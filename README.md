@@ -4,7 +4,7 @@
 
 Assets are mounted **read-only** directly from an existing Steam Half-Life / Counter-Strike 1.6 installation (`cstrike`, `valve`, `platform`, optional `cstrike_hd`); zero Valve assets are stored in this repository.
 
-Licensing: MIT; see [`docs/LICENSING.md`](docs/LICENSING.md) for the licensing decision and reference-project attribution.
+Licensing: GPL-3.0-or-later; see [`docs/LICENSING.md`](docs/LICENSING.md) for the licensing decision and reference-project attribution.
 
 ## Workspace Architecture (13 Crates)
 

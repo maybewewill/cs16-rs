@@ -1,12 +1,16 @@
 # Third-party notices
 
-`cs16-rs` contains code ported from the following MIT-licensed projects.
-
-Until the project owner decides, no further code is ported from files in these projects whose header states a different licence; see "Open question — file headers in the reference projects" in `docs/LICENSING.md`.
+`cs16-rs` contains code ported from the following projects. Code ported from them is
+distributed in this repository under GPL-3.0-or-later, the licence of this project; see
+`docs/LICENSING.md`.
 
 ## ReHLDS
 
 Upstream: https://github.com/rehlds/ReHLDS
+
+While the repository-level `LICENSE` of ReHLDS is MIT (notice below), its source files carry
+headers stating GPL v2-or-later with an exception permitting linking with Valve's Half-Life
+engine and game libraries.
 
 ```
 Copyright (c) 2014–2025 ReHLDS Contributors
@@ -33,6 +37,10 @@ SOFTWARE.
 ## ReGameDLL_CS
 
 Upstream: https://github.com/rehlds/ReGameDLL_CS
+
+While the repository-level `LICENSE` of ReGameDLL_CS is MIT (notice below), its source files carry
+headers stating GPL v2-or-later with an exception permitting linking with Valve's Half-Life
+engine and game libraries.
 
 ```
 Copyright (c) 2015–2025 ReGameDLL_CS Contributors
