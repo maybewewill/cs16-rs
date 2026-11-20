@@ -16,6 +16,14 @@ pub const DEFAULT_MAX_EDICTS: usize = 900;
 /// Seconds a freed slot stays unused before [`EdictPool::alloc`] may reuse it.
 pub const EDICT_REUSE_DELAY: f64 = 0.5;
 
+/// Seconds after the map start during which freed slots are reused at once.
+///
+/// Mirrors ReHLDS `rehlds/engine/pr_edict.cpp`, `ED_Alloc_internal` (read 2026-11-21), which
+/// reuses a free edict when `e->freetime <= 2.0 || g_psv.time - e->freetime >= 0.5`. HLDS server
+/// time starts at 1.0 on every map load, so `freetime <= 2.0` is "freed within one second of
+/// the map start".
+pub const EDICT_LOAD_GRACE: f64 = 1.0;
+
 /// Handle to an edict: slot index plus the slot's serial at the time the
 /// handle was made.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -109,6 +117,8 @@ struct Slot {
 pub struct EdictPool {
     slots: Vec<Slot>,
     max_clients: u8,
+    /// Server time at which the pool was created for its map.
+    map_start: f64,
 }
 
 impl EdictPool {
@@ -127,12 +137,18 @@ impl EdictPool {
                 freed_at: None,
             })
             .collect();
-        Self { slots, max_clients }
+        Self {
+            slots,
+            max_clients,
+            map_start: 0.0,
+        }
     }
 
     /// A pool like [`new`](Self::new) for the next map: every slot starts at a serial one past
-    /// the highest any slot of `self` holds, so no id `self` handed out resolves in it.
-    pub fn successor(&self, max_clients: u8, max_edicts: usize) -> Self {
+    /// the highest any slot of `self` holds, so no id `self` handed out resolves in it. The new
+    /// pool's map starts at server time `map_start` (see [`alloc`](Self::alloc)); a non-finite
+    /// `map_start` is taken as 0.
+    pub fn successor(&self, max_clients: u8, max_edicts: usize, map_start: f64) -> Self {
         let next = self
             .slots
             .iter()
@@ -141,6 +157,7 @@ impl EdictPool {
             .unwrap_or(0)
             .wrapping_add(1);
         let mut pool = Self::new(max_clients, max_edicts);
+        pool.map_start = if map_start.is_finite() { map_start } else { 0.0 };
         for slot in &mut pool.slots {
             slot.serial = next;
         }
@@ -164,13 +181,19 @@ impl EdictPool {
         self.id_at(u16::from(slot) + 1)
     }
 
-    /// Takes the lowest free slot above the player slots that was never used
-    /// or was freed more than [`EDICT_REUSE_DELAY`] seconds before `now`.
+    /// Takes the lowest free slot above the player slots that was never used, was freed at most
+    /// [`EDICT_LOAD_GRACE`] seconds after the pool's map start (a pool from [`new`](Self::new)
+    /// starts at time 0), or was freed at least [`EDICT_REUSE_DELAY`] seconds before `now`. The
+    /// rule is that of ReHLDS `ED_Alloc_internal` (`rehlds/engine/pr_edict.cpp`, read
+    /// 2026-11-21).
     pub fn alloc(&mut self, now: f64) -> Option<EdictId> {
         let first = usize::from(self.max_clients) + 1;
         let index = (first..self.slots.len()).find(|&i| {
             let slot = &self.slots[i];
-            !slot.live && slot.freed_at.is_none_or(|t| now - t > EDICT_REUSE_DELAY)
+            !slot.live
+                && slot.freed_at.is_none_or(|t| {
+                    t - self.map_start <= EDICT_LOAD_GRACE || now - t >= EDICT_REUSE_DELAY
+                })
         })?;
         let slot = &mut self.slots[index];
         slot.live = true;
@@ -292,7 +315,7 @@ mod tests {
         let player = old.client(0);
         let reset_player = old.client(1);
 
-        let mut new = old.successor(2, 16);
+        let mut new = old.successor(2, 16, 0.0);
         assert_eq!(new.max_clients(), 2);
         for id in [world, freed, live, player, reset_player] {
             assert!(new.get(id).is_none(), "{id:?}");
@@ -339,6 +362,21 @@ mod tests {
         assert_ne!(early.index, old.index);
         let late = pool.alloc(10.6).unwrap();
         assert_eq!(late.index, old.index);
+    }
+
+    #[test]
+    fn slot_freed_after_the_load_grace_waits_exactly_half_a_second() {
+        let mut pool = EdictPool::new(1, 4).successor(1, 4, 100.0);
+        let a = pool.alloc(101.0).unwrap();
+        let b = pool.alloc(101.0).unwrap();
+        // 1.0 s after the map start: still reused at once.
+        pool.free(a, 101.0);
+        assert_eq!(pool.alloc(101.0).unwrap().index, a.index);
+        // Past the grace: kept back until 0.5 s have passed, then free again at exactly 0.5.
+        pool.free(b, 102.0);
+        assert!(pool.alloc(102.25).is_none());
+        assert!(pool.alloc(102.49).is_none());
+        assert_eq!(pool.alloc(102.5).unwrap().index, b.index);
     }
 
     #[test]
@@ -467,8 +505,8 @@ mod tests {
         let b = pool.alloc(0.0).unwrap();
         pool.free(a, 10.0);
         pool.free(b, 10.0);
-        assert!(pool.alloc(10.5).is_none());
-        assert_eq!(pool.alloc(10.6).unwrap().index, a.index);
+        assert!(pool.alloc(10.49).is_none());
+        assert_eq!(pool.alloc(10.5).unwrap().index, a.index);
     }
 
     #[test]

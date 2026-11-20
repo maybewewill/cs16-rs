@@ -366,6 +366,20 @@ fn hostile_entity_lump_is_bounded() {
 }
 
 #[test]
+fn rejected_entries_reuse_their_slots_during_activation() {
+    // More entries than the pool has slots; the game refuses every one (`test_drop`), so each
+    // is spawned, freed and its slot reused by the next.
+    let mut lump = vec![world()];
+    for i in 0..2000 {
+        lump.push(ent(&[("classname", "test_drop"), ("targetname", &i.to_string())]));
+    }
+    let h = harness_on(4, lump, TestGame::default());
+    assert_eq!(h.server.game().spawned.len(), 1 + 2000);
+    assert_eq!(h.server.edicts().iter_live().count(), 4 + 1);
+    assert_eq!(h.server.game().server_activate_calls, 1);
+}
+
+#[test]
 fn pool_exhaustion_skips_the_rest_and_activates() {
     let mut lump = vec![world()];
     for i in 0..2000 {

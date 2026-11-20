@@ -139,7 +139,7 @@ impl<G: GameDll> Server<G> {
         self.spawn_count += 1;
         self.edicts = self
             .edicts
-            .successor(self.cfg.max_clients, DEFAULT_MAX_EDICTS);
+            .successor(self.cfg.max_clients, DEFAULT_MAX_EDICTS, self.time);
         self.precache = Self::map_precache(&map);
         self.map = map;
         self.activate_map();
