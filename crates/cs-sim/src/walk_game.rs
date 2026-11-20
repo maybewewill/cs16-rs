@@ -70,27 +70,25 @@ impl WalkGame {
             players: BTreeMap::new(),
         }
     }
+}
 
-    /// Spawn of `slot`: even slots are counter-terrorists, odd slots terrorists, the `slot / 2`th
-    /// spawn of the team (wrapping). Falls back to the other team's spawns, then to none.
-    fn spawn_for(&self, slot: u8) -> Option<&SpawnPoint> {
-        let (team, other) = if slot.is_multiple_of(2) {
-            (SpawnTeam::CounterTerrorist, SpawnTeam::Terrorist)
-        } else {
-            (SpawnTeam::Terrorist, SpawnTeam::CounterTerrorist)
-        };
-        let of = |t: SpawnTeam| -> Vec<&SpawnPoint> {
-            self.spawns.iter().filter(|s| s.team == t).collect()
-        };
-        let mut candidates = of(team);
-        if candidates.is_empty() {
-            candidates = of(other);
-        }
-        if candidates.is_empty() {
-            return None;
-        }
-        Some(candidates[usize::from(slot / 2) % candidates.len()])
+/// Spawn of `slot`: even slots are counter-terrorists, odd slots terrorists, the `slot / 2`th
+/// spawn of the team (wrapping). Falls back to the other team's spawns, then to none.
+fn spawn_for(spawns: &[SpawnPoint], slot: u8) -> Option<&SpawnPoint> {
+    let (team, other) = if slot.is_multiple_of(2) {
+        (SpawnTeam::CounterTerrorist, SpawnTeam::Terrorist)
+    } else {
+        (SpawnTeam::Terrorist, SpawnTeam::CounterTerrorist)
+    };
+    let of = |t: SpawnTeam| -> Vec<&SpawnPoint> { spawns.iter().filter(|s| s.team == t).collect() };
+    let mut candidates = of(team);
+    if candidates.is_empty() {
+        candidates = of(other);
     }
+    if candidates.is_empty() {
+        return None;
+    }
+    Some(candidates[usize::from(slot / 2) % candidates.len()])
 }
 
 /// Movement input of a client command: move speeds as fractions of `max_speed`.
@@ -121,7 +119,15 @@ impl GameDll for WalkGame {
             match eng.precache.precache_model(&name) {
                 Ok(index) if name == PLAYER_MODEL => self.player_model = index,
                 Ok(_) => {}
-                Err(err) => tracing::error!("precache {name}: {err:?}"),
+                Err(err) if name == PLAYER_MODEL => {
+                    self.player_model = 0;
+                    tracing::error!(
+                        model = PLAYER_MODEL,
+                        ?err,
+                        "player model not precached; players get model index 0 and are invisible"
+                    );
+                }
+                Err(err) => tracing::error!(model = %name, ?err, "model not precached"),
             }
         }
     }
@@ -135,7 +141,7 @@ impl GameDll for WalkGame {
     }
 
     fn client_put_in_server(&mut self, eng: &mut EngineApi<'_>, slot: u8) {
-        let (origin, yaw) = match self.spawn_for(slot) {
+        let (origin, yaw) = match spawn_for(&self.spawns, slot) {
             Some(spawn) => (
                 snap_spawn_to_floor(spawn.position, &self.collision),
                 spawn.yaw_deg,
@@ -251,6 +257,47 @@ impl GameDll for WalkGame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn spawn(x: f32, team: SpawnTeam) -> SpawnPoint {
+        SpawnPoint {
+            position: Vec3::new(x, 0.0, 0.0),
+            yaw_deg: 0.0,
+            team,
+        }
+    }
+
+    fn spawn_x(spawns: &[SpawnPoint], slot: u8) -> Option<f32> {
+        spawn_for(spawns, slot).map(|s| s.position.x)
+    }
+
+    #[test]
+    fn spawns_alternate_teams_and_wrap() {
+        let spawns = [
+            spawn(1.0, SpawnTeam::Terrorist),
+            spawn(10.0, SpawnTeam::CounterTerrorist),
+            spawn(2.0, SpawnTeam::Terrorist),
+            spawn(20.0, SpawnTeam::CounterTerrorist),
+        ];
+        let xs: Vec<_> = (0..6).map(|slot| spawn_x(&spawns, slot)).collect();
+        assert_eq!(xs, [10.0, 1.0, 20.0, 2.0, 10.0, 1.0].map(Some).to_vec());
+    }
+
+    #[test]
+    fn spawns_of_one_team_serve_both_teams() {
+        let spawns = [
+            spawn(1.0, SpawnTeam::Terrorist),
+            spawn(2.0, SpawnTeam::Terrorist),
+        ];
+        // Counter-terrorists fall back to the terrorist spawns, by their own `slot / 2`.
+        let xs: Vec<_> = (0..4).map(|slot| spawn_x(&spawns, slot)).collect();
+        assert_eq!(xs, [1.0, 1.0, 2.0, 2.0].map(Some).to_vec());
+    }
+
+    #[test]
+    fn no_spawns_give_no_spawn() {
+        assert_eq!(spawn_x(&[], 0), None);
+        assert_eq!(spawn_x(&[], 1), None);
+    }
 
     #[test]
     fn usercmd_maps_to_move_input() {

@@ -28,6 +28,6 @@ pub use oob::{
 pub use precache::{MAX_GENERIC, MAX_MODELS, MAX_SOUNDS, PrecacheError, PrecacheTables, res_type};
 pub use server::{MAX_RELIABLE_BACKLOG, NetStats, Server, ServerConfig};
 pub use usercmd::{
-    MAX_BANKED_MS, MAX_CONSECUTIVE_BAD_MOVES, MAX_DROPPED_REPLAY, MsecBudget, STRINGCMD_BURST,
-    STRINGCMD_RATE_PER_SEC, select_cmds_to_run,
+    MAX_BANKED_MS, MAX_CONSECUTIVE_BAD_MOVES, MAX_DROPPED_REPLAY, MAX_USERCMD_STEP_MS, MsecBudget,
+    STRINGCMD_BURST, STRINGCMD_RATE_PER_SEC, select_cmds_to_run, split_usercmd, usercmd_is_finite,
 };

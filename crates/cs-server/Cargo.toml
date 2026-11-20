@@ -6,8 +6,13 @@ license.workspace = true
 
 [dependencies]
 cs-assets.workspace = true
+cs-cvar.workspace = true
+cs-engine.workspace = true
 cs-net.workspace = true
+cs-platform.workspace = true
+cs-proto48.workspace = true
 cs-sim.workspace = true
+cs-transport.workspace = true
 cs-vfs.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

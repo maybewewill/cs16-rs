@@ -88,6 +88,45 @@ pub fn select_cmds_to_run(
     run
 }
 
+/// Longest step, in milliseconds, one user command may give the game; longer ones are split.
+pub const MAX_USERCMD_STEP_MS: u8 = 50;
+
+/// `cmd` as the steps the game runs, as the original engine does: unchanged when its `msec` is
+/// at most [`MAX_USERCMD_STEP_MS`], otherwise split into two halves of its time (the first
+/// taking the odd millisecond), each split the same way. Buttons, angles and moves are the
+/// same in every step; the `impulse` is kept only in the first.
+pub fn split_usercmd(cmd: &GoldSrcUserCmd) -> Vec<GoldSrcUserCmd> {
+    fn push_steps(cmd: GoldSrcUserCmd, steps: &mut Vec<GoldSrcUserCmd>) {
+        if cmd.msec <= MAX_USERCMD_STEP_MS {
+            steps.push(cmd);
+            return;
+        }
+        let second = GoldSrcUserCmd {
+            msec: cmd.msec / 2,
+            impulse: 0,
+            ..cmd.clone()
+        };
+        let first = GoldSrcUserCmd {
+            msec: cmd.msec - second.msec,
+            ..cmd
+        };
+        push_steps(first, steps);
+        push_steps(second, steps);
+    }
+    let mut steps = Vec::new();
+    push_steps(cmd.clone(), &mut steps);
+    steps
+}
+
+/// Whether the view angles and the forward, side and up moves of `cmd` are all finite. A
+/// command failing this never reaches the game.
+pub fn usercmd_is_finite(cmd: &GoldSrcUserCmd) -> bool {
+    cmd.viewangles.is_finite()
+        && cmd.forwardmove.is_finite()
+        && cmd.sidemove.is_finite()
+        && cmd.upmove.is_finite()
+}
+
 /// A token bucket: `burst` tokens, refilled at `rate_per_sec`. It starts full.
 #[derive(Debug, Clone)]
 pub(crate) struct TokenBucket {
@@ -142,7 +181,9 @@ impl<G: GameDll> Server<G> {
     }
 
     /// Runs the commands of one `clc_move` from `slot`, which arrived in netchan packet
-    /// `sequence` after `dropped` lost packets. Ignored unless the client is `Active`.
+    /// `sequence` after `dropped` lost packets. Ignored unless the client is `Active`. A command
+    /// failing [`usercmd_is_finite`] is skipped; the others get the time the budget grants and
+    /// reach the game as the steps of [`split_usercmd`].
     pub(crate) fn handle_move(
         &mut self,
         slot: u8,
@@ -163,6 +204,10 @@ impl<G: GameDll> Server<G> {
         );
         let count = run.len();
         for (i, cmd) in run.iter().enumerate() {
+            // Dropped before it costs any time; it is not a bad move.
+            if !usercmd_is_finite(cmd) {
+                continue;
+            }
             let msec = self.clients[index].budget.take(cmd.msec);
             if msec == 0 {
                 continue;
@@ -173,10 +218,12 @@ impl<G: GameDll> Server<G> {
             };
             // Working assumption: the packet's sequence minus the index from the newest.
             let random_seed = sequence.wrapping_sub((count - 1 - i) as u32);
-            self.call_game(|game, eng| game.run_usercmd(eng, slot, &granted, random_seed));
+            for step in split_usercmd(&granted) {
+                self.call_game(|game, eng| game.run_usercmd(eng, slot, &step, random_seed));
+            }
         }
         let client = &mut self.clients[index];
-        if let Some(last) = run.into_iter().last() {
+        if let Some(last) = run.into_iter().rfind(usercmd_is_finite) {
             client.last_cmd = last;
         }
         client.bad_moves = 0;
@@ -345,6 +392,99 @@ mod tests {
         let cmds = [cmd(3.0), cmd(2.0), cmd(1.0)];
         let run = select_cmds_to_run(&cmds, 2, MAX_DROPPED_REPLAY, &cmd(9.0));
         assert_eq!(run, vec![cmd(3.0)]);
+    }
+
+    fn msecs(steps: &[GoldSrcUserCmd]) -> Vec<u8> {
+        steps.iter().map(|c| c.msec).collect()
+    }
+
+    #[test]
+    fn short_cmd_is_not_split() {
+        let c = GoldSrcUserCmd {
+            msec: MAX_USERCMD_STEP_MS,
+            impulse: 100,
+            ..cmd(1.0)
+        };
+        assert_eq!(split_usercmd(&c), vec![c]);
+    }
+
+    #[test]
+    fn long_cmd_is_split_in_halves_recursively() {
+        let c = GoldSrcUserCmd {
+            msec: 200,
+            buttons: 6,
+            impulse: 201,
+            viewangles: glam::Vec3::new(10.0, 20.0, 0.0),
+            ..cmd(250.0)
+        };
+        let steps = split_usercmd(&c);
+        assert_eq!(msecs(&steps), vec![50, 50, 50, 50]);
+        // Buttons, angles and moves stay; only the first step keeps the impulse.
+        for (i, step) in steps.iter().enumerate() {
+            let expected_impulse = if i == 0 { 201 } else { 0 };
+            assert_eq!(
+                *step,
+                GoldSrcUserCmd {
+                    msec: 50,
+                    impulse: expected_impulse,
+                    ..c.clone()
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn odd_millisecond_goes_to_the_first_half() {
+        assert_eq!(msecs(&split_usercmd(&cmd_ms(51))), vec![26, 25]);
+        // 101 = 51 + 50, and 51 = 26 + 25.
+        assert_eq!(msecs(&split_usercmd(&cmd_ms(101))), vec![26, 25, 50]);
+        let steps = split_usercmd(&cmd_ms(255));
+        assert!(
+            steps.iter().all(|s| s.msec <= MAX_USERCMD_STEP_MS),
+            "{steps:?}"
+        );
+        assert_eq!(steps.iter().map(|s| u32::from(s.msec)).sum::<u32>(), 255);
+    }
+
+    fn cmd_ms(msec: u8) -> GoldSrcUserCmd {
+        GoldSrcUserCmd { msec, ..cmd(1.0) }
+    }
+
+    #[test]
+    fn non_finite_moves_and_angles_are_detected() {
+        assert!(usercmd_is_finite(&cmd(250.0)));
+        let bad = [f32::NAN, f32::INFINITY, f32::NEG_INFINITY];
+        for v in bad {
+            let cases = [
+                GoldSrcUserCmd {
+                    forwardmove: v,
+                    ..cmd(0.0)
+                },
+                GoldSrcUserCmd {
+                    sidemove: v,
+                    ..cmd(0.0)
+                },
+                GoldSrcUserCmd {
+                    upmove: v,
+                    ..cmd(0.0)
+                },
+                GoldSrcUserCmd {
+                    viewangles: glam::Vec3::new(0.0, v, 0.0),
+                    ..cmd(0.0)
+                },
+                GoldSrcUserCmd {
+                    viewangles: glam::Vec3::new(v, 0.0, 0.0),
+                    ..cmd(0.0)
+                },
+                GoldSrcUserCmd {
+                    viewangles: glam::Vec3::new(0.0, 0.0, v),
+                    ..cmd(0.0)
+                },
+            ];
+            for c in cases {
+                assert!(!usercmd_is_finite(&c), "{c:?}");
+            }
+        }
     }
 
     #[test]

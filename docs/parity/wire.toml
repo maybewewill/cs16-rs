@@ -8,7 +8,8 @@ status = "implemented"
 
 [[item]]
 id = "svc_disconnect"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-engine/tests/lifecycle.rs::kick_delivers_reason, game_kick_delivers_reason"
 
 [[item]]
 id = "svc_event"
@@ -20,7 +21,8 @@ status = "implemented"
 
 [[item]]
 id = "svc_setview"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-engine/src/signon.rs::tests::new_stage_messages_in_order"
 
 [[item]]
 id = "svc_sound"
@@ -29,19 +31,23 @@ evidence = "crates/cs-proto48/src/messages.rs::tests::sound_pings_and_clc_resour
 
 [[item]]
 id = "svc_time"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-engine/src/signon.rs::tests::spawn_stage_messages_in_order"
 
 [[item]]
 id = "svc_print"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-engine/src/signon.rs::tests::new_stage_messages_in_order; crates/cs-engine/tests/lifecycle.rs::reliable_broadcast_reaches_everyone_past_new"
 
 [[item]]
 id = "svc_stufftext"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-engine/tests/signon.rs::stale_spawn_count_restarts_signon (reconnect)"
 
 [[item]]
 id = "svc_setangle"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-engine/src/signon.rs::tests::spawn_stage_messages_in_order"
 
 [[item]]
 id = "svc_serverinfo"
@@ -50,11 +56,13 @@ evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_s
 
 [[item]]
 id = "svc_lightstyle"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-engine/src/signon.rs::tests::spawn_stage_messages_in_order"
 
 [[item]]
 id = "svc_updateuserinfo"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-engine/src/signon.rs::tests::new_stage_messages_in_order; crates/cs-engine/tests/lifecycle.rs::name_change_is_broadcast_sanitized_and_rate_limited"
 
 [[item]]
 id = "svc_deltadescription"
@@ -92,7 +100,8 @@ status = "implemented"
 
 [[item]]
 id = "svc_spawnbaseline"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-engine/src/signon.rs::tests::spawn_stage_messages_in_order; crates/cs-engine/tests/lifecycle.rs::baselines_are_rebuilt_for_the_new_map"
 
 [[item]]
 id = "svc_temp_entity"
@@ -134,7 +143,8 @@ status = "implemented"
 
 [[item]]
 id = "svc_cdtrack"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-engine/src/signon.rs::tests::new_stage_messages_in_order"
 
 [[item]]
 id = "svc_restore"
@@ -176,19 +186,23 @@ evidence = "crates/cs-proto48/src/messages.rs::tests::delta_packetentities_round
 
 [[item]]
 id = "svc_choke"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-engine/tests/frames.rs::choked_updates_are_announced_in_the_next_update"
 
 [[item]]
 id = "svc_resourcelist"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-engine/src/signon.rs::tests::sendres_stage_requests_and_lists_resources"
 
 [[item]]
 id = "svc_newmovevars"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-engine/src/signon.rs::tests::new_stage_messages_in_order, move_vars_follow_cvars_and_sky"
 
 [[item]]
 id = "svc_resourcerequest"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-engine/src/signon.rs::tests::sendres_stage_requests_and_lists_resources"
 
 [[item]]
 id = "svc_customization"
@@ -224,7 +238,8 @@ status = "implemented"
 
 [[item]]
 id = "svc_sendextrainfo"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-engine/src/signon.rs::tests::new_stage_messages_in_order"
 
 [[item]]
 id = "svc_timescale"

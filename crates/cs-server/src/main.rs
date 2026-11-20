@@ -1,6 +1,11 @@
 //! Dedicated headless 100 Hz Counter-Strike 1.6 Rust server (`cs-server`).
 //!
 //! Run with: `cargo run --release -p cs-server -- --map de_dust2 --port 27015 --bots 9`
+//!
+//! With `--proto48` it runs the Protocol 48 server for the original client instead (see
+//! `proto48.rs`): `cargo run -p cs-server -- --proto48 --map de_dust2`.
+
+mod proto48;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -19,6 +24,11 @@ fn main() {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+
+    let all_args: Vec<String> = std::env::args().skip(1).collect();
+    if all_args.iter().any(|a| a == "--proto48") {
+        proto48::run(&all_args);
+    }
 
     let mut args = std::env::args().skip(1);
     let mut gamedir: Option<PathBuf> = None;

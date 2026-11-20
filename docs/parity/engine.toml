@@ -1,4 +1,9 @@
 [[item]]
+id = "a2s_queries"
+status = "tested"
+evidence = "crates/cs-engine/src/oob.rs::tests::a2s_without_challenge_gets_nine_byte_challenge, a2s_with_accepted_challenge_returns_server_info, server_to_client_packets_are_ignored (A2A_PING); crates/cs-engine/tests/lifecycle.rs::shutdown_refuses_new_connections (A2S_INFO answered through Server::frame); challenge rule and reply contents unverified against the original server browser, see docs/parity/checklists/phase1-original-client.md line 7"
+
+[[item]]
 id = "changelevel"
 status = "tested"
 evidence = "crates/cs-engine/tests/lifecycle.rs::probe_survives_changelevel, old_entities_are_gone_after_changelevel, precache_after_activate_is_too_late, two_clients_survive_changelevel, client_in_signon_survives_changelevel, stale_spawn_after_changelevel_restarts_signon, old_reliable_data_does_not_cross_the_change, baselines_are_rebuilt_for_the_new_map, changelevel_restarts_the_signon_timeout, stale_edict_id_does_not_resolve_after_changelevel, changelevel_twice_before_signon, changelevel_without_clients, client_stalled_after_changelevel_is_dropped, changelevel_during_a_fragmented_reliable_stream, duplicated_reconnect_is_harmless; crates/cs-engine/src/client.rs::tests::restart_signon_keeps_the_connection; crates/cs-engine/src/edict.rs::tests::successor_rejects_every_id_of_the_previous_pool; crates/cs-probe/src/lib.rs::tests::reconnect_forgets_the_previous_map; reconnect flow (svc_stufftext reconnect, sign-on restarted on the same netchan) unverified against a real client, tested only against cs-probe; two cases in particular are unverified: a reconnect delivered twice after a map change (the client had received the abandoned reliable message), and a client holding a half-received fragment stream from the old map; see docs/parity/checklists/phase1-changelevel.md"
@@ -26,12 +31,17 @@ evidence = "crates/cs-probe/src/lib.rs::tests::signon_chain_reaches_in_game; unv
 [[item]]
 id = "delta_frames"
 status = "tested"
-evidence = "crates/cs-engine/src/frame.rs::tests::delta_base_requires_matching_recent_frame, update_interval_clamps, clear_time_advances_by_transmission_time; crates/cs-engine/tests/frames.rs::second_probe_sees_first_probe_entity, stationary_world_frames_are_small_deltas, stale_delta_request_falls_back_to_full_update, moved_entity_is_updated_and_removed_entity_disappears, update_rate_follows_userinfo, no_update_is_sent_before_it_is_due, oversized_frame_drops_entities_but_keeps_clientdata, hidden_entity_is_not_sent, low_rate_client_still_receives_updates, choked_updates_are_announced_in_the_next_update, signon_at_minimum_rate_reaches_updates_promptly, reliable_message_and_large_frame_share_the_datagram_budget, reliable_flood_does_not_exceed_the_rate, withheld_reliable_ack_is_not_amplified, omitting_clc_delta_requests_a_full_update, rejected_datagram_keeps_the_delta_request; frame contents, rate and choke behaviour unverified against a real client"
+evidence = "crates/cs-engine/src/frame.rs::tests::delta_base_requires_matching_recent_frame, update_interval_clamps, clear_time_advances_by_transmission_time; crates/cs-engine/tests/frames.rs::second_probe_sees_first_probe_entity, stationary_world_frames_are_small_deltas, stale_delta_request_falls_back_to_full_update, moved_entity_is_updated_and_removed_entity_disappears, update_rate_follows_userinfo, no_update_is_sent_before_it_is_due, oversized_frame_drops_entities_but_keeps_clientdata, hidden_entity_is_not_sent, low_rate_client_still_receives_updates, choked_updates_are_announced_in_the_next_update, signon_at_minimum_rate_reaches_updates_promptly, reliable_message_and_large_frame_share_the_datagram_budget, reliable_flood_does_not_exceed_the_rate, withheld_reliable_ack_is_not_amplified, omitting_clc_delta_requests_a_full_update, rejected_datagram_keeps_the_delta_request; crates/cs-engine/tests/soak.rs::soak_3000_frames_8_clients (8 clients, every 17th datagram dropped: client data matches the edict, datagrams within 4010 bytes, at most 64 frames per client); frame contents, rate and choke behaviour unverified against a real client"
 
 [[item]]
 id = "msec_budget"
 status = "tested"
-evidence = "crates/cs-engine/src/usercmd.rs::tests::budget_grants_only_accrued_time, budget_bank_is_capped; crates/cs-engine/tests/usercmd.rs::speedhack_is_bounded_by_real_time; 500 ms bank cap unverified against a real server"
+evidence = "crates/cs-engine/src/usercmd.rs::tests::budget_grants_only_accrued_time, budget_bank_is_capped, short_cmd_is_not_split, long_cmd_is_split_in_halves_recursively, odd_millisecond_goes_to_the_first_half, non_finite_moves_and_angles_are_detected; crates/cs-engine/tests/usercmd.rs::speedhack_is_bounded_by_real_time, long_cmd_reaches_the_game_in_steps_of_at_most_50_ms; 500 ms bank cap and the 50 ms split (odd millisecond to the first half) unverified against a real server"
+
+[[item]]
+id = "oob_rate_limit"
+status = "tested"
+evidence = "crates/cs-engine/src/oob.rs::tests::limiter_caps_burst, limiter_evicts_least_recently_touched_address; burst and refill rate are working assumptions, unverified against a real server"
 
 [[item]]
 id = "pings"
@@ -60,4 +70,4 @@ evidence = "crates/cs-engine/tests/lifecycle.rs::silent_client_times_out_and_oth
 [[item]]
 id = "usercmd_replay"
 status = "tested"
-evidence = "crates/cs-engine/src/usercmd.rs::tests::loss_within_backup_replays_backups, loss_beyond_backup_repeats_last, huge_loss_runs_only_new; crates/cs-engine/tests/usercmd.rs::movement_continues_under_loss, forward_cmds_move_the_player (random_seed); replay rule and random_seed are working assumptions, unverified against a real server"
+evidence = "crates/cs-engine/src/usercmd.rs::tests::loss_within_backup_replays_backups, loss_beyond_backup_repeats_last, huge_loss_runs_only_new; crates/cs-engine/tests/usercmd.rs::movement_continues_under_loss, forward_cmds_move_the_player (random_seed); crates/cs-engine/tests/soak.rs::soak_3000_frames_8_clients; replay rule and random_seed are working assumptions, unverified against a real server"

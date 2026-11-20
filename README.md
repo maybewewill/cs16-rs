@@ -6,7 +6,7 @@ Assets are mounted **read-only** directly from an existing Steam Half-Life / Cou
 
 Licensing: MIT; see [`docs/LICENSING.md`](docs/LICENSING.md) for the licensing decision and reference-project attribution.
 
-## Workspace Architecture (8 Crates)
+## Workspace Architecture (13 Crates)
 
 - **`cs-vfs`** — Multi-layer case-insensitive GoldSrc VFS (`cstrike_downloads` → optional `cstrike_hd` → `cstrike` → `valve` → `platform`) with automatic Steam `libraryfolders.vdf` discovery.
 - **`cs-cvar`** — Quake/GoldSrc command & CVar engine (`bind`, `unbind`, `alias`, `exec`, `toggle`, `cvarlist`, `cmdlist`, `find`, `map`, `connect`, `buy`, `give`, `god`, `noclip`, `sv_restart`, `bot_add`/`_t`/`_ct`, `bot_kick`, `say`/`say_team`, `radio1..3`, `nightvision`, `impulse 201`, `screenshot`, `Tab` autocomplete, local `config.cfg` persistence).
@@ -18,7 +18,12 @@ Licensing: MIT; see [`docs/LICENSING.md`](docs/LICENSING.md) for the licensing d
   - Both **Bomb/Defuse (`de_*`)** and **Hostage Rescue (`cs_*`)** modes, persistent round corpses, economy (`$800..$16000` + loss bonus), automatic BSP `NavGraph` generator + Bot AI.
 - **`cs-net`** — `postcard`-over-UDP client/server protocol, `WorldSnapshot` replication, client-side `pm_shared` prediction, 250 ms lag-compensation ring buffer, and UDP LAN server discovery (`LanPing` / `LanInfo`).
 - **`cs-proto48`** — `#![forbid(unsafe_code)]` implementation of Valve's **GoldSrc Protocol 48** (Counter-Strike 1.6 / Half-Life 1 network wire protocol), ported deterministically from `ReHLDS` and `ReGameDLL_CS`.
-- **`cs-server`** — Standalone headless 100 Hz dedicated UDP server.
+- **`cs-platform`** — Platform seams shared by native and `wasm32` builds: the `Clock` time source (`NativeClock`, `ManualClock`).
+- **`cs-transport`** — Datagram transports behind one `PacketTransport` trait: non-blocking UDP and an in-process loopback hub with injectable loss, duplication and reordering.
+- **`cs-engine`** — Protocol 48 server engine, the equivalent of the original dedicated server: connectionless queries, connect and sign-on, per-client delta frames with PVS culling, user commands, timeouts and map changes, with the game behind a `GameDll` trait.
+- **`cs-probe`** — Headless Protocol 48 test client (library and `cs-probe` binary): connects, signs on, walks and records captures, used by the engine's tests and against real servers.
+- **`cs-server`** — Standalone headless 100 Hz dedicated UDP server; with `--proto48` it runs `cs-engine` with a walking-only game for the original CS 1.6 client.
+- **`xtask`** — Repository tasks (`cargo xtask parity`: the parity ledger report in `docs/parity/`).
 - **`cs-client`** — `winit` + `wgpu 30` (Vulkan/DX12/Metal) multi-pass renderer (BSP overbright ×2 lightmaps, live `gl_texturemode`, dynamic broken/door brush culling, skinned 3D player/hostage/corpse MDLs with `EF_BONEMERGE` `p_*.mdl` in hands, depth-cleared viewmodel with `cl_righthand`, 3D decals/sprays/tracers/grenades/smoke/C4 LED/muzzleflashes, `F5` GPU PNG readback), `rodio` 2D/3D spatial WAV audio + UI clicks + Main Menu MP3 music, **1-to-1 Valve VGUI2 UI** (`ClientScheme.res` Buy Menu with real `gfx/vgui/*.tga` silhouettes & 9-row specs, Team Menu with `maps/*.txt` briefings, Class Menu with 256×196 portraits, translucent rounded `TAB` Scoreboard, Steam 2003 `Options` with live crosshair preview & `icon_steam.tga`), classic `640hud7`/`640hud1` sprite HUD, AWP scope, NightVision overlay, Radio menus, and Spectator letterbox camera.
 
 ## Quick Start
@@ -49,6 +54,16 @@ Terminal 2 (connect directly or click **Find Servers → LAN → Refresh LAN**):
 ```powershell
 cargo run --release -p cs-client -- --exec "connect 127.0.0.1:27015"
 ```
+
+### Protocol 48 Server for the Original CS 1.6 Client
+
+```powershell
+cargo run -p cs-server -- --proto48 --map de_dust2
+```
+
+Optional flags: `--port <n>` (default 27015), `--maxplayers <n>` (default 16), `--hostname <name>`, `--gamedir <path>`. Then, in the original Counter-Strike 1.6 client, open the console (`~`) and type `connect 127.0.0.1:27015`.
+
+This mode currently offers walking only: players spawn and move around the map, with no weapons, rounds or HUD. Compatibility with the original client is not yet verified; the manual checks are in [`docs/parity/checklists/phase1-original-client.md`](docs/parity/checklists/phase1-original-client.md). The headless probe connects the same way: `cargo run -p cs-probe -- --connect 127.0.0.1:27015 --seconds 20 --walk`.
 
 ## Controls & Shortcuts
 

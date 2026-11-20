@@ -219,6 +219,14 @@ impl<G: GameDll> Server<G> {
             .map(|c| c.userid)
     }
 
+    /// Updates kept as delta bases for the client in `slot`; `None` for a free slot.
+    pub fn client_frame_count(&self, slot: u8) -> Option<usize> {
+        self.clients
+            .get(usize::from(slot))
+            .filter(|c| !c.is_free())
+            .map(|c| c.frames.stored())
+    }
+
     pub fn net_stats(&self) -> NetStats {
         self.net_stats
     }

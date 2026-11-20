@@ -6,7 +6,7 @@ mod common;
 use common::Harness;
 use cs_engine::{
     ClientState, MAX_CLIENT_INCOMING_STREAM, MAX_CONSECUTIVE_BAD_MOVES, MAX_NAME_BYTES,
-    STRINGCMD_BURST, STRINGCMD_RATE_PER_SEC,
+    MAX_USERCMD_STEP_MS, STRINGCMD_BURST, STRINGCMD_RATE_PER_SEC,
 };
 use cs_probe::{ProbeClient, ProbeState};
 use cs_proto48::bitbuf::MsgWriter;
@@ -75,6 +75,22 @@ fn forward_cmds_move_the_player() {
     let seeds = &h.server.game().random_seeds[seeds_before..];
     assert_eq!(seeds.len(), 100);
     assert!(seeds.windows(2).all(|w| w[1] == w[0] + 1), "{seeds:?}");
+}
+
+#[test]
+fn long_cmd_reaches_the_game_in_steps_of_at_most_50_ms() {
+    let mut h = Harness::new(4);
+    let mut probe = joined(&mut h, "Player");
+    let start = origin_x(&h, 0);
+    let before = h.server.game().usercmd_msecs.len();
+
+    // The bank is full after sign-on, so all 200 ms are granted.
+    drive(&mut h, &mut probe, &forward(200), 1);
+    let steps = &h.server.game().usercmd_msecs[before..];
+    assert_eq!(steps, &[50, 50, 50, 50]);
+    assert!(steps.iter().all(|&ms| ms <= MAX_USERCMD_STEP_MS));
+    let moved = origin_x(&h, 0) - start;
+    assert!((moved - 50.0).abs() <= 0.01, "moved {moved}");
 }
 
 #[test]

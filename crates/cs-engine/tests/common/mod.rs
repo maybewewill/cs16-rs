@@ -126,6 +126,8 @@ pub struct TestGame {
     pub commands: Vec<Vec<String>>,
     /// Every `random_seed` received by `run_usercmd`, in call order.
     pub random_seeds: Vec<u32>,
+    /// The `msec` of every command `run_usercmd` received, in call order.
+    pub usercmd_msecs: Vec<u8>,
 
     pub server_activate_calls: usize,
     pub server_deactivate_calls: usize,
@@ -257,6 +259,7 @@ impl GameDll for TestGame {
     ) {
         self.run_usercmd_calls += 1;
         self.random_seeds.push(random_seed);
+        self.usercmd_msecs.push(cmd.msec);
         if self.flood_per_usercmd > 0 {
             // `svc_nop` bytes.
             eng.reliable(slot).write_bytes(&vec![svc::NOP; self.flood_per_usercmd]);

@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use cs_assets::bsp::BspMap;
+use cs_assets::bsp::{BspMap, SpawnPoint, SpawnTeam};
 use cs_assets::materials::MaterialTable;
 use cs_cvar::CVarRegistry;
 use cs_engine::{EntVars, Server, ServerConfig, ServerMap};
@@ -11,7 +11,7 @@ use cs_probe::{ProbeClient, ProbeConfig, ProbeState};
 use cs_proto48::crypto::md5_hex;
 use cs_proto48::delta::{DeltaRegistry, GoldSrcUserCmd};
 use cs_proto48::info::InfoString;
-use cs_sim::pmove::{MoveParams, VEC_VIEW};
+use cs_sim::pmove::{MoveParams, VEC_VIEW, snap_spawn_to_floor};
 use cs_sim::trace::{BspCollision, Hull};
 use cs_sim::walk_game::{WALK_MAX_SPEED, WalkGame, buttons, ent_flags};
 use cs_transport::{LoopbackEndpoint, LoopbackHub, PeerAddr};
@@ -33,6 +33,8 @@ struct World {
     now: f64,
     /// A copy of the collision the game moves players with, for the test's own traces.
     collision: BspCollision,
+    /// The map's spawn points, as the game was given them.
+    spawns: Vec<SpawnPoint>,
 }
 
 impl World {
@@ -42,7 +44,7 @@ impl World {
         let collision = BspCollision::from_map(&bsp, MaterialTable::load(vfs));
         let spawns = bsp.spawns.clone();
         let map = ServerMap::from_bsp("de_dust2", &raw, Arc::new(bsp)).expect("BSP header");
-        let game = WalkGame::new(collision.clone(), spawns, MoveParams::default());
+        let game = WalkGame::new(collision.clone(), spawns.clone(), MoveParams::default());
         let cfg = ServerConfig {
             max_clients: 4,
             ..ServerConfig::default()
@@ -59,6 +61,7 @@ impl World {
             hub: LoopbackHub::new(),
             now: 0.0,
             collision,
+            spawns,
         }
     }
 
@@ -145,17 +148,18 @@ fn clear_yaw(collision: &BspCollision, start: Vec3, spawn_yaw: f32) -> f32 {
 }
 
 /// Distance from `origin` down to the floor under the standing hull, looking at most 64 units
-/// down; 64 when nothing is found.
-fn floor_distance(collision: &BspCollision, origin: Vec3) -> f32 {
+/// down; 64 when nothing is found. `None` when the hull at `origin` is already in solid: the
+/// trace then ends where it starts, and a distance of 0 would hide a player sunk in the floor.
+fn floor_distance(collision: &BspCollision, origin: Vec3) -> Option<f32> {
     let tr = collision.trace_hull(origin, origin - Vec3::new(0.0, 0.0, 64.0), Hull::Standing);
-    origin.z - tr.end_pos.z
+    (!tr.start_solid && !tr.all_solid).then_some(origin.z - tr.end_pos.z)
 }
 
 /// A sample taken during the run: whether `FL_ONGROUND` is set, and the floor distance.
 #[derive(Debug, Clone, Copy)]
 struct FloorSample {
     on_ground: bool,
-    floor: f32,
+    floor: Option<f32>,
 }
 
 /// The run of the runner probe.
@@ -220,7 +224,7 @@ fn player_runs_forward_on_de_dust2() {
     let speed = Vec3::new(v.velocity.x, v.velocity.y, 0.0).length();
     let floor = floor_distance(&r.world.collision, v.origin);
     println!(
-        "yaw {} start {:?} end {:?} velocity {:?} horizontal {horizontal:.3} dz {:.3} speed {speed:.3} floor {floor:.4} samples {:?}",
+        "yaw {} start {:?} end {:?} velocity {:?} horizontal {horizontal:.3} dz {:.3} speed {speed:.3} floor {floor:?} samples {:?}",
         v.v_angle.y, r.start, v.origin, v.velocity, run.z, r.samples
     );
     assert!((440.0..=500.0).contains(&horizontal), "ran {horizontal}");
@@ -232,11 +236,19 @@ fn player_runs_forward_on_de_dust2() {
         run.z
     );
     assert_ne!(v.flags & ent_flags::FL_ONGROUND, 0, "flags {:#x}", v.flags);
-    assert!(floor <= 1.0, "floor {floor} below the player at the end");
+    // `None`: the hull is in solid, sunk into the floor.
+    assert!(
+        floor.is_some_and(|f| f <= 1.0),
+        "floor {floor:?} below the player at the end"
+    );
     assert_eq!(r.samples.len(), 4);
     for (i, sample) in r.samples.iter().enumerate() {
+        assert!(sample.floor.is_some(), "sample {i} in solid: {sample:?}");
         if sample.on_ground {
-            assert!(sample.floor <= 1.0, "sample {i}: {sample:?}");
+            assert!(
+                sample.floor.is_some_and(|f| f <= 1.0),
+                "sample {i}: {sample:?}"
+            );
         }
     }
     let grounded = r.samples.iter().filter(|s| s.on_ground).count();
@@ -275,6 +287,21 @@ fn spawns_alternate_teams_and_set_model_key() {
     let (pa, pb) = (w.vars(0).origin, w.vars(1).origin);
     println!("slot 0 {pa:?} slot 1 {pb:?}");
     assert!((pa - pb).length() > 32.0, "{pa:?} vs {pb:?}");
+    // Slot 0 stands on the first counter-terrorist spawn, slot 1 on the first terrorist one.
+    let first_of = |team: SpawnTeam| {
+        let spawn = w.spawns.iter().find(|s| s.team == team).expect("spawn");
+        snap_spawn_to_floor(spawn.position, &w.collision)
+    };
+    for (origin, team) in [
+        (pa, SpawnTeam::CounterTerrorist),
+        (pb, SpawnTeam::Terrorist),
+    ] {
+        let expected = first_of(team);
+        assert!(
+            (origin - expected).abs().max_element() <= TOLERANCE,
+            "{team:?}: {origin:?} vs {expected:?}"
+        );
+    }
 }
 
 #[test]

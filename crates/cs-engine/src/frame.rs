@@ -65,6 +65,11 @@ impl FrameRing {
         self.frames[slot] = Some(f);
     }
 
+    /// Frames stored, at most [`UPDATE_BACKUP`].
+    pub fn stored(&self) -> usize {
+        self.frames.iter().filter(|f| f.is_some()).count()
+    }
+
     /// The frame the client names with `delta_seq` (the low byte of its sequence), when it is
     /// stored and fewer than 63 sequences older than `current_seq`.
     pub fn delta_base(&self, delta_seq: u8, current_seq: u32) -> Option<&ClientFrame> {
