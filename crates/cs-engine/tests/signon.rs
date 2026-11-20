@@ -3,7 +3,7 @@
 mod common;
 
 use common::{Harness, TestGame};
-use cs_engine::{ClientState, SignonStage};
+use cs_engine::{ClientState, MAX_NAME_BYTES, MAX_RELIABLE_BACKLOG, SignonStage};
 use cs_probe::{Direction, ProbeClient, ProbeState, read_capture};
 use cs_proto48::CONNECTIONLESS_HEADER;
 use cs_proto48::delta::DeltaRegistry;
@@ -188,6 +188,7 @@ fn signon_survives_duplicates_and_reordering() {
     });
     assert_eq!(h.server.client_state(0), ClientState::Active);
     assert_eq!(h.server.client_count(), 1);
+    assert_eq!(h.server.game().client_put_in_server_calls, 1);
     let stats = probe.transport().fault_stats();
     assert!(stats.duplicated > 0, "{stats:?}");
     assert!(stats.swapped > 0, "{stats:?}");
@@ -314,4 +315,99 @@ fn stalled_signon_times_out() {
     assert_eq!(h.server.client_count(), 0);
     // Never put in the server, so the game is not told about a disconnect.
     assert_eq!(h.server.game().client_disconnect_calls, 0);
+}
+
+fn serverinfo_count(probe: &Probe) -> usize {
+    opcodes(probe)
+        .iter()
+        .filter(|&&op| op == svc::SERVERINFO)
+        .count()
+}
+
+#[test]
+fn repeated_new_while_stage_pending_is_ignored() {
+    let mut h = Harness::new(4);
+    let mut probe = h.add_probe("Player");
+    step_until(&mut h, &mut [&mut probe], 20, "AwaitSendRes", |h, _| {
+        h.server.client_state(0) == ClientState::Signon(SignonStage::AwaitSendRes)
+    });
+    // One reliable payload of 300 `new` commands while the `new` stage is still in flight.
+    for _ in 0..300 {
+        probe.send_stringcmd("new");
+    }
+    h.step(&mut [&mut probe], 200);
+    assert_eq!(serverinfo_count(&probe), 1);
+    assert_eq!(probe.state(), &ProbeState::InGame);
+    assert_eq!(h.server.client_state(0), ClientState::Active);
+}
+
+#[test]
+fn reliable_backlog_over_the_cap_drops_the_client() {
+    let game = TestGame {
+        flood_bytes: MAX_RELIABLE_BACKLOG + 1,
+        ..TestGame::default()
+    };
+    let mut h = Harness::with_game(4, game);
+    let mut flooder = h.add_probe("Flooder");
+    let mut other = h.add_probe("Other");
+    h.step(&mut [&mut flooder, &mut other], 200);
+    assert_eq!(h.server.client_count(), 2);
+
+    flooder.send_stringcmd("flood");
+    h.step(&mut [&mut flooder, &mut other], 20);
+    assert_eq!(h.server.client_state(0), ClientState::Free);
+    assert_eq!(h.server.client_state(1), ClientState::Active);
+    assert_eq!(h.server.client_count(), 1);
+    assert_eq!(h.server.game().client_disconnect_calls, 1);
+    assert_eq!(other.state(), &ProbeState::InGame);
+}
+
+#[test]
+fn new_after_spawn_restarts_cleanly() {
+    let mut h = Harness::new(4);
+    let mut probe = h.add_probe("Player");
+    step_until(&mut h, &mut [&mut probe], 200, "AwaitSendEnts", |h, _| {
+        h.server.client_state(0) == ClientState::Signon(SignonStage::AwaitSendEnts)
+    });
+    // Goes out ahead of the probe's own `sendents`, which then arrives out of stage.
+    probe.send_stringcmd("new");
+    h.step(&mut [&mut probe], 200);
+    assert_eq!(serverinfo_count(&probe), 2);
+    assert_eq!(probe.state(), &ProbeState::InGame);
+    assert_eq!(h.server.client_state(0), ClientState::Active);
+    let game = h.server.game();
+    assert_eq!(game.client_put_in_server_calls, 2);
+    assert_eq!(game.client_disconnect_calls, 1);
+}
+
+#[test]
+fn kick_during_connect_rejects() {
+    let game = TestGame {
+        kick_on_connect: Some("Kicked while connecting".to_string()),
+        ..TestGame::default()
+    };
+    let mut h = Harness::with_game(4, game);
+    let mut probe = h.add_probe("Player");
+    h.step(&mut [&mut probe], 20);
+    assert_eq!(
+        probe.state(),
+        &ProbeState::Rejected("Kicked while connecting".to_string())
+    );
+    assert_eq!(h.server.client_count(), 0);
+    assert_eq!(h.server.game().client_connect_calls, 1);
+}
+
+#[test]
+fn prefixed_duplicate_name_fits_the_name_limit() {
+    let long = "N".repeat(MAX_NAME_BYTES);
+    let mut h = Harness::new(4);
+    let mut first = h.add_probe(&long);
+    h.step(&mut [&mut first], 200);
+    let mut second = h.add_probe(&long);
+    h.step(&mut [&mut first, &mut second], 200);
+    assert_eq!(second.state(), &ProbeState::InGame);
+    assert_eq!(name_of(&second, 0).as_deref(), Some(long.as_str()));
+    let prefixed = name_of(&second, 1).expect("second client's name");
+    assert_eq!(prefixed, format!("(1){}", &long[..MAX_NAME_BYTES - 3]));
+    assert_eq!(prefixed.len(), MAX_NAME_BYTES);
 }

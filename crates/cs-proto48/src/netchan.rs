@@ -173,6 +173,23 @@ impl NetChan {
             || !self.waitlist[1].is_empty()
     }
 
+    /// Reliable bytes not yet acknowledged: the queue, the in-flight buffer and every fragment
+    /// still queued or waiting.
+    pub fn pending_reliable_bytes(&self) -> usize {
+        let fragments: usize = (0..MAX_STREAMS)
+            .map(|s| {
+                let active: usize = self.fragbufs[s].iter().map(|f| f.data.len()).sum();
+                let waiting: usize = self.waitlist[s]
+                    .iter()
+                    .flat_map(|(_, frags)| frags.iter())
+                    .map(|f| f.data.len())
+                    .sum();
+                active + waiting
+            })
+            .sum();
+        self.reliable_queue.len() + self.reliable_buf.len() + fragments
+    }
+
     fn promote_waitlist(&mut self) {
         for s in 0..MAX_STREAMS {
             if self.fragbufs[s].is_empty()
@@ -490,5 +507,34 @@ mod tests {
         }
 
         assert_eq!(assembled, Some(large_signon));
+    }
+
+    #[test]
+    fn pending_reliable_bytes_counts_queue_in_flight_and_fragments() {
+        let mut server = NetChan::new(64);
+        let mut client = NetChan::new(64);
+        assert_eq!(server.pending_reliable_bytes(), 0);
+
+        server.write_reliable(&[1; 10]);
+        assert_eq!(server.pending_reliable_bytes(), 10);
+        // In flight after sending, still pending until acknowledged.
+        let pkt = server.build_packet(&[]);
+        assert_eq!(server.pending_reliable_bytes(), 10);
+        server.write_reliable(&[2; 5]);
+        assert_eq!(server.pending_reliable_bytes(), 15);
+
+        client.process_packet(&pkt).unwrap().unwrap();
+        server
+            .process_packet(&client.build_packet(&[]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(server.pending_reliable_bytes(), 5);
+
+        // Two fragment batches: one becomes active, the other waits.
+        server.create_fragments(&[3; 100]);
+        server.create_fragments(&[4; 70]);
+        assert_eq!(server.pending_reliable_bytes(), 175);
+        server.build_packet(&[]);
+        assert_eq!(server.pending_reliable_bytes(), 175);
     }
 }

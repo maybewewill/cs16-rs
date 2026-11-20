@@ -77,6 +77,10 @@ impl Harness {
 pub struct TestGame {
     /// Reason `client_connect` refuses with, if any.
     pub refuse: Option<String>,
+    /// Reason `client_connect` kicks the connecting slot with (and then accepts), if any.
+    pub kick_on_connect: Option<String>,
+    /// Bytes `client_command("flood")` writes into that client's reliable buffer.
+    pub flood_bytes: usize,
     /// Entities with `modelindex = 2` that `server_activate` creates.
     pub extra_entities: usize,
     /// Result of `precache_model("models/late.mdl")` in `client_put_in_server`.
@@ -121,8 +125,11 @@ impl GameDll for TestGame {
         self.server_deactivate_calls += 1;
     }
 
-    fn client_connect(&mut self, _eng: &mut EngineApi<'_>, _slot: u8) -> Result<(), String> {
+    fn client_connect(&mut self, eng: &mut EngineApi<'_>, slot: u8) -> Result<(), String> {
         self.client_connect_calls += 1;
+        if let Some(reason) = &self.kick_on_connect {
+            eng.kick(slot, reason);
+        }
         match &self.refuse {
             Some(text) => Err(text.clone()),
             None => Ok(()),
@@ -144,8 +151,12 @@ impl GameDll for TestGame {
         self.client_disconnect_calls += 1;
     }
 
-    fn client_command(&mut self, _eng: &mut EngineApi<'_>, _slot: u8, argv: &[String]) {
+    fn client_command(&mut self, eng: &mut EngineApi<'_>, slot: u8, argv: &[String]) {
         self.client_command_calls += 1;
+        if argv.first().is_some_and(|c| c == "flood") {
+            // `svc_nop` bytes: harmless if they ever reached the client.
+            eng.reliable(slot).write_bytes(&vec![1; self.flood_bytes]);
+        }
         self.commands.push(argv.to_vec());
     }
 

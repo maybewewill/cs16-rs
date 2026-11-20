@@ -148,6 +148,10 @@ pub trait GameDll {
     fn usermsgs(&self) -> UserMsgRegistry;
     fn server_activate(&mut self, eng: &mut EngineApi<'_>);
     fn server_deactivate(&mut self, eng: &mut EngineApi<'_>);
+    /// A client asks to connect; `Err(text)` refuses it with `text`. A client that never
+    /// finishes sign-on gets no `client_disconnect` afterwards (that is only called for clients
+    /// that were put in the server), so a game must not allocate per-client state here; do it
+    /// in `client_put_in_server`.
     fn client_connect(&mut self, eng: &mut EngineApi<'_>, slot: u8) -> Result<(), String>;
     fn client_put_in_server(&mut self, eng: &mut EngineApi<'_>, slot: u8);
     fn client_disconnect(&mut self, eng: &mut EngineApi<'_>, slot: u8);

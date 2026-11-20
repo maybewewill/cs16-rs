@@ -1,18 +1,17 @@
-//! The server: client slots, connectionless dispatch, one netchan per client, the sign-on
-//! sequence and the per-frame datagram to every client.
+//! The server: client slots, one netchan per client, the sign-on sequence and the per-frame
+//! datagram to every client. Connectionless packets and connects are in `connect.rs`.
 
 use std::collections::BTreeMap;
 
 use cs_cvar::CVarRegistry;
 use cs_proto48::bitbuf::MsgWriter;
 use cs_proto48::delta::{DeltaRecord, DeltaRegistry, DeltaSchema, GoldSrcEntityState};
-use cs_proto48::handshake::{encode_s2c_connection, encode_s2c_reject, tokenize_goldsrc_line};
+use cs_proto48::handshake::tokenize_goldsrc_line;
 use cs_proto48::messages::{
     ClcMessage, ServerInfoMsg, entity_schema_name, parse_clc_stream, wire_entity_type,
     write_svc_clientdata, write_svc_packetentities_full, write_svc_stufftext, write_svc_time,
     write_svc_updateuserinfo,
 };
-use cs_proto48::query::{PlayerQueryEntry, cs16_server_query_info};
 use cs_proto48::usermsg::UserMsgRegistry;
 use cs_transport::{MAX_UDP_PACKET, PacketTransport, PeerAddr};
 
@@ -20,12 +19,15 @@ use crate::client::{Client, ClientState, SignonStage};
 use crate::edict::{DEFAULT_MAX_EDICTS, EdictPool};
 use crate::game::{ClientView, EngineApi, GameDll, Outbox, entity_state_from_vars};
 use crate::map::ServerMap;
-use crate::oob::{ChallengeIssuer, ConnectRequest, OobContext, OobLimiter, OobOutcome, handle_oob};
+use crate::oob::{ChallengeIssuer, OobLimiter};
 use crate::precache::PrecacheTables;
 use crate::signon::{
     UserInfoEntry, move_vars, munged_map_crc, write_new_stage, write_sendres_stage,
     write_spawn_baselines, write_spawn_stage,
 };
+
+/// Unacknowledged reliable bytes a client may have queued; past this it is dropped.
+pub const MAX_RELIABLE_BACKLOG: usize = 256 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -59,28 +61,28 @@ impl Default for ServerConfig {
 }
 
 pub struct Server<G: GameDll> {
-    cfg: ServerConfig,
-    map: ServerMap,
-    game: G,
-    deltas: DeltaRegistry,
-    cvars: CVarRegistry,
-    usermsgs: UserMsgRegistry,
-    edicts: EdictPool,
-    precache: PrecacheTables,
-    outbox: Outbox,
+    pub(crate) cfg: ServerConfig,
+    pub(crate) map: ServerMap,
+    pub(crate) game: G,
+    pub(crate) deltas: DeltaRegistry,
+    pub(crate) cvars: CVarRegistry,
+    pub(crate) usermsgs: UserMsgRegistry,
+    pub(crate) edicts: EdictPool,
+    pub(crate) precache: PrecacheTables,
+    pub(crate) outbox: Outbox,
     /// What the game sees of each slot, indexed like `clients`.
-    views: Vec<ClientView>,
-    clients: Vec<Client>,
+    pub(crate) views: Vec<ClientView>,
+    pub(crate) clients: Vec<Client>,
     /// Entity states sent with `svc_spawnbaseline`, by entity number.
-    baselines: Vec<(u16, GoldSrcEntityState)>,
+    pub(crate) baselines: Vec<(u16, GoldSrcEntityState)>,
     /// The same baselines as delta records, the base of full entity updates.
-    baseline_records: BTreeMap<u16, (u8, DeltaRecord)>,
-    usercmd_schema: Option<DeltaSchema>,
-    challenges: ChallengeIssuer,
-    limiter: OobLimiter,
-    spawn_count: u32,
-    next_userid: i32,
-    time: f64,
+    pub(crate) baseline_records: BTreeMap<u16, (u8, DeltaRecord)>,
+    pub(crate) usercmd_schema: Option<DeltaSchema>,
+    pub(crate) challenges: ChallengeIssuer,
+    pub(crate) limiter: OobLimiter,
+    pub(crate) spawn_count: u32,
+    pub(crate) next_userid: i32,
+    pub(crate) time: f64,
 }
 
 impl<G: GameDll> Server<G> {
@@ -173,14 +175,14 @@ impl<G: GameDll> Server<G> {
     }
 
     /// Calls into the game, then drains what it queued.
-    fn with_game<R>(&mut self, f: impl FnOnce(&mut G, &mut EngineApi<'_>) -> R) -> R {
+    pub(crate) fn with_game<R>(&mut self, f: impl FnOnce(&mut G, &mut EngineApi<'_>) -> R) -> R {
         let result = self.call_game(f);
         self.drain_outbox();
         result
     }
 
     /// Calls into the game without draining the outbox.
-    fn call_game<R>(&mut self, f: impl FnOnce(&mut G, &mut EngineApi<'_>) -> R) -> R {
+    pub(crate) fn call_game<R>(&mut self, f: impl FnOnce(&mut G, &mut EngineApi<'_>) -> R) -> R {
         let mut eng = EngineApi::new(
             &mut self.edicts,
             &mut self.precache,
@@ -194,7 +196,7 @@ impl<G: GameDll> Server<G> {
     }
 
     /// Moves what the game queued to the clients and carries out its kicks.
-    fn drain_outbox(&mut self) {
+    pub(crate) fn drain_outbox(&mut self) {
         loop {
             for (slot, client) in self.clients.iter_mut().enumerate() {
                 let reliable = std::mem::take(&mut self.outbox.reliable[slot]);
@@ -234,15 +236,29 @@ impl<G: GameDll> Server<G> {
                 }
             }
 
-            let kicks = std::mem::take(&mut self.outbox.kicks);
-            if kicks.is_empty() {
+            // Telling a kicked or dropped client why is left to a later task.
+            let mut drops: Vec<u8> = std::mem::take(&mut self.outbox.kicks)
+                .into_iter()
+                .map(|(slot, _reason)| slot)
+                .collect();
+            drops.extend(self.overloaded_slots());
+            if drops.is_empty() {
                 return;
             }
-            // Telling the kicked client why is left to a later task.
-            for (slot, _reason) in kicks {
+            for slot in drops {
                 self.release_slot(slot);
             }
         }
+    }
+
+    /// Connected clients whose unacknowledged reliable data exceeds [`MAX_RELIABLE_BACKLOG`].
+    fn overloaded_slots(&self) -> Vec<u8> {
+        self.clients
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| !c.is_free() && c.chan.pending_reliable_bytes() > MAX_RELIABLE_BACKLOG)
+            .map(|(slot, _)| slot as u8)
+            .collect()
     }
 
     /// Frees `slot`; a client that was put in the server is reported to the game first. The
@@ -261,7 +277,7 @@ impl<G: GameDll> Server<G> {
     }
 
     /// Frees `slot` and passes on what the game queued meanwhile.
-    fn free_slot(&mut self, slot: u8) {
+    pub(crate) fn free_slot(&mut self, slot: u8) {
         self.release_slot(slot);
         self.drain_outbox();
     }
@@ -290,17 +306,10 @@ impl<G: GameDll> Server<G> {
             .collect();
     }
 
-    fn slot_of(&self, addr: &PeerAddr) -> Option<u8> {
+    pub(crate) fn slot_of(&self, addr: &PeerAddr) -> Option<u8> {
         self.clients
             .iter()
             .position(|c| c.addr.as_ref() == Some(addr))
-            .map(|i| i as u8)
-    }
-
-    fn free_slot_index(&self) -> Option<u8> {
-        self.clients
-            .iter()
-            .position(Client::is_free)
             .map(|i| i as u8)
     }
 
@@ -310,103 +319,6 @@ impl<G: GameDll> Server<G> {
         } else if let Some(slot) = self.slot_of(&from) {
             self.handle_netchan(slot, data);
         }
-    }
-
-    fn handle_connectionless(
-        &mut self,
-        net: &mut dyn PacketTransport,
-        from: PeerAddr,
-        data: &[u8],
-    ) {
-        if !self.limiter.allow(&from, self.time) {
-            return;
-        }
-        let players: Vec<PlayerQueryEntry> = self
-            .clients
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| !c.is_free())
-            .map(|(slot, c)| PlayerQueryEntry {
-                index: slot as u8,
-                name: self.views[slot]
-                    .userinfo
-                    .get("name")
-                    .unwrap_or_default()
-                    .to_string(),
-                score: 0,
-                duration_secs: (self.time - c.connected_at) as f32,
-            })
-            .collect();
-        let query = cs16_server_query_info(
-            &self.cfg.hostname,
-            &self.map.name,
-            players.len(),
-            usize::from(self.cfg.max_clients),
-            0,
-        );
-        let ctx = OobContext {
-            challenges: &self.challenges,
-            query: &query,
-            players: &players,
-            rules: &[],
-            is_full: self.free_slot_index().is_none() && self.slot_of(&from).is_none(),
-        };
-        let reply = match handle_oob(data, &from, self.time, &ctx) {
-            OobOutcome::Reply(reply) => reply,
-            OobOutcome::Connect(request) => self.connect(from, request),
-            OobOutcome::Ignore => return,
-        };
-        let _ = net.send(from, &reply);
-    }
-
-    /// Accepts a checked connect request and returns the reply for it.
-    fn connect(&mut self, from: PeerAddr, request: ConnectRequest) -> Vec<u8> {
-        let slot = match self.slot_of(&from) {
-            Some(slot) => {
-                self.free_slot(slot);
-                slot
-            }
-            // `handle_oob` already rejected a full server.
-            None => match self.free_slot_index() {
-                Some(slot) => slot,
-                None => return encode_s2c_reject("Server is full.\n"),
-            },
-        };
-        let index = usize::from(slot);
-        let mut userinfo = request.userinfo;
-        userinfo.set("name", self.unique_name(&request.name));
-        self.views[index] = ClientView {
-            userinfo,
-            ..ClientView::default()
-        };
-        self.clients[index] = Client::connected(from, self.next_userid, self.time);
-
-        if let Err(reason) = self.with_game(|game, eng| game.client_connect(eng, slot)) {
-            self.free_slot(slot);
-            return encode_s2c_reject(&reason);
-        }
-        let userid = self.next_userid;
-        self.next_userid += 1;
-        encode_s2c_connection(userid, &from.to_string(), false, self.cfg.build)
-    }
-
-    /// `name`, or `(1)name`, `(2)name`… when a connected client already uses it.
-    fn unique_name(&self, name: &str) -> String {
-        let taken = |candidate: &str| {
-            self.clients.iter().zip(&self.views).any(|(c, v)| {
-                !c.is_free()
-                    && v.userinfo
-                        .get("name")
-                        .is_some_and(|n| n.eq_ignore_ascii_case(candidate))
-            })
-        };
-        let mut candidate = name.to_string();
-        let mut n = 1;
-        while taken(&candidate) {
-            candidate = format!("({n}){name}");
-            n += 1;
-        }
-        candidate
     }
 
     fn handle_netchan(&mut self, slot: u8, data: &[u8]) {
@@ -440,7 +352,13 @@ impl<G: GameDll> Server<G> {
         let Some(cmd) = argv.first() else {
             return;
         };
-        let state = self.clients[usize::from(slot)].state;
+        let client = &self.clients[usize::from(slot)];
+        let state = client.state;
+        let is_stage_cmd = matches!(cmd.as_str(), "new" | "sendres" | "spawn" | "sendents");
+        if is_stage_cmd && client.chan.has_pending_reliable() {
+            // The previous stage's output has not been delivered yet.
+            return;
+        }
         match (cmd.as_str(), state) {
             ("new", ClientState::Signon(_)) => self.stage_new(slot),
             ("sendres", ClientState::Signon(SignonStage::AwaitSendRes)) => {
@@ -452,9 +370,11 @@ impl<G: GameDll> Server<G> {
             ("sendents", ClientState::Signon(SignonStage::AwaitSendEnts)) => {
                 self.clients[usize::from(slot)].state = ClientState::Active;
             }
-            ("new" | "sendres" | "spawn" | "sendents", _) => {}
+            _ if is_stage_cmd => {}
             _ => self.with_game(|game, eng| game.client_command(eng, slot, &argv)),
         }
+        // Enforces the reliable backlog cap on what the stage wrote.
+        self.drain_outbox();
     }
 
     /// Userinfo of the connected slots that `include` accepts.
@@ -473,6 +393,17 @@ impl<G: GameDll> Server<G> {
     }
 
     fn stage_new(&mut self, slot: u8) {
+        let index = usize::from(slot);
+        if self.clients[index].put_in_server {
+            // Restarting after `spawn`: end the old session the way a reconnect does.
+            self.with_game(|game, eng| game.client_disconnect(eng, slot));
+            if self.clients[index].is_free() {
+                return;
+            }
+            self.edicts.reset_client(slot);
+            self.clients[index].put_in_server = false;
+            self.views[index].active = false;
+        }
         let info = ServerInfoMsg {
             protocol: 48,
             spawn_count: self.spawn_count,
