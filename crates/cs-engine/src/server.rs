@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use cs_cvar::CVarRegistry;
-use cs_proto48::bitbuf::MsgWriter;
+use cs_proto48::bitbuf::{MsgWriter, ProtoError};
 use cs_proto48::delta::{DeltaRecord, DeltaRegistry, DeltaSchema, GoldSrcEntityState};
 use cs_proto48::handshake::tokenize_goldsrc_line;
 use cs_proto48::messages::{
@@ -400,11 +400,11 @@ impl<G: GameDll> Server<G> {
                 self.net_stats.datagrams_rejected += 1;
                 return;
             }
-            Err(_) => {
+            Err(error) => {
                 self.net_stats.datagrams_rejected += 1;
-                // Bit 30 of the first word: the datagram carries fragments, so the netchan
-                // refused a stream.
-                if data.get(3).is_some_and(|b| b & 0x40 != 0) {
+                // Only a refused stream counts; a malformed header proves nothing about the
+                // sender, as anyone who knows the address can forge one.
+                if matches!(error, ProtoError::StreamRefused(_)) {
                     self.count_refused_stream(slot);
                 }
                 return;

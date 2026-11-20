@@ -77,7 +77,7 @@ fn compressed_stream_past_the_channel_limit_is_refused() {
     assert!(piece.len() < 1024 && text_plain().len() > 1024);
     assert!(matches!(
         chan.process_packet(&one_piece_packet(1, &piece)),
-        Err(ProtoError::InvalidPayload(_))
+        Err(ProtoError::StreamRefused(_))
     ));
     assert_eq!(chan.incoming_buffered_bytes(), 0);
 

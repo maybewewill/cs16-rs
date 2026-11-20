@@ -205,7 +205,7 @@ impl NetChan {
         let buffered = self.incoming_bytes[s] - replaced + fragment_charge(piece.len());
         if buffered > self.max_incoming_stream {
             self.discard_incoming(s);
-            return Err(ProtoError::InvalidPayload(format!(
+            return Err(ProtoError::StreamRefused(format!(
                 "fragment stream {s}: {buffered} bytes buffered, limit {}",
                 self.max_incoming_stream
             )));
@@ -533,7 +533,10 @@ impl NetChan {
 
         let completed_normal_stream = completed[FRAG_NORMAL_STREAM]
             .take()
-            .map(|stream| decompress_stream(&stream, self.max_incoming_stream))
+            .map(|stream| {
+                decompress_stream(&stream, self.max_incoming_stream)
+                    .map_err(|e| ProtoError::StreamRefused(e.to_string()))
+            })
             .transpose()?;
 
         Ok(Some(NetChanIncoming {

@@ -164,15 +164,29 @@ pub struct OobContext<'a> {
 /// Answers one connectionless datagram from `from`. The caller applies
 /// [`OobLimiter`] first.
 pub fn handle_oob(raw: &[u8], from: &PeerAddr, now: f64, ctx: &OobContext<'_>) -> OobOutcome {
+    handle_oob_checked(raw, from, now, ctx).0
+}
+
+/// [`handle_oob`], also telling whether the datagram carried a challenge issued to `from`
+/// (see [`carries_valid_challenge`]), found while answering it.
+pub fn handle_oob_checked(
+    raw: &[u8],
+    from: &PeerAddr,
+    now: f64,
+    ctx: &OobContext<'_>,
+) -> (OobOutcome, bool) {
     let Ok(packet) = parse_oob_packet(raw) else {
-        return OobOutcome::Ignore;
+        return (OobOutcome::Ignore, false);
     };
     match packet {
-        OobPacket::GetChallenge { .. } => OobOutcome::Reply(encode_s2c_challenge(
-            ctx.challenges.issue(from, now),
-            0,
+        OobPacket::GetChallenge { .. } => (
+            OobOutcome::Reply(encode_s2c_challenge(
+                ctx.challenges.issue(from, now),
+                0,
+                false,
+            )),
             false,
-        )),
+        ),
         OobPacket::Connect {
             protocol,
             challenge,
@@ -183,31 +197,37 @@ pub fn handle_oob(raw: &[u8], from: &PeerAddr, now: f64, ctx: &OobContext<'_>) -
         } => {
             // The challenge goes first: longer reject texts only reach a confirmed address.
             if !ctx.challenges.check(from, challenge, now) {
-                return reject("Bad challenge.\n");
+                return (reject("Bad challenge.\n"), false);
             }
             if protocol != PROTOCOL_VERSION {
-                return reject(&format!(
-                    "This server is using a different protocol ( {PROTOCOL_VERSION} ) than your client ( {protocol} ).\n"
-                ));
+                return (
+                    reject(&format!(
+                        "This server is using a different protocol ( {PROTOCOL_VERSION} ) than your client ( {protocol} ).\n"
+                    )),
+                    true,
+                );
             }
             // `InfoString::is_valid` tolerates a missing leading `\`; the original `Info_IsValid` does not.
             if !userinfo_raw.starts_with('\\')
                 || !InfoString::is_valid(&userinfo_raw)
                 || userinfo_raw.len() > MAX_INFO_STRING
             {
-                return reject("Invalid userinfo in connect command\n");
+                return (reject("Invalid userinfo in connect command\n"), true);
             }
             if ctx.is_full {
-                return reject("Server is full.\n");
+                return (reject("Server is full.\n"), true);
             }
             let name = sanitize_name(userinfo.get("name").unwrap_or(""));
-            OobOutcome::Connect(ConnectRequest {
-                userinfo,
-                protinfo,
-                name,
-            })
+            (
+                OobOutcome::Connect(ConnectRequest {
+                    userinfo,
+                    protinfo,
+                    name,
+                }),
+                true,
+            )
         }
-        OobPacket::A2aPing => OobOutcome::Reply(encode_a2a_ack()),
+        OobPacket::A2aPing => (OobOutcome::Reply(encode_a2a_ack()), false),
         OobPacket::A2sInfo { challenge } => {
             query_reply(challenge, from, now, ctx, || encode_s2a_info_src(ctx.query))
         }
@@ -222,7 +242,7 @@ pub fn handle_oob(raw: &[u8], from: &PeerAddr, now: f64, ctx: &OobContext<'_>) -
         | OobPacket::S2cConnection { .. }
         | OobPacket::S2cReject(_)
         | OobPacket::A2aPrint(_)
-        | OobPacket::Unknown(_) => OobOutcome::Ignore,
+        | OobPacket::Unknown(_) => (OobOutcome::Ignore, false),
     }
 }
 
@@ -248,19 +268,25 @@ fn reject(text: &str) -> OobOutcome {
     OobOutcome::Reply(encode_s2c_reject(text))
 }
 
-/// The full A2S reply for an accepted challenge, otherwise the 9-byte challenge reply.
+/// The full A2S reply for an accepted challenge, otherwise the 9-byte challenge reply; the
+/// flag tells which.
 fn query_reply(
     challenge: Option<i32>,
     from: &PeerAddr,
     now: f64,
     ctx: &OobContext<'_>,
     full_reply: impl FnOnce() -> Vec<u8>,
-) -> OobOutcome {
+) -> (OobOutcome, bool) {
     match challenge {
-        Some(c) if ctx.challenges.check(from, c as u32, now) => OobOutcome::Reply(full_reply()),
-        _ => OobOutcome::Reply(encode_s2c_query_challenge(
-            ctx.challenges.issue(from, now) as i32
-        )),
+        Some(c) if ctx.challenges.check(from, c as u32, now) => {
+            (OobOutcome::Reply(full_reply()), true)
+        }
+        _ => (
+            OobOutcome::Reply(encode_s2c_query_challenge(
+                ctx.challenges.issue(from, now) as i32
+            )),
+            false,
+        ),
     }
 }
 

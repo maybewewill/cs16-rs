@@ -189,8 +189,8 @@ fn garbage_from_connected_address_never_panics() {
     // Headers carry strictly increasing sequences, so the server's channel accepts each one
     // and the payload parser sees its random body. The random datagrams carry random 30-bit
     // sequences, so the headers start near the top of that range, where no random
-    // sequence overtakes them. Only the reliable bit is random: a fragment flag would make
-    // most of them fail in the netchan.
+    // sequence overtakes them. Only the reliable bit is random: the fragment flag is cleared,
+    // as it would make most of them fail in the netchan.
     let mut next_seq = 0x3FFF_FFFF - 4_000;
     assert!(next_seq > target.outgoing_sequence().expect("connected"));
     let ack = target.incoming_sequence().expect("connected");
@@ -203,6 +203,10 @@ fn garbage_from_connected_address_never_panics() {
             data[..4].copy_from_slice(&(next_seq | reliable).to_le_bytes());
             data[4..8].copy_from_slice(&ack.to_le_bytes());
             next_seq += 1;
+        }
+        // Garbage never sets the fragment flag (bit 30 of the first word).
+        if len >= 4 {
+            data[3] &= !0x40;
         }
         target
             .transport_mut()
@@ -217,11 +221,11 @@ fn garbage_from_connected_address_never_panics() {
 
     let stats = h.server.net_stats();
     assert!(stats.datagrams_rejected > 0, "{stats:?}");
-    // The target is dropped by the bad-move rule or, since the random fragment flags make the
-    // netchan refuse streams, by the refused-stream rule; after that its address has no slot
-    // and its garbage is no longer counted.
+    // The target is dropped by the bad-move rule; after that its address has no slot and
+    // its garbage is no longer counted.
     assert!(
-        stats.payloads_rejected > stats_before.payloads_rejected,
+        stats.payloads_rejected
+            >= stats_before.payloads_rejected + u64::from(MAX_CONSECUTIVE_BAD_MOVES),
         "{stats:?}"
     );
     assert_eq!(h.server.client_state(0), ClientState::Free);
@@ -529,4 +533,28 @@ fn an_accepted_stream_resets_the_refused_count() {
     assert_eq!(h.server.client_state(0), ClientState::Active);
     send_bombs(&mut h, &mut target, &mut other, &mut seq, 1);
     assert_eq!(h.server.client_state(0), ClientState::Free);
+}
+
+#[test]
+fn spoofed_fragment_headers_do_not_drop_the_client() {
+    let mut h = Harness::new(4);
+    let mut target = h.add_probe("Target");
+    let mut other = h.add_probe("Other");
+    h.step(&mut [&mut target, &mut other], 200);
+    assert_eq!(h.server.client_state(0), ClientState::Active);
+
+    // Anyone who knows the address can send these: the fragment flag and a header that ends
+    // before the first stream's entry.
+    for _ in 0..20 {
+        target
+            .transport_mut()
+            .send(PeerAddr::Loopback(0), &[0, 0, 0, 0x40, 0, 0, 0, 0])
+            .expect("loopback send");
+    }
+    let rejected = h.server.net_stats().datagrams_rejected;
+    h.step(&mut [&mut other], 5);
+
+    assert!(h.server.net_stats().datagrams_rejected >= rejected + 20);
+    assert_eq!(h.server.client_state(0), ClientState::Active);
+    assert_eq!(h.server.client_state(1), ClientState::Active);
 }

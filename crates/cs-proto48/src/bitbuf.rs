@@ -9,6 +9,10 @@ pub enum ProtoError {
     UnexpectedEof,
     #[error("invalid protocol payload: {0}")]
     InvalidPayload(String),
+    /// A fragment stream the netchan refused: over its size limit, or failing to decompress
+    /// or decompressing past the limit. Malformed fragment headers are `InvalidPayload`.
+    #[error("refused fragment stream: {0}")]
+    StreamRefused(String),
     #[error("unknown or unsupported opcode: {0}")]
     UnknownOpcode(u8),
     #[error("delta schema error: {0}")]
