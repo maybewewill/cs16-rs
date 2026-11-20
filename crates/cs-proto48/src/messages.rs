@@ -1027,9 +1027,13 @@ fn parse_packet_entities(
             &ent_schema
         };
 
+        // A record built for another schema (an entity whose kind changed, or malformed data)
+        // is never used as a base; the entry then falls through to the next candidate.
+        let fits = |rec: &&DeltaRecord| rec.values.len() == schema.fields.len();
         let base_rec = if let Some(idx) = custom_bl_idx {
             ctx.instance_baselines
                 .get(idx)
+                .filter(fits)
                 .cloned()
                 .unwrap_or_else(|| schema.zero_record())
         } else if let Some(off) = prev_offset {
@@ -1037,11 +1041,14 @@ fn parse_packet_entities(
                 .len()
                 .checked_sub(off)
                 .and_then(|i| ordered_full.get(i))
+                .filter(fits)
                 .cloned()
                 .unwrap_or_else(|| schema.zero_record())
-        } else if is_delta && let Some((_, prev)) = prev_frame.get(&entnum) {
+        } else if is_delta
+            && let Some(prev) = matching_base(prev_frame.get(&entnum), custom, schema)
+        {
             prev.clone()
-        } else if let Some((_, bl)) = ctx.baselines.get(&entnum) {
+        } else if let Some(bl) = matching_base(ctx.baselines.get(&entnum), custom, schema) {
             bl.clone()
         } else {
             schema.zero_record()
@@ -1072,6 +1079,7 @@ fn parse_packet_entities(
 fn skip_temp_entity(r: &mut MsgReader<'_>) -> Result<(u8, Vec<u8>), ProtoError> {
     let te_type = r.read_u8()?;
     let start = r.pos();
+    let rest = r.remaining_slice();
     match te_type {
         0 | 19 | 20 | 21 => {
             let _ = r.read_bytes(24)?;
@@ -1209,10 +1217,9 @@ fn skip_temp_entity(r: &mut MsgReader<'_>) -> Result<(u8, Vec<u8>), ProtoError> 
             )));
         }
     }
-    let end = r.pos();
-    // Re-slice exact bytes read for callers that want to inspect them.
-    let len = end - start;
-    Ok((te_type, vec![0u8; len]))
+    let len = r.pos() - start;
+    let raw = rest.get(..len).ok_or(ProtoError::UnexpectedEof)?;
+    Ok((te_type, raw.to_vec()))
 }
 
 // ============================================================================
@@ -1453,18 +1460,73 @@ pub fn write_svc_clientdata(
     to_rec
 }
 
+/// Whether a wire entity type byte (`ENTITY_NORMAL` / `ENTITY_BEAM`) marks a custom entity,
+/// as `svc_spawnbaseline` and `svc_packetentities` decide it.
+fn is_custom_entity_type(ent_type: u8) -> bool {
+    (ent_type & ENTITY_NORMAL) == 0
+}
+
+/// `candidate`'s record when it can serve as the delta base of an entity entry: it is of the same
+/// kind (custom or normal) as the entry and holds one value per field of `schema`. Writers and
+/// parser both pick base records through this, so they agree on every entry.
+fn matching_base<'a>(
+    candidate: Option<&'a (u8, DeltaRecord)>,
+    custom: bool,
+    schema: &DeltaSchema,
+) -> Option<&'a DeltaRecord> {
+    candidate
+        .filter(|(ent_type, rec)| {
+            is_custom_entity_type(*ent_type) == custom && rec.values.len() == schema.fields.len()
+        })
+        .map(|(_, rec)| rec)
+}
+
+/// The three `entity_state_t` delta schemas a packet-entities message chooses between.
+struct EntitySchemas<'a> {
+    normal: &'a DeltaSchema,
+    player: &'a DeltaSchema,
+    custom: &'a DeltaSchema,
+}
+
+impl<'a> EntitySchemas<'a> {
+    fn from_registry(reg: &'a DeltaRegistry) -> Option<Self> {
+        Some(Self {
+            normal: reg.get("entity_state_t")?,
+            player: reg.get("entity_state_player_t")?,
+            custom: reg.get("custom_entity_state_t")?,
+        })
+    }
+
+    /// `(custom, schema)` for `ent`, chosen the way the parser chooses for its entry.
+    fn for_state(&self, ent: &GoldSrcEntityState, max_clients: u8) -> (bool, &'a DeltaSchema) {
+        let custom = ent.entity_type != 0 && is_custom_entity_type(ent.entity_type);
+        let schema = if custom {
+            self.custom
+        } else if ent.number >= 1 && ent.number <= max_clients as u16 {
+            self.player
+        } else {
+            self.normal
+        };
+        (custom, schema)
+    }
+}
+
 /// Write a full (`svc_packetentities`) entity snapshot (sorted by entity number).
+///
+/// Each entity is delta-encoded against its entry in `baselines` (the records sent with
+/// `svc_spawnbaseline`, keyed by entity number, as the parser stores them in
+/// `SvcParseContext::baselines`) when that entry is of the same kind, and against the zero record
+/// otherwise — the same record the parser picks. Assumes no instance baselines were sent (the
+/// parser then reads no instance-baseline bit).
 pub fn write_svc_packetentities_full(
     w: &mut MsgWriter,
     reg: &DeltaRegistry,
     max_clients: u8,
+    baselines: &BTreeMap<u16, (u8, DeltaRecord)>,
     entities: &[GoldSrcEntityState],
     server_time: f64,
 ) {
-    let Some(ent_schema) = reg.get("entity_state_t") else {
-        return;
-    };
-    let Some(player_schema) = reg.get("entity_state_player_t") else {
+    let Some(schemas) = EntitySchemas::from_registry(reg) else {
         return;
     };
 
@@ -1478,13 +1540,10 @@ pub fn write_svc_packetentities_full(
     let mut num_base: i32 = 0;
     for ent in sorted {
         let num = ent.number as i32;
-        let schema = if ent.number >= 1 && ent.number <= max_clients as u16 {
-            player_schema
-        } else {
-            ent_schema
-        };
-        let zero = schema.zero_record();
+        let (custom, schema) = schemas.for_state(ent, max_clients);
         let rec = ent.to_delta(schema);
+        let zero = schema.zero_record();
+        let base = matching_base(baselines.get(&ent.number), custom, schema).unwrap_or(&zero);
 
         let delta = num - num_base;
         if delta == 1 {
@@ -1500,9 +1559,9 @@ pub fn write_svc_packetentities_full(
             }
         }
         num_base = num;
-        w.write_one_bit(false); // custom = false
-        w.write_one_bit(false); // offset = 0 (no instance baselines -> no newbl bit)
-        write_delta(w, schema, &zero, &rec, true, server_time);
+        w.write_one_bit(custom);
+        w.write_one_bit(false); // no offset into this packet's earlier entities
+        write_delta(w, schema, base, &rec, true, server_time);
     }
 
     w.write_bits(0, 16);
@@ -1527,26 +1586,26 @@ fn write_delta_entity_header(w: &mut MsgWriter, num_base: &mut u16, num: u16, re
 /// Write a `svc_deltapacketentities` update from the frame `from` (the snapshot the client
 /// acknowledged as `delta_seq`) to the snapshot `to`.
 ///
-/// Entities missing from `to` are sent as removals, entities whose wire fields did not change are
-/// omitted (the client keeps them from its `delta_seq` frame), and entities new in `to` are
-/// delta-encoded against the schema's zero record, not against a spawn baseline. Assumes no
-/// instance baselines were sent, like [`write_svc_packetentities_full`].
+/// - An entity missing from `to` is sent as a removal.
+/// - An entity in both frames with the same kind (custom or normal) is delta-encoded against its
+///   `from` record, or omitted when no wire field changed (the client keeps it from `delta_seq`).
+/// - An entity new in `to` is delta-encoded against its `baselines` entry when that entry is of
+///   the same kind, else against the zero record — the record the parser picks.
+/// - An entity whose kind changed is sent as a removal followed by a new entity.
+///
+/// Assumes no instance baselines were sent, like [`write_svc_packetentities_full`].
+#[allow(clippy::too_many_arguments)]
 pub fn write_svc_packetentities_delta(
     w: &mut MsgWriter,
     reg: &DeltaRegistry,
     max_clients: u8,
     delta_seq: u8,
+    baselines: &BTreeMap<u16, (u8, DeltaRecord)>,
     from: &BTreeMap<u16, (u8, DeltaRecord)>,
     to: &[GoldSrcEntityState],
     server_time: f64,
 ) {
-    let Some(ent_schema) = reg.get("entity_state_t") else {
-        return;
-    };
-    let Some(player_schema) = reg.get("entity_state_player_t") else {
-        return;
-    };
-    let Some(custom_schema) = reg.get("custom_entity_state_t") else {
+    let Some(schemas) = EntitySchemas::from_registry(reg) else {
         return;
     };
 
@@ -1566,31 +1625,24 @@ pub fn write_svc_packetentities_delta(
             write_delta_entity_header(w, &mut num_base, num, true);
             continue;
         };
-        let ent_type = if ent.entity_type == 0 {
-            ENTITY_NORMAL
-        } else {
-            ent.entity_type
-        };
-        let custom = (ent_type & ENTITY_NORMAL) == 0;
-        let schema = if custom {
-            custom_schema
-        } else if num >= 1 && num <= max_clients as u16 {
-            player_schema
-        } else {
-            ent_schema
-        };
+        let (custom, schema) = schemas.for_state(ent, max_clients);
         let rec = ent.to_delta(schema);
-        let zero;
-        let base = match from.get(&num) {
-            Some((_, prev)) => {
-                if !has_delta_changes(schema, prev, &rec) {
+
+        let prev = from.get(&num);
+        let zero = schema.zero_record();
+        let base = match matching_base(prev, custom, schema) {
+            Some(prev_rec) => {
+                if !has_delta_changes(schema, prev_rec, &rec) {
                     continue;
                 }
-                prev
+                prev_rec
             }
             None => {
-                zero = schema.zero_record();
-                &zero
+                if prev.is_some() {
+                    // Kind changed: drop the old entity, then send this one as new.
+                    write_delta_entity_header(w, &mut num_base, num, true);
+                }
+                matching_base(baselines.get(&num), custom, schema).unwrap_or(&zero)
             }
         };
         write_delta_entity_header(w, &mut num_base, num, false);
@@ -1956,7 +2008,21 @@ mod tests {
             },
             12.5,
         );
-        write_svc_packetentities_full(&mut sw, &reg, 16, &[player_ent], 12.5);
+        let player_baselines = BTreeMap::from([(
+            1u16,
+            (
+                ENTITY_NORMAL,
+                player_ent.to_delta(reg.get("entity_state_player_t").unwrap()),
+            ),
+        )]);
+        write_svc_packetentities_full(
+            &mut sw,
+            &reg,
+            16,
+            &player_baselines,
+            std::slice::from_ref(&player_ent),
+            12.5,
+        );
         assert!(write_svc_usermsg(
             &mut sw,
             &ureg,
@@ -1978,10 +2044,17 @@ mod tests {
             m,
             SvcMessage::ClientData { parsed, .. } if (parsed.health - 100.0).abs() < 0.1 && (parsed.origin.x - 100.0).abs() < 0.1
         )));
-        assert!(parsed.iter().any(|m| matches!(
-            m,
-            SvcMessage::PacketEntities(pe) if pe.entities.contains_key(&1)
-        )));
+        let pe = parsed
+            .iter()
+            .find_map(|m| match m {
+                SvcMessage::PacketEntities(pe) => Some(pe),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            decode_entities(&reg, 16, &pe.entities),
+            vec![player_ent.clone()]
+        );
         assert!(parsed.iter().any(|m| matches!(
             m,
             SvcMessage::UserMsg { decoded: CsUserMsg::Money { amount: 800, .. }, .. }
@@ -2031,13 +2104,100 @@ mod tests {
         assert_eq!(clc_msgs[2], ClcMessage::StringCmd("jointeam 2".to_string()));
     }
 
-    fn entity_schema(reg: &DeltaRegistry, max_clients: u8, num: u16) -> &DeltaSchema {
-        let name = if num >= 1 && num <= max_clients as u16 {
+    /// Entity records keyed by number, as the parser keeps frames and baselines.
+    type EntityRecords = BTreeMap<u16, (u8, DeltaRecord)>;
+
+    fn entity_schema(reg: &DeltaRegistry, max_clients: u8, num: u16, ent_type: u8) -> &DeltaSchema {
+        let name = if (ent_type & ENTITY_NORMAL) == 0 {
+            "custom_entity_state_t"
+        } else if num >= 1 && num <= max_clients as u16 {
             "entity_state_player_t"
         } else {
             "entity_state_t"
         };
         reg.get(name).unwrap()
+    }
+
+    /// Wire-level `(type, record)` map for `states`, as the parser stores frames and baselines.
+    fn entity_records(
+        reg: &DeltaRegistry,
+        max_clients: u8,
+        states: &[GoldSrcEntityState],
+    ) -> BTreeMap<u16, (u8, DeltaRecord)> {
+        states
+            .iter()
+            .map(|e| {
+                let schema = entity_schema(reg, max_clients, e.number, e.entity_type);
+                (e.number, (e.entity_type, e.to_delta(schema)))
+            })
+            .collect()
+    }
+
+    fn decode_entities(
+        reg: &DeltaRegistry,
+        max_clients: u8,
+        entities: &BTreeMap<u16, (u8, DeltaRecord)>,
+    ) -> Vec<GoldSrcEntityState> {
+        entities
+            .iter()
+            .map(|(&num, (ent_type, rec))| {
+                GoldSrcEntityState::from_delta(
+                    num,
+                    *ent_type,
+                    rec,
+                    entity_schema(reg, max_clients, num, *ent_type),
+                )
+            })
+            .collect()
+    }
+
+    /// Parse a single packet-entities message with the given baselines and previous frame.
+    fn parse_entities(
+        stream: &[u8],
+        max_clients: u8,
+        baselines: &BTreeMap<u16, (u8, DeltaRecord)>,
+        frame: Option<(u8, EntityRecords)>,
+    ) -> PacketEntitiesMsg {
+        let mut ctx = SvcParseContext::new();
+        ctx.max_clients = max_clients;
+        ctx.server_time = 12.5;
+        ctx.baselines = baselines.clone();
+        if let Some((seq, from)) = frame {
+            ctx.entity_frames.insert(seq, from);
+            ctx.last_incoming_seq = seq.wrapping_add(1);
+        }
+        let mut parsed = parse_svc_stream(stream, &mut ctx).unwrap();
+        assert_eq!(parsed.len(), 1);
+        match parsed.pop() {
+            Some(SvcMessage::PacketEntities(pe)) => *pe,
+            other => panic!("expected packet entities, got {other:?}"),
+        }
+    }
+
+    fn normal_ent(number: u16, x: f32, modelindex: u16) -> GoldSrcEntityState {
+        GoldSrcEntityState {
+            number,
+            entity_type: ENTITY_NORMAL,
+            origin: Vec3::new(x, -200.25, 64.0),
+            angles: Vec3::new(0.0, 90.0, 0.0),
+            modelindex,
+            sequence: 4,
+            ..Default::default()
+        }
+    }
+
+    /// A custom (beam) entity using only fields `custom_entity_state_t` carries.
+    fn beam_ent(number: u16, x: f32, modelindex: u16) -> GoldSrcEntityState {
+        GoldSrcEntityState {
+            number,
+            entity_type: ENTITY_BEAM,
+            origin: Vec3::new(x, 20.0, 30.0),
+            modelindex,
+            sequence: 3,
+            body: 1,
+            renderamt: 100,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -2046,57 +2206,169 @@ mod tests {
         let max_clients = 16;
         let seq = 7;
 
-        let ent = |number: u16, x: f32, modelindex: u16| GoldSrcEntityState {
-            number,
-            entity_type: ENTITY_NORMAL,
-            origin: Vec3::new(x, -200.25, 64.0),
-            angles: Vec3::new(0.0, 90.0, 0.0),
-            modelindex,
-            sequence: 4,
-            ..Default::default()
-        };
-        let from_states = [ent(1, 100.0, 12), ent(5, 300.0, 20), ent(9, 500.0, 30)];
-        let from: BTreeMap<u16, (u8, DeltaRecord)> = from_states
-            .iter()
-            .map(|e| {
-                let schema = entity_schema(&reg, max_clients, e.number);
-                (e.number, (ENTITY_NORMAL, e.to_delta(schema)))
-            })
-            .collect();
+        let from = entity_records(
+            &reg,
+            max_clients,
+            &[
+                normal_ent(1, 100.0, 12),
+                normal_ent(5, 300.0, 20),
+                normal_ent(9, 500.0, 30),
+            ],
+        );
         // 1 moves, 5 is removed, 9 is unchanged, 12 is new.
-        let to = vec![ent(1, 132.5, 12), ent(9, 500.0, 30), ent(12, -40.125, 44)];
+        let to = vec![
+            normal_ent(1, 132.5, 12),
+            normal_ent(9, 500.0, 30),
+            normal_ent(12, -40.125, 44),
+        ];
 
         let mut w = MsgWriter::new();
-        write_svc_packetentities_delta(&mut w, &reg, max_clients, seq, &from, &to, 12.5);
-
-        let mut ctx = SvcParseContext::new();
-        ctx.max_clients = max_clients;
-        ctx.server_time = 12.5;
-        ctx.entity_frames.insert(seq, from);
-        ctx.last_incoming_seq = seq.wrapping_add(1);
-        let parsed = parse_svc_stream(w.as_slice(), &mut ctx).unwrap();
-        assert_eq!(parsed.len(), 1);
-        let SvcMessage::PacketEntities(pe) = &parsed[0] else {
-            panic!("expected packet entities, got {parsed:?}");
-        };
+        write_svc_packetentities_delta(
+            &mut w,
+            &reg,
+            max_clients,
+            seq,
+            &BTreeMap::new(),
+            &from,
+            &to,
+            12.5,
+        );
+        let pe = parse_entities(
+            w.as_slice(),
+            max_clients,
+            &BTreeMap::new(),
+            Some((seq, from)),
+        );
 
         assert!(pe.is_delta);
         assert_eq!(pe.delta_from_seq, Some(seq));
         assert_eq!(pe.expected_count, 3);
         assert_eq!(pe.removed, vec![5]);
-        let decoded: Vec<GoldSrcEntityState> = pe
-            .entities
-            .iter()
-            .map(|(&num, (ent_type, rec))| {
-                GoldSrcEntityState::from_delta(
-                    num,
-                    *ent_type,
-                    rec,
-                    entity_schema(&reg, max_clients, num),
-                )
-            })
-            .collect();
-        assert_eq!(decoded, to);
+        assert_eq!(decode_entities(&reg, max_clients, &pe.entities), to);
+    }
+
+    #[test]
+    fn full_packetentities_encode_against_baselines() {
+        let reg = DeltaRegistry::cs16_default();
+        let max_clients = 16;
+
+        // Entity 1 differs from its baseline only in `body`, which it has at zero: encoding it
+        // against the zero record would leave the parser holding the baseline's body.
+        let with_baseline = normal_ent(1, 100.0, 12);
+        let baseline_state = GoldSrcEntityState {
+            body: 2,
+            ..with_baseline.clone()
+        };
+        // Entity 20 has no baseline; entity 21 equals its baseline in every field.
+        let without_baseline = normal_ent(20, -64.5, 33);
+        let equal_to_baseline = GoldSrcEntityState {
+            skin: 3,
+            renderamt: 200,
+            ..normal_ent(21, 8.0, 40)
+        };
+        let baselines = entity_records(
+            &reg,
+            max_clients,
+            &[baseline_state, equal_to_baseline.clone()],
+        );
+        let entities = vec![with_baseline, without_baseline, equal_to_baseline];
+
+        let mut w = MsgWriter::new();
+        write_svc_packetentities_full(&mut w, &reg, max_clients, &baselines, &entities, 12.5);
+        let pe = parse_entities(w.as_slice(), max_clients, &baselines, None);
+
+        assert!(!pe.is_delta);
+        assert_eq!(decode_entities(&reg, max_clients, &pe.entities), entities);
+    }
+
+    #[test]
+    fn delta_packetentities_new_entity_uses_its_baseline() {
+        let reg = DeltaRegistry::cs16_default();
+        let max_clients = 16;
+        let seq = 200;
+
+        let from = entity_records(&reg, max_clients, &[normal_ent(9, 500.0, 30)]);
+        // The baseline has non-zero `renderamt` and `skin` where the new entity has zero.
+        let new_ent = normal_ent(30, 16.0, 50);
+        let baselines = entity_records(
+            &reg,
+            max_clients,
+            &[GoldSrcEntityState {
+                renderamt: 255,
+                skin: 2,
+                ..new_ent.clone()
+            }],
+        );
+        let to = vec![normal_ent(9, 500.0, 30), new_ent];
+
+        let mut w = MsgWriter::new();
+        write_svc_packetentities_delta(
+            &mut w,
+            &reg,
+            max_clients,
+            seq,
+            &baselines,
+            &from,
+            &to,
+            12.5,
+        );
+        let pe = parse_entities(w.as_slice(), max_clients, &baselines, Some((seq, from)));
+
+        assert!(pe.removed.is_empty());
+        assert_eq!(decode_entities(&reg, max_clients, &pe.entities), to);
+    }
+
+    #[test]
+    fn delta_packetentities_entity_type_change_is_remove_plus_new() {
+        let reg = DeltaRegistry::cs16_default();
+        let max_clients = 16;
+        let seq = 3;
+
+        // 40 turns from a normal entity into a beam, 41 from a beam into a normal entity.
+        let from = entity_records(
+            &reg,
+            max_clients,
+            &[normal_ent(40, 10.0, 5), beam_ent(41, 70.0, 6)],
+        );
+        let to = vec![beam_ent(40, 10.0, 5), normal_ent(41, 70.0, 6)];
+
+        let mut w = MsgWriter::new();
+        write_svc_packetentities_delta(
+            &mut w,
+            &reg,
+            max_clients,
+            seq,
+            &BTreeMap::new(),
+            &from,
+            &to,
+            12.5,
+        );
+        let pe = parse_entities(
+            w.as_slice(),
+            max_clients,
+            &BTreeMap::new(),
+            Some((seq, from)),
+        );
+
+        assert_eq!(pe.removed, vec![40, 41]);
+        assert_eq!(decode_entities(&reg, max_clients, &pe.entities), to);
+    }
+
+    #[test]
+    fn temp_entity_raw_holds_the_payload_bytes() {
+        // TE_EXPLOSION (3): 11 payload bytes.
+        let payload: Vec<u8> = (1..=11).collect();
+        let mut stream = vec![svc::TEMP_ENTITY, 3];
+        stream.extend_from_slice(&payload);
+        let mut ctx = SvcParseContext::new();
+        let parsed = parse_svc_stream(&stream, &mut ctx).unwrap();
+        assert_eq!(
+            parsed,
+            vec![SvcMessage::TempEntity {
+                te_type: 3,
+                raw: payload
+            }]
+        );
     }
 
     #[test]
