@@ -28,6 +28,7 @@
 
 use cs_assets::bsp::{BspMap, SpawnTeam};
 use cs_assets::materials::MaterialTable;
+use cs_engine::collision::WorldCollision;
 use cs_sim::trace::{BspCollision, Hull, TraceResult};
 use cs_vfs::{Vfs, VfsConfig};
 use glam::Vec3;
@@ -215,4 +216,53 @@ fn world_only_traces_are_unchanged() {
     let hash = hash_traces(&world_only, &queries);
     println!("WORLD_ONLY_TRACE_HASH {hash:#018x}");
     assert_eq!(hash, WORLD_ONLY_TRACE_HASH);
+}
+
+/// The same 2000 traces through the engine's `WorldCollision::trace_world`, one by one.
+/// `BspCollision::trace_hull` also traces solid brush entities, so the world-only trace
+/// reaches as far or farther, and is bit-identical to `BspCollision` with every brush model
+/// disabled. One exception to "as far or farther", kept from the original `trace_hull`: a
+/// brush trace that starts in solid (without being all solid) replaces a world result that
+/// does not, even when the world hit is nearer; those traces are counted, not asserted.
+#[test]
+fn world_trace_agrees_with_bsp_collision_per_trace() {
+    let Ok(vfs) = Vfs::discover(None, VfsConfig::default()) else {
+        return;
+    };
+    let Ok(bsp) = BspMap::load(&vfs, "de_dust2") else {
+        return;
+    };
+    let collision = BspCollision::from_map(&bsp, MaterialTable::load(&vfs));
+    let mut world_only = collision.clone();
+    world_only.disabled_models.extend(1..bsp.models.len());
+    let world = WorldCollision::from_bsp(&bsp);
+
+    let queries = trace_queries(&mut Lcg::new(collision.world_bounds()));
+    let mut differing = 0;
+    let mut start_solid_brush = 0;
+    for (i, &(start, end, hull)) in queries.iter().enumerate() {
+        let engine = world.trace_world(start, end, hull);
+        let full = collision.trace_hull(start, end, hull);
+        let reference = world_only.trace_hull(start, end, hull);
+        let brush_start_solid = full.start_solid && !engine.start_solid;
+        start_solid_brush += usize::from(brush_start_solid);
+        assert!(
+            brush_start_solid || engine.fraction >= full.fraction,
+            "trace {i}: world-only fraction {} < full fraction {}",
+            engine.fraction,
+            full.fraction
+        );
+        let mut a = Fnv::new();
+        a.trace(&engine);
+        let mut b = Fnv::new();
+        b.trace(&reference);
+        assert_eq!(a.0, b.0, "trace {i}: {engine:?} != {reference:?}");
+        let mut c = Fnv::new();
+        c.trace(&full);
+        differing += usize::from(a.0 != c.0);
+    }
+    println!(
+        "{differing} of 2000 traces differ between trace_world and BspCollision::trace_hull \
+         ({start_solid_brush} of them start in a brush's solid)"
+    );
 }

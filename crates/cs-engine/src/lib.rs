@@ -1,6 +1,7 @@
 //! Server engine: the equivalent of the original game's dedicated server.
 
 pub mod client;
+pub mod collision;
 mod connect;
 pub mod edict;
 pub mod frame;
@@ -14,6 +15,7 @@ mod signon;
 pub mod usercmd;
 
 pub use client::{ClientState, MAX_CLIENT_INCOMING_STREAM, SignonStage};
+pub use collision::WorldCollision;
 pub use edict::{DEFAULT_MAX_EDICTS, EDICT_REUSE_DELAY, Edict, EdictId, EdictPool, EntVars};
 pub use frame::{ClientFrame, FrameRing, MAX_DATAGRAM, UPDATE_BACKUP, clamp_rate, update_interval};
 pub use game::{EngineApi, GameDll, entity_state_from_vars};

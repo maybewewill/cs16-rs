@@ -1,11 +1,13 @@
 //! What the server needs from a BSP map: name, checksum, brush-model count,
-//! entity list and visibility (PVS) queries.
+//! entity list, visibility (PVS) queries and hull collision.
 
 use std::sync::Arc;
 
 use cs_assets::bsp::{BspMap, Entity};
 use cs_proto48::crypto::crc_map_bsp;
 use glam::Vec3;
+
+use crate::collision::WorldCollision;
 
 pub struct ServerMap {
     pub name: String,
@@ -14,6 +16,7 @@ pub struct ServerMap {
     pub submodel_count: usize,
     pub entities: Vec<Entity>,
     vis: Option<Arc<BspMap>>,
+    collision: Option<WorldCollision>,
 }
 
 impl ServerMap {
@@ -27,12 +30,13 @@ impl ServerMap {
             crc,
             submodel_count: bsp.models.len(),
             entities: bsp.entities.clone(),
+            collision: Some(WorldCollision::from_bsp(&bsp)),
             vis: Some(bsp),
         })
     }
 
     /// Map without geometry: checksum 0, only the world model, sees
-    /// everything.
+    /// everything, no collision.
     pub fn stub(name: &str) -> Self {
         Self {
             name: name.to_string(),
@@ -41,7 +45,13 @@ impl ServerMap {
             submodel_count: 1,
             entities: Vec::new(),
             vis: None,
+            collision: None,
         }
+    }
+
+    /// The map's hull collision; `None` for the stub map.
+    pub fn collision(&self) -> Option<&WorldCollision> {
+        self.collision.as_ref()
     }
 
     /// Whether a box with absolute corners `mins`/`maxs` is potentially
