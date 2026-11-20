@@ -33,15 +33,19 @@ fn thinks_of(h: &Harness, index: u16) -> usize {
 
 #[test]
 fn think_fires_once_when_due() {
-    let mut h = harness(1, 0.5, 64, TestGame::default());
+    // Between the 49th and the 50th frame, so the float sum of the steps does not matter.
+    let target = 0.495;
+    let mut h = harness(1, target, 64, TestGame::default());
     h.step(&mut [], 49);
-    assert!(h.server.game().think_log.is_empty(), "0.49 s: not due yet");
+    assert!(h.now < target);
+    assert!(h.server.game().think_log.is_empty(), "not due yet");
     h.step(&mut [], 1);
+    assert!(h.now >= target);
     assert_eq!(h.server.game().think_log.len(), 1);
     let (index, time) = h.server.game().think_log[0];
     assert_eq!(index, 2);
     // `eng.time()` during the think is the frame's server time.
-    assert!((time - h.now).abs() < 1e-9 && time >= 0.5 - 1e-9, "{time}");
+    assert!((time - h.now).abs() < 1e-9, "{time}");
     // The engine cleared the schedule: no second call.
     assert_eq!(h.server.edicts().by_index(2).unwrap().1.vars.nextthink, 0.0);
     h.step(&mut [], 100);
@@ -126,9 +130,67 @@ fn thinks_are_capped_per_frame() {
 
 #[test]
 fn nan_nextthink_never_fires() {
-    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
-        let mut h = harness(1, bad, 64, TestGame::default());
-        h.step(&mut [], 20);
-        assert!(h.server.game().think_log.is_empty(), "{bad}");
-    }
+    // Entities 2..=5 hold bad values; entity 6 has a finite due think, so the frames do run
+    // thinks.
+    let bad = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0];
+    let mut overrides = bad.to_vec();
+    overrides.push(0.01);
+    let game = TestGame {
+        extra_nextthink_overrides: overrides,
+        ..TestGame::default()
+    };
+    let mut h = harness(5, 0.0, 64, game);
+    h.step(&mut [], 20);
+    let log = &h.server.game().think_log;
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert_eq!(log[0].0, 6);
+    // The bad values were not rewritten.
+    let value = |index| h.server.edicts().by_index(index).unwrap().1.vars.nextthink;
+    assert!(value(2).is_nan());
+    assert_eq!(value(3), f64::INFINITY);
+    assert_eq!(value(4), f64::NEG_INFINITY);
+    assert_eq!(value(5), -1.0);
+    assert_eq!(value(6), 0.0);
+}
+
+#[test]
+fn entity_created_during_the_pass_is_called_in_the_next_frame() {
+    let game = TestGame {
+        think_creates_child: true,
+        ..TestGame::default()
+    };
+    let mut h = harness(1, 0.01, 64, game);
+    h.step(&mut [], 1);
+    let child = h.server.game().children[0];
+    assert_eq!(h.server.game().think_log.len(), 1);
+    assert_eq!(h.server.game().think_log[0].0, 2);
+    h.step(&mut [], 1);
+    let log = &h.server.game().think_log;
+    assert_eq!(log.len(), 2, "{log:?}");
+    assert_eq!(log[1].0, child);
+    h.step(&mut [], 3);
+    assert_eq!(h.server.game().think_log.len(), 2);
+}
+
+#[test]
+fn slot_reused_during_the_pass_is_not_called_for_the_old_entity() {
+    // Entities 2 (A) and 3 (B) are due together. A's think removes B and creates a due child;
+    // within the first second after the map start the freed slot is reused at once.
+    let game = TestGame {
+        think_removes_index: Some(3),
+        think_creates_child: true,
+        ..TestGame::default()
+    };
+    let mut h = harness(2, 0.01, 64, game);
+    h.step(&mut [], 1);
+    let child = h.server.game().children[0];
+    assert_eq!(child, 3, "the child takes B's slot");
+    // B was not called, and neither was the child that now holds its slot.
+    let log = &h.server.game().think_log;
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert_eq!(log[0].0, 2);
+    h.step(&mut [], 1);
+    let log = &h.server.game().think_log;
+    assert_eq!(log.len(), 2, "{log:?}");
+    assert_eq!(log[1].0, 3);
 }

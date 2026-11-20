@@ -209,11 +209,11 @@ impl<G: GameDll> Server<G> {
     }
 
     /// One server frame: lets the game start the frame, runs the entity thinks that are due
-    /// (see `think.rs`), handles up to
-    /// [`MAX_DATAGRAMS_PER_FRAME`] waiting datagrams, frees clients that timed out, queues the
-    /// pings and userinfo updates that are due, then sends each client what is due for it (see
-    /// `frame.rs`) and the final datagrams of released clients. A call whose `now` is not
-    /// finite or earlier than the previous frame's does nothing.
+    /// (see `think.rs`), handles up to [`MAX_DATAGRAMS_PER_FRAME`] waiting datagrams, frees
+    /// clients that timed out, queues the pings and userinfo updates that are due, then sends
+    /// each client what is due for it (see `frame.rs`) and the final datagrams of released
+    /// clients. A call whose `now` is not finite or earlier than the previous frame's does
+    /// nothing.
     pub fn frame(&mut self, net: &mut dyn PacketTransport, now: f64) {
         if !now.is_finite() || now < self.time {
             self.net_stats.frames_skipped += 1;

@@ -27,6 +27,10 @@ impl<G: GameDll> Server<G> {
     /// time waits for the next frame, and an entity scheduled during the pass was not collected.
     /// Each call is a game call like any other: what the game queued is drained afterwards.
     ///
+    /// With more than [`MAX_THINKS_PER_FRAME`] entities due in every frame, the highest indices
+    /// can starve: the order is ascending and always starts at the same index. Acceptable for
+    /// now; HLDS has no cap.
+    ///
     /// Known differences from HLDS (assumptions from memory, not verified against the source):
     /// HLDS runs `StartFrame` and the thinks inside `SV_Physics`, after the frame's packets were
     /// read, while here they run before the packets; and HLDS sets the global time to the

@@ -234,6 +234,13 @@ pub struct TestGame {
     pub think_removes_self: bool,
     /// When set, every `think` removes the live entity with this index.
     pub think_removes_index: Option<u16>,
+    /// `nextthink` of the n-th extra entity (0-based) where it overrides `extra_nextthink`.
+    pub extra_nextthink_overrides: Vec<f64>,
+    /// When set, a think of a `test_extra` entity creates a `test_child` that is due at once;
+    /// it does so after `think_removes_index` took effect, so the child may take that slot.
+    pub think_creates_child: bool,
+    /// Index of every `test_child` created by a think, in creation order.
+    pub children: Vec<u16>,
     /// `(entity index, eng.time())` of every `think` call, in call order.
     pub think_log: Vec<(u16, f64)>,
 
@@ -297,7 +304,11 @@ impl GameDll for TestGame {
             vars.modelindex = 2;
             vars.origin = Vec3::new(0.0, 0.0, 16.0 * n as f32);
             vars.skin = self.extra_skin;
-            vars.nextthink = self.extra_nextthink;
+            vars.nextthink = self
+                .extra_nextthink_overrides
+                .get(n - 1)
+                .copied()
+                .unwrap_or(self.extra_nextthink);
             if self.nodraw_extras {
                 vars.effects |= EF_NODRAW;
             }
@@ -478,6 +489,15 @@ impl GameDll for TestGame {
             && let Some(victim) = eng.entity_ids().into_iter().find(|v| v.index == index)
         {
             eng.remove_entity(victim);
+        }
+        if self.think_creates_child
+            && eng.ent(id).is_some_and(|v| v.classname == "test_extra")
+            && let Some(child) = eng.create_entity("test_child")
+        {
+            if let Some(vars) = eng.ent_mut(child) {
+                vars.nextthink = now;
+            }
+            self.children.push(child.index);
         }
         if self.think_removes_self {
             eng.remove_entity(id);
