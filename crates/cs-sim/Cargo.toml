@@ -7,11 +7,15 @@ license.workspace = true
 [dependencies]
 cs-assets.workspace = true
 cs-cvar.workspace = true
+cs-engine.workspace = true
+cs-proto48.workspace = true
 glam.workspace = true
 serde.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+cs-probe.workspace = true
+cs-transport.workspace = true
 cs-vfs.workspace = true
 
 [lints]

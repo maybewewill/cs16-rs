@@ -6,6 +6,7 @@ pub mod grenades;
 pub mod pmove;
 pub mod rules;
 pub mod trace;
+pub mod walk_game;
 pub mod weapons;
 
 #[cfg(test)]
