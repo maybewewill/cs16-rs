@@ -91,6 +91,18 @@ impl BrushRef {
     }
 }
 
+/// Whether the player's box (hull half-extents plus 3 units in x and y) overlaps the bounds of
+/// any ladder: the check of the legacy `BspCollision::is_on_ladder`. A ladder the engine gave
+/// no bounds never matches.
+fn touches_ladder(ladders: &[BrushRef], pos: Vec3, hull: Hull) -> bool {
+    let ext = hull.half_extents() + Vec3::new(3.0, 3.0, 0.0);
+    let (lo, hi) = (pos - ext, pos + ext);
+    ladders.iter().any(|l| {
+        l.bounds
+            .is_some_and(|(mins, maxs)| lo.cmple(maxs).all() && hi.cmpge(mins).all())
+    })
+}
+
 /// The world the players move in: the engine's geometry through [`EngineApi`] plus the game's
 /// own lists of solid and ladder brush entities.
 struct EngineWorld<'a, 'e> {
@@ -127,32 +139,8 @@ impl MoveWorld for EngineWorld<'_, '_> {
         best
     }
 
-    /// Whether any point of the player's box (hull extents plus 3 units either way in x and y,
-    /// the margin the legacy `BspCollision` uses) lies inside a ladder model. `EngineApi` only
-    /// answers point queries, so the box is sampled on a grid, about 6 units apart in x and y.
     fn is_on_ladder(&self, pos: Vec3, hull: Hull) -> bool {
-        const XY_STEPS: i32 = 6;
-        const Z_STEPS: i32 = 4;
-        let ext = hull.half_extents() + Vec3::new(3.0, 3.0, 0.0);
-        let (lo, hi) = (pos - ext, pos + ext);
-        let at = |i: i32, n: i32, a: f32, b: f32| a + (b - a) * i as f32 / n as f32;
-        self.ladders
-            .iter()
-            .filter(|l| l.near_sweep(pos, pos, ext))
-            .any(|l| {
-                (0..=XY_STEPS).any(|ix| {
-                    (0..=XY_STEPS).any(|iy| {
-                        (0..=Z_STEPS).any(|iz| {
-                            let p = Vec3::new(
-                                at(ix, XY_STEPS, lo.x, hi.x),
-                                at(iy, XY_STEPS, lo.y, hi.y),
-                                at(iz, Z_STEPS, lo.z, hi.z),
-                            );
-                            self.eng.point_in_model(l.model, l.origin, p)
-                        })
-                    })
-                })
-            })
+        touches_ladder(self.ladders, pos, hull)
     }
 
     fn point_contents(&self, point: Vec3, hull: Hull) -> i32 {
@@ -185,6 +173,12 @@ impl WalkGame {
             player_model: 0,
             players: BTreeMap::new(),
         }
+    }
+
+    /// Whether a player of `hull` at `pos` touches a ladder of the current map; the answer the
+    /// movement code gets.
+    pub fn is_on_ladder(&self, pos: Vec3, hull: Hull) -> bool {
+        touches_ladder(&self.ladders, pos, hull)
     }
 
     /// The spawn points of the current map, in the order of the entity lump.

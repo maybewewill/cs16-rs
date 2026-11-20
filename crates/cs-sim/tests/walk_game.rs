@@ -612,3 +612,49 @@ fn solid_brush_entities_block_movement() {
     // ... and was stopped by it.
     assert!(along <= run.stop + 0.1, "went into the brush: {along} vs {}", run.stop);
 }
+
+#[test]
+fn ladder_check_matches_the_legacy_overlap_test() {
+    let Ok(vfs) = Vfs::discover(None, VfsConfig::default()) else {
+        return;
+    };
+    // cs_office has func_ladder entities.
+    let (_, _, _, bsp) = load_map(&vfs, "cs_office");
+    let ladders: Vec<_> = bsp
+        .brush_entities
+        .iter()
+        .filter(|b| b.classname == "func_ladder")
+        .collect();
+    assert!(!ladders.is_empty(), "cs_office has no func_ladder");
+    let w = World::on(&vfs, "cs_office");
+    let (mut on, mut off) = (0, 0);
+    for ladder in &ladders {
+        for hull in [Hull::Standing, Hull::Crouched] {
+            // The box edges of the overlap test: just inside and just outside each face.
+            let ext = hull.half_extents() + Vec3::new(3.0, 3.0, 0.0);
+            let axis = |lo: f32, hi: f32, e: f32| {
+                [(lo + hi) * 0.5, lo - e - 0.5, lo - e + 0.5, hi + e - 0.5, hi + e + 0.5]
+            };
+            for x in axis(ladder.mins.x, ladder.maxs.x, ext.x) {
+                for y in axis(ladder.mins.y, ladder.maxs.y, ext.y) {
+                    for z in axis(ladder.mins.z, ladder.maxs.z, ext.z) {
+                        let pos = Vec3::new(x, y, z);
+                        let legacy = w.collision.is_on_ladder(pos, hull);
+                        assert_eq!(
+                            w.server.game().is_on_ladder(pos, hull),
+                            legacy,
+                            "{pos:?} {hull:?}"
+                        );
+                        if legacy {
+                            on += 1;
+                        } else {
+                            off += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    println!("{} ladders, {on} points on, {off} off", ladders.len());
+    assert!(on > 0 && off > 0);
+}
