@@ -8,6 +8,7 @@ members = [
     "crates/cs-net",
     "crates/cs-server",
     "crates/cs-client",
+    "xtask",
 ]
 resolver = "3"
 
