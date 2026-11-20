@@ -1,10 +1,12 @@
 # cs16-rs
 
-Clean-room **Counter-Strike 1.6** rewrite in pure Rust (`#![forbid(unsafe_code)]`, Rust edition 2024) preserving the authentic GoldSrc visual style, **1-to-1 Valve VGUI2 interface** (`ClientScheme.res` + `TrackerScheme.res` + `BackgroundPanel.res`), developer console (`~`), `CVar`/`config.cfg` engine, `pm_shared` movement physics, ReGameDLL-calibrated `KickBack` gunplay across **all 28 CS 1.6 weapons**, `EF_BONEMERGE` third-person weapons, hostage rescue & bomb defusal modes, offline bots, and 100 Hz UDP multiplayer with LAN server discovery.
+**Counter-Strike 1.6** rewrite in pure Rust, with the protocol layer ported from the MIT-licensed ReHLDS / ReGameDLL_CS (`#![forbid(unsafe_code)]`, Rust edition 2024) preserving the authentic GoldSrc visual style, **1-to-1 Valve VGUI2 interface** (`ClientScheme.res` + `TrackerScheme.res` + `BackgroundPanel.res`), developer console (`~`), `CVar`/`config.cfg` engine, `pm_shared` movement physics, ReGameDLL-calibrated `KickBack` gunplay across **all 28 CS 1.6 weapons**, `EF_BONEMERGE` third-person weapons, hostage rescue & bomb defusal modes, offline bots, and 100 Hz UDP multiplayer with LAN server discovery.
 
 Assets are mounted **read-only** directly from an existing Steam Half-Life / Counter-Strike 1.6 installation (`cstrike`, `valve`, `platform`, optional `cstrike_hd`); zero Valve assets are stored in this repository.
 
-## Workspace Architecture (7 Crates)
+Licensing: MIT; see [`docs/LICENSING.md`](docs/LICENSING.md) for the licensing decision and reference-project attribution.
+
+## Workspace Architecture (8 Crates)
 
 - **`cs-vfs`** — Multi-layer case-insensitive GoldSrc VFS (`cstrike_downloads` → optional `cstrike_hd` → `cstrike` → `valve` → `platform`) with automatic Steam `libraryfolders.vdf` discovery.
 - **`cs-cvar`** — Quake/GoldSrc command & CVar engine (`bind`, `unbind`, `alias`, `exec`, `toggle`, `cvarlist`, `cmdlist`, `find`, `map`, `connect`, `buy`, `give`, `god`, `noclip`, `sv_restart`, `bot_add`/`_t`/`_ct`, `bot_kick`, `say`/`say_team`, `radio1..3`, `nightvision`, `impulse 201`, `screenshot`, `Tab` autocomplete, local `config.cfg` persistence).
@@ -15,6 +17,7 @@ Assets are mounted **read-only** directly from an existing Steam Half-Life / Cou
   - **All 28 CS 1.6 weapons + C4 + NightVision**: Knife, Glock-18 (burst), USP (silencer), P228, Deagle, Five-SeveN, Dual Elites, M3 & XM1014 (interruptible shell-by-shell reload), MAC-10, TMP, MP5, UMP-45, P90, Galil, FAMAS (burst), AK-47, M4A1 (silencer), SG552, AUG, Scout, AWP, G3SG1, SG550, M249, HE/Flash/Smoke grenades, C4 — with ReGameDLL `KickBack` recoil & `PM_DropPunchAngle` spring recovery.
   - Both **Bomb/Defuse (`de_*`)** and **Hostage Rescue (`cs_*`)** modes, persistent round corpses, economy (`$800..$16000` + loss bonus), automatic BSP `NavGraph` generator + Bot AI.
 - **`cs-net`** — `postcard`-over-UDP client/server protocol, `WorldSnapshot` replication, client-side `pm_shared` prediction, 250 ms lag-compensation ring buffer, and UDP LAN server discovery (`LanPing` / `LanInfo`).
+- **`cs-proto48`** — `#![forbid(unsafe_code)]` implementation of Valve's **GoldSrc Protocol 48** (Counter-Strike 1.6 / Half-Life 1 network wire protocol), ported deterministically from `ReHLDS` and `ReGameDLL_CS`.
 - **`cs-server`** — Standalone headless 100 Hz dedicated UDP server.
 - **`cs-client`** — `winit` + `wgpu 30` (Vulkan/DX12/Metal) multi-pass renderer (BSP overbright ×2 lightmaps, live `gl_texturemode`, dynamic broken/door brush culling, skinned 3D player/hostage/corpse MDLs with `EF_BONEMERGE` `p_*.mdl` in hands, depth-cleared viewmodel with `cl_righthand`, 3D decals/sprays/tracers/grenades/smoke/C4 LED/muzzleflashes, `F5` GPU PNG readback), `rodio` 2D/3D spatial WAV audio + UI clicks + Main Menu MP3 music, **1-to-1 Valve VGUI2 UI** (`ClientScheme.res` Buy Menu with real `gfx/vgui/*.tga` silhouettes & 9-row specs, Team Menu with `maps/*.txt` briefings, Class Menu with 256×196 portraits, translucent rounded `TAB` Scoreboard, Steam 2003 `Options` with live crosshair preview & `icon_steam.tga`), classic `640hud7`/`640hud1` sprite HUD, AWP scope, NightVision overlay, Radio menus, and Spectator letterbox camera.
 

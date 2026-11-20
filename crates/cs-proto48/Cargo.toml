@@ -1,0 +1,14 @@
+[package]
+name = "cs-proto48"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+glam.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

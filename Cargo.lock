@@ -580,6 +580,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cs-proto48"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
 name = "cs-server"
 version = "0.1.0"
 dependencies = [
