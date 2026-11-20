@@ -28,13 +28,11 @@ status = "implemented"
 
 [[item]]
 id = "svc_time"
-status = "tested"
-evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+status = "implemented"
 
 [[item]]
 id = "svc_print"
-status = "tested"
-evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+status = "implemented"
 
 [[item]]
 id = "svc_stufftext"
@@ -59,8 +57,7 @@ status = "implemented"
 
 [[item]]
 id = "svc_deltadescription"
-status = "tested"
-evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+status = "implemented"
 
 [[item]]
 id = "svc_clientdata"
@@ -93,8 +90,7 @@ status = "implemented"
 
 [[item]]
 id = "svc_spawnbaseline"
-status = "tested"
-evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+status = "implemented"
 
 [[item]]
 id = "svc_temp_entity"
@@ -164,8 +160,7 @@ status = "implemented"
 
 [[item]]
 id = "svc_newusermsg"
-status = "tested"
-evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+status = "implemented"
 
 [[item]]
 id = "svc_packetentities"
@@ -182,18 +177,15 @@ status = "implemented"
 
 [[item]]
 id = "svc_resourcelist"
-status = "tested"
-evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+status = "implemented"
 
 [[item]]
 id = "svc_newmovevars"
-status = "tested"
-evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+status = "implemented"
 
 [[item]]
 id = "svc_resourcerequest"
-status = "tested"
-evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+status = "implemented"
 
 [[item]]
 id = "svc_customization"
@@ -229,8 +221,7 @@ status = "implemented"
 
 [[item]]
 id = "svc_sendextrainfo"
-status = "tested"
-evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+status = "implemented"
 
 [[item]]
 id = "svc_timescale"
