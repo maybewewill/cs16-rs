@@ -20,8 +20,8 @@ their `LICENSE` files on the GitHub `master` branch:
 | ReHLDS | MIT | Copyright (c) 2014–2025 ReHLDS Contributors |
 | ReGameDLL_CS | MIT | Copyright (c) 2015–2025 ReGameDLL_CS Contributors |
 
-The copyright and permission notices are kept in `LICENSE` (this project) and
-`THIRD-PARTY-NOTICES.md` (ReHLDS and ReGameDLL_CS) at the repository root. The protocol crate
+`LICENSE` at the repository root holds the GPL v3 text; `THIRD-PARTY-NOTICES.md` holds the
+upstream copyright and permission notices of ReHLDS and ReGameDLL_CS. The protocol crate
 `crates/cs-proto48` is ported from ReHLDS and ReGameDLL_CS.
 
 ## Resolved — file headers in the reference projects
@@ -32,16 +32,36 @@ What was found:
 
 - The repository-level `LICENSE` files of ReHLDS and ReGameDLL_CS read as MIT, as recorded in
   the table above.
-- Source files in these projects (for example `rehlds/engine/sv_user.cpp` on the ReHLDS
-  `master` branch) carry a header stating that the file is licensed under the GNU General
-  Public License, version 2 or later, with an exception permitting linking with Valve's
-  Half-Life engine and game libraries.
+- The source files examined — ReHLDS `rehlds/engine/sv_user.cpp` (master, read 2026-11-21) and
+  ReGameDLL_CS `regamedll/dlls/player.cpp` (master, read 2026-11-21) — carry a header stating
+  that the file is licensed under the GNU General Public License, version 2 or later, with an
+  exception permitting linking with Valve's Half-Life engine and game libraries. Other files of
+  these projects were not examined.
 
 Decision: the project owner chose GPL-3.0-or-later because it is compatible with both readings
 of the reference projects' licensing.
 
 Porting code from ReHLDS and ReGameDLL_CS is allowed again, with the source of ported code
 named in `THIRD-PARTY-NOTICES.md`.
+
+## Copyright notice
+
+```
+Copyright (C) 2026 cs16-rs contributors
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+```
 
 ## Valve Half-Life SDK caveat
 

@@ -8,9 +8,10 @@ distributed in this repository under GPL-3.0-or-later, the licence of this proje
 
 Upstream: https://github.com/rehlds/ReHLDS
 
-While the repository-level `LICENSE` of ReHLDS is MIT (notice below), its source files carry
-headers stating GPL v2-or-later with an exception permitting linking with Valve's Half-Life
-engine and game libraries.
+The repository-level `LICENSE` of ReHLDS is MIT (notice below); the source file examined,
+`rehlds/engine/sv_user.cpp` (master, read 2026-11-21), carries a header stating GPL v2-or-later
+with an exception permitting linking with Valve's Half-Life engine and game libraries. Other
+files of this project were not examined.
 
 ```
 Copyright (c) 2014–2025 ReHLDS Contributors
@@ -38,9 +39,10 @@ SOFTWARE.
 
 Upstream: https://github.com/rehlds/ReGameDLL_CS
 
-While the repository-level `LICENSE` of ReGameDLL_CS is MIT (notice below), its source files carry
-headers stating GPL v2-or-later with an exception permitting linking with Valve's Half-Life
-engine and game libraries.
+The repository-level `LICENSE` of ReGameDLL_CS is MIT (notice below); the source file examined,
+`regamedll/dlls/player.cpp` (master, read 2026-11-21), carries a header stating GPL v2-or-later
+with an exception permitting linking with Valve's Half-Life engine and game libraries. Other
+files of this project were not examined.
 
 ```
 Copyright (c) 2015–2025 ReGameDLL_CS Contributors

@@ -79,4 +79,10 @@ fn workspace_is_gpl3_or_later() {
         !readme.contains("MIT-licensed"),
         "README.md must not call anything MIT-licensed"
     );
+
+    let licensing = read(&root.join("docs/LICENSING.md"));
+    assert!(
+        licensing.contains("Copyright (C) 2026 cs16-rs contributors"),
+        "docs/LICENSING.md must carry the project copyright line"
+    );
 }
