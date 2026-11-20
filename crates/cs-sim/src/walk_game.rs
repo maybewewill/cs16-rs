@@ -14,7 +14,7 @@ use crate::pmove::{
     MoveInputCmd, MoveParams, MoveWorld, PlayerMoveState, VEC_VIEW, snap_spawn_to_floor,
     step_player_move,
 };
-use crate::trace::{Hull, TraceResult};
+use crate::trace::{CONTENTS_SOLID, Hull, TraceResult};
 
 /// `usercmd_t::buttons` bits.
 pub mod buttons {
@@ -94,13 +94,12 @@ impl BrushRef {
 /// Whether the player's box (hull half-extents plus 3 units in x and y) overlaps the bounds of
 /// any ladder: the check of the legacy `BspCollision::is_on_ladder`. A ladder the engine gave
 /// no bounds never matches.
-fn touches_ladder(ladders: &[BrushRef], pos: Vec3, hull: Hull) -> bool {
+fn touches_ladder(ladders: &[(Vec3, Vec3)], pos: Vec3, hull: Hull) -> bool {
     let ext = hull.half_extents() + Vec3::new(3.0, 3.0, 0.0);
     let (lo, hi) = (pos - ext, pos + ext);
-    ladders.iter().any(|l| {
-        l.bounds
-            .is_some_and(|(mins, maxs)| lo.cmple(maxs).all() && hi.cmpge(mins).all())
-    })
+    ladders
+        .iter()
+        .any(|&(mins, maxs)| lo.cmple(maxs).all() && hi.cmpge(mins).all())
 }
 
 /// The world the players move in: the engine's geometry through [`EngineApi`] plus the game's
@@ -108,32 +107,32 @@ fn touches_ladder(ladders: &[BrushRef], pos: Vec3, hull: Hull) -> bool {
 struct EngineWorld<'a, 'e> {
     eng: &'a EngineApi<'e>,
     solids: &'a [BrushRef],
-    ladders: &'a [BrushRef],
+    ladders: &'a [(Vec3, Vec3)],
 }
 
 impl MoveWorld for EngineWorld<'_, '_> {
-    /// The world trace, then each solid brush entity's: a brush that starts or ends the trace
-    /// inside solid marks the result so, and one hit nearer than the best so far takes over its
-    /// fraction, end position and plane. Modelled on HLDS `SV_ClipMoveToEntities` from memory
-    /// (assumption, not checked against the ReHLDS source).
+    /// Mirrors `BspCollision::trace_hull`: the world trace, returned at once when it is
+    /// all-solid; then each solid brush entity's trace, where an all-solid brush trace is
+    /// returned at once, and a trace replaces the best wholesale when it is nearer or starts in
+    /// solid while the best does not.
     fn trace_hull(&self, start: Vec3, end: Vec3, hull: Hull) -> TraceResult {
         let mut best = self.eng.trace_hull(start, end, hull);
+        if best.fraction <= 0.0 && best.all_solid {
+            return best;
+        }
         let half = hull.half_extents();
         for brush in self.solids {
             if !brush.near_sweep(start, end, half) {
                 continue;
             }
-            let t = self
+            let res = self
                 .eng
                 .trace_model(brush.model, brush.origin, start, end, hull);
-            best.all_solid |= t.all_solid;
-            best.start_solid |= t.start_solid;
-            if t.fraction < best.fraction {
-                best.fraction = t.fraction;
-                best.end_pos = t.end_pos;
-                best.plane_normal = t.plane_normal;
-                best.hit_solid = t.hit_solid;
-                best.hit_sky = t.hit_sky;
+            if res.all_solid {
+                return res;
+            }
+            if res.fraction < best.fraction || (res.start_solid && !best.start_solid) {
+                best = res;
             }
         }
         best
@@ -143,22 +142,65 @@ impl MoveWorld for EngineWorld<'_, '_> {
         touches_ladder(self.ladders, pos, hull)
     }
 
+    /// Mirrors `BspCollision::point_contents`: the world's contents unless that is solid
+    /// anyway, else solid when a solid brush entity near `point` (bounds padded by the hull's
+    /// half-extents plus 2) holds it. The legacy precise query is the brush model's contents
+    /// for `hull`; `EngineApi` has no such call, so a zero-length trace of `hull` through the
+    /// model stands in: it starts in solid exactly when that point is solid.
     fn point_contents(&self, point: Vec3, hull: Hull) -> i32 {
-        self.eng.point_contents(point, hull)
+        let c = self.eng.point_contents(point, hull);
+        if c == CONTENTS_SOLID {
+            return c;
+        }
+        let pad = hull.half_extents() + Vec3::splat(2.0);
+        let in_solid_brush = self.solids.iter().any(|b| {
+            b.bounds
+                .is_none_or(|(mins, maxs)| (mins - pad).cmple(point).all() && point.cmple(maxs + pad).all())
+                && self
+                    .eng
+                    .trace_model(b.model, b.origin, point, point, hull)
+                    .start_solid
+        });
+        if in_solid_brush { CONTENTS_SOLID } else { c }
     }
+}
+
+/// A question put to the game's movement world, answered at the start of the next frame.
+/// For tests only.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub enum WorldQuery {
+    /// `MoveWorld::trace_hull`.
+    Trace { start: Vec3, end: Vec3, hull: Hull },
+    /// `MoveWorld::point_contents`.
+    Contents { point: Vec3, hull: Hull },
+    /// `snap_spawn_to_floor`.
+    Snap(Vec3),
+}
+
+/// The answer to a [`WorldQuery`]. For tests only.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub enum WorldAnswer {
+    Trace(TraceResult),
+    Contents(i32),
+    Snap(Vec3),
 }
 
 pub struct WalkGame {
     spawns: Vec<SpawnPoint>,
     /// Brush entities of the map that block movement, from `spawn_entity`.
     solids: Vec<BrushRef>,
-    /// `func_ladder` entities of the map.
-    ladders: Vec<BrushRef>,
+    /// World-space bounds of the map's `func_ladder` entities: all the overlap test reads.
+    ladders: Vec<(Vec3, Vec3)>,
     params: MoveParams,
     /// Model index of [`PLAYER_MODEL`], known after `server_activate`.
     player_model: u16,
     /// Movement state of every player put in the server, by slot.
     players: BTreeMap<u8, PlayerMoveState>,
+    /// Queries tests queued for the next frame, and their answers.
+    queries: Vec<WorldQuery>,
+    answers: Vec<WorldAnswer>,
 }
 
 impl WalkGame {
@@ -172,6 +214,8 @@ impl WalkGame {
             params,
             player_model: 0,
             players: BTreeMap::new(),
+            queries: Vec::new(),
+            answers: Vec::new(),
         }
     }
 
@@ -186,9 +230,23 @@ impl WalkGame {
         &self.spawns
     }
 
+    /// Queues `query`; its answer is available through [`take_answers`](Self::take_answers)
+    /// after the next server frame. For tests only.
+    #[doc(hidden)]
+    pub fn query_world(&mut self, query: WorldQuery) {
+        self.queries.push(query);
+    }
+
+    /// The answers to the queries run so far, in order, removed from the game. For tests only.
+    #[doc(hidden)]
+    pub fn take_answers(&mut self) -> Vec<WorldAnswer> {
+        std::mem::take(&mut self.answers)
+    }
+
     /// Moves the movement state of the player in `slot` to `origin` and stops it, to place a
     /// player at a chosen spot in tests; the edict follows with the player's next command.
     /// `false` when nobody is in that slot.
+    #[doc(hidden)]
     pub fn set_player_origin(&mut self, slot: u8, origin: Vec3) -> bool {
         let Some(state) = self.players.get_mut(&slot) else {
             return false;
@@ -316,15 +374,14 @@ impl GameDll for WalkGame {
         };
         let origin = vars.origin;
         let bounds = (vars.maxs != vars.mins).then_some((origin + vars.mins, origin + vars.maxs));
-        let brush = BrushRef {
-            model,
-            origin,
-            bounds,
-        };
         if solid {
-            self.solids.push(brush);
-        } else {
-            self.ladders.push(brush);
+            self.solids.push(BrushRef {
+                model,
+                origin,
+                bounds,
+            });
+        } else if let Some(bounds) = bounds {
+            self.ladders.push(bounds);
         }
         false
     }
@@ -426,7 +483,27 @@ impl GameDll for WalkGame {
         }
     }
 
-    fn start_frame(&mut self, _eng: &mut EngineApi<'_>, _frametime: f32) {}
+    fn start_frame(&mut self, eng: &mut EngineApi<'_>, _frametime: f32) {
+        if self.queries.is_empty() {
+            return;
+        }
+        let world = EngineWorld {
+            eng,
+            solids: &self.solids,
+            ladders: &self.ladders,
+        };
+        for query in self.queries.drain(..) {
+            self.answers.push(match query {
+                WorldQuery::Trace { start, end, hull } => {
+                    WorldAnswer::Trace(world.trace_hull(start, end, hull))
+                }
+                WorldQuery::Contents { point, hull } => {
+                    WorldAnswer::Contents(world.point_contents(point, hull))
+                }
+                WorldQuery::Snap(raw) => WorldAnswer::Snap(snap_spawn_to_floor(raw, &world)),
+            });
+        }
+    }
 
     fn update_client_data(&mut self, eng: &mut EngineApi<'_>, slot: u8) -> GoldSrcClientData {
         let Some(v) = eng.ent(eng.client_edict(slot)) else {

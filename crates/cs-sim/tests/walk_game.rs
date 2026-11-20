@@ -13,7 +13,9 @@ use cs_proto48::delta::{DeltaRegistry, GoldSrcUserCmd};
 use cs_proto48::info::InfoString;
 use cs_sim::pmove::{MoveParams, VEC_VIEW, snap_spawn_to_floor};
 use cs_sim::trace::{BspCollision, CONTENTS_SOLID, Hull};
-use cs_sim::walk_game::{WALK_MAX_SPEED, WalkGame, buttons, ent_flags};
+use cs_sim::walk_game::{
+    WALK_MAX_SPEED, WalkGame, WorldAnswer, WorldQuery, buttons, ent_flags,
+};
 use cs_transport::{LoopbackEndpoint, LoopbackHub, PeerAddr};
 use cs_vfs::{Vfs, VfsConfig};
 use glam::Vec3;
@@ -596,6 +598,10 @@ fn solid_brush_entities_block_movement() {
         return;
     };
     let run = find_brush_run(&vfs).expect("no solid brush entity with a clear run in the maps");
+    assert_eq!(
+        (run.map, run.classname.as_str()),
+        ("de_dust2", "func_breakable")
+    );
     println!(
         "map {} entity {} *{} start {:?} dir {:?} stop {}",
         run.map, run.classname, run.model_index, run.start, run.dir, run.stop
@@ -657,4 +663,89 @@ fn ladder_check_matches_the_legacy_overlap_test() {
     }
     println!("{} ladders, {on} points on, {off} off", ladders.len());
     assert!(on > 0 && off > 0);
+}
+
+/// A point inside the first `func_breakable` of de_dust2 whose centre is solid only because of
+/// the brush, found with the legacy collision, and the brush's model number.
+fn point_inside_breakable(bsp: &BspMap, collision: &BspCollision) -> (Vec3, usize) {
+    for b in bsp.brush_entities.iter().filter(|b| b.classname == "func_breakable") {
+        let mut open = collision.clone();
+        open.disabled_models.insert(b.model_index);
+        let c = (b.mins + b.maxs) * 0.5;
+        if collision.point_contents(c, Hull::Standing) == CONTENTS_SOLID
+            && open.point_contents(c, Hull::Standing) != CONTENTS_SOLID
+        {
+            return (c, b.model_index);
+        }
+    }
+    panic!("no func_breakable on de_dust2 with a centre outside the world's solid");
+}
+
+#[test]
+fn adapter_mirrors_legacy_inside_a_solid_brush() {
+    let Ok(vfs) = Vfs::discover(None, VfsConfig::default()) else {
+        return;
+    };
+    let mut w = World::dust2(&vfs);
+    let (_, _, _, bsp) = load_map(&vfs, "de_dust2");
+    let (inside, model) = point_inside_breakable(&bsp, &w.collision);
+    println!("point {inside:?} in *{model}");
+    let outside = inside + Vec3::new(0.0, 0.0, 300.0);
+    let cases = [
+        // Starts inside the brush and stays in it.
+        (inside, inside + Vec3::new(2.0, 0.0, 0.0)),
+        // Starts inside the brush and leaves it.
+        (inside, outside),
+        // Starts outside and enters.
+        (outside, inside),
+    ];
+    let hulls = [Hull::Standing, Hull::Crouched, Hull::Point];
+    for (start, end) in cases {
+        for hull in hulls {
+            w.server
+                .game_mut()
+                .query_world(WorldQuery::Trace { start, end, hull });
+        }
+    }
+    w.server.game_mut().query_world(WorldQuery::Contents {
+        point: inside,
+        hull: Hull::Standing,
+    });
+    w.server.game_mut().query_world(WorldQuery::Snap(inside));
+    w.step(&mut [], 1);
+    let mut answers = w.server.game_mut().take_answers().into_iter();
+    let mut started_solid = 0;
+    for (start, end) in cases {
+        for hull in hulls {
+            let Some(WorldAnswer::Trace(got)) = answers.next() else {
+                panic!("missing trace answer");
+            };
+            let want = w.collision.trace_hull(start, end, hull);
+            let ctx = format!("{start:?} -> {end:?} {hull:?}: {got:?} vs {want:?}");
+            assert_eq!(got.start_solid, want.start_solid, "{ctx}");
+            assert_eq!(got.all_solid, want.all_solid, "{ctx}");
+            assert!((got.fraction - want.fraction).abs() <= 0.001, "{ctx}");
+            assert!(
+                (got.end_pos - want.end_pos).abs().max_element() <= 0.1,
+                "{ctx}"
+            );
+            started_solid += usize::from(want.start_solid);
+        }
+    }
+    assert!(started_solid > 0, "no case started inside solid");
+    let Some(WorldAnswer::Contents(c)) = answers.next() else {
+        panic!("missing contents answer");
+    };
+    assert_eq!(c, w.collision.point_contents(inside, Hull::Standing));
+    assert_eq!(c, CONTENTS_SOLID);
+    // `snap_spawn_to_floor` from a point inside the brush gives the same through both.
+    let Some(WorldAnswer::Snap(snapped)) = answers.next() else {
+        panic!("missing snap answer");
+    };
+    let want = snap_spawn_to_floor(inside, &w.collision);
+    println!("snap {snapped:?} legacy {want:?}");
+    assert!(
+        (snapped - want).abs().max_element() <= 0.1,
+        "{snapped:?} vs {want:?}"
+    );
 }
