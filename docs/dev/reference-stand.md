@@ -43,8 +43,9 @@ hlds.exe -console -game cstrike -port 27015 +sv_lan 1 +mp_consistency 0 +maxplay
 ## 3. Optional: ReHLDS + ReGameDLL_CS
 
 ReHLDS (<https://github.com/dreamstalker/rehlds>) and ReGameDLL_CS
-(<https://github.com/s1lentq/ReGameDLL_CS>) are MIT-licensed reimplementations of the engine and
-the game library; their sources are what `cs-proto48` is ported from. To compare against them:
+(<https://github.com/s1lentq/ReGameDLL_CS>) are reimplementations of the engine and the game
+library; their sources are what `cs-proto48` is ported from (licensing: see
+[`docs/LICENSING.md`](../LICENSING.md)). To compare against them:
 
 1. Copy the ReHLDS release binaries over the HLDS ones (`swds.dll`/`engine_i486.so` and friends).
 2. Copy the ReGameDLL_CS release `mp.dll`/`cs.so` over `cstrike/dlls/`, plus its

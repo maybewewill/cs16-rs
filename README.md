@@ -1,6 +1,6 @@
 # cs16-rs
 
-**Counter-Strike 1.6** rewrite in pure Rust, with the protocol layer ported from the MIT-licensed ReHLDS / ReGameDLL_CS (`#![forbid(unsafe_code)]`, Rust edition 2024) preserving the authentic GoldSrc visual style, **1-to-1 Valve VGUI2 interface** (`ClientScheme.res` + `TrackerScheme.res` + `BackgroundPanel.res`), developer console (`~`), `CVar`/`config.cfg` engine, `pm_shared` movement physics, ReGameDLL-calibrated `KickBack` gunplay across **all 28 CS 1.6 weapons**, `EF_BONEMERGE` third-person weapons, hostage rescue & bomb defusal modes, offline bots, and 100 Hz UDP multiplayer with LAN server discovery.
+**Counter-Strike 1.6** rewrite in pure Rust, with the protocol layer ported from ReHLDS / ReGameDLL_CS (for their licensing see [`docs/LICENSING.md`](docs/LICENSING.md); `#![forbid(unsafe_code)]`, Rust edition 2024) preserving the authentic GoldSrc visual style, **1-to-1 Valve VGUI2 interface** (`ClientScheme.res` + `TrackerScheme.res` + `BackgroundPanel.res`), developer console (`~`), `CVar`/`config.cfg` engine, `pm_shared` movement physics, ReGameDLL-calibrated `KickBack` gunplay across **all 28 CS 1.6 weapons**, `EF_BONEMERGE` third-person weapons, hostage rescue & bomb defusal modes, offline bots, and 100 Hz UDP multiplayer with LAN server discovery.
 
 Assets are mounted **read-only** directly from an existing Steam Half-Life / Counter-Strike 1.6 installation (`cstrike`, `valve`, `platform`, optional `cstrike_hd`); zero Valve assets are stored in this repository.
 

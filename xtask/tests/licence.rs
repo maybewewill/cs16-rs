@@ -73,4 +73,10 @@ fn workspace_is_gpl3_or_later() {
         text.contains("Version 3, 29 June 2007"),
         "LICENSE must be GPL version 3"
     );
+
+    let readme = read(&root.join("README.md"));
+    assert!(
+        !readme.contains("MIT-licensed"),
+        "README.md must not call anything MIT-licensed"
+    );
 }
