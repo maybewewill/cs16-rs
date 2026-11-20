@@ -576,6 +576,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cs-engine"
+version = "0.1.0"
+dependencies = [
+ "glam",
+]
+
+[[package]]
 name = "cs-net"
 version = "0.1.0"
 dependencies = [
