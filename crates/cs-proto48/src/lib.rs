@@ -1,8 +1,9 @@
-//! Clean-room, `#![forbid(unsafe_code)]` implementation of Valve's **GoldSrc Protocol 48**
+//! `#![forbid(unsafe_code)]` implementation of Valve's **GoldSrc Protocol 48**
 //! (Counter-Strike 1.6 / Half-Life 1 network wire protocol), ported deterministically from
-//! `ReHLDS` and `ReGameDLL_CS`.
+//! `ReHLDS` and `ReGameDLL_CS` (licensing: `docs/LICENSING.md`).
 
 pub mod bitbuf;
+pub mod compress;
 pub mod crypto;
 pub mod delta;
 pub mod handshake;

@@ -24,7 +24,8 @@ status = "implemented"
 
 [[item]]
 id = "svc_sound"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::sound_pings_and_clc_resourcelist_roundtrip"
 
 [[item]]
 id = "svc_time"
@@ -70,7 +71,8 @@ status = "implemented"
 
 [[item]]
 id = "svc_pings"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::sound_pings_and_clc_resourcelist_roundtrip"
 
 [[item]]
 id = "svc_particle"
@@ -169,7 +171,8 @@ evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_s
 
 [[item]]
 id = "svc_deltapacketentities"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::delta_packetentities_roundtrip"
 
 [[item]]
 id = "svc_choke"
@@ -268,7 +271,8 @@ evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_s
 
 [[item]]
 id = "clc_resourcelist"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::sound_pings_and_clc_resourcelist_roundtrip"
 
 [[item]]
 id = "clc_tmove"
@@ -276,7 +280,8 @@ status = "implemented"
 
 [[item]]
 id = "clc_fileconsistency"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::sound_pings_and_clc_resourcelist_roundtrip"
 
 [[item]]
 id = "clc_voicedata"

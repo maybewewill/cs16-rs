@@ -81,6 +81,16 @@ pub fn encode_a2a_ping() -> Vec<u8> {
     w.into_bytes()
 }
 
+/// Encode the `S2C_CHALLENGE_QUERY` (`'A'`) reply to an unchallenged A2S query:
+/// `0xFFFFFFFF 'A' <i32 challenge>`, 9 bytes.
+pub fn encode_s2c_query_challenge(challenge: i32) -> Vec<u8> {
+    let mut w = MsgWriter::with_capacity(9);
+    w.write_i32(CONNECTIONLESS_HEADER);
+    w.write_u8(S2C_CHALLENGE_QUERY);
+    w.write_i32(challenge);
+    w.into_bytes()
+}
+
 /// Encode a modern Valve/Steam `S2A_INFO_SRC` (`'I'`) response understood by both Steam
 /// Server Browser and CS 1.6 `Find Servers -> LAN`.
 pub fn encode_s2a_info_src(info: &ServerQueryInfo) -> Vec<u8> {
@@ -354,5 +364,16 @@ mod tests {
             }
             other => panic!("unexpected reply: {other:?}"),
         }
+    }
+
+    #[test]
+    fn s2c_query_challenge_encodes_and_decodes() {
+        let wire = encode_s2c_query_challenge(-123_456_789);
+        assert_eq!(wire.len(), 9);
+        assert_eq!(&wire[..5], &[0xFF, 0xFF, 0xFF, 0xFF, b'A']);
+        assert_eq!(
+            decode_a2s_info_reply(&wire, "127.0.0.1:27015", 0).unwrap(),
+            A2sInfoReply::Challenge(-123_456_789)
+        );
     }
 }

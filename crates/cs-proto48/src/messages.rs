@@ -1509,6 +1509,143 @@ pub fn write_svc_packetentities_full(
     w.end_bit_writing();
 }
 
+/// Write the bit-packed entity number of a `svc_deltapacketentities` entry (remove flag, then
+/// an 11-bit absolute number or a 6-bit offset from the previous entry), as the parser reads it.
+fn write_delta_entity_header(w: &mut MsgWriter, num_base: &mut u16, num: u16, remove: bool) {
+    w.write_one_bit(remove);
+    let offset = num as i32 - *num_base as i32;
+    if offset <= 0 || offset > 63 {
+        w.write_one_bit(true);
+        w.write_bits(num as u32, 11);
+    } else {
+        w.write_one_bit(false);
+        w.write_bits(offset as u32, 6);
+    }
+    *num_base = num;
+}
+
+/// Write a `svc_deltapacketentities` update from the frame `from` (the snapshot the client
+/// acknowledged as `delta_seq`) to the snapshot `to`.
+///
+/// Entities missing from `to` are sent as removals, entities whose wire fields did not change are
+/// omitted (the client keeps them from its `delta_seq` frame), and entities new in `to` are
+/// delta-encoded against the schema's zero record, not against a spawn baseline. Assumes no
+/// instance baselines were sent, like [`write_svc_packetentities_full`].
+pub fn write_svc_packetentities_delta(
+    w: &mut MsgWriter,
+    reg: &DeltaRegistry,
+    max_clients: u8,
+    delta_seq: u8,
+    from: &BTreeMap<u16, (u8, DeltaRecord)>,
+    to: &[GoldSrcEntityState],
+    server_time: f64,
+) {
+    let Some(ent_schema) = reg.get("entity_state_t") else {
+        return;
+    };
+    let Some(player_schema) = reg.get("entity_state_player_t") else {
+        return;
+    };
+    let Some(custom_schema) = reg.get("custom_entity_state_t") else {
+        return;
+    };
+
+    let to_by_num: BTreeMap<u16, &GoldSrcEntityState> = to.iter().map(|e| (e.number, e)).collect();
+    let mut numbers: Vec<u16> = from.keys().chain(to_by_num.keys()).copied().collect();
+    numbers.sort_unstable();
+    numbers.dedup();
+
+    w.write_u8(svc::DELTAPACKETENTITIES);
+    w.write_u16(to_by_num.len() as u16);
+    w.write_u8(delta_seq);
+    w.start_bit_writing();
+
+    let mut num_base: u16 = 0;
+    for num in numbers {
+        let Some(ent) = to_by_num.get(&num) else {
+            write_delta_entity_header(w, &mut num_base, num, true);
+            continue;
+        };
+        let ent_type = if ent.entity_type == 0 {
+            ENTITY_NORMAL
+        } else {
+            ent.entity_type
+        };
+        let custom = (ent_type & ENTITY_NORMAL) == 0;
+        let schema = if custom {
+            custom_schema
+        } else if num >= 1 && num <= max_clients as u16 {
+            player_schema
+        } else {
+            ent_schema
+        };
+        let rec = ent.to_delta(schema);
+        let zero;
+        let base = match from.get(&num) {
+            Some((_, prev)) => {
+                if !has_delta_changes(schema, prev, &rec) {
+                    continue;
+                }
+                prev
+            }
+            None => {
+                zero = schema.zero_record();
+                &zero
+            }
+        };
+        write_delta_entity_header(w, &mut num_base, num, false);
+        w.write_one_bit(custom);
+        write_delta(w, schema, base, &rec, true, server_time);
+    }
+
+    w.write_bits(0, 16);
+    w.end_bit_writing();
+}
+
+/// Write `svc_sound` (`SV_StartSound`, `sv_main.cpp`). The optional fields follow `s.flags`;
+/// `SND_FL_LARGE_INDEX` is added when `sound_index` does not fit in a byte.
+pub fn write_svc_sound(w: &mut MsgWriter, s: &SoundMsg) {
+    let mut flags = s.flags as u32;
+    if s.sound_index > 0xFF {
+        flags |= SND_FL_LARGE_INDEX;
+    }
+    w.write_u8(svc::SOUND);
+    w.start_bit_writing();
+    w.write_bits(flags, 9);
+    if (flags & SND_FL_VOLUME) != 0 {
+        w.write_bits(s.volume as u32, 8);
+    }
+    if (flags & SND_FL_ATTENUATION) != 0 {
+        w.write_bits((s.attenuation * 64.0) as u32, 8);
+    }
+    w.write_bits(s.channel as u32, 3);
+    w.write_bits(s.entity as u32, 11);
+    if (flags & SND_FL_LARGE_INDEX) != 0 {
+        w.write_bits(s.sound_index as u32, 16);
+    } else {
+        w.write_bits(s.sound_index as u32, 8);
+    }
+    w.write_bit_vec3_coord(s.origin);
+    if (flags & SND_FL_PITCH) != 0 {
+        w.write_bits(s.pitch as u32, 8);
+    }
+    w.end_bit_writing();
+}
+
+/// Write `svc_pings` (`SV_WritePingsToClient`): `(slot, ping ms, loss %)` per player.
+pub fn write_svc_pings(w: &mut MsgWriter, pings: &[(u8, u16, u8)]) {
+    w.write_u8(svc::PINGS);
+    w.start_bit_writing();
+    for &(slot, ping, loss) in pings {
+        w.write_one_bit(true);
+        w.write_bits(slot as u32, 5);
+        w.write_bits(ping as u32, 12);
+        w.write_bits(loss as u32, 7);
+    }
+    w.write_one_bit(false);
+    w.end_bit_writing();
+}
+
 /// Write a `CsUserMsg` onto the server stream using the registered `UserMsgRegistry`.
 pub fn write_svc_usermsg(w: &mut MsgWriter, reg: &UserMsgRegistry, msg: &CsUserMsg) -> bool {
     let (name, payload) = encode_cs_usermsg(msg);
@@ -1575,6 +1712,33 @@ pub fn write_clc_cvarvalue2(w: &mut MsgWriter, request_id: i32, cvar_name: &str,
     w.write_i32(request_id);
     w.write_str(cvar_name);
     w.write_str(value);
+}
+
+/// Encode `clc_resourcelist` (opcode 5): the client's custom resources (`SV_ParseResourceList`).
+/// An entry flagged `RES_CUSTOM` always carries 16 MD5 bytes (zeros when `md5` is `None`).
+pub fn write_clc_resourcelist(w: &mut MsgWriter, resources: &[ResourceEntry]) {
+    let count = resources.len().min(u16::MAX as usize);
+    w.write_u8(clc::RESOURCELIST);
+    w.write_u16(count as u16);
+    for r in &resources[..count] {
+        w.write_str(&r.filename);
+        w.write_u8(r.res_type);
+        w.write_u16(r.index);
+        w.write_u32(r.download_size);
+        w.write_u8(r.flags);
+        if (r.flags as u32 & RES_CUSTOM) != 0 {
+            w.write_bytes(&r.md5.unwrap_or([0; 16]));
+        }
+    }
+}
+
+/// Encode `clc_fileconsistency` (opcode 7): a `u16` length, then the consistency payload
+/// (truncated to `u16::MAX` bytes).
+pub fn write_clc_fileconsistency(w: &mut MsgWriter, payload: &[u8]) {
+    let len = payload.len().min(u16::MAX as usize);
+    w.write_u8(clc::FILECONSISTENCY);
+    w.write_u16(len as u16);
+    w.write_bytes(&payload[..len]);
 }
 
 /// Encode `clc_move` (opcode 2) with exact GoldSrc `COM_BlockSequenceCRCByte` + `COM_Munge`
@@ -1865,5 +2029,145 @@ mod tests {
             other => panic!("unexpected clc: {other:?}"),
         }
         assert_eq!(clc_msgs[2], ClcMessage::StringCmd("jointeam 2".to_string()));
+    }
+
+    fn entity_schema(reg: &DeltaRegistry, max_clients: u8, num: u16) -> &DeltaSchema {
+        let name = if num >= 1 && num <= max_clients as u16 {
+            "entity_state_player_t"
+        } else {
+            "entity_state_t"
+        };
+        reg.get(name).unwrap()
+    }
+
+    #[test]
+    fn delta_packetentities_roundtrip() {
+        let reg = DeltaRegistry::cs16_default();
+        let max_clients = 16;
+        let seq = 7;
+
+        let ent = |number: u16, x: f32, modelindex: u16| GoldSrcEntityState {
+            number,
+            entity_type: ENTITY_NORMAL,
+            origin: Vec3::new(x, -200.25, 64.0),
+            angles: Vec3::new(0.0, 90.0, 0.0),
+            modelindex,
+            sequence: 4,
+            ..Default::default()
+        };
+        let from_states = [ent(1, 100.0, 12), ent(5, 300.0, 20), ent(9, 500.0, 30)];
+        let from: BTreeMap<u16, (u8, DeltaRecord)> = from_states
+            .iter()
+            .map(|e| {
+                let schema = entity_schema(&reg, max_clients, e.number);
+                (e.number, (ENTITY_NORMAL, e.to_delta(schema)))
+            })
+            .collect();
+        // 1 moves, 5 is removed, 9 is unchanged, 12 is new.
+        let to = vec![ent(1, 132.5, 12), ent(9, 500.0, 30), ent(12, -40.125, 44)];
+
+        let mut w = MsgWriter::new();
+        write_svc_packetentities_delta(&mut w, &reg, max_clients, seq, &from, &to, 12.5);
+
+        let mut ctx = SvcParseContext::new();
+        ctx.max_clients = max_clients;
+        ctx.server_time = 12.5;
+        ctx.entity_frames.insert(seq, from);
+        ctx.last_incoming_seq = seq.wrapping_add(1);
+        let parsed = parse_svc_stream(w.as_slice(), &mut ctx).unwrap();
+        assert_eq!(parsed.len(), 1);
+        let SvcMessage::PacketEntities(pe) = &parsed[0] else {
+            panic!("expected packet entities, got {parsed:?}");
+        };
+
+        assert!(pe.is_delta);
+        assert_eq!(pe.delta_from_seq, Some(seq));
+        assert_eq!(pe.expected_count, 3);
+        assert_eq!(pe.removed, vec![5]);
+        let decoded: Vec<GoldSrcEntityState> = pe
+            .entities
+            .iter()
+            .map(|(&num, (ent_type, rec))| {
+                GoldSrcEntityState::from_delta(
+                    num,
+                    *ent_type,
+                    rec,
+                    entity_schema(&reg, max_clients, num),
+                )
+            })
+            .collect();
+        assert_eq!(decoded, to);
+    }
+
+    #[test]
+    fn sound_pings_and_clc_resourcelist_roundtrip() {
+        let sound = SoundMsg {
+            flags: (SND_FL_VOLUME | SND_FL_ATTENUATION | SND_FL_LARGE_INDEX | SND_FL_PITCH) as u16,
+            volume: 200,
+            attenuation: 0.8125,
+            channel: 2,
+            entity: 17,
+            sound_index: 300,
+            origin: Vec3::new(128.0, -256.0, 32.0),
+            pitch: 110,
+        };
+        let pings = vec![(0u8, 35u16, 0u8), (3, 120, 5), (31, 999, 100)];
+
+        let mut sw = MsgWriter::new();
+        write_svc_sound(&mut sw, &sound);
+        write_svc_pings(&mut sw, &pings);
+        let mut ctx = SvcParseContext::new();
+        let parsed = parse_svc_stream(sw.as_slice(), &mut ctx).unwrap();
+        assert_eq!(
+            parsed,
+            vec![SvcMessage::Sound(sound), SvcMessage::Pings(pings)]
+        );
+
+        let resources = vec![
+            ResourceEntry {
+                res_type: 3,
+                filename: "models/player/gign/gign.mdl".to_string(),
+                index: 7,
+                download_size: 123_456,
+                flags: 0,
+                md5: None,
+            },
+            ResourceEntry {
+                res_type: 5,
+                filename: "tempdecal.wad".to_string(),
+                index: 0,
+                download_size: 4096,
+                flags: RES_CUSTOM as u8,
+                md5: Some([0x5A; 16]),
+            },
+        ];
+        let consistency = [1u8, 2, 3, 0xFF, 0];
+
+        let mut cw = MsgWriter::new();
+        write_clc_resourcelist(&mut cw, &resources);
+        write_clc_fileconsistency(&mut cw, &consistency);
+        let ucmd_schema = DeltaRegistry::cs16_default()
+            .get("usercmd_t")
+            .unwrap()
+            .clone();
+        let clc_msgs = parse_clc_stream(cw.as_slice(), &ucmd_schema, 1).unwrap();
+        assert_eq!(
+            clc_msgs,
+            vec![
+                ClcMessage::ResourceList(resources),
+                ClcMessage::FileConsistency(consistency.to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn unknown_temp_entity_type_is_an_error() {
+        // 250 is not a TE_* type (they end at TE_USERTRACER = 127).
+        let stream = [svc::TEMP_ENTITY, 250, 0, 0, 0, 0];
+        let mut ctx = SvcParseContext::new();
+        assert!(matches!(
+            parse_svc_stream(&stream, &mut ctx),
+            Err(ProtoError::InvalidPayload(_))
+        ));
     }
 }

@@ -318,7 +318,7 @@ pub fn parse_oob_packet(raw: &[u8]) -> Result<OobPacket, ProtoError> {
 }
 
 /// GoldSrc `Cmd_TokenizeString`-compatible splitter handling quoted arguments.
-fn tokenize_goldsrc_line(line: &str) -> Vec<String> {
+pub fn tokenize_goldsrc_line(line: &str) -> Vec<String> {
     let mut out = Vec::new();
     let bytes = line.as_bytes();
     let mut i = 0;

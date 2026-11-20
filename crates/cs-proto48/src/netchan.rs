@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use crate::bitbuf::{MsgReader, MsgWriter, ProtoError};
+use crate::compress::decompress_stream;
 use crate::crypto::{com_munge2, com_unmunge2};
 use crate::SPLIT_PACKET_HEADER;
 
@@ -45,7 +46,8 @@ struct OutFrag {
 pub struct NetChanIncoming {
     /// Immediate payload (reliable + unreliable messages carried in this packet).
     pub payload: Vec<u8>,
-    /// Fully reassembled normal-stream (`FRAG_NORMAL_STREAM`) payload, if completed on this packet.
+    /// Fully reassembled normal-stream (`FRAG_NORMAL_STREAM`) payload, if completed on this packet,
+    /// already BZ2-decompressed when it carried the `b"BZ2\0"` prefix.
     pub completed_normal_stream: Option<Vec<u8>>,
     /// Fully reassembled file-stream (`FRAG_FILE_STREAM`) payload, if completed on this packet.
     pub completed_file_stream: Option<Vec<u8>>,
@@ -400,9 +402,14 @@ impl NetChan {
             }
         }
 
+        let completed_normal_stream = completed[FRAG_NORMAL_STREAM]
+            .take()
+            .map(|stream| decompress_stream(&stream))
+            .transpose()?;
+
         Ok(Some(NetChanIncoming {
             payload: body,
-            completed_normal_stream: completed[FRAG_NORMAL_STREAM].take(),
+            completed_normal_stream,
             completed_file_stream: completed[FRAG_FILE_STREAM].take(),
             dropped,
             sequence,
