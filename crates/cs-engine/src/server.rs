@@ -87,6 +87,9 @@ pub struct Server<G: GameDll> {
     pub(crate) spawn_count: u32,
     pub(crate) next_userid: i32,
     pub(crate) time: f64,
+    /// Real seconds of the frame being run, handed to the game as `EngineApi::frametime`; 0
+    /// between frames.
+    pub(crate) frametime: f32,
     pub(crate) net_stats: NetStats,
     /// Set by `shutdown`: connects are refused from then on.
     pub(crate) shutting_down: bool,
@@ -165,6 +168,7 @@ impl<G: GameDll> Server<G> {
             spawn_count: 1,
             next_userid: 1,
             time: 0.0,
+            frametime: 0.0,
             net_stats: NetStats::default(),
             shutting_down: false,
             farewells: Vec::new(),
@@ -208,6 +212,7 @@ impl<G: GameDll> Server<G> {
         }
         let real_dt = now - self.time;
         self.time = now;
+        self.frametime = real_dt as f32;
         self.accrue_client_time(real_dt);
         self.oob_budget.refill(real_dt);
         self.with_game(|game, eng| game.start_frame(eng, real_dt as f32));
@@ -222,6 +227,7 @@ impl<G: GameDll> Server<G> {
         self.broadcast_userinfo();
         self.send_client_frames(net);
         self.send_farewells(net);
+        self.frametime = 0.0;
     }
 
     pub fn config(&self) -> &ServerConfig {
@@ -289,6 +295,7 @@ impl<G: GameDll> Server<G> {
             &mut self.cvars,
             &self.map,
             self.time,
+            self.frametime,
             &mut self.outbox,
             &mut self.views,
         );

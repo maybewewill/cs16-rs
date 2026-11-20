@@ -49,13 +49,17 @@ pub(crate) struct ClientView {
     pub(crate) userinfo_dirty: bool,
 }
 
-/// Engine services available to the game during one call.
+/// Engine services available to the game during one call. Everything the game does to the
+/// engine goes through its methods (entities, resources and cvars in `api_entities.rs`, clients
+/// and messages here), so each can later be wrapped by a mod hook.
 pub struct EngineApi<'a> {
-    pub edicts: &'a mut EdictPool,
-    pub precache: &'a mut PrecacheTables,
-    pub cvars: &'a mut CVarRegistry,
-    pub map: &'a ServerMap,
-    pub time: f64,
+    pub(crate) edicts: &'a mut EdictPool,
+    pub(crate) precache: &'a mut PrecacheTables,
+    pub(crate) cvars: &'a mut CVarRegistry,
+    pub(crate) map: &'a ServerMap,
+    pub(crate) time: f64,
+    /// Real seconds of the current server frame; 0 outside a frame.
+    pub(crate) frametime: f32,
     pub(crate) outbox: &'a mut Outbox,
     pub(crate) clients: &'a mut [ClientView],
     /// Handed out for out-of-range slots; its contents are discarded.
@@ -63,12 +67,14 @@ pub struct EngineApi<'a> {
 }
 
 impl<'a> EngineApi<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         edicts: &'a mut EdictPool,
         precache: &'a mut PrecacheTables,
         cvars: &'a mut CVarRegistry,
         map: &'a ServerMap,
         time: f64,
+        frametime: f32,
         outbox: &'a mut Outbox,
         clients: &'a mut [ClientView],
     ) -> Self {
@@ -80,6 +86,7 @@ impl<'a> EngineApi<'a> {
             cvars,
             map,
             time,
+            frametime,
             outbox,
             clients,
             scratch: MsgWriter::new(),
@@ -346,6 +353,7 @@ mod tests {
                 &mut self.cvars,
                 &self.map,
                 1.0,
+                0.0,
                 &mut self.outbox,
                 &mut self.clients,
             )

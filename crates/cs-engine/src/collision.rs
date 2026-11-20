@@ -73,6 +73,12 @@ pub struct WorldCollision {
     models: Vec<BspModel>,
 }
 
+// Checked in every build: the engine, and the map collision it holds, may run on its own thread.
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<WorldCollision>();
+};
+
 impl WorldCollision {
     pub fn from_bsp(map: &BspMap) -> Self {
         Self {
@@ -389,11 +395,6 @@ mod tests {
     use crate::map::ServerMap;
     use cs_vfs::{Vfs, VfsConfig};
 
-    const _: () = {
-        const fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<WorldCollision>();
-    };
-
     /// `WORLD_ONLY_TRACE_HASH` of `cs-sim/tests/collision_characterization.rs`: the 2000
     /// traces of that test through `BspCollision` with every brush model disabled, recorded
     /// before the move.
@@ -468,9 +469,7 @@ mod tests {
         let Ok(vfs) = Vfs::discover(None, VfsConfig::default()) else {
             return;
         };
-        let Ok(raw) = vfs.read_bytes("maps/de_dust2.bsp") else {
-            return;
-        };
+        let raw = vfs.read_bytes("maps/de_dust2.bsp").expect("de_dust2 reads");
         let bsp = Arc::new(BspMap::load(&vfs, "de_dust2").expect("de_dust2 parses"));
         let map = ServerMap::from_bsp("de_dust2", &raw, bsp.clone()).expect("valid BSP header");
         let world = map.collision().expect("a BSP map has collision");
@@ -482,6 +481,37 @@ mod tests {
         assert!(!world.point_in_model(n, Vec3::ZERO, Vec3::ZERO));
     }
 
+    /// `point_in_model` is true inside a real brush: among the first brush models of de_dust2,
+    /// one has a point on an 8x8x8 grid inside its bounds whose model contents are solid.
+    #[test]
+    fn point_in_model_is_true_inside_a_real_brush() {
+        let Ok(vfs) = Vfs::discover(None, VfsConfig::default()) else {
+            return;
+        };
+        let bsp = BspMap::load(&vfs, "de_dust2").expect("de_dust2 parses");
+        let world = WorldCollision::from_bsp(&bsp);
+        const MODELS: usize = 8;
+        const STEPS: usize = 8;
+        let solid = (1..world.model_count().min(MODELS + 1)).find_map(|model| {
+            let (mins, maxs) = world.model_bounds(model)?;
+            let at = |i: usize| (i as f32 + 0.5) / STEPS as f32;
+            (0..STEPS * STEPS * STEPS)
+                .map(|i| {
+                    let t = Vec3::new(at(i % STEPS), at(i / STEPS % STEPS), at(i / STEPS / STEPS));
+                    mins + (maxs - mins) * t
+                })
+                .find(|&p| {
+                    world.model_point_contents(model, Vec3::ZERO, p, Hull::Point) == CONTENTS_SOLID
+                })
+                .map(|p| (model, p))
+        });
+        let (model, p) = solid.expect("a solid point in one of the first brush models");
+        assert!(
+            world.point_in_model(model, Vec3::ZERO, p),
+            "model {model} at {p}"
+        );
+    }
+
     /// The 2000 traces of `cs-sim/tests/collision_characterization.rs` (same LCG, seed, point
     /// and offset rules, hull order and hash) through `trace_world`.
     #[test]
@@ -489,9 +519,7 @@ mod tests {
         let Ok(vfs) = Vfs::discover(None, VfsConfig::default()) else {
             return;
         };
-        let Ok(bsp) = BspMap::load(&vfs, "de_dust2") else {
-            return;
-        };
+        let bsp = BspMap::load(&vfs, "de_dust2").expect("de_dust2 parses");
         let world = WorldCollision::from_bsp(&bsp);
         let (mins, maxs) = world.model_bounds(0).expect("world model");
 

@@ -200,13 +200,11 @@ impl GameDll for TestGame {
         self.server_activate_calls += 1;
         self.active_at_activate = (0..32).filter(|&s| eng.is_client_active(s)).collect();
         // Lands at model index 2 on a stub map.
-        eng.precache
-            .precache_model("models/test.mdl")
+        eng.precache_model("models/test.mdl")
             .expect("precache before lock");
         for n in 1..=self.extra_entities {
-            let id = eng.edicts.alloc(eng.time).expect("free edict");
-            let vars = &mut eng.edicts.get_mut(id).expect("just allocated").vars;
-            vars.classname = "test_extra".to_string();
+            let id = eng.create_entity("test_extra").expect("free edict");
+            let vars = eng.ent_mut(id).expect("just allocated");
             vars.modelindex = 2;
             vars.origin = Vec3::new(0.0, 0.0, 16.0 * n as f32);
             vars.skin = self.extra_skin;
@@ -241,13 +239,13 @@ impl GameDll for TestGame {
 
     fn client_put_in_server(&mut self, eng: &mut EngineApi<'_>, slot: u8) {
         self.client_put_in_server_calls += 1;
-        let id = eng.edicts.client(slot);
-        if let Some(edict) = eng.edicts.get_mut(id) {
-            edict.vars.origin = Vec3::new(64.0 * f32::from(slot), 0.0, 0.0);
-            edict.vars.modelindex = 2;
-            edict.vars.health = 100.0;
+        let id = eng.client_edict(slot);
+        if let Some(vars) = eng.ent_mut(id) {
+            vars.origin = Vec3::new(64.0 * f32::from(slot), 0.0, 0.0);
+            vars.modelindex = 2;
+            vars.health = 100.0;
         }
-        self.late_precache = Some(eng.precache.precache_model("models/late.mdl"));
+        self.late_precache = Some(eng.precache_model("models/late.mdl"));
         if self.shout_on_put_in_server {
             write_svc_print(eng.reliable_all(), SHOUT);
         }
@@ -313,9 +311,9 @@ impl GameDll for TestGame {
             // `svc_nop` bytes.
             eng.reliable(slot).write_bytes(&vec![svc::NOP; self.flood_per_usercmd]);
         }
-        let id = eng.edicts.client(slot);
-        if let Some(edict) = eng.edicts.get_mut(id) {
-            edict.vars.origin.x += cmd.forwardmove * f32::from(cmd.msec) / 1000.0;
+        let id = eng.client_edict(slot);
+        if let Some(vars) = eng.ent_mut(id) {
+            vars.origin.x += cmd.forwardmove * f32::from(cmd.msec) / 1000.0;
         }
     }
 
@@ -333,12 +331,8 @@ impl GameDll for TestGame {
         if self.churn_extras {
             churn_extras(eng, self.update_client_data_calls);
         }
-        let id = eng.edicts.client(slot);
-        let vars = eng
-            .edicts
-            .get(id)
-            .map(|e| e.vars.clone())
-            .unwrap_or_default();
+        let id = eng.client_edict(slot);
+        let vars = eng.ent(id).cloned().unwrap_or_default();
         GoldSrcClientData {
             origin: vars.origin,
             health: vars.health,
@@ -388,16 +382,14 @@ pub const EF_NODRAW: u32 = 128;
 
 /// Gives every `test_extra` entity values derived from its index and `call`.
 fn churn_extras(eng: &mut EngineApi<'_>, call: usize) {
-    let ids: Vec<_> = eng
-        .edicts
-        .iter_live()
-        .filter(|(_, e)| e.vars.classname == "test_extra")
-        .map(|(id, _)| id)
-        .collect();
+    let mut ids = Vec::new();
+    while let Some(id) = eng.find_by_classname(ids.last().copied(), "test_extra") {
+        ids.push(id);
+    }
     let k = call as f32;
     for id in ids {
         let n = f32::from(id.index);
-        let vars = &mut eng.edicts.get_mut(id).expect("live").vars;
+        let vars = eng.ent_mut(id).expect("live");
         vars.origin = Vec3::new(8.0 * n + k, -4.0 * n - k, 16.0 * n + 0.5 * k);
         vars.angles = Vec3::new((n + k) % 90.0, (3.0 * n + k) % 360.0, (n * 7.0) % 180.0);
         vars.frame = (n + k) % 200.0;

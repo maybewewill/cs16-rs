@@ -116,7 +116,7 @@ impl GameDll for WalkGame {
                 .map(|m| format!("models/player/{m}/{m}.mdl")),
         );
         for name in models {
-            match eng.precache.precache_model(&name) {
+            match eng.precache_model(&name) {
                 Ok(index) if name == PLAYER_MODEL => self.player_model = index,
                 Ok(_) => {}
                 Err(err) if name == PLAYER_MODEL => {
@@ -156,11 +156,10 @@ impl GameDll for WalkGame {
         };
         eng.set_client_key(slot, "model", model);
 
-        let id = eng.edicts.client(slot);
-        let Some(edict) = eng.edicts.get_mut(id) else {
+        let id = eng.client_edict(slot);
+        let Some(v) = eng.ent_mut(id) else {
             return;
         };
-        let v = &mut edict.vars;
         v.origin = origin;
         v.velocity = Vec3::ZERO;
         v.v_angle = Vec3::new(0.0, yaw, 0.0);
@@ -209,11 +208,10 @@ impl GameDll for WalkGame {
             dt,
         );
 
-        let id = eng.edicts.client(slot);
-        let Some(edict) = eng.edicts.get_mut(id) else {
+        let id = eng.client_edict(slot);
+        let Some(v) = eng.ent_mut(id) else {
             return;
         };
-        let v = &mut edict.vars;
         v.v_angle = cmd.viewangles;
         v.angles.y = v.v_angle.y;
         v.origin = state.origin;
@@ -236,10 +234,9 @@ impl GameDll for WalkGame {
     fn start_frame(&mut self, _eng: &mut EngineApi<'_>, _frametime: f32) {}
 
     fn update_client_data(&mut self, eng: &mut EngineApi<'_>, slot: u8) -> GoldSrcClientData {
-        let Some(edict) = eng.edicts.get(eng.edicts.client(slot)) else {
+        let Some(v) = eng.ent(eng.client_edict(slot)) else {
             return GoldSrcClientData::default();
         };
-        let v = &edict.vars;
         GoldSrcClientData {
             origin: v.origin,
             velocity: v.velocity,

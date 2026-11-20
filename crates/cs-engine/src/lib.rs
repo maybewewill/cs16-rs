@@ -1,5 +1,6 @@
 //! Server engine: the equivalent of the original game's dedicated server.
 
+mod api_entities;
 pub mod client;
 pub mod collision;
 mod connect;

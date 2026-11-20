@@ -1,0 +1,591 @@
+//! The game-facing calls of [`EngineApi`] for entities, resources, cvars, time and geometry.
+//! Every call refuses quietly (or returns a default) on bad game-supplied data: a stale or
+//! foreign [`EdictId`], an out-of-range slot or model, non-finite numbers.
+
+use std::any::Any;
+
+use glam::Vec3;
+
+use crate::collision::{CONTENTS_EMPTY, Hull, TraceResult};
+use crate::edict::{EdictId, EntVars};
+use crate::game::EngineApi;
+use crate::precache::PrecacheError;
+
+impl EngineApi<'_> {
+    /// Server time in seconds.
+    pub fn time(&self) -> f64 {
+        self.time
+    }
+
+    /// Real seconds elapsed in the current server frame; 0 for a call made outside a frame
+    /// (server start-up, a map change).
+    pub fn frametime(&self) -> f32 {
+        self.frametime
+    }
+
+    /// Number of player slots.
+    pub fn max_clients(&self) -> u8 {
+        self.edicts.max_clients()
+    }
+
+    /// Name of the current map, without `maps/` and `.bsp`.
+    pub fn map_name(&self) -> &str {
+        &self.map.name
+    }
+
+    /// Worldspawn (index 0); always live.
+    pub fn world(&self) -> EdictId {
+        self.edicts.world()
+    }
+
+    /// Edict of player slot `slot` (index `slot + 1`). For `slot >= max_clients` returns an id
+    /// that no call resolves.
+    pub fn client_edict(&self, slot: u8) -> EdictId {
+        self.edicts.client(slot)
+    }
+
+    /// Allocates an entity at the current time and sets its `classname`. Returns `None` when
+    /// the pool has no free slot (slots freed less than `EDICT_REUSE_DELAY` ago do not count).
+    pub fn create_entity(&mut self, classname: &str) -> Option<EdictId> {
+        let id = self.edicts.alloc(self.time)?;
+        if let Some(edict) = self.edicts.get_mut(id) {
+            edict.vars.classname = classname.to_string();
+        }
+        Some(id)
+    }
+
+    /// Frees entity `id` with its variables and private data. A stale or foreign id, the
+    /// world and the player slots are left alone.
+    pub fn remove_entity(&mut self, id: EdictId) {
+        self.edicts.free(id, self.time);
+    }
+
+    /// Variables of entity `id`; `None` for a stale or foreign id.
+    pub fn ent(&self, id: EdictId) -> Option<&EntVars> {
+        self.edicts.get(id).map(|e| &e.vars)
+    }
+
+    /// Mutable variables of entity `id`; `None` for a stale or foreign id.
+    pub fn ent_mut(&mut self, id: EdictId) -> Option<&mut EntVars> {
+        self.edicts.get_mut(id).map(|e| &mut e.vars)
+    }
+
+    /// The game's private data of entity `id` as a `T`; `None` for a stale or foreign id, an
+    /// entity without private data, or data of another type.
+    pub fn private<T: Any + Send>(&self, id: EdictId) -> Option<&T> {
+        self.edicts.get(id)?.private.as_deref()?.downcast_ref()
+    }
+
+    /// Mutable private data of entity `id` as a `T`; `None` in the cases
+    /// [`private`](Self::private) returns `None`.
+    pub fn private_mut<T: Any + Send>(&mut self, id: EdictId) -> Option<&mut T> {
+        self.edicts
+            .get_mut(id)?
+            .private
+            .as_deref_mut()?
+            .downcast_mut()
+    }
+
+    /// Replaces the private data of entity `id`, whatever its type was, with `value`. A stale
+    /// or foreign id is ignored (`value` is dropped).
+    pub fn set_private<T: Any + Send>(&mut self, id: EdictId, value: T) {
+        if let Some(edict) = self.edicts.get_mut(id) {
+            edict.private = Some(Box::new(value));
+        }
+    }
+
+    /// Every live entity (world and player slots included) in ascending index order.
+    pub fn entity_ids(&self) -> Vec<EdictId> {
+        self.edicts.iter_live().map(|(id, _)| id).collect()
+    }
+
+    /// The first live entity after `after` (from the start for `None`), in ascending index
+    /// order, whose `classname` equals `classname` exactly (case-sensitive). An `after` that no
+    /// longer resolves starts after its index. `None` when there is no further match.
+    pub fn find_by_classname(&self, after: Option<EdictId>, classname: &str) -> Option<EdictId> {
+        let first = after.map_or(0, |id| usize::from(id.index) + 1);
+        self.edicts
+            .iter_live()
+            .skip_while(|(id, _)| usize::from(id.index) < first)
+            .find(|(_, e)| e.vars.classname == classname)
+            .map(|(id, _)| id)
+    }
+
+    /// Live entities (world and player slots included) whose `origin` lies within `radius` of
+    /// `center`, in ascending index order. A non-finite `center` or `radius`, or a negative
+    /// `radius`, gives an empty list; an entity with a non-finite origin is never included.
+    pub fn entities_in_sphere(&self, center: Vec3, radius: f32) -> Vec<EdictId> {
+        if !center.is_finite() || !radius.is_finite() || radius < 0.0 {
+            return Vec::new();
+        }
+        let radius_sq = radius * radius;
+        self.edicts
+            .iter_live()
+            .filter(|(_, e)| e.vars.origin.distance_squared(center) <= radius_sq)
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// Adds `name` to the model table and returns its index. Errors when the table is full or
+    /// when a new name comes after `server_activate`; a name already present always resolves.
+    pub fn precache_model(&mut self, name: &str) -> Result<u16, PrecacheError> {
+        self.precache.precache_model(name)
+    }
+
+    /// Adds `name` to the sound table; errors as [`precache_model`](Self::precache_model).
+    pub fn precache_sound(&mut self, name: &str) -> Result<u16, PrecacheError> {
+        self.precache.precache_sound(name)
+    }
+
+    /// Adds `name` to the generic file table; errors as
+    /// [`precache_model`](Self::precache_model).
+    pub fn precache_generic(&mut self, name: &str) -> Result<u16, PrecacheError> {
+        self.precache.precache_generic(name)
+    }
+
+    /// Index of model `name` (case-insensitive, `\` and `/` alike); `None` if not precached.
+    pub fn model_index(&self, name: &str) -> Option<u16> {
+        self.precache.model_index(name)
+    }
+
+    /// Index of sound `name` (case-insensitive, `\` and `/` alike); `None` if not precached.
+    pub fn sound_index(&self, name: &str) -> Option<u16> {
+        self.precache.sound_index(name)
+    }
+
+    /// Gives entity `id` model `name`, which must already be in the model table: stores the
+    /// name in `model` and its index in `modelindex`. For a brush sub-model (`*N`) on a map
+    /// with collision data it also sets `mins`/`maxs` to that model's bounds. Returns `false`
+    /// and changes nothing for a stale or foreign id or a name not in the table.
+    pub fn set_model(&mut self, id: EdictId, name: &str) -> bool {
+        let Some(index) = self.precache.model_index(name) else {
+            return false;
+        };
+        let bounds = name
+            .strip_prefix('*')
+            .and_then(|n| n.parse::<usize>().ok())
+            .and_then(|n| self.map.collision()?.model_bounds(n));
+        let Some(vars) = self.edicts.get_mut(id).map(|e| &mut e.vars) else {
+            return false;
+        };
+        vars.model = name.to_string();
+        vars.modelindex = index;
+        if let Some((mins, maxs)) = bounds {
+            vars.mins = mins;
+            vars.maxs = maxs;
+        }
+        true
+    }
+
+    /// Numeric value of cvar `name` (case-insensitive); 0.0 for a cvar that is missing or
+    /// whose value is not a finite number.
+    pub fn cvar_f32(&self, name: &str) -> f32 {
+        let value = self.cvars.get_f32(name);
+        if value.is_finite() { value } else { 0.0 }
+    }
+
+    /// Value of cvar `name` (case-insensitive); `None` if it is not registered.
+    pub fn cvar_str(&self, name: &str) -> Option<String> {
+        self.cvars.get(name).map(|c| c.value.clone())
+    }
+
+    /// Sets cvar `name` (case-insensitive) to `value`; a name that is not registered is
+    /// ignored.
+    pub fn set_cvar(&mut self, name: &str, value: &str) {
+        self.cvars.set(name, value);
+    }
+
+    /// Traces `hull` from `start` to `end` through the world model only; entities are not
+    /// traced yet (that comes with entity collision in a later plan). Without collision data
+    /// (stub map) or with a non-finite `start`/`end`, nothing is hit: fraction 1, `end_pos =
+    /// end`.
+    pub fn trace_hull(&self, start: Vec3, end: Vec3, hull: Hull) -> TraceResult {
+        match self.map.collision() {
+            Some(c) if start.is_finite() && end.is_finite() => c.trace_world(start, end, hull),
+            _ => TraceResult::clear(end),
+        }
+    }
+
+    /// Traces `hull` from `start` to `end` through brush model `model` (0 is the world) placed
+    /// at `origin`. Nothing is hit for a model out of range, without collision data, or with
+    /// a non-finite `origin`/`start`/`end`.
+    pub fn trace_model(
+        &self,
+        model: usize,
+        origin: Vec3,
+        start: Vec3,
+        end: Vec3,
+        hull: Hull,
+    ) -> TraceResult {
+        match self.map.collision() {
+            Some(c) if origin.is_finite() && start.is_finite() && end.is_finite() => {
+                c.trace_model(model, origin, start, end, hull)
+            }
+            _ => TraceResult::clear(end),
+        }
+    }
+
+    /// Contents (`CONTENTS_*`) of the world model at `p` for `hull`; `CONTENTS_EMPTY` without
+    /// collision data or for a non-finite `p`.
+    pub fn point_contents(&self, p: Vec3, hull: Hull) -> i32 {
+        match self.map.collision() {
+            Some(c) if p.is_finite() => c.point_contents(p, hull),
+            _ => CONTENTS_EMPTY,
+        }
+    }
+
+    /// Whether `p` is inside the solid of brush model `model` placed at `origin`; `false` for
+    /// a model out of range, without collision data, or for non-finite input.
+    pub fn point_in_model(&self, model: usize, origin: Vec3, p: Vec3) -> bool {
+        match self.map.collision() {
+            Some(c) if origin.is_finite() && p.is_finite() => c.point_in_model(model, origin, p),
+            _ => false,
+        }
+    }
+
+    /// Whether a box with absolute corners `mins`/`maxs` is potentially visible (PVS) from
+    /// `eye`. A map without visibility data (stub map) sees everything; non-finite input sees
+    /// nothing.
+    pub fn can_see(&self, eye: Vec3, mins: Vec3, maxs: Vec3) -> bool {
+        eye.is_finite() && mins.is_finite() && maxs.is_finite() && self.map.can_see(eye, mins, maxs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use cs_assets::bsp::BspMap;
+    use cs_cvar::{CVarFlags, CVarRegistry};
+    use cs_vfs::{Vfs, VfsConfig};
+    use glam::Vec3;
+
+    use crate::collision::{CONTENTS_EMPTY, Hull};
+    use crate::edict::{EdictId, EdictPool, EntVars};
+    use crate::game::{ClientView, EngineApi, Outbox};
+    use crate::map::ServerMap;
+    use crate::precache::PrecacheTables;
+
+    struct Fixture {
+        edicts: EdictPool,
+        precache: PrecacheTables,
+        cvars: CVarRegistry,
+        map: ServerMap,
+        outbox: Outbox,
+        clients: Vec<ClientView>,
+    }
+
+    impl Fixture {
+        fn new(max_clients: u8, max_edicts: usize) -> Self {
+            Self::on(ServerMap::stub("de_test"), max_clients, max_edicts)
+        }
+
+        fn on(map: ServerMap, max_clients: u8, max_edicts: usize) -> Self {
+            Self {
+                edicts: EdictPool::new(max_clients, max_edicts),
+                precache: PrecacheTables::new(&map.path, map.submodel_count),
+                cvars: CVarRegistry::new_empty(),
+                map,
+                outbox: Outbox::new(max_clients),
+                clients: (0..max_clients).map(|_| ClientView::default()).collect(),
+            }
+        }
+
+        fn api(&mut self) -> EngineApi<'_> {
+            EngineApi::new(
+                &mut self.edicts,
+                &mut self.precache,
+                &mut self.cvars,
+                &self.map,
+                10.0,
+                0.25,
+                &mut self.outbox,
+                &mut self.clients,
+            )
+        }
+    }
+
+    #[test]
+    fn time_and_identity_calls() {
+        let mut f = Fixture::new(2, 8);
+        let eng = f.api();
+        assert_eq!(eng.time(), 10.0);
+        assert_eq!(eng.frametime(), 0.25);
+        assert_eq!(eng.max_clients(), 2);
+        assert_eq!(eng.map_name(), "de_test");
+        assert_eq!(eng.world().index, 0);
+        assert_eq!(eng.client_edict(0).index, 1);
+        assert_eq!(eng.client_edict(1).index, 2);
+        assert!(eng.ent(eng.client_edict(2)).is_none());
+        assert!(eng.ent(eng.client_edict(255)).is_none());
+    }
+
+    #[test]
+    fn stale_and_foreign_ids_are_rejected_everywhere() {
+        let mut f = Fixture::new(1, 8);
+        f.precache.precache_model("models/a.mdl").unwrap();
+        let mut eng = f.api();
+        let stale = eng.create_entity("info_target").unwrap();
+        eng.remove_entity(stale);
+        let fresh = eng.create_entity("info_target").unwrap();
+        let foreign = EdictId {
+            index: 5,
+            serial: 77,
+        };
+        let out_of_range = EdictId {
+            index: u16::MAX,
+            serial: 0,
+        };
+        for id in [stale, foreign, out_of_range] {
+            assert!(eng.ent(id).is_none(), "{id:?}");
+            assert!(eng.ent_mut(id).is_none(), "{id:?}");
+            assert!(eng.private::<u32>(id).is_none(), "{id:?}");
+            assert!(eng.private_mut::<u32>(id).is_none(), "{id:?}");
+            eng.set_private(id, 5u32);
+            assert!(eng.private::<u32>(id).is_none(), "{id:?}");
+            assert!(!eng.set_model(id, "models/a.mdl"), "{id:?}");
+            eng.remove_entity(id);
+        }
+        // None of it touched the live entity.
+        assert_eq!(eng.ent(fresh).unwrap().classname, "info_target");
+        assert_eq!(eng.ent(fresh).unwrap().modelindex, 0);
+        assert!(eng.private::<u32>(fresh).is_none());
+        assert_eq!(eng.entity_ids().len(), 3);
+    }
+
+    #[test]
+    fn create_and_remove_roundtrip() {
+        let mut f = Fixture::new(2, 5);
+        let mut eng = f.api();
+        let a = eng.create_entity("func_wall").unwrap();
+        let b = eng.create_entity("info_target").unwrap();
+        assert_eq!((a.index, b.index), (3, 4));
+        assert_eq!(eng.ent(a).unwrap().classname, "func_wall");
+        assert_eq!(eng.ent(b).unwrap().classname, "info_target");
+        // The pool is exhausted.
+        assert!(eng.create_entity("one_too_many").is_none());
+
+        eng.remove_entity(a);
+        assert!(eng.ent(a).is_none());
+        assert!(eng.ent_mut(a).is_none());
+        assert_eq!(
+            eng.entity_ids()
+                .iter()
+                .map(|id| id.index)
+                .collect::<Vec<_>>(),
+            [0, 1, 2, 4]
+        );
+        // The freed slot is not reused within the reuse delay of the current time.
+        assert!(eng.create_entity("too_soon").is_none());
+
+        let world = eng.world();
+        let player = eng.client_edict(1);
+        eng.remove_entity(world);
+        eng.remove_entity(player);
+        assert!(eng.ent(world).is_some());
+        assert!(eng.ent(player).is_some());
+        assert_eq!(eng.world(), world);
+        assert_eq!(eng.client_edict(1), player);
+    }
+
+    #[test]
+    fn private_data_is_typed() {
+        let mut f = Fixture::new(1, 8);
+        let mut eng = f.api();
+        let id = eng.create_entity("info_target").unwrap();
+        assert!(eng.private::<u32>(id).is_none());
+        eng.set_private(id, 7u32);
+        assert_eq!(eng.private::<u32>(id), Some(&7));
+        assert!(eng.private::<String>(id).is_none());
+        assert!(eng.private_mut::<String>(id).is_none());
+        *eng.private_mut::<u32>(id).unwrap() += 1;
+        assert_eq!(eng.private::<u32>(id), Some(&8));
+        // `set_private` replaces whatever was there, of any type.
+        eng.set_private(id, String::from("hello"));
+        assert!(eng.private::<u32>(id).is_none());
+        assert_eq!(eng.private::<String>(id).map(String::as_str), Some("hello"));
+        // A removed entity's data goes with it.
+        eng.remove_entity(id);
+        assert!(eng.private::<String>(id).is_none());
+    }
+
+    #[test]
+    fn find_by_classname_iterates_in_index_order() {
+        let mut f = Fixture::new(1, 16);
+        let mut eng = f.api();
+        let a = eng.create_entity("light").unwrap();
+        let _other = eng.create_entity("info_target").unwrap();
+        let b = eng.create_entity("light").unwrap();
+        let _case = eng.create_entity("Light").unwrap();
+        let c = eng.create_entity("light").unwrap();
+
+        let mut found = Vec::new();
+        let mut after = None;
+        while let Some(id) = eng.find_by_classname(after, "light") {
+            found.push(id);
+            after = Some(id);
+        }
+        assert_eq!(found, [a, b, c]);
+        assert_eq!(eng.find_by_classname(Some(c), "light"), None);
+        assert_eq!(eng.find_by_classname(None, "nothing"), None);
+        assert_eq!(eng.find_by_classname(None, ""), Some(eng.world()));
+
+        // An `after` that no longer resolves still starts after its index.
+        eng.remove_entity(b);
+        assert_eq!(eng.find_by_classname(Some(b), "light"), Some(c));
+        assert_eq!(eng.find_by_classname(Some(a), "light"), Some(c));
+        let far = EdictId {
+            index: u16::MAX,
+            serial: 3,
+        };
+        assert_eq!(eng.find_by_classname(Some(far), "light"), None);
+    }
+
+    #[test]
+    fn entities_in_sphere_uses_origin_and_handles_nan() {
+        let mut f = Fixture::new(1, 16);
+        let mut eng = f.api();
+        let near = eng.create_entity("near").unwrap();
+        eng.ent_mut(near).unwrap().origin = Vec3::new(100.0, 0.0, 0.0);
+        let edge = eng.create_entity("edge").unwrap();
+        eng.ent_mut(edge).unwrap().origin = Vec3::new(110.0, 0.0, 0.0);
+        let far = eng.create_entity("far").unwrap();
+        eng.ent_mut(far).unwrap().origin = Vec3::new(200.0, 0.0, 0.0);
+        let lost = eng.create_entity("lost").unwrap();
+        eng.ent_mut(lost).unwrap().origin = Vec3::NAN;
+        let player = eng.client_edict(0);
+        eng.ent_mut(player).unwrap().origin = Vec3::new(95.0, 5.0, 0.0);
+
+        let center = Vec3::new(100.0, 0.0, 0.0);
+        assert_eq!(eng.entities_in_sphere(center, 10.0), [player, near, edge]);
+        // The world sits at the origin and is included like any other entity.
+        assert_eq!(eng.entities_in_sphere(Vec3::ZERO, 1.0), [eng.world()]);
+        assert!(eng.entities_in_sphere(Vec3::NAN, 10.0).is_empty());
+        assert!(eng.entities_in_sphere(center, f32::NAN).is_empty());
+        assert!(eng.entities_in_sphere(center, f32::INFINITY).is_empty());
+        assert!(
+            eng.entities_in_sphere(Vec3::splat(f32::INFINITY), 10.0)
+                .is_empty()
+        );
+        assert!(eng.entities_in_sphere(center, -1.0).is_empty());
+    }
+
+    #[test]
+    fn set_model_requires_a_precached_name() {
+        let mut f = Fixture::new(1, 8);
+        let mut eng = f.api();
+        let id = eng.create_entity("cycler").unwrap();
+        eng.ent_mut(id).unwrap().mins = Vec3::splat(-1.0);
+        let before: EntVars = eng.ent(id).unwrap().clone();
+        assert!(!eng.set_model(id, "models/unknown.mdl"));
+        // `*1` is not in the table of a map without brush models.
+        assert!(!eng.set_model(id, "*1"));
+        assert_eq!(eng.ent(id).unwrap(), &before);
+
+        let index = eng.precache_model("models/Barney.mdl").unwrap();
+        assert_eq!(eng.model_index("models/barney.mdl"), Some(index));
+        assert_eq!(eng.model_index("models/unknown.mdl"), None);
+        assert!(eng.set_model(id, "models/barney.mdl"));
+        let v = eng.ent(id).unwrap();
+        assert_eq!(
+            (v.model.as_str(), v.modelindex),
+            ("models/barney.mdl", index)
+        );
+        // Not a brush model: the size is left alone.
+        assert_eq!(v.mins, Vec3::splat(-1.0));
+
+        let shot = eng.precache_sound("weapons/shot.wav").unwrap();
+        assert_eq!(eng.sound_index("WEAPONS/SHOT.WAV"), Some(shot));
+        assert_eq!(eng.sound_index("weapons/none.wav"), None);
+        assert_eq!(eng.precache_generic("sprites/hud.txt"), Ok(1));
+    }
+
+    #[test]
+    fn traces_on_a_stub_map_hit_nothing() {
+        let mut f = Fixture::new(1, 8);
+        let eng = f.api();
+        let start = Vec3::new(1.0, 2.0, 3.0);
+        let end = Vec3::new(500.0, -20.0, 7.0);
+        for hull in [Hull::Point, Hull::Standing, Hull::Large, Hull::Crouched] {
+            let tr = eng.trace_hull(start, end, hull);
+            assert_eq!((tr.fraction, tr.end_pos), (1.0, end));
+            assert!(!tr.all_solid && !tr.start_solid && !tr.hit_solid && !tr.hit_sky);
+            let tr = eng.trace_model(0, Vec3::ZERO, start, end, hull);
+            assert_eq!((tr.fraction, tr.end_pos), (1.0, end));
+            assert_eq!(eng.point_contents(start, hull), CONTENTS_EMPTY);
+        }
+        assert!(!eng.point_in_model(0, Vec3::ZERO, start));
+        assert!(!eng.point_in_model(usize::MAX, Vec3::ZERO, start));
+        // The stub map sees everything; non-finite input sees nothing.
+        assert!(eng.can_see(start, end - 16.0, end + 16.0));
+        assert!(!eng.can_see(Vec3::NAN, end - 16.0, end + 16.0));
+
+        // Non-finite input is "no hit" too.
+        let tr = eng.trace_hull(Vec3::NAN, end, Hull::Point);
+        assert_eq!(tr.fraction, 1.0);
+        assert!(!tr.hit_solid);
+        assert_eq!(
+            eng.point_contents(Vec3::INFINITY, Hull::Point),
+            CONTENTS_EMPTY
+        );
+    }
+
+    #[test]
+    fn cvar_access_roundtrips_and_missing_is_zero() {
+        let mut f = Fixture::new(1, 8);
+        f.cvars
+            .register("sv_gravity", "800", CVarFlags::NONE, "gravity");
+        f.cvars
+            .register("hostname", "my server", CVarFlags::NONE, "name");
+        let mut eng = f.api();
+        assert_eq!(eng.cvar_f32("sv_gravity"), 800.0);
+        assert_eq!(eng.cvar_f32("SV_GRAVITY"), 800.0);
+        assert_eq!(eng.cvar_str("sv_gravity").as_deref(), Some("800"));
+        eng.set_cvar("sv_gravity", "600.5");
+        assert_eq!(eng.cvar_f32("sv_gravity"), 600.5);
+        assert_eq!(eng.cvar_f32("hostname"), 0.0);
+        assert_eq!(eng.cvar_str("hostname").as_deref(), Some("my server"));
+        eng.set_cvar("sv_gravity", "nan");
+        assert_eq!(eng.cvar_f32("sv_gravity"), 0.0);
+
+        assert_eq!(eng.cvar_f32("missing"), 0.0);
+        assert_eq!(eng.cvar_str("missing"), None);
+        eng.set_cvar("missing", "1");
+        assert_eq!(eng.cvar_str("missing"), None);
+    }
+
+    /// On de_dust2: `set_model("*N")` takes the brush model's bounds, and the geometry calls
+    /// answer what the map's `WorldCollision` answers.
+    #[test]
+    fn real_map_brush_models_and_traces() {
+        let Ok(vfs) = Vfs::discover(None, VfsConfig::default()) else {
+            return;
+        };
+        let raw = vfs.read_bytes("maps/de_dust2.bsp").expect("de_dust2 reads");
+        let bsp = Arc::new(BspMap::load(&vfs, "de_dust2").expect("de_dust2 parses"));
+        let map = ServerMap::from_bsp("de_dust2", &raw, bsp).expect("valid BSP header");
+        let mut f = Fixture::on(map, 1, 64);
+        let collision = f.map.collision().expect("collision").clone();
+        let mut eng = f.api();
+
+        let id = eng.create_entity("func_wall").unwrap();
+        assert!(eng.set_model(id, "*1"));
+        let (mins, maxs) = collision.model_bounds(1).expect("model 1");
+        let v = eng.ent(id).unwrap();
+        assert_eq!((v.model.as_str(), v.modelindex), ("*1", 2));
+        assert_eq!((v.mins, v.maxs), (mins, maxs));
+
+        let (wmins, wmaxs) = collision.model_bounds(0).expect("world");
+        let start = (wmins + wmaxs) * 0.5;
+        let end = start + Vec3::new(4096.0, 0.0, -4096.0);
+        for hull in [Hull::Point, Hull::Standing, Hull::Large, Hull::Crouched] {
+            let a = eng.trace_hull(start, end, hull);
+            let b = collision.trace_world(start, end, hull);
+            assert_eq!((a.fraction, a.end_pos), (b.fraction, b.end_pos));
+            assert_eq!(
+                eng.point_contents(start, hull),
+                collision.point_contents(start, hull)
+            );
+        }
+    }
+}

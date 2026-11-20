@@ -4,7 +4,7 @@
 //! and ladders. Run on de_dust2 and on de_nuke (a map with `func_ladder`). Uses the public
 //! `BspCollision` API only, so the same file builds against the code before and after the
 //! hull-tracing core moved into `cs-engine`. Each test returns without assertions when the
-//! installed game or its map is absent.
+//! installed game is absent; with the game installed, a map that fails to load is a failure.
 //!
 //! Call sequence for one map (one LCG stream per map, consumed strictly in this order):
 //!
@@ -183,10 +183,11 @@ fn zones(h: &mut Fnv, collision: &BspCollision, p: Vec3, counts: &mut [usize; 4]
     counts[3] += h.bool(collision.is_in_hostage_rescue(p));
 }
 
-/// Runs the pass on `map`, or `None` without the installed game or map.
+/// Runs the pass on `map`, or `None` without the installed game. With the game installed, a
+/// map that fails to load panics.
 fn run_pass(map: &str) -> Option<(Hashes, Coverage)> {
     let vfs = Vfs::discover(None, VfsConfig::default()).ok()?;
-    let bsp = BspMap::load(&vfs, map).ok()?;
+    let bsp = BspMap::load(&vfs, map).unwrap_or_else(|err| panic!("{map} fails to load: {err:?}"));
     let collision = BspCollision::from_map(&bsp, MaterialTable::load(&vfs));
     let (mins, maxs) = collision.world_bounds();
     let mut lcg = Lcg {

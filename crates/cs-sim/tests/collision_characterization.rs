@@ -1,7 +1,8 @@
 //! Characterization of `BspCollision` on de_dust2: hashes of its answers to a fixed,
 //! pseudo-random set of queries, recorded before the hull-tracing core moved into
 //! `cs-engine`. The move must not change a single bit. Every test returns without
-//! assertions when the installed game is absent.
+//! assertions when the installed game is absent; with the game installed, a map that fails to
+//! load is a failure.
 //!
 //! Call sequence (one LCG stream, consumed strictly in this order):
 //!
@@ -123,10 +124,11 @@ impl Fnv {
     }
 }
 
-/// de_dust2's collision and its model count, or `None` without the installed game.
+/// de_dust2's collision and its model count, or `None` without the installed game. With the
+/// game installed, a map that fails to load panics.
 fn dust2() -> Option<(BspCollision, usize)> {
     let vfs = Vfs::discover(None, VfsConfig::default()).ok()?;
-    let bsp = BspMap::load(&vfs, "de_dust2").ok()?;
+    let bsp = BspMap::load(&vfs, "de_dust2").expect("de_dust2 parses");
     let collision = BspCollision::from_map(&bsp, MaterialTable::load(&vfs));
     Some((collision, bsp.models.len()))
 }
@@ -229,9 +231,7 @@ fn world_trace_agrees_with_bsp_collision_per_trace() {
     let Ok(vfs) = Vfs::discover(None, VfsConfig::default()) else {
         return;
     };
-    let Ok(bsp) = BspMap::load(&vfs, "de_dust2") else {
-        return;
-    };
+    let bsp = BspMap::load(&vfs, "de_dust2").expect("de_dust2 parses");
     let collision = BspCollision::from_map(&bsp, MaterialTable::load(&vfs));
     let mut world_only = collision.clone();
     world_only.disabled_models.extend(1..bsp.models.len());
