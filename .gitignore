@@ -1,0 +1,6 @@
+/target
+/config.cfg
+*.log
+*.png
+.DS_Store
+Thumbs.db

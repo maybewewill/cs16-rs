@@ -1,0 +1,16 @@
+[package]
+name = "cs-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cs-assets.workspace = true
+cs-net.workspace = true
+cs-sim.workspace = true
+cs-vfs.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

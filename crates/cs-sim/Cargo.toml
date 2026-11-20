@@ -1,0 +1,18 @@
+[package]
+name = "cs-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cs-assets.workspace = true
+cs-cvar.workspace = true
+glam.workspace = true
+serde.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+cs-vfs.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,46 @@
+[workspace]
+members = [
+    "crates/cs-vfs",
+    "crates/cs-cvar",
+    "crates/cs-assets",
+    "crates/cs-sim",
+    "crates/cs-net",
+    "crates/cs-server",
+    "crates/cs-client",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.95"
+
+[workspace.dependencies]
+bytemuck = { version = "1", features = ["derive"] }
+egui = "0.37"
+egui-wgpu = "0.37"
+egui-winit = "0.37"
+glam = { version = "0.34", features = ["serde"] }
+image = { version = "0.25", default-features = false, features = ["tga", "png"] }
+pollster = "0.4"
+postcard = { version = "1", features = ["alloc"] }
+rodio = { version = "0.23", default-features = false, features = ["wav", "playback"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+wgpu = "30"
+winit = "0.30"
+
+cs-vfs = { path = "crates/cs-vfs" }
+cs-cvar = { path = "crates/cs-cvar" }
+cs-assets = { path = "crates/cs-assets" }
+cs-sim = { path = "crates/cs-sim" }
+cs-net = { path = "crates/cs-net" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
