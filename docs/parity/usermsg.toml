@@ -1,0 +1,296 @@
+[[item]]
+id = "CurWeapon"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::cs_usermsgs_roundtrip_cleanly"
+
+[[item]]
+id = "Geiger"
+status = "missing"
+
+[[item]]
+id = "Flashlight"
+status = "missing"
+
+[[item]]
+id = "FlashBat"
+status = "missing"
+
+[[item]]
+id = "Health"
+status = "implemented"
+
+[[item]]
+id = "Damage"
+status = "implemented"
+
+[[item]]
+id = "Battery"
+status = "implemented"
+
+[[item]]
+id = "Train"
+status = "missing"
+
+[[item]]
+id = "HudTextPro"
+status = "missing"
+
+[[item]]
+id = "HudText"
+status = "missing"
+
+[[item]]
+id = "SayText"
+status = "implemented"
+
+[[item]]
+id = "TextMsg"
+status = "implemented"
+
+[[item]]
+id = "WeaponList"
+status = "missing"
+
+[[item]]
+id = "ResetHUD"
+status = "implemented"
+
+[[item]]
+id = "InitHUD"
+status = "implemented"
+
+[[item]]
+id = "ViewMode"
+status = "missing"
+
+[[item]]
+id = "GameTitle"
+status = "missing"
+
+[[item]]
+id = "DeathMsg"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::cs_usermsgs_roundtrip_cleanly"
+
+[[item]]
+id = "ScoreAttrib"
+status = "implemented"
+
+[[item]]
+id = "ScoreInfo"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::cs_usermsgs_roundtrip_cleanly"
+
+[[item]]
+id = "TeamInfo"
+status = "implemented"
+
+[[item]]
+id = "TeamScore"
+status = "implemented"
+
+[[item]]
+id = "GameMode"
+status = "missing"
+
+[[item]]
+id = "MOTD"
+status = "implemented"
+
+[[item]]
+id = "ServerName"
+status = "implemented"
+
+[[item]]
+id = "AmmoPickup"
+status = "missing"
+
+[[item]]
+id = "WeapPickup"
+status = "missing"
+
+[[item]]
+id = "ItemPickup"
+status = "missing"
+
+[[item]]
+id = "HideWeapon"
+status = "implemented"
+
+[[item]]
+id = "SetFOV"
+status = "implemented"
+
+[[item]]
+id = "ShowMenu"
+status = "implemented"
+
+[[item]]
+id = "ScreenShake"
+status = "implemented"
+
+[[item]]
+id = "ScreenFade"
+status = "implemented"
+
+[[item]]
+id = "AmmoX"
+status = "implemented"
+
+[[item]]
+id = "SendAudio"
+status = "implemented"
+
+[[item]]
+id = "RoundTime"
+status = "implemented"
+
+[[item]]
+id = "Money"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::cs_usermsgs_roundtrip_cleanly"
+
+[[item]]
+id = "ArmorType"
+status = "implemented"
+
+[[item]]
+id = "BlinkAcct"
+status = "missing"
+
+[[item]]
+id = "StatusValue"
+status = "missing"
+
+[[item]]
+id = "StatusText"
+status = "missing"
+
+[[item]]
+id = "StatusIcon"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::cs_usermsgs_roundtrip_cleanly"
+
+[[item]]
+id = "BarTime"
+status = "implemented"
+
+[[item]]
+id = "ReloadSound"
+status = "missing"
+
+[[item]]
+id = "Crosshair"
+status = "missing"
+
+[[item]]
+id = "NVGToggle"
+status = "implemented"
+
+[[item]]
+id = "Radar"
+status = "implemented"
+
+[[item]]
+id = "Spectator"
+status = "missing"
+
+[[item]]
+id = "VGUIMenu"
+status = "implemented"
+
+[[item]]
+id = "AllowSpec"
+status = "missing"
+
+[[item]]
+id = "BombDrop"
+status = "implemented"
+
+[[item]]
+id = "BombPickup"
+status = "implemented"
+
+[[item]]
+id = "ClCorpse"
+status = "missing"
+
+[[item]]
+id = "HostagePos"
+status = "implemented"
+
+[[item]]
+id = "HostageK"
+status = "implemented"
+
+[[item]]
+id = "HLTV"
+status = "missing"
+
+[[item]]
+id = "SpecHealth"
+status = "missing"
+
+[[item]]
+id = "ForceCam"
+status = "missing"
+
+[[item]]
+id = "ADStop"
+status = "missing"
+
+[[item]]
+id = "ReceiveW"
+status = "missing"
+
+[[item]]
+id = "ShadowIdx"
+status = "missing"
+
+[[item]]
+id = "TaskTime"
+status = "missing"
+
+[[item]]
+id = "Scenario"
+status = "missing"
+
+[[item]]
+id = "BotVoice"
+status = "missing"
+
+[[item]]
+id = "BuyClose"
+status = "implemented"
+
+[[item]]
+id = "SpecHealth2"
+status = "missing"
+
+[[item]]
+id = "BarTime2"
+status = "missing"
+
+[[item]]
+id = "ItemStatus"
+status = "implemented"
+
+[[item]]
+id = "Location"
+status = "missing"
+
+[[item]]
+id = "Brass"
+status = "missing"
+
+[[item]]
+id = "Fog"
+status = "missing"
+
+[[item]]
+id = "ShowTimer"
+status = "implemented"
+
+[[item]]
+id = "HudTextArgs"
+status = "missing"

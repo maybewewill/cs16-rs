@@ -32,6 +32,15 @@ impl Status {
             _ => None,
         }
     }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::Implemented => "implemented",
+            Self::Tested => "tested",
+            Self::Verified => "verified",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -70,11 +79,16 @@ pub struct Report {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParityError {
     Toml(String),
-    UnknownStatus { id: String, value: String },
+    UnknownStatus {
+        id: String,
+        value: String,
+    },
     DuplicateId(String),
     MissingEvidence(String),
     WeightsSum(u32),
     Io(String),
+    /// A category file whose name is not a key in `weights.toml`.
+    UnweightedCategory(String),
 }
 
 impl fmt::Display for ParityError {
@@ -90,6 +104,9 @@ impl fmt::Display for ParityError {
             }
             Self::WeightsSum(sum) => write!(f, "weights sum to {sum}, expected 100"),
             Self::Io(msg) => write!(f, "I/O error: {msg}"),
+            Self::UnweightedCategory(name) => {
+                write!(f, "category `{name}` has no weight in {WEIGHTS_FILE}")
+            }
         }
     }
 }
@@ -216,8 +233,86 @@ fn category_score(name: &str, weight: u32, items: &[Item]) -> CategoryScore {
     }
 }
 
+/// Renders a category back to registry TOML: one `[[item]]` table per item,
+/// in the category's item order, separated by blank lines.
+pub fn category_to_toml(cat: &Category) -> String {
+    let quote = |s: &str| toml::Value::String(s.to_owned()).to_string();
+    let tables: Vec<String> = cat
+        .items
+        .iter()
+        .map(|item| {
+            let mut table = format!(
+                "[[item]]\nid = {}\nstatus = {}\n",
+                quote(&item.id),
+                quote(item.status.as_str())
+            );
+            if let Some(evidence) = &item.evidence {
+                table.push_str(&format!("evidence = {}\n", quote(evidence)));
+            }
+            table
+        })
+        .collect();
+    tables.join("\n")
+}
+
+/// Adds the names listed in a console dump (`cvarlist` / `cmdlist` output)
+/// to `existing` as `missing` items.
+///
+/// Each line contributes its first whitespace-delimited token when that token
+/// matches `[A-Za-z_+\-][A-Za-z0-9_+\-.]*`. Blank lines, lines of dashes and
+/// lines whose first token is a number (the summary line) are skipped. When
+/// the dump contains a line of dashes, everything up to and including the
+/// first one is a header and is skipped too. Existing items keep their
+/// status and evidence; the result is sorted by id without duplicates.
+pub fn import_names(existing: Category, dump_text: &str) -> Category {
+    let is_dashes = |line: &str| {
+        let line = line.trim();
+        !line.is_empty() && line.chars().all(|c| c == '-')
+    };
+    let body_start = dump_text
+        .lines()
+        .position(is_dashes)
+        .map_or(0, |idx| idx + 1);
+
+    let mut items: BTreeMap<String, Item> = existing
+        .items
+        .into_iter()
+        .map(|item| (item.id.clone(), item))
+        .collect();
+    for line in dump_text.lines().skip(body_start) {
+        if is_dashes(line) {
+            continue;
+        }
+        let Some(token) = line.split_whitespace().next() else {
+            continue;
+        };
+        if token.parse::<f64>().is_ok() || !is_dump_name(token) {
+            continue;
+        }
+        items.entry(token.to_owned()).or_insert_with(|| Item {
+            id: token.to_owned(),
+            status: Status::Missing,
+            evidence: None,
+        });
+    }
+    Category {
+        name: existing.name,
+        items: items.into_values().collect(),
+    }
+}
+
+/// `[A-Za-z_+\-][A-Za-z0-9_+\-.]*`
+fn is_dump_name(token: &str) -> bool {
+    let mut chars = token.chars();
+    let first_ok = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || matches!(c, '_' | '+' | '-'));
+    first_ok && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '+' | '-' | '.'))
+}
+
 /// Loads a ledger directory: `weights.toml` plus every other `*.toml` file as
-/// a category named by its file stem. Subdirectories are ignored.
+/// a category named by its file stem. Subdirectories are ignored. A category
+/// file with no entry in `weights.toml` is an error.
 pub fn load_dir(dir: &Path) -> Result<(Vec<Category>, Weights), ParityError> {
     let io_err =
         |path: &Path, e: std::io::Error| ParityError::Io(format!("{}: {e}", path.display()));
@@ -246,6 +341,9 @@ pub fn load_dir(dir: &Path) -> Result<(Vec<Category>, Weights), ParityError> {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
+        if !weights.0.contains_key(&name) {
+            return Err(ParityError::UnweightedCategory(name));
+        }
         categories.push(parse_category(&name, &text)?);
     }
     Ok((categories, weights))
@@ -334,5 +432,146 @@ mod tests {
     fn weights_must_sum_to_100() {
         let r = parse_weights("a = 60\nb = 30");
         assert_eq!(r.unwrap_err(), ParityError::WeightsSum(90));
+    }
+
+    /// Temporary ledger directory under `std::env::temp_dir()`, removed on drop.
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let path =
+                std::env::temp_dir().join(format!("xtask-parity-{tag}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn load_dir_names_categories_by_file_stem() {
+        let dir = TempDir::new("stem");
+        fs::write(dir.0.join(WEIGHTS_FILE), "alpha = 100\n").unwrap();
+        fs::write(
+            dir.0.join("alpha.toml"),
+            "[[item]]\nid = \"x\"\nstatus = \"tested\"\n",
+        )
+        .unwrap();
+        let sub = dir.0.join("nested.toml");
+        fs::create_dir(&sub).unwrap();
+        fs::write(sub.join("beta.toml"), "this is = not [valid").unwrap();
+
+        let (cats, weights) = load_dir(&dir.0).unwrap();
+        let names: Vec<&str> = cats.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["alpha"]);
+        assert_eq!(cats[0].items.len(), 1);
+        assert_eq!(weights.0.get("alpha"), Some(&100));
+    }
+
+    #[test]
+    fn load_dir_on_missing_directory_is_io_error() {
+        let path = std::env::temp_dir().join(format!(
+            "xtask-parity-does-not-exist-{}",
+            std::process::id()
+        ));
+        assert!(matches!(load_dir(&path), Err(ParityError::Io(_))));
+    }
+
+    #[test]
+    fn load_dir_rejects_category_without_weight() {
+        let dir = TempDir::new("unweighted");
+        fs::write(dir.0.join(WEIGHTS_FILE), "alpha = 100\n").unwrap();
+        fs::write(dir.0.join("alpha.toml"), "").unwrap();
+        fs::write(dir.0.join("gamma.toml"), "").unwrap();
+        assert_eq!(
+            load_dir(&dir.0).unwrap_err(),
+            ParityError::UnweightedCategory("gamma".into())
+        );
+    }
+
+    #[test]
+    fn import_names_parses_synthetic_dump() {
+        let existing = parse_category(
+            "cvars",
+            r#"
+            [[item]]
+            id = "sv_gravity"
+            status = "tested"
+            evidence = "t::gravity"
+
+            [[item]]
+            id = "zz_custom"
+            status = "implemented""#,
+        )
+        .unwrap();
+        let dump = "CVar List\n\
+                    --------------\n\
+                    sv_gravity                       : 800      : , \"sv\"\n\
+                    _cl_autowepswitch                : 1        : , \"a\", \"user\"\n\
+                    \n\
+                    +attack\n\
+                    cl_righthand : 1\n\
+                    gl_vsync 0\n\
+                    --------------\n\
+                    5 Total CVars\n";
+
+        let cat = import_names(existing, dump);
+
+        assert_eq!(cat.name, "cvars");
+        let ids: Vec<&str> = cat.items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "+attack",
+                "_cl_autowepswitch",
+                "cl_righthand",
+                "gl_vsync",
+                "sv_gravity",
+                "zz_custom"
+            ]
+        );
+        let get = |id: &str| cat.items.iter().find(|i| i.id == id).unwrap();
+        assert_eq!(get("sv_gravity").status, Status::Tested);
+        assert_eq!(get("sv_gravity").evidence.as_deref(), Some("t::gravity"));
+        assert_eq!(get("zz_custom").status, Status::Implemented);
+        assert_eq!(get("gl_vsync").status, Status::Missing);
+        assert_eq!(get("gl_vsync").evidence, None);
+    }
+
+    #[test]
+    fn import_names_without_separator_keeps_first_line() {
+        let empty = Category {
+            name: "cmds".into(),
+            items: Vec::new(),
+        };
+        let cat = import_names(empty, "quit\nmap de_dust2\nquit\n3 commands\n");
+        let ids: Vec<&str> = cat.items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, ["map", "quit"]);
+    }
+
+    #[test]
+    fn category_toml_roundtrips() {
+        let cat = Category {
+            name: "wire".into(),
+            items: vec![
+                Item {
+                    id: "svc_bad".into(),
+                    status: Status::Missing,
+                    evidence: None,
+                },
+                Item {
+                    id: "odd \"id\" \\ x".into(),
+                    status: Status::Verified,
+                    evidence: Some("payload не разбирается".into()),
+                },
+            ],
+        };
+        let text = category_to_toml(&cat);
+        assert_eq!(parse_category("wire", &text).unwrap(), cat);
     }
 }

@@ -77,6 +77,70 @@ pub mod svc {
     pub const SENDCVARVALUE: u8 = 57;
     pub const SENDCVARVALUE2: u8 = 58;
     pub const EXEC: u8 = 59;
+
+    /// Every `svc_*` opcode as `(lowercase name, value)`, in opcode order.
+    pub const ALL: &[(&str, u8)] = &[
+        ("bad", BAD),
+        ("nop", NOP),
+        ("disconnect", DISCONNECT),
+        ("event", EVENT),
+        ("version", VERSION),
+        ("setview", SETVIEW),
+        ("sound", SOUND),
+        ("time", TIME),
+        ("print", PRINT),
+        ("stufftext", STUFFTEXT),
+        ("setangle", SETANGLE),
+        ("serverinfo", SERVERINFO),
+        ("lightstyle", LIGHTSTYLE),
+        ("updateuserinfo", UPDATEUSERINFO),
+        ("deltadescription", DELTADESCRIPTION),
+        ("clientdata", CLIENTDATA),
+        ("stopsound", STOPSOUND),
+        ("pings", PINGS),
+        ("particle", PARTICLE),
+        ("damage", DAMAGE),
+        ("spawnstatic", SPAWNSTATIC),
+        ("event_reliable", EVENT_RELIABLE),
+        ("spawnbaseline", SPAWNBASELINE),
+        ("temp_entity", TEMP_ENTITY),
+        ("setpause", SETPAUSE),
+        ("signonnum", SIGNONNUM),
+        ("centerprint", CENTERPRINT),
+        ("killedmonster", KILLEDMONSTER),
+        ("foundsecret", FOUNDSECRET),
+        ("spawnstaticsound", SPAWNSTATICSOUND),
+        ("intermission", INTERMISSION),
+        ("finale", FINALE),
+        ("cdtrack", CDTRACK),
+        ("restore", RESTORE),
+        ("cutscene", CUTSCENE),
+        ("weaponanim", WEAPONANIM),
+        ("decalname", DECALNAME),
+        ("roomtype", ROOMTYPE),
+        ("addangle", ADDANGLE),
+        ("newusermsg", NEWUSERMSG),
+        ("packetentities", PACKETENTITIES),
+        ("deltapacketentities", DELTAPACKETENTITIES),
+        ("choke", CHOKE),
+        ("resourcelist", RESOURCELIST),
+        ("newmovevars", NEWMOVEVARS),
+        ("resourcerequest", RESOURCEREQUEST),
+        ("customization", CUSTOMIZATION),
+        ("crosshairangle", CROSSHAIRANGLE),
+        ("soundfade", SOUNDFADE),
+        ("filetxferfailed", FILETXFERFAILED),
+        ("hltv", HLTV),
+        ("director", DIRECTOR),
+        ("voiceinit", VOICEINIT),
+        ("voicedata", VOICEDATA),
+        ("sendextrainfo", SENDEXTRAINFO),
+        ("timescale", TIMESCALE),
+        ("resourcelocation", RESOURCELOCATION),
+        ("sendcvarvalue", SENDCVARVALUE),
+        ("sendcvarvalue2", SENDCVARVALUE2),
+        ("exec", EXEC),
+    ];
 }
 
 pub mod clc {
@@ -92,6 +156,22 @@ pub mod clc {
     pub const HLTV: u8 = 9;
     pub const CVARVALUE: u8 = 10;
     pub const CVARVALUE2: u8 = 11;
+
+    /// Every `clc_*` opcode as `(lowercase name, value)`, in opcode order.
+    pub const ALL: &[(&str, u8)] = &[
+        ("bad", BAD),
+        ("nop", NOP),
+        ("move", MOVE),
+        ("stringcmd", STRINGCMD),
+        ("delta", DELTA),
+        ("resourcelist", RESOURCELIST),
+        ("tmove", TMOVE),
+        ("fileconsistency", FILECONSISTENCY),
+        ("voicedata", VOICEDATA),
+        ("hltv", HLTV),
+        ("cvarvalue", CVARVALUE),
+        ("cvarvalue2", CVARVALUE2),
+    ];
 }
 
 pub const ENTITY_NORMAL: u8 = 1;

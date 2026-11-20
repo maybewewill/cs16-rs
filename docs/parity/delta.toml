@@ -1,0 +1,864 @@
+[[item]]
+id = "clientdata_t.flTimeStepSound"
+status = "implemented"
+
+[[item]]
+id = "clientdata_t.origin[0]"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+
+[[item]]
+id = "clientdata_t.origin[1]"
+status = "implemented"
+
+[[item]]
+id = "clientdata_t.velocity[0]"
+status = "implemented"
+
+[[item]]
+id = "clientdata_t.velocity[1]"
+status = "implemented"
+
+[[item]]
+id = "clientdata_t.m_flNextAttack"
+status = "implemented"
+
+[[item]]
+id = "clientdata_t.origin[2]"
+status = "implemented"
+
+[[item]]
+id = "clientdata_t.velocity[2]"
+status = "implemented"
+
+[[item]]
+id = "clientdata_t.ammo_nails"
+status = "missing"
+
+[[item]]
+id = "clientdata_t.ammo_shells"
+status = "missing"
+
+[[item]]
+id = "clientdata_t.ammo_cells"
+status = "missing"
+
+[[item]]
+id = "clientdata_t.ammo_rockets"
+status = "missing"
+
+[[item]]
+id = "clientdata_t.m_iId"
+status = "implemented"
+
+[[item]]
+id = "clientdata_t.punchangle[2]"
+status = "implemented"
+
+[[item]]
+id = "clientdata_t.flags"
+status = "implemented"
+
+[[item]]
+id = "clientdata_t.weaponanim"
+status = "implemented"
+
+[[item]]
+id = "clientdata_t.health"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+
+[[item]]
+id = "clientdata_t.maxspeed"
+status = "implemented"
+
+[[item]]
+id = "clientdata_t.flDuckTime"
+status = "implemented"
+
+[[item]]
+id = "clientdata_t.view_ofs[2]"
+status = "implemented"
+
+[[item]]
+id = "clientdata_t.punchangle[0]"
+status = "implemented"
+
+[[item]]
+id = "clientdata_t.punchangle[1]"
+status = "implemented"
+
+[[item]]
+id = "clientdata_t.viewmodel"
+status = "implemented"
+
+[[item]]
+id = "clientdata_t.weapons"
+status = "implemented"
+
+[[item]]
+id = "clientdata_t.pushmsec"
+status = "missing"
+
+[[item]]
+id = "clientdata_t.deadflag"
+status = "implemented"
+
+[[item]]
+id = "clientdata_t.fov"
+status = "implemented"
+
+[[item]]
+id = "clientdata_t.physinfo"
+status = "implemented"
+
+[[item]]
+id = "clientdata_t.bInDuck"
+status = "implemented"
+
+[[item]]
+id = "clientdata_t.flSwimTime"
+status = "missing"
+
+[[item]]
+id = "clientdata_t.waterjumptime"
+status = "missing"
+
+[[item]]
+id = "clientdata_t.waterlevel"
+status = "implemented"
+
+[[item]]
+id = "clientdata_t.iuser1"
+status = "implemented"
+
+[[item]]
+id = "clientdata_t.iuser2"
+status = "implemented"
+
+[[item]]
+id = "clientdata_t.iuser3"
+status = "implemented"
+
+[[item]]
+id = "clientdata_t.iuser4"
+status = "implemented"
+
+[[item]]
+id = "clientdata_t.vuser2[0]"
+status = "missing"
+
+[[item]]
+id = "clientdata_t.vuser2[1]"
+status = "missing"
+
+[[item]]
+id = "clientdata_t.vuser2[2]"
+status = "missing"
+
+[[item]]
+id = "clientdata_t.vuser3[0]"
+status = "missing"
+
+[[item]]
+id = "clientdata_t.vuser3[1]"
+status = "missing"
+
+[[item]]
+id = "clientdata_t.vuser3[2]"
+status = "missing"
+
+[[item]]
+id = "clientdata_t.vuser4[0]"
+status = "missing"
+
+[[item]]
+id = "clientdata_t.vuser4[1]"
+status = "missing"
+
+[[item]]
+id = "clientdata_t.fuser1"
+status = "missing"
+
+[[item]]
+id = "clientdata_t.fuser2"
+status = "missing"
+
+[[item]]
+id = "clientdata_t.fuser3"
+status = "missing"
+
+[[item]]
+id = "entity_state_t.animtime"
+status = "implemented"
+
+[[item]]
+id = "entity_state_t.frame"
+status = "implemented"
+
+[[item]]
+id = "entity_state_t.origin[0]"
+status = "implemented"
+
+[[item]]
+id = "entity_state_t.angles[0]"
+status = "implemented"
+
+[[item]]
+id = "entity_state_t.angles[1]"
+status = "implemented"
+
+[[item]]
+id = "entity_state_t.origin[1]"
+status = "implemented"
+
+[[item]]
+id = "entity_state_t.origin[2]"
+status = "implemented"
+
+[[item]]
+id = "entity_state_t.sequence"
+status = "implemented"
+
+[[item]]
+id = "entity_state_t.modelindex"
+status = "implemented"
+
+[[item]]
+id = "entity_state_t.movetype"
+status = "implemented"
+
+[[item]]
+id = "entity_state_t.solid"
+status = "implemented"
+
+[[item]]
+id = "entity_state_t.mins[0]"
+status = "implemented"
+
+[[item]]
+id = "entity_state_t.mins[1]"
+status = "implemented"
+
+[[item]]
+id = "entity_state_t.mins[2]"
+status = "implemented"
+
+[[item]]
+id = "entity_state_t.maxs[0]"
+status = "implemented"
+
+[[item]]
+id = "entity_state_t.maxs[1]"
+status = "implemented"
+
+[[item]]
+id = "entity_state_t.maxs[2]"
+status = "implemented"
+
+[[item]]
+id = "entity_state_t.endpos[0]"
+status = "missing"
+
+[[item]]
+id = "entity_state_t.endpos[1]"
+status = "missing"
+
+[[item]]
+id = "entity_state_t.endpos[2]"
+status = "missing"
+
+[[item]]
+id = "entity_state_t.startpos[0]"
+status = "missing"
+
+[[item]]
+id = "entity_state_t.startpos[1]"
+status = "missing"
+
+[[item]]
+id = "entity_state_t.startpos[2]"
+status = "missing"
+
+[[item]]
+id = "entity_state_t.impacttime"
+status = "missing"
+
+[[item]]
+id = "entity_state_t.starttime"
+status = "missing"
+
+[[item]]
+id = "entity_state_t.weaponmodel"
+status = "implemented"
+
+[[item]]
+id = "entity_state_t.owner"
+status = "implemented"
+
+[[item]]
+id = "entity_state_t.effects"
+status = "implemented"
+
+[[item]]
+id = "entity_state_t.eflags"
+status = "missing"
+
+[[item]]
+id = "entity_state_t.angles[2]"
+status = "implemented"
+
+[[item]]
+id = "entity_state_t.colormap"
+status = "implemented"
+
+[[item]]
+id = "entity_state_t.framerate"
+status = "implemented"
+
+[[item]]
+id = "entity_state_t.skin"
+status = "implemented"
+
+[[item]]
+id = "entity_state_t.controller[0]"
+status = "missing"
+
+[[item]]
+id = "entity_state_t.controller[1]"
+status = "missing"
+
+[[item]]
+id = "entity_state_t.controller[2]"
+status = "missing"
+
+[[item]]
+id = "entity_state_t.controller[3]"
+status = "missing"
+
+[[item]]
+id = "entity_state_t.blending[0]"
+status = "missing"
+
+[[item]]
+id = "entity_state_t.blending[1]"
+status = "missing"
+
+[[item]]
+id = "entity_state_t.body"
+status = "implemented"
+
+[[item]]
+id = "entity_state_t.rendermode"
+status = "implemented"
+
+[[item]]
+id = "entity_state_t.renderamt"
+status = "implemented"
+
+[[item]]
+id = "entity_state_t.renderfx"
+status = "implemented"
+
+[[item]]
+id = "entity_state_t.scale"
+status = "implemented"
+
+[[item]]
+id = "entity_state_t.rendercolor.r"
+status = "missing"
+
+[[item]]
+id = "entity_state_t.rendercolor.g"
+status = "missing"
+
+[[item]]
+id = "entity_state_t.rendercolor.b"
+status = "missing"
+
+[[item]]
+id = "entity_state_t.aiment"
+status = "implemented"
+
+[[item]]
+id = "entity_state_t.basevelocity[0]"
+status = "missing"
+
+[[item]]
+id = "entity_state_t.basevelocity[1]"
+status = "missing"
+
+[[item]]
+id = "entity_state_t.basevelocity[2]"
+status = "missing"
+
+[[item]]
+id = "entity_state_t.iuser4"
+status = "missing"
+
+[[item]]
+id = "entity_state_player_t.animtime"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::parses_real_cs16_delta_lst_and_roundtrips_meta_wire_and_records"
+
+[[item]]
+id = "entity_state_player_t.frame"
+status = "implemented"
+
+[[item]]
+id = "entity_state_player_t.origin[0]"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::parses_real_cs16_delta_lst_and_roundtrips_meta_wire_and_records"
+
+[[item]]
+id = "entity_state_player_t.angles[0]"
+status = "implemented"
+
+[[item]]
+id = "entity_state_player_t.angles[1]"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::parses_real_cs16_delta_lst_and_roundtrips_meta_wire_and_records"
+
+[[item]]
+id = "entity_state_player_t.origin[1]"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::parses_real_cs16_delta_lst_and_roundtrips_meta_wire_and_records"
+
+[[item]]
+id = "entity_state_player_t.origin[2]"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::parses_real_cs16_delta_lst_and_roundtrips_meta_wire_and_records"
+
+[[item]]
+id = "entity_state_player_t.gaitsequence"
+status = "implemented"
+
+[[item]]
+id = "entity_state_player_t.sequence"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::parses_real_cs16_delta_lst_and_roundtrips_meta_wire_and_records"
+
+[[item]]
+id = "entity_state_player_t.modelindex"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::parses_real_cs16_delta_lst_and_roundtrips_meta_wire_and_records"
+
+[[item]]
+id = "entity_state_player_t.movetype"
+status = "implemented"
+
+[[item]]
+id = "entity_state_player_t.solid"
+status = "implemented"
+
+[[item]]
+id = "entity_state_player_t.mins[0]"
+status = "implemented"
+
+[[item]]
+id = "entity_state_player_t.mins[1]"
+status = "implemented"
+
+[[item]]
+id = "entity_state_player_t.mins[2]"
+status = "implemented"
+
+[[item]]
+id = "entity_state_player_t.maxs[0]"
+status = "implemented"
+
+[[item]]
+id = "entity_state_player_t.maxs[1]"
+status = "implemented"
+
+[[item]]
+id = "entity_state_player_t.maxs[2]"
+status = "implemented"
+
+[[item]]
+id = "entity_state_player_t.weaponmodel"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::parses_real_cs16_delta_lst_and_roundtrips_meta_wire_and_records"
+
+[[item]]
+id = "entity_state_player_t.owner"
+status = "implemented"
+
+[[item]]
+id = "entity_state_player_t.effects"
+status = "implemented"
+
+[[item]]
+id = "entity_state_player_t.angles[2]"
+status = "implemented"
+
+[[item]]
+id = "entity_state_player_t.colormap"
+status = "implemented"
+
+[[item]]
+id = "entity_state_player_t.framerate"
+status = "implemented"
+
+[[item]]
+id = "entity_state_player_t.skin"
+status = "implemented"
+
+[[item]]
+id = "entity_state_player_t.controller[0]"
+status = "missing"
+
+[[item]]
+id = "entity_state_player_t.controller[1]"
+status = "missing"
+
+[[item]]
+id = "entity_state_player_t.controller[2]"
+status = "missing"
+
+[[item]]
+id = "entity_state_player_t.controller[3]"
+status = "missing"
+
+[[item]]
+id = "entity_state_player_t.blending[0]"
+status = "missing"
+
+[[item]]
+id = "entity_state_player_t.blending[1]"
+status = "missing"
+
+[[item]]
+id = "entity_state_player_t.body"
+status = "implemented"
+
+[[item]]
+id = "entity_state_player_t.rendermode"
+status = "implemented"
+
+[[item]]
+id = "entity_state_player_t.renderamt"
+status = "implemented"
+
+[[item]]
+id = "entity_state_player_t.renderfx"
+status = "implemented"
+
+[[item]]
+id = "entity_state_player_t.scale"
+status = "implemented"
+
+[[item]]
+id = "entity_state_player_t.rendercolor.r"
+status = "missing"
+
+[[item]]
+id = "entity_state_player_t.rendercolor.g"
+status = "missing"
+
+[[item]]
+id = "entity_state_player_t.rendercolor.b"
+status = "missing"
+
+[[item]]
+id = "entity_state_player_t.friction"
+status = "missing"
+
+[[item]]
+id = "entity_state_player_t.usehull"
+status = "implemented"
+
+[[item]]
+id = "entity_state_player_t.gravity"
+status = "missing"
+
+[[item]]
+id = "entity_state_player_t.aiment"
+status = "implemented"
+
+[[item]]
+id = "entity_state_player_t.basevelocity[0]"
+status = "missing"
+
+[[item]]
+id = "entity_state_player_t.basevelocity[1]"
+status = "missing"
+
+[[item]]
+id = "entity_state_player_t.basevelocity[2]"
+status = "missing"
+
+[[item]]
+id = "entity_state_player_t.spectator"
+status = "implemented"
+
+[[item]]
+id = "entity_state_player_t.iuser4"
+status = "missing"
+
+[[item]]
+id = "custom_entity_state_t.rendermode"
+status = "implemented"
+
+[[item]]
+id = "custom_entity_state_t.origin[0]"
+status = "implemented"
+
+[[item]]
+id = "custom_entity_state_t.origin[1]"
+status = "implemented"
+
+[[item]]
+id = "custom_entity_state_t.origin[2]"
+status = "implemented"
+
+[[item]]
+id = "custom_entity_state_t.angles[0]"
+status = "implemented"
+
+[[item]]
+id = "custom_entity_state_t.angles[1]"
+status = "implemented"
+
+[[item]]
+id = "custom_entity_state_t.angles[2]"
+status = "implemented"
+
+[[item]]
+id = "custom_entity_state_t.sequence"
+status = "implemented"
+
+[[item]]
+id = "custom_entity_state_t.skin"
+status = "implemented"
+
+[[item]]
+id = "custom_entity_state_t.modelindex"
+status = "implemented"
+
+[[item]]
+id = "custom_entity_state_t.scale"
+status = "implemented"
+
+[[item]]
+id = "custom_entity_state_t.body"
+status = "implemented"
+
+[[item]]
+id = "custom_entity_state_t.rendercolor.r"
+status = "missing"
+
+[[item]]
+id = "custom_entity_state_t.rendercolor.g"
+status = "missing"
+
+[[item]]
+id = "custom_entity_state_t.rendercolor.b"
+status = "missing"
+
+[[item]]
+id = "custom_entity_state_t.renderfx"
+status = "implemented"
+
+[[item]]
+id = "custom_entity_state_t.renderamt"
+status = "implemented"
+
+[[item]]
+id = "custom_entity_state_t.frame"
+status = "implemented"
+
+[[item]]
+id = "custom_entity_state_t.animtime"
+status = "implemented"
+
+[[item]]
+id = "usercmd_t.lerp_msec"
+status = "implemented"
+
+[[item]]
+id = "usercmd_t.msec"
+status = "implemented"
+
+[[item]]
+id = "usercmd_t.viewangles[1]"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+
+[[item]]
+id = "usercmd_t.viewangles[0]"
+status = "implemented"
+
+[[item]]
+id = "usercmd_t.buttons"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+
+[[item]]
+id = "usercmd_t.forwardmove"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+
+[[item]]
+id = "usercmd_t.lightlevel"
+status = "implemented"
+
+[[item]]
+id = "usercmd_t.sidemove"
+status = "implemented"
+
+[[item]]
+id = "usercmd_t.upmove"
+status = "implemented"
+
+[[item]]
+id = "usercmd_t.impulse"
+status = "implemented"
+
+[[item]]
+id = "usercmd_t.viewangles[2]"
+status = "implemented"
+
+[[item]]
+id = "usercmd_t.impact_index"
+status = "implemented"
+
+[[item]]
+id = "usercmd_t.impact_position[0]"
+status = "implemented"
+
+[[item]]
+id = "usercmd_t.impact_position[1]"
+status = "implemented"
+
+[[item]]
+id = "usercmd_t.impact_position[2]"
+status = "implemented"
+
+[[item]]
+id = "weapon_data_t.m_flTimeWeaponIdle"
+status = "missing"
+
+[[item]]
+id = "weapon_data_t.m_flNextPrimaryAttack"
+status = "missing"
+
+[[item]]
+id = "weapon_data_t.m_flNextReload"
+status = "missing"
+
+[[item]]
+id = "weapon_data_t.m_fNextAimBonus"
+status = "missing"
+
+[[item]]
+id = "weapon_data_t.m_flNextSecondaryAttack"
+status = "missing"
+
+[[item]]
+id = "weapon_data_t.m_iClip"
+status = "missing"
+
+[[item]]
+id = "weapon_data_t.m_flPumpTime"
+status = "missing"
+
+[[item]]
+id = "weapon_data_t.m_fInSpecialReload"
+status = "missing"
+
+[[item]]
+id = "weapon_data_t.m_fReloadTime"
+status = "missing"
+
+[[item]]
+id = "weapon_data_t.m_fInReload"
+status = "missing"
+
+[[item]]
+id = "weapon_data_t.m_fAimedDamage"
+status = "missing"
+
+[[item]]
+id = "weapon_data_t.m_fInZoom"
+status = "missing"
+
+[[item]]
+id = "weapon_data_t.m_iWeaponState"
+status = "missing"
+
+[[item]]
+id = "weapon_data_t.m_iId"
+status = "missing"
+
+[[item]]
+id = "weapon_data_t.fuser1"
+status = "missing"
+
+[[item]]
+id = "weapon_data_t.fuser2"
+status = "missing"
+
+[[item]]
+id = "weapon_data_t.fuser3"
+status = "missing"
+
+[[item]]
+id = "weapon_data_t.iuser1"
+status = "missing"
+
+[[item]]
+id = "event_t.entindex"
+status = "missing"
+
+[[item]]
+id = "event_t.bparam1"
+status = "missing"
+
+[[item]]
+id = "event_t.bparam2"
+status = "missing"
+
+[[item]]
+id = "event_t.origin[0]"
+status = "missing"
+
+[[item]]
+id = "event_t.origin[1]"
+status = "missing"
+
+[[item]]
+id = "event_t.origin[2]"
+status = "missing"
+
+[[item]]
+id = "event_t.fparam1"
+status = "missing"
+
+[[item]]
+id = "event_t.fparam2"
+status = "missing"
+
+[[item]]
+id = "event_t.iparam1"
+status = "missing"
+
+[[item]]
+id = "event_t.iparam2"
+status = "missing"
+
+[[item]]
+id = "event_t.angles[0]"
+status = "missing"
+
+[[item]]
+id = "event_t.angles[1]"
+status = "missing"
+
+[[item]]
+id = "event_t.angles[2]"
+status = "missing"
+
+[[item]]
+id = "event_t.ducking"
+status = "missing"

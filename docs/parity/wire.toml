@@ -1,0 +1,304 @@
+[[item]]
+id = "svc_bad"
+status = "missing"
+
+[[item]]
+id = "svc_nop"
+status = "implemented"
+
+[[item]]
+id = "svc_disconnect"
+status = "implemented"
+
+[[item]]
+id = "svc_event"
+status = "implemented"
+
+[[item]]
+id = "svc_version"
+status = "implemented"
+
+[[item]]
+id = "svc_setview"
+status = "implemented"
+
+[[item]]
+id = "svc_sound"
+status = "implemented"
+
+[[item]]
+id = "svc_time"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+
+[[item]]
+id = "svc_print"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+
+[[item]]
+id = "svc_stufftext"
+status = "implemented"
+
+[[item]]
+id = "svc_setangle"
+status = "implemented"
+
+[[item]]
+id = "svc_serverinfo"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+
+[[item]]
+id = "svc_lightstyle"
+status = "implemented"
+
+[[item]]
+id = "svc_updateuserinfo"
+status = "implemented"
+
+[[item]]
+id = "svc_deltadescription"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+
+[[item]]
+id = "svc_clientdata"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+
+[[item]]
+id = "svc_stopsound"
+status = "implemented"
+
+[[item]]
+id = "svc_pings"
+status = "implemented"
+
+[[item]]
+id = "svc_particle"
+status = "implemented"
+
+[[item]]
+id = "svc_damage"
+status = "implemented"
+
+[[item]]
+id = "svc_spawnstatic"
+status = "implemented"
+
+[[item]]
+id = "svc_event_reliable"
+status = "implemented"
+
+[[item]]
+id = "svc_spawnbaseline"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+
+[[item]]
+id = "svc_temp_entity"
+status = "implemented"
+evidence = "payload не разбирается"
+
+[[item]]
+id = "svc_setpause"
+status = "implemented"
+
+[[item]]
+id = "svc_signonnum"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+
+[[item]]
+id = "svc_centerprint"
+status = "implemented"
+
+[[item]]
+id = "svc_killedmonster"
+status = "implemented"
+
+[[item]]
+id = "svc_foundsecret"
+status = "implemented"
+
+[[item]]
+id = "svc_spawnstaticsound"
+status = "implemented"
+
+[[item]]
+id = "svc_intermission"
+status = "implemented"
+
+[[item]]
+id = "svc_finale"
+status = "implemented"
+
+[[item]]
+id = "svc_cdtrack"
+status = "implemented"
+
+[[item]]
+id = "svc_restore"
+status = "implemented"
+
+[[item]]
+id = "svc_cutscene"
+status = "implemented"
+
+[[item]]
+id = "svc_weaponanim"
+status = "implemented"
+
+[[item]]
+id = "svc_decalname"
+status = "implemented"
+
+[[item]]
+id = "svc_roomtype"
+status = "implemented"
+
+[[item]]
+id = "svc_addangle"
+status = "implemented"
+
+[[item]]
+id = "svc_newusermsg"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+
+[[item]]
+id = "svc_packetentities"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+
+[[item]]
+id = "svc_deltapacketentities"
+status = "implemented"
+
+[[item]]
+id = "svc_choke"
+status = "implemented"
+
+[[item]]
+id = "svc_resourcelist"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+
+[[item]]
+id = "svc_newmovevars"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+
+[[item]]
+id = "svc_resourcerequest"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+
+[[item]]
+id = "svc_customization"
+status = "implemented"
+
+[[item]]
+id = "svc_crosshairangle"
+status = "implemented"
+
+[[item]]
+id = "svc_soundfade"
+status = "implemented"
+
+[[item]]
+id = "svc_filetxferfailed"
+status = "implemented"
+
+[[item]]
+id = "svc_hltv"
+status = "implemented"
+
+[[item]]
+id = "svc_director"
+status = "implemented"
+
+[[item]]
+id = "svc_voiceinit"
+status = "implemented"
+
+[[item]]
+id = "svc_voicedata"
+status = "implemented"
+
+[[item]]
+id = "svc_sendextrainfo"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+
+[[item]]
+id = "svc_timescale"
+status = "implemented"
+
+[[item]]
+id = "svc_resourcelocation"
+status = "implemented"
+
+[[item]]
+id = "svc_sendcvarvalue"
+status = "implemented"
+
+[[item]]
+id = "svc_sendcvarvalue2"
+status = "implemented"
+
+[[item]]
+id = "svc_exec"
+status = "implemented"
+
+[[item]]
+id = "clc_bad"
+status = "missing"
+
+[[item]]
+id = "clc_nop"
+status = "implemented"
+
+[[item]]
+id = "clc_move"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+
+[[item]]
+id = "clc_stringcmd"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+
+[[item]]
+id = "clc_delta"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+
+[[item]]
+id = "clc_resourcelist"
+status = "implemented"
+
+[[item]]
+id = "clc_tmove"
+status = "implemented"
+
+[[item]]
+id = "clc_fileconsistency"
+status = "implemented"
+
+[[item]]
+id = "clc_voicedata"
+status = "implemented"
+
+[[item]]
+id = "clc_hltv"
+status = "implemented"
+
+[[item]]
+id = "clc_cvarvalue"
+status = "implemented"
+
+[[item]]
+id = "clc_cvarvalue2"
+status = "implemented"

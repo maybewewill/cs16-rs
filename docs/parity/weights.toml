@@ -1,0 +1,15 @@
+wire = 8
+usermsg = 6
+delta = 3
+tempents = 4
+entities = 12
+weapons = 10
+movement = 8
+cvars = 6
+render = 10
+sound = 4
+ui = 8
+engine = 7
+bots = 4
+web = 5
+mods = 5

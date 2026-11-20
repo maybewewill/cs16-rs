@@ -1,0 +1,183 @@
+[[item]]
+id = "_vgui_menus"
+status = "implemented"
+
+[[item]]
+id = "bot_difficulty"
+status = "implemented"
+
+[[item]]
+id = "bot_quota"
+status = "implemented"
+
+[[item]]
+id = "brightness"
+status = "implemented"
+
+[[item]]
+id = "cl_crosshair_color"
+status = "implemented"
+
+[[item]]
+id = "cl_crosshair_size"
+status = "implemented"
+
+[[item]]
+id = "cl_crosshair_translucent"
+status = "implemented"
+
+[[item]]
+id = "cl_dynamiccrosshair"
+status = "implemented"
+
+[[item]]
+id = "cl_hd_models"
+status = "implemented"
+
+[[item]]
+id = "cl_righthand"
+status = "implemented"
+
+[[item]]
+id = "fov_default"
+status = "implemented"
+
+[[item]]
+id = "fps_max"
+status = "implemented"
+
+[[item]]
+id = "gamma"
+status = "implemented"
+
+[[item]]
+id = "gl_texturemode"
+status = "implemented"
+
+[[item]]
+id = "hostname"
+status = "implemented"
+
+[[item]]
+id = "hud_fastswitch"
+status = "implemented"
+
+[[item]]
+id = "m_filter"
+status = "implemented"
+
+[[item]]
+id = "m_pitch"
+status = "implemented"
+
+[[item]]
+id = "m_rawinput"
+status = "implemented"
+
+[[item]]
+id = "m_yaw"
+status = "implemented"
+
+[[item]]
+id = "mp3volume"
+status = "implemented"
+
+[[item]]
+id = "mp_c4timer"
+status = "implemented"
+
+[[item]]
+id = "mp_freezetime"
+status = "implemented"
+
+[[item]]
+id = "mp_friendlyfire"
+status = "implemented"
+
+[[item]]
+id = "mp_roundtime"
+status = "implemented"
+
+[[item]]
+id = "mp_startmoney"
+status = "implemented"
+
+[[item]]
+id = "name"
+status = "implemented"
+
+[[item]]
+id = "net_graph"
+status = "implemented"
+
+[[item]]
+id = "net_graphpos"
+status = "implemented"
+
+[[item]]
+id = "r_drawviewmodel"
+status = "implemented"
+
+[[item]]
+id = "r_fullbright"
+status = "implemented"
+
+[[item]]
+id = "r_lightmap_only"
+status = "implemented"
+
+[[item]]
+id = "r_noclip_speed"
+status = "implemented"
+
+[[item]]
+id = "r_vis"
+status = "implemented"
+
+[[item]]
+id = "sensitivity"
+status = "implemented"
+
+[[item]]
+id = "sv_accelerate"
+status = "implemented"
+
+[[item]]
+id = "sv_airaccelerate"
+status = "implemented"
+
+[[item]]
+id = "sv_cheats"
+status = "implemented"
+
+[[item]]
+id = "sv_friction"
+status = "implemented"
+
+[[item]]
+id = "sv_gravity"
+status = "implemented"
+
+[[item]]
+id = "sv_maxspeed"
+status = "implemented"
+
+[[item]]
+id = "sv_stepsize"
+status = "implemented"
+
+[[item]]
+id = "sv_stopspeed"
+status = "implemented"
+
+[[item]]
+id = "texgamma"
+status = "implemented"
+
+[[item]]
+id = "vid_aspect_mode"
+status = "implemented"
+
+[[item]]
+id = "volume"
+status = "implemented"

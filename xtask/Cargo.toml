@@ -3,11 +3,16 @@ name = "xtask"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 publish = false
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 toml = "1.2.1"
+
+[dev-dependencies]
+cs-cvar.workspace = true
+cs-proto48.workspace = true
 
 [lints]
 workspace = true
