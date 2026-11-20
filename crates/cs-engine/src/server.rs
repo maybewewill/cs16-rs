@@ -158,6 +158,14 @@ impl<G: GameDll> Server<G> {
         self.clients.iter().filter(|c| !c.is_free()).count()
     }
 
+    /// Userid of the client in `slot`; `None` for a free slot.
+    pub fn client_userid(&self, slot: u8) -> Option<i32> {
+        self.clients
+            .get(usize::from(slot))
+            .filter(|c| !c.is_free())
+            .map(|c| c.userid)
+    }
+
     pub fn spawn_count(&self) -> u32 {
         self.spawn_count
     }
@@ -335,32 +343,40 @@ impl<G: GameDll> Server<G> {
             let Ok(messages) = parse_clc_stream(&payload, &schema, incoming.sequence) else {
                 continue;
             };
+            // At most one sign-on stage command is honoured per payload.
+            let mut stage_done = false;
             for message in messages {
                 if self.clients[index].is_free() {
                     return;
                 }
                 // User commands, deltas and resource lists are handled by later tasks.
                 if let ClcMessage::StringCmd(line) = message {
-                    self.handle_stringcmd(slot, &line);
+                    self.handle_stringcmd(slot, &line, &mut stage_done);
                 }
             }
         }
     }
 
-    fn handle_stringcmd(&mut self, slot: u8, line: &str) {
+    /// Runs one string command. A sign-on stage command is honoured only in the stage that
+    /// expects it and only while `stage_done` is clear; honouring one sets `stage_done`.
+    fn handle_stringcmd(&mut self, slot: u8, line: &str, stage_done: &mut bool) {
         let argv = tokenize_goldsrc_line(line);
         let Some(cmd) = argv.first() else {
             return;
         };
-        let client = &self.clients[usize::from(slot)];
-        let state = client.state;
+        let state = self.clients[usize::from(slot)].state;
         let is_stage_cmd = matches!(cmd.as_str(), "new" | "sendres" | "spawn" | "sendents");
-        if is_stage_cmd && client.chan.has_pending_reliable() {
-            // The previous stage's output has not been delivered yet.
+        if is_stage_cmd && *stage_done {
             return;
         }
         match (cmd.as_str(), state) {
-            ("new", ClientState::Signon(_)) => self.stage_new(slot),
+            // `new` while the `new` stage's output is the latest sent is a repeat: ignored.
+            (
+                "new",
+                ClientState::Signon(
+                    SignonStage::AwaitNew | SignonStage::AwaitSpawn | SignonStage::AwaitSendEnts,
+                ),
+            ) => self.stage_new(slot),
             ("sendres", ClientState::Signon(SignonStage::AwaitSendRes)) => {
                 self.stage_sendres(slot);
             }
@@ -370,9 +386,10 @@ impl<G: GameDll> Server<G> {
             ("sendents", ClientState::Signon(SignonStage::AwaitSendEnts)) => {
                 self.clients[usize::from(slot)].state = ClientState::Active;
             }
-            _ if is_stage_cmd => {}
+            _ if is_stage_cmd => return,
             _ => self.with_game(|game, eng| game.client_command(eng, slot, &argv)),
         }
+        *stage_done |= is_stage_cmd;
         // Enforces the reliable backlog cap on what the stage wrote.
         self.drain_outbox();
     }

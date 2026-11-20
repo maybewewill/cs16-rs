@@ -331,7 +331,7 @@ fn repeated_new_while_stage_pending_is_ignored() {
     step_until(&mut h, &mut [&mut probe], 20, "AwaitSendRes", |h, _| {
         h.server.client_state(0) == ClientState::Signon(SignonStage::AwaitSendRes)
     });
-    // One reliable payload of 300 `new` commands while the `new` stage is still in flight.
+    // One reliable payload of 300 `new` commands while the client awaits `sendres`.
     for _ in 0..300 {
         probe.send_stringcmd("new");
     }
@@ -339,6 +339,93 @@ fn repeated_new_while_stage_pending_is_ignored() {
     assert_eq!(serverinfo_count(&probe), 1);
     assert_eq!(probe.state(), &ProbeState::InGame);
     assert_eq!(h.server.client_state(0), ClientState::Active);
+}
+
+#[test]
+fn repeated_new_followed_by_sendres_in_one_payload() {
+    let mut h = Harness::new(4);
+    let mut other = h.add_probe("Other");
+    h.step(&mut [&mut other], 200);
+    assert_eq!(other.state(), &ProbeState::InGame);
+
+    let mut probe = h.add_probe("Player");
+    step_until(
+        &mut h,
+        &mut [&mut other, &mut probe],
+        200,
+        "first stage delivered",
+        |_, p| p[1].server_info().is_some(),
+    );
+    // One reliable payload: 300 `new`, then `sendres`.
+    for _ in 0..300 {
+        probe.send_stringcmd("new");
+    }
+    probe.send_stringcmd("sendres");
+    h.step(&mut [&mut other, &mut probe], 400);
+
+    // Either sign-on completes or the client was dropped by the backlog cap.
+    match h.server.client_state(1) {
+        ClientState::Active => assert_eq!(probe.state(), &ProbeState::InGame),
+        state => assert_eq!(state, ClientState::Free),
+    }
+    assert_eq!(other.state(), &ProbeState::InGame);
+    assert_eq!(h.server.client_state(0), ClientState::Active);
+    assert_eq!(other.stats().parse_errors, 0);
+}
+
+#[test]
+fn new_is_ignored_awaiting_sendres_and_restarts_awaiting_spawn() {
+    let mut h = Harness::new(4);
+    let mut probe = h.add_probe("Player");
+    step_until(&mut h, &mut [&mut probe], 20, "AwaitSendRes", |h, _| {
+        h.server.client_state(0) == ClientState::Signon(SignonStage::AwaitSendRes)
+    });
+    probe.send_stringcmd("new");
+    h.step(&mut [&mut probe], 200);
+    assert_eq!(serverinfo_count(&probe), 1);
+    assert_eq!(probe.state(), &ProbeState::InGame);
+
+    let mut h = Harness::new(4);
+    let mut probe = h.add_probe("Player");
+    step_until(&mut h, &mut [&mut probe], 200, "AwaitSpawn", |h, _| {
+        h.server.client_state(0) == ClientState::Signon(SignonStage::AwaitSpawn)
+    });
+    // Goes out ahead of the probe's own `spawn`, which then arrives out of stage.
+    probe.send_stringcmd("new");
+    h.step(&mut [&mut probe], 200);
+    assert_eq!(serverinfo_count(&probe), 2);
+    assert_eq!(probe.state(), &ProbeState::InGame);
+    assert_eq!(h.server.client_state(0), ClientState::Active);
+    let game = h.server.game();
+    assert_eq!(game.client_put_in_server_calls, 1);
+    assert_eq!(game.client_disconnect_calls, 0);
+}
+
+#[test]
+fn signon_completes_while_game_broadcasts_every_frame() {
+    let game = TestGame {
+        broadcast_every_frame: true,
+        ..TestGame::default()
+    };
+    let mut h = Harness::with_game(4, game);
+    let mut first = h.add_probe("First");
+    h.step(&mut [&mut first], 200);
+    assert_eq!(first.state(), &ProbeState::InGame);
+
+    // Every frame the game broadcasts a reliable message and a userinfo change, so the
+    // joining client's channel almost always has reliable data in flight during sign-on.
+    let mut second = h.add_probe("Second");
+    step_until(
+        &mut h,
+        &mut [&mut first, &mut second],
+        400,
+        "second InGame",
+        |_, p| p[1].state() == &ProbeState::InGame,
+    );
+    assert_eq!(h.server.client_state(1), ClientState::Active);
+    assert_eq!(first.state(), &ProbeState::InGame);
+    assert_eq!(first.stats().parse_errors, 0);
+    assert_eq!(second.stats().parse_errors, 0);
 }
 
 #[test]
@@ -395,6 +482,30 @@ fn kick_during_connect_rejects() {
     );
     assert_eq!(h.server.client_count(), 0);
     assert_eq!(h.server.game().client_connect_calls, 1);
+
+    // The rejected connect did not use up a userid.
+    h.server.game_mut().kick_on_connect = None;
+    let mut next = h.add_probe("Next");
+    h.step(&mut [&mut next], 200);
+    assert_eq!(next.state(), &ProbeState::InGame);
+    assert_eq!(h.server.client_userid(0), Some(1));
+}
+
+#[test]
+fn backlog_overflow_during_connect_rejects_with_reason() {
+    let game = TestGame {
+        flood_on_connect: true,
+        flood_bytes: MAX_RELIABLE_BACKLOG + 1,
+        ..TestGame::default()
+    };
+    let mut h = Harness::with_game(4, game);
+    let mut probe = h.add_probe("Player");
+    h.step(&mut [&mut probe], 20);
+    assert_eq!(
+        probe.state(),
+        &ProbeState::Rejected("Reliable channel overflowed".to_string())
+    );
+    assert_eq!(h.server.client_count(), 0);
 }
 
 #[test]

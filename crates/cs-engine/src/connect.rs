@@ -100,8 +100,10 @@ impl<G: GameDll> Server<G> {
             return encode_s2c_reject(&reason);
         }
         if self.clients[index].is_free() {
-            // Kicked (or dropped) during `client_connect`: no userid is used up.
-            return encode_s2c_reject(&kick_reason.unwrap_or_default());
+            // Kicked, or dropped by the reliable backlog cap, during `client_connect`: no
+            // userid is used up.
+            let reason = kick_reason.unwrap_or_else(|| "Reliable channel overflowed\n".to_string());
+            return encode_s2c_reject(&reason);
         }
         let userid = self.next_userid;
         self.next_userid += 1;

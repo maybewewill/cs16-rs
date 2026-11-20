@@ -6,6 +6,7 @@ use cs_engine::{EngineApi, GameDll, PrecacheError, Server, ServerConfig, ServerM
 use cs_probe::{ProbeClient, ProbeConfig};
 use cs_proto48::crypto::md5_hex;
 use cs_proto48::delta::{DeltaRegistry, GoldSrcClientData, GoldSrcEntityState, GoldSrcUserCmd};
+use cs_proto48::messages::svc;
 use cs_proto48::usermsg::UserMsgRegistry;
 use cs_transport::{LoopbackEndpoint, LoopbackHub, PeerAddr};
 use glam::Vec3;
@@ -81,6 +82,12 @@ pub struct TestGame {
     pub kick_on_connect: Option<String>,
     /// Bytes `client_command("flood")` writes into that client's reliable buffer.
     pub flood_bytes: usize,
+    /// When set, `client_connect` also writes `flood_bytes` into the connecting slot's
+    /// reliable buffer.
+    pub flood_on_connect: bool,
+    /// When set, `update_client_data` (called every frame for each active client) writes an
+    /// `svc_nop` to `reliable_all` and sets a userinfo key on that client.
+    pub broadcast_every_frame: bool,
     /// Entities with `modelindex = 2` that `server_activate` creates.
     pub extra_entities: usize,
     /// Result of `precache_model("models/late.mdl")` in `client_put_in_server`.
@@ -129,6 +136,9 @@ impl GameDll for TestGame {
         self.client_connect_calls += 1;
         if let Some(reason) = &self.kick_on_connect {
             eng.kick(slot, reason);
+        }
+        if self.flood_on_connect {
+            eng.reliable(slot).write_bytes(&vec![1; self.flood_bytes]);
         }
         match &self.refuse {
             Some(text) => Err(text.clone()),
@@ -184,6 +194,11 @@ impl GameDll for TestGame {
 
     fn update_client_data(&mut self, eng: &mut EngineApi<'_>, slot: u8) -> GoldSrcClientData {
         self.update_client_data_calls += 1;
+        if self.broadcast_every_frame {
+            eng.reliable_all().write_u8(svc::NOP);
+            let frame = self.update_client_data_calls.to_string();
+            eng.set_client_key(slot, "frame", &frame);
+        }
         let id = eng.edicts.client(slot);
         let vars = eng
             .edicts
