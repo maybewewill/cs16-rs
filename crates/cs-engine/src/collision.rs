@@ -11,6 +11,11 @@ pub const CONTENTS_SLIME: i32 = -4;
 pub const CONTENTS_LAVA: i32 = -5;
 pub const CONTENTS_SKY: i32 = -6;
 
+/// Largest coordinate magnitude the engine's geometry calls accept; input beyond it is refused
+/// like non-finite input, so traces never overflow to infinities. Assumption (from memory, not
+/// checked against ReHLDS): GoldSrc maps stay well inside it (±4096 per axis by default).
+pub const MAX_WORLD_COORD: f32 = 131_072.0;
+
 /// Classic Quake / GoldSrc epsilon preventing surface sinking (`1 / 32`).
 pub const DIST_EPSILON: f32 = 0.03125;
 

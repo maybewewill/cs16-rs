@@ -6,7 +6,7 @@ use std::any::Any;
 
 use glam::Vec3;
 
-use crate::collision::{CONTENTS_EMPTY, Hull, TraceResult};
+use crate::collision::{CONTENTS_EMPTY, Hull, MAX_WORLD_COORD, TraceResult};
 use crate::edict::{EdictId, EntVars};
 use crate::game::EngineApi;
 use crate::precache::PrecacheError;
@@ -105,8 +105,7 @@ impl EngineApi<'_> {
     pub fn find_by_classname(&self, after: Option<EdictId>, classname: &str) -> Option<EdictId> {
         let first = after.map_or(0, |id| usize::from(id.index) + 1);
         self.edicts
-            .iter_live()
-            .skip_while(|(id, _)| usize::from(id.index) < first)
+            .iter_live_from(first)
             .find(|(_, e)| e.vars.classname == classname)
             .map(|(id, _)| id)
     }
@@ -197,18 +196,24 @@ impl EngineApi<'_> {
 
     /// Traces `hull` from `start` to `end` through the world model only; entities are not
     /// traced yet (that comes with entity collision in a later plan). Without collision data
-    /// (stub map) or with a non-finite `start`/`end`, nothing is hit: fraction 1, `end_pos =
-    /// end`.
+    /// (stub map) nothing is hit: fraction 1, `end_pos = end`. A `start` or `end` outside the
+    /// world (non-finite, or a coordinate beyond [`MAX_WORLD_COORD`]) is refused: nothing is
+    /// hit, `end_pos = start` if `start` is inside the world, else the origin. Every returned
+    /// float is finite.
     pub fn trace_hull(&self, start: Vec3, end: Vec3, hull: Hull) -> TraceResult {
+        if !in_world(start) || !in_world(end) {
+            return refused_trace(start);
+        }
         match self.map.collision() {
-            Some(c) if start.is_finite() && end.is_finite() => c.trace_world(start, end, hull),
-            _ => TraceResult::clear(end),
+            Some(c) => c.trace_world(start, end, hull),
+            None => TraceResult::clear(end),
         }
     }
 
     /// Traces `hull` from `start` to `end` through brush model `model` (0 is the world) placed
-    /// at `origin`. Nothing is hit for a model out of range, without collision data, or with
-    /// a non-finite `origin`/`start`/`end`.
+    /// at `origin`. Nothing is hit (fraction 1, `end_pos = end`) for a model out of range or
+    /// without collision data. An `origin`, `start` or `end` outside the world is refused as in
+    /// [`trace_hull`](Self::trace_hull). Every returned float is finite.
     pub fn trace_model(
         &self,
         model: usize,
@@ -217,38 +222,53 @@ impl EngineApi<'_> {
         end: Vec3,
         hull: Hull,
     ) -> TraceResult {
+        if !in_world(origin) || !in_world(start) || !in_world(end) {
+            return refused_trace(start);
+        }
         match self.map.collision() {
-            Some(c) if origin.is_finite() && start.is_finite() && end.is_finite() => {
-                c.trace_model(model, origin, start, end, hull)
-            }
-            _ => TraceResult::clear(end),
+            Some(c) => c.trace_model(model, origin, start, end, hull),
+            None => TraceResult::clear(end),
         }
     }
 
     /// Contents (`CONTENTS_*`) of the world model at `p` for `hull`; `CONTENTS_EMPTY` without
-    /// collision data or for a non-finite `p`.
+    /// collision data or for a `p` outside the world (non-finite, or a coordinate beyond
+    /// [`MAX_WORLD_COORD`]).
     pub fn point_contents(&self, p: Vec3, hull: Hull) -> i32 {
         match self.map.collision() {
-            Some(c) if p.is_finite() => c.point_contents(p, hull),
+            Some(c) if in_world(p) => c.point_contents(p, hull),
             _ => CONTENTS_EMPTY,
         }
     }
 
     /// Whether `p` is inside the solid of brush model `model` placed at `origin`; `false` for
-    /// a model out of range, without collision data, or for non-finite input.
+    /// a model out of range, without collision data, or for an `origin` or `p` outside the
+    /// world (non-finite, or a coordinate beyond [`MAX_WORLD_COORD`]).
     pub fn point_in_model(&self, model: usize, origin: Vec3, p: Vec3) -> bool {
         match self.map.collision() {
-            Some(c) if origin.is_finite() && p.is_finite() => c.point_in_model(model, origin, p),
+            Some(c) if in_world(origin) && in_world(p) => c.point_in_model(model, origin, p),
             _ => false,
         }
     }
 
     /// Whether a box with absolute corners `mins`/`maxs` is potentially visible (PVS) from
-    /// `eye`. A map without visibility data (stub map) sees everything; non-finite input sees
+    /// `eye`. A map without visibility data (stub map) sees everything; an `eye`, `mins` or
+    /// `maxs` outside the world (non-finite, or a coordinate beyond [`MAX_WORLD_COORD`]) sees
     /// nothing.
     pub fn can_see(&self, eye: Vec3, mins: Vec3, maxs: Vec3) -> bool {
-        eye.is_finite() && mins.is_finite() && maxs.is_finite() && self.map.can_see(eye, mins, maxs)
+        in_world(eye) && in_world(mins) && in_world(maxs) && self.map.can_see(eye, mins, maxs)
     }
+}
+
+/// Whether every coordinate of `v` is finite and within [`MAX_WORLD_COORD`].
+fn in_world(v: Vec3) -> bool {
+    v.is_finite() && v.abs().max_element() <= MAX_WORLD_COORD
+}
+
+/// The answer to a refused trace: nothing hit, ending where it started if `start` is inside the
+/// world, else at the origin.
+fn refused_trace(start: Vec3) -> TraceResult {
+    TraceResult::clear(if in_world(start) { start } else { Vec3::ZERO })
 }
 
 #[cfg(test)]
@@ -260,7 +280,7 @@ mod tests {
     use cs_vfs::{Vfs, VfsConfig};
     use glam::Vec3;
 
-    use crate::collision::{CONTENTS_EMPTY, Hull};
+    use crate::collision::{CONTENTS_EMPTY, Hull, TraceResult};
     use crate::edict::{EdictId, EdictPool, EntVars};
     use crate::game::{ClientView, EngineApi, Outbox};
     use crate::map::ServerMap;
@@ -520,10 +540,15 @@ mod tests {
         assert!(eng.can_see(start, end - 16.0, end + 16.0));
         assert!(!eng.can_see(Vec3::NAN, end - 16.0, end + 16.0));
 
-        // Non-finite input is "no hit" too.
+        // Refused input is "no hit" too, ending at `start` if it is usable, else at the origin.
         let tr = eng.trace_hull(Vec3::NAN, end, Hull::Point);
-        assert_eq!(tr.fraction, 1.0);
+        assert_eq!((tr.fraction, tr.end_pos), (1.0, Vec3::ZERO));
         assert!(!tr.hit_solid);
+        let tr = eng.trace_hull(start, Vec3::splat(1e30), Hull::Point);
+        assert_eq!((tr.fraction, tr.end_pos), (1.0, start));
+        let tr = eng.trace_model(0, Vec3::INFINITY, start, end, Hull::Point);
+        assert_eq!((tr.fraction, tr.end_pos), (1.0, start));
+        assert!(!eng.can_see(start, end - 16.0, Vec3::splat(-1e30)));
         assert_eq!(
             eng.point_contents(Vec3::INFINITY, Hull::Point),
             CONTENTS_EMPTY
@@ -586,6 +611,41 @@ mod tests {
                 eng.point_contents(start, hull),
                 collision.point_contents(start, hull)
             );
+        }
+
+        // Refused input on a real map: no hit, nothing solid, nothing seen, and no non-finite
+        // number handed back. `1e30` is finite but overflows inside the trace code.
+        let finite = |tr: &TraceResult| {
+            tr.fraction.is_finite() && tr.end_pos.is_finite() && tr.plane_normal.is_finite()
+        };
+        let p = mins + (maxs - mins) * 0.5;
+        for bad in [Vec3::NAN, Vec3::splat(1e30), Vec3::new(0.0, -1e30, 0.0)] {
+            for hull in [Hull::Point, Hull::Standing, Hull::Large, Hull::Crouched] {
+                for (from, to) in [(bad, end), (start, bad), (bad, bad)] {
+                    let tr = eng.trace_hull(from, to, hull);
+                    assert!(finite(&tr), "trace_hull {from} -> {to}: {tr:?}");
+                    assert!(
+                        tr.fraction == 1.0 && !tr.hit_solid && !tr.start_solid,
+                        "{tr:?}"
+                    );
+                    for model in [0, 1] {
+                        let tr = eng.trace_model(model, Vec3::ZERO, from, to, hull);
+                        assert!(finite(&tr), "trace_model {model} {from} -> {to}: {tr:?}");
+                        assert!(tr.fraction == 1.0 && !tr.hit_solid, "{tr:?}");
+                    }
+                }
+                let tr = eng.trace_model(1, bad, start, end, hull);
+                assert!(
+                    finite(&tr) && tr.fraction == 1.0,
+                    "trace_model at {bad}: {tr:?}"
+                );
+                assert_eq!(eng.point_contents(bad, hull), CONTENTS_EMPTY);
+            }
+            assert!(!eng.point_in_model(1, Vec3::ZERO, bad));
+            assert!(!eng.point_in_model(1, bad, p));
+            assert!(!eng.can_see(bad, start - 16.0, start + 16.0));
+            assert!(!eng.can_see(start, bad, start + 16.0));
+            assert!(!eng.can_see(start, start - 16.0, bad));
         }
     }
 }

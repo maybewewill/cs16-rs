@@ -226,15 +226,23 @@ impl EdictPool {
 
     /// Worldspawn, player slots and allocated edicts in ascending index order.
     pub fn iter_live(&self) -> impl Iterator<Item = (EdictId, &Edict)> {
+        self.iter_live_from(0)
+    }
+
+    /// Live edicts at index `first` and above, in ascending index order; empty when `first` is
+    /// past the end of the pool.
+    pub fn iter_live_from(&self, first: usize) -> impl Iterator<Item = (EdictId, &Edict)> {
         self.slots
+            .get(first..)
+            .unwrap_or_default()
             .iter()
             .enumerate()
             .filter(|(_, s)| s.live)
-            .map(|(i, s)| {
+            .map(move |(i, s)| {
                 (
                     EdictId {
                         // Lossless: `new` caps the pool at `u16::MAX` slots.
-                        index: i as u16,
+                        index: (first + i) as u16,
                         serial: s.serial,
                     },
                     &s.edict,
@@ -428,6 +436,16 @@ mod tests {
         pool.free(b, 1.0);
         let live: Vec<u16> = pool.iter_live().map(|(id, _)| id.index).collect();
         assert_eq!(live, vec![0, 1, 2, a.index, c.index]);
+        let from =
+            |first| -> Vec<u16> { pool.iter_live_from(first).map(|(id, _)| id.index).collect() };
+        assert_eq!(from(2), vec![2, a.index, c.index]);
+        assert_eq!(from(usize::from(b.index)), vec![c.index]);
+        assert!(from(8).is_empty());
+        assert!(from(usize::MAX).is_empty());
+        assert_eq!(
+            pool.iter_live_from(usize::from(c.index)).next().unwrap().0,
+            c
+        );
         for (id, _) in pool.iter_live() {
             assert!(pool.get(id).is_some());
             assert_eq!(pool.by_index(id.index).unwrap().0, id);

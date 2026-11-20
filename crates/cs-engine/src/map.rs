@@ -121,9 +121,7 @@ mod tests {
         let Ok(vfs) = Vfs::discover(None, VfsConfig::default()) else {
             return;
         };
-        let Ok(raw) = vfs.read_bytes("maps/de_dust2.bsp") else {
-            return;
-        };
+        let raw = vfs.read_bytes("maps/de_dust2.bsp").expect("de_dust2 reads");
         let bsp = Arc::new(BspMap::load(&vfs, "de_dust2").expect("de_dust2 parses"));
         let map = ServerMap::from_bsp("de_dust2", &raw, bsp.clone()).expect("valid BSP header");
         assert_eq!(map.path, "maps/de_dust2.bsp");
