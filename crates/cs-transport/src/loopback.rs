@@ -11,7 +11,22 @@ use crate::{PacketTransport, PeerAddr, TransportError, check_len};
 pub struct Faults {
     pub drop_every: u32,
     pub duplicate_every: u32,
+    /// The datagram whose count is a multiple of this is delivered before the one
+    /// preceding it, which is held back until then. A value of `1` behaves like `2`.
+    /// The held datagram is released only by the next send in the same direction,
+    /// [`LoopbackEndpoint::flush_held`], or dropping the endpoint — never by `recv` —
+    /// so the last datagram of a stream can stay held until one of those happens.
     pub swap_every: u32,
+}
+
+/// Fault events that actually happened on one endpoint, over both directions.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct FaultStats {
+    pub dropped: u64,
+    pub duplicated: u64,
+    /// Pairs delivered in reversed order; a held datagram released without a partner
+    /// (by a dropped successor, `flush_held` or drop) does not count.
+    pub swapped: u64,
 }
 
 /// Fault state of one direction (endpoint → hub or hub → endpoint).
@@ -24,36 +39,38 @@ struct Direction {
 }
 
 impl Direction {
-    /// Applies `faults` (drop, then duplicate, then swap) to one datagram and
-    /// returns what to deliver now, in order.
-    fn offer(&mut self, faults: Faults, data: &[u8]) -> Vec<Vec<u8>> {
+    /// Applies `faults` (drop, then duplicate, then swap) to one datagram, records
+    /// what fired in `stats`, and returns what to deliver now, in order.
+    fn offer(&mut self, faults: Faults, stats: &mut FaultStats, data: &[u8]) -> Vec<Vec<u8>> {
         self.offered += 1;
         let count = self.offered;
         let hits = |every: u32| every != 0 && count.is_multiple_of(u64::from(every));
 
-        let mut out = Vec::new();
         if hits(faults.drop_every) {
-            return out;
+            stats.dropped += 1;
+            return self.release();
         }
-        let copies = if hits(faults.duplicate_every) { 2 } else { 1 };
-        let unit = vec![data.to_vec(); copies];
+        let copies = if hits(faults.duplicate_every) {
+            stats.duplicated += 1;
+            2
+        } else {
+            1
+        };
+        let mut out = vec![data.to_vec(); copies];
 
         if let Some(held) = self.held.take() {
-            if hits(faults.swap_every) {
-                out.extend(unit);
-                out.extend(held);
-                return out;
-            }
+            stats.swapped += 1;
             out.extend(held);
+            return out;
         }
         let next_swaps =
             faults.swap_every != 0 && (count + 1).is_multiple_of(u64::from(faults.swap_every));
         if next_swaps {
-            self.held = Some(unit);
+            self.held = Some(out);
+            Vec::new()
         } else {
-            out.extend(unit);
+            out
         }
-        out
     }
 
     /// Gives up the held-back datagram, if any.
@@ -66,6 +83,7 @@ struct EndpointState {
     faults: Faults,
     to_hub: Direction,
     from_hub: Direction,
+    stats: FaultStats,
     inbox: VecDeque<Vec<u8>>,
 }
 
@@ -108,6 +126,7 @@ impl LoopbackHub {
                 faults: Faults::default(),
                 to_hub: Direction::default(),
                 from_hub: Direction::default(),
+                stats: FaultStats::default(),
                 inbox: VecDeque::new(),
             },
         );
@@ -126,19 +145,7 @@ impl Default for LoopbackHub {
 
 impl PacketTransport for LoopbackHub {
     fn recv(&mut self) -> Option<(PeerAddr, Vec<u8>)> {
-        let mut guard = lock(&self.shared);
-        let shared = &mut *guard;
-        if shared.hub_inbox.is_empty() {
-            let released = shared
-                .endpoints
-                .iter_mut()
-                .map(|(&id, ep)| (id, ep.to_hub.release()))
-                .find(|(_, held)| !held.is_empty());
-            if let Some((id, held)) = released {
-                shared.hub_inbox.extend(held.into_iter().map(|d| (id, d)));
-            }
-        }
-        let (id, data) = shared.hub_inbox.pop_front()?;
+        let (id, data) = lock(&self.shared).hub_inbox.pop_front()?;
         Some((PeerAddr::Loopback(id), data))
     }
 
@@ -152,7 +159,7 @@ impl PacketTransport for LoopbackHub {
             .endpoints
             .get_mut(&id)
             .ok_or(TransportError::Closed)?;
-        let out = ep.from_hub.offer(ep.faults, data);
+        let out = ep.from_hub.offer(ep.faults, &mut ep.stats, data);
         ep.inbox.extend(out);
         Ok(())
     }
@@ -174,17 +181,36 @@ impl LoopbackEndpoint {
             ep.faults = f;
         }
     }
+
+    /// Delivers anything held back for a swap, in both directions, in original order.
+    pub fn flush_held(&mut self) {
+        let mut guard = lock(&self.shared);
+        let shared = &mut *guard;
+        let Some(ep) = shared.endpoints.get_mut(&self.id) else {
+            return;
+        };
+        let to_hub = ep.to_hub.release();
+        shared
+            .hub_inbox
+            .extend(to_hub.into_iter().map(|d| (self.id, d)));
+        let from_hub = ep.from_hub.release();
+        ep.inbox.extend(from_hub);
+    }
+
+    pub fn fault_stats(&self) -> FaultStats {
+        lock(&self.shared)
+            .endpoints
+            .get(&self.id)
+            .map_or_else(FaultStats::default, |ep| ep.stats)
+    }
 }
 
 impl PacketTransport for LoopbackEndpoint {
     fn recv(&mut self) -> Option<(PeerAddr, Vec<u8>)> {
-        let mut shared = lock(&self.shared);
-        let ep = shared.endpoints.get_mut(&self.id)?;
-        if ep.inbox.is_empty() {
-            let held = ep.from_hub.release();
-            ep.inbox.extend(held);
-        }
-        ep.inbox
+        lock(&self.shared)
+            .endpoints
+            .get_mut(&self.id)?
+            .inbox
             .pop_front()
             .map(|data| (PeerAddr::Loopback(0), data))
     }
@@ -200,7 +226,7 @@ impl PacketTransport for LoopbackEndpoint {
             .endpoints
             .get_mut(&self.id)
             .ok_or(TransportError::Closed)?;
-        let out = ep.to_hub.offer(ep.faults, data);
+        let out = ep.to_hub.offer(ep.faults, &mut ep.stats, data);
         shared
             .hub_inbox
             .extend(out.into_iter().map(|d| (self.id, d)));
@@ -275,6 +301,13 @@ mod tests {
             hub.send(PeerAddr::Loopback(ep.id()), &[i]).unwrap();
         }
         assert_eq!(payloads(&drain(&mut ep)), vec![1, 2, 4, 5, 7, 8]);
+        assert_eq!(
+            ep.fault_stats(),
+            FaultStats {
+                dropped: 6,
+                ..FaultStats::default()
+            }
+        );
     }
 
     #[test]
@@ -295,6 +328,13 @@ mod tests {
             hub.send(id, &[i]).unwrap();
         }
         assert_eq!(payloads(&drain(&mut ep)), vec![1, 2, 2, 3, 4, 4]);
+        assert_eq!(
+            ep.fault_stats(),
+            FaultStats {
+                duplicated: 4,
+                ..FaultStats::default()
+            }
+        );
 
         let mut hub = LoopbackHub::new();
         let mut ep = hub.connect();
@@ -311,23 +351,63 @@ mod tests {
             hub.send(id, &[i]).unwrap();
         }
         assert_eq!(payloads(&drain(&mut ep)), vec![2, 1, 4, 3]);
+        assert_eq!(
+            ep.fault_stats(),
+            FaultStats {
+                swapped: 4,
+                ..FaultStats::default()
+            }
+        );
     }
 
-    #[test]
-    fn loopback_held_back_datagram_is_not_lost() {
-        let mut hub = LoopbackHub::new();
+    fn swapping_pair() -> (LoopbackHub, LoopbackEndpoint, PeerAddr) {
+        let hub = LoopbackHub::new();
         let mut ep = hub.connect();
         let id = PeerAddr::Loopback(ep.id());
         ep.set_faults(Faults {
             swap_every: 2,
             ..Faults::default()
         });
-        for i in 1..=3u8 {
-            ep.send(HUB, &[i]).unwrap();
-            hub.send(id, &[i]).unwrap();
-        }
-        assert_eq!(payloads(&drain(&mut hub)), vec![2, 1, 3]);
-        assert_eq!(payloads(&drain(&mut ep)), vec![2, 1, 3]);
+        (hub, ep, id)
+    }
+
+    #[test]
+    fn loopback_swap_fires_when_receiver_polls_between_sends() {
+        let (mut hub, mut ep, id) = swapping_pair();
+        ep.send(HUB, &[1]).unwrap();
+        assert!(hub.recv().is_none(), "1 is held for its partner");
+        ep.send(HUB, &[2]).unwrap();
+        assert_eq!(payloads(&drain(&mut hub)), vec![2, 1]);
+        assert_eq!(ep.fault_stats().swapped, 1);
+
+        hub.send(id, &[1]).unwrap();
+        assert!(ep.recv().is_none(), "1 is held for its partner");
+        hub.send(id, &[2]).unwrap();
+        assert_eq!(payloads(&drain(&mut ep)), vec![2, 1]);
+        assert_eq!(ep.fault_stats().swapped, 2);
+    }
+
+    #[test]
+    fn loopback_flush_held_delivers_without_swapping() {
+        let (mut hub, mut ep, id) = swapping_pair();
+        ep.send(HUB, &[1]).unwrap();
+        hub.send(id, &[7]).unwrap();
+        assert!(hub.recv().is_none());
+        assert!(ep.recv().is_none());
+
+        ep.flush_held();
+        assert_eq!(payloads(&drain(&mut hub)), vec![1]);
+        assert_eq!(payloads(&drain(&mut ep)), vec![7]);
+        assert_eq!(ep.fault_stats(), FaultStats::default());
+    }
+
+    #[test]
+    fn loopback_dropped_endpoint_delivers_held_datagram() {
+        let (mut hub, mut ep, _) = swapping_pair();
+        ep.send(HUB, &[1]).unwrap();
+        assert!(hub.recv().is_none());
+        drop(ep);
+        assert_eq!(hub.recv(), Some((PeerAddr::Loopback(1), vec![1])));
     }
 
     #[test]
@@ -343,8 +423,16 @@ mod tests {
             ep.send(HUB, &[i]).unwrap();
         }
         // 3 and 6 dropped; 2 and 4 duplicated; the pair of 2s swaps ahead of 1;
-        // 4 has no partner (3 was dropped); 5 waits for 6, then is released on drain.
+        // 4 has no partner (3 was dropped); 5 waits for 6, which is dropped, so 5 goes alone.
         assert_eq!(payloads(&drain(&mut hub)), vec![2, 2, 1, 4, 4, 5]);
+        assert_eq!(
+            ep.fault_stats(),
+            FaultStats {
+                dropped: 2,
+                duplicated: 2,
+                swapped: 1,
+            }
+        );
     }
 
     #[test]

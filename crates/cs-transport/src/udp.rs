@@ -109,11 +109,19 @@ mod tests {
         drop(dead);
         // On Windows the ICMP port-unreachable surfaces as ConnectionReset on recv.
         a.send(PeerAddr::Udp(dead_addr), b"void").unwrap();
+        // Gives the reset a head start so it is queued ahead of the live datagram;
+        // the outcome does not depend on this timing, only how much the test proves.
+        std::thread::sleep(Duration::from_millis(20));
         let mut b = UdpTransport::bind("127.0.0.1:0").unwrap();
         b.send(PeerAddr::Udp(a.local_addr()), b"alive").unwrap();
-        std::thread::sleep(Duration::from_millis(100));
 
-        // A single recv must step over the reset and return the live datagram.
+        // Blocking reads with a timeout remove any arrival-time assumption: a single
+        // recv must step over the reset and wait for the live datagram. Polling would
+        // not discriminate, since a recv that wrongly returns None is simply retried.
+        a.socket.set_nonblocking(false).unwrap();
+        a.socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
         let (_, data) = a.recv().expect("datagram behind the reset is returned");
         assert_eq!(data, b"alive");
     }

@@ -8,7 +8,7 @@ mod loopback;
 #[cfg(not(target_arch = "wasm32"))]
 mod udp;
 
-pub use loopback::{Faults, LoopbackEndpoint, LoopbackHub};
+pub use loopback::{FaultStats, Faults, LoopbackEndpoint, LoopbackHub};
 #[cfg(not(target_arch = "wasm32"))]
 pub use udp::UdpTransport;
 
