@@ -571,9 +571,6 @@ dependencies = [
 [[package]]
 name = "cs-cvar"
 version = "0.1.0"
-dependencies = [
- "thiserror 2.0.21",
-]
 
 [[package]]
 name = "cs-engine"
@@ -624,7 +621,6 @@ dependencies = [
  "bzip2-rs",
  "glam",
  "thiserror 2.0.21",
- "tracing",
 ]
 
 [[package]]

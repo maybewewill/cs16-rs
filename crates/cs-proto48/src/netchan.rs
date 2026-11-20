@@ -374,9 +374,7 @@ impl NetChan {
             if send_from_regular {
                 self.reliable_buf = std::mem::take(&mut self.reliable_queue);
                 let base_len = self.reliable_buf.len() as u16;
-                for s in 0..MAX_STREAMS {
-                    self.frag_startpos[s] = base_len;
-                }
+                self.frag_startpos.fill(base_len);
             }
 
             for (s, &from_frag) in send_from_frag.iter().enumerate() {
@@ -390,9 +388,8 @@ impl NetChan {
                     self.reliable_buf.extend_from_slice(&frag.data);
                     self.frag_length[s] = flen;
                     self.reliable_fragment[s] = true;
-                    for next_s in (s + 1)..MAX_STREAMS {
-                        self.frag_startpos[next_s] =
-                            self.frag_startpos[next_s].saturating_add(flen);
+                    for pos in self.frag_startpos.iter_mut().skip(s + 1) {
+                        *pos = pos.saturating_add(flen);
                     }
                 }
             }

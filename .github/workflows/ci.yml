@@ -16,9 +16,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The declared rust-version (1.95) is not yet checked by CI; this job uses stable.
-      - uses: dtolnay/rust-toolchain@stable
+      # Same toolchain as rust-toolchain.toml and the declared rust-version.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.100.0"
           targets: wasm32-unknown-unknown
           components: clippy
 

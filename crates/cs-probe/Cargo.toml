@@ -9,9 +9,12 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-cs-platform.workspace = true
 cs-proto48.workspace = true
 cs-transport.workspace = true
+
+# Only the native binary uses the platform clock.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+cs-platform.workspace = true
 
 [dev-dependencies]
 glam.workspace = true
