@@ -6,8 +6,12 @@ mod common;
 use common::{Harness, Tap};
 use cs_engine::{ClientState, MAX_DATAGRAMS_PER_FRAME, OOB_GLOBAL_REPLIES_PER_SEC};
 use cs_probe::{ProbeClient, ProbeState};
-use cs_proto48::handshake::encode_getchallenge;
-use cs_transport::{LoopbackEndpoint, PeerAddr};
+use cs_proto48::crypto::md5_hex;
+use cs_proto48::handshake::{
+    OobPacket, default_cs16_protinfo, default_cs16_userinfo, encode_connect_48,
+    encode_getchallenge, lan_steam_auth_ticket, parse_oob_packet,
+};
+use cs_transport::{LoopbackEndpoint, PacketTransport, PeerAddr};
 
 type Probe = ProbeClient<LoopbackEndpoint>;
 
@@ -142,4 +146,60 @@ fn a_flood_is_read_over_several_frames() {
     h.step(&mut [&mut probe], 10);
     assert_eq!(probe.state(), &ProbeState::InGame);
     assert_eq!(probe.stats().parse_errors, 0);
+}
+
+#[test]
+fn garbage_does_not_spend_the_global_reply_budget() {
+    let mut h = Harness::new(4);
+    // Connectionless datagrams that get no reply, each from its own address, and a challenge
+    // request from a new one last: all are read in one frame.
+    let garbage = [0xFF, 0xFF, 0xFF, 0xFF, b'z', b'z', b'z', 0];
+    for i in 0..3_000 {
+        h.hub.inject(FORGED + i, &garbage);
+    }
+    let asker = FORGED + 50_000;
+    h.hub.inject(asker, &encode_getchallenge(true));
+
+    let denied = h.server.net_stats().oob_denied;
+    let tap = h.step_tapped(&mut []);
+    assert_eq!(tap.sent_to(PeerAddr::Loopback(asker)), 1, "the request is answered");
+    assert_eq!(h.server.net_stats().oob_denied, denied);
+}
+
+#[test]
+fn challenged_connect_passes_while_the_global_budget_is_empty() {
+    let mut h = Harness::new(4);
+    let mut ep = h.hub.connect();
+    ep.send(PeerAddr::Loopback(0), &encode_getchallenge(true))
+        .expect("loopback send");
+    h.step(&mut [], 1);
+    let (_, reply) = ep.recv().expect("challenge reply");
+    let Ok(OobPacket::S2cChallenge { challenge, .. }) = parse_oob_packet(&reply) else {
+        panic!("not a challenge: {reply:?}");
+    };
+
+    // A flood of challenge requests empties the budget, and the connect is read after it in
+    // the same frame.
+    let getchallenge = encode_getchallenge(true);
+    for i in 0..3_000 {
+        h.hub.inject(FORGED + i, &getchallenge);
+    }
+    let connect = encode_connect_48(
+        challenge,
+        &default_cs16_protinfo(&md5_hex(b"budget")),
+        &default_cs16_userinfo("Late"),
+        &lan_steam_auth_ticket(76_561_197_960_265_999),
+    );
+    ep.send(PeerAddr::Loopback(0), &connect).expect("loopback send");
+    let denied = h.server.net_stats().oob_denied;
+    let replies = forged_replies(&h.step_tapped(&mut [])).len();
+
+    assert_eq!(replies, OOB_GLOBAL_REPLIES_PER_SEC as usize, "the budget is spent");
+    assert_eq!(h.server.net_stats().oob_denied, denied + 3_000 - replies as u64);
+    let (_, reply) = ep.recv().expect("connect reply");
+    assert!(
+        matches!(parse_oob_packet(&reply), Ok(OobPacket::S2cConnection { .. })),
+        "{reply:?}"
+    );
+    assert_eq!(h.server.client_count(), 1);
 }

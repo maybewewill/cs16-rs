@@ -14,7 +14,7 @@ use cs_proto48::messages::{
 use cs_proto48::usermsg::UserMsgRegistry;
 use cs_transport::{PacketTransport, PeerAddr};
 
-use crate::client::{Client, ClientState, SignonStage};
+use crate::client::{Client, ClientState, MAX_REFUSED_STREAMS, SignonStage};
 use crate::edict::{DEFAULT_MAX_EDICTS, EdictPool};
 use crate::game::{ClientView, EngineApi, GameDll, Outbox, entity_state_from_vars};
 use crate::map::ServerMap;
@@ -393,10 +393,26 @@ impl<G: GameDll> Server<G> {
 
     fn handle_netchan(&mut self, slot: u8, data: &[u8]) {
         let index = usize::from(slot);
-        let Ok(Some(incoming)) = self.clients[index].chan.process_packet(data) else {
-            self.net_stats.datagrams_rejected += 1;
-            return;
+        let incoming = match self.clients[index].chan.process_packet(data) {
+            Ok(Some(incoming)) => incoming,
+            // A duplicate or out-of-order datagram.
+            Ok(None) => {
+                self.net_stats.datagrams_rejected += 1;
+                return;
+            }
+            Err(_) => {
+                self.net_stats.datagrams_rejected += 1;
+                // Bit 30 of the first word: the datagram carries fragments, so the netchan
+                // refused a stream.
+                if data.get(3).is_some_and(|b| b & 0x40 != 0) {
+                    self.count_refused_stream(slot);
+                }
+                return;
+            }
         };
+        if incoming.completed_normal_stream.is_some() || incoming.completed_file_stream.is_some() {
+            self.clients[index].refused_streams = 0;
+        }
         self.note_accepted(slot, incoming.sequence_ack);
         // The delta request is per packet: one without `clc_delta` asks for a full update.
         self.clients[index].delta_seq = None;
@@ -439,6 +455,17 @@ impl<G: GameDll> Server<G> {
                     _ => {}
                 }
             }
+        }
+    }
+
+    /// Counts a stream the netchan of `slot` refused; the client is sent a farewell and dropped
+    /// at the [`MAX_REFUSED_STREAMS`]th in a row.
+    fn count_refused_stream(&mut self, slot: u8) {
+        let client = &mut self.clients[usize::from(slot)];
+        client.refused_streams += 1;
+        if client.refused_streams >= MAX_REFUSED_STREAMS {
+            self.release_slot(slot, Some("Too many refused streams"));
+            self.drain_outbox();
         }
     }
 

@@ -35,12 +35,8 @@ impl<G: GameDll> Server<G> {
         from: PeerAddr,
         data: &[u8],
     ) {
-        // Every datagram is charged to its address; one without a challenge issued to its
-        // sender also to the global budget.
-        if !self.limiter.allow(&from, self.time)
-            || (!carries_valid_challenge(data, &from, self.time, &self.challenges)
-                && !self.oob_budget.try_take())
-        {
+        // Every datagram is charged to its address.
+        if !self.limiter.allow(&from, self.time) {
             self.net_stats.oob_denied += 1;
             return;
         }
@@ -59,7 +55,17 @@ impl<G: GameDll> Server<G> {
             is_full: self.free_slot_index().is_none() && self.slot_of(&from).is_none(),
         };
         let reply = match handle_oob(data, &from, self.time, &ctx) {
-            OobOutcome::Reply(reply) => reply,
+            // A reply to a datagram without a challenge issued to its sender is also charged to
+            // the global budget; datagrams that get no reply cost nothing from it.
+            OobOutcome::Reply(reply) => {
+                if !carries_valid_challenge(data, &from, self.time, &self.challenges)
+                    && !self.oob_budget.try_take()
+                {
+                    self.net_stats.oob_denied += 1;
+                    return;
+                }
+                reply
+            }
             OobOutcome::Connect(_) if self.shutting_down => {
                 encode_s2c_reject("Server is shutting down.\n")
             }

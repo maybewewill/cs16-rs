@@ -16,7 +16,7 @@ pub mod server;
 mod signon;
 pub mod usercmd;
 
-pub use client::{ClientState, MAX_CLIENT_INCOMING_STREAM, SignonStage};
+pub use client::{ClientState, MAX_CLIENT_INCOMING_STREAM, MAX_REFUSED_STREAMS, SignonStage};
 pub use collision::WorldCollision;
 pub use edict::{DEFAULT_MAX_EDICTS, EDICT_REUSE_DELAY, Edict, EdictId, EdictPool, EntVars};
 pub use frame::{ClientFrame, FrameRing, MAX_DATAGRAM, UPDATE_BACKUP, clamp_rate, update_interval};

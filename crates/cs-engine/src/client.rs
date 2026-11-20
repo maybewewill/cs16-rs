@@ -12,6 +12,11 @@ use crate::usercmd::{MsecBudget, TokenBucket};
 /// Clients only send small reliable messages, so this is far below the netchan default.
 pub const MAX_CLIENT_INCOMING_STREAM: usize = 64 * 1024;
 
+/// Consecutive incoming streams (fragmented or compressed) from one client that its netchan
+/// refuses (over the size limit, failing to decompress, or decompressing past the limit)
+/// before the client is dropped. A stream the netchan accepts resets the count.
+pub const MAX_REFUSED_STREAMS: u32 = 8;
+
 /// Sign-on stage: the string command the server waits for next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignonStage {
@@ -62,6 +67,8 @@ pub(crate) struct Client {
     pub(crate) last_cmd: GoldSrcUserCmd,
     /// Unparsable payloads received in a row while `Active`.
     pub(crate) bad_moves: u32,
+    /// Incoming streams the netchan refused in a row; see [`MAX_REFUSED_STREAMS`].
+    pub(crate) refused_streams: u32,
     /// Rate limit for string commands other than the sign-on ones.
     pub(crate) stringcmds: TokenBucket,
     /// Rate limit for `setinfo`, on top of `stringcmds`.
@@ -98,6 +105,7 @@ impl Client {
             budget: MsecBudget::new(),
             last_cmd: GoldSrcUserCmd::default(),
             bad_moves: 0,
+            refused_streams: 0,
             stringcmds: TokenBucket::stringcmds(),
             setinfos: TokenBucket::new(SETINFO_RATE_PER_SEC, SETINFO_BURST),
             last_name_change: None,

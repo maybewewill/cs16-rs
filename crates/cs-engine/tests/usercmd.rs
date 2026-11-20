@@ -6,7 +6,7 @@ mod common;
 use common::Harness;
 use cs_engine::{
     ClientState, MAX_CLIENT_INCOMING_STREAM, MAX_CONSECUTIVE_BAD_MOVES, MAX_NAME_BYTES,
-    MAX_USERCMD_STEP_MS, STRINGCMD_BURST, STRINGCMD_RATE_PER_SEC,
+    MAX_REFUSED_STREAMS, MAX_USERCMD_STEP_MS, STRINGCMD_BURST, STRINGCMD_RATE_PER_SEC,
 };
 use cs_probe::{ProbeClient, ProbeState};
 use cs_proto48::bitbuf::MsgWriter;
@@ -217,11 +217,11 @@ fn garbage_from_connected_address_never_panics() {
 
     let stats = h.server.net_stats();
     assert!(stats.datagrams_rejected > 0, "{stats:?}");
-    // The target is dropped by the bad-move rule; after that its address has no slot and
-    // its garbage is no longer counted.
+    // The target is dropped by the bad-move rule or, since the random fragment flags make the
+    // netchan refuse streams, by the refused-stream rule; after that its address has no slot
+    // and its garbage is no longer counted.
     assert!(
-        stats.payloads_rejected
-            >= stats_before.payloads_rejected + u64::from(MAX_CONSECUTIVE_BAD_MOVES),
+        stats.payloads_rejected > stats_before.payloads_rejected,
         "{stats:?}"
     );
     assert_eq!(h.server.client_state(0), ClientState::Free);
@@ -465,4 +465,68 @@ fn fragment_flood_stays_bounded() {
     assert_eq!(other.state(), &ProbeState::InGame);
     // 120 frames at the probe's `cl_updaterate` of 60 are 72 updates.
     assert!(entity_updates(&other) > updates_before + 60);
+}
+
+/// Sends `target` one-piece compressed streams that its netchan refuses, with sequences from
+/// `*seq` on, one datagram per frame.
+fn send_bombs(h: &mut Harness, target: &mut Probe, other: &mut Probe, seq: &mut u32, count: u32) {
+    let bomb = bz2_stream(include_bytes!("../../cs-proto48/tests/fixtures/bomb.bz2"));
+    for _ in 0..count {
+        let packet = fragment_packet(*seq, 1, 1, &bomb);
+        *seq += 1;
+        target
+            .transport_mut()
+            .send(PeerAddr::Loopback(0), &packet)
+            .expect("loopback send");
+        h.step(&mut [&mut *other], 1);
+    }
+}
+
+#[test]
+fn repeated_refused_streams_drop_the_sender() {
+    let mut h = Harness::new(4);
+    let mut target = h.add_probe("Target");
+    let mut other = h.add_probe("Other");
+    h.step(&mut [&mut target, &mut other], 200);
+    assert_eq!(h.server.client_state(0), ClientState::Active);
+    let updates_before = entity_updates(&other);
+
+    // The target's own probe is not pumped, so its sequences do not clash.
+    let mut seq = target.outgoing_sequence().expect("connected");
+    send_bombs(&mut h, &mut target, &mut other, &mut seq, MAX_REFUSED_STREAMS - 1);
+    assert_eq!(h.server.client_state(0), ClientState::Active, "one short");
+    send_bombs(&mut h, &mut target, &mut other, &mut seq, 1);
+    assert_eq!(h.server.client_state(0), ClientState::Free);
+    assert_eq!(h.server.client_count(), 1);
+    h.step(&mut [&mut other], 20);
+
+    assert_eq!(h.server.client_state(1), ClientState::Active);
+    assert_eq!(other.state(), &ProbeState::InGame);
+    // 28 frames at the probe's `cl_updaterate` of 60 are 16 updates.
+    assert!(entity_updates(&other) > updates_before + 12);
+    assert_eq!(other.stats().parse_errors, 0);
+}
+
+#[test]
+fn an_accepted_stream_resets_the_refused_count() {
+    let mut h = Harness::new(4);
+    let mut target = h.add_probe("Target");
+    let mut other = h.add_probe("Other");
+    h.step(&mut [&mut target, &mut other], 200);
+    assert_eq!(h.server.client_state(0), ClientState::Active);
+
+    let mut seq = target.outgoing_sequence().expect("connected");
+    send_bombs(&mut h, &mut target, &mut other, &mut seq, MAX_REFUSED_STREAMS - 1);
+    // A completed, uncompressed one-piece stream (`clc_nop`).
+    let packet = fragment_packet(seq, 1, 1, &[1]);
+    seq += 1;
+    target
+        .transport_mut()
+        .send(PeerAddr::Loopback(0), &packet)
+        .expect("loopback send");
+    h.step(&mut [&mut other], 1);
+    send_bombs(&mut h, &mut target, &mut other, &mut seq, MAX_REFUSED_STREAMS - 1);
+    assert_eq!(h.server.client_state(0), ClientState::Active);
+    send_bombs(&mut h, &mut target, &mut other, &mut seq, 1);
+    assert_eq!(h.server.client_state(0), ClientState::Free);
 }
