@@ -15,6 +15,7 @@ pub mod oob;
 pub mod precache;
 pub mod server;
 mod signon;
+mod think;
 pub mod usercmd;
 
 pub use client::{ClientState, MAX_CLIENT_INCOMING_STREAM, MAX_REFUSED_STREAMS, SignonStage};
@@ -37,6 +38,7 @@ pub use precache::{MAX_GENERIC, MAX_MODELS, MAX_SOUNDS, PrecacheError, PrecacheT
 pub use server::{
     MAX_DATAGRAMS_PER_FRAME, MAX_RELIABLE_BACKLOG, NetStats, Server, ServerConfig,
 };
+pub use think::MAX_THINKS_PER_FRAME;
 pub use usercmd::{
     MAX_BANKED_MS, MAX_CONSECUTIVE_BAD_MOVES, MAX_DROPPED_REPLAY, MAX_USERCMD_STEP_MS, MsecBudget,
     STRINGCMD_BURST, STRINGCMD_RATE_PER_SEC, select_cmds_to_run, split_usercmd, usercmd_is_finite,

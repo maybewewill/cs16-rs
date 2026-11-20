@@ -43,6 +43,8 @@ pub struct ServerConfig {
     pub max_update_rate: u32,
     pub min_rate: u32,
     pub max_rate: u32,
+    /// Size of the edict pool (clamped as `EdictPool::new` does).
+    pub max_edicts: usize,
 }
 
 impl Default for ServerConfig {
@@ -58,6 +60,7 @@ impl Default for ServerConfig {
             max_update_rate: 102,
             min_rate: 1000,
             max_rate: 100_000,
+            max_edicts: DEFAULT_MAX_EDICTS,
         }
     }
 }
@@ -140,7 +143,7 @@ impl<G: GameDll> Server<G> {
     ) -> Self {
         let cfg = cfg.sanitized();
         let usermsgs = game.usermsgs();
-        let edicts = EdictPool::new(cfg.max_clients, DEFAULT_MAX_EDICTS);
+        let edicts = EdictPool::new(cfg.max_clients, cfg.max_edicts);
         let precache = Self::map_precache(&map);
         let usercmd_schema = deltas.get("usercmd_t").cloned();
         if usercmd_schema.is_none() {
@@ -205,7 +208,8 @@ impl<G: GameDll> Server<G> {
         self.compute_baselines();
     }
 
-    /// One server frame: lets the game start the frame, handles up to
+    /// One server frame: lets the game start the frame, runs the entity thinks that are due
+    /// (see `think.rs`), handles up to
     /// [`MAX_DATAGRAMS_PER_FRAME`] waiting datagrams, frees clients that timed out, queues the
     /// pings and userinfo updates that are due, then sends each client what is due for it (see
     /// `frame.rs`) and the final datagrams of released clients. A call whose `now` is not
@@ -221,6 +225,7 @@ impl<G: GameDll> Server<G> {
         self.accrue_client_time(real_dt);
         self.oob_budget.refill(real_dt);
         self.with_game(|game, eng| game.start_frame(eng, real_dt as f32));
+        self.run_thinks();
         for _ in 0..MAX_DATAGRAMS_PER_FRAME {
             let Some((from, data)) = net.recv() else {
                 break;

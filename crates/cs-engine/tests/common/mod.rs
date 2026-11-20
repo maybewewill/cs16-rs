@@ -226,6 +226,17 @@ pub struct TestGame {
     /// `eng.time()` of every `spawn_entity` call.
     pub spawn_times: Vec<f64>,
 
+    /// `nextthink` the extra entities get in `server_activate`; 0 schedules nothing.
+    pub extra_nextthink: f64,
+    /// When set, every `think` sets the entity's `nextthink` to the current time.
+    pub think_reschedules: bool,
+    /// When set, every `think` removes the entity itself.
+    pub think_removes_self: bool,
+    /// When set, every `think` removes the live entity with this index.
+    pub think_removes_index: Option<u16>,
+    /// `(entity index, eng.time())` of every `think` call, in call order.
+    pub think_log: Vec<(u16, f64)>,
+
     pub server_activate_calls: usize,
     pub server_deactivate_calls: usize,
     pub client_connect_calls: usize,
@@ -286,6 +297,7 @@ impl GameDll for TestGame {
             vars.modelindex = 2;
             vars.origin = Vec3::new(0.0, 0.0, 16.0 * n as f32);
             vars.skin = self.extra_skin;
+            vars.nextthink = self.extra_nextthink;
             if self.nodraw_extras {
                 vars.effects |= EF_NODRAW;
             }
@@ -451,6 +463,24 @@ impl GameDll for TestGame {
                 eng.send(MsgDest::Pvs(Vec3::ZERO), &[svc::NOP; 1000]);
             }
             eng.send(MsgDest::Init, &[svc::NOP; 1000]);
+        }
+    }
+
+    fn think(&mut self, eng: &mut EngineApi<'_>, id: EdictId) {
+        let now = eng.time();
+        self.think_log.push((id.index, now));
+        if self.think_reschedules
+            && let Some(vars) = eng.ent_mut(id)
+        {
+            vars.nextthink = now;
+        }
+        if let Some(index) = self.think_removes_index
+            && let Some(victim) = eng.entity_ids().into_iter().find(|v| v.index == index)
+        {
+            eng.remove_entity(victim);
+        }
+        if self.think_removes_self {
+            eng.remove_entity(id);
         }
     }
 

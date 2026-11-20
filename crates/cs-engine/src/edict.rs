@@ -82,6 +82,9 @@ pub struct EntVars {
     pub iuser2: i32,
     pub iuser3: i32,
     pub iuser4: i32,
+    /// Server time at which the game's `think` is next called for this entity; 0 means no
+    /// think is scheduled. The engine sets it to 0 just before each call.
+    pub nextthink: f64,
 }
 
 /// One entity slot: its variables plus the game's private data.

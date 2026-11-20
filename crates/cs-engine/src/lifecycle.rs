@@ -13,7 +13,6 @@ use cs_proto48::messages::{
 use cs_transport::PacketTransport;
 
 use crate::client::{Client, ClientState};
-use crate::edict::DEFAULT_MAX_EDICTS;
 use crate::game::{ClientView, GameDll};
 use crate::map::ServerMap;
 use crate::server::{Server, ServerConfig};
@@ -140,7 +139,7 @@ impl<G: GameDll> Server<G> {
         self.outbox.reset_map_state();
         self.edicts = self
             .edicts
-            .successor(self.cfg.max_clients, DEFAULT_MAX_EDICTS, self.time);
+            .successor(self.cfg.max_clients, self.cfg.max_edicts, self.time);
         self.precache = Self::map_precache(&map);
         self.map = map;
         self.activate_map();

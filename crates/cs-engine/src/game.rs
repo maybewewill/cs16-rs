@@ -189,6 +189,11 @@ pub trait GameDll {
     /// Called once at the start of every server frame, before its datagrams are handled, with
     /// the seconds elapsed since the previous frame.
     fn start_frame(&mut self, eng: &mut EngineApi<'_>, frametime: f32);
+    /// The think of entity `id`, called in the frame its `nextthink` comes due (`0 < nextthink
+    /// <= time`), after `start_frame`. The engine has set `nextthink` to 0 before the call; the
+    /// game schedules the next think by setting it again. At most `MAX_THINKS_PER_FRAME` per
+    /// frame.
+    fn think(&mut self, _eng: &mut EngineApi<'_>, _id: EdictId) {}
     fn update_client_data(&mut self, eng: &mut EngineApi<'_>, slot: u8) -> GoldSrcClientData;
     /// Whether `ent` goes into `viewer`'s packet; may adjust `state`.
     fn add_to_full_pack(
