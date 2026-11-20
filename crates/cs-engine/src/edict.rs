@@ -71,7 +71,8 @@ pub struct EntVars {
 /// One entity slot: its variables plus the game's private data.
 pub struct Edict {
     pub vars: EntVars,
-    pub private: Option<Box<dyn Any>>,
+    /// `Send` so the engine can run on its own thread.
+    pub private: Option<Box<dyn Any + Send>>,
 }
 
 impl Edict {
@@ -150,6 +151,7 @@ impl EdictPool {
         slot.live = true;
         slot.freed_at = None;
         Some(EdictId {
+            // Lossless: `new` caps the pool at `u16::MAX` slots.
             index: index as u16,
             serial: slot.serial,
         })
@@ -214,6 +216,7 @@ impl EdictPool {
             .map(|(i, s)| {
                 (
                     EdictId {
+                        // Lossless: `new` caps the pool at `u16::MAX` slots.
                         index: i as u16,
                         serial: s.serial,
                     },
@@ -237,6 +240,11 @@ impl EdictPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const _: () = {
+        const fn assert_send<T: Send>() {}
+        assert_send::<EdictPool>();
+    };
 
     #[test]
     fn first_alloc_is_after_player_slots() {
@@ -338,8 +346,16 @@ mod tests {
         assert!(pool.get(bogus).is_none());
         assert!(pool.get_mut(bogus).is_none());
         assert!(pool.get(pool.client(255)).is_none());
+        let client = pool.client(1);
+        let allocated = pool.alloc(0.0).unwrap();
+        // Slot 3 is the first allocatable one.
+        assert_eq!(allocated.index, 3);
         pool.reset_client(2);
         pool.reset_client(255);
+        assert!(pool.get(client).is_some());
+        assert_eq!(pool.client(1), client);
+        assert!(pool.get(allocated).is_some());
+        assert_eq!(pool.by_index(3).unwrap().0, allocated);
         assert!(
             pool.get(EdictId {
                 index: 100,
@@ -349,9 +365,9 @@ mod tests {
         );
         assert!(pool.by_index(8).is_none());
         assert!(pool.by_index(u16::MAX).is_none());
-        // Slot 3 is the first allocatable one and is not yet live.
-        assert!(pool.by_index(3).is_none());
-        assert_eq!(pool.alloc(0.0).unwrap().index, 3);
+        // Slot 4 is the next allocatable one and is not yet live.
+        assert!(pool.by_index(4).is_none());
+        assert_eq!(pool.alloc(0.0).unwrap().index, 4);
     }
 
     #[test]

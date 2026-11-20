@@ -9,4 +9,9 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+cs-assets.workspace = true
+cs-proto48.workspace = true
 glam.workspace = true
+
+[dev-dependencies]
+cs-vfs.workspace = true

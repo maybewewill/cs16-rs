@@ -17,3 +17,12 @@ evidence = "crates/cs-probe/src/lib.rs::tests::signon_chain_reaches_in_game; unv
 id = "client_spawn_crc_munge"
 status = "implemented"
 evidence = "crates/cs-probe/src/lib.rs::tests::signon_chain_reaches_in_game; unverified against a real server, see docs/dev/reference-stand.md"
+
+[[item]]
+id = "pvs_leaf_list"
+status = "missing"
+
+[[item]]
+id = "pvs_points"
+status = "tested"
+evidence = "crates/cs-engine/src/map.rs::tests::real_map_pvs_hides_far_spawn; approximation: box centre and 8 corners, not the entity's full leaf list"
