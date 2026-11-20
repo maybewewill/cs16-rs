@@ -117,7 +117,8 @@ impl<G: GameDll> Server<G> {
     ) -> Self {
         let cfg = cfg.sanitized();
         let usermsgs = game.usermsgs();
-        let (edicts, precache) = Self::map_tables(&map, cfg.max_clients);
+        let edicts = EdictPool::new(cfg.max_clients, DEFAULT_MAX_EDICTS);
+        let precache = Self::map_precache(&map);
         let usercmd_schema = deltas.get("usercmd_t").cloned();
         if usercmd_schema.is_none() {
             tracing::error!("delta registry has no usercmd_t; client messages cannot be parsed");
@@ -152,9 +153,8 @@ impl<G: GameDll> Server<G> {
         server
     }
 
-    /// A fresh edict pool and precache tables for `map`, before the game activates it.
-    pub(crate) fn map_tables(map: &ServerMap, max_clients: u8) -> (EdictPool, PrecacheTables) {
-        let edicts = EdictPool::new(max_clients, DEFAULT_MAX_EDICTS);
+    /// Fresh precache tables for `map`, before the game activates it.
+    pub(crate) fn map_precache(map: &ServerMap) -> PrecacheTables {
         let precache = PrecacheTables::new(&map.path, map.submodel_count);
         let last_submodel = map.submodel_count.saturating_sub(1);
         if last_submodel > 0 && precache.model_index(&format!("*{last_submodel}")).is_none() {
@@ -164,7 +164,7 @@ impl<G: GameDll> Server<G> {
                 "brush models do not fit the model precache table"
             );
         }
-        (edicts, precache)
+        precache
     }
 
     /// Lets the game activate the current map, then locks the precache tables and computes

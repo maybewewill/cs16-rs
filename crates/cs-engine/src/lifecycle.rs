@@ -13,6 +13,7 @@ use cs_proto48::messages::{
 use cs_transport::PacketTransport;
 
 use crate::client::{Client, ClientState};
+use crate::edict::DEFAULT_MAX_EDICTS;
 use crate::game::{ClientView, GameDll};
 use crate::map::ServerMap;
 use crate::server::{Server, ServerConfig};
@@ -120,29 +121,34 @@ impl ServerConfig {
 }
 
 impl<G: GameDll> Server<G> {
-    /// Switches to `map` without dropping anyone: the game deactivates the old map, the spawn
-    /// count goes up, the edicts and precache tables are rebuilt for `map` and the game
-    /// activates it; then every connected client restarts its sign-on, its old reliable data
-    /// discarded and `reconnect` sent through the reliable stream. Clients are not reported to
-    /// the game as disconnected: its `server_deactivate` owns that state.
+    /// Switches to `map` without dropping anyone: the game deactivates the old map and every
+    /// client is taken out of the server, the spawn count goes up, the edicts (with serials no
+    /// old id can match) and precache tables are rebuilt for `map` and the game activates it;
+    /// then every connected client restarts its sign-on, its old reliable data discarded and
+    /// `reconnect` sent through the reliable stream. Clients are not reported to the game as
+    /// disconnected: its `server_deactivate` owns that state. Call it between [`frame`]
+    /// calls.
+    ///
+    /// [`frame`]: Server::frame
     pub fn change_map(&mut self, map: ServerMap) {
         self.with_game(|game, eng| game.server_deactivate(eng));
+        for (client, view) in self.clients.iter_mut().zip(&mut self.views) {
+            client.put_in_server = false;
+            view.active = false;
+        }
         self.spawn_count += 1;
-        let (edicts, precache) = Self::map_tables(&map, self.cfg.max_clients);
+        self.edicts = self
+            .edicts
+            .successor(self.cfg.max_clients, DEFAULT_MAX_EDICTS);
+        self.precache = Self::map_precache(&map);
         self.map = map;
-        self.edicts = edicts;
-        self.precache = precache;
         self.activate_map();
         let mut reconnect = MsgWriter::new();
         write_svc_stufftext(&mut reconnect, "reconnect\n");
         let now = self.time;
-        for (client, view) in self.clients.iter_mut().zip(&mut self.views) {
-            if client.is_free() {
-                continue;
-            }
+        for client in self.clients.iter_mut().filter(|c| !c.is_free()) {
             client.restart_signon(now);
             client.chan.write_reliable(reconnect.as_slice());
-            view.active = false;
         }
     }
 

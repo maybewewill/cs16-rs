@@ -116,6 +116,10 @@ pub struct TestGame {
     /// When set, `server_deactivate` writes an `svc_print` of [`DEACTIVATE_PRINT`] into the
     /// reliable buffer of every slot.
     pub print_on_deactivate: bool,
+    /// `skin` the extra entities get in `server_activate`.
+    pub extra_skin: i16,
+    /// Slots `EngineApi::is_client_active` reported active during the last `server_activate`.
+    pub active_at_activate: Vec<u8>,
     /// Result of `precache_model("models/late.mdl")` in `client_put_in_server`.
     pub late_precache: Option<Result<u16, PrecacheError>>,
     /// Every `argv` received by `client_command`.
@@ -143,6 +147,7 @@ impl GameDll for TestGame {
 
     fn server_activate(&mut self, eng: &mut EngineApi<'_>) {
         self.server_activate_calls += 1;
+        self.active_at_activate = (0..32).filter(|&s| eng.is_client_active(s)).collect();
         // Lands at model index 2 on a stub map.
         eng.precache
             .precache_model("models/test.mdl")
@@ -153,6 +158,7 @@ impl GameDll for TestGame {
             vars.classname = "test_extra".to_string();
             vars.modelindex = 2;
             vars.origin = Vec3::new(0.0, 0.0, 16.0 * n as f32);
+            vars.skin = self.extra_skin;
             if self.nodraw_extras {
                 vars.effects |= EF_NODRAW;
             }
@@ -223,6 +229,13 @@ impl GameDll for TestGame {
         {
             // `setkey <slot> <key> <value>`: sets a userinfo key of any slot.
             eng.set_client_key(slot, key, value);
+        }
+        if argv.first().is_some_and(|c| c == "bigprint") {
+            // Enough `svc_print` messages of `BIG_PRINT` to be sent as a fragmented stream.
+            let text = big_print();
+            for _ in 0..BIG_PRINT_COUNT {
+                write_svc_print(eng.reliable(slot), &text);
+            }
         }
         if argv.first().is_some_and(|c| c == "biginfo") {
             // A userinfo update of slot 15 whose text is `BIG_INFO`.
@@ -301,6 +314,14 @@ pub const GAME_KICK_REASON: &str = "Kicked by the game";
 
 /// Text of the `svc_print` that `print_on_deactivate` writes.
 pub const DEACTIVATE_PRINT: &str = "old map\n";
+
+/// `svc_print` messages `client_command("bigprint")` writes, each of [`big_print`].
+pub const BIG_PRINT_COUNT: usize = 40;
+
+/// Text of the `svc_print` messages `client_command("bigprint")` writes: 400 bytes.
+pub fn big_print() -> String {
+    format!("{}\n", "b".repeat(399))
+}
 
 /// Text of the `svc_print` that `shout_on_put_in_server` broadcasts.
 pub const SHOUT: &str = "shout\n";

@@ -290,6 +290,20 @@ impl<T: PacketTransport> ProbeClient<T> {
         &self.entities
     }
 
+    /// Spawn baselines received for the current map, decoded, by entity number.
+    pub fn baselines(&self) -> BTreeMap<u16, GoldSrcEntityState> {
+        let deltas = &self.ctx.deltas;
+        let max_clients = self.ctx.max_clients;
+        self.ctx
+            .baselines
+            .iter()
+            .filter_map(|(&number, (ent_type, rec))| {
+                let schema = deltas.get(entity_schema_name(number, *ent_type, max_clients))?;
+                Some((number, GoldSrcEntityState::from_delta(number, *ent_type, rec, schema)))
+            })
+            .collect()
+    }
+
     pub fn client_data(&self) -> Option<&GoldSrcClientData> {
         self.client_data.as_ref()
     }

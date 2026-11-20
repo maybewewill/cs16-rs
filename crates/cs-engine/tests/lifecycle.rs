@@ -14,6 +14,7 @@ use cs_probe::{ProbeClient, ProbeState};
 use cs_proto48::delta::DeltaRegistry;
 use cs_proto48::info::InfoString;
 use cs_proto48::messages::svc;
+use cs_proto48::netchan::{FRAGMENT_S2C_MAX_SIZE, MAX_MSGLEN};
 use cs_proto48::query::{A2S_INFO, A2S_INFO_PAYLOAD};
 use cs_transport::{LoopbackEndpoint, PacketTransport, PeerAddr};
 
@@ -511,6 +512,8 @@ fn two_clients_survive_changelevel() {
     assert_eq!(name_of(&a, slot_b).as_deref(), Some("B"));
     assert_eq!(name_of(&b, slot_a).as_deref(), Some("A"));
     let game = h.server.game();
+    // Nobody is in the server while the new map activates.
+    assert!(game.active_at_activate.is_empty(), "{:?}", game.active_at_activate);
     assert_eq!(game.server_activate_calls, 2);
     assert_eq!(game.server_deactivate_calls, 1);
     assert_eq!(game.client_disconnect_calls, 0);
@@ -613,16 +616,211 @@ fn baselines_are_rebuilt_for_the_new_map() {
     h.step(&mut [&mut a], 20);
     let old_extras = server_extras(&h);
     assert_eq!(non_player_entities(&h, &a), old_extras);
+    assert_eq!(baseline_skins(&h, &a), vec![0; 5]);
 
+    // The new map's extras take the first two old indices, with another skin.
     h.server.game_mut().extra_entities = 2;
+    h.server.game_mut().extra_skin = 7;
     h.server.change_map(ServerMap::stub("second"));
     let new_extras = server_extras(&h);
-    assert_eq!(new_extras.len(), 2);
+    assert_eq!(new_extras, old_extras[..2]);
     rejoined(&mut h, &mut [&mut a], "second");
     let mut b = joined(&mut h, "B", &mut [&mut a]);
     h.step(&mut [&mut a, &mut b], 20);
-    assert_eq!(non_player_entities(&h, &a), new_extras);
-    assert_eq!(non_player_entities(&h, &b), new_extras);
+    for probe in [&a, &b] {
+        assert_eq!(non_player_entities(&h, probe), new_extras);
+        let max_clients = u16::from(h.server.config().max_clients);
+        let baselines: Vec<u16> = probe
+            .baselines()
+            .keys()
+            .copied()
+            .filter(|&n| n > max_clients)
+            .collect();
+        assert_eq!(baselines, new_extras);
+        assert_eq!(baseline_skins(&h, probe), vec![7, 7]);
+        assert!(new_extras.iter().all(|n| probe.entities()[n].skin == 7));
+    }
+}
+
+/// `skin` of each spawn baseline above the player slots that `probe` holds.
+fn baseline_skins(h: &Harness, probe: &Probe) -> Vec<i16> {
+    let max_clients = u16::from(h.server.config().max_clients);
+    probe
+        .baselines()
+        .iter()
+        .filter(|&(&n, _)| n > max_clients)
+        .map(|(_, state)| state.skin)
+        .collect()
+}
+
+#[test]
+fn stale_edict_id_does_not_resolve_after_changelevel() {
+    let game = TestGame {
+        extra_entities: 1,
+        ..TestGame::default()
+    };
+    let mut h = Harness::with_game(4, game);
+    let (old_id, _) = h
+        .server
+        .edicts()
+        .iter_live()
+        .find(|(_, e)| e.vars.classname == "test_extra")
+        .expect("extra entity");
+    h.server.change_map(ServerMap::stub("second"));
+    let (new_id, _) = h
+        .server
+        .edicts()
+        .iter_live()
+        .find(|(_, e)| e.vars.classname == "test_extra")
+        .expect("extra entity");
+    assert_eq!(new_id.index, old_id.index);
+    assert!(h.server.edicts().get(old_id).is_none());
+    assert!(h.server.edicts().get(new_id).is_some());
+}
+
+#[test]
+fn changelevel_twice_before_signon() {
+    let mut h = Harness::new(4);
+    let mut a = joined(&mut h, "A", &mut []);
+    h.step(&mut [&mut a], 20);
+    let signon_stufftexts = opcodes(&a, svc::STUFFTEXT);
+    let spawn_count = h.server.spawn_count();
+    let put_in = h.server.game().client_put_in_server_calls;
+
+    h.server.change_map(ServerMap::stub("second"));
+    h.server.change_map(ServerMap::stub("third"));
+    rejoined(&mut h, &mut [&mut a], "third");
+    h.step(&mut [&mut a], 50);
+    assert_eq!(a.state(), &ProbeState::InGame);
+    assert_eq!(h.server.spawn_count(), spawn_count + 2);
+    assert_eq!(a.server_info().map(|i| i.spawn_count), Some(spawn_count + 2));
+    assert_eq!(h.server.client_state(0), ClientState::Active);
+    assert_eq!(h.server.game().client_put_in_server_calls, put_in + 1);
+    // One `reconnect`, then the stuffed text of one sign-on.
+    assert_eq!(
+        opcodes(&a, svc::STUFFTEXT),
+        signon_stufftexts * 2 + 1,
+        "{:?}",
+        a.opcode_log()
+    );
+}
+
+#[test]
+fn changelevel_without_clients() {
+    let mut h = Harness::new(4);
+    h.step(&mut [], 5);
+    h.server.change_map(ServerMap::stub("second"));
+    assert_eq!(h.server.spawn_count(), 2);
+    assert_eq!(h.server.client_count(), 0);
+    let game = h.server.game();
+    assert_eq!(
+        (game.server_deactivate_calls, game.server_activate_calls),
+        (1, 2)
+    );
+    let mut a = joined(&mut h, "A", &mut []);
+    let info = a.server_info().expect("server info");
+    assert!(info.map_path.contains("second"), "{}", info.map_path);
+    assert_eq!(info.spawn_count, 2);
+    h.step(&mut [&mut a], 5);
+    assert_eq!(a.state(), &ProbeState::InGame);
+}
+
+#[test]
+fn client_stalled_after_changelevel_is_dropped() {
+    let cfg = ServerConfig {
+        max_clients: 4,
+        signon_timeout_secs: 2.0,
+        timeout_secs: 1000.0,
+        ..ServerConfig::default()
+    };
+    let mut h = Harness::with_config(cfg, TestGame::default());
+    let mut a = joined(&mut h, "A", &mut []);
+    h.step(&mut [&mut a], 20);
+
+    h.server.change_map(ServerMap::stub("second"));
+    // A is no longer pumped.
+    h.step(&mut [], frames(2.0) - 5);
+    assert_eq!(
+        h.server.client_state(0),
+        ClientState::Signon(SignonStage::AwaitNew)
+    );
+    h.step(&mut [], 10);
+    assert_eq!(h.server.client_state(0), ClientState::Free);
+    // It was not in the server on the new map.
+    assert_eq!(h.server.game().client_disconnect_calls, 0);
+}
+
+#[test]
+fn changelevel_during_a_fragmented_reliable_stream() {
+    let mut h = Harness::new(4);
+    let mut a = joined(&mut h, "A", &mut []);
+    h.step(&mut [&mut a], 20);
+    let prints = opcodes(&a, svc::PRINT);
+
+    a.send_stringcmd("bigprint");
+    let mut peak = 0;
+    let mut partly_sent = false;
+    for _ in 0..200 {
+        h.step(&mut [&mut a], 1);
+        let backlog = h.server.client_reliable_backlog(0);
+        peak = peak.max(backlog);
+        if peak > 0 && backlog > 0 && backlog + 2 * FRAGMENT_S2C_MAX_SIZE <= peak {
+            partly_sent = true;
+            break;
+        }
+    }
+    assert!(partly_sent, "peak {peak}");
+    assert!(peak > MAX_MSGLEN, "peak {peak}");
+    assert_eq!(opcodes(&a, svc::PRINT), prints);
+
+    h.server.change_map(ServerMap::stub("second"));
+    rejoined(&mut h, &mut [&mut a], "second");
+    h.step(&mut [&mut a], 100);
+    assert_eq!(a.state(), &ProbeState::InGame);
+    assert_eq!(h.server.client_state(0), ClientState::Active);
+    // Only the banner of the new `new` stage: no part of the old stream is delivered.
+    assert_eq!(opcodes(&a, svc::PRINT), prints + 1);
+}
+
+#[test]
+fn duplicated_reconnect_is_harmless() {
+    let mut h = Harness::new(4);
+    let mut a = joined(&mut h, "A", &mut []);
+    h.step(&mut [&mut a], 20);
+    let put_in = h.server.game().client_put_in_server_calls;
+    let stufftexts = opcodes(&a, svc::STUFFTEXT);
+
+    // A receives a reliable message whose acknowledgement the server never sees.
+    a.withhold_reliable_ack(true);
+    a.send_stringcmd("biginfo");
+    for _ in 0..100 {
+        h.step(&mut [&mut a], 1);
+        if a.userinfos().contains_key(&15) {
+            break;
+        }
+    }
+    assert!(a.userinfos().contains_key(&15));
+    assert!(h.server.client_reliable_backlog(0) > 0);
+
+    h.server.change_map(ServerMap::stub("second"));
+    a.withhold_reliable_ack(false);
+    let mut entered = 0;
+    let mut was_in_game = a.state() == &ProbeState::InGame;
+    for _ in 0..500 {
+        h.step(&mut [&mut a], 1);
+        let in_game = a.state() == &ProbeState::InGame
+            && a.server_info().is_some_and(|i| i.map_path.contains("second"));
+        if in_game && !was_in_game {
+            entered += 1;
+        }
+        was_in_game = a.state() == &ProbeState::InGame;
+    }
+    assert_eq!(entered, 1);
+    assert_eq!(a.state(), &ProbeState::InGame);
+    assert_eq!(h.server.client_state(0), ClientState::Active);
+    assert_eq!(h.server.game().client_put_in_server_calls, put_in + 1);
+    // The `reconnect` did arrive twice: the stuffed text of one sign-on plus two.
+    assert_eq!(opcodes(&a, svc::STUFFTEXT), stufftexts * 2 + 2);
 }
 
 #[test]

@@ -122,6 +122,23 @@ impl EdictPool {
         Self { slots, max_clients }
     }
 
+    /// A pool like [`new`](Self::new) for the next map: every slot starts at a serial one past
+    /// the highest any slot of `self` holds, so no id `self` handed out resolves in it.
+    pub fn successor(&self, max_clients: u8, max_edicts: usize) -> Self {
+        let next = self
+            .slots
+            .iter()
+            .map(|s| s.serial)
+            .max()
+            .unwrap_or(0)
+            .wrapping_add(1);
+        let mut pool = Self::new(max_clients, max_edicts);
+        for slot in &mut pool.slots {
+            slot.serial = next;
+        }
+        pool
+    }
+
     /// Worldspawn.
     pub fn world(&self) -> EdictId {
         self.id_at(0)
@@ -245,6 +262,38 @@ mod tests {
         const fn assert_send<T: Send>() {}
         assert_send::<EdictPool>();
     };
+
+    #[test]
+    fn successor_rejects_every_id_of_the_previous_pool() {
+        let mut old = EdictPool::new(2, 16);
+        let world = old.world();
+        let freed = old.alloc(0.0).unwrap();
+        let live = old.alloc(0.0).unwrap();
+        old.free(freed, 1.0);
+        old.reset_client(1);
+        old.reset_client(1);
+        // A player id taken before and after the resets.
+        let player = old.client(0);
+        let reset_player = old.client(1);
+
+        let mut new = old.successor(2, 16);
+        assert_eq!(new.max_clients(), 2);
+        for id in [world, freed, live, player, reset_player] {
+            assert!(new.get(id).is_none(), "{id:?}");
+        }
+        // The successor's own ids resolve, at the same indices.
+        assert!(new.get(new.world()).is_some());
+        assert!(new.get(new.client(0)).is_some());
+        assert!(new.get(new.client(1)).is_some());
+        let first = new.alloc(0.0).unwrap();
+        assert_eq!(first.index, freed.index);
+        assert!(new.get(first).is_some());
+        let second = new.alloc(0.0).unwrap();
+        assert_eq!(second.index, live.index);
+        assert!(new.get(second).is_some());
+        assert!(new.get(live).is_none());
+        assert_eq!(new.iter_live().count(), 5);
+    }
 
     #[test]
     fn first_alloc_is_after_player_slots() {
