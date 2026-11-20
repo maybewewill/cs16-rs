@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 
 use cs_cvar::CVarRegistry;
-use cs_engine::{EngineApi, GameDll, PrecacheError, Server, ServerConfig, ServerMap};
+use cs_engine::{EdictId, EngineApi, GameDll, PrecacheError, Server, ServerConfig, ServerMap};
 use cs_probe::{ProbeClient, ProbeConfig};
 use cs_proto48::crypto::md5_hex;
 use cs_proto48::delta::{DeltaRegistry, GoldSrcClientData, GoldSrcEntityState, GoldSrcUserCmd};
@@ -37,9 +37,14 @@ impl Harness {
     }
 
     pub fn with_config(cfg: ServerConfig, game: TestGame) -> Self {
+        Self::with_map(cfg, ServerMap::stub("test"), game)
+    }
+
+    /// A harness whose server starts on `map`.
+    pub fn with_map(cfg: ServerConfig, map: ServerMap, game: TestGame) -> Self {
         let server = Server::new(
             cfg,
-            ServerMap::stub("test"),
+            map,
             game,
             DeltaRegistry::cs16_default(),
             CVarRegistry::new_with_defaults(),
@@ -178,6 +183,17 @@ pub struct TestGame {
     /// The `msec` of every command `run_usercmd` received, in call order.
     pub usercmd_msecs: Vec<u8>,
 
+    /// `(classname, keys)` of every `spawn_entity` call, in call order.
+    pub spawned: Vec<(String, Vec<(String, String)>)>,
+    /// `"spawn:<classname>"` for every `spawn_entity` call and `"activate"` for every
+    /// `server_activate`, in call order.
+    pub call_order: Vec<String>,
+    /// Result of the `precache_model` that `spawn_entity` made for each accepted entity with a
+    /// `model` key.
+    pub spawn_precache: Vec<Result<u16, PrecacheError>>,
+    /// `eng.time()` of every `spawn_entity` call.
+    pub spawn_times: Vec<f64>,
+
     pub server_activate_calls: usize,
     pub server_deactivate_calls: usize,
     pub client_connect_calls: usize,
@@ -198,6 +214,7 @@ impl GameDll for TestGame {
 
     fn server_activate(&mut self, eng: &mut EngineApi<'_>) {
         self.server_activate_calls += 1;
+        self.call_order.push("activate".to_string());
         self.active_at_activate = (0..32).filter(|&s| eng.is_client_active(s)).collect();
         // Lands at model index 2 on a stub map.
         eng.precache_model("models/test.mdl")
@@ -212,6 +229,35 @@ impl GameDll for TestGame {
                 vars.effects |= EF_NODRAW;
             }
         }
+    }
+
+    fn spawn_entity(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        id: EdictId,
+        classname: &str,
+        keys: &[(String, String)],
+    ) -> bool {
+        self.spawned.push((classname.to_string(), keys.to_vec()));
+        self.call_order.push(format!("spawn:{classname}"));
+        self.spawn_times.push(eng.time());
+        if classname == "test_selfremove" {
+            // Removes the entity itself and still refuses it.
+            eng.remove_entity(id);
+            return false;
+        }
+        if !classname.starts_with("test_keep") {
+            return false;
+        }
+        let model = keys.iter().find(|(k, _)| k == "model").map(|(_, v)| v);
+        if let Some(model) = model
+            && eng.ent(id).is_some_and(|v| v.model.is_empty())
+        {
+            let result = eng.precache_model(model);
+            self.spawn_precache.push(result);
+            eng.set_model(id, model);
+        }
+        true
     }
 
     fn server_deactivate(&mut self, eng: &mut EngineApi<'_>) {

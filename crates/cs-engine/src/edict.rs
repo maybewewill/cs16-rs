@@ -28,6 +28,12 @@ pub struct EdictId {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EntVars {
     pub classname: String,
+    /// Name other entities refer to this one by; set from the map's `targetname` key.
+    pub targetname: String,
+    /// Name of the entity this one acts on; set from the map's `target` key.
+    pub target: String,
+    /// Map-defined option bits; set from the map's `spawnflags` key.
+    pub spawnflags: u32,
     pub model: String,
     pub origin: Vec3,
     pub angles: Vec3,
@@ -52,6 +58,8 @@ pub struct EntVars {
     pub rendermode: u8,
     pub renderamt: u8,
     pub renderfx: u8,
+    /// Colour of the `rendermode` effects; set from the map's `rendercolor` key.
+    pub rendercolor: [u8; 3],
     pub solid: u8,
     pub movetype: u8,
     pub flags: u32,

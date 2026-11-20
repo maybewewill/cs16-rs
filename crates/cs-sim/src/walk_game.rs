@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use cs_assets::bsp::{SpawnPoint, SpawnTeam};
-use cs_engine::{EngineApi, GameDll};
+use cs_engine::{EdictId, EngineApi, GameDll};
 use cs_proto48::delta::{GoldSrcClientData, GoldSrcUserCmd};
 use cs_proto48::usermsg::UserMsgRegistry;
 use glam::Vec3;
@@ -134,6 +134,17 @@ impl GameDll for WalkGame {
 
     fn server_deactivate(&mut self, _eng: &mut EngineApi<'_>) {
         self.players.clear();
+    }
+
+    /// Refuses every map entity; the real entity logic comes later.
+    fn spawn_entity(
+        &mut self,
+        _eng: &mut EngineApi<'_>,
+        _id: EdictId,
+        _classname: &str,
+        _keys: &[(String, String)],
+    ) -> bool {
+        false
     }
 
     fn client_connect(&mut self, _eng: &mut EngineApi<'_>, _slot: u8) -> Result<(), String> {

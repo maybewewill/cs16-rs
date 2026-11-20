@@ -9,7 +9,7 @@ use cs_proto48::info::InfoString;
 use cs_proto48::messages::ENTITY_NORMAL;
 use cs_proto48::usermsg::UserMsgRegistry;
 
-use crate::edict::{EdictPool, EntVars};
+use crate::edict::{EdictId, EdictPool, EntVars};
 use crate::map::ServerMap;
 use crate::precache::PrecacheTables;
 
@@ -160,6 +160,19 @@ pub trait GameDll {
     fn usermsgs(&self) -> UserMsgRegistry;
     fn server_activate(&mut self, eng: &mut EngineApi<'_>);
     fn server_deactivate(&mut self, eng: &mut EngineApi<'_>);
+    /// An entry of the map's entity lump, offered before `server_activate`. `id` is a fresh
+    /// edict (the world for the first `worldspawn` entry) whose variables the engine has already
+    /// filled from `keys`, and `model` is set when it was precached; `keys` are the
+    /// `(key, value)` pairs, at most `MAX_ENTITY_KEYS` of them, `classname` first. Return
+    /// `false` to refuse the entry: the engine frees the edict (the world is never removed).
+    /// A game may remove the entity itself and then return `false`.
+    fn spawn_entity(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        id: EdictId,
+        classname: &str,
+        keys: &[(String, String)],
+    ) -> bool;
     /// A client asks to connect; `Err(text)` refuses it with `text`. A client that never
     /// finishes sign-on gets no `client_disconnect` afterwards (that is only called for clients
     /// that were put in the server), so a game must not allocate per-client state here; do it
@@ -228,7 +241,7 @@ pub fn entity_state_from_vars(index: u16, v: &EntVars) -> GoldSrcEntityState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::edict::{DEFAULT_MAX_EDICTS, EdictId};
+    use crate::edict::DEFAULT_MAX_EDICTS;
     use glam::Vec3;
 
     #[test]

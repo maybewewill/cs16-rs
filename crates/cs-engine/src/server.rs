@@ -192,9 +192,10 @@ impl<G: GameDll> Server<G> {
         precache
     }
 
-    /// Lets the game activate the current map, then locks the precache tables and computes
-    /// the spawn baselines.
+    /// Spawns the map's entities, lets the game activate the current map, then locks the
+    /// precache tables and computes the spawn baselines.
     pub(crate) fn activate_map(&mut self) {
+        self.spawn_map_entities();
         self.with_game(|game, eng| game.server_activate(eng));
         self.precache.lock();
         self.compute_baselines();

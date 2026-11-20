@@ -8,6 +8,7 @@ pub mod edict;
 pub mod frame;
 pub mod game;
 mod lifecycle;
+pub mod mapents;
 pub mod map;
 pub mod oob;
 pub mod precache;
@@ -24,6 +25,7 @@ pub use lifecycle::{
     NAME_CHANGE_MIN_INTERVAL_SECS, PINGS_INTERVAL_SECS, SETINFO_BURST, SETINFO_RATE_PER_SEC,
 };
 pub use map::ServerMap;
+pub use mapents::{MAX_ENTITY_KEYS, MAX_KEY_BYTES, MAX_VALUE_BYTES};
 pub use oob::{
     CHALLENGE_BUCKET_SECS, ChallengeIssuer, ConnectRequest, MAX_INFO_STRING, MAX_NAME_BYTES,
     OOB_GLOBAL_REPLIES_PER_SEC, OobContext, OobLimiter, OobOutcome, carries_valid_challenge,

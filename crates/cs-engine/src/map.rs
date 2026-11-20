@@ -49,6 +49,15 @@ impl ServerMap {
         }
     }
 
+    /// A [`stub`](Self::stub) map whose entity lump is `entities`, spawned in vector order when
+    /// the map is activated.
+    pub fn stub_with_entities(name: &str, entities: Vec<Entity>) -> Self {
+        Self {
+            entities,
+            ..Self::stub(name)
+        }
+    }
+
     /// The map's hull collision; `None` for the stub map.
     pub fn collision(&self) -> Option<&WorldCollision> {
         self.collision.as_ref()
