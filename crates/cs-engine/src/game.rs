@@ -27,7 +27,6 @@ pub(crate) struct Outbox {
 
 impl Outbox {
     /// One reliable and one unreliable writer per slot.
-    #[cfg_attr(not(test), expect(dead_code, reason = "constructed by the server"))]
     pub(crate) fn new(max_clients: u8) -> Self {
         let slots = usize::from(max_clients);
         Self {
@@ -62,7 +61,6 @@ pub struct EngineApi<'a> {
 }
 
 impl<'a> EngineApi<'a> {
-    #[cfg_attr(not(test), expect(dead_code, reason = "constructed by the server"))]
     pub(crate) fn new(
         edicts: &'a mut EdictPool,
         precache: &'a mut PrecacheTables,
@@ -72,6 +70,8 @@ impl<'a> EngineApi<'a> {
         outbox: &'a mut Outbox,
         clients: &'a mut [ClientView],
     ) -> Self {
+        debug_assert_eq!(outbox.reliable.len(), clients.len());
+        debug_assert_eq!(outbox.unreliable.len(), clients.len());
         Self {
             edicts,
             precache,

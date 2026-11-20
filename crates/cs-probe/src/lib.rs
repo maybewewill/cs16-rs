@@ -262,6 +262,15 @@ impl<T: PacketTransport> ProbeClient<T> {
         self.stats
     }
 
+    /// The transport the probe talks through.
+    pub fn transport(&self) -> &T {
+        &self.transport
+    }
+
+    pub fn transport_mut(&mut self) -> &mut T {
+        &mut self.transport
+    }
+
     /// Records every datagram exchanged with the server from now on.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn set_capture(&mut self, w: CaptureWriter) {

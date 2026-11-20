@@ -14,6 +14,8 @@ cs-cvar.workspace = true
 cs-proto48.workspace = true
 cs-transport.workspace = true
 glam.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
+cs-probe.workspace = true
 cs-vfs.workspace = true

@@ -26,3 +26,8 @@ status = "missing"
 id = "pvs_points"
 status = "tested"
 evidence = "crates/cs-engine/src/map.rs::tests::real_map_pvs_hides_far_spawn; approximation: box centre and 8 corners, not the entity's full leaf list"
+
+[[item]]
+id = "signon"
+status = "tested"
+evidence = "crates/cs-engine/tests/signon.rs::probe_reaches_in_game_within_200_frames; stage order unverified against a real server (working assumption, see signon_opcode_order_matches_golden_capture)"

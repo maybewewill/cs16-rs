@@ -581,10 +581,12 @@ version = "0.1.0"
 dependencies = [
  "cs-assets",
  "cs-cvar",
+ "cs-probe",
  "cs-proto48",
  "cs-transport",
  "cs-vfs",
  "glam",
+ "tracing",
 ]
 
 [[package]]
