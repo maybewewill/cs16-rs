@@ -154,40 +154,48 @@ fn garbage_from_connected_address_never_panics() {
     assert_eq!(h.server.client_state(0), ClientState::Active);
     assert_eq!(h.server.client_state(1), ClientState::Active);
     let updates_before = other.stats().full_updates;
+    let stats_before = h.server.net_stats();
 
+    // Headers carry strictly increasing sequences, so the server's channel accepts each one
+    // and the payload parser sees its random body. The random datagrams carry random 30-bit
+    // sequences, so the headers start near the top of that range, where no random
+    // sequence overtakes them. Only the reliable bit is random: a fragment flag would make
+    // most of them fail in the netchan.
+    let mut next_seq = 0x3FFF_FFFF - 4_000;
+    assert!(next_seq > target.outgoing_sequence().expect("connected"));
+    let ack = target.incoming_sequence().expect("connected");
     let mut rng = Lcg(0xC516);
     for i in 0..10_000usize {
         let len = i % 65;
         let mut data: Vec<u8> = (0..len).map(|_| rng.next_byte()).collect();
         if i % 3 == 0 && len >= 8 {
-            // A netchan header with a sequence just above the client's, so the server's
-            // channel accepts the packet and the payload parser sees the random body.
-            let flags = u32::from(rng.next_byte() & 0xC0) << 24;
-            let ahead = u32::from(rng.next_byte() % 4);
-            let seq = target.outgoing_sequence().expect("connected") + ahead;
-            let ack = target.incoming_sequence().expect("connected");
-            data[..4].copy_from_slice(&(seq | flags).to_le_bytes());
+            let reliable = u32::from(rng.next_byte() & 0x80) << 24;
+            data[..4].copy_from_slice(&(next_seq | reliable).to_le_bytes());
             data[4..8].copy_from_slice(&ack.to_le_bytes());
+            next_seq += 1;
         }
         target
             .transport_mut()
             .send(PeerAddr::Loopback(0), &data)
             .expect("loopback send");
+        // The target's own probe is not pumped, so no good move resets its bad-move count.
         if i % 100 == 99 {
-            h.step(&mut [&mut target, &mut other], 1);
+            h.step(&mut [&mut other], 1);
         }
     }
-    h.step(&mut [&mut target, &mut other], 50);
+    h.step(&mut [&mut other], 50);
 
-    // The target may have been dropped for unparsable payloads; either outcome is fine.
+    let stats = h.server.net_stats();
+    assert!(stats.datagrams_rejected > 0, "{stats:?}");
+    // The target is dropped by the bad-move rule; after that its address has no slot and
+    // its garbage is no longer counted.
     assert!(
-        matches!(
-            h.server.client_state(0),
-            ClientState::Active | ClientState::Free
-        ),
-        "{:?}",
-        h.server.client_state(0)
+        stats.payloads_rejected
+            >= stats_before.payloads_rejected + u64::from(MAX_CONSECUTIVE_BAD_MOVES),
+        "{stats:?}"
     );
+    assert_eq!(h.server.client_state(0), ClientState::Free);
+    assert_eq!(h.server.game().client_disconnect_calls, 1);
     assert_eq!(h.server.client_state(1), ClientState::Active);
     assert_eq!(other.state(), &ProbeState::InGame);
     assert!(other.stats().full_updates > updates_before + 100);

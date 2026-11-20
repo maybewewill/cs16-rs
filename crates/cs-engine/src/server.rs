@@ -83,6 +83,16 @@ pub struct Server<G: GameDll> {
     pub(crate) spawn_count: u32,
     pub(crate) next_userid: i32,
     pub(crate) time: f64,
+    pub(crate) net_stats: NetStats,
+}
+
+/// Monotonic counts of what the server refused from known client addresses.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct NetStats {
+    /// Datagrams the client's netchan refused: malformed, stale or duplicate.
+    pub datagrams_rejected: u64,
+    /// Payloads that reached `parse_clc_stream` and failed to parse.
+    pub payloads_rejected: u64,
 }
 
 impl<G: GameDll> Server<G> {
@@ -129,6 +139,7 @@ impl<G: GameDll> Server<G> {
             spawn_count: 1,
             next_userid: 1,
             time: 0.0,
+            net_stats: NetStats::default(),
         };
         server.with_game(|game, eng| game.server_activate(eng));
         server.precache.lock();
@@ -166,6 +177,10 @@ impl<G: GameDll> Server<G> {
             .get(usize::from(slot))
             .filter(|c| !c.is_free())
             .map(|c| c.userid)
+    }
+
+    pub fn net_stats(&self) -> NetStats {
+        self.net_stats
     }
 
     pub fn spawn_count(&self) -> u32 {
@@ -334,6 +349,7 @@ impl<G: GameDll> Server<G> {
     fn handle_netchan(&mut self, slot: u8, data: &[u8]) {
         let index = usize::from(slot);
         let Ok(Some(incoming)) = self.clients[index].chan.process_packet(data) else {
+            self.net_stats.datagrams_rejected += 1;
             return;
         };
         let Some(schema) = self.usercmd_schema.clone() else {
@@ -347,6 +363,7 @@ impl<G: GameDll> Server<G> {
             // The parser does not tell a bad `clc_move` checksum from other errors, so every
             // unparsable payload counts as a bad move.
             let Ok(messages) = parse_clc_stream(&payload, &schema, incoming.sequence) else {
+                self.net_stats.payloads_rejected += 1;
                 self.count_bad_move(slot);
                 if self.clients[index].is_free() {
                     return;

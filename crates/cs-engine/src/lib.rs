@@ -20,7 +20,7 @@ pub use oob::{
     OobContext, OobLimiter, OobOutcome, handle_oob, sanitize_name,
 };
 pub use precache::{MAX_GENERIC, MAX_MODELS, MAX_SOUNDS, PrecacheError, PrecacheTables, res_type};
-pub use server::{MAX_RELIABLE_BACKLOG, Server, ServerConfig};
+pub use server::{MAX_RELIABLE_BACKLOG, NetStats, Server, ServerConfig};
 pub use usercmd::{
     MAX_BANKED_MS, MAX_CONSECUTIVE_BAD_MOVES, MAX_DROPPED_REPLAY, MsecBudget, STRINGCMD_BURST,
     STRINGCMD_RATE_PER_SEC, select_cmds_to_run,
