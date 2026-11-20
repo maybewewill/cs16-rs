@@ -4,10 +4,16 @@
 mod common;
 
 use common::Harness;
-use cs_engine::{ClientState, MAX_CONSECUTIVE_BAD_MOVES, STRINGCMD_BURST, STRINGCMD_RATE_PER_SEC};
+use cs_engine::{
+    ClientState, MAX_CLIENT_INCOMING_STREAM, MAX_CONSECUTIVE_BAD_MOVES, MAX_NAME_BYTES,
+    STRINGCMD_BURST, STRINGCMD_RATE_PER_SEC,
+};
 use cs_probe::{ProbeClient, ProbeState};
+use cs_proto48::bitbuf::MsgWriter;
+use cs_proto48::crypto::com_munge2;
 use cs_proto48::delta::GoldSrcUserCmd;
 use cs_proto48::info::InfoString;
+use cs_proto48::netchan::{FRAGMENT_S2C_MAX_SIZE, make_frag_id};
 use cs_transport::{FaultStats, Faults, LoopbackEndpoint, PacketTransport, PeerAddr};
 
 type Probe = ProbeClient<LoopbackEndpoint>;
@@ -71,11 +77,14 @@ fn speedhack_is_bounded_by_real_time() {
     let mut h = Harness::new(4);
     let mut probe = joined(&mut h, "Player");
     let start = origin_x(&h, 0);
+    let t0 = h.now;
 
     // 100 commands per second claiming 20 ms each: twice real time, for two seconds.
     drive(&mut h, &mut probe, &forward(20), 200);
-    let moved = origin_x(&h, 0) - start;
-    assert!(moved <= 250.0 * (2.0 + 0.5), "moved {moved}");
+    let moved = f64::from(origin_x(&h, 0) - start);
+    // The bank (full since sign-on) plus the real time that passed.
+    let bound = 250.0 * (0.5 + (h.now - t0));
+    assert!(moved <= bound, "moved {moved}, bound {bound}");
     // Real time itself is granted.
     assert!(moved >= 250.0 * 2.0, "moved {moved}");
 }
@@ -284,4 +293,104 @@ fn disconnect_and_dropclient_free_the_slot() {
     let game = h.server.game();
     assert_eq!(game.client_disconnect_calls, 2);
     assert!(game.commands.is_empty(), "{:?}", game.commands);
+}
+
+/// Name in the userinfo `probe` received for `slot`.
+fn name_of(probe: &Probe, slot: u8) -> Option<String> {
+    let info = probe.userinfos().get(&slot)?;
+    InfoString::parse(info).get("name").map(str::to_string)
+}
+
+#[test]
+fn setinfo_name_is_sanitised_and_bounded() {
+    let mut h = Harness::new(4);
+    let mut probe = joined(&mut h, "Player");
+    let long = "N".repeat(MAX_NAME_BYTES + 20);
+    probe.send_stringcmd(&format!("setinfo name \x01{long}\x7F"));
+    h.step(&mut [&mut probe], 20);
+    assert_eq!(name_of(&probe, 0), Some("N".repeat(MAX_NAME_BYTES)));
+    assert_eq!(h.server.game().client_userinfo_changed_calls, 1);
+}
+
+#[test]
+fn setinfo_name_of_another_client_gets_a_prefix() {
+    let mut h = Harness::new(4);
+    let mut first = h.add_probe("First");
+    let mut second = h.add_probe("Second");
+    h.step(&mut [&mut first, &mut second], 200);
+
+    second.send_stringcmd("setinfo name First");
+    // Re-setting one's own name adds no prefix.
+    first.send_stringcmd("setinfo name First");
+    h.step(&mut [&mut first, &mut second], 20);
+    assert_eq!(name_of(&first, 0).as_deref(), Some("First"));
+    assert_eq!(name_of(&first, 1).as_deref(), Some("(1)First"));
+}
+
+#[test]
+fn setinfo_name_without_value_keeps_the_name() {
+    let mut h = Harness::new(4);
+    let mut probe = joined(&mut h, "Player");
+    probe.send_stringcmd("setinfo name");
+    probe.send_stringcmd("setinfo name \"\"");
+    h.step(&mut [&mut probe], 20);
+    assert_eq!(name_of(&probe, 0).as_deref(), Some("Player"));
+    assert_eq!(h.server.game().client_userinfo_changed_calls, 0);
+}
+
+/// A netchan packet with sequence `seq` whose only content is a `piece` sent as fragment `idx`
+/// of `total` in the normal stream, munged like the sender does.
+fn fragment_packet(seq: u32, idx: u16, total: u16, piece: &[u8]) -> Vec<u8> {
+    let mut w = MsgWriter::new();
+    w.write_u32(seq | (1 << 30));
+    w.write_u32(0);
+    w.write_u8(1);
+    w.write_u32(make_frag_id(idx, total));
+    w.write_u16(0);
+    w.write_u16(piece.len() as u16);
+    w.write_u8(0);
+    w.write_bytes(piece);
+    let mut bytes = w.into_bytes();
+    com_munge2(&mut bytes[8..], (seq as u8) as i32);
+    bytes
+}
+
+#[test]
+fn fragment_flood_stays_bounded() {
+    let mut h = Harness::new(4);
+    let mut target = h.add_probe("Target");
+    let mut other = h.add_probe("Other");
+    h.step(&mut [&mut target, &mut other], 200);
+    assert_eq!(h.server.client_state(0), ClientState::Active);
+    let updates_before = other.stats().full_updates;
+
+    // 2000 maximum-size pieces of a 65535-piece message that is never completed, each with
+    // a new piece index. The target's own probe is not pumped, so its sequences do not clash.
+    let first_seq = target.outgoing_sequence().expect("connected");
+    let piece = vec![0x5A; FRAGMENT_S2C_MAX_SIZE];
+    let mut peak = 0;
+    for (i, seq) in (0..2_000u16).zip(first_seq..) {
+        let packet = fragment_packet(seq, i + 1, u16::MAX, &piece);
+        target
+            .transport_mut()
+            .send(PeerAddr::Loopback(0), &packet)
+            .expect("loopback send");
+        if i % 20 == 19 {
+            h.step(&mut [&mut other], 1);
+            let buffered = h.server.client_incoming_buffered_bytes(0);
+            assert!(
+                buffered <= 2 * MAX_CLIENT_INCOMING_STREAM,
+                "{buffered} bytes"
+            );
+            peak = peak.max(buffered);
+        }
+    }
+    h.step(&mut [&mut other], 20);
+
+    // Pieces were buffered up to the limit, then discarded.
+    assert!(peak > MAX_CLIENT_INCOMING_STREAM / 2, "peak {peak}");
+    assert!(h.server.net_stats().datagrams_rejected > 0);
+    assert_eq!(h.server.client_state(1), ClientState::Active);
+    assert_eq!(other.state(), &ProbeState::InGame);
+    assert!(other.stats().full_updates > updates_before + 100);
 }

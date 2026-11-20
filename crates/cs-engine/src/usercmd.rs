@@ -10,7 +10,7 @@ use cs_proto48::delta::GoldSrcUserCmd;
 
 use crate::client::ClientState;
 use crate::game::GameDll;
-use crate::oob::MAX_INFO_STRING;
+use crate::oob::{MAX_INFO_STRING, sanitize_name};
 use crate::server::Server;
 
 /// Movement time, in milliseconds, a client may bank ahead of the commands it sends.
@@ -190,8 +190,9 @@ impl<G: GameDll> Server<G> {
 
     /// `setinfo <key> <value>`: stores the pair in the client's userinfo and tells the game.
     /// Keys starting with `*`, a missing key, a key or value containing `\` or `"`, and a
-    /// change that would make the userinfo longer than [`MAX_INFO_STRING`] are ignored. The
-    /// caller drains the outbox.
+    /// change that would make the userinfo longer than [`MAX_INFO_STRING`] are ignored. A
+    /// `name` is sanitised and made unique as at connect; an empty one is ignored. The caller
+    /// drains the outbox.
     pub(crate) fn client_setinfo(&mut self, slot: u8, argv: &[String]) {
         let Some(key) = argv.get(1) else {
             return;
@@ -201,6 +202,14 @@ impl<G: GameDll> Server<G> {
         if key.is_empty() || key.starts_with('*') || forbidden(key) || forbidden(value) {
             return;
         }
+        let value = if key.eq_ignore_ascii_case("name") {
+            if value.is_empty() {
+                return;
+            }
+            self.unique_name(&sanitize_name(value), Some(slot))
+        } else {
+            value.to_string()
+        };
         let view = &mut self.views[usize::from(slot)];
         let mut info = view.userinfo.clone();
         info.set(key.as_str(), value);

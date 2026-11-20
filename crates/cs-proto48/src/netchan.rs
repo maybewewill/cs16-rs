@@ -17,6 +17,8 @@ pub const MAX_RELIABLE_PAYLOAD: usize = 1200;
 pub const MAX_MSGLEN: usize = 3990;
 pub const FRAGMENT_S2C_MAX_SIZE: usize = 1024;
 pub const FRAGMENT_C2S_SIZE: usize = 128;
+/// Default limit, in bytes, on the fragments buffered for reassembly in one incoming stream.
+pub const DEFAULT_MAX_INCOMING_STREAM: usize = 4 * 1024 * 1024;
 
 const SVC_NOP: u8 = 1;
 
@@ -89,6 +91,10 @@ pub struct NetChan {
     /// Incoming fragment reassembly buffers per stream (`chan->incomingbufs`).
     incoming_frags: [BTreeMap<u16, Vec<u8>>; MAX_STREAMS],
     incoming_expected: [u16; MAX_STREAMS],
+    /// Bytes held in `incoming_frags`, per stream.
+    incoming_bytes: [usize; MAX_STREAMS],
+    /// Limit on `incoming_bytes` of one stream.
+    max_incoming_stream: usize,
 
     /// Default fragment size used when slicing large payloads.
     pub fragment_size: usize,
@@ -116,6 +122,8 @@ impl NetChan {
             waitlist: [VecDeque::new(), VecDeque::new()],
             incoming_frags: [BTreeMap::new(), BTreeMap::new()],
             incoming_expected: [0; MAX_STREAMS],
+            incoming_bytes: [0; MAX_STREAMS],
+            max_incoming_stream: DEFAULT_MAX_INCOMING_STREAM,
             fragment_size: fragment_size.clamp(16, FRAGMENT_S2C_MAX_SIZE),
         }
     }
@@ -135,9 +143,70 @@ impl NetChan {
             self.fragbufs[s].clear();
             self.fragbufcount[s] = 0;
             self.waitlist[s].clear();
-            self.incoming_frags[s].clear();
-            self.incoming_expected[s] = 0;
+            self.discard_incoming(s);
         }
+    }
+
+    /// Limits the bytes buffered for reassembly in each incoming stream; a fragment that would
+    /// take a stream past it discards that stream's pieces and is refused.
+    pub fn set_max_incoming_stream(&mut self, bytes: usize) {
+        self.max_incoming_stream = bytes;
+    }
+
+    /// Bytes buffered for reassembly in both incoming streams.
+    pub fn incoming_buffered_bytes(&self) -> usize {
+        self.incoming_bytes.iter().sum()
+    }
+
+    /// Drops the pieces buffered in incoming stream `s`.
+    fn discard_incoming(&mut self, s: usize) {
+        self.incoming_frags[s].clear();
+        self.incoming_expected[s] = 0;
+        self.incoming_bytes[s] = 0;
+    }
+
+    /// Buffers piece `idx` of a `total`-piece message in incoming stream `s` and returns the
+    /// reassembled message when this piece completes it. Pieces of a message with another
+    /// total are discarded first.
+    fn store_fragment(
+        &mut self,
+        s: usize,
+        idx: u16,
+        total: u16,
+        piece: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>, ProtoError> {
+        if idx == 0 || idx > total {
+            return Err(ProtoError::InvalidPayload(format!(
+                "fragment stream {s}: index {idx} of {total}"
+            )));
+        }
+        if piece.len() > FRAGMENT_S2C_MAX_SIZE {
+            return Err(ProtoError::InvalidPayload(format!(
+                "fragment stream {s}: piece of {} bytes",
+                piece.len()
+            )));
+        }
+        if self.incoming_expected[s] != total {
+            self.discard_incoming(s);
+        }
+        let replaced = self.incoming_frags[s].get(&idx).map_or(0, Vec::len);
+        let buffered = self.incoming_bytes[s] - replaced + piece.len();
+        if buffered > self.max_incoming_stream {
+            self.discard_incoming(s);
+            return Err(ProtoError::InvalidPayload(format!(
+                "fragment stream {s}: {buffered} bytes buffered, limit {}",
+                self.max_incoming_stream
+            )));
+        }
+        self.incoming_expected[s] = total;
+        self.incoming_bytes[s] = buffered;
+        self.incoming_frags[s].insert(idx, piece);
+        if self.incoming_frags[s].len() < usize::from(total) {
+            return Ok(None);
+        }
+        let frags = std::mem::take(&mut self.incoming_frags[s]);
+        self.discard_incoming(s);
+        Ok(Some(frags.into_values().flatten().collect()))
     }
 
     /// Append bytes to the reliable outgoing stream (`chan->message`).
@@ -403,19 +472,7 @@ impl NetChan {
 
                 let idx = frag_get_id(frag_id[s]);
                 let total = frag_get_count(frag_id[s]);
-                if idx > 0 && total > 0 {
-                    self.incoming_expected[s] = total;
-                    self.incoming_frags[s].insert(idx, piece);
-                    if self.incoming_frags[s].len() == total as usize {
-                        let mut full = Vec::new();
-                        let frags = std::mem::take(&mut self.incoming_frags[s]);
-                        for (_, part) in frags {
-                            full.extend_from_slice(&part);
-                        }
-                        self.incoming_expected[s] = 0;
-                        completed[s] = Some(full);
-                    }
-                }
+                completed[s] = self.store_fragment(s, idx, total, piece)?;
             }
         }
 
@@ -536,5 +593,106 @@ mod tests {
         assert_eq!(server.pending_reliable_bytes(), 175);
         server.build_packet(&[]);
         assert_eq!(server.pending_reliable_bytes(), 175);
+    }
+
+    /// A packet with sequence `seq` carrying `piece` as fragment `idx` of `total` in the
+    /// normal stream, munged like `build_packet` does.
+    fn fragment_packet(seq: u32, idx: u16, total: u16, piece: &[u8]) -> Vec<u8> {
+        let mut w = MsgWriter::new();
+        w.write_u32(seq | (1 << 31) | (1 << 30));
+        w.write_u32(0);
+        w.write_u8(1);
+        w.write_u32(make_frag_id(idx, total));
+        w.write_u16(0);
+        w.write_u16(piece.len() as u16);
+        w.write_u8(0);
+        w.write_bytes(piece);
+        let mut bytes = w.into_bytes();
+        com_munge2(&mut bytes[8..], (seq as u8) as i32);
+        bytes
+    }
+
+    #[test]
+    fn fragment_index_zero_is_refused() {
+        let mut chan = NetChan::new(64);
+        assert!(
+            chan.process_packet(&fragment_packet(1, 0, 2, &[1; 4]))
+                .is_err()
+        );
+        assert_eq!(chan.incoming_buffered_bytes(), 0);
+    }
+
+    #[test]
+    fn fragment_index_above_total_is_refused() {
+        let mut chan = NetChan::new(64);
+        assert!(
+            chan.process_packet(&fragment_packet(1, 3, 2, &[1; 4]))
+                .is_err()
+        );
+        assert_eq!(chan.incoming_buffered_bytes(), 0);
+    }
+
+    #[test]
+    fn oversized_fragment_piece_is_refused() {
+        let mut chan = NetChan::new(64);
+        let big = vec![1; FRAGMENT_S2C_MAX_SIZE + 1];
+        assert!(
+            chan.process_packet(&fragment_packet(1, 1, 2, &big))
+                .is_err()
+        );
+        assert_eq!(chan.incoming_buffered_bytes(), 0);
+        let max = vec![1; FRAGMENT_S2C_MAX_SIZE];
+        assert!(chan.process_packet(&fragment_packet(2, 1, 2, &max)).is_ok());
+        assert_eq!(chan.incoming_buffered_bytes(), FRAGMENT_S2C_MAX_SIZE);
+    }
+
+    #[test]
+    fn fragment_of_another_message_discards_buffered_pieces() {
+        let mut chan = NetChan::new(64);
+        let inc = chan.process_packet(&fragment_packet(1, 1, 3, &[9; 10]));
+        assert!(inc.unwrap().unwrap().completed_normal_stream.is_none());
+        assert_eq!(chan.incoming_buffered_bytes(), 10);
+
+        // A two-piece message starts: the piece of the three-piece one is dropped.
+        chan.process_packet(&fragment_packet(2, 1, 2, &[1; 5]))
+            .unwrap();
+        assert_eq!(chan.incoming_buffered_bytes(), 5);
+        let inc = chan
+            .process_packet(&fragment_packet(3, 2, 2, &[2; 3]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            inc.completed_normal_stream,
+            Some(vec![1, 1, 1, 1, 1, 2, 2, 2])
+        );
+        assert_eq!(chan.incoming_buffered_bytes(), 0);
+    }
+
+    #[test]
+    fn exceeding_the_incoming_limit_empties_the_stream() {
+        let mut chan = NetChan::new(64);
+        chan.set_max_incoming_stream(100);
+        chan.process_packet(&fragment_packet(1, 1, 3, &[1; 60]))
+            .unwrap();
+        assert_eq!(chan.incoming_buffered_bytes(), 60);
+        assert!(
+            chan.process_packet(&fragment_packet(2, 2, 3, &[2; 60]))
+                .is_err()
+        );
+        assert_eq!(chan.incoming_buffered_bytes(), 0);
+
+        // The channel still works: a fragment and a plain packet go through.
+        let inc = chan
+            .process_packet(&fragment_packet(3, 1, 1, &[3; 30]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(inc.completed_normal_stream, Some(vec![3; 30]));
+        let mut peer = NetChan::new(64);
+        peer.outgoing_sequence = 4;
+        let inc = chan
+            .process_packet(&peer.build_packet(&[7]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(inc.payload[0], 7);
     }
 }

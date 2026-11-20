@@ -11,6 +11,13 @@ use crate::oob::{ConnectRequest, MAX_NAME_BYTES, OobContext, OobOutcome, handle_
 use crate::server::Server;
 
 impl<G: GameDll> Server<G> {
+    /// Fragment bytes the client in `slot` has buffered for reassembly; 0 for a free slot.
+    pub fn client_incoming_buffered_bytes(&self, slot: u8) -> usize {
+        self.clients
+            .get(usize::from(slot))
+            .map_or(0, |c| c.chan.incoming_buffered_bytes())
+    }
+
     pub(crate) fn free_slot_index(&self) -> Option<u8> {
         self.clients
             .iter()
@@ -80,7 +87,7 @@ impl<G: GameDll> Server<G> {
         };
         let index = usize::from(slot);
         let mut userinfo = request.userinfo;
-        userinfo.set("name", self.unique_name(&request.name));
+        userinfo.set("name", self.unique_name(&request.name, None));
         self.views[index] = ClientView {
             userinfo,
             ..ClientView::default()
@@ -110,16 +117,22 @@ impl<G: GameDll> Server<G> {
         encode_s2c_connection(userid, &from.to_string(), false, self.cfg.build)
     }
 
-    /// `name`, or `(1)name`, `(2)name`… when a connected client already uses it; a prefixed
-    /// name is cut on a character boundary to stay within [`MAX_NAME_BYTES`].
-    fn unique_name(&self, name: &str) -> String {
+    /// `name`, or `(1)name`, `(2)name`… when a connected client other than `except` already
+    /// uses it; a prefixed name is cut on a character boundary to stay within
+    /// [`MAX_NAME_BYTES`].
+    pub(crate) fn unique_name(&self, name: &str, except: Option<u8>) -> String {
         let taken = |candidate: &str| {
-            self.clients.iter().zip(&self.views).any(|(c, v)| {
-                !c.is_free()
-                    && v.userinfo
-                        .get("name")
-                        .is_some_and(|n| n.eq_ignore_ascii_case(candidate))
-            })
+            self.clients
+                .iter()
+                .zip(&self.views)
+                .enumerate()
+                .any(|(slot, (c, v))| {
+                    Some(slot as u8) != except
+                        && !c.is_free()
+                        && v.userinfo
+                            .get("name")
+                            .is_some_and(|n| n.eq_ignore_ascii_case(candidate))
+                })
         };
         let mut candidate = name.to_string();
         let mut n = 1;

@@ -6,6 +6,10 @@ use cs_transport::PeerAddr;
 
 use crate::usercmd::{MsecBudget, StringCmdBucket};
 
+/// Limit on the fragment bytes a client may have buffered for reassembly per incoming stream.
+/// Clients only send small reliable messages, so this is far below the netchan default.
+pub const MAX_CLIENT_INCOMING_STREAM: usize = 64 * 1024;
+
 /// Sign-on stage: the string command the server waits for next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignonStage {
@@ -77,9 +81,12 @@ impl Client {
 
     /// A fresh connection from `addr` waiting for `new`.
     pub(crate) fn connected(addr: PeerAddr, userid: i32, now: f64) -> Self {
+        let mut chan = NetChan::new(FRAGMENT_S2C_MAX_SIZE);
+        chan.set_max_incoming_stream(MAX_CLIENT_INCOMING_STREAM);
         Self {
             state: ClientState::Signon(SignonStage::AwaitNew),
             addr: Some(addr),
+            chan,
             userid,
             connected_at: now,
             ..Self::free()

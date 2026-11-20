@@ -3,7 +3,7 @@
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
 
-use crate::{PacketTransport, PeerAddr, TransportError, check_len};
+use crate::{MAX_UDP_PACKET, PacketTransport, PeerAddr, TransportError, check_len};
 
 /// Receive buffer size: the largest possible UDP payload, so no datagram is truncated.
 const RECV_BUF_LEN: usize = 65536;
@@ -33,9 +33,11 @@ impl UdpTransport {
 }
 
 impl PacketTransport for UdpTransport {
+    /// Returns the next datagram; datagrams longer than [`MAX_UDP_PACKET`] are discarded.
     fn recv(&mut self) -> Option<(PeerAddr, Vec<u8>)> {
         loop {
             match self.socket.recv_from(&mut self.buf) {
+                Ok((len, _)) if len > MAX_UDP_PACKET => continue,
                 Ok((len, from)) => return Some((PeerAddr::Udp(from), self.buf[..len].to_vec())),
                 // Windows reports an ICMP port-unreachable from an earlier send this way;
                 // skip it so one dead peer cannot stall the receive loop.
@@ -60,7 +62,6 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::MAX_UDP_PACKET;
 
     /// Polls `t` until a datagram arrives or a second passes.
     fn recv_within_a_second(t: &mut UdpTransport) -> Option<(PeerAddr, Vec<u8>)> {
@@ -99,6 +100,24 @@ mod tests {
             a.send(PeerAddr::Loopback(0), b"x"),
             Err(TransportError::Closed)
         ));
+    }
+
+    #[test]
+    fn udp_recv_discards_oversized_datagrams() {
+        let mut a = UdpTransport::bind("127.0.0.1:0").unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender
+            .send_to(&[0xAB; MAX_UDP_PACKET + 1], a.local_addr())
+            .unwrap();
+        sender.send_to(b"normal", a.local_addr()).unwrap();
+
+        // Blocking reads: a single recv must skip the oversized datagram and return the next.
+        a.socket.set_nonblocking(false).unwrap();
+        a.socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let (_, data) = a.recv().expect("the normal datagram is returned");
+        assert_eq!(data, b"normal");
     }
 
     #[test]
