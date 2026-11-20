@@ -8,7 +8,7 @@ use cs_engine::{EngineApi, GameDll, PrecacheError, Server, ServerConfig, ServerM
 use cs_probe::{ProbeClient, ProbeConfig};
 use cs_proto48::crypto::md5_hex;
 use cs_proto48::delta::{DeltaRegistry, GoldSrcClientData, GoldSrcEntityState, GoldSrcUserCmd};
-use cs_proto48::messages::{svc, write_svc_updateuserinfo};
+use cs_proto48::messages::{svc, write_svc_print, write_svc_updateuserinfo};
 use cs_proto48::usermsg::UserMsgRegistry;
 use cs_transport::{LoopbackEndpoint, LoopbackHub, PeerAddr};
 use glam::Vec3;
@@ -33,6 +33,10 @@ impl Harness {
             max_clients,
             ..ServerConfig::default()
         };
+        Self::with_config(cfg, game)
+    }
+
+    pub fn with_config(cfg: ServerConfig, game: TestGame) -> Self {
         let server = Server::new(
             cfg,
             ServerMap::stub("test"),
@@ -93,6 +97,8 @@ pub struct TestGame {
     /// When set, `update_client_data` (called for every update sent to an active client)
     /// writes an `svc_nop` to `reliable_all` and sets a userinfo key on that client.
     pub broadcast_every_frame: bool,
+    /// When set, `client_put_in_server` writes an `svc_print` of [`SHOUT`] to `reliable_all`.
+    pub shout_on_put_in_server: bool,
     /// Entities with `modelindex = 2` that `server_activate` creates.
     pub extra_entities: usize,
     /// When set, the extra entities get `EF_NODRAW` in `effects`.
@@ -177,6 +183,9 @@ impl GameDll for TestGame {
             edict.vars.health = 100.0;
         }
         self.late_precache = Some(eng.precache.precache_model("models/late.mdl"));
+        if self.shout_on_put_in_server {
+            write_svc_print(eng.reliable_all(), SHOUT);
+        }
         if self.scatter_extras {
             churn_extras(eng, 0);
         }
@@ -191,6 +200,14 @@ impl GameDll for TestGame {
         if argv.first().is_some_and(|c| c == "flood") {
             // `svc_nop` bytes: harmless if they ever reached the client.
             eng.reliable(slot).write_bytes(&vec![1; self.flood_bytes]);
+        }
+        if argv.first().is_some_and(|c| c == "kickme") {
+            eng.kick(slot, GAME_KICK_REASON);
+        }
+        if argv.first().is_some_and(|c| c == "rekey") {
+            // A new value on every call, so every call is a real change.
+            let value = (self.client_command_calls).to_string();
+            eng.set_client_key(slot, "rekey", &value);
         }
         if argv.first().is_some_and(|c| c == "biginfo") {
             // A userinfo update of slot 15 whose text is `BIG_INFO`.
@@ -263,6 +280,12 @@ impl GameDll for TestGame {
         true
     }
 }
+
+/// Reason of the kick `client_command("kickme")` issues.
+pub const GAME_KICK_REASON: &str = "Kicked by the game";
+
+/// Text of the `svc_print` that `shout_on_put_in_server` broadcasts.
+pub const SHOUT: &str = "shout\n";
 
 /// Text of the userinfo update `client_command("biginfo")` sends: about 1900 bytes.
 pub fn big_info() -> String {

@@ -1769,15 +1769,21 @@ pub fn write_svc_sound(w: &mut MsgWriter, s: &SoundMsg) {
     w.end_bit_writing();
 }
 
-/// Write `svc_pings` (`SV_WritePingsToClient`): `(slot, ping ms, loss %)` per player.
+/// Largest ping, in milliseconds, `svc_pings` can carry (12 bits).
+pub const MAX_WIRE_PING: u16 = 4095;
+/// Largest loss, in percent, `svc_pings` can carry (7 bits).
+pub const MAX_WIRE_LOSS: u8 = 127;
+
+/// Write `svc_pings` (`SV_WritePingsToClient`): `(slot, ping ms, loss %)` per player. Pings
+/// above [`MAX_WIRE_PING`] and losses above [`MAX_WIRE_LOSS`] are written as those limits.
 pub fn write_svc_pings(w: &mut MsgWriter, pings: &[(u8, u16, u8)]) {
     w.write_u8(svc::PINGS);
     w.start_bit_writing();
     for &(slot, ping, loss) in pings {
         w.write_one_bit(true);
         w.write_bits(slot as u32, 5);
-        w.write_bits(ping as u32, 12);
-        w.write_bits(loss as u32, 7);
+        w.write_bits(u32::from(ping.min(MAX_WIRE_PING)), 12);
+        w.write_bits(u32::from(loss.min(MAX_WIRE_LOSS)), 7);
     }
     w.write_one_bit(false);
     w.end_bit_writing();
@@ -2597,6 +2603,22 @@ mod tests {
         assert_eq!(
             decode_entities(&reg, max_clients, &pe.entities),
             as_wire(&to)
+        );
+    }
+
+    #[test]
+    fn pings_are_clamped_to_their_bit_widths() {
+        let mut w = MsgWriter::new();
+        write_svc_pings(&mut w, &[(1, 4096, 128), (2, u16::MAX, u8::MAX), (3, 4095, 127)]);
+        let mut ctx = SvcParseContext::new();
+        let parsed = parse_svc_stream(w.as_slice(), &mut ctx).unwrap();
+        assert_eq!(
+            parsed,
+            vec![SvcMessage::Pings(vec![
+                (1, MAX_WIRE_PING, MAX_WIRE_LOSS),
+                (2, MAX_WIRE_PING, MAX_WIRE_LOSS),
+                (3, 4095, 127),
+            ])]
         );
     }
 

@@ -5,6 +5,7 @@ mod connect;
 pub mod edict;
 pub mod frame;
 pub mod game;
+mod lifecycle;
 pub mod map;
 pub mod oob;
 pub mod precache;
@@ -16,6 +17,9 @@ pub use client::{ClientState, MAX_CLIENT_INCOMING_STREAM, SignonStage};
 pub use edict::{DEFAULT_MAX_EDICTS, EDICT_REUSE_DELAY, Edict, EdictId, EdictPool, EntVars};
 pub use frame::{ClientFrame, FrameRing, MAX_DATAGRAM, UPDATE_BACKUP, clamp_rate, update_interval};
 pub use game::{EngineApi, GameDll, entity_state_from_vars};
+pub use lifecycle::{
+    NAME_CHANGE_MIN_INTERVAL_SECS, PINGS_INTERVAL_SECS, SETINFO_BURST, SETINFO_RATE_PER_SEC,
+};
 pub use map::ServerMap;
 pub use oob::{
     CHALLENGE_BUCKET_SECS, ChallengeIssuer, ConnectRequest, MAX_INFO_STRING, MAX_NAME_BYTES,

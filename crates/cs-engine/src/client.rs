@@ -5,7 +5,8 @@ use cs_proto48::netchan::{FRAGMENT_S2C_MAX_SIZE, NetChan};
 use cs_transport::PeerAddr;
 
 use crate::frame::{FrameRing, MAX_DATAGRAM};
-use crate::usercmd::{MsecBudget, StringCmdBucket};
+use crate::lifecycle::{PingTracker, SETINFO_BURST, SETINFO_RATE_PER_SEC};
+use crate::usercmd::{MsecBudget, TokenBucket};
 
 /// Limit on the fragment bytes a client may have buffered for reassembly per incoming stream.
 /// Clients only send small reliable messages, so this is far below the netchan default.
@@ -60,7 +61,15 @@ pub(crate) struct Client {
     /// Unparsable payloads received in a row while `Active`.
     pub(crate) bad_moves: u32,
     /// Rate limit for string commands other than the sign-on ones.
-    pub(crate) stringcmds: StringCmdBucket,
+    pub(crate) stringcmds: TokenBucket,
+    /// Rate limit for `setinfo`, on top of `stringcmds`.
+    pub(crate) setinfos: TokenBucket,
+    /// Server time of the last accepted name change.
+    pub(crate) last_name_change: Option<f64>,
+    /// Server time of the last datagram the netchan accepted (of the connect, before any).
+    pub(crate) last_heard: f64,
+    /// Send times of recent datagrams and the round trips measured from them.
+    pub(crate) pings: PingTracker,
     /// Updates sent, kept as delta bases.
     pub(crate) frames: FrameRing,
     /// Server time the next update is due.
@@ -86,7 +95,11 @@ impl Client {
             budget: MsecBudget::new(),
             last_cmd: GoldSrcUserCmd::default(),
             bad_moves: 0,
-            stringcmds: StringCmdBucket::default(),
+            stringcmds: TokenBucket::stringcmds(),
+            setinfos: TokenBucket::new(SETINFO_RATE_PER_SEC, SETINFO_BURST),
+            last_name_change: None,
+            last_heard: 0.0,
+            pings: PingTracker::default(),
             frames: FrameRing::new(),
             next_update_at: 0.0,
             delta_seq: None,
@@ -128,6 +141,7 @@ impl Client {
             chan,
             userid,
             connected_at: now,
+            last_heard: now,
             ..Self::free()
         }
     }

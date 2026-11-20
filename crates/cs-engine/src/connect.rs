@@ -2,7 +2,9 @@
 //! making its name unique, and the reject and connection replies.
 
 use cs_proto48::handshake::{encode_s2c_connection, encode_s2c_reject};
-use cs_proto48::query::{PlayerQueryEntry, cs16_server_query_info};
+use cs_proto48::query::{
+    A2S_INFO, A2S_PLAYER, A2S_RULES, PlayerQueryEntry, ServerQueryInfo, cs16_server_query_info,
+};
 use cs_transport::{PacketTransport, PeerAddr};
 
 use crate::client::Client;
@@ -34,6 +36,33 @@ impl<G: GameDll> Server<G> {
         if !self.limiter.allow(&from, self.time) {
             return;
         }
+        // The player list and query info are only built for the queries that send them.
+        let is_query = matches!(data.get(4), Some(&(A2S_INFO | A2S_PLAYER | A2S_RULES)));
+        let (players, query) = if is_query {
+            self.query_answers()
+        } else {
+            (Vec::new(), cs16_server_query_info("", "", 0, 0, 0))
+        };
+        let ctx = OobContext {
+            challenges: &self.challenges,
+            query: &query,
+            players: &players,
+            rules: &[],
+            is_full: self.free_slot_index().is_none() && self.slot_of(&from).is_none(),
+        };
+        let reply = match handle_oob(data, &from, self.time, &ctx) {
+            OobOutcome::Reply(reply) => reply,
+            OobOutcome::Connect(_) if self.shutting_down => {
+                encode_s2c_reject("Server is shutting down.\n")
+            }
+            OobOutcome::Connect(request) => self.connect(from, request),
+            OobOutcome::Ignore => return,
+        };
+        let _ = net.send(from, &reply);
+    }
+
+    /// The player list and server info that A2S queries are answered with.
+    fn query_answers(&self) -> (Vec<PlayerQueryEntry>, ServerQueryInfo) {
         let players: Vec<PlayerQueryEntry> = self
             .clients
             .iter()
@@ -57,19 +86,7 @@ impl<G: GameDll> Server<G> {
             usize::from(self.cfg.max_clients),
             0,
         );
-        let ctx = OobContext {
-            challenges: &self.challenges,
-            query: &query,
-            players: &players,
-            rules: &[],
-            is_full: self.free_slot_index().is_none() && self.slot_of(&from).is_none(),
-        };
-        let reply = match handle_oob(data, &from, self.time, &ctx) {
-            OobOutcome::Reply(reply) => reply,
-            OobOutcome::Connect(request) => self.connect(from, request),
-            OobOutcome::Ignore => return,
-        };
-        let _ = net.send(from, &reply);
+        (players, query)
     }
 
     /// Accepts a checked connect request and returns the reply for it.
@@ -88,29 +105,31 @@ impl<G: GameDll> Server<G> {
         let index = usize::from(slot);
         let mut userinfo = request.userinfo;
         userinfo.set("name", self.unique_name(&request.name, None));
+        // Everyone past `new` is told about the newcomer (replacing whoever had the slot).
         self.views[index] = ClientView {
             userinfo,
+            userinfo_dirty: true,
             ..ClientView::default()
         };
         self.clients[index] = Client::connected(from, self.next_userid, self.time);
 
         let result = self.call_game(|game, eng| game.client_connect(eng, slot));
-        let kick_reason = self
-            .outbox
-            .kicks
-            .iter()
-            .find(|(kicked, _)| *kicked == slot)
-            .map(|(_, reason)| reason.clone());
+        // A kick of the connecting client is answered with the reject, not `svc_disconnect`.
+        let kick_at = self.outbox.kicks.iter().position(|(kicked, _)| *kicked == slot);
+        let kick_reason = kick_at.map(|at| self.outbox.kicks.remove(at).1);
         self.drain_outbox();
+        // Refused, kicked, or dropped by the reliable backlog cap during `client_connect`: no
+        // userid is used up.
         if let Err(reason) = result {
             self.free_slot(slot);
             return encode_s2c_reject(&reason);
         }
-        if self.clients[index].is_free() {
-            // Kicked, or dropped by the reliable backlog cap, during `client_connect`: no
-            // userid is used up.
-            let reason = kick_reason.unwrap_or_else(|| "Reliable channel overflowed\n".to_string());
+        if let Some(reason) = kick_reason {
+            self.free_slot(slot);
             return encode_s2c_reject(&reason);
+        }
+        if self.clients[index].is_free() {
+            return encode_s2c_reject("Reliable channel overflowed\n");
         }
         let userid = self.next_userid;
         self.next_userid += 1;

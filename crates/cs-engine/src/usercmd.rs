@@ -10,6 +10,7 @@ use cs_proto48::delta::GoldSrcUserCmd;
 
 use crate::client::ClientState;
 use crate::game::GameDll;
+use crate::lifecycle::NAME_CHANGE_MIN_INTERVAL_SECS;
 use crate::oob::{MAX_INFO_STRING, sanitize_name};
 use crate::server::Server;
 
@@ -87,26 +88,32 @@ pub fn select_cmds_to_run(
     run
 }
 
-/// Rate limit for a client's string commands: [`STRINGCMD_BURST`] tokens, refilled at
-/// [`STRINGCMD_RATE_PER_SEC`]. It starts full.
+/// A token bucket: `burst` tokens, refilled at `rate_per_sec`. It starts full.
 #[derive(Debug, Clone)]
-pub(crate) struct StringCmdBucket {
+pub(crate) struct TokenBucket {
     tokens: f64,
+    rate_per_sec: f64,
+    burst: f64,
 }
 
-impl Default for StringCmdBucket {
-    fn default() -> Self {
+impl TokenBucket {
+    pub(crate) fn new(rate_per_sec: f64, burst: f64) -> Self {
         Self {
-            tokens: STRINGCMD_BURST,
+            tokens: burst,
+            rate_per_sec,
+            burst,
         }
     }
-}
 
-impl StringCmdBucket {
+    /// The limit on string commands: [`STRINGCMD_BURST`] tokens, refilled at
+    /// [`STRINGCMD_RATE_PER_SEC`].
+    pub(crate) fn stringcmds() -> Self {
+        Self::new(STRINGCMD_RATE_PER_SEC, STRINGCMD_BURST)
+    }
+
     pub(crate) fn refill(&mut self, real_dt_secs: f64) {
         if real_dt_secs > 0.0 && real_dt_secs.is_finite() {
-            self.tokens =
-                (self.tokens + real_dt_secs * STRINGCMD_RATE_PER_SEC).min(STRINGCMD_BURST);
+            self.tokens = (self.tokens + real_dt_secs * self.rate_per_sec).min(self.burst);
         }
     }
 
@@ -123,10 +130,11 @@ impl StringCmdBucket {
 
 impl<G: GameDll> Server<G> {
     /// Credits `real_dt_secs` of frame time: to the movement budget of every `Active` client
-    /// and to the string command bucket of every connected one.
+    /// and to the string command and `setinfo` buckets of every connected one.
     pub(crate) fn accrue_client_time(&mut self, real_dt_secs: f64) {
         for client in self.clients.iter_mut().filter(|c| !c.is_free()) {
             client.stringcmds.refill(real_dt_secs);
+            client.setinfos.refill(real_dt_secs);
             if client.state == ClientState::Active {
                 client.budget.accrue(real_dt_secs);
             }
@@ -191,8 +199,9 @@ impl<G: GameDll> Server<G> {
     /// `setinfo <key> <value>`: stores the pair in the client's userinfo and tells the game.
     /// Keys starting with `*`, a missing key, a key or value containing `\` or `"`, and a
     /// change that would make the userinfo longer than [`MAX_INFO_STRING`] are ignored. A
-    /// `name` is sanitised and made unique as at connect; an empty one is ignored. The caller
-    /// drains the outbox.
+    /// `name` is sanitised and made unique as at connect; an empty one, and one arriving less
+    /// than [`NAME_CHANGE_MIN_INTERVAL_SECS`] after the last accepted name change, are
+    /// ignored. The caller drains the outbox.
     pub(crate) fn client_setinfo(&mut self, slot: u8, argv: &[String]) {
         let Some(key) = argv.get(1) else {
             return;
@@ -202,8 +211,11 @@ impl<G: GameDll> Server<G> {
         if key.is_empty() || key.starts_with('*') || forbidden(key) || forbidden(value) {
             return;
         }
-        let value = if key.eq_ignore_ascii_case("name") {
-            if value.is_empty() {
+        let is_name = key.eq_ignore_ascii_case("name");
+        let value = if is_name {
+            let last = self.clients[usize::from(slot)].last_name_change;
+            let too_soon = last.is_some_and(|t| self.time - t < NAME_CHANGE_MIN_INTERVAL_SECS);
+            if value.is_empty() || too_soon {
                 return;
             }
             self.unique_name(&sanitize_name(value), Some(slot))
@@ -215,6 +227,9 @@ impl<G: GameDll> Server<G> {
         info.set(key.as_str(), value);
         if info.to_wire_string().len() > MAX_INFO_STRING {
             return;
+        }
+        if is_name {
+            self.clients[usize::from(slot)].last_name_change = Some(self.time);
         }
         view.userinfo = info;
         view.userinfo_dirty = true;
@@ -263,6 +278,28 @@ mod tests {
         b.accrue(-1.0);
         b.accrue(f64::NAN);
         assert_eq!(b.take(10), 0);
+    }
+
+    #[test]
+    fn token_bucket_starts_full_and_refills_at_its_rate() {
+        use crate::lifecycle::{SETINFO_BURST, SETINFO_RATE_PER_SEC};
+        let mut b = TokenBucket::new(SETINFO_RATE_PER_SEC, SETINFO_BURST);
+        let taken = std::iter::from_fn(|| Some(b.try_take()))
+            .take_while(|&t| t)
+            .count();
+        assert_eq!(taken as f64, SETINFO_BURST);
+        b.refill(0.5);
+        assert!(b.try_take());
+        assert!(!b.try_take());
+        // Refills stop at the burst; bad time adds nothing.
+        b.refill(f64::NAN);
+        b.refill(-3.0);
+        assert!(!b.try_take());
+        b.refill(1000.0);
+        let taken = std::iter::from_fn(|| Some(b.try_take()))
+            .take_while(|&t| t)
+            .count();
+        assert_eq!(taken as f64, SETINFO_BURST);
     }
 
     #[test]

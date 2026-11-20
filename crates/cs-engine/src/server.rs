@@ -9,7 +9,7 @@ use cs_proto48::delta::{DeltaRecord, DeltaRegistry, DeltaSchema, GoldSrcEntitySt
 use cs_proto48::handshake::tokenize_goldsrc_line;
 use cs_proto48::messages::{
     ClcMessage, ServerInfoMsg, entity_schema_name, parse_clc_stream, wire_entity_type,
-    write_svc_stufftext, write_svc_updateuserinfo,
+    write_svc_stufftext,
 };
 use cs_proto48::usermsg::UserMsgRegistry;
 use cs_transport::{PacketTransport, PeerAddr};
@@ -83,6 +83,12 @@ pub struct Server<G: GameDll> {
     pub(crate) next_userid: i32,
     pub(crate) time: f64,
     pub(crate) net_stats: NetStats,
+    /// Set by `shutdown`: connects are refused from then on.
+    pub(crate) shutting_down: bool,
+    /// Final datagrams for released clients, sent at the end of the frame.
+    pub(crate) farewells: Vec<(PeerAddr, Vec<u8>)>,
+    /// Server time the next `svc_pings` is due.
+    pub(crate) next_pings_at: f64,
 }
 
 /// Monotonic counts of what the server refused from known client addresses.
@@ -97,6 +103,8 @@ pub struct NetStats {
     pub unreliable_dropped: u64,
     /// Updates sent without their entity block because it did not fit in the datagram.
     pub entity_blocks_dropped: u64,
+    /// `Server::frame` calls ignored because their time was not finite or went backwards.
+    pub frames_skipped: u64,
 }
 
 impl<G: GameDll> Server<G> {
@@ -107,6 +115,7 @@ impl<G: GameDll> Server<G> {
         deltas: DeltaRegistry,
         cvars: CVarRegistry,
     ) -> Self {
+        let cfg = cfg.sanitized();
         let usermsgs = game.usermsgs();
         let edicts = EdictPool::new(cfg.max_clients, DEFAULT_MAX_EDICTS);
         let precache = PrecacheTables::new(&map.path, map.submodel_count);
@@ -144,6 +153,9 @@ impl<G: GameDll> Server<G> {
             next_userid: 1,
             time: 0.0,
             net_stats: NetStats::default(),
+            shutting_down: false,
+            farewells: Vec::new(),
+            next_pings_at: 0.0,
         };
         server.with_game(|game, eng| game.server_activate(eng));
         server.precache.lock();
@@ -151,17 +163,30 @@ impl<G: GameDll> Server<G> {
         server
     }
 
-    /// One server frame: handles every waiting datagram, frees clients whose sign-on took too
-    /// long, then sends each client what is due for it (see `frame.rs`).
+    /// One server frame: handles every waiting datagram, frees clients that timed out, queues
+    /// the pings and userinfo updates that are due, then sends each client what is due for it
+    /// (see `frame.rs`) and the final datagrams of released clients. A call whose `now` is not
+    /// finite or earlier than the previous frame's does nothing.
     pub fn frame(&mut self, net: &mut dyn PacketTransport, now: f64) {
+        if !now.is_finite() || now < self.time {
+            self.net_stats.frames_skipped += 1;
+            return;
+        }
         let real_dt = now - self.time;
         self.time = now;
         self.accrue_client_time(real_dt);
         while let Some((from, data)) = net.recv() {
             self.handle_datagram(net, from, &data);
         }
-        self.drop_stalled_signons();
+        self.drop_timed_out_clients();
+        self.queue_pings_if_due();
+        self.broadcast_userinfo();
         self.send_client_frames(net);
+        self.send_farewells(net);
+    }
+
+    pub fn config(&self) -> &ServerConfig {
+        &self.cfg
     }
 
     pub fn client_state(&self, slot: u8) -> ClientState {
@@ -223,7 +248,8 @@ impl<G: GameDll> Server<G> {
         f(&mut self.game, &mut eng)
     }
 
-    /// Moves what the game queued to the clients and carries out its kicks.
+    /// Moves what the game queued to the clients, carries out its kicks (telling the kicked
+    /// client why) and drops clients over the reliable backlog cap.
     pub(crate) fn drain_outbox(&mut self) {
         loop {
             for (slot, client) in self.clients.iter_mut().enumerate() {
@@ -241,42 +267,22 @@ impl<G: GameDll> Server<G> {
             }
 
             let all = std::mem::take(&mut self.outbox.reliable_all);
-            let mut broadcast = all.into_bytes();
-            for slot in 0..self.clients.len() {
-                if !std::mem::take(&mut self.views[slot].userinfo_dirty) {
-                    continue;
-                }
-                let client = &self.clients[slot];
-                if client.is_free() {
-                    continue;
-                }
-                let mut w = MsgWriter::new();
-                write_svc_updateuserinfo(
-                    &mut w,
-                    slot as u8,
-                    client.userid,
-                    &self.views[slot].userinfo.to_wire_string(),
-                    &[0; 16],
-                );
-                broadcast.extend_from_slice(w.as_slice());
-            }
-            if !broadcast.is_empty() {
+            if !all.is_empty() {
                 for client in self.clients.iter_mut().filter(|c| c.state.is_past_new()) {
-                    client.chan.write_reliable(&broadcast);
+                    client.chan.write_reliable(all.as_slice());
                 }
             }
 
-            // Telling a kicked or dropped client why is left to a later task.
-            let mut drops: Vec<u8> = std::mem::take(&mut self.outbox.kicks)
+            let mut drops: Vec<(u8, Option<String>)> = std::mem::take(&mut self.outbox.kicks)
                 .into_iter()
-                .map(|(slot, _reason)| slot)
+                .map(|(slot, reason)| (slot, Some(reason)))
                 .collect();
-            drops.extend(self.overloaded_slots());
+            drops.extend(self.overloaded_slots().into_iter().map(|slot| (slot, None)));
             if drops.is_empty() {
                 return;
             }
-            for slot in drops {
-                self.release_slot(slot);
+            for (slot, reason) in drops {
+                self.release_slot(slot, reason.as_deref());
             }
         }
     }
@@ -289,27 +295,6 @@ impl<G: GameDll> Server<G> {
             .filter(|(_, c)| !c.is_free() && c.chan.pending_reliable_bytes() > MAX_RELIABLE_BACKLOG)
             .map(|(slot, _)| slot as u8)
             .collect()
-    }
-
-    /// Frees `slot`; a client that was put in the server is reported to the game first. The
-    /// caller drains the outbox.
-    fn release_slot(&mut self, slot: u8) {
-        let index = usize::from(slot);
-        if self.clients.get(index).is_none_or(Client::is_free) {
-            return;
-        }
-        if self.clients[index].put_in_server {
-            self.call_game(|game, eng| game.client_disconnect(eng, slot));
-        }
-        self.edicts.reset_client(slot);
-        self.clients[index] = Client::free();
-        self.views[index] = ClientView::default();
-    }
-
-    /// Frees `slot` and passes on what the game queued meanwhile.
-    pub(crate) fn free_slot(&mut self, slot: u8) {
-        self.release_slot(slot);
-        self.drain_outbox();
     }
 
     /// Spawn baselines of every live, visible edict that is not a client slot.
@@ -357,6 +342,7 @@ impl<G: GameDll> Server<G> {
             self.net_stats.datagrams_rejected += 1;
             return;
         };
+        self.note_accepted(slot, incoming.sequence_ack);
         // The delta request is per packet: one without `clc_delta` asks for a full update.
         self.clients[index].delta_seq = None;
         let Some(schema) = self.usercmd_schema.clone() else {
@@ -403,7 +389,8 @@ impl<G: GameDll> Server<G> {
 
     /// Runs one string command. A sign-on stage command is honoured only in the stage that
     /// expects it and only while `stage_done` is clear; honouring one sets `stage_done`. Any
-    /// other command needs a token from the client's string command bucket.
+    /// other command needs a token from the client's string command bucket, and a `setinfo` one
+    /// from its `setinfo` bucket as well.
     fn handle_stringcmd(&mut self, slot: u8, line: &str, stage_done: &mut bool) {
         let argv = tokenize_goldsrc_line(line);
         let Some(cmd) = argv.first() else {
@@ -435,8 +422,12 @@ impl<G: GameDll> Server<G> {
                 self.clients[usize::from(slot)].state = ClientState::Active;
             }
             _ if is_stage_cmd => return,
-            ("setinfo", _) => self.client_setinfo(slot, &argv),
-            ("disconnect" | "dropclient", _) => self.release_slot(slot),
+            ("setinfo", _) => {
+                if self.clients[usize::from(slot)].setinfos.try_take() {
+                    self.client_setinfo(slot, &argv);
+                }
+            }
+            ("disconnect" | "dropclient", _) => self.release_slot(slot, None),
             _ => self.with_game(|game, eng| game.client_command(eng, slot, &argv)),
         }
         *stage_done |= is_stage_cmd;
@@ -559,18 +550,6 @@ impl<G: GameDll> Server<G> {
         let client = &mut self.clients[index];
         client.chan.write_reliable(w.as_slice());
         client.state = ClientState::Signon(SignonStage::AwaitSendEnts);
-    }
-
-    /// Frees clients that did not reach `Active` within `signon_timeout_secs` of connecting.
-    fn drop_stalled_signons(&mut self) {
-        for slot in 0..self.cfg.max_clients {
-            let client = &self.clients[usize::from(slot)];
-            if matches!(client.state, ClientState::Signon(_))
-                && self.time - client.connected_at > self.cfg.signon_timeout_secs
-            {
-                self.free_slot(slot);
-            }
-        }
     }
 }
 

@@ -265,7 +265,7 @@ fn active_at_rate(h: &mut Harness, rate: &str) -> Probe {
     // Sign-on datagrams wait for the rate too: at 1000 bytes per second this takes a while.
     while h.server.client_state(0) != ClientState::Active {
         h.step(&mut [&mut probe], 1);
-        assert!(h.now < 120.0, "not active");
+        assert!(h.now < 15.0, "not active");
     }
     probe
 }

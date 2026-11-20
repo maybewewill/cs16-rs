@@ -3,7 +3,7 @@
 mod common;
 
 use common::{Harness, TestGame};
-use cs_engine::{ClientState, MAX_NAME_BYTES, MAX_RELIABLE_BACKLOG, SignonStage};
+use cs_engine::{ClientState, MAX_NAME_BYTES, MAX_RELIABLE_BACKLOG, ServerConfig, SignonStage};
 use cs_probe::{Direction, ProbeClient, ProbeState, read_capture};
 use cs_proto48::CONNECTIONLESS_HEADER;
 use cs_proto48::delta::DeltaRegistry;
@@ -299,7 +299,13 @@ fn game_can_refuse_connection() {
 
 #[test]
 fn stalled_signon_times_out() {
-    let mut h = Harness::new(4);
+    // The silence timeout is set past the sign-on timeout, which is what is tested here.
+    let cfg = ServerConfig {
+        max_clients: 4,
+        timeout_secs: 1000.0,
+        ..ServerConfig::default()
+    };
+    let mut h = Harness::with_config(cfg, TestGame::default());
     let mut probe = h.add_probe("Player");
     step_until(&mut h, &mut [&mut probe], 20, "AwaitSendRes", |h, _| {
         h.server.client_state(0) == ClientState::Signon(SignonStage::AwaitSendRes)

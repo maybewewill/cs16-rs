@@ -142,6 +142,8 @@ impl<G: GameDll> Server<G> {
             };
             client.clear_time =
                 advance_clear_time(client.clear_time, self.time, packet.len(), rate);
+            let seq = client.chan.outgoing_sequence.wrapping_sub(1);
+            client.pings.record_sent(seq, self.time);
             let _ = net.send(addr, &packet);
         }
     }

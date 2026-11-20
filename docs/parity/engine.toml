@@ -29,6 +29,11 @@ status = "tested"
 evidence = "crates/cs-engine/src/usercmd.rs::tests::budget_grants_only_accrued_time, budget_bank_is_capped; crates/cs-engine/tests/usercmd.rs::speedhack_is_bounded_by_real_time; 500 ms bank cap unverified against a real server"
 
 [[item]]
+id = "pings"
+status = "tested"
+evidence = "crates/cs-engine/src/lifecycle.rs::tests::ping_is_the_average_of_the_last_samples, ping_forgets_sequences_older_than_the_history; crates/cs-engine/tests/lifecycle.rs::pings_are_sent_every_two_seconds; crates/cs-proto48/src/messages.rs::tests::pings_are_clamped_to_their_bit_widths; ping calculation (average round trip of the last 16 acknowledged datagrams, loss 0) unverified against a real client"
+
+[[item]]
 id = "pvs_leaf_list"
 status = "missing"
 
@@ -41,6 +46,11 @@ evidence = "crates/cs-engine/src/map.rs::tests::real_map_pvs_hides_far_spawn; ap
 id = "signon"
 status = "tested"
 evidence = "crates/cs-engine/tests/signon.rs::probe_reaches_in_game_within_200_frames; stage order unverified against a real server (working assumption, see signon_opcode_order_matches_golden_capture)"
+
+[[item]]
+id = "timeouts"
+status = "tested"
+evidence = "crates/cs-engine/tests/lifecycle.rs::silent_client_times_out_and_others_see_removal, rejected_datagrams_do_not_keep_a_client_alive, kick_delivers_reason, game_kick_delivers_reason, client_disconnect_command_frees_slot, shutdown_notifies_everyone, shutdown_refuses_new_connections, slot_is_reusable_after_disconnect; crates/cs-engine/tests/signon.rs::stalled_signon_times_out; kick delivery (three svc_disconnect datagrams) unverified against a real client"
 
 [[item]]
 id = "usercmd_replay"
