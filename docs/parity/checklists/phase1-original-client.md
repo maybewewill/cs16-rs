@@ -30,4 +30,4 @@ Items in the registries: `signon`, `delta_frames`, `usercmd_replay`, `msec_budge
 | 8 | While the client is loading, the server sends it a datagram every server frame | The loading finishes; no disconnect, no error in the console. | | |
 | 9 | Joining while other players are in the game, so the loading client receives userinfo updates and messages broadcast to everyone | The loading finishes; no error in the console, the other players appear with their names. | | |
 | 10 | Walking at a low frame rate (`fps_max 15`, so each command is longer than 50 ms) | No rubber-banding: the player is not pulled back. | | |
-| 11 | Being kicked by the server | The client returns to the menu and shows the kick reason. | | |
+| 11 | Being kicked by the server. Doable now with the server console command `kick`: `kick #<userid> <reason>` or `kick <slot> <reason>` (take the userid and slot from `status`); see also `docs/parity/checklists/phase2a-console.md` | The client returns to the menu and shows the kick reason. | | |

@@ -63,7 +63,20 @@ cargo run -p cs-server -- --proto48 --map de_dust2
 
 Optional flags: `--port <n>` (default 27015), `--maxplayers <n>` (default 16), `--hostname <name>`, `--gamedir <path>`. Then, in the original Counter-Strike 1.6 client, open the console (`~`) and type `connect 127.0.0.1:27015`.
 
-This mode currently offers walking only: players spawn and move around the map, with no weapons, rounds or HUD. Compatibility with the original client is not yet verified; the manual checks are in [`docs/parity/checklists/phase1-original-client.md`](docs/parity/checklists/phase1-original-client.md). The headless probe connects the same way: `cargo run -p cs-probe -- --connect 127.0.0.1:27015 --seconds 20 --walk`.
+This mode is still walking only: players spawn and move around the map, with no weapons, rounds or HUD. Entities from the map's entity lump are spawned and their thinks run, but they are not yet linked into the world, so entity traces and touch are missing.
+
+The server console (type in the terminal where the server runs) accepts these commands:
+
+- `status` - print the hostname, the map and one line per connected client (1-based slot, state, name, address, ping).
+- `kick #<userid> [reason]` or `kick <slot> [reason]` - disconnect a client; the reason is shown to the client (a name that matches exactly one client also works).
+- `say <text>` - print `Console: <text>` to every client.
+- `changelevel <map>` or `map <map>` - change the map; connected clients reload it automatically.
+- `quit` or `exit` - shut the server down, telling the clients.
+- `<cvar>` or `<cvar> <value>` - read or set a cvar.
+
+Ctrl+C and SIGTERM shut the server down gracefully: connected clients are told and disconnect at once instead of timing out.
+
+Compatibility with the original client is not yet verified; the manual checks are in [`docs/parity/checklists/phase1-original-client.md`](docs/parity/checklists/phase1-original-client.md) and [`docs/parity/checklists/phase2a-console.md`](docs/parity/checklists/phase2a-console.md). The headless probe connects the same way: `cargo run -p cs-probe -- --connect 127.0.0.1:27015 --seconds 20 --walk`.
 
 ## Controls & Shortcuts
 
@@ -82,6 +95,8 @@ This mode currently offers walking only: players spawn and move around the map, 
 | `` ` `` (or `Ё`) / `Esc` / `F5` | Developer Console / Pause Menu / GPU PNG Screenshot |
 
 ## Verification
+
+The toolchain is pinned to Rust 1.100.0 by `rust-toolchain.toml`; `rustup` installs it on the first `cargo` run.
 
 ```powershell
 cargo clippy --workspace --all-targets -- -D warnings

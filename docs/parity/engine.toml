@@ -29,14 +29,33 @@ status = "implemented"
 evidence = "crates/cs-probe/src/lib.rs::tests::signon_chain_reaches_in_game; unverified against a real server, see docs/dev/reference-stand.md"
 
 [[item]]
+id = "console"
+status = "tested"
+evidence = "crates/cs-engine/tests/console.rs::status_lists_connected_clients, status_cleans_client_names, kick_by_userid_slot_and_name, kick_name_must_match_exactly_one_client, say_reaches_everyone, changelevel_validates_the_name, quit_and_exit_are_quit, cvars_can_be_read_and_set, game_commands_are_dispatched, hostile_console_input_is_harmless; crates/cs-server/src/console_io.rs::tests::lines_arrive_in_order_and_eof_ends_the_stream, an_overlong_line_is_cut_and_its_rest_dropped, invalid_utf8_is_replaced_not_fatal; server console commands (status, kick, say, changelevel/map, quit/exit, cvar get/set) written from the brief, not compared with the original dedicated server; the output formats (status columns, 1-based slots) and the cvar read-only handling (no read-only flag yet) are working assumptions; graceful Ctrl+C / SIGTERM shutdown has no automated test of the signal itself (shutdown_notifies_everyone covers the engine side), see docs/parity/checklists/phase2a-console.md"
+
+[[item]]
 id = "delta_frames"
 status = "tested"
 evidence = "crates/cs-engine/src/frame.rs::tests::delta_base_requires_matching_recent_frame, update_interval_clamps, clear_time_advances_by_transmission_time; crates/cs-engine/tests/frames.rs::second_probe_sees_first_probe_entity, stationary_world_frames_are_small_deltas, stale_delta_request_falls_back_to_full_update, moved_entity_is_updated_and_removed_entity_disappears, update_rate_follows_userinfo, no_update_is_sent_before_it_is_due, oversized_frame_drops_entities_but_keeps_clientdata, hidden_entity_is_not_sent, low_rate_client_still_receives_updates, choked_updates_are_announced_in_the_next_update, signon_at_minimum_rate_reaches_updates_promptly, reliable_message_and_large_frame_share_the_datagram_budget, reliable_flood_does_not_exceed_the_rate, withheld_reliable_ack_is_not_amplified, omitting_clc_delta_requests_a_full_update, rejected_datagram_keeps_the_delta_request; crates/cs-engine/tests/soak.rs::soak_3000_frames_8_clients (8 clients, every 17th datagram dropped: client data matches the edict, no send refused by the transport (NetStats::send_failures = 0, so every datagram was within 4010 bytes), at most 64 frames per client); crates/cs-engine/tests/connectionless.rs::a_flood_is_read_over_several_frames (at most MAX_DATAGRAMS_PER_FRAME datagrams read per frame, updates still sent); frame contents, rate and choke behaviour unverified against a real client"
 
 [[item]]
+id = "engine_traces"
+status = "tested"
+evidence = "crates/cs-engine/src/collision.rs::tests::world_trace_matches_bsp_collision, point_in_model_is_true_inside_a_real_brush, real_map_has_collision, out_of_range_model_is_harmless, stub_map_has_no_collision; crates/cs-engine/src/api_entities.rs::tests::traces_on_a_stub_map_hit_nothing, real_map_brush_models_and_traces; crates/cs-sim/tests/collision_characterization.rs::bsp_collision_answers_are_unchanged, world_only_traces_are_unchanged, world_trace_agrees_with_bsp_collision_per_trace; crates/cs-sim/tests/collision_open_space.rs::dust2_open_space_answers_are_unchanged, nuke_open_space_and_ladder_answers_are_unchanged; world traces only (the BSP world and brush models through EngineApi); traces against entities are the separate item entity_traces; one pre-existing quirk kept: a brush trace that starts in solid replaces a nearer world hit"
+
+[[item]]
+id = "entity_traces"
+status = "missing"
+
+[[item]]
 id = "game_messages"
 status = "tested"
-evidence = "crates/cs-engine/tests/messages.rs::each_destination_reaches_exactly_its_audience, pvs_message_respects_visibility (de_dust2 half runs only with the installed game), usermsg_roundtrips_to_the_probe, prints_and_stufftext_arrive, sound_requires_precache_and_reaches_listeners, init_messages_are_replayed_to_late_joiners, init_messages_come_from_spawn_entity_too_and_only_during_activation, a_full_init_buffer_still_reaches_a_late_joiner, light_styles_are_stored_and_updated, temp_entities_and_raw_sends_follow_the_limits, out_of_range_slots_and_stale_entities_are_ignored, per_frame_message_flood_respects_client_limits; crates/cs-proto48/src/messages.rs::tests::centerprint_and_temp_entity_roundtrip; crates/cs-probe/src/lib.rs::tests::message_log_skips_per_update_messages, message_log_keeps_the_last_1024; destinations (One, OneUnreliable, All, Broadcast, Pvs, Init), the init buffer replayed in the spawn stage after the light styles, the 64 stored light styles and the sound/print/stufftext/centerprint encodings follow the brief and recalled HLDS behaviour (SV_StartSound, SV_ClientPrintf, the light style table), not compared with the original server; the limits (1024 bytes of text, 3990 bytes per send, 64 KiB init buffer, volume 0..1, attenuation 0..3.98) are working assumptions"
+evidence = "crates/cs-engine/tests/messages.rs::each_destination_reaches_exactly_its_audience, pvs_message_respects_visibility (de_dust2 half runs only with the installed game), usermsg_roundtrips_to_the_probe, prints_and_stufftext_arrive, sound_requires_precache_and_reaches_listeners, init_messages_are_replayed_to_late_joiners, init_messages_come_from_spawn_entity_too_and_only_during_activation, a_full_init_buffer_still_reaches_a_late_joiner, light_styles_are_stored_and_updated, temp_entities_and_raw_sends_follow_the_limits, out_of_range_slots_and_stale_entities_are_ignored, per_frame_message_flood_respects_client_limits; crates/cs-proto48/src/messages.rs::tests::centerprint_and_temp_entity_roundtrip; crates/cs-probe/src/lib.rs::tests::message_log_skips_per_update_messages, message_log_keeps_the_last_1024; destinations (One, OneUnreliable, All, Broadcast, Pvs, Init), the init buffer replayed in the spawn stage after the light styles, the 64 stored light styles and the sound/print/stufftext/centerprint encodings follow the brief and recalled HLDS behaviour (SV_StartSound, SV_ClientPrintf, the light style table), not compared with the original server; assumption: the original client accepts reliable game messages (Init, One) sent to a slot that has not yet sent new, as client_connect writes to such slots, unverified against a real client; the limits (1024 bytes of text, 3990 bytes per send, 64 KiB init buffer, volume 0..1, attenuation 0..3.98) are working assumptions"
+
+[[item]]
+id = "map_entity_spawn"
+status = "tested"
+evidence = "crates/cs-engine/tests/mapents.rs::map_entities_reach_the_game_with_parsed_vars, rejected_entities_are_removed, a_game_that_removes_the_entity_itself_is_safe, spawn_happens_before_activate_and_precache_still_works, a_model_that_is_not_precached_is_left_to_the_game, angle_key_shortcuts, only_the_first_worldspawn_is_the_world, a_map_without_worldspawn_gives_the_world_no_spawn_call, entries_without_a_classname_are_skipped, hostile_entity_lump_is_bounded, rejected_entries_reuse_their_slots_during_activation, changelevel_after_the_load_grace_still_reuses_slots_of_refused_entries, pool_exhaustion_skips_the_rest_and_activates, changelevel_respawns_entities_from_the_new_map, map_entity_is_visible_to_a_probe; crates/cs-engine/src/mapents.rs::tests::vectors_need_three_finite_numbers, origin_beyond_the_world_is_refused, angle_is_used_only_without_a_valid_angles, spawnflags_are_a_strict_integer_of_32_bits, render_values_are_clamped_and_truncated, entries_without_a_usable_classname_are_skipped, keys_are_bounded_and_ordered; accepted deviation: the keys of an entity reach the game in sorted order, the original passes them in file order; the slot reuse rule (a freed slot is reused after 0.5 s, within the first second of a map at once) follows ED_Alloc in the ReHLDS source, read 2026-11-21; map entities of a real client unverified"
 
 [[item]]
 id = "msec_budget"
@@ -66,6 +85,11 @@ evidence = "crates/cs-engine/src/map.rs::tests::real_map_pvs_hides_far_spawn; ap
 id = "signon"
 status = "tested"
 evidence = "crates/cs-engine/tests/signon.rs::probe_reaches_in_game_within_200_frames; stage order unverified against a real server (working assumption, see signon_opcode_order_matches_golden_capture)"
+
+[[item]]
+id = "think"
+status = "tested"
+evidence = "crates/cs-engine/tests/think.rs::think_fires_once_when_due, rescheduling_inside_think_waits_for_the_next_frame, entity_removed_before_its_turn_is_skipped, entity_removing_itself_is_safe, thinks_are_capped_per_frame, nan_nextthink_never_fires, entity_created_during_the_pass_is_called_in_the_next_frame, slot_reused_during_the_pass_is_not_called_for_the_old_entity; accepted deviations: the thinks run right after start_frame, before the packets are read (the order differs from the original server), and eng.time() inside a think is the frame time, not the entity's own nextthink time; due rule 0 < nextthink <= time; not compared with the original server"
 
 [[item]]
 id = "timeouts"
