@@ -1045,10 +1045,12 @@ fn parse_packet_entities(
                 .cloned()
                 .unwrap_or_else(|| schema.zero_record())
         } else if is_delta
-            && let Some(prev) = matching_base(prev_frame.get(&entnum), custom, schema)
+            && let Some(prev) = matching_base(parsed_entry(prev_frame.get(&entnum)), custom, schema)
         {
             prev.clone()
-        } else if let Some(bl) = matching_base(ctx.baselines.get(&entnum), custom, schema) {
+        } else if let Some(bl) =
+            matching_base(parsed_entry(ctx.baselines.get(&entnum)), custom, schema)
+        {
             bl.clone()
         } else {
             schema.zero_record()
@@ -1412,12 +1414,8 @@ pub fn write_svc_spawnbaseline(
     w.write_u8(svc::SPAWNBASELINE);
     w.start_bit_writing();
     for (entnum, state) in baselines {
-        let ent_type = if state.entity_type == 0 {
-            ENTITY_NORMAL
-        } else {
-            state.entity_type
-        };
-        let custom = (ent_type & ENTITY_NORMAL) == 0;
+        let ent_type = wire_entity_type(state.entity_type);
+        let custom = ent_type == ENTITY_BEAM;
         let schema = if custom {
             custom_schema
         } else if *entnum >= 1 && *entnum <= max_clients as u16 {
@@ -1460,17 +1458,30 @@ pub fn write_svc_clientdata(
     to_rec
 }
 
+/// Map a caller-side entity type byte (`GoldSrcEntityState::entity_type`, or the type stored next
+/// to a record in a `from` frame or `baselines` map handed to a writer) to the wire type the
+/// writers send: `0` (the `Default`) and any value with the `ENTITY_NORMAL` bit set become
+/// `ENTITY_NORMAL`; any other non-zero value (such as `ENTITY_BEAM`) becomes `ENTITY_BEAM`.
+pub fn wire_entity_type(entity_type: u8) -> u8 {
+    if entity_type == 0 || (entity_type & ENTITY_NORMAL) != 0 {
+        ENTITY_NORMAL
+    } else {
+        ENTITY_BEAM
+    }
+}
+
 /// Whether a wire entity type byte (`ENTITY_NORMAL` / `ENTITY_BEAM`) marks a custom entity,
 /// as `svc_spawnbaseline` and `svc_packetentities` decide it.
 fn is_custom_entity_type(ent_type: u8) -> bool {
     (ent_type & ENTITY_NORMAL) == 0
 }
 
-/// `candidate`'s record when it can serve as the delta base of an entity entry: it is of the same
-/// kind (custom or normal) as the entry and holds one value per field of `schema`. Writers and
-/// parser both pick base records through this, so they agree on every entry.
+/// `candidate`'s record when it can serve as the delta base of an entity entry: its wire type is
+/// of the same kind (custom or normal) as the entry and it holds one value per field of
+/// `schema`. Writers and parser both pick base records through this, so they agree on every
+/// entry; writers first map caller-side type bytes with [`caller_entry`].
 fn matching_base<'a>(
-    candidate: Option<&'a (u8, DeltaRecord)>,
+    candidate: Option<(u8, &'a DeltaRecord)>,
     custom: bool,
     schema: &DeltaSchema,
 ) -> Option<&'a DeltaRecord> {
@@ -1479,6 +1490,17 @@ fn matching_base<'a>(
             is_custom_entity_type(*ent_type) == custom && rec.values.len() == schema.fields.len()
         })
         .map(|(_, rec)| rec)
+}
+
+/// A parser-stored `(wire type, record)` entry as a [`matching_base`] candidate.
+fn parsed_entry(entry: Option<&(u8, DeltaRecord)>) -> Option<(u8, &DeltaRecord)> {
+    entry.map(|(ent_type, rec)| (*ent_type, rec))
+}
+
+/// A caller-supplied `(type, record)` entry as a [`matching_base`] candidate, its type byte
+/// mapped through [`wire_entity_type`].
+fn caller_entry(entry: Option<&(u8, DeltaRecord)>) -> Option<(u8, &DeltaRecord)> {
+    entry.map(|(ent_type, rec)| (wire_entity_type(*ent_type), rec))
 }
 
 /// The three `entity_state_t` delta schemas a packet-entities message chooses between.
@@ -1499,7 +1521,7 @@ impl<'a> EntitySchemas<'a> {
 
     /// `(custom, schema)` for `ent`, chosen the way the parser chooses for its entry.
     fn for_state(&self, ent: &GoldSrcEntityState, max_clients: u8) -> (bool, &'a DeltaSchema) {
-        let custom = ent.entity_type != 0 && is_custom_entity_type(ent.entity_type);
+        let custom = wire_entity_type(ent.entity_type) == ENTITY_BEAM;
         let schema = if custom {
             self.custom
         } else if ent.number >= 1 && ent.number <= max_clients as u16 {
@@ -1543,7 +1565,8 @@ pub fn write_svc_packetentities_full(
         let (custom, schema) = schemas.for_state(ent, max_clients);
         let rec = ent.to_delta(schema);
         let zero = schema.zero_record();
-        let base = matching_base(baselines.get(&ent.number), custom, schema).unwrap_or(&zero);
+        let base = matching_base(caller_entry(baselines.get(&ent.number)), custom, schema)
+            .unwrap_or(&zero);
 
         let delta = num - num_base;
         if delta == 1 {
@@ -1630,7 +1653,7 @@ pub fn write_svc_packetentities_delta(
 
         let prev = from.get(&num);
         let zero = schema.zero_record();
-        let base = match matching_base(prev, custom, schema) {
+        let base = match matching_base(caller_entry(prev), custom, schema) {
             Some(prev_rec) => {
                 if !has_delta_changes(schema, prev_rec, &rec) {
                     continue;
@@ -1642,7 +1665,7 @@ pub fn write_svc_packetentities_delta(
                     // Kind changed: drop the old entity, then send this one as new.
                     write_delta_entity_header(w, &mut num_base, num, true);
                 }
-                matching_base(baselines.get(&num), custom, schema).unwrap_or(&zero)
+                matching_base(caller_entry(baselines.get(&num)), custom, schema).unwrap_or(&zero)
             }
         };
         write_delta_entity_header(w, &mut num_base, num, false);
@@ -2108,7 +2131,7 @@ mod tests {
     type EntityRecords = BTreeMap<u16, (u8, DeltaRecord)>;
 
     fn entity_schema(reg: &DeltaRegistry, max_clients: u8, num: u16, ent_type: u8) -> &DeltaSchema {
-        let name = if (ent_type & ENTITY_NORMAL) == 0 {
+        let name = if wire_entity_type(ent_type) == ENTITY_BEAM {
             "custom_entity_state_t"
         } else if num >= 1 && num <= max_clients as u16 {
             "entity_state_player_t"
@@ -2368,6 +2391,150 @@ mod tests {
                 te_type: 3,
                 raw: payload
             }]
+        );
+    }
+
+    /// A normal entity whose `entity_type` is left at the `Default` 0.
+    fn default_type_ent(number: u16, x: f32, modelindex: u16) -> GoldSrcEntityState {
+        GoldSrcEntityState {
+            entity_type: 0,
+            ..normal_ent(number, x, modelindex)
+        }
+    }
+
+    /// Default-type `states` as the parser hands them back, with the wire type `ENTITY_NORMAL`.
+    fn as_wire(states: &[GoldSrcEntityState]) -> Vec<GoldSrcEntityState> {
+        states
+            .iter()
+            .map(|e| GoldSrcEntityState {
+                entity_type: ENTITY_NORMAL,
+                ..e.clone()
+            })
+            .collect()
+    }
+
+    fn numbered(states: &[GoldSrcEntityState]) -> Vec<(u16, GoldSrcEntityState)> {
+        states.iter().map(|e| (e.number, e.clone())).collect()
+    }
+
+    #[test]
+    fn spawnbaseline_then_full_update_with_default_entity_type() {
+        let reg = DeltaRegistry::cs16_default();
+        let max_clients = 16;
+
+        // 1 differs from its baseline in `body`; 25 equals its baseline; 26 has none.
+        let player = default_type_ent(1, 100.0, 12);
+        let equal_to_baseline = GoldSrcEntityState {
+            skin: 3,
+            renderamt: 200,
+            ..default_type_ent(25, 8.0, 40)
+        };
+        let baseline_states = [
+            GoldSrcEntityState {
+                body: 2,
+                ..player.clone()
+            },
+            equal_to_baseline.clone(),
+        ];
+        let entities = vec![player, equal_to_baseline, default_type_ent(26, -64.5, 33)];
+
+        let mut w = MsgWriter::new();
+        write_svc_spawnbaseline(&mut w, &reg, max_clients, &numbered(&baseline_states), 12.5);
+        let baselines = entity_records(&reg, max_clients, &baseline_states);
+        write_svc_packetentities_full(&mut w, &reg, max_clients, &baselines, &entities, 12.5);
+
+        let mut ctx = SvcParseContext::new();
+        ctx.max_clients = max_clients;
+        ctx.server_time = 12.5;
+        let parsed = parse_svc_stream(w.as_slice(), &mut ctx).unwrap();
+        let [
+            SvcMessage::SpawnBaseline { .. },
+            SvcMessage::PacketEntities(pe),
+        ] = parsed.as_slice()
+        else {
+            panic!("expected baseline + packet entities, got {parsed:?}");
+        };
+        assert!(pe.removed.is_empty());
+        assert_eq!(
+            decode_entities(&reg, max_clients, &pe.entities),
+            as_wire(&entities)
+        );
+    }
+
+    #[test]
+    fn delta_update_with_default_entity_type() {
+        let reg = DeltaRegistry::cs16_default();
+        let max_clients = 16;
+        let seq = 10;
+
+        // 30 stays unchanged, 31 changes `sequence`, 32 is new; all three have baselines whose
+        // `renderamt`/`skin` are non-zero where the entities have zero.
+        let unchanged = default_type_ent(30, 16.0, 50);
+        let changing = default_type_ent(31, 48.0, 51);
+        let new_ent = default_type_ent(32, -24.0, 52);
+        let baseline_states: Vec<GoldSrcEntityState> = [&unchanged, &changing, &new_ent]
+            .into_iter()
+            .map(|e| GoldSrcEntityState {
+                renderamt: 255,
+                skin: 2,
+                ..e.clone()
+            })
+            .collect();
+        let baselines = entity_records(&reg, max_clients, &baseline_states);
+        let frame = vec![unchanged.clone(), changing.clone()];
+
+        // Signon and the full update the client acknowledges as `seq`.
+        let mut w = MsgWriter::new();
+        write_svc_spawnbaseline(&mut w, &reg, max_clients, &numbered(&baseline_states), 12.5);
+        write_svc_packetentities_full(&mut w, &reg, max_clients, &baselines, &frame, 12.5);
+        let mut ctx = SvcParseContext::new();
+        ctx.max_clients = max_clients;
+        ctx.server_time = 12.5;
+        ctx.last_incoming_seq = seq;
+        let parsed = parse_svc_stream(w.as_slice(), &mut ctx).unwrap();
+        let [
+            SvcMessage::SpawnBaseline { .. },
+            SvcMessage::PacketEntities(full),
+        ] = parsed.as_slice()
+        else {
+            panic!("expected baseline + packet entities, got {parsed:?}");
+        };
+        assert_eq!(
+            decode_entities(&reg, max_clients, &full.entities),
+            as_wire(&frame)
+        );
+
+        // The server's own record of that frame, built from the same default-type states.
+        let from = entity_records(&reg, max_clients, &frame);
+        let to = vec![
+            unchanged,
+            GoldSrcEntityState {
+                sequence: 9,
+                ..changing
+            },
+            new_ent,
+        ];
+        let mut w = MsgWriter::new();
+        write_svc_packetentities_delta(
+            &mut w,
+            &reg,
+            max_clients,
+            seq,
+            &baselines,
+            &from,
+            &to,
+            12.5,
+        );
+        ctx.last_incoming_seq = seq.wrapping_add(1);
+        let parsed = parse_svc_stream(w.as_slice(), &mut ctx).unwrap();
+        let [SvcMessage::PacketEntities(pe)] = parsed.as_slice() else {
+            panic!("expected packet entities, got {parsed:?}");
+        };
+        assert_eq!(pe.delta_from_seq, Some(seq));
+        assert!(pe.removed.is_empty());
+        assert_eq!(
+            decode_entities(&reg, max_clients, &pe.entities),
+            as_wire(&to)
         );
     }
 
