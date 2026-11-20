@@ -223,13 +223,17 @@ mod tests {
 
     #[test]
     fn origin_beyond_the_world_is_refused() {
-        let v = vars_from(&[("origin", "200000 0 0")]);
+        let beyond = MAX_WORLD_COORD * 2.0;
+        let v = vars_from(&[("origin", &format!("{beyond} 0 0"))]);
         assert_eq!(v.origin, Vec3::ZERO);
-        let v = vars_from(&[("origin", "131072 -131072 0")]);
-        assert_eq!(v.origin, Vec3::new(131_072.0, -131_072.0, 0.0));
+        let edge = MAX_WORLD_COORD;
+        let v = vars_from(&[("origin", &format!("{edge} -{edge} 0"))]);
+        assert_eq!(v.origin, Vec3::new(edge, -edge, 0.0));
+        let v = vars_from(&[("origin", &format!("{} 0 0", edge + 1024.0))]);
+        assert_eq!(v.origin, Vec3::ZERO);
         // The limit applies to origin only.
-        let v = vars_from(&[("angles", "200000 0 0")]);
-        assert_eq!(v.angles, Vec3::new(200_000.0, 0.0, 0.0));
+        let v = vars_from(&[("angles", &format!("{beyond} 0 0"))]);
+        assert_eq!(v.angles, Vec3::new(beyond, 0.0, 0.0));
     }
 
     #[test]
@@ -264,6 +268,8 @@ mod tests {
         assert_eq!(vars_from(&[("spawnflags", " 5 ")]).spawnflags, 5);
         assert_eq!(vars_from(&[("spawnflags", "-1")]).spawnflags, u32::MAX);
         assert_eq!(vars_from(&[("spawnflags", "4294967296")]).spawnflags, 0);
+        // Truncation to the low 32 bits, not a rejection.
+        assert_eq!(vars_from(&[("spawnflags", "4294967297")]).spawnflags, 1);
         assert_eq!(vars_from(&[("spawnflags", "5.0")]).spawnflags, 0);
         assert_eq!(vars_from(&[("spawnflags", "abc")]).spawnflags, 0);
         assert_eq!(
@@ -320,6 +326,16 @@ mod tests {
         assert_eq!(entry.keys[1].0, "a_exact");
         assert_eq!(entry.keys[2].0, "k0000");
         assert!(entry.keys.iter().all(|(k, _)| k != "big"));
+        assert!(entry.keys.iter().all(|(k, _)| k.len() <= MAX_KEY_BYTES));
+        // A key of exactly the limit is kept (it sorts after the `k` keys, so check separately).
+        let exact = prepare_entry(&entity(&[
+            ("classname", "x"),
+            (&"m".repeat(MAX_KEY_BYTES), "v"),
+            (&"n".repeat(MAX_KEY_BYTES + 1), "v"),
+        ]))
+        .unwrap();
+        assert_eq!(exact.keys.len(), 2);
+        assert_eq!(exact.keys[1].0.len(), MAX_KEY_BYTES);
         assert!(entry.keys.windows(2).skip(1).all(|w| w[0].0 < w[1].0));
     }
 }

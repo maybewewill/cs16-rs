@@ -380,6 +380,24 @@ fn rejected_entries_reuse_their_slots_during_activation() {
 }
 
 #[test]
+fn changelevel_after_the_load_grace_still_reuses_slots_of_refused_entries() {
+    let mut h = harness_on(4, vec![world()], TestGame::default());
+    // Server time well past 1.0 s, so a successor pool that started its map at 0 would hold
+    // freed slots back for half a second.
+    h.step(&mut [], 120);
+    assert!(h.now > 1.0);
+    let mut lump = vec![world()];
+    for i in 0..2000 {
+        lump.push(ent(&[("classname", "test_drop"), ("targetname", &i.to_string())]));
+    }
+    let before = h.server.game().spawned.len();
+    h.server
+        .change_map(ServerMap::stub_with_entities("second", lump));
+    assert_eq!(h.server.game().spawned.len() - before, 1 + 2000);
+    assert_eq!(h.server.edicts().iter_live().count(), 4 + 1);
+}
+
+#[test]
 fn pool_exhaustion_skips_the_rest_and_activates() {
     let mut lump = vec![world()];
     for i in 0..2000 {
