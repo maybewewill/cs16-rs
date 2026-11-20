@@ -1,0 +1,19 @@
+[[item]]
+id = "client_consistency_stop"
+status = "implemented"
+evidence = "crates/cs-probe/src/lib.rs::tests::consistency_list_disconnects; unverified against a real server, see docs/dev/reference-stand.md"
+
+[[item]]
+id = "client_lan_ticket_connect"
+status = "implemented"
+evidence = "crates/cs-probe/src/lib.rs::tests::scripted_handshake_reaches_signon_and_sends_new; unverified against a real server, see docs/dev/reference-stand.md"
+
+[[item]]
+id = "client_signon_order"
+status = "implemented"
+evidence = "crates/cs-probe/src/lib.rs::tests::signon_chain_reaches_in_game; unverified against a real server, see docs/dev/reference-stand.md"
+
+[[item]]
+id = "client_spawn_crc_munge"
+status = "implemented"
+evidence = "crates/cs-probe/src/lib.rs::tests::signon_chain_reaches_in_game; unverified against a real server, see docs/dev/reference-stand.md"

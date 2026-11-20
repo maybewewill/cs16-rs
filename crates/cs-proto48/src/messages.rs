@@ -388,6 +388,55 @@ pub enum SvcMessage {
     Ignored(u8),
 }
 
+impl SvcMessage {
+    /// The wire opcode the message is sent with; for a user message, its registered id.
+    pub fn opcode(&self) -> u8 {
+        match self {
+            SvcMessage::Nop => svc::NOP,
+            SvcMessage::Disconnect(_) => svc::DISCONNECT,
+            SvcMessage::Version(_) => svc::VERSION,
+            SvcMessage::SetView(_) => svc::SETVIEW,
+            SvcMessage::Sound(_) => svc::SOUND,
+            SvcMessage::Time(_) => svc::TIME,
+            SvcMessage::Print(_) => svc::PRINT,
+            SvcMessage::StuffText(_) => svc::STUFFTEXT,
+            SvcMessage::SetAngle(_) => svc::SETANGLE,
+            SvcMessage::AddAngle(_) => svc::ADDANGLE,
+            SvcMessage::ServerInfo(_) => svc::SERVERINFO,
+            SvcMessage::LightStyle { .. } => svc::LIGHTSTYLE,
+            SvcMessage::UpdateUserInfo { .. } => svc::UPDATEUSERINFO,
+            SvcMessage::DeltaDescription(_) => svc::DELTADESCRIPTION,
+            SvcMessage::ClientData { .. } => svc::CLIENTDATA,
+            SvcMessage::StopSound(_) => svc::STOPSOUND,
+            SvcMessage::Pings(_) => svc::PINGS,
+            SvcMessage::SpawnBaseline { .. } => svc::SPAWNBASELINE,
+            SvcMessage::TempEntity { .. } => svc::TEMP_ENTITY,
+            SvcMessage::SetPause(_) => svc::SETPAUSE,
+            SvcMessage::SignonNum(_) => svc::SIGNONNUM,
+            SvcMessage::CenterPrint(_) => svc::CENTERPRINT,
+            SvcMessage::CdTrack { .. } => svc::CDTRACK,
+            SvcMessage::WeaponAnim { .. } => svc::WEAPONANIM,
+            SvcMessage::DecalName { .. } => svc::DECALNAME,
+            SvcMessage::RoomType(_) => svc::ROOMTYPE,
+            SvcMessage::NewUserMsg(_) => svc::NEWUSERMSG,
+            SvcMessage::PacketEntities(update) if update.is_delta => svc::DELTAPACKETENTITIES,
+            SvcMessage::PacketEntities(_) => svc::PACKETENTITIES,
+            SvcMessage::Choke => svc::CHOKE,
+            SvcMessage::ResourceList { .. } => svc::RESOURCELIST,
+            SvcMessage::NewMoveVars(_) => svc::NEWMOVEVARS,
+            SvcMessage::ResourceRequest { .. } => svc::RESOURCEREQUEST,
+            SvcMessage::ResourceLocation(_) => svc::RESOURCELOCATION,
+            SvcMessage::SendExtraInfo { .. } => svc::SENDEXTRAINFO,
+            SvcMessage::VoiceInit { .. } => svc::VOICEINIT,
+            SvcMessage::VoiceData { .. } => svc::VOICEDATA,
+            SvcMessage::SendCvarValue(_) => svc::SENDCVARVALUE,
+            SvcMessage::SendCvarValue2 { .. } => svc::SENDCVARVALUE2,
+            SvcMessage::UserMsg { id, .. } => *id,
+            SvcMessage::Ignored(op) => *op,
+        }
+    }
+}
+
 /// Mutable parsing context maintained across packets of a GoldSrc 48 client session.
 #[derive(Debug, Default)]
 pub struct SvcParseContext {
@@ -709,14 +758,12 @@ fn parse_one_svc(
                 }
                 let entnum = r.read_bits(11) as u16;
                 let ent_type = r.read_bits(2) as u8;
-                let custom = (ent_type & ENTITY_NORMAL) == 0;
-                let schema = if custom {
-                    &custom_schema
-                } else if entnum >= 1 && entnum <= ctx.max_clients as u16 {
-                    &player_schema
-                } else {
-                    &ent_schema
-                };
+                let schema = EntitySchemas {
+                    normal: &ent_schema,
+                    player: &player_schema,
+                    custom: &custom_schema,
+                }
+                .for_entity(entnum, ent_type, ctx.max_clients);
                 let zero = schema.zero_record();
                 let rec = read_delta(r, schema, &zero, ctx.server_time)?;
                 baselines.insert(entnum, (ent_type, rec));
@@ -1019,13 +1066,13 @@ fn parse_packet_entities(
             prev_offset = Some(r.read_bits(6) as usize);
         }
 
-        let schema = if custom {
-            &custom_schema
-        } else if entnum >= 1 && entnum <= ctx.max_clients as u16 {
-            &player_schema
-        } else {
-            &ent_schema
-        };
+        let ent_type = if custom { ENTITY_BEAM } else { ENTITY_NORMAL };
+        let schema = EntitySchemas {
+            normal: &ent_schema,
+            player: &player_schema,
+            custom: &custom_schema,
+        }
+        .for_entity(entnum, ent_type, ctx.max_clients);
 
         // A record built for another schema (an entity whose kind changed, or malformed data)
         // is never used as a base; the entry then falls through to the next candidate.
@@ -1057,7 +1104,6 @@ fn parse_packet_entities(
         };
 
         let rec = read_delta(r, schema, &base_rec, ctx.server_time)?;
-        let ent_type = if custom { ENTITY_BEAM } else { ENTITY_NORMAL };
         if full {
             ordered_full.push(rec.clone());
         }
@@ -1401,13 +1447,7 @@ pub fn write_svc_spawnbaseline(
     baselines: &[(u16, GoldSrcEntityState)],
     server_time: f64,
 ) {
-    let Some(ent_schema) = reg.get("entity_state_t") else {
-        return;
-    };
-    let Some(player_schema) = reg.get("entity_state_player_t") else {
-        return;
-    };
-    let Some(custom_schema) = reg.get("custom_entity_state_t") else {
+    let Some(schemas) = EntitySchemas::from_registry(reg) else {
         return;
     };
 
@@ -1415,14 +1455,7 @@ pub fn write_svc_spawnbaseline(
     w.start_bit_writing();
     for (entnum, state) in baselines {
         let ent_type = wire_entity_type(state.entity_type);
-        let custom = ent_type == ENTITY_BEAM;
-        let schema = if custom {
-            custom_schema
-        } else if *entnum >= 1 && *entnum <= max_clients as u16 {
-            player_schema
-        } else {
-            ent_schema
-        };
+        let schema = schemas.for_entity(*entnum, ent_type, max_clients);
         let zero = schema.zero_record();
         let rec = state.to_delta(schema);
         w.write_bits(*entnum as u32, 11);
@@ -1503,7 +1536,26 @@ fn caller_entry(entry: Option<&(u8, DeltaRecord)>) -> Option<(u8, &DeltaRecord)>
     entry.map(|(ent_type, rec)| (wire_entity_type(*ent_type), rec))
 }
 
-/// The three `entity_state_t` delta schemas a packet-entities message chooses between.
+const ENTITY_SCHEMA: &str = "entity_state_t";
+const PLAYER_ENTITY_SCHEMA: &str = "entity_state_player_t";
+const CUSTOM_ENTITY_SCHEMA: &str = "custom_entity_state_t";
+
+/// Name of the delta schema an entity is encoded with in `svc_spawnbaseline` and
+/// `svc_packetentities` / `svc_deltapacketentities`: `custom_entity_state_t` for a custom wire
+/// type (`ENTITY_NORMAL` bit clear), `entity_state_player_t` for indices `1..=max_clients`,
+/// `entity_state_t` otherwise. `wire_type` is a wire type byte; map caller-side type bytes with
+/// [`wire_entity_type`] first.
+pub fn entity_schema_name(entnum: u16, wire_type: u8, max_clients: u8) -> &'static str {
+    if is_custom_entity_type(wire_type) {
+        CUSTOM_ENTITY_SCHEMA
+    } else if (1..=max_clients as u16).contains(&entnum) {
+        PLAYER_ENTITY_SCHEMA
+    } else {
+        ENTITY_SCHEMA
+    }
+}
+
+/// The three `entity_state_t` delta schemas an entity message chooses between.
 struct EntitySchemas<'a> {
     normal: &'a DeltaSchema,
     player: &'a DeltaSchema,
@@ -1513,23 +1565,28 @@ struct EntitySchemas<'a> {
 impl<'a> EntitySchemas<'a> {
     fn from_registry(reg: &'a DeltaRegistry) -> Option<Self> {
         Some(Self {
-            normal: reg.get("entity_state_t")?,
-            player: reg.get("entity_state_player_t")?,
-            custom: reg.get("custom_entity_state_t")?,
+            normal: reg.get(ENTITY_SCHEMA)?,
+            player: reg.get(PLAYER_ENTITY_SCHEMA)?,
+            custom: reg.get(CUSTOM_ENTITY_SCHEMA)?,
         })
+    }
+
+    /// The schema [`entity_schema_name`] names for this entity.
+    fn for_entity(&self, entnum: u16, wire_type: u8, max_clients: u8) -> &'a DeltaSchema {
+        match entity_schema_name(entnum, wire_type, max_clients) {
+            CUSTOM_ENTITY_SCHEMA => self.custom,
+            PLAYER_ENTITY_SCHEMA => self.player,
+            _ => self.normal,
+        }
     }
 
     /// `(custom, schema)` for `ent`, chosen the way the parser chooses for its entry.
     fn for_state(&self, ent: &GoldSrcEntityState, max_clients: u8) -> (bool, &'a DeltaSchema) {
-        let custom = wire_entity_type(ent.entity_type) == ENTITY_BEAM;
-        let schema = if custom {
-            self.custom
-        } else if ent.number >= 1 && ent.number <= max_clients as u16 {
-            self.player
-        } else {
-            self.normal
-        };
-        (custom, schema)
+        let wire_type = wire_entity_type(ent.entity_type);
+        (
+            is_custom_entity_type(wire_type),
+            self.for_entity(ent.number, wire_type, max_clients),
+        )
     }
 }
 

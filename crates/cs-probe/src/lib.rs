@@ -19,8 +19,8 @@ use cs_proto48::handshake::{
     encode_getchallenge, lan_steam_auth_ticket, parse_oob_packet,
 };
 use cs_proto48::messages::{
-    ENTITY_NORMAL, PacketEntitiesMsg, ServerInfoMsg, SvcMessage, SvcParseContext, parse_svc_stream,
-    svc, write_clc_delta, write_clc_move, write_clc_resourcelist, write_clc_stringcmd,
+    PacketEntitiesMsg, ServerInfoMsg, SvcMessage, SvcParseContext, entity_schema_name,
+    parse_svc_stream, write_clc_delta, write_clc_move, write_clc_resourcelist, write_clc_stringcmd,
 };
 use cs_proto48::netchan::{FRAGMENT_C2S_SIZE, NetChan, SplitPacketAssembler};
 use cs_transport::{PacketTransport, PeerAddr};
@@ -40,6 +40,8 @@ const MAX_BACKUP_CMDS: usize = 2;
 const MAX_NEW_CMDS: usize = 16;
 /// Reason given when the server demands file consistency checks the probe cannot answer.
 const CONSISTENCY_REASON: &str = "consistency required: set mp_consistency 0";
+/// Reason given when `svc_resourcelist` arrives before `svc_serverinfo`.
+const NO_SERVERINFO_REASON: &str = "resourcelist before serverinfo";
 
 /// Identity the probe connects with.
 #[derive(Debug, Clone)]
@@ -359,7 +361,7 @@ impl<T: PacketTransport> ProbeClient<T> {
             match parse_svc_stream(&stream, &mut self.ctx) {
                 Ok(messages) => {
                     for message in messages {
-                        self.opcode_log.push(svc_opcode(&message));
+                        self.opcode_log.push(message.opcode());
                         self.handle_svc(message, now);
                     }
                 }
@@ -411,7 +413,7 @@ impl<T: PacketTransport> ProbeClient<T> {
                     && is_reconnect(&text) =>
             {
                 self.state = ProbeState::Signon;
-                self.last_entity_seq = None;
+                self.forget_map();
                 self.send_stringcmd("new");
             }
             _ => {}
@@ -420,8 +422,11 @@ impl<T: PacketTransport> ProbeClient<T> {
 
     /// `spawn <spawn_count> <crc>`: the map CRC munged with `COM_Munge2` keyed by
     /// `(-1 - spawn_count) & 0xFF`, printed as a signed 32-bit integer.
+    /// Without `svc_serverinfo` there is no spawn count or map CRC to answer with, so the probe
+    /// stops instead of waiting in `Signon` forever.
     fn send_spawn(&mut self) {
         let Some(info) = self.server_info.as_ref() else {
+            self.state = ProbeState::Disconnected(NO_SERVERINFO_REASON.to_string());
             return;
         };
         let spawn_count = info.spawn_count;
@@ -431,22 +436,28 @@ impl<T: PacketTransport> ProbeClient<T> {
         self.send_stringcmd(&format!("spawn {spawn_count} {crc}"));
     }
 
+    /// Drops everything that belongs to the previous map before a `reconnect` sign-on. The
+    /// channel, user infos, stats, opcode log and the caller's `force_delta_seq` stay.
+    fn forget_map(&mut self) {
+        self.entities.clear();
+        self.ctx.baselines.clear();
+        self.ctx.instance_baselines.clear();
+        self.ctx.entity_frames.clear();
+        self.server_info = None;
+        self.client_data = None;
+        self.sent_cmds.clear();
+        self.last_entity_seq = None;
+    }
+
     /// Replaces the entity view with the complete frame the parser rebuilt from this update.
     fn apply_entities(&mut self, update: &PacketEntitiesMsg, now: f64) {
         let deltas = &self.ctx.deltas;
-        let max_clients = self.ctx.max_clients as u16;
+        let max_clients = self.ctx.max_clients;
         self.entities = update
             .entities
             .iter()
             .filter_map(|(&number, (ent_type, rec))| {
-                let schema_name = if (ent_type & ENTITY_NORMAL) == 0 {
-                    "custom_entity_state_t"
-                } else if (1..=max_clients).contains(&number) {
-                    "entity_state_player_t"
-                } else {
-                    "entity_state_t"
-                };
-                let schema = deltas.get(schema_name)?;
+                let schema = deltas.get(entity_schema_name(number, *ent_type, max_clients))?;
                 let state = GoldSrcEntityState::from_delta(number, *ent_type, rec, schema);
                 Some((number, state))
             })
@@ -516,53 +527,6 @@ fn is_reconnect(text: &str) -> bool {
     text.split(['\n', ';']).any(|cmd| cmd.trim() == "reconnect")
 }
 
-/// The wire opcode a decoded message arrived with; a user message by its registered id.
-fn svc_opcode(message: &SvcMessage) -> u8 {
-    match message {
-        SvcMessage::Nop => svc::NOP,
-        SvcMessage::Disconnect(_) => svc::DISCONNECT,
-        SvcMessage::Version(_) => svc::VERSION,
-        SvcMessage::SetView(_) => svc::SETVIEW,
-        SvcMessage::Sound(_) => svc::SOUND,
-        SvcMessage::Time(_) => svc::TIME,
-        SvcMessage::Print(_) => svc::PRINT,
-        SvcMessage::StuffText(_) => svc::STUFFTEXT,
-        SvcMessage::SetAngle(_) => svc::SETANGLE,
-        SvcMessage::AddAngle(_) => svc::ADDANGLE,
-        SvcMessage::ServerInfo(_) => svc::SERVERINFO,
-        SvcMessage::LightStyle { .. } => svc::LIGHTSTYLE,
-        SvcMessage::UpdateUserInfo { .. } => svc::UPDATEUSERINFO,
-        SvcMessage::DeltaDescription(_) => svc::DELTADESCRIPTION,
-        SvcMessage::ClientData { .. } => svc::CLIENTDATA,
-        SvcMessage::StopSound(_) => svc::STOPSOUND,
-        SvcMessage::Pings(_) => svc::PINGS,
-        SvcMessage::SpawnBaseline { .. } => svc::SPAWNBASELINE,
-        SvcMessage::TempEntity { .. } => svc::TEMP_ENTITY,
-        SvcMessage::SetPause(_) => svc::SETPAUSE,
-        SvcMessage::SignonNum(_) => svc::SIGNONNUM,
-        SvcMessage::CenterPrint(_) => svc::CENTERPRINT,
-        SvcMessage::CdTrack { .. } => svc::CDTRACK,
-        SvcMessage::WeaponAnim { .. } => svc::WEAPONANIM,
-        SvcMessage::DecalName { .. } => svc::DECALNAME,
-        SvcMessage::RoomType(_) => svc::ROOMTYPE,
-        SvcMessage::NewUserMsg(_) => svc::NEWUSERMSG,
-        SvcMessage::PacketEntities(update) if update.is_delta => svc::DELTAPACKETENTITIES,
-        SvcMessage::PacketEntities(_) => svc::PACKETENTITIES,
-        SvcMessage::Choke => svc::CHOKE,
-        SvcMessage::ResourceList { .. } => svc::RESOURCELIST,
-        SvcMessage::NewMoveVars(_) => svc::NEWMOVEVARS,
-        SvcMessage::ResourceRequest { .. } => svc::RESOURCEREQUEST,
-        SvcMessage::ResourceLocation(_) => svc::RESOURCELOCATION,
-        SvcMessage::SendExtraInfo { .. } => svc::SENDEXTRAINFO,
-        SvcMessage::VoiceInit { .. } => svc::VOICEINIT,
-        SvcMessage::VoiceData { .. } => svc::VOICEDATA,
-        SvcMessage::SendCvarValue(_) => svc::SENDCVARVALUE,
-        SvcMessage::SendCvarValue2 { .. } => svc::SENDCVARVALUE2,
-        SvcMessage::UserMsg { id, .. } => *id,
-        SvcMessage::Ignored(op) => *op,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -570,9 +534,10 @@ mod tests {
     use cs_proto48::delta::DeltaRegistry;
     use cs_proto48::handshake::{encode_s2c_challenge, encode_s2c_connection, encode_s2c_reject};
     use cs_proto48::messages::{
-        ClcMessage, parse_clc_stream, write_svc_disconnect, write_svc_packetentities_full,
-        write_svc_resourcelist, write_svc_resourcerequest, write_svc_serverinfo,
-        write_svc_signonnum, write_svc_stufftext, write_svc_updateuserinfo,
+        ClcMessage, ENTITY_NORMAL, parse_clc_stream, svc, write_svc_disconnect,
+        write_svc_packetentities_full, write_svc_resourcelist, write_svc_resourcerequest,
+        write_svc_serverinfo, write_svc_signonnum, write_svc_spawnbaseline, write_svc_stufftext,
+        write_svc_updateuserinfo,
     };
     use cs_proto48::netchan::FRAGMENT_S2C_MAX_SIZE;
     use cs_transport::{LoopbackEndpoint, LoopbackHub};
@@ -1005,6 +970,83 @@ mod tests {
         assert_eq!(
             probe.state(),
             &ProbeState::Disconnected("Kicked by console".to_string())
+        );
+    }
+
+    #[test]
+    fn reconnect_forgets_the_previous_map() {
+        let (mut server, mut probe) = ScriptedServer::new();
+        let mut now = handshake(&mut server, &mut probe);
+        server.recv_clc();
+        exchange(
+            &mut server,
+            &mut probe,
+            &mut now,
+            &msg(|w| write_svc_serverinfo(w, &server_info())),
+        );
+
+        let ent = GoldSrcEntityState {
+            number: 40,
+            entity_type: ENTITY_NORMAL,
+            origin: Vec3::new(8.0, 16.0, 32.0),
+            modelindex: 3,
+            ..Default::default()
+        };
+        let baseline =
+            msg(|w| write_svc_spawnbaseline(w, &server.reg, 32, &[(40, ent.clone())], 0.0));
+        exchange(&mut server, &mut probe, &mut now, &baseline);
+        let mut baselines = BTreeMap::new();
+        baselines.insert(
+            40,
+            (
+                ENTITY_NORMAL,
+                ent.to_delta(server.reg.get("entity_state_t").unwrap()),
+            ),
+        );
+        let update =
+            msg(|w| write_svc_packetentities_full(w, &server.reg, 32, &baselines, &[ent], 0.0));
+        let packet = server.chan.build_packet(&update);
+        server.send_raw(&packet);
+        now += SEND_INTERVAL;
+        probe.pump(now);
+        server.recv_clc();
+        assert_eq!(probe.state(), &ProbeState::InGame);
+        assert_eq!(probe.entities().len(), 1);
+        assert!(probe.server_info().is_some());
+        probe.force_delta_seq(Some(9));
+
+        let reply = exchange(
+            &mut server,
+            &mut probe,
+            &mut now,
+            &msg(|w| write_svc_stufftext(w, "reconnect\n")),
+        );
+        assert_eq!(string_cmds(&reply), vec!["new".to_string()]);
+        assert_eq!(probe.state(), &ProbeState::Signon);
+        assert!(probe.entities().is_empty());
+        assert!(probe.server_info().is_none());
+        assert!(probe.client_data().is_none());
+        assert!(probe.ctx.baselines.is_empty());
+        assert!(probe.ctx.entity_frames.is_empty());
+        assert!(probe.last_entity_seq.is_none());
+        // The caller's override survives the reconnect.
+        assert!(reply.iter().flatten().any(|m| m == &ClcMessage::Delta(9)));
+    }
+
+    #[test]
+    fn resourcelist_before_serverinfo_disconnects() {
+        let (mut server, mut probe) = ScriptedServer::new();
+        let mut now = handshake(&mut server, &mut probe);
+        server.recv_clc();
+        exchange(
+            &mut server,
+            &mut probe,
+            &mut now,
+            &msg(|w| write_svc_resourcelist(w, &[])),
+        );
+        assert_eq!(
+            probe.state(),
+            &ProbeState::Disconnected(NO_SERVERINFO_REASON.to_string())
         );
     }
 
