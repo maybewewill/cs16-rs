@@ -2,14 +2,15 @@
 //! for the original Counter-Strike 1.6 client. Players spawn and walk; there are no weapons,
 //! rounds or HUD.
 
-use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use cs_assets::bsp::BspMap;
 use cs_cvar::CVarRegistry;
-use cs_engine::{Server, ServerConfig, ServerMap};
+use cs_engine::{ConsoleOutcome, Server, ServerConfig, ServerMap};
 use cs_platform::{Clock, NativeClock};
 use cs_proto48::delta::DeltaRegistry;
 use cs_sim::pmove::MoveParams;
@@ -17,6 +18,8 @@ use cs_sim::walk_game::WalkGame;
 use cs_transport::UdpTransport;
 use cs_vfs::{Vfs, VfsConfig};
 use tracing::info;
+
+use crate::console_io;
 
 /// Seconds between server frames: 100 Hz.
 const FRAME_SECS: f64 = 0.01;
@@ -67,27 +70,81 @@ fn parse(args: &[String]) -> Result<Options, String> {
     Ok(opts)
 }
 
-/// Runs the server until the process is stopped. A start-up error (bad arguments, map not
-/// found, port taken) is printed and ends the process with exit code 1.
+/// Runs the server until the operator types `quit` or `exit` or presses Ctrl+C, then exits
+/// with code 0 after telling every client why. A start-up error (bad arguments, map not found,
+/// port taken) is printed and ends the process with exit code 1.
 pub fn run(args: &[String]) -> ! {
-    let Err(msg) = start(args);
-    eprintln!("error: {msg}");
-    std::process::exit(1);
+    match start(args) {
+        Ok(()) => std::process::exit(0),
+        Err(msg) => {
+            eprintln!("error: {msg}");
+            std::process::exit(1);
+        }
+    }
 }
 
-fn start(args: &[String]) -> Result<Infallible, String> {
-    let opts = parse(args)?;
-    let vfs = Vfs::discover(opts.gamedir.as_deref(), VfsConfig::default())
-        .map_err(|e| format!("cannot find the Half-Life / CS 1.6 directory: {e}"))?;
-    let bsp =
-        BspMap::load(&vfs, &opts.map).map_err(|e| format!("cannot load map {}: {e}", opts.map))?;
-    let path = format!("maps/{}.bsp", opts.map);
+type WalkServer = Server<WalkGame>;
+
+/// Loads `maps/<name>.bsp` through `vfs`, for start-up and for `changelevel`.
+fn load_server_map(vfs: &Vfs, name: &str) -> Result<ServerMap, String> {
+    let bsp = Arc::new(BspMap::load(vfs, name).map_err(|e| format!("cannot load map {name}: {e}"))?);
+    let path = format!("maps/{name}.bsp");
     let raw = vfs
         .read_bytes(&path)
         .map_err(|e| format!("cannot read {path}: {e}"))?;
+    ServerMap::from_bsp(name, &raw, bsp).ok_or(format!("{path} has no valid BSP header"))
+}
+
+/// Carries out `changelevel <name>`: loads the map and switches the server to it. A failure is
+/// printed and the server keeps running on its current map.
+fn change_level(vfs: &Vfs, server: &mut WalkServer, name: &str) {
+    match load_server_map(vfs, name) {
+        Ok(map) => {
+            println!("changing level to {name}");
+            server.change_map(map);
+        }
+        Err(msg) => println!("changelevel failed: {msg}"),
+    }
+}
+
+/// Runs the console lines that arrived since the last frame and checks Ctrl+C. Returns `true`
+/// once the server was shut down (the caller runs one more frame and exits). Closed or silent
+/// input is not a request to stop.
+fn run_console(
+    server: &mut WalkServer,
+    net: &mut UdpTransport,
+    vfs: &Vfs,
+    commands: &Receiver<String>,
+    interrupted: &AtomicBool,
+) -> bool {
+    let mut quit = interrupted.load(Ordering::SeqCst);
+    while !quit {
+        let Ok(line) = commands.try_recv() else {
+            break;
+        };
+        match server.console_command(&line) {
+            ConsoleOutcome::Output(text) => {
+                if !text.is_empty() {
+                    print!("{text}");
+                }
+            }
+            ConsoleOutcome::ChangeLevel(name) => change_level(vfs, server, &name),
+            ConsoleOutcome::Quit => quit = true,
+        }
+    }
+    if quit {
+        info!("shutting down");
+        server.shutdown(net, "Server shutting down");
+    }
+    quit
+}
+
+fn start(args: &[String]) -> Result<(), String> {
+    let opts = parse(args)?;
+    let vfs = Vfs::discover(opts.gamedir.as_deref(), VfsConfig::default())
+        .map_err(|e| format!("cannot find the Half-Life / CS 1.6 directory: {e}"))?;
+    let map = load_server_map(&vfs, &opts.map)?;
     let game = WalkGame::new(MoveParams::default());
-    let map = ServerMap::from_bsp(&opts.map, &raw, Arc::new(bsp))
-        .ok_or(format!("{path} has no valid BSP header"))?;
     let (map_name, map_crc) = (map.name.clone(), map.crc);
 
     let bind = format!("0.0.0.0:{}", opts.port);
@@ -110,13 +167,21 @@ fn start(args: &[String]) -> Result<Infallible, String> {
         crc = format_args!("{map_crc:#010x}"),
         maxplayers = server.config().max_clients,
         hostname = %server.config().hostname,
-        "cs-server (Protocol 48, walking only) listening at 100 Hz (Ctrl+C to stop)"
+        "cs-server (Protocol 48, walking only) listening at 100 Hz (type quit or press Ctrl+C to stop)"
     );
 
+    let commands = console_io::spawn_line_reader(std::io::BufReader::new(std::io::stdin()));
+    let interrupted = console_io::interrupt_flag();
     let clock = NativeClock::new();
     let mut next_frame = clock.now();
+    let mut quitting = false;
     loop {
         server.frame(&mut net, clock.now());
+        if quitting {
+            // One frame after `shutdown`, so the farewells are out; then done.
+            return Ok(());
+        }
+        quitting = run_console(&mut server, &mut net, &vfs, &commands, &interrupted);
         next_frame += FRAME_SECS;
         let now = clock.now();
         if next_frame > now {

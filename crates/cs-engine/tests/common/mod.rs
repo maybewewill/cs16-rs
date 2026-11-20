@@ -210,6 +210,8 @@ pub struct TestGame {
     pub late_precache: Option<Result<u16, PrecacheError>>,
     /// Every `argv` received by `client_command`.
     pub commands: Vec<Vec<String>>,
+    /// Every `argv` received by `server_command`.
+    pub server_commands: Vec<Vec<String>>,
     /// Every `random_seed` received by `run_usercmd`, in call order.
     pub random_seeds: Vec<u32>,
     /// The `msec` of every command `run_usercmd` received, in call order.
@@ -396,6 +398,15 @@ impl GameDll for TestGame {
 
     fn client_disconnect(&mut self, _eng: &mut EngineApi<'_>, _slot: u8) {
         self.client_disconnect_calls += 1;
+    }
+
+    fn server_command(&mut self, _eng: &mut EngineApi<'_>, argv: &[String]) -> Option<String> {
+        self.server_commands.push(argv.to_vec());
+        match argv.first().map(String::as_str) {
+            Some("gamecmd") => Some("game says hi\n".to_string()),
+            Some("gameesc") => Some("a\x1b[31mb\nc".to_string()),
+            _ => None,
+        }
     }
 
     fn client_command(&mut self, eng: &mut EngineApi<'_>, slot: u8, argv: &[String]) {

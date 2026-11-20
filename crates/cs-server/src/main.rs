@@ -5,6 +5,7 @@
 //! With `--proto48` it runs the Protocol 48 server for the original client instead (see
 //! `proto48.rs`): `cargo run -p cs-server -- --proto48 --map de_dust2`.
 
+mod console_io;
 mod proto48;
 
 use std::path::PathBuf;

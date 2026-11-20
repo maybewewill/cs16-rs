@@ -195,6 +195,14 @@ pub trait GameDll {
     /// frame.
     fn think(&mut self, _eng: &mut EngineApi<'_>, _id: EdictId) {}
     fn update_client_data(&mut self, eng: &mut EngineApi<'_>, slot: u8) -> GoldSrcClientData;
+    /// A server console command no engine command or cvar claims, with `argv[0]` the command
+    /// name as typed (never empty). Return the text to print, or `None` if the game does not
+    /// know the command (the console then reports it unknown). The engine replaces control
+    /// characters other than newlines in the returned text; a game that echoes client-supplied
+    /// text should still keep it short.
+    fn server_command(&mut self, _eng: &mut EngineApi<'_>, _argv: &[String]) -> Option<String> {
+        None
+    }
     /// Whether `ent` goes into `viewer`'s packet; may adjust `state`.
     fn add_to_full_pack(
         &mut self,
