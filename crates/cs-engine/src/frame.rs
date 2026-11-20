@@ -28,10 +28,6 @@ const DEFAULT_UPDATE_RATE: f64 = 20.0;
 const DEFAULT_RATE: f64 = 30_000.0;
 /// `EF_NODRAW` in `EntVars::effects`.
 const EF_NODRAW: u32 = 128;
-/// Longest a client can be kept waiting for updates by the bytes it was sent.
-pub const MAX_RATE_DEBT_SECS: f64 = 1.0;
-/// Netchan header bytes: a next packet no longer than this carries no reliable data.
-const NETCHAN_HEADER: usize = 8;
 
 /// One update sent to a client, kept as the base of later deltas.
 #[derive(Debug, Clone, PartialEq)]
@@ -106,20 +102,21 @@ fn next_due(due: f64, interval: f64, now: f64) -> f64 {
     if next <= now { now + interval } else { next }
 }
 
-/// When a client may be sent its next update, after a datagram of `bytes` went to it at
-/// `now` with `rate` bytes per second: the datagram's transmission time is added to the later
-/// of `clear_time` and `now`, and the result is capped at [`MAX_RATE_DEBT_SECS`] after `now`.
+/// When a client may be sent its next datagram, after one of `bytes` went to it at `now` with
+/// `rate` bytes per second: the datagram's transmission time added to the later of
+/// `clear_time` and `now`. Every datagram waits for the clear time, so the debt never exceeds
+/// one datagram's worth.
 pub(crate) fn advance_clear_time(clear_time: f64, now: f64, bytes: usize, rate: u32) -> f64 {
-    let after = clear_time.max(now) + bytes as f64 / f64::from(rate.max(1));
-    after.min(now + MAX_RATE_DEBT_SECS)
+    clear_time.max(now) + bytes as f64 / f64::from(rate.max(1))
 }
 
 impl<G: GameDll> Server<G> {
-    /// Sends each connected client its datagram for this frame: an update when the client is
-    /// `Active`, one is due and its rate lets it be sent, otherwise only the reliable data
-    /// waiting for it, if any. A due update the rate holds back is choked: counted, and
-    /// announced with `svc_choke` in the next update sent. Every datagram moves the client's
-    /// clear time (see [`advance_clear_time`]).
+    /// Sends each connected client its datagram for this frame, if any. No datagram goes before
+    /// the client's clear time, and every one moves it (see [`advance_clear_time`]). An
+    /// `Active` client is sent only its due updates, which carry its pending reliable data; a
+    /// due update the rate holds back is choked: counted, and announced with `svc_choke` in the
+    /// next update sent. A client still signing on is sent one datagram per frame, so that the
+    /// packets it acknowledges let a lost reliable message be resent.
     pub(crate) fn send_client_frames(&mut self, net: &mut dyn PacketTransport) {
         for slot in 0..self.cfg.max_clients {
             let index = usize::from(slot);
@@ -127,14 +124,16 @@ impl<G: GameDll> Server<G> {
             if client.is_free() {
                 continue;
             }
-            let due = client.state == ClientState::Active && self.time >= client.next_update_at;
-            let packet = if due && self.time >= client.clear_time {
+            let can_send = self.time >= client.clear_time;
+            let packet = if client.state != ClientState::Active {
+                can_send.then(|| self.build_signon_packet(slot))
+            } else if self.time < client.next_update_at {
+                None
+            } else if can_send {
                 self.build_update(slot)
             } else {
-                if due {
-                    self.choke_update(slot);
-                }
-                self.build_reliable_only(slot)
+                self.choke_update(slot);
+                None
             };
             let rate = clamp_rate(self.views[index].userinfo.get("rate"), &self.cfg);
             let client = &mut self.clients[index];
@@ -156,18 +155,12 @@ impl<G: GameDll> Server<G> {
         client.choke_count = client.choke_count.saturating_add(1);
     }
 
-    /// A packet without unreliable data. An `Active` client gets one only when it carries
-    /// reliable data; a client still signing on gets one every frame, so that the packets it
-    /// acknowledges let a lost reliable message be resent. Unreliable messages queued for a
-    /// client still signing on are dropped.
-    fn build_reliable_only(&mut self, slot: u8) -> Option<Vec<u8>> {
+    /// The datagram of a client still signing on: its pending reliable data, if any. Unreliable
+    /// messages queued for it are dropped.
+    fn build_signon_packet(&mut self, slot: u8) -> Vec<u8> {
         let client = &mut self.clients[usize::from(slot)];
-        if client.state != ClientState::Active {
-            client.unreliable.clear();
-        } else if client.chan.next_packet_reliable_len() <= NETCHAN_HEADER {
-            return None;
-        }
-        Some(client.chan.build_packet(&[]))
+        client.unreliable.clear();
+        client.chan.build_packet(&[])
     }
 
     /// The due update of `slot`: one `svc_choke` per update choked since the last one sent,
@@ -239,8 +232,11 @@ impl<G: GameDll> Server<G> {
         let with_entities = payload.len() + block.len() <= budget;
         if with_entities {
             payload.extend_from_slice(block.as_slice());
-        } else if payload.len() > budget {
-            payload.clear();
+        } else {
+            self.net_stats.entity_blocks_dropped += 1;
+            if payload.len() > budget {
+                payload.clear();
+            }
         }
         if payload.len() + queued.len() <= budget {
             payload.extend_from_slice(&queued);
@@ -366,21 +362,14 @@ mod tests {
     }
 
     #[test]
-    fn clear_time_advances_by_transmission_time_and_is_capped() {
+    fn clear_time_advances_by_transmission_time() {
         let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
         // Idle client: counted from now.
         assert!(close(advance_clear_time(0.0, 5.0, 500, 1000), 5.5));
         // Still busy: counted from the clear time.
         assert!(close(advance_clear_time(5.5, 5.2, 200, 1000), 5.7));
-        // A huge datagram owes at most MAX_RATE_DEBT_SECS.
-        assert!(close(
-            advance_clear_time(0.0, 5.0, 100_000, 1000),
-            5.0 + MAX_RATE_DEBT_SECS
-        ));
-        assert!(close(
-            advance_clear_time(5.9, 5.0, 500, 1000),
-            5.0 + MAX_RATE_DEBT_SECS
-        ));
+        // No cap: a large datagram owes its whole transmission time.
+        assert!(close(advance_clear_time(0.0, 5.0, 4010, 1000), 9.01));
     }
 
     #[test]
@@ -395,9 +384,9 @@ mod tests {
         // A zero-byte datagram costs nothing.
         assert!(close(advance_clear_time(0.0, 1.0, 0, min), 1.0));
         assert!(close(advance_clear_time(1.3, 1.0, 0, min), 1.3));
-        // `now` earlier than the clear time: counted from the clear time, still capped.
+        // `now` earlier than the clear time: counted from the clear time.
         assert!(close(advance_clear_time(1.5, 1.0, 100, min), 1.6));
-        assert!(close(advance_clear_time(3.0, 1.0, 100, min), 2.0));
+        assert!(close(advance_clear_time(3.0, 1.0, 100, min), 3.1));
         // A zero rate (not reachable through clamp_rate) does not divide by zero.
         assert!(advance_clear_time(0.0, 1.0, 10, 0).is_finite());
     }

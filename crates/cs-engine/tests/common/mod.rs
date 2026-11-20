@@ -84,6 +84,9 @@ pub struct TestGame {
     pub kick_on_connect: Option<String>,
     /// Bytes `client_command("flood")` writes into that client's reliable buffer.
     pub flood_bytes: usize,
+    /// While non-zero, every `run_usercmd` writes this many bytes into that client's reliable
+    /// buffer.
+    pub flood_per_usercmd: usize,
     /// When set, `client_connect` also writes `flood_bytes` into the connecting slot's
     /// reliable buffer.
     pub flood_on_connect: bool,
@@ -209,6 +212,10 @@ impl GameDll for TestGame {
     ) {
         self.run_usercmd_calls += 1;
         self.random_seeds.push(random_seed);
+        if self.flood_per_usercmd > 0 {
+            // `svc_nop` bytes.
+            eng.reliable(slot).write_bytes(&vec![svc::NOP; self.flood_per_usercmd]);
+        }
         let id = eng.edicts.client(slot);
         if let Some(edict) = eng.edicts.get_mut(id) {
             edict.vars.origin.x += cmd.forwardmove * f32::from(cmd.msec) / 1000.0;

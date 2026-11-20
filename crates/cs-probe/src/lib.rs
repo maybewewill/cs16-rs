@@ -117,6 +117,9 @@ pub struct ProbeClient<T: PacketTransport> {
     forced_delta_seq: Option<u8>,
     /// Test hook: `clc_delta` is left out of outgoing packets.
     delta_suppressed: bool,
+    /// Test hook: the reliable acknowledgement bit outgoing packets carry instead of the
+    /// channel's own.
+    withheld_reliable_ack: Option<u32>,
     /// Outgoing `clc_move` messages still to be sent with a corrupted checksum (test hook).
     corrupt_moves: u32,
     #[cfg(not(target_arch = "wasm32"))]
@@ -151,6 +154,7 @@ impl<T: PacketTransport> ProbeClient<T> {
             last_entity_seq: None,
             forced_delta_seq: None,
             delta_suppressed: false,
+            withheld_reliable_ack: None,
             corrupt_moves: 0,
             #[cfg(not(target_arch = "wasm32"))]
             capture: None,
@@ -239,6 +243,17 @@ impl<T: PacketTransport> ProbeClient<T> {
     /// full updates.
     pub fn suppress_delta(&mut self, suppress: bool) {
         self.delta_suppressed = suppress;
+    }
+
+    /// Test hook: while `true`, outgoing packets keep acknowledging the reliable message state
+    /// of the moment the hook was set, so the server never sees later reliable messages
+    /// acknowledged and keeps resending them. `None` before the server accepted the connection.
+    pub fn withhold_reliable_ack(&mut self, withhold: bool) {
+        self.withheld_reliable_ack = if withhold {
+            self.chan.as_ref().map(|c| c.incoming_reliable_sequence)
+        } else {
+            None
+        };
     }
 
     /// Test hook: flips the checksum byte of the next `n` outgoing `clc_move` messages, so the
@@ -566,7 +581,15 @@ impl<T: PacketTransport> ProbeClient<T> {
         {
             write_clc_delta(&mut unreliable, seq);
         }
-        let packet = chan.build_packet(&unreliable.into_bytes());
+        let packet = match self.withheld_reliable_ack {
+            Some(ack) => {
+                let own = std::mem::replace(&mut chan.incoming_reliable_sequence, ack);
+                let packet = chan.build_packet(&unreliable.into_bytes());
+                chan.incoming_reliable_sequence = own;
+                packet
+            }
+            None => chan.build_packet(&unreliable.into_bytes()),
+        };
         self.send(&packet, now);
     }
 }

@@ -95,6 +95,8 @@ pub struct NetStats {
     /// Times queued unreliable messages for a client were discarded: the queue outgrew
     /// `MAX_DATAGRAM`, or it did not fit in the update that was to carry it.
     pub unreliable_dropped: u64,
+    /// Updates sent without their entity block because it did not fit in the datagram.
+    pub entity_blocks_dropped: u64,
 }
 
 impl<G: GameDll> Server<G> {

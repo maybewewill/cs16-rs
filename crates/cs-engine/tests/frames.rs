@@ -4,7 +4,7 @@
 mod common;
 
 use common::{Harness, TestGame, big_info};
-use cs_engine::{ClientState, MAX_RATE_DEBT_SECS, ServerConfig};
+use cs_engine::{ClientState, ServerConfig};
 use cs_probe::{ProbeClient, ProbeState};
 use cs_proto48::delta::GoldSrcUserCmd;
 use cs_proto48::messages::svc;
@@ -262,9 +262,10 @@ fn active_at_rate(h: &mut Harness, rate: &str) -> Probe {
         assert!(h.now < 5.0, "no connection");
     }
     probe.send_stringcmd(&format!("setinfo rate {rate}"));
+    // Sign-on datagrams wait for the rate too: at 1000 bytes per second this takes a while.
     while h.server.client_state(0) != ClientState::Active {
         h.step(&mut [&mut probe], 1);
-        assert!(h.now < 10.0, "not active");
+        assert!(h.now < 120.0, "not active");
     }
     probe
 }
@@ -272,8 +273,9 @@ fn active_at_rate(h: &mut Harness, rate: &str) -> Probe {
 #[test]
 fn low_rate_client_still_receives_updates() {
     let game = TestGame {
-        // A full update of about 3000 bytes.
-        extra_entities: 120,
+        // A full update of about 2000 bytes: at 1000 bytes per second it costs two of the ten
+        // seconds, leaving room for the deltas after it.
+        extra_entities: 80,
         scatter_extras: true,
         ..TestGame::default()
     };
@@ -292,8 +294,8 @@ fn low_rate_client_still_receives_updates() {
     }
     let bytes = probe.stats().bytes_in - bytes_before;
     assert!(
-        probe.stats().largest_datagram > 2 * rate as usize,
-        "the full update is several KB: {}",
+        probe.stats().largest_datagram > 3 * rate as usize / 2,
+        "the full update is about 2 KB: {}",
         probe.stats().largest_datagram
     );
     assert!(entity_updates(&probe) >= 3, "{:?}", probe.stats());
@@ -303,8 +305,8 @@ fn low_rate_client_still_receives_updates() {
     assert!(distinct.len() >= 5, "{origins:?}");
     let seen = probe.entities()[&entity_number(&probe)].origin;
     assert!(seen.x > 100.0, "the entity view follows too: {seen:?}");
-    let limit = rate as f64 * (10.0 + MAX_RATE_DEBT_SECS) + MAX_UDP_PACKET as f64;
-    assert!(bytes as f64 <= limit, "{bytes} bytes in ten seconds, limit {limit}");
+    let limit = rate * 10 + MAX_UDP_PACKET as u64;
+    assert!(bytes <= limit, "{bytes} bytes in ten seconds, limit {limit}");
     assert_eq!(probe.stats().parse_errors, 0);
 }
 
@@ -350,7 +352,7 @@ fn signon_at_minimum_rate_reaches_updates_promptly() {
     while entity_updates(&probe) == 0 {
         h.step(&mut [&mut probe], 1);
         assert!(
-            h.now - active_at <= MAX_RATE_DEBT_SECS + 0.5,
+            h.now - active_at <= MAX_UDP_PACKET as f64 / 1000.0 + 1.0,
             "no entity update {} s after becoming active",
             h.now - active_at
         );
@@ -368,9 +370,11 @@ fn reliable_message_and_large_frame_share_the_datagram_budget() {
     };
     let mut h = Harness::with_game(4, game);
     let mut probe = joined(&mut h, "A", &mut []);
-    // Full updates every time: each one is a large entity block.
+    // Frequent updates, each a full one with a large entity block.
+    probe.send_stringcmd("setinfo rate 100000");
+    probe.send_stringcmd("setinfo cl_updaterate 102");
     probe.suppress_delta(true);
-    h.step(&mut [&mut probe], 20);
+    h.step(&mut [&mut probe], 50);
     let frame_size = probe.stats().last_datagram;
     let info = big_info();
     assert!(
@@ -379,17 +383,80 @@ fn reliable_message_and_large_frame_share_the_datagram_budget() {
         info.len()
     );
 
+    let dropped = h.server.net_stats().entity_blocks_dropped;
+    let origin = probe.client_data().expect("client data").origin.x;
     probe.send_stringcmd("biginfo");
     while !probe.userinfos().contains_key(&15) {
+        probe.queue_cmd(forward());
         h.step(&mut [&mut probe], 1);
         assert!(h.now < 30.0, "the reliable message never arrived");
     }
+    // The message travelled in an update whose entity block gave way to it; the update still
+    // brought client data.
+    assert!(h.server.net_stats().entity_blocks_dropped > dropped);
+    assert!(probe.client_data().expect("client data").origin.x > origin);
     assert_eq!(probe.userinfos()[&15], info);
     let fulls = probe.stats().full_updates;
     h.step(&mut [&mut probe], 20);
     assert!(probe.stats().full_updates > fulls, "entity updates resume");
     assert!(probe.stats().largest_datagram <= MAX_UDP_PACKET);
     assert_eq!(probe.stats().parse_errors, 0);
+}
+
+#[test]
+fn reliable_flood_does_not_exceed_the_rate() {
+    let mut h = Harness::new(4);
+    let mut probe = joined(&mut h, "A", &mut []);
+    let rate = 30_000; // the probe's userinfo
+    let bytes_before = probe.stats().bytes_in;
+    let origin = probe.client_data().expect("client data").origin.x;
+    h.server.game_mut().flood_per_usercmd = 2000;
+
+    // 2000 reliable bytes per frame against 30000 bytes per second: the backlog passes
+    // MAX_RELIABLE_BACKLOG within the three seconds and the client is dropped.
+    let mut dropped_at = None;
+    let mut last_origin = origin;
+    for _ in 0..300 {
+        probe.queue_cmd(forward());
+        h.step(&mut [&mut probe], 1);
+        if dropped_at.is_none() {
+            if h.server.client_state(0) == ClientState::Free {
+                dropped_at = Some(h.now);
+            } else {
+                last_origin = probe.client_data().expect("client data").origin.x;
+            }
+        }
+    }
+    let bytes = probe.stats().bytes_in - bytes_before;
+    let limit = rate * 3 + MAX_UDP_PACKET as u64;
+    assert!(bytes <= limit, "{bytes} bytes in three seconds, limit {limit}");
+    assert!(dropped_at.is_some(), "the reliable backlog cap drops the client");
+    assert!(last_origin > origin + 10.0, "client data kept coming: {origin} -> {last_origin}");
+    assert_eq!(probe.stats().parse_errors, 0);
+}
+
+#[test]
+fn withheld_reliable_ack_is_not_amplified() {
+    let mut h = Harness::new(4);
+    let mut probe = h.add_probe("A");
+    while probe.state() != &ProbeState::Signon {
+        h.step(&mut [&mut probe], 1);
+        assert!(h.now < 5.0, "no connection");
+    }
+    // From its first packet on, the client asks for a low rate and never acknowledges a
+    // reliable message: the server's sign-on data is resent again and again.
+    let rate = 5_000;
+    probe.send_stringcmd(&format!("setinfo rate {rate}"));
+    probe.withhold_reliable_ack(true);
+    h.step(&mut [&mut probe], 50);
+    assert!(h.server.client_state(0) != ClientState::Active);
+
+    let bytes_before = probe.stats().bytes_in;
+    h.step(&mut [&mut probe], 200);
+    let bytes = probe.stats().bytes_in - bytes_before;
+    assert!(bytes > 0, "the server keeps resending");
+    let limit = rate * 2 + MAX_UDP_PACKET as u64;
+    assert!(bytes <= limit, "{bytes} bytes in two seconds, limit {limit}");
 }
 
 #[test]
