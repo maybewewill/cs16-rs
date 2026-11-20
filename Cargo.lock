@@ -580,6 +580,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "cs-platform"
+version = "0.1.0"
+
+[[package]]
 name = "cs-proto48"
 version = "0.1.0"
 dependencies = [

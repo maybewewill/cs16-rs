@@ -4,6 +4,7 @@ members = [
     "crates/cs-cvar",
     "crates/cs-assets",
     "crates/cs-proto48",
+    "crates/cs-platform",
     "crates/cs-sim",
     "crates/cs-net",
     "crates/cs-server",
@@ -39,6 +40,7 @@ cs-vfs = { path = "crates/cs-vfs" }
 cs-cvar = { path = "crates/cs-cvar" }
 cs-assets = { path = "crates/cs-assets" }
 cs-proto48 = { path = "crates/cs-proto48" }
+cs-platform = { path = "crates/cs-platform" }
 cs-sim = { path = "crates/cs-sim" }
 cs-net = { path = "crates/cs-net" }
 

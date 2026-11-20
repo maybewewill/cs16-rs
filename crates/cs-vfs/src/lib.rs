@@ -42,15 +42,27 @@ impl Default for VfsConfig {
     }
 }
 
-/// Case-insensitive multi-layer VFS over an installed Half-Life / CS 1.6 folder.
+/// Where the bytes of an indexed file come from.
+#[derive(Debug, Clone)]
+enum Source {
+    /// Winning real filesystem path.
+    Disk(PathBuf),
+    /// File contents held in memory.
+    Memory(Vec<u8>),
+}
+
+/// Case-insensitive multi-layer VFS over an installed Half-Life / CS 1.6 folder,
+/// or over a set of in-memory files (see [`Vfs::from_memory`]).
 #[derive(Debug, Clone)]
 pub struct Vfs {
     root: PathBuf,
     config: VfsConfig,
     /// Mounted subdirectories from highest to lowest priority.
     layers: Vec<PathBuf>,
-    /// Normalized lowercase relative path -> winning real filesystem path.
-    index: HashMap<String, PathBuf>,
+    /// Normalized lowercase relative path -> file source.
+    index: HashMap<String, Source>,
+    /// True when files were supplied in memory; the index is never rebuilt from disk.
+    in_memory: bool,
 }
 
 impl Vfs {
@@ -68,9 +80,27 @@ impl Vfs {
             config,
             layers: Vec::new(),
             index: HashMap::new(),
+            in_memory: false,
         };
         vfs.rebuild_index();
         Ok(vfs)
+    }
+
+    /// Build a VFS over in-memory files. Paths are normalized with [`Vfs::normalize`];
+    /// a later entry with the same normalized path replaces an earlier one.
+    /// The instance has no disk root or layers, and [`Vfs::resolve`] returns `None` for its files.
+    pub fn from_memory(files: impl IntoIterator<Item = (String, Vec<u8>)>) -> Self {
+        let index = files
+            .into_iter()
+            .map(|(path, bytes)| (Self::normalize(&path), Source::Memory(bytes)))
+            .collect();
+        Self {
+            root: PathBuf::new(),
+            config: VfsConfig::default(),
+            layers: Vec::new(),
+            index,
+            in_memory: true,
+        }
     }
 
     /// Auto-discover Half-Life / CS 1.6 directory from explicit arg, `CS16_GAMEDIR`,
@@ -121,7 +151,11 @@ impl Vfs {
         }
     }
 
+    /// Re-scan the disk layers. Does nothing for an in-memory VFS.
     pub fn rebuild_index(&mut self) {
+        if self.in_memory {
+            return;
+        }
         self.layers.clear();
         self.index.clear();
 
@@ -168,23 +202,27 @@ impl Vfs {
         s.to_ascii_lowercase()
     }
 
+    /// Real filesystem path of a disk-backed file; `None` if absent or held in memory.
     pub fn resolve(&self, rel_path: &str) -> Option<&Path> {
-        let key = Self::normalize(rel_path);
-        self.index.get(&key).map(PathBuf::as_path)
+        match self.index.get(&Self::normalize(rel_path))? {
+            Source::Disk(path) => Some(path),
+            Source::Memory(_) => None,
+        }
     }
 
     pub fn exists(&self, rel_path: &str) -> bool {
-        self.resolve(rel_path).is_some()
+        self.index.contains_key(&Self::normalize(rel_path))
     }
 
     pub fn read_bytes(&self, rel_path: &str) -> Result<Vec<u8>, VfsError> {
-        let real_path = self
-            .resolve(rel_path)
-            .ok_or_else(|| VfsError::NotFound(rel_path.to_string()))?;
-        fs::read(real_path).map_err(|source| VfsError::Io {
-            path: real_path.to_path_buf(),
-            source,
-        })
+        match self.index.get(&Self::normalize(rel_path)) {
+            None => Err(VfsError::NotFound(rel_path.to_string())),
+            Some(Source::Memory(bytes)) => Ok(bytes.clone()),
+            Some(Source::Disk(real_path)) => fs::read(real_path).map_err(|source| VfsError::Io {
+                path: real_path.clone(),
+                source,
+            }),
+        }
     }
 
     pub fn read_string_lossy(&self, rel_path: &str) -> Result<String, VfsError> {
@@ -230,7 +268,7 @@ impl Vfs {
     }
 }
 
-fn walk_layer(base: &Path, current: &Path, index: &mut HashMap<String, PathBuf>) {
+fn walk_layer(base: &Path, current: &Path, index: &mut HashMap<String, Source>) {
     let Ok(entries) = fs::read_dir(current) else {
         return;
     };
@@ -246,7 +284,7 @@ fn walk_layer(base: &Path, current: &Path, index: &mut HashMap<String, PathBuf>)
         {
             let rel_str = rel.to_string_lossy();
             let key = Vfs::normalize(&rel_str);
-            index.insert(key, path);
+            index.insert(key, Source::Disk(path));
         }
     }
 }
@@ -255,7 +293,11 @@ fn candidate_game_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
     // 1. Parse Steam libraryfolders.vdf on Windows/Linux/macOS.
-    let mut vdf_paths = Vec::new();
+    #[cfg_attr(
+        not(any(target_os = "windows", target_os = "linux", target_os = "macos")),
+        allow(unused_mut)
+    )]
+    let mut vdf_paths: Vec<PathBuf> = Vec::new();
     #[cfg(target_os = "windows")]
     {
         vdf_paths.push(PathBuf::from(
@@ -353,6 +395,16 @@ mod tests {
         assert_eq!(libs.len(), 2);
         assert_eq!(libs[0], PathBuf::from(r"C:\Program Files (x86)\Steam"));
         assert_eq!(libs[1], PathBuf::from(r"D:\SteamLibrary"));
+    }
+
+    #[test]
+    fn memory_vfs_reads_lists_and_is_case_insensitive() {
+        let vfs = Vfs::from_memory([("Maps/De_Dust2.bsp".to_string(), b"x".to_vec())]);
+        assert!(vfs.exists("maps/de_dust2.bsp"));
+        assert_eq!(vfs.read_bytes("MAPS/de_dust2.BSP").unwrap(), b"x");
+        assert_eq!(vfs.list_maps(), vec!["de_dust2"]);
+        assert_eq!(vfs.file_count(), 1);
+        assert!(vfs.resolve("maps/de_dust2.bsp").is_none());
     }
 
     #[test]
