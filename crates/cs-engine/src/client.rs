@@ -4,6 +4,7 @@ use cs_proto48::delta::GoldSrcUserCmd;
 use cs_proto48::netchan::{FRAGMENT_S2C_MAX_SIZE, NetChan};
 use cs_transport::PeerAddr;
 
+use crate::frame::{FrameRing, RateBucket};
 use crate::usercmd::{MsecBudget, StringCmdBucket};
 
 /// Limit on the fragment bytes a client may have buffered for reassembly per incoming stream.
@@ -60,6 +61,14 @@ pub(crate) struct Client {
     pub(crate) bad_moves: u32,
     /// Rate limit for string commands other than the sign-on ones.
     pub(crate) stringcmds: StringCmdBucket,
+    /// Updates sent, kept as delta bases.
+    pub(crate) frames: FrameRing,
+    /// Server time the next update is due.
+    pub(crate) next_update_at: f64,
+    /// Sequence of the update the client last asked deltas from (`clc_delta`).
+    pub(crate) delta_seq: Option<u8>,
+    /// Bytes the client may still be sent under its `rate`.
+    pub(crate) rate: RateBucket,
 }
 
 impl Client {
@@ -76,7 +85,17 @@ impl Client {
             last_cmd: GoldSrcUserCmd::default(),
             bad_moves: 0,
             stringcmds: StringCmdBucket::default(),
+            frames: FrameRing::new(),
+            next_update_at: 0.0,
+            delta_seq: None,
+            rate: RateBucket::full(),
         }
+    }
+
+    /// Forgets the updates sent so far: the next one is sent in full.
+    pub(crate) fn reset_frames(&mut self) {
+        self.frames = FrameRing::new();
+        self.delta_seq = None;
     }
 
     /// A fresh connection from `addr` waiting for `new`.

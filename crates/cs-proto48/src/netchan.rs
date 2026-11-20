@@ -180,7 +180,7 @@ impl NetChan {
                 "fragment stream {s}: index {idx} of {total}"
             )));
         }
-        if piece.len() > FRAGMENT_S2C_MAX_SIZE {
+        if piece.is_empty() || piece.len() > FRAGMENT_S2C_MAX_SIZE {
             return Err(ProtoError::InvalidPayload(format!(
                 "fragment stream {s}: piece of {} bytes",
                 piece.len()
@@ -257,6 +257,49 @@ impl NetChan {
             })
             .sum();
         self.reliable_queue.len() + self.reliable_buf.len() + fragments
+    }
+
+    /// Bytes the next [`build_packet`](Self::build_packet) writes ahead of its unreliable
+    /// payload: the 8-byte header, the fragment descriptors and the reliable data it will carry.
+    /// The packet is this plus the unreliable bytes, padded to at least 16 bytes.
+    pub fn next_packet_reliable_len(&self) -> usize {
+        const HEADER: usize = 8;
+        let resend = self.incoming_acknowledged > self.last_reliable_sequence
+            && self.incoming_reliable_acknowledged != self.reliable_sequence;
+        if !self.reliable_buf.is_empty() {
+            if !resend {
+                return HEADER;
+            }
+            let fragments = self.reliable_fragment.iter().filter(|&&f| f).count();
+            let descriptors = if fragments > 0 { 2 + 8 * fragments } else { 0 };
+            return HEADER + descriptors + self.reliable_buf.len();
+        }
+
+        // Mirrors the new-data branch of `build_packet` without changing anything.
+        let queue = self.reliable_queue.len();
+        let queue_fragmented = queue > MAX_MSGLEN;
+        let chunk = self.fragment_size.max(16);
+        let first_fragment = |s: usize| -> Option<usize> {
+            if let Some(front) = self.fragbufs[s].front() {
+                return Some(front.data.len());
+            }
+            if let Some((_, frags)) = self.waitlist[s].front() {
+                return frags.front().map(|f| f.data.len());
+            }
+            (s == FRAG_NORMAL_STREAM && queue_fragmented).then(|| queue.min(chunk))
+        };
+        let fronts = [first_fragment(0), first_fragment(1)];
+        let regular = !queue_fragmented && queue > 0 && fronts[FRAG_NORMAL_STREAM].is_none();
+        let mut reliable = if regular { queue } else { 0 };
+        let mut fragments = 0;
+        for len in fronts.into_iter().flatten() {
+            if reliable + len < MAX_RELIABLE_PAYLOAD {
+                reliable += len;
+                fragments += 1;
+            }
+        }
+        let descriptors = if fragments > 0 { 2 + 8 * fragments } else { 0 };
+        HEADER + descriptors + reliable
     }
 
     fn promote_waitlist(&mut self) {
@@ -644,6 +687,95 @@ mod tests {
         let max = vec![1; FRAGMENT_S2C_MAX_SIZE];
         assert!(chan.process_packet(&fragment_packet(2, 1, 2, &max)).is_ok());
         assert_eq!(chan.incoming_buffered_bytes(), FRAGMENT_S2C_MAX_SIZE);
+    }
+
+    #[test]
+    fn empty_fragment_piece_is_refused() {
+        let mut chan = NetChan::new(64);
+        assert!(chan.process_packet(&fragment_packet(1, 1, 2, &[])).is_err());
+        assert_eq!(chan.incoming_buffered_bytes(), 0);
+        // A piece of a message already being buffered is refused too and leaves it intact.
+        chan.process_packet(&fragment_packet(2, 1, 3, &[1; 4]))
+            .unwrap();
+        assert!(chan.process_packet(&fragment_packet(3, 2, 3, &[])).is_err());
+        assert_eq!(chan.incoming_buffered_bytes(), 4);
+    }
+
+    /// `next_packet_reliable_len` matches what `build_packet(&[])` then writes, padding aside.
+    fn assert_next_len_matches(chan: &NetChan) {
+        let predicted = chan.next_packet_reliable_len();
+        let built = chan.clone().build_packet(&[]).len();
+        assert_eq!(
+            built,
+            predicted.max(16),
+            "predicted {predicted}, built {built}"
+        );
+    }
+
+    #[test]
+    fn next_packet_reliable_len_predicts_build_packet() {
+        let mut server = NetChan::new(FRAGMENT_S2C_MAX_SIZE);
+        let mut client = NetChan::new(FRAGMENT_C2S_SIZE);
+        assert_eq!(server.next_packet_reliable_len(), 8);
+        assert_next_len_matches(&server);
+
+        // A plain reliable message.
+        server.write_reliable(&[1; 300]);
+        assert_eq!(server.next_packet_reliable_len(), 308);
+        assert_next_len_matches(&server);
+        let pkt = server.build_packet(&[]);
+        // In flight and not yet acknowledged: nothing reliable goes out.
+        assert_eq!(server.next_packet_reliable_len(), 8);
+        assert_next_len_matches(&server);
+
+        // The packet is lost; the client acknowledges a later one: the server resends it.
+        drop(pkt);
+        let later = server.build_packet(&[]);
+        client.process_packet(&later).unwrap().unwrap();
+        server
+            .process_packet(&client.build_packet(&[]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(server.next_packet_reliable_len(), 308);
+        assert_next_len_matches(&server);
+
+        // Acknowledged: a queue bigger than MAX_MSGLEN goes out as fragments.
+        let pkt = server.build_packet(&[]);
+        client.process_packet(&pkt).unwrap().unwrap();
+        server
+            .process_packet(&client.build_packet(&[]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(server.pending_reliable_bytes(), 0);
+        server.write_reliable(&[2; MAX_MSGLEN + 500]);
+        assert_eq!(
+            server.next_packet_reliable_len(),
+            8 + 2 + 8 + FRAGMENT_S2C_MAX_SIZE
+        );
+        assert_next_len_matches(&server);
+        let pkt = server.build_packet(&[]);
+        client.process_packet(&pkt).unwrap().unwrap();
+        server
+            .process_packet(&client.build_packet(&[]))
+            .unwrap()
+            .unwrap();
+
+        // Fragments under way plus a small queued message: the next fragment goes first.
+        server.write_reliable(&[3; 50]);
+        assert_next_len_matches(&server);
+        // Fragments of both streams at once, and a queue too large to wait.
+        let mut both = NetChan::new(100);
+        both.create_fragments(&[4; 250]);
+        both.waitlist[FRAG_FILE_STREAM].push_back((
+            1,
+            VecDeque::from([OutFrag {
+                buffer_id: 1,
+                data: vec![5; 40],
+            }]),
+        ));
+        both.write_reliable(&[6; MAX_RELIABLE_PAYLOAD + 10]);
+        assert_next_len_matches(&both);
+        assert_eq!(both.next_packet_reliable_len(), 8 + 2 + 16 + 100 + 40);
     }
 
     #[test]

@@ -26,6 +26,11 @@ fn joined(h: &mut Harness, name: &str) -> Probe {
     probe
 }
 
+/// Entity updates the probe received, full and delta.
+fn entity_updates(probe: &Probe) -> u64 {
+    probe.stats().full_updates + probe.stats().delta_updates
+}
+
 fn origin_x(h: &Harness, slot: u8) -> f32 {
     let edicts = h.server.edicts();
     edicts
@@ -162,7 +167,7 @@ fn garbage_from_connected_address_never_panics() {
     h.step(&mut [&mut target, &mut other], 200);
     assert_eq!(h.server.client_state(0), ClientState::Active);
     assert_eq!(h.server.client_state(1), ClientState::Active);
-    let updates_before = other.stats().full_updates;
+    let updates_before = entity_updates(&other);
     let stats_before = h.server.net_stats();
 
     // Headers carry strictly increasing sequences, so the server's channel accepts each one
@@ -207,7 +212,8 @@ fn garbage_from_connected_address_never_panics() {
     assert_eq!(h.server.game().client_disconnect_calls, 1);
     assert_eq!(h.server.client_state(1), ClientState::Active);
     assert_eq!(other.state(), &ProbeState::InGame);
-    assert!(other.stats().full_updates > updates_before + 100);
+    // 150 frames at the probe's `cl_updaterate` of 60 are 90 updates.
+    assert!(entity_updates(&other) > updates_before + 80);
     assert_eq!(other.stats().parse_errors, 0);
 }
 
@@ -362,7 +368,7 @@ fn fragment_flood_stays_bounded() {
     let mut other = h.add_probe("Other");
     h.step(&mut [&mut target, &mut other], 200);
     assert_eq!(h.server.client_state(0), ClientState::Active);
-    let updates_before = other.stats().full_updates;
+    let updates_before = entity_updates(&other);
 
     // 2000 maximum-size pieces of a 65535-piece message that is never completed, each with
     // a new piece index. The target's own probe is not pumped, so its sequences do not clash.
@@ -392,5 +398,6 @@ fn fragment_flood_stays_bounded() {
     assert!(h.server.net_stats().datagrams_rejected > 0);
     assert_eq!(h.server.client_state(1), ClientState::Active);
     assert_eq!(other.state(), &ProbeState::InGame);
-    assert!(other.stats().full_updates > updates_before + 100);
+    // 120 frames at the probe's `cl_updaterate` of 60 are 72 updates.
+    assert!(entity_updates(&other) > updates_before + 60);
 }

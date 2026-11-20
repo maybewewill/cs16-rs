@@ -19,6 +19,11 @@ status = "implemented"
 evidence = "crates/cs-probe/src/lib.rs::tests::signon_chain_reaches_in_game; unverified against a real server, see docs/dev/reference-stand.md"
 
 [[item]]
+id = "delta_frames"
+status = "tested"
+evidence = "crates/cs-engine/src/frame.rs::tests::delta_base_requires_matching_recent_frame, update_interval_clamps; crates/cs-engine/tests/frames.rs::second_probe_sees_first_probe_entity, stationary_world_frames_are_small_deltas, stale_delta_request_falls_back_to_full_update, moved_entity_is_updated_and_removed_entity_disappears, update_rate_follows_userinfo, no_update_is_sent_before_it_is_due, oversized_frame_drops_entities_but_keeps_clientdata, hidden_entity_is_not_sent, choke_is_sent_when_rate_is_exhausted; frame contents, rate and choke behaviour unverified against a real client"
+
+[[item]]
 id = "msec_budget"
 status = "tested"
 evidence = "crates/cs-engine/src/usercmd.rs::tests::budget_grants_only_accrued_time, budget_bank_is_capped; crates/cs-engine/tests/usercmd.rs::speedhack_is_bounded_by_real_time; 500 ms bank cap unverified against a real server"

@@ -1294,6 +1294,11 @@ pub fn write_svc_time(w: &mut MsgWriter, server_time: f32) {
     w.write_f32(server_time);
 }
 
+/// `svc_choke`: tells the client the server held back an update to keep within its rate.
+pub fn write_svc_choke(w: &mut MsgWriter) {
+    w.write_u8(svc::CHOKE);
+}
+
 pub fn write_svc_setview(w: &mut MsgWriter, entindex: u16) {
     w.write_u8(svc::SETVIEW);
     w.write_u16(entindex);
@@ -2653,6 +2658,18 @@ mod tests {
                 ClcMessage::ResourceList(resources),
                 ClcMessage::FileConsistency(consistency.to_vec()),
             ]
+        );
+    }
+
+    #[test]
+    fn svc_choke_roundtrips() {
+        let mut w = MsgWriter::new();
+        write_svc_choke(&mut w);
+        assert_eq!(w.as_slice(), &[svc::CHOKE]);
+        let mut ctx = SvcParseContext::new();
+        assert_eq!(
+            parse_svc_stream(w.as_slice(), &mut ctx).unwrap(),
+            vec![SvcMessage::Choke]
         );
     }
 

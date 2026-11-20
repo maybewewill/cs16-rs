@@ -1,6 +1,8 @@
 //! Test game and harness shared by the engine's integration tests.
 #![allow(dead_code)]
 
+use std::collections::BTreeSet;
+
 use cs_cvar::CVarRegistry;
 use cs_engine::{EngineApi, GameDll, PrecacheError, Server, ServerConfig, ServerMap};
 use cs_probe::{ProbeClient, ProbeConfig};
@@ -85,11 +87,18 @@ pub struct TestGame {
     /// When set, `client_connect` also writes `flood_bytes` into the connecting slot's
     /// reliable buffer.
     pub flood_on_connect: bool,
-    /// When set, `update_client_data` (called every frame for each active client) writes an
-    /// `svc_nop` to `reliable_all` and sets a userinfo key on that client.
+    /// When set, `update_client_data` (called for every update sent to an active client)
+    /// writes an `svc_nop` to `reliable_all` and sets a userinfo key on that client.
     pub broadcast_every_frame: bool,
     /// Entities with `modelindex = 2` that `server_activate` creates.
     pub extra_entities: usize,
+    /// When set, the extra entities get `EF_NODRAW` in `effects`.
+    pub nodraw_extras: bool,
+    /// When set, every `update_client_data` call gives each extra entity field values that
+    /// differ from its spawn baseline, from the other extras and from the previous call.
+    pub churn_extras: bool,
+    /// Entity numbers `add_to_full_pack` was called for.
+    pub add_to_full_pack_ents: BTreeSet<u16>,
     /// Result of `precache_model("models/late.mdl")` in `client_put_in_server`.
     pub late_precache: Option<Result<u16, PrecacheError>>,
     /// Every `argv` received by `client_command`.
@@ -127,6 +136,9 @@ impl GameDll for TestGame {
             vars.classname = "test_extra".to_string();
             vars.modelindex = 2;
             vars.origin = Vec3::new(0.0, 0.0, 16.0 * n as f32);
+            if self.nodraw_extras {
+                vars.effects |= EF_NODRAW;
+            }
         }
     }
 
@@ -202,6 +214,9 @@ impl GameDll for TestGame {
             let frame = self.update_client_data_calls.to_string();
             eng.set_client_key(slot, "frame", &frame);
         }
+        if self.churn_extras {
+            churn_extras(eng, self.update_client_data_calls);
+        }
         let id = eng.edicts.client(slot);
         let vars = eng
             .edicts
@@ -220,10 +235,37 @@ impl GameDll for TestGame {
         &mut self,
         _eng: &mut EngineApi<'_>,
         _viewer: u8,
-        _ent: u16,
+        ent: u16,
         _state: &mut GoldSrcEntityState,
     ) -> bool {
         self.add_to_full_pack_calls += 1;
+        self.add_to_full_pack_ents.insert(ent);
         true
+    }
+}
+
+/// `EF_NODRAW` in `EntVars::effects`.
+pub const EF_NODRAW: u32 = 128;
+
+/// Gives every `test_extra` entity values derived from its index and `call`.
+fn churn_extras(eng: &mut EngineApi<'_>, call: usize) {
+    let ids: Vec<_> = eng
+        .edicts
+        .iter_live()
+        .filter(|(_, e)| e.vars.classname == "test_extra")
+        .map(|(id, _)| id)
+        .collect();
+    let k = call as f32;
+    for id in ids {
+        let n = f32::from(id.index);
+        let vars = &mut eng.edicts.get_mut(id).expect("live").vars;
+        vars.origin = Vec3::new(8.0 * n + k, -4.0 * n - k, 16.0 * n + 0.5 * k);
+        vars.angles = Vec3::new((n + k) % 90.0, (3.0 * n + k) % 360.0, (n * 7.0) % 180.0);
+        vars.frame = (n + k) % 200.0;
+        vars.framerate = 1.0 + (n % 7.0) * 0.25;
+        vars.sequence = id.index % 50;
+        vars.skin = (id.index % 13) as i16;
+        vars.body = (id.index % 11) as u8;
+        vars.renderamt = (id.index % 251) as u8;
     }
 }

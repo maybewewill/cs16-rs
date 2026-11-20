@@ -1,5 +1,5 @@
-//! The server: client slots, one netchan per client, the sign-on sequence and the per-frame
-//! datagram to every client. Connectionless packets and connects are in `connect.rs`.
+//! The server: client slots, one netchan per client and the sign-on sequence. Connectionless
+//! packets and connects are in `connect.rs`, per-client updates in `frame.rs`.
 
 use std::collections::BTreeMap;
 
@@ -9,11 +9,10 @@ use cs_proto48::delta::{DeltaRecord, DeltaRegistry, DeltaSchema, GoldSrcEntitySt
 use cs_proto48::handshake::tokenize_goldsrc_line;
 use cs_proto48::messages::{
     ClcMessage, ServerInfoMsg, entity_schema_name, parse_clc_stream, wire_entity_type,
-    write_svc_clientdata, write_svc_packetentities_full, write_svc_stufftext, write_svc_time,
-    write_svc_updateuserinfo,
+    write_svc_stufftext, write_svc_updateuserinfo,
 };
 use cs_proto48::usermsg::UserMsgRegistry;
-use cs_transport::{MAX_UDP_PACKET, PacketTransport, PeerAddr};
+use cs_transport::{PacketTransport, PeerAddr};
 
 use crate::client::{Client, ClientState, SignonStage};
 use crate::edict::{DEFAULT_MAX_EDICTS, EdictPool};
@@ -148,7 +147,7 @@ impl<G: GameDll> Server<G> {
     }
 
     /// One server frame: handles every waiting datagram, frees clients whose sign-on took too
-    /// long, queues the per-frame update and sends one datagram to every connected client.
+    /// long, then sends each client what is due for it (see `frame.rs`).
     pub fn frame(&mut self, net: &mut dyn PacketTransport, now: f64) {
         let real_dt = now - self.time;
         self.time = now;
@@ -157,8 +156,7 @@ impl<G: GameDll> Server<G> {
             self.handle_datagram(net, from, &data);
         }
         self.drop_stalled_signons();
-        self.queue_full_entity_updates();
-        self.send_datagrams(net);
+        self.send_client_frames(net, real_dt);
     }
 
     pub fn client_state(&self, slot: u8) -> ClientState {
@@ -376,7 +374,7 @@ impl<G: GameDll> Server<G> {
                 if self.clients[index].is_free() {
                     return;
                 }
-                // Deltas and resource lists are handled by later tasks.
+                // Resource lists are handled by a later task.
                 match message {
                     ClcMessage::StringCmd(line) => {
                         self.handle_stringcmd(slot, &line, &mut stage_done);
@@ -387,6 +385,7 @@ impl<G: GameDll> Server<G> {
                         let lost = std::mem::take(&mut dropped);
                         self.handle_move(slot, &cmds, num_backup, lost, incoming.sequence);
                     }
+                    ClcMessage::Delta(seq) => self.clients[index].delta_seq = Some(seq),
                     _ => {}
                 }
             }
@@ -463,6 +462,7 @@ impl<G: GameDll> Server<G> {
             self.clients[index].put_in_server = false;
             self.views[index].active = false;
         }
+        self.clients[index].reset_frames();
         let info = ServerInfoMsg {
             protocol: 48,
             spawn_count: self.spawn_count,
@@ -561,68 +561,6 @@ impl<G: GameDll> Server<G> {
             {
                 self.free_slot(slot);
             }
-        }
-    }
-
-    /// Stand-in for delta frames: every `Active` client gets `svc_time`, its client data
-    /// without a delta base and a full `svc_packetentities` of every live edict with a model.
-    fn queue_full_entity_updates(&mut self) {
-        let entities: Vec<GoldSrcEntityState> = self
-            .edicts
-            .iter_live()
-            .filter(|(_, e)| e.vars.modelindex != 0)
-            .map(|(id, e)| entity_state_from_vars(id.index, &e.vars))
-            .collect();
-        for slot in 0..self.cfg.max_clients {
-            if self.clients[usize::from(slot)].state != ClientState::Active {
-                continue;
-            }
-            let client_data = self.with_game(|game, eng| game.update_client_data(eng, slot));
-            let mut w = MsgWriter::new();
-            write_svc_time(&mut w, self.time as f32);
-            if let Some(schema) = self.deltas.get("clientdata_t") {
-                write_svc_clientdata(&mut w, schema, None, &client_data, self.time);
-            }
-            write_svc_packetentities_full(
-                &mut w,
-                &self.deltas,
-                self.cfg.max_clients,
-                &self.baseline_records,
-                &entities,
-                self.time,
-            );
-            let client = &mut self.clients[usize::from(slot)];
-            if client.state == ClientState::Active {
-                client.unreliable.extend_from_slice(w.as_slice());
-            }
-        }
-    }
-
-    /// One netchan datagram to every connected client. When the queued unreliable bytes would
-    /// push the datagram past `MAX_UDP_PACKET`, they are dropped for this frame.
-    fn send_datagrams(&mut self, net: &mut dyn PacketTransport) {
-        for client in &mut self.clients {
-            let Some(addr) = client.addr else {
-                continue;
-            };
-            let unreliable = std::mem::take(&mut client.unreliable);
-            let packet = if unreliable.is_empty() {
-                client.chan.build_packet(&[])
-            } else {
-                let mut trial = client.chan.clone();
-                let packet = trial.build_packet(&unreliable);
-                if packet.len() <= MAX_UDP_PACKET {
-                    client.chan = trial;
-                    packet
-                } else {
-                    client.chan.build_packet(&[])
-                }
-            };
-            if packet.len() > MAX_UDP_PACKET {
-                tracing::error!(%addr, len = packet.len(), "netchan packet exceeds MAX_UDP_PACKET");
-                continue;
-            }
-            let _ = net.send(addr, &packet);
         }
     }
 }
