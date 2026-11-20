@@ -28,6 +28,8 @@ const DEFAULT_UPDATE_RATE: f64 = 20.0;
 const DEFAULT_RATE: f64 = 30_000.0;
 /// `EF_NODRAW` in `EntVars::effects`.
 const EF_NODRAW: u32 = 128;
+/// Longest a client can be kept waiting for updates by the bytes it was sent.
+pub const MAX_RATE_DEBT_SECS: f64 = 1.0;
 /// Netchan header bytes: a next packet no longer than this carries no reliable data.
 const NETCHAN_HEADER: usize = 8;
 
@@ -37,7 +39,7 @@ pub struct ClientFrame {
     /// Netchan sequence of the datagram that carried the update.
     pub seq: u32,
     pub time: f64,
-    /// Entities sent, as `(entity type, record)` by entity number.
+    /// Entities sent, as `(wire entity type, record)` by entity number.
     pub entities: BTreeMap<u16, (u8, DeltaRecord)>,
     pub clientdata: DeltaRecord,
 }
@@ -104,60 +106,54 @@ fn next_due(due: f64, interval: f64, now: f64) -> f64 {
     if next <= now { now + interval } else { next }
 }
 
-/// Bytes a client may still be sent: refilled at its rate, holding one second's worth.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct RateBucket {
-    bytes: f64,
-}
-
-impl RateBucket {
-    /// A full bucket: the first refill caps it at one second of the client's rate.
-    pub(crate) fn full() -> Self {
-        Self {
-            bytes: f64::INFINITY,
-        }
-    }
-
-    pub(crate) fn refill(&mut self, rate: u32, dt: f64) {
-        let capacity = f64::from(rate);
-        self.bytes = (self.bytes + capacity * dt.max(0.0)).min(capacity);
-    }
-
-    fn allows(&self, len: usize) -> bool {
-        self.bytes >= len as f64
-    }
-
-    fn spend(&mut self, len: usize) {
-        self.bytes -= len as f64;
-    }
+/// When a client may be sent its next update, after a datagram of `bytes` went to it at
+/// `now` with `rate` bytes per second: the datagram's transmission time is added to the later
+/// of `clear_time` and `now`, and the result is capped at [`MAX_RATE_DEBT_SECS`] after `now`.
+pub(crate) fn advance_clear_time(clear_time: f64, now: f64, bytes: usize, rate: u32) -> f64 {
+    let after = clear_time.max(now) + bytes as f64 / f64::from(rate.max(1));
+    after.min(now + MAX_RATE_DEBT_SECS)
 }
 
 impl<G: GameDll> Server<G> {
-    /// Sends each connected client its datagram for this frame, `dt` seconds after the last:
-    /// an update when the client is `Active` and one is due, otherwise only the reliable data
-    /// waiting for it, if any.
-    pub(crate) fn send_client_frames(&mut self, net: &mut dyn PacketTransport, dt: f64) {
+    /// Sends each connected client its datagram for this frame: an update when the client is
+    /// `Active`, one is due and its rate lets it be sent, otherwise only the reliable data
+    /// waiting for it, if any. A due update the rate holds back is choked: counted, and
+    /// announced with `svc_choke` in the next update sent. Every datagram moves the client's
+    /// clear time (see [`advance_clear_time`]).
+    pub(crate) fn send_client_frames(&mut self, net: &mut dyn PacketTransport) {
         for slot in 0..self.cfg.max_clients {
             let index = usize::from(slot);
-            if self.clients[index].is_free() {
+            let client = &self.clients[index];
+            if client.is_free() {
                 continue;
             }
+            let due = client.state == ClientState::Active && self.time >= client.next_update_at;
+            let packet = if due && self.time >= client.clear_time {
+                self.build_update(slot)
+            } else {
+                if due {
+                    self.choke_update(slot);
+                }
+                self.build_reliable_only(slot)
+            };
             let rate = clamp_rate(self.views[index].userinfo.get("rate"), &self.cfg);
-            self.clients[index].rate.refill(rate, dt);
-            let client = &self.clients[index];
-            let packet =
-                if client.state == ClientState::Active && self.time >= client.next_update_at {
-                    self.build_update(slot)
-                } else {
-                    self.build_reliable_only(slot)
-                };
             let client = &mut self.clients[index];
             let (Some(packet), Some(addr)) = (packet, client.addr) else {
                 continue;
             };
-            client.rate.spend(packet.len());
+            client.clear_time =
+                advance_clear_time(client.clear_time, self.time, packet.len(), rate);
             let _ = net.send(addr, &packet);
         }
+    }
+
+    /// Skips the due update of `slot`: its due time advances as if it had been sent.
+    fn choke_update(&mut self, slot: u8) {
+        let index = usize::from(slot);
+        let interval = update_interval(self.views[index].userinfo.get("cl_updaterate"), &self.cfg);
+        let client = &mut self.clients[index];
+        client.next_update_at = next_due(client.next_update_at, interval, self.time);
+        client.choke_count = client.choke_count.saturating_add(1);
     }
 
     /// A packet without unreliable data. An `Active` client gets one only when it carries
@@ -174,10 +170,10 @@ impl<G: GameDll> Server<G> {
         Some(client.chan.build_packet(&[]))
     }
 
-    /// The due update of `slot`: `svc_time`, `svc_clientdata` and the entity block, delta-encoded
-    /// against the frame the client acknowledged when there is one, followed by the queued
-    /// unreliable messages. Parts that do not fit in the datagram are dropped, entities first;
-    /// an update beyond the client's rate is replaced by `svc_choke`. `None` when the game
+    /// The due update of `slot`: one `svc_choke` per update choked since the last one sent,
+    /// `svc_time`, `svc_clientdata` and the entity block, delta-encoded against the frame the
+    /// client acknowledged when there is one, followed by the queued unreliable messages. Parts
+    /// that do not fit in the datagram are dropped, entities first. `None` when the game
     /// dropped the client meanwhile.
     fn build_update(&mut self, slot: u8) -> Option<Vec<u8>> {
         let index = usize::from(slot);
@@ -200,6 +196,9 @@ impl<G: GameDll> Server<G> {
             .and_then(|delta_seq| client.frames.delta_base(delta_seq, seq));
 
         let mut payload = MsgWriter::new();
+        for _ in 0..std::mem::take(&mut client.choke_count).min(255) {
+            write_svc_choke(&mut payload);
+        }
         write_svc_time(&mut payload, self.time as f32);
         let clientdata = match self.deltas.get("clientdata_t") {
             Some(schema) => write_svc_clientdata(
@@ -245,13 +244,10 @@ impl<G: GameDll> Server<G> {
         }
         if payload.len() + queued.len() <= budget {
             payload.extend_from_slice(&queued);
+        } else if !queued.is_empty() {
+            self.net_stats.unreliable_dropped += 1;
         }
 
-        if !client.rate.allows((reliable_len + payload.len()).max(16)) {
-            let mut choke = MsgWriter::new();
-            write_svc_choke(&mut choke);
-            return Some(client.chan.build_packet(choke.as_slice()));
-        }
         if with_entities {
             let entities = entities
                 .iter()
@@ -262,7 +258,7 @@ impl<G: GameDll> Server<G> {
                         wire_type,
                         max_clients,
                     ))?;
-                    Some((state.number, (state.entity_type, state.to_delta(schema))))
+                    Some((state.number, (wire_type, state.to_delta(schema))))
                 })
                 .collect();
             client.frames.store(ClientFrame {
@@ -370,20 +366,40 @@ mod tests {
     }
 
     #[test]
-    fn rate_bucket_starts_full_and_refills_up_to_one_second() {
-        let mut bucket = RateBucket::full();
-        bucket.refill(1000, 0.01);
-        assert!(bucket.allows(1000));
-        assert!(!bucket.allows(1001));
-        bucket.spend(900);
-        bucket.refill(1000, 0.1);
-        assert!(bucket.allows(200));
-        assert!(!bucket.allows(201));
-        bucket.refill(1000, 10.0);
-        assert!(bucket.allows(1000) && !bucket.allows(1001));
-        // A lower rate lowers the capacity at once.
-        bucket.refill(500, 0.0);
-        assert!(bucket.allows(500) && !bucket.allows(501));
+    fn clear_time_advances_by_transmission_time_and_is_capped() {
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        // Idle client: counted from now.
+        assert!(close(advance_clear_time(0.0, 5.0, 500, 1000), 5.5));
+        // Still busy: counted from the clear time.
+        assert!(close(advance_clear_time(5.5, 5.2, 200, 1000), 5.7));
+        // A huge datagram owes at most MAX_RATE_DEBT_SECS.
+        assert!(close(
+            advance_clear_time(0.0, 5.0, 100_000, 1000),
+            5.0 + MAX_RATE_DEBT_SECS
+        ));
+        assert!(close(
+            advance_clear_time(5.9, 5.0, 500, 1000),
+            5.0 + MAX_RATE_DEBT_SECS
+        ));
+    }
+
+    #[test]
+    fn clear_time_handles_hostile_inputs() {
+        let cfg = ServerConfig::default();
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        let min = clamp_rate(Some("0"), &cfg);
+        let max = clamp_rate(Some("1e30"), &cfg);
+        assert_eq!((min, max), (cfg.min_rate, cfg.max_rate));
+        assert!(close(advance_clear_time(0.0, 1.0, 1000, min), 2.0));
+        assert!(close(advance_clear_time(0.0, 1.0, 4000, max), 1.04));
+        // A zero-byte datagram costs nothing.
+        assert!(close(advance_clear_time(0.0, 1.0, 0, min), 1.0));
+        assert!(close(advance_clear_time(1.3, 1.0, 0, min), 1.3));
+        // `now` earlier than the clear time: counted from the clear time, still capped.
+        assert!(close(advance_clear_time(1.5, 1.0, 100, min), 1.6));
+        assert!(close(advance_clear_time(3.0, 1.0, 100, min), 2.0));
+        // A zero rate (not reachable through clamp_rate) does not divide by zero.
+        assert!(advance_clear_time(0.0, 1.0, 10, 0).is_finite());
     }
 
     #[test]

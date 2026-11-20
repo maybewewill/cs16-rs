@@ -4,7 +4,7 @@ use cs_proto48::delta::GoldSrcUserCmd;
 use cs_proto48::netchan::{FRAGMENT_S2C_MAX_SIZE, NetChan};
 use cs_transport::PeerAddr;
 
-use crate::frame::{FrameRing, RateBucket};
+use crate::frame::{FrameRing, MAX_DATAGRAM};
 use crate::usercmd::{MsecBudget, StringCmdBucket};
 
 /// Limit on the fragment bytes a client may have buffered for reassembly per incoming stream.
@@ -67,8 +67,10 @@ pub(crate) struct Client {
     pub(crate) next_update_at: f64,
     /// Sequence of the update the client last asked deltas from (`clc_delta`).
     pub(crate) delta_seq: Option<u8>,
-    /// Bytes the client may still be sent under its `rate`.
-    pub(crate) rate: RateBucket,
+    /// Server time from which the client's `rate` lets it be sent its next update.
+    pub(crate) clear_time: f64,
+    /// Due updates held back by the rate since the last update sent.
+    pub(crate) choke_count: u32,
 }
 
 impl Client {
@@ -88,8 +90,26 @@ impl Client {
             frames: FrameRing::new(),
             next_update_at: 0.0,
             delta_seq: None,
-            rate: RateBucket::full(),
+            clear_time: 0.0,
+            choke_count: 0,
         }
+    }
+
+    /// Queues unreliable bytes for the next update, keeping the queue within [`MAX_DATAGRAM`]:
+    /// when they would take it past that, the queue is cleared first, and bytes longer than
+    /// that on their own are not queued. Returns whether anything was dropped.
+    pub(crate) fn queue_unreliable(&mut self, bytes: &[u8]) -> bool {
+        if bytes.is_empty() {
+            return false;
+        }
+        let dropped = self.unreliable.len() + bytes.len() > MAX_DATAGRAM;
+        if dropped {
+            self.unreliable.clear();
+        }
+        if bytes.len() <= MAX_DATAGRAM {
+            self.unreliable.extend_from_slice(bytes);
+        }
+        dropped
     }
 
     /// Forgets the updates sent so far: the next one is sent in full.
@@ -129,6 +149,21 @@ mod tests {
         assert!(ClientState::Signon(SignonStage::AwaitSpawn).is_past_new());
         assert!(ClientState::Signon(SignonStage::AwaitSendEnts).is_past_new());
         assert!(ClientState::Active.is_past_new());
+    }
+
+    #[test]
+    fn unreliable_queue_is_bounded() {
+        let mut c = Client::free();
+        assert!(!c.queue_unreliable(&[]));
+        assert!(!c.queue_unreliable(&[1; 3000]));
+        assert!(!c.queue_unreliable(&[2; MAX_DATAGRAM - 3000]));
+        assert_eq!(c.unreliable.len(), MAX_DATAGRAM);
+        // Overflow: the old queue goes, the new bytes stay.
+        assert!(c.queue_unreliable(&[3; 10]));
+        assert_eq!(c.unreliable, vec![3; 10]);
+        // Bytes too long on their own are dropped too.
+        assert!(c.queue_unreliable(&[4; MAX_DATAGRAM + 1]));
+        assert!(c.unreliable.is_empty());
     }
 
     #[test]

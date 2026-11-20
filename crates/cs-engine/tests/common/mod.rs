@@ -8,7 +8,7 @@ use cs_engine::{EngineApi, GameDll, PrecacheError, Server, ServerConfig, ServerM
 use cs_probe::{ProbeClient, ProbeConfig};
 use cs_proto48::crypto::md5_hex;
 use cs_proto48::delta::{DeltaRegistry, GoldSrcClientData, GoldSrcEntityState, GoldSrcUserCmd};
-use cs_proto48::messages::svc;
+use cs_proto48::messages::{svc, write_svc_updateuserinfo};
 use cs_proto48::usermsg::UserMsgRegistry;
 use cs_transport::{LoopbackEndpoint, LoopbackHub, PeerAddr};
 use glam::Vec3;
@@ -97,6 +97,9 @@ pub struct TestGame {
     /// When set, every `update_client_data` call gives each extra entity field values that
     /// differ from its spawn baseline, from the other extras and from the previous call.
     pub churn_extras: bool,
+    /// When set, `client_put_in_server` gives each extra entity field values that differ from
+    /// its spawn baseline and from the other extras, once.
+    pub scatter_extras: bool,
     /// Entity numbers `add_to_full_pack` was called for.
     pub add_to_full_pack_ents: BTreeSet<u16>,
     /// `(viewer slot, entity number)` of every `add_to_full_pack` call.
@@ -171,6 +174,9 @@ impl GameDll for TestGame {
             edict.vars.health = 100.0;
         }
         self.late_precache = Some(eng.precache.precache_model("models/late.mdl"));
+        if self.scatter_extras {
+            churn_extras(eng, 0);
+        }
     }
 
     fn client_disconnect(&mut self, _eng: &mut EngineApi<'_>, _slot: u8) {
@@ -182,6 +188,10 @@ impl GameDll for TestGame {
         if argv.first().is_some_and(|c| c == "flood") {
             // `svc_nop` bytes: harmless if they ever reached the client.
             eng.reliable(slot).write_bytes(&vec![1; self.flood_bytes]);
+        }
+        if argv.first().is_some_and(|c| c == "biginfo") {
+            // A userinfo update of slot 15 whose text is `BIG_INFO`.
+            write_svc_updateuserinfo(eng.reliable(slot), 15, 99, &big_info(), &[0; 16]);
         }
         self.commands.push(argv.to_vec());
     }
@@ -245,6 +255,11 @@ impl GameDll for TestGame {
         self.add_to_full_pack_pairs.insert((viewer, ent));
         true
     }
+}
+
+/// Text of the userinfo update `client_command("biginfo")` sends: about 1900 bytes.
+pub fn big_info() -> String {
+    (0..95).map(|i| format!("\\key{i:03}\\{i:012}")).collect()
 }
 
 /// `EF_NODRAW` in `EntVars::effects`.

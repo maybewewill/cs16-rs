@@ -3,8 +3,8 @@
 
 mod common;
 
-use common::{Harness, TestGame};
-use cs_engine::{ClientState, ServerConfig};
+use common::{Harness, TestGame, big_info};
+use cs_engine::{ClientState, MAX_RATE_DEBT_SECS, ServerConfig};
 use cs_probe::{ProbeClient, ProbeState};
 use cs_proto48::delta::GoldSrcUserCmd;
 use cs_proto48::messages::svc;
@@ -248,37 +248,148 @@ fn omitting_clc_delta_requests_a_full_update() {
     assert_eq!(probe.stats().parse_errors, 0);
 }
 
+/// Entity updates the probe received, full and delta.
+fn entity_updates(probe: &Probe) -> u64 {
+    probe.stats().full_updates + probe.stats().delta_updates
+}
+
+/// Adds a probe that sets `rate` while it signs on and runs the harness until the server has
+/// it `Active` (in slot 0); returns the probe.
+fn active_at_rate(h: &mut Harness, rate: &str) -> Probe {
+    let mut probe = h.add_probe("A");
+    while probe.state() != &ProbeState::Signon {
+        h.step(&mut [&mut probe], 1);
+        assert!(h.now < 5.0, "no connection");
+    }
+    probe.send_stringcmd(&format!("setinfo rate {rate}"));
+    while h.server.client_state(0) != ClientState::Active {
+        h.step(&mut [&mut probe], 1);
+        assert!(h.now < 10.0, "not active");
+    }
+    probe
+}
+
 #[test]
-fn choke_is_sent_when_rate_is_exhausted() {
+fn low_rate_client_still_receives_updates() {
     let game = TestGame {
-        extra_entities: 100,
-        churn_extras: true,
+        // A full update of about 3000 bytes.
+        extra_entities: 120,
+        scatter_extras: true,
+        ..TestGame::default()
+    };
+    let mut h = Harness::with_game(4, game);
+    let mut probe = active_at_rate(&mut h, "1000");
+    let rate = u64::from(ServerConfig::default().min_rate);
+    let bytes_before = probe.stats().bytes_in;
+
+    let mut origins = Vec::new();
+    for _ in 0..10 {
+        for _ in 0..100 {
+            probe.queue_cmd(forward());
+            h.step(&mut [&mut probe], 1);
+        }
+        origins.push(probe.client_data().map(|c| c.origin.x));
+    }
+    let bytes = probe.stats().bytes_in - bytes_before;
+    assert!(
+        probe.stats().largest_datagram > 2 * rate as usize,
+        "the full update is several KB: {}",
+        probe.stats().largest_datagram
+    );
+    assert!(entity_updates(&probe) >= 3, "{:?}", probe.stats());
+    // Client data kept following the moving player, second by second.
+    let distinct: std::collections::BTreeSet<u32> =
+        origins.iter().flatten().map(|x| x.to_bits()).collect();
+    assert!(distinct.len() >= 5, "{origins:?}");
+    let seen = probe.entities()[&entity_number(&probe)].origin;
+    assert!(seen.x > 100.0, "the entity view follows too: {seen:?}");
+    let limit = rate as f64 * (10.0 + MAX_RATE_DEBT_SECS) + MAX_UDP_PACKET as f64;
+    assert!(bytes as f64 <= limit, "{bytes} bytes in ten seconds, limit {limit}");
+    assert_eq!(probe.stats().parse_errors, 0);
+}
+
+#[test]
+fn choked_updates_are_announced_in_the_next_update() {
+    let mut h = Harness::new(4);
+    let mut probe = joined(&mut h, "A", &mut []);
+    probe.send_stringcmd("setinfo rate 1000");
+    probe.send_stringcmd("setinfo cl_updaterate 102");
+    h.step(&mut [&mut probe], 100);
+
+    let log_start = probe.opcode_log().len();
+    let datagrams = probe.stats().datagrams_in;
+    let updates = entity_updates(&probe);
+    h.step(&mut [&mut probe], 300);
+    let log = &probe.opcode_log()[log_start..];
+    let chokes = log.iter().filter(|&&op| op == svc::CHOKE).count();
+    assert!(chokes > 0, "updates were choked");
+    // Every run of chokes leads into an update.
+    for (i, w) in log.windows(2).enumerate() {
+        if w[0] == svc::CHOKE {
+            assert!(
+                matches!(w[1], svc::CHOKE | svc::TIME),
+                "choke at {i} followed by {}",
+                w[1]
+            );
+        }
+    }
+    assert_ne!(log.last(), Some(&svc::CHOKE));
+    // No reliable traffic is left by now, so every datagram is an update: none carries only
+    // chokes.
+    let new_datagrams = probe.stats().datagrams_in - datagrams;
+    assert_eq!(new_datagrams, entity_updates(&probe) - updates);
+    assert!(new_datagrams < 150, "{new_datagrams} updates in three seconds at 1000 bytes/s");
+    assert_eq!(probe.stats().parse_errors, 0);
+}
+
+#[test]
+fn signon_at_minimum_rate_reaches_updates_promptly() {
+    let mut h = Harness::new(4);
+    let mut probe = active_at_rate(&mut h, "1000");
+    let active_at = h.now;
+    while entity_updates(&probe) == 0 {
+        h.step(&mut [&mut probe], 1);
+        assert!(
+            h.now - active_at <= MAX_RATE_DEBT_SECS + 0.5,
+            "no entity update {} s after becoming active",
+            h.now - active_at
+        );
+    }
+    assert_eq!(probe.state(), &ProbeState::InGame);
+}
+
+#[test]
+fn reliable_message_and_large_frame_share_the_datagram_budget() {
+    let game = TestGame {
+        // A full update of about 3000 bytes.
+        extra_entities: 120,
+        scatter_extras: true,
         ..TestGame::default()
     };
     let mut h = Harness::with_game(4, game);
     let mut probe = joined(&mut h, "A", &mut []);
-    probe.send_stringcmd("setinfo rate 1");
-    h.step(&mut [&mut probe], 100);
-
-    let min_rate = u64::from(ServerConfig::default().min_rate);
-    let chokes_before = choke_count(&probe);
-    let bytes_before = probe.stats().bytes_in;
-    h.step(&mut [&mut probe], 500);
-    let bytes = probe.stats().bytes_in - bytes_before;
-    assert!(choke_count(&probe) > chokes_before, "svc_choke received");
+    // Full updates every time: each one is a large entity block.
+    probe.suppress_delta(true);
+    h.step(&mut [&mut probe], 20);
+    let frame_size = probe.stats().last_datagram;
+    let info = big_info();
     assert!(
-        bytes <= 5 * min_rate + min_rate,
-        "{bytes} bytes in five seconds at {min_rate} bytes per second"
+        frame_size + info.len() > MAX_UDP_PACKET,
+        "frame {frame_size} + message {} must not fit one datagram",
+        info.len()
     );
-    assert_eq!(probe.stats().parse_errors, 0);
-}
 
-fn choke_count(probe: &Probe) -> usize {
-    probe
-        .opcode_log()
-        .iter()
-        .filter(|&&op| op == svc::CHOKE)
-        .count()
+    probe.send_stringcmd("biginfo");
+    while !probe.userinfos().contains_key(&15) {
+        h.step(&mut [&mut probe], 1);
+        assert!(h.now < 30.0, "the reliable message never arrived");
+    }
+    assert_eq!(probe.userinfos()[&15], info);
+    let fulls = probe.stats().full_updates;
+    h.step(&mut [&mut probe], 20);
+    assert!(probe.stats().full_updates > fulls, "entity updates resume");
+    assert!(probe.stats().largest_datagram <= MAX_UDP_PACKET);
+    assert_eq!(probe.stats().parse_errors, 0);
 }
 
 #[test]

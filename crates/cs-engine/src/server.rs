@@ -92,6 +92,9 @@ pub struct NetStats {
     pub datagrams_rejected: u64,
     /// Payloads that reached `parse_clc_stream` and failed to parse.
     pub payloads_rejected: u64,
+    /// Times queued unreliable messages for a client were discarded: the queue outgrew
+    /// `MAX_DATAGRAM`, or it did not fit in the update that was to carry it.
+    pub unreliable_dropped: u64,
 }
 
 impl<G: GameDll> Server<G> {
@@ -156,7 +159,7 @@ impl<G: GameDll> Server<G> {
             self.handle_datagram(net, from, &data);
         }
         self.drop_stalled_signons();
-        self.send_client_frames(net, real_dt);
+        self.send_client_frames(net);
     }
 
     pub fn client_state(&self, slot: u8) -> ClientState {
@@ -230,7 +233,9 @@ impl<G: GameDll> Server<G> {
                 if !reliable.is_empty() {
                     client.chan.write_reliable(reliable.as_slice());
                 }
-                client.unreliable.extend_from_slice(unreliable.as_slice());
+                if client.queue_unreliable(unreliable.as_slice()) {
+                    self.net_stats.unreliable_dropped += 1;
+                }
             }
 
             let all = std::mem::take(&mut self.outbox.reliable_all);

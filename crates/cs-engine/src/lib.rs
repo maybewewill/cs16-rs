@@ -14,7 +14,10 @@ pub mod usercmd;
 
 pub use client::{ClientState, MAX_CLIENT_INCOMING_STREAM, SignonStage};
 pub use edict::{DEFAULT_MAX_EDICTS, EDICT_REUSE_DELAY, Edict, EdictId, EdictPool, EntVars};
-pub use frame::{ClientFrame, FrameRing, MAX_DATAGRAM, UPDATE_BACKUP, clamp_rate, update_interval};
+pub use frame::{
+    ClientFrame, FrameRing, MAX_DATAGRAM, MAX_RATE_DEBT_SECS, UPDATE_BACKUP, clamp_rate,
+    update_interval,
+};
 pub use game::{EngineApi, GameDll, entity_state_from_vars};
 pub use map::ServerMap;
 pub use oob::{
