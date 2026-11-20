@@ -19,6 +19,11 @@ status = "implemented"
 evidence = "crates/cs-probe/src/lib.rs::tests::signon_chain_reaches_in_game; unverified against a real server, see docs/dev/reference-stand.md"
 
 [[item]]
+id = "msec_budget"
+status = "tested"
+evidence = "crates/cs-engine/src/usercmd.rs::tests::budget_grants_only_accrued_time, budget_bank_is_capped; crates/cs-engine/tests/usercmd.rs::speedhack_is_bounded_by_real_time; 500 ms bank cap unverified against a real server"
+
+[[item]]
 id = "pvs_leaf_list"
 status = "missing"
 
@@ -31,3 +36,8 @@ evidence = "crates/cs-engine/src/map.rs::tests::real_map_pvs_hides_far_spawn; ap
 id = "signon"
 status = "tested"
 evidence = "crates/cs-engine/tests/signon.rs::probe_reaches_in_game_within_200_frames; stage order unverified against a real server (working assumption, see signon_opcode_order_matches_golden_capture)"
+
+[[item]]
+id = "usercmd_replay"
+status = "tested"
+evidence = "crates/cs-engine/src/usercmd.rs::tests::loss_within_backup_replays_backups, loss_beyond_backup_repeats_last, huge_loss_runs_only_new; crates/cs-engine/tests/usercmd.rs::movement_continues_under_loss, forward_cmds_move_the_player (random_seed); replay rule and random_seed are working assumptions, unverified against a real server"

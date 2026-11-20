@@ -402,6 +402,34 @@ fn new_is_ignored_awaiting_sendres_and_restarts_awaiting_spawn() {
 }
 
 #[test]
+fn new_and_sendres_in_one_payload_honour_only_new() {
+    let mut h = Harness::new(4);
+    let mut probe = h.add_probe("Player");
+    step_until(&mut h, &mut [&mut probe], 200, "AwaitSpawn", |h, _| {
+        h.server.client_state(0) == ClientState::Signon(SignonStage::AwaitSpawn)
+    });
+    // One reliable payload: `new`, then `sendres` (the probe may append its own replies to the
+    // `sendres` stage, which arrive out of stage as well).
+    probe.send_stringcmd("new");
+    probe.send_stringcmd("sendres");
+    step_until(
+        &mut h,
+        &mut [&mut probe],
+        200,
+        "second svc_serverinfo",
+        |_, p| serverinfo_count(p[0]) == 2,
+    );
+    // Had `sendres` been honoured too, its `svc_resourcerequest` would have gone out in the
+    // same reliable message as the `new` stage and arrived with it.
+    let requests = opcodes(&probe)
+        .iter()
+        .filter(|&&op| op == svc::RESOURCEREQUEST)
+        .count();
+    assert_eq!(requests, 1);
+    assert_eq!(serverinfo_count(&probe), 2);
+}
+
+#[test]
 fn signon_completes_while_game_broadcasts_every_frame() {
     let game = TestGame {
         broadcast_every_frame: true,

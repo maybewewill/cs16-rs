@@ -1,7 +1,10 @@
 //! State of one client slot: where it is in the sign-on, its address and its netchan.
 
+use cs_proto48::delta::GoldSrcUserCmd;
 use cs_proto48::netchan::{FRAGMENT_S2C_MAX_SIZE, NetChan};
 use cs_transport::PeerAddr;
+
+use crate::usercmd::{MsecBudget, StringCmdBucket};
 
 /// Sign-on stage: the string command the server waits for next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +48,14 @@ pub(crate) struct Client {
     pub(crate) put_in_server: bool,
     /// Unreliable bytes for the next datagram.
     pub(crate) unreliable: Vec<u8>,
+    /// Real time the client may still spend on user commands.
+    pub(crate) budget: MsecBudget,
+    /// Last user command selected to run; repeated for losses the backups do not cover.
+    pub(crate) last_cmd: GoldSrcUserCmd,
+    /// Unparsable payloads received in a row while `Active`.
+    pub(crate) bad_moves: u32,
+    /// Rate limit for string commands other than the sign-on ones.
+    pub(crate) stringcmds: StringCmdBucket,
 }
 
 impl Client {
@@ -57,6 +68,10 @@ impl Client {
             connected_at: 0.0,
             put_in_server: false,
             unreliable: Vec::new(),
+            budget: MsecBudget::new(),
+            last_cmd: GoldSrcUserCmd::default(),
+            bad_moves: 0,
+            stringcmds: StringCmdBucket::default(),
         }
     }
 

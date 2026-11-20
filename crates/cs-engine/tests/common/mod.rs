@@ -94,6 +94,8 @@ pub struct TestGame {
     pub late_precache: Option<Result<u16, PrecacheError>>,
     /// Every `argv` received by `client_command`.
     pub commands: Vec<Vec<String>>,
+    /// Every `random_seed` received by `run_usercmd`, in call order.
+    pub random_seeds: Vec<u32>,
 
     pub server_activate_calls: usize,
     pub server_deactivate_calls: usize,
@@ -179,9 +181,10 @@ impl GameDll for TestGame {
         eng: &mut EngineApi<'_>,
         slot: u8,
         cmd: &GoldSrcUserCmd,
-        _random_seed: u32,
+        random_seed: u32,
     ) {
         self.run_usercmd_calls += 1;
+        self.random_seeds.push(random_seed);
         let id = eng.edicts.client(slot);
         if let Some(edict) = eng.edicts.get_mut(id) {
             edict.vars.origin.x += cmd.forwardmove * f32::from(cmd.msec) / 1000.0;

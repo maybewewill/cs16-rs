@@ -139,7 +139,9 @@ impl<G: GameDll> Server<G> {
     /// One server frame: handles every waiting datagram, frees clients whose sign-on took too
     /// long, queues the per-frame update and sends one datagram to every connected client.
     pub fn frame(&mut self, net: &mut dyn PacketTransport, now: f64) {
+        let real_dt = now - self.time;
         self.time = now;
+        self.accrue_client_time(real_dt);
         while let Some((from, data)) = net.recv() {
             self.handle_datagram(net, from, &data);
         }
@@ -337,10 +339,18 @@ impl<G: GameDll> Server<G> {
         let Some(schema) = self.usercmd_schema.clone() else {
             return;
         };
+        // Losses are replayed once per packet, by its first `clc_move`.
+        let mut dropped = incoming.dropped;
         // A completed file stream (`completed_file_stream`) is discarded.
         let payloads = std::iter::once(incoming.payload).chain(incoming.completed_normal_stream);
         for payload in payloads {
+            // The parser does not tell a bad `clc_move` checksum from other errors, so every
+            // unparsable payload counts as a bad move.
             let Ok(messages) = parse_clc_stream(&payload, &schema, incoming.sequence) else {
+                self.count_bad_move(slot);
+                if self.clients[index].is_free() {
+                    return;
+                }
                 continue;
             };
             // At most one sign-on stage command is honoured per payload.
@@ -349,16 +359,26 @@ impl<G: GameDll> Server<G> {
                 if self.clients[index].is_free() {
                     return;
                 }
-                // User commands, deltas and resource lists are handled by later tasks.
-                if let ClcMessage::StringCmd(line) = message {
-                    self.handle_stringcmd(slot, &line, &mut stage_done);
+                // Deltas and resource lists are handled by later tasks.
+                match message {
+                    ClcMessage::StringCmd(line) => {
+                        self.handle_stringcmd(slot, &line, &mut stage_done);
+                    }
+                    ClcMessage::Move {
+                        num_backup, cmds, ..
+                    } => {
+                        let lost = std::mem::take(&mut dropped);
+                        self.handle_move(slot, &cmds, num_backup, lost, incoming.sequence);
+                    }
+                    _ => {}
                 }
             }
         }
     }
 
     /// Runs one string command. A sign-on stage command is honoured only in the stage that
-    /// expects it and only while `stage_done` is clear; honouring one sets `stage_done`.
+    /// expects it and only while `stage_done` is clear; honouring one sets `stage_done`. Any
+    /// other command needs a token from the client's string command bucket.
     fn handle_stringcmd(&mut self, slot: u8, line: &str, stage_done: &mut bool) {
         let argv = tokenize_goldsrc_line(line);
         let Some(cmd) = argv.first() else {
@@ -367,6 +387,9 @@ impl<G: GameDll> Server<G> {
         let state = self.clients[usize::from(slot)].state;
         let is_stage_cmd = matches!(cmd.as_str(), "new" | "sendres" | "spawn" | "sendents");
         if is_stage_cmd && *stage_done {
+            return;
+        }
+        if !is_stage_cmd && !self.clients[usize::from(slot)].stringcmds.try_take() {
             return;
         }
         match (cmd.as_str(), state) {
@@ -387,6 +410,8 @@ impl<G: GameDll> Server<G> {
                 self.clients[usize::from(slot)].state = ClientState::Active;
             }
             _ if is_stage_cmd => return,
+            ("setinfo", _) => self.client_setinfo(slot, &argv),
+            ("disconnect" | "dropclient", _) => self.release_slot(slot),
             _ => self.with_game(|game, eng| game.client_command(eng, slot, &argv)),
         }
         *stage_done |= is_stage_cmd;

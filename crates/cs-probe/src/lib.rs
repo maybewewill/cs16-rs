@@ -115,6 +115,8 @@ pub struct ProbeClient<T: PacketTransport> {
     /// Low byte of the netchan sequence of the last entity update.
     last_entity_seq: Option<u8>,
     forced_delta_seq: Option<u8>,
+    /// Outgoing `clc_move` messages still to be sent with a corrupted checksum (test hook).
+    corrupt_moves: u32,
     #[cfg(not(target_arch = "wasm32"))]
     capture: Option<CaptureWriter>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -146,6 +148,7 @@ impl<T: PacketTransport> ProbeClient<T> {
             last_cmd: GoldSrcUserCmd::default(),
             last_entity_seq: None,
             forced_delta_seq: None,
+            corrupt_moves: 0,
             #[cfg(not(target_arch = "wasm32"))]
             capture: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -227,6 +230,24 @@ impl<T: PacketTransport> ProbeClient<T> {
     /// Overrides the sequence sent in `clc_delta`; `None` restores the last entity update's.
     pub fn force_delta_seq(&mut self, seq: Option<u8>) {
         self.forced_delta_seq = seq;
+    }
+
+    /// Test hook: flips the checksum byte of the next `n` outgoing `clc_move` messages, so the
+    /// server cannot parse the packets that carry them.
+    pub fn corrupt_next_moves(&mut self, n: u32) {
+        self.corrupt_moves = n;
+    }
+
+    /// Test hook: sequence number the next netchan packet will carry; `None` before the server
+    /// accepted the connection.
+    pub fn outgoing_sequence(&self) -> Option<u32> {
+        self.chan.as_ref().map(|c| c.outgoing_sequence)
+    }
+
+    /// Test hook: sequence number of the last netchan packet received from the server; `None`
+    /// before the server accepted the connection.
+    pub fn incoming_sequence(&self) -> Option<u32> {
+        self.chan.as_ref().map(|c| c.incoming_sequence)
     }
 
     pub fn state(&self) -> &ProbeState {
@@ -509,14 +530,22 @@ impl<T: PacketTransport> ProbeClient<T> {
                 .chain(self.sent_cmds.iter())
                 .cloned()
                 .collect();
+            let mut mv = MsgWriter::new();
             write_clc_move(
-                &mut unreliable,
+                &mut mv,
                 schema,
                 chan.outgoing_sequence,
                 0,
                 self.sent_cmds.len() as u8,
                 &cmds_newest_first,
             );
+            let mut mv = mv.into_bytes();
+            if self.corrupt_moves > 0 {
+                self.corrupt_moves -= 1;
+                // Opcode, length, then the checksum byte.
+                mv[2] ^= 0xFF;
+            }
+            unreliable.write_bytes(&mv);
             for cmd in new_cmds {
                 self.sent_cmds.push_front(cmd);
             }
@@ -1057,6 +1086,30 @@ mod tests {
             probe.state(),
             &ProbeState::Disconnected(NO_SERVERINFO_REASON.to_string())
         );
+    }
+
+    #[test]
+    fn corrupt_next_moves_breaks_only_that_many_moves() {
+        let (mut server, mut probe) = ScriptedServer::new();
+        let mut now = handshake(&mut server, &mut probe);
+        server.recv_clc();
+        assert_eq!(
+            probe.outgoing_sequence(),
+            Some(server.chan.incoming_sequence + 1)
+        );
+
+        probe.corrupt_next_moves(1);
+        let schema = server.reg.get("usercmd_t").unwrap().clone();
+        let mut parsed = Vec::new();
+        for _ in 0..2 {
+            now += SEND_INTERVAL;
+            probe.pump(now);
+            for d in server.recv_raw() {
+                let inc = server.chan.process_packet(&d).unwrap().unwrap();
+                parsed.push(parse_clc_stream(&inc.payload, &schema, inc.sequence).is_ok());
+            }
+        }
+        assert_eq!(parsed, vec![false, true]);
     }
 
     #[test]

@@ -9,6 +9,7 @@ pub mod oob;
 pub mod precache;
 pub mod server;
 mod signon;
+pub mod usercmd;
 
 pub use client::{ClientState, SignonStage};
 pub use edict::{DEFAULT_MAX_EDICTS, EDICT_REUSE_DELAY, Edict, EdictId, EdictPool, EntVars};
@@ -20,3 +21,7 @@ pub use oob::{
 };
 pub use precache::{MAX_GENERIC, MAX_MODELS, MAX_SOUNDS, PrecacheError, PrecacheTables, res_type};
 pub use server::{MAX_RELIABLE_BACKLOG, Server, ServerConfig};
+pub use usercmd::{
+    MAX_BANKED_MS, MAX_CONSECUTIVE_BAD_MOVES, MAX_DROPPED_REPLAY, MsecBudget, STRINGCMD_BURST,
+    STRINGCMD_RATE_PER_SEC, select_cmds_to_run,
+};
