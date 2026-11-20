@@ -377,6 +377,55 @@ fn fragment_packet(seq: u32, idx: u16, total: u16, piece: &[u8]) -> Vec<u8> {
     bytes
 }
 
+/// `b"BZ2\0"` followed by `body`: a compressed fragment stream.
+fn bz2_stream(body: &[u8]) -> Vec<u8> {
+    let mut stream = b"BZ2\0".to_vec();
+    stream.extend_from_slice(body);
+    stream
+}
+
+#[test]
+fn compressed_stream_bombs_are_refused() {
+    let mut h = Harness::new(4);
+    let mut target = h.add_probe("Target");
+    let mut other = h.add_probe("Other");
+    h.step(&mut [&mut target, &mut other], 200);
+    assert_eq!(h.server.client_state(0), ClientState::Active);
+    let updates_before = entity_updates(&other);
+
+    // Each a one-piece stream that completes in one datagram: 8 MiB of zeros, and 1 MiB of
+    // `clc_nop`. The target's own probe is not pumped, so its sequences do not clash.
+    let bombs = [
+        bz2_stream(include_bytes!("../../cs-proto48/tests/fixtures/bomb.bz2")),
+        bz2_stream(include_bytes!("../../cs-proto48/tests/fixtures/nops.bz2")),
+    ];
+    let first_seq = target.outgoing_sequence().expect("connected");
+    for (bomb, seq) in bombs.iter().zip(first_seq..) {
+        let rejected = h.server.net_stats().datagrams_rejected;
+        let packet = fragment_packet(seq, 1, 1, bomb);
+        target
+            .transport_mut()
+            .send(PeerAddr::Loopback(0), &packet)
+            .expect("loopback send");
+        h.step(&mut [&mut other], 1);
+        assert_eq!(
+            h.server.net_stats().datagrams_rejected,
+            rejected + 1,
+            "{} byte bomb",
+            bomb.len()
+        );
+    }
+    h.step(&mut [&mut other], 20);
+
+    // The sender stays connected: a refused datagram is not a bad move.
+    assert_eq!(h.server.client_state(0), ClientState::Active);
+    assert_eq!(h.server.client_state(1), ClientState::Active);
+    assert_eq!(other.state(), &ProbeState::InGame);
+    // 22 frames at the probe's `cl_updaterate` of 60 are 13 updates.
+    assert!(entity_updates(&other) > updates_before + 10);
+    assert_eq!(other.stats().parse_errors, 0);
+}
+
 #[test]
 fn fragment_flood_stays_bounded() {
     let mut h = Harness::new(4);

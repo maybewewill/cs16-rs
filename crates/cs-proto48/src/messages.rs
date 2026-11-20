@@ -1816,7 +1816,6 @@ pub fn write_svc_usermsg(w: &mut MsgWriter, reg: &UserMsgRegistry, msg: &CsUserM
 /// High-level decoded GoldSrc `clc_*` client message.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClcMessage {
-    Nop,
     Move {
         packet_loss: u8,
         voice_loopback: bool,
@@ -1924,7 +1923,12 @@ pub fn write_clc_move(
     w.write_bytes(&body_bytes);
 }
 
-/// Parse an entire stream of concatenated GoldSrc `clc_*` client messages.
+/// Most messages one payload may yield in [`parse_clc_stream`]; `clc_nop` does not count.
+pub const MAX_CLC_MESSAGES_PER_PAYLOAD: usize = 8192;
+
+/// Parse an entire stream of concatenated GoldSrc `clc_*` client messages. `clc_nop` yields no
+/// message; a stream that would yield more than [`MAX_CLC_MESSAGES_PER_PAYLOAD`] messages is an
+/// error.
 pub fn parse_clc_stream(
     data: &[u8],
     usercmd_schema: &DeltaSchema,
@@ -1936,7 +1940,7 @@ pub fn parse_clc_stream(
     while r.remaining() > 0 {
         let op = r.read_u8()?;
         match op {
-            clc::NOP => out.push(ClcMessage::Nop),
+            clc::NOP => {}
             clc::MOVE => {
                 let mlen = r.read_u8()? as usize;
                 let expected_crc = r.read_u8()?;
@@ -2018,6 +2022,11 @@ pub fn parse_clc_stream(
                 value: r.read_str()?,
             }),
             other => return Err(ProtoError::UnknownOpcode(other)),
+        }
+        if out.len() > MAX_CLC_MESSAGES_PER_PAYLOAD {
+            return Err(ProtoError::InvalidPayload(format!(
+                "more than {MAX_CLC_MESSAGES_PER_PAYLOAD} clc messages in one payload"
+            )));
         }
     }
 
@@ -2681,6 +2690,46 @@ mod tests {
                 ClcMessage::FileConsistency(consistency.to_vec()),
             ]
         );
+    }
+
+    fn usercmd_schema() -> DeltaSchema {
+        DeltaRegistry::cs16_default()
+            .get("usercmd_t")
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn clc_nops_are_skipped() {
+        let nops = vec![clc::NOP; 10_000];
+        assert_eq!(parse_clc_stream(&nops, &usercmd_schema(), 1).unwrap(), vec![]);
+        // Nops between messages leave the messages alone.
+        let mut w = MsgWriter::new();
+        w.write_u8(clc::NOP);
+        w.write_u8(clc::DELTA);
+        w.write_u8(7);
+        w.write_u8(clc::NOP);
+        assert_eq!(
+            parse_clc_stream(w.as_slice(), &usercmd_schema(), 1).unwrap(),
+            vec![ClcMessage::Delta(7)]
+        );
+    }
+
+    #[test]
+    fn clc_message_count_is_capped() {
+        let mut w = MsgWriter::new();
+        for _ in 0..MAX_CLC_MESSAGES_PER_PAYLOAD {
+            w.write_u8(clc::DELTA);
+            w.write_u8(1);
+        }
+        let at_cap = parse_clc_stream(w.as_slice(), &usercmd_schema(), 1).unwrap();
+        assert_eq!(at_cap.len(), MAX_CLC_MESSAGES_PER_PAYLOAD);
+        w.write_u8(clc::DELTA);
+        w.write_u8(1);
+        assert!(matches!(
+            parse_clc_stream(w.as_slice(), &usercmd_schema(), 1),
+            Err(ProtoError::InvalidPayload(_))
+        ));
     }
 
     #[test]

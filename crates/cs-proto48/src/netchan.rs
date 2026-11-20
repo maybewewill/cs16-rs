@@ -148,7 +148,8 @@ impl NetChan {
     }
 
     /// Limits the bytes buffered for reassembly in each incoming stream; a fragment that would
-    /// take a stream past it discards that stream's pieces and is refused.
+    /// take a stream past it discards that stream's pieces and is refused. The same limit bounds
+    /// the output of a compressed normal stream, so no reassembled stream is larger than it.
     pub fn set_max_incoming_stream(&mut self, bytes: usize) {
         self.max_incoming_stream = bytes;
     }
@@ -521,7 +522,7 @@ impl NetChan {
 
         let completed_normal_stream = completed[FRAG_NORMAL_STREAM]
             .take()
-            .map(|stream| decompress_stream(&stream))
+            .map(|stream| decompress_stream(&stream, self.max_incoming_stream))
             .transpose()?;
 
         Ok(Some(NetChanIncoming {
