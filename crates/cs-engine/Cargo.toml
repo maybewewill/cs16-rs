@@ -12,6 +12,7 @@ workspace = true
 cs-assets.workspace = true
 cs-cvar.workspace = true
 cs-proto48.workspace = true
+cs-transport.workspace = true
 glam.workspace = true
 
 [dev-dependencies]

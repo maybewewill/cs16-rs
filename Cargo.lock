@@ -582,6 +582,7 @@ dependencies = [
  "cs-assets",
  "cs-cvar",
  "cs-proto48",
+ "cs-transport",
  "cs-vfs",
  "glam",
 ]

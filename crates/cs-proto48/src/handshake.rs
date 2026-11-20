@@ -40,6 +40,9 @@ pub enum OobPacket {
         challenge: u32,
         protinfo: InfoString,
         userinfo: InfoString,
+        /// The userinfo argument exactly as received, for validity and length checks
+        /// that the parsed [`InfoString`] cannot express.
+        userinfo_raw: String,
         auth_ticket: Vec<u8>,
     },
     S2cConnection {
@@ -310,6 +313,7 @@ pub fn parse_oob_packet(raw: &[u8]) -> Result<OobPacket, ProtoError> {
             challenge,
             protinfo,
             userinfo,
+            userinfo_raw: tokens[4].clone(),
             auth_ticket: trailing,
         });
     }
@@ -384,12 +388,14 @@ mod tests {
                 challenge,
                 protinfo,
                 userinfo,
+                userinfo_raw,
                 auth_ticket,
             } => {
                 assert_eq!(protocol, 48);
                 assert_eq!(challenge, 123_456_789);
                 assert_eq!(protinfo.get("raw"), Some("steam"));
                 assert_eq!(userinfo.get("name"), Some("Player"));
+                assert_eq!(userinfo_raw, user.to_wire_string());
                 assert_eq!(auth_ticket, ticket);
             }
             other => panic!("unexpected packet: {other:?}"),
