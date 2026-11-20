@@ -14,7 +14,7 @@ cs-proto48.workspace = true
 cs-sim.workspace = true
 cs-transport.workspace = true
 cs-vfs.workspace = true
-ctrlc = "3.5.3"
+ctrlc.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

@@ -82,10 +82,11 @@ fn status_cleans_client_names() {
     let mut a = joined(&mut h, "Alice", &mut []);
     h.server
         .game_mut()
-        .act(|eng| eng.set_client_key(0, "name", "ev\x1b[2Jil\x07"));
+        .act(|eng| eng.set_client_key(0, "name", "ev\x1b[2Jil\x07\n9 99 \"forged\""));
     h.step(&mut [&mut a], 3);
     let text = out(&mut h, "status");
-    assert!(text.contains("\"ev?[2Jil?\""), "{text:?}");
+    assert!(text.contains("\"ev?[2Jil??9 99 \"forged\"\""), "{text:?}");
+    assert_eq!(text.lines().count(), 3, "forged line: {text:?}");
     assert!(!text.contains('\x1b') && !text.contains('\x07'));
 }
 
@@ -186,20 +187,21 @@ fn changelevel_validates_the_name() {
         h.server.console_command(&format!("map {max}")),
         ConsoleOutcome::ChangeLevel(max)
     );
-    for line in [
-        "changelevel ../x",
-        "changelevel",
-        "changelevel \"\"",
-        &format!("changelevel {}", "a".repeat(65)),
-        "changelevel a b",
-        "map de dust",
-        "changelevel a/b",
-        "changelevel a\\b",
-        "changelevel \u{43a}arta",
-        "changelevel a.bsp",
+    let invalid = "Invalid map name: use 1 to 64 letters, digits, '_' or '-'\n";
+    let usage = "Usage: changelevel <map>\n";
+    for (line, expected) in [
+        ("changelevel ../x", invalid),
+        ("changelevel", usage),
+        ("changelevel \"\"", invalid),
+        (&format!("changelevel {}", "a".repeat(65)), invalid),
+        ("changelevel a b", usage),
+        ("map de dust", usage),
+        ("changelevel a/b", invalid),
+        ("changelevel a\\b", invalid),
+        ("changelevel \u{43a}arta", invalid),
+        ("changelevel a.bsp", invalid),
     ] {
-        let text = out(&mut h, line);
-        assert!(!text.is_empty(), "{line}");
+        assert_eq!(out(&mut h, line), expected, "{line}");
     }
 }
 
@@ -291,6 +293,20 @@ fn hostile_console_input_is_harmless() {
     h.step(&mut [&mut a], 10);
     assert_eq!(a.state(), &ProbeState::InGame);
     assert_eq!(h.server.client_count(), 1);
+    // The NUL cut: nothing after the NUL is parsed.
+    assert_eq!(out(&mut h, "sv_gravity 5\0 7"), "");
+    assert_eq!(out(&mut h, "sv_gravity"), "\"sv_gravity\" is \"5\"\n");
+    // The length clip: a command that starts after the limit never runs...
+    let late = format!("{}kick 1", " ".repeat(MAX_CONSOLE_LINE + 6));
+    assert_eq!(out(&mut h, &late), "");
+    // ...and a long value is cut at the limit minus the prefix.
+    assert_eq!(out(&mut h, &format!("sv_gravity {}", "9".repeat(2000))), "");
+    assert_eq!(
+        out(&mut h, "sv_gravity").len(),
+        "\"sv_gravity\" is \"\"\n".len() + MAX_CONSOLE_LINE - "sv_gravity ".len()
+    );
+    h.step(&mut [&mut a], 5);
+    assert_eq!(a.state(), &ProbeState::InGame);
     // A blank line and an empty quoted name are no-ops.
     assert_eq!(out(&mut h, "  "), "");
     assert_eq!(out(&mut h, "\"\""), "");

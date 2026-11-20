@@ -24,7 +24,11 @@ pub fn spawn_line_reader<R: BufRead + Send + 'static>(mut input: R) -> Receiver<
             loop {
                 buf.clear();
                 match (&mut input).take(MAX_READ_LINE).read_until(b'\n', &mut buf) {
-                    Ok(0) | Err(_) => return,
+                    Ok(0) => return,
+                    Err(e) => {
+                        tracing::warn!("console input ended on a read error: {e}");
+                        return;
+                    }
                     Ok(_) => {}
                 }
                 // An over-long line is cut here (the engine cuts far shorter) and the rest of
@@ -50,7 +54,8 @@ pub fn spawn_line_reader<R: BufRead + Send + 'static>(mut input: R) -> Receiver<
     rx
 }
 
-/// A flag set by Ctrl+C (and SIGTERM or console close where the platform maps them). If the
+/// A flag set by Ctrl+C, and with ctrlc's `termination` feature (enabled in the workspace) by
+/// SIGTERM and SIGHUP on unix. If the
 /// handler cannot be installed a warning is logged and the flag simply never rises.
 pub fn interrupt_flag() -> Arc<AtomicBool> {
     let flag = Arc::new(AtomicBool::new(false));

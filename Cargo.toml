@@ -25,6 +25,7 @@ rust-version = "1.100"
 [workspace.dependencies]
 bytemuck = { version = "1", features = ["derive"] }
 bzip2-rs = "0.1.2"
+ctrlc = { version = "3.5.3", features = ["termination"] }
 egui = "0.37"
 egui-wgpu = "0.37"
 egui-winit = "0.37"
