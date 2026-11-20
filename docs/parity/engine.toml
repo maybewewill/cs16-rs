@@ -1,7 +1,7 @@
 [[item]]
 id = "a2s_queries"
 status = "tested"
-evidence = "crates/cs-engine/src/oob.rs::tests::a2s_without_challenge_gets_nine_byte_challenge, a2s_with_accepted_challenge_returns_server_info, server_to_client_packets_are_ignored (A2A_PING); crates/cs-engine/tests/lifecycle.rs::shutdown_refuses_new_connections (A2S_INFO answered through Server::frame); challenge rule and reply contents unverified against the original server browser, see docs/parity/checklists/phase1-original-client.md line 7"
+evidence = "crates/cs-engine/src/oob.rs::tests::a2s_without_challenge_gets_nine_byte_challenge, a2s_with_accepted_challenge_returns_server_info, server_to_client_packets_are_ignored (A2A_PING); crates/cs-engine/tests/lifecycle.rs::shutdown_refuses_new_connections (A2S_INFO answered through Server::frame); challenge rule and reply contents unverified against the original server browser, see docs/parity/checklists/phase1-original-client.md table row 7"
 
 [[item]]
 id = "changelevel"
@@ -31,17 +31,17 @@ evidence = "crates/cs-probe/src/lib.rs::tests::signon_chain_reaches_in_game; unv
 [[item]]
 id = "delta_frames"
 status = "tested"
-evidence = "crates/cs-engine/src/frame.rs::tests::delta_base_requires_matching_recent_frame, update_interval_clamps, clear_time_advances_by_transmission_time; crates/cs-engine/tests/frames.rs::second_probe_sees_first_probe_entity, stationary_world_frames_are_small_deltas, stale_delta_request_falls_back_to_full_update, moved_entity_is_updated_and_removed_entity_disappears, update_rate_follows_userinfo, no_update_is_sent_before_it_is_due, oversized_frame_drops_entities_but_keeps_clientdata, hidden_entity_is_not_sent, low_rate_client_still_receives_updates, choked_updates_are_announced_in_the_next_update, signon_at_minimum_rate_reaches_updates_promptly, reliable_message_and_large_frame_share_the_datagram_budget, reliable_flood_does_not_exceed_the_rate, withheld_reliable_ack_is_not_amplified, omitting_clc_delta_requests_a_full_update, rejected_datagram_keeps_the_delta_request; crates/cs-engine/tests/soak.rs::soak_3000_frames_8_clients (8 clients, every 17th datagram dropped: client data matches the edict, datagrams within 4010 bytes, at most 64 frames per client); frame contents, rate and choke behaviour unverified against a real client"
+evidence = "crates/cs-engine/src/frame.rs::tests::delta_base_requires_matching_recent_frame, update_interval_clamps, clear_time_advances_by_transmission_time; crates/cs-engine/tests/frames.rs::second_probe_sees_first_probe_entity, stationary_world_frames_are_small_deltas, stale_delta_request_falls_back_to_full_update, moved_entity_is_updated_and_removed_entity_disappears, update_rate_follows_userinfo, no_update_is_sent_before_it_is_due, oversized_frame_drops_entities_but_keeps_clientdata, hidden_entity_is_not_sent, low_rate_client_still_receives_updates, choked_updates_are_announced_in_the_next_update, signon_at_minimum_rate_reaches_updates_promptly, reliable_message_and_large_frame_share_the_datagram_budget, reliable_flood_does_not_exceed_the_rate, withheld_reliable_ack_is_not_amplified, omitting_clc_delta_requests_a_full_update, rejected_datagram_keeps_the_delta_request; crates/cs-engine/tests/soak.rs::soak_3000_frames_8_clients (8 clients, every 17th datagram dropped: client data matches the edict, no send refused by the transport (NetStats::send_failures = 0, so every datagram was within 4010 bytes), at most 64 frames per client); crates/cs-engine/tests/connectionless.rs::a_flood_is_read_over_several_frames (at most MAX_DATAGRAMS_PER_FRAME datagrams read per frame, updates still sent); frame contents, rate and choke behaviour unverified against a real client"
 
 [[item]]
 id = "msec_budget"
 status = "tested"
-evidence = "crates/cs-engine/src/usercmd.rs::tests::budget_grants_only_accrued_time, budget_bank_is_capped, short_cmd_is_not_split, long_cmd_is_split_in_halves_recursively, odd_millisecond_goes_to_the_first_half, non_finite_moves_and_angles_are_detected; crates/cs-engine/tests/usercmd.rs::speedhack_is_bounded_by_real_time, long_cmd_reaches_the_game_in_steps_of_at_most_50_ms; 500 ms bank cap and the 50 ms split (odd millisecond to the first half) unverified against a real server"
+evidence = "crates/cs-engine/src/usercmd.rs::tests::budget_grants_only_accrued_time, budget_bank_is_capped, short_cmd_is_not_split, long_cmd_is_split_in_halves_recursively, odd_millisecond_is_not_simulated, non_finite_moves_and_angles_are_detected; crates/cs-engine/tests/usercmd.rs::speedhack_is_bounded_by_real_time, long_cmd_reaches_the_game_in_steps_of_at_most_50_ms; the 50 ms split (two halves of msec / 2, the odd millisecond not simulated, impulse only in the first step) matches SV_RunCmd in the ReHLDS source, read on 2026-11-21, not compared with the original game; the 500 ms bank cap is a working assumption, unverified against a real server"
 
 [[item]]
 id = "oob_rate_limit"
 status = "tested"
-evidence = "crates/cs-engine/src/oob.rs::tests::limiter_caps_burst, limiter_evicts_least_recently_touched_address; burst and refill rate are working assumptions, unverified against a real server"
+evidence = "crates/cs-engine/src/oob.rs::tests::limiter_caps_burst, limiter_evicts_least_recently_touched_address, random_and_truncated_datagrams_never_panic_or_amplify; crates/cs-engine/tests/connectionless.rs::random_connectionless_datagrams_from_many_addresses, challenge_burst_from_one_address_is_limited (fails without the per-address limiter), challenges_from_many_addresses_share_a_global_budget (OOB_GLOBAL_REPLIES_PER_SEC); accepted deviation from the plan: a reply to a datagram without a valid challenge can be larger than the datagram (a 23-byte getchallenge gets up to 32 bytes); the rule is at most 64 bytes before a valid challenge, roughly twice the request; burst, refill rate and the global budget are working assumptions, unverified against a real server"
 
 [[item]]
 id = "pings"
@@ -65,7 +65,7 @@ evidence = "crates/cs-engine/tests/signon.rs::probe_reaches_in_game_within_200_f
 [[item]]
 id = "timeouts"
 status = "tested"
-evidence = "crates/cs-engine/tests/lifecycle.rs::silent_client_times_out_and_others_see_removal, rejected_datagrams_do_not_keep_a_client_alive, kick_delivers_reason, game_kick_delivers_reason, client_disconnect_command_frees_slot, shutdown_notifies_everyone, shutdown_refuses_new_connections, slot_is_reusable_after_disconnect; crates/cs-engine/tests/signon.rs::stalled_signon_times_out; kick delivery (three svc_disconnect datagrams) unverified against a real client"
+evidence = "crates/cs-engine/tests/lifecycle.rs::silent_client_times_out_and_others_see_removal, rejected_datagrams_do_not_keep_a_client_alive, kick_delivers_reason, game_kick_delivers_reason, kick_with_a_reliable_backlog_still_delivers_reason, client_disconnect_command_frees_slot, shutdown_notifies_everyone, shutdown_refuses_new_connections, slot_is_reusable_after_disconnect; crates/cs-engine/tests/signon.rs::stalled_signon_times_out; kick delivery (three svc_disconnect datagrams) unverified against a real client"
 
 [[item]]
 id = "usercmd_replay"

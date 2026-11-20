@@ -135,6 +135,12 @@ impl LoopbackHub {
             id,
         }
     }
+
+    /// Queues `data` for the hub as if `PeerAddr::Loopback(from)` had sent it, without faults.
+    /// `from` need not be a connected endpoint: tests use it to send from many addresses.
+    pub fn inject(&self, from: u32, data: &[u8]) {
+        lock(&self.shared).hub_inbox.push_back((from, data.to_vec()));
+    }
 }
 
 impl Default for LoopbackHub {
@@ -282,6 +288,25 @@ mod tests {
         hub.send(PeerAddr::Loopback(2), b"to-b").unwrap();
         assert!(a.recv().is_none());
         assert_eq!(b.recv(), Some((HUB, b"to-b".to_vec())));
+    }
+
+    #[test]
+    fn injected_datagram_arrives_from_any_address() {
+        let mut hub = LoopbackHub::new();
+        let mut ep = hub.connect();
+        ep.set_faults(Faults {
+            drop_every: 1,
+            ..Faults::default()
+        });
+        hub.inject(77, b"x");
+        hub.inject(ep.id(), b"y");
+        assert_eq!(
+            drain(&mut hub),
+            vec![
+                (PeerAddr::Loopback(77), b"x".to_vec()),
+                (PeerAddr::Loopback(ep.id()), b"y".to_vec()),
+            ]
+        );
     }
 
     #[test]

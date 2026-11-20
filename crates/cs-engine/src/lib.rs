@@ -23,10 +23,13 @@ pub use lifecycle::{
 pub use map::ServerMap;
 pub use oob::{
     CHALLENGE_BUCKET_SECS, ChallengeIssuer, ConnectRequest, MAX_INFO_STRING, MAX_NAME_BYTES,
-    OobContext, OobLimiter, OobOutcome, handle_oob, sanitize_name,
+    OOB_GLOBAL_REPLIES_PER_SEC, OobContext, OobLimiter, OobOutcome, carries_valid_challenge,
+    handle_oob, sanitize_name,
 };
 pub use precache::{MAX_GENERIC, MAX_MODELS, MAX_SOUNDS, PrecacheError, PrecacheTables, res_type};
-pub use server::{MAX_RELIABLE_BACKLOG, NetStats, Server, ServerConfig};
+pub use server::{
+    MAX_DATAGRAMS_PER_FRAME, MAX_RELIABLE_BACKLOG, NetStats, Server, ServerConfig,
+};
 pub use usercmd::{
     MAX_BANKED_MS, MAX_CONSECUTIVE_BAD_MOVES, MAX_DROPPED_REPLAY, MAX_USERCMD_STEP_MS, MsecBudget,
     STRINGCMD_BURST, STRINGCMD_RATE_PER_SEC, select_cmds_to_run, split_usercmd, usercmd_is_finite,

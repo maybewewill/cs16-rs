@@ -10,7 +10,7 @@ use cs_proto48::crypto::md5_hex;
 use cs_proto48::delta::{DeltaRegistry, GoldSrcClientData, GoldSrcEntityState, GoldSrcUserCmd};
 use cs_proto48::messages::{svc, write_svc_print, write_svc_updateuserinfo};
 use cs_proto48::usermsg::UserMsgRegistry;
-use cs_transport::{LoopbackEndpoint, LoopbackHub, PeerAddr};
+use cs_transport::{LoopbackEndpoint, LoopbackHub, PacketTransport, PeerAddr, TransportError};
 use glam::Vec3;
 
 /// Seconds of one harness frame.
@@ -75,6 +75,55 @@ impl Harness {
             }
             self.server.frame(&mut self.hub, self.now);
         }
+    }
+
+    /// Advances one frame like [`step`](Self::step), recording what the server reads and sends.
+    pub fn step_tapped(&mut self, probes: &mut [&mut ProbeClient<LoopbackEndpoint>]) -> Tap {
+        self.now = ((self.now / FRAME).round() + 1.0) * FRAME;
+        for probe in probes.iter_mut() {
+            probe.pump(self.now);
+        }
+        let mut tap = TapTransport {
+            hub: &mut self.hub,
+            log: Tap::default(),
+        };
+        self.server.frame(&mut tap, self.now);
+        tap.log
+    }
+}
+
+/// What the server did with the transport in one tapped frame.
+#[derive(Debug, Default)]
+pub struct Tap {
+    /// Datagrams the server read.
+    pub received: usize,
+    /// Address and length of every datagram the server tried to send, in order.
+    pub sent: Vec<(PeerAddr, usize)>,
+}
+
+impl Tap {
+    /// Datagrams the server tried to send to `addr`.
+    pub fn sent_to(&self, addr: PeerAddr) -> usize {
+        self.sent.iter().filter(|(to, _)| *to == addr).count()
+    }
+}
+
+/// The hub, with every read and send recorded in a [`Tap`].
+struct TapTransport<'a> {
+    hub: &'a mut LoopbackHub,
+    log: Tap,
+}
+
+impl PacketTransport for TapTransport<'_> {
+    fn recv(&mut self) -> Option<(PeerAddr, Vec<u8>)> {
+        let datagram = self.hub.recv()?;
+        self.log.received += 1;
+        Some(datagram)
+    }
+
+    fn send(&mut self, to: PeerAddr, data: &[u8]) -> Result<(), TransportError> {
+        self.log.sent.push((to, data.len()));
+        self.hub.send(to, data)
     }
 }
 

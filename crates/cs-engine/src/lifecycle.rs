@@ -215,12 +215,14 @@ impl<G: GameDll> Server<G> {
 
     /// Builds the [`DISCONNECT_DATAGRAMS`] datagrams that tell the client in `index` why it is
     /// released, each a netchan packet with `svc_disconnect` in its unreliable part. The reason
-    /// is cut to [`MAX_DISCONNECT_REASON_BYTES`].
+    /// is cut to [`MAX_DISCONNECT_REASON_BYTES`]. The client's pending reliable data is
+    /// discarded first, so no farewell carries it and each stays small.
     fn queue_farewell(&mut self, index: usize, reason: &str) {
         let client = &mut self.clients[index];
         let Some(addr) = client.addr else {
             return;
         };
+        client.chan.clear();
         let mut w = MsgWriter::new();
         write_svc_disconnect(&mut w, truncate_reason(reason));
         for _ in 0..DISCONNECT_DATAGRAMS {
@@ -233,7 +235,7 @@ impl<G: GameDll> Server<G> {
     /// do not wait for the client's clear time.
     pub(crate) fn send_farewells(&mut self, net: &mut dyn PacketTransport) {
         for (addr, packet) in std::mem::take(&mut self.farewells) {
-            let _ = net.send(addr, &packet);
+            self.net_stats.send(net, addr, &packet);
         }
     }
 

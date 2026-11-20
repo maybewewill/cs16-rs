@@ -3,7 +3,11 @@
 //!
 //! Anyone can send these datagrams with a forged source address, so
 //! [`handle_oob`] never panics and, unless the datagram carries a challenge
-//! issued to its source address, never replies with more than 64 bytes.
+//! issued to its source address, never replies with more than 64 bytes. That is
+//! more than some requests (a 23-byte `getchallenge` gets a reply of up to 32 bytes), so a
+//! reply may be about twice the size of what prompted it; the per-address
+//! [`OobLimiter`] and the server's global budget of [`OOB_GLOBAL_REPLIES_PER_SEC`]
+//! bound how many such replies go out.
 
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{BuildHasher, RandomState};
@@ -25,6 +29,10 @@ pub const CHALLENGE_BUCKET_SECS: f64 = 30.0;
 pub const MAX_INFO_STRING: usize = 256;
 /// Longest player name, in bytes.
 pub const MAX_NAME_BYTES: usize = 31;
+
+/// Replies per second, all addresses together, to connectionless datagrams that carry no
+/// challenge issued to their sender; also the largest burst of such replies.
+pub const OOB_GLOBAL_REPLIES_PER_SEC: f64 = 1000.0;
 
 const LIMITER_TOKENS_PER_SEC: f64 = 10.0;
 const LIMITER_CAPACITY: f64 = 20.0;
@@ -218,6 +226,24 @@ pub fn handle_oob(raw: &[u8], from: &PeerAddr, now: f64, ctx: &OobContext<'_>) -
     }
 }
 
+/// Whether `raw` is a connect request or an A2S query carrying a challenge that `issuer`
+/// accepts for `from`.
+pub fn carries_valid_challenge(
+    raw: &[u8],
+    from: &PeerAddr,
+    now: f64,
+    issuer: &ChallengeIssuer,
+) -> bool {
+    let challenge = match parse_oob_packet(raw) {
+        Ok(OobPacket::Connect { challenge, .. }) => challenge,
+        Ok(OobPacket::A2sInfo { challenge: Some(c) })
+        | Ok(OobPacket::A2sPlayer { challenge: c })
+        | Ok(OobPacket::A2sRules { challenge: c }) => c as u32,
+        _ => return false,
+    };
+    issuer.check(from, challenge, now)
+}
+
 fn reject(text: &str) -> OobOutcome {
     OobOutcome::Reply(encode_s2c_reject(text))
 }
@@ -325,23 +351,6 @@ mod tests {
         );
         d.extend_from_slice(&lan_steam_auth_ticket(76561198000000001));
         d
-    }
-
-    /// True when `raw` carries a challenge that `issuer` accepts for `from`.
-    fn carries_accepted_challenge(
-        raw: &[u8],
-        issuer: &ChallengeIssuer,
-        from: &PeerAddr,
-        now: f64,
-    ) -> bool {
-        let challenge = match parse_oob_packet(raw) {
-            Ok(OobPacket::Connect { challenge, .. }) => challenge,
-            Ok(OobPacket::A2sInfo { challenge: Some(c) })
-            | Ok(OobPacket::A2sPlayer { challenge: c })
-            | Ok(OobPacket::A2sRules { challenge: c }) => c as u32,
-            _ => return false,
-        };
-        issuer.check(from, challenge, now)
     }
 
     #[test]
@@ -651,7 +660,7 @@ mod tests {
             match handle_oob(raw, &from, NOW, &ctx) {
                 OobOutcome::Reply(reply) => {
                     replies += 1;
-                    if !carries_accepted_challenge(raw, &issuer, &from, NOW) {
+                    if !carries_valid_challenge(raw, &from, NOW, &issuer) {
                         assert!(reply.len() <= 64, "{} byte reply to {raw:?}", reply.len());
                     }
                 }

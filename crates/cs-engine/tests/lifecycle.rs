@@ -136,6 +136,62 @@ fn game_kick_delivers_reason() {
 }
 
 #[test]
+fn kick_with_a_reliable_backlog_still_delivers_reason() {
+    let game = TestGame {
+        // Just under MAX_MSGLEN, so it is queued as one regular reliable message that, with the
+        // header and an `svc_disconnect`, would not fit one datagram.
+        flood_bytes: MAX_MSGLEN - 5,
+        ..TestGame::default()
+    };
+    let mut h = Harness::with_game(4, game);
+    let mut a = joined(&mut h, "A", &mut []);
+    // The flood and the kick arrive in one payload, so the kick finds the flood queued.
+    a.send_stringcmd("flood");
+    a.send_stringcmd("kickme");
+    while h.server.client_state(0) != ClientState::Free {
+        h.step(&mut [&mut a], 1);
+        assert!(h.now < 5.0, "not kicked");
+    }
+
+    // What reached the probe after the kick, read raw, then handed to it.
+    let farewells: Vec<Vec<u8>> = std::iter::from_fn(|| a.transport_mut().recv())
+        .map(|(_, data)| data)
+        .collect();
+    assert_eq!(farewells.len(), 3, "{:?}", h.server.net_stats());
+    for datagram in &farewells {
+        assert!(
+            datagram.len() <= 256 + GAME_KICK_REASON.len(),
+            "{} byte farewell",
+            datagram.len()
+        );
+        h.hub
+            .send(PeerAddr::Loopback(a.transport().id()), datagram)
+            .expect("loopback send");
+    }
+    assert_eq!(h.server.net_stats().send_failures, 0);
+    a.pump(h.now);
+    assert_eq!(
+        a.state(),
+        &ProbeState::Disconnected(GAME_KICK_REASON.to_string())
+    );
+}
+
+#[test]
+fn start_frame_is_called_once_per_frame() {
+    let mut h = Harness::new(4);
+    let mut probe = h.add_probe("A");
+    h.step(&mut [&mut probe], 30);
+    assert_eq!(h.server.game().start_frame_calls, 30);
+    // A skipped frame does not start one.
+    h.server.frame(&mut h.hub, f64::NAN);
+    h.server.frame(&mut h.hub, h.now - 1.0);
+    assert_eq!(h.server.net_stats().frames_skipped, 2);
+    assert_eq!(h.server.game().start_frame_calls, 30);
+    h.step(&mut [&mut probe], 1);
+    assert_eq!(h.server.game().start_frame_calls, 31);
+}
+
+#[test]
 fn client_disconnect_command_frees_slot() {
     let mut h = Harness::new(4);
     let mut a = joined(&mut h, "A", &mut []);

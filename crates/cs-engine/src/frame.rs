@@ -34,7 +34,6 @@ const EF_NODRAW: u32 = 128;
 pub struct ClientFrame {
     /// Netchan sequence of the datagram that carried the update.
     pub seq: u32,
-    pub time: f64,
     /// Entities sent, as `(wire entity type, record)` by entity number.
     pub entities: BTreeMap<u16, (u8, DeltaRecord)>,
     pub clientdata: DeltaRecord,
@@ -149,7 +148,7 @@ impl<G: GameDll> Server<G> {
                 advance_clear_time(client.clear_time, self.time, packet.len(), rate);
             let seq = client.chan.outgoing_sequence.wrapping_sub(1);
             client.pings.record_sent(seq, self.time);
-            let _ = net.send(addr, &packet);
+            self.net_stats.send(net, addr, &packet);
         }
     }
 
@@ -266,7 +265,6 @@ impl<G: GameDll> Server<G> {
                 .collect();
             client.frames.store(ClientFrame {
                 seq,
-                time: self.time,
                 entities,
                 clientdata,
             });
@@ -320,7 +318,6 @@ mod tests {
     fn frame(seq: u32) -> ClientFrame {
         ClientFrame {
             seq,
-            time: 1.5,
             entities: BTreeMap::new(),
             clientdata: DeltaRecord::default(),
         }

@@ -90,6 +90,8 @@ fn soak(frames: usize) {
 
     let stats = h.server.net_stats();
     assert_eq!(stats.frames_skipped, 0, "{stats:?}");
+    // Every datagram the server built was within the transport's limit.
+    assert_eq!(stats.send_failures, 0, "{stats:?}");
     for probe in &probes {
         let slot = probe.player_slot().expect("slot");
         assert_eq!(probe.state(), &ProbeState::InGame, "slot {slot}");

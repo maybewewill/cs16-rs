@@ -14,7 +14,7 @@ In the original client, open the developer console (`~`) and type:
 connect 127.0.0.1:27015
 ```
 
-Fill in the date and the result (pass / fail plus what was seen) of every line. When a line fails, write down what the client showed, record a capture with `cs-probe --capture` against the reference server on the same scenario (see `docs/dev/reference-stand.md`), and fix the difference.
+Fill in the date and the result (pass / fail plus what was seen) of every line. When a line fails, write down what the client showed, record a capture with `cargo run -p cs-probe -- --connect <reference server address> --capture <file> --seconds <seconds> --walk` against the reference server on the same scenario (see `docs/dev/reference-stand.md`), and fix the difference.
 
 Items in the registries: `signon`, `delta_frames`, `usercmd_replay`, `msec_budget`, `timeouts`, `changelevel`, `a2s_queries` in `docs/parity/engine.toml`; the `svc_*` / `clc_*` opcodes in `docs/parity/wire.toml`.
 
@@ -23,7 +23,11 @@ Items in the registries: `signon`, `delta_frames`, `usercmd_replay`, `msec_budge
 | 1 | `connect 127.0.0.1:27015` in the original client | The loading bar runs to the end. | | |
 | 2 | The map after loading | The map is drawn, the camera is at a spawn point. | | |
 | 3 | Walking, jumping, crouching, a ladder | No jerks and no snapping back. | | |
-| 4 | A second client, or `cs-probe --connect 127.0.0.1:27015 --walk --seconds 60` | The other player is visible and moves smoothly. | | |
+| 4 | A second client, or `cargo run -p cs-probe -- --connect 127.0.0.1:27015 --walk --seconds 60` | The other player is visible and moves smoothly. | | |
 | 5 | 10 minutes of play | No disconnect. | | |
 | 6 | `disconnect`, then `connect 127.0.0.1:27015` again | Both work; the client is back in the game. | | |
 | 7 | The server browser, LAN tab | The server is listed. | | |
+| 8 | While the client is loading, the server sends it a datagram every server frame | The loading finishes; no disconnect, no error in the console. | | |
+| 9 | Joining while other players are in the game, so the loading client receives userinfo updates and messages broadcast to everyone | The loading finishes; no error in the console, the other players appear with their names. | | |
+| 10 | Walking at a low frame rate (`fps_max 15`, so each command is longer than 50 ms) | No rubber-banding: the player is not pulled back. | | |
+| 11 | Being kicked by the server | The client returns to the menu and shows the kick reason. | | |

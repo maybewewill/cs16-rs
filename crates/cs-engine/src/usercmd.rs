@@ -91,25 +91,26 @@ pub fn select_cmds_to_run(
 /// Longest step, in milliseconds, one user command may give the game; longer ones are split.
 pub const MAX_USERCMD_STEP_MS: u8 = 50;
 
-/// `cmd` as the steps the game runs, as the original engine does: unchanged when its `msec` is
-/// at most [`MAX_USERCMD_STEP_MS`], otherwise split into two halves of its time (the first
-/// taking the odd millisecond), each split the same way. Buttons, angles and moves are the
-/// same in every step; the `impulse` is kept only in the first.
+/// `cmd` as the steps the game runs: unchanged when its `msec` is at most
+/// [`MAX_USERCMD_STEP_MS`], otherwise run as two commands of `msec / 2` each (integer
+/// division, so an odd millisecond is not simulated), each split the same way. Buttons, angles
+/// and moves are the same in every step; the `impulse` is cleared in the second half, so only
+/// the first step keeps it. This is what `SV_RunCmd` in ReHLDS (`rehlds/engine/sv_user.cpp`,
+/// `master`) does, read on 2026-11-21. The time budget is charged the full `msec` before the
+/// split, so the simulated time can be a few milliseconds less than what was charged.
 pub fn split_usercmd(cmd: &GoldSrcUserCmd) -> Vec<GoldSrcUserCmd> {
     fn push_steps(cmd: GoldSrcUserCmd, steps: &mut Vec<GoldSrcUserCmd>) {
         if cmd.msec <= MAX_USERCMD_STEP_MS {
             steps.push(cmd);
             return;
         }
+        let half = cmd.msec / 2;
         let second = GoldSrcUserCmd {
-            msec: cmd.msec / 2,
+            msec: half,
             impulse: 0,
             ..cmd.clone()
         };
-        let first = GoldSrcUserCmd {
-            msec: cmd.msec - second.msec,
-            ..cmd
-        };
+        let first = GoldSrcUserCmd { msec: half, ..cmd };
         push_steps(first, steps);
         push_steps(second, steps);
     }
@@ -433,17 +434,37 @@ mod tests {
         }
     }
 
+    /// Time simulated for a command of `msec`: halved, rounding down, until a half is at most
+    /// [`MAX_USERCMD_STEP_MS`].
+    fn halved_total(msec: u8) -> u32 {
+        if msec <= MAX_USERCMD_STEP_MS {
+            u32::from(msec)
+        } else {
+            2 * halved_total(msec / 2)
+        }
+    }
+
     #[test]
-    fn odd_millisecond_goes_to_the_first_half() {
-        assert_eq!(msecs(&split_usercmd(&cmd_ms(51))), vec![26, 25]);
-        // 101 = 51 + 50, and 51 = 26 + 25.
-        assert_eq!(msecs(&split_usercmd(&cmd_ms(101))), vec![26, 25, 50]);
-        let steps = split_usercmd(&cmd_ms(255));
-        assert!(
-            steps.iter().all(|s| s.msec <= MAX_USERCMD_STEP_MS),
-            "{steps:?}"
-        );
-        assert_eq!(steps.iter().map(|s| u32::from(s.msec)).sum::<u32>(), 255);
+    fn odd_millisecond_is_not_simulated() {
+        assert_eq!(msecs(&split_usercmd(&cmd_ms(51))), vec![25, 25]);
+        // 101 halves to 50 and 50.
+        assert_eq!(msecs(&split_usercmd(&cmd_ms(101))), vec![50, 50]);
+        // 255 halves to 127, 63, then 31: eight steps, 248 ms.
+        assert_eq!(msecs(&split_usercmd(&cmd_ms(255))), vec![31; 8]);
+        for msec in 51..=255u8 {
+            let steps = msecs(&split_usercmd(&cmd_ms(msec)));
+            assert!(
+                steps.iter().all(|&s| s <= MAX_USERCMD_STEP_MS),
+                "{msec}: {steps:?}"
+            );
+            // Every level splits into equal halves, so all steps are equal and their count is
+            // a power of two.
+            assert!(steps.iter().all(|&s| s == steps[0]), "{msec}: {steps:?}");
+            assert!(steps.len().is_power_of_two(), "{msec}: {steps:?}");
+            let total: u32 = steps.iter().map(|&s| u32::from(s)).sum();
+            assert_eq!(total, halved_total(msec), "{msec}: {steps:?}");
+            assert!(total <= u32::from(msec));
+        }
     }
 
     fn cmd_ms(msec: u8) -> GoldSrcUserCmd {

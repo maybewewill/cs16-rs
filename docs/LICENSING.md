@@ -21,6 +21,21 @@ The copyright and permission notices are kept in `LICENSE` (this project) and
 `THIRD-PARTY-NOTICES.md` (ReHLDS and ReGameDLL_CS) at the repository root. The protocol crate
 `crates/cs-proto48` is ported from ReHLDS and ReGameDLL_CS on this basis.
 
+## Open question — file headers in the reference projects
+
+Recorded: 2026-11-21. **Unresolved: this needs the project owner's decision.**
+
+- The repository-level `LICENSE` files of ReHLDS and ReGameDLL_CS read as MIT, as recorded in
+  the table above.
+- The source file `rehlds/engine/sv_user.cpp` on the ReHLDS `master` branch carries a header
+  stating that the file is licensed under the GNU General Public License, version 2 or later,
+  with an exception permitting linking with Valve's Half-Life engine and game libraries.
+- These two statements have not been reconciled.
+- `crates/cs-proto48` describes itself as ported from ReHLDS and ReGameDLL_CS.
+- Until the project owner decides, no further code is to be ported from files carrying that
+  header. The behaviour of such files may be studied and reimplemented in this project's own
+  code.
+
 ## Valve Half-Life SDK caveat
 
 Parts of ReHLDS and ReGameDLL_CS originate from Valve's Half-Life SDK. Code that originates

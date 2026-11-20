@@ -267,7 +267,8 @@ status = "missing"
 
 [[item]]
 id = "clc_nop"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::clc_nops_are_skipped (parsed and skipped, yielding no message; not compared with the original server)"
 
 [[item]]
 id = "clc_move"

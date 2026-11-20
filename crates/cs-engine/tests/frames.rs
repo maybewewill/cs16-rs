@@ -193,6 +193,7 @@ fn oversized_frame_drops_entities_but_keeps_clientdata() {
     );
     assert!(probe.entities().is_empty(), "the entity block never fits");
     assert!(probe.stats().largest_datagram <= MAX_UDP_PACKET);
+    assert_eq!(h.server.net_stats().send_failures, 0);
     assert_eq!(probe.stats().parse_errors, 0);
 }
 
@@ -400,6 +401,7 @@ fn reliable_message_and_large_frame_share_the_datagram_budget() {
     h.step(&mut [&mut probe], 20);
     assert!(probe.stats().full_updates > fulls, "entity updates resume");
     assert!(probe.stats().largest_datagram <= MAX_UDP_PACKET);
+    assert_eq!(h.server.net_stats().send_failures, 0);
     assert_eq!(probe.stats().parse_errors, 0);
 }
 

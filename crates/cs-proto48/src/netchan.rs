@@ -19,8 +19,16 @@ pub const FRAGMENT_S2C_MAX_SIZE: usize = 1024;
 pub const FRAGMENT_C2S_SIZE: usize = 128;
 /// Default limit, in bytes, on the fragments buffered for reassembly in one incoming stream.
 pub const DEFAULT_MAX_INCOMING_STREAM: usize = 4 * 1024 * 1024;
+/// Bytes each buffered fragment is charged against the incoming-stream limit at least, so that
+/// tiny pieces cannot hold far more memory than the limit says.
+pub const MIN_FRAGMENT_CHARGE: usize = 64;
 
 const SVC_NOP: u8 = 1;
+
+/// Bytes a buffered piece of `len` bytes is charged against the incoming-stream limit.
+fn fragment_charge(len: usize) -> usize {
+    len.max(MIN_FRAGMENT_CHARGE)
+}
 
 #[inline]
 pub fn make_frag_id(id: u16, count: u16) -> u32 {
@@ -91,7 +99,7 @@ pub struct NetChan {
     /// Incoming fragment reassembly buffers per stream (`chan->incomingbufs`).
     incoming_frags: [BTreeMap<u16, Vec<u8>>; MAX_STREAMS],
     incoming_expected: [u16; MAX_STREAMS],
-    /// Bytes held in `incoming_frags`, per stream.
+    /// Bytes charged for the pieces in `incoming_frags`, per stream (see [`fragment_charge`]).
     incoming_bytes: [usize; MAX_STREAMS],
     /// Limit on `incoming_bytes` of one stream.
     max_incoming_stream: usize,
@@ -154,7 +162,8 @@ impl NetChan {
         self.max_incoming_stream = bytes;
     }
 
-    /// Bytes buffered for reassembly in both incoming streams.
+    /// Bytes charged for the pieces buffered for reassembly in both incoming streams: each
+    /// piece counts its length, and at least [`MIN_FRAGMENT_CHARGE`].
     pub fn incoming_buffered_bytes(&self) -> usize {
         self.incoming_bytes.iter().sum()
     }
@@ -190,8 +199,10 @@ impl NetChan {
         if self.incoming_expected[s] != total {
             self.discard_incoming(s);
         }
-        let replaced = self.incoming_frags[s].get(&idx).map_or(0, Vec::len);
-        let buffered = self.incoming_bytes[s] - replaced + piece.len();
+        let replaced = self.incoming_frags[s]
+            .get(&idx)
+            .map_or(0, |old| fragment_charge(old.len()));
+        let buffered = self.incoming_bytes[s] - replaced + fragment_charge(piece.len());
         if buffered > self.max_incoming_stream {
             self.discard_incoming(s);
             return Err(ProtoError::InvalidPayload(format!(
@@ -699,7 +710,7 @@ mod tests {
         chan.process_packet(&fragment_packet(2, 1, 3, &[1; 4]))
             .unwrap();
         assert!(chan.process_packet(&fragment_packet(3, 2, 3, &[])).is_err());
-        assert_eq!(chan.incoming_buffered_bytes(), 4);
+        assert_eq!(chan.incoming_buffered_bytes(), MIN_FRAGMENT_CHARGE);
     }
 
     /// `next_packet_reliable_len` matches what `build_packet(&[])` then writes, padding aside.
@@ -784,12 +795,12 @@ mod tests {
         let mut chan = NetChan::new(64);
         let inc = chan.process_packet(&fragment_packet(1, 1, 3, &[9; 10]));
         assert!(inc.unwrap().unwrap().completed_normal_stream.is_none());
-        assert_eq!(chan.incoming_buffered_bytes(), 10);
+        assert_eq!(chan.incoming_buffered_bytes(), MIN_FRAGMENT_CHARGE);
 
         // A two-piece message starts: the piece of the three-piece one is dropped.
         chan.process_packet(&fragment_packet(2, 1, 2, &[1; 5]))
             .unwrap();
-        assert_eq!(chan.incoming_buffered_bytes(), 5);
+        assert_eq!(chan.incoming_buffered_bytes(), MIN_FRAGMENT_CHARGE);
         let inc = chan
             .process_packet(&fragment_packet(3, 2, 2, &[2; 3]))
             .unwrap()
@@ -804,12 +815,12 @@ mod tests {
     #[test]
     fn exceeding_the_incoming_limit_empties_the_stream() {
         let mut chan = NetChan::new(64);
-        chan.set_max_incoming_stream(100);
-        chan.process_packet(&fragment_packet(1, 1, 3, &[1; 60]))
+        chan.set_max_incoming_stream(150);
+        chan.process_packet(&fragment_packet(1, 1, 3, &[1; 80]))
             .unwrap();
-        assert_eq!(chan.incoming_buffered_bytes(), 60);
+        assert_eq!(chan.incoming_buffered_bytes(), 80);
         assert!(
-            chan.process_packet(&fragment_packet(2, 2, 3, &[2; 60]))
+            chan.process_packet(&fragment_packet(2, 2, 3, &[2; 80]))
                 .is_err()
         );
         assert_eq!(chan.incoming_buffered_bytes(), 0);
@@ -827,5 +838,27 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(inc.payload[0], 7);
+    }
+
+    #[test]
+    fn tiny_fragments_are_charged_the_minimum() {
+        let mut chan = NetChan::new(64);
+        let limit = 10 * MIN_FRAGMENT_CHARGE;
+        chan.set_max_incoming_stream(limit);
+        // One-byte pieces of a message that never completes: the stream holds
+        // `limit / MIN_FRAGMENT_CHARGE` of them, not `limit`.
+        for idx in 1..=10u16 {
+            chan.process_packet(&fragment_packet(u32::from(idx), idx, 1000, &[idx as u8]))
+                .unwrap();
+            assert_eq!(
+                chan.incoming_buffered_bytes(),
+                usize::from(idx) * MIN_FRAGMENT_CHARGE
+            );
+        }
+        assert!(
+            chan.process_packet(&fragment_packet(11, 11, 1000, &[11]))
+                .is_err()
+        );
+        assert_eq!(chan.incoming_buffered_bytes(), 0);
     }
 }

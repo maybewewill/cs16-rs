@@ -2,6 +2,8 @@
 
 `cs16-rs` contains code ported from the following MIT-licensed projects.
 
+Until the project owner decides, no further code is ported from files in these projects whose header states a different licence; see "Open question — file headers in the reference projects" in `docs/LICENSING.md`.
+
 ## ReHLDS
 
 Upstream: https://github.com/rehlds/ReHLDS

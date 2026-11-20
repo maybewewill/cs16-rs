@@ -9,7 +9,9 @@ use cs_transport::{PacketTransport, PeerAddr};
 
 use crate::client::Client;
 use crate::game::{ClientView, GameDll};
-use crate::oob::{ConnectRequest, MAX_NAME_BYTES, OobContext, OobOutcome, handle_oob};
+use crate::oob::{
+    ConnectRequest, MAX_NAME_BYTES, OobContext, OobOutcome, carries_valid_challenge, handle_oob,
+};
 use crate::server::Server;
 
 impl<G: GameDll> Server<G> {
@@ -33,7 +35,13 @@ impl<G: GameDll> Server<G> {
         from: PeerAddr,
         data: &[u8],
     ) {
-        if !self.limiter.allow(&from, self.time) {
+        // Every datagram is charged to its address; one without a challenge issued to its
+        // sender also to the global budget.
+        if !self.limiter.allow(&from, self.time)
+            || (!carries_valid_challenge(data, &from, self.time, &self.challenges)
+                && !self.oob_budget.try_take())
+        {
+            self.net_stats.oob_denied += 1;
             return;
         }
         // The player list and query info are only built for the queries that send them.
@@ -58,7 +66,7 @@ impl<G: GameDll> Server<G> {
             OobOutcome::Connect(request) => self.connect(from, request),
             OobOutcome::Ignore => return,
         };
-        let _ = net.send(from, &reply);
+        self.net_stats.send(net, from, &reply);
     }
 
     /// The player list and server info that A2S queries are answered with.

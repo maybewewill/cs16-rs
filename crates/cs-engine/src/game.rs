@@ -169,6 +169,8 @@ pub trait GameDll {
         cmd: &GoldSrcUserCmd,
         random_seed: u32,
     );
+    /// Called once at the start of every server frame, before its datagrams are handled, with
+    /// the seconds elapsed since the previous frame.
     fn start_frame(&mut self, eng: &mut EngineApi<'_>, frametime: f32);
     fn update_client_data(&mut self, eng: &mut EngineApi<'_>, slot: u8) -> GoldSrcClientData;
     /// Whether `ent` goes into `viewer`'s packet; may adjust `state`.

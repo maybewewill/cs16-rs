@@ -18,15 +18,18 @@ use crate::client::{Client, ClientState, SignonStage};
 use crate::edict::{DEFAULT_MAX_EDICTS, EdictPool};
 use crate::game::{ClientView, EngineApi, GameDll, Outbox, entity_state_from_vars};
 use crate::map::ServerMap;
-use crate::oob::{ChallengeIssuer, OobLimiter};
+use crate::oob::{ChallengeIssuer, OOB_GLOBAL_REPLIES_PER_SEC, OobLimiter};
 use crate::precache::PrecacheTables;
 use crate::signon::{
     UserInfoEntry, move_vars, munged_map_crc, write_new_stage, write_sendres_stage,
     write_spawn_baselines, write_spawn_stage,
 };
+use crate::usercmd::TokenBucket;
 
 /// Unacknowledged reliable bytes a client may have queued; past this it is dropped.
 pub const MAX_RELIABLE_BACKLOG: usize = 256 * 1024;
+/// Datagrams one [`Server::frame`] reads; the rest wait in the transport for the next frame.
+pub const MAX_DATAGRAMS_PER_FRAME: usize = 4096;
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -79,6 +82,8 @@ pub struct Server<G: GameDll> {
     pub(crate) usercmd_schema: Option<DeltaSchema>,
     pub(crate) challenges: ChallengeIssuer,
     pub(crate) limiter: OobLimiter,
+    /// Replies to connectionless datagrams without a valid challenge, all addresses together.
+    pub(crate) oob_budget: TokenBucket,
     pub(crate) spawn_count: u32,
     pub(crate) next_userid: i32,
     pub(crate) time: f64,
@@ -91,7 +96,7 @@ pub struct Server<G: GameDll> {
     pub(crate) next_pings_at: f64,
 }
 
-/// Monotonic counts of what the server refused from known client addresses.
+/// Monotonic counts of what the server refused, dropped or failed to send.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct NetStats {
     /// Datagrams the client's netchan refused: malformed, stale or duplicate.
@@ -105,6 +110,21 @@ pub struct NetStats {
     pub entity_blocks_dropped: u64,
     /// `Server::frame` calls ignored because their time was not finite or went backwards.
     pub frames_skipped: u64,
+    /// Connectionless datagrams left unanswered by the per-address limiter or by the global
+    /// budget for replies without a valid challenge.
+    pub oob_denied: u64,
+    /// Datagrams the transport refused to send: updates, sign-on datagrams, farewells and
+    /// connectionless replies.
+    pub send_failures: u64,
+}
+
+impl NetStats {
+    /// Sends `data` to `to`, counting a refused send in `send_failures`.
+    pub(crate) fn send(&mut self, net: &mut dyn PacketTransport, to: PeerAddr, data: &[u8]) {
+        if net.send(to, data).is_err() {
+            self.send_failures += 1;
+        }
+    }
 }
 
 impl<G: GameDll> Server<G> {
@@ -141,6 +161,7 @@ impl<G: GameDll> Server<G> {
             usercmd_schema,
             challenges: ChallengeIssuer::new(),
             limiter: OobLimiter::new(),
+            oob_budget: TokenBucket::new(OOB_GLOBAL_REPLIES_PER_SEC, OOB_GLOBAL_REPLIES_PER_SEC),
             spawn_count: 1,
             next_userid: 1,
             time: 0.0,
@@ -175,9 +196,10 @@ impl<G: GameDll> Server<G> {
         self.compute_baselines();
     }
 
-    /// One server frame: handles every waiting datagram, frees clients that timed out, queues
-    /// the pings and userinfo updates that are due, then sends each client what is due for it
-    /// (see `frame.rs`) and the final datagrams of released clients. A call whose `now` is not
+    /// One server frame: lets the game start the frame, handles up to
+    /// [`MAX_DATAGRAMS_PER_FRAME`] waiting datagrams, frees clients that timed out, queues the
+    /// pings and userinfo updates that are due, then sends each client what is due for it (see
+    /// `frame.rs`) and the final datagrams of released clients. A call whose `now` is not
     /// finite or earlier than the previous frame's does nothing.
     pub fn frame(&mut self, net: &mut dyn PacketTransport, now: f64) {
         if !now.is_finite() || now < self.time {
@@ -187,7 +209,12 @@ impl<G: GameDll> Server<G> {
         let real_dt = now - self.time;
         self.time = now;
         self.accrue_client_time(real_dt);
-        while let Some((from, data)) = net.recv() {
+        self.oob_budget.refill(real_dt);
+        self.with_game(|game, eng| game.start_frame(eng, real_dt as f32));
+        for _ in 0..MAX_DATAGRAMS_PER_FRAME {
+            let Some((from, data)) = net.recv() else {
+                break;
+            };
             self.handle_datagram(net, from, &data);
         }
         self.drop_timed_out_clients();
@@ -389,7 +416,7 @@ impl<G: GameDll> Server<G> {
                 if self.clients[index].is_free() {
                     return;
                 }
-                // Resource lists are handled by a later task.
+                // Resource lists, file consistency, voice and cvar replies are not handled.
                 match message {
                     ClcMessage::StringCmd(line) => {
                         self.handle_stringcmd(slot, &line, &mut stage_done);
@@ -514,7 +541,7 @@ impl<G: GameDll> Server<G> {
     }
 
     fn stage_sendres(&mut self, slot: u8) {
-        // File sizes arrive with the file-transfer task.
+        // File transfer is not implemented: every resource is listed with size 0.
         let resources = self.precache.resource_list(&|_| 0);
         let mut w = MsgWriter::new();
         write_sendres_stage(&mut w, self.spawn_count, &resources);
