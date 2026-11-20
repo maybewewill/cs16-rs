@@ -7,7 +7,32 @@
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
-use crate::trace::{BspCollision, CONTENTS_SOLID, Hull};
+use crate::trace::{BspCollision, CONTENTS_SOLID, Hull, TraceResult};
+
+/// What [`step_player_move`] asks of the world it moves in: exactly the queries it makes of
+/// [`BspCollision`], so the legacy path and the engine-backed game share one movement code.
+pub trait MoveWorld {
+    /// Traces `hull` from `start` to `end` against everything the player collides with.
+    fn trace_hull(&self, start: Vec3, end: Vec3, hull: Hull) -> TraceResult;
+    /// Whether a player of `hull` standing at `pos` touches a ladder.
+    fn is_on_ladder(&self, pos: Vec3, hull: Hull) -> bool;
+    /// `CONTENTS_*` of the world at `point` for `hull`.
+    fn point_contents(&self, point: Vec3, hull: Hull) -> i32;
+}
+
+impl MoveWorld for BspCollision {
+    fn trace_hull(&self, start: Vec3, end: Vec3, hull: Hull) -> TraceResult {
+        BspCollision::trace_hull(self, start, end, hull)
+    }
+
+    fn is_on_ladder(&self, pos: Vec3, hull: Hull) -> bool {
+        BspCollision::is_on_ladder(self, pos, hull)
+    }
+
+    fn point_contents(&self, point: Vec3, hull: Hull) -> i32 {
+        BspCollision::point_contents(self, point, hull)
+    }
+}
 
 pub const VEC_VIEW: f32 = 17.0;
 pub const VEC_DUCK_VIEW: f32 = 12.0;
@@ -118,12 +143,12 @@ pub struct MoveStepEvents {
 }
 
 /// Advance player movement by one fixed timestep `dt` (normally `0.01s` at 100 Hz).
-pub fn step_player_move(
+pub fn step_player_move<W: MoveWorld + ?Sized>(
     state: &mut PlayerMoveState,
     cmd: &MoveInputCmd,
     weapon_max_speed: f32,
     params: &MoveParams,
-    collision: &BspCollision,
+    world: &W,
     dt: f32,
 ) -> MoveStepEvents {
     let mut events = MoveStepEvents::default();
@@ -155,14 +180,14 @@ pub fn step_player_move(
     }
 
     // 2. Ducking (`hull 1 <-> hull 3` with headroom check & duck-jump tuck)
-    pm_duck(state, cmd.duck, collision, dt);
+    pm_duck(state, cmd.duck, world, dt);
 
     // 3. Categorize position (ground & ladder check)
-    categorize_position(state, collision, &mut events);
+    categorize_position(state, world, &mut events);
 
     // 4. Ladder movement
     if state.on_ladder {
-        pm_ladder_move(state, cmd, collision, dt, &mut events);
+        pm_ladder_move(state, cmd, world, dt, &mut events);
         state.old_jump_held = cmd.jump;
         return events;
     }
@@ -208,13 +233,13 @@ pub fn step_player_move(
         pm_accelerate(state, wish_dir, wish_speed, params.accelerate, dt);
         state.velocity.z = 0.0;
         if state.velocity.length_squared() > 1e-4 {
-            pm_step_slide_move(state, params.step_size, collision, dt);
+            pm_step_slide_move(state, params.step_size, world, dt);
         }
     } else {
         // Half gravity before move, half after (exact Quake/GoldSrc symplectic split!)
         state.velocity.z -= params.gravity * 0.5 * dt;
         pm_air_accelerate(state, wish_dir, wish_speed, params.air_accelerate, dt);
-        pm_fly_move(state, collision, dt);
+        pm_fly_move(state, world, dt);
         state.velocity.z -= params.gravity * 0.5 * dt;
     }
 
@@ -224,7 +249,7 @@ pub fn step_player_move(
     }
 
     // Re-categorize ground state after move
-    categorize_position(state, collision, &mut events);
+    categorize_position(state, world, &mut events);
 
     // Footstep cadence: silent when walking (`shift`) or crouching (`ctrl`)!
     if state.on_ground && !state.ducking && !cmd.walk {
@@ -242,7 +267,12 @@ pub fn step_player_move(
     events
 }
 
-fn pm_duck(state: &mut PlayerMoveState, want_duck: bool, collision: &BspCollision, dt: f32) {
+fn pm_duck<W: MoveWorld + ?Sized>(
+    state: &mut PlayerMoveState,
+    want_duck: bool,
+    world: &W,
+    dt: f32,
+) {
     if want_duck {
         if !state.ducking {
             state.ducking = true;
@@ -261,7 +291,7 @@ fn pm_duck(state: &mut PlayerMoveState, want_duck: bool, collision: &BspCollisio
         } else {
             state.origin - Vec3::new(0.0, 0.0, 18.0)
         };
-        let tr = collision.trace_hull(candidate, candidate, Hull::Standing);
+        let tr = world.trace_hull(candidate, candidate, Hull::Standing);
         if !tr.start_solid && !tr.all_solid {
             state.ducking = false;
             state.origin = candidate;
@@ -273,12 +303,12 @@ fn pm_duck(state: &mut PlayerMoveState, want_duck: bool, collision: &BspCollisio
     state.view_ofs_z += (target_eye - state.view_ofs_z) * blend;
 }
 
-fn categorize_position(
+fn categorize_position<W: MoveWorld + ?Sized>(
     state: &mut PlayerMoveState,
-    collision: &BspCollision,
+    world: &W,
     events: &mut MoveStepEvents,
 ) {
-    state.on_ladder = collision.is_on_ladder(state.origin, state.hull());
+    state.on_ladder = world.is_on_ladder(state.origin, state.hull());
     if state.on_ladder {
         state.on_ground = false;
         state.fall_velocity = 0.0;
@@ -292,7 +322,7 @@ fn categorize_position(
     }
 
     let down = state.origin - Vec3::new(0.0, 0.0, 2.0);
-    let tr = collision.trace_hull(state.origin, down, state.hull());
+    let tr = world.trace_hull(state.origin, down, state.hull());
     let was_grounded = state.on_ground;
 
     if tr.fraction < 1.0 && !tr.all_solid && tr.plane_normal.z >= 0.7 {
@@ -363,10 +393,10 @@ fn pm_air_accelerate(
     state.velocity += wish_dir * accel_speed;
 }
 
-fn pm_ladder_move(
+fn pm_ladder_move<W: MoveWorld + ?Sized>(
     state: &mut PlayerMoveState,
     cmd: &MoveInputCmd,
-    collision: &BspCollision,
+    world: &W,
     dt: f32,
     events: &mut MoveStepEvents,
 ) {
@@ -379,7 +409,7 @@ fn pm_ladder_move(
         // Jump off ladder
         state.velocity = Vec3::new(yaw.cos() * 200.0, yaw.sin() * 200.0, 220.0);
         state.on_ladder = false;
-        pm_fly_move(state, collision, dt);
+        pm_fly_move(state, world, dt);
         events.jumped = true;
         return;
     }
@@ -395,7 +425,7 @@ fn pm_ladder_move(
 
     let prev = state.origin;
     state.velocity = vel;
-    pm_fly_move(state, collision, dt);
+    pm_fly_move(state, world, dt);
     state.step_distance += (state.origin - prev).length();
     if state.step_distance >= 85.0 && !cmd.walk {
         state.step_distance -= 85.0;
@@ -404,7 +434,7 @@ fn pm_ladder_move(
 }
 
 /// Multi-plane slide movement (`PM_FlyMove` from Half-Life SDK).
-fn pm_fly_move(state: &mut PlayerMoveState, collision: &BspCollision, dt: f32) {
+fn pm_fly_move<W: MoveWorld + ?Sized>(state: &mut PlayerMoveState, world: &W, dt: f32) {
     let mut time_left = dt;
     let primal_vel = state.velocity;
     let mut planes = [Vec3::ZERO; MAX_CLIP_PLANES];
@@ -416,7 +446,7 @@ fn pm_fly_move(state: &mut PlayerMoveState, collision: &BspCollision, dt: f32) {
             break;
         }
         let end = state.origin + state.velocity * time_left;
-        let tr = collision.trace_hull(state.origin, end, hull);
+        let tr = world.trace_hull(state.origin, end, hull);
 
         if tr.all_solid {
             state.velocity = Vec3::ZERO;
@@ -481,34 +511,34 @@ fn pm_fly_move(state: &mut PlayerMoveState, collision: &BspCollision, dt: f32) {
 }
 
 /// Ground slide + stair climbing up to `step_size` (18 units in CS 1.6).
-fn pm_step_slide_move(
+fn pm_step_slide_move<W: MoveWorld + ?Sized>(
     state: &mut PlayerMoveState,
     step_size: f32,
-    collision: &BspCollision,
+    world: &W,
     dt: f32,
 ) {
     let orig_pos = state.origin;
     let orig_vel = state.velocity;
 
     // 1. Try normal slide first
-    pm_fly_move(state, collision, dt);
+    pm_fly_move(state, world, dt);
     let down_pos = state.origin;
     let down_vel = state.velocity;
 
     // 2. Try stepping up `step_size`, sliding, then stepping back down
     let hull = state.hull();
     let up_target = orig_pos + Vec3::new(0.0, 0.0, step_size);
-    let up_tr = collision.trace_hull(orig_pos, up_target, hull);
+    let up_tr = world.trace_hull(orig_pos, up_target, hull);
     if up_tr.all_solid || up_tr.start_solid {
         return;
     }
 
     state.origin = up_tr.end_pos;
     state.velocity = orig_vel;
-    pm_fly_move(state, collision, dt);
+    pm_fly_move(state, world, dt);
 
     let down_target = state.origin - Vec3::new(0.0, 0.0, step_size + 2.0);
-    let down_tr = collision.trace_hull(state.origin, down_target, hull);
+    let down_tr = world.trace_hull(state.origin, down_target, hull);
     if !down_tr.all_solid && down_tr.fraction < 1.0 && down_tr.plane_normal.z >= 0.7 {
         state.origin = down_tr.end_pos;
     } else if !down_tr.all_solid {
@@ -545,17 +575,17 @@ pub fn clip_velocity(v: Vec3, normal: Vec3, overbounce: f32) -> Vec3 {
 }
 
 /// Find a safe standing position slightly above `raw_spawn` and snapped cleanly onto the floor.
-pub fn snap_spawn_to_floor(raw_spawn: Vec3, collision: &BspCollision) -> Vec3 {
+pub fn snap_spawn_to_floor<W: MoveWorld + ?Sized>(raw_spawn: Vec3, world: &W) -> Vec3 {
     // Try `raw_spawn` or slightly elevated in case mapper placed spawn near floor
     let mut start = raw_spawn;
     for lift in [0.0f32, 8.0, 18.0, 36.0] {
         let candidate = raw_spawn + Vec3::new(0.0, 0.0, lift);
-        if collision.point_contents(candidate, Hull::Standing) != CONTENTS_SOLID {
+        if world.point_contents(candidate, Hull::Standing) != CONTENTS_SOLID {
             start = candidate;
             break;
         }
     }
-    let tr = collision.trace_hull(start, start - Vec3::new(0.0, 0.0, 128.0), Hull::Standing);
+    let tr = world.trace_hull(start, start - Vec3::new(0.0, 0.0, 128.0), Hull::Standing);
     if !tr.all_solid && tr.fraction < 1.0 {
         tr.end_pos + Vec3::new(0.0, 0.0, 0.5)
     } else {

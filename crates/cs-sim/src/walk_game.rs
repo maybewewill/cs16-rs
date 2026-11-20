@@ -11,9 +11,10 @@ use cs_proto48::usermsg::UserMsgRegistry;
 use glam::Vec3;
 
 use crate::pmove::{
-    MoveInputCmd, MoveParams, PlayerMoveState, VEC_VIEW, snap_spawn_to_floor, step_player_move,
+    MoveInputCmd, MoveParams, MoveWorld, PlayerMoveState, VEC_VIEW, snap_spawn_to_floor,
+    step_player_move,
 };
-use crate::trace::BspCollision;
+use crate::trace::{Hull, TraceResult};
 
 /// `usercmd_t::buttons` bits.
 pub mod buttons {
@@ -50,9 +51,121 @@ const DUCKED_MINS: Vec3 = Vec3::new(-16.0, -16.0, -18.0);
 const DUCKED_MAXS: Vec3 = Vec3::new(16.0, 16.0, 18.0);
 const FOV: f32 = 90.0;
 
+/// Classnames of the brush entities players cannot walk through.
+const SOLID_BRUSH_CLASSES: [&str; 8] = [
+    "func_wall",
+    "func_door",
+    "func_door_rotating",
+    "func_breakable",
+    "func_button",
+    "func_plat",
+    "func_train",
+    "func_pushable",
+];
+
+/// A brush entity the game remembers from the map's entity lump.
+#[derive(Debug, Clone, Copy)]
+struct BrushRef {
+    /// Brush model number `N` of the entity's `*N` model.
+    model: usize,
+    /// The entity's `origin` when it spawned; the engine places the model there.
+    ///
+    /// Limitation: this is the spawn-time origin, never updated, so a door that has moved is
+    /// not followed (entity linking belongs to a later plan item). The BSP model's own `origin`
+    /// field, which the legacy `BspCollision` adds, is not reachable through `EngineApi` and is
+    /// not added here.
+    origin: Vec3,
+    /// World-space bounds of the model at `origin`; `None` when the engine gave none.
+    bounds: Option<(Vec3, Vec3)>,
+}
+
+impl BrushRef {
+    /// Whether a box of half-extents `half` swept from `a` to `b` can touch the brush.
+    fn near_sweep(&self, a: Vec3, b: Vec3, half: Vec3) -> bool {
+        let Some((mins, maxs)) = self.bounds else {
+            return true;
+        };
+        let pad = half + Vec3::splat(4.0);
+        let (lo, hi) = (a.min(b) - pad, a.max(b) + pad);
+        lo.cmple(maxs).all() && hi.cmpge(mins).all()
+    }
+}
+
+/// The world the players move in: the engine's geometry through [`EngineApi`] plus the game's
+/// own lists of solid and ladder brush entities.
+struct EngineWorld<'a, 'e> {
+    eng: &'a EngineApi<'e>,
+    solids: &'a [BrushRef],
+    ladders: &'a [BrushRef],
+}
+
+impl MoveWorld for EngineWorld<'_, '_> {
+    /// The world trace, then each solid brush entity's: a brush that starts or ends the trace
+    /// inside solid marks the result so, and one hit nearer than the best so far takes over its
+    /// fraction, end position and plane. Modelled on HLDS `SV_ClipMoveToEntities` from memory
+    /// (assumption, not checked against the ReHLDS source).
+    fn trace_hull(&self, start: Vec3, end: Vec3, hull: Hull) -> TraceResult {
+        let mut best = self.eng.trace_hull(start, end, hull);
+        let half = hull.half_extents();
+        for brush in self.solids {
+            if !brush.near_sweep(start, end, half) {
+                continue;
+            }
+            let t = self
+                .eng
+                .trace_model(brush.model, brush.origin, start, end, hull);
+            best.all_solid |= t.all_solid;
+            best.start_solid |= t.start_solid;
+            if t.fraction < best.fraction {
+                best.fraction = t.fraction;
+                best.end_pos = t.end_pos;
+                best.plane_normal = t.plane_normal;
+                best.hit_solid = t.hit_solid;
+                best.hit_sky = t.hit_sky;
+            }
+        }
+        best
+    }
+
+    /// Whether any point of the player's box (hull extents plus 3 units either way in x and y,
+    /// the margin the legacy `BspCollision` uses) lies inside a ladder model. `EngineApi` only
+    /// answers point queries, so the box is sampled on a grid, about 6 units apart in x and y.
+    fn is_on_ladder(&self, pos: Vec3, hull: Hull) -> bool {
+        const XY_STEPS: i32 = 6;
+        const Z_STEPS: i32 = 4;
+        let ext = hull.half_extents() + Vec3::new(3.0, 3.0, 0.0);
+        let (lo, hi) = (pos - ext, pos + ext);
+        let at = |i: i32, n: i32, a: f32, b: f32| a + (b - a) * i as f32 / n as f32;
+        self.ladders
+            .iter()
+            .filter(|l| l.near_sweep(pos, pos, ext))
+            .any(|l| {
+                (0..=XY_STEPS).any(|ix| {
+                    (0..=XY_STEPS).any(|iy| {
+                        (0..=Z_STEPS).any(|iz| {
+                            let p = Vec3::new(
+                                at(ix, XY_STEPS, lo.x, hi.x),
+                                at(iy, XY_STEPS, lo.y, hi.y),
+                                at(iz, Z_STEPS, lo.z, hi.z),
+                            );
+                            self.eng.point_in_model(l.model, l.origin, p)
+                        })
+                    })
+                })
+            })
+    }
+
+    fn point_contents(&self, point: Vec3, hull: Hull) -> i32 {
+        self.eng.point_contents(point, hull)
+    }
+}
+
 pub struct WalkGame {
-    collision: BspCollision,
     spawns: Vec<SpawnPoint>,
+    /// Brush entities of the map that block movement, from `spawn_entity`.
+    solids: Vec<BrushRef>,
+    /// `func_ladder` entities of the map.
+    ladders: Vec<BrushRef>,
     params: MoveParams,
     /// Model index of [`PLAYER_MODEL`], known after `server_activate`.
     player_model: u16,
@@ -61,15 +174,45 @@ pub struct WalkGame {
 }
 
 impl WalkGame {
-    pub fn new(collision: BspCollision, spawns: Vec<SpawnPoint>, params: MoveParams) -> Self {
+    /// A game with no map: spawn points and brush entities arrive through `spawn_entity` as the
+    /// engine activates a map, and `server_deactivate` drops them again.
+    pub fn new(params: MoveParams) -> Self {
         Self {
-            collision,
-            spawns,
+            spawns: Vec::new(),
+            solids: Vec::new(),
+            ladders: Vec::new(),
             params,
             player_model: 0,
             players: BTreeMap::new(),
         }
     }
+
+    /// The spawn points of the current map, in the order of the entity lump.
+    pub fn spawns(&self) -> &[SpawnPoint] {
+        &self.spawns
+    }
+
+    /// Moves the movement state of the player in `slot` to `origin` and stops it, to place a
+    /// player at a chosen spot in tests; the edict follows with the player's next command.
+    /// `false` when nobody is in that slot.
+    pub fn set_player_origin(&mut self, slot: u8, origin: Vec3) -> bool {
+        let Some(state) = self.players.get_mut(&slot) else {
+            return false;
+        };
+        state.origin = origin;
+        state.velocity = Vec3::ZERO;
+        true
+    }
+}
+
+/// The brush model number `N` of a model named `*N`; `None` for the world (`*0`) and for any
+/// other name.
+fn brush_model_number(model: &str) -> Option<usize> {
+    model
+        .strip_prefix('*')?
+        .parse::<usize>()
+        .ok()
+        .filter(|&n| n > 0)
 }
 
 /// Spawn of `slot`: even slots are counter-terrorists, odd slots terrorists, the `slot / 2`th
@@ -134,16 +277,61 @@ impl GameDll for WalkGame {
 
     fn server_deactivate(&mut self, _eng: &mut EngineApi<'_>) {
         self.players.clear();
+        self.spawns.clear();
+        self.solids.clear();
+        self.ladders.clear();
     }
 
-    /// Refuses every map entity; the real entity logic comes later.
+    /// Remembers spawn points and brush entities from the map's entity lump and refuses every
+    /// entity: the game keeps none of its own.
     fn spawn_entity(
         &mut self,
-        _eng: &mut EngineApi<'_>,
-        _id: EdictId,
-        _classname: &str,
-        _keys: &[(String, String)],
+        eng: &mut EngineApi<'_>,
+        id: EdictId,
+        classname: &str,
+        keys: &[(String, String)],
     ) -> bool {
+        let Some(vars) = eng.ent(id) else {
+            return false;
+        };
+        let team = match classname {
+            "info_player_start" => Some(SpawnTeam::CounterTerrorist),
+            "info_player_deathmatch" => Some(SpawnTeam::Terrorist),
+            _ => None,
+        };
+        if let Some(team) = team {
+            // The map's own spawn list (`BspMap::spawns`) skips entries without an origin.
+            if keys.iter().any(|(k, _)| k == "origin") {
+                self.spawns.push(SpawnPoint {
+                    position: vars.origin,
+                    yaw_deg: vars.angles.y,
+                    team,
+                });
+            }
+            return false;
+        }
+        let solid = SOLID_BRUSH_CLASSES.contains(&classname);
+        if !solid && classname != "func_ladder" {
+            return false;
+        }
+        // The engine ran `set_model` for a precached `*N` model before this call. The brush
+        // model number comes from the name: `modelindex` is the model-table index, one more
+        // than `N` (slot 1 holds the map itself).
+        let Some(model) = brush_model_number(&vars.model) else {
+            return false;
+        };
+        let origin = vars.origin;
+        let bounds = (vars.maxs != vars.mins).then_some((origin + vars.mins, origin + vars.maxs));
+        let brush = BrushRef {
+            model,
+            origin,
+            bounds,
+        };
+        if solid {
+            self.solids.push(brush);
+        } else {
+            self.ladders.push(brush);
+        }
         false
     }
 
@@ -152,12 +340,16 @@ impl GameDll for WalkGame {
     }
 
     fn client_put_in_server(&mut self, eng: &mut EngineApi<'_>, slot: u8) {
-        let (origin, yaw) = match spawn_for(&self.spawns, slot) {
-            Some(spawn) => (
-                snap_spawn_to_floor(spawn.position, &self.collision),
-                spawn.yaw_deg,
-            ),
-            None => (Vec3::ZERO, 0.0),
+        let (origin, yaw) = {
+            let world = EngineWorld {
+                eng,
+                solids: &self.solids,
+                ladders: &self.ladders,
+            };
+            match spawn_for(&self.spawns, slot) {
+                Some(spawn) => (snap_spawn_to_floor(spawn.position, &world), spawn.yaw_deg),
+                None => (Vec3::ZERO, 0.0),
+            }
         };
         self.players.insert(slot, PlayerMoveState::at_spawn(origin));
         let model = if slot.is_multiple_of(2) {
@@ -210,14 +402,12 @@ impl GameDll for WalkGame {
         };
         let input = usercmd_to_move_input(cmd, WALK_MAX_SPEED);
         let dt = f32::from(cmd.msec) / 1000.0;
-        step_player_move(
-            state,
-            &input,
-            WALK_MAX_SPEED,
-            &self.params,
-            &self.collision,
-            dt,
-        );
+        let world = EngineWorld {
+            eng,
+            solids: &self.solids,
+            ladders: &self.ladders,
+        };
+        step_player_move(state, &input, WALK_MAX_SPEED, &self.params, &world, dt);
 
         let id = eng.client_edict(slot);
         let Some(v) = eng.ent_mut(id) else {

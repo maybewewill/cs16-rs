@@ -12,7 +12,7 @@ use cs_proto48::crypto::md5_hex;
 use cs_proto48::delta::{DeltaRegistry, GoldSrcUserCmd};
 use cs_proto48::info::InfoString;
 use cs_sim::pmove::{MoveParams, VEC_VIEW, snap_spawn_to_floor};
-use cs_sim::trace::{BspCollision, Hull};
+use cs_sim::trace::{BspCollision, CONTENTS_SOLID, Hull};
 use cs_sim::walk_game::{WALK_MAX_SPEED, WalkGame, buttons, ent_flags};
 use cs_transport::{LoopbackEndpoint, LoopbackHub, PeerAddr};
 use cs_vfs::{Vfs, VfsConfig};
@@ -26,25 +26,36 @@ const FRAME: f64 = 0.01;
 /// Position tolerance of the project.
 const TOLERANCE: f32 = 0.03125;
 
-/// `Server<WalkGame>` on de_dust2 plus the loopback hub the probes connect through.
+/// `Server<WalkGame>` on one map plus the loopback hub the probes connect through.
 struct World {
     server: Server<WalkGame>,
     hub: LoopbackHub,
     now: f64,
-    /// A copy of the collision the game moves players with, for the test's own traces.
+    /// The legacy collision of the map, for the test's own traces.
     collision: BspCollision,
-    /// The map's spawn points, as the game was given them.
+    /// The map's spawn points, as the map file parser lists them.
     spawns: Vec<SpawnPoint>,
+}
+
+/// A map as the engine takes it, with the legacy collision and spawn list of the same file.
+fn load_map(vfs: &Vfs, name: &str) -> (ServerMap, BspCollision, Vec<SpawnPoint>, BspMap) {
+    let bsp = BspMap::load(vfs, name).unwrap_or_else(|e| panic!("load {name}: {e:?}"));
+    let raw = vfs
+        .read_bytes(&format!("maps/{name}.bsp"))
+        .unwrap_or_else(|e| panic!("read {name}: {e:?}"));
+    let collision = BspCollision::from_map(&bsp, MaterialTable::load(vfs));
+    let spawns = bsp.spawns.clone();
+    let map = ServerMap::from_bsp(name, &raw, Arc::new(bsp.clone())).expect("BSP header");
+    (map, collision, spawns, bsp)
 }
 
 impl World {
     fn dust2(vfs: &Vfs) -> Self {
-        let bsp = BspMap::load(vfs, "de_dust2").expect("load de_dust2");
-        let raw = vfs.read_bytes("maps/de_dust2.bsp").expect("read de_dust2");
-        let collision = BspCollision::from_map(&bsp, MaterialTable::load(vfs));
-        let spawns = bsp.spawns.clone();
-        let map = ServerMap::from_bsp("de_dust2", &raw, Arc::new(bsp)).expect("BSP header");
-        let game = WalkGame::new(collision.clone(), spawns.clone(), MoveParams::default());
+        Self::on(vfs, "de_dust2")
+    }
+
+    fn on(vfs: &Vfs, name: &str) -> Self {
+        let (map, collision, spawns, _) = load_map(vfs, name);
         let cfg = ServerConfig {
             max_clients: 4,
             ..ServerConfig::default()
@@ -52,7 +63,7 @@ impl World {
         let server = Server::new(
             cfg,
             map,
-            game,
+            WalkGame::new(MoveParams::default()),
             DeltaRegistry::cs16_default(),
             CVarRegistry::new_with_defaults(),
         );
@@ -388,4 +399,216 @@ fn jump_and_duck_change_the_flags_and_hull() {
         (v.mins, v.maxs),
         (Vec3::new(-16.0, -16.0, -36.0), Vec3::new(16.0, 16.0, 36.0))
     );
+}
+
+impl World {
+    /// Switches the server to `name` and runs until `probe` has left the game on the
+    /// `reconnect` and is in the game again.
+    fn change_map(&mut self, vfs: &Vfs, name: &str, probe: &mut Probe) {
+        let (map, collision, spawns, _) = load_map(vfs, name);
+        self.server.change_map(map);
+        self.collision = collision;
+        self.spawns = spawns;
+        let mut left = false;
+        for _ in 0..600 {
+            self.step(&mut [&mut *probe], 1);
+            left |= probe.state() != &ProbeState::InGame;
+            if left && probe.state() == &ProbeState::InGame {
+                return;
+            }
+        }
+        panic!("did not get back in the game on {name}: {:?}", probe.state());
+    }
+}
+
+/// Number of spawns of `team`.
+fn count(spawns: &[SpawnPoint], team: SpawnTeam) -> usize {
+    spawns.iter().filter(|s| s.team == team).count()
+}
+
+#[test]
+fn walk_game_follows_changelevel() {
+    let Ok(vfs) = Vfs::discover(None, VfsConfig::default()) else {
+        return;
+    };
+    let mut w = World::dust2(&vfs);
+    let mut probe = w.join("Traveller", &mut []);
+    let yaw = w.vars(0).v_angle.y;
+    w.run_cmds(&mut probe, (0..50).map(|_| cmd(yaw, WALK_MAX_SPEED, 0)));
+    let dust_spawns = w.spawns.len();
+
+    w.change_map(&vfs, "cs_office", &mut probe);
+    w.step(&mut [&mut probe], 20);
+    assert_eq!(slot(&probe), 0);
+    // The game holds the spawns of the new map, none of the old one.
+    let game_spawns = w.server.game().spawns().len();
+    println!("de_dust2 {dust_spawns} spawns, cs_office {game_spawns}");
+    assert_eq!(game_spawns, w.spawns.len());
+    assert_ne!(game_spawns, dust_spawns);
+
+    // Slot 0 stands on the first counter-terrorist spawn of cs_office.
+    let first = w
+        .spawns
+        .iter()
+        .find(|s| s.team == SpawnTeam::CounterTerrorist)
+        .expect("a counter-terrorist spawn");
+    let expected = snap_spawn_to_floor(first.position, &w.collision);
+    let start = w.vars(0).origin;
+    println!("cs_office spawn {start:?} expected {expected:?}");
+    assert!(
+        (start - expected).abs().max_element() <= 1.0,
+        "{start:?} vs {expected:?}"
+    );
+
+    let yaw = w.vars(0).v_angle.y;
+    w.run_cmds(&mut probe, (0..100).map(|_| cmd(yaw, WALK_MAX_SPEED, 0)));
+    let v = w.vars(0);
+    let floor = floor_distance(&w.collision, v.origin);
+    println!("after 100 commands {:?} floor {floor:?}", v.origin);
+    assert_ne!(v.flags & ent_flags::FL_ONGROUND, 0, "flags {:#x}", v.flags);
+    assert!(floor.is_some_and(|f| f <= 1.0), "floor {floor:?}");
+}
+
+#[test]
+fn spawns_come_from_the_map_entity_lump() {
+    let Ok(vfs) = Vfs::discover(None, VfsConfig::default()) else {
+        return;
+    };
+    for name in ["de_dust2", "cs_office"] {
+        let w = World::on(&vfs, name);
+        let game = w.server.game().spawns();
+        println!(
+            "{name}: game {} CT {} T, map {} CT {} T",
+            count(game, SpawnTeam::CounterTerrorist),
+            count(game, SpawnTeam::Terrorist),
+            count(&w.spawns, SpawnTeam::CounterTerrorist),
+            count(&w.spawns, SpawnTeam::Terrorist),
+        );
+        assert!(!w.spawns.is_empty(), "{name} has no spawns");
+        for team in [SpawnTeam::CounterTerrorist, SpawnTeam::Terrorist] {
+            assert_eq!(count(game, team), count(&w.spawns, team), "{name} {team:?}");
+        }
+        // Same points in the same order, with the yaw of the lump.
+        assert_eq!(game.len(), w.spawns.len());
+        for (g, m) in game.iter().zip(&w.spawns) {
+            assert_eq!(
+                (g.team, g.position, g.yaw_deg),
+                (m.team, m.position, m.yaw_deg)
+            );
+        }
+    }
+}
+
+/// Maps tried, in order, for a solid brush entity that stands in a clear run.
+const BRUSH_MAPS: [&str; 12] = [
+    "de_dust2",
+    "cs_office",
+    "de_dust",
+    "cs_italy",
+    "de_inferno",
+    "de_nuke",
+    "de_aztec",
+    "cs_assault",
+    "cs_militia",
+    "de_train",
+    "de_cbble",
+    "cs_backalley",
+];
+
+/// A run that ends at a solid brush entity: the player stands on the floor some units from
+/// the face of the brush, on a line along an axis that is clear but for the brush.
+struct BrushRun {
+    map: &'static str,
+    classname: String,
+    model_index: usize,
+    start: Vec3,
+    dir: Vec3,
+    yaw: f32,
+    /// Position along `dir` where the hull's centre stops against the brush.
+    stop: f32,
+}
+
+/// The first run of [`BRUSH_MAPS`] found with the legacy collision: its trace along `dir` is
+/// stopped by the brush entity, and clear of everything when that brush is disabled.
+fn find_brush_run(vfs: &Vfs) -> Option<BrushRun> {
+    const GAP: f32 = 60.0;
+    for map in BRUSH_MAPS {
+        let Ok(bsp) = BspMap::load(vfs, map) else {
+            continue;
+        };
+        let collision = BspCollision::from_map(&bsp, MaterialTable::load(vfs));
+        for b in &bsp.brush_entities {
+            if !matches!(
+                b.classname.as_str(),
+                "func_wall" | "func_breakable" | "func_door" | "func_door_rotating"
+            ) {
+                continue;
+            }
+            let centre = (b.mins + b.maxs) * 0.5;
+            let half = (b.maxs - b.mins) * 0.5;
+            for (dir, yaw, half_along) in [
+                (Vec3::X, 0.0, half.x),
+                (Vec3::Y, 90.0, half.y),
+                (-Vec3::X, 180.0, half.x),
+                (-Vec3::Y, 270.0, half.y),
+            ] {
+                // The hull's centre stops 16 units before the face.
+                let stop = dir.dot(centre) - half_along - 16.0;
+                let lateral = centre - dir * dir.dot(centre);
+                // Floor under the run's first point, found from just above the brush's base.
+                let above = Vec3::new(lateral.x, lateral.y, b.mins.z + 40.0) + dir * (stop - GAP);
+                let down = collision.trace_hull(above, above - Vec3::new(0.0, 0.0, 128.0), Hull::Standing);
+                if down.start_solid || down.fraction >= 1.0 {
+                    continue;
+                }
+                let start = down.end_pos + Vec3::new(0.0, 0.0, 0.5);
+                if collision.point_contents(start, Hull::Standing) == CONTENTS_SOLID {
+                    continue;
+                }
+                let end = start + dir * (GAP + 16.0 + half_along * 2.0 + 64.0);
+                let blocked = collision.trace_hull(start, end, Hull::Standing);
+                let mut open = collision.clone();
+                open.disabled_models.insert(b.model_index);
+                let free = open.trace_hull(start, end, Hull::Standing);
+                let reaches = blocked.fraction < 1.0
+                    && (dir.dot(blocked.end_pos) - stop).abs() < 0.5
+                    && !blocked.start_solid;
+                if reaches && free.fraction >= 1.0 && !free.start_solid {
+                    return Some(BrushRun {
+                        map,
+                        classname: b.classname.clone(),
+                        model_index: b.model_index,
+                        start,
+                        dir,
+                        yaw,
+                        stop: dir.dot(blocked.end_pos),
+                    });
+                }
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn solid_brush_entities_block_movement() {
+    let Ok(vfs) = Vfs::discover(None, VfsConfig::default()) else {
+        return;
+    };
+    let run = find_brush_run(&vfs).expect("no solid brush entity with a clear run in the maps");
+    println!(
+        "map {} entity {} *{} start {:?} dir {:?} stop {}",
+        run.map, run.classname, run.model_index, run.start, run.dir, run.stop
+    );
+    let mut w = World::on(&vfs, run.map);
+    let mut probe = w.join("Walker", &mut []);
+    assert!(w.server.game_mut().set_player_origin(0, run.start));
+    w.run_cmds(&mut probe, (0..150).map(|_| cmd(run.yaw, WALK_MAX_SPEED, 0)));
+    let v = w.vars(0);
+    let along = run.dir.dot(v.origin);
+    println!("ended {:?}, {along} along the run, stop {}", v.origin, run.stop);
+    // Reached the brush ...
+    assert!(along >= run.stop - 2.0, "stopped short: {along} vs {}", run.stop);
+    // ... and was stopped by it.
+    assert!(along <= run.stop + 0.1, "went into the brush: {along} vs {}", run.stop);
 }

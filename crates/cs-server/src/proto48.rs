@@ -8,13 +8,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cs_assets::bsp::BspMap;
-use cs_assets::materials::MaterialTable;
 use cs_cvar::CVarRegistry;
 use cs_engine::{Server, ServerConfig, ServerMap};
 use cs_platform::{Clock, NativeClock};
 use cs_proto48::delta::DeltaRegistry;
 use cs_sim::pmove::MoveParams;
-use cs_sim::trace::BspCollision;
 use cs_sim::walk_game::WalkGame;
 use cs_transport::UdpTransport;
 use cs_vfs::{Vfs, VfsConfig};
@@ -87,8 +85,7 @@ fn start(args: &[String]) -> Result<Infallible, String> {
     let raw = vfs
         .read_bytes(&path)
         .map_err(|e| format!("cannot read {path}: {e}"))?;
-    let collision = BspCollision::from_map(&bsp, MaterialTable::load(&vfs));
-    let game = WalkGame::new(collision, bsp.spawns.clone(), MoveParams::default());
+    let game = WalkGame::new(MoveParams::default());
     let map = ServerMap::from_bsp(&opts.map, &raw, Arc::new(bsp))
         .ok_or(format!("{path} has no valid BSP header"))?;
     let (map_name, map_crc) = (map.name.clone(), map.crc);
