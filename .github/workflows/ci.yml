@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -37,7 +40,7 @@ jobs:
         run: cargo test --workspace
 
       - name: wasm32 check (library crates)
-        run: cargo check --target wasm32-unknown-unknown -p cs-proto48 -p cs-cvar -p cs-assets -p cs-vfs -p cs-sim -p cs-platform
+        run: cargo check --target wasm32-unknown-unknown -p cs-proto48 -p cs-cvar -p cs-assets -p cs-vfs -p cs-sim -p cs-platform -p cs-transport
 
       - name: Parity report
         run: cargo xtask parity
