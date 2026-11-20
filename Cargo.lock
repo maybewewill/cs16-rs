@@ -594,6 +594,16 @@ name = "cs-platform"
 version = "0.1.0"
 
 [[package]]
+name = "cs-probe"
+version = "0.1.0"
+dependencies = [
+ "cs-platform",
+ "cs-proto48",
+ "cs-transport",
+ "glam",
+]
+
+[[package]]
 name = "cs-proto48"
 version = "0.1.0"
 dependencies = [

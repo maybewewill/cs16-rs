@@ -4,7 +4,8 @@ use std::process::ExitCode;
 use xtask::parity;
 
 const USAGE: &str = "usage: cargo xtask parity [--dir <path>] [--min <pct>]\n       \
-                     cargo xtask parity import-names <category> <file> [--dir <path>]";
+                     cargo xtask parity import-names <category> <file> [--dir <path>]\n       \
+                     cargo xtask golden <ip:port> <name>";
 
 const DEFAULT_DIR: &str = "docs/parity";
 
@@ -27,10 +28,56 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Some("golden") => match run_golden(args) {
+            Ok(code) => code,
+            Err(msg) => {
+                eprintln!("error: {msg}");
+                ExitCode::from(2)
+            }
+        },
         _ => {
             eprintln!("{USAGE}");
             ExitCode::from(2)
         }
+    }
+}
+
+/// Records a golden capture: runs `cs-probe` against `<ip:port>` for 30 s, walking, and writes
+/// `$CS16_GOLDEN_DIR/<name>.cs48cap`.
+fn run_golden(args: impl Iterator<Item = String>) -> Result<ExitCode, String> {
+    let positional: Vec<String> = args.collect();
+    let [server, name] = positional.as_slice() else {
+        return Err(format!("golden needs <ip:port> <name>\n{USAGE}"));
+    };
+    if name.is_empty() || name.contains(['/', '\\']) {
+        return Err(format!("invalid capture name `{name}`"));
+    }
+    let dir = std::env::var_os("CS16_GOLDEN_DIR").ok_or(
+        "CS16_GOLDEN_DIR is not set; point it at the directory that holds golden captures",
+    )?;
+    let capture = PathBuf::from(dir).join(format!("{name}.cs48cap"));
+
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let status = std::process::Command::new(cargo)
+        .args([
+            "run",
+            "--release",
+            "-p",
+            "cs-probe",
+            "--",
+            "--connect",
+            server,
+        ])
+        .arg("--capture")
+        .arg(&capture)
+        .args(["--seconds", "30", "--walk"])
+        .status()
+        .map_err(|e| format!("cannot run cargo: {e}"))?;
+    if status.success() {
+        println!("capture written to {}", capture.display());
+        Ok(ExitCode::SUCCESS)
+    } else {
+        Ok(ExitCode::FAILURE)
     }
 }
 
