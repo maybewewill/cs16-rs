@@ -42,6 +42,8 @@ impl Outbox {
 #[derive(Debug, Default)]
 pub(crate) struct ClientView {
     pub(crate) userinfo: InfoString,
+    /// The slot holds a connection; the userinfo of a free slot cannot be changed.
+    pub(crate) in_use: bool,
     pub(crate) active: bool,
     /// Set when the game changed `userinfo`; the server broadcasts it.
     pub(crate) userinfo_dirty: bool,
@@ -111,9 +113,12 @@ impl EngineApi<'_> {
         self.clients.get(usize::from(slot))?.userinfo.get(key)
     }
 
-    /// Sets a userinfo key and marks the slot's userinfo for broadcast.
+    /// Sets a userinfo key and marks the slot's userinfo for broadcast; a free slot is left
+    /// alone.
     pub fn set_client_key(&mut self, slot: u8, key: &str, value: &str) {
-        if let Some(client) = self.clients.get_mut(usize::from(slot)) {
+        if let Some(client) = self.clients.get_mut(usize::from(slot))
+            && client.in_use
+        {
             client.userinfo.set(key, value);
             client.userinfo_dirty = true;
         }
@@ -386,6 +391,7 @@ mod tests {
     #[test]
     fn set_client_key_marks_dirty_and_reads_back() {
         let mut f = Fixture::new(2);
+        f.clients[1].in_use = true;
         f.clients[1].active = true;
         let mut eng = f.api();
         assert_eq!(eng.client_key(1, "model"), None);
@@ -396,6 +402,16 @@ mod tests {
         assert_eq!(eng.client_key(0, "model"), None);
         drop(eng);
         assert!(f.clients[1].userinfo_dirty);
+        assert!(!f.clients[0].userinfo_dirty);
+    }
+
+    #[test]
+    fn set_client_key_ignores_a_free_slot() {
+        let mut f = Fixture::new(2);
+        let mut eng = f.api();
+        eng.set_client_key(0, "name", "Ghost");
+        assert_eq!(eng.client_key(0, "name"), None);
+        drop(eng);
         assert!(!f.clients[0].userinfo_dirty);
     }
 

@@ -117,16 +117,7 @@ impl<G: GameDll> Server<G> {
     ) -> Self {
         let cfg = cfg.sanitized();
         let usermsgs = game.usermsgs();
-        let edicts = EdictPool::new(cfg.max_clients, DEFAULT_MAX_EDICTS);
-        let precache = PrecacheTables::new(&map.path, map.submodel_count);
-        let last_submodel = map.submodel_count.saturating_sub(1);
-        if last_submodel > 0 && precache.model_index(&format!("*{last_submodel}")).is_none() {
-            tracing::error!(
-                map = %map.name,
-                submodels = map.submodel_count,
-                "brush models do not fit the model precache table"
-            );
-        }
+        let (edicts, precache) = Self::map_tables(&map, cfg.max_clients);
         let usercmd_schema = deltas.get("usercmd_t").cloned();
         if usercmd_schema.is_none() {
             tracing::error!("delta registry has no usercmd_t; client messages cannot be parsed");
@@ -157,10 +148,31 @@ impl<G: GameDll> Server<G> {
             farewells: Vec::new(),
             next_pings_at: 0.0,
         };
-        server.with_game(|game, eng| game.server_activate(eng));
-        server.precache.lock();
-        server.compute_baselines();
+        server.activate_map();
         server
+    }
+
+    /// A fresh edict pool and precache tables for `map`, before the game activates it.
+    pub(crate) fn map_tables(map: &ServerMap, max_clients: u8) -> (EdictPool, PrecacheTables) {
+        let edicts = EdictPool::new(max_clients, DEFAULT_MAX_EDICTS);
+        let precache = PrecacheTables::new(&map.path, map.submodel_count);
+        let last_submodel = map.submodel_count.saturating_sub(1);
+        if last_submodel > 0 && precache.model_index(&format!("*{last_submodel}")).is_none() {
+            tracing::error!(
+                map = %map.name,
+                submodels = map.submodel_count,
+                "brush models do not fit the model precache table"
+            );
+        }
+        (edicts, precache)
+    }
+
+    /// Lets the game activate the current map, then locks the precache tables and computes
+    /// the spawn baselines.
+    pub(crate) fn activate_map(&mut self) {
+        self.with_game(|game, eng| game.server_activate(eng));
+        self.precache.lock();
+        self.compute_baselines();
     }
 
     /// One server frame: handles every waiting datagram, frees clients that timed out, queues

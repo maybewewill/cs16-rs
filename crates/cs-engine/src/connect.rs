@@ -108,6 +108,7 @@ impl<G: GameDll> Server<G> {
         // Everyone past `new` is told about the newcomer (replacing whoever had the slot).
         self.views[index] = ClientView {
             userinfo,
+            in_use: true,
             userinfo_dirty: true,
             ..ClientView::default()
         };
@@ -133,6 +134,8 @@ impl<G: GameDll> Server<G> {
         }
         let userid = self.next_userid;
         self.next_userid += 1;
+        // Farewells built from the address's previous netchan would reach the new one.
+        self.farewells.retain(|(addr, _)| *addr != from);
         encode_s2c_connection(userid, &from.to_string(), false, self.cfg.build)
     }
 

@@ -1,16 +1,20 @@
 //! The end of a client's life and the housekeeping around it: releasing a slot for any reason
-//! (telling a kicked client why), timeouts, `shutdown`, userinfo broadcasts and pings.
+//! (telling a kicked client why), timeouts, `shutdown`, map changes, userinfo broadcasts and
+//! pings.
 //!
 //! The ping measure (average round trip of the last [`PING_SAMPLES`] acknowledged datagrams)
 //! and the three `svc_disconnect` datagrams of a kick are working assumptions, unverified
 //! against a real client.
 
 use cs_proto48::bitbuf::MsgWriter;
-use cs_proto48::messages::{write_svc_disconnect, write_svc_pings, write_svc_updateuserinfo};
+use cs_proto48::messages::{
+    write_svc_disconnect, write_svc_pings, write_svc_stufftext, write_svc_updateuserinfo,
+};
 use cs_transport::PacketTransport;
 
 use crate::client::{Client, ClientState};
 use crate::game::{ClientView, GameDll};
+use crate::map::ServerMap;
 use crate::server::{Server, ServerConfig};
 
 /// Seconds between the `svc_pings` messages sent to active clients.
@@ -25,6 +29,8 @@ pub const SETINFO_BURST: f64 = 8.0;
 
 /// Datagrams carrying `svc_disconnect` sent to a client that is kicked or shut down.
 const DISCONNECT_DATAGRAMS: usize = 3;
+/// Longest `svc_disconnect` reason sent, in bytes.
+const MAX_DISCONNECT_REASON_BYTES: usize = 128;
 /// Round-trip samples a client's ping is averaged over.
 const PING_SAMPLES: usize = 16;
 /// Sequences whose send times are kept per client.
@@ -114,6 +120,32 @@ impl ServerConfig {
 }
 
 impl<G: GameDll> Server<G> {
+    /// Switches to `map` without dropping anyone: the game deactivates the old map, the spawn
+    /// count goes up, the edicts and precache tables are rebuilt for `map` and the game
+    /// activates it; then every connected client restarts its sign-on, its old reliable data
+    /// discarded and `reconnect` sent through the reliable stream. Clients are not reported to
+    /// the game as disconnected: its `server_deactivate` owns that state.
+    pub fn change_map(&mut self, map: ServerMap) {
+        self.with_game(|game, eng| game.server_deactivate(eng));
+        self.spawn_count += 1;
+        let (edicts, precache) = Self::map_tables(&map, self.cfg.max_clients);
+        self.map = map;
+        self.edicts = edicts;
+        self.precache = precache;
+        self.activate_map();
+        let mut reconnect = MsgWriter::new();
+        write_svc_stufftext(&mut reconnect, "reconnect\n");
+        let now = self.time;
+        for (client, view) in self.clients.iter_mut().zip(&mut self.views) {
+            if client.is_free() {
+                continue;
+            }
+            client.restart_signon(now);
+            client.chan.write_reliable(reconnect.as_slice());
+            view.active = false;
+        }
+    }
+
     /// Releases the client in `slot`, sending it `svc_disconnect(reason)` at the end of the
     /// next frame. A free slot is left alone.
     pub fn kick(&mut self, slot: u8, reason: &str) {
@@ -176,14 +208,15 @@ impl<G: GameDll> Server<G> {
     }
 
     /// Builds the [`DISCONNECT_DATAGRAMS`] datagrams that tell the client in `index` why it is
-    /// released, each a netchan packet with `svc_disconnect` in its unreliable part.
+    /// released, each a netchan packet with `svc_disconnect` in its unreliable part. The reason
+    /// is cut to [`MAX_DISCONNECT_REASON_BYTES`].
     fn queue_farewell(&mut self, index: usize, reason: &str) {
         let client = &mut self.clients[index];
         let Some(addr) = client.addr else {
             return;
         };
         let mut w = MsgWriter::new();
-        write_svc_disconnect(&mut w, reason);
+        write_svc_disconnect(&mut w, truncate_reason(reason));
         for _ in 0..DISCONNECT_DATAGRAMS {
             let packet = client.chan.build_packet(w.as_slice());
             self.farewells.push((addr, packet));
@@ -207,8 +240,8 @@ impl<G: GameDll> Server<G> {
     }
 
     /// Releases, without telling them, clients that did not reach `Active` within
-    /// `signon_timeout_secs` of connecting, and clients from which no datagram was accepted
-    /// for `timeout_secs`.
+    /// `signon_timeout_secs` of connecting or of the last map change, and clients from which
+    /// no datagram was accepted for `timeout_secs`.
     pub(crate) fn drop_timed_out_clients(&mut self) {
         for slot in 0..self.cfg.max_clients {
             let client = &self.clients[usize::from(slot)];
@@ -216,7 +249,7 @@ impl<G: GameDll> Server<G> {
                 continue;
             }
             let stalled = matches!(client.state, ClientState::Signon(_))
-                && self.time - client.connected_at > self.cfg.signon_timeout_secs;
+                && self.time - client.signon_since > self.cfg.signon_timeout_secs;
             let silent = self.time - client.last_heard > self.cfg.timeout_secs;
             if stalled || silent {
                 self.free_slot(slot);
@@ -255,21 +288,21 @@ impl<G: GameDll> Server<G> {
     }
 
     /// Sends one `svc_updateuserinfo` per slot marked since the last call, however often it
-    /// was marked, to every client past `new` through the reliable stream. A freed slot goes
-    /// out with an empty userinfo.
+    /// was marked, to every client past `new` through the reliable stream. A free slot always
+    /// goes out with an empty userinfo.
     pub(crate) fn broadcast_userinfo(&mut self) {
         let mut w = MsgWriter::new();
         for (slot, view) in self.views.iter_mut().enumerate() {
             if !std::mem::take(&mut view.userinfo_dirty) {
                 continue;
             }
-            write_svc_updateuserinfo(
-                &mut w,
-                slot as u8,
-                self.clients[slot].userid,
-                &view.userinfo.to_wire_string(),
-                &[0; 16],
-            );
+            let client = &self.clients[slot];
+            let info = if client.is_free() {
+                String::new()
+            } else {
+                view.userinfo.to_wire_string()
+            };
+            write_svc_updateuserinfo(&mut w, slot as u8, client.userid, &info, &[0; 16]);
         }
         if w.is_empty() {
             return;
@@ -282,9 +315,31 @@ impl<G: GameDll> Server<G> {
     }
 }
 
+/// `reason` cut on a character boundary to at most [`MAX_DISCONNECT_REASON_BYTES`].
+fn truncate_reason(reason: &str) -> &str {
+    let mut end = reason.len().min(MAX_DISCONNECT_REASON_BYTES);
+    while !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    &reason[..end]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disconnect_reason_is_cut_on_a_character_boundary() {
+        assert_eq!(truncate_reason("bye"), "bye");
+        let exact = "x".repeat(MAX_DISCONNECT_REASON_BYTES);
+        assert_eq!(truncate_reason(&exact), exact);
+        let long = "y".repeat(500);
+        assert_eq!(truncate_reason(&long).len(), MAX_DISCONNECT_REASON_BYTES);
+        // A two-byte character straddling byte 128 is left out whole.
+        let straddling = format!("{}é", "z".repeat(MAX_DISCONNECT_REASON_BYTES - 1));
+        let cut = truncate_reason(&straddling);
+        assert_eq!(cut, "z".repeat(MAX_DISCONNECT_REASON_BYTES - 1));
+    }
 
     #[test]
     fn ping_is_the_average_of_the_last_samples() {

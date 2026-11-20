@@ -1,4 +1,9 @@
 [[item]]
+id = "changelevel"
+status = "tested"
+evidence = "crates/cs-engine/tests/lifecycle.rs::probe_survives_changelevel, old_entities_are_gone_after_changelevel, precache_after_activate_is_too_late, two_clients_survive_changelevel, client_in_signon_survives_changelevel, stale_spawn_after_changelevel_restarts_signon, old_reliable_data_does_not_cross_the_change, baselines_are_rebuilt_for_the_new_map, changelevel_restarts_the_signon_timeout; crates/cs-engine/src/client.rs::tests::restart_signon_keeps_the_connection; crates/cs-probe/src/lib.rs::tests::reconnect_forgets_the_previous_map; reconnect flow (svc_stufftext reconnect, sign-on restarted on the same netchan) unverified against a real client"
+
+[[item]]
 id = "client_consistency_stop"
 status = "implemented"
 evidence = "crates/cs-probe/src/lib.rs::tests::consistency_list_disconnects; unverified against a real server, see docs/dev/reference-stand.md"

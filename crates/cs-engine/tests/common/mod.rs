@@ -113,6 +113,9 @@ pub struct TestGame {
     pub add_to_full_pack_ents: BTreeSet<u16>,
     /// `(viewer slot, entity number)` of every `add_to_full_pack` call.
     pub add_to_full_pack_pairs: BTreeSet<(u8, u16)>,
+    /// When set, `server_deactivate` writes an `svc_print` of [`DEACTIVATE_PRINT`] into the
+    /// reliable buffer of every slot.
+    pub print_on_deactivate: bool,
     /// Result of `precache_model("models/late.mdl")` in `client_put_in_server`.
     pub late_precache: Option<Result<u16, PrecacheError>>,
     /// Every `argv` received by `client_command`.
@@ -156,8 +159,13 @@ impl GameDll for TestGame {
         }
     }
 
-    fn server_deactivate(&mut self, _eng: &mut EngineApi<'_>) {
+    fn server_deactivate(&mut self, eng: &mut EngineApi<'_>) {
         self.server_deactivate_calls += 1;
+        if self.print_on_deactivate {
+            for slot in 0..32 {
+                write_svc_print(eng.reliable(slot), DEACTIVATE_PRINT);
+            }
+        }
     }
 
     fn client_connect(&mut self, eng: &mut EngineApi<'_>, slot: u8) -> Result<(), String> {
@@ -208,6 +216,13 @@ impl GameDll for TestGame {
             // A new value on every call, so every call is a real change.
             let value = (self.client_command_calls).to_string();
             eng.set_client_key(slot, "rekey", &value);
+        }
+        if let [cmd, slot, key, value] = argv
+            && cmd == "setkey"
+            && let Ok(slot) = slot.parse::<u8>()
+        {
+            // `setkey <slot> <key> <value>`: sets a userinfo key of any slot.
+            eng.set_client_key(slot, key, value);
         }
         if argv.first().is_some_and(|c| c == "biginfo") {
             // A userinfo update of slot 15 whose text is `BIG_INFO`.
@@ -283,6 +298,9 @@ impl GameDll for TestGame {
 
 /// Reason of the kick `client_command("kickme")` issues.
 pub const GAME_KICK_REASON: &str = "Kicked by the game";
+
+/// Text of the `svc_print` that `print_on_deactivate` writes.
+pub const DEACTIVATE_PRINT: &str = "old map\n";
 
 /// Text of the `svc_print` that `shout_on_put_in_server` broadcasts.
 pub const SHOUT: &str = "shout\n";

@@ -50,6 +50,8 @@ pub(crate) struct Client {
     pub(crate) userid: i32,
     /// Server time of the `connect` that took the slot.
     pub(crate) connected_at: f64,
+    /// Server time the current sign-on started: the connect, or the last map change.
+    pub(crate) signon_since: f64,
     /// `GameDll::client_put_in_server` was called for this connection.
     pub(crate) put_in_server: bool,
     /// Unreliable bytes for the next datagram.
@@ -90,6 +92,7 @@ impl Client {
             chan: NetChan::new(FRAGMENT_S2C_MAX_SIZE),
             userid: 0,
             connected_at: 0.0,
+            signon_since: 0.0,
             put_in_server: false,
             unreliable: Vec::new(),
             budget: MsecBudget::new(),
@@ -131,6 +134,22 @@ impl Client {
         self.delta_seq = None;
     }
 
+    /// Forgets what belonged to the previous map and waits for `new` again, the sign-on
+    /// starting at `now`. Reliable data still queued or in flight is discarded; the netchan
+    /// session, the rate state, the limits, the pings and the last-heard time stay.
+    pub(crate) fn restart_signon(&mut self, now: f64) {
+        self.state = ClientState::Signon(SignonStage::AwaitNew);
+        self.signon_since = now;
+        self.put_in_server = false;
+        self.unreliable.clear();
+        self.budget = MsecBudget::new();
+        self.last_cmd = GoldSrcUserCmd::default();
+        self.bad_moves = 0;
+        self.choke_count = 0;
+        self.reset_frames();
+        self.chan.clear();
+    }
+
     /// A fresh connection from `addr` waiting for `new`.
     pub(crate) fn connected(addr: PeerAddr, userid: i32, now: f64) -> Self {
         let mut chan = NetChan::new(FRAGMENT_S2C_MAX_SIZE);
@@ -141,6 +160,7 @@ impl Client {
             chan,
             userid,
             connected_at: now,
+            signon_since: now,
             last_heard: now,
             ..Self::free()
         }
@@ -189,5 +209,36 @@ mod tests {
         assert!(!c.put_in_server);
         assert!(Client::free().is_free());
         assert!(Client::free().addr.is_none());
+    }
+
+    #[test]
+    fn restart_signon_keeps_the_connection() {
+        let addr = PeerAddr::Loopback(3);
+        let mut c = Client::connected(addr, 7, 2.5);
+        c.state = ClientState::Active;
+        c.put_in_server = true;
+        c.unreliable.push(1);
+        c.choke_count = 4;
+        c.bad_moves = 2;
+        c.delta_seq = Some(9);
+        c.clear_time = 11.0;
+        c.last_heard = 9.5;
+        // One reliable message in flight, one queued.
+        c.chan.write_reliable(&[1, 2, 3]);
+        c.chan.build_packet(&[]);
+        c.chan.write_reliable(&[4]);
+        assert!(c.chan.pending_reliable_bytes() > 0);
+        let outgoing = c.chan.outgoing_sequence;
+
+        c.restart_signon(10.0);
+        assert_eq!(c.state, ClientState::Signon(SignonStage::AwaitNew));
+        assert_eq!((c.signon_since, c.connected_at), (10.0, 2.5));
+        assert!(!c.put_in_server);
+        assert!(c.unreliable.is_empty());
+        assert_eq!((c.choke_count, c.bad_moves, c.delta_seq), (0, 0, None));
+        assert_eq!(c.chan.pending_reliable_bytes(), 0);
+        assert_eq!(c.chan.outgoing_sequence, outgoing);
+        assert_eq!((c.addr, c.userid), (Some(addr), 7));
+        assert_eq!((c.clear_time, c.last_heard), (11.0, 9.5));
     }
 }

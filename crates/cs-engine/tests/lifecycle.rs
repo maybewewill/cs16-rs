@@ -1,13 +1,14 @@
 //! The end of a client's life and the housekeeping around it, as `cs-probe` clients see it over
-//! the loopback: kicks, timeouts, `disconnect`, shutdown, userinfo updates and pings.
+//! the loopback: kicks, timeouts, `disconnect`, shutdown, userinfo updates, pings and map
+//! changes.
 
 mod common;
 
 use common::{FRAME, GAME_KICK_REASON, Harness, TestGame};
 use cs_cvar::CVarRegistry;
 use cs_engine::{
-    ClientState, MAX_RELIABLE_BACKLOG, PINGS_INTERVAL_SECS, SETINFO_BURST, SETINFO_RATE_PER_SEC,
-    Server, ServerConfig, ServerMap,
+    ClientState, MAX_RELIABLE_BACKLOG, PINGS_INTERVAL_SECS, PrecacheError, SETINFO_BURST,
+    SETINFO_RATE_PER_SEC, Server, ServerConfig, ServerMap, SignonStage,
 };
 use cs_probe::{ProbeClient, ProbeState};
 use cs_proto48::delta::DeltaRegistry;
@@ -392,4 +393,303 @@ fn config_is_sanitised() {
     });
     assert_eq!(server.config().timeout_secs, 5.0);
     assert_eq!(server.config().max_clients, defaults.max_clients);
+}
+
+/// Runs the harness until every probe is in the game on the map whose path contains `map`.
+fn rejoined(h: &mut Harness, probes: &mut [&mut Probe], map: &str) {
+    let on_map = |p: &Probe| {
+        p.state() == &ProbeState::InGame
+            && p.server_info().is_some_and(|i| i.map_path.contains(map))
+    };
+    for _ in 0..500 {
+        h.step(probes, 1);
+        if probes.iter().all(|p| on_map(p)) {
+            return;
+        }
+    }
+    let states: Vec<_> = probes.iter().map(|p| p.state().clone()).collect();
+    panic!("probes did not get in the game on {map}: {states:?}");
+}
+
+/// Entity numbers above the player slots that `probe` holds.
+fn non_player_entities(h: &Harness, probe: &Probe) -> Vec<u16> {
+    let max_clients = u16::from(h.server.config().max_clients);
+    probe
+        .entities()
+        .keys()
+        .copied()
+        .filter(|&n| n > max_clients)
+        .collect()
+}
+
+/// Entity numbers of the server's live `test_extra` edicts.
+fn server_extras(h: &Harness) -> Vec<u16> {
+    h.server
+        .edicts()
+        .iter_live()
+        .filter(|(_, e)| e.vars.classname == "test_extra")
+        .map(|(id, _)| id.index)
+        .collect()
+}
+
+#[test]
+fn probe_survives_changelevel() {
+    let mut h = Harness::new(4);
+    let mut a = joined(&mut h, "A", &mut []);
+    h.step(&mut [&mut a], 20);
+    let spawn_count = h.server.spawn_count();
+    let slot = slot_of(&a);
+
+    h.server.change_map(ServerMap::stub("second"));
+    rejoined(&mut h, &mut [&mut a], "second");
+    assert_eq!(h.server.spawn_count(), spawn_count + 1);
+    let info = a.server_info().expect("server info");
+    assert!(info.map_path.contains("second"), "{}", info.map_path);
+    assert_eq!(info.spawn_count, spawn_count + 1);
+    assert_eq!(h.server.client_state(slot), ClientState::Active);
+    assert_eq!(h.server.game().client_disconnect_calls, 0);
+}
+
+#[test]
+fn old_entities_are_gone_after_changelevel() {
+    let game = TestGame {
+        extra_entities: 5,
+        ..TestGame::default()
+    };
+    let mut h = Harness::with_game(4, game);
+    let mut a = joined(&mut h, "A", &mut []);
+    h.step(&mut [&mut a], 20);
+    assert_eq!(non_player_entities(&h, &a).len(), 5);
+
+    h.server.game_mut().extra_entities = 0;
+    h.server.change_map(ServerMap::stub("second"));
+    rejoined(&mut h, &mut [&mut a], "second");
+    h.step(&mut [&mut a], 20);
+    assert!(non_player_entities(&h, &a).is_empty());
+    assert!(server_extras(&h).is_empty());
+}
+
+#[test]
+fn precache_after_activate_is_too_late() {
+    let mut h = Harness::new(4);
+    let mut a = joined(&mut h, "A", &mut []);
+    h.server.game_mut().late_precache = None;
+    h.server.change_map(ServerMap::stub("second"));
+    rejoined(&mut h, &mut [&mut a], "second");
+    assert_eq!(
+        h.server.game().late_precache,
+        Some(Err(PrecacheError::TooLate))
+    );
+    assert_eq!(h.server.game().client_put_in_server_calls, 2);
+}
+
+#[test]
+fn two_clients_survive_changelevel() {
+    let mut h = Harness::new(4);
+    let mut a = joined(&mut h, "A", &mut []);
+    let mut b = joined(&mut h, "B", &mut [&mut a]);
+    h.step(&mut [&mut a, &mut b], 20);
+    let (slot_a, slot_b) = (slot_of(&a), slot_of(&b));
+    let game = h.server.game();
+    assert_eq!(
+        (game.server_activate_calls, game.server_deactivate_calls),
+        (1, 0)
+    );
+
+    h.server.change_map(ServerMap::stub("second"));
+    // Frame by frame, so that an empty userinfo is seen before anything could replace it.
+    for _ in 0..300 {
+        h.step(&mut [&mut a, &mut b], 1);
+        assert_ne!(a.userinfos().get(&slot_b).map(String::as_str), Some(""));
+        assert_ne!(b.userinfos().get(&slot_a).map(String::as_str), Some(""));
+    }
+    rejoined(&mut h, &mut [&mut a, &mut b], "second");
+    assert_eq!(h.server.client_state(slot_a), ClientState::Active);
+    assert_eq!(h.server.client_state(slot_b), ClientState::Active);
+    assert!(a.entities().contains_key(&(u16::from(slot_b) + 1)));
+    assert!(b.entities().contains_key(&(u16::from(slot_a) + 1)));
+    assert_eq!(name_of(&a, slot_b).as_deref(), Some("B"));
+    assert_eq!(name_of(&b, slot_a).as_deref(), Some("A"));
+    let game = h.server.game();
+    assert_eq!(game.server_activate_calls, 2);
+    assert_eq!(game.server_deactivate_calls, 1);
+    assert_eq!(game.client_disconnect_calls, 0);
+    assert_eq!(game.client_put_in_server_calls, 4);
+}
+
+#[test]
+fn client_in_signon_survives_changelevel() {
+    let mut h = Harness::new(4);
+    let mut a = h.add_probe("A");
+    // Until the server has sent the `new` stage, before the probe is in the game.
+    for _ in 0..300 {
+        h.step(&mut [&mut a], 1);
+        if h.server.client_state(0) == ClientState::Signon(SignonStage::AwaitSendRes) {
+            break;
+        }
+    }
+    assert_eq!(
+        h.server.client_state(0),
+        ClientState::Signon(SignonStage::AwaitSendRes)
+    );
+    assert_ne!(a.state(), &ProbeState::InGame);
+
+    h.server.change_map(ServerMap::stub("second"));
+    assert_eq!(
+        h.server.client_state(0),
+        ClientState::Signon(SignonStage::AwaitNew)
+    );
+    rejoined(&mut h, &mut [&mut a], "second");
+    assert_eq!(h.server.client_state(0), ClientState::Active);
+    assert_eq!(h.server.game().client_put_in_server_calls, 1);
+}
+
+#[test]
+fn stale_spawn_after_changelevel_restarts_signon() {
+    let mut h = Harness::new(4);
+    let mut a = joined(&mut h, "A", &mut []);
+    h.step(&mut [&mut a], 20);
+    let slot = slot_of(&a);
+    let old_count = h.server.spawn_count();
+    h.server.change_map(ServerMap::stub("second"));
+
+    // Once the server waits for `spawn` on the new map, a `spawn` with the old count goes out
+    // ahead of the probe's own.
+    for _ in 0..300 {
+        h.step(&mut [&mut a], 1);
+        if h.server.client_state(slot) == ClientState::Signon(SignonStage::AwaitSpawn) {
+            break;
+        }
+    }
+    assert_eq!(
+        h.server.client_state(slot),
+        ClientState::Signon(SignonStage::AwaitSpawn)
+    );
+    let put_in = h.server.game().client_put_in_server_calls;
+    a.send_stringcmd(&format!("spawn {old_count} 0"));
+    for _ in 0..50 {
+        h.step(&mut [&mut a], 1);
+        if h.server.client_state(slot) != ClientState::Signon(SignonStage::AwaitSpawn) {
+            break;
+        }
+    }
+    assert_eq!(h.server.game().client_put_in_server_calls, put_in);
+    assert_eq!(
+        h.server.client_state(slot),
+        ClientState::Signon(SignonStage::AwaitNew)
+    );
+
+    rejoined(&mut h, &mut [&mut a], "second");
+    assert_eq!(h.server.client_state(slot), ClientState::Active);
+    assert_eq!(h.server.game().client_put_in_server_calls, put_in + 1);
+}
+
+#[test]
+fn old_reliable_data_does_not_cross_the_change() {
+    let game = TestGame {
+        print_on_deactivate: true,
+        ..TestGame::default()
+    };
+    let mut h = Harness::with_game(4, game);
+    let mut a = joined(&mut h, "A", &mut []);
+    h.step(&mut [&mut a], 20);
+    let prints = opcodes(&a, svc::PRINT);
+
+    h.server.change_map(ServerMap::stub("second"));
+    rejoined(&mut h, &mut [&mut a], "second");
+    h.step(&mut [&mut a], 50);
+    // Only the banner of the new `new` stage: the game's message to the old map is gone.
+    assert_eq!(opcodes(&a, svc::PRINT), prints + 1);
+}
+
+#[test]
+fn baselines_are_rebuilt_for_the_new_map() {
+    let game = TestGame {
+        extra_entities: 5,
+        ..TestGame::default()
+    };
+    let mut h = Harness::with_game(4, game);
+    let mut a = joined(&mut h, "A", &mut []);
+    h.step(&mut [&mut a], 20);
+    let old_extras = server_extras(&h);
+    assert_eq!(non_player_entities(&h, &a), old_extras);
+
+    h.server.game_mut().extra_entities = 2;
+    h.server.change_map(ServerMap::stub("second"));
+    let new_extras = server_extras(&h);
+    assert_eq!(new_extras.len(), 2);
+    rejoined(&mut h, &mut [&mut a], "second");
+    let mut b = joined(&mut h, "B", &mut [&mut a]);
+    h.step(&mut [&mut a, &mut b], 20);
+    assert_eq!(non_player_entities(&h, &a), new_extras);
+    assert_eq!(non_player_entities(&h, &b), new_extras);
+}
+
+#[test]
+fn changelevel_restarts_the_signon_timeout() {
+    let cfg = ServerConfig {
+        max_clients: 4,
+        signon_timeout_secs: 2.0,
+        ..ServerConfig::default()
+    };
+    let mut h = Harness::with_config(cfg, TestGame::default());
+    let mut a = joined(&mut h, "A", &mut []);
+    h.step(&mut [&mut a], frames(3.0));
+    assert_eq!(h.server.client_state(0), ClientState::Active);
+
+    h.server.change_map(ServerMap::stub("second"));
+    h.step(&mut [&mut a], 1);
+    assert_ne!(h.server.client_state(0), ClientState::Free);
+    rejoined(&mut h, &mut [&mut a], "second");
+    assert_eq!(h.server.client_state(0), ClientState::Active);
+}
+
+#[test]
+fn reconnect_from_a_kicked_address_drops_stale_farewells() {
+    let mut h = Harness::new(4);
+    let mut a = joined(&mut h, "A", &mut []);
+    h.step(&mut [&mut a], 20);
+
+    // The probe starts over: `getchallenge`, then `connect`.
+    a.connect();
+    for _ in 0..50 {
+        h.now += FRAME;
+        a.pump(h.now);
+        if a.state() == &ProbeState::AwaitConnection {
+            break;
+        }
+        h.server.frame(&mut h.hub, h.now);
+    }
+    assert_eq!(a.state(), &ProbeState::AwaitConnection);
+    // Kicked between frames: its farewells go out at the end of the frame that also accepts
+    // the probe's `connect`.
+    h.server.kick(0, "stale");
+    h.server.frame(&mut h.hub, h.now);
+    for _ in 0..300 {
+        h.step(&mut [&mut a], 1);
+        if a.state() == &ProbeState::InGame {
+            break;
+        }
+    }
+    assert_eq!(a.state(), &ProbeState::InGame);
+    assert_eq!(h.server.client_state(0), ClientState::Active);
+}
+
+#[test]
+fn game_cannot_set_userinfo_of_a_free_slot() {
+    let mut h = Harness::new(4);
+    let mut a = joined(&mut h, "A", &mut []);
+    let mut b = joined(&mut h, "B", &mut [&mut a]);
+    let slot_a = slot_of(&a);
+    a.send_stringcmd("disconnect");
+    h.step(&mut [&mut a, &mut b], 20);
+    assert_eq!(h.server.client_state(slot_a), ClientState::Free);
+    assert_eq!(b.userinfos()[&slot_a], "");
+    let updates = opcodes(&b, svc::UPDATEUSERINFO);
+
+    b.send_stringcmd(&format!("setkey {slot_a} name Ghost"));
+    h.step(&mut [&mut b], 20);
+    assert!(h.server.game().commands.iter().any(|c| c[0] == "setkey"));
+    assert_eq!(b.userinfos()[&slot_a], "");
+    assert_eq!(opcodes(&b, svc::UPDATEUSERINFO), updates);
 }

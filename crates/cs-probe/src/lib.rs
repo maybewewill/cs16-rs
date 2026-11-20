@@ -497,6 +497,7 @@ impl<T: PacketTransport> ProbeClient<T> {
         self.ctx.baselines.clear();
         self.ctx.instance_baselines.clear();
         self.ctx.entity_frames.clear();
+        self.ctx.clientdata_history.clear();
         self.server_info = None;
         self.client_data = None;
         self.sent_cmds.clear();
@@ -606,10 +607,10 @@ mod tests {
     use cs_proto48::delta::DeltaRegistry;
     use cs_proto48::handshake::{encode_s2c_challenge, encode_s2c_connection, encode_s2c_reject};
     use cs_proto48::messages::{
-        ClcMessage, ENTITY_NORMAL, parse_clc_stream, svc, write_svc_disconnect,
-        write_svc_packetentities_full, write_svc_resourcelist, write_svc_resourcerequest,
-        write_svc_serverinfo, write_svc_signonnum, write_svc_spawnbaseline, write_svc_stufftext,
-        write_svc_updateuserinfo,
+        ClcMessage, ENTITY_NORMAL, parse_clc_stream, svc, write_svc_clientdata,
+        write_svc_disconnect, write_svc_packetentities_full, write_svc_resourcelist,
+        write_svc_resourcerequest, write_svc_serverinfo, write_svc_signonnum,
+        write_svc_spawnbaseline, write_svc_stufftext, write_svc_updateuserinfo,
     };
     use cs_proto48::netchan::FRAGMENT_S2C_MAX_SIZE;
     use cs_transport::{LoopbackEndpoint, LoopbackHub};
@@ -1086,8 +1087,11 @@ mod tests {
                 ent.to_delta(server.reg.get("entity_state_t").unwrap()),
             ),
         );
-        let update =
-            msg(|w| write_svc_packetentities_full(w, &server.reg, 32, &baselines, &[ent], 0.0));
+        let update = msg(|w| {
+            let schema = server.reg.get("clientdata_t").unwrap();
+            write_svc_clientdata(w, schema, None, &GoldSrcClientData::default(), 0.0);
+            write_svc_packetentities_full(w, &server.reg, 32, &baselines, &[ent], 0.0);
+        });
         let packet = server.chan.build_packet(&update);
         server.send_raw(&packet);
         now += SEND_INTERVAL;
@@ -1096,6 +1100,8 @@ mod tests {
         assert_eq!(probe.state(), &ProbeState::InGame);
         assert_eq!(probe.entities().len(), 1);
         assert!(probe.server_info().is_some());
+        assert!(probe.client_data().is_some());
+        assert!(!probe.ctx.clientdata_history.is_empty());
         probe.force_delta_seq(Some(9));
 
         let reply = exchange(
@@ -1111,6 +1117,7 @@ mod tests {
         assert!(probe.client_data().is_none());
         assert!(probe.ctx.baselines.is_empty());
         assert!(probe.ctx.entity_frames.is_empty());
+        assert!(probe.ctx.clientdata_history.is_empty());
         assert!(probe.last_entity_seq.is_none());
         // The caller's override survives the reconnect.
         assert!(reply.iter().flatten().any(|m| m == &ClcMessage::Delta(9)));
