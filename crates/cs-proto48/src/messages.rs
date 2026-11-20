@@ -180,10 +180,14 @@ pub const ENTITY_BEAM: u8 = 2;
 const RESOURCE_INDEX_BITS: u32 = 12;
 const RES_CUSTOM: u32 = 1 << 2;
 
-const SND_FL_VOLUME: u32 = 1 << 0;
-const SND_FL_ATTENUATION: u32 = 1 << 1;
-const SND_FL_LARGE_INDEX: u32 = 1 << 2;
-const SND_FL_PITCH: u32 = 1 << 3;
+/// `SoundMsg::flags` bit: the volume byte follows (otherwise 255).
+pub const SND_FL_VOLUME: u32 = 1 << 0;
+/// `SoundMsg::flags` bit: the attenuation byte follows (otherwise 1.0).
+pub const SND_FL_ATTENUATION: u32 = 1 << 1;
+/// `SoundMsg::flags` bit: the sound index takes 16 bits. The writer sets it by itself.
+pub const SND_FL_LARGE_INDEX: u32 = 1 << 2;
+/// `SoundMsg::flags` bit: the pitch byte follows (otherwise 100).
+pub const SND_FL_PITCH: u32 = 1 << 3;
 
 /// Parsed `svc_serverinfo` payload (`SV_SendServerinfo_internal`, `sv_main.cpp:1129-1205`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1282,6 +1286,20 @@ pub fn write_svc_print(w: &mut MsgWriter, text: &str) {
 pub fn write_svc_stufftext(w: &mut MsgWriter, cmd: &str) {
     w.write_u8(svc::STUFFTEXT);
     w.write_str(cmd);
+}
+
+/// `svc_centerprint`: `text` shown in the middle of the client's screen.
+pub fn write_svc_centerprint(w: &mut MsgWriter, text: &str) {
+    w.write_u8(svc::CENTERPRINT);
+    w.write_str(text);
+}
+
+/// `svc_temp_entity`: the `te_type` byte and then `payload` as is; the caller encodes the
+/// payload for the effect type.
+pub fn write_svc_temp_entity(w: &mut MsgWriter, te_type: u8, payload: &[u8]) {
+    w.write_u8(svc::TEMP_ENTITY);
+    w.write_u8(te_type);
+    w.write_bytes(payload);
 }
 
 pub fn write_svc_disconnect(w: &mut MsgWriter, reason: &str) {
@@ -2452,6 +2470,29 @@ mod tests {
 
         assert_eq!(pe.removed, vec![40, 41]);
         assert_eq!(decode_entities(&reg, max_clients, &pe.entities), to);
+    }
+
+    #[test]
+    fn centerprint_and_temp_entity_roundtrip() {
+        // TE_EXPLOSION (3): 11 payload bytes.
+        let payload: Vec<u8> = (20..31).collect();
+        let mut w = MsgWriter::new();
+        write_svc_centerprint(&mut w, "Round start");
+        write_svc_temp_entity(&mut w, 3, &payload);
+        write_svc_centerprint(&mut w, "");
+        let parsed = parse_svc_stream(w.as_slice(), &mut SvcParseContext::new()).unwrap();
+        assert_eq!(
+            parsed,
+            vec![
+                SvcMessage::CenterPrint("Round start".to_string()),
+                SvcMessage::TempEntity {
+                    te_type: 3,
+                    raw: payload
+                },
+                SvcMessage::CenterPrint(String::new()),
+            ]
+        );
+        assert_eq!(&w.as_slice()[..2], &[svc::CENTERPRINT, b'R']);
     }
 
     #[test]

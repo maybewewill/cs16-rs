@@ -20,6 +20,13 @@ use glam::Vec3;
 /// Light styles sent in the `spawn` stage.
 pub(crate) const MAX_LIGHTSTYLES: u8 = 64;
 
+/// The light styles of a fresh map: style 0 is steady full brightness, the rest are empty.
+pub(crate) fn default_light_styles() -> Vec<String> {
+    (0..MAX_LIGHTSTYLES)
+        .map(|style| if style == 0 { "m" } else { "" }.to_string())
+        .collect()
+}
+
 /// One `svc_updateuserinfo` entry.
 pub(crate) struct UserInfoEntry {
     pub(crate) slot: u8,
@@ -118,19 +125,24 @@ pub(crate) fn write_spawn_baselines(
 }
 
 /// Rest of the answer to `spawn`, after the game put the player in: view angles, time, every
-/// connected client's userinfo, light styles and `svc_signonnum 1`.
+/// connected client's userinfo, the stored light styles, the init buffer (messages the game
+/// sent to `MsgDest::Init` while the map was activated, complete as it wrote them) and
+/// `svc_signonnum 1`.
 pub(crate) fn write_spawn_stage(
     w: &mut MsgWriter,
     view_angles: Vec3,
     time: f64,
     userinfos: &[UserInfoEntry],
+    light_styles: &[String],
+    init: &[u8],
 ) {
     write_svc_setangle(w, view_angles);
     write_svc_time(w, time as f32);
     write_userinfos(w, userinfos);
-    for style in 0..MAX_LIGHTSTYLES {
-        write_svc_lightstyle(w, style, if style == 0 { "m" } else { "" });
+    for (style, pattern) in light_styles.iter().enumerate().take(MAX_LIGHTSTYLES.into()) {
+        write_svc_lightstyle(w, style as u8, pattern);
     }
+    w.write_bytes(init);
     write_svc_signonnum(w, 1);
 }
 
@@ -274,14 +286,18 @@ mod tests {
         };
         let mut w = MsgWriter::new();
         write_spawn_baselines(&mut w, &deltas, 8, &[(40, state)], 1.0);
+        let mut init = MsgWriter::new();
+        write_svc_print(&mut init, "init\n");
         write_spawn_stage(
             &mut w,
             Vec3::new(0.0, 90.0, 0.0),
             1.5,
             &[entry(0, 1, "\\name\\A"), entry(1, 2, "\\name\\B")],
+            &default_light_styles(),
+            init.as_slice(),
         );
         let msgs = parse(w);
-        assert_eq!(msgs.len(), 1 + 1 + 1 + 2 + 64 + 1);
+        assert_eq!(msgs.len(), 1 + 1 + 1 + 2 + 64 + 1 + 1);
         let SvcMessage::SpawnBaseline { baselines, .. } = &msgs[0] else {
             panic!("expected spawnbaseline, got {:?}", msgs[0]);
         };
@@ -307,7 +323,8 @@ mod tests {
                 pattern: String::new()
             }
         );
-        assert_eq!(msgs[5 + 64], SvcMessage::SignonNum(1));
+        assert_eq!(msgs[5 + 64], SvcMessage::Print("init\n".to_string()));
+        assert_eq!(msgs[5 + 65], SvcMessage::SignonNum(1));
     }
 
     #[test]

@@ -137,6 +137,7 @@ impl<G: GameDll> Server<G> {
             view.active = false;
         }
         self.spawn_count += 1;
+        self.outbox.reset_map_state();
         self.edicts = self
             .edicts
             .successor(self.cfg.max_clients, DEFAULT_MAX_EDICTS, self.time);

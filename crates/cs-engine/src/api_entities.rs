@@ -277,6 +277,7 @@ mod tests {
 
     use cs_assets::bsp::BspMap;
     use cs_cvar::{CVarFlags, CVarRegistry};
+    use cs_proto48::usermsg::UserMsgRegistry;
     use cs_vfs::{Vfs, VfsConfig};
     use glam::Vec3;
 
@@ -290,6 +291,7 @@ mod tests {
         edicts: EdictPool,
         precache: PrecacheTables,
         cvars: CVarRegistry,
+        usermsgs: UserMsgRegistry,
         map: ServerMap,
         outbox: Outbox,
         clients: Vec<ClientView>,
@@ -305,6 +307,7 @@ mod tests {
                 edicts: EdictPool::new(max_clients, max_edicts),
                 precache: PrecacheTables::new(&map.path, map.submodel_count),
                 cvars: CVarRegistry::new_empty(),
+                usermsgs: UserMsgRegistry::cs16_default(),
                 map,
                 outbox: Outbox::new(max_clients),
                 clients: (0..max_clients).map(|_| ClientView::default()).collect(),
@@ -316,6 +319,7 @@ mod tests {
                 &mut self.edicts,
                 &mut self.precache,
                 &mut self.cvars,
+                &self.usermsgs,
                 &self.map,
                 10.0,
                 0.25,

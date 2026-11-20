@@ -195,8 +195,12 @@ impl<G: GameDll> Server<G> {
     /// Spawns the map's entities, lets the game activate the current map, then locks the
     /// precache tables and computes the spawn baselines.
     pub(crate) fn activate_map(&mut self) {
+        // While the game spawns entities and activates the map, messages sent to
+        // `MsgDest::Init` are kept for the clients that enter later.
+        self.outbox.init_open = true;
         self.spawn_map_entities();
         self.with_game(|game, eng| game.server_activate(eng));
+        self.outbox.init_open = false;
         self.precache.lock();
         self.compute_baselines();
     }
@@ -261,6 +265,12 @@ impl<G: GameDll> Server<G> {
             .map(|c| c.frames.stored())
     }
 
+    /// Bytes in the init buffer: what the game sent to `MsgDest::Init` while activating the
+    /// current map, at most [`MAX_INIT_BUFFER`](crate::MAX_INIT_BUFFER).
+    pub fn init_buffer_len(&self) -> usize {
+        self.outbox.init.len()
+    }
+
     pub fn net_stats(&self) -> NetStats {
         self.net_stats
     }
@@ -288,12 +298,17 @@ impl<G: GameDll> Server<G> {
         result
     }
 
-    /// Calls into the game without draining the outbox.
+    /// Calls into the game without draining the outbox. The game sees the sign-on state every
+    /// slot has now.
     pub(crate) fn call_game<R>(&mut self, f: impl FnOnce(&mut G, &mut EngineApi<'_>) -> R) -> R {
+        for (view, client) in self.views.iter_mut().zip(&self.clients) {
+            view.state = client.state;
+        }
         let mut eng = EngineApi::new(
             &mut self.edicts,
             &mut self.precache,
             &mut self.cvars,
+            &self.usermsgs,
             &self.map,
             self.time,
             self.frametime,
@@ -318,13 +333,6 @@ impl<G: GameDll> Server<G> {
                 }
                 if client.queue_unreliable(unreliable.as_slice()) {
                     self.net_stats.unreliable_dropped += 1;
-                }
-            }
-
-            let all = std::mem::take(&mut self.outbox.reliable_all);
-            if !all.is_empty() {
-                for client in self.clients.iter_mut().filter(|c| c.state.is_past_new()) {
-                    client.chan.write_reliable(all.as_slice());
                 }
             }
 
@@ -628,7 +636,14 @@ impl<G: GameDll> Server<G> {
             .unwrap_or_default();
         let userinfos = self.userinfo_entries(|_| true);
         let mut w = MsgWriter::new();
-        write_spawn_stage(&mut w, view_angles, self.time, &userinfos);
+        write_spawn_stage(
+            &mut w,
+            view_angles,
+            self.time,
+            &userinfos,
+            &self.outbox.light_styles,
+            &self.outbox.init,
+        );
         let client = &mut self.clients[index];
         client.chan.write_reliable(w.as_slice());
         client.state = ClientState::Signon(SignonStage::AwaitSendEnts);

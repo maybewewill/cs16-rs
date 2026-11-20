@@ -9,20 +9,31 @@ use cs_proto48::info::InfoString;
 use cs_proto48::messages::ENTITY_NORMAL;
 use cs_proto48::usermsg::UserMsgRegistry;
 
+use crate::client::ClientState;
 use crate::edict::{EdictId, EdictPool, EntVars};
 use crate::map::ServerMap;
 use crate::precache::PrecacheTables;
+use crate::signon::default_light_styles;
 
 /// `FL_DUCKING` in `EntVars::flags`.
 const FL_DUCKING: u32 = 1 << 14;
 
-/// Messages and kicks the game queued during one call; the server drains
-/// them afterwards. Per-client buffers are indexed by slot.
+/// Messages and kicks the game queued during one call, which the server drains afterwards,
+/// and the message state that outlives a call: the init buffer and the light styles. Per-client
+/// buffers are indexed by slot; a destination is resolved to slots when the game sends, so each
+/// buffer keeps the order the game wrote in.
 pub(crate) struct Outbox {
     pub(crate) reliable: Vec<MsgWriter>,
     pub(crate) unreliable: Vec<MsgWriter>,
-    pub(crate) reliable_all: MsgWriter,
     pub(crate) kicks: Vec<(u8, String)>,
+    /// Messages sent to `MsgDest::Init` during map activation, replayed to every client that
+    /// enters the server. Cleared when the map changes.
+    pub(crate) init: Vec<u8>,
+    /// The map is being activated (`spawn_entity` and `server_activate` calls): `Init` messages
+    /// are stored.
+    pub(crate) init_open: bool,
+    /// The 64 light style patterns, sent to every client that enters the server.
+    pub(crate) light_styles: Vec<String>,
 }
 
 impl Outbox {
@@ -32,9 +43,18 @@ impl Outbox {
         Self {
             reliable: vec![MsgWriter::new(); slots],
             unreliable: vec![MsgWriter::new(); slots],
-            reliable_all: MsgWriter::new(),
             kicks: Vec::new(),
+            init: Vec::new(),
+            init_open: false,
+            light_styles: default_light_styles(),
         }
+    }
+
+    /// Forgets what belonged to the previous map: the init buffer and the light styles.
+    pub(crate) fn reset_map_state(&mut self) {
+        self.init.clear();
+        self.init_open = false;
+        self.light_styles = default_light_styles();
     }
 }
 
@@ -45,6 +65,9 @@ pub(crate) struct ClientView {
     /// The slot holds a connection; the userinfo of a free slot cannot be changed.
     pub(crate) in_use: bool,
     pub(crate) active: bool,
+    /// Sign-on state of the slot, copied from the server before every call into the game; it
+    /// decides who a message destination reaches.
+    pub(crate) state: ClientState,
     /// Set when the game changed `userinfo`; the server broadcasts it.
     pub(crate) userinfo_dirty: bool,
 }
@@ -56,14 +79,14 @@ pub struct EngineApi<'a> {
     pub(crate) edicts: &'a mut EdictPool,
     pub(crate) precache: &'a mut PrecacheTables,
     pub(crate) cvars: &'a mut CVarRegistry,
+    /// The user messages the game registered; `send_usermsg` encodes with their ids.
+    pub(crate) usermsgs: &'a UserMsgRegistry,
     pub(crate) map: &'a ServerMap,
     pub(crate) time: f64,
     /// Real seconds of the current server frame; 0 outside a frame.
     pub(crate) frametime: f32,
     pub(crate) outbox: &'a mut Outbox,
     pub(crate) clients: &'a mut [ClientView],
-    /// Handed out for out-of-range slots; its contents are discarded.
-    scratch: MsgWriter,
 }
 
 impl<'a> EngineApi<'a> {
@@ -72,6 +95,7 @@ impl<'a> EngineApi<'a> {
         edicts: &'a mut EdictPool,
         precache: &'a mut PrecacheTables,
         cvars: &'a mut CVarRegistry,
+        usermsgs: &'a UserMsgRegistry,
         map: &'a ServerMap,
         time: f64,
         frametime: f32,
@@ -84,38 +108,17 @@ impl<'a> EngineApi<'a> {
             edicts,
             precache,
             cvars,
+            usermsgs,
             map,
             time,
             frametime,
             outbox,
             clients,
-            scratch: MsgWriter::new(),
         }
     }
 }
 
 impl EngineApi<'_> {
-    /// Reliable buffer of `slot`.
-    pub fn reliable(&mut self, slot: u8) -> &mut MsgWriter {
-        match self.outbox.reliable.get_mut(usize::from(slot)) {
-            Some(writer) => writer,
-            None => discard(&mut self.scratch),
-        }
-    }
-
-    /// Unreliable buffer of `slot`.
-    pub fn unreliable(&mut self, slot: u8) -> &mut MsgWriter {
-        match self.outbox.unreliable.get_mut(usize::from(slot)) {
-            Some(writer) => writer,
-            None => discard(&mut self.scratch),
-        }
-    }
-
-    /// Reliable buffer sent to every client.
-    pub fn reliable_all(&mut self) -> &mut MsgWriter {
-        &mut self.outbox.reliable_all
-    }
-
     pub fn client_key(&self, slot: u8, key: &str) -> Option<&str> {
         self.clients.get(usize::from(slot))?.userinfo.get(key)
     }
@@ -146,12 +149,6 @@ impl EngineApi<'_> {
             .get(usize::from(slot))
             .is_some_and(|c| c.active)
     }
-}
-
-/// Empties the scratch writer and hands it out.
-fn discard(scratch: &mut MsgWriter) -> &mut MsgWriter {
-    *scratch = MsgWriter::new();
-    scratch
 }
 
 /// What a game implements. The engine calls it with a fresh [`EngineApi`]
@@ -241,6 +238,7 @@ pub fn entity_state_from_vars(index: u16, v: &EntVars) -> GoldSrcEntityState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api_messages::MsgDest;
     use crate::edict::DEFAULT_MAX_EDICTS;
     use glam::Vec3;
 
@@ -341,6 +339,7 @@ mod tests {
         edicts: EdictPool,
         precache: PrecacheTables,
         cvars: CVarRegistry,
+        usermsgs: UserMsgRegistry,
         map: ServerMap,
         outbox: Outbox,
         clients: Vec<ClientView>,
@@ -353,6 +352,7 @@ mod tests {
                 edicts: EdictPool::new(max_clients, DEFAULT_MAX_EDICTS),
                 precache: PrecacheTables::new(&map.path, map.submodel_count),
                 cvars: CVarRegistry::new_empty(),
+                usermsgs: UserMsgRegistry::cs16_default(),
                 map,
                 outbox: Outbox::new(max_clients),
                 clients: (0..max_clients).map(|_| ClientView::default()).collect(),
@@ -364,6 +364,7 @@ mod tests {
                 &mut self.edicts,
                 &mut self.precache,
                 &mut self.cvars,
+                &self.usermsgs,
                 &self.map,
                 1.0,
                 0.0,
@@ -374,39 +375,18 @@ mod tests {
     }
 
     #[test]
-    fn per_slot_writers_are_independent() {
-        let mut f = Fixture::new(2);
-        let mut eng = f.api();
-        eng.reliable(0).write_u8(1);
-        eng.reliable(1).write_u8(2);
-        eng.reliable(1).write_u8(3);
-        eng.unreliable(0).write_u8(4);
-        eng.reliable_all().write_u8(5);
-        drop(eng);
-        assert_eq!(f.outbox.reliable[0].as_slice(), &[1]);
-        assert_eq!(f.outbox.reliable[1].as_slice(), &[2, 3]);
-        assert_eq!(f.outbox.unreliable[0].as_slice(), &[4]);
-        assert!(f.outbox.unreliable[1].is_empty());
-        assert_eq!(f.outbox.reliable_all.as_slice(), &[5]);
-    }
-
-    #[test]
     fn out_of_range_slots_do_not_panic() {
         let mut f = Fixture::new(2);
         let mut eng = f.api();
-        eng.reliable(2).write_u8(1);
-        eng.unreliable(255).write_u8(2);
-        // The scratch writer starts empty every time it is handed out.
-        assert!(eng.reliable(3).is_empty());
+        eng.send(MsgDest::One(2), &[1]);
+        eng.send(MsgDest::OneUnreliable(255), &[2]);
         assert_eq!(eng.client_key(2, "name"), None);
         eng.set_client_key(2, "name", "x");
         eng.kick(2, "bye");
         assert!(!eng.is_client_active(2));
         assert!(!eng.is_client_active(255));
-        drop(eng);
         assert!(f.outbox.reliable.iter().all(MsgWriter::is_empty));
         assert!(f.outbox.unreliable.iter().all(MsgWriter::is_empty));
-        assert!(f.outbox.reliable_all.is_empty());
         assert!(f.outbox.kicks.is_empty());
         assert!(f.clients.iter().all(|c| !c.userinfo_dirty));
     }
@@ -423,7 +403,6 @@ mod tests {
         eng.set_client_key(1, "model", "gign");
         assert_eq!(eng.client_key(1, "model"), Some("gign"));
         assert_eq!(eng.client_key(0, "model"), None);
-        drop(eng);
         assert!(f.clients[1].userinfo_dirty);
         assert!(!f.clients[0].userinfo_dirty);
     }
@@ -434,7 +413,6 @@ mod tests {
         let mut eng = f.api();
         eng.set_client_key(0, "name", "Ghost");
         assert_eq!(eng.client_key(0, "name"), None);
-        drop(eng);
         assert!(!f.clients[0].userinfo_dirty);
     }
 
@@ -445,7 +423,6 @@ mod tests {
         eng.kick(1, "first");
         eng.kick(1, "second");
         eng.kick(0, "other");
-        drop(eng);
         assert_eq!(
             f.outbox.kicks,
             vec![(1, "first".to_string()), (0, "other".to_string())]

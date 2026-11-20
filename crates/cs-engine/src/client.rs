@@ -26,16 +26,17 @@ pub enum SignonStage {
     AwaitSendEnts,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ClientState {
+    #[default]
     Free,
     Signon(SignonStage),
     Active,
 }
 
 impl ClientState {
-    /// Past `new`: the client has the server info and receives `reliable_all` and userinfo
-    /// broadcasts.
+    /// Past `new`: the client has the server info and receives `MsgDest::All` messages and
+    /// userinfo broadcasts.
     pub(crate) fn is_past_new(self) -> bool {
         matches!(
             self,

@@ -1,6 +1,7 @@
 //! Server engine: the equivalent of the original game's dedicated server.
 
 mod api_entities;
+mod api_messages;
 pub mod client;
 pub mod collision;
 mod connect;
@@ -17,6 +18,7 @@ mod signon;
 pub mod usercmd;
 
 pub use client::{ClientState, MAX_CLIENT_INCOMING_STREAM, MAX_REFUSED_STREAMS, SignonStage};
+pub use api_messages::{MAX_INIT_BUFFER, MAX_MESSAGE_TEXT, MsgDest};
 pub use collision::WorldCollision;
 pub use edict::{DEFAULT_MAX_EDICTS, EDICT_REUSE_DELAY, Edict, EdictId, EdictPool, EntVars};
 pub use frame::{ClientFrame, FrameRing, MAX_DATAGRAM, UPDATE_BACKUP, clamp_rate, update_interval};

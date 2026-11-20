@@ -40,6 +40,8 @@ const MAX_BACKUP_CMDS: usize = 2;
 const MAX_NEW_CMDS: usize = 16;
 /// Reason given when the server demands file consistency checks the probe cannot answer.
 const CONSISTENCY_REASON: &str = "consistency required: set mp_consistency 0";
+/// Messages [`ProbeClient::messages`] keeps.
+pub const MESSAGE_LOG_CAPACITY: usize = 1024;
 /// Reason given when `svc_resourcelist` arrives before `svc_serverinfo`.
 const NO_SERVERINFO_REASON: &str = "resourcelist before serverinfo";
 
@@ -104,6 +106,8 @@ pub struct ProbeClient<T: PacketTransport> {
     client_data: Option<GoldSrcClientData>,
     userinfos: BTreeMap<u8, String>,
     opcode_log: Vec<u8>,
+    /// The last [`MESSAGE_LOG_CAPACITY`] messages received, without the per-update ones.
+    messages: VecDeque<SvcMessage>,
     stats: ProbeStats,
     /// Arrival times of entity updates within the last second.
     frame_times: VecDeque<f64>,
@@ -146,6 +150,7 @@ impl<T: PacketTransport> ProbeClient<T> {
             client_data: None,
             userinfos: BTreeMap::new(),
             opcode_log: Vec::new(),
+            messages: VecDeque::new(),
             stats: ProbeStats::default(),
             frame_times: VecDeque::new(),
             cmd_queue: VecDeque::new(),
@@ -313,6 +318,13 @@ impl<T: PacketTransport> ProbeClient<T> {
     }
 
     /// Opcode of every decoded server message in arrival order; a user message by its id.
+    /// The last 1024 messages received, oldest first, without `svc_nop`, `svc_time`,
+    /// `svc_clientdata` and the entity updates that every frame carries. User messages are
+    /// decoded. A map change does not clear it.
+    pub fn messages(&self) -> &VecDeque<SvcMessage> {
+        &self.messages
+    }
+
     pub fn opcode_log(&self) -> &[u8] {
         &self.opcode_log
     }
@@ -430,6 +442,7 @@ impl<T: PacketTransport> ProbeClient<T> {
                 Ok(messages) => {
                     for message in messages {
                         self.opcode_log.push(message.opcode());
+                        self.log_message(&message);
                         self.handle_svc(message, now);
                     }
                 }
@@ -439,6 +452,23 @@ impl<T: PacketTransport> ProbeClient<T> {
         if failed {
             self.stats.parse_errors += 1;
         }
+    }
+
+    /// Keeps `message` in the bounded message log unless it is one of the per-update ones.
+    fn log_message(&mut self, message: &SvcMessage) {
+        if matches!(
+            message,
+            SvcMessage::Nop
+                | SvcMessage::Time(_)
+                | SvcMessage::ClientData { .. }
+                | SvcMessage::PacketEntities(_)
+        ) {
+            return;
+        }
+        if self.messages.len() >= MESSAGE_LOG_CAPACITY {
+            self.messages.pop_front();
+        }
+        self.messages.push_back(message.clone());
     }
 
     fn handle_svc(&mut self, message: SvcMessage, now: f64) {
@@ -624,7 +654,8 @@ mod tests {
         ClcMessage, ENTITY_NORMAL, parse_clc_stream, svc, write_svc_clientdata,
         write_svc_disconnect, write_svc_packetentities_full, write_svc_resourcelist,
         write_svc_resourcerequest, write_svc_serverinfo, write_svc_signonnum,
-        write_svc_spawnbaseline, write_svc_stufftext, write_svc_updateuserinfo,
+        write_svc_print, write_svc_spawnbaseline, write_svc_stufftext, write_svc_time,
+        write_svc_updateuserinfo,
     };
     use cs_proto48::netchan::FRAGMENT_S2C_MAX_SIZE;
     use cs_transport::{LoopbackEndpoint, LoopbackHub};
@@ -1135,6 +1166,50 @@ mod tests {
         assert!(probe.last_entity_seq.is_none());
         // The caller's override survives the reconnect.
         assert!(reply.iter().flatten().any(|m| m == &ClcMessage::Delta(9)));
+    }
+
+    #[test]
+    fn message_log_skips_per_update_messages() {
+        let (mut server, mut probe) = ScriptedServer::new();
+        let mut now = handshake(&mut server, &mut probe);
+        server.recv_clc();
+        let stream = msg(|w| {
+            w.write_u8(svc::NOP);
+            write_svc_time(w, 1.0);
+            write_svc_print(w, "hello\n");
+            write_svc_clientdata(
+                w,
+                server.reg.get("clientdata_t").unwrap(),
+                None,
+                &GoldSrcClientData::default(),
+                1.0,
+            );
+            write_svc_stufftext(w, "echo hi\n");
+        });
+        exchange(&mut server, &mut probe, &mut now, &stream);
+        assert_eq!(
+            probe.messages().iter().cloned().collect::<Vec<_>>(),
+            vec![
+                SvcMessage::Print("hello\n".to_string()),
+                SvcMessage::StuffText("echo hi\n".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn message_log_keeps_the_last_1024() {
+        let (_server, mut probe) = ScriptedServer::new();
+        for i in 0..MESSAGE_LOG_CAPACITY + 10 {
+            probe.log_message(&SvcMessage::Print(i.to_string()));
+        }
+        probe.log_message(&SvcMessage::Nop);
+        probe.log_message(&SvcMessage::Time(2.0));
+        assert_eq!(probe.messages().len(), MESSAGE_LOG_CAPACITY);
+        assert_eq!(probe.messages().front(), Some(&SvcMessage::Print("10".to_string())));
+        assert_eq!(
+            probe.messages().back(),
+            Some(&SvcMessage::Print((MESSAGE_LOG_CAPACITY + 9).to_string()))
+        );
     }
 
     #[test]
