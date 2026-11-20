@@ -610,3 +610,89 @@ fn per_frame_message_flood_respects_client_limits() {
         "{updates_before} -> {updates_after}"
     );
 }
+
+#[test]
+fn audiences_skip_slots_that_are_not_in_game() {
+    let (mut h, mut a, mut b) = two_active(TestGame::default());
+    // C is connected but has not sent `new` yet: nothing of it is pumped.
+    let mut c = h.add_probe("C");
+    h.step(&mut [&mut a, &mut b], 1);
+    h.step(&mut [&mut a, &mut b, &mut c], 1);
+    for _ in 0..200 {
+        if h.server.client_state(2) == ClientState::Signon(SignonStage::AwaitNew) {
+            break;
+        }
+        h.step(&mut [&mut a, &mut b, &mut c], 1);
+    }
+    assert_eq!(
+        h.server.client_state(2),
+        ClientState::Signon(SignonStage::AwaitNew)
+    );
+    h.server.game_mut().act(|eng| {
+        eng.send(MsgDest::All, &print_bytes("all-pre-new"));
+        eng.send(MsgDest::Broadcast, &print_bytes("bc-pre-new"));
+        eng.send(MsgDest::Pvs(Vec3::ZERO), &print_bytes("pvs-pre-new"));
+        eng.send(MsgDest::OneUnreliable(2), &print_bytes("one-unrel-pre-new"));
+    });
+    h.step(&mut [&mut a, &mut b], 30);
+    assert_eq!(count_print(&a, "all-pre-new"), 1);
+    // C signs on completely; it never receives any of them.
+    h.step(&mut [&mut a, &mut b, &mut c], 300);
+    assert_eq!(c.state(), &ProbeState::InGame);
+    for text in ["all-pre-new", "bc-pre-new", "pvs-pre-new", "one-unrel-pre-new"] {
+        assert_eq!(count_print(&c, text), 0, "{text}");
+    }
+
+    // In sign-on but past `new`: reliable audiences reach it, unreliable ones skip it.
+    let mut d = h.add_probe("D");
+    for _ in 0..200 {
+        if h.server.client_state(3) == ClientState::Signon(SignonStage::AwaitSendRes) {
+            break;
+        }
+        h.step(&mut [&mut a, &mut b, &mut c, &mut d], 1);
+    }
+    assert_eq!(
+        h.server.client_state(3),
+        ClientState::Signon(SignonStage::AwaitSendRes)
+    );
+    h.server.game_mut().act(|eng| {
+        eng.send(MsgDest::Broadcast, &print_bytes("bc-signon"));
+        eng.send(MsgDest::Pvs(Vec3::ZERO), &print_bytes("pvs-signon"));
+        eng.send(MsgDest::OneUnreliable(3), &print_bytes("one-unrel-signon"));
+    });
+    h.step(&mut [&mut a, &mut b, &mut c], 30);
+    h.step(&mut [&mut a, &mut b, &mut c, &mut d], 300);
+    assert_eq!(d.state(), &ProbeState::InGame);
+    for text in ["bc-signon", "pvs-signon", "one-unrel-signon"] {
+        assert_eq!(count_print(&d, text), 0, "{text}");
+        assert_eq!(count_print(&a, text), if text == "one-unrel-signon" { 0 } else { 1 });
+    }
+}
+
+#[test]
+fn temp_entity_payload_limit_is_exact() {
+    let (mut h, mut a, mut b) = two_active(TestGame::default());
+    // svc byte + te_type + payload: at most MAX_MSGLEN bytes. The raw payload is not parsed
+    // as a real effect here, so only the engine's accounting is checked.
+    let before = h.server.net_stats();
+    h.server.game_mut().act(|eng| {
+        eng.temp_entity(MsgDest::One(0), 3, &vec![0; MAX_MSGLEN - 2]);
+        eng.temp_entity(MsgDest::One(1), 3, &vec![0; MAX_MSGLEN - 1]);
+    });
+    h.step(&mut [&mut a, &mut b], 1);
+    assert!(h.server.client_reliable_backlog(0) > 0);
+    assert_eq!(h.server.client_reliable_backlog(1), 0);
+    assert_eq!(h.server.net_stats().send_failures, before.send_failures);
+}
+
+#[test]
+fn oversized_broadcast_beside_an_update_is_counted_as_dropped() {
+    let (mut h, mut a, mut b) = two_active(TestGame::default());
+    let before = h.server.net_stats().unreliable_dropped;
+    h.server.game_mut().act(|eng| {
+        eng.send(MsgDest::Broadcast, &vec![svc::NOP; MAX_MSGLEN]);
+    });
+    h.step(&mut [&mut a, &mut b], 30);
+    assert!(h.server.net_stats().unreliable_dropped > before);
+    assert_eq!(a.state(), &ProbeState::InGame);
+}

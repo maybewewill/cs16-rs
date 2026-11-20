@@ -317,7 +317,6 @@ impl<T: PacketTransport> ProbeClient<T> {
         &self.userinfos
     }
 
-    /// Opcode of every decoded server message in arrival order; a user message by its id.
     /// The last 1024 messages received, oldest first, without `svc_nop`, `svc_time`,
     /// `svc_clientdata` and the entity updates that every frame carries. User messages are
     /// decoded. A map change does not clear it.
@@ -325,6 +324,7 @@ impl<T: PacketTransport> ProbeClient<T> {
         &self.messages
     }
 
+    /// Opcode of every decoded server message in arrival order; a user message by its id.
     pub fn opcode_log(&self) -> &[u8] {
         &self.opcode_log
     }
