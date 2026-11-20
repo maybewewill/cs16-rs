@@ -99,6 +99,8 @@ pub struct TestGame {
     pub churn_extras: bool,
     /// Entity numbers `add_to_full_pack` was called for.
     pub add_to_full_pack_ents: BTreeSet<u16>,
+    /// `(viewer slot, entity number)` of every `add_to_full_pack` call.
+    pub add_to_full_pack_pairs: BTreeSet<(u8, u16)>,
     /// Result of `precache_model("models/late.mdl")` in `client_put_in_server`.
     pub late_precache: Option<Result<u16, PrecacheError>>,
     /// Every `argv` received by `client_command`.
@@ -234,12 +236,13 @@ impl GameDll for TestGame {
     fn add_to_full_pack(
         &mut self,
         _eng: &mut EngineApi<'_>,
-        _viewer: u8,
+        viewer: u8,
         ent: u16,
         _state: &mut GoldSrcEntityState,
     ) -> bool {
         self.add_to_full_pack_calls += 1;
         self.add_to_full_pack_ents.insert(ent);
+        self.add_to_full_pack_pairs.insert((viewer, ent));
         true
     }
 }

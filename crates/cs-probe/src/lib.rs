@@ -115,6 +115,8 @@ pub struct ProbeClient<T: PacketTransport> {
     /// Low byte of the netchan sequence of the last entity update.
     last_entity_seq: Option<u8>,
     forced_delta_seq: Option<u8>,
+    /// Test hook: `clc_delta` is left out of outgoing packets.
+    delta_suppressed: bool,
     /// Outgoing `clc_move` messages still to be sent with a corrupted checksum (test hook).
     corrupt_moves: u32,
     #[cfg(not(target_arch = "wasm32"))]
@@ -148,6 +150,7 @@ impl<T: PacketTransport> ProbeClient<T> {
             last_cmd: GoldSrcUserCmd::default(),
             last_entity_seq: None,
             forced_delta_seq: None,
+            delta_suppressed: false,
             corrupt_moves: 0,
             #[cfg(not(target_arch = "wasm32"))]
             capture: None,
@@ -230,6 +233,12 @@ impl<T: PacketTransport> ProbeClient<T> {
     /// Overrides the sequence sent in `clc_delta`; `None` restores the last entity update's.
     pub fn force_delta_seq(&mut self, seq: Option<u8>) {
         self.forced_delta_seq = seq;
+    }
+
+    /// Test hook: while `true`, outgoing packets carry no `clc_delta`, which asks the server for
+    /// full updates.
+    pub fn suppress_delta(&mut self, suppress: bool) {
+        self.delta_suppressed = suppress;
     }
 
     /// Test hook: flips the checksum byte of the next `n` outgoing `clc_move` messages, so the
@@ -552,7 +561,9 @@ impl<T: PacketTransport> ProbeClient<T> {
             self.sent_cmds.truncate(MAX_BACKUP_CMDS);
         }
 
-        if let Some(seq) = self.forced_delta_seq.or(self.last_entity_seq) {
+        if let Some(seq) = self.forced_delta_seq.or(self.last_entity_seq)
+            && !self.delta_suppressed
+        {
             write_clc_delta(&mut unreliable, seq);
         }
         let packet = chan.build_packet(&unreliable.into_bytes());
@@ -923,6 +934,17 @@ mod tests {
         let reply = exchange(&mut server, &mut probe, &mut now, &[]);
         assert!(reply.iter().flatten().any(|m| m == &ClcMessage::Delta(7)));
         probe.force_delta_seq(None);
+        let reply = exchange(&mut server, &mut probe, &mut now, &[]);
+        assert!(
+            reply
+                .iter()
+                .flatten()
+                .any(|m| m == &ClcMessage::Delta(entity_seq))
+        );
+        probe.suppress_delta(true);
+        let reply = exchange(&mut server, &mut probe, &mut now, &[]);
+        assert!(!reply.iter().flatten().any(|m| matches!(m, ClcMessage::Delta(_))));
+        probe.suppress_delta(false);
         let reply = exchange(&mut server, &mut probe, &mut now, &[]);
         assert!(
             reply

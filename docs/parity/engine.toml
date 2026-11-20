@@ -21,7 +21,7 @@ evidence = "crates/cs-probe/src/lib.rs::tests::signon_chain_reaches_in_game; unv
 [[item]]
 id = "delta_frames"
 status = "tested"
-evidence = "crates/cs-engine/src/frame.rs::tests::delta_base_requires_matching_recent_frame, update_interval_clamps; crates/cs-engine/tests/frames.rs::second_probe_sees_first_probe_entity, stationary_world_frames_are_small_deltas, stale_delta_request_falls_back_to_full_update, moved_entity_is_updated_and_removed_entity_disappears, update_rate_follows_userinfo, no_update_is_sent_before_it_is_due, oversized_frame_drops_entities_but_keeps_clientdata, hidden_entity_is_not_sent, choke_is_sent_when_rate_is_exhausted; frame contents, rate and choke behaviour unverified against a real client"
+evidence = "crates/cs-engine/src/frame.rs::tests::delta_base_requires_matching_recent_frame, update_interval_clamps; crates/cs-engine/tests/frames.rs::second_probe_sees_first_probe_entity, stationary_world_frames_are_small_deltas, stale_delta_request_falls_back_to_full_update, moved_entity_is_updated_and_removed_entity_disappears, update_rate_follows_userinfo, no_update_is_sent_before_it_is_due, oversized_frame_drops_entities_but_keeps_clientdata, hidden_entity_is_not_sent, choke_is_sent_when_rate_is_exhausted, omitting_clc_delta_requests_a_full_update, rejected_datagram_keeps_the_delta_request; frame contents, rate and choke behaviour unverified against a real client"
 
 [[item]]
 id = "msec_budget"

@@ -8,7 +8,7 @@ use cs_engine::{ClientState, ServerConfig};
 use cs_probe::{ProbeClient, ProbeState};
 use cs_proto48::delta::GoldSrcUserCmd;
 use cs_proto48::messages::svc;
-use cs_transport::{LoopbackEndpoint, MAX_UDP_PACKET};
+use cs_transport::{LoopbackEndpoint, MAX_UDP_PACKET, PacketTransport, PeerAddr};
 use glam::Vec3;
 
 type Probe = ProbeClient<LoopbackEndpoint>;
@@ -216,8 +216,36 @@ fn hidden_entity_is_not_sent() {
     assert!(b.entities().contains_key(&entity_number(&a)));
     let game = h.server.game();
     assert!(!game.add_to_full_pack_ents.contains(&hidden));
-    // The game was asked about the other player's entity.
+    // The game was asked about the other player's entity, and each viewer's own.
     assert!(game.add_to_full_pack_ents.contains(&entity_number(&a)));
+    for probe in [&a, &b] {
+        let slot = probe.player_slot().unwrap();
+        assert!(
+            game.add_to_full_pack_pairs
+                .contains(&(slot, entity_number(probe)))
+        );
+    }
+}
+
+#[test]
+fn omitting_clc_delta_requests_a_full_update() {
+    let mut h = Harness::new(4);
+    let mut probe = joined(&mut h, "A", &mut []);
+    h.step(&mut [&mut probe], 20);
+    assert!(probe.stats().delta_updates > 0);
+
+    probe.suppress_delta(true);
+    // Packets already on their way may still name a frame.
+    h.step(&mut [&mut probe], 5);
+    let (fulls, deltas) = (probe.stats().full_updates, probe.stats().delta_updates);
+    h.step(&mut [&mut probe], 20);
+    assert!(probe.stats().full_updates > fulls);
+    assert_eq!(probe.stats().delta_updates, deltas);
+
+    probe.suppress_delta(false);
+    h.step(&mut [&mut probe], 20);
+    assert!(probe.stats().delta_updates > deltas);
+    assert_eq!(probe.stats().parse_errors, 0);
 }
 
 #[test]
@@ -251,4 +279,31 @@ fn choke_count(probe: &Probe) -> usize {
         .iter()
         .filter(|&&op| op == svc::CHOKE)
         .count()
+}
+
+#[test]
+fn rejected_datagram_keeps_the_delta_request() {
+    let mut h = Harness::new(4);
+    let mut probe = joined(&mut h, "A", &mut []);
+    h.step(&mut [&mut probe], 20);
+    let (fulls, deltas) = (probe.stats().full_updates, probe.stats().delta_updates);
+
+    // The probe is not pumped: its last packet asked for a delta. Each frame the server gets
+    // only a stale datagram (sequence 1) from its address, which the netchan refuses.
+    let rejected = h.server.net_stats().datagrams_rejected;
+    let mut stale = vec![1u8; 16];
+    stale[..4].copy_from_slice(&1u32.to_le_bytes());
+    stale[4..8].copy_from_slice(&0u32.to_le_bytes());
+    for _ in 0..10 {
+        probe
+            .transport_mut()
+            .send(PeerAddr::Loopback(0), &stale)
+            .expect("loopback send");
+        h.step(&mut [], 1);
+    }
+    assert!(h.server.net_stats().datagrams_rejected >= rejected + 10);
+    h.step(&mut [&mut probe], 1);
+    assert_eq!(probe.stats().full_updates, fulls);
+    assert!(probe.stats().delta_updates > deltas);
+    assert_eq!(probe.stats().parse_errors, 0);
 }

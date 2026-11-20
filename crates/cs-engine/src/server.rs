@@ -350,6 +350,8 @@ impl<G: GameDll> Server<G> {
             self.net_stats.datagrams_rejected += 1;
             return;
         };
+        // The delta request is per packet: one without `clc_delta` asks for a full update.
+        self.clients[index].delta_seq = None;
         let Some(schema) = self.usercmd_schema.clone() else {
             return;
         };

@@ -275,9 +275,10 @@ impl<G: GameDll> Server<G> {
         Some(client.chan.build_packet(&payload))
     }
 
-    /// Entity states `slot` is sent: every live edict with a model and without `EF_NODRAW`
-    /// that is the viewer's own player, or that is potentially visible from the viewer's eye
-    /// and that the game's `add_to_full_pack` accepts. The caller drains the outbox.
+    /// Entity states `slot` is sent. Candidates are the viewer's own player edict, and every
+    /// other live edict with a model and without `EF_NODRAW` that is potentially visible from
+    /// the viewer's eye; each goes out when the game's `add_to_full_pack` accepts it, with the
+    /// game's edits. The caller drains the outbox.
     fn visible_entities(&mut self, slot: u8) -> Vec<GoldSrcEntityState> {
         let viewer = self.edicts.client(slot);
         let eye = self
@@ -285,29 +286,26 @@ impl<G: GameDll> Server<G> {
             .get(viewer)
             .map(|e| e.vars.origin + e.vars.view_ofs)
             .unwrap_or_default();
-        let mut own = None;
-        let mut candidates = Vec::new();
-        for (id, edict) in self.edicts.iter_live() {
-            let v = &edict.vars;
-            if v.modelindex == 0 || v.effects & EF_NODRAW != 0 {
-                continue;
-            }
-            if id == viewer {
-                own = Some(entity_state_from_vars(id.index, v));
-            } else if self.map.can_see(eye, v.origin + v.mins, v.origin + v.maxs) {
-                candidates.push(entity_state_from_vars(id.index, v));
-            }
-        }
-        let mut states: Vec<GoldSrcEntityState> = candidates
+        let candidates: Vec<GoldSrcEntityState> = self
+            .edicts
+            .iter_live()
+            .filter(|(id, edict)| {
+                let v = &edict.vars;
+                *id == viewer
+                    || (v.modelindex != 0
+                        && v.effects & EF_NODRAW == 0
+                        && self.map.can_see(eye, v.origin + v.mins, v.origin + v.maxs))
+            })
+            .map(|(id, edict)| entity_state_from_vars(id.index, &edict.vars))
+            .collect();
+        candidates
             .into_iter()
             .filter_map(|mut state| {
                 let ent = state.number;
                 self.call_game(|game, eng| game.add_to_full_pack(eng, slot, ent, &mut state))
                     .then_some(state)
             })
-            .collect();
-        states.extend(own);
-        states
+            .collect()
     }
 }
 
