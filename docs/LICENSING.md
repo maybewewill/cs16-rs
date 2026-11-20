@@ -17,7 +17,8 @@ The licences of both reference projects were checked on 2026-11-20 by reading th
 | ReGameDLL_CS | MIT | Copyright (c) 2015–2025 ReGameDLL_CS Contributors |
 
 Because both are MIT, their source code may be read and ported into this repository.
-Ported code keeps the attribution above, as the MIT licence requires. The protocol crate
+The copyright and permission notices are kept in `LICENSE` (this project) and
+`THIRD-PARTY-NOTICES.md` (ReHLDS and ReGameDLL_CS) at the repository root. The protocol crate
 `crates/cs-proto48` is ported from ReHLDS and ReGameDLL_CS on this basis.
 
 ## Valve Half-Life SDK caveat
