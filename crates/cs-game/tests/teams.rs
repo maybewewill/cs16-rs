@@ -7,8 +7,9 @@
 mod common;
 
 use common::{Bench, spawns};
-use cs_engine::GameDll;
 use cs_engine::consts::{MOVETYPE_WALK, SOLID_SLIDEBOX};
+use cs_engine::{EngineApi, GameDll};
+use cs_game::CsGame;
 use cs_game::menus::Menu;
 use cs_game::player::{DEAD_DYING, Player, Team};
 use cs_game::teams::JoinState;
@@ -24,16 +25,34 @@ fn player(b: &Bench, slot: usize) -> Player {
 /// Runs the console command `line` as the player of `slot`, at the start of the next frame.
 fn command(b: &mut Bench, slot: u8, line: &str) {
     let argv: Vec<String> = line.split_whitespace().map(str::to_string).collect();
-    b.run(move |game, eng| game.client_command(eng, slot, &argv));
+    b.run(move |game, eng| {
+        game.client_command(eng, slot, &argv);
+        commands_of(game, eng, slot, 2);
+    });
     // The probe reads what the game sent a few frames later (the server sends every other
     // frame or so).
     b.step(3);
 }
 
+/// `n` commands with time in them from the player of `slot`, which the game's per-player logic
+/// runs from (the probe of slot 0 sends its own every frame; the other slots have no client).
+fn commands_of(game: &mut CsGame, eng: &mut EngineApi<'_>, slot: u8, n: usize) {
+    for _ in 0..n {
+        let cmd = GoldSrcUserCmd {
+            msec: 10,
+            ..Default::default()
+        };
+        game.run_usercmd(eng, slot, &cmd, 0);
+    }
+}
+
 /// Puts a player in `slot` and lets it reach the team menu.
 fn enter(b: &mut Bench, slot: u8) {
-    b.run(move |game, eng| game.client_put_in_server(eng, slot));
-    b.step(4);
+    b.run(move |game, eng| {
+        game.client_put_in_server(eng, slot);
+        commands_of(game, eng, slot, 3);
+    });
+    b.step(2);
 }
 
 /// The player of `slot` picks `team_choice` (1 or 2) and then appearance `class`.
@@ -46,6 +65,7 @@ fn join(b: &mut Bench, slot: u8, team_choice: u8, class: u8) {
 /// A bench the probe has reached the team menu on.
 fn bench(map: Vec<cs_assets::bsp::Entity>, slots: u8) -> Bench {
     let mut b = Bench::stub_slots(map, slots);
+    b.idle_cmds = true;
     b.step(6);
     b
 }
@@ -185,8 +205,9 @@ fn jointeam_then_joinclass_spawns_on_the_team() {
     });
     assert_eq!(model.as_deref(), Some("arctic"));
     assert_eq!((v.solid, v.movetype), (SOLID_SLIDEBOX, MOVETYPE_WALK));
-    // On a terrorist spawn point (`info_player_deathmatch`, one unit up).
-    assert!(v.origin.x < 0.0 && v.origin.z == 1.0, "{:?}", v.origin);
+    // On a terrorist spawn point (`info_player_deathmatch`; the stub map has no floor, so it
+    // has begun to fall).
+    assert!(v.origin.x < 0.0 && v.origin.z <= 1.0, "{:?}", v.origin);
     assert!(b.messages().iter().any(|m| matches!(
         m,
         CsUserMsg::ScoreInfo {
@@ -689,4 +710,58 @@ fn commands_before_the_player_is_in_the_game_are_harmless() {
     let p = player(&b, 2);
     assert_eq!(p.team, Team::Terrorist);
     assert!(!p.alive);
+}
+
+fn menu_messages(b: &Bench) -> usize {
+    b.messages()
+        .iter()
+        .filter(|m| matches!(m, CsUserMsg::VguiMenu { .. } | CsUserMsg::ShowMenu { .. }))
+        .count()
+}
+
+#[test]
+fn menus_only_reach_a_client_that_is_in_game() {
+    // The engine puts the player in the server before the client has begun; the menus wait for
+    // its first command (`PlayerPreThink`), however many frames pass.
+    let mut b = Bench::stub(spawns(2, 2));
+    b.step(30);
+    assert_eq!(menu_messages(&b), 0);
+    let p = player(&b, 0);
+    assert_eq!((p.joining, p.menu), (JoinState::ShowLText, Menu::Off));
+
+    // The first commands bring the menu.
+    for _ in 0..4 {
+        b.probe.queue_cmd(GoldSrcUserCmd {
+            msec: 10,
+            ..Default::default()
+        });
+    }
+    b.step(6);
+    assert!(b.messages().iter().any(|m| is_team_menu(m, 0b11_0011)));
+    let p = player(&b, 0);
+    assert_eq!(
+        (p.joining, p.menu),
+        (JoinState::PickingTeam, Menu::ChooseTeam)
+    );
+}
+
+#[test]
+fn the_connect_userinfo_chooses_the_menu_kind() {
+    // A client whose `connect` userinfo says `_vgui_menus 0` gets the text menus: the key
+    // travels through the engine's userinfo into the game's `client_key` lookup.
+    let map = cs_engine::ServerMap::stub_with_entities("test", spawns(2, 2));
+    let mut b = Bench::with_userinfo(map, 2, &[("_vgui_menus", "0")]);
+    b.idle_cmds = true;
+    b.step(8);
+    assert!(!player(&b, 0).vgui_menus);
+    let msgs = b.messages();
+    assert!(msgs.iter().any(|m| matches!(
+        m,
+        CsUserMsg::ShowMenu { keys_bitmask: 0b11_0011, text, .. } if text == "#Team_Select_Spect"
+    )));
+    assert!(!msgs.iter().any(|m| matches!(m, CsUserMsg::VguiMenu { .. })));
+
+    // And the default userinfo of the original client (`_vgui_menus 1`) gets the VGUI one.
+    let b = bench(spawns(2, 2), 2);
+    assert!(player(&b, 0).vgui_menus);
 }

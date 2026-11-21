@@ -9,14 +9,14 @@
 //! A player enters [`JoinState::ShowLText`], goes on to [`JoinState::ShowTeamSelect`] (the
 //! level text is not shown), gets the team menu and waits in [`JoinState::PickingTeam`] until it
 //! has picked a team and an appearance; then [`JoinState::GetIntoGame`] spawns it, or, when the
-//! rules do not let it spawn yet ([`can_spawn_now`]), leaves it watching. [`frame`] runs the
-//! per-player part of `PlayerThink` and `JoiningThink` once per server frame (the original runs
-//! them from `PlayerPreThink`, once per command: a client that sends no commands still gets
-//! its menu).
+//! rules do not let it spawn yet ([`can_spawn_now`]), leaves it watching. [`pre_think`] runs the
+//! per-player part of `PlayerThink` and `JoiningThink` from the player's commands, as the
+//! original does from `PlayerPreThink`: the engine only runs commands of a client that is in
+//! the game, so no menu is sent to a client still signing on.
 //!
 //! Deviations from vanilla:
-//! - A random team (`jointeam 5`) when both teams are full is refused; vanilla puts the player
-//!   in the game with no team (`REGAMEDLL_FIXES` refuses it).
+//! - A random team (`jointeam 5`) when both teams are full is refused (the `REGAMEDLL_FIXES`
+//!   behaviour); vanilla lets the player through with no team (UNASSIGNED) and the menu closed.
 //! - The team counts (`m_iNumCT`, `m_iNumTerrorist`) are taken from the players when asked,
 //!   not from the cache `CheckWinConditions` refreshes.
 //!
@@ -40,7 +40,7 @@ use crate::menus::{
     VGUI_MENU_CLASS_CT, VGUI_MENU_CLASS_T, VGUI_MENU_TEAM, atoi,
 };
 use crate::messages;
-use crate::player::{DEAD_DEAD, MAX_PLAYERS, Team, apply_model, kill, spawn, start_money};
+use crate::player::{DEAD_DEAD, Team, apply_model, kill, spawn, start_money};
 use crate::world::{CT_SPAWN_CLASS, T_SPAWN_CLASS};
 
 /// `ChooseTeamMenuSlot` (`client.h`): what `jointeam` and the team menu's keys mean.
@@ -299,17 +299,12 @@ pub(crate) fn show_team_menu_again(g: &mut GameState, eng: &mut EngineApi<'_>, s
     }
 }
 
-/// What the team and appearance menus need of the game, once per server frame: the part of
-/// `CHalfLifeMultiplay::PlayerThink` that opens the team menu and `CBasePlayer::JoiningThink`,
-/// for every player in the game.
-pub(crate) fn frame(g: &mut GameState, eng: &mut EngineApi<'_>) {
-    let clients = usize::from(eng.max_clients()).min(MAX_PLAYERS);
-    for slot in 0..clients {
-        if g.players[slot].is_some() {
-            player_think(g, eng, slot as u8);
-            joining_think(g, eng, slot as u8);
-        }
-    }
+/// The per-player logic of the way into the game, run before each command the player's client
+/// sends (`CBasePlayer::PreThink`, so only once the client is in the game and able to receive
+/// the menus): the team-menu part of `CHalfLifeMultiplay::PlayerThink`, then `JoiningThink`.
+pub(crate) fn pre_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    player_think(g, eng, slot);
+    joining_think(g, eng, slot);
 }
 
 /// The team-menu part of `CHalfLifeMultiplay::PlayerThink`: a player about to pick a team gets

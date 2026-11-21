@@ -96,6 +96,9 @@ pub struct Bench {
     pub hub: LoopbackHub,
     pub probe: ProbeClient<LoopbackEndpoint>,
     pub now: f64,
+    /// Whether each frame the probe sends a command with time in it (a client does; the game's
+    /// per-player logic runs from the commands).
+    pub idle_cmds: bool,
 }
 
 impl Bench {
@@ -107,6 +110,12 @@ impl Bench {
     /// A server of `max_clients` slots on `map`; the probe (slot 0) has entered the game when
     /// this returns, the other slots are free until a test puts a player in them.
     pub fn with_slots(map: ServerMap, max_clients: u8) -> Self {
+        Self::with_userinfo(map, max_clients, &[])
+    }
+
+    /// Like [`with_slots`](Self::with_slots), the probe's `connect` userinfo carrying `userinfo`
+    /// in place of its defaults.
+    pub fn with_userinfo(map: ServerMap, max_clients: u8, userinfo: &[(&str, &str)]) -> Self {
         let cfg = ServerConfig {
             max_clients,
             max_edicts: 256,
@@ -131,6 +140,9 @@ impl Bench {
             cdkey_md5_hex: md5_hex(b"probe"),
         };
         let mut probe = ProbeClient::new(endpoint, PeerAddr::Loopback(0), cfg);
+        for (key, value) in userinfo {
+            probe.set_userinfo(key, value);
+        }
         probe.connect();
         let mut now = 0.0;
         for _ in 0..300 {
@@ -147,6 +159,7 @@ impl Bench {
             hub,
             probe,
             now,
+            idle_cmds: false,
         }
     }
 
@@ -162,6 +175,12 @@ impl Bench {
     /// Runs `frames` server frames (10 ms each) with the probe pumped.
     pub fn step(&mut self, frames: usize) {
         for _ in 0..frames {
+            if self.idle_cmds && self.probe.state() == &ProbeState::InGame {
+                self.probe.queue_cmd(GoldSrcUserCmd {
+                    msec: 10,
+                    ..Default::default()
+                });
+            }
             self.probe.pump(self.now);
             self.now = ((self.now / 0.01).round() + 1.0) * 0.01;
             self.server.frame(&mut self.hub, self.now);

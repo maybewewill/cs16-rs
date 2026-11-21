@@ -16,14 +16,13 @@ use cs_proto48::usermsg::CsUserMsg;
 use crate::GameState;
 use crate::teams::{self, JoinState};
 
-/// `_Menu` (`player.h`): the menu a player is looking at.
+/// `_Menu` (`player.h`): the menu a player is looking at (`Menu_IGChooseTeam` is never set by
+/// the game and is left out).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Menu {
     #[default]
     Off,
     ChooseTeam,
-    /// Never set by the game (`Menu_IGChooseTeam`); `menuselect` still answers it.
-    IgChooseTeam,
     ChooseAppearance,
 }
 
@@ -178,11 +177,6 @@ pub(crate) fn menuselect(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, a
         Menu::ChooseTeam => {
             if text_menus && !teams::handle_menu_choose_team(g, eng, slot, choice) {
                 teams::show_team_menu_again(g, eng, slot);
-            }
-        }
-        Menu::IgChooseTeam => {
-            if text_menus {
-                teams::handle_menu_choose_team(g, eng, slot, choice);
             }
         }
         Menu::ChooseAppearance => {

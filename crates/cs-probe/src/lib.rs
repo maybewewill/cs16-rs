@@ -112,6 +112,8 @@ pub struct ProbeClient<T: PacketTransport> {
     /// Arrival times of entity updates within the last second.
     frame_times: VecDeque<f64>,
     cmd_queue: VecDeque<GoldSrcUserCmd>,
+    /// Userinfo keys that replace the defaults in the `connect` packet.
+    userinfo_overrides: Vec<(String, String)>,
     /// Last sent commands, newest first, repeated as backups.
     sent_cmds: VecDeque<GoldSrcUserCmd>,
     /// Most recent command taken from the queue; repeated with `msec = 0` when the queue is empty.
@@ -154,6 +156,7 @@ impl<T: PacketTransport> ProbeClient<T> {
             stats: ProbeStats::default(),
             frame_times: VecDeque::new(),
             cmd_queue: VecDeque::new(),
+            userinfo_overrides: Vec::new(),
             sent_cmds: VecDeque::new(),
             last_cmd: GoldSrcUserCmd::default(),
             last_entity_seq: None,
@@ -204,10 +207,14 @@ impl<T: PacketTransport> ProbeClient<T> {
                     let packet = if self.state == ProbeState::AwaitChallenge {
                         encode_getchallenge(true)
                     } else {
+                        let mut userinfo = default_cs16_userinfo(&self.cfg.name);
+                        for (key, value) in &self.userinfo_overrides {
+                            userinfo.set(key, value);
+                        }
                         encode_connect_48(
                             self.challenge,
                             &default_cs16_protinfo(&self.cfg.cdkey_md5_hex),
-                            &default_cs16_userinfo(&self.cfg.name),
+                            &userinfo,
                             &lan_steam_auth_ticket(self.cfg.steam_id),
                         )
                     };
@@ -223,6 +230,12 @@ impl<T: PacketTransport> ProbeClient<T> {
             }
             ProbeState::Idle | ProbeState::Rejected(_) | ProbeState::Disconnected(_) => {}
         }
+    }
+
+    /// Sets a userinfo key sent in the `connect` packet in place of the default (call before
+    /// [`connect`](Self::connect)), e.g. `_vgui_menus` `0` for a client that wants text menus.
+    pub fn set_userinfo(&mut self, key: &str, value: &str) {
+        self.userinfo_overrides.push((key.to_string(), value.to_string()));
     }
 
     pub fn queue_cmd(&mut self, cmd: GoldSrcUserCmd) {

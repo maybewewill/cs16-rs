@@ -7,9 +7,10 @@
 //!
 //! A player lives in [`GameState::players`], by slot, from `client_put_in_server` to
 //! `client_disconnect`. A fresh player is [`Team::Unassigned`]: invisible, not solid, taking no
-//! damage, until it has picked a team and an appearance ([`crate::teams`]) and spawns with [`spawn`]. The movement is `cs_sim::pmove` over
-//! the engine's traces (`EngineWorld`); the rest of `pm_shared` is not ported (a dying player
-//! moves like a walking one with no input, where the original runs `PM_Physics_Toss`).
+//! damage, until it has picked a team and an appearance ([`crate::teams`]) and spawns with
+//! [`spawn`]. The movement is `cs_sim::pmove` over the engine's traces (`EngineWorld`); the rest
+//! of `pm_shared` is not ported (a dying player moves like a walking one with no input, where
+//! the original runs `PM_Physics_Toss`).
 //!
 //! A player that joins stands at the counter-terrorists' spawn point as in `ClientPutInServer`
 //! (without the telefrag the vanilla join path would do); the `trigger_camera` intro path (the
@@ -555,6 +556,14 @@ pub(crate) fn run_usercmd(
     slot: u8,
     cmd: &GoldSrcUserCmd,
 ) {
+    if g.players
+        .get(usize::from(slot))
+        .is_none_or(Option::is_none)
+    {
+        return;
+    }
+    // `PlayerPreThink`: the way into the game advances with the player's commands.
+    teams::pre_think(g, eng, slot);
     let Some(p) = g
         .players
         .get_mut(usize::from(slot))

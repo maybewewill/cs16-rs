@@ -243,9 +243,7 @@ impl GameDll for CsGame {
         player::run_usercmd(&mut self.state, eng, slot, cmd);
     }
 
-    fn start_frame(&mut self, eng: &mut EngineApi<'_>, _frametime: f32) {
-        teams::frame(&mut self.state, eng);
-    }
+    fn start_frame(&mut self, _eng: &mut EngineApi<'_>, _frametime: f32) {}
 
     fn think(&mut self, eng: &mut EngineApi<'_>, id: EdictId) {
         with_entity(&mut self.state, eng, id, |entity, g, eng| {

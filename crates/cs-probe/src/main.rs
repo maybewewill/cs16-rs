@@ -173,10 +173,12 @@ mod native {
                         cmd_baseline = probe.stats().datagrams_in;
                         println!("{now:.3}s: sent `{line}`");
                     }
-                    while args.walk && next_walk_cmd <= now {
+                    // A client sends a command with time in it every frame, walking or
+                    // not: the game's per-player logic (menus, joining) runs from them.
+                    while next_walk_cmd <= now {
                         probe.queue_cmd(GoldSrcUserCmd {
                             msec: WALK_MSEC,
-                            forwardmove: WALK_FORWARD,
+                            forwardmove: if args.walk { WALK_FORWARD } else { 0.0 },
                             ..Default::default()
                         });
                         next_walk_cmd += f64::from(WALK_MSEC) / 1000.0;
