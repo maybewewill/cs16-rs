@@ -747,7 +747,7 @@ impl EngineApi<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Arc;
 
     use cs_assets::bsp::{BspMap, BspModel, Leaf, LightmapAtlas, Node};

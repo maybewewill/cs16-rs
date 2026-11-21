@@ -188,6 +188,8 @@ pub const SND_FL_ATTENUATION: u32 = 1 << 1;
 pub const SND_FL_LARGE_INDEX: u32 = 1 << 2;
 /// `SoundMsg::flags` bit: the pitch byte follows (otherwise 100).
 pub const SND_FL_PITCH: u32 = 1 << 3;
+/// `SoundMsg::flags` bit: stop the sound instead of starting it (`SND_STOP`).
+pub const SND_FL_STOP: u32 = 1 << 5;
 
 /// Parsed `svc_serverinfo` payload (`SV_SendServerinfo_internal`, `sv_main.cpp:1129-1205`).
 #[derive(Debug, Clone, PartialEq, Eq)]

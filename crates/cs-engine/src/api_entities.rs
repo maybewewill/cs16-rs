@@ -282,14 +282,6 @@ impl EngineApi<'_> {
     pub fn can_see(&self, eye: Vec3, mins: Vec3, maxs: Vec3) -> bool {
         in_world(eye) && in_world(mins) && in_world(maxs) && self.map.can_see(eye, mins, maxs)
     }
-
-    /// Whether a box with absolute corners `mins`/`maxs` is potentially audible (PAS) from
-    /// `ear`: the PAS reaches every leaf the PVS does and the leaves those see. A map without
-    /// visibility data (stub map) hears everything; an `ear`, `mins` or `maxs` outside the
-    /// world (non-finite, or a coordinate beyond [`MAX_WORLD_COORD`]) hears nothing.
-    pub fn can_hear(&self, ear: Vec3, mins: Vec3, maxs: Vec3) -> bool {
-        in_world(ear) && in_world(mins) && in_world(maxs) && self.map.can_hear(ear, mins, maxs)
-    }
 }
 
 /// Whether every coordinate of `v` is finite and within [`MAX_WORLD_COORD`].

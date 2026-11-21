@@ -237,6 +237,8 @@ impl<G: GameDll> Server<G> {
     /// Spawns the map's entities, lets the game activate the current map, then locks the
     /// precache tables and computes the spawn baselines.
     pub(crate) fn activate_map(&mut self) {
+        // ReHLDS builds the PAS at SV_SpawnServer, before the map entities exist.
+        self.map.calc_pas(self.cfg.max_clients);
         // While the game spawns entities and activates the map, messages sent to
         // `MsgDest::Init` are kept for the clients that enter later.
         self.outbox.init_open = true;

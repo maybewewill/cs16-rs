@@ -11,11 +11,11 @@ use std::sync::Arc;
 use common::{Harness, TestGame, print_bytes};
 use cs_assets::bsp::{BspMap, Entity};
 use cs_engine::{
-    ClientState, INIT_BUFFER_BUDGET, MAX_MESSAGE_TEXT, MAX_RELIABLE_BACKLOG, MsgDest,
+    ClientState, EdictId, EngineApi, INIT_BUFFER_BUDGET, MAX_MESSAGE_TEXT, MAX_RELIABLE_BACKLOG, MsgDest,
     ServerConfig, ServerMap, SignonStage,
 };
 use cs_probe::{ProbeClient, ProbeState};
-use cs_proto48::messages::{SoundMsg, SvcMessage, svc};
+use cs_proto48::messages::{SND_FL_STOP, SoundMsg, SvcMessage, svc};
 use cs_proto48::netchan::MAX_MSGLEN;
 use cs_proto48::usermsg::CsUserMsg;
 use cs_transport::{LoopbackEndpoint, MAX_UDP_PACKET};
@@ -310,30 +310,27 @@ fn sound_requires_precache_and_reaches_listeners() {
     }
 }
 
-#[test]
-fn sound_reaches_a_listener_behind_a_wall() {
-    // On a stub map the PAS holds everything.
-    let game = TestGame {
-        precache_sounds: vec!["weapons/ak47-1.wav".to_string()],
-        ..TestGame::default()
-    };
-    let (mut h, mut a, mut b) = two_active(game);
-    h.server.game_mut().act(|eng| {
-        let ent = eng.create_entity("test_source").expect("free edict");
-        eng.set_origin(ent, Vec3::new(5000.0, 5000.0, 5000.0));
-        assert!(eng.emit_sound(ent, 1, "weapons/ak47-1.wav", 1.0, 1.0, 100));
-    });
-    h.step(&mut [&mut a, &mut b], 30);
-    assert_eq!(sounds(&a).len(), 1);
-    assert_eq!(sounds(&b).len(), 1);
+/// de_dust2 with a T probe at the T spawn (slot 0) and a CT probe at the CT spawn (slot 1),
+/// both in game, a sound precached; `None` without the installed game. Also gives the map's
+/// BSP, the map itself (as a copy for queries) and the two spawn origins.
+struct Dust2 {
+    h: Harness,
+    t: Probe,
+    ct: Probe,
+    bsp: Arc<BspMap>,
+    map: ServerMap,
+    t_spawn: Vec3,
+    ct_spawn: Vec3,
+}
 
-    // Without the installed game the real-map half cannot run.
-    let Ok(vfs) = Vfs::discover(None, VfsConfig::default()) else {
-        return;
-    };
+fn dust2_two_players() -> Option<Dust2> {
+    let vfs = Vfs::discover(None, VfsConfig::default()).ok()?;
     let raw = vfs.read_bytes("maps/de_dust2.bsp").expect("de_dust2 reads");
     let bsp = Arc::new(BspMap::load(&vfs, "de_dust2").expect("de_dust2 parses"));
-    let map = ServerMap::from_bsp("de_dust2", &raw, bsp.clone()).expect("valid BSP header");
+    let load = || ServerMap::from_bsp("de_dust2", &raw, bsp.clone()).expect("valid BSP header");
+    let (map, query) = (load(), load());
+    // The query copy answers like the server's, once it has built its PAS as activation does.
+    query.calc_pas(4);
     let origin_of = |classname: &str| {
         map.entities
             .iter()
@@ -343,20 +340,6 @@ fn sound_reaches_a_listener_behind_a_wall() {
     };
     let t_spawn = origin_of("info_player_deathmatch");
     let ct_spawn = origin_of("info_player_start");
-    let ct_ear = ct_spawn + Vec3::new(0.0, 0.0, 17.0);
-    // A point in an open leaf that the CT cannot see but can hear.
-    let source = (1..bsp.leafs.len())
-        .filter(|&n| bsp.leafs[n].contents != -2)
-        .map(|n| {
-            let l = &bsp.leafs[n];
-            let centre = |i: usize| (f32::from(l.mins[i]) + f32::from(l.maxs[i])) * 0.5;
-            (n, Vec3::new(centre(0), centre(1), centre(2)))
-        })
-        .filter(|&(n, p)| bsp.find_leaf(p) == n)
-        .map(|(_, p)| p)
-        .find(|&p| !map.can_see(ct_ear, p - Vec3::ONE, p + Vec3::ONE) && map.can_hear(ct_ear, p - Vec3::ONE, p + Vec3::ONE))
-        .expect("de_dust2 has a point the CT hears without seeing");
-
     let game = TestGame {
         precache_sounds: vec!["weapons/ak47-1.wav".to_string()],
         spawn_origins: vec![t_spawn, ct_spawn],
@@ -370,15 +353,115 @@ fn sound_reaches_a_listener_behind_a_wall() {
     let mut t = h.add_probe("T");
     let mut ct = h.add_probe("CT");
     h.step(&mut [&mut t, &mut ct], 300);
+    assert_eq!(t.state(), &ProbeState::InGame);
     assert_eq!(ct.state(), &ProbeState::InGame);
-    h.server.game_mut().act(move |eng| {
-        let ent = eng.create_entity("test_source").expect("free edict");
-        eng.set_origin(ent, source);
+    Some(Dust2 {
+        h,
+        t,
+        ct,
+        bsp,
+        map: query,
+        t_spawn,
+        ct_spawn,
+    })
+}
+
+impl Dust2 {
+    /// Runs `f` in the game with a fresh entity at `origin`, then lets the probes receive.
+    fn sound_from(&mut self, origin: Vec3, f: impl FnOnce(&mut EngineApi<'_>, EdictId) + 'static) {
+        self.h.server.game_mut().act(move |eng| {
+            let ent = eng.create_entity("test_source").expect("free edict");
+            eng.set_origin(ent, origin);
+            f(eng, ent);
+        });
+        self.h.step(&mut [&mut self.t, &mut self.ct], 30);
+    }
+}
+
+#[test]
+fn sound_reaches_a_listener_behind_a_wall() {
+    let Some(mut d) = dust2_two_players() else {
+        return;
+    };
+    // A point in an open leaf that the CT cannot see but, by the PAS rule, hears.
+    let ct_ear = d.ct_spawn + Vec3::new(0.0, 0.0, 17.0);
+    let (bsp, map, ct_spawn) = (d.bsp.clone(), &d.map, d.ct_spawn);
+    let source = (1..bsp.leafs.len())
+        .filter(|&n| bsp.leafs[n].contents != -2)
+        .map(|n| {
+            let l = &bsp.leafs[n];
+            let centre = |i: usize| (f32::from(l.mins[i]) + f32::from(l.maxs[i])) * 0.5;
+            (n, Vec3::new(centre(0), centre(1), centre(2)))
+        })
+        .filter(|&(n, p)| bsp.find_leaf(p) == n)
+        .map(|(_, p)| p)
+        .find(|&p| {
+            !map.can_see(ct_ear, p - Vec3::ONE, p + Vec3::ONE) && map.can_hear_point(p, ct_spawn)
+        })
+        .expect("de_dust2 has a point the CT hears without seeing");
+    let t_hears = d.map.can_hear_point(source, d.t_spawn);
+    d.sound_from(source, move |eng, ent| {
         assert!(!eng.can_see(ct_ear, source - Vec3::ONE, source + Vec3::ONE));
         assert!(eng.emit_sound(ent, 1, "weapons/ak47-1.wav", 1.0, 1.0, 100));
     });
-    h.step(&mut [&mut t, &mut ct], 30);
-    assert_eq!(sounds(&ct).len(), 1, "the PAS reaches the CT behind the wall");
+    assert_eq!(sounds(&d.ct).len(), 1, "the PAS reaches the CT behind the wall");
+    assert_eq!(sounds(&d.t).len(), usize::from(t_hears));
+}
+
+#[test]
+fn sound_outside_the_pas_is_not_sent() {
+    let Some(mut d) = dust2_two_players() else {
+        return;
+    };
+    assert!(!d.map.can_hear_point(d.ct_spawn, d.t_spawn), "the spawns are apart");
+    let ct_spawn = d.ct_spawn;
+    d.sound_from(ct_spawn, |eng, ent| {
+        assert!(eng.emit_sound(ent, 1, "weapons/ak47-1.wav", 1.0, 1.0, 100));
+    });
+    assert_eq!(sounds(&d.ct).len(), 1);
+    assert_eq!(sounds(&d.t).len(), 0, "the T spawn is outside the PAS of the CT spawn");
+}
+
+#[test]
+fn a_sound_in_solid_is_heard_by_everyone() {
+    let Some(mut d) = dust2_two_players() else {
+        return;
+    };
+    let bsp = d.bsp.clone();
+    let solid = (-40..40)
+        .flat_map(|x| (-40..40).map(move |y| Vec3::new(x as f32, y as f32, 0.0) * 128.0))
+        .flat_map(|p| (-8..8).map(move |z| p + Vec3::Z * (z as f32 * 128.0)))
+        .find(|&p| bsp.find_leaf(p) == 0)
+        .expect("de_dust2 has solid space");
+    d.sound_from(solid, |eng, ent| {
+        assert!(eng.emit_sound(ent, 1, "weapons/ak47-1.wav", 1.0, 1.0, 100));
+    });
+    assert_eq!(sounds(&d.ct).len(), 1);
+    assert_eq!(sounds(&d.t).len(), 1);
+}
+
+#[test]
+fn static_channel_and_stop_sounds_are_broadcast() {
+    let Some(mut d) = dust2_two_players() else {
+        return;
+    };
+    assert!(!d.map.can_hear_point(d.ct_spawn, d.t_spawn));
+    let ct_spawn = d.ct_spawn;
+    // CHAN_STATIC (6): the T spawn is outside the PAS, and still gets it.
+    d.sound_from(ct_spawn, |eng, ent| {
+        assert!(eng.emit_sound(ent, 6, "weapons/ak47-1.wav", 1.0, 1.0, 100));
+    });
+    assert_eq!((sounds(&d.ct).len(), sounds(&d.t).len()), (1, 1));
+    // A sound that stops is broadcast too, and carries the stop flag.
+    d.sound_from(ct_spawn, |eng, ent| {
+        assert!(eng.stop_sound(ent, 1, "weapons/ak47-1.wav"));
+    });
+    for probe in [&d.ct, &d.t] {
+        let heard = sounds(probe);
+        assert_eq!(heard.len(), 2, "{heard:?}");
+        assert_ne!(u32::from(heard[1].flags) & SND_FL_STOP, 0);
+        assert_eq!(u32::from(heard[0].flags) & SND_FL_STOP, 0);
+    }
 }
 
 #[test]

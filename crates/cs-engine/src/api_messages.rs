@@ -5,7 +5,7 @@
 
 use cs_proto48::bitbuf::MsgWriter;
 use cs_proto48::messages::{
-    SND_FL_ATTENUATION, SND_FL_PITCH, SND_FL_VOLUME, SoundMsg, write_svc_centerprint,
+    SND_FL_ATTENUATION, SND_FL_PITCH, SND_FL_STOP, SND_FL_VOLUME, SoundMsg, write_svc_centerprint,
     write_svc_lightstyle, write_svc_print, write_svc_sound, write_svc_stufftext,
     write_svc_temp_entity, write_svc_usermsg,
 };
@@ -36,6 +36,8 @@ fn sound_entity_fits(index: u16) -> bool {
 
 /// Highest sound channel (3 bits on the wire).
 const MAX_SOUND_CHANNEL: u8 = 7;
+/// `CHAN_STATIC`: a sound on this channel is broadcast, not limited to the PAS.
+const CHAN_STATIC: u8 = 6;
 /// Highest sound attenuation (the byte on the wire is `attenuation * 64`).
 const MAX_ATTENUATION: f32 = 3.98;
 /// Volume byte of a sound at full volume, the default on the wire.
@@ -57,9 +59,13 @@ pub enum MsgDest {
     /// The unreliable queue of every `Active` client whose eye (its edict's `origin +
     /// view_ofs`) can potentially see the box of half-size 1 around the point.
     Pvs(Vec3),
-    /// Like `Pvs`, but with the potentially audible set: the box of half-size 1 around the
-    /// point must be audible from the eye (`EngineApi::can_hear`), which reaches beyond what
-    /// can be seen. `MSG_FL_PAS` of ReHLDS, as `emit_sound` uses.
+    /// The unreliable queue of every `Active` client in the potentially audible set of the
+    /// point, as `SV_Multicast` with `MSG_FL_PAS` (ReHLDS `sv_main.cpp`, read 2026-11-21): a
+    /// client hears it when the leaf of its edict's `origin` (not the eye) is in the PAS row of
+    /// the leaf of the point. A point in solid or outside the world, and a map without PAS
+    /// (no visibility data, a single-client server, a map over the PAS caps), reach every
+    /// `Active` client. The PAS reaches beyond the PVS; `Pvs` itself keeps the eye and box
+    /// test (HLDS tests the origin leaf there too; the difference is accepted).
     Pas(Vec3),
     /// The init buffer: stored, and replayed to every client that enters the server (in its
     /// `spawn` stage, after the light styles). Only while the map is being activated (in
@@ -122,8 +128,30 @@ impl EngineApi<'_> {
                     }
                 }
             }
-            MsgDest::Pvs(point) => self.send_in_range(point, bytes, Self::can_see),
-            MsgDest::Pas(point) => self.send_in_range(point, bytes, Self::can_hear),
+            MsgDest::Pvs(point) => self.send_in_range(point, bytes),
+            MsgDest::Pas(point) => {
+                // `SV_Multicast` with `MSG_FL_PAS` (`rehlds/engine/sv_main.cpp`, read
+                // 2026-11-21): the PAS row of the leaf of the point against the leaf of each
+                // client's origin (not its eye). A point in solid or outside the world and a
+                // map without PAS (visibility data missing, one client, over the caps) reach
+                // everyone; a client whose edict is gone is not sent to.
+                let row = if point.is_finite() { self.map.pas_row(point) } else { None };
+                for slot in 0..self.clients.len() {
+                    if self.clients[slot].state != ClientState::Active {
+                        continue;
+                    }
+                    let origin = self
+                        .edicts
+                        .get(self.edicts.client(slot as u8))
+                        .map(|e| e.vars.origin);
+                    let hears = origin.is_some_and(|origin| {
+                        row.is_none_or(|row| self.map.pas_row_contains(row, origin))
+                    });
+                    if hears {
+                        self.outbox.push_unreliable(slot, bytes);
+                    }
+                }
+            }
             MsgDest::Init => {
                 if self.outbox.init_open
                     && self.outbox.init.len() + bytes.len() <= INIT_BUFFER_BUDGET
@@ -137,8 +165,8 @@ impl EngineApi<'_> {
     }
 
     /// Queues `bytes` unreliably for every `Active` client whose eye (its edict's `origin +
-    /// view_ofs`) passes `test` for the box of half-size 1 around `point`.
-    fn send_in_range(&mut self, point: Vec3, bytes: &[u8], test: fn(&Self, Vec3, Vec3, Vec3) -> bool) {
+    /// view_ofs`) can see the box of half-size 1 around `point`.
+    fn send_in_range(&mut self, point: Vec3, bytes: &[u8]) {
         let (mins, maxs) = (point - Vec3::ONE, point + Vec3::ONE);
         for slot in 0..self.clients.len() {
             if self.clients[slot].state != ClientState::Active {
@@ -149,7 +177,7 @@ impl EngineApi<'_> {
                 .edicts
                 .get(self.edicts.client(slot as u8))
                 .map(|e| e.vars.origin + e.vars.view_ofs);
-            if eye.is_some_and(|eye| test(self, eye, mins, maxs)) {
+            if eye.is_some_and(|eye| self.can_see(eye, mins, maxs)) {
                 self.outbox.push_unreliable(slot, bytes);
             }
         }
@@ -208,10 +236,10 @@ impl EngineApi<'_> {
     ///
     /// ReHLDS `SV_StartSound_internal` (`rehlds/engine/sv_main.cpp`, read 2026-11-21) computes
     /// `origin[i] = (maxs[i] + mins[i]) * 0.5 + entity origin[i]` the same way and multicasts
-    /// the sound with `MSG_FL_PAS` (potentially audible set), as this does. Deviation: HLDS
-    /// tests the listener's origin leaf against the PAS of the sound's leaf
-    /// (`SV_ValidClientMulticast`); this tests the listener's ear (`origin + view_ofs`)
-    /// against the leaves the sound's box touches, the same machinery as `Pvs`.
+    /// the sound with `MSG_FL_PAS` (potentially audible set), as this does, with the audience
+    /// rule of `SV_Multicast` (see [`MsgDest::Pas`]). A sound on `CHAN_STATIC` (6) goes to
+    /// every `Active` client instead (see [`stop_sound`](Self::stop_sound)). Deviation: HLDS
+    /// sends that broadcast reliably in multiplayer, this sends it unreliably.
     ///
     /// Returns `false`, sending nothing, for a stale entity or one whose index does not fit the
     /// 11-bit wire field (2048 and up), a non-finite position, a sample that is not in the
@@ -225,6 +253,30 @@ impl EngineApi<'_> {
         volume: f32,
         attenuation: f32,
         pitch: u8,
+    ) -> bool {
+        self.start_sound(ent, channel, sample, volume, attenuation, pitch, 0)
+    }
+
+    /// Stops the sound `sample` on `channel` of `ent` (`svc_sound` with `SND_STOP`), for
+    /// every `Active` client: such a message is never limited to the PAS
+    /// (`SV_StartSound_internal` sends PAS only for `channel != CHAN_STATIC && !(flags &
+    /// SND_STOP)`). Refused like [`emit_sound`](Self::emit_sound).
+    pub fn stop_sound(&mut self, ent: crate::edict::EdictId, channel: u8, sample: &str) -> bool {
+        self.start_sound(ent, channel, sample, 1.0, 1.0, NORMAL_PITCH, SND_FL_STOP)
+    }
+
+    /// `SV_StartSound_internal`: builds the message and picks the audience; `extra_flags` is
+    /// added to the `svc_sound` flags.
+    #[allow(clippy::too_many_arguments)]
+    fn start_sound(
+        &mut self,
+        ent: crate::edict::EdictId,
+        channel: u8,
+        sample: &str,
+        volume: f32,
+        attenuation: f32,
+        pitch: u8,
+        extra_flags: u32,
     ) -> bool {
         if channel > MAX_SOUND_CHANNEL
             || !sound_entity_fits(ent.index)
@@ -246,7 +298,7 @@ impl EngineApi<'_> {
         };
         let volume = (volume.clamp(0.0, 1.0) * f32::from(FULL_VOLUME)).round() as u8;
         let attenuation = attenuation.clamp(0.0, MAX_ATTENUATION);
-        let mut flags = 0u32;
+        let mut flags = extra_flags;
         if volume != FULL_VOLUME {
             flags |= SND_FL_VOLUME;
         }
@@ -270,7 +322,11 @@ impl EngineApi<'_> {
                 pitch,
             },
         );
-        self.send(MsgDest::Pas(origin), w.as_slice());
+        if channel != CHAN_STATIC && extra_flags & SND_FL_STOP == 0 {
+            self.send(MsgDest::Pas(origin), w.as_slice());
+        } else {
+            self.send(MsgDest::Broadcast, w.as_slice());
+        }
         true
     }
 
