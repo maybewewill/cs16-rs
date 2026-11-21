@@ -63,6 +63,19 @@ pub(crate) fn vector_ma(a: Vec3, scale: f64, b: Vec3) -> Vec3 {
     )
 }
 
+/// Stores `candidate` in `target` when it is finite. Otherwise `target` keeps its value and
+/// `offender` (the velocity or angular velocity the candidate came from) is zeroed, as
+/// `advance_angles` does. Returns whether the candidate was taken.
+pub(crate) fn set_finite(target: &mut Vec3, candidate: Vec3, offender: &mut Vec3) -> bool {
+    if candidate.is_finite() {
+        *target = candidate;
+        true
+    } else {
+        *offender = Vec3::ZERO;
+        false
+    }
+}
+
 impl<G: GameDll> Server<G> {
     /// `SV_Physics`: lets the game start the frame, then runs every live entity, in ascending
     /// index order, by its `movetype`. The pass follows the pool as it is when each entity's
@@ -124,6 +137,9 @@ impl<G: GameDll> Server<G> {
         self.frametime = frametime;
         for _ in 0..passes {
             self.run_physics();
+            // Each pass gets the touch budget of a frame: the passes and the first frame must
+            // not share one.
+            self.finish_frame_touches();
         }
         self.frametime = 0.0;
     }
@@ -168,8 +184,12 @@ impl<G: GameDll> Server<G> {
         let frametime = self.frametime;
         if let Some(edict) = self.edicts.get_mut(id) {
             let v = &mut edict.vars;
-            v.origin = vector_ma(v.origin, frametime, v.velocity);
-            v.angles = vector_ma(v.angles, frametime, v.avelocity);
+            // `check_velocity` does not run for this movetype: a non-finite result (or a
+            // velocity that overflows the origin) must not reach the entity.
+            let origin = vector_ma(v.origin, frametime, v.velocity);
+            set_finite(&mut v.origin, origin, &mut v.velocity);
+            let angles = vector_ma(v.angles, frametime, v.avelocity);
+            set_finite(&mut v.angles, angles, &mut v.avelocity);
         }
         self.with_engine(|eng| eng.link_entity(id, false));
     }
@@ -194,8 +214,12 @@ impl<G: GameDll> Server<G> {
             edict.vars.movetype = MOVETYPE_NONE;
             return;
         };
-        edict.vars.origin = origin + edict.vars.v_angle;
-        edict.vars.angles = angles;
+        // The parent's values are taken only when finite (the parent may have been poisoned by
+        // the game); a non-finite `v_angle` is dropped.
+        let v = &mut edict.vars;
+        set_finite(&mut v.origin, origin + v.v_angle, &mut v.v_angle);
+        let mut ignored = Vec3::ZERO;
+        set_finite(&mut v.angles, angles, &mut ignored);
         self.with_engine(|eng| eng.link_entity(id, true));
     }
 
@@ -458,9 +482,13 @@ impl<G: GameDll> Server<G> {
         let step = v.velocity * movetime as f32;
         let (mins, maxs) = (v.absmin + step, v.absmax + step);
         let pushorig = v.origin;
-        // The pusher goes to its final position.
-        v.origin += step;
+        // The pusher goes to its final position; a non-finite one is refused and the velocity
+        // dropped (`check_velocity` does not run for pushers).
+        let destination = v.origin + step;
         v.ltime += movetime;
+        if !set_finite(&mut v.origin, destination, &mut v.velocity) {
+            return;
+        }
         let solid = v.solid;
         self.with_engine(|eng| eng.link_entity(pusher, false));
         if solid == SOLID_NOT {
@@ -520,10 +548,14 @@ impl<G: GameDll> Server<G> {
         let amove = v.avelocity * movetime as f32;
         let (forward, right, up) = angle_vectors(v.angles);
         let pushorig = v.angles;
-        // The pusher goes to its final angles.
-        v.angles += amove;
-        let (forward_now, right_now, up_now) = angle_vectors_transpose(v.angles);
+        // The pusher goes to its final angles; non-finite ones are refused and the angular
+        // velocity dropped.
+        let turned = v.angles + amove;
         v.ltime += movetime;
+        if !set_finite(&mut v.angles, turned, &mut v.avelocity) {
+            return true;
+        }
+        let (forward_now, right_now, up_now) = angle_vectors_transpose(v.angles);
         let solid = v.solid;
         self.with_engine(|eng| eng.link_entity(pusher, false));
         // Non-solid pushers cannot push anything.

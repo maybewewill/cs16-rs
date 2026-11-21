@@ -93,6 +93,23 @@ fn long_cmd_reaches_the_game_in_steps_of_at_most_50_ms() {
     assert!((moved - 50.0).abs() <= 0.01, "moved {moved}");
 }
 
+/// A kick the game queues in a step stops the move at once, as HLDS does: the later steps of
+/// the same command (and the later commands) are not run for the kicked slot.
+#[test]
+fn a_kick_queued_by_a_step_stops_the_move() {
+    let mut h = Harness::new(4);
+    let mut probe = joined(&mut h, "Player");
+    let before = h.server.game().usercmd_msecs.len();
+    h.server
+        .game_mut()
+        .usercmd_hook
+        .set(|eng, slot| eng.kick(slot, "test kick"));
+    // One 200 ms command is four steps; the first one kicks.
+    drive(&mut h, &mut probe, &forward(200), 1);
+    assert_eq!(h.server.game().usercmd_msecs[before..], [50]);
+    assert_eq!(h.server.client_state(0), ClientState::Free);
+}
+
 #[test]
 fn speedhack_is_bounded_by_real_time() {
     let mut h = Harness::new(4);

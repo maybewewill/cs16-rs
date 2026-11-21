@@ -224,8 +224,10 @@ impl<G: GameDll> Server<G> {
             for step in split_usercmd(&granted) {
                 svtimebase += f64::from(step.msec) * 0.001;
                 self.run_player_cmd(slot, &step, random_seed, svtimebase);
-                if self.clients[index].state != ClientState::Active {
-                    // Kicked by the game, or freed by what a touch did.
+                let kicked = self.outbox.kicks.iter().any(|(kicked, _)| *kicked == slot);
+                if kicked || self.clients[index].state != ClientState::Active {
+                    // Kicked by the game (a kick queued during the step is not yet carried out:
+                    // HLDS stops the move at once), or freed by what a touch did.
                     self.drain_outbox();
                     return;
                 }

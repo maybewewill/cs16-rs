@@ -395,7 +395,14 @@ impl BspMap {
             .first()
             .map(|m| m.head_nodes[0])
             .unwrap_or(0);
+        // A valid tree is walked in fewer steps than it has nodes; a hostile map whose nodes
+        // lead back to themselves ends in the solid leaf.
+        let mut steps_left = self.nodes.len() + self.leafs.len();
         while node_idx >= 0 {
+            if steps_left == 0 {
+                return 0;
+            }
+            steps_left -= 1;
             let Some(node) = self.nodes.get(node_idx as usize) else {
                 return 0;
             };
@@ -415,11 +422,13 @@ impl BspMap {
 
     /// Decompress RLE-encoded Potentially Visible Set (PVS) bitmask for a leaf.
     pub fn decompress_pvs(&self, leaf_idx: usize) -> Vec<bool> {
+        // The count comes from the file: it never sizes the row beyond the leaves there are.
         let num_vis_leafs = self
             .models
             .first()
             .map(|m| m.vis_leafs.max(0) as usize)
-            .unwrap_or(self.leafs.len().saturating_sub(1));
+            .unwrap_or(self.leafs.len().saturating_sub(1))
+            .min(self.leafs.len());
         let mut visible = vec![false; num_vis_leafs];
         let Some(leaf) = self.leafs.get(leaf_idx) else {
             visible.fill(true);

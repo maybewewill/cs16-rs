@@ -75,7 +75,13 @@ impl Pas {
         pvs[..row_bytes].fill(0xFF);
         for leaf in 1..=vis_leafs {
             let row = &mut pvs[leaf * row_bytes..(leaf + 1) * row_bytes];
-            for (n, _) in bsp.decompress_pvs(leaf).iter().enumerate().filter(|(_, v)| **v) {
+            for (n, _) in bsp
+                .decompress_pvs(leaf)
+                .iter()
+                .take(vis_leafs)
+                .enumerate()
+                .filter(|(_, v)| **v)
+            {
                 row[n >> 3] |= 1 << (n & 7);
             }
         }
@@ -507,6 +513,22 @@ mod tests {
         let small = dense_bsp(64);
         let pas = Pas::build(&small).expect("small dense map");
         assert_eq!(pas.or_rows, 64 * 64);
+    }
+
+    /// A corrupt `vis_leafs` (past the leaves there are, up to the largest `i32`) must not
+    /// size a row or index outside the PAS build's rows.
+    #[test]
+    fn vis_leafs_past_the_leaf_count_is_clamped() {
+        let mut bsp = strip_with_vis();
+        bsp.models[0].vis_leafs = i32::MAX;
+        // One bit per leaf at most, whatever the file says.
+        assert!(bsp.decompress_pvs(1).len() <= bsp.leafs.len());
+        let map = ServerMap::with_bsp_for_test(Arc::new(bsp));
+        map.calc_pas(2);
+        // The map still works: leaf 1 sees leaf 2, and the rows are the clamped ones.
+        let row = map.pvs_row(STRIP_POINTS[0]);
+        assert!(row.is_some_and(|r| r.len() <= 5 && r[1]));
+        assert!(map.can_hear_point(STRIP_POINTS[0], STRIP_POINTS[1]));
     }
 
     #[test]

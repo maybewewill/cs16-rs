@@ -225,3 +225,31 @@ fn settle_pass_touch_is_in_the_baseline() {
     assert_eq!(probe.state(), &ProbeState::InGame);
     assert_eq!(probe.baselines()[&2].skin, 9);
 }
+
+/// The settle passes of map activation each get a frame's touch budget: a touch-heavy settle
+/// (4 player slots: 16 passes) must not use up the budget of the first frame, nor lose touches.
+#[test]
+fn settle_passes_do_not_share_the_first_frames_touch_budget() {
+    let game = TestGame {
+        activate_crowd: 300,
+        ..TestGame::default()
+    };
+    let cfg = ServerConfig {
+        max_clients: 4,
+        max_edicts: 2048,
+        ..ServerConfig::default()
+    };
+    let mut h = Harness::with_config(cfg, game);
+    let settled = h.server.game().touch_log.len();
+    assert!(
+        settled > MAX_TOUCHES_PER_FRAME,
+        "the settle must be touch-heavy: {settled}"
+    );
+    let stats = h.server.net_stats();
+    assert_eq!((stats.touches_dropped, stats.touch_cap_frames), (0, 0));
+
+    // The first frame after it starts with a whole budget.
+    h.step(&mut [], 1);
+    let stats = h.server.net_stats();
+    assert_eq!((stats.touches_dropped, stats.touch_cap_frames), (0, 0));
+}

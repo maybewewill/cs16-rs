@@ -64,4 +64,6 @@ pub use usercmd::{
     MAX_BANKED_MS, MAX_CONSECUTIVE_BAD_MOVES, MAX_DROPPED_REPLAY, MAX_USERCMD_STEP_MS, MsecBudget,
     STRINGCMD_BURST, STRINGCMD_RATE_PER_SEC, select_cmds_to_run, split_usercmd, usercmd_is_finite,
 };
-pub use world::{AREA_DEPTH, LinkSnapshot, MAX_ENT_LEAFS, consts};
+#[doc(hidden)]
+pub use world::LinkSnapshot;
+pub use world::{AREA_DEPTH, MAX_ENT_LEAFS, consts};

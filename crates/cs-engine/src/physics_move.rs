@@ -155,6 +155,9 @@ impl<G: GameDll> Server<G> {
         let Some(v) = self.vars_mut(id) else {
             return;
         };
+        // The source reads `movetype` where it uses it: a touch of the impact may have
+        // changed it.
+        let movetype = v.movetype;
         if trace.trace.all_solid {
             // Trapped in another solid.
             v.avelocity = Vec3::ZERO;
@@ -569,6 +572,8 @@ impl<G: GameDll> Server<G> {
             };
             let normal = trace.trace.plane_normal;
 
+            // The source reads `movetype` where it uses it (a touch may change it).
+            let movetype = self.edicts.get(id).map_or(movetype, |e| e.vars.movetype);
             // Stop if on ground.
             if normal.z > 0.7 {
                 let hit_vars = self.edicts.get(hit).map(|e| &e.vars);
@@ -609,6 +614,7 @@ impl<G: GameDll> Server<G> {
                 return;
             };
             (origin, velocity) = (v.origin, v.velocity);
+            let movetype = v.movetype;
 
             // Reduce the time left by the fraction covered.
             time_left -= time_left * trace.trace.fraction;

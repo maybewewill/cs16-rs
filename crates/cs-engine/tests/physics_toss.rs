@@ -580,6 +580,23 @@ fn a_touch_that_changes_the_velocity_alters_the_outcome() {
     assert!(near(v.z, 50.0, 0.01), "{v:?}");
 }
 
+/// The source reads `movetype` after the impact: a touch that turns a `BOUNCE` entity into a
+/// `FLY` one makes the clip a plain slide (no reflection) and the entity stops on the floor.
+#[test]
+fn a_touch_that_changes_the_movetype_changes_the_branch() {
+    let game = TestGame {
+        mover_touch_movetype: Some(MOVETYPE_FLY),
+        ..TestGame::default()
+    };
+    let mut h = stub_with(game);
+    let (_, id) = run(&mut h, bounce_onto_floor);
+    let v = vars(&h, id);
+    assert_eq!(v.movetype, MOVETYPE_FLY);
+    // As a `BOUNCE` entity it would leave with +204 (see the test above).
+    assert_eq!(v.velocity, Vec3::ZERO);
+    assert_ne!(v.flags & FL_ONGROUND, 0);
+}
+
 #[test]
 fn a_touch_that_removes_the_entity_ends_the_move() {
     for movetype in [MOVETYPE_BOUNCE, MOVETYPE_TOSS, MOVETYPE_STEP] {

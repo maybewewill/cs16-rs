@@ -118,7 +118,7 @@ impl EntLeaves {
     /// (`SV_HeadnodeVisible` and the leaf loop of `SV_AddToFullPack`).
     pub(crate) fn visible(&self, bsp: &BspMap, pvs: &[bool]) -> bool {
         if self.headnode >= 0 {
-            return headnode_visible(bsp, pvs, self.headnode, &mut walk_budget(bsp));
+            return headnode_visible(bsp, pvs, self.headnode, &mut walk_budget(bsp), 0);
         }
         self.leafnums[..self.num_leafs]
             .iter()
@@ -128,7 +128,13 @@ impl EntLeaves {
 
 /// `SV_HeadnodeVisible`: whether any leaf under node `child` is in `pvs`. `budget` bounds the
 /// nodes visited, so a cyclic node tree in a hostile map cannot make it run away.
-fn headnode_visible(bsp: &BspMap, pvs: &[bool], child: i32, budget: &mut u32) -> bool {
+fn headnode_visible(
+    bsp: &BspMap,
+    pvs: &[bool],
+    child: i32,
+    budget: &mut u32,
+    depth: u32,
+) -> bool {
     if child < 0 {
         let leaf = !child as usize;
         return leaf != 0
@@ -138,7 +144,7 @@ fn headnode_visible(bsp: &BspMap, pvs: &[bool], child: i32, budget: &mut u32) ->
                 .is_some_and(|l| l.contents != CONTENTS_SOLID)
             && pvs.get(leaf - 1).copied().unwrap_or(false);
     }
-    if *budget == 0 {
+    if *budget == 0 || depth >= MAX_WALK_DEPTH {
         return false;
     }
     *budget -= 1;
@@ -147,8 +153,12 @@ fn headnode_visible(bsp: &BspMap, pvs: &[bool], child: i32, budget: &mut u32) ->
     };
     node.children
         .iter()
-        .any(|&c| headnode_visible(bsp, pvs, i32::from(c), budget))
+        .any(|&c| headnode_visible(bsp, pvs, i32::from(c), budget, depth + 1))
 }
+
+/// Depth the recursive walks of the BSP go to: a compiled tree is a few dozen levels deep, so
+/// a chain this long is hostile (and would overflow the stack before the node budget ran out).
+const MAX_WALK_DEPTH: u32 = 512;
 
 /// Nodes a walk of the BSP may visit: every node once, plus slack. A valid tree never needs
 /// more.
@@ -196,7 +206,7 @@ pub(crate) fn find_touched_leafs(bsp: &BspMap, mins: Vec3, maxs: Vec3) -> EntLea
         budget: u32,
     }
     impl Walk<'_> {
-        fn visit(&mut self, child: i32) {
+        fn visit(&mut self, child: i32, depth: u32) {
             if child < 0 {
                 let leaf = !child as usize;
                 // Leaf 0 is the solid leaf.
@@ -218,7 +228,7 @@ pub(crate) fn find_touched_leafs(bsp: &BspMap, mins: Vec3, maxs: Vec3) -> EntLea
                 }
                 return;
             }
-            if self.budget == 0 {
+            if self.budget == 0 || depth >= MAX_WALK_DEPTH {
                 return;
             }
             self.budget -= 1;
@@ -234,10 +244,10 @@ pub(crate) fn find_touched_leafs(bsp: &BspMap, mins: Vec3, maxs: Vec3) -> EntLea
             }
             let children = node.children;
             if sides & 1 != 0 {
-                self.visit(i32::from(children[0]));
+                self.visit(i32::from(children[0]), depth + 1);
             }
             if sides & 2 != 0 {
-                self.visit(i32::from(children[1]));
+                self.visit(i32::from(children[1]), depth + 1);
             }
         }
     }
@@ -254,7 +264,7 @@ pub(crate) fn find_touched_leafs(bsp: &BspMap, mins: Vec3, maxs: Vec3) -> EntLea
         topnode: -1,
         budget: walk_budget(bsp),
     };
-    walk.visit(root);
+    walk.visit(root, 0);
     if walk.overflow {
         // Use the head node instead of the leaf list.
         walk.out = EntLeaves {
@@ -1112,5 +1122,47 @@ pub(crate) mod tests {
         bsp.models.clear();
         let none = find_touched_leafs(&bsp, Vec3::ZERO, Vec3::ONE);
         assert_eq!(none, EntLeaves::NONE);
+    }
+
+    /// The walks are bounded in depth as well as in visits: a chain of nodes as long as an
+    /// `i16` index allows would overflow the stack of a recursive walk.
+    #[test]
+    fn a_very_deep_node_chain_does_not_overflow_the_stack() {
+        let mut bsp = strip_bsp();
+        let chain = i16::MAX as usize;
+        // Every node splits the box at x = 0 and continues down child 0; child 1 is leaf 2.
+        bsp.planes = vec![Plane {
+            normal: Vec3::X,
+            dist: 0.0,
+            plane_type: 0,
+        }];
+        let node = |next: i16| Node {
+            plane: 0,
+            children: [next, -3],
+            mins: [0; 3],
+            maxs: [0; 3],
+            first_face: 0,
+            num_faces: 0,
+        };
+        bsp.nodes = (0..chain).map(|i| node(i as i16 + 1)).collect();
+        bsp.nodes[chain - 1].children[0] = -2;
+        let _ = find_touched_leafs(&bsp, Vec3::splat(-300.0), Vec3::splat(300.0));
+        let leaves = EntLeaves {
+            headnode: 0,
+            ..EntLeaves::NONE
+        };
+        assert!(!leaves.visible(&bsp, &[false; 4]));
+        // A point walk is iterative and ends at the leaf the chain leads to.
+        assert!(bsp.find_leaf(Vec3::new(1.0, 0.0, 0.0)) <= 4);
+    }
+
+    /// `find_leaf` of a tree whose nodes lead back to themselves ends in the solid leaf instead
+    /// of walking for ever.
+    #[test]
+    fn find_leaf_of_a_cyclic_tree_ends_in_the_solid_leaf() {
+        let mut bsp = strip_bsp();
+        bsp.nodes[0].children = [0, 0];
+        assert_eq!(bsp.find_leaf(Vec3::new(500.0, 0.0, 0.0)), 0);
+        assert_eq!(bsp.find_leaf(Vec3::new(-500.0, 0.0, 0.0)), 0);
     }
 }

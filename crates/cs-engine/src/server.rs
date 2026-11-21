@@ -117,8 +117,6 @@ pub struct Server<G: GameDll> {
     pub(crate) warned_movetypes: BTreeSet<u16>,
     /// Warnings given for such entities since the server started.
     pub(crate) movetype_warnings: u64,
-    /// State of the generator that picks a wade sound (`RandomLong` of `PF_WaterMove`).
-    pub(crate) phys_rng: u32,
     /// The cvars the movement physics reads, read once per physics pass.
     pub(crate) phys_cvars: crate::physics_move::PhysCvars,
     pub(crate) net_stats: NetStats,
@@ -212,7 +210,6 @@ impl<G: GameDll> Server<G> {
             sv_time: SV_TIME_AT_MAP_START,
             frametime: 0.0,
             warned_movetypes: BTreeSet::new(),
-            phys_rng: 0x9E37_79B9,
             phys_cvars: crate::physics_move::PhysCvars::default(),
             movetype_warnings: 0,
             net_stats: NetStats::default(),
@@ -343,12 +340,14 @@ impl<G: GameDll> Server<G> {
     }
 
     /// Entities a `movetype` that HLDS rejects was reported for (one warning per entity per
-    /// map), counted since the server started.
+    /// map), counted since the server started. Test aid.
+    #[doc(hidden)]
     pub fn movetype_warnings(&self) -> u64 {
         self.movetype_warnings
     }
 
-    /// Touches found by linking and not yet dispatched (`(trigger, other)` pairs).
+    /// Touches found by linking and not yet dispatched (`(trigger, other)` pairs). Test aid.
+    #[doc(hidden)]
     pub fn pending_touch_count(&self) -> usize {
         self.world.pending_touch_count()
     }
@@ -370,7 +369,8 @@ impl<G: GameDll> Server<G> {
     }
 
     /// How entity `id` is linked into the world (its leaves and area node); `None` when it is
-    /// not linked.
+    /// not linked. Test aid.
+    #[doc(hidden)]
     pub fn link_snapshot(&self, id: crate::edict::EdictId) -> Option<crate::world::LinkSnapshot> {
         self.world.link_snapshot(id)
     }

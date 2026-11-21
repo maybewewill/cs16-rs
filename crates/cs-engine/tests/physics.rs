@@ -10,7 +10,7 @@ use std::sync::Arc;
 use common::{FRAME, Harness, TestGame, schedule_extra_thinks};
 use cs_assets::bsp::BspMap;
 use cs_engine::consts::{
-    FL_KILLME, MOVETYPE_FOLLOW, MOVETYPE_NOCLIP, MOVETYPE_NONE, SOLID_BBOX,
+    FL_KILLME, MOVETYPE_FOLLOW, MOVETYPE_NOCLIP, MOVETYPE_NONE, MOVETYPE_PUSH, SOLID_BBOX,
     SOLID_TRIGGER,
 };
 use cs_engine::{EdictId, EngineApi, SV_TIME_AT_MAP_START, ServerConfig, ServerMap};
@@ -304,6 +304,42 @@ fn noclip_entity_stays_visible_to_a_probe_while_it_crosses_the_world() {
         last = now;
     }
     assert!(last > 2900.0, "{last}");
+}
+
+/// `NOCLIP`, `FOLLOW` and `PUSH` never run `SV_CheckVelocity`: a NaN or overflowing velocity
+/// must not poison the origin or the angles (nor those of a follower).
+#[test]
+fn non_finite_and_huge_velocities_keep_noclip_follow_and_push_finite() {
+    for bad in [f32::NAN, f32::INFINITY, 3e38] {
+        let mut h = harness(1, TestGame::default());
+        let (noclip, follower, pusher) = run(&mut h, move |eng| {
+            let noclip = spawn_box(eng, Vec3::new(10.0, 20.0, 30.0));
+            let v = eng.ent_mut(noclip).unwrap();
+            v.movetype = MOVETYPE_NOCLIP;
+            v.velocity = Vec3::new(bad, 1.0, bad);
+            v.avelocity = Vec3::new(bad, bad, 0.0);
+            let follower = eng.create_entity("test_follower").expect("free edict");
+            let v = eng.ent_mut(follower).unwrap();
+            v.movetype = MOVETYPE_FOLLOW;
+            v.aiment = Some(noclip);
+            v.v_angle = Vec3::new(bad, 0.0, 0.0);
+            let pusher = spawn_box(eng, Vec3::new(500.0, 0.0, 0.0));
+            let v = eng.ent_mut(pusher).unwrap();
+            v.movetype = MOVETYPE_PUSH;
+            v.velocity = Vec3::new(bad, bad, 0.0);
+            v.avelocity = Vec3::new(0.0, bad, 0.0);
+            v.nextthink = 1000.0;
+            (noclip, follower, pusher)
+        });
+        // Enough frames for 3e38 per second to overflow an f32 origin.
+        h.step(&mut [], 40);
+        for id in [noclip, follower, pusher] {
+            let v = vars(&h, id);
+            assert!(v.origin.is_finite(), "{bad}: {:?} {:?}", id, v.origin);
+            assert!(v.angles.is_finite(), "{bad}: {:?} {:?}", id, v.angles);
+            assert!(v.velocity.is_finite() && v.avelocity.is_finite(), "{bad}: {id:?}");
+        }
+    }
 }
 
 #[test]

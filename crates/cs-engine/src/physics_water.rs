@@ -66,15 +66,10 @@ impl<G: GameDll> Server<G> {
         }
     }
 
-    /// One of the four wade sounds, as `RandomLong(0, 3)` picks (assumption: any generator
-    /// will do; the engine's own is not reproduced).
+    /// One of the four wade sounds, as `RandomLong(0, 3)` picks (from the engine's per-map
+    /// generator, see `rng.rs`).
     pub(crate) fn random_wade_sound(&mut self) -> &'static str {
-        let mut x = self.phys_rng;
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
-        self.phys_rng = x;
-        match x % 4 {
+        match self.world.rng.random_long(0, 3) {
             0 => "player/pl_wade1.wav",
             1 => "player/pl_wade2.wav",
             2 => "player/pl_wade3.wav",

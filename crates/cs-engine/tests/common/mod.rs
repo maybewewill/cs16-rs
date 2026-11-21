@@ -331,6 +331,9 @@ pub struct TestGame {
     /// of extra 2, which stands inside a new trigger: the follower's first physics step
     /// touches it.
     pub follow_into_trigger: bool,
+    /// When non-zero, `server_activate` creates a trigger holding this many boxes and sets
+    /// `force_retouch`, so every settle pass touches each box.
+    pub activate_crowd: usize,
     /// When set, every `touch` marks the toucher `FL_KILLME`.
     pub touch_kills_toucher: bool,
     /// When set, every `touch` makes the toucher `SOLID_NOT`.
@@ -347,6 +350,8 @@ pub struct TestGame {
     pub mover_touch_velocity: Option<Vec3>,
     /// When set, a `touch` by a `test_mover` removes it.
     pub mover_touch_removes: bool,
+    /// When set, a `touch` by a `test_mover` gives it this `movetype`.
+    pub mover_touch_movetype: Option<u8>,
     /// `(pusher index, blocker index)` of every `blocked` call, in call order.
     pub blocked_log: Vec<(u16, u16)>,
     /// When set, every `blocked` removes the pusher.
@@ -420,6 +425,19 @@ impl GameDll for TestGame {
                 vars.solid = 1 + (n % 4) as u8;
                 vars.movetype = 1 + (n % 12) as u8;
             }
+        }
+        if self.activate_crowd > 0 {
+            let trigger = eng.create_entity("crowd_trigger").expect("free edict");
+            eng.ent_mut(trigger).unwrap().solid = consts::SOLID_TRIGGER;
+            eng.set_size(trigger, Vec3::splat(-64.0), Vec3::splat(64.0));
+            eng.set_origin(trigger, Vec3::new(0.0, 0.0, 500.0));
+            for _ in 0..self.activate_crowd {
+                let id = eng.create_entity("crowd").expect("free edict");
+                eng.ent_mut(id).unwrap().solid = consts::SOLID_BBOX;
+                eng.set_size(id, Vec3::splat(-8.0), Vec3::splat(8.0));
+                eng.set_origin(id, Vec3::new(0.0, 0.0, 500.0));
+            }
+            eng.set_force_retouch(100.0);
         }
         if self.follow_into_trigger {
             let mut extras = Vec::new();
@@ -668,6 +686,9 @@ impl GameDll for TestGame {
                 .push((toucher.index, v.origin, v.velocity, v.flags));
             if let Some(velocity) = self.mover_touch_velocity {
                 eng.ent_mut(toucher).unwrap().velocity = velocity;
+            }
+            if let Some(movetype) = self.mover_touch_movetype {
+                eng.ent_mut(toucher).unwrap().movetype = movetype;
             }
             if self.mover_touch_removes {
                 eng.remove_entity(toucher);

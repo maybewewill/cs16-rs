@@ -98,7 +98,7 @@ impl<G: GameDll> Server<G> {
     /// Calls [`GameDll::touch`] for every queued touch, oldest first, until the queue is empty.
     /// Before each one the world is checked again: an entity removed since (its serial no longer
     /// resolves) or marked `FL_KILLME` drops the touch, and so does a trigger that is no longer
-    /// `SOLID_TRIGGER`. Each call is a game call like any other, so what the game queued is
+    /// `SOLID_TRIGGER` and an impact half whose toucher is now `SOLID_NOT`. Each call is a game call like any other, so what the game queued is
     /// drained afterwards; the touches it caused join the queue and are delivered by this loop.
     /// A call made while the loop is already running (a kick released a slot, whose disconnect
     /// is a game call too) leaves the queue to the running loop.
@@ -118,8 +118,11 @@ impl<G: GameDll> Server<G> {
             else {
                 continue;
             };
+            // `SV_Impact` tests `e2->v.solid` after `touch(e1, e2)` ran: an impact half whose
+            // toucher turned `SOLID_NOT` meanwhile is dropped too.
             if (flags | other_flags) & FL_KILLME != 0
                 || (kind == TouchKind::Trigger && solid != SOLID_TRIGGER)
+                || (kind == TouchKind::Impact && solid == SOLID_NOT)
             {
                 continue;
             }
@@ -163,6 +166,8 @@ mod tests {
         touches: Vec<(u16, u16)>,
         /// The first touch marks its `other` with `FL_KILLME`.
         kill_other_on_touch: bool,
+        /// The first touch makes its `other` `SOLID_NOT`.
+        unsolid_other_on_touch: bool,
     }
 
     impl GameDll for Recorder {
@@ -203,6 +208,9 @@ mod tests {
             self.touches.push((toucher.index, other.index));
             if self.kill_other_on_touch {
                 eng.ent_mut(other).unwrap().flags |= FL_KILLME;
+            }
+            if self.unsolid_other_on_touch {
+                eng.ent_mut(other).unwrap().solid = SOLID_NOT;
             }
         }
     }
@@ -299,6 +307,18 @@ mod tests {
     }
 
     #[test]
+    fn second_half_is_dropped_when_the_first_made_its_toucher_non_solid() {
+        let mut s = server();
+        s.game.unsolid_other_on_touch = true;
+        let a = entity(&mut s, SOLID_BBOX);
+        let b = entity(&mut s, SOLID_BBOX);
+        s.impact(a, b);
+        s.drain_outbox();
+        // `touch(a, b)` made `b` non-solid; `SV_Impact` then skips `touch(b, a)`.
+        assert_eq!(s.game.touches, [(a.index, b.index)]);
+    }
+
+    #[test]
     fn impact_queues_both_halves_or_neither() {
         let mut s = server();
         let a = entity(&mut s, SOLID_BBOX);
@@ -328,8 +348,8 @@ mod tests {
         assert!(s.game.touches.is_empty());
         // An impact side is not held to being a trigger.
         s.world.queue_touches(&[PendingTouch {
-            toucher: trigger,
-            other,
+            toucher: other,
+            other: trigger,
             kind: TouchKind::Impact,
         }]);
         s.dispatch_touches();
