@@ -124,12 +124,12 @@ fn sines(angles: Vec3) -> (f32, f32, f32, f32, f32, f32) {
 }
 
 /// The brush model number of a `*N` model name.
-fn brush_model(v: &EntVars) -> Option<usize> {
+pub(crate) fn brush_model(v: &EntVars) -> Option<usize> {
     v.model.strip_prefix('*')?.parse().ok()
 }
 
 /// `SV_HullForBsp`'s choice of the BSP hull by the size of the moving box.
-fn bsp_hull_for(mins: Vec3, maxs: Vec3) -> Hull {
+pub(crate) fn bsp_hull_for(mins: Vec3, maxs: Vec3) -> Hull {
     let size = maxs - mins;
     if size.x <= 8.0 {
         Hull::Point
@@ -146,7 +146,7 @@ fn bsp_hull_for(mins: Vec3, maxs: Vec3) -> Hull {
 
 /// The offset `SV_HullForBsp` gives: the box's `mins` corner is moved onto the hull's
 /// `clip_mins` (nothing for the point hull), then the model's `origin` is added.
-fn bsp_offset(hull: Hull, mins: Vec3, origin: Vec3) -> Vec3 {
+pub(crate) fn bsp_offset(hull: Hull, mins: Vec3, origin: Vec3) -> Vec3 {
     if hull == Hull::Point {
         origin
     } else {
@@ -881,6 +881,28 @@ mod tests {
         assert_eq!(eng.test_entity_position(monster), None);
         eng.ent_mut(monster).unwrap().flags |= FL_MONSTERCLIP;
         assert_eq!(eng.test_entity_position(monster), Some(slab));
+    }
+
+    /// A brush trigger is touched when the entity's origin is inside its hull, not merely when
+    /// the boxes overlap (`SV_TouchLinks`).
+    #[test]
+    fn brush_trigger_needs_the_hull_not_just_the_box() {
+        let mut f = slab_fixture();
+        let mut eng = f.api();
+        let trigger = eng.create_entity("trigger_multiple").unwrap();
+        assert!(eng.set_model(trigger, "*1"));
+        eng.ent_mut(trigger).unwrap().solid = SOLID_TRIGGER;
+        eng.set_origin(trigger, Vec3::ZERO);
+        let ball = eng.create_entity("ball").unwrap();
+        eng.ent_mut(ball).unwrap().solid = SOLID_BBOX;
+        eng.set_size(ball, Vec3::splat(-1.0), Vec3::splat(1.0));
+        // The boxes overlap (the trigger's is widened by 1), the slab's y range ends at 8.
+        eng.set_origin(ball, Vec3::new(0.0, 8.5, 0.0));
+        eng.link_entity(ball, true);
+        assert!(eng.pending_touches().is_empty());
+        eng.set_origin(ball, Vec3::new(0.0, 5.0, 0.0));
+        eng.link_entity(ball, true);
+        assert_eq!(eng.pending_touches(), [(trigger, ball)]);
     }
 
     #[test]

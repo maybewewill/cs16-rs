@@ -11,17 +11,21 @@
 //!   through `pfnSetAbsBox`. That function widens every box by 1 and, for a rotated `SOLID_BSP`
 //!   entity, uses the cube of its largest coordinate; it has no `FL_ITEM` case (that is Quake's
 //!   `SV_LinkEdict`), so none is made here.
-//! - Brush triggers are touched by their box here; the exact hull test is not made yet.
-//! - Touches are queued, not dispatched (see [`WorldLinks::take_pending_touches`]).
+//! - Touches are queued here and dispatched by the server after the current game call
+//!   returns (`touch.rs`), not synchronously inside `SV_LinkEdict`. `SV_TouchLinks` (box test,
+//!   then the exact hull test for brush triggers) runs at link time, as in HLDS.
 //! - `BOX_ON_PLANE_SIDE` is written from memory of the Quake macro (not in the ReHLDS tree).
 //! - `ent->groupinfo` is not modelled.
 
 use cs_assets::bsp::{BspMap, Plane};
+use std::collections::VecDeque;
+
 use glam::Vec3;
 
 use crate::collision::{CONTENTS_SOLID, MAX_WORLD_COORD};
 use crate::edict::{EdictId, EdictPool, EntVars};
 use crate::game::EngineApi;
+use crate::touch::MAX_TOUCHES_PER_FRAME;
 
 /// Constants of `rehlds/common/const.h` (read 2026-11-21) that entity code uses.
 pub mod consts {
@@ -84,9 +88,6 @@ pub const AREA_DEPTH: usize = 4;
 /// Leaves an entity keeps (`MAX_ENT_LEAFS` in `rehlds/public/rehlds/edict.h`, read 2026-11-21).
 /// An entity touching more leaves keeps the top node of its box instead.
 pub const MAX_ENT_LEAFS: usize = 48;
-
-/// Pending touches kept; more are dropped (private cap, HLDS has none).
-const MAX_PENDING_TOUCHES: usize = 4096;
 
 /// What a linked entity touches in the BSP, for the visibility test: `num_leafs`,
 /// `leafnums` and `headnode` of the HLDS edict. A leaf number `n` stands for leaf `n + 1` of
@@ -298,8 +299,15 @@ pub(crate) struct WorldLinks {
     nodes: Vec<AreaNode>,
     /// By edict index.
     links: Vec<Option<Link>>,
-    pending_touches: Vec<(EdictId, EdictId)>,
-    touches_dropped: bool,
+    /// `(toucher, other)` pairs waiting for the server to dispatch them, oldest first.
+    pending_touches: VecDeque<(EdictId, EdictId)>,
+    /// Touches queued since the frame began (dispatched or not); bounded by
+    /// [`MAX_TOUCHES_PER_FRAME`].
+    frame_touches: usize,
+    /// Touches refused this frame because the bound was reached.
+    touches_dropped: usize,
+    /// The server is inside its touch dispatch loop (`touch.rs`).
+    pub(crate) dispatching: bool,
     /// The game's `force_retouch` global (see `EngineApi::set_force_retouch`).
     pub(crate) force_retouch: f32,
 }
@@ -310,8 +318,10 @@ impl WorldLinks {
         let mut world = Self {
             nodes: Vec::with_capacity((1 << (AREA_DEPTH + 1)) - 1),
             links: Vec::new(),
-            pending_touches: Vec::new(),
-            touches_dropped: false,
+            pending_touches: VecDeque::new(),
+            frame_touches: 0,
+            touches_dropped: 0,
+            dispatching: false,
             force_retouch: 0.0,
         };
         world.create_node(0, bounds.0, bounds.1);
@@ -491,31 +501,32 @@ impl WorldLinks {
             .map(|l| &l.leaves)
     }
 
-    /// Takes the touches queued by `link_entity(_, true)`: `(trigger, other)` pairs in the
-    /// order they were found.
-    #[allow(dead_code)] // The dispatch of touches comes with the physics.
-    pub(crate) fn take_pending_touches(&mut self) -> Vec<(EdictId, EdictId)> {
-        self.touches_dropped = false;
-        std::mem::take(&mut self.pending_touches)
+    /// Takes the oldest queued `(toucher, other)` pair.
+    pub(crate) fn pop_touch(&mut self) -> Option<(EdictId, EdictId)> {
+        self.pending_touches.pop_front()
     }
 
     /// The touches queued and not yet taken.
-    pub(crate) fn pending_touches(&self) -> &[(EdictId, EdictId)] {
-        &self.pending_touches
+    #[cfg(test)]
+    pub(crate) fn pending_touches(&self) -> Vec<(EdictId, EdictId)> {
+        self.pending_touches.iter().copied().collect()
     }
 
-    fn queue_touch(&mut self, trigger: EdictId, other: EdictId) {
-        if self.pending_touches.len() >= MAX_PENDING_TOUCHES {
-            if !self.touches_dropped {
-                self.touches_dropped = true;
-                tracing::warn!(
-                    cap = MAX_PENDING_TOUCHES,
-                    "pending touches over the cap; the rest are dropped"
-                );
-            }
+    /// Queues `touch(toucher, other)`; refused (and counted) once [`MAX_TOUCHES_PER_FRAME`]
+    /// touches were queued this frame.
+    pub(crate) fn queue_touch(&mut self, toucher: EdictId, other: EdictId) {
+        if self.frame_touches >= MAX_TOUCHES_PER_FRAME {
+            self.touches_dropped += 1;
             return;
         }
-        self.pending_touches.push((trigger, other));
+        self.frame_touches += 1;
+        self.pending_touches.push_back((toucher, other));
+    }
+
+    /// Starts a new frame's touch budget; returns the touches refused during the last one.
+    pub(crate) fn reset_touch_budget(&mut self) -> usize {
+        self.frame_touches = 0;
+        std::mem::take(&mut self.touches_dropped)
     }
 }
 
@@ -584,8 +595,9 @@ impl EngineApi<'_> {
     /// `SV_LinkEdict`: recomputes the absolute box of entity `id`, the leaves it touches and
     /// its place in the area tree. An entity that is `SOLID_NOT` (with `skin >= -1`) is not
     /// put in the tree; a `SOLID_BSP` entity without a model is not either. With
-    /// `touch_triggers` the `SOLID_TRIGGER` entities whose box meets the entity's are queued
-    /// as pending touches (nothing dispatches them yet). The world, a stale id and an entity
+    /// `touch_triggers` the `SOLID_TRIGGER` entities whose box meets the entity's (and, for a
+    /// brush trigger, whose hull holds its origin) are queued as touches, which the server
+    /// dispatches after the current game call (see `touch.rs`). The world, a stale id and an entity
     /// whose box is not finite are left out of the tree; such an entity gets a zero box.
     pub fn link_entity(&mut self, id: EdictId, touch_triggers: bool) {
         let Some(v) = self.edicts.get(id).map(|e| &e.vars) else {
@@ -596,6 +608,7 @@ impl EngineApi<'_> {
         let has_model = v.modelindex != 0;
         let no_model = !has_model && v.model.is_empty();
         let killed = v.flags & FL_KILLME != 0;
+        let (ent_origin, ent_mins, ent_maxs) = (v.origin, v.mins, v.maxs);
 
         // Whatever the entity was linked as is gone.
         self.world.unlink(id.index);
@@ -632,7 +645,11 @@ impl EngineApi<'_> {
                 let Some(t) = self.edicts.get(touch).map(|e| &e.vars) else {
                     continue;
                 };
-                if touch.index != id.index && t.flags & FL_KILLME == 0 && t.solid == SOLID_TRIGGER {
+                if touch.index != id.index
+                    && t.flags & FL_KILLME == 0
+                    && t.solid == SOLID_TRIGGER
+                    && self.brush_trigger_holds(t, ent_origin, ent_mins, ent_maxs)
+                {
                     self.world.queue_touch(touch, id);
                 }
             }
@@ -690,7 +707,7 @@ impl EngineApi<'_> {
     /// The touches `link_entity(_, true)` found and nothing has taken yet, as
     /// `(trigger, other)`.
     #[cfg(test)]
-    pub(crate) fn pending_touches(&self) -> &[(EdictId, EdictId)] {
+    pub(crate) fn pending_touches(&self) -> Vec<(EdictId, EdictId)> {
         self.world.pending_touches()
     }
 }
@@ -970,7 +987,7 @@ mod tests {
     }
 
     #[test]
-    fn touch_queue_is_capped() {
+    fn touch_queue_is_capped_per_frame() {
         let mut f = Fixture::on(ServerMap::stub("cap"));
         let mut eng = f.api();
         let trigger = eng.create_entity("trigger").unwrap();
@@ -979,13 +996,14 @@ mod tests {
         let ball = eng.create_entity("ball").unwrap();
         eng.ent_mut(ball).unwrap().solid = SOLID_BBOX;
         eng.set_size(ball, Vec3::splat(-1.0), Vec3::splat(1.0));
-        for _ in 0..MAX_PENDING_TOUCHES + 10 {
+        for _ in 0..MAX_TOUCHES_PER_FRAME + 10 {
             eng.link_entity(ball, true);
         }
-        assert_eq!(eng.pending_touches().len(), MAX_PENDING_TOUCHES);
-        assert!(f.world.touches_dropped);
-        assert_eq!(f.world.take_pending_touches().len(), MAX_PENDING_TOUCHES);
-        assert!(!f.world.touches_dropped);
+        assert_eq!(eng.pending_touches().len(), MAX_TOUCHES_PER_FRAME);
+        assert_eq!(f.world.reset_touch_budget(), 10);
+        // The budget is back; the queue itself is not touched by the reset.
+        assert_eq!(f.world.pending_touches().len(), MAX_TOUCHES_PER_FRAME);
+        assert_eq!(f.world.reset_touch_budget(), 0);
     }
 
     #[test]

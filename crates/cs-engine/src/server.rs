@@ -275,6 +275,7 @@ impl<G: GameDll> Server<G> {
         self.broadcast_userinfo();
         self.send_client_frames(net);
         self.send_farewells(net);
+        self.finish_frame_touches();
         self.frametime = 0.0;
     }
 
@@ -422,9 +423,17 @@ impl<G: GameDll> Server<G> {
         f(&mut self.game, &mut eng)
     }
 
+    /// What follows every game call: moves what the game queued to the clients (see
+    /// [`drain_messages`](Self::drain_messages)), then dispatches the touches the call queued
+    /// (see `touch.rs`).
+    pub(crate) fn drain_outbox(&mut self) {
+        self.drain_messages();
+        self.dispatch_touches();
+    }
+
     /// Moves what the game queued to the clients, carries out its kicks (telling the kicked
     /// client why) and drops clients over the reliable backlog cap.
-    pub(crate) fn drain_outbox(&mut self) {
+    pub(crate) fn drain_messages(&mut self) {
         loop {
             self.net_stats.outbox_dropped += std::mem::take(&mut self.outbox.dropped);
             for (slot, client) in self.clients.iter_mut().enumerate() {

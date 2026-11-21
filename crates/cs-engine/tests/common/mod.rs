@@ -289,6 +289,16 @@ pub struct TestGame {
     pub message_flood: bool,
     /// Calls queued by the test, run at the start of the next frame.
     pub actions: Actions,
+
+    /// `(toucher index, other index)` of every `touch` call, in call order.
+    pub touch_log: Vec<(u16, u16)>,
+    /// When set, every `touch` removes both entities.
+    pub touch_removes_both: bool,
+    /// When set, every `touch` links `other` again, asking for its touches.
+    pub touch_relinks_other: bool,
+    /// When set, a `touch` by an `other` of class `mover` links every entity of this class,
+    /// asking for its touches.
+    pub touch_links_class: Option<String>,
 }
 
 impl TestGame {
@@ -565,6 +575,26 @@ impl GameDll for TestGame {
         }
         if self.think_removes_self {
             eng.remove_entity(id);
+        }
+    }
+
+    fn touch(&mut self, eng: &mut EngineApi<'_>, toucher: EdictId, other: EdictId) {
+        self.touch_log.push((toucher.index, other.index));
+        if self.touch_removes_both {
+            eng.remove_entity(toucher);
+            eng.remove_entity(other);
+        }
+        if self.touch_relinks_other {
+            eng.link_entity(other, true);
+        }
+        if let Some(class) = &self.touch_links_class
+            && eng.ent(other).is_some_and(|v| v.classname == "mover")
+        {
+            let mut linked = None;
+            while let Some(id) = eng.find_by_classname(linked, class) {
+                eng.link_entity(id, true);
+                linked = Some(id);
+            }
         }
     }
 

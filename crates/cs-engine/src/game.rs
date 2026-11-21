@@ -230,6 +230,14 @@ pub trait GameDll {
     /// order. During the call `eng.time()` is `max(nextthink, sv_time)`. The engine has set
     /// `nextthink` to 0 before the call; the game schedules the next think by setting it again.
     fn think(&mut self, _eng: &mut EngineApi<'_>, _id: EdictId) {}
+    /// `pfnTouch`: `toucher` (a trigger, or the first entity of an impact) is touched by
+    /// `other`. Called after the game call that found the touch has returned, never nested
+    /// inside it; at most `MAX_TOUCHES_PER_FRAME` per frame. Both entities were live when the
+    /// call was made.
+    fn touch(&mut self, _eng: &mut EngineApi<'_>, _toucher: EdictId, _other: EdictId) {}
+    /// `pfnBlocked`: `other` blocked the movement of the pusher `pusher`. Called by the
+    /// engine's push physics.
+    fn blocked(&mut self, _eng: &mut EngineApi<'_>, _pusher: EdictId, _other: EdictId) {}
     fn update_client_data(&mut self, eng: &mut EngineApi<'_>, slot: u8) -> GoldSrcClientData;
     /// A server console command no engine command or cvar claims, with `argv[0]` the command
     /// name as typed (never empty). Return the text to print, or `None` if the game does not

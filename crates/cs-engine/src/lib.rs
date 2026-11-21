@@ -17,6 +17,7 @@ pub mod precache;
 pub mod server;
 mod signon;
 mod physics;
+mod touch;
 mod trace_ents;
 pub mod usercmd;
 mod world;
@@ -51,6 +52,7 @@ pub use server::{
 pub use signon::{
     INIT_BUFFER_BUDGET, MAX_SIGNON_BUFFER, SIGNON_BASELINE_RESERVE, SPAWN_TAIL_MAX,
 };
+pub use touch::MAX_TOUCHES_PER_FRAME;
 pub use trace_ents::{EntTrace, MoveFilter};
 pub use usercmd::{
     MAX_BANKED_MS, MAX_CONSECUTIVE_BAD_MOVES, MAX_DROPPED_REPLAY, MAX_USERCMD_STEP_MS, MsecBudget,
