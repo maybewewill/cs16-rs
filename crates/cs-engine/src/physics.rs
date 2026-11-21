@@ -398,9 +398,10 @@ impl<G: GameDll> Server<G> {
     }
 
     /// The failure of a push: `blocker`, the entity that stayed stuck and where it was, goes
-    /// back there (linked with trigger touching), the pusher is put back by `restore_pusher` and gets its `ltime` back, the
-    /// game is told the pusher was blocked, and everything moved so far goes back to where it
-    /// was. `rotation` is the yaw the pusher turned them by, when it rotates.
+    /// back there (linked with trigger touching), the pusher is put back by `restore_pusher`
+    /// and gets its `ltime` back, the touches the push queued are delivered (HLDS delivers
+    /// them inside the push, so they precede `blocked`), the game is told the pusher was
+    /// blocked, and everything moved so far goes back to where it was. `rotation` is the yaw the pusher turned them by, when it rotates.
     fn push_failed(
         &mut self,
         pusher: EdictId,
@@ -421,6 +422,7 @@ impl<G: GameDll> Server<G> {
         self.with_engine(|eng| eng.link_entity(pusher, false));
         // The game may remove the pusher or the entity that blocked it; what is left of the
         // entities moved so far is put back either way.
+        self.dispatch_touches();
         self.with_game(|game, eng| game.blocked(eng, pusher, check));
         for &(moved_id, from) in moved {
             let Some(v) = self.edicts.get_mut(moved_id).map(|e| &mut e.vars) else {

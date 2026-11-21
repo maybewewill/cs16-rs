@@ -164,6 +164,69 @@ fn rider_moves_with_the_pusher() {
     assert!(near(rv.origin, moved + Vec3::new(0.0, 0.0, 40.0), 1e-3), "{:?}", rv.origin);
 }
 
+#[test]
+fn an_entity_in_the_way_is_shoved_aside() {
+    let mut h = harness(TestGame::default());
+    let (p, shoved) = run(&mut h, |eng| {
+        let p = pusher(eng, Vec3::ZERO, 16.0, Vec3::new(100.0, 0.0, 0.0), 1.0);
+        // Not on the pusher, but 0.5 inside its box once it has moved 1: the push clears it.
+        let shoved = body(eng, "shoved", Vec3::new(24.5, 0.0, 0.0), 8.0);
+        (p, shoved)
+    });
+    let moved = vars(&h, p).origin;
+    assert!(moved.x > 0.5, "{moved:?}");
+    let sv = vars(&h, shoved);
+    assert!(near(sv.origin, moved + Vec3::new(24.5, 0.0, 0.0), 1e-4), "{:?}", sv.origin);
+    assert!(h.server.game().blocked_log.is_empty());
+}
+
+#[test]
+fn blocked_may_remove_the_blocker() {
+    let game = TestGame {
+        blocked_removes_other: true,
+        ..TestGame::default()
+    };
+    let mut h = harness(game);
+    let (p, free, crushed, _wall) = crush_scene(&mut h);
+    assert_eq!(h.server.game().blocked_log, [(p.index, crushed.index)]);
+    assert!(h.server.edicts().get(crushed).is_none());
+    // The rest was put back, the removed one skipped.
+    assert_eq!(vars(&h, free).origin, Vec3::new(0.0, 0.0, 24.0));
+    assert_eq!(vars(&h, p).origin, Vec3::ZERO);
+    // Nothing blocks any more: the pusher goes on.
+    h.step(&mut [], 5);
+    assert_eq!(h.server.game().blocked_log.len(), 1);
+    assert!(vars(&h, p).origin.x > 1.0);
+}
+
+#[test]
+fn a_blocked_rotation_clears_a_clients_avelocity() {
+    let game = TestGame {
+        blocked_stops_pusher: true,
+        ..TestGame::default()
+    };
+    let mut h = harness(game);
+    let (p, player) = run(&mut h, |eng| {
+        let p = pusher(eng, Vec3::ZERO, 32.0, Vec3::ZERO, 10.0);
+        eng.ent_mut(p).unwrap().avelocity = Vec3::new(0.0, 9000.0, 0.0);
+        let player = eng.client_edict(0);
+        let v = eng.ent_mut(player).unwrap();
+        v.movetype = MOVETYPE_WALK;
+        v.solid = SOLID_SLIDEBOX;
+        v.flags = FL_CLIENT;
+        eng.set_size(player, Vec3::splat(-8.0), Vec3::splat(8.0));
+        eng.set_origin(player, Vec3::new(30.0, 0.0, 0.0));
+        let wall = body(eng, "wall", Vec3::new(15.0, 15.0, 0.0), 6.0);
+        eng.ent_mut(wall).unwrap().movetype = MOVETYPE_NONE;
+        (p, player)
+    });
+    assert_eq!(h.server.game().blocked_log, [(p.index, player.index)]);
+    let pv = vars(&h, player);
+    assert_eq!(pv.origin, Vec3::new(30.0, 0.0, 0.0));
+    assert_eq!(pv.avelocity, Vec3::ZERO);
+    assert_eq!(pv.angles, Vec3::ZERO);
+}
+
 /// A pusher at the origin moving along +x; a free rider on top, a rider whose way is shut by a
 /// wall, in that index order.
 fn crush_scene(h: &mut Harness) -> (EdictId, EdictId, EdictId, EdictId) {
@@ -391,8 +454,8 @@ fn dust2() -> Option<(ServerMap, Arc<BspMap>)> {
     Some((map, bsp))
 }
 
-/// A brush model of de_dust2 as a pusher carries a player standing on it, and the player is
-/// not carried by a pusher it is not on. The brush is the one the map gives to a `func_*`
+/// A brush model of de_dust2 as a pusher carries a player standing on it, and an entity that
+/// is not on it stays put. The brush is the one the map gives to a `func_*`
 /// entity, moved up and sideways by the pusher's `velocity`.
 #[test]
 fn brush_pusher_of_a_real_map_carries_its_rider() {
@@ -419,7 +482,7 @@ fn brush_pusher_of_a_real_map_carries_its_rider() {
     };
     let mut h = Harness::with_map(cfg, map, TestGame::default());
     let name = format!("*{model}");
-    let (p, player) = run(&mut h, move |eng| {
+    let (p, player, apart) = run(&mut h, move |eng| {
         let p = eng.create_entity("func_test").expect("free edict");
         assert!(eng.set_model(p, &name), "{name} is a model of the map");
         let v = eng.ent_mut(p).unwrap();
@@ -438,7 +501,9 @@ fn brush_pusher_of_a_real_map_carries_its_rider() {
         v.groundentity = Some(p);
         eng.set_size(player, Vec3::new(-16.0, -16.0, -36.0), Vec3::new(16.0, 16.0, 36.0));
         eng.set_origin(player, Vec3::new(center.x, center.y, top + 36.0 + 1.0));
-        (p, player)
+        // Not on the brush and far above where it can reach.
+        let apart = body(eng, "apart", Vec3::new(center.x, center.y, top + 600.0), 8.0);
+        (p, player, apart)
     });
     h.step(&mut [], 2);
     let pv = vars(&h, p);
@@ -448,6 +513,7 @@ fn brush_pusher_of_a_real_map_carries_its_rider() {
     // Carried by the full distance the brush moved, while it was not blocked.
     let blocked = h.server.game().blocked_log.clone();
     assert!(blocked.is_empty(), "{blocked:?}");
+    assert_eq!(vars(&h, apart).origin.z, top + 600.0);
     assert!(
         (player_v.origin.z - (top + 37.0 + pv.origin.z)).abs() < 1e-3,
         "{:?} after the brush rose {}",

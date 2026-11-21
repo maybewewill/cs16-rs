@@ -329,6 +329,8 @@ pub struct TestGame {
     pub blocked_removes_pusher: bool,
     /// When set, every `blocked` stops the pusher (zero velocity and angular velocity).
     pub blocked_stops_pusher: bool,
+    /// When set, every `blocked` removes the entity that blocked the pusher.
+    pub blocked_removes_other: bool,
 }
 
 impl TestGame {
@@ -678,6 +680,9 @@ impl GameDll for TestGame {
         }
         if self.blocked_removes_pusher {
             eng.remove_entity(pusher);
+        }
+        if self.blocked_removes_other {
+            eng.remove_entity(other);
         }
     }
 
