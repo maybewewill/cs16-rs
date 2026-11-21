@@ -287,7 +287,25 @@ fn velocity_is_clamped_and_nan_zeroed() {
     let n = vars(&h, nan_origin);
     assert_eq!(n.origin, Vec3::new(0.0, 5.0, 7.0));
 
-    // The cvar is read every time.
+    // An infinity is treated as a NaN, and a non-finite angular velocity never reaches the
+    // angles.
+    let (inf, spin) = run(&mut h, |eng| {
+        let inf = mover(
+            eng,
+            MOVETYPE_FLY,
+            SOLID_NOT,
+            Vec3::ZERO,
+            Vec3::new(f32::INFINITY, 0.0, 0.0),
+        );
+        let spin = mover(eng, MOVETYPE_FLY, SOLID_NOT, Vec3::ZERO, Vec3::ZERO);
+        eng.ent_mut(spin).unwrap().avelocity = Vec3::new(f32::NAN, f32::INFINITY, 90.0);
+        (inf, spin)
+    });
+    assert_eq!(vars(&h, inf).velocity, Vec3::ZERO);
+    let s = vars(&h, spin);
+    assert!(s.angles.is_finite() && s.avelocity.is_finite(), "{s:?}");
+
+    // The cvar is read at the start of every physics pass.
     run(&mut h, move |eng| {
         eng.set_cvar("sv_maxvelocity", "500");
         eng.ent_mut(fast).unwrap().velocity = Vec3::new(-3000.0, 100.0, 0.0);
@@ -508,4 +526,216 @@ fn step_entity_falls_and_gets_friction() {
     assert!(stopped.origin.x > start.x + 5.0 && stopped.origin.x < start.x + 60.0);
     assert!(near(stopped.origin.z, rest_z, 0.1));
     assert_ne!(stopped.flags & FL_ONGROUND, 0);
+}
+
+fn stub_with(game: TestGame) -> Harness {
+    let cfg = ServerConfig {
+        max_clients: 1,
+        max_edicts: 64,
+        ..ServerConfig::default()
+    };
+    Harness::with_config(cfg, game)
+}
+
+/// A `BOUNCE` mover with friction 0.5 two units over a floor, falling at 400 units/s.
+fn bounce_onto_floor(eng: &mut EngineApi<'_>) -> (EdictId, EdictId) {
+    let floor_id = floor(eng);
+    let id = mover(
+        eng,
+        MOVETYPE_BOUNCE,
+        SOLID_BBOX,
+        Vec3::new(0.0, 0.0, 6.0),
+        Vec3::new(0.0, 0.0, -400.0),
+    );
+    eng.ent_mut(id).unwrap().friction = 0.5;
+    (floor_id, id)
+}
+
+#[test]
+fn a_touch_at_impact_sees_the_velocity_before_the_clip() {
+    let mut h = stub();
+    let (_, id) = run(&mut h, bounce_onto_floor);
+    let states = &h.server.game().mover_touch_states;
+    // One impact: the mover's own touch, seen with the velocity it hit with (400 plus the
+    // frame's gravity), not the reflected one, and not on the ground.
+    assert_eq!(states.len(), 1, "{states:?}");
+    let (index, origin, velocity, flags) = states[0];
+    assert_eq!(index, id.index);
+    assert!(near(velocity.z, -408.0, 0.01), "{velocity:?}");
+    assert_eq!(flags & FL_ONGROUND, 0);
+    assert!(near(origin.z, 4.0, 0.1), "{origin:?}");
+    assert!(near(vars(&h, id).velocity.z, 204.0, 0.01));
+}
+
+#[test]
+fn a_touch_that_changes_the_velocity_alters_the_outcome() {
+    let game = TestGame {
+        mover_touch_velocity: Some(Vec3::new(0.0, 0.0, -100.0)),
+        ..TestGame::default()
+    };
+    let mut h = stub_with(game);
+    let (_, id) = run(&mut h, bounce_onto_floor);
+    // The clip works on what the touch left: -100 reflected by 1.5 is 50, not 204.
+    let v = vars(&h, id).velocity;
+    assert!(near(v.z, 50.0, 0.01), "{v:?}");
+}
+
+#[test]
+fn a_touch_that_removes_the_entity_ends_the_move() {
+    for movetype in [MOVETYPE_BOUNCE, MOVETYPE_TOSS, MOVETYPE_STEP] {
+        let game = TestGame {
+            mover_touch_removes: true,
+            ..TestGame::default()
+        };
+        let mut h = stub_with(game);
+        let id = run(&mut h, move |eng| {
+            floor(eng);
+            mover(
+                eng,
+                movetype,
+                SOLID_SLIDEBOX,
+                Vec3::new(0.0, 0.0, 5.0),
+                Vec3::new(0.0, 0.0, -400.0),
+            )
+        });
+        assert!(h.server.edicts().get(id).is_none(), "movetype {movetype}");
+        // The mover's touch only: the floor's half of the impact and every later impact of
+        // the move are dropped.
+        let log = &h.server.game().touch_log;
+        assert_eq!(log.len(), 1, "movetype {movetype}: {log:?}");
+        assert_eq!(log[0].0, id.index);
+        h.step(&mut [], 3);
+        assert_eq!(h.server.game().touch_log.len(), 1);
+    }
+}
+
+#[test]
+fn a_step_entity_touch_sees_the_velocity_before_the_clip() {
+    let mut h = stub();
+    let id = run(&mut h, |eng| {
+        floor(eng);
+        mover(
+            eng,
+            MOVETYPE_STEP,
+            SOLID_BBOX,
+            Vec3::new(0.0, 0.0, 4.2),
+            Vec3::new(0.0, 0.0, -20.0),
+        )
+    });
+    let states = &h.server.game().mover_touch_states;
+    assert_eq!(states.len(), 1, "{states:?}");
+    // 20 units/s and the frame's 8 of gravity, not yet clipped to the floor.
+    assert!(near(states[0].2.z, -28.0, 0.01), "{:?}", states[0]);
+    let v = vars(&h, id);
+    assert_eq!(v.velocity.z, 0.0);
+    assert_ne!(v.flags & FL_ONGROUND, 0);
+}
+
+#[test]
+fn a_move_into_a_crease_slides_along_it() {
+    let mut h = stub();
+    // Two walls meeting at a corner: faces at x = 40 and y = 40. The box is flush against both
+    // (4 units from the faces, less the clipping epsilon) and flies diagonally into them.
+    let flush = 36.0 - 0.03125;
+    let id = run(&mut h, move |eng| {
+        for (origin, half) in [
+            (Vec3::new(50.0, 0.0, 0.0), Vec3::new(10.0, 200.0, 200.0)),
+            (Vec3::new(0.0, 50.0, 0.0), Vec3::new(200.0, 10.0, 200.0)),
+        ] {
+            let wall = eng.create_entity("test_wall").expect("free edict");
+            eng.ent_mut(wall).unwrap().solid = SOLID_SLIDEBOX;
+            eng.set_size(wall, -half, half);
+            eng.set_origin(wall, origin);
+        }
+        let id = mover(
+            eng,
+            MOVETYPE_STEP,
+            SOLID_BBOX,
+            Vec3::new(flush, flush, 100.0),
+            Vec3::new(100.0, 100.0, -50.0),
+        );
+        eng.ent_mut(id).unwrap().flags |= cs_engine::consts::FL_FLY;
+        id
+    });
+    // The planes of both walls clip it away; what is left is along the crease, straight down.
+    let v = vars(&h, id);
+    assert!(v.velocity.x == 0.0 && v.velocity.y == 0.0, "{:?}", v.velocity);
+    assert!(near(v.velocity.z, -50.0, 0.01), "{:?}", v.velocity);
+    assert!(v.origin.z < 100.0 && v.origin.z > 99.0, "{:?}", v.origin);
+    assert!(near(v.origin.x, flush, 0.05) && near(v.origin.y, flush, 0.05));
+}
+
+/// The wade sounds of a real pool: `player/pl_wade1.wav` when an entity crosses into the water
+/// and `player/pl_wade2.wav` when it leaves, heard by a player in the same room.
+#[test]
+fn wade_sounds_play_on_entering_and_leaving_water() {
+    use cs_proto48::messages::SvcMessage;
+
+    let Ok(vfs) = Vfs::discover(None, VfsConfig::default()) else {
+        return;
+    };
+    let raw = vfs.read_bytes("maps/cs_militia.bsp").expect("cs_militia reads");
+    let bsp = Arc::new(BspMap::load(&vfs, "cs_militia").expect("cs_militia parses"));
+    let make = || ServerMap::from_bsp("cs_militia", &raw, bsp.clone()).expect("valid BSP header");
+    let cfg = ServerConfig {
+        max_clients: 1,
+        ..ServerConfig::default()
+    };
+    let mut first = Harness::with_map(cfg.clone(), make(), TestGame::default());
+    let probe_bsp = bsp.clone();
+    let surface = run(&mut first, move |eng| water_spot(eng, &probe_bsp))
+        .expect("cs_militia has a pool with air above and 30 units of water");
+
+    let game = TestGame {
+        precache_sounds: vec![
+            "player/pl_wade1.wav".to_string(),
+            "player/pl_wade2.wav".to_string(),
+        ],
+        spawn_origins: vec![surface + Vec3::new(0.0, 0.0, 60.0)],
+        ..TestGame::default()
+    };
+    let mut h = Harness::with_map(cfg, make(), game);
+    let mut probe = h.add_probe("Player");
+    h.step(&mut [&mut probe], 200);
+    let heard = |probe: &cs_probe::ProbeClient<cs_transport::LoopbackEndpoint>| {
+        probe
+            .messages()
+            .iter()
+            .filter_map(|m| match m {
+                SvcMessage::Sound(s) => Some((s.sound_index, s.entity)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(heard(&probe).is_empty());
+
+    let tossed = run(&mut h, move |eng| {
+        mover(
+            eng,
+            MOVETYPE_TOSS,
+            SOLID_NOT,
+            surface + Vec3::new(0.0, 0.0, 20.0),
+            Vec3::ZERO,
+        )
+    });
+    h.step(&mut [&mut probe], 40);
+    // Sound 1 is `pl_wade1` (the order of the precache): the entry.
+    assert_eq!(heard(&probe).first(), Some(&(1, tossed.index)));
+
+    let rising = run(&mut h, move |eng| {
+        mover(
+            eng,
+            MOVETYPE_FLY,
+            SOLID_NOT,
+            surface - Vec3::Z * 20.0,
+            Vec3::new(0.0, 0.0, 500.0),
+        )
+    });
+    h.step(&mut [&mut probe], 40);
+    // The flyer began in the water (no entry) and leaves it: `pl_wade2`.
+    let own: Vec<_> = heard(&probe)
+        .into_iter()
+        .filter(|&(_, entity)| entity == rising.index)
+        .collect();
+    assert_eq!(own, [(2, rising.index)]);
 }

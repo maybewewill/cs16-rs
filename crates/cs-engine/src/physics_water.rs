@@ -33,7 +33,7 @@ pub(crate) fn in_liquid(contents: i32) -> bool {
 }
 
 /// `SV_RecursiveWaterLevel`, as a loop: the height, relative to `origin`, of the water surface
-/// found by 6 bisections of `mins..maxs`.
+/// found by 5 bisections of `mins..maxs`.
 fn water_level_between(
     contents_at: &mut impl FnMut(Vec3) -> i32,
     origin: Vec3,

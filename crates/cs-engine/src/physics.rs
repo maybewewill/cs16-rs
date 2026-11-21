@@ -11,15 +11,17 @@
 //!   above 13) behaves as `NONE` here, with one warning per entity index per map.
 //! - `SV_CheckMovingGround` (the conveyor and `basevelocity` bookkeeping before the switch) is
 //!   not ported.
-//! - The game's `touch` is not called inside `SV_FlyMove` and `SV_PushEntity`: the impacts are
-//!   queued (see `touch.rs`) and delivered when the entity's step is over, so a touch cannot
-//!   change the move that is under way (HLDS: a touch that frees the entity ends the move, one
-//!   that changes the velocity or origin changes the rest of it). `SV_FlyMove` has no
-//!   `ent->free` exit for the same reason.
+//! - `SV_Impact` is delivered at the point of impact, as in HLDS: `SV_PushEntity` and
+//!   `SV_FlyMove` queue the impact and dispatch the touches at once (physics is driven by the
+//!   engine, so this is not a nested game call), then read the entity back; a touch that frees
+//!   the entity or marks it `FL_KILLME` ends the move (the source's `ent->free` exit; it also
+//!   stops at `FL_KILLME`). A touch in `SV_FlyMove` sees the origin and velocity the move has
+//!   reached. `SV_LinkEdict`'s trigger touches are delivered at once the same way.
 //! - `groupinfo` (`g_groupmask`) is not modelled; `SV_Trace_Toss` (`PF_TraceToss`) is not ported.
-//! - `IS_NAN` of `SV_CheckVelocity` is taken as a plain NaN test (assumption: the macro reads
-//!   the exponent bits, which would zero an infinity as well; an infinite component is clamped
-//!   to `sv_maxvelocity` here).
+//! - `IS_NAN` of `SV_CheckVelocity` is taken as a test of the exponent bits (assumption: the
+//!   macro could not be read; Quake's `IS_NAN` is that test, which an infinity passes too), so a
+//!   non-finite velocity or origin component becomes 0. `avelocity` is guarded the same way
+//!   before it turns the angles.
 //! - `sv_time` is not advanced while a think runs, so the game's time global reverts to `sv_time`
 //!   for every call after it; HLDS leaves the global at the think's due time until the next
 //!   `SV_Physics` or `SV_Impact` resets it.
@@ -64,6 +66,8 @@ impl<G: GameDll> Server<G> {
     pub(crate) fn run_physics(&mut self) {
         let frametime = self.frametime as f32;
         self.with_game(|game, eng| game.start_frame(eng, frametime));
+        // After the game's frame start, which may set them.
+        self.phys_cvars = crate::physics_move::PhysCvars::read(&self.cvars);
         let max_clients = usize::from(self.edicts.max_clients());
         let mut next = 0;
         loop {

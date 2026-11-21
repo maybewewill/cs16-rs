@@ -118,6 +118,8 @@ pub struct Server<G: GameDll> {
     pub(crate) movetype_warnings: u64,
     /// State of the generator that picks a wade sound (`RandomLong` of `PF_WaterMove`).
     pub(crate) phys_rng: u32,
+    /// The cvars the movement physics reads, read once per physics pass.
+    pub(crate) phys_cvars: crate::physics_move::PhysCvars,
     pub(crate) net_stats: NetStats,
     /// Set by `shutdown`: frames do nothing from then on.
     pub(crate) shutting_down: bool,
@@ -210,6 +212,7 @@ impl<G: GameDll> Server<G> {
             frametime: 0.0,
             warned_movetypes: BTreeSet::new(),
             phys_rng: 0x9E37_79B9,
+            phys_cvars: crate::physics_move::PhysCvars::default(),
             movetype_warnings: 0,
             net_stats: NetStats::default(),
             shutting_down: false,

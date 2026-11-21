@@ -316,6 +316,13 @@ pub struct TestGame {
     /// When set, a `touch` by an `other` of class `mover` links every entity of this class,
     /// asking for its touches.
     pub touch_links_class: Option<String>,
+    /// `(toucher index, origin, velocity, flags)` of the toucher at every `touch` call whose
+    /// toucher is a `test_mover`.
+    pub mover_touch_states: Vec<(u16, Vec3, Vec3, u32)>,
+    /// When set, a `touch` by a `test_mover` gives it this velocity.
+    pub mover_touch_velocity: Option<Vec3>,
+    /// When set, a `touch` by a `test_mover` removes it.
+    pub mover_touch_removes: bool,
 }
 
 impl TestGame {
@@ -617,6 +624,16 @@ impl GameDll for TestGame {
 
     fn touch(&mut self, eng: &mut EngineApi<'_>, toucher: EdictId, other: EdictId) {
         self.touch_log.push((toucher.index, other.index));
+        if let Some(v) = eng.ent(toucher).filter(|v| v.classname == "test_mover") {
+            self.mover_touch_states
+                .push((toucher.index, v.origin, v.velocity, v.flags));
+            if let Some(velocity) = self.mover_touch_velocity {
+                eng.ent_mut(toucher).unwrap().velocity = velocity;
+            }
+            if self.mover_touch_removes {
+                eng.remove_entity(toucher);
+            }
+        }
         self.touch_update_marks.push(self.update_client_data_calls);
         if let Some(skin) = self.touch_sets_other_skin {
             eng.ent_mut(other).unwrap().skin = skin;

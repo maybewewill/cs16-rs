@@ -7,17 +7,19 @@
 //! dispatch loop.
 //!
 //! Difference from HLDS: there, `pfnTouch` is called synchronously inside `SV_LinkEdict` and
-//! `SV_Impact`, in the middle of the game's own call. Here the touch is queued and dispatched
-//! after the game call (or the physics step) that found it has returned, so the game is never
-//! entered twice at once. The order of the calls can differ from the original's (the code that
-//! linked the entity runs to the end of its call before the touch is delivered); assumption:
-//! harmless for game logic, which cannot rely on the order of a touch against the rest of the
-//! call that caused it.
+//! `SV_Impact`, in the middle of the game's own call. Here a touch found during a game call is
+//! queued and dispatched after that call has returned, so the game is never entered twice at
+//! once; the order of the calls can differ from the original's (the code that linked the entity
+//! runs to the end of its call before the touch is delivered), which game logic cannot rely on
+//! (assumption). The movement physics is run by the engine, not by the game, so it dispatches at
+//! the point of impact as HLDS does: `SV_PushEntity` and `SV_FlyMove` (`physics_move.rs`) call
+//! [`Server::impact`] and then [`Server::dispatch_touches`] at once and read the entity back.
 //!
 //! The queue is drained after every game call (`drain_outbox`), after each entity's step of the
 //! physics pass (`physics.rs`, whose moves link without a game call) and at the end of the
 //! frame's physics (`finish_frame_touches`); the settle passes of map activation are physics
-//! passes too, so their touches are delivered before the baselines are cut. Touches a touch causes (it relinks or hits
+//! passes too, so their touches are delivered before the baselines are cut. Touches a touch
+//! causes (it relinks or hits
 //! something) are appended behind the ones waiting and dispatched in the same loop. At most
 //! [`MAX_TOUCHES_PER_FRAME`] touches are queued per frame; the rest are dropped with one
 //! `tracing::warn!` at the end of the frame. HLDS has no such bound (it prevents recursion
