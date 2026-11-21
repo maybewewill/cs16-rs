@@ -110,22 +110,17 @@ impl Bench {
             game,
             actions: Vec::new(),
         };
-        let map = ServerMap::stub_with_entities(
-            "test",
-            vec![
-                entity(&[("classname", "worldspawn")]),
-                entity(&[
-                    ("classname", "info_player_start"),
-                    ("origin", "100 0 0"),
+        let mut entities = vec![entity(&[("classname", "worldspawn")])];
+        for i in 0..20 {
+            for class in ["info_player_start", "info_player_deathmatch"] {
+                entities.push(entity(&[
+                    ("classname", class),
+                    ("origin", &format!("{} {} 0", 100 + i * 100, if class == "info_player_start" { 0 } else { 500 })),
                     ("angles", "0 90 0"),
-                ]),
-                entity(&[
-                    ("classname", "info_player_deathmatch"),
-                    ("origin", "-100 0 0"),
-                    ("angles", "0 90 0"),
-                ]),
-            ],
-        );
+                ]));
+            }
+        }
+        let map = ServerMap::stub_with_entities("test", entities);
         let server = Server::new(
             cfg,
             map,
@@ -310,7 +305,6 @@ const FIRST_UPDATE: &[&str] = &[
     "RoundTime",
     "TeamScore",
     "TeamScore",
-    "HideWeapon",
     "SetFOV",
     "Health",
     "Battery",
@@ -360,7 +354,8 @@ fn init_hud_sequence_as_regamedll() {
     );
     assert_eq!(find("ScoreAttrib")[0], CsUserMsg::ScoreAttrib { player_id: 1, flags: 1 });
     assert_eq!(find("SetFOV"), [CsUserMsg::SetFov(90)]);
-    assert_eq!(find("HideWeapon"), [CsUserMsg::HideWeapon(0)]);
+    // A joiner's cached hide-HUD value is already 0 (vanilla), so no `HideWeapon`.
+    assert!(find("HideWeapon").is_empty());
     assert_eq!(find("Health"), [CsUserMsg::Health(100)]);
     assert_eq!(find("Battery"), [CsUserMsg::Battery(0)]);
     assert_eq!(
@@ -405,7 +400,7 @@ fn a_spawn_starts_the_hud_over_without_the_welcome() {
         names,
         [
             "ScoreInfo", "CurWeapon", "ResetHUD", "Money", "StatusIcon", "ScoreAttrib",
-            "RoundTime", "TeamScore", "TeamScore", "HideWeapon", "SetFOV", "Health", "Battery",
+            "RoundTime", "TeamScore", "TeamScore", "SetFOV", "Health", "Battery",
             "Damage", "Train",
         ]
     );
@@ -494,6 +489,7 @@ fn health_and_armor_follow_the_player() {
     // those kept (a bullet is not a time-based kind), so it is sent once more, empty.
     assert_eq!(names, ["Health", "Battery", "Damage", "Damage"]);
     // `ARMOR_RATIO` 0.5, `ARMOR_BONUS` 0.5: 10 points to the health (90 left), 5 to the armor.
+    // The message's armor byte is always 0: nothing sets `dmg_save` in the original.
     assert_eq!(after[0].1, CsUserMsg::Health(90));
     assert_eq!(after[1].1, CsUserMsg::Battery(45));
     match &after[2].1 {
@@ -503,7 +499,7 @@ fn health_and_armor_follow_the_player() {
             damage_bits,
             origin,
         } => {
-            assert_eq!((*armor_damage, *health_damage), (10, 10));
+            assert_eq!((*armor_damage, *health_damage), (0, 10));
             // A bullet has no art on the HUD.
             assert_eq!(*damage_bits, 0);
             // From inside the player (no inflictor): its own position.
@@ -531,6 +527,27 @@ fn health_and_armor_follow_the_player() {
         .map(|(_, m)| m)
         .collect();
     assert_eq!(health, [CsUserMsg::Health(0), CsUserMsg::Health(0)]);
+    // `StartObserver` hides the weapons and the health (1 | 8), once.
+    let hide: Vec<CsUserMsg> = b
+        .messages(0)
+        .into_iter()
+        .skip(before)
+        .filter(|(n, _)| n == "HideWeapon")
+        .map(|(_, m)| m)
+        .collect();
+    assert_eq!(hide, [CsUserMsg::HideWeapon(9)]);
+    // A player killed before gets the HUD elements back on its next spawn, and is told.
+    let before_respawn = b.messages(0).len();
+    assert!(b.run(|game, eng| game.respawn_player(eng, 0)));
+    b.step(20);
+    let hide: Vec<CsUserMsg> = b
+        .messages(0)
+        .into_iter()
+        .skip(before_respawn)
+        .filter(|(n, _)| n == "HideWeapon")
+        .map(|(_, m)| m)
+        .collect();
+    assert_eq!(hide, [CsUserMsg::HideWeapon(0)]);
     let before = b.messages(0).len();
     b.step(30);
     assert!(!b.names_from(0, before).iter().any(|n| n == "Health"));
@@ -543,7 +560,10 @@ fn full_server_init_hud_fits() {
     for n in 0..32 {
         assert_eq!(b.join(), n);
         // Every player is on the scoreboard with a score to tell.
-        b.run(move |game, _| {
+        // Alive on a team (so `Radar` is sent), with a score to tell.
+        b.run(move |game, eng| {
+            let team = if n % 2 == 0 { Team::Ct } else { Team::Terrorist };
+            assert!(game.spawn_player(eng, n as u8, team, 0));
             let p = game.state_mut().players[n].as_mut().unwrap();
             p.frags = n as i32;
             p.deaths = 3;
@@ -557,6 +577,9 @@ fn full_server_init_hud_fits() {
     assert_eq!(teams, 32);
     let motd = last.iter().filter(|(n, _)| n == "MOTD").count();
     assert_eq!(motd, 26);
+    // The 31 players alive when it came in are on its radar.
+    let radar = last.iter().filter(|(n, _)| n == "Radar").count();
+    assert_eq!(radar, 31);
     // What InitHUD put on its reliable stream, as the bytes of the messages on the wire (the id,
     // the length byte of a variable message, the payload): well inside the reliable buffer of
     // a netchan, and the engine neither dropped nor kicked anyone.

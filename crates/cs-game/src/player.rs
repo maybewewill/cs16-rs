@@ -109,6 +109,12 @@ const ARMOR_RATIO: f32 = 0.5;
 const ARMOR_BONUS: f32 = 0.5;
 /// `AIRTIME`: seconds a player can stay under water.
 const AIRTIME: f64 = 12.0;
+/// `HIDEHUD_*` (`cdll_dll.h`; values of the Half-Life SDK, assumption).
+const HIDEHUD_WEAPONS: i32 = 1 << 0;
+const HIDEHUD_HEALTH: i32 = 1 << 3;
+const HIDEHUD_TIMER: i32 = 1 << 4;
+const HIDEHUD_MONEY: i32 = 1 << 5;
+const HIDEHUD_CROSSHAIR: i32 = 1 << 6;
 /// `CONTENTS_EMPTY` and `CONTENTS_WATER`.
 const CONTENT_EMPTY: i32 = -1;
 const CONTENT_WATER: i32 = -3;
@@ -260,7 +266,7 @@ pub struct Player {
     pub(crate) hud_damage: i32,
     /// `pev->dmg_take`: health lost since the HUD was last told.
     pub(crate) dmg_take: f32,
-    /// `pev->dmg_save`: damage armor absorbed since the HUD was last told.
+    /// `pev->dmg_save`: never set by the game (ReGameDLL `basemonster.cpp`), so always 0.
     pub(crate) dmg_save: f32,
     /// `pev->dmg_inflictor`: what last hurt the player.
     pub(crate) dmg_inflictor: Option<EdictId>,
@@ -314,7 +320,7 @@ impl Player {
             dmg_save: 0.0,
             dmg_inflictor: None,
             hide_hud: 0,
-            client_hide_hud: -1,
+            client_hide_hud: 0,
             fov: 90,
             client_fov: 0,
             train_new: true,
@@ -339,7 +345,6 @@ impl Player {
         self.dmg_take = 0.0;
         self.dmg_save = 0.0;
         self.dmg_inflictor = None;
-        self.client_hide_hud = -1;
         self.fov = 90;
         self.client_fov = 0;
         self.train_new = true;
@@ -540,7 +545,13 @@ pub(crate) fn spawn(
     if !p.not_killed {
         p.armor = 0.0;
         p.kevlar = ArmorType::None;
+        // `Spawn` (player.cpp:6030-6039) starts the client's cached `m_iClientHideHUD` over
+        // only for a player killed before (or under `REGAMEDLL_FIXES`, not vanilla), so a
+        // joiner's first update sends no `HideWeapon`.
+        p.client_hide_hud = -1;
     }
+    p.hide_hud &=
+        !(HIDEHUD_WEAPONS | HIDEHUD_HEALTH | HIDEHUD_TIMER | HIDEHUD_MONEY | HIDEHUD_CROSSHAIR);
     p.alive = true;
     p.takes_damage = true;
     p.not_killed = true;
@@ -846,7 +857,6 @@ pub(crate) fn take_damage(
     {
         damage *= 0.35;
     }
-    let before_armor = damage;
     // Armor does not protect against falls and drowning.
     if p.armor != 0.0 && bits & (dmg::DROWN | dmg::FALL) == 0 && p.is_armored(p.last_hit_group) {
         let mut new = ARMOR_RATIO * damage;
@@ -871,12 +881,14 @@ pub(crate) fn take_damage(
     // health would look dead to the client.
     p.health -= damage.trunc();
     p.damage_bits |= bits;
-    // What the `Damage` message reports (`CBasePlayer::TakeDamage` of the Half-Life SDK, an
-    // assumption: ReGameDLL's copy of it is not in the sources read): the health lost, the
-    // damage armor took, and what hurt the player.
+    // What the `Damage` message reports (`CBaseMonster::TakeDamage`, ReGameDLL
+    // `basemonster.cpp:430-441`, as reviewed): for a player, the inflictor when there is one
+    // (the old one stays otherwise) and the health lost. Nothing sets `dmg_save`, so the
+    // message's armor byte is always 0.
+    if inflictor.is_some() {
+        p.dmg_inflictor = inflictor;
+    }
     p.dmg_take += damage.trunc();
-    p.dmg_save += (before_armor - damage).max(0.0);
-    p.dmg_inflictor = inflictor;
     let health = p.health;
     let id = eng.client_edict(slot);
     if let Some(v) = eng.ent_mut(id) {
@@ -999,6 +1011,8 @@ fn killed(
     if let Some(victim) = g.players[index].as_mut() {
         victim.deaths += 1;
         victim.not_killed = false;
+        // `StartObserver` (player.cpp) hides the weapons and the health.
+        victim.hide_hud = HIDEHUD_WEAPONS | HIDEHUD_HEALTH;
     }
     if let Some(k) = killer {
         let teammate = g.players[k].as_ref().map(|p| p.team) == Some(victim_team);

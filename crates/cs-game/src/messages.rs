@@ -12,6 +12,8 @@
 //! and the `MOTD` text, whose chunks may end inside a UTF-8 sequence) are written as bytes with
 //! [`send_raw`], against the same table.
 //!
+//! `InitHUD`'s "entered the game" log line (`UTIL_LogPrintf`) is not ported.
+//!
 //! Not sent yet, with the task that sends them: `Fog` (no `env_fog` entity yet), `HLTV` and
 //! `SVC_INTERMISSION` (no HLTV, no game over; rounds), `BombDrop` and the defuser icon of
 //! `InitHUD` (bomb), `HostagePos`/`Scenario` (hostages), `Account`/`HealthInfo` (they exist
@@ -527,6 +529,8 @@ pub(crate) fn update_client_data(g: &mut GameState, eng: &mut EngineApi<'_>, slo
         p.client_hide_hud = p.hide_hud;
     }
     if p.fov != p.client_fov {
+        // The original writes `pev->fov = m_iFOV` first; `spawn` keeps the edict's `fov`
+        // equal to `p.fov` already (no zoom exists yet), so nothing is written here.
         eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::SetFov(p.fov));
         // `MSG_SPEC` `HLTV` follows: there is no HLTV.
     }
@@ -542,7 +546,7 @@ pub(crate) fn update_client_data(g: &mut GameState, eng: &mut EngineApi<'_>, slo
         p.client_battery = p.armor as i32;
         eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::Battery(clamp_i16(p.client_battery)));
     }
-    if p.dmg_take != 0.0 || p.dmg_save != 0.0 || p.hud_damage != p.damage_bits as i32 {
+    if p.dmg_take != 0.0 || p.hud_damage != p.damage_bits as i32 {
         // Damage comes from inside the player if nothing is known to have caused it; a fall
         // shows no direction.
         let mut from = origin;
@@ -555,14 +559,13 @@ pub(crate) fn update_client_data(g: &mut GameState, eng: &mut EngineApi<'_>, slo
         eng.send_usermsg(
             MsgDest::One(slot),
             &CsUserMsg::Damage {
-                armor_damage: p.dmg_save.clamp(0.0, 255.0) as u8,
+                armor_damage: 0, // `dmg_save` is never set (`basemonster.cpp`)
                 health_damage: p.dmg_take.clamp(0.0, 255.0) as u8,
                 damage_bits: p.damage_bits & dmg::SHOWNHUD,
                 origin: from,
             },
         );
         p.dmg_take = 0.0;
-        p.dmg_save = 0.0;
         p.hud_damage = p.damage_bits as i32;
         // Non-time-based kinds are not shown again.
         p.damage_bits &= dmg::TIMEBASED;

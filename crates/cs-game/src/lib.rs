@@ -109,10 +109,18 @@ impl CsGame {
     }
 
     /// Reads the message of the day, `motd.txt` of the game directories (`LOAD_FILE_FOR_ME` of
-    /// the `motdfile` cvar, whose default this is), through `vfs`. A missing file means no
+    /// the `motdfile` cvar, which is not read: the name is fixed at its default), through
+    /// `vfs`. A missing file means no
     /// message of the day, as in `SendMOTDToClient`, which then sends the server name alone.
     pub fn load_motd(&mut self, vfs: &cs_vfs::Vfs) {
-        self.state.motd = vfs.read_bytes("motd.txt").unwrap_or_default();
+        self.state.motd = match vfs.read_bytes("motd.txt") {
+            Ok(bytes) => bytes,
+            Err(cs_vfs::VfsError::NotFound(_)) => Vec::new(),
+            Err(err) => {
+                tracing::warn!(%err, "motd.txt could not be read");
+                Vec::new()
+            }
+        };
     }
 
     pub fn state(&self) -> &GameState {
