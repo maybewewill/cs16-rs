@@ -7,7 +7,8 @@
 //! players are in [`player`]: their lifecycle, damage, death and movement; [`teams`] and [`menus`]
 //! take them from the team menu into the game, and [`rules`] runs the rounds, the match and the
 //! map cycle (`CHalfLifeMultiplay`); [`chat`] carries what the players say to each other, their
-//! names and the text messages of the HUD.
+//! names and the text messages of the HUD. The dead and the spectators watch through
+//! [`observer`].
 
 pub mod chat;
 pub mod entity;
@@ -15,6 +16,7 @@ pub mod mapcycle;
 pub mod menus;
 mod messages;
 pub mod money;
+pub mod observer;
 pub mod player;
 pub mod rules;
 pub mod teams;
@@ -323,5 +325,10 @@ impl GameDll for CsGame {
 
     fn update_client_data(&mut self, eng: &mut EngineApi<'_>, slot: u8) -> GoldSrcClientData {
         player::client_data(&mut self.state, eng, slot)
+    }
+
+    /// `SetupVisibility`: an observer sees what the player it follows sees.
+    fn setup_visibility(&mut self, eng: &mut EngineApi<'_>, slot: u8) -> Option<Vec3> {
+        observer::setup_visibility(&self.state, eng, slot)
     }
 }

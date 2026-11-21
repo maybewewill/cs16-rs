@@ -113,9 +113,10 @@ impl Bench {
         let mut entities = vec![entity(&[("classname", "worldspawn")])];
         for i in 0..20 {
             for class in ["info_player_start", "info_player_deathmatch"] {
+                let y = if class == "info_player_start" { 0 } else { 500 };
                 entities.push(entity(&[
                     ("classname", class),
-                    ("origin", &format!("{} {} 0", 100 + i * 100, if class == "info_player_start" { 0 } else { 500 })),
+                    ("origin", &format!("{} {} 0", 100 + i * 100, y)),
                     ("angles", "0 90 0"),
                 ]));
             }
@@ -467,7 +468,11 @@ fn motd_is_sent_in_chunks() {
 fn health_and_armor_follow_the_player() {
     let mut b = Bench::with_one_client(2, b"");
     assert!(b.run(|game, eng| game.spawn_player(eng, 0, Team::Ct, 0)));
-    b.step(20);
+    // A teammate stays alive, or the death would end the round and the next round would bring
+    // the dead player back before its death camera.
+    b.join();
+    assert!(b.run(|game, eng| game.spawn_player(eng, 1, Team::Ct, 0)));
+    b.step(40);
     // Nothing changes, nothing is sent.
     let before = b.messages(0).len();
     b.step(30);
@@ -520,9 +525,22 @@ fn health_and_armor_follow_the_player() {
     assert_eq!(b.names_from(0, before), Vec::<String>::new());
 
     // Death: the client is told 0 (by `Killed`, and by the update, which sees a health of -410
-    // against the 0 `Killed` cached, as the original does), and then nothing more.
+    // against the 0 `Killed` cached, as the original does), and 1 when `StartObserver` gives the
+    // observer a health of 1.
     b.run(|game, eng| game.damage_player(eng, 0, None, 500.0, 0));
     b.step(20);
+    // Hiding the weapons and the health is `StartObserver`'s: it comes with the death camera,
+    // which `PlayerDeathThink` starts from the dead player's commands, 3 seconds after the death
+    // (and sets the health to 1, which the client is told too).
+    for _ in 0..800 {
+        b.run(|game, eng| {
+            let cmd = GoldSrcUserCmd {
+                msec: 10,
+                ..Default::default()
+            };
+            game.run_usercmd(eng, 0, &cmd, 0);
+        });
+    }
     let health: Vec<CsUserMsg> = b
         .messages(0)
         .into_iter()
@@ -530,7 +548,10 @@ fn health_and_armor_follow_the_player() {
         .filter(|(n, _)| n == "Health")
         .map(|(_, m)| m)
         .collect();
-    assert_eq!(health, [CsUserMsg::Health(0), CsUserMsg::Health(0)]);
+    assert_eq!(
+        health,
+        [CsUserMsg::Health(0), CsUserMsg::Health(0), CsUserMsg::Health(1)]
+    );
     // `StartObserver` hides the weapons and the health (1 | 8), once.
     let hide: Vec<CsUserMsg> = b
         .messages(0)

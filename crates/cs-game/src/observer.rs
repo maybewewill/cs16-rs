@@ -1,0 +1,858 @@
+//! The observer: the death camera of the dead and the cameras of the spectators. Ported from
+//! ReGameDLL_CS (`observer.cpp`, `player.cpp` `StartDeathCam`/`StartObserver`/`Killed`,
+//! `client.cpp` `specmode`/`follownext`/`follow`/`SetupVisibility`/`UpdateClientData`,
+//! `pm_shared.cpp` `PM_SpectatorMove`, read 2026-11-22), the vanilla `mp.dll` behaviour (not the
+//! `REGAMEDLL_FIXES`/`REGAMEDLL_ADD` builds).
+//!
+//! What the clients see of an observer lives in the edict: `iuser1` is the mode (`OBS_*`),
+//! `iuser2` the edict index of the player it follows (0 when roaming) and `iuser3` the killer
+//! while the player is dying (cleared when the observer mode starts). The engine sends them in
+//! the client data ([`crate::player::client_data`]); the client draws the camera from them. A
+//! player in first person (`OBS_IN_EYE`) is sent the data of the player it follows, but its own
+//! `iuser*`.
+//!
+//! The server side of the camera is `PM_SpectatorMove`: a roaming observer flies with friction
+//! and acceleration, through everything; one that follows takes the origin of its target on every
+//! command, so that the engine sends it what the target sees (see
+//! [`setup_visibility`], `GameDll::setup_visibility`).
+//!
+//! Deviations and gaps:
+//! - `OBS_*`, `CAMERA_MODE_*`, `FADETOBLACK_STAY` and `FFADE_*` are the values of the Half-Life
+//!   SDK headers (assumption: the headers are not among the files fetched).
+//! - `MSG_PAS` (the `TE_KILLPLAYERATTACHMENTS` of [`start_observer`]) goes out as `MSG_PVS`: the
+//!   engine has no PAS multicast; the potentially audible set only differs at its edge.
+//! - The state the first-person view copies from the followed player (the progress bar, the
+//!   blindness, the night vision, the C4 and defuser icons, its weapon) has nothing to copy yet:
+//!   those players do not exist until the weapons and the bomb do. The messages that clear that
+//!   state when the mode changes are sent as the original sends them.
+//! - A spectator or a late joiner is put where it stands, not at a fresh spawn point
+//!   (`GetPlayerSpawnSpot` of `StartObserver`'s callers).
+//! - The `mp_fadetoblack` of the dying player is the vanilla one: any value but 0 fades the
+//!   screen to black and does not follow the killer. The state the career mode, the bots and
+//!   the HLTV (`TheBots`, `MSG_SPEC`) keep is not ported.
+//! - The target an observer follows is a slot; the original keeps an `EHANDLE`. A target that left
+//!   is found out by [`check_target`] (a free slot), as the original finds out by
+//!   `UTIL_PlayerByIndex`.
+
+use cs_engine::consts::{FL_DUCKING, MOVETYPE_NONE, SOLID_NOT};
+use cs_engine::{EdictId, EngineApi, MsgDest};
+use cs_proto48::delta::GoldSrcUserCmd;
+use cs_proto48::messages::svc;
+use cs_proto48::usermsg::CsUserMsg;
+use glam::Vec3;
+
+use crate::GameState;
+use crate::menus::{atoi, print_center};
+use crate::messages::send_raw;
+use crate::player::{DEAD_DEAD, DEAD_RESPAWNABLE, HIDEHUD_HEALTH, HIDEHUD_WEAPONS, Team};
+use crate::teams::player_name;
+
+/// `OBS_*`: the observer modes (`pev->iuser1`).
+pub const OBS_NONE: i32 = 0;
+pub const OBS_CHASE_LOCKED: i32 = 1;
+pub const OBS_CHASE_FREE: i32 = 2;
+pub const OBS_ROAMING: i32 = 3;
+pub const OBS_IN_EYE: i32 = 4;
+pub const OBS_MAP_FREE: i32 = 5;
+pub const OBS_MAP_CHASE: i32 = 6;
+
+/// `CAMERA_MODE_*`: what `mp_forcecamera` and `mp_forcechasecam` allow.
+pub const CAMERA_MODE_SPEC_ANYONE: i32 = 0;
+pub const CAMERA_MODE_SPEC_ONLY_TEAM: i32 = 1;
+pub const CAMERA_MODE_SPEC_ONLY_FIRST_PERSON: i32 = 2;
+
+/// `mp_fadetoblack 1`: the screen of the dead stays black.
+const FADETOBLACK_STAY: i32 = 1;
+/// `FFADE_OUT` and `FFADE_STAYOUT` (`util.h`).
+const FFADE_OUT: u16 = 1;
+const FFADE_STAYOUT: u16 = 4;
+/// `UTIL_ScreenFade` writes the seconds as fixed point with 12 fractional bits.
+const FADE_UNIT: f32 = 4096.0;
+/// `EF_NODRAW`.
+const EF_NODRAW: u32 = 128;
+/// `TE_KILLPLAYERATTACHMENTS`.
+const TE_KILLPLAYERATTACHMENTS: u8 = 125;
+/// `DEFAULT_FOV`.
+const DEFAULT_FOV: u8 = 90;
+/// Seconds before a follower may pick the next player again (`m_flNextFollowTime`).
+const FOLLOW_INTERVAL: f64 = 0.25;
+/// Seconds between two button presses of an observer (`m_flNextObserverInput`).
+const INPUT_INTERVAL: f64 = 0.2;
+/// Seconds a followed player has been dead before its follower looks for another.
+const DEAD_TARGET_GRACE: f64 = 2.0;
+/// `sv_spectatormaxspeed`: the movement variable `PM_SpectatorMove` caps the speed by.
+const SPECTATOR_MAX_SPEED: f32 = 500.0;
+/// `IN_ATTACK`, `IN_JUMP`, `IN_ATTACK2`.
+const IN_ATTACK: u16 = 1 << 0;
+const IN_JUMP: u16 = 1 << 1;
+const IN_ATTACK2: u16 = 1 << 11;
+/// `VEC_HULL_MIN.z - VEC_DUCK_HULL_MIN.z`: how much lower a ducking player's eye is taken.
+const DUCK_EYE_DROP: f32 = -18.0;
+
+/// What `CBasePlayer` keeps for the observer (`m_hObserverTarget`, `m_iObserverLastMode`,
+/// `m_flNextFollowTime`, `m_flNextObserverInput`, `m_bWasFollowing`, `m_canSwitchObserverModes`,
+/// `m_bObserverAutoDirector`).
+#[derive(Debug, Clone)]
+pub(crate) struct ObserverState {
+    /// The slot of the player followed.
+    pub target: Option<u8>,
+    /// The mode `StartObserver` goes back to, and the one the player last asked for.
+    pub last_mode: i32,
+    pub next_follow_time: f64,
+    pub next_input: f64,
+    /// The followed player is gone and the observer roams until it finds another.
+    pub was_following: bool,
+    /// Whether `specmode` and `follownext` are heard (not while dying).
+    pub can_switch: bool,
+    pub auto_director: bool,
+}
+
+impl Default for ObserverState {
+    fn default() -> Self {
+        Self {
+            target: None,
+            last_mode: OBS_ROAMING,
+            next_follow_time: 0.0,
+            next_input: 0.0,
+            was_following: false,
+            can_switch: true,
+            auto_director: false,
+        }
+    }
+}
+
+/// The mode of the observer of `slot` (`GetObserverMode`, `pev->iuser1`).
+pub(crate) fn mode_of(eng: &EngineApi<'_>, slot: u8) -> i32 {
+    eng.ent(eng.client_edict(slot)).map_or(OBS_NONE, |v| v.iuser1)
+}
+
+/// `GetForceCamera`: what a dead player may watch. `mp_fadetoblack 1` allows only the first
+/// person view of its own (black) screen; otherwise `mp_forcechasecam`, and when that allows
+/// anyone, `mp_forcecamera`.
+pub(crate) fn force_camera(eng: &EngineApi<'_>) -> i32 {
+    if eng.cvar_f32("mp_fadetoblack") as i32 != FADETOBLACK_STAY {
+        let chase = eng.cvar_f32("mp_forcechasecam") as i32;
+        if chase == CAMERA_MODE_SPEC_ANYONE {
+            eng.cvar_f32("mp_forcecamera") as i32
+        } else {
+            chase
+        }
+    } else {
+        CAMERA_MODE_SPEC_ONLY_FIRST_PERSON
+    }
+}
+
+/// The edict index of `slot` (`ENTINDEX`).
+fn index_of(slot: u8) -> i32 {
+    i32::from(slot) + 1
+}
+
+/// `Observer_IsValidTarget`: the player of edict index `index`, when `observer` may follow it:
+/// not itself, not an observer or an invisible player, not on no team, and, when
+/// `same_team`, on the observer's team.
+fn valid_target(
+    g: &GameState,
+    eng: &EngineApi<'_>,
+    observer: u8,
+    index: i32,
+    same_team: bool,
+) -> Option<u8> {
+    if index > i32::from(eng.max_clients()) || index < 1 {
+        return None;
+    }
+    let slot = u8::try_from(index - 1).ok()?;
+    if slot == observer {
+        return None;
+    }
+    let target = g.players.get(usize::from(slot))?.as_ref()?;
+    let own_team = g.players.get(usize::from(observer))?.as_ref()?.team;
+    let v = eng.ent(eng.client_edict(slot))?;
+    if v.iuser1 != OBS_NONE || v.effects & EF_NODRAW != 0 {
+        return None;
+    }
+    if target.team == Team::Unassigned || (same_team && target.team != own_team) {
+        return None;
+    }
+    Some(slot)
+}
+
+/// The target of the observer of `slot`, when it is still a player in the game.
+fn current_target(g: &GameState, slot: u8) -> Option<u8> {
+    let target = g.players.get(usize::from(slot))?.as_ref()?.obs.target?;
+    g.players.get(usize::from(target))?.as_ref().map(|_| target)
+}
+
+fn set_target(g: &mut GameState, slot: u8, target: Option<u8>) {
+    if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+        p.obs.target = target;
+    }
+}
+
+/// `UpdateClientEffects`: what the observer's screen shows of the player it followed in first
+/// person is taken away when the mode changes. (The progress bar, blindness and night vision of
+/// the followed player are not copied: see the module docs.)
+fn update_client_effects(eng: &mut EngineApi<'_>, slot: u8, old_mode: i32) {
+    let mode = mode_of(eng, slot);
+    let blindness_ok = eng.cvar_f32("mp_fadetoblack") as i32 != FADETOBLACK_STAY;
+    if mode != OBS_IN_EYE && old_mode != OBS_IN_EYE {
+        return;
+    }
+    // `SetProgressBarTime(0)`.
+    eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::BarTime(0));
+    if blindness_ok {
+        // `UTIL_ScreenFade(pObserver, Vector(0, 0, 0), 0.001)`: fade in, black, instantly.
+        eng.send_usermsg(
+            MsgDest::One(slot),
+            &CsUserMsg::ScreenFade {
+                duration: (0.001 * FADE_UNIT) as u16,
+                hold_time: 0,
+                flags: 0,
+                color: [0, 0, 0, 255],
+            },
+        );
+    }
+    eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::NvgToggle(false));
+}
+
+/// `CBasePlayer::Observer_FindNextPlayer`: the observer of `slot` follows the next player (the
+/// previous one with `reverse`), or, with `name`, the next one of that name. Not oftener than
+/// every [`FOLLOW_INTERVAL`] seconds. Moves the observer to the target.
+pub(crate) fn find_next_player(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    slot: u8,
+    reverse: bool,
+    name: Option<&str>,
+) {
+    let now = eng.time();
+    let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) else {
+        return;
+    };
+    if p.obs.next_follow_time != 0.0 && p.obs.next_follow_time > now {
+        return;
+    }
+    p.obs.next_follow_time = now + FOLLOW_INTERVAL;
+    let own_team = p.team;
+    let start = p.obs.target.map_or(index_of(slot), index_of);
+    p.obs.target = None;
+
+    let dir = if reverse { -1 } else { 1 };
+    let same_team = force_camera(eng) != CAMERA_MODE_SPEC_ANYONE && own_team != Team::Spectator;
+    let max = i32::from(eng.max_clients());
+    let mut current = start;
+    let mut target: Option<u8>;
+    loop {
+        current += dir;
+        if current > max {
+            current = 1;
+        } else if current < 1 {
+            current = max;
+        }
+        target = valid_target(g, eng, slot, current, same_team);
+        if let Some(t) = target
+            && name.is_none_or(|n| player_name(eng, t) == n)
+        {
+            break;
+        }
+        if current == start {
+            break;
+        }
+    }
+    set_target(g, slot, target);
+
+    // Did we find a target? Move to it.
+    let Some(t) = target else {
+        return;
+    };
+    let id = eng.client_edict(slot);
+    let target_id = eng.client_edict(t);
+    let Some(tv) = eng.ent_mut(target_id) else {
+        return;
+    };
+    if tv.health < 0.0 {
+        tv.health = 0.0;
+    }
+    let (origin, health) = (tv.origin, tv.health);
+    eng.set_origin(id, origin);
+    // `SpecHealth2`: the health of the followed player and its index.
+    send_raw(
+        eng,
+        MsgDest::One(slot),
+        "SpecHealth2",
+        &[health as i32 as u8, index_of(t) as u8],
+    );
+    // Store the target in the edict, for the movement and the clients.
+    let old_mode = mode_of(eng, slot);
+    if old_mode != OBS_ROAMING
+        && let Some(v) = eng.ent_mut(id)
+    {
+        v.iuser2 = index_of(t);
+    }
+    update_client_effects(eng, slot, old_mode);
+}
+
+/// `CBasePlayer::Observer_SetMode`: the observer of `slot` asks for mode `mode`. Mode and target
+/// are corrected by `mp_forcecamera`/`mp_forcechasecam`; a mode that follows needs a target, and
+/// with none the observer roams.
+pub(crate) fn set_mode(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, mode: i32) {
+    let id = eng.client_edict(slot);
+    let Some(old_mode) = eng.ent(id).map(|v| v.iuser1) else {
+        return;
+    };
+    // Just abort if we're changing to the mode we're already in.
+    if mode == old_mode {
+        return;
+    }
+    let force = force_camera(eng);
+    let Some(own_team) = g.players.get(usize::from(slot)).and_then(Option::as_ref).map(|p| p.team)
+    else {
+        return;
+    };
+    // Is it a valid mode?
+    let mut mode = if (OBS_CHASE_LOCKED..=OBS_MAP_CHASE).contains(&mode) {
+        mode
+    } else {
+        OBS_IN_EYE
+    };
+    if own_team != Team::Spectator {
+        if force == CAMERA_MODE_SPEC_ONLY_TEAM {
+            if mode == OBS_ROAMING {
+                mode = OBS_MAP_FREE;
+            }
+        } else if force == CAMERA_MODE_SPEC_ONLY_FIRST_PERSON {
+            mode = OBS_IN_EYE;
+        }
+    }
+    // Verify the observer target again (the vanilla check, which does not look at the team of a
+    // spectator the way `Observer_IsValidTarget` does).
+    if let Some(t) = current_target(g, slot) {
+        let target_team = g.players[usize::from(t)].as_ref().map(|p| p.team);
+        let invalid = t == slot
+            || eng.ent(eng.client_edict(t)).is_none_or(|v| {
+                v.iuser1 != OBS_NONE
+                    || v.effects & EF_NODRAW != 0
+                    || (force != CAMERA_MODE_SPEC_ANYONE && target_team != Some(own_team))
+            });
+        if invalid {
+            set_target(g, slot, None);
+        }
+    } else {
+        set_target(g, slot, None);
+    }
+    // Set the spectator mode.
+    if let Some(v) = eng.ent_mut(id) {
+        v.iuser1 = mode;
+    }
+    // If we are not roaming, we need a valid target to track.
+    if mode != OBS_ROAMING && current_target(g, slot).is_none() {
+        find_next_player(g, eng, slot, false, None);
+        // If we didn't find a valid target switch to roaming.
+        if current_target(g, slot).is_none() {
+            print_center(eng, slot, "#Spec_NoTarget");
+            if let Some(v) = eng.ent_mut(id) {
+                v.iuser1 = OBS_ROAMING;
+            }
+        }
+    }
+    let target = current_target(g, slot);
+    let target_origin = target.and_then(|t| eng.ent(eng.client_edict(t)).map(|v| v.origin));
+    if let Some(v) = eng.ent_mut(id) {
+        // Set the target if not roaming; clear the second target from the death camera.
+        v.iuser2 = match target {
+            Some(t) if v.iuser1 != OBS_ROAMING => index_of(t),
+            _ => 0,
+        };
+        v.iuser3 = 0;
+    }
+    if let Some(origin) = target_origin {
+        eng.set_origin(id, origin);
+    }
+    // `gmsgCrosshair`: the crosshair shows only while roaming.
+    send_raw(eng, MsgDest::One(slot), "Crosshair", &[u8::from(mode == OBS_ROAMING)]);
+    update_client_effects(eng, slot, old_mode);
+    // Print the spectator mode on the client's screen.
+    let shown = eng.ent(id).map_or(mode, |v| v.iuser1);
+    print_center(eng, slot, &format!("#Spec_Mode{shown}"));
+    if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+        p.obs.last_mode = mode;
+        p.obs.was_following = false;
+    }
+}
+
+/// `CBasePlayer::Observer_HandleButtons`: jump changes the mode, attack follows the next player,
+/// attack2 the previous one; not oftener than every [`INPUT_INTERVAL`] seconds.
+fn handle_buttons(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    let now = eng.time();
+    let Some(p) = g.players.get(usize::from(slot)).and_then(Option::as_ref) else {
+        return;
+    };
+    // Slow down mouse clicks.
+    if p.obs.next_input > now {
+        return;
+    }
+    let (pressed, auto_director) = (p.buttons_pressed, p.obs.auto_director);
+    let mut used = false;
+    if pressed & IN_JUMP != 0 {
+        let next = match mode_of(eng, slot) {
+            OBS_CHASE_LOCKED | OBS_CHASE_FREE => OBS_IN_EYE,
+            OBS_IN_EYE => OBS_ROAMING,
+            OBS_ROAMING => OBS_MAP_FREE,
+            OBS_MAP_FREE => OBS_MAP_CHASE,
+            _ => {
+                if auto_director {
+                    OBS_CHASE_LOCKED
+                } else {
+                    OBS_CHASE_FREE
+                }
+            }
+        };
+        set_mode(g, eng, slot, next);
+        used = true;
+    }
+    if pressed & IN_ATTACK != 0 {
+        find_next_player(g, eng, slot, false, None);
+        used = true;
+    }
+    if pressed & IN_ATTACK2 != 0 {
+        find_next_player(g, eng, slot, true, None);
+        used = true;
+    }
+    if used && let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+        p.obs.next_input = now + INPUT_INTERVAL;
+    }
+}
+
+/// `CBasePlayer::Observer_CheckTarget`: finds a target when there is none, another when the
+/// followed player is gone, has no body to watch or has been dead for two seconds, and roams
+/// when there is nobody (going back to the mode it asked for when somebody appears).
+fn check_target(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    let now = eng.time();
+    let Some(p) = g.players.get(usize::from(slot)).and_then(Option::as_ref) else {
+        return;
+    };
+    let was_following = p.obs.was_following;
+    if mode_of(eng, slot) == OBS_ROAMING && !was_following {
+        return;
+    }
+    if was_following {
+        find_next_player(g, eng, slot, false, None);
+        if current_target(g, slot).is_some() {
+            let last = g.players[usize::from(slot)].as_ref().map_or(OBS_ROAMING, |p| p.obs.last_mode);
+            set_mode(g, eng, slot, last);
+        }
+        return;
+    }
+    // Try to find a target if we have none.
+    if p.obs.target.is_none() {
+        find_next_player(g, eng, slot, false, None);
+    }
+    let roam = |g: &mut GameState, eng: &mut EngineApi<'_>, following: bool| {
+        // Don't overwrite the user's last mode.
+        let last = mode_of(eng, slot);
+        set_mode(g, eng, slot, OBS_ROAMING);
+        if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+            p.obs.last_mode = last;
+            p.obs.was_following |= following;
+        }
+    };
+    let has_target = g.players[usize::from(slot)]
+        .as_ref()
+        .is_some_and(|p| p.obs.target.is_some());
+    if !has_target {
+        // No target found at all.
+        roam(g, eng, false);
+        return;
+    }
+    // Check the target.
+    let Some(t) = current_target(g, slot) else {
+        find_next_player(g, eng, slot, false, None);
+        return;
+    };
+    let dead_time = g.players[usize::from(t)].as_ref().map_or(0.0, |p| p.dead_time);
+    let Some((deadflag, effects)) = eng.ent(eng.client_edict(t)).map(|v| (v.deadflag, v.effects))
+    else {
+        find_next_player(g, eng, slot, false, None);
+        return;
+    };
+    if deadflag == DEAD_RESPAWNABLE || effects & EF_NODRAW != 0 {
+        find_next_player(g, eng, slot, false, None);
+    } else if deadflag == DEAD_DEAD && now > dead_time + DEAD_TARGET_GRACE {
+        // Two seconds after the death, change the target.
+        find_next_player(g, eng, slot, false, None);
+        if g.players[usize::from(slot)]
+            .as_ref()
+            .is_some_and(|p| p.obs.target.is_none())
+        {
+            roam(g, eng, true);
+        }
+    }
+}
+
+/// `CBasePlayer::Observer_CheckProperties`: in first person the observer takes the field of view
+/// of the player it follows; otherwise the default one. (The weapon, C4 and defuser icons of the
+/// followed player have nothing to show yet.)
+fn check_properties(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    let target = if mode_of(eng, slot) == OBS_IN_EYE {
+        current_target(g, slot)
+    } else {
+        None
+    };
+    let target_fov = target.and_then(|t| g.players[usize::from(t)].as_ref().map(|p| p.fov));
+    let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) else {
+        return;
+    };
+    match target_fov {
+        Some(fov) => {
+            // Use the field of view of the tracked client.
+            if p.fov != fov {
+                p.fov = fov;
+                p.client_fov = fov;
+                eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::SetFov(fov));
+            }
+        }
+        None => p.fov = DEFAULT_FOV,
+    }
+}
+
+/// `CBasePlayer::Observer_Think`, run from `PlayerPreThink` of an observer.
+fn think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    handle_buttons(g, eng, slot);
+    check_target(g, eng, slot);
+    check_properties(g, eng, slot);
+}
+
+/// `StartDeathCam` as `PlayerDeathThink` calls it after it has sent the corpse: the dead player
+/// becomes an observer where it died. Nothing happens for one that already is (its view offset
+/// is zero then). Vanilla lets the player switch modes from the corpse on
+/// (`m_canSwitchObserverModes`, set after `SpawnClientSideCorpse`).
+pub(crate) fn start_death_cam(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+        p.obs.can_switch = true;
+    }
+    let id = eng.client_edict(slot);
+    let Some(v) = eng.ent(id) else {
+        return;
+    };
+    // Don't accept subsequent attempts to `StartDeathCam`.
+    if v.view_ofs == Vec3::ZERO {
+        return;
+    }
+    let (origin, angles) = (v.origin, v.angles);
+    start_observer(g, eng, slot, origin, angles);
+}
+
+/// `CBasePlayer::StartObserver`: the player of `slot` becomes an observer at `position`, looking
+/// along `view_angle`: invisible, not solid, taking no damage, with its weapons and health
+/// hidden, and in the mode it last used.
+pub(crate) fn start_observer(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    slot: u8,
+    position: Vec3,
+    view_angle: Vec3,
+) {
+    let id = eng.client_edict(slot);
+    let Some(current_origin) = eng.ent(id).map(|v| v.origin) else {
+        return;
+    };
+    // Clear any clientside entities attached to this player.
+    eng.send(
+        MsgDest::Pvs(current_origin),
+        &[svc::TEMP_ENTITY, TE_KILLPLAYERATTACHMENTS, index_of(slot) as u8],
+    );
+    // Tell the ammo HUD that the player is dead (the weapon is holstered and the tank and the
+    // suit sentences are let go: none of them exist yet).
+    eng.send_usermsg(
+        MsgDest::One(slot),
+        &CsUserMsg::CurWeapon {
+            is_active: false,
+            weapon_id: 0xFF,
+            clip_ammo: -1,
+        },
+    );
+    // Reset the field of view.
+    eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::SetFov(0));
+    let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) else {
+        return;
+    };
+    p.fov = 0;
+    p.client_fov = 0;
+    // Setup the flags.
+    p.hide_hud = HIDEHUD_WEAPONS | HIDEHUD_HEALTH;
+    p.pflag_observer = true;
+    p.takes_damage = false;
+    p.health = 1.0;
+    p.mv.ducking = false;
+    p.mv.origin = position;
+    p.mv.velocity = Vec3::ZERO;
+    // Find a player to watch.
+    p.obs.next_input = 0.0;
+    let last_mode = p.obs.last_mode;
+    if let Some(v) = eng.ent_mut(id) {
+        v.fov = 0.0;
+        v.effects = EF_NODRAW;
+        // Set the position and the view angles.
+        v.view_ofs = Vec3::ZERO;
+        v.angles = view_angle;
+        v.v_angle = view_angle;
+        v.fixangle = 1;
+        v.solid = SOLID_NOT;
+        v.movetype = MOVETYPE_NONE;
+        v.flags &= !FL_DUCKING;
+        v.health = 1.0;
+        v.iuser1 = OBS_NONE;
+    }
+    // Move it to the new position.
+    eng.set_origin(id, position);
+    set_mode(g, eng, slot, last_mode);
+    crate::player::reset_max_speed(g, eng, slot);
+    // Tell all clients this player is now a spectator.
+    send_raw(eng, MsgDest::All, "Spectator", &[index_of(slot) as u8, 1]);
+}
+
+/// The part of `CBasePlayer::Killed` that concerns the camera: a dying player cannot switch
+/// modes; with `mp_fadetoblack 0` its camera chases the killer (`OBS_CHASE_FREE`, `iuser2` itself,
+/// `iuser3` the attacker), otherwise its screen fades to black.
+pub(crate) fn killed(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    slot: u8,
+    attacker: Option<EdictId>,
+) {
+    if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+        p.obs.can_switch = false;
+    }
+    if eng.cvar_f32("mp_fadetoblack") == 0.0 {
+        let killer = attacker.and_then(|a| crate::player::player_slot(g, eng, a));
+        let id = eng.client_edict(slot);
+        if let Some(v) = eng.ent_mut(id) {
+            v.iuser1 = OBS_CHASE_FREE;
+            v.iuser2 = index_of(slot);
+            v.iuser3 = attacker.map_or(0, |a| i32::from(a.index));
+        }
+        set_target(g, slot, killer.map(|k| k as u8));
+        // `gmsgADStop`: the auto director is off.
+        send_raw(eng, MsgDest::One(slot), "ADStop", &[]);
+    } else {
+        // `UTIL_ScreenFade(this, Vector(0, 0, 0), 3, 3, 255, FFADE_OUT | FFADE_STAYOUT)`.
+        eng.send_usermsg(
+            MsgDest::One(slot),
+            &CsUserMsg::ScreenFade {
+                duration: (3.0 * FADE_UNIT) as u16,
+                hold_time: (3.0 * FADE_UNIT) as u16,
+                flags: FFADE_OUT | FFADE_STAYOUT,
+                color: [0, 0, 0, 255],
+            },
+        );
+    }
+}
+
+/// `CBasePlayer::Spawn`: a player in the game follows nobody.
+pub(crate) fn on_spawn(p: &mut crate::player::Player) {
+    p.obs.target = None;
+    p.obs.can_switch = true;
+    p.pflag_observer = false;
+}
+
+/// What a command of an observer does to its camera. Moves the observer as `PM_SpectatorMove`
+/// does, after `PlayerPreThink` ([`think`]) ran.
+pub(crate) fn run_cmd(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, cmd: &GoldSrcUserCmd) {
+    think(g, eng, slot);
+    if cmd.msec == 0 {
+        return;
+    }
+    let id = eng.client_edict(slot);
+    let Some(v) = eng.ent(id) else {
+        return;
+    };
+    // `PM_ShouldDoSpectMode`: a dying player is moved as a dead body.
+    if v.iuser1 == OBS_NONE || (v.iuser3 > 0 && v.deadflag != DEAD_DEAD) {
+        return;
+    }
+    if v.iuser1 == OBS_ROAMING {
+        roam(g, eng, slot, cmd);
+        return;
+    }
+    // All other modes track some kind of target, so the observer's PVS is the target's.
+    let Some(target) = u8::try_from(v.iuser2 - 1).ok().filter(|_| v.iuser2 > 0) else {
+        return;
+    };
+    let Some(tv) = g
+        .players
+        .get(usize::from(target))
+        .and_then(Option::as_ref)
+        .and_then(|_| eng.ent(eng.client_edict(target)))
+    else {
+        return;
+    };
+    let (origin, angles) = (tv.origin, tv.angles);
+    if let Some(v) = eng.ent_mut(id) {
+        // Use the target's position as our own, for the PVS; no velocity.
+        v.v_angle = angles;
+        v.velocity = Vec3::ZERO;
+    }
+    eng.set_origin(id, origin);
+    if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+        p.mv.origin = origin;
+        p.mv.velocity = Vec3::ZERO;
+    }
+}
+
+/// `AngleVectors` for the view angles of a command (pitch, yaw, no roll): the unit forward and
+/// right vectors.
+fn view_vectors(angles: Vec3) -> (Vec3, Vec3) {
+    let (sp, cp) = angles.x.to_radians().sin_cos();
+    let (sy, cy) = angles.y.to_radians().sin_cos();
+    (Vec3::new(cp * cy, cp * sy, -sp), Vec3::new(sy, -cy, 0.0))
+}
+
+fn finite(x: f32) -> f32 {
+    if x.is_finite() { x } else { 0.0 }
+}
+
+/// `PM_SpectatorMove` for `OBS_ROAMING`: friction (one and a half times the ground's), then
+/// acceleration along the wish of the command, capped by [`SPECTATOR_MAX_SPEED`]; the observer
+/// flies through everything. Like the original, a command that adds no speed does not move it.
+fn roam(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, cmd: &GoldSrcUserCmd) {
+    let id = eng.client_edict(slot);
+    let Some(v) = eng.ent(id) else {
+        return;
+    };
+    let dt = f32::from(cmd.msec) / 1000.0;
+    let params = g.move_params;
+    let (origin, mut velocity) = (v.origin, v.velocity);
+    let angles = Vec3::new(
+        finite(cmd.viewangles.x),
+        finite(cmd.viewangles.y),
+        finite(cmd.viewangles.z),
+    );
+
+    let speed = velocity.length();
+    if speed >= 1.0 {
+        // Extra friction.
+        let friction = params.friction * 1.5;
+        let control = speed.max(params.stop_speed);
+        let drop = friction * control * dt;
+        velocity *= (speed - drop).max(0.0) / speed;
+    } else {
+        velocity = Vec3::ZERO;
+    }
+
+    // Accelerate.
+    let (forward, right) = view_vectors(angles);
+    let wish = forward * finite(cmd.forwardmove)
+        + right * finite(cmd.sidemove)
+        + Vec3::Z * finite(cmd.upmove);
+    let wishdir = wish.normalize_or_zero();
+    // Clamp to the server's maximum speed.
+    let wishspeed = wish.length().min(SPECTATOR_MAX_SPEED);
+    let addspeed = wishspeed - velocity.dot(wishdir);
+    let mut moved = false;
+    if addspeed > 0.0 {
+        let accelspeed = (params.accelerate * dt * wishspeed).min(addspeed);
+        velocity += wishdir * accelspeed;
+        moved = true;
+    }
+    let new_origin = if moved { origin + velocity * dt } else { origin };
+    if let Some(v) = eng.ent_mut(id) {
+        v.velocity = velocity;
+        v.v_angle = angles;
+    }
+    if moved {
+        eng.set_origin(id, new_origin);
+    }
+    if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+        p.mv.origin = new_origin;
+        p.mv.velocity = velocity;
+    }
+}
+
+/// `SetupVisibility`: an observer that follows somebody sees the world from the eye of the
+/// followed player (lowered by 18 units when it ducks); otherwise from its own.
+pub(crate) fn setup_visibility(g: &GameState, eng: &EngineApi<'_>, slot: u8) -> Option<Vec3> {
+    let p = g.players.get(usize::from(slot))?.as_ref()?;
+    let v = eng.ent(eng.client_edict(slot))?;
+    if v.iuser2 == 0 || !p.pflag_observer {
+        return None;
+    }
+    let target = current_target(g, slot)?;
+    let tv = eng.ent(eng.client_edict(target))?;
+    let mut eye = tv.origin + tv.view_ofs;
+    if tv.flags & FL_DUCKING != 0 {
+        eye.z += DUCK_EYE_DROP;
+    }
+    Some(eye)
+}
+
+/// The player whose state a first-person observer is sent as its own client data
+/// (`UpdateClientData`): the one it follows, in `OBS_IN_EYE`.
+pub(crate) fn first_person_source(g: &GameState, eng: &EngineApi<'_>, slot: u8) -> Option<u8> {
+    if mode_of(eng, slot) != OBS_IN_EYE {
+        return None;
+    }
+    current_target(g, slot)
+}
+
+/// `Observer_FindNextPlayer`'s other caller: the `SpecHealth` of a player that took damage goes
+/// to the observers that follow it (`TakeDamage`).
+pub(crate) fn notify_spec_health(g: &GameState, eng: &mut EngineApi<'_>, victim: u8) {
+    let health = eng
+        .ent(eng.client_edict(victim))
+        .map_or(0.0, |v| v.health.max(0.0));
+    for (i, p) in g.players.iter().enumerate() {
+        if p.as_ref().is_some_and(|p| p.obs.target == Some(victim)) {
+            send_raw(eng, MsgDest::One(i as u8), "SpecHealth", &[health as i32 as u8]);
+        }
+    }
+}
+
+/// The observer commands of `ClientCommand_` (`client.cpp`): `specmode N` picks a mode,
+/// `follownext [reverse]` and `follow name` pick the player to watch, `spec_set_ad` turns the
+/// auto director on. Returns whether `argv[0]` was one of them.
+pub(crate) fn command(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    slot: u8,
+    argv: &[String],
+) -> bool {
+    let Some(command) = argv.first() else {
+        return false;
+    };
+    let arg = argv.get(1).map_or("", String::as_str);
+    let observing = mode_of(eng, slot) != OBS_NONE
+        && g.players
+            .get(usize::from(slot))
+            .and_then(Option::as_ref)
+            .is_some_and(|p| p.obs.can_switch);
+    match command.as_str() {
+        "specmode" => {
+            let mode = atoi(arg);
+            if observing {
+                set_mode(g, eng, slot, mode);
+            } else if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+                p.obs.last_mode = mode;
+            }
+            if mode == OBS_CHASE_FREE {
+                send_raw(eng, MsgDest::One(slot), "ADStop", &[]);
+            }
+        }
+        "spec_set_ad" => {
+            let on = arg.trim().parse::<f32>().is_ok_and(|v| v > 0.0);
+            if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+                p.obs.auto_director = on;
+            }
+        }
+        "follownext" => {
+            if observing {
+                find_next_player(g, eng, slot, atoi(arg) != 0, None);
+            }
+        }
+        "follow" => {
+            if observing {
+                find_next_player(g, eng, slot, false, Some(arg));
+            }
+        }
+        _ => return false,
+    }
+    true
+}

@@ -459,15 +459,23 @@ impl<G: GameDll> Server<G> {
     /// the rest are not offered to the game. Client slots are the lowest edict numbers, so
     /// they come first and the cap never cuts one. Candidates are the viewer's own player
     /// edict, and every other live edict with a model and without `EF_NODRAW` that is
-    /// potentially visible from the viewer's eye; each goes out when the game's
-    /// `add_to_full_pack` accepts it, with the game's edits. The caller drains the outbox.
+    /// potentially visible from the viewer's eye (the game's `setup_visibility` may move it);
+    /// each goes out when the game's `add_to_full_pack` accepts it, with the game's edits. The
+    /// caller drains the outbox.
     fn visible_entities(&mut self, slot: u8) -> Vec<GoldSrcEntityState> {
         let viewer = self.edicts.client(slot);
-        let eye = self
+        let own_eye = self
             .edicts
             .get(viewer)
             .map(|e| e.vars.origin + e.vars.view_ofs)
             .unwrap_or_default();
+        // `SetupVisibility`: the game may move the viewpoint (a spectator sees through the
+        // player it follows). The sign-on states are copied once, for this call and the ones below.
+        self.sync_views();
+        let eye = self
+            .call_game_synced(|game, eng| game.setup_visibility(eng, slot))
+            .filter(|p| p.is_finite())
+            .unwrap_or(own_eye);
         let pvs = self.map.viewer_pvs(eye);
         let candidates: Vec<GoldSrcEntityState> = self
             .edicts
@@ -483,8 +491,6 @@ impl<G: GameDll> Server<G> {
             })
             .map(|(id, edict)| entity_state_from_vars(id.index, &edict.vars))
             .collect();
-        // One copy of the sign-on states for all the calls below: nothing changes them here.
-        self.sync_views();
         let max_clients = u16::from(self.cfg.max_clients);
         let mut accepted = Vec::new();
         for mut state in candidates {

@@ -261,6 +261,26 @@ fn hidden_entity_is_not_sent() {
 }
 
 #[test]
+fn the_game_chooses_the_viewpoint_of_each_update() {
+    let game = TestGame {
+        extra_entities: 1,
+        // Not finite: the engine keeps the player's own eye then.
+        visibility_eye: Some(glam::Vec3::new(f32::NAN, 0.0, 0.0)),
+        ..TestGame::default()
+    };
+    let mut h = Harness::with_game(4, game);
+    let mut a = joined(&mut h, "A", &mut []);
+    h.step(&mut [&mut a], 20);
+    let slot = a.player_slot().unwrap();
+    let game = h.server.game();
+    // Asked once per update sent, for the viewer; an answer that is no point changes nothing.
+    assert!(!game.setup_visibility_slots.is_empty());
+    assert!(game.setup_visibility_slots.iter().all(|&s| s == slot));
+    assert!(a.entities().contains_key(&entity_number(&a)));
+    assert_eq!(a.stats().parse_errors, 0);
+}
+
+#[test]
 fn omitting_clc_delta_requests_a_full_update() {
     let mut h = Harness::new(4);
     let mut probe = joined(&mut h, "A", &mut []);

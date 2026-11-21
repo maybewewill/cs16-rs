@@ -8,6 +8,7 @@ use cs_proto48::delta::{GoldSrcClientData, GoldSrcEntityState, GoldSrcUserCmd};
 use cs_proto48::info::InfoString;
 use cs_proto48::messages::ENTITY_NORMAL;
 use cs_proto48::usermsg::UserMsgRegistry;
+use glam::Vec3;
 
 use crate::client::ClientState;
 use crate::edict::{EdictId, EdictPool, EntVars};
@@ -273,6 +274,13 @@ pub trait GameDll {
     /// characters other than newlines in the returned text; a game that echoes client-supplied
     /// text should still keep it short.
     fn server_command(&mut self, _eng: &mut EngineApi<'_>, _argv: &[String]) -> Option<String> {
+        None
+    }
+    /// `SetupVisibility` of the game library: the point `slot`'s client sees the world from, when
+    /// it is not the player edict's own eye (`origin + view_ofs`): a spectator watching a
+    /// player sees what that player sees. `None`: the edict's own eye. The engine asks once per
+    /// update, before it picks the entities the client is sent.
+    fn setup_visibility(&mut self, _eng: &mut EngineApi<'_>, _slot: u8) -> Option<Vec3> {
         None
     }
     /// Whether `ent` goes into `viewer`'s packet; may adjust `state`.

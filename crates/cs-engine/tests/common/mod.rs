@@ -222,6 +222,10 @@ pub struct TestGame {
     pub add_to_full_pack_ents: BTreeSet<u16>,
     /// `(viewer slot, entity number)` of every `add_to_full_pack` call.
     pub add_to_full_pack_pairs: BTreeSet<(u8, u16)>,
+    /// Slots `setup_visibility` was called for, in order.
+    pub setup_visibility_slots: Vec<u8>,
+    /// The viewpoint `setup_visibility` answers with, when it is set.
+    pub visibility_eye: Option<glam::Vec3>,
     /// When set, `server_deactivate` writes an `svc_print` of [`DEACTIVATE_PRINT`] into the
     /// reliable buffer of every slot.
     pub print_on_deactivate: bool,
@@ -763,6 +767,11 @@ impl GameDll for TestGame {
             maxspeed: 250.0,
             ..Default::default()
         }
+    }
+
+    fn setup_visibility(&mut self, _eng: &mut EngineApi<'_>, slot: u8) -> Option<glam::Vec3> {
+        self.setup_visibility_slots.push(slot);
+        self.visibility_eye
     }
 
     fn add_to_full_pack(

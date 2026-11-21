@@ -17,14 +17,14 @@
 //! player looks through the map's camera until it picks a team) is not ported.
 //!
 //! The dead leave a corpse: `PlayerDeathThink` sends `ClCorpse` once the player has been dead
-//! for `DEATH_ANIMATION_TIME`, then calls `StartDeathCam`, which belongs to the observer task
-//! (see [`start_death_cam`], its call point; until then it only records that the corpse was
-//! sent, as `PFLAG_OBSERVER` does in the original).
+//! for `DEATH_ANIMATION_TIME`, then calls `StartDeathCam` ([`observer::start_death_cam`]): the
+//! dead player becomes an observer ([`crate::observer`]), which `PlayerPreThink` runs from then
+//! on instead of `PlayerDeathThink`.
 //!
 //! ## Known gaps
 //!
 //! Not ported yet, each a later task: weapons and the active item, the economy rewards
-//! (`AddAccount`), the observer camera of the dead (`StartDeathCam`),
+//! (`AddAccount`),
 //! `Pain` sounds, flinch, the momentum block of `TakeDamage` (see [`take_damage`]), the blast
 //! branch of `TakeDamage`, the HUD damage message, armor (`Battery`, `ArmorType`) messages,
 //! animations and the VIP.
@@ -56,6 +56,7 @@ use crate::GameState;
 use crate::menus::{self, Menu};
 use crate::messages;
 use crate::money;
+use crate::observer::{self, ObserverState};
 use crate::rules;
 use crate::teams::{self, JoinState};
 use crate::world::{select_join_spawn_point, select_spawn_point};
@@ -111,8 +112,8 @@ const ARMOR_BONUS: f32 = 0.5;
 /// `AIRTIME`: seconds a player can stay under water.
 const AIRTIME: f64 = 12.0;
 /// `HIDEHUD_*` (`cdll_dll.h`; values of the Half-Life SDK, assumption).
-const HIDEHUD_WEAPONS: i32 = 1 << 0;
-const HIDEHUD_HEALTH: i32 = 1 << 3;
+pub(crate) const HIDEHUD_WEAPONS: i32 = 1 << 0;
+pub(crate) const HIDEHUD_HEALTH: i32 = 1 << 3;
 const HIDEHUD_TIMER: i32 = 1 << 4;
 const HIDEHUD_MONEY: i32 = 1 << 5;
 const HIDEHUD_CROSSHAIR: i32 = 1 << 6;
@@ -252,9 +253,13 @@ pub struct Player {
     pub(crate) damage_bits: u32,
     /// `pev->weapons`: only the suit bit for now.
     pub(crate) weapons: u32,
-    /// `PFLAG_OBSERVER` as far as `PlayerDeathThink` is concerned: the corpse was sent and
-    /// [`start_death_cam`] ran.
-    pub(crate) death_cam: bool,
+    /// `PFLAG_OBSERVER`: the player is an observer ([`observer::start_observer`] ran), so the
+    /// corpse was sent and `PlayerDeathThink` does not run again.
+    pub(crate) pflag_observer: bool,
+    /// The observer's state (`m_hObserverTarget`, `m_iObserverLastMode`, ...).
+    pub(crate) obs: ObserverState,
+    /// `m_afButtonPressed`: the buttons that went down with the last command.
+    pub(crate) buttons_pressed: u16,
     /// Server time of the death, `m_fDeadTime` once the player is `DEAD_DEAD`.
     pub(crate) dead_time: f64,
     /// Server time of the next `PlayerDeathThink`.
@@ -331,7 +336,9 @@ impl Player {
             last_hit_group: HITGROUP_GENERIC,
             damage_bits: 0,
             weapons: 0,
-            death_cam: false,
+            pflag_observer: false,
+            obs: ObserverState::default(),
+            buttons_pressed: 0,
             dead_time: 0.0,
             next_death_think: 0.0,
             joining: JoinState::ShowLText,
@@ -592,7 +599,7 @@ pub(crate) fn spawn(
     p.receives_no_money_next_round = false;
     p.fall_velocity = 0.0;
     p.last_hit_group = HITGROUP_GENERIC;
-    p.death_cam = false;
+    observer::on_spawn(p);
     p.chat.on_spawn();
     // `PlayerSpawn`: `pev->weapons |= (1 << WEAPON_SUIT)`.
     p.weapons |= 1 << WEAPON_SUIT;
@@ -708,6 +715,12 @@ pub(crate) fn run_usercmd(
     else {
         return;
     };
+    // An observer (the dead after their camera, the spectators) does not walk: it flies, or
+    // follows a player (`PlayerPreThink` runs `Observer_Think` and returns).
+    if p.pflag_observer && observer::mode_of(eng, slot) != observer::OBS_NONE {
+        observer::run_cmd(g, eng, slot, cmd);
+        return;
+    }
     if cmd.msec == 0 || !p.in_play() {
         return;
     }
@@ -954,8 +967,10 @@ pub(crate) fn take_damage(
     }
     if health <= 0.0 {
         killed(g, eng, slot, attacker, inflictor);
+        observer::notify_spec_health(g, eng, slot);
         return false;
     }
+    observer::notify_spec_health(g, eng, slot);
     true
 }
 
@@ -1069,8 +1084,6 @@ fn killed(
     if let Some(victim) = g.players[index].as_mut() {
         victim.deaths += 1;
         victim.not_killed = false;
-        // `StartObserver` (player.cpp) hides the weapons and the health.
-        victim.hide_hud = HIDEHUD_WEAPONS | HIDEHUD_HEALTH;
     }
     if let Some(k) = killer {
         let teammate = g.players[k].as_ref().map(|p| p.team) == Some(victim_team);
@@ -1111,6 +1124,8 @@ fn killed(
         v.angles.x = 0.0;
         v.angles.z = 0.0;
     }
+    // The camera of the dying: it chases the killer, or the screen fades to black.
+    observer::killed(g, eng, slot, attacker);
     // `DeathSound`: one of four, `RANDOM_LONG(1, 4)`.
     let sample = match g.random_range(1, 4) {
         1 => "player/die1.wav",
@@ -1167,7 +1182,7 @@ fn death_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
         p.dead_time = now;
     }
     // A player dead for `DEATH_ANIMATION_TIME` leaves a corpse and goes to the death camera.
-    if v.deadflag != DEAD_RESPAWNABLE && !p.death_cam && now > p.dead_time + DEATH_ANIMATION_TIME {
+    if v.deadflag != DEAD_RESPAWNABLE && !p.pflag_observer && now > p.dead_time + DEATH_ANIMATION_TIME {
         let origin = [
             (v.origin.x * 128.0) as i32,
             (v.origin.y * 128.0) as i32,
@@ -1177,7 +1192,6 @@ fn death_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
         let time_diff = ((f64::from(v.animtime) - now) * 100.0) as i32;
         let sequence = v.sequence as u8;
         let (team, player_id) = (p.team.id(), id.index as u8);
-        start_death_cam(p);
         let model = eng.client_key(slot, "model").unwrap_or("urban").to_string();
         let corpse = CsUserMsg::ClCorpse {
             model,
@@ -1190,14 +1204,9 @@ fn death_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
             player_id,
         };
         messages::corpse(eng, corpse);
+        // Go to the dead camera.
+        observer::start_death_cam(g, eng, slot);
     }
-}
-
-/// The call point of `CBasePlayer::StartDeathCam`, which `PlayerDeathThink` calls right after
-/// the corpse was sent: the observer camera of the dead is the observer task's (Task 9). Until
-/// then this only records what the camera's `PFLAG_OBSERVER` records, that the corpse is out.
-fn start_death_cam(p: &mut Player) {
-    p.death_cam = true;
 }
 
 /// `UpdateClientData` (ReGameDLL `player.cpp`, `CBasePlayer::UpdateClientData`): the player's
@@ -1208,9 +1217,13 @@ pub(crate) fn client_data(
     slot: u8,
 ) -> GoldSrcClientData {
     let id = eng.client_edict(slot);
-    let Some(v) = eng.ent(id) else {
+    let Some(own) = eng.ent(id) else {
         return GoldSrcClientData::default();
     };
+    // An observer in first person is sent the state of the player it follows, with its own
+    // `iuser*` and death state.
+    let source = observer::first_person_source(g, eng, slot).map(|t| (t, eng.client_edict(t)));
+    let v = source.and_then(|(_, sid)| eng.ent(sid)).unwrap_or(own);
     let data = GoldSrcClientData {
         origin: v.origin,
         velocity: v.velocity,
@@ -1220,15 +1233,20 @@ pub(crate) fn client_data(
         health: v.health,
         maxspeed: v.max_speed,
         fov: v.fov,
-        deadflag: v.deadflag,
+        deadflag: own.deadflag,
         punchangle: v.punchangle,
-        iuser1: v.iuser1,
-        iuser2: v.iuser2,
-        iuser3: v.iuser3,
+        iuser1: own.iuser1,
+        iuser2: own.iuser2,
+        iuser3: own.iuser3,
         ..Default::default()
     };
     let mut data = data;
-    if let Some(p) = g.players.get(usize::from(slot)).and_then(Option::as_ref) {
+    let weapons_of = source.map_or(slot, |(t, _)| t);
+    if let Some(p) = g
+        .players
+        .get(usize::from(weapons_of))
+        .and_then(Option::as_ref)
+    {
         data.weapons = p.weapons;
     }
     messages::update_client_data(g, eng, slot);
@@ -1266,7 +1284,9 @@ pub(crate) fn client_command(
         "say" => crate::chat::say_command(g, eng, slot, argv, false),
         "say_team" => crate::chat::say_command(g, eng, slot, argv, true),
         "ignoremsg" => crate::chat::ignore_msg_command(g, eng, slot),
-        _ => {}
+        _ => {
+            observer::command(g, eng, slot, argv);
+        }
     }
 }
 

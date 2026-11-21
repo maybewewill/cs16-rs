@@ -20,8 +20,7 @@
 //! - The team counts (`m_iNumCT`, `m_iNumTerrorist`) are taken from the players when asked,
 //!   not from the cache `CheckWinConditions` refreshes.
 //!
-//! Left for later tasks: the observer ([`start_observer`]),
-//! the VIP (`jointeam 3` is refused: no map has a VIP safety zone yet), the items a player
+//! Left for later tasks: the VIP (`jointeam 3` is refused: no map has a VIP safety zone yet), the items a player
 //! drops or loses on a team change, the `Location` and radar messages, the career mode and the
 //! bots. `mp_teamlist` is not part of Counter-Strike's game library.
 
@@ -39,6 +38,7 @@ use crate::menus::{
 };
 use crate::messages;
 use crate::money;
+use crate::observer;
 use crate::player::{DEAD_DEAD, Team, apply_model, kill, spawn};
 use crate::rules;
 use crate::world::{CT_SPAWN_CLASS, T_SPAWN_CLASS};
@@ -374,7 +374,7 @@ fn get_into_game(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
         v.flags &= FL_PROXY | FL_FAKECLIENT;
         v.flags |= FL_SPECTATOR | FL_CLIENT;
     }
-    start_observer(eng, slot);
+    start_observer(g, eng, slot);
     rules::check_win_conditions(g, eng);
     eng.send_usermsg(
         MsgDest::All,
@@ -388,19 +388,19 @@ fn get_into_game(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     }
 }
 
-/// The call point of `CBasePlayer::StartObserver`: a spectator, or a player that waits for the
-/// next round, flies around unseen. The observer's cameras and HUD are a later task (the
-/// observer, Task 9); until then this only makes the player invisible, not solid and not
-/// moved by the game.
-fn start_observer(eng: &mut EngineApi<'_>, slot: u8) {
+/// `CBasePlayer::StartObserver` for a spectator, or a player that waits for the next round
+/// ([`observer::start_observer`]), where it stands and looking the way it looks (the original
+/// takes a spawn point's origin and angles from `GetPlayerSpawnSpot`).
+fn start_observer(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let id = eng.client_edict(slot);
+    let (origin, angles) = eng
+        .ent(id)
+        .map_or((Vec3::ZERO, Vec3::ZERO), |v| (v.origin, v.angles));
     if let Some(v) = eng.ent_mut(id) {
-        v.solid = SOLID_NOT;
-        v.movetype = MOVETYPE_NOCLIP;
-        v.effects = EF_NODRAW | EF_NOINTERP;
         v.velocity = Vec3::ZERO;
         v.punchangle = Vec3::ZERO;
     }
+    observer::start_observer(g, eng, slot, origin, angles);
 }
 
 /// `HandleMenu_ChooseTeam` (`client.cpp`): the player of `slot` chose `choice` in the team menu.
@@ -608,7 +608,7 @@ fn choose_spectator(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) -> boo
         p.team_changed = true;
     }
     team_change_update(g, eng, slot);
-    start_observer(eng, slot);
+    start_observer(g, eng, slot);
     true
 }
 

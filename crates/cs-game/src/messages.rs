@@ -140,7 +140,12 @@ pub(crate) fn link_user_messages() -> UserMsgRegistry {
 /// Sends the message `name` of [`USER_MESSAGES`] with `payload` as its bytes. `false`, nothing
 /// sent, for a name that is not registered, a payload of the wrong size for a fixed-size
 /// message, or one over 255 bytes for a variable one.
-fn send_raw(eng: &mut EngineApi<'_>, dest: MsgDest, name: &str, payload: &[u8]) -> bool {
+pub(crate) fn send_raw(
+    eng: &mut EngineApi<'_>,
+    dest: MsgDest,
+    name: &str,
+    payload: &[u8],
+) -> bool {
     let Some(i) = USER_MESSAGES.iter().position(|&(n, _)| n == name) else {
         return false;
     };
