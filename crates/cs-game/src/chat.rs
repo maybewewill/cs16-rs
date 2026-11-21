@@ -19,7 +19,10 @@
 //!
 //! - The console command line reaches the game as `argv`, so the text is `argv[1..]` joined by
 //!   single spaces where the original reads the raw rest of the line (`CMD_ARGS`) with its quotes.
-//!   The quote stripping of `Host_Say` is ported all the same.
+//!   The quote stripping of `Host_Say` is ported all the same. The reason is that
+//!   `GameDll::client_command` does not carry the raw `CMD_ARGS` line, so unquoted text typed
+//!   at the console with repeated spaces differs from the original (a carry: add the raw line
+//!   to the boundary later).
 //! - A Rust string is always valid UTF-8: `Q_UnicodeValidate` and `Q_UnicodeRepair` have nothing
 //!   to repair. Cuts to a byte count land on a character boundary, where the original may cut
 //!   a sequence in two.
@@ -99,9 +102,12 @@ impl ChatState {
         }
     }
 
-    /// `Spawn` clears the flood timer (`m_flLastTalk = 0`).
+    /// `Spawn` clears the flood timer (`m_flLastTalk = 0`) and every command timer
+    /// (`m_flLastCommandTime[i] = -1`, player.cpp:6144), so a line right after a spawn is heard.
     pub(crate) fn on_spawn(&mut self) {
         self.last_talk = 0.0;
+        self.next_say = -1.0;
+        self.next_say_team = -1.0;
     }
 }
 

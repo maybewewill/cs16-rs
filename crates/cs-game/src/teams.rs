@@ -358,6 +358,7 @@ fn get_into_game(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     };
     p.not_killed = false;
     p.team_kills = 0;
+    // `GetIntoGame` (ReGameDLL player.cpp:10746) resets `m_iIgnoreGlobalChat`.
     p.chat.ignore = crate::chat::IgnoreMsg::None;
     p.joining = JoinState::Joined;
     let (team, class) = (p.team, p.class);

@@ -299,3 +299,74 @@ fn chat_floods_are_dropped() {
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].2[1], "one\n");
 }
+
+#[test]
+fn a_line_right_after_a_spawn_is_heard() {
+    let mut b = bench();
+    assert_eq!(say(&mut b, 0, &["say", "first"]).len(), 1);
+    // Spawning clears the flood timers: no waiting needed.
+    b.run(|game, eng| game.respawn_player(eng, 0));
+    b.probe.clear_messages();
+    b.run(|game, eng| {
+        game.client_command(eng, 0, &["say".to_string(), "again".to_string()]);
+    });
+    b.step(4);
+    let got = say_texts(&b);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].2[1], "again\n");
+}
+
+#[test]
+fn spectators_and_unassigned_players_chat_as_the_dead() {
+    let mut b = bench();
+    // Slot 1 goes to the spectators, the probe too (a spectator is a dead player).
+    // (A living player may only become a spectator in the freeze period, so they die first.)
+    kill(&mut b, 0);
+    kill(&mut b, 1);
+    command(&mut b, 1, "jointeam 6");
+    command(&mut b, 0, "jointeam 6");
+    let team = |b: &Bench, s: usize| b.server.game().game.state().players[s].as_ref().unwrap().team;
+    assert_eq!((team(&b, 0), team(&b, 1)), (Team::Spectator, Team::Spectator));
+    // Slot 2 stays a terrorist and alive: the spectator probe does not hear it.
+    assert!(say(&mut b, 2, &["say", "alive"]).is_empty());
+    let got = say(&mut b, 1, &["say", "spec"]);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].1, "#Cstrike_Chat_AllSpec");
+    let got = say(&mut b, 1, &["say_team", "spec"]);
+    assert_eq!(got[0].1, "#Cstrike_Chat_Spec");
+    // The probe itself, a spectator, is heard by itself with the same keys.
+    let got = say(&mut b, 0, &["say_team", "me"]);
+    assert_eq!((got[0].0, got[0].1.as_str()), (1, "#Cstrike_Chat_Spec"));
+
+    // A player that has not joined (slot 2 after it is made to leave its team) is dead and on
+    // no team: "dead" for all, and its team line is for the unassigned only.
+    b.run(|game, _| {
+        let p = game.state_mut().players[2].as_mut().unwrap();
+        p.team = Team::Unassigned;
+    });
+    b.run(|game, eng| game.damage_player(eng, 2, None, 500.0, 0));
+    b.step(2);
+    let got = say(&mut b, 2, &["say", "hi"]);
+    assert_eq!(got[0].1, "#Cstrike_Chat_AllDead");
+    assert!(say(&mut b, 2, &["say_team", "hi"]).is_empty());
+}
+
+#[test]
+fn a_name_is_cut_to_31_bytes() {
+    let mut b = bench();
+    set_name(&mut b, 0, "abcdefghijklmnopqrstuvwxyz0123456789ABCD");
+    assert_eq!(name_of(&mut b, 0), "abcdefghijklmnopqrstuvwxyz01234");
+    assert_eq!(say_texts(&b)[0].2[1], "abcdefghijklmnopqrstuvwxyz01234");
+}
+
+#[test]
+fn a_second_name_change_while_dead_replaces_the_pending_one() {
+    let mut b = bench();
+    kill(&mut b, 0);
+    set_name(&mut b, 0, "one");
+    set_name(&mut b, 0, "two");
+    assert_eq!(name_of(&mut b, 0), "p");
+    b.run(|game, eng| game.respawn_player(eng, 0));
+    b.step(2);
+    assert_eq!(name_of(&mut b, 0), "two");
+}
