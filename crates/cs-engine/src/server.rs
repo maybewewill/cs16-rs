@@ -22,7 +22,8 @@ use crate::oob::{ChallengeIssuer, OOB_GLOBAL_REPLIES_PER_SEC, OobLimiter};
 use crate::precache::PrecacheTables;
 use crate::world::WorldLinks;
 use crate::signon::{
-    MAX_SIGNON_BUFFER, SPAWN_TAIL_MAX, UserInfoEntry, move_vars, munged_map_crc, write_new_stage, write_sendres_stage,
+    MAX_SIGNON_BUFFER, SPAWN_TAIL_MAX, UserInfoEntry, move_vars, munged_map_crc, write_new_stage,
+    write_sendres_stage,
     write_spawn_baselines, write_spawn_stage,
 };
 use crate::usercmd::TokenBucket;
@@ -97,7 +98,7 @@ pub struct Server<G: GameDll> {
     /// between frames.
     pub(crate) frametime: f32,
     pub(crate) net_stats: NetStats,
-    /// Set by `shutdown`: connects are refused from then on.
+    /// Set by `shutdown`: frames do nothing from then on.
     pub(crate) shutting_down: bool,
     /// Final datagrams for released clients, sent at the end of the frame.
     pub(crate) farewells: Vec<(PeerAddr, Vec<u8>)>,
@@ -444,7 +445,8 @@ impl<G: GameDll> Server<G> {
             tracing::error!(
                 skipped,
                 kept = lo,
-                "spawn baselines do not fit the sign-on buffer; the highest entities are sent from the zero state"
+                "spawn baselines do not fit the sign-on buffer; \
+                 the highest entities are sent from the zero state"
             );
         }
         self.baselines = baselines;
@@ -941,7 +943,8 @@ mod tests {
              ({baselines} baselines, {rest} other)"
         );
         assert!(total <= MAX_SIGNON_BUFFER, "{total} bytes");
-        assert!(baselines > 0 && baselines + INIT_BUFFER_BUDGET <= MAX_SIGNON_BUFFER - SPAWN_TAIL_MAX);
+        assert!(baselines > 0);
+        assert!(baselines + INIT_BUFFER_BUDGET <= MAX_SIGNON_BUFFER - SPAWN_TAIL_MAX);
     }
 
     #[test]

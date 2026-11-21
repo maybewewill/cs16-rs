@@ -29,6 +29,11 @@ const MAX_SEND_BYTES: usize = MAX_MSGLEN;
 pub const MAX_LIGHT_STYLE_BYTES: usize = 63;
 /// Highest entity index the `svc_sound` entity field (11 bits) can carry.
 const MAX_SOUND_ENTITY: u16 = (1 << 11) - 1;
+/// Whether the `svc_sound` entity field (11 bits) can carry entity `index`.
+fn sound_entity_fits(index: u16) -> bool {
+    index <= MAX_SOUND_ENTITY
+}
+
 /// Highest sound channel (3 bits on the wire).
 const MAX_SOUND_CHANNEL: u8 = 7;
 /// Highest sound attenuation (the byte on the wire is `attenuation * 64`).
@@ -54,7 +59,8 @@ pub enum MsgDest {
     Pvs(Vec3),
     /// The init buffer: stored, and replayed to every client that enters the server (in its
     /// `spawn` stage, after the light styles). Only while the map is being activated (in
-    /// `spawn_entity` and `server_activate`) and while it fits [`INIT_BUFFER_BUDGET`](crate::INIT_BUFFER_BUDGET); otherwise
+    /// `spawn_entity` and `server_activate`) and while it fits
+    /// [`INIT_BUFFER_BUDGET`](crate::INIT_BUFFER_BUDGET); otherwise
     /// the same as `All`.
     Init,
 }
@@ -211,7 +217,7 @@ impl EngineApi<'_> {
         pitch: u8,
     ) -> bool {
         if channel > MAX_SOUND_CHANNEL
-            || ent.index > MAX_SOUND_ENTITY
+            || !sound_entity_fits(ent.index)
             || !volume.is_finite()
             || !attenuation.is_finite()
         {
@@ -292,6 +298,16 @@ impl EngineApi<'_> {
 
 #[cfg(test)]
 mod tests {
+    use super::sound_entity_fits;
+
+    #[test]
+    fn sound_entity_guard_stops_at_the_11_bit_field() {
+        assert!(sound_entity_fits(0));
+        assert!(sound_entity_fits(2047));
+        assert!(!sound_entity_fits(2048));
+        assert!(!sound_entity_fits(u16::MAX));
+    }
+
     use super::*;
 
     #[test]

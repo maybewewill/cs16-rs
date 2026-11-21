@@ -17,8 +17,8 @@ use cs_proto48::messages::{
 use cs_proto48::usermsg::UserMsgRegistry;
 use glam::Vec3;
 
-use crate::lifecycle::MAX_CLIENT_SLOTS;
 use crate::api_messages::MAX_LIGHT_STYLE_BYTES;
+use crate::lifecycle::MAX_CLIENT_SLOTS;
 use crate::oob::MAX_INFO_STRING;
 
 /// Light styles sent in the `spawn` stage: the HLDS table size (`MAX_LIGHTSTYLES`), the limit
@@ -45,8 +45,9 @@ pub const SPAWN_TAIL_MAX: usize = 7
 /// Bytes of [`MAX_SIGNON_BUFFER`] kept back for the spawn baselines when the game writes
 /// `MsgDest::Init` messages. The game writes them before the engine knows how big the
 /// baselines are; HLDS has no such reserve and errors when the two overflow its buffer.
-/// Measurements: see the Task 1 report of phase 2B (a large real map's baselines take a few
-/// KiB; a stub of 1500 model entities with origin and angles takes about 20 KiB).
+/// A baseline of a model entity with an origin and angles takes about 19 bytes, so the
+/// reserve holds about 1270 of them (a baseline with every field set takes about 49 bytes:
+/// about 500); a real map's brush entities take a few KiB (205 entities of cs_office: 3.8 KB).
 pub const SIGNON_BASELINE_RESERVE: usize = 24 * 1024;
 
 /// Bytes the init buffer holds: what is left of the sign-on buffer after the spawn tail and

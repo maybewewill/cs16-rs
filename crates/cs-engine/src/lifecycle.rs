@@ -101,8 +101,8 @@ impl PingTracker {
 impl ServerConfig {
     /// The configuration with unusable values replaced: `min_rate` at least 1000, `max_rate`
     /// at least `min_rate`, `min_update_rate` at least 1, `max_update_rate` at least
-    /// `min_update_rate`, `max_clients` within 1..=32, `max_edicts` at most [`MAX_EDICTS_WIRE`], and timeouts that are not positive and
-    /// finite set to the defaults.
+    /// `min_update_rate`, `max_clients` within 1..=32, `max_edicts` at most
+    /// [`MAX_EDICTS_WIRE`], and timeouts that are not positive and finite set to the defaults.
     pub(crate) fn sanitized(mut self) -> Self {
         let defaults = ServerConfig::default();
         self.min_rate = self.min_rate.max(MIN_RATE_FLOOR);
@@ -167,7 +167,7 @@ impl<G: GameDll> Server<G> {
     /// Sends every connected client `svc_disconnect(reason)` and releases it (the game hears
     /// `client_disconnect` for those it had put in), then lets the game deactivate the map
     /// (`server_deactivate`, once: a repeated shutdown does not call it again); from then on
-    /// connects are refused (queries are still answered).
+    /// [`frame`](Self::frame) does nothing, so no connect or query is read.
     pub fn shutdown(&mut self, net: &mut dyn PacketTransport, reason: &str) {
         let first = !self.shutting_down;
         self.shutting_down = true;

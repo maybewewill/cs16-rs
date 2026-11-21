@@ -63,9 +63,6 @@ impl<G: GameDll> Server<G> {
                 }
                 reply
             }
-            OobOutcome::Connect(_) if self.shutting_down => {
-                encode_s2c_reject("Server is shutting down.\n")
-            }
             OobOutcome::Connect(request) => self.connect(from, request),
             OobOutcome::Ignore => return,
         };
