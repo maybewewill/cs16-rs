@@ -122,12 +122,12 @@ const HIDEHUD_CROSSHAIR: i32 = 1 << 6;
 const CONTENT_EMPTY: i32 = -1;
 const CONTENT_WATER: i32 = -3;
 /// `EF_NODRAW` and `EF_NOINTERP`.
-const EF_NODRAW: u32 = 128;
+pub(crate) const EF_NODRAW: u32 = 128;
 const EF_NOINTERP: u32 = 32;
 /// `CHAN_VOICE` and `CHAN_ITEM`, `ATTN_NORM`, `PITCH_NORM`.
 const CHAN_VOICE: u8 = 2;
-const CHAN_ITEM: u8 = 3;
-const ATTN_NORM: f32 = 0.8;
+pub(crate) const CHAN_ITEM: u8 = 3;
+pub(crate) const ATTN_NORM: f32 = 0.8;
 pub(crate) const PITCH_NORM: u8 = 100;
 /// `VEC_HULL_MIN`/`MAX` and `VEC_DUCK_HULL_MIN`/`MAX`.
 const HULL_MIN: Vec3 = Vec3::new(-16.0, -16.0, -36.0);
@@ -214,8 +214,8 @@ pub struct Player {
     /// guerilla (`client.cpp`, `HandleMenu_ChooseAppearance`).
     pub class: u8,
     pub health: f32,
-    /// `pev->armorvalue`. Kept here only: the edict has no such field and the client is not
-    /// told yet (the `Battery` message belongs to the HUD and economy tasks).
+    /// `pev->armorvalue`. Kept here only: the edict has no such field; the client hears of it
+    /// in `Battery` (client data update) and `ArmorType` ([`crate::buy`]).
     pub armor: f32,
     /// `m_iKevlar`.
     pub kevlar: ArmorType,
@@ -308,12 +308,16 @@ pub struct Player {
     pub(crate) train_new: bool,
     /// Chat, the name and `ignoremsg` ([`crate::chat`]).
     pub chat: crate::chat::ChatState,
-    /// `m_bHasNightVision`: set by the buy menu (Task 10).
+    /// `m_bHasNightVision`: the player bought night vision goggles ([`crate::buy`]).
     pub(crate) has_night_vision: bool,
-    /// `m_bNightVisionOn`.
+    /// `m_bNightVisionOn`: the goggles are on ([`crate::hud_misc`]).
     pub(crate) night_vision_on: bool,
     /// The radio, the radar, the status bar ([`crate::hud_misc`]).
     pub hud: crate::hud_misc::HudState,
+    /// `m_signals`: the zones the player stands in ([`crate::buy`]).
+    pub(crate) signals: crate::buy::Signals,
+    /// `m_tmHandleSignals`: server time `HandleSignals` runs next.
+    pub(crate) next_handle_signals: f64,
 }
 
 impl Player {
@@ -371,7 +375,31 @@ impl Player {
             has_night_vision: false,
             night_vision_on: false,
             hud: Default::default(),
+            signals: Default::default(),
+            next_handle_signals: 0.0,
         }
+    }
+
+    /// `m_bHasNightVision`. For tests only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn test_has_night_vision(&self) -> bool {
+        self.has_night_vision
+    }
+
+    /// `m_bNightVisionOn`. For tests only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn test_night_vision_on(&self) -> bool {
+        self.night_vision_on
+    }
+
+    /// `m_signals.GetState()`: the zones the player was in at the last `HandleSignals`. For
+    /// tests only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn test_zone_signals(&self) -> u8 {
+        self.signals.state()
     }
 
     /// Whether the player has joined the game with a team that plays: the stand-in for
@@ -592,14 +620,16 @@ pub(crate) fn spawn(
     p.team = team;
     p.class = class;
     p.health = 100.0;
-    if !p.not_killed {
+    // A player killed before starts with nothing (`Spawn`: armor, kevlar and the goggles).
+    let lost_items = !p.not_killed;
+    if lost_items {
         p.armor = 0.0;
         p.kevlar = ArmorType::None;
+        p.has_night_vision = false;
         // `Spawn` (player.cpp:6030-6039) starts the client's cached `m_iClientHideHUD` over
         // only for a player killed before (or under `REGAMEDLL_FIXES`, not vanilla), so a
         // joiner's first update sends no `HideWeapon`.
         p.client_hide_hud = -1;
-        p.has_night_vision = false;
     }
     p.hide_hud &=
         !(HIDEHUD_WEAPONS | HIDEHUD_HEALTH | HIDEHUD_TIMER | HIDEHUD_MONEY | HIDEHUD_CROSSHAIR);
@@ -611,6 +641,8 @@ pub(crate) fn spawn(
     p.fall_velocity = 0.0;
     p.last_hit_group = HITGROUP_GENERIC;
     observer::on_spawn(p);
+    // `m_tmHandleSignals = 0`: the zones are looked at again with the first client data update.
+    p.next_handle_signals = 0.0;
     p.chat.on_spawn();
     // `PlayerSpawn`: `pev->weapons |= (1 << WEAPON_SUIT)`.
     p.weapons |= 1 << WEAPON_SUIT;
@@ -653,6 +685,16 @@ pub(crate) fn spawn(
     eng.set_size(id, HULL_MIN, HULL_MAX);
     eng.set_origin(id, origin);
     reset_max_speed(g, eng, slot);
+    // The order of the messages is that of `Spawn` (player.cpp): `SendItemStatus` of a player
+    // that lost its items (6046-6052), `NVGToggle 0` to the player and its first-person
+    // watchers (6064-6081, `hud_misc::on_spawn`), then `PlayerSpawn` (6085), whose
+    // `RemoveAllItems` sends the empty `CurWeapon` (no weapons exist yet), and last the
+    // scoreboard line (`ScoreInfo`, 6112-6118).
+    if lost_items {
+        crate::buy::send_item_status(eng, slot, false);
+    }
+    crate::hud_misc::on_spawn(g, eng, slot);
+    messages::cur_weapon_none(eng, slot);
     if let Some(p) = g.players[index].as_mut() {
         p.num_spawns += 1;
     }
@@ -661,10 +703,6 @@ pub(crate) fn spawn(
     }
     // A name asked for while dead is taken at the spawn.
     crate::chat::apply_pending_name(g, eng, slot);
-    // `PlayerSpawn` takes the items away and starts the weapons over; no weapons exist yet, so
-    // the ammo HUD is told there is none (`RemoveAllItems`).
-    messages::cur_weapon_none(eng, slot);
-    crate::hud_misc::on_spawn(g, eng, slot);
     true
 }
 
@@ -1083,6 +1121,8 @@ fn killed(
     observer::killed(g, eng, slot, attacker);
     // `SetScoreboardAttributes()`: the scoreboard marks the player dead.
     messages::set_scoreboard_attributes(g, eng, usize::from(slot));
+    // The buy zone icon goes (and a buy menu that is open closes).
+    crate::buy::buy_zone_icon_clear(g, eng, slot);
     // `DeathSound`: one of four, `RANDOM_LONG(1, 4)`.
     let sample = match g.random_range(1, 4) {
         1 => "player/die1.wav",
@@ -1244,8 +1284,11 @@ pub(crate) fn client_command(
         _ => {
             // Distinct commands, so the order of `ClientCommand_` (`ignorerad`, the observer
             // commands, then the living player's) does not matter.
-            if !observer::command(g, eng, slot, argv) {
-                crate::hud_misc::client_command(g, eng, slot, argv);
+            if !observer::command(g, eng, slot, argv)
+                && !crate::hud_misc::client_command(g, eng, slot, argv)
+                && crate::buy::is_buy_command(command)
+            {
+                crate::buy::client_command(g, eng, slot, argv);
             }
         }
     }

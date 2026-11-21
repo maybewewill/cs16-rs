@@ -498,6 +498,9 @@ pub(crate) fn handle_menu_choose_team(
             v.velocity = Vec3::ZERO;
             v.max_speed = 1.0;
         }
+        // `m_bHasNightVision = false; SendItemStatus()`.
+        p.has_night_vision = false;
+        crate::buy::send_item_status(eng, slot, false);
         apply_model(eng, slot, Team::Unassigned, 0);
     }
 

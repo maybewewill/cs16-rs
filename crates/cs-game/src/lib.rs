@@ -8,8 +8,10 @@
 //! take them from the team menu into the game, and [`rules`] runs the rounds, the match and the
 //! map cycle (`CHalfLifeMultiplay`); [`chat`] carries what the players say to each other, their
 //! names and the text messages of the HUD; [`hud_misc`] has the radio, the radar, the status bar
-//! and the night vision. The dead and the spectators watch through [`observer`].
+//! and the night vision; [`buy`] has the buy zones and the purchase of the equipment. The dead
+//! and the spectators watch through [`observer`].
 
+pub mod buy;
 pub mod chat;
 pub mod entity;
 pub mod hud_misc;

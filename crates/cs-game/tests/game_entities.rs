@@ -406,7 +406,7 @@ fn unknown_classes_are_removed() {
         spawn_at(CT_SPAWN_CLASS, "100 0 0"),
         spawn_at("light", "1 2 3"),
         spawn_at("ambient_generic", "4 5 6"),
-        entity(&[("classname", "func_buyzone")]),
+        entity(&[("classname", "func_bomb_target")]),
         // A brush entity without a brush model has nothing to collide with.
         entity(&[("classname", "func_wall")]),
     ]);

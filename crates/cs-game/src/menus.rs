@@ -7,8 +7,8 @@
 //! `VGUIMenu` and answers with `jointeam`/`joinclass`; one with `_vgui_menus 0` gets the text
 //! menu from `ShowMenu` and answers with `menuselect`.
 //!
-//! The menus of the buy commands (`Menu_Buy` ... `Menu_ClientBuy`) come with the economy;
-//! [`Menu`] has the ones the team selection and the radio use.
+//! The menus of the buy commands (`Menu_Buy` ... `Menu_ClientBuy`) are shown and answered by
+//! [`crate::buy`]; [`Menu`] also has the radio menus ([`crate::hud_misc`]).
 
 use cs_engine::{EngineApi, MsgDest};
 use cs_proto48::usermsg::CsUserMsg;
@@ -28,6 +28,22 @@ pub enum Menu {
     Radio1,
     Radio2,
     Radio3,
+    /// `Menu_Buy`: the first buy menu.
+    Buy,
+    /// `Menu_BuyPistol`.
+    BuyPistol,
+    /// `Menu_BuyRifle`.
+    BuyRifle,
+    /// `Menu_BuyMachineGun`.
+    BuyMachineGun,
+    /// `Menu_BuyShotgun`.
+    BuyShotgun,
+    /// `Menu_BuySubMachineGun`.
+    BuySubMachineGun,
+    /// `Menu_BuyItem`: the equipment menu.
+    BuyItem,
+    /// `Menu_ClientBuy`: the client's own buy menu is open (`client_buy_open`).
+    ClientBuy,
 }
 
 /// `VGUI_Menu_Team`, `VGUI_Menu_Class_T`, `VGUI_Menu_Class_CT` (`cdll_dll.h`): the ids the
@@ -179,8 +195,9 @@ pub(crate) fn menuselect(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, a
         p.menu = Menu::Off;
     }
     let text_menus = !p.vgui_menus;
-    match p.menu {
-        Menu::Off => {}
+    let menu = p.menu;
+    match menu {
+        Menu::Off | Menu::ClientBuy => {}
         Menu::ChooseTeam => {
             if text_menus && !teams::handle_menu_choose_team(g, eng, slot, choice) {
                 teams::show_team_menu_again(g, eng, slot);
@@ -194,6 +211,17 @@ pub(crate) fn menuselect(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, a
         // The radio menus are text menus for every client.
         menu @ (Menu::Radio1 | Menu::Radio2 | Menu::Radio3) => {
             crate::hud_misc::menu_choice(g, eng, slot, menu, choice);
+        }
+        Menu::Buy
+        | Menu::BuyPistol
+        | Menu::BuyRifle
+        | Menu::BuyMachineGun
+        | Menu::BuyShotgun
+        | Menu::BuySubMachineGun
+        | Menu::BuyItem => {
+            if text_menus {
+                crate::buy::menuselect(g, eng, slot, menu, choice);
+            }
         }
     }
 }

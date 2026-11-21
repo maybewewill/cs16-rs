@@ -272,6 +272,9 @@ pub enum CsUserMsg {
     },
     HideWeapon(u8),
     ItemStatus(u8),
+    /// `gmsgItemPickup`: the classname of an item the player picked up (`item_kevlar`), which
+    /// the HUD shows a pickup icon for.
+    ItemPickup(String),
     ResetHud,
     InitHud,
     BuyClose,
@@ -454,6 +457,7 @@ pub fn decode_cs_usermsg(name: &str, payload: &[u8]) -> Result<CsUserMsg, ProtoE
         },
         "HideWeapon" => CsUserMsg::HideWeapon(r.read_u8()?),
         "ItemStatus" => CsUserMsg::ItemStatus(r.read_u8()?),
+        "ItemPickup" => CsUserMsg::ItemPickup(r.read_str()?),
         "ResetHUD" => CsUserMsg::ResetHud,
         "InitHUD" => CsUserMsg::InitHud,
         "BuyClose" => CsUserMsg::BuyClose,
@@ -748,6 +752,10 @@ pub fn encode_cs_usermsg(msg: &CsUserMsg) -> (&'static str, Vec<u8>) {
             w.write_u8(*flags);
             "ItemStatus"
         }
+        CsUserMsg::ItemPickup(name) => {
+            w.write_str(name);
+            "ItemPickup"
+        }
         CsUserMsg::ResetHud => "ResetHUD",
         CsUserMsg::InitHud => "InitHUD",
         CsUserMsg::BuyClose => "BuyClose",
@@ -815,6 +823,7 @@ mod tests {
                 index: 3,
                 value: -7,
             },
+            CsUserMsg::ItemPickup("item_kevlar".to_string()),
             CsUserMsg::DeathMsg {
                 killer_id: 1,
                 victim_id: 2,

@@ -86,6 +86,8 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     reg.register("mp_roundtime", "1.75", srv_arch, "Round duration in minutes");
     reg.register("mp_freezetime", "6", srv_arch, "Freeze time at round start (seconds)");
     reg.register("mp_startmoney", "800", srv_arch, "Starting money per half");
+    // ReGameDLL `game.cpp` (read 2026-11-22): `mp_buytime` "1.5", in minutes.
+    reg.register("mp_buytime", "1.5", srv_arch, "Minutes of a round the players may buy in (at least 15 seconds)");
     reg.register("mp_c4timer", "45", srv_arch, "C4 detonation timer (seconds)");
     reg.register("mp_friendlyfire", "0", srv_arch, "Friendly fire (0 or 1)");
     // ReGameDLL `game.cpp` (read 2026-11-22): the team rules.

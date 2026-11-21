@@ -98,6 +98,11 @@ status = "tested"
 evidence = "crates/cs-game/tests/rounds.rs::auto_team_balance_moves_the_last_to_join"
 
 [[item]]
+id = "mp_buytime"
+status = "tested"
+evidence = "crates/cs-game/tests/buy.rs::buy_time_expires"
+
+[[item]]
 id = "mp_c4timer"
 status = "implemented"
 

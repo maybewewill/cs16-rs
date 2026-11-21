@@ -510,6 +510,9 @@ pub(crate) fn update_client_data(g: &mut GameState, eng: &mut EngineApi<'_>, slo
     let (start_over, first_entry) = (p.init_hud, !p.game_hud_initialized);
     p.init_hud = false;
     if start_over {
+        // Vanilla (`m_signals.Update()`): the zones the player touched count as the ones it
+        // stands in, with no icon message for the change.
+        p.signals.update();
         eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::ResetHud);
         if first_entry {
             eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::InitHud);
@@ -591,6 +594,8 @@ pub(crate) fn update_client_data(g: &mut GameState, eng: &mut EngineApi<'_>, slo
     // Cached last, so the weapon updates can see that the field of view changed.
     p.client_fov = p.fov;
     crate::hud_misc::update_status_bar(g, eng, slot);
+    // The end of `UpdateClientData`: every half second the zones the player is in.
+    crate::buy::handle_signals_when_due(g, eng, slot);
     crate::hud_misc::update_radar(g, eng, slot);
 }
 

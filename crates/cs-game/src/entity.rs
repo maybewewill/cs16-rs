@@ -10,6 +10,7 @@
 use cs_engine::{EdictId, EngineApi};
 
 use crate::GameState;
+use crate::buy::BuyZone;
 use crate::world::{BrushKind, FuncLadder, InfoPlayer, StaticBrush, World};
 
 /// What one class of map entity does. Every method but [`classname`](Self::classname) has a
@@ -66,6 +67,7 @@ pub fn create_entity(classname: &str) -> Option<Box<dyn GameEntity>> {
         "info_player_start" => Box::new(InfoPlayer("info_player_start")),
         "info_player_deathmatch" => Box::new(InfoPlayer("info_player_deathmatch")),
         "func_ladder" => Box::new(FuncLadder),
+        "func_buyzone" => Box::new(BuyZone::default()),
         "func_wall" => Box::new(StaticBrush::new("func_wall", BrushKind::Solid)),
         "func_door" => Box::new(StaticBrush::new("func_door", BrushKind::Solid)),
         "func_door_rotating" => Box::new(StaticBrush::new("func_door_rotating", BrushKind::Solid)),
@@ -219,6 +221,7 @@ mod tests {
             "info_player_start",
             "info_player_deathmatch",
             "func_ladder",
+            "func_buyzone",
             "func_wall",
             "func_door",
             "func_door_rotating",
@@ -232,7 +235,7 @@ mod tests {
             let entity = create_entity(class).unwrap_or_else(|| panic!("{class} missing"));
             assert_eq!(entity.classname(), class);
         }
-        for unknown in ["", "light", "FUNC_WALL", "func_buyzone", "worldspawn "] {
+        for unknown in ["", "light", "FUNC_WALL", "func_buyzones", "worldspawn "] {
             assert!(create_entity(unknown).is_none(), "{unknown:?}");
         }
     }

@@ -399,14 +399,16 @@ fn a_spawn_starts_the_hud_over_without_the_welcome() {
     assert!(b.run(|game, eng| game.spawn_player(eng, 0, Team::Ct, 0)));
     b.step(20);
     let names = b.names_from(0, before);
-    // `PlayerSpawn`'s empty weapon after the scoreboard line, the night vision switched off
-    // (`Spawn`), then the HUD again, but not InitHUD or the rules' welcome.
+    // The order of `Spawn` (player.cpp): the goggles go off (`NVGToggle`, 6064), `PlayerSpawn`'s
+    // empty weapon (`CurWeapon`, 6085), the scoreboard line (`ScoreInfo`, 6112), then the HUD
+    // again, but not InitHUD or the rules' welcome. The stub map has no buy zone, so standing at
+    // a spawn point counts as one and the last update of the HUD shows its icon.
     assert_eq!(
         names,
         [
-            "ScoreInfo", "CurWeapon", "NVGToggle", "ResetHUD", "Money", "StatusIcon", "ScoreAttrib",
-            "RoundTime", "TeamScore", "TeamScore", "SetFOV", "Health", "Battery",
-            "Damage", "Train",
+            "NVGToggle", "CurWeapon", "ScoreInfo", "ResetHUD", "Money", "StatusIcon",
+            "ScoreAttrib", "RoundTime", "TeamScore", "TeamScore", "SetFOV", "Health",
+            "Battery", "Damage", "Train", "StatusIcon",
         ]
     );
 }

@@ -136,6 +136,12 @@ pub struct Rules {
     change_level_asked_at: f64,
     /// The round economy: what the teams are paid, the losing streaks, the loser bonus.
     economy: Economy,
+    /// `m_bMapHasBuyZone`: the map has a `func_buyzone` (else the players buy around the spawn
+    /// points).
+    map_has_buy_zone: bool,
+    /// `m_bMapHasBombTarget`: the map has a bomb target (2E: the entities do not exist yet, so
+    /// no map has one).
+    map_has_bomb_target: bool,
 }
 
 impl Default for Rules {
@@ -168,6 +174,8 @@ impl Default for Rules {
             game_start_time: 0.0,
             change_level_asked_at: f64::NEG_INFINITY,
             economy: Economy::default(),
+            map_has_buy_zone: false,
+            map_has_bomb_target: false,
         }
     }
 }
@@ -182,6 +190,11 @@ impl Rules {
             ..Self::default()
         };
         r.read_multiplay_cvars(eng);
+        // `CheckMapConditions`.
+        r.map_has_bomb_target = ["func_bomb_target", "info_bomb_target"]
+            .iter()
+            .any(|c| eng.find_by_classname(None, c).is_some());
+        r.map_has_buy_zone = eng.find_by_classname(None, "func_buyzone").is_some();
         r.intro_round_time += 2;
         r.round_time_secs = r.intro_round_time;
         r.win_difference = (eng.cvar_f32("mp_windifference") as i32).max(1);
@@ -229,6 +242,21 @@ impl Rules {
     /// `IsFreezePeriod`: the round has started but nobody may move yet.
     pub fn is_freeze_period(&self) -> bool {
         self.freeze_period
+    }
+
+    /// `m_bMapHasBuyZone`.
+    pub fn map_has_buy_zone(&self) -> bool {
+        self.map_has_buy_zone
+    }
+
+    /// `m_bMapHasBombTarget`.
+    pub fn map_has_bomb_target(&self) -> bool {
+        self.map_has_bomb_target
+    }
+
+    /// `m_fRoundStartTime`: server time the round clock counts from.
+    pub fn round_start_time(&self) -> f64 {
+        self.round_start_time
     }
 
     /// `GetRoundRemainingTime` at server time `now`: seconds left on the round clock (the freeze
