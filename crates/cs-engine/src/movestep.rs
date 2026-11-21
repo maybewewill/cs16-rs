@@ -152,7 +152,7 @@ impl EngineApi<'_> {
 
     /// `SV_CheckBottom`: false if any part of the bottom of the entity is off an edge that is
     /// not a staircase.
-    fn check_bottom(&self, id: EdictId) -> bool {
+    pub(crate) fn check_bottom(&self, id: EdictId) -> bool {
         let Some(v) = self.edicts.get(id).map(|e| &e.vars) else {
             return false;
         };

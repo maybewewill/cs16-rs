@@ -419,7 +419,7 @@ impl<G: GameDll> Server<G> {
                 v.flags &= !FL_ONGROUND;
             }
             // Friction; a dead monster that is not completely on the ground slides.
-            if was_on_ground && (alive || self.step_check_bottom(id)) {
+            if was_on_ground && (alive || self.with_engine(|eng| eng.check_bottom(id))) {
                 self.apply_ground_friction(id);
             }
             self.add_basevelocity(id);
@@ -1046,55 +1046,6 @@ impl<G: GameDll> Server<G> {
             let drag = -0.8 * f64::from(waterlevel) * frametime;
             v.velocity = vector_ma(v.velocity, drag, v.velocity);
         }
-    }
-
-    /// `SV_CheckBottom` (ReHLDS `sv_move.cpp`, read 2026-11-21): whether the entity's whole
-    /// bottom is over solid ground or a drop of at most `sv_stepsize` (a staircase). Corners
-    /// over solid world pass at once; otherwise a trace down from the middle sets the floor
-    /// height and the four corners may not be lower than `sv_stepsize` under it.
-    fn step_check_bottom(&mut self, id: EdictId) -> bool {
-        let step_size = self.cvar_or("sv_stepsize", 18.0);
-        let Some(v) = self.edicts.get(id).map(|e| &e.vars) else {
-            return true;
-        };
-        let monster_clip = v.flags & FL_MONSTERCLIP != 0;
-        let (mins, maxs) = (v.origin + v.mins, v.origin + v.maxs);
-        let corners = [
-            (mins.x, mins.y),
-            (mins.x, maxs.y),
-            (maxs.x, mins.y),
-            (maxs.x, maxs.y),
-        ];
-        let below = mins.z - 1.0;
-        let all_solid = self.with_engine(|eng| {
-            corners
-                .iter()
-                .all(|&(x, y)| eng.point_contents_ents(Vec3::new(x, y, below)) == CONTENTS_SOLID)
-        });
-        if all_solid {
-            return true;
-        }
-
-        let middle = Vec3::new((mins.x + maxs.x) * 0.5, (mins.y + maxs.y) * 0.5, 0.0);
-        let start = Vec3::new(middle.x, middle.y, mins.z + step_size);
-        let stop = Vec3::new(middle.x, middle.y, start.z - 2.0 * step_size);
-        let down = |s: &mut Self, from: Vec3, to: Vec3| {
-            s.move_trace(from, Vec3::ZERO, Vec3::ZERO, to, MoveFilter::NoMonsters, id, monster_clip)
-        };
-        let trace = down(self, start, stop);
-        if trace.trace.fraction == 1.0 {
-            return false;
-        }
-        let mid = trace.trace.end_pos.z;
-        for (x, y) in corners {
-            let from = Vec3::new(x, y, start.z);
-            let to = Vec3::new(x, y, stop.z);
-            let trace = down(self, from, to);
-            if trace.trace.fraction == 1.0 || mid - trace.trace.end_pos.z > step_size {
-                return false;
-            }
-        }
-        true
     }
 
     /// `SV_RunThink`: calls the game's think of `id` when it is due, `0 < nextthink <= sv_time +

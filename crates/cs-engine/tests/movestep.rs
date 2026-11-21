@@ -34,12 +34,15 @@ fn run<T: 'static>(h: &mut Harness, f: impl FnOnce(&mut EngineApi<'_>) -> T + 's
 }
 
 /// A solid box (a pushable, so that floor searches that skip monsters still see it) spanning
-/// `mins..maxs` in world coordinates.
+/// `mins..maxs` in world coordinates. It rests on the ground (`FL_ONGROUND`, as a settled
+/// pushable has): a `MOVETYPE_PUSHSTEP` entity that is not on the ground falls under
+/// `SV_Physics_Step` gravity every frame and would touch whatever overlaps it.
 fn slab(eng: &mut EngineApi<'_>, mins: Vec3, maxs: Vec3) -> EdictId {
     let id = eng.create_entity("test_slab").expect("free edict");
     let v = eng.ent_mut(id).unwrap();
     v.solid = SOLID_BBOX;
     v.movetype = MOVETYPE_PUSHSTEP;
+    v.flags = FL_ONGROUND;
     eng.set_size(id, mins, maxs);
     eng.set_origin(id, Vec3::ZERO);
     id
