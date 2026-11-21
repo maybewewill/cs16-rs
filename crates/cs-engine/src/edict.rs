@@ -94,6 +94,17 @@ pub struct EntVars {
     pub watertype: i32,
     pub gravity: f32,
     pub friction: f32,
+    /// Server time a swimmer runs out of air (`entvars_t::air_finished`); kept by the water
+    /// movement of `MOVETYPE_STEP` entities.
+    pub air_finished: f32,
+    /// Server time of the next drowning pain (`entvars_t::pain_finished`).
+    pub pain_finished: f32,
+    /// Damage of the next drowning pain (`entvars_t::dmg`).
+    pub dmg: f32,
+    /// Server time of the next lava or slime damage (`entvars_t::dmgtime`).
+    pub dmgtime: f32,
+    /// Server time the radiation suit protection ends (`entvars_t::radsuit_finished`).
+    pub radsuit_finished: f32,
     pub iuser1: i32,
     pub iuser2: i32,
     pub iuser3: i32,

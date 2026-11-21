@@ -116,6 +116,8 @@ pub struct Server<G: GameDll> {
     pub(crate) warned_movetypes: BTreeSet<u16>,
     /// Warnings given for such entities since the server started.
     pub(crate) movetype_warnings: u64,
+    /// State of the generator that picks a wade sound (`RandomLong` of `PF_WaterMove`).
+    pub(crate) phys_rng: u32,
     pub(crate) net_stats: NetStats,
     /// Set by `shutdown`: frames do nothing from then on.
     pub(crate) shutting_down: bool,
@@ -207,6 +209,7 @@ impl<G: GameDll> Server<G> {
             sv_time: SV_TIME_AT_MAP_START,
             frametime: 0.0,
             warned_movetypes: BTreeSet::new(),
+            phys_rng: 0x9E37_79B9,
             movetype_warnings: 0,
             net_stats: NetStats::default(),
             shutting_down: false,
@@ -239,9 +242,11 @@ impl<G: GameDll> Server<G> {
         self.outbox.init_open = true;
         self.spawn_map_entities();
         self.with_game(|game, eng| game.server_activate(eng));
+        // HLDS sets `ss_active` before the settle passes, so a think that precaches during
+        // them is refused.
+        self.precache.lock();
         self.settle_physics();
         self.outbox.init_open = false;
-        self.precache.lock();
         self.compute_baselines();
     }
 

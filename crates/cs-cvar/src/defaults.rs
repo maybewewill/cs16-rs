@@ -64,6 +64,8 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     reg.register("sv_friction", "4", srv, "Ground friction");
     reg.register("sv_stopspeed", "100", srv, "Minimum stopping speed");
     reg.register("sv_stepsize", "18", srv, "Maximum stair step height");
+    reg.register("sv_maxvelocity", "2000", CVarFlags::NONE, "Maximum speed of any entity on an axis");
+    reg.register("sv_bounce", "1", srv, "Bounce of a walking entity off a wall");
     reg.register("sv_cheats", "0", srv, "Allow cheat commands (0 or 1)");
     reg.register("mp_roundtime", "1.75", srv_arch, "Round duration in minutes");
     reg.register("mp_freezetime", "6", srv_arch, "Freeze time at round start (seconds)");

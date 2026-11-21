@@ -239,6 +239,10 @@ pub struct TestGame {
     pub think_reschedules: bool,
     /// When set, every `think` removes the entity itself.
     pub think_removes_self: bool,
+    /// When set, every `think` precaches this model and records the result.
+    pub think_precaches: Option<String>,
+    /// Result of every precache a `think` made, in call order.
+    pub think_precache_results: Vec<Result<u16, PrecacheError>>,
     /// When set, every `think` sets `FL_KILLME` on the entity.
     pub think_kills_self: bool,
     /// When set, every `think` sets the entity's `skin` to this value.
@@ -605,6 +609,9 @@ impl GameDll for TestGame {
         }
         if self.think_removes_self {
             eng.remove_entity(id);
+        }
+        if let Some(model) = &self.think_precaches {
+            self.think_precache_results.push(eng.precache_model(model));
         }
     }
 

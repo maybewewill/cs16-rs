@@ -70,8 +70,6 @@ impl<G: GameDll> Server<G> {
     /// Differences from the source: the `groupinfo` filter is not modelled; the trace globals
     /// (`SV_SetGlobalTrace`) are not set, the game gets no trace; the touches are delivered
     /// after the current call, not inside it.
-    // Called by the physics and the player movement of later tasks.
-    #[allow(dead_code)]
     pub(crate) fn impact(&mut self, e1: EdictId, e2: EdictId) {
         let vars = |id| self.edicts.get(id).map(|e| (e.vars.solid, e.vars.flags));
         let (Some((s1, f1)), Some((s2, f2))) = (vars(e1), vars(e2)) else {

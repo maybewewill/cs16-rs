@@ -14,6 +14,7 @@ use crate::collision::MAX_WORLD_COORD;
 use crate::edict::EntVars;
 use crate::game::GameDll;
 use crate::server::Server;
+use crate::world::consts::{MOVETYPE_PUSH, SOLID_BSP};
 use crate::world::free_entity;
 
 /// Most keys one lump entry hands to the game, `classname` included. Further keys are dropped.
@@ -141,6 +142,14 @@ impl<G: GameDll> Server<G> {
     /// `classname` is skipped. When the pool has no free edict the remaining entries are
     /// skipped and one error is logged with their number.
     pub(crate) fn spawn_map_entities(&mut self) {
+        // `SV_SpawnServer` (ReHLDS `sv_main.cpp`, read 2026-11-21) makes the world a brush entity
+        // that pushes before the game spawns anything: physics asks for `SOLID_BSP` when it
+        // decides whether a landing is on the ground.
+        let world = self.edicts.world();
+        if let Some(edict) = self.edicts.get_mut(world) {
+            edict.vars.solid = SOLID_BSP;
+            edict.vars.movetype = MOVETYPE_PUSH;
+        }
         let total = self.map.entities.len();
         let mut world_taken = false;
         for index in 0..total {

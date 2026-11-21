@@ -10,7 +10,7 @@ use std::sync::Arc;
 use common::{FRAME, Harness, TestGame, schedule_extra_thinks};
 use cs_assets::bsp::BspMap;
 use cs_engine::consts::{
-    FL_KILLME, MOVETYPE_FOLLOW, MOVETYPE_NOCLIP, MOVETYPE_NONE, MOVETYPE_TOSS, SOLID_BBOX,
+    FL_KILLME, MOVETYPE_FOLLOW, MOVETYPE_NOCLIP, MOVETYPE_NONE, MOVETYPE_PUSH, SOLID_BBOX,
     SOLID_TRIGGER,
 };
 use cs_engine::{EdictId, EngineApi, SV_TIME_AT_MAP_START, ServerConfig, ServerMap};
@@ -329,7 +329,7 @@ fn players_are_skipped_by_the_entity_pass() {
 
 #[test]
 fn movetypes_not_ported_yet_only_think() {
-    // 1 and 2 and 99 are movetypes HLDS refuses; TOSS is not ported yet. All think.
+    // 1 and 2 and 99 are movetypes HLDS refuses; PUSH is not ported yet. All think.
     let game = TestGame {
         extra_entities: 4,
         ..TestGame::default()
@@ -337,7 +337,7 @@ fn movetypes_not_ported_yet_only_think() {
     let mut h = harness(1, game);
     schedule_extra_thinks(&mut h, 0.01, Vec::new());
     run(&mut h, |eng| {
-        for (index, movetype) in [(2, 1), (3, 2), (4, 99), (5, MOVETYPE_TOSS)] {
+        for (index, movetype) in [(2, 1), (3, 2), (4, 99), (5, MOVETYPE_PUSH)] {
             let id = eng.entity_ids()[index];
             assert_eq!(id.index, index as u16);
             let v = eng.ent_mut(id).unwrap();

@@ -147,6 +147,10 @@ id = "sv_airaccelerate"
 status = "implemented"
 
 [[item]]
+id = "sv_bounce"
+status = "implemented"
+
+[[item]]
 id = "sv_cheats"
 status = "implemented"
 
@@ -160,6 +164,10 @@ status = "implemented"
 
 [[item]]
 id = "sv_maxspeed"
+status = "implemented"
+
+[[item]]
+id = "sv_maxvelocity"
 status = "implemented"
 
 [[item]]
