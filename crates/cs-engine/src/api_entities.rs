@@ -287,9 +287,10 @@ impl EngineApi<'_> {
     /// `mins.z == 0`, `maxs.z == 1` or its `size` is zero; and when its absolute box misses
     /// the box around the player's origin (256 units each way, the original's reach), which
     /// here also takes in the whole move so that a trace never misses what it passes through.
-    /// A client's box is the entity's own (the original's lag compensation,
-    /// `SV_GetTrueOrigin`, is not modelled), and neither the `groupinfo` filter nor the
-    /// `SV_AllowPhysent` hook exists.
+    /// A client's box is the entity's own, except that a player the lag compensation moved for
+    /// the command being run (`unlag.rs`) is met where it really is (`SV_GetTrueOrigin`,
+    /// `SV_GetTrueMinMax`); neither the `groupinfo` filter nor the `SV_AllowPhysent` hook
+    /// exists.
     ///
     /// The results combine as the legacy `BspCollision::trace_hull` did: the world first, an
     /// all-solid world trace returned at once; then each entity in ascending index order, an
@@ -334,6 +335,17 @@ impl EngineApi<'_> {
         let mut candidates = Vec::new();
         self.world
             .solids_in_box(self.edicts, box_min, box_max, &mut candidates);
+        // Players the lag compensation moved are linked where they were rewound to, but the
+        // movement meets them where they really are (`SV_GetTrueOrigin`).
+        candidates.extend(
+            self.world
+                .moved_players
+                .iter()
+                .filter(|m| {
+                    m.true_absmin.cmple(box_max).all() && box_min.cmple(m.true_absmax).all()
+                })
+                .map(|m| m.id),
+        );
         candidates.sort_by_key(|id| id.index);
         candidates.dedup();
 
@@ -344,8 +356,9 @@ impl EngineApi<'_> {
             let Some(solid) = self.edicts.get(id).map(|e| e.vars.solid) else {
                 continue;
             };
+            let true_origin = self.world.moved_player(id).map(|m| m.true_origin);
             let hit = self
-                .clip_to_entity(id, start, mins, maxs, end, solid == SOLID_BSP)
+                .clip_to_entity_at(id, true_origin, start, mins, maxs, end, solid == SOLID_BSP)
                 .trace;
             if hit.all_solid {
                 return EntTrace {
@@ -370,6 +383,11 @@ impl EngineApi<'_> {
         let Some(v) = self.edicts.get(id).map(|e| &e.vars) else {
             return false;
         };
+        // A moved player is judged by the box it really has (`SV_GetTrueMinMax`).
+        let (absmin, absmax) = self
+            .world
+            .moved_player(id)
+            .map_or((v.absmin, v.absmax), |m| (m.true_absmin, m.true_absmax));
         id.index != player.index
             && v.owner.is_none_or(|o| o.index != player.index)
             && matches!(v.solid, SOLID_BSP | SOLID_BBOX | SOLID_SLIDEBOX)
@@ -377,8 +395,8 @@ impl EngineApi<'_> {
             && !(v.flags & FL_CLIENT != 0 && v.health <= 0.0)
             && !(v.mins.z == 0.0 && v.maxs.z == 1.0)
             && v.size.length() != 0.0
-            && v.absmin.cmple(maxs).all()
-            && mins.cmple(v.absmax).all()
+            && absmin.cmple(maxs).all()
+            && mins.cmple(absmax).all()
     }
 
     /// `SV_Impact` for a touch the movement of `player` found with `other` (`SV_ProcessImpacts`

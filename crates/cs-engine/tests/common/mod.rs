@@ -151,6 +151,24 @@ impl std::fmt::Debug for Actions {
     }
 }
 
+/// A call the test game makes at the end of every `run_usercmd`, with the slot of the command.
+#[derive(Default)]
+pub struct UsercmdHook(Option<Hook>);
+
+type Hook = Box<dyn FnMut(&mut EngineApi<'_>, u8)>;
+
+impl std::fmt::Debug for UsercmdHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "UsercmdHook({})", self.0.is_some())
+    }
+}
+
+impl UsercmdHook {
+    pub fn set(&mut self, f: impl FnMut(&mut EngineApi<'_>, u8) + 'static) {
+        self.0 = Some(Box::new(f));
+    }
+}
+
 /// Sends `bytes` to `dest` in messages the engine accepts (each at most `MAX_MSGLEN` bytes).
 /// Only for filler such as `svc_nop` bytes, which stay valid when cut anywhere.
 pub fn send_chunked(eng: &mut EngineApi<'_>, dest: MsgDest, bytes: &[u8]) {
@@ -298,6 +316,8 @@ pub struct TestGame {
     pub message_flood: bool,
     /// Calls queued by the test, run at the start of the next frame.
     pub actions: Actions,
+    /// Called at the end of every `run_usercmd`.
+    pub usercmd_hook: UsercmdHook,
 
     /// `(toucher index, other index)` of every `touch` call, in call order.
     pub touch_log: Vec<(u16, u16)>,
@@ -579,6 +599,9 @@ impl GameDll for TestGame {
         }
         for &other in &self.usercmd_touches {
             eng.player_touched(id, other);
+        }
+        if let Some(hook) = self.usercmd_hook.0.as_mut() {
+            hook(eng, slot);
         }
     }
 

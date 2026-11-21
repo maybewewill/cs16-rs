@@ -328,6 +328,9 @@ pub(crate) struct WorldLinks {
     /// Touches the movement of the player being run found, as `(player, other)`, until the
     /// engine turns them into impacts after the command (`EngineApi::player_touched`).
     pub(crate) player_impacts: Vec<(EdictId, EdictId)>,
+    /// The players lag compensation has moved for the command being run (see `unlag.rs`), with
+    /// where they really are; empty outside a command.
+    pub(crate) moved_players: Vec<crate::unlag::MovedPlayer>,
     /// The game's `force_retouch` global (see `EngineApi::set_force_retouch`).
     pub(crate) force_retouch: f32,
     /// The engine's random numbers (`RandomLong` replacement), restarted with every map's world.
@@ -335,6 +338,11 @@ pub(crate) struct WorldLinks {
 }
 
 impl WorldLinks {
+    /// The lag compensation record of `id`, when it is a player moved for the command being run.
+    pub(crate) fn moved_player(&self, id: EdictId) -> Option<&crate::unlag::MovedPlayer> {
+        self.moved_players.iter().find(|m| m.id == id)
+    }
+
     /// `SV_ClearWorld`: an empty tree over the world bounds `mins..maxs`.
     pub(crate) fn new(bounds: (Vec3, Vec3)) -> Self {
         let mut world = Self {
@@ -345,6 +353,7 @@ impl WorldLinks {
             touches_dropped: 0,
             dispatching: false,
             player_impacts: Vec::new(),
+            moved_players: Vec::new(),
             force_retouch: 0.0,
             rng: crate::rng::EngineRng::new(),
         };

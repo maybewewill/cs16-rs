@@ -41,6 +41,29 @@ pub struct ClientFrame {
     /// Entities sent, as `(wire entity type, record)` by entity number.
     pub entities: BTreeMap<u16, (u8, DeltaRecord)>,
     pub clientdata: DeltaRecord,
+    /// Real time the update was built (`client_frame_t::senttime`).
+    pub sent_at: f64,
+    /// Round trip of this update in seconds, set when the client acknowledges it
+    /// (`client_frame_t::ping_time`); negative while it is not known.
+    pub ping_time: f64,
+    /// The players among the entities sent, as the client was given them: what lag
+    /// compensation rewinds to (`client_frame_t::entities` of the original keeps whole entity
+    /// states; only what `SV_FlagNonInterpolatedPlayers` and `SV_ApplyAdjustedPositions` read
+    /// is kept here).
+    pub players: Vec<FramePlayer>,
+}
+
+/// A player as one update showed it to a client.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FramePlayer {
+    /// Entity number (slot + 1).
+    pub number: u16,
+    pub origin: glam::Vec3,
+    /// `EntVars::effects` as sent.
+    pub effects: u32,
+    /// `EntVars::health` of the player when the update was built (`entity_state_t::health`,
+    /// which the original's game fills from it; an assumption, not checked against the game).
+    pub health: f32,
 }
 
 /// The last [`UPDATE_BACKUP`] updates sent to one client, by netchan sequence.
@@ -66,6 +89,68 @@ impl FrameRing {
     pub fn store(&mut self, f: ClientFrame) {
         let slot = f.seq as usize % UPDATE_BACKUP;
         self.frames[slot] = Some(f);
+    }
+
+    /// The frame stored for exactly `seq`, if it is still kept.
+    pub fn get(&self, seq: u32) -> Option<&ClientFrame> {
+        self.frames[seq as usize % UPDATE_BACKUP]
+            .as_ref()
+            .filter(|f| f.seq == seq)
+    }
+
+    /// The ping `SV_ExecuteClientMessage` gives the frame the client just acknowledged (ReHLDS
+    /// `rehlds/engine/sv_user.cpp`, read 2026-11-21): `now - sent_at - update_interval`, or 0
+    /// when that is not positive or the client connected less than 2 s ago. Nothing for a frame
+    /// that is not kept.
+    pub fn note_ack(&mut self, seq: u32, now: f64, update_interval: f64, since_connect: f64) {
+        let Some(frame) = self.frames[seq as usize % UPDATE_BACKUP]
+            .as_mut()
+            .filter(|f| f.seq == seq)
+        else {
+            return;
+        };
+        let ping = now - frame.sent_at - update_interval;
+        frame.ping_time = if ping <= 0.0 || since_connect < 2.0 {
+            0.0
+        } else {
+            ping
+        };
+    }
+
+    /// Takes `seconds` off the ping of frame `seq` (never below 0), if it is kept and has one.
+    pub fn trim_ping(&mut self, seq: u32, seconds: f64) {
+        if let Some(frame) = self.frames[seq as usize % UPDATE_BACKUP]
+            .as_mut()
+            .filter(|f| f.seq == seq && f.ping_time >= 0.0)
+        {
+            frame.ping_time = (frame.ping_time - seconds).max(0.0);
+        }
+    }
+
+    /// `SV_CalcClientTime` (ReHLDS `rehlds/engine/sv_user.cpp`, read 2026-11-21): the average
+    /// ping of the frames up to the acknowledged `ack`, `samples` of them (clamped to 1..=16),
+    /// that have one; 0 without any, and 0 when the pings of the latest 4 differ by more than
+    /// 0.2 s.
+    pub fn client_time(&self, ack: u32, samples: i32) -> f64 {
+        let samples = samples.clamp(1, 16) as u32;
+        let ping_of = |i: u32| {
+            self.get(ack.wrapping_sub(i))
+                .map(|f| f.ping_time)
+                .filter(|&p| p > 0.0)
+        };
+        let known: Vec<f64> = (0..samples).filter_map(ping_of).collect();
+        if known.is_empty() {
+            return 0.0;
+        }
+        let average = known.iter().sum::<f64>() / known.len() as f64;
+        let recent: Vec<f64> = (0..4).filter_map(ping_of).collect();
+        let min = recent.iter().copied().fold(9999.0, f64::min);
+        let max = recent.iter().copied().fold(-9999.0, f64::max);
+        if max < min || (max - min).abs() <= 0.2 {
+            average
+        } else {
+            0.0
+        }
     }
 
     /// Frames stored, at most [`UPDATE_BACKUP`].
@@ -193,6 +278,7 @@ impl<G: GameDll> Server<G> {
 
         let client_data = self.call_game(|game, eng| game.update_client_data(eng, slot));
         let entities = self.visible_entities(slot);
+        let players = self.frame_players(&entities);
         self.drain_outbox();
         if self.clients[index].state != ClientState::Active {
             return None;
@@ -279,9 +365,30 @@ impl<G: GameDll> Server<G> {
                 seq,
                 entities,
                 clientdata,
+                sent_at: self.real_time,
+                ping_time: -1.0,
+                players,
             });
         }
         Some(client.chan.build_packet(&payload))
+    }
+
+    /// The players among `states`, as lag compensation will need them later.
+    fn frame_players(&self, states: &[GoldSrcEntityState]) -> Vec<FramePlayer> {
+        let max_clients = u16::from(self.cfg.max_clients);
+        states
+            .iter()
+            .filter(|s| (1..=max_clients).contains(&s.number))
+            .map(|s| FramePlayer {
+                number: s.number,
+                origin: s.origin,
+                effects: s.effects,
+                health: self
+                    .edicts
+                    .by_index(s.number)
+                    .map_or(0.0, |(_, e)| e.vars.health),
+            })
+            .collect()
     }
 
     /// Whether entity `id` is potentially visible in `pvs` (`None`: the viewer sees all): by the
@@ -358,6 +465,9 @@ mod tests {
             seq,
             entities: BTreeMap::new(),
             clientdata: DeltaRecord::default(),
+            sent_at: 0.0,
+            ping_time: -1.0,
+            players: Vec::new(),
         }
     }
 

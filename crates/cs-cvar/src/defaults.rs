@@ -67,6 +67,10 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     reg.register("sv_maxvelocity", "2000", CVarFlags::NONE, "Maximum speed of any entity on an axis");
     reg.register("sv_bounce", "1", srv, "Bounce of a walking entity off a wall");
     reg.register("sv_cheats", "0", srv, "Allow cheat commands (0 or 1)");
+    reg.register("sv_unlag", "1", CVarFlags::NONE, "Lag compensation of the players' shots (0 or 1)");
+    reg.register("sv_maxunlag", "0.5", CVarFlags::NONE, "Longest time lag compensation goes back (seconds, 0 for no limit)");
+    reg.register("sv_unlagpush", "0", CVarFlags::NONE, "Seconds added to the time lag compensation goes back to");
+    reg.register("sv_unlagsamples", "1", CVarFlags::NONE, "Updates averaged for the latency lag compensation uses (1..16)");
     reg.register("mp_roundtime", "1.75", srv_arch, "Round duration in minutes");
     reg.register("mp_freezetime", "6", srv_arch, "Freeze time at round start (seconds)");
     reg.register("mp_startmoney", "800", srv_arch, "Starting money per half");

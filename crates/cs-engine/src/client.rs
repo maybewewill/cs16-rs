@@ -90,6 +90,9 @@ pub(crate) struct Client {
     pub(crate) clear_time: f64,
     /// Due updates held back by the rate since the last update sent.
     pub(crate) choke_count: u32,
+    /// Average round trip of the client in seconds (`client_t::latency`), refreshed with every
+    /// datagram accepted from it; what lag compensation rewinds by.
+    pub(crate) latency: f64,
 }
 
 impl Client {
@@ -117,6 +120,7 @@ impl Client {
             delta_seq: None,
             clear_time: 0.0,
             choke_count: 0,
+            latency: 0.0,
         }
     }
 

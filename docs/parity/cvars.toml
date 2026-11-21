@@ -167,6 +167,10 @@ id = "sv_maxspeed"
 status = "implemented"
 
 [[item]]
+id = "sv_maxunlag"
+status = "implemented"
+
+[[item]]
 id = "sv_maxvelocity"
 status = "implemented"
 
@@ -176,6 +180,18 @@ status = "implemented"
 
 [[item]]
 id = "sv_stopspeed"
+status = "implemented"
+
+[[item]]
+id = "sv_unlag"
+status = "implemented"
+
+[[item]]
+id = "sv_unlagpush"
+status = "implemented"
+
+[[item]]
+id = "sv_unlagsamples"
 status = "implemented"
 
 [[item]]

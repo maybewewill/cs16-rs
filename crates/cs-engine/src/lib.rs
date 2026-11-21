@@ -22,6 +22,7 @@ mod physics_move;
 mod physics_water;
 mod rng;
 mod touch;
+mod unlag;
 mod trace_ents;
 pub mod usercmd;
 mod world;
@@ -34,7 +35,7 @@ pub use edict::{
     DEFAULT_MAX_EDICTS, EDICT_REUSE_DELAY, Edict, EdictId, EdictPool, EntVars, MAX_EDICTS_WIRE,
 };
 pub use frame::{
-    ClientFrame, FrameRing, MAX_DATAGRAM, MAX_PACKET_ENTITIES, UPDATE_BACKUP, clamp_rate,
+    ClientFrame, FramePlayer, FrameRing, MAX_DATAGRAM, MAX_PACKET_ENTITIES, UPDATE_BACKUP, clamp_rate,
     update_interval,
 };
 pub use game::{EngineApi, GameDll, entity_state_from_vars};

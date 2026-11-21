@@ -458,12 +458,29 @@ impl EngineApi<'_> {
         end: Vec3,
         force_bsp: bool,
     ) -> EntTrace {
+        self.clip_to_entity_at(id, None, start, mins, maxs, end, force_bsp)
+    }
+
+    /// [`clip_to_entity`](Self::clip_to_entity) with the entity taken to be at `origin` when
+    /// that is given (a player the lag compensation moved, at its true place).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn clip_to_entity_at(
+        &self,
+        id: EdictId,
+        origin: Option<Vec3>,
+        start: Vec3,
+        mins: Vec3,
+        maxs: Vec3,
+        end: Vec3,
+        force_bsp: bool,
+    ) -> EntTrace {
         let miss = EntTrace::miss(end);
         let Some(v) = self.edicts.get(id).map(|e| &e.vars) else {
             return miss;
         };
+        let origin = origin.unwrap_or(v.origin);
         // Hostile numbers (set behind the linking's back) hit nothing.
-        if !in_world(v.origin) || !in_world(v.mins) || !in_world(v.maxs) || !v.angles.is_finite() {
+        if !in_world(origin) || !in_world(v.mins) || !in_world(v.maxs) || !v.angles.is_finite() {
             return miss;
         }
         let collision = self.map.collision();
@@ -479,7 +496,7 @@ impl EngineApi<'_> {
                 return miss;
             }
             let hull = bsp_hull_for(mins, maxs);
-            let offset = bsp_offset(hull, mins, v.origin);
+            let offset = bsp_offset(hull, mins, origin);
             let mut start_l = start - offset;
             let mut end_l = end - offset;
             let rotated = v.angles != Vec3::ZERO;
@@ -498,7 +515,7 @@ impl EngineApi<'_> {
             // A hull made of the entity's box grown by the moving box.
             let boxhull = BoxHull::new(v.mins - maxs, v.maxs - mins);
             (
-                NO_COLLISION.trace_local(Geometry::Box(&boxhull), start - v.origin, end - v.origin),
+                NO_COLLISION.trace_local(Geometry::Box(&boxhull), start - origin, end - origin),
                 false,
                 true,
             )

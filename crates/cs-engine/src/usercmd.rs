@@ -235,6 +235,13 @@ impl<G: GameDll> Server<G> {
         if let Some(last) = run.into_iter().rfind(usercmd_is_finite) {
             client.last_cmd = last;
         }
+        // The move left the client in the middle of its last command: half of it is not part
+        // of the ping of the frame it acknowledged (`SV_ParseMove`, ReHLDS
+        // `rehlds/engine/sv_user.cpp`, read 2026-11-21).
+        let half_last = f64::from(client.last_cmd.msec) * 0.5 / 1000.0;
+        client
+            .frames
+            .trim_ping(client.chan.incoming_acknowledged, half_last);
         client.bad_moves = 0;
         self.drain_outbox();
     }
@@ -257,11 +264,15 @@ impl<G: GameDll> Server<G> {
         // Touches reported outside a command are not this command's.
         self.world.player_impacts.clear();
         self.sync_views();
+        // `SV_RunCmd`: the other players are where this client saw them for the command, and
+        // are put back after `SV_ProcessImpacts`.
+        self.setup_move(slot);
         self.call_game_synced_at(time, |game, eng| {
             game.run_usercmd(eng, slot, step, random_seed)
         });
         self.frametime = host_frametime;
         self.finish_player_cmd(slot);
+        self.restore_move();
     }
 
     /// `SV_ProcessImpacts` (`sv_user.cpp`): unless the player's edict is `SOLID_NOT`, links it

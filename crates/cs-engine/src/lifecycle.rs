@@ -256,9 +256,21 @@ impl<G: GameDll> Server<G> {
     /// Records a datagram from `slot` that its netchan accepted, acknowledging `sequence_ack`.
     pub(crate) fn note_accepted(&mut self, slot: u8, sequence_ack: u32) {
         let now = self.real_time;
+        let interval = crate::frame::update_interval(
+            self.views[usize::from(slot)].userinfo.get("cl_updaterate"),
+            &self.cfg,
+        );
+        let samples = self.cvars.get_f32("sv_unlagsamples");
         let client = &mut self.clients[usize::from(slot)];
         client.last_heard = now;
         client.pings.acknowledged(sequence_ack, now);
+        // `SV_ExecuteClientMessage`: the ping of the acknowledged frame, then the latency.
+        let since_connect = now - client.connected_at;
+        client
+            .frames
+            .note_ack(sequence_ack, now, interval, since_connect);
+        let samples = if samples.is_finite() { samples as i32 } else { 1 };
+        client.latency = client.frames.client_time(sequence_ack, samples);
     }
 
     /// Releases, without telling them, clients that did not reach `Active` within
