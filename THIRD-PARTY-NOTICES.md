@@ -9,7 +9,7 @@ distributed in this repository under GPL-3.0-or-later, the licence of this proje
 Upstream: https://github.com/rehlds/ReHLDS
 
 The repository-level `LICENSE` of ReHLDS is MIT (notice below); the engine source files listed
-and the engine headers `net.h`, `server.h` and `common/mathlib.h` (master, read 2026-11-21)
+and the engine headers `net.h`, `server.h` and `common/mathlib.h` (master, read 2026-11-21; `unicode_strtools.cpp` read 2026-11-22)
 carry a header stating GPL v2-or-later with an exception permitting linking with Valve's
 Half-Life engine and game libraries. The remaining headers listed (`common/const.h`,
 `common/usercmd.h`, `common/entity_state.h`, `common/qlimits.h`, `public/rehlds/edict.h`) carry
@@ -35,6 +35,7 @@ function names its source file, function and the date read in its doc comment):
 | `info.cpp` | The `\key\value` info string parser and serializer (`crates/cs-proto48/src/info.rs`). |
 | `cmodel.cpp` | `CM_CalcPAS` (the PAS built from the PVS rows). |
 | `mathlib.cpp` | `AngleVectors`, `AngleVectorsTranspose`. |
+| `unicode_strtools.cpp` | `Q_StripUnprintableAndSpace` (with the `Q_iswprint` table it uses): the behaviour of the chat text clean-up of `crates/cs-game/src/chat.rs`, ported by function (master, read 2026-11-22). The file begins with the GPL v2-or-later header with the linking exception, like the other engine sources; it is the ReHLDS file `rehlds/engine/unicode_strtools.cpp`, not a ReGameDLL_CS file. |
 | `r_studio.cpp` | Read for documentation only: `SV_HullForStudioModel` and `SV_CheckSphereIntersection` are described in the module docs as not ported; no code was taken. |
 | `net.h`, `server.h` (engine headers, GPL header) | Buffer size constants only (`NET_MAX_PAYLOAD`, `MAX_DATAGRAM`, the size of `signon_data`). |
 | `common/mathlib.h` | Read for the value of `M_PI` (a double literal) in comments only; no constant or code was taken (the engine uses `std::f64::consts::PI`). The file carries the GPL v2-or-later header with the linking exception, like the engine sources; it is not a Valve-noticed header. |
@@ -102,14 +103,14 @@ function names its source file, function and the date read in its doc comment.
 | `world.cpp`, `bmodels.cpp`, `triggers.cpp`, `items.cpp`, `cbase.cpp`, `basemonster.cpp`, `subs.cpp` | `CWorld::Precache`/`Spawn` precache lists and world keys; `func_wall`, `func_illusionary` (`bmodels.cpp`); `func_buyzone`, `func_ladder` and the buy zone touch/`BuyZoneIcon_Set` (`triggers.cpp`); `CItemKevlar`/`CItemAssaultSuit` pickup behaviour (`items.cpp`); `CBaseEntity::TakeDamage` and entity dispatch rules (`cbase.cpp`); the `dmg_save` observation (`basemonster.cpp`); `info_player_*` spawn handling (`subs.cpp`, `gamerules.cpp`). |
 | `util.cpp`, `util.h` | `UTIL_ScreenFade`, `UTIL_ClientPrintAll`/`ClientPrint` and their destinations (`HUD_PRINT*`, `HUD_PRINTRADIO`), `DMG_EXPLOSION`, `UTIL_PlayerByIndex`, the `UTIL_*` message helpers. |
 | `weapontype.cpp`, `weapontype.h`, `weapons.cpp` | `g_weaponBuyAliasInfo` (the buy aliases), the prices `KEVLAR_PRICE`, `HELMET_PRICE`, `ASSAULTSUIT_PRICE`, `NVG_PRICE`; `W_Precache` (the `radio.spr` precache). |
-| `unisignals.h`, `cdll_dll.h`, `observer.cpp`, `observer.h` | `CUnifiedSignals` and `SIGNAL_BUY`; `HIDEHUD_*`, `WEAPON_SUIT` and the other `cdll_dll.h` constants; `CBasePlayer::Observer_*` (`Observer_FindNextPlayer`, `Observer_HandleButtons`, `Observer_SetMode`, `Observer_CheckTarget`, `Observer_CheckProperties`), `CAMERA_MODE_*`, `FADETOBLACK_*`. |
+| `unisignals.h`, `cdll_dll.h`, `observer.cpp`, `observer.h` | `CUnifiedSignals` and `SIGNAL_BUY`; `HIDEHUD_*`, `SCORE_STATUS_*`, `WEAPON_SUIT` and the other `cdll_dll.h` constants (`cdll_dll.h` was read; its header is the GPL v2-or-later one); `CBasePlayer::Observer_*` (`Observer_FindNextPlayer`, `Observer_HandleButtons`, `Observer_SetMode`, `Observer_CheckTarget`, `Observer_CheckProperties`), `CAMERA_MODE_*`, `FADETOBLACK_*`. |
 | `regamedll/pm_shared/pm_shared.h`, `pm_shared.cpp` | `OBS_*` mode values; `PM_SpectatorMove` read for the observer's angle assumption (no movement code taken; the movement is `cs_sim::pmove`). |
 | `regamedll/engine/shake.h` | `FFADE_*` values. |
-| `regamedll/game_shared/unicode_strtools.cpp` (engine-side string helper) | `Q_StripUnprintableAndSpace` behaviour for chat text. |
 
-Values that are named after the Half-Life SDK (`DMG_*` bit values, `SCORE_STATUS_DEAD`,
-`HIDEHUD_*`) were taken from memory in places and are labelled as assumptions in the code; no
-SDK header text was copied. `regamedll/dlls/damage.h` was not read.
+The `HIDEHUD_*` and `SCORE_STATUS_*` values were read from `regamedll/dlls/cdll_dll.h` (master,
+read 2026-11-22). Only the `DMG_*` bit values were taken from memory of the Half-Life SDK
+(`regamedll/dlls/damage.h` was not read); they are labelled as assumptions in the code. No SDK
+header text was copied.
 
 ```
 Copyright (c) 2015–2025 ReGameDLL_CS Contributors

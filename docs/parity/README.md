@@ -2,6 +2,8 @@
 
 `weights.toml` gives each category a weight; the weights sum to 100. Each `<category>.toml` lists `[[item]]` entries with `id`, `status` and an optional `evidence`. Every category file needs a key in `weights.toml`.
 
+The game rules and HUD items of `cs-game` (teams, rounds, money, chat, observer, buying, radio and so on) live in `entities.toml`, in the `entities` category; the weights do not change.
+
 ## Statuses
 
 - `missing`: no code for the item.

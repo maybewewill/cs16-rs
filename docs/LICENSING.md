@@ -49,6 +49,10 @@ What was found:
   `weapons.cpp`, `observer.cpp`, `pm_shared/pm_shared.cpp`) begin with
   `#include "precompiled.h"` and have no licence header, so the repository `LICENSE` (MIT) is
   the notice that applies to them. `THIRD-PARTY-NOTICES.md` says what was taken from each.
+- ReHLDS `rehlds/engine/unicode_strtools.cpp` (master, read 2026-11-22; ported for the chat text
+  clean-up of `cs-game`) carries the same GPL v2-or-later header with the linking exception as
+  the other engine sources. Earlier notes placed it in ReGameDLL_CS (`game_shared`); that was a
+  mistake.
 - ReHLDS `rehlds/common/const.h`, `usercmd.h` and `entity_state.h` carry Valve LLC's notice,
   which restricts use, distribution and modification to non-commercial enhancements to products
   from Valve LLC; `rehlds/common/qlimits.h` and `rehlds/public/rehlds/edict.h` carry a plain

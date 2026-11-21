@@ -2,123 +2,125 @@
 # Registered in the existing weighted category `entities` ("map and game entity classes") because
 # a new category needs a new key in weights.toml and the owner's weights sum to 100.
 # Nothing here is `verified`: no dated check with the original client yet, see
-# docs/parity/checklists/phase2c-game.md. Every finished item is `implemented`: the tests cited
-# compare with the ReGameDLL_CS source, not with the original game.
+# docs/parity/checklists/phase2c-game.md. An item is `tested` when a cited test asserts it (the
+# definition in docs/parity/README.md) and `implemented` when the code exists and no cited test
+# would fail if it broke. The tests compare with the ReGameDLL_CS source, not with the original
+# game.
 
 [[item]]
 id = "game_team_menu"
-status = "implemented"
-evidence = "crates/cs-game/tests/teams.rs::new_player_sees_the_team_menu, text_menus_for_clients_that_want_them, chooseteam_shows_the_in_game_menu, team_limits_refuse_as_regamedll, auto_assign_balances, spectators, humans_join_team_sends_players_to_that_team, hostile_team_commands_are_ignored, commands_before_the_player_is_in_the_game_are_harmless; crates/cs-game/tests/rounds.rs::auto_team_balance_moves_the_last_to_join. Deviations: jointeam 5 with both teams full is refused (REGAMEDLL_FIXES behaviour; vanilla leaves a teamless player); jointeam 3 (VIP) is refused until the VIP exists (2E); the items a player drops on a team change and the career mode are not ported; team counts are taken from the players when asked, not from the CheckWinConditions cache. Menus are sent from the player's usercmds as vanilla does (JoiningThink from PlayerPreThink)."
+status = "tested"
+evidence = "crates/cs-game/tests/teams.rs::new_player_sees_the_team_menu, text_menus_for_clients_that_want_them, chooseteam_shows_the_in_game_menu, team_limits_refuse_as_regamedll, auto_assign_balances, spectators, humans_join_team_sends_players_to_that_team, hostile_team_commands_are_ignored, commands_before_the_player_is_in_the_game_are_harmless; crates/cs-game/tests/rounds.rs::auto_team_balance_moves_the_last_to_join. Deviations: jointeam 5 with both teams full is refused (REGAMEDLL_FIXES behaviour; vanilla leaves a teamless player); jointeam 3 (VIP) is refused until the VIP exists (2E); the items a player drops on a team change and the career mode are not ported; team counts are taken from the players when asked, not from the CheckWinConditions cache. Menus are sent from the player's usercmds as vanilla does (JoiningThink from PlayerPreThink). The default team of an Auto-Select join (SelectDefaultTeam with the round-win tie-break): TODO(controller): test name."
 
 [[item]]
 id = "game_class_menu"
-status = "implemented"
+status = "tested"
 evidence = "crates/cs-game/tests/teams.rs::jointeam_then_joinclass_spawns_on_the_team, a_random_appearance_is_one_of_the_teams, the_connect_userinfo_chooses_the_menu_kind, every_team_is_told_to_the_joiner, menus_only_reach_a_client_that_is_in_game; VGUI menus and, for a client with _vgui_menus 0, text menus (ShowMenu). Deviation: the VIP appearance is not offered."
 
 [[item]]
 id = "game_player_spawn"
-status = "implemented"
-evidence = "crates/cs-game/tests/player.rs::connected_player_waits_unassigned, spawned_player_has_regamedll_defaults, a_full_spawn_kills_its_occupants, a_spawner_does_not_telefrag_itself_or_the_dead, a_disconnected_player_leaves_the_game, client_data_reflects_the_player; crates/cs-game/tests/game_entities.rs::spawn_points_come_from_the_lump_by_team, spawn_points_of_de_dust2_are_the_lumps_by_team, with_every_point_taken_the_pick_is_the_first_of_the_search, the_fallback_spawn_becomes_the_teams_last_one. Deviations: vanilla mp.dll spawn rules (dead players block a spot, telefrag when all are taken), not REGAMEDLL_FIXES; movement is cs_sim::pmove, not the original pm_shared (the pm_shared plan carries the duck, step-sound and water-jump client data fields, water and the landing punch); the target of a spawn point is not fired (no trigger entities); the trigger_camera intro and the VIP spawn are not ported; spawn keeps the spot's angles where vanilla uses gpGlobals v_forward."
+status = "tested"
+evidence = "crates/cs-game/tests/player.rs::connected_player_waits_unassigned, spawned_player_has_regamedll_defaults, a_full_spawn_kills_its_occupants, a_spawner_does_not_telefrag_itself_or_the_dead, a_disconnected_player_leaves_the_game, client_data_reflects_the_player; crates/cs-game/tests/game_entities.rs::spawn_points_come_from_the_lump_by_team, spawn_points_of_de_dust2_are_the_lumps_by_team, with_every_point_taken_the_pick_is_the_first_of_the_search, the_fallback_spawn_becomes_the_teams_last_one. The disconnect order (ScoreAttrib, ScoreInfo and TeamInfo before CheckWinConditions, the leaver not counted): TODO(controller): test name. The #Game_connected and #Game_disconnected notices: TODO(controller): test name. Deviations: vanilla mp.dll spawn rules (dead players block a spot, telefrag when all are taken), not REGAMEDLL_FIXES; movement is cs_sim::pmove, not the original pm_shared (the pm_shared plan carries the duck, step-sound and water-jump client data fields, water and the landing punch); the target of a spawn point is not fired (no trigger entities); the trigger_camera intro and the VIP spawn are not ported; spawn keeps the spot's angles where vanilla uses gpGlobals v_forward."
 
 [[item]]
 id = "game_player_damage_death"
-status = "implemented"
+status = "tested"
 evidence = "crates/cs-game/tests/player.rs::fall_damage_as_regamedll, kill_command_kills_and_costs_a_frag, damage_follows_the_rules, kills_score_by_who_killed, a_dying_player_ends_up_dead_and_can_respawn, a_dead_player_leaves_a_corpse. Deviations: TakeDamage's momentum block, the blast branch, pain sounds, flinch, the HUD damage message from weapons and the g_pevLastInflictor weapon names wait for 2D; the corpse is a client-side ClCorpse (no corpse entity yet); the DMG_* values are Half-Life SDK values from memory (assumption)."
 
 [[item]]
 id = "game_hud_init"
-status = "implemented"
+status = "tested"
 evidence = "crates/cs-game/tests/hud.rs::init_hud_sequence_as_regamedll, a_spawn_starts_the_hud_over_without_the_welcome, motd_is_sent_in_chunks, health_and_armor_follow_the_player, full_server_init_hud_fits. Deviations: Fog, HLTV, intermission, bomb, hostage, flashlight and weapon CurWeapon data are not sent yet; the InitHUD 'entered the game' log line is not ported; SCORE_STATUS_DEAD is an SDK value from memory (assumption)."
 
 [[item]]
 id = "game_usermsgs_sent"
-status = "implemented"
+status = "tested"
 evidence = "crates/cs-game/tests/hud.rs::usermsgs_registered_in_regamedll_order (80 messages in the ReGameDLL order and with its sizes); the messages themselves are covered by the other items of this file; the wire format of each is in docs/parity/usermsg.toml. Messages that nothing sends yet (weapon, bomb, hostage and flashlight ones) are registered but unused until 2D/2E."
 
 [[item]]
 id = "game_round_freeze"
-status = "implemented"
+status = "tested"
 evidence = "crates/cs-game/tests/rounds.rs::freeze_time_holds_players_then_round_starts; crates/cs-game/tests/observer.rs::a_late_joiner_watches_from_a_spawn_point. Deviations: the sv_accelerate, sv_friction and sv_stopspeed hard locks of RestartRound and Think are not applied (pm_shared plan); buttons are not cleared during game over (weapons task)."
 
 [[item]]
 id = "game_round_time"
-status = "implemented"
+status = "tested"
 evidence = "crates/cs-game/tests/rounds.rs::round_time_expiry_as_regamedll, freeze_time_holds_players_then_round_starts. Deviations: on a map with no objective a round that runs out of time goes on and pushes the next round start 60 seconds as CheckRoundTimeExpired does; the bomb, hostage, VIP and escape branches are 2E (until then rounds on objective maps never end by time); mp_roundtime is 5 on the proto48 server (vanilla) and keeps the shared registry default of 1.75 for the legacy client."
 
 [[item]]
 id = "game_round_win_conditions"
-status = "implemented"
+status = "tested"
 evidence = "crates/cs-game/tests/rounds.rs::elimination_ends_the_round_for_the_other_team, a_team_with_players_left_plays_on, leaving_players_end_the_round_as_regamedll, spectating_in_the_freeze_period_costs_nothing; crates/cs-game/tests/match_flow.rs::two_teams_play_a_round. Win conditions without objectives only (a team exterminated, the last player of a team leaving); #Terrorists_Win and #CTs_Win with the MRAD_terwin and MRAD_ctwin sounds. The bomb, hostage, VIP and escape conditions are 2E; the HintMessage lines (#Hint_win_round_by_killing_enemy) wait for a hint queue."
 
 [[item]]
 id = "game_round_restart"
-status = "implemented"
+status = "tested"
 evidence = "crates/cs-game/tests/rounds.rs::game_commencing_on_first_players, restart_round_cvar, a_late_joiner_waits_for_the_next_round; crates/cs-game/tests/match_flow.rs::two_teams_play_a_round. sv_restartround and sv_restart, Game Commencing, respawn of everybody, the team_changed and spawn counters reset as RestartRound does. Deviation: ClearBodyQue and CleanUpMap are skipped (no corpse or breakable entities yet); whether corpses vanish after a restart needs a check with the original client."
 
 [[item]]
 id = "game_match_end_mapcycle"
-status = "implemented"
-evidence = "crates/cs-game/tests/rounds.rs::win_limit_changes_the_map, the_match_ends_without_a_key_after_two_minutes, the_time_limit_ends_the_match; crates/cs-game/src/mapcycle.rs::tests::the_cycle_goes_round_in_order, the_cycle_honours_the_player_range_of_a_line, a_map_cycle_loads_the_valid_maps_only. mp_timelimit, mp_maxrounds and mp_winlimit end the match, the scoreboard shows for mp_chattime, then EngineApi::change_level asks for the next map of mapcycle.txt (the HLDS CHANGE_LEVEL equivalent, performed by cs-server between frames). Deviations: a cycle that cannot be used changes to the current map again (vanilla asks for hldm1, which does not exist in CS); mapcyclefile is not read (always mapcycle.txt, loaded once); the minplayers and maxplayers of a line are honoured, commands after the map name are not run; the 64 KiB cap counts chars not bytes."
+status = "tested"
+evidence = "crates/cs-game/tests/rounds.rs::win_limit_changes_the_map, the_match_ends_without_a_key_after_two_minutes, the_time_limit_ends_the_match; crates/cs-game/src/mapcycle.rs::tests::the_cycle_goes_round_in_order, the_cycle_honours_the_player_range_of_a_line, a_map_cycle_loads_the_valid_maps_only. The timeleft command (#Game_timelimit and #Game_no_timelimit): TODO(controller): test name. mp_timelimit, mp_maxrounds and mp_winlimit end the match, the scoreboard shows for mp_chattime, then EngineApi::change_level asks for the next map of mapcycle.txt (the HLDS CHANGE_LEVEL equivalent, performed by cs-server between frames). Deviations: a cycle that cannot be used changes to the current map again (vanilla asks for hldm1, which does not exist in CS); mapcyclefile is not read (always mapcycle.txt, loaded once); the minplayers and maxplayers of a line are honoured, commands after the map name are not run; the 64 KiB cap counts chars not bytes."
 
 [[item]]
 id = "game_money_rewards"
-status = "implemented"
+status = "tested"
 evidence = "crates/cs-game/tests/money.rs::start_money_from_cvar, round_rewards_as_regamedll, money_is_clamped_and_loss_bonus_grows, blink_account_sends_the_count; crates/cs-game/tests/match_flow.rs::two_teams_play_a_round. Win reward 3000, loser bonus ladder from 1400 as the source, 16000 cap. Deviations: the objective rewards (bomb planted, defused or exploded, hostages, VIP, escape; the win reward is 3250 on a map with a bomb target) are 2E; HintMessage lines are not sent (no hint queue); the MONEY_BLINK_AMOUNT blink of the freeze period needs the tutor and is not ported."
 
 [[item]]
 id = "game_money_kills"
-status = "implemented"
+status = "tested"
 evidence = "crates/cs-game/tests/money.rs::kill_reward_and_teamkill_penalty, team_kill_is_punished_at_the_next_round, the_third_team_kill_is_kicked; crates/cs-game/tests/score.rs::a_teammate_kill_costs_the_killer_a_frag_and_the_money. Kill reward 300, team kill penalty, mp_tkpunish, mp_autokick (the kick uses the console kick's default text). Deviation: the VIP kill reward is 2E."
 
 [[item]]
 id = "game_scoreboard_deathmsg"
-status = "implemented"
+status = "tested"
 evidence = "crates/cs-game/tests/score.rs::death_updates_scores_for_everyone, fall_death_message_as_regamedll, a_player_leaving_is_marked_dead_then_emptied, team_score_after_round, headshot_byte_follows_the_last_hit_group, weapon_name_is_the_inflictors_classname_without_its_prefix; crates/cs-game/tests/match_flow.rs::two_teams_play_a_round. DeathMsg, ScoreInfo, ScoreAttrib and TeamScore in the order and with the destinations of the source (the killer's ScoreInfo to everybody, the victim's broadcast). Deviations: the weapon name is 'world' until weapons exist (2D); the revenge, assist and kill-rarity fields of newer builds, the SVC_DIRECTOR event for HLTV, the log lines and the game_playerdie targets are not ported; SCORE_STATUS_BOMB and SCORE_STATUS_VIP are 2E."
 
 [[item]]
 id = "game_chat"
-status = "implemented"
+status = "tested"
 evidence = "crates/cs-game/tests/chat.rs::say_reaches_everyone_with_the_regamedll_format, say_team_reaches_the_team_only, dead_chat_as_regamedll, ignoremsg_mutes_the_global_chat, name_change_is_announced_and_limited, name_changes_through_the_engine_are_rate_limited, say_is_sanitized_and_bounded, chat_floods_are_dropped, a_line_right_after_a_spawn_is_heard, spectators_and_unassigned_players_chat_as_the_dead, a_name_is_cut_to_31_bytes, a_second_name_change_while_dead_replaces_the_pending_one. Deviations: the text is argv[1..] joined by single spaces where the original reads the raw CMD_ARGS line (the engine boundary does not carry it yet; console-typed text with repeated spaces or quotes can differ); UTIL_LogPrintf lines are not ported; iswspace is char::is_whitespace (assumption)."
 
 [[item]]
 id = "game_observer"
-status = "implemented"
-evidence = "crates/cs-game/tests/observer.rs::dead_player_becomes_an_observer_after_the_death_cam, fadetoblack_does_not_chase_the_killer, observer_follows_a_teammate_with_forcecamera, spectator_team_roams, observer_target_leaves, first_person_observer_is_sent_the_followed_players_state, a_target_that_left_restarts_the_search_at_the_observer, a_late_joiner_watches_from_a_spawn_point, joining_the_spectators_with_fadetoblack_fades_the_screen_back_in, the_camera_cvars_default_to_vanilla. Deviations: ClientSetupVisibility does not yet move the observer's origin to the followed player's (PAS and sounds for a spectator follow the observer's own spot); the first-person copy of weapon, C4 and defuser state is empty until those exist; GetPlayerSpawnSpot does not fire the spot's target; MSG_SPEC, HLTV and career state are not ported; the TE_KILLPLAYERATTACHMENTS test proves delivery, not PAS filtering."
+status = "tested"
+evidence = "crates/cs-game/tests/observer.rs::dead_player_becomes_an_observer_after_the_death_cam, fadetoblack_does_not_chase_the_killer, observer_follows_a_teammate_with_forcecamera, spectator_team_roams, observer_target_leaves, first_person_observer_is_sent_the_followed_players_state, a_target_that_left_restarts_the_search_at_the_observer, a_late_joiner_watches_from_a_spawn_point, joining_the_spectators_with_fadetoblack_fades_the_screen_back_in, the_camera_cvars_default_to_vanilla. Deviations: the observer's origin already follows the followed player (run_cmd and find_next_player call set_origin on every usercmd), but the per-frame ClientSetupVisibility of the source, which moves the origin again on every server frame, is not ported, so between two usercmds the PAS and the sounds of a spectator use the last origin; the first-person copy of weapon, C4 and defuser state is empty until those exist; GetPlayerSpawnSpot does not fire the spot's target; MSG_SPEC, HLTV and career state are not ported; the TE_KILLPLAYERATTACHMENTS test proves delivery, not PAS filtering."
 
 [[item]]
 id = "game_buy_zones"
-status = "implemented"
+status = "tested"
 evidence = "crates/cs-game/tests/buy.rs::buy_zone_icon_on_spawn, a_zone_of_no_team_or_a_bad_team_is_for_everyone, a_map_without_buy_zones_buys_around_the_spawn_points, cannot_buy_outside_the_zone_or_without_money, buy_time_expires, leaving_the_zone_closes_the_buy_menu, the_buy_menus_follow_the_clients_preference, buy_zones_of_a_real_map. Deviations: map_has_bomb_target is false until func_bomb_target exists (a CT sees #CT_BuyItem, not #DCT_BuyItem, and the defuser is refused; 2E); BuyZoneIcon_Clear has no Disappear caller until the escape zone (2E); the CT and T cant-buy flags and the tutor are not ported."
 
 [[item]]
 id = "game_buy_equipment"
-status = "implemented"
+status = "tested"
 evidence = "crates/cs-game/tests/buy.rs::buy_armor_as_regamedll, buy_night_vision_goggles, weapon_purchase_refused_until_weapons. The vest (650), the vest with helmet (1000, or the 350 or 650 that make up the rest), the night vision goggles (1250) and #Not_Enough_Money with BlinkAccount (twice). Deviations: weapons, grenades, the shield and ammo do not exist until 2D (a purchase is refused with #Cannot_Buy_This, nothing taken; cl_autobuy and cl_rebuy are not ported); the defuser needs a bomb target (2E); #Hint_use_nightvision is not sent (no hint queue)."
 
 [[item]]
 id = "game_radio"
-status = "implemented"
-evidence = "crates/cs-game/tests/hud_misc.rs::radio_reaches_the_team_with_sound, radio_menus_and_aliases_pick_the_sentences, radio_is_limited_and_silent_for_the_dead_and_the_deaf, a_dead_teammate_still_hears_the_team_radio, an_observer_hears_the_radio_of_the_player_it_follows_and_its_team. SendAudio, a TextMsg to HUD_PRINTRADIO and the TE_PLAYERATTACHMENT icon; the 1.5 s and 60-per-spawn limits; the radio1 to radio3 menus and the aliases. Deviation: the radio_timeout, radio_maxinround and show_radioicon cvars of REGAMEDLL_ADD do not exist (vanilla behaviour)."
+status = "tested"
+evidence = "crates/cs-game/tests/hud_misc.rs::radio_reaches_the_team_with_sound, radio_menus_and_aliases_pick_the_sentences, radio_is_limited_and_silent_for_the_dead_and_the_deaf, a_dead_teammate_still_hears_the_team_radio, an_observer_hears_the_radio_of_the_player_it_follows_and_its_team. SendAudio, a TextMsg to HUD_PRINTRADIO and the TE_PLAYERATTACHMENT icon; the 1.5 s and 60-per-spawn limits; the radio1 to radio3 menus and the aliases. The round-start sentence (OnRoundFreezeEnd: the first joined CT and T hear one of MOVEOUT, LETSGO, LOCKNLOAD or GO): TODO(controller): test name. Deviation: the radio_timeout, radio_maxinround and show_radioicon cvars of REGAMEDLL_ADD do not exist (vanilla behaviour)."
 
 [[item]]
 id = "game_radar"
-status = "implemented"
-evidence = "crates/cs-game/tests/hud_misc.rs::radar_shows_teammates_only; crates/cs-game/tests/hud.rs::init_hud_sequence_as_regamedll. Living teammates only, at most once a second and after 64 units of movement; InitHUD sends the newcomer everyone's position. Deviation: bomb and hostage dots wait for 2E."
+status = "tested"
+evidence = "crates/cs-game/tests/hud_misc.rs::radar_shows_teammates_only; crates/cs-game/tests/hud.rs::init_hud_sequence_as_regamedll. Living teammates only; at most once a second: TODO(controller): test name (the once-a-second test of F27); after 64 units of movement; InitHUD sends the newcomer everyone's position. Deviation: bomb and hostage dots wait for 2E."
 
 [[item]]
 id = "game_status_bar"
-status = "implemented"
+status = "tested"
 evidence = "crates/cs-game/tests/hud_misc.rs::status_bar_names_the_teammate_under_the_crosshair, status_bar_names_an_enemy_without_health_and_forgets_after_two_seconds, mp_playerid_limits_what_the_status_bar_names, a_dead_observer_gets_the_teammate_status_bar_from_2048_units, a_spectator_looks_8192_units_for_the_status_bar. StatusText and StatusValue every 0.2 s, 2048 units, mp_playerid modes 0, 1 and 2. Deviation: the playerid_showhealth, playerid_field and zmax range of REGAMEDLL_ADD are not in vanilla and not ported."
 
 [[item]]
 id = "game_night_vision"
-status = "implemented"
+status = "tested"
 evidence = "crates/cs-game/tests/hud_misc.rs::night_vision_toggles_for_a_player_that_has_it, night_vision_follows_the_player_the_observer_watches; crates/cs-game/tests/buy.rs::buy_night_vision_goggles. NVGToggle with the nvg_on and nvg_off sounds, switched off by a spawn and a death. Deviation: the follower NVGToggle branch of the observer is only partly tested."
 
 [[item]]
 id = "game_match_flow_end_to_end"
-status = "implemented"
-evidence = "crates/cs-game/tests/match_flow.rs::two_teams_play_a_round (a real client over loopback: team menu, jointeam and joinclass, freeze period, round, the last terrorist's kill, #CTs_Win with sound, TeamScore, money, scoreboard, next round with respawn; on de_dust2 when the game is installed, else a stub map); binary smoke of cs-server --proto48 with two cs-probe clients on port 27115 is in .superpowers/sdd/2026-11-22-phase2c-cs-game/task-12-report.md. Not compared with the original game."
+status = "tested"
+evidence = "crates/cs-game/tests/match_flow.rs::two_teams_play_a_round (a real client over loopback, the probe, as a terrorist: the wire it receives is asserted for the team menu, the round timer, the last terrorist's kill (DeathMsg, ScoreInfo), #CTs_Win with the ctwin sound, TeamScore and the next round's money; the other three players' sides (the counter-terrorist side of the wire included) are read from the game state, not from their wire; on de_dust2 when the game is installed, else a stub map); binary smoke of cs-server --proto48 with two cs-probe clients on port 27115 is in .superpowers/sdd/2026-11-22-phase2c-cs-game/task-12-report.md. Not compared with the original game."
 
 [[item]]
 id = "game_weapons_and_equipment_items"
