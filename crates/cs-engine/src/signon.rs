@@ -74,8 +74,10 @@ pub(crate) fn banner(build: i32, spawn_count: u32) -> String {
     format!("\x02\nBUILD {build} SERVER (0 CRC)\nServer # {spawn_count}\n")
 }
 
-/// Movement variables from the `sv_*` cvars that exist, defaults otherwise; the sky name
-/// comes from the world entity's `skyname` key.
+/// Movement variables from the `sv_*` cvars that exist, defaults otherwise (`SV_SetMoveVars`,
+/// ReHLDS `sv_main.cpp`, read 2026-11-22: `sv_zmax` is `zmax`, `sv_wateramp` is the wave height,
+/// `sv_skyname` the sky). The sky name is the world entity's `skyname` key when it has one, else
+/// the cvar when it is not empty.
 pub(crate) fn move_vars(cvars: &CVarRegistry, entities: &[Entity]) -> MoveVarsMsg {
     let mut mv = MoveVarsMsg::default();
     let fields: [(&str, &mut f32); 9] = [
@@ -94,12 +96,22 @@ pub(crate) fn move_vars(cvars: &CVarRegistry, entities: &[Entity]) -> MoveVarsMs
             *field = cvar.as_f32();
         }
     }
-    if let Some(sky) = entities
+    if let Some(cvar) = cvars.get("sv_zmax") {
+        mv.zmax = cvar.as_f32();
+    }
+    if let Some(cvar) = cvars.get("sv_wateramp") {
+        mv.wave_height = cvar.as_f32();
+    }
+    let lump_sky = entities
         .iter()
         .find(|e| e.classname() == "worldspawn")
-        .and_then(|e| e.get("skyname"))
-    {
+        .and_then(|e| e.get("skyname"));
+    if let Some(sky) = lump_sky {
         mv.sky_name = sky.to_string();
+    } else if let Some(cvar) = cvars.get("sv_skyname")
+        && !cvar.value.is_empty()
+    {
+        mv.sky_name = cvar.value.clone();
     }
     mv
 }
@@ -383,6 +395,16 @@ mod tests {
         assert_eq!((mv.maxvelocity, mv.bounce), (1500.0, 0.5));
         assert_eq!(mv.stopspeed, cvars.get_f32("sv_stopspeed"));
         assert_eq!(mv.sky_name, "space");
+
+        // Without a `skyname` key the cvar is the sky; `zmax` and the wave height are cvars.
+        cvars.set("sv_skyname", "des");
+        cvars.set("sv_zmax", "8192");
+        cvars.set("sv_wateramp", "2");
+        let mv = move_vars(&cvars, &[]);
+        assert_eq!(
+            (mv.sky_name.as_str(), mv.zmax, mv.wave_height),
+            ("des", 8192.0, 2.0)
+        );
 
         let empty = move_vars(&CVarRegistry::new_empty(), &[]);
         assert_eq!(empty, MoveVarsMsg::default());

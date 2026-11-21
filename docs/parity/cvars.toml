@@ -135,7 +135,15 @@ id = "r_vis"
 status = "implemented"
 
 [[item]]
+id = "room_type"
+status = "implemented"
+
+[[item]]
 id = "sensitivity"
+status = "implemented"
+
+[[item]]
+id = "showtriggers"
 status = "implemented"
 
 [[item]]
@@ -163,6 +171,10 @@ id = "sv_gravity"
 status = "implemented"
 
 [[item]]
+id = "sv_language"
+status = "implemented"
+
+[[item]]
 id = "sv_maxspeed"
 status = "implemented"
 
@@ -172,6 +184,10 @@ status = "implemented"
 
 [[item]]
 id = "sv_maxvelocity"
+status = "implemented"
+
+[[item]]
+id = "sv_skyname"
 status = "implemented"
 
 [[item]]
@@ -192,6 +208,14 @@ status = "implemented"
 
 [[item]]
 id = "sv_unlagsamples"
+status = "implemented"
+
+[[item]]
+id = "sv_wateramp"
+status = "implemented"
+
+[[item]]
+id = "sv_zmax"
 status = "implemented"
 
 [[item]]

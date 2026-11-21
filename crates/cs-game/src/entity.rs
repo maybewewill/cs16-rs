@@ -17,6 +17,12 @@ use crate::world::{BrushKind, FuncLadder, InfoPlayer, StaticBrush, World};
 pub trait GameEntity: Send + 'static {
     fn classname(&self) -> &'static str;
 
+    /// Whether this is the stand-in of an entity that is out for a call; no game class says yes.
+    #[doc(hidden)]
+    fn is_vacant(&self) -> bool {
+        false
+    }
+
     /// Sets the entity up after the engine filled the edict's variables from `keys`. `false`
     /// removes the entity (the engine frees the edict).
     fn spawn(
@@ -70,7 +76,11 @@ pub fn create_entity(classname: &str) -> Option<Box<dyn GameEntity>> {
         "func_pushable" => Box::new(StaticBrush::new("func_pushable", BrushKind::Solid)),
         "func_illusionary" => Box::new(StaticBrush::new("func_illusionary", BrushKind::Illusionary)),
         #[cfg(feature = "test-hooks")]
-        "test_dispatch" => Box::new(DispatchProbe),
+        "test_dispatch" => Box::new(DispatchProbe(ProbeMode::Plain)),
+        "test_dispatch_remove_on_think" => Box::new(DispatchProbe(ProbeMode::RemoveOnThink)),
+        "test_dispatch_remove_on_touch" => Box::new(DispatchProbe(ProbeMode::RemoveOnTouch)),
+        "test_dispatch_replace_on_think" => Box::new(DispatchProbe(ProbeMode::ReplaceOnThink)),
+        "test_dispatch_create_on_think" => Box::new(DispatchProbe(ProbeMode::CreateOnThink)),
         _ => return None,
     };
     Some(entity)
@@ -82,6 +92,10 @@ struct Vacant;
 impl GameEntity for Vacant {
     fn classname(&self) -> &'static str {
         "(vacant)"
+    }
+
+    fn is_vacant(&self) -> bool {
+        true
     }
 }
 
@@ -104,7 +118,7 @@ pub(crate) fn with_entity(
     let mut entity = std::mem::replace(slot, Box::new(Vacant));
     call(entity.as_mut(), g, eng);
     if let Some(slot) = eng.private_mut::<Box<dyn GameEntity>>(id)
-        && slot.classname() == Vacant.classname()
+        && slot.is_vacant()
     {
         *slot = entity;
     }
@@ -121,23 +135,62 @@ pub enum DispatchEvent {
     Blocked { id: EdictId, other: EdictId },
 }
 
-/// The class `test_dispatch`: logs every call it receives into `GameState::dispatch_log`. For
-/// tests only (feature `test-hooks`).
+/// What a [`DispatchProbe`] does besides logging. For tests only (feature `test-hooks`).
 #[cfg(feature = "test-hooks")]
-struct DispatchProbe;
+#[derive(Clone, Copy)]
+enum ProbeMode {
+    Plain,
+    RemoveOnThink,
+    RemoveOnTouch,
+    /// Replaces its own entity with a plain probe during its think.
+    ReplaceOnThink,
+    /// Creates a plain probe, due to think soon, during its think.
+    CreateOnThink,
+}
+
+/// The classes `test_dispatch*`: log every call they receive into `GameState::dispatch_log`,
+/// and some do something odd to themselves during the call. For tests only (feature
+/// `test-hooks`).
+#[cfg(feature = "test-hooks")]
+struct DispatchProbe(ProbeMode);
 
 #[cfg(feature = "test-hooks")]
 impl GameEntity for DispatchProbe {
     fn classname(&self) -> &'static str {
-        "test_dispatch"
+        match self.0 {
+            ProbeMode::Plain => "test_dispatch",
+            ProbeMode::RemoveOnThink => "test_dispatch_remove_on_think",
+            ProbeMode::RemoveOnTouch => "test_dispatch_remove_on_touch",
+            ProbeMode::ReplaceOnThink => "test_dispatch_replace_on_think",
+            ProbeMode::CreateOnThink => "test_dispatch_create_on_think",
+        }
     }
 
-    fn think(&mut self, g: &mut GameState, _eng: &mut EngineApi<'_>, id: EdictId) {
+    fn think(&mut self, g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId) {
         g.dispatch_log.push(DispatchEvent::Think { id });
+        match self.0 {
+            ProbeMode::RemoveOnThink => eng.remove_entity(id),
+            ProbeMode::ReplaceOnThink => {
+                attach(eng, id, Box::new(DispatchProbe(ProbeMode::Plain)));
+            }
+            ProbeMode::CreateOnThink => {
+                if let Some(child) = eng.create_entity("test_dispatch") {
+                    attach(eng, child, Box::new(DispatchProbe(ProbeMode::Plain)));
+                    let due = eng.time() + 0.015;
+                    if let Some(v) = eng.ent_mut(child) {
+                        v.nextthink = due;
+                    }
+                }
+            }
+            ProbeMode::Plain | ProbeMode::RemoveOnTouch => {}
+        }
     }
 
-    fn touch(&mut self, g: &mut GameState, _eng: &mut EngineApi<'_>, id: EdictId, other: EdictId) {
+    fn touch(&mut self, g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId, other: EdictId) {
         g.dispatch_log.push(DispatchEvent::Touch { id, other });
+        if matches!(self.0, ProbeMode::RemoveOnTouch) {
+            eng.remove_entity(id);
+        }
     }
 
     fn blocked(

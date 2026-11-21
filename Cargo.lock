@@ -594,6 +594,7 @@ dependencies = [
  "cs-cvar",
  "cs-engine",
  "cs-game",
+ "cs-probe",
  "cs-proto48",
  "cs-sim",
  "cs-transport",

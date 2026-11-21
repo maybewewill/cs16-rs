@@ -21,6 +21,7 @@ test-hooks = []
 [dev-dependencies]
 cs-game = { path = ".", features = ["test-hooks"] }
 cs-cvar.workspace = true
+cs-probe.workspace = true
 cs-transport.workspace = true
 cs-vfs.workspace = true
 

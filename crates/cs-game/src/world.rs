@@ -433,35 +433,50 @@ impl GameEntity for StaticBrush {
     }
 }
 
-/// Whether `spot` can be used by `player`: no other live player within `radius` of it
-/// (`IsSpawnPointValid`, ReGameDLL `player.cpp`, read 2026-11-22; `IsTriggered` is always true
-/// for a spawn point). Assumes the build with `REGAMEDLL_FIXES`, where a dead player does not
-/// block a spawn.
-fn is_spawn_point_valid(eng: &EngineApi<'_>, player: EdictId, spot: EdictId, radius: f32) -> bool {
+/// The players other than `player` within `radius` of `spot`, alive or dead.
+fn players_near(eng: &EngineApi<'_>, player: EdictId, spot: EdictId, radius: f32) -> Vec<EdictId> {
     let Some(origin) = eng.ent(spot).map(|v| v.origin) else {
-        return false;
+        return Vec::new();
     };
-    !eng.entities_in_sphere(origin, radius).into_iter().any(|e| {
-        e != player
-            && eng
-                .ent(e)
-                .is_some_and(|v| v.flags & FL_CLIENT != 0 && v.deadflag == 0)
-    })
+    eng.entities_in_sphere(origin, radius)
+        .into_iter()
+        .filter(|&e| e != player && eng.ent(e).is_some_and(|v| v.flags & FL_CLIENT != 0))
+        .collect()
 }
 
-/// `CBasePlayer::SelectSpawnSpot`: from the spawn point after `*last` of class `classname`
-/// (wrapping round to the first), the first one that is free and not at the origin; `*last`
-/// becomes it. When every point is taken the point the search started from is used. `false`
-/// when the map has no point of that class. (ReGameDLL `player.cpp`, read 2026-11-22. The
-/// original kills the players standing at that point when `kill_filled_spawn` is set; there is
-/// no damage yet, so they overlap.)
+/// Whether `spot` can be used by `player`: no other player, alive or dead, within `radius` of
+/// it (`IsSpawnPointValid`, ReGameDLL `player.cpp`, read 2026-11-22, the vanilla branch: the
+/// `REGAMEDLL_FIXES` build skips dead players, the target build does not; `IsTriggered` is
+/// always true for a spawn point).
+fn is_spawn_point_valid(eng: &EngineApi<'_>, player: EdictId, spot: EdictId, radius: f32) -> bool {
+    players_near(eng, player, spot, radius).is_empty()
+}
+
+/// The hook for the telefrag of `SelectSpawnSpot`: every spawn point is taken, so the players
+/// standing at `spot` (other than `player`) are killed with 200 generic damage
+/// (`TakeDamage(VARS(eoNullEntity), VARS(eoNullEntity), 200, DMG_GENERIC)`). There is no damage
+/// system yet, so this only finds and logs the victims; the player task applies the damage to
+/// the returned players here.
+fn kill_spawn_occupants(eng: &EngineApi<'_>, player: EdictId, spot: EdictId) -> Vec<EdictId> {
+    let victims = players_near(eng, player, spot, MAX_PLAYER_USE_RADIUS);
+    if !victims.is_empty() {
+        tracing::debug!(?victims, "every spawn point is taken: the occupants of the first one die");
+    }
+    victims
+}
+
+/// `CBasePlayer::SelectSpawnSpot`: from the spawn point after `last` of class `classname`
+/// (wrapping round to the first), the first one that is free and not at the origin. When every
+/// point is taken the point the search started from is used, after its occupants were killed
+/// ([`kill_spawn_occupants`]). `None` when the map has no point of that class. (ReGameDLL
+/// `player.cpp`, read 2026-11-22.)
 fn select_spawn_spot(
     eng: &EngineApi<'_>,
     player: EdictId,
     classname: &str,
-    last: &mut Option<EdictId>,
-) -> bool {
-    let mut spot = eng.find_by_classname(*last, classname);
+    last: Option<EdictId>,
+) -> Option<EdictId> {
+    let mut spot = eng.find_by_classname(last, classname);
     if spot.is_none() {
         spot = eng.find_by_classname(None, classname);
     }
@@ -473,8 +488,7 @@ fn select_spawn_spot(
             && is_spawn_point_valid(eng, player, candidate, MAX_PLAYER_USE_RADIUS)
             && eng.ent(candidate).is_some_and(|v| v.origin != Vec3::ZERO)
         {
-            *last = Some(candidate);
-            return true;
+            return Some(candidate);
         }
         spot = eng.find_by_classname(spot, classname);
         budget -= 1;
@@ -482,16 +496,19 @@ fn select_spawn_spot(
             break;
         }
     }
-    *last = first;
-    first.is_some()
+    if let Some(first) = first {
+        kill_spawn_occupants(eng, player, first);
+    }
+    first
 }
 
 /// `CBasePlayer::EntSelectSpawnPoint` for a deathmatch game: the spawn point `team` spawns
 /// at, counter-terrorists at `info_player_start` and terrorists at `info_player_deathmatch`,
 /// each team cycling through its points. When the team's class has no point it falls back to
-/// the first `info_player_deathmatch`. `None` when the map has no spawn point at all
-/// ("PutClientInServer: no info_player_start on level"). The VIP spawn (`info_vip_start`) is not
-/// ported. (ReGameDLL `player.cpp`, read 2026-11-22.)
+/// the first `info_player_deathmatch`. Either way the point becomes the team's last one
+/// (`ReturnSpot`). `None` when the map has no spawn point at all ("PutClientInServer: no
+/// info_player_start on level"). The VIP spawn (`info_vip_start`) is not ported. (ReGameDLL
+/// `player.cpp`, read 2026-11-22.)
 pub fn select_spawn_point(
     g: &mut GameState,
     eng: &EngineApi<'_>,
@@ -502,12 +519,11 @@ pub fn select_spawn_point(
         SpawnTeam::CounterTerrorist => (CT_SPAWN_CLASS, &mut g.last_ct_spawn),
         SpawnTeam::Terrorist => (T_SPAWN_CLASS, &mut g.last_t_spawn),
     };
-    if select_spawn_spot(eng, player, class, last) {
-        return *last;
-    }
-    let spot = eng.find_by_classname(None, T_SPAWN_CLASS);
-    if spot.is_none() {
-        tracing::error!("PutClientInServer: no info_player_start on level");
+    let spot = select_spawn_spot(eng, player, class, *last)
+        .or_else(|| eng.find_by_classname(None, T_SPAWN_CLASS));
+    match spot {
+        Some(spot) => *last = Some(spot),
+        None => tracing::error!("PutClientInServer: no info_player_start on level"),
     }
     spot
 }

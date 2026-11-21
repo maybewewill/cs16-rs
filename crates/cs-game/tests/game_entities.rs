@@ -16,7 +16,11 @@ use cs_engine::consts::{
 use cs_engine::{EdictId, EngineApi, GameDll, MoveFilter, Server, ServerConfig, ServerMap};
 use cs_game::entity::DispatchEvent;
 use cs_game::world::{CT_SPAWN_CLASS, T_SPAWN_CLASS, select_spawn_point};
-use cs_game::CsGame;
+use cs_game::{CsGame, GameEntity};
+use cs_probe::{ProbeClient, ProbeConfig, ProbeState};
+use cs_proto48::crypto::md5_hex;
+use cs_proto48::messages::SvcMessage;
+use cs_transport::PeerAddr;
 use cs_proto48::delta::{DeltaRegistry, GoldSrcClientData, GoldSrcUserCmd};
 use cs_proto48::usermsg::UserMsgRegistry;
 use cs_sim::trace::Hull;
@@ -194,7 +198,7 @@ fn world_precaches_player_models_and_sounds() {
         ("WaveHeight", "16"),
         ("MaxRange", "8192"),
     ])]);
-    let (models, sounds, world_speed, scale) = b.run(|_, eng| {
+    let (models, sounds, world_speed, scale, cvars) = b.run(|_, eng| {
         let models = [
             "models/player.mdl",
             "models/player/gign/gign.mdl",
@@ -206,12 +210,53 @@ fn world_precaches_player_models_and_sounds() {
         let sounds = ["player/pl_step1.wav", "player/die1.wav", "common/null.wav"]
             .map(|s| eng.sound_index(s).is_some());
         let world = eng.ent(eng.world()).unwrap();
-        (models, sounds, world.speed, world.scale)
+        let cvars = ["sv_skyname", "sv_zmax", "sv_wateramp", "sv_gravity", "sv_maxspeed"]
+            .map(|name| eng.cvar_str(name));
+        (models, sounds, world.speed, world.scale, cvars)
     });
     assert_eq!(models, [true; 5]);
     assert_eq!(sounds, [true; 3]);
     assert_eq!(world_speed, 8192.0);
     assert_eq!(scale, 2.0);
+    // The world keys reach the cvars the engine sends in the movevars.
+    let cvars = cvars.map(|v| v.expect("registered"));
+    assert_eq!(cvars, ["des", "8192", "2", "800", "900"]);
+}
+
+#[test]
+fn the_world_keys_reach_the_probe_in_the_movevars() {
+    let mut b = Bench::stub(vec![entity(&[
+        ("classname", "worldspawn"),
+        ("skyname", "des"),
+        ("WaveHeight", "16"),
+        ("MaxRange", "8192"),
+    ])]);
+    let endpoint = b.hub.connect();
+    let cfg = ProbeConfig {
+        name: "p".to_string(),
+        steam_id: 76_561_197_960_265_728 + u64::from(endpoint.id()),
+        cdkey_md5_hex: md5_hex(b"probe"),
+    };
+    let mut probe = ProbeClient::new(endpoint, PeerAddr::Loopback(0), cfg);
+    probe.connect();
+    for _ in 0..300 {
+        probe.pump(b.now);
+        b.step(1);
+        if probe.state() == &ProbeState::InGame {
+            break;
+        }
+    }
+    assert_eq!(probe.state(), &ProbeState::InGame);
+    let mv = probe
+        .messages()
+        .iter()
+        .find_map(|m| match m {
+            SvcMessage::NewMoveVars(mv) => Some(mv.clone()),
+            _ => None,
+        })
+        .expect("movevars received");
+    assert_eq!(mv.sky_name, "des");
+    assert_eq!((mv.zmax, mv.wave_height), (8192.0, 2.0));
 }
 
 #[test]
@@ -242,13 +287,14 @@ fn spawn_points_come_from_the_lump_by_team() {
     });
     assert_eq!(picks, [100.0, 200.0, 100.0, -100.0, -100.0]);
 
-    // A point with another player within the use radius is skipped; with all taken the first
-    // one of the search is used.
+    // A point with another player within the use radius is skipped, and a dead player blocks it
+    // as well (the vanilla rule).
     let picks = b.run(|game, eng| {
         let me = eng.client_edict(0);
         let other = eng.client_edict(1);
         let v = eng.ent_mut(other).unwrap();
         v.flags = FL_CLIENT;
+        v.deadflag = 2;
         eng.set_origin(other, Vec3::new(100.0, 0.0, 0.0));
         let mut pick = |eng: &EngineApi<'_>| {
             let spot = select_spawn_point(game.state_mut(), eng, me, SpawnTeam::CounterTerrorist)
@@ -260,6 +306,48 @@ fn spawn_points_come_from_the_lump_by_team() {
         (a, b)
     });
     assert_eq!(picks, (200.0, 200.0));
+}
+
+#[test]
+fn with_every_point_taken_the_pick_is_the_first_of_the_search() {
+    // Two CT points 30 apart with a player between them: both are within the use radius.
+    let mut b = Bench::stub(vec![
+        entity(&[("classname", "worldspawn")]),
+        spawn_at(CT_SPAWN_CLASS, "100 0 0"),
+        spawn_at(CT_SPAWN_CLASS, "130 0 0"),
+    ]);
+    let (picks, last) = b.run(|game, eng| {
+        let me = eng.client_edict(0);
+        let other = eng.client_edict(1);
+        eng.ent_mut(other).unwrap().flags = FL_CLIENT;
+        eng.set_origin(other, Vec3::new(115.0, 0.0, 0.0));
+        let mut pick = || {
+            let spot = select_spawn_point(game.state_mut(), eng, me, SpawnTeam::CounterTerrorist)
+                .expect("a spawn point");
+            (spot, eng.ent(spot).unwrap().origin.x)
+        };
+        let (_, x1) = pick();
+        let (s2, x2) = pick();
+        ([x1, x2], (s2, game.state().last_ct_spawn))
+    });
+    // The search starts after the last point used, so the first of it moves on each time.
+    assert_eq!(picks, [100.0, 130.0]);
+    assert_eq!(last.1, Some(last.0));
+}
+
+#[test]
+fn the_fallback_spawn_becomes_the_teams_last_one() {
+    let mut b = Bench::stub(vec![
+        entity(&[("classname", "worldspawn")]),
+        spawn_at(T_SPAWN_CLASS, "-100 0 0"),
+    ]);
+    let (spot, last) = b.run(|game, eng| {
+        let me = eng.client_edict(0);
+        let spot = select_spawn_point(game.state_mut(), eng, me, SpawnTeam::CounterTerrorist);
+        (spot, game.state().last_ct_spawn)
+    });
+    assert!(spot.is_some());
+    assert_eq!(last, spot);
 }
 
 #[test]
@@ -351,7 +439,12 @@ fn brush_entities_stay_solid() {
     let Some(vfs) = discover() else {
         return;
     };
-    let (map, _) = dust2(&vfs);
+    let (map, bsp) = dust2(&vfs);
+    let bsp_ladders = bsp
+        .entities
+        .iter()
+        .filter(|e| e.classname() == "func_ladder")
+        .count();
     let mut b = Bench::on(map);
     let (solid, unsolid_ok, hit, ladders, illusionary_ok) = b.run(|game, eng| {
         let mut solid = 0;
@@ -391,14 +484,103 @@ fn brush_entities_stay_solid() {
     assert!(solid > 0, "de_dust2 has brush entities");
     assert!(unsolid_ok);
     assert!(hit > 0, "a trace into one of {solid} brush entities stops at it");
-    assert!(ladders <= 64 && illusionary_ok);
+    assert!(illusionary_ok);
+    // Every `func_ladder` of the lump with a model gave its bounds.
+    assert_eq!(ladders, bsp_ladders);
 }
 
-/// A `test_dispatch` entity made by the game itself, as `spawn_entity` makes it.
-fn probe(game: &mut CsGame, eng: &mut EngineApi<'_>) -> EdictId {
-    let id = eng.create_entity("test_dispatch").expect("free edict");
-    assert!(game.spawn_entity(eng, id, "test_dispatch", &[]));
+/// A `class` probe entity made by the game itself, as `spawn_entity` makes it.
+fn probe_of(class: &str, game: &mut CsGame, eng: &mut EngineApi<'_>) -> EdictId {
+    let id = eng.create_entity(class).expect("free edict");
+    assert!(game.spawn_entity(eng, id, class, &[]));
     id
+}
+
+fn probe(game: &mut CsGame, eng: &mut EngineApi<'_>) -> EdictId {
+    probe_of("test_dispatch", game, eng)
+}
+
+/// The class of the game entity of `id`, `None` for a freed edict or one with no entity.
+fn game_class(b: &mut Bench, id: EdictId) -> Option<&'static str> {
+    b.run(move |_, eng| eng.private::<Box<dyn GameEntity>>(id).map(|e| e.classname()))
+}
+
+fn thinks_of(b: &Bench, id: EdictId) -> usize {
+    b.log()
+        .iter()
+        .filter(|e| **e == DispatchEvent::Think { id })
+        .count()
+}
+
+/// A probe of `class` that thinks in the next frame or two.
+fn thinking_probe(b: &mut Bench, class: &'static str) -> EdictId {
+    b.run(move |game, eng| {
+        let id = probe_of(class, game, eng);
+        let due = eng.time() + 0.015;
+        eng.ent_mut(id).unwrap().nextthink = due;
+        id
+    })
+}
+
+#[test]
+fn an_entity_may_remove_itself_in_its_own_think() {
+    let mut b = Bench::stub(vec![entity(&[("classname", "worldspawn")])]);
+    let id = thinking_probe(&mut b, "test_dispatch_remove_on_think");
+    b.step(5);
+    assert!(b.server.edicts().get(id).is_none());
+    assert_eq!(b.log(), [DispatchEvent::Think { id }], "one call, no panic");
+}
+
+#[test]
+fn an_entity_may_remove_itself_in_its_own_touch() {
+    let mut b = Bench::stub(vec![entity(&[("classname", "worldspawn")])]);
+    let (trigger, ent) = b.run(|game, eng| {
+        let trigger = probe_of("test_dispatch_remove_on_touch", game, eng);
+        eng.ent_mut(trigger).unwrap().solid = SOLID_TRIGGER;
+        eng.set_size(trigger, Vec3::splat(-64.0), Vec3::splat(64.0));
+        eng.set_origin(trigger, Vec3::new(0.0, 0.0, 500.0));
+        let ent = body(eng, "ent", Vec3::new(0.0, 0.0, 500.0), 8.0);
+        eng.ent_mut(ent).unwrap().movetype = MOVETYPE_NONE;
+        eng.link_entity(ent, true);
+        (trigger, ent)
+    });
+    b.step(5);
+    assert!(b.server.edicts().get(trigger).is_none());
+    assert_eq!(
+        b.log(),
+        [DispatchEvent::Touch {
+            id: trigger,
+            other: ent
+        }]
+    );
+}
+
+#[test]
+fn an_entity_may_replace_itself_during_its_call() {
+    let mut b = Bench::stub(vec![entity(&[("classname", "worldspawn")])]);
+    let id = thinking_probe(&mut b, "test_dispatch_replace_on_think");
+    b.step(5);
+    // The replacement stays; the old entity is dropped, not put back over it.
+    assert_eq!(game_class(&mut b, id), Some("test_dispatch"));
+    assert_eq!(thinks_of(&b, id), 1);
+    assert_eq!(b.log().len(), 1);
+}
+
+#[test]
+fn an_entity_may_create_another_during_its_call() {
+    let mut b = Bench::stub(vec![entity(&[("classname", "worldspawn")])]);
+    let creator = thinking_probe(&mut b, "test_dispatch_create_on_think");
+    b.step(8);
+    let log = b.log();
+    assert_eq!(log.len(), 2, "{log:?}");
+    assert_eq!(log[0], DispatchEvent::Think { id: creator });
+    let DispatchEvent::Think { id: child } = log[1] else {
+        panic!("{log:?}");
+    };
+    assert_ne!(child, creator);
+    // Both are still there, each with its entity, and each thought once.
+    assert_eq!(game_class(&mut b, creator), Some("test_dispatch_create_on_think"));
+    assert_eq!(game_class(&mut b, child), Some("test_dispatch"));
 }
 
 /// A box that stays where it is, with no game entity.

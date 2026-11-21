@@ -64,6 +64,18 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     reg.register("sv_friction", "4", srv, "Ground friction");
     reg.register("sv_stopspeed", "100", srv, "Minimum stopping speed");
     reg.register("sv_stepsize", "18", srv, "Maximum stair step height");
+    // Set by the game's world (`CWorld`) from the map's worldspawn keys; the engine sends them in
+    // the movevars. ReHLDS `sv_main.cpp` (read 2026-11-22): `sv_skyname` "desert", `sv_zmax`
+    // 4096 (FCVAR_SPONLY there, a flag this registry does not have), `sv_wateramp` 0.
+    reg.register("sv_skyname", "desert", CVarFlags::NONE, "Sky box name");
+    reg.register("sv_zmax", "4096", CVarFlags::NONE, "Far clip distance");
+    reg.register("sv_wateramp", "0", CVarFlags::NONE, "Water wave height");
+    // ReGameDLL `game.cpp` (read 2026-11-22): `showtriggers` "0". The defaults of `room_type`
+    // (client DSP preset) and `sv_language` (assumption, from memory: 0 is English) are not
+    // checked against a source.
+    reg.register("showtriggers", "0", CVarFlags::NONE, "Show trigger brushes (debug)");
+    reg.register("room_type", "0", CVarFlags::NONE, "DSP room type");
+    reg.register("sv_language", "0", CVarFlags::NONE, "Server language (1 is German)");
     reg.register("sv_maxvelocity", "2000", CVarFlags::NONE, "Maximum speed of any entity on an axis");
     reg.register("sv_bounce", "1", srv, "Bounce of a walking entity off a wall");
     reg.register("sv_cheats", "0", srv, "Allow cheat commands (0 or 1)");
