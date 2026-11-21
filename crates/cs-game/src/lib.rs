@@ -206,6 +206,32 @@ impl CsGame {
         player::take_damage(&mut self.state, eng, slot, attacker, attacker, damage, bits)
     }
 
+    /// Sets the hit group the player of `slot` was last hit in (`m_LastHitGroup`; 1 is the
+    /// head). For tests only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn set_last_hit_group(&mut self, slot: u8, group: i32) {
+        if let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+            p.last_hit_group = group;
+        }
+    }
+
+    /// Hurts the player of `slot` as `TakeDamage` with the given attacker and inflictor edicts
+    /// (either may be `None`, the world). For tests only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn damage_player_by(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        slot: u8,
+        attacker: Option<EdictId>,
+        inflictor: Option<EdictId>,
+        damage: f32,
+        bits: u32,
+    ) -> bool {
+        player::take_damage(&mut self.state, eng, slot, inflictor, attacker, damage, bits)
+    }
+
     /// Puts the movement of the player of `slot` at `origin`, stopped, to place a player
     /// mid-air or elsewhere in tests. `false` when nobody is in that slot. For tests only
     /// (cargo feature `test-hooks`).

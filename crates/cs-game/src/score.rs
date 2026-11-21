@@ -8,15 +8,17 @@
 //! The messages and where they are sent:
 //! - `DeathMsg` (killer, victim, headshot byte, weapon string) to everyone, reliable
 //!   (`MSG_ALL`), from [`player_killed`].
-//! - `ScoreInfo` (index, frags, deaths, class 0, team) of the victim and then of a killer that is
-//!   a player, from [`player_killed`]. Vanilla sends these two with `MSG_BROADCAST`: the unreliable
-//!   queue of every active client (`REGAMEDLL_FIXES` makes them `MSG_ALL`); [`MsgDest::Broadcast`]
-//!   is the same here. The other `ScoreInfo` senders (spawn, join, team change, leaving) are in
-//!   [`crate::messages`], [`crate::teams`] and [`crate::rules`].
+//! - `ScoreInfo` (index, frags, deaths, class 0, team) of the victim, then of a killer that is a
+//!   player, from [`player_killed`]. The victim's line is `MSG_BROADCAST` in vanilla (the
+//!   unreliable queue of every active client; `REGAMEDLL_FIXES` makes it `MSG_ALL`), the killer's
+//!   is `MSG_ALL` (reliable) always. On the wire the reliable messages of a frame (the
+//!   `DeathMsg`, the killer's line, the `ScoreAttrib`) therefore precede the victim's line. The
+//!   other `ScoreInfo` senders (spawn, join, team change, leaving) are in [`crate::messages`],
+//!   [`crate::teams`] and [`crate::rules`].
 //! - `ScoreAttrib` (index, flags) of a player to every player in the game
-//!   (`SetScoreboardAttributes`): [`set_scoreboard_attributes`] is sent when a player dies
-//!   (`Killed`, flag `SCORE_STATUS_DEAD`) and when it leaves ([`on_disconnect`], the leaving
-//!   player counts as dead).
+//!   (`SetScoreboardAttributes`, [`crate::messages::set_scoreboard_attributes`]): sent when a
+//!   player dies (`Killed`, flag `SCORE_STATUS_DEAD`, after the observer setup) and when it leaves
+//!   (`ClientDisconnected`, the leaving player counts as dead).
 //! - `TeamScore` (team name, rounds won) is `UpdateTeamScores` of the round rules, `CT` then
 //!   `TERRORIST`, to everyone ([`crate::rules`]); a joining player gets them in `InitHUD`
 //!   (`TERRORIST` first) and `UpdateClientData` (`CT` first) ([`crate::messages`]).
@@ -38,9 +40,10 @@
 //!   `DeathNotice`/`SendDeathMessage` exist only in newer builds (`REGAMEDLL_ADD` writes the extra
 //!   death message fields) and are not ported; the byte vanilla writes for the headshot is
 //!   `KILLRARITY_HEADSHOT` (1), a boolean.
-//! - `DeathNotice`'s `CheckWinConditions()` runs while the victim is still alive for the rules
-//!   (`deadflag` is set later in `Killed`), so it changes nothing; the one at the end of
-//!   `Killed` ([`crate::player`]) is the one that counts.
+//! - `DeathNotice` calls `CheckWinConditions()` once more, inside `PlayerKilled`, which
+//!   `CBasePlayer::Killed` runs before it sets `deadflag = DEAD_DYING` (`player.cpp`). It is not
+//!   ported as a second call: the one at the end of `Killed` ([`crate::player`]) is the one
+//!   ported (the original's extra call is marked as probably unnecessary by its own TODO).
 //! - The `SVC_DIRECTOR` death event to `MSG_SPEC` (HLTV), the log lines (`UTIL_LogPrintf`),
 //!   `FireTargets("game_playerdie"/"game_playerkill")`, the vehicle driver as killer, the hints
 //!   (`#Hint_careful_around_teammates`, `#Hint_win_round_by_killing_enemy`: no hint queue yet),
@@ -92,14 +95,13 @@ pub(crate) fn killer_weapon_name(
         .to_string()
 }
 
-/// `ScoreInfo` to every active client, unreliable (`MSG_BROADCAST`): the scoreboard line of the
-/// player of `slot`, as `PlayerKilled` sends it.
-fn score_info_broadcast(g: &GameState, eng: &mut EngineApi<'_>, slot: usize) {
+/// `ScoreInfo` to `dest`: the scoreboard line of the player of `slot`, as `PlayerKilled` sends it.
+fn score_info(g: &GameState, eng: &mut EngineApi<'_>, dest: MsgDest, slot: usize) {
     let Some(p) = g.players.get(slot).and_then(Option::as_ref) else {
         return;
     };
     eng.send_usermsg(
-        MsgDest::Broadcast,
+        dest,
         &CsUserMsg::ScoreInfo {
             player_id: (slot + 1) as u8,
             frags: p.frags.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
@@ -162,22 +164,10 @@ pub(crate) fn player_killed(
     // The money and the team kills (`AddAccount`, `m_iTeamKills`, `mp_autokick`).
     money::killed_by(g, eng, slot, attacker);
 
-    // The scoreboard: the victim's line, then the killer's if it is a player.
-    score_info_broadcast(g, eng, index);
+    // The scoreboard: the victim's line (`MSG_BROADCAST`, unreliable, in vanilla; `MSG_ALL` with
+    // `REGAMEDLL_FIXES`), then the killer's if it is a player (`MSG_ALL`, reliable, always).
+    score_info(g, eng, MsgDest::Broadcast, index);
     if let Some(k) = killer {
-        score_info_broadcast(g, eng, k);
+        score_info(g, eng, MsgDest::All, k);
     }
-}
-
-/// `CBasePlayer::SetScoreboardAttributes()` of the player of `slot`: its `ScoreAttrib` (dead;
-/// the bomb and the VIP come with 2E) to every player in the game.
-pub(crate) fn set_scoreboard_attributes(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) {
-    messages::set_scoreboard_attributes(g, eng, usize::from(slot));
-}
-
-/// What `CHalfLifeMultiplay::ClientDisconnected` tells the scoreboard first: the leaving player
-/// is marked dead (`pev->deadflag = DEAD_DEAD`; the caller has cleared its alive flag) for
-/// everyone, before its line is emptied ([`crate::teams::announce_departure`]).
-pub(crate) fn on_disconnect(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) {
-    set_scoreboard_attributes(g, eng, slot);
 }

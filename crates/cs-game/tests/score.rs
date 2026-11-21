@@ -8,6 +8,7 @@ mod common;
 use common::{Bench, command, enter, join, spawns, stub_spawns};
 use cs_engine::GameDll;
 use cs_game::player::{Team, dmg};
+use cs_engine::EdictId;
 use cs_proto48::usermsg::{CsUserMsg, encode_cs_usermsg};
 
 /// The messages of the scoreboard the probe has received, as `(name, bytes)`.
@@ -73,19 +74,20 @@ fn info_bytes(index: u8, frags: i16, deaths: i16, team: i16) -> (&'static str, V
 #[test]
 fn death_updates_scores_for_everyone() {
     let mut b = duel();
-    // The terrorist (index 2) kills the counter-terrorist (index 1): the death notice and the
-    // victim marked dead on the scoreboard (both reliable, so first on the wire), then the
-    // victim's line (one death, team 2) and the killer's line (one frag, team 1), which vanilla
-    // sends unreliably (`MSG_BROADCAST`) and so come after the reliable stream in the packet.
+    // The terrorist (index 2) kills the counter-terrorist (index 1). Reliable, in the order sent:
+    // the death notice, the killer's line (one frag, team 1; `MSG_ALL`) and the victim marked
+    // dead. Then, unreliable (`MSG_BROADCAST` in vanilla, so after the reliable stream in the
+    // packet), the victim's line (one death, team 2). The bench does not report which stream a
+    // message came on; the order is the evidence.
     b.run(|game, eng| game.damage_player(eng, 0, Some(1), 500.0, dmg::BULLET));
     b.step(3);
     assert_eq!(
         scoreboard(&b),
         vec![
             death_bytes(2, 1, 0, "world"),
+            info_bytes(2, 1, 0, 1),
             ("ScoreAttrib", vec![1, 1]),
             info_bytes(1, 0, 1, 2),
-            info_bytes(2, 1, 0, 1),
         ]
     );
     assert_eq!(scores(&mut b), [(0, 1, false), (1, 0, true)]);
@@ -119,8 +121,8 @@ fn death_updates_scores_for_everyone() {
         scoreboard(&b),
         vec![
             death_bytes(1, 1, 0, "world"),
-            ("ScoreAttrib", vec![1, 1]),
             info_bytes(1, -1, 2, 2),
+            ("ScoreAttrib", vec![1, 1]),
             info_bytes(1, -1, 2, 2),
         ]
     );
@@ -145,9 +147,9 @@ fn a_teammate_kill_costs_the_killer_a_frag_and_the_money() {
         scoreboard(&b),
         vec![
             death_bytes(2, 1, 0, "world"),
+            info_bytes(2, -1, 0, 2),
             ("ScoreAttrib", vec![1, 1]),
             info_bytes(1, 0, 1, 2),
-            info_bytes(2, -1, 0, 2),
         ]
     );
     assert_eq!(scores(&mut b), [(0, 1, false), (-1, 0, true)]);
@@ -232,4 +234,40 @@ fn team_score_after_round() {
         )),
         (1, 0)
     );
+}
+
+#[test]
+fn headshot_byte_follows_the_last_hit_group() {
+    let mut b = duel();
+    // `m_LastHitGroup` is HITGROUP_HEAD (1): the headshot byte of the notice is 1.
+    b.run(|game, eng| {
+        game.set_last_hit_group(0, 1);
+        game.damage_player(eng, 0, Some(1), 500.0, dmg::BULLET)
+    });
+    b.step(3);
+    let notice = scoreboard(&b).into_iter().find(|(n, _)| *n == "DeathMsg");
+    assert_eq!(notice, Some(death_bytes(2, 1, 1, "world")));
+}
+
+#[test]
+fn weapon_name_is_the_inflictors_classname_without_its_prefix() {
+    let mut b = duel();
+    let kill_with = |b: &mut Bench, class: &'static str| {
+        b.run(move |game, eng| {
+            game.spawn_player(eng, 0, Team::Ct, 0);
+            let thing: EdictId = eng.create_entity(class).expect("an edict");
+            let killer = eng.client_edict(1);
+            game.damage_player_by(eng, 0, Some(killer), Some(thing), 500.0, dmg::BULLET)
+        });
+        b.step(3);
+        let notice = scoreboard(b).into_iter().find(|(n, _)| *n == "DeathMsg");
+        b.probe.clear_messages();
+        notice
+    };
+    // An inflictor that is not the killer names itself: `weapon_`, `func_` and `monster_` go.
+    assert_eq!(kill_with(&mut b, "weapon_knife"), Some(death_bytes(2, 1, 0, "knife")));
+    assert_eq!(kill_with(&mut b, "func_door"), Some(death_bytes(2, 1, 0, "door")));
+    assert_eq!(kill_with(&mut b, "monster_zombie"), Some(death_bytes(2, 1, 0, "zombie")));
+    // Any other classname stays as it is.
+    assert_eq!(kill_with(&mut b, "grenade"), Some(death_bytes(2, 1, 0, "grenade")));
 }

@@ -523,7 +523,7 @@ pub(crate) fn on_disconnect(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8
         p.alive = false;
     }
     // `SetScoreboardAttributes()` right after `deadflag = DEAD_DEAD`.
-    crate::score::on_disconnect(g, eng, slot);
+    messages::set_scoreboard_attributes(g, eng, usize::from(slot));
     check_win_conditions(g, eng);
 }
 
