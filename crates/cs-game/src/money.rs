@@ -302,7 +302,9 @@ pub(crate) fn killed_by(
                 "#Banned_For_Killing_Teamates",
                 &[],
             );
-            eng.kick(killer_slot, "For killing too many teammates");
+            // The original runs `kick # <userid>` with no reason (non-FIXES), so the player sees
+            // the console kick's default text.
+            eng.kick(killer_slot, "Kicked by server");
         }
     } else {
         add_account(g, eng, killer_slot, REWARD_KILLED_ENEMY, true);
