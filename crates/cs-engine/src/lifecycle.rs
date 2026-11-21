@@ -132,9 +132,13 @@ impl<G: GameDll> Server<G> {
     /// to the game as disconnected: its `server_deactivate` owns that state. Call it between
     /// [`frame`] calls.
     ///
+    /// A map change the game asked for before the switch, or while it deactivated the old map or
+    /// activated the new one, is forgotten when the switch is done: it belongs to the map that is
+    /// gone and must not take the new one away (it is cleared after `activate_map`, so a request
+    /// made by `server_activate` is dropped too; the game asks again from its first frame).
+    ///
     /// [`frame`]: Server::frame
     pub fn change_map(&mut self, map: ServerMap) {
-        self.outbox.change_level = None;
         self.with_game(|game, eng| game.server_deactivate(eng));
         for (client, view) in self.clients.iter_mut().zip(&mut self.views) {
             client.put_in_server = false;
@@ -151,6 +155,7 @@ impl<G: GameDll> Server<G> {
         self.world = WorldLinks::new(map.world_bounds());
         self.map = map;
         self.activate_map();
+        self.outbox.change_level = None;
         let mut reconnect = MsgWriter::new();
         write_svc_stufftext(&mut reconnect, "reconnect\n");
         let now = self.real_time;

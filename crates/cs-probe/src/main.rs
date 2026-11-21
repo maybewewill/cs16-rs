@@ -125,6 +125,12 @@ mod native {
         parse_args(args).map(|a| (a.cmds, a.cmd_gap))
     }
 
+    /// Whether the server has sent `gap` datagrams since `baseline`; a gap too large to add
+    /// (`--cmd-gap 18446744073709551615`) never elapses instead of overflowing.
+    pub fn gap_elapsed(datagrams_in: u64, baseline: u64, gap: u64) -> bool {
+        datagrams_in >= baseline.saturating_add(gap) && gap != u64::MAX
+    }
+
     pub fn run(args: impl Iterator<Item = String>) -> Result<ExitCode, String> {
         let args = parse_args(args)?;
         let bind = if args.server.is_ipv4() {
@@ -166,7 +172,7 @@ mod native {
                         cmd_baseline = probe.stats().datagrams_in;
                         println!("{now:.3}s: in game");
                     }
-                    if probe.stats().datagrams_in >= cmd_baseline + args.cmd_gap
+                    if gap_elapsed(probe.stats().datagrams_in, cmd_baseline, args.cmd_gap)
                         && let Some(line) = pending_cmds.pop_front()
                     {
                         probe.send_stringcmd(&line);
@@ -223,13 +229,20 @@ mod native {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    use super::native::parse_args_for_tests;
+    use super::native::{gap_elapsed, parse_args_for_tests};
 
     fn args(list: &[&str]) -> impl Iterator<Item = String> + use<> {
         list.iter()
             .map(|s| s.to_string())
             .collect::<Vec<_>>()
             .into_iter()
+    }
+
+    #[test]
+    fn a_huge_cmd_gap_does_not_overflow() {
+        assert!(!gap_elapsed(5, 3, u64::MAX));
+        assert!(!gap_elapsed(u64::MAX, 3, u64::MAX));
+        assert!(gap_elapsed(13, 3, 10) && !gap_elapsed(12, 3, 10));
     }
 
     #[test]

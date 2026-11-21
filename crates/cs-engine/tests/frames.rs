@@ -260,6 +260,11 @@ fn hidden_entity_is_not_sent() {
     }
 }
 
+/// What this checks: the game is asked once per update for the viewer, and an eye that is no
+/// point changes nothing. It cannot check that a finite eye changes which entities are sent:
+/// the stub map has no BSP, so `viewer_pvs` is `None` and the viewer sees every entity from any
+/// eye (`entity_in_pvs`); that needs a map with visibility data and is not tested yet (the
+/// game's side, the eye value `setup_visibility` returns, is asserted in `cs-game/tests/observer.rs`).
 #[test]
 fn the_game_chooses_the_viewpoint_of_each_update() {
     let game = TestGame {

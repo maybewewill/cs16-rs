@@ -229,6 +229,9 @@ pub struct TestGame {
     /// When set, `server_deactivate` writes an `svc_print` of [`DEACTIVATE_PRINT`] into the
     /// reliable buffer of every slot.
     pub print_on_deactivate: bool,
+    /// Maps `server_deactivate` and `server_activate` ask the engine to change to.
+    pub change_level_on_deactivate: Option<String>,
+    pub change_level_on_activate: Option<String>,
     /// `skin` the extra entities get in `server_activate`.
     pub extra_skin: i16,
     /// Slots `EngineApi::is_client_active` reported active during the last `server_activate`.
@@ -382,6 +385,9 @@ impl GameDll for TestGame {
 
     fn server_activate(&mut self, eng: &mut EngineApi<'_>) {
         self.server_activate_calls += 1;
+        if let Some(map) = &self.change_level_on_activate {
+            eng.change_level(map);
+        }
         self.activate_times.push(eng.time());
         self.call_order.push("activate".to_string());
         self.active_at_activate = (0..32).filter(|&s| eng.is_client_active(s)).collect();
@@ -501,6 +507,9 @@ impl GameDll for TestGame {
 
     fn server_deactivate(&mut self, eng: &mut EngineApi<'_>) {
         self.server_deactivate_calls += 1;
+        if let Some(map) = &self.change_level_on_deactivate {
+            eng.change_level(map);
+        }
         if self.print_on_deactivate {
             for slot in 0..32 {
                 eng.send(MsgDest::One(slot), &print_bytes(DEACTIVATE_PRINT));

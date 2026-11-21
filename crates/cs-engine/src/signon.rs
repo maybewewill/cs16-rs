@@ -77,7 +77,10 @@ pub(crate) fn banner(build: i32, spawn_count: u32) -> String {
 /// Movement variables from the `sv_*` cvars that exist, defaults otherwise (`SV_SetMoveVars`,
 /// ReHLDS `sv_main.cpp`, read 2026-11-22: `sv_zmax` is `zmax`, `sv_wateramp` is the wave height,
 /// `sv_skyname` the sky). The sky name is the world entity's `skyname` key when it has one, else
-/// the cvar when it is not empty.
+/// the cvar when it is not empty. Either way it is cut to what `movevars_t::skyName` holds, 32
+/// bytes with the terminator (`Q_strncpy(movevars->skyName, sv_skyname.string,
+/// sizeof(movevars->skyName) - 1)`, `SV_SetMoveVars`, ReHLDS `sv_main.cpp`, read 2026-11-22), so
+/// 31 bytes at most (the finding's "32 characters" counted the terminator; the source wins).
 pub(crate) fn move_vars(cvars: &CVarRegistry, entities: &[Entity]) -> MoveVarsMsg {
     let mut mv = MoveVarsMsg::default();
     let fields: [(&str, &mut f32); 9] = [
@@ -113,8 +116,17 @@ pub(crate) fn move_vars(cvars: &CVarRegistry, entities: &[Entity]) -> MoveVarsMs
     {
         mv.sky_name = cvar.value.clone();
     }
+    // A cut inside a multi-byte character drops the whole character (a name is ASCII in practice).
+    let mut end = mv.sky_name.len().min(SKY_NAME_MAX);
+    while !mv.sky_name.is_char_boundary(end) {
+        end -= 1;
+    }
+    mv.sky_name.truncate(end);
     mv
 }
+
+/// `sizeof(movevars_t::skyName) - 1`: the longest sky name the client is sent.
+const SKY_NAME_MAX: usize = 31;
 
 /// The map CRC a client answers `spawn` with: munged with `COM_Munge2` keyed by
 /// `(-1 - spawn_count) & 0xFF`, read as a signed integer.
@@ -405,6 +417,20 @@ mod tests {
             (mv.sky_name.as_str(), mv.zmax, mv.wave_height),
             ("des", 8192.0, 2.0)
         );
+
+        // A long name is cut to 31 bytes, from the lump and from the cvar alike.
+        let long = "s".repeat(40);
+        let world = Entity {
+            properties: HashMap::from([
+                ("classname".to_string(), "worldspawn".to_string()),
+                ("skyname".to_string(), long.clone()),
+            ]),
+        };
+        assert_eq!(move_vars(&cvars, &[world]).sky_name, "s".repeat(31));
+        cvars.set("sv_skyname", &long);
+        assert_eq!(move_vars(&cvars, &[]).sky_name, "s".repeat(31));
+        cvars.set("sv_skyname", "s".repeat(31));
+        assert_eq!(move_vars(&cvars, &[]).sky_name.len(), 31);
 
         let empty = move_vars(&CVarRegistry::new_empty(), &[]);
         assert_eq!(empty, MoveVarsMsg::default());

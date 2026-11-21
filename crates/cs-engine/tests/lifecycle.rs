@@ -991,3 +991,29 @@ fn game_cannot_set_userinfo_of_a_free_slot() {
     assert_eq!(b.userinfos()[&slot_a], "");
     assert_eq!(opcodes(&b, svc::UPDATEUSERINFO), updates);
 }
+
+/// F19: a map change the game asks for while it deactivates the old map or activates the new one
+/// (or before the switch) does not survive `change_map`.
+#[test]
+fn a_change_level_asked_during_the_switch_is_forgotten() {
+    let game = TestGame {
+        change_level_on_deactivate: Some("from_deactivate".to_string()),
+        change_level_on_activate: Some("from_activate".to_string()),
+        ..TestGame::default()
+    };
+    let mut h = Harness::with_game(4, game);
+    // The first activation (before any switch) asked as well; nobody has taken it yet.
+    h.server.change_map(ServerMap::stub("second"));
+    assert_eq!(h.server.take_pending_change_level(), None);
+    // After the switch the game can ask again, and that request stands.
+    h.server.game_mut().change_level_on_deactivate = None;
+    h.server.game_mut().change_level_on_activate = None;
+    h.server.game_mut().act(|eng| {
+        eng.change_level("later");
+    });
+    h.step(&mut [], 1);
+    assert_eq!(
+        h.server.take_pending_change_level(),
+        Some("later".to_string())
+    );
+}
