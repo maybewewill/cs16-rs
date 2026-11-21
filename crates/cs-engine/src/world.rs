@@ -1,7 +1,7 @@
 //! Entities in the world: the area tree, absolute bounds and the leaves an entity touches.
 //!
 //! Ported from ReHLDS `rehlds/engine/world.cpp` (read 2026-11-21): `SV_ClearWorld`,
-//! `SV_CreateAreaNode`, `SV_UnlinkEdict`, `SV_LinkEdict`, `SV_TouchLinks` (the box part only)
+//! `SV_CreateAreaNode`, `SV_UnlinkEdict`, `SV_LinkEdict`, `SV_TouchLinks` (box test; the hull test of brush triggers is in `touch.rs`)
 //! and `SV_FindTouchedLeafs`. Links are kept by edict index, not by pointer: every area node
 //! holds a list of trigger entities and a list of solid ones.
 //!
@@ -294,13 +294,30 @@ pub(crate) fn free_entity(edicts: &mut EdictPool, world: &mut WorldLinks, id: Ed
     edicts.free(id, now);
 }
 
+/// Where a queued touch came from; decides what is re-checked when it is dispatched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TouchKind {
+    /// `SV_TouchLinks`: `toucher` is a trigger, which must still be `SOLID_TRIGGER`.
+    Trigger,
+    /// `SV_Impact`.
+    Impact,
+}
+
+/// A touch waiting for dispatch.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PendingTouch {
+    pub(crate) toucher: EdictId,
+    pub(crate) other: EdictId,
+    pub(crate) kind: TouchKind,
+}
+
 /// The area tree and what each linked entity touches, plus the touches found by linking.
 pub(crate) struct WorldLinks {
     nodes: Vec<AreaNode>,
     /// By edict index.
     links: Vec<Option<Link>>,
     /// `(toucher, other)` pairs waiting for the server to dispatch them, oldest first.
-    pending_touches: VecDeque<(EdictId, EdictId)>,
+    pending_touches: VecDeque<PendingTouch>,
     /// Touches queued since the frame began (dispatched or not); bounded by
     /// [`MAX_TOUCHES_PER_FRAME`].
     frame_touches: usize,
@@ -501,26 +518,38 @@ impl WorldLinks {
             .map(|l| &l.leaves)
     }
 
-    /// Takes the oldest queued `(toucher, other)` pair.
-    pub(crate) fn pop_touch(&mut self) -> Option<(EdictId, EdictId)> {
+    /// Takes the oldest queued touch.
+    pub(crate) fn pop_touch(&mut self) -> Option<PendingTouch> {
         self.pending_touches.pop_front()
     }
 
-    /// The touches queued and not yet taken.
+    /// The touches queued and not yet taken, as `(toucher, other)`.
     #[cfg(test)]
     pub(crate) fn pending_touches(&self) -> Vec<(EdictId, EdictId)> {
-        self.pending_touches.iter().copied().collect()
+        self.pending_touches
+            .iter()
+            .map(|t| (t.toucher, t.other))
+            .collect()
     }
 
-    /// Queues `touch(toucher, other)`; refused (and counted) once [`MAX_TOUCHES_PER_FRAME`]
-    /// touches were queued this frame.
-    pub(crate) fn queue_touch(&mut self, toucher: EdictId, other: EdictId) {
-        if self.frame_touches >= MAX_TOUCHES_PER_FRAME {
-            self.touches_dropped += 1;
+    /// Queues `touches` together, or none of them when fewer than `touches.len()` are left of
+    /// this frame's [`MAX_TOUCHES_PER_FRAME`]; the refused ones are counted.
+    pub(crate) fn queue_touches(&mut self, touches: &[PendingTouch]) {
+        if self.frame_touches + touches.len() > MAX_TOUCHES_PER_FRAME {
+            self.touches_dropped += touches.len();
             return;
         }
-        self.frame_touches += 1;
-        self.pending_touches.push_back((toucher, other));
+        self.frame_touches += touches.len();
+        self.pending_touches.extend(touches.iter().copied());
+    }
+
+    /// [`queue_touches`](Self::queue_touches) for one trigger touch.
+    pub(crate) fn queue_touch(&mut self, trigger: EdictId, other: EdictId) {
+        self.queue_touches(&[PendingTouch {
+            toucher: trigger,
+            other,
+            kind: TouchKind::Trigger,
+        }]);
     }
 
     /// Starts a new frame's touch budget; returns the touches refused during the last one.

@@ -28,7 +28,8 @@ use crate::edict::{EdictId, EntVars};
 use crate::game::{EngineApi, GameDll};
 use crate::server::Server;
 use crate::trace_ents::{brush_model, bsp_hull_for, bsp_offset};
-use crate::world::consts::SOLID_NOT;
+use crate::world::consts::{FL_KILLME, SOLID_NOT, SOLID_TRIGGER};
+use crate::world::{PendingTouch, TouchKind};
 
 /// Touches queued, and so dispatched, in one server frame; further ones are dropped.
 pub const MAX_TOUCHES_PER_FRAME: usize = 4096;
@@ -57,36 +58,67 @@ impl EngineApi<'_> {
 }
 
 impl<G: GameDll> Server<G> {
-    /// `SV_Impact`: queues `touch(e1, e2)` then `touch(e2, e1)`, each only if neither entity is
-    /// `SOLID_NOT`. Both must be live. The pairs are dispatched at the next dispatch point
-    /// (after the current game call, or by [`dispatch_touches`](Self::dispatch_touches)).
+    /// `SV_Impact` (ReHLDS `sv_phys.cpp`, read 2026-11-21): nothing happens when either entity
+    /// has `FL_KILLME`; `touch(e1, e2)` is queued when `e1` is not `SOLID_NOT`, then
+    /// `touch(e2, e1)` when `e2` is not (each side on its own). The second half is skipped when
+    /// either entity got `FL_KILLME` during the first (the `REHLDS_FIXES` branch): the dispatch
+    /// re-checks `FL_KILLME` before every touch. Either both halves are queued or, when fewer
+    /// than two places are left in the frame's budget, neither. A stale entity queues nothing.
+    ///
+    /// Differences from the source: the `groupinfo` filter is not modelled; the trace globals
+    /// (`SV_SetGlobalTrace`) are not set, the game gets no trace; the touches are delivered
+    /// after the current call, not inside it.
     // Called by the physics and the player movement of later tasks.
     #[allow(dead_code)]
     pub(crate) fn impact(&mut self, e1: EdictId, e2: EdictId) {
-        let solid = |id| self.edicts.get(id).map(|e| e.vars.solid);
-        let (Some(s1), Some(s2)) = (solid(e1), solid(e2)) else {
+        let vars = |id| self.edicts.get(id).map(|e| (e.vars.solid, e.vars.flags));
+        let (Some((s1, f1)), Some((s2, f2))) = (vars(e1), vars(e2)) else {
             return;
         };
-        if s1 == SOLID_NOT || s2 == SOLID_NOT {
+        if (f1 | f2) & FL_KILLME != 0 {
             return;
         }
-        self.world.queue_touch(e1, e2);
-        self.world.queue_touch(e2, e1);
+        let half = |toucher, other| PendingTouch {
+            toucher,
+            other,
+            kind: TouchKind::Impact,
+        };
+        let mut halves = Vec::with_capacity(2);
+        if s1 != SOLID_NOT {
+            halves.push(half(e1, e2));
+        }
+        if s2 != SOLID_NOT {
+            halves.push(half(e2, e1));
+        }
+        self.world.queue_touches(&halves);
     }
 
-    /// Calls [`GameDll::touch`] for every queued pair, oldest first, until the queue is empty.
-    /// Before a pair its two entities are checked: one removed since (its serial no longer
-    /// resolves) drops the pair. Each call is a game call like any other, so what the game
-    /// queued is drained afterwards; the touches it caused join the queue and are delivered by
-    /// this loop. A call made while the loop is already running (a kick released a slot, whose
-    /// disconnect is a game call too) leaves the queue to the running loop.
+    /// Calls [`GameDll::touch`] for every queued touch, oldest first, until the queue is empty.
+    /// Before each one the world is checked again: an entity removed since (its serial no longer
+    /// resolves) or marked `FL_KILLME` drops the touch, and so does a trigger that is no longer
+    /// `SOLID_TRIGGER`. Each call is a game call like any other, so what the game queued is
+    /// drained afterwards; the touches it caused join the queue and are delivered by this loop.
+    /// A call made while the loop is already running (a kick released a slot, whose disconnect
+    /// is a game call too) leaves the queue to the running loop.
     pub(crate) fn dispatch_touches(&mut self) {
         if self.world.dispatching {
             return;
         }
         self.world.dispatching = true;
-        while let Some((toucher, other)) = self.world.pop_touch() {
-            if self.edicts.get(toucher).is_none() || self.edicts.get(other).is_none() {
+        while let Some(PendingTouch {
+            toucher,
+            other,
+            kind,
+        }) = self.world.pop_touch()
+        {
+            let vars = |id| self.edicts.get(id).map(|e| (e.vars.solid, e.vars.flags));
+            let (Some((solid, flags)), Some((_, other_flags))) = (vars(toucher), vars(other))
+            else {
+                continue;
+            };
+            if (flags | other_flags) & FL_KILLME != 0
+                || (kind == TouchKind::Trigger && solid != SOLID_TRIGGER)
+            {
                 continue;
             }
             self.call_game(|game, eng| game.touch(eng, toucher, other));
@@ -101,6 +133,8 @@ impl<G: GameDll> Server<G> {
         self.dispatch_touches();
         let dropped = self.world.reset_touch_budget();
         if dropped > 0 {
+            self.net_stats.touches_dropped += dropped as u64;
+            self.net_stats.touch_cap_frames += 1;
             tracing::warn!(
                 dropped,
                 cap = MAX_TOUCHES_PER_FRAME,
@@ -119,12 +153,14 @@ mod tests {
     use super::*;
     use crate::map::ServerMap;
     use crate::server::ServerConfig;
-    use crate::world::consts::{SOLID_BBOX, SOLID_TRIGGER};
+    use crate::world::consts::SOLID_BBOX;
 
     /// Records the touches it receives.
     #[derive(Default)]
     struct Recorder {
         touches: Vec<(u16, u16)>,
+        /// The first touch marks its `other` with `FL_KILLME`.
+        kill_other_on_touch: bool,
     }
 
     impl GameDll for Recorder {
@@ -161,8 +197,11 @@ mod tests {
         fn update_client_data(&mut self, _eng: &mut EngineApi<'_>, _slot: u8) -> GoldSrcClientData {
             GoldSrcClientData::default()
         }
-        fn touch(&mut self, _eng: &mut EngineApi<'_>, toucher: EdictId, other: EdictId) {
+        fn touch(&mut self, eng: &mut EngineApi<'_>, toucher: EdictId, other: EdictId) {
             self.touches.push((toucher.index, other.index));
+            if self.kill_other_on_touch {
+                eng.ent_mut(other).unwrap().flags |= FL_KILLME;
+            }
         }
     }
 
@@ -197,15 +236,13 @@ mod tests {
     }
 
     #[test]
-    fn impact_ignores_a_non_solid_side_and_a_stale_one() {
+    fn impact_ignores_a_stale_entity() {
         let mut s = server();
         let a = entity(&mut s, SOLID_BBOX);
-        let ghost = entity(&mut s, SOLID_NOT);
         let gone = entity(&mut s, SOLID_BBOX);
         s.call_game(|_, eng| eng.remove_entity(gone));
-        s.impact(a, ghost);
-        s.impact(ghost, a);
         s.impact(a, gone);
+        s.impact(gone, a);
         s.drain_outbox();
         assert!(s.game.touches.is_empty());
     }
@@ -219,5 +256,81 @@ mod tests {
         s.call_game(|_, eng| eng.remove_entity(b));
         s.dispatch_touches();
         assert!(s.game.touches.is_empty());
+    }
+
+    #[test]
+    fn impact_does_nothing_when_either_side_is_killed() {
+        let mut s = server();
+        let a = entity(&mut s, SOLID_BBOX);
+        let b = entity(&mut s, SOLID_BBOX);
+        s.call_game(|_, eng| eng.ent_mut(b).unwrap().flags |= FL_KILLME);
+        s.impact(a, b);
+        s.impact(b, a);
+        s.drain_outbox();
+        assert!(s.game.touches.is_empty());
+    }
+
+    #[test]
+    fn impact_sides_are_independent() {
+        let mut s = server();
+        let solid = entity(&mut s, SOLID_BBOX);
+        let ghost = entity(&mut s, SOLID_NOT);
+        // A non-solid side gets no touch, the other side still does.
+        s.impact(solid, ghost);
+        s.impact(ghost, solid);
+        s.drain_outbox();
+        assert_eq!(
+            s.game.touches,
+            [(solid.index, ghost.index), (solid.index, ghost.index)]
+        );
+    }
+
+    #[test]
+    fn second_half_is_skipped_when_the_first_killed_an_entity() {
+        let mut s = server();
+        s.game.kill_other_on_touch = true;
+        let a = entity(&mut s, SOLID_BBOX);
+        let b = entity(&mut s, SOLID_BBOX);
+        s.impact(a, b);
+        s.drain_outbox();
+        assert_eq!(s.game.touches, [(a.index, b.index)]);
+    }
+
+    #[test]
+    fn impact_queues_both_halves_or_neither() {
+        let mut s = server();
+        let a = entity(&mut s, SOLID_BBOX);
+        let b = entity(&mut s, SOLID_BBOX);
+        // Leave room for one touch only.
+        for _ in 0..MAX_TOUCHES_PER_FRAME - 1 {
+            s.world.queue_touches(&[PendingTouch {
+                toucher: a,
+                other: b,
+                kind: TouchKind::Impact,
+            }]);
+        }
+        s.impact(a, b);
+        assert_eq!(s.world.reset_touch_budget(), 2);
+        s.dispatch_touches();
+        assert_eq!(s.game.touches.len(), MAX_TOUCHES_PER_FRAME - 1);
+    }
+
+    #[test]
+    fn trigger_touches_are_rechecked_at_dispatch() {
+        let mut s = server();
+        let trigger = entity(&mut s, SOLID_TRIGGER);
+        let other = entity(&mut s, SOLID_BBOX);
+        s.world.queue_touch(trigger, other);
+        s.call_game(|_, eng| eng.ent_mut(trigger).unwrap().solid = SOLID_NOT);
+        s.dispatch_touches();
+        assert!(s.game.touches.is_empty());
+        // An impact side is not held to being a trigger.
+        s.world.queue_touches(&[PendingTouch {
+            toucher: trigger,
+            other,
+            kind: TouchKind::Impact,
+        }]);
+        s.dispatch_touches();
+        assert_eq!(s.game.touches.len(), 1);
     }
 }

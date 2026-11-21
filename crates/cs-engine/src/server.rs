@@ -149,6 +149,10 @@ pub struct NetStats {
     /// Datagrams the transport refused to send: updates, sign-on datagrams, farewells and
     /// connectionless replies.
     pub send_failures: u64,
+    /// Touches dropped because a frame already queued `MAX_TOUCHES_PER_FRAME`.
+    pub touches_dropped: u64,
+    /// Frames that dropped touches (one `tracing::warn!` each).
+    pub touch_cap_frames: u64,
 }
 
 impl NetStats {
@@ -273,9 +277,10 @@ impl<G: GameDll> Server<G> {
         self.drop_timed_out_clients();
         self.queue_pings_if_due();
         self.broadcast_userinfo();
+        // The frame's game work is done: deliver what it queued before the updates go out.
+        self.finish_frame_touches();
         self.send_client_frames(net);
         self.send_farewells(net);
-        self.finish_frame_touches();
         self.frametime = 0.0;
     }
 

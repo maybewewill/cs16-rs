@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 
 use cs_cvar::CVarRegistry;
 use cs_engine::{
+    consts,
     EdictId, EngineApi, GameDll, MsgDest, PrecacheError, Server, ServerConfig, ServerMap,
 };
 use cs_probe::{ProbeClient, ProbeConfig};
@@ -294,6 +295,10 @@ pub struct TestGame {
     pub touch_log: Vec<(u16, u16)>,
     /// When set, every `touch` removes both entities.
     pub touch_removes_both: bool,
+    /// When set, every `touch` marks the toucher `FL_KILLME`.
+    pub touch_kills_toucher: bool,
+    /// When set, every `touch` makes the toucher `SOLID_NOT`.
+    pub touch_unsolids_toucher: bool,
     /// When set, every `touch` links `other` again, asking for its touches.
     pub touch_relinks_other: bool,
     /// When set, a `touch` by an `other` of class `mover` links every entity of this class,
@@ -583,6 +588,12 @@ impl GameDll for TestGame {
         if self.touch_removes_both {
             eng.remove_entity(toucher);
             eng.remove_entity(other);
+        }
+        if self.touch_kills_toucher {
+            eng.ent_mut(toucher).unwrap().flags |= consts::FL_KILLME;
+        }
+        if self.touch_unsolids_toucher {
+            eng.ent_mut(toucher).unwrap().solid = consts::SOLID_NOT;
         }
         if self.touch_relinks_other {
             eng.link_entity(other, true);

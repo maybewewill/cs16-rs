@@ -100,6 +100,45 @@ fn touches_inside_touch_are_dispatched_in_the_same_frame() {
     assert_eq!(log[0].0, log[1].0, "both by the one trigger");
 }
 
+/// One trigger holding two entities; the first touch changes the trigger, so the pair already
+/// queued for the second entity is skipped.
+fn two_in_a_trigger(game: TestGame) -> Harness {
+    let mut h = harness(game);
+    h.server.game_mut().act(|eng| {
+        trigger(eng, "trigger", Vec3::new(0.0, 0.0, 500.0), 64.0);
+        for _ in 0..2 {
+            let ent = body(eng, "ent", Vec3::new(0.0, 0.0, 500.0));
+            eng.link_entity(ent, true);
+        }
+    });
+    h.step(&mut [], 1);
+    h
+}
+
+#[test]
+fn killed_trigger_gets_no_further_touches() {
+    let h = two_in_a_trigger(TestGame {
+        touch_kills_toucher: true,
+        ..TestGame::default()
+    });
+    assert_eq!(h.server.game().touch_log.len(), 1);
+}
+
+#[test]
+fn trigger_made_non_solid_gets_no_further_touches() {
+    let h = two_in_a_trigger(TestGame {
+        touch_unsolids_toucher: true,
+        ..TestGame::default()
+    });
+    assert_eq!(h.server.game().touch_log.len(), 1);
+}
+
+#[test]
+fn both_triggers_still_touch_when_nothing_changes() {
+    let h = two_in_a_trigger(TestGame::default());
+    assert_eq!(h.server.game().touch_log.len(), 2);
+}
+
 #[test]
 fn touch_storm_is_bounded() {
     // 2000 entities in one trigger, each relinking itself when touched: the chain would never
@@ -118,7 +157,23 @@ fn touch_storm_is_bounded() {
     });
     h.step(&mut [], 1);
     assert_eq!(h.server.game().touch_log.len(), MAX_TOUCHES_PER_FRAME);
-    // The frame ended and the rest was dropped, not carried over.
+    let stats = h.server.net_stats();
+    assert_eq!(stats.touch_cap_frames, 1, "one warning for the frame");
+    assert!(stats.touches_dropped > 0);
+    // The rest was dropped, not carried over.
     h.step(&mut [], 3);
     assert_eq!(h.server.game().touch_log.len(), MAX_TOUCHES_PER_FRAME);
+    assert_eq!(h.server.net_stats().touch_cap_frames, 1);
+
+    // A new frame has a fresh budget: the storm runs again, capped again, warned once more.
+    h.server.game_mut().act(|eng| {
+        let mut after = None;
+        while let Some(id) = eng.find_by_classname(after, "ent") {
+            eng.link_entity(id, true);
+            after = Some(id);
+        }
+    });
+    h.step(&mut [], 1);
+    assert_eq!(h.server.game().touch_log.len(), 2 * MAX_TOUCHES_PER_FRAME);
+    assert_eq!(h.server.net_stats().touch_cap_frames, 2);
 }
