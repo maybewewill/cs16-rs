@@ -92,11 +92,14 @@ fn frame_order_is_packets_then_physics_then_time() {
     let seen = *game.think_player_x.last().unwrap();
     assert!((seen - (x_before + 2.5)).abs() < 1e-3, "{seen} vs {x_before}");
 
-    // It ran at the simulation time, which the frame advances only after the physics: the
-    // frame's `start_frame` had the same time.
+    // It ran before the frame's time advance, but at the client's `svtimebase`: the frame's
+    // simulation time plus the frame time minus the duration of the commands, plus the
+    // command's own 10 ms (`SV_EstablishTimeBase`, `SV_RunCmd`). That frame is 10 ms long
+    // and the command 10 ms, so the command's time is the end of the frame, and the frame's
+    // `start_frame` (at the simulation time before the advance) is one frame earlier.
     let at_cmd = *game.usercmd_times.last().unwrap();
     let at_start = *game.start_frame_times.last().unwrap();
-    assert_eq!(at_cmd, at_start);
+    assert!((at_cmd - at_start - FRAME).abs() < EPS, "{at_cmd} vs {at_start}");
     h.step(&mut [&mut probe], 1);
     let next_start = *h.server.game().start_frame_times.last().unwrap();
     assert!((next_start - at_start - FRAME).abs() < EPS, "{next_start}");

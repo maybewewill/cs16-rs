@@ -146,17 +146,22 @@ const CLEAR_RUN: f32 = 600.0;
 /// First of the spawn's yaw and its seven other multiples of 45 degrees along which a
 /// standing-hull trace of [`CLEAR_RUN`] units from `start`, lifted 4 units, hits nothing.
 fn clear_yaw(collision: &BspCollision, start: Vec3, spawn_yaw: f32) -> f32 {
+    clear_yaw_for(collision, start, spawn_yaw, CLEAR_RUN)
+}
+
+/// [`clear_yaw`] for a run of `run` units.
+fn clear_yaw_for(collision: &BspCollision, start: Vec3, spawn_yaw: f32, run: f32) -> f32 {
     let from = start + Vec3::new(0.0, 0.0, 4.0);
     (0..8)
         .map(|k| (spawn_yaw + 45.0 * k as f32).rem_euclid(360.0))
         .find(|yaw| {
             let r = yaw.to_radians();
-            let to = from + Vec3::new(r.cos(), r.sin(), 0.0) * CLEAR_RUN;
+            let to = from + Vec3::new(r.cos(), r.sin(), 0.0) * run;
             let tr = collision.trace_hull(from, to, Hull::Standing);
             !tr.start_solid && !tr.all_solid && tr.fraction >= 1.0
         })
         .unwrap_or_else(|| {
-            panic!("no clear {CLEAR_RUN}-unit run from {start:?} (spawn yaw {spawn_yaw})")
+            panic!("no clear {run}-unit run from {start:?} (spawn yaw {spawn_yaw})")
         })
 }
 
@@ -607,6 +612,23 @@ fn solid_brush_entities_block_movement() {
         run.map, run.classname, run.model_index, run.start, run.dir, run.stop
     );
     let mut w = World::on(&vfs, run.map);
+
+    // The brush is an entity of the engine: solid, a pusher at rest, linked; the player's
+    // movement trace hits it.
+    let model = format!("*{}", run.model_index);
+    let (brush, brush_vars) = (0..2048)
+        .filter_map(|i| w.server.edicts().by_index(i))
+        .find(|(_, e)| e.vars.classname == run.classname && e.vars.model == model)
+        .map(|(id, e)| (id, e.vars.clone()))
+        .expect("the brush entity is in the engine");
+    // SOLID_BSP, MOVETYPE_PUSH.
+    assert_eq!((brush_vars.solid, brush_vars.movetype), (4, 7));
+    assert_eq!(brush_vars.velocity, Vec3::ZERO);
+    assert!(
+        brush_vars.modelindex > 0 && brush_vars.absmin.cmplt(brush_vars.absmax).all(),
+        "{brush_vars:?}"
+    );
+
     let mut probe = w.join("Walker", &mut []);
     assert!(w.server.game_mut().set_player_origin(0, run.start));
     w.run_cmds(&mut probe, (0..150).map(|_| cmd(run.yaw, WALK_MAX_SPEED, 0)));
@@ -617,6 +639,9 @@ fn solid_brush_entities_block_movement() {
     assert!(along >= run.stop - 2.0, "stopped short: {along} vs {}", run.stop);
     // ... and was stopped by it.
     assert!(along <= run.stop + 0.1, "went into the brush: {along} vs {}", run.stop);
+
+    // The movement's touches reached the engine: the brush entity is still the same live one.
+    assert!(w.server.edicts().get(brush).is_some());
 }
 
 #[test]
@@ -748,4 +773,142 @@ fn adapter_mirrors_legacy_inside_a_solid_brush() {
         (snapped - want).abs().max_element() <= 0.1,
         "{snapped:?} vs {want:?}"
     );
+}
+
+/// Origin on the floor under the standing hull at the (x, y) of `at`, found with the legacy
+/// collision from 40 units above `at.z`.
+fn on_floor(collision: &BspCollision, at: Vec3) -> Vec3 {
+    let above = at + Vec3::new(0.0, 0.0, 40.0);
+    let down = collision.trace_hull(above, above - Vec3::new(0.0, 0.0, 128.0), Hull::Standing);
+    assert!(!down.start_solid && down.fraction < 1.0, "no floor under {at:?}");
+    down.end_pos + Vec3::new(0.0, 0.0, 0.5)
+}
+
+/// Queues an idle command on each probe (so its edict follows its movement state) and runs one
+/// frame, `times` times.
+fn idle(w: &mut World, probes: &mut [&mut Probe], times: usize) {
+    for _ in 0..times {
+        for p in probes.iter_mut() {
+            p.queue_cmd(cmd(0.0, 0.0, 0));
+        }
+        w.step(probes, 1);
+    }
+}
+
+/// Two joined players, A in slot 0 and B in slot 1, and the clear run of B's spawn: B's origin,
+/// the unit direction of the run and its yaw.
+fn two_players_and_a_run(vfs: &Vfs) -> (World, Probe, Probe, Vec3, Vec3, f32) {
+    let mut w = World::dust2(vfs);
+    let mut a = w.join("A", &mut []);
+    let b = w.join("B", &mut [&mut a]);
+    let start = w.vars(slot(&b)).origin;
+    let yaw = clear_yaw(&w.collision, start, w.vars(slot(&b)).v_angle.y);
+    let r = yaw.to_radians();
+    (w, a, b, start, Vec3::new(r.cos(), r.sin(), 0.0), yaw)
+}
+
+#[test]
+fn players_block_each_other() {
+    let Ok(vfs) = Vfs::discover(None, VfsConfig::default()) else {
+        return;
+    };
+    let (mut w, mut a, mut b, start, dir, yaw) = two_players_and_a_run(&vfs);
+    // B at its spawn looking along the run, A 100 units ahead of it looking back.
+    let a_origin = on_floor(&w.collision, start + dir * 100.0);
+    assert!(w.server.game_mut().set_player_origin(slot(&a), a_origin));
+    assert!(w.server.game_mut().set_player_origin(slot(&b), start));
+    idle(&mut w, &mut [&mut a, &mut b], 20);
+    let (sa, sb) = (slot(&a), slot(&b));
+    let gap = |w: &World| (w.vars(sa).origin - w.vars(sb).origin).length();
+    assert!(gap(&w) > 90.0, "{}", gap(&w));
+
+    // Both walk at each other for a second and a half: 375 units each, far past the gap.
+    let mut closest = f32::MAX;
+    for _ in 0..150 {
+        a.queue_cmd(cmd(yaw + 180.0, WALK_MAX_SPEED, 0));
+        b.queue_cmd(cmd(yaw, WALK_MAX_SPEED, 0));
+        w.step(&mut [&mut a, &mut b], 1);
+        closest = closest.min(gap(&w));
+    }
+    println!("closest {closest}, last {}", gap(&w));
+    // The boxes are 32 wide: players never get closer than one body width.
+    assert!(closest >= 32.0 - TOLERANCE, "walked through each other: {closest}");
+    assert!(closest < 40.0, "never met: {closest}");
+}
+
+#[test]
+fn a_walking_player_stays_visible_across_leaves() {
+    let Ok(vfs) = Vfs::discover(None, VfsConfig::default()) else {
+        return;
+    };
+    // The observer (slot 0) stands at its counter-terrorist spawn; the runner (slot 1) starts
+    // at its terrorist spawn, far away and out of the observer's sight.
+    let mut w = World::dust2(&vfs);
+    let mut observer = w.join("Observer", &mut []);
+    let mut runner = w.join("Runner", &mut [&mut observer]);
+    let (so, sr) = (slot(&observer), slot(&runner));
+    let runner_entity = u16::from(sr) + 1;
+    w.step(&mut [&mut observer, &mut runner], 20);
+    assert!(
+        observer.entities().get(&runner_entity).is_none(),
+        "the runner's spawn was in sight of the observer's"
+    );
+
+    // Puts the runner 100 units from the observer along a clear run, in the observer's sight,
+    // and walks it away for a second, 250 units.
+    let seat = w.vars(so).origin;
+    let yaw = clear_yaw_for(&w.collision, seat, w.vars(so).v_angle.y, 300.0);
+    let r = yaw.to_radians();
+    let dir = Vec3::new(r.cos(), r.sin(), 0.0);
+    let from = on_floor(&w.collision, seat + dir * 100.0);
+    assert!(w.server.game_mut().set_player_origin(sr, from));
+    for _ in 0..100 {
+        runner.queue_cmd(cmd(yaw, WALK_MAX_SPEED, 0));
+        observer.queue_cmd(cmd(0.0, 0.0, 0));
+        w.step(&mut [&mut observer, &mut runner], 1);
+    }
+    // Lets the runner come to rest and the last update reach the observer.
+    idle(&mut w, &mut [&mut observer, &mut runner], 80);
+    let actual = w.vars(sr).origin;
+    println!("runner ended at {actual:?}, observer at {seat:?}");
+    let seen = observer
+        .entities()
+        .get(&runner_entity)
+        .expect("the observer cannot see the runner that walked up to it");
+    assert!(
+        (seen.origin - actual).abs().max_element() <= TOLERANCE,
+        "{:?} vs {actual:?}",
+        seen.origin
+    );
+}
+
+#[test]
+fn legacy_numbers_unchanged() {
+    let Ok(vfs) = Vfs::discover(None, VfsConfig::default()) else {
+        return;
+    };
+    // A lone player on the engine's entity traces ends a run where the movement code on the
+    // legacy collision alone ends it, within the project tolerance. (The probe delivers a
+    // command a frame late now and then, so only the end of the run is compared, after the
+    // late commands have run.)
+    let mut w = World::dust2(&vfs);
+    let mut keeper = w.join("Keeper", &mut []);
+    let mut probe = w.join("Runner", &mut [&mut keeper]);
+    let s = slot(&probe);
+    let start = w.vars(s).origin;
+    let yaw = clear_yaw(&w.collision, start, w.vars(s).v_angle.y);
+    let mut legacy = cs_sim::pmove::PlayerMoveState::at_spawn(start);
+    let params = MoveParams::default();
+    for _ in 0..200 {
+        probe.queue_cmd(cmd(yaw, WALK_MAX_SPEED, 0));
+        w.step(&mut [&mut keeper, &mut probe], 1);
+        // The view angle crosses the wire quantized: the legacy run uses the one the server got.
+        let received = cmd(w.vars(s).v_angle.y, WALK_MAX_SPEED, 0);
+        let input = cs_sim::walk_game::usercmd_to_move_input(&received, WALK_MAX_SPEED);
+        cs_sim::pmove::step_player_move(&mut legacy, &input, WALK_MAX_SPEED, &params, &w.collision, 0.01);
+    }
+    w.step(&mut [&mut keeper, &mut probe], 5);
+    let (engine, expected) = (w.vars(s).origin, legacy.origin);
+    println!("engine {engine:?} legacy {expected:?}");
+    assert!((engine - expected).abs().max_element() <= TOLERANCE, "{engine:?} vs {expected:?}");
 }

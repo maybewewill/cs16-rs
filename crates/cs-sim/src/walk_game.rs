@@ -2,6 +2,7 @@
 //! at the map's spawn points and move with [`step_player_move`]; there are no weapons, rounds
 //! or animations. Scaffolding until the full game rules move onto the engine.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use cs_assets::bsp::{SpawnPoint, SpawnTeam};
@@ -14,7 +15,7 @@ use crate::pmove::{
     MoveInputCmd, MoveParams, MoveWorld, PlayerMoveState, VEC_VIEW, snap_spawn_to_floor,
     step_player_move,
 };
-use crate::trace::{CONTENTS_SOLID, Hull, TraceResult};
+use crate::trace::{CONTENTS_EMPTY, CONTENTS_SOLID, Hull, TraceResult};
 
 /// `usercmd_t::buttons` bits.
 pub mod buttons {
@@ -43,8 +44,12 @@ const PLAYER_SKINS: [&str; 8] = [
 ];
 /// `SOLID_SLIDEBOX`.
 const SOLID_SLIDEBOX: u8 = 3;
+/// `SOLID_BSP`.
+const SOLID_BSP: u8 = 4;
 /// `MOVETYPE_WALK`.
 const MOVETYPE_WALK: u8 = 3;
+/// `MOVETYPE_PUSH`.
+const MOVETYPE_PUSH: u8 = 7;
 const STANDING_MINS: Vec3 = Vec3::new(-16.0, -16.0, -36.0);
 const STANDING_MAXS: Vec3 = Vec3::new(16.0, 16.0, 36.0);
 const DUCKED_MINS: Vec3 = Vec3::new(-16.0, -16.0, -18.0);
@@ -63,34 +68,6 @@ const SOLID_BRUSH_CLASSES: [&str; 8] = [
     "func_pushable",
 ];
 
-/// A brush entity the game remembers from the map's entity lump.
-#[derive(Debug, Clone, Copy)]
-struct BrushRef {
-    /// Brush model number `N` of the entity's `*N` model.
-    model: usize,
-    /// The entity's `origin` when it spawned; the engine places the model there.
-    ///
-    /// Limitation: this is the spawn-time origin, never updated, so a door that has moved is
-    /// not followed (entity linking belongs to a later plan item). The BSP model's own `origin`
-    /// field, which the legacy `BspCollision` adds, is not reachable through `EngineApi` and is
-    /// not added here.
-    origin: Vec3,
-    /// World-space bounds of the model at `origin`; `None` when the engine gave none.
-    bounds: Option<(Vec3, Vec3)>,
-}
-
-impl BrushRef {
-    /// Whether a box of half-extents `half` swept from `a` to `b` can touch the brush.
-    fn near_sweep(&self, a: Vec3, b: Vec3, half: Vec3) -> bool {
-        let Some((mins, maxs)) = self.bounds else {
-            return true;
-        };
-        let pad = half + Vec3::splat(4.0);
-        let (lo, hi) = (a.min(b) - pad, a.max(b) + pad);
-        lo.cmple(maxs).all() && hi.cmpge(mins).all()
-    }
-}
-
 /// Whether the player's box (hull half-extents plus 3 units in x and y) overlaps the bounds of
 /// any ladder: the check of the legacy `BspCollision::is_on_ladder`. A ladder the engine gave
 /// no bounds never matches.
@@ -102,66 +79,77 @@ fn touches_ladder(ladders: &[(Vec3, Vec3)], pos: Vec3, hull: Hull) -> bool {
         .any(|&(mins, maxs)| lo.cmple(maxs).all() && hi.cmpge(mins).all())
 }
 
-/// The world the players move in: the engine's geometry through [`EngineApi`] plus the game's
-/// own lists of solid and ladder brush entities.
+/// The world one player moves in: the engine's geometry and entities through
+/// [`EngineApi::trace_player_move`] plus the game's own list of ladder bounds.
+///
+/// Ladders: in the original the movement finds them as physents whose `skin` is
+/// `CONTENTS_LADDER` (`SV_AddLinksToPM`); here the game keeps their bounds from the entity
+/// lump and answers [`MoveWorld::is_on_ladder`] with the legacy overlap test.
 struct EngineWorld<'a, 'e> {
     eng: &'a EngineApi<'e>,
-    solids: &'a [BrushRef],
+    /// The edict of the player that moves: the one `trace_player_move` leaves out.
+    player: EdictId,
     ladders: &'a [(Vec3, Vec3)],
+    /// Entities (not the world) the traces of this move were stopped by or started inside,
+    /// each once, in the order they were found.
+    touched: RefCell<Vec<EdictId>>,
+}
+
+impl<'a, 'e> EngineWorld<'a, 'e> {
+    fn new(eng: &'a EngineApi<'e>, player: EdictId, ladders: &'a [(Vec3, Vec3)]) -> Self {
+        Self {
+            eng,
+            player,
+            ladders,
+            touched: RefCell::new(Vec::new()),
+        }
+    }
 }
 
 impl MoveWorld for EngineWorld<'_, '_> {
-    /// Mirrors `BspCollision::trace_hull`: the world trace, returned at once when it is
-    /// all-solid; then each solid brush entity's trace, where an all-solid brush trace is
-    /// returned at once, and a trace replaces the best wholesale when it is nearer or starts in
-    /// solid while the best does not.
+    /// The player movement trace of the engine. Every entity a trace hits (or starts inside)
+    /// is remembered as touched. The original's `pmove` records a touch only for the traces
+    /// of its fly and step moves (`PM_AddToTouched`); this records those of every trace, the
+    /// ground checks included, so a player standing on a brush touches it.
     fn trace_hull(&self, start: Vec3, end: Vec3, hull: Hull) -> TraceResult {
-        let mut best = self.eng.trace_hull(start, end, hull);
-        if best.fraction <= 0.0 && best.all_solid {
-            return best;
-        }
-        let half = hull.half_extents();
-        for brush in self.solids {
-            if !brush.near_sweep(start, end, half) {
-                continue;
-            }
-            let res = self
-                .eng
-                .trace_model(brush.model, brush.origin, start, end, hull);
-            if res.all_solid {
-                return res;
-            }
-            if res.fraction < best.fraction || (res.start_solid && !best.start_solid) {
-                best = res;
+        let hit = self.eng.trace_player_move(self.player, start, end, hull);
+        if let Some(ent) = hit.ent
+            && ent != self.eng.world()
+        {
+            let mut touched = self.touched.borrow_mut();
+            if !touched.contains(&ent) {
+                touched.push(ent);
             }
         }
-        best
+        hit.trace
     }
 
     fn is_on_ladder(&self, pos: Vec3, hull: Hull) -> bool {
         touches_ladder(self.ladders, pos, hull)
     }
 
-    /// Mirrors `BspCollision::point_contents`: the world's contents unless that is solid
-    /// anyway, else solid when a solid brush entity near `point` (bounds padded by the hull's
-    /// half-extents plus 2) holds it. The legacy precise query is the brush model's contents
-    /// for `hull`; `EngineApi` has no such call, so a zero-length trace of `hull` through the
-    /// model stands in: it starts in solid exactly when that point is solid.
+    /// The contents of the world for `hull` unless that is solid anyway; else solid when the
+    /// entities the player collides with hold `point` (a zero-length player trace of `hull`
+    /// starts in solid exactly then: the legacy rule for the brush entities, and now other
+    /// players too); else the contents of a non-solid brush entity (`func_water`) that holds
+    /// `point`, which [`EngineApi::point_contents_ents`] finds.
     fn point_contents(&self, point: Vec3, hull: Hull) -> i32 {
         let c = self.eng.point_contents(point, hull);
         if c == CONTENTS_SOLID {
             return c;
         }
-        let pad = hull.half_extents() + Vec3::splat(2.0);
-        let in_solid_brush = self.solids.iter().any(|b| {
-            b.bounds
-                .is_none_or(|(mins, maxs)| (mins - pad).cmple(point).all() && point.cmple(maxs + pad).all())
-                && self
-                    .eng
-                    .trace_model(b.model, b.origin, point, point, hull)
-                    .start_solid
-        });
-        if in_solid_brush { CONTENTS_SOLID } else { c }
+        if self
+            .eng
+            .trace_player_move(self.player, point, point, hull)
+            .trace
+            .start_solid
+        {
+            return CONTENTS_SOLID;
+        }
+        match self.eng.point_contents_ents(point) {
+            CONTENTS_EMPTY => c,
+            in_entity => in_entity,
+        }
     }
 }
 
@@ -191,8 +179,6 @@ pub enum WorldAnswer {
 
 pub struct WalkGame {
     spawns: Vec<SpawnPoint>,
-    /// Brush entities of the map that block movement, from `spawn_entity`.
-    solids: Vec<BrushRef>,
     /// World-space bounds of the map's `func_ladder` entities: all the overlap test reads.
     ladders: Vec<(Vec3, Vec3)>,
     params: MoveParams,
@@ -213,7 +199,6 @@ impl WalkGame {
     pub fn new(params: MoveParams) -> Self {
         Self {
             spawns: Vec::new(),
-            solids: Vec::new(),
             ladders: Vec::new(),
             params,
             player_model: 0,
@@ -340,12 +325,13 @@ impl GameDll for WalkGame {
     fn server_deactivate(&mut self, _eng: &mut EngineApi<'_>) {
         self.players.clear();
         self.spawns.clear();
-        self.solids.clear();
         self.ladders.clear();
     }
 
-    /// Remembers spawn points and brush entities from the map's entity lump and refuses every
-    /// entity: the game keeps none of its own.
+    /// Remembers spawn points and ladders from the map's entity lump and keeps the solid brush
+    /// entities (`SOLID_BSP`, `MOVETYPE_PUSH`, not moving: there is no door logic yet) as
+    /// entities of the engine, which the players' movement traces hit; refuses every other
+    /// entity.
     fn spawn_entity(
         &mut self,
         eng: &mut EngineApi<'_>,
@@ -376,22 +362,24 @@ impl GameDll for WalkGame {
         if !solid && classname != "func_ladder" {
             return false;
         }
-        // The engine ran `set_model` for a precached `*N` model before this call. The brush
-        // model number comes from the name: `modelindex` is the model-table index, one more
-        // than `N` (slot 1 holds the map itself).
-        let Some(model) = brush_model_number(&vars.model) else {
+        // The engine ran `set_model` for a precached `*N` model before this call.
+        if brush_model_number(&vars.model).is_none() {
             return false;
-        };
-        let origin = vars.origin;
-        let bounds = (vars.maxs != vars.mins).then_some((origin + vars.mins, origin + vars.maxs));
+        }
         if solid {
-            self.solids.push(BrushRef {
-                model,
-                origin,
-                bounds,
-            });
-        } else if let Some(bounds) = bounds {
-            self.ladders.push(bounds);
+            // The engine ran `set_model` for the `*N` model, which gave the entity its bounds
+            // and linked it; it is solid now, so link it again for the traces to see it.
+            if let Some(v) = eng.ent_mut(id) {
+                v.solid = SOLID_BSP;
+                v.movetype = MOVETYPE_PUSH;
+                v.velocity = Vec3::ZERO;
+            }
+            eng.link_entity(id, false);
+            return true;
+        }
+        let origin = vars.origin;
+        if vars.maxs != vars.mins {
+            self.ladders.push((origin + vars.mins, origin + vars.maxs));
         }
         false
     }
@@ -402,11 +390,7 @@ impl GameDll for WalkGame {
 
     fn client_put_in_server(&mut self, eng: &mut EngineApi<'_>, slot: u8) {
         let (origin, yaw) = {
-            let world = EngineWorld {
-                eng,
-                solids: &self.solids,
-                ladders: &self.ladders,
-            };
+            let world = EngineWorld::new(eng, eng.client_edict(slot), &self.ladders);
             match spawn_for(&self.spawns, slot) {
                 Some(spawn) => (snap_spawn_to_floor(spawn.position, &world), spawn.yaw_deg),
                 None => (Vec3::ZERO, 0.0),
@@ -435,9 +419,11 @@ impl GameDll for WalkGame {
         v.flags = ent_flags::FL_CLIENT;
         v.mins = STANDING_MINS;
         v.maxs = STANDING_MAXS;
+        v.size = STANDING_MAXS - STANDING_MINS;
         v.view_ofs = Vec3::new(0.0, 0.0, VEC_VIEW);
         v.max_speed = WALK_MAX_SPEED;
         v.fov = FOV;
+        // The engine links the player after this call.
     }
 
     fn client_disconnect(&mut self, _eng: &mut EngineApi<'_>, slot: u8) {
@@ -463,14 +449,14 @@ impl GameDll for WalkGame {
         };
         let input = usercmd_to_move_input(cmd, WALK_MAX_SPEED);
         let dt = f32::from(cmd.msec) / 1000.0;
-        let world = EngineWorld {
-            eng,
-            solids: &self.solids,
-            ladders: &self.ladders,
-        };
-        step_player_move(state, &input, WALK_MAX_SPEED, &self.params, &world, dt);
-
         let id = eng.client_edict(slot);
+        let world = EngineWorld::new(eng, id, &self.ladders);
+        step_player_move(state, &input, WALK_MAX_SPEED, &self.params, &world, dt);
+        // What the movement ran into reaches the engine as impacts, delivered after the command.
+        for other in world.touched.into_inner() {
+            eng.player_touched(id, other);
+        }
+
         let Some(v) = eng.ent_mut(id) else {
             return;
         };
@@ -491,6 +477,8 @@ impl GameDll for WalkGame {
             v.mins = STANDING_MINS;
             v.maxs = STANDING_MAXS;
         }
+        v.size = v.maxs - v.mins;
+        // The engine links the player after the command.
     }
 
     #[cfg(not(feature = "test-hooks"))]
@@ -501,11 +489,7 @@ impl GameDll for WalkGame {
         if self.queries.is_empty() {
             return;
         }
-        let world = EngineWorld {
-            eng,
-            solids: &self.solids,
-            ladders: &self.ladders,
-        };
+        let world = EngineWorld::new(eng, eng.client_edict(0), &self.ladders);
         for query in self.queries.drain(..) {
             self.answers.push(match query {
                 WorldQuery::Trace { start, end, hull } => {

@@ -78,7 +78,7 @@ pub(crate) fn banner(build: i32, spawn_count: u32) -> String {
 /// comes from the world entity's `skyname` key.
 pub(crate) fn move_vars(cvars: &CVarRegistry, entities: &[Entity]) -> MoveVarsMsg {
     let mut mv = MoveVarsMsg::default();
-    let fields: [(&str, &mut f32); 7] = [
+    let fields: [(&str, &mut f32); 9] = [
         ("sv_gravity", &mut mv.gravity),
         ("sv_stopspeed", &mut mv.stopspeed),
         ("sv_maxspeed", &mut mv.maxspeed),
@@ -86,6 +86,8 @@ pub(crate) fn move_vars(cvars: &CVarRegistry, entities: &[Entity]) -> MoveVarsMs
         ("sv_airaccelerate", &mut mv.airaccelerate),
         ("sv_friction", &mut mv.friction),
         ("sv_stepsize", &mut mv.stepsize),
+        ("sv_bounce", &mut mv.bounce),
+        ("sv_maxvelocity", &mut mv.maxvelocity),
     ];
     for (name, field) in fields {
         if let Some(cvar) = cvars.get(name) {
@@ -367,6 +369,8 @@ mod tests {
         let mut cvars = CVarRegistry::new_with_defaults();
         cvars.set("sv_gravity", "600");
         cvars.set("sv_stepsize", "20");
+        cvars.set("sv_maxvelocity", "1500");
+        cvars.set("sv_bounce", "0.5");
         let world = Entity {
             properties: HashMap::from([
                 ("classname".to_string(), "worldspawn".to_string()),
@@ -375,6 +379,8 @@ mod tests {
         };
         let mv = move_vars(&cvars, &[world]);
         assert_eq!((mv.gravity, mv.stepsize), (600.0, 20.0));
+        // `SV_SetMoveVars` (`sv_main.cpp`, read 2026-11-21) copies these two as well.
+        assert_eq!((mv.maxvelocity, mv.bounce), (1500.0, 0.5));
         assert_eq!(mv.stopspeed, cvars.get_f32("sv_stopspeed"));
         assert_eq!(mv.sky_name, "space");
 

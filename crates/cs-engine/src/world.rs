@@ -325,6 +325,9 @@ pub(crate) struct WorldLinks {
     touches_dropped: usize,
     /// The server is inside its touch dispatch loop (`touch.rs`).
     pub(crate) dispatching: bool,
+    /// Touches the movement of the player being run found, as `(player, other)`, until the
+    /// engine turns them into impacts after the command (`EngineApi::player_touched`).
+    pub(crate) player_impacts: Vec<(EdictId, EdictId)>,
     /// The game's `force_retouch` global (see `EngineApi::set_force_retouch`).
     pub(crate) force_retouch: f32,
     /// The engine's random numbers (`RandomLong` replacement), restarted with every map's world.
@@ -341,6 +344,7 @@ impl WorldLinks {
             frame_touches: 0,
             touches_dropped: 0,
             dispatching: false,
+            player_impacts: Vec::new(),
             force_retouch: 0.0,
             rng: crate::rng::EngineRng::new(),
         };

@@ -13,6 +13,7 @@ use crate::game::GameDll;
 use crate::lifecycle::NAME_CHANGE_MIN_INTERVAL_SECS;
 use crate::oob::{MAX_INFO_STRING, sanitize_name};
 use crate::server::Server;
+use crate::world::consts::SOLID_NOT;
 
 /// Movement time, in milliseconds, a client may bank ahead of the commands it sends.
 pub const MAX_BANKED_MS: f64 = 500.0;
@@ -204,6 +205,7 @@ impl<G: GameDll> Server<G> {
             &self.clients[index].last_cmd,
         );
         let count = run.len();
+        let mut svtimebase = self.establish_time_base(&run);
         for (i, cmd) in run.iter().enumerate() {
             // Dropped before it costs any time; it is not a bad move.
             if !usercmd_is_finite(cmd) {
@@ -220,7 +222,13 @@ impl<G: GameDll> Server<G> {
             // Working assumption: the packet's sequence minus the index from the newest.
             let random_seed = sequence.wrapping_sub((count - 1 - i) as u32);
             for step in split_usercmd(&granted) {
-                self.call_game(|game, eng| game.run_usercmd(eng, slot, &step, random_seed));
+                svtimebase += f64::from(step.msec) * 0.001;
+                self.run_player_cmd(slot, &step, random_seed, svtimebase);
+                if self.clients[index].state != ClientState::Active {
+                    // Kicked by the game, or freed by what a touch did.
+                    self.drain_outbox();
+                    return;
+                }
             }
         }
         let client = &mut self.clients[index];
@@ -229,6 +237,49 @@ impl<G: GameDll> Server<G> {
         }
         client.bad_moves = 0;
         self.drain_outbox();
+    }
+
+    /// `SV_EstablishTimeBase` (ReHLDS `rehlds/engine/sv_user.cpp`, read 2026-11-21): the server
+    /// time the first command of a move starts at, the end of the frame minus the duration of
+    /// every command that will run (the new ones and the replayed ones; `run` holds both, by the
+    /// `msec` they arrived with, before the time budget and the split).
+    fn establish_time_base(&self, run: &[GoldSrcUserCmd]) -> f64 {
+        let total: f64 = run.iter().map(|c| f64::from(c.msec) / 1000.0).sum();
+        self.frametime + self.sv_time - total
+    }
+
+    /// One step of `SV_RunCmd`: the game's `run_usercmd` at the client's `svtimebase` (the time
+    /// at the end of this step) with the step's own frame time, `EngineApi::time` and
+    /// `EngineApi::frametime` of the call; then `SV_ProcessImpacts`, see
+    /// [`finish_player_cmd`](Self::finish_player_cmd).
+    fn run_player_cmd(&mut self, slot: u8, step: &GoldSrcUserCmd, random_seed: u32, time: f64) {
+        let host_frametime = std::mem::replace(&mut self.frametime, f64::from(step.msec) * 0.001);
+        // Touches reported outside a command are not this command's.
+        self.world.player_impacts.clear();
+        self.sync_views();
+        self.call_game_synced_at(time, |game, eng| {
+            game.run_usercmd(eng, slot, step, random_seed)
+        });
+        self.frametime = host_frametime;
+        self.finish_player_cmd(slot);
+    }
+
+    /// `SV_ProcessImpacts` (`sv_user.cpp`): unless the player's edict is `SOLID_NOT`, links it
+    /// again, which queues the triggers its box now meets, then queues the impacts the movement
+    /// reported (`EngineApi::player_touched`) as `SV_Impact(other, player)`; the touches are
+    /// delivered at once, after the call that found them. The touches of a non-solid player are
+    /// dropped, and so are those reported for another player than `slot`'s.
+    fn finish_player_cmd(&mut self, slot: u8) {
+        let player = self.edicts.client(slot);
+        let touched = std::mem::take(&mut self.world.player_impacts);
+        let solid = self.edicts.get(player).is_some_and(|e| e.vars.solid != SOLID_NOT);
+        if solid {
+            self.with_engine(|eng| eng.link_entity(player, true));
+            for (_, other) in touched.into_iter().filter(|&(p, _)| p == player) {
+                self.impact(other, player);
+            }
+        }
+        self.dispatch_touches();
     }
 
     /// Counts an unparsable payload from `slot` as a bad move; an `Active` client is dropped

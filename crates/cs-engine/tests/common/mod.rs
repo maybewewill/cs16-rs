@@ -264,6 +264,10 @@ pub struct TestGame {
     pub start_frame_times: Vec<f64>,
     /// `eng.time()` of every `run_usercmd` call.
     pub usercmd_times: Vec<f64>,
+    /// `eng.frametime()` of every `run_usercmd` call.
+    pub usercmd_frametimes: Vec<f32>,
+    /// Entities every `run_usercmd` reports to `EngineApi::player_touched` for its player.
+    pub usercmd_touches: Vec<EdictId>,
     /// `eng.time()` of every `server_activate` call.
     pub activate_times: Vec<f64>,
 
@@ -558,6 +562,7 @@ impl GameDll for TestGame {
     ) {
         self.run_usercmd_calls += 1;
         self.usercmd_times.push(eng.time());
+        self.usercmd_frametimes.push(eng.frametime());
         self.random_seeds.push(random_seed);
         self.usercmd_msecs.push(cmd.msec);
         if self.flood_per_usercmd > 0 {
@@ -571,6 +576,9 @@ impl GameDll for TestGame {
         let id = eng.client_edict(slot);
         if let Some(vars) = eng.ent_mut(id) {
             vars.origin.x += cmd.forwardmove * f32::from(cmd.msec) / 1000.0;
+        }
+        for &other in &self.usercmd_touches {
+            eng.player_touched(id, other);
         }
     }
 

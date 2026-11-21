@@ -155,7 +155,7 @@ pub(crate) fn bsp_offset(hull: Hull, mins: Vec3, origin: Vec3) -> Vec3 {
 }
 
 /// `SV_MoveBounds`: the box that holds the whole move.
-fn move_bounds(start: Vec3, mins: Vec3, maxs: Vec3, end: Vec3) -> (Vec3, Vec3) {
+pub(crate) fn move_bounds(start: Vec3, mins: Vec3, maxs: Vec3, end: Vec3) -> (Vec3, Vec3) {
     let mut boxmins = Vec3::ZERO;
     let mut boxmaxs = Vec3::ZERO;
     for i in 0..3 {
@@ -449,7 +449,7 @@ impl EngineApi<'_> {
     /// `SV_SingleClipMoveToEntity`: traces the box `mins..maxs` from `start` to `end` against
     /// entity `id` alone. `force_bsp` is `PF_TraceModel`'s: a brush-model entity is clipped as
     /// `SOLID_BSP` with `MOVETYPE_PUSH`.
-    fn clip_to_entity(
+    pub(crate) fn clip_to_entity(
         &self,
         id: EdictId,
         start: Vec3,

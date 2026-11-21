@@ -9,6 +9,8 @@ use glam::Vec3;
 use crate::collision::{CONTENTS_EMPTY, Hull, MAX_WORLD_COORD, TraceResult};
 use crate::edict::{EdictId, EntVars};
 use crate::game::EngineApi;
+use crate::trace_ents::{EntTrace, move_bounds};
+use crate::world::consts::{FL_CLIENT, FL_MONSTERCLIP, SOLID_BBOX, SOLID_BSP, SOLID_SLIDEBOX};
 use crate::world::free_entity;
 use crate::mapents::MAX_VALUE_BYTES;
 use crate::precache::PrecacheError;
@@ -275,6 +277,131 @@ impl EngineApi<'_> {
         }
     }
 
+    /// The trace of the player movement code: the box of `hull` from `start` to `end` through
+    /// the world and the entities `player`'s movement collides with, which are the physents of
+    /// `SV_AddLinksToPM` and `SV_IsCollidableInPM` (ReHLDS `rehlds/engine/sv_user.cpp`, read
+    /// 2026-11-21). An entity is left out when it is `player` itself or is owned by it; when it
+    /// is not `SOLID_BSP`, `SOLID_BBOX` or `SOLID_SLIDEBOX` (triggers and `SOLID_NOT` entities,
+    /// whose `skin` contents only matter to `point_contents_ents`); when it is a `SOLID_BSP`
+    /// entity with `FL_MONSTERCLIP`; when it is a client with no health left; when its box is
+    /// `mins.z == 0`, `maxs.z == 1` or its `size` is zero; and when its absolute box misses
+    /// the box around the player's origin (256 units each way, the original's reach), which
+    /// here also takes in the whole move so that a trace never misses what it passes through.
+    /// A client's box is the entity's own (the original's lag compensation,
+    /// `SV_GetTrueOrigin`, is not modelled), and neither the `groupinfo` filter nor the
+    /// `SV_AllowPhysent` hook exists.
+    ///
+    /// The results combine as the legacy `BspCollision::trace_hull` did: the world first, an
+    /// all-solid world trace returned at once; then each entity in ascending index order, an
+    /// all-solid one returned at once, and any other replacing the best when it stops nearer
+    /// or starts in solid while the best does not. `EntTrace::ent` is the world or the entity
+    /// that stopped the trace, `None` for a clear one. A stale `player` or a `start` or `end`
+    /// outside the world is refused: nothing is hit and `end_pos` is `start`.
+    pub fn trace_player_move(
+        &self,
+        player: EdictId,
+        start: Vec3,
+        end: Vec3,
+        hull: Hull,
+    ) -> EntTrace {
+        let refused = EntTrace {
+            trace: refused_trace(start),
+            ent: None,
+        };
+        let Some(origin) = self.edicts.get(player).map(|e| e.vars.origin) else {
+            return refused;
+        };
+        if !in_world(start) || !in_world(end) {
+            return refused;
+        }
+        let half = hull.half_extents();
+        let (mins, maxs) = (-half, half);
+
+        let mut best = self.trace_hull(start, end, hull);
+        let mut best_ent = (best.fraction < 1.0 || best.start_solid).then(|| self.world());
+        if best.fraction <= 0.0 && best.all_solid {
+            return EntTrace {
+                trace: finish_player_trace(best),
+                ent: best_ent,
+            };
+        }
+
+        // The reach box of `SV_AddLinksToPM`, widened to the move.
+        let (move_min, move_max) = move_bounds(start, mins, maxs, end);
+        let reach = Vec3::splat(PM_REACH);
+        let box_min = (origin - reach).min(move_min);
+        let box_max = (origin + reach).max(move_max);
+        let mut candidates = Vec::new();
+        self.world
+            .solids_in_box(self.edicts, box_min, box_max, &mut candidates);
+        candidates.sort_by_key(|id| id.index);
+        candidates.dedup();
+
+        for id in candidates {
+            if !self.collidable_in_pm(id, player, box_min, box_max) {
+                continue;
+            }
+            let Some(solid) = self.edicts.get(id).map(|e| e.vars.solid) else {
+                continue;
+            };
+            let hit = self
+                .clip_to_entity(id, start, mins, maxs, end, solid == SOLID_BSP)
+                .trace;
+            if hit.all_solid {
+                return EntTrace {
+                    trace: finish_player_trace(hit),
+                    ent: Some(id),
+                };
+            }
+            if hit.fraction < best.fraction || (hit.start_solid && !best.start_solid) {
+                best = hit;
+                best_ent = Some(id);
+            }
+        }
+        EntTrace {
+            trace: finish_player_trace(best),
+            ent: best_ent,
+        }
+    }
+
+    /// `SV_AddLinksToPM_` and `SV_IsCollidableInPM` for entity `id` against the box
+    /// `mins..maxs` (see [`trace_player_move`](Self::trace_player_move)).
+    fn collidable_in_pm(&self, id: EdictId, player: EdictId, mins: Vec3, maxs: Vec3) -> bool {
+        let Some(v) = self.edicts.get(id).map(|e| &e.vars) else {
+            return false;
+        };
+        id.index != player.index
+            && v.owner.is_none_or(|o| o.index != player.index)
+            && matches!(v.solid, SOLID_BSP | SOLID_BBOX | SOLID_SLIDEBOX)
+            && !(v.flags & FL_MONSTERCLIP != 0 && v.solid == SOLID_BSP)
+            && !(v.flags & FL_CLIENT != 0 && v.health <= 0.0)
+            && !(v.mins.z == 0.0 && v.maxs.z == 1.0)
+            && v.size.length() != 0.0
+            && v.absmin.cmple(maxs).all()
+            && mins.cmple(v.absmax).all()
+    }
+
+    /// `SV_Impact` for a touch the movement of `player` found with `other` (`SV_ProcessImpacts`
+    /// does this for each `touchindex` of the original's `pmove`). The touches are kept until
+    /// the command ends; then the engine relinks `player` (which queues the triggers it
+    /// overlaps) and queues one impact for each, as `SV_Impact(other, player)`. Ignored for
+    /// anything but a client's edict, a stale id, `other == player`, and past
+    /// `MAX_PLAYER_IMPACTS` touches in one command. The original also sets the player's
+    /// velocity to the trace's `deltavelocity` for each touch; here the game sees the velocity
+    /// the command ended with.
+    pub fn player_touched(&mut self, player: EdictId, other: EdictId) {
+        let is_client = (1..=u16::from(self.edicts.max_clients())).contains(&player.index);
+        if !is_client
+            || player.index == other.index
+            || self.edicts.get(player).is_none()
+            || self.edicts.get(other).is_none()
+            || self.world.player_impacts.len() >= MAX_PLAYER_IMPACTS
+        {
+            return;
+        }
+        self.world.player_impacts.push((player, other));
+    }
+
     /// Whether a box with absolute corners `mins`/`maxs` is potentially visible (PVS) from
     /// `eye`. A map without visibility data (stub map) sees everything; an `eye`, `mins` or
     /// `maxs` outside the world (non-finite, or a coordinate beyond [`MAX_WORLD_COORD`]) sees
@@ -282,6 +409,20 @@ impl EngineApi<'_> {
     pub fn can_see(&self, eye: Vec3, mins: Vec3, maxs: Vec3) -> bool {
         in_world(eye) && in_world(mins) && in_world(maxs) && self.map.can_see(eye, mins, maxs)
     }
+}
+
+/// Reach, in units each way from the player's origin, of the entities `SV_AddLinksToPM` hands
+/// to the player movement.
+const PM_REACH: f32 = 256.0;
+
+/// Touches of one player command `player_touched` keeps (`MAX_PHYSENTS`, the most physents the
+/// original's `pmove` has).
+const MAX_PLAYER_IMPACTS: usize = 600;
+
+/// The flags of a trace that [`EngineApi::trace_player_move`] sets once, at the end.
+fn finish_player_trace(mut t: TraceResult) -> TraceResult {
+    t.hit_solid = t.fraction < 1.0 || t.start_solid;
+    t
 }
 
 /// Whether every coordinate of `v` is finite and within [`MAX_WORLD_COORD`].

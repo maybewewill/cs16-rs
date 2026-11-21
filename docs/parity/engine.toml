@@ -110,3 +110,23 @@ evidence = "crates/cs-engine/tests/lifecycle.rs::silent_client_times_out_and_oth
 id = "usercmd_replay"
 status = "tested"
 evidence = "crates/cs-engine/src/usercmd.rs::tests::loss_within_backup_replays_backups, loss_beyond_backup_repeats_last, huge_loss_runs_only_new; crates/cs-engine/tests/usercmd.rs::movement_continues_under_loss, forward_cmds_move_the_player (random_seed); crates/cs-engine/tests/soak.rs::soak_3000_frames_8_clients; replay rule and random_seed are working assumptions, unverified against a real server"
+
+[[item]]
+id = "player_movement_trace"
+status = "tested"
+evidence = "crates/cs-engine/tests/players_in_world.rs::player_move_trace_ignores_triggers_and_self, player_move_trace_is_refused_for_bad_input; crates/cs-sim/tests/walk_game.rs::players_block_each_other, solid_brush_entities_block_movement, legacy_numbers_unchanged, adapter_mirrors_legacy_inside_a_solid_brush; EngineApi::trace_player_move ports the entity filter of ReHLDS sv_user.cpp SV_AddLinksToPM_ / SV_IsCollidableInPM / SV_CopyEdictToPhysent (read 2026-11-21): not the player itself, not entities it owns, only SOLID_BSP / SOLID_BBOX / SOLID_SLIDEBOX block (SOLID_NOT entities, whose skin is a contents or the ladder, and triggers do not), no FL_MONSTERCLIP brush, no client with health <= 0, no box with mins.z == 0 and maxs.z == 1, no zero size, within 256 units of the player; accepted deviations: the reach box is widened to the move, a client's box is its own (SV_GetTrueOrigin lag compensation is not modelled), no groupinfo filter and no SV_AllowPhysent hook, the results combine as the legacy BspCollision::trace_hull did (world first, all-solid at once, nearer or start-solid replaces) rather than as PM_PlayerTrace; ladders are physents with skin CONTENTS_LADDER in the original, WalkGame keeps its own list of ladder bounds from the entity lump (ladder_check_matches_the_legacy_overlap_test); not compared with the original server"
+
+[[item]]
+id = "player_impacts"
+status = "tested"
+evidence = "crates/cs-engine/tests/players_in_world.rs::player_edict_is_linked_after_each_command, walking_into_a_trigger_touches_it, touches_the_movement_reports_arrive_as_impacts; crates/cs-sim/tests/walk_game.rs::a_walking_player_stays_visible_across_leaves; after every run_usercmd step the engine links the player edict with trigger touches unless it is SOLID_NOT, then queues SV_Impact(other, player) for each EngineApi::player_touched, as SV_FinishPMove / SV_ProcessImpacts of ReHLDS sv_user.cpp (read 2026-11-21); a player is SOLID_SLIDEBOX and MOVETYPE_WALK before the game's client_put_in_server; accepted deviations: the touches are delivered after the game call, not inside it, the player's velocity is not set to each touch's deltavelocity, WalkGame reports the entity of every hit trace (the original's pmove records only those of its fly and step moves, PM_AddToTouched); not compared with the original server"
+
+[[item]]
+id = "usercmd_time_base"
+status = "tested"
+evidence = "crates/cs-engine/tests/players_in_world.rs::commands_run_at_their_clients_time_base, crates/cs-engine/tests/physics.rs::frame_order_is_packets_then_physics_then_time; ReHLDS sv_user.cpp SV_EstablishTimeBase and SV_RunCmd (read 2026-11-21): the commands of a move start at sv_time + frametime minus their total duration, each step advances the time base by its own msec, and during the game's run_usercmd EngineApi::time is that time base and EngineApi::frametime the step's own frame time; the sum includes commands the msec budget then cuts short (as the original, which has no budget); the time base is local to one move, not kept per client"
+
+[[item]]
+id = "movevars_maxvelocity"
+status = "tested"
+evidence = "crates/cs-engine/src/signon.rs::tests::move_vars_follow_cvars_and_sky; SV_SetMoveVars of ReHLDS sv_main.cpp (read 2026-11-21) copies sv_maxvelocity and sv_bounce into the movevars sent in svc_newmovevars; the other cvars that function copies (spectatormaxspeed, wateraccelerate, edgefriction, waterfriction, zmax, wateramp, footsteps, rollangle, rollspeed, sky) are not registered here and keep the message defaults"

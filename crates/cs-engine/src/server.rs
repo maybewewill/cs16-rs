@@ -21,6 +21,7 @@ use crate::map::ServerMap;
 use crate::oob::{ChallengeIssuer, OOB_GLOBAL_REPLIES_PER_SEC, OobLimiter};
 use crate::precache::PrecacheTables;
 use crate::world::WorldLinks;
+use crate::world::consts::{MOVETYPE_WALK, SOLID_SLIDEBOX};
 use crate::signon::{
     MAX_SIGNON_BUFFER, SPAWN_TAIL_MAX, UserInfoEntry, move_vars, munged_map_crc, write_new_stage,
     write_sendres_stage,
@@ -792,11 +793,20 @@ impl<G: GameDll> Server<G> {
         );
         self.clients[index].chan.write_reliable(w.as_slice());
 
+        // A player is a sliding box that walks unless the game says otherwise; the game's
+        // `ClientPutInServer` sets what it wants, then the edict is linked as `SV_LinkEdict`
+        // would from its `SET_ORIGIN`.
+        let player = self.edicts.client(slot);
+        if let Some(edict) = self.edicts.get_mut(player) {
+            edict.vars.solid = SOLID_SLIDEBOX;
+            edict.vars.movetype = MOVETYPE_WALK;
+        }
         self.with_game(|game, eng| game.client_put_in_server(eng, slot));
         if self.clients[index].is_free() {
             // Kicked while being put in.
             return;
         }
+        self.with_engine(|eng| eng.link_entity(player, false));
         self.clients[index].put_in_server = true;
         self.views[index].active = true;
 
