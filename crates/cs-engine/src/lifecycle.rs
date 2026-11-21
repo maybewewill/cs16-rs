@@ -126,8 +126,8 @@ impl<G: GameDll> Server<G> {
     /// Switches to `map` without dropping anyone: the game deactivates the old map and every
     /// client is taken out of the server, the spawn count goes up, the edicts (with serials no
     /// old id can match), the area tree and the precache tables are rebuilt for `map` and the
-    /// game activates it; then every connected client restarts its sign-on, its old reliable data discarded and
-    /// `reconnect` sent through the reliable stream. The init buffer and the light styles of
+    /// game activates it; then every connected client restarts its sign-on, its old reliable
+    /// data discarded and `reconnect` sent through the reliable stream. The init buffer and the light styles of
     /// the old map are cleared (the new map's activation refills them). Clients are not reported
     /// to the game as disconnected: its `server_deactivate` owns that state. Call it between
     /// [`frame`] calls.

@@ -18,7 +18,7 @@ use std::sync::Arc;
 use common::{FRAME, Harness, TestGame};
 use cs_assets::bsp::BspMap;
 use cs_engine::collision::Hull;
-use cs_engine::consts::{SOLID_TRIGGER};
+use cs_engine::consts::SOLID_TRIGGER;
 use cs_engine::{EngineApi, LinkSnapshot, MoveFilter, ServerConfig, ServerMap};
 use cs_probe::{ProbeClient, ProbeState};
 use cs_proto48::delta::GoldSrcUserCmd;
