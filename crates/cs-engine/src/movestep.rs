@@ -13,8 +13,8 @@
 //!   globals.
 //!
 //! Deviations kept on purpose:
-//! - `RandomLong(0, 1)` of `SV_NewChaseDir2` is a xorshift32 of the engine's own, state
-//!   `WorldLinks::rng`, set to a constant whenever a map's world is created. The original's
+//! - `RandomLong(0, 1)` of `SV_NewChaseDir2` is the engine generator of `rng.rs`
+//!   (`WorldLinks::rng`, restarted from a constant whenever a map's world is created). The original's
 //!   generator is a time-seeded global, so its choices cannot be reproduced anyway; this one
 //!   makes the walking of a map repeatable (tests count on that).
 //! - Input that is not finite or lies outside the world (see `in_world`) moves nothing and
@@ -230,6 +230,10 @@ impl EngineApi<'_> {
             .map(|e| e.vars.origin.z);
         for i in 0..2 {
             let mut neworg = origin + mv;
+            if !in_world(neworg) {
+                // A refused trace reads as a clear one; refuse the move itself.
+                return false;
+            }
             if i == 0
                 && let Some(enemy_z) = enemy_z
             {
@@ -411,12 +415,7 @@ impl EngineApi<'_> {
 
     /// `RandomLong(0, 1)` of the engine's own generator (see the module notes).
     fn random_bool(&mut self) -> bool {
-        let mut x = self.world.rng;
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
-        self.world.rng = x;
-        (x >> 16) & 1 != 0
+        self.world.rng.random_long(0, 1) != 0
     }
 
     /// `SV_NewChaseDir2`: picks a direction toward `goal` and walks `dist` along it.
@@ -515,7 +514,9 @@ impl EngineApi<'_> {
 }
 
 /// The horizontal move of `dist` units along `yaw` degrees, computed in double as the source
-/// does.
+/// does. (Assumption, not checked: `M_PI` is a double there, so `M_PI * 2.0f` is not rounded to
+/// float; `SV_StepDirection` groups `yaw * (M_PI * 2.0f) / 360.0f` where this groups
+/// `yaw * 2.0 * M_PI / 360.0`, which can differ in the last bit of the double only.)
 fn yaw_move(yaw: f32, dist: f32) -> Vec3 {
     let a = f64::from(yaw) * 2.0 * std::f64::consts::PI / 360.0;
     Vec3::new(
@@ -523,4 +524,117 @@ fn yaw_move(yaw: f32, dist: f32) -> Vec3 {
         (a.sin() * f64::from(dist)) as f32,
         0.0,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use cs_cvar::CVarRegistry;
+    use cs_proto48::usermsg::UserMsgRegistry;
+    use glam::Vec3;
+
+    use super::WalkMoveMode;
+    use crate::edict::{EdictId, EdictPool};
+    use crate::game::{ClientView, EngineApi, Outbox};
+    use crate::map::ServerMap;
+    use crate::precache::PrecacheTables;
+    use crate::world::WorldLinks;
+    use crate::world::consts::{
+        FL_ONGROUND, MOVETYPE_PUSHSTEP, SOLID_BBOX, SOLID_SLIDEBOX, SOLID_TRIGGER,
+    };
+
+    struct Fixture {
+        edicts: EdictPool,
+        precache: PrecacheTables,
+        cvars: CVarRegistry,
+        usermsgs: UserMsgRegistry,
+        map: ServerMap,
+        world: WorldLinks,
+        outbox: Outbox,
+        clients: Vec<ClientView>,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let map = ServerMap::stub("test");
+            Self {
+                edicts: EdictPool::new(1, 64),
+                precache: PrecacheTables::new(&map.path, map.submodel_count),
+                cvars: CVarRegistry::new_with_defaults(),
+                usermsgs: UserMsgRegistry::cs16_default(),
+                world: WorldLinks::new(map.world_bounds()),
+                map,
+                outbox: Outbox::new(1),
+                clients: vec![ClientView::default()],
+            }
+        }
+
+        fn api(&mut self) -> EngineApi<'_> {
+            EngineApi::new(
+                &mut self.edicts,
+                &mut self.precache,
+                &mut self.cvars,
+                &self.usermsgs,
+                &self.map,
+                &mut self.world,
+                1.0,
+                0.0,
+                &mut self.outbox,
+                &mut self.clients,
+            )
+        }
+    }
+
+    fn boxed(eng: &mut EngineApi<'_>, solid: u8, mins: Vec3, maxs: Vec3) -> EdictId {
+        let id = eng.create_entity("test_box").expect("free edict");
+        let v = eng.ent_mut(id).unwrap();
+        v.solid = solid;
+        v.movetype = MOVETYPE_PUSHSTEP;
+        eng.set_size(id, mins, maxs);
+        eng.set_origin(id, Vec3::ZERO);
+        id
+    }
+
+    /// A successful `Normal` move links with touches (a trigger the monster walks into is
+    /// queued); `CheckOnly` does not link and queues nothing.
+    #[test]
+    fn moves_queue_touches_as_sv_linkedict_does() {
+        for (mode, queued) in [
+            (WalkMoveMode::Normal, true),
+            (WalkMoveMode::CheckOnly, false),
+        ] {
+            let mut f = Fixture::new();
+            let mut eng = f.api();
+            boxed(
+                &mut eng,
+                SOLID_BBOX,
+                Vec3::new(-200.0, -200.0, -16.0),
+                Vec3::new(200.0, 200.0, 0.0),
+            );
+            let trigger = boxed(
+                &mut eng,
+                SOLID_TRIGGER,
+                Vec3::new(30.0, -50.0, 0.0),
+                Vec3::new(60.0, 50.0, 80.0),
+            );
+            let w = eng.create_entity("test_walker").unwrap();
+            let v = eng.ent_mut(w).unwrap();
+            v.solid = SOLID_SLIDEBOX;
+            v.flags = FL_ONGROUND;
+            eng.set_size(
+                w,
+                Vec3::new(-16.0, -16.0, -36.0),
+                Vec3::new(16.0, 16.0, 36.0),
+            );
+            eng.set_origin(w, Vec3::new(0.0, 0.0, 36.0));
+            assert!(eng.pending_touches().is_empty());
+
+            // Not yet in the trigger: nothing.
+            assert!(eng.walk_move(w, 0.0, 10.0, mode));
+            assert!(eng.pending_touches().is_empty());
+            // Into it (the box reaches x = 36 > 30).
+            assert!(eng.walk_move(w, 0.0, 20.0, mode));
+            let want: &[(EdictId, EdictId)] = if queued { &[(trigger, w)] } else { &[] };
+            assert_eq!(eng.pending_touches(), want, "{mode:?}");
+        }
+    }
 }

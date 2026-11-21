@@ -14,14 +14,13 @@ use std::sync::Arc;
 use common::{Harness, TestGame};
 use cs_assets::bsp::BspMap;
 use cs_engine::consts::{
-    FL_FLY, FL_ONGROUND, FL_PARTIALGROUND, FL_SWIM, MOVETYPE_PUSHSTEP, SOLID_BBOX, SOLID_SLIDEBOX,
+    FL_FLY, FL_MONSTERCLIP, FL_ONGROUND, FL_PARTIALGROUND, FL_SWIM, MOVETYPE_PUSH,
+    MOVETYPE_PUSHSTEP, SOLID_BBOX, SOLID_BSP, SOLID_SLIDEBOX,
 };
-use cs_engine::{EdictId, EngineApi, ServerConfig, ServerMap, WalkMoveMode};
+use cs_engine::{EdictId, EngineApi, MOVE_NORMAL, ServerConfig, ServerMap, WalkMoveMode};
 use cs_vfs::{Vfs, VfsConfig};
 use glam::Vec3;
 
-/// `MOVE_NORMAL` of `move_to_origin`.
-const MOVE_NORMAL: i32 = 0;
 
 /// Runs `f` as the game at the start of the next frame and returns what it returned.
 fn run<T: 'static>(h: &mut Harness, f: impl FnOnce(&mut EngineApi<'_>) -> T + 'static) -> T {
@@ -441,5 +440,111 @@ fn stuck_monster_gets_partial_ground_flag() {
         eng.move_to_origin(w, Vec3::new(200.0, 200.0, 36.0), 10.0, MOVE_NORMAL);
         assert_eq!(origin(eng, w), before);
         assert_ne!(eng.ent(w).unwrap().flags & FL_PARTIALGROUND, 0);
+    });
+}
+
+/// A flier in open air at (0, 0, 100), and a non-solid entity at `enemy_z` it has as `enemy`.
+fn flier_with_enemy(eng: &mut EngineApi<'_>, enemy_z: f32) -> (EdictId, EdictId) {
+    let f = walker(eng, Vec3::new(0.0, 0.0, 100.0), FL_FLY);
+    let e = walker(eng, Vec3::new(500.0, 0.0, enemy_z), 0);
+    eng.ent_mut(e).unwrap().solid = 0;
+    eng.ent_mut(f).unwrap().enemy = Some(e);
+    (f, e)
+}
+
+#[test]
+fn flier_follows_the_enemy_height_and_retries_flat() {
+    let mut h = stub_harness();
+    run(&mut h, |eng| {
+        // The enemy far below (dz 100 > 40): the move sinks 8.
+        let (f, _) = flier_with_enemy(eng, 0.0);
+        assert!(eng.walk_move(f, 0.0, 10.0, WalkMoveMode::Normal));
+        let p = origin(eng, f);
+        assert!(near(p.x, 10.0) && near(p.z, 92.0), "{p:?}");
+
+        // The enemy far above (dz < 30): the move rises 8.
+        let (f, _) = flier_with_enemy(eng, 200.0);
+        assert!(eng.walk_move(f, 0.0, 10.0, WalkMoveMode::Normal));
+        assert!(near(origin(eng, f).z, 108.0), "{:?}", origin(eng, f));
+
+        // Between 30 and 40 below: level flight.
+        let (f, _) = flier_with_enemy(eng, 65.0);
+        assert!(eng.walk_move(f, 0.0, 10.0, WalkMoveMode::Normal));
+        assert!(near(origin(eng, f).z, 100.0));
+
+        // A stale enemy counts as none: no height change.
+        let (f, e) = flier_with_enemy(eng, 0.0);
+        eng.remove_entity(e);
+        assert!(eng.walk_move(f, 0.0, 10.0, WalkMoveMode::Normal));
+        assert!(near(origin(eng, f).z, 100.0));
+
+        // A ceiling just above blocks the rising move; the second pass flies level.
+        slab(eng, Vec3::new(-300.0, -300.0, 140.0), Vec3::new(300.0, 300.0, 200.0));
+        let (f, _) = flier_with_enemy(eng, 400.0);
+        eng.set_origin(f, Vec3::new(0.0, 100.0, 100.0));
+        assert!(eng.walk_move(f, 0.0, 10.0, WalkMoveMode::Normal));
+        let p = origin(eng, f);
+        assert!(near(p.x, 10.0) && near(p.z, 100.0), "{p:?}");
+    });
+}
+
+#[test]
+fn hostile_numbers_never_reach_a_flier() {
+    let mut h = stub_harness();
+    run(&mut h, |eng| {
+        let f = walker(eng, Vec3::new(0.0, 0.0, 100.0), FL_FLY);
+        let before = origin(eng, f);
+        let linked = eng.ent(f).unwrap().absmin;
+        assert!(!eng.walk_move(f, 0.0, 1.0e9, WalkMoveMode::Normal));
+        assert!(!eng.walk_move(f, 0.0, 1.0e9, WalkMoveMode::CheckOnly));
+        assert_eq!(origin(eng, f), before);
+        assert_eq!(eng.ent(f).unwrap().absmin, linked);
+
+        // A huge step through `move_to_origin` goes nowhere either.
+        eng.move_to_origin(f, Vec3::new(100.0, 0.0, 100.0), 1.0e9, MOVE_NORMAL);
+        eng.move_to_origin(f, Vec3::new(100.0, 0.0, 100.0), 1.0e9, 1);
+        assert_eq!(origin(eng, f), before);
+
+        // A NaN `ideal_yaw` is no success and writes nothing that is not finite.
+        for flags in [FL_FLY, FL_ONGROUND] {
+            slab(eng, Vec3::new(-300.0, -300.0, -16.0), Vec3::new(500.0, 400.0, 0.0));
+            let w = walker(eng, Vec3::new(0.0, 200.0, 36.0), flags);
+            eng.ent_mut(w).unwrap().ideal_yaw = f32::NAN;
+            eng.move_to_origin(w, Vec3::new(100.0, 200.0, 36.0), 10.0, MOVE_NORMAL);
+            let v = eng.ent(w).unwrap();
+            assert!(v.origin.is_finite() && v.absmin.is_finite() && v.absmax.is_finite());
+        }
+    });
+}
+
+#[test]
+fn monster_clip_brushes_stop_only_monsters_that_ask_for_it() {
+    let Some(mut h) = dust2() else {
+        return;
+    };
+    run(&mut h, |eng| {
+        // The T spawn floor (-832, -704, 164.03125), where walking east 16 works. Then brush
+        // model *1 with `FL_MONSTERCLIP` is put over the step's destination.
+        let w = walker(eng, Vec3::new(-832.0, -704.0, 176.0), 0);
+        assert_eq!(eng.drop_to_floor(w), 1);
+        let p = origin(eng, w);
+        let wall = eng.create_entity("func_wall").expect("free edict");
+        assert!(eng.set_model(wall, "*1"));
+        let v = eng.ent_mut(wall).unwrap();
+        v.solid = SOLID_BSP;
+        v.movetype = MOVETYPE_PUSH;
+        v.flags = FL_MONSTERCLIP;
+        let mid = (v.mins + v.maxs) * 0.5;
+        eng.set_origin(wall, p + Vec3::new(16.0, 0.0, 0.0) - mid);
+
+        // An ordinary monster walks through it.
+        eng.ent_mut(w).unwrap().flags = FL_ONGROUND;
+        assert!(eng.walk_move(w, 0.0, 16.0, WalkMoveMode::Normal));
+
+        // One with `FL_MONSTERCLIP` is stopped by it and stays put.
+        eng.set_origin(w, p);
+        eng.ent_mut(w).unwrap().flags = FL_ONGROUND | FL_MONSTERCLIP;
+        assert!(!eng.walk_move(w, 0.0, 16.0, WalkMoveMode::Normal));
+        assert_eq!(origin(eng, w), p);
     });
 }

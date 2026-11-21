@@ -10,15 +10,16 @@ pub mod edict;
 pub mod frame;
 pub mod game;
 mod lifecycle;
-pub mod mapents;
 pub mod map;
+pub mod mapents;
+mod movestep;
 pub mod oob;
 pub mod precache;
 pub mod server;
 mod signon;
-mod movestep;
 mod physics;
 mod touch;
+mod rng;
 mod trace_ents;
 pub mod usercmd;
 mod world;
@@ -40,6 +41,7 @@ pub use lifecycle::{
 };
 pub use map::ServerMap;
 pub use mapents::{MAX_ENTITY_KEYS, MAX_KEY_BYTES, MAX_VALUE_BYTES};
+pub use movestep::{MOVE_NORMAL, WalkMoveMode};
 pub use oob::{
     CHALLENGE_BUCKET_SECS, ChallengeIssuer, ConnectRequest, MAX_INFO_STRING, MAX_NAME_BYTES,
     OOB_GLOBAL_REPLIES_PER_SEC, OobContext, OobLimiter, OobOutcome, handle_oob,
@@ -54,7 +56,6 @@ pub use signon::{
     INIT_BUFFER_BUDGET, MAX_SIGNON_BUFFER, SIGNON_BASELINE_RESERVE, SPAWN_TAIL_MAX,
 };
 pub use touch::MAX_TOUCHES_PER_FRAME;
-pub use movestep::WalkMoveMode;
 pub use trace_ents::{EntTrace, MoveFilter};
 pub use usercmd::{
     MAX_BANKED_MS, MAX_CONSECUTIVE_BAD_MOVES, MAX_DROPPED_REPLAY, MAX_USERCMD_STEP_MS, MsecBudget,
