@@ -6,10 +6,9 @@
 
 mod common;
 
-use common::{Bench, spawns};
+use common::{Bench, command, enter, join, spawns};
+use cs_engine::GameDll;
 use cs_engine::consts::{MOVETYPE_WALK, SOLID_SLIDEBOX};
-use cs_engine::{EngineApi, GameDll};
-use cs_game::CsGame;
 use cs_game::menus::Menu;
 use cs_game::player::{DEAD_DYING, Player, Team};
 use cs_game::teams::JoinState;
@@ -20,46 +19,6 @@ fn player(b: &Bench, slot: usize) -> Player {
     b.server.game().game.state().players[slot]
         .clone()
         .expect("a player in the slot")
-}
-
-/// Runs the console command `line` as the player of `slot`, at the start of the next frame.
-fn command(b: &mut Bench, slot: u8, line: &str) {
-    let argv: Vec<String> = line.split_whitespace().map(str::to_string).collect();
-    b.run(move |game, eng| {
-        game.client_command(eng, slot, &argv);
-        commands_of(game, eng, slot, 2);
-    });
-    // The probe reads what the game sent a few frames later (the server sends every other
-    // frame or so).
-    b.step(3);
-}
-
-/// `n` commands with time in them from the player of `slot`, which the game's per-player logic
-/// runs from (the probe of slot 0 sends its own every frame; the other slots have no client).
-fn commands_of(game: &mut CsGame, eng: &mut EngineApi<'_>, slot: u8, n: usize) {
-    for _ in 0..n {
-        let cmd = GoldSrcUserCmd {
-            msec: 10,
-            ..Default::default()
-        };
-        game.run_usercmd(eng, slot, &cmd, 0);
-    }
-}
-
-/// Puts a player in `slot` and lets it reach the team menu.
-fn enter(b: &mut Bench, slot: u8) {
-    b.run(move |game, eng| {
-        game.client_put_in_server(eng, slot);
-        commands_of(game, eng, slot, 3);
-    });
-    b.step(2);
-}
-
-/// The player of `slot` picks `team_choice` (1 or 2) and then appearance `class`.
-fn join(b: &mut Bench, slot: u8, team_choice: u8, class: u8) {
-    command(b, slot, &format!("jointeam {team_choice}"));
-    command(b, slot, &format!("joinclass {class}"));
-    b.step(2);
 }
 
 /// A bench the probe has reached the team menu on.

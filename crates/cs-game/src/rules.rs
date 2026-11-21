@@ -21,11 +21,15 @@
 //! - A map cycle that cannot be used (no `mapcycle.txt`, no valid map in it) changes to the
 //!   current map again; vanilla asks for `hldm1`, which does not exist in Counter-Strike (the
 //!   change fails and is retried every frame). A failed change is retried once a second here.
-//! - `mapcyclefile` is not read: the file is always `mapcycle.txt` ([`MapCycle::load`]), loaded
+//! - `mapcyclefile` is not read: the file is always `mapcycle.txt` ([`crate::mapcycle::MapCycle::load`]), loaded
 //!   once when the server starts. The `minplayers`/`maxplayers` of a line are honoured; the
 //!   other rules of a line (commands run after the change) are not executed.
 //! - The players leaving the server are counted the way vanilla counts them for the check made
 //!   when they leave: dead, on their team ([`on_disconnect`]).
+//! - `m_bRoundTerminating` is written by `TerminateRound`/`RestartRound` but never read in
+//!   vanilla, so it is not ported. `ClearBodyQue` and `CleanUpMap` are skipped: nothing creates
+//!   corpse entities or breakables yet (the corpse is a client-side `ClCorpse`); whether the
+//!   corpses of the last round are gone after a restart needs a live check with a real client.
 //! - `m_iCareer*`, bots, tutor, `m_flForceCameraValue`/`AllowSpec` change messages, the idle
 //!   kick and the voice manager are not ported.
 //!
@@ -45,7 +49,7 @@ use cs_proto48::usermsg::CsUserMsg;
 use crate::GameState;
 use crate::menus::{self, Menu};
 use crate::messages;
-use crate::player::{self, Team};
+use crate::player::{self, PITCH_NORM, Team};
 use crate::teams::{self, JoinState};
 
 /// `ROUND_RESPAWN_TIME` (`gamerules.h`): seconds into a round after which a joining player waits
@@ -63,8 +67,6 @@ const CHANGE_LEVEL_RETRY: f64 = 1.0;
 const MAX_BALANCE_SWAPS: usize = 4;
 /// The buttons that end the intermission: `IN_DUCK | IN_ATTACK | IN_ATTACK2 | IN_USE | IN_JUMP`.
 const INTERMISSION_BUTTONS: u16 = 4 | 1 | 2048 | 32 | 2;
-/// `PITCH_NORM`.
-const PITCH_NORM: i16 = 100;
 
 /// `m_iRoundWinStatus` (`WINSTATUS_*`): who won the round, none while it is played.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -300,7 +302,7 @@ fn broadcast(eng: &mut EngineApi<'_>, sentence: &str) {
         &CsUserMsg::SendAudio {
             sender_id: 0,
             audio_code: format!("%!MRAD_{sentence}"),
-            pitch: PITCH_NORM,
+            pitch: i16::from(PITCH_NORM),
         },
     );
 }
@@ -392,7 +394,7 @@ fn terminate_round(g: &mut GameState, eng: &EngineApi<'_>, delay: f64, status: W
 /// `Round_Cts`: the counter-terrorists win the round. (The account of the round belongs to the
 /// economy.)
 fn round_cts(g: &mut GameState, eng: &mut EngineApi<'_>, delay: f64) {
-    tracing::info!(ct_wins = g.num_ct_wins + 1, "round won by the counter-terrorists");
+    tracing::info!(needed_players = g.rules.needed_players, "round won by the counter-terrorists");
     broadcast(eng, "ctwin");
     if !g.rules.needed_players {
         g.num_ct_wins += 1;
@@ -404,7 +406,7 @@ fn round_cts(g: &mut GameState, eng: &mut EngineApi<'_>, delay: f64) {
 
 /// `Round_Ts`: the terrorists win the round.
 fn round_ts(g: &mut GameState, eng: &mut EngineApi<'_>, delay: f64) {
-    tracing::info!(t_wins = g.num_terrorist_wins + 1, "round won by the terrorists");
+    tracing::info!(needed_players = g.rules.needed_players, "round won by the terrorists");
     broadcast(eng, "terwin");
     if !g.rules.needed_players {
         g.num_terrorist_wins += 1;
@@ -932,155 +934,6 @@ pub(crate) fn player_think(g: &mut GameState, slot: u8, buttons: u16) {
     }
 }
 
-// ---- the map cycle ----
-
-/// One line of `mapcycle.txt` (`mapcycle_item_t`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct MapCycleItem {
-    map: String,
-    min_players: i32,
-    max_players: i32,
-}
-
-/// The maps `mapcycle.txt` lists, in order, and the one the cycle is at (`mapcycle_t`). It
-/// outlives the maps: [`GameState::map_cycle`] is not reset when the map changes.
-#[derive(Debug, Clone, Default)]
-pub struct MapCycle {
-    items: Vec<MapCycleItem>,
-    next: usize,
-}
-
-/// The tokens of a Half-Life text file (`SharedParse`): words split by white space, `"quoted"`
-/// strings, `//` comments to the end of the line.
-fn tokenize_line(line: &str) -> Vec<String> {
-    let line = line.split("//").next().unwrap_or("");
-    let mut tokens = Vec::new();
-    let mut chars = line.chars().peekable();
-    while let Some(&c) = chars.peek() {
-        if c.is_whitespace() || c.is_control() {
-            chars.next();
-        } else if c == '"' {
-            chars.next();
-            let mut token = String::new();
-            for c in chars.by_ref() {
-                if c == '"' {
-                    break;
-                }
-                token.push(c);
-            }
-            tokens.push(token);
-        } else {
-            let mut token = String::new();
-            while let Some(&c) = chars.peek() {
-                if c.is_whitespace() || c.is_control() {
-                    break;
-                }
-                token.push(c);
-                chars.next();
-            }
-            tokens.push(token);
-        }
-    }
-    tokens
-}
-
-/// The value of `key` in an info string `\key\value\key2\value2` (`GET_KEY_VALUE`), as a number
-/// (`atoi`), 0 when it is missing.
-fn info_number(info: &str, key: &str) -> i32 {
-    let mut parts = info.split('\\').skip(1);
-    while let (Some(k), Some(v)) = (parts.next(), parts.next()) {
-        if k == key {
-            return menus::atoi(v);
-        }
-    }
-    0
-}
-
-impl MapCycle {
-    /// `ReloadMapCycleFile` on `mapcycle.txt` (the `mapcyclefile` cvar is not read): every line
-    /// names a map, optionally followed by `\minplayers\N\maxplayers\N`. A map that is not
-    /// valid (`IS_MAP_VALID`: it has no `maps/<name>.bsp`) is skipped. The first map of the
-    /// file is where the cycle starts. Nothing is listed for a file that is missing or empty.
-    pub fn load(vfs: &cs_vfs::Vfs) -> Self {
-        let text = match vfs.read_string_lossy("mapcycle.txt") {
-            Ok(text) => text,
-            Err(cs_vfs::VfsError::NotFound(_)) => String::new(),
-            Err(err) => {
-                tracing::warn!(%err, "mapcycle.txt could not be read");
-                String::new()
-            }
-        };
-        let mut items = Vec::new();
-        for line in text.lines() {
-            let tokens = tokenize_line(line);
-            let Some(map) = tokens.first() else { continue };
-            if !cs_engine::valid_map_name(map) || !vfs.exists(&format!("maps/{map}.bsp")) {
-                tracing::info!(map = %map, "skipping a map of the map cycle: not a valid map");
-                continue;
-            }
-            let rules = tokens.get(1).map_or("", String::as_str);
-            items.push(MapCycleItem {
-                map: map.clone(),
-                min_players: info_number(rules, "minplayers").max(0),
-                max_players: info_number(rules, "maxplayers").max(0),
-            });
-        }
-        Self { items, next: 0 }
-    }
-
-    /// The map the cycle is at (where [`advance`](Self::advance) goes next when no player range
-    /// holds it back), `None` for an empty cycle.
-    pub fn next_map(&self) -> Option<&str> {
-        self.items.get(self.next).map(|i| i.map.as_str())
-    }
-
-    /// The map the cycle goes to next with `players` players on the server, and moves on past it
-    /// (the item walk of `ChangeLevel`): the first map from where the cycle stands whose player
-    /// range holds `players`; the last map of the walk is never looked at, as in the original.
-    /// `max_clients` caps the ranges. `None` for an empty cycle.
-    fn advance(&mut self, players: i32, max_clients: i32) -> Option<String> {
-        let n = self.items.len();
-        if n == 0 {
-            return None;
-        }
-        let mut found = false;
-        let mut chosen = None;
-        for k in 0..n - 1 {
-            let i = (self.next + k) % n;
-            let item = &self.items[i];
-            let mut keep_looking = false;
-            if item.min_players != 0 {
-                if players >= item.min_players.min(max_clients) {
-                    found = true;
-                } else {
-                    keep_looking = true;
-                }
-            }
-            if item.max_players != 0 {
-                if players <= item.max_players.min(max_clients) {
-                    found = true;
-                } else {
-                    keep_looking = true;
-                }
-            }
-            if keep_looking {
-                continue;
-            }
-            found = true;
-            chosen = Some(i);
-            break;
-        }
-        let index = match (chosen, found) {
-            (Some(i), _) => i,
-            // The walk ended: the last item of it, or where the cycle stood if nothing fitted.
-            (None, true) => (self.next + n - 1) % n,
-            (None, false) => self.next,
-        };
-        self.next = (index + 1) % n;
-        Some(self.items[index].map.clone())
-    }
-}
-
 /// `CHalfLifeMultiplay::ChangeLevel`: asks the engine for the next map of the cycle. A cycle
 /// that cannot be used keeps the current map. Asked again after [`CHANGE_LEVEL_RETRY`] seconds
 /// if the map did not change.
@@ -1097,89 +950,18 @@ fn change_level(g: &mut GameState, eng: &mut EngineApi<'_>) {
         .advance(players, max_clients)
         .unwrap_or_else(|| eng.map_name().to_string());
     tracing::info!(map = %map, "CHANGE LEVEL");
-    eng.change_level(&map);
+    if !eng.change_level(&map) {
+        tracing::warn!(map = %map, "the engine refused the map change");
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn cycle(lines: &[(&str, i32, i32)]) -> MapCycle {
-        MapCycle {
-            items: lines
-                .iter()
-                .map(|&(map, min_players, max_players)| MapCycleItem {
-                    map: map.to_string(),
-                    min_players,
-                    max_players,
-                })
-                .collect(),
-            next: 0,
-        }
-    }
 
-    #[test]
-    fn the_cycle_goes_round_in_order() {
-        let mut c = cycle(&[("a", 0, 0), ("b", 0, 0), ("c", 0, 0)]);
-        let got: Vec<_> = (0..5).filter_map(|_| c.advance(4, 32)).collect();
-        assert_eq!(got, ["a", "b", "c", "a", "b"]);
-        assert_eq!(MapCycle::default().advance(1, 32), None);
-        // A cycle of one map goes to it again and again.
-        let mut one = cycle(&[("only", 0, 0)]);
-        assert_eq!(one.advance(1, 32).as_deref(), Some("only"));
-        assert_eq!(one.advance(1, 32).as_deref(), Some("only"));
-    }
 
-    #[test]
-    fn the_cycle_honours_the_player_range_of_a_line() {
-        // `big` wants 8 players: with 2 the cycle skips it.
-        let mut c = cycle(&[("a", 0, 0), ("big", 8, 0), ("c", 0, 0)]);
-        assert_eq!(c.advance(2, 32).as_deref(), Some("a"));
-        assert_eq!(c.advance(2, 32).as_deref(), Some("c"));
-        assert_eq!(c.advance(2, 32).as_deref(), Some("a"));
-        // With 9 it is taken.
-        let mut c = cycle(&[("a", 0, 0), ("big", 8, 0), ("c", 0, 0)]);
-        c.next = 1;
-        assert_eq!(c.advance(9, 32).as_deref(), Some("big"));
-        // `small` takes at most 4.
-        let mut c = cycle(&[("small", 0, 4), ("c", 0, 0), ("d", 0, 0)]);
-        assert_eq!(c.advance(6, 32).as_deref(), Some("c"));
-        assert_eq!(c.advance(3, 32).as_deref(), Some("d"));
-        // Nothing fits: the map the cycle stood at.
-        let mut c = cycle(&[("x", 9, 0), ("y", 9, 0), ("z", 9, 0)]);
-        assert_eq!(c.advance(1, 32).as_deref(), Some("x"));
-    }
 
-    #[test]
-    fn map_cycle_lines_are_read_like_the_original() {
-        assert_eq!(tokenize_line("de_dust2"), ["de_dust2"]);
-        assert_eq!(
-            tokenize_line("  cs_office  \\minplayers\\4\\maxplayers\\8 // comment"),
-            ["cs_office", "\\minplayers\\4\\maxplayers\\8"]
-        );
-        assert_eq!(tokenize_line("\"de_nuke\""), ["de_nuke"]);
-        assert!(tokenize_line("// only a comment").is_empty());
-        assert_eq!(info_number("\\minplayers\\4\\maxplayers\\8", "maxplayers"), 8);
-        assert_eq!(info_number("\\minplayers\\4", "maxplayers"), 0);
-        assert_eq!(info_number("", "minplayers"), 0);
-    }
-
-    #[test]
-    fn a_map_cycle_loads_the_valid_maps_only() {
-        let vfs = cs_vfs::Vfs::from_memory([
-            (
-                "mapcycle.txt".to_string(),
-                b"de_dust2\ncs_gone\n\\bad\nde_nuke \\minplayers\\2\n".to_vec(),
-            ),
-            ("maps/de_dust2.bsp".to_string(), Vec::new()),
-            ("maps/de_nuke.bsp".to_string(), Vec::new()),
-        ]);
-        let c = MapCycle::load(&vfs);
-        let maps: Vec<_> = c.items.iter().map(|i| i.map.as_str()).collect();
-        assert_eq!(maps, ["de_dust2", "de_nuke"]);
-        assert_eq!(c.items[1].min_players, 2);
-        assert!(MapCycle::load(&cs_vfs::Vfs::from_memory([])).items.is_empty());
-    }
 
     #[test]
     fn a_switched_team_wears_the_counterpart_model() {

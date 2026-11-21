@@ -43,7 +43,11 @@ fn bench(slots: u8) -> Bench {
     b.step(6);
     // Room in the probe's message log (it holds 1024 and is full after the sign-on).
     b.probe.clear_messages();
-    b.run(|_, eng| eng.set_cvar("mp_freezetime", "2"));
+    // The round time is set here, not left to a default (the servers differ).
+    b.run(|_, eng| {
+        eng.set_cvar("mp_freezetime", "2");
+        eng.set_cvar("mp_roundtime", "2");
+    });
     b
 }
 
@@ -212,7 +216,7 @@ fn freeze_time_holds_players_then_round_starts() {
     assert_eq!(max_speed(&mut b, 0), 240.0);
     assert_eq!(max_speed(&mut b, 1), 240.0);
     b.step(3);
-    // The new clock is the round time (`mp_roundtime`, 1.75 minutes).
+    // The new clock is the round time (`mp_roundtime`, 2 minutes).
     let timer = b
         .messages()
         .into_iter()
@@ -222,7 +226,7 @@ fn freeze_time_holds_players_then_round_starts() {
             _ => None,
         })
         .expect("a RoundTime at the start of the round");
-    assert!((103..=105).contains(&timer), "{timer}");
+    assert!((118..=120).contains(&timer), "{timer}");
     // They move now.
     let start = origin_of(&mut b, 1);
     b.run(forward(1, 100));

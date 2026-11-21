@@ -118,7 +118,7 @@ evidence = "crates/cs-game/tests/teams.rs::team_limits_refuse_as_regamedll"
 [[item]]
 id = "mp_roundtime"
 status = "tested"
-evidence = "crates/cs-game/tests/rounds.rs::round_time_expiry_as_regamedll"
+evidence = "crates/cs-game/tests/rounds.rs::round_time_expiry_as_regamedll; the shared registry keeps the legacy offline default 1.75, the --proto48 server starts at the vanilla 5 (cs-server vanilla_cvars, unit test vanilla_round_time)"
 
 [[item]]
 id = "mp_startmoney"

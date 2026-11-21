@@ -125,7 +125,7 @@ const EF_NOINTERP: u32 = 32;
 const CHAN_VOICE: u8 = 2;
 const CHAN_ITEM: u8 = 3;
 const ATTN_NORM: f32 = 0.8;
-const PITCH_NORM: u8 = 100;
+pub(crate) const PITCH_NORM: u8 = 100;
 /// `VEC_HULL_MIN`/`MAX` and `VEC_DUCK_HULL_MIN`/`MAX`.
 const HULL_MIN: Vec3 = Vec3::new(-16.0, -16.0, -36.0);
 const HULL_MAX: Vec3 = Vec3::new(16.0, 16.0, 36.0);

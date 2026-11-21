@@ -114,6 +114,16 @@ fn change_level<G: GameDll>(
     }
 }
 
+/// The shared cvar defaults with the vanilla game's own where they differ from what the legacy
+/// offline client uses: `mp_roundtime` is 5 minutes in ReGameDLL `game.cpp` (the shared registry
+/// keeps 1.75 for the offline game). Applied before the first `server_activate`, so a value the
+/// operator sets later in the console wins, and the rules read it at the first restart.
+fn vanilla_cvars() -> CVarRegistry {
+    let mut cvars = CVarRegistry::new_with_defaults();
+    cvars.set("mp_roundtime", "5");
+    cvars
+}
+
 /// Runs the console lines that arrived since the last frame and checks Ctrl+C. Returns `true`
 /// once the server was shut down (the caller then exits: `shutdown` already sent the
 /// farewells). Closed or silent input is not a request to stop.
@@ -193,7 +203,7 @@ fn serve<G: GameDll>(
         map,
         game,
         DeltaRegistry::cs16_default(),
-        CVarRegistry::new_with_defaults(),
+        vanilla_cvars(),
     );
     info!(
         addr = %net.local_addr(),
@@ -216,12 +226,19 @@ fn serve<G: GameDll>(
         // frame long instead of about 0, and later frames get their real elapsed time.
         server.frame(&mut net, clock.now() + FRAME_SECS);
         // A map change the game asked for (`CHANGE_LEVEL`), done as the console's `changelevel`.
-        if let Some(name) = server.take_pending_change_level() {
-            change_level(&mut load_map, &mut server, &name);
-        }
+        // A change leaves the console lines to the next frame, as a console `changelevel` does.
+        let changed = match server.take_pending_change_level() {
+            Some(name) => {
+                change_level(&mut load_map, &mut server, &name);
+                true
+            }
+            None => false,
+        };
         // `shutdown` has already sent every farewell, so there is nothing left to run a frame
         // for.
-        if run_console(&mut server, &mut net, &mut load_map, &commands, &interrupted) {
+        if !changed
+            && run_console(&mut server, &mut net, &mut load_map, &commands, &interrupted)
+        {
             return Ok(());
         }
         next_frame += FRAME_SECS;
@@ -243,6 +260,13 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn vanilla_round_time() {
+        // The proto48 server starts at the vanilla 5 minutes, the legacy registry at 1.75.
+        assert_eq!(vanilla_cvars().get_f32("mp_roundtime"), 5.0);
+        assert_eq!(CVarRegistry::new_with_defaults().get_f32("mp_roundtime"), 1.75);
     }
 
     #[test]

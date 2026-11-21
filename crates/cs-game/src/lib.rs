@@ -9,6 +9,7 @@
 //! map cycle (`CHalfLifeMultiplay`).
 
 pub mod entity;
+pub mod mapcycle;
 pub mod menus;
 mod messages;
 pub mod player;
@@ -49,7 +50,7 @@ pub struct GameState {
     /// The state of the round rules (`CHalfLifeMultiplay`); new for every map.
     pub rules: rules::Rules,
     /// `mapcycle.txt`: the maps the match goes through. Outlives the map ([`CsGame::load_map_cycle`]).
-    pub map_cycle: rules::MapCycle,
+    pub map_cycle: mapcycle::MapCycle,
     /// How many players have entered the server since the game started (the user id the team
     /// balance orders by).
     pub(crate) join_counter: u32,
@@ -74,7 +75,7 @@ impl GameState {
             num_terrorist_wins: 0,
             num_ct_wins: 0,
             rules: rules::Rules::default(),
-            map_cycle: rules::MapCycle::default(),
+            map_cycle: mapcycle::MapCycle::default(),
             join_counter: 0,
             rng: 0x2545_f491,
             #[cfg(feature = "test-hooks")]
@@ -138,10 +139,10 @@ impl CsGame {
         };
     }
 
-    /// Reads the map cycle, `mapcycle.txt`, through `vfs` (see [`rules::MapCycle::load`]); the
+    /// Reads the map cycle, `mapcycle.txt`, through `vfs` (see [`mapcycle::MapCycle::load`]); the
     /// match asks for the next map of it when it ends.
     pub fn load_map_cycle(&mut self, vfs: &cs_vfs::Vfs) {
-        self.state.map_cycle = rules::MapCycle::load(vfs);
+        self.state.map_cycle = mapcycle::MapCycle::load(vfs);
     }
 
     pub fn state(&self) -> &GameState {
