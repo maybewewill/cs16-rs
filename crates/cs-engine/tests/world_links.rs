@@ -350,3 +350,54 @@ fn hostile_bounds_link_safely() {
         hostile_bounds_link_safely_on(Harness::with_map(cfg, map, TestGame::default()));
     }
 }
+
+#[test]
+fn moving_across_area_nodes_relinks() {
+    let mut h = Harness::new(2);
+    run(&mut h, |eng| {
+        let id = boxed(eng, SOLID_BBOX, Vec3::new(0.0, 50_000.0, 0.0), 8.0);
+        let at = |eng: &EngineApi<'_>, y: f32| {
+            eng.entities_in_box(Vec3::new(-1.0, y - 1.0, -1.0), Vec3::new(1.0, y + 1.0, 1.0))
+        };
+        assert_eq!(at(eng, 50_000.0), [id]);
+        eng.set_origin(id, Vec3::new(0.0, -50_000.0, 0.0));
+        assert_eq!(at(eng, -50_000.0), [id]);
+        assert!(at(eng, 50_000.0).is_empty());
+        // A box over the root split is in the root node and found from either side.
+        eng.set_origin(id, Vec3::ZERO);
+        assert_eq!(at(eng, 5.0), [id]);
+        assert_eq!(at(eng, -5.0), [id]);
+    });
+}
+
+#[test]
+fn change_map_rebuilds_the_tree_for_the_new_bounds() {
+    // Stub maps all span the same range, so this needs two real maps.
+    let Ok(vfs) = Vfs::discover(None, VfsConfig::default()) else {
+        return;
+    };
+    let load = |name: &str| {
+        let raw = vfs.read_bytes(&format!("maps/{name}.bsp")).ok()?;
+        let bsp = Arc::new(BspMap::load(&vfs, name).ok()?);
+        ServerMap::from_bsp(name, &raw, bsp)
+    };
+    let (Some(first), Some(second)) = (load("de_dust2"), load("de_inferno")) else {
+        return;
+    };
+    let (mins, maxs) = second.collision().unwrap().model_bounds(0).unwrap();
+    let cfg = ServerConfig {
+        max_clients: 2,
+        ..ServerConfig::default()
+    };
+    let mut h = Harness::with_map(cfg, first, TestGame::default());
+    h.server.change_map(second);
+    run(&mut h, move |eng| {
+        for corner in [mins, maxs, (mins + maxs) * 0.5] {
+            let id = boxed(eng, SOLID_BBOX, corner, 8.0);
+            assert_eq!(
+                eng.entities_in_box(corner - Vec3::ONE, corner + Vec3::ONE),
+                [id]
+            );
+        }
+    });
+}

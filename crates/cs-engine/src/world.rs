@@ -379,7 +379,8 @@ impl WorldLinks {
     }
 
     /// Indices of the entities in the tree whose absolute box touches `mins..maxs`, with their
-    /// list (`SV_AreaEdicts` order is not kept; the caller sorts).
+    /// list, node by node in the order `SV_TouchLinks` visits them (a node's triggers, then its
+    /// solids, then the larger-coordinate child's subtree, then the other).
     fn collect(
         &self,
         edicts: &EdictPool,
@@ -412,11 +413,13 @@ impl WorldLinks {
                 }
             }
             if let Some(axis) = n.axis {
-                if maxs[axis] > n.dist {
-                    stack.push(n.children[0]);
-                }
+                // The stack is last in, first out: `children[1]` goes in first so that
+                // `children[0]` is visited first, as `SV_TouchLinks` recurses.
                 if n.dist > mins[axis] {
                     stack.push(n.children[1]);
+                }
+                if maxs[axis] > n.dist {
+                    stack.push(n.children[0]);
                 }
             }
         }
@@ -616,8 +619,13 @@ impl EngineApi<'_> {
     }
 
     /// Entities in the area tree whose absolute box touches `mins..maxs`, in ascending index
-    /// order. An entity that was not linked, or is not in the tree because it is not solid, is
-    /// not found. Non-finite bounds give an empty list.
+    /// order. The filter is that of the game's `UTIL_EntitiesInBox` (ReGameDLL_CS
+    /// `regamedll/dlls/util.cpp`, read 2026-11-21; ReHLDS has no entities-in-box call of its own):
+    /// free slots and the world (index 0) are skipped and the absolute boxes must overlap,
+    /// touching counting as overlap (`CBaseEntity::Intersects`); there is no flag mask. Unlike
+    /// that linear scan, this one reads the area tree, so an entity that was not linked, or is
+    /// not in the tree because it is not solid, is not found, and a moved entity is found where
+    /// it was last linked. Non-finite bounds give an empty list.
     pub fn entities_in_box(&self, mins: Vec3, maxs: Vec3) -> Vec<EdictId> {
         if !mins.is_finite() || !maxs.is_finite() {
             return Vec::new();
@@ -888,6 +896,27 @@ mod tests {
         eng.ent_mut(solid_box).unwrap().flags |= FL_KILLME;
         eng.link_entity(solid_box, true);
         assert_eq!(eng.pending_touches().len(), 1);
+    }
+
+    #[test]
+    fn touches_come_in_the_order_the_tree_is_walked() {
+        let mut f = Fixture::on(ServerMap::stub("order"));
+        let mut eng = f.api();
+        let trigger = |eng: &mut EngineApi<'_>, y: f32| {
+            let id = eng.create_entity("trigger").unwrap();
+            eng.ent_mut(id).unwrap().solid = SOLID_TRIGGER;
+            eng.set_size(id, Vec3::splat(-8.0), Vec3::splat(8.0));
+            eng.set_origin(id, Vec3::new(0.0, y, 0.0));
+            id
+        };
+        // The lower index sits in the child with the smaller coordinates.
+        let back = trigger(&mut eng, -500.0);
+        let front = trigger(&mut eng, 500.0);
+        let big = eng.create_entity("big").unwrap();
+        eng.ent_mut(big).unwrap().solid = SOLID_BBOX;
+        eng.set_size(big, Vec3::splat(-1000.0), Vec3::splat(1000.0));
+        eng.link_entity(big, true);
+        assert_eq!(eng.pending_touches(), [(front, big), (back, big)]);
     }
 
     #[test]
