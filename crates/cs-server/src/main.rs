@@ -3,7 +3,8 @@
 //! Run with: `cargo run --release -p cs-server -- --map de_dust2 --port 27015 --bots 9`
 //!
 //! With `--proto48` it runs the Protocol 48 server for the original client instead (see
-//! `proto48.rs`): `cargo run -p cs-server -- --proto48 --map de_dust2`.
+//! `proto48.rs`): `cargo run -p cs-server -- --proto48 --map de_dust2` runs the game of
+//! `cs-game`; add `--walk-game` for the older walking-only `WalkGame` of `cs-sim`.
 
 mod console_io;
 mod proto48;

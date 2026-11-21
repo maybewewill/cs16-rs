@@ -587,6 +587,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "cs-game"
+version = "0.1.0"
+dependencies = [
+ "cs-assets",
+ "cs-cvar",
+ "cs-engine",
+ "cs-game",
+ "cs-proto48",
+ "cs-sim",
+ "cs-transport",
+ "cs-vfs",
+ "glam",
+ "tracing",
+]
+
+[[package]]
 name = "cs-net"
 version = "0.1.0"
 dependencies = [
@@ -630,6 +646,7 @@ dependencies = [
  "cs-assets",
  "cs-cvar",
  "cs-engine",
+ "cs-game",
  "cs-net",
  "cs-platform",
  "cs-proto48",

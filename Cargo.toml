@@ -9,6 +9,7 @@ members = [
     "crates/cs-engine",
     "crates/cs-probe",
     "crates/cs-sim",
+    "crates/cs-game",
     "crates/cs-net",
     "crates/cs-server",
     "crates/cs-client",
@@ -50,6 +51,7 @@ cs-transport = { path = "crates/cs-transport" }
 cs-engine = { path = "crates/cs-engine" }
 cs-probe = { path = "crates/cs-probe" }
 cs-sim = { path = "crates/cs-sim" }
+cs-game = { path = "crates/cs-game" }
 cs-net = { path = "crates/cs-net" }
 
 [workspace.lints.rust]

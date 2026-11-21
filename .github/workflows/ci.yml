@@ -41,7 +41,7 @@ jobs:
         run: cargo test --workspace
 
       - name: wasm32 check (library crates)
-        run: cargo check --target wasm32-unknown-unknown -p cs-proto48 -p cs-cvar -p cs-assets -p cs-vfs -p cs-sim -p cs-platform -p cs-transport -p cs-engine -p cs-probe
+        run: cargo check --target wasm32-unknown-unknown -p cs-proto48 -p cs-cvar -p cs-assets -p cs-vfs -p cs-sim -p cs-platform -p cs-transport -p cs-engine -p cs-probe -p cs-game
 
       - name: Parity report
         run: cargo xtask parity

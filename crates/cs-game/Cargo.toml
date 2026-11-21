@@ -1,0 +1,28 @@
+[package]
+name = "cs-game"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cs-assets.workspace = true
+cs-engine.workspace = true
+cs-proto48.workspace = true
+cs-sim.workspace = true
+glam.workspace = true
+tracing.workspace = true
+
+[features]
+# Test-only hooks (a probe entity class, the log of what the dispatch delivered). Never enabled
+# in production builds; the integration tests enable it through the self dev-dependency below.
+test-hooks = []
+
+[dev-dependencies]
+cs-game = { path = ".", features = ["test-hooks"] }
+cs-cvar.workspace = true
+cs-transport.workspace = true
+cs-vfs.workspace = true
+
+[lints]
+workspace = true

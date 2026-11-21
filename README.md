@@ -20,9 +20,10 @@ Copyright (C) 2026 cs16-rs contributors. Licensed under GPL-3.0-or-later; see LI
 - **`cs-proto48`** — `#![forbid(unsafe_code)]` implementation of Valve's **GoldSrc Protocol 48** (Counter-Strike 1.6 / Half-Life 1 network wire protocol), ported deterministically from `ReHLDS` and `ReGameDLL_CS`.
 - **`cs-platform`** — Platform seams shared by native and `wasm32` builds: the `Clock` time source (`NativeClock`, `ManualClock`).
 - **`cs-transport`** — Datagram transports behind one `PacketTransport` trait: non-blocking UDP and an in-process loopback hub with injectable loss, duplication and reordering.
+- **`cs-game`** — The game logic of CS 1.6 (the `mp.dll` equivalent) behind the engine's `GameDll` trait, ported from ReGameDLL_CS: the entity registry, the world and spawn points so far.
 - **`cs-engine`** — Protocol 48 server engine, the equivalent of the original dedicated server: connectionless queries, connect and sign-on, per-client delta frames with PVS culling, user commands, timeouts and map changes, with the game behind a `GameDll` trait.
 - **`cs-probe`** — Headless Protocol 48 test client (library and `cs-probe` binary): connects, signs on, walks and records captures, used by the engine's tests and against real servers.
-- **`cs-server`** — Standalone headless 100 Hz dedicated UDP server; with `--proto48` it runs `cs-engine` with a walking-only game for the original CS 1.6 client.
+- **`cs-server`** — Standalone headless 100 Hz dedicated UDP server; with `--proto48` it runs `cs-engine` with the `cs-game` game (`--walk-game`: the older walking-only `WalkGame`) for the original CS 1.6 client.
 - **`xtask`** — Repository tasks (`cargo xtask parity`: the parity ledger report in `docs/parity/`).
 - **`cs-client`** — `winit` + `wgpu 30` (Vulkan/DX12/Metal) multi-pass renderer (BSP overbright ×2 lightmaps, live `gl_texturemode`, dynamic broken/door brush culling, skinned 3D player/hostage/corpse MDLs with `EF_BONEMERGE` `p_*.mdl` in hands, depth-cleared viewmodel with `cl_righthand`, 3D decals/sprays/tracers/grenades/smoke/C4 LED/muzzleflashes, `F5` GPU PNG readback), `rodio` 2D/3D spatial WAV audio + UI clicks + Main Menu MP3 music, **1-to-1 Valve VGUI2 UI** (`ClientScheme.res` Buy Menu with real `gfx/vgui/*.tga` silhouettes & 9-row specs, Team Menu with `maps/*.txt` briefings, Class Menu with 256×196 portraits, translucent rounded `TAB` Scoreboard, Steam 2003 `Options` with live crosshair preview & `icon_steam.tga`), classic `640hud7`/`640hud1` sprite HUD, AWP scope, NightVision overlay, Radio menus, and Spectator letterbox camera.
 
@@ -61,7 +62,7 @@ cargo run --release -p cs-client -- --exec "connect 127.0.0.1:27015"
 cargo run -p cs-server -- --proto48 --map de_dust2
 ```
 
-Optional flags: `--port <n>` (default 27015), `--maxplayers <n>` (default 16), `--hostname <name>`, `--gamedir <path>`. Then, in the original Counter-Strike 1.6 client, open the console (`~`) and type `connect 127.0.0.1:27015`.
+Optional flags: `--port <n>` (default 27015), `--maxplayers <n>` (default 16), `--hostname <name>`, `--gamedir <path>`, `--walk-game` (run the older walking-only `WalkGame` instead of `cs-game`). Then, in the original Counter-Strike 1.6 client, open the console (`~`) and type `connect 127.0.0.1:27015`.
 
 This mode is still walking only: players spawn and move around the map, with no weapons, rounds or HUD. Since phase 2B the world is real: players collide with each other, brush entities (`func_wall`, `func_breakable` and the like) are solid, and entities from the map's entity lump are linked into the world with traces against them, touches, the movement types (toss, bounce, fly, step, push) and pushers, ported from ReHLDS (not yet compared with the original server). A client's commands are lag compensated and sounds travel through the PAS. Doors, buttons, lifts and trains do not open or move yet: their logic comes with the map entities in phase 7.
 

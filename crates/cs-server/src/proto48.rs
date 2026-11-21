@@ -1,6 +1,6 @@
-//! `cs-server --proto48`: the Protocol 48 server engine running `WalkGame` on a UDP socket,
-//! for the original Counter-Strike 1.6 client. Players spawn and walk; there are no weapons,
-//! rounds or HUD.
+//! `cs-server --proto48`: the Protocol 48 server engine running the game on a UDP socket, for
+//! the original Counter-Strike 1.6 client. The game is `cs_game::CsGame`; `--walk-game` runs the
+//! older `cs_sim::walk_game::WalkGame` instead (players only walk: no weapons, rounds or HUD).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use cs_assets::bsp::BspMap;
 use cs_cvar::CVarRegistry;
-use cs_engine::{ConsoleOutcome, Server, ServerConfig, ServerMap};
+use cs_engine::{ConsoleOutcome, GameDll, Server, ServerConfig, ServerMap};
+use cs_game::CsGame;
 use cs_platform::{Clock, NativeClock};
 use cs_proto48::delta::DeltaRegistry;
 use cs_sim::pmove::MoveParams;
@@ -30,6 +31,8 @@ struct Options {
     port: u16,
     max_players: u8,
     hostname: String,
+    /// Run `WalkGame` instead of `CsGame`.
+    walk_game: bool,
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
@@ -39,12 +42,14 @@ fn parse(args: &[String]) -> Result<Options, String> {
         port: cs_net::DEFAULT_PORT,
         max_players: 16,
         hostname: ServerConfig::default().hostname,
+        walk_game: false,
     };
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
             "--proto48" => {}
+            "--walk-game" => opts.walk_game = true,
             "--gamedir" | "-g" => opts.gamedir = Some(PathBuf::from(value()?)),
             "--map" | "-m" => opts.map = value()?.clone(),
             "--port" | "-p" => {
@@ -83,8 +88,6 @@ pub fn run(args: &[String]) -> ! {
     }
 }
 
-type WalkServer = Server<WalkGame>;
-
 /// Loads `maps/<name>.bsp` through `vfs`, for start-up and for `changelevel`.
 fn load_server_map(vfs: &Vfs, name: &str) -> Result<ServerMap, String> {
     let bsp = Arc::new(BspMap::load(vfs, name).map_err(|e| format!("cannot load map {name}: {e}"))?);
@@ -97,9 +100,9 @@ fn load_server_map(vfs: &Vfs, name: &str) -> Result<ServerMap, String> {
 
 /// Carries out `changelevel <name>`: loads the map with `load_map` and switches the server to
 /// it. A failure is printed and the server keeps running on its current map.
-fn change_level(
+fn change_level<G: GameDll>(
     load_map: &mut dyn FnMut(&str) -> Result<ServerMap, String>,
-    server: &mut WalkServer,
+    server: &mut Server<G>,
     name: &str,
 ) {
     match load_map(name) {
@@ -119,8 +122,8 @@ fn change_level(
 /// the next frame, so a map change is never followed by more commands in the same frame and
 /// Ctrl+C pressed during a slow map load is honoured right after it. Lines after `quit` are
 /// not run.
-fn run_console(
-    server: &mut WalkServer,
+fn run_console<G: GameDll>(
+    server: &mut Server<G>,
     net: &mut dyn PacketTransport,
     load_map: &mut dyn FnMut(&str) -> Result<ServerMap, String>,
     commands: &Receiver<String>,
@@ -157,13 +160,28 @@ fn start(args: &[String]) -> Result<(), String> {
     let vfs = Vfs::discover(opts.gamedir.as_deref(), VfsConfig::default())
         .map_err(|e| format!("cannot find the Half-Life / CS 1.6 directory: {e}"))?;
     let map = load_server_map(&vfs, &opts.map)?;
-    let game = WalkGame::new(MoveParams::default());
+    if opts.walk_game {
+        let game = WalkGame::new(MoveParams::default());
+        serve(&opts, &vfs, map, game, "WalkGame (walking only)")
+    } else {
+        serve(&opts, &vfs, map, CsGame::new(), "CsGame")
+    }
+}
+
+/// Binds the socket and runs `game` on `map` until the operator stops the server.
+fn serve<G: GameDll>(
+    opts: &Options,
+    vfs: &Vfs,
+    map: ServerMap,
+    game: G,
+    game_name: &str,
+) -> Result<(), String> {
     let (map_name, map_crc) = (map.name.clone(), map.crc);
 
     let bind = format!("0.0.0.0:{}", opts.port);
     let mut net = UdpTransport::bind(&bind).map_err(|e| format!("cannot bind UDP {bind}: {e}"))?;
     let cfg = ServerConfig {
-        hostname: opts.hostname,
+        hostname: opts.hostname.clone(),
         max_clients: opts.max_players,
         ..ServerConfig::default()
     };
@@ -180,14 +198,15 @@ fn start(args: &[String]) -> Result<(), String> {
         crc = format_args!("{map_crc:#010x}"),
         maxplayers = server.config().max_clients,
         hostname = %server.config().hostname,
-        "cs-server (Protocol 48, walking only) listening at 100 Hz (type quit or press Ctrl+C to stop)"
+        game = game_name,
+        "cs-server (Protocol 48) listening at 100 Hz (type quit or press Ctrl+C to stop)"
     );
 
     let commands = console_io::spawn_line_reader(std::io::BufReader::new(std::io::stdin()));
     let interrupted = console_io::interrupt_flag();
     let clock = NativeClock::new();
     let mut next_frame = clock.now();
-    let mut load_map = |name: &str| load_server_map(&vfs, name);
+    let mut load_map = |name: &str| load_server_map(vfs, name);
     loop {
         // Server time starts at 0 with the server, so `clock.now()` (seconds since the clock
         // was created, just before this loop) plus one frame makes the first `frametime` one
@@ -213,6 +232,8 @@ fn start(args: &[String]) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    type WalkServer = Server<WalkGame>;
+
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
     }
@@ -225,6 +246,7 @@ mod tests {
             ("de_dust2", 27015, 16)
         );
         assert_eq!(o.hostname, ServerConfig::default().hostname);
+        assert!(!o.walk_game);
 
         let o = parse(&args(&[
             "--proto48",
@@ -248,6 +270,11 @@ mod tests {
         );
         assert_eq!(o.hostname, "Test");
         assert_eq!(o.gamedir, Some(PathBuf::from("C:/hl")));
+    }
+
+    #[test]
+    fn walk_game_flag_selects_the_old_game() {
+        assert!(parse(&args(&["--proto48", "--walk-game"])).unwrap().walk_game);
     }
 
     #[test]

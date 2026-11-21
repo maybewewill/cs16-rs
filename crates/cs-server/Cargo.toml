@@ -9,6 +9,7 @@ rust-version.workspace = true
 cs-assets.workspace = true
 cs-cvar.workspace = true
 cs-engine.workspace = true
+cs-game.workspace = true
 cs-net.workspace = true
 cs-platform.workspace = true
 cs-proto48.workspace = true

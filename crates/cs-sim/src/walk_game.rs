@@ -78,7 +78,7 @@ fn touches_ladder(ladders: &[(Vec3, Vec3)], pos: Vec3, hull: Hull) -> bool {
 /// Ladders: in the original the movement finds them as physents whose `skin` is
 /// `CONTENTS_LADDER` (`SV_AddLinksToPM`); here the game keeps their bounds from the entity
 /// lump and answers [`MoveWorld::is_on_ladder`] with the legacy overlap test.
-struct EngineWorld<'a, 'e> {
+pub struct EngineWorld<'a, 'e> {
     eng: &'a EngineApi<'e>,
     /// The edict of the player that moves: the one `trace_player_move` leaves out.
     player: EdictId,
@@ -89,13 +89,20 @@ struct EngineWorld<'a, 'e> {
 }
 
 impl<'a, 'e> EngineWorld<'a, 'e> {
-    fn new(eng: &'a EngineApi<'e>, player: EdictId, ladders: &'a [(Vec3, Vec3)]) -> Self {
+    /// The world of `player`'s movement; `ladders` are the bounds of the map's ladders.
+    pub fn new(eng: &'a EngineApi<'e>, player: EdictId, ladders: &'a [(Vec3, Vec3)]) -> Self {
         Self {
             eng,
             player,
             ladders,
             touched: RefCell::new(Vec::new()),
         }
+    }
+
+    /// The entities the traces made so far were stopped by or started inside, each once, in
+    /// the order they were found.
+    pub fn into_touched(self) -> Vec<EdictId> {
+        self.touched.into_inner()
     }
 }
 
