@@ -93,6 +93,10 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     reg.register("mp_autoteambalance", "1", srv, "Move players between teams at the end of a round to even them out");
     reg.register("allow_spectators", "1.0", srv, "Players may join the spectators (0 or 1)");
     reg.register("humans_join_team", "any", srv, "Team humans must join: any, T or CT");
+    // The cvars `InitHUD` sends to a joining client (ReGameDLL `game.cpp`, read 2026-11-22).
+    reg.register("mp_forcecamera", "0", srv, "Dead players see through teammates only");
+    reg.register("mp_forcechasecam", "0", srv, "Dead players follow their own team only");
+    reg.register("mp_fadetoblack", "0", srv, "Fade a dead player's screen to black (1 stays black)");
     reg.register("bot_quota", "9", srv_arch, "Target number of bots in local match (0..15)");
     reg.register("bot_difficulty", "1", srv_arch, "Bot skill level (0=Easy, 1=Normal, 2=Hard, 3=Expert)");
 }

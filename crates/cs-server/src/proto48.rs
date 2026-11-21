@@ -164,7 +164,9 @@ fn start(args: &[String]) -> Result<(), String> {
         let game = WalkGame::new(MoveParams::default());
         serve(&opts, &vfs, map, game, "WalkGame (walking only)")
     } else {
-        serve(&opts, &vfs, map, CsGame::new(), "CsGame")
+        let mut game = CsGame::new();
+        game.load_motd(&vfs);
+        serve(&opts, &vfs, map, game, "CsGame")
     }
 }
 

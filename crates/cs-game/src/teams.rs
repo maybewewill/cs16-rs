@@ -227,22 +227,6 @@ fn team_change_update(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) {
     }
 }
 
-/// What the new player of `slot` is told about the teams: `TeamInfo` of every player in the game
-/// (`CHalfLifeMultiplay::InitHUD`; the HUD task takes over the rest of that function).
-pub(crate) fn send_team_infos(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) {
-    for (other, p) in g.players.iter().enumerate() {
-        if let Some(p) = p {
-            eng.send_usermsg(
-                MsgDest::One(slot),
-                &CsUserMsg::TeamInfo {
-                    player_id: other as u8 + 1,
-                    team_name: team_name(p.team).to_string(),
-                },
-            );
-        }
-    }
-}
-
 /// What everyone is told when the player of `slot` leaves (`CHalfLifeMultiplay::ClientDisconnected`):
 /// an empty scoreboard line and no team.
 pub(crate) fn announce_departure(eng: &mut EngineApi<'_>, slot: u8) {

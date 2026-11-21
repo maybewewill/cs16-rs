@@ -270,6 +270,8 @@ impl World {
         for name in PLAYER_MODELS {
             precache_model(eng, name);
         }
+        // `g_iShadowSprite`, which `InitHUD` sends in `ShadowIdx`.
+        precache_model(eng, "sprites/shadow_circle.spr");
         for name in WORLD_SOUNDS {
             precache_sound(eng, name);
         }

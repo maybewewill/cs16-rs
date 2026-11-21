@@ -37,6 +37,13 @@ pub struct GameState {
     pub move_params: MoveParams,
     /// The players, by slot, from `client_put_in_server` to `client_disconnect`.
     pub players: [Option<Player>; MAX_PLAYERS],
+    /// The message of the day, the bytes of `motd.txt` (`motdfile`): empty for none. See
+    /// [`CsGame::load_motd`].
+    pub motd: Vec<u8>,
+    /// `m_iNumTerroristWins`: the rounds the terrorists have won, for `TeamScore`.
+    pub num_terrorist_wins: i32,
+    /// `m_iNumCTWins`: the rounds the counter-terrorists have won, for `TeamScore`.
+    pub num_ct_wins: i32,
     /// State of the game's own random numbers (`RANDOM_LONG`).
     rng: u32,
     /// Every call the dispatch delivered to a `test_dispatch` entity. For tests only (feature
@@ -54,6 +61,9 @@ impl GameState {
             last_t_spawn: None,
             move_params: MoveParams::default(),
             players: std::array::from_fn(|_| None),
+            motd: Vec::new(),
+            num_terrorist_wins: 0,
+            num_ct_wins: 0,
             rng: 0x2545_f491,
             #[cfg(feature = "test-hooks")]
             dispatch_log: Vec::new(),
@@ -96,6 +106,13 @@ impl CsGame {
         Self {
             state: GameState::new(),
         }
+    }
+
+    /// Reads the message of the day, `motd.txt` of the game directories (`LOAD_FILE_FOR_ME` of
+    /// the `motdfile` cvar, whose default this is), through `vfs`. A missing file means no
+    /// message of the day, as in `SendMOTDToClient`, which then sends the server name alone.
+    pub fn load_motd(&mut self, vfs: &cs_vfs::Vfs) {
+        self.state.motd = vfs.read_bytes("motd.txt").unwrap_or_default();
     }
 
     pub fn state(&self) -> &GameState {
@@ -178,7 +195,7 @@ impl CsGame {
 
 impl GameDll for CsGame {
     fn usermsgs(&self) -> UserMsgRegistry {
-        UserMsgRegistry::cs16_default()
+        messages::link_user_messages()
     }
 
     /// Every entity of the map has spawned: finds the ladders.

@@ -248,3 +248,15 @@ status = "implemented"
 [[item]]
 id = "volume"
 status = "implemented"
+
+[[item]]
+id = "mp_forcecamera"
+status = "implemented"
+
+[[item]]
+id = "mp_forcechasecam"
+status = "implemented"
+
+[[item]]
+id = "mp_fadetoblack"
+status = "implemented"

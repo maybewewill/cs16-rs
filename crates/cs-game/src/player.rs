@@ -78,6 +78,14 @@ pub mod dmg {
     pub const DROWN: u32 = 1 << 14;
     /// Counter-Strike's `DMG_EXPLOSION` (`dlls/util.h`).
     pub const EXPLOSION: u32 = 1 << 24;
+    /// The kinds of damage the HUD has art for (`DMG_SHOWNHUD`: poison, acid, freeze, slow
+    /// freeze, drown, burn, slow burn, nerve gas, radiation, shock). Values of the Half-Life
+    /// SDK's `damage.h` (assumption: not fetched for this task).
+    pub const SHOWNHUD: u32 =
+        (1 << 17) | (1 << 20) | (1 << 4) | (1 << 22) | (1 << 14) | (1 << 3) | (1 << 21) | (1 << 16)
+            | (1 << 18) | (1 << 8);
+    /// `DMG_TIMEBASED`: the kinds that last (Half-Life SDK, assumption as above).
+    pub const TIMEBASED: u32 = !0x3fff;
 }
 
 /// Hit groups (`common/const.h`).
@@ -222,6 +230,8 @@ pub struct Player {
     pub(crate) client_health: i32,
     /// `m_LastHitGroup`.
     pub(crate) last_hit_group: i32,
+    /// `m_bitsDamageType`: the kinds of damage since the HUD was last told.
+    pub(crate) damage_bits: u32,
     /// `pev->weapons`: only the suit bit for now.
     pub(crate) weapons: u32,
     /// `PFLAG_OBSERVER` as far as `PlayerDeathThink` is concerned: the corpse was sent and
@@ -239,6 +249,31 @@ pub struct Player {
     pub team_changed: bool,
     /// `m_bVGUIMenus`: the client's `_vgui_menus` (VGUI menus, else text ones).
     pub vgui_menus: bool,
+    /// `m_fInitHUD`: the next client data update starts the HUD over (`ResetHUD`, the money, the
+    /// team scores, and, once per entry, `InitHUD` and the rules' welcome).
+    pub(crate) init_hud: bool,
+    /// `m_fGameHUDInitialized`: `CHalfLifeMultiplay::InitHUD` has run for this entry.
+    pub(crate) game_hud_initialized: bool,
+    /// `m_iClientBattery`: the armor the client was last told.
+    pub(crate) client_battery: i32,
+    /// `m_bitsHUDDamage`: the damage kinds the client was last told.
+    pub(crate) hud_damage: i32,
+    /// `pev->dmg_take`: health lost since the HUD was last told.
+    pub(crate) dmg_take: f32,
+    /// `pev->dmg_save`: damage armor absorbed since the HUD was last told.
+    pub(crate) dmg_save: f32,
+    /// `pev->dmg_inflictor`: what last hurt the player.
+    pub(crate) dmg_inflictor: Option<EdictId>,
+    /// `m_iHideHUD`: the HUD elements hidden (`HIDEHUD_*`).
+    pub(crate) hide_hud: i32,
+    /// `m_iClientHideHUD`: what the client was last told.
+    pub(crate) client_hide_hud: i32,
+    /// `m_iFOV`.
+    pub(crate) fov: u8,
+    /// `m_iClientFOV`.
+    pub(crate) client_fov: u8,
+    /// `m_iTrain & TRAIN_NEW`: the train HUD has not been sent yet.
+    pub(crate) train_new: bool,
 }
 
 impl Player {
@@ -262,6 +297,7 @@ impl Player {
             next_suicide_time: 0.0,
             client_health: -1,
             last_hit_group: HITGROUP_GENERIC,
+            damage_bits: 0,
             weapons: 0,
             death_cam: false,
             dead_time: 0.0,
@@ -270,6 +306,18 @@ impl Player {
             menu: Menu::Off,
             team_changed: false,
             vgui_menus: true,
+            init_hud: true,
+            game_hud_initialized: false,
+            client_battery: -1,
+            hud_damage: -1,
+            dmg_take: 0.0,
+            dmg_save: 0.0,
+            dmg_inflictor: None,
+            hide_hud: 0,
+            client_hide_hud: -1,
+            fov: 90,
+            client_fov: 0,
+            train_new: true,
         }
     }
 
@@ -277,6 +325,24 @@ impl Player {
     /// `m_iJoiningState == JOINED` with a team that spawns.
     pub(crate) fn in_play(&self) -> bool {
         self.joining == JoinState::Joined && self.team.plays()
+    }
+
+    /// What `CBasePlayer::Spawn` and `Precache` reset about what the client knows, so the next
+    /// client data update sends it all again (`m_fInitHUD`, `m_iClientBattery`,
+    /// `m_bitsHUDDamage`, `m_iClientFOV`, `m_iFOV`, `m_iClientHideHUD`, `m_iTrain`).
+    fn reset_hud_state(&mut self) {
+        self.init_hud = true;
+        self.client_health = -1;
+        self.client_battery = -1;
+        self.hud_damage = -1;
+        self.damage_bits = 0;
+        self.dmg_take = 0.0;
+        self.dmg_save = 0.0;
+        self.dmg_inflictor = None;
+        self.client_hide_hud = -1;
+        self.fov = 90;
+        self.client_fov = 0;
+        self.train_new = true;
     }
 
     /// `CBasePlayer::IsArmored`.
@@ -355,7 +421,6 @@ pub(crate) fn put_in_server(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8
     v.fov = DEFAULT_FOV;
     v.view_ofs = Vec3::new(0.0, 0.0, VEC_VIEW);
     eng.set_origin(id, origin);
-    teams::send_team_infos(g, eng, slot);
 }
 
 /// `CheckStartMoney`: `mp_startmoney` clamped to the account's limits.
@@ -480,11 +545,11 @@ pub(crate) fn spawn(
     p.takes_damage = true;
     p.not_killed = true;
     p.fall_velocity = 0.0;
-    p.client_health = -1;
     p.last_hit_group = HITGROUP_GENERIC;
     p.death_cam = false;
     // `PlayerSpawn`: `pev->weapons |= (1 << WEAPON_SUIT)`.
     p.weapons |= 1 << WEAPON_SUIT;
+    p.reset_hud_state();
     p.mv = PlayerMoveState::at_spawn(origin);
 
     if eng.ent(id).is_some_and(|v| v.modelindex == 0) {
@@ -526,6 +591,9 @@ pub(crate) fn spawn(
     if let Some(p) = g.players[index].as_ref() {
         messages::score_info(eng, id.index, p);
     }
+    // `PlayerSpawn` takes the items away and starts the weapons over; no weapons exist yet, so
+    // the ammo HUD is told there is none (`RemoveAllItems`).
+    messages::cur_weapon_none(eng, slot);
     true
 }
 
@@ -778,6 +846,7 @@ pub(crate) fn take_damage(
     {
         damage *= 0.35;
     }
+    let before_armor = damage;
     // Armor does not protect against falls and drowning.
     if p.armor != 0.0 && bits & (dmg::DROWN | dmg::FALL) == 0 && p.is_armored(p.last_hit_group) {
         let mut new = ARMOR_RATIO * damage;
@@ -801,6 +870,13 @@ pub(crate) fn take_damage(
     // `CBaseMonster::TakeDamage` gets the damage as an integer: a player with half a point of
     // health would look dead to the client.
     p.health -= damage.trunc();
+    p.damage_bits |= bits;
+    // What the `Damage` message reports (`CBasePlayer::TakeDamage` of the Half-Life SDK, an
+    // assumption: ReGameDLL's copy of it is not in the sources read): the health lost, the
+    // damage armor took, and what hurt the player.
+    p.dmg_take += damage.trunc();
+    p.dmg_save += (before_armor - damage).max(0.0);
+    p.dmg_inflictor = inflictor;
     let health = p.health;
     let id = eng.client_edict(slot);
     if let Some(v) = eng.ent_mut(id) {
@@ -1046,8 +1122,8 @@ fn start_death_cam(p: &mut Player) {
     p.death_cam = true;
 }
 
-/// `UpdateClientData` (ReGameDLL `client.cpp`, `CBasePlayer::UpdateClientData`): the player's
-/// state for its own client, and the health message when the health changed.
+/// `UpdateClientData` (ReGameDLL `player.cpp`, `CBasePlayer::UpdateClientData`): the player's
+/// state for its own client, and the HUD messages for what changed ([`messages::update_client_data`]).
 pub(crate) fn client_data(
     g: &mut GameState,
     eng: &mut EngineApi<'_>,
@@ -1073,24 +1149,11 @@ pub(crate) fn client_data(
         iuser3: v.iuser3,
         ..Default::default()
     };
-    let health = v.health;
     let mut data = data;
     if let Some(p) = g.players.get(usize::from(slot)).and_then(Option::as_ref) {
         data.weapons = p.weapons;
     }
-    if let Some(p) = g
-        .players
-        .get_mut(usize::from(slot))
-        .and_then(Option::as_mut)
-        && health as i32 != p.client_health
-    {
-        let mut shown = (health as i32).clamp(0, 255) as u8;
-        if health > 0.0 && health <= 1.0 {
-            shown = 1;
-        }
-        p.client_health = health as i32;
-        messages::health(eng, slot, shown);
-    }
+    messages::update_client_data(g, eng, slot);
     data
 }
 
