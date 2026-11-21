@@ -447,12 +447,12 @@ fn static_channel_and_stop_sounds_are_broadcast() {
     };
     assert!(!d.map.can_hear_point(d.ct_spawn, d.t_spawn));
     let ct_spawn = d.ct_spawn;
-    // CHAN_STATIC (6): the T spawn is outside the PAS, and still gets it.
+    // CHAN_STATIC (6), sent reliably: the T spawn is outside the PAS, and still gets it.
     d.sound_from(ct_spawn, |eng, ent| {
         assert!(eng.emit_sound(ent, 6, "weapons/ak47-1.wav", 1.0, 1.0, 100));
     });
     assert_eq!((sounds(&d.ct).len(), sounds(&d.t).len()), (1, 1));
-    // A sound that stops is broadcast too, and carries the stop flag.
+    // A sound that stops is broadcast too (reliably), and carries the stop flag.
     d.sound_from(ct_spawn, |eng, ent| {
         assert!(eng.stop_sound(ent, 1, "weapons/ak47-1.wav"));
     });
@@ -699,7 +699,7 @@ fn out_of_range_slots_and_stale_entities_are_ignored() {
         // Free slots take nothing either.
         eng.send(MsgDest::One(3), &print_bytes("nobody"));
         eng.send(MsgDest::OneUnreliable(3), &print_bytes("nobody"));
-        for point in [Vec3::NAN, Vec3::splat(f32::INFINITY), Vec3::splat(1.0e30)] {
+        for point in [Vec3::NAN, Vec3::splat(f32::INFINITY)] {
             eng.send(MsgDest::Pvs(point), &print_bytes("nobody"));
         }
         let stale = eng.create_entity("test_gone").expect("free edict");

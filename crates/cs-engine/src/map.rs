@@ -231,6 +231,25 @@ impl ServerMap {
             .then(|| &pas.rows[leaf * pas.row_bytes..(leaf + 1) * pas.row_bytes])
     }
 
+    /// The PVS of the leaf `point` is in, as the sound leaf of `SV_Multicast` (flag `n` is leaf
+    /// `n + 1`); `None` when everyone gets it: no visibility data, a point outside the world or
+    /// in solid (leaf 0).
+    pub(crate) fn pvs_row(&self, point: Vec3) -> Option<Vec<bool>> {
+        let bsp = self.vis.as_deref()?;
+        let leaf = bsp.find_leaf(point);
+        (leaf != 0 && !bsp.visibility.is_empty()).then(|| bsp.decompress_pvs(leaf))
+    }
+
+    /// Whether the leaf of `listener` (the client's edict origin) is in the PVS `row`; a
+    /// listener in leaf 0 gets it, as with [`pas_row_contains`](Self::pas_row_contains).
+    pub(crate) fn pvs_row_contains(&self, row: &[bool], listener: Vec3) -> bool {
+        let Some(bsp) = self.vis.as_deref() else {
+            return true;
+        };
+        let leaf = bsp.find_leaf(listener);
+        leaf == 0 || row.get(leaf - 1).copied().unwrap_or(true)
+    }
+
     /// Whether the leaf of `listener` (the client's edict origin) is in the PAS row `row`
     /// (bit `leaf - 1`, `SV_ValidClientMulticast`). A listener in solid or outside the world
     /// (leaf 0) hears it; HLDS reads the byte before the row there.

@@ -56,16 +56,18 @@ pub enum MsgDest {
     All,
     /// The unreliable queue of every `Active` client.
     Broadcast,
-    /// The unreliable queue of every `Active` client whose eye (its edict's `origin +
-    /// view_ofs`) can potentially see the box of half-size 1 around the point.
+    /// The unreliable queue of every `Active` client in the potentially visible set of the
+    /// point, as `SV_Multicast` with `MSG_FL_PVS` (ReHLDS `sv_main.cpp`, read 2026-11-21): a
+    /// client gets it when the leaf of its edict's `origin` (not the eye) is in the PVS of the
+    /// leaf of the point. A non-finite point reaches no one; a point in solid or outside the world, a map without visibility
+    /// data and a single-client server reach every `Active` client.
     Pvs(Vec3),
     /// The unreliable queue of every `Active` client in the potentially audible set of the
     /// point, as `SV_Multicast` with `MSG_FL_PAS` (ReHLDS `sv_main.cpp`, read 2026-11-21): a
     /// client hears it when the leaf of its edict's `origin` (not the eye) is in the PAS row of
-    /// the leaf of the point. A point in solid or outside the world, and a map without PAS
+    /// the leaf of the point. A non-finite point reaches no one; a point in solid or outside the world, and a map without PAS
     /// (no visibility data, a single-client server, a map over the PAS caps), reach every
-    /// `Active` client. The PAS reaches beyond the PVS; `Pvs` itself keeps the eye and box
-    /// test (HLDS tests the origin leaf there too; the difference is accepted).
+    /// `Active` client. The PAS reaches beyond the PVS.
     Pas(Vec3),
     /// The init buffer: stored, and replayed to every client that enters the server (in its
     /// `spawn` stage, after the light styles). Only while the map is being activated (in
@@ -128,14 +130,17 @@ impl EngineApi<'_> {
                     }
                 }
             }
-            MsgDest::Pvs(point) => self.send_in_range(point, bytes),
+            MsgDest::Pvs(point) => self.send_in_pvs(point, bytes),
             MsgDest::Pas(point) => {
                 // `SV_Multicast` with `MSG_FL_PAS` (`rehlds/engine/sv_main.cpp`, read
                 // 2026-11-21): the PAS row of the leaf of the point against the leaf of each
                 // client's origin (not its eye). A point in solid or outside the world and a
                 // map without PAS (visibility data missing, one client, over the caps) reach
                 // everyone; a client whose edict is gone is not sent to.
-                let row = if point.is_finite() { self.map.pas_row(point) } else { None };
+                if !point.is_finite() {
+                    return;
+                }
+                let row = self.map.pas_row(point);
                 for slot in 0..self.clients.len() {
                     if self.clients[slot].state != ClientState::Active {
                         continue;
@@ -164,21 +169,39 @@ impl EngineApi<'_> {
         }
     }
 
-    /// Queues `bytes` unreliably for every `Active` client whose eye (its edict's `origin +
-    /// view_ofs`) can see the box of half-size 1 around `point`.
-    fn send_in_range(&mut self, point: Vec3, bytes: &[u8]) {
-        let (mins, maxs) = (point - Vec3::ONE, point + Vec3::ONE);
+    /// `SV_Multicast` with `MSG_FL_PVS`: the PVS row of the leaf of `point` against the leaf of
+    /// each `Active` client's edict origin; see [`MsgDest::Pvs`]. A client whose edict is gone
+    /// is not sent to.
+    fn send_in_pvs(&mut self, point: Vec3, bytes: &[u8]) {
+        if !point.is_finite() {
+            return;
+        }
+        let row = if self.clients.len() > 1 { self.map.pvs_row(point) } else { None };
         for slot in 0..self.clients.len() {
             if self.clients[slot].state != ClientState::Active {
                 continue;
             }
-            // Active clients have an edict; one without is not sent to.
-            let eye = self
+            let origin = self
                 .edicts
                 .get(self.edicts.client(slot as u8))
-                .map(|e| e.vars.origin + e.vars.view_ofs);
-            if eye.is_some_and(|eye| self.can_see(eye, mins, maxs)) {
+                .map(|e| e.vars.origin);
+            let hears = origin.is_some_and(|origin| {
+                row.as_ref().is_none_or(|row| self.map.pvs_row_contains(row, origin))
+            });
+            if hears {
                 self.outbox.push_unreliable(slot, bytes);
+            }
+        }
+    }
+
+    /// `SV_Multicast` with `MSG_FL_BROADCAST` and `reliable` set (`SV_StartSound_internal` for
+    /// `CHAN_STATIC` and `SND_STOP` sounds in multiplayer): the reliable stream of every client
+    /// with `client->active`, which `SV_Spawn_f` sets (`sv_main.cpp`, read 2026-11-21) and
+    /// which is our `Active` state, not the wider "past `new`" of [`MsgDest::All`].
+    fn send_reliable_to_active(&mut self, bytes: &[u8]) {
+        for slot in 0..self.clients.len() {
+            if self.clients[slot].state == ClientState::Active {
+                self.outbox.push_reliable(slot, bytes);
             }
         }
     }
@@ -238,8 +261,8 @@ impl EngineApi<'_> {
     /// `origin[i] = (maxs[i] + mins[i]) * 0.5 + entity origin[i]` the same way and multicasts
     /// the sound with `MSG_FL_PAS` (potentially audible set), as this does, with the audience
     /// rule of `SV_Multicast` (see [`MsgDest::Pas`]). A sound on `CHAN_STATIC` (6) goes to
-    /// every `Active` client instead (see [`stop_sound`](Self::stop_sound)). Deviation: HLDS
-    /// sends that broadcast reliably in multiplayer, this sends it unreliably.
+    /// every `Active` client instead, on their reliable stream (unreliable on a single-client
+    /// server), as `SV_StartSound_internal` does (see [`stop_sound`](Self::stop_sound)).
     ///
     /// Returns `false`, sending nothing, for a stale entity or one whose index does not fit the
     /// 11-bit wire field (2048 and up), a non-finite position, a sample that is not in the
@@ -324,6 +347,8 @@ impl EngineApi<'_> {
         );
         if channel != CHAN_STATIC && extra_flags & SND_FL_STOP == 0 {
             self.send(MsgDest::Pas(origin), w.as_slice());
+        } else if self.clients.len() > 1 {
+            self.send_reliable_to_active(w.as_slice());
         } else {
             self.send(MsgDest::Broadcast, w.as_slice());
         }
