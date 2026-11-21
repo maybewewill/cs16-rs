@@ -399,12 +399,12 @@ fn a_spawn_starts_the_hud_over_without_the_welcome() {
     assert!(b.run(|game, eng| game.spawn_player(eng, 0, Team::Ct, 0)));
     b.step(20);
     let names = b.names_from(0, before);
-    // `PlayerSpawn`'s empty weapon after the scoreboard line, then the HUD again, but not
-    // InitHUD or the rules' welcome.
+    // `PlayerSpawn`'s empty weapon after the scoreboard line, the night vision switched off
+    // (`Spawn`), then the HUD again, but not InitHUD or the rules' welcome.
     assert_eq!(
         names,
         [
-            "ScoreInfo", "CurWeapon", "ResetHUD", "Money", "StatusIcon", "ScoreAttrib",
+            "ScoreInfo", "CurWeapon", "NVGToggle", "ResetHUD", "Money", "StatusIcon", "ScoreAttrib",
             "RoundTime", "TeamScore", "TeamScore", "SetFOV", "Health", "Battery",
             "Damage", "Train",
         ]

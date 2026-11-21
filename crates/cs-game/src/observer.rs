@@ -664,8 +664,11 @@ pub(crate) fn killed(
         screen_fade(eng, slot, 3.0, 3.0, 255, FFADE_OUT | FFADE_STAYOUT);
     }
     // The dead player's night vision goes off, and so does that of the observers that watch it
-    // in first person (`Killed`; there is no night vision state to clear yet).
+    // in first person (`Killed`).
     eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::NvgToggle(false));
+    if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+        p.night_vision_on = false;
+    }
     let victim_index = index_of(slot);
     for observer in 0..g.players.len() as u8 {
         let watching = g.players[usize::from(observer)].is_some()
@@ -674,6 +677,9 @@ pub(crate) fn killed(
                 .is_some_and(|v| v.iuser1 == OBS_IN_EYE && v.iuser2 == victim_index);
         if watching {
             eng.send_usermsg(MsgDest::One(observer), &CsUserMsg::NvgToggle(false));
+            if let Some(p) = g.players[usize::from(observer)].as_mut() {
+                p.night_vision_on = false;
+            }
         }
     }
 }

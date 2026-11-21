@@ -272,6 +272,8 @@ impl World {
         }
         // `g_iShadowSprite`, which `InitHUD` sends in `ShadowIdx`.
         precache_model(eng, "sprites/shadow_circle.spr");
+        // `g_sModelIndexRadio` of `W_Precache`: the icon over a player that used the radio.
+        precache_model(eng, crate::hud_misc::RADIO_SPRITE);
         for name in WORLD_SOUNDS {
             precache_sound(eng, name);
         }

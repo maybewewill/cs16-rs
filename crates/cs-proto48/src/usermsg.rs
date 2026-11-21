@@ -232,6 +232,18 @@ pub enum CsUserMsg {
         frequency: u16,
     },
     NvgToggle(bool),
+    /// `gmsgStatusText`: the format string of a status bar line (`%c1`, `%p2`, `%h`, `%i3`: the
+    /// client fills them from `StatusValue`).
+    StatusText {
+        line: u8,
+        text: String,
+    },
+    /// `gmsgStatusValue`: the value `%i`/`%p`/`%c` of the status bar format number `index`
+    /// stands for.
+    StatusValue {
+        index: u8,
+        value: i16,
+    },
     Radar {
         player_id: u8,
         origin: Vec3,
@@ -406,6 +418,14 @@ pub fn decode_cs_usermsg(name: &str, payload: &[u8]) -> Result<CsUserMsg, ProtoE
             frequency: r.read_u16()?,
         },
         "NVGToggle" => CsUserMsg::NvgToggle(r.read_u8()? != 0),
+        "StatusText" => CsUserMsg::StatusText {
+            line: r.read_u8()?,
+            text: r.read_str()?,
+        },
+        "StatusValue" => CsUserMsg::StatusValue {
+            index: r.read_u8()?,
+            value: r.read_i16()?,
+        },
         "Radar" => CsUserMsg::Radar {
             player_id: r.read_u8()?,
             origin: Vec3::new(r.read_coord()?, r.read_coord()?, r.read_coord()?),
@@ -656,6 +676,16 @@ pub fn encode_cs_usermsg(msg: &CsUserMsg) -> (&'static str, Vec<u8>) {
             w.write_u8(u8::from(*on));
             "NVGToggle"
         }
+        CsUserMsg::StatusText { line, text } => {
+            w.write_u8(*line);
+            w.write_str(text);
+            "StatusText"
+        }
+        CsUserMsg::StatusValue { index, value } => {
+            w.write_u8(*index);
+            w.write_i16(*value);
+            "StatusValue"
+        }
         CsUserMsg::Radar { player_id, origin } => {
             w.write_u8(*player_id);
             w.write_coord(origin.x);
@@ -771,6 +801,20 @@ mod tests {
                 flash: true,
             },
             CsUserMsg::BlinkAcct(30),
+            CsUserMsg::NvgToggle(true),
+            CsUserMsg::Radar {
+                player_id: 3,
+                origin: Vec3::new(-1200.0, 64.5, 8.0),
+            },
+            CsUserMsg::StatusText {
+                line: 0,
+                text: "1 %c1: %p2
+2  %h: %i3%%".to_string(),
+            },
+            CsUserMsg::StatusValue {
+                index: 3,
+                value: -7,
+            },
             CsUserMsg::DeathMsg {
                 killer_id: 1,
                 victim_id: 2,

@@ -7,11 +7,12 @@
 //! players are in [`player`]: their lifecycle, damage, death and movement; [`teams`] and [`menus`]
 //! take them from the team menu into the game, and [`rules`] runs the rounds, the match and the
 //! map cycle (`CHalfLifeMultiplay`); [`chat`] carries what the players say to each other, their
-//! names and the text messages of the HUD. The dead and the spectators watch through
-//! [`observer`].
+//! names and the text messages of the HUD; [`hud_misc`] has the radio, the radar, the status bar
+//! and the night vision. The dead and the spectators watch through [`observer`].
 
 pub mod chat;
 pub mod entity;
+pub mod hud_misc;
 pub mod mapcycle;
 pub mod menus;
 mod messages;
@@ -230,6 +231,19 @@ impl CsGame {
         bits: u32,
     ) -> bool {
         player::take_damage(&mut self.state, eng, slot, inflictor, attacker, damage, bits)
+    }
+
+    /// Gives the player of `slot` night vision (`m_bHasNightVision`, which the buy menu sets).
+    /// `false` when nobody is in that slot. For tests only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn grant_night_vision(&mut self, slot: u8) -> bool {
+        let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut)
+        else {
+            return false;
+        };
+        p.has_night_vision = true;
+        true
     }
 
     /// Puts the movement of the player of `slot` at `origin`, stopped, to place a player

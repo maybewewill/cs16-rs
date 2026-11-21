@@ -308,6 +308,12 @@ pub struct Player {
     pub(crate) train_new: bool,
     /// Chat, the name and `ignoremsg` ([`crate::chat`]).
     pub chat: crate::chat::ChatState,
+    /// `m_bHasNightVision`: set by the buy menu (Task 10).
+    pub(crate) has_night_vision: bool,
+    /// `m_bNightVisionOn`.
+    pub(crate) night_vision_on: bool,
+    /// The radio, the radar, the status bar ([`crate::hud_misc`]).
+    pub hud: crate::hud_misc::HudState,
 }
 
 impl Player {
@@ -362,6 +368,9 @@ impl Player {
             client_fov: 0,
             train_new: true,
             chat: Default::default(),
+            has_night_vision: false,
+            night_vision_on: false,
+            hud: Default::default(),
         }
     }
 
@@ -590,6 +599,7 @@ pub(crate) fn spawn(
         // only for a player killed before (or under `REGAMEDLL_FIXES`, not vanilla), so a
         // joiner's first update sends no `HideWeapon`.
         p.client_hide_hud = -1;
+        p.has_night_vision = false;
     }
     p.hide_hud &=
         !(HIDEHUD_WEAPONS | HIDEHUD_HEALTH | HIDEHUD_TIMER | HIDEHUD_MONEY | HIDEHUD_CROSSHAIR);
@@ -654,6 +664,7 @@ pub(crate) fn spawn(
     // `PlayerSpawn` takes the items away and starts the weapons over; no weapons exist yet, so
     // the ammo HUD is told there is none (`RemoveAllItems`).
     messages::cur_weapon_none(eng, slot);
+    crate::hud_misc::on_spawn(g, eng, slot);
     true
 }
 
@@ -1231,7 +1242,11 @@ pub(crate) fn client_command(
         "say_team" => crate::chat::say_command(g, eng, slot, argv, true),
         "ignoremsg" => crate::chat::ignore_msg_command(g, eng, slot),
         _ => {
-            observer::command(g, eng, slot, argv);
+            // Distinct commands, so the order of `ClientCommand_` (`ignorerad`, the observer
+            // commands, then the living player's) does not matter.
+            if !observer::command(g, eng, slot, argv) {
+                crate::hud_misc::client_command(g, eng, slot, argv);
+            }
         }
     }
 }

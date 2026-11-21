@@ -590,6 +590,8 @@ pub(crate) fn update_client_data(g: &mut GameState, eng: &mut EngineApi<'_>, slo
     }
     // Cached last, so the weapon updates can see that the field of view changed.
     p.client_fov = p.fov;
+    crate::hud_misc::update_status_bar(g, eng, slot);
+    crate::hud_misc::update_radar(g, eng, slot);
 }
 
 #[cfg(test)]

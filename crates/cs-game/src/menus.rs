@@ -7,8 +7,8 @@
 //! `VGUIMenu` and answers with `jointeam`/`joinclass`; one with `_vgui_menus 0` gets the text
 //! menu from `ShowMenu` and answers with `menuselect`.
 //!
-//! The menus of the buy and radio commands (`Menu_Buy` ... `Menu_ClientBuy`, `Menu_Radio1` ...)
-//! come with the economy and the radio; [`Menu`] has only the ones the team selection uses.
+//! The menus of the buy commands (`Menu_Buy` ... `Menu_ClientBuy`) come with the economy;
+//! [`Menu`] has the ones the team selection and the radio use.
 
 use cs_engine::{EngineApi, MsgDest};
 use cs_proto48::usermsg::CsUserMsg;
@@ -24,6 +24,10 @@ pub enum Menu {
     Off,
     ChooseTeam,
     ChooseAppearance,
+    /// `Menu_Radio1`, `Menu_Radio2`, `Menu_Radio3`: the radio menus ([`crate::hud_misc`]).
+    Radio1,
+    Radio2,
+    Radio3,
 }
 
 /// `VGUI_Menu_Team`, `VGUI_Menu_Class_T`, `VGUI_Menu_Class_CT` (`cdll_dll.h`): the ids the
@@ -42,6 +46,9 @@ pub const MENU_KEY_3: u16 = 1 << 2;
 pub const MENU_KEY_4: u16 = 1 << 3;
 pub const MENU_KEY_5: u16 = 1 << 4;
 pub const MENU_KEY_6: u16 = 1 << 5;
+pub const MENU_KEY_7: u16 = 1 << 6;
+pub const MENU_KEY_8: u16 = 1 << 7;
+pub const MENU_KEY_9: u16 = 1 << 8;
 pub const MENU_KEY_0: u16 = 1 << 9;
 
 pub(crate) use crate::chat::{HUD_PRINTCENTER, HUD_PRINTCONSOLE, HUD_PRINTNOTIFY};
@@ -183,6 +190,10 @@ pub(crate) fn menuselect(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, a
             if text_menus {
                 teams::handle_menu_choose_appearance(g, eng, slot, choice);
             }
+        }
+        // The radio menus are text menus for every client.
+        menu @ (Menu::Radio1 | Menu::Radio2 | Menu::Radio3) => {
+            crate::hud_misc::menu_choice(g, eng, slot, menu, choice);
         }
     }
 }
