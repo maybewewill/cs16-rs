@@ -40,6 +40,15 @@ What was found:
   General Public License, version 2 or later, with an exception permitting linking with Valve's
   Half-Life engine and game libraries. ReGameDLL_CS `regamedll/dlls/client.cpp` has no licence
   header. Files not listed in `THIRD-PARTY-NOTICES.md` were not examined.
+- Phase 2C (read 2026-11-22): ReGameDLL_CS `regamedll/dlls/player.cpp` and the headers
+  `player.h`, `client.h`, `gamerules.h`, `game.h`, `util.h`, `cdll_dll.h`, `weapontype.h`,
+  `unisignals.h`, `observer.h`, `pm_shared/pm_shared.h` and `engine/shake.h` carry the same
+  GPL v2-or-later header with the linking exception. The other `.cpp` files read (`client.cpp`,
+  `multiplay_gamerules.cpp`, `gamerules.cpp`, `game.cpp`, `util.cpp`, `triggers.cpp`, `world.cpp`,
+  `bmodels.cpp`, `items.cpp`, `cbase.cpp`, `basemonster.cpp`, `subs.cpp`, `weapontype.cpp`,
+  `weapons.cpp`, `observer.cpp`, `pm_shared/pm_shared.cpp`) begin with
+  `#include "precompiled.h"` and have no licence header, so the repository `LICENSE` (MIT) is
+  the notice that applies to them. `THIRD-PARTY-NOTICES.md` says what was taken from each.
 - ReHLDS `rehlds/common/const.h`, `usercmd.h` and `entity_state.h` carry Valve LLC's notice,
   which restricts use, distribution and modification to non-commercial enhancements to products
   from Valve LLC; `rehlds/common/qlimits.h` and `rehlds/public/rehlds/edict.h` carry a plain

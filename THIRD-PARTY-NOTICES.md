@@ -83,7 +83,33 @@ message table (names, order and payloads, `crates/cs-proto48/src/usermsg.rs`), b
 notice that applies to it. In phase 2B `regamedll/dlls/cbase.cpp` (`SetObjectCollisionBox`)
 and `regamedll/dlls/util.cpp` (`UTIL_EntitiesInBox`) were read for comparison only (master,
 read 2026-11-21): the engine's linking and `entities_in_box` were checked against them and no
-code was taken from these two files. Other files of this project were not examined.
+code was taken from these two files. In phase 2C the files listed below were read and the
+behaviour of the game library `cs-game` was ported from them (all master, read 2026-11-22). Files
+not listed here were not examined.
+
+The `.h` files listed and `regamedll/dlls/player.cpp` carry a header stating GPL v2-or-later with
+the same exception permitting linking with Valve's Half-Life engine and game libraries; the other
+`.cpp` files listed begin with `#include "precompiled.h"` and have no licence header, so the
+repository `LICENSE` (MIT, notice below) is the notice that applies to them. Each ported
+function names its source file, function and the date read in its doc comment.
+
+| File (`regamedll/dlls/` unless noted) | What was taken |
+|---|---|
+| `player.cpp`, `player.h` | The player's life: `CBasePlayer::Spawn`, `Killed`, `PlayerDeathThink`, `StartDeathCam`, `StartObserver`, `TakeDamage` usage, fall damage in `PlayerPreThink`/`PostThink`, `UpdateClientData` (the radar and status bar calls), `UpdateStatusBar`, `InitStatusBar`, `Radio`, `JoiningThink`, `GetIntoGame`, `HandleMenu_*` team and class choices, `AddAccount`, the HUD hide flags and `SBAR_*`/`MAX_ID_RANGE` values. |
+| `client.cpp`, `client.h` | `ClientConnect`, `ClientPutInServer`, `ClientDisconnect`, `ClientKill`, `ClientCommand` (`jointeam`, `joinclass`, `menuselect`, `chooseteam`, `kill`, `nightvision`, `radio1` to `radio3`, `drop`, `ignorerad`, the buy aliases), `Host_Say` (chat formats, sanitising and flood limits), `ClientUserInfoChanged` (name changes), `Radio1` to `Radio3` and `HandleRadioAliasCommands`, `BuyItem`-related command parsing, `ClientSetupVisibility` (the observer part), the usermsg registration table (`LinkUserMessages`) and its order, `InitHUD`-related text. |
+| `multiplay_gamerules.cpp`, `gamerules.cpp`, `gamerules.h` | `CHalfLifeMultiplay`: `Think`, `RestartRound`, `CheckWinConditions`, `CheckRoundTimeExpired`, `Round_Cts`/`Round_Ts` and `TerminateRound`, the freeze period, the money rewards and the loser bonus ladder, `PlayerKilled`, `DeathNotice`, `IPointsForKill`, `PlayerSpawn`, `GetPlayerSpawnSpot`, `FPlayerCanRespawn`, `InitHUD`, `UpdateTeamScores`, `GoToIntermission`, `ChangeLevel` and the map cycle, `ROUND_RESPAWN_TIME` and the other round constants. |
+| `game.cpp`, `game.h` | The `mp_*` cvars the rules read and their defaults (`mp_timelimit`, `mp_freezetime`, `mp_roundtime`, `mp_startmoney`, `mp_friendlyfire`, `mp_tkpunish`, `mp_autokick`, `mp_playerid`, `mp_forcecamera`, `mp_forcechasecam`, `mp_fadetoblack`, `mp_limitteams`, `mp_autoteambalance`, `mp_buytime`, `mp_chattime`, `mp_winlimit`, `mp_maxrounds` and others), `PLAYERID_MODE_*`. |
+| `world.cpp`, `bmodels.cpp`, `triggers.cpp`, `items.cpp`, `cbase.cpp`, `basemonster.cpp`, `subs.cpp` | `CWorld::Precache`/`Spawn` precache lists and world keys; `func_wall`, `func_illusionary` (`bmodels.cpp`); `func_buyzone`, `func_ladder` and the buy zone touch/`BuyZoneIcon_Set` (`triggers.cpp`); `CItemKevlar`/`CItemAssaultSuit` pickup behaviour (`items.cpp`); `CBaseEntity::TakeDamage` and entity dispatch rules (`cbase.cpp`); the `dmg_save` observation (`basemonster.cpp`); `info_player_*` spawn handling (`subs.cpp`, `gamerules.cpp`). |
+| `util.cpp`, `util.h` | `UTIL_ScreenFade`, `UTIL_ClientPrintAll`/`ClientPrint` and their destinations (`HUD_PRINT*`, `HUD_PRINTRADIO`), `DMG_EXPLOSION`, `UTIL_PlayerByIndex`, the `UTIL_*` message helpers. |
+| `weapontype.cpp`, `weapontype.h`, `weapons.cpp` | `g_weaponBuyAliasInfo` (the buy aliases), the prices `KEVLAR_PRICE`, `HELMET_PRICE`, `ASSAULTSUIT_PRICE`, `NVG_PRICE`; `W_Precache` (the `radio.spr` precache). |
+| `unisignals.h`, `cdll_dll.h`, `observer.cpp`, `observer.h` | `CUnifiedSignals` and `SIGNAL_BUY`; `HIDEHUD_*`, `WEAPON_SUIT` and the other `cdll_dll.h` constants; `CBasePlayer::Observer_*` (`Observer_FindNextPlayer`, `Observer_HandleButtons`, `Observer_SetMode`, `Observer_CheckTarget`, `Observer_CheckProperties`), `CAMERA_MODE_*`, `FADETOBLACK_*`. |
+| `regamedll/pm_shared/pm_shared.h`, `pm_shared.cpp` | `OBS_*` mode values; `PM_SpectatorMove` read for the observer's angle assumption (no movement code taken; the movement is `cs_sim::pmove`). |
+| `regamedll/engine/shake.h` | `FFADE_*` values. |
+| `regamedll/game_shared/unicode_strtools.cpp` (engine-side string helper) | `Q_StripUnprintableAndSpace` behaviour for chat text. |
+
+Values that are named after the Half-Life SDK (`DMG_*` bit values, `SCORE_STATUS_DEAD`,
+`HIDEHUD_*`) were taken from memory in places and are labelled as assumptions in the code; no
+SDK header text was copied. `regamedll/dlls/damage.h` was not read.
 
 ```
 Copyright (c) 2015–2025 ReGameDLL_CS Contributors
