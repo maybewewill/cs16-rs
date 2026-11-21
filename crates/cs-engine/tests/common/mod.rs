@@ -248,6 +248,14 @@ pub struct TestGame {
     pub children: Vec<u16>,
     /// `(entity index, eng.time())` of every `think` call, in call order.
     pub think_log: Vec<(u16, f64)>,
+    /// `origin.x` of player slot 0 at every `think` call, in call order.
+    pub think_player_x: Vec<f32>,
+    /// `eng.time()` of every `start_frame` call.
+    pub start_frame_times: Vec<f64>,
+    /// `eng.time()` of every `run_usercmd` call.
+    pub usercmd_times: Vec<f64>,
+    /// `eng.time()` of every `server_activate` call.
+    pub activate_times: Vec<f64>,
 
     pub server_activate_calls: usize,
     pub server_deactivate_calls: usize,
@@ -292,6 +300,7 @@ impl GameDll for TestGame {
 
     fn server_activate(&mut self, eng: &mut EngineApi<'_>) {
         self.server_activate_calls += 1;
+        self.activate_times.push(eng.time());
         self.call_order.push("activate".to_string());
         self.active_at_activate = (0..32).filter(|&s| eng.is_client_active(s)).collect();
         // Lands at model index 2 on a stub map.
@@ -484,6 +493,7 @@ impl GameDll for TestGame {
         random_seed: u32,
     ) {
         self.run_usercmd_calls += 1;
+        self.usercmd_times.push(eng.time());
         self.random_seeds.push(random_seed);
         self.usercmd_msecs.push(cmd.msec);
         if self.flood_per_usercmd > 0 {
@@ -502,6 +512,7 @@ impl GameDll for TestGame {
 
     fn start_frame(&mut self, eng: &mut EngineApi<'_>, _frametime: f32) {
         self.start_frame_calls += 1;
+        self.start_frame_times.push(eng.time());
         for action in std::mem::take(&mut self.actions.0) {
             action(eng);
         }
@@ -517,6 +528,9 @@ impl GameDll for TestGame {
     fn think(&mut self, eng: &mut EngineApi<'_>, id: EdictId) {
         let now = eng.time();
         self.think_log.push((id.index, now));
+        let player = eng.client_edict(0);
+        self.think_player_x
+            .push(eng.ent(player).map_or(f32::NAN, |v| v.origin.x));
         if self.think_reschedules
             && let Some(vars) = eng.ent_mut(id)
         {

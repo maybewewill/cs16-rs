@@ -34,7 +34,7 @@ impl<G: GameDll> Server<G> {
         data: &[u8],
     ) {
         // Every datagram is charged to its address.
-        if !self.limiter.allow(&from, self.time) {
+        if !self.limiter.allow(&from, self.real_time) {
             self.net_stats.oob_denied += 1;
             return;
         }
@@ -52,7 +52,7 @@ impl<G: GameDll> Server<G> {
             rules: &[],
             is_full: self.free_slot_index().is_none() && self.slot_of(&from).is_none(),
         };
-        let (outcome, challenged) = handle_oob(data, &from, self.time, &ctx);
+        let (outcome, challenged) = handle_oob(data, &from, self.real_time, &ctx);
         let reply = match outcome {
             // A reply to a datagram without a challenge issued to its sender is also charged to
             // the global budget; datagrams that get no reply cost nothing from it.
@@ -84,7 +84,7 @@ impl<G: GameDll> Server<G> {
                     .unwrap_or_default()
                     .to_string(),
                 score: 0,
-                duration_secs: (self.time - c.connected_at) as f32,
+                duration_secs: (self.real_time - c.connected_at) as f32,
             })
             .collect();
         let query = cs16_server_query_info(
@@ -120,7 +120,7 @@ impl<G: GameDll> Server<G> {
             userinfo_dirty: true,
             ..ClientView::default()
         };
-        self.clients[index] = Client::connected(from, self.next_userid, self.time);
+        self.clients[index] = Client::connected(from, self.next_userid, self.real_time);
 
         let result = self.call_game(|game, eng| game.client_connect(eng, slot));
         // A kick of the connecting client is answered with the reject, not `svc_disconnect`.

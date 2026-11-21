@@ -94,7 +94,7 @@ evidence = "ReHLDS rehlds/engine/r_studio.cpp SV_HullForStudioModel (read 2026-1
 [[item]]
 id = "think"
 status = "tested"
-evidence = "crates/cs-engine/tests/think.rs::think_fires_once_when_due, rescheduling_inside_think_waits_for_the_next_frame, entity_removed_before_its_turn_is_skipped, entity_removing_itself_is_safe, thinks_are_capped_per_frame, nan_nextthink_never_fires, entity_created_during_the_pass_is_called_in_the_next_frame, slot_reused_during_the_pass_is_not_called_for_the_old_entity; accepted deviations: the thinks run right after start_frame, before the packets are read (the order differs from the original server), and eng.time() inside a think is the frame time, not the entity's own nextthink time; due rule 0 < nextthink <= time; not compared with the original server"
+evidence = "crates/cs-engine/tests/think.rs::think_fires_once_when_due, rescheduling_inside_think_waits_for_the_next_frame, entity_removed_before_its_turn_is_skipped, entity_removing_itself_is_safe, a_full_pool_thinks_in_one_frame, nan_nextthink_never_fires, entity_created_above_the_running_one_is_called_in_the_same_pass, entity_created_below_the_running_one_waits_for_the_next_frame, slot_reused_during_the_pass_is_not_called_for_the_old_entity; crates/cs-engine/tests/physics.rs::frame_order_is_packets_then_physics_then_time, think_sees_its_own_time; order and rule follow ReHLDS sv_main.cpp SV_Frame_Internal and sv_phys.cpp SV_Physics / SV_RunThink (read 2026-11-21): packets, then start_frame and the entity pass, then sv_time advances; due rule 0 < nextthink <= sv_time + frametime; eng.time() inside a think is max(nextthink, sv_time); no per-frame think cap (the pass is bounded by the pool); not compared with the original server"
 
 [[item]]
 id = "timeouts"

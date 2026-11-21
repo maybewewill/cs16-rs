@@ -262,7 +262,7 @@ impl<G: GameDll> Server<G> {
         let is_name = key.eq_ignore_ascii_case("name");
         let value = if is_name {
             let last = self.clients[usize::from(slot)].last_name_change;
-            let too_soon = last.is_some_and(|t| self.time - t < NAME_CHANGE_MIN_INTERVAL_SECS);
+            let too_soon = last.is_some_and(|t| self.real_time - t < NAME_CHANGE_MIN_INTERVAL_SECS);
             if value.is_empty() || too_soon {
                 return;
             }
@@ -277,7 +277,7 @@ impl<G: GameDll> Server<G> {
             return;
         }
         if is_name {
-            self.clients[usize::from(slot)].last_name_change = Some(self.time);
+            self.clients[usize::from(slot)].last_name_change = Some(self.real_time);
         }
         view.userinfo = info;
         view.userinfo_dirty = true;

@@ -16,7 +16,7 @@ use crate::client::{Client, ClientState};
 use crate::edict::MAX_EDICTS_WIRE;
 use crate::game::{ClientView, GameDll};
 use crate::map::ServerMap;
-use crate::server::{Server, ServerConfig};
+use crate::server::{SV_TIME_AT_MAP_START, Server, ServerConfig};
 use crate::world::WorldLinks;
 
 /// Seconds between the `svc_pings` messages sent to active clients.
@@ -143,14 +143,16 @@ impl<G: GameDll> Server<G> {
         self.outbox.reset_map_state();
         self.edicts = self
             .edicts
-            .successor(self.cfg.max_clients, self.cfg.max_edicts, self.time);
+            .successor(self.cfg.max_clients, self.cfg.max_edicts);
+        self.sv_time = SV_TIME_AT_MAP_START;
+        self.warned_movetypes.clear();
         self.precache = Self::map_precache(&map);
         self.world = WorldLinks::new(map.world_bounds());
         self.map = map;
         self.activate_map();
         let mut reconnect = MsgWriter::new();
         write_svc_stufftext(&mut reconnect, "reconnect\n");
-        let now = self.time;
+        let now = self.real_time;
         for client in self.clients.iter_mut().filter(|c| !c.is_free()) {
             client.restart_signon(now);
             client.chan.write_reliable(reconnect.as_slice());
@@ -253,7 +255,7 @@ impl<G: GameDll> Server<G> {
 
     /// Records a datagram from `slot` that its netchan accepted, acknowledging `sequence_ack`.
     pub(crate) fn note_accepted(&mut self, slot: u8, sequence_ack: u32) {
-        let now = self.time;
+        let now = self.real_time;
         let client = &mut self.clients[usize::from(slot)];
         client.last_heard = now;
         client.pings.acknowledged(sequence_ack, now);
@@ -269,8 +271,8 @@ impl<G: GameDll> Server<G> {
                 continue;
             }
             let stalled = matches!(client.state, ClientState::Signon(_))
-                && self.time - client.signon_since > self.cfg.signon_timeout_secs;
-            let silent = self.time - client.last_heard > self.cfg.timeout_secs;
+                && self.real_time - client.signon_since > self.cfg.signon_timeout_secs;
+            let silent = self.real_time - client.last_heard > self.cfg.timeout_secs;
             if stalled || silent {
                 self.free_slot(slot);
             }
@@ -280,10 +282,10 @@ impl<G: GameDll> Server<G> {
     /// Every [`PINGS_INTERVAL_SECS`], queues one `svc_pings` listing every `Active` client
     /// (loss reported as 0) into each `Active` client's unreliable queue.
     pub(crate) fn queue_pings_if_due(&mut self) {
-        if self.time < self.next_pings_at {
+        if self.real_time < self.next_pings_at {
             return;
         }
-        self.next_pings_at = self.time + PINGS_INTERVAL_SECS;
+        self.next_pings_at = self.real_time + PINGS_INTERVAL_SECS;
         let pings: Vec<(u8, u16, u8)> = self
             .clients
             .iter()

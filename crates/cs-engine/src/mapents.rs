@@ -150,7 +150,7 @@ impl<G: GameDll> Server<G> {
             let id = if is_world {
                 world_taken = true;
                 self.edicts.world()
-            } else if let Some(id) = self.edicts.alloc(self.time) {
+            } else if let Some(id) = self.edicts.alloc(self.sv_time) {
                 id
             } else {
                 tracing::error!(
@@ -187,7 +187,7 @@ impl<G: GameDll> Server<G> {
                 if self.edicts.get(id).is_some() {
                     self.world.forget(id.index);
                 }
-                self.edicts.free(id, self.time);
+                self.edicts.free(id, self.sv_time);
             }
         }
     }

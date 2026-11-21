@@ -13,15 +13,27 @@ use crate::mapents::MAX_VALUE_BYTES;
 use crate::precache::PrecacheError;
 
 impl EngineApi<'_> {
-    /// Server time in seconds.
+    /// Simulation time in seconds (HLDS `gpGlobals->time`). It starts at `SV_TIME_AT_MAP_START`
+    /// (1.0) on every map and advances by the frame time after the frame's physics. During a
+    /// `think` it is the time that think was due (`max(nextthink, sv_time)`); in every other
+    /// game call it is the server time `sv_time` (HLDS `sv.time`).
     pub fn time(&self) -> f64 {
         self.time
     }
 
-    /// Real seconds elapsed in the current server frame; 0 for a call made outside a frame
-    /// (server start-up, a map change).
+    /// Seconds of the current server frame (HLDS `host_frametime`: the real time since the
+    /// previous frame, at most 0.25); 0 for a call made outside a frame (server start-up, a map
+    /// change).
     pub fn frametime(&self) -> f32 {
         self.frametime
+    }
+
+    /// Sets the game's `force_retouch` global. While it is above 0, every physics pass links
+    /// every live entity with trigger touching (HLDS `SV_Physics`) and then lowers the value by
+    /// 1, so `n` makes the next `n` frames re-find the triggers stationary entities rest in.
+    /// A non-finite or negative `n` is taken as 0.
+    pub fn set_force_retouch(&mut self, n: f32) {
+        self.world.force_retouch = if n.is_finite() && n > 0.0 { n } else { 0.0 };
     }
 
     /// Number of player slots.
@@ -47,14 +59,14 @@ impl EngineApi<'_> {
 
     /// Allocates an entity at the current time and sets its `classname`. Returns `None` when
     /// the pool has no free slot (slots freed less than `EDICT_REUSE_DELAY` ago do not count,
-    /// except in the `EDICT_LOAD_GRACE` after the map start, when freed slots are reused at
-    /// once), and for a `classname` longer than [`MAX_VALUE_BYTES`] or containing a NUL byte
+    /// except slots freed at server time `EDICT_REUSE_ALWAYS_BEFORE` or earlier, which are
+    /// reused at once), and for a `classname` longer than [`MAX_VALUE_BYTES`] or containing a NUL byte
     /// (nothing is allocated then).
     pub fn create_entity(&mut self, classname: &str) -> Option<EdictId> {
         if classname.len() > MAX_VALUE_BYTES || classname.contains('\0') {
             return None;
         }
-        let id = self.edicts.alloc(self.time)?;
+        let id = self.edicts.alloc(self.sv_time)?;
         if let Some(edict) = self.edicts.get_mut(id) {
             edict.vars.classname = classname.to_string();
         }
@@ -67,7 +79,7 @@ impl EngineApi<'_> {
         if self.edicts.get(id).is_some() {
             self.world.forget(id.index);
         }
-        self.edicts.free(id, self.time);
+        self.edicts.free(id, self.sv_time);
     }
 
     /// Variables of entity `id`; `None` for a stale or foreign id.

@@ -132,10 +132,10 @@ impl<G: GameDll> Server<G> {
             if client.is_free() {
                 continue;
             }
-            let can_send = self.time >= client.clear_time;
+            let can_send = self.real_time >= client.clear_time;
             let packet = if client.state != ClientState::Active {
                 can_send.then(|| self.build_signon_packet(slot))
-            } else if self.time < client.next_update_at {
+            } else if self.real_time < client.next_update_at {
                 None
             } else if can_send {
                 self.build_update(slot)
@@ -149,9 +149,9 @@ impl<G: GameDll> Server<G> {
                 continue;
             };
             client.clear_time =
-                advance_clear_time(client.clear_time, self.time, packet.len(), rate);
+                advance_clear_time(client.clear_time, self.real_time, packet.len(), rate);
             let seq = client.chan.outgoing_sequence.wrapping_sub(1);
-            client.pings.record_sent(seq, self.time);
+            client.pings.record_sent(seq, self.real_time);
             self.net_stats.send(net, addr, &packet);
         }
     }
@@ -161,7 +161,7 @@ impl<G: GameDll> Server<G> {
         let index = usize::from(slot);
         let interval = update_interval(self.views[index].userinfo.get("cl_updaterate"), &self.cfg);
         let client = &mut self.clients[index];
-        client.next_update_at = next_due(client.next_update_at, interval, self.time);
+        client.next_update_at = next_due(client.next_update_at, interval, self.real_time);
         client.choke_count = client.choke_count.saturating_add(1);
     }
 
@@ -189,7 +189,7 @@ impl<G: GameDll> Server<G> {
         let index = usize::from(slot);
         let interval = update_interval(self.views[index].userinfo.get("cl_updaterate"), &self.cfg);
         let client = &mut self.clients[index];
-        client.next_update_at = next_due(client.next_update_at, interval, self.time);
+        client.next_update_at = next_due(client.next_update_at, interval, self.real_time);
 
         let client_data = self.call_game(|game, eng| game.update_client_data(eng, slot));
         let entities = self.visible_entities(slot);
@@ -209,14 +209,14 @@ impl<G: GameDll> Server<G> {
         for _ in 0..std::mem::take(&mut client.choke_count).min(255) {
             write_svc_choke(&mut payload);
         }
-        write_svc_time(&mut payload, self.time as f32);
+        write_svc_time(&mut payload, self.sv_time as f32);
         let clientdata = match self.deltas.get("clientdata_t") {
             Some(schema) => write_svc_clientdata(
                 &mut payload,
                 schema,
                 base.map(|f| (low_byte(f.seq), &f.clientdata)),
                 &client_data,
-                self.time,
+                self.sv_time,
             ),
             None => DeltaRecord::default(),
         };
@@ -230,7 +230,7 @@ impl<G: GameDll> Server<G> {
                 &self.baseline_records,
                 &from.entities,
                 &entities,
-                self.time,
+                self.sv_time,
             ),
             None => write_svc_packetentities_full(
                 &mut block,
@@ -238,7 +238,7 @@ impl<G: GameDll> Server<G> {
                 max_clients,
                 &self.baseline_records,
                 &entities,
-                self.time,
+                self.sv_time,
             ),
         }
 

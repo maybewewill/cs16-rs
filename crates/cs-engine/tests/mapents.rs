@@ -460,9 +460,10 @@ fn changelevel_respawns_entities_from_the_new_map() {
     );
     let game = h.server.game();
     assert_eq!(game.spawned.len() - spawned_before, 3);
-    // Spawned at the server time of the change.
+    // Spawned at the server time every map starts at, not the host's clock.
     let last = *game.spawn_times.last().unwrap();
-    assert!((last - h.now).abs() < 1e-9, "{last} vs {}", h.now);
+    assert_eq!(last, cs_engine::SV_TIME_AT_MAP_START);
+    assert!(h.now > 0.1, "the host's clock was elsewhere");
     assert_eq!(game.call_order.last().unwrap(), "activate");
 }
 

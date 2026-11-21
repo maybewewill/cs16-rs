@@ -291,6 +291,8 @@ pub(crate) struct WorldLinks {
     links: Vec<Option<Link>>,
     pending_touches: Vec<(EdictId, EdictId)>,
     touches_dropped: bool,
+    /// The game's `force_retouch` global (see `EngineApi::set_force_retouch`).
+    pub(crate) force_retouch: f32,
 }
 
 impl WorldLinks {
@@ -301,6 +303,7 @@ impl WorldLinks {
             links: Vec::new(),
             pending_touches: Vec::new(),
             touches_dropped: false,
+            force_retouch: 0.0,
         };
         world.create_node(0, bounds.0, bounds.1);
         world

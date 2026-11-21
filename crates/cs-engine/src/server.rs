@@ -1,7 +1,7 @@
 //! The server: client slots, one netchan per client and the sign-on sequence. Connectionless
 //! packets and connects are in `connect.rs`, per-client updates in `frame.rs`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use cs_cvar::CVarRegistry;
 use cs_proto48::bitbuf::{MsgWriter, ProtoError};
@@ -32,6 +32,12 @@ use crate::usercmd::TokenBucket;
 pub const MAX_RELIABLE_BACKLOG: usize = 256 * 1024;
 /// Datagrams one [`Server::frame`] reads; the rest wait in the transport for the next frame.
 pub const MAX_DATAGRAMS_PER_FRAME: usize = 4096;
+/// Simulation time (`EngineApi::time`) at every map activation: HLDS starts `sv.time` at 1.0 on
+/// each map load.
+pub const SV_TIME_AT_MAP_START: f64 = 1.0;
+/// Longest frame the simulation takes as one step, seconds: `Host_FilterTime` (ReHLDS
+/// `rehlds/engine/host.cpp`, read 2026-11-21) clamps `host_frametime` to 0.25.
+pub const MAX_FRAMETIME: f64 = 0.25;
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -93,10 +99,17 @@ pub struct Server<G: GameDll> {
     pub(crate) oob_budget: TokenBucket,
     pub(crate) spawn_count: u32,
     pub(crate) next_userid: i32,
-    pub(crate) time: f64,
-    /// Real seconds of the frame being run, handed to the game as `EngineApi::frametime`; 0
-    /// between frames.
-    pub(crate) frametime: f32,
+    /// Real time of the latest frame, as the host gave it. Network timers (timeouts, rates,
+    /// pings, challenge buckets) run on it; nothing the game sees does.
+    pub(crate) real_time: f64,
+    /// Simulation time (HLDS `sv.time`): [`SV_TIME_AT_MAP_START`] when a map is activated, plus
+    /// the frame time after each physics pass. What the game sees as `EngineApi::time`.
+    pub(crate) sv_time: f64,
+    /// Seconds of the frame being run (HLDS `host_frametime`, see [`MAX_FRAMETIME`]), handed to
+    /// the game as `EngineApi::frametime`; 0 between frames.
+    pub(crate) frametime: f64,
+    /// Entities (by index) a `movetype` nothing handles was already reported for on this map.
+    pub(crate) warned_movetypes: BTreeSet<u16>,
     pub(crate) net_stats: NetStats,
     /// Set by `shutdown`: frames do nothing from then on.
     pub(crate) shutting_down: bool,
@@ -180,8 +193,10 @@ impl<G: GameDll> Server<G> {
             oob_budget: TokenBucket::new(OOB_GLOBAL_REPLIES_PER_SEC, OOB_GLOBAL_REPLIES_PER_SEC),
             spawn_count: 1,
             next_userid: 1,
-            time: 0.0,
+            real_time: 0.0,
+            sv_time: SV_TIME_AT_MAP_START,
             frametime: 0.0,
+            warned_movetypes: BTreeSet::new(),
             net_stats: NetStats::default(),
             shutting_down: false,
             farewells: Vec::new(),
@@ -218,31 +233,35 @@ impl<G: GameDll> Server<G> {
         self.compute_baselines();
     }
 
-    /// One server frame: lets the game start the frame, runs the entity thinks that are due
-    /// (see `think.rs`), handles up to [`MAX_DATAGRAMS_PER_FRAME`] waiting datagrams, frees
-    /// clients that timed out, queues the pings and userinfo updates that are due, then sends
-    /// each client what is due for it (see `frame.rs`) and the final datagrams of released
-    /// clients. A call whose `now` is not finite or earlier than the previous frame's, and any
-    /// call after [`shutdown`](Self::shutdown), does nothing but count in
-    /// `NetStats::frames_skipped`.
+    /// One server frame, in the order of HLDS `SV_Frame_Internal` (ReHLDS
+    /// `rehlds/engine/sv_main.cpp`, read 2026-11-21): the frame time is `now` minus the previous
+    /// frame's, at most [`MAX_FRAMETIME`] (`Host_FilterTime`); then up to
+    /// [`MAX_DATAGRAMS_PER_FRAME`] waiting datagrams are handled, so the user commands they carry
+    /// run at the simulation time before this frame's physics; then the physics pass (see
+    /// `physics.rs`: `start_frame`, the entities by movetype, their thinks); then the simulation
+    /// time advances by the frame time; then clients that timed out are freed, the pings and
+    /// userinfo updates that are due are queued, and each client is sent what is due for it (see
+    /// `frame.rs`) with the final datagrams of released clients. Network timers run on `now`.
+    /// A call whose `now` is not finite or earlier than the previous frame's, and any call after
+    /// [`shutdown`](Self::shutdown), does nothing but count in `NetStats::frames_skipped`.
     pub fn frame(&mut self, net: &mut dyn PacketTransport, now: f64) {
-        if self.shutting_down || !now.is_finite() || now < self.time {
+        if self.shutting_down || !now.is_finite() || now < self.real_time {
             self.net_stats.frames_skipped += 1;
             return;
         }
-        let real_dt = now - self.time;
-        self.time = now;
-        self.frametime = real_dt as f32;
+        let real_dt = now - self.real_time;
+        self.real_time = now;
+        self.frametime = real_dt.min(MAX_FRAMETIME);
         self.accrue_client_time(real_dt);
         self.oob_budget.refill(real_dt);
-        self.with_game(|game, eng| game.start_frame(eng, real_dt as f32));
-        self.run_thinks();
         for _ in 0..MAX_DATAGRAMS_PER_FRAME {
             let Some((from, data)) = net.recv() else {
                 break;
             };
             self.handle_datagram(net, from, &data);
         }
+        self.run_physics();
+        self.sv_time += self.frametime;
         self.drop_timed_out_clients();
         self.queue_pings_if_due();
         self.broadcast_userinfo();
@@ -320,6 +339,24 @@ impl<G: GameDll> Server<G> {
         result
     }
 
+    /// [`with_game`](Self::with_game) with `EngineApi::time` set to `time` for the call.
+    pub(crate) fn with_game_at<R>(
+        &mut self,
+        time: f64,
+        f: impl FnOnce(&mut G, &mut EngineApi<'_>) -> R,
+    ) -> R {
+        self.sync_views();
+        let result = self.call_game_synced_at(time, f);
+        self.drain_outbox();
+        result
+    }
+
+    /// Runs `f` on the engine services without calling the game; the world, the pool and the
+    /// outbox are the game's own, so nothing queued is drained.
+    pub(crate) fn with_engine<R>(&mut self, f: impl FnOnce(&mut EngineApi<'_>) -> R) -> R {
+        self.call_game_synced_at(self.sv_time, |_, eng| f(eng))
+    }
+
     /// Copies the sign-on state of every slot into what the game sees of it.
     pub(crate) fn sync_views(&mut self) {
         for (view, client) in self.views.iter_mut().zip(&self.clients) {
@@ -341,6 +378,15 @@ impl<G: GameDll> Server<G> {
         &mut self,
         f: impl FnOnce(&mut G, &mut EngineApi<'_>) -> R,
     ) -> R {
+        self.call_game_synced_at(self.sv_time, f)
+    }
+
+    /// [`call_game_synced`](Self::call_game_synced) with `EngineApi::time` set to `time`.
+    pub(crate) fn call_game_synced_at<R>(
+        &mut self,
+        time: f64,
+        f: impl FnOnce(&mut G, &mut EngineApi<'_>) -> R,
+    ) -> R {
         let mut eng = EngineApi::new(
             &mut self.edicts,
             &mut self.precache,
@@ -348,11 +394,12 @@ impl<G: GameDll> Server<G> {
             &self.usermsgs,
             &self.map,
             &mut self.world,
-            self.time,
-            self.frametime,
+            self.sv_time,
+            self.frametime as f32,
             &mut self.outbox,
             &mut self.views,
         );
+        eng.time = time;
         f(&mut self.game, &mut eng)
     }
 
@@ -425,7 +472,7 @@ impl<G: GameDll> Server<G> {
                 &self.deltas,
                 max_clients,
                 &baselines[..count],
-                self.time,
+                self.sv_time,
             );
             w.len() <= room
         };
@@ -697,7 +744,7 @@ impl<G: GameDll> Server<G> {
             &self.deltas,
             self.cfg.max_clients,
             &self.baselines,
-            self.time,
+            self.sv_time,
         );
         self.clients[index].chan.write_reliable(w.as_slice());
 
@@ -719,7 +766,7 @@ impl<G: GameDll> Server<G> {
         write_spawn_stage(
             &mut w,
             view_angles,
-            self.time,
+            self.sv_time,
             &userinfos,
             &self.outbox.light_styles,
             &self.outbox.init,

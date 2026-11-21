@@ -112,8 +112,11 @@ pub struct EngineApi<'a> {
     pub(crate) map: &'a ServerMap,
     /// The area tree and the leaves of the linked entities.
     pub(crate) world: &'a mut WorldLinks,
+    /// The game's time global: `sv_time`, or the due time of the think being run.
     pub(crate) time: f64,
-    /// Real seconds of the current server frame; 0 outside a frame.
+    /// Server time `sv_time` (HLDS `sv.time`), what slot reuse is measured in.
+    pub(crate) sv_time: f64,
+    /// Seconds of the current server frame (`host_frametime`); 0 outside a frame.
     pub(crate) frametime: f32,
     pub(crate) outbox: &'a mut Outbox,
     pub(crate) clients: &'a mut [ClientView],
@@ -143,6 +146,7 @@ impl<'a> EngineApi<'a> {
             map,
             world,
             time,
+            sv_time: time,
             frametime,
             outbox,
             clients,
@@ -218,13 +222,13 @@ pub trait GameDll {
         cmd: &GoldSrcUserCmd,
         random_seed: u32,
     );
-    /// Called once at the start of every server frame, before its datagrams are handled, with
-    /// the seconds elapsed since the previous frame.
+    /// Called at the start of every physics pass (HLDS `StartFrame`), after the frame's
+    /// datagrams were handled, with the seconds of the frame (`host_frametime`).
     fn start_frame(&mut self, eng: &mut EngineApi<'_>, frametime: f32);
     /// The think of entity `id`, called in the frame its `nextthink` comes due (`0 < nextthink
-    /// <= time`), after `start_frame`. The engine has set `nextthink` to 0 before the call; the
-    /// game schedules the next think by setting it again. At most `MAX_THINKS_PER_FRAME` per
-    /// frame.
+    /// <= sv_time + frametime`), in the physics pass after `start_frame`, in ascending entity
+    /// order. During the call `eng.time()` is `max(nextthink, sv_time)`. The engine has set
+    /// `nextthink` to 0 before the call; the game schedules the next think by setting it again.
     fn think(&mut self, _eng: &mut EngineApi<'_>, _id: EdictId) {}
     fn update_client_data(&mut self, eng: &mut EngineApi<'_>, slot: u8) -> GoldSrcClientData;
     /// A server console command no engine command or cvar claims, with `argv[0]` the command

@@ -4,7 +4,7 @@
 mod common;
 
 use common::{FRAME, Harness, TestGame};
-use cs_engine::{MAX_EDICTS_WIRE, MAX_THINKS_PER_FRAME, ServerConfig};
+use cs_engine::{MAX_EDICTS_WIRE, SV_TIME_AT_MAP_START, ServerConfig};
 
 /// A harness with one player slot and `extras` entities (indices 2, 3, ...) whose `nextthink`
 /// is `nextthink`, in a pool of `max_edicts`.
@@ -33,19 +33,19 @@ fn thinks_of(h: &Harness, index: u16) -> usize {
 
 #[test]
 fn think_fires_once_when_due() {
-    // Between the 49th and the 50th frame, so the float sum of the steps does not matter.
-    let target = 0.495;
+    // Server time starts at `SV_TIME_AT_MAP_START`. A think is due when `nextthink <= sv_time
+    // + frametime`: `sv_time` is 1.49 in the 50th frame, so the target is between the 49th
+    // and the 50th frame's due time and the float sum of the steps does not matter.
+    let target = SV_TIME_AT_MAP_START + 0.495;
     let mut h = harness(1, target, 64, TestGame::default());
     h.step(&mut [], 49);
-    assert!(h.now < target);
     assert!(h.server.game().think_log.is_empty(), "not due yet");
     h.step(&mut [], 1);
-    assert!(h.now >= target);
     assert_eq!(h.server.game().think_log.len(), 1);
     let (index, time) = h.server.game().think_log[0];
     assert_eq!(index, 2);
-    // `eng.time()` during the think is the frame's server time.
-    assert!((time - h.now).abs() < 1e-9, "{time}");
+    // `eng.time()` during the think is the time the think was due, not the frame's.
+    assert!((time - target).abs() < 1e-9, "{time}");
     // The engine cleared the schedule: no second call.
     assert_eq!(h.server.edicts().by_index(2).unwrap().1.vars.nextthink, 0.0);
     h.step(&mut [], 100);
@@ -58,7 +58,8 @@ fn rescheduling_inside_think_waits_for_the_next_frame() {
         think_reschedules: true,
         ..TestGame::default()
     };
-    let mut h = harness(1, 0.05, 64, game);
+    // Due in the 5th frame (`sv_time` 1.04 + frame 0.01), 2 ms ahead of that frame's `sv_time`.
+    let mut h = harness(1, SV_TIME_AT_MAP_START + 0.042, 64, game);
     h.step(&mut [], 4);
     assert!(h.server.game().think_log.is_empty());
     h.step(&mut [], 1);
@@ -68,6 +69,7 @@ fn rescheduling_inside_think_waits_for_the_next_frame() {
     h.step(&mut [], 10);
     // One call per frame.
     assert_eq!(h.server.game().think_log.len(), 12);
+    // The first call runs at its due time, 8 ms before the next frame's time.
     let times: Vec<f64> = h.server.game().think_log.iter().map(|&(_, t)| t).collect();
     assert!(
         times.windows(2).all(|w| w[1] - w[0] > FRAME / 2.0),
@@ -105,12 +107,11 @@ fn entity_removing_itself_is_safe() {
     assert!(h.server.edicts().by_index(3).is_none());
 }
 
-/// The pool stops at the wire limit (`MAX_EDICTS_WIRE`), below `MAX_THINKS_PER_FRAME`: a full
+/// The pass is bounded by the pool, which stops at the wire limit (`MAX_EDICTS_WIRE`): a full
 /// pool whose every entity is due thinks in one frame, lowest indices first, and no think
 /// repeats.
 #[test]
 fn a_full_pool_thinks_in_one_frame() {
-    const { assert!(MAX_THINKS_PER_FRAME >= MAX_EDICTS_WIRE) };
     // The world and the one client slot take two edicts.
     let total = MAX_EDICTS_WIRE - 2;
     let mut h = harness(total, 0.001, 6000, TestGame::default());
@@ -150,7 +151,9 @@ fn nan_nextthink_never_fires() {
 }
 
 #[test]
-fn entity_created_during_the_pass_is_called_in_the_next_frame() {
+fn entity_created_above_the_running_one_is_called_in_the_same_pass() {
+    // HLDS reads the entity count at every step of the pass, so a child at a higher index than
+    // its parent is run in the same pass, and its think (due at once) is called in this frame.
     let game = TestGame {
         think_creates_child: true,
         ..TestGame::default()
@@ -158,20 +161,44 @@ fn entity_created_during_the_pass_is_called_in_the_next_frame() {
     let mut h = harness(1, 0.01, 64, game);
     h.step(&mut [], 1);
     let child = h.server.game().children[0];
-    assert_eq!(h.server.game().think_log.len(), 1);
-    assert_eq!(h.server.game().think_log[0].0, 2);
-    h.step(&mut [], 1);
+    assert_eq!(child, 3);
     let log = &h.server.game().think_log;
     assert_eq!(log.len(), 2, "{log:?}");
-    assert_eq!(log[1].0, child);
+    assert_eq!((log[0].0, log[1].0), (2, child));
     h.step(&mut [], 3);
     assert_eq!(h.server.game().think_log.len(), 2);
 }
 
 #[test]
+fn entity_created_below_the_running_one_waits_for_the_next_frame() {
+    // Entities 2 (A) and 3 (B) are due together. A's think removes A itself (so it creates no
+    // child); B's think creates a child that takes A's freed slot 2, which this pass has
+    // already left.
+    let game = TestGame {
+        think_removes_index: Some(2),
+        think_creates_child: true,
+        ..TestGame::default()
+    };
+    let mut h = harness(2, 0.01, 64, game);
+    h.step(&mut [], 1);
+    let child = h.server.game().children[0];
+    assert_eq!(child, 2, "the child takes A's slot");
+    let log = &h.server.game().think_log;
+    assert_eq!(log.len(), 2, "{log:?}");
+    assert_eq!((log[0].0, log[1].0), (2, 3));
+    h.step(&mut [], 1);
+    let log = &h.server.game().think_log;
+    assert_eq!(log.len(), 3, "{log:?}");
+    assert_eq!(log[2].0, child);
+    h.step(&mut [], 3);
+    assert_eq!(h.server.game().think_log.len(), 3);
+}
+
+#[test]
 fn slot_reused_during_the_pass_is_not_called_for_the_old_entity() {
     // Entities 2 (A) and 3 (B) are due together. A's think removes B and creates a due child;
-    // within the first second after the map start the freed slot is reused at once.
+    // a slot freed at server time 2.0 or earlier is reused at once, so the child takes B's
+    // slot. B is not called, and the child, run when the pass reaches slot 3, is called once.
     let game = TestGame {
         think_removes_index: Some(3),
         think_creates_child: true,
@@ -181,12 +208,9 @@ fn slot_reused_during_the_pass_is_not_called_for_the_old_entity() {
     h.step(&mut [], 1);
     let child = h.server.game().children[0];
     assert_eq!(child, 3, "the child takes B's slot");
-    // B was not called, and neither was the child that now holds its slot.
-    let log = &h.server.game().think_log;
-    assert_eq!(log.len(), 1, "{log:?}");
-    assert_eq!(log[0].0, 2);
-    h.step(&mut [], 1);
     let log = &h.server.game().think_log;
     assert_eq!(log.len(), 2, "{log:?}");
-    assert_eq!(log[1].0, 3);
+    assert_eq!((log[0].0, log[1].0), (2, 3));
+    h.step(&mut [], 3);
+    assert_eq!(h.server.game().think_log.len(), 2);
 }
