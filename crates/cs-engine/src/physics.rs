@@ -20,6 +20,18 @@
 //!   macro could not be read; Quake's `IS_NAN` is that test, which an infinity passes too), so a
 //!   non-finite velocity or origin component becomes 0. `avelocity` is guarded the same way
 //!   before it turns the angles.
+//! - `SV_CheckVelocity` does not run for `NOCLIP`, `FOLLOW` and `PUSH` in the source; here a
+//!   non-finite or overflowing result of their moves (`set_finite`) is refused, the old value
+//!   kept and the offending velocity or `avelocity` zeroed, so a bad value cannot reach the
+//!   origin or spread to followers.
+//! - A `FOLLOW` entity whose `aiment` is stale (freed) becomes `MOVETYPE_NONE` (HLDS follows the
+//!   freed edict's zeroed origin), and an entity whose `groundentity` is stale falls (HLDS
+//!   keeps `FL_ONGROUND`).
+//! - The `REHLDS_FIXES` branches are taken on purpose, while the target is the stock Steam
+//!   build (assumption: the fixes only remove crashes and wrong results): `TOSS` is run by
+//!   `SV_Physics_Toss` alone, `SV_FlyMove` stops a `TOSS` entity dead on the ground, and a
+//!   pusher with `FL_KILLME` does not think.
+//! - The settle passes give each pass the touch budget of a frame (HLDS has no budget).
 //! - Pushers (`SV_Physics_Pusher`, `SV_PushMove`, `SV_PushRotate`, `SV_PushEntity`; ReHLDS
 //!   `rehlds/engine/sv_phys.cpp`, read 2026-11-21): `movetime`, `ltime` and the vector maths are
 //!   `f64` where the source has `float` (`movetime` is cast to `f32` for the vector maths). A

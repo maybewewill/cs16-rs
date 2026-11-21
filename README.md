@@ -63,7 +63,7 @@ cargo run -p cs-server -- --proto48 --map de_dust2
 
 Optional flags: `--port <n>` (default 27015), `--maxplayers <n>` (default 16), `--hostname <name>`, `--gamedir <path>`. Then, in the original Counter-Strike 1.6 client, open the console (`~`) and type `connect 127.0.0.1:27015`.
 
-This mode is still walking only: players spawn and move around the map, with no weapons, rounds or HUD. Since phase 2B the world is real: players collide with each other, brush entities (`func_wall`, `func_breakable` and the like) are solid, and entities from the map's entity lump are linked into the world with traces against them, touches, the movement types (toss, bounce, fly, step, push) and pushers, as in the original server. A client's commands are lag compensated and sounds travel through the PAS. Doors, buttons, lifts and trains do not open or move yet: their logic comes with the map entities in phase 7.
+This mode is still walking only: players spawn and move around the map, with no weapons, rounds or HUD. Since phase 2B the world is real: players collide with each other, brush entities (`func_wall`, `func_breakable` and the like) are solid, and entities from the map's entity lump are linked into the world with traces against them, touches, the movement types (toss, bounce, fly, step, push) and pushers, ported from ReHLDS (not yet compared with the original server). A client's commands are lag compensated and sounds travel through the PAS. Doors, buttons, lifts and trains do not open or move yet: their logic comes with the map entities in phase 7.
 
 The server console (type in the terminal where the server runs) accepts these commands:
 

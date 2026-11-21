@@ -32,18 +32,25 @@ What was found:
 
 - The repository-level `LICENSE` files of ReHLDS and ReGameDLL_CS read as MIT, as recorded in
   the table above.
-- The source files examined — ReHLDS `rehlds/engine/sv_user.cpp` (master, read 2026-11-21) and
-  ReGameDLL_CS `regamedll/dlls/player.cpp` (master, read 2026-11-21) — carry a header stating
-  that the file is licensed under the GNU General Public License, version 2 or later, with an
-  exception permitting linking with Valve's Half-Life engine and game libraries. Other files of
-  these projects were not examined.
+- The ReHLDS engine sources read (`sv_user.cpp`, `sv_main.cpp`, `sv_phys.cpp`, `world.cpp`,
+  `delta.cpp`, `common.cpp`, `crc.cpp`, `net_ws.cpp`, `net_chan.cpp`, `info.cpp` and the others
+  listed in `THIRD-PARTY-NOTICES.md`, all master, read 2026-11-21), the engine headers `net.h`
+  and `server.h` and `rehlds/common/mathlib.h`, and ReGameDLL_CS `regamedll/dlls/player.cpp`
+  (master, read 2026-11-21), carry a header stating that the file is licensed under the GNU
+  General Public License, version 2 or later, with an exception permitting linking with Valve's
+  Half-Life engine and game libraries. ReGameDLL_CS `regamedll/dlls/client.cpp` has no licence
+  header. Files not listed in `THIRD-PARTY-NOTICES.md` were not examined.
+- ReHLDS `rehlds/common/const.h`, `usercmd.h` and `entity_state.h` carry Valve LLC's notice,
+  which restricts use, distribution and modification to non-commercial enhancements to products
+  from Valve LLC; `rehlds/common/qlimits.h` and `rehlds/public/rehlds/edict.h` carry a plain
+  Valve copyright line without terms of use.
 
 Decision: the project owner chose GPL-3.0-or-later because it is compatible with both readings
 of the reference projects' licensing.
 
 Porting code from ReHLDS and ReGameDLL_CS is allowed again, with the source of ported code
-named in `THIRD-PARTY-NOTICES.md`. Code derived from the Valve Half-Life SDK stays excluded; see
-[Valve Half-Life SDK caveat](#valve-half-life-sdk-caveat).
+named in `THIRD-PARTY-NOTICES.md`. Code copied from the Valve Half-Life SDK headers stays
+excluded; see [Valve Half-Life SDK caveat](#valve-half-life-sdk-caveat) for what was taken.
 
 ## Copyright notice
 
@@ -68,8 +75,15 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 Parts of ReHLDS and ReGameDLL_CS originate from Valve's Half-Life SDK. Code that originates
 from the Half-Life SDK carries Valve's SDK licence regardless of the licence of the reference
-project it was read from. Anything traceable to the Half-Life SDK must be treated with that
-in mind before it is ported.
+project it was read from, and no such code was copied.
+
+What was taken from the headers that carry Valve's notice (`const.h`, `usercmd.h`,
+`entity_state.h`, `qlimits.h`, `edict.h`) is the numeric constants and names the original
+client, the game libraries and the wire protocol require to match: the `SOLID_*`, `MOVETYPE_*`,
+`FL_*`, `CONTENTS_*` and `EF_*` constants, `MAX_PACKET_ENTITIES`, `MAX_ENT_LEAFS`,
+`MAX_LIGHTSTYLE_SIZE`, and the field names and types of `usercmd_t`, `clientdata_t` and
+`entity_state_t`. `THIRD-PARTY-NOTICES.md` lists them file by file. Whether taking these
+numbers and names is acceptable under GPL-3.0-or-later is an open question for the owner.
 
 ## Valve assets
 

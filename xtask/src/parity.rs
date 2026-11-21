@@ -349,6 +349,76 @@ pub fn load_dir(dir: &Path) -> Result<(Vec<Category>, Weights), ParityError> {
     Ok((categories, weights))
 }
 
+/// The `path.rs::name` citations of an evidence text, as `(file, fn name)`. After `path.rs::`
+/// come one or more names, `tests::a_test`, then further names after commas (`, other_test`)
+/// as long as each looks like a test name (it has an underscore) and ends at a comma, a
+/// semicolon, a parenthesis or the end; only the last `::` segment of a name is the function.
+pub fn cited_fns(evidence: &str) -> Vec<(String, String)> {
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let is_path = |c: char| is_ident(c) || matches!(c, '/' | '.' | '-');
+    let mut out = Vec::new();
+    let mut rest = evidence;
+    while let Some(at) = rest.find(".rs::") {
+        let start = rest[..at]
+            .rfind(|c: char| !is_path(c))
+            .map_or(0, |i| i + 1);
+        let file = format!("{}.rs", &rest[start..at]);
+        let mut tail = &rest[at + ".rs::".len()..];
+        loop {
+            let len = tail
+                .find(|c: char| !is_ident(c) && c != ':')
+                .unwrap_or(tail.len());
+            let name = tail[..len].rsplit("::").next().unwrap_or_default();
+            // After a name: a list continues only after a comma and a space.
+            let after = &tail[len..];
+            if !name.is_empty() {
+                out.push((file.clone(), name.to_string()));
+            }
+            let Some(next) = after.strip_prefix(", ") else {
+                tail = after;
+                break;
+            };
+            let next_len = next.find(|c: char| !is_ident(c)).unwrap_or(next.len());
+            let token = &next[..next_len];
+            let ends = next[next_len..].is_empty()
+                || next[next_len..].starts_with([',', ';', ')', '.'])
+                || next[next_len..].starts_with(" (");
+            if token.contains('_') && ends {
+                tail = next;
+            } else {
+                tail = after;
+                break;
+            }
+        }
+        rest = tail;
+    }
+    out
+}
+
+/// Every `path.rs::fn_name` an item's evidence cites that is not a `fn` of that file under
+/// `root`: `category/id: file::name`. An evidence text that cites a function that was renamed
+/// or removed would otherwise keep claiming a test that no longer exists.
+pub fn missing_cited_fns(category: &Category, root: &Path) -> Vec<String> {
+    let mut missing = Vec::new();
+    for item in &category.items {
+        let Some(evidence) = &item.evidence else {
+            continue;
+        };
+        for (file, name) in cited_fns(evidence) {
+            let found = fs::read_to_string(root.join(&file)).is_ok_and(|text| {
+                text.match_indices(&format!("fn {name}")).any(|(at, m)| {
+                    !text[at + m.len()..]
+                        .starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+                })
+            });
+            if !found {
+                missing.push(format!("{}/{}: {file}::{name}", category.name, item.id));
+            }
+        }
+    }
+    missing
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,5 +643,65 @@ mod tests {
         };
         let text = category_to_toml(&cat);
         assert_eq!(parse_category("wire", &text).unwrap(), cat);
+    }
+
+    #[test]
+    fn cited_fns_follow_the_lists_and_stop_at_prose() {
+        let evidence = "crates/a/src/x.rs::tests::one_test, two_test, three_test (A2A_PING);              crates/b/tests/y.rs::solo_test (8 clients, every 17th); unverified, see docs/z.md;              crates/c/src/z.rs::last_test, unverified against a real server";
+        let cited: Vec<_> = cited_fns(evidence)
+            .into_iter()
+            .map(|(f, n)| format!("{f}:{n}"))
+            .collect();
+        assert_eq!(
+            cited,
+            [
+                "crates/a/src/x.rs:one_test",
+                "crates/a/src/x.rs:two_test",
+                "crates/a/src/x.rs:three_test",
+                "crates/b/tests/y.rs:solo_test",
+                "crates/c/src/z.rs:last_test",
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_cited_fns_reports_renamed_tests() {
+        let dir = TempDir::new("cited");
+        fs::create_dir_all(dir.0.join("crates/a")).unwrap();
+        fs::write(
+            dir.0.join("crates/a/t.rs"),
+            "#[test]
+fn present_test() {}
+fn present_test_longer() {}
+",
+        )
+        .unwrap();
+        let cat = parse_category(
+            "cat",
+            "[[item]]
+id = \"i\"
+status = \"tested\"
+             evidence = \"crates/a/t.rs::present_test, gone_test; crates/a/none.rs::x_test\"
+",
+        )
+        .unwrap();
+        assert_eq!(
+            missing_cited_fns(&cat, &dir.0),
+            ["cat/i: crates/a/t.rs::gone_test", "cat/i: crates/a/none.rs::x_test"]
+        );
+    }
+
+    /// The registry of the repository cites tests and functions that exist.
+    #[test]
+    fn the_registry_cites_only_existing_functions() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let (categories, _) = load_dir(&root.join("docs/parity")).unwrap();
+        let missing: Vec<String> = categories
+            .iter()
+            .flat_map(|c| missing_cited_fns(c, &root))
+            .collect();
+        assert!(missing.is_empty(), "evidence cites missing functions:
+{}", missing.join("
+"));
     }
 }

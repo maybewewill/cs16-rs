@@ -514,10 +514,12 @@ impl EngineApi<'_> {
     }
 }
 
-/// The horizontal move of `dist` units along `yaw` degrees, computed in double as the source
-/// does. ReHLDS `mathlib.h` (read 2026-11-21) has `M_PI` as a double and both
-/// `SV_StepDirection` and `PF_walkmove_I` compute in double, so `(yaw * 2) * PI` and
-/// `yaw * (2 * PI)` are the same number bit for bit.
+/// The horizontal move of `dist` units along `yaw` degrees, in double precision as
+/// `PF_walkmove_I` computes it (`pr_cmds.cpp` lines 1675-1676, read 2026-11-21):
+/// `yaw * 2.0 * M_PI / 360.0`, with `std::f64::consts::PI` for the source's `M_PI` (a double
+/// literal in `rehlds/common/mathlib.h`). `SV_StepDirection` (`sv_move.cpp` line 342) writes
+/// `yaw * (M_PI * 2.0f) / 360.0f`, which can differ from this in the last bit of the double;
+/// both walks use this form.
 fn yaw_move(yaw: f32, dist: f32) -> Vec3 {
     let a = f64::from(yaw) * 2.0 * std::f64::consts::PI / 360.0;
     Vec3::new(
