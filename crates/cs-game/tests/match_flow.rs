@@ -174,7 +174,8 @@ fn two_teams_play_a_round() {
     b.step(frames(5.3));
 
     // The next round: everybody alive again in a new freeze period, the score stays, the
-    // winners got 3000 (the source's reward) and the losers the loser bonus of 1400.
+    // winners got 3000 (no bomb target on this map yet; the original pays 3250 on de_dust2) and
+    // the losers the loser bonus of 1400.
     assert_eq!(rules(&b).win_status(), WinStatus::None);
     assert!(rules(&b).is_freeze_period());
     for slot in 0..4usize {

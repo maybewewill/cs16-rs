@@ -1,8 +1,9 @@
 //! Chat, names and text messages: `say` and `say_team` (`Host_Say` and `SendSayMessage`), a
 //! player changing its name (`ClientUserInfoChanged`, `SetClientUserInfoName`), `ignoremsg`, and
 //! the `ClientPrint` family that prints a localization key on the HUD, in the console or in the
-//! chat. Ported from ReGameDLL_CS `client.cpp`, `player.cpp`, `util.cpp` and the engine-side
-//! `unicode_strtools.cpp` (`Q_StripUnprintableAndSpace`), read 2026-11-22: the vanilla `mp.dll`
+//! chat. Ported from ReGameDLL_CS `client.cpp`, `player.cpp`, `util.cpp` and, for
+//! `Q_StripUnprintableAndSpace`, ReHLDS `rehlds/engine/unicode_strtools.cpp` (GPL v2 or later
+//! with a linking exception; not a ReGameDLL file), read 2026-11-22: the vanilla `mp.dll`
 //! behaviour, not the `REGAMEDLL_ADD`/`REGAMEDLL_FIXES` builds (no `allchat`, no `chat_loc_fallback`,
 //! no location of the speaker).
 //!

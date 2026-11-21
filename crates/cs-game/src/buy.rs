@@ -873,7 +873,8 @@ pub(crate) fn client_command(
 }
 
 /// `HandleBuyAliasCommands`: the commands that buy one thing, for the players whose scripts
-/// buy.
+/// buy. Only a living player gets here: `ClientCommand_` calls it inside its `DEAD_NO` branch,
+/// so a dead player is told nothing, not even `#Alias_Not_Avail` (checked 2026-11-22).
 fn alias_command(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, command: &str) {
     let team = team_of(g, slot);
     if let Some(&(_, fail_name, teams)) = weapon_alias(command) {

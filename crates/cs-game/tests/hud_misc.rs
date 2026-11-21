@@ -713,3 +713,106 @@ fn night_vision_follows_the_player_the_observer_watches() {
     command(&mut b, 3, "nightvision");
     assert!(toggles(&b).is_empty());
 }
+
+/// The probe (slot 0) joins `team_choice` (1 terrorists, 2 counter-terrorists), slot 1 the
+/// other team and slot 2 the probe's team; returns what the probe was sent from the moment
+/// everyone is in until the freeze period of the round has ended.
+fn through_the_freeze_end(team_choice: u8) -> (Vec<SvcMessage>, Vec<(u8, String, i16)>) {
+    let mut b = Bench::stub_slots(spawns(3, 3), 3);
+    b.idle_cmds = true;
+    b.step(6);
+    let other = 3 - team_choice;
+    join(&mut b, 0, team_choice, 1);
+    enter(&mut b, 1);
+    join(&mut b, 1, other, 1);
+    enter(&mut b, 2);
+    join(&mut b, 2, team_choice, 1);
+    b.probe.clear_messages();
+    let mut all: Vec<SvcMessage> = Vec::new();
+    let mut calls = Vec::new();
+    for _ in 0..60 {
+        b.step(100);
+        let got: Vec<SvcMessage> = b.probe.messages().iter().cloned().collect();
+        b.probe.clear_messages();
+        calls.extend(
+            audio(&got)
+                .into_iter()
+                .filter(|a| a.1.starts_with("%!MRAD_")),
+        );
+        all.extend(got);
+        if !calls.is_empty() {
+            break;
+        }
+    }
+    (all, calls)
+}
+
+/// F4: `OnRoundFreezeEnd` has the first joined player of each team call one of four sentences
+/// over the radio, without a text. The probe is the first of its team, so it hears itself;
+/// it is run once as a terrorist and once as a counter-terrorist.
+#[test]
+fn the_round_start_radio_call_reaches_the_first_player_of_each_team() {
+    for team_choice in [1u8, 2] {
+        let (all, calls) = through_the_freeze_end(team_choice);
+        assert_eq!(calls.len(), 1, "team {team_choice}: {calls:?}");
+        let (sender, code, pitch) = &calls[0];
+        assert_eq!(
+            (*sender, *pitch),
+            (1, 100),
+            "the first joined player is slot 0"
+        );
+        assert!(
+            [
+                "%!MRAD_MOVEOUT",
+                "%!MRAD_LETSGO",
+                "%!MRAD_LOCKNLOAD",
+                "%!MRAD_GO"
+            ]
+            .contains(&code.as_str()),
+            "{code}"
+        );
+        // No verbose text (`Radio(sentence)`): no `#Game_radio`, but the icon over the speaker.
+        assert!(
+            texts(&all)
+                .iter()
+                .all(|t| t.2.first().map(String::as_str) != Some("#Game_radio")),
+            "{:?}",
+            texts(&all)
+        );
+        assert_eq!(icons(&all).len(), 1, "{:?}", icons(&all));
+    }
+}
+
+/// F27: the radar tells the team at most once a second (`m_tmNextRadarUpdate`): a player that
+/// moved far twice within the second is sent once; after the second it is sent again. Counted
+/// in server frames, no wall clock.
+#[test]
+fn the_radar_is_sent_at_most_once_a_second() {
+    let mut b = bench();
+    b.step(150);
+    let radars = |b: &Bench| {
+        b.messages()
+            .iter()
+            .filter(|m| matches!(m, CsUserMsg::Radar { player_id: 3, .. }))
+            .count()
+    };
+    let hop = |b: &mut Bench, x: f32| {
+        b.run(move |game: &mut CsGame, eng: &mut EngineApi<'_>| {
+            game.place_player(eng, 2, Vec3::new(x, -480.0, 48.0));
+            game.update_client_data(eng, 2);
+        });
+        b.step(2);
+    };
+    b.probe.clear_messages();
+    hop(&mut b, 1000.0);
+    assert_eq!(radars(&b), 1);
+    // 100 units further, 0.04 s later: due only after a second.
+    hop(&mut b, 1100.0);
+    b.step(40);
+    hop(&mut b, 1200.0);
+    assert_eq!(radars(&b), 1, "{:?}", b.messages());
+    // More than a second after the first one.
+    b.step(80);
+    hop(&mut b, 1300.0);
+    assert_eq!(radars(&b), 2);
+}

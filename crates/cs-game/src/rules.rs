@@ -47,7 +47,7 @@
 //! The money of a round (`m_iAccountCT`, `m_iAccountTerrorist`, the loser bonus and its streaks)
 //! is [`crate::money`]'s; `RestartRound` settles it here.
 //!
-//! Left for later tasks: the radio call of the round start (Task 11), the map objectives (2E): the bomb, the
+//! Left for later tasks: the map objectives (2E): the bomb, the
 //! hostages, the VIP and the escape zones. Their branches in [`check_win_conditions`] and
 //! [`check_round_time_expired`] are stubs: no entity of those classes exists yet, so a map has
 //! no objective, and a round that runs out of time on such a map simply goes on, as
@@ -60,6 +60,7 @@ use cs_proto48::usermsg::CsUserMsg;
 
 use crate::GameState;
 use crate::chat;
+use crate::hud_misc;
 use crate::menus::{self, Menu};
 use crate::messages;
 use crate::money::{self, Economy};
@@ -605,21 +606,46 @@ fn check_freeze_period_expired(g: &mut GameState, eng: &mut EngineApi<'_>) {
     on_round_freeze_end(g, eng);
 }
 
-/// `OnRoundFreezeEnd`: the round starts. Nobody is frozen any more and the round clock starts
-/// counting down the round time. (The radio call of the round start is Task 11's.)
+/// `OnRoundFreezeEnd` (`multiplay_gamerules.cpp`, read 2026-11-22): the round starts. Nobody is
+/// frozen any more, the round clock starts counting down the round time, and the first joined
+/// CT and the first joined T call out a random start sentence over the radio
+/// (`RANDOM_LONG(0, 3)`: MOVEOUT, LETSGO, LOCKNLOAD or GO, the same for both teams). The map
+/// objectives that change the sentences (`m_bMapHasEscapeZone`: ELIM/GETOUT,
+/// `m_bMapHasVIPSafetyZone`: VIP/LOCKNLOAD) are 2E. The call is `Radio(sentence)` without a
+/// verbose text, so the teammates get the `SendAudio` and the icon, no `TextMsg`. Vanilla's
+/// `pev->flags == FL_DORMANT` test (an equality, never true for a joined player) is dropped.
 fn on_round_freeze_end(g: &mut GameState, eng: &mut EngineApi<'_>) {
     // Freeze period expired: kill the flag.
     g.rules.freeze_period = false;
+    let sentence = match g.random_range(0, 3) {
+        0 => "%!MRAD_MOVEOUT",
+        1 => "%!MRAD_LETSGO",
+        2 => "%!MRAD_LOCKNLOAD",
+        _ => "%!MRAD_GO",
+    };
     // Reset the round time.
     g.rules.round_start_time = eng.time();
     g.rules.round_time_secs = g.rules.round_time;
+    let (mut ct_played, mut t_played) = (false, false);
     for slot in 0..g.players.len() {
         let slot = slot as u8;
         let Some(p) = g.players[usize::from(slot)].as_ref() else {
             continue;
         };
-        if p.joining == JoinState::Joined && p.team != Team::Spectator {
-            player::reset_max_speed(g, eng, slot);
+        if p.joining == JoinState::Joined {
+            if p.team == Team::Ct && !ct_played {
+                ct_played = true;
+                hud_misc::radio(g, eng, slot, sentence, "");
+            } else if p.team == Team::Terrorist && !t_played {
+                t_played = true;
+                hud_misc::radio(g, eng, slot, sentence, "");
+            }
+            if g.players[usize::from(slot)]
+                .as_ref()
+                .is_some_and(|p| p.team != Team::Spectator)
+            {
+                player::reset_max_speed(g, eng, slot);
+            }
         }
         messages::sync_round_timer(g, eng, slot);
     }
@@ -1121,10 +1147,6 @@ fn change_level(g: &mut GameState, eng: &mut EngineApi<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-
-
-
 
     #[test]
     fn a_switched_team_wears_the_counterpart_model() {

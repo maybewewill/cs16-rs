@@ -163,7 +163,6 @@ impl MapCycle {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

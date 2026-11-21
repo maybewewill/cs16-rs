@@ -65,7 +65,7 @@ use crate::menus::{
     MENU_KEY_7, MENU_KEY_8, MENU_KEY_9, Menu,
 };
 use crate::observer::{OBS_CHASE_FREE, OBS_CHASE_LOCKED, OBS_IN_EYE, OBS_NONE};
-use crate::player::{DEAD_NO, PITCH_NORM, player_slot};
+use crate::player::{ATTN_NORM, CHAN_ITEM, DEAD_NO, PITCH_NORM, player_slot};
 
 /// `HUD_PRINTRADIO` (`util.h`): the `TextMsg` destination of a radio line.
 pub const HUD_PRINTRADIO: u8 = 5;
@@ -111,10 +111,6 @@ const RADAR_TOLERANCE: f32 = 64.0;
 const RADAR_INTERVAL: f64 = 1.0;
 /// Seconds before `nightvision` is accepted again (`m_flLastCommandTime[CMD_NIGHTVISION]`).
 const NIGHTVISION_INTERVAL: f64 = 0.3;
-
-/// `CHAN_ITEM` and `ATTN_NORM`.
-const CHAN_ITEM: u8 = 3;
-const ATTN_NORM: f32 = 0.8;
 
 /// What the game keeps of a player for the radio, the radar, the status bar and the night
 /// vision.

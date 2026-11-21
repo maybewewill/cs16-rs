@@ -163,7 +163,7 @@ impl CsGame {
     }
 
     /// Spawns the player of `slot` on `team` with appearance `class` (1 to 4, 0 the team's
-    /// default), as the team selection will once it exists. For tests only (cargo feature
+    /// default), as `jointeam`/`joinclass` do (see [`teams`]), without the menus. For tests only (cargo feature
     /// `test-hooks`).
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]

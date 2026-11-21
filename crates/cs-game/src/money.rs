@@ -27,8 +27,9 @@
 //!   ([`crate::player::Player::receives_no_money_next_round`]) is honoured here.
 //! - `HintMessage` (`#Hint_careful_around_teammates`, `#Hint_cannot_play_because_tk`) has no
 //!   hint queue behind it yet and is not sent.
-//! - The `MONEY_BLINK_AMOUNT` blink of the freeze period needs the tutor (`TheTutor`), which does
-//!   not exist; [`blink_account`] is the buy menu's.
+//! - The blink of the freeze period (`MONEY_BLINK_AMOUNT`, 30 in `player.h`) belongs to the tutor
+//!   (`TheTutor`), which does not exist, so the constant is not defined; [`blink_account`] is the
+//!   buy menu's.
 
 use cs_engine::{EngineApi, MsgDest};
 use cs_proto48::usermsg::CsUserMsg;
@@ -58,8 +59,6 @@ pub const REWARD_LOSER_BONUS_ADD: i32 = 500;
 pub const REWARD_KILLED_ENEMY: i32 = 300;
 /// `PAYBACK_FOR_KILLED_TEAMMATES`.
 pub const PAYBACK_FOR_KILLED_TEAMMATES: i32 = -3300;
-/// `MONEY_BLINK_AMOUNT` (`player.h`): how often the account blinks by default.
-pub const MONEY_BLINK_AMOUNT: u8 = 30;
 /// The team kill that `mp_autokick` kicks for (`killer->m_iTeamKills == 3`).
 const AUTOKICK_TEAM_KILLS: i32 = 3;
 

@@ -747,3 +747,23 @@ fn buy_zones_of_a_real_map() {
     );
     assert_eq!(buy(&mut b, "nvgs"), ["Money 1100 true", "ItemStatus 1"]);
 }
+
+/// F26: the dead buy nothing and are told nothing. The finding asked for `#Alias_Not_Avail` to a
+/// dead player; the source says otherwise: `ClientCommand_` (`client.cpp`, read 2026-11-22)
+/// runs `HandleBuyAliasCommands` only inside the `deadflag == DEAD_NO` branch, so a dead
+/// player's alias (wrong team or not) reaches nothing, as here.
+#[test]
+fn a_dead_players_buy_alias_says_nothing() {
+    let mut b = zones();
+    spawn(&mut b, Team::Ct);
+    settle(&mut b);
+    set_money(&mut b, 16000);
+    assert_eq!(buy(&mut b, "ak47"), [text("#Alias_Not_Avail", &["#AK47"])]);
+    b.run(|game, eng| game.damage_player(eng, 0, None, 500.0, dmg::GENERIC));
+    b.step(5);
+    assert!(b.run(|_, eng| eng.ent(eng.client_edict(0)).unwrap().deadflag) != DEAD_NO);
+    for line in ["ak47", "m4a1", "defuser", "vest"] {
+        assert_eq!(buy(&mut b, line), Vec::<String>::new(), "{line}");
+    }
+    assert_eq!(money(&b), 16000);
+}
