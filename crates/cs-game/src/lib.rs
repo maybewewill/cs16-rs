@@ -19,6 +19,7 @@ pub mod money;
 pub mod observer;
 pub mod player;
 pub mod rules;
+mod score;
 pub mod teams;
 pub mod world;
 

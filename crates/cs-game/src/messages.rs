@@ -350,7 +350,7 @@ fn set_bomb_icon(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) {
 
 /// `CBasePlayer::SetScoreboardAttributes()` for the player of `slot`: `ScoreAttrib` to every
 /// player in the game.
-fn set_scoreboard_attributes(g: &GameState, eng: &mut EngineApi<'_>, slot: usize) {
+pub(crate) fn set_scoreboard_attributes(g: &GameState, eng: &mut EngineApi<'_>, slot: usize) {
     let Some(p) = g.players.get(slot).and_then(Option::as_ref) else {
         return;
     };

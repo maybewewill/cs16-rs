@@ -58,6 +58,7 @@ use crate::messages;
 use crate::money;
 use crate::observer::{self, ObserverState};
 use crate::rules;
+use crate::score;
 use crate::teams::{self, JoinState};
 use crate::world::{select_join_spawn_point, select_spawn_point};
 
@@ -92,7 +93,7 @@ pub mod dmg {
 
 /// Hit groups (`common/const.h`).
 const HITGROUP_GENERIC: i32 = 0;
-const HITGROUP_HEAD: i32 = 1;
+pub(crate) const HITGROUP_HEAD: i32 = 1;
 const HITGROUP_CHEST: i32 = 2;
 const HITGROUP_STOMACH: i32 = 3;
 const HITGROUP_LEFTARM: i32 = 4;
@@ -1021,35 +1022,6 @@ pub(crate) fn client_kill(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) 
     kill(g, eng, slot);
 }
 
-/// The weapon name of a death message (`CBasePlayer::GetKillerWeaponName`, `player.cpp:824-872`):
-/// the inflictor's classname without its `weapon_`, `monster_` or `func_` prefix. A killer that is
-/// no client with no inflictor is the world (`VARS(eoNullEntity)`): `worldspawn`. A client killer
-/// that is its own inflictor names its active weapon, `world` while there are no weapons.
-fn killer_weapon_name(
-    eng: &EngineApi<'_>,
-    inflictor: Option<EdictId>,
-    attacker: Option<EdictId>,
-) -> String {
-    let killer_is_client = attacker
-        .and_then(|a| eng.ent(a))
-        .is_some_and(|v| v.flags & FL_CLIENT != 0);
-    let world_class = eng
-        .ent(eng.world())
-        .map_or("worldspawn", |v| v.classname.as_str());
-    let name = match inflictor {
-        Some(i) if !(killer_is_client && Some(i) == attacker) => {
-            eng.ent(i).map_or("world", |v| v.classname.as_str())
-        }
-        None if !killer_is_client => world_class,
-        _ => "world",
-    };
-    ["weapon_", "monster_", "func_"]
-        .iter()
-        .find_map(|prefix| name.strip_prefix(prefix))
-        .unwrap_or(name)
-        .to_string()
-}
-
 /// `CHalfLifeMultiplay::PlayerKilled` (the part this task has the data for) and
 /// `CBasePlayer::Killed`: the death notice, the frag rules, the scoreboard, then the player
 /// dies (`DEAD_DYING`, not solid, `MOVETYPE_TOSS`) and runs `PlayerDeathThink`.
@@ -1067,38 +1039,11 @@ fn killed(
     let index = usize::from(slot);
     let id = eng.client_edict(slot);
     let now = eng.time();
-    let killer = attacker.and_then(|a| player_slot(g, eng, a));
-    let weapon = killer_weapon_name(eng, inflictor, attacker);
-    let Some(victim) = g.players[index].as_mut() else {
+    if g.players[index].is_none() {
         return;
-    };
-    let headshot = victim.last_hit_group == HITGROUP_HEAD;
-    let victim_team = victim.team;
-
-    // DeathNotice.
-    let killer_index = killer.map_or(0, |k| k as u16 + 1);
-    messages::death_msg(eng, killer_index, id.index, headshot, &weapon);
-
-    // PlayerKilled.
-    if let Some(victim) = g.players[index].as_mut() {
-        victim.deaths += 1;
-        victim.not_killed = false;
     }
-    if let Some(k) = killer {
-        let teammate = g.players[k].as_ref().map(|p| p.team) == Some(victim_team);
-        if let Some(kp) = g.players[k].as_mut() {
-            kp.frags += if k == index || teammate { -1 } else { 1 };
-        }
-    }
-    money::killed_by(g, eng, slot, attacker);
-    if let Some(p) = g.players[index].as_ref() {
-        messages::score_info(eng, id.index, p);
-    }
-    if let Some(k) = killer
-        && let Some(kp) = g.players[k].as_ref()
-    {
-        messages::score_info(eng, k as u16 + 1, kp);
-    }
+    // `PlayerKilled` with `DeathNotice`: the death notice, deaths, frags, money, scoreboard.
+    score::player_killed(g, eng, slot, attacker, inflictor);
 
     // CBasePlayer::Killed.
     if let Some(p) = g.players[index].as_mut() {
@@ -1125,6 +1070,8 @@ fn killed(
     }
     // The camera of the dying: it chases the killer, or the screen fades to black.
     observer::killed(g, eng, slot, attacker);
+    // `SetScoreboardAttributes()`: the scoreboard marks the player dead.
+    messages::set_scoreboard_attributes(g, eng, usize::from(slot));
     // `DeathSound`: one of four, `RANDOM_LONG(1, 4)`.
     let sample = match g.random_range(1, 4) {
         1 => "player/die1.wav",
