@@ -10,8 +10,14 @@
 //!   above 13) behaves as `NONE` here, with one warning per entity index per map.
 //! - `SV_CheckMovingGround` (the conveyor and `basevelocity` bookkeeping before the switch) and
 //!   `SV_CheckWaterTransition` are not ported.
+//! - `sv_time` is not advanced while a think runs, so the game's time global reverts to `sv_time`
+//!   for every call after it; HLDS leaves the global at the think's due time until the next
+//!   `SV_Physics` or `SV_Impact` resets it.
+//! - A `nextthink` that is NaN or infinite is never due (C compares false and would fire NaN).
 //! - `force_retouch` is lowered while it is above 0 (HLDS: while it is not 0), so a fractional
 //!   value cannot keep the pass relinking forever.
+//! - The settle passes of map activation (`settle_physics`) assume `runPhysics` is true (a new
+//!   map, not a saved game).
 //! - The frame filter of `Host_FilterTime` that skips a frame that is too early (`sys_ticrate`)
 //!   is not applied: the host decides when to call `Server::frame`.
 
@@ -19,7 +25,8 @@ use glam::Vec3;
 
 use crate::edict::EdictId;
 use crate::game::GameDll;
-use crate::server::Server;
+use crate::world::free_entity;
+use crate::server::{SETTLE_PASSES_MULTI, SETTLE_PASSES_SINGLE, Server};
 use crate::world::consts::{
     FL_KILLME, MOVETYPE_BOUNCE, MOVETYPE_BOUNCEMISSILE, MOVETYPE_FLY, MOVETYPE_FLYMISSILE,
     MOVETYPE_FOLLOW, MOVETYPE_NONE, MOVETYPE_NOCLIP, MOVETYPE_PUSH, MOVETYPE_PUSHSTEP,
@@ -67,12 +74,30 @@ impl<G: GameDll> Server<G> {
                 .get(id)
                 .is_some_and(|e| e.vars.flags & FL_KILLME != 0);
             if killed {
-                self.free_edict(id);
+                free_entity(&mut self.edicts, &mut self.world, id, self.sv_time);
             }
         }
         if self.world.force_retouch > 0.0 {
             self.world.force_retouch = (self.world.force_retouch - 1.0).max(0.0);
         }
+    }
+
+    /// The physics passes `SV_ActivateServer` (ReHLDS `rehlds/engine/sv_main.cpp`, read
+    /// 2026-11-21, with `runPhysics` true) runs after the game activated the map and before the
+    /// baselines are cut: with one player slot 2 passes of `host_frametime` 0.1, otherwise 16 of
+    /// 0.8. `sv_time` does not advance, so a think due before `sv_time + 0.1` (or `+ 0.8`) runs
+    /// now and its effects are in the baselines.
+    pub(crate) fn settle_physics(&mut self) {
+        let (passes, frametime) = if self.cfg.max_clients <= 1 {
+            (SETTLE_PASSES_SINGLE, 0.1)
+        } else {
+            (SETTLE_PASSES_MULTI, 0.8)
+        };
+        self.frametime = frametime;
+        for _ in 0..passes {
+            self.run_physics();
+        }
+        self.frametime = 0.0;
     }
 
     /// The `switch (ent->v.movetype)` of `SV_Physics`.
@@ -90,6 +115,7 @@ impl<G: GameDll> Server<G> {
             }
             other => {
                 if self.warned_movetypes.insert(id.index) {
+                    self.movetype_warnings += 1;
                     tracing::warn!(
                         entity = id.index,
                         movetype = other,
@@ -167,17 +193,8 @@ impl<G: GameDll> Server<G> {
             .get(id)
             .is_some_and(|e| e.vars.flags & FL_KILLME != 0)
         {
-            self.free_edict(id);
+            free_entity(&mut self.edicts, &mut self.world, id, self.sv_time);
         }
         self.edicts.get(id).is_some()
-    }
-
-    /// `ED_Free` for the engine: takes `id` out of the area tree and frees its slot at the
-    /// simulation time.
-    fn free_edict(&mut self, id: EdictId) {
-        if self.edicts.get(id).is_some() {
-            self.world.forget(id.index);
-        }
-        self.edicts.free(id, self.sv_time);
     }
 }

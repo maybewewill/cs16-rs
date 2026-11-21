@@ -38,6 +38,10 @@ pub const SV_TIME_AT_MAP_START: f64 = 1.0;
 /// Longest frame the simulation takes as one step, seconds: `Host_FilterTime` (ReHLDS
 /// `rehlds/engine/host.cpp`, read 2026-11-21) clamps `host_frametime` to 0.25.
 pub const MAX_FRAMETIME: f64 = 0.25;
+/// Physics passes that settle a map at activation with one player slot: 2 of 0.1 s.
+pub const SETTLE_PASSES_SINGLE: usize = 2;
+/// Physics passes that settle a map at activation with more player slots: 16 of 0.8 s.
+pub const SETTLE_PASSES_MULTI: usize = 16;
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -110,6 +114,8 @@ pub struct Server<G: GameDll> {
     pub(crate) frametime: f64,
     /// Entities (by index) a `movetype` nothing handles was already reported for on this map.
     pub(crate) warned_movetypes: BTreeSet<u16>,
+    /// Warnings given for such entities since the server started.
+    pub(crate) movetype_warnings: u64,
     pub(crate) net_stats: NetStats,
     /// Set by `shutdown`: frames do nothing from then on.
     pub(crate) shutting_down: bool,
@@ -197,6 +203,7 @@ impl<G: GameDll> Server<G> {
             sv_time: SV_TIME_AT_MAP_START,
             frametime: 0.0,
             warned_movetypes: BTreeSet::new(),
+            movetype_warnings: 0,
             net_stats: NetStats::default(),
             shutting_down: false,
             farewells: Vec::new(),
@@ -228,6 +235,7 @@ impl<G: GameDll> Server<G> {
         self.outbox.init_open = true;
         self.spawn_map_entities();
         self.with_game(|game, eng| game.server_activate(eng));
+        self.settle_physics();
         self.outbox.init_open = false;
         self.precache.lock();
         self.compute_baselines();
@@ -314,6 +322,17 @@ impl<G: GameDll> Server<G> {
 
     pub fn net_stats(&self) -> NetStats {
         self.net_stats
+    }
+
+    /// Entities a `movetype` that HLDS rejects was reported for (one warning per entity per
+    /// map), counted since the server started.
+    pub fn movetype_warnings(&self) -> u64 {
+        self.movetype_warnings
+    }
+
+    /// Touches found by linking and not yet dispatched (`(trigger, other)` pairs).
+    pub fn pending_touch_count(&self) -> usize {
+        self.world.pending_touches().len()
     }
 
     pub fn spawn_count(&self) -> u32 {

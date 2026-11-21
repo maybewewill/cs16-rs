@@ -284,6 +284,15 @@ struct Link {
     area: Option<(usize, bool)>,
 }
 
+/// `ED_Free` for the engine: takes `id` out of the area tree and frees its slot at server time
+/// `now`. A stale id, the world and the player slots are left alone.
+pub(crate) fn free_entity(edicts: &mut EdictPool, world: &mut WorldLinks, id: EdictId, now: f64) {
+    if id.index > u16::from(edicts.max_clients()) && edicts.get(id).is_some() {
+        world.forget(id.index);
+    }
+    edicts.free(id, now);
+}
+
 /// The area tree and what each linked entity touches, plus the touches found by linking.
 pub(crate) struct WorldLinks {
     nodes: Vec<AreaNode>,
@@ -491,7 +500,6 @@ impl WorldLinks {
     }
 
     /// The touches queued and not yet taken.
-    #[allow(dead_code)] // Read by tests; the physics takes them with `take_pending_touches`.
     pub(crate) fn pending_touches(&self) -> &[(EdictId, EdictId)] {
         &self.pending_touches
     }

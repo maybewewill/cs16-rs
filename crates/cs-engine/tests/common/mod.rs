@@ -15,6 +15,7 @@ use cs_proto48::messages::{svc, write_svc_print, write_svc_updateuserinfo};
 use cs_proto48::netchan::MAX_MSGLEN;
 use cs_proto48::usermsg::UserMsgRegistry;
 use cs_transport::{LoopbackEndpoint, LoopbackHub, PacketTransport, PeerAddr, TransportError};
+use cs_engine::consts::FL_KILLME;
 use glam::Vec3;
 
 /// Seconds of one harness frame.
@@ -237,6 +238,10 @@ pub struct TestGame {
     pub think_reschedules: bool,
     /// When set, every `think` removes the entity itself.
     pub think_removes_self: bool,
+    /// When set, every `think` sets `FL_KILLME` on the entity.
+    pub think_kills_self: bool,
+    /// When set, every `think` sets the entity's `skin` to this value.
+    pub think_sets_skin: Option<i16>,
     /// When set, every `think` removes the live entity with this index.
     pub think_removes_index: Option<u16>,
     /// `nextthink` of the n-th extra entity (0-based) where it overrides `extra_nextthink`.
@@ -550,6 +555,14 @@ impl GameDll for TestGame {
             }
             self.children.push(child.index);
         }
+        if let Some(vars) = eng.ent_mut(id) {
+            if self.think_kills_self {
+                vars.flags |= FL_KILLME;
+            }
+            if let Some(skin) = self.think_sets_skin {
+                vars.skin = skin;
+            }
+        }
         if self.think_removes_self {
             eng.remove_entity(id);
         }
@@ -587,6 +600,21 @@ impl GameDll for TestGame {
         self.add_to_full_pack_pairs.insert((viewer, ent));
         true
     }
+}
+
+/// Sets the `nextthink` of the `test_extra` entities at the start of the next frame, after the
+/// settle passes of activation (which run thinks due before about `sv_time + 0.1`): the n-th
+/// gets `overrides[n]` where there is one, `default` otherwise.
+pub fn schedule_extra_thinks(h: &mut Harness, default: f64, overrides: Vec<f64>) {
+    h.server.game_mut().act(move |eng| {
+        let mut after = None;
+        let mut n = 0;
+        while let Some(id) = eng.find_by_classname(after, "test_extra") {
+            eng.ent_mut(id).expect("live").nextthink = overrides.get(n).copied().unwrap_or(default);
+            after = Some(id);
+            n += 1;
+        }
+    });
 }
 
 /// Reason of the kick `client_command("kickme")` issues.

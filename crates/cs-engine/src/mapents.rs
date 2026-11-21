@@ -14,6 +14,7 @@ use crate::collision::MAX_WORLD_COORD;
 use crate::edict::EntVars;
 use crate::game::GameDll;
 use crate::server::Server;
+use crate::world::free_entity;
 
 /// Most keys one lump entry hands to the game, `classname` included. Further keys are dropped.
 pub const MAX_ENTITY_KEYS: usize = 256;
@@ -184,10 +185,7 @@ impl<G: GameDll> Server<G> {
             if !accepted && !is_world {
                 // A game that already removed the entity itself leaves a stale id, which the
                 // pool ignores.
-                if self.edicts.get(id).is_some() {
-                    self.world.forget(id.index);
-                }
-                self.edicts.free(id, self.sv_time);
+                free_entity(&mut self.edicts, &mut self.world, id, self.sv_time);
             }
         }
     }

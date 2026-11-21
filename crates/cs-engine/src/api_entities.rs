@@ -9,6 +9,7 @@ use glam::Vec3;
 use crate::collision::{CONTENTS_EMPTY, Hull, MAX_WORLD_COORD, TraceResult};
 use crate::edict::{EdictId, EntVars};
 use crate::game::EngineApi;
+use crate::world::free_entity;
 use crate::mapents::MAX_VALUE_BYTES;
 use crate::precache::PrecacheError;
 
@@ -60,8 +61,8 @@ impl EngineApi<'_> {
     /// Allocates an entity at the current time and sets its `classname`. Returns `None` when
     /// the pool has no free slot (slots freed less than `EDICT_REUSE_DELAY` ago do not count,
     /// except slots freed at server time `EDICT_REUSE_ALWAYS_BEFORE` or earlier, which are
-    /// reused at once), and for a `classname` longer than [`MAX_VALUE_BYTES`] or containing a NUL byte
-    /// (nothing is allocated then).
+    /// reused at once), and for a `classname` longer than [`MAX_VALUE_BYTES`] or containing a
+    /// NUL byte (nothing is allocated then).
     pub fn create_entity(&mut self, classname: &str) -> Option<EdictId> {
         if classname.len() > MAX_VALUE_BYTES || classname.contains('\0') {
             return None;
@@ -76,10 +77,7 @@ impl EngineApi<'_> {
     /// Frees entity `id` with its variables and private data. A stale or foreign id, the
     /// world and the player slots are left alone.
     pub fn remove_entity(&mut self, id: EdictId) {
-        if self.edicts.get(id).is_some() {
-            self.world.forget(id.index);
-        }
-        self.edicts.free(id, self.sv_time);
+        free_entity(self.edicts, self.world, id, self.sv_time);
     }
 
     /// Variables of entity `id`; `None` for a stale or foreign id.

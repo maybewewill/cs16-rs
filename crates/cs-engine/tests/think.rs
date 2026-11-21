@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{FRAME, Harness, TestGame};
+use common::{FRAME, Harness, TestGame, schedule_extra_thinks};
 use cs_engine::{MAX_EDICTS_WIRE, SV_TIME_AT_MAP_START, ServerConfig};
 
 /// A harness with one player slot and `extras` entities (indices 2, 3, ...) whose `nextthink`
@@ -14,12 +14,18 @@ fn harness(extras: usize, nextthink: f64, max_edicts: usize, game: TestGame) -> 
         max_edicts,
         ..ServerConfig::default()
     };
+    let overrides = game.extra_nextthink_overrides.clone();
     let game = TestGame {
         extra_entities: extras,
-        extra_nextthink: nextthink,
+        extra_nextthink: 0.0,
+        extra_nextthink_overrides: Vec::new(),
         ..game
     };
-    Harness::with_config(cfg, game)
+    let mut h = Harness::with_config(cfg, game);
+    // Scheduled at the first frame: activation settles the map with passes that would run
+    // thinks due that early (see `settle_physics`).
+    schedule_extra_thinks(&mut h, nextthink, overrides);
+    h
 }
 
 fn thinks_of(h: &Harness, index: u16) -> usize {

@@ -5,15 +5,19 @@ mod common;
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
-use common::{FRAME, Harness, TestGame};
+use common::{FRAME, Harness, TestGame, schedule_extra_thinks};
+use cs_assets::bsp::BspMap;
 use cs_engine::consts::{
     FL_KILLME, MOVETYPE_FOLLOW, MOVETYPE_NOCLIP, MOVETYPE_NONE, MOVETYPE_TOSS, SOLID_BBOX,
+    SOLID_TRIGGER,
 };
 use cs_engine::{EdictId, EngineApi, SV_TIME_AT_MAP_START, ServerConfig, ServerMap};
 use cs_probe::{ProbeClient, ProbeState};
 use cs_proto48::delta::GoldSrcUserCmd;
 use cs_transport::LoopbackEndpoint;
+use cs_vfs::{Vfs, VfsConfig};
 use glam::Vec3;
 
 type Probe = ProbeClient<LoopbackEndpoint>;
@@ -105,10 +109,11 @@ fn think_sees_its_own_time() {
     // Entity 2 is due 4 ms into the first frame (10 ms long); entity 3 was due long ago.
     let game = TestGame {
         extra_entities: 2,
-        extra_nextthink_overrides: vec![SV_TIME_AT_MAP_START + 0.004, 0.5],
         ..TestGame::default()
     };
     let mut h = harness(1, game);
+    schedule_extra_thinks(&mut h, 0.0, vec![SV_TIME_AT_MAP_START + 0.004, 0.5]);
+    let settle = h.server.game().start_frame_times.len();
     h.step(&mut [], 1);
     let log = &h.server.game().think_log;
     assert_eq!(log.len(), 2, "{log:?}");
@@ -119,7 +124,10 @@ fn think_sees_its_own_time() {
     assert_eq!(log[1].0, 3);
     assert!((log[1].1 - SV_TIME_AT_MAP_START).abs() < EPS);
     // `start_frame` saw the server time of the frame.
-    assert_eq!(h.server.game().start_frame_times, vec![SV_TIME_AT_MAP_START]);
+    assert_eq!(
+        h.server.game().start_frame_times[settle..],
+        [SV_TIME_AT_MAP_START]
+    );
 }
 
 #[test]
@@ -127,10 +135,10 @@ fn think_due_after_the_frame_waits() {
     // 11 ms into a 10 ms frame: not due in the first frame, due in the second.
     let game = TestGame {
         extra_entities: 1,
-        extra_nextthink: SV_TIME_AT_MAP_START + 0.011,
         ..TestGame::default()
     };
     let mut h = harness(1, game);
+    schedule_extra_thinks(&mut h, SV_TIME_AT_MAP_START + 0.011, Vec::new());
     h.step(&mut [], 1);
     assert!(h.server.game().think_log.is_empty());
     h.step(&mut [], 1);
@@ -142,12 +150,13 @@ fn think_due_after_the_frame_waits() {
 #[test]
 fn long_frames_are_clamped_to_a_quarter_second() {
     let mut h = harness(1, TestGame::default());
+    let settle = h.server.game().start_frame_times.len();
     h.step(&mut [], 1);
     // A 10 s stall: the simulation takes one 0.25 s step.
     h.now += 10.0;
     h.server.frame(&mut h.hub, h.now);
     h.step(&mut [], 1);
-    let times = &h.server.game().start_frame_times;
+    let times = &h.server.game().start_frame_times[settle..];
     assert_eq!(times.len(), 3);
     assert!((times[2] - times[1] - 0.25).abs() < EPS, "{times:?}");
 }
@@ -174,10 +183,10 @@ fn sv_time_restarts_at_each_map() {
 fn killme_frees_after_physics() {
     let game = TestGame {
         extra_entities: 2,
-        extra_nextthink: 0.01,
         ..TestGame::default()
     };
     let mut h = harness(1, game);
+    schedule_extra_thinks(&mut h, 0.01, Vec::new());
     // Entity 2 is marked at the start of the frame, before the pass reaches it.
     h.server.game_mut().act(|eng| {
         let victim = eng.find_by_classname(None, "test_extra").unwrap();
@@ -323,10 +332,10 @@ fn movetypes_not_ported_yet_only_think() {
     // 1 and 2 and 99 are movetypes HLDS refuses; TOSS is not ported yet. All think.
     let game = TestGame {
         extra_entities: 4,
-        extra_nextthink: 0.01,
         ..TestGame::default()
     };
     let mut h = harness(1, game);
+    schedule_extra_thinks(&mut h, 0.01, Vec::new());
     run(&mut h, |eng| {
         for (index, movetype) in [(2, 1), (3, 2), (4, 99), (5, MOVETYPE_TOSS)] {
             let id = eng.entity_ids()[index];
@@ -366,4 +375,168 @@ fn force_retouch_relinks_stationary_entities_and_counts_down() {
     h.step(&mut [], 1);
     move_to(&mut h, 900.0);
     assert!(vars(&h, id).absmax.x < 600.0, "linking stopped");
+}
+
+#[test]
+fn settle_passes_run_before_the_baselines_are_cut() {
+    // One player slot: 2 passes of 0.1 s at activation, `sv_time` stays 1.0. A think due at
+    // 1.05 runs in them; its `skin` is in the baseline a joining probe receives.
+    let game = TestGame {
+        extra_entities: 1,
+        extra_nextthink: SV_TIME_AT_MAP_START + 0.05,
+        think_sets_skin: Some(9),
+        ..TestGame::default()
+    };
+    let mut h = harness(1, game);
+    let log = &h.server.game().think_log;
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert!((log[0].1 - (SV_TIME_AT_MAP_START + 0.05)).abs() < EPS);
+    assert_eq!(h.server.game().start_frame_calls, 2);
+    let probe = joined(&mut h);
+    assert_eq!(probe.baselines()[&2].skin, 9);
+    // The settle passes did not advance the simulation time.
+    assert_eq!(h.server.game().start_frame_times[..3], [1.0, 1.0, 1.0]);
+}
+
+#[test]
+fn think_that_sets_killme_is_freed_after_the_call() {
+    let game = TestGame {
+        extra_entities: 1,
+        think_kills_self: true,
+        ..TestGame::default()
+    };
+    let mut h = harness(1, game);
+    schedule_extra_thinks(&mut h, 0.01, Vec::new());
+    h.step(&mut [], 1);
+    assert_eq!(h.server.game().think_log.len(), 1);
+    assert!(h.server.edicts().by_index(2).is_none());
+}
+
+#[test]
+fn rejected_movetype_is_reported_once_per_entity_per_map() {
+    let game = TestGame {
+        extra_entities: 2,
+        ..TestGame::default()
+    };
+    let mut h = harness(1, game);
+    let set_bad = |h: &mut Harness| {
+        run(h, |eng| {
+            for id in eng.entity_ids().into_iter().filter(|id| id.index >= 2) {
+                eng.ent_mut(id).unwrap().movetype = 99;
+            }
+        });
+    };
+    set_bad(&mut h);
+    h.step(&mut [], 5);
+    assert_eq!(h.server.movetype_warnings(), 2);
+    // A new map starts again.
+    h.server.change_map(ServerMap::stub("second"));
+    set_bad(&mut h);
+    h.step(&mut [], 5);
+    assert_eq!(h.server.movetype_warnings(), 4);
+}
+
+#[test]
+fn follow_and_force_retouch_queue_touches() {
+    let mut h = harness(1, TestGame::default());
+    // A trigger at x = 1000 and a box resting in it, linked without touching.
+    let (parent, follower) = run(&mut h, |eng| {
+        let trigger = spawn_box(eng, Vec3::new(1000.0, 0.0, 0.0));
+        eng.ent_mut(trigger).unwrap().solid = SOLID_TRIGGER;
+        eng.set_origin(trigger, Vec3::new(1000.0, 0.0, 0.0));
+        spawn_box(eng, Vec3::new(1000.0, 0.0, 0.0));
+        let parent = spawn_box(eng, Vec3::new(-2000.0, 0.0, 0.0));
+        let follower = spawn_box(eng, Vec3::new(-2000.0, 0.0, 0.0));
+        (parent, follower)
+    });
+    h.step(&mut [], 3);
+    assert_eq!(h.server.pending_touch_count(), 0);
+
+    // `force_retouch` re-links the resting box with touching.
+    run(&mut h, |eng| eng.set_force_retouch(1.0));
+    let after_retouch = h.server.pending_touch_count();
+    assert!(after_retouch >= 1, "{after_retouch}");
+
+    // A follower carried into the trigger touches it.
+    run(&mut h, move |eng| {
+        let v = eng.ent_mut(follower).unwrap();
+        v.movetype = MOVETYPE_FOLLOW;
+        v.aiment = Some(parent);
+        eng.set_origin(parent, Vec3::new(1000.0, 0.0, 0.0));
+    });
+    assert!(h.server.pending_touch_count() > after_retouch);
+}
+
+fn dust2() -> Option<(ServerMap, ServerMap)> {
+    let vfs = Vfs::discover(None, VfsConfig::default()).ok()?;
+    let raw = vfs.read_bytes("maps/de_dust2.bsp").expect("de_dust2 reads");
+    let bsp = Arc::new(BspMap::load(&vfs, "de_dust2").expect("de_dust2 parses"));
+    let make = || ServerMap::from_bsp("de_dust2", &raw, bsp.clone()).expect("valid BSP header");
+    Some((make(), make()))
+}
+
+/// A noclip model entity that flies from a spot the viewer cannot see into its view is sent
+/// to the viewer once it is there, and not before: the relink after each move keeps the
+/// leaves it touches (what the visibility test reads) current.
+#[test]
+fn noclip_entity_enters_a_probes_view_on_a_real_map() {
+    let Some((map, probe_map)) = dust2() else {
+        return;
+    };
+    let origin_of = |classname: &str| {
+        probe_map
+            .entities
+            .iter()
+            .filter(|e| e.classname() == classname)
+            .find_map(|e| e.get_vec3("origin"))
+            .unwrap_or_else(|| panic!("de_dust2 has a {classname}"))
+    };
+    let t_spawn = origin_of("info_player_deathmatch");
+    let ct_spawn = origin_of("info_player_start");
+    let eye = ct_spawn + Vec3::new(0.0, 0.0, 17.0);
+    assert!(!probe_map.can_see(eye, t_spawn - Vec3::ONE, t_spawn + Vec3::ONE));
+
+    let game = TestGame {
+        spawn_origins: vec![ct_spawn],
+        ..TestGame::default()
+    };
+    let cfg = ServerConfig {
+        max_clients: 2,
+        ..ServerConfig::default()
+    };
+    let mut h = Harness::with_map(cfg, map, game);
+    let mut probe = h.add_probe("CT");
+    h.step(&mut [&mut probe], 300);
+    assert_eq!(probe.state(), &ProbeState::InGame);
+
+    // 100 frames of 10 ms from the far spawn to the viewer's.
+    let velocity = (ct_spawn - t_spawn) / (100.0 * FRAME as f32);
+    let id = run(&mut h, move |eng| {
+        let model = eng
+            .precache_model("models/test.mdl")
+            .ok()
+            .or_else(|| eng.model_index("models/test.mdl"))
+            .unwrap();
+        let id = eng.create_entity("test_box").unwrap();
+        let v = eng.ent_mut(id).unwrap();
+        v.modelindex = model;
+        v.solid = SOLID_BBOX;
+        v.movetype = MOVETYPE_NOCLIP;
+        v.velocity = velocity;
+        eng.set_size(id, Vec3::splat(-16.0), Vec3::splat(16.0));
+        eng.set_origin(id, t_spawn);
+        id
+    });
+    // The first 10 frames take it a tenth of the way: still where the viewer cannot see.
+    h.server.game_mut().add_to_full_pack_ents.clear();
+    h.step(&mut [&mut probe], 10);
+    assert!(
+        !h.server.game().add_to_full_pack_ents.contains(&id.index),
+        "listed before it crossed into view"
+    );
+    h.step(&mut [&mut probe], 100);
+    assert!(
+        h.server.game().add_to_full_pack_ents.contains(&id.index),
+        "never listed after it crossed into view"
+    );
 }

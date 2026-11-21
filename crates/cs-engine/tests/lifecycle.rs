@@ -179,16 +179,19 @@ fn kick_with_a_reliable_backlog_still_delivers_reason() {
 #[test]
 fn start_frame_is_called_once_per_frame() {
     let mut h = Harness::new(4);
+    // Activation ran 16 settle passes (4 player slots), each with a `start_frame`.
+    let settle = h.server.game().start_frame_calls;
+    assert_eq!(settle, 16);
     let mut probe = h.add_probe("A");
     h.step(&mut [&mut probe], 30);
-    assert_eq!(h.server.game().start_frame_calls, 30);
+    assert_eq!(h.server.game().start_frame_calls, settle + 30);
     // A skipped frame does not start one.
     h.server.frame(&mut h.hub, f64::NAN);
     h.server.frame(&mut h.hub, h.now - 1.0);
     assert_eq!(h.server.net_stats().frames_skipped, 2);
-    assert_eq!(h.server.game().start_frame_calls, 30);
+    assert_eq!(h.server.game().start_frame_calls, settle + 30);
     h.step(&mut [&mut probe], 1);
-    assert_eq!(h.server.game().start_frame_calls, 31);
+    assert_eq!(h.server.game().start_frame_calls, settle + 31);
 }
 
 #[test]
