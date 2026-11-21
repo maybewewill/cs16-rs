@@ -40,9 +40,7 @@ impl Hull {
             Self::Crouched => Vec3::new(16.0, 16.0, 18.0),
         }
     }
-}
 
-impl Hull {
     /// `clip_mins` of the BSP hull: the corner of the box the hull was built for.
     pub(crate) fn clip_mins(self) -> Vec3 {
         -self.half_extents()
@@ -73,18 +71,13 @@ impl Geometry<'_> {
         }
     }
 
-    /// The node the "back up out of solid" step tests. For a BSP hull it is the world model's
-    /// hull whichever model is traced (behaviour kept as it was in `cs-sim::trace`).
+    /// The node the "back up out of solid" step tests: the root of the hull being traced
+    /// (`SV_HullPointContents(hull, hull->firstclipnode, mid)` of `SV_RecursiveHullCheck`).
     fn backup_root(self, world: &WorldCollision) -> i32 {
-        match self {
-            Self::Bsp { hull, .. } => world
-                .models
-                .first()
-                .map_or(CONTENTS_EMPTY, |m| m.head_nodes[hull as usize]),
-            Self::Box(_) => 0,
-        }
+        self.root(world)
     }
 }
+
 
 /// `box_hull` of `SV_InitBoxHull`: planes 0..6 are `+x max`, `+x min`, `+y max`, `+y min`,
 /// `+z max`, `+z min`; clipnode `i` has the plane `i`.
@@ -270,6 +263,11 @@ impl WorldCollision {
 
     /// `SV_RecursiveHullCheck` over `geo` for the segment `start..end`, both in the
     /// geometry's own frame; the result is in that frame too. Model indices are in range.
+    ///
+    /// Deviations from the source, kept from phase 2A (its characterization hash depends on
+    /// them): a trace that never leaves solid reports `all_solid`, fraction 0 and
+    /// `end_pos = start` (the source keeps fraction 1 and `end`); the "back up out of solid"
+    /// step moves 0.05 of the segment at a time, at most 8 times (the source: 0.1, no cap).
     pub(crate) fn trace_local(&self, geo: Geometry<'_>, start: Vec3, end: Vec3) -> TraceResult {
         let mut ctx = TraceCtx {
             fraction: 1.0,
@@ -449,8 +447,7 @@ impl WorldCollision {
         let mut adj_mid = mid;
 
         // Back up slightly if `mid` still lands in solid due to numerical precision.
-        // The check walks the world model's hull even when tracing a brush sub-model
-        // (behaviour kept as it was in `cs-sim::trace`).
+        // The hull tested is the one being traced, as in the source.
         let mut tries = 0;
         while self.geo_point_contents(geo, geo.backup_root(self), adj_mid) == CONTENTS_SOLID
             && tries < 8

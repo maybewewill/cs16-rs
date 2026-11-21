@@ -51,6 +51,14 @@ fn dust2_harness() -> Option<Harness> {
     Some(Harness::with_map(cfg, map, TestGame::default()))
 }
 
+/// The world edict: what `trace_line` reports for a miss.
+fn world() -> EdictId {
+    EdictId {
+        index: 0,
+        serial: 0,
+    }
+}
+
 fn near(a: f32, b: f32) -> bool {
     (a - b).abs() < 0.001
 }
@@ -88,61 +96,68 @@ fn line_hits_a_bbox_entity_and_reports_it() {
             None,
         )
     });
-    assert_eq!(t.ent, None);
+    assert_eq!(t.ent, Some(world()), "a missed line reports the world");
     assert_eq!(t.trace.fraction, 1.0);
     assert_eq!(t.trace.end_pos, Vec3::new(200.0, 40.0, 0.0));
 }
 
 #[test]
 fn pass_and_owner_are_skipped() {
+    fn trace(eng: &EngineApi<'_>, from_x: f32, pass: Option<EdictId>) -> Option<EdictId> {
+        let (start, end) = (Vec3::new(from_x, 0.0, 0.0), Vec3::new(200.0, 0.0, 0.0));
+        eng.trace_line(start, end, MoveFilter::Normal, pass).ent
+    }
     let mut h = Harness::new(2);
     let (hits, ids) = run(&mut h, |eng| {
         let shooter = boxed(eng, SOLID_SLIDEBOX, Vec3::new(-100.0, 0.0, 0.0), 8.0);
         let target = boxed(eng, SOLID_BBOX, Vec3::new(100.0, 0.0, 0.0), 16.0);
         let missile = boxed(eng, SOLID_BBOX, Vec3::new(50.0, 0.0, 0.0), 4.0);
         eng.ent_mut(missile).unwrap().owner = Some(shooter);
-        fn trace(eng: &EngineApi<'_>, pass: Option<EdictId>) -> Option<EdictId> {
-            let (start, end) = (Vec3::new(-50.0, 0.0, 0.0), Vec3::new(200.0, 0.0, 0.0));
-            eng.trace_line(start, end, MoveFilter::Normal, pass).ent
-        }
         // Nothing passed: the first thing in the way is the missile.
-        let plain = trace(eng, None);
+        let plain = trace(eng, -50.0, None);
         // Passing the missile: the target.
-        let pass_missile = trace(eng, Some(missile));
-        // Passing the target as well as the missile cannot be asked, but the missile's owner
-        // passing means the missile is skipped (own missiles).
-        let pass_owner = trace(eng, Some(shooter));
-        // Passing the target hits the missile.
-        let pass_target = trace(eng, Some(target));
-        // A passed entity that the target is owned by skips it.
+        let pass_missile = trace(eng, -50.0, Some(missile));
+        // Passing the shooter skips its own missile (`touch.owner == pass`).
+        let pass_shooter = trace(eng, -50.0, Some(shooter));
+        // Passing the target: the missile.
+        let pass_target = trace(eng, -50.0, Some(target));
+        // Starting before the shooter and passing the missile skips the shooter, the
+        // missile's owner (`pass.owner == touch`); without a pass it is hit first.
+        let from_behind = trace(eng, -150.0, None);
+        let owner_of_pass = trace(eng, -150.0, Some(missile));
+        // Owned by the passed entity, the target is skipped too.
         eng.ent_mut(target).unwrap().owner = Some(missile);
-        let owner_of_target = trace(eng, Some(missile));
+        let owned_by_pass = trace(eng, -50.0, Some(missile));
         (
             (
                 plain,
                 pass_missile,
-                pass_owner,
-                owner_of_target,
+                pass_shooter,
                 pass_target,
+                from_behind,
+                owner_of_pass,
+                owned_by_pass,
             ),
             (shooter, target, missile),
         )
     });
     let (shooter, target, missile) = ids;
-    let (plain, pass_missile, pass_owner, owner_of_target, pass_target) = hits;
+    let (plain, pass_missile, pass_shooter, pass_target, from_behind, owner_of_pass, owned) = hits;
     assert_eq!(plain, Some(missile));
     assert_eq!(pass_missile, Some(target));
-    assert_eq!(
-        pass_owner,
-        Some(target),
-        "the owner's own missile is skipped"
-    );
-    assert_eq!(
-        owner_of_target, None,
-        "the passed entity's owner is skipped"
-    );
+    assert_eq!(pass_shooter, Some(target), "own missile skipped");
     assert_eq!(pass_target, Some(missile));
-    let _ = shooter;
+    assert_eq!(from_behind, Some(shooter));
+    assert_eq!(
+        owner_of_pass,
+        Some(target),
+        "the passed entity's owner skipped"
+    );
+    assert_eq!(
+        owned,
+        Some(world()),
+        "entity owned by the passed one skipped"
+    );
 }
 
 #[test]
@@ -157,7 +172,7 @@ fn triggers_and_not_solid_are_ignored() {
         let seen = eng.trace_line(start, end, MoveFilter::Normal, None).ent;
         (ignored, seen, slide)
     });
-    assert_eq!(hit.0, None);
+    assert_eq!(hit.0, Some(world()));
     assert_eq!(hit.1, Some(hit.2));
 }
 
@@ -174,7 +189,7 @@ fn no_monsters_skips_everything_but_brushes_and_pushables() {
         (plain, nomonsters, pushable, boxy)
     });
     assert_eq!(plain, Some(boxy));
-    assert_eq!(nomonsters, None);
+    assert_eq!(nomonsters, Some(world()));
     assert_eq!(pushable, Some(boxy));
 }
 
@@ -189,7 +204,7 @@ fn missile_widens_monsters() {
         let missile = eng.trace_line(start, end, MoveFilter::Missile, None).ent;
         (normal, missile, monster)
     });
-    assert_eq!(normal, None);
+    assert_eq!(normal, Some(world()));
     assert_eq!(missile, Some(monster));
 }
 
@@ -521,4 +536,29 @@ fn rotated_brush_entity_collides_rotated() {
         rotated.trace.plane_normal,
         want
     );
+}
+
+#[test]
+fn a_move_inside_a_box_entity_keeps_the_source_fraction() {
+    let mut h = Harness::new(2);
+    let (id, t) = run(&mut h, |eng| {
+        let id = boxed(eng, SOLID_BBOX, Vec3::ZERO, 16.0);
+        let end = Vec3::new(5.0, 0.0, 0.0);
+        (
+            id,
+            eng.trace_box(
+                Vec3::ZERO,
+                Vec3::ZERO,
+                Vec3::ZERO,
+                end,
+                MoveFilter::Normal,
+                None,
+            ),
+        )
+    });
+    // As `SV_RecursiveHullCheck` leaves it: all solid, but fraction 1 and the end point.
+    assert_eq!(t.ent, Some(id));
+    assert!(t.trace.all_solid && t.trace.start_solid);
+    assert_eq!(t.trace.fraction, 1.0);
+    assert_eq!(t.trace.end_pos, Vec3::new(5.0, 0.0, 0.0));
 }

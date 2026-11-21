@@ -87,6 +87,11 @@ status = "tested"
 evidence = "crates/cs-engine/tests/signon.rs::probe_reaches_in_game_within_200_frames; stage order unverified against a real server (working assumption, see signon_opcode_order_matches_golden_capture)"
 
 [[item]]
+id = "studio_hitbox_traces"
+status = "missing"
+evidence = "ReHLDS rehlds/engine/r_studio.cpp SV_HullForStudioModel (read 2026-11-21): a zero-size trace against an entity with a studio model clips its hitbox hulls and reports a hitgroup. Traces here hit the bounding box only, with no hitgroup, so no headshots or damage zones; the weapons of phase 2D need it"
+
+[[item]]
 id = "think"
 status = "tested"
 evidence = "crates/cs-engine/tests/think.rs::think_fires_once_when_due, rescheduling_inside_think_waits_for_the_next_frame, entity_removed_before_its_turn_is_skipped, entity_removing_itself_is_safe, thinks_are_capped_per_frame, nan_nextthink_never_fires, entity_created_during_the_pass_is_called_in_the_next_frame, slot_reused_during_the_pass_is_not_called_for_the_old_entity; accepted deviations: the thinks run right after start_frame, before the packets are read (the order differs from the original server), and eng.time() inside a think is the frame time, not the entity's own nextthink time; due rule 0 < nextthink <= time; not compared with the original server"

@@ -41,7 +41,10 @@ use cs_vfs::{Vfs, VfsConfig};
 use glam::Vec3;
 
 const DUST2: Hashes = Hashes {
-    trace: 0x841ea81f55ac8194,
+    // Was 0x841ea81f55ac8194: the old value encoded brush-model backups tested against the world hull;
+    // fixed in Phase 2B Task 3 (`backup_root` uses the traced model's own root, ReHLDS
+    // `SV_RecursiveHullCheck`). The contents, ladder, sight and zone hashes are unchanged.
+    trace: 0x115d34d1bff7baae,
     contents: 0x5b829d8950d41981,
     ladder: 0x1fe3fce62bd816b5,
     sight: 0xbcc698dd0a3e560f,
@@ -51,7 +54,10 @@ const DUST2: Hashes = Hashes {
 /// de_nuke: the first of the installed maps checked (`de_nuke`, `cs_assault`, `de_train`)
 /// that has `func_ladder` brushes.
 const NUKE: Hashes = Hashes {
-    trace: 0xb9a3998da5b79ecc,
+    // Was 0xb9a3998da5b79ecc: the old value encoded brush-model backups tested against the world hull;
+    // fixed in Phase 2B Task 3 (`backup_root` uses the traced model's own root, ReHLDS
+    // `SV_RecursiveHullCheck`). The contents, ladder, sight and zone hashes are unchanged.
+    trace: 0x216633fb2151de43,
     contents: 0x10713892049499e5,
     ladder: 0xb1d1b18b29265f2e,
     sight: 0xda6c9b0a68bcb829,

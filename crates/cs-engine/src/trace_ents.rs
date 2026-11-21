@@ -11,14 +11,33 @@
 //! Left out, on purpose:
 //! - `pfnShouldCollide` of the game, the `groupinfo` filters and `FMOVE_IGNORE_GLASS`: the
 //!   engine has no such hook, field or flag yet.
-//! - `SV_CheckSphereIntersection`: its source is not in ReHLDS (it is in the original binary).
-//!   It is a quick reject for non-`SOLID_SLIDEBOX` entities that `sv_force_ent_intersection`
-//!   switches off, so skipping it is the behaviour of that cvar set to 1.
-//! - `SV_HullForStudioModel`: an entity with a studio model is clipped as its box, as any
-//!   other non-brush entity.
+//! - `SV_CheckSphereIntersection` (`rehlds/engine/r_studio.cpp`, read 2026-11-21): called from
+//!   `SV_ClipToLinks` for entities that are not `SOLID_SLIDEBOX`, or, with `REHLDS_FIXES`, for
+//!   all when `sv_force_ent_intersection` is on. It never rejects an entity without
+//!   `FL_CLIENT`; for a client it rejects when the move misses a sphere around the player's
+//!   current sequence bounding box. Players are `SOLID_SLIDEBOX` in CS 1.6, so by default it
+//!   never runs and skipping it only adds exact clips. The cvar's widening to players would
+//!   need the studio sequence bounding boxes, which the engine does not read.
+//! - `SV_HullForStudioModel` (`r_studio.cpp`): in the original a zero-size trace (every bullet)
+//!   against an entity with a studio model clips against its hitbox hulls (unless
+//!   `FTRACE_SIMPLEBOX`; for clients only when `sv_clienttrace != 0`) and the result carries a
+//!   `hitgroup`. Here every studio entity is clipped as its bounding box and there is no
+//!   `hitgroup`: no headshots or damage zones yet (parity registry `studio_hitbox_traces`;
+//!   the weapons of phase 2D need it).
 //!
 //! Where the original stops the server (`Sys_Error`: a `SOLID_BSP` entity without a brush
 //! model or without `MOVETYPE_PUSH`/`MOVETYPE_PUSHSTEP`), the entity is not hit.
+//!
+//! Deviations kept on purpose:
+//! - BSP hulls (the world and brush entities) go through `WorldCollision::trace_local`, which
+//!   keeps the phase 2A behaviour: a trace that never leaves solid reports fraction 0 and
+//!   `end_pos = start`, and the "back up out of solid" step moves 0.05 of the segment, at most
+//!   8 times (the source: fraction 1 and `end`; 0.1 and no cap).
+//! - Box-hull entities are new here, so they follow the source: a trace that starts and ends
+//!   inside the box is `all_solid` and `start_solid` with fraction 1 and `end_pos = end`.
+//! - `EntTrace::ent` is `None` for a miss, as the null `trace.ent` of `SV_Move` and `TraceHull`;
+//!   [`EngineApi::trace_line`] alone maps it to the world, as `PF_traceline_DLL` does
+//!   (`SV_SetGlobalTrace`).
 
 use glam::Vec3;
 
@@ -154,7 +173,8 @@ fn move_bounds(start: Vec3, mins: Vec3, maxs: Vec3, end: Vec3) -> (Vec3, Vec3) {
 impl EngineApi<'_> {
     /// `PF_traceline_DLL`: traces a point from `start` to `end` through the world and the
     /// solid entities. `pass` (the world when `None`) and the entities it owns, or is owned
-    /// by, are not hit. Input outside the world (non-finite, or a coordinate beyond
+    /// by, are not hit. Unlike the other traces, a miss reports the world as `ent`
+    /// (`SV_SetGlobalTrace` does). Input outside the world (non-finite, or a coordinate beyond
     /// `MAX_WORLD_COORD`) is refused: nothing is hit and `end_pos` is `start` (the origin when
     /// `start` is itself outside the world).
     pub fn trace_line(
@@ -165,7 +185,11 @@ impl EngineApi<'_> {
         pass: Option<EdictId>,
     ) -> EntTrace {
         let pass = pass.unwrap_or_else(|| self.world());
-        self.trace_box(start, Vec3::ZERO, Vec3::ZERO, end, filter, Some(pass))
+        let mut t = self.trace_box(start, Vec3::ZERO, Vec3::ZERO, end, filter, Some(pass));
+        if t.ent.is_none() && in_world(start) && in_world(end) {
+            t.ent = Some(self.world());
+        }
+        t
     }
 
     /// `TraceHull`: traces the box of `hull` (see [`Hull::half_extents`]) from `start` to
@@ -446,7 +470,7 @@ impl EngineApi<'_> {
         let brush = brush_model(v).filter(|&m| collision.is_some_and(|c| m < c.model_count()));
         let is_bsp = v.solid == SOLID_BSP || (force_bsp && brush.is_some());
 
-        let (mut tr, rotated) = if is_bsp {
+        let (mut tr, rotated, boxed) = if is_bsp {
             let pushable = matches!(v.movetype, MOVETYPE_PUSH | MOVETYPE_PUSHSTEP);
             let (Some(model), Some(collision)) = (brush, collision) else {
                 return miss;
@@ -468,6 +492,7 @@ impl EngineApi<'_> {
             (
                 collision.trace_local(Geometry::Bsp { model, hull }, start_l, end_l),
                 rotated,
+                false,
             )
         } else {
             // A hull made of the entity's box grown by the moving box.
@@ -475,8 +500,13 @@ impl EngineApi<'_> {
             (
                 NO_COLLISION.trace_local(Geometry::Box(&boxhull), start - v.origin, end - v.origin),
                 false,
+                true,
             )
         };
+        if boxed && tr.all_solid {
+            // The source keeps fraction 1 (and so `end`) for a trace that never leaves solid.
+            tr.fraction = 1.0;
+        }
 
         if tr.fraction != 1.0 {
             if rotated {
@@ -557,6 +587,11 @@ mod tests {
     /// and inside contents, each with all four hulls (hull `h` is the box grown by the half
     /// size of hull `h`, as the map compiler does).
     fn box_map(boxes: &[(Vec3, i32)]) -> BspMap {
+        box_map_with_world(boxes, None)
+    }
+
+    /// As [`box_map`], with the world solid for `x < world_solid_x` when that is given.
+    fn box_map_with_world(boxes: &[(Vec3, i32)], world_solid_x: Option<f32>) -> BspMap {
         let leaf = |contents: i32| Leaf {
             contents,
             vis_offset: -1,
@@ -580,6 +615,26 @@ mod tests {
             first_face: 0,
             num_faces: 0,
         }];
+        if let Some(x) = world_solid_x {
+            planes.push(Plane {
+                normal: Vec3::X,
+                dist: x,
+                plane_type: 0,
+            });
+            nodes.push(Node {
+                plane: 0,
+                children: [-2, -1],
+                mins: [0; 3],
+                maxs: [0; 3],
+                first_face: 0,
+                num_faces: 0,
+            });
+            clipnodes.push(ClipNode {
+                plane: 0,
+                children: [CONTENTS_EMPTY as i16, CONTENTS_SOLID as i16],
+            });
+            models[0].head_nodes = [0; 4];
+        }
         for (k, &(half, inside)) in boxes.iter().enumerate() {
             leafs.push(leaf(inside));
             let mut head_nodes = [0i32; 4];
@@ -723,7 +778,7 @@ mod tests {
         let slab = brush(&mut eng, "*1", Vec3::ZERO, Vec3::ZERO);
         let t = eng.trace_line(start, end, MoveFilter::Normal, None);
         assert_eq!(t.trace.fraction, 1.0);
-        assert_eq!(t.ent, None);
+        assert_eq!(t.ent, Some(eng.world()));
         // Moved up by 64, it is hit at its -x face.
         eng.set_origin(slab, Vec3::new(0.0, 0.0, 64.0));
         let t = eng.trace_line(start, end, MoveFilter::Normal, None);
@@ -735,6 +790,32 @@ mod tests {
         let t = eng.trace_hull_ents(start, end, Hull::Standing, MoveFilter::Normal, None);
         assert_eq!(t.ent, Some(slab));
         assert!(near(t.trace.end_pos.x, -48.0 - 0.03125), "{:?}", t.trace);
+    }
+
+    /// A brush entity far from the origin whose surface is in the local frame where the world
+    /// is solid: the backup step must test the entity's own hull, not the world's.
+    #[test]
+    fn brush_trace_does_not_back_up_into_the_world_tree() {
+        let bsp = box_map_with_world(&[(Vec3::new(32.0, 8.0, 8.0), CONTENTS_SOLID)], Some(-20.0));
+        let mut f = Fixture::on(ServerMap::with_bsp_for_test(Arc::new(bsp)), 64);
+        let mut eng = f.api();
+        let slab = brush(&mut eng, "*1", Vec3::new(500.0, 0.0, 0.0), Vec3::ZERO);
+        // The slab's -x face is at local x = -32, which is world-solid (x < -20) in the local
+        // frame the trace runs in.
+        let t = eng.trace_entity(
+            slab,
+            Vec3::new(400.0, 0.0, 0.0),
+            Vec3::new(600.0, 0.0, 0.0),
+            Hull::Point,
+        );
+        assert_eq!(t.ent, Some(slab));
+        let face = 468.0 - 0.03125;
+        assert!(near(t.trace.end_pos.x, face), "{:?}", t.trace);
+        assert!(
+            near(t.trace.fraction, (face - 400.0) / 200.0),
+            "{:?}",
+            t.trace
+        );
     }
 
     #[test]
@@ -771,7 +852,7 @@ mod tests {
             MoveFilter::Normal,
             None,
         );
-        assert_eq!(t.ent, None);
+        assert_eq!(t.ent, Some(eng.world()));
         // `trace_entity` agrees with the move.
         let t = eng.trace_entity(
             slab,
@@ -790,7 +871,11 @@ mod tests {
         eng.ent_mut(slab).unwrap().flags |= FL_MONSTERCLIP;
         let (start, end) = (Vec3::new(-100.0, 0.0, 0.0), Vec3::new(100.0, 0.0, 0.0));
         let t = eng.trace_line(start, end, MoveFilter::Normal, None);
-        assert_eq!(t.ent, None, "an ordinary trace goes through monster clip");
+        assert_eq!(
+            t.ent,
+            Some(eng.world()),
+            "an ordinary trace goes through monster clip"
+        );
         // An entity with the flag that stands in it finds it.
         let monster = boxed(&mut eng, SOLID_SLIDEBOX, Vec3::ZERO, 4.0);
         assert_eq!(eng.test_entity_position(monster), None);
@@ -827,7 +912,7 @@ mod tests {
             MoveFilter::Normal,
             None,
         );
-        assert_eq!(t.ent, None);
+        assert_eq!(t.ent, Some(eng.world()));
         assert_eq!(
             eng.point_contents_ents(Vec3::splat(f32::NAN)),
             CONTENTS_EMPTY
@@ -843,15 +928,15 @@ mod tests {
         let wall = boxed(&mut eng, SOLID_BBOX, Vec3::new(100.0, -40.0, 0.0), 16.0);
         let (start, end) = (Vec3::ZERO, Vec3::new(200.0, 0.0, 0.0));
         let t = eng.trace_line(start, end, MoveFilter::Normal, None);
-        assert_eq!(t.ent, None);
+        assert_eq!(t.ent, Some(eng.world()));
         // y = 0 is 24 from both boxes' near faces; the +-15 box is short of that.
         let t = eng.trace_line(start, end, MoveFilter::Missile, None);
-        assert_eq!(t.ent, None, "15 is short of 24");
+        assert_eq!(t.ent, Some(eng.world()), "15 is short of 24");
         eng.set_origin(monster, Vec3::new(100.0, 30.0, 0.0));
         let t = eng.trace_line(start, end, MoveFilter::Missile, None);
         assert_eq!(t.ent, Some(monster), "y 14..46 grown by 15 holds y = 0");
         let t = eng.trace_line(start, end, MoveFilter::Normal, None);
-        assert_eq!(t.ent, None);
+        assert_eq!(t.ent, Some(eng.world()));
         // The wall is no monster: it is not widened.
         eng.set_origin(wall, Vec3::new(100.0, -30.0, 0.0));
         let t = eng.trace_line(start, end, MoveFilter::Missile, None);
