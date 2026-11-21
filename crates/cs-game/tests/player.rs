@@ -614,3 +614,119 @@ fn a_dead_player_leaves_a_corpse() {
     // The body is where the player died: `origin` is the position times 128.
     assert_eq!(origin[0], (spawn_x * 128.0) as i32);
 }
+
+/// The names of the user messages `msgs` are, in order.
+fn names_of(msgs: &[CsUserMsg]) -> Vec<&'static str> {
+    msgs.iter()
+        .map(|m| cs_proto48::usermsg::encode_cs_usermsg(m).0)
+        .collect()
+}
+
+#[test]
+fn connecting_and_leaving_are_announced_to_everyone() {
+    // `ClientPutInServer` ends with `#Game_connected` (`HUD_PRINTNOTIFY`, `%` of the name made a
+    // space); `ClientDisconnect` prints `#Game_disconnected` before anything else.
+    let mut b = Bench::with_userinfo(
+        cs_engine::ServerMap::stub_with_entities("test", stub_spawns()),
+        2,
+        &[("name", "a%b")],
+    );
+    let notices = |b: &Bench, text: &str| -> Vec<Vec<String>> {
+        b.messages()
+            .into_iter()
+            .filter_map(|m| match m {
+                CsUserMsg::TextMsg { dest: 1, message, params } if message == text => Some(params),
+                _ => None,
+            })
+            .collect()
+    };
+    // The probe heard its own entry.
+    assert_eq!(notices(&b, "#Game_connected"), [vec!["a b".to_string()]]);
+    // A second client with no name known to the engine is `<unconnected>`.
+    b.enter_second_client();
+    b.step(3);
+    assert_eq!(
+        notices(&b, "#Game_connected")[1],
+        vec!["<unconnected>".to_string()]
+    );
+    // And its departure is told after the engine has the name (`netname`), skipped at game over.
+    b.probe.clear_messages();
+    b.run(|game, eng| game.client_disconnect(eng, 1));
+    b.step(3);
+    assert_eq!(notices(&b, "#Game_disconnected").len(), 1);
+    assert_eq!(notices(&b, "#Game_connected").len(), 0);
+    assert!(b.server.game().game.state().players[1].is_none());
+}
+
+#[test]
+fn a_userinfo_change_puts_the_team_model_back() {
+    // `ClientUserInfoChanged` runs `SetPlayerModel`: the `model` key a client sets is replaced
+    // with the one its team and appearance give (`urban` for a player on no team).
+    let mut b = Bench::stub(stub_spawns());
+    let key = |b: &mut Bench| b.run(|_, eng| eng.client_key(0, "model").map(str::to_string));
+    b.run(|game, eng| {
+        eng.set_client_key(0, "model", "x");
+        game.client_userinfo_changed(eng, 0);
+    });
+    assert_eq!(key(&mut b).as_deref(), Some("urban"));
+    b.run(|game, eng| game.spawn_player(eng, 0, Team::Terrorist, 3));
+    assert_eq!(key(&mut b).as_deref(), Some("arctic"));
+    b.run(|game, eng| {
+        eng.set_client_key(0, "model", "gign");
+        game.client_userinfo_changed(eng, 0);
+    });
+    assert_eq!(key(&mut b).as_deref(), Some("arctic"));
+    // The key a client sets that is already right is left alone.
+    b.run(|game, eng| game.client_userinfo_changed(eng, 0));
+    assert_eq!(key(&mut b).as_deref(), Some("arctic"));
+}
+
+#[test]
+fn a_death_sends_its_messages_in_the_order_of_killed() {
+    // Three players, so the death does not end the round: the probe (counter-terrorist, slot 0)
+    // is killed by the terrorist of slot 1; slot 2 is another counter-terrorist.
+    let mut b = Bench::stub(stub_spawns());
+    b.enter_second_client();
+    b.run(|game, eng| {
+        game.client_put_in_server(eng, 2);
+        game.spawn_player(eng, 0, Team::Ct, 0);
+        game.spawn_player(eng, 1, Team::Terrorist, 0);
+        game.spawn_player(eng, 2, Team::Ct, 0);
+    });
+    b.step(5);
+    b.probe.clear_messages();
+    b.run(|game, eng| game.damage_player(eng, 0, Some(1), 500.0, dmg::BULLET));
+    b.step(3);
+    let msgs = b.messages();
+    // `CBasePlayer::Killed` (player.cpp, read 2026-11-22): `PlayerKilled` (the notice and the
+    // killer's line), `NVGToggle`, the camera (`ADStop`, a message `CsUserMsg` has no variant
+    // for), `SetScoreboardAttributes`, `Health 0`, `CurWeapon 0 255 255`, `SetFOV 0`,
+    // `CheckWinConditions` (here the first round is commencing: a `TextMsg`), `BuyZoneIcon_Clear`.
+    // The victim's own line (`MSG_BROADCAST`) and the HUD update follow after.
+    let killed_order = [
+        "DeathMsg", "ScoreInfo", "NVGToggle", "Unknown", "ScoreAttrib", "Health", "CurWeapon",
+        "SetFOV", "TextMsg", "StatusIcon",
+    ];
+    assert_eq!(names_of(&msgs)[..killed_order.len()], killed_order);
+    assert_eq!(msgs[5], CsUserMsg::Health(0));
+    assert_eq!(
+        msgs[6],
+        CsUserMsg::CurWeapon { is_active: false, weapon_id: 0xFF, clip_ammo: -1 }
+    );
+    assert_eq!(msgs[7], CsUserMsg::SetFov(0));
+    assert!(matches!(&msgs[8], CsUserMsg::TextMsg { message, .. } if message == "#Game_Commencing"));
+    assert!(matches!(&msgs[9], CsUserMsg::StatusIcon { status: 0, sprite_name, .. } if sprite_name == "buyzone"));
+
+    // With `mp_fadetoblack 1` the fade replaces `ADStop` at the same place.
+    b.run(|game, eng| {
+        eng.set_cvar("mp_fadetoblack", "1");
+        game.spawn_player(eng, 0, Team::Ct, 0);
+    });
+    b.step(3);
+    b.probe.clear_messages();
+    b.run(|game, eng| game.damage_player(eng, 0, Some(1), 500.0, dmg::BULLET));
+    b.step(3);
+    let names = names_of(&b.messages());
+    assert_eq!(names[..4], ["DeathMsg", "ScoreInfo", "NVGToggle", "ScreenFade"]);
+    assert_eq!(names[4..8], ["ScoreAttrib", "Health", "CurWeapon", "SetFOV"]);
+}

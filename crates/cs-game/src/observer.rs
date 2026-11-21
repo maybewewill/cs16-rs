@@ -47,7 +47,9 @@ use glam::Vec3;
 use crate::GameState;
 use crate::menus::{atoi, print_center};
 use crate::messages::send_raw;
-use crate::player::{DEAD_DEAD, DEAD_RESPAWNABLE, HIDEHUD_HEALTH, HIDEHUD_WEAPONS, Team};
+use crate::player::{
+    DEAD_DEAD, DEAD_RESPAWNABLE, EF_NODRAW, HIDEHUD_HEALTH, HIDEHUD_WEAPONS, Team,
+};
 use crate::teams::player_name;
 use crate::world::atof;
 
@@ -69,12 +71,10 @@ pub const CAMERA_MODE_SPEC_ONLY_FIRST_PERSON: i32 = 2;
 pub(crate) const FADETOBLACK_STAY: i32 = 1;
 /// `FFADE_IN`, `FFADE_OUT` and `FFADE_STAYOUT` (`engine/shake.h`).
 pub(crate) const FFADE_IN: u16 = 0;
-const FFADE_OUT: u16 = 1;
-const FFADE_STAYOUT: u16 = 4;
+pub(crate) const FFADE_OUT: u16 = 1;
+pub(crate) const FFADE_STAYOUT: u16 = 4;
 /// `UTIL_ScreenFade` writes the seconds as fixed point with 12 fractional bits.
 const FADE_UNIT: f32 = 4096.0;
-/// `EF_NODRAW`.
-const EF_NODRAW: u32 = 128;
 /// `TE_KILLPLAYERATTACHMENTS`.
 const TE_KILLPLAYERATTACHMENTS: u8 = 125;
 /// `DEFAULT_FOV`.
@@ -663,8 +663,12 @@ pub(crate) fn killed(
         // `UTIL_ScreenFade(this, Vector(0, 0, 0), 3, 3, 255, FFADE_OUT | FFADE_STAYOUT)`.
         screen_fade(eng, slot, 3.0, 3.0, 255, FFADE_OUT | FFADE_STAYOUT);
     }
-    // The dead player's night vision goes off, and so does that of the observers that watch it
-    // in first person (`Killed`).
+}
+
+/// The night vision half of `CBasePlayer::Killed`, which comes right after `PlayerKilled` and
+/// before the camera ([`killed`]): the dead player's goggles go off (`NVGToggle 0`), and so do
+/// those of the observers that watch it in first person.
+pub(crate) fn killed_night_vision(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::NvgToggle(false));
     if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
         p.night_vision_on = false;
@@ -681,6 +685,29 @@ pub(crate) fn killed(
                 p.night_vision_on = false;
             }
         }
+    }
+}
+
+/// The observer part of `CHalfLifeMultiplay::ClientDisconnected` (ReGameDLL
+/// `multiplay_gamerules.cpp:3580`, read 2026-11-22): a spectator that was chasing the player of
+/// slot `left` (already out of [`GameState::players`]) has its mode cleared and asked for again, so
+/// `Observer_SetMode` looks for another player to follow.
+pub(crate) fn on_target_left(g: &mut GameState, eng: &mut EngineApi<'_>, left: u8) {
+    for slot in 0..g.players.len() as u8 {
+        let follows = slot != left
+            && g.players[usize::from(slot)]
+                .as_ref()
+                .is_some_and(|p| p.obs.target == Some(left));
+        if !follows {
+            continue;
+        }
+        let id = eng.client_edict(slot);
+        let Some(v) = eng.ent_mut(id) else {
+            continue;
+        };
+        let mode = v.iuser1;
+        v.iuser1 = OBS_NONE;
+        set_mode(g, eng, slot, mode);
     }
 }
 

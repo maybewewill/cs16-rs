@@ -121,7 +121,9 @@ fn dead_player_becomes_an_observer_after_the_death_cam() {
     assert_eq!(v.max_speed, 900.0);
 
     let msgs = b.messages();
-    assert!(msgs.contains(&CsUserMsg::HideWeapon(9)));
+    // `StartObserver` hides the weapons and the health (1 | 8); with `mp_flashlight 0` the
+    // `PreThink` of the next command adds the flashlight bit (2).
+    assert!(msgs.contains(&CsUserMsg::HideWeapon(11)));
     // Everybody is told this player is a spectator now.
     assert_eq!(unknown(&msgs, "Spectator"), [vec![1, 1]]);
     // A roaming observer has the crosshair, and sees its mode on the screen.
@@ -130,7 +132,7 @@ fn dead_player_becomes_an_observer_after_the_death_cam() {
         m,
         CsUserMsg::TextMsg { message, .. } if message == "#Spec_Mode3"
     )));
-    // The ammo HUD is told the player is dead, once.
+    // The ammo HUD is told the player is dead, by `Killed` and again by `StartObserver`.
     let weapons = msgs
         .iter()
         .filter(|m| {
@@ -144,7 +146,7 @@ fn dead_player_becomes_an_observer_after_the_death_cam() {
             )
         })
         .count();
-    assert_eq!(weapons, 1);
+    assert_eq!(weapons, 2);
     // The dead player's night vision is turned off (`Killed`).
     assert!(msgs.contains(&CsUserMsg::NvgToggle(false)));
     // `TE_KILLPLAYERATTACHMENTS` (125) for the player, to those who can hear it.
@@ -349,7 +351,10 @@ fn observer_target_leaves() {
     let v = vars(&mut b, 0);
     assert_eq!((v.iuser1, v.iuser2), (OBS_IN_EYE, 2));
 
-    // The followed player leaves: the follower is moved on to the other one.
+    // The followed player leaves: the follower is moved on to the other one (`ClientDisconnected`
+    // clears its mode and asks for it again; `Observer_FindNextPlayer` is not throttled any more
+    // once 0.25 seconds are over).
+    pump(&mut b, 0, 40, 0, 0.0);
     b.run(|game, eng| game.client_disconnect(eng, 1));
     pump(&mut b, 0, 60, 0, 0.0);
     let v = vars(&mut b, 0);
@@ -425,7 +430,9 @@ fn a_target_that_left_restarts_the_search_at_the_observer() {
     });
     assert_eq!(vars(&mut b, 1).iuser2, 4);
     // Player 4 leaves: the old handle is null, so the search goes on from the observer (index 2)
-    // to 3, not from the leaver around to 1.
+    // to 3, not from the leaver around to 1. (The follower asked 0.3 seconds ago, so the search
+    // is not throttled: `m_flNextFollowTime`.)
+    pump(&mut b, 1, 30, 0, 0.0);
     b.run(|game, eng| game.client_disconnect(eng, 3));
     pump(&mut b, 1, 60, 0, 0.0);
     assert_eq!(vars(&mut b, 1).iuser2, 3);
@@ -488,4 +495,82 @@ fn the_camera_cvars_default_to_vanilla() {
         ]
     });
     assert_eq!(values, [0.0; 3]);
+}
+
+fn fades(msgs: &[CsUserMsg]) -> Vec<CsUserMsg> {
+    msgs.iter()
+        .filter(|m| matches!(m, CsUserMsg::ScreenFade { .. }))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn with_fadetoblack_a_respawn_clears_the_death_fade() {
+    // `Killed` fades the screen to black and holds it (`UTIL_ScreenFade(this, Vector(0, 0, 0), 3,
+    // 3, 255, FFADE_OUT | FFADE_STAYOUT)`); the end of `Spawn` clears it
+    // (`UTIL_ScreenFade(this, Vector(0, 0, 0), 0.001)`) just before `SyncRoundTimer`
+    // (player.cpp:6132, read 2026-11-22).
+    let mut b = four_players();
+    b.run(|_, eng| eng.set_cvar("mp_fadetoblack", "1"));
+    b.probe.clear_messages();
+    kill_by(&mut b, 0, 2);
+    b.step(3);
+    assert_eq!(
+        fades(&b.messages()),
+        [CsUserMsg::ScreenFade {
+            duration: 3 * 4096,
+            hold_time: 3 * 4096,
+            flags: 1 | 4,
+            color: [0, 0, 0, 255],
+        }]
+    );
+    b.probe.clear_messages();
+    assert!(b.run(|game, eng| game.respawn_player(eng, 0)));
+    b.step(3);
+    let msgs = b.messages();
+    assert_eq!(
+        fades(&msgs),
+        [CsUserMsg::ScreenFade { duration: 4, hold_time: 0, flags: 0, color: [0, 0, 0, 0] }]
+    );
+    let fade = msgs
+        .iter()
+        .position(|m| matches!(m, CsUserMsg::ScreenFade { .. }))
+        .unwrap();
+    assert!(matches!(msgs[fade + 1], CsUserMsg::RoundTime(_)));
+}
+
+#[test]
+fn a_late_joiner_is_faded_to_black_when_fadetoblack_is_1() {
+    // `FPlayerCanRespawn`: a player that joins more than 20 seconds into a round with both teams
+    // playing waits for the next one, and with `mp_fadetoblack 1` its screen goes black and
+    // stays (multiplay_gamerules.cpp:3897, read 2026-11-22).
+    for (fadetoblack, expected) in [("0", 0), ("1", 1)] {
+        let mut b = Bench::stub_slots(spawns(8, 8), 4);
+        b.idle_cmds = true;
+        b.step(6);
+        b.run(move |_, eng| eng.set_cvar("mp_fadetoblack", fadetoblack));
+        for (slot, team_choice) in [(1, 2), (2, 1)] {
+            enter(&mut b, slot);
+            join(&mut b, slot, team_choice, 1);
+        }
+        b.step(3000);
+        b.probe.clear_messages();
+        join(&mut b, 0, 2, 1);
+        b.step(5);
+        let v = vars(&mut b, 0);
+        assert_eq!(v.deadflag, DEAD_RESPAWNABLE);
+        let faded = fades(&b.messages());
+        assert_eq!(faded.len(), expected, "{faded:?}");
+        if expected == 1 {
+            assert_eq!(
+                faded[0],
+                CsUserMsg::ScreenFade {
+                    duration: 3 * 4096,
+                    hold_time: 3 * 4096,
+                    flags: 1 | 4,
+                    color: [0, 0, 0, 255],
+                }
+            );
+        }
+    }
 }

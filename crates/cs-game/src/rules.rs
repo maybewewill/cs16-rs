@@ -24,12 +24,23 @@
 //! - `mapcyclefile` is not read: the file is always `mapcycle.txt` ([`crate::mapcycle::MapCycle::load`]), loaded
 //!   once when the server starts. The `minplayers`/`maxplayers` of a line are honoured; the
 //!   other rules of a line (commands run after the change) are not executed.
-//! - The players leaving the server are counted the way vanilla counts them for the check made
-//!   when they leave: dead, on their team ([`on_disconnect`]).
+//! - A player that leaves is `FL_DORMANT` before `ClientDisconnected`, so the counts of the check
+//!   made when it leaves do not include it ([`on_disconnect`]); nothing of this runs once the
+//!   match is over.
 //! - `m_bRoundTerminating` is written by `TerminateRound`/`RestartRound` but never read in
 //!   vanilla, so it is not ported. `ClearBodyQue` and `CleanUpMap` are skipped: nothing creates
 //!   corpse entities or breakables yet (the corpse is a client-side `ClCorpse`); whether the
 //!   corpses of the last round are gone after a restart needs a live check with a real client.
+//! - `votemap`/`vote` (map and kick votes, `mp_mapvoteratio`, `DisplayMaps` with a vote) are not
+//!   ported: phase 7 (votes). `listmaps` lists the cycle with 0 votes each.
+//! - `mp_fraglimit` has no effect: in vanilla `CheckFragLimit` is empty outside `REGAMEDLL_ADD`.
+//! - `CheckGameOver`'s "nobody may change the map" test is `!UTIL_HumansInGame()` in vanilla
+//!   (only bots: change at once); here it is an empty server (`players` all empty), which is the
+//!   same while there are no bots (assumption: `UTIL_HumansInGame` was not read).
+//! - A map change the engine refuses is asked again once a second ([`CHANGE_LEVEL_RETRY`]) and
+//!   each retry advances the map cycle, where vanilla `ChangeLevel` checks each item with
+//!   `IS_MAP_VALID` before it takes it (assumption, the body of `ChangeLevel` was not read for
+//!   this note); the engine's validity check is not reachable from the game.
 //! - `m_iCareer*`, bots, tutor, `m_flForceCameraValue`/`AllowSpec` change messages, the idle
 //!   kick and the voice manager are not ported.
 //!
@@ -48,9 +59,11 @@ use cs_proto48::messages::svc;
 use cs_proto48::usermsg::CsUserMsg;
 
 use crate::GameState;
+use crate::chat;
 use crate::menus::{self, Menu};
 use crate::messages;
 use crate::money::{self, Economy};
+use crate::observer;
 use crate::player::{self, PITCH_NORM, Team};
 use crate::teams::{self, JoinState};
 
@@ -401,7 +414,7 @@ fn initialize_player_counts(g: &mut GameState) -> Counts {
 /// in this round (`m_iNumSpawns`) or that joins a round more than [`ROUND_RESPAWN_TIME`] seconds
 /// old while both teams have players waits for the next round, and one in the appearance menu
 /// does not spawn.
-pub(crate) fn can_respawn(g: &GameState, eng: &EngineApi<'_>, slot: u8) -> bool {
+pub(crate) fn can_respawn(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) -> bool {
     let Some(p) = g.players.get(usize::from(slot)).and_then(Option::as_ref) else {
         return false;
     };
@@ -409,12 +422,25 @@ pub(crate) fn can_respawn(g: &GameState, eng: &EngineApi<'_>, slot: u8) -> bool 
     if p.num_spawns > 0 {
         return false;
     }
-    // A player cannot respawn until the next round if more than 20 seconds in. (The screen fade
-    // of `mp_fadetoblack 1` is not sent: the observer task owns it.)
+    // A player cannot respawn until the next round if more than 20 seconds in. If it just
+    // connected and `mp_fadetoblack` is 1, "maybe the server admin doesn't want him peeking
+    // around": its screen goes black and stays (`UTIL_ScreenFade(pPlayer, Vector(0, 0, 0), 3, 3,
+    // 255, FFADE_OUT | FFADE_STAYOUT)`, the only place a late joiner is faded; `Killed` fades the
+    // dead and [`player::spawn`] clears it).
     if teams::count_team_players(g, Team::Terrorist) > 0
         && teams::count_team_players(g, Team::Ct) > 0
         && eng.time() > g.rules.round_start_time + ROUND_RESPAWN_TIME
     {
+        if eng.cvar_f32("mp_fadetoblack") == observer::FADETOBLACK_STAY as f32 {
+            observer::screen_fade(
+                eng,
+                slot,
+                3.0,
+                3.0,
+                255,
+                observer::FFADE_OUT | observer::FFADE_STAYOUT,
+            );
+        }
         return false;
     }
     // A player cannot respawn while in the Choose Appearance menu.
@@ -540,8 +566,14 @@ pub(crate) fn check_win_conditions(g: &mut GameState, eng: &mut EngineApi<'_>) {
     let _ended = team_extermination_check(g, eng, &counts);
 }
 
-/// What `ClientDisconnected` does before the player is gone: the player counts as dead on its
-/// team in the check that follows.
+/// `CHalfLifeMultiplay::ClientDisconnected` (ReGameDLL `multiplay_gamerules.cpp:3580`, read
+/// 2026-11-22), called by `ClientDisconnect` after it made the player dormant: the player is
+/// `DEAD_DEAD` and `SetScoreboardAttributes()` tells everyone; then (the items, the VIP and the
+/// votes have nothing to release yet) its scoreboard line is emptied (`ScoreInfo` with nothing,
+/// `TeamInfo` `UNASSIGNED`), the observers that followed it move on ([`observer::on_target_left`])
+/// and `CheckWinConditions` runs last. The player is dormant, so `InitializePlayerCounts` no longer
+/// counts it: here it is removed from [`GameState::players`] before the check. (The empty
+/// `Location` message and `game_playerleave` are not ported.)
 pub(crate) fn on_disconnect(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     if let Some(p) = g
         .players
@@ -550,8 +582,16 @@ pub(crate) fn on_disconnect(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8
     {
         p.alive = false;
     }
-    // `SetScoreboardAttributes()` right after `deadflag = DEAD_DEAD`.
+    let id = eng.client_edict(slot);
+    if let Some(v) = eng.ent_mut(id) {
+        v.deadflag = player::DEAD_DEAD;
+    }
     messages::set_scoreboard_attributes(g, eng, usize::from(slot));
+    if let Some(entry) = g.players.get_mut(usize::from(slot)) {
+        *entry = None;
+    }
+    teams::announce_departure(eng, slot);
+    observer::on_target_left(g, eng, slot);
     check_win_conditions(g, eng);
 }
 
@@ -992,6 +1032,68 @@ pub(crate) fn player_think(g: &mut GameState, slot: u8, buttons: u16) {
     p.buttons_pressed = pressed;
     if g.rules.game_over && pressed & INTERMISSION_BUTTONS != 0 {
         g.rules.end_intermission_button_hit = true;
+    }
+}
+
+/// The `timeleft` command (`ClientCommand_`, ReGameDLL `client.cpp:2851`, read 2026-11-22): at
+/// most once a second per player, the chat line `#Game_no_timelimit` when `mp_timelimit` is 0,
+/// else `#Game_timelimit` with the minutes and the two-digit seconds left (`GetTimeLeft()`, never
+/// below 0, truncated to whole seconds: the match started at [`Rules::game_start_time`]).
+pub(crate) fn timeleft_command(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    let now = eng.time();
+    let Some(p) = g
+        .players
+        .get_mut(usize::from(slot))
+        .and_then(Option::as_mut)
+    else {
+        return;
+    };
+    if now <= f64::from(p.time_check_allowed) {
+        return;
+    }
+    p.time_check_allowed = (now + 1.0) as i32;
+    let limit = eng.cvar_f32("mp_timelimit");
+    if limit == 0.0 {
+        chat::client_print(eng, slot, chat::HUD_PRINTTALK, "#Game_no_timelimit", &[]);
+        return;
+    }
+    let left = (g.rules.game_start_time + f64::from(limit * 60.0) - now) as i32;
+    let left = left.max(0);
+    let (minutes, seconds) = (left / 60, left % 60);
+    chat::client_print(
+        eng,
+        slot,
+        chat::HUD_PRINTTALK,
+        "#Game_timelimit",
+        &[&minutes.to_string(), &format!("{seconds:02}")],
+    );
+}
+
+/// The `listmaps` command (`ClientCommand_` `client.cpp:2766`, `CHalfLifeMultiplay::DisplayMaps`
+/// with no vote, read 2026-11-22): at most every 0.3 seconds per player, every map of the cycle
+/// as a console line `#Votes` with its number, its name and its votes. Voting (`votemap`, `vote`,
+/// `mp_mapvoteratio`) is phase 7's, so every map has 0 votes.
+pub(crate) fn listmaps_command(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    let now = eng.time();
+    let Some(p) = g
+        .players
+        .get_mut(usize::from(slot))
+        .and_then(Option::as_mut)
+    else {
+        return;
+    };
+    if now < p.next_listmaps {
+        return;
+    }
+    p.next_listmaps = now + 0.3;
+    for (i, item) in g.map_cycle.items.iter().enumerate() {
+        chat::client_print(
+            eng,
+            slot,
+            chat::HUD_PRINTCONSOLE,
+            "#Votes",
+            &[&(i + 1).to_string(), &item.map, "0"],
+        );
     }
 }
 

@@ -318,8 +318,11 @@ fn init_hud_sequence_as_regamedll() {
     let mut b = Bench::with_one_client(2, b"");
     b.step(20);
     let names = b.names_from(0, 0);
-    // The team menu comes from the player's commands (`teams::pre_think`), after the first
-    // update, so the HUD is the first thing the client gets, once.
+    // `ClientPutInServer` ends with `#Game_connected` to everyone, the newcomer included. The
+    // team menu comes from the player's commands (`teams::pre_think`), after the first update,
+    // so the HUD is the first thing the client gets after it, once.
+    assert_eq!(names[0], "TextMsg");
+    let names = &names[1..];
     assert_eq!(names[..FIRST_UPDATE.len()], *FIRST_UPDATE, "the first player's HUD");
     assert!(names[FIRST_UPDATE.len()..].iter().all(|n| n == "ShowMenu" || n == "VGUIMenu"));
 
@@ -358,7 +361,8 @@ fn init_hud_sequence_as_regamedll() {
     );
     assert_eq!(find("ScoreAttrib")[0], CsUserMsg::ScoreAttrib { player_id: 1, flags: 1 });
     assert_eq!(find("SetFOV"), [CsUserMsg::SetFov(90)]);
-    // A joiner's cached hide-HUD value is already 0 (vanilla), so no `HideWeapon`.
+    // A joiner's cached hide-HUD value is already 0 (vanilla), so no `HideWeapon`; the
+    // flashlight bit comes with the first command (`flashlight_cvar_hides_the_flashlight_hud`).
     assert!(find("HideWeapon").is_empty());
     assert_eq!(find("Health"), [CsUserMsg::Health(100)]);
     assert_eq!(find("Battery"), [CsUserMsg::Battery(0)]);
@@ -384,7 +388,8 @@ fn init_hud_sequence_as_regamedll() {
     assert_eq!(names.iter().filter(|n| *n == "InitHUD").count(), 1);
     assert_eq!(names.iter().filter(|n| *n == "ScoreInfo").count(), 3);
     // The newcomer's marks go to every player (`SetBombIcon` ends in `SetScoreboardAttributes`).
-    assert_eq!(b.names_from(0, before), ["ScoreAttrib"]);
+    // The first one hears the connect line (`#Game_connected`) of the second.
+    assert_eq!(b.names_from(0, before), ["TextMsg", "ScoreAttrib"]);
     assert_eq!(
         b.messages(0).last().unwrap().1,
         CsUserMsg::ScoreAttrib { player_id: 2, flags: 1 }
@@ -400,17 +405,27 @@ fn a_spawn_starts_the_hud_over_without_the_welcome() {
     b.step(20);
     let names = b.names_from(0, before);
     // The order of `Spawn` (player.cpp): the goggles go off (`NVGToggle`, 6064), `PlayerSpawn`'s
-    // empty weapon (`CurWeapon`, 6085), the scoreboard line (`ScoreInfo`, 6112), then the HUD
-    // again, but not InitHUD or the rules' welcome. The stub map has no buy zone, so standing at
-    // a spawn point counts as one and the last update of the HUD shows its icon.
+    // empty weapon (`CurWeapon`, 6085), `SetScoreboardAttributes` (6104), `TeamInfo` (6106), the
+    // scoreboard line (`ScoreInfo`, 6112), the fade-in that clears a death fade (6132) and
+    // `SyncRoundTimer` (6133), then the HUD again, but not InitHUD or the rules' welcome. The stub
+    // map has no buy zone, so standing at a spawn point counts as one and the last update of the
+    // HUD shows its icon.
     assert_eq!(
         names,
         [
-            "NVGToggle", "CurWeapon", "ScoreInfo", "ResetHUD", "Money", "StatusIcon",
-            "ScoreAttrib", "RoundTime", "TeamScore", "TeamScore", "SetFOV", "Health",
-            "Battery", "Damage", "Train", "StatusIcon",
+            "NVGToggle", "CurWeapon", "ScoreAttrib", "TeamInfo", "ScoreInfo", "ScreenFade",
+            "RoundTime", "ResetHUD", "Money", "StatusIcon", "ScoreAttrib", "RoundTime",
+            "TeamScore", "TeamScore", "SetFOV", "Health", "Battery", "Damage", "Train",
+            "StatusIcon",
         ]
     );
+    // `SVC_ROOMTYPE` (`room_type`, 0 here) goes first of all, before the user messages.
+    let room_types = b.probes[0]
+        .messages()
+        .iter()
+        .filter(|m| matches!(m, SvcMessage::RoomType(0)))
+        .count();
+    assert_eq!(room_types, 1);
 }
 
 #[test]
@@ -554,7 +569,9 @@ fn health_and_armor_follow_the_player() {
         health,
         [CsUserMsg::Health(0), CsUserMsg::Health(0), CsUserMsg::Health(1)]
     );
-    // `StartObserver` hides the weapons and the health (1 | 8), once.
+    // The flashlight bit of `PreThink` (2) went first; `StartObserver` then sets the hidden
+    // elements to the weapons and the health (1 | 8) and the next command's `PreThink` puts the
+    // flashlight bit back (11).
     let hide: Vec<CsUserMsg> = b
         .messages(0)
         .into_iter()
@@ -562,7 +579,10 @@ fn health_and_armor_follow_the_player() {
         .filter(|(n, _)| n == "HideWeapon")
         .map(|(_, m)| m)
         .collect();
-    assert_eq!(hide, [CsUserMsg::HideWeapon(9)]);
+    assert_eq!(
+        hide,
+        [CsUserMsg::HideWeapon(2), CsUserMsg::HideWeapon(9), CsUserMsg::HideWeapon(11)]
+    );
     // A player killed before gets the HUD elements back on its next spawn, and is told.
     let before_respawn = b.messages(0).len();
     assert!(b.run(|game, eng| game.respawn_player(eng, 0)));
@@ -574,7 +594,8 @@ fn health_and_armor_follow_the_player() {
         .filter(|(n, _)| n == "HideWeapon")
         .map(|(_, m)| m)
         .collect();
-    assert_eq!(hide, [CsUserMsg::HideWeapon(0)]);
+    // (the flashlight bit stays: `mp_flashlight` is 0)
+    assert_eq!(hide, [CsUserMsg::HideWeapon(2)]);
     let before = b.messages(0).len();
     b.step(30);
     assert!(!b.names_from(0, before).iter().any(|n| n == "Health"));
@@ -600,8 +621,9 @@ fn full_server_init_hud_fits() {
 
     // The 32nd joiner got the whole welcome: all 32 on the scoreboard, in one go.
     let last = b.messages(31);
+    // (and its own spawn's `TeamInfo` to everyone, which `Spawn` sends before the first update)
     let teams = last.iter().filter(|(n, _)| n == "TeamInfo").count();
-    assert_eq!(teams, 32);
+    assert_eq!(teams, 33);
     let motd = last.iter().filter(|(n, _)| n == "MOTD").count();
     assert_eq!(motd, 26);
     // The 31 players alive when it came in are on its radar.
@@ -630,4 +652,84 @@ fn full_server_init_hud_fits() {
     for slot in 0..32 {
         assert_eq!(b.server.client_state(slot), ClientState::Active, "slot {slot}");
     }
+}
+
+/// A command with time in it from the player of `slot`, run as the game.
+fn command_of(b: &mut Bench, slot: u8) {
+    b.run(move |game, eng| {
+        let cmd = GoldSrcUserCmd {
+            msec: 10,
+            ..Default::default()
+        };
+        game.run_usercmd(eng, slot, &cmd, 0);
+    });
+    b.step(2);
+}
+
+#[test]
+fn flashlight_cvar_hides_the_flashlight_hud() {
+    // `PreThink` sets `HIDEHUD_FLASHLIGHT` (bit 1) unless `FAllowFlashlight()` (`mp_flashlight`,
+    // default 0), before `UpdateClientData` tells the client (player.cpp:4825, read 2026-11-22).
+    let mut b = Bench::with_one_client(2, b"");
+    b.step(20);
+    assert!(b.run(|game, eng| game.spawn_player(eng, 0, Team::Ct, 0)));
+    b.step(5);
+    let hide = |b: &Bench, from: usize| -> Vec<CsUserMsg> {
+        b.messages(0)
+            .into_iter()
+            .skip(from)
+            .filter(|(n, _)| n == "HideWeapon")
+            .map(|(_, m)| m)
+            .collect()
+    };
+    let before = b.messages(0).len();
+    command_of(&mut b, 0);
+    assert_eq!(hide(&b, before), [CsUserMsg::HideWeapon(2)]);
+    // The cvar allows it: the bit goes, the client is told once.
+    b.run(|_, eng| eng.set_cvar("mp_flashlight", "1"));
+    let before = b.messages(0).len();
+    command_of(&mut b, 0);
+    command_of(&mut b, 0);
+    assert_eq!(hide(&b, before), [CsUserMsg::HideWeapon(0)]);
+    b.run(|_, eng| eng.set_cvar("mp_flashlight", "0"));
+    let before = b.messages(0).len();
+    command_of(&mut b, 0);
+    assert_eq!(hide(&b, before), [CsUserMsg::HideWeapon(2)]);
+}
+
+#[test]
+fn every_hit_sends_the_damage_message_with_the_integer_health_lost() {
+    // `CBasePlayer::TakeDamage` ends with `m_bitsHUDDamage = -1`, so the next update sends
+    // `Damage` even when the kind of damage is the one it last sent; the health byte is
+    // `int(pev->dmg_take)`.
+    let mut b = Bench::with_one_client(2, b"");
+    b.step(20);
+    assert!(b.run(|game, eng| game.spawn_player(eng, 0, Team::Ct, 0)));
+    b.step(10);
+    let damage = |b: &Bench, from: usize| -> Vec<CsUserMsg> {
+        b.messages(0)
+            .into_iter()
+            .skip(from)
+            .filter(|(n, _)| n == "Damage")
+            .map(|(_, m)| m)
+            .collect()
+    };
+    let before = b.messages(0).len();
+    b.run(|game, eng| game.damage_player(eng, 0, None, 33.7, 1 << 1));
+    b.step(10);
+    let first = damage(&b, before);
+    assert!(!first.is_empty());
+    assert!(matches!(first[0], CsUserMsg::Damage { armor_damage: 0, health_damage: 33, damage_bits: 0, .. }));
+    // Quiet again: nothing more is sent while nothing is hit.
+    let before = b.messages(0).len();
+    b.step(10);
+    assert!(damage(&b, before).is_empty());
+    // A hit of no kind that costs no whole point (damage 0.5, `dmg_take` stays 0, the bits are
+    // the ones the client was last told) still reaches the client: `m_bitsHUDDamage = -1`.
+    let before = b.messages(0).len();
+    b.run(|game, eng| game.damage_player(eng, 0, None, 0.5, 0));
+    b.step(10);
+    let second = damage(&b, before);
+    assert!(!second.is_empty());
+    assert!(second.iter().all(|m| matches!(m, CsUserMsg::Damage { health_damage: 0, .. })));
 }

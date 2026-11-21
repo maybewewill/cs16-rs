@@ -277,6 +277,11 @@ id = "mp_forcechasecam"
 status = "implemented"
 
 [[item]]
+id = "mp_flashlight"
+status = "tested"
+evidence = "crates/cs-game/tests/hud.rs::flashlight_cvar_hides_the_flashlight_hud"
+
+[[item]]
 id = "mp_playerid"
 status = "implemented"
 

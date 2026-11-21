@@ -734,3 +734,81 @@ fn the_connect_userinfo_chooses_the_menu_kind() {
     let b = bench(spawns(2, 2), 2);
     assert!(player(&b, 0).vgui_menus);
 }
+
+#[test]
+fn the_first_joining_think_resets_the_menu_hides_the_defuser_and_sends_the_item_status() {
+    // `JoiningThink`, `SHOWLTEXT` (vanilla, not `REGAMEDLL_FIXES`; player.cpp:3820, read
+    // 2026-11-22): `ResetMenu`, the defuser status icon hidden, `SendItemStatus`; the team menu
+    // follows from `PlayerThink`.
+    let b = bench(spawns(2, 2), 2);
+    let msgs = b.messages();
+    let reset = msgs
+        .iter()
+        .position(
+            |m| matches!(m, CsUserMsg::ShowMenu { keys_bitmask: 0, text, .. } if text.is_empty()),
+        )
+        .expect("the menu reset");
+    let defuser = msgs
+        .iter()
+        .position(|m| {
+            matches!(m, CsUserMsg::StatusIcon { status: 0, sprite_name, .. } if sprite_name == "defuser")
+        })
+        .expect("the defuser icon hidden");
+    let items = msgs
+        .iter()
+        .position(|m| matches!(m, CsUserMsg::ItemStatus(0)))
+        .expect("the item status");
+    let menu = msgs
+        .iter()
+        .position(|m| is_team_menu(m, 0b11_0011))
+        .expect("the team menu");
+    assert!(reset < defuser && defuser < items && items < menu, "{reset} {defuser} {items} {menu}");
+}
+
+#[test]
+fn the_default_team_is_the_one_with_fewer_round_wins() {
+    // `SelectDefaultTeam` (the vanilla branch): even teams go to the team that has won fewer
+    // rounds, a draw of the random number only when the wins are even too.
+    let mut b = bench(spawns(3, 3), 2);
+    b.run(|game, _| game.state_mut().num_ct_wins = 2);
+    command(&mut b, 0, "jointeam 5");
+    assert_eq!(player(&b, 0).team, Team::Terrorist);
+
+    let mut b = bench(spawns(3, 3), 2);
+    b.run(|game, _| game.state_mut().num_terrorist_wins = 1);
+    command(&mut b, 0, "jointeam 5");
+    assert_eq!(player(&b, 0).team, Team::Ct);
+
+    // Fewer players come first: the terrorists lead on wins but the counter-terrorists have more
+    // players, so the terrorists are the default again (they are the team with fewer players).
+    let mut b = bench(spawns(3, 3), 3);
+    enter(&mut b, 1);
+    command(&mut b, 1, "jointeam 2");
+    b.run(|game, _| game.state_mut().num_terrorist_wins = 3);
+    command(&mut b, 0, "jointeam 5");
+    assert_eq!(player(&b, 0).team, Team::Terrorist);
+}
+
+#[test]
+fn joining_the_spectators_broadcasts_the_scoreboard_line_unreliably() {
+    // The scoreboard line of a player that watches is `MSG_BROADCAST` (client.cpp:1962, read
+    // 2026-11-22; `MSG_ALL` only with `REGAMEDLL_FIXES`): it goes out after the reliable
+    // messages of the same command (`TeamInfo`, `ScoreAttrib`, `Spectator`).
+    let mut b = bench(spawns(3, 3), 2);
+    b.probe.clear_messages();
+    command(&mut b, 0, "jointeam 6");
+    let msgs = b.messages();
+    let info = msgs
+        .iter()
+        .position(|m| matches!(m, CsUserMsg::ScoreInfo { player_id: 1, team_id: 0, .. }))
+        .expect("the scoreboard line");
+    let team = msgs
+        .iter()
+        .position(|m| matches!(m, CsUserMsg::TeamInfo { player_id: 1, team_name } if team_name == "SPECTATOR"))
+        .expect("the team");
+    let attrib = msgs
+        .iter()
+        .position(|m| matches!(m, CsUserMsg::ScoreAttrib { player_id: 1, .. }))
+        .expect("the scoreboard marks");
+    assert!(team < info && attrib < info, "{team} {attrib} {info}");
+}

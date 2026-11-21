@@ -108,8 +108,10 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     reg.register("mp_timelimit", "0", srv, "Change the map after this many minutes (0 for no limit)");
     reg.register("mp_chattime", "10", srv, "Seconds the scoreboard is shown when the map ends");
     // The cvars `InitHUD` sends to a joining client (ReGameDLL `game.cpp`, read 2026-11-22).
-    reg.register("mp_forcecamera", "0", srv, "Dead players see through teammates only");
-    reg.register("mp_forcechasecam", "0", srv, "Dead players follow their own team only");
+    reg.register("mp_forcecamera", "0", srv, "Spectator camera of the dead: 0 anyone, including enemies; 1 teammates only; 2 first person only");
+    reg.register("mp_forcechasecam", "0", srv, "Chase camera of the dead: 0 anyone (then mp_forcecamera decides); 1 teammates only; 2 first person only");
+    // `game.cpp`: `{ "mp_flashlight", "0", FCVAR_SERVER }`; `FAllowFlashlight`.
+    reg.register("mp_flashlight", "0", srv, "Allow players to use the flashlight (0 or 1)");
     reg.register("mp_fadetoblack", "0", srv, "Fade a dead player's screen to black (1 stays black)");
     // `game.cpp`: `{ "mp_playerid", "0", FCVAR_SERVER }`; 0 names everyone, 1 teammates only, 2 nobody.
     reg.register("mp_playerid", "0", srv, "Who the status bar names (0 all, 1 teammates, 2 nobody)");

@@ -21,8 +21,7 @@
 //!   not from the cache `CheckWinConditions` refreshes.
 //!
 //! Left for later tasks: the VIP (`jointeam 3` is refused: no map has a VIP safety zone yet), the items a player
-//! drops or loses on a team change, the `Location` and radar messages, the career mode and the
-//! bots. `mp_teamlist` is not part of Counter-Strike's game library.
+//! drops or loses on a team change, the `Location` message, the career mode and the bots. `mp_teamlist` is not part of Counter-Strike's game library.
 
 use cs_engine::consts::{
     FL_CLIENT, FL_FAKECLIENT, FL_PROXY, FL_SPECTATOR, MOVETYPE_NOCLIP, SOLID_NOT,
@@ -39,7 +38,7 @@ use crate::menus::{
 use crate::messages;
 use crate::money;
 use crate::observer;
-use crate::player::{DEAD_DEAD, Team, apply_model, kill, spawn};
+use crate::player::{DEAD_DEAD, EF_NODRAW, EF_NOINTERP, Team, apply_model, kill, spawn};
 use crate::rules;
 use crate::world::{self, CT_SPAWN_CLASS, T_SPAWN_CLASS};
 
@@ -52,11 +51,6 @@ pub const MENU_SLOT_TEAM_SPECT: i32 = 6;
 
 /// `CS_NUM_SKIN`: the appearances of each team.
 const NUM_SKINS: i32 = 4;
-/// `SCORE_STATUS_DEAD`: the `ScoreAttrib` flag of a dead player.
-const SCORE_STATUS_DEAD: u8 = 1;
-/// `EF_NODRAW` and `EF_NOINTERP`.
-const EF_NODRAW: u32 = 128;
-const EF_NOINTERP: u32 = 32;
 
 /// `JoinState` (`player.h`): where a player is on its way into the game.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -153,18 +147,27 @@ fn team_stacked(g: &GameState, eng: &EngineApi<'_>, new: Team, current: Team) ->
     new_count + 1 > other_count + allowed
 }
 
-/// `SelectDefaultTeam`: the team with fewer players; when they are even the team that has won
-/// fewer rounds (no rounds are played yet: both have won none) or else a random one; the other
-/// team when that one is full; `None` when both are.
+/// `CHalfLifeMultiplay::SelectDefaultTeam` (ReGameDLL `multiplay_gamerules.cpp`, the vanilla
+/// non-`REGAMEDLL_ADD` branch, read 2026-11-22): the team with fewer players; when they are even
+/// the team that has won fewer rounds; when those are even too a random one (`RANDOM_LONG(0, 1)`:
+/// 0 is the counter-terrorists); then the other team when that one is full; `None` when both are.
 fn select_default_team(g: &mut GameState, eng: &EngineApi<'_>) -> Option<Team> {
     let (terrorists, cts) = (
         count_team_players(g, Team::Terrorist),
         count_team_players(g, Team::Ct),
     );
+    let (t_wins, ct_wins) = (g.num_terrorist_wins, g.num_ct_wins);
     let team = if terrorists < cts {
         Team::Terrorist
-    } else if terrorists > cts || g.random_range(0, 1) == 0 {
-        // More terrorists, or even teams and the draw says so.
+    } else if terrorists > cts {
+        Team::Ct
+    } else if t_wins < ct_wins {
+        // Choose the team that is losing.
+        Team::Terrorist
+    } else if ct_wins < t_wins {
+        Team::Ct
+    } else if g.random_range(0, 1) == 0 {
+        // Teams and scores are equal, pick a random team.
         Team::Ct
     } else {
         Team::Terrorist
@@ -181,32 +184,23 @@ fn select_default_team(g: &mut GameState, eng: &EngineApi<'_>) -> Option<Team> {
 }
 
 /// `TeamInfo` of the player of `slot` to everyone, then its `ScoreAttrib` to every player
-/// (`CBasePlayer::TeamChangeUpdate`, `SetScoreboardAttributes`; only the dead flag: the bomb
-/// and the VIP come later).
+/// (`CBasePlayer::TeamChangeUpdate`, [`messages::set_scoreboard_attributes`]; only the dead flag:
+/// the bomb and the VIP come later).
 pub(crate) fn team_change_update(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let Some(p) = g.players.get(usize::from(slot)).and_then(Option::as_ref) else {
         return;
     };
-    let player_id = slot + 1;
     eng.send_usermsg(
         MsgDest::All,
         &CsUserMsg::TeamInfo {
-            player_id,
+            player_id: slot + 1,
             team_name: team_name(p.team).to_string(),
         },
     );
     if p.team == Team::Unassigned {
         return;
     }
-    let flags = if p.alive { 0 } else { SCORE_STATUS_DEAD };
-    for (to, other) in g.players.iter().enumerate() {
-        if other.is_some() {
-            eng.send_usermsg(
-                MsgDest::One(to as u8),
-                &CsUserMsg::ScoreAttrib { player_id, flags },
-            );
-        }
-    }
+    messages::set_scoreboard_attributes(g, eng, usize::from(slot));
 }
 
 /// What everyone is told when the player of `slot` leaves (`CHalfLifeMultiplay::ClientDisconnected`):
@@ -268,9 +262,15 @@ pub(crate) fn show_team_menu_again(g: &mut GameState, eng: &mut EngineApi<'_>, s
 /// The per-player logic of the way into the game, run before each command the player's client
 /// sends (`CBasePlayer::PreThink`, so only once the client is in the game and able to receive
 /// the menus): the team-menu part of `CHalfLifeMultiplay::PlayerThink`, then `JoiningThink`.
+///
+/// Once the match is over `PreThink` returns after `PlayerThink` (player.cpp:4741, read
+/// 2026-11-22): the team menu is still offered but `JoiningThink` does not run, so nobody enters
+/// the game during the intermission.
 pub(crate) fn pre_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     player_think(g, eng, slot);
-    joining_think(g, eng, slot);
+    if !g.rules.game_over() {
+        joining_think(g, eng, slot);
+    }
 }
 
 /// The team-menu part of `CHalfLifeMultiplay::PlayerThink`: a player about to pick a team gets
@@ -323,7 +323,8 @@ fn player_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     }
 }
 
-/// `CBasePlayer::JoiningThink`.
+/// `CBasePlayer::JoiningThink` (ReGameDLL `player.cpp:3814`, the non-`REGAMEDLL_FIXES` branch,
+/// read 2026-11-22).
 fn joining_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let Some(p) = g
         .players
@@ -335,10 +336,19 @@ fn joining_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     match p.joining {
         JoinState::Joined | JoinState::ShowTeamSelect | JoinState::PickingTeam => {}
         JoinState::ShowLText => {
-            // `ResetMenu`; the original also hides the defuser status icon and sends the item
-            // status (the items come later).
+            // `ResetMenu`, then (vanilla, not `REGAMEDLL_FIXES`) the defuser status icon is
+            // hidden (the player has no defuser: `m_bHasDefuser = false`) and `SendItemStatus`.
             p.joining = JoinState::ShowTeamSelect;
             menus::reset_menu_message(eng, slot);
+            eng.send_usermsg(
+                MsgDest::One(slot),
+                &CsUserMsg::StatusIcon {
+                    status: 0,
+                    sprite_name: "defuser".to_string(),
+                    color: None,
+                },
+            );
+            crate::buy::send_item_status(eng, slot, p.has_night_vision);
         }
         // There is no level text to read.
         JoinState::ReadingLText => p.joining = JoinState::ShowTeamSelect,
@@ -590,16 +600,11 @@ fn choose_spectator(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) -> boo
     // The account is emptied.
     p.money = 0;
     let (frags, deaths) = (p.frags, p.deaths);
+    messages::money(eng, slot, 0);
+    // Sent with no team and no class, as the original does: `MSG_BROADCAST`, unreliable
+    // (`REGAMEDLL_FIXES` would use `MSG_ALL`; client.cpp:1962, read 2026-11-22).
     eng.send_usermsg(
-        MsgDest::One(slot),
-        &CsUserMsg::Money {
-            amount: 0,
-            flash: false,
-        },
-    );
-    // Sent with no team and no class, as the original does.
-    eng.send_usermsg(
-        MsgDest::All,
+        MsgDest::Broadcast,
         &CsUserMsg::ScoreInfo {
             player_id: slot + 1,
             frags: frags.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,

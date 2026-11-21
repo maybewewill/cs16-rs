@@ -6,11 +6,12 @@
 
 mod common;
 
-use common::{Bench, command, enter, join, spawns};
+use common::{Bench, command, commands_of, enter, join, spawns};
 use cs_engine::{EngineApi, GameDll, ServerMap};
 use cs_game::CsGame;
 use cs_game::player::{DEAD_NO, Player, Team};
 use cs_game::rules::{Rules, WinStatus};
+use cs_game::teams::JoinState;
 use cs_proto48::delta::GoldSrcUserCmd;
 use cs_proto48::usermsg::CsUserMsg;
 use cs_vfs::Vfs;
@@ -533,13 +534,21 @@ fn the_time_limit_ends_the_match() {
     assert_eq!(b.run(|_, eng| eng.cvar_f32("mp_timelimit")), 0.0);
 }
 
+/// The index of the first message of `b` that `is`, and panics if there is none.
+fn position(b: &Bench, what: &str, is: impl Fn(&CsUserMsg) -> bool) -> usize {
+    b.messages()
+        .iter()
+        .position(is)
+        .unwrap_or_else(|| panic!("no {what} message"))
+}
+
 #[test]
 fn leaving_players_end_the_round_as_regamedll() {
     // Two terrorists and a counter-terrorist.
     let mut b = match_under_way(4, &[0, 1], &[2]);
     b.step(frames(2.3));
-    // One terrorist is dead and the other leaves: the dead one's team has nobody alive, the
-    // leaver counts as dead on his team, so the counter-terrorists win the round.
+    // One terrorist is dead and the other leaves: the dead one's team has nobody alive (the
+    // leaver is dormant, so it is not counted at all), so the counter-terrorists win the round.
     kill_player(&mut b, 0);
     b.step(3);
     assert_eq!(rules(&b).win_status(), WinStatus::None);
@@ -549,28 +558,98 @@ fn leaving_players_end_the_round_as_regamedll() {
     assert_eq!(rules(&b).win_status(), WinStatus::Cts);
     assert_eq!(wins(&b), (0, 1));
     assert!(said(&b, 4, "#CTs_Win"));
+    // `ClientDisconnect`/`ClientDisconnected` order: the notice, the leaver's `ScoreAttrib`
+    // (dead), the emptied scoreboard line and team, and only then `CheckWinConditions`, whose
+    // messages (the win's audio and text) come last.
+    let notice = position(&b, "#Game_disconnected", |m| {
+        matches!(m, CsUserMsg::TextMsg { message, params, .. }
+            if message == "#Game_disconnected" && params.len() == 1)
+    });
+    let attrib = position(&b, "leaver ScoreAttrib", |m| {
+        matches!(m, CsUserMsg::ScoreAttrib { player_id: 2, flags: 1 })
+    });
+    let info = position(&b, "leaver ScoreInfo", |m| {
+        matches!(m, CsUserMsg::ScoreInfo { player_id: 2, frags: 0, deaths: 0, class_id: 0, team_id: 0 })
+    });
+    let team = position(&b, "leaver TeamInfo", |m| {
+        matches!(m, CsUserMsg::TeamInfo { player_id: 2, team_name } if team_name == "UNASSIGNED")
+    });
+    let win_audio = position(&b, "ctwin", |m| {
+        matches!(m, CsUserMsg::SendAudio { audio_code, .. } if audio_code == "%!MRAD_ctwin")
+    });
+    let win_text = position(&b, "#CTs_Win", |m| {
+        matches!(m, CsUserMsg::TextMsg { message, .. } if message == "#CTs_Win")
+    });
+    assert!(notice < attrib && attrib < info && info < team, "{notice} {attrib} {info} {team}");
+    assert!(team < win_audio && team < win_text, "{team} {win_audio} {win_text}");
 
-    // The last counter-terrorist leaves in the middle of a round: it counts as dead, so the
-    // terrorists win the round.
+    // The last counter-terrorist leaves in the middle of a round: it is dormant, so the
+    // terrorists do not win anything; `NeededPlayersCheck` finds nobody on the other side, the
+    // game goes back to waiting (`#Game_scoring`) and no round is won.
     let mut b = match_under_way(4, &[0, 1], &[2]);
     b.step(frames(2.3));
     b.probe.clear_messages();
     b.run(|game, eng| game.client_disconnect(eng, 2));
     b.step(3);
-    assert_eq!(rules(&b).win_status(), WinStatus::Terrorists);
-    assert_eq!(wins(&b), (1, 0));
-    // The game waits for a counter-terrorist again at the next restart: then a round won by
-    // the terrorists does not count until both teams play.
-    b.step(frames(5.3));
-    assert!(player(&b, 0).alive && player(&b, 1).alive);
-    b.step(frames(2.3));
-    b.run(|game, eng| game.damage_player(eng, 0, None, 500.0, 0));
-    b.run(|game, eng| game.damage_player(eng, 1, None, 500.0, 0));
-    b.step(3);
-    // Nobody left alive on either side: a draw.
-    assert_eq!(rules(&b).win_status(), WinStatus::Draw);
-    assert!(said(&b, 4, "#Round_Draw"));
+    assert_eq!(rules(&b).win_status(), WinStatus::None);
+    assert_eq!(wins(&b), (0, 0));
+    assert!(!said(&b, 4, "#Terrorists_Win"));
     assert!(!rules(&b).game_started());
+    assert!(said(&b, 2, "#Game_scoring"));
+    assert!(player(&b, 0).alive && player(&b, 1).alive);
+}
+
+#[test]
+fn the_last_ct_leaving_a_one_on_one_wins_nothing() {
+    // The probe (slot 0) is the terrorist, slot 1 the counter-terrorist.
+    let mut b = match_under_way(3, &[0], &[1]);
+    b.step(frames(2.3));
+    b.probe.clear_messages();
+    b.run(|game, eng| game.client_disconnect(eng, 1));
+    b.step(3);
+    // No round is won, no win counted: the leaver was not counted, `NeededPlayersCheck` says
+    // the game is waiting for players.
+    assert_eq!(rules(&b).win_status(), WinStatus::None);
+    assert_eq!(wins(&b), (0, 0));
+    assert!(!said(&b, 4, "#Terrorists_Win"));
+    assert!(!audio(&b, "%!MRAD_terwin"));
+    assert!(!rules(&b).game_started());
+    // `CheckWinConditions` is the last thing `ClientDisconnected` does: the scoreboard line and
+    // the team went out before `#Game_scoring`.
+    let info = position(&b, "leaver ScoreInfo", |m| {
+        matches!(m, CsUserMsg::ScoreInfo { player_id: 2, frags: 0, deaths: 0, class_id: 0, team_id: 0 })
+    });
+    let team = position(&b, "leaver TeamInfo", |m| {
+        matches!(m, CsUserMsg::TeamInfo { player_id: 2, team_name } if team_name == "UNASSIGNED")
+    });
+    let scoring = position(&b, "#Game_scoring", |m| {
+        matches!(m, CsUserMsg::TextMsg { dest: 2, message, .. } if message == "#Game_scoring")
+    });
+    assert!(info < team && team < scoring, "{info} {team} {scoring}");
+}
+
+#[test]
+fn nothing_is_announced_when_a_player_leaves_during_the_intermission() {
+    let mut b = match_under_way(3, &[0], &[1]);
+    b.run(|_, eng| {
+        eng.set_cvar("mp_maxrounds", "1");
+        eng.set_cvar("mp_chattime", "10");
+    });
+    b.step(frames(1.2));
+    kill_player(&mut b, 1);
+    b.step(frames(5.5));
+    assert!(rules(&b).game_over());
+    b.probe.clear_messages();
+    b.run(|game, eng| game.client_disconnect(eng, 1));
+    b.step(3);
+    // `ClientDisconnect` does nothing while `IsGameOver()`: no notice, no emptied line.
+    assert!(!said(&b, 1, "#Game_disconnected"));
+    assert!(
+        !b.messages()
+            .iter()
+            .any(|m| matches!(m, CsUserMsg::TeamInfo { player_id: 2, .. }))
+    );
+    assert!(b.server.game().game.state().players[1].is_none());
 }
 
 #[test]
@@ -661,4 +740,85 @@ fn auto_team_balance_moves_the_last_to_join() {
         b.step(frames(3.5));
     }
     assert_eq!(player(&b, 2).team, Team::Terrorist);
+}
+
+#[test]
+fn nobody_gets_into_the_game_during_the_intermission() {
+    // `PreThink` returns after `PlayerThink` while `IsGameOver()`: no `JoiningThink`, so a player
+    // that connects during the intermission stays at `SHOWLTEXT` (no team menu, no spawn) however
+    // many commands it sends, and one that picks a team and an appearance is not spawned.
+    let mut b = match_under_way(4, &[0], &[1]);
+    b.run(|_, eng| {
+        eng.set_cvar("mp_maxrounds", "1");
+        eng.set_cvar("mp_chattime", "10");
+    });
+    b.step(frames(1.2));
+    kill_player(&mut b, 1);
+    b.step(frames(5.5));
+    assert!(rules(&b).game_over());
+    enter(&mut b, 2);
+    b.run(|game, eng| {
+        game.client_command(eng, 2, &["jointeam".into(), "1".into()]);
+        game.client_command(eng, 2, &["joinclass".into(), "1".into()]);
+        commands_of(game, eng, 2, 20);
+    });
+    let p = player(&b, 2);
+    assert_eq!((p.joining, p.alive, p.num_spawns), (JoinState::ShowLText, false, 0));
+}
+
+#[test]
+fn timeleft_answers_as_regamedll() {
+    let mut b = match_under_way(3, &[0], &[1]);
+    // No limit: `#Game_no_timelimit` in the chat.
+    b.probe.clear_messages();
+    command(&mut b, 0, "timeleft");
+    assert_eq!(texts(&b, 3, "#Game_no_timelimit"), [Vec::<String>::new()]);
+    // Not oftener than once a second (`m_iTimeCheckAllowed`).
+    command(&mut b, 0, "timeleft");
+    assert_eq!(texts(&b, 3, "#Game_no_timelimit").len(), 1);
+
+    // A limit of 10 minutes: 9 minutes and some seconds are left, the seconds in two digits.
+    b.run(|_, eng| eng.set_cvar("mp_timelimit", "10"));
+    b.step(frames(1.5));
+    b.probe.clear_messages();
+    command(&mut b, 0, "timeleft");
+    let left = texts(&b, 3, "#Game_timelimit");
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0][0], "9");
+    assert_eq!(left[0][1].len(), 2);
+    assert!(left[0][1].parse::<i32>().unwrap() < 60);
+
+    // The limit is over (the match ends): 0 minutes and "00" seconds, never negative.
+    b.run(|_, eng| eng.set_cvar("mp_timelimit", "0.01"));
+    b.step(frames(1.5));
+    b.probe.clear_messages();
+    command(&mut b, 0, "timeleft");
+    assert_eq!(
+        texts(&b, 3, "#Game_timelimit"),
+        [vec!["0".to_string(), "00".to_string()]]
+    );
+}
+
+#[test]
+fn listmaps_lists_the_cycle_with_no_votes() {
+    let mut b = match_under_way(3, &[0], &[1]);
+    b.run(|game, _| game.load_map_cycle(&cycle(&["de_one", "de_two", "de_three"])));
+    b.probe.clear_messages();
+    command(&mut b, 0, "listmaps");
+    // One console line per map, `#Votes` with its number, its name and its votes.
+    let lines: Vec<Vec<String>> = texts(&b, 2, "#Votes");
+    assert_eq!(
+        lines,
+        [
+            vec!["1".to_string(), "de_one".to_string(), "0".to_string()],
+            vec!["2".to_string(), "de_two".to_string(), "0".to_string()],
+            vec!["3".to_string(), "de_three".to_string(), "0".to_string()],
+        ]
+    );
+    // Not twice within 0.3 seconds.
+    command(&mut b, 0, "listmaps");
+    assert_eq!(texts(&b, 2, "#Votes").len(), 3);
+    b.step(frames(0.5));
+    command(&mut b, 0, "listmaps");
+    assert_eq!(texts(&b, 2, "#Votes").len(), 6);
 }

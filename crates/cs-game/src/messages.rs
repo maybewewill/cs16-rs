@@ -14,8 +14,8 @@
 //!
 //! `InitHUD`'s "entered the game" log line (`UTIL_LogPrintf`) is not ported.
 //!
-//! Not sent yet, with the task that sends them: `Fog` (no `env_fog` entity yet), `HLTV` and
-//! (no HLTV; `SVC_INTERMISSION` is sent by the round rules), `BombDrop` and the defuser icon of
+//! Not sent yet, with the task that sends them: `Fog` (no `env_fog` entity yet), `HLTV` (there
+//! is no HLTV; `SVC_INTERMISSION` is sent by the round rules), `BombDrop` and the defuser icon of
 //! `InitHUD` (bomb), `HostagePos`/`Scenario` (hostages), `Account`/`HealthInfo` (they exist
 //! only in the newest builds, `BUILD_LATEST`: vanilla does not register them), the career
 //! messages (`CZCareer`, Condition Zero only).
@@ -124,9 +124,8 @@ const MAX_MOTD_LENGTH: usize = 1536;
 /// `STATUSICON_HIDE` and `STATUSICON_SHOW`.
 const STATUSICON_HIDE: u8 = 0;
 
-/// `SCORE_STATUS_DEAD`, `_BOMB` (ReGameDLL `player.h`; values assumed, the header was not
-/// fetched).
-const SCORE_STATUS_DEAD: u8 = 1 << 0;
+/// `SCORE_STATUS_DEAD` (ReGameDLL `player.h`; value assumed, the header was not fetched).
+pub(crate) const SCORE_STATUS_DEAD: u8 = 1 << 0;
 
 /// The registry the game gives the engine: [`USER_MESSAGES`] with ids from `USERMSG_BASE_ID`.
 pub(crate) fn link_user_messages() -> UserMsgRegistry {
@@ -243,6 +242,19 @@ pub(crate) fn set_fov(eng: &mut EngineApi<'_>, slot: u8, fov: u8) {
 /// `gmsgSendCorpse` to everyone (`CBasePlayer::SpawnClientSideCorpse`).
 pub(crate) fn corpse(eng: &mut EngineApi<'_>, msg: CsUserMsg) {
     eng.send_usermsg(MsgDest::All, &msg);
+}
+
+/// `gmsgCurWeapon` of `CBasePlayer::Killed`: not active, weapon `0xFF`, clip `0xFF` (a byte of
+/// -1), so the ammo HUD of the dead shows nothing.
+pub(crate) fn cur_weapon_dead(eng: &mut EngineApi<'_>, slot: u8) {
+    eng.send_usermsg(
+        MsgDest::One(slot),
+        &CsUserMsg::CurWeapon {
+            is_active: false,
+            weapon_id: 0xFF,
+            clip_ammo: -1,
+        },
+    );
 }
 
 /// `gmsgCurWeapon` with no weapon (`RemoveAllItems`): the ammo HUD shows nothing.
@@ -576,8 +588,9 @@ pub(crate) fn update_client_data(g: &mut GameState, eng: &mut EngineApi<'_>, slo
         eng.send_usermsg(
             MsgDest::One(slot),
             &CsUserMsg::Damage {
-                armor_damage: 0, // `dmg_save` is never set (`basemonster.cpp`)
-                health_damage: p.dmg_take.clamp(0.0, 255.0) as u8,
+                armor_damage: 0, // `pev->dmg_save` is never set (`basemonster.cpp`)
+                // `WRITE_BYTE(int(pev->dmg_take))`: the integer part, as a byte.
+                health_damage: (p.dmg_take as i32) as u8,
                 damage_bits: p.damage_bits & dmg::SHOWNHUD,
                 origin: from,
             },

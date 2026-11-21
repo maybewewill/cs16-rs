@@ -26,8 +26,16 @@
 //! Not ported yet, each a later task: weapons and the active item, the economy rewards
 //! (`AddAccount`),
 //! `Pain` sounds, flinch, the momentum block of `TakeDamage` (see [`take_damage`]), the blast
-//! branch of `TakeDamage`, the HUD damage message, armor (`Battery`, `ArmorType`) messages,
-//! animations and the VIP.
+//! branch of `TakeDamage`, animations and the VIP.
+//!
+//! The flashlight itself (`impulse 100`, `FlashlightTurnOn`, the `Flashlight`/`FlashBat`
+//! messages) is not ported: impulses are not handled yet. `PreThink` does hide its HUD unless
+//! `mp_flashlight` allows it (`HIDEHUD_FLASHLIGHT`, [`run_usercmd`]); `FlashlightTurnOn` will
+//! have to honour `FAllowFlashlight()` too.
+//!
+//! `WaterMove` (`PreThink`: drowning, `air_finished`, `DMG_DROWN` and its recovery) is not
+//! ported: it needs `waterlevel` from the movement, which `cs_sim::pmove` does not compute (the
+//! `pm_shared` plan carries it); the edict's `waterlevel` stays 0 and a player never drowns.
 //!
 //! Fields of the client data ([`client_data`]) that stay zero for now:
 //! - `bInDuck`, `flDuckTime`, `flTimeStepSound`, `waterjumptime`, `flSwimTime`, `pushmsec`: the
@@ -45,8 +53,9 @@ use cs_engine::consts::{
     FL_CLIENT, FL_DORMANT, FL_DUCKING, FL_ONGROUND, FL_PROXY, FL_SPECTATOR, MOVETYPE_NONE,
     MOVETYPE_TOSS, MOVETYPE_WALK, SOLID_NOT, SOLID_SLIDEBOX,
 };
-use cs_engine::{EdictId, EngineApi};
+use cs_engine::{EdictId, EngineApi, MsgDest};
 use cs_proto48::delta::{GoldSrcClientData, GoldSrcUserCmd};
+use cs_proto48::messages::svc;
 use cs_proto48::usermsg::CsUserMsg;
 use cs_sim::pmove::{MoveInputCmd, PlayerMoveState, VEC_VIEW, step_player_move};
 use cs_sim::walk_game::{EngineWorld, usercmd_to_move_input};
@@ -112,8 +121,9 @@ const ARMOR_RATIO: f32 = 0.5;
 const ARMOR_BONUS: f32 = 0.5;
 /// `AIRTIME`: seconds a player can stay under water.
 const AIRTIME: f64 = 12.0;
-/// `HIDEHUD_*` (`cdll_dll.h`; values of the Half-Life SDK, assumption).
+/// `HIDEHUD_*` (`cdll_dll.h`, read 2026-11-22).
 pub(crate) const HIDEHUD_WEAPONS: i32 = 1 << 0;
+pub(crate) const HIDEHUD_FLASHLIGHT: i32 = 1 << 1;
 pub(crate) const HIDEHUD_HEALTH: i32 = 1 << 3;
 const HIDEHUD_TIMER: i32 = 1 << 4;
 const HIDEHUD_MONEY: i32 = 1 << 5;
@@ -123,7 +133,7 @@ const CONTENT_EMPTY: i32 = -1;
 const CONTENT_WATER: i32 = -3;
 /// `EF_NODRAW` and `EF_NOINTERP`.
 pub(crate) const EF_NODRAW: u32 = 128;
-const EF_NOINTERP: u32 = 32;
+pub(crate) const EF_NOINTERP: u32 = 32;
 /// `CHAN_VOICE` and `CHAN_ITEM`, `ATTN_NORM`, `PITCH_NORM`.
 const CHAN_VOICE: u8 = 2;
 pub(crate) const CHAN_ITEM: u8 = 3;
@@ -292,8 +302,6 @@ pub struct Player {
     pub(crate) hud_damage: i32,
     /// `pev->dmg_take`: health lost since the HUD was last told.
     pub(crate) dmg_take: f32,
-    /// `pev->dmg_save`: never set by the game (ReGameDLL `basemonster.cpp`), so always 0.
-    pub(crate) dmg_save: f32,
     /// `pev->dmg_inflictor`: what last hurt the player.
     pub(crate) dmg_inflictor: Option<EdictId>,
     /// `m_iHideHUD`: the HUD elements hidden (`HIDEHUD_*`).
@@ -318,6 +326,12 @@ pub struct Player {
     pub(crate) signals: crate::buy::Signals,
     /// `m_tmHandleSignals`: server time `HandleSignals` runs next.
     pub(crate) next_handle_signals: f64,
+    /// `m_iTimeCheckAllowed`: `timeleft` answers when the server time is past this (whole
+    /// seconds).
+    pub(crate) time_check_allowed: i32,
+    /// `m_flLastCommandTime[CMD_LISTMAPS]`: `listmaps` answers when the server time reaches
+    /// this.
+    pub(crate) next_listmaps: f64,
 }
 
 impl Player {
@@ -364,7 +378,6 @@ impl Player {
             client_battery: -1,
             hud_damage: -1,
             dmg_take: 0.0,
-            dmg_save: 0.0,
             dmg_inflictor: None,
             hide_hud: 0,
             client_hide_hud: 0,
@@ -377,6 +390,8 @@ impl Player {
             hud: Default::default(),
             signals: Default::default(),
             next_handle_signals: 0.0,
+            time_check_allowed: 0,
+            next_listmaps: 0.0,
         }
     }
 
@@ -418,7 +433,6 @@ impl Player {
         self.hud_damage = -1;
         self.damage_bits = 0;
         self.dmg_take = 0.0;
-        self.dmg_save = 0.0;
         self.dmg_inflictor = None;
         self.fov = 90;
         self.client_fov = 0;
@@ -504,6 +518,14 @@ pub(crate) fn put_in_server(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8
     v.fov = DEFAULT_FOV;
     v.view_ofs = Vec3::new(0.0, 0.0, VEC_VIEW);
     eng.set_origin(id, origin);
+    // The end of `ClientPutInServer` (client.cpp:735-749, read 2026-11-22): everyone is told the
+    // player connected, `%` of the name made a space (the text is a format string).
+    let name = eng
+        .client_key(slot, "name")
+        .unwrap_or("")
+        .replace('%', " ");
+    let name = if name.is_empty() { "<unconnected>" } else { name.as_str() };
+    menus::print_all_notify(eng, "#Game_connected", name);
 }
 
 /// `SetPrefsFromUserinfo`: whether the client wants VGUI menus (`_vgui_menus`, on when the
@@ -515,39 +537,57 @@ fn prefers_vgui_menus(eng: &EngineApi<'_>, slot: u8) -> bool {
     }
 }
 
-/// `ClientUserInfoChanged`: the part that concerns the menus.
-pub(crate) fn userinfo_changed(g: &mut GameState, eng: &EngineApi<'_>, slot: u8) {
+/// `ClientUserInfoChanged` (ReGameDLL `client.cpp:3746`, `CHalfLifeMultiplay::ClientUserInfoChanged`,
+/// `multiplay_gamerules.cpp:5087`, read 2026-11-22): `SetPlayerModel` forces the `model` key back
+/// to the one the player's team and appearance give (`SetClientUserInfoModel` writes it only when
+/// it differs), then `SetPrefsFromUserinfo` reads the menu preference. A player on no team (or a
+/// spectator) is `urban`. The name part is [`crate::chat::name_changed`].
+pub(crate) fn userinfo_changed(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let vgui = prefers_vgui_menus(eng, slot);
-    if let Some(p) = g
+    let Some(p) = g
         .players
         .get_mut(usize::from(slot))
         .and_then(Option::as_mut)
-    {
-        p.vgui_menus = vgui;
+    else {
+        return;
+    };
+    p.vgui_menus = vgui;
+    let model = model_name(p.team, p.class);
+    if eng.client_key(slot, "model") != Some(model) {
+        eng.set_client_key(slot, "model", model);
     }
 }
 
-/// `ClientDisconnect`: the slot's player is gone and its edict inert.
+/// `ClientDisconnect` (ReGameDLL `client.cpp:316`, read 2026-11-22). Unless the match is over
+/// (`IsGameOver()`: then nothing is announced and the rules are not told), everyone is told
+/// `#Game_disconnected`, the player stops taking damage and being solid and is made `FL_DORMANT`
+/// (so the player counts of the rules skip it), and `CHalfLifeMultiplay::ClientDisconnected`
+/// ([`rules::on_disconnect`]) runs, ending with `CheckWinConditions`. The slot's player is gone
+/// afterwards in either case, and its edict inert.
 pub(crate) fn disconnect(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     if g.players.get(usize::from(slot)).is_none_or(Option::is_none) {
         return;
     }
-    // `CHalfLifeMultiplay::ClientDisconnected`: the round rules see the player go.
-    rules::on_disconnect(g, eng, slot);
-    let Some(entry) = g.players.get_mut(usize::from(slot)) else {
-        return;
-    };
-    if entry.take().is_some() {
-        teams::announce_departure(eng, slot);
-    }
     let id = eng.client_edict(slot);
-    let Some(v) = eng.ent_mut(id) else {
-        return;
-    };
-    v.solid = SOLID_NOT;
-    v.flags = FL_DORMANT;
-    let origin = v.origin;
-    eng.set_origin(id, origin);
+    let announce = !g.rules.game_over();
+    if announce {
+        let name = teams::player_name(eng, slot);
+        menus::print_all_notify(eng, "#Game_disconnected", &name);
+        if let Some(p) = g.players[usize::from(slot)].as_mut() {
+            p.takes_damage = false;
+        }
+    }
+    if let Some(v) = eng.ent_mut(id) {
+        v.solid = SOLID_NOT;
+        v.flags = FL_DORMANT;
+        let origin = v.origin;
+        eng.set_origin(id, origin);
+    }
+    if announce {
+        rules::on_disconnect(g, eng, slot);
+    } else {
+        g.players[usize::from(slot)] = None;
+    }
 }
 
 /// The model name of a team and appearance choice (`CBasePlayer::SetPlayerModel`).
@@ -685,11 +725,18 @@ pub(crate) fn spawn(
     eng.set_size(id, HULL_MIN, HULL_MAX);
     eng.set_origin(id, origin);
     reset_max_speed(g, eng, slot);
-    // The order of the messages is that of `Spawn` (player.cpp): `SendItemStatus` of a player
-    // that lost its items (6046-6052), `NVGToggle 0` to the player and its first-person
-    // watchers (6064-6081, `hud_misc::on_spawn`), then `PlayerSpawn` (6085), whose
-    // `RemoveAllItems` sends the empty `CurWeapon` (no weapons exist yet), and last the
-    // scoreboard line (`ScoreInfo`, 6112-6118).
+    // The order of the messages is that of `Spawn` (player.cpp, read 2026-11-22): the
+    // `SVC_ROOMTYPE` (`room_type`, 5937), `SendItemStatus` of a player that lost its items
+    // (6046-6052), `NVGToggle 0` to the player and its first-person watchers (6064-6081,
+    // `hud_misc::on_spawn`), then `PlayerSpawn` (6085), whose `RemoveAllItems` sends the empty
+    // `CurWeapon` (no weapons exist yet), `SetScoreboardAttributes` (6104), `TeamInfo` to all
+    // (6106), the scoreboard line (`ScoreInfo`, 6112-6118), the name asked for while dead, the
+    // `UTIL_ScreenFade(this, Vector(0, 0, 0), 0.001)` that clears a fade left from the death
+    // (6132), and `SyncRoundTimer` (6133). (`UpdateLocation` is not ported.) The first client
+    // data update (`m_fInitHUD`) sends the round timer again, as `UpdateClientData` does.
+    let room_type = eng.cvar_f32("room_type") as i32 as i16 as u16;
+    let [lo, hi] = room_type.to_le_bytes();
+    eng.send(MsgDest::One(slot), &[svc::ROOMTYPE, lo, hi]);
     if lost_items {
         crate::buy::send_item_status(eng, slot, false);
     }
@@ -698,11 +745,22 @@ pub(crate) fn spawn(
     if let Some(p) = g.players[index].as_mut() {
         p.num_spawns += 1;
     }
+    messages::set_scoreboard_attributes(g, eng, index);
     if let Some(p) = g.players[index].as_ref() {
+        eng.send_usermsg(
+            MsgDest::All,
+            &CsUserMsg::TeamInfo {
+                player_id: id.index as u8,
+                team_name: teams::team_name(p.team).to_string(),
+            },
+        );
         messages::score_info(eng, id.index, p);
     }
     // A name asked for while dead is taken at the spawn.
     crate::chat::apply_pending_name(g, eng, slot);
+    // `UTIL_ScreenFade(this, Vector(0, 0, 0), 0.001)`: fade in, alpha 0, no hold.
+    observer::screen_fade(eng, slot, 0.001, 0.0, 0, observer::FFADE_IN);
+    messages::sync_round_timer(g, eng, slot);
     true
 }
 
@@ -755,9 +813,28 @@ pub(crate) fn run_usercmd(
     {
         return;
     }
-    // `PlayerPreThink`: the way into the game advances with the player's commands.
+    // `PlayerPreThink`: the way into the game advances with the player's commands (not once the
+    // match is over: `PreThink` returns after `PlayerThink` while `IsGameOver()`, so there is no
+    // `JoiningThink`, and `PostThink` skips the fall damage).
+    let game_over = g.rules.game_over();
     teams::pre_think(g, eng, slot);
     rules::player_think(g, slot, cmd.buttons);
+    if !game_over {
+        // `PreThink` (player.cpp:4825, read 2026-11-22): the flashlight is hidden from the HUD
+        // unless `mp_flashlight` allows it (`FAllowFlashlight`), before `UpdateClientData`.
+        let allow = eng.cvar_f32("mp_flashlight") != 0.0;
+        if let Some(p) = g
+            .players
+            .get_mut(usize::from(slot))
+            .and_then(Option::as_mut)
+        {
+            if allow {
+                p.hide_hud &= !HIDEHUD_FLASHLIGHT;
+            } else {
+                p.hide_hud |= HIDEHUD_FLASHLIGHT;
+            }
+        }
+    }
     let Some(p) = g
         .players
         .get_mut(usize::from(slot))
@@ -792,7 +869,9 @@ pub(crate) fn run_usercmd(
     }
     move_player(g, eng, slot, cmd, alive);
     if alive {
-        post_think(g, eng, slot);
+        if !game_over {
+            post_think(g, eng, slot);
+        }
     } else {
         death_think(g, eng, slot);
     }
@@ -1004,12 +1083,15 @@ pub(crate) fn take_damage(
     p.damage_bits |= bits;
     // What the `Damage` message reports (`CBaseMonster::TakeDamage`, ReGameDLL
     // `basemonster.cpp:430-441`, as reviewed): for a player, the inflictor when there is one
-    // (the old one stays otherwise) and the health lost. Nothing sets `dmg_save`, so the
-    // message's armor byte is always 0.
+    // (the old one stays otherwise) and the health lost. Nothing sets `pev->dmg_save`, so the
+    // message's armor byte is always 0 (the field is not kept).
     if inflictor.is_some() {
         p.dmg_inflictor = inflictor;
     }
     p.dmg_take += damage.trunc();
+    // `m_bitsHUDDamage = -1` at the end of `CBasePlayer::TakeDamage` (player.cpp:1374): the next
+    // client data update sends the `Damage` message whatever the bits.
+    p.hud_damage = -1;
     let health = p.health;
     let id = eng.client_edict(slot);
     if let Some(v) = eng.ent_mut(id) {
@@ -1072,12 +1154,16 @@ pub(crate) fn client_kill(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) 
 }
 
 /// `CHalfLifeMultiplay::PlayerKilled` (the part this task has the data for) and
-/// `CBasePlayer::Killed`: the death notice, the frag rules, the scoreboard, then the player
-/// dies (`DEAD_DYING`, not solid, `MOVETYPE_TOSS`) and runs `PlayerDeathThink`.
+/// `CBasePlayer::Killed` (ReGameDLL `player.cpp`, read 2026-11-22): the death notice, the frag
+/// rules, the scoreboard, then the player dies (`DEAD_DYING`, not solid, `MOVETYPE_TOSS`) and
+/// runs `PlayerDeathThink`. The messages go out in the order of `Killed`: `PlayerKilled`'s
+/// (`DeathMsg`, `ScoreInfo`), `NVGToggle` of the player and of its first-person watchers, the
+/// camera (`ADStop` or the black `ScreenFade`), `ScoreAttrib`, `Health 0`, `CurWeapon 0 255 255`,
+/// `SetFOV 0`, the `CheckWinConditions` ones, `BuyZoneIcon_Clear`, and the death sound.
 ///
 /// Frags: a suicide costs one, killing a teammate costs one, killing an enemy gives one, the
 /// world (an attacker that is no player) changes none. Money: 300 for an enemy, -3300 for a
-/// teammate ([`money::killed_by`]). A death ends with `CheckWinConditions` ([`rules`]).
+/// teammate ([`money::killed_by`]).
 fn killed(
     g: &mut GameState,
     eng: &mut EngineApi<'_>,
@@ -1093,6 +1179,8 @@ fn killed(
     }
     // `PlayerKilled` with `DeathNotice`: the death notice, deaths, frags, money, scoreboard.
     score::player_killed(g, eng, slot, attacker, inflictor);
+    // `NVGToggle 0` to the player and to the observers that watch it in first person.
+    observer::killed_night_vision(g, eng, slot);
 
     // CBasePlayer::Killed.
     if let Some(p) = g.players[index].as_mut() {
@@ -1105,9 +1193,6 @@ fn killed(
         p.next_death_think = now + DEATH_THINK_INTERVAL;
         p.client_health = 0;
     }
-    messages::health(eng, slot, 0);
-    // `SendFOV(0)`.
-    messages::set_fov(eng, slot, 0);
     if let Some(v) = eng.ent_mut(id) {
         v.fov = 0.0;
         v.deadflag = DEAD_DYING;
@@ -1121,6 +1206,12 @@ fn killed(
     observer::killed(g, eng, slot, attacker);
     // `SetScoreboardAttributes()`: the scoreboard marks the player dead.
     messages::set_scoreboard_attributes(g, eng, usize::from(slot));
+    messages::health(eng, slot, 0);
+    messages::cur_weapon_dead(eng, slot);
+    // `SendFOV(0)`.
+    messages::set_fov(eng, slot, 0);
+    // A team may be out of players now (`CheckWinConditions` of `Killed`).
+    rules::check_win_conditions(g, eng);
     // The buy zone icon goes (and a buy menu that is open closes).
     crate::buy::buy_zone_icon_clear(g, eng, slot);
     // `DeathSound`: one of four, `RANDOM_LONG(1, 4)`.
@@ -1131,8 +1222,6 @@ fn killed(
         _ => "player/death6.wav",
     };
     eng.emit_sound(id, CHAN_VOICE, sample, 1.0, ATTN_NORM, PITCH_NORM);
-    // A team may be out of players now (`CheckWinConditions` of `Killed`).
-    rules::check_win_conditions(g, eng);
 }
 
 /// `CBasePlayer::PlayerDeathThink` for a dead player, every `DEATH_THINK_INTERVAL`: a body on
@@ -1281,6 +1370,8 @@ pub(crate) fn client_command(
         "say" => crate::chat::say_command(g, eng, slot, argv, false),
         "say_team" => crate::chat::say_command(g, eng, slot, argv, true),
         "ignoremsg" => crate::chat::ignore_msg_command(g, eng, slot),
+        "timeleft" => rules::timeleft_command(g, eng, slot),
+        "listmaps" => rules::listmaps_command(g, eng, slot),
         _ => {
             // Distinct commands, so the order of `ClientCommand_` (`ignorerad`, the observer
             // commands, then the living player's) does not matter.
