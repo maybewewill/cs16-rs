@@ -311,6 +311,77 @@ fn sound_requires_precache_and_reaches_listeners() {
 }
 
 #[test]
+fn sound_reaches_a_listener_behind_a_wall() {
+    // On a stub map the PAS holds everything.
+    let game = TestGame {
+        precache_sounds: vec!["weapons/ak47-1.wav".to_string()],
+        ..TestGame::default()
+    };
+    let (mut h, mut a, mut b) = two_active(game);
+    h.server.game_mut().act(|eng| {
+        let ent = eng.create_entity("test_source").expect("free edict");
+        eng.set_origin(ent, Vec3::new(5000.0, 5000.0, 5000.0));
+        assert!(eng.emit_sound(ent, 1, "weapons/ak47-1.wav", 1.0, 1.0, 100));
+    });
+    h.step(&mut [&mut a, &mut b], 30);
+    assert_eq!(sounds(&a).len(), 1);
+    assert_eq!(sounds(&b).len(), 1);
+
+    // Without the installed game the real-map half cannot run.
+    let Ok(vfs) = Vfs::discover(None, VfsConfig::default()) else {
+        return;
+    };
+    let raw = vfs.read_bytes("maps/de_dust2.bsp").expect("de_dust2 reads");
+    let bsp = Arc::new(BspMap::load(&vfs, "de_dust2").expect("de_dust2 parses"));
+    let map = ServerMap::from_bsp("de_dust2", &raw, bsp.clone()).expect("valid BSP header");
+    let origin_of = |classname: &str| {
+        map.entities
+            .iter()
+            .filter(|e| e.classname() == classname)
+            .find_map(|e| e.get_vec3("origin"))
+            .unwrap_or_else(|| panic!("de_dust2 has a {classname}"))
+    };
+    let t_spawn = origin_of("info_player_deathmatch");
+    let ct_spawn = origin_of("info_player_start");
+    let ct_ear = ct_spawn + Vec3::new(0.0, 0.0, 17.0);
+    // A point in an open leaf that the CT cannot see but can hear.
+    let source = (1..bsp.leafs.len())
+        .filter(|&n| bsp.leafs[n].contents != -2)
+        .map(|n| {
+            let l = &bsp.leafs[n];
+            let centre = |i: usize| (f32::from(l.mins[i]) + f32::from(l.maxs[i])) * 0.5;
+            (n, Vec3::new(centre(0), centre(1), centre(2)))
+        })
+        .filter(|&(n, p)| bsp.find_leaf(p) == n)
+        .map(|(_, p)| p)
+        .find(|&p| !map.can_see(ct_ear, p - Vec3::ONE, p + Vec3::ONE) && map.can_hear(ct_ear, p - Vec3::ONE, p + Vec3::ONE))
+        .expect("de_dust2 has a point the CT hears without seeing");
+
+    let game = TestGame {
+        precache_sounds: vec!["weapons/ak47-1.wav".to_string()],
+        spawn_origins: vec![t_spawn, ct_spawn],
+        ..TestGame::default()
+    };
+    let cfg = ServerConfig {
+        max_clients: 4,
+        ..ServerConfig::default()
+    };
+    let mut h = Harness::with_map(cfg, map, game);
+    let mut t = h.add_probe("T");
+    let mut ct = h.add_probe("CT");
+    h.step(&mut [&mut t, &mut ct], 300);
+    assert_eq!(ct.state(), &ProbeState::InGame);
+    h.server.game_mut().act(move |eng| {
+        let ent = eng.create_entity("test_source").expect("free edict");
+        eng.set_origin(ent, source);
+        assert!(!eng.can_see(ct_ear, source - Vec3::ONE, source + Vec3::ONE));
+        assert!(eng.emit_sound(ent, 1, "weapons/ak47-1.wav", 1.0, 1.0, 100));
+    });
+    h.step(&mut [&mut t, &mut ct], 30);
+    assert_eq!(sounds(&ct).len(), 1, "the PAS reaches the CT behind the wall");
+}
+
+#[test]
 fn init_messages_are_replayed_to_late_joiners() {
     let game = TestGame {
         activate_sends: vec![

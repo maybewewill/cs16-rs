@@ -57,6 +57,10 @@ pub enum MsgDest {
     /// The unreliable queue of every `Active` client whose eye (its edict's `origin +
     /// view_ofs`) can potentially see the box of half-size 1 around the point.
     Pvs(Vec3),
+    /// Like `Pvs`, but with the potentially audible set: the box of half-size 1 around the
+    /// point must be audible from the eye (`EngineApi::can_hear`), which reaches beyond what
+    /// can be seen. `MSG_FL_PAS` of ReHLDS, as `emit_sound` uses.
+    Pas(Vec3),
     /// The init buffer: stored, and replayed to every client that enters the server (in its
     /// `spawn` stage, after the light styles). Only while the map is being activated (in
     /// `spawn_entity` and `server_activate`) and while it fits
@@ -118,22 +122,8 @@ impl EngineApi<'_> {
                     }
                 }
             }
-            MsgDest::Pvs(point) => {
-                let (mins, maxs) = (point - Vec3::ONE, point + Vec3::ONE);
-                for slot in 0..self.clients.len() {
-                    if self.clients[slot].state != ClientState::Active {
-                        continue;
-                    }
-                    // Active clients have an edict; one without is not sent to.
-                    let eye = self
-                        .edicts
-                        .get(self.edicts.client(slot as u8))
-                        .map(|e| e.vars.origin + e.vars.view_ofs);
-                    if eye.is_some_and(|eye| self.can_see(eye, mins, maxs)) {
-                        self.outbox.push_unreliable(slot, bytes);
-                    }
-                }
-            }
+            MsgDest::Pvs(point) => self.send_in_range(point, bytes, Self::can_see),
+            MsgDest::Pas(point) => self.send_in_range(point, bytes, Self::can_hear),
             MsgDest::Init => {
                 if self.outbox.init_open
                     && self.outbox.init.len() + bytes.len() <= INIT_BUFFER_BUDGET
@@ -142,6 +132,25 @@ impl EngineApi<'_> {
                 } else {
                     self.send(MsgDest::All, bytes);
                 }
+            }
+        }
+    }
+
+    /// Queues `bytes` unreliably for every `Active` client whose eye (its edict's `origin +
+    /// view_ofs`) passes `test` for the box of half-size 1 around `point`.
+    fn send_in_range(&mut self, point: Vec3, bytes: &[u8], test: fn(&Self, Vec3, Vec3, Vec3) -> bool) {
+        let (mins, maxs) = (point - Vec3::ONE, point + Vec3::ONE);
+        for slot in 0..self.clients.len() {
+            if self.clients[slot].state != ClientState::Active {
+                continue;
+            }
+            // Active clients have an edict; one without is not sent to.
+            let eye = self
+                .edicts
+                .get(self.edicts.client(slot as u8))
+                .map(|e| e.vars.origin + e.vars.view_ofs);
+            if eye.is_some_and(|eye| test(self, eye, mins, maxs)) {
+                self.outbox.push_unreliable(slot, bytes);
             }
         }
     }
@@ -192,16 +201,17 @@ impl EngineApi<'_> {
     }
 
     /// Plays the precached sound `sample` on `channel` (0 to 7) from the centre of `ent`'s
-    /// bounds, `origin + (mins + maxs) * 0.5`, to every client that can see that point
-    /// (`MsgDest::Pvs`), with `volume` clamped to 0.0..=1.0, `attenuation` to 0.0..=3.98 and
+    /// bounds, `origin + (mins + maxs) * 0.5`, to every client that can hear that point
+    /// (`MsgDest::Pas`), with `volume` clamped to 0.0..=1.0, `attenuation` to 0.0..=3.98 and
     /// `pitch` as is (100 is normal). The wire origin is that same point, so a brush entity
     /// (origin zero, bounds around its model) sounds from the middle of the brush.
     ///
     /// ReHLDS `SV_StartSound_internal` (`rehlds/engine/sv_main.cpp`, read 2026-11-21) computes
-    /// `origin[i] = (maxs[i] + mins[i]) * 0.5 + entity origin[i]` the same way, but multicasts
-    /// the sound with `MSG_FL_PAS` (potentially audible set). We have no PAS and use the
-    /// potentially visible set, so on a map where the PAS reaches beyond the PVS our audience
-    /// is narrower than HLDS's (assumption: PAS contains PVS).
+    /// `origin[i] = (maxs[i] + mins[i]) * 0.5 + entity origin[i]` the same way and multicasts
+    /// the sound with `MSG_FL_PAS` (potentially audible set), as this does. Deviation: HLDS
+    /// tests the listener's origin leaf against the PAS of the sound's leaf
+    /// (`SV_ValidClientMulticast`); this tests the listener's ear (`origin + view_ofs`)
+    /// against the leaves the sound's box touches, the same machinery as `Pvs`.
     ///
     /// Returns `false`, sending nothing, for a stale entity or one whose index does not fit the
     /// 11-bit wire field (2048 and up), a non-finite position, a sample that is not in the
@@ -260,7 +270,7 @@ impl EngineApi<'_> {
                 pitch,
             },
         );
-        self.send(MsgDest::Pvs(origin), w.as_slice());
+        self.send(MsgDest::Pas(origin), w.as_slice());
         true
     }
 

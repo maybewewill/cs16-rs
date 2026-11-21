@@ -1,7 +1,7 @@
 //! What the server needs from a BSP map: name, checksum, brush-model count,
 //! entity list, visibility (PVS) queries and hull collision.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use cs_assets::bsp::{BspMap, Entity};
 use cs_proto48::crypto::crc_map_bsp;
@@ -18,6 +18,94 @@ pub struct ServerMap {
     pub entities: Vec<Entity>,
     vis: Option<Arc<BspMap>>,
     collision: Option<WorldCollision>,
+    /// The potentially audible set of every leaf, built on the first
+    /// [`can_hear`](Self::can_hear): a map load that never sends a sound does not pay for it,
+    /// and the build is bounded by [`MAX_PAS_LEAFS`]. `None` inside for a map without
+    /// visibility data or with more leaves than that, where everything is audible.
+    pas: OnceLock<Option<Pas>>,
+}
+
+/// Most visible leaves a PAS is built for: the GoldSrc `MAX_MAP_LEAFS`. Its table is at most
+/// `8192 * 1024` bytes (8 MiB); a hostile map with more leaves hears everything instead of
+/// making the load allocate without bound.
+const MAX_PAS_LEAFS: usize = 8192;
+
+/// The potentially audible set of every leaf (`CM_CalcPAS`, which ReHLDS calls from
+/// `SV_SpawnServer`; the original engine calls it `SV_CalcPHS`): the OR of the PVS of every
+/// leaf the leaf can see. One bit row per leaf number `0..=vis_leafs`, in the PVS bit layout
+/// (bit `n` of a row is leaf `n + 1`), `row_bytes` each; row 0, the solid leaf, hears
+/// everything.
+struct Pas {
+    vis_leafs: usize,
+    row_bytes: usize,
+    rows: Vec<u8>,
+    /// Row ORs the build did: the work done is `or_rows * row_bytes` byte ORs. Only tests
+    /// read it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    or_rows: u64,
+}
+
+impl Pas {
+    /// `CM_CalcPAS` (`rehlds/engine/cmodel.cpp`, read 2026-11-21): the PVS rows come from
+    /// [`BspMap::decompress_pvs`] (a leaf without visibility data sees every leaf, as
+    /// `mod_novis` does there), and each PAS row is its PVS row ORed with the PVS row of every
+    /// leaf in it. The table is stored as bit rows, `(vis_leafs + 1) * ceil(vis_leafs / 8)`
+    /// bytes, never more than `leafs * ceil(leafs / 8)`. `None` for a map without
+    /// visibility data or past [`MAX_PAS_LEAFS`].
+    fn build(bsp: &BspMap) -> Option<Self> {
+        if bsp.visibility.is_empty() {
+            return None;
+        }
+        let vis_leafs = bsp
+            .models
+            .first()
+            .map_or(bsp.leafs.len().saturating_sub(1), |m| m.vis_leafs.max(0) as usize)
+            .min(bsp.leafs.len().saturating_sub(1));
+        if vis_leafs == 0 || vis_leafs > MAX_PAS_LEAFS {
+            return None;
+        }
+        let row_bytes = vis_leafs.div_ceil(8);
+        let mut pvs = vec![0u8; (vis_leafs + 1) * row_bytes];
+        pvs[..row_bytes].fill(0xFF);
+        for leaf in 1..=vis_leafs {
+            let row = &mut pvs[leaf * row_bytes..(leaf + 1) * row_bytes];
+            for (n, _) in bsp.decompress_pvs(leaf).iter().enumerate().filter(|(_, v)| **v) {
+                row[n >> 3] |= 1 << (n & 7);
+            }
+        }
+        let mut rows = pvs.clone();
+        let mut or_rows = 0u64;
+        for leaf in 1..=vis_leafs {
+            let own = leaf * row_bytes;
+            for n in 0..vis_leafs {
+                if pvs[own + (n >> 3)] & (1 << (n & 7)) == 0 {
+                    continue;
+                }
+                let src = (n + 1) * row_bytes;
+                for (d, s) in rows[own..own + row_bytes].iter_mut().zip(&pvs[src..src + row_bytes]) {
+                    *d |= s;
+                }
+                or_rows += 1;
+            }
+        }
+        rows[..row_bytes].fill(0xFF);
+        Some(Self {
+            vis_leafs,
+            row_bytes,
+            rows,
+            or_rows,
+        })
+    }
+
+    /// The row of `leaf` as one flag per leaf (flag `n` is leaf `n + 1`), the shape the leaf
+    /// tests take; `None` for a leaf that has no row.
+    fn audible_from(&self, leaf: usize) -> Option<Vec<bool>> {
+        if leaf > self.vis_leafs {
+            return None;
+        }
+        let row = &self.rows[leaf * self.row_bytes..(leaf + 1) * self.row_bytes];
+        Some((0..self.vis_leafs).map(|n| row[n >> 3] & (1 << (n & 7)) != 0).collect())
+    }
 }
 
 impl ServerMap {
@@ -32,6 +120,7 @@ impl ServerMap {
             submodel_count: bsp.models.len(),
             entities: bsp.entities.clone(),
             collision: Some(WorldCollision::from_bsp(&bsp)),
+            pas: OnceLock::new(),
             vis: Some(bsp),
         })
     }
@@ -47,6 +136,7 @@ impl ServerMap {
             entities: Vec::new(),
             vis: None,
             collision: None,
+            pas: OnceLock::new(),
         }
     }
 
@@ -106,6 +196,46 @@ impl ServerMap {
         find_touched_leafs(bsp, mins, maxs).visible(bsp, &pvs)
     }
 
+    /// Whether a box with absolute corners `mins`/`maxs` is potentially audible from `ear`: any
+    /// leaf the box touches is in the PAS of the ear's leaf (the leaves PVS-visible from any
+    /// leaf the ear leaf sees). Everything is audible on a map without visibility data (or with
+    /// too many leaves to build a PAS), and to an ear in a leaf without any (solid leaf 0,
+    /// outside the world). ReHLDS `SV_ValidClientMulticast` tests the listener's origin leaf
+    /// against the PAS of the sound's leaf; this tests the ear's leaf against the leaves of the
+    /// box, as [`can_see`](Self::can_see) does for the PVS.
+    pub fn can_hear(&self, ear: Vec3, mins: Vec3, maxs: Vec3) -> bool {
+        let (Some(bsp), Some(pas)) = (self.vis.as_deref(), self.pas()) else {
+            return true;
+        };
+        let ear_leaf = bsp.find_leaf(ear);
+        if ear_leaf == 0 {
+            return true;
+        }
+        let Some(audible) = pas.audible_from(ear_leaf) else {
+            return true;
+        };
+        find_touched_leafs(bsp, mins, maxs).visible(bsp, &audible)
+    }
+
+    /// The PAS, built on first use.
+    fn pas(&self) -> Option<&Pas> {
+        self.pas
+            .get_or_init(|| self.vis.as_deref().and_then(Pas::build))
+            .as_ref()
+    }
+
+    /// Whether leaf `to` is in the PAS of leaf `from`; for tests.
+    #[cfg(test)]
+    fn pas_leaf_audible(&self, from: usize, to: usize) -> Option<bool> {
+        self.pas()?.audible_from(from)?.get(to.checked_sub(1)?).copied()
+    }
+
+    /// Size of the PAS table in bytes, and the row ORs its build did; for tests.
+    #[cfg(test)]
+    fn pas_size(&self) -> Option<(usize, u64)> {
+        self.pas().map(|p| (p.rows.len(), p.or_rows))
+    }
+
     /// A map around `bsp` without a file behind it, for tests.
     #[cfg(test)]
     pub(crate) fn with_bsp_for_test(bsp: Arc<BspMap>) -> Self {
@@ -113,6 +243,7 @@ impl ServerMap {
             submodel_count: bsp.models.len(),
             entities: Vec::new(),
             collision: Some(WorldCollision::from_bsp(&bsp)),
+            pas: OnceLock::new(),
             vis: Some(bsp),
             ..Self::stub("test_bsp")
         }
@@ -179,5 +310,60 @@ mod tests {
         assert!(map.can_see(ct, ct + hull_mins, ct + hull_maxs));
         assert!(!map.can_see(ct, t + hull_mins, t + hull_maxs));
         assert!(!map.can_see(t, ct + hull_mins, ct + hull_maxs));
+    }
+
+    fn real_map(name: &str) -> Option<(Arc<BspMap>, ServerMap)> {
+        let vfs = Vfs::discover(None, VfsConfig::default()).ok()?;
+        let raw = vfs.read_bytes(&format!("maps/{name}.bsp")).ok()?;
+        let bsp = Arc::new(BspMap::load(&vfs, name).expect("map parses"));
+        let map = ServerMap::from_bsp(name, &raw, bsp.clone()).expect("valid BSP header");
+        Some((bsp, map))
+    }
+
+    fn dust2() -> Option<(Arc<BspMap>, ServerMap)> {
+        real_map("de_dust2")
+    }
+
+    #[test]
+    fn stub_map_hears_everything() {
+        let map = ServerMap::stub("de_test");
+        let far = Vec3::splat(1.0e5);
+        assert!(map.can_hear(Vec3::ZERO, far - 16.0, far + 16.0));
+    }
+
+    #[test]
+    fn pas_is_a_superset_of_pvs() {
+        let Some((bsp, map)) = dust2() else {
+            return;
+        };
+        let vis_leafs = bsp.models[0].vis_leafs as usize;
+        assert!(vis_leafs > 200);
+        let (mut seen, mut heard_only) = (0u64, 0u64);
+        for i in 0..200usize {
+            let from = 1 + (i * 7919) % vis_leafs;
+            let pvs = bsp.decompress_pvs(from);
+            for n in (0..vis_leafs).filter(|&n| pvs[n]) {
+                seen += 1;
+                assert_eq!(map.pas_leaf_audible(from, n + 1), Some(true), "leaf {from} sees {}", n + 1);
+            }
+            heard_only += (0..vis_leafs)
+                .filter(|&n| !pvs[n] && map.pas_leaf_audible(from, n + 1) == Some(true))
+                .count() as u64;
+        }
+        assert!(seen > 0);
+        assert!(heard_only > 0, "the PAS must reach beyond the PVS");
+    }
+
+    #[test]
+    fn pas_memory_is_bounded() {
+        for name in ["de_dust2", "cs_office"] {
+            let Some((bsp, map)) = real_map(name) else {
+                continue;
+            };
+            let leafs = bsp.leafs.len();
+            let (bytes, or_rows) = map.pas_size().expect("the map has visibility data");
+            assert!(bytes <= leafs * leafs.div_ceil(8), "{name}: {bytes} bytes for {leafs} leafs");
+            println!("{name} PAS: {leafs} leafs, {bytes} bytes, {or_rows} row ORs");
+        }
     }
 }
