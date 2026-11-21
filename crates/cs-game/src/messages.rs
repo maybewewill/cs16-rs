@@ -15,7 +15,7 @@
 //! `InitHUD`'s "entered the game" log line (`UTIL_LogPrintf`) is not ported.
 //!
 //! Not sent yet, with the task that sends them: `Fog` (no `env_fog` entity yet), `HLTV` and
-//! `SVC_INTERMISSION` (no HLTV, no game over; rounds), `BombDrop` and the defuser icon of
+//! (no HLTV; `SVC_INTERMISSION` is sent by the round rules), `BombDrop` and the defuser icon of
 //! `InitHUD` (bomb), `HostagePos`/`Scenario` (hostages), `Account`/`HealthInfo` (they exist
 //! only in the newest builds, `BUILD_LATEST`: vanilla does not register them), the career
 //! messages (`CZCareer`, Condition Zero only).
@@ -319,7 +319,7 @@ fn radar(eng: &mut EngineApi<'_>, dest_slot: u8, index: u8, origin: Vec3) {
 }
 
 /// `gmsgMoney` to `slot`: the account, no flash (`UpdateClientData` with `m_fInitHUD`).
-fn money(eng: &mut EngineApi<'_>, slot: u8, amount: i32) {
+pub(crate) fn money(eng: &mut EngineApi<'_>, slot: u8, amount: i32) {
     eng.send_usermsg(
         MsgDest::One(slot),
         &CsUserMsg::Money {
@@ -356,10 +356,16 @@ fn set_scoreboard_attributes(g: &GameState, eng: &mut EngineApi<'_>, slot: usize
     }
 }
 
-/// `gmsgRoundTime` to `slot` (`CBasePlayer::SyncRoundTimer`): the seconds left in the round.
-/// There are no rounds yet, so none (`GetRoundRemainingTimeReal` is 0).
-fn sync_round_timer(eng: &mut EngineApi<'_>, slot: u8) {
-    eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::RoundTime(0));
+/// `gmsgRoundTime` to `slot` (`CBasePlayer::SyncRoundTimer`): the seconds left on the round
+/// clock (`GetRoundRemainingTimeReal`, which is `GetRoundRemainingTime` in vanilla), or 0 when
+/// it has run out. The freeze period counts down the freeze time. (The bomb and career
+/// additions of the original are not ported.)
+pub(crate) fn sync_round_timer(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    let remaining = g.rules.round_remaining(eng.time()).max(0.0);
+    eng.send_usermsg(
+        MsgDest::One(slot),
+        &CsUserMsg::RoundTime(remaining.min(f64::from(u16::MAX)) as u16),
+    );
 }
 
 /// `gmsgReceiveW` (`CBasePlayer::SendWeatherInfo`): 1 for a map with rain, 2 for snow.
@@ -418,8 +424,7 @@ fn send_motd(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) {
 
 /// `CHalfLifeMultiplay::InitHUD` for the player of `slot`, who has just entered: the game mode,
 /// the scoreboard (everyone's score and team), the team scores, the MOTD and the spectator
-/// rules. Without a game over (`SVC_INTERMISSION`) and a dropped or planted bomb, which come
-/// with the rounds and the bomb.
+/// rules. Without a dropped or planted bomb, which comes with the bomb.
 fn init_hud(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let Some(me) = g.players.get(usize::from(slot)).and_then(Option::as_ref) else {
         return;
@@ -467,6 +472,10 @@ fn init_hud(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) {
         u8::from(eng.cvar_f32("mp_fadetoblack") == 1.0),
     ];
     send_raw(eng, MsgDest::One(slot), "ForceCam", &force_cam);
+    // A player that enters while the scoreboard is up sees it too.
+    if g.rules.game_over() {
+        eng.send(MsgDest::One(slot), &[cs_proto48::messages::svc::INTERMISSION]);
+    }
 
     for (i, other) in g.players.iter().enumerate() {
         let Some(other) = other else { continue };
@@ -508,7 +517,7 @@ pub(crate) fn update_client_data(g: &mut GameState, eng: &mut EngineApi<'_>, slo
         let account = g.players[index].as_ref().map_or(0, |p| p.money);
         money(eng, slot, account);
         set_bomb_icon(g, eng, slot);
-        sync_round_timer(eng, slot);
+        sync_round_timer(g, eng, slot);
         send_weather_info(eng, slot);
         team_score(eng, slot, Team::Ct, g.num_ct_wins);
         team_score(eng, slot, Team::Terrorist, g.num_terrorist_wins);

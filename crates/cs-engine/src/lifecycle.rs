@@ -134,6 +134,7 @@ impl<G: GameDll> Server<G> {
     ///
     /// [`frame`]: Server::frame
     pub fn change_map(&mut self, map: ServerMap) {
+        self.outbox.change_level = None;
         self.with_game(|game, eng| game.server_deactivate(eng));
         for (client, view) in self.clients.iter_mut().zip(&mut self.views) {
             client.put_in_server = false;
@@ -157,6 +158,14 @@ impl<G: GameDll> Server<G> {
             client.restart_signon(now);
             client.chan.write_reliable(reconnect.as_slice());
         }
+    }
+
+    /// The map the game asked to change to with `EngineApi::change_level` since the last call,
+    /// if any (the name is already validated). The caller loads it and calls
+    /// [`change_map`](Self::change_map), as for the console's `changelevel`; the request is
+    /// forgotten here whether or not the map loads.
+    pub fn take_pending_change_level(&mut self) -> Option<String> {
+        self.outbox.change_level.take()
     }
 
     /// Releases the client in `slot`, sending it `svc_disconnect(reason)` at the end of the

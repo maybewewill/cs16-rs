@@ -166,6 +166,7 @@ fn start(args: &[String]) -> Result<(), String> {
     } else {
         let mut game = CsGame::new();
         game.load_motd(&vfs);
+        game.load_map_cycle(&vfs);
         serve(&opts, &vfs, map, game, "CsGame")
     }
 }
@@ -214,6 +215,10 @@ fn serve<G: GameDll>(
         // was created, just before this loop) plus one frame makes the first `frametime` one
         // frame long instead of about 0, and later frames get their real elapsed time.
         server.frame(&mut net, clock.now() + FRAME_SECS);
+        // A map change the game asked for (`CHANGE_LEVEL`), done as the console's `changelevel`.
+        if let Some(name) = server.take_pending_change_level() {
+            change_level(&mut load_map, &mut server, &name);
+        }
         // `shutdown` has already sent every farewell, so there is nothing left to run a frame
         // for.
         if run_console(&mut server, &mut net, &mut load_map, &commands, &interrupted) {

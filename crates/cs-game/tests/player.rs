@@ -89,8 +89,9 @@ fn spawned_player_has_regamedll_defaults() {
     assert_eq!(v.health, 100.0);
     assert_eq!(v.deadflag, DEAD_NO);
     assert_eq!((v.solid, v.movetype), (SOLID_SLIDEBOX, MOVETYPE_WALK));
-    // `ResetMaxSpeed` with no active item.
-    assert_eq!(v.max_speed, 240.0);
+    // `ResetMaxSpeed`: nobody moves during the freeze period a map starts in (240 with no
+    // active item once the round runs: `tests/rounds.rs`).
+    assert_eq!(v.max_speed, 1.0);
     assert_eq!(v.fov, 90.0);
     assert_eq!(v.effects, 0);
     assert_ne!(v.modelindex, 0);
@@ -458,7 +459,8 @@ fn client_data_reflects_the_player() {
     b.run(|game, eng| game.spawn_player(eng, 0, Team::Ct, 0));
     let data = b.run(|game, eng| game.update_client_data(eng, 0));
     assert_eq!(data.health, 100.0);
-    assert_eq!(data.maxspeed, 240.0);
+    // The map starts in its freeze period.
+    assert_eq!(data.maxspeed, 1.0);
     assert_eq!(data.fov, 90.0);
     assert_eq!(data.deadflag, DEAD_NO);
     assert_eq!(data.view_ofs.z, 17.0);
@@ -571,9 +573,14 @@ fn a_spawner_does_not_telefrag_itself_or_the_dead() {
 #[test]
 fn a_dead_player_leaves_a_corpse() {
     let mut b = Bench::stub(stub_spawns());
-    b.run(|game, eng| {
+    // A teammate stays alive, or the death would end the round and the next round would bring
+    // the dead player back.
+    b.enter_second_client();
+    let spawn_x = b.run(|game, eng| {
         game.spawn_player(eng, 0, Team::Ct, 4);
+        game.spawn_player(eng, 1, Team::Ct, 0);
         game.client_command(eng, 0, &["kill".to_string()]);
+        eng.ent(eng.client_edict(0)).unwrap().origin.x
     });
     let corpses = |b: &Bench| {
         b.messages()
@@ -605,5 +612,5 @@ fn a_dead_player_leaves_a_corpse() {
     };
     assert_eq!((model.as_str(), *team, *player_id), ("gign", 2, 1));
     // The body is where the player died: `origin` is the position times 128.
-    assert_eq!(origin[0], 300 * 128);
+    assert_eq!(origin[0], (spawn_x * 128.0) as i32);
 }

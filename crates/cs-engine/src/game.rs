@@ -39,6 +39,9 @@ pub(crate) struct Outbox {
     /// Messages `EngineApi::send` dropped because a target's buffer already held more than
     /// `MAX_RELIABLE_BACKLOG` bytes; the server adds them to `NetStats::outbox_dropped`.
     pub(crate) dropped: u64,
+    /// The map the game asked to change to (`EngineApi::change_level`); the server's owner takes
+    /// it between frames (`Server::take_pending_change_level`).
+    pub(crate) change_level: Option<String>,
 }
 
 impl Outbox {
@@ -53,6 +56,7 @@ impl Outbox {
             init_open: false,
             light_styles: default_light_styles(),
             dropped: 0,
+            change_level: None,
         }
     }
 
@@ -184,6 +188,19 @@ impl EngineApi<'_> {
         self.clients
             .get(usize::from(slot))
             .is_some_and(|c| c.active)
+    }
+
+    /// `CHANGE_LEVEL`: asks the server to switch to map `map`. The engine does not load maps
+    /// itself: the request waits for the server's owner, who loads the map and calls
+    /// `Server::change_map` (see `Server::take_pending_change_level`). A name the console's
+    /// `changelevel` would refuse (see [`valid_map_name`](crate::valid_map_name)) is ignored and
+    /// `false` is returned; a later valid request replaces an earlier one.
+    pub fn change_level(&mut self, map: &str) -> bool {
+        if !crate::console::valid_map_name(map) {
+            return false;
+        }
+        self.outbox.change_level = Some(map.to_string());
+        true
     }
 }
 

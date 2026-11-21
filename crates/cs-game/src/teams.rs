@@ -9,7 +9,7 @@
 //! A player enters [`JoinState::ShowLText`], goes on to [`JoinState::ShowTeamSelect`] (the
 //! level text is not shown), gets the team menu and waits in [`JoinState::PickingTeam`] until it
 //! has picked a team and an appearance; then [`JoinState::GetIntoGame`] spawns it, or, when the
-//! rules do not let it spawn yet ([`can_spawn_now`]), leaves it watching. [`pre_think`] runs the
+//! rules do not let it spawn yet ([`rules::can_respawn`]), leaves it watching. [`pre_think`] runs the
 //! per-player part of `PlayerThink` and `JoiningThink` from the player's commands, as the
 //! original does from `PlayerPreThink`: the engine only runs commands of a client that is in
 //! the game, so no menu is sent to a client still signing on.
@@ -20,9 +20,7 @@
 //! - The team counts (`m_iNumCT`, `m_iNumTerrorist`) are taken from the players when asked,
 //!   not from the cache `CheckWinConditions` refreshes.
 //!
-//! Left for later tasks: the round rules ([`can_spawn_now`], [`is_freeze_period`],
-//! `CheckWinConditions`, the team balance of `mp_autoteambalance`, which only runs at the end
-//! of a round, and the round wins `SelectDefaultTeam` weighs), the observer ([`start_observer`]),
+//! Left for later tasks: the observer ([`start_observer`]),
 //! the VIP (`jointeam 3` is refused: no map has a VIP safety zone yet), the items a player
 //! drops or loses on a team change, the `Location` and radar messages, the career mode and the
 //! bots. `mp_teamlist` is not part of Counter-Strike's game library.
@@ -41,6 +39,7 @@ use crate::menus::{
 };
 use crate::messages;
 use crate::player::{DEAD_DEAD, Team, apply_model, kill, spawn, start_money};
+use crate::rules;
 use crate::world::{CT_SPAWN_CLASS, T_SPAWN_CLASS};
 
 /// `ChooseTeamMenuSlot` (`client.h`): what `jointeam` and the team menu's keys mean.
@@ -87,29 +86,11 @@ pub fn team_name(team: Team) -> &'static str {
 }
 
 /// The player's name for the notices (`netname`), or what the original prints for none.
-fn player_name(eng: &EngineApi<'_>, slot: u8) -> String {
+pub(crate) fn player_name(eng: &EngineApi<'_>, slot: u8) -> String {
     match eng.client_key(slot, "name") {
         Some(name) if !name.is_empty() => name.to_string(),
         _ => "<unconnected>".to_string(),
     }
-}
-
-/// Whether the round is in its freeze period (`IsFreezePeriod`). The rounds are a later task: no
-/// round has a freeze period yet.
-fn is_freeze_period(_g: &GameState) -> bool {
-    false
-}
-
-/// `CHalfLifeMultiplay::FPlayerCanRespawn`, the rule that decides whether a player that has
-/// just picked its appearance spawns now or watches until the next round: a player may not
-/// spawn while it is in the appearance menu; once the rounds exist this also holds back a
-/// player whose team plays a round that is more than `GetRoundRespawnTime` old, or who has
-/// already spawned in it (`m_iNumSpawns`). With no rounds the answer depends on the menu only.
-pub(crate) fn can_spawn_now(g: &GameState, slot: u8) -> bool {
-    g.players
-        .get(usize::from(slot))
-        .and_then(Option::as_ref)
-        .is_some_and(|p| p.menu != Menu::ChooseAppearance)
 }
 
 /// The number of entities of `class` (`UTIL_CountEntities`).
@@ -124,7 +105,7 @@ fn count_entities(eng: &EngineApi<'_>, class: &str) -> usize {
 }
 
 /// The players of `team` that are in the game (`m_iNumCT`, `m_iNumTerrorist`).
-fn count_team_players(g: &GameState, team: Team) -> usize {
+pub(crate) fn count_team_players(g: &GameState, team: Team) -> usize {
     g.players
         .iter()
         .flatten()
@@ -201,7 +182,7 @@ fn select_default_team(g: &mut GameState, eng: &EngineApi<'_>) -> Option<Team> {
 /// `TeamInfo` of the player of `slot` to everyone, then its `ScoreAttrib` to every player
 /// (`CBasePlayer::TeamChangeUpdate`, `SetScoreboardAttributes`; only the dead flag: the bomb
 /// and the VIP come later).
-fn team_change_update(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) {
+pub(crate) fn team_change_update(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let Some(p) = g.players.get(usize::from(slot)).and_then(Option::as_ref) else {
         return;
     };
@@ -365,7 +346,7 @@ fn joining_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
 }
 
 /// `CBasePlayer::GetIntoGame`: the player is in the game; it spawns when the rules allow
-/// ([`can_spawn_now`]), else it watches until the next round.
+/// ([`rules::can_respawn`]), else it watches until the next round.
 fn get_into_game(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let Some(p) = g
         .players
@@ -377,8 +358,9 @@ fn get_into_game(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     p.not_killed = false;
     p.joining = JoinState::Joined;
     let (team, class) = (p.team, p.class);
-    if can_spawn_now(g, slot) {
+    if rules::can_respawn(g, eng, slot) {
         spawn(g, eng, slot, team, class);
+        rules::check_win_conditions(g, eng);
         return;
     }
     // Watching until the next round.
@@ -389,6 +371,7 @@ fn get_into_game(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
         v.flags |= FL_SPECTATOR | FL_CLIENT;
     }
     start_observer(eng, slot);
+    rules::check_win_conditions(g, eng);
     eng.send_usermsg(
         MsgDest::All,
         &CsUserMsg::TeamInfo {
@@ -570,7 +553,7 @@ fn choose_spectator(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) -> boo
         eng.stufftext(slot, "slot10\n");
         return false;
     }
-    let freeze = is_freeze_period(g);
+    let freeze = g.rules.is_freeze_period();
     let Some(p) = g.players.get(usize::from(slot)).and_then(Option::as_ref) else {
         return false;
     };
@@ -651,13 +634,17 @@ pub(crate) fn handle_menu_choose_appearance(
     if !p.team.plays() {
         return;
     }
-    // `CheckWinConditions` for a player already in the game comes with the rounds.
+    let joined = p.joining == JoinState::Joined;
     if p.joining == JoinState::PickingTeam {
         p.joining = JoinState::GetIntoGame;
     }
     p.class = class;
     let team = p.team;
     apply_model(eng, slot, team, class);
+    // A player already in the game changes the count of the players that may spawn.
+    if joined {
+        rules::check_win_conditions(g, eng);
+    }
 }
 
 /// The `jointeam` command: join the team of `argv[1]` (1 terrorists, 2 counter-terrorists, 5 a
@@ -702,7 +689,7 @@ pub(crate) fn join_class(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, a
 /// The `chooseteam` command: the team menu of a player in the game. The spectators' key is
 /// offered while the player is dead or in the freeze period.
 pub(crate) fn choose_team(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
-    let freeze = is_freeze_period(g);
+    let freeze = g.rules.is_freeze_period();
     let Some(p) = g
         .players
         .get_mut(usize::from(slot))

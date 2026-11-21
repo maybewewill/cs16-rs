@@ -278,3 +278,44 @@ pub fn dust2(vfs: &Vfs) -> ServerMap {
     let raw = vfs.read_bytes("maps/de_dust2.bsp").expect("read de_dust2");
     ServerMap::from_bsp("de_dust2", &raw, Arc::new(bsp)).expect("BSP header")
 }
+
+/// Runs the console command `line` as the player of `slot`, at the start of the next frame, with
+/// two commands with time in them (the game's per-player logic runs from the commands), then
+/// lets the probe read what the game sent.
+pub fn command(b: &mut Bench, slot: u8, line: &str) {
+    let argv: Vec<String> = line.split_whitespace().map(str::to_string).collect();
+    b.run(move |game, eng| {
+        game.client_command(eng, slot, &argv);
+        commands_of(game, eng, slot, 2);
+    });
+    b.step(3);
+}
+
+/// `n` commands with time in them from the player of `slot` (the probe of slot 0 sends its own
+/// every frame with `idle_cmds`; the other slots have no client).
+pub fn commands_of(game: &mut CsGame, eng: &mut EngineApi<'_>, slot: u8, n: usize) {
+    for _ in 0..n {
+        let cmd = GoldSrcUserCmd {
+            msec: 10,
+            ..Default::default()
+        };
+        game.run_usercmd(eng, slot, &cmd, 0);
+    }
+}
+
+/// Puts a player in `slot` and lets it reach the team menu.
+pub fn enter(b: &mut Bench, slot: u8) {
+    b.run(move |game, eng| {
+        game.client_put_in_server(eng, slot);
+        commands_of(game, eng, slot, 3);
+    });
+    b.step(2);
+}
+
+/// The player of `slot` picks `team_choice` (1 terrorists, 2 counter-terrorists) and then
+/// appearance `class`.
+pub fn join(b: &mut Bench, slot: u8, team_choice: u8, class: u8) {
+    command(b, slot, &format!("jointeam {team_choice}"));
+    command(b, slot, &format!("joinclass {class}"));
+    b.step(2);
+}

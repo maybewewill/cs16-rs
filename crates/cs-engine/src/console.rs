@@ -73,7 +73,11 @@ fn output(text: impl Into<String>) -> ConsoleOutcome {
     ConsoleOutcome::Output(text.into())
 }
 
-fn valid_map_name(name: &str) -> bool {
+/// Whether `name` is a map name `changelevel`, `map` and [`EngineApi::change_level`] accept:
+/// 1 to 64 characters, each a letter, digit, `_` or `-`.
+///
+/// [`EngineApi::change_level`]: crate::EngineApi::change_level
+pub fn valid_map_name(name: &str) -> bool {
     (1..=MAX_MAP_NAME).contains(&name.chars().count())
         && name
             .chars()

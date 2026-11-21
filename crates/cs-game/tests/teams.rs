@@ -70,6 +70,13 @@ fn bench(map: Vec<cs_assets::bsp::Entity>, slots: u8) -> Bench {
     b
 }
 
+/// Runs the map's first freeze period out (it lasts `mp_freezetime` and two seconds from the
+/// start of the map), so a round is being played.
+fn end_freeze(b: &mut Bench) {
+    b.step(800);
+    assert!(!b.server.game().game.state().rules.is_freeze_period());
+}
+
 fn is_team_menu(m: &CsUserMsg, keys: u16) -> bool {
     matches!(m, CsUserMsg::VguiMenu { menu_id: 2, keys_bitmask, time: -1, multipart: false, name }
         if *keys_bitmask == keys && name == " ")
@@ -217,8 +224,9 @@ fn jointeam_then_joinclass_spawns_on_the_team() {
         }
     )));
 
-    // And it walks.
-    let start = v.origin;
+    // And it walks, once the freeze period (in which nobody moves) is over.
+    end_freeze(&mut b);
+    let start = b.run(|_, eng| eng.ent(eng.client_edict(0)).unwrap().origin);
     for _ in 0..100 {
         b.probe.queue_cmd(GoldSrcUserCmd {
             msec: 10,
@@ -498,6 +506,7 @@ fn spectators() {
     // A living player may not watch (outside the freeze period).
     let mut b = bench(spawns(3, 3), 2);
     join(&mut b, 0, 1, 1);
+    end_freeze(&mut b);
     b.run(|game, _| game.state_mut().players[0].as_mut().unwrap().frags = 3);
     b.probe.clear_messages();
     command(&mut b, 0, "jointeam 6");
@@ -523,6 +532,7 @@ fn spectators() {
 fn chooseteam_shows_the_in_game_menu() {
     let mut b = bench(spawns(3, 3), 2);
     join(&mut b, 0, 2, 1);
+    end_freeze(&mut b);
     b.probe.clear_messages();
     command(&mut b, 0, "chooseteam");
     b.step(2);

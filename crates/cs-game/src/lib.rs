@@ -5,12 +5,14 @@
 //! This is the foundation: the entity registry ([`entity`]), the world and the static entities
 //! of a map ([`world`]) and [`CsGame`], which dispatches the engine's calls to the entities. The
 //! players are in [`player`]: their lifecycle, damage, death and movement; [`teams`] and [`menus`]
-//! take them from the team menu into the game.
+//! take them from the team menu into the game, and [`rules`] runs the rounds, the match and the
+//! map cycle (`CHalfLifeMultiplay`).
 
 pub mod entity;
 pub mod menus;
 mod messages;
 pub mod player;
+pub mod rules;
 pub mod teams;
 pub mod world;
 
@@ -44,6 +46,13 @@ pub struct GameState {
     pub num_terrorist_wins: i32,
     /// `m_iNumCTWins`: the rounds the counter-terrorists have won, for `TeamScore`.
     pub num_ct_wins: i32,
+    /// The state of the round rules (`CHalfLifeMultiplay`); new for every map.
+    pub rules: rules::Rules,
+    /// `mapcycle.txt`: the maps the match goes through. Outlives the map ([`CsGame::load_map_cycle`]).
+    pub map_cycle: rules::MapCycle,
+    /// How many players have entered the server since the game started (the user id the team
+    /// balance orders by).
+    pub(crate) join_counter: u32,
     /// State of the game's own random numbers (`RANDOM_LONG`).
     rng: u32,
     /// Every call the dispatch delivered to a `test_dispatch` entity. For tests only (feature
@@ -64,6 +73,9 @@ impl GameState {
             motd: Vec::new(),
             num_terrorist_wins: 0,
             num_ct_wins: 0,
+            rules: rules::Rules::default(),
+            map_cycle: rules::MapCycle::default(),
+            join_counter: 0,
             rng: 0x2545_f491,
             #[cfg(feature = "test-hooks")]
             dispatch_log: Vec::new(),
@@ -84,6 +96,9 @@ impl GameState {
         self.ladders.clear();
         self.last_ct_spawn = None;
         self.last_t_spawn = None;
+        self.num_terrorist_wins = 0;
+        self.num_ct_wins = 0;
+        self.rules = rules::Rules::default();
     }
 }
 
@@ -121,6 +136,12 @@ impl CsGame {
                 Vec::new()
             }
         };
+    }
+
+    /// Reads the map cycle, `mapcycle.txt`, through `vfs` (see [`rules::MapCycle::load`]); the
+    /// match asks for the next map of it when it ends.
+    pub fn load_map_cycle(&mut self, vfs: &cs_vfs::Vfs) {
+        self.state.map_cycle = rules::MapCycle::load(vfs);
     }
 
     pub fn state(&self) -> &GameState {
@@ -206,9 +227,11 @@ impl GameDll for CsGame {
         messages::link_user_messages()
     }
 
-    /// Every entity of the map has spawned: finds the ladders.
+    /// Every entity of the map has spawned: finds the ladders and starts the rules of the map
+    /// (the freeze period before the first round).
     fn server_activate(&mut self, eng: &mut EngineApi<'_>) {
         self.state.ladders = world::ladder_bounds(eng);
+        self.state.rules = rules::Rules::new(eng);
     }
 
     fn server_deactivate(&mut self, _eng: &mut EngineApi<'_>) {
@@ -268,7 +291,10 @@ impl GameDll for CsGame {
         player::run_usercmd(&mut self.state, eng, slot, cmd);
     }
 
-    fn start_frame(&mut self, _eng: &mut EngineApi<'_>, _frametime: f32) {}
+    /// `CHalfLifeMultiplay::Think`: the clock of the round and the match.
+    fn start_frame(&mut self, eng: &mut EngineApi<'_>, _frametime: f32) {
+        rules::think(&mut self.state, eng);
+    }
 
     fn think(&mut self, eng: &mut EngineApi<'_>, id: EdictId) {
         with_entity(&mut self.state, eng, id, |entity, g, eng| {

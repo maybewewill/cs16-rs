@@ -321,3 +321,33 @@ fn hostile_console_input_is_harmless() {
     let said = prints(&a);
     assert!(said.iter().all(|t| t.len() <= MAX_CONSOLE_LINE + 16), "{}", said.len());
 }
+
+#[test]
+fn the_game_can_ask_for_a_map_change() {
+    let mut h = Harness::new(2);
+    assert_eq!(h.server.take_pending_change_level(), None);
+    let accepted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = std::rc::Rc::clone(&accepted);
+    h.server.game_mut().act(move |eng| {
+        let mut sink = sink.borrow_mut();
+        // Names the console's `changelevel` refuses are ignored and nothing is recorded.
+        for bad in ["", "../x", "a/b", "a b", "a.bsp", &"a".repeat(65)] {
+            sink.push(eng.change_level(bad));
+        }
+        sink.push(eng.change_level("de_dust2"));
+        // The last valid request wins.
+        sink.push(eng.change_level("cs_office"));
+        sink.push(eng.change_level("not/valid"));
+    });
+    h.step(&mut [], 1);
+    assert_eq!(
+        *accepted.borrow(),
+        [false, false, false, false, false, false, true, true, false]
+    );
+    assert_eq!(
+        h.server.take_pending_change_level(),
+        Some("cs_office".to_string())
+    );
+    // Taken once.
+    assert_eq!(h.server.take_pending_change_level(), None);
+}

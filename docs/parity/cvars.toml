@@ -94,7 +94,8 @@ status = "implemented"
 
 [[item]]
 id = "mp_autoteambalance"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-game/tests/rounds.rs::auto_team_balance_moves_the_last_to_join"
 
 [[item]]
 id = "mp_c4timer"
@@ -102,7 +103,8 @@ status = "implemented"
 
 [[item]]
 id = "mp_freezetime"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-game/tests/rounds.rs::freeze_time_holds_players_then_round_starts"
 
 [[item]]
 id = "mp_friendlyfire"
@@ -115,7 +117,8 @@ evidence = "crates/cs-game/tests/teams.rs::team_limits_refuse_as_regamedll"
 
 [[item]]
 id = "mp_roundtime"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-game/tests/rounds.rs::round_time_expiry_as_regamedll"
 
 [[item]]
 id = "mp_startmoney"
@@ -260,3 +263,37 @@ status = "implemented"
 [[item]]
 id = "mp_fadetoblack"
 status = "implemented"
+
+[[item]]
+id = "sv_restart"
+status = "tested"
+evidence = "crates/cs-game/tests/rounds.rs::restart_round_cvar"
+
+[[item]]
+id = "sv_restartround"
+status = "tested"
+evidence = "crates/cs-game/tests/rounds.rs::restart_round_cvar"
+
+[[item]]
+id = "mp_maxrounds"
+status = "tested"
+evidence = "crates/cs-game/tests/rounds.rs::the_match_ends_without_a_key_after_two_minutes"
+
+[[item]]
+id = "mp_winlimit"
+status = "tested"
+evidence = "crates/cs-game/tests/rounds.rs::win_limit_changes_the_map"
+
+[[item]]
+id = "mp_windifference"
+status = "implemented"
+
+[[item]]
+id = "mp_timelimit"
+status = "tested"
+evidence = "crates/cs-game/tests/rounds.rs::the_time_limit_ends_the_match"
+
+[[item]]
+id = "mp_chattime"
+status = "tested"
+evidence = "crates/cs-game/tests/rounds.rs::win_limit_changes_the_map"

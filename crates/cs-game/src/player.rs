@@ -24,8 +24,7 @@
 //! ## Known gaps
 //!
 //! Not ported yet, each a later task: weapons and the active item, the economy rewards
-//! (`AddAccount`), rounds (`CheckWinConditions`,
-//! `FPlayerCanRespawn`, the freeze period), the observer camera of the dead (`StartDeathCam`),
+//! (`AddAccount`), the observer camera of the dead (`StartDeathCam`),
 //! `Pain` sounds, flinch, the momentum block of `TakeDamage` (see [`take_damage`]), the blast
 //! branch of `TakeDamage`, the HUD damage message, armor (`Battery`, `ArmorType`) messages,
 //! animations and the VIP.
@@ -56,6 +55,7 @@ use glam::Vec3;
 use crate::GameState;
 use crate::menus::{self, Menu};
 use crate::messages;
+use crate::rules;
 use crate::teams::{self, JoinState};
 use crate::world::{select_join_spawn_point, select_spawn_point};
 
@@ -140,6 +140,10 @@ const DEFAULT_FOV: f32 = 90.0;
 /// The speed of a player with no active item (`CBasePlayer::ResetMaxSpeed`, ReGameDLL
 /// `player.cpp`); weapons set it themselves once they exist.
 const NO_ITEM_MAX_SPEED: f32 = 240.0;
+/// The speed of an observer (`ResetMaxSpeed`).
+const OBSERVER_MAX_SPEED: f32 = 900.0;
+/// The speed of a player during the freeze period (`ResetMaxSpeed`): it cannot move.
+const FROZEN_MAX_SPEED: f32 = 1.0;
 /// `MAX_MONEY_THRESHOLD`: the largest account (`CheckStartMoney` clamps `mp_startmoney`).
 const MAX_MONEY: i32 = 16000;
 /// Seconds between two suicides (`ClientKill`).
@@ -251,8 +255,16 @@ pub struct Player {
     pub joining: JoinState,
     /// `m_iMenu`: the menu the player is looking at.
     pub menu: Menu,
-    /// `m_bTeamChanged`: the player has picked a team since it entered the server.
+    /// `m_bTeamChanged`: the player has picked a team since the round began (the round restart
+    /// clears it).
     pub team_changed: bool,
+    /// `m_iNumSpawns`: how often the player has spawned in this round.
+    pub num_spawns: i32,
+    /// The order the players entered the server in (the user id of the original), for the team
+    /// balance, which moves the last to join.
+    pub(crate) join_order: u32,
+    /// The buttons of the player's previous command (`m_afButtonLast`).
+    pub(crate) last_buttons: u16,
     /// `m_bVGUIMenus`: the client's `_vgui_menus` (VGUI menus, else text ones).
     pub vgui_menus: bool,
     /// `m_fInitHUD`: the next client data update starts the HUD over (`ResetHUD`, the money, the
@@ -311,6 +323,9 @@ impl Player {
             joining: JoinState::ShowLText,
             menu: Menu::Off,
             team_changed: false,
+            num_spawns: 0,
+            join_order: 0,
+            last_buttons: 0,
             vgui_menus: true,
             init_hud: true,
             game_hud_initialized: false,
@@ -394,6 +409,8 @@ pub(crate) fn put_in_server(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8
     // `CheckStartMoney`: `mp_startmoney` clamped to the account's limits.
     let mut player = Player::new(start_money(eng));
     player.vgui_menus = prefers_vgui_menus(eng, slot);
+    g.join_counter += 1;
+    player.join_order = g.join_counter;
     g.players[index] = Some(player);
     let id = eng.client_edict(slot);
     let (origin, angles) = match select_join_spawn_point(g, eng, id, SpawnTeam::CounterTerrorist) {
@@ -456,6 +473,11 @@ pub(crate) fn userinfo_changed(g: &mut GameState, eng: &EngineApi<'_>, slot: u8)
 
 /// `ClientDisconnect`: the slot's player is gone and its edict inert.
 pub(crate) fn disconnect(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    if g.players.get(usize::from(slot)).is_none_or(Option::is_none) {
+        return;
+    }
+    // `CHalfLifeMultiplay::ClientDisconnected`: the round rules see the player go.
+    rules::on_disconnect(g, eng, slot);
     let Some(entry) = g.players.get_mut(usize::from(slot)) else {
         return;
     };
@@ -568,7 +590,6 @@ pub(crate) fn spawn(
     }
     eng.set_client_key(slot, "model", model_name(team, class));
     if let Some(v) = eng.ent_mut(id) {
-        v.max_speed = NO_ITEM_MAX_SPEED;
         v.solid = SOLID_SLIDEBOX;
         v.movetype = MOVETYPE_WALK;
         v.health = 100.0;
@@ -599,6 +620,10 @@ pub(crate) fn spawn(
     }
     eng.set_size(id, HULL_MIN, HULL_MAX);
     eng.set_origin(id, origin);
+    reset_max_speed(g, eng, slot);
+    if let Some(p) = g.players[index].as_mut() {
+        p.num_spawns += 1;
+    }
     if let Some(p) = g.players[index].as_ref() {
         messages::score_info(eng, id.index, p);
     }
@@ -608,10 +633,26 @@ pub(crate) fn spawn(
     true
 }
 
+/// `CBasePlayer::ResetMaxSpeed`, for a player with no weapon: 900 for an observer, 1 while the
+/// round is in its freeze period (nobody moves), else [`NO_ITEM_MAX_SPEED`]. The active item
+/// sets the speed of an armed player once weapons exist.
+pub(crate) fn reset_max_speed(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    let id = eng.client_edict(slot);
+    let freeze = g.rules.is_freeze_period();
+    if let Some(v) = eng.ent_mut(id) {
+        v.max_speed = if v.iuser1 != 0 {
+            OBSERVER_MAX_SPEED
+        } else if freeze {
+            FROZEN_MAX_SPEED
+        } else {
+            NO_ITEM_MAX_SPEED
+        };
+    }
+}
+
 /// `respawn()` (ReGameDLL `client.cpp`): spawns the player again on its team. The round rules
 /// call this when a round starts and, with `forcerespawn`, after a death; nothing respawns a
 /// dead player by itself. `false` when the player has no team that spawns.
-#[allow(dead_code)] // Called by the round rules, which come after this task.
 pub(crate) fn respawn_player(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) -> bool {
     let Some(p) = g.players.get(usize::from(slot)).and_then(Option::as_ref) else {
         return false;
@@ -643,6 +684,7 @@ pub(crate) fn run_usercmd(
     }
     // `PlayerPreThink`: the way into the game advances with the player's commands.
     teams::pre_think(g, eng, slot);
+    rules::player_think(g, slot, cmd.buttons);
     let Some(p) = g
         .players
         .get_mut(usize::from(slot))
@@ -984,7 +1026,7 @@ fn killer_weapon_name(
 ///
 /// Frags: a suicide costs one, killing a teammate costs one, killing an enemy gives one, the
 /// world (an attacker that is no player) changes none. The money rewards come with the
-/// economy, `CheckWinConditions` with the rounds.
+/// economy. A death ends with `CheckWinConditions` ([`rules`]).
 fn killed(
     g: &mut GameState,
     eng: &mut EngineApi<'_>,
@@ -1057,6 +1099,8 @@ fn killed(
         _ => "player/death6.wav",
     };
     eng.emit_sound(id, CHAN_VOICE, sample, 1.0, ATTN_NORM, PITCH_NORM);
+    // A team may be out of players now (`CheckWinConditions` of `Killed`).
+    rules::check_win_conditions(g, eng);
 }
 
 /// `CBasePlayer::PlayerDeathThink` for a dead player, every `DEATH_THINK_INTERVAL`: a body on

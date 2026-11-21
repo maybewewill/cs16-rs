@@ -93,6 +93,15 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     reg.register("mp_autoteambalance", "1", srv, "Move players between teams at the end of a round to even them out");
     reg.register("allow_spectators", "1.0", srv, "Players may join the spectators (0 or 1)");
     reg.register("humans_join_team", "any", srv, "Team humans must join: any, T or CT");
+    // ReGameDLL `game.cpp` (read 2026-11-22): the round and match rules. `mp_roundtime` and
+    // `mp_freezetime` are registered above (the legacy offline game reads them too).
+    reg.register("sv_restart", "0", srv, "Restart the round in this many seconds (the score is reset)");
+    reg.register("sv_restartround", "0", srv, "Restart the round in this many seconds (the score is reset)");
+    reg.register("mp_maxrounds", "0", srv, "Change the map after this many rounds (0 for no limit)");
+    reg.register("mp_winlimit", "0", srv, "Change the map when a team has won this many rounds (0 for no limit)");
+    reg.register("mp_windifference", "1", srv, "Rounds a team must lead by to win at the win limit");
+    reg.register("mp_timelimit", "0", srv, "Change the map after this many minutes (0 for no limit)");
+    reg.register("mp_chattime", "10", srv, "Seconds the scoreboard is shown when the map ends");
     // The cvars `InitHUD` sends to a joining client (ReGameDLL `game.cpp`, read 2026-11-22).
     reg.register("mp_forcecamera", "0", srv, "Dead players see through teammates only");
     reg.register("mp_forcechasecam", "0", srv, "Dead players follow their own team only");
