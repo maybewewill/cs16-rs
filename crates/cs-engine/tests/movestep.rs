@@ -21,7 +21,6 @@ use cs_engine::{EdictId, EngineApi, MOVE_NORMAL, ServerConfig, ServerMap, WalkMo
 use cs_vfs::{Vfs, VfsConfig};
 use glam::Vec3;
 
-
 /// Runs `f` as the game at the start of the next frame and returns what it returned.
 fn run<T: 'static>(h: &mut Harness, f: impl FnOnce(&mut EngineApi<'_>) -> T + 'static) -> T {
     let out = Rc::new(RefCell::new(None));
@@ -499,6 +498,15 @@ fn hostile_numbers_never_reach_a_flier() {
         assert!(!eng.walk_move(f, 0.0, 1.0e9, WalkMoveMode::CheckOnly));
         assert_eq!(origin(eng, f), before);
         assert_eq!(eng.ent(f).unwrap().absmin, linked);
+
+        // The height adjustment (+8 for an enemy above) can carry the move over the edge of
+        // the world: refused, nothing moves.
+        let (edge, _) = flier_with_enemy(eng, 131_071.0);
+        eng.set_origin(edge, Vec3::new(0.0, 0.0, 131_070.0));
+        let at_edge = origin(eng, edge);
+        assert_eq!(at_edge.z, 131_070.0);
+        assert!(!eng.walk_move(edge, 0.0, 1.0, WalkMoveMode::Normal));
+        assert_eq!(origin(eng, edge), at_edge);
 
         // A huge step through `move_to_origin` goes nowhere either.
         eng.move_to_origin(f, Vec3::new(100.0, 0.0, 100.0), 1.0e9, MOVE_NORMAL);

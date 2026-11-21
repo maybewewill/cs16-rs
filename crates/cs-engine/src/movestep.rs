@@ -230,10 +230,6 @@ impl EngineApi<'_> {
             .map(|e| e.vars.origin.z);
         for i in 0..2 {
             let mut neworg = origin + mv;
-            if !in_world(neworg) {
-                // A refused trace reads as a clear one; refuse the move itself.
-                return false;
-            }
             if i == 0
                 && let Some(enemy_z) = enemy_z
             {
@@ -243,6 +239,11 @@ impl EngineApi<'_> {
                 } else if dz < 30.0 {
                     neworg.z += 8.0;
                 }
+            }
+            if !in_world(neworg) {
+                // A refused trace reads as a clear one; refuse the move itself (after the
+                // height adjustment, which can carry it over the edge of the world).
+                return false;
             }
             let (t, _) = self.move_counted(
                 origin,
@@ -514,9 +515,9 @@ impl EngineApi<'_> {
 }
 
 /// The horizontal move of `dist` units along `yaw` degrees, computed in double as the source
-/// does. (Assumption, not checked: `M_PI` is a double there, so `M_PI * 2.0f` is not rounded to
-/// float; `SV_StepDirection` groups `yaw * (M_PI * 2.0f) / 360.0f` where this groups
-/// `yaw * 2.0 * M_PI / 360.0`, which can differ in the last bit of the double only.)
+/// does. ReHLDS `mathlib.h` (read 2026-11-21) has `M_PI` as a double and both
+/// `SV_StepDirection` and `PF_walkmove_I` compute in double, so `(yaw * 2) * PI` and
+/// `yaw * (2 * PI)` are the same number bit for bit.
 fn yaw_move(yaw: f32, dist: f32) -> Vec3 {
     let a = f64::from(yaw) * 2.0 * std::f64::consts::PI / 360.0;
     Vec3::new(
