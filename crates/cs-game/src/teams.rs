@@ -41,7 +41,7 @@ use crate::money;
 use crate::observer;
 use crate::player::{DEAD_DEAD, Team, apply_model, kill, spawn};
 use crate::rules;
-use crate::world::{CT_SPAWN_CLASS, T_SPAWN_CLASS};
+use crate::world::{self, CT_SPAWN_CLASS, T_SPAWN_CLASS};
 
 /// `ChooseTeamMenuSlot` (`client.h`): what `jointeam` and the team menu's keys mean.
 pub const MENU_SLOT_TEAM_TERRORIST: i32 = 1;
@@ -374,7 +374,7 @@ fn get_into_game(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
         v.flags &= FL_PROXY | FL_FAKECLIENT;
         v.flags |= FL_SPECTATOR | FL_CLIENT;
     }
-    start_observer(g, eng, slot);
+    start_observer(g, eng, slot, false);
     rules::check_win_conditions(g, eng);
     eng.send_usermsg(
         MsgDest::All,
@@ -388,19 +388,20 @@ fn get_into_game(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     }
 }
 
-/// `CBasePlayer::StartObserver` for a spectator, or a player that waits for the next round
-/// ([`observer::start_observer`]), where it stands and looking the way it looks (the original
-/// takes a spawn point's origin and angles from `GetPlayerSpawnSpot`).
-fn start_observer(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
-    let id = eng.client_edict(slot);
-    let (origin, angles) = eng
-        .ent(id)
-        .map_or((Vec3::ZERO, Vec3::ZERO), |v| (v.origin, v.angles));
-    if let Some(v) = eng.ent_mut(id) {
-        v.velocity = Vec3::ZERO;
-        v.punchangle = Vec3::ZERO;
-    }
-    observer::start_observer(g, eng, slot, origin, angles);
+/// `CBasePlayer::StartObserver` ([`observer::start_observer`]) at a spawn point of
+/// `GetPlayerSpawnSpot`. A player that joins the spectators (`HandleMenu_ChooseTeam`,
+/// `client.cpp`) is observed at the point's origin and angles; a player that waits for the next
+/// round (`GetIntoGame`, `player.cpp`) at its own origin, which `GetPlayerSpawnSpot` has just
+/// put one unit above the point, with the point's angles.
+fn start_observer(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, spectator: bool) {
+    let (spot_origin, spot_angles) = world::get_player_spawn_spot(g, eng, slot);
+    let origin = if spectator {
+        spot_origin
+    } else {
+        eng.ent(eng.client_edict(slot))
+            .map_or(spot_origin, |v| v.origin)
+    };
+    observer::start_observer(g, eng, slot, origin, spot_angles);
 }
 
 /// `HandleMenu_ChooseTeam` (`client.cpp`): the player of `slot` chose `choice` in the team menu.
@@ -608,7 +609,19 @@ fn choose_spectator(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) -> boo
         p.team_changed = true;
     }
     team_change_update(g, eng, slot);
-    start_observer(g, eng, slot);
+    start_observer(g, eng, slot, true);
+    // The original sends the `Spectator` message again, after the one `StartObserver` sent.
+    messages::send_raw(
+        eng,
+        MsgDest::All,
+        "Spectator",
+        &[(u16::from(slot) + 1) as u8, 1],
+    );
+    // With `mp_fadetoblack 1` the screen is faded back in: `UTIL_ScreenFade(pPlayer,
+    // Vector(0, 0, 0), 0.001, 0, 0, FFADE_IN)`.
+    if eng.cvar_f32("mp_fadetoblack") as i32 == observer::FADETOBLACK_STAY {
+        observer::screen_fade(eng, slot, 0.001, 0.0, 0, observer::FFADE_IN);
+    }
     true
 }
 

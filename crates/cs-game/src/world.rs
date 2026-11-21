@@ -195,7 +195,7 @@ const LIGHT_STYLES: [(u8, &str); 14] = [
 ];
 
 /// C `atof`: the number a string starts with, 0 when it starts with none.
-fn atof(text: &str) -> f32 {
+pub(crate) fn atof(text: &str) -> f32 {
     let text = text.trim_start();
     let mut end = 0;
     for (i, c) in text.char_indices() {
@@ -546,6 +546,57 @@ pub fn select_join_spawn_point(
     select_spawn_point_with(g, eng, player, team, false)
 }
 
+/// `CBasePlayer::EntSelectSpawnPoint` for a player on no team (a spectator, or one that has not
+/// picked): neither the counter-terrorists' nor the terrorists' branch applies, so it is the
+/// first `info_player_deathmatch`, which `ReturnSpot` records as the counter-terrorists' last
+/// spawn point (the player is not a terrorist). (ReGameDLL `player.cpp`, read 2026-11-22.)
+fn select_no_team_spawn_point(g: &mut GameState, eng: &EngineApi<'_>) -> Option<EdictId> {
+    let spot = eng.find_by_classname(None, T_SPAWN_CLASS);
+    match spot {
+        Some(spot) => g.last_ct_spawn = Some(spot),
+        None => tracing::error!("PutClientInServer: no info_player_start on level"),
+    }
+    spot
+}
+
+/// `CHalfLifeMultiplay::GetPlayerSpawnSpot` for the player of `slot` (ReGameDLL `gamerules.cpp`
+/// and `multiplay_gamerules.cpp`, read 2026-11-22): picks the spawn point of the player's team
+/// as it is now (`EntSelectSpawnPoint`, which kills the players standing on every point when
+/// all are taken) and puts the player there: origin one unit above the point, the view angles,
+/// velocity and punch zero, the angles the point's, `fixangle` 1. Returns the point's own origin
+/// and angles (the world's, zero, when the map has no point). The `target` of the point is
+/// not fired: there are no trigger entities yet.
+pub(crate) fn get_player_spawn_spot(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    slot: u8,
+) -> (Vec3, Vec3) {
+    let id = eng.client_edict(slot);
+    let team = g
+        .players
+        .get(usize::from(slot))
+        .and_then(Option::as_ref)
+        .map(|p| p.team);
+    let spot = match team.and_then(|t| t.spawn_team()) {
+        Some(spawn_team) => select_spawn_point(g, eng, id, spawn_team),
+        None => select_no_team_spawn_point(g, eng),
+    };
+    let (origin, angles) = spot
+        .and_then(|s| eng.ent(s))
+        .map_or((Vec3::ZERO, Vec3::ZERO), |v| (v.origin, v.angles));
+    let placed = origin + Vec3::new(0.0, 0.0, 1.0);
+    if let Some(v) = eng.ent_mut(id) {
+        v.origin = placed;
+        v.v_angle = Vec3::ZERO;
+        v.velocity = Vec3::ZERO;
+        v.angles = angles;
+        v.punchangle = Vec3::ZERO;
+        v.fixangle = 1;
+    }
+    eng.set_origin(id, placed);
+    (origin, angles)
+}
+
 fn select_spawn_point_with(
     g: &mut GameState,
     eng: &mut EngineApi<'_>,
@@ -582,6 +633,7 @@ mod tests {
         assert_eq!(atof("abc"), 0.0);
         assert_eq!(atof(""), 0.0);
         assert_eq!(atof("16 sky"), 16.0);
+        assert_eq!(atof("1x"), 1.0);
     }
 
     #[test]

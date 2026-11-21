@@ -16,23 +16,26 @@
 //! command, so that the engine sends it what the target sees (see
 //! [`setup_visibility`], `GameDll::setup_visibility`).
 //!
+//! Constants: `OBS_*` are `pm_shared.h`, `CAMERA_MODE_*` and `FADETOBLACK_*` `observer.h`,
+//! `FFADE_*` `engine/shake.h`, `HIDEHUD_*` `cdll_dll.h` (all read 2026-11-22);
+//! `UTIL_ScreenFade` is `util.h`/`util.cpp` (read 2026-11-22).
+//!
 //! Deviations and gaps:
-//! - `OBS_*`, `CAMERA_MODE_*`, `FADETOBLACK_STAY` and `FFADE_*` are the values of the Half-Life
-//!   SDK headers (assumption: the headers are not among the files fetched).
-//! - `MSG_PAS` (the `TE_KILLPLAYERATTACHMENTS` of [`start_observer`]) goes out as `MSG_PVS`: the
-//!   engine has no PAS multicast; the potentially audible set only differs at its edge.
 //! - The state the first-person view copies from the followed player (the progress bar, the
 //!   blindness, the night vision, the C4 and defuser icons, its weapon) has nothing to copy yet:
-//!   those players do not exist until the weapons and the bomb do. The messages that clear that
-//!   state when the mode changes are sent as the original sends them.
-//! - A spectator or a late joiner is put where it stands, not at a fresh spawn point
-//!   (`GetPlayerSpawnSpot` of `StartObserver`'s callers).
+//!   those players do not exist until the weapons, the bomb and the night vision do. The messages
+//!   that clear that state when the mode changes are sent as the original sends them.
+//! - `GetPlayerSpawnSpot` ([`crate::world::get_player_spawn_spot`]) does not fire the `target` of
+//!   the spawn point (the trigger entities do not exist yet; `spawn` skips it too).
 //! - The `mp_fadetoblack` of the dying player is the vanilla one: any value but 0 fades the
 //!   screen to black and does not follow the killer. The state the career mode, the bots and
 //!   the HLTV (`TheBots`, `MSG_SPEC`) keep is not ported.
 //! - The target an observer follows is a slot; the original keeps an `EHANDLE`. A target that left
 //!   is found out by [`check_target`] (a free slot), as the original finds out by
-//!   `UTIL_PlayerByIndex`.
+//!   `UTIL_PlayerByIndex`; a search then starts from the observer's own index, as with a null
+//!   handle.
+//! - Tracking mode copies the target's `angles` into the observer's `v_angle`
+//!   (assumption about `pmove->angles` after `PM_SpectatorMove`).
 
 use cs_engine::consts::{FL_DUCKING, MOVETYPE_NONE, SOLID_NOT};
 use cs_engine::{EdictId, EngineApi, MsgDest};
@@ -46,6 +49,7 @@ use crate::menus::{atoi, print_center};
 use crate::messages::send_raw;
 use crate::player::{DEAD_DEAD, DEAD_RESPAWNABLE, HIDEHUD_HEALTH, HIDEHUD_WEAPONS, Team};
 use crate::teams::player_name;
+use crate::world::atof;
 
 /// `OBS_*`: the observer modes (`pev->iuser1`).
 pub const OBS_NONE: i32 = 0;
@@ -62,8 +66,9 @@ pub const CAMERA_MODE_SPEC_ONLY_TEAM: i32 = 1;
 pub const CAMERA_MODE_SPEC_ONLY_FIRST_PERSON: i32 = 2;
 
 /// `mp_fadetoblack 1`: the screen of the dead stays black.
-const FADETOBLACK_STAY: i32 = 1;
-/// `FFADE_OUT` and `FFADE_STAYOUT` (`util.h`).
+pub(crate) const FADETOBLACK_STAY: i32 = 1;
+/// `FFADE_IN`, `FFADE_OUT` and `FFADE_STAYOUT` (`engine/shake.h`).
+pub(crate) const FFADE_IN: u16 = 0;
 const FFADE_OUT: u16 = 1;
 const FFADE_STAYOUT: u16 = 4;
 /// `UTIL_ScreenFade` writes the seconds as fixed point with 12 fractional bits.
@@ -188,6 +193,29 @@ fn set_target(g: &mut GameState, slot: u8, target: Option<u8>) {
     }
 }
 
+/// `UTIL_ScreenFade(player, Vector(0, 0, 0), fade_time, hold, alpha, flags)` (`util.cpp`): the
+/// seconds go out as fixed point with 12 fractional bits (`FixedUnsigned16`, clamped to 16
+/// bits), the colour is black.
+pub(crate) fn screen_fade(
+    eng: &mut EngineApi<'_>,
+    slot: u8,
+    fade_time: f32,
+    hold: f32,
+    alpha: u8,
+    flags: u16,
+) {
+    let fixed = |seconds: f32| (seconds * FADE_UNIT).clamp(0.0, 65535.0) as u16;
+    eng.send_usermsg(
+        MsgDest::One(slot),
+        &CsUserMsg::ScreenFade {
+            duration: fixed(fade_time),
+            hold_time: fixed(hold),
+            flags,
+            color: [0, 0, 0, alpha],
+        },
+    );
+}
+
 /// `UpdateClientEffects`: what the observer's screen shows of the player it followed in first
 /// person is taken away when the mode changes. (The progress bar, blindness and night vision of
 /// the followed player are not copied: see the module docs.)
@@ -200,16 +228,9 @@ fn update_client_effects(eng: &mut EngineApi<'_>, slot: u8, old_mode: i32) {
     // `SetProgressBarTime(0)`.
     eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::BarTime(0));
     if blindness_ok {
-        // `UTIL_ScreenFade(pObserver, Vector(0, 0, 0), 0.001)`: fade in, black, instantly.
-        eng.send_usermsg(
-            MsgDest::One(slot),
-            &CsUserMsg::ScreenFade {
-                duration: (0.001 * FADE_UNIT) as u16,
-                hold_time: 0,
-                flags: 0,
-                color: [0, 0, 0, 255],
-            },
-        );
+        // `UTIL_ScreenFade(pObserver, Vector(0, 0, 0), 0.001)`: the defaults of the rest, an
+        // alpha of 0 and no flags.
+        screen_fade(eng, slot, 0.001, 0.0, 0, FFADE_IN);
     }
     eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::NvgToggle(false));
 }
@@ -233,8 +254,13 @@ pub(crate) fn find_next_player(
     }
     p.obs.next_follow_time = now + FOLLOW_INTERVAL;
     let own_team = p.team;
-    let start = p.obs.target.map_or(index_of(slot), index_of);
+    let old_target = p.obs.target;
     p.obs.target = None;
+    // The old target that left is a null handle in the original: the search starts at the
+    // observer itself.
+    let start = old_target
+        .filter(|&t| g.players.get(usize::from(t)).is_some_and(Option::is_some))
+        .map_or(index_of(slot), index_of);
 
     let dir = if reverse { -1 } else { 1 };
     let same_team = force_camera(eng) != CAMERA_MODE_SPEC_ANYONE && own_team != Team::Spectator;
@@ -557,7 +583,7 @@ pub(crate) fn start_observer(
     };
     // Clear any clientside entities attached to this player.
     eng.send(
-        MsgDest::Pvs(current_origin),
+        MsgDest::Pas(current_origin),
         &[svc::TEMP_ENTITY, TE_KILLPLAYERATTACHMENTS, index_of(slot) as u8],
     );
     // Tell the ammo HUD that the player is dead (the weapon is holstered and the tank and the
@@ -635,15 +661,20 @@ pub(crate) fn killed(
         send_raw(eng, MsgDest::One(slot), "ADStop", &[]);
     } else {
         // `UTIL_ScreenFade(this, Vector(0, 0, 0), 3, 3, 255, FFADE_OUT | FFADE_STAYOUT)`.
-        eng.send_usermsg(
-            MsgDest::One(slot),
-            &CsUserMsg::ScreenFade {
-                duration: (3.0 * FADE_UNIT) as u16,
-                hold_time: (3.0 * FADE_UNIT) as u16,
-                flags: FFADE_OUT | FFADE_STAYOUT,
-                color: [0, 0, 0, 255],
-            },
-        );
+        screen_fade(eng, slot, 3.0, 3.0, 255, FFADE_OUT | FFADE_STAYOUT);
+    }
+    // The dead player's night vision goes off, and so does that of the observers that watch it
+    // in first person (`Killed`; there is no night vision state to clear yet).
+    eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::NvgToggle(false));
+    let victim_index = index_of(slot);
+    for observer in 0..g.players.len() as u8 {
+        let watching = g.players[usize::from(observer)].is_some()
+            && eng
+                .ent(eng.client_edict(observer))
+                .is_some_and(|v| v.iuser1 == OBS_IN_EYE && v.iuser2 == victim_index);
+        if watching {
+            eng.send_usermsg(MsgDest::One(observer), &CsUserMsg::NvgToggle(false));
+        }
     }
 }
 
@@ -767,18 +798,21 @@ fn roam(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, cmd: &GoldSrcUserC
     }
 }
 
-/// `SetupVisibility`: an observer that follows somebody sees the world from the eye of the
-/// followed player (lowered by 18 units when it ducks); otherwise from its own.
+/// `SetupVisibility`: the point a player sees the world from. An observer that follows somebody
+/// uses the followed player, anybody else (and an observer that roams) the player itself: its
+/// origin plus its view offset, 18 units lower when it ducks.
 pub(crate) fn setup_visibility(g: &GameState, eng: &EngineApi<'_>, slot: u8) -> Option<Vec3> {
     let p = g.players.get(usize::from(slot))?.as_ref()?;
-    let v = eng.ent(eng.client_edict(slot))?;
-    if v.iuser2 == 0 || !p.pflag_observer {
-        return None;
+    let own = eng.ent(eng.client_edict(slot))?;
+    let mut view = own;
+    if own.iuser2 != 0
+        && p.pflag_observer
+        && let Some(target) = current_target(g, slot)
+    {
+        view = eng.ent(eng.client_edict(target))?;
     }
-    let target = current_target(g, slot)?;
-    let tv = eng.ent(eng.client_edict(target))?;
-    let mut eye = tv.origin + tv.view_ofs;
-    if tv.flags & FL_DUCKING != 0 {
+    let mut eye = view.origin + view.view_ofs;
+    if view.flags & FL_DUCKING != 0 {
         eye.z += DUCK_EYE_DROP;
     }
     Some(eye)
@@ -837,7 +871,7 @@ pub(crate) fn command(
             }
         }
         "spec_set_ad" => {
-            let on = arg.trim().parse::<f32>().is_ok_and(|v| v > 0.0);
+            let on = atof(arg) > 0.0;
             if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
                 p.obs.auto_director = on;
             }

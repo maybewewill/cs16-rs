@@ -177,7 +177,7 @@ impl Team {
 
     /// The team of the spawn points a player of this team uses; `None` for a team that does not
     /// spawn.
-    fn spawn_team(self) -> Option<SpawnTeam> {
+    pub(crate) fn spawn_team(self) -> Option<SpawnTeam> {
         match self {
             Team::Terrorist => Some(SpawnTeam::Terrorist),
             Team::Ct => Some(SpawnTeam::CounterTerrorist),
@@ -967,11 +967,10 @@ pub(crate) fn take_damage(
     }
     if health <= 0.0 {
         killed(g, eng, slot, attacker, inflictor);
-        observer::notify_spec_health(g, eng, slot);
-        return false;
     }
+    // The observers that follow the player are told its health.
     observer::notify_spec_health(g, eng, slot);
-    true
+    health > 0.0
 }
 
 /// `CBasePlayer::Kill`: the player kills itself. `false` when it cannot (it has not joined).

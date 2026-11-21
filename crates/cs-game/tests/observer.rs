@@ -9,8 +9,9 @@ use cs_game::CsGame;
 use cs_game::observer::{
     OBS_CHASE_FREE, OBS_IN_EYE, OBS_MAP_FREE, OBS_NONE, OBS_ROAMING,
 };
-use cs_game::player::{DEAD_NO, dmg};
+use cs_game::player::{DEAD_NO, DEAD_RESPAWNABLE, dmg};
 use cs_proto48::delta::GoldSrcUserCmd;
+use cs_proto48::messages::SvcMessage;
 use cs_proto48::usermsg::CsUserMsg;
 use glam::Vec3;
 
@@ -50,7 +51,12 @@ fn unknown(msgs: &[CsUserMsg], name: &str) -> Vec<Vec<u8>> {
 /// and slot 1 on `Team::Ct`, slots 2 and 3 on `Team::Terrorist`. Four slots, so the round goes
 /// on while one of them dies.
 fn four_players() -> Bench {
-    let mut b = Bench::stub_slots(spawns(8, 8), 4);
+    players(4)
+}
+
+/// [`four_players`] on a server of `max_slots` slots.
+fn players(max_slots: u8) -> Bench {
+    let mut b = Bench::stub_slots(spawns(8, 8), max_slots);
     // The probe sends commands with time in them: the menus advance with the player's commands.
     b.idle_cmds = true;
     b.step(6);
@@ -127,9 +133,25 @@ fn dead_player_becomes_an_observer_after_the_death_cam() {
     // The ammo HUD is told the player is dead, once.
     let weapons = msgs
         .iter()
-        .filter(|m| matches!(m, CsUserMsg::CurWeapon { weapon_id: 0xFF, .. }))
+        .filter(|m| {
+            matches!(
+                m,
+                CsUserMsg::CurWeapon {
+                    is_active: false,
+                    weapon_id: 0xFF,
+                    clip_ammo: -1,
+                }
+            )
+        })
         .count();
     assert_eq!(weapons, 1);
+    // The dead player's night vision is turned off (`Killed`).
+    assert!(msgs.contains(&CsUserMsg::NvgToggle(false)));
+    // `TE_KILLPLAYERATTACHMENTS` (125) for the player, to those who can hear it.
+    assert!(b.probe.messages().iter().any(|m| matches!(
+        m,
+        SvcMessage::TempEntity { te_type: 125, raw } if raw.last() == Some(&1)
+    )));
 
     // It may now switch modes: `specmode 4` (first person) goes on with the player who killed
     // it, whom it was following until then (`m_hObserverTarget` outlives the death).
@@ -205,6 +227,16 @@ fn observer_follows_a_teammate_with_forcecamera() {
         game.client_command(eng, 0, &["specmode".into(), "4".into()]);
     });
     assert_eq!(vars(&mut b, 0).iuser1, OBS_IN_EYE);
+    b.step(3);
+    // Entering first person clears the follower's screen as `UTIL_ScreenFade(.., 0.001)` does:
+    // a duration of 4/4096 s, no hold, no flags, an alpha of 0.
+    assert!(b.messages().contains(&CsUserMsg::ScreenFade {
+        duration: 4,
+        hold_time: 0,
+        flags: 0,
+        color: [0, 0, 0, 0],
+    }));
+    assert!(b.messages().contains(&CsUserMsg::BarTime(0)));
     // What the followed player sees is what the follower is sent (here: that its origin is the
     // target's, `SetupVisibility` looks through the target's eye).
     let eye = b.run(|game, eng| game.setup_visibility(eng, 0));
@@ -238,6 +270,12 @@ fn spectator_team_roams() {
     assert_ne!(v.effects & 128, 0);
     assert_eq!((v.solid, v.movetype, v.view_ofs), (0, 0, Vec3::ZERO));
     assert_eq!(v.max_speed, 900.0);
+    // `GetPlayerSpawnSpot` for a player with no team: the first `info_player_deathmatch`
+    // (`spawns(3, 3)` has them at x = -100, -300, -500, looking along y 90); `StartObserver`
+    // takes the spot's origin and angles.
+    assert_eq!(v.origin, Vec3::new(-100.0, 0.0, 0.0));
+    assert_eq!(v.angles, Vec3::new(0.0, 90.0, 0.0));
+    assert_eq!(v.velocity, Vec3::ZERO);
     let before = v.origin;
 
     // A command that asks to go forward flies it forward, through anything, at no more than
@@ -324,11 +362,9 @@ fn observer_target_leaves() {
     pump(&mut b, 0, 60, 0, 0.0);
     let v = vars(&mut b, 0);
     assert_eq!((v.iuser1, v.iuser2), (OBS_ROAMING, 0));
-    // No stale target is looked through.
-    assert_eq!(
-        b.run(|game, eng| game.setup_visibility(eng, 0)),
-        None
-    );
+    // No stale target is looked through: it sees from its own eye, as every player does.
+    let eye = b.run(|game, eng| game.setup_visibility(eng, 0));
+    assert_eq!(eye, Some(v.origin + v.view_ofs));
 }
 
 /// What `UpdateClientData` hands the engine for a player in first person: the state of the
@@ -351,4 +387,105 @@ fn first_person_observer_is_sent_the_followed_players_state() {
     assert_eq!(data.origin, followed.origin);
     assert_eq!(data.health, followed.health);
     assert_eq!(data.view_ofs, followed.view_ofs);
+    // Every player is sent the world from its own eye (`SetupVisibility`), a follower from the
+    // one it follows.
+    let eyes = b.run(|game, eng| {
+        [
+            game.setup_visibility(eng, 1),
+            game.setup_visibility(eng, 0),
+            game.setup_visibility(eng, 9),
+        ]
+    });
+    let (mate, killer) = (vars(&mut b, 1), vars(&mut b, 2));
+    assert_eq!(eyes[0], Some(mate.origin + mate.view_ofs));
+    assert_eq!(eyes[1], Some(killer.origin + killer.view_ofs));
+    assert_eq!(eyes[2], None);
+}
+
+#[test]
+fn a_target_that_left_restarts_the_search_at_the_observer() {
+    let mut b = Bench::stub_slots(spawns(3, 3), 4);
+    enter(&mut b, 1);
+    command(&mut b, 1, "jointeam 6");
+    for (slot, team_choice) in [(0, 1), (2, 2), (3, 1)] {
+        if slot != 0 {
+            enter(&mut b, slot);
+        }
+        join(&mut b, slot, team_choice, 1);
+    }
+    pump(&mut b, 1, 30, 0, 0.0);
+    // Edict indexes: the observer is 2; it follows 3, then 4.
+    b.run(|game, eng| {
+        game.client_command(eng, 1, &["specmode".into(), "4".into()]);
+    });
+    assert_eq!(vars(&mut b, 1).iuser2, 3);
+    pump(&mut b, 1, 30, 0, 0.0);
+    b.run(|game, eng| {
+        game.client_command(eng, 1, &["follownext".into()]);
+    });
+    assert_eq!(vars(&mut b, 1).iuser2, 4);
+    // Player 4 leaves: the old handle is null, so the search goes on from the observer (index 2)
+    // to 3, not from the leaver around to 1.
+    b.run(|game, eng| game.client_disconnect(eng, 3));
+    pump(&mut b, 1, 60, 0, 0.0);
+    assert_eq!(vars(&mut b, 1).iuser2, 3);
+}
+
+#[test]
+fn a_late_joiner_watches_from_a_spawn_point() {
+    let mut b = players(5);
+    // More than 20 seconds into a round with both teams playing, nobody spawns any more.
+    b.step(3000);
+    enter(&mut b, 4);
+    join(&mut b, 4, 2, 1);
+    b.step(5);
+    let v = vars(&mut b, 4);
+    assert_eq!(v.deadflag, DEAD_RESPAWNABLE);
+    assert_ne!(v.iuser1, OBS_NONE);
+    assert_ne!(v.effects & 128, 0, "EF_NODRAW");
+    // `GetPlayerSpawnSpot` put it one unit above a counter-terrorist spawn point (`spawns(8, 8)`
+    // has them at x = 100, 300, ..., y 0, z 0, looking along y 90), and `StartObserver` kept
+    // that origin and took the point's angles.
+    assert_eq!((v.origin.y, v.origin.z), (0.0, 1.0));
+    assert!(v.origin.x > 0.0 && v.origin.x % 200.0 == 100.0, "{:?}", v.origin);
+    assert_eq!(v.angles, Vec3::new(0.0, 90.0, 0.0));
+}
+
+#[test]
+fn joining_the_spectators_with_fadetoblack_fades_the_screen_back_in() {
+    let mut b = Bench::stub_slots(spawns(3, 3), 2);
+    b.run(|_, eng| eng.set_cvar("mp_fadetoblack", "1"));
+    b.probe.clear_messages();
+    command(&mut b, 0, "jointeam 6");
+    let msgs = b.messages();
+    // `StartObserver` sends `Spectator` and so does `HandleMenu_ChooseTeam` after it.
+    assert_eq!(unknown(&msgs, "Spectator"), [vec![1, 1], vec![1, 1]]);
+    // `UTIL_ScreenFade(pPlayer, Vector(0, 0, 0), 0.001, 0, 0, FFADE_IN)`; with the screen held
+    // black the observer's own effects clear sends no blindness fade.
+    let fades: Vec<&CsUserMsg> = msgs
+        .iter()
+        .filter(|m| matches!(m, CsUserMsg::ScreenFade { .. }))
+        .collect();
+    assert_eq!(
+        fades,
+        [&CsUserMsg::ScreenFade {
+            duration: 4,
+            hold_time: 0,
+            flags: 0,
+            color: [0, 0, 0, 0],
+        }]
+    );
+}
+
+#[test]
+fn the_camera_cvars_default_to_vanilla() {
+    let mut b = Bench::stub_slots(spawns(1, 1), 2);
+    let values = b.run(|_, eng| {
+        [
+            eng.cvar_f32("mp_forcecamera"),
+            eng.cvar_f32("mp_forcechasecam"),
+            eng.cvar_f32("mp_fadetoblack"),
+        ]
+    });
+    assert_eq!(values, [0.0; 3]);
 }
