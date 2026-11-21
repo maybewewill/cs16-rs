@@ -39,6 +39,9 @@
 //!   bomb target only; the bomb targets are 2E, so no map has one yet and the purchase is
 //!   refused silently, as the original does on a map without one. The menu then has no defuser
 //!   key either. The terrorists' `defuser` alias says `#Alias_Not_Avail` as the original.
+//! - `BuyZoneIcon_Clear` is also called by `CBasePlayer::Disappear`, which only the escape
+//!   zone (`func_escapezone`, `triggers.cpp:2069`, 2E) calls; it has no caller here yet and
+//!   the 2E escape port must add the call.
 //! - `HintMessage("#Hint_use_nightvision")` (first night vision purchase) has no hint queue
 //!   behind it and is not sent, like the hints of [`crate::money`].
 //! - `m_bCTCantBuy`/`m_bTCantBuy` are never set by a vanilla multiplayer game and the VIP does
@@ -58,7 +61,7 @@ use crate::menus::{
     self, HUD_PRINTCENTER, MENU_KEY_0, MENU_KEY_1, MENU_KEY_2, MENU_KEY_3, MENU_KEY_4, MENU_KEY_5,
     MENU_KEY_6, MENU_KEY_7, MENU_KEY_8, Menu, VGUI_MENU_BUY_ITEM,
 };
-use crate::money::{self, MONEY_BLINK_AMOUNT};
+use crate::money;
 use crate::player::{ATTN_NORM, ArmorType, CHAN_ITEM, DEAD_NO, EF_NODRAW, PITCH_NORM, Team, player_slot};
 
 /// `SIGNAL_BUY` (`unisignals.h`): the player stands in a buy zone.
@@ -77,6 +80,9 @@ pub const MAX_NORMAL_BATTERY: f32 = 100.0;
 const OLD_BUY_ZONE_RADIUS: f32 = 200.0;
 /// Seconds between two runs of `HandleSignals`.
 const HANDLE_SIGNALS_INTERVAL: f64 = 0.5;
+/// The default `numBlinks` of `BlinkAccount` (`client.h:128`), which `BuyItem` calls it with
+/// (`client.cpp:1572`, `1617`). `MONEY_BLINK_AMOUNT` (30) is the tutor's.
+const BUY_BLINK_AMOUNT: u8 = 2;
 /// `ITEM_STATUS_NIGHTVISION` (`cdll_dll.h`).
 const ITEM_STATUS_NIGHTVISION: u8 = 1 << 0;
 
@@ -376,7 +382,7 @@ fn say(eng: &mut EngineApi<'_>, slot: u8, text: &str) {
 /// The player is not given what it asked for: `#Not_Enough_Money` and the account blinks.
 fn not_enough_money(eng: &mut EngineApi<'_>, slot: u8) {
     say(eng, slot, "#Not_Enough_Money");
-    money::blink_account(eng, slot, MONEY_BLINK_AMOUNT);
+    money::blink_account(eng, slot, BUY_BLINK_AMOUNT);
 }
 
 /// `SendItemStatus`: what the player carries that the HUD shows (the goggles, when
@@ -694,6 +700,9 @@ pub(crate) fn menuselect(
     menu: Menu,
     choice: i32,
 ) {
+    // The key counts are those of `BuyPistol` (1 to 5), `BuyShotgun` (1 to 2),
+    // `BuySubMachineGun` (1 to 4), `BuyRifle` (1 to 6) and `BuyMachineGun` (only 1) in
+    // `client.cpp:1177-1285`. Task 2D replaces the refusal with the purchase.
     let weapon_keys = match menu {
         Menu::Buy => {
             choose_buy_group(g, eng, slot, choice);

@@ -313,7 +313,7 @@ fn buy_armor_as_regamedll() {
     let wire = |m: CsUserMsg| encode_cs_usermsg(&m).1;
     assert_eq!(
         wire(CsUserMsg::ItemPickup("item_kevlar".into())),
-        b"item_kevlar "
+        b"item_kevlar\0"
     );
     assert_eq!(wire(CsUserMsg::ArmorType(0)), [0]);
     assert_eq!(
@@ -379,7 +379,7 @@ fn buy_armor_as_regamedll() {
     set_money(&mut b, 999);
     assert_eq!(
         without_battery(buy(&mut b, "vesthelm")),
-        [text("#Not_Enough_Money", &[]), "BlinkAcct 30".to_string()]
+        [text("#Not_Enough_Money", &[]), "BlinkAcct 2".to_string()]
     );
     set_money(&mut b, 1000);
     assert_eq!(
@@ -396,7 +396,7 @@ fn buy_armor_as_regamedll() {
     set_money(&mut b, 649);
     assert_eq!(
         without_battery(buy(&mut b, "vesthelm")),
-        [text("#Not_Enough_Money", &[]), "BlinkAcct 30".to_string()]
+        [text("#Not_Enough_Money", &[]), "BlinkAcct 2".to_string()]
     );
     set_money(&mut b, 650);
     assert_eq!(
@@ -507,7 +507,7 @@ fn cannot_buy_outside_the_zone_or_without_money() {
     // In the zone with too little money: the message and the blinking account.
     place(&mut b, Vec3::new(100.0, 0.0, 0.0));
     settle(&mut b);
-    let broke = [text("#Not_Enough_Money", &[]), "BlinkAcct 30".to_string()];
+    let broke = [text("#Not_Enough_Money", &[]), "BlinkAcct 2".to_string()];
     for (line, price) in [("vest", 650), ("vesthelm", 1000), ("nvgs", 1250)] {
         set_money(&mut b, price - 1);
         assert_eq!(buy(&mut b, line), broke, "{line}");
@@ -516,7 +516,7 @@ fn cannot_buy_outside_the_zone_or_without_money() {
     with_player(&b, |p| {
         assert_eq!((p.armor, p.test_has_night_vision()), (0.0, false))
     });
-    assert_eq!(encode_cs_usermsg(&CsUserMsg::BlinkAcct(30)).1, [30]);
+    assert_eq!(encode_cs_usermsg(&CsUserMsg::BlinkAcct(2)).1, [2]);
     // Just enough is enough.
     set_money(&mut b, 650);
     assert_eq!(buy(&mut b, "vest")[2], "Money 0 true");
