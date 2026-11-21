@@ -317,10 +317,10 @@ fn init_hud_sequence_as_regamedll() {
     let mut b = Bench::with_one_client(2, b"");
     b.step(20);
     let names = b.names_from(0, 0);
-    // `ClientPutInServer` shows the team menu (the text and the VGUI one) before the first
-    // update; the HUD follows, once.
-    assert_eq!(names[..2], ["ShowMenu", "VGUIMenu"]);
-    assert_eq!(names[2..], *FIRST_UPDATE, "the first player's HUD, once");
+    // The team menu comes from the player's commands (`teams::pre_think`), after the first
+    // update, so the HUD is the first thing the client gets, once.
+    assert_eq!(names[..FIRST_UPDATE.len()], *FIRST_UPDATE, "the first player's HUD");
+    assert!(names[FIRST_UPDATE.len()..].iter().all(|n| n == "ShowMenu" || n == "VGUIMenu"));
 
     let msgs = b.messages(0);
     let find = |name: &str| -> Vec<CsUserMsg> {
