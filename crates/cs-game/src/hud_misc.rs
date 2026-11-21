@@ -33,11 +33,14 @@
 //!
 //! ## Differences from the original, each deliberate
 //!
-//! - Spectators and observers: [`Radio`](radio) does not deliver to a spectator that follows a
-//!   teammate, the status bar does not use the spectator format or the longer range of an
-//!   observer and `nightvision` does not follow an observed player, because the observer mode
-//!   and target are not part of the game here yet (the observer task adds them; the places
-//!   are marked `observer`).
+//! - Observers (all ported from the source): a spectator in `OBS_CHASE_LOCKED`, `OBS_CHASE_FREE`
+//!   or `OBS_IN_EYE` with a target hears the radio of the speaker when its target is the speaker
+//!   or a teammate (player.cpp:446-464); its status bar uses the teammate format and health for
+//!   any target and looks 8192 units (player.cpp:8288, 8314-8316); the players that watch a
+//!   player in first person get its night vision toggled with the sound (client.cpp:3466-3512),
+//!   switched off at its spawn (player.cpp:6066-6081) and, at its death, by [`crate::observer`].
+//!   The radar sends nothing to observers (only living players are told, player.cpp:7939), and
+//!   `nightvision` itself is for a living player only (client.cpp:3445).
 //! - `HintMessage` (`#Hint_spotted_a_friend`, `#Hint_spotted_an_enemy`) and the hostage branch of
 //!   the status bar need the hint queue and the hostages; they are not sent. `m_blindUntilTime`
 //!   (a flashbang) is never in the future yet.
@@ -61,6 +64,7 @@ use crate::menus::{
     self, MENU_KEY_0, MENU_KEY_1, MENU_KEY_2, MENU_KEY_3, MENU_KEY_4, MENU_KEY_5, MENU_KEY_6,
     MENU_KEY_7, MENU_KEY_8, MENU_KEY_9, Menu,
 };
+use crate::observer::{OBS_CHASE_FREE, OBS_CHASE_LOCKED, OBS_IN_EYE, OBS_NONE};
 use crate::player::{DEAD_NO, PITCH_NORM, player_slot};
 
 /// `HUD_PRINTRADIO` (`util.h`): the `TextMsg` destination of a radio line.
@@ -79,6 +83,8 @@ pub(crate) const RADIO_SPRITE: &str = "sprites/radio.spr";
 
 /// `MAX_ID_RANGE` (`player.h`): how far the status bar looks.
 const MAX_ID_RANGE: f32 = 2048.0;
+/// `MAX_SPEC_ID_RANGE` (`player.h`): how far a spectator looks.
+const MAX_SPEC_ID_RANGE: f32 = 8192.0;
 /// Seconds between two status bar updates, and how long a name stays after the crosshair left.
 const SBAR_UPDATE_INTERVAL: f64 = 0.2;
 const SBAR_HOLD: f64 = 2.0;
@@ -178,16 +184,30 @@ pub(crate) fn on_spawn(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     switch_night_vision_off(g, eng, slot);
 }
 
-/// Tells the client its night vision is off and records it (`observer`: the players that watch
-/// this one are not told yet).
+/// The observers that watch `slot` in first person (`IsObservingPlayer`: `OBS_IN_EYE` and
+/// `iuser2` its edict index; the original skips an edict whose flags are exactly `FL_DORMANT`).
+fn followers(g: &GameState, eng: &EngineApi<'_>, slot: u8) -> Vec<u8> {
+    let index = i32::from(slot) + 1;
+    (0..g.players.len() as u8)
+        .filter(|&i| {
+            g.players[usize::from(i)].is_some()
+                && eng.ent(eng.client_edict(i)).is_some_and(|v| {
+                    v.flags != FL_DORMANT && v.iuser1 == OBS_IN_EYE && v.iuser2 == index
+                })
+        })
+        .collect()
+}
+
+/// Tells the client its night vision is off and records it, and does the same for the
+/// observers that watch it in first person (`Spawn`, player.cpp:6060-6081).
 fn switch_night_vision_off(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
-    eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::NvgToggle(false));
-    if let Some(p) = g
-        .players
-        .get_mut(usize::from(slot))
-        .and_then(Option::as_mut)
-    {
-        p.night_vision_on = false;
+    let mut who = vec![slot];
+    who.extend(followers(g, eng, slot));
+    for s in who {
+        eng.send_usermsg(MsgDest::One(s), &CsUserMsg::NvgToggle(false));
+        if let Some(p) = g.players.get_mut(usize::from(s)).and_then(Option::as_mut) {
+            p.night_vision_on = false;
+        }
     }
 }
 
@@ -412,7 +432,7 @@ pub(crate) fn radio(
         return;
     }
     let sender = id.index.min(u16::from(u8::MAX)) as u8;
-    let (team, name) = (me.team, me.chat.netname.clone());
+    let name = me.chat.netname.clone();
     let sender_text = id.index.to_string();
     let sprite = eng.model_index(RADIO_SPRITE).unwrap_or(0);
     let mut icon = MsgWriter::new();
@@ -429,13 +449,29 @@ pub(crate) fn radio(
         if ov.flags & FL_DORMANT != 0 || other.hud.ignore_radio {
             continue;
         }
-        // A spectator is told what the player it follows hears (`observer`): not yet.
-        if ov.flags & FL_SPECTATOR != 0 {
-            continue;
-        }
-        // `PlayerRelationship`: the speaker and its team (even the dead hear).
-        if other.team != team {
-            continue;
+        if ov.flags & FL_SPECTATOR == 0 {
+            // `PlayerRelationship`: the speaker and its team (even the dead hear).
+            if !is_teammate(g, eng, slot, i as u8) {
+                continue;
+            }
+        } else {
+            // A spectator hears what the player it follows would (player.cpp:446-464): it must
+            // be chasing or watching in first person, have a target that is not dormant, and
+            // that target must be the speaker or a teammate.
+            if !matches!(ov.iuser1, OBS_CHASE_LOCKED | OBS_CHASE_FREE | OBS_IN_EYE) {
+                continue;
+            }
+            let Some(target) = other.obs.target else {
+                continue;
+            };
+            if g.players.get(usize::from(target)).is_none_or(Option::is_none)
+                || eng
+                    .ent(eng.client_edict(target))
+                    .is_none_or(|tv| tv.flags & FL_DORMANT != 0)
+                || !is_teammate(g, eng, slot, target)
+            {
+                continue;
+            }
         }
         let dest = MsgDest::One(i as u8);
         eng.send_usermsg(
@@ -460,9 +496,26 @@ pub(crate) fn radio(
     }
 }
 
+/// `CHalfLifeMultiplay::PlayerRelationship(slot, target) == GR_TEAMMATE`: the same player, or a
+/// player (not a spectator) of the same team.
+fn is_teammate(g: &GameState, eng: &EngineApi<'_>, slot: u8, target: u8) -> bool {
+    if slot == target {
+        return true;
+    }
+    let (Some(a), Some(b)) = (
+        g.players.get(usize::from(slot)).and_then(Option::as_ref),
+        g.players.get(usize::from(target)).and_then(Option::as_ref),
+    ) else {
+        return false;
+    };
+    eng.ent(eng.client_edict(target))
+        .is_some_and(|v| v.flags & FL_SPECTATOR == 0)
+        && a.team == b.team
+}
+
 /// `nightvision`: for a player that has night vision, switches it on or off with the sound and
-/// `NVGToggle`; at most once every 0.3 seconds (`observer`: the players that watch this one are
-/// not toggled yet).
+/// `NVGToggle`; at most once every 0.3 seconds. The observers that watch the player in first
+/// person get the same sound and toggle (client.cpp:3466-3512).
 fn night_vision(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let now = eng.time();
     let Some(p) = g
@@ -490,6 +543,19 @@ fn night_vision(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let id = eng.client_edict(slot);
     eng.emit_sound(id, CHAN_ITEM, sample, volume, ATTN_NORM, PITCH_NORM);
     eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::NvgToggle(!was_on));
+    for watcher in followers(g, eng, slot) {
+        let volume = random_float(g, 0.92, 1.0);
+        let wid = eng.client_edict(watcher);
+        eng.emit_sound(wid, CHAN_ITEM, sample, volume, ATTN_NORM, PITCH_NORM);
+        eng.send_usermsg(MsgDest::One(watcher), &CsUserMsg::NvgToggle(!was_on));
+        if let Some(w) = g
+            .players
+            .get_mut(usize::from(watcher))
+            .and_then(Option::as_mut)
+        {
+            w.night_vision_on = !was_on;
+        }
+    }
 }
 
 /// The radar half of `UpdateClientData`: a living player that has moved 64 units since the last
@@ -581,11 +647,17 @@ pub(crate) fn update_status_bar(g: &mut GameState, eng: &mut EngineApi<'_>, slot
         return;
     };
     let (src, view) = (v.origin + v.view_ofs, v.v_angle + v.punchangle);
+    let range = if v.flags & FL_SPECTATOR != 0 {
+        MAX_SPEC_ID_RANGE
+    } else {
+        MAX_ID_RANGE
+    };
+    let observing = v.iuser1 != OBS_NONE;
     let mut state = [0i32; SBAR_END];
     let mut text = old_string.clone();
 
-    // Find an ID target. `observer`: a spectator would look 8192 units.
-    let end = src + forward_vector(view) * MAX_ID_RANGE;
+    // Find an ID target.
+    let end = src + forward_vector(view) * range;
     let tr = eng.trace_line(src, end, MoveFilter::Normal, Some(id));
     if tr.trace.fraction != 1.0 {
         // `FNullEnt(tr.pHit)`: the world counts as none.
@@ -606,8 +678,8 @@ pub(crate) fn update_status_bar(g: &mut GameState, eng: &mut EngineApi<'_>, slot
             } else {
                 SBAR_TARGETTYPE_ENEMY
             };
-            if same_team {
-                text = if playerid != PLAYERID_MODE_OFF {
+            if same_team || observing {
+                text = if playerid != PLAYERID_MODE_OFF || observing {
                     SBAR_FORMAT_TEAMMATE
                 } else {
                     SBAR_FORMAT_NONE

@@ -432,3 +432,236 @@ fn night_vision_toggles_for_a_player_that_has_it() {
     b.step(3);
     assert_eq!(toggles(&b), vec![false]);
 }
+
+// ---- observers ----
+
+/// Both teams in the game: the probe (slot 0) and slot 1 on the counter-terrorists, slots 2 and 3
+/// on the terrorists; four slots, so the round goes on while the probe dies and watches.
+fn four_players() -> Bench {
+    let mut b = Bench::stub_slots(spawns(8, 8), 4);
+    b.idle_cmds = true;
+    b.step(6);
+    join(&mut b, 0, 2, 1);
+    for (slot, team_choice) in [(1, 2), (2, 1), (3, 1)] {
+        enter(&mut b, slot);
+        join(&mut b, slot, team_choice, 1);
+    }
+    b.step(400);
+    b.run(|_, eng| eng.set_cvar("mp_forcecamera", "0"));
+    b
+}
+
+fn pump(b: &mut Bench, slot: u8, n: usize) {
+    for _ in 0..n {
+        let cmd = cs_proto48::delta::GoldSrcUserCmd {
+            msec: 10,
+            ..Default::default()
+        };
+        b.run(move |game, eng| game.run_usercmd(eng, slot, &cmd, 0));
+    }
+}
+
+/// The probe is killed by slot 2, goes through the death camera and then watches in `mode`
+/// (`specmode`), following the killer.
+fn probe_observes(b: &mut Bench, mode: &str) {
+    assert!(!b.run(|game, eng| game.damage_player(eng, 0, Some(2), 500.0, 1 << 1)));
+    pump(b, 0, 800);
+    let mode = mode.to_string();
+    b.run(move |game, eng| game.client_command(eng, 0, &["specmode".into(), mode]));
+    b.step(3);
+}
+
+/// The probe joins the counter-terrorists after the round has started: it waits for the next
+/// round as a spectator (`FL_SPECTATOR`, `GetIntoGame`), and watches in `mode`.
+fn late_probe_watches(mode: &str) -> Bench {
+    let mut b = Bench::stub_slots(spawns(8, 8), 4);
+    b.idle_cmds = true;
+    b.step(6);
+    for (slot, team_choice) in [(1, 2), (2, 1), (3, 1)] {
+        enter(&mut b, slot);
+        join(&mut b, slot, team_choice, 1);
+    }
+    b.step(3000);
+    b.run(|_, eng| eng.set_cvar("mp_forcecamera", "0"));
+    join(&mut b, 0, 2, 1);
+    pump(&mut b, 0, 50);
+    let flags = b.run(|_, eng| eng.ent(eng.client_edict(0)).unwrap().flags);
+    assert_ne!(flags & cs_engine::consts::FL_SPECTATOR, 0, "waits as a spectator");
+    // Jumping makes a spectator follow the first player it finds.
+    let jump = cs_proto48::delta::GoldSrcUserCmd {
+        msec: 10,
+        buttons: 1 << 1,
+        ..Default::default()
+    };
+    b.run(move |game, eng| game.run_usercmd(eng, 0, &jump, 0));
+    pump(&mut b, 0, 50);
+    let mode = mode.to_string();
+    b.run(move |game, eng| game.client_command(eng, 0, &["specmode".into(), mode]));
+    b.step(3);
+    b
+}
+
+fn probe_vars(b: &mut Bench) -> (i32, i32) {
+    b.run(|_, eng| {
+        let v = eng.ent(eng.client_edict(0)).unwrap();
+        (v.iuser1, v.iuser2)
+    })
+}
+
+#[test]
+fn an_observer_hears_the_radio_of_the_player_it_follows_and_its_team() {
+    let mut b = late_probe_watches("4");
+    // In first person; move on to slot 2 (edict 3), a terrorist.
+    for _ in 0..6 {
+        if probe_vars(&mut b) == (4, 3) {
+            break;
+        }
+        pump(&mut b, 0, 30);
+        b.run(|game, eng| game.client_command(eng, 0, &["follownext".into()]));
+    }
+    assert_eq!(probe_vars(&mut b), (4, 3));
+    // The target speaks: the observer hears it.
+    wait_out_radio(&mut b);
+    let got = send(&mut b, 2, "coverme");
+    assert_eq!(audio(&got), vec![(3, "%!MRAD_COVERME".to_string(), 100)]);
+    assert_eq!(texts(&got).len(), 1);
+    assert_eq!(icons(&got).len(), 1);
+    // A teammate of the target (slot 3) too; an enemy of the target (slot 1) does not reach it.
+    let got = send(&mut b, 3, "coverme");
+    assert_eq!(audio(&got), vec![(4, "%!MRAD_COVERME".to_string(), 100)]);
+    let got = send(&mut b, 1, "coverme");
+    assert!(audio(&got).is_empty() && texts(&got).is_empty());
+
+    // Chasing from a distance counts too; roaming (nobody it follows) does not.
+    b.run(|game, eng| game.client_command(eng, 0, &["specmode".into(), "2".into()]));
+    b.step(3);
+    assert_eq!(probe_vars(&mut b).0, 2);
+    wait_out_radio(&mut b);
+    assert_eq!(audio(&send(&mut b, 3, "go")).len(), 1);
+    b.run(|game, eng| game.client_command(eng, 0, &["specmode".into(), "3".into()]));
+    b.step(3);
+    assert_eq!(probe_vars(&mut b).0, 3);
+    wait_out_radio(&mut b);
+    assert!(audio(&send(&mut b, 3, "go")).is_empty());
+
+    // `ignorerad` silences the observer as it does a player.
+    b.run(|game, eng| game.client_command(eng, 0, &["specmode".into(), "4".into()]));
+    b.step(3);
+    command(&mut b, 0, "ignorerad");
+    wait_out_radio(&mut b);
+    assert!(audio(&send(&mut b, 3, "go")).is_empty());
+}
+
+#[test]
+fn a_dead_observer_gets_the_teammate_status_bar_from_2048_units() {
+    let mut b = four_players();
+    // Alive, the probe sees an enemy (slot 2): the enemy format is on its screen.
+    b.step(40);
+    b.probe.clear_messages();
+    b.run(|game: &mut CsGame, eng: &mut EngineApi<'_>| {
+        game.place_player(eng, 0, Vec3::new(0.0, 0.0, 100.0));
+        game.place_player(eng, 2, Vec3::new(200.0, 0.0, 100.0));
+        let id = eng.client_edict(0);
+        if let Some(v) = eng.ent_mut(id) {
+            v.v_angle = Vec3::ZERO;
+        }
+    });
+    b.step(30);
+    assert_eq!(
+        status(&b.messages()).0.last(),
+        Some(&(0, "1 %c1: %p2".to_string()))
+    );
+
+    // Dead and watching, it still looks 2048 units like a player: nothing at 3000.
+    b.probe.clear_messages();
+    probe_observes(&mut b, "3");
+    // The format on its screen is the teammate one (it was sent while it chased the killer).
+    assert_eq!(
+        status(&b.messages()).0.last(),
+        Some(&(0, "1 %c1: %p2
+2  %h: %i3%%".to_string()))
+    );
+    b.probe.clear_messages();
+    let aim = |far: f32, who: u8, away: u8| {
+        move |game: &mut CsGame, eng: &mut EngineApi<'_>| {
+            game.place_player(eng, 0, Vec3::new(0.0, 0.0, 100.0));
+            let id = eng.client_edict(0);
+            if let Some(v) = eng.ent_mut(id) {
+                v.v_angle = Vec3::ZERO;
+                v.view_ofs = Vec3::ZERO;
+            }
+            game.place_player(eng, away, Vec3::new(0.0, 6000.0, 100.0));
+            game.place_player(eng, who, Vec3::new(far, 0.0, 100.0));
+        }
+    };
+    b.run(aim(3000.0, 2, 3));
+    b.step(30);
+    assert!(status(&b.messages()).1.is_empty(), "{:?}", b.messages());
+    // At 1500 it is shown the name and the health of anyone, enemy or not: the teammate
+    // format, type 2 (the observer's team is not the terrorists'), the edict index, the health.
+    b.run(aim(1500.0, 2, 3));
+    b.step(30);
+    let (_, values) = status(&b.messages());
+    assert_eq!(values, vec![(1, 2), (2, 3), (3, 100)]);
+}
+
+#[test]
+fn a_spectator_looks_8192_units_for_the_status_bar() {
+    let mut b = late_probe_watches("3");
+    b.probe.clear_messages();
+    b.run(|game: &mut CsGame, eng: &mut EngineApi<'_>| {
+        game.place_player(eng, 0, Vec3::new(0.0, 0.0, 100.0));
+        let id = eng.client_edict(0);
+        if let Some(v) = eng.ent_mut(id) {
+            v.v_angle = Vec3::ZERO;
+            v.view_ofs = Vec3::ZERO;
+        }
+        game.place_player(eng, 3, Vec3::new(0.0, 6000.0, 100.0));
+        // Slot 2 (edict 3), a terrorist, 5000 units ahead: beyond what a player sees.
+        game.place_player(eng, 2, Vec3::new(5000.0, 0.0, 100.0));
+    });
+    b.step(30);
+    let (text, values) = status(&b.messages());
+    assert_eq!(text, vec![(0, "1 %c1: %p2
+2  %h: %i3%%".to_string())]);
+    assert_eq!(values, vec![(1, 2), (2, 3), (3, 100)]);
+}
+
+#[test]
+fn night_vision_follows_the_player_the_observer_watches() {
+    let mut b = four_players();
+    probe_observes(&mut b, "4");
+    assert_eq!(probe_vars(&mut b), (4, 3));
+    assert!(b.server.game_mut().game.grant_night_vision(2));
+    let toggles = |b: &Bench| -> Vec<bool> {
+        b.messages()
+            .into_iter()
+            .filter_map(|m| match m {
+                CsUserMsg::NvgToggle(on) => Some(on),
+                _ => None,
+            })
+            .collect()
+    };
+    b.step(40);
+    b.probe.clear_messages();
+    command(&mut b, 2, "nightvision");
+    assert_eq!(toggles(&b), vec![true]);
+    b.step(40);
+    b.probe.clear_messages();
+    command(&mut b, 2, "nightvision");
+    assert_eq!(toggles(&b), vec![false]);
+
+    // On again, then the watched player spawns: its goggles and the observer's go off.
+    b.step(40);
+    command(&mut b, 2, "nightvision");
+    b.probe.clear_messages();
+    b.run(|game, eng| game.respawn_player(eng, 2));
+    b.step(3);
+    assert_eq!(toggles(&b), vec![false]);
+
+    // An observer that watches someone else is left alone.
+    b.step(40);
+    b.probe.clear_messages();
+    command(&mut b, 3, "nightvision");
+    assert!(toggles(&b).is_empty());
+}
