@@ -20,6 +20,7 @@ use crate::game::{ClientView, EngineApi, GameDll, Outbox, entity_state_from_vars
 use crate::map::ServerMap;
 use crate::oob::{ChallengeIssuer, OOB_GLOBAL_REPLIES_PER_SEC, OobLimiter};
 use crate::precache::PrecacheTables;
+use crate::world::WorldLinks;
 use crate::signon::{
     UserInfoEntry, move_vars, munged_map_crc, write_new_stage, write_sendres_stage,
     write_spawn_baselines, write_spawn_stage,
@@ -73,6 +74,8 @@ pub struct Server<G: GameDll> {
     pub(crate) cvars: CVarRegistry,
     pub(crate) usermsgs: UserMsgRegistry,
     pub(crate) edicts: EdictPool,
+    /// The area tree and what each linked entity touches; rebuilt for every map.
+    pub(crate) world: WorldLinks,
     pub(crate) precache: PrecacheTables,
     pub(crate) outbox: Outbox,
     /// What the game sees of each slot, indexed like `clients`.
@@ -148,6 +151,7 @@ impl<G: GameDll> Server<G> {
         let usermsgs = game.usermsgs();
         let edicts = EdictPool::new(cfg.max_clients, cfg.max_edicts);
         let precache = Self::map_precache(&map);
+        let map_bounds = map.world_bounds();
         let usercmd_schema = deltas.get("usercmd_t").cloned();
         if usercmd_schema.is_none() {
             tracing::error!("delta registry has no usercmd_t; client messages cannot be parsed");
@@ -164,6 +168,7 @@ impl<G: GameDll> Server<G> {
             cvars,
             usermsgs,
             edicts,
+            world: WorldLinks::new(map_bounds),
             precache,
             baselines: Vec::new(),
             baseline_records: BTreeMap::new(),
@@ -333,6 +338,7 @@ impl<G: GameDll> Server<G> {
             &mut self.cvars,
             &self.usermsgs,
             &self.map,
+            &mut self.world,
             self.time,
             self.frametime,
             &mut self.outbox,
@@ -573,6 +579,7 @@ impl<G: GameDll> Server<G> {
                 return;
             }
             self.edicts.reset_client(slot);
+            self.world.forget(u16::from(slot) + 1);
             self.clients[index].put_in_server = false;
             self.views[index].active = false;
         }

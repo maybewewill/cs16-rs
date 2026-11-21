@@ -64,6 +64,9 @@ impl EngineApi<'_> {
     /// Frees entity `id` with its variables and private data. A stale or foreign id, the
     /// world and the player slots are left alone.
     pub fn remove_entity(&mut self, id: EdictId) {
+        if self.edicts.get(id).is_some() {
+            self.world.forget(id.index);
+        }
         self.edicts.free(id, self.time);
     }
 
@@ -161,7 +164,8 @@ impl EngineApi<'_> {
 
     /// Gives entity `id` model `name`, which must already be in the model table: stores the
     /// name in `model` and its index in `modelindex`. For a brush sub-model (`*N`) on a map
-    /// with collision data it also sets `mins`/`maxs` to that model's bounds. Returns `false`
+    /// with collision data it also sets `mins`/`maxs`/`size` to that model's bounds. The entity
+    /// is linked (see [`link_entity`](Self::link_entity)). Returns `false`
     /// and changes nothing for a stale or foreign id or a name not in the table.
     pub fn set_model(&mut self, id: EdictId, name: &str) -> bool {
         let Some(index) = self.precache.model_index(name) else {
@@ -179,7 +183,10 @@ impl EngineApi<'_> {
         if let Some((mins, maxs)) = bounds {
             vars.mins = mins;
             vars.maxs = maxs;
+            vars.size = maxs - mins;
         }
+        // `PF_setmodel_I`: `SetMinMaxSize` for a brush model, then `SV_LinkEdict`.
+        self.link_entity(id, false);
         true
     }
 
@@ -268,7 +275,7 @@ impl EngineApi<'_> {
 }
 
 /// Whether every coordinate of `v` is finite and within [`MAX_WORLD_COORD`].
-fn in_world(v: Vec3) -> bool {
+pub(crate) fn in_world(v: Vec3) -> bool {
     v.is_finite() && v.abs().max_element() <= MAX_WORLD_COORD
 }
 
@@ -293,6 +300,7 @@ mod tests {
     use crate::game::{ClientView, EngineApi, Outbox};
     use crate::map::ServerMap;
     use crate::precache::PrecacheTables;
+    use crate::world::WorldLinks;
 
     struct Fixture {
         edicts: EdictPool,
@@ -300,6 +308,7 @@ mod tests {
         cvars: CVarRegistry,
         usermsgs: UserMsgRegistry,
         map: ServerMap,
+        world: WorldLinks,
         outbox: Outbox,
         clients: Vec<ClientView>,
     }
@@ -311,6 +320,7 @@ mod tests {
 
         fn on(map: ServerMap, max_clients: u8, max_edicts: usize) -> Self {
             Self {
+                world: WorldLinks::new(map.world_bounds()),
                 edicts: EdictPool::new(max_clients, max_edicts),
                 precache: PrecacheTables::new(&map.path, map.submodel_count),
                 cvars: CVarRegistry::new_empty(),
@@ -328,6 +338,7 @@ mod tests {
                 &mut self.cvars,
                 &self.usermsgs,
                 &self.map,
+                &mut self.world,
                 10.0,
                 0.25,
                 &mut self.outbox,

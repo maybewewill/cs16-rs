@@ -18,6 +18,7 @@ pub mod server;
 mod signon;
 mod think;
 pub mod usercmd;
+mod world;
 
 pub use client::{ClientState, MAX_CLIENT_INCOMING_STREAM, MAX_REFUSED_STREAMS, SignonStage};
 pub use api_messages::{MAX_INIT_BUFFER, MAX_MESSAGE_TEXT, MsgDest};
@@ -41,6 +42,7 @@ pub use server::{
     MAX_DATAGRAMS_PER_FRAME, MAX_RELIABLE_BACKLOG, NetStats, Server, ServerConfig,
 };
 pub use think::MAX_THINKS_PER_FRAME;
+pub use world::{AREA_DEPTH, MAX_ENT_LEAFS, consts};
 pub use usercmd::{
     MAX_BANKED_MS, MAX_CONSECUTIVE_BAD_MOVES, MAX_DROPPED_REPLAY, MAX_USERCMD_STEP_MS, MsecBudget,
     STRINGCMD_BURST, STRINGCMD_RATE_PER_SEC, select_cmds_to_run, split_usercmd, usercmd_is_finite,

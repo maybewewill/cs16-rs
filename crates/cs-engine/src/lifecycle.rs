@@ -16,6 +16,7 @@ use crate::client::{Client, ClientState};
 use crate::game::{ClientView, GameDll};
 use crate::map::ServerMap;
 use crate::server::{Server, ServerConfig};
+use crate::world::WorldLinks;
 
 /// Seconds between the `svc_pings` messages sent to active clients.
 pub const PINGS_INTERVAL_SECS: f64 = 2.0;
@@ -122,7 +123,7 @@ impl ServerConfig {
 impl<G: GameDll> Server<G> {
     /// Switches to `map` without dropping anyone: the game deactivates the old map and every
     /// client is taken out of the server, the spawn count goes up, the edicts (with serials no
-    /// old id can match) and precache tables are rebuilt for `map` and the game activates it;
+    /// old id can match), the area tree and the precache tables are rebuilt for `map` and the game activates it;
     /// then every connected client restarts its sign-on, its old reliable data discarded and
     /// `reconnect` sent through the reliable stream. The init buffer and the light styles of
     /// the old map are cleared (the new map's activation refills them). Clients are not reported
@@ -142,6 +143,7 @@ impl<G: GameDll> Server<G> {
             .edicts
             .successor(self.cfg.max_clients, self.cfg.max_edicts, self.time);
         self.precache = Self::map_precache(&map);
+        self.world = WorldLinks::new(map.world_bounds());
         self.map = map;
         self.activate_map();
         let mut reconnect = MsgWriter::new();
@@ -202,6 +204,7 @@ impl<G: GameDll> Server<G> {
             self.call_game(|game, eng| game.client_disconnect(eng, slot));
         }
         self.edicts.reset_client(slot);
+        self.world.forget(u16::from(slot) + 1);
         // The userid stays for the removal broadcast.
         let userid = self.clients[index].userid;
         self.clients[index] = Client {

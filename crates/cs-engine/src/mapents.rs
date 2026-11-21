@@ -173,11 +173,20 @@ impl<G: GameDll> Server<G> {
                     // A model that is not precached yet stays unset; the game sees the key.
                     eng.set_model(id, model);
                 }
-                game.spawn_entity(eng, id, &entry.classname, &entry.keys)
+                let accepted = game.spawn_entity(eng, id, &entry.classname, &entry.keys);
+                if accepted {
+                    // The game may not have placed the entity itself; HLDS links it in
+                    // `SET_ORIGIN` and `SET_MODEL`, which a game that spawns it as is skips.
+                    eng.link_entity(id, false);
+                }
+                accepted
             });
             if !accepted && !is_world {
                 // A game that already removed the entity itself leaves a stale id, which the
                 // pool ignores.
+                if self.edicts.get(id).is_some() {
+                    self.world.forget(id.index);
+                }
                 self.edicts.free(id, self.time);
             }
         }

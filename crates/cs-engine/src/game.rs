@@ -15,6 +15,7 @@ use crate::map::ServerMap;
 use crate::precache::PrecacheTables;
 use crate::server::MAX_RELIABLE_BACKLOG;
 use crate::signon::default_light_styles;
+use crate::world::WorldLinks;
 
 /// `FL_DUCKING` in `EntVars::flags`.
 const FL_DUCKING: u32 = 1 << 14;
@@ -109,6 +110,8 @@ pub struct EngineApi<'a> {
     /// The user messages the game registered; `send_usermsg` encodes with their ids.
     pub(crate) usermsgs: &'a UserMsgRegistry,
     pub(crate) map: &'a ServerMap,
+    /// The area tree and the leaves of the linked entities.
+    pub(crate) world: &'a mut WorldLinks,
     pub(crate) time: f64,
     /// Real seconds of the current server frame; 0 outside a frame.
     pub(crate) frametime: f32,
@@ -124,6 +127,7 @@ impl<'a> EngineApi<'a> {
         cvars: &'a mut CVarRegistry,
         usermsgs: &'a UserMsgRegistry,
         map: &'a ServerMap,
+        world: &'a mut WorldLinks,
         time: f64,
         frametime: f32,
         outbox: &'a mut Outbox,
@@ -137,6 +141,7 @@ impl<'a> EngineApi<'a> {
             cvars,
             usermsgs,
             map,
+            world,
             time,
             frametime,
             outbox,
@@ -381,6 +386,7 @@ mod tests {
         cvars: CVarRegistry,
         usermsgs: UserMsgRegistry,
         map: ServerMap,
+        world: WorldLinks,
         outbox: Outbox,
         clients: Vec<ClientView>,
     }
@@ -389,6 +395,7 @@ mod tests {
         fn new(max_clients: u8) -> Self {
             let map = ServerMap::stub("de_test");
             Self {
+                world: WorldLinks::new(map.world_bounds()),
                 edicts: EdictPool::new(max_clients, DEFAULT_MAX_EDICTS),
                 precache: PrecacheTables::new(&map.path, map.submodel_count),
                 cvars: CVarRegistry::new_empty(),
@@ -406,6 +413,7 @@ mod tests {
                 &mut self.cvars,
                 &self.usermsgs,
                 &self.map,
+                &mut self.world,
                 1.0,
                 0.0,
                 &mut self.outbox,

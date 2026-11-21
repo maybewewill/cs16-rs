@@ -7,7 +7,8 @@ use cs_assets::bsp::{BspMap, Entity};
 use cs_proto48::crypto::crc_map_bsp;
 use glam::Vec3;
 
-use crate::collision::WorldCollision;
+use crate::collision::{MAX_WORLD_COORD, WorldCollision};
+use crate::world::find_touched_leafs;
 
 pub struct ServerMap {
     pub name: String,
@@ -63,38 +64,58 @@ impl ServerMap {
         self.collision.as_ref()
     }
 
-    /// Whether a box with absolute corners `mins`/`maxs` is potentially
-    /// visible from `eye`: the leaf of the box centre or of any of its 8
-    /// corners is in the PVS of the eye's leaf. An eye in a leaf without
-    /// visibility data (solid leaf 0, outside the world) sees everything.
-    ///
-    /// Approximation: HLDS tests the entity's full leaf list.
-    pub fn can_see(&self, eye: Vec3, mins: Vec3, maxs: Vec3) -> bool {
-        let Some(bsp) = &self.vis else {
-            return true;
-        };
+    /// The BSP behind the visibility tests; `None` for the stub map.
+    pub(crate) fn bsp(&self) -> Option<&BspMap> {
+        self.vis.as_deref()
+    }
+
+    /// Mins and maxs of the world model, which the area tree spans; a map without collision
+    /// data spans the whole coordinate range.
+    pub(crate) fn world_bounds(&self) -> (Vec3, Vec3) {
+        let whole = (Vec3::splat(-MAX_WORLD_COORD), Vec3::splat(MAX_WORLD_COORD));
+        self.collision()
+            .and_then(|c| c.model_bounds(0))
+            .filter(|(mins, maxs)| mins.is_finite() && maxs.is_finite() && mins.cmple(*maxs).all())
+            .unwrap_or(whole)
+    }
+
+    /// The PVS of the leaf `eye` is in, bit `n` for leaf `n + 1`. `None` when the eye sees
+    /// everything: a map without visibility data, or an eye in a leaf without any (solid leaf
+    /// 0, outside the world).
+    pub(crate) fn viewer_pvs(&self, eye: Vec3) -> Option<Vec<bool>> {
+        let bsp = self.vis.as_deref()?;
         let eye_leaf = bsp.find_leaf(eye);
         let has_vis = eye_leaf != 0
             && !bsp.visibility.is_empty()
             && bsp.leafs.get(eye_leaf).is_some_and(|l| l.vis_offset >= 0);
-        if !has_vis {
+        has_vis.then(|| bsp.decompress_pvs(eye_leaf))
+    }
+
+    /// Whether a box with absolute corners `mins`/`maxs` is potentially visible from `eye`: any
+    /// leaf the box touches (`SV_FindTouchedLeafs`) is in the PVS of the eye's leaf, as for a
+    /// linked entity; a box that touches more leaves than an entity keeps is tested by the
+    /// leaves under its top node. An eye in a leaf without visibility data (solid leaf 0,
+    /// outside the world) sees everything.
+    pub fn can_see(&self, eye: Vec3, mins: Vec3, maxs: Vec3) -> bool {
+        let Some(bsp) = self.vis.as_deref() else {
             return true;
+        };
+        let Some(pvs) = self.viewer_pvs(eye) else {
+            return true;
+        };
+        find_touched_leafs(bsp, mins, maxs).visible(bsp, &pvs)
+    }
+
+    /// A map around `bsp` without a file behind it, for tests.
+    #[cfg(test)]
+    pub(crate) fn with_bsp_for_test(bsp: Arc<BspMap>) -> Self {
+        Self {
+            submodel_count: bsp.models.len(),
+            entities: Vec::new(),
+            collision: Some(WorldCollision::from_bsp(&bsp)),
+            vis: Some(bsp),
+            ..Self::stub("test_bsp")
         }
-        let pvs = bsp.decompress_pvs(eye_leaf);
-        let corners = (0..8).map(|i| {
-            Vec3::new(
-                if i & 1 == 0 { mins.x } else { maxs.x },
-                if i & 2 == 0 { mins.y } else { maxs.y },
-                if i & 4 == 0 { mins.z } else { maxs.z },
-            )
-        });
-        std::iter::once((mins + maxs) * 0.5)
-            .chain(corners)
-            .any(|point| {
-                // PVS bit `n` stands for leaf `n + 1`; leaf 0 is solid.
-                let leaf = bsp.find_leaf(point);
-                leaf != 0 && pvs.get(leaf - 1).copied().unwrap_or(false)
-            })
     }
 }
 

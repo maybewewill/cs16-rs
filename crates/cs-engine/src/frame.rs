@@ -12,6 +12,7 @@ use cs_proto48::messages::{
 use cs_transport::{MAX_UDP_PACKET, PacketTransport};
 
 use crate::client::ClientState;
+use crate::edict::{EdictId, EntVars};
 use crate::game::{GameDll, entity_state_from_vars};
 use crate::server::{Server, ServerConfig};
 
@@ -272,6 +273,19 @@ impl<G: GameDll> Server<G> {
         Some(client.chan.build_packet(&payload))
     }
 
+    /// Whether entity `id` is potentially visible in `pvs` (`None`: the viewer sees all): by the
+    /// leaves it was linked with, or, for an entity that was never linked, by the leaves its
+    /// box `origin + mins..origin + maxs` touches.
+    fn entity_in_pvs(&self, pvs: Option<&[bool]>, id: EdictId, v: &EntVars) -> bool {
+        let (Some(bsp), Some(pvs)) = (self.map.bsp(), pvs) else {
+            return true;
+        };
+        self.world.leaves_visible(bsp, pvs, id).unwrap_or_else(|| {
+            crate::world::find_touched_leafs(bsp, v.origin + v.mins, v.origin + v.maxs)
+                .visible(bsp, pvs)
+        })
+    }
+
     /// Entity states `slot` is sent. Candidates are the viewer's own player edict, and every
     /// other live edict with a model and without `EF_NODRAW` that is potentially visible from
     /// the viewer's eye; each goes out when the game's `add_to_full_pack` accepts it, with the
@@ -283,6 +297,7 @@ impl<G: GameDll> Server<G> {
             .get(viewer)
             .map(|e| e.vars.origin + e.vars.view_ofs)
             .unwrap_or_default();
+        let pvs = self.map.viewer_pvs(eye);
         let candidates: Vec<GoldSrcEntityState> = self
             .edicts
             .iter_live()
@@ -291,7 +306,7 @@ impl<G: GameDll> Server<G> {
                 *id == viewer
                     || (v.modelindex != 0
                         && v.effects & EF_NODRAW == 0
-                        && self.map.can_see(eye, v.origin + v.mins, v.origin + v.maxs))
+                        && self.entity_in_pvs(pvs.as_deref(), *id, v))
             })
             .map(|(id, edict)| entity_state_from_vars(id.index, &edict.vars))
             .collect();

@@ -52,6 +52,14 @@ pub struct EntVars {
     pub view_ofs: Vec3,
     pub mins: Vec3,
     pub maxs: Vec3,
+    /// `maxs - mins`; written by `EngineApi::set_size`.
+    pub size: Vec3,
+    /// Absolute bounding box, written when the entity is linked (see `world.rs`): stale until
+    /// the next `set_origin`, `set_size`, `set_model` or `link_entity`.
+    pub absmin: Vec3,
+    pub absmax: Vec3,
+    pub avelocity: Vec3,
+    pub basevelocity: Vec3,
     pub modelindex: u16,
     pub weaponmodel: u16,
     pub sequence: u16,
@@ -79,6 +87,10 @@ pub struct EntVars {
     pub deadflag: i32,
     pub owner: Option<EdictId>,
     pub aiment: Option<EdictId>,
+    pub groundentity: Option<EdictId>,
+    pub watertype: i32,
+    pub gravity: f32,
+    pub friction: f32,
     pub iuser1: i32,
     pub iuser2: i32,
     pub iuser3: i32,
@@ -86,6 +98,8 @@ pub struct EntVars {
     /// Server time at which the game's `think` is next called for this entity; 0 means no
     /// think is scheduled. The engine sets it to 0 just before each call.
     pub nextthink: f64,
+    /// Local time of a pushing brush entity.
+    pub ltime: f64,
 }
 
 /// One entity slot: its variables plus the game's private data.
