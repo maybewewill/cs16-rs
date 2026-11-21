@@ -450,12 +450,14 @@ fn follow_and_force_retouch_queue_touches() {
         (parent, follower)
     });
     h.step(&mut [], 3);
-    assert_eq!(h.server.pending_touch_count(), 0);
+    assert!(h.server.game().touch_log.is_empty());
 
-    // `force_retouch` re-links the resting box with touching.
+    // `force_retouch` re-links the resting box with touching; the touch is delivered in the
+    // same frame.
     run(&mut h, |eng| eng.set_force_retouch(1.0));
-    let after_retouch = h.server.pending_touch_count();
+    let after_retouch = h.server.game().touch_log.len();
     assert!(after_retouch >= 1, "{after_retouch}");
+    assert_eq!(h.server.pending_touch_count(), 0);
 
     // A follower carried into the trigger touches it.
     run(&mut h, move |eng| {
@@ -464,7 +466,8 @@ fn follow_and_force_retouch_queue_touches() {
         v.aiment = Some(parent);
         eng.set_origin(parent, Vec3::new(1000.0, 0.0, 0.0));
     });
-    assert!(h.server.pending_touch_count() > after_retouch);
+    assert!(h.server.game().touch_log.len() > after_retouch);
+    assert_eq!(h.server.pending_touch_count(), 0);
 }
 
 fn dust2() -> Option<(ServerMap, ServerMap)> {

@@ -1,9 +1,8 @@
 //! Touches and impacts: the dispatch of [`GameDll::touch`].
 //!
 //! Ported from ReHLDS `rehlds/engine/world.cpp` (`SV_TouchLinks`, the brush-trigger hull test;
-//! read 2026-11-21). `SV_Impact` (`sv_phys.cpp`) is written from memory of its behaviour
-//! (assumption, not checked against the source): it calls the touch of each side when neither
-//! entity is `SOLID_NOT`. The box test and the queueing happen in `EngineApi::link_entity`
+//! read 2026-11-21) and `rehlds/engine/sv_phys.cpp` (`SV_Impact`, read 2026-11-21; see
+//! [`Server::impact`] for what is left out). The box test and the queueing happen in `EngineApi::link_entity`
 //! (`world.rs`); this file holds the hull test for brush triggers, [`Server::impact`] and the
 //! dispatch loop.
 //!
@@ -15,7 +14,10 @@
 //! harmless for game logic, which cannot rely on the order of a touch against the rest of the
 //! call that caused it.
 //!
-//! The queue is drained after every game call. Touches a touch causes (it relinks or hits
+//! The queue is drained after every game call (`drain_outbox`), after each entity's step of the
+//! physics pass (`physics.rs`, whose moves link without a game call) and at the end of the
+//! frame's physics (`finish_frame_touches`); the settle passes of map activation are physics
+//! passes too, so their touches are delivered before the baselines are cut. Touches a touch causes (it relinks or hits
 //! something) are appended behind the ones waiting and dispatched in the same loop. At most
 //! [`MAX_TOUCHES_PER_FRAME`] touches are queued per frame; the rest are dropped with one
 //! `tracing::warn!` at the end of the frame. HLDS has no such bound (it prevents recursion
@@ -83,14 +85,14 @@ impl<G: GameDll> Server<G> {
             other,
             kind: TouchKind::Impact,
         };
-        let mut halves = Vec::with_capacity(2);
-        if s1 != SOLID_NOT {
-            halves.push(half(e1, e2));
-        }
-        if s2 != SOLID_NOT {
-            halves.push(half(e2, e1));
-        }
-        self.world.queue_touches(&halves);
+        let halves = [half(e1, e2), half(e2, e1)];
+        let queued = match (s1 != SOLID_NOT, s2 != SOLID_NOT) {
+            (true, true) => &halves[..],
+            (true, false) => &halves[..1],
+            (false, true) => &halves[1..],
+            (false, false) => return,
+        };
+        self.world.queue_touches(queued);
     }
 
     /// Calls [`GameDll::touch`] for every queued touch, oldest first, until the queue is empty.

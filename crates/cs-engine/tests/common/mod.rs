@@ -295,6 +295,14 @@ pub struct TestGame {
     pub touch_log: Vec<(u16, u16)>,
     /// When set, every `touch` removes both entities.
     pub touch_removes_both: bool,
+    /// `update_client_data_calls` at the time of every `touch` call.
+    pub touch_update_marks: Vec<usize>,
+    /// When set, every `touch` gives `other` this `skin`.
+    pub touch_sets_other_skin: Option<i16>,
+    /// When set (with at least two extras), `server_activate` makes extra 1 a `FOLLOW` entity
+    /// of extra 2, which stands inside a new trigger: the follower's first physics step
+    /// touches it.
+    pub follow_into_trigger: bool,
     /// When set, every `touch` marks the toucher `FL_KILLME`.
     pub touch_kills_toucher: bool,
     /// When set, every `touch` makes the toucher `SOLID_NOT`.
@@ -369,6 +377,23 @@ impl GameDll for TestGame {
                 vars.solid = 1 + (n % 4) as u8;
                 vars.movetype = 1 + (n % 12) as u8;
             }
+        }
+        if self.follow_into_trigger {
+            let mut extras = Vec::new();
+            while let Some(id) = eng.find_by_classname(extras.last().copied(), "test_extra") {
+                extras.push(id);
+            }
+            let (follower, parent) = (extras[0], extras[1]);
+            let trigger = eng.create_entity("test_trigger").expect("free edict");
+            eng.ent_mut(trigger).unwrap().solid = consts::SOLID_TRIGGER;
+            eng.set_size(trigger, Vec3::splat(-64.0), Vec3::splat(64.0));
+            eng.set_origin(trigger, Vec3::new(0.0, 0.0, 500.0));
+            eng.set_origin(parent, Vec3::new(0.0, 0.0, 500.0));
+            let v = eng.ent_mut(follower).unwrap();
+            v.solid = consts::SOLID_BBOX;
+            v.movetype = consts::MOVETYPE_FOLLOW;
+            v.aiment = Some(parent);
+            eng.set_size(follower, Vec3::splat(-8.0), Vec3::splat(8.0));
         }
     }
 
@@ -585,6 +610,10 @@ impl GameDll for TestGame {
 
     fn touch(&mut self, eng: &mut EngineApi<'_>, toucher: EdictId, other: EdictId) {
         self.touch_log.push((toucher.index, other.index));
+        self.touch_update_marks.push(self.update_client_data_calls);
+        if let Some(skin) = self.touch_sets_other_skin {
+            eng.ent_mut(other).unwrap().skin = skin;
+        }
         if self.touch_removes_both {
             eng.remove_entity(toucher);
             eng.remove_entity(other);

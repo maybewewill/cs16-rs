@@ -49,7 +49,7 @@ impl<G: GameDll> Server<G> {
     /// turn comes, so an entity created during the pass at a higher index than the one running
     /// is run in the same pass, and one freed before its turn is skipped. The world is run
     /// (its think); player slots are not. An entity with `FL_KILLME` set after its turn is
-    /// freed. While `force_retouch` is above 0, every live entity (players included) is linked
+    /// freed. The touches an entity's step queued are dispatched right after it. While `force_retouch` is above 0, every live entity (players included) is linked
     /// with trigger touching before its turn, and the value is lowered by 1 at the end.
     pub(crate) fn run_physics(&mut self) {
         let frametime = self.frametime as f32;
@@ -64,11 +64,15 @@ impl<G: GameDll> Server<G> {
             if self.world.force_retouch > 0.0 {
                 // Forces a retouch even of stationary entities.
                 self.with_engine(|eng| eng.link_entity(id, true));
+                self.dispatch_touches();
             }
             if id.index != 0 && usize::from(id.index) <= max_clients {
                 continue;
             }
             self.run_entity(id);
+            // HLDS calls the touches inside the step; here they are delivered before the next
+            // entity's turn (the moves of `NOCLIP` and `FOLLOW` link without a game call).
+            self.dispatch_touches();
             let killed = self
                 .edicts
                 .get(id)

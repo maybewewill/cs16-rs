@@ -523,6 +523,11 @@ impl WorldLinks {
         self.pending_touches.pop_front()
     }
 
+    /// How many touches are queued and not yet taken.
+    pub(crate) fn pending_touch_count(&self) -> usize {
+        self.pending_touches.len()
+    }
+
     /// The touches queued and not yet taken, as `(toucher, other)`.
     #[cfg(test)]
     pub(crate) fn pending_touches(&self) -> Vec<(EdictId, EdictId)> {

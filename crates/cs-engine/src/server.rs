@@ -273,12 +273,13 @@ impl<G: GameDll> Server<G> {
             self.handle_datagram(net, from, &data);
         }
         self.run_physics();
+        // The physics pass is the frame's game work: deliver what is still queued, and start a
+        // fresh touch budget, before the updates are built.
+        self.finish_frame_touches();
         self.sv_time += self.frametime;
         self.drop_timed_out_clients();
         self.queue_pings_if_due();
         self.broadcast_userinfo();
-        // The frame's game work is done: deliver what it queued before the updates go out.
-        self.finish_frame_touches();
         self.send_client_frames(net);
         self.send_farewells(net);
         self.frametime = 0.0;
@@ -338,7 +339,7 @@ impl<G: GameDll> Server<G> {
 
     /// Touches found by linking and not yet dispatched (`(trigger, other)` pairs).
     pub fn pending_touch_count(&self) -> usize {
-        self.world.pending_touches().len()
+        self.world.pending_touch_count()
     }
 
     pub fn spawn_count(&self) -> u32 {

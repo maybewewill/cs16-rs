@@ -5,6 +5,7 @@
 mod common;
 
 use common::{Harness, TestGame};
+use cs_probe::ProbeState;
 use cs_engine::{EdictId, EngineApi, MAX_TOUCHES_PER_FRAME, ServerConfig, consts};
 use glam::Vec3;
 
@@ -176,4 +177,51 @@ fn touch_storm_is_bounded() {
     h.step(&mut [], 1);
     assert_eq!(h.server.game().touch_log.len(), 2 * MAX_TOUCHES_PER_FRAME);
     assert_eq!(h.server.net_stats().touch_cap_frames, 2);
+}
+
+/// A follower carried into a trigger by the physics pass (it links without a game call) is
+/// touched in that same frame, before the client updates are built.
+#[test]
+fn touch_caused_by_a_physics_move_is_dispatched_in_the_same_frame() {
+    let mut h = harness(TestGame::default());
+    let mut probe = h.add_probe("Player");
+    h.step(&mut [&mut probe], 200);
+    assert_eq!(probe.state(), &ProbeState::InGame);
+    h.server.game_mut().act(|eng| {
+        trigger(eng, "trigger", Vec3::new(0.0, 0.0, 500.0), 64.0);
+        let parent = body(eng, "parent", Vec3::new(-2000.0, 0.0, 0.0));
+        let follower = body(eng, "follower", Vec3::new(-2000.0, 0.0, 0.0));
+        let v = eng.ent_mut(follower).unwrap();
+        v.movetype = consts::MOVETYPE_FOLLOW;
+        v.aiment = Some(parent);
+        // The follower takes this position in its step, later in the same frame.
+        eng.set_origin(parent, Vec3::new(0.0, 0.0, 500.0));
+    });
+    let updates_before = h.server.game().update_client_data_calls;
+    assert!(h.server.game().touch_log.is_empty());
+    h.step(&mut [&mut probe], 1);
+    let game = h.server.game();
+    assert_eq!(game.touch_log.len(), 1, "{:?}", game.touch_log);
+    assert_eq!(h.server.pending_touch_count(), 0);
+    // Delivered before this frame's `update_client_data`.
+    assert_eq!(game.touch_update_marks, [updates_before]);
+}
+
+/// A touch caused by a physics step of the settle passes is delivered, and its effect is in
+/// the baseline cut afterwards.
+#[test]
+fn settle_pass_touch_is_in_the_baseline() {
+    let game = TestGame {
+        extra_entities: 2,
+        follow_into_trigger: true,
+        touch_sets_other_skin: Some(9),
+        ..TestGame::default()
+    };
+    let mut h = harness(game);
+    // One touch per settle pass (a single player slot runs two).
+    assert_eq!(h.server.game().touch_log.len(), 2, "{:?}", h.server.game().touch_log);
+    let mut probe = h.add_probe("Player");
+    h.step(&mut [&mut probe], 200);
+    assert_eq!(probe.state(), &ProbeState::InGame);
+    assert_eq!(probe.baselines()[&2].skin, 9);
 }
