@@ -334,6 +334,8 @@ pub struct TestGame {
     /// When non-zero, `server_activate` creates a trigger holding this many boxes and sets
     /// `force_retouch`, so every settle pass touches each box.
     pub activate_crowd: usize,
+    /// When set, every `touch` removes every entity of this classname.
+    pub touch_removes_class: Option<String>,
     /// When set, every `touch` marks the toucher `FL_KILLME`.
     pub touch_kills_toucher: bool,
     /// When set, every `touch` makes the toucher `SOLID_NOT`.
@@ -701,6 +703,11 @@ impl GameDll for TestGame {
         if self.touch_removes_both {
             eng.remove_entity(toucher);
             eng.remove_entity(other);
+        }
+        if let Some(class) = &self.touch_removes_class {
+            while let Some(id) = eng.find_by_classname(None, class) {
+                eng.remove_entity(id);
+            }
         }
         if self.touch_kills_toucher {
             eng.ent_mut(toucher).unwrap().flags |= consts::FL_KILLME;

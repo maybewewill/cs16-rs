@@ -522,22 +522,100 @@ fn brush_pusher_of_a_real_map_carries_its_rider() {
     );
 }
 
-/// The world edict is a `MOVETYPE_PUSH` entity (as in HLDS) with nothing to push: its pass is a
-/// no-op, even with a `nextthink`, and never calls its think (its clock `ltime` has no think
-/// due).
+/// The world edict is a `MOVETYPE_PUSH` entity (as in HLDS) with nothing to push: its clock
+/// `ltime` runs towards `nextthink` without moving anything, the think is called once when the
+/// clock gets there (as for every pusher), and after it the clock rests.
 #[test]
-fn the_world_as_a_pusher_does_nothing() {
+fn the_world_as_a_pusher_only_runs_its_clock_and_thinks() {
     let mut h = harness(TestGame::default());
     let world = h.server.edicts().world();
     let before = vars(&h, world);
     run(&mut h, |eng| {
         let w = eng.world();
-        eng.ent_mut(w).unwrap().nextthink = 5.0;
+        eng.ent_mut(w).unwrap().nextthink = 0.05;
     });
-    h.step(&mut [], 5);
+    // The clock has not got there yet.
+    assert!(vars(&h, world).ltime < 0.05);
+    assert!(h.server.game().think_log.iter().all(|(i, _)| *i != 0));
+    h.step(&mut [], 10);
     let after = vars(&h, world);
     assert_eq!(after.origin, before.origin);
     assert_eq!(after.angles, before.angles);
-    assert!(h.server.game().think_log.iter().all(|(i, _)| *i != 0));
+    // One think of the world, which cleared `nextthink`; the clock stopped where it was due.
+    let world_thinks = h.server.game().think_log.iter().filter(|(i, _)| *i == 0).count();
+    assert_eq!(world_thinks, 1, "{:?}", h.server.game().think_log);
+    assert_eq!(after.nextthink, 0.0);
+    assert!((after.ltime - 0.05).abs() < 1e-9, "ltime {}", after.ltime);
     assert!(h.server.game().blocked_log.is_empty());
+}
+
+/// A touch delivered while a pusher pushes one entity removes the pusher: the push ends at
+/// once, nothing is "blocked", and nothing is left in a state that panics or is not finite.
+#[test]
+fn a_touch_that_removes_the_pusher_ends_the_move() {
+    let game = TestGame {
+        touch_removes_class: Some("pusher".to_string()),
+        ..TestGame::default()
+    };
+    let mut h = harness(game);
+    // As the crush scene: the rider against the wall hits it as the pusher moves it.
+    let (p, free, crushed, wall) = crush_scene(&mut h);
+    assert!(h.server.edicts().get(p).is_none(), "the pusher was removed");
+    assert!(h.server.game().blocked_log.is_empty());
+    for id in [free, crushed, wall] {
+        assert!(vars(&h, id).origin.is_finite());
+    }
+    h.step(&mut [], 5);
+    assert!(h.server.game().blocked_log.is_empty());
+}
+
+/// The same for a rotating pusher (`push_rotate`'s early return).
+#[test]
+fn a_touch_that_removes_a_rotating_pusher_ends_the_move() {
+    let game = TestGame {
+        touch_removes_class: Some("pusher".to_string()),
+        ..TestGame::default()
+    };
+    let mut h = harness(game);
+    let (p, r, wall) = run(&mut h, |eng| {
+        let p = pusher(eng, Vec3::ZERO, 32.0, Vec3::ZERO, 10.0);
+        eng.ent_mut(p).unwrap().avelocity = Vec3::new(0.0, 9000.0, 0.0);
+        let r = body(eng, "rider", Vec3::new(30.0, 0.0, 0.0), 8.0);
+        let wall = body(eng, "wall", Vec3::new(15.0, 15.0, 0.0), 6.0);
+        eng.ent_mut(wall).unwrap().movetype = MOVETYPE_NONE;
+        (p, r, wall)
+    });
+    assert!(h.server.edicts().get(p).is_none(), "the pusher was removed");
+    assert!(h.server.game().blocked_log.is_empty());
+    for id in [r, wall] {
+        let v = vars(&h, id);
+        assert!(v.origin.is_finite() && v.angles.is_finite());
+    }
+    h.step(&mut [], 5);
+    assert!(h.server.game().blocked_log.is_empty());
+}
+
+/// `blocked` removes the entity that blocked a rotation: what was moved so far is put back and
+/// the removed one is skipped (`push_rotate`'s path of the `push_move` test).
+#[test]
+fn blocked_may_remove_the_blocker_of_a_rotation() {
+    let game = TestGame {
+        blocked_removes_other: true,
+        ..TestGame::default()
+    };
+    let mut h = harness(game);
+    let (p, r, wall) = run(&mut h, |eng| {
+        let p = pusher(eng, Vec3::ZERO, 32.0, Vec3::ZERO, 10.0);
+        eng.ent_mut(p).unwrap().avelocity = Vec3::new(0.0, 9000.0, 0.0);
+        let r = body(eng, "rider", Vec3::new(30.0, 0.0, 0.0), 8.0);
+        let wall = body(eng, "wall", Vec3::new(15.0, 15.0, 0.0), 6.0);
+        eng.ent_mut(wall).unwrap().movetype = MOVETYPE_NONE;
+        (p, r, wall)
+    });
+    assert_eq!(h.server.game().blocked_log, [(p.index, r.index)]);
+    assert!(h.server.edicts().get(r).is_none(), "the blocker was removed");
+    let pv = vars(&h, p);
+    assert_eq!(pv.angles, Vec3::ZERO);
+    assert!(pv.ltime.abs() < 1e-12);
+    assert_eq!(vars(&h, wall).origin, Vec3::new(15.0, 15.0, 0.0));
 }
