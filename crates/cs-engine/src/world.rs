@@ -425,6 +425,45 @@ impl WorldLinks {
         }
     }
 
+    /// The solid-list entities whose absolute box touches `mins..maxs`, in the order
+    /// `SV_ClipToLinks` visits them.
+    pub(crate) fn solids_in_box(
+        &self,
+        edicts: &EdictPool,
+        mins: Vec3,
+        maxs: Vec3,
+        out: &mut Vec<EdictId>,
+    ) {
+        self.collect(edicts, mins, maxs, false, true, out);
+    }
+
+    /// The solid-list entities of the nodes `SV_LinkContents` visits for `pos` (the root down
+    /// to the node `pos` selects), in its order. Boxes are not tested.
+    pub(crate) fn solids_along_point(&self, edicts: &EdictPool, pos: Vec3) -> Vec<EdictId> {
+        let mut out = Vec::new();
+        let mut node = 0;
+        loop {
+            let n = &self.nodes[node];
+            out.extend(
+                n.solid
+                    .iter()
+                    .filter_map(|&index| self.link_of(index))
+                    .map(|link| link.id)
+                    .filter(|&id| edicts.get(id).is_some()),
+            );
+            let Some(axis) = n.axis else {
+                return out;
+            };
+            node = if pos[axis] > n.dist {
+                n.children[0]
+            } else if pos[axis] < n.dist {
+                n.children[1]
+            } else {
+                return out;
+            };
+        }
+    }
+
     /// Whether the entity's own leaves (not a box) are in `pvs`; `None` when the entity is not
     /// linked.
     pub(crate) fn leaves_visible(&self, bsp: &BspMap, pvs: &[bool], id: EdictId) -> Option<bool> {

@@ -42,6 +42,100 @@ impl Hull {
     }
 }
 
+impl Hull {
+    /// `clip_mins` of the BSP hull: the corner of the box the hull was built for.
+    pub(crate) fn clip_mins(self) -> Vec3 {
+        -self.half_extents()
+    }
+}
+
+/// `CONTENTS_CURRENT_0` and `CONTENTS_CURRENT_DOWN` (`rehlds/common/const.h`): the water
+/// currents, which `SV_PointContents` reports as water.
+pub const CONTENTS_CURRENT_0: i32 = -9;
+pub const CONTENTS_CURRENT_DOWN: i32 = -14;
+
+/// What a trace walks: a hull of a BSP model, or a box turned into a six-plane hull.
+#[derive(Clone, Copy)]
+pub(crate) enum Geometry<'a> {
+    Bsp { model: usize, hull: Hull },
+    Box(&'a BoxHull),
+}
+
+impl Geometry<'_> {
+    /// The node the walk starts at (`hull->firstclipnode`).
+    fn root(self, world: &WorldCollision) -> i32 {
+        match self {
+            Self::Bsp { model, hull } => world
+                .models
+                .get(model)
+                .map_or(CONTENTS_EMPTY, |m| m.head_nodes[hull as usize]),
+            Self::Box(_) => 0,
+        }
+    }
+
+    /// The node the "back up out of solid" step tests. For a BSP hull it is the world model's
+    /// hull whichever model is traced (behaviour kept as it was in `cs-sim::trace`).
+    fn backup_root(self, world: &WorldCollision) -> i32 {
+        match self {
+            Self::Bsp { hull, .. } => world
+                .models
+                .first()
+                .map_or(CONTENTS_EMPTY, |m| m.head_nodes[hull as usize]),
+            Self::Box(_) => 0,
+        }
+    }
+}
+
+/// `box_hull` of `SV_InitBoxHull`: planes 0..6 are `+x max`, `+x min`, `+y max`, `+y min`,
+/// `+z max`, `+z min`; clipnode `i` has the plane `i`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BoxHull {
+    planes: [Plane; 6],
+}
+
+/// Children of the six clipnodes of the box hull: `children[i & 1]` is empty, the other one
+/// the next clipnode (the last one: solid).
+const BOX_CHILDREN: [[i32; 2]; 6] = {
+    let mut out = [[0; 2]; 6];
+    let mut i = 0;
+    while i < 6 {
+        let side = i & 1;
+        out[i][side] = CONTENTS_EMPTY;
+        out[i][side ^ 1] = if i != 5 {
+            i as i32 + 1
+        } else {
+            CONTENTS_SOLID
+        };
+        i += 1;
+    }
+    out
+};
+
+impl BoxHull {
+    /// `SV_HullForBox`: the hull of the box `mins..maxs`.
+    pub(crate) fn new(mins: Vec3, maxs: Vec3) -> Self {
+        let plane = |i: usize, dist: f32| {
+            let mut normal = Vec3::ZERO;
+            normal[i >> 1] = 1.0;
+            Plane {
+                normal,
+                dist,
+                plane_type: (i >> 1) as i32,
+            }
+        };
+        Self {
+            planes: [
+                plane(0, maxs.x),
+                plane(1, mins.x),
+                plane(2, maxs.y),
+                plane(3, mins.y),
+                plane(4, maxs.z),
+                plane(5, mins.z),
+            ],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct TraceResult {
     pub fraction: f32,
@@ -78,6 +172,15 @@ pub struct WorldCollision {
     models: Vec<BspModel>,
 }
 
+/// A map without any model: the stand-in for geometry that does not need the map (box hulls).
+pub(crate) static NO_COLLISION: WorldCollision = WorldCollision {
+    planes: Vec::new(),
+    nodes: Vec::new(),
+    clipnodes: Vec::new(),
+    leaf_contents: Vec::new(),
+    models: Vec::new(),
+};
+
 // Checked in every build: the engine, and the map collision it holds, may run on its own thread.
 const _: () = {
     const fn assert_send_sync<T: Send + Sync>() {}
@@ -107,10 +210,10 @@ impl WorldCollision {
 
     /// Trace `hull` from `start` to `end` through the world model alone.
     pub fn trace_world(&self, start: Vec3, end: Vec3, hull: Hull) -> TraceResult {
-        let Some(world) = self.models.first() else {
+        if self.models.is_empty() {
             return TraceResult::clear(end);
-        };
-        self.trace_bsp_model(world, Vec3::ZERO, start, end, hull)
+        }
+        self.trace_bsp_model(0, Vec3::ZERO, start, end, hull)
     }
 
     /// Trace `hull` from `start` to `end` through brush model `model` placed at `origin`.
@@ -123,10 +226,10 @@ impl WorldCollision {
         end: Vec3,
         hull: Hull,
     ) -> TraceResult {
-        let Some(m) = self.models.get(model) else {
+        if model >= self.models.len() {
             return TraceResult::clear(end);
-        };
-        self.trace_bsp_model(m, origin, start, end, hull)
+        }
+        self.trace_bsp_model(model, origin, start, end, hull)
     }
 
     /// Contents of the world model at `p` for `hull`.
@@ -154,19 +257,23 @@ impl WorldCollision {
 
     fn trace_bsp_model(
         &self,
-        model: &BspModel,
+        model: usize,
         origin: Vec3,
         start: Vec3,
         end: Vec3,
         hull: Hull,
     ) -> TraceResult {
-        let local_start = start - origin;
-        let local_end = end - origin;
-        let head = model.head_nodes[hull as usize];
+        let mut tr = self.trace_local(Geometry::Bsp { model, hull }, start - origin, end - origin);
+        tr.end_pos += origin;
+        tr
+    }
 
+    /// `SV_RecursiveHullCheck` over `geo` for the segment `start..end`, both in the
+    /// geometry's own frame; the result is in that frame too. Model indices are in range.
+    pub(crate) fn trace_local(&self, geo: Geometry<'_>, start: Vec3, end: Vec3) -> TraceResult {
         let mut ctx = TraceCtx {
             fraction: 1.0,
-            end_pos: local_end,
+            end_pos: end,
             plane_normal: Vec3::Z,
             all_solid: true,
             start_solid: false,
@@ -175,19 +282,19 @@ impl WorldCollision {
             hit_sky: false,
         };
 
-        self.recursive_hull_check(hull, head, 0.0, 1.0, local_start, local_end, &mut ctx);
+        self.recursive_hull_check(geo, geo.root(self), 0.0, 1.0, start, end, &mut ctx);
 
         if ctx.all_solid {
             ctx.start_solid = true;
             ctx.fraction = 0.0;
-            ctx.end_pos = local_start;
+            ctx.end_pos = start;
         } else if ctx.fraction < 1.0 {
-            ctx.end_pos = local_start + (local_end - local_start) * ctx.fraction;
+            ctx.end_pos = start + (end - start) * ctx.fraction;
         }
 
         TraceResult {
             fraction: ctx.fraction,
-            end_pos: ctx.end_pos + origin,
+            end_pos: ctx.end_pos,
             plane_normal: ctx.plane_normal,
             all_solid: ctx.all_solid,
             start_solid: ctx.start_solid,
@@ -196,48 +303,67 @@ impl WorldCollision {
         }
     }
 
-    fn hull_point_contents(&self, hull: Hull, mut node_idx: i32, p: Vec3) -> i32 {
+    fn hull_point_contents(&self, hull: Hull, node_idx: i32, p: Vec3) -> i32 {
+        self.geo_point_contents(Geometry::Bsp { model: 0, hull }, node_idx, p)
+    }
+
+    /// `SV_HullPointContents` from node `node_idx` of `geo`.
+    fn geo_point_contents(&self, geo: Geometry<'_>, mut node_idx: i32, p: Vec3) -> i32 {
         let mut guard = 0usize;
         while node_idx >= 0 && guard < 4096 {
             guard += 1;
-            let (plane_idx, children) = if hull == Hull::Point {
-                let Some(node) = self.nodes.get(node_idx as usize) else {
-                    return CONTENTS_EMPTY;
-                };
-                (node.plane as usize, node.children)
-            } else {
-                let Some(cn) = self.clipnodes.get(node_idx as usize) else {
-                    return CONTENTS_EMPTY;
-                };
-                (cn.plane as usize, cn.children)
-            };
-
-            let Some(plane) = self.planes.get(plane_idx) else {
+            let Some((plane, children)) = self.geo_node(geo, node_idx) else {
                 return CONTENTS_EMPTY;
             };
-            let d = plane_distance(plane, p);
-            node_idx = if d < 0.0 {
-                children[1] as i32
-            } else {
-                children[0] as i32
-            };
+            let d = plane_distance(&plane, p);
+            node_idx = if d < 0.0 { children[1] } else { children[0] };
         }
+        self.geo_leaf_contents(geo, node_idx)
+    }
 
-        if hull == Hull::Point {
-            let leaf_idx = (-node_idx - 1) as usize;
-            self.leaf_contents
-                .get(leaf_idx)
-                .copied()
-                .unwrap_or(CONTENTS_EMPTY)
-        } else {
-            node_idx
+    /// Plane and children of node `idx` of `geo`; `None` out of range.
+    fn geo_node(&self, geo: Geometry<'_>, idx: i32) -> Option<(Plane, [i32; 2])> {
+        let idx = usize::try_from(idx).ok()?;
+        match geo {
+            Geometry::Bsp {
+                hull: Hull::Point, ..
+            } => {
+                let node = self.nodes.get(idx)?;
+                let plane = *self.planes.get(node.plane as usize)?;
+                Some((plane, node.children.map(i32::from)))
+            }
+            Geometry::Bsp { .. } => {
+                let cn = self.clipnodes.get(idx)?;
+                let plane = *self.planes.get(usize::try_from(cn.plane).ok()?)?;
+                Some((plane, cn.children.map(i32::from)))
+            }
+            Geometry::Box(b) => {
+                let plane = *b.planes.get(idx)?;
+                Some((plane, BOX_CHILDREN[idx]))
+            }
+        }
+    }
+
+    /// Contents of the leaf `idx` (negative) of `geo`.
+    fn geo_leaf_contents(&self, geo: Geometry<'_>, idx: i32) -> i32 {
+        match geo {
+            Geometry::Bsp {
+                hull: Hull::Point, ..
+            } => {
+                let leaf_idx = (-idx - 1) as usize;
+                self.leaf_contents
+                    .get(leaf_idx)
+                    .copied()
+                    .unwrap_or(CONTENTS_EMPTY)
+            }
+            _ => idx,
         }
     }
 
     #[allow(clippy::too_many_arguments)]
     fn recursive_hull_check(
         &self,
-        hull: Hull,
+        geo: Geometry<'_>,
         node_idx: i32,
         p1f: f32,
         p2f: f32,
@@ -246,15 +372,7 @@ impl WorldCollision {
         ctx: &mut TraceCtx,
     ) -> bool {
         if node_idx < 0 {
-            let contents = if hull == Hull::Point {
-                let leaf_idx = (-node_idx - 1) as usize;
-                self.leaf_contents
-                    .get(leaf_idx)
-                    .copied()
-                    .unwrap_or(CONTENTS_EMPTY)
-            } else {
-                node_idx
-            };
+            let contents = self.geo_leaf_contents(geo, node_idx);
 
             if contents != CONTENTS_SOLID {
                 ctx.all_solid = false;
@@ -271,30 +389,18 @@ impl WorldCollision {
             return true;
         }
 
-        let (plane_idx, children) = if hull == Hull::Point {
-            let Some(node) = self.nodes.get(node_idx as usize) else {
-                return true;
-            };
-            (node.plane as usize, node.children)
-        } else {
-            let Some(cn) = self.clipnodes.get(node_idx as usize) else {
-                return true;
-            };
-            (cn.plane as usize, cn.children)
-        };
-
-        let Some(plane) = self.planes.get(plane_idx) else {
+        let Some((plane, children)) = self.geo_node(geo, node_idx) else {
             return true;
         };
 
-        let t1 = plane_distance(plane, p1);
-        let t2 = plane_distance(plane, p2);
+        let t1 = plane_distance(&plane, p1);
+        let t2 = plane_distance(&plane, p2);
 
         if t1 >= 0.0 && t2 >= 0.0 {
-            return self.recursive_hull_check(hull, children[0] as i32, p1f, p2f, p1, p2, ctx);
+            return self.recursive_hull_check(geo, children[0], p1f, p2f, p1, p2, ctx);
         }
         if t1 < 0.0 && t2 < 0.0 {
-            return self.recursive_hull_check(hull, children[1] as i32, p1f, p2f, p1, p2, ctx);
+            return self.recursive_hull_check(geo, children[1], p1f, p2f, p1, p2, ctx);
         }
 
         // Split the segment across the plane with classic GoldSrc DIST_EPSILON padding
@@ -309,15 +415,15 @@ impl WorldCollision {
         let side = usize::from(t1 < 0.0);
 
         // Near side first
-        if !self.recursive_hull_check(hull, children[side] as i32, p1f, midf, p1, mid, ctx) {
+        if !self.recursive_hull_check(geo, children[side], p1f, midf, p1, mid, ctx) {
             return false;
         }
 
         // If far side is not solid at `mid`, recurse into it
-        if self.hull_point_contents(hull, children[side ^ 1] as i32, mid) != CONTENTS_SOLID {
+        if self.geo_point_contents(geo, children[side ^ 1], mid) != CONTENTS_SOLID {
             return self.recursive_hull_check(
-                hull,
-                children[side ^ 1] as i32,
+                geo,
+                children[side ^ 1],
                 midf,
                 p2f,
                 mid,
@@ -346,8 +452,7 @@ impl WorldCollision {
         // The check walks the world model's hull even when tracing a brush sub-model
         // (behaviour kept as it was in `cs-sim::trace`).
         let mut tries = 0;
-        while self.hull_point_contents(hull, self.models[0].head_nodes[hull as usize], adj_mid)
-            == CONTENTS_SOLID
+        while self.geo_point_contents(geo, geo.backup_root(self), adj_mid) == CONTENTS_SOLID
             && tries < 8
         {
             adj_frac -= 0.05;

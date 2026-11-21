@@ -17,6 +17,7 @@ pub mod precache;
 pub mod server;
 mod signon;
 mod think;
+mod trace_ents;
 pub mod usercmd;
 mod world;
 
@@ -50,6 +51,7 @@ pub use signon::{
     INIT_BUFFER_BUDGET, MAX_SIGNON_BUFFER, SIGNON_BASELINE_RESERVE, SPAWN_TAIL_MAX,
 };
 pub use think::MAX_THINKS_PER_FRAME;
+pub use trace_ents::{EntTrace, MoveFilter};
 pub use usercmd::{
     MAX_BANKED_MS, MAX_CONSECUTIVE_BAD_MOVES, MAX_DROPPED_REPLAY, MAX_USERCMD_STEP_MS, MsecBudget,
     STRINGCMD_BURST, STRINGCMD_RATE_PER_SEC, select_cmds_to_run, split_usercmd, usercmd_is_finite,

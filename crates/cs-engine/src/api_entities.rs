@@ -208,8 +208,8 @@ impl EngineApi<'_> {
         self.cvars.set(name, value);
     }
 
-    /// Traces `hull` from `start` to `end` through the world model only; entities are not
-    /// traced yet (that comes with entity collision in a later plan). Without collision data
+    /// Traces `hull` from `start` to `end` through the world model only; for a trace that
+    /// also hits entities see [`trace_hull_ents`](Self::trace_hull_ents). Without collision data
     /// (stub map) nothing is hit: fraction 1, `end_pos = end`. A `start` or `end` outside the
     /// world (non-finite, or a coordinate beyond [`MAX_WORLD_COORD`]) is refused: nothing is
     /// hit, `end_pos = start` if `start` is inside the world, else the origin. Every returned
@@ -281,7 +281,7 @@ pub(crate) fn in_world(v: Vec3) -> bool {
 
 /// The answer to a refused trace: nothing hit, ending where it started if `start` is inside the
 /// world, else at the origin.
-fn refused_trace(start: Vec3) -> TraceResult {
+pub(crate) fn refused_trace(start: Vec3) -> TraceResult {
     TraceResult::clear(if in_world(start) { start } else { Vec3::ZERO })
 }
 
