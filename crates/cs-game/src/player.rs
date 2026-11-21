@@ -7,7 +7,7 @@
 //!
 //! A player lives in [`GameState::players`], by slot, from `client_put_in_server` to
 //! `client_disconnect`. A fresh player is [`Team::Unassigned`]: invisible, not solid, taking no
-//! damage, until the team task spawns it with [`spawn`]. The movement is `cs_sim::pmove` over
+//! damage, until it has picked a team and an appearance ([`crate::teams`]) and spawns with [`spawn`]. The movement is `cs_sim::pmove` over
 //! the engine's traces (`EngineWorld`); the rest of `pm_shared` is not ported (a dying player
 //! moves like a walking one with no input, where the original runs `PM_Physics_Toss`).
 //!
@@ -23,7 +23,7 @@
 //! ## Known gaps
 //!
 //! Not ported yet, each a later task: weapons and the active item, the economy rewards
-//! (`AddAccount`), team selection and `m_iJoiningState`, rounds (`CheckWinConditions`,
+//! (`AddAccount`), rounds (`CheckWinConditions`,
 //! `FPlayerCanRespawn`, the freeze period), the observer camera of the dead (`StartDeathCam`),
 //! `Pain` sounds, flinch, the momentum block of `TakeDamage` (see [`take_damage`]), the blast
 //! branch of `TakeDamage`, the HUD damage message, armor (`Battery`, `ArmorType`) messages,
@@ -53,7 +53,9 @@ use cs_sim::walk_game::{EngineWorld, usercmd_to_move_input};
 use glam::Vec3;
 
 use crate::GameState;
+use crate::menus::{self, Menu};
 use crate::messages;
+use crate::teams::{self, JoinState};
 use crate::world::{select_join_spawn_point, select_spawn_point};
 
 /// Most players a server holds (the slots of [`GameState::players`]).
@@ -228,12 +230,20 @@ pub struct Player {
     pub(crate) dead_time: f64,
     /// Server time of the next `PlayerDeathThink`.
     next_death_think: f64,
+    /// `m_iJoiningState`: where the player is on its way into the game ([`crate::teams`]).
+    pub joining: JoinState,
+    /// `m_iMenu`: the menu the player is looking at.
+    pub menu: Menu,
+    /// `m_bTeamChanged`: the player has picked a team since it entered the server.
+    pub team_changed: bool,
+    /// `m_bVGUIMenus`: the client's `_vgui_menus` (VGUI menus, else text ones).
+    pub vgui_menus: bool,
 }
 
 impl Player {
     /// A player as `ClientPutInServer` leaves it: no team, nothing earned, `money` in the
     /// account.
-    fn new(money: i32) -> Self {
+    pub(crate) fn new(money: i32) -> Self {
         Self {
             team: Team::Unassigned,
             class: 0,
@@ -255,7 +265,17 @@ impl Player {
             death_cam: false,
             dead_time: 0.0,
             next_death_think: 0.0,
+            joining: JoinState::ShowLText,
+            menu: Menu::Off,
+            team_changed: false,
+            vgui_menus: true,
         }
+    }
+
+    /// Whether the player has joined the game with a team that plays: the stand-in for
+    /// `m_iJoiningState == JOINED` with a team that spawns.
+    pub(crate) fn in_play(&self) -> bool {
+        self.joining == JoinState::Joined && self.team.plays()
     }
 
     /// `CBasePlayer::IsArmored`.
@@ -300,8 +320,9 @@ pub(crate) fn put_in_server(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8
         return;
     }
     // `CheckStartMoney`: `mp_startmoney` clamped to the account's limits.
-    let money = (eng.cvar_f32("mp_startmoney") as i32).clamp(0, MAX_MONEY);
-    g.players[index] = Some(Player::new(money));
+    let mut player = Player::new(start_money(eng));
+    player.vgui_menus = prefers_vgui_menus(eng, slot);
+    g.players[index] = Some(player);
     let id = eng.client_edict(slot);
     let (origin, angles) = match select_join_spawn_point(g, eng, id, SpawnTeam::CounterTerrorist) {
         Some(spot) => {
@@ -333,6 +354,33 @@ pub(crate) fn put_in_server(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8
     v.fov = DEFAULT_FOV;
     v.view_ofs = Vec3::new(0.0, 0.0, VEC_VIEW);
     eng.set_origin(id, origin);
+    teams::send_team_infos(g, eng, slot);
+}
+
+/// `CheckStartMoney`: `mp_startmoney` clamped to the account's limits.
+pub(crate) fn start_money(eng: &EngineApi<'_>) -> i32 {
+    (eng.cvar_f32("mp_startmoney") as i32).clamp(0, MAX_MONEY)
+}
+
+/// `SetPrefsFromUserinfo`: whether the client wants VGUI menus (`_vgui_menus`, on when the
+/// key is missing or empty).
+fn prefers_vgui_menus(eng: &EngineApi<'_>, slot: u8) -> bool {
+    match eng.client_key(slot, "_vgui_menus") {
+        Some(v) if !v.is_empty() => menus::atoi(v) != 0,
+        _ => true,
+    }
+}
+
+/// `ClientUserInfoChanged`: the part that concerns the menus.
+pub(crate) fn userinfo_changed(g: &mut GameState, eng: &EngineApi<'_>, slot: u8) {
+    let vgui = prefers_vgui_menus(eng, slot);
+    if let Some(p) = g
+        .players
+        .get_mut(usize::from(slot))
+        .and_then(Option::as_mut)
+    {
+        p.vgui_menus = vgui;
+    }
 }
 
 /// `ClientDisconnect`: the slot's player is gone and its edict inert.
@@ -340,7 +388,9 @@ pub(crate) fn disconnect(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let Some(entry) = g.players.get_mut(usize::from(slot)) else {
         return;
     };
-    *entry = None;
+    if entry.take().is_some() {
+        teams::announce_departure(eng, slot);
+    }
     let id = eng.client_edict(slot);
     let Some(v) = eng.ent_mut(id) else {
         return;
@@ -365,11 +415,29 @@ fn model_name(team: Team, class: u8) -> &'static str {
     }
 }
 
+/// `SetClientUserInfoModel` and `SetNewPlayerModel` of `HandleMenu_ChooseAppearance`: the player
+/// of `slot` wears appearance `class` of `team` (the userinfo `model` key the clients render it
+/// by) on the team's default model file; a player on no team gets the plain `player.mdl`.
+pub(crate) fn apply_model(eng: &mut EngineApi<'_>, slot: u8, team: Team, class: u8) {
+    let file = match team {
+        Team::Terrorist => {
+            eng.set_client_key(slot, "model", model_name(team, class));
+            "models/player/terror/terror.mdl"
+        }
+        Team::Ct => {
+            eng.set_client_key(slot, "model", model_name(team, class));
+            "models/player/urban/urban.mdl"
+        }
+        Team::Unassigned | Team::Spectator => "models/player.mdl",
+    };
+    let id = eng.client_edict(slot);
+    eng.set_model(id, file);
+}
+
 /// Spawns the player of `slot` on `team` with appearance `class`: `CBasePlayer::Spawn` of a
 /// joined player, including `GetPlayerSpawnSpot` (the spawn point may kill the players standing
 /// at it) and the team's model. `false` for a team that does not spawn or a slot with no
 /// player.
-#[allow(dead_code)] // Called by the team selection, which comes after this task (tests use it).
 pub(crate) fn spawn(
     g: &mut GameState,
     eng: &mut EngineApi<'_>,
@@ -494,7 +562,7 @@ pub(crate) fn run_usercmd(
     else {
         return;
     };
-    if cmd.msec == 0 || !p.team.plays() {
+    if cmd.msec == 0 || !p.in_play() {
         return;
     }
     let alive = p.alive;
@@ -737,7 +805,7 @@ pub(crate) fn take_damage(
 }
 
 /// `CBasePlayer::Kill`: the player kills itself. `false` when it cannot (it has not joined).
-fn kill(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) -> bool {
+pub(crate) fn kill(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) -> bool {
     let id = eng.client_edict(slot);
     let Some(p) = g
         .players
@@ -746,7 +814,8 @@ fn kill(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) -> bool {
     else {
         return false;
     };
-    if !p.team.plays() {
+    // Only a player in the game, and alive (an observer is not killed).
+    if !p.in_play() || !p.alive {
         return false;
     }
     p.last_hit_group = HITGROUP_GENERIC;
@@ -1016,16 +1085,35 @@ pub(crate) fn client_data(
     data
 }
 
-/// What a player's `client_command` does: `kill`.
+/// What a player's `client_command` does: `kill`, and the team and menu commands (`ClientCommand_`
+/// of ReGameDLL `client.cpp`). Nothing happens for a slot with no player or an unknown command.
 pub(crate) fn client_command(
     g: &mut GameState,
     eng: &mut EngineApi<'_>,
     slot: u8,
     argv: &[String],
 ) {
-    // Console commands are not case sensitive.
-    if argv.first().is_some_and(|c| c.eq_ignore_ascii_case("kill")) {
+    let Some(command) = argv.first() else {
+        return;
+    };
+    if g.players
+        .get(usize::from(slot))
+        .is_none_or(Option::is_none)
+    {
+        return;
+    }
+    // `kill` is the engine's command, which the engine matches without regard to case.
+    if command.eq_ignore_ascii_case("kill") {
         client_kill(g, eng, slot);
+        return;
+    }
+    // The game compares the rest exactly (`FStrEq`).
+    match command.as_str() {
+        "menuselect" => menus::menuselect(g, eng, slot, argv),
+        "chooseteam" => teams::choose_team(g, eng, slot),
+        "jointeam" => teams::join_team(g, eng, slot, argv),
+        "joinclass" => teams::join_class(g, eng, slot, argv),
+        _ => {}
     }
 }
 

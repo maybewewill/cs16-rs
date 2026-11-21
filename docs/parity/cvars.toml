@@ -3,6 +3,11 @@ id = "_vgui_menus"
 status = "implemented"
 
 [[item]]
+id = "allow_spectators"
+status = "tested"
+evidence = "crates/cs-game/tests/teams.rs::spectators, new_player_sees_the_team_menu"
+
+[[item]]
 id = "bot_difficulty"
 status = "implemented"
 
@@ -59,6 +64,11 @@ id = "hostname"
 status = "implemented"
 
 [[item]]
+id = "humans_join_team"
+status = "tested"
+evidence = "crates/cs-game/tests/teams.rs::humans_join_team_sends_players_to_that_team"
+
+[[item]]
 id = "hud_fastswitch"
 status = "implemented"
 
@@ -83,6 +93,10 @@ id = "mp3volume"
 status = "implemented"
 
 [[item]]
+id = "mp_autoteambalance"
+status = "missing"
+
+[[item]]
 id = "mp_c4timer"
 status = "implemented"
 
@@ -93,6 +107,11 @@ status = "implemented"
 [[item]]
 id = "mp_friendlyfire"
 status = "implemented"
+
+[[item]]
+id = "mp_limitteams"
+status = "tested"
+evidence = "crates/cs-game/tests/teams.rs::team_limits_refuse_as_regamedll"
 
 [[item]]
 id = "mp_roundtime"

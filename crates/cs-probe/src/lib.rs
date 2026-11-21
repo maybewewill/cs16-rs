@@ -317,6 +317,11 @@ impl<T: PacketTransport> ProbeClient<T> {
         &self.userinfos
     }
 
+    /// Forgets the logged messages, so a test can tell what arrives from now on.
+    pub fn clear_messages(&mut self) {
+        self.messages.clear();
+    }
+
     /// The last 1024 messages received, oldest first, without `svc_nop`, `svc_time`,
     /// `svc_clientdata` and the entity updates that every frame carries. User messages are
     /// decoded. A map change does not clear it.

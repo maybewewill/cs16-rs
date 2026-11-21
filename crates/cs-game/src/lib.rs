@@ -4,11 +4,14 @@
 //!
 //! This is the foundation: the entity registry ([`entity`]), the world and the static entities
 //! of a map ([`world`]) and [`CsGame`], which dispatches the engine's calls to the entities. The
-//! players are in [`player`]: their lifecycle, damage, death and movement.
+//! players are in [`player`]: their lifecycle, damage, death and movement; [`teams`] and [`menus`]
+//! take them from the team menu into the game.
 
 pub mod entity;
+pub mod menus;
 mod messages;
 pub mod player;
+pub mod teams;
 pub mod world;
 
 use cs_engine::{EdictId, EngineApi, GameDll};
@@ -115,6 +118,14 @@ impl CsGame {
         team: player::Team,
         class: u8,
     ) -> bool {
+        if let Some(p) = self
+            .state
+            .players
+            .get_mut(usize::from(slot))
+            .and_then(Option::as_mut)
+        {
+            teams::mark_joined(p);
+        }
         player::spawn(&mut self.state, eng, slot, team, class)
     }
 
@@ -218,7 +229,9 @@ impl GameDll for CsGame {
         player::client_command(&mut self.state, eng, slot, argv);
     }
 
-    fn client_userinfo_changed(&mut self, _eng: &mut EngineApi<'_>, _slot: u8) {}
+    fn client_userinfo_changed(&mut self, eng: &mut EngineApi<'_>, slot: u8) {
+        player::userinfo_changed(&mut self.state, eng, slot);
+    }
 
     fn run_usercmd(
         &mut self,
@@ -230,7 +243,9 @@ impl GameDll for CsGame {
         player::run_usercmd(&mut self.state, eng, slot, cmd);
     }
 
-    fn start_frame(&mut self, _eng: &mut EngineApi<'_>, _frametime: f32) {}
+    fn start_frame(&mut self, eng: &mut EngineApi<'_>, _frametime: f32) {
+        teams::frame(&mut self.state, eng);
+    }
 
     fn think(&mut self, eng: &mut EngineApi<'_>, id: EdictId) {
         with_entity(&mut self.state, eng, id, |entity, g, eng| {
