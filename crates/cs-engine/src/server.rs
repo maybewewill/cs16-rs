@@ -970,7 +970,8 @@ mod tests {
             CVarRegistry::new_with_defaults(),
         );
         assert_eq!(server.init_buffer_len(), INIT_BUFFER_BUDGET);
-        assert!(server.baselines.len() <= entities);
+        // The map entities and the world (edict 0, which has a model).
+        assert!(server.baselines.len() <= entities + 1);
         // Every slot connected, each with a userinfo of the longest a connect may carry.
         let info = format!("\\k\\{}", "v".repeat(MAX_INFO_STRING - 3));
         assert_eq!(info.len(), MAX_INFO_STRING);

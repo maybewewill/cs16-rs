@@ -142,11 +142,17 @@ impl<G: GameDll> Server<G> {
     /// `classname` is skipped. When the pool has no free edict the remaining entries are
     /// skipped and one error is logged with their number.
     pub(crate) fn spawn_map_entities(&mut self) {
-        // `SV_SpawnServer` (ReHLDS `sv_main.cpp`, read 2026-11-21) makes the world a brush entity
-        // that pushes before the game spawns anything: physics asks for `SOLID_BSP` when it
-        // decides whether a landing is on the ground.
+        // `SV_SpawnServer` (ReHLDS `sv_main.cpp`, lines 6657-6663, read 2026-11-21) makes the
+        // world a brush entity that pushes before the game spawns anything: `modelindex` 1,
+        // the world model's name, `SOLID_BSP` and `MOVETYPE_PUSH`. Physics asks for `SOLID_BSP`
+        // when it decides whether a landing is on the ground, `trace_entity(world)` needs the
+        // model, and `SV_CreateBaseline` makes a baseline for edict 0 (the frames never send
+        // it: `SV_WriteEntitiesToClient` starts at entity 1).
         let world = self.edicts.world();
+        let model = self.map.path.clone();
         if let Some(edict) = self.edicts.get_mut(world) {
+            edict.vars.modelindex = 1;
+            edict.vars.model = model;
             edict.vars.solid = SOLID_BSP;
             edict.vars.movetype = MOVETYPE_PUSH;
         }

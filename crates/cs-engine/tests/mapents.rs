@@ -492,3 +492,20 @@ fn map_entity_is_visible_to_a_probe() {
     assert_eq!(seen.origin, Vec3::new(0.0, 0.0, 32.0));
     assert_eq!(seen.modelindex, vars.modelindex);
 }
+
+/// `SV_SpawnServer` gives the world `modelindex` 1 and the world model's name; `SV_CreateBaseline`
+/// makes a baseline for edict 0, and the frames never send it (`SV_WriteEntitiesToClient`
+/// starts at entity 1).
+#[test]
+fn the_world_has_its_model_a_baseline_and_is_never_sent() {
+    let mut h = harness_on(4, vec![world()], TestGame::default());
+    let w = h.server.edicts().get(h.server.edicts().world()).unwrap();
+    assert_eq!(w.vars.modelindex, 1);
+    assert_eq!(w.vars.model, "maps/lump.bsp");
+    let mut probe = h.add_probe("A");
+    h.step(&mut [&mut probe], 200);
+    assert_eq!(probe.state(), &ProbeState::InGame);
+    assert!(probe.baselines().contains_key(&0), "{:?}", probe.baselines().keys());
+    assert!(!h.server.game().add_to_full_pack_ents.contains(&0));
+    assert!(!probe.entities().contains_key(&0));
+}

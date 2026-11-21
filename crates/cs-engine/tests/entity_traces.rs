@@ -562,3 +562,32 @@ fn a_move_inside_a_box_entity_keeps_the_source_fraction() {
     assert_eq!(t.trace.fraction, 1.0);
     assert_eq!(t.trace.end_pos, Vec3::new(5.0, 0.0, 0.0));
 }
+
+/// The world edict has the world model, so `trace_entity(world)` is the world's own trace:
+/// a line straight down from over a spawn point hits the floor.
+#[test]
+fn trace_entity_of_the_world_hits_the_world_model() {
+    let Ok(vfs) = Vfs::discover(None, VfsConfig::default()) else {
+        return;
+    };
+    let raw = vfs.read_bytes("maps/de_dust2.bsp").expect("de_dust2 reads");
+    let bsp = Arc::new(BspMap::load(&vfs, "de_dust2").expect("de_dust2 parses"));
+    let spawn = bsp.spawns.first().expect("de_dust2 has spawns").position;
+    let map = ServerMap::from_bsp("de_dust2", &raw, bsp).expect("valid BSP header");
+    let cfg = ServerConfig {
+        max_clients: 2,
+        ..ServerConfig::default()
+    };
+    let mut h = Harness::with_map(cfg, map, TestGame::default());
+    let t = run(&mut h, move |eng| {
+        let w = eng.world();
+        eng.trace_entity(
+            w,
+            spawn + Vec3::Z * 8.0,
+            spawn - Vec3::Z * 512.0,
+            Hull::Point,
+        )
+    });
+    assert_eq!(t.ent, Some(world()));
+    assert!(t.trace.fraction < 1.0 && t.trace.fraction > 0.0, "{:?}", t.trace);
+}

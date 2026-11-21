@@ -426,7 +426,9 @@ impl<G: GameDll> Server<G> {
             .filter(|(id, edict)| {
                 let v = &edict.vars;
                 *id == viewer
-                    || (v.modelindex != 0
+                    // The world (edict 0) has a model but is never sent: the source starts at 1.
+                    || (id.index != 0
+                        && v.modelindex != 0
                         && v.effects & EF_NODRAW == 0
                         && self.entity_in_pvs(pvs.as_deref(), *id, v))
             })

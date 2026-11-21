@@ -123,8 +123,12 @@ fn sines(angles: Vec3) -> (f32, f32, f32, f32, f32, f32) {
     (sy, cy, sp, cp, sr, cr)
 }
 
-/// The brush model number of a `*N` model name.
+/// The brush model number of a `*N` model name; model index 1 is the world model (0), which
+/// the world edict has (`SV_SpawnServer`).
 pub(crate) fn brush_model(v: &EntVars) -> Option<usize> {
+    if v.modelindex == 1 {
+        return Some(0);
+    }
     v.model.strip_prefix('*')?.parse().ok()
 }
 
