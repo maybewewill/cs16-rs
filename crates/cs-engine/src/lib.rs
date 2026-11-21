@@ -18,6 +18,8 @@ pub mod precache;
 pub mod server;
 mod signon;
 mod physics;
+mod physics_move;
+mod physics_water;
 mod rng;
 mod touch;
 mod trace_ents;
