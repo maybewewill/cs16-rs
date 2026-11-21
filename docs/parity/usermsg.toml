@@ -213,7 +213,8 @@ status = "implemented"
 
 [[item]]
 id = "ClCorpse"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::clcorpse_roundtrips"
 
 [[item]]
 id = "HostagePos"

@@ -485,6 +485,7 @@ fn select_spawn_spot(
     player: EdictId,
     classname: &str,
     last: Option<EdictId>,
+    kill_occupants: bool,
 ) -> Option<EdictId> {
     let mut spot = eng.find_by_classname(last, classname);
     if spot.is_none() {
@@ -506,7 +507,9 @@ fn select_spawn_spot(
             break;
         }
     }
-    if let Some(first) = first {
+    if let Some(first) = first
+        && kill_occupants
+    {
         kill_spawn_occupants(g, eng, player, first);
     }
     first
@@ -525,11 +528,34 @@ pub fn select_spawn_point(
     player: EdictId,
     team: SpawnTeam,
 ) -> Option<EdictId> {
+    select_spawn_point_with(g, eng, player, team, true)
+}
+
+/// [`select_spawn_point`] for a player that only joins (`ClientPutInServer` looks for the
+/// counter-terrorists' spot to stand at): the same choice, and the point still becomes the
+/// team's last one, but when every point is taken nobody is killed (the vanilla join path
+/// would telefrag; a spectating newcomer has no business doing that).
+pub fn select_join_spawn_point(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    player: EdictId,
+    team: SpawnTeam,
+) -> Option<EdictId> {
+    select_spawn_point_with(g, eng, player, team, false)
+}
+
+fn select_spawn_point_with(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    player: EdictId,
+    team: SpawnTeam,
+    kill_occupants: bool,
+) -> Option<EdictId> {
     let (class, last) = match team {
         SpawnTeam::CounterTerrorist => (CT_SPAWN_CLASS, g.last_ct_spawn),
         SpawnTeam::Terrorist => (T_SPAWN_CLASS, g.last_t_spawn),
     };
-    let spot = select_spawn_spot(g, eng, player, class, last)
+    let spot = select_spawn_spot(g, eng, player, class, last, kill_occupants)
         .or_else(|| eng.find_by_classname(None, T_SPAWN_CLASS));
     let last = match team {
         SpawnTeam::CounterTerrorist => &mut g.last_ct_spawn,

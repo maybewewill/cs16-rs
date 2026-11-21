@@ -11,11 +11,34 @@
 //! the engine's traces (`EngineWorld`); the rest of `pm_shared` is not ported (a dying player
 //! moves like a walking one with no input, where the original runs `PM_Physics_Toss`).
 //!
+//! A player that joins stands at the counter-terrorists' spawn point as in `ClientPutInServer`
+//! (without the telefrag the vanilla join path would do); the `trigger_camera` intro path (the
+//! player looks through the map's camera until it picks a team) is not ported.
+//!
+//! The dead leave a corpse: `PlayerDeathThink` sends `ClCorpse` once the player has been dead
+//! for `DEATH_ANIMATION_TIME`, then calls `StartDeathCam`, which belongs to the observer task
+//! (see [`start_death_cam`], its call point; until then it only records that the corpse was
+//! sent, as `PFLAG_OBSERVER` does in the original).
+//!
+//! ## Known gaps
+//!
 //! Not ported yet, each a later task: weapons and the active item, the economy rewards
 //! (`AddAccount`), team selection and `m_iJoiningState`, rounds (`CheckWinConditions`,
-//! `FPlayerCanRespawn`, the freeze period), the observer camera of the dead, `Pain` sounds,
-//! knockback and flinch, the blast branch of `TakeDamage`, the HUD damage message, animations
-//! and the VIP.
+//! `FPlayerCanRespawn`, the freeze period), the observer camera of the dead (`StartDeathCam`),
+//! `Pain` sounds, flinch, the momentum block of `TakeDamage` (see [`take_damage`]), the blast
+//! branch of `TakeDamage`, the HUD damage message, armor (`Battery`, `ArmorType`) messages,
+//! animations and the VIP.
+//!
+//! Fields of the client data ([`client_data`]) that stay zero for now:
+//! - `bInDuck`, `flDuckTime`, `flTimeStepSound`, `waterjumptime`, `flSwimTime`, `pushmsec`: the
+//!   state of `pm_shared`'s duck, step-sound and water-jump timers; `cs_sim::pmove` has no such
+//!   timers, they come with the faithful `pm_shared` port.
+//! - `weaponanim`, `viewmodel`, `m_flNextAttack`, the ammo fields and the `iuser3` flags
+//!   (`PLAYER_CAN_SHOOT`, `PLAYER_FREEZE_TIME_OVER`, `PLAYER_IN_BOMB_ZONE`, ...): they belong to
+//!   the weapons, the freeze period and the bomb zones.
+//! - `fuser1`-`fuser3`: set by the spectator and HLTV code.
+//! - `weapons` carries only the suit bit (`1 << WEAPON_SUIT`) that `PlayerSpawn` sets; the
+//!   weapon bits come with the weapons.
 
 use cs_assets::bsp::SpawnTeam;
 use cs_engine::consts::{
@@ -24,13 +47,14 @@ use cs_engine::consts::{
 };
 use cs_engine::{EdictId, EngineApi};
 use cs_proto48::delta::{GoldSrcClientData, GoldSrcUserCmd};
+use cs_proto48::usermsg::CsUserMsg;
 use cs_sim::pmove::{MoveInputCmd, PlayerMoveState, VEC_VIEW, step_player_move};
 use cs_sim::walk_game::{EngineWorld, usercmd_to_move_input};
 use glam::Vec3;
 
 use crate::GameState;
 use crate::messages;
-use crate::world::select_spawn_point;
+use crate::world::{select_join_spawn_point, select_spawn_point};
 
 /// Most players a server holds (the slots of [`GameState::players`]).
 pub const MAX_PLAYERS: usize = 32;
@@ -90,6 +114,10 @@ const HULL_MIN: Vec3 = Vec3::new(-16.0, -16.0, -36.0);
 const HULL_MAX: Vec3 = Vec3::new(16.0, 16.0, 36.0);
 const DUCK_HULL_MIN: Vec3 = Vec3::new(-16.0, -16.0, -18.0);
 const DUCK_HULL_MAX: Vec3 = Vec3::new(16.0, 16.0, 18.0);
+/// `WEAPON_SUIT`: the bit of `pev->weapons` that stands for the HEV suit.
+const WEAPON_SUIT: u32 = 31;
+/// `DEATH_ANIMATION_TIME` (`gamerules.h`): how long a death lasts before the corpse is sent.
+const DEATH_ANIMATION_TIME: f64 = 3.0;
 /// `DEFAULT_FOV`.
 const DEFAULT_FOV: f32 = 90.0;
 /// The speed of a player with no active item (`CBasePlayer::ResetMaxSpeed`, ReGameDLL
@@ -154,7 +182,8 @@ pub enum ArmorType {
 /// What the game knows of one player: the fields of `CBasePlayer` this task needs.
 ///
 /// `health` mirrors `pev->health` and is written to the edict whenever it changes; the edict's
-/// variables carry the rest of the entity state (origin, flags, movetype, ...).
+/// variables carry the rest of the entity state (origin, flags, movetype, ...). `armor` and
+/// `weapons` live only here.
 #[derive(Debug, Clone)]
 pub struct Player {
     pub team: Team,
@@ -163,7 +192,8 @@ pub struct Player {
     /// guerilla (`client.cpp`, `HandleMenu_ChooseAppearance`).
     pub class: u8,
     pub health: f32,
-    /// `pev->armorvalue`.
+    /// `pev->armorvalue`. Kept here only: the edict has no such field and the client is not
+    /// told yet (the `Battery` message belongs to the HUD and economy tasks).
     pub armor: f32,
     /// `m_iKevlar`.
     pub kevlar: ArmorType,
@@ -189,10 +219,11 @@ pub struct Player {
     pub(crate) client_health: i32,
     /// `m_LastHitGroup`.
     pub(crate) last_hit_group: i32,
-    /// `m_lastDamageAmount`.
-    pub(crate) last_damage_amount: f32,
-    /// `m_bitsDamageType`: the kinds of damage since the HUD was last told.
-    pub(crate) damage_bits: u32,
+    /// `pev->weapons`: only the suit bit for now.
+    pub(crate) weapons: u32,
+    /// `PFLAG_OBSERVER` as far as `PlayerDeathThink` is concerned: the corpse was sent and
+    /// [`start_death_cam`] ran.
+    pub(crate) death_cam: bool,
     /// Server time of the death, `m_fDeadTime` once the player is `DEAD_DEAD`.
     pub(crate) dead_time: f64,
     /// Server time of the next `PlayerDeathThink`.
@@ -220,8 +251,8 @@ impl Player {
             next_suicide_time: 0.0,
             client_health: -1,
             last_hit_group: HITGROUP_GENERIC,
-            last_damage_amount: 0.0,
-            damage_bits: 0,
+            weapons: 0,
+            death_cam: false,
             dead_time: 0.0,
             next_death_think: 0.0,
         }
@@ -256,10 +287,13 @@ pub(crate) fn player_slot(g: &GameState, eng: &EngineApi<'_>, id: EdictId) -> Op
     slot_of(eng, id).filter(|&s| g.players[s].is_some())
 }
 
-/// `ClientPutInServer` of a multiplayer game (ReGameDLL `client.cpp`): the player enters with no
-/// team, invisible, not solid and taking no damage, until it is spawned. The original keeps the
-/// player as a `MOVETYPE_NOCLIP` spectator with `models/player.mdl` while it looks at the intro
-/// camera and the menus; with neither, this is `MOVETYPE_NONE` and no model.
+/// `ClientPutInServer` of a multiplayer game (ReGameDLL `client.cpp`, read 2026-11-22): the
+/// player enters with no team, invisible, not solid and taking no damage, until it is spawned.
+/// It stands at the counter-terrorists' spawn point (the `GetPlayerSpawnSpot` of the original's
+/// no-camera path; the `trigger_camera` intro path is not ported) with `v_angle` zero and the
+/// spot's angles, and keeps the view offset `VEC_VIEW`. The original keeps the player as a
+/// `MOVETYPE_NOCLIP` spectator with `models/player.mdl` while it looks at the menus; with no
+/// menus yet, this is `MOVETYPE_NONE` and no model.
 pub(crate) fn put_in_server(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let index = usize::from(slot);
     if index >= MAX_PLAYERS {
@@ -269,9 +303,22 @@ pub(crate) fn put_in_server(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8
     let money = (eng.cvar_f32("mp_startmoney") as i32).clamp(0, MAX_MONEY);
     g.players[index] = Some(Player::new(money));
     let id = eng.client_edict(slot);
+    let (origin, angles) = match select_join_spawn_point(g, eng, id, SpawnTeam::CounterTerrorist) {
+        Some(spot) => {
+            let v = eng.ent(spot);
+            (
+                v.map_or(Vec3::ZERO, |v| v.origin) + Vec3::new(0.0, 0.0, 1.0),
+                v.map_or(Vec3::ZERO, |v| v.angles),
+            )
+        }
+        None => (Vec3::new(0.0, 0.0, 1.0), Vec3::ZERO),
+    };
     let Some(v) = eng.ent_mut(id) else {
         return;
     };
+    v.origin = origin;
+    v.angles = angles;
+    v.v_angle = Vec3::ZERO;
     v.flags = FL_CLIENT | FL_SPECTATOR;
     v.solid = SOLID_NOT;
     v.movetype = MOVETYPE_NONE;
@@ -284,8 +331,8 @@ pub(crate) fn put_in_server(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8
     v.fixangle = 1;
     v.max_speed = 1.0;
     v.fov = DEFAULT_FOV;
-    v.view_ofs = Vec3::ZERO;
-    // The engine links the player after this call.
+    v.view_ofs = Vec3::new(0.0, 0.0, VEC_VIEW);
+    eng.set_origin(id, origin);
 }
 
 /// `ClientDisconnect`: the slot's player is gone and its edict inert.
@@ -366,7 +413,9 @@ pub(crate) fn spawn(
     p.fall_velocity = 0.0;
     p.client_health = -1;
     p.last_hit_group = HITGROUP_GENERIC;
-    p.damage_bits = 0;
+    p.death_cam = false;
+    // `PlayerSpawn`: `pev->weapons |= (1 << WEAPON_SUIT)`.
+    p.weapons |= 1 << WEAPON_SUIT;
     p.mv = PlayerMoveState::at_spawn(origin);
 
     if eng.ent(id).is_some_and(|v| v.modelindex == 0) {
@@ -498,6 +547,13 @@ fn move_player(
     else {
         return;
     };
+    // Start from the edict, so a move the engine (or the game) made since the last command is
+    // not overwritten.
+    if let Some(v) = eng.ent(id) {
+        p.mv.origin = v.origin;
+        p.mv.velocity = v.velocity;
+        p.mv.on_ground = v.flags & FL_ONGROUND != 0;
+    }
     let world = EngineWorld::new(eng, id, &g.ladders);
     step_player_move(&mut p.mv, &input, max_speed, &g.move_params, &world, dt);
     // What the movement ran into reaches the engine as impacts, delivered after the command.
@@ -580,18 +636,21 @@ fn post_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     }
 }
 
-/// `CBasePlayer::TakeDamage` (the branch for everything but explosions, which come with the
-/// grenades), then `CBaseMonster::TakeDamage`: refuses damage the rules forbid
+/// `CBasePlayer::TakeDamage` (ReGameDLL `player.cpp`, the branch for everything but explosions,
+/// which come with the grenades), then `CBaseMonster::TakeDamage`, which for a player resolves to
+/// `CBaseEntity::TakeDamage` (`cbase.cpp:660-712`, read 2026-11-22): refuses damage the rules
+/// forbid
 /// (`FPlayerCanTakeDamage`: a teammate's needs `mp_friendlyfire`), scales a teammate's (and
 /// one's own) by 0.35, lets armor absorb its share, takes the health off and kills the player at
 /// zero. `attacker` and `inflictor` are `None` for the world. Returns whether the player took
 /// damage and survived (the original's result).
 ///
 /// Left out for the tasks that need them: the active-item multipliers of the armor ratio, the
-/// VIP's, flinch and knockback, the `Pain` sound, the teammate-attack hints, the HUD damage
-/// message. `CBaseMonster::TakeDamage` is not part of ReGameDLL's sources; its effect on a
-/// player (health loses the damage truncated to an integer, `Killed` at zero or less) is the
-/// Half-Life SDK's (assumption).
+/// VIP's, flinch and `TakeDamageImpulse` knockback, the `Pain` sound, the teammate-attack hints,
+/// the HUD damage message, and the momentum block of `CBaseEntity::TakeDamage` (a `MOVETYPE_WALK`
+/// or `MOVETYPE_STEP` victim whose inflictor is not the world gets `velocity += dir * min(1000,
+/// damage * (32 * 32 * 72 / size volume) * 5)`, `dir` from the inflictor's centre to the
+/// victim): it needs the inflictor entities, so it is ported with the weapons (2D).
 pub(crate) fn take_damage(
     g: &mut GameState,
     eng: &mut EngineApi<'_>,
@@ -631,8 +690,8 @@ pub(crate) fn take_damage(
     if attacker_slot.is_some() && teammate && attacker_slot != Some(index) && !friendly_fire {
         return false;
     }
-    // Already dead.
-    if !p.alive {
+    // `pev->takedamage == DAMAGE_NO`, and already dead.
+    if !p.takes_damage || !p.alive {
         return false;
     }
     let mut damage = damage;
@@ -662,11 +721,9 @@ pub(crate) fn take_damage(
             p.kevlar = ArmorType::None;
         }
     }
-    p.last_damage_amount = damage;
     // `CBaseMonster::TakeDamage` gets the damage as an integer: a player with half a point of
     // health would look dead to the client.
     p.health -= damage.trunc();
-    p.damage_bits |= bits;
     let health = p.health;
     let id = eng.client_edict(slot);
     if let Some(v) = eng.ent_mut(id) {
@@ -726,9 +783,10 @@ pub(crate) fn client_kill(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) 
     kill(g, eng, slot);
 }
 
-/// The weapon name of a death message (`CBasePlayer::GetKillerWeaponName`): the inflictor's
-/// classname without its `weapon_`, `monster_` or `func_` prefix, `world` for none. A player's
-/// own weapon (the inflictor is the killer) names itself once weapons exist.
+/// The weapon name of a death message (`CBasePlayer::GetKillerWeaponName`, `player.cpp:824-872`):
+/// the inflictor's classname without its `weapon_`, `monster_` or `func_` prefix. A killer that is
+/// no client with no inflictor is the world (`VARS(eoNullEntity)`): `worldspawn`. A client killer
+/// that is its own inflictor names its active weapon, `world` while there are no weapons.
 fn killer_weapon_name(
     eng: &EngineApi<'_>,
     inflictor: Option<EdictId>,
@@ -737,10 +795,14 @@ fn killer_weapon_name(
     let killer_is_client = attacker
         .and_then(|a| eng.ent(a))
         .is_some_and(|v| v.flags & FL_CLIENT != 0);
+    let world_class = eng
+        .ent(eng.world())
+        .map_or("worldspawn", |v| v.classname.as_str());
     let name = match inflictor {
         Some(i) if !(killer_is_client && Some(i) == attacker) => {
             eng.ent(i).map_or("world", |v| v.classname.as_str())
         }
+        None if !killer_is_client => world_class,
         _ => "world",
     };
     ["weapon_", "monster_", "func_"]
@@ -808,7 +870,10 @@ fn killed(
         p.client_health = 0;
     }
     messages::health(eng, slot, 0);
+    // `SendFOV(0)`.
+    messages::set_fov(eng, slot, 0);
     if let Some(v) = eng.ent_mut(id) {
+        v.fov = 0.0;
         v.deadflag = DEAD_DYING;
         v.movetype = MOVETYPE_TOSS;
         v.flags &= !FL_ONGROUND;
@@ -869,6 +934,38 @@ fn death_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
         v.deadflag = DEAD_DEAD;
         p.dead_time = now;
     }
+    // A player dead for `DEATH_ANIMATION_TIME` leaves a corpse and goes to the death camera.
+    if v.deadflag != DEAD_RESPAWNABLE && !p.death_cam && now > p.dead_time + DEATH_ANIMATION_TIME {
+        let origin = [
+            (v.origin.x * 128.0) as i32,
+            (v.origin.y * 128.0) as i32,
+            (v.origin.z * 128.0) as i32,
+        ];
+        let (angles, body) = (v.angles, v.body);
+        let time_diff = ((f64::from(v.animtime) - now) * 100.0) as i32;
+        let sequence = v.sequence as u8;
+        let (team, player_id) = (p.team.id(), id.index as u8);
+        start_death_cam(p);
+        let model = eng.client_key(slot, "model").unwrap_or("urban").to_string();
+        let corpse = CsUserMsg::ClCorpse {
+            model,
+            origin,
+            angles,
+            time_diff,
+            sequence,
+            body,
+            team,
+            player_id,
+        };
+        messages::corpse(eng, corpse);
+    }
+}
+
+/// The call point of `CBasePlayer::StartDeathCam`, which `PlayerDeathThink` calls right after
+/// the corpse was sent: the observer camera of the dead is the observer task's (Task 9). Until
+/// then this only records what the camera's `PFLAG_OBSERVER` records, that the corpse is out.
+fn start_death_cam(p: &mut Player) {
+    p.death_cam = true;
 }
 
 /// `UpdateClientData` (ReGameDLL `client.cpp`, `CBasePlayer::UpdateClientData`): the player's
@@ -899,6 +996,10 @@ pub(crate) fn client_data(
         ..Default::default()
     };
     let health = v.health;
+    let mut data = data;
+    if let Some(p) = g.players.get(usize::from(slot)).and_then(Option::as_ref) {
+        data.weapons = p.weapons;
+    }
     if let Some(p) = g
         .players
         .get_mut(usize::from(slot))
@@ -922,7 +1023,8 @@ pub(crate) fn client_command(
     slot: u8,
     argv: &[String],
 ) {
-    if argv.first().map(String::as_str) == Some("kill") {
+    // Console commands are not case sensitive.
+    if argv.first().is_some_and(|c| c.eq_ignore_ascii_case("kill")) {
         client_kill(g, eng, slot);
     }
 }

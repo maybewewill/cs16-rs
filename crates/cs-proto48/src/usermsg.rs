@@ -262,6 +262,19 @@ pub enum CsUserMsg {
     InitHud,
     BuyClose,
     ShowTimer,
+    /// `gmsgSendCorpse` (registered as `ClCorpse`): a dead player's body, left to the client to
+    /// draw. `origin` is the position times 128 as longs, `angles` are coords, `time_diff` is
+    /// `(animtime - time) * 100` (ReGameDLL `CBasePlayer::SpawnClientSideCorpse`).
+    ClCorpse {
+        model: String,
+        origin: [i32; 3],
+        angles: Vec3,
+        time_diff: i32,
+        sequence: u8,
+        body: u8,
+        team: u8,
+        player_id: u8,
+    },
     Unknown {
         name: String,
         payload: Vec<u8>,
@@ -422,6 +435,16 @@ pub fn decode_cs_usermsg(name: &str, payload: &[u8]) -> Result<CsUserMsg, ProtoE
         "InitHUD" => CsUserMsg::InitHud,
         "BuyClose" => CsUserMsg::BuyClose,
         "ShowTimer" => CsUserMsg::ShowTimer,
+        "ClCorpse" => CsUserMsg::ClCorpse {
+            model: r.read_str()?,
+            origin: [r.read_i32()?, r.read_i32()?, r.read_i32()?],
+            angles: Vec3::new(r.read_coord()?, r.read_coord()?, r.read_coord()?),
+            time_diff: r.read_i32()?,
+            sequence: r.read_u8()?,
+            body: r.read_u8()?,
+            team: r.read_u8()?,
+            player_id: r.read_u8()?,
+        },
         _ => CsUserMsg::Unknown {
             name: name.to_string(),
             payload: payload.to_vec(),
@@ -692,6 +715,30 @@ pub fn encode_cs_usermsg(msg: &CsUserMsg) -> (&'static str, Vec<u8>) {
         CsUserMsg::InitHud => "InitHUD",
         CsUserMsg::BuyClose => "BuyClose",
         CsUserMsg::ShowTimer => "ShowTimer",
+        CsUserMsg::ClCorpse {
+            model,
+            origin,
+            angles,
+            time_diff,
+            sequence,
+            body,
+            team,
+            player_id,
+        } => {
+            w.write_str(model);
+            for v in origin {
+                w.write_i32(*v);
+            }
+            w.write_coord(angles.x);
+            w.write_coord(angles.y);
+            w.write_coord(angles.z);
+            w.write_i32(*time_diff);
+            w.write_u8(*sequence);
+            w.write_u8(*body);
+            w.write_u8(*team);
+            w.write_u8(*player_id);
+            "ClCorpse"
+        }
         CsUserMsg::Unknown { payload, .. } => {
             w.write_bytes(payload);
             "Unknown"
@@ -741,5 +788,22 @@ mod tests {
             let decoded = decode_cs_usermsg(name, &raw).unwrap();
             assert_eq!(decoded, m);
         }
+    }
+
+    #[test]
+    fn clcorpse_roundtrips() {
+        let m = CsUserMsg::ClCorpse {
+            model: "gign".to_string(),
+            origin: [-100 * 128, 4096 * 128 + 64, 36 * 128],
+            angles: Vec3::new(0.0, 90.5, -1.25),
+            time_diff: -312,
+            sequence: 12,
+            body: 1,
+            team: 2,
+            player_id: 5,
+        };
+        let (name, raw) = encode_cs_usermsg(&m);
+        assert_eq!(name, "ClCorpse");
+        assert_eq!(decode_cs_usermsg(name, &raw).unwrap(), m);
     }
 }

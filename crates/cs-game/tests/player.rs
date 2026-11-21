@@ -281,6 +281,11 @@ fn connected_player_waits_unassigned() {
     assert_ne!(v.flags & FL_CLIENT, 0);
     assert_ne!(v.flags & FL_SPECTATOR, 0);
     assert!(!moved);
+    // It stands at a counter-terrorist spawn point (the first, which the join used), looking
+    // where the point looks, with the standing view offset.
+    assert_eq!(v.origin, Vec3::new(100.0, 0.0, 1.0));
+    assert_eq!((v.angles.y, v.v_angle), (90.0, Vec3::ZERO));
+    assert_eq!(v.view_ofs.z, 17.0);
     // Nobody else is in the game.
     assert!(b.server.game().game.state().players[1].is_none());
 }
@@ -318,8 +323,9 @@ fn spawned_player_has_regamedll_defaults() {
         (Vec3::new(-16.0, -16.0, -36.0), Vec3::new(16.0, 16.0, 36.0))
     );
     assert_eq!(v.view_ofs, Vec3::new(0.0, 0.0, 17.0));
-    // `GetPlayerSpawnSpot`: one unit above the point, at its angles, view angles cleared.
-    assert_eq!(v.origin, Vec3::new(100.0, 0.0, 1.0));
+    // `GetPlayerSpawnSpot`: one unit above the point, at its angles, view angles cleared. The
+    // join took the first counter-terrorist point, so this is the next one.
+    assert_eq!(v.origin, Vec3::new(300.0, 0.0, 1.0));
     assert_eq!(v.angles.y, 90.0);
     assert_eq!(v.v_angle, Vec3::ZERO);
     assert_eq!(v.fixangle, 1);
@@ -459,7 +465,8 @@ fn kill_command_kills_and_costs_a_frag() {
     );
     assert_eq!(v.health, p.health);
 
-    // Dead players do not suicide again.
+    // Dead players do not suicide again, whatever the case of the command.
+    b.run(|game, eng| game.client_command(eng, 0, &["KILL".to_string()]));
     let (p, _) = b.run(kill);
     assert_eq!((p.frags, p.deaths), (-1, 1));
 
@@ -583,9 +590,14 @@ fn kills_score_by_who_killed() {
     let again = b.run(|game, eng| game.damage_player(eng, 0, Some(1), 500.0, dmg::BULLET));
     assert!(!again);
     assert_eq!(frags(&mut b), ((0, 1, false), (1, 0, true)));
-    // The world kills without a frag lost or gained.
+    // The world kills without a frag lost or gained, and the death notice names it.
     b.run(|game, eng| game.damage_player(eng, 1, None, 500.0, dmg::CRUSH));
     assert_eq!(frags(&mut b), ((0, 1, false), (1, 1, false)));
+    b.step(5);
+    assert!(b.messages().iter().any(|m| matches!(
+        m,
+        CsUserMsg::DeathMsg { killer_id: 0, victim_id: 2, weapon, .. } if weapon == "worldspawn"
+    )));
     // A teammate's kill costs the killer a frag.
     b.run(|game, eng| {
         eng.set_cvar("mp_friendlyfire", "1");
@@ -672,8 +684,14 @@ fn client_data_reflects_the_player() {
     assert_eq!(data.fov, 90.0);
     assert_eq!(data.deadflag, DEAD_NO);
     assert_eq!(data.view_ofs.z, 17.0);
-    assert_eq!(data.origin, Vec3::new(100.0, 0.0, 1.0));
+    assert_eq!(data.origin, Vec3::new(300.0, 0.0, 1.0));
     assert_eq!(data.waterlevel, 0);
+    // The suit bit `PlayerSpawn` sets, nothing else yet.
+    assert_eq!(data.weapons, 1 << 31);
+    assert_eq!(
+        (data.b_in_duck, data.fl_duck_time, data.weaponanim),
+        (0, 0, 0)
+    );
     assert_ne!(data.flags & FL_CLIENT, 0);
 
     // Hurt: the health follows, and the client is told.
@@ -700,6 +718,8 @@ fn client_data_reflects_the_player() {
     });
     assert_eq!(data.deadflag, DEAD_DYING);
     assert!(data.health <= 0.0);
+    // `SendFOV(0)` on death.
+    assert_eq!(data.fov, 0.0);
     b.step(5);
     let health: Vec<u8> = b
         .messages()
@@ -732,4 +752,80 @@ fn a_disconnected_player_leaves_the_game() {
         game.run_usercmd(eng, 0, &cmd(10), 0);
         game.client_command(eng, 0, &["kill".to_string()]);
     });
+}
+
+#[test]
+fn a_spawner_does_not_telefrag_itself_or_the_dead() {
+    // One point only, so it is always the one the spawner picks.
+    let mut b = Bench::stub(vec![
+        entity(&[("classname", "worldspawn")]),
+        spawn_at("info_player_start", "100 0 0"),
+    ]);
+    b.enter_second_client();
+    // The occupant is the spawner itself: respawning where it stands kills nobody.
+    let (p, deaths) = b.run(|game, eng| {
+        game.spawn_player(eng, 0, Team::Ct, 0);
+        game.respawn_player(eng, 0);
+        (
+            game.state().players[0].clone().unwrap(),
+            game.state().players[0].as_ref().unwrap().deaths,
+        )
+    });
+    assert!(p.alive);
+    assert_eq!((p.health, deaths), (100.0, 0));
+
+    // The occupant is already dead: the point still counts as taken, the dead player is not
+    // killed again (no second death, no frag change) and the spawner lives.
+    let (spawner, dead) = b.run(|game, eng| {
+        game.spawn_player(eng, 1, Team::Ct, 0);
+        game.damage_player(eng, 1, None, 500.0, dmg::CRUSH);
+        game.spawn_player(eng, 0, Team::Ct, 0);
+        (
+            game.state().players[0].clone().unwrap(),
+            game.state().players[1].clone().unwrap(),
+        )
+    });
+    assert!(spawner.alive);
+    assert!(!dead.alive);
+    assert_eq!((dead.deaths, dead.frags), (1, 0));
+}
+
+#[test]
+fn a_dead_player_leaves_a_corpse() {
+    let mut b = Bench::stub(stub_spawns());
+    b.run(|game, eng| {
+        game.spawn_player(eng, 0, Team::Ct, 4);
+        game.client_command(eng, 0, &["kill".to_string()]);
+    });
+    let corpses = |b: &Bench| {
+        b.messages()
+            .into_iter()
+            .filter(|m| matches!(m, CsUserMsg::ClCorpse { .. }))
+            .collect::<Vec<_>>()
+    };
+    // No corpse while the player is dying or has just died.
+    for _ in 0..50 {
+        b.run(|game, eng| game.run_usercmd(eng, 0, &cmd(10), 0));
+    }
+    assert!(corpses(&b).is_empty());
+    // It is sent once, three seconds after the death was over.
+    for _ in 0..800 {
+        b.run(|game, eng| game.run_usercmd(eng, 0, &cmd(10), 0));
+    }
+    b.step(5);
+    let corpses = corpses(&b);
+    assert_eq!(corpses.len(), 1);
+    let CsUserMsg::ClCorpse {
+        model,
+        team,
+        player_id,
+        origin,
+        ..
+    } = &corpses[0]
+    else {
+        unreachable!()
+    };
+    assert_eq!((model.as_str(), *team, *player_id), ("gign", 2, 1));
+    // The body is where the player died: `origin` is the position times 128.
+    assert_eq!(origin[0], 300 * 128);
 }

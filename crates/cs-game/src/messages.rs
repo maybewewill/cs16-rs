@@ -51,3 +51,13 @@ pub(crate) fn death_msg(
 pub(crate) fn health(eng: &mut EngineApi<'_>, slot: u8, hp: u8) {
     eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::Health(hp));
 }
+
+/// `gmsgSetFOV` to `slot` (`CBasePlayer::SendFOV`).
+pub(crate) fn set_fov(eng: &mut EngineApi<'_>, slot: u8, fov: u8) {
+    eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::SetFov(fov));
+}
+
+/// `gmsgSendCorpse` to everyone (`CBasePlayer::SpawnClientSideCorpse`).
+pub(crate) fn corpse(eng: &mut EngineApi<'_>, msg: CsUserMsg) {
+    eng.send_usermsg(MsgDest::All, &msg);
+}
