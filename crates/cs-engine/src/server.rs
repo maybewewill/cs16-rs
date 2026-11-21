@@ -323,6 +323,15 @@ impl<G: GameDll> Server<G> {
             .map(|c| c.frames.stored())
     }
 
+    /// `(records, distinct records)` held by the updates kept for the client in `slot`: the
+    /// number of entity records in its frame ring and how many of them are separate
+    /// allocations (records of unchanged entities are shared). Test aid.
+    #[doc(hidden)]
+    pub fn client_frame_records(&self, slot: u8) -> Option<(usize, usize)> {
+        let client = self.clients.get(usize::from(slot)).filter(|c| !c.is_free())?;
+        Some(client.frames.record_counts())
+    }
+
     /// Bytes in the init buffer: what the game sent to `MsgDest::Init` while activating the
     /// current map, at most [`INIT_BUFFER_BUDGET`](crate::INIT_BUFFER_BUDGET).
     pub fn init_buffer_len(&self) -> usize {

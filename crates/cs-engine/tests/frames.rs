@@ -524,3 +524,29 @@ fn rejected_datagram_keeps_the_delta_request() {
     assert!(probe.stats().delta_updates > deltas);
     assert_eq!(probe.stats().parse_errors, 0);
 }
+
+/// The ring of updates kept as delta bases shares the records of entities that did not change:
+/// 70 updates of 12 static entities hold about one record per entity, not 64 each.
+#[test]
+fn unchanged_entities_share_their_records_across_the_ring() {
+    let entities = 12;
+    let game = TestGame {
+        extra_entities: entities,
+        ..TestGame::default()
+    };
+    let mut h = Harness::with_game(4, game);
+    let mut probe = joined(&mut h, "A", &mut []);
+    // Enough frames for more than 70 updates at the default rate.
+    for _ in 0..400 {
+        h.step(&mut [&mut probe], 1);
+    }
+    assert_eq!(h.server.client_frame_count(0), Some(64));
+    let (total, distinct) = h.server.client_frame_records(0).unwrap();
+    // 64 updates of the extras and the player.
+    assert!(total >= 64 * entities, "{total} records kept");
+    // The static extras are 12 records; the player and anything else may change a little.
+    assert!(
+        distinct <= 2 * (entities + 1),
+        "{distinct} distinct records of {total}"
+    );
+}

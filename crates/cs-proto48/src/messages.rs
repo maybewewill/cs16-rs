@@ -1,6 +1,7 @@
 //! GoldSrc Protocol 48 `svc_*` (server → client) and `clc_*` (client → server)
 //! message codecs (`ReHLDS/engine/net.h`, `sv_main.cpp`, `sv_user.cpp`).
 
+use std::borrow::Borrow;
 use std::collections::BTreeMap;
 
 use glam::Vec3;
@@ -1706,7 +1707,7 @@ pub fn write_svc_packetentities_delta(
     max_clients: u8,
     delta_seq: u8,
     baselines: &BTreeMap<u16, (u8, DeltaRecord)>,
-    from: &BTreeMap<u16, (u8, DeltaRecord)>,
+    from: &BTreeMap<u16, (u8, impl Borrow<DeltaRecord>)>,
     to: &[GoldSrcEntityState],
     server_time: f64,
 ) {
@@ -1735,7 +1736,8 @@ pub fn write_svc_packetentities_delta(
 
         let prev = from.get(&num);
         let zero = schema.zero_record();
-        let base = match matching_base(caller_entry(prev), custom, schema) {
+        let prev_entry = prev.map(|(ent_type, rec)| (wire_entity_type(*ent_type), rec.borrow()));
+        let base = match matching_base(prev_entry, custom, schema) {
             Some(prev_rec) => {
                 if !has_delta_changes(schema, prev_rec, &rec) {
                     continue;

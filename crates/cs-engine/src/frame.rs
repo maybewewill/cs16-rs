@@ -4,6 +4,8 @@
 use std::collections::BTreeMap;
 
 use cs_proto48::bitbuf::MsgWriter;
+use std::sync::Arc;
+
 use cs_proto48::delta::{DeltaRecord, GoldSrcEntityState};
 use cs_proto48::messages::{
     entity_schema_name, wire_entity_type, write_svc_choke, write_svc_clientdata,
@@ -38,8 +40,10 @@ const EF_NODRAW: u32 = 128;
 pub struct ClientFrame {
     /// Netchan sequence of the datagram that carried the update.
     pub seq: u32,
-    /// Entities sent, as `(wire entity type, record)` by entity number.
-    pub entities: BTreeMap<u16, (u8, DeltaRecord)>,
+    /// Entities sent, as `(wire entity type, record)` by entity number. The record of an
+    /// entity whose state did not change from one update to the next is the same `Arc`, so a
+    /// ring of 64 updates of static entities holds one record each.
+    pub entities: BTreeMap<u16, (u8, Arc<DeltaRecord>)>,
     pub clientdata: DeltaRecord,
     /// Real time the update was built (`client_frame_t::senttime`).
     pub sent_at: f64,
@@ -64,6 +68,15 @@ pub struct FramePlayer {
     /// `EntVars::health` of the player when the update was built (`entity_state_t::health`,
     /// which the original's game fills from it; an assumption, not checked against the game).
     pub health: f32,
+}
+
+/// The state of an entity as last encoded for one client, kept to skip the encoding (and share
+/// the record) when the next update shows the same state.
+#[derive(Debug, Clone)]
+pub(crate) struct EncodedEntity {
+    state: GoldSrcEntityState,
+    wire_type: u8,
+    record: Arc<DeltaRecord>,
 }
 
 /// The last [`UPDATE_BACKUP`] updates sent to one client, by netchan sequence.
@@ -151,6 +164,19 @@ impl FrameRing {
         } else {
             0.0
         }
+    }
+
+    /// `(entity records, distinct allocations among them)` over the frames stored.
+    pub(crate) fn record_counts(&self) -> (usize, usize) {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut total = 0;
+        for frame in self.frames.iter().flatten() {
+            for (_, record) in frame.entities.values() {
+                total += 1;
+                seen.insert(Arc::as_ptr(record));
+            }
+        }
+        (total, seen.len())
     }
 
     /// Frames stored, at most [`UPDATE_BACKUP`].
@@ -349,18 +375,41 @@ impl<G: GameDll> Server<G> {
         }
 
         if with_entities {
-            let entities = entities
-                .iter()
-                .filter_map(|state| {
-                    let wire_type = wire_entity_type(state.entity_type);
-                    let schema = self.deltas.get(entity_schema_name(
-                        state.number,
-                        wire_type,
-                        max_clients,
-                    ))?;
-                    Some((state.number, (wire_type, state.to_delta(schema))))
-                })
-                .collect();
+            // An entity in the same state as in the update before keeps its record (and the
+            // encoding is skipped).
+            let mut encoded = BTreeMap::new();
+            let mut stored = BTreeMap::new();
+            for state in &entities {
+                let known = client
+                    .last_encoded
+                    .remove(&state.number)
+                    .filter(|known| known.state == *state);
+                let known = match known {
+                    Some(known) => known,
+                    None => {
+                        let wire_type = wire_entity_type(state.entity_type);
+                        let Some(schema) = self.deltas.get(entity_schema_name(
+                            state.number,
+                            wire_type,
+                            max_clients,
+                        )) else {
+                            continue;
+                        };
+                        EncodedEntity {
+                            state: state.clone(),
+                            wire_type,
+                            record: Arc::new(state.to_delta(schema)),
+                        }
+                    }
+                };
+                stored.insert(
+                    state.number,
+                    (known.wire_type, Arc::clone(&known.record)),
+                );
+                encoded.insert(state.number, known);
+            }
+            client.last_encoded = encoded;
+            let entities = stored;
             client.frames.store(ClientFrame {
                 seq,
                 entities,

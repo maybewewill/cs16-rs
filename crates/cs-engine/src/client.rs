@@ -1,10 +1,12 @@
 //! State of one client slot: where it is in the sign-on, its address and its netchan.
 
+use std::collections::BTreeMap;
+
 use cs_proto48::delta::GoldSrcUserCmd;
 use cs_proto48::netchan::{FRAGMENT_S2C_MAX_SIZE, NetChan};
 use cs_transport::PeerAddr;
 
-use crate::frame::{FrameRing, MAX_DATAGRAM};
+use crate::frame::{EncodedEntity, FrameRing, MAX_DATAGRAM};
 use crate::lifecycle::{PingTracker, SETINFO_BURST, SETINFO_RATE_PER_SEC};
 use crate::usercmd::{MsecBudget, TokenBucket};
 
@@ -82,6 +84,8 @@ pub(crate) struct Client {
     pub(crate) pings: PingTracker,
     /// Updates sent, kept as delta bases.
     pub(crate) frames: FrameRing,
+    /// The entities of the last update as encoded, by entity number (see `frame.rs`).
+    pub(crate) last_encoded: BTreeMap<u16, EncodedEntity>,
     /// Server time the next update is due.
     pub(crate) next_update_at: f64,
     /// Sequence of the update the client last asked deltas from (`clc_delta`).
@@ -116,6 +120,7 @@ impl Client {
             last_heard: 0.0,
             pings: PingTracker::default(),
             frames: FrameRing::new(),
+            last_encoded: BTreeMap::new(),
             next_update_at: 0.0,
             delta_seq: None,
             clear_time: 0.0,
@@ -144,6 +149,7 @@ impl Client {
     /// Forgets the updates sent so far: the next one is sent in full.
     pub(crate) fn reset_frames(&mut self) {
         self.frames = FrameRing::new();
+        self.last_encoded.clear();
         self.delta_seq = None;
     }
 
