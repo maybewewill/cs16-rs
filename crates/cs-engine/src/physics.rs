@@ -385,7 +385,9 @@ impl<G: GameDll> Server<G> {
         true
     }
 
-    /// Moves `check` by `push` with the pusher out of the way (`SOLID_NOT` for the push).
+    /// Moves `check` by `push` with the pusher out of the way (`SOLID_NOT` for the push). The
+    /// impact touches are delivered inside [`push_entity`](Self::push_entity), so `check` or
+    /// the pusher may be gone, or `check` marked `FL_KILLME`, when this returns.
     fn push_clear_of(&mut self, pusher: EdictId, check: EdictId, push: Vec3) {
         let solid = self.edicts.get(pusher).map(|e| e.vars.solid);
         if let Some(edict) = self.edicts.get_mut(pusher) {
@@ -485,6 +487,10 @@ impl<G: GameDll> Server<G> {
             moved.push((check, entorig));
 
             self.push_clear_of(pusher, check, step);
+            // A touch delivered during the push may have removed the pusher.
+            if self.edicts.get(pusher).is_none() {
+                return;
+            }
             if self.push_blocked_by(check) {
                 self.push_failed(
                     pusher,
@@ -562,6 +568,9 @@ impl<G: GameDll> Server<G> {
             );
 
             self.push_clear_of(pusher, check, end - start);
+            if self.edicts.get(pusher).is_none() {
+                return false;
+            }
             if let Some(c) = self.edicts.get_mut(check).map(|e| &mut e.vars)
                 && c.movetype != MOVETYPE_PUSHSTEP
             {

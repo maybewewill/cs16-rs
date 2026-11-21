@@ -521,3 +521,23 @@ fn brush_pusher_of_a_real_map_carries_its_rider() {
         pv.origin.z
     );
 }
+
+/// The world edict is a `MOVETYPE_PUSH` entity (as in HLDS) with nothing to push: its pass is a
+/// no-op, even with a `nextthink`, and never calls its think (its clock `ltime` has no think
+/// due).
+#[test]
+fn the_world_as_a_pusher_does_nothing() {
+    let mut h = harness(TestGame::default());
+    let world = h.server.edicts().world();
+    let before = vars(&h, world);
+    run(&mut h, |eng| {
+        let w = eng.world();
+        eng.ent_mut(w).unwrap().nextthink = 5.0;
+    });
+    h.step(&mut [], 5);
+    let after = vars(&h, world);
+    assert_eq!(after.origin, before.origin);
+    assert_eq!(after.angles, before.angles);
+    assert!(h.server.game().think_log.iter().all(|(i, _)| *i != 0));
+    assert!(h.server.game().blocked_log.is_empty());
+}

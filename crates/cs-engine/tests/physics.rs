@@ -10,7 +10,7 @@ use std::sync::Arc;
 use common::{FRAME, Harness, TestGame, schedule_extra_thinks};
 use cs_assets::bsp::BspMap;
 use cs_engine::consts::{
-    FL_KILLME, MOVETYPE_FOLLOW, MOVETYPE_NOCLIP, MOVETYPE_NONE, MOVETYPE_PUSH, SOLID_BBOX,
+    FL_KILLME, MOVETYPE_FOLLOW, MOVETYPE_NOCLIP, MOVETYPE_NONE, SOLID_BBOX,
     SOLID_TRIGGER,
 };
 use cs_engine::{EdictId, EngineApi, SV_TIME_AT_MAP_START, ServerConfig, ServerMap};
@@ -315,29 +315,30 @@ fn players_are_skipped_by_the_entity_pass() {
         v.movetype = MOVETYPE_NOCLIP;
         v.velocity = Vec3::new(1000.0, 0.0, 0.0);
         v.nextthink = t;
-        // The world is not a player: its think runs.
-        let world = eng.world();
-        eng.ent_mut(world).unwrap().nextthink = t;
+        // An entity that is not a player: its think runs. (The world is a `PUSH` entity on its
+        // own clock `ltime`, as in HLDS, so it is no control for this.)
+        let other = eng.create_entity("control").unwrap();
+        eng.ent_mut(other).unwrap().nextthink = t;
     });
     h.step(&mut [], 5);
     assert_eq!(vars(&h, player).origin, before);
     let log = &h.server.game().think_log;
     assert!(log.iter().all(|(index, _)| *index != 1), "{log:?}");
-    assert!(log.iter().any(|(index, _)| *index == 0), "{log:?}");
+    assert!(log.iter().any(|(index, _)| *index > 1), "{log:?}");
     assert!(vars(&h, player).nextthink > 0.0, "left alone");
 }
 
 #[test]
-fn movetypes_not_ported_yet_only_think() {
-    // 1 and 2 and 99 are movetypes HLDS refuses; PUSH is not ported yet. All think.
+fn movetypes_hlds_refuses_only_think() {
+    // 1 and 2 and 99 are movetypes HLDS refuses. They only think.
     let game = TestGame {
-        extra_entities: 4,
+        extra_entities: 3,
         ..TestGame::default()
     };
     let mut h = harness(1, game);
     schedule_extra_thinks(&mut h, 0.01, Vec::new());
     run(&mut h, |eng| {
-        for (index, movetype) in [(2, 1), (3, 2), (4, 99), (5, MOVETYPE_PUSH)] {
+        for (index, movetype) in [(2, 1), (3, 2), (4, 99)] {
             let id = eng.entity_ids()[index];
             assert_eq!(id.index, index as u16);
             let v = eng.ent_mut(id).unwrap();
@@ -347,8 +348,8 @@ fn movetypes_not_ported_yet_only_think() {
     });
     h.step(&mut [], 2);
     let log = &h.server.game().think_log;
-    assert_eq!(log.len(), 4, "{log:?}");
-    for index in 2..=5 {
+    assert_eq!(log.len(), 3, "{log:?}");
+    for index in 2..=4 {
         let (id, _) = h.server.edicts().by_index(index).unwrap();
         assert_eq!(vars(&h, id).origin.x, 0.0, "entity {index} did not move");
     }
