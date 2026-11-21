@@ -4,10 +4,11 @@
 //!
 //! This is the foundation: the entity registry ([`entity`]), the world and the static entities
 //! of a map ([`world`]) and [`CsGame`], which dispatches the engine's calls to the entities. The
-//! players are a stand-in (`walker.rs`: spawn at a spawn point, walk) until the player task.
+//! players are in [`player`]: their lifecycle, damage, death and movement.
 
 pub mod entity;
-mod walker;
+mod messages;
+pub mod player;
 pub mod world;
 
 use cs_engine::{EdictId, EngineApi, GameDll};
@@ -19,7 +20,7 @@ use glam::Vec3;
 pub use entity::{GameEntity, create_entity};
 
 use entity::{attach, with_entity};
-use walker::Walkers;
+use player::{MAX_PLAYERS, Player};
 
 /// What the game keeps outside its entities: handed to every entity call.
 pub struct GameState {
@@ -31,6 +32,10 @@ pub struct GameState {
     pub last_t_spawn: Option<EdictId>,
     /// Parameters of the player movement.
     pub move_params: MoveParams,
+    /// The players, by slot, from `client_put_in_server` to `client_disconnect`.
+    pub players: [Option<Player>; MAX_PLAYERS],
+    /// State of the game's own random numbers (`RANDOM_LONG`).
+    rng: u32,
     /// Every call the dispatch delivered to a `test_dispatch` entity. For tests only (feature
     /// `test-hooks`).
     #[cfg(feature = "test-hooks")]
@@ -45,9 +50,20 @@ impl GameState {
             last_ct_spawn: None,
             last_t_spawn: None,
             move_params: MoveParams::default(),
+            players: std::array::from_fn(|_| None),
+            rng: 0x2545_f491,
             #[cfg(feature = "test-hooks")]
             dispatch_log: Vec::new(),
         }
+    }
+
+    /// A random number in `lo..=hi` (xorshift32: the engine offers the game no generator).
+    pub(crate) fn random_range(&mut self, lo: i32, hi: i32) -> i32 {
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 17;
+        self.rng ^= self.rng << 5;
+        let span = (hi - lo + 1).max(1) as u32;
+        lo + (self.rng % span) as i32
     }
 
     /// Forgets what belonged to the previous map.
@@ -58,10 +74,10 @@ impl GameState {
     }
 }
 
-/// The game: [`GameState`], the entities (in the private data of their edicts) and the players.
+/// The game: [`GameState`] (with the players) and the entities (in the private data of their
+/// edicts).
 pub struct CsGame {
     state: GameState,
-    walkers: Walkers,
 }
 
 impl Default for CsGame {
@@ -76,7 +92,6 @@ impl CsGame {
     pub fn new() -> Self {
         Self {
             state: GameState::new(),
-            walkers: Walkers::default(),
         }
     }
 
@@ -86,6 +101,67 @@ impl CsGame {
 
     pub fn state_mut(&mut self) -> &mut GameState {
         &mut self.state
+    }
+
+    /// Spawns the player of `slot` on `team` with appearance `class` (1 to 4, 0 the team's
+    /// default), as the team selection will once it exists. For tests only (cargo feature
+    /// `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn spawn_player(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        slot: u8,
+        team: player::Team,
+        class: u8,
+    ) -> bool {
+        player::spawn(&mut self.state, eng, slot, team, class)
+    }
+
+    /// Respawns the player of `slot` on its team (`respawn()`). For tests only (cargo feature
+    /// `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn respawn_player(&mut self, eng: &mut EngineApi<'_>, slot: u8) -> bool {
+        player::respawn_player(&mut self.state, eng, slot)
+    }
+
+    /// Hurts the player of `slot` as `attacker` (a player's slot; `None` the world) would, with
+    /// `TakeDamage`. For tests only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn damage_player(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        slot: u8,
+        attacker: Option<u8>,
+        damage: f32,
+        bits: u32,
+    ) -> bool {
+        let attacker = attacker.map(|a| eng.client_edict(a));
+        player::take_damage(&mut self.state, eng, slot, attacker, attacker, damage, bits)
+    }
+
+    /// Puts the movement of the player of `slot` at `origin`, stopped, to place a player
+    /// mid-air or elsewhere in tests. `false` when nobody is in that slot. For tests only
+    /// (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn place_player(&mut self, eng: &mut EngineApi<'_>, slot: u8, origin: Vec3) -> bool {
+        let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut)
+        else {
+            return false;
+        };
+        p.mv.origin = origin;
+        p.mv.velocity = Vec3::ZERO;
+        p.mv.on_ground = false;
+        let id = eng.client_edict(slot);
+        if let Some(v) = eng.ent_mut(id) {
+            v.velocity = Vec3::ZERO;
+            v.flags &= !cs_engine::consts::FL_ONGROUND;
+        }
+        eng.set_origin(id, origin);
+        true
     }
 }
 
@@ -100,7 +176,7 @@ impl GameDll for CsGame {
     }
 
     fn server_deactivate(&mut self, _eng: &mut EngineApi<'_>) {
-        self.walkers.clear();
+        self.state.players = std::array::from_fn(|_| None);
         self.state.reset_map();
     }
 
@@ -125,19 +201,22 @@ impl GameDll for CsGame {
         true
     }
 
+    /// `CHalfLifeMultiplay::ClientConnected`: every client may connect.
     fn client_connect(&mut self, _eng: &mut EngineApi<'_>, _slot: u8) -> Result<(), String> {
         Ok(())
     }
 
     fn client_put_in_server(&mut self, eng: &mut EngineApi<'_>, slot: u8) {
-        self.walkers.put_in_server(&mut self.state, eng, slot);
+        player::put_in_server(&mut self.state, eng, slot);
     }
 
-    fn client_disconnect(&mut self, _eng: &mut EngineApi<'_>, slot: u8) {
-        self.walkers.remove(slot);
+    fn client_disconnect(&mut self, eng: &mut EngineApi<'_>, slot: u8) {
+        player::disconnect(&mut self.state, eng, slot);
     }
 
-    fn client_command(&mut self, _eng: &mut EngineApi<'_>, _slot: u8, _argv: &[String]) {}
+    fn client_command(&mut self, eng: &mut EngineApi<'_>, slot: u8, argv: &[String]) {
+        player::client_command(&mut self.state, eng, slot, argv);
+    }
 
     fn client_userinfo_changed(&mut self, _eng: &mut EngineApi<'_>, _slot: u8) {}
 
@@ -148,7 +227,7 @@ impl GameDll for CsGame {
         cmd: &GoldSrcUserCmd,
         _random_seed: u32,
     ) {
-        self.walkers.run_usercmd(&self.state, eng, slot, cmd);
+        player::run_usercmd(&mut self.state, eng, slot, cmd);
     }
 
     fn start_frame(&mut self, _eng: &mut EngineApi<'_>, _frametime: f32) {}
@@ -174,6 +253,6 @@ impl GameDll for CsGame {
     }
 
     fn update_client_data(&mut self, eng: &mut EngineApi<'_>, slot: u8) -> GoldSrcClientData {
-        walker::client_data(eng, slot)
+        player::client_data(&mut self.state, eng, slot)
     }
 }

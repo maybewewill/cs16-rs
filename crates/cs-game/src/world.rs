@@ -10,6 +10,7 @@ use glam::Vec3;
 
 use crate::GameState;
 use crate::entity::GameEntity;
+use crate::player::{dmg, player_slot, take_damage};
 
 /// `MAX_PLAYER_USE_RADIUS` (ReGameDLL `player.h`, read 2026-11-22): how close to a spawn point
 /// another player makes it unusable.
@@ -452,17 +453,25 @@ fn is_spawn_point_valid(eng: &EngineApi<'_>, player: EdictId, spot: EdictId, rad
     players_near(eng, player, spot, radius).is_empty()
 }
 
-/// The hook for the telefrag of `SelectSpawnSpot`: every spawn point is taken, so the players
-/// standing at `spot` (other than `player`) are killed with 200 generic damage
-/// (`TakeDamage(VARS(eoNullEntity), VARS(eoNullEntity), 200, DMG_GENERIC)`). There is no damage
-/// system yet, so this only finds and logs the victims; the player task applies the damage to
-/// the returned players here.
-fn kill_spawn_occupants(eng: &EngineApi<'_>, player: EdictId, spot: EdictId) -> Vec<EdictId> {
+/// The telefrag of `SelectSpawnSpot`: every spawn point is taken, so each player standing at
+/// `spot` (other than `player`) takes 200 generic damage from the world
+/// (`TakeDamage(VARS(eoNullEntity), VARS(eoNullEntity), 200, DMG_GENERIC)`), which kills them.
+/// An edict flagged as a client that is no player of the game is left alone.
+fn kill_spawn_occupants(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    player: EdictId,
+    spot: EdictId,
+) {
     let victims = players_near(eng, player, spot, MAX_PLAYER_USE_RADIUS);
     if !victims.is_empty() {
         tracing::debug!(?victims, "every spawn point is taken: the occupants of the first one die");
     }
-    victims
+    for victim in victims {
+        if let Some(slot) = player_slot(g, eng, victim) {
+            take_damage(g, eng, slot as u8, None, None, 200.0, dmg::GENERIC);
+        }
+    }
 }
 
 /// `CBasePlayer::SelectSpawnSpot`: from the spawn point after `last` of class `classname`
@@ -471,7 +480,8 @@ fn kill_spawn_occupants(eng: &EngineApi<'_>, player: EdictId, spot: EdictId) -> 
 /// ([`kill_spawn_occupants`]). `None` when the map has no point of that class. (ReGameDLL
 /// `player.cpp`, read 2026-11-22.)
 fn select_spawn_spot(
-    eng: &EngineApi<'_>,
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
     player: EdictId,
     classname: &str,
     last: Option<EdictId>,
@@ -497,7 +507,7 @@ fn select_spawn_spot(
         }
     }
     if let Some(first) = first {
-        kill_spawn_occupants(eng, player, first);
+        kill_spawn_occupants(g, eng, player, first);
     }
     first
 }
@@ -511,16 +521,20 @@ fn select_spawn_spot(
 /// `player.cpp`, read 2026-11-22.)
 pub fn select_spawn_point(
     g: &mut GameState,
-    eng: &EngineApi<'_>,
+    eng: &mut EngineApi<'_>,
     player: EdictId,
     team: SpawnTeam,
 ) -> Option<EdictId> {
     let (class, last) = match team {
-        SpawnTeam::CounterTerrorist => (CT_SPAWN_CLASS, &mut g.last_ct_spawn),
-        SpawnTeam::Terrorist => (T_SPAWN_CLASS, &mut g.last_t_spawn),
+        SpawnTeam::CounterTerrorist => (CT_SPAWN_CLASS, g.last_ct_spawn),
+        SpawnTeam::Terrorist => (T_SPAWN_CLASS, g.last_t_spawn),
     };
-    let spot = select_spawn_spot(eng, player, class, *last)
+    let spot = select_spawn_spot(g, eng, player, class, last)
         .or_else(|| eng.find_by_classname(None, T_SPAWN_CLASS));
+    let last = match team {
+        SpawnTeam::CounterTerrorist => &mut g.last_ct_spawn,
+        SpawnTeam::Terrorist => &mut g.last_t_spawn,
+    };
     match spot {
         Some(spot) => *last = Some(spot),
         None => tracing::error!("PutClientInServer: no info_player_start on level"),

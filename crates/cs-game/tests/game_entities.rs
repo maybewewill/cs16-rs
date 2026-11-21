@@ -296,7 +296,7 @@ fn spawn_points_come_from_the_lump_by_team() {
         v.flags = FL_CLIENT;
         v.deadflag = 2;
         eng.set_origin(other, Vec3::new(100.0, 0.0, 0.0));
-        let mut pick = |eng: &EngineApi<'_>| {
+        let mut pick = |eng: &mut EngineApi<'_>| {
             let spot = select_spawn_point(game.state_mut(), eng, me, SpawnTeam::CounterTerrorist)
                 .expect("a spawn point");
             eng.ent(spot).unwrap().origin.x
