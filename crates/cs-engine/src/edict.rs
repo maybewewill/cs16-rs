@@ -13,7 +13,8 @@ use glam::Vec3;
 /// Default size of the edict pool.
 pub const DEFAULT_MAX_EDICTS: usize = 900;
 
-/// Seconds a freed slot stays unused before [`EdictPool::alloc`] may reuse it.
+/// Seconds a freed slot stays unused before [`EdictPool::alloc`] may reuse it, except during
+/// the [`EDICT_LOAD_GRACE`] after the map start, when freed slots are reused at once.
 pub const EDICT_REUSE_DELAY: f64 = 0.5;
 
 /// Seconds after the map start during which freed slots are reused at once.

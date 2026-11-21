@@ -1,13 +1,13 @@
 //! Connectionless (`0xFFFF_FFFF`) packets: challenge, connect request and
 //! server-info queries (`ReHLDS/engine/sv_main.cpp`: `SV_ConnectionlessPacket`).
 //!
-//! Anyone can send these datagrams with a forged source address, so
-//! [`handle_oob`] never panics and, unless the datagram carries a challenge
-//! issued to its source address, never replies with more than 64 bytes. That is
-//! more than some requests (a 23-byte `getchallenge` gets a reply of up to 32 bytes), so a
-//! reply may be about twice the size of what prompted it; the per-address
-//! [`OobLimiter`] and the server's global budget of [`OOB_GLOBAL_REPLIES_PER_SEC`]
-//! bound how many such replies go out.
+//! [`handle_oob`] is the one entry point: it parses a datagram and says what to do with it
+//! ([`OobOutcome`]) and whether the datagram carried a challenge issued to its sender. Anyone
+//! can send these datagrams with a forged source address, so it never panics and, unless the
+//! datagram carries such a challenge, never replies with more than 64 bytes. A reply may still
+//! be larger than the request that prompted it (a 23-byte `getchallenge` is answered with
+//! up to 32 bytes), which is why the caller charges replies to unchallenged datagrams to the
+//! per-address [`OobLimiter`] and to a global budget of [`OOB_GLOBAL_REPLIES_PER_SEC`].
 
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{BuildHasher, RandomState};
@@ -161,15 +161,11 @@ pub struct OobContext<'a> {
     pub is_full: bool,
 }
 
-/// Answers one connectionless datagram from `from`. The caller applies
-/// [`OobLimiter`] first.
-pub fn handle_oob(raw: &[u8], from: &PeerAddr, now: f64, ctx: &OobContext<'_>) -> OobOutcome {
-    handle_oob_checked(raw, from, now, ctx).0
-}
-
-/// [`handle_oob`], also telling whether the datagram carried a challenge issued to `from`
-/// (see [`carries_valid_challenge`]), found while answering it.
-pub fn handle_oob_checked(
+/// Answers one connectionless datagram from `from`. The caller applies [`OobLimiter`] first.
+/// The flag is `true` when the datagram is a connect request or an A2S query that carries a
+/// challenge `ctx.challenges` accepts for `from` (a reply to it may exceed 64 bytes), `false`
+/// for every other datagram.
+pub fn handle_oob(
     raw: &[u8],
     from: &PeerAddr,
     now: f64,
@@ -244,24 +240,6 @@ pub fn handle_oob_checked(
         | OobPacket::A2aPrint(_)
         | OobPacket::Unknown(_) => (OobOutcome::Ignore, false),
     }
-}
-
-/// Whether `raw` is a connect request or an A2S query carrying a challenge that `issuer`
-/// accepts for `from`.
-pub fn carries_valid_challenge(
-    raw: &[u8],
-    from: &PeerAddr,
-    now: f64,
-    issuer: &ChallengeIssuer,
-) -> bool {
-    let challenge = match parse_oob_packet(raw) {
-        Ok(OobPacket::Connect { challenge, .. }) => challenge,
-        Ok(OobPacket::A2sInfo { challenge: Some(c) })
-        | Ok(OobPacket::A2sPlayer { challenge: c })
-        | Ok(OobPacket::A2sRules { challenge: c }) => c as u32,
-        _ => return false,
-    };
-    issuer.check(from, challenge, now)
 }
 
 fn reject(text: &str) -> OobOutcome {
@@ -365,6 +343,39 @@ mod tests {
         default_cs16_protinfo(&md5_hex(b"cs16-rs-key"))
     }
 
+    /// The outcome of [`handle_oob`], without the challenge flag.
+    fn outcome(raw: &[u8], from: &PeerAddr, now: f64, ctx: &OobContext<'_>) -> OobOutcome {
+        handle_oob(raw, from, now, ctx).0
+    }
+
+    #[test]
+    fn challenge_flag_is_set_only_for_a_valid_challenge() {
+        let issuer = ChallengeIssuer::new();
+        let q = query();
+        let list = players();
+        let ctx = context(&issuer, &q, &list, false);
+        let from = addr(1);
+        let good = issuer.issue(&from, NOW);
+        let bad = (1..).find(|c| !issuer.check(&from, *c, NOW)).unwrap();
+        let info = default_cs16_userinfo("P").to_wire_string();
+        let a2s = |c: i32| encode_a2s_player_request(c);
+        let flag = |raw: &[u8]| handle_oob(raw, &from, NOW, &ctx).1;
+        // A connect or a query with the issued challenge.
+        assert!(flag(&connect_datagram(48, good, &info)));
+        assert!(flag(&connect_datagram(47, good, &info)));
+        assert!(flag(&a2s(good as i32)));
+        assert!(flag(&encode_a2s_info_request(Some(good as i32))));
+        // The same with a wrong challenge, a challenge issued to someone else, and requests
+        // that carry none.
+        assert!(!flag(&connect_datagram(48, bad, &info)));
+        assert!(!flag(&a2s(bad as i32)));
+        assert!(!flag(&encode_a2s_info_request(None)));
+        assert!(!flag(&encode_a2s_info_request(Some(bad as i32))));
+        assert!(!handle_oob(&connect_datagram(48, good, &info), &addr(2), NOW, &ctx).1);
+        assert!(!flag(&encode_getchallenge(true)));
+        assert!(!flag(b"garbage"));
+    }
+
     /// A connect datagram with an arbitrary protocol number and raw userinfo text.
     fn connect_datagram(protocol: u32, challenge: u32, userinfo_raw: &str) -> Vec<u8> {
         let mut d = vec![0xFF; 4];
@@ -384,7 +395,7 @@ mod tests {
         let issuer = ChallengeIssuer::new();
         let q = query();
         let ctx = context(&issuer, &q, &[], false);
-        let OobOutcome::Reply(reply) = handle_oob(&encode_getchallenge(true), &addr(1), NOW, &ctx)
+        let OobOutcome::Reply(reply) = outcome(&encode_getchallenge(true), &addr(1), NOW, &ctx)
         else {
             panic!("getchallenge must be answered");
         };
@@ -419,7 +430,7 @@ mod tests {
         for protocol in [48, 47] {
             let raw = connect_datagram(protocol, bad, &default_cs16_userinfo("P").to_wire_string());
             assert_eq!(
-                handle_oob(&raw, &addr(1), NOW, &ctx),
+                outcome(&raw, &addr(1), NOW, &ctx),
                 reject("Bad challenge.\n")
             );
         }
@@ -432,7 +443,7 @@ mod tests {
         let ctx = context(&issuer, &q, &[], false);
         let challenge = issuer.issue(&addr(1), NOW);
         let raw = connect_datagram(47, challenge, &default_cs16_userinfo("P").to_wire_string());
-        let OobOutcome::Reply(reply) = handle_oob(&raw, &addr(1), NOW, &ctx) else {
+        let OobOutcome::Reply(reply) = outcome(&raw, &addr(1), NOW, &ctx) else {
             panic!("wrong protocol must be rejected");
         };
         let OobPacket::S2cReject(text) = parse_oob_packet(&reply).unwrap() else {
@@ -456,19 +467,19 @@ mod tests {
         let oversized = format!("\\name\\{}", "a".repeat(251));
         assert_eq!(oversized.len(), 257);
         let raw = connect_datagram(48, challenge, &oversized);
-        assert_eq!(handle_oob(&raw, &addr(1), NOW, &ctx), invalid);
+        assert_eq!(outcome(&raw, &addr(1), NOW, &ctx), invalid);
 
         let at_limit = format!("\\name\\{}", "a".repeat(250));
         assert_eq!(at_limit.len(), MAX_INFO_STRING);
         let raw = connect_datagram(48, challenge, &at_limit);
         assert!(matches!(
-            handle_oob(&raw, &addr(1), NOW, &ctx),
+            outcome(&raw, &addr(1), NOW, &ctx),
             OobOutcome::Connect(_)
         ));
 
         for bad in ["name\\Bob", "", "\\name", "\\\\Bob"] {
             let raw = connect_datagram(48, challenge, bad);
-            assert_eq!(handle_oob(&raw, &addr(1), NOW, &ctx), invalid, "{bad:?}");
+            assert_eq!(outcome(&raw, &addr(1), NOW, &ctx), invalid, "{bad:?}");
         }
     }
 
@@ -485,7 +496,7 @@ mod tests {
             &lan_steam_auth_ticket(1),
         );
         assert_eq!(
-            handle_oob(&raw, &addr(1), NOW, &ctx),
+            outcome(&raw, &addr(1), NOW, &ctx),
             reject("Server is full.\n")
         );
     }
@@ -499,7 +510,7 @@ mod tests {
         let userinfo = default_cs16_userinfo("  A\x01B  ");
         let raw = encode_connect_48(challenge, &protinfo(), &userinfo, &lan_steam_auth_ticket(1));
         assert_eq!(
-            handle_oob(&raw, &addr(1), NOW, &ctx),
+            outcome(&raw, &addr(1), NOW, &ctx),
             OobOutcome::Connect(ConnectRequest {
                 userinfo,
                 protinfo: protinfo(),
@@ -521,7 +532,7 @@ mod tests {
             encode_a2s_player_request(-1),
             rules_request,
         ] {
-            let OobOutcome::Reply(reply) = handle_oob(&request, &addr(1), NOW, &ctx) else {
+            let OobOutcome::Reply(reply) = outcome(&request, &addr(1), NOW, &ctx) else {
                 panic!("A2S query must be answered");
             };
             assert_eq!(reply.len(), 9);
@@ -542,7 +553,7 @@ mod tests {
         let challenge = issuer.issue(&addr(1), NOW) as i32;
 
         let request = encode_a2s_info_request(Some(challenge));
-        let OobOutcome::Reply(reply) = handle_oob(&request, &addr(1), NOW, &ctx) else {
+        let OobOutcome::Reply(reply) = outcome(&request, &addr(1), NOW, &ctx) else {
             panic!("A2S_INFO must be answered");
         };
         assert_eq!(
@@ -551,20 +562,20 @@ mod tests {
         );
 
         assert_eq!(
-            handle_oob(&encode_a2s_player_request(challenge), &addr(1), NOW, &ctx),
+            outcome(&encode_a2s_player_request(challenge), &addr(1), NOW, &ctx),
             OobOutcome::Reply(encode_s2a_players(&p))
         );
         let mut rules_request = vec![0xFF; 4];
         rules_request.push(A2S_RULES);
         rules_request.extend_from_slice(&challenge.to_le_bytes());
         assert_eq!(
-            handle_oob(&rules_request, &addr(1), NOW, &ctx),
+            outcome(&rules_request, &addr(1), NOW, &ctx),
             OobOutcome::Reply(encode_s2a_rules(RULES))
         );
 
         let foreign = issuer.issue(&addr(2), NOW) as i32;
         let OobOutcome::Reply(reply) =
-            handle_oob(&encode_a2s_info_request(Some(foreign)), &addr(1), NOW, &ctx)
+            outcome(&encode_a2s_info_request(Some(foreign)), &addr(1), NOW, &ctx)
         else {
             panic!("A2S_INFO must be answered");
         };
@@ -588,10 +599,10 @@ mod tests {
             b"\xFF\xFF\xFF\xFFrcon 1 pass status\n".to_vec(),
             b"not connectionless".to_vec(),
         ] {
-            assert_eq!(handle_oob(&raw, &addr(1), NOW, &ctx), OobOutcome::Ignore);
+            assert_eq!(outcome(&raw, &addr(1), NOW, &ctx), OobOutcome::Ignore);
         }
         assert_eq!(
-            handle_oob(&cs_proto48::query::encode_a2a_ping(), &addr(1), NOW, &ctx),
+            outcome(&cs_proto48::query::encode_a2a_ping(), &addr(1), NOW, &ctx),
             OobOutcome::Reply(encode_a2a_ack())
         );
     }
@@ -683,10 +694,11 @@ mod tests {
         let mut replies = 0;
         let mut connects = 0;
         for raw in &inputs {
-            match handle_oob(raw, &from, NOW, &ctx) {
+            let (result, challenged) = handle_oob(raw, &from, NOW, &ctx);
+            match result {
                 OobOutcome::Reply(reply) => {
                     replies += 1;
-                    if !carries_valid_challenge(raw, &from, NOW, &issuer) {
+                    if !challenged {
                         assert!(reply.len() <= 64, "{} byte reply to {raw:?}", reply.len());
                     }
                 }

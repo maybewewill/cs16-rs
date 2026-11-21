@@ -18,15 +18,21 @@ use crate::game::EngineApi;
 use crate::signon::MAX_LIGHTSTYLES;
 
 /// Bytes the init buffer holds; a message that would take it past this is sent as
-/// [`MsgDest::All`] instead.
-pub const MAX_INIT_BUFFER: usize = 64 * 1024;
+/// [`MsgDest::All`] instead. The size of the server's sign-on buffer in ReHLDS
+/// (`rehlds/engine/server.h`: `unsigned char signon_data[32768];`, read 2026-11-21).
+pub const MAX_INIT_BUFFER: usize = 32 * 1024;
 /// Bytes of text `client_print`, `print_all`, `center_print` and `stufftext` send at most.
 pub const MAX_MESSAGE_TEXT: usize = 1024;
 /// Bytes one `send` may carry: the netchan's `MAX_MSGLEN`, above which queued reliable data
 /// goes out as a fragment stream; a longer message is dropped.
 const MAX_SEND_BYTES: usize = MAX_MSGLEN;
-/// Bytes of a light style pattern.
-const MAX_LIGHT_STYLE_BYTES: usize = 64;
+/// Bytes of a light style pattern the engine keeps. ReHLDS `PF_lightstyle_I`
+/// (`rehlds/engine/pr_cmds.cpp`, read 2026-11-21) copies the pattern with `Q_strlcpy` into a
+/// buffer of `MAX_LIGHTSTYLE_SIZE` (64, `rehlds/common/qlimits.h`) bytes, which holds the
+/// terminating NUL, so at most 63 bytes of pattern remain.
+pub const MAX_LIGHT_STYLE_BYTES: usize = 63;
+/// Highest entity index the `svc_sound` entity field (11 bits) can carry.
+const MAX_SOUND_ENTITY: u16 = (1 << 11) - 1;
 /// Highest sound channel (3 bits on the wire).
 const MAX_SOUND_CHANNEL: u8 = 7;
 /// Highest sound attenuation (the byte on the wire is `attenuation * 64`).
@@ -75,7 +81,10 @@ impl EngineApi<'_> {
     /// Sends `bytes`, complete `svc_*` messages the game wrote, to `dest`. The engine does not
     /// look inside them. Nothing is sent for empty `bytes`, for more than `MAX_MSGLEN` bytes
     /// at once, or for a destination with no one in it (a slot out of range, free or not in
-    /// the stage the destination needs).
+    /// the stage the destination needs). A target whose buffer for this call already holds more
+    /// than [`MAX_RELIABLE_BACKLOG`](crate::MAX_RELIABLE_BACKLOG) bytes (a game looping sends
+    /// within one call) is skipped; the message is dropped for it and counted in
+    /// `NetStats::outbox_dropped`.
     pub fn send(&mut self, dest: MsgDest, bytes: &[u8]) {
         if bytes.is_empty() || bytes.len() > MAX_SEND_BYTES {
             return;
@@ -84,26 +93,26 @@ impl EngineApi<'_> {
             MsgDest::One(slot) => {
                 let slot = usize::from(slot);
                 if self.clients.get(slot).is_some_and(|c| c.state != ClientState::Free) {
-                    self.outbox.reliable[slot].write_bytes(bytes);
+                    self.outbox.push_reliable(slot, bytes);
                 }
             }
             MsgDest::OneUnreliable(slot) => {
                 let slot = usize::from(slot);
                 if self.clients.get(slot).is_some_and(|c| c.state == ClientState::Active) {
-                    self.outbox.unreliable[slot].write_bytes(bytes);
+                    self.outbox.push_unreliable(slot, bytes);
                 }
             }
             MsgDest::All => {
-                for (view, out) in self.clients.iter().zip(&mut self.outbox.reliable) {
+                for (slot, view) in self.clients.iter().enumerate() {
                     if view.state.is_past_new() {
-                        out.write_bytes(bytes);
+                        self.outbox.push_reliable(slot, bytes);
                     }
                 }
             }
             MsgDest::Broadcast => {
-                for (view, out) in self.clients.iter().zip(&mut self.outbox.unreliable) {
+                for (slot, view) in self.clients.iter().enumerate() {
                     if view.state == ClientState::Active {
-                        out.write_bytes(bytes);
+                        self.outbox.push_unreliable(slot, bytes);
                     }
                 }
             }
@@ -119,7 +128,7 @@ impl EngineApi<'_> {
                         .get(self.edicts.client(slot as u8))
                         .map(|e| e.vars.origin + e.vars.view_ofs);
                     if eye.is_some_and(|eye| self.can_see(eye, mins, maxs)) {
-                        self.outbox.unreliable[slot].write_bytes(bytes);
+                        self.outbox.push_unreliable(slot, bytes);
                     }
                 }
             }
@@ -179,12 +188,22 @@ impl EngineApi<'_> {
         self.send(MsgDest::One(slot), w.as_slice());
     }
 
-    /// Plays the precached sound `sample` on `channel` (0 to 7) from `ent`'s origin to every
-    /// client that can see that point (`MsgDest::Pvs`), with `volume` clamped to 0.0..=1.0,
-    /// `attenuation` to 0.0..=3.98 and `pitch` as is (100 is normal). Returns `false`, sending
-    /// nothing, for a stale entity, a sample that is not in the sound precache (or is empty),
-    /// a channel above 7 or a non-finite volume or attenuation; `true` once the message is
-    /// queued, even if no client can hear it.
+    /// Plays the precached sound `sample` on `channel` (0 to 7) from the centre of `ent`'s
+    /// bounds, `origin + (mins + maxs) * 0.5`, to every client that can see that point
+    /// (`MsgDest::Pvs`), with `volume` clamped to 0.0..=1.0, `attenuation` to 0.0..=3.98 and
+    /// `pitch` as is (100 is normal). The wire origin is that same point, so a brush entity
+    /// (origin zero, bounds around its model) sounds from the middle of the brush.
+    ///
+    /// ReHLDS `SV_StartSound_internal` (`rehlds/engine/sv_main.cpp`, read 2026-11-21) computes
+    /// `origin[i] = (maxs[i] + mins[i]) * 0.5 + entity origin[i]` the same way, but multicasts
+    /// the sound with `MSG_FL_PAS` (potentially audible set). We have no PAS and use the
+    /// potentially visible set, so on a map where the PAS reaches beyond the PVS our audience
+    /// is narrower than HLDS's (assumption: PAS contains PVS).
+    ///
+    /// Returns `false`, sending nothing, for a stale entity or one whose index does not fit the
+    /// 11-bit wire field (2048 and up), a non-finite position, a sample that is not in the
+    /// sound precache (or is empty), a channel above 7 or a non-finite volume or attenuation;
+    /// `true` once the message is queued, even if no client can hear it.
     pub fn emit_sound(
         &mut self,
         ent: crate::edict::EdictId,
@@ -194,10 +213,19 @@ impl EngineApi<'_> {
         attenuation: f32,
         pitch: u8,
     ) -> bool {
-        if channel > MAX_SOUND_CHANNEL || !volume.is_finite() || !attenuation.is_finite() {
+        if channel > MAX_SOUND_CHANNEL
+            || ent.index > MAX_SOUND_ENTITY
+            || !volume.is_finite()
+            || !attenuation.is_finite()
+        {
             return false;
         }
-        let Some(origin) = self.edicts.get(ent).map(|e| e.vars.origin) else {
+        let Some(origin) = self
+            .edicts
+            .get(ent)
+            .map(|e| e.vars.origin + (e.vars.mins + e.vars.maxs) * 0.5)
+            .filter(|origin| origin.is_finite())
+        else {
             return false;
         };
         let Some(sound_index) = self.precache.sound_index(sample).filter(|&i| i != 0) else {
@@ -245,15 +273,19 @@ impl EngineApi<'_> {
     /// Sets light style `index` to `pattern` (`a` dark to `z` bright, one letter per tenth of a
     /// second) and sends the change to every client past the `new` stage; clients that enter
     /// later are sent the stored styles. Ignored for an `index` of 64 or more and for a pattern
-    /// over 64 bytes or with a NUL byte in it. An empty pattern is allowed. The styles go
-    /// back to their defaults (style 0 is `m`) when the map changes.
+    /// with a NUL byte in it. A pattern longer than [`MAX_LIGHT_STYLE_BYTES`] (63) is cut to
+    /// that many bytes, on a character boundary, as ReHLDS keeps at most 63 (see the constant).
+    /// An empty pattern is allowed. The styles go back to their defaults (style 0 is `m`) when
+    /// the map changes.
     pub fn light_style(&mut self, index: u8, pattern: &str) {
-        if index >= MAX_LIGHTSTYLES
-            || pattern.len() > MAX_LIGHT_STYLE_BYTES
-            || pattern.contains('\0')
-        {
+        if index >= MAX_LIGHTSTYLES || pattern.contains('\0') {
             return;
         }
+        let mut end = pattern.len().min(MAX_LIGHT_STYLE_BYTES);
+        while !pattern.is_char_boundary(end) {
+            end -= 1;
+        }
+        let pattern = &pattern[..end];
         self.outbox.light_styles[usize::from(index)] = pattern.to_string();
         let mut w = MsgWriter::new();
         write_svc_lightstyle(&mut w, index, pattern);

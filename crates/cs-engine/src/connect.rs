@@ -9,7 +9,7 @@ use cs_transport::{PacketTransport, PeerAddr};
 
 use crate::client::Client;
 use crate::game::{ClientView, GameDll};
-use crate::oob::{ConnectRequest, MAX_NAME_BYTES, OobContext, OobOutcome, handle_oob_checked};
+use crate::oob::{ConnectRequest, MAX_NAME_BYTES, OobContext, OobOutcome, handle_oob};
 use crate::server::Server;
 
 impl<G: GameDll> Server<G> {
@@ -52,7 +52,7 @@ impl<G: GameDll> Server<G> {
             rules: &[],
             is_full: self.free_slot_index().is_none() && self.slot_of(&from).is_none(),
         };
-        let (outcome, challenged) = handle_oob_checked(data, &from, self.time, &ctx);
+        let (outcome, challenged) = handle_oob(data, &from, self.time, &ctx);
         let reply = match outcome {
             // A reply to a datagram without a challenge issued to its sender is also charged to
             // the global budget; datagrams that get no reply cost nothing from it.

@@ -98,9 +98,10 @@ impl<G: GameDll> Server<G> {
     /// dispatch order and the character cleaning of echoed text.
     ///
     /// Commands:
-    /// - `status`: lines `hostname: <hostname cvar, else the configured name>` and
-    ///   `map: <name>`, then one line per connected client, columns separated by one space:
-    ///   `<slot> <userid> "<name>" <state> <ping>ms <address>`. The slot is 1-based as in
+    /// - `status`: lines `hostname: <ServerConfig::hostname>` (the one source of the name: the
+    ///   same text is in `svc_serverinfo` and the A2S info reply; the `hostname` cvar is not
+    ///   consulted) and `map: <name>`, then one line per connected client, columns separated by
+    ///   one space: `<slot> <userid> "<name>" <state> <ping>ms <address>`. The slot is 1-based as in
     ///   HLDS, the state `connecting` (signing on) or `active`.
     /// - `kick <#userid | slot | name> [reason]`: `#N` is a userid, a bare number a `status`
     ///   slot, anything else a name that must match exactly one client, ignoring case. The
@@ -110,7 +111,10 @@ impl<G: GameDll> Server<G> {
     /// - `changelevel <map>` and `map <map>`: [`ConsoleOutcome::ChangeLevel`].
     /// - `quit`, `exit`: [`ConsoleOutcome::Quit`].
     /// - `<cvar>` shows a cvar, `<cvar> <value>` sets it (further arguments are ignored).
-    ///   The registry has no read-only flag, so every registered cvar can be set.
+    ///   The registry has no read-only flag, so every registered cvar can be set. Setting an
+    ///   `sv_*` movement cvar changes what clients that sign on later are sent in
+    ///   `svc_newmovevars`; clients already past the `new` stage keep the values they were
+    ///   sent (there is no `svc_newmovevars` resend yet).
     pub fn console_command(&mut self, line: &str) -> ConsoleOutcome {
         let argv = tokenize_goldsrc_line(clip_line(line));
         let Some(name) = argv.first() else {
@@ -148,13 +152,9 @@ impl<G: GameDll> Server<G> {
     }
 
     fn console_status(&self) -> ConsoleOutcome {
-        let hostname = self
-            .cvars
-            .get("hostname")
-            .map_or(self.cfg.hostname.as_str(), |c| c.value.as_str());
         let mut text = format!(
             "hostname: {}\nmap: {}\n",
-            clean(hostname),
+            clean(&self.cfg.hostname),
             clean(&self.map.name)
         );
         for (index, client) in self.clients.iter().enumerate() {

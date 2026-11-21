@@ -119,6 +119,9 @@ pub struct NetStats {
     /// Connectionless datagrams left unanswered by the per-address limiter or by the global
     /// budget for replies without a valid challenge.
     pub oob_denied: u64,
+    /// Messages `EngineApi::send` dropped because the buffer of a target slot already held more
+    /// than [`MAX_RELIABLE_BACKLOG`] bytes within one game call (a game looping sends).
+    pub outbox_dropped: u64,
     /// Datagrams the transport refused to send: updates, sign-on datagrams, farewells and
     /// connectionless replies.
     pub send_failures: u64,
@@ -303,12 +306,27 @@ impl<G: GameDll> Server<G> {
         result
     }
 
-    /// Calls into the game without draining the outbox. The game sees the sign-on state every
-    /// slot has now.
-    pub(crate) fn call_game<R>(&mut self, f: impl FnOnce(&mut G, &mut EngineApi<'_>) -> R) -> R {
+    /// Copies the sign-on state of every slot into what the game sees of it.
+    pub(crate) fn sync_views(&mut self) {
         for (view, client) in self.views.iter_mut().zip(&self.clients) {
             view.state = client.state;
         }
+    }
+
+    /// Calls into the game without draining the outbox. The game sees the sign-on state every
+    /// slot has now.
+    pub(crate) fn call_game<R>(&mut self, f: impl FnOnce(&mut G, &mut EngineApi<'_>) -> R) -> R {
+        self.sync_views();
+        self.call_game_synced(f)
+    }
+
+    /// [`call_game`](Self::call_game) for a caller that ran [`sync_views`](Self::sync_views)
+    /// and changed no slot's state since, such as the per-entity `add_to_full_pack` calls of
+    /// one update.
+    pub(crate) fn call_game_synced<R>(
+        &mut self,
+        f: impl FnOnce(&mut G, &mut EngineApi<'_>) -> R,
+    ) -> R {
         let mut eng = EngineApi::new(
             &mut self.edicts,
             &mut self.precache,
@@ -327,6 +345,7 @@ impl<G: GameDll> Server<G> {
     /// client why) and drops clients over the reliable backlog cap.
     pub(crate) fn drain_outbox(&mut self) {
         loop {
+            self.net_stats.outbox_dropped += std::mem::take(&mut self.outbox.dropped);
             for (slot, client) in self.clients.iter_mut().enumerate() {
                 let reliable = std::mem::take(&mut self.outbox.reliable[slot]);
                 let unreliable = std::mem::take(&mut self.outbox.unreliable[slot]);
@@ -657,7 +676,190 @@ impl<G: GameDll> Server<G> {
 
 #[cfg(test)]
 mod tests {
+    use cs_proto48::delta::{GoldSrcClientData, GoldSrcUserCmd};
+    use cs_proto48::messages::svc;
+    use cs_proto48::netchan::MAX_MSGLEN;
+    use glam::Vec3;
+
     use super::*;
+    use crate::api_messages::{MAX_INIT_BUFFER, MAX_LIGHT_STYLE_BYTES, MsgDest};
+    use crate::edict::EdictId;
+    use crate::oob::MAX_INFO_STRING;
+    use crate::signon::{MAX_LIGHTSTYLES, write_spawn_baselines, write_spawn_stage};
+
+    /// `NET_MAX_PAYLOAD` of ReHLDS (`rehlds/engine/net.h`, read 2026-11-21), also the size of
+    /// the reliable message buffer of its netchan (`net_chan.cpp`).
+    const NET_MAX_PAYLOAD: usize = 65536;
+
+    /// A game that fills everything the `spawn` stage carries: `entities` map entities (with a
+    /// model, an origin and angles; with every baseline field set to a value that differs
+    /// between entities when `all_fields`), 64 light styles of the longest stored length and a
+    /// full init buffer.
+    struct WorstCaseGame {
+        entities: usize,
+        all_fields: bool,
+    }
+
+    impl GameDll for WorstCaseGame {
+        fn usermsgs(&self) -> UserMsgRegistry {
+            UserMsgRegistry::cs16_default()
+        }
+
+        fn server_activate(&mut self, eng: &mut EngineApi<'_>) {
+            eng.precache_model("models/test.mdl").expect("before lock");
+            for n in 0..self.entities {
+                let id = eng.create_entity("worst").expect("free edict");
+                let k = n as f32;
+                let owner = eng.client_edict(0);
+                let vars = eng.ent_mut(id).expect("just allocated");
+                vars.modelindex = 2;
+                vars.origin = Vec3::new(4000.0 - k, -3000.0 + 2.0 * k, 100.5 + k);
+                vars.angles = Vec3::new((k * 3.7) % 360.0, (k * 1.3) % 360.0, (k * 5.1) % 360.0);
+                if !self.all_fields {
+                    continue;
+                }
+                vars.weaponmodel = 1 + (n % 200) as u16;
+                vars.mins = Vec3::new(-16.0 - k % 7.0, -16.0, -36.0);
+                vars.maxs = Vec3::new(16.0 + k % 5.0, 16.0, 36.0);
+                vars.sequence = 1 + (n % 500) as u16;
+                vars.gaitsequence = 1 + (n % 90) as u16;
+                vars.frame = 0.5 + k % 200.0;
+                vars.animtime = 1.0 + k;
+                vars.framerate = 1.0 + (k % 7.0) * 0.25;
+                vars.scale = 1.0 + (k % 9.0) * 0.1;
+                vars.body = 1 + (n % 250) as u8;
+                vars.skin = 1 + (n % 12) as i16;
+                vars.colormap = 1 + (n % 60_000) as u16;
+                vars.effects = 1 + (n % 120) as u32;
+                vars.rendermode = 1 + (n % 5) as u8;
+                vars.renderamt = 1 + (n % 250) as u8;
+                vars.renderfx = 1 + (n % 20) as u8;
+                vars.solid = 1 + (n % 4) as u8;
+                vars.movetype = 1 + (n % 12) as u8;
+                vars.owner = Some(owner);
+                vars.aiment = Some(owner);
+            }
+            for style in 0..MAX_LIGHTSTYLES {
+                eng.light_style(style, &"z".repeat(MAX_LIGHT_STYLE_BYTES));
+            }
+            // `svc_nop` bytes stay valid when cut anywhere.
+            let filler = vec![svc::NOP; MAX_INIT_BUFFER];
+            for chunk in filler.chunks(MAX_MSGLEN) {
+                eng.send(MsgDest::Init, chunk);
+            }
+        }
+
+        fn server_deactivate(&mut self, _eng: &mut EngineApi<'_>) {}
+
+        fn spawn_entity(
+            &mut self,
+            _eng: &mut EngineApi<'_>,
+            _id: EdictId,
+            _classname: &str,
+            _keys: &[(String, String)],
+        ) -> bool {
+            false
+        }
+
+        fn client_connect(&mut self, _eng: &mut EngineApi<'_>, _slot: u8) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn client_put_in_server(&mut self, _eng: &mut EngineApi<'_>, _slot: u8) {}
+        fn client_disconnect(&mut self, _eng: &mut EngineApi<'_>, _slot: u8) {}
+        fn client_command(&mut self, _eng: &mut EngineApi<'_>, _slot: u8, _argv: &[String]) {}
+        fn client_userinfo_changed(&mut self, _eng: &mut EngineApi<'_>, _slot: u8) {}
+
+        fn run_usercmd(
+            &mut self,
+            _eng: &mut EngineApi<'_>,
+            _slot: u8,
+            _cmd: &GoldSrcUserCmd,
+            _random_seed: u32,
+        ) {
+        }
+
+        fn start_frame(&mut self, _eng: &mut EngineApi<'_>, _frametime: f32) {}
+
+        fn update_client_data(&mut self, _eng: &mut EngineApi<'_>, _slot: u8) -> GoldSrcClientData {
+            GoldSrcClientData::default()
+        }
+    }
+
+    /// Bytes the `spawn` stage writes to one client's reliable stream on a full server of
+    /// `entities` map entities: the total, the baselines and the rest of the stage.
+    fn spawn_stage_size(entities: usize, all_fields: bool) -> (usize, usize, usize) {
+        let cfg = ServerConfig {
+            max_clients: 32,
+            max_edicts: 33 + entities,
+            ..ServerConfig::default()
+        };
+        let server = Server::new(
+            cfg,
+            ServerMap::stub("test"),
+            WorstCaseGame {
+                entities,
+                all_fields,
+            },
+            DeltaRegistry::cs16_default(),
+            CVarRegistry::new_with_defaults(),
+        );
+        assert_eq!(server.init_buffer_len(), MAX_INIT_BUFFER);
+        assert_eq!(server.baselines.len(), entities);
+        // Every slot connected, each with a userinfo of the longest a connect may carry.
+        let info = format!("\\k\\{}", "v".repeat(MAX_INFO_STRING - 3));
+        assert_eq!(info.len(), MAX_INFO_STRING);
+        let userinfos: Vec<UserInfoEntry> = (0..32)
+            .map(|slot| UserInfoEntry {
+                slot,
+                userid: 1000 + i32::from(slot),
+                info: info.clone(),
+            })
+            .collect();
+        let mut baselines = MsgWriter::new();
+        write_spawn_baselines(&mut baselines, &server.deltas, 32, &server.baselines, 100.0);
+        let mut rest = MsgWriter::new();
+        write_spawn_stage(
+            &mut rest,
+            Vec3::new(0.0, 90.0, 0.0),
+            100.0,
+            &userinfos,
+            &server.outbox.light_styles,
+            &server.outbox.init,
+        );
+        let (a, b) = (baselines.as_slice().len(), rest.as_slice().len());
+        (a + b, a, b)
+    }
+
+    /// The `spawn` stage of a full server must fit the reliable buffer ReHLDS gives a netchan
+    /// (`NET_MAX_PAYLOAD`): a full init buffer, 64 light styles of the longest stored length,
+    /// 32 userinfos of 256 bytes and the baselines of every entity of the default pool. A pool
+    /// whose entities all have every baseline field set does not fit; that is reported, not
+    /// asserted (see the final-fix report).
+    #[test]
+    fn worst_case_spawn_stage_fits_the_reliable_payload() {
+        let entities = DEFAULT_MAX_EDICTS - 33;
+        let (total, baselines, rest) = spawn_stage_size(entities, false);
+        eprintln!(
+            "spawn stage, {entities} model entities (origin, angles): {total} bytes \
+             ({baselines} baselines, {rest} other) of {NET_MAX_PAYLOAD}"
+        );
+        assert!(total <= NET_MAX_PAYLOAD, "{total} bytes");
+
+        // Everything except the baselines is bounded and fits on its own, with room left.
+        assert!(rest < NET_MAX_PAYLOAD, "{rest} bytes");
+
+        let (total, baselines, rest) = spawn_stage_size(entities, true);
+        eprintln!(
+            "spawn stage, {entities} entities with every field set: {total} bytes \
+             ({baselines} baselines, {rest} other) of {NET_MAX_PAYLOAD}"
+        );
+        let (largest, _, _) = spawn_stage_size(2047 - 33, false);
+        eprintln!(
+            "spawn stage, {} model entities (the 11-bit entity number limit): {largest} bytes",
+            2047 - 33
+        );
+    }
 
     #[test]
     fn default_config_matches_brief() {

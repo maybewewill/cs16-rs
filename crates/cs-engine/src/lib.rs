@@ -33,8 +33,8 @@ pub use map::ServerMap;
 pub use mapents::{MAX_ENTITY_KEYS, MAX_KEY_BYTES, MAX_VALUE_BYTES};
 pub use oob::{
     CHALLENGE_BUCKET_SECS, ChallengeIssuer, ConnectRequest, MAX_INFO_STRING, MAX_NAME_BYTES,
-    OOB_GLOBAL_REPLIES_PER_SEC, OobContext, OobLimiter, OobOutcome, carries_valid_challenge,
-    handle_oob, sanitize_name,
+    OOB_GLOBAL_REPLIES_PER_SEC, OobContext, OobLimiter, OobOutcome, handle_oob,
+    sanitize_name,
 };
 pub use precache::{MAX_GENERIC, MAX_MODELS, MAX_SOUNDS, PrecacheError, PrecacheTables, res_type};
 pub use server::{

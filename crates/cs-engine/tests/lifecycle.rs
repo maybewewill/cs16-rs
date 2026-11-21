@@ -218,6 +218,21 @@ fn shutdown_notifies_everyone() {
 }
 
 #[test]
+fn shutdown_deactivates_the_game_once() {
+    let mut h = Harness::new(4);
+    let mut a = joined(&mut h, "A", &mut []);
+    assert_eq!(h.server.game().server_deactivate_calls, 0);
+    h.server.shutdown(&mut h.hub, "bye");
+    // Clients are released first, then the game deactivates.
+    assert_eq!(h.server.game().client_disconnect_calls, 1);
+    assert_eq!(h.server.game().server_deactivate_calls, 1);
+    // A second shutdown does not call it again.
+    h.server.shutdown(&mut h.hub, "bye again");
+    assert_eq!(h.server.game().server_deactivate_calls, 1);
+    h.step(&mut [&mut a], 2);
+}
+
+#[test]
 fn shutdown_refuses_new_connections() {
     let mut h = Harness::new(4);
     let mut a = joined(&mut h, "A", &mut []);

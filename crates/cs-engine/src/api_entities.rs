@@ -9,6 +9,7 @@ use glam::Vec3;
 use crate::collision::{CONTENTS_EMPTY, Hull, MAX_WORLD_COORD, TraceResult};
 use crate::edict::{EdictId, EntVars};
 use crate::game::EngineApi;
+use crate::mapents::MAX_VALUE_BYTES;
 use crate::precache::PrecacheError;
 
 impl EngineApi<'_> {
@@ -45,8 +46,14 @@ impl EngineApi<'_> {
     }
 
     /// Allocates an entity at the current time and sets its `classname`. Returns `None` when
-    /// the pool has no free slot (slots freed less than `EDICT_REUSE_DELAY` ago do not count).
+    /// the pool has no free slot (slots freed less than `EDICT_REUSE_DELAY` ago do not count,
+    /// except in the `EDICT_LOAD_GRACE` after the map start, when freed slots are reused at
+    /// once), and for a `classname` longer than [`MAX_VALUE_BYTES`] or containing a NUL byte
+    /// (nothing is allocated then).
     pub fn create_entity(&mut self, classname: &str) -> Option<EdictId> {
+        if classname.len() > MAX_VALUE_BYTES || classname.contains('\0') {
+            return None;
+        }
         let id = self.edicts.alloc(self.time)?;
         if let Some(edict) = self.edicts.get_mut(id) {
             edict.vars.classname = classname.to_string();
@@ -342,6 +349,23 @@ mod tests {
         assert_eq!(eng.client_edict(1).index, 2);
         assert!(eng.ent(eng.client_edict(2)).is_none());
         assert!(eng.ent(eng.client_edict(255)).is_none());
+    }
+
+    #[test]
+    fn create_entity_refuses_a_bad_classname_without_allocating() {
+        let mut f = Fixture::new(1, 5);
+        let mut eng = f.api();
+        let long = "c".repeat(crate::mapents::MAX_VALUE_BYTES + 1);
+        assert!(eng.create_entity(&long).is_none());
+        assert!(eng.create_entity("a\0b").is_none());
+        assert!(eng.create_entity("\0").is_none());
+        // Nothing was taken from the pool: the 3 free slots are still there.
+        let exact = "c".repeat(crate::mapents::MAX_VALUE_BYTES);
+        let first = eng.create_entity(&exact).expect("longest classname");
+        assert_eq!(eng.ent(first).map(|v| v.classname.len()), Some(exact.len()));
+        assert!(eng.create_entity("ok").is_some());
+        assert!(eng.create_entity("full").is_some());
+        assert!(eng.create_entity("full").is_none());
     }
 
     #[test]

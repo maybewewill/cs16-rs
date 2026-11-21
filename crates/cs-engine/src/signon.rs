@@ -17,7 +17,8 @@ use cs_proto48::messages::{
 use cs_proto48::usermsg::UserMsgRegistry;
 use glam::Vec3;
 
-/// Light styles sent in the `spawn` stage.
+/// Light styles sent in the `spawn` stage: the HLDS table size (`MAX_LIGHTSTYLES`), the limit
+/// of the `svc_lightstyle` index.
 pub(crate) const MAX_LIGHTSTYLES: u8 = 64;
 
 /// The light styles of a fresh map: style 0 is steady full brightness, the rest are empty.

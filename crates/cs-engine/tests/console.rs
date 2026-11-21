@@ -71,9 +71,16 @@ fn status_lists_connected_clients() {
         lines[3]
     );
 
-    // The hostname cvar wins over the configured name.
+    // One source for the name: the configuration. The `hostname` cvar is not consulted, so
+    // `status`, `svc_serverinfo` and the A2S info reply cannot disagree.
     out(&mut h, "hostname \"My Server\"");
-    assert!(out(&mut h, "status").starts_with("hostname: My Server\nmap: test\n"));
+    let configured = h.server.config().hostname.clone();
+    assert!(out(&mut h, "status").starts_with(&format!("hostname: {configured}\nmap: test\n")));
+    let served = a.messages().iter().find_map(|m| match m {
+        SvcMessage::ServerInfo(info) => Some(info.hostname.clone()),
+        _ => None,
+    });
+    assert_eq!(served, Some(configured));
 }
 
 #[test]

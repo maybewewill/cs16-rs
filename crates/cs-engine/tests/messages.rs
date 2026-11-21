@@ -396,13 +396,14 @@ fn init_messages_come_from_spawn_entity_too_and_only_during_activation() {
 
 #[test]
 fn a_full_init_buffer_still_reaches_a_late_joiner() {
-    // 65 messages of 1000 bytes and one of 536 fill the buffer exactly; one more byte spills
+    // 32 messages of 1000 bytes and one of 768 fill the buffer exactly; one more byte spills
     // over and is sent as `All` (to nobody).
+    assert_eq!(MAX_INIT_BUFFER, 32 * 1024, "ReHLDS signon_data[32768]");
     let big = "x".repeat(998);
-    let mut sends: Vec<(MsgDest, Vec<u8>)> = (0..65)
+    let mut sends: Vec<(MsgDest, Vec<u8>)> = (0..32)
         .map(|i| (MsgDest::Init, print_bytes(&format!("{i:03}{}", &big[3..]))))
         .collect();
-    sends.push((MsgDest::Init, print_bytes(&"y".repeat(534))));
+    sends.push((MsgDest::Init, print_bytes(&"y".repeat(766))));
     assert_eq!(
         sends.iter().map(|(_, b)| b.len()).sum::<usize>(),
         MAX_INIT_BUFFER
@@ -427,7 +428,7 @@ fn a_full_init_buffer_still_reaches_a_late_joiner() {
     assert_eq!(h.server.client_state(0), ClientState::Active);
     assert_eq!(
         prints(&a).iter().filter(|t| t.starts_with("0") || t.starts_with("y")).count(),
-        66
+        33
     );
     assert!(worst_backlog < MAX_RELIABLE_BACKLOG, "{worst_backlog}");
     eprintln!("worst reliable backlog during a full init replay: {worst_backlog}");
@@ -443,22 +444,31 @@ fn light_styles_are_stored_and_updated() {
     h.server.game_mut().act(|eng| {
         eng.light_style(5, "abcba");
         eng.light_style(63, "z");
-        // Ignored: out of range, too long, NUL inside.
+        // Ignored: out of range, NUL inside.
         eng.light_style(64, "nope");
         eng.light_style(200, "nope");
-        eng.light_style(6, &"a".repeat(65));
         eng.light_style(7, "a\0b");
-        // The longest pattern is allowed; an empty one is a valid pattern.
-        eng.light_style(8, &"b".repeat(64));
+        // ReHLDS keeps 63 bytes: 63 are kept as they are, a longer pattern is cut to 63 (on a
+        // character boundary), an empty one is a valid pattern.
+        eng.light_style(8, &"b".repeat(63));
+        eng.light_style(6, &"a".repeat(65));
+        eng.light_style(9, &"c".repeat(64));
+        eng.light_style(10, &format!("d{}", "\u{20ac}".repeat(30)));
         eng.light_style(0, "");
     });
     h.step(&mut [&mut a, &mut b], 30);
     for probe in [&a, &b] {
         assert_eq!(light_style_of(probe, 5), Some("abcba".to_string()));
         assert_eq!(light_style_of(probe, 63), Some("z".to_string()));
-        assert_eq!(light_style_of(probe, 6), Some(String::new()));
+        assert_eq!(light_style_of(probe, 6), Some("a".repeat(63)));
         assert_eq!(light_style_of(probe, 7), Some(String::new()));
-        assert_eq!(light_style_of(probe, 8), Some("b".repeat(64)));
+        assert_eq!(light_style_of(probe, 8), Some("b".repeat(63)));
+        assert_eq!(light_style_of(probe, 9), Some("c".repeat(63)));
+        // 1 + 20 characters of 3 bytes = 61 bytes; a 21st would end at byte 64.
+        assert_eq!(
+            light_style_of(probe, 10),
+            Some(format!("d{}", "\u{20ac}".repeat(20)))
+        );
         assert_eq!(light_style_of(probe, 0), Some(String::new()));
     }
     // A client entering later is sent the stored styles in its spawn stage.
@@ -468,6 +478,7 @@ fn light_styles_are_stored_and_updated() {
     assert_eq!(light_style_of(&c, 5), Some("abcba".to_string()));
     assert_eq!(light_style_of(&c, 63), Some("z".to_string()));
     assert_eq!(light_style_of(&c, 7), Some(String::new()));
+    assert_eq!(light_style_of(&c, 6), Some("a".repeat(63)));
     assert_eq!(light_style_of(&c, 0), Some(String::new()));
 
     // A map change resets them.
@@ -582,7 +593,7 @@ fn per_frame_message_flood_respects_client_limits() {
             .collect(),
         ..TestGame::default()
     };
-    // Each client is replayed 65 KB of init messages first.
+    // Each client is replayed the 32 KB init buffer first.
     let (mut h, mut a, mut b) = two_active_within(game, 1000);
     assert!(h.server.init_buffer_len() <= MAX_INIT_BUFFER);
     let before = h.server.net_stats();
@@ -695,4 +706,105 @@ fn oversized_broadcast_beside_an_update_is_counted_as_dropped() {
     h.step(&mut [&mut a, &mut b], 30);
     assert!(h.server.net_stats().unreliable_dropped > before);
     assert_eq!(a.state(), &ProbeState::InGame);
+}
+
+#[test]
+fn sound_comes_from_the_centre_of_the_bounds() {
+    // A brush entity has a zero origin and bounds around its model (`set_model("*N")`):
+    // ReHLDS `SV_StartSound_internal` sounds from `origin + (mins + maxs) / 2`.
+    let game = TestGame {
+        precache_sounds: vec!["doors/door1.wav".to_string()],
+        ..TestGame::default()
+    };
+    let (mut h, mut a, mut b) = two_active(game);
+    let results = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&results);
+    h.server.game_mut().act(move |eng| {
+        let brush = eng.create_entity("func_door").expect("free edict");
+        let vars = eng.ent_mut(brush).expect("just allocated");
+        vars.mins = Vec3::new(100.0, 200.0, -40.0);
+        vars.maxs = Vec3::new(140.0, 240.0, 40.0);
+        sink.borrow_mut()
+            .push(eng.emit_sound(brush, 1, "doors/door1.wav", 1.0, 1.0, 100));
+        // With an origin as well the two add up.
+        let prop = eng.create_entity("prop").expect("free edict");
+        let vars = eng.ent_mut(prop).expect("just allocated");
+        vars.origin = Vec3::new(10.0, 20.0, 30.0);
+        vars.mins = Vec3::new(-2.0, -4.0, 0.0);
+        vars.maxs = Vec3::new(6.0, 8.0, 10.0);
+        sink.borrow_mut()
+            .push(eng.emit_sound(prop, 2, "doors/door1.wav", 1.0, 1.0, 100));
+    });
+    h.step(&mut [&mut a, &mut b], 30);
+    assert_eq!(*results.borrow(), vec![true, true]);
+    let heard = sounds(&a);
+    assert_eq!(heard.len(), 2, "{heard:?}");
+    let near = |got: Vec3, want: Vec3| (got - want).abs().max_element() <= 0.125;
+    assert!(near(heard[0].origin, Vec3::new(120.0, 220.0, 0.0)), "{:?}", heard[0]);
+    assert!(near(heard[1].origin, Vec3::new(12.0, 22.0, 35.0)), "{:?}", heard[1]);
+}
+
+#[test]
+fn sound_refuses_an_entity_index_the_wire_cannot_carry() {
+    let game = TestGame {
+        precache_sounds: vec!["doors/door1.wav".to_string()],
+        ..TestGame::default()
+    };
+    let cfg = ServerConfig {
+        max_clients: 2,
+        max_edicts: 2100,
+        ..ServerConfig::default()
+    };
+    let mut h = Harness::with_config(cfg, game);
+    let mut a = h.add_probe("A");
+    h.step(&mut [&mut a], 200);
+    assert_eq!(a.state(), &ProbeState::InGame);
+    let results = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&results);
+    h.server.game_mut().act(move |eng| {
+        let mut ids = Vec::new();
+        while let Some(id) = eng.create_entity("filler") {
+            ids.push(id);
+        }
+        for index in [2047u16, 2048, 2049, 2099] {
+            let id = ids.iter().find(|id| id.index == index).copied().expect("edict");
+            sink.borrow_mut()
+                .push(eng.emit_sound(id, 1, "doors/door1.wav", 1.0, 1.0, 100));
+        }
+    });
+    h.step(&mut [&mut a], 30);
+    assert_eq!(*results.borrow(), vec![true, false, false, false]);
+    let heard = sounds(&a);
+    assert_eq!(heard.len(), 1, "{heard:?}");
+    assert_eq!(heard[0].entity, 2047);
+}
+
+#[test]
+fn sends_within_one_call_stop_at_the_backlog_cap() {
+    let (mut h, mut a, mut b) = two_active(TestGame::default());
+    assert_eq!(h.server.net_stats().outbox_dropped, 0);
+    // Full-size messages: the buffer is checked before each, so the one that takes it past the
+    // cap is kept and the rest are dropped.
+    let accepted = MAX_RELIABLE_BACKLOG / MAX_MSGLEN + 1;
+    assert!(accepted * MAX_MSGLEN > MAX_RELIABLE_BACKLOG);
+    assert!((accepted - 1) * MAX_MSGLEN <= MAX_RELIABLE_BACKLOG);
+    let sent = accepted + 30;
+    h.server.game_mut().act(move |eng| {
+        for _ in 0..sent {
+            eng.send(MsgDest::OneUnreliable(0), &[svc::NOP; MAX_MSGLEN]);
+        }
+    });
+    h.step(&mut [&mut a, &mut b], 3);
+    assert_eq!(h.server.net_stats().outbox_dropped, 30);
+    // The same for the reliable buffer of the other slot, which is then over the backlog cap
+    // and released: the counter still counts what was dropped.
+    h.server.game_mut().act(move |eng| {
+        for _ in 0..sent {
+            eng.send(MsgDest::One(1), &[svc::NOP; MAX_MSGLEN]);
+        }
+    });
+    h.step(&mut [&mut a, &mut b], 3);
+    assert_eq!(h.server.net_stats().outbox_dropped, 60);
+    assert_eq!(h.server.client_state(1), ClientState::Free);
+    assert_eq!(h.server.client_state(0), ClientState::Active);
 }

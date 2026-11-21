@@ -124,8 +124,9 @@ impl<G: GameDll> Server<G> {
     /// client is taken out of the server, the spawn count goes up, the edicts (with serials no
     /// old id can match) and precache tables are rebuilt for `map` and the game activates it;
     /// then every connected client restarts its sign-on, its old reliable data discarded and
-    /// `reconnect` sent through the reliable stream. Clients are not reported to the game as
-    /// disconnected: its `server_deactivate` owns that state. Call it between [`frame`]
+    /// `reconnect` sent through the reliable stream. The init buffer and the light styles of
+    /// the old map are cleared (the new map's activation refills them). Clients are not reported
+    /// to the game as disconnected: its `server_deactivate` owns that state. Call it between [`frame`]
     /// calls.
     ///
     /// [`frame`]: Server::frame
@@ -159,14 +160,20 @@ impl<G: GameDll> Server<G> {
         self.drain_outbox();
     }
 
-    /// Sends every connected client `svc_disconnect(reason)` and releases it; from then on
+    /// Sends every connected client `svc_disconnect(reason)` and releases it (the game hears
+    /// `client_disconnect` for those it had put in), then lets the game deactivate the map
+    /// (`server_deactivate`, once: a repeated shutdown does not call it again); from then on
     /// connects are refused (queries are still answered).
     pub fn shutdown(&mut self, net: &mut dyn PacketTransport, reason: &str) {
+        let first = !self.shutting_down;
         self.shutting_down = true;
         for slot in 0..self.cfg.max_clients {
             self.release_slot(slot, Some(reason));
         }
         self.drain_outbox();
+        if first {
+            self.with_game(|game, eng| game.server_deactivate(eng));
+        }
         self.send_farewells(net);
     }
 

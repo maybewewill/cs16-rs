@@ -13,6 +13,7 @@ use crate::client::ClientState;
 use crate::edict::{EdictId, EdictPool, EntVars};
 use crate::map::ServerMap;
 use crate::precache::PrecacheTables;
+use crate::server::MAX_RELIABLE_BACKLOG;
 use crate::signon::default_light_styles;
 
 /// `FL_DUCKING` in `EntVars::flags`.
@@ -34,6 +35,9 @@ pub(crate) struct Outbox {
     pub(crate) init_open: bool,
     /// The 64 light style patterns, sent to every client that enters the server.
     pub(crate) light_styles: Vec<String>,
+    /// Messages `EngineApi::send` dropped because a target's buffer already held more than
+    /// `MAX_RELIABLE_BACKLOG` bytes; the server adds them to `NetStats::outbox_dropped`.
+    pub(crate) dropped: u64,
 }
 
 impl Outbox {
@@ -47,6 +51,28 @@ impl Outbox {
             init: Vec::new(),
             init_open: false,
             light_styles: default_light_styles(),
+            dropped: 0,
+        }
+    }
+
+    /// Appends `bytes` to the reliable buffer of `slot`, unless it already holds more than
+    /// `MAX_RELIABLE_BACKLOG` bytes: then the message is dropped and counted.
+    pub(crate) fn push_reliable(&mut self, slot: usize, bytes: &[u8]) {
+        let buffer = &mut self.reliable[slot];
+        if buffer.len() > MAX_RELIABLE_BACKLOG {
+            self.dropped += 1;
+        } else {
+            buffer.write_bytes(bytes);
+        }
+    }
+
+    /// [`push_reliable`](Self::push_reliable) for the unreliable buffer of `slot`.
+    pub(crate) fn push_unreliable(&mut self, slot: usize, bytes: &[u8]) {
+        let buffer = &mut self.unreliable[slot];
+        if buffer.len() > MAX_RELIABLE_BACKLOG {
+            self.dropped += 1;
+        } else {
+            buffer.write_bytes(bytes);
         }
     }
 
@@ -73,8 +99,9 @@ pub(crate) struct ClientView {
 }
 
 /// Engine services available to the game during one call. Everything the game does to the
-/// engine goes through its methods (entities, resources and cvars in `api_entities.rs`, clients
-/// and messages here), so each can later be wrapped by a mod hook.
+/// engine goes through its methods (entities, resources and cvars in `api_entities.rs`,
+/// messages and sounds in `api_messages.rs`, client slots, userinfo and kicks here), so each
+/// can later be wrapped by a mod hook.
 pub struct EngineApi<'a> {
     pub(crate) edicts: &'a mut EdictPool,
     pub(crate) precache: &'a mut PrecacheTables,

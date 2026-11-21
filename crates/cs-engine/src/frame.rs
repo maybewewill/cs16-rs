@@ -295,11 +295,13 @@ impl<G: GameDll> Server<G> {
             })
             .map(|(id, edict)| entity_state_from_vars(id.index, &edict.vars))
             .collect();
+        // One copy of the sign-on states for all the calls below: nothing changes them here.
+        self.sync_views();
         candidates
             .into_iter()
             .filter_map(|mut state| {
                 let ent = state.number;
-                self.call_game(|game, eng| game.add_to_full_pack(eng, slot, ent, &mut state))
+                self.call_game_synced(|game, eng| game.add_to_full_pack(eng, slot, ent, &mut state))
                     .then_some(state)
             })
             .collect()
