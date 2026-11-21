@@ -55,8 +55,8 @@ pub fn spawn_line_reader<R: BufRead + Send + 'static>(mut input: R) -> Receiver<
 }
 
 /// A flag set by Ctrl+C, and with ctrlc's `termination` feature (enabled in the workspace) by
-/// SIGTERM and SIGHUP on unix. If the
-/// handler cannot be installed a warning is logged and the flag simply never rises.
+/// SIGTERM and SIGHUP on unix. If the handler cannot be installed a warning is logged and the
+/// flag simply never rises.
 pub fn interrupt_flag() -> Arc<AtomicBool> {
     let flag = Arc::new(AtomicBool::new(false));
     let handler_flag = Arc::clone(&flag);

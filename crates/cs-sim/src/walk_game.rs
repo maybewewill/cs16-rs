@@ -166,7 +166,8 @@ impl MoveWorld for EngineWorld<'_, '_> {
 }
 
 /// A question put to the game's movement world, answered at the start of the next frame.
-/// For tests only.
+/// For tests only (cargo feature `test-hooks`).
+#[cfg(feature = "test-hooks")]
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy)]
 pub enum WorldQuery {
@@ -178,7 +179,8 @@ pub enum WorldQuery {
     Snap(Vec3),
 }
 
-/// The answer to a [`WorldQuery`]. For tests only.
+/// The answer to a [`WorldQuery`]. For tests only (cargo feature `test-hooks`).
+#[cfg(feature = "test-hooks")]
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy)]
 pub enum WorldAnswer {
@@ -199,7 +201,9 @@ pub struct WalkGame {
     /// Movement state of every player put in the server, by slot.
     players: BTreeMap<u8, PlayerMoveState>,
     /// Queries tests queued for the next frame, and their answers.
+    #[cfg(feature = "test-hooks")]
     queries: Vec<WorldQuery>,
+    #[cfg(feature = "test-hooks")]
     answers: Vec<WorldAnswer>,
 }
 
@@ -214,7 +218,9 @@ impl WalkGame {
             params,
             player_model: 0,
             players: BTreeMap::new(),
+            #[cfg(feature = "test-hooks")]
             queries: Vec::new(),
+            #[cfg(feature = "test-hooks")]
             answers: Vec::new(),
         }
     }
@@ -231,13 +237,16 @@ impl WalkGame {
     }
 
     /// Queues `query`; its answer is available through [`take_answers`](Self::take_answers)
-    /// after the next server frame. For tests only.
+    /// after the next server frame. For tests only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn query_world(&mut self, query: WorldQuery) {
         self.queries.push(query);
     }
 
-    /// The answers to the queries run so far, in order, removed from the game. For tests only.
+    /// The answers to the queries run so far, in order, removed from the game. For tests only
+    /// (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn take_answers(&mut self) -> Vec<WorldAnswer> {
         std::mem::take(&mut self.answers)
@@ -245,7 +254,8 @@ impl WalkGame {
 
     /// Moves the movement state of the player in `slot` to `origin` and stops it, to place a
     /// player at a chosen spot in tests; the edict follows with the player's next command.
-    /// `false` when nobody is in that slot.
+    /// `false` when nobody is in that slot. For tests only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn set_player_origin(&mut self, slot: u8, origin: Vec3) -> bool {
         let Some(state) = self.players.get_mut(&slot) else {
@@ -483,6 +493,10 @@ impl GameDll for WalkGame {
         }
     }
 
+    #[cfg(not(feature = "test-hooks"))]
+    fn start_frame(&mut self, _eng: &mut EngineApi<'_>, _frametime: f32) {}
+
+    #[cfg(feature = "test-hooks")]
     fn start_frame(&mut self, eng: &mut EngineApi<'_>, _frametime: f32) {
         if self.queries.is_empty() {
             return;

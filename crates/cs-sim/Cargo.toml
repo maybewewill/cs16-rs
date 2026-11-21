@@ -3,6 +3,7 @@ name = "cs-sim"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 cs-assets.workspace = true
@@ -13,7 +14,13 @@ glam.workspace = true
 serde.workspace = true
 tracing.workspace = true
 
+[features]
+# Test-only hooks of `WalkGame` (world queries, placing a player). Never enabled in production
+# builds; cs-sim's own integration tests enable it through the self dev-dependency below.
+test-hooks = []
+
 [dev-dependencies]
+cs-sim = { path = ".", features = ["test-hooks"] }
 cs-probe.workspace = true
 cs-transport.workspace = true
 cs-vfs.workspace = true

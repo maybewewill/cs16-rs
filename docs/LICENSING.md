@@ -42,7 +42,8 @@ Decision: the project owner chose GPL-3.0-or-later because it is compatible with
 of the reference projects' licensing.
 
 Porting code from ReHLDS and ReGameDLL_CS is allowed again, with the source of ported code
-named in `THIRD-PARTY-NOTICES.md`.
+named in `THIRD-PARTY-NOTICES.md`. Code derived from the Valve Half-Life SDK stays excluded; see
+[Valve Half-Life SDK caveat](#valve-half-life-sdk-caveat).
 
 ## Copyright notice
 

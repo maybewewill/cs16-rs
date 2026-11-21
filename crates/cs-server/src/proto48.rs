@@ -15,7 +15,7 @@ use cs_platform::{Clock, NativeClock};
 use cs_proto48::delta::DeltaRegistry;
 use cs_sim::pmove::MoveParams;
 use cs_sim::walk_game::WalkGame;
-use cs_transport::UdpTransport;
+use cs_transport::{PacketTransport, UdpTransport};
 use cs_vfs::{Vfs, VfsConfig};
 use tracing::info;
 
@@ -95,10 +95,14 @@ fn load_server_map(vfs: &Vfs, name: &str) -> Result<ServerMap, String> {
     ServerMap::from_bsp(name, &raw, bsp).ok_or(format!("{path} has no valid BSP header"))
 }
 
-/// Carries out `changelevel <name>`: loads the map and switches the server to it. A failure is
-/// printed and the server keeps running on its current map.
-fn change_level(vfs: &Vfs, server: &mut WalkServer, name: &str) {
-    match load_server_map(vfs, name) {
+/// Carries out `changelevel <name>`: loads the map with `load_map` and switches the server to
+/// it. A failure is printed and the server keeps running on its current map.
+fn change_level(
+    load_map: &mut dyn FnMut(&str) -> Result<ServerMap, String>,
+    server: &mut WalkServer,
+    name: &str,
+) {
+    match load_map(name) {
         Ok(map) => {
             println!("changing level to {name}");
             server.change_map(map);
@@ -108,12 +112,17 @@ fn change_level(vfs: &Vfs, server: &mut WalkServer, name: &str) {
 }
 
 /// Runs the console lines that arrived since the last frame and checks Ctrl+C. Returns `true`
-/// once the server was shut down (the caller runs one more frame and exits). Closed or silent
-/// input is not a request to stop.
+/// once the server was shut down (the caller then exits: `shutdown` already sent the
+/// farewells). Closed or silent input is not a request to stop.
+///
+/// At most one map change happens per call: after a `changelevel` the remaining lines wait for
+/// the next frame, so a map change is never followed by more commands in the same frame and
+/// Ctrl+C pressed during a slow map load is honoured right after it. Lines after `quit` are
+/// not run.
 fn run_console(
     server: &mut WalkServer,
-    net: &mut UdpTransport,
-    vfs: &Vfs,
+    net: &mut dyn PacketTransport,
+    load_map: &mut dyn FnMut(&str) -> Result<ServerMap, String>,
     commands: &Receiver<String>,
     interrupted: &AtomicBool,
 ) -> bool {
@@ -128,7 +137,11 @@ fn run_console(
                     print!("{text}");
                 }
             }
-            ConsoleOutcome::ChangeLevel(name) => change_level(vfs, server, &name),
+            ConsoleOutcome::ChangeLevel(name) => {
+                change_level(load_map, server, &name);
+                quit = interrupted.load(Ordering::SeqCst);
+                break;
+            }
             ConsoleOutcome::Quit => quit = true,
         }
     }
@@ -174,14 +187,17 @@ fn start(args: &[String]) -> Result<(), String> {
     let interrupted = console_io::interrupt_flag();
     let clock = NativeClock::new();
     let mut next_frame = clock.now();
-    let mut quitting = false;
+    let mut load_map = |name: &str| load_server_map(&vfs, name);
     loop {
-        server.frame(&mut net, clock.now());
-        if quitting {
-            // One frame after `shutdown`, so the farewells are out; then done.
+        // Server time starts at 0 with the server, so `clock.now()` (seconds since the clock
+        // was created, just before this loop) plus one frame makes the first `frametime` one
+        // frame long instead of about 0, and later frames get their real elapsed time.
+        server.frame(&mut net, clock.now() + FRAME_SECS);
+        // `shutdown` has already sent every farewell, so there is nothing left to run a frame
+        // for.
+        if run_console(&mut server, &mut net, &mut load_map, &commands, &interrupted) {
             return Ok(());
         }
-        quitting = run_console(&mut server, &mut net, &vfs, &commands, &interrupted);
         next_frame += FRAME_SECS;
         let now = clock.now();
         if next_frame > now {
@@ -245,5 +261,124 @@ mod tests {
         ] {
             assert!(parse(&args(bad)).is_err(), "{bad:?}");
         }
+    }
+
+    fn stub_server() -> WalkServer {
+        Server::new(
+            ServerConfig::default(),
+            ServerMap::stub("start"),
+            WalkGame::new(MoveParams::default()),
+            DeltaRegistry::cs16_default(),
+            CVarRegistry::new_with_defaults(),
+        )
+    }
+
+    fn map_of(server: &mut WalkServer) -> String {
+        match server.console_command("status") {
+            ConsoleOutcome::Output(text) => text
+                .lines()
+                .find_map(|l| l.strip_prefix("map: "))
+                .unwrap_or_default()
+                .to_string(),
+            _ => String::new(),
+        }
+    }
+
+    /// What one `run_console` call over a batch of lines did.
+    struct Batch {
+        quit: bool,
+        /// Map names the loader was asked for; names starting with `bad` fail to load.
+        loaded: Vec<String>,
+        /// The channel, with the lines the call left unread.
+        rest: Receiver<String>,
+    }
+
+    fn console_once(server: &mut WalkServer, lines: &[&str], interrupted: &AtomicBool) -> Batch {
+        let (tx, rest) = std::sync::mpsc::channel();
+        for l in lines {
+            tx.send(l.to_string()).unwrap();
+        }
+        let mut loaded = Vec::new();
+        let mut net = cs_transport::LoopbackHub::new();
+        let mut load = |name: &str| {
+            loaded.push(name.to_string());
+            if name.starts_with("bad") {
+                Err(format!("no map {name}"))
+            } else {
+                Ok(ServerMap::stub(name))
+            }
+        };
+        let quit = run_console(server, &mut net, &mut load, &rest, interrupted);
+        Batch { quit, loaded, rest }
+    }
+
+    #[test]
+    fn changelevel_then_quit_in_one_batch_changes_first_and_quits_next_frame() {
+        let mut server = stub_server();
+        let flag = AtomicBool::new(false);
+        let b = console_once(&mut server, &["changelevel a", "quit"], &flag);
+        assert!(!b.quit, "the quit line waits for the next frame");
+        assert_eq!(b.loaded, ["a"]);
+        assert_eq!(map_of(&mut server), "a");
+        assert_eq!(b.rest.try_recv().as_deref(), Ok("quit"));
+    }
+
+    #[test]
+    fn two_changelevels_in_one_batch_run_one_per_frame() {
+        let mut server = stub_server();
+        let flag = AtomicBool::new(false);
+        let b = console_once(&mut server, &["changelevel a", "map b"], &flag);
+        assert!(!b.quit);
+        assert_eq!(b.loaded, ["a"]);
+        assert_eq!(map_of(&mut server), "a");
+        // The next frame picks up the second line.
+        let mut net = cs_transport::LoopbackHub::new();
+        let mut load = |name: &str| Ok(ServerMap::stub(name));
+        assert!(!run_console(&mut server, &mut net, &mut load, &b.rest, &flag));
+        assert_eq!(map_of(&mut server), "b");
+    }
+
+    #[test]
+    fn a_failed_load_keeps_the_old_map() {
+        let mut server = stub_server();
+        let flag = AtomicBool::new(false);
+        let b = console_once(&mut server, &["changelevel bad1"], &flag);
+        assert!(!b.quit);
+        assert_eq!(b.loaded, ["bad1"]);
+        assert_eq!(map_of(&mut server), "start");
+    }
+
+    #[test]
+    fn lines_after_quit_are_not_run() {
+        let mut server = stub_server();
+        let flag = AtomicBool::new(false);
+        let b = console_once(&mut server, &["quit", "changelevel a"], &flag);
+        assert!(b.quit);
+        assert!(b.loaded.is_empty());
+        assert_eq!(b.rest.try_recv().as_deref(), Ok("changelevel a"));
+    }
+
+    #[test]
+    fn ctrl_c_during_a_load_quits_right_after_it() {
+        let mut server = stub_server();
+        let flag = AtomicBool::new(false);
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send("changelevel a".to_string()).unwrap();
+        let mut net = cs_transport::LoopbackHub::new();
+        let mut load = |name: &str| {
+            flag.store(true, Ordering::SeqCst); // Ctrl+C arrives while the map loads.
+            Ok(ServerMap::stub(name))
+        };
+        assert!(run_console(&mut server, &mut net, &mut load, &rx, &flag));
+        assert_eq!(map_of(&mut server), "a");
+    }
+
+    #[test]
+    fn ctrl_c_before_the_batch_runs_none_of_it() {
+        let mut server = stub_server();
+        let flag = AtomicBool::new(true);
+        let b = console_once(&mut server, &["changelevel a"], &flag);
+        assert!(b.quit);
+        assert!(b.loaded.is_empty());
     }
 }

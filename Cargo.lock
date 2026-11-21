@@ -650,6 +650,7 @@ dependencies = [
  "cs-engine",
  "cs-probe",
  "cs-proto48",
+ "cs-sim",
  "cs-transport",
  "cs-vfs",
  "glam",

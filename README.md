@@ -74,7 +74,7 @@ The server console (type in the terminal where the server runs) accepts these co
 - `quit` or `exit` - shut the server down, telling the clients.
 - `<cvar>` or `<cvar> <value>` - read or set a cvar.
 
-Ctrl+C and SIGTERM shut the server down gracefully: connected clients are told and disconnect at once instead of timing out.
+Ctrl+C (and SIGTERM/SIGHUP on unix) shuts the server down gracefully: connected clients are told and disconnect at once instead of timing out.
 
 Compatibility with the original client is not yet verified; the manual checks are in [`docs/parity/checklists/phase1-original-client.md`](docs/parity/checklists/phase1-original-client.md) and [`docs/parity/checklists/phase2a-console.md`](docs/parity/checklists/phase2a-console.md). The headless probe connects the same way: `cargo run -p cs-probe -- --connect 127.0.0.1:27015 --seconds 20 --walk`.
 
@@ -96,7 +96,7 @@ Compatibility with the original client is not yet verified; the manual checks ar
 
 ## Verification
 
-The toolchain is pinned to Rust 1.100.0 by `rust-toolchain.toml`; `rustup` installs it on the first `cargo` run.
+The toolchain is pinned to Rust 1.100.0 by `rust-toolchain.toml`; `rustup` installs it on the first `cargo` run; if it does not, run `rustup toolchain install`.
 
 ```powershell
 cargo clippy --workspace --all-targets -- -D warnings
