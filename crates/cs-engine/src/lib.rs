@@ -21,11 +21,16 @@ pub mod usercmd;
 mod world;
 
 pub use client::{ClientState, MAX_CLIENT_INCOMING_STREAM, MAX_REFUSED_STREAMS, SignonStage};
-pub use api_messages::{MAX_INIT_BUFFER, MAX_MESSAGE_TEXT, MsgDest};
+pub use api_messages::{MAX_MESSAGE_TEXT, MsgDest};
 pub use collision::WorldCollision;
 pub use console::{ConsoleOutcome, MAX_CONSOLE_LINE};
-pub use edict::{DEFAULT_MAX_EDICTS, EDICT_REUSE_DELAY, Edict, EdictId, EdictPool, EntVars};
-pub use frame::{ClientFrame, FrameRing, MAX_DATAGRAM, UPDATE_BACKUP, clamp_rate, update_interval};
+pub use edict::{
+    DEFAULT_MAX_EDICTS, EDICT_REUSE_DELAY, Edict, EdictId, EdictPool, EntVars, MAX_EDICTS_WIRE,
+};
+pub use frame::{
+    ClientFrame, FrameRing, MAX_DATAGRAM, MAX_PACKET_ENTITIES, UPDATE_BACKUP, clamp_rate,
+    update_interval,
+};
 pub use game::{EngineApi, GameDll, entity_state_from_vars};
 pub use lifecycle::{
     NAME_CHANGE_MIN_INTERVAL_SECS, PINGS_INTERVAL_SECS, SETINFO_BURST, SETINFO_RATE_PER_SEC,
@@ -40,6 +45,9 @@ pub use oob::{
 pub use precache::{MAX_GENERIC, MAX_MODELS, MAX_SOUNDS, PrecacheError, PrecacheTables, res_type};
 pub use server::{
     MAX_DATAGRAMS_PER_FRAME, MAX_RELIABLE_BACKLOG, NetStats, Server, ServerConfig,
+};
+pub use signon::{
+    INIT_BUFFER_BUDGET, MAX_SIGNON_BUFFER, SIGNON_BASELINE_RESERVE, SPAWN_TAIL_MAX,
 };
 pub use think::MAX_THINKS_PER_FRAME;
 pub use usercmd::{

@@ -13,6 +13,9 @@ use glam::Vec3;
 /// Default size of the edict pool.
 pub const DEFAULT_MAX_EDICTS: usize = 900;
 
+/// Most edicts the protocol can address: the entity number is 11 bits on the wire.
+pub const MAX_EDICTS_WIRE: usize = 2048;
+
 /// Seconds a freed slot stays unused before [`EdictPool::alloc`] may reuse it, except during
 /// the [`EDICT_LOAD_GRACE`] after the map start, when freed slots are reused at once.
 pub const EDICT_REUSE_DELAY: f64 = 0.5;
@@ -142,11 +145,11 @@ pub struct EdictPool {
 impl EdictPool {
     /// Creates the pool with worldspawn at index 0 and players at
     /// `1..=max_clients`, all live. `max_edicts` is raised to
-    /// `max_clients + 1` if smaller and capped at `u16::MAX` slots, so every
-    /// index fits an [`EdictId`] and `u16::MAX` itself is never a valid index.
+    /// `max_clients + 1` if smaller and capped at [`MAX_EDICTS_WIRE`] slots, so every
+    /// index fits the 11-bit entity number of the wire (and an [`EdictId`]).
     pub fn new(max_clients: u8, max_edicts: usize) -> Self {
         let fixed = usize::from(max_clients) + 1;
-        let len = max_edicts.max(fixed).min(usize::from(u16::MAX));
+        let len = max_edicts.max(fixed).min(MAX_EDICTS_WIRE);
         let slots = (0..len)
             .map(|index| Slot {
                 edict: Edict::empty(),
@@ -217,7 +220,7 @@ impl EdictPool {
         slot.live = true;
         slot.freed_at = None;
         Some(EdictId {
-            // Lossless: `new` caps the pool at `u16::MAX` slots.
+            // Lossless: `new` caps the pool at `MAX_EDICTS_WIRE` slots.
             index: index as u16,
             serial: slot.serial,
         })
@@ -290,7 +293,7 @@ impl EdictPool {
             .map(move |(i, s)| {
                 (
                     EdictId {
-                        // Lossless: `new` caps the pool at `u16::MAX` slots.
+                        // Lossless: `new` caps the pool at `MAX_EDICTS_WIRE` slots.
                         index: (first + i) as u16,
                         serial: s.serial,
                     },

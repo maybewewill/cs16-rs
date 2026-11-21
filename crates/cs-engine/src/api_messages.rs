@@ -15,12 +15,8 @@ use glam::Vec3;
 
 use crate::client::ClientState;
 use crate::game::EngineApi;
-use crate::signon::MAX_LIGHTSTYLES;
+use crate::signon::{INIT_BUFFER_BUDGET, MAX_LIGHTSTYLES};
 
-/// Bytes the init buffer holds; a message that would take it past this is sent as
-/// [`MsgDest::All`] instead. The size of the server's sign-on buffer in ReHLDS
-/// (`rehlds/engine/server.h`: `unsigned char signon_data[32768];`, read 2026-11-21).
-pub const MAX_INIT_BUFFER: usize = 32 * 1024;
 /// Bytes of text `client_print`, `print_all`, `center_print` and `stufftext` send at most.
 pub const MAX_MESSAGE_TEXT: usize = 1024;
 /// Bytes one `send` may carry: the netchan's `MAX_MSGLEN`, above which queued reliable data
@@ -58,7 +54,7 @@ pub enum MsgDest {
     Pvs(Vec3),
     /// The init buffer: stored, and replayed to every client that enters the server (in its
     /// `spawn` stage, after the light styles). Only while the map is being activated (in
-    /// `spawn_entity` and `server_activate`) and while it fits [`MAX_INIT_BUFFER`]; otherwise
+    /// `spawn_entity` and `server_activate`) and while it fits [`INIT_BUFFER_BUDGET`](crate::INIT_BUFFER_BUDGET); otherwise
     /// the same as `All`.
     Init,
 }
@@ -133,7 +129,8 @@ impl EngineApi<'_> {
                 }
             }
             MsgDest::Init => {
-                if self.outbox.init_open && self.outbox.init.len() + bytes.len() <= MAX_INIT_BUFFER
+                if self.outbox.init_open
+                    && self.outbox.init.len() + bytes.len() <= INIT_BUFFER_BUDGET
                 {
                     self.outbox.init.extend_from_slice(bytes);
                 } else {

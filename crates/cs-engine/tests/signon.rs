@@ -3,7 +3,10 @@
 mod common;
 
 use common::{Harness, TestGame};
-use cs_engine::{ClientState, MAX_NAME_BYTES, MAX_RELIABLE_BACKLOG, ServerConfig, SignonStage};
+use cs_engine::{
+    ClientState, INIT_BUFFER_BUDGET, MAX_NAME_BYTES, MAX_RELIABLE_BACKLOG, MAX_SIGNON_BUFFER,
+    MsgDest, SPAWN_TAIL_MAX, ServerConfig, ServerMap, SignonStage,
+};
 use cs_probe::{Direction, ProbeClient, ProbeState, read_capture};
 use cs_proto48::CONNECTIONLESS_HEADER;
 use cs_proto48::delta::DeltaRegistry;
@@ -555,4 +558,137 @@ fn prefixed_duplicate_name_fits_the_name_limit() {
     let prefixed = name_of(&second, 1).expect("second client's name");
     assert_eq!(prefixed, format!("(1){}", &long[..MAX_NAME_BYTES - 3]));
     assert_eq!(prefixed.len(), MAX_NAME_BYTES);
+}
+
+/// Bytes of the `svc_spawnbaseline` message for `baselines` of a server with `max_clients`.
+fn baseline_message_len(
+    max_clients: u8,
+    baselines: &[(u16, cs_proto48::delta::GoldSrcEntityState)],
+) -> usize {
+    let mut w = cs_proto48::bitbuf::MsgWriter::new();
+    cs_proto48::messages::write_svc_spawnbaseline(
+        &mut w,
+        &DeltaRegistry::cs16_default(),
+        max_clients,
+        baselines,
+        0.0,
+    );
+    w.len()
+}
+
+/// The init buffer is full, 1500 entities have every baseline field set: the baselines that
+/// fit the rest of the sign-on budget are sent (the lowest entity numbers), the others are
+/// skipped, and the client still gets in the game.
+#[test]
+fn init_and_baselines_share_the_signon_budget() {
+    let entities = 1500;
+    let game = TestGame {
+        extra_entities: entities,
+        rich_extras: true,
+        activate_sends: (0..INIT_BUFFER_BUDGET / 1000 + 2)
+            .map(|_| (MsgDest::Init, vec![svc::NOP; 1000]))
+            .collect(),
+        ..TestGame::default()
+    };
+    let cfg = ServerConfig {
+        max_clients: 4,
+        max_edicts: entities + 10,
+        ..ServerConfig::default()
+    };
+    let mut h = Harness::with_config(cfg, game);
+    let init = h.server.init_buffer_len();
+    assert!(
+        init > INIT_BUFFER_BUDGET - 1000 && init <= INIT_BUFFER_BUDGET,
+        "{init}"
+    );
+    let mut probe = h.add_probe("A");
+    step_until(&mut h, &mut [&mut probe], 3000, "in game", |_, p| {
+        p[0].state() == &ProbeState::InGame
+    });
+    assert_eq!(h.server.client_state(0), ClientState::Active);
+
+    let baselines = probe.baselines();
+    let kept: Vec<_> = baselines.iter().map(|(n, s)| (*n, s.clone())).collect();
+    assert!(
+        !kept.is_empty() && kept.len() < entities,
+        "{} baselines",
+        kept.len()
+    );
+    assert_eq!(kept.len(), h.server.baseline_count());
+    // The highest numbers are the ones skipped: the lowest `kept.len()` are all there.
+    let first = *baselines.keys().next().unwrap();
+    assert_eq!(first, 5);
+    assert!(
+        baselines
+            .keys()
+            .copied()
+            .eq(first..first + kept.len() as u16)
+    );
+    // Together with the init buffer they fit the sign-on buffer less the spawn tail.
+    let room = MAX_SIGNON_BUFFER - SPAWN_TAIL_MAX - init;
+    let size = baseline_message_len(4, &kept);
+    assert!(size <= room, "{size} bytes of {room}");
+    eprintln!(
+        "{} of {entities} baselines kept: {size} bytes of {room}",
+        kept.len()
+    );
+}
+
+/// Sizes of the spawn baselines (for the choice of `SIGNON_BASELINE_RESERVE`): a stub of 1500
+/// entities with a model, an origin and angles, and the brush entities of the installed maps.
+/// Reported with `--nocapture`; the real maps are skipped without the installed game.
+#[test]
+fn signon_baseline_sizes_are_reported() {
+    let entities = 1500;
+    let game = TestGame {
+        extra_entities: entities,
+        ..TestGame::default()
+    };
+    let cfg = ServerConfig {
+        max_clients: 16,
+        max_edicts: entities + 20,
+        ..ServerConfig::default()
+    };
+    let mut h = Harness::with_config(cfg, game);
+    let mut probe = h.add_probe("A");
+    step_until(&mut h, &mut [&mut probe], 3000, "in game", |_, p| {
+        p[0].state() == &ProbeState::InGame
+    });
+    let kept: Vec<_> = probe.baselines().into_iter().collect();
+    let size = baseline_message_len(16, &kept);
+    eprintln!(
+        "stub, {entities} entities with a model (origin): {} baselines, {size} bytes",
+        kept.len()
+    );
+    assert_eq!(kept.len(), entities);
+
+    let Ok(vfs) = cs_vfs::Vfs::discover(None, cs_vfs::VfsConfig::default()) else {
+        return;
+    };
+    for name in ["de_dust2", "cs_office"] {
+        let Ok(raw) = vfs.read_bytes(&format!("maps/{name}.bsp")) else {
+            continue;
+        };
+        let bsp = std::sync::Arc::new(cs_assets::bsp::BspMap::load(&vfs, name).expect("map parses"));
+        let mut map = ServerMap::from_bsp(name, &raw, bsp).expect("valid BSP header");
+        // The test game keeps the entities it knows by class: give the brush entities that.
+        for e in &mut map.entities {
+            if e.get("model").is_some_and(|m| m.starts_with('*')) {
+                e.properties
+                    .insert("classname".to_string(), "test_keep_brush".to_string());
+            }
+        }
+        let cfg = ServerConfig {
+            max_clients: 32,
+            ..ServerConfig::default()
+        };
+        let mut h = Harness::with_map(cfg, map, TestGame::default());
+        let mut probe = h.add_probe("A");
+        step_until(&mut h, &mut [&mut probe], 3000, "in game", |_, p| {
+            p[0].state() == &ProbeState::InGame
+        });
+        let kept: Vec<_> = probe.baselines().into_iter().collect();
+        let size = baseline_message_len(32, &kept);
+        eprintln!("{name}: {} brush-entity baselines, {size} bytes", kept.len());
+    }
 }

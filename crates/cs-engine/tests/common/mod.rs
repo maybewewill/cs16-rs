@@ -189,6 +189,9 @@ pub struct TestGame {
     pub extra_entities: usize,
     /// When set, the extra entities get `EF_NODRAW` in `effects`.
     pub nodraw_extras: bool,
+    /// When set, every extra entity gets a value in every baseline field, different from the
+    /// other extras' (the largest spawn baselines the engine can be asked to send).
+    pub rich_extras: bool,
     /// When set, every `update_client_data` call gives each extra entity field values that
     /// differ from its spawn baseline, from the other extras and from the previous call.
     pub churn_extras: bool,
@@ -313,6 +316,29 @@ impl GameDll for TestGame {
                 .unwrap_or(self.extra_nextthink);
             if self.nodraw_extras {
                 vars.effects |= EF_NODRAW;
+            }
+            if self.rich_extras {
+                let k = n as f32;
+                vars.origin = Vec3::new(4000.0 - k, -3000.0 + 2.0 * k, 100.5 + k);
+                vars.angles = Vec3::new((k * 3.7) % 360.0, (k * 1.3) % 360.0, (k * 5.1) % 360.0);
+                vars.weaponmodel = 1 + (n % 200) as u16;
+                vars.mins = Vec3::new(-16.0 - k % 7.0, -16.0, -36.0);
+                vars.maxs = Vec3::new(16.0 + k % 5.0, 16.0, 36.0);
+                vars.sequence = 1 + (n % 500) as u16;
+                vars.gaitsequence = 1 + (n % 90) as u16;
+                vars.frame = 0.5 + k % 200.0;
+                vars.animtime = 1.0 + k;
+                vars.framerate = 1.0 + (k % 7.0) * 0.25;
+                vars.scale = 1.0 + (k % 9.0) * 0.1;
+                vars.body = 1 + (n % 250) as u8;
+                vars.skin = 1 + (n % 12) as i16;
+                vars.colormap = 1 + (n % 60_000) as u16;
+                vars.effects = 1 + (n % 120) as u32;
+                vars.rendermode = 1 + (n % 5) as u8;
+                vars.renderamt = 1 + (n % 250) as u8;
+                vars.renderfx = 1 + (n % 20) as u8;
+                vars.solid = 1 + (n % 4) as u8;
+                vars.movetype = 1 + (n % 12) as u8;
             }
         }
     }

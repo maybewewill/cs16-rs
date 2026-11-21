@@ -22,7 +22,7 @@ use crate::oob::{ChallengeIssuer, OOB_GLOBAL_REPLIES_PER_SEC, OobLimiter};
 use crate::precache::PrecacheTables;
 use crate::world::WorldLinks;
 use crate::signon::{
-    UserInfoEntry, move_vars, munged_map_crc, write_new_stage, write_sendres_stage,
+    MAX_SIGNON_BUFFER, SPAWN_TAIL_MAX, UserInfoEntry, move_vars, munged_map_crc, write_new_stage, write_sendres_stage,
     write_spawn_baselines, write_spawn_stage,
 };
 use crate::usercmd::TokenBucket;
@@ -115,7 +115,8 @@ pub struct NetStats {
     /// Times queued unreliable messages for a client were discarded: the queue outgrew
     /// `MAX_DATAGRAM`, or it did not fit in the update that was to carry it.
     pub unreliable_dropped: u64,
-    /// Updates sent without their entity block because it did not fit in the datagram.
+    /// Updates whose unreliable part (client data and entity block) was dropped because the
+    /// entity block did not fit in the datagram.
     pub entity_blocks_dropped: u64,
     /// `Server::frame` calls ignored because their time was not finite or went backwards.
     pub frames_skipped: u64,
@@ -220,10 +221,11 @@ impl<G: GameDll> Server<G> {
     /// (see `think.rs`), handles up to [`MAX_DATAGRAMS_PER_FRAME`] waiting datagrams, frees
     /// clients that timed out, queues the pings and userinfo updates that are due, then sends
     /// each client what is due for it (see `frame.rs`) and the final datagrams of released
-    /// clients. A call whose `now` is not finite or earlier than the previous frame's does
-    /// nothing.
+    /// clients. A call whose `now` is not finite or earlier than the previous frame's, and any
+    /// call after [`shutdown`](Self::shutdown), does nothing but count in
+    /// `NetStats::frames_skipped`.
     pub fn frame(&mut self, net: &mut dyn PacketTransport, now: f64) {
-        if !now.is_finite() || now < self.time {
+        if self.shutting_down || !now.is_finite() || now < self.time {
             self.net_stats.frames_skipped += 1;
             return;
         }
@@ -279,9 +281,15 @@ impl<G: GameDll> Server<G> {
     }
 
     /// Bytes in the init buffer: what the game sent to `MsgDest::Init` while activating the
-    /// current map, at most [`MAX_INIT_BUFFER`](crate::MAX_INIT_BUFFER).
+    /// current map, at most [`INIT_BUFFER_BUDGET`](crate::INIT_BUFFER_BUDGET).
     pub fn init_buffer_len(&self) -> usize {
         self.outbox.init.len()
+    }
+
+    /// Spawn baselines the `spawn` stage sends for the current map: those that fit the sign-on
+    /// buffer (see [`MAX_SIGNON_BUFFER`]).
+    pub fn baseline_count(&self) -> usize {
+        self.baselines.len()
     }
 
     pub fn net_stats(&self) -> NetStats {
@@ -390,10 +398,15 @@ impl<G: GameDll> Server<G> {
             .collect()
     }
 
-    /// Spawn baselines of every live, visible edict that is not a client slot.
+    /// Spawn baselines of every live, visible edict that is not a client slot, as many as fit
+    /// what the init buffer leaves of [`MAX_SIGNON_BUFFER`] after the spawn tail
+    /// ([`SPAWN_TAIL_MAX`]). Baselines that do not fit are skipped from the highest entity
+    /// number down (HLDS has no such rule: its `SV_CreateBaseline` overflows the signon buffer
+    /// and errors out); a client gets such an entity as a full delta from the zero state. One
+    /// `tracing::error!` reports how many were skipped.
     fn compute_baselines(&mut self) {
         let max_clients = self.cfg.max_clients;
-        self.baselines = self
+        let mut baselines: Vec<(u16, GoldSrcEntityState)> = self
             .edicts
             .iter_live()
             .filter(|(id, e)| {
@@ -401,6 +414,40 @@ impl<G: GameDll> Server<G> {
             })
             .map(|(id, e)| (id.index, entity_state_from_vars(id.index, &e.vars)))
             .collect();
+        let room = MAX_SIGNON_BUFFER
+            .saturating_sub(SPAWN_TAIL_MAX)
+            .saturating_sub(self.outbox.init.len());
+        let fits = |count: usize| {
+            let mut w = MsgWriter::new();
+            write_spawn_baselines(
+                &mut w,
+                &self.deltas,
+                max_clients,
+                &baselines[..count],
+                self.time,
+            );
+            w.len() <= room
+        };
+        if !fits(baselines.len()) {
+            // The size grows with the count: the largest prefix that fits is a binary search.
+            let (mut lo, mut hi) = (0, baselines.len());
+            while lo < hi {
+                let mid = (lo + hi).div_ceil(2);
+                if fits(mid) {
+                    lo = mid;
+                } else {
+                    hi = mid - 1;
+                }
+            }
+            let skipped = baselines.len() - lo;
+            baselines.truncate(lo);
+            tracing::error!(
+                skipped,
+                kept = lo,
+                "spawn baselines do not fit the sign-on buffer; the highest entities are sent from the zero state"
+            );
+        }
+        self.baselines = baselines;
         self.baseline_records = self
             .baselines
             .iter()
@@ -689,10 +736,12 @@ mod tests {
     use glam::Vec3;
 
     use super::*;
-    use crate::api_messages::{MAX_INIT_BUFFER, MAX_LIGHT_STYLE_BYTES, MsgDest};
+    use crate::api_messages::{MAX_LIGHT_STYLE_BYTES, MsgDest};
     use crate::edict::EdictId;
     use crate::oob::MAX_INFO_STRING;
-    use crate::signon::{MAX_LIGHTSTYLES, write_spawn_baselines, write_spawn_stage};
+    use crate::signon::{
+        INIT_BUFFER_BUDGET, MAX_LIGHTSTYLES, write_spawn_baselines, write_spawn_stage,
+    };
 
     /// `NET_MAX_PAYLOAD` of ReHLDS (`rehlds/engine/net.h`, read 2026-11-21), also the size of
     /// the reliable message buffer of its netchan (`net_chan.cpp`).
@@ -750,7 +799,7 @@ mod tests {
                 eng.light_style(style, &"z".repeat(MAX_LIGHT_STYLE_BYTES));
             }
             // `svc_nop` bytes stay valid when cut anywhere.
-            let filler = vec![svc::NOP; MAX_INIT_BUFFER];
+            let filler = vec![svc::NOP; INIT_BUFFER_BUDGET];
             for chunk in filler.chunks(MAX_MSGLEN) {
                 eng.send(MsgDest::Init, chunk);
             }
@@ -811,8 +860,8 @@ mod tests {
             DeltaRegistry::cs16_default(),
             CVarRegistry::new_with_defaults(),
         );
-        assert_eq!(server.init_buffer_len(), MAX_INIT_BUFFER);
-        assert_eq!(server.baselines.len(), entities);
+        assert_eq!(server.init_buffer_len(), INIT_BUFFER_BUDGET);
+        assert!(server.baselines.len() <= entities);
         // Every slot connected, each with a userinfo of the longest a connect may carry.
         let info = format!("\\k\\{}", "v".repeat(MAX_INFO_STRING - 3));
         assert_eq!(info.len(), MAX_INFO_STRING);
@@ -866,6 +915,33 @@ mod tests {
             "spawn stage, {} model entities (the 11-bit entity number limit): {largest} bytes",
             2047 - 33
         );
+    }
+
+    /// The spawn tail constant covers what `write_spawn_stage` writes at its worst, and is not
+    /// loose by more than a few bytes per message.
+    #[test]
+    fn spawn_tail_max_is_the_worst_case_of_the_tail() {
+        let (_, _, rest) = spawn_stage_size(0, false);
+        // `spawn_stage_size` fills the init buffer; the tail is what is left.
+        let tail = rest - INIT_BUFFER_BUDGET;
+        assert!(tail <= SPAWN_TAIL_MAX, "{tail} bytes of {SPAWN_TAIL_MAX}");
+        assert!(SPAWN_TAIL_MAX - tail <= 64, "{tail} bytes of {SPAWN_TAIL_MAX}");
+    }
+
+    /// Init messages and baselines share `MAX_SIGNON_BUFFER`: whatever the game wrote, the
+    /// baselines kept fit what the init buffer and the spawn tail leave, the ones that do not
+    /// are the highest, and the whole `spawn` stage fits a reliable payload.
+    #[test]
+    fn init_and_baselines_share_the_signon_budget() {
+        // Every baseline field set: 1500 entities do not all fit.
+        let entities = 1500;
+        let (total, baselines, rest) = spawn_stage_size(entities, true);
+        eprintln!(
+            "{entities} entities with every field set: {total} bytes of {NET_MAX_PAYLOAD} \
+             ({baselines} baselines, {rest} other)"
+        );
+        assert!(total <= MAX_SIGNON_BUFFER, "{total} bytes");
+        assert!(baselines > 0 && baselines + INIT_BUFFER_BUDGET <= MAX_SIGNON_BUFFER - SPAWN_TAIL_MAX);
     }
 
     #[test]

@@ -4,7 +4,7 @@
 mod common;
 
 use common::{Harness, TestGame, big_info};
-use cs_engine::{ClientState, ServerConfig};
+use cs_engine::{ClientState, MAX_PACKET_ENTITIES, ServerConfig};
 use cs_probe::{ProbeClient, ProbeState};
 use cs_proto48::delta::GoldSrcUserCmd;
 use cs_proto48::messages::svc;
@@ -162,8 +162,11 @@ fn no_update_is_sent_before_it_is_due() {
     assert!((9..=11).contains(&frames), "{frames} updates per second");
 }
 
+/// A datagram whose entity block would not fit `MAX_DATAGRAM` carries no unreliable data at
+/// all, as in HLDS: `SV_SendClientDatagram` clears an overflowed message, so the client gets
+/// neither client data nor entities (`rehlds/engine/sv_main.cpp`, read 2026-11-21).
 #[test]
-fn oversized_frame_drops_entities_but_keeps_clientdata() {
+fn oversized_frame_drops_the_whole_unreliable_part_as_hlds() {
     let game = TestGame {
         extra_entities: 800,
         churn_extras: true,
@@ -173,27 +176,56 @@ fn oversized_frame_drops_entities_but_keeps_clientdata() {
     let mut probe = h.add_probe("A");
     for _ in 0..300 {
         h.step(&mut [&mut probe], 1);
-        if h.server.client_state(0) == ClientState::Active && probe.client_data().is_some() {
+        if h.server.client_state(0) == ClientState::Active {
             break;
         }
     }
     assert_eq!(h.server.client_state(0), ClientState::Active);
-    let first = probe.client_data().expect("client data").origin;
-
+    let dropped = h.server.net_stats().entity_blocks_dropped;
     for _ in 0..30 {
         probe.queue_cmd(forward());
         h.step(&mut [&mut probe], 1);
     }
     h.step(&mut [&mut probe], 10);
-    let later = probe.client_data().expect("client data").origin;
-    assert!(later.x > first.x + 10.0, "{first:?} -> {later:?}");
-    assert!(
-        (later - server_origin(&h, 0)).abs().max_element() <= TOLERANCE,
-        "client data follows the server"
-    );
+    assert!(h.server.net_stats().entity_blocks_dropped > dropped + 10);
     assert!(probe.entities().is_empty(), "the entity block never fits");
+    assert!(probe.client_data().is_none(), "client data goes with it");
     assert!(probe.stats().largest_datagram <= MAX_UDP_PACKET);
     assert_eq!(h.server.net_stats().send_failures, 0);
+    assert_eq!(probe.stats().parse_errors, 0);
+}
+
+/// More visible entities than `MAX_PACKET_ENTITIES`: the update carries exactly that many
+/// (the viewer's player edict and the lowest-numbered others), and the game is never asked
+/// about the rest, as in HLDS `SV_WriteEntitiesToClient` (`rehlds/engine/sv_main.cpp`, read
+/// 2026-11-21: "Too many entities in visible packet list.").
+#[test]
+fn packet_entities_follow_the_original_overflow_rule() {
+    assert_eq!(MAX_PACKET_ENTITIES, 256, "rehlds/common/qlimits.h");
+    let game = TestGame {
+        extra_entities: 600,
+        ..TestGame::default()
+    };
+    let cfg = ServerConfig {
+        max_clients: 4,
+        max_edicts: 700,
+        ..ServerConfig::default()
+    };
+    let mut h = Harness::with_config(cfg, game);
+    let mut probe = joined(&mut h, "A", &mut []);
+    h.step(&mut [&mut probe], 30);
+    assert_eq!(h.server.net_stats().entity_blocks_dropped, 0);
+    let own = entity_number(&probe);
+    let seen: Vec<u16> = probe.entities().keys().copied().collect();
+    assert_eq!(seen.len(), MAX_PACKET_ENTITIES, "{} entities", seen.len());
+    assert!(seen.contains(&own));
+    // Players come first, then the extras from the first edict after the four player slots.
+    let last = 4 + (MAX_PACKET_ENTITIES as u16 - 1);
+    assert!(seen.contains(&last), "{seen:?}");
+    assert!(!seen.contains(&(last + 1)));
+    let game = h.server.game();
+    assert!(game.add_to_full_pack_ents.contains(&last));
+    assert!(!game.add_to_full_pack_ents.contains(&(last + 1)));
     assert_eq!(probe.stats().parse_errors, 0);
 }
 
@@ -392,9 +424,14 @@ fn reliable_message_and_large_frame_share_the_datagram_budget() {
         h.step(&mut [&mut probe], 1);
         assert!(h.now < 30.0, "the reliable message never arrived");
     }
-    // The message travelled in an update whose entity block gave way to it; the update still
-    // brought client data.
+    // The message travelled in an update whose unreliable part gave way to it (HLDS drops the
+    // whole of it, `Netchan_Transmit`: "Unreliable would overfow, ignoring"); the updates after
+    // it bring client data again.
     assert!(h.server.net_stats().entity_blocks_dropped > dropped);
+    for _ in 0..20 {
+        probe.queue_cmd(forward());
+        h.step(&mut [&mut probe], 1);
+    }
     assert!(probe.client_data().expect("client data").origin.x > origin);
     assert_eq!(probe.userinfos()[&15], info);
     let fulls = probe.stats().full_updates;

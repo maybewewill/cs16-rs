@@ -20,6 +20,9 @@ use crate::server::{Server, ServerConfig};
 pub const UPDATE_BACKUP: usize = 64;
 /// Limit on the unreliable part of a client's datagram.
 pub const MAX_DATAGRAM: usize = 4000;
+/// Entities one update carries at most: `MAX_PACKET_ENTITIES` (`rehlds/common/qlimits.h`, read
+/// 2026-11-21).
+pub const MAX_PACKET_ENTITIES: usize = 256;
 
 /// A frame this many sequences older than the datagram being built is no longer a delta base.
 const MAX_DELTA_AGE: u32 = UPDATE_BACKUP as u32 - 1;
@@ -172,9 +175,16 @@ impl<G: GameDll> Server<G> {
 
     /// The due update of `slot`: one `svc_choke` per update choked since the last one sent,
     /// `svc_time`, `svc_clientdata` and the entity block, delta-encoded against the frame the
-    /// client acknowledged when there is one, followed by the queued unreliable messages. Parts
-    /// that do not fit in the datagram are dropped, entities first. `None` when the game
-    /// dropped the client meanwhile.
+    /// client acknowledged when there is one, followed by the queued unreliable messages. The
+    /// entity block counts at most [`MAX_PACKET_ENTITIES`] entities. When the block does not
+    /// fit the datagram the whole unreliable part is dropped (nothing is stored as a delta
+    /// base, the client gets the reliable data alone), as HLDS does: a `SV_SendClientDatagram`
+    /// (`rehlds/engine/sv_main.cpp`, read 2026-11-21) whose message overflowed is cleared
+    /// (`WARNING: msg overflowed`) and its netchan sends the reliable data alone; and
+    /// `Netchan_Transmit` (`net_chan.cpp`, read 2026-11-21) leaves the unreliable payload out
+    /// when it does not fit next to the reliable one (`Unreliable would overfow, ignoring`).
+    /// Queued unreliable messages that do not fit next to the block are dropped alone (the
+    /// `REHLDS_FIXES` rule). `None` when the game dropped the client meanwhile.
     fn build_update(&mut self, slot: u8) -> Option<Vec<u8>> {
         let index = usize::from(slot);
         let interval = update_interval(self.views[index].userinfo.get("cl_updaterate"), &self.cfg);
@@ -239,16 +249,17 @@ impl<G: GameDll> Server<G> {
         let with_entities = payload.len() + block.len() <= budget;
         if with_entities {
             payload.extend_from_slice(block.as_slice());
+            if payload.len() + queued.len() <= budget {
+                payload.extend_from_slice(&queued);
+            } else if !queued.is_empty() {
+                self.net_stats.unreliable_dropped += 1;
+            }
         } else {
             self.net_stats.entity_blocks_dropped += 1;
-            if payload.len() > budget {
-                payload.clear();
+            if !queued.is_empty() {
+                self.net_stats.unreliable_dropped += 1;
             }
-        }
-        if payload.len() + queued.len() <= budget {
-            payload.extend_from_slice(&queued);
-        } else if !queued.is_empty() {
-            self.net_stats.unreliable_dropped += 1;
+            payload.clear();
         }
 
         if with_entities {
@@ -286,7 +297,10 @@ impl<G: GameDll> Server<G> {
         })
     }
 
-    /// Entity states `slot` is sent. Candidates are the viewer's own player edict, and every
+    /// Entity states `slot` is sent, at most [`MAX_PACKET_ENTITIES`]: as in HLDS
+    /// (`SV_WriteEntitiesToClient`, `rehlds/engine/sv_main.cpp`, read 2026-11-21) the client
+    /// slots are always asked, the other edicts in index order until the list is full, and
+    /// the rest are not offered to the game. Candidates are the viewer's own player edict, and every
     /// other live edict with a model and without `EF_NODRAW` that is potentially visible from
     /// the viewer's eye; each goes out when the game's `add_to_full_pack` accepts it, with the
     /// game's edits. The caller drains the outbox.
@@ -312,14 +326,20 @@ impl<G: GameDll> Server<G> {
             .collect();
         // One copy of the sign-on states for all the calls below: nothing changes them here.
         self.sync_views();
-        candidates
-            .into_iter()
-            .filter_map(|mut state| {
-                let ent = state.number;
-                self.call_game_synced(|game, eng| game.add_to_full_pack(eng, slot, ent, &mut state))
-                    .then_some(state)
-            })
-            .collect()
+        let max_clients = u16::from(self.cfg.max_clients);
+        let mut accepted = Vec::new();
+        for mut state in candidates {
+            let ent = state.number;
+            if ent > max_clients && accepted.len() >= MAX_PACKET_ENTITIES {
+                tracing::debug!(slot, "too many entities in the visible packet list");
+                break;
+            }
+            if self.call_game_synced(|game, eng| game.add_to_full_pack(eng, slot, ent, &mut state))
+            {
+                accepted.push(state);
+            }
+        }
+        accepted
     }
 }
 

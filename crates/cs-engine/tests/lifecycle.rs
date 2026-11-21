@@ -7,7 +7,7 @@ mod common;
 use common::{FRAME, GAME_KICK_REASON, Harness, TestGame};
 use cs_cvar::CVarRegistry;
 use cs_engine::{
-    ClientState, MAX_RELIABLE_BACKLOG, PINGS_INTERVAL_SECS, PrecacheError, SETINFO_BURST,
+    ClientState, MAX_EDICTS_WIRE, MAX_RELIABLE_BACKLOG, PINGS_INTERVAL_SECS, PrecacheError, SETINFO_BURST,
     SETINFO_RATE_PER_SEC, Server, ServerConfig, ServerMap, SignonStage,
 };
 use cs_probe::{ProbeClient, ProbeState};
@@ -232,22 +232,20 @@ fn shutdown_deactivates_the_game_once() {
     h.step(&mut [&mut a], 2);
 }
 
+/// After `shutdown` a frame does nothing but count itself as skipped: the game's
+/// `start_frame` is not called and the datagrams waiting for the server (a new connection, a
+/// query) are not read, so no new client gets in.
 #[test]
-fn shutdown_refuses_new_connections() {
+fn frame_after_shutdown_does_nothing() {
     let mut h = Harness::new(4);
     let mut a = joined(&mut h, "A", &mut []);
     h.server.shutdown(&mut h.hub, "bye");
     h.step(&mut [&mut a], 2);
-
-    let mut late = h.add_probe("Late");
-    h.step(&mut [&mut late], 50);
-    assert_eq!(
-        late.state(),
-        &ProbeState::Rejected("Server is shutting down.".to_string())
-    );
     assert_eq!(h.server.client_count(), 0);
 
-    // Queries are still answered.
+    let start_frames = h.server.game().start_frame_calls;
+    let skipped = h.server.net_stats().frames_skipped;
+    let mut late = h.add_probe("Late");
     let mut query = vec![0xFF; 4];
     query.push(A2S_INFO);
     query.extend_from_slice(A2S_INFO_PAYLOAD);
@@ -255,8 +253,36 @@ fn shutdown_refuses_new_connections() {
     asker
         .send(PeerAddr::Loopback(0), &query)
         .expect("loopback send");
+    h.step(&mut [&mut late], 50);
+    assert_eq!(h.server.game().start_frame_calls, start_frames);
+    assert_eq!(h.server.net_stats().frames_skipped, skipped + 50);
+    assert_eq!(h.server.client_count(), 0);
+    assert!(
+        !matches!(late.state(), ProbeState::InGame | ProbeState::Rejected(_)),
+        "{:?}",
+        late.state()
+    );
+    assert!(asker.recv().is_none(), "the query was not read");
+}
+
+#[test]
+fn max_edicts_is_capped_by_the_wire() {
+    let cfg = ServerConfig {
+        max_edicts: 65_535,
+        ..ServerConfig::default()
+    };
+    let mut h = Harness::with_config(cfg, TestGame::default());
+    assert_eq!(h.server.config().max_edicts, MAX_EDICTS_WIRE);
+    let created = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let counter = std::rc::Rc::clone(&created);
+    h.server.game_mut().act(move |eng| {
+        while eng.create_entity("test_extra").is_some() {
+            counter.set(counter.get() + 1);
+        }
+    });
     h.step(&mut [], 1);
-    assert!(asker.recv().is_some());
+    // The world and the 16 player slots take 17 of the 2048 numbers the wire can carry.
+    assert_eq!(created.get(), MAX_EDICTS_WIRE - 17);
 }
 
 #[test]

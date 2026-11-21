@@ -4,7 +4,7 @@
 mod common;
 
 use common::{FRAME, Harness, TestGame};
-use cs_engine::{MAX_THINKS_PER_FRAME, ServerConfig};
+use cs_engine::{MAX_EDICTS_WIRE, MAX_THINKS_PER_FRAME, ServerConfig};
 
 /// A harness with one player slot and `extras` entities (indices 2, 3, ...) whose `nextthink`
 /// is `nextthink`, in a pool of `max_edicts`.
@@ -105,26 +105,22 @@ fn entity_removing_itself_is_safe() {
     assert!(h.server.edicts().by_index(3).is_none());
 }
 
+/// The pool stops at the wire limit (`MAX_EDICTS_WIRE`), below `MAX_THINKS_PER_FRAME`: a full
+/// pool whose every entity is due thinks in one frame, lowest indices first, and no think
+/// repeats.
 #[test]
-fn thinks_are_capped_per_frame() {
-    let total = 5000;
+fn a_full_pool_thinks_in_one_frame() {
+    const { assert!(MAX_THINKS_PER_FRAME >= MAX_EDICTS_WIRE) };
+    // The world and the one client slot take two edicts.
+    let total = MAX_EDICTS_WIRE - 2;
     let mut h = harness(total, 0.001, 6000, TestGame::default());
     h.step(&mut [], 1);
-    let first = h.server.game().think_log.len();
-    assert_eq!(first, MAX_THINKS_PER_FRAME);
+    assert_eq!(h.server.game().think_log.len(), total);
     // Lowest indices first.
     let log = &h.server.game().think_log;
     assert!(log.windows(2).all(|w| w[0].0 < w[1].0));
     assert_eq!(log[0].0, 2);
-    h.step(&mut [], 1);
-    assert_eq!(h.server.game().think_log.len(), total);
-    let log = &h.server.game().think_log;
-    assert!(
-        log[first..]
-            .iter()
-            .all(|&(i, _)| usize::from(i) >= 2 + MAX_THINKS_PER_FRAME)
-    );
-    h.step(&mut [], 2);
+    h.step(&mut [], 3);
     assert_eq!(h.server.game().think_log.len(), total);
 }
 

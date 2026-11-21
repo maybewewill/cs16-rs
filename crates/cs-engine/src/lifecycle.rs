@@ -13,6 +13,7 @@ use cs_proto48::messages::{
 use cs_transport::PacketTransport;
 
 use crate::client::{Client, ClientState};
+use crate::edict::MAX_EDICTS_WIRE;
 use crate::game::{ClientView, GameDll};
 use crate::map::ServerMap;
 use crate::server::{Server, ServerConfig};
@@ -37,7 +38,7 @@ const PING_SAMPLES: usize = 16;
 /// Sequences whose send times are kept per client.
 const PING_SEND_HISTORY: usize = 64;
 /// Most client slots a server may have.
-const MAX_CLIENT_SLOTS: u8 = 32;
+pub(crate) const MAX_CLIENT_SLOTS: u8 = 32;
 /// Lowest `min_rate` a server may be configured with.
 const MIN_RATE_FLOOR: u32 = 1000;
 
@@ -100,7 +101,7 @@ impl PingTracker {
 impl ServerConfig {
     /// The configuration with unusable values replaced: `min_rate` at least 1000, `max_rate`
     /// at least `min_rate`, `min_update_rate` at least 1, `max_update_rate` at least
-    /// `min_update_rate`, `max_clients` within 1..=32, and timeouts that are not positive and
+    /// `min_update_rate`, `max_clients` within 1..=32, `max_edicts` at most [`MAX_EDICTS_WIRE`], and timeouts that are not positive and
     /// finite set to the defaults.
     pub(crate) fn sanitized(mut self) -> Self {
         let defaults = ServerConfig::default();
@@ -109,6 +110,7 @@ impl ServerConfig {
         self.min_update_rate = self.min_update_rate.max(1);
         self.max_update_rate = self.max_update_rate.max(self.min_update_rate);
         self.max_clients = self.max_clients.clamp(1, MAX_CLIENT_SLOTS);
+        self.max_edicts = self.max_edicts.min(MAX_EDICTS_WIRE);
         let usable = |secs: f64| secs.is_finite() && secs > 0.0;
         if !usable(self.timeout_secs) {
             self.timeout_secs = defaults.timeout_secs;

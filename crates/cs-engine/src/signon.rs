@@ -17,9 +17,42 @@ use cs_proto48::messages::{
 use cs_proto48::usermsg::UserMsgRegistry;
 use glam::Vec3;
 
+use crate::lifecycle::MAX_CLIENT_SLOTS;
+use crate::api_messages::MAX_LIGHT_STYLE_BYTES;
+use crate::oob::MAX_INFO_STRING;
+
 /// Light styles sent in the `spawn` stage: the HLDS table size (`MAX_LIGHTSTYLES`), the limit
 /// of the `svc_lightstyle` index.
 pub(crate) const MAX_LIGHTSTYLES: u8 = 64;
+
+/// Bytes of the sign-on data a client is sent at once in the `spawn` stage: the init messages
+/// and the spawn baselines the engine keeps for it, plus [`SPAWN_TAIL_MAX`] of the rest. The
+/// reliable buffer of an HLDS netchan, `NET_MAX_PAYLOAD` (`rehlds/engine/net.h`, read
+/// 2026-11-21), which is also the size of its sign-on buffer in a `REHLDS_FIXES` build
+/// (`g_rehlds_sv.signonData[NET_MAX_PAYLOAD]`, `sv_main.cpp` `SV_SpawnServer`, read 2026-11-21).
+pub const MAX_SIGNON_BUFFER: usize = 65536;
+
+/// Most bytes [`write_spawn_stage`] writes besides the init buffer: `svc_setangle`,
+/// `svc_time`, one `svc_updateuserinfo` per client slot at the longest userinfo a connect may
+/// carry (with its terminating NUL), every light style at its longest stored length and
+/// `svc_signonnum`.
+pub const SPAWN_TAIL_MAX: usize = 7
+    + 5
+    + MAX_CLIENT_SLOTS as usize * (1 + 1 + 4 + MAX_INFO_STRING + 1 + 16)
+    + MAX_LIGHTSTYLES as usize * (1 + 1 + MAX_LIGHT_STYLE_BYTES + 1)
+    + 2;
+
+/// Bytes of [`MAX_SIGNON_BUFFER`] kept back for the spawn baselines when the game writes
+/// `MsgDest::Init` messages. The game writes them before the engine knows how big the
+/// baselines are; HLDS has no such reserve and errors when the two overflow its buffer.
+/// Measurements: see the Task 1 report of phase 2B (a large real map's baselines take a few
+/// KiB; a stub of 1500 model entities with origin and angles takes about 20 KiB).
+pub const SIGNON_BASELINE_RESERVE: usize = 24 * 1024;
+
+/// Bytes the init buffer holds: what is left of the sign-on buffer after the spawn tail and
+/// the baseline reserve. A `MsgDest::Init` message that would take it past this is sent as
+/// `MsgDest::All` instead.
+pub const INIT_BUFFER_BUDGET: usize = MAX_SIGNON_BUFFER - SPAWN_TAIL_MAX - SIGNON_BASELINE_RESERVE;
 
 /// The light styles of a fresh map: style 0 is steady full brightness, the rest are empty.
 pub(crate) fn default_light_styles() -> Vec<String> {

@@ -11,8 +11,8 @@ use std::sync::Arc;
 use common::{Harness, TestGame, print_bytes};
 use cs_assets::bsp::{BspMap, Entity};
 use cs_engine::{
-    ClientState, MAX_INIT_BUFFER, MAX_MESSAGE_TEXT, MAX_RELIABLE_BACKLOG, MsgDest, ServerConfig,
-    ServerMap, SignonStage,
+    ClientState, INIT_BUFFER_BUDGET, MAX_MESSAGE_TEXT, MAX_RELIABLE_BACKLOG, MsgDest,
+    ServerConfig, ServerMap, SignonStage,
 };
 use cs_probe::{ProbeClient, ProbeState};
 use cs_proto48::messages::{SoundMsg, SvcMessage, svc};
@@ -396,17 +396,18 @@ fn init_messages_come_from_spawn_entity_too_and_only_during_activation() {
 
 #[test]
 fn a_full_init_buffer_still_reaches_a_late_joiner() {
-    // 32 messages of 1000 bytes and one of 768 fill the buffer exactly; one more byte spills
-    // over and is sent as `All` (to nobody).
-    assert_eq!(MAX_INIT_BUFFER, 32 * 1024, "ReHLDS signon_data[32768]");
+    // Messages of 1000 bytes and one more of what is left fill the buffer exactly; one more
+    // byte spills over and is sent as `All` (to nobody).
+    let (whole, rest) = (INIT_BUFFER_BUDGET / 1000, INIT_BUFFER_BUDGET % 1000);
+    assert!(rest >= 2, "a print message is at least 2 bytes");
     let big = "x".repeat(998);
-    let mut sends: Vec<(MsgDest, Vec<u8>)> = (0..32)
+    let mut sends: Vec<(MsgDest, Vec<u8>)> = (0..whole)
         .map(|i| (MsgDest::Init, print_bytes(&format!("{i:03}{}", &big[3..]))))
         .collect();
-    sends.push((MsgDest::Init, print_bytes(&"y".repeat(766))));
+    sends.push((MsgDest::Init, print_bytes(&"y".repeat(rest - 2))));
     assert_eq!(
         sends.iter().map(|(_, b)| b.len()).sum::<usize>(),
-        MAX_INIT_BUFFER
+        INIT_BUFFER_BUDGET
     );
     sends.push((MsgDest::Init, vec![svc::NOP]));
     let game = TestGame {
@@ -414,7 +415,7 @@ fn a_full_init_buffer_still_reaches_a_late_joiner() {
         ..TestGame::default()
     };
     let mut h = Harness::with_game(4, game);
-    assert_eq!(h.server.init_buffer_len(), MAX_INIT_BUFFER);
+    assert_eq!(h.server.init_buffer_len(), INIT_BUFFER_BUDGET);
     let mut a = h.add_probe("A");
     let mut worst_backlog = 0;
     for _ in 0..1500 {
@@ -428,7 +429,7 @@ fn a_full_init_buffer_still_reaches_a_late_joiner() {
     assert_eq!(h.server.client_state(0), ClientState::Active);
     assert_eq!(
         prints(&a).iter().filter(|t| t.starts_with("0") || t.starts_with("y")).count(),
-        33
+        whole + 1
     );
     assert!(worst_backlog < MAX_RELIABLE_BACKLOG, "{worst_backlog}");
     eprintln!("worst reliable backlog during a full init replay: {worst_backlog}");
@@ -593,9 +594,9 @@ fn per_frame_message_flood_respects_client_limits() {
             .collect(),
         ..TestGame::default()
     };
-    // Each client is replayed the 32 KB init buffer first.
+    // Each client is replayed the full init buffer first.
     let (mut h, mut a, mut b) = two_active_within(game, 1000);
-    assert!(h.server.init_buffer_len() <= MAX_INIT_BUFFER);
+    assert!(h.server.init_buffer_len() <= INIT_BUFFER_BUDGET);
     let before = h.server.net_stats();
     let updates_before = a.stats().full_updates + a.stats().delta_updates;
     h.server.game_mut().message_flood = true;
@@ -609,7 +610,7 @@ fn per_frame_message_flood_respects_client_limits() {
         "{after:?}"
     );
     assert_eq!(after.send_failures, 0);
-    assert!(h.server.init_buffer_len() <= MAX_INIT_BUFFER);
+    assert!(h.server.init_buffer_len() <= INIT_BUFFER_BUDGET);
     assert!(a.stats().largest_datagram <= MAX_UDP_PACKET);
     assert!(b.stats().largest_datagram <= MAX_UDP_PACKET);
     for probe in [&a, &b] {
@@ -752,7 +753,7 @@ fn sound_refuses_an_entity_index_the_wire_cannot_carry() {
     };
     let cfg = ServerConfig {
         max_clients: 2,
-        max_edicts: 2100,
+        max_edicts: 2100, // capped at MAX_EDICTS_WIRE
         ..ServerConfig::default()
     };
     let mut h = Harness::with_config(cfg, game);
@@ -766,14 +767,14 @@ fn sound_refuses_an_entity_index_the_wire_cannot_carry() {
         while let Some(id) = eng.create_entity("filler") {
             ids.push(id);
         }
-        for index in [2047u16, 2048, 2049, 2099] {
-            let id = ids.iter().find(|id| id.index == index).copied().expect("edict");
-            sink.borrow_mut()
-                .push(eng.emit_sound(id, 1, "doors/door1.wav", 1.0, 1.0, 100));
-        }
+        // The pool stops at the wire limit: 2047 is the highest entity there is.
+        assert_eq!(ids.iter().map(|id| id.index).max(), Some(2047));
+        let id = ids.iter().find(|id| id.index == 2047).copied().expect("edict");
+        sink.borrow_mut()
+            .push(eng.emit_sound(id, 1, "doors/door1.wav", 1.0, 1.0, 100));
     });
     h.step(&mut [&mut a], 30);
-    assert_eq!(*results.borrow(), vec![true, false, false, false]);
+    assert_eq!(*results.borrow(), vec![true]);
     let heard = sounds(&a);
     assert_eq!(heard.len(), 1, "{heard:?}");
     assert_eq!(heard[0].entity, 2047);
