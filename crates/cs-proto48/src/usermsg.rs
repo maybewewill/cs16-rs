@@ -160,6 +160,8 @@ pub enum CsUserMsg {
         flash: bool,
     },
     RoundTime(u16),
+    /// `BlinkAcct`: the account on the HUD blinks this many times.
+    BlinkAcct(u8),
     AmmoX {
         ammo_id: u8,
         amount: u8,
@@ -304,6 +306,7 @@ pub fn decode_cs_usermsg(name: &str, payload: &[u8]) -> Result<CsUserMsg, ProtoE
             flash: r.read_u8()? != 0,
         },
         "RoundTime" => CsUserMsg::RoundTime(r.read_u16()?),
+        "BlinkAcct" => CsUserMsg::BlinkAcct(r.read_u8()?),
         "AmmoX" => CsUserMsg::AmmoX {
             ammo_id: r.read_u8()?,
             amount: r.read_u8()?,
@@ -501,6 +504,10 @@ pub fn encode_cs_usermsg(msg: &CsUserMsg) -> (&'static str, Vec<u8>) {
         CsUserMsg::RoundTime(secs) => {
             w.write_u16(*secs);
             "RoundTime"
+        }
+        CsUserMsg::BlinkAcct(times) => {
+            w.write_u8(*times);
+            "BlinkAcct"
         }
         CsUserMsg::AmmoX { ammo_id, amount } => {
             w.write_u8(*ammo_id);
@@ -763,6 +770,7 @@ mod tests {
                 amount: 16000,
                 flash: true,
             },
+            CsUserMsg::BlinkAcct(30),
             CsUserMsg::DeathMsg {
                 killer_id: 1,
                 victim_id: 2,

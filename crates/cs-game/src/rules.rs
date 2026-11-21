@@ -33,9 +33,10 @@
 //! - `m_iCareer*`, bots, tutor, `m_flForceCameraValue`/`AllowSpec` change messages, the idle
 //!   kick and the voice manager are not ported.
 //!
-//! Left for later tasks: the economy of a round (`m_iAccountCT`, `m_iAccountTerrorist`, the
-//! loser bonus and its streaks: Task 6; a complete reset only gives back the starting money),
-//! the radio call of the round start (Task 11), the map objectives (2E): the bomb, the
+//! The money of a round (`m_iAccountCT`, `m_iAccountTerrorist`, the loser bonus and its streaks)
+//! is [`crate::money`]'s; `RestartRound` settles it here.
+//!
+//! Left for later tasks: the radio call of the round start (Task 11), the map objectives (2E): the bomb, the
 //! hostages, the VIP and the escape zones. Their branches in [`check_win_conditions`] and
 //! [`check_round_time_expired`] are stubs: no entity of those classes exists yet, so a map has
 //! no objective, and a round that runs out of time on such a map simply goes on, as
@@ -49,6 +50,7 @@ use cs_proto48::usermsg::CsUserMsg;
 use crate::GameState;
 use crate::menus::{self, Menu};
 use crate::messages;
+use crate::money::{self, Economy};
 use crate::player::{self, PITCH_NORM, Team};
 use crate::teams::{self, JoinState};
 
@@ -132,6 +134,8 @@ pub struct Rules {
     game_start_time: f64,
     /// Server time of the last ask for a map change.
     change_level_asked_at: f64,
+    /// The round economy: what the teams are paid, the losing streaks, the loser bonus.
+    economy: Economy,
 }
 
 impl Default for Rules {
@@ -163,6 +167,7 @@ impl Default for Rules {
             num_spawnable_terrorist: 0,
             game_start_time: 0.0,
             change_level_asked_at: f64::NEG_INFINITY,
+            economy: Economy::default(),
         }
     }
 }
@@ -214,6 +219,11 @@ impl Rules {
         } else if limit < 0 {
             eng.set_cvar("mp_limitteams", "0");
         }
+    }
+
+    /// The round economy (`m_iAccountCT`, `m_iNumConsecutiveCTLoses`, `m_iLoserBonus`, ...).
+    pub fn economy(&self) -> &Economy {
+        &self.economy
     }
 
     /// `IsFreezePeriod`: the round has started but nobody may move yet.
@@ -391,11 +401,12 @@ fn terminate_round(g: &mut GameState, eng: &EngineApi<'_>, delay: f64, status: W
     g.rules.restart_round_time = eng.time() + delay;
 }
 
-/// `Round_Cts`: the counter-terrorists win the round. (The account of the round belongs to the
-/// economy.)
+/// `Round_Cts`: the counter-terrorists win the round (and are paid for it when the next one
+/// starts).
 fn round_cts(g: &mut GameState, eng: &mut EngineApi<'_>, delay: f64) {
     tracing::info!(needed_players = g.rules.needed_players, "round won by the counter-terrorists");
     broadcast(eng, "ctwin");
+    g.rules.economy.round_won(Team::Ct);
     if !g.rules.needed_players {
         g.num_ct_wins += 1;
         update_team_scores(g, eng);
@@ -408,6 +419,7 @@ fn round_cts(g: &mut GameState, eng: &mut EngineApi<'_>, delay: f64) {
 fn round_ts(g: &mut GameState, eng: &mut EngineApi<'_>, delay: f64) {
     tracing::info!(needed_players = g.rules.needed_players, "round won by the terrorists");
     broadcast(eng, "terwin");
+    g.rules.economy.round_won(Team::Terrorist);
     if !g.rules.needed_players {
         g.num_terrorist_wins += 1;
         update_team_scores(g, eng);
@@ -599,9 +611,10 @@ fn restart_round_check(g: &mut GameState, eng: &mut EngineApi<'_>, delay: f64) {
 // ---- the start of a round ----
 
 /// `CBasePlayer::Reset`: a new match gives the player a clean scoreboard line and the starting
-/// money (`AddAccount` is the economy's: the account is just set).
+/// money (the account is emptied and told to the client, then `AddAccount` gives the
+/// `mp_startmoney` that `CheckStartMoney` allows).
 fn reset_player(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
-    let money = player::start_money(eng);
+    let start = money::check_start_money(eng);
     let Some(p) = g
         .players
         .get_mut(usize::from(slot))
@@ -612,19 +625,23 @@ fn reset_player(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     p.frags = 0;
     p.deaths = 0;
     p.not_killed = false;
-    p.money = money;
-    messages::money(eng, slot, money);
-    messages::score_info(eng, u16::from(slot) + 1, p);
+    p.money = 0;
+    messages::money(eng, slot, 0);
+    money::add_account(g, eng, slot, start, true);
+    if let Some(p) = g.players[usize::from(slot)].as_ref() {
+        messages::score_info(eng, u16::from(slot) + 1, p);
+    }
 }
 
 /// `CBasePlayer::RoundRespawn`: the player of `slot` spawns again, unless it is choosing its
-/// appearance. (The team-kill punishment is the economy's.)
+/// appearance. A player that killed a teammate may be punished first ([`money::punish_team_kill`]).
 fn round_respawn(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let choosing = g
         .players
         .get(usize::from(slot))
         .and_then(Option::as_ref)
         .is_none_or(|p| p.menu == Menu::ChooseAppearance);
+    money::punish_team_kill(g, eng, slot);
     if choosing {
         return;
     }
@@ -755,11 +772,16 @@ pub(crate) fn restart_round(g: &mut GameState, eng: &mut EngineApi<'_>) {
     // This makes the round timer function as the intro timer on the client side.
     g.rules.round_time_secs = g.rules.intro_round_time;
 
-    // The accounts, the hostages, the VIP and the escape rounds are not ported (see the module
-    // documentation). The round time stamp must be set before the players are spawned.
+    // The hostages, the VIP and the escape rounds are not ported (see the module documentation).
+    // Scale up the loser bonus when teams fall into losing streaks, and assign it.
+    let status = g.rules.round_win_status;
+    g.rules.economy.settle(status);
+    // The round time stamp must be set before the players are spawned.
     g.rules.round_start_time = now;
     if g.rules.complete_reset {
-        // We are starting fresh: it is like no one has ever won or lost.
+        // No cash for anyone at first rounds (only the starting money), and it is like no one
+        // has ever won or lost.
+        g.rules.economy.reset_match();
         g.num_terrorist_wins = 0;
         g.num_ct_wins = 0;
     }
@@ -770,7 +792,14 @@ pub(crate) fn restart_round(g: &mut GameState, eng: &mut EngineApi<'_>) {
         };
         p.num_spawns = 0;
         p.team_changed = false;
-        if p.team != Team::Unassigned && p.team != Team::Spectator {
+        let (team, paid) = (p.team, !p.receives_no_money_next_round);
+        // The players of the teams are paid for the last round.
+        if let Some(sum) = g.rules.economy.payout(team)
+            && paid
+        {
+            money::add_account(g, eng, slot as u8, sum, true);
+        }
+        if team != Team::Unassigned && team != Team::Spectator {
             round_respawn(g, eng, slot as u8);
         }
     }
@@ -780,6 +809,7 @@ pub(crate) fn restart_round(g: &mut GameState, eng: &mut EngineApi<'_>) {
     rules.intermission_end_time = 0.0;
     rules.intermission_start_time = 0.0;
     rules.restart_round_time = 0.0;
+    rules.economy.clear_accounts();
     rules.round_win_status = WinStatus::None;
     rules.complete_reset = false;
 }

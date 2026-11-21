@@ -12,6 +12,7 @@ pub mod entity;
 pub mod mapcycle;
 pub mod menus;
 mod messages;
+pub mod money;
 pub mod player;
 pub mod rules;
 pub mod teams;

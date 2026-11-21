@@ -38,7 +38,8 @@ use crate::menus::{
     VGUI_MENU_CLASS_CT, VGUI_MENU_CLASS_T, VGUI_MENU_TEAM, atoi,
 };
 use crate::messages;
-use crate::player::{DEAD_DEAD, Team, apply_model, kill, spawn, start_money};
+use crate::money;
+use crate::player::{DEAD_DEAD, Team, apply_model, kill, spawn};
 use crate::rules;
 use crate::world::{CT_SPAWN_CLASS, T_SPAWN_CLASS};
 
@@ -356,6 +357,7 @@ fn get_into_game(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
         return;
     };
     p.not_killed = false;
+    p.team_kills = 0;
     p.joining = JoinState::Joined;
     let (team, class) = (p.team, p.class);
     if rules::can_respawn(g, eng, slot) {
@@ -478,7 +480,7 @@ pub(crate) fn handle_menu_choose_team(
     if p.team == Team::Spectator {
         // Coming out of the spectators: a fresh start.
         p.not_killed = true;
-        p.money = start_money(eng);
+        p.money = money::check_start_money(eng);
         p.alive = false;
         p.takes_damage = false;
         p.joining = JoinState::GetIntoGame;

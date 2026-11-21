@@ -55,6 +55,7 @@ use glam::Vec3;
 use crate::GameState;
 use crate::menus::{self, Menu};
 use crate::messages;
+use crate::money;
 use crate::rules;
 use crate::teams::{self, JoinState};
 use crate::world::{select_join_spawn_point, select_spawn_point};
@@ -144,8 +145,6 @@ const NO_ITEM_MAX_SPEED: f32 = 240.0;
 const OBSERVER_MAX_SPEED: f32 = 900.0;
 /// The speed of a player during the freeze period (`ResetMaxSpeed`): it cannot move.
 const FROZEN_MAX_SPEED: f32 = 1.0;
-/// `MAX_MONEY_THRESHOLD`: the largest account (`CheckStartMoney` clamps `mp_startmoney`).
-const MAX_MONEY: i32 = 16000;
 /// Seconds between two suicides (`ClientKill`).
 const SUICIDE_DELAY: f64 = 1.0;
 /// Seconds between two runs of `PlayerDeathThink`.
@@ -224,6 +223,15 @@ pub struct Player {
     pub deaths: i32,
     /// `m_iAccount`.
     pub money: i32,
+    /// `m_iTeamKills`: teammates killed since the player entered the game.
+    pub team_kills: i32,
+    /// `m_bJustKilledTeammate`: the player killed a teammate since it last spawned.
+    pub just_killed_teammate: bool,
+    /// `m_bPunishedForTK`: `mp_tkpunish` made the player kill itself for a team kill, until it
+    /// dies.
+    pub punished_for_tk: bool,
+    /// `m_bReceivesNoMoneyNextRound`: the round's reward skips the player (until it spawns).
+    pub receives_no_money_next_round: bool,
     /// `deadflag == DEAD_NO` of a spawned player.
     pub alive: bool,
     /// `pev->takedamage != DAMAGE_NO`.
@@ -307,6 +315,10 @@ impl Player {
             frags: 0,
             deaths: 0,
             money,
+            team_kills: 0,
+            just_killed_teammate: false,
+            punished_for_tk: false,
+            receives_no_money_next_round: false,
             alive: false,
             takes_damage: false,
             not_killed: true,
@@ -407,7 +419,7 @@ pub(crate) fn put_in_server(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8
         return;
     }
     // `CheckStartMoney`: `mp_startmoney` clamped to the account's limits.
-    let mut player = Player::new(start_money(eng));
+    let mut player = Player::new(money::check_start_money(eng));
     player.vgui_menus = prefers_vgui_menus(eng, slot);
     g.join_counter += 1;
     player.join_order = g.join_counter;
@@ -443,11 +455,6 @@ pub(crate) fn put_in_server(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8
     v.fov = DEFAULT_FOV;
     v.view_ofs = Vec3::new(0.0, 0.0, VEC_VIEW);
     eng.set_origin(id, origin);
-}
-
-/// `CheckStartMoney`: `mp_startmoney` clamped to the account's limits.
-pub(crate) fn start_money(eng: &EngineApi<'_>) -> i32 {
-    (eng.cvar_f32("mp_startmoney") as i32).clamp(0, MAX_MONEY)
 }
 
 /// `SetPrefsFromUserinfo`: whether the client wants VGUI menus (`_vgui_menus`, on when the
@@ -577,6 +584,8 @@ pub(crate) fn spawn(
     p.alive = true;
     p.takes_damage = true;
     p.not_killed = true;
+    p.just_killed_teammate = false;
+    p.receives_no_money_next_round = false;
     p.fall_velocity = 0.0;
     p.last_hit_group = HITGROUP_GENERIC;
     p.death_cam = false;
@@ -1025,8 +1034,8 @@ fn killer_weapon_name(
 /// dies (`DEAD_DYING`, not solid, `MOVETYPE_TOSS`) and runs `PlayerDeathThink`.
 ///
 /// Frags: a suicide costs one, killing a teammate costs one, killing an enemy gives one, the
-/// world (an attacker that is no player) changes none. The money rewards come with the
-/// economy. A death ends with `CheckWinConditions` ([`rules`]).
+/// world (an attacker that is no player) changes none. Money: 300 for an enemy, -3300 for a
+/// teammate ([`money::killed_by`]). A death ends with `CheckWinConditions` ([`rules`]).
 fn killed(
     g: &mut GameState,
     eng: &mut EngineApi<'_>,
@@ -1062,6 +1071,7 @@ fn killed(
             kp.frags += if k == index || teammate { -1 } else { 1 };
         }
     }
+    money::killed_by(g, eng, slot, attacker);
     if let Some(p) = g.players[index].as_ref() {
         messages::score_info(eng, id.index, p);
     }
@@ -1073,6 +1083,9 @@ fn killed(
 
     // CBasePlayer::Killed.
     if let Some(p) = g.players[index].as_mut() {
+        // A player punished for a team kill is told why it cannot play
+        // (`#Hint_cannot_play_because_tk` needs the hint queue, not ported yet).
+        p.punished_for_tk = false;
         p.alive = false;
         p.takes_damage = false;
         p.dead_time = now;

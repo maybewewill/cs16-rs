@@ -122,7 +122,18 @@ evidence = "crates/cs-game/tests/rounds.rs::round_time_expiry_as_regamedll; the 
 
 [[item]]
 id = "mp_startmoney"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-game/tests/money.rs::start_money_from_cvar"
+
+[[item]]
+id = "mp_tkpunish"
+status = "tested"
+evidence = "crates/cs-game/tests/money.rs::team_kill_is_punished_at_the_next_round"
+
+[[item]]
+id = "mp_autokick"
+status = "tested"
+evidence = "crates/cs-game/tests/money.rs::the_third_team_kill_is_kicked"
 
 [[item]]
 id = "name"
