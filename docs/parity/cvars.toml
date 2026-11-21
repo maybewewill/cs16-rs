@@ -272,6 +272,10 @@ id = "mp_forcechasecam"
 status = "implemented"
 
 [[item]]
+id = "mp_playerid"
+status = "implemented"
+
+[[item]]
 id = "mp_fadetoblack"
 status = "implemented"
 

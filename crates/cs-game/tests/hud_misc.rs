@@ -326,6 +326,10 @@ fn look_at(b: &mut Bench, viewer: u8, target: u8) -> Vec<CsUserMsg> {
 }
 
 fn place_pair(game: &mut CsGame, eng: &mut EngineApi<'_>, viewer: u8, target: u8) {
+    // Everybody else is out of the way (a player with no client stays where it was put).
+    for other in (0..4u8).filter(|&s| s != viewer && s != target) {
+        game.place_player(eng, other, Vec3::new(0.0, 6000.0 + 100.0 * f32::from(other), 100.0));
+    }
     game.place_player(eng, viewer, Vec3::new(0.0, 0.0, 100.0));
     game.place_player(eng, target, Vec3::new(200.0, 0.0, 100.0));
     let id = eng.client_edict(viewer);
@@ -392,6 +396,50 @@ fn status_bar_names_an_enemy_without_health_and_forgets_after_two_seconds() {
     b.step(250);
     let (_, values) = status(&b.messages());
     assert_eq!(values, vec![(1, 0), (2, 0)]);
+}
+
+#[test]
+fn mp_playerid_limits_what_the_status_bar_names() {
+    let mut b = bench();
+    // Default 0 (everyone) is registered: the cvar exists with its vanilla default.
+    assert_eq!(
+        b.run(|_, eng| eng.cvar_str("mp_playerid")),
+        Some("0".to_string())
+    );
+    // 1 (teammates only): a teammate is named in full, an enemy is not named at all (the
+    // format is a blank, the type and the index are still sent).
+    b.run(|_, eng| eng.set_cvar("mp_playerid", "1"));
+    let (text, values) = status(&look_at(&mut b, 0, 2));
+    assert_eq!(text, vec![(0, "1 %c1: %p2\n2  %h: %i3%%".to_string())]);
+    assert_eq!(values, vec![(1, 1), (2, 3), (3, 100)]);
+    let (text, values) = status(&look_at(&mut b, 0, 1));
+    assert_eq!(text, vec![(0, " ".to_string())]);
+    assert_eq!(values, vec![(1, 2), (2, 2), (3, 0)]);
+    // 2 (off): nobody is named, the health of a teammate is still sent.
+    b.run(|_, eng| eng.set_cvar("mp_playerid", "2"));
+    let (text, values) = status(&look_at(&mut b, 0, 2));
+    assert_eq!(text, vec![(0, " ".to_string())]);
+    assert_eq!(values, vec![(1, 1), (2, 3), (3, 100)]);
+    let (text, values) = status(&look_at(&mut b, 0, 1));
+    assert_eq!(text, vec![(0, " ".to_string())]);
+    assert_eq!(values, vec![(1, 2), (2, 2), (3, 0)]);
+}
+
+#[test]
+fn a_dead_teammate_still_hears_the_team_radio() {
+    let mut b = bench();
+    wait_out_radio(&mut b);
+    // Dead, and then an observer: neither has `FL_SPECTATOR`, so the player branch of
+    // `CBasePlayer::Radio` applies and its team is heard.
+    b.run(|game, eng| game.damage_player(eng, 0, Some(1), 500.0, 1 << 1));
+    b.step(3);
+    assert_eq!(audio(&send(&mut b, 2, "coverme")).len(), 1);
+    pump(&mut b, 0, 800);
+    wait_out_radio(&mut b);
+    assert_eq!(audio(&send(&mut b, 2, "coverme")).len(), 1);
+    // Not the other team's.
+    wait_out_radio(&mut b);
+    assert!(audio(&send(&mut b, 1, "coverme")).is_empty());
 }
 
 #[test]

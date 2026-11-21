@@ -211,7 +211,8 @@ fn switch_night_vision_off(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8)
     }
 }
 
-/// `RANDOM_FLOAT(lo, hi)` from the game's generator.
+/// A float in `lo..=hi` derived from the game's own `random_range` (the engine offers the game no
+/// `RANDOM_FLOAT`); the original's `RANDOM_FLOAT(lo, hi)` is the engine's generator.
 fn random_float(g: &mut GameState, lo: f32, hi: f32) -> f32 {
     lo + (hi - lo) * (g.random_range(0, 65535) as f32 / 65535.0)
 }

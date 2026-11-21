@@ -109,6 +109,8 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     reg.register("mp_forcecamera", "0", srv, "Dead players see through teammates only");
     reg.register("mp_forcechasecam", "0", srv, "Dead players follow their own team only");
     reg.register("mp_fadetoblack", "0", srv, "Fade a dead player's screen to black (1 stays black)");
+    // `game.cpp`: `{ "mp_playerid", "0", FCVAR_SERVER }`; 0 names everyone, 1 teammates only, 2 nobody.
+    reg.register("mp_playerid", "0", srv, "Who the status bar names (0 all, 1 teammates, 2 nobody)");
     reg.register("bot_quota", "9", srv_arch, "Target number of bots in local match (0..15)");
     reg.register("bot_difficulty", "1", srv_arch, "Bot skill level (0=Easy, 1=Normal, 2=Hard, 3=Expert)");
 }
