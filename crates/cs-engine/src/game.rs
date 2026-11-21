@@ -234,9 +234,20 @@ pub trait GameDll {
     /// `other`. Called after the game call that found the touch has returned, never nested
     /// inside it; at most `MAX_TOUCHES_PER_FRAME` per frame. Both entities were live when the
     /// call was made.
+    ///
+    /// The touches of the engine's movement physics run at the point of impact, inside the
+    /// physics pass, as in HLDS: in `SV_FlyMove` the toucher's `origin` has been written to
+    /// where the move got to but the entity is not linked there yet (its `absmin`/`absmax` and
+    /// its place in the area tree are the old ones), and what the touch writes to `origin` and
+    /// `velocity` is what the move goes on from. A touch during a push (the pushed entity
+    /// hitting something) finds the pusher `SOLID_NOT`: the push moves the entity with the
+    /// pusher out of the way.
     fn touch(&mut self, _eng: &mut EngineApi<'_>, _toucher: EdictId, _other: EdictId) {}
     /// `pfnBlocked`: `other` blocked the movement of the pusher `pusher`. Called by the
-    /// engine's push physics.
+    /// engine's push physics. As in HLDS the pusher is already back where it was, but the
+    /// entities it moved earlier in the same push are still at their pushed places when this
+    /// runs; they are put back (to where they were) after it returns. The game may remove
+    /// `pusher` or `other`; what is left of the moved entities is put back all the same.
     fn blocked(&mut self, _eng: &mut EngineApi<'_>, _pusher: EdictId, _other: EdictId) {}
     fn update_client_data(&mut self, eng: &mut EngineApi<'_>, slot: u8) -> GoldSrcClientData;
     /// A server console command no engine command or cvar claims, with `argv[0]` the command

@@ -6,6 +6,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use cs_assets::bsp::{SpawnPoint, SpawnTeam};
+use cs_engine::consts::{MOVETYPE_PUSH, MOVETYPE_WALK, SOLID_BSP, SOLID_SLIDEBOX};
 use cs_engine::{EdictId, EngineApi, GameDll};
 use cs_proto48::delta::{GoldSrcClientData, GoldSrcUserCmd};
 use cs_proto48::usermsg::UserMsgRegistry;
@@ -42,14 +43,6 @@ const PLAYER_MODEL: &str = "models/player.mdl";
 const PLAYER_SKINS: [&str; 8] = [
     "urban", "gsg9", "sas", "gign", "terror", "leet", "arctic", "guerilla",
 ];
-/// `SOLID_SLIDEBOX`.
-const SOLID_SLIDEBOX: u8 = 3;
-/// `SOLID_BSP`.
-const SOLID_BSP: u8 = 4;
-/// `MOVETYPE_WALK`.
-const MOVETYPE_WALK: u8 = 3;
-/// `MOVETYPE_PUSH`.
-const MOVETYPE_PUSH: u8 = 7;
 const STANDING_MINS: Vec3 = Vec3::new(-16.0, -16.0, -36.0);
 const STANDING_MAXS: Vec3 = Vec3::new(16.0, 16.0, 36.0);
 const DUCKED_MINS: Vec3 = Vec3::new(-16.0, -16.0, -18.0);
@@ -191,6 +184,9 @@ pub struct WalkGame {
     queries: Vec<WorldQuery>,
     #[cfg(feature = "test-hooks")]
     answers: Vec<WorldAnswer>,
+    /// `(toucher, other)` of every `touch` call.
+    #[cfg(feature = "test-hooks")]
+    touches: Vec<(EdictId, EdictId)>,
 }
 
 impl WalkGame {
@@ -207,6 +203,8 @@ impl WalkGame {
             queries: Vec::new(),
             #[cfg(feature = "test-hooks")]
             answers: Vec::new(),
+            #[cfg(feature = "test-hooks")]
+            touches: Vec::new(),
         }
     }
 
@@ -237,6 +235,14 @@ impl WalkGame {
         std::mem::take(&mut self.answers)
     }
 
+    /// The `(toucher, other)` pairs of the touches the engine delivered so far, in order. For
+    /// tests only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn touches(&self) -> &[(EdictId, EdictId)] {
+        &self.touches
+    }
+
     /// Moves the movement state of the player in `slot` to `origin` and stops it, to place a
     /// player at a chosen spot in tests; the edict follows with the player's next command.
     /// `false` when nobody is in that slot. For tests only (cargo feature `test-hooks`).
@@ -262,23 +268,41 @@ fn brush_model_number(model: &str) -> Option<usize> {
         .filter(|&n| n > 0)
 }
 
-/// Spawn of `slot`: even slots are counter-terrorists, odd slots terrorists, the `slot / 2`th
-/// spawn of the team (wrapping). Falls back to the other team's spawns, then to none.
-fn spawn_for(spawns: &[SpawnPoint], slot: u8) -> Option<&SpawnPoint> {
+/// The spawns `slot` may use: its team's (even slots are counter-terrorists, odd slots
+/// terrorists), or the other team's when its own has none.
+fn team_spawns(spawns: &[SpawnPoint], slot: u8) -> Vec<&SpawnPoint> {
     let (team, other) = if slot.is_multiple_of(2) {
         (SpawnTeam::CounterTerrorist, SpawnTeam::Terrorist)
     } else {
         (SpawnTeam::Terrorist, SpawnTeam::CounterTerrorist)
     };
     let of = |t: SpawnTeam| -> Vec<&SpawnPoint> { spawns.iter().filter(|s| s.team == t).collect() };
-    let mut candidates = of(team);
-    if candidates.is_empty() {
-        candidates = of(other);
-    }
+    let candidates = of(team);
+    if candidates.is_empty() { of(other) } else { candidates }
+}
+
+/// Spawn of `slot` when nothing is in the way: the `slot / 2`th spawn of its team (wrapping).
+/// `None` without any spawn.
+fn spawn_for(spawns: &[SpawnPoint], slot: u8) -> Option<&SpawnPoint> {
+    let candidates = team_spawns(spawns, slot);
     if candidates.is_empty() {
         return None;
     }
     Some(candidates[usize::from(slot / 2) % candidates.len()])
+}
+
+/// The first spawn of `slot`'s team that `occupied` does not report taken; when every one is
+/// taken, the one [`spawn_for`] gives (players are solid, so two of them at one spawn cannot
+/// separate).
+fn free_spawn_for(
+    spawns: &[SpawnPoint],
+    slot: u8,
+    occupied: impl Fn(&SpawnPoint) -> bool,
+) -> Option<&SpawnPoint> {
+    team_spawns(spawns, slot)
+        .into_iter()
+        .find(|s| !occupied(s))
+        .or_else(|| spawn_for(spawns, slot))
 }
 
 /// Movement input of a client command: move speeds as fractions of `max_speed`.
@@ -390,8 +414,20 @@ impl GameDll for WalkGame {
 
     fn client_put_in_server(&mut self, eng: &mut EngineApi<'_>, slot: u8) {
         let (origin, yaw) = {
-            let world = EngineWorld::new(eng, eng.client_edict(slot), &self.ladders);
-            match spawn_for(&self.spawns, slot) {
+            let player = eng.client_edict(slot);
+            let world = EngineWorld::new(eng, player, &self.ladders);
+            // A spawn is taken when a player stands in the box of one that spawns there: a
+            // zero-length player trace starts inside that player (a brush or the world does
+            // not count: the position is snapped to the floor anyway).
+            let taken = |spawn: &SpawnPoint| {
+                let hit = eng.trace_player_move(player, spawn.position, spawn.position, Hull::Standing);
+                hit.trace.start_solid
+                    && hit.ent.is_some_and(|e| {
+                        e != eng.world()
+                            && eng.ent(e).is_some_and(|v| v.flags & ent_flags::FL_CLIENT != 0)
+                    })
+            };
+            match free_spawn_for(&self.spawns, slot, taken) {
                 Some(spawn) => (snap_spawn_to_floor(spawn.position, &world), spawn.yaw_deg),
                 None => (Vec3::ZERO, 0.0),
             }
@@ -481,6 +517,11 @@ impl GameDll for WalkGame {
         // The engine links the player after the command.
     }
 
+    #[cfg(feature = "test-hooks")]
+    fn touch(&mut self, _eng: &mut EngineApi<'_>, toucher: EdictId, other: EdictId) {
+        self.touches.push((toucher, other));
+    }
+
     #[cfg(not(feature = "test-hooks"))]
     fn start_frame(&mut self, _eng: &mut EngineApi<'_>, _frametime: f32) {}
 
@@ -558,6 +599,24 @@ mod tests {
         // Counter-terrorists fall back to the terrorist spawns, by their own `slot / 2`.
         let xs: Vec<_> = (0..4).map(|slot| spawn_x(&spawns, slot)).collect();
         assert_eq!(xs, [1.0, 1.0, 2.0, 2.0].map(Some).to_vec());
+    }
+
+    #[test]
+    fn a_taken_spawn_is_skipped_for_the_next_free_one_of_the_team() {
+        let spawns = [
+            spawn(10.0, SpawnTeam::CounterTerrorist),
+            spawn(20.0, SpawnTeam::CounterTerrorist),
+            spawn(30.0, SpawnTeam::CounterTerrorist),
+        ];
+        let x = |taken: &[f32], slot| {
+            free_spawn_for(&spawns, slot, |s| taken.contains(&s.position.x)).map(|s| s.position.x)
+        };
+        // The first free one of the team, whatever the slot's own index.
+        assert_eq!(x(&[], 4), Some(10.0));
+        assert_eq!(x(&[10.0], 4), Some(20.0));
+        assert_eq!(x(&[10.0, 20.0], 0), Some(30.0));
+        // More players than spawns: all taken, so the old choice.
+        assert_eq!(x(&[10.0, 20.0, 30.0], 2), Some(20.0));
     }
 
     #[test]

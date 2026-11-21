@@ -640,8 +640,13 @@ fn solid_brush_entities_block_movement() {
     // ... and was stopped by it.
     assert!(along <= run.stop + 0.1, "went into the brush: {along} vs {}", run.stop);
 
-    // The movement's touches reached the engine: the brush entity is still the same live one.
+    // The movement's touches reached the engine: the brush entity is still the same live one,
+    // and the game was told the player and the brush touched (the brush's half comes first).
     assert!(w.server.edicts().get(brush).is_some());
+    let player = w.server.edicts().client(0);
+    let touches = w.server.game().touches();
+    assert!(touches.contains(&(brush, player)), "{touches:?}");
+    assert!(touches.contains(&(player, brush)), "{touches:?}");
 }
 
 #[test]
@@ -911,4 +916,41 @@ fn legacy_numbers_unchanged() {
     let (engine, expected) = (w.vars(s).origin, legacy.origin);
     println!("engine {engine:?} legacy {expected:?}");
     assert!((engine - expected).abs().max_element() <= TOLERANCE, "{engine:?} vs {expected:?}");
+}
+
+/// Players are solid: a player who joins must not spawn inside another. Slot 0 stands on the
+/// spawn slot 2 would get; slot 2 takes the first free spawn of the team instead.
+#[test]
+fn a_player_does_not_spawn_inside_another() {
+    let Ok(vfs) = Vfs::discover(None, VfsConfig::default()) else {
+        return;
+    };
+    let mut w = World::dust2(&vfs);
+    let ct: Vec<SpawnPoint> = w
+        .spawns
+        .iter()
+        .filter(|s| s.team == SpawnTeam::CounterTerrorist)
+        .cloned()
+        .collect();
+    assert!(ct.len() >= 2, "de_dust2 has several CT spawns");
+    let mut a = w.join("A", &mut []);
+    // A stands on the second CT spawn, where slot 2 would spawn by its index.
+    let on_second = snap_spawn_to_floor(ct[1].position, &w.collision);
+    assert!(w.server.game_mut().set_player_origin(slot(&a), on_second));
+    idle(&mut w, &mut [&mut a], 5);
+    assert!((w.vars(0).origin - on_second).length() < 1.0);
+
+    let mut b = w.join("B", &mut [&mut a]);
+    let mut c = w.join("C", &mut [&mut a, &mut b]);
+    w.step(&mut [&mut a, &mut b, &mut c], 5);
+    assert_eq!(slot(&c), 2);
+    let gap = (w.vars(0).origin - w.vars(2).origin).length();
+    assert!(gap >= 32.0, "C spawned inside A: {gap}");
+    // The first CT spawn was free: C takes it.
+    let first = snap_spawn_to_floor(ct[0].position, &w.collision);
+    assert!(
+        (w.vars(2).origin - first).abs().max_element() <= TOLERANCE,
+        "{:?} vs {first:?}",
+        w.vars(2).origin
+    );
 }
