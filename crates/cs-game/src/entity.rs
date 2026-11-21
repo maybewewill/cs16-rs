@@ -77,9 +77,13 @@ pub fn create_entity(classname: &str) -> Option<Box<dyn GameEntity>> {
         "func_illusionary" => Box::new(StaticBrush::new("func_illusionary", BrushKind::Illusionary)),
         #[cfg(feature = "test-hooks")]
         "test_dispatch" => Box::new(DispatchProbe(ProbeMode::Plain)),
+        #[cfg(feature = "test-hooks")]
         "test_dispatch_remove_on_think" => Box::new(DispatchProbe(ProbeMode::RemoveOnThink)),
+        #[cfg(feature = "test-hooks")]
         "test_dispatch_remove_on_touch" => Box::new(DispatchProbe(ProbeMode::RemoveOnTouch)),
+        #[cfg(feature = "test-hooks")]
         "test_dispatch_replace_on_think" => Box::new(DispatchProbe(ProbeMode::ReplaceOnThink)),
+        #[cfg(feature = "test-hooks")]
         "test_dispatch_create_on_think" => Box::new(DispatchProbe(ProbeMode::CreateOnThink)),
         _ => return None,
     };
