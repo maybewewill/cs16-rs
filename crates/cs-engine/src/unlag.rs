@@ -22,6 +22,11 @@
 //! - `next_messageinterval` is `1 / cl_updaterate` clamped to the server's update rates
 //!   (`update_interval`), 0.05 without `cl_updaterate`.
 //! - The `health` of a player in a frame is the edict's, taken when the update was built.
+//! - When the frame a client acknowledges is no longer among the 64 kept, its latency stays at
+//!   the last value measured (see `note_accepted`); HLDS computes a wrong small one from the
+//!   newer frame in that slot.
+//! - HLDS skips `SV_SetupMove` and `SV_RestoreMove` for fake clients; the engine has no bots
+//!   yet, so `lag_compensation_active` does not look at that.
 
 use std::collections::BTreeSet;
 
@@ -257,6 +262,9 @@ impl<G: GameDll> Server<G> {
 
     /// `SV_RestoreMove`: puts the players [`setup_move`](Self::setup_move) moved back, linked
     /// without touching triggers. One the game moved meanwhile stays where the game put it.
+    /// As in HLDS the absolute box is recomputed by the relink, not restored from a copy (a
+    /// copy taken before the command would be stale if the player's size changed), and the
+    /// entity's place in its area node list changes; queries sort by entity number.
     pub(crate) fn restore_move(&mut self) {
         for moved in std::mem::take(&mut self.world.moved_players) {
             let untouched = self

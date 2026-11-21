@@ -275,6 +275,19 @@ struct AreaNode {
     solid: Vec<u16>,
 }
 
+/// What an entity is linked as, to compare before and after a relink: the leaves kept for the
+/// visibility test and the area node and list it is in (the order inside the list is not part
+/// of it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkSnapshot {
+    /// `leafnums` of the HLDS edict.
+    pub leafnums: Vec<i32>,
+    /// `headnode` of the HLDS edict: -1 unless the box touched too many leaves.
+    pub headnode: i32,
+    /// Area node and list (`true`: the trigger list); `None` when not in the tree.
+    pub area: Option<(usize, bool)>,
+}
+
 /// Where a linked entity sits.
 #[derive(Clone)]
 struct Link {
@@ -524,6 +537,16 @@ impl WorldLinks {
     pub(crate) fn leaves_visible(&self, bsp: &BspMap, pvs: &[bool], id: EdictId) -> Option<bool> {
         let link = self.link_of(id.index).filter(|l| l.id == id)?;
         Some(link.leaves.visible(bsp, pvs))
+    }
+
+    /// How `id` is linked; `None` when it is not.
+    pub(crate) fn link_snapshot(&self, id: EdictId) -> Option<LinkSnapshot> {
+        let link = self.link_of(id.index).filter(|l| l.id == id)?;
+        Some(LinkSnapshot {
+            leafnums: link.leaves.leafnums[..link.leaves.num_leafs].to_vec(),
+            headnode: link.leaves.headnode,
+            area: link.area,
+        })
     }
 
     /// The leaves kept for `id`; `None` when it is not linked.

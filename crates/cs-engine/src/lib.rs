@@ -22,8 +22,8 @@ mod physics_move;
 mod physics_water;
 mod rng;
 mod touch;
-mod unlag;
 mod trace_ents;
+mod unlag;
 pub mod usercmd;
 mod world;
 
@@ -64,4 +64,4 @@ pub use usercmd::{
     MAX_BANKED_MS, MAX_CONSECUTIVE_BAD_MOVES, MAX_DROPPED_REPLAY, MAX_USERCMD_STEP_MS, MsecBudget,
     STRINGCMD_BURST, STRINGCMD_RATE_PER_SEC, select_cmds_to_run, split_usercmd, usercmd_is_finite,
 };
-pub use world::{AREA_DEPTH, MAX_ENT_LEAFS, consts};
+pub use world::{AREA_DEPTH, LinkSnapshot, MAX_ENT_LEAFS, consts};

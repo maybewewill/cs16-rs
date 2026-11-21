@@ -369,6 +369,12 @@ impl<G: GameDll> Server<G> {
         &self.edicts
     }
 
+    /// How entity `id` is linked into the world (its leaves and area node); `None` when it is
+    /// not linked.
+    pub fn link_snapshot(&self, id: crate::edict::EdictId) -> Option<crate::world::LinkSnapshot> {
+        self.world.link_snapshot(id)
+    }
+
     /// Calls into the game, then drains what it queued.
     pub(crate) fn with_game<R>(&mut self, f: impl FnOnce(&mut G, &mut EngineApi<'_>) -> R) -> R {
         let result = self.call_game(f);

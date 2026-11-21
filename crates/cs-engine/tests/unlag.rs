@@ -13,13 +13,17 @@ mod common;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use common::{FRAME, Harness, TestGame};
+use cs_assets::bsp::BspMap;
 use cs_engine::collision::Hull;
-use cs_engine::{EngineApi, MoveFilter, ServerConfig};
+use cs_engine::consts::{SOLID_TRIGGER};
+use cs_engine::{EngineApi, LinkSnapshot, MoveFilter, ServerConfig, ServerMap};
 use cs_probe::{ProbeClient, ProbeState};
 use cs_proto48::delta::GoldSrcUserCmd;
 use cs_transport::{LoopbackEndpoint, PacketTransport, PeerAddr, TransportError};
+use cs_vfs::{Vfs, VfsConfig};
 use glam::Vec3;
 
 type Probe = ProbeClient<LoopbackEndpoint>;
@@ -28,9 +32,10 @@ type Probe = ProbeClient<LoopbackEndpoint>;
 const SPEED: f32 = 300.0;
 /// How far the target jumps when it teleports.
 const JUMP: f32 = 500.0;
-/// Slack, in units, between where the rewind should put the target and where it did: a frame
-/// and a half of the target's movement.
-const TOLERANCE: f32 = 4.5;
+/// Slack, in units, between where the rewind should put the target and where it did: far below
+/// one frame of the target's movement (3 units), the interpolation being exact for a straight
+/// run.
+const TOLERANCE: f32 = 0.5;
 
 /// A transport the server reads nothing from while `held`: what the clients send waits.
 struct Holdable<'a> {
@@ -56,6 +61,18 @@ struct Scenario {
     hold: usize,
     /// The shooter's `cl_updaterate`; 100 when 0.
     update_rate: u32,
+    /// Frames of a first, shorter hold right before the measured one, whose only datagram is
+    /// the one the server reads last; it leaves the shooter's latency measured there.
+    prime: usize,
+    /// The target's speed in units per second; [`SPEED`] when 0.
+    speed: f32,
+    /// The game moves the target during the shooter's command, to its true x plus 100.
+    game_moves_target: bool,
+    /// Triggers at the target's true place and at the place it is rewound to; the target sends
+    /// no command, so nothing is meant to touch them.
+    triggers: bool,
+    /// Run on de_dust2 (needs the installed game).
+    dust2: bool,
     /// The target teleports this many seconds before the measured command.
     jump_before: Option<f64>,
     /// The target dies this many seconds before the measured command.
@@ -89,6 +106,11 @@ struct Outcome {
     /// The target's own x as seen by its own command, run in the same frame after the
     /// shooter's.
     target_saw_self_x: f32,
+    /// How the target is linked before the command and after the restore.
+    link_before: Option<LinkSnapshot>,
+    link_after: Option<LinkSnapshot>,
+    /// Every touch the game was told of, in the whole run.
+    touches: Vec<(u16, u16)>,
     /// `pos` of the scenario, to compute where the rewind should have put the target.
     pos: Rc<dyn Fn(f64) -> f32>,
 }
@@ -118,16 +140,18 @@ fn same_bits(a: (Vec3, Vec3, Vec3), b: (Vec3, Vec3, Vec3)) -> bool {
     bits(a.0) == bits(b.0) && bits(a.1) == bits(b.1) && bits(a.2) == bits(b.2)
 }
 
-/// Sets the target's origin to `x` along its line, and its health.
-fn put_target(h: &mut Harness, x: f32, health: f32) {
+/// Sets the target's origin to `x` along its line (`lane` is where the line starts), and its
+/// health.
+fn put_target(h: &mut Harness, lane: Vec3, x: f32, health: f32) {
     h.server.game_mut().act(move |eng| {
         let id = eng.client_edict(1);
         eng.ent_mut(id).unwrap().health = health;
-        eng.set_origin(id, Vec3::new(x, 0.0, 0.0));
+        eng.set_origin(id, lane + Vec3::new(x, 0.0, 0.0));
     });
 }
 
-fn run(scn: &Scenario) -> Outcome {
+/// The harness, and where the target's line starts.
+fn harness(scn: &Scenario) -> (Harness, Vec3) {
     let game = TestGame {
         spawn_origins: vec![Vec3::new(0.0, 500.0, 0.0), Vec3::new(0.0, 0.0, 0.0)],
         ..TestGame::default()
@@ -137,7 +161,62 @@ fn run(scn: &Scenario) -> Outcome {
         max_edicts: 64,
         ..ServerConfig::default()
     };
-    let mut h = Harness::with_config(cfg, game);
+    if !scn.dust2 {
+        return (Harness::with_config(cfg, game), Vec3::ZERO);
+    }
+    let vfs = Vfs::discover(None, VfsConfig::default()).expect("the installed game");
+    let raw = vfs.read_bytes("maps/de_dust2.bsp").expect("de_dust2 reads");
+    let bsp = Arc::new(BspMap::load(&vfs, "de_dust2").expect("de_dust2 parses"));
+    let map = ServerMap::from_bsp("de_dust2", &raw, bsp).expect("valid BSP header");
+    let lane = map
+        .entities
+        .iter()
+        .filter(|e| e.classname() == "info_player_deathmatch")
+        .find_map(|e| e.get_vec3("origin"))
+        .expect("de_dust2 has a spawn point");
+    (Harness::with_map(cfg, map, game), lane)
+}
+
+/// `hold + 1` frames, the first one's datagrams (and, with `pump_all`, every later frame's too)
+/// sent by the probes; the server reads nothing until the last. The target runs on every frame
+/// but the last, unless `move_last`; `at_last` runs just before the last frame.
+#[allow(clippy::too_many_arguments)]
+fn round(
+    h: &mut Harness,
+    shooter: &mut Probe,
+    target: &mut Probe,
+    hold: usize,
+    pump_all: bool,
+    move_last: bool,
+    lane: Vec3,
+    pos: &dyn Fn(f64) -> f32,
+    health_at: &dyn Fn(f64) -> f32,
+    at_last: &mut dyn FnMut(&mut Harness),
+) {
+    let start = h.now;
+    for i in 0..=hold {
+        let at = start + (i + 1) as f64 * FRAME;
+        if i < hold || move_last {
+            put_target(h, lane, pos(at), health_at(at));
+        } else {
+            at_last(h);
+        }
+        h.now = at;
+        if pump_all || i == 0 {
+            shooter.pump(at);
+            target.pump(at);
+        }
+        let mut net = Holdable {
+            hub: &mut h.hub,
+            held: i < hold,
+        };
+        h.server.frame(&mut net, at);
+    }
+}
+
+fn run(scn: &Scenario) -> Outcome {
+    // On a real map the target runs from a spawn point, where there is room.
+    let (mut h, lane) = harness(scn);
     for &(name, value) in &scn.cvars {
         h.server.game_mut().act(move |eng| eng.set_cvar(name, value));
     }
@@ -159,36 +238,68 @@ fn run(scn: &Scenario) -> Outcome {
 
     // The schedule: the measured command is sent at the first pump after `now0` and read at
     // `time`; the target's place is a function of the time of the frame that sets it.
-    let now0 = h.now + 40.0 * FRAME;
+    let prime_len = if scn.prime > 0 { (scn.prime + 1) as f64 * FRAME } else { 0.0 };
+    let now0 = h.now + 40.0 * FRAME + prime_len;
     let time = now0 + (scn.hold + 1) as f64 * FRAME;
     let t_start = h.now;
+    let speed = if scn.speed == 0.0 { SPEED } else { scn.speed };
     let jump_at = scn.jump_before.map(|s| time - s);
     let die_at = scn.die_before.map(|s| time - s);
     let pos: Rc<dyn Fn(f64) -> f32> = Rc::new(move |t| {
         let jumped = jump_at.is_some_and(|j| t >= j);
-        SPEED * (t - t_start) as f32 + if jumped { JUMP } else { 0.0 }
+        speed * (t - t_start) as f32 + if jumped { JUMP } else { 0.0 }
     });
     let health_at = move |t: f64| if die_at.is_some_and(|d| t >= d) { 0.0 } else { 100.0 };
+    let true_x = pos(now0 + scn.hold as f64 * FRAME);
+
+    if scn.triggers {
+        // One where the target will be for real, one where the rewind puts it (lerp 50).
+        let rewound_x = pos(time - scn.hold as f64 * FRAME - 0.05);
+        h.server.game_mut().act(move |eng| {
+            for x in [true_x, rewound_x] {
+                let id = eng.create_entity("test_trigger").expect("free edict");
+                eng.ent_mut(id).unwrap().solid = SOLID_TRIGGER;
+                eng.set_size(id, Vec3::splat(-10.0), Vec3::splat(10.0));
+                eng.set_origin(id, Vec3::new(x, 0.0, 0.0));
+            }
+        });
+    }
 
     // Warm up: the target runs and the shooter sends commands with its `lerp_msec`.
-    while h.now + FRAME < now0 - 1e-9 {
+    let warm_end = now0 - prime_len;
+    while h.now + FRAME < warm_end - 1e-9 {
         let t = h.now + FRAME;
-        put_target(&mut h, pos(t), health_at(t));
+        put_target(&mut h, lane, pos(t), health_at(t));
         shooter.queue_cmd(cmd(10, scn.lerp));
         h.step(&mut [&mut shooter, &mut target], 1);
     }
-    h.now = now0 - FRAME;
-    put_target(&mut h, pos(now0), health_at(now0));
+    h.now = warm_end - FRAME;
+    put_target(&mut h, lane, pos(warm_end), health_at(warm_end));
     shooter.queue_cmd(cmd(10, scn.lerp));
     h.step(&mut [&mut shooter, &mut target], 1);
+    if scn.prime > 0 {
+        // A stale datagram read last: the latency measured from it stays.
+        round(
+            &mut h,
+            &mut shooter,
+            &mut target,
+            scn.prime,
+            false,
+            true,
+            lane,
+            &*pos,
+            &health_at,
+            &mut |_| {},
+        );
+    }
     assert!((h.now - now0).abs() < 1e-9);
 
     // The measured command.
-    let true_x = pos(now0 + scn.hold as f64 * FRAME);
     let seen = Rc::new(RefCell::new(Vec::new()));
     let sink = Rc::clone(&seen);
     let marks = Rc::new(Cell::new(0));
     let own_x = Rc::new(Cell::new(f32::NAN));
+    let game_moves = scn.game_moves_target;
     h.server.game_mut().usercmd_hook.set({
         let marks = Rc::clone(&marks);
         let own_x = Rc::clone(&own_x);
@@ -219,36 +330,38 @@ fn run(scn: &Scenario) -> Outcome {
                 pmove(eng, place.0.x),
                 pmove(eng, true_x),
             ));
+            if game_moves {
+                eng.set_origin(other, Vec3::new(true_x + 100.0, 0.0, 0.0));
+            }
         }
     });
     shooter.queue_cmd(cmd(10, scn.lerp));
-    target.queue_cmd(cmd(10, 0));
-    let mut before = places(&h, 1);
-    let mut tail = 0;
-    for i in 0..=scn.hold {
-        let pump_at = now0 + (i + 1) as f64 * FRAME;
-        let frame_at = pump_at;
-        if i < scn.hold {
-            put_target(&mut h, pos(frame_at), health_at(frame_at));
-        } else {
-            before = places(&h, 1);
-        }
-        h.now = pump_at;
-        shooter.pump(pump_at);
-        target.pump(pump_at);
-        let mut net = Holdable {
-            hub: &mut h.hub,
-            held: i < scn.hold,
-        };
-        h.server.frame(&mut net, frame_at);
-        h.now = frame_at;
-        tail = i;
+    if !scn.triggers {
+        target.queue_cmd(cmd(10, 0));
     }
-    assert_eq!(tail, scn.hold);
+    let target_id = h.server.edicts().client(1);
+    let mut before = places(&h, 1);
+    let mut link_before = None;
+    round(
+        &mut h,
+        &mut shooter,
+        &mut target,
+        scn.hold,
+        true,
+        false,
+        lane,
+        &*pos,
+        &health_at,
+        &mut |h| {
+            before = places(h, 1);
+            link_before = h.server.link_snapshot(target_id);
+        },
+    );
     assert!((h.now - time).abs() < 1e-9, "{} {}", h.now, time);
     assert_eq!(marks.get(), 1, "the measured command ran once");
 
     let after = places(&h, 1);
+    let link_after = h.server.link_snapshot(target_id);
     let found = Rc::new(Cell::new((false, false)));
     let sink = Rc::clone(&found);
     let (seen_place, line_seen, line_true, pmove_seen, pmove_true) = seen.borrow()[0];
@@ -276,9 +389,13 @@ fn run(scn: &Scenario) -> Outcome {
         found_at_seen: found.get().1,
         shown_to_shooter_x: shooter.entities().get(&2).map_or(f32::NAN, |s| s.origin.x),
         target_saw_self_x: own_x.get(),
+        link_before,
+        link_after,
+        touches: h.server.game().touch_log.clone(),
         pos,
     }
 }
+
 /// Where the rewind should put the target for a shooter whose ping is `latency` seconds, whose
 /// `lerp_msec` is `lerp` and whose update interval is `interval` (the original's
 /// `SV_GetUnlagTargetTime`, with `sv_maxunlag` 0.5).
@@ -289,7 +406,6 @@ fn expected_x(o: &Outcome, latency: f64, lerp: i16, interval: f64) -> f32 {
     let interp = (f64::from(lerp) / 1000.0).min(0.1).max(interval);
     (o.pos)(o.time - latency - interp)
 }
-
 
 /// The ping of a shooter held back for `hold` frames, with an update every frame.
 fn ping(hold: usize) -> f64 {
@@ -455,4 +571,76 @@ fn the_rewind_does_not_reach_packets_or_other_commands() {
     );
     // The target's own command, run right after the shooter's, finds the target at home.
     assert_eq!(o.target_saw_self_x, o.true_x);
+}
+
+#[test]
+fn a_player_the_game_moved_during_the_command_is_not_put_back() {
+    let o = run(&Scenario {
+        lerp: 50,
+        hold: 10,
+        game_moves_target: true,
+        ..Scenario::default()
+    });
+    // It was rewound, the game moved it, and the restore left it where the game put it.
+    assert!(o.true_x - o.seen.0.x > SPEED * 0.13);
+    assert_eq!(o.after.0.x, o.true_x + 100.0);
+    assert_eq!(o.after.1.x, o.after.0.x - 17.0);
+    assert_eq!(o.after.2.x, o.after.0.x + 17.0);
+}
+
+#[test]
+fn rewinding_and_restoring_touch_no_triggers() {
+    let o = run(&Scenario {
+        lerp: 50,
+        hold: 10,
+        triggers: true,
+        ..Scenario::default()
+    });
+    // The rewind really crossed both triggers' places.
+    assert!(o.true_x - o.seen.0.x > SPEED * 0.13);
+    assert!(o.touches.is_empty(), "{:?}", o.touches);
+}
+
+#[test]
+fn links_and_leaves_are_the_same_after_the_restore() {
+    let stub = run(&Scenario {
+        lerp: 50,
+        hold: 10,
+        ..Scenario::default()
+    });
+    assert!(stub.link_before.is_some());
+    assert_eq!(stub.link_before, stub.link_after);
+
+    // On a real map, with a target fast enough for the rewound and the true places to differ
+    // in leaves and area node.
+    if Vfs::discover(None, VfsConfig::default()).is_err() {
+        return;
+    }
+    let o = run(&Scenario {
+        lerp: 50,
+        hold: 10,
+        speed: 1000.0,
+        dust2: true,
+        ..Scenario::default()
+    });
+    assert!(o.true_x - o.seen.0.x > 200.0, "{} {}", o.seen.0.x, o.true_x);
+    assert!(same_bits(o.before, o.after));
+    let (before, after) = (o.link_before.expect("linked"), o.link_after.expect("linked"));
+    assert!(!before.leafnums.is_empty(), "the target touches some leaf");
+    assert_eq!(before, after);
+}
+
+#[test]
+fn a_ping_beyond_the_frames_kept_keeps_the_last_latency() {
+    // 0.3 s of ping measured, then a ping of 2 s with an update every frame: the frame the
+    // second command acknowledges is long gone from the 64 kept, and the 0.3 s stay.
+    let o = run(&Scenario {
+        lerp: 50,
+        prime: 30,
+        hold: 200,
+        ..Scenario::default()
+    });
+    let expected = expected_x(&o, ping(30), 50, FRAME);
+    assert!((o.seen.0.x - expected).abs() <= TOLERANCE, "{} {expected}", o.seen.0.x);
+    assert!(same_bits(o.before, o.after));
 }

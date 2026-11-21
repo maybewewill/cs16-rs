@@ -269,8 +269,14 @@ impl<G: GameDll> Server<G> {
         client
             .frames
             .note_ack(sequence_ack, now, interval, since_connect);
-        let samples = if samples.is_finite() { samples as i32 } else { 1 };
-        client.latency = client.frames.client_time(sequence_ack, samples);
+        // Deliberate deviation: when the acknowledged frame is no longer among the 64 kept (a
+        // very high ping), the last latency measured stays. HLDS takes the ping of whatever
+        // newer frame now sits in that slot, a wrong, small value; with the last one such a
+        // client is still rewound, as far as `sv_maxunlag` allows.
+        if client.frames.get(sequence_ack).is_some() {
+            let samples = if samples.is_finite() { samples as i32 } else { 1 };
+            client.latency = client.frames.client_time(sequence_ack, samples);
+        }
     }
 
     /// Releases, without telling them, clients that did not reach `Active` within
