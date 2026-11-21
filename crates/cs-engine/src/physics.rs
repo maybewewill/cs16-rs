@@ -3,14 +3,12 @@
 //! index order is run by its `movetype`, which calls its think when it is due.
 //!
 //! Handled here: `NONE` (think only), `NOCLIP`, `FOLLOW`, `TOSS`, `BOUNCE`, `BOUNCEMISSILE`,
-//! `FLY`, `FLYMISSILE`, `STEP` and `PUSHSTEP`. `PUSH` behaves as `NONE` until its physics is
-//! ported.
+//! `FLY`, `FLYMISSILE`, `STEP`, `PUSHSTEP` and `PUSH` (the pushers: brush entities that carry
+//! what stands on them and push what is in their way).
 //!
 //! Known differences from HLDS:
 //! - A `movetype` HLDS ends the process for (`Sys_Error`: 1, 2, `WALK` on a non-player, anything
 //!   above 13) behaves as `NONE` here, with one warning per entity index per map.
-//! - `SV_CheckMovingGround` (the conveyor and `basevelocity` bookkeeping before the switch) is
-//!   not ported.
 //! - `SV_Impact` is delivered at the point of impact, as in HLDS: `SV_PushEntity` and
 //!   `SV_FlyMove` queue the impact and dispatch the touches at once (physics is driven by the
 //!   engine, so this is not a nested game call), then read the entity back; a touch that frees
@@ -22,6 +20,14 @@
 //!   macro could not be read; Quake's `IS_NAN` is that test, which an infinity passes too), so a
 //!   non-finite velocity or origin component becomes 0. `avelocity` is guarded the same way
 //!   before it turns the angles.
+//! - Pushers (`SV_Physics_Pusher`, `SV_PushMove`, `SV_PushRotate`, `SV_PushEntity`; ReHLDS
+//!   `rehlds/engine/sv_phys.cpp`, read 2026-11-21): `movetime`, `ltime` and the vector maths are
+//!   `f64` where the source has `float` (`movetime` is cast to `f32` for the vector maths). A
+//!   pusher gets back the `solid` it had before the push, where the source writes `SOLID_BSP`
+//!   (the same for every pusher the game makes). The source's `pfnBlocked` runs in the middle
+//!   of the push; here it is a normal game call, so the touches queued so far are delivered
+//!   before it, and a pusher or entity it removes is skipped when the entities moved so far are
+//!   put back. The pass over the entities is the live pool as it is (no `num_edicts`).
 //! - `sv_time` is not advanced while a think runs, so the game's time global reverts to `sv_time`
 //!   for every call after it; HLDS leaves the global at the think's due time until the next
 //!   `SV_Physics` or `SV_Impact` resets it.
@@ -35,13 +41,15 @@
 
 use glam::Vec3;
 
-use crate::edict::EdictId;
+use crate::edict::{EdictId, EntVars};
 use crate::game::GameDll;
 use crate::server::{SETTLE_PASSES_MULTI, SETTLE_PASSES_SINGLE, Server};
+use crate::trace_ents::{angle_vectors, angle_vectors_transpose};
 use crate::world::consts::{
-    FL_KILLME, MOVETYPE_BOUNCE, MOVETYPE_BOUNCEMISSILE, MOVETYPE_FLY, MOVETYPE_FLYMISSILE,
+    FL_ALWAYSTHINK, FL_BASEVELOCITY, FL_CLIENT, FL_CONVEYOR, FL_KILLME,
+    FL_ONGROUND, MOVETYPE_BOUNCE, MOVETYPE_BOUNCEMISSILE, MOVETYPE_FLY, MOVETYPE_FLYMISSILE,
     MOVETYPE_FOLLOW, MOVETYPE_NONE, MOVETYPE_NOCLIP, MOVETYPE_PUSH, MOVETYPE_PUSHSTEP,
-    MOVETYPE_STEP, MOVETYPE_TOSS,
+    MOVETYPE_STEP, MOVETYPE_TOSS, MOVETYPE_WALK, SOLID_NOT, SOLID_TRIGGER,
 };
 use crate::world::free_entity;
 
@@ -83,6 +91,8 @@ impl<G: GameDll> Server<G> {
             if id.index != 0 && usize::from(id.index) <= max_clients {
                 continue;
             }
+            let frametime = self.frametime as f32;
+            self.check_moving_ground(id, frametime);
             self.run_entity(id);
             // HLDS calls the touches inside the step; here they are delivered before the next
             // entity's turn (the moves of `NOCLIP` and `FOLLOW` link without a game call).
@@ -131,8 +141,8 @@ impl<G: GameDll> Server<G> {
                 self.physics_bounce(id);
             }
             MOVETYPE_STEP | MOVETYPE_PUSHSTEP => self.physics_step(id),
-            // `PUSH` is not ported yet: it thinks and nothing else.
-            MOVETYPE_NONE | MOVETYPE_PUSH => {
+            MOVETYPE_PUSH => self.physics_pusher(id),
+            MOVETYPE_NONE => {
                 self.run_think(id);
             }
             other => {
@@ -218,5 +228,360 @@ impl<G: GameDll> Server<G> {
             free_entity(&mut self.edicts, &mut self.world, id, self.sv_time);
         }
         self.edicts.get(id).is_some()
+    }
+}
+
+/// `VectorIsZero`.
+fn is_zero(v: Vec3) -> bool {
+    v.x == 0.0 && v.y == 0.0 && v.z == 0.0
+}
+
+// The pushers. Ported from ReHLDS `rehlds/engine/sv_phys.cpp` (`SV_PushEntity`, `SV_PushMove`,
+// `SV_PushRotate`, `SV_Physics_Pusher`) and `rehlds/engine/sv_user.cpp`
+// (`SV_CheckMovingGround`), read 2026-11-21.
+impl<G: GameDll> Server<G> {
+    /// `SV_CheckMovingGround`: the conveyor under an entity adds its belt speed to the entity's
+    /// `basevelocity`; an entity that got no base velocity this frame (`FL_BASEVELOCITY` clear)
+    /// has what it had folded into its `velocity` and cleared. The flag is cleared at the end.
+    /// Called before the movetype switch for every entity the physics runs.
+    pub(crate) fn check_moving_ground(&mut self, id: EdictId, frametime: f32) {
+        let Some(v) = self.edicts.get(id).map(|e| &e.vars) else {
+            return;
+        };
+        let belt = (v.flags & FL_ONGROUND != 0)
+            .then_some(v.groundentity)
+            .flatten()
+            .and_then(|ground| self.edicts.get(ground))
+            .filter(|ground| ground.vars.flags & FL_CONVEYOR != 0)
+            .map(|ground| (ground.vars.speed, ground.vars.movedir));
+        let Some(v) = self.edicts.get_mut(id).map(|e| &mut e.vars) else {
+            return;
+        };
+        if let Some((speed, movedir)) = belt {
+            if v.flags & FL_BASEVELOCITY != 0 {
+                v.basevelocity += movedir * speed;
+            } else {
+                v.basevelocity = movedir * speed;
+            }
+            v.flags |= FL_BASEVELOCITY;
+        }
+        if v.flags & FL_BASEVELOCITY == 0 {
+            v.velocity += v.basevelocity * (frametime * 0.5 + 1.0);
+            v.basevelocity = Vec3::ZERO;
+        }
+        v.flags &= !FL_BASEVELOCITY;
+    }
+
+    /// `SV_Physics_Pusher`: a pusher moves by the time its own clock `ltime` runs, not the
+    /// server's. `movetime` is the frame time, or what is left until `nextthink` when that
+    /// comes first (never negative); a pusher with no `nextthink` does not move. It rotates when
+    /// it has an `avelocity` and translates when it has a `velocity` (when both, the rotation
+    /// first and the translation only if the rotation was not blocked, with `ltime` advanced
+    /// once), then calls its think when `ltime` has reached `nextthink` (always for
+    /// `FL_ALWAYSTHINK`), with the game's time set to the server time.
+    pub(crate) fn physics_pusher(&mut self, id: EdictId) {
+        let Some(v) = self.edicts.get(id).map(|e| &e.vars) else {
+            return;
+        };
+        let (thinktime, oldltime) = (v.nextthink, v.ltime);
+        let movetime = if thinktime < oldltime + self.frametime {
+            (thinktime - oldltime).max(0.0)
+        } else {
+            self.frametime
+        };
+        if movetime != 0.0 {
+            let Some((rotates, moves)) = self
+                .edicts
+                .get(id)
+                .map(|e| (!is_zero(e.vars.avelocity), !is_zero(e.vars.velocity)))
+            else {
+                return;
+            };
+            if !rotates {
+                self.push_move(id, movetime);
+            } else if !moves {
+                self.push_rotate(id, movetime);
+            } else if self.push_rotate(id, movetime) {
+                let Some(edict) = self.edicts.get_mut(id) else {
+                    return;
+                };
+                let savetime = edict.vars.ltime;
+                // Back to the local time from before the rotation.
+                edict.vars.ltime = oldltime;
+                self.push_move(id, movetime);
+                if let Some(edict) = self.edicts.get_mut(id)
+                    && edict.vars.ltime < savetime
+                {
+                    edict.vars.ltime = savetime;
+                }
+            }
+        }
+        let Some(v) = self.edicts.get_mut(id).map(|e| &mut e.vars) else {
+            return;
+        };
+        for angle in [&mut v.angles.x, &mut v.angles.y, &mut v.angles.z] {
+            if *angle < -3600.0 || *angle > 3600.0 {
+                *angle %= 3600.0;
+            }
+        }
+        if thinktime > oldltime
+            && (v.flags & FL_ALWAYSTHINK != 0 || thinktime <= v.ltime)
+            && v.flags & FL_KILLME == 0
+        {
+            v.nextthink = 0.0;
+            self.with_game_at(self.sv_time, |game, eng| game.think(eng, id));
+        }
+    }
+
+    /// Whether `check` is to be moved by the pusher whose box (after the move) is
+    /// `mins..maxs`: not an entity that never moves with a pusher, and either standing on the
+    /// pusher or inside its final box and stuck in it.
+    fn pushed_by(&mut self, pusher: EdictId, check: EdictId, mins: Vec3, maxs: Vec3) -> bool {
+        let Some(c) = self.edicts.get(check).map(|e| &e.vars) else {
+            return false;
+        };
+        if matches!(
+            c.movetype,
+            MOVETYPE_PUSH | MOVETYPE_NONE | MOVETYPE_FOLLOW | MOVETYPE_NOCLIP
+        ) {
+            return false;
+        }
+        if c.flags & FL_ONGROUND != 0 && c.groundentity == Some(pusher) {
+            return true; // standing on the pusher: definitely moved
+        }
+        if c.absmin.cmpge(maxs).any() || c.absmax.cmple(mins).any() {
+            return false;
+        }
+        self.test_position(check)
+    }
+
+    /// `SV_TestEntityPosition(id) != NULL`: whether the entity is stuck in something.
+    fn test_position(&mut self, id: EdictId) -> bool {
+        let stuck = self.with_engine(|eng| eng.test_entity_position(id));
+        stuck.is_some()
+    }
+
+    /// The test after a push: whether `check` is still stuck, so that the push has failed. An
+    /// entity without width never blocks. A non-solid or trigger one that is stuck (a corpse)
+    /// is shrunk to a line and does not block either.
+    fn push_blocked_by(&mut self, check: EdictId) -> bool {
+        if !self.test_position(check) {
+            return false;
+        }
+        let Some(v) = self.edicts.get_mut(check).map(|e| &mut e.vars) else {
+            return false;
+        };
+        if v.mins.x == v.maxs.x {
+            return false;
+        }
+        if v.solid == SOLID_NOT || v.solid == SOLID_TRIGGER {
+            v.mins.x = 0.0;
+            v.mins.y = 0.0;
+            v.maxs.x = 0.0;
+            v.maxs.y = 0.0;
+            v.maxs.z = v.mins.z;
+            return false;
+        }
+        true
+    }
+
+    /// Moves `check` by `push` with the pusher out of the way (`SOLID_NOT` for the push).
+    fn push_clear_of(&mut self, pusher: EdictId, check: EdictId, push: Vec3) {
+        let solid = self.edicts.get(pusher).map(|e| e.vars.solid);
+        if let Some(edict) = self.edicts.get_mut(pusher) {
+            edict.vars.solid = SOLID_NOT;
+        }
+        self.push_entity(check, push);
+        if let (Some(solid), Some(edict)) = (solid, self.edicts.get_mut(pusher)) {
+            edict.vars.solid = solid;
+        }
+    }
+
+    /// The failure of a push: `blocker`, the entity that stayed stuck and where it was, goes
+    /// back there (linked with trigger touching), the pusher is put back by `restore_pusher` and gets its `ltime` back, the
+    /// game is told the pusher was blocked, and everything moved so far goes back to where it
+    /// was. `rotation` is the yaw the pusher turned them by, when it rotates.
+    fn push_failed(
+        &mut self,
+        pusher: EdictId,
+        (check, check_origin): (EdictId, Vec3),
+        movetime: f64,
+        restore_pusher: impl FnOnce(&mut EntVars),
+        moved: &[(EdictId, Vec3)],
+        rotation: Option<f32>,
+    ) {
+        if let Some(edict) = self.edicts.get_mut(check) {
+            edict.vars.origin = check_origin;
+        }
+        self.with_engine(|eng| eng.link_entity(check, true));
+        if let Some(edict) = self.edicts.get_mut(pusher) {
+            restore_pusher(&mut edict.vars);
+            edict.vars.ltime -= movetime;
+        }
+        self.with_engine(|eng| eng.link_entity(pusher, false));
+        // The game may remove the pusher or the entity that blocked it; what is left of the
+        // entities moved so far is put back either way.
+        self.with_game(|game, eng| game.blocked(eng, pusher, check));
+        for &(moved_id, from) in moved {
+            let Some(v) = self.edicts.get_mut(moved_id).map(|e| &mut e.vars) else {
+                continue;
+            };
+            v.origin = from;
+            if let Some(yaw) = rotation {
+                if v.flags & FL_CLIENT != 0 {
+                    v.avelocity.y = 0.0;
+                } else if v.movetype != MOVETYPE_PUSHSTEP {
+                    v.angles.y -= yaw;
+                }
+            }
+            self.with_engine(|eng| eng.link_entity(moved_id, false));
+        }
+    }
+
+    /// `SV_PushMove`: the pusher moves by `velocity * movetime` and `ltime` advances. Every
+    /// entity that stands on it (`FL_ONGROUND` with the pusher as `groundentity`) or is stuck in
+    /// the final position is moved by the same vector, with its `FL_ONGROUND` cleared unless it
+    /// is a `WALK` entity. If one of them is still stuck afterwards, the whole push is undone
+    /// and `GameDll::blocked(pusher, that entity)` is called.
+    fn push_move(&mut self, pusher: EdictId, movetime: f64) {
+        let Some(v) = self.edicts.get_mut(pusher).map(|e| &mut e.vars) else {
+            return;
+        };
+        if is_zero(v.velocity) {
+            v.ltime += movetime;
+            return;
+        }
+        let step = v.velocity * movetime as f32;
+        let (mins, maxs) = (v.absmin + step, v.absmax + step);
+        let pushorig = v.origin;
+        // The pusher goes to its final position.
+        v.origin += step;
+        v.ltime += movetime;
+        let solid = v.solid;
+        self.with_engine(|eng| eng.link_entity(pusher, false));
+        if solid == SOLID_NOT {
+            return;
+        }
+
+        let mut moved: Vec<(EdictId, Vec3)> = Vec::new();
+        let mut next = 1;
+        loop {
+            let Some(check) = self.edicts.iter_live_from(next).next().map(|(id, _)| id) else {
+                break;
+            };
+            next = usize::from(check.index) + 1;
+            if !self.pushed_by(pusher, check, mins, maxs) {
+                continue;
+            }
+            let Some(c) = self.edicts.get_mut(check).map(|e| &mut e.vars) else {
+                continue;
+            };
+            if c.movetype != MOVETYPE_WALK {
+                c.flags &= !FL_ONGROUND;
+            }
+            let entorig = c.origin;
+            moved.push((check, entorig));
+
+            self.push_clear_of(pusher, check, step);
+            if self.push_blocked_by(check) {
+                self.push_failed(
+                    pusher,
+                    (check, entorig),
+                    movetime,
+                    |v| v.origin = pushorig,
+                    &moved,
+                    None,
+                );
+                return;
+            }
+        }
+    }
+
+    /// `SV_PushRotate`: as [`push_move`](Self::push_move) for `avelocity * movetime`. What the
+    /// pusher carries is moved around the pusher's origin and turned by the yaw (a client gets
+    /// `fixangle` 2 and the yaw in its `avelocity`, a `PUSHSTEP` entity is not turned). `false`
+    /// when the push failed. Without an `avelocity` only `ltime` advances.
+    fn push_rotate(&mut self, pusher: EdictId, movetime: f64) -> bool {
+        let Some(v) = self.edicts.get_mut(pusher).map(|e| &mut e.vars) else {
+            return false;
+        };
+        if is_zero(v.avelocity) {
+            v.ltime += movetime;
+            return true;
+        }
+        let amove = v.avelocity * movetime as f32;
+        let (forward, right, up) = angle_vectors(v.angles);
+        let pushorig = v.angles;
+        // The pusher goes to its final angles.
+        v.angles += amove;
+        let (forward_now, right_now, up_now) = angle_vectors_transpose(v.angles);
+        v.ltime += movetime;
+        let solid = v.solid;
+        self.with_engine(|eng| eng.link_entity(pusher, false));
+        // Non-solid pushers cannot push anything.
+        if solid == SOLID_NOT {
+            return true;
+        }
+
+        let mut moved: Vec<(EdictId, Vec3)> = Vec::new();
+        let mut next = 1;
+        loop {
+            let Some(check) = self.edicts.iter_live_from(next).next().map(|(id, _)| id) else {
+                break;
+            };
+            next = usize::from(check.index) + 1;
+            let Some(p) = self.edicts.get(pusher).map(|e| &e.vars) else {
+                return false;
+            };
+            let (mins, maxs, pusher_origin) = (p.absmin, p.absmax, p.origin);
+            if !self.pushed_by(pusher, check, mins, maxs) {
+                continue;
+            }
+            let Some(c) = self.edicts.get_mut(check).map(|e| &mut e.vars) else {
+                continue;
+            };
+            if c.movetype != MOVETYPE_WALK {
+                c.flags &= !FL_ONGROUND;
+            }
+            let entorig = c.origin;
+            moved.push((check, entorig));
+
+            let start = if c.movetype == MOVETYPE_PUSHSTEP {
+                (c.absmax + c.absmin) * 0.5 - pusher_origin
+            } else {
+                c.origin - pusher_origin
+            };
+            // The destination: where the point is after the pusher turned.
+            let local = Vec3::new(forward.dot(start), -right.dot(start), up.dot(start));
+            let end = Vec3::new(
+                forward_now.dot(local),
+                right_now.dot(local),
+                up_now.dot(local),
+            );
+
+            self.push_clear_of(pusher, check, end - start);
+            if let Some(c) = self.edicts.get_mut(check).map(|e| &mut e.vars)
+                && c.movetype != MOVETYPE_PUSHSTEP
+            {
+                if c.flags & FL_CLIENT != 0 {
+                    c.fixangle = 2;
+                    c.avelocity.y += amove.y;
+                } else {
+                    c.angles.y += amove.y;
+                }
+            }
+            if self.push_blocked_by(check) {
+                self.push_failed(
+                    pusher,
+                    (check, entorig),
+                    movetime,
+                    |v| v.angles = pushorig,
+                    &moved,
+                    Some(amove.y),
+                );
+                return false;
+            }
+        }
+        true
     }
 }

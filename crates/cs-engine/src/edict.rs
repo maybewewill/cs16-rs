@@ -120,6 +120,13 @@ pub struct EntVars {
     pub nextthink: f64,
     /// Local time of a pushing brush entity.
     pub ltime: f64,
+    /// Speed of a conveyor (`FL_CONVEYOR`) along [`movedir`](Self::movedir).
+    pub speed: f32,
+    /// Direction of a conveyor's belt, or of a door's travel.
+    pub movedir: Vec3,
+    /// Non-zero asks the client to take `angles` as its view angles (`2` is what a rotating
+    /// pusher sets on a player it turns).
+    pub fixangle: i32,
 }
 
 /// One entity slot: its variables plus the game's private data.

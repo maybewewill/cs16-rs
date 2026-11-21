@@ -93,7 +93,7 @@ pub(crate) struct MoveStats {
 }
 
 /// `AngleVectors`.
-fn angle_vectors(angles: Vec3) -> (Vec3, Vec3, Vec3) {
+pub(crate) fn angle_vectors(angles: Vec3) -> (Vec3, Vec3, Vec3) {
     let (sy, cy, sp, cp, sr, cr) = sines(angles);
     let forward = Vec3::new(cp * cy, cp * sy, -sp);
     let right = Vec3::new(-sr * sp * cy + cr * sy, -sr * sp * sy - cr * cy, -sr * cp);
@@ -102,7 +102,7 @@ fn angle_vectors(angles: Vec3) -> (Vec3, Vec3, Vec3) {
 }
 
 /// `AngleVectorsTranspose`.
-fn angle_vectors_transpose(angles: Vec3) -> (Vec3, Vec3, Vec3) {
+pub(crate) fn angle_vectors_transpose(angles: Vec3) -> (Vec3, Vec3, Vec3) {
     let (sy, cy, sp, cp, sr, cr) = sines(angles);
     let forward = Vec3::new(cp * cy, sr * sp * cy + cr * -sy, cr * sp * cy + -sr * -sy);
     let right = Vec3::new(cp * sy, sr * sp * sy + cr * cy, cr * sp * sy + -sr * cy);

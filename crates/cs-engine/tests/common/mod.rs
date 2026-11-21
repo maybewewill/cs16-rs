@@ -323,6 +323,12 @@ pub struct TestGame {
     pub mover_touch_velocity: Option<Vec3>,
     /// When set, a `touch` by a `test_mover` removes it.
     pub mover_touch_removes: bool,
+    /// `(pusher index, blocker index)` of every `blocked` call, in call order.
+    pub blocked_log: Vec<(u16, u16)>,
+    /// When set, every `blocked` removes the pusher.
+    pub blocked_removes_pusher: bool,
+    /// When set, every `blocked` stops the pusher (zero velocity and angular velocity).
+    pub blocked_stops_pusher: bool,
 }
 
 impl TestGame {
@@ -659,6 +665,19 @@ impl GameDll for TestGame {
                 eng.link_entity(id, true);
                 linked = Some(id);
             }
+        }
+    }
+
+    fn blocked(&mut self, eng: &mut EngineApi<'_>, pusher: EdictId, other: EdictId) {
+        self.blocked_log.push((pusher.index, other.index));
+        if self.blocked_stops_pusher
+            && let Some(v) = eng.ent_mut(pusher)
+        {
+            v.velocity = Vec3::ZERO;
+            v.avelocity = Vec3::ZERO;
+        }
+        if self.blocked_removes_pusher {
+            eng.remove_entity(pusher);
         }
     }
 
