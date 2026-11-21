@@ -15,7 +15,7 @@ use common::{Harness, TestGame};
 use cs_assets::bsp::BspMap;
 use cs_engine::consts::{
     FL_FLY, FL_MONSTERCLIP, FL_ONGROUND, FL_PARTIALGROUND, FL_SWIM, MOVETYPE_PUSH,
-    MOVETYPE_PUSHSTEP, SOLID_BBOX, SOLID_BSP, SOLID_SLIDEBOX,
+    MOVETYPE_PUSHSTEP, SOLID_BBOX, SOLID_BSP, SOLID_SLIDEBOX, SOLID_TRIGGER,
 };
 use cs_engine::{EdictId, EngineApi, MOVE_NORMAL, ServerConfig, ServerMap, WalkMoveMode};
 use cs_vfs::{Vfs, VfsConfig};
@@ -440,6 +440,31 @@ fn stuck_monster_gets_partial_ground_flag() {
         assert_eq!(origin(eng, w), before);
         assert_ne!(eng.ent(w).unwrap().flags & FL_PARTIALGROUND, 0);
     });
+}
+
+#[test]
+fn a_walk_into_a_trigger_is_delivered_as_a_touch() {
+    for (mode, delivered) in [
+        (WalkMoveMode::Normal, true),
+        (WalkMoveMode::CheckOnly, false),
+    ] {
+        let mut h = stub_harness();
+        let (trigger, w) = run(&mut h, move |eng| {
+            slab(eng, Vec3::new(-200.0, -200.0, -16.0), Vec3::new(200.0, 200.0, 0.0));
+            let trigger = slab(eng, Vec3::new(30.0, -50.0, 0.0), Vec3::new(60.0, 50.0, 80.0));
+            eng.ent_mut(trigger).unwrap().solid = SOLID_TRIGGER;
+            eng.set_origin(trigger, Vec3::ZERO);
+            let w = walker(eng, Vec3::new(0.0, 0.0, 36.0), FL_ONGROUND);
+            assert!(eng.walk_move(w, 0.0, 10.0, mode));
+            assert!(eng.walk_move(w, 0.0, 20.0, mode));
+            (trigger, w)
+        });
+        let log = h.server.game().touch_log.clone();
+        let want = vec![(trigger.index, w.index)];
+        assert_eq!(log == want, delivered, "{mode:?}: {log:?}");
+        assert!(delivered || log.is_empty());
+        assert_eq!(h.server.pending_touch_count(), 0);
+    }
 }
 
 /// A flier in open air at (0, 0, 100), and a non-solid entity at `enemy_z` it has as `enemy`.
