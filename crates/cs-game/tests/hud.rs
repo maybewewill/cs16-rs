@@ -317,7 +317,10 @@ fn init_hud_sequence_as_regamedll() {
     let mut b = Bench::with_one_client(2, b"");
     b.step(20);
     let names = b.names_from(0, 0);
-    assert_eq!(names, FIRST_UPDATE, "the first player's HUD, once");
+    // `ClientPutInServer` shows the team menu (the text and the VGUI one) before the first
+    // update; the HUD follows, once.
+    assert_eq!(names[..2], ["ShowMenu", "VGUIMenu"]);
+    assert_eq!(names[2..], *FIRST_UPDATE, "the first player's HUD, once");
 
     let msgs = b.messages(0);
     let find = |name: &str| -> Vec<CsUserMsg> {
@@ -364,7 +367,8 @@ fn init_hud_sequence_as_regamedll() {
             armor_damage: 0,
             health_damage: 0,
             damage_bits: 0,
-            origin: glam::Vec3::ZERO
+            // From inside the player, which waits at the first counter-terrorist spawn point.
+            origin: glam::Vec3::new(100.0, 0.0, 1.0)
         }]
     );
 
