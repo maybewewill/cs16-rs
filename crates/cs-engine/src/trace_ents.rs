@@ -423,7 +423,7 @@ impl EngineApi<'_> {
 
     /// `SV_ClipMoveToEntity` of the world edict: the world model through the hull the box
     /// selects.
-    fn clip_world(&self, start: Vec3, mins: Vec3, maxs: Vec3, end: Vec3) -> EntTrace {
+    pub(crate) fn clip_world(&self, start: Vec3, mins: Vec3, maxs: Vec3, end: Vec3) -> EntTrace {
         let Some(collision) = self.map.collision().filter(|c| c.model_count() > 0) else {
             return EntTrace::miss(end);
         };

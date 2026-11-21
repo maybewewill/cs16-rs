@@ -327,6 +327,9 @@ pub(crate) struct WorldLinks {
     pub(crate) dispatching: bool,
     /// The game's `force_retouch` global (see `EngineApi::set_force_retouch`).
     pub(crate) force_retouch: f32,
+    /// State of the engine's random numbers (`movestep.rs`), set to the same constant when a
+    /// map's world is created, so a map's monster walking is reproducible.
+    pub(crate) rng: u32,
 }
 
 impl WorldLinks {
@@ -340,6 +343,7 @@ impl WorldLinks {
             touches_dropped: 0,
             dispatching: false,
             force_retouch: 0.0,
+            rng: 0x2545_F491,
         };
         world.create_node(0, bounds.0, bounds.1);
         world

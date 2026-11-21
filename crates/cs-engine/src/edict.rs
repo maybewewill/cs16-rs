@@ -91,6 +91,12 @@ pub struct EntVars {
     pub owner: Option<EdictId>,
     pub aiment: Option<EdictId>,
     pub groundentity: Option<EdictId>,
+    /// The entity a monster is after (`entvars_t::enemy`); read by `EngineApi::walk_move`'s flying
+    /// branch.
+    pub enemy: Option<EdictId>,
+    /// The yaw a monster wants to walk in (`entvars_t::ideal_yaw`); read and written by
+    /// `EngineApi::move_to_origin`.
+    pub ideal_yaw: f32,
     pub watertype: i32,
     pub gravity: f32,
     pub friction: f32,
