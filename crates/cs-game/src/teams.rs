@@ -358,6 +358,7 @@ fn get_into_game(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     };
     p.not_killed = false;
     p.team_kills = 0;
+    p.chat.ignore = crate::chat::IgnoreMsg::None;
     p.joining = JoinState::Joined;
     let (team, class) = (p.team, p.class);
     if rules::can_respawn(g, eng, slot) {
@@ -480,6 +481,7 @@ pub(crate) fn handle_menu_choose_team(
     if p.team == Team::Spectator {
         // Coming out of the spectators: a fresh start.
         p.not_killed = true;
+        p.chat.ignore = crate::chat::IgnoreMsg::None;
         p.money = money::check_start_money(eng);
         p.alive = false;
         p.takes_damage = false;

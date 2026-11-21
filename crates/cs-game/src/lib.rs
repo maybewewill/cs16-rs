@@ -6,8 +6,10 @@
 //! of a map ([`world`]) and [`CsGame`], which dispatches the engine's calls to the entities. The
 //! players are in [`player`]: their lifecycle, damage, death and movement; [`teams`] and [`menus`]
 //! take them from the team menu into the game, and [`rules`] runs the rounds, the match and the
-//! map cycle (`CHalfLifeMultiplay`).
+//! map cycle (`CHalfLifeMultiplay`); [`chat`] carries what the players say to each other, their
+//! names and the text messages of the HUD.
 
+pub mod chat;
 pub mod entity;
 pub mod mapcycle;
 pub mod menus;
@@ -280,6 +282,7 @@ impl GameDll for CsGame {
     }
 
     fn client_userinfo_changed(&mut self, eng: &mut EngineApi<'_>, slot: u8) {
+        chat::name_changed(&mut self.state, eng, slot);
         player::userinfo_changed(&mut self.state, eng, slot);
     }
 

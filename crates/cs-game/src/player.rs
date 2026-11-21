@@ -300,6 +300,8 @@ pub struct Player {
     pub(crate) client_fov: u8,
     /// `m_iTrain & TRAIN_NEW`: the train HUD has not been sent yet.
     pub(crate) train_new: bool,
+    /// Chat, the name and `ignoremsg` ([`crate::chat`]).
+    pub chat: crate::chat::ChatState,
 }
 
 impl Player {
@@ -351,6 +353,7 @@ impl Player {
             fov: 90,
             client_fov: 0,
             train_new: true,
+            chat: Default::default(),
         }
     }
 
@@ -421,6 +424,7 @@ pub(crate) fn put_in_server(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8
     // `CheckStartMoney`: `mp_startmoney` clamped to the account's limits.
     let mut player = Player::new(money::check_start_money(eng));
     player.vgui_menus = prefers_vgui_menus(eng, slot);
+    player.chat = crate::chat::ChatState::entered(eng.client_key(slot, "name").unwrap_or(""));
     g.join_counter += 1;
     player.join_order = g.join_counter;
     g.players[index] = Some(player);
@@ -589,6 +593,7 @@ pub(crate) fn spawn(
     p.fall_velocity = 0.0;
     p.last_hit_group = HITGROUP_GENERIC;
     p.death_cam = false;
+    p.chat.on_spawn();
     // `PlayerSpawn`: `pev->weapons |= (1 << WEAPON_SUIT)`.
     p.weapons |= 1 << WEAPON_SUIT;
     p.reset_hud_state();
@@ -636,6 +641,8 @@ pub(crate) fn spawn(
     if let Some(p) = g.players[index].as_ref() {
         messages::score_info(eng, id.index, p);
     }
+    // A name asked for while dead is taken at the spawn.
+    crate::chat::apply_pending_name(g, eng, slot);
     // `PlayerSpawn` takes the items away and starts the weapons over; no weapons exist yet, so
     // the ammo HUD is told there is none (`RemoveAllItems`).
     messages::cur_weapon_none(eng, slot);
@@ -1256,6 +1263,9 @@ pub(crate) fn client_command(
         "chooseteam" => teams::choose_team(g, eng, slot),
         "jointeam" => teams::join_team(g, eng, slot, argv),
         "joinclass" => teams::join_class(g, eng, slot, argv),
+        "say" => crate::chat::say_command(g, eng, slot, argv, false),
+        "say_team" => crate::chat::say_command(g, eng, slot, argv, true),
+        "ignoremsg" => crate::chat::ignore_msg_command(g, eng, slot),
         _ => {}
     }
 }

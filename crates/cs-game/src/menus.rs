@@ -44,10 +44,7 @@ pub const MENU_KEY_5: u16 = 1 << 4;
 pub const MENU_KEY_6: u16 = 1 << 5;
 pub const MENU_KEY_0: u16 = 1 << 9;
 
-/// `HUD_PRINTNOTIFY` and `HUD_PRINTCENTER`: where a `TextMsg` prints.
-const HUD_PRINTNOTIFY: u8 = 1;
-pub(crate) const HUD_PRINTCONSOLE: u8 = 2;
-pub(crate) const HUD_PRINTCENTER: u8 = 4;
+pub(crate) use crate::chat::{HUD_PRINTCENTER, HUD_PRINTCONSOLE, HUD_PRINTNOTIFY};
 
 /// `atoi` as the C library does it: leading white space, an optional sign, then digits; the
 /// rest is ignored and a string with no number is 0. A number too large for `i32` saturates
@@ -130,40 +127,19 @@ pub(crate) fn reset_menu_message(eng: &mut EngineApi<'_>, slot: u8) {
 /// `ClientPrint(HUD_PRINTCENTER, text)`: `text` (a localization key) in the middle of the
 /// screen of `slot`.
 pub(crate) fn print_center(eng: &mut EngineApi<'_>, slot: u8, text: &str) {
-    eng.send_usermsg(
-        MsgDest::One(slot),
-        &CsUserMsg::TextMsg {
-            dest: HUD_PRINTCENTER,
-            message: text.to_string(),
-            params: Vec::new(),
-        },
-    );
+    crate::chat::client_print(eng, slot, HUD_PRINTCENTER, text, &[]);
 }
 
 /// `UTIL_ClientPrintAll(HUD_PRINTNOTIFY, text, param)`: the notice line of everyone's console
 /// and chat.
 pub(crate) fn print_all_notify(eng: &mut EngineApi<'_>, text: &str, param: &str) {
-    eng.send_usermsg(
-        MsgDest::All,
-        &CsUserMsg::TextMsg {
-            dest: HUD_PRINTNOTIFY,
-            message: text.to_string(),
-            params: vec![param.to_string()],
-        },
-    );
+    crate::chat::client_print_all(eng, HUD_PRINTNOTIFY, text, &[param]);
 }
 
 /// `UTIL_ClientPrintAll(dest, text, params...)`: `text` (a localization key) with its parameters
 /// to everyone.
 pub(crate) fn print_all(eng: &mut EngineApi<'_>, dest: u8, text: &str, params: &[&str]) {
-    eng.send_usermsg(
-        MsgDest::All,
-        &CsUserMsg::TextMsg {
-            dest,
-            message: text.to_string(),
-            params: params.iter().map(|p| (*p).to_string()).collect(),
-        },
-    );
+    crate::chat::client_print_all(eng, dest, text, params);
 }
 
 /// `UTIL_ClientPrintAll(HUD_PRINTCENTER, text)`.
