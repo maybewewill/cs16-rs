@@ -28,6 +28,7 @@
 //! - HLDS skips `SV_SetupMove` and `SV_RestoreMove` for fake clients; the engine has no bots
 //!   yet, so `lag_compensation_active` does not look at that.
 
+use crate::world::consts::EF_NOINTERP;
 use std::collections::BTreeSet;
 
 use glam::Vec3;
@@ -38,8 +39,6 @@ use crate::frame::{ClientFrame, UPDATE_BACKUP, update_interval};
 use crate::game::GameDll;
 use crate::server::Server;
 
-/// `EF_NOINTERP` (`common/const.h`): the entity is not interpolated between two updates.
-const EF_NOINTERP: u32 = 32;
 /// Longest time, in seconds, the latency counts for in the target time.
 const MAX_LATENCY: f32 = 1.5;
 /// Longest interpolation time, in seconds, taken from a command's `lerp_msec`.

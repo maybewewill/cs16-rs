@@ -67,7 +67,7 @@ pub struct GameState {
     /// `gInitHUD` (player.cpp:31): true until the first `UpdateClientData` that starts a HUD over
     /// has run, in the life of the game module (it is not reset with the map). `Precache` makes a
     /// player start its HUD over while it is set; `Spawn` does so whatever it is.
-    pub(crate) init_hud_global: bool,
+    pub init_hud_global: bool,
     /// State of the game's own random numbers (`RANDOM_LONG`).
     rng: u32,
     /// The statics of `pm_shared` (the stuck table, the texture materials, the wade-step skip

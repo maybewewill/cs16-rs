@@ -113,11 +113,10 @@ impl<G: GameDll> Server<G> {
         let index = usize::from(slot);
         let mut userinfo = request.userinfo;
         userinfo.set("name", self.unique_name(&request.name, None));
-        // Everyone past `new` is told about the newcomer (replacing whoever had the slot).
+        // Nobody is told yet: `sendinfo` is set by `SV_WriteSpawn` (`stage_spawn`), not at connect.
         self.views[index] = ClientView {
             userinfo,
             in_use: true,
-            userinfo_dirty: true,
             ..ClientView::default()
         };
         self.clients[index] = Client::connected(from, self.next_userid, self.real_time);

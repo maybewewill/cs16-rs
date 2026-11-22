@@ -425,6 +425,33 @@ fn armoury_gives_items() {
     assert!(!hidden);
 }
 
+/// `CanDrop` is FALSE for the knife and the three grenades only (rg_weapons.h:982-1679); `CC4`
+/// has no override, so a `weapon_c4` lying in the world is touchable.
+#[test]
+fn a_world_c4_is_touchable_and_a_world_grenade_is_not() {
+    let mut b = bench_with(vec![
+        entity(&[("classname", "weapon_c4"), ("origin", "900 0 0")]),
+        entity(&[("classname", "weapon_hegrenade"), ("origin", "900 100 0")]),
+    ]);
+    join(&mut b, 0, 1, 1);
+    b.step(5);
+    let c4 = of_class(&mut b, "weapon_c4")[0];
+    let grenade = of_class(&mut b, "weapon_hegrenade")[0];
+    for _ in 0..30 {
+        b.run(move |_, eng| {
+            for id in [c4, grenade] {
+                if let Some(v) = eng.ent_mut(id) {
+                    v.flags |= FL_ONGROUND;
+                }
+            }
+        });
+    }
+    touch(&mut b, grenade);
+    assert!(!carried(&b).contains(&WeaponId::HeGrenade));
+    touch(&mut b, c4);
+    assert!(carried(&b).contains(&WeaponId::C4), "{:?}", carried(&b));
+}
+
 #[test]
 fn round_restart_clears_weapons_on_the_ground() {
     let mut b = team_bench(1);

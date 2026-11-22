@@ -15,17 +15,14 @@ use cs_proto48::usermsg::UserMsgRegistry;
 use cs_transport::{PacketTransport, PeerAddr};
 
 use crate::client::{Client, ClientState, MAX_REFUSED_STREAMS, SignonStage};
-use crate::edict::{DEFAULT_MAX_EDICTS, EdictId, EdictPool};
+use crate::edict::{DEFAULT_MAX_EDICTS, EdictPool};
 
-/// `EF_MUZZLEFLASH` and `EF_NOINTERP` (`common/const.h`).
-const EF_MUZZLEFLASH: u32 = 2;
-const EF_NOINTERP: u32 = 32;
 use crate::game::{ClientView, EngineApi, GameDll, Outbox, entity_state_from_vars};
 use crate::map::ServerMap;
 use crate::oob::{ChallengeIssuer, OOB_GLOBAL_REPLIES_PER_SEC, OobLimiter};
 use crate::precache::PrecacheTables;
 use crate::world::WorldLinks;
-use crate::world::consts::{MOVETYPE_WALK, SOLID_SLIDEBOX};
+use crate::world::consts::{EF_MUZZLEFLASH, EF_NOINTERP, MOVETYPE_WALK, SOLID_SLIDEBOX};
 use crate::signon::{
     MAX_SIGNON_BUFFER, SPAWN_TAIL_MAX, UserInfoEntry, move_vars, public_userinfo, munged_map_crc, write_new_stage,
     write_sendres_stage,
@@ -586,10 +583,7 @@ impl<G: GameDll> Server<G> {
         }
         let bytes = std::mem::replace(&mut self.outbox.reliable_all, MsgWriter::new());
         for client in &mut self.clients {
-            if matches!(
-                client.state,
-                ClientState::Signon(SignonStage::AwaitSendEnts) | ClientState::Active
-            ) {
+            if client.state.is_in_game() {
                 client.chan.write_reliable(bytes.as_slice());
             }
         }
@@ -602,17 +596,7 @@ impl<G: GameDll> Server<G> {
     /// `EF_MUZZLEFLASH`) are cleared on every entity from 1 up, whether or not any client was
     /// sent an update this frame.
     fn cleanup_ents(&mut self) {
-        let ids: Vec<EdictId> = self
-            .edicts
-            .iter_live()
-            .filter(|(id, e)| id.index >= 1 && e.vars.effects & (EF_NOINTERP | EF_MUZZLEFLASH) != 0)
-            .map(|(id, _)| id)
-            .collect();
-        for id in ids {
-            if let Some(edict) = self.edicts.get_mut(id) {
-                edict.vars.effects &= !(EF_NOINTERP | EF_MUZZLEFLASH);
-            }
-        }
+        self.edicts.clear_effects_from(1, EF_NOINTERP | EF_MUZZLEFLASH);
     }
 
     /// Connected clients whose unacknowledged reliable data exceeds [`MAX_RELIABLE_BACKLOG`].
@@ -975,6 +959,9 @@ impl<G: GameDll> Server<G> {
         write_spawn_tail(&mut w);
         let client = &mut self.clients[index];
         client.chan.write_reliable(w.as_slice());
+        // `host_client->sendinfo = TRUE` (`SV_WriteSpawn`, sv_main.cpp:1464, read 2026-11-22): the
+        // others learn of the joiner at the end of this frame (`broadcast_userinfo`).
+        self.views[index].userinfo_dirty = true;
         client.state = ClientState::Signon(SignonStage::AwaitSendEnts);
     }
 }

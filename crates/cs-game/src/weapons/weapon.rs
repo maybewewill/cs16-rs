@@ -239,7 +239,7 @@ pub trait WeaponBehavior: Send + WeaponClone + 'static {
     fn can_deploy(&self, _w: &WeaponCtx<'_, '_>) -> bool {
         true
     }
-    /// `CanDrop` (the grenades say no).
+    /// `CanDrop` (the knife and the three grenades say no).
     fn can_drop(&self, _w: &WeaponCtx<'_, '_>) -> bool {
         true
     }

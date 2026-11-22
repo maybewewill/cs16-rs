@@ -29,6 +29,9 @@ use crate::touch::MAX_TOUCHES_PER_FRAME;
 
 /// Constants of `rehlds/common/const.h` (read 2026-11-21) that entity code uses.
 pub mod consts {
+    pub const EF_MUZZLEFLASH: u32 = 1 << 1;
+    pub const EF_NOINTERP: u32 = 1 << 5;
+    pub const EF_NODRAW: u32 = 1 << 7;
     pub const SOLID_NOT: u8 = 0;
     pub const SOLID_TRIGGER: u8 = 1;
     pub const SOLID_BBOX: u8 = 2;

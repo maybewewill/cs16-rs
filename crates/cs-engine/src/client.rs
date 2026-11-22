@@ -38,15 +38,11 @@ pub enum ClientState {
 }
 
 impl ClientState {
-    /// Past `new`: the client has the server info and receives the
-    /// userinfo broadcasts (`MsgDest::All` waits for the `spawn` answer).
-    pub(crate) fn is_past_new(self) -> bool {
-        matches!(
-            self,
-            ClientState::Signon(
-                SignonStage::AwaitSendRes | SignonStage::AwaitSpawn | SignonStage::AwaitSendEnts
-            ) | ClientState::Active
-        )
+    /// `client->active` of ReHLDS: set by `SV_WriteSpawn`, so from the `spawn` answer on. What
+    /// `sv.reliable_datagram` (`MsgDest::All`, the userinfo updates) and the reliable broadcasts
+    /// of sounds reach.
+    pub(crate) fn is_in_game(self) -> bool {
+        matches!(self, ClientState::Signon(SignonStage::AwaitSendEnts) | ClientState::Active)
     }
 }
 
@@ -201,12 +197,12 @@ mod tests {
 
     #[test]
     fn past_new_covers_later_stages_and_active() {
-        assert!(!ClientState::Free.is_past_new());
-        assert!(!ClientState::Signon(SignonStage::AwaitNew).is_past_new());
-        assert!(ClientState::Signon(SignonStage::AwaitSendRes).is_past_new());
-        assert!(ClientState::Signon(SignonStage::AwaitSpawn).is_past_new());
-        assert!(ClientState::Signon(SignonStage::AwaitSendEnts).is_past_new());
-        assert!(ClientState::Active.is_past_new());
+        assert!(!ClientState::Free.is_in_game());
+        assert!(!ClientState::Signon(SignonStage::AwaitNew).is_in_game());
+        assert!(!ClientState::Signon(SignonStage::AwaitSendRes).is_in_game());
+        assert!(!ClientState::Signon(SignonStage::AwaitSpawn).is_in_game());
+        assert!(ClientState::Signon(SignonStage::AwaitSendEnts).is_in_game());
+        assert!(ClientState::Active.is_in_game());
     }
 
     #[test]

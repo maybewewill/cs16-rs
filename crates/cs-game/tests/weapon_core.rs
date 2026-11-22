@@ -570,7 +570,8 @@ fn cur_weapon_follows_the_clip_and_the_active_item() {
     let mut b = armed(WeaponId::Usp);
     // The first command tells the client everything (`UpdateClientData` runs in `PreThink`).
     b.run(|game, eng| common::run_cmd(game, eng, 0, &cmd(), 0));
-    b.step(2);
+    // Long enough for the whole first burst (the first `CurWeapon`, clip 12) to arrive.
+    b.step(10);
     b.probe.clear_messages();
     b.run(|game, eng| {
         // A shot: the clip is 11. The shot is fired in `PostThink`, after the `PreThink` that
@@ -588,8 +589,11 @@ fn cur_weapon_follows_the_clip_and_the_active_item() {
             _ => None,
         })
         .collect();
-    // The last word is the clip after the shot (the command that fired it told the old one).
-    assert_eq!(cur.last(), Some(&(true, 16, 11)), "{cur:?}");
+    // Exactly one `CurWeapon`, the clip after the shot: the command that fired it ran its
+    // `PreThink` (and the weapon's `UpdateClientData`, weapons.cpp:1353: nothing changed, so
+    // nothing sent) before the shot; the second command's `PreThink` finds `m_iClip` (11) not
+    // equal to `m_iClientClip` (12) and sends it.
+    assert_eq!(cur, [(true, 16, 11)]);
     // The reserve is told with `AmmoX` once, when it changes.
     b.probe.clear_messages();
     b.run(|game, eng| {

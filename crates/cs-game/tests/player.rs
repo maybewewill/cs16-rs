@@ -64,7 +64,9 @@ fn connected_player_waits_unassigned() {
     // It stands at a counter-terrorist spawn point (the first, which the join used), looking
     // where the point looks, with the standing view offset.
     assert_eq!(v.origin, Vec3::new(100.0, 0.0, 1.0));
-    assert_eq!(v.angles.y, 90.0);
+    // `v_angle` is zero at the join (`ClientPutInServer`: the spawn-point path leaves it); the
+    // probe takes the forced view (`svc_setangle`) only with the update after this frame.
+    assert_eq!((v.angles.y, v.v_angle), (90.0, Vec3::ZERO));
     assert_eq!(v.view_ofs.z, 17.0);
     // Nobody else is in the game.
     assert!(b.server.game().game.state().players[1].is_none());
@@ -455,6 +457,21 @@ fn a_dying_player_ends_up_dead_and_can_respawn() {
         (DEAD_NO, SOLID_SLIDEBOX, MOVETYPE_WALK)
     );
     assert_eq!(v.health, 100.0);
+}
+
+/// `gInitHUD` (player.cpp:31, 6178, 7603): true until the first `UpdateClientData` that starts a
+/// HUD over has run; `Precache` makes a spawning player start its HUD over while it is set.
+#[test]
+fn g_init_hud_is_cleared_by_the_first_hud_start() {
+    assert!(CsGame::new().state().init_hud_global);
+    let mut b = Bench::stub(stub_spawns());
+    b.step(10);
+    assert!(!b.server.game().game.state().init_hud_global);
+    // A spawn starts the HUD over whatever it is (`Spawn` sets `m_fInitHUD`).
+    b.run(|game, eng| game.spawn_player(eng, 0, Team::Ct, 0));
+    b.probe.clear_messages();
+    b.step(10);
+    assert!(b.messages().contains(&CsUserMsg::ResetHud));
 }
 
 #[test]

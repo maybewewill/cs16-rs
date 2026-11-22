@@ -346,7 +346,8 @@ impl<G: GameDll> Server<G> {
     }
 
     /// Sends one `svc_updateuserinfo` per slot marked since the last call, however often it
-    /// was marked, to every client past `new` through the reliable stream. A free slot always
+    /// was marked, to every client in the game (`client->active`) through the reliable stream, as
+    /// `SV_UpdateToReliableMessages` copies `sv.reliable_datagram`. A free slot always
     /// goes out with an empty userinfo.
     pub(crate) fn broadcast_userinfo(&mut self) {
         let mut w = MsgWriter::new();
@@ -365,7 +366,7 @@ impl<G: GameDll> Server<G> {
         if w.is_empty() {
             return;
         }
-        for client in self.clients.iter_mut().filter(|c| c.state.is_past_new()) {
+        for client in self.clients.iter_mut().filter(|c| c.state.is_in_game()) {
             client.chan.write_reliable(w.as_slice());
         }
         // Enforces the reliable backlog cap on what was written.

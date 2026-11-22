@@ -19,6 +19,7 @@ use crate::edict::{EdictId, EntVars};
 use crate::game::{GameDll, entity_state_from_vars};
 use crate::server::{Server, ServerConfig};
 use crate::unlag::userinfo_lw;
+use crate::world::consts::EF_NODRAW;
 
 /// Updates remembered per client as delta bases.
 pub const UPDATE_BACKUP: usize = 64;
@@ -34,8 +35,6 @@ const MAX_DELTA_AGE: u32 = UPDATE_BACKUP as u32 - 1;
 const DEFAULT_UPDATE_RATE: f64 = 20.0;
 /// `rate` of a client whose userinfo has no usable value.
 const DEFAULT_RATE: f64 = 30_000.0;
-/// `EF_NODRAW` in `EntVars::effects`.
-const EF_NODRAW: u32 = 128;
 
 /// One update sent to a client, kept as the base of later deltas.
 #[derive(Debug, Clone, PartialEq)]
@@ -293,8 +292,8 @@ impl<G: GameDll> Server<G> {
         client.chan.build_packet(&[])
     }
 
-    /// The due update of `slot`: one `svc_choke` per update choked since the last one sent,
-    /// `svc_time`, `svc_clientdata` and the entity block, delta-encoded against the frame the
+    /// The due update of `slot`: `svc_time`, one `svc_choke` if any update was choked since the
+    /// last one sent, the forced view, `svc_clientdata` and the entity block, delta-encoded against the frame the
     /// client acknowledged when there is one, followed by the queued unreliable messages. The
     /// entity block counts at most [`MAX_PACKET_ENTITIES`] entities. When the block does not
     /// fit the datagram the whole unreliable part is dropped (nothing is stored as a delta
@@ -311,9 +310,14 @@ impl<G: GameDll> Server<G> {
         let client = &mut self.clients[index];
         client.next_update_at = next_due(client.next_update_at, interval, self.real_time);
 
+        // `SV_SendClientDatagram`: `svc_time`, then `SV_WriteClientdataToMessage`: the choke
+        // byte and the forced view first, and only then the game is asked for the client data.
+        let mut payload = MsgWriter::new();
+        write_svc_time(&mut payload, self.sv_time as f32);
+        self.write_choke_and_fixangle(slot, &mut payload);
         let client_data = self.call_game(|game, eng| game.update_client_data(eng, slot));
-        // `SV_WriteClientdataToMessage` (ReHLDS `sv_main.cpp`, read 2026-11-22): the weapon list
-        // is asked for only when the client has `cl_lw`, and sent only if the game filled it.
+        // The weapon list is asked for only when the client has `cl_lw`, and sent only if the
+        // game filled it.
         let weapon_list = if self.client_has_lw(slot) {
             let mut list = [GoldSrcWeaponData::default(); 64];
             self.call_game_synced(|game, eng| game.get_weapon_data(eng, slot, &mut list))
@@ -327,11 +331,6 @@ impl<G: GameDll> Server<G> {
         if self.clients[index].state != ClientState::Active {
             return None;
         }
-
-        // `SV_SendClientDatagram`: `svc_time`, then `SV_WriteClientdataToMessage`.
-        let mut payload = MsgWriter::new();
-        write_svc_time(&mut payload, self.sv_time as f32);
-        self.write_choke_and_fixangle(slot, &mut payload);
 
         let max_clients = self.cfg.max_clients;
         let client = &mut self.clients[index];

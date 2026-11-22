@@ -221,11 +221,11 @@ impl EngineApi<'_> {
 
     /// `SV_Multicast` with `MSG_FL_BROADCAST` and `reliable` set (`SV_StartSound_internal` for
     /// `CHAN_STATIC` and `SND_STOP` sounds in multiplayer): the reliable stream of every client
-    /// with `client->active`, which `SV_Spawn_f` sets (`sv_main.cpp`, read 2026-11-21) and
-    /// which is our `Active` state, not the wider "past `new`" of [`MsgDest::All`].
+    /// with `client->active`, which `SV_WriteSpawn` sets (`sv_main.cpp`, read 2026-11-22): the
+    /// same set as [`MsgDest::All`] reaches ([`ClientState::is_in_game`]).
     fn send_reliable_to_active(&mut self, bytes: &[u8], except: Option<usize>) {
         for slot in 0..self.clients.len() {
-            if self.clients[slot].state == ClientState::Active && Some(slot) != except {
+            if self.clients[slot].state.is_in_game() && Some(slot) != except {
                 self.outbox.push_reliable(slot, bytes);
             }
         }

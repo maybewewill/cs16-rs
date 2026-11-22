@@ -1514,15 +1514,13 @@ impl GameEntity for WorldWeapon {
             v.solid = SOLID_TRIGGER;
             v.nextthink = now + 1.0;
         }
-        // A weapon that cannot be dropped (the knife, the grenades, the bomb) cannot be picked
-        // up off the floor either. The answer is the weapon classes' `CanDrop`.
+        // A weapon that cannot be dropped (the knife and the three grenades: `CKnife`,
+        // `CFlashbang`, `CHEGrenade`, `CSmokeGrenade` override `CanDrop` with FALSE,
+        // rg_weapons.h:982-1679, read 2026-11-22) cannot be picked up off the floor either. `CC4`
+        // has no override, so a `weapon_c4` in the world is touchable.
         self.touchable = !matches!(
             self.id,
-            WeaponId::Knife
-                | WeaponId::C4
-                | WeaponId::HeGrenade
-                | WeaponId::Flashbang
-                | WeaponId::SmokeGrenade
+            WeaponId::Knife | WeaponId::HeGrenade | WeaponId::Flashbang | WeaponId::SmokeGrenade
         );
         eng.set_size(id, Vec3::new(-24.0, -24.0, 0.0), Vec3::new(24.0, 24.0, 16.0));
     }

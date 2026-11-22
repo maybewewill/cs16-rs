@@ -545,7 +545,13 @@ impl Player {
     /// What `CBasePlayer::Spawn` and `Precache` reset about what the client knows, so the next
     /// client data update sends it all again (`m_fInitHUD`, `m_iClientBattery`,
     /// `m_bitsHUDDamage`, `m_iClientFOV`, `m_iFOV`, `m_iClientHideHUD`, `m_iTrain`).
-    fn reset_hud_state(&mut self) {
+    fn reset_hud_state(&mut self, init_hud_global: bool) {
+        // `Precache` (player.cpp:6178, called by `Spawn` first): `if (gInitHUD) m_fInitHUD = TRUE`.
+        // `Spawn` then sets it whatever `gInitHUD` is (6030), so it matters to nobody that
+        // spawns; kept as the source has it.
+        if init_hud_global {
+            self.init_hud = true;
+        }
         self.init_hud = true;
         // `m_iClientHealth` is not part of it: `Spawn` leaves it, so a respawn that finds the
         // client already knows the health (a joiner's 100) does not send `Health` again.
@@ -608,8 +614,14 @@ fn spawn_on_connect(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     // `Spawn` (player.cpp:6036-6058, read 2026-11-22): `ClientPutInServer` sets `m_bNotKilled`
     // before it, so the player keeps what it has and `m_rgAmmoLast[i] = -1` makes the first
     // `SendAmmoUpdate` tell the client every ammo count, zeros included (32 `AmmoX`).
+    let init_global = g.init_hud_global;
     if let Some(p) = g.players[usize::from(slot)].as_mut() {
         p.ammo_last = [-1; crate::weapons::MAX_AMMO_SLOTS];
+        // `Precache` and `Spawn` (player.cpp:6178, 6030): `m_fInitHUD = TRUE`.
+        if init_global {
+            p.init_hud = true;
+        }
+        p.init_hud = true;
     }
     eng.set_view(eng.client_edict(slot), eng.client_edict(slot));
     send_room_type(eng, slot);
@@ -905,7 +917,7 @@ pub(crate) fn spawn(
     p.chat.on_spawn();
     // `PlayerSpawn`: `pev->weapons |= (1 << WEAPON_SUIT)`.
     p.weapons |= 1 << WEAPON_SUIT;
-    p.reset_hud_state();
+    p.reset_hud_state(g.init_hud_global);
     // `Spawn` (player.cpp 6026-6028, read 2026-11-22): the weapon HUD starts over.
     p.last_item = None;
     p.f_weapon = false;

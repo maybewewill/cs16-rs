@@ -341,6 +341,14 @@ impl EdictPool {
         ))
     }
 
+    /// Clears the `effects` bits `mask` on every live edict at index `first` and above, with
+    /// no allocation (`SV_CleanupEnts`).
+    pub(crate) fn clear_effects_from(&mut self, first: usize, mask: u32) {
+        for slot in self.slots.iter_mut().skip(first).filter(|s| s.live) {
+            slot.edict.vars.effects &= !mask;
+        }
+    }
+
     /// Worldspawn, player slots and allocated edicts in ascending index order.
     pub fn iter_live(&self) -> impl Iterator<Item = (EdictId, &Edict)> {
         self.iter_live_from(0)

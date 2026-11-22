@@ -563,6 +563,10 @@ impl<T: PacketTransport> ProbeClient<T> {
             SvcMessage::SetAngle(angles) => {
                 self.last_cmd.viewangles = angles;
             }
+            // `svc_addangle` turns the view by a yaw.
+            SvcMessage::AddAngle(yaw) => {
+                self.last_cmd.viewangles.y += yaw;
+            }
             SvcMessage::UpdateUserInfo { slot, userinfo, .. } => {
                 self.userinfos.insert(slot, userinfo);
             }
