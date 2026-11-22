@@ -66,10 +66,12 @@ pub fn pm_init(materials_txt: Option<&[u8]>) -> PmShared {
     }
 }
 
-/// `PM_Move` (pm_shared.cpp 3543-3569, read 2026-11-22): runs `PM_PlayerMove(server)` (`pm.server`
-/// says which side), then mirrors `onground` into `FL_ONGROUND` and, in single player, resets the
+/// `PM_Move(ppmove, server)` (pm_shared.cpp 3543-3569, read 2026-11-22): sets `pmove->server` (in C the engine
+/// fills it before the call; here the argument is the one place it comes from),
+/// runs `PM_PlayerMove(server)`, then mirrors `onground` into `FL_ONGROUND` and, in single player, resets the
 /// entity friction of walkers to 1.
-pub fn pm_move(pm: &mut PlayerMove, sh: &mut PmShared, world: &mut dyn PmWorld) {
+pub fn pm_move(pm: &mut PlayerMove, sh: &mut PmShared, world: &mut dyn PmWorld, server: bool) {
+    pm.server = server;
     let mut c = PmCtx { pm, sh, w: world };
 
     pm_player_move(&mut c);
@@ -103,8 +105,9 @@ fn pm_should_do_spect_mode(c: &PmCtx<'_>) -> bool {
 ///
 /// Quirks kept: `PM_CheckParameters` runs before `frametime` is recomputed from `cmd.msec` (the
 /// punch decay uses the engine's prefilled `frametime`); `frametime = cmd.msec * 0.001` is a
-/// `double` product stored into a `float`; a TOSS/BOUNCE/FLY player that is alive and not on a
-/// train is turned back into a WALK player unless a ladder holds it; the water-jump and ladder-jump
+/// `double` product stored into a `float`; a player that is alive and not on a train, whose
+/// movetype is anything but WALK and NOCLIP (NONE, STEP, FLY, TOSS, BOUNCE...), is reset to WALK
+/// unless a ladder holds it; the water-jump and ladder-jump
 /// paths return without `PM_CategorizePosition`/`PM_CheckFalling`.
 fn pm_player_move(c: &mut PmCtx<'_>) {
     let mut p_ladder: Option<usize> = None;

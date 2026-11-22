@@ -3,14 +3,10 @@
 
 use super::consts::{
     FL_DUCKING, HALF_HUMAN_HEIGHT, IN_DUCK, PLAYER_DUCKING_MULTIPLIER, PM_VEC_DUCK_HULL_MIN, PM_VEC_DUCK_VIEW,
-    PM_VEC_HULL_MIN, PM_VEC_VIEW, STUCK_MOVEUP,
+    PM_VEC_HULL_MIN, PM_VEC_VIEW, STUCK_MOVEUP, TIME_TO_DUCK,
 };
 use super::position::pm_categorize_position;
 use super::types::PmCtx;
-
-/// `TIME_TO_DUCK` as the `double` literal it is in C (`#define TIME_TO_DUCK 0.4`); the shared
-/// constant is the `f32` rounding of it, which the double comparisons below must not use.
-const TIME_TO_DUCK_F64: f64 = 0.4;
 
 /// `PM_Duck` (pm_shared.cpp 2105-2214, read 2026-11-22): two-phase ducking. A press of the duck
 /// button on the ground starts a 400 ms transition (`bInDuck`, `flDuckTime` 1000 counting down);
@@ -54,7 +50,7 @@ pub(crate) fn pm_duck(c: &mut PmCtx<'_>) {
 
         if c.pm.b_in_duck {
             // Finish ducking immediately if duck time is over or not on ground
-            if (f64::from(c.pm.fl_duck_time) / 1000.0) <= (1.0 - TIME_TO_DUCK_F64) || c.pm.onground == -1 {
+            if (f64::from(c.pm.fl_duck_time) / 1000.0) <= (1.0 - TIME_TO_DUCK) || c.pm.onground == -1 {
                 c.pm.usehull = 1;
                 c.pm.view_ofs[2] = PM_VEC_DUCK_VIEW;
                 c.pm.flags |= FL_DUCKING;
@@ -76,7 +72,7 @@ pub(crate) fn pm_duck(c: &mut PmCtx<'_>) {
 
                 // Calc parametric time
                 if time >= 0.0 {
-                    duck_fraction = pm_spline_fraction(time, (1.0 / TIME_TO_DUCK_F64) as f32);
+                    duck_fraction = pm_spline_fraction(time, (1.0 / TIME_TO_DUCK) as f32);
                 }
 
                 let f_more: f32 = PM_VEC_DUCK_HULL_MIN - PM_VEC_HULL_MIN;
@@ -206,8 +202,11 @@ mod tests {
         fn moveent_bounds(&self, _m: usize) -> (Vec3, Vec3) {
             (Vec3::ZERO, Vec3::ZERO)
         }
-        fn moveent_origin(&self, _m: usize) -> Vec3 {
-            Vec3::ZERO
+        fn physent_is_player(&self, _ent: i32) -> bool {
+            false
+        }
+        fn physent_has_model(&self, _ent: i32) -> bool {
+            false
         }
         fn trace_model(&mut self, _m: usize, _s: Vec3, _e: Vec3) -> (f32, Vec3) {
             (1.0, Vec3::ZERO)

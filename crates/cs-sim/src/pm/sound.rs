@@ -4,15 +4,13 @@
 
 use super::consts::{
     ATTN_NORM, CHAN_BODY, CHAR_TEX_CONCRETE, CHAR_TEX_DIRT, CHAR_TEX_GRATE, CHAR_TEX_METAL, CHAR_TEX_SLOSH,
-    CHAR_TEX_SNOW, CHAR_TEX_TILE, CHAR_TEX_VENT, CONTENTS_WATER, FL_DUCKING, FL_FROZEN, MOVETYPE_FLY, PITCH_NORM,
+    CHAR_TEX_SNOW, CHAR_TEX_TILE, CHAR_TEX_VENT, CONTENTS_WATER, FL_DUCKING, FL_FROZEN, MAX_TEXTURENAME_LENGHT,
+    MOVETYPE_FLY, PITCH_NORM,
     STEP_CONCRETE, STEP_DIRT, STEP_GRATE, STEP_LADDER, STEP_METAL, STEP_SLOSH, STEP_SNOW, STEP_TILE, STEP_VENT,
     STEP_WADE,
 };
 use super::math::length;
 use super::types::PmCtx;
-
-/// `MAX_TEXTURENAME_LENGHT` (sic): `sztexturename` keeps at most 16 characters.
-const MAX_TEXTURENAME_LENGHT: usize = 17;
 
 /// `PM_UpdateStepSound` (pm_shared.cpp 375-495, read 2026-11-22): the footstep timer. Plays a step
 /// when `flTimeStepSound` has run out and the player is on the ground or a ladder.
@@ -119,23 +117,13 @@ fn step_family(step: i32) -> &'static str {
     }
 }
 
-/// Every sample name the movement code can play: the step families (samples 1 to 4, tile 1 to 5)
-/// and the wade sounds of a water jump and of entering or leaving water (`pl_wade1-4`, already
-/// in the wade family). For the game's precache list.
+/// Every sample name `PM_PlayStepSound` can play: `step_family` run over every `STEP_*` value
+/// (`STEP_CONCRETE` to `STEP_SNOW`, which are contiguous), samples 1 to 4 and, for tile, 1 to 5.
+/// The wade sounds of a water jump and of entering or leaving water (`pl_wade1-4`) are already in
+/// the wade family. For the game's precache list.
 pub fn all_sample_names() -> Vec<String> {
     let mut names = Vec::new();
-    for step in [
-        STEP_CONCRETE,
-        STEP_METAL,
-        STEP_DIRT,
-        STEP_VENT,
-        STEP_GRATE,
-        STEP_TILE,
-        STEP_SLOSH,
-        STEP_WADE,
-        STEP_LADDER,
-        STEP_SNOW,
-    ] {
+    for step in STEP_CONCRETE..=STEP_SNOW {
         let count = if step == STEP_TILE { 5 } else { 4 };
         for n in 1..=count {
             names.push(format!("player/pl_{}{n}.wav", step_family(step)));
@@ -321,8 +309,11 @@ mod tests {
         fn moveent_bounds(&self, _m: usize) -> (Vec3, Vec3) {
             (Vec3::ZERO, Vec3::ZERO)
         }
-        fn moveent_origin(&self, _m: usize) -> Vec3 {
-            Vec3::ZERO
+        fn physent_is_player(&self, _ent: i32) -> bool {
+            false
+        }
+        fn physent_has_model(&self, _ent: i32) -> bool {
+            false
         }
         fn trace_model(&mut self, _m: usize, _s: Vec3, _e: Vec3) -> (f32, Vec3) {
             (1.0, Vec3::ZERO)

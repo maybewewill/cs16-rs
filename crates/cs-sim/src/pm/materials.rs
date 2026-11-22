@@ -4,10 +4,8 @@
 
 use std::cmp::Ordering;
 
-/// `MAX_TEXTURES`.
-const MAX_TEXTURES: usize = 1024;
-/// `MAX_TEXTURENAME_LENGHT` (sic): 16 characters plus the terminator.
-const MAX_TEXTURENAME_LENGHT: usize = 17;
+use super::consts::{MAX_TEXTURENAME_LENGHT, MAX_TEXTURES};
+
 /// `sizeof(buffer) - 1` of `PM_InitTextureTypes`: the `bufferSize` passed to `memfgets`.
 const LINE_BUFFER_SIZE: usize = 511;
 

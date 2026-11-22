@@ -134,8 +134,7 @@ pub(crate) const HIDEHUD_HEALTH: i32 = 1 << 3;
 const HIDEHUD_TIMER: i32 = 1 << 4;
 const HIDEHUD_MONEY: i32 = 1 << 5;
 const HIDEHUD_CROSSHAIR: i32 = 1 << 6;
-/// `CONTENTS_EMPTY` and `CONTENTS_WATER`.
-const CONTENT_EMPTY: i32 = -1;
+/// `CONTENTS_WATER`.
 const CONTENT_WATER: i32 = -3;
 const CONTENT_SLIME: i32 = -4;
 const CONTENT_LAVA: i32 = -5;
@@ -739,9 +738,10 @@ pub(crate) fn spawn(
         v.dmg = 2.0;
         v.effects = 0;
         v.deadflag = DEAD_NO;
-        v.watertype = CONTENT_EMPTY;
-        v.waterlevel = 0;
-        v.basevelocity = Vec3::ZERO;
+        // Vanilla `CBasePlayer::Spawn` (ReGameDLL `player.cpp` 5827-5831, read 2026-11-22) resets
+        // `watertype`, `waterlevel` and `basevelocity` only under `REGAMEDLL_FIXES`, which the
+        // target is not: they keep what the last movement left until the next `pm` run
+        // recategorizes the position.
         v.friction = 1.0;
         v.gravity = 1.0;
         v.fov = DEFAULT_FOV;

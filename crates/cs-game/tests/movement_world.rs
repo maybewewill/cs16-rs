@@ -358,12 +358,22 @@ fn a_ladder_is_climbed_on_a_real_map() {
     assert!(down.last().unwrap().1.z < origin.z, "descends");
 }
 
-/// The first stock map (`preferred` first, then in name order) whose world has a pool deep
-/// enough to swim in, with the points the scan found: water at the point and 36 units above and
-/// below it, and 150 units on along +x, so a short swim stays in the water.
-fn find_pool(vfs: &cs_vfs::Vfs, preferred: &str) -> Option<(String, Bench, Vec<Vec3>)> {
-    let mut names = vec![preferred.to_string()];
-    names.extend(vfs.list_maps());
+/// How far the idle sink of the water test goes at most: 150 commands of 10 ms at the 48 units a
+/// second the idle player settles at.
+const SINK_TRAVEL: f32 = 72.0;
+
+/// The first map whose world has a pool deep enough to swim in, with the points the scan found:
+/// water at the point and 36 units above it, `SINK_TRAVEL` plus a margin of water below it, and
+/// 150 units on along +x, so a short swim stays in the water. The Counter-Strike maps are tried
+/// first (`cs_`, `de_`, `as_`, `es_`, in name order), the other stock maps after them and
+/// `last_resort` (a Half-Life map) at the very end. (On the installed stock maps the CS pools are
+/// `func_water` entities or 20 units deep, so the scan ends on a Half-Life map; the test prints
+/// which.)
+fn find_pool(vfs: &cs_vfs::Vfs, last_resort: &str) -> Option<(String, Bench, Vec<Vec3>)> {
+    let mut names = vfs.list_maps();
+    names.retain(|n| n != last_resort);
+    names.sort_by_key(|n| !["cs_", "de_", "as_", "es_"].iter().any(|p| n.starts_with(p)));
+    names.push(last_resort.to_string());
     for name in names {
         if !vfs.exists(&format!("maps/{name}.bsp")) {
             continue;
@@ -390,7 +400,7 @@ fn find_pool(vfs: &cs_vfs::Vfs, preferred: &str) -> Option<(String, Bench, Vec<V
                         let p = Vec3::new(x, y, z);
                         if wet(eng, p)
                             && wet(eng, p + Vec3::Z * 36.0)
-                            && wet(eng, p - Vec3::Z * 36.0)
+                            && (1..=11).all(|k| wet(eng, p - Vec3::Z * (8.0 * k as f32)))
                             && wet(eng, p + Vec3::X * 150.0)
                             && !eng.trace_hull(p, p, Hull::Standing).start_solid
                             && eng
@@ -415,18 +425,19 @@ fn find_pool(vfs: &cs_vfs::Vfs, preferred: &str) -> Option<(String, Bench, Vec<V
     None
 }
 
-/// The stock map the water test tries first (the first with a pool the scan finds in this
-/// installation; any other is found by the scan).
-const PREFERRED_WATER_MAP: &str = "c0a0d";
+/// The Half-Life map the water test falls back to when no Counter-Strike map has a pool the scan
+/// finds; the map used is printed.
+const FALLBACK_WATER_MAP: &str = "c0a0d";
 
 #[test]
 fn water_is_swum_on_a_real_map() {
     let Some(vfs) = discover() else {
         return;
     };
-    let Some((name, mut b, spots)) = find_pool(&vfs, PREFERRED_WATER_MAP) else {
+    let Some((name, mut b, spots)) = find_pool(&vfs, FALLBACK_WATER_MAP) else {
         panic!("no stock map has a deep pool the scan can find");
     };
+    eprintln!("water test map: {name}");
 
     let mut swum = false;
     for spot in spots.into_iter().take(40) {
@@ -438,6 +449,9 @@ fn water_is_swum_on_a_real_map() {
         if last.3 < 2 {
             continue;
         }
+        // The scan found `SINK_TRAVEL` plus 16 units of water below the spot, so the sink
+        // does not reach a bottom (which would hold the player up).
+        assert!(spot.z - last.1.z < SINK_TRAVEL + 16.0, "sank {:?}", last.1);
         assert_eq!(last.4, CONTENTS_WATER, "{name}");
         assert!((last.2.z + 48.0).abs() < 0.1, "sink speed {:?}", last.2);
 
@@ -511,6 +525,40 @@ fn func_water_spawns_as_a_non_solid_special_contents_door() {
     assert_eq!(state_of("*5").map(|e| e.1), Some(4), "{seen:?}");
 }
 
+/// `CBaseDoor::Spawn` calls `SetMovedir`: `movedir` comes from `angles` (with the editor's up and
+/// down codes) and `angles` is zeroed; a rotating door keeps its angles.
+#[test]
+fn a_door_spawns_with_movedir_from_its_angles_and_none_left() {
+    let mut b = Bench::stub(spawns(2, 2));
+    let cases: [(&str, Vec3); 5] = [
+        ("func_door", Vec3::new(0.0, 90.0, 0.0)),
+        ("func_door", Vec3::new(0.0, -1.0, 0.0)),
+        ("func_door", Vec3::new(0.0, -2.0, 0.0)),
+        ("func_water", Vec3::new(0.0, 0.0, 0.0)),
+        ("func_door_rotating", Vec3::new(0.0, 90.0, 0.0)),
+    ];
+    let seen = b.run(move |game, eng| {
+        let mut out = Vec::new();
+        for (i, (class, angles)) in cases.into_iter().enumerate() {
+            let id = eng.create_entity(class).expect("free edict");
+            let v = eng.ent_mut(id).unwrap();
+            v.model = format!("*{}", i + 1);
+            v.angles = angles;
+            assert!(game.spawn_entity(eng, id, class, &[]), "{class}");
+            let v = eng.ent(id).unwrap();
+            out.push((v.angles, v.movedir));
+        }
+        out
+    });
+    let near = |a: Vec3, b: Vec3| (a - b).abs().max_element() < 1e-5;
+    assert_eq!(seen[0].0, Vec3::ZERO, "{seen:?}");
+    assert!(near(seen[0].1, Vec3::Y), "angle 90 points along +y: {seen:?}");
+    assert_eq!((seen[1].0, seen[1].1), (Vec3::ZERO, Vec3::Z), "angle -1 is up");
+    assert_eq!((seen[2].0, seen[2].1), (Vec3::ZERO, -Vec3::Z), "angle -2 is down");
+    assert!(near(seen[3].1, Vec3::X), "angle 0 points along +x: {seen:?}");
+    assert_eq!(seen[4].0, Vec3::new(0.0, 90.0, 0.0), "a rotating door keeps its angles");
+}
+
 #[test]
 fn func_water_gives_the_player_water_on_a_stock_map() {
     let Some(vfs) = discover() else {
@@ -520,6 +568,7 @@ fn func_water_gives_the_player_water_on_a_stock_map() {
         eprintln!("no stock map has a func_water: skipped");
         return;
     };
+    eprintln!("func_water test map: {name}");
     let mut b = Bench::on(map_named(&vfs, &name));
     b.run(|game, eng| assert!(game.spawn_player(eng, 0, Team::Ct, 0)));
     let pools: Vec<(Vec3, i16)> = b.run(|_, eng| {
@@ -539,6 +588,11 @@ fn func_water_gives_the_player_water_on_a_stock_map() {
     let mut found = false;
     for (centre, skin) in pools {
         if i32::from(skin) != CONTENTS_WATER {
+            continue;
+        }
+        // The entity must be what supplies the water: the world alone says something else there.
+        let world_contents = b.run(move |_, eng| eng.point_contents(centre, Hull::Point));
+        if world_contents == CONTENTS_WATER {
             continue;
         }
         let (contents, level) = b.run(move |game, eng| {

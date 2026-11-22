@@ -37,8 +37,8 @@ pub const MAX_CLIMB_SPEED: f32 = 200.0;
 pub const PLAYER_DUCKING_MULTIPLIER: f64 = 0.333;
 /// `PM_CHECKSTUCK_MINTIME` seconds (a `double` literal in C).
 pub const PM_CHECKSTUCK_MINTIME: f64 = 0.05;
-/// `TIME_TO_DUCK` seconds.
-pub const TIME_TO_DUCK: f32 = 0.4;
+/// `TIME_TO_DUCK` seconds: `#define TIME_TO_DUCK 0.4`, a `double` literal in C.
+pub const TIME_TO_DUCK: f64 = 0.4;
 /// `STUCK_MOVEUP`.
 pub const STUCK_MOVEUP: i32 = 1;
 /// `PM_VEC_DUCK_HULL_MIN` / `PM_VEC_HULL_MIN` (z of the hull minimum).
@@ -58,16 +58,11 @@ pub const BUNNYJUMP_MAX_SPEED_FACTOR: f32 = 1.2;
 pub const HALF_HUMAN_HEIGHT: i32 = 36;
 
 // pm_defs.h
-/// `MAX_PHYSENTS`, `MAX_MOVEENTS`, `MAX_CLIP_PLANES`.
-pub const MAX_PHYSENTS: usize = 600;
-pub const MAX_MOVEENTS: usize = 64;
+/// `MAX_CLIP_PLANES`.
 pub const MAX_CLIP_PLANES: usize = 5;
-/// `PM_NORMAL` trace flags.
-pub const PM_NORMAL: i32 = 0;
-pub const PM_STUDIO_IGNORE: i32 = 1;
-pub const PM_STUDIO_BOX: i32 = 2;
-pub const PM_GLASS_IGNORE: i32 = 4;
-pub const PM_WORLD_ONLY: i32 = 8;
+/// `PM_NORMAL` trace flags: the engine's own constant (`pm_defs.h`); the other trace flags and
+/// `MAX_PHYSENTS`, `MAX_MOVEENTS`, `CONTENTS_LADDER` are not used by the movement code here.
+pub use cs_engine::PM_NORMAL;
 /// `MAX_CLIENTS` (`const.h`).
 pub const MAX_CLIENTS: usize = 32;
 
@@ -117,7 +112,6 @@ pub const CONTENTS_CURRENT_270: i32 = -12;
 pub const CONTENTS_CURRENT_UP: i32 = -13;
 pub const CONTENTS_CURRENT_DOWN: i32 = -14;
 pub const CONTENTS_TRANSLUCENT: i32 = -15;
-pub const CONTENTS_LADDER: i32 = -16;
 
 // in_buttons.h
 pub const IN_ATTACK: i32 = 1 << 0;
@@ -142,6 +136,7 @@ pub const PLAYER_IN_BOMB_ZONE: i32 = 1 << 2;
 pub const PLAYER_HOLDING_SHIELD: i32 = 1 << 3;
 
 // pm_materials.h
+/// `MAX_TEXTURES`.
 pub const MAX_TEXTURES: usize = 1024;
 /// `MAX_TEXTURENAME_LENGHT` (sic): 16 characters plus the terminator.
 pub const MAX_TEXTURENAME_LENGHT: usize = 17;

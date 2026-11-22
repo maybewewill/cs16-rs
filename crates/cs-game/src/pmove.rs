@@ -141,12 +141,6 @@ impl PmWorld for EnginePmWorld<'_, '_> {
             .map_or((Vec3::ZERO, Vec3::ZERO), |m| (m.model_mins, m.model_maxs))
     }
 
-    fn moveent_origin(&self, moveent: usize) -> Vec3 {
-        self.physents
-            .moveent(moveent)
-            .map_or(Vec3::ZERO, |m| m.origin)
-    }
-
     fn trace_model(&mut self, moveent: usize, start: Vec3, end: Vec3) -> (f32, Vec3) {
         self.eng.pm_trace_model(self.physents, moveent, start, end)
     }
@@ -410,7 +404,7 @@ pub(crate) fn run_pmove(
             player: id,
             rng: &mut g.rng,
         };
-        pm_move(&mut pm, &mut g.pm_shared, &mut world);
+        pm_move(&mut pm, &mut g.pm_shared, &mut world, true);
     }
 
     if let Some(v) = eng.ent_mut(id) {

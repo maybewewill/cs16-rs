@@ -339,10 +339,6 @@ impl PmWorld for BoxWorld {
         self.ladders.get(moveent).map_or((Vec3::ZERO, Vec3::ZERO), |l| (l.mins, l.maxs))
     }
 
-    fn moveent_origin(&self, moveent: usize) -> Vec3 {
-        self.record(Call::MoveentOrigin(moveent));
-        self.ladders.get(moveent).map_or(Vec3::ZERO, |l| l.origin)
-    }
 
     fn trace_model(&mut self, moveent: usize, start: Vec3, end: Vec3) -> (f32, Vec3) {
         self.record(Call::TraceModel(moveent));
@@ -401,5 +397,6 @@ pub fn standing_player(origin: Vec3) -> (PlayerMove, PmShared) {
 pub fn run_cmd(pm: &mut PlayerMove, sh: &mut PmShared, w: &mut BoxWorld, msec: u8) {
     pm.cmd.msec = msec;
     pm.frametime = (f64::from(msec) * 0.001) as f32;
-    pm_move(pm, sh, w);
+    let server = pm.server;
+    pm_move(pm, sh, w, server);
 }

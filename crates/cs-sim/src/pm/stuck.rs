@@ -256,8 +256,11 @@ mod tests {
         fn moveent_bounds(&self, _m: usize) -> (Vec3, Vec3) {
             (Vec3::ZERO, Vec3::ZERO)
         }
-        fn moveent_origin(&self, _m: usize) -> Vec3 {
-            Vec3::ZERO
+        fn physent_is_player(&self, _ent: i32) -> bool {
+            false
+        }
+        fn physent_has_model(&self, _ent: i32) -> bool {
+            false
         }
         fn trace_model(&mut self, _m: usize, _s: Vec3, _e: Vec3) -> (f32, Vec3) {
             (1.0, Vec3::ZERO)

@@ -255,8 +255,9 @@ impl PlayerMove {
     }
 }
 
-/// What `pm_shared` needs from the world (the engine's `pmove` callbacks and physents).
-/// Everything the game or the client has to provide; `cs_sim::pm` never calls `EngineApi`.
+/// What `pm_shared` needs from the world: the engine's `pmove` callbacks and the physent arrays.
+/// Everything the game or the client has to provide; `cs_sim::pm` never calls `EngineApi`. Every
+/// method must be implemented: a silent default would show up as a client-side mispredict.
 pub trait PmWorld {
     /// `PM_PlayerTrace(start, end, trace_flags, ignore_pe)` with `pmove->usehull` = `usehull`.
     fn player_trace(&mut self, start: Vec3, end: Vec3, usehull: i32, trace_flags: i32, ignore_pe: i32) -> PmTrace;
@@ -268,15 +269,14 @@ pub trait PmWorld {
     fn point_contents(&mut self, p: Vec3) -> (i32, i32);
     /// `pmove->nummoveent`.
     fn num_moveents(&self) -> usize;
-    /// The ladder test of `PM_Ladder` for moveent `moveent`: the model is a brush model with
+    /// `PM_GetModelType` + `PM_HullForBsp` + `PM_HullPointContents`, the ladder test of
+    /// `PM_Ladder` for `pmove->moveents[moveent]`: the model is a brush model with
     /// `skin == CONTENTS_LADDER` and the hull-point contents of `origin` in its hull `usehull`
     /// are not empty.
     fn ladder_contains(&mut self, moveent: usize, origin: Vec3, usehull: i32) -> bool;
-    /// `PM_GetModelBounds` of the moveent's model: (mins, maxs).
+    /// `PM_GetModelBounds(moveents[moveent].model, mins, maxs)`: (mins, maxs).
     fn moveent_bounds(&self, moveent: usize) -> (Vec3, Vec3);
-    /// `moveents[i].origin`.
-    fn moveent_origin(&self, moveent: usize) -> Vec3;
-    /// `PM_TraceModel(moveent, start, end, &trace)`: (fraction, plane normal).
+    /// `PM_TraceModel(&moveents[moveent], start, end, &trace)`: (fraction, plane normal).
     fn trace_model(&mut self, moveent: usize, start: Vec3, end: Vec3) -> (f32, Vec3);
     /// `PM_TraceTexture(ground, start, end)`: the texture name hit on physent `ground`.
     fn trace_texture(&mut self, ground: i32, start: Vec3, end: Vec3) -> Option<String>;
@@ -286,18 +286,13 @@ pub trait PmWorld {
     fn random_long(&mut self, low: i32, high: i32) -> i32;
     /// `Sys_FloatTime()` in seconds.
     fn sys_float_time(&mut self) -> f64;
-    /// Origin and angles of the first physent whose `info == info` (PM_SpectatorMove tracking).
+    /// Origin and angles of the first `pmove->physents[i]` whose `info == info`
+    /// (`PM_SpectatorMove` tracking).
     fn physent_by_info(&self, info: i32) -> Option<(Vec3, Vec3)>;
-    /// `pmove->physents[ent].player != 0`. Added by Task 4 (the plan's `PM_CheckStuck` reads it);
-    /// the default says "not a player".
-    fn physent_is_player(&self, _ent: i32) -> bool {
-        false
-    }
-    /// `pmove->physents[ent].model != NULL`. Added by Task 4 (client branch of `PM_CheckStuck`);
-    /// the default says "no model".
-    fn physent_has_model(&self, _ent: i32) -> bool {
-        false
-    }
+    /// `pmove->physents[ent].player != 0` (`PM_CheckStuck`).
+    fn physent_is_player(&self, ent: i32) -> bool;
+    /// `pmove->physents[ent].model != NULL` (`PM_CheckStuck`, client branch).
+    fn physent_has_model(&self, ent: i32) -> bool;
 }
 
 /// pm_shared.cpp globals and statics: stuck table and per-client stuck state, texture table,
@@ -316,8 +311,7 @@ pub struct PmShared {
     pub(crate) stuck_check_time: [[f32; 2]; MAX_CLIENTS],
     /// `pm_gcTextures`, `pm_grgszTextureName`, `pm_grgchTextureType` (materials.txt table).
     pub(crate) textures: TextureTable,
-    /// `static int iSkipStep` of `PM_PlayStepSound` (wade-step skip counter). Read by Task 7.
-    #[allow(dead_code)]
+    /// `static int iSkipStep` of `PM_PlayStepSound` (wade-step skip counter).
     pub(crate) i_skip_step: i32,
     /// `g_onladder`.
     pub(crate) g_onladder: bool,

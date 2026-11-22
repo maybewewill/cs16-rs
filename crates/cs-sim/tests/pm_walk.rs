@@ -402,7 +402,7 @@ fn punch_angle_decays() {
     pm.punchangle = Vec3::new(0.0, 0.0, 10.0);
     pm.cmd.msec = 10;
     pm.frametime = 0.02;
-    pm_move(&mut pm, &mut sh, &mut w);
+    pm_move(&mut pm, &mut sh, &mut w, true);
     assert_close(pm.punchangle.z, 9.7, 1e-5, "punch after one command");
 
     // It never goes negative: a small punch is gone in one step.

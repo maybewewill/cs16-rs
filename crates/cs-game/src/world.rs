@@ -18,7 +18,8 @@ pub const MAX_PLAYER_USE_RADIUS: f32 = 64.0;
 
 /// `kRenderTransTexture`.
 const RENDER_TRANS_TEXTURE: u8 = 2;
-/// `CONTENTS_LADDER`: the `skin` of a ladder entity.
+/// `CONTENTS_LADDER`: the `skin` of a ladder entity (the same value as `cs_engine::CONTENTS_LADDER`,
+/// which is an `i32`; `skin` is an `i16`).
 const CONTENTS_LADDER: i16 = -16;
 /// `EF_NODRAW`.
 const EF_NODRAW: u32 = 128;
@@ -369,6 +370,23 @@ pub(crate) enum BrushKind {
 /// `SF_DOOR_PASSABLE`.
 const SF_DOOR_PASSABLE: u32 = 1 << 3;
 
+/// `SF_DOOR_ACTUALLY_WATER` (`BIT(31)`, ReGameDLL `doors.h`, read 2026-11-22).
+const SF_DOOR_ACTUALLY_WATER: u32 = 1 << 31;
+
+/// `SetMovedir` (ReGameDLL `subs.cpp`, read 2026-11-22): `movedir` is the direction `angles`
+/// point in, with the editor's special cases (0 -1 0) = up and (0 -2 0) = down; then `angles`
+/// is zeroed, so the brush is never rotated by the key.
+fn set_movedir(v: &mut cs_engine::EntVars) {
+    v.movedir = if v.angles == Vec3::new(0.0, -1.0, 0.0) {
+        Vec3::Z
+    } else if v.angles == Vec3::new(0.0, -2.0, 0.0) {
+        -Vec3::Z
+    } else {
+        cs_sim::pm::math::angle_vectors(v.angles).0
+    };
+    v.angles = Vec3::ZERO;
+}
+
 /// The brush model number `N` of a model named `*N`; `None` for the world (`*0`) and any other
 /// name.
 pub(crate) fn brush_model_number(model: &str) -> Option<usize> {
@@ -427,6 +445,15 @@ impl GameEntity for StaticBrush {
                     v.skin = crate::menus::atoi(value).clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
                 }
                 let special = kind == BrushKind::Door && v.skin != 0;
+                if kind == BrushKind::Door {
+                    // `CBaseDoor::Spawn` (rg_doors.cpp, read 2026-11-22): `SetMovedir(pev)`
+                    // before anything else; the rotating door keeps its angles.
+                    set_movedir(v);
+                    if special {
+                        // "water is silent for now": marks a `func_door` as a `func_water`.
+                        v.spawnflags |= SF_DOOR_ACTUALLY_WATER;
+                    }
+                }
                 v.solid = if special || v.spawnflags & SF_DOOR_PASSABLE != 0 {
                     SOLID_NOT
                 } else {
