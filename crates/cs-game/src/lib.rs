@@ -38,6 +38,7 @@ pub mod targets;
 pub mod teams;
 pub mod weapons;
 pub mod world;
+pub mod zones;
 
 use cs_engine::{EdictId, EngineApi, GameDll};
 use cs_proto48::delta::{DeltaMarks, GoldSrcClientData, GoldSrcEntityState, GoldSrcUserCmd};
@@ -67,6 +68,8 @@ pub struct GameState {
     pub num_ct_wins: i32,
     /// The state of the round rules (`CHalfLifeMultiplay`); new for every map.
     pub rules: rules::Rules,
+    /// `g_pMapInfo`: what the map's `info_map_parameters` says, if it has one ([`zones`]).
+    pub map_info: Option<zones::MapInfo>,
     /// `mapcycle.txt`: the maps the match goes through. Outlives the map ([`CsGame::load_map_cycle`]).
     pub map_cycle: mapcycle::MapCycle,
     /// How many players have entered the server since the game started (the user id the team
@@ -106,6 +109,7 @@ impl GameState {
             num_terrorist_wins: 0,
             num_ct_wins: 0,
             rules: rules::Rules::default(),
+            map_info: None,
             map_cycle: mapcycle::MapCycle::default(),
             join_counter: 0,
             init_hud_global: true,
@@ -131,6 +135,7 @@ impl GameState {
         self.num_ct_wins = 0;
         self.rules = rules::Rules::default();
         self.delay_keys.clear();
+        self.map_info = None;
     }
 }
 
@@ -568,6 +573,16 @@ impl CsGame {
         rules::restart_round(&mut self.state, eng);
     }
 
+    /// Uses the entity `id` (`CBaseEntity::Use` with no activator, `USE_TOGGLE`). For tests only
+    /// (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn test_use_entity(&mut self, eng: &mut EngineApi<'_>, id: EdictId) {
+        entity::with_entity(&mut self.state, eng, id, |entity, g, eng| {
+            entity.use_(g, eng, id, None, None, crate::entity::UseType::Toggle, 0.0);
+        });
+    }
+
     /// Puts the player of `slot` at `origin`, stopped, to place a player
     /// mid-air or elsewhere in tests. `false` when nobody is in that slot. For tests only
     /// (cargo feature `test-hooks`).
@@ -630,7 +645,10 @@ impl GameDll for CsGame {
     /// Every entity of the map has spawned: starts the rules of the map
     /// (the freeze period before the first round).
     fn server_activate(&mut self, eng: &mut EngineApi<'_>) {
+        // `ServerActivate`: `g_pMapInfo->CheckMapInfo()`, `ReadMultiplayCvars()` and
+        // `CheckMapConditions()` (the last two are the constructor's of the rules here).
         self.state.rules = rules::Rules::new(eng);
+        zones::check_map_info(&mut self.state);
         // `WriteSigonMessages`, after `LinkUserMessages`: the HUD's weapon table.
         inventory::write_sigon_messages(eng);
     }
@@ -662,6 +680,9 @@ impl GameDll for CsGame {
             targets::note_keys(&mut self.state, id, keys);
         }
         attach(eng, id, entity);
+        if classname == "info_map_parameters" {
+            zones::register_map_info(&mut self.state, keys);
+        }
         if classname == "worldspawn" {
             world::precache_briefing(eng, &self.state.briefings);
         }

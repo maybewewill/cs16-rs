@@ -158,9 +158,24 @@ pub struct Rules {
     /// `m_bMapHasBuyZone`: the map has a `func_buyzone` (else the players buy around the spawn
     /// points).
     map_has_buy_zone: bool,
-    /// `m_bMapHasBombTarget`: the map has a bomb target (2E: the entities do not exist yet, so
-    /// no map has one).
+    /// `m_bMapHasBombTarget`: the map has a bomb target (a `func_bomb_target` or the legacy
+    /// `info_bomb_target`).
     map_has_bomb_target: bool,
+    /// `m_bMapHasBombZone`: the map has a `func_bomb_target` (not only the legacy point).
+    map_has_bomb_zone: bool,
+    /// `m_bMapHasRescueZone`: the map has a `func_hostage_rescue`.
+    map_has_rescue_zone: bool,
+    /// `m_bMapHasEscapeZone`: the map has a `func_escapezone`.
+    map_has_escape_zone: bool,
+    /// `m_bMapHasVIPSafetyZone`: the map has a `func_vip_safetyzone`.
+    map_has_vip_safety_zone: bool,
+    /// `m_bCTCantBuy`: the counter-terrorists may not buy (`info_map_parameters`).
+    ct_cant_buy: bool,
+    /// `m_bTCantBuy`: the terrorists may not buy (`info_map_parameters`).
+    t_cant_buy: bool,
+    /// `m_flBombRadius`: 500 unless `info_map_parameters` says otherwise. The bomb's explosion
+    /// takes it as its damage and 3.5 times it as its radius (task 4).
+    bomb_radius: f32,
 }
 
 impl Default for Rules {
@@ -198,6 +213,13 @@ impl Default for Rules {
             economy: Economy::default(),
             map_has_buy_zone: false,
             map_has_bomb_target: false,
+            map_has_bomb_zone: false,
+            map_has_rescue_zone: false,
+            map_has_escape_zone: false,
+            map_has_vip_safety_zone: false,
+            ct_cant_buy: false,
+            t_cant_buy: false,
+            bomb_radius: 500.0,
         }
     }
 }
@@ -212,11 +234,7 @@ impl Rules {
             ..Self::default()
         };
         r.read_multiplay_cvars(eng);
-        // `CheckMapConditions`.
-        r.map_has_bomb_target = ["func_bomb_target", "info_bomb_target"]
-            .iter()
-            .any(|c| eng.find_by_classname(None, c).is_some());
-        r.map_has_buy_zone = eng.find_by_classname(None, "func_buyzone").is_some();
+        r.check_map_conditions(eng);
         r.intro_round_time += 2;
         r.round_time_secs = r.intro_round_time;
         r.win_difference = (eng.cvar_f32("mp_windifference") as i32).max(1);
@@ -224,6 +242,36 @@ impl Rules {
             eng.set_cvar("mp_windifference", "1");
         }
         r
+    }
+
+    /// `CHalfLifeMultiplay::CheckMapConditions` (ReGameDLL `multiplay_gamerules.cpp` 1640-1672,
+    /// read 2026-11-23): what the objective entities of the map are. A `func_bomb_target` makes
+    /// both bomb flags true; the legacy `info_bomb_target` alone only the target one. Run at the
+    /// start of the map and by every `RestartRound`.
+    pub(crate) fn check_map_conditions(&mut self, eng: &EngineApi<'_>) {
+        let has = |class: &str| eng.find_by_classname(None, class).is_some();
+        if has("func_bomb_target") {
+            self.map_has_bomb_target = true;
+            self.map_has_bomb_zone = true;
+        } else if has("info_bomb_target") {
+            self.map_has_bomb_target = true;
+            self.map_has_bomb_zone = false;
+        } else {
+            self.map_has_bomb_target = false;
+            self.map_has_bomb_zone = false;
+        }
+        self.map_has_rescue_zone = has("func_hostage_rescue");
+        self.map_has_buy_zone = has("func_buyzone");
+        self.map_has_escape_zone = has("func_escapezone");
+        self.map_has_vip_safety_zone = has("func_vip_safetyzone");
+    }
+
+    /// The tail of `CMapInfo::CheckMapInfo` (`mapinfo.cpp` 60-67): the bomb radius and the
+    /// teams that may not buy, written into the rules.
+    pub(crate) fn set_map_parameters(&mut self, bomb_radius: f32, ct_cant_buy: bool, t_cant_buy: bool) {
+        self.bomb_radius = bomb_radius;
+        self.ct_cant_buy = ct_cant_buy;
+        self.t_cant_buy = t_cant_buy;
     }
 
     /// `ReadMultiplayCvars` (the vanilla bounds): the round time is 1 to 9 minutes and the freeze
@@ -281,6 +329,41 @@ impl Rules {
     /// `m_bMapHasBombTarget`.
     pub fn map_has_bomb_target(&self) -> bool {
         self.map_has_bomb_target
+    }
+
+    /// `m_bMapHasBombZone`.
+    pub fn map_has_bomb_zone(&self) -> bool {
+        self.map_has_bomb_zone
+    }
+
+    /// `m_bMapHasRescueZone`.
+    pub fn map_has_rescue_zone(&self) -> bool {
+        self.map_has_rescue_zone
+    }
+
+    /// `m_bMapHasEscapeZone`.
+    pub fn map_has_escape_zone(&self) -> bool {
+        self.map_has_escape_zone
+    }
+
+    /// `m_bMapHasVIPSafetyZone`.
+    pub fn map_has_vip_safety_zone(&self) -> bool {
+        self.map_has_vip_safety_zone
+    }
+
+    /// `m_bCTCantBuy`.
+    pub fn ct_cant_buy(&self) -> bool {
+        self.ct_cant_buy
+    }
+
+    /// `m_bTCantBuy`.
+    pub fn t_cant_buy(&self) -> bool {
+        self.t_cant_buy
+    }
+
+    /// `m_flBombRadius`.
+    pub fn bomb_radius(&self) -> f32 {
+        self.bomb_radius
     }
 
     /// `m_fRoundStartTime`: server time the round clock counts from.
@@ -893,6 +976,11 @@ pub(crate) fn restart_round(g: &mut GameState, eng: &mut EngineApi<'_>) {
     // This makes the round timer function as the intro timer on the client side.
     g.rules.round_time_secs = g.rules.intro_round_time;
 
+    // Check to see if there's a mapping info paramater entity, then what the map has
+    // (`RestartRound`, multiplay_gamerules.cpp 1853-1857, read 2026-11-23). The escape and VIP
+    // rounds that follow in the source are not ported yet (see the module documentation).
+    crate::zones::check_map_info(g);
+    g.rules.check_map_conditions(eng);
     // The hostages, the VIP and the escape rounds are not ported (see the module documentation).
     // Scale up the loser bonus when teams fall into losing streaks, and assign it.
     let status = g.rules.round_win_status;

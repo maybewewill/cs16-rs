@@ -12,7 +12,10 @@
 //!   ([`Signals`], `CUnifiedSignals`): every half second the player's client data update
 //!   (`UpdateClientData`, [`handle_signals_when_due`]) turns the signals raised since the last
 //!   time into the state, and the `buyzone` status icon follows the changes of it. A dead
-//!   player, which touches nothing, leaves the zone the same way.
+//!   player, which touches nothing, leaves the zone the same way. The signals of the objective
+//!   zones ([`crate::zones`]: bomb site, hostage rescue, escape, VIP safety) go the same way, with
+//!   the icons `c4`, `rescue`, `escape` and `vipsafety`, and the legacy `info_bomb_target` and
+//!   `info_hostage_rescue` points for a map that has no such zone entity.
 //! - [`can_player_buy`] is `CBasePlayer::CanPlayerBuy`: alive, in a zone, and within
 //!   `mp_buytime` minutes (at least 15 seconds, written back to the cvar) of the start of the
 //!   round (`m_fRoundStartTime`, which restarts when the freeze period ends). The `#Cant_buy`
@@ -43,16 +46,12 @@
 //!   (`CBasePlayerAmmo::AddAmmo`: `GiveAmmo` of `buyClipSize`, then `items/9mmclip1.wav`); the sound
 //!   comes from the player's edict, not from an entity of its own (assumption: the same place).
 //! - The defuser (`MENU_SLOT_ITEM_DEFUSEKIT`) is sold to a counter-terrorist on a map with a
-//!   bomb target only; the bomb targets are 2E, so no map has one yet and the purchase is
-//!   refused silently, as the original does on a map without one. The menu then has no defuser
-//!   key either. The terrorists' `defuser` alias says `#Alias_Not_Avail` as the original.
-//! - `BuyZoneIcon_Clear` is also called by `CBasePlayer::Disappear`, which only the escape
-//!   zone (`func_escapezone`, `triggers.cpp:2069`, 2E) calls; it has no caller here yet and
-//!   the 2E escape port must add the call.
+//!   bomb target only; the defuser itself is task 5's, so the purchase is still refused
+//!   silently. The terrorists' `defuser` alias says `#Alias_Not_Avail` as the original.
 //! - `HintMessage("#Hint_use_nightvision")` (first night vision purchase) goes through
 //!   [`crate::hint`].
-//! - `m_bCTCantBuy`/`m_bTCantBuy` are never set by a vanilla multiplayer game and the VIP does
-//!   not exist yet, so the checks on them are left out. The tutor is not ported.
+//! - `CanPlayerBuy` also refuses the VIP and the team `info_map_parameters` (`buying`) keeps out
+//!   of the buy menus ([`crate::zones`]). The tutor is not ported.
 //! - A `func_buyzone`'s `angles` (one-way touch, `SetMovedir`) only matter to the generic
 //!   trigger code, not to the buy zone, and are cleared without computing a `movedir`.
 
@@ -64,6 +63,7 @@ use glam::Vec3;
 use crate::GameState;
 use crate::chat::client_print;
 use crate::entity::GameEntity;
+use crate::hint;
 use crate::menus::{
     self, HUD_PRINTCENTER, MENU_KEY_0, MENU_KEY_1, MENU_KEY_2, MENU_KEY_3, MENU_KEY_4, MENU_KEY_5,
     MENU_KEY_6, MENU_KEY_7, MENU_KEY_8, Menu, VGUI_MENU_BUY_ITEM,
@@ -76,8 +76,14 @@ use crate::weapons::{
     is_primary_weapon, max_ammo_carry_for_weapon, weapon_info,
 };
 
-/// `SIGNAL_BUY` (`unisignals.h`): the player stands in a buy zone.
+/// `SIGNAL_BUY`, `SIGNAL_BOMB`, `SIGNAL_RESCUE`, `SIGNAL_ESCAPE`, `SIGNAL_VIPSAFETY`
+/// (`unisignals.h`): the player stands in a buy zone, a bomb site, a hostage rescue zone, an
+/// escape zone, a VIP safety zone.
 pub const SIGNAL_BUY: u8 = 1 << 0;
+pub const SIGNAL_BOMB: u8 = 1 << 1;
+pub const SIGNAL_RESCUE: u8 = 1 << 2;
+pub const SIGNAL_ESCAPE: u8 = 1 << 3;
+pub const SIGNAL_VIPSAFETY: u8 = 1 << 4;
 /// `MIN_BUY_TIME` (`player.h`, vanilla): the least `mp_buytime` allows, in seconds.
 pub const MIN_BUY_TIME: i32 = 15;
 /// `KEVLAR_PRICE`, `HELMET_PRICE`, `ASSAULTSUIT_PRICE`, `NVG_PRICE` (`weapontype.h`).
@@ -221,27 +227,43 @@ impl GameEntity for BuyZone {
 
 // ---- the signals of a player ----
 
-/// `gmsgStatusIcon` of `BuyZoneIcon_Set`: the `buyzone` icon, shown, in green.
-fn buy_zone_icon_set(eng: &mut EngineApi<'_>, slot: u8) {
+/// `STATUSICON_HIDE`, `STATUSICON_SHOW`, `STATUSICON_FLASH` (`cdll_dll.h`).
+const STATUSICON_HIDE: u8 = 0;
+const STATUSICON_SHOW: u8 = 1;
+const STATUSICON_FLASH: u8 = 2;
+/// The colour of every icon the zones show (`WRITE_BYTE(0); WRITE_BYTE(160); WRITE_BYTE(0)`).
+const ICON_GREEN: [u8; 3] = [0, 160, 0];
+/// `MAX_HOSTAGES_RESCUE_RADIUS` (`hostage.h`): how close to an `info_hostage_rescue` a player
+/// is in a rescue zone on a map that has no `func_hostage_rescue`.
+const MAX_HOSTAGES_RESCUE_RADIUS: f32 = 256.0;
+/// The distance from an `info_bomb_target` within which a map that has no `func_bomb_target`
+/// puts a player in a bomb site (`OLD_CheckBombTarget`, `<=`).
+const OLD_BOMB_TARGET_RADIUS: f32 = 256.0;
+
+/// `gmsgStatusIcon` of the `*Icon_Set` functions: the `sprite` icon, shown, in green.
+fn zone_icon_set(eng: &mut EngineApi<'_>, slot: u8, sprite: &str) {
     eng.send_usermsg(
         MsgDest::One(slot),
         &CsUserMsg::StatusIcon {
-            status: 1,
-            sprite_name: "buyzone".to_string(),
-            color: Some([0, 160, 0]),
+            status: STATUSICON_SHOW,
+            sprite_name: sprite.to_string(),
+            color: Some(ICON_GREEN),
         },
     );
 }
 
-/// `BuyZoneIcon_Clear`: the `buyzone` icon is hidden. A buy menu the player has open is closed
-/// with it: a text or VGUI menu with the `slot10` command (the client's "close"), the client's own
-/// menu with `BuyClose`.
-pub(crate) fn buy_zone_icon_clear(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) {
+/// The `*Icon_Clear` functions (`BuyZoneIcon_Clear`, `RescueZoneIcon_Clear`,
+/// `EscapeZoneIcon_Clear`, `VIP_SafetyZoneIcon_Clear`): the `sprite` icon is hidden. A buy menu
+/// the player has open is closed with it: a text or VGUI menu with the `slot10` command (the
+/// client's "close"), the client's own menu with `BuyClose`. (The four functions are the same
+/// but for the sprite in vanilla; the `REGAMEDLL_FIXES` `BuyClose` for a VGUI menu is not
+/// ported.)
+fn zone_icon_clear(g: &GameState, eng: &mut EngineApi<'_>, slot: u8, sprite: &str) {
     eng.send_usermsg(
         MsgDest::One(slot),
         &CsUserMsg::StatusIcon {
-            status: 0,
-            sprite_name: "buyzone".to_string(),
+            status: STATUSICON_HIDE,
+            sprite_name: sprite.to_string(),
             color: None,
         },
     );
@@ -268,20 +290,85 @@ pub(crate) fn buy_zone_icon_clear(g: &GameState, eng: &mut EngineApi<'_>, slot: 
     }
 }
 
-/// `OLD_CheckBuyZone`: on a map with no `func_buyzone`, a player of a team that spawns is in a
-/// buy zone within 200 units of one of its team's spawn points (the origin of the point, whether
-/// or not the player is alive).
-fn old_check_buy_zone(g: &mut GameState, eng: &EngineApi<'_>, slot: u8) {
-    let Some(p) = g.players.get(usize::from(slot)).and_then(Option::as_ref) else {
-        return;
+/// `BuyZoneIcon_Clear`: the `buyzone` icon is hidden (see [`zone_icon_clear`]).
+pub(crate) fn buy_zone_icon_clear(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    zone_icon_clear(g, eng, slot, "buyzone");
+}
+
+/// `CBasePlayer::SetBombIcon(bFlash)` (`player.cpp` 1935-1956, read 2026-11-23): the `c4` icon
+/// is shown (flashing with `flash`) for the player that carries the bomb, else hidden; then
+/// `SetScoreboardAttributes`.
+pub(crate) fn set_bomb_icon(g: &GameState, eng: &mut EngineApi<'_>, slot: u8, flash: bool) {
+    let has_c4 = g
+        .players
+        .get(usize::from(slot))
+        .and_then(Option::as_ref)
+        .is_some_and(|p| p.has_c4);
+    let msg = if has_c4 {
+        CsUserMsg::StatusIcon {
+            status: if flash { STATUSICON_FLASH } else { STATUSICON_SHOW },
+            sprite_name: "c4".to_string(),
+            color: Some(ICON_GREEN),
+        }
+    } else {
+        CsUserMsg::StatusIcon {
+            status: STATUSICON_HIDE,
+            sprite_name: "c4".to_string(),
+            color: None,
+        }
     };
-    let class = match p.team {
-        Team::Terrorist => crate::world::T_SPAWN_CLASS,
-        Team::Ct => crate::world::CT_SPAWN_CLASS,
-        Team::Unassigned | Team::Spectator => return,
+    eng.send_usermsg(MsgDest::One(slot), &msg);
+    crate::messages::set_scoreboard_attributes(g, eng, usize::from(slot));
+}
+
+/// `BombTargetFlash_Set`: the bomb carrier is told once that it is in a target zone, and its
+/// `c4` icon flashes.
+fn bomb_target_flash_set(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    let carries = g
+        .players
+        .get(usize::from(slot))
+        .and_then(Option::as_ref)
+        .is_some_and(|p| p.has_c4);
+    if carries && hint::first_time(g, slot, hint::dhf::IN_TARGET_ZONE) {
+        hint::hint(g, eng, slot, "#Hint_you_are_in_targetzone");
+    }
+    set_bomb_icon(g, eng, slot, true);
+}
+
+/// `RescueZoneIcon_Set`: the `rescue` icon; a counter-terrorist is told once what the zone is.
+fn rescue_zone_icon_set(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    zone_icon_set(eng, slot, "rescue");
+    if team_of(g, slot) == Team::Ct && hint::first_time(g, slot, hint::dhf::IN_RESCUE_ZONE) {
+        hint::hint(g, eng, slot, "#Hint_hostage_rescue_zone");
+    }
+}
+
+/// `EscapeZoneIcon_Set`: the `escape` icon; a counter-terrorist is told once what the zone is.
+fn escape_zone_icon_set(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    zone_icon_set(eng, slot, "escape");
+    if team_of(g, slot) == Team::Ct && hint::first_time(g, slot, hint::dhf::IN_ESCAPE_ZONE) {
+        hint::hint(g, eng, slot, "#Hint_terrorist_escape_zone");
+    }
+}
+
+/// `VIP_SafetyZoneIcon_Set`: the `vipsafety` icon; a player of either team is told once what
+/// the zone is (`HintMessage(text, TRUE)`: shown to the dead too, but not past `_ah 0`).
+fn vip_safety_zone_icon_set(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    zone_icon_set(eng, slot, "vipsafety");
+    let text = match team_of(g, slot) {
+        Team::Ct => "#Hint_ct_vip_zone",
+        Team::Terrorist => "#Hint_terrorist_vip_zone",
+        _ => return,
     };
+    if hint::first_time(g, slot, hint::dhf::IN_VIPSAFETY_ZONE) {
+        hint::hint_message(g, eng, slot, text, true, false);
+    }
+}
+
+/// Whether the player of `slot` is at a distance `within` accepts from any entity of `class`.
+fn near_any(eng: &EngineApi<'_>, slot: u8, class: &str, within: impl Fn(f32) -> bool) -> bool {
     let Some(origin) = eng.ent(eng.client_edict(slot)).map(|v| v.origin) else {
-        return;
+        return false;
     };
     let mut near = false;
     let mut spot = None;
@@ -289,22 +376,68 @@ fn old_check_buy_zone(g: &mut GameState, eng: &EngineApi<'_>, slot: u8) {
         spot = Some(found);
         if eng
             .ent(found)
-            .is_some_and(|v| (v.origin - origin).length() < OLD_BUY_ZONE_RADIUS)
+            .is_some_and(|v| within((v.origin - origin).length()))
         {
             near = true;
         }
     }
-    if near && let Some(p) = g.players[usize::from(slot)].as_mut() {
+    near
+}
+
+/// `OLD_CheckBuyZone`: on a map with no `func_buyzone`, a player of a team that spawns is in a
+/// buy zone within 200 units of one of its team's spawn points (the origin of the point, whether
+/// or not the player is alive).
+fn old_check_buy_zone(g: &mut GameState, eng: &EngineApi<'_>, slot: u8) {
+    let class = match team_of(g, slot) {
+        Team::Terrorist => crate::world::T_SPAWN_CLASS,
+        Team::Ct => crate::world::CT_SPAWN_CLASS,
+        _ => return,
+    };
+    if near_any(eng, slot, class, |d| d < OLD_BUY_ZONE_RADIUS)
+        && let Some(p) = g.players[usize::from(slot)].as_mut()
+    {
         p.signals.signal(SIGNAL_BUY);
     }
 }
 
-/// `HandleSignals` (the buy part; the bomb, rescue, escape and VIP zones are 2E): on a map
-/// without buy zones the spawn points count ([`old_check_buy_zone`]), then the raised signals
-/// become the state and a change of the buy signal shows or hides the icon.
+/// `OLD_CheckBombTarget` (`player.cpp` 7132-7144, read 2026-11-23): a player within 256 units
+/// of an `info_bomb_target` is in a bomb site (any player, not only the carrier).
+fn old_check_bomb_target(g: &mut GameState, eng: &EngineApi<'_>, slot: u8) {
+    if near_any(eng, slot, "info_bomb_target", |d| d <= OLD_BOMB_TARGET_RADIUS)
+        && let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut)
+    {
+        p.signals.signal(SIGNAL_BOMB);
+    }
+}
+
+/// `OLD_CheckRescueZone` (`player.cpp` 7147-7160, read 2026-11-23): a player within
+/// [`MAX_HOSTAGES_RESCUE_RADIUS`] of an `info_hostage_rescue` is in a rescue zone.
+fn old_check_rescue_zone(g: &mut GameState, eng: &EngineApi<'_>, slot: u8) {
+    if near_any(eng, slot, "info_hostage_rescue", |d| d <= MAX_HOSTAGES_RESCUE_RADIUS)
+        && let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut)
+    {
+        p.signals.signal(SIGNAL_RESCUE);
+    }
+}
+
+/// `CBasePlayer::HandleSignals` (`player.cpp` 7162-7260, read 2026-11-23, vanilla: no
+/// `buy_anywhere`, `plant_c4_anywhere` or `buytime 0`): a map without a `func_buyzone`, a
+/// `func_bomb_target` or a `func_hostage_rescue` lets the players use the legacy points
+/// (`OLD_CheckBuyZone`, `OLD_CheckBombTarget`, `OLD_CheckRescueZone`), then the raised signals
+/// become the state and each change of a signal sets or clears its icon, in the order buy, bomb,
+/// rescue, escape, VIP safety.
+///
+/// The state lags the touch by up to half a second in both directions (the zones touch every
+/// frame, this runs every half second): `CC4::PrimaryAttack` reads the state.
 fn handle_signals(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     if !g.rules.map_has_buy_zone() {
         old_check_buy_zone(g, eng, slot);
+    }
+    if !g.rules.map_has_bomb_zone() {
+        old_check_bomb_target(g, eng, slot);
+    }
+    if !g.rules.map_has_rescue_zone() {
+        old_check_rescue_zone(g, eng, slot);
     }
     let Some(p) = g
         .players
@@ -316,11 +449,41 @@ fn handle_signals(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let signal = p.signals.pending();
     let changed = p.signals.state() ^ signal;
     p.signals.update();
+    let on = |bit: u8| signal & bit != 0;
     if changed & SIGNAL_BUY != 0 {
-        if signal & SIGNAL_BUY != 0 {
-            buy_zone_icon_set(eng, slot);
+        if on(SIGNAL_BUY) {
+            zone_icon_set(eng, slot, "buyzone");
         } else {
             buy_zone_icon_clear(g, eng, slot);
+        }
+    }
+    if changed & SIGNAL_BOMB != 0 {
+        if on(SIGNAL_BOMB) {
+            bomb_target_flash_set(g, eng, slot);
+        } else {
+            // `BombTargetFlash_Clear`.
+            set_bomb_icon(g, eng, slot, false);
+        }
+    }
+    if changed & SIGNAL_RESCUE != 0 {
+        if on(SIGNAL_RESCUE) {
+            rescue_zone_icon_set(g, eng, slot);
+        } else {
+            zone_icon_clear(g, eng, slot, "rescue");
+        }
+    }
+    if changed & SIGNAL_ESCAPE != 0 {
+        if on(SIGNAL_ESCAPE) {
+            escape_zone_icon_set(g, eng, slot);
+        } else {
+            zone_icon_clear(g, eng, slot, "escape");
+        }
+    }
+    if changed & SIGNAL_VIPSAFETY != 0 {
+        if on(SIGNAL_VIPSAFETY) {
+            vip_safety_zone_icon_set(g, eng, slot);
+        } else {
+            zone_icon_clear(g, eng, slot, "vipsafety");
         }
     }
 }
@@ -380,6 +543,26 @@ pub(crate) fn can_player_buy(
                 "#Cant_buy",
                 &[&buy_time.to_string()],
             );
+        }
+        return false;
+    }
+    // The VIP buys nothing, and a team the map's `info_map_parameters` keeps out of the buy
+    // menus (`buying`) cannot buy (`player.cpp` 4693-4721, read 2026-11-23).
+    if p.is_vip {
+        if display {
+            client_print(eng, slot, HUD_PRINTCENTER, "#VIP_cant_buy", &[]);
+        }
+        return false;
+    }
+    if g.rules.ct_cant_buy() && p.team == Team::Ct {
+        if display {
+            client_print(eng, slot, HUD_PRINTCENTER, "#CT_cant_buy", &[]);
+        }
+        return false;
+    }
+    if g.rules.t_cant_buy() && p.team == Team::Terrorist {
+        if display {
+            client_print(eng, slot, HUD_PRINTCENTER, "#Terrorist_cant_buy", &[]);
         }
         return false;
     }

@@ -15,7 +15,7 @@ use crate::GameState;
 use crate::buy::BuyZone;
 use crate::bullets::{self, MultiDamage};
 use crate::player::{DEAD_DEAD, DEAD_NO, player_slot};
-use crate::world::{BombTarget, BrushKind, FuncLadder, InfoPlayer, InfoTarget, StaticBrush, TriggerCamera, World};
+use crate::world::{BrushKind, FuncLadder, InfoPlayer, InfoTarget, StaticBrush, TriggerCamera, World};
 
 /// `USE_TYPE` (the Half-Life SDK's `cbase.h`; assumption: the header is not among the fetched
 /// sources): how an entity is used. `USE_OFF` is the default argument of `CBaseEntity::Use`.
@@ -367,7 +367,16 @@ pub fn create_entity(classname: &str) -> Option<Box<dyn GameEntity>> {
         "trigger_camera" => Box::new(TriggerCamera::default()),
         "func_ladder" => Box::new(FuncLadder),
         "func_buyzone" => Box::new(BuyZone::default()),
-        "func_bomb_target" => Box::new(BombTarget),
+        "func_bomb_target" => Box::new(crate::zones::BombTarget),
+        "info_bomb_target" => Box::new(crate::zones::PointMarker("info_bomb_target")),
+        "func_hostage_rescue" => Box::new(crate::zones::HostageRescue),
+        "info_hostage_rescue" => Box::new(crate::zones::PointMarker("info_hostage_rescue")),
+        "func_escapezone" => Box::new(crate::zones::EscapeZone),
+        "func_vip_safetyzone" => Box::new(crate::zones::VipSafetyZone),
+        "info_vip_start" => Box::new(crate::zones::PointMarker("info_vip_start")),
+        "info_map_parameters" => Box::new(crate::zones::InfoMapParameters),
+        #[cfg(feature = "test-hooks")]
+        "test_use_counter" => Box::new(crate::zones::UseCounter),
         "func_wall" => Box::new(StaticBrush::new("func_wall", BrushKind::Solid)),
         "func_door" => Box::new(StaticBrush::new("func_door", BrushKind::Door)),
         "func_water" => Box::new(StaticBrush::new("func_water", BrushKind::Door)),
@@ -643,6 +652,13 @@ mod tests {
             "func_ladder",
             "func_buyzone",
             "func_bomb_target",
+            "info_bomb_target",
+            "func_hostage_rescue",
+            "info_hostage_rescue",
+            "func_escapezone",
+            "func_vip_safetyzone",
+            "info_vip_start",
+            "info_map_parameters",
             "func_wall",
             "func_door",
             "func_door_rotating",

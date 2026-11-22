@@ -34,6 +34,10 @@ pub(crate) mod dhf {
     pub const ENEMY_KILLED: u32 = 1 << 11;
     pub const BOMB_RETRIEVED: u32 = 1 << 12;
     pub const AMMO_EXHAUSTED: u32 = 1 << 15;
+    pub const IN_TARGET_ZONE: u32 = 1 << 16;
+    pub const IN_RESCUE_ZONE: u32 = 1 << 17;
+    pub const IN_ESCAPE_ZONE: u32 = 1 << 18;
+    pub const IN_VIPSAFETY_ZONE: u32 = 1 << 19;
     pub const NIGHTVISION: u32 = 1 << 20;
     pub const SPEC_DUCK: u32 = 1 << 22;
 

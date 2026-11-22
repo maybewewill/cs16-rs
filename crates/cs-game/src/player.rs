@@ -168,10 +168,9 @@ const PLAYER_FREEZE_TIME_OVER: i32 = 1 << 1;
 /// `PLAYER_CAN_SHOOT` and `PLAYER_HOLDING_SHIELD` (`cdll_dll.h`), bits of `iuser3` in the client
 /// data. (`PLAYER_IN_BOMB_ZONE` is phase 2E.)
 const PLAYER_CAN_SHOOT: i32 = cs_sim::pm::consts::PLAYER_CAN_SHOOT;
-/// `PLAYER_IN_BOMB_ZONE` and `SIGNAL_BOMB` (`unisignals.h`): the bomb site signal (raised by
-/// the bomb zones of phase 2E; nothing raises it yet).
+/// `PLAYER_IN_BOMB_ZONE` (`cdll_dll.h`): the `iuser3` bit of a player whose `HandleSignals`
+/// state has `SIGNAL_BOMB` ([`crate::zones`] raises it).
 const PLAYER_IN_BOMB_ZONE: i32 = cs_sim::pm::consts::PLAYER_IN_BOMB_ZONE;
-const SIGNAL_BOMB: u8 = 1 << 1;
 const PLAYER_HOLDING_SHIELD: i32 = cs_sim::pm::consts::PLAYER_HOLDING_SHIELD;
 /// `DEATH_ANIMATION_TIME` (`gamerules.h`): how long a death lasts before the corpse is sent.
 const DEATH_ANIMATION_TIME: f64 = 3.0;
@@ -418,6 +417,17 @@ pub struct Player {
     pub(crate) signals: crate::buy::Signals,
     /// `m_tmHandleSignals`: server time `HandleSignals` runs next.
     pub(crate) next_handle_signals: f64,
+    /// `m_bHasC4`: the player carries the bomb (the C4 weapon and its handing out are 2E,
+    /// tasks 4 and 5; the zones and the icons already read the flag).
+    pub has_c4: bool,
+    /// `m_pentCurBombTarget`: the `func_bomb_target` the player's last touch was in (set by
+    /// [`crate::zones::BombTarget`]'s touch, cleared by `Spawn`).
+    pub cur_bomb_target: Option<EdictId>,
+    /// `m_bEscaped`: the player has reached an escape zone or a VIP safety zone this round.
+    pub escaped: bool,
+    /// `m_bIsVIP`: the player is the VIP of the round (the VIP is task 9; the buy check and the
+    /// safety zone already read the flag).
+    pub is_vip: bool,
     /// `m_iTimeCheckAllowed`: `timeleft` answers when the server time is past this (whole
     /// seconds).
     pub(crate) time_check_allowed: i32,
@@ -541,6 +551,10 @@ impl Player {
             hud: Default::default(),
             signals: Default::default(),
             next_handle_signals: 0.0,
+            has_c4: false,
+            cur_bomb_target: None,
+            escaped: false,
+            is_vip: false,
             time_check_allowed: 0,
             next_listmaps: 0.0,
             blind_until_time: 0.0,
@@ -1024,6 +1038,10 @@ pub(crate) fn spawn(
     observer::on_spawn(p);
     // `m_tmHandleSignals = 0`: the zones are looked at again with the first client data update.
     p.next_handle_signals = 0.0;
+    // `Spawn` (player.cpp 5838, 5863, 5870, read 2026-11-23): no bomb, no bomb site, not escaped.
+    p.cur_bomb_target = None;
+    p.has_c4 = false;
+    p.escaped = false;
     p.chat.on_spawn();
     // `PlayerSpawn`: `pev->weapons |= (1 << WEAPON_SUIT)`.
     p.weapons |= 1 << WEAPON_SUIT;
@@ -2362,6 +2380,64 @@ pub(crate) fn client_kill(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) 
     kill(g, eng, slot);
 }
 
+/// `CBasePlayer::Disappear` (ReGameDLL `player.cpp` 3902-3972, read 2026-11-23, vanilla): the
+/// player leaves the round without dying (the VIP that reached a safety zone): it stops
+/// animating on the plain player model, lies down (`view_ofs` -8, `DEAD_DYING`, not solid, off
+/// the ground), its HUD health and weapon go, the field of view resets, the rules look at the
+/// teams again, it counts as not killed, the buy zone icon goes and `PlayerDeathThink` takes it
+/// over. A player that carries the C4 drops it and one with a defuser loses it
+/// (`DropPlayerItem("weapon_c4")`, `RemoveDefuser`: tasks 4 and 5, so nothing happens yet).
+///
+/// Not ported: `DetachTank` (there is no `func_tank`), the `CSound` reset of the player's sound
+/// slot (the game has no sound entity), `SetSuitUpdate(nullptr, ...)` (no suit sentence queue).
+pub(crate) fn disappear(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    let index = usize::from(slot);
+    let id = eng.client_edict(slot);
+    if g.players.get(index).is_none_or(Option::is_none) {
+        return;
+    }
+    let player_model = eng.model_index("models/player.mdl");
+    if let Some(p) = g.players[index].as_mut() {
+        // `m_fSequenceFinished = TRUE`.
+        p.anim.sequence_finished = true;
+        // `m_iClientHealth = 0`, and `SendFOV(0)`: `m_iClientFOV = m_iFOV = 0`.
+        p.client_health = 0;
+        p.client_fov = 0;
+        p.fov = 0;
+    }
+    if let Some(v) = eng.ent_mut(id) {
+        // `SendFOV(0)`: `pev->fov = 0`.
+        v.fov = 0.0;
+        if let Some(model) = player_model {
+            v.modelindex = model;
+        }
+        v.view_ofs = Vec3::new(0.0, 0.0, -8.0);
+        v.deadflag = DEAD_DYING;
+        v.solid = SOLID_NOT;
+        v.flags &= !FL_ONGROUND;
+    }
+    messages::health(eng, slot, 0);
+    messages::cur_weapon_dead(eng, slot);
+    // `SendFOV(0)`.
+    messages::set_fov(eng, slot, 0);
+    rules::check_win_conditions(g, eng);
+    if let Some(p) = g.players[index].as_mut() {
+        p.not_killed = false;
+    }
+    // (`if (m_bHasC4) DropPlayerItem("weapon_c4")` and `else if (m_bHasDefuser)
+    // RemoveDefuser(); GiveNamedItem("item_thighpack")` go here: the bomb and the defuser are
+    // tasks 4 and 5.)
+    crate::buy::buy_zone_icon_clear(g, eng, slot);
+    // `SetThink(&CBasePlayer::PlayerDeathThink); pev->nextthink = time + 0.1`, and the angles
+    // lose their pitch and roll.
+    let now = eng.time();
+    if let Some(v) = eng.ent_mut(id) {
+        v.nextthink = f64::from(now as f32 + 0.1);
+        v.angles.x = 0.0;
+        v.angles.z = 0.0;
+    }
+}
+
 /// `CHalfLifeMultiplay::PlayerKilled` (the part this task has the data for) and
 /// `CBasePlayer::Killed` (ReGameDLL `player.cpp`, read 2026-11-22): the death notice, the frag
 /// rules, the scoreboard, then the player dies (`DEAD_DYING`, not solid, `MOVETYPE_TOSS`) and
@@ -2726,7 +2802,7 @@ pub(crate) fn client_data(
             if p.can_shoot && !p.is_defusing {
                 bits |= PLAYER_CAN_SHOOT;
             }
-            if p.signals.state() & SIGNAL_BOMB != 0 {
+            if p.signals.state() & crate::buy::SIGNAL_BOMB != 0 {
                 bits |= PLAYER_IN_BOMB_ZONE;
             }
             if p.owns_shield {

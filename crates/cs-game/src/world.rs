@@ -4,7 +4,7 @@
 use cs_assets::bsp::SpawnTeam;
 use cs_engine::consts::{
     EF_NODRAW, FL_CLIENT, FL_WORLDBRUSH, MOVETYPE_NOCLIP, MOVETYPE_NONE, MOVETYPE_PUSH, SOLID_BSP,
-    SOLID_NOT, SOLID_TRIGGER,
+    SOLID_NOT,
 };
 use cs_engine::{EdictId, EngineApi};
 use glam::Vec3;
@@ -590,45 +590,6 @@ impl GameEntity for FuncLadder {
         }
         v.effects &= !EF_NODRAW;
         v.movetype = MOVETYPE_PUSH;
-        true
-    }
-}
-
-/// `func_bomb_target` (`CBombTarget`, ReGameDLL `triggers.cpp`, read 2026-11-22): a trigger
-/// brush that marks a bomb site. `Spawn` is `InitTrigger` (a non-solid trigger of the brush
-/// model, invisible unless `showtriggers` is set, `angles` cleared as for [`BuyZone`]) and the
-/// touch and use callbacks.
-///
-/// Not ported (gap): `BombTargetTouch` (signals `SIGNAL_BOMB` to a player that carries the C4
-/// and remembers the site) and `BombTargetUse` (`SUB_UseTargets`), both for the bomb phase;
-/// until then the entity only exists, which the baselines, the entity numbering and
-/// `map_has_bomb_target` need.
-///
-/// [`BuyZone`]: crate::buy::BuyZone
-pub(crate) struct BombTarget;
-
-impl GameEntity for BombTarget {
-    fn classname(&self) -> &'static str {
-        "func_bomb_target"
-    }
-
-    fn spawn(&mut self, eng: &mut EngineApi<'_>, id: EdictId, _keys: &[(String, String)]) -> bool {
-        let showtriggers = eng.cvar_f32("showtriggers") != 0.0;
-        let Some(v) = eng.ent_mut(id) else {
-            return false;
-        };
-        v.angles = Vec3::ZERO;
-        v.solid = SOLID_TRIGGER;
-        v.movetype = MOVETYPE_NONE;
-        let (model, origin) = (v.model.clone(), v.origin);
-        if !showtriggers {
-            v.effects |= EF_NODRAW;
-        }
-        if model.is_empty() {
-            eng.set_origin(id, origin);
-        } else if !eng.set_model(id, &model) {
-            tracing::warn!(model = %model, "func_bomb_target model could not be set");
-        }
         true
     }
 }
