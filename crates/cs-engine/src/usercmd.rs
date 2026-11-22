@@ -350,13 +350,19 @@ impl<G: GameDll> Server<G> {
         // runs: `v.button` is the command's buttons, then `SV_CheckMovingGround` with the
         // command's frame time, `(float)(ucmd->msec * 0.001)`: a conveyor under the player's
         // feet sets its `basevelocity`, and a base velocity nothing renewed is folded into the
-        // `velocity`. Not ported here: `impulse` and `clbasevelocity` (no `EntVars` field for
-        // them), and the `v_angle` / `pmove->oldangles` update, which the game does itself (the
-        // engine has no `pmove` to hand the old angles to: cs-game owns `SV_SetupPMove`, and
-        // Task 8 of the pm_shared plan takes the angles).
+        // `velocity`. Not ported here: `clbasevelocity` (no `EntVars` field for it), the
+        // `impulse 204` full update of the original, and the `v_angle` / `pmove->oldangles`
+        // update, which the game does itself (the engine has no `pmove` to hand the old angles
+        // to: cs-game owns `SV_SetupPMove`, and Task 8 of the pm_shared plan takes the angles).
+        // The `impulse` is stored before the game's `CmdStart` here, after it in the original.
         let player = self.edicts.client(slot);
         if let Some(v) = self.edicts.get_mut(player).map(|e| &mut e.vars) {
             v.button = i32::from(step.buttons);
+            // `if (ucmd->impulse) sv_player->v.impulse = ucmd->impulse;` (`SV_RunCmd`, read
+            // 2026-11-22): a zero impulse leaves the last one for the game to clear.
+            if step.impulse != 0 {
+                v.impulse = i32::from(step.impulse);
+            }
         }
         self.check_moving_ground(player, (f64::from(step.msec) * 0.001) as f32);
         // `SV_RunCmd`: the other players are where this client saw them for the command, and

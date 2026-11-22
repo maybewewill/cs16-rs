@@ -11,6 +11,11 @@ pub const MAX_GENERIC: usize = 512;
 /// `MAX_EVENTS` (`rehlds/common/qlimits.h`, read 2026-11-22): event indices are `1..256`.
 pub const MAX_EVENTS: usize = 256;
 
+/// Most decals the server knows by name: `MAX_BASE_DECALS`, `1 << MAX_DECAL_INDEX_BITS` with 9
+/// bits (ReHLDS `rehlds/engine/decals.h`, read 2026-11-22). `Decal_Init` stops the server with
+/// an error past it; here the list is cut instead.
+pub const MAX_DECALS: usize = 512;
+
 /// Resource types of `svc_resourcelist`.
 pub mod res_type {
     pub const SOUND: u8 = 0;
@@ -36,6 +41,9 @@ pub struct PrecacheTables {
     generic: Table,
     events: Table,
     locked: bool,
+    /// The decal names of `decals.wad` in the order of `sv_decalnames`; see
+    /// [`decal_names_from_wads`]. Empty until the server sets them; it keeps them across maps.
+    decals: Vec<String>,
 }
 
 impl PrecacheTables {
@@ -57,7 +65,29 @@ impl PrecacheTables {
             generic: Table::new("generic", MAX_GENERIC),
             events: Table::new("event", MAX_EVENTS),
             locked: false,
+            decals: Vec::new(),
         }
+    }
+
+    /// Sets the decal list `pfnDecalIndex` answers from (`sv_decalnames`, filled once by
+    /// `Decal_Init`), cut to [`MAX_DECALS`].
+    pub fn set_decals(&mut self, mut names: Vec<String>) {
+        names.truncate(MAX_DECALS);
+        self.decals = names;
+    }
+
+    /// The decal list, to carry it over to the tables of the next map.
+    pub fn decals(&self) -> &[String] {
+        &self.decals
+    }
+
+    /// `PF_DecalIndex` (ReHLDS `rehlds/engine/pr_cmds.cpp`, read 2026-11-22): the position of
+    /// the first decal called `name` (`Q_stricmp`), or -1 for an unknown name.
+    pub fn decal_index(&self, name: &str) -> i32 {
+        self.decals
+            .iter()
+            .position(|d| d.eq_ignore_ascii_case(name))
+            .map_or(-1, |i| i as i32)
     }
 
     pub fn precache_model(&mut self, name: &str) -> Result<u16, PrecacheError> {
@@ -152,6 +182,71 @@ impl PrecacheTables {
 /// `RES_FATALIFMISSING` (`rehlds/common/resource.h`): the client stops when it cannot load the
 /// resource. Assumption: the value (1 << 0) is from memory.
 const RES_FATALIFMISSING: u8 = 1;
+
+/// The lump names of a WAD3 file in directory order, lowercased and cut at 16 bytes as
+/// `W_CleanupName` does (ReHLDS `rehlds/engine/wad.cpp`, read 2026-11-22); `None` for a file
+/// that is not a WAD3 or whose directory does not fit in it.
+pub fn wad_lump_names(wad: &[u8]) -> Option<Vec<String>> {
+    if wad.get(..4)? != b"WAD3" {
+        return None;
+    }
+    let word = |at: usize| -> Option<usize> {
+        let b = wad.get(at..at + 4)?;
+        usize::try_from(u32::from_le_bytes([b[0], b[1], b[2], b[3]])).ok()
+    };
+    let count = word(4)?;
+    let table = word(8)?;
+    let end = table.checked_add(count.checked_mul(32)?)?;
+    if end > wad.len() {
+        return None;
+    }
+    Some(
+        (0..count)
+            .map(|i| {
+                let raw = &wad[table + i * 32 + 16..table + i * 32 + 32];
+                let len = raw.iter().position(|&c| c == 0).unwrap_or(16);
+                raw[..len]
+                    .to_ascii_lowercase()
+                    .iter()
+                    .map(|&c| char::from(c))
+                    .collect()
+            })
+            .collect(),
+    )
+}
+
+/// The decal names the server holds, from the lump names of each `decals.wad` the engine loads,
+/// in load order (`DEFAULTGAME`, then `GAME`): `Decal_Init` and `Decal_MergeInDecals` (ReHLDS
+/// `rehlds/engine/decals.cpp`, read 2026-11-22).
+///
+/// The first list is kept as it is. Each later list is merged in as `Decal_MergeInDecals`
+/// does: the lumps of the list so far are put one by one at the head of a linked list
+/// (`Decal_ReplaceOrAppendLump`, which only replaces a lump of the same name in place), then
+/// the new lumps the same way, and the result is read from the head. Quirk kept: after a merge
+/// the order is reversed, a lump already in the list keeps its place in that reversed order,
+/// and a new lump goes in front of everything. With the same file loaded twice (as the stock
+/// `valve` and `cstrike` directories do) the indices run from the last lump of the file to the
+/// first.
+pub fn decal_names_from_wads(wads: &[Vec<String>]) -> Vec<String> {
+    let Some((first, later)) = wads.split_first() else {
+        return Vec::new();
+    };
+    let mut names = first.clone();
+    for wad in later {
+        // The end of `list` is the head of the original linked list: pushing is its prepend.
+        let mut list: Vec<String> = Vec::new();
+        for lump in names.iter().chain(wad) {
+            match list.iter_mut().find(|n| n.eq_ignore_ascii_case(lump)) {
+                Some(slot) => *slot = lump.clone(),
+                None => list.push(lump.clone()),
+            }
+        }
+        list.reverse();
+        names = list;
+    }
+    names.truncate(MAX_DECALS);
+    names
+}
 
 /// One precache table. Index 0 is the empty name.
 struct Table {

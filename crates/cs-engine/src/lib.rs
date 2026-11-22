@@ -59,7 +59,10 @@ pub use pm::{
     PM_PLAYER_MINS, PM_STUDIO_BOX, PM_STUDIO_IGNORE, PM_WORLD_ONLY, PhysEntView, PmPhysEnts,
     PmTraceResult,
 };
-pub use precache::{MAX_GENERIC, MAX_MODELS, MAX_SOUNDS, PrecacheError, PrecacheTables, res_type};
+pub use precache::{
+    MAX_DECALS, MAX_GENERIC, MAX_MODELS, MAX_SOUNDS, PrecacheError, PrecacheTables,
+    decal_names_from_wads, res_type, wad_lump_names,
+};
 pub use server::{
     MAX_DATAGRAMS_PER_FRAME, MAX_FRAMETIME, MAX_RELIABLE_BACKLOG, NetStats, SV_TIME_AT_MAP_START,
     Server, ServerConfig,

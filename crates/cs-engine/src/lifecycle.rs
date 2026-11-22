@@ -151,7 +151,9 @@ impl<G: GameDll> Server<G> {
             .successor(self.cfg.max_clients, self.cfg.max_edicts);
         self.sv_time = SV_TIME_AT_MAP_START;
         self.warned_movetypes.clear();
+        let decals = self.precache.decals().to_vec();
         self.precache = Self::map_precache(&map);
+        self.precache.set_decals(decals);
         self.world = WorldLinks::new(map.world_bounds());
         self.map = map;
         self.activate_map();

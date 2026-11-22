@@ -5,11 +5,12 @@
 
 use cs_proto48::bitbuf::MsgWriter;
 use cs_proto48::messages::{
-    svc, SND_FL_ATTENUATION, SND_FL_PITCH, SND_FL_STOP, SND_FL_VOLUME, SoundMsg, write_svc_centerprint,
-    write_svc_lightstyle, write_svc_print, write_svc_sound, write_svc_stufftext,
-    write_svc_temp_entity, write_svc_usermsg,
+    SND_FL_ATTENUATION, SND_FL_PITCH, SND_FL_SENTENCE, SND_FL_SPAWNING, SND_FL_STOP,
+    SND_FL_VOLUME, SoundMsg, svc, write_svc_centerprint, write_svc_lightstyle, write_svc_print,
+    write_svc_sound, write_svc_stufftext, write_svc_temp_entity, write_svc_usermsg,
 };
 use cs_proto48::netchan::MAX_MSGLEN;
+use cs_proto48::tempent::TempEntity;
 use cs_proto48::usermsg::CsUserMsg;
 use glam::Vec3;
 
@@ -345,6 +346,134 @@ impl EngineApi<'_> {
         self.start_sound(player, channel, sample, volume, attenuation, pitch, flags, except)
     }
 
+    /// `PF_sound_I` (ReHLDS `rehlds/engine/pr_cmds.cpp`, read 2026-11-22), the game's
+    /// `EMIT_SOUND_DYN2`: `SV_StartSound(0, ...)`, so the sound goes out as
+    /// [`emit_sound`](Self::emit_sound) does and reaches every client that can hear the point,
+    /// the entity's own client included. `volume` is 0 to 1 and is sent as
+    /// `(int)(volume * 255)`; `flags` are the `SND_FL_*` bits (`SND_FL_STOP`,
+    /// `SND_FL_CHANGE_VOL`, `SND_FL_CHANGE_PITCH`), ORed into the message; the arguments are held
+    /// to what the wire carries as `SV_BuildSoundMsg` does (see
+    /// [`pm_play_sound`](Self::pm_play_sound)).
+    ///
+    /// Quirk kept: a `SND_FL_STOP` sound is never limited to the PAS. Where `PF_sound_I` stops
+    /// the server with an error for an argument out of range (a volume over 255 as an int, a
+    /// channel outside 0 to 7, a pitch outside 0 to 255) this holds it to the range instead.
+    /// Assumption: a sentence sample (`!N`, `#N`) is refused like any sample that is not
+    /// precached; the weapons do not use them.
+    #[allow(clippy::too_many_arguments)]
+    pub fn emit_sound_flags(
+        &mut self,
+        ent: crate::edict::EdictId,
+        channel: i32,
+        sample: &str,
+        volume: f32,
+        attenuation: f32,
+        flags: i32,
+        pitch: i32,
+    ) -> bool {
+        if !volume.is_finite() {
+            return false;
+        }
+        let volume = ((f64::from(volume) * 255.0) as i32).clamp(0, 255) as u8;
+        let channel = match channel {
+            ..=-1 => 0,
+            0..=7 => channel as u8,
+            _ => CHAN_NETWORKVOICE_BASE,
+        };
+        let pitch = pitch.clamp(0, 255) as u8;
+        let flags = (flags as u32) & SND_FIELD_MASK;
+        self.start_sound(ent, channel, sample, volume, attenuation, pitch, flags, None)
+    }
+
+    /// `PF_ambientsound_I` (ReHLDS `rehlds/engine/pr_cmds.cpp`, read 2026-11-22): a sound that
+    /// plays from the point `origin`, as `svc_spawnstaticsound`: `origin` (coords), the sound
+    /// index (`short`), `volume * 255` and `attenuation * 64` (bytes), the entity number
+    /// (`short`), the pitch and the flags (bytes). It goes to every `Active` client on the
+    /// unreliable stream (`g_psv.datagram`), or, with [`SND_FL_SPAWNING`], into the init buffer
+    /// that every client entering the server is replayed (`g_psv.signon`; see
+    /// [`MsgDest::Init`]).
+    ///
+    /// A sample starting with `!` is a sentence: the flags get `SND_FL_SENTENCE`, the number
+    /// after the `!` is the sound index, and a number of 1536 and up is refused
+    /// (`CVOXFILESENTENCEMAX`). Any other sample must be in the sound precache.
+    ///
+    /// Returns `false`, sending nothing, for a stale entity, a non-finite origin, volume or
+    /// attenuation, and a sample that is not valid as above (the original prints and returns).
+    /// Assumptions: an empty sample is refused (the original would match slot 0 of its table);
+    /// the volume and the attenuation bytes are held to 0 to 255 (the original's `MSG_WriteByte`
+    /// does not check them in the build we read); the entity must be alive, which the original
+    /// cannot ask.
+    #[allow(clippy::too_many_arguments)]
+    pub fn emit_ambient_sound(
+        &mut self,
+        ent: crate::edict::EdictId,
+        origin: Vec3,
+        sample: &str,
+        volume: f32,
+        attenuation: f32,
+        flags: i32,
+        pitch: i32,
+    ) -> bool {
+        /// `CVOXFILESENTENCEMAX`: sentence numbers at and above this are not sentences.
+        const SENTENCE_MAX: i64 = 1536;
+        if !origin.is_finite()
+            || !volume.is_finite()
+            || !attenuation.is_finite()
+            || !sound_entity_fits(ent.index)
+            || self.edicts.get(ent).is_none()
+        {
+            return false;
+        }
+        let mut flags = flags as u32;
+        let sound_index = if let Some(number) = sample.strip_prefix('!') {
+            flags |= SND_FL_SENTENCE;
+            // `Q_atoi`: the leading digits, 0 for none.
+            let digits: String = number.chars().take_while(char::is_ascii_digit).collect();
+            let n = digits.parse::<i64>().unwrap_or(if digits.is_empty() { 0 } else { i64::MAX });
+            if n >= SENTENCE_MAX {
+                return false;
+            }
+            n as u16
+        } else {
+            match self.precache.sound_index(sample).filter(|&i| i != 0) {
+                Some(i) => i,
+                None => return false,
+            }
+        };
+        let mut w = MsgWriter::new();
+        w.write_u8(svc::SPAWNSTATICSOUND);
+        w.write_coord(origin.x);
+        w.write_coord(origin.y);
+        w.write_coord(origin.z);
+        w.write_u16(sound_index);
+        w.write_u8((f64::from(volume) * 255.0).clamp(0.0, 255.0) as u8);
+        w.write_u8((f64::from(attenuation) * 64.0).clamp(0.0, 255.0) as u8);
+        w.write_u16(ent.index);
+        w.write_u8(pitch.clamp(0, 255) as u8);
+        w.write_u8(flags as u8);
+        let dest = if flags & SND_FL_SPAWNING != 0 {
+            MsgDest::Init
+        } else {
+            MsgDest::Broadcast
+        };
+        self.send(dest, w.as_slice());
+        true
+    }
+
+    /// `PF_DecalIndex` (ReHLDS `rehlds/engine/pr_cmds.cpp`, read 2026-11-22): the index of the
+    /// decal `name` in `decals.wad` as the server holds it (see
+    /// [`Server::set_decals`](crate::Server::set_decals)), the first match without regard to
+    /// case, or -1 for a name it does not know.
+    pub fn decal_index(&self, name: &str) -> i32 {
+        self.precache.decal_index(name)
+    }
+
+    /// Sends a temp entity built by one of the [`cs_proto48::tempent`] functions to `dest`;
+    /// [`temp_entity`](Self::temp_entity) with the effect and its payload taken from `te`.
+    pub fn send_temp_entity(&mut self, dest: MsgDest, te: &TempEntity) {
+        self.temp_entity(dest, te.te_type, &te.payload);
+    }
+
     /// Stops the sound `sample` on `channel` of `ent` (`svc_sound` with `SND_STOP`), for
     /// every `Active` client: such a message is never limited to the PAS
     /// (`SV_StartSound_internal` sends PAS only for `channel != CHAN_STATIC && !(flags &
@@ -498,6 +627,75 @@ mod tests {
     }
 
     use super::*;
+    use crate::edict::{DEFAULT_MAX_EDICTS, EdictPool};
+    use crate::game::{ClientView, Outbox};
+    use crate::map::ServerMap;
+    use crate::precache::PrecacheTables;
+    use crate::world::WorldLinks;
+    use cs_cvar::CVarRegistry;
+    use cs_proto48::usermsg::UserMsgRegistry;
+
+    /// `svc_spawnstaticsound` byte by byte (`PF_ambientsound_I`): coords `(1, -2.5, 100)` are
+    /// 8, -20, 800; the sound is index 1; volume `0.5 * 255` is 127; attenuation
+    /// `0.8125 * 64` is 52; entity 1; pitch 90; flags 0x10 (the sentence flag is not set for a
+    /// named sample, so the 0x10 is the flag the caller passed).
+    #[test]
+    fn ambient_sound_bytes_follow_pf_ambientsound() {
+        let map = ServerMap::stub("de_test");
+        let mut world = WorldLinks::new(map.world_bounds());
+        let mut edicts = EdictPool::new(1, DEFAULT_MAX_EDICTS);
+        let mut precache = PrecacheTables::new(&map.path, map.submodel_count);
+        let mut cvars = CVarRegistry::new_empty();
+        let usermsgs = UserMsgRegistry::cs16_default();
+        let mut outbox = Outbox::new(1);
+        let mut clients = vec![ClientView::default()];
+        clients[0].state = ClientState::Active;
+        assert_eq!(precache.precache_sound("ambience/fan.wav"), Ok(1));
+        let mut eng = EngineApi::new(
+            &mut edicts,
+            &mut precache,
+            &mut cvars,
+            &usermsgs,
+            &map,
+            &mut world,
+            1.0,
+            0.0,
+            &mut outbox,
+            &mut clients,
+        );
+        let ent = eng.client_edict(0);
+        assert!(eng.emit_ambient_sound(
+            ent,
+            Vec3::new(1.0, -2.5, 100.0),
+            "ambience/fan.wav",
+            0.5,
+            0.8125,
+            0x10,
+            90
+        ));
+        // A sentence: `!12` is sound 12 with `SND_FL_SENTENCE` (0x10) added.
+        assert!(eng.emit_ambient_sound(ent, Vec3::ZERO, "!12", 1.0, 1.0, 0, 100));
+        let want = [
+            vec![
+                svc::SPAWNSTATICSOUND,
+                0x08, 0x00, 0xEC, 0xFF, 0x20, 0x03, // origin
+                0x01, 0x00, // sound index
+                127, 52, // volume, attenuation
+                0x01, 0x00, // entity
+                90, 0x10, // pitch, flags
+            ],
+            vec![
+                svc::SPAWNSTATICSOUND,
+                0, 0, 0, 0, 0, 0, //
+                12, 0, //
+                255, 64, //
+                0x01, 0x00, //
+                100, 0x10,
+            ],
+        ]
+        .concat();
+        assert_eq!(outbox.unreliable[0].as_slice(), &want[..]);
+    }
 
     #[test]
     fn text_is_cut_at_nul_and_on_a_character_boundary() {

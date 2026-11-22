@@ -225,6 +225,13 @@ impl<G: GameDll> Server<G> {
         server
     }
 
+    /// Sets the decal list `EngineApi::decal_index` answers from (`Decal_Init` in the original,
+    /// once at start). Build it with [`decal_names_from_wads`](crate::decal_names_from_wads)
+    /// from the lump names of the `decals.wad` files; it is kept across map changes.
+    pub fn set_decals(&mut self, names: Vec<String>) {
+        self.precache.set_decals(names);
+    }
+
     /// Fresh precache tables for `map`, before the game activates it.
     pub(crate) fn map_precache(map: &ServerMap) -> PrecacheTables {
         let precache = PrecacheTables::new(&map.path, map.submodel_count);

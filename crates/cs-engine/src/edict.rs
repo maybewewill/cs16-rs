@@ -65,6 +65,13 @@ pub struct EntVars {
     pub basevelocity: Vec3,
     pub modelindex: u16,
     pub weaponmodel: u16,
+    /// `entvars_t::viewmodel`, as the model index the engine sends (`clientdata_t::viewmodel`).
+    pub viewmodel: u16,
+    /// `entvars_t::weaponanim`: the sequence of the weapon animation the client plays.
+    pub weaponanim: i32,
+    /// `entvars_t::impulse`: the last non-zero `impulse` of a command of this player
+    /// (`SV_RunCmd` sets it only when the command's impulse is not 0; the game clears it).
+    pub impulse: i32,
     pub sequence: u16,
     pub gaitsequence: u16,
     pub frame: f32,

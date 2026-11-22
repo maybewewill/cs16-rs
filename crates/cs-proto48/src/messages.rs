@@ -189,8 +189,16 @@ pub const SND_FL_ATTENUATION: u32 = 1 << 1;
 pub const SND_FL_LARGE_INDEX: u32 = 1 << 2;
 /// `SoundMsg::flags` bit: the pitch byte follows (otherwise 100).
 pub const SND_FL_PITCH: u32 = 1 << 3;
+/// `SND_FL_SENTENCE`: the sound index is a sentence number (`!N` samples).
+pub const SND_FL_SENTENCE: u32 = 1 << 4;
 /// `SoundMsg::flags` bit: stop the sound instead of starting it (`SND_STOP`).
 pub const SND_FL_STOP: u32 = 1 << 5;
+/// `SND_FL_CHANGE_VOL`: change the volume of a sound that is playing.
+pub const SND_FL_CHANGE_VOL: u32 = 1 << 6;
+/// `SND_FL_CHANGE_PITCH`: change the pitch of a sound that is playing.
+pub const SND_FL_CHANGE_PITCH: u32 = 1 << 7;
+/// `SND_FL_SPAWNING`: the sound is sent while the map is spawning (ambient sounds).
+pub const SND_FL_SPAWNING: u32 = 1 << 8;
 
 /// Parsed `svc_serverinfo` payload (`SV_SendServerinfo_internal`, `sv_main.cpp:1129-1205`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1184,8 +1192,14 @@ fn skip_temp_entity(r: &mut MsgReader<'_>) -> Result<(u8, Vec<u8>), ProtoError> 
         15 => {
             let _ = r.read_bytes(19)?;
         }
-        18 | 27 | 28 | 107 => {
+        18 | 28 | 107 => {
             let _ = r.read_bytes(16)?;
+        }
+        27 => {
+            // TE_DLIGHT: 3 coords (6) + radius + rgb (3) + life + decay. `const.h` lists a
+            // brightness byte too; the engine does not read one (assumption, see
+            // `tempent::dlight`).
+            let _ = r.read_bytes(12)?;
         }
         22 => {
             let _ = r.read_bytes(10)?;

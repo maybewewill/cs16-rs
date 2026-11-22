@@ -12,6 +12,7 @@ pub mod info;
 pub mod messages;
 pub mod netchan;
 pub mod query;
+pub mod tempent;
 pub mod usermsg;
 
 /// GoldSrc network protocol version (`PROTOCOL_VERSION` in `ReHLDS/engine/net.h`).
