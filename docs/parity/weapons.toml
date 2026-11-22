@@ -24,8 +24,8 @@ evidence = "crates/cs-game/tests/weapon_core.rs::deploy_sets_next_attack_0_75, i
 
 [[item]]
 id = "weapon_reload"
-status = "tested"
-evidence = "crates/cs-game/tests/weapon_core.rs::default_reload_moves_ammo_into_the_clip, shotgun_reload_stages, reload_sound_reaches_nearby_players; per-weapon reload times and quirks: crates/cs-game/tests/weapons_pistols.rs::reload_quirks_and_idle, crates/cs-game/tests/weapons_special.rs::shotgun_special_reload_and_pump"
+status = "verified"
+evidence = "crates/cs-game/tests/weapon_core.rs::default_reload_moves_ammo_into_the_clip, shotgun_reload_stages, reload_sound_reaches_nearby_players; per-weapon reload times and quirks: crates/cs-game/tests/weapons_pistols.rs::reload_quirks_and_idle, crates/cs-game/tests/weapons_special.rs::shotgun_special_reload_and_pump VERIFIED 2026-11-23 with the original client: a USP reload from 8|24 ends at 12|20."
 
 [[item]]
 id = "weapon_kickback_punch"
@@ -49,8 +49,8 @@ evidence = "crates/cs-engine/tests/events.rs::playback_reaches_pas_clients_not_t
 
 [[item]]
 id = "weapon_brass_eject"
-status = "implemented"
-evidence = "crates/cs-game/src/weapons/core.rs eject_brass_late (CBasePlayerWeapon::EjectBrassLate, weapons.cpp 682): a TE_MODEL (106) shell at the eye, 9 down, 16 forward; the weapon-entity origin and yaw are taken as the player's (assumption); no test asserts the bytes. From memory - confirm: the shell flies out to the right (checklist row 5)"
+status = "verified"
+evidence = "crates/cs-game/src/weapons/core.rs eject_brass_late (CBasePlayerWeapon::EjectBrassLate, weapons.cpp 682): a TE_MODEL (106) shell at the eye, 9 down, 16 forward; the weapon-entity origin and yaw are taken as the player's (assumption); no test asserts the bytes. From memory - confirm: the shell flies out to the right (checklist row 5) VERIFIED 2026-11-23 with the original client: a USP shot throws a shell casing that lands on the floor."
 
 [[item]]
 id = "bullet_range_damage"
@@ -99,8 +99,8 @@ evidence = "crates/cs-game/tests/weapons_pistols.rs::pistol_rows_match_source, s
 
 [[item]]
 id = "weapon_usp"
-status = "tested"
-evidence = "crates/cs-game/tests/weapons_pistols.rs::pistol_rows_match_source, semi_auto_needs_release, pistol_events_carry_source_args, reload_quirks_and_idle, usp_silencer_toggle_timing (wpn_usp.cpp). Known gap: the shield variants (shield models, `m_bShieldDrawn` states) are not ported"
+status = "verified"
+evidence = "crates/cs-game/tests/weapons_pistols.rs::pistol_rows_match_source, semi_auto_needs_release, pistol_events_carry_source_args, reload_quirks_and_idle, usp_silencer_toggle_timing (wpn_usp.cpp). Known gap: the shield variants (shield models, `m_bShieldDrawn` states) are not ported VERIFIED 2026-11-23 with the original CS 1.6 client (build 10210) on our server, de_dust2: the USP fires with its animation, muzzle effect and a bullet decal under the crosshair; the clip goes 12, 11, 8 over four shots."
 
 [[item]]
 id = "weapon_p228"
@@ -269,8 +269,8 @@ evidence = "2026-11-22, method 1 (the weapon-selection HUD builds from our Weapo
 
 [[item]]
 id = "weapon_buy"
-status = "tested"
-evidence = "crates/cs-game/tests/inventory.rs::buy_drop_pickup_as_regamedll, buying_a_primary_drops_the_old_one; crates/cs-game/tests/buy.rs::cannot_buy_outside_the_zone_or_without_money, buy_time_expires, the_buy_menus_follow_the_clients_preference (client.cpp BuyWeaponByWeaponID, read 2026-11-22). Deviation: REGAMEDLL_FIXES is not used, vanilla rules"
+status = "verified"
+evidence = "crates/cs-game/tests/inventory.rs::buy_drop_pickup_as_regamedll, buying_a_primary_drops_the_old_one; crates/cs-game/tests/buy.rs::cannot_buy_outside_the_zone_or_without_money, buy_time_expires, the_buy_menus_follow_the_clients_preference (client.cpp BuyWeaponByWeaponID, read 2026-11-22). Deviation: REGAMEDLL_FIXES is not used, vanilla rules. VERIFIED 2026-11-23 with the original client: the VGUI buy menu opens in the buy zone; after mp_buytime the buy is refused with the message 90 seconds have passed, you cannot buy anything now; after sv_restartround a Desert Eagle is bought ($800 to $150) and the USP is dropped on the floor (the replaced pistol)."
 
 [[item]]
 id = "weapon_buy_ammo"
