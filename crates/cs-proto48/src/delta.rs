@@ -58,11 +58,44 @@ pub struct DeltaSchema {
     pub name: String,
     pub encoder: Option<String>,
     pub fields: Vec<DeltaFieldDesc>,
+    /// Name -> index of the first field of that name, built on the first lookup. It is a cache
+    /// of `fields` (equality and `Clone` ignore it), so `fields` must not change after a lookup.
+    index: FieldIndexCache,
+}
+
+/// The lazily built name -> field index map of a [`DeltaSchema`]: a lookup was a linear scan of
+/// string compares, run about 55 times per entity state decoded.
+#[derive(Debug, Default)]
+struct FieldIndexCache(std::sync::OnceLock<std::collections::HashMap<String, usize>>);
+
+impl Clone for FieldIndexCache {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl PartialEq for FieldIndexCache {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
 }
 
 impl DeltaSchema {
+    /// A schema of `fields`.
+    pub fn new(name: String, encoder: Option<String>, fields: Vec<DeltaFieldDesc>) -> Self {
+        Self { name, encoder, fields, index: FieldIndexCache::default() }
+    }
+
+    /// The index of the first field called `name`.
     pub fn field_index(&self, name: &str) -> Option<usize> {
-        self.fields.iter().position(|f| f.name == name)
+        let map = self.index.0.get_or_init(|| {
+            let mut map = std::collections::HashMap::with_capacity(self.fields.len());
+            for (i, f) in self.fields.iter().enumerate() {
+                map.entry(f.name.clone()).or_insert(i);
+            }
+            map
+        });
+        map.get(name).copied()
     }
 
     pub fn zero_record(&self) -> DeltaRecord {
@@ -210,10 +243,10 @@ impl DeltaRecord {
 /// Built-in `g_MetaDelta` (`delta.cpp:83-92`) used to serialize and deserialize
 /// `svc_deltadescription` schemas over the wire.
 pub fn meta_delta_schema() -> DeltaSchema {
-    DeltaSchema {
-        name: "delta_description_t".to_string(),
-        encoder: None,
-        fields: vec![
+    DeltaSchema::new(
+        "delta_description_t".to_string(),
+        None,
+        vec![
             DeltaFieldDesc {
                 field_type: DT_INTEGER,
                 name: "fieldType".to_string(),
@@ -278,7 +311,7 @@ pub fn meta_delta_schema() -> DeltaSchema {
                 postmultiply: 1.0,
             },
         ],
-    }
+    )
 }
 
 /// The changed-field marks (`FDT_MARK`) of one delta, as a game's conditional encoder sees them
@@ -334,7 +367,7 @@ pub type DeltaEncodeFn<'e> = &'e mut dyn FnMut(&DeltaRecord, &DeltaRecord, &mut 
 /// The marks of the fields that differ between `from` and `to` (`DELTA_MarkDelta`), edited by the
 /// conditional encoder when there is one (`DELTA_CheckDelta`, `rehlds/engine/delta.cpp`: the
 /// encoder runs after the marking and before the fields are counted).
-fn delta_mask(
+pub fn delta_mask(
     schema: &DeltaSchema,
     from: &DeltaRecord,
     to: &DeltaRecord,
@@ -377,6 +410,19 @@ pub fn write_delta_encoded(
     encode: Option<DeltaEncodeFn<'_>>,
 ) -> bool {
     let mask = delta_mask(schema, from, to, encode);
+    write_delta_masked(w, schema, to, mask, force, time_base)
+}
+
+/// [`write_delta_encoded`] for a `mask` [`delta_mask`] already made: the conditional encoder is
+/// not run again. Returns `true` if any field was marked.
+pub fn write_delta_masked(
+    w: &mut MsgWriter,
+    schema: &DeltaSchema,
+    to: &DeltaRecord,
+    mask: u64,
+    force: bool,
+    time_base: f64,
+) -> bool {
     let last_bit = (mask != 0).then(|| 63 - mask.leading_zeros() as usize);
 
     if last_bit.is_none() && !force {
@@ -642,11 +688,7 @@ pub fn read_delta_description(r: &mut MsgReader<'_>) -> Result<DeltaSchema, Prot
         });
     }
     r.end_bit_reading()?;
-    Ok(DeltaSchema {
-        name,
-        encoder: None,
-        fields,
-    })
+    Ok(DeltaSchema::new(name, None, fields))
 }
 
 /// Parse Valve's `cstrike/delta.lst` or `valve/delta.lst` file into `DeltaSchema`s.
@@ -739,11 +781,7 @@ pub fn parse_delta_lst(source: &str) -> Result<Vec<DeltaSchema>, ProtoError> {
             });
         }
 
-        schemas.push(DeltaSchema {
-            name: struct_name.to_string(),
-            encoder,
-            fields,
-        });
+        schemas.push(DeltaSchema::new(struct_name.to_string(), encoder, fields));
     }
 
     Ok(schemas)
@@ -1185,6 +1223,14 @@ pub struct GoldSrcEntityState {
     pub iuser4: i32,
 }
 
+/// The wire names of the indexed `entity_state_t` fields, so a state is not decoded through
+/// `format!`.
+const CONTROLLER_NAMES: [&str; 4] = ["controller[0]", "controller[1]", "controller[2]", "controller[3]"];
+const BLENDING_NAMES: [&str; 2] = ["blending[0]", "blending[1]"];
+const BASEVELOCITY_NAMES: [&str; 3] = ["basevelocity[0]", "basevelocity[1]", "basevelocity[2]"];
+const STARTPOS_NAMES: [&str; 3] = ["startpos[0]", "startpos[1]", "startpos[2]"];
+const ENDPOS_NAMES: [&str; 3] = ["endpos[0]", "endpos[1]", "endpos[2]"];
+
 impl GoldSrcEntityState {
     pub fn to_delta(&self, schema: &DeltaSchema) -> DeltaRecord {
         let mut rec = schema.zero_record();
@@ -1225,18 +1271,18 @@ impl GoldSrcEntityState {
         rec.set_u32(schema, "rendercolor.r", u32::from(self.rendercolor[0]));
         rec.set_u32(schema, "rendercolor.g", u32::from(self.rendercolor[1]));
         rec.set_u32(schema, "rendercolor.b", u32::from(self.rendercolor[2]));
-        for (i, c) in self.controller.iter().enumerate() {
-            rec.set_u32(schema, &format!("controller[{i}]"), u32::from(*c));
+        for (name, c) in CONTROLLER_NAMES.iter().zip(&self.controller) {
+            rec.set_u32(schema, name, u32::from(*c));
         }
-        for (i, b) in self.blending.iter().enumerate() {
-            rec.set_u32(schema, &format!("blending[{i}]"), u32::from(*b));
+        for (name, b) in BLENDING_NAMES.iter().zip(&self.blending) {
+            rec.set_u32(schema, name, u32::from(*b));
         }
         rec.set_f32(schema, "friction", self.friction);
         rec.set_f32(schema, "gravity", self.gravity);
-        for (i, axis) in ["0", "1", "2"].iter().enumerate() {
-            rec.set_f32(schema, &format!("basevelocity[{axis}]"), self.basevelocity[i]);
-            rec.set_f32(schema, &format!("startpos[{axis}]"), self.startpos[i]);
-            rec.set_f32(schema, &format!("endpos[{axis}]"), self.endpos[i]);
+        for i in 0..3 {
+            rec.set_f32(schema, BASEVELOCITY_NAMES[i], self.basevelocity[i]);
+            rec.set_f32(schema, STARTPOS_NAMES[i], self.startpos[i]);
+            rec.set_f32(schema, ENDPOS_NAMES[i], self.endpos[i]);
         }
         rec.set_f32(schema, "impacttime", self.impacttime);
         rec.set_f32(schema, "starttime", self.starttime);
@@ -1295,12 +1341,8 @@ impl GoldSrcEntityState {
                 rec.get_u32(schema, "rendercolor.g") as u8,
                 rec.get_u32(schema, "rendercolor.b") as u8,
             ],
-            controller: std::array::from_fn(|i| {
-                rec.get_u32(schema, &format!("controller[{i}]")) as u8
-            }),
-            blending: std::array::from_fn(|i| {
-                rec.get_u32(schema, &format!("blending[{i}]")) as u8
-            }),
+            controller: std::array::from_fn(|i| rec.get_u32(schema, CONTROLLER_NAMES[i]) as u8),
+            blending: std::array::from_fn(|i| rec.get_u32(schema, BLENDING_NAMES[i]) as u8),
             friction: rec.get_f32(schema, "friction"),
             gravity: rec.get_f32(schema, "gravity"),
             basevelocity: Vec3::new(

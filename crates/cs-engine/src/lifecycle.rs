@@ -153,9 +153,12 @@ impl<G: GameDll> Server<G> {
         self.warned_movetypes.clear();
         let decals = self.precache.decals().to_vec();
         let loader = self.precache.model_loader();
+        let studio_cache = self.precache.studio_cache();
         self.precache = Self::map_precache(&map);
         self.precache.set_decals(decals);
         self.precache.set_model_loader(loader);
+        // The player and weapon models of this map are mostly those of the last: not parsed again.
+        self.precache.restore_studio_cache(studio_cache);
         self.world = WorldLinks::new(map.world_bounds());
         self.map = map;
         self.activate_map();

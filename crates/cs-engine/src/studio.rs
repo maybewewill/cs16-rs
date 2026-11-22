@@ -709,7 +709,8 @@ impl EngineApi<'_> {
     }
 
     /// Bone setups the traces of this call made so far (cache misses). For tests that count
-    /// work instead of time.
+    /// work instead of time. Test-only (`test-hooks` feature).
+    #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn studio_setups(&self) -> usize {
         self.studio_cache.borrow().setups

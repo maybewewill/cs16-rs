@@ -426,7 +426,9 @@ impl<G: GameDll> Server<G> {
         self.baselines.len()
     }
 
-    /// The entity numbers of the spawn baselines, ascending.
+    /// The entity numbers of the spawn baselines, ascending. Test-only (`test-hooks` feature).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
     pub fn baseline_numbers(&self) -> Vec<u16> {
         self.baselines.iter().map(|(number, _)| *number).collect()
     }
@@ -935,6 +937,7 @@ impl<G: GameDll> Server<G> {
         let mut w = MsgWriter::new();
         w.write_bytes(&self.outbox.init);
         // The game's conditional encoders run on baselines as well (`DELTA_WriteDelta`).
+        let has_encoder = self.game.has_delta_encoder();
         let game = &mut self.game;
         let mut encode = |name: &str,
                           from: &GoldSrcEntityState,
@@ -942,13 +945,14 @@ impl<G: GameDll> Server<G> {
                           marks: &mut cs_proto48::delta::DeltaMarks<'_>| {
             game.delta_encode(name, slot, from, to, marks);
         };
+        let encode = has_encoder.then_some(&mut encode as cs_proto48::messages::EntityEncodeFn<'_>);
         write_spawn_baselines(
             &mut w,
             &self.deltas,
             self.cfg.max_clients,
             &self.baselines,
             self.sv_time,
-            Some(&mut encode),
+            encode,
         );
 
         // `SV_WriteSpawn`: a player is a sliding box that walks unless the game says otherwise;
@@ -1000,6 +1004,8 @@ impl<G: GameDll> Server<G> {
         // others learn of the joiner at the end of this frame (`broadcast_userinfo`).
         self.views[index].userinfo_dirty = true;
         client.state = ClientState::Signon(SignonStage::AwaitSendEnts);
+        // What `UpdateClientData` and `GetWeaponData` made the game send goes behind the answer.
+        self.drain_outbox();
     }
 }
 

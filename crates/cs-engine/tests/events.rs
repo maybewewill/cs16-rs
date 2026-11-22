@@ -380,6 +380,29 @@ fn bad_event_index_is_refused_quietly() {
     assert_eq!(h.server.client_state(0), ClientState::Active);
 }
 
+/// The invoker's own angles go on the wire when none are given: NaN in them is sent as zero,
+/// and NaN in the invoker's own origin refuses the event.
+#[test]
+fn the_invokers_own_non_finite_angles_and_origin_do_not_reach_the_wire() {
+    let (mut h, mut a, mut b) = two_active();
+    h.server.game_mut().act(|eng| {
+        let shooter = eng.client_edict(0);
+        eng.ent_mut(shooter).unwrap().angles = Vec3::new(f32::NAN, f32::INFINITY, 5.0);
+        play(eng, 0, 0, 1);
+        eng.ent_mut(shooter).unwrap().origin = Vec3::splat(f32::NAN);
+        play(eng, 0, 0, 2);
+    });
+    h.step(&mut [&mut a, &mut b], 30);
+    for p in [&a, &b] {
+        let events = events_of(p);
+        assert_eq!(events.len(), 1, "only the event of the finite origin");
+        assert_eq!(events[0].index, 1);
+        let args = events[0].args.unwrap_or_default();
+        assert!(args.angles.is_finite());
+        assert!(args.origin.is_finite());
+    }
+}
+
 /// de_dust2 with a T probe at the T spawn (slot 0) and a CT probe at the CT spawn (slot 1),
 /// events precached; `None` without the installed game.
 fn dust2_two_players() -> Option<(Harness, Probe, Probe)> {

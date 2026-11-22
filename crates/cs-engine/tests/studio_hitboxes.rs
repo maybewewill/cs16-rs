@@ -382,6 +382,34 @@ fn models_are_read_when_precached_and_again_after_a_map_change() {
     assert_eq!(t.trace.hitgroup, HEAD);
 }
 
+/// The parsed models are kept by name across map changes: the file is read once, not once per
+/// map.
+#[test]
+fn a_model_is_read_once_across_map_changes() {
+    let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = Arc::clone(&reads);
+    let bytes = two_box_model();
+    let mut h = Harness::new(2);
+    h.server.set_model_loader(Arc::new(move |name| {
+        if name.ends_with("test.mdl") {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        Some(bytes.clone())
+    }));
+    let first = reads.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(first, 1, "read when precached");
+    for map in ["second", "third", "fourth"] {
+        h.server.change_map(cs_engine::ServerMap::stub(map));
+        h.step(&mut [], 1);
+    }
+    assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), first);
+    let t = run(&mut h, |eng| {
+        studio_entity(eng, Vec3::new(100.0, 0.0, 0.0), STANDING_MINS, STANDING_MAXS, 0);
+        ray(eng, Vec3::new(0.0, 0.0, 66.0), Vec3::new(200.0, 0.0, 66.0))
+    });
+    assert_eq!(t.trace.hitgroup, HEAD, "the cached model still traces by its hitboxes");
+}
+
 #[test]
 fn hull_traces_ignore_hitboxes() {
     // A moving box (the hull of a player) is clipped against the entity's own box, as it is

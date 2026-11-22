@@ -334,11 +334,11 @@ fn decal_list_limits_and_resources() {
     assert_eq!(
         types,
         vec![
+            (res_type::GENERIC, 1, "hud.txt"),
             (res_type::MODEL, 1, "maps/x.bsp"),
             (res_type::MODEL, 2, "models/a.mdl"),
             (res_type::DECAL, 0, "0123456789abcde"),
             (res_type::DECAL, 1, "{shot1"),
-            (res_type::GENERIC, 1, "hud.txt"),
         ]
     );
 }

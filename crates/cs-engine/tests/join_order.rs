@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::{Harness, JOINER_PRINT, SHOUT, TestGame, print_bytes};
+use common::{CLIENTDATA_PRINT, Harness, JOINER_PRINT, SHOUT, TestGame, print_bytes};
 use cs_engine::{ClientState, MsgDest};
 use cs_probe::ProbeState;
 use cs_proto48::messages::{SvcMessage, svc};
@@ -140,6 +140,20 @@ fn what_the_game_sends_the_joiner_in_put_in_server_is_thrown_away() {
     // joiner alone is gone; the broadcast is `sv.reliable_datagram`, which stays.
     assert_eq!(count(JOINER_PRINT), 0);
     assert_eq!(count(SHOUT), 1);
+}
+
+/// `SV_WriteSpawn` puts the answer in `netchan.message` and only then does the game's
+/// `UpdateClientData` run, so what it sends the client alone follows the answer.
+#[test]
+fn what_update_client_data_sends_follows_the_spawn_answer() {
+    let game = TestGame { print_in_update_client_data: true, ..TestGame::default() };
+    let (_h, p) = joined_with(game);
+    // Not inside the answer (baselines to the voice codec), but right behind it.
+    assert!(!spawn_answer(&p).contains(&svc::PRINT), "no print inside the answer");
+    let log = p.opcode_log();
+    let voiceinit = log.iter().position(|&op| op == svc::VOICEINIT).expect("voiceinit");
+    assert_eq!(log[voiceinit + 1], svc::PRINT, "the print follows the answer");
+    assert!(p.messages().iter().any(|m| *m == SvcMessage::Print(CLIENTDATA_PRINT.to_string())));
 }
 
 #[test]

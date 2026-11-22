@@ -45,6 +45,9 @@ pub enum PrecacheError {
 
 pub struct PrecacheTables {
     models: Table,
+    /// `model_precache_flags`, by model index: [`RES_FATALIFMISSING`] for the world, the
+    /// submodels and every model the game did not precache with a leading `!`.
+    model_flags: Vec<u8>,
     sounds: Table,
     generic: Table,
     events: Table,
@@ -57,7 +60,15 @@ pub struct PrecacheTables {
     loader: Option<ModelLoader>,
     /// The studio models read at precache, by model index (`Mod_Extradata` of the original).
     studio: HashMap<u16, Arc<StudioPoseData>>,
+    /// The parsed studio models by lowercase name, kept across map changes
+    /// ([`studio_cache`](Self::studio_cache)): the game precaches the same player and weapon
+    /// models on every map, and parsing them again costs a file read and a parse each.
+    studio_by_name: HashMap<String, Arc<StudioPoseData>>,
 }
+
+/// Most parsed studio models [`PrecacheTables`] keeps by name: the size of the model table,
+/// so the cache holds no more than one map's worth of models plus what the last maps left.
+const MAX_STUDIO_CACHE: usize = MAX_MODELS;
 
 impl PrecacheTables {
     /// Models: `[0]` = "", `[1]` = `map_path`, `[2..]` = `"*1"..="*{n-1}"`
@@ -67,13 +78,18 @@ impl PrecacheTables {
         let mut models = Table::new("model", MAX_MODELS);
         let names = std::iter::once(map_path.to_string())
             .chain((1..submodel_count).map(|i| format!("*{i}")));
+        // `SV_SpawnServer`: the world and the submodels are `RES_FATALIFMISSING` (ReHLDS
+        // `rehlds/engine/sv_main.cpp`, read 2026-11-22).
+        let mut model_flags = vec![0];
         for name in names {
             if models.insert(&name, false).is_err() {
                 break;
             }
+            model_flags.push(RES_FATALIFMISSING);
         }
         Self {
             models,
+            model_flags,
             sounds: Table::new("sound", MAX_SOUNDS),
             generic: Table::new("generic", MAX_GENERIC),
             events: Table::new("event", MAX_EVENTS),
@@ -81,6 +97,7 @@ impl PrecacheTables {
             decals: Vec::new(),
             loader: None,
             studio: HashMap::new(),
+            studio_by_name: HashMap::new(),
         }
     }
 
@@ -112,8 +129,21 @@ impl PrecacheTables {
             .map_or(-1, |i| i as i32)
     }
 
+    /// `PF_precache_model_I` (ReHLDS `rehlds/engine/pr_cmds.cpp`, read 2026-11-22): a leading
+    /// `!` marks the model optional and is not part of the name; any other model is
+    /// `RES_FATALIFMISSING` in the resource list. The flag is set when the name is new only.
     pub fn precache_model(&mut self, name: &str) -> Result<u16, PrecacheError> {
+        let (optional, name) = match name.strip_prefix('!') {
+            Some(rest) => (true, rest),
+            None => (false, name),
+        };
         let index = self.models.insert(name, self.locked)?;
+        if usize::from(index) >= self.model_flags.len() {
+            self.model_flags.resize(usize::from(index) + 1, 0);
+            if !optional {
+                self.model_flags[usize::from(index)] |= RES_FATALIFMISSING;
+            }
+        }
         self.load_studio(index, name);
         Ok(index)
     }
@@ -121,6 +151,37 @@ impl PrecacheTables {
     /// Sets where studio models are read from and reads the `.mdl` models precached so far.
     pub fn set_model_loader(&mut self, loader: Option<ModelLoader>) {
         self.loader = loader;
+        // What the old loader read is not what the new one reads.
+        self.studio_by_name.clear();
+        let names: Vec<(u16, String)> = self
+            .models
+            .names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (i as u16, n.clone()))
+            .collect();
+        for (index, name) in names {
+            self.load_studio(index, &name);
+        }
+    }
+
+    /// The parsed studio models by name, to hand on to the tables of the next map with
+    /// [`restore_studio_cache`](Self::restore_studio_cache) (cheap: the models are shared).
+    pub fn studio_cache(&self) -> HashMap<String, Arc<StudioPoseData>> {
+        self.studio_by_name.clone()
+    }
+
+    /// Takes the cache of the previous map's tables (see [`studio_cache`](Self::studio_cache)),
+    /// bounded to [`MAX_STUDIO_CACHE`] names, after the loader is set. The models precached so
+    /// far that the cache knows are not read again.
+    pub fn restore_studio_cache(&mut self, cache: HashMap<String, Arc<StudioPoseData>>) {
+        self.studio_by_name = cache;
+        while self.studio_by_name.len() > MAX_STUDIO_CACHE {
+            let Some(name) = self.studio_by_name.keys().next().cloned() else {
+                break;
+            };
+            self.studio_by_name.remove(&name);
+        }
         let names: Vec<(u16, String)> = self
             .models
             .names
@@ -156,13 +217,27 @@ impl PrecacheTables {
         let Some(loader) = &self.loader else {
             return;
         };
+        if let Some(model) = self.studio_by_name.get(&key(name)) {
+            self.studio.insert(index, Arc::clone(model));
+            return;
+        }
         let Some(bytes) = loader(name) else {
             tracing::warn!(model = name, "model file not found; traced as a box");
             return;
         };
         match StudioPoseData::parse(&bytes) {
             Ok(model) => {
-                self.studio.insert(index, Arc::new(model));
+                let model = Arc::new(model);
+                if self.studio_by_name.len() >= MAX_STUDIO_CACHE {
+                    // Full: drop the models this map does not use before taking a new one.
+                    let used: std::collections::HashSet<String> =
+                        self.models.names.iter().map(|n| key(n)).collect();
+                    self.studio_by_name.retain(|name, _| used.contains(name));
+                }
+                if self.studio_by_name.len() < MAX_STUDIO_CACHE {
+                    self.studio_by_name.insert(key(name), Arc::clone(&model));
+                }
+                self.studio.insert(index, model);
             }
             Err(error) => {
                 tracing::warn!(model = name, %error, "model refused; traced as a box");
@@ -209,60 +284,62 @@ impl PrecacheTables {
         self.locked = true;
     }
 
-    /// Sounds, then models, then decals, then generic files, then the event scripts. Sounds,
-    /// models and generic files are in index order without the empty entry 0; submodel names
-    /// (`*N`) get size 0 and every other name gets `size_of(name)`. The decals are
-    /// `SV_CreateResourceList`'s `SV_AddResource(t_decal, sv_decalnames[i].name,
-    /// Draw_DecalSize(i), 0, i)` (ReHLDS `rehlds/engine/sv_main.cpp`, read 2026-11-22), after the
-    /// models, from index 0, with size 0 here (no file transfer). The event scripts (type
-    /// [`res_type::EVENTSCRIPT`], flag `RES_FATALIFMISSING`) come last, after the decals, as in
-    /// `SV_CreateResourceList`. The rest of the order is a working assumption about HLDS
-    /// (ReHLDS lists generic files first).
+    /// `SV_CreateResourceList` (ReHLDS `rehlds/engine/sv_main.cpp:5787`, read 2026-11-22, the
+    /// build without `REHLDS_FIXES`): the generic files (flag `RES_FATALIFMISSING`), then the
+    /// sounds, the models, the decals and the event scripts, each table in index order without
+    /// the empty entry 0.
+    ///
+    /// - A sound whose name starts with `!` is a sentence: only the first of them is listed,
+    ///   as the name `!` with size 0 and flag `RES_FATALIFMISSING`, at its own index. The size
+    ///   of any other sound is `size_of("sound/<name>")`.
+    /// - A model has the flags of `model_precache_flags`; a submodel (`*N`) has size 0 and
+    ///   every other name `size_of(name)`.
+    /// - A decal is `SV_AddResource(t_decal, sv_decalnames[i].name, Draw_DecalSize(i), 0, i)`
+    ///   from index 0, with size 0 here (no file transfer).
+    /// - An event script has type [`res_type::EVENTSCRIPT`] and flag `RES_FATALIFMISSING`.
     pub fn resource_list(&self, size_of: &dyn Fn(&str) -> u32) -> Vec<ResourceEntry> {
-        let named = |res_type, table: &Table| -> Vec<ResourceEntry> {
-            table
-                .names
+        let entry = |res_type, name: &str, index: usize, download_size, flags| ResourceEntry {
+            res_type,
+            filename: name.to_string(),
+            // Lossless: a table never holds more than 512 names.
+            index: index as u16,
+            download_size,
+            flags,
+            md5: None,
+        };
+        let mut list: Vec<ResourceEntry> = self
+            .generic
+            .names
+            .iter()
+            .enumerate()
+            .skip(1)
+            .map(|(i, name)| entry(res_type::GENERIC, name, i, size_of(name), RES_FATALIFMISSING))
+            .collect();
+        let mut sentence_listed = false;
+        for (i, name) in self.sounds.names.iter().enumerate().skip(1) {
+            if name.starts_with('!') {
+                if !sentence_listed {
+                    sentence_listed = true;
+                    list.push(entry(res_type::SOUND, "!", i, 0, RES_FATALIFMISSING));
+                }
+            } else {
+                list.push(entry(res_type::SOUND, name, i, size_of(&format!("sound/{name}")), 0));
+            }
+        }
+        for (i, name) in self.models.names.iter().enumerate().skip(1) {
+            let size = if name.starts_with('*') { 0 } else { size_of(name) };
+            let flags = self.model_flags.get(i).copied().unwrap_or(0);
+            list.push(entry(res_type::MODEL, name, i, size, flags));
+        }
+        list.extend(
+            self.decals
                 .iter()
                 .enumerate()
-                .skip(1)
-                .map(|(index, name)| ResourceEntry {
-                    res_type,
-                    filename: name.clone(),
-                    // Lossless: a table never holds more than 512 names.
-                    index: index as u16,
-                    download_size: if name.starts_with('*') {
-                        0
-                    } else {
-                        size_of(name)
-                    },
-                    flags: 0,
-                    md5: None,
-                })
-                .collect()
-        };
-        let decals = self.decals.iter().enumerate().map(|(index, name)| ResourceEntry {
-            res_type: res_type::DECAL,
-            filename: name.clone(),
-            // Lossless: at most `MAX_DECALS` names.
-            index: index as u16,
-            download_size: 0,
-            flags: 0,
-            md5: None,
-        });
-        let events = self.events.names.iter().enumerate().skip(1).map(|(index, name)| ResourceEntry {
-            res_type: res_type::EVENTSCRIPT,
-            filename: name.clone(),
-            // Lossless: the table never holds more than 256 names.
-            index: index as u16,
-            download_size: size_of(name),
-            flags: RES_FATALIFMISSING,
-            md5: None,
-        });
-        let mut list = named(res_type::SOUND, &self.sounds);
-        list.extend(named(res_type::MODEL, &self.models));
-        list.extend(decals);
-        list.extend(named(res_type::GENERIC, &self.generic));
-        list.extend(events);
+                .map(|(i, name)| entry(res_type::DECAL, name, i, 0, 0)),
+        );
+        list.extend(self.events.names.iter().enumerate().skip(1).map(|(i, name)| {
+            entry(res_type::EVENTSCRIPT, name, i, size_of(name), RES_FATALIFMISSING)
+        }));
         list
     }
 }
@@ -475,32 +552,58 @@ mod tests {
         assert_eq!(t.model_index("models/new.mdl"), None);
     }
 
+    /// `SV_CreateResourceList` writes the generic files first, then the sounds, the models, the
+    /// decals and the event scripts; submodels have size 0, a sound is sized by its `sound/`
+    /// path, and the flags are the ones of the source.
     #[test]
-    fn resource_list_orders_sounds_models_generic_and_zero_sizes_submodels() {
+    fn resource_list_orders_generic_sounds_models_decals_events() {
         let mut t = PrecacheTables::new("maps/de_dust2.bsp", 2);
         t.precache_model("models/gign.mdl").unwrap();
+        t.precache_model("!models/optional.mdl").unwrap();
         t.precache_sound("a.wav").unwrap();
         t.precache_sound("b.wav").unwrap();
         t.precache_generic("hud.txt").unwrap();
+        t.set_decals(vec!["{shot1".to_string()]);
+        t.precache_event("events/ak47.sc").unwrap();
         let list = t.resource_list(&|name| name.len() as u32 * 10);
-        let entry = |res_type, filename: &str, index, download_size| ResourceEntry {
+        let entry = |res_type, filename: &str, index, download_size, flags| ResourceEntry {
             res_type,
             filename: filename.to_string(),
             index,
             download_size,
-            flags: 0,
+            flags,
             md5: None,
         };
         assert_eq!(
             list,
             vec![
-                entry(res_type::SOUND, "a.wav", 1, 50),
-                entry(res_type::SOUND, "b.wav", 2, 50),
-                entry(res_type::MODEL, "maps/de_dust2.bsp", 1, 170),
-                entry(res_type::MODEL, "*1", 2, 0),
-                entry(res_type::MODEL, "models/gign.mdl", 3, 150),
-                entry(res_type::GENERIC, "hud.txt", 1, 70),
+                entry(res_type::GENERIC, "hud.txt", 1, 70, 1),
+                entry(res_type::SOUND, "a.wav", 1, 110, 0),
+                entry(res_type::SOUND, "b.wav", 2, 110, 0),
+                entry(res_type::MODEL, "maps/de_dust2.bsp", 1, 170, 1),
+                entry(res_type::MODEL, "*1", 2, 0, 1),
+                entry(res_type::MODEL, "models/gign.mdl", 3, 150, 1),
+                entry(res_type::MODEL, "models/optional.mdl", 4, 190, 0),
+                entry(res_type::DECAL, "{shot1", 0, 0, 0),
+                entry(res_type::EVENTSCRIPT, "events/ak47.sc", 1, 140, 1),
             ]
         );
+    }
+
+    /// Only the first sentence sound is listed, as the name `!` (`SV_CreateResourceList`).
+    #[test]
+    fn resource_list_has_one_sentence_marker() {
+        let mut t = PrecacheTables::new("maps/de_dust2.bsp", 1);
+        t.precache_sound("a.wav").unwrap();
+        t.precache_sound("!HG_1").unwrap();
+        t.precache_sound("!HG_2").unwrap();
+        t.precache_sound("c.wav").unwrap();
+        let sounds: Vec<(&str, u16, u8)> = t
+            .resource_list(&|_| 0)
+            .iter()
+            .filter(|r| r.res_type == res_type::SOUND)
+            .map(|r| (if r.filename == "!" { "!" } else { "x" }, r.index, r.flags))
+            .collect();
+        assert_eq!(sounds, vec![("x", 1, 0), ("!", 2, 1), ("x", 4, 0)]);
     }
 }

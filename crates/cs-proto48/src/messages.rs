@@ -12,8 +12,8 @@ use crate::crypto::{
 };
 use crate::delta::{
     DeltaEncodeFn, DeltaMarks, DeltaRecord, DeltaRegistry, DeltaSchema, GoldSrcClientData, GoldSrcEntityState, GoldSrcUserCmd,
-    GoldSrcWeaponData, has_delta_changes, has_delta_changes_encoded, read_delta, read_delta_description, write_delta,
-    write_delta_description, write_delta_encoded,
+    GoldSrcWeaponData, delta_mask, has_delta_changes, read_delta, read_delta_description, write_delta,
+    write_delta_description, write_delta_encoded, write_delta_masked,
 };
 use crate::usermsg::{CsUserMsg, USERMSG_BASE_ID, UserMsgDesc, UserMsgRegistry, decode_cs_usermsg, encode_cs_usermsg};
 use crate::PROTOCOL_VERSION;
@@ -1898,29 +1898,33 @@ pub fn write_svc_packetentities_delta_encoded(
         let prev = from.get(&num);
         let zero = schema.zero_record();
         let prev_entry = prev.map(|(ent_type, rec)| (wire_entity_type(*ent_type), rec.borrow()));
-        let base = match matching_base(prev_entry, custom, schema) {
+        // The conditional encoder runs once per entity: its marks decide whether the entity is
+        // sent and are then the fields written (`DELTA_CheckDelta`, then `DELTA_WriteDelta`).
+        let mask = match matching_base(prev_entry, custom, schema) {
             Some(prev_rec) => {
-                let changed = with_record_encoder(&mut encode, schema, ent, |hook| {
-                    has_delta_changes_encoded(schema, prev_rec, &rec, hook)
+                let mask = with_record_encoder(&mut encode, schema, ent, |hook| {
+                    delta_mask(schema, prev_rec, &rec, hook)
                 });
-                if !changed {
+                if mask == 0 {
                     continue;
                 }
-                prev_rec
+                mask
             }
             None => {
                 if prev.is_some() {
                     // Kind changed: drop the old entity, then send this one as new.
                     write_delta_entity_header(w, &mut num_base, num, true);
                 }
-                matching_base(caller_entry(baselines.get(&num)), custom, schema).unwrap_or(&zero)
+                let base = matching_base(caller_entry(baselines.get(&num)), custom, schema)
+                    .unwrap_or(&zero);
+                with_record_encoder(&mut encode, schema, ent, |hook| {
+                    delta_mask(schema, base, &rec, hook)
+                })
             }
         };
         write_delta_entity_header(w, &mut num_base, num, false);
         w.write_one_bit(custom);
-        with_record_encoder(&mut encode, schema, ent, |hook| {
-            write_delta_encoded(w, schema, base, &rec, true, server_time, hook)
-        });
+        write_delta_masked(w, schema, &rec, mask, true, server_time);
     }
 
     w.write_bits(0, 16);
@@ -2587,6 +2591,36 @@ mod tests {
         let pe = parse_entities(w.as_slice(), max_clients, &BTreeMap::new(), Some((seq, from)));
         let seen = decode_entities(&reg, max_clients, &pe.entities);
         assert_eq!(seen[0].origin.x, 132.5);
+    }
+
+    /// The conditional encoder runs once per entity that is written (it ran twice before: once
+    /// to ask whether the entity changed, once to write it), and the bytes are the ones a plain
+    /// writer gives when the encoder changes nothing.
+    #[test]
+    fn the_delta_encoder_runs_once_per_changed_entity() {
+        let reg = DeltaRegistry::cs16_default();
+        let max_clients = 16;
+        let seq = 7;
+        let to = vec![normal_ent(1, 100.0, 12), normal_ent(20, 500.0, 30), normal_ent(21, 7.0, 30)];
+        let from = entity_records(&reg, max_clients, &to);
+        // Entity 1 and 20 move; 21 is unchanged.
+        let moved = vec![normal_ent(1, 132.5, 12), normal_ent(20, 600.0, 30), normal_ent(21, 7.0, 30)];
+
+        let calls = std::cell::Cell::new(0u32);
+        let mut count = |_: &str, _: &GoldSrcEntityState, _: &GoldSrcEntityState, _: &mut DeltaMarks<'_>| {
+            calls.set(calls.get() + 1);
+        };
+        let mut w = MsgWriter::new();
+        write_svc_packetentities_delta_encoded(
+            &mut w, &reg, max_clients, seq, &BTreeMap::new(), &from, &moved, 12.5, Some(&mut count),
+        );
+        // One call for each of the three entities: the unchanged one is asked once and left out,
+        // the two changed ones are asked once and written.
+        assert_eq!(calls.get(), 3);
+
+        let mut plain = MsgWriter::new();
+        write_svc_packetentities_delta(&mut plain, &reg, max_clients, seq, &BTreeMap::new(), &from, &moved, 12.5);
+        assert_eq!(w.as_slice(), plain.as_slice(), "an encoder that edits nothing changes nothing");
     }
 
     #[test]

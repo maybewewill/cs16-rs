@@ -144,17 +144,45 @@ impl EngineApi<'_> {
             .map(|(id, _)| id)
     }
 
-    /// Live entities (world and player slots included) whose `origin` lies within `radius` of
-    /// `center`, in ascending index order. A non-finite `center` or `radius`, or a negative
-    /// `radius`, gives an empty list; an entity with a non-finite origin is never included.
+    /// `FindEntityInSphere` (ReHLDS `rehlds/engine/pr_cmds.cpp`, rh_pr_cmds.cpp:859-889, read
+    /// 2026-11-22) run to the end: the live entities, in ascending index order, whose box
+    /// `absmin..absmax` lies within `radius` of `center`: the distance is the one from the point
+    /// to the box (zero inside it), compared as `distance^2 <= radius^2`, so an entity counts
+    /// when any part of its box does, not only its origin.
+    ///
+    /// As in the source: the world (edict 0) is never listed (the search starts after it), an
+    /// entity with no classname is skipped, and so is a client slot whose client is not active.
+    /// A non-finite `center` or `radius`, or a negative `radius`, gives an empty list (the
+    /// source would take them as it computes; here they are refused); an entity with a
+    /// non-finite box is never included.
     pub fn entities_in_sphere(&self, center: Vec3, radius: f32) -> Vec<EdictId> {
         if !center.is_finite() || !radius.is_finite() || radius < 0.0 {
             return Vec::new();
         }
         let radius_sq = radius * radius;
+        let max_clients = usize::from(self.max_clients());
         self.edicts
             .iter_live()
-            .filter(|(_, e)| e.vars.origin.distance_squared(center) <= radius_sq)
+            .filter(|(id, e)| {
+                let index = usize::from(id.index);
+                if index == 0 || e.vars.classname.is_empty() {
+                    return false;
+                }
+                if index <= max_clients && !self.is_client_active((index - 1) as u8) {
+                    return false;
+                }
+                // The distance of the point to the box, one axis at a time.
+                let (lo, hi) = (e.vars.absmin, e.vars.absmax);
+                let gap = |c: f32, lo: f32, hi: f32| {
+                    if c >= lo {
+                        if c <= hi { 0.0 } else { c - hi }
+                    } else {
+                        c - lo
+                    }
+                };
+                let (dx, dy, dz) = (gap(center.x, lo.x, hi.x), gap(center.y, lo.y, hi.y), gap(center.z, lo.z, hi.z));
+                dx * dx + dy * dy + dz * dz <= radius_sq
+            })
             .map(|(id, _)| id)
             .collect()
     }
@@ -845,25 +873,39 @@ mod tests {
         assert_eq!(eng.find_by_classname(Some(far), "light"), None);
     }
 
+    /// Sets the box of `id` to `origin +- half` (what `link_entity` would compute for a box
+    /// entity).
+    fn boxed(eng: &mut EngineApi<'_>, id: EdictId, origin: Vec3, half: f32) {
+        let v = eng.ent_mut(id).unwrap();
+        v.origin = origin;
+        v.absmin = origin - Vec3::splat(half);
+        v.absmax = origin + Vec3::splat(half);
+    }
+
+    /// `FindEntityInSphere`: the distance is the one to the box, the world, the nameless and the
+    /// inactive client slots are skipped, and a bad sphere finds nothing.
     #[test]
-    fn entities_in_sphere_uses_origin_and_handles_nan() {
+    fn entities_in_sphere_is_the_distance_to_the_box_and_skips_the_unlisted() {
         let mut f = Fixture::new(1, 16);
+        f.clients[0].active = true;
         let mut eng = f.api();
         let near = eng.create_entity("near").unwrap();
-        eng.ent_mut(near).unwrap().origin = Vec3::new(100.0, 0.0, 0.0);
+        boxed(&mut eng, near, Vec3::new(100.0, 0.0, 0.0), 0.0);
         let edge = eng.create_entity("edge").unwrap();
-        eng.ent_mut(edge).unwrap().origin = Vec3::new(110.0, 0.0, 0.0);
+        boxed(&mut eng, edge, Vec3::new(110.0, 0.0, 0.0), 0.0);
         let far = eng.create_entity("far").unwrap();
-        eng.ent_mut(far).unwrap().origin = Vec3::new(200.0, 0.0, 0.0);
+        boxed(&mut eng, far, Vec3::new(200.0, 0.0, 0.0), 0.0);
         let lost = eng.create_entity("lost").unwrap();
-        eng.ent_mut(lost).unwrap().origin = Vec3::NAN;
+        boxed(&mut eng, lost, Vec3::NAN, 0.0);
         let player = eng.client_edict(0);
-        eng.ent_mut(player).unwrap().origin = Vec3::new(95.0, 5.0, 0.0);
+        boxed(&mut eng, player, Vec3::new(95.0, 5.0, 0.0), 16.0);
+        eng.ent_mut(player).unwrap().classname = "player".to_string();
 
         let center = Vec3::new(100.0, 0.0, 0.0);
         assert_eq!(eng.entities_in_sphere(center, 10.0), [player, near, edge]);
-        // The world sits at the origin and is included like any other entity.
-        assert_eq!(eng.entities_in_sphere(Vec3::ZERO, 1.0), [eng.world()]);
+        // The world is never listed (the search starts after edict 0), whatever its box.
+        eng.ent_mut(eng.world()).unwrap().absmax = Vec3::splat(10.0);
+        assert!(eng.entities_in_sphere(Vec3::ZERO, 1.0).is_empty());
         assert!(eng.entities_in_sphere(Vec3::NAN, 10.0).is_empty());
         assert!(eng.entities_in_sphere(center, f32::NAN).is_empty());
         assert!(eng.entities_in_sphere(center, f32::INFINITY).is_empty());
@@ -872,6 +914,33 @@ mod tests {
                 .is_empty()
         );
         assert!(eng.entities_in_sphere(center, -1.0).is_empty());
+
+        // No classname: skipped.
+        eng.ent_mut(near).unwrap().classname.clear();
+        assert_eq!(eng.entities_in_sphere(center, 10.0), [player, edge]);
+        // A client slot is listed only while its client is active.
+        drop(eng);
+        f.clients[0].active = false;
+        let eng = f.api();
+        assert_eq!(eng.entities_in_sphere(center, 10.0), [edge]);
+    }
+
+    /// A grenade 360 units from the origin whose hull edge is inside 350 units is in the sphere:
+    /// the distance is to the box, not to the origin (`DEFAULT_RADIUS` 350 of an HE grenade).
+    #[test]
+    fn a_hull_edge_inside_the_radius_counts_though_the_origin_is_outside() {
+        let mut f = Fixture::new(1, 16);
+        let mut eng = f.api();
+        let grenade = eng.create_entity("grenade").unwrap();
+        // A 16-unit box around x = 360: its nearest face is at x = 344.
+        boxed(&mut eng, grenade, Vec3::new(360.0, 0.0, 0.0), 16.0);
+        let outside = eng.create_entity("outside").unwrap();
+        boxed(&mut eng, outside, Vec3::new(380.0, 0.0, 0.0), 16.0);
+        assert_eq!(eng.entities_in_sphere(Vec3::ZERO, 350.0), [grenade]);
+        // The origin alone is 360 away: the old origin test missed it.
+        assert!(eng.ent(grenade).unwrap().origin.length() > 350.0);
+        // A box on the far side of the centre is the same distance away.
+        assert_eq!(eng.entities_in_sphere(Vec3::new(700.0, 0.0, 0.0), 310.0), [outside]);
     }
 
     #[test]

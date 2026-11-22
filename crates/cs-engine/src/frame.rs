@@ -9,7 +9,7 @@ use std::sync::Arc;
 use cs_proto48::delta::{DeltaMarks, DeltaRecord, GoldSrcEntityState, GoldSrcWeaponData};
 use cs_proto48::event::write_svc_event;
 use cs_proto48::messages::{
-    WeaponDelta, WeaponRecords, entity_schema_name, weapon_records, wire_entity_type,
+    EntityEncodeFn, WeaponDelta, WeaponRecords, entity_schema_name, weapon_records, wire_entity_type,
     write_svc_addangle, write_svc_choke, write_svc_clientdata_with_weapons, write_svc_setangle, write_svc_packetentities_delta_encoded, write_svc_packetentities_full_encoded, write_svc_time,
 };
 use cs_transport::{MAX_UDP_PACKET, PacketTransport};
@@ -367,6 +367,7 @@ impl<G: GameDll> Server<G> {
         };
         let mut block = MsgWriter::new();
         // `ENGINE_CURRENT_PLAYER` of the game's conditional encoders is this client's slot.
+        let has_encoder = self.game.has_delta_encoder();
         let game = &mut self.game;
         let mut encode = |name: &str,
                           from: &GoldSrcEntityState,
@@ -374,6 +375,7 @@ impl<G: GameDll> Server<G> {
                           marks: &mut DeltaMarks<'_>| {
             game.delta_encode(name, slot, from, to, marks);
         };
+        let encode = has_encoder.then_some(&mut encode as EntityEncodeFn<'_>);
         match base {
             Some(from) => write_svc_packetentities_delta_encoded(
                 &mut block,
@@ -384,7 +386,7 @@ impl<G: GameDll> Server<G> {
                 &from.entities,
                 &entities,
                 self.sv_time,
-                Some(&mut encode),
+                encode,
             ),
             None => write_svc_packetentities_full_encoded(
                 &mut block,
@@ -393,7 +395,7 @@ impl<G: GameDll> Server<G> {
                 &self.baseline_records,
                 &entities,
                 self.sv_time,
-                Some(&mut encode),
+                encode,
             ),
         }
 
@@ -508,7 +510,10 @@ impl<G: GameDll> Server<G> {
     /// of `SV_WriteSpawn` sends it before the client has acknowledged any update), preceded by
     /// the choke and `fixangle` messages of [`write_choke_and_fixangle`](Self::write_choke_and_fixangle).
     /// Asks the game for the client data (the engine's `UpdateClientData` export) and, for a
-    /// client with `cl_lw`, the weapon data. Not kept as a delta base.
+    /// client with `cl_lw`, the weapon data. Not kept as a delta base. Does not drain the
+    /// outbox: what the game sent while it ran goes to the client's reliable stream after the
+    /// answer, as `SV_WriteSpawn` leaves it in `netchan.message` behind the answer (the caller
+    /// drains once the answer is written).
     pub(crate) fn write_spawn_clientdata(&mut self, slot: u8, w: &mut MsgWriter) {
         self.write_choke_and_fixangle(slot, w);
         let client_data = self.call_game(|game, eng| game.update_client_data(eng, slot));
@@ -519,7 +524,6 @@ impl<G: GameDll> Server<G> {
         } else {
             None
         };
-        self.drain_outbox();
         let Some(schema) = self.deltas.get("clientdata_t") else {
             return;
         };
@@ -604,7 +608,7 @@ impl<G: GameDll> Server<G> {
         // no model) need no game state, so they are made here, before the state is copied; the
         // world (edict 0) has a model but is never sent: the source starts at entity 1. The
         // visibility test is made for every entity and handed to the game, which decides.
-        let candidates: Vec<(EdictId, bool, GoldSrcEntityState)> = self
+        let candidates: Vec<(EdictId, bool)> = self
             .edicts
             .iter_live()
             .filter(|(id, edict)| {
@@ -614,9 +618,7 @@ impl<G: GameDll> Server<G> {
                     && (*id == viewer || v.effects & EF_NODRAW == 0)
             })
             .map(|(id, edict)| {
-                let in_pvs = self.entity_in_pvs(pvs.as_deref(), id, &edict.vars);
-                let state = entity_state_from_vars(id.index, &edict.vars, max_clients_u8);
-                (id, in_pvs, state)
+                (id, self.entity_in_pvs(pvs.as_deref(), id, &edict.vars))
             })
             .collect();
         let viewer_leaves = self
@@ -626,12 +628,17 @@ impl<G: GameDll> Server<G> {
         let hostflags = u8::from(self.client_has_lw(slot));
         let max_clients = u16::from(self.cfg.max_clients);
         let mut accepted = Vec::new();
-        for (ent_id, in_pvs, mut state) in candidates {
-            let ent = state.number;
+        for (ent_id, in_pvs) in candidates {
+            let ent = ent_id.index;
             if ent > max_clients && accepted.len() >= MAX_PACKET_ENTITIES {
                 tracing::debug!(slot, "too many entities in the visible packet list");
                 break;
             }
+            // The state is copied only for an entity the game is asked about: the game may edit
+            // it, so it cannot be built after the answer (the first two checks and the cap
+            // stop the rest from being copied at all).
+            let Some(edict) = self.edicts.get(ent_id) else { continue };
+            let mut state = entity_state_from_vars(ent, &edict.vars, max_clients_u8);
             let ctx = FullPackCtx {
                 ent,
                 ent_id,

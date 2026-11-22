@@ -193,7 +193,9 @@ impl EngineApi<'_> {
     /// - `FEV_CLIENT` events are not sent. An index outside `1..256` or without a precached
     ///   event, a stale `invoker` and non-finite numbers are refused quietly.
     /// - A zero `origin` or `angles` means "not given": the invoker's own are used (which, for
-    ///   an invoker, the client derives from the entity, so they are not sent). `ducking` is
+    ///   an invoker, the client derives from the entity, so they are not sent). An invoker whose
+    ///   own origin is not finite refuses the event, one whose own angles are not finite sends
+    ///   zero angles. `ducking` is
     ///   set from `FL_DUCKING` for a client invoker.
     /// - Audience: every `Active` client. With an invoker and no `FEV_GLOBAL`, those whose
     ///   edict origin is in the PAS of the invoker's origin (`SV_ValidClientMulticast`, 4);
@@ -262,6 +264,11 @@ impl EngineApi<'_> {
             let Some(vars) = self.edicts.get(id).map(|e| &e.vars) else {
                 return;
             };
+            // The invoker's own origin and angles go on the wire when none were given; a game
+            // that left NaN or infinity in them must not reach the clients (or the PAS test).
+            if !vars.origin.is_finite() {
+                return;
+            }
             event_origin = vars.origin;
             invoker_num = i32::from(id.index);
             if (1..=max_clients).contains(&usize::from(id.index)) && vars.flags & FL_DUCKING != 0 {
@@ -271,7 +278,7 @@ impl EngineApi<'_> {
                 eargs.origin = vars.origin;
             }
             if eargs.flags & FEVENT_ANGLES == 0 {
-                eargs.angles = vars.angles;
+                eargs.angles = if vars.angles.is_finite() { vars.angles } else { Vec3::ZERO };
             }
         } else {
             event_origin = eargs.origin;

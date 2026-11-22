@@ -207,6 +207,9 @@ pub struct TestGame {
     pub broadcast_every_frame: bool,
     /// When set, `client_put_in_server` sends an `svc_print` of [`SHOUT`] to `MsgDest::All`.
     pub shout_on_put_in_server: bool,
+    /// When set, `update_client_data` sends an `svc_print` of [`CLIENTDATA_PRINT`] to that
+    /// client alone (`MsgDest::One`).
+    pub print_in_update_client_data: bool,
     /// When set, `client_put_in_server` sends an `svc_print` of [`SHOUT`] to the joiner alone
     /// (`MsgDest::One`), which the engine throws away (`SV_WriteSpawn` clears the buffers).
     pub print_to_joiner_on_put_in_server: bool,
@@ -805,6 +808,9 @@ impl GameDll for TestGame {
 
     fn update_client_data(&mut self, eng: &mut EngineApi<'_>, slot: u8) -> GoldSrcClientData {
         self.update_client_data_calls += 1;
+        if self.print_in_update_client_data {
+            eng.send(MsgDest::One(slot), &print_bytes(CLIENTDATA_PRINT));
+        }
         if self.broadcast_every_frame {
             eng.send(MsgDest::All, &[svc::NOP]);
             let frame = self.update_client_data_calls.to_string();
@@ -895,6 +901,9 @@ pub fn big_print() -> String {
 
 /// Text of the `svc_print` that `print_to_joiner_on_put_in_server` sends to the joiner.
 pub const JOINER_PRINT: &str = "for the joiner only";
+
+/// Text of the `svc_print` that `print_in_update_client_data` sends.
+pub const CLIENTDATA_PRINT: &str = "from update_client_data";
 
 /// Text of the `svc_print` that `shout_on_put_in_server` broadcasts.
 pub const SHOUT: &str = "shout\n";

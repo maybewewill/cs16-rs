@@ -17,7 +17,7 @@ tracing.workspace = true
 [features]
 # Test-only hooks (a probe entity class, the log of what the dispatch delivered). Never enabled
 # in production builds; the integration tests enable it through the self dev-dependency below.
-test-hooks = []
+test-hooks = ["cs-engine/test-hooks"]
 
 [dev-dependencies]
 cs-game = { path = ".", features = ["test-hooks"] }

@@ -8,6 +8,11 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Test-only accessors (`studio_setups`, `baseline_numbers`). Never enabled in production builds;
+# the integration tests enable it through the self dev-dependency below.
+test-hooks = []
+
 [dependencies]
 cs-assets.workspace = true
 cs-cvar.workspace = true
@@ -17,5 +22,6 @@ glam.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+cs-engine = { path = ".", features = ["test-hooks"] }
 cs-probe.workspace = true
 cs-vfs.workspace = true

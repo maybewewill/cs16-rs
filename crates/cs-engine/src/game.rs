@@ -257,6 +257,18 @@ impl EngineApi<'_> {
             .is_some_and(|c| c.active)
     }
 
+    /// Marks the client of `slot` active or not without a client behind it (`client->active`
+    /// is set by the engine when a client enters the game): for a game's tests that stand a
+    /// player in a slot by calling `client_put_in_server` themselves. A slot out of range is
+    /// ignored. Test-only (`test-hooks` feature).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn test_set_client_active(&mut self, slot: u8, active: bool) {
+        if let Some(client) = self.clients.get_mut(usize::from(slot)) {
+            client.active = active;
+        }
+    }
+
     /// `CHANGE_LEVEL`: asks the server to switch to map `map`. The engine does not load maps
     /// itself: the request waits for the server's owner, who loads the map and calls
     /// `Server::change_map` (see `Server::take_pending_change_level`). A name the console's
@@ -396,6 +408,14 @@ pub trait GameDll {
         _to: &GoldSrcEntityState,
         _marks: &mut DeltaMarks<'_>,
     ) {
+    }
+
+    /// Whether [`delta_encode`](Self::delta_encode) does anything. A game that does not override
+    /// it returns `false`, and the engine then skips the encoder hook (and the decoding of the
+    /// `from` state it needs) for every entity of every update. The default is `true`, which is
+    /// always correct.
+    fn has_delta_encoder(&self) -> bool {
+        true
     }
 }
 
