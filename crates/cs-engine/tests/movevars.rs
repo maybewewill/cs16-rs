@@ -8,6 +8,7 @@ use std::rc::Rc;
 
 use common::Harness;
 use cs_cvar::{CVarFlags, CVarRegistry};
+use cs_engine::{ClientState, SignonStage};
 use cs_probe::{ProbeClient, ProbeState};
 use cs_proto48::messages::{MoveVarsMsg, SvcMessage, svc};
 use cs_transport::LoopbackEndpoint;
@@ -200,15 +201,53 @@ fn unchanged_movevars_are_not_resent() {
 }
 
 #[test]
-fn a_client_still_signing_on_gets_the_current_movevars_once() {
-    let mut h = Harness::new(2);
-    let mut probe = h.add_probe("Player");
-    // Change a cvar before the probe finishes; whichever stage it lands in, the probe ends with
-    // the new value and no more than one resend of it.
-    h.step(&mut [&mut probe], 5);
+fn only_clients_in_the_game_are_resent_and_a_signing_on_client_gets_the_new_value() {
+    let mut h = Harness::new(3);
+    let mut a = in_game_probe(&mut h);
+    assert_eq!(newmovevars_count(&a), 1);
+
+    // B connects, then is no longer pumped as soon as the server waits for its `new`.
+    let mut b = h.add_probe("Second");
+    for _ in 0..50 {
+        if h.server.client_state(1) == ClientState::Signon(SignonStage::AwaitNew) {
+            break;
+        }
+        h.step(&mut [&mut a, &mut b], 1);
+    }
+    assert_eq!(
+        h.server.client_state(1),
+        ClientState::Signon(SignonStage::AwaitNew)
+    );
+
     h.server.game_mut().act(|eng| eng.set_cvar("sv_gravity", "700"));
-    h.step(&mut [&mut probe], 300);
-    assert_eq!(probe.state(), &ProbeState::InGame);
-    assert_eq!(last_movevars(&probe).gravity, 700.0);
-    assert!(newmovevars_count(&probe) <= 2);
+    h.step(&mut [&mut a], 50);
+    assert_eq!(newmovevars_count(&a), 2, "A: exactly one extra message");
+    assert_eq!(last_movevars(&a).gravity, 700.0);
+    assert_eq!(newmovevars_count(&b), 0, "B was not resent anything");
+
+    // B finishes the sign-on: its `new` stage carries the new value, and nothing follows it.
+    h.step(&mut [&mut a, &mut b], 300);
+    assert_eq!(b.state(), &ProbeState::InGame);
+    assert_eq!(newmovevars_count(&b), 1);
+    assert_eq!(last_movevars(&b).gravity, 700.0);
+    assert_eq!(newmovevars_count(&a), 2);
 }
+
+#[test]
+fn every_client_in_the_game_is_resent_exactly_once() {
+    let mut h = Harness::new(3);
+    let mut a = in_game_probe(&mut h);
+    let mut b = h.add_probe("Second");
+    h.step(&mut [&mut a, &mut b], 300);
+    assert_eq!(b.state(), &ProbeState::InGame);
+    assert_eq!(newmovevars_count(&a), 1);
+    assert_eq!(newmovevars_count(&b), 1);
+
+    h.server.game_mut().act(|eng| eng.set_cvar("sv_gravity", "650"));
+    h.step(&mut [&mut a, &mut b], 100);
+    assert_eq!(newmovevars_count(&a), 2);
+    assert_eq!(newmovevars_count(&b), 2);
+    assert_eq!(last_movevars(&a).gravity, 650.0);
+    assert_eq!(last_movevars(&b).gravity, 650.0);
+}
+

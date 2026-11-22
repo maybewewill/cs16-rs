@@ -77,11 +77,12 @@ pub(crate) fn banner(build: i32, spawn_count: u32) -> String {
 /// Movement variables from the cvars that exist, defaults otherwise (`SV_SetMoveVars`, ReHLDS
 /// `sv_main.cpp`, read 2026-11-22: every field has its own cvar; `sv_zmax` is `zmax`,
 /// `sv_wateramp` the wave height, `edgefriction` the edge friction, `mp_footsteps` the footsteps
-/// flag, `sv_skyname` the sky; `entgravity` is always 1). The sky name is the world entity's `skyname` key when it has one, else
-/// the cvar when it is not empty. Either way it is cut to what `movevars_t::skyName` holds, 32
-/// bytes with the terminator (`Q_strncpy(movevars->skyName, sv_skyname.string,
-/// sizeof(movevars->skyName) - 1)`, `SV_SetMoveVars`, ReHLDS `sv_main.cpp`, read 2026-11-22), so
-/// 31 bytes at most (the finding's "32 characters" counted the terminator; the source wins).
+/// flag, `sv_skyname` the sky; `entgravity` is always 1). The sky name is the world entity's
+/// `skyname` key when it has one, else the cvar when it is not empty. Either way it is cut to
+/// what `movevars_t::skyName` holds, 32 bytes with the terminator (`Q_strncpy(movevars->skyName,
+/// sv_skyname.string, sizeof(movevars->skyName) - 1)`, `SV_SetMoveVars`, ReHLDS `sv_main.cpp`,
+/// read 2026-11-22), so 31 bytes at most (the finding's "32 characters" counted the
+/// terminator; the source wins).
 pub(crate) fn move_vars(cvars: &CVarRegistry, entities: &[Entity]) -> MoveVarsMsg {
     let mut mv = MoveVarsMsg {
         // The first assignment of `SV_SetMoveVars`; the game scales it per player.

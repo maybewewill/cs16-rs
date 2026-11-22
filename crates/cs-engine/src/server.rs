@@ -295,31 +295,34 @@ impl<G: GameDll> Server<G> {
     }
 
     /// Sends `svc_newmovevars` to each client in the game whose last movevars differ from the
-    /// server's now. ReHLDS does this in `SV_RunCmd` (`sv_user.cpp`, read 2026-11-22): after
-    /// `pfnPM_Move` it compares the client's copy, which the game may have altered, with the
-    /// copy it had before the command and writes the message when they differ. The game does not
-    /// alter the copy here yet and the commands are run elsewhere, so the check runs once per
-    /// frame, for the clients that are `Active`; a client that is still signing on gets the
-    /// difference at its first frame in the game. Fake clients (which the original skips) do not
-    /// exist in the engine.
+    /// server's now. TEMPORARY placement: ReHLDS does this per command in `SV_RunCmd`
+    /// (`sv_user.cpp` ~1020-1028, read 2026-11-22): after `pfnPM_Move` it compares the client's
+    /// copy, which the game may have altered, with the copy it had before the command, skips
+    /// fake clients, and writes the message when they differ. The commands run in `usercmd.rs`
+    /// and the game does not alter the copy yet, so the check runs once per frame, for the
+    /// clients that are `Active`; a client past `new` but not yet in the game gets the
+    /// difference at its first frame in the game, one before `new` gets the current values in
+    /// that stage. Fake clients do not exist in the engine.
     pub(crate) fn resend_changed_movevars(&mut self) {
         let current = move_vars(&self.cvars, &self.map.entities);
-        let mut w = MsgWriter::new();
-        write_svc_newmovevars(&mut w, &current);
-        let mut sent = false;
+        let mut message: Option<MsgWriter> = None;
         for client in &mut self.clients {
             if client.state != ClientState::Active || client.movevars.as_ref() == Some(&current) {
                 continue;
             }
             if client.movevars.is_some() {
+                let w = message.get_or_insert_with(|| {
+                    let mut w = MsgWriter::new();
+                    write_svc_newmovevars(&mut w, &current);
+                    w
+                });
                 client.chan.write_reliable(w.as_slice());
-                sent = true;
             }
             client.movevars = Some(current.clone());
         }
-        if sent {
-            // Enforces the reliable backlog cap on what was written.
-            self.drain_outbox();
+        if message.is_some() {
+            // Applies the reliable backlog cap to what was written; no game callback.
+            self.drain_messages();
         }
     }
 
