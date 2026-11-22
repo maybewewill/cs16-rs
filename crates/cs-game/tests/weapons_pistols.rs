@@ -517,6 +517,7 @@ fn usp_silencer_toggle_timing() {
 fn glock_burst_three_shots() {
     let mut a = Arena::new();
     arm(&mut a, WeaponId::Glock18, 20, 200.0);
+    a.probe.clear_messages();
     a.run(|game, eng| {
         let ft = eng.frametime();
         let glock = WeaponId::Glock18;
@@ -545,6 +546,7 @@ fn glock_burst_three_shots() {
         assert!(w.glock18_shoot > 0.0, "the burst is armed");
         assert!(approx(w.next_primary_attack, 0.5 - ft), "{}", w.next_primary_attack);
         assert_eq!(w.shots_fired, 0, "the burst does not count as semi-automatic shots");
+        assert!(approx(w.time_weapon_idle, 2.5 - ft), "idle {}", w.time_weapon_idle);
         // The two shots that follow are `FireRemaining`'s, one per command (vanilla has no time
         // test for the Glock), and then the burst is over.
         press(game, eng, 0);
@@ -558,6 +560,30 @@ fn glock_burst_three_shots() {
         press(game, eng, 0);
         assert_eq!(weapon(game, glock).clip, 17);
     });
+
+    // The three shots played the Glock's event. The first one is the burst-mode shot in the air
+    // (spread 1.2 * (1 - 0.9) = 0.12); `FireRemaining`'s are 0.05 wide and draw the same random
+    // numbers (the same command seed), so their spread vector is the first one scaled by
+    // 0.05 / 0.12. QUIRK: FireRemaining's integers are the punch times 10000, the first's times
+    // 100; the last bool is the clip being empty.
+    let index = a.run(|_, eng| eng.precache_event("events/glock18.sc"));
+    let events = a.events();
+    assert_eq!(events.len(), 3);
+    assert!(events.iter().all(|e| e.index == index));
+    let args: Vec<_> = events.iter().map(|e| e.args.expect("arguments")).collect();
+    let (first, rest) = (args[0], &args[1..]);
+    let (f, g) = if first.fparam1.abs() > first.fparam2.abs() {
+        (first.fparam1, [rest[0].fparam1, rest[1].fparam1])
+    } else {
+        (first.fparam2, [rest[0].fparam2, rest[1].fparam2])
+    };
+    assert!(f.abs() > 1e-3 && f.abs() <= 0.24, "burst-mode spread {f}");
+    for g in g {
+        // The wire keeps two decimals of a float argument, so both sides carry up to 0.005 of
+        // rounding.
+        assert!((g - f * (0.05 / 0.12)).abs() < 0.0125, "FireRemaining spread {g} vs {}", f * (0.05 / 0.12));
+    }
+    assert!(args.iter().all(|a| a.bparam1 == 0 && a.bparam2 == 0));
 
     // A burst on a nearly empty clip ends at the empty clip with the count at 3.
     let mut a = Arena::new();
@@ -768,5 +794,32 @@ fn reload_quirks_and_idle() {
                 None => assert_eq!(sent, 99, "{id:?}: no idle animation"),
             }
         });
+    }
+}
+
+#[test]
+fn elite_shoots_from_five_units_to_the_side() {
+    // With the accuracy at 1 the spread is 0, so the bullet goes straight along +X from the eye
+    // moved 5 units along `v_right` (which points to -Y for a player facing +X): the left gun
+    // (an even clip starts with it) shoots from y = +5, the right gun from y = -5. A victim
+    // whose box (+-16 wide) covers one of those and not the other is hit by that gun only.
+    for (clip, left_gun) in [(30, true), (29, false)] {
+        for victim_y in [-20.0_f32, 20.0] {
+            let mut a = Arena::new();
+            arm(&mut a, WeaponId::Elite, clip, 100.0);
+            let lost = a.run(move |game, eng| {
+                let victim = eng.client_edict(1);
+                eng.set_origin(victim, Vec3::new(116.0, victim_y, 0.0));
+                weapon(game, WeaponId::Elite).accuracy = 1.0;
+                let before = health(game, 1);
+                press(game, eng, IN_ATTACK);
+                before - health(game, 1)
+            });
+            // The gun at y = +5 hits the victim at y = +20 (box 4..36), the gun at y = -5 the
+            // victim at y = -20 (box -36..-4).
+            let gun_y = if left_gun { 5.0 } else { -5.0 };
+            let hit = (victim_y > 0.0) == (gun_y > 0.0);
+            assert_eq!(lost > 0.0, hit, "left gun {left_gun}, victim at y {victim_y}: lost {lost}");
+        }
     }
 }

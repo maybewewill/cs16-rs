@@ -41,23 +41,32 @@ use cs_engine::event_flags::FEV_NOTHOST;
 use cs_sim::pm::math::angle_vectors;
 use glam::Vec3;
 
-use super::core::{PlayerAnim, WeaponCtx};
+use super::core::{GLOCK18_DAMAGE, PlayerAnim, TAB_9MM, WeaponCtx};
 use super::info::{
     BulletType, WPNSTATE_ELITE_LEFT, WPNSTATE_GLOCK18_BURST_MODE, WPNSTATE_SHIELD_DRAWN,
     WPNSTATE_USP_SILENCED, WeaponId,
 };
 use super::weapon::{Weapon, WeaponBehavior};
 use crate::chat::{HUD_PRINTCENTER, client_print};
+use crate::player::HIDEHUD_CROSSHAIR;
 
 /// `EF_MUZZLEFLASH`.
 const EF_MUZZLEFLASH: u32 = 2;
-/// `HIDEHUD_CROSSHAIR`.
-const HIDEHUD_CROSSHAIR: i32 = 1 << 6;
+
+/// The `K` of each pistol's spread, `[in the air, moving, ducking, standing]` (the literals of
+/// the `PrimaryAttack` of each source file).
+const GLOCK18_BURST_K: [f64; 4] = [1.2, 0.185, 0.095, 0.3];
+const GLOCK18_SEMI_K: [f64; 4] = [1.0, 0.165, 0.075, 0.1];
+const USP_SIL_K: [f64; 4] = [1.3, 0.25, 0.125, 0.15];
+const USP_K: [f64; 4] = [1.2, 0.225, 0.08, 0.1];
+const P228_K: [f64; 4] = [1.5, 0.255, 0.075, 0.15];
+const DEAGLE_K: [f64; 4] = [1.5, 0.25, 0.115, 0.13];
+const FIVESEVEN_K: [f64; 4] = [1.5, 0.255, 0.075, 0.15];
+const ELITE_K: [f64; 4] = [1.3, 0.175, 0.08, 0.1];
 
 /// The indices of the legacy ammo counters in [`crate::player::Player::tabulated_ammo`]
 /// (`ammo_9mm`, `ammo_45acp`, `ammo_50ae`, `ammo_57mm`, `ammo_357sig`; the order of
 /// [`super::core::TABULATED_AMMO`]).
-const TAB_9MM: usize = 1;
 const TAB_45ACP: usize = 5;
 const TAB_50AE: usize = 6;
 const TAB_57MM: usize = 8;
@@ -117,8 +126,6 @@ mod elite_anim {
 /// `GLOCK18_MAX_SPEED`, `USP_MAX_SPEED`, `P228_MAX_SPEED`, `DEAGLE_MAX_SPEED`,
 /// `FIVESEVEN_MAX_SPEED` and `ELITE_MAX_SPEED`: all 250.
 pub const PISTOL_MAX_SPEED: f32 = 250.0;
-/// `GLOCK18_DAMAGE`.
-pub const GLOCK18_DAMAGE: f32 = 25.0;
 /// `GLOCK18_RANGE_MODIFER`.
 pub const GLOCK18_RANGE_MODIFIER: f32 = 0.75;
 /// `GLOCK18_RELOAD_TIME`.
@@ -244,6 +251,11 @@ fn shield_secondary_fire(
 /// `float` by the parameter.
 fn spread_by_state(w: &WeaponCtx<'_, '_>, k: [f64; 4]) -> f32 {
     let (flags, velocity) = w.eng.ent(w.edict()).map_or((0, Vec3::ZERO), |v| (v.flags, v.velocity));
+    spread_of(k, flags, velocity, w.weapon.accuracy)
+}
+
+/// [`spread_by_state`] on the state itself: the player's `pev->flags` and velocity.
+fn spread_of(k: [f64; 4], flags: u32, velocity: Vec3, accuracy: f32) -> f32 {
     let k = if flags & FL_ONGROUND == 0 {
         k[0]
     } else if velocity.truncate().length() > 0.0 {
@@ -253,7 +265,7 @@ fn spread_by_state(w: &WeaponCtx<'_, '_>, k: [f64; 4]) -> f32 {
     } else {
         k[3]
     };
-    (k * f64::from(1.0_f32 - w.weapon.accuracy)) as f32
+    (k * f64::from(1.0_f32 - accuracy)) as f32
 }
 
 /// `m_flAccuracy -= (base - (gpGlobals->time - m_flLastFire)) * k;` and the clamp to
@@ -377,8 +389,6 @@ impl WeaponBehavior for Glock18 {
 
     /// `CGLOCK18::Deploy` (`wpn_glock18.cpp`): the burst is cleared and the accuracy 0.9; with
     /// a shield the burst mode goes off, else the draw is one of two (`RANDOM_LONG(0, 1)`).
-    /// `m_usFireGlock18` is looked up here as well, because `FireRemaining` plays it from the
-    /// weapon's own fields.
     fn deploy(&mut self, w: &mut WeaponCtx<'_, '_>) -> bool {
         w.weapon.weapon_state &= !WPNSTATE_SHIELD_DRAWN;
         // `m_bBurstFire = false` is only ever written.
@@ -387,9 +397,6 @@ impl WeaponBehavior for Glock18 {
         w.weapon.accuracy = 0.9;
         w.weapon.max_speed = PISTOL_MAX_SPEED;
         w.player_mut().shield_drawn = false;
-        if w.weapon.events.glock18 == 0 {
-            w.weapon.events.glock18 = w.eng.precache_event("events/glock18.sc");
-        }
 
         if w.has_shield() {
             w.weapon.weapon_state &= !WPNSTATE_GLOCK18_BURST_MODE;
@@ -410,10 +417,10 @@ impl WeaponBehavior for Glock18 {
     /// spread by state (the burst's is larger) and cycle time.
     fn primary_attack(&mut self, w: &mut WeaponCtx<'_, '_>) {
         if w.weapon.weapon_state & WPNSTATE_GLOCK18_BURST_MODE != 0 {
-            let spread = spread_by_state(w, [1.2, 0.185, 0.095, 0.3]);
+            let spread = spread_by_state(w, GLOCK18_BURST_K);
             glock18_fire(w, spread, 0.5_f64 as f32, true);
         } else {
-            let spread = spread_by_state(w, [1.0, 0.165, 0.075, 0.1]);
+            let spread = spread_by_state(w, GLOCK18_SEMI_K);
             glock18_fire(w, spread, 0.2_f64 as f32, false);
         }
     }
@@ -632,9 +639,9 @@ impl WeaponBehavior for Usp {
     /// `CUSP::PrimaryAttack`: the silenced gun is a little less accurate on the move.
     fn primary_attack(&mut self, w: &mut WeaponCtx<'_, '_>) {
         let k = if w.weapon.weapon_state & WPNSTATE_USP_SILENCED != 0 {
-            [1.3, 0.25, 0.125, 0.15]
+            USP_SIL_K
         } else {
-            [1.2, 0.225, 0.08, 0.1]
+            USP_K
         };
         let spread = spread_by_state(w, k);
         usp_fire(w, spread, 0.225_f64 as f32);
@@ -830,7 +837,7 @@ impl WeaponBehavior for P228 {
 
     /// `CP228::PrimaryAttack`.
     fn primary_attack(&mut self, w: &mut WeaponCtx<'_, '_>) {
-        let spread = spread_by_state(w, [1.5, 0.255, 0.075, 0.15]);
+        let spread = spread_by_state(w, P228_K);
         p228_fire(w, spread, 0.2_f64 as f32);
     }
 
@@ -997,7 +1004,7 @@ impl WeaponBehavior for Deagle {
 
     /// `CDEAGLE::PrimaryAttack`.
     fn primary_attack(&mut self, w: &mut WeaponCtx<'_, '_>) {
-        let spread = spread_by_state(w, [1.5, 0.25, 0.115, 0.13]);
+        let spread = spread_by_state(w, DEAGLE_K);
         deagle_fire(w, spread, 0.3_f64 as f32);
     }
 
@@ -1160,7 +1167,7 @@ impl WeaponBehavior for FiveSeven {
 
     /// `CFiveSeven::PrimaryAttack`.
     fn primary_attack(&mut self, w: &mut WeaponCtx<'_, '_>) {
-        let spread = spread_by_state(w, [1.5, 0.255, 0.075, 0.15]);
+        let spread = spread_by_state(w, FIVESEVEN_K);
         fiveseven_fire(w, spread, 0.2_f64 as f32);
     }
 
@@ -1320,7 +1327,7 @@ impl WeaponBehavior for Elite {
 
     /// `CELITE::PrimaryAttack`.
     fn primary_attack(&mut self, w: &mut WeaponCtx<'_, '_>) {
-        let spread = spread_by_state(w, [1.3, 0.175, 0.08, 0.1]);
+        let spread = spread_by_state(w, ELITE_K);
         elite_fire(w, spread, 0.2_f64 as f32);
     }
 
@@ -1428,4 +1435,45 @@ fn elite_fire(w: &mut WeaponCtx<'_, '_>, spread: f32, mut cycle_time: f32) {
     // `SetSuitUpdate("!HEV_AMO0")`: no suit.
     w.weapon.time_weapon_idle = 2.0;
     punch_up(w, 2.0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The four states pick the four `K`s of every pistol, in the order of the source's
+    /// `if`/`else if` chain: no ground first, then a moving player (any 2D speed above 0, even
+    /// when ducking), then ducking, else standing.
+    #[test]
+    fn spread_picks_the_k_of_the_state() {
+        let tables = [
+            ("glock burst", GLOCK18_BURST_K, [1.2, 0.185, 0.095, 0.3]),
+            ("glock semi", GLOCK18_SEMI_K, [1.0, 0.165, 0.075, 0.1]),
+            ("usp silenced", USP_SIL_K, [1.3, 0.25, 0.125, 0.15]),
+            ("usp", USP_K, [1.2, 0.225, 0.08, 0.1]),
+            ("p228", P228_K, [1.5, 0.255, 0.075, 0.15]),
+            ("deagle", DEAGLE_K, [1.5, 0.25, 0.115, 0.13]),
+            ("fiveseven", FIVESEVEN_K, [1.5, 0.255, 0.075, 0.15]),
+            ("elite", ELITE_K, [1.3, 0.175, 0.08, 0.1]),
+        ];
+        let acc = 0.5_f32;
+        let want = |k: f64| (k * 0.5) as f32;
+        let run = Vec3::new(3.0, 4.0, 0.0);
+        for (name, k, source) in tables {
+            assert_eq!(k, source, "{name}: the literals of the source");
+            // In the air, whatever else (ducking, running).
+            assert_eq!(spread_of(k, FL_DUCKING, run, acc), want(k[0]), "{name} air");
+            // On the ground and moving (also when ducking), ducking, standing.
+            assert_eq!(spread_of(k, FL_ONGROUND, run, acc), want(k[1]), "{name} moving");
+            assert_eq!(spread_of(k, FL_ONGROUND | FL_DUCKING, run, acc), want(k[1]), "{name} moving ducked");
+            assert_eq!(spread_of(k, FL_ONGROUND | FL_DUCKING, Vec3::ZERO, acc), want(k[2]), "{name} ducking");
+            // Only the 2D speed counts: a vertical speed is standing.
+            assert_eq!(spread_of(k, FL_ONGROUND, Vec3::new(0.0, 0.0, 300.0), acc), want(k[3]), "{name} standing");
+        }
+        // `1 - m_flAccuracy` is a float; the product is a double cut to float.
+        assert_eq!(
+            spread_of(USP_K, FL_ONGROUND, Vec3::ZERO, 0.92),
+            (0.1_f64 * f64::from(1.0_f32 - 0.92_f32)) as f32
+        );
+    }
 }

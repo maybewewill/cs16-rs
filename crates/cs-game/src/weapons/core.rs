@@ -25,7 +25,7 @@
 //!
 //! Not ported and named: the legacy `m_pTank` (func_tank), `ImpulseCommands`' use, flashlight
 //! and spray (see [`crate::player`]), `ResetAutoaim`/`GetAutoaimVector` (no weapon of
-//! CS 1.6 uses them for more than a call), the shield's crosshair, and `m_fOnTarget` (only the
+//! CS 1.6 uses them for more than a call), and `m_fOnTarget` (only the
 //! autoaim of the Half-Life weapons sets it).
 
 use cs_engine::consts::FL_DORMANT;

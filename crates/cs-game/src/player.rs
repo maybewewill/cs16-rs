@@ -139,7 +139,7 @@ pub(crate) const HIDEHUD_FLASHLIGHT: i32 = 1 << 1;
 pub(crate) const HIDEHUD_HEALTH: i32 = 1 << 3;
 const HIDEHUD_TIMER: i32 = 1 << 4;
 const HIDEHUD_MONEY: i32 = 1 << 5;
-const HIDEHUD_CROSSHAIR: i32 = 1 << 6;
+pub(crate) const HIDEHUD_CROSSHAIR: i32 = 1 << 6;
 /// `CONTENTS_WATER`.
 const CONTENT_WATER: i32 = -3;
 const CONTENT_SLIME: i32 = -4;
