@@ -21,7 +21,7 @@
 //! `game_player_equip` entity of `OnSpawnEquip`, bots, the hint queue (`HintMessage`), the
 //! tutor, and the cheat impulses (101, 102, ...).
 
-use cs_engine::consts::{FL_ONGROUND, MOVETYPE_TOSS, SOLID_BBOX, SOLID_NOT, SOLID_TRIGGER};
+use cs_engine::consts::{FL_ONGROUND, MOVETYPE_TOSS, SOLID_BBOX, SOLID_TRIGGER};
 use cs_engine::{EdictId, EngineApi, MsgDest};
 use cs_proto48::usermsg::CsUserMsg;
 use glam::Vec3;
@@ -152,7 +152,7 @@ const WEAPONS_SOUNDS: [&str; 12] = [
 
 /// The sprites and models of `WeaponsPrecache` that belong to no weapon (`weapons.cpp`
 /// 381-402): explosions, smoke, blood, the radio icon, the laser.
-const WEAPONS_MODELS: [&str; 18] = [
+const WEAPONS_MODELS: [&str; 17] = [
     "sprites/zerogxplode.spr",
     "sprites/WXplo1.spr",
     "sprites/steam1.spr",
@@ -170,7 +170,6 @@ const WEAPONS_MODELS: [&str; 18] = [
     "sprites/laserdot.spr",
     "models/grenade.mdl",
     "sprites/explode1.spr",
-    "models/w_weaponbox.mdl",
 ];
 
 /// Every `PRECACHE_EVENT(1, ...)` of the weapons, in the order `WeaponsPrecache` runs the weapons'
@@ -220,13 +219,16 @@ pub(crate) fn weapons_precache(eng: &mut EngineApi<'_>) {
     for event in WEAPON_EVENTS {
         eng.precache_event(event);
     }
-    for model in WEAPONS_MODELS {
-        precache_model(eng, model);
-    }
     for id in crate::weapons::WEAPONS_PRECACHE_ORDER {
         if let Some(model) = cs_model_name(id) {
             precache_model(eng, model);
         }
+    }
+    // `UTIL_PrecacheOther("weaponbox")` (`CWeaponBox::Precache`) comes after the weapons and
+    // before the effects' sprites.
+    precache_model(eng, "models/w_weaponbox.mdl");
+    for model in WEAPONS_MODELS {
+        precache_model(eng, model);
     }
     for model in ARMOURY_MODELS {
         precache_model(eng, model);
@@ -540,25 +542,50 @@ pub(crate) fn add_player_item(
     g: &mut GameState,
     eng: &mut EngineApi<'_>,
     slot: u8,
-    mut item: WeaponSlotItem,
+    item: WeaponSlotItem,
 ) -> bool {
+    matches!(try_add_player_item(g, eng, slot, item), AddResult::Added)
+}
+
+/// What [`try_add_player_item`] did with the weapon.
+pub(crate) enum AddResult {
+    /// It is in the player's list (`AddPlayerItem` was TRUE).
+    Added,
+    /// The player has a weapon of its class and took the new one's ammo (`AddDuplicate` was
+    /// nonzero): the new weapon is spent (`Kill`).
+    Taken,
+    /// Nothing was taken (`AddDuplicate` was 0, or the weapon cannot be added at all): the weapon
+    /// is given back and stays where it was.
+    Refused(Box<WeaponSlotItem>),
+}
+
+/// `AddPlayerItem` that gives the weapon back when nothing came of it, for a weapon that lies in
+/// the world (`DefaultTouch` keeps the entity unless `AddDuplicate` took its ammo).
+pub(crate) fn try_add_player_item(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    slot: u8,
+    mut item: WeaponSlotItem,
+) -> AddResult {
     let id = item.weapon.id;
     let slot_index = item_slot(id);
     if slot_index == 0 || slot_index >= MAX_ITEM_TYPES {
-        return false;
+        return AddResult::Refused(Box::new(item));
     }
     let Some(p) = player_ref(g, slot) else {
-        return false;
+        return AddResult::Refused(Box::new(item));
     };
     if has_player_item(p, id) {
-        // `PlayerGotWeapon`, `CheckRespawn` and `UpdateItemInfo` do nothing in vanilla; the
-        // new weapon (`Kill`) is dropped.
-        add_duplicate(g, eng, slot, &mut item);
-        return false;
+        // `PlayerGotWeapon`, `CheckRespawn` and `UpdateItemInfo` do nothing in vanilla.
+        return if add_duplicate(g, eng, slot, &mut item) {
+            AddResult::Taken
+        } else {
+            AddResult::Refused(Box::new(item))
+        };
     }
     add_to_player(g, eng, slot, &mut item);
     let Some(p) = player_mut(g, slot) else {
-        return false;
+        return AddResult::Refused(Box::new(item));
     };
     if slot_index == PRIMARY_WEAPON_SLOT {
         p.has_primary = true;
@@ -569,7 +596,7 @@ pub(crate) fn add_player_item(
     if should_switch_weapon(g, eng, slot, id) && !player_ref(g, slot).is_some_and(|p| p.shield_drawn) {
         switch_weapon(g, eng, slot, id);
     }
-    true
+    AddResult::Added
 }
 
 /// `CBasePlayer::RemovePlayerItem` (`player.cpp` 7321): the weapon `id` leaves the list and is
@@ -1021,8 +1048,8 @@ pub(crate) fn clean_up_map(g: &mut GameState, eng: &mut EngineApi<'_>) {
         };
         match class.as_str() {
             "armoury_entity" => {
-                crate::entity::with_entity(g, eng, id, |entity, _g, eng| {
-                    entity.restart(eng, id);
+                crate::entity::with_entity(g, eng, id, |entity, g, eng| {
+                    entity.restart(g, eng, id);
                 });
             }
             "grenade" | "weaponbox" => eng.remove_entity(id),
@@ -1098,11 +1125,13 @@ impl GameEntity for WeaponBox {
         "weaponbox"
     }
 
-    /// `CWeaponBox::Kill` at the end of its life; before that, a look every tenth of a second:
-    /// the original's `SetObjectCollisionBox` makes the touch box 32 by 32 by 16 whatever the
-    /// entity's size, which this engine does not ask the game for; so the entity's box is made
-    /// that size once the box lies on the ground, where it matters (assumption: a point-sized
-    /// box falls and lands as the original's, a 32-unit one would not).
+    /// `CWeaponBox::Kill` at the end of its life; before that, a look every tenth of a second
+    /// until the box has landed. The original's `SetObjectCollisionBox` makes the touch box 32 by
+    /// 32 by 16 whatever the entity's size; this engine has no such hook (the absolute box is
+    /// always `origin + mins/maxs`), so the only way to get that touch box is the entity's own
+    /// size. That would change how the box falls (the hull the movement traces with is chosen by
+    /// the size), so it is set only once the box lies on the ground, where a `MOVETYPE_TOSS`
+    /// body at rest is no longer traced (assumption).
     fn think(&mut self, _g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId) {
         let now = eng.time();
         if now >= self.kill_time {
@@ -1114,7 +1143,8 @@ impl GameEntity for WeaponBox {
             self.widened = true;
             eng.set_size(id, Vec3::new(-16.0, -16.0, 0.0), Vec3::new(16.0, 16.0, 16.0));
         }
-        let next = (now + BOX_THINK_INTERVAL).min(self.kill_time);
+        // Looks every tenth of a second until it has landed, then sleeps until its end.
+        let next = if self.widened { self.kill_time } else { (now + BOX_THINK_INTERVAL).min(self.kill_time) };
         if let Some(v) = eng.ent_mut(id) {
             v.nextthink = next;
         }
@@ -1276,6 +1306,8 @@ pub(crate) struct Armoury {
     count: i32,
     /// `m_iInitialCount`.
     initial_count: i32,
+    /// `m_bAlreadyCounted`: the rack is in the rules' totals.
+    already_counted: bool,
 }
 
 impl GameEntity for Armoury {
@@ -1374,11 +1406,31 @@ impl GameEntity for Armoury {
         }
     }
 
-    /// The round starts over (`UTIL_RestartOther("armoury_entity")`, `CleanUpMap`): the rack is
-    /// full and drawn again (`Restart` of vanilla outside an escape map: the count back to the
-    /// map's, `Draw`).
-    fn restart(&mut self, eng: &mut EngineApi<'_>, id: EdictId) {
-        self.count = self.initial_count.max(1);
+    /// `CArmoury::Restart` (`weapons.cpp` 2545, vanilla: the `REGAMEDLL_FIXES` escape-map test
+    /// around the block is absent, so it always runs). The first restart counts the rack into the
+    /// totals of its kind (guns, grenades, armor; zeroed only when the rules are made) and fills
+    /// it with its own count. Every later one sets the count from the share the rack has in the
+    /// total, times the terrorists in the game: `int((initial / total) * terrorists * k)` with
+    /// the division of the two ints done as ints (so 0 or 1), `k` 0.85 for guns, 1.75 for
+    /// flashbangs and grenades, 1 for armor; at least 1. Then `Draw`.
+    fn restart(&mut self, g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId) {
+        let terrorists = g.rules.num_terrorist as f32;
+        let (total, factor) = match self.item {
+            ARMOURY_FLASHBANG | ARMOURY_HEGRENADE => (&mut g.rules.total_grenade_count, 1.75_f64),
+            ARMOURY_KEVLAR | ARMOURY_ASSAULT => (&mut g.rules.total_armour_count, 1.0),
+            _ => (&mut g.rules.total_gun_count, 0.85),
+        };
+        if !self.already_counted {
+            self.already_counted = true;
+            *total += self.initial_count;
+            self.count = self.initial_count;
+        } else {
+            let share = (self.initial_count / (*total).max(1)) as f32;
+            self.count = (f64::from(share * terrorists) * factor) as f32 as i32;
+            if self.count < 1 {
+                self.count = 1;
+            }
+        }
         if let Some(v) = eng.ent_mut(id) {
             v.effects &= !EF_NODRAW;
         }
@@ -1395,6 +1447,8 @@ pub(crate) struct WorldWeapon {
     class: &'static str,
     id: WeaponId,
     item: Option<WeaponSlotItem>,
+    /// The touch function is set (`Materialize` clears it for a weapon that cannot be dropped).
+    touchable: bool,
 }
 
 impl WorldWeapon {
@@ -1402,7 +1456,7 @@ impl WorldWeapon {
     pub(crate) fn of_class(class: &str) -> Option<Self> {
         let info = item_infos().iter().find(|i| i.name == class)?;
         new_weapon(info.id)?;
-        Some(Self { class: info.name, id: info.id, item: None })
+        Some(Self { class: info.name, id: info.id, item: None, touchable: true })
     }
 }
 
@@ -1460,6 +1514,16 @@ impl GameEntity for WorldWeapon {
             v.solid = SOLID_TRIGGER;
             v.nextthink = now + 1.0;
         }
+        // A weapon that cannot be dropped (the knife, the grenades, the bomb) cannot be picked
+        // up off the floor either. The answer is the weapon classes' `CanDrop`.
+        self.touchable = !matches!(
+            self.id,
+            WeaponId::Knife
+                | WeaponId::C4
+                | WeaponId::HeGrenade
+                | WeaponId::Flashbang
+                | WeaponId::SmokeGrenade
+        );
         eng.set_size(id, Vec3::new(-24.0, -24.0, 0.0), Vec3::new(24.0, 24.0, 16.0));
     }
 
@@ -1471,6 +1535,10 @@ impl GameEntity for WorldWeapon {
         if eng.ent(id).is_none_or(|v| v.solid != SOLID_TRIGGER) {
             return;
         }
+        // `Materialize`: `if (!CanDrop()) SetTouch(nullptr)`.
+        if !self.touchable {
+            return;
+        }
         let Some(item) = self.item.take() else {
             return;
         };
@@ -1480,13 +1548,19 @@ impl GameEntity for WorldWeapon {
             self.item = Some(item);
             return;
         }
-        if add_player_item(g, eng, slot, item) {
-            eng.emit_sound(other, CHAN_ITEM, "items/gunpickup2.wav", 1.0, ATTN_NORM, PITCH_NORM);
+        match try_add_player_item(g, eng, slot, item) {
+            AddResult::Added => {
+                eng.emit_sound(other, CHAN_ITEM, "items/gunpickup2.wav", 1.0, ATTN_NORM, PITCH_NORM);
+            }
+            // The player took the ammo of the weapon: `Kill()`.
+            AddResult::Taken => {}
+            // `AddDuplicate` took nothing: the weapon stays where it lies.
+            AddResult::Refused(item) => {
+                self.item = Some(*item);
+                return;
+            }
         }
         // `AttachToPlayer`/`Kill`: the entity has served its purpose.
-        if let Some(v) = eng.ent_mut(id) {
-            v.solid = SOLID_NOT;
-        }
         eng.remove_entity(id);
     }
 }

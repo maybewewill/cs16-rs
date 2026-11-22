@@ -236,9 +236,12 @@ fn buy_zone_icon_on_spawn() {
     // A terrorist is in it.
     spawn(&mut b, Team::Terrorist);
     settle(&mut b);
-    // `RemoveAllItems` of the default items runs `UpdateClientData` in the middle of the spawn,
-    // so the zone the player's last life ended in is forgotten (the icon goes) before the new
-    // one is found.
+    // The engine builds a client's update (and so calls `UpdateClientData`) only every
+    // `1 / cl_updaterate` seconds, so whether the zone's touch of the spawn frame is already
+    // raised when the update runs depends on the phase. When it is, `m_fInitHUD`'s
+    // `m_signals.Update()` (player.cpp 7600-7607, vanilla) makes it the state and clears the
+    // signal, and `HandleSignals` (due: `m_tmHandleSignals = 0`, 7908) finds state BUY and signal
+    // 0: `BuyZoneIcon_Clear`; the next look, half a second later, sets the icon. Vanilla quirk.
     assert_eq!(icons(&b), [(0, None), (1, Some([0, 160, 0]))]);
 }
 
@@ -359,6 +362,9 @@ fn buy_armor_as_regamedll() {
     // original, tells the client it is a plain vest and keeps the helmet.
     b.run(|game, eng| game.damage_player(eng, 0, None, 40.0, dmg::GENERIC));
     with_player(&b, |p| assert!(p.armor < 100.0 && p.armor > 0.0));
+    // The `Battery` message goes out with the next client update (every 50 ms at `cl_updaterate`
+    // 20), so how many frames it takes to arrive depends on the phase of that cycle, which the
+    // spawn's longer message list shifted: wait for it instead of counting on one frame.
     b.step(5);
     assert_eq!(purchase_log(&b), ["Battery 90"], "the HUD is told of the worn armor first");
     set_money(&mut b, 700);

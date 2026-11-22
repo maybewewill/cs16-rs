@@ -346,6 +346,35 @@ impl CsGame {
             .unwrap_or_default()
     }
 
+    /// Sets `m_pLastItem` of the player of `slot`. For tests only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn set_last_item(&mut self, slot: u8, id: Option<weapons::WeaponId>) {
+        if let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+            p.last_item = id;
+        }
+    }
+
+    /// Drops weapon `id` of the player of `slot` in a box that lives `life` seconds (`DropPlayerItem`
+    /// makes it `ITEM_KILL_DELAY`). The box's edict. For tests only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn drop_weapon_with_life(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        slot: u8,
+        id: weapons::WeaponId,
+        life: f32,
+    ) -> Option<EdictId> {
+        let model = inventory::cs_model_name(id)?;
+        let ent = eng.client_edict(slot);
+        let v = eng.ent(ent)?;
+        let (origin, angles) = (v.origin, v.angles);
+        inventory::create_weapon_box(
+            &mut self.state, eng, Some(slot), id, model, origin, angles, Vec3::ZERO, life, false,
+        )
+    }
+
     /// `pev->weapons` and `m_bHasPrimary` of the player of `slot`. For tests only (cargo feature
     /// `test-hooks`).
     #[cfg(feature = "test-hooks")]

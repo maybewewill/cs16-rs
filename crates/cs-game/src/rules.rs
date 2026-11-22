@@ -140,7 +140,12 @@ pub struct Rules {
     unbalanced_rounds: i32,
     /// `m_iNumCT` and `m_iNumTerrorist`: the players of each team (at the last count).
     num_ct: usize,
-    num_terrorist: usize,
+    pub(crate) num_terrorist: usize,
+    /// `m_iTotalGunCount`, `m_iTotalGrenadeCount`, `m_iTotalArmourCount`: what the armoury
+    /// racks of the map hold in all (never reset but by the rules being made).
+    pub(crate) total_gun_count: i32,
+    pub(crate) total_grenade_count: i32,
+    pub(crate) total_armour_count: i32,
     /// `m_iNumSpawnableCT` and `m_iNumSpawnableTerrorist`: those not in the appearance menu.
     num_spawnable_ct: usize,
     num_spawnable_terrorist: usize,
@@ -183,6 +188,9 @@ impl Default for Rules {
             unbalanced_rounds: 0,
             num_ct: 0,
             num_terrorist: 0,
+            total_gun_count: 0,
+            total_grenade_count: 0,
+            total_armour_count: 0,
             num_spawnable_ct: 0,
             num_spawnable_terrorist: 0,
             game_start_time: 0.0,

@@ -1398,7 +1398,9 @@ fn weapon_player_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
 /// `CBasePlayer::ImpulseCommands` (`player.cpp` 6816), what is ported: `pev->impulse` is
 /// consumed (set to 0) once the weapons have had their turn. Not ported: `PlayerUse` (the use
 /// key), impulse 100 (the flashlight), 201 (the spray) and the cheat impulses (they need
-/// `sv_cheats`-like `g_flWeaponCheat`, off on a server).
+/// `sv_cheats`-like `g_flWeaponCheat`, off on a server). DEFERRED (Task 12 review): impulse 100 and
+/// 201 belong to the flashlight and spray tasks, not to the weapons; impulse 101 and the other cheat
+/// impulses are not ported.
 pub(crate) fn impulse_commands(_g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let id = eng.client_edict(slot);
     if let Some(v) = eng.ent_mut(id) {

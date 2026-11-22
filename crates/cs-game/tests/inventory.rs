@@ -506,3 +506,160 @@ fn hostile_weapon_commands_are_ignored() {
         game.client_command(eng, 1, &argv);
     });
 }
+
+/// The edicts of class `class`.
+fn of_class(b: &mut Bench, class: &'static str) -> Vec<EdictId> {
+    b.run(move |_, eng| {
+        let mut found = Vec::new();
+        let mut after = None;
+        while let Some(id) = eng.find_by_classname(after, class) {
+            found.push(id);
+            after = Some(id);
+        }
+        found
+    })
+}
+
+/// Touches `thing` with the probe, the way the engine would when the player stands on it.
+fn touch(b: &mut Bench, thing: EdictId) {
+    b.run(move |game, eng| {
+        eng.ent_mut(thing).unwrap().flags |= FL_ONGROUND;
+        let me = eng.client_edict(0);
+        game.touch(eng, thing, me);
+    });
+}
+
+#[test]
+fn a_weapon_box_removes_itself_at_the_end_of_its_life() {
+    let mut b = team_bench(1);
+    // A box that lives 1.5 s (`DropPlayerItem` gives 300 s; the hook shortens it).
+    let weapon_box = b
+        .run(|game, eng| game.drop_weapon_with_life(eng, 0, WeaponId::Glock18, 1.5))
+        .expect("a box");
+    b.step(100);
+    assert_eq!(boxes(&mut b), [weapon_box], "still there after a second");
+    b.step(70);
+    assert!(boxes(&mut b).is_empty(), "gone after its life");
+}
+
+#[test]
+fn a_dead_players_ammo_is_in_the_box_and_comes_back_with_it() {
+    let mut b = team_bench(1);
+    set_money(&mut b, 16000);
+    say(&mut b, "ak47");
+    say(&mut b, "buyammo1");
+    assert_eq!(reserve(&b, "762Nato"), 30);
+    b.run(|game, eng| {
+        game.damage_player(eng, 0, None, 500.0, dmg::GENERIC);
+    });
+    b.step(30);
+    assert_eq!(reserve(&b, "762Nato"), 0, "the player has nothing left");
+    let found = boxes(&mut b);
+    assert_eq!(found.len(), 1);
+    // The player lives again with the default items and picks the box up: the rifle with the
+    // clip it had, and, the box being empty then, its 30 rounds.
+    b.run(|game, eng| {
+        assert!(game.respawn_player(eng, 0));
+    });
+    b.step(5);
+    assert_eq!(carried(&b), [WeaponId::Glock18, WeaponId::Knife]);
+    touch(&mut b, found[0]);
+    assert_eq!(carried(&b), [WeaponId::Ak47, WeaponId::Glock18, WeaponId::Knife]);
+    assert_eq!(clip(&mut b, WeaponId::Ak47), 30);
+    assert_eq!(reserve(&b, "762Nato"), 30);
+    assert!(boxes(&mut b).is_empty());
+}
+
+#[test]
+fn a_second_weapon_of_a_class_gives_its_ammo_to_the_first() {
+    // A rifle lying in the world (a map's `weapon_ak47`) touched by a player who has one.
+    let mut b = bench_with(vec![entity(&[("classname", "weapon_ak47"), ("origin", "900 0 0")])]);
+    join(&mut b, 0, 1, 1);
+    b.step(5);
+    set_money(&mut b, 16000);
+    say(&mut b, "ak47");
+    let world = of_class(&mut b, "weapon_ak47");
+    assert_eq!(world.len(), 1);
+    let rifle = world[0];
+    b.run(move |_, eng| eng.ent_mut(rifle).unwrap().solid = cs_engine::consts::SOLID_TRIGGER);
+    assert_eq!(reserve(&b, "762Nato"), 0);
+    touch(&mut b, rifle);
+    // `AddDuplicate`: the default ammo of 30 goes to the rifle the player has; the world's is
+    // spent.
+    assert_eq!(carried(&b), [WeaponId::Ak47, WeaponId::Glock18, WeaponId::Knife]);
+    assert_eq!(reserve(&b, "762Nato"), 30);
+    assert!(of_class(&mut b, "weapon_ak47").is_empty());
+}
+
+#[test]
+fn a_map_knife_cannot_be_picked_up() {
+    let mut b = bench_with(vec![entity(&[("classname", "weapon_knife"), ("origin", "900 0 0")])]);
+    join(&mut b, 0, 2, 1);
+    b.step(5);
+    let world = of_class(&mut b, "weapon_knife");
+    assert_eq!(world.len(), 1);
+    let knife = world[0];
+    // On the ground it becomes a trigger without a touch function (`Materialize`: `CanDrop` is
+    // false), so touching it does nothing and it is removed a second later.
+    let land = |b: &mut Bench, frames: usize| {
+        for _ in 0..frames {
+            b.run(move |_, eng| {
+                if let Some(v) = eng.ent_mut(knife) {
+                    v.flags |= FL_ONGROUND;
+                }
+            });
+        }
+    };
+    land(&mut b, 30);
+    touch(&mut b, knife);
+    assert_eq!(carried(&b), [WeaponId::Usp, WeaponId::Knife]);
+    assert_eq!(of_class(&mut b, "weapon_knife").len(), 1, "a touch does not use it up");
+    land(&mut b, 130);
+    assert!(of_class(&mut b, "weapon_knife").is_empty());
+}
+
+#[test]
+fn lastinv_without_a_last_item_takes_the_first_other_weapon() {
+    let mut b = team_bench(2);
+    assert_eq!(active(&b), Some(WeaponId::Usp));
+    b.server.game_mut().game.set_last_item(0, None);
+    command(&mut b, 0, "lastinv");
+    // `SelectLastItem`: the first weapon of the primary, pistol and knife slots that is not
+    // active is the last item, and the two swap.
+    assert_eq!(active(&b), Some(WeaponId::Knife));
+    command(&mut b, 0, "lastinv");
+    assert_eq!(active(&b), Some(WeaponId::Usp));
+}
+
+#[test]
+fn armoury_racks_restart_by_the_share_of_the_terrorists() {
+    // Two gun racks of two guns each: 4 guns in all. The first restart fills each rack with its
+    // own count; the next ones give `int((2 / 4) * terrorists * 0.85)` (the division is of ints:
+    // 0), and at least 1.
+    let mut b = bench_with(vec![
+        entity(&[("classname", "armoury_entity"), ("origin", "400 0 0"), ("item", "4"), ("count", "2")]),
+        entity(&[("classname", "armoury_entity"), ("origin", "500 0 0"), ("item", "6"), ("count", "2")]),
+    ]);
+    join(&mut b, 0, 1, 1);
+    b.step(5);
+    let racks = of_class(&mut b, "armoury_entity");
+    assert_eq!(racks.len(), 2);
+    let rack = racks[0];
+    let hidden = |b: &mut Bench| b.run(move |_, eng| eng.ent(rack).unwrap().effects & 128 != 0);
+    b.run(|game, eng| game.restart_round_now(eng));
+    b.step(5);
+    // The first restart: the count is the map's 2, so one gun does not empty the rack.
+    command(&mut b, 0, "drop weapon_ak47");
+    touch(&mut b, rack);
+    assert!(carried(&b).contains(&WeaponId::Ak47));
+    assert!(!hidden(&mut b));
+    command(&mut b, 0, "drop weapon_ak47");
+    // The second restart: 1 gun, so the next gun taken empties the rack.
+    b.run(|game, eng| game.restart_round_now(eng));
+    b.step(5);
+    command(&mut b, 0, "drop weapon_ak47");
+    assert!(!carried(&b).contains(&WeaponId::Ak47));
+    touch(&mut b, rack);
+    assert!(carried(&b).contains(&WeaponId::Ak47));
+    assert!(hidden(&mut b), "the count after the second restart was 1");
+}

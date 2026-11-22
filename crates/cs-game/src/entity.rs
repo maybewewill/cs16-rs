@@ -50,7 +50,7 @@ pub trait GameEntity: Send + 'static {
 
     /// The round starts over and the map's entities are made again (`UTIL_RestartOther`): the
     /// entity goes back to how it spawned. Only the `armoury_entity` does anything.
-    fn restart(&mut self, _eng: &mut EngineApi<'_>, _id: EdictId) {}
+    fn restart(&mut self, _g: &mut GameState, _eng: &mut EngineApi<'_>, _id: EdictId) {}
 
     /// `other` blocked this entity's push movement.
     fn blocked(
