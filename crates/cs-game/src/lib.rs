@@ -25,6 +25,7 @@ mod pmove;
 pub mod rules;
 mod score;
 pub mod teams;
+pub mod weapons;
 pub mod world;
 
 use cs_engine::{EdictId, EngineApi, GameDll};
