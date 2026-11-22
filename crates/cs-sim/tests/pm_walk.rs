@@ -575,8 +575,7 @@ fn texture_lookup_defaults_to_concrete() {
     let sh = pm_init(None);
     assert_eq!(pm_find_texture_type(&sh, "ANYTHING"), b'C');
     let sh = pm_init(Some(b"M METAL\n"));
-    // Task 7 parses the table; until then every lookup answers concrete.
-    assert!(matches!(pm_find_texture_type(&sh, "METAL"), b'C' | b'M'));
+    assert_eq!(pm_find_texture_type(&sh, "METAL"), b'M');
 }
 
 #[test]
