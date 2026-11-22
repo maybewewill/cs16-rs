@@ -700,6 +700,11 @@ impl GameEntity for StaticBrush {
         self.class
     }
 
+    /// Every brush class but `func_wall` (a plain `CBaseEntity`) is a `CBaseToggle`.
+    fn is_delay(&self) -> bool {
+        self.class != "func_wall"
+    }
+
     /// An entry without a `*N` brush model is refused: there is nothing to collide with.
     fn spawn(&mut self, eng: &mut EngineApi<'_>, id: EdictId, keys: &[(String, String)]) -> bool {
         let (class, kind) = (self.class, self.kind);

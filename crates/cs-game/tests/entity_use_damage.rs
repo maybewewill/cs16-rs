@@ -547,3 +547,148 @@ fn a_player_is_not_usable() {
     assert_eq!(sounds(&b), vec![(deny, 3)]);
     assert!(uses(&b).is_empty());
 }
+
+/// A map for the push tests: the victim `[0]` at 200 units on X (a 32-unit box, health 1000,
+/// damageable) and a non-damageable `[1]` 100 units behind it, the inflictor and attacker.
+fn push_arena() -> (Bench, EdictId, EdictId) {
+    let mut b = arena(vec![
+        target("200 0 17", &[("damageable", "1"), ("health", "1000")]),
+        target("100 0 17", &[("damageable", "0")]),
+    ]);
+    let (victim, source) = (nth(&mut b, 0), nth(&mut b, 1));
+    (b, victim, source)
+}
+
+fn velocity_of(b: &mut Bench, id: EdictId) -> Vec3 {
+    b.run(move |_, eng| eng.ent(id).unwrap().velocity)
+}
+
+fn assert_near(a: Vec3, b: Vec3) {
+    assert!((a - b).length() < 0.01, "{a:?} is not {b:?}");
+}
+
+#[test]
+fn take_damage_pushes_walking_and_stepping_entities_away_from_the_inflictor() {
+    use cs_engine::consts::{MOVETYPE_STEP, MOVETYPE_WALK};
+    let (mut b, victim, source) = push_arena();
+    // `flDamage * ((32 * 32 * 72) / (32 * 32 * 32)) * 5` = 11.25 per point, along the direction
+    // from the inflictor's centre to the victim's origin (+X).
+    for (movetype, pushed) in [(MOVETYPE_WALK, true), (MOVETYPE_STEP, true), (0, false)] {
+        b.run(move |_, eng| {
+            let v = eng.ent_mut(victim).unwrap();
+            v.movetype = movetype;
+            v.velocity = Vec3::ZERO;
+        });
+        let hurt = b.run(move |game, eng| {
+            game.test_take_damage(eng, victim, Some(source), Some(source), 10.0, dmg::BULLET)
+        });
+        assert!(hurt);
+        let expected = if pushed { Vec3::new(112.5, 0.0, 0.0) } else { Vec3::ZERO };
+        assert_near(velocity_of(&mut b, victim), expected);
+    }
+    // 110 points of damage and more are 1237.5 and are cut at 1000.
+    b.run(move |game, eng| {
+        let v = eng.ent_mut(victim).unwrap();
+        v.movetype = MOVETYPE_WALK;
+        v.velocity = Vec3::new(0.0, 5.0, 0.0);
+        game.test_take_damage(eng, victim, Some(source), Some(source), 110.0, dmg::BULLET);
+    });
+    assert_near(velocity_of(&mut b, victim), Vec3::new(1000.0, 5.0, 0.0));
+}
+
+#[test]
+fn a_trigger_attacker_does_not_push() {
+    use cs_engine::consts::{MOVETYPE_WALK, SOLID_TRIGGER};
+    let (mut b, victim, source) = push_arena();
+    b.run(move |game, eng| {
+        eng.ent_mut(victim).unwrap().movetype = MOVETYPE_WALK;
+        eng.ent_mut(source).unwrap().solid = SOLID_TRIGGER;
+        // The damage is done, the push is not ("don't let hurt brushes or other triggers move
+        // player").
+        assert!(game.test_take_damage(eng, victim, Some(source), Some(source), 10.0, dmg::BULLET));
+    });
+    assert_eq!(velocity_of(&mut b, victim), Vec3::ZERO);
+    assert_eq!(health_of(&mut b, victim), 990.0);
+    // No attacker, no push either (the source would read a null pointer).
+    b.run(move |game, eng| {
+        assert!(game.test_take_damage(eng, victim, Some(source), None, 10.0, dmg::BULLET));
+    });
+    assert_eq!(velocity_of(&mut b, victim), Vec3::ZERO);
+}
+
+#[test]
+fn radius_damage2_with_an_inflictor_pushes_through_the_trace() {
+    // The blast's inflictor stands at the blast; the line ends on the victim's near face, so the
+    // damage goes through `TraceAttack`/`ApplyMultiDamage` and its `TakeDamage` knows the
+    // inflictor: 75 points, pushed 843.75 away from it.
+    use cs_engine::consts::MOVETYPE_WALK;
+    let mut b = arena(vec![
+        target("100 0 100", &[("damageable", "1"), ("health", "1000")]),
+        target("0 0 100", &[("damageable", "0")]),
+    ]);
+    let (victim, source) = (nth(&mut b, 0), nth(&mut b, 1));
+    b.run(move |game, eng| {
+        eng.ent_mut(victim).unwrap().movetype = MOVETYPE_WALK;
+        let me = eng.client_edict(0);
+        cs_game::grenade::radius_damage2(
+            game.state_mut(),
+            eng,
+            Vec3::new(0.0, 0.0, 100.0),
+            Some(source),
+            Some(me),
+            200.0,
+            350.0,
+            dmg::BLAST,
+        );
+    });
+    assert_eq!(health_of(&mut b, victim), 925.0);
+    assert_near(velocity_of(&mut b, victim), Vec3::new(843.75, 0.0, 0.0));
+}
+
+#[test]
+fn radius_damage2_calls_take_damage_directly_when_nothing_is_in_the_way() {
+    // A non-solid entity does not stop the line (fraction 1): `TakeDamage` is called at once,
+    // with the damage the distance gives (here under the cap of 75), and the push follows.
+    use cs_engine::consts::{MOVETYPE_WALK, SOLID_NOT};
+    let mut b = arena(vec![
+        target("100 0 100", &[("damageable", "1"), ("health", "1000")]),
+        target("0 0 100", &[("damageable", "0")]),
+    ]);
+    let (victim, source) = (nth(&mut b, 0), nth(&mut b, 1));
+    b.run(move |game, eng| {
+        let v = eng.ent_mut(victim).unwrap();
+        v.movetype = MOVETYPE_WALK;
+        v.solid = SOLID_NOT;
+        let me = eng.client_edict(0);
+        cs_game::grenade::radius_damage2(
+            game.state_mut(),
+            eng,
+            Vec3::new(0.0, 0.0, 100.0),
+            Some(source),
+            Some(me),
+            100.0,
+            350.0,
+            dmg::BLAST,
+        );
+    });
+    let origin = Vec3::new(100.0, 0.0, 100.0);
+    let expected = blast(100.0, 350.0, Vec3::new(0.0, 0.0, 100.0), origin).min(75.0);
+    assert_eq!(health_of(&mut b, victim), 1000.0 - expected);
+    assert!(velocity_of(&mut b, victim).x > 0.0);
+}
+
+#[test]
+fn a_removed_entity_still_takes_damage_until_it_is_freed() {
+    // `UTIL_Remove` marks `FL_KILLME` and clears the name but keeps `takedamage` (only `Killed`
+    // sets `DAMAGE_NO`): a blast in the same frame still hurts it.
+    let mut b = arena(vec![target("100 0 100", &[("damageable", "1"), ("health", "1000")])]);
+    let t = nth(&mut b, 0);
+    let health = b.run(move |game, eng| {
+        let v = eng.ent_mut(t).unwrap();
+        v.flags |= FL_KILLME;
+        v.targetname.clear();
+        game.test_radius_damage(eng, Vec3::new(0.0, 0.0, 100.0), None, None, None, 100.0, 350.0, dmg::EXPLOSION);
+        eng.ent(t).unwrap().health
+    });
+    assert!(health < 1000.0);
+}

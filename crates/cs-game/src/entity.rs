@@ -50,12 +50,6 @@ pub const FCAP_IMPULSE_USE: i32 = 0x0000_0008;
 pub const FCAP_CONTINUOUS_USE: i32 = 0x0000_0010;
 /// The player's use key calls `Use` when it goes down (on) and when it is released (off).
 pub const FCAP_ONOFF_USE: i32 = 0x0000_0020;
-/// Can "master" other entities (a `multisource`).
-pub const FCAP_MASTER: i32 = 0x0000_0080;
-/// Goes back to how it spawned when the round restarts (`UTIL_RestartOther`).
-pub const FCAP_MUST_RESET: i32 = 0x0000_0100;
-/// Is released when the round restarts.
-pub const FCAP_MUST_RELEASE: i32 = 0x0000_0200;
 
 /// `DONT_BLEED` (`util.h`): the `BloodColor` of an entity that has no blood.
 pub const DONT_BLEED: i32 = -1;
@@ -245,9 +239,8 @@ pub trait GameEntity: Send + 'static {
     }
 
     /// `CBaseEntity::Killed(pevAttacker, iGib)` (`cbase.cpp:715`, read 2026-11-22): `deadflag`
-    /// becomes `DEAD_DEAD` and the entity is removed ([`util_remove`]). A class that overrides
-    /// this also stops [`takes_damage`](Self::takes_damage) (the source's `DAMAGE_NO`); a
-    /// removed entity takes no damage whatever the class says (see [`entity_takes_damage`]).
+    /// becomes `DEAD_DEAD`, `takedamage` becomes `DAMAGE_NO` ([`stop_damage`](Self::stop_damage))
+    /// and the entity is removed ([`util_remove`]). A class that overrides this does the same.
     fn killed(
         &mut self,
         _g: &mut GameState,
@@ -256,10 +249,21 @@ pub trait GameEntity: Send + 'static {
         _attacker: Option<EdictId>,
         _gib: i32,
     ) {
+        self.stop_damage();
         if let Some(v) = eng.ent_mut(id) {
             v.deadflag = DEAD_DEAD;
         }
         util_remove(eng, id);
+    }
+
+    /// `pev->takedamage = DAMAGE_NO`, as `Killed` does: a class that keeps its own damageable
+    /// flag clears it here (the default class has none, it never takes damage).
+    fn stop_damage(&mut self) {}
+
+    /// Whether the class derives from `CBaseDelay` (`CBaseToggle`, triggers, buttons, doors...),
+    /// the only ones that read the `delay` and `killtarget` keys ([`crate::targets::note_keys`]).
+    fn is_delay(&self) -> bool {
+        false
     }
 }
 
@@ -300,11 +304,13 @@ pub(crate) fn object_caps_of(eng: &EngineApi<'_>, id: EdictId) -> i32 {
     eng.private::<Box<dyn GameEntity>>(id).map_or(0, |e| e.object_caps())
 }
 
-/// `pev->takedamage != DAMAGE_NO` of an entity that is not a player: the class says so and the
-/// entity is not on its way out (`UTIL_Remove` marks `FL_KILLME`).
+/// `pev->takedamage != DAMAGE_NO` of an entity that is not a player: what its class says. Like
+/// the source it does not look at `FL_KILLME`: a plain `UTIL_Remove` keeps `takedamage` (only
+/// `Killed` sets `DAMAGE_NO`), and the entity stays damageable until the engine frees it. An
+/// entity that is out of its edict for its own call is a [`Vacant`] (no damage); that cannot be
+/// seen yet, as no class damages entities from within its own method.
 pub(crate) fn entity_takes_damage(eng: &EngineApi<'_>, id: EdictId) -> bool {
-    eng.ent(id).is_some_and(|v| v.flags & FL_KILLME == 0)
-        && eng.private::<Box<dyn GameEntity>>(id).is_some_and(|e| e.takes_damage())
+    eng.private::<Box<dyn GameEntity>>(id).is_some_and(|e| e.takes_damage())
 }
 
 /// `BodyTarget(posSrc)` of whichever entity `id` is: a player's is its centre plus `view_ofs *
@@ -593,6 +599,14 @@ impl GameEntity for TestTarget {
         self.damageable
     }
 
+    fn stop_damage(&mut self) {
+        self.damageable = false;
+    }
+
+    fn is_delay(&self) -> bool {
+        true
+    }
+
     fn blood_color(&self) -> i32 {
         self.blood
     }
@@ -606,7 +620,7 @@ impl GameEntity for TestTarget {
         _gib: i32,
     ) {
         g.dispatch_log.push(DispatchEvent::Killed { id });
-        self.damageable = false;
+        self.stop_damage();
         if let Some(v) = eng.ent_mut(id) {
             v.deadflag = DEAD_DEAD;
         }

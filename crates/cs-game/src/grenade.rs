@@ -1317,6 +1317,19 @@ impl crate::CsGame {
         );
     }
 
+    /// `TakeDamage` of the entity `id` (a player or a game entity).
+    pub fn test_take_damage(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        id: EdictId,
+        inflictor: Option<EdictId>,
+        attacker: Option<EdictId>,
+        damage: f32,
+        bits: u32,
+    ) -> bool {
+        crate::entity::take_damage_of(&mut self.state, eng, id, inflictor, attacker, damage, bits)
+    }
+
     /// `RadiusFlash(src, inflictor, attacker, damage, CLASS_NONE, DMG_BLAST)`.
     pub fn test_radius_flash(
         &mut self,

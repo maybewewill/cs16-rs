@@ -658,7 +658,9 @@ impl GameDll for CsGame {
         if !entity.spawn(eng, id, keys) {
             return false;
         }
-        targets::note_keys(&mut self.state, id, keys);
+        if entity.is_delay() {
+            targets::note_keys(&mut self.state, id, keys);
+        }
         attach(eng, id, entity);
         if classname == "worldspawn" {
             world::precache_briefing(eng, &self.state.briefings);

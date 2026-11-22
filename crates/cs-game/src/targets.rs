@@ -5,8 +5,9 @@
 //! [`use_targets`] is the `SUB_UseTargets` an entity calls on itself, e.g. a bomb target when the
 //! planted bomb explodes in its zone. The `delay` and `killtarget` keys of the map entity are
 //! kept by [`note_keys`] (`CBaseDelay::KeyValue`) because the entity is out of its edict while
-//! its own method runs (see [`crate::entity`]); a class that is no `CBaseDelay` has none, so its
-//! call behaves as `CBaseEntity::SUB_UseTargets` (it fires the targets).
+//! its own method runs (see [`crate::entity`]). Only a class that is a `CBaseDelay`
+//! ([`GameEntity::is_delay`]) has them; the others never read the keys, so their call behaves as
+//! `CBaseEntity::SUB_UseTargets` (it fires the targets).
 //!
 //! Gaps (named, none is needed by a classic map): the `REGAMEDLL_FIXES` recursion guard of
 //! `FireTargets` (vanilla has none: an entity that targets itself calls itself as far as the
