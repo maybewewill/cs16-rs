@@ -58,6 +58,8 @@ use glam::Vec3;
 
 use crate::GameState;
 use crate::menus::{self, Menu};
+use crate::weapons::core as weapon_core;
+use crate::weapons::{MAX_AMMO_SLOTS, MAX_ITEM_TYPES, WeaponId, WeaponSlotItem};
 use crate::messages;
 use crate::money;
 use crate::observer::{self, ObserverState};
@@ -155,12 +157,20 @@ const VEC_VIEW: f32 = PM_VEC_VIEW;
 /// `PLAYER_FREEZE_TIME_OVER` (`cdll_dll.h`, read 2026-11-22), a bit of `iuser3` in the client
 /// data. The name is inverted in the source: the bit is set while the freeze period is on.
 const PLAYER_FREEZE_TIME_OVER: i32 = 1 << 1;
+/// `PLAYER_CAN_SHOOT` and `PLAYER_HOLDING_SHIELD` (`cdll_dll.h`), bits of `iuser3` in the client
+/// data. (`PLAYER_IN_BOMB_ZONE` is phase 2E.)
+const PLAYER_CAN_SHOOT: i32 = cs_sim::pm::consts::PLAYER_CAN_SHOOT;
+const PLAYER_HOLDING_SHIELD: i32 = cs_sim::pm::consts::PLAYER_HOLDING_SHIELD;
 /// `WEAPON_SUIT`: the bit of `pev->weapons` that stands for the HEV suit.
 const WEAPON_SUIT: u32 = 31;
 /// `DEATH_ANIMATION_TIME` (`gamerules.h`): how long a death lasts before the corpse is sent.
 const DEATH_ANIMATION_TIME: f64 = 3.0;
 /// `DEFAULT_FOV`.
 const DEFAULT_FOV: f32 = 90.0;
+/// `HITGROUP_SHIELD_ENABLED` and `HITGROUP_SHIELD_DISABLED`: the values of `pev->gamestate` of
+/// a player (`player.h`, read 2026-11-22); the engine's hitbox traces skip the shield box at 1.
+const HITGROUP_SHIELD_ENABLED: i32 = 0;
+const HITGROUP_SHIELD_DISABLED: i32 = 1;
 /// The speed of a player with no active item (`CBasePlayer::ResetMaxSpeed`, ReGameDLL
 /// `player.cpp`); weapons set it themselves once they exist.
 const NO_ITEM_MAX_SPEED: f32 = 240.0;
@@ -285,8 +295,47 @@ pub struct Player {
     pub(crate) time_based_damage: [u8; ITBD_END],
     /// `m_tbdPrev`: server time of the last time-based damage check.
     pub(crate) tbd_prev: f32,
-    /// `pev->weapons`: only the suit bit for now.
+    /// `pev->weapons`: the suit bit, and the bit of every weapon the player carries.
     pub(crate) weapons: u32,
+    /// `m_rgpPlayerItems`: the weapons the player carries, by inventory slot (`iItemSlot()`,
+    /// 1 to 5; 0 is not used). Each list is the linked list `m_pNext` makes in C: the head
+    /// (the weapon picked up last) first.
+    pub(crate) items: [Vec<WeaponSlotItem>; MAX_ITEM_TYPES],
+    /// `m_pActiveItem`, by weapon id.
+    pub(crate) active_item: Option<WeaponId>,
+    /// `m_pLastItem`.
+    pub(crate) last_item: Option<WeaponId>,
+    /// `m_pClientActiveItem`: the active item the client was last told.
+    pub(crate) client_active_item: Option<WeaponId>,
+    /// `m_fWeapon`: a `CurWeapon` has been sent since the spawn.
+    pub(crate) f_weapon: bool,
+    /// `m_rgAmmo`: the reserve of each ammo type (the registry's index, see
+    /// [`crate::weapons::ammo_index`]).
+    pub(crate) ammo: [i32; MAX_AMMO_SLOTS],
+    /// `m_rgAmmoLast`: what the client was last told of each ammo.
+    pub(crate) ammo_last: [i32; MAX_AMMO_SLOTS],
+    /// The legacy counters `ammo_buckshot`, `ammo_9mm`, ... of `TabulateAmmo` (the order of
+    /// [`weapon_core::TABULATED_AMMO`]); the client data carries them.
+    pub(crate) tabulated_ammo: [i32; 10],
+    /// `m_flNextAttack`: seconds until the player may act with a weapon again (a countdown).
+    pub(crate) next_attack: f32,
+    /// `m_bCanShoot`.
+    pub(crate) can_shoot: bool,
+    /// `m_bIsDefusing` (the bomb is phase 2E).
+    pub(crate) is_defusing: bool,
+    /// `m_bOwnsShield` (the shield is Task 12).
+    pub(crate) owns_shield: bool,
+    /// `m_bShieldDrawn` (read by the shield code of Task 12).
+    #[allow(dead_code)]
+    pub(crate) shield_drawn: bool,
+    /// `m_bResumeZoom`: a shot closed the scope; it opens again when the weapon may shoot.
+    pub(crate) resume_zoom: bool,
+    /// `m_iLastZoom`: the FOV to go back to.
+    pub(crate) last_zoom: i32,
+    /// `m_flEjectBrass`: server time the shell leaves the weapon, 0 for none.
+    pub(crate) eject_brass: f32,
+    /// `m_szAnimExtention`: the animation set of the weapon in hand.
+    pub(crate) anim_extension: String,
     /// `PFLAG_OBSERVER`: the player is an observer ([`observer::start_observer`] ran), so the
     /// corpse was sent and `PlayerDeathThink` does not run again.
     pub(crate) pflag_observer: bool,
@@ -390,6 +439,23 @@ impl Player {
             time_based_damage: [0; ITBD_END],
             tbd_prev: 0.0,
             weapons: 0,
+            items: Default::default(),
+            active_item: None,
+            last_item: None,
+            client_active_item: None,
+            f_weapon: false,
+            ammo: [0; MAX_AMMO_SLOTS],
+            ammo_last: [0; MAX_AMMO_SLOTS],
+            tabulated_ammo: [0; 10],
+            next_attack: 0.0,
+            can_shoot: false,
+            is_defusing: false,
+            owns_shield: false,
+            shield_drawn: false,
+            resume_zoom: false,
+            last_zoom: 90,
+            eject_brass: 0.0,
+            anim_extension: String::new(),
             pflag_observer: false,
             obs: ObserverState::default(),
             buttons_pressed: 0,
@@ -683,6 +749,7 @@ pub(crate) fn spawn(
         None => (Vec3::new(0.0, 0.0, 1.0), Vec3::ZERO),
     };
     let time = eng.time();
+    let freeze = g.rules.is_freeze_period();
     let Some(p) = g.players[index].as_mut() else {
         return false;
     };
@@ -723,6 +790,15 @@ pub(crate) fn spawn(
     // `PlayerSpawn`: `pev->weapons |= (1 << WEAPON_SUIT)`.
     p.weapons |= 1 << WEAPON_SUIT;
     p.reset_hud_state();
+    // `Spawn` (player.cpp 6026-6028, read 2026-11-22): the weapon HUD starts over.
+    p.last_item = None;
+    p.f_weapon = false;
+    p.client_active_item = None;
+    // `Spawn` (player.cpp 5937): no shooting during the freeze period.
+    p.can_shoot = !freeze;
+    // `Spawn` (player.cpp 5841-5843): a player without a shield has `HITGROUP_SHIELD_DISABLED`
+    // (1) in `gamestate`, so the engine's studio traces skip the shield's hit box.
+    let shield_state = if p.owns_shield { HITGROUP_SHIELD_ENABLED } else { HITGROUP_SHIELD_DISABLED };
 
     if eng.ent(id).is_some_and(|v| v.modelindex == 0) {
         eng.set_model(id, "models/player.mdl");
@@ -745,6 +821,7 @@ pub(crate) fn spawn(
         v.friction = 1.0;
         v.gravity = 1.0;
         v.fov = DEFAULT_FOV;
+        v.gamestate = shield_state;
         v.origin = origin;
         v.v_angle = Vec3::ZERO;
         v.velocity = Vec3::ZERO;
@@ -804,10 +881,21 @@ pub(crate) fn spawn(
     true
 }
 
-/// `CBasePlayer::ResetMaxSpeed`, for a player with no weapon: 900 for an observer, 1 while the
-/// round is in its freeze period (nobody moves), else [`NO_ITEM_MAX_SPEED`]. The active item
-/// sets the speed of an armed player once weapons exist.
+/// `CBasePlayer::ResetMaxSpeed`: 900 for an observer, 1 while the round is in its freeze period
+/// (nobody moves), else the active item's `GetMaxSpeed()`, or [`NO_ITEM_MAX_SPEED`] with none.
+/// (The VIP's 227 is not ported.)
 pub(crate) fn reset_max_speed(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    let item = g
+        .players
+        .get(usize::from(slot))
+        .and_then(Option::as_ref)
+        .and_then(Player::active_max_speed);
+    apply_max_speed(g, eng, slot, item);
+}
+
+/// [`reset_max_speed`] with the active item's speed given (`None` for no active item), for a
+/// weapon that is checked out of the player's list while it runs.
+pub(crate) fn apply_max_speed(g: &GameState, eng: &mut EngineApi<'_>, slot: u8, item: Option<f32>) {
     let id = eng.client_edict(slot);
     let freeze = g.rules.is_freeze_period();
     if let Some(v) = eng.ent_mut(id) {
@@ -816,7 +904,7 @@ pub(crate) fn reset_max_speed(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) 
         } else if freeze {
             FROZEN_MAX_SPEED
         } else {
-            NO_ITEM_MAX_SPEED
+            item.unwrap_or(NO_ITEM_MAX_SPEED)
         };
     }
 }
@@ -903,6 +991,8 @@ pub(crate) fn post_usercmd(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8)
     if !observing && p.in_play() && p.alive && !g.rules.game_over() {
         post_think(g, eng, slot);
     }
+    // `pt_end`: `PostThink` jumps here when the match is over or the player is dead.
+    weapon_core::decay_timers(g, eng, slot);
     pmove::cmd_end(eng, slot);
 }
 
@@ -914,9 +1004,11 @@ fn run_cmd_body(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, cmd: &Gold
     let game_over = g.rules.game_over();
     teams::pre_think(g, eng, slot);
     rules::player_think(g, slot, cmd.buttons);
+    weapon_player_think(g, eng, slot);
     let id = eng.client_edict(slot);
     if !game_over {
         // `ItemPreFrame; WaterMove` come before the velocity modifier.
+        weapon_core::player_item_pre_frame(g, eng, slot);
         water_move(g, eng, slot);
         // `PreThink` (player.cpp:4825, read 2026-11-22): the flashlight is hidden from the HUD
         // unless `mp_flashlight` allows it (`FAllowFlashlight`), before `UpdateClientData`.
@@ -1173,6 +1265,47 @@ fn check_time_based_damage(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8)
     }
 }
 
+/// What `CHalfLifeMultiplay::PlayerThink` does to the weapons' state, right after the round rules
+/// have noted the buttons (multiplay_gamerules.cpp 3722-3755, read 2026-11-22): once the match
+/// is over the player's buttons are cleared (the pressed ones were noted for the intermission
+/// first), `m_bCanShoot` comes back when the freeze period is over, and a weapon with its
+/// shield drawn cannot shoot. (`NOFIREUNDERWATER` is `REGAMEDLL_ADD`: not here.)
+fn weapon_player_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    let game_over = g.rules.game_over();
+    let freeze = g.rules.is_freeze_period();
+    let id = eng.client_edict(slot);
+    let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) else {
+        return;
+    };
+    if game_over {
+        // Clear attack/use commands from the player.
+        p.buttons_pressed = 0;
+        if let Some(v) = eng.ent_mut(id) {
+            v.button = 0;
+        }
+    }
+    if !p.can_shoot && !freeze {
+        p.can_shoot = true;
+    }
+    let shield_drawn = p.active_item.and_then(|a| p.find_item(a)).is_some_and(|(s, i)| {
+        p.items[s][i].weapon.weapon_state & crate::weapons::WPNSTATE_SHIELD_DRAWN != 0
+    });
+    if shield_drawn {
+        p.can_shoot = false;
+    }
+}
+
+/// `CBasePlayer::ImpulseCommands` (`player.cpp` 6816), what is ported: `pev->impulse` is
+/// consumed (set to 0) once the weapons have had their turn. Not ported: `PlayerUse` (the use
+/// key), impulse 100 (the flashlight), 201 (the spray) and the cheat impulses (they need
+/// `sv_cheats`-like `g_flWeaponCheat`, off on a server).
+pub(crate) fn impulse_commands(_g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    let id = eng.client_edict(slot);
+    if let Some(v) = eng.ent_mut(id) {
+        v.impulse = 0;
+    }
+}
+
 /// The fall part of `CBasePlayer::PostThink`: a player that lands faster than
 /// `MAX_PLAYER_SAFE_FALL_SPEED` out of water takes [`fall_damage`] from the world.
 fn post_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
@@ -1189,6 +1322,15 @@ fn post_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
         return;
     };
     let (health, fall_velocity) = (p.health, p.fall_velocity);
+    // `PostThink` does the weapon stuff before the fall check (`ItemPostFrame`).
+    weapon_core::player_item_post_frame(g, eng, slot);
+    let Some(p) = g
+        .players
+        .get_mut(usize::from(slot))
+        .and_then(Option::as_mut)
+    else {
+        return;
+    };
     if flags & FL_ONGROUND == 0 {
         return;
     }
@@ -1424,6 +1566,8 @@ fn killed(
     }
     if let Some(v) = eng.ent_mut(id) {
         v.fov = 0.0;
+        // `Killed` (player.cpp 2418): the dead have no shield hit box.
+        v.gamestate = HITGROUP_SHIELD_DISABLED;
         v.deadflag = DEAD_DYING;
         v.movetype = MOVETYPE_TOSS;
         v.flags &= !FL_ONGROUND;
@@ -1545,11 +1689,20 @@ pub(crate) fn client_data(
     // others (CAN_SHOOT, IN_BOMB_ZONE, HOLDING_SHIELD) come with the weapons and the bomb
     // zones (2D, 2E).
     let iuser3 = if own.iuser1 == observer::OBS_NONE && source.is_none() {
-        if g.rules.is_freeze_period() {
-            PLAYER_FREEZE_TIME_OVER
-        } else {
-            0
+        let mut bits = 0;
+        if let Some(p) = g.players.get(usize::from(slot)).and_then(Option::as_ref) {
+            // `m_bCanShoot && !m_bIsDefusing` (`m_bCanShootOverride` is a mod API).
+            if p.can_shoot && !p.is_defusing {
+                bits |= PLAYER_CAN_SHOOT;
+            }
+            if p.owns_shield {
+                bits |= PLAYER_HOLDING_SHIELD;
+            }
         }
+        if g.rules.is_freeze_period() {
+            bits |= PLAYER_FREEZE_TIME_OVER;
+        }
+        bits
     } else {
         own.iuser3
     };

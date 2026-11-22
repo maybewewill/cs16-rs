@@ -269,6 +269,23 @@ pub(crate) fn cur_weapon_none(eng: &mut EngineApi<'_>, slot: u8) {
     );
 }
 
+/// `gmsgCurWeapon` of `CBasePlayerWeapon::UpdateClientData`: the state (1 for the active weapon,
+/// 0 for the others), the weapon id and the clip, each a byte (a clip of -1 is 255).
+pub(crate) fn cur_weapon(eng: &mut EngineApi<'_>, slot: u8, state: u8, id: u8, clip: u8) {
+    send_raw(eng, MsgDest::One(slot), "CurWeapon", &[state, id, clip]);
+}
+
+/// `gmsgAmmoX` (`CBasePlayer::SendAmmoUpdate`): the player's count of ammo `index`.
+pub(crate) fn ammo_x(eng: &mut EngineApi<'_>, slot: u8, index: u8, amount: u8) {
+    send_raw(eng, MsgDest::One(slot), "AmmoX", &[index, amount]);
+}
+
+/// `gmsgReloadSound` (`CBasePlayerWeapon::ReloadSound`) to `slot`: the volume byte and the
+/// kind (0 for a shotgun, 1 for any other weapon).
+pub(crate) fn reload_sound(eng: &mut EngineApi<'_>, slot: u8, volume: u8, kind: u8) {
+    send_raw(eng, MsgDest::One(slot), "ReloadSound", &[volume, kind]);
+}
+
 /// `gmsgGameMode` (`CHalfLifeMultiplay::UpdateGameMode`): 1, multiplayer.
 fn game_mode(eng: &mut EngineApi<'_>, slot: u8) {
     send_raw(eng, MsgDest::One(slot), "GameMode", &[1]);
@@ -558,8 +575,11 @@ pub(crate) fn update_client_data(g: &mut GameState, eng: &mut EngineApi<'_>, slo
         p.client_hide_hud = p.hide_hud;
     }
     if p.fov != p.client_fov {
-        // The original writes `pev->fov = m_iFOV` first; `spawn` keeps the edict's `fov`
-        // equal to `p.fov` already (no zoom exists yet), so nothing is written here.
+        // The cache is updated at the end of the function, so the weapons' `UpdateClientData`
+        // see that the FOV changed. `pev->fov = m_iFOV` first.
+        if let Some(v) = eng.ent_mut(eng.client_edict(slot)) {
+            v.fov = f32::from(p.fov);
+        }
         eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::SetFov(p.fov));
         // `MSG_SPEC` `HLTV` follows: there is no HLTV.
     }
@@ -604,7 +624,14 @@ pub(crate) fn update_client_data(g: &mut GameState, eng: &mut EngineApi<'_>, slo
         send_raw(eng, MsgDest::One(slot), "Train", &[0]);
         p.train_new = false;
     }
-    // Cached last, so the weapon updates can see that the field of view changed.
+    // `SendAmmoUpdate`, then every item sends its `CurWeapon` if the HUD is stale.
+    crate::weapons::core::send_ammo_update(g, eng, slot);
+    crate::weapons::core::update_items_client_data(g, eng, slot);
+    // Cache the client's weapon and FOV, after the weapon updates have seen the change.
+    let Some(p) = g.players.get_mut(index).and_then(Option::as_mut) else {
+        return;
+    };
+    p.client_active_item = p.active_item;
     p.client_fov = p.fov;
     crate::hud_misc::update_status_bar(g, eng, slot);
     // The end of `UpdateClientData`: every half second the zones the player is in.

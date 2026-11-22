@@ -290,6 +290,142 @@ impl CsGame {
         pmove::world_flags(eng, slot)
     }
 
+    /// Gives the player of `slot` the weapon `behavior` with `clip` rounds loaded and `reserve`
+    /// rounds of its ammo, without the pickup rules (the inventory operations are Task 12).
+    /// `false` when nobody is in that slot or the weapon has no inventory slot. For tests only
+    /// (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn give_weapon(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        slot: u8,
+        behavior: Box<dyn weapons::WeaponBehavior>,
+        clip: i32,
+        reserve: i32,
+    ) -> bool {
+        weapons::core::give_weapon(&mut self.state, eng, slot, behavior, clip, reserve)
+    }
+
+    /// `SelectItem` for weapon `id` of the player of `slot`. For tests only (cargo feature
+    /// `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn select_weapon(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        slot: u8,
+        id: weapons::WeaponId,
+    ) -> bool {
+        weapons::core::select_item(&mut self.state, eng, slot, id)
+    }
+
+    /// The fields of weapon `id` the player of `slot` carries, to read or change. For tests only
+    /// (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn weapon_mut(&mut self, slot: u8, id: weapons::WeaponId) -> Option<&mut weapons::Weapon> {
+        let p = self.state.players.get_mut(usize::from(slot))?.as_mut()?;
+        let (s, i) = p.find_item(id)?;
+        Some(&mut p.items[s][i].weapon)
+    }
+
+    /// `(m_flNextAttack, m_bCanShoot, the active weapon, m_iFOV, m_iClientFOV)` of the player of
+    /// `slot`. For tests only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn player_weapon_state(
+        &self,
+        slot: u8,
+    ) -> Option<(f32, bool, Option<weapons::WeaponId>, u8, u8)> {
+        let p = self.state.players.get(usize::from(slot))?.as_ref()?;
+        Some((p.next_attack, p.can_shoot, p.active_item, p.fov, p.client_fov))
+    }
+
+    /// Sets `m_flNextAttack` of the player of `slot`. For tests only (cargo feature
+    /// `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn set_next_attack(&mut self, slot: u8, value: f32) {
+        if let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+            p.next_attack = value;
+        }
+    }
+
+    /// Sets `m_iFOV` of the player of `slot` (a zoom, which a weapon would set). For tests only
+    /// (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn set_fov(&mut self, slot: u8, fov: u8) {
+        if let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+            p.fov = fov;
+        }
+    }
+
+    /// `m_rgAmmo[index]` of the player of `slot`. For tests only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn player_ammo(&self, slot: u8, index: usize) -> Option<i32> {
+        self.state.players.get(usize::from(slot))?.as_ref()?.ammo.get(index).copied()
+    }
+
+    /// `m_rgAmmo[index] = value` of the player of `slot`. For tests only (cargo feature
+    /// `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn set_player_ammo(&mut self, slot: u8, index: usize, value: i32) {
+        if let Some(a) = self
+            .state
+            .players
+            .get_mut(usize::from(slot))
+            .and_then(Option::as_mut)
+            .and_then(|p| p.ammo.get_mut(index))
+        {
+            *a = value;
+        }
+    }
+
+    /// The legacy `ammo_*` counters of `TabulateAmmo` of the player of `slot`. For tests only
+    /// (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn tabulated_ammo(&self, slot: u8) -> Option<[i32; 10]> {
+        Some(self.state.players.get(usize::from(slot))?.as_ref()?.tabulated_ammo)
+    }
+
+    /// Ends the freeze period now (`OnRoundFreezeEnd`). For tests only (cargo feature
+    /// `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn end_freeze_period(&mut self, eng: &mut EngineApi<'_>) {
+        rules::on_round_freeze_end(&mut self.state, eng);
+    }
+
+    /// Sets `m_bGameOver` (no intermission). For tests only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn force_game_over(&mut self, over: bool) {
+        self.state.rules.force_game_over(over);
+    }
+
+    /// Closes the scope of the player of `slot` as a shot does (`m_bResumeZoom`, with
+    /// `m_iLastZoom`). For tests only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn set_resume_zoom(&mut self, slot: u8, last_zoom: i32) {
+        if let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+            p.resume_zoom = true;
+            p.last_zoom = last_zoom;
+        }
+    }
+
+    /// Runs `ResetMaxSpeed` of the player of `slot`. For tests only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn reset_max_speed(&self, eng: &mut EngineApi<'_>, slot: u8) {
+        player::reset_max_speed(&self.state, eng, slot);
+    }
+
     /// Runs `RestartRound` now (not the delayed `sv_restart`). For tests only (cargo feature
     /// `test-hooks`).
     #[cfg(feature = "test-hooks")]

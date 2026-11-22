@@ -258,6 +258,13 @@ impl Rules {
         self.freeze_period
     }
 
+    /// Sets `m_bGameOver`, without the intermission. For tests only (cargo feature
+    /// `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn force_game_over(&mut self, over: bool) {
+        self.game_over = over;
+    }
+
     /// `m_bMapHasBuyZone`.
     pub fn map_has_buy_zone(&self) -> bool {
         self.map_has_buy_zone
@@ -614,7 +621,7 @@ fn check_freeze_period_expired(g: &mut GameState, eng: &mut EngineApi<'_>) {
 /// `m_bMapHasVIPSafetyZone`: VIP/LOCKNLOAD) are 2E. The call is `Radio(sentence)` without a
 /// verbose text, so the teammates get the `SendAudio` and the icon, no `TextMsg`. Vanilla's
 /// `pev->flags == FL_DORMANT` test (an equality, never true for a joined player) is dropped.
-fn on_round_freeze_end(g: &mut GameState, eng: &mut EngineApi<'_>) {
+pub(crate) fn on_round_freeze_end(g: &mut GameState, eng: &mut EngineApi<'_>) {
     // Freeze period expired: kill the flag.
     g.rules.freeze_period = false;
     let sentence = match g.random_range(0, 3) {
@@ -645,6 +652,10 @@ fn on_round_freeze_end(g: &mut GameState, eng: &mut EngineApi<'_>) {
                 .is_some_and(|p| p.team != Team::Spectator)
             {
                 player::reset_max_speed(g, eng, slot);
+                // `OnRoundFreezeEnd` (multiplay_gamerules.cpp 2861): shooting is allowed.
+                if let Some(p) = g.players[usize::from(slot)].as_mut() {
+                    p.can_shoot = true;
+                }
             }
         }
         messages::sync_round_timer(g, eng, slot);
