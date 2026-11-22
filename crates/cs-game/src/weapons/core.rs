@@ -224,8 +224,7 @@ impl<'a, 'e> WeaponCtx<'a, 'e> {
     /// `RANDOM_FLOAT(lo, hi)`. Assumption: a uniform float from the game's generator (the
     /// engine's `RandomFloat` is not reproduced; nothing but the ejected brass uses it).
     pub fn random_float(&mut self, lo: f32, hi: f32) -> f32 {
-        let r = self.g.random_range(0, 65535) as f32 / 65535.0;
-        lo + (hi - lo) * r
+        crate::bullets::random_float(self.g, lo, hi)
     }
 
     /// `m_pPlayer->TabulateAmmo()` ([`tabulate_ammo`]).
@@ -668,42 +667,72 @@ impl<'a, 'e> WeaponCtx<'a, 'e> {
     /// `CBaseEntity::FireBullets3` (`cbase.cpp`/`combat.cpp`): the bullet of a gun, with its
     /// spread (from the shared random `shared_rand`), range, penetration and range modifier;
     /// returns the spread vector the event carries. `attacker` is the shooter's edict.
-    /// Wired to `bullets::fire_bullets3` by the controller after Task 7; until then nothing is
-    /// fired and the spread is zero.
+    /// `m_pPlayer->FireBullets3(...)`: the shooter is the player, the weapon blamed is this one,
+    /// and `v_right`/`v_up` are `UTIL_MakeVectors(v_angle + punchangle)`, which every gun calls
+    /// right before the shot ([`crate::bullets::fire_bullets3`]).
     #[allow(clippy::too_many_arguments)]
     pub fn fire_bullets3(
         &mut self,
-        _src: Vec3,
-        _dir: Vec3,
-        _spread: f32,
-        _distance: f32,
-        _penetration: i32,
-        _bullet: BulletType,
-        _damage: i32,
-        _range_modifier: f32,
-        _attacker: Option<EdictId>,
-        _is_pistol: bool,
-        _shared_rand: u32,
+        src: Vec3,
+        dir: Vec3,
+        spread: f32,
+        distance: f32,
+        penetration: i32,
+        bullet: BulletType,
+        damage: i32,
+        range_modifier: f32,
+        attacker: Option<EdictId>,
+        is_pistol: bool,
+        shared_rand: u32,
     ) -> Vec3 {
-        Vec3::ZERO
+        let shooter = self.edict();
+        let (_, v_right, v_up) = self.view_vectors(shooter);
+        let shot = crate::bullets::Bullet {
+            src,
+            dir,
+            spread,
+            distance,
+            penetration,
+            kind: bullet,
+            damage,
+            range_modifier,
+            pistol: is_pistol,
+            shared_rand,
+        };
+        crate::bullets::fire_bullets3(
+            self.g, self.eng, shooter, attacker, Some(self.weapon.id), v_right, v_up, &shot,
+        )
     }
 
     /// `CBaseEntity::FireBullets` (the buckshot of the shotguns: `shots` pellets with a
-    /// spread vector). Wired to `bullets::fire_bullets` by the controller after Task 7; until
-    /// then nothing is fired.
+    /// spread vector), as `m_pPlayer->FireBullets(...)` ([`crate::bullets::fire_bullets`]).
+    /// `_tracer_freq` is dropped: tracers are drawn by the client's event.
     #[allow(clippy::too_many_arguments)]
     pub fn fire_bullets(
         &mut self,
-        _shots: u32,
-        _src: Vec3,
-        _dir: Vec3,
-        _spread: Vec3,
-        _distance: f32,
-        _bullet: BulletType,
+        shots: u32,
+        src: Vec3,
+        dir: Vec3,
+        spread: Vec3,
+        distance: f32,
+        bullet: BulletType,
         _tracer_freq: i32,
-        _damage: i32,
-        _attacker: Option<EdictId>,
+        damage: i32,
+        attacker: Option<EdictId>,
     ) {
+        let shooter = self.edict();
+        let (_, v_right, v_up) = self.view_vectors(shooter);
+        crate::bullets::fire_bullets(
+            self.g, self.eng, shooter, attacker, Some(self.weapon.id), v_right, v_up, shots, src,
+            dir, spread, distance, bullet, damage,
+        );
+    }
+
+    /// `UTIL_MakeVectors(pev->v_angle + pev->punchangle)` of the player: `gpGlobals->v_forward`,
+    /// `v_right`, `v_up` as the gun leaves them before it fires.
+    fn view_vectors(&self, player: EdictId) -> (Vec3, Vec3, Vec3) {
+        let angles = self.eng.ent(player).map_or(Vec3::ZERO, |v| v.v_angle + v.punchangle);
+        angle_vectors(angles)
     }
 
     /// `CBasePlayer::ResetMaxSpeed` from inside the weapon `me`: the same as

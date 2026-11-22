@@ -22,8 +22,7 @@
 //!
 //! ## Known gaps
 //!
-//! Not ported yet, each a later task: weapons and the active item (the weapon of an attacker is
-//! [`active_weapon_id`], `None` until they are wired), the flinch animations, the shield, the
+//! Not ported yet, each a later task: the flinch animations, the shield, the
 //! bomb and grenade flags of `TakeDamage`, and the VIP. Bullets and the damage they do
 //! (`TraceAttack`, `TakeDamage`, `Pain`) are in [`crate::bullets`] and here.
 //!
@@ -69,7 +68,6 @@ use crate::pmove;
 use crate::rules;
 use crate::score;
 use crate::teams::{self, JoinState};
-use crate::weapons::WeaponId;
 use crate::world::{select_join_spawn_point, select_spawn_point};
 
 /// Most players a server holds (the slots of [`GameState::players`]).
@@ -1381,10 +1379,9 @@ fn post_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
 }
 
 /// The id of the weapon the player of `slot` holds out (`m_pActiveItem->m_iId`), `None` when it
-/// holds none. Wired by the controller after Task 6 (the weapon state machine and the player's
-/// items); until then nobody holds a weapon.
-pub(crate) fn active_weapon_id(_g: &GameState, _slot: usize) -> Option<WeaponId> {
-    None
+/// holds none (or the slot is empty).
+pub(crate) fn active_weapon_id(g: &GameState, slot: usize) -> Option<WeaponId> {
+    g.players.get(slot)?.as_ref()?.active_item
 }
 
 /// The armor ratio of an attacker holding `weapon` (the `switch (iGunType)` of
