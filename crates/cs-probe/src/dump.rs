@@ -433,6 +433,23 @@ fn svc_line(
             line = line
                 .field("baselines", baselines.len().to_string())
                 .field("instance_baselines", instance_baselines.len().to_string());
+            // Every baseline with the fields it carries (the non-zero ones), and the set of the
+            // entity numbers for the diff.
+            let mut numbers = BTreeSet::new();
+            for (&number, (ty, rec)) in baselines {
+                numbers.insert(format!("#{number}"));
+                if let Some(schema) = ctx
+                    .deltas
+                    .get(entity_schema_name(number, *ty, ctx.max_clients))
+                {
+                    let list: Vec<String> = changed_fields(schema, None, rec, "")
+                        .iter()
+                        .map(|(n, v)| format!("{n}={v}"))
+                        .collect();
+                    line = line.field(&format!("#{number}"), format!("type={ty} [{}]", list.join(" ")));
+                }
+            }
+            line.sets.push(("baseline entities".to_string(), numbers));
         }
         SvcMessage::ResourceList {
             resources,

@@ -79,6 +79,8 @@ fn rotated_brush_bounds_cover_the_rotation() {
     let (mins, maxs) = bounds_map
         .collision()
         .and_then(|c| c.model_bounds(1))
+        // `set_model` gives a brush entity the model's bounds one unit larger on every side.
+        .map(|(mins, maxs)| (mins - Vec3::ONE, maxs + Vec3::ONE))
         .expect("model 1");
     let cfg = ServerConfig {
         max_clients: 2,

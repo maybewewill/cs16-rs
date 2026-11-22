@@ -17,7 +17,7 @@ use cs_transport::{PacketTransport, PeerAddr};
 use crate::client::{Client, ClientState, MAX_REFUSED_STREAMS, SignonStage};
 use crate::edict::{DEFAULT_MAX_EDICTS, EdictPool};
 
-use crate::game::{ClientView, EngineApi, GameDll, Outbox, entity_state_from_vars};
+use crate::game::{ClientView, EngineApi, GameDll, Outbox, baseline_state_from_vars};
 use crate::map::ServerMap;
 use crate::oob::{ChallengeIssuer, OOB_GLOBAL_REPLIES_PER_SEC, OobLimiter};
 use crate::precache::PrecacheTables;
@@ -169,6 +169,13 @@ impl NetStats {
             self.send_failures += 1;
         }
     }
+}
+
+/// Whether `SV_CreateBaseline` (ReHLDS `sv_main.cpp`, read 2026-11-22) baselines edict `index`:
+/// `g_psvs.maxclients >= entnum || svent->v.modelindex`, so the world (0) and every client slot
+/// are baselined whether or not they have a model, and any other live edict only with one.
+pub(crate) fn baselined(index: u16, v: &crate::edict::EntVars, max_clients: u8) -> bool {
+    index <= u16::from(max_clients) || v.modelindex != 0
 }
 
 impl<G: GameDll> Server<G> {
@@ -419,6 +426,11 @@ impl<G: GameDll> Server<G> {
         self.baselines.len()
     }
 
+    /// The entity numbers of the spawn baselines, ascending.
+    pub fn baseline_numbers(&self) -> Vec<u16> {
+        self.baselines.iter().map(|(number, _)| *number).collect()
+    }
+
     pub fn net_stats(&self) -> NetStats {
         self.net_stats
     }
@@ -609,7 +621,9 @@ impl<G: GameDll> Server<G> {
             .collect()
     }
 
-    /// Spawn baselines of every live, visible edict that is not a client slot, as many as fit
+    /// Spawn baselines of the edicts `SV_CreateBaseline` (ReHLDS `sv_main.cpp`, read
+    /// 2026-11-22) baselines: every live edict that is the world, a client slot or has a model
+    /// ([`baselined`]), each built by [`baseline_state_from_vars`]; as many as fit
     /// what the init buffer leaves of [`MAX_SIGNON_BUFFER`] after the spawn tail
     /// ([`SPAWN_TAIL_MAX`]). Baselines that do not fit are skipped from the highest entity
     /// number down (HLDS has no such rule: its `SV_CreateBaseline` overflows the signon buffer
@@ -617,13 +631,18 @@ impl<G: GameDll> Server<G> {
     /// `tracing::error!` reports how many were skipped.
     fn compute_baselines(&mut self) {
         let max_clients = self.cfg.max_clients;
+        // `sv_playermodel` (`SV_FindModelNumbers`): 0 when the game never precached it.
+        let player_model = self.precache.model_index("models/player.mdl").unwrap_or(0);
         let mut baselines: Vec<(u16, GoldSrcEntityState)> = self
             .edicts
             .iter_live()
-            .filter(|(id, e)| {
-                !(1..=u16::from(max_clients)).contains(&id.index) && e.vars.modelindex != 0
+            .filter(|(id, e)| baselined(id.index, &e.vars, max_clients))
+            .map(|(id, e)| {
+                (
+                    id.index,
+                    baseline_state_from_vars(id.index, &e.vars, max_clients, player_model),
+                )
             })
-            .map(|(id, e)| (id.index, entity_state_from_vars(id.index, &e.vars)))
             .collect();
         let room = MAX_SIGNON_BUFFER
             .saturating_sub(SPAWN_TAIL_MAX)
@@ -929,6 +948,9 @@ impl<G: GameDll> Server<G> {
         if let Some(edict) = self.edicts.get_mut(player) {
             edict.vars.solid = SOLID_SLIDEBOX;
             edict.vars.movetype = MOVETYPE_WALK;
+            // `sv_player->v.colormap = NUM_FOR_EDICT(sv_player)` (ReHLDS `sv_main.cpp`,
+            // `SV_WriteSpawn`, read 2026-11-22): the entity state carries it to every client.
+            edict.vars.colormap = player.index;
         }
         self.outbox.discard_direct = Some(index);
         self.with_game(|game, eng| game.client_put_in_server(eng, slot));
@@ -1100,8 +1122,9 @@ mod tests {
             CVarRegistry::new_with_defaults(),
         );
         assert_eq!(server.init_buffer_len(), INIT_BUFFER_BUDGET);
-        // The map entities and the world (edict 0, which has a model).
-        assert!(server.baselines.len() <= entities + 1);
+        // The map entities, the world (edict 0) and the 32 client slots, which `SV_CreateBaseline`
+        // baselines whether or not they have a model.
+        assert!(server.baselines.len() <= entities + 1 + 32);
         // Every slot connected, each with a userinfo of the longest a connect may carry.
         let info = format!("\\k\\{}", "v".repeat(MAX_INFO_STRING - 3));
         assert_eq!(info.len(), MAX_INFO_STRING);

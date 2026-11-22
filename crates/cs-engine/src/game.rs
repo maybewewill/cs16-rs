@@ -6,7 +6,7 @@ use cs_cvar::CVarRegistry;
 use cs_proto48::bitbuf::MsgWriter;
 use cs_proto48::delta::{GoldSrcClientData, GoldSrcEntityState, GoldSrcUserCmd, GoldSrcWeaponData};
 use cs_proto48::info::InfoString;
-use cs_proto48::messages::ENTITY_NORMAL;
+use cs_proto48::messages::{ENTITY_BEAM, ENTITY_NORMAL};
 use cs_proto48::usermsg::UserMsgRegistry;
 use glam::Vec3;
 
@@ -20,6 +20,9 @@ use crate::world::WorldLinks;
 
 /// `FL_DUCKING` in `EntVars::flags`.
 const FL_DUCKING: u32 = 1 << 14;
+/// `EFLAG_SLERP` of `entity_state_t::eflags`: the client interpolates the studio model.
+const EFLAG_SLERP: u8 = 1;
+use crate::world::consts::{MOVETYPE_WALK, SOLID_SLIDEBOX};
 
 /// Messages and kicks the game queued during one call, which the server drains afterwards,
 /// and the message state that outlives a call: the init buffer and the light styles. Per-client
@@ -376,38 +379,132 @@ pub trait GameDll {
     }
 }
 
-/// Network state of edict `index` built from its variables.
-pub fn entity_state_from_vars(index: u16, v: &EntVars) -> GoldSrcEntityState {
-    GoldSrcEntityState {
+/// Network state of edict `index` built from its variables: the copy `AddToFullPack` of the
+/// game library makes into `entity_state_t` (ReGameDLL_CS `regamedll/dlls/client.cpp`, vanilla
+/// branch, read 2026-11-22), statement by statement. The engine calls it for every entity it
+/// offers; `player` of the original is `index` in `1..=max_clients` (`SV_IsPlayerIndex`).
+///
+/// Quirks kept: the state starts all zero, so a non-player never carries `weaponmodel`,
+/// `gaitsequence`, `spectator`, `friction`, `gravity`, `usehull` or `basevelocity`; `animtime` is
+/// truncated to milliseconds through a `double` (`int(1000.0 * animtime) / 1000.0`); a non-player
+/// that has an animation time and no velocity gets `EFLAG_SLERP`; `owner` is sent only when it is
+/// a client (`1..=max_clients`); `aiment` is the edict number of the followed entity.
+pub fn entity_state_from_vars(index: u16, v: &EntVars, max_clients: u8) -> GoldSrcEntityState {
+    let is_client = |n: u16| (1..=u16::from(max_clients)).contains(&n);
+    let player = is_client(index);
+    let mut state = GoldSrcEntityState {
         number: index,
-        entity_type: ENTITY_NORMAL,
+        entity_type: if v.flags & crate::world::consts::FL_CUSTOMENTITY != 0 {
+            ENTITY_BEAM
+        } else {
+            ENTITY_NORMAL
+        },
+        // `int(1000.0 * animtime) / 1000.0`: the product and the quotient are `double`.
+        animtime: (f64::from((1000.0 * f64::from(v.animtime)) as i32) / 1000.0) as f32,
         origin: v.origin,
         angles: v.angles,
+        mins: v.mins,
+        maxs: v.maxs,
+        startpos: v.startpos,
+        endpos: v.endpos,
+        impacttime: v.impacttime,
+        starttime: v.starttime,
         modelindex: v.modelindex,
-        sequence: v.sequence,
-        gaitsequence: v.gaitsequence,
         frame: v.frame,
-        animtime: v.animtime,
-        framerate: v.framerate,
-        weaponmodel: v.weaponmodel,
-        movetype: v.movetype,
-        solid: v.solid,
+        skin: v.skin,
         effects: v.effects,
+        scale: v.scale,
+        solid: v.solid,
+        colormap: v.colormap,
+        movetype: v.movetype,
+        sequence: v.sequence,
+        framerate: v.framerate,
+        body: v.body,
+        controller: v.controller,
+        blending: v.blending,
         rendermode: v.rendermode,
         renderamt: v.renderamt,
         renderfx: v.renderfx,
-        skin: v.skin,
-        body: v.body,
-        scale: v.scale,
-        owner: v.owner.map_or(0, |id| id.index),
+        rendercolor: v.rendercolor,
         aiment: v.aiment.map_or(0, |id| id.index),
-        usehull: u8::from(v.flags & FL_DUCKING != 0),
-        // `AddToFullPack` of the game sets it for a player, the only entity with the flag.
-        spectator: v.flags & crate::world::consts::FL_SPECTATOR != 0,
-        mins: v.mins,
-        maxs: v.maxs,
-        colormap: v.colormap,
+        owner: v.owner.map_or(0, |id| id.index),
+        iuser4: v.iuser4,
+        ..Default::default()
+    };
+    // Add studio interpolation if a non-player entity is moving (the original's own question
+    // is "why?").
+    if !player && v.animtime != 0.0 && v.velocity == Vec3::ZERO {
+        state.eflags |= EFLAG_SLERP;
     }
+    if !is_client(state.owner) {
+        state.owner = 0;
+    }
+    if player {
+        state.basevelocity = v.basevelocity;
+        state.weaponmodel = v.weaponmodel;
+        state.gaitsequence = v.gaitsequence;
+        state.spectator = v.flags & crate::world::consts::FL_SPECTATOR != 0;
+        state.friction = v.friction;
+        state.gravity = v.gravity;
+        state.usehull = u8::from(v.flags & FL_DUCKING != 0);
+    }
+    state
+}
+
+/// The baseline of edict `index`: `CreateBaseline` of the game library (ReGameDLL_CS
+/// `regamedll/dlls/client.cpp`, read 2026-11-22) with the entity type and number that
+/// `SV_CreateBaseline` (ReHLDS `rehlds/engine/sv_main.cpp`, read 2026-11-22) sets around the
+/// call. Only the fields the game copies are set; the rest stay zero, as in the original (the
+/// baseline is only the base the first delta of an entity is written against).
+///
+/// A client slot gets the fixed player baseline: hull 0 bounds, `colormap` = the slot number,
+/// `modelindex` = `player_model` (`sv_playermodel`, the index of `models/player.mdl`), friction
+/// and gravity 1, `MOVETYPE_WALK`, `SOLID_SLIDEBOX`, `framerate` 1.
+pub fn baseline_state_from_vars(
+    index: u16,
+    v: &EntVars,
+    max_clients: u8,
+    player_model: u16,
+) -> GoldSrcEntityState {
+    let mut state = GoldSrcEntityState {
+        number: index,
+        entity_type: if v.flags & crate::world::consts::FL_CUSTOMENTITY != 0 {
+            ENTITY_BEAM
+        } else {
+            ENTITY_NORMAL
+        },
+        origin: v.origin,
+        angles: v.angles,
+        frame: v.frame,
+        skin: v.skin,
+        rendermode: v.rendermode,
+        renderamt: v.renderamt,
+        rendercolor: v.rendercolor,
+        renderfx: v.renderfx,
+        scale: v.scale,
+        ..Default::default()
+    };
+    if (1..=u16::from(max_clients)).contains(&index) {
+        state.mins = crate::pm::PM_PLAYER_MINS[0];
+        state.maxs = crate::pm::PM_PLAYER_MAXS[0];
+        state.colormap = index;
+        state.modelindex = player_model;
+        state.friction = 1.0;
+        state.movetype = MOVETYPE_WALK;
+        state.solid = SOLID_SLIDEBOX;
+        state.framerate = 1.0;
+        state.gravity = 1.0;
+    } else {
+        state.mins = v.mins;
+        state.maxs = v.maxs;
+        state.colormap = 0;
+        state.modelindex = v.modelindex;
+        state.movetype = v.movetype;
+        state.solid = v.solid;
+        state.framerate = v.framerate;
+        state.gravity = v.gravity;
+    }
+    state
 }
 
 #[cfg(test)]
@@ -426,27 +523,33 @@ mod tests {
             effects: 8,
             ..Default::default()
         };
-        let s = entity_state_from_vars(21, &v);
+        let s = entity_state_from_vars(21, &v, 8);
         assert_eq!(
             (s.number, s.origin, s.modelindex, s.sequence, s.effects),
             (21, v.origin, 7, 4, 8)
         );
     }
 
-    #[test]
-    fn entity_state_copies_every_field() {
-        let v = EntVars {
+    fn rich_vars() -> EntVars {
+        EntVars {
             origin: Vec3::new(1.0, 2.0, 3.0),
             angles: Vec3::new(4.0, 5.0, 6.0),
             mins: Vec3::new(-16.0, -16.0, -36.0),
             maxs: Vec3::new(16.0, 16.0, 36.0),
+            startpos: Vec3::new(7.0, 8.0, 9.0),
+            endpos: Vec3::new(10.0, 11.0, 12.0),
+            starttime: 3.5,
+            impacttime: 4.5,
+            basevelocity: Vec3::new(1.0, 0.0, -1.0),
             modelindex: 7,
             weaponmodel: 9,
             sequence: 4,
             gaitsequence: 3,
             frame: 0.5,
-            animtime: 1.25,
+            animtime: 1.2509,
             framerate: 2.0,
+            controller: [1, 2, 3, 4],
+            blending: [128, 127],
             scale: 1.5,
             body: 2,
             skin: -1,
@@ -455,8 +558,12 @@ mod tests {
             rendermode: 5,
             renderamt: 200,
             renderfx: 3,
+            rendercolor: [10, 20, 30],
             solid: 2,
             movetype: 6,
+            friction: 0.5,
+            gravity: 0.25,
+            iuser4: 2,
             flags: FL_DUCKING | 1,
             owner: Some(EdictId {
                 index: 5,
@@ -467,12 +574,18 @@ mod tests {
                 serial: 0,
             }),
             ..Default::default()
-        };
-        let s = entity_state_from_vars(21, &v);
+        }
+    }
+
+    #[test]
+    fn player_state_carries_every_delta_field_of_its_edict() {
+        let v = rich_vars();
+        // Edict 3 of 8 clients is a player.
+        let s = entity_state_from_vars(3, &v, 8);
         assert_eq!(
             s,
             GoldSrcEntityState {
-                number: 21,
+                number: 3,
                 entity_type: ENTITY_NORMAL,
                 origin: v.origin,
                 angles: v.angles,
@@ -480,6 +593,7 @@ mod tests {
                 sequence: 4,
                 gaitsequence: 3,
                 frame: 0.5,
+                // `int(1000.0 * 1.2509) / 1000.0`: milliseconds, truncated.
                 animtime: 1.25,
                 framerate: 2.0,
                 weaponmodel: 9,
@@ -499,15 +613,111 @@ mod tests {
                 mins: v.mins,
                 maxs: v.maxs,
                 colormap: 0x1234,
+                // A player never gets `EFLAG_SLERP`.
+                eflags: 0,
+                rendercolor: [10, 20, 30],
+                controller: [1, 2, 3, 4],
+                blending: [128, 127],
+                friction: 0.5,
+                gravity: 0.25,
+                basevelocity: Vec3::new(1.0, 0.0, -1.0),
+                startpos: Vec3::new(7.0, 8.0, 9.0),
+                endpos: Vec3::new(10.0, 11.0, 12.0),
+                impacttime: 4.5,
+                starttime: 3.5,
+                iuser4: 2,
             }
         );
-
-        let standing = entity_state_from_vars(3, &EntVars::default());
+        let standing = entity_state_from_vars(3, &EntVars::default(), 8);
         assert_eq!(
             (standing.owner, standing.aiment, standing.usehull),
             (0, 0, 0)
         );
         assert_eq!(standing.entity_type, ENTITY_NORMAL);
+    }
+
+    #[test]
+    fn non_player_state_leaves_the_player_only_fields_zero() {
+        let v = rich_vars();
+        let s = entity_state_from_vars(21, &v, 8);
+        // Only `AddToFullPack`'s `player` branch sets these.
+        assert_eq!(
+            (s.weaponmodel, s.gaitsequence, s.usehull, s.spectator),
+            (0, 0, 0, false)
+        );
+        assert_eq!((s.friction, s.gravity, s.basevelocity), (0.0, 0.0, Vec3::ZERO));
+        // The owner is sent only when it is a client; edict 5 is one of 8, 12 is not.
+        assert_eq!(s.owner, 5);
+        let far = EntVars {
+            owner: Some(EdictId {
+                index: 12,
+                serial: 0,
+            }),
+            ..rich_vars()
+        };
+        assert_eq!(entity_state_from_vars(21, &far, 8).owner, 0);
+        // A moving-animated non-player with no velocity is interpolated by the client.
+        assert_eq!(s.eflags, 1);
+        let moving = EntVars {
+            velocity: Vec3::new(0.0, 1.0, 0.0),
+            ..rich_vars()
+        };
+        assert_eq!(entity_state_from_vars(21, &moving, 8).eflags, 0);
+        let custom = EntVars {
+            flags: crate::world::consts::FL_CUSTOMENTITY,
+            ..Default::default()
+        };
+        assert_eq!(entity_state_from_vars(21, &custom, 8).entity_type, ENTITY_BEAM);
+    }
+
+    #[test]
+    fn baselines_follow_create_baseline() {
+        let v = rich_vars();
+        let player = baseline_state_from_vars(2, &v, 8, 36);
+        assert_eq!(
+            (
+                player.colormap,
+                player.modelindex,
+                player.friction,
+                player.gravity,
+                player.movetype,
+                player.solid,
+                player.framerate
+            ),
+            (2, 36, 1.0, 1.0, MOVETYPE_WALK, SOLID_SLIDEBOX, 1.0)
+        );
+        assert_eq!(
+            (player.mins, player.maxs),
+            (crate::pm::PM_PLAYER_MINS[0], crate::pm::PM_PLAYER_MAXS[0])
+        );
+        // The copy `CreateBaseline` makes for every entity.
+        assert_eq!(
+            (player.origin, player.angles, player.frame, player.skin),
+            (v.origin, v.angles, 0.5, -1)
+        );
+        assert_eq!(
+            (player.rendermode, player.renderamt, player.renderfx, player.rendercolor),
+            (5, 200, 3, [10, 20, 30])
+        );
+        // What it leaves alone stays zero.
+        assert_eq!(
+            (player.sequence, player.body, player.effects, player.weaponmodel),
+            (0, 0, 0, 0)
+        );
+        let other = baseline_state_from_vars(21, &v, 8, 36);
+        assert_eq!(
+            (
+                other.colormap,
+                other.modelindex,
+                other.movetype,
+                other.solid,
+                other.framerate,
+                other.gravity,
+                other.mins,
+                other.maxs
+            ),
+            (0, 7, 6, 2, 2.0, 0.25, v.mins, v.maxs)
+        );
     }
 
     struct Fixture {

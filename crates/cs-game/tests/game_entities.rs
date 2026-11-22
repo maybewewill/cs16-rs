@@ -409,8 +409,8 @@ fn unknown_classes_are_removed() {
         spawn_at(CT_SPAWN_CLASS, "100 0 0"),
         spawn_at("light", "1 2 3"),
         spawn_at("ambient_generic", "4 5 6"),
-        // Unknown until 2E registers the bomb targets; then this test needs another class.
-        entity(&[("classname", "func_bomb_target")]),
+        // Not registered yet (the hostage phase).
+        entity(&[("classname", "func_hostage_rescue")]),
         // A brush entity without a brush model has nothing to collide with.
         entity(&[("classname", "func_wall")]),
     ]);
@@ -420,10 +420,11 @@ fn unknown_classes_are_removed() {
             .map(|id| eng.ent(id).unwrap().classname.clone())
             .collect::<Vec<_>>()
     });
-    // The world and the one spawn point: nothing else survived.
+    // The world, the sound entity `CWorld::Precache` makes and the one spawn point: nothing
+    // else survived.
     let mut named: Vec<String> = classes.into_iter().filter(|c| !c.is_empty()).collect();
     named.sort();
-    assert_eq!(named, [CT_SPAWN_CLASS, "worldspawn"]);
+    assert_eq!(named, [CT_SPAWN_CLASS, "soundent", "worldspawn"]);
 }
 
 /// Classnames of the brush entities that stand as solid walls.
@@ -724,3 +725,42 @@ fn entity_dispatch_reaches_the_owner() {
             .any(|e| matches!(e, DispatchEvent::Think { id } if *id == doomed))
     );
 }
+
+/// The spawn baselines of de_dust2 are what `SV_CreateBaseline` makes on an 8-slot server: the
+/// world, every client slot (with or without a model), and each other edict that has a model.
+/// The golden capture of HLDS on this map has 51: edicts 0 to 8, then 10 to 51, edict 9 being
+/// the sound entity, which has no model. The 42 brush entities of the map (28
+/// `func_illusionary`, 10 `func_breakable`, 2 `func_buyzone`, 2 `func_bomb_target`) are the ones
+/// with a model; the lights and the spawn points are removed or have none.
+#[test]
+fn de_dust2_baselines_are_those_of_rehlds() {
+    let Some(vfs) = discover() else {
+        return;
+    };
+    let (map, bsp) = dust2(&vfs);
+    let brush_entities = bsp
+        .entities
+        .iter()
+        .filter(|e| e.get("model").is_some_and(|m| m.starts_with('*')))
+        .count();
+    assert_eq!(brush_entities, 42);
+    let cfg = ServerConfig {
+        max_clients: 8,
+        ..ServerConfig::default()
+    };
+    let server = Server::new(
+        cfg,
+        map,
+        Rig {
+            game: CsGame::new(),
+            actions: Vec::new(),
+        },
+        DeltaRegistry::cs16_default(),
+        CVarRegistry::new_with_defaults(),
+    );
+    let numbers = server.baseline_numbers();
+    assert_eq!(numbers.len(), 1 + 8 + brush_entities);
+    let expected: Vec<u16> = (0..=8).chain(10..=51).collect();
+    assert_eq!(numbers, expected);
+}
+

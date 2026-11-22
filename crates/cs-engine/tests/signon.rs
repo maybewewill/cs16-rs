@@ -615,11 +615,11 @@ fn init_and_baselines_share_the_signon_budget() {
         kept.len()
     );
     assert_eq!(kept.len(), h.server.baseline_count());
-    // The highest numbers are the ones skipped: the world (edict 0, which has a model, so
-    // `SV_CreateBaseline` makes one for it) and the lowest of the others are all there.
+    // The highest numbers are the ones skipped: the world (edict 0), the 4 client slots (which
+    // `SV_CreateBaseline` baselines without a model) and the lowest of the others are all there.
     let mut numbers = baselines.keys().copied();
     assert_eq!(numbers.next(), Some(0));
-    assert!(numbers.eq(5..5 + kept.len() as u16 - 1));
+    assert!(numbers.eq(1..kept.len() as u16));
     // Together with the init buffer they fit the sign-on buffer less the spawn tail.
     let room = MAX_SIGNON_BUFFER - SPAWN_TAIL_MAX - init;
     let size = baseline_message_len(4, &kept);
@@ -656,8 +656,8 @@ fn signon_baseline_sizes_are_reported() {
         "stub, {entities} entities with a model (origin): {} baselines, {size} bytes",
         kept.len()
     );
-    // The entities and the world, which has a model.
-    assert_eq!(kept.len(), entities + 1);
+    // The entities, the world and the 16 client slots.
+    assert_eq!(kept.len(), entities + 1 + 16);
 
     let Ok(vfs) = cs_vfs::Vfs::discover(None, cs_vfs::VfsConfig::default()) else {
         return;

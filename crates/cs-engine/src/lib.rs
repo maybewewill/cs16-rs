@@ -43,7 +43,7 @@ pub use frame::{
     ClientFrame, FramePlayer, FrameRing, MAX_DATAGRAM, MAX_PACKET_ENTITIES, UPDATE_BACKUP, clamp_rate,
     update_interval,
 };
-pub use game::{EngineApi, GameDll, entity_state_from_vars};
+pub use game::{EngineApi, GameDll, baseline_state_from_vars, entity_state_from_vars};
 pub use lifecycle::{
     NAME_CHANGE_MIN_INTERVAL_SECS, PINGS_INTERVAL_SECS, SETINFO_BURST, SETINFO_RATE_PER_SEC,
 };

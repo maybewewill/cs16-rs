@@ -1079,6 +1079,27 @@ pub struct GoldSrcEntityState {
     pub mins: Vec3,
     pub maxs: Vec3,
     pub colormap: u16,
+    /// `eflags` (`EFLAG_SLERP`: studio interpolation); 2 bits on the wire.
+    pub eflags: u8,
+    /// `rendercolor` (`color24`): red, green, blue.
+    pub rendercolor: [u8; 3],
+    /// The four bone controller positions a studio model is posed with.
+    pub controller: [u8; 4],
+    /// The two sequence blend weights; the client pitches a player model with `blending[0]`.
+    /// (`entity_state_t::blending` has four bytes, the delta description names two.)
+    pub blending: [u8; 2],
+    /// Friction for prediction (`entity_state_player_t` only).
+    pub friction: f32,
+    /// Gravity multiplier for prediction (`entity_state_player_t` only).
+    pub gravity: f32,
+    /// Conveyor velocity the entity stands on.
+    pub basevelocity: Vec3,
+    /// Parametric movement overrides (`startpos`, `endpos`, `starttime`, `impacttime`).
+    pub startpos: Vec3,
+    pub endpos: Vec3,
+    pub impacttime: f32,
+    pub starttime: f32,
+    pub iuser4: i32,
 }
 
 impl GoldSrcEntityState {
@@ -1117,6 +1138,26 @@ impl GoldSrcEntityState {
         rec.set_u32(schema, "aiment", self.aiment as u32);
         rec.set_u32(schema, "usehull", self.usehull as u32);
         rec.set_u32(schema, "spectator", u32::from(self.spectator));
+        rec.set_u32(schema, "eflags", u32::from(self.eflags));
+        rec.set_u32(schema, "rendercolor.r", u32::from(self.rendercolor[0]));
+        rec.set_u32(schema, "rendercolor.g", u32::from(self.rendercolor[1]));
+        rec.set_u32(schema, "rendercolor.b", u32::from(self.rendercolor[2]));
+        for (i, c) in self.controller.iter().enumerate() {
+            rec.set_u32(schema, &format!("controller[{i}]"), u32::from(*c));
+        }
+        for (i, b) in self.blending.iter().enumerate() {
+            rec.set_u32(schema, &format!("blending[{i}]"), u32::from(*b));
+        }
+        rec.set_f32(schema, "friction", self.friction);
+        rec.set_f32(schema, "gravity", self.gravity);
+        for (i, axis) in ["0", "1", "2"].iter().enumerate() {
+            rec.set_f32(schema, &format!("basevelocity[{axis}]"), self.basevelocity[i]);
+            rec.set_f32(schema, &format!("startpos[{axis}]"), self.startpos[i]);
+            rec.set_f32(schema, &format!("endpos[{axis}]"), self.endpos[i]);
+        }
+        rec.set_f32(schema, "impacttime", self.impacttime);
+        rec.set_f32(schema, "starttime", self.starttime);
+        rec.set_i32(schema, "iuser4", self.iuser4);
         rec
     }
 
@@ -1165,6 +1206,38 @@ impl GoldSrcEntityState {
                 rec.get_f32(schema, "maxs[2]"),
             ),
             colormap: rec.get_u32(schema, "colormap") as u16,
+            eflags: rec.get_u32(schema, "eflags") as u8,
+            rendercolor: [
+                rec.get_u32(schema, "rendercolor.r") as u8,
+                rec.get_u32(schema, "rendercolor.g") as u8,
+                rec.get_u32(schema, "rendercolor.b") as u8,
+            ],
+            controller: std::array::from_fn(|i| {
+                rec.get_u32(schema, &format!("controller[{i}]")) as u8
+            }),
+            blending: std::array::from_fn(|i| {
+                rec.get_u32(schema, &format!("blending[{i}]")) as u8
+            }),
+            friction: rec.get_f32(schema, "friction"),
+            gravity: rec.get_f32(schema, "gravity"),
+            basevelocity: Vec3::new(
+                rec.get_f32(schema, "basevelocity[0]"),
+                rec.get_f32(schema, "basevelocity[1]"),
+                rec.get_f32(schema, "basevelocity[2]"),
+            ),
+            startpos: Vec3::new(
+                rec.get_f32(schema, "startpos[0]"),
+                rec.get_f32(schema, "startpos[1]"),
+                rec.get_f32(schema, "startpos[2]"),
+            ),
+            endpos: Vec3::new(
+                rec.get_f32(schema, "endpos[0]"),
+                rec.get_f32(schema, "endpos[1]"),
+                rec.get_f32(schema, "endpos[2]"),
+            ),
+            impacttime: rec.get_f32(schema, "impacttime"),
+            starttime: rec.get_f32(schema, "starttime"),
+            iuser4: rec.get_i32(schema, "iuser4"),
         }
     }
 }
@@ -1539,6 +1612,64 @@ mod tests {
         assert_eq!(decoded_ent.sequence, 7);
         assert_eq!(decoded_ent.weaponmodel, 19);
         assert!((decoded_ent.animtime - 10.25).abs() < 0.02);
+    }
+
+    /// Every field the `entity_state_t` and `entity_state_player_t` delta descriptions name goes
+    /// through the wire and back: the blending, controllers, colormap, friction, gravity,
+    /// render colour, base velocity, the parametric movement and `iuser4`.
+    #[test]
+    fn entity_state_wire_round_trips_every_field() {
+        let reg = DeltaRegistry::cs16_default();
+        let full = GoldSrcEntityState {
+            number: 1,
+            entity_type: 1,
+            colormap: 1,
+            eflags: 1,
+            rendercolor: [11, 22, 33],
+            controller: [127, 128, 129, 130],
+            blending: [128, 127],
+            friction: 1.0,
+            gravity: 1.0,
+            basevelocity: Vec3::new(8.0, -16.0, 24.5),
+            startpos: Vec3::new(100.0, -200.0, 300.0),
+            endpos: Vec3::new(-100.0, 200.0, -300.0),
+            impacttime: 12.5,
+            starttime: 11.25,
+            iuser4: 3,
+            ..Default::default()
+        };
+        for (name, player) in [("entity_state_player_t", true), ("entity_state_t", false)] {
+            let schema = reg.get(name).unwrap();
+            let zero = GoldSrcEntityState::default().to_delta(schema);
+            let to = full.to_delta(schema);
+            let mut w = MsgWriter::new();
+            w.start_bit_writing();
+            assert!(write_delta(&mut w, schema, &zero, &to, true, 20.0));
+            w.end_bit_writing();
+            let mut r = MsgReader::new(w.as_slice());
+            r.start_bit_reading();
+            let out = read_delta(&mut r, schema, &zero, 20.0).unwrap();
+            r.end_bit_reading().unwrap();
+            let got = GoldSrcEntityState::from_delta(1, 1, &out, schema);
+            assert_eq!(got.colormap, 1, "{name}");
+            assert_eq!(got.rendercolor, [11, 22, 33], "{name}");
+            assert_eq!(got.controller, [127, 128, 129, 130], "{name}");
+            assert_eq!(got.blending, [128, 127], "{name}");
+            assert_eq!(got.basevelocity, full.basevelocity, "{name}");
+            assert_eq!(got.iuser4, 3, "{name}");
+            if player {
+                assert_eq!((got.friction, got.gravity), (1.0, 1.0));
+                // `eflags` and the parametric movement are not in `entity_state_player_t`.
+                assert_eq!(got.eflags, 0);
+            } else {
+                // Only `entity_state_player_t` names them.
+                assert_eq!((got.friction, got.gravity), (0.0, 0.0));
+                assert_eq!(got.eflags, 1);
+                assert_eq!(got.startpos, full.startpos);
+                assert_eq!(got.endpos, full.endpos);
+                assert!((got.impacttime - 12.5).abs() < 0.02 && (got.starttime - 11.25).abs() < 0.02);
+            }
+        }
     }
 
     /// `svc_deltadescription` for `clientdata_t` carries the real C offsets of the 32-bit

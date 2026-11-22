@@ -764,6 +764,11 @@ pub(crate) fn put_in_server(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8
     v.solid = SOLID_NOT;
     v.movetype = MOVETYPE_NOCLIP;
     v.effects = EF_NODRAW | EF_NOINTERP;
+    // `ClientPutInServer` runs `Spawn()` first (client.cpp 637), which ends with `pev->friction`
+    // and `pev->gravity` set to 1 (player.cpp 5846): the golden capture of HLDS has both in
+    // the first entity state of a player that has not picked a team.
+    v.friction = 1.0;
+    v.gravity = 1.0;
     v.deadflag = DEAD_DEAD;
     v.health = 100.0;
     v.velocity = Vec3::ZERO;

@@ -63,6 +63,12 @@ pub struct EntVars {
     pub absmax: Vec3,
     pub avelocity: Vec3,
     pub basevelocity: Vec3,
+    /// `entvars_t::startpos` / `endpos` / `starttime` / `impacttime`: the parametric movement
+    /// a client interpolates along (`AddToFullPack` copies them into the entity state).
+    pub startpos: Vec3,
+    pub endpos: Vec3,
+    pub starttime: f32,
+    pub impacttime: f32,
     pub modelindex: u16,
     pub weaponmodel: u16,
     /// `entvars_t::viewmodel`, as the model index the engine sends (`clientdata_t::viewmodel`).

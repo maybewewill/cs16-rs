@@ -588,6 +588,7 @@ impl<G: GameDll> Server<G> {
             .filter(|p| p.is_finite())
             .unwrap_or(own_eye);
         let pvs = self.map.viewer_pvs(eye);
+        let max_clients_u8 = self.cfg.max_clients;
         let candidates: Vec<GoldSrcEntityState> = self
             .edicts
             .iter_live()
@@ -600,7 +601,7 @@ impl<G: GameDll> Server<G> {
                         && v.effects & EF_NODRAW == 0
                         && self.entity_in_pvs(pvs.as_deref(), *id, v))
             })
-            .map(|(id, edict)| entity_state_from_vars(id.index, &edict.vars))
+            .map(|(id, edict)| entity_state_from_vars(id.index, &edict.vars, max_clients_u8))
             .collect();
         let max_clients = u16::from(self.cfg.max_clients);
         let mut accepted = Vec::new();
