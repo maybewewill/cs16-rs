@@ -363,6 +363,11 @@ status = "tested"
 evidence = "crates/cs-game/tests/hud.rs::flashlight_cvar_hides_the_flashlight_hud"
 
 [[item]]
+id = "decalfrequency"
+status = "tested"
+evidence = "crates/cs-game/tests/hud_extras.rs::spray_paints_a_decal_where_the_player_looks_every_decalfrequency"
+
+[[item]]
 id = "mp_playerid"
 status = "implemented"
 

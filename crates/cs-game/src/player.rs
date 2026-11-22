@@ -190,6 +190,8 @@ const NO_ITEM_MAX_SPEED: f32 = 240.0;
 const OBSERVER_MAX_SPEED: f32 = 900.0;
 /// The speed of a player during the freeze period (`ResetMaxSpeed`): it cannot move.
 const FROZEN_MAX_SPEED: f32 = 1.0;
+/// `IN_SCORE` (`in_buttons.h`): the scoreboard key, the one button `PlayerDeathThink` ignores.
+const IN_SCORE: i32 = 1 << 15;
 /// Seconds between two suicides (`ClientKill`).
 const SUICIDE_DELAY: f64 = 1.0;
 
@@ -1306,7 +1308,9 @@ fn run_cmd_body(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, cmd: &Gold
         return;
     }
     let alive = p.alive;
-    if !alive {
+    // `if (pev->deadflag >= DEAD_DYING && pev->deadflag != DEAD_RESPAWNABLE)` (player.cpp:4853).
+    let deadflag = eng.ent(id).map_or(DEAD_NO, |v| v.deadflag);
+    if deadflag >= DEAD_DYING && deadflag != DEAD_RESPAWNABLE {
         // `PreThink` calls `PlayerDeathThink` before the movement and returns; the dead body
         // then goes through `PM_Move` (`MOVETYPE_TOSS`, or `MOVETYPE_NONE` once it has landed).
         death_think(g, eng, slot);
@@ -2311,6 +2315,9 @@ fn killed(
     }
     if let Some(v) = eng.ent_mut(id) {
         v.fov = 0.0;
+        // `SetThink(&CBasePlayer::PlayerDeathThink); pev->nextthink = gpGlobals->time + 0.1f`
+        // (player.cpp:2604): the entity think runs it too, besides the one in `PreThink`.
+        v.nextthink = f64::from(now as f32 + 0.1);
         // `Killed` (player.cpp 2418): the dead have no shield hit box.
         v.gamestate = HITGROUP_SHIELD_DISABLED;
         v.deadflag = DEAD_DYING;
@@ -2385,8 +2392,8 @@ fn throw_grenade_on_death(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) 
 }
 
 /// `CBasePlayer::PlayerDeathThink` (`player.cpp` 3977-4080, read 2026-11-22) for a dead player,
-/// on every command (`PreThink` calls it each frame; the entity think of `SetThink` every tenth
-/// of a second is not run, as the engine runs the player's commands, not its think): a body on
+/// on every command (`PreThink` calls it each frame) and from the entity think (`SetThink` from
+/// `Killed`, [`death_think_entity`], every tenth of a second while it reschedules itself): a body on
 /// the ground slows down by 20 units a second per call; the
 /// guns are dropped; while the death animation plays (`DEAD_DYING`, the sequence not finished)
 /// the frame advances (`StudioFrameAdvance`) and nothing else happens; then a body on the
@@ -2399,6 +2406,17 @@ fn throw_grenade_on_death(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) 
 /// Assumption: a player whose model the engine has not loaded (a test server without a model
 /// loader) has no animation to wait for, so it is not held in `DEAD_DYING`; with the model the
 /// wait is the source's.
+/// The entity think of a dead player (`SetThink(&CBasePlayer::PlayerDeathThink)`): the same
+/// function, called by the engine when `nextthink` is due, besides `PreThink`'s call. It
+/// reschedules itself (`nextthink = time + 0.1`) only in the "wait for all buttons released"
+/// branch, so the think ends when the body is animating, or a button is held, or the player has
+/// no team; a live player (respawned meanwhile) is left alone.
+pub(crate) fn death_think_entity(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    if eng.ent(eng.client_edict(slot)).is_some_and(|v| v.deadflag != DEAD_NO) {
+        death_think(g, eng, slot);
+    }
+}
+
 fn death_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let now = eng.time();
     let id = eng.client_edict(slot);
@@ -2479,6 +2497,16 @@ fn death_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
         messages::corpse(eng, corpse);
         // Go to the dead camera.
         observer::start_death_cam(g, eng, slot);
+    }
+    // "wait for all buttons released": a dead player on a team that holds no button thinks again
+    // in a tenth of a second (`pev->nextthink = gpGlobals->time + 0.1f`).
+    let team = g.players[usize::from(slot)].as_ref().map(|p| p.team);
+    if let (Some(team), Some(v)) = (team, eng.ent_mut(id))
+        && v.deadflag == DEAD_DEAD
+        && !matches!(team, Team::Unassigned | Team::Spectator)
+        && v.button & !IN_SCORE == 0
+    {
+        v.nextthink = f64::from(now as f32 + 0.1);
     }
 }
 

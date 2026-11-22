@@ -5,8 +5,8 @@
 
 mod common;
 
-use common::{Bench, discover, dust2, enter, join, spawns};
-use cs_engine::consts::FL_ONGROUND;
+use common::{Bench, command, discover, dust2, enter, join, spawns};
+use cs_engine::consts::{FL_ONGROUND, FL_SPECTATOR};
 use cs_engine::{EngineApi, GameDll, ServerMap};
 use cs_game::CsGame;
 use cs_game::player::{DEAD_DEAD, Team, dmg};
@@ -288,8 +288,9 @@ fn a_body_on_the_ground_slows_down_at_every_command() {
         }
         out
     });
+    // `flForward = velocity.Length() - 20`: exactly 80, each time.
     for s in speeds {
-        assert!(s < 99.0, "the velocity of the body decays: {s}");
+        assert!((s - 80.0).abs() < 1e-3, "the velocity of the body decays by 20: {s}");
     }
 }
 
@@ -356,4 +357,128 @@ fn spray_paints_a_decal_where_the_player_looks_every_decalfrequency() {
     b.step(3100);
     let (can, _) = spray(&mut b);
     assert!(can);
+}
+
+// ---- the other hints ----
+
+/// Four players, the probe (CT) looking along +x at a teammate (`friend`) or an enemy 200 units
+/// ahead, the rest far away; hanging in the air, the join hints over.
+fn sighted(friend: bool, spectator: bool) -> Bench {
+    let mut b = four_players();
+    b.run(move |game: &mut CsGame, eng: &mut EngineApi<'_>| {
+        game.place_player(eng, 1, Vec3::new(0.0, 6000.0, 100.0));
+        game.place_player(eng, 2, Vec3::new(0.0, -6000.0, 100.0));
+        game.place_player(eng, 3, Vec3::new(0.0, -7000.0, 100.0));
+        game.place_player(eng, 0, Vec3::new(0.0, 0.0, 100.0));
+        game.place_player(eng, if friend { 1 } else { 2 }, Vec3::new(200.0, 0.0, 100.0));
+        // What the joins showed is forgotten, but the round has started (`DHF_ROUND_STARTED`).
+        for slot in 0..4 {
+            game.set_display_history(slot, 1 << 1);
+        }
+        let id = eng.client_edict(0);
+        if let Some(v) = eng.ent_mut(id) {
+            v.v_angle = Vec3::ZERO;
+            if spectator {
+                v.flags |= FL_SPECTATOR;
+            }
+        }
+    });
+    b.probe.clear_messages();
+    b
+}
+
+#[test]
+fn the_first_friend_and_the_first_enemy_in_the_crosshair_are_hints() {
+    // `#Hint_spotted_a_friend`, once (`DHF_FRIEND_SEEN`).
+    let mut b = sighted(true, false);
+    b.step(60);
+    assert_eq!(hints(&b), ["#Hint_spotted_a_friend"]);
+    assert_ne!(b.run(|g, _| g.display_history(0)).unwrap() & (1 << 7), 0);
+    b.probe.clear_messages();
+    b.step(1000);
+    assert!(hints(&b).is_empty());
+
+    // `#Hint_spotted_an_enemy`, once (`DHF_ENEMY_SEEN`).
+    let mut b = sighted(false, false);
+    b.step(60);
+    assert_eq!(hints(&b), ["#Hint_spotted_an_enemy"]);
+    assert_ne!(b.run(|g, _| g.display_history(0)).unwrap() & (1 << 8), 0);
+}
+
+#[test]
+fn a_spectator_is_not_told_about_friends() {
+    // `!(pev->flags & FL_SPECTATOR)` guards the friend hint and its history bit.
+    let mut b = sighted(true, true);
+    b.step(60);
+    assert!(hints(&b).is_empty(), "{:?}", hints(&b));
+    assert_eq!(b.run(|g, _| g.display_history(0)).unwrap() & (1 << 7), 0);
+}
+
+#[test]
+fn the_first_night_vision_purchase_hints_how_to_use_it() {
+    let mut b = four_players();
+    b.run(|game, _| game.state_mut().players[0].as_mut().unwrap().money = 5000);
+    b.probe.clear_messages();
+    command(&mut b, 0, "nvgs");
+    b.step(5);
+    assert_eq!(hints(&b), ["#Hint_use_nightvision"]);
+    assert_ne!(b.run(|g, _| g.display_history(0)).unwrap() & (1 << 20), 0);
+}
+
+#[test]
+fn the_first_kills_of_a_teammate_and_of_an_enemy_are_hints() {
+    let mut b = four_players();
+    b.run(|game, _| {
+        for slot in 0..4 {
+            game.set_display_history(slot, 1 << 1);
+        }
+    });
+    b.probe.clear_messages();
+    // A teammate: the hit is `#Hint_try_not_to_injure_teammates` (the victim's first injury),
+    // the kill `#Hint_careful_around_teammates`, a hint at a time.
+    assert!(!b.run(|game: &mut CsGame, eng: &mut EngineApi<'_>| {
+        let me = Some(eng.client_edict(0));
+        game.damage_player_by(eng, 1, me, me, 500.0, dmg::BULLET)
+    }));
+    b.step(800);
+    assert_eq!(
+        hints(&b),
+        ["#Hint_try_not_to_injure_teammates", "#Hint_careful_around_teammates"]
+    );
+    // An enemy: `#Hint_win_round_by_killing_enemy`.
+    b.step(500);
+    b.probe.clear_messages();
+    assert!(!b.run(|game: &mut CsGame, eng: &mut EngineApi<'_>| {
+        let me = Some(eng.client_edict(0));
+        game.damage_player_by(eng, 2, me, me, 500.0, dmg::BULLET)
+    }));
+    // (The hints of what the probe sees meanwhile wait in the queue too.)
+    b.step(1500);
+    assert!(hints(&b).contains(&"#Hint_win_round_by_killing_enemy".to_string()), "{:?}", hints(&b));
+}
+
+#[test]
+fn a_player_punished_for_a_team_kill_is_told_when_it_dies() {
+    let mut b = four_players();
+    b.run(|game, _| game.state_mut().players[0].as_mut().unwrap().punished_for_tk = true);
+    b.probe.clear_messages();
+    assert!(!b.run(|game, eng| game.damage_player(eng, 0, None, 500.0, dmg::BULLET)));
+    b.step(800);
+    // The punishment first, then how to look around (both forced, shown to the dead).
+    assert_eq!(hints(&b), ["#Hint_cannot_play_because_tk", "#Spec_Duck"]);
+    assert!(!b.run(|game, _| game.state().players[0].as_ref().unwrap().punished_for_tk));
+}
+
+#[test]
+fn a_dead_player_has_the_entity_think_of_player_death_think_too() {
+    // `Killed`: `SetThink(PlayerDeathThink)`, `nextthink = time + 0.1`; the think reschedules
+    // itself while the dead wait with no button down, on a team.
+    let mut b = bench();
+    let now = b.run(|_, eng| eng.time());
+    assert!(!b.run(|game, eng| game.damage_player(eng, 0, None, 500.0, dmg::BULLET)));
+    let at = b.run(|_, eng| eng.ent(eng.client_edict(0)).unwrap().nextthink);
+    assert!(at > now, "the think is scheduled: {at}");
+    b.step(100);
+    let (later, t) = b.run(|_, eng| (eng.ent(eng.client_edict(0)).unwrap().nextthink, eng.time()));
+    assert!(later > 0.0 && later <= t + 0.2, "it keeps rescheduling: {later} at {t}");
 }

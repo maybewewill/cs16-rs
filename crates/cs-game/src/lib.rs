@@ -579,6 +579,16 @@ impl CsGame {
         }
     }
 
+    /// Sets `m_flDisplayHistory` of the player of `slot`. For tests only (cargo feature
+    /// `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn set_display_history(&mut self, slot: u8, history: u32) {
+        if let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+            p.display_history = history;
+        }
+    }
+
     /// `m_flDisplayHistory` (`DHF_*`) of the player of `slot`. For tests only (cargo feature
     /// `test-hooks`).
     #[cfg(feature = "test-hooks")]
@@ -670,6 +680,11 @@ impl GameDll for CsGame {
     }
 
     fn think(&mut self, eng: &mut EngineApi<'_>, id: EdictId) {
+        // A player's own think is `PlayerDeathThink` (set by `Killed`).
+        if let Some(slot) = player::player_slot(&self.state, eng, id) {
+            player::death_think_entity(&mut self.state, eng, slot as u8);
+            return;
+        }
         with_entity(&mut self.state, eng, id, |entity, g, eng| {
             entity.think(g, eng, id);
         });

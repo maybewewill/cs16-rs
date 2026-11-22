@@ -22,13 +22,10 @@ use crate::GameState;
 use crate::messages::send_raw;
 use crate::player::DEAD_NO;
 
-/// `DHF_*` (`hintmessage.h`): the hints a player has been shown. (`BIT(n)` is `1 << n`.)
+/// `DHF_*` (`hintmessage.h`): the hints a player has been shown. (`BIT(n)` is `1 << n`.) Only the
+/// flags of code that exists are here; the hostage and zone flags come with 2E.
 pub(crate) mod dhf {
     pub const ROUND_STARTED: u32 = 1 << 1;
-    pub const HOSTAGE_SEEN_FAR: u32 = 1 << 2;
-    pub const HOSTAGE_SEEN_NEAR: u32 = 1 << 3;
-    pub const HOSTAGE_USED: u32 = 1 << 4;
-    pub const HOSTAGE_INJURED: u32 = 1 << 5;
     pub const HOSTAGE_KILLED: u32 = 1 << 6;
     pub const FRIEND_SEEN: u32 = 1 << 7;
     pub const ENEMY_SEEN: u32 = 1 << 8;
@@ -37,34 +34,11 @@ pub(crate) mod dhf {
     pub const ENEMY_KILLED: u32 = 1 << 11;
     pub const BOMB_RETRIEVED: u32 = 1 << 12;
     pub const AMMO_EXHAUSTED: u32 = 1 << 15;
-    pub const IN_TARGET_ZONE: u32 = 1 << 16;
-    pub const IN_RESCUE_ZONE: u32 = 1 << 17;
-    pub const IN_ESCAPE_ZONE: u32 = 1 << 18;
-    pub const IN_VIPSAFETY_ZONE: u32 = 1 << 19;
     pub const NIGHTVISION: u32 = 1 << 20;
-    pub const HOSTAGE_CTMOVE: u32 = 1 << 21;
     pub const SPEC_DUCK: u32 = 1 << 22;
 
     /// `DHM_ROUND_CLEAR`: what a spawn forgets.
     pub const ROUND_CLEAR: u32 = ROUND_STARTED | HOSTAGE_KILLED | FRIEND_KILLED | BOMB_RETRIEVED;
-    /// `DHM_CONNECT_CLEAR`: what a (re)connect forgets. Only `Restore` uses it in the source,
-    /// and a new [`Player`](crate::player::Player) has an empty history, so nothing here does.
-    #[allow(dead_code)]
-    pub const CONNECT_CLEAR: u32 = HOSTAGE_SEEN_FAR
-        | HOSTAGE_SEEN_NEAR
-        | HOSTAGE_USED
-        | HOSTAGE_INJURED
-        | FRIEND_SEEN
-        | ENEMY_SEEN
-        | FRIEND_INJURED
-        | ENEMY_KILLED
-        | AMMO_EXHAUSTED
-        | IN_TARGET_ZONE
-        | IN_RESCUE_ZONE
-        | IN_ESCAPE_ZONE
-        | IN_VIPSAFETY_ZONE
-        | HOSTAGE_CTMOVE
-        | SPEC_DUCK;
 }
 
 /// The seconds a hint stays up (`HintMessage` passes `6.0f` to `HintMessageEx`).
