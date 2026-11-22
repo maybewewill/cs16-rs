@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, VecDeque};
 use cs_proto48::CONNECTIONLESS_HEADER;
 use cs_proto48::bitbuf::MsgWriter;
 use cs_proto48::crypto::com_munge2;
-use cs_proto48::delta::{GoldSrcClientData, GoldSrcEntityState, GoldSrcUserCmd};
+use cs_proto48::delta::{GoldSrcClientData, GoldSrcEntityState, GoldSrcUserCmd, GoldSrcWeaponData};
 use cs_proto48::handshake::{
     OobPacket, default_cs16_protinfo, default_cs16_userinfo, encode_connect_48,
     encode_getchallenge, lan_steam_auth_ticket, parse_oob_packet,
@@ -336,6 +336,24 @@ impl<T: PacketTransport> ProbeClient<T> {
         self.client_data.as_ref()
     }
 
+    /// The `weapon_data_t` list of the last `svc_clientdata` the server sent, as the client
+    /// rebuilds it from the deltas, by weapon index; an index not listed is all zero.
+    pub fn weapon_data(&self) -> BTreeMap<u8, GoldSrcWeaponData> {
+        let Some(schema) = self.ctx.deltas.get("weapon_data_t") else {
+            return BTreeMap::new();
+        };
+        self.ctx
+            .weapondata_history
+            .get(&self.ctx.last_incoming_seq)
+            .map(|records| {
+                records
+                    .iter()
+                    .map(|(&index, record)| (index, GoldSrcWeaponData::from_delta(record, schema)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn userinfos(&self) -> &BTreeMap<u8, String> {
         &self.userinfos
     }
@@ -570,6 +588,7 @@ impl<T: PacketTransport> ProbeClient<T> {
         self.ctx.instance_baselines.clear();
         self.ctx.entity_frames.clear();
         self.ctx.clientdata_history.clear();
+        self.ctx.weapondata_history.clear();
         self.server_info = None;
         self.client_data = None;
         self.sent_cmds.clear();

@@ -3,8 +3,10 @@
 //! that limits string commands. The server glue for `clc_move`, `setinfo` and bad moves is the
 //! `impl Server` block below.
 //!
-//! The loss replay rule and the `random_seed` handed to the game are working assumptions
-//! (recalled HLDS behaviour), not verified against a real server.
+//! The loss replay rule is a working assumption (recalled HLDS behaviour), not verified against a
+//! real server. The `random_seed` handed to the game is ReHLDS's (`SV_ParseMove`,
+//! `SV_RunDroppedCmds`, `SV_RunCmd`, `rehlds/engine/sv_user.cpp`, read 2026-11-22), see
+//! [`select_cmds_with_seeds`].
 
 use cs_proto48::delta::GoldSrcUserCmd;
 
@@ -73,19 +75,57 @@ pub fn select_cmds_to_run(
     dropped: u32,
     last: &GoldSrcUserCmd,
 ) -> Vec<GoldSrcUserCmd> {
+    select_cmds_with_seeds(cmds_newest_first, num_backup, dropped, last, 0)
+        .into_iter()
+        .map(|(cmd, _)| cmd)
+        .collect()
+}
+
+/// [`select_cmds_to_run`] with the `random_seed` `pfnCmdStart` is given for each command, as
+/// `SV_ParseMove` and `SV_RunDroppedCmds` (ReHLDS `rehlds/engine/sv_user.cpp`, read 2026-11-22)
+/// pass it to `SV_RunCmd`, where `sequence` is the packet's `netchan.incoming_sequence`:
+/// - a new command is run with `sequence - i`, `i` being its index in `cmds_newest_first` (the
+///   newest is 0, so the seeds of successive packets' newest commands are successive);
+/// - a backup command replayed for a lost packet with `sequence - cmdnum`, `cmdnum` being its
+///   index in `cmds_newest_first` as well (it follows the new commands);
+/// - the last command repeated for a loss the backups do not cover with 0 (`SV_RunCmd(&lastcmd,
+///   0, FALSE)`).
+///
+/// The seed is an `int` in C; here its wrapping `u32` (what `m_random_seed` is). Both halves of a
+/// command that `SV_RunCmd` splits (`msec > 50`) get the seed of the command, see
+/// [`split_usercmd`].
+pub fn select_cmds_with_seeds(
+    cmds_newest_first: &[GoldSrcUserCmd],
+    num_backup: u8,
+    dropped: u32,
+    last: &GoldSrcUserCmd,
+    sequence: u32,
+) -> Vec<(GoldSrcUserCmd, u32)> {
     let backups = usize::from(num_backup).min(cmds_newest_first.len());
     let (new, backup) = cmds_newest_first.split_at(cmds_newest_first.len() - backups);
+    let seed_of = |index: usize| sequence.wrapping_sub(index as u32);
     let mut run =
         Vec::with_capacity(cmds_newest_first.len() + dropped.min(MAX_DROPPED_REPLAY) as usize);
     if dropped > 0 && dropped < MAX_DROPPED_REPLAY {
         let replayed = (dropped as usize).min(backups);
         run.extend(std::iter::repeat_n(
-            last.clone(),
+            (last.clone(), 0),
             dropped as usize - replayed,
         ));
-        run.extend(backup[..replayed].iter().rev().cloned());
+        run.extend(
+            backup[..replayed]
+                .iter()
+                .enumerate()
+                .rev()
+                .map(|(j, cmd)| (cmd.clone(), seed_of(new.len() + j))),
+        );
     }
-    run.extend(new.iter().rev().cloned());
+    run.extend(
+        new.iter()
+            .enumerate()
+            .rev()
+            .map(|(i, cmd)| (cmd.clone(), seed_of(i))),
+    );
     run
 }
 
@@ -232,15 +272,16 @@ impl<G: GameDll> Server<G> {
         } else {
             (cmds_newest_first, dropped)
         };
-        let run = select_cmds_to_run(
+        let seeded = select_cmds_with_seeds(
             cmds_newest_first,
             num_backup,
             dropped,
             &self.clients[index].last_cmd,
+            sequence,
         );
-        let count = run.len();
+        let (run, seeds): (Vec<GoldSrcUserCmd>, Vec<u32>) = seeded.into_iter().unzip();
         let mut svtimebase = self.establish_time_base(&run);
-        for (i, cmd) in run.iter().enumerate() {
+        for (cmd, &random_seed) in run.iter().zip(&seeds) {
             // Dropped before it costs any time; it is not a bad move.
             if !usercmd_is_finite(cmd) {
                 continue;
@@ -258,8 +299,8 @@ impl<G: GameDll> Server<G> {
                 msec,
                 ..cmd.clone()
             };
-            // Working assumption: the packet's sequence minus the index from the newest.
-            let random_seed = sequence.wrapping_sub((count - 1 - i) as u32);
+            // The seed of the command (`select_cmds_with_seeds`): both halves of a split
+            // command share it.
             for step in split_usercmd(&granted) {
                 svtimebase += f64::from(step.msec) * 0.001;
                 self.run_player_cmd(slot, &step, random_seed, svtimebase);

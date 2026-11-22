@@ -12,7 +12,7 @@ use crate::crypto::{
 };
 use crate::delta::{
     DeltaRecord, DeltaRegistry, DeltaSchema, GoldSrcClientData, GoldSrcEntityState, GoldSrcUserCmd,
-    has_delta_changes, read_delta, read_delta_description, write_delta, write_delta_description,
+    GoldSrcWeaponData, has_delta_changes, read_delta, read_delta_description, write_delta, write_delta_description,
 };
 use crate::usermsg::{CsUserMsg, USERMSG_BASE_ID, UserMsgDesc, UserMsgRegistry, decode_cs_usermsg, encode_cs_usermsg};
 use crate::PROTOCOL_VERSION;
@@ -454,6 +454,9 @@ pub struct SvcParseContext {
     pub baselines: BTreeMap<u16, (u8, DeltaRecord)>,
     pub instance_baselines: Vec<DeltaRecord>,
     pub clientdata_history: BTreeMap<u8, DeltaRecord>,
+    /// The `weapon_data_t` list of each `svc_clientdata` parsed, by sequence, as the delta base
+    /// of the next ones.
+    pub weapondata_history: BTreeMap<u8, WeaponRecords>,
     pub entity_frames: BTreeMap<u8, BTreeMap<u16, (u8, DeltaRecord)>>,
     pub last_incoming_seq: u8,
 }
@@ -671,6 +674,12 @@ fn parse_one_svc(
                 .unwrap_or_else(|| schema.zero_record());
             let record = read_delta(r, &schema, &from, ctx.server_time)?;
 
+            // The weapon list is a delta against the same frame as the clientdata (`from` of
+            // `SV_WriteClientdataToMessage`): an index not in the base is the zero record.
+            let mut weapons = delta_seq
+                .and_then(|seq| ctx.weapondata_history.get(&seq))
+                .cloned()
+                .unwrap_or_default();
             let mut weapon_deltas = Vec::new();
             while r.read_one_bit() {
                 if r.is_bad_read() {
@@ -678,12 +687,14 @@ fn parse_one_svc(
                 }
                 let w_idx = r.read_bits(6) as u8;
                 if let Some(ws) = w_schema.as_ref() {
-                    let wzero = ws.zero_record();
-                    let wrec = read_delta(r, ws, &wzero, ctx.server_time)?;
+                    let from = weapons.get(&w_idx).cloned().unwrap_or_else(|| ws.zero_record());
+                    let wrec = read_delta(r, ws, &from, ctx.server_time)?;
+                    weapons.insert(w_idx, wrec.clone());
                     weapon_deltas.push((w_idx, wrec));
                 }
             }
             r.end_bit_reading()?;
+            ctx.weapondata_history.insert(ctx.last_incoming_seq, weapons);
 
             ctx.clientdata_history
                 .insert(ctx.last_incoming_seq, record.clone());
@@ -1500,6 +1511,48 @@ pub fn write_svc_clientdata(
     to: &GoldSrcClientData,
     server_time: f64,
 ) -> DeltaRecord {
+    write_svc_clientdata_with_weapons(w, schema, from, to, None, server_time)
+}
+
+/// The `weapon_data_t` list of one `svc_clientdata` as records, by weapon index (0..64). An
+/// index that is missing is the all-zero record, so a list of default weapons is empty.
+pub type WeaponRecords = BTreeMap<u8, DeltaRecord>;
+
+/// The records of `data` for the delta schema `schema` (`weapon_data_t`), without the ones equal
+/// to the zero record.
+pub fn weapon_records(schema: &DeltaSchema, data: &[GoldSrcWeaponData; 64]) -> WeaponRecords {
+    let zero = schema.zero_record();
+    data.iter()
+        .enumerate()
+        .map(|(i, w)| (i as u8, w.to_delta(schema)))
+        .filter(|(_, rec)| has_delta_changes(schema, &zero, rec))
+        .collect()
+}
+
+/// The weapon list a `svc_clientdata` carries (`weapon_data_t`): the schema, the list of the
+/// frame the clientdata is a delta against (empty for a delta against the baseline) and the
+/// list to send.
+#[derive(Debug, Clone, Copy)]
+pub struct WeaponDelta<'a> {
+    pub schema: &'a DeltaSchema,
+    pub from: &'a WeaponRecords,
+    pub to: &'a WeaponRecords,
+}
+
+/// [`write_svc_clientdata`] followed by the weapon list, `SV_WriteClientdataToMessage` (ReHLDS
+/// `sv_main.cpp`, read 2026-11-22): for each of the 64 weapon indices, in order, whose record
+/// differs from the base one (`DELTA_CheckDelta`): a 1 bit, the index in 6 bits and the delta
+/// of the record (`DELTA_WriteDelta` with `force`). The list ends with a 0 bit. `weapons` is
+/// `None` where the original sends no list (the client has no `cl_lw`, or the game has no weapon
+/// data): the message is then the same as [`write_svc_clientdata`]'s.
+pub fn write_svc_clientdata_with_weapons(
+    w: &mut MsgWriter,
+    schema: &DeltaSchema,
+    from: Option<(u8, &DeltaRecord)>,
+    to: &GoldSrcClientData,
+    weapons: Option<WeaponDelta<'_>>,
+    server_time: f64,
+) -> DeltaRecord {
     let to_rec = to.to_delta(schema);
     let zero = schema.zero_record();
     w.write_u8(svc::CLIENTDATA);
@@ -1511,6 +1564,18 @@ pub fn write_svc_clientdata(
     } else {
         w.write_one_bit(false);
         write_delta(w, schema, &zero, &to_rec, true, server_time);
+    }
+    if let Some(weapons) = weapons {
+        let wzero = weapons.schema.zero_record();
+        for index in 0..64u8 {
+            let from = weapons.from.get(&index).unwrap_or(&wzero);
+            let to = weapons.to.get(&index).unwrap_or(&wzero);
+            if has_delta_changes(weapons.schema, from, to) {
+                w.write_one_bit(true);
+                w.write_bits(u32::from(index), 6);
+                write_delta(w, weapons.schema, from, to, true, server_time);
+            }
+        }
     }
     w.write_one_bit(false); // end weapon_data_t list
     w.end_bit_writing();

@@ -79,7 +79,7 @@ pub(crate) fn calc_unlag_fraction(older_sent: f64, newer_sent: f64, target: f64)
 }
 
 /// C's `atoi` on a userinfo value: the leading integer, 0 for a missing or non-numeric one.
-fn info_atoi(value: Option<&str>) -> i64 {
+pub(crate) fn info_atoi(value: Option<&str>) -> i64 {
     let s = value.unwrap_or("").trim_start();
     let (negative, digits) = match s.as_bytes().first() {
         Some(b'-') => (true, &s[1..]),

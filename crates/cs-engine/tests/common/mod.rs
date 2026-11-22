@@ -11,7 +11,9 @@ use cs_engine::{
 use cs_probe::{ProbeClient, ProbeConfig};
 use cs_proto48::bitbuf::MsgWriter;
 use cs_proto48::crypto::md5_hex;
-use cs_proto48::delta::{DeltaRegistry, GoldSrcClientData, GoldSrcEntityState, GoldSrcUserCmd};
+use cs_proto48::delta::{
+    DeltaRegistry, GoldSrcClientData, GoldSrcEntityState, GoldSrcUserCmd, GoldSrcWeaponData,
+};
 use cs_proto48::messages::{svc, write_svc_print, write_svc_updateuserinfo};
 use cs_proto48::netchan::MAX_MSGLEN;
 use cs_proto48::usermsg::UserMsgRegistry;
@@ -244,6 +246,10 @@ pub struct TestGame {
     pub server_commands: Vec<Vec<String>>,
     /// Every `random_seed` received by `run_usercmd`, in call order.
     pub random_seeds: Vec<u32>,
+    /// What `get_weapon_data` fills in (`(weapon index, data)`); `None` answers `false`.
+    pub weapon_list: Option<Vec<(u8, GoldSrcWeaponData)>>,
+    /// The slot of every `get_weapon_data` call, in call order.
+    pub weapon_data_slots: Vec<u8>,
     /// The `msec` of every command `run_usercmd` received, in call order.
     pub usercmd_msecs: Vec<u8>,
     /// Every command `run_usercmd` received, in call order.
@@ -788,6 +794,22 @@ impl GameDll for TestGame {
             maxspeed: 250.0,
             ..Default::default()
         }
+    }
+
+    fn get_weapon_data(
+        &mut self,
+        _eng: &mut EngineApi<'_>,
+        slot: u8,
+        out: &mut [GoldSrcWeaponData; 64],
+    ) -> bool {
+        self.weapon_data_slots.push(slot);
+        let Some(list) = &self.weapon_list else {
+            return false;
+        };
+        for (index, data) in list {
+            out[usize::from(*index)] = *data;
+        }
+        true
     }
 
     fn setup_visibility(&mut self, _eng: &mut EngineApi<'_>, slot: u8) -> Option<glam::Vec3> {

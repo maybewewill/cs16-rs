@@ -4,7 +4,7 @@
 
 use cs_cvar::CVarRegistry;
 use cs_proto48::bitbuf::MsgWriter;
-use cs_proto48::delta::{GoldSrcClientData, GoldSrcEntityState, GoldSrcUserCmd};
+use cs_proto48::delta::{GoldSrcClientData, GoldSrcEntityState, GoldSrcUserCmd, GoldSrcWeaponData};
 use cs_proto48::info::InfoString;
 use cs_proto48::messages::ENTITY_NORMAL;
 use cs_proto48::usermsg::UserMsgRegistry;
@@ -277,6 +277,19 @@ pub trait GameDll {
     /// `pusher` or `other`; what is left of the moved entities is put back all the same.
     fn blocked(&mut self, _eng: &mut EngineApi<'_>, _pusher: EdictId, _other: EdictId) {}
     fn update_client_data(&mut self, eng: &mut EngineApi<'_>, slot: u8) -> GoldSrcClientData;
+    /// `pfnGetWeaponData`: fills `out`, the `weapon_data_t` list of `slot`'s player (index =
+    /// weapon id, 64 entries, entries the game does not set stay as they are: default), for the
+    /// `svc_clientdata` of the client's next update. The engine asks only for a client whose
+    /// `cl_lw` is on (see [`EngineApi::client_lw`]), after [`update_client_data`](Self::update_client_data)
+    /// of the same update. Return `false` to send no weapon data (the default).
+    fn get_weapon_data(
+        &mut self,
+        _eng: &mut EngineApi<'_>,
+        _slot: u8,
+        _out: &mut [GoldSrcWeaponData; 64],
+    ) -> bool {
+        false
+    }
     /// A server console command no engine command or cvar claims, with `argv[0]` the command
     /// name as typed (never empty). Return the text to print, or `None` if the game does not
     /// know the command (the console then reports it unknown). The engine replaces control

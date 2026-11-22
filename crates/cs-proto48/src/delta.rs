@@ -806,6 +806,12 @@ pub struct GoldSrcClientData {
     pub health: f32,
     pub b_in_duck: i32,
     pub weapons: u32,
+    /// `ammo_nails`, `ammo_shells`, `ammo_cells`, `ammo_rockets`: 10 signed bits each on the
+    /// wire (the HL ammo counters the stock client reads; CS sends its ammo in `AmmoX`).
+    pub ammo_nails: i32,
+    pub ammo_shells: i32,
+    pub ammo_cells: i32,
+    pub ammo_rockets: i32,
     pub fl_time_step_sound: i32,
     pub fl_duck_time: i32,
     pub maxspeed: f32,
@@ -853,6 +859,10 @@ impl GoldSrcClientData {
         rec.set_f32(schema, "health", self.health);
         rec.set_i32(schema, "bInDuck", self.b_in_duck);
         rec.set_u32(schema, "weapons", self.weapons);
+        rec.set_i32(schema, "ammo_nails", self.ammo_nails);
+        rec.set_i32(schema, "ammo_shells", self.ammo_shells);
+        rec.set_i32(schema, "ammo_cells", self.ammo_cells);
+        rec.set_i32(schema, "ammo_rockets", self.ammo_rockets);
         rec.set_i32(schema, "flTimeStepSound", self.fl_time_step_sound);
         rec.set_i32(schema, "flDuckTime", self.fl_duck_time);
         rec.set_f32(schema, "maxspeed", self.maxspeed);
@@ -913,6 +923,10 @@ impl GoldSrcClientData {
             health: rec.get_f32(schema, "health"),
             b_in_duck: rec.get_i32(schema, "bInDuck"),
             weapons: rec.get_u32(schema, "weapons"),
+            ammo_nails: rec.get_i32(schema, "ammo_nails"),
+            ammo_shells: rec.get_i32(schema, "ammo_shells"),
+            ammo_cells: rec.get_i32(schema, "ammo_cells"),
+            ammo_rockets: rec.get_i32(schema, "ammo_rockets"),
             fl_time_step_sound: rec.get_i32(schema, "flTimeStepSound"),
             fl_duck_time: rec.get_i32(schema, "flDuckTime"),
             maxspeed: rec.get_f32(schema, "maxspeed"),
@@ -939,6 +953,94 @@ impl GoldSrcClientData {
                 rec.get_f32(schema, "vuser4[1]"),
                 0.0,
             ),
+        }
+    }
+}
+
+/// `weapon_data_t` (`common/weaponinfo.h`): the per-weapon state the server sends in
+/// `svc_clientdata` and the client predicts with. Field names are the C names in snake_case.
+/// The `weapon_data_t` delta schema carries 18 of the 22 fields (checked against the installed
+/// `cstrike/delta.lst`, 2026-11-22): `iuser1` is the only `iuser`, and `iuser2..4` and `fuser4`
+/// are not on the wire (`to_delta` leaves them out, `from_delta` gives them as 0).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GoldSrcWeaponData {
+    pub m_i_id: i32,
+    pub m_i_clip: i32,
+    pub m_fl_next_primary_attack: f32,
+    pub m_fl_next_secondary_attack: f32,
+    pub m_fl_time_weapon_idle: f32,
+    pub m_f_in_reload: i32,
+    pub m_f_in_special_reload: i32,
+    pub m_fl_next_reload: f32,
+    pub m_fl_pump_time: f32,
+    pub m_f_reload_time: f32,
+    pub m_f_aimed_damage: f32,
+    pub m_f_next_aim_bonus: f32,
+    pub m_f_in_zoom: i32,
+    pub m_i_weapon_state: i32,
+    pub iuser1: i32,
+    pub iuser2: i32,
+    pub iuser3: i32,
+    pub iuser4: i32,
+    pub fuser1: f32,
+    pub fuser2: f32,
+    pub fuser3: f32,
+    pub fuser4: f32,
+}
+
+impl GoldSrcWeaponData {
+    /// The record of the fields the schema has.
+    pub fn to_delta(&self, schema: &DeltaSchema) -> DeltaRecord {
+        let mut rec = schema.zero_record();
+        rec.set_i32(schema, "m_iId", self.m_i_id);
+        rec.set_i32(schema, "m_iClip", self.m_i_clip);
+        rec.set_f32(schema, "m_flNextPrimaryAttack", self.m_fl_next_primary_attack);
+        rec.set_f32(schema, "m_flNextSecondaryAttack", self.m_fl_next_secondary_attack);
+        rec.set_f32(schema, "m_flTimeWeaponIdle", self.m_fl_time_weapon_idle);
+        rec.set_i32(schema, "m_fInReload", self.m_f_in_reload);
+        rec.set_i32(schema, "m_fInSpecialReload", self.m_f_in_special_reload);
+        rec.set_f32(schema, "m_flNextReload", self.m_fl_next_reload);
+        rec.set_f32(schema, "m_flPumpTime", self.m_fl_pump_time);
+        rec.set_f32(schema, "m_fReloadTime", self.m_f_reload_time);
+        rec.set_f32(schema, "m_fAimedDamage", self.m_f_aimed_damage);
+        rec.set_f32(schema, "m_fNextAimBonus", self.m_f_next_aim_bonus);
+        rec.set_i32(schema, "m_fInZoom", self.m_f_in_zoom);
+        rec.set_i32(schema, "m_iWeaponState", self.m_i_weapon_state);
+        rec.set_i32(schema, "iuser1", self.iuser1);
+        rec.set_i32(schema, "iuser2", self.iuser2);
+        rec.set_i32(schema, "iuser3", self.iuser3);
+        rec.set_i32(schema, "iuser4", self.iuser4);
+        rec.set_f32(schema, "fuser1", self.fuser1);
+        rec.set_f32(schema, "fuser2", self.fuser2);
+        rec.set_f32(schema, "fuser3", self.fuser3);
+        rec.set_f32(schema, "fuser4", self.fuser4);
+        rec
+    }
+
+    pub fn from_delta(rec: &DeltaRecord, schema: &DeltaSchema) -> Self {
+        Self {
+            m_i_id: rec.get_i32(schema, "m_iId"),
+            m_i_clip: rec.get_i32(schema, "m_iClip"),
+            m_fl_next_primary_attack: rec.get_f32(schema, "m_flNextPrimaryAttack"),
+            m_fl_next_secondary_attack: rec.get_f32(schema, "m_flNextSecondaryAttack"),
+            m_fl_time_weapon_idle: rec.get_f32(schema, "m_flTimeWeaponIdle"),
+            m_f_in_reload: rec.get_i32(schema, "m_fInReload"),
+            m_f_in_special_reload: rec.get_i32(schema, "m_fInSpecialReload"),
+            m_fl_next_reload: rec.get_f32(schema, "m_flNextReload"),
+            m_fl_pump_time: rec.get_f32(schema, "m_flPumpTime"),
+            m_f_reload_time: rec.get_f32(schema, "m_fReloadTime"),
+            m_f_aimed_damage: rec.get_f32(schema, "m_fAimedDamage"),
+            m_f_next_aim_bonus: rec.get_f32(schema, "m_fNextAimBonus"),
+            m_f_in_zoom: rec.get_i32(schema, "m_fInZoom"),
+            m_i_weapon_state: rec.get_i32(schema, "m_iWeaponState"),
+            iuser1: rec.get_i32(schema, "iuser1"),
+            iuser2: rec.get_i32(schema, "iuser2"),
+            iuser3: rec.get_i32(schema, "iuser3"),
+            iuser4: rec.get_i32(schema, "iuser4"),
+            fuser1: rec.get_f32(schema, "fuser1"),
+            fuser2: rec.get_f32(schema, "fuser2"),
+            fuser3: rec.get_f32(schema, "fuser3"),
+            fuser4: rec.get_f32(schema, "fuser4"),
         }
     }
 }

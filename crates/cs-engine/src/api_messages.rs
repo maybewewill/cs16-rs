@@ -5,7 +5,7 @@
 
 use cs_proto48::bitbuf::MsgWriter;
 use cs_proto48::messages::{
-    SND_FL_ATTENUATION, SND_FL_PITCH, SND_FL_STOP, SND_FL_VOLUME, SoundMsg, write_svc_centerprint,
+    svc, SND_FL_ATTENUATION, SND_FL_PITCH, SND_FL_STOP, SND_FL_VOLUME, SoundMsg, write_svc_centerprint,
     write_svc_lightstyle, write_svc_print, write_svc_sound, write_svc_stufftext,
     write_svc_temp_entity, write_svc_usermsg,
 };
@@ -16,6 +16,7 @@ use glam::Vec3;
 use crate::client::ClientState;
 use crate::game::EngineApi;
 use crate::signon::{INIT_BUFFER_BUDGET, MAX_LIGHTSTYLES};
+use crate::unlag::info_atoi;
 
 /// Bytes of text `client_print`, `print_all`, `center_print` and `stufftext` send at most.
 pub const MAX_MESSAGE_TEXT: usize = 1024;
@@ -430,6 +431,30 @@ impl EngineApi<'_> {
         let mut w = MsgWriter::new();
         write_svc_temp_entity(&mut w, te_type, payload);
         self.send(dest, w.as_slice());
+    }
+
+    /// `svc_weaponanim` to the client of `slot`: the view model plays `sequence` with bodygroup
+    /// `body`. Both are sent as bytes (`WRITE_BYTE`), so a wider value is cut to its low byte.
+    /// Reliable, as the game's `MESSAGE_BEGIN(MSG_ONE, SVC_WEAPONANIM, ...)` is (ReGameDLL
+    /// `CBasePlayerWeapon::SendWeaponAnim`, read 2026-11-22); the `skiplocal` rule (a client with
+    /// `cl_lw` predicts its own animations and is not sent them) is the game's, see
+    /// [`client_lw`](Self::client_lw). A slot that is out of range or free gets nothing.
+    pub fn weapon_anim(&mut self, slot: u8, sequence: i32, body: i32) {
+        self.send(
+            MsgDest::One(slot),
+            &[svc::WEAPONANIM, sequence as u8, body as u8],
+        );
+    }
+
+    /// The client's `cl_lw` (local weapons): `host_client->lw` of ReHLDS, set by
+    /// `SV_ExtractFromUserinfo` (`rehlds/engine/sv_main.cpp`, read 2026-11-22) as
+    /// `atoi(cl_lw) != 0`, false when the key is missing or empty. `false` for a slot that is
+    /// out of range. This is also what `ENGINE_CANSKIP` (`PF_CanSkipPlayer`, `rehlds/engine/
+    /// pr_cmds.cpp`, read 2026-11-22) answers for a slot that is a client.
+    pub fn client_lw(&self, slot: u8) -> bool {
+        self.clients
+            .get(usize::from(slot))
+            .is_some_and(|c| info_atoi(c.userinfo.get("cl_lw")) != 0)
     }
 
     /// Sets light style `index` to `pattern` (`a` dark to `z` bright, one letter per tenth of a

@@ -6,10 +6,10 @@ use std::collections::BTreeMap;
 use cs_proto48::bitbuf::MsgWriter;
 use std::sync::Arc;
 
-use cs_proto48::delta::{DeltaRecord, GoldSrcEntityState};
+use cs_proto48::delta::{DeltaRecord, GoldSrcEntityState, GoldSrcWeaponData};
 use cs_proto48::messages::{
-    entity_schema_name, wire_entity_type, write_svc_choke, write_svc_clientdata,
-    write_svc_packetentities_delta, write_svc_packetentities_full, write_svc_time,
+    WeaponDelta, WeaponRecords, entity_schema_name, weapon_records, wire_entity_type,
+    write_svc_choke, write_svc_clientdata_with_weapons, write_svc_packetentities_delta, write_svc_packetentities_full, write_svc_time,
 };
 use cs_transport::{MAX_UDP_PACKET, PacketTransport};
 
@@ -17,6 +17,7 @@ use crate::client::ClientState;
 use crate::edict::{EdictId, EntVars};
 use crate::game::{GameDll, entity_state_from_vars};
 use crate::server::{Server, ServerConfig};
+use crate::unlag::info_atoi;
 
 /// Updates remembered per client as delta bases.
 pub const UPDATE_BACKUP: usize = 64;
@@ -45,6 +46,11 @@ pub struct ClientFrame {
     /// ring of 64 updates of static entities holds one record each.
     pub entities: BTreeMap<u16, (u8, Arc<DeltaRecord>)>,
     pub clientdata: DeltaRecord,
+    /// The `weapon_data_t` list sent with `clientdata` (`client_frame_t::weapondata`), by weapon
+    /// index; an index that is missing is the zero record. Empty for a client without `cl_lw`.
+    /// (The original leaves the list of a frame it sent no weapons in as it was 64 frames
+    /// earlier, so a later delta against that frame would use stale data; here it is empty.)
+    pub weapondata: WeaponRecords,
     /// Real time the update was built (`client_frame_t::senttime`).
     pub sent_at: f64,
     /// Round trip of this update in seconds, set when the client acknowledges it
@@ -303,6 +309,15 @@ impl<G: GameDll> Server<G> {
         client.next_update_at = next_due(client.next_update_at, interval, self.real_time);
 
         let client_data = self.call_game(|game, eng| game.update_client_data(eng, slot));
+        // `SV_WriteClientdataToMessage` (ReHLDS `sv_main.cpp`, read 2026-11-22): the weapon list
+        // is asked for only when the client has `cl_lw`, and sent only if the game filled it.
+        let weapon_list = if self.client_has_lw(slot) {
+            let mut list = [GoldSrcWeaponData::default(); 64];
+            self.call_game_synced(|game, eng| game.get_weapon_data(eng, slot, &mut list))
+                .then_some(list)
+        } else {
+            None
+        };
         let entities = self.visible_entities(slot);
         let players = self.frame_players(&entities);
         self.drain_outbox();
@@ -322,14 +337,30 @@ impl<G: GameDll> Server<G> {
             write_svc_choke(&mut payload);
         }
         write_svc_time(&mut payload, self.sv_time as f32);
+        let mut weapondata = WeaponRecords::new();
         let clientdata = match self.deltas.get("clientdata_t") {
-            Some(schema) => write_svc_clientdata(
-                &mut payload,
-                schema,
-                base.map(|f| (low_byte(f.seq), &f.clientdata)),
-                &client_data,
-                self.sv_time,
-            ),
+            Some(schema) => {
+                let weapon_schema = self.deltas.get("weapon_data_t");
+                if let (Some(ws), Some(list)) = (weapon_schema, &weapon_list) {
+                    weapondata = weapon_records(ws, list);
+                }
+                let no_weapons = WeaponRecords::new();
+                let weapons = weapon_schema
+                    .zip(weapon_list.as_ref())
+                    .map(|(schema, _)| WeaponDelta {
+                        schema,
+                        from: base.map_or(&no_weapons, |f| &f.weapondata),
+                        to: &weapondata,
+                    });
+                write_svc_clientdata_with_weapons(
+                    &mut payload,
+                    schema,
+                    base.map(|f| (low_byte(f.seq), &f.clientdata)),
+                    &client_data,
+                    weapons,
+                    self.sv_time,
+                )
+            }
             None => DeltaRecord::default(),
         };
         let mut block = MsgWriter::new();
@@ -414,12 +445,18 @@ impl<G: GameDll> Server<G> {
                 seq,
                 entities,
                 clientdata,
+                weapondata,
                 sent_at: self.real_time,
                 ping_time: -1.0,
                 players,
             });
         }
         Some(client.chan.build_packet(&payload))
+    }
+
+    /// `host_client->lw`: the client's `cl_lw`, see `EngineApi::client_lw`.
+    fn client_has_lw(&self, slot: u8) -> bool {
+        info_atoi(self.views[usize::from(slot)].userinfo.get("cl_lw")) != 0
     }
 
     /// The players among `states`, as lag compensation will need them later.
@@ -522,6 +559,7 @@ mod tests {
             seq,
             entities: BTreeMap::new(),
             clientdata: DeltaRecord::default(),
+            weapondata: WeaponRecords::new(),
             sent_at: 0.0,
             ping_time: -1.0,
             players: Vec::new(),
