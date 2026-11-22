@@ -230,6 +230,9 @@ fn dot(a: Vec3, b: Vec3) -> f32 {
     a.x * b.x + a.y * b.y + a.z * b.z
 }
 
+/// Deliberately a second copy of `collision.rs::plane_distance`: this one keeps the original's
+/// float order of operations (`_DotProduct`, `plane->type >= 3u`) for the prediction-exact walk
+/// of `PM_RecursiveHullCheck`, and must not be merged with the engine's version.
 /// The signed distance of `p` from `plane` as `PM_RecursiveHullCheck` and `PM_HullPointContents`
 /// compute it: a dot product for planes of type 3 and up (`plane->type >= 3u`), else one axis.
 fn plane_dist(plane: &Plane, p: Vec3) -> f32 {

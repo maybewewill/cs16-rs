@@ -897,3 +897,137 @@ fn world_player_trace_matches_hull_trace_on_dust2() {
     assert!(compared > 200, "traces were compared: {compared}");
     assert_eq!(mismatched, 0, "of {compared} traces");
 }
+
+#[test]
+fn physents_come_in_area_tree_order_not_edict_order() {
+    let mut h = synthetic();
+    run(&mut h, |eng| {
+        let p = player(eng, Vec3::new(0.0, 0.0, 50.0));
+        // Created in the order c, b, a. The world's area tree splits at y = 0 (the larger y
+        // is children[0]), and `SV_AddLinksToPM_` takes a node's own list (a box that
+        // straddles the plane lives there) before children[0] and then children[1].
+        let c = boxed(eng, SOLID_BBOX, Vec3::new(-100.0, -100.0, 50.0), 16.0);
+        let b = boxed(eng, SOLID_BBOX, Vec3::new(-100.0, 100.0, 50.0), 16.0);
+        let a = boxed(eng, SOLID_BBOX, Vec3::new(100.0, 0.0, 50.0), 16.0);
+        let pe = eng.pm_physents(p);
+        let order: Vec<Option<EdictId>> = (0..pe.num_physents() as i32)
+            .map(|i| pe.edict_of(i))
+            .collect();
+        assert_eq!(
+            order,
+            vec![Some(eng.world()), Some(a), Some(b), Some(c)],
+            "world, the straddling box, then children[0], then children[1]"
+        );
+    });
+}
+
+/// A transport the server reads nothing from while `held`.
+struct Held<'a> {
+    hub: &'a mut cs_transport::LoopbackHub,
+    held: bool,
+}
+
+impl cs_transport::PacketTransport for Held<'_> {
+    fn recv(&mut self) -> Option<(cs_transport::PeerAddr, Vec<u8>)> {
+        if self.held { None } else { self.hub.recv() }
+    }
+
+    fn send(
+        &mut self,
+        to: cs_transport::PeerAddr,
+        data: &[u8],
+    ) -> Result<(), cs_transport::TransportError> {
+        self.hub.send(to, data)
+    }
+}
+
+#[test]
+fn a_lag_rewound_player_is_a_physent_at_its_true_origin() {
+    const SPEED: f32 = 100.0;
+    const HOLD: usize = 10;
+    let game = TestGame {
+        spawn_origins: vec![Vec3::new(50.0, 60.0, 0.0), Vec3::ZERO],
+        ..TestGame::default()
+    };
+    let cfg = ServerConfig {
+        max_clients: 2,
+        max_edicts: 64,
+        ..ServerConfig::default()
+    };
+    let mut h = Harness::with_config(cfg, game);
+    let mut shooter = h.add_probe("Shooter");
+    h.step(&mut [&mut shooter], 200);
+    let mut target = h.add_probe("Target");
+    h.step(&mut [&mut shooter, &mut target], 200);
+    h.server.game_mut().act(|eng| {
+        for slot in 0..2 {
+            let id = eng.client_edict(slot);
+            eng.set_size(id, Vec3::splat(-16.0), Vec3::splat(16.0));
+        }
+    });
+    shooter.send_stringcmd("setinfo cl_updaterate 100");
+    h.step(&mut [&mut shooter, &mut target], 5);
+
+    let t0 = h.now;
+    let put = |h: &mut Harness, at: f64| {
+        let x = SPEED * (at - t0) as f32;
+        h.server.game_mut().act(move |eng| {
+            let id = eng.client_edict(1);
+            eng.ent_mut(id).unwrap().health = 100.0;
+            eng.set_origin(id, Vec3::new(x, 0.0, 0.0));
+        });
+    };
+    let cmd = || cs_proto48::delta::GoldSrcUserCmd {
+        msec: 10,
+        ..Default::default()
+    };
+    // Warm up: the target runs, so that the history holds where it was.
+    for _ in 0..60 {
+        let at = h.now + common::FRAME;
+        put(&mut h, at);
+        shooter.queue_cmd(cmd());
+        h.step(&mut [&mut shooter, &mut target], 1);
+    }
+
+    let seen = Rc::new(RefCell::new(None));
+    let sink = Rc::clone(&seen);
+    h.server
+        .game_mut()
+        .usercmd_hook
+        .set(move |eng: &mut EngineApi<'_>, slot| {
+            if slot != 0 {
+                return;
+            }
+            let (me, other) = (eng.client_edict(0), eng.client_edict(1));
+            let pe = eng.pm_physents(me);
+            let view = index_of(&pe, other).and_then(|i| pe.physent(i));
+            *sink.borrow_mut() = Some((eng.ent(other).unwrap().origin, view));
+        });
+    // The measured command is read `HOLD` frames after it was sent.
+    shooter.queue_cmd(cmd());
+    let start = h.now;
+    let mut true_x = f32::NAN;
+    for i in 0..=HOLD {
+        let at = start + (i + 1) as f64 * common::FRAME;
+        if i == HOLD {
+            // Where the target really is when the command runs: where the last frame left it.
+            true_x = h.server.edicts().get(h.server.edicts().client(1)).unwrap().vars.origin.x;
+        }
+        put(&mut h, at);
+        h.now = at;
+        if i == 0 {
+            shooter.pump(at);
+            target.pump(at);
+        }
+        let mut net = Held {
+            hub: &mut h.hub,
+            held: i < HOLD,
+        };
+        h.server.frame(&mut net, at);
+    }
+    let (rewound, view) = seen.borrow().expect("the command ran");
+    let view = view.expect("the target is a physent");
+    assert!(rewound.x < true_x - 5.0, "rewound {} true {true_x}", rewound.x);
+    assert_eq!(view.origin.x, true_x, "the physent is at the true origin");
+    assert_eq!(view.player, 2);
+}

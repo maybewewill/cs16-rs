@@ -6,10 +6,9 @@ use std::any::Any;
 
 use glam::Vec3;
 
-use crate::collision::{CONTENTS_EMPTY, Hull, MAX_WORLD_COORD, TraceResult};
+use crate::collision::{CONTENTS_EMPTY, Hull, MAX_WORLD_COORD, NO_COLLISION, TraceResult};
 use crate::edict::{EdictId, EntVars};
 use crate::game::EngineApi;
-use crate::collision::NO_COLLISION;
 use crate::pm::{
     self, CONTENTS_LADDER, MAX_MOVEENTS, MAX_PHYSENTS, PmPhysEnts, PmTraceResult,
     physent_from_edict, reach_box, world_physent,
