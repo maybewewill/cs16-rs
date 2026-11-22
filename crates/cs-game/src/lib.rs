@@ -16,6 +16,7 @@ pub mod buy;
 pub mod chat;
 pub mod entity;
 pub mod hud_misc;
+pub mod intro;
 pub mod mapcycle;
 pub mod menus;
 mod messages;

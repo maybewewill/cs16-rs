@@ -324,7 +324,9 @@ fn player_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
 }
 
 /// `CBasePlayer::JoiningThink` (ReGameDLL `player.cpp:3814`, the non-`REGAMEDLL_FIXES` branch,
-/// read 2026-11-22).
+/// read 2026-11-22). Whatever the state it is not `Joined` in, and unless the player was taken
+/// into the game by this call, the intro camera may move on ([`crate::intro::joining_think`]):
+/// the `switch` of the original has no case for the team menu states, which fall out of it.
 fn joining_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let Some(p) = g
         .players
@@ -334,7 +336,8 @@ fn joining_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
         return;
     };
     match p.joining {
-        JoinState::Joined | JoinState::ShowTeamSelect | JoinState::PickingTeam => {}
+        JoinState::Joined => return,
+        JoinState::ShowTeamSelect | JoinState::PickingTeam => {}
         JoinState::ShowLText => {
             // `ResetMenu`, then (vanilla, not `REGAMEDLL_FIXES`) the defuser status icon is
             // hidden (the player has no defuser: `m_bHasDefuser = false`) and `SendItemStatus`.
@@ -352,8 +355,12 @@ fn joining_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
         }
         // There is no level text to read.
         JoinState::ReadingLText => p.joining = JoinState::ShowTeamSelect,
-        JoinState::GetIntoGame => get_into_game(g, eng, slot),
+        JoinState::GetIntoGame => {
+            get_into_game(g, eng, slot);
+            return;
+        }
     }
+    crate::intro::joining_think(g, eng, slot);
 }
 
 /// `CBasePlayer::GetIntoGame`: the player is in the game; it spawns when the rules allow
@@ -613,7 +620,9 @@ fn choose_spectator(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) -> boo
             team_id: 0,
         },
     );
+    // `m_pIntroCamera = nullptr; m_bTeamChanged = true` (client.cpp:1981, read 2026-11-22).
     if let Some(p) = g.players[usize::from(slot)].as_mut() {
+        p.intro_camera = None;
         p.team_changed = true;
     }
     team_change_update(g, eng, slot);

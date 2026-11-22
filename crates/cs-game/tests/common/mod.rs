@@ -158,6 +158,17 @@ impl Bench {
             max_edicts: 256,
             ..ServerConfig::default()
         };
+        Self::with_config(map, cfg, userinfo, send_moves)
+    }
+
+    /// A server of `cfg` on `map` with the probe in the game (`with_probe_moves` with the whole
+    /// configuration given).
+    pub fn with_config(
+        map: ServerMap,
+        cfg: ServerConfig,
+        userinfo: &[(&str, &str)],
+        send_moves: bool,
+    ) -> Self {
         let rig = Rig {
             game: CsGame::new(),
             actions: Vec::new(),

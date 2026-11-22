@@ -3,7 +3,7 @@
 
 use cs_assets::bsp::SpawnTeam;
 use cs_engine::consts::{
-    FL_CLIENT, FL_WORLDBRUSH, MOVETYPE_NONE, MOVETYPE_PUSH, SOLID_BSP, SOLID_NOT,
+    FL_CLIENT, FL_WORLDBRUSH, MOVETYPE_NOCLIP, MOVETYPE_NONE, MOVETYPE_PUSH, SOLID_BSP, SOLID_NOT,
 };
 use cs_engine::{EdictId, EngineApi};
 use glam::Vec3;
@@ -316,6 +316,73 @@ pub(crate) struct InfoPlayer(pub(crate) &'static str);
 impl GameEntity for InfoPlayer {
     fn classname(&self) -> &'static str {
         self.0
+    }
+}
+
+/// `info_target` (`CPointEntity`, ReGameDLL `cbase.cpp`/`world.cpp`, read 2026-11-22): a point
+/// with a name and nothing else to do. It is the default target of a `trigger_camera`, which the
+/// intro camera looks at ([`crate::intro`]); the entity is kept so the target can be found by
+/// its `targetname`.
+pub(crate) struct InfoTarget;
+
+impl GameEntity for InfoTarget {
+    fn classname(&self) -> &'static str {
+        "info_target"
+    }
+}
+
+/// `trigger_camera` (`CTriggerCamera`, ReGameDLL `triggers.cpp`, read 2026-11-22), as far as the
+/// join screen needs it: the entity exists, with its origin, `target` and `targetname` (the
+/// engine copies them from the map), and the keyvalues of `CTriggerCamera::KeyValue` are kept.
+/// `Spawn` makes it invisible and not solid. Not ported (gap): `Use` (the camera that takes a
+/// player over and follows its `target`/`moveto` path), `FollowTarget`, `Move` and their think;
+/// nothing triggers a camera in a competitive map, so only the intro uses it.
+#[derive(Debug, Default)]
+pub(crate) struct TriggerCamera {
+    /// `m_flWait` (`wait`): how long the camera holds the view.
+    pub(crate) wait: f32,
+    /// `m_sPath` (`moveto`): the `path_corner` the camera moves to.
+    pub(crate) moveto: String,
+    /// `m_acceleration` (`acceleration`), 500 when the map gives none.
+    pub(crate) acceleration: f32,
+    /// `m_deceleration` (`deceleration`), 500 when the map gives none.
+    pub(crate) deceleration: f32,
+    /// `m_initialSpeed`: the `speed` the map gave.
+    pub(crate) initial_speed: f32,
+}
+
+impl GameEntity for TriggerCamera {
+    fn classname(&self) -> &'static str {
+        "trigger_camera"
+    }
+
+    /// `CTriggerCamera::KeyValue` (the four keys it handles; the rest are `CBaseDelay`'s and the
+    /// engine's), then `CTriggerCamera::Spawn`.
+    fn spawn(&mut self, eng: &mut EngineApi<'_>, id: EdictId, keys: &[(String, String)]) -> bool {
+        for (key, value) in keys {
+            match key.as_str() {
+                "wait" => self.wait = atof(value),
+                "moveto" => self.moveto.clone_from(value),
+                "acceleration" => self.acceleration = atof(value),
+                "deceleration" => self.deceleration = atof(value),
+                _ => {}
+            }
+        }
+        let Some(v) = eng.ent_mut(id) else {
+            return false;
+        };
+        v.movetype = MOVETYPE_NOCLIP;
+        v.solid = SOLID_NOT;
+        v.renderamt = 0;
+        v.rendermode = RENDER_TRANS_TEXTURE;
+        self.initial_speed = v.speed;
+        if self.acceleration == 0.0 {
+            self.acceleration = 500.0;
+        }
+        if self.deceleration == 0.0 {
+            self.deceleration = 500.0;
+        }
+        true
     }
 }
 

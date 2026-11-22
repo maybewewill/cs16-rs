@@ -176,9 +176,13 @@ impl<G: GameDll> Server<G> {
         map: ServerMap,
         game: G,
         deltas: DeltaRegistry,
-        cvars: CVarRegistry,
+        mut cvars: CVarRegistry,
     ) -> Self {
         let cfg = cfg.sanitized();
+        // The name the operator configured (`--hostname`) is the `hostname` cvar the game reads for
+        // `gmsgServerName` (the title of the MOTD window), as in the original, where the one
+        // cvar is both. A registry with no such cvar is left alone.
+        cvars.set("hostname", cfg.hostname.clone());
         let usermsgs = game.usermsgs();
         let edicts = EdictPool::new(cfg.max_clients, cfg.max_edicts);
         let precache = Self::map_precache(&map);

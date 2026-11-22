@@ -11,9 +11,10 @@
 //! [`spawn`]. The movement is `cs_sim::pm`, the port of `pm_shared`, run by [`crate::pmove`] in the
 //! order of `SV_RunCmd` (`PlayerPreThink`, `PM_Move`, `PlayerPostThink`).
 //!
-//! A player that joins stands at the counter-terrorists' spawn point as in `ClientPutInServer`
-//! (without the telefrag the vanilla join path would do); the `trigger_camera` intro path (the
-//! player looks through the map's camera until it picks a team) is not ported.
+//! A player that joins looks through the map's first `trigger_camera` at its target until it picks
+//! a team ([`crate::intro`]: the next camera every six seconds); a map with no camera that has a
+//! target puts it at the counter-terrorists' spawn point as in `ClientPutInServer` (without the
+//! telefrag the vanilla join path would do).
 //!
 //! The dead leave a corpse: `PlayerDeathThink` sends `ClCorpse` once the player has been dead
 //! for `DEATH_ANIMATION_TIME`, then calls `StartDeathCam` ([`observer::start_death_cam`]): the
@@ -59,6 +60,7 @@ use glam::Vec3;
 use crate::GameState;
 use crate::bullets;
 use crate::menus::{self, Menu};
+use crate::intro;
 use crate::weapons::core as weapon_core;
 use crate::weapons::{MAX_AMMO_SLOTS, MAX_ITEM_TYPES, WeaponId, WeaponSlotItem};
 use crate::messages;
@@ -358,6 +360,11 @@ pub struct Player {
     next_death_think: f64,
     /// `m_iJoiningState`: where the player is on its way into the game ([`crate::teams`]).
     pub joining: JoinState,
+    /// `m_pIntroCamera`: the `trigger_camera` whose view the joining player has
+    /// ([`crate::intro`]); `None` once it picked a team, or when the map has none to look through.
+    pub intro_camera: Option<EdictId>,
+    /// `m_fIntroCamTime`: server time of the next camera (0 until a camera sets it).
+    pub intro_cam_time: f64,
     /// `m_iMenu`: the menu the player is looking at.
     pub menu: Menu,
     /// `m_bTeamChanged`: the player has picked a team since the round began (the round restart
@@ -473,6 +480,8 @@ impl Player {
             dead_time: 0.0,
             next_death_think: 0.0,
             joining: JoinState::ShowLText,
+            intro_camera: None,
+            intro_cam_time: 0.0,
             menu: Menu::Off,
             team_changed: false,
             num_spawns: 0,
@@ -576,8 +585,9 @@ pub(crate) fn player_slot(g: &GameState, eng: &EngineApi<'_>, id: EdictId) -> Op
 
 /// `ClientPutInServer` of a multiplayer game (ReGameDLL `client.cpp`, read 2026-11-22): the
 /// player enters with no team, invisible, not solid and taking no damage, until it is spawned.
-/// It stands at the counter-terrorists' spawn point (the `GetPlayerSpawnSpot` of the original's
-/// no-camera path; the `trigger_camera` intro path is not ported) with `v_angle` zero and the
+/// With a `trigger_camera` that has a target it stands at the camera, looking at the target, with
+/// no view offset ([`intro::join_view`]); else it stands at the counter-terrorists' spawn point
+/// (the `GetPlayerSpawnSpot` of the original's no-camera path) with `v_angle` zero and the
 /// spot's angles, and keeps the view offset `VEC_VIEW`. The original keeps the player as a
 /// `MOVETYPE_NOCLIP` spectator with `models/player.mdl` while it looks at the menus; with no
 /// menus yet, this is `MOVETYPE_NONE` and no model.
@@ -592,24 +602,42 @@ pub(crate) fn put_in_server(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8
     player.chat = crate::chat::ChatState::entered(eng.client_key(slot, "name").unwrap_or(""));
     g.join_counter += 1;
     player.join_order = g.join_counter;
+    // `m_pIntroCamera = UTIL_FindEntityByClassname(nullptr, "trigger_camera")`; with a target to
+    // look at the player takes the camera's view for six seconds ([`intro`]); with no camera, or
+    // none with a target (the vanilla `else`), it stands at the CT spawn point.
+    let (camera, view) = intro::join_view(eng);
+    player.intro_camera = camera;
+    let time = eng.time();
+    let intro_view = view.is_some();
+    if intro_view {
+        player.intro_cam_time = time + intro::INTRO_CAM_INTERVAL;
+    }
     g.players[index] = Some(player);
     let id = eng.client_edict(slot);
-    let (origin, angles) = match select_join_spawn_point(g, eng, id, SpawnTeam::CounterTerrorist) {
-        Some(spot) => {
-            let v = eng.ent(spot);
-            (
-                v.map_or(Vec3::ZERO, |v| v.origin) + Vec3::new(0.0, 0.0, 1.0),
-                v.map_or(Vec3::ZERO, |v| v.angles),
-            )
+    let (origin, angles, view_ofs) = match view {
+        Some((origin, angles)) => (origin, angles, Vec3::ZERO),
+        None => {
+            let (origin, angles) =
+                match select_join_spawn_point(g, eng, id, SpawnTeam::CounterTerrorist) {
+                    Some(spot) => {
+                        let v = eng.ent(spot);
+                        (
+                            v.map_or(Vec3::ZERO, |v| v.origin) + Vec3::new(0.0, 0.0, 1.0),
+                            v.map_or(Vec3::ZERO, |v| v.angles),
+                        )
+                    }
+                    None => (Vec3::new(0.0, 0.0, 1.0), Vec3::ZERO),
+                };
+            (origin, angles, Vec3::new(0.0, 0.0, VEC_VIEW))
         }
-        None => (Vec3::new(0.0, 0.0, 1.0), Vec3::ZERO),
     };
     let Some(v) = eng.ent_mut(id) else {
         return;
     };
     v.origin = origin;
     v.angles = angles;
-    v.v_angle = Vec3::ZERO;
+    // The camera's `v_angle` is its angles; the spawn point's path leaves it zero.
+    v.v_angle = if intro_view { angles } else { Vec3::ZERO };
     v.flags = FL_CLIENT | FL_SPECTATOR;
     v.solid = SOLID_NOT;
     v.movetype = MOVETYPE_NONE;
@@ -622,7 +650,7 @@ pub(crate) fn put_in_server(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8
     v.fixangle = 1;
     v.max_speed = 1.0;
     v.fov = DEFAULT_FOV;
-    v.view_ofs = Vec3::new(0.0, 0.0, VEC_VIEW);
+    v.view_ofs = view_ofs;
     eng.set_origin(id, origin);
     // The end of `ClientPutInServer` (client.cpp:735-749, read 2026-11-22): everyone is told the
     // player connected, `%` of the name made a space (the text is a format string).

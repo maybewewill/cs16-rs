@@ -11,7 +11,7 @@ use cs_engine::{EdictId, EngineApi};
 
 use crate::GameState;
 use crate::buy::BuyZone;
-use crate::world::{BrushKind, FuncLadder, InfoPlayer, StaticBrush, World};
+use crate::world::{BrushKind, FuncLadder, InfoPlayer, InfoTarget, StaticBrush, TriggerCamera, World};
 
 /// What one class of map entity does. Every method but [`classname`](Self::classname) has a
 /// default that does nothing.
@@ -66,6 +66,8 @@ pub fn create_entity(classname: &str) -> Option<Box<dyn GameEntity>> {
         "worldspawn" => Box::new(World),
         "info_player_start" => Box::new(InfoPlayer("info_player_start")),
         "info_player_deathmatch" => Box::new(InfoPlayer("info_player_deathmatch")),
+        "info_target" => Box::new(InfoTarget),
+        "trigger_camera" => Box::new(TriggerCamera::default()),
         "func_ladder" => Box::new(FuncLadder),
         "func_buyzone" => Box::new(BuyZone::default()),
         "func_wall" => Box::new(StaticBrush::new("func_wall", BrushKind::Solid)),
@@ -223,6 +225,8 @@ mod tests {
             "worldspawn",
             "info_player_start",
             "info_player_deathmatch",
+            "info_target",
+            "trigger_camera",
             "func_ladder",
             "func_buyzone",
             "func_wall",

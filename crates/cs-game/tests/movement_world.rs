@@ -213,12 +213,13 @@ fn footsteps_reach_others_not_self() {
         }
         let start = vars(eng, 0).origin;
         eng.ent_mut(eng.client_edict(0)).unwrap().max_speed = 250.0;
-        // The other player stands 40 units off the runner, out of its way.
+        // The other player stands 48 units off the runner, out of its way (at 45 degrees the two
+        // hulls, 32 wide, clear each other from 46 units on: 40 left them overlapping and stuck).
         let spot = (0..16)
             .map(|i| i as f32 * 22.5f32)
             .map(|yaw| Vec3::new(yaw.to_radians().cos(), yaw.to_radians().sin(), 0.0))
             .find(|dir| eng.trace_hull(start, start + *dir * 60.0, Hull::Standing).fraction >= 1.0)
-            .map_or(start, |dir| start + dir * 40.0);
+            .map_or(start, |dir| start + dir * 48.0);
         game.place_player(eng, 1, spot);
         step_sample_indices(eng)
     });
