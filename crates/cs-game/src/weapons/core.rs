@@ -232,9 +232,11 @@ impl<'a, 'e> WeaponCtx<'a, 'e> {
         tabulate_ammo(self.player_mut());
     }
 
-    /// `CBasePlayer::SetAnimation(anim)`. Wired to the player animation by Task 9 (`player_anim`);
-    /// until then nothing moves the third-person model.
-    pub fn set_animation(&mut self, _anim: PlayerAnim) {}
+    /// `CBasePlayer::SetAnimation(anim)` ([`crate::player_anim::set_animation`]): the sequence of
+    /// the third-person model.
+    pub fn set_animation(&mut self, anim: PlayerAnim) {
+        crate::player_anim::set_animation(self.g, self.eng, self.slot, anim);
+    }
 
     /// `CBasePlayerWeapon::SendWeaponAnim(iAnim, skiplocal)`: records the animation and sends
     /// `svc_weaponanim` unless the client predicts it (`skiplocal` and `cl_lw`).

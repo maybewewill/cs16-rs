@@ -97,6 +97,14 @@ impl GameDll for Rig {
     fn update_client_data(&mut self, eng: &mut EngineApi<'_>, slot: u8) -> GoldSrcClientData {
         self.game.update_client_data(eng, slot)
     }
+    fn get_weapon_data(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        slot: u8,
+        out: &mut [cs_proto48::delta::GoldSrcWeaponData; 64],
+    ) -> bool {
+        self.game.get_weapon_data(eng, slot, out)
+    }
     fn setup_visibility(&mut self, eng: &mut EngineApi<'_>, slot: u8) -> Option<glam::Vec3> {
         self.game.setup_visibility(eng, slot)
     }

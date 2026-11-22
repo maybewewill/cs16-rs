@@ -43,6 +43,58 @@ const PLAYER_MODELS: [&str; 10] = [
     "models/player/urban/urban.mdl",
 ];
 
+/// The `PRECACHE_MODEL` calls of `ClientPrecache` that follow the player models (ReGameDLL
+/// `client.cpp` 4095-4140, read 2026-11-22): the third-person models of the weapons and their
+/// shield variants, and a few world models. `pev->weaponmodel` is a model index looked up by
+/// name (`MODEL_INDEX(STRING(pev->weaponmodel))` in `AddToFullPack`), so a weapon whose
+/// `p_*.mdl` is not here has no model in the hands of the player on the other clients.
+const CLIENT_WEAPON_MODELS: [&str; 44] = [
+    "models/p_ak47.mdl",
+    "models/p_aug.mdl",
+    "models/p_awp.mdl",
+    "models/p_c4.mdl",
+    "models/w_c4.mdl",
+    "models/p_deagle.mdl",
+    "models/shield/p_shield_deagle.mdl",
+    "models/p_flashbang.mdl",
+    "models/shield/p_shield_flashbang.mdl",
+    "models/p_hegrenade.mdl",
+    "models/shield/p_shield_hegrenade.mdl",
+    "models/p_glock18.mdl",
+    "models/shield/p_shield_glock18.mdl",
+    "models/p_p228.mdl",
+    "models/shield/p_shield_p228.mdl",
+    "models/p_smokegrenade.mdl",
+    "models/shield/p_shield_smokegrenade.mdl",
+    "models/p_usp.mdl",
+    "models/shield/p_shield_usp.mdl",
+    "models/p_fiveseven.mdl",
+    "models/shield/p_shield_fiveseven.mdl",
+    "models/p_knife.mdl",
+    "models/shield/p_shield_knife.mdl",
+    "models/w_flashbang.mdl",
+    "models/w_hegrenade.mdl",
+    "models/p_sg550.mdl",
+    "models/p_g3sg1.mdl",
+    "models/p_m249.mdl",
+    "models/p_m3.mdl",
+    "models/p_m4a1.mdl",
+    "models/p_mac10.mdl",
+    "models/p_mp5.mdl",
+    "models/p_ump45.mdl",
+    "models/p_p90.mdl",
+    "models/p_scout.mdl",
+    "models/p_sg552.mdl",
+    "models/w_smokegrenade.mdl",
+    "models/p_tmp.mdl",
+    "models/p_elite.mdl",
+    "models/p_xm1014.mdl",
+    "models/p_galil.mdl",
+    "models/p_famas.mdl",
+    "models/p_shield.mdl",
+    "models/w_shield.mdl",
+];
+
 /// The `PRECACHE_SOUND` calls of `ClientPrecache` (ReGameDLL `client.cpp`, read 2026-11-22),
 /// plus the flashlight sound (`SOUND_FLASHLIGHT_ON` and `_OFF` are the same file).
 const CLIENT_SOUNDS: [&str; 110] = [
@@ -269,6 +321,9 @@ impl World {
             precache_sound(eng, name);
         }
         for name in PLAYER_MODELS {
+            precache_model(eng, name);
+        }
+        for name in CLIENT_WEAPON_MODELS {
             precache_model(eng, name);
         }
         // `g_iShadowSprite`, which `InitHUD` sends in `ShadowIdx`.

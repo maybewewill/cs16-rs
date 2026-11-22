@@ -735,9 +735,22 @@ pub struct RawController {
     pub index: i32,
 }
 
-/// The part of `mstudioseqdesc_t` a pose needs.
-#[derive(Debug, Clone, Copy)]
+/// The part of `mstudioseqdesc_t` a pose needs, and what the game's `LookupSequence`,
+/// `LookupActivity` and `GetSequenceInfo` read (`animation.cpp`).
+#[derive(Debug, Clone)]
 pub struct RawSequence {
+    /// `label`, at most 31 characters.
+    pub label: String,
+    /// `fps`.
+    pub fps: f32,
+    /// `flags`: `STUDIO_LOOPING` (1) and the like.
+    pub flags: i32,
+    /// `activity`: an `ACT_*` value, 0 for none.
+    pub activity: i32,
+    /// `actweight`: the weight of this sequence among those of its activity.
+    pub actweight: i32,
+    /// `linearmovement`: the distance the sequence moves the model over its length.
+    pub linearmovement: [f32; 3],
     pub numframes: i32,
     pub numblends: i32,
     pub blendstart: [f32; 2],
@@ -867,7 +880,21 @@ impl StudioPoseData {
         let mut sequences = Vec::with_capacity(num_seq);
         for i in 0..num_seq {
             let base = seq_index.saturating_add(i * 176);
+            let label = data
+                .get(base..base.saturating_add(32))
+                .map(read_cstr)
+                .ok_or(MdlError::Truncated("sequence label"))?;
             sequences.push(RawSequence {
+                label,
+                fps: read_f32(data, base + 32)?,
+                flags: read_i32(data, base + 36)?,
+                activity: read_i32(data, base + 40)?,
+                actweight: read_i32(data, base + 44)?,
+                linearmovement: [
+                    read_f32(data, base + 76)?,
+                    read_f32(data, base + 80)?,
+                    read_f32(data, base + 84)?,
+                ],
                 numframes: read_i32(data, base + 56)?,
                 numblends: read_i32(data, base + 120)?,
                 animindex: count(base + 124)?,

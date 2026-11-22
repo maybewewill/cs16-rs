@@ -829,3 +829,23 @@ fn an_entity_moved_within_a_call_gets_a_fresh_pose() {
     assert!(near(second, (145.0 - 0.03125) / 300.0), "{second}");
     assert_eq!(setups, 2);
 }
+
+#[test]
+fn the_game_reads_the_sequences_of_a_precached_studio_model() {
+    // `GET_MODEL_PTR`: what the game's `LookupSequence`, `LookupActivity` and `GetSequenceInfo`
+    // read (`animation.cpp`). The fixture's one sequence has no label, activity or movement.
+    let mut h = harness_with_model(two_box_model());
+    let seen = run(&mut h, |eng| {
+        let index = eng.model_index("models/test.mdl").expect("the harness precaches it");
+        let model = eng.studio_model(index).expect("a studio model");
+        let seq = &model.sequences[0];
+        (
+            model.sequences.len(),
+            seq.numframes,
+            seq.label.clone(),
+            (seq.activity, seq.actweight, seq.flags),
+            eng.studio_model(0).is_none(),
+        )
+    });
+    assert_eq!(seen, (1, 1, String::new(), (0, 0, 0), true));
+}

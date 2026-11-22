@@ -25,6 +25,7 @@ mod messages;
 pub mod money;
 pub mod observer;
 pub mod player;
+mod player_anim;
 mod pmove;
 pub mod rules;
 mod score;
@@ -402,6 +403,42 @@ impl CsGame {
         Some((p.next_attack, p.can_shoot, p.active_item, p.fov, p.client_fov))
     }
 
+    /// `CBasePlayer::SetAnimation(anim)` for the player of `slot`, with `m_LastHitGroup` set to
+    /// `hit_group` first. For tests only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn set_animation(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        slot: u8,
+        anim: weapons::core::PlayerAnim,
+        hit_group: i32,
+    ) {
+        if let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+            p.last_hit_group = hit_group;
+        }
+        player_anim::set_animation(&mut self.state, eng, slot, anim);
+    }
+
+    /// `m_Activity` and `m_IdealActivity` of the player of `slot`, and whether the sequence has
+    /// finished (`m_fSequenceFinished`). For tests only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn anim_state(&self, slot: u8) -> Option<(i32, i32, bool)> {
+        let a = &self.state.players.get(usize::from(slot))?.as_ref()?.anim;
+        Some((a.activity, a.ideal_activity, a.sequence_finished))
+    }
+
+    /// Sets `m_szAnimExtention` of the player of `slot`. For tests only (cargo feature
+    /// `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn set_anim_extension(&mut self, slot: u8, ext: &str) {
+        if let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+            p.anim_extension = ext.to_string();
+        }
+    }
+
     /// Sets `m_flNextAttack` of the player of `slot`. For tests only (cargo feature
     /// `test-hooks`).
     #[cfg(feature = "test-hooks")]
@@ -626,6 +663,16 @@ impl GameDll for CsGame {
 
     fn update_client_data(&mut self, eng: &mut EngineApi<'_>, slot: u8) -> GoldSrcClientData {
         player::client_data(&mut self.state, eng, slot)
+    }
+
+    /// `GetWeaponData`: what the client with `cl_lw` needs to predict its weapons.
+    fn get_weapon_data(
+        &mut self,
+        _eng: &mut EngineApi<'_>,
+        slot: u8,
+        out: &mut [cs_proto48::delta::GoldSrcWeaponData; 64],
+    ) -> bool {
+        player::weapon_data(&self.state, slot, out)
     }
 
     /// `SetupVisibility`: an observer sees what the player it follows sees.

@@ -20,6 +20,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use cs_assets::bsp::Plane;
 use cs_assets::mdl::{RawBone, RawSequence, STUDIO_TRACE_HITBOX, StudioPoseData};
@@ -699,6 +700,14 @@ impl EngineApi<'_> {
         hulls
     }
 
+    /// `GET_MODEL_PTR`: the studio model with model index `index` (the `modelindex` of an
+    /// entity), `None` for model 0, a brush model, a file the loader did not find or one it could
+    /// not parse. The game reads the sequences of a player model from it (`LookupSequence`,
+    /// `LookupActivity`, `GetSequenceInfo`).
+    pub fn studio_model(&self, index: u16) -> Option<Arc<StudioPoseData>> {
+        self.precache.studio_model(index).cloned()
+    }
+
     /// Bone setups the traces of this call made so far (cache misses). For tests that count
     /// work instead of time.
     #[doc(hidden)]
@@ -726,6 +735,12 @@ mod tests {
     #[test]
     fn player_blend_follows_the_pitch_range() {
         let seq = RawSequence {
+            label: String::new(),
+            fps: 30.0,
+            flags: 0,
+            activity: 0,
+            actweight: 0,
+            linearmovement: [0.0; 3],
             numframes: 1,
             numblends: 2,
             blendstart: [-45.0, 0.0],

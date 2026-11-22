@@ -54,18 +54,19 @@ use cs_engine::{EdictId, EngineApi, EntTrace, MsgDest};
 use cs_proto48::delta::{GoldSrcClientData, GoldSrcUserCmd};
 use cs_proto48::messages::svc;
 use cs_proto48::usermsg::CsUserMsg;
-use cs_sim::pm::consts::{IN_ATTACK, PM_VEC_VIEW};
+use cs_sim::pm::consts::{IN_ATTACK, IN_JUMP, PM_VEC_VIEW};
 use glam::Vec3;
 
 use crate::GameState;
 use crate::bullets;
 use crate::menus::{self, Menu};
 use crate::intro;
-use crate::weapons::core as weapon_core;
+use crate::weapons::core::{self as weapon_core, PlayerAnim};
 use crate::weapons::{MAX_AMMO_SLOTS, MAX_ITEM_TYPES, WeaponId, WeaponSlotItem};
 use crate::messages;
 use crate::money;
 use crate::observer::{self, ObserverState};
+use crate::player_anim;
 use crate::pmove;
 use crate::rules;
 use crate::score;
@@ -107,12 +108,12 @@ pub mod dmg {
 }
 
 /// Hit groups (`common/const.h`).
-const HITGROUP_GENERIC: i32 = 0;
+pub(crate) const HITGROUP_GENERIC: i32 = 0;
 pub(crate) const HITGROUP_HEAD: i32 = 1;
-const HITGROUP_CHEST: i32 = 2;
-const HITGROUP_STOMACH: i32 = 3;
-const HITGROUP_LEFTARM: i32 = 4;
-const HITGROUP_RIGHTARM: i32 = 5;
+pub(crate) const HITGROUP_CHEST: i32 = 2;
+pub(crate) const HITGROUP_STOMACH: i32 = 3;
+pub(crate) const HITGROUP_LEFTARM: i32 = 4;
+pub(crate) const HITGROUP_RIGHTARM: i32 = 5;
 const HITGROUP_LEFTLEG: i32 = 6;
 const HITGROUP_RIGHTLEG: i32 = 7;
 pub(crate) const HITGROUP_SHIELD: i32 = 8;
@@ -166,6 +167,10 @@ const PLAYER_FREEZE_TIME_OVER: i32 = 1 << 1;
 /// `PLAYER_CAN_SHOOT` and `PLAYER_HOLDING_SHIELD` (`cdll_dll.h`), bits of `iuser3` in the client
 /// data. (`PLAYER_IN_BOMB_ZONE` is phase 2E.)
 const PLAYER_CAN_SHOOT: i32 = cs_sim::pm::consts::PLAYER_CAN_SHOOT;
+/// `PLAYER_IN_BOMB_ZONE` and `SIGNAL_BOMB` (`unisignals.h`): the bomb site signal (raised by
+/// the bomb zones of phase 2E; nothing raises it yet).
+const PLAYER_IN_BOMB_ZONE: i32 = cs_sim::pm::consts::PLAYER_IN_BOMB_ZONE;
+const SIGNAL_BOMB: u8 = 1 << 1;
 const PLAYER_HOLDING_SHIELD: i32 = cs_sim::pm::consts::PLAYER_HOLDING_SHIELD;
 /// `WEAPON_SUIT`: the bit of `pev->weapons` that stands for the HEV suit.
 const WEAPON_SUIT: u32 = 31;
@@ -350,6 +355,9 @@ pub struct Player {
     pub(crate) eject_brass: f32,
     /// `m_szAnimExtention`: the animation set of the weapon in hand.
     pub(crate) anim_extension: String,
+    /// The animation of the third-person model: `m_Activity`, the gait and the rest
+    /// ([`crate::player_anim`]).
+    pub(crate) anim: crate::player_anim::AnimState,
     /// `PFLAG_OBSERVER`: the player is an observer ([`observer::start_observer`] ran), so the
     /// corpse was sent and `PlayerDeathThink` does not run again.
     pub(crate) pflag_observer: bool,
@@ -490,6 +498,7 @@ impl Player {
             last_zoom: 90,
             eject_brass: 0.0,
             anim_extension: String::new(),
+            anim: crate::player_anim::AnimState::new(),
             pflag_observer: false,
             obs: ObserverState::default(),
             buttons_pressed: 0,
@@ -1009,6 +1018,8 @@ pub(crate) fn spawn(
     }
     eng.set_size(id, HULL_MIN, HULL_MAX);
     eng.set_origin(id, origin);
+    // `Spawn`: the gait starts over and the sequence is an idle one.
+    player_anim::on_spawn(g, eng, slot);
     reset_max_speed(g, eng, slot);
     // The order of the messages is that of `Spawn` (player.cpp, read 2026-11-22): the
     // `SVC_ROOMTYPE` (`room_type`, 5937), `SendItemStatus` of a player that lost its items
@@ -1167,6 +1178,8 @@ pub(crate) fn post_usercmd(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8)
     }
     // `pt_end`: `PostThink` jumps here when the match is over or the player is dead.
     weapon_core::decay_timers(g, eng, slot);
+    // `m_iGaitsequence = pev->gaitsequence; StudioProcessGait();` close `pt_end`.
+    player_anim::studio_process_gait(g, eng, slot);
     pmove::cmd_end(eng, slot);
 }
 
@@ -1246,6 +1259,14 @@ fn run_cmd_body(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, cmd: &Gold
         death_think(g, eng, slot);
         // When the death camera has just started, the player is an observer now and the
         // movement below is `PM_SpectatorMove` (`PM_Move` follows `PreThink` in `SV_RunCmd`).
+    }
+    if alive {
+        // `PreThink` (player.cpp:4984-4994): "if (pev->button & IN_JUMP) Jump();" and, trying to
+        // duck, already ducked or ducking, `Duck()`. (`Duck` does something only for IN_DUCK.)
+        if eng.ent(id).is_some_and(|v| v.button & IN_JUMP != 0) {
+            player_anim::jump(g, eng, slot);
+        }
+        player_anim::duck(g, eng, slot);
     }
     if alive
         && let Some(v) = eng.ent(id)
@@ -1489,10 +1510,19 @@ pub(crate) fn impulse_commands(_g: &mut GameState, eng: &mut EngineApi<'_>, slot
     }
 }
 
-/// The fall part of `CBasePlayer::PostThink`: a player that lands faster than
-/// `MAX_PLAYER_SAFE_FALL_SPEED` out of water takes [`fall_damage`] from the world.
+/// `CBasePlayer::PostThink` (`player.cpp` 5352-5480, read 2026-11-22), what is ported, for a
+/// player that is alive in a match that is on: `ItemPostFrame`; a landing faster than
+/// `MAX_PLAYER_SAFE_FALL_SPEED` out of water takes [`fall_damage`] from the world, and a hard
+/// enough landing is followed by `SetAnimation(PLAYER_WALK)` for the living; the fall speed is
+/// forgotten on the ground; the animation that fits the movement (`PLAYER_WALK` moving on the
+/// ground or in deep water, else `PLAYER_IDLE` unless flying); `StudioFrameAdvance`. Not
+/// ported: the tank (`m_pTank`), `CheckPowerups` (the model index is never changed) and
+/// `UpdatePlayerSound` (useless in CS 1.6). The end of `PostThink` (`pt_end`) is
+/// [`post_usercmd`].
 fn post_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let id = eng.client_edict(slot);
+    // `PostThink` does the weapon stuff before the fall check (`ItemPostFrame`).
+    weapon_core::player_item_post_frame(g, eng, slot);
     let Some(v) = eng.ent(id) else {
         return;
     };
@@ -1505,45 +1535,57 @@ fn post_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
         return;
     };
     let (health, fall_velocity) = (p.health, p.fall_velocity);
-    // `PostThink` does the weapon stuff before the fall check (`ItemPostFrame`).
-    weapon_core::player_item_post_frame(g, eng, slot);
-    let Some(p) = g
-        .players
-        .get_mut(usize::from(slot))
-        .and_then(Option::as_mut)
-    else {
-        return;
-    };
-    if flags & FL_ONGROUND == 0 {
-        return;
-    }
-    p.fall_velocity = 0.0;
-    if health > 0.0
-        && fall_velocity >= PLAYER_FALL_PUNCH_THRESHHOLD
-        && watertype != CONTENT_WATER
-        && fall_velocity > MAX_PLAYER_SAFE_FALL_SPEED
-    {
-        let damage = fall_damage(fall_velocity);
-        if damage > health {
-            // Played on the item channel: the footstep landing uses the body channel.
-            eng.emit_sound(
-                id,
-                CHAN_ITEM,
-                "common/bodysplat.wav",
-                1.0,
-                ATTN_NORM,
-                PITCH_NORM,
-            );
-        }
-        if damage > 0.0 {
-            // Vanilla: the damage comes from the world (no attacker, no inflictor).
-            p.last_hit_group = HITGROUP_GENERIC;
-            take_damage(g, eng, slot, None, None, damage, dmg::FALL);
-            if let Some(v) = eng.ent_mut(id) {
-                v.punchangle.x = 0.0;
+    if flags & FL_ONGROUND != 0 && health > 0.0 && fall_velocity >= PLAYER_FALL_PUNCH_THRESHHOLD {
+        if watertype != CONTENT_WATER && fall_velocity > MAX_PLAYER_SAFE_FALL_SPEED {
+            let damage = fall_damage(fall_velocity);
+            if damage > health {
+                // Played on the item channel: the footstep landing uses the body channel.
+                eng.emit_sound(
+                    id,
+                    CHAN_ITEM,
+                    "common/bodysplat.wav",
+                    1.0,
+                    ATTN_NORM,
+                    PITCH_NORM,
+                );
+            }
+            if damage > 0.0 {
+                // Vanilla: the damage comes from the world (no attacker, no inflictor).
+                p.last_hit_group = HITGROUP_GENERIC;
+                take_damage(g, eng, slot, None, None, damage, dmg::FALL);
+                if let Some(v) = eng.ent_mut(id) {
+                    v.punchangle.x = 0.0;
+                }
             }
         }
+        if g.players[usize::from(slot)].as_ref().is_some_and(|p| p.alive) {
+            player_anim::set_animation(g, eng, slot, PlayerAnim::Walk);
+        }
     }
+    if eng.ent(id).is_some_and(|v| v.flags & FL_ONGROUND != 0)
+        && let Some(p) = g.players[usize::from(slot)].as_mut()
+    {
+        p.fall_velocity = 0.0;
+    }
+    // "Select the proper animation for the player character."
+    if g.players[usize::from(slot)].as_ref().is_some_and(|p| p.alive)
+        && let Some(v) = eng.ent(id)
+    {
+        let (moving, on_ground, waterlevel, gait) = (
+            v.velocity.x != 0.0 || v.velocity.y != 0.0,
+            v.flags & FL_ONGROUND != 0,
+            v.waterlevel,
+            i32::from(v.gaitsequence as i16),
+        );
+        if moving {
+            if on_ground || waterlevel > 1 {
+                player_anim::set_animation(g, eng, slot, PlayerAnim::Walk);
+            }
+        } else if gait != player_anim::ACT_FLY {
+            player_anim::set_animation(g, eng, slot, PlayerAnim::Idle);
+        }
+    }
+    player_anim::studio_frame_advance(g, eng, slot);
 }
 
 /// The id of the weapon the player of `slot` holds out (`m_pActiveItem->m_iId`), `None` when it
@@ -1869,9 +1911,9 @@ pub(crate) fn take_damage_from_grenade(
 /// [`monster_take_damage`], and the time-based damage counters of the hit's kinds reset.
 ///
 /// Left out: the VIP's halved ratio and the shield's added 0.2 (VIP and shield tasks), the
-/// teammate-attack hints and `m_flLastAttackedTeammate`, `SetAnimation(PLAYER_FLINCH)` (the
-/// player animation task), `m_lastDamageAmount`, `m_bKilledByBomb`/`m_bKilledByGrenade`
-/// (only the death animation reads them: the player animation task, with the bomb), `LogAttack`, bots, the career tasks and the director/`HLTV`
+/// teammate-attack hints and `m_flLastAttackedTeammate`, `m_lastDamageAmount`,
+/// `m_bKilledByBomb`/`m_bKilledByGrenade` (bomb task), `LogAttack`, bots, the career tasks and
+/// the director/`HLTV`
 /// messages.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn take_damage_with(
@@ -1970,7 +2012,7 @@ pub(crate) fn take_damage_with(
         }
         pain(g, eng, slot, hit_group, armored);
         if g.players[index].as_ref().is_some_and(|p| p.health > damage) {
-            // `SetAnimation(PLAYER_FLINCH)` waits for the animation task.
+            player_anim::set_animation(g, eng, slot, PlayerAnim::Flinch);
             pain(g, eng, slot, hit_group, false);
         }
         let took = monster_take_damage(
@@ -2017,11 +2059,11 @@ pub(crate) fn take_damage_with(
         let Some(p) = g.players[index].as_mut() else {
             return false;
         };
-        if !should_do_large_flinch(ducking, hit_group, attacker_weapon) {
+        let flinch = if !should_do_large_flinch(ducking, hit_group, attacker_weapon) {
             // `TakeDamageImpulse(pAttack, 0.0f, 0.5f)`.
             p.velocity_modifier = 0.5;
             p.high_damage = if hit_group == HITGROUP_HEAD { damage > 60.0 } else { damage > 20.0 };
-            // `SetAnimation(PLAYER_FLINCH)`: the animation task.
+            PlayerAnim::Flinch
         } else {
             if let (Some((origin, velocity)), Some(ao)) = (victim_vars, attacker_origin)
                 && velocity.length() < 300.0
@@ -2034,8 +2076,10 @@ pub(crate) fn take_damage_with(
                     v.velocity += push;
                 }
             }
-            // `SetAnimation(PLAYER_LARGE_FLINCH)`: the animation task.
-        }
+            PlayerAnim::LargeFlinch
+        };
+        // `SetAnimation(PLAYER_FLINCH)` or `SetAnimation(PLAYER_LARGE_FLINCH)`.
+        player_anim::set_animation(g, eng, slot, flinch);
     }
 
     // Armor. It doesn't protect against fall or drown damage!
@@ -2171,6 +2215,9 @@ fn killed(
     score::player_killed(g, eng, slot, attacker, inflictor, attacker_weapon);
     // `NVGToggle 0` to the player and to the observers that watch it in first person.
     observer::killed_night_vision(g, eng, slot);
+    // `SetAnimation(PLAYER_DIE)` (player.cpp:2360): the death sequence, and (vanilla) a first
+    // `DeathSound`; `Killed` plays another one at its end.
+    player_anim::set_animation(g, eng, slot, PlayerAnim::Die);
     // `Killed` (player.cpp 2365-2411, vanilla): a player that dies holding a grenade and the
     // fire button throws it.
     throw_grenade_on_death(g, eng, slot);
@@ -2340,16 +2387,20 @@ pub(crate) fn client_data(
     // `iuser*` and death state.
     let source = observer::first_person_source(g, eng, slot).map(|t| (t, eng.client_edict(t)));
     let v = source.and_then(|(_, sid)| eng.ent(sid)).unwrap_or(own);
+    // `sendweapons` is the engine's `host_client->lw`: only a client that predicts its weapons
+    // (`cl_lw`) is sent the weapon part of the client data (client.cpp:5073-5153).
+    let sendweapons = eng.client_lw(slot);
     // `iuser3` (`sendweapons && pPlayer`, only `iuser1 == OBS_NONE && !pevOrg`): the bits of
-    // the player's own state, not the entity's value. Only FREEZE_TIME_OVER is set here; the
-    // others (CAN_SHOOT, IN_BOMB_ZONE, HOLDING_SHIELD) come with the weapons and the bomb
-    // zones (2D, 2E).
-    let iuser3 = if own.iuser1 == observer::OBS_NONE && source.is_none() {
+    // the player's own state, not the entity's value.
+    let iuser3 = if sendweapons && own.iuser1 == observer::OBS_NONE && source.is_none() {
         let mut bits = 0;
         if let Some(p) = g.players.get(usize::from(slot)).and_then(Option::as_ref) {
             // `m_bCanShoot && !m_bIsDefusing` (`m_bCanShootOverride` is a mod API).
             if p.can_shoot && !p.is_defusing {
                 bits |= PLAYER_CAN_SHOOT;
+            }
+            if p.signals.state() & SIGNAL_BOMB != 0 {
+                bits |= PLAYER_IN_BOMB_ZONE;
             }
             if p.owns_shield {
                 bits |= PLAYER_HOLDING_SHIELD;
@@ -2371,6 +2422,10 @@ pub(crate) fn client_data(
         health: v.health,
         maxspeed: v.max_speed,
         fov: v.fov,
+        // `MODEL_INDEX(STRING(pev->viewmodel))`, `pev->weaponanim` (the followed player's for an
+        // observer in first person).
+        viewmodel: i32::from(v.viewmodel),
+        weaponanim: v.weaponanim,
         // `deadflag` is not filled: the `UpdateClientData` export (client.cpp:5020, read
         // 2026-11-22) leaves it as the engine cleared it, and the golden capture of HLDS sends 0
         // for a player that is dead or not yet in the game.
@@ -2395,14 +2450,99 @@ pub(crate) fn client_data(
         ..Default::default()
     };
     let weapons_of = source.map_or(slot, |(t, _)| t);
-    if let Some(p) = g
+    let Some(p) = g
         .players
         .get(usize::from(weapons_of))
         .and_then(Option::as_ref)
-    {
-        data.weapons = p.weapons;
+    else {
+        return data;
+    };
+    data.weapons = p.weapons;
+    if !sendweapons {
+        return data;
+    }
+    // The legacy ammo counters (`TabulateAmmo`'s, in [`weapon_core::TABULATED_AMMO`] order) go
+    // into the fields the Half-Life client reads as its ammo.
+    let t = &p.tabulated_ammo;
+    data.ammo_shells = t[0];
+    data.ammo_nails = t[1];
+    data.ammo_cells = t[2];
+    data.ammo_rockets = t[3];
+    data.vuser2 = Vec3::new(t[4] as f32, t[5] as f32, t[6] as f32);
+    data.vuser3 = Vec3::new(t[7] as f32, t[8] as f32, t[9] as f32);
+    data.m_fl_next_attack = p.next_attack;
+    // The held weapon: its id, and the ammo it uses (the type and what is left of it); a
+    // weapon with no ammo (the knife) says -1 and 0. QUIRK: the type is tested as unsigned.
+    if let Some((s, i)) = p.active_item.and_then(|a| p.find_item(a)) {
+        let item = &p.items[s][i];
+        if item.behavior.use_decrement()
+            && let Some(info) = crate::weapons::item_info(item.weapon.id)
+        {
+            data.m_i_id = info.id as i32;
+            let ammo_type = item.weapon.primary_ammo_type;
+            data.vuser4 = match usize::try_from(ammo_type) {
+                Ok(index) if index < MAX_AMMO_SLOTS => {
+                    Vec3::new(ammo_type as f32, p.ammo[index] as f32, 0.0)
+                }
+                _ => Vec3::new(-1.0, 0.0, 0.0),
+            };
+        }
     }
     data
+}
+
+/// `GetWeaponData` (ReGameDLL `client.cpp` 4947-5018, read 2026-11-22, `CLIENT_WEAPONS`): the
+/// `weapon_data_t` of every weapon the player carries that the client predicts
+/// (`UseDecrement()`), by weapon id, for the `svc_clientdata` of a client with `cl_lw`. Always
+/// answers true (C returns 1, also for a slot with no player, whose list is then all zero).
+///
+/// QUIRKS kept: the timers are not sent below -0.001 (`Q_max(.., -0.001f)`); fields are reused
+/// for what the client's weapon code reads from them: `m_fInZoom` carries `m_iShotsFired`,
+/// `m_fAimedDamage` carries `m_flLastFire`, `fuser2` and `fuser3` the grenade's `m_flStartThrow`
+/// and `m_flReleaseThrow`, `iuser1` the knife's `m_iSwing`. `m_flPumpTime`, `m_fReloadTime` and
+/// `m_fNextAimBonus` are not sent (0). The `REGAMEDLL_FIXES` clip-size override is not ported.
+pub(crate) fn weapon_data(
+    g: &GameState,
+    slot: u8,
+    out: &mut [cs_proto48::delta::GoldSrcWeaponData; 64],
+) -> bool {
+    use cs_proto48::delta::GoldSrcWeaponData;
+    for entry in out.iter_mut() {
+        *entry = GoldSrcWeaponData::default();
+    }
+    let Some(p) = g.players.get(usize::from(slot)).and_then(Option::as_ref) else {
+        return true;
+    };
+    for item in p.items.iter().flatten() {
+        if !item.behavior.use_decrement() {
+            continue;
+        }
+        let Some(info) = crate::weapons::item_info(item.weapon.id) else {
+            continue;
+        };
+        let id = info.id as i32;
+        let Some(entry) = usize::try_from(id).ok().and_then(|i| out.get_mut(i)) else {
+            continue;
+        };
+        let w = &item.weapon;
+        // `Q_max(x, -0.001f)`.
+        let floor = -0.001_f32;
+        entry.m_i_id = id;
+        entry.m_i_clip = w.clip;
+        entry.m_fl_time_weapon_idle = w.time_weapon_idle.max(floor);
+        entry.m_fl_next_primary_attack = w.next_primary_attack.max(floor);
+        entry.m_fl_next_secondary_attack = w.next_secondary_attack.max(floor);
+        entry.m_fl_next_reload = w.next_reload.max(floor);
+        entry.m_f_in_reload = i32::from(w.in_reload);
+        entry.m_f_in_special_reload = w.in_special_reload;
+        entry.m_f_in_zoom = w.shots_fired;
+        entry.m_f_aimed_damage = w.last_fire;
+        entry.m_i_weapon_state = w.weapon_state;
+        entry.fuser2 = w.start_throw;
+        entry.fuser3 = w.release_throw;
+        entry.iuser1 = w.swing;
+    }
+    true
 }
 
 /// What a player's `client_command` does: `kill`, and the team and menu commands (`ClientCommand_`
