@@ -4,6 +4,7 @@
 //! do not depend on the library's own tables.
 
 use cs_game::weapons::{
+    default_give, weapon_struct,
     AmmoType, ItemInfo, WeaponId, alias_to_weapon_id, ammo_index, ammo_registry, buy_alias_info,
     buy_alias_to_weapon_id, item_info, max_ammo_carry, shared_random_float, shared_random_long,
     weapon_id_to_alias, weapon_info, weapon_info_by_name, weapon_slot,
@@ -400,4 +401,92 @@ fn shared_random_matches_util_cpp() {
     assert_eq!(shared_random_long(42, 0, 99), a);
     // `high == low - 1` is a division by zero in C; here it gives `low`.
     assert_eq!(shared_random_long(3, 5, 4), 5);
+}
+
+/// `g_weaponStruct` (`weapontype.cpp`): id, price, side (`TERRORIST` = 1, `CT` = 2), autobuy
+/// class (`PRIMARY` = 1, `SECONDARY` = 2), ammo price. Typed from the source; the Galil is
+/// $2000 in vanilla.
+const STRUCT_ROWS: [(i32, i32, i32, i32, i32); 25] = [
+    (1, 600, 3, 2, 50),
+    (3, 2750, 3, 1, 80),
+    (5, 3000, 3, 1, 65),
+    (7, 1400, 2, 1, 25),
+    (8, 3500, 1, 1, 60),
+    (10, 800, 2, 2, 20),
+    (11, 750, 3, 2, 50),
+    (12, 1700, 1, 1, 25),
+    (13, 4200, 1, 1, 60),
+    (16, 500, 3, 2, 25),
+    (17, 400, 3, 2, 20),
+    (19, 1500, 3, 1, 20),
+    (18, 4750, 3, 1, 125),
+    (20, 5750, 3, 1, 60),
+    (21, 1700, 3, 1, 65),
+    (22, 3100, 1, 1, 60),
+    (23, 1250, 1, 1, 20),
+    (24, 5000, 2, 1, 80),
+    (26, 650, 3, 2, 40),
+    (27, 3500, 2, 1, 60),
+    (28, 2500, 2, 1, 80),
+    (30, 2350, 3, 1, 50),
+    (15, 2250, 1, 1, 60),
+    (14, 2000, 2, 1, 60),
+    (99, 2200, 1, 1, 0),
+];
+
+#[test]
+fn weapon_struct_matches_weapontype_cpp() {
+    for &(wid, price, side, class, ammo) in &STRUCT_ROWS {
+        let s = weapon_struct(id(wid)).unwrap_or_else(|| panic!("no struct row for {wid}"));
+        assert_eq!(s.price, price, "price of {wid}");
+        assert_eq!(s.side, side, "side of {wid}");
+        assert_eq!(s.class, class, "class of {wid}");
+        assert_eq!(s.ammo_price, ammo, "ammo price of {wid}");
+    }
+    // The C4, the knife, the grenades and the unused Glock are not in the table.
+    for w in [WeaponId::C4, WeaponId::Knife, WeaponId::HeGrenade, WeaponId::Glock, WeaponId::None] {
+        assert!(weapon_struct(w).is_none(), "{w:?}");
+    }
+}
+
+/// `ClipGiveDefault` (`weapontype.h`): id, default give. The knife and the shield have none.
+const GIVE_ROWS: [(i32, i32); 28] = [
+    (1, 13),
+    (17, 20),
+    (3, 10),
+    (4, 1),
+    (5, 7),
+    (6, 1),
+    (7, 30),
+    (8, 30),
+    (9, 1),
+    (10, 30),
+    (11, 20),
+    (12, 25),
+    (13, 30),
+    (14, 35),
+    (15, 25),
+    (16, 12),
+    (18, 10),
+    (19, 30),
+    (20, 100),
+    (21, 8),
+    (22, 30),
+    (23, 30),
+    (24, 20),
+    (25, 1),
+    (26, 7),
+    (27, 30),
+    (28, 30),
+    (30, 50),
+];
+
+#[test]
+fn default_give_matches_clip_give_default() {
+    for &(wid, give) in &GIVE_ROWS {
+        assert_eq!(default_give(id(wid)), Some(give), "give of {wid}");
+    }
+    for w in [WeaponId::Knife, WeaponId::ShieldGun, WeaponId::Glock, WeaponId::None] {
+        assert_eq!(default_give(w), None, "{w:?}");
+    }
 }

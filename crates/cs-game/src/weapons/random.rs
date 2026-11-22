@@ -9,7 +9,7 @@
 //! of the call ([`URandom`]).
 
 /// `seed_table[256]` (`util.cpp`, read 2026-11-22), verbatim.
-pub const SEED_TABLE: [u32; 256] = [
+pub(crate) const SEED_TABLE: [u32; 256] = [
     28985, 27138, 26457, 9451, 17764, 10909, 28790, 8716, 6361, 4853, 17798, 21977, 19643, 20662, 10834, 20103,
     27067, 28634, 18623, 25849, 8576, 26234, 23887, 18228, 32587, 4836, 3306, 1811, 3035, 24559, 18399, 315,
     26766, 907, 24102, 12370, 9674, 2972, 10472, 16492, 22683, 11529, 27968, 30406, 13213, 2319, 23620, 16823,
@@ -30,19 +30,19 @@ pub const SEED_TABLE: [u32; 256] = [
 
 /// The state of `glSeed` for one call: `U_Srand` then `U_Random`.
 #[derive(Debug, Clone, Copy)]
-pub struct URandom {
+pub(crate) struct URandom {
     seed: u32,
 }
 
 impl URandom {
     /// `U_Srand(seed)`: `glSeed = seed_table[seed & 0xFF]`. Only the low byte of the seed counts.
-    pub fn new(seed: u32) -> Self {
+    pub(crate) fn new(seed: u32) -> Self {
         Self { seed: SEED_TABLE[(seed & 0xFF) as usize] }
     }
 
     /// `U_Random()`: `glSeed *= 69069; glSeed += seed_table[glSeed & 0xFF] + 1;` (all `unsigned int`,
     /// wrapping), returns `glSeed & 0xFFFFFFF` (28 bits).
-    pub fn random(&mut self) -> u32 {
+    pub(crate) fn random(&mut self) -> u32 {
         self.seed = self.seed.wrapping_mul(69069);
         self.seed = self
             .seed
