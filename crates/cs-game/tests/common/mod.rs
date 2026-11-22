@@ -158,7 +158,7 @@ impl Bench {
             max_edicts: 256,
             ..ServerConfig::default()
         };
-        Self::with_config(map, cfg, userinfo, send_moves)
+        Self::with_config_and_events(map, cfg, userinfo, send_moves, events)
     }
 
     /// A server of `cfg` on `map` with the probe in the game (`with_probe_moves` with the whole
@@ -168,6 +168,18 @@ impl Bench {
         cfg: ServerConfig,
         userinfo: &[(&str, &str)],
         send_moves: bool,
+    ) -> Self {
+        Self::with_config_and_events(map, cfg, userinfo, send_moves, &[])
+    }
+
+    /// [`with_config`](Self::with_config) with the event scripts `events` precached before the
+    /// game activates.
+    fn with_config_and_events(
+        map: ServerMap,
+        cfg: ServerConfig,
+        userinfo: &[(&str, &str)],
+        send_moves: bool,
+        events: &[&str],
     ) -> Self {
         let rig = Rig {
             game: CsGame::new(),
