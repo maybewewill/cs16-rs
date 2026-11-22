@@ -16,7 +16,7 @@
 [[item]]
 id = "movement_player_move_order"
 status = "tested"
-evidence = "crates/cs-sim/tests/pm_walk.rs::player_move_runs_in_source_order, move_tail_mirrors_ground_flag_and_single_player_friction, texture_lookup_defaults_to_concrete; PM_PlayerMove calls its parts in the source's order (stubs and engine callbacks included), PM_Move mirrors FL_ONGROUND and uses the single-player friction 1. Deviation: the stuck tables are indexed by the player slot modulo 32 (the C code would index out of bounds on a bogus slot)."
+evidence = "crates/cs-sim/tests/pm_walk.rs::player_move_runs_in_source_order, move_tail_mirrors_ground_flag_and_single_player_friction, texture_lookup_defaults_to_concrete; PM_PlayerMove calls its parts in the source's order, PM_Move mirrors FL_ONGROUND and uses the single-player friction 1. Deviation: the stuck tables are indexed by the player slot modulo 32 (the C code would index out of bounds on a bogus slot)."
 
 [[item]]
 id = "movement_check_parameters_roll_punch"
@@ -46,7 +46,7 @@ evidence = "crates/cs-sim/tests/pm_walk.rs::friction_uses_stopspeed_control, edg
 [[item]]
 id = "movement_accelerate_walk_step"
 status = "tested"
-evidence = "crates/cs-sim/tests/pm_walk.rs::ground_acceleration_matches_pm_accelerate, running_converges_to_maxspeed, steps_up_to_stepsize_and_not_higher, walk_move_applies_the_jump_penalty_ratio; crates/cs-game/tests/movement.rs::walking_reaches_250_on_dust2, stairs_are_climbed; PM_Accelerate, PM_WalkMove (the step up to 18 units, the down probe, the fuser2 jump penalty ratio). Accepted deviation: the dead VectorScale rescales of wishvel in PM_WalkMove and PM_AirMove are omitted."
+evidence = "crates/cs-sim/tests/pm_walk.rs::ground_acceleration_matches_pm_accelerate, running_converges_to_maxspeed, steps_up_to_stepsize_and_not_higher, walk_move_applies_the_jump_penalty_ratio; crates/cs-game/tests/movement.rs::walking_reaches_250_on_dust2 (the test sets max_speed to 250 itself; the server's no-item speed is 240, NO_ITEM_MAX_SPEED), stairs_are_climbed; PM_Accelerate, PM_WalkMove (the step up to 18 units, the down probe, the fuser2 jump penalty ratio). Accepted deviation: the dead VectorScale rescales of wishvel in PM_WalkMove and PM_AirMove are omitted."
 
 [[item]]
 id = "movement_air_move"
@@ -61,7 +61,7 @@ evidence = "crates/cs-sim/tests/pm_walk.rs::wall_slide_clips_velocity, fly_move_
 [[item]]
 id = "movement_gravity"
 status = "tested"
-evidence = "crates/cs-sim/tests/pm_walk.rs::falling_uses_half_step_gravity; crates/cs-game/tests/movement.rs::jump_apex_is_45_units; PM_AddCorrectGravity and PM_FixupGravityVelocity (half a step of gravity before and after the move, in double), with sv_gravity from the movevars and the entity gravity."
+evidence = "crates/cs-sim/tests/pm_walk.rs::falling_uses_half_step_gravity; crates/cs-game/tests/movement.rs::jump_apex_is_45_units; PM_AddCorrectGravity (half a step of gravity before the move, with the float constant 0.5f) and PM_FixupGravityVelocity (half a step after the move, with the double constant 0.5), with sv_gravity from the movevars and the entity gravity."
 
 [[item]]
 id = "movement_stuck"
