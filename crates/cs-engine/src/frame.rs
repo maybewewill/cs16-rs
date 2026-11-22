@@ -7,6 +7,7 @@ use cs_proto48::bitbuf::MsgWriter;
 use std::sync::Arc;
 
 use cs_proto48::delta::{DeltaRecord, GoldSrcEntityState, GoldSrcWeaponData};
+use cs_proto48::event::write_svc_event;
 use cs_proto48::messages::{
     WeaponDelta, WeaponRecords, entity_schema_name, weapon_records, wire_entity_type,
     write_svc_choke, write_svc_clientdata_with_weapons, write_svc_packetentities_delta, write_svc_packetentities_full, write_svc_time,
@@ -251,6 +252,8 @@ impl<G: GameDll> Server<G> {
             }
             let can_send = self.real_time >= client.clear_time;
             let packet = if client.state != ClientState::Active {
+                // A client that is not in the game is sent no events, and keeps none.
+                self.outbox.events[index].clear();
                 can_send.then(|| self.build_signon_packet(slot))
             } else if self.real_time < client.next_update_at {
                 None
@@ -385,13 +388,24 @@ impl<G: GameDll> Server<G> {
             ),
         }
 
+        // `SV_EmitEvents` (ReHLDS `rehlds/engine/sv_main.cpp`, read 2026-11-22): the events
+        // queued for the client follow the packet entities. The queue is emptied whether or not
+        // the datagram goes out, as there.
+        let mut event_block = MsgWriter::new();
+        let numbers: Vec<u16> = entities.iter().map(|s| s.number).collect();
+        let wire_events = self.outbox.events[index].take_wire_events(&numbers);
+        if let Some(schema) = self.deltas.get("event_t") {
+            write_svc_event(&mut event_block, schema, &wire_events, self.sv_time);
+        }
+
         let reliable_len = client.chan.next_packet_reliable_len();
         let budget = MAX_DATAGRAM.min(MAX_UDP_PACKET.saturating_sub(reliable_len));
         let mut payload = payload.into_bytes();
         let queued = std::mem::take(&mut client.unreliable);
-        let with_entities = payload.len() + block.len() <= budget;
+        let with_entities = payload.len() + block.len() + event_block.len() <= budget;
         if with_entities {
             payload.extend_from_slice(block.as_slice());
+            payload.extend_from_slice(event_block.as_slice());
             if payload.len() + queued.len() <= budget {
                 payload.extend_from_slice(&queued);
             } else if !queued.is_empty() {

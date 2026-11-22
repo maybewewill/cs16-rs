@@ -43,6 +43,11 @@ pub(crate) struct Outbox {
     /// The map the game asked to change to (`EngineApi::change_level`); the server's owner takes
     /// it between frames (`Server::take_pending_change_level`).
     pub(crate) change_level: Option<String>,
+    /// The events queued for each client, waiting for its next update (see `events.rs`).
+    pub(crate) events: Vec<crate::events::EventQueue>,
+    /// The `event_t` delta schema `svc_event_reliable` is encoded with; `None` where the
+    /// server has not set it (a reliable event is then not sent).
+    pub(crate) event_schema: Option<cs_proto48::delta::DeltaSchema>,
 }
 
 impl Outbox {
@@ -58,7 +63,15 @@ impl Outbox {
             light_styles: default_light_styles(),
             dropped: 0,
             change_level: None,
+            events: vec![crate::events::EventQueue::default(); slots],
+            event_schema: None,
         }
+    }
+
+    /// `self` with the `event_t` schema reliable events are encoded with.
+    pub(crate) fn with_event_schema(mut self, schema: Option<cs_proto48::delta::DeltaSchema>) -> Self {
+        self.event_schema = schema;
+        self
     }
 
     /// Appends `bytes` to the reliable buffer of `slot`, unless it already holds more than

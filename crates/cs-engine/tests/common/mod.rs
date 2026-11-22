@@ -322,6 +322,8 @@ pub struct TestGame {
 
     /// Sounds `server_activate` precaches.
     pub precache_sounds: Vec<String>,
+    /// Event scripts `server_activate` precaches, in order.
+    pub precache_events: Vec<String>,
     /// `(destination, bytes)` sent by `server_activate`, in order.
     pub activate_sends: Vec<(MsgDest, Vec<u8>)>,
     /// `(destination, bytes)` sent by `spawn_entity` for every entity of class
@@ -408,6 +410,9 @@ impl GameDll for TestGame {
             .expect("precache before lock");
         for sound in &self.precache_sounds {
             eng.precache_sound(sound).expect("precache before lock");
+        }
+        for event in &self.precache_events {
+            assert_ne!(eng.precache_event(event), 0, "precache before lock");
         }
         for (dest, bytes) in &self.activate_sends {
             eng.send(*dest, bytes);

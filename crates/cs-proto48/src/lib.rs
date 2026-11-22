@@ -6,6 +6,7 @@ pub mod bitbuf;
 pub mod compress;
 pub mod crypto;
 pub mod delta;
+pub mod event;
 pub mod handshake;
 pub mod info;
 pub mod messages;

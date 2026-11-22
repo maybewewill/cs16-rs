@@ -82,6 +82,11 @@ pub enum MsgDest {
     Init,
 }
 
+/// `client_t::lw` of a client view in use: the one `cl_lw` reader, [`crate::unlag::userinfo_lw`].
+pub(crate) fn lw_of(view: &crate::game::ClientView) -> bool {
+    view.in_use && crate::unlag::userinfo_lw(&view.userinfo)
+}
+
 /// `text` cut at its first NUL byte and then to [`MAX_MESSAGE_TEXT`] bytes on a character
 /// boundary.
 fn clip_text(text: &str) -> &str {

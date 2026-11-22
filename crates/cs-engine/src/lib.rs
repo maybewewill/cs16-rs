@@ -7,6 +7,7 @@ pub mod collision;
 mod connect;
 pub mod console;
 pub mod edict;
+pub mod events;
 pub mod frame;
 pub mod game;
 mod lifecycle;
@@ -36,6 +37,7 @@ pub use console::{ConsoleOutcome, MAX_CONSOLE_LINE, valid_map_name};
 pub use edict::{
     DEFAULT_MAX_EDICTS, EDICT_REUSE_DELAY, Edict, EdictId, EdictPool, EntVars, MAX_EDICTS_WIRE,
 };
+pub use events::{MAX_EVENT_QUEUE, event_flags};
 pub use frame::{
     ClientFrame, FramePlayer, FrameRing, MAX_DATAGRAM, MAX_PACKET_ENTITIES, UPDATE_BACKUP, clamp_rate,
     update_interval,

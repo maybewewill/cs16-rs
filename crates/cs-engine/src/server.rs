@@ -189,7 +189,7 @@ impl<G: GameDll> Server<G> {
         }
         let slots = usize::from(cfg.max_clients);
         let mut server = Self {
-            outbox: Outbox::new(cfg.max_clients),
+            outbox: Outbox::new(cfg.max_clients).with_event_schema(deltas.get("event_t").cloned()),
             views: (0..slots).map(|_| ClientView::default()).collect(),
             clients: (0..slots).map(|_| Client::free()).collect(),
             cfg,

@@ -392,6 +392,14 @@ pub enum SvcMessage {
         name: String,
         decoded: CsUserMsg,
     },
+    /// `svc_event`: the events of one update.
+    Event(Vec<crate::event::WireEvent>),
+    /// `svc_event_reliable`: one event, with its delay in hundredths of a second.
+    EventReliable {
+        index: u16,
+        args: crate::event::EventArgs,
+        fire_time: Option<u16>,
+    },
     Ignored(u8),
 }
 
@@ -439,6 +447,8 @@ impl SvcMessage {
             SvcMessage::SendCvarValue(_) => svc::SENDCVARVALUE,
             SvcMessage::SendCvarValue2 { .. } => svc::SENDCVARVALUE2,
             SvcMessage::UserMsg { id, .. } => *id,
+            SvcMessage::Event(_) => svc::EVENT,
+            SvcMessage::EventReliable { .. } => svc::EVENT_RELIABLE,
             SvcMessage::Ignored(op) => *op,
         }
     }
@@ -522,28 +532,13 @@ fn parse_one_svc(
         svc::DISCONNECT => Ok(SvcMessage::Disconnect(r.read_str()?)),
         svc::EVENT => {
             r.start_bit_reading();
-            let count = r.read_bits(5);
-            let ev_schema = ctx.deltas.get("event_t").cloned();
-            let ev_zero = ev_schema.as_ref().map(DeltaSchema::zero_record);
-            for _ in 0..count {
-                let _index = r.read_bits(10);
-                let has_packet_idx = r.read_one_bit();
-                if has_packet_idx {
-                    let _pkt_idx = r.read_bits(11);
-                    let has_delta = r.read_one_bit();
-                    if has_delta
-                        && let (Some(schema), Some(zero)) = (ev_schema.as_ref(), ev_zero.as_ref())
-                    {
-                        let _ = read_delta(r, schema, zero, ctx.server_time)?;
-                    }
-                }
-                let has_fire_time = r.read_one_bit();
-                if has_fire_time {
-                    let _ = r.read_bits(16);
-                }
-            }
+            let events = crate::event::read_svc_event(
+                r,
+                ctx.deltas.get("event_t"),
+                ctx.server_time,
+            )?;
             r.end_bit_reading()?;
-            Ok(SvcMessage::Ignored(op))
+            Ok(SvcMessage::Event(events))
         }
         svc::VERSION => Ok(SvcMessage::Version(r.read_u32()?)),
         svc::SETVIEW => Ok(SvcMessage::SetView(r.read_u16()?)),
@@ -740,16 +735,17 @@ fn parse_one_svc(
         }
         svc::EVENT_RELIABLE => {
             r.start_bit_reading();
-            let _index = r.read_bits(10);
-            if let Some(ev_schema) = ctx.deltas.get("event_t").cloned() {
-                let zero = ev_schema.zero_record();
-                let _ = read_delta(r, &ev_schema, &zero, ctx.server_time)?;
-            }
-            if r.read_one_bit() {
-                let _ = r.read_bits(16);
-            }
+            let (index, args, fire_time) = crate::event::read_svc_event_reliable(
+                r,
+                ctx.deltas.get("event_t"),
+                ctx.server_time,
+            )?;
             r.end_bit_reading()?;
-            Ok(SvcMessage::Ignored(op))
+            Ok(SvcMessage::EventReliable {
+                index,
+                args,
+                fire_time,
+            })
         }
         svc::SPAWNBASELINE => {
             let ent_schema = ctx

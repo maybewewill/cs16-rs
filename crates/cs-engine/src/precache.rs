@@ -8,6 +8,8 @@ use cs_proto48::messages::ResourceEntry;
 pub const MAX_MODELS: usize = 512;
 pub const MAX_SOUNDS: usize = 512;
 pub const MAX_GENERIC: usize = 512;
+/// `MAX_EVENTS` (`rehlds/common/qlimits.h`, read 2026-11-22): event indices are `1..256`.
+pub const MAX_EVENTS: usize = 256;
 
 /// Resource types of `svc_resourcelist`.
 pub mod res_type {
@@ -32,6 +34,7 @@ pub struct PrecacheTables {
     models: Table,
     sounds: Table,
     generic: Table,
+    events: Table,
     locked: bool,
 }
 
@@ -52,6 +55,7 @@ impl PrecacheTables {
             models,
             sounds: Table::new("sound", MAX_SOUNDS),
             generic: Table::new("generic", MAX_GENERIC),
+            events: Table::new("event", MAX_EVENTS),
             locked: false,
         }
     }
@@ -68,6 +72,23 @@ impl PrecacheTables {
         self.generic.insert(name, self.locked)
     }
 
+    /// `EV_Precache_internal` (ReHLDS `rehlds/engine/pr_cmds.cpp`, read 2026-11-22): the
+    /// 1-based index of the event script `name` (`events/ak47.sc`, case-insensitive), a new one
+    /// taking the next free index (at most 255). Not ported: it loads the script file and
+    /// stops the server when it is missing; the file is the game directory's business here.
+    pub fn precache_event(&mut self, name: &str) -> Result<u16, PrecacheError> {
+        self.events.insert(name, self.locked)
+    }
+
+    /// Whether `index` names a precached event (`g_psv.event_precache[index].pszScript`).
+    pub fn event_exists(&self, index: u16) -> bool {
+        index >= 1 && usize::from(index) < self.events.names.len()
+    }
+
+    pub fn event_index(&self, name: &str) -> Option<u16> {
+        self.events.index(name)
+    }
+
     pub fn model_index(&self, name: &str) -> Option<u16> {
         self.models.index(name)
     }
@@ -82,8 +103,9 @@ impl PrecacheTables {
         self.locked = true;
     }
 
-    /// Sounds, then models, then generic files, each in index order without
-    /// the empty entry 0. Submodel names (`*N`) get size 0; every other name
+    /// Sounds, then models, then generic files, then the event scripts (type
+    /// [`res_type::EVENTSCRIPT`], flag `RES_FATALIFMISSING`, in `SV_CreateResourceList` order
+    /// last, after the decals), each in index order without the empty entry 0. Submodel names (`*N`) get size 0; every other name
     /// gets `size_of(name)`. Order is a working assumption about HLDS.
     pub fn resource_list(&self, size_of: &dyn Fn(&str) -> u32) -> Vec<ResourceEntry> {
         [
@@ -112,9 +134,22 @@ impl PrecacheTables {
                     md5: None,
                 })
         })
+        .chain(self.events.names.iter().enumerate().skip(1).map(|(index, name)| ResourceEntry {
+            res_type: res_type::EVENTSCRIPT,
+            filename: name.clone(),
+            // Lossless: the table never holds more than 256 names.
+            index: index as u16,
+            download_size: size_of(name),
+            flags: RES_FATALIFMISSING,
+            md5: None,
+        }))
         .collect()
     }
 }
+
+/// `RES_FATALIFMISSING` (`rehlds/common/resource.h`): the client stops when it cannot load the
+/// resource. Assumption: the value (1 << 0) is from memory.
+const RES_FATALIFMISSING: u8 = 1;
 
 /// One precache table. Index 0 is the empty name.
 struct Table {
