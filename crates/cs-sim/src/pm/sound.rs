@@ -118,7 +118,8 @@ pub(crate) fn pm_play_step_sound(c: &mut PmCtx<'_>, step: i32, fvol: f32) {
         return;
     }
 
-    let mut irand = c.w.random_long(0, 1) + c.pm.i_step_left * 2;
+    // Wrapping like the C `int` arithmetic: a hostile RNG value must not panic in debug.
+    let mut irand = c.w.random_long(0, 1).wrapping_add(c.pm.i_step_left.wrapping_mul(2));
 
     // FIXME mp_footsteps needs to be a movevar
     if c.pm.multiplayer && !c.pm.movevars.footsteps {

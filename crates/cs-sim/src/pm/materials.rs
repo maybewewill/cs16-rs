@@ -25,9 +25,10 @@ fn is_space(b: u8) -> bool {
 }
 
 /// `memfgets` of the engine: the next line of `file` starting at `*pos`, newline included, at most
-/// `buffer_size - 1` bytes; `None` at the end of the file. Assumption: the engine's `memfgets`
-/// (not among the fetched sources) is the usual HL one: stop after the first `\n` or when the
-/// buffer is full, advance the position by what was copied, return NULL when nothing was copied.
+/// `buffer_size - 1` bytes; `None` at the end of the file. Ported from ReHLDS
+/// `rehlds/engine/tmessage.cpp` `memfgets`, lines 62-100, read 2026-11-22 (verified equivalent):
+/// stop after the first `\n` or when the buffer is full, advance the position by what was copied,
+/// return NULL when nothing was copied.
 fn memfgets<'a>(file: &'a [u8], pos: &mut usize, buffer_size: usize) -> Option<&'a [u8]> {
     let start = *pos;
     if start >= file.len() {

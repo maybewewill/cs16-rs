@@ -110,6 +110,48 @@ fn materials_parse_like_pm_init_texture_types() {
 }
 
 #[test]
+fn materials_parse_hostile_bytes() {
+    // Embedded NUL: the line is a C string and ends there. "M AB\0CD\n" has a NUL right after
+    // "AB" so the name run hits the terminator and the line is skipped.
+    let t = TextureTable::parse(b"M AB\0CD\nD OK\n");
+    assert_eq!(t.len(), 1);
+    assert_eq!(t.find("OK"), b'D');
+    assert_eq!(t.find("AB"), b'C');
+
+    // 0xFF is neither a letter nor a space: a line starting with it is skipped; inside a name it
+    // is an ordinary byte (the lookup string is lossy UTF-8, so only a pure-ASCII name is checked).
+    let t = TextureTable::parse(b"\xffM SKIP\nM A\xffB\nT PLAIN\n");
+    assert_eq!(t.len(), 2);
+    assert_eq!(t.find("PLAIN"), b'T');
+
+    // A lone '\r' is whitespace but not a line break: both entries sit on one line, the second
+    // is never read as a type.
+    let t = TextureTable::parse(b"M ONE\rD TWO\nV THREE\n");
+    assert_eq!(t.len(), 2);
+    assert_eq!(t.find("ONE"), b'M');
+    assert_eq!(t.find("TWO"), b'C');
+    assert_eq!(t.find("THREE"), b'V');
+
+    // Lines of exactly 510 and 511 bytes (newline included). 510 fits one chunk: the name is
+    // followed by '\n' and is kept. 511 splits: the first 510 bytes end inside the name
+    // (skipped), the tail is a lone "\n", a blank line.
+    let mut f = b"M ".to_vec();
+    f.extend(std::iter::repeat_n(b'x', 507));
+    f.push(b'\n'); // 2 + 507 + 1 = 510 bytes
+    let t = TextureTable::parse(&f);
+    assert_eq!(t.len(), 1);
+    assert_eq!(t.find("xxxxxxxxxxxxxxxx"), b'M');
+
+    let mut f = b"M ".to_vec();
+    f.extend(std::iter::repeat_n(b'x', 508));
+    f.push(b'\n'); // 511 bytes
+    f.extend(b"D NEXT\n");
+    let t = TextureTable::parse(&f);
+    assert_eq!(t.len(), 1);
+    assert_eq!(t.find("NEXT"), b'D');
+}
+
+#[test]
 fn texture_prefixes_are_stripped() {
     // (texture name the world reports, name PM keeps)
     for (raw, kept) in [
