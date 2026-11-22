@@ -2,8 +2,8 @@
 //! the shared random generator ([`random`]) that both the server and the client's prediction
 //! use, the state of a weapon and its behaviour trait ([`weapon`]), the state machine that runs
 //! them ([`core`]: `ItemPostFrame`, `DefaultDeploy`, `DefaultReload`, ...) and the weapons
-//! themselves, each a placeholder until its task ports it ([`pistols`], [`smgs`], [`rifles`],
-//! [`snipers`], [`shotguns`], [`knife`], [`grenades`]).
+//! themselves ([`pistols`], [`smgs`], [`rifles`], [`snipers`], [`shotguns`], [`knife`],
+//! [`grenades`]; only the C4 in [`grenades`] is still a stub).
 
 pub mod core;
 pub mod grenades;

@@ -10,22 +10,21 @@
 //! the engine's table at the shot and `m_iShellId` is set at the deploy (see
 //! [`super::snipers`]).
 //!
-//! Limit of the core, not of the source: `CM3::PlayEmptySound` and
-//! `CXM1014::PlayEmptySound` are virtual overrides that clear `m_iPlayEmptySound` after the
-//! base click. The weapons call their own version ([`play_empty_sound`]); the underwater click
-//! of [`super::core::item_post_frame`] calls the base one.
+//! `CM3::PlayEmptySound` and `CXM1014::PlayEmptySound` are virtual overrides that clear
+//! `m_iPlayEmptySound` after the base click: both weapons implement
+//! [`WeaponBehavior::play_empty_sound`], which the underwater click of
+//! [`super::core::item_post_frame`] calls as well.
 
 use cs_engine::EngineApi;
 use cs_engine::event_flags::FEV_NOTHOST;
 use glam::Vec3;
 
-use super::core::{PlayerAnim, WeaponCtx};
+use super::core::{
+    PlayerAnim, WeaponCtx, gun_position, muzzle_flash, precache_model, precache_sound, punch,
+};
 use super::info::{BulletType, WeaponId};
 use super::random::shared_random_long;
-use super::snipers::{
-    event_index, gun_position, muzzle_flash, precache_model, precache_sound, punch, set_punch,
-    set_shell, view_forward,
-};
+use super::snipers::{event_index, set_punch, set_shell, view_forward};
 use super::weapon::WeaponBehavior;
 
 /// `FL_ONGROUND`.
@@ -56,9 +55,10 @@ const XM1014_PUMP: i32 = 4;
 const XM1014_START_RELOAD: i32 = 5;
 const XM1014_DRAW: i32 = 6;
 
-/// `CM3::PlayEmptySound` and `CXM1014::PlayEmptySound`: the base click, then
-/// `m_iPlayEmptySound = 0` (so the click is not repeated until the idle allows it again).
-fn play_empty_sound(w: &mut WeaponCtx<'_, '_>) -> bool {
+/// `CM3::PlayEmptySound` and `CXM1014::PlayEmptySound` (`wpn_m3.cpp` 65-70, `wpn_xm1014.cpp`
+/// 63-68, read 2026-11-22): the base click, then `m_iPlayEmptySound = 0` (so the click is not
+/// repeated until the idle allows it again).
+fn shotgun_empty_sound(w: &mut WeaponCtx<'_, '_>) -> bool {
     let result = w.play_empty_sound();
     w.weapon.play_empty_sound = false;
     result
@@ -69,7 +69,7 @@ fn play_empty_sound(w: &mut WeaponCtx<'_, '_>) -> bool {
 fn empty_primary(me: &mut dyn WeaponBehavior, w: &mut WeaponCtx<'_, '_>) {
     me.reload(w);
     if w.weapon.clip == 0 {
-        play_empty_sound(w);
+        me.play_empty_sound(w);
     }
     w.weapon.next_primary_attack = w.get_next_attack_delay(1.0);
 }
@@ -126,6 +126,10 @@ pub struct M3;
 impl WeaponBehavior for M3 {
     fn id(&self) -> WeaponId {
         WeaponId::M3
+    }
+
+    fn play_empty_sound(&mut self, w: &mut WeaponCtx<'_, '_>) -> bool {
+        shotgun_empty_sound(w)
     }
 
     /// `CM3::Precache`.
@@ -218,6 +222,10 @@ pub struct Xm1014;
 impl WeaponBehavior for Xm1014 {
     fn id(&self) -> WeaponId {
         WeaponId::Xm1014
+    }
+
+    fn play_empty_sound(&mut self, w: &mut WeaponCtx<'_, '_>) -> bool {
+        shotgun_empty_sound(w)
     }
 
     /// `CXM1014::Precache`.

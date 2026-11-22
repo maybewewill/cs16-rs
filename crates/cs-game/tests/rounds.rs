@@ -12,7 +12,9 @@ use cs_game::CsGame;
 use cs_game::player::{DEAD_NO, Player, Team};
 use cs_game::rules::{Rules, WinStatus};
 use cs_game::teams::JoinState;
+use cs_game::weapons::{WeaponId, ammo_index, new_weapon};
 use cs_proto48::delta::GoldSrcUserCmd;
+use cs_proto48::messages::SvcMessage;
 use cs_proto48::usermsg::CsUserMsg;
 use cs_vfs::Vfs;
 
@@ -824,4 +826,66 @@ fn listmaps_lists_the_cycle_with_no_votes() {
     b.step(frames(0.5));
     command(&mut b, 0, "listmaps");
     assert_eq!(texts(&b, 2, "#Votes").len(), 6);
+}
+
+#[test]
+fn restart_round_resets_the_decals() {
+    // `CleanUpMap` ends with `PLAYBACK_EVENT(FEV_GLOBAL | FEV_RELIABLE, 0, m_usResetDecals)`
+    // (multiplay_gamerules.cpp 685): every client gets `events/decal_reset.sc` on its reliable
+    // stream when a round restarts, once, and not before.
+    let mut b = match_under_way(3, &[0], &[1]);
+    let event = b.run(|_, eng| eng.precache_event("events/decal_reset.sc"));
+    assert_ne!(event, 0, "ClientPrecache precaches the decal reset");
+    let resets = |b: &Bench| {
+        b.probe
+            .messages()
+            .iter()
+            .filter(|m| matches!(m, SvcMessage::EventReliable { index, .. } if *index == event))
+            .count()
+    };
+    b.probe.clear_messages();
+    b.step(frames(1.0));
+    assert_eq!(resets(&b), 0, "nothing restarts mid-round");
+
+    b.run(|_, eng| eng.set_cvar("sv_restartround", "1"));
+    b.step(frames(3.0));
+    assert_eq!(resets(&b), 1, "the restart wipes the decals once");
+}
+
+#[test]
+fn spectating_in_the_freeze_period_gives_up_the_inventory() {
+    // `HandleMenu_ChooseTeam` (client.cpp 1925-1938): after the suicide, `RemoveAllItems(TRUE)`:
+    // the weapons, the ammo and the suit go, and the client is told `CurWeapon 0 0 0`.
+    let mut b = match_under_way(3, &[1], &[0]);
+    b.run(|game, eng| {
+        assert!(game.give_weapon(eng, 0, new_weapon(WeaponId::Ak47).unwrap(), 30, 90));
+        assert!(game.select_weapon(eng, 0, WeaponId::Ak47));
+    });
+    assert!(b.server.game().game.carried_weapons(0).contains(&WeaponId::Ak47));
+    let before = b.run(|game, eng| game.update_client_data(eng, 0).weapons);
+    assert_ne!(before & (1 << WeaponId::Ak47 as u32), 0, "the AK is in `pev->weapons`");
+
+    b.probe.clear_messages();
+    command(&mut b, 0, "jointeam 6");
+    b.step(3);
+    assert_eq!(player(&b, 0).team, Team::Spectator);
+    assert!(b.server.game().game.carried_weapons(0).is_empty(), "no weapon is kept");
+    let ammo = b.server.game().game.player_ammo(0, ammo_index("762Nato") as usize);
+    assert_eq!(ammo, Some(0), "no ammo is kept");
+    let after = b.run(|game, eng| game.update_client_data(eng, 0).weapons);
+    assert_eq!(after, 0, "`pev->weapons` is empty, the suit's bit too");
+    let weapon_messages: Vec<_> = b
+        .messages()
+        .into_iter()
+        .filter_map(|m| match m {
+            CsUserMsg::CurWeapon { is_active, weapon_id, clip_ammo } => {
+                Some((is_active, weapon_id, clip_ammo))
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        weapon_messages.contains(&(false, 0, 0)),
+        "`CurWeapon 0 0 0` of RemoveAllItems: {weapon_messages:?}"
+    );
 }

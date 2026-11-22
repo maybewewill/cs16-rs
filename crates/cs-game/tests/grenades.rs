@@ -11,7 +11,7 @@
 mod common;
 
 use common::{Bench, spawns};
-use cs_engine::consts::{FL_ONGROUND, MOVETYPE_BOUNCE, SOLID_BBOX};
+use cs_engine::consts::{EF_NODRAW, FL_ONGROUND, MOVETYPE_BOUNCE, SOLID_BBOX};
 use cs_engine::{EngineApi, GameDll};
 use cs_game::CsGame;
 use cs_game::player::{Team, dmg};
@@ -22,8 +22,6 @@ use cs_proto48::usermsg::CsUserMsg;
 use glam::Vec3;
 
 const IN_ATTACK: u16 = 1 << 0;
-/// `EF_NODRAW`.
-const EF_NODRAW: u32 = 128;
 
 fn approx(a: f32, b: f32, tolerance: f32) -> bool {
     (a - b).abs() <= tolerance

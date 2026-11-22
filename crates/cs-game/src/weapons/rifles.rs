@@ -21,17 +21,14 @@
 use cs_engine::EngineApi;
 use cs_engine::event_flags::FEV_NOTHOST;
 
-use super::core::{PlayerAnim, TAB_556NATO, WeaponCtx};
+use super::core::{DEFAULT_FOV, PlayerAnim, TAB_556NATO, WeaponCtx, muzzle_flash, punch};
 use super::info::{BulletType, WPNSTATE_FAMAS_BURST_MODE, WPNSTATE_M4A1_SILENCED, WeaponId};
 use super::smgs::{
-    accuracy_cubed, aim, event_index, f32_of, fire_on_empty, int_x100, kick, muzzle_flash, punch,
-    stance, weapon_idle,
+    accuracy_cubed, aim, event_index, f32_of, fire_on_empty, int_x100, kick, stance, weapon_idle,
 };
 use super::weapon::{Weapon, WeaponBehavior};
 use crate::chat::{HUD_PRINTCENTER, client_print};
 
-/// `DEFAULT_FOV`.
-const DEFAULT_FOV: u8 = 90;
 /// The scope of the AUG and the SG552.
 const ZOOM_FOV: u8 = 55;
 

@@ -12,6 +12,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use common::{run_cmd, spawns};
+use cs_engine::consts::EF_MUZZLEFLASH;
 use cs_cvar::CVarRegistry;
 use cs_engine::{EngineApi, GameDll, Server, ServerConfig, ServerMap};
 use cs_game::CsGame;
@@ -31,7 +32,6 @@ const IN_ATTACK2: u16 = 1 << 11;
 const WPNSTATE_USP_SILENCED: i32 = 1 << 0;
 const WPNSTATE_GLOCK18_BURST_MODE: i32 = 1 << 1;
 const WPNSTATE_ELITE_LEFT: i32 = 1 << 3;
-const EF_MUZZLEFLASH: u32 = 2;
 
 type Action = Box<dyn FnOnce(&mut CsGame, &mut EngineApi<'_>)>;
 

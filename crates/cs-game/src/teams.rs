@@ -603,6 +603,9 @@ fn choose_spectator(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) -> boo
             p.frags += 1;
         }
     }
+    // `pPlayer->RemoveAllItems(TRUE)` (client.cpp 1938, read 2026-11-22): a spectator keeps
+    // no weapon, no ammo and no suit. (`m_bHasC4 = false` after it is already part of it.)
+    crate::inventory::remove_all_items(g, eng, slot, true);
     let Some(p) = g.players[usize::from(slot)].as_mut() else {
         return false;
     };

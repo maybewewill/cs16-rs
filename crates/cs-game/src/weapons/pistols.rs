@@ -41,17 +41,17 @@ use cs_engine::event_flags::FEV_NOTHOST;
 use cs_sim::pm::math::angle_vectors;
 use glam::Vec3;
 
-use super::core::{GLOCK18_DAMAGE, PlayerAnim, TAB_9MM, WeaponCtx};
+use super::core::{
+    GLOCK18_DAMAGE, PlayerAnim, TAB_9MM, TAB_45ACP, TAB_50AE, TAB_57MM, TAB_357SIG, WeaponCtx,
+    gun_position, muzzle_flash, precache_model, precache_sound, punch, reset_player_shield_anim,
+    set_player_shield_anim, shield_secondary_fire,
+};
 use super::info::{
     BulletType, WPNSTATE_ELITE_LEFT, WPNSTATE_GLOCK18_BURST_MODE, WPNSTATE_SHIELD_DRAWN,
     WPNSTATE_USP_SILENCED, WeaponId,
 };
 use super::weapon::{Weapon, WeaponBehavior};
 use crate::chat::{HUD_PRINTCENTER, client_print};
-use crate::player::HIDEHUD_CROSSHAIR;
-
-/// `EF_MUZZLEFLASH`.
-const EF_MUZZLEFLASH: u32 = 2;
 
 /// The `K` of each pistol's spread, `[in the air, moving, ducking, standing]` (the literals of
 /// the `PrimaryAttack` of each source file).
@@ -63,14 +63,6 @@ const P228_K: [f64; 4] = [1.5, 0.255, 0.075, 0.15];
 const DEAGLE_K: [f64; 4] = [1.5, 0.25, 0.115, 0.13];
 const FIVESEVEN_K: [f64; 4] = [1.5, 0.255, 0.075, 0.15];
 const ELITE_K: [f64; 4] = [1.3, 0.175, 0.08, 0.1];
-
-/// The indices of the legacy ammo counters in [`crate::player::Player::tabulated_ammo`]
-/// (`ammo_9mm`, `ammo_45acp`, `ammo_50ae`, `ammo_57mm`, `ammo_357sig`; the order of
-/// [`super::core::TABULATED_AMMO`]).
-const TAB_45ACP: usize = 5;
-const TAB_50AE: usize = 6;
-const TAB_57MM: usize = 8;
-const TAB_357SIG: usize = 9;
 
 /// The animations of the shield variants, the same sequence numbers in every pistol's
 /// `*_shield_e` enum (`weapons.h`).
@@ -165,86 +157,6 @@ pub const ELITE_RANGE_MODIFIER: f32 = 0.75;
 /// `ELITE_RELOAD_TIME`.
 pub const ELITE_RELOAD_TIME: f32 = 4.5;
 
-/// `PRECACHE_MODEL`: a refused name is logged and the game goes on (the source would stop).
-fn precache_model(eng: &mut EngineApi<'_>, name: &str) {
-    if let Err(err) = eng.precache_model(name) {
-        tracing::warn!(name, ?err, "pistol model not precached");
-    }
-}
-
-/// `PRECACHE_SOUND`.
-fn precache_sound(eng: &mut EngineApi<'_>, name: &str) {
-    if let Err(err) = eng.precache_sound(name) {
-        tracing::warn!(name, ?err, "pistol sound not precached");
-    }
-}
-
-/// `m_pPlayer->HasShield()`'s `UpdateShieldCrosshair(draw)` (`player.cpp` 8799): the crosshair
-/// is hidden while the shield is up.
-fn update_shield_crosshair(w: &mut WeaponCtx<'_, '_>, draw: bool) {
-    let p = w.player_mut();
-    if draw {
-        p.hide_hud &= !HIDEHUD_CROSSHAIR;
-    } else {
-        p.hide_hud |= HIDEHUD_CROSSHAIR;
-    }
-}
-
-/// `CBasePlayerWeapon::SetPlayerShieldAnim` (`weapons.cpp` 656): a shield bearer's third-person
-/// animation set while shooting.
-fn set_player_shield_anim(w: &mut WeaponCtx<'_, '_>) {
-    if !w.has_shield() {
-        return;
-    }
-    let ext = if w.weapon.weapon_state & WPNSTATE_SHIELD_DRAWN != 0 { "shield" } else { "shieldgun" };
-    w.player_mut().anim_extension = ext.to_string();
-}
-
-/// `CBasePlayerWeapon::ResetPlayerShieldAnim` (`weapons.cpp` 671): with the shield up the
-/// animation set goes back to "shieldgun". (The `shielded` set is only set by
-/// [`shield_secondary_fire`].)
-fn reset_player_shield_anim(w: &mut WeaponCtx<'_, '_>) {
-    if w.has_shield() && w.weapon.weapon_state & WPNSTATE_SHIELD_DRAWN != 0 {
-        w.player_mut().anim_extension = "shieldgun".to_string();
-    }
-}
-
-/// `CBasePlayerWeapon::ShieldSecondaryFire` (`weapons.cpp` 699): false without a shield. Else
-/// lowers or raises the shield (the animation, the animation set, the speed 250 or 180, the
-/// player's `m_bShieldDrawn`), shows or hides the crosshair, resets the player's speed and holds
-/// everything for 0.4 s (the idle 0.6 s). QUIRK: these are not `UTIL_WeaponTimeBase() +` sums,
-/// they are plain assignments (the same thing with `CLIENT_WEAPONS`).
-fn shield_secondary_fire(
-    me: &dyn WeaponBehavior,
-    w: &mut WeaponCtx<'_, '_>,
-    up_anim: i32,
-    down_anim: i32,
-) -> bool {
-    if !w.has_shield() {
-        return false;
-    }
-    if w.weapon.weapon_state & WPNSTATE_SHIELD_DRAWN != 0 {
-        w.weapon.weapon_state &= !WPNSTATE_SHIELD_DRAWN;
-        w.send_weapon_anim(down_anim, me.use_decrement());
-        w.player_mut().anim_extension = "shieldgun".to_string();
-        w.weapon.max_speed = 250.0;
-        w.player_mut().shield_drawn = false;
-    } else {
-        w.weapon.weapon_state |= WPNSTATE_SHIELD_DRAWN;
-        w.send_weapon_anim(up_anim, me.use_decrement());
-        w.player_mut().anim_extension = "shielded".to_string();
-        w.weapon.max_speed = 180.0;
-        w.player_mut().shield_drawn = true;
-    }
-    let drawn = w.weapon.weapon_state & WPNSTATE_SHIELD_DRAWN == WPNSTATE_SHIELD_DRAWN;
-    update_shield_crosshair(w, !drawn);
-    w.reset_max_speed(me);
-    w.weapon.next_secondary_attack = 0.4;
-    w.weapon.next_primary_attack = 0.4;
-    w.weapon.time_weapon_idle = 0.6;
-    true
-}
-
 /// The spread of the shot (`K * (1 - m_flAccuracy)`, the call's first argument) for the state
 /// of the player: `[in the air, moving, ducking, standing]`, the `K` of each. `1 - m_flAccuracy`
 /// is a float (an int minus a float), the `K` a double literal, and the product is cut to
@@ -295,28 +207,10 @@ fn fire_on_empty(w: &mut WeaponCtx<'_, '_>) -> bool {
     true
 }
 
-/// `m_pPlayer->GetGunPosition()`: the eye.
-fn gun_position(w: &WeaponCtx<'_, '_>) -> Vec3 {
-    w.eng.ent(w.edict()).map_or(Vec3::ZERO, |v| v.origin + v.view_ofs)
-}
-
 /// `UTIL_MakeVectors(m_pPlayer->pev->v_angle + m_pPlayer->pev->punchangle)`: `v_forward`,
 /// `v_right`, `v_up`.
 fn make_vectors(w: &WeaponCtx<'_, '_>) -> (Vec3, Vec3, Vec3) {
     angle_vectors(w.eng.ent(w.edict()).map_or(Vec3::ZERO, |v| v.v_angle + v.punchangle))
-}
-
-/// `m_pPlayer->pev->effects |= EF_MUZZLEFLASH`.
-fn muzzle_flash(w: &mut WeaponCtx<'_, '_>) {
-    let id = w.edict();
-    if let Some(v) = w.eng.ent_mut(id) {
-        v.effects |= EF_MUZZLEFLASH;
-    }
-}
-
-/// `m_pPlayer->pev->punchangle`.
-fn punch(w: &WeaponCtx<'_, '_>) -> Vec3 {
-    w.eng.ent(w.edict()).map_or(Vec3::ZERO, |v| v.punchangle)
 }
 
 /// The vanilla recoil, `m_pPlayer->pev->punchangle.x -= amount`.

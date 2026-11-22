@@ -3,7 +3,7 @@
 
 use cs_assets::bsp::SpawnTeam;
 use cs_engine::consts::{
-    FL_CLIENT, FL_WORLDBRUSH, MOVETYPE_NOCLIP, MOVETYPE_NONE, MOVETYPE_PUSH, SOLID_BSP,
+    EF_NODRAW, FL_CLIENT, FL_WORLDBRUSH, MOVETYPE_NOCLIP, MOVETYPE_NONE, MOVETYPE_PUSH, SOLID_BSP,
     SOLID_NOT, SOLID_TRIGGER,
 };
 use cs_engine::{EdictId, EngineApi};
@@ -22,8 +22,6 @@ const RENDER_TRANS_TEXTURE: u8 = 2;
 /// `CONTENTS_LADDER`: the `skin` of a ladder entity (the same value as `cs_engine::CONTENTS_LADDER`,
 /// which is an `i32`; `skin` is an `i16`).
 const CONTENTS_LADDER: i16 = -16;
-/// `EF_NODRAW`.
-const EF_NODRAW: u32 = 128;
 /// The classname of the CT spawn points.
 pub const CT_SPAWN_CLASS: &str = "info_player_start";
 /// The classname of the terrorist spawn points.

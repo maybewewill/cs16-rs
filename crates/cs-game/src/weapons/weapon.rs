@@ -212,6 +212,11 @@ pub trait WeaponBehavior: Send + WeaponClone + 'static {
     fn holster(&mut self, w: &mut WeaponCtx<'_, '_>) {
         w.base_holster();
     }
+    /// `PlayEmptySound`: the dry-fire click. The default is `CBasePlayerWeapon::PlayEmptySound`;
+    /// the M3 and the XM1014 override it to clear `m_iPlayEmptySound` after the click.
+    fn play_empty_sound(&mut self, w: &mut WeaponCtx<'_, '_>) -> bool {
+        w.play_empty_sound()
+    }
     /// `GetMaxSpeed`.
     fn max_speed(&self, _w: &Weapon) -> f32 {
         250.0
@@ -230,8 +235,8 @@ pub trait WeaponBehavior: Send + WeaponClone + 'static {
     fn has_secondary_attack(&self, w: &Weapon) -> bool {
         super::core::has_secondary_attack_by_id(w.id)
     }
-    /// A hook run after the base `ItemPostFrame` has run, for a weapon whose class overrides
-    /// `ItemPostFrame`. No weapon of ReGameDLL does, so nothing implements it.
+    /// A hook run in `ItemPostFrame` after the base class's work, for a weapon whose class
+    /// adds to it: the snipers use it to resume the zoom after a reload ([`super::snipers`]).
     fn item_post_frame_extra(&mut self, _w: &mut WeaponCtx<'_, '_>) {}
     /// `ItemPreFrame` (no weapon overrides it).
     fn item_pre_frame(&mut self, _w: &mut WeaponCtx<'_, '_>) {}
@@ -368,8 +373,9 @@ pub fn new_weapon(id: WeaponId) -> Option<Box<dyn WeaponBehavior>> {
 }
 
 /// `WeaponsPrecache`: runs `Precache` of every weapon in the order the game does
-/// ([`WEAPONS_PRECACHE_ORDER`]). Not wired into the world's precache yet: the weapons' own
-/// `Precache` comes with their tasks.
+/// ([`WEAPONS_PRECACHE_ORDER`]). The server's precache (`crate::inventory`) does not call it:
+/// it walks the same order itself, to put the ammo boxes' resources where the source precaches
+/// them. This one is the plain list, for a test that wants the weapons' resources alone.
 pub fn precache_all(eng: &mut EngineApi<'_>) {
     for id in WEAPONS_PRECACHE_ORDER {
         if let Some(mut behavior) = new_weapon(id) {

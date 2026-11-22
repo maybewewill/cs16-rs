@@ -17,7 +17,7 @@ use std::rc::Rc;
 
 use common::{Rig, spawns};
 use cs_cvar::CVarRegistry;
-use cs_engine::consts::{FL_DUCKING, FL_ONGROUND};
+use cs_engine::consts::{EF_MUZZLEFLASH, FL_DUCKING, FL_ONGROUND};
 use cs_engine::{EdictId, EngineApi, GameDll, Server, ServerConfig, ServerMap};
 use cs_game::CsGame;
 use cs_game::player::Team;
@@ -34,7 +34,6 @@ use glam::Vec3;
 const IN_ATTACK: i32 = 1 << 0;
 const IN_ATTACK2: i32 = 1 << 11;
 const IN_RELOAD: i32 = 1 << 13;
-const EF_MUZZLEFLASH: u32 = 2;
 
 /// The fire events of the twelve weapons (`events/*.sc`).
 const EVENTS: [&str; 12] = [

@@ -785,3 +785,81 @@ fn the_player_entity_carries_colormap_friction_gravity_and_blending() {
     assert_eq!(state.blending[1], 127);
 }
 
+
+/// Spawns slot 0 (the victim, a CT) and slot 1 (the attacker, a terrorist), aims them, hurts
+/// the victim in `hit_group` (ducking or not) and returns the victim's velocity and angles the
+/// moment it died, before any physics.
+fn corpse_throw(
+    b: &mut Bench,
+    hit_group: i32,
+    ducking: bool,
+    victim_yaw: f32,
+    attacker_yaw: f32,
+) -> (Vec3, Vec3, Vec3) {
+    b.run(move |game, eng| {
+        game.spawn_player(eng, 0, Team::Ct, 0);
+        game.spawn_player(eng, 1, Team::Terrorist, 0);
+        let (victim, attacker) = (eng.client_edict(0), eng.client_edict(1));
+        let v = eng.ent_mut(victim).unwrap();
+        v.angles = Vec3::new(0.0, victim_yaw, 0.0);
+        v.v_angle = v.angles;
+        v.velocity = Vec3::ZERO;
+        if ducking {
+            v.flags |= cs_engine::consts::FL_DUCKING;
+        }
+        eng.ent_mut(attacker).unwrap().angles = Vec3::new(0.0, attacker_yaw, 0.0);
+        game.set_last_hit_group(0, hit_group);
+        game.damage_player(eng, 0, Some(1), 500.0, dmg::BULLET);
+        let v = eng.ent(victim).unwrap();
+        (v.velocity, v.angles, v.v_angle)
+    })
+}
+
+#[test]
+fn a_ducking_corpse_is_thrown_backwards() {
+    // `SetAnimation(PLAYER_DIE)` of a ducking player picks `THROW_BACKWARD`; `Killed`
+    // (player.cpp 2500-2507) then gives it `v_forward * RANDOM_FLOAT(-100, -200)` and
+    // `velocity.z = RANDOM_FLOAT(50, 100)` and (vanilla) turns the yaw against the velocity:
+    // `UTIL_VecToAngles(-velocity).y`.
+    let mut b = Bench::stub(stub_spawns());
+    b.enter_second_client();
+    let (velocity, angles, v_angle) = corpse_throw(&mut b, 0, true, 90.0, 0.0);
+    // Facing +y: backwards is -y, 100 to 200 units a second, and up 50 to 100.
+    assert!(velocity.x.abs() < 0.01, "{velocity:?}");
+    assert!((-200.0..=-100.0).contains(&velocity.y), "{velocity:?}");
+    assert!((50.0..=100.0).contains(&velocity.z), "{velocity:?}");
+    // The body faces against the throw, which is where it looked (`angles.x`/`z` are cleared at
+    // the end of `Killed`).
+    assert!((angles.y - 90.0).abs() < 0.01, "{angles:?}");
+    assert_eq!(v_angle.y, angles.y);
+    assert_eq!((angles.x, angles.z), (0.0, 0.0));
+}
+
+#[test]
+fn a_corpse_hit_in_the_arm_flies_along_the_attackers_aim() {
+    // `THROW_HITVEL` and `THROW_HITVEL_MINUS_AIRVEL` (the right arm picks one of the two): the
+    // attacker's `v_forward * RANDOM_FLOAT(200, 300)`, when the attacker is a player; the
+    // corpse then turns its yaw against it.
+    let mut b = Bench::stub(stub_spawns());
+    b.enter_second_client();
+    let (velocity, angles, v_angle) = corpse_throw(&mut b, 5, false, 0.0, 90.0);
+    assert!(velocity.x.abs() < 0.01, "{velocity:?}");
+    assert!((200.0..=300.0).contains(&velocity.y), "{velocity:?}");
+    // The yaw of `-velocity`, which points along -y: 270.
+    assert!((angles.y - 270.0).abs() < 0.01, "{angles:?}");
+    assert_eq!(v_angle.y, angles.y);
+
+    // Killed by the world (no player attacker): `FClassnameIs(pevAttacker, "player")` fails and
+    // the velocity stays what it was.
+    let mut b = Bench::stub(stub_spawns());
+    b.enter_second_client();
+    let velocity = b.run(|game, eng| {
+        game.spawn_player(eng, 0, Team::Ct, 0);
+        let victim = eng.client_edict(0);
+        eng.ent_mut(victim).unwrap().velocity = Vec3::new(1.0, 2.0, 3.0);
+        game.set_last_hit_group(0, 5);
+        game.damage_player(eng, 0, None, 500.0, dmg::CRUSH);
+        eng.ent(victim).unwrap().velocity
+    });
+    assert_eq!(velocity.x, 1.0);
+}

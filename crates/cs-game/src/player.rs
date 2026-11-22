@@ -63,7 +63,7 @@ use crate::bullets;
 use crate::menus::{self, Menu};
 use crate::intro;
 use crate::weapons::core::{self as weapon_core, PlayerAnim};
-use crate::weapons::{MAX_AMMO_SLOTS, MAX_ITEM_TYPES, WeaponId, WeaponSlotItem};
+use crate::weapons::{MAX_AMMO_SLOTS, MAX_ITEM_TYPES, WEAPON_SUIT, WeaponId, WeaponSlotItem};
 use crate::messages;
 use crate::money;
 use crate::observer::{self, ObserverState};
@@ -148,9 +148,8 @@ pub(crate) const HIDEHUD_CROSSHAIR: i32 = 1 << 6;
 const CONTENT_WATER: i32 = -3;
 const CONTENT_SLIME: i32 = -4;
 const CONTENT_LAVA: i32 = -5;
-/// `EF_NODRAW` and `EF_NOINTERP`.
-pub(crate) const EF_NODRAW: u32 = 128;
-pub(crate) const EF_NOINTERP: u32 = 32;
+/// `EF_NODRAW` and `EF_NOINTERP` (the engine's `const.h` values, one home for the game).
+pub(crate) use cs_engine::consts::{EF_NODRAW, EF_NOINTERP};
 /// `CHAN_VOICE` and `CHAN_ITEM`, `ATTN_NORM`, `PITCH_NORM`.
 pub(crate) const CHAN_VOICE: u8 = 2;
 const CHAN_BODY: u8 = 4;
@@ -173,12 +172,8 @@ const PLAYER_CAN_SHOOT: i32 = cs_sim::pm::consts::PLAYER_CAN_SHOOT;
 const PLAYER_IN_BOMB_ZONE: i32 = cs_sim::pm::consts::PLAYER_IN_BOMB_ZONE;
 const SIGNAL_BOMB: u8 = 1 << 1;
 const PLAYER_HOLDING_SHIELD: i32 = cs_sim::pm::consts::PLAYER_HOLDING_SHIELD;
-/// `WEAPON_SUIT`: the bit of `pev->weapons` that stands for the HEV suit.
-pub(crate) const WEAPON_SUIT: u32 = 31;
 /// `DEATH_ANIMATION_TIME` (`gamerules.h`): how long a death lasts before the corpse is sent.
 const DEATH_ANIMATION_TIME: f64 = 3.0;
-/// `DEFAULT_FOV`.
-const DEFAULT_FOV: f32 = 90.0;
 /// `HITGROUP_SHIELD_ENABLED` and `HITGROUP_SHIELD_DISABLED`: the values of `pev->gamestate` of
 /// a player (`player.h`, read 2026-11-22); the engine's hitbox traces skip the shield box at 1.
 const HITGROUP_SHIELD_ENABLED: i32 = 0;
@@ -342,8 +337,7 @@ pub struct Player {
     pub(crate) is_defusing: bool,
     /// `m_bOwnsShield` (the shield is Task 12).
     pub(crate) owns_shield: bool,
-    /// `m_bShieldDrawn` (read by the shield code of Task 12).
-    #[allow(dead_code)]
+    /// `m_bShieldDrawn`.
     pub(crate) shield_drawn: bool,
     /// `m_bResumeZoom`: a shot closed the scope; it opens again when the weapon may shoot.
     pub(crate) resume_zoom: bool,
@@ -1050,7 +1044,7 @@ pub(crate) fn spawn(
         // recategorizes the position.
         v.friction = 1.0;
         v.gravity = 1.0;
-        v.fov = DEFAULT_FOV;
+        v.fov = f32::from(weapon_core::DEFAULT_FOV);
         v.gamestate = shield_state;
         v.origin = origin;
         v.v_angle = Vec3::ZERO;
@@ -2327,8 +2321,6 @@ fn killed(
         v.movetype = MOVETYPE_TOSS;
         v.flags &= !FL_ONGROUND;
         v.solid = SOLID_NOT;
-        v.angles.x = 0.0;
-        v.angles.z = 0.0;
         // `Killed` (player.cpp:3919, read 2026-11-22): `pev->view_ofs = Vector(0, 0, -8)`.
         v.view_ofs = Vec3::new(0.0, 0.0, -8.0);
     }
@@ -2341,6 +2333,8 @@ fn killed(
     observer::killed(g, eng, slot, attacker);
     // `SetScoreboardAttributes()`: the scoreboard marks the player dead.
     messages::set_scoreboard_attributes(g, eng, usize::from(slot));
+    // The corpse's throw (`m_iThrowDirection`, which `SetAnimation(PLAYER_DIE)` chose).
+    throw_corpse(g, eng, slot, attacker);
     messages::health(eng, slot, 0);
     messages::cur_weapon_dead(eng, slot);
     // `SendFOV(0)`.
@@ -2357,10 +2351,105 @@ fn killed(
         _ => "player/death6.wav",
     };
     eng.emit_sound(id, CHAN_VOICE, sample, 1.0, ATTN_NORM, PITCH_NORM);
+    // `pev->angles.x = 0; pev->angles.z = 0;` (player.cpp 2631): after the throw above, which
+    // takes its direction from the angles with the pitch the player died with.
+    if let Some(v) = eng.ent_mut(id) {
+        v.angles.x = 0.0;
+        v.angles.z = 0.0;
+    }
     // `Killed` ends (player.cpp:2634, read 2026-11-22), for a player that was not gibbed, by
     // telling the dead how to change the view, once.
     if crate::hint::first_time(g, slot, crate::hint::dhf::SPEC_DUCK) {
         crate::hint::hint_message(g, eng, slot, "#Spec_Duck", true, true);
+    }
+}
+
+/// The corpse throw of `CBasePlayer::Killed` (`player.cpp` 2493-2547, read 2026-11-22, vanilla):
+/// `m_iThrowDirection`, which `SetAnimation(PLAYER_DIE)` chose, gives the dead body a velocity.
+/// `THROW_FORWARD` and `THROW_BACKWARD` use the player's own `angles`; `THROW_HITVEL` and
+/// `THROW_HITVEL_MINUS_AIRVEL` the attacker's, when the attacker is a player (the velocity stays
+/// as it was otherwise); `THROW_BOMB` and `THROW_GRENADE` take the direction from
+/// `m_vBlastVector`. Then (QUIRK, the `REGAMEDLL_FIXES` build drops it) the yaw of `angles` and
+/// `v_angle` is turned to face against the new velocity: `UTIL_VecToAngles(-velocity).y`. The
+/// throw direction is cleared.
+///
+/// The random numbers are taken in the source's order. Assumption: `m_vBlastVector` of length 0
+/// (the source divides by it) throws nothing, instead of writing a non-finite velocity.
+fn throw_corpse(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, attacker: Option<EdictId>) {
+    const THROW_FORWARD: i32 = 1;
+    const THROW_BACKWARD: i32 = 2;
+    const THROW_HITVEL: i32 = 3;
+    const THROW_BOMB: i32 = 4;
+    const THROW_GRENADE: i32 = 5;
+    const THROW_HITVEL_MINUS_AIRVEL: i32 = 6;
+    let id = eng.client_edict(slot);
+    let Some(p) = g.players[usize::from(slot)].as_ref() else {
+        return;
+    };
+    let (direction, blast) = (p.anim.throw_direction, p.blast_vector);
+    if direction == 0 {
+        return;
+    }
+    let Some(v) = eng.ent(id) else {
+        return;
+    };
+    let (angles, mut velocity) = (v.angles, v.velocity);
+    // `FClassnameIs(pevAttacker, "player")`: the attacker is a client.
+    let attacker_angles = attacker
+        .filter(|&a| player_slot(g, eng, a).is_some())
+        .and_then(|a| eng.ent(a))
+        .map(|a| a.angles);
+    let forward = |angles: Vec3| cs_sim::pm::math::angle_vectors(angles).0;
+    match direction {
+        THROW_FORWARD => {
+            let f = forward(angles);
+            velocity = f * bullets::random_float(g, 100.0, 200.0);
+            velocity.z = bullets::random_float(g, 50.0, 100.0);
+        }
+        THROW_BACKWARD => {
+            let f = forward(angles);
+            velocity = f * bullets::random_float(g, -100.0, -200.0);
+            velocity.z = bullets::random_float(g, 50.0, 100.0);
+        }
+        THROW_HITVEL => {
+            if let Some(a) = attacker_angles {
+                let f = forward(a);
+                velocity = f * bullets::random_float(g, 200.0, 300.0);
+                velocity.z = bullets::random_float(g, 200.0, 300.0);
+            }
+        }
+        THROW_BOMB => {
+            let length = blast.length();
+            if length != 0.0 {
+                velocity = blast * (1.0 / length) * (2300.0f32 - length) * 0.25f32;
+                velocity.z = (2300.0f32 - length) / 2.75f32;
+            }
+        }
+        THROW_GRENADE => {
+            let length = blast.length();
+            if length != 0.0 {
+                velocity = blast * (1.0 / length) * (500.0 - length);
+                // `(350 - length) * 1.5`: the double literal.
+                velocity.z = (f64::from(350.0 - length) * 1.5) as f32;
+            }
+        }
+        THROW_HITVEL_MINUS_AIRVEL => {
+            if let Some(a) = attacker_angles {
+                let f = forward(a);
+                velocity = f * bullets::random_float(g, 200.0, 300.0);
+            }
+        }
+        _ => {}
+    }
+    if let Some(v) = eng.ent_mut(id) {
+        v.velocity = velocity;
+        // `pev->angles.y = UTIL_VecToAngles(-pev->velocity).y; pev->v_angle.y = pev->angles.y`.
+        let yaw = intro::vec_to_angles(-velocity).y;
+        v.angles.y = yaw;
+        v.v_angle.y = yaw;
+    }
+    if let Some(p) = g.players[usize::from(slot)].as_mut() {
+        p.anim.throw_direction = 0;
     }
 }
 

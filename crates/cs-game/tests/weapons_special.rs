@@ -14,7 +14,7 @@ use cs_engine::{EngineApi, EntTrace, GameDll, MoveFilter};
 use cs_game::CsGame;
 use cs_game::player::Team;
 use cs_game::weapons::knife::{find_hull_intersection, knife_hit_sample};
-use cs_game::weapons::snipers::TestCall;
+use cs_game::weapons::core::TestCall;
 use cs_game::weapons::shotguns::{M3_CONE_VECTOR, XM1014_CONE_VECTOR};
 use cs_game::weapons::{
     shared_random_float,

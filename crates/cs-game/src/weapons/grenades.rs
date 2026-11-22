@@ -41,9 +41,8 @@
 use cs_engine::EngineApi;
 use cs_sim::pm::math::angle_vectors;
 
-use super::core::{PlayerAnim, WeaponCtx, with_weapon};
+use super::core::{PlayerAnim, WeaponCtx, precache_model, precache_sound, with_weapon};
 use super::info::{WPNSTATE_SHIELD_DRAWN, WeaponId, item_info};
-use super::snipers::{precache_model, precache_sound};
 use super::weapon::{Weapon, WeaponBehavior, stub_weapon};
 
 /// `*_IDLE`, `*_PULLPIN` (`*_PINPULL` of the smoke grenade), `*_THROW` and `*_DRAW`

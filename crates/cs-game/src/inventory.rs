@@ -21,6 +21,7 @@
 //! `game_player_equip` entity of `OnSpawnEquip`, bots, the tutor, and the cheat impulses (101, 102, ...).
 
 use cs_engine::consts::{FL_ONGROUND, MOVETYPE_TOSS, SOLID_BBOX, SOLID_TRIGGER};
+use cs_engine::event_flags::{FEV_GLOBAL, FEV_RELIABLE};
 use cs_engine::{EdictId, EngineApi, MsgDest};
 use cs_proto48::usermsg::CsUserMsg;
 use glam::Vec3;
@@ -1108,7 +1109,10 @@ pub(crate) fn death_think_pack(g: &mut GameState, eng: &mut EngineApi<'_>, slot:
 /// The weapons part of `CHalfLifeMultiplay::CleanUpMap` (`multiplay_gamerules.cpp` 611, vanilla),
 /// run by `RestartRound` after the players have respawned: the `armoury_entity`s start over,
 /// the grenades (and the C4 with them) in flight go, and `RemoveGuns` kills every weapon box.
-/// (The other entity classes `UTIL_RestartOther` recreates are not ported entities.)
+/// (The other entity classes `UTIL_RestartOther` recreates are not ported entities.) It ends
+/// with `PLAYBACK_EVENT((FEV_GLOBAL | FEV_RELIABLE), 0, m_usResetDecals)`
+/// (`multiplay_gamerules.cpp` 685, read 2026-11-22): `events/decal_reset.sc` tells every client
+/// to wipe the decals off the map.
 pub(crate) fn clean_up_map(g: &mut GameState, eng: &mut EngineApi<'_>) {
     for id in eng.entity_ids() {
         let Some(class) = eng.ent(id).map(|v| v.classname.clone()) else {
@@ -1124,6 +1128,24 @@ pub(crate) fn clean_up_map(g: &mut GameState, eng: &mut EngineApi<'_>) {
             _ => {}
         }
     }
+    // `PLAYBACK_EVENT(flags, ent, idx)` is `PLAYBACK_EVENT_FULL` with a zero delay, origin,
+    // angles and parameters, and no invoker. `m_usResetDecals` is `PRECACHE_EVENT(1,
+    // "events/decal_reset.sc")` of `ClientPrecache`; asking again gives its index.
+    let decal_reset = eng.precache_event("events/decal_reset.sc");
+    eng.playback_event(
+        FEV_GLOBAL | FEV_RELIABLE,
+        None,
+        decal_reset,
+        0.0,
+        Vec3::ZERO,
+        Vec3::ZERO,
+        0.0,
+        0.0,
+        0,
+        0,
+        false,
+        false,
+    );
 }
 
 // ---- weaponbox ----

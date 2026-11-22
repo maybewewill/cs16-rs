@@ -26,9 +26,8 @@ use cs_engine::{EdictId, EngineApi, EntTrace, MoveFilter};
 use cs_sim::pm::math::angle_vectors;
 use glam::{Vec2, Vec3};
 
-use super::core::{CHAN_WEAPON, PlayerAnim, WeaponCtx};
+use super::core::{CHAN_WEAPON, PlayerAnim, WeaponCtx, gun_position, precache_model, precache_sound};
 use super::info::{WPNSTATE_SHIELD_DRAWN, WeaponId};
-use super::snipers::{gun_position, precache_model, precache_sound};
 use super::weapon::{Weapon, WeaponBehavior};
 use crate::bullets::{DMG_NEVERGIB, MultiDamage, apply_multi_damage, is_bsp_model, trace_attack};
 use crate::player::{ATTN_NORM, CHAN_ITEM, DEAD_NO, PITCH_NORM, dmg, player_slot};

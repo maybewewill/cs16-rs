@@ -20,7 +20,8 @@ use cs_engine::{EngineApi, MsgDest};
 
 use crate::GameState;
 use crate::messages::send_raw;
-use crate::player::{ATTN_NORM, CHAN_ITEM, PITCH_NORM, WEAPON_SUIT};
+use crate::player::{ATTN_NORM, CHAN_ITEM, PITCH_NORM};
+use crate::weapons::WEAPON_SUIT;
 
 /// `EF_DIMLIGHT` (`const.h`): the player's flashlight.
 pub(crate) const EF_DIMLIGHT: u32 = 1 << 3;

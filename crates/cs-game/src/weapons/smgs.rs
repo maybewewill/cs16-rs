@@ -28,16 +28,9 @@ use cs_engine::EngineApi;
 use cs_sim::pm::math::angle_vectors;
 use glam::Vec3;
 
-use super::core::{PlayerAnim, TAB_9MM, WeaponCtx};
+use super::core::{PlayerAnim, TAB_9MM, TAB_45ACP, TAB_57MM, WeaponCtx, muzzle_flash, punch};
 use super::info::{BulletType, WeaponId};
 use super::weapon::WeaponBehavior;
-
-/// `EF_MUZZLEFLASH`.
-const EF_MUZZLEFLASH: u32 = 2;
-/// The index of `ammo_45acp` in [`crate::player::Player::tabulated_ammo`] (`TabulateAmmo`).
-const TAB_45ACP: usize = 5;
-/// The index of `ammo_57mm`.
-const TAB_57MM: usize = 8;
 
 /// What a gun's movement tests read off the player: `pev->flags & FL_ONGROUND`,
 /// `pev->flags & FL_DUCKING` and `pev->velocity.Length2D()`.
@@ -73,14 +66,6 @@ pub(super) fn fire_on_empty(w: &mut WeaponCtx<'_, '_>) {
     }
 }
 
-/// `pev->effects |= EF_MUZZLEFLASH`.
-pub(super) fn muzzle_flash(w: &mut WeaponCtx<'_, '_>) {
-    let id = w.edict();
-    if let Some(v) = w.eng.ent_mut(id) {
-        v.effects |= EF_MUZZLEFLASH;
-    }
-}
-
 /// `UTIL_MakeVectors(v_angle + punchangle)` then `vecSrc = GetGunPosition()` and
 /// `vecAiming = gpGlobals->v_forward`: the source and the direction of the shot.
 pub(super) fn aim(w: &WeaponCtx<'_, '_>) -> (Vec3, Vec3) {
@@ -89,12 +74,6 @@ pub(super) fn aim(w: &WeaponCtx<'_, '_>) -> (Vec3, Vec3) {
         let (forward, ..) = angle_vectors(v.v_angle + v.punchangle);
         (v.origin + v.view_ofs, forward)
     })
-}
-
-/// `pev->punchangle`.
-pub(super) fn punch(w: &WeaponCtx<'_, '_>) -> Vec3 {
-    let id = w.edict();
-    w.eng.ent(id).map_or(Vec3::ZERO, |v| v.punchangle)
 }
 
 /// `int(punchangle * 100)`: a float times an int is a float, cut toward zero.

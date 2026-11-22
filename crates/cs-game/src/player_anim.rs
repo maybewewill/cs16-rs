@@ -15,9 +15,10 @@
 //! missing) the lookups answer as the C ones do for a null `studiohdr_t`: `LookupSequence` and
 //! `LookupActivity` 0, `GetSequenceInfo` leaves the rates alone, `GetSequenceFlags` 0.
 //!
-//! Not ported and named: the bot events (`TheBots->OnEvent`), the career tasks, and the
-//! `m_flDeathThrowTime`/`m_iThrowDirection` consumers (`PlayerDeathThink` of the corpse's throw;
-//! [`AnimState`] keeps the values `SetAnimation` writes).
+//! Not ported and named: the bot events (`TheBots->OnEvent`) and the career tasks.
+//! `m_iThrowDirection`, which `SetAnimation(PLAYER_DIE)` chooses, is [`AnimState`]'s
+//! `throw_direction`; its consumer, the corpse's throw of `CBasePlayer::Killed`, is
+//! `player::throw_corpse`.
 
 use cs_assets::mdl::StudioPoseData;
 use cs_engine::EngineApi;
@@ -31,6 +32,7 @@ use crate::player::{
     ATTN_NORM, CHAN_VOICE, HITGROUP_CHEST, HITGROUP_GENERIC, HITGROUP_HEAD, HITGROUP_LEFTARM,
     HITGROUP_RIGHTARM, HITGROUP_SHIELD, HITGROUP_STOMACH, PITCH_NORM,
 };
+use crate::player::EF_NOINTERP;
 use crate::random_in;
 use crate::weapons::core::PlayerAnim;
 
@@ -71,8 +73,6 @@ const THROW_HITVEL_MINUS_AIRVEL: i32 = 6;
 
 /// `STUDIO_LOOPING` (`studio.h`): a sequence flag.
 const STUDIO_LOOPING: i32 = 0x0001;
-/// `EF_NOINTERP` (`const.h`): the client does not interpolate the entity's next update.
-const EF_NOINTERP: u32 = 32;
 
 /// The animation state of one player: the `CBasePlayer` and `CBaseAnimating` members the code
 /// of this module reads and writes.

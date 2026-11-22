@@ -320,7 +320,8 @@ impl CsGame {
     }
 
     /// Gives the player of `slot` the weapon `behavior` with `clip` rounds loaded and `reserve`
-    /// rounds of its ammo, without the pickup rules (the inventory operations are Task 12).
+    /// rounds of its ammo, without the pickup rules (`AddPlayerItem` and `GiveNamedItem` of
+    /// [`crate::inventory`] have them).
     /// `false` when nobody is in that slot or the weapon has no inventory slot. For tests only
     /// (cargo feature `test-hooks`).
     #[cfg(feature = "test-hooks")]

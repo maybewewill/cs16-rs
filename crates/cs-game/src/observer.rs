@@ -53,6 +53,7 @@ use crate::player::{
     DEAD_DEAD, DEAD_RESPAWNABLE, EF_NODRAW, HIDEHUD_HEALTH, HIDEHUD_WEAPONS, Team,
 };
 use crate::teams::player_name;
+use crate::weapons::core::DEFAULT_FOV;
 use crate::world::atof;
 
 /// `OBS_*`: the observer modes (`pev->iuser1`).
@@ -79,8 +80,6 @@ pub(crate) const FFADE_STAYOUT: u16 = 4;
 const FADE_UNIT: f32 = 4096.0;
 /// `TE_KILLPLAYERATTACHMENTS`.
 const TE_KILLPLAYERATTACHMENTS: u8 = 125;
-/// `DEFAULT_FOV`.
-const DEFAULT_FOV: u8 = 90;
 /// Seconds before a follower may pick the next player again (`m_flNextFollowTime`).
 const FOLLOW_INTERVAL: f64 = 0.25;
 /// Seconds between two button presses of an observer (`m_flNextObserverInput`).
@@ -630,8 +629,15 @@ pub(crate) fn start_observer(
         MsgDest::Pas(current_origin),
         &[svc::TEMP_ENTITY, TE_KILLPLAYERATTACHMENTS, index_of(slot) as u8],
     );
-    // Tell the ammo HUD that the player is dead (the weapon is holstered and the tank and the
-    // suit sentences are let go: none of them exist yet).
+    // Holster the weapon immediately, to let it clean up (`m_pActiveItem->Holster()`,
+    // player.cpp:4163, read 2026-11-22).
+    let active = g.players.get(usize::from(slot)).and_then(Option::as_ref).and_then(|p| p.active_item);
+    if let Some(active) = active {
+        crate::weapons::core::with_weapon(g, eng, slot, active, |b, w| b.holster(w));
+    }
+    // Tell the ammo HUD that the player is dead. (`DetachTank` and the suit sentence cache
+    // `SetSuitUpdate(nullptr, ...)` follow in the source; there is no func_tank, and the suit's
+    // sentence queue is not ported, so there is nothing to let go.)
     eng.send_usermsg(
         MsgDest::One(slot),
         &CsUserMsg::CurWeapon {

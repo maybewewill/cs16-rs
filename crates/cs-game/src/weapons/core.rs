@@ -28,7 +28,7 @@
 //! CS 1.6 uses them for more than a call), and `m_fOnTarget` (only the
 //! autoaim of the Half-Life weapons sets it).
 
-use cs_engine::consts::FL_DORMANT;
+use cs_engine::consts::{EF_MUZZLEFLASH, FL_DORMANT};
 use cs_engine::event_flags::FEV_NOTHOST;
 use cs_engine::{EdictId, EngineApi, MsgDest};
 use cs_proto48::bitbuf::MsgWriter;
@@ -44,12 +44,10 @@ use super::info::{
 use super::weapon::{MAX_ITEM_TYPES, Weapon, WeaponBehavior, WeaponSlotItem, item_slot};
 use crate::GameState;
 use crate::messages;
-use crate::player::{ATTN_NORM, CHAN_ITEM, PITCH_NORM, Player};
+use crate::player::{ATTN_NORM, CHAN_ITEM, HIDEHUD_CROSSHAIR, PITCH_NORM, Player};
 
 /// `CHAN_WEAPON`.
 pub const CHAN_WEAPON: u8 = 1;
-/// `EF_MUZZLEFLASH`.
-pub(crate) const EF_MUZZLEFLASH: u32 = 2;
 /// `DEFAULT_FOV`.
 pub(crate) const DEFAULT_FOV: u8 = 90;
 /// `MAX_DIST_RELOAD_SOUND` (`weapons.h`): how far a reload is heard on the radar HUD.
@@ -78,6 +76,127 @@ pub const TAB_BUCKSHOT: usize = 0;
 pub const TAB_9MM: usize = 1;
 /// The index of `ammo_556nato`.
 pub const TAB_556NATO: usize = 2;
+/// The index of `ammo_762nato`.
+pub const TAB_762NATO: usize = 4;
+/// The index of `ammo_45acp`.
+pub const TAB_45ACP: usize = 5;
+/// The index of `ammo_50ae`.
+pub const TAB_50AE: usize = 6;
+/// The index of `ammo_338mag`.
+pub const TAB_338MAG: usize = 7;
+/// The index of `ammo_57mm`.
+pub const TAB_57MM: usize = 8;
+/// The index of `ammo_357sig`.
+pub const TAB_357SIG: usize = 9;
+
+// ---------------------------------------------------------------------------------------------
+// Helpers the weapon files share.
+// ---------------------------------------------------------------------------------------------
+
+/// `PRECACHE_MODEL`: the model's index, 0 when refused (the source would stop the server; a
+/// refused name is logged and the game goes on).
+pub(super) fn precache_model(eng: &mut EngineApi<'_>, name: &str) -> i32 {
+    match eng.precache_model(name) {
+        Ok(index) => i32::from(index),
+        Err(err) => {
+            tracing::warn!(name, ?err, "weapon model not precached");
+            0
+        }
+    }
+}
+
+/// `PRECACHE_SOUND`: a refused name is logged and the game goes on.
+pub(super) fn precache_sound(eng: &mut EngineApi<'_>, name: &str) {
+    if let Err(err) = eng.precache_sound(name) {
+        tracing::warn!(name, ?err, "weapon sound not precached");
+    }
+}
+
+/// `m_pPlayer->GetGunPosition()`: the eye.
+pub(super) fn gun_position(w: &WeaponCtx<'_, '_>) -> Vec3 {
+    w.eng.ent(w.edict()).map_or(Vec3::ZERO, |v| v.origin + v.view_ofs)
+}
+
+/// `m_pPlayer->pev->effects |= EF_MUZZLEFLASH`.
+pub(super) fn muzzle_flash(w: &mut WeaponCtx<'_, '_>) {
+    let id = w.edict();
+    if let Some(v) = w.eng.ent_mut(id) {
+        v.effects |= EF_MUZZLEFLASH;
+    }
+}
+
+/// `m_pPlayer->pev->punchangle`.
+pub(super) fn punch(w: &WeaponCtx<'_, '_>) -> Vec3 {
+    w.eng.ent(w.edict()).map_or(Vec3::ZERO, |v| v.punchangle)
+}
+
+/// `UpdateShieldCrosshair(draw)` (`player.cpp` 8799): the crosshair is hidden while the shield
+/// is up.
+pub(super) fn update_shield_crosshair(w: &mut WeaponCtx<'_, '_>, draw: bool) {
+    let p = w.player_mut();
+    if draw {
+        p.hide_hud &= !HIDEHUD_CROSSHAIR;
+    } else {
+        p.hide_hud |= HIDEHUD_CROSSHAIR;
+    }
+}
+
+/// `CBasePlayerWeapon::SetPlayerShieldAnim` (`weapons.cpp` 656): a shield bearer's third-person
+/// animation set while shooting. (The knife and the grenades override it in the source, with
+/// their own sets: see their files.)
+pub(super) fn set_player_shield_anim(w: &mut WeaponCtx<'_, '_>) {
+    if !w.has_shield() {
+        return;
+    }
+    let ext = if w.weapon.weapon_state & WPNSTATE_SHIELD_DRAWN != 0 { "shield" } else { "shieldgun" };
+    w.player_mut().anim_extension = ext.to_string();
+}
+
+/// `CBasePlayerWeapon::ResetPlayerShieldAnim` (`weapons.cpp` 671): with the shield up the
+/// animation set goes back to "shieldgun". (The `shielded` set is only set by
+/// [`shield_secondary_fire`].)
+pub(super) fn reset_player_shield_anim(w: &mut WeaponCtx<'_, '_>) {
+    if w.has_shield() && w.weapon.weapon_state & WPNSTATE_SHIELD_DRAWN != 0 {
+        w.player_mut().anim_extension = "shieldgun".to_string();
+    }
+}
+
+/// `CBasePlayerWeapon::ShieldSecondaryFire` (`weapons.cpp` 699): false without a shield. Else
+/// lowers or raises the shield (the animation, the animation set, the speed 250 or 180, the
+/// player's `m_bShieldDrawn`), shows or hides the crosshair, resets the player's speed and holds
+/// everything for 0.4 s (the idle 0.6 s). QUIRK: these are not `UTIL_WeaponTimeBase() +` sums,
+/// they are plain assignments (the same thing with `CLIENT_WEAPONS`). (The knife and the
+/// grenades override it in the source: see their files.)
+pub(super) fn shield_secondary_fire(
+    me: &dyn WeaponBehavior,
+    w: &mut WeaponCtx<'_, '_>,
+    up_anim: i32,
+    down_anim: i32,
+) -> bool {
+    if !w.has_shield() {
+        return false;
+    }
+    if w.weapon.weapon_state & WPNSTATE_SHIELD_DRAWN != 0 {
+        w.weapon.weapon_state &= !WPNSTATE_SHIELD_DRAWN;
+        w.send_weapon_anim(down_anim, me.use_decrement());
+        w.player_mut().anim_extension = "shieldgun".to_string();
+        w.weapon.max_speed = 250.0;
+        w.player_mut().shield_drawn = false;
+    } else {
+        w.weapon.weapon_state |= WPNSTATE_SHIELD_DRAWN;
+        w.send_weapon_anim(up_anim, me.use_decrement());
+        w.player_mut().anim_extension = "shielded".to_string();
+        w.weapon.max_speed = 180.0;
+        w.player_mut().shield_drawn = true;
+    }
+    let drawn = w.weapon.weapon_state & WPNSTATE_SHIELD_DRAWN == WPNSTATE_SHIELD_DRAWN;
+    update_shield_crosshair(w, !drawn);
+    w.reset_max_speed(me);
+    w.weapon.next_secondary_attack = 0.4;
+    w.weapon.next_primary_attack = 0.4;
+    w.weapon.time_weapon_idle = 0.6;
+    true
+}
 
 /// `PLAYER_ANIM`: what `CBasePlayer::SetAnimation` is asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1099,7 +1218,7 @@ pub fn item_post_frame(b: &mut dyn WeaponBehavior, w: &mut WeaponCtx<'_, '_>) {
             let waterlevel = w.eng.ent(id).map_or(0, |v| v.waterlevel);
             // Don't fire underwater.
             if waterlevel == 3 && w.flags() & ITEM_FLAG_NOFIREUNDERWATER != 0 {
-                w.play_empty_sound();
+                b.play_empty_sound(w);
                 w.weapon.next_primary_attack = w.get_next_attack_delay(0.15);
             } else {
                 b.primary_attack(w);
@@ -1164,9 +1283,7 @@ pub fn item_post_frame(b: &mut dyn WeaponBehavior, w: &mut WeaponCtx<'_, '_>) {
 /// `CBasePlayer::SelectItem` for weapon `id` (`player.cpp` 6364, vanilla: no `CanHolster` or
 /// `CanDeploy` test): false when the player has no such weapon or it is the active one.
 /// Holsters the active item, makes this one active (with the shield down), deploys it and
-/// resets the player's speed. (Task 12's inventory operations call it; until then only the
-/// tests do.)
-#[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
+/// resets the player's speed. (The inventory's `SwitchWeapon` and `GiveNamedItem` call it.)
 pub(crate) fn select_item(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, id: WeaponId) -> bool {
     let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) else {
         return false;
@@ -1194,12 +1311,12 @@ pub(crate) fn select_item(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, 
 }
 
 /// Gives the player of `slot` a weapon directly, without the pickup rules (`AddPlayerItem`,
-/// `GiveNamedItem`: Task 12): `behavior` goes at the head of its inventory slot (a weapon of
+/// `GiveNamedItem` of [`crate::inventory`] have them): `behavior` goes at the head of its inventory slot (a weapon of
 /// the same id is replaced), with `clip` rounds loaded, its ammo types set from its item info
 /// and `reserve` rounds of its primary ammo (not above the maximum). The player's `weapons`
 /// bit is set, and the events of `CBasePlayerWeapon` itself are precached. False when the
-/// player does not exist or the weapon has no inventory slot. (Task 12's inventory operations
-/// replace it; until then only the tests call it.)
+/// player does not exist or the weapon has no inventory slot. (Only the tests call it, through
+/// `CsGame::give_weapon`; the game itself goes through `crate::inventory`.)
 #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
 pub(crate) fn give_weapon(
     g: &mut GameState,
@@ -1292,5 +1409,69 @@ pub(crate) fn update_items_client_data(g: &mut GameState, eng: &mut EngineApi<'_
     }
     for (state, id, clip) in sends {
         messages::cur_weapon(eng, slot, state, id, clip);
+    }
+}
+
+/// What [`crate::CsGame::test_weapon_call`] runs on a weapon.
+#[cfg(feature = "test-hooks")]
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TestCall {
+    Primary,
+    Secondary,
+    Reload,
+}
+
+/// Entry points for the tests (cargo feature `test-hooks`): the weapon's own methods run
+/// directly, without the movement of a command (which would clear `FL_ONGROUND` on a map with
+/// no floor), with the player's command seed set.
+#[cfg(feature = "test-hooks")]
+#[doc(hidden)]
+impl crate::CsGame {
+    /// Runs `call` on weapon `id` of the player of `slot` with `m_random_seed = seed`, and
+    /// returns what `Swing`/`Stab` return for the knife (false for every other call).
+    pub fn test_weapon_call(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        slot: u8,
+        id: WeaponId,
+        call: TestCall,
+        seed: u32,
+    ) -> bool {
+        if let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+            p.random_seed = seed;
+        }
+        with_weapon(&mut self.state, eng, slot, id, |b, w| match call {
+            TestCall::Primary if id == WeaponId::Knife => super::knife::Knife.swing(w, true),
+            TestCall::Secondary if id == WeaponId::Knife => super::knife::Knife.stab(w, true),
+            TestCall::Primary => {
+                b.primary_attack(w);
+                false
+            }
+            TestCall::Secondary => {
+                b.secondary_attack(w);
+                false
+            }
+            TestCall::Reload => {
+                b.reload(w);
+                false
+            }
+        })
+        .unwrap_or(false)
+    }
+
+    /// The game's random generator state, to compare how many numbers a call drew.
+    pub fn test_rng(&self) -> u32 {
+        self.state.rng
+    }
+
+    /// Sets the game's random generator state.
+    pub fn test_set_rng(&mut self, state: u32) {
+        self.state.rng = state;
+    }
+
+    /// `RANDOM_LONG(lo, hi)` of the game's generator.
+    pub fn test_random_long(&mut self, lo: i32, hi: i32) -> i32 {
+        self.state.random_range(lo, hi)
     }
 }

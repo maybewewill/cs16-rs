@@ -31,7 +31,10 @@ use cs_engine::event_flags::FEV_NOTHOST;
 use cs_sim::pm::math::angle_vectors;
 use glam::Vec3;
 
-use super::core::{DEFAULT_FOV, EF_MUZZLEFLASH, PlayerAnim, WeaponCtx};
+use super::core::{
+    DEFAULT_FOV, PlayerAnim, TAB_338MAG, TAB_762NATO, WeaponCtx, gun_position, muzzle_flash,
+    precache_model, precache_sound, punch,
+};
 use super::info::{BulletType, WeaponId};
 use super::random::shared_random_float;
 use super::weapon::{Weapon, WeaponBehavior};
@@ -89,11 +92,6 @@ const SG550_DRAW: i32 = 4;
 // Helpers shared with the shotguns and the knife.
 // ---------------------------------------------------------------------------------------------
 
-/// `m_pPlayer->GetGunPosition()`: the eye.
-pub(super) fn gun_position(w: &WeaponCtx<'_, '_>) -> Vec3 {
-    w.eng.ent(w.edict()).map_or(Vec3::ZERO, |v| v.origin + v.view_ofs)
-}
-
 /// `UTIL_MakeVectors(pev->v_angle + pev->punchangle)`, then `gpGlobals->v_forward`.
 pub(super) fn view_forward(w: &WeaponCtx<'_, '_>) -> Vec3 {
     let angles = w.eng.ent(w.edict()).map_or(Vec3::ZERO, |v| v.v_angle + v.punchangle);
@@ -119,19 +117,6 @@ fn set_pev_fov(w: &mut WeaponCtx<'_, '_>, fov: u8) {
     }
 }
 
-/// `pev->effects |= EF_MUZZLEFLASH`.
-pub(super) fn muzzle_flash(w: &mut WeaponCtx<'_, '_>) {
-    let id = w.edict();
-    if let Some(v) = w.eng.ent_mut(id) {
-        v.effects |= EF_MUZZLEFLASH;
-    }
-}
-
-/// `pev->punchangle`.
-pub(super) fn punch(w: &WeaponCtx<'_, '_>) -> Vec3 {
-    w.eng.ent(w.edict()).map_or(Vec3::ZERO, |v| v.punchangle)
-}
-
 /// Sets `pev->punchangle`.
 pub(super) fn set_punch(w: &mut WeaponCtx<'_, '_>, value: Vec3) {
     let id = w.edict();
@@ -150,16 +135,6 @@ pub(super) fn event_index(w: &mut WeaponCtx<'_, '_>, name: &str) -> u16 {
 /// `m_iShellId`: the model index of the brass the weapon ejects.
 pub(super) fn set_shell(w: &mut WeaponCtx<'_, '_>, model: &str) {
     w.weapon.shell_id = w.eng.model_index(model).map_or(0, i32::from);
-}
-
-/// `PRECACHE_MODEL`, the index (0 when refused).
-pub(super) fn precache_model(eng: &mut EngineApi<'_>, name: &str) -> i32 {
-    eng.precache_model(name).map_or(0, i32::from)
-}
-
-/// `PRECACHE_SOUND`.
-pub(super) fn precache_sound(eng: &mut EngineApi<'_>, name: &str) {
-    let _ = eng.precache_sound(name);
 }
 
 /// `m_pPlayer->pev->velocity.Length2D()`.
@@ -552,11 +527,6 @@ impl WeaponBehavior for Awp {
     }
 }
 
-/// The index of `ammo_338mag` in [`crate::player::Player::tabulated_ammo`] (`TABULATED_AMMO`).
-const TAB_338MAG: usize = 7;
-/// `ammo_762nato`.
-const TAB_762NATO: usize = 4;
-
 // ---------------------------------------------------------------------------------------------
 // The G3SG1.
 // ---------------------------------------------------------------------------------------------
@@ -872,69 +842,5 @@ impl WeaponBehavior for Sg550 {
 
     fn item_post_frame_extra(&mut self, w: &mut WeaponCtx<'_, '_>) {
         sync_speed(w, SG550_MAX_SPEED, SG550_MAX_SPEED_ZOOM);
-    }
-}
-
-/// What [`crate::CsGame::test_weapon_call`] runs on a weapon.
-#[cfg(feature = "test-hooks")]
-#[doc(hidden)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TestCall {
-    Primary,
-    Secondary,
-    Reload,
-}
-
-/// Entry points for the tests (cargo feature `test-hooks`): the weapon's own methods run
-/// directly, without the movement of a command (which would clear `FL_ONGROUND` on a map with
-/// no floor), with the player's command seed set.
-#[cfg(feature = "test-hooks")]
-#[doc(hidden)]
-impl crate::CsGame {
-    /// Runs `call` on weapon `id` of the player of `slot` with `m_random_seed = seed`, and
-    /// returns what `Swing`/`Stab` return for the knife (false for every other call).
-    pub fn test_weapon_call(
-        &mut self,
-        eng: &mut EngineApi<'_>,
-        slot: u8,
-        id: WeaponId,
-        call: TestCall,
-        seed: u32,
-    ) -> bool {
-        if let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
-            p.random_seed = seed;
-        }
-        super::core::with_weapon(&mut self.state, eng, slot, id, |b, w| match call {
-            TestCall::Primary if id == WeaponId::Knife => super::knife::Knife.swing(w, true),
-            TestCall::Secondary if id == WeaponId::Knife => super::knife::Knife.stab(w, true),
-            TestCall::Primary => {
-                b.primary_attack(w);
-                false
-            }
-            TestCall::Secondary => {
-                b.secondary_attack(w);
-                false
-            }
-            TestCall::Reload => {
-                b.reload(w);
-                false
-            }
-        })
-        .unwrap_or(false)
-    }
-
-    /// The game's random generator state, to compare how many numbers a call drew.
-    pub fn test_rng(&self) -> u32 {
-        self.state.rng
-    }
-
-    /// Sets the game's random generator state.
-    pub fn test_set_rng(&mut self, state: u32) {
-        self.state.rng = state;
-    }
-
-    /// `RANDOM_LONG(lo, hi)` of the game's generator.
-    pub fn test_random_long(&mut self, lo: i32, hi: i32) -> i32 {
-        self.state.random_range(lo, hi)
     }
 }

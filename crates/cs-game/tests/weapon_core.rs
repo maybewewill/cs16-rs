@@ -883,3 +883,63 @@ fn weapons_run_through_the_engine() {
     assert!(shots >= 1, "the probe's command fired the weapon");
     assert!(timer < 0.15, "and the engine's frame time ran the timer down: {timer}");
 }
+
+/// A server whose probe is a counter-terrorist out of the freeze period carrying the real
+/// weapon `id` (8 rounds loaded, 36 in reserve), selected, with the deploy delay spent.
+fn armed_real(id: WeaponId) -> Bench {
+    let mut b = Bench::stub_without_moves(spawns(4, 4));
+    b.run(move |game, eng| {
+        eng.set_cvar("sv_gravity", "0");
+        assert!(game.spawn_player(eng, 0, Team::Ct, 0));
+        game.end_freeze_period(eng);
+        assert!(game.give_weapon(eng, 0, cs_game::weapons::new_weapon(id).unwrap(), 8, 36));
+        assert!(game.select_weapon(eng, 0, id));
+        game.set_next_attack(0, 0.0);
+        weapon(game, id).time_weapon_idle = 0.0;
+    });
+    b
+}
+
+/// How many times the probe hears the dry-fire click of `sample` on the weapon channel when the
+/// player of `id` holds the fire button under water for `attempts` attempts (the idle between
+/// them having armed the click once at the start, `m_iPlayEmptySound`).
+fn underwater_clicks(id: WeaponId, attempts: usize) -> usize {
+    let mut b = armed_real(id);
+    let rifle = b.run(|_, eng| eng.sound_index("weapons/dryfire_rifle.wav").unwrap());
+    b.probe.clear_messages();
+    b.run(move |game, eng| {
+        // The idle (the button released) arms the click.
+        press(game, eng, 0);
+        assert!(weapon(game, id).play_empty_sound, "{id:?}: the idle arms the click");
+        for _ in 0..attempts {
+            weapon(game, id).next_primary_attack = 0.0;
+            // The stub map has no water: the movement leaves the waterlevel at 0, so it is set
+            // between the movement and `PostThink`, where the weapon looks at it.
+            let player = eng.client_edict(0);
+            eng.ent_mut(player).unwrap().button = i32::from(IN_ATTACK);
+            let attack = GoldSrcUserCmd { buttons: IN_ATTACK, ..cmd() };
+            game.run_usercmd(eng, 0, &attack, 0);
+            eng.ent_mut(player).unwrap().waterlevel = 3;
+            game.post_usercmd(eng, 0, &attack);
+            // Nothing was fired: `ItemPostFrame` took the underwater branch.
+            assert_eq!(weapon(game, id).clip, 8, "{id:?}");
+        }
+    });
+    b.step(3);
+    b.probe
+        .messages()
+        .iter()
+        .filter(|m| matches!(m, SvcMessage::Sound(s) if s.sound_index == rifle && s.channel == 1))
+        .count()
+}
+
+#[test]
+fn a_shotgun_clicks_once_when_fired_under_water() {
+    // `CM3::PlayEmptySound` and `CXM1014::PlayEmptySound` (wpn_m3.cpp 65-70, wpn_xm1014.cpp
+    // 63-68) clear `m_iPlayEmptySound` after the click, and `ItemPostFrame`'s underwater branch
+    // calls the virtual: a held trigger clicks once until the idle arms it again. A gun without
+    // the override (the Galil) clicks at every attempt.
+    assert_eq!(underwater_clicks(WeaponId::M3, 3), 1);
+    assert_eq!(underwater_clicks(WeaponId::Xm1014, 3), 1);
+    assert_eq!(underwater_clicks(WeaponId::Galil, 3), 3);
+}
