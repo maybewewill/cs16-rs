@@ -48,6 +48,14 @@ pub(crate) struct Outbox {
     /// The `event_t` delta schema `svc_event_reliable` is encoded with; `None` where the
     /// server has not set it (a reliable event is then not sent).
     pub(crate) event_schema: Option<cs_proto48::delta::DeltaSchema>,
+    /// While the game puts the client of this slot in the server (`ClientPutInServer`), what it
+    /// sends to that client alone (`MsgDest::One`, `MsgDest::OneUnreliable`) is thrown away: the
+    /// original clears the client's reliable and unreliable buffers after the call.
+    pub(crate) discard_direct: Option<usize>,
+    /// `sv.reliable_datagram`: what the game sent to `MsgDest::All` since the last flush. The
+    /// server appends it to the reliable stream of every client in the game at the end of the
+    /// frame (`SV_UpdateToReliableMessages`), after what the game sent to single clients.
+    pub(crate) reliable_all: MsgWriter,
 }
 
 impl Outbox {
@@ -65,6 +73,8 @@ impl Outbox {
             change_level: None,
             events: vec![crate::events::EventQueue::default(); slots],
             event_schema: None,
+            discard_direct: None,
+            reliable_all: MsgWriter::new(),
         }
     }
 
@@ -85,6 +95,16 @@ impl Outbox {
         }
     }
 
+    /// Appends `bytes` to [`reliable_all`](Self::reliable_all) under the same cap as
+    /// [`push_reliable`](Self::push_reliable).
+    pub(crate) fn push_reliable_all(&mut self, bytes: &[u8]) {
+        if self.reliable_all.len() > MAX_RELIABLE_BACKLOG {
+            self.dropped += 1;
+        } else {
+            self.reliable_all.write_bytes(bytes);
+        }
+    }
+
     /// [`push_reliable`](Self::push_reliable) for the unreliable buffer of `slot`.
     pub(crate) fn push_unreliable(&mut self, slot: usize, bytes: &[u8]) {
         let buffer = &mut self.unreliable[slot];
@@ -99,6 +119,7 @@ impl Outbox {
     pub(crate) fn reset_map_state(&mut self) {
         self.init.clear();
         self.init_open = false;
+        self.reliable_all = MsgWriter::new();
         self.light_styles = default_light_styles();
     }
 }
@@ -107,6 +128,9 @@ impl Outbox {
 #[derive(Debug, Default)]
 pub(crate) struct ClientView {
     pub(crate) userinfo: InfoString,
+    /// `client_t::physinfo`: what the game set with `SET_PHYSICS_KEY_VALUE`; empty at connect
+    /// (ReHLDS `sv_main.cpp` clears it there). It goes to the client in its client data.
+    pub(crate) physinfo: InfoString,
     /// The slot holds a connection; the userinfo of a free slot cannot be changed.
     pub(crate) in_use: bool,
     pub(crate) active: bool,
@@ -193,6 +217,25 @@ impl EngineApi<'_> {
             client.userinfo.set(key, value);
             client.userinfo_dirty = true;
         }
+    }
+
+    /// `SET_PHYSICS_KEY_VALUE` (`PF_SetPhysicsKeyValue`, ReHLDS `pr_cmds.cpp`, read 2026-11-22):
+    /// sets a key of the slot's physics info; a free slot is left alone.
+    pub fn set_physics_key(&mut self, slot: u8, key: &str, value: &str) {
+        if let Some(client) = self.clients.get_mut(usize::from(slot))
+            && client.in_use
+        {
+            client.physinfo.set(key, value);
+        }
+    }
+
+    /// `ENGINE_GETPHYSINFO`: the slot's physics info as an info string (`\keyalue...`),
+    /// empty for a free slot.
+    pub fn physics_info(&self, slot: u8) -> String {
+        self.clients
+            .get(usize::from(slot))
+            .filter(|c| c.in_use)
+            .map_or_else(String::new, |c| c.physinfo.to_wire_string())
     }
 
     /// Queues a kick; a second kick of the same slot keeps the first reason.
@@ -359,7 +402,8 @@ pub fn entity_state_from_vars(index: u16, v: &EntVars) -> GoldSrcEntityState {
         owner: v.owner.map_or(0, |id| id.index),
         aiment: v.aiment.map_or(0, |id| id.index),
         usehull: u8::from(v.flags & FL_DUCKING != 0),
-        spectator: false,
+        // `AddToFullPack` of the game sets it for a player, the only entity with the flag.
+        spectator: v.flags & crate::world::consts::FL_SPECTATOR != 0,
         mins: v.mins,
         maxs: v.maxs,
         colormap: v.colormap,

@@ -15,7 +15,11 @@ use cs_proto48::usermsg::UserMsgRegistry;
 use cs_transport::{PacketTransport, PeerAddr};
 
 use crate::client::{Client, ClientState, MAX_REFUSED_STREAMS, SignonStage};
-use crate::edict::{DEFAULT_MAX_EDICTS, EdictPool};
+use crate::edict::{DEFAULT_MAX_EDICTS, EdictId, EdictPool};
+
+/// `EF_MUZZLEFLASH` and `EF_NOINTERP` (`common/const.h`).
+const EF_MUZZLEFLASH: u32 = 2;
+const EF_NOINTERP: u32 = 32;
 use crate::game::{ClientView, EngineApi, GameDll, Outbox, entity_state_from_vars};
 use crate::map::ServerMap;
 use crate::oob::{ChallengeIssuer, OOB_GLOBAL_REPLIES_PER_SEC, OobLimiter};
@@ -23,9 +27,9 @@ use crate::precache::PrecacheTables;
 use crate::world::WorldLinks;
 use crate::world::consts::{MOVETYPE_WALK, SOLID_SLIDEBOX};
 use crate::signon::{
-    MAX_SIGNON_BUFFER, SPAWN_TAIL_MAX, UserInfoEntry, move_vars, munged_map_crc, write_new_stage,
+    MAX_SIGNON_BUFFER, SPAWN_TAIL_MAX, UserInfoEntry, move_vars, public_userinfo, munged_map_crc, write_new_stage,
     write_sendres_stage,
-    write_spawn_baselines, write_spawn_stage,
+    write_spawn_baselines, write_spawn_stage, write_spawn_tail,
 };
 use crate::usercmd::TokenBucket;
 
@@ -323,11 +327,13 @@ impl<G: GameDll> Server<G> {
         // The physics pass is the frame's game work: deliver what is still queued, and start a
         // fresh touch budget, before the updates are built.
         self.finish_frame_touches();
+        self.flush_reliable_datagram();
         self.sv_time += self.frametime;
         self.drop_timed_out_clients();
         self.queue_pings_if_due();
         self.broadcast_userinfo();
         self.send_client_frames(net);
+        self.cleanup_ents();
         self.send_farewells(net);
         self.frametime = 0.0;
     }
@@ -569,6 +575,46 @@ impl<G: GameDll> Server<G> {
         }
     }
 
+    /// The broadcast half of `SV_UpdateToReliableMessages` (ReHLDS `sv_main.cpp`, read
+    /// 2026-11-22): what the game sent to `MsgDest::All` during the frame is appended to the
+    /// reliable stream of every client with `client->active`, which `SV_WriteSpawn` sets (here:
+    /// past the `spawn` answer), and the buffer is emptied. The `REHLDS_FIXES` build also reaches
+    /// a client that has been in the game before; not reproduced.
+    pub(crate) fn flush_reliable_datagram(&mut self) {
+        if self.outbox.reliable_all.is_empty() {
+            return;
+        }
+        let bytes = std::mem::replace(&mut self.outbox.reliable_all, MsgWriter::new());
+        for client in &mut self.clients {
+            if matches!(
+                client.state,
+                ClientState::Signon(SignonStage::AwaitSendEnts) | ClientState::Active
+            ) {
+                client.chan.write_reliable(bytes.as_slice());
+            }
+        }
+        // The cap applies to what stays unacknowledged.
+        self.drain_outbox();
+    }
+
+    /// `SV_CleanupEnts` (ReHLDS `sv_main.cpp`, read 2026-11-22), the end of
+    /// `SV_SendClientMessages`: the effects that live for one frame (`EF_NOINTERP`,
+    /// `EF_MUZZLEFLASH`) are cleared on every entity from 1 up, whether or not any client was
+    /// sent an update this frame.
+    fn cleanup_ents(&mut self) {
+        let ids: Vec<EdictId> = self
+            .edicts
+            .iter_live()
+            .filter(|(id, e)| id.index >= 1 && e.vars.effects & (EF_NOINTERP | EF_MUZZLEFLASH) != 0)
+            .map(|(id, _)| id)
+            .collect();
+        for id in ids {
+            if let Some(edict) = self.edicts.get_mut(id) {
+                edict.vars.effects &= !(EF_NOINTERP | EF_MUZZLEFLASH);
+            }
+        }
+    }
+
     /// Connected clients whose unacknowledged reliable data exceeds [`MAX_RELIABLE_BACKLOG`].
     fn overloaded_slots(&self) -> Vec<u8> {
         self.clients
@@ -794,7 +840,7 @@ impl<G: GameDll> Server<G> {
             .map(|(slot, (c, v))| UserInfoEntry {
                 slot: slot as u8,
                 userid: c.userid,
-                info: v.userinfo.to_wire_string(),
+                info: public_userinfo(&v.userinfo),
             })
             .collect()
     }
@@ -874,7 +920,11 @@ impl<G: GameDll> Server<G> {
             tracing::warn!(slot, ?crc, expected, "map CRC mismatch in spawn");
         }
 
+        // `SV_Spawn_f` (ReHLDS `sv_main.cpp`, read 2026-11-22): the answer starts with the signon
+        // buffer (what the game sent to the init buffer while the map was activated, then the
+        // spawn baselines, in the order `SV_ActivateServer` made them), then `SV_WriteSpawn`.
         let mut w = MsgWriter::new();
+        w.write_bytes(&self.outbox.init);
         write_spawn_baselines(
             &mut w,
             &self.deltas,
@@ -882,17 +932,23 @@ impl<G: GameDll> Server<G> {
             &self.baselines,
             self.sv_time,
         );
-        self.clients[index].chan.write_reliable(w.as_slice());
 
-        // A player is a sliding box that walks unless the game says otherwise; the game's
-        // `ClientPutInServer` sets what it wants, then the edict is linked as `SV_LinkEdict`
-        // would from its `SET_ORIGIN`.
+        // `SV_WriteSpawn`: a player is a sliding box that walks unless the game says otherwise;
+        // the game's `ClientPutInServer` sets what it wants, then the edict is linked as
+        // `SV_LinkEdict` would from its `SET_ORIGIN`. Whatever the game sends to this client
+        // alone in it is thrown away: the original clears the client's reliable and unreliable
+        // buffers right after the call (`SZ_Clear(&host_client->netchan.message)` and `datagram`,
+        // not under `REHLDS_FIXES`, which clears them before the call; the golden capture of
+        // HLDS build 10210 has none of the messages of `Spawn()` in the join). What it sends to
+        // everyone stays.
         let player = self.edicts.client(slot);
         if let Some(edict) = self.edicts.get_mut(player) {
             edict.vars.solid = SOLID_SLIDEBOX;
             edict.vars.movetype = MOVETYPE_WALK;
         }
+        self.outbox.discard_direct = Some(index);
         self.with_game(|game, eng| game.client_put_in_server(eng, slot));
+        self.outbox.discard_direct = None;
         if self.clients[index].is_free() {
             // Kicked while being put in.
             return;
@@ -907,15 +963,16 @@ impl<G: GameDll> Server<G> {
             .map(|e| e.vars.v_angle)
             .unwrap_or_default();
         let userinfos = self.userinfo_entries(|_| true);
-        let mut w = MsgWriter::new();
         write_spawn_stage(
             &mut w,
             view_angles,
             self.sv_time,
             &userinfos,
             &self.outbox.light_styles,
-            &self.outbox.init,
         );
+        // `SV_WriteClientdataToMessage`, then `svc_signonnum 1` and `SV_WriteVoiceCodec`.
+        self.write_spawn_clientdata(slot, &mut w);
+        write_spawn_tail(&mut w);
         let client = &mut self.clients[index];
         client.chan.write_reliable(w.as_slice());
         client.state = ClientState::Signon(SignonStage::AwaitSendEnts);
@@ -934,6 +991,7 @@ mod tests {
     use crate::edict::EdictId;
     use crate::oob::MAX_INFO_STRING;
     use crate::signon::{
+        SPAWN_CLIENTDATA_MAX,
         INIT_BUFFER_BUDGET, MAX_LIGHTSTYLES, write_spawn_baselines, write_spawn_stage,
     };
 
@@ -1070,14 +1128,15 @@ mod tests {
         let mut baselines = MsgWriter::new();
         write_spawn_baselines(&mut baselines, &server.deltas, 32, &server.baselines, 100.0);
         let mut rest = MsgWriter::new();
+        rest.write_bytes(&server.outbox.init);
         write_spawn_stage(
             &mut rest,
             Vec3::new(0.0, 90.0, 0.0),
             100.0,
             &userinfos,
             &server.outbox.light_styles,
-            &server.outbox.init,
         );
+        write_spawn_tail(&mut rest);
         let (a, b) = (baselines.as_slice().len(), rest.as_slice().len());
         (a + b, a, b)
     }
@@ -1112,15 +1171,42 @@ mod tests {
         );
     }
 
-    /// The spawn tail constant covers what `write_spawn_stage` writes at its worst, and is not
-    /// loose by more than a few bytes per message.
+    /// The spawn tail constant covers what the `spawn` answer holds besides the init buffer and
+    /// the baselines, and is not loose by more than a few bytes per message (the client data
+    /// has a bound of its own, [`SPAWN_CLIENTDATA_MAX`]).
     #[test]
     fn spawn_tail_max_is_the_worst_case_of_the_tail() {
         let (_, _, rest) = spawn_stage_size(0, false);
-        // `spawn_stage_size` fills the init buffer; the tail is what is left.
-        let tail = rest - INIT_BUFFER_BUDGET;
+        // `spawn_stage_size` fills the init buffer; the tail is what is left, with no client
+        // data and no choke or forced view.
+        let tail = rest - INIT_BUFFER_BUDGET + 1 + 7 + SPAWN_CLIENTDATA_MAX;
         assert!(tail <= SPAWN_TAIL_MAX, "{tail} bytes of {SPAWN_TAIL_MAX}");
         assert!(SPAWN_TAIL_MAX - tail <= 64, "{tail} bytes of {SPAWN_TAIL_MAX}");
+    }
+
+    /// `SPAWN_CLIENTDATA_MAX` holds the client data with every field at its widest and 64
+    /// weapon records likewise (a string at its 256 bytes).
+    #[test]
+    fn spawn_clientdata_max_holds_the_widest_client_data() {
+        let deltas = DeltaRegistry::cs16_default();
+        let bits = |schema: &DeltaSchema| -> usize {
+            schema
+                .fields
+                .iter()
+                .map(|f| {
+                    if f.base_type() == cs_proto48::delta::DT_STRING {
+                        8 * 256
+                    } else {
+                        usize::from(f.significant_bits) + 1
+                    }
+                })
+                .sum::<usize>()
+                + 8
+        };
+        let clientdata = bits(deltas.get("clientdata_t").expect("clientdata_t"));
+        let weapon = bits(deltas.get("weapon_data_t").expect("weapon_data_t")) + 7;
+        let bytes = 1 + clientdata.div_ceil(8) + 64 * weapon.div_ceil(8) + 8;
+        assert!(bytes <= SPAWN_CLIENTDATA_MAX, "{bytes} bytes");
     }
 
     /// Init messages and baselines share `MAX_SIGNON_BUFFER`: whatever the game wrote, the

@@ -95,7 +95,7 @@ evidence = "crates/cs-game/tests/buy.rs::buy_zone_icon_on_spawn, a_zone_of_no_te
 [[item]]
 id = "game_buy_equipment"
 status = "tested"
-evidence = "crates/cs-game/tests/buy.rs::buy_armor_as_regamedll, buy_night_vision_goggles, weapon_purchase_refused_until_weapons. The vest (650), the vest with helmet (1000, or the 350 or 650 that make up the rest), the night vision goggles (1250) and #Not_Enough_Money with BlinkAccount (twice). Deviations: weapons, grenades, the shield and ammo do not exist until 2D (a purchase is refused with #Cannot_Buy_This, nothing taken; cl_autobuy and cl_rebuy are not ported); the defuser needs a bomb target (2E); #Hint_use_nightvision is not sent (no hint queue)."
+evidence = "crates/cs-game/tests/buy.rs::buy_armor_as_regamedll, buy_night_vision_goggles; crates/cs-game/tests/inventory.rs::buy_drop_pickup_as_regamedll (weapons are bought since 2D). The vest (650), the vest with helmet (1000, or the 350 or 650 that make up the rest), the night vision goggles (1250) and #Not_Enough_Money with BlinkAccount (twice). Deviations: weapons, grenades, the shield and ammo do not exist until 2D (a purchase is refused with #Cannot_Buy_This, nothing taken; cl_autobuy and cl_rebuy are not ported); the defuser needs a bomb target (2E); #Hint_use_nightvision is not sent (no hint queue)."
 
 [[item]]
 id = "game_radio"

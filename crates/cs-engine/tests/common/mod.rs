@@ -207,6 +207,14 @@ pub struct TestGame {
     pub broadcast_every_frame: bool,
     /// When set, `client_put_in_server` sends an `svc_print` of [`SHOUT`] to `MsgDest::All`.
     pub shout_on_put_in_server: bool,
+    /// When set, `client_put_in_server` sends an `svc_print` of [`SHOUT`] to the joiner alone
+    /// (`MsgDest::One`), which the engine throws away (`SV_WriteSpawn` clears the buffers).
+    pub print_to_joiner_on_put_in_server: bool,
+    /// What `client_put_in_server` sets on the joiner's edict: `fixangle` and `effects`; and a
+    /// physics key (`"slj"`) when `physinfo_on_put_in_server` is set.
+    pub fixangle_on_put_in_server: i32,
+    pub effects_on_put_in_server: u32,
+    pub physinfo_on_put_in_server: bool,
     /// Entities with `modelindex = 2` that `server_activate` creates.
     pub extra_entities: usize,
     /// When set, the extra entities get `EF_NODRAW` in `effects`.
@@ -564,6 +572,20 @@ impl GameDll for TestGame {
         if self.shout_on_put_in_server {
             eng.send(MsgDest::All, &print_bytes(SHOUT));
         }
+        if self.print_to_joiner_on_put_in_server {
+            eng.send(MsgDest::One(slot), &print_bytes(JOINER_PRINT));
+        }
+        if let Some(vars) = eng.ent_mut(id) {
+            if self.fixangle_on_put_in_server != 0 {
+                vars.fixangle = self.fixangle_on_put_in_server;
+                vars.angles = Vec3::new(10.0, 90.0, 5.0);
+                vars.avelocity = Vec3::new(0.0, 33.0, 0.0);
+            }
+            vars.effects = self.effects_on_put_in_server;
+        }
+        if self.physinfo_on_put_in_server {
+            eng.set_physics_key(slot, "slj", "0");
+        }
         if self.scatter_extras {
             churn_extras(eng, 0);
         }
@@ -797,6 +819,7 @@ impl GameDll for TestGame {
             origin: vars.origin,
             health: vars.health,
             maxspeed: 250.0,
+            physinfo: eng.physics_info(slot),
             ..Default::default()
         }
     }
@@ -864,6 +887,9 @@ pub const BIG_PRINT_COUNT: usize = 40;
 pub fn big_print() -> String {
     format!("{}\n", "b".repeat(399))
 }
+
+/// Text of the `svc_print` that `print_to_joiner_on_put_in_server` sends to the joiner.
+pub const JOINER_PRINT: &str = "for the joiner only";
 
 /// Text of the `svc_print` that `shout_on_put_in_server` broadcasts.
 pub const SHOUT: &str = "shout\n";

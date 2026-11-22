@@ -121,7 +121,10 @@ fn each_destination_reaches_exactly_its_audience() {
 
     h.step(&mut [&mut a, &mut b, &mut c], 250);
     assert_eq!(c.state(), &ProbeState::InGame);
-    assert_eq!(count_print(&c, "all"), 1);
+    // `MSG_ALL` reaches the clients with `client->active` when the frame ends
+    // (`SV_UpdateToReliableMessages`, ReHLDS `sv_main.cpp`, read 2026-11-22); C had not been
+    // through `spawn` yet.
+    assert_eq!(count_print(&c, "all"), 0);
     assert_eq!(count_print(&c, "one-c"), 1);
     assert_eq!(count_print(&c, "one-a"), 0);
     assert_eq!(count_print(&c, "broadcast"), 0);
@@ -474,7 +477,8 @@ fn init_messages_are_replayed_to_late_joiners() {
         ..TestGame::default()
     };
     let (mut h, mut a, mut b) = two_active(game);
-    // Everyone entering gets the stored messages, in order, after the light styles.
+    // Everyone entering gets the stored messages, in order, at the start of the `spawn` answer,
+    // before the baselines (`SV_Spawn_f` writes the signon buffer, then `SV_WriteSpawn`).
     for probe in [&a, &b] {
         assert_eq!(count_print(probe, "init-1"), 1);
         assert_eq!(count_print(probe, "init-2"), 1);
@@ -487,6 +491,11 @@ fn init_messages_are_replayed_to_late_joiners() {
         .iter()
         .rposition(|m| matches!(m, SvcMessage::LightStyle { .. }))
         .unwrap();
+    let baselines = a
+        .messages()
+        .iter()
+        .position(|m| matches!(m, SvcMessage::SpawnBaseline { .. }))
+        .unwrap();
     let init = a
         .messages()
         .iter()
@@ -497,7 +506,7 @@ fn init_messages_are_replayed_to_late_joiners() {
         .iter()
         .position(|m| *m == SvcMessage::SignonNum(1))
         .unwrap();
-    assert!(styles < init && init < signon_num);
+    assert!(init < baselines && baselines < styles && styles < signon_num);
 
     let mut c = h.add_probe("C");
     h.step(&mut [&mut a, &mut b, &mut c], 250);

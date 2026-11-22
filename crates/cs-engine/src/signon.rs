@@ -12,7 +12,7 @@ use cs_proto48::messages::{
     write_svc_lightstyle, write_svc_newmovevars, write_svc_print, write_svc_resourcelist,
     write_svc_resourcerequest, write_svc_sendextrainfo, write_svc_serverinfo, write_svc_setangle,
     write_svc_setview, write_svc_signonnum, write_svc_spawnbaseline, write_svc_time,
-    write_svc_updateuserinfo, write_svc_userregs,
+    write_svc_updateuserinfo, write_svc_userregs, write_svc_voiceinit,
 };
 use cs_proto48::usermsg::UserMsgRegistry;
 use glam::Vec3;
@@ -32,12 +32,22 @@ pub(crate) const MAX_LIGHTSTYLES: u8 = 64;
 /// (`g_rehlds_sv.signonData[NET_MAX_PAYLOAD]`, `sv_main.cpp` `SV_SpawnServer`, read 2026-11-21).
 pub const MAX_SIGNON_BUFFER: usize = 65536;
 
-/// Most bytes [`write_spawn_stage`] writes besides the init buffer: `svc_setangle`,
+/// Bytes kept back for the `svc_clientdata` of the `spawn` answer (`SV_WriteClientdataToMessage`):
+/// the client data against the zero baseline and, for a client with `cl_lw`, the weapon data of
+/// up to 64 weapons. A bound over what a game can fill (see the test of its size).
+pub const SPAWN_CLIENTDATA_MAX: usize = 8 * 1024;
+
+/// Most bytes the `spawn` answer holds besides the init buffer and the baselines: `svc_setangle`,
 /// `svc_time`, one `svc_updateuserinfo` per client slot at the longest userinfo a connect may
-/// carry (with its terminating NUL), every light style at its longest stored length and
-/// `svc_signonnum`.
+/// carry (with its terminating NUL), every light style at its longest stored length, the choke
+/// byte and a forced view (`svc_setangle`), [`SPAWN_CLIENTDATA_MAX`] of client data,
+/// `svc_signonnum` and `svc_voiceinit`.
 pub const SPAWN_TAIL_MAX: usize = 7
     + 5
+    + 1
+    + 7
+    + SPAWN_CLIENTDATA_MAX
+    + 3
     + MAX_CLIENT_SLOTS as usize * (1 + 1 + 4 + MAX_INFO_STRING + 1 + 16)
     + MAX_LIGHTSTYLES as usize * (1 + 1 + MAX_LIGHT_STYLE_BYTES + 1)
     + 2;
@@ -60,6 +70,14 @@ pub(crate) fn default_light_styles() -> Vec<String> {
     (0..MAX_LIGHTSTYLES)
         .map(|style| if style == 0 { "m" } else { "" }.to_string())
         .collect()
+}
+
+/// A userinfo as `SV_FullClientUpdate` sends it (ReHLDS `sv_main.cpp`, read 2026-11-22): without
+/// the keys that start with `_`, which are private to the server (`Info_RemovePrefixedKeys`).
+pub(crate) fn public_userinfo(info: &cs_proto48::info::InfoString) -> String {
+    let mut info = info.clone();
+    info.remove_prefixed('_');
+    info.to_wire_string()
 }
 
 /// One `svc_updateuserinfo` entry.
@@ -210,26 +228,30 @@ pub(crate) fn write_spawn_baselines(
     write_svc_spawnbaseline(w, deltas, max_clients, baselines, time);
 }
 
-/// Rest of the answer to `spawn`, after the game put the player in: view angles, time, every
-/// connected client's userinfo, the stored light styles, the init buffer (messages the game
-/// sent to `MsgDest::Init` while the map was activated, complete as it wrote them) and
-/// `svc_signonnum 1`.
+/// `SV_WriteSpawn` (ReHLDS `sv_main.cpp`, read 2026-11-22) after the game put the player in:
+/// `svc_time`, the userinfo of every connected client (`SV_FullClientUpdate`), the stored light
+/// styles and the view angles (`v_angle` pitch and yaw, roll 0). The client data follows
+/// ([`Server::write_spawn_clientdata`](crate::server::Server)) and then [`write_spawn_tail`].
 pub(crate) fn write_spawn_stage(
     w: &mut MsgWriter,
     view_angles: Vec3,
     time: f64,
     userinfos: &[UserInfoEntry],
     light_styles: &[String],
-    init: &[u8],
 ) {
-    write_svc_setangle(w, view_angles);
     write_svc_time(w, time as f32);
     write_userinfos(w, userinfos);
     for (style, pattern) in light_styles.iter().enumerate().take(MAX_LIGHTSTYLES.into()) {
         write_svc_lightstyle(w, style as u8, pattern);
     }
-    w.write_bytes(init);
+    write_svc_setangle(w, Vec3::new(view_angles.x, view_angles.y, 0.0));
+}
+
+/// The end of the answer to `spawn`: `svc_signonnum 1` and `SV_WriteVoiceCodec` (an empty codec
+/// of quality 0, `SV_WriteVoiceCodec_internal`).
+pub(crate) fn write_spawn_tail(w: &mut MsgWriter) {
     write_svc_signonnum(w, 1);
+    write_svc_voiceinit(w, "", 0);
 }
 
 #[cfg(test)]
@@ -370,28 +392,27 @@ mod tests {
             origin: Vec3::new(0.0, 0.0, 16.0),
             ..Default::default()
         };
+        // `SV_Spawn_f`: the init buffer, the baselines, then `SV_WriteSpawn`.
         let mut w = MsgWriter::new();
-        write_spawn_baselines(&mut w, &deltas, 8, &[(40, state)], 1.0);
         let mut init = MsgWriter::new();
         write_svc_print(&mut init, "init\n");
+        w.write_bytes(init.as_slice());
+        write_spawn_baselines(&mut w, &deltas, 8, &[(40, state)], 1.0);
         write_spawn_stage(
             &mut w,
-            Vec3::new(0.0, 90.0, 0.0),
+            Vec3::new(0.0, 90.0, 5.0),
             1.5,
-            &[entry(0, 1, "\\name\\A"), entry(1, 2, "\\name\\B")],
+            &[entry(0, 1, r"\name\A"), entry(1, 2, r"\name\B")],
             &default_light_styles(),
-            init.as_slice(),
         );
+        write_spawn_tail(&mut w);
         let msgs = parse(w);
-        assert_eq!(msgs.len(), 1 + 1 + 1 + 2 + 64 + 1 + 1);
-        let SvcMessage::SpawnBaseline { baselines, .. } = &msgs[0] else {
-            panic!("expected spawnbaseline, got {:?}", msgs[0]);
+        assert_eq!(msgs.len(), 1 + 1 + 1 + 2 + 64 + 1 + 1 + 1);
+        assert_eq!(msgs[0], SvcMessage::Print("init\n".to_string()));
+        let SvcMessage::SpawnBaseline { baselines, .. } = &msgs[1] else {
+            panic!("expected spawnbaseline, got {:?}", msgs[1]);
         };
         assert_eq!(baselines.keys().copied().collect::<Vec<_>>(), vec![40]);
-        let SvcMessage::SetAngle(angles) = msgs[1] else {
-            panic!("expected setangle");
-        };
-        assert!((angles.y - 90.0).abs() < 0.01, "{angles:?}");
         assert_eq!(msgs[2], SvcMessage::Time(1.5));
         assert_eq!(msgs[3].opcode(), svc::UPDATEUSERINFO);
         assert_eq!(msgs[4].opcode(), svc::UPDATEUSERINFO);
@@ -409,8 +430,13 @@ mod tests {
                 pattern: String::new()
             }
         );
-        assert_eq!(msgs[5 + 64], SvcMessage::Print("init\n".to_string()));
+        // The roll is zero whatever `v_angle` holds.
+        let SvcMessage::SetAngle(angles) = msgs[5 + 64] else {
+            panic!("expected setangle");
+        };
+        assert!((angles.y - 90.0).abs() < 0.01 && angles.z == 0.0, "{angles:?}");
         assert_eq!(msgs[5 + 65], SvcMessage::SignonNum(1));
+        assert_eq!(msgs[5 + 66].opcode(), svc::VOICEINIT);
     }
 
     #[test]

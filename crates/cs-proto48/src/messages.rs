@@ -1353,6 +1353,13 @@ pub fn write_svc_setangle(w: &mut MsgWriter, angles: Vec3) {
     w.write_hires_angle(angles.z);
 }
 
+/// `svc_addangle`: turns the client's view by `yaw` degrees (the `fixangle == 2` case of
+/// `SV_WriteClientdataToMessage`).
+pub fn write_svc_addangle(w: &mut MsgWriter, yaw: f32) {
+    w.write_u8(svc::ADDANGLE);
+    w.write_hires_angle(yaw);
+}
+
 pub fn write_svc_signonnum(w: &mut MsgWriter, num: u8) {
     w.write_u8(svc::SIGNONNUM);
     w.write_u8(num);

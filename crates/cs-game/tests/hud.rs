@@ -284,17 +284,19 @@ fn usermsgs_registered_in_regamedll_order() {
     }
 }
 
-/// The user messages of `Spawn()` inside `ClientPutInServer` for a player that has only connected
-/// (`m_bJustConnected`: `PlayerSpawn` returns at once), in the order of `player.cpp` `Spawn`:
-/// the goggles off (`NVGToggle`), `SetProgressBarTime(0)`, `SetScoreboardAttributes`, `TeamInfo`,
-/// `ScoreInfo`, the fade and `SyncRoundTimer`. (`SVC_ROOMTYPE` goes first; `Spawn` sends no
-/// `Flashlight`.)
-pub const SPAWN_ON_CONNECT: &[&str] = &[
-    "NVGToggle", "BarTime", "ScoreAttrib", "TeamInfo", "ScoreInfo", "ScreenFade", "RoundTime",
-];
+/// What is left of the user messages of `Spawn()` inside `ClientPutInServer`. The original clears
+/// what the game sent to the joiner alone (`NVGToggle`, `BarTime`, `ScoreAttrib`, `ScreenFade`,
+/// `RoundTime`: `SZ_Clear` of `netchan.message` after `pfnClientPutInServer`, `SV_WriteSpawn`,
+/// ReHLDS `sv_main.cpp`, read 2026-11-22; the golden capture of HLDS has none of them), and what
+/// it sent to everyone (`MSG_ALL`) stays: `TeamInfo` and `ScoreInfo` (player.cpp:6106, 6112), and
+/// then `ClientPutInServer`'s `#Game_connected` (`TextMsg`). They reach the joiner at the end of
+/// the frame of its `spawn` (`sv.reliable_datagram`), whatever the commands that follow send.
+pub const SPAWN_ON_CONNECT: &[&str] = &["TeamInfo", "ScoreInfo"];
 
-/// What the first command's `PlayerPreThink` sends: the join menus (`JoiningThink`).
-const FIRST_MENU: &[&str] = &["ShowMenu", "StatusIcon", "ItemStatus", "VGUIMenu"];
+/// What the first command's `PlayerPreThink` sends before `UpdateClientData`: the join menus
+/// (`JoiningThink`: the MOTD window is reset, the defuser icon and the item status hidden). The
+/// team menu (`PlayerThink`) is the second command's, after the first update: `VGUIMenu`.
+const FIRST_MENU: &[&str] = &["ShowMenu", "StatusIcon", "ItemStatus"];
 
 /// The messages a first player gets when its first client data update runs.
 const FIRST_UPDATE: &[&str] = &[
@@ -328,6 +330,12 @@ const FIRST_UPDATE: &[&str] = &[
     "Battery",
     "Damage",
     "Train",
+    // `m_rgAmmoLast` is -1 after the `Spawn()` of the join: all 32 ammo counts, zeros too
+    // (`SendAmmoUpdate`).
+    "AmmoX", "AmmoX", "AmmoX", "AmmoX", "AmmoX", "AmmoX", "AmmoX", "AmmoX",
+    "AmmoX", "AmmoX", "AmmoX", "AmmoX", "AmmoX", "AmmoX", "AmmoX", "AmmoX",
+    "AmmoX", "AmmoX", "AmmoX", "AmmoX", "AmmoX", "AmmoX", "AmmoX", "AmmoX",
+    "AmmoX", "AmmoX", "AmmoX", "AmmoX", "AmmoX", "AmmoX", "AmmoX", "AmmoX",
 ];
 
 /// What a joining client is sent up to the team menu, as ReGameDLL sends it: the `Spawn()` of
@@ -341,16 +349,22 @@ const FIRST_UPDATE: &[&str] = &[
 fn join_hud_messages_as_regamedll() {
     let mut b = Bench::with_one_client(2, b"");
     b.step(20);
-    let names = b.names_from(0, 0);
+    let all = b.names_from(0, 0);
+    // The weapon table comes first, in the `spawn` answer (the init buffer).
+    let weapon_lists = all.iter().take_while(|n| *n == "WeaponList").count();
+    assert_eq!(weapon_lists, cs_game::weapons::item_infos().len());
+    let names = &all[weapon_lists..];
     let mut expected: Vec<&str> = SPAWN_ON_CONNECT.to_vec();
     expected.push("TextMsg");
     expected.extend(FIRST_MENU);
     expected.extend(FIRST_UPDATE);
+    // The team menu is the second command's `PlayerThink`, after the first update.
+    expected.push("VGUIMenu");
     assert_eq!(names[..expected.len()], *expected);
     assert!(names[expected.len()..].iter().all(|n| n == "ShowMenu" || n == "VGUIMenu"));
-    // `RoundTime` twice: `Spawn()` and the first update; no `ShowTimer`; `HideWeapon` once, the
-    // flashlight bit only.
-    assert_eq!(names.iter().filter(|n| *n == "RoundTime").count(), 2);
+    // `RoundTime` once, from the first update (the `Spawn()` of the join sent one the engine
+    // cleared); no `ShowTimer`; `HideWeapon` once, the flashlight bit only.
+    assert_eq!(names.iter().filter(|n| *n == "RoundTime").count(), 1);
     assert!(!names.iter().any(|n| n == "ShowTimer"));
     let hides: Vec<CsUserMsg> = b
         .messages(0)
@@ -369,24 +383,29 @@ fn join_hud_messages_as_regamedll() {
 fn init_hud_sequence_as_regamedll() {
     let mut b = Bench::with_one_client(2, b"");
     b.step(20);
-    let names = b.names_from(0, 0);
-    // `ClientPutInServer` ends with `#Game_connected` to everyone, the newcomer included. The
-    // client's first command runs in the packet that makes it active (the engine runs the moves
-    // that follow `sendents` in the same packet, as ReHLDS runs them after `begin`), and
-    // `PlayerPreThink` runs for every command, so the team menu (`teams::pre_think`) goes out
-    // before the first update, which is built at the end of that frame: the HUD follows it, once.
-    // Before it, the messages of the `Spawn()` that `ClientPutInServer` runs (`SPAWN_ON_CONNECT`).
+    let all = b.names_from(0, 0);
+    // The weapon table of `WriteSigonMessages` is in the init (sign-on) buffer every client is
+    // sent at `spawn`, so all of it comes before what `ClientPutInServer` sends.
+    let weapon_lists = all.iter().filter(|n| *n == "WeaponList").count();
+    assert_eq!(weapon_lists, cs_game::weapons::item_infos().len());
+    assert!(all[..weapon_lists].iter().all(|n| n == "WeaponList"), "WeaponList first: {all:?}");
+    let names = &all[weapon_lists..];
+    // What `ClientPutInServer` sends to everyone survives the engine's clearing of the joiner's
+    // own messages: `TeamInfo` and `ScoreInfo` of its `Spawn()`, and `#Game_connected` to
+    // everyone, the newcomer included. They are the broadcast of the frame of its `spawn`, which
+    // the engine delivers at the end of it (`SV_UpdateToReliableMessages`). Then the client's
+    // first command runs (the engine runs the moves that follow `sendents` in the same packet, as
+    // ReHLDS runs them after `begin`): `PlayerPreThink` runs for every command, so the join menus
+    // (`teams::pre_think`) and the first update (`UpdateClientData`, in `PreThink` too) come out
+    // in it, the HUD once; the team menu is the second command's.
     assert_eq!(names[..SPAWN_ON_CONNECT.len()], *SPAWN_ON_CONNECT, "Spawn() of ClientPutInServer");
     let names = &names[SPAWN_ON_CONNECT.len()..];
     assert_eq!(names[0], "TextMsg");
-    // The weapon table of `WriteSigonMessages` is in the init buffer every client is sent.
-    let weapon_lists = names.iter().filter(|n| *n == "WeaponList").count();
-    assert_eq!(weapon_lists, cs_game::weapons::item_infos().len());
-    let names: Vec<String> = names.into_iter().filter(|n| n != "WeaponList").collect();
     let names = &names[1..];
     assert_eq!(names[..FIRST_MENU.len()], *FIRST_MENU, "the first command's PreThink");
     let names = &names[FIRST_MENU.len()..];
     assert_eq!(names[..FIRST_UPDATE.len()], *FIRST_UPDATE, "the first player's HUD");
+    assert_eq!(names[FIRST_UPDATE.len()], "VGUIMenu", "the second command's team menu");
     assert!(names[FIRST_UPDATE.len()..].iter().all(|n| n == "ShowMenu" || n == "VGUIMenu"));
 
     let msgs = b.messages(0);
@@ -401,7 +420,7 @@ fn init_hud_sequence_as_regamedll() {
         find("ScoreInfo")[0],
         CsUserMsg::ScoreInfo { player_id: 1, frags: 0, deaths: 0, class_id: 0, team_id: 0 }
     );
-    // Once from `Spawn()` of the join, once from `InitHUD`.
+    // Once from `Spawn()` of the join (to everyone, so it stayed), once from `InitHUD`.
     let unassigned = CsUserMsg::TeamInfo { player_id: 1, team_name: "UNASSIGNED".into() };
     assert_eq!(find("TeamInfo"), [unassigned.clone(), unassigned]);
     // The terrorists' score first, then the counter-terrorists' (InitHUD), the other way
@@ -421,8 +440,10 @@ fn init_hud_sequence_as_regamedll() {
         find("ServerName"),
         [CsUserMsg::ServerName("Counter-Strike 1.6 Rust".into())]
     );
-    // `Spawn()` shows the player alive (it is `DEAD_NO` for the length of `Spawn`), `InitHUD` dead.
-    assert_eq!(find("ScoreAttrib")[0], CsUserMsg::ScoreAttrib { player_id: 1, flags: 0 });
+    // `Spawn()` shows the player alive (it is `DEAD_NO` for the length of `Spawn`), which the
+    // engine cleared; `InitHUD` and the first update say dead.
+    assert_eq!(find("ScoreAttrib").len(), 2);
+    assert_eq!(find("ScoreAttrib")[0], CsUserMsg::ScoreAttrib { player_id: 1, flags: 1 });
     assert_eq!(find("ScoreAttrib")[1], CsUserMsg::ScoreAttrib { player_id: 1, flags: 1 });
     assert_eq!(find("SetFOV"), [CsUserMsg::SetFov(90)]);
     // A joiner's cached hide-HUD value is 0 (vanilla), and the first command's `PreThink` set
@@ -484,10 +505,14 @@ fn a_spawn_starts_the_hud_over_without_the_welcome() {
     // A player that was not killed keeps what it carries, so `OnSpawnEquip` does not run
     // `RemoveAllItems` (and its `CurWeapon`); the client is told every ammo count again
     // (`m_rgAmmoLast` is -1: one `AmmoX` for each of the 32 ammo slots).
+    // What goes to everyone (`TeamInfo`, `ScoreInfo`) reaches the player at the end of the frame
+    // of the spawn, after what went to it alone; the first command after it runs the update.
+    // `Spawn()` sends `BarTime 0` (`SetProgressBarTime(0)`, 6090) and leaves `m_iClientHealth`
+    // alone: the client knows the health, no `Health`.
     let mut expected: Vec<&str> = vec![
-        "NVGToggle", "ScoreAttrib", "TeamInfo", "ScoreInfo", "ScreenFade", "RoundTime",
+        "NVGToggle", "BarTime", "ScoreAttrib", "ScreenFade", "RoundTime", "TeamInfo", "ScoreInfo",
         "ResetHUD", "Money", "StatusIcon", "ScoreAttrib", "RoundTime", "TeamScore", "TeamScore",
-        "SetFOV", "Health", "Battery", "Damage", "Train",
+        "SetFOV", "Battery", "Damage", "Train",
     ];
     expected.extend(std::iter::repeat_n("AmmoX", 32));
     expected.push("StatusIcon");
@@ -498,8 +523,8 @@ fn a_spawn_starts_the_hud_over_without_the_welcome() {
         .iter()
         .filter(|m| matches!(m, SvcMessage::RoomType(0)))
         .count();
-    // The join's `Spawn()` and this one.
-    assert_eq!(room_types, 2);
+    // This one: the join's `Spawn()` sent one to the joiner alone, which the engine cleared.
+    assert_eq!(room_types, 1);
 }
 
 #[test]

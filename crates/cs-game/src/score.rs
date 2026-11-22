@@ -154,6 +154,9 @@ pub(crate) fn player_killed(
         victim.deaths += 1;
         victim.not_killed = false;
     }
+    // `SET_VIEW(ENT(pVictim->pev), ENT(pVictim->pev))` (multiplay_gamerules.cpp:3947, read
+    // 2026-11-22).
+    eng.set_view(victim_edict, victim_edict);
     if let Some(k) = killer {
         if k == index {
             // Players lose a frag for killing themselves.

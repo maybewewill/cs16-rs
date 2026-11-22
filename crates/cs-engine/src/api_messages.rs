@@ -15,6 +15,7 @@ use cs_proto48::usermsg::CsUserMsg;
 use glam::Vec3;
 
 use crate::client::ClientState;
+use crate::edict::EdictId;
 use crate::game::EngineApi;
 use crate::signon::{INIT_BUFFER_BUDGET, MAX_LIGHTSTYLES};
 use crate::unlag::userinfo_lw;
@@ -58,7 +59,9 @@ pub enum MsgDest {
     One(u8),
     /// The unreliable queue of one slot, which must be `Active`.
     OneUnreliable(u8),
-    /// The reliable stream of every client that has passed the `new` stage.
+    /// The reliable stream of every client in the game (past `spawn`) at the end of the frame
+    /// (`MSG_ALL`, `sv.reliable_datagram`): what the game sends to single clients in the same
+    /// frame comes first.
     All,
     /// The unreliable queue of every `Active` client.
     Broadcast,
@@ -125,23 +128,26 @@ impl EngineApi<'_> {
         match dest {
             MsgDest::One(slot) => {
                 let slot = usize::from(slot);
+                if self.outbox.discard_direct == Some(slot) {
+                    return;
+                }
                 if self.clients.get(slot).is_some_and(|c| c.state != ClientState::Free) {
                     self.outbox.push_reliable(slot, bytes);
                 }
             }
             MsgDest::OneUnreliable(slot) => {
                 let slot = usize::from(slot);
+                if self.outbox.discard_direct == Some(slot) {
+                    return;
+                }
                 if self.clients.get(slot).is_some_and(|c| c.state == ClientState::Active) {
                     self.outbox.push_unreliable(slot, bytes);
                 }
             }
-            MsgDest::All => {
-                for (slot, view) in self.clients.iter().enumerate() {
-                    if view.state.is_past_new() {
-                        self.outbox.push_reliable(slot, bytes);
-                    }
-                }
-            }
+            // `MSG_ALL`: `sv.reliable_datagram`, which `SV_UpdateToReliableMessages` copies to
+            // the clients in the game at the end of the frame (ReHLDS `sv_main.cpp`, read
+            // 2026-11-22), after the messages sent to single clients during the frame.
+            MsgDest::All => self.outbox.push_reliable_all(bytes),
             MsgDest::Broadcast => {
                 for (slot, view) in self.clients.iter().enumerate() {
                     if view.state == ClientState::Active && Some(slot) != except {
@@ -235,6 +241,20 @@ impl EngineApi<'_> {
         }
         self.send(dest, w.as_slice());
         true
+    }
+
+    /// `SET_VIEW` (`PF_setview_I`, ReHLDS `pr_cmds.cpp`, read 2026-11-22): the client of the
+    /// edict `client` is told to look through `view` (`svc_setview` on its reliable stream; the
+    /// original also keeps the entity for `SetupVisibility`, which the game here answers from its
+    /// own state). Nothing for an edict that is not a client slot.
+    pub fn set_view(&mut self, client: EdictId, view: EdictId) {
+        let Some(slot) = client.index.checked_sub(1).filter(|s| usize::from(*s) < self.clients.len())
+        else {
+            return;
+        };
+        let mut w = MsgWriter::new();
+        cs_proto48::messages::write_svc_setview(&mut w, view.index);
+        self.send(MsgDest::One(slot as u8), w.as_slice());
     }
 
     /// Prints `text` in the console of `slot` (`svc_print`). The text is cut at its first NUL

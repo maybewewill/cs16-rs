@@ -6,7 +6,7 @@ mod common;
 
 use common::{Bench, discover, dust2, entity, spawn_at, stub_spawns};
 use cs_engine::consts::{
-    FL_CLIENT, FL_DORMANT, FL_ONGROUND, FL_SPECTATOR, MOVETYPE_NONE, MOVETYPE_TOSS, MOVETYPE_WALK,
+    FL_CLIENT, FL_DORMANT, FL_ONGROUND, FL_SPECTATOR, MOVETYPE_NOCLIP, MOVETYPE_TOSS, MOVETYPE_WALK,
     SOLID_NOT, SOLID_SLIDEBOX,
 };
 use cs_engine::{EngineApi, GameDll};
@@ -51,9 +51,11 @@ fn connected_player_waits_unassigned() {
     assert!(!p.alive && !p.takes_damage);
     assert_eq!((p.frags, p.deaths), (0, 0));
     assert_eq!(p.money, 800);
-    assert_eq!(v.movetype, MOVETYPE_NONE);
+    // `ClientPutInServer` (client.cpp:643-662, read 2026-11-22): `MOVETYPE_NOCLIP`, no solidity,
+    // and `SET_MODEL("models/player.mdl")`.
+    assert_eq!(v.movetype, MOVETYPE_NOCLIP);
     assert_eq!(v.solid, SOLID_NOT);
-    assert_eq!(v.modelindex, 0);
+    assert_ne!(v.modelindex, 0);
     assert_ne!(v.effects & 128, 0, "EF_NODRAW");
     assert_eq!(v.deadflag, DEAD_DEAD);
     assert_ne!(v.flags & FL_CLIENT, 0);
@@ -62,7 +64,7 @@ fn connected_player_waits_unassigned() {
     // It stands at a counter-terrorist spawn point (the first, which the join used), looking
     // where the point looks, with the standing view offset.
     assert_eq!(v.origin, Vec3::new(100.0, 0.0, 1.0));
-    assert_eq!((v.angles.y, v.v_angle), (90.0, Vec3::ZERO));
+    assert_eq!(v.angles.y, 90.0);
     assert_eq!(v.view_ofs.z, 17.0);
     // Nobody else is in the game.
     assert!(b.server.game().game.state().players[1].is_none());
@@ -498,7 +500,10 @@ fn client_data_reflects_the_player() {
         game.client_command(eng, 0, &["kill".to_string()]);
         game.update_client_data(eng, 0)
     });
-    assert_eq!(data.deadflag, DEAD_DYING);
+    // The export leaves `deadflag` out (client.cpp:5020, read 2026-11-22); the edict has it.
+    assert_eq!(data.deadflag, 0);
+    let dead = b.run(|_, eng| eng.ent(eng.client_edict(0)).unwrap().deadflag);
+    assert_eq!(dead, DEAD_DYING);
     assert!(data.health <= 0.0);
     // `SendFOV(0)` on death.
     assert_eq!(data.fov, 0.0);
@@ -704,20 +709,24 @@ fn a_death_sends_its_messages_in_the_order_of_killed() {
     // killer's line), `NVGToggle`, the camera (`ADStop`, a message `CsUserMsg` has no variant
     // for), `SetScoreboardAttributes`, `Health 0`, `CurWeapon 0 255 255`, `SetFOV 0`,
     // `CheckWinConditions` (here the first round is commencing: a `TextMsg`), `BuyZoneIcon_Clear`.
-    // The victim's own line (`MSG_BROADCAST`) and the HUD update follow after.
+    // What goes to everyone (`MSG_ALL`: the notice, the scoreboard line and the `TextMsg`) is
+    // kept in `sv.reliable_datagram` and reaches the client at the end of the frame, after what
+    // went to it alone (ReHLDS `SV_UpdateToReliableMessages`, read 2026-11-22): the golden
+    // capture of HLDS has the `TeamInfo` and `ScoreInfo` of a spawn after the messages of the
+    // `PreThink` that follows it in the same way.
     let killed_order = [
-        "DeathMsg", "ScoreInfo", "NVGToggle", "Unknown", "ScoreAttrib", "Health", "CurWeapon",
-        "SetFOV", "TextMsg", "StatusIcon",
+        "NVGToggle", "Unknown", "ScoreAttrib", "Health", "CurWeapon", "SetFOV", "StatusIcon",
+        "DeathMsg", "ScoreInfo", "TextMsg",
     ];
     assert_eq!(names_of(&msgs)[..killed_order.len()], killed_order);
-    assert_eq!(msgs[5], CsUserMsg::Health(0));
+    assert_eq!(msgs[3], CsUserMsg::Health(0));
     assert_eq!(
-        msgs[6],
+        msgs[4],
         CsUserMsg::CurWeapon { is_active: false, weapon_id: 0xFF, clip_ammo: -1 }
     );
-    assert_eq!(msgs[7], CsUserMsg::SetFov(0));
-    assert!(matches!(&msgs[8], CsUserMsg::TextMsg { message, .. } if message == "#Game_Commencing"));
-    assert!(matches!(&msgs[9], CsUserMsg::StatusIcon { status: 0, sprite_name, .. } if sprite_name == "buyzone"));
+    assert_eq!(msgs[5], CsUserMsg::SetFov(0));
+    assert!(matches!(&msgs[6], CsUserMsg::StatusIcon { status: 0, sprite_name, .. } if sprite_name == "buyzone"));
+    assert!(matches!(&msgs[9], CsUserMsg::TextMsg { message, .. } if message == "#Game_Commencing"));
 
     // With `mp_fadetoblack 1` the fade replaces `ADStop` at the same place.
     b.run(|game, eng| {
@@ -729,6 +738,6 @@ fn a_death_sends_its_messages_in_the_order_of_killed() {
     b.run(|game, eng| game.damage_player(eng, 0, Some(1), 500.0, dmg::BULLET));
     b.step(3);
     let names = names_of(&b.messages());
-    assert_eq!(names[..4], ["DeathMsg", "ScoreInfo", "NVGToggle", "ScreenFade"]);
-    assert_eq!(names[4..8], ["ScoreAttrib", "Health", "CurWeapon", "SetFOV"]);
+    assert_eq!(names[..3], ["NVGToggle", "ScreenFade", "ScoreAttrib"]);
+    assert_eq!(names[3..6], ["Health", "CurWeapon", "SetFOV"]);
 }

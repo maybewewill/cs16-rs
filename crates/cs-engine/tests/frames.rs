@@ -189,7 +189,11 @@ fn oversized_frame_drops_the_whole_unreliable_part_as_hlds() {
     h.step(&mut [&mut probe], 10);
     assert!(h.server.net_stats().entity_blocks_dropped > dropped + 10);
     assert!(probe.entities().is_empty(), "the entity block never fits");
-    assert!(probe.client_data().is_none(), "client data goes with it");
+    // The one client data there is came with the `spawn` answer (`SV_WriteSpawn`).
+    let client_data = |p: &ProbeClient<_>| {
+        p.opcode_log().iter().filter(|&&op| op == svc::CLIENTDATA).count()
+    };
+    assert_eq!(client_data(&probe), 1, "client data goes with the entities");
     assert!(probe.stats().largest_datagram <= MAX_UDP_PACKET);
     assert_eq!(h.server.net_stats().send_failures, 0);
     assert_eq!(probe.stats().parse_errors, 0);
@@ -383,13 +387,18 @@ fn choked_updates_are_announced_in_the_next_update() {
     let log = &probe.opcode_log()[log_start..];
     let chokes = log.iter().filter(|&&op| op == svc::CHOKE).count();
     assert!(chokes > 0, "updates were choked");
-    // Every run of chokes leads into an update.
-    for (i, w) in log.windows(2).enumerate() {
-        if w[0] == svc::CHOKE {
+    // `SV_SendClientDatagram` writes `svc_time` and then `SV_WriteClientdataToMessage`, which
+    // starts with one `svc_choke` however many updates were choked (ReHLDS `sv_main.cpp`, read
+    // 2026-11-22): a choke follows the time of an update and leads into its client data.
+    // One byte however many updates were choked: never two in a row.
+    assert!(log.windows(2).all(|w| w != [svc::CHOKE, svc::CHOKE]));
+    for (i, w) in log.windows(3).enumerate() {
+        if w[1] == svc::CHOKE {
+            assert_eq!(w[0], svc::TIME, "choke at {i} follows {}", w[0]);
             assert!(
-                matches!(w[1], svc::CHOKE | svc::TIME),
+                matches!(w[2], svc::CLIENTDATA | svc::SETANGLE | svc::ADDANGLE),
                 "choke at {i} followed by {}",
-                w[1]
+                w[2]
             );
         }
     }

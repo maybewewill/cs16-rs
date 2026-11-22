@@ -38,8 +38,8 @@ pub enum ClientState {
 }
 
 impl ClientState {
-    /// Past `new`: the client has the server info and receives `MsgDest::All` messages and
-    /// userinfo broadcasts.
+    /// Past `new`: the client has the server info and receives the
+    /// userinfo broadcasts (`MsgDest::All` waits for the `spawn` answer).
     pub(crate) fn is_past_new(self) -> bool {
         matches!(
             self,

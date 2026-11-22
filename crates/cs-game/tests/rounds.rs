@@ -560,7 +560,10 @@ fn leaving_players_end_the_round_as_regamedll() {
     assert!(said(&b, 4, "#CTs_Win"));
     // `ClientDisconnect`/`ClientDisconnected` order: the notice, the leaver's `ScoreAttrib`
     // (dead), the emptied scoreboard line and team, and only then `CheckWinConditions`, whose
-    // messages (the win's audio and text) come last.
+    // messages (the win's audio and text) come last. The `ScoreAttrib` goes to each client alone
+    // (`MSG_ONE`) and the rest to everyone (`MSG_ALL`), which the engine delivers at the end of
+    // the frame, after what went to single clients (`SV_UpdateToReliableMessages`): so the
+    // `ScoreAttrib` is the first of them.
     let notice = position(&b, "#Game_disconnected", |m| {
         matches!(m, CsUserMsg::TextMsg { message, params, .. }
             if message == "#Game_disconnected" && params.len() == 1)
@@ -580,7 +583,7 @@ fn leaving_players_end_the_round_as_regamedll() {
     let win_text = position(&b, "#CTs_Win", |m| {
         matches!(m, CsUserMsg::TextMsg { message, .. } if message == "#CTs_Win")
     });
-    assert!(notice < attrib && attrib < info && info < team, "{notice} {attrib} {info} {team}");
+    assert!(attrib < notice && notice < info && info < team, "{notice} {attrib} {info} {team}");
     assert!(team < win_audio && team < win_text, "{team} {win_audio} {win_text}");
 
     // The last counter-terrorist leaves in the middle of a round: it is dormant, so the

@@ -10,7 +10,7 @@ use cs_proto48::delta::{DeltaRecord, GoldSrcEntityState, GoldSrcWeaponData};
 use cs_proto48::event::write_svc_event;
 use cs_proto48::messages::{
     WeaponDelta, WeaponRecords, entity_schema_name, weapon_records, wire_entity_type,
-    write_svc_choke, write_svc_clientdata_with_weapons, write_svc_packetentities_delta, write_svc_packetentities_full, write_svc_time,
+    write_svc_addangle, write_svc_choke, write_svc_clientdata_with_weapons, write_svc_setangle, write_svc_packetentities_delta, write_svc_packetentities_full, write_svc_time,
 };
 use cs_transport::{MAX_UDP_PACKET, PacketTransport};
 
@@ -328,18 +328,17 @@ impl<G: GameDll> Server<G> {
             return None;
         }
 
+        // `SV_SendClientDatagram`: `svc_time`, then `SV_WriteClientdataToMessage`.
+        let mut payload = MsgWriter::new();
+        write_svc_time(&mut payload, self.sv_time as f32);
+        self.write_choke_and_fixangle(slot, &mut payload);
+
         let max_clients = self.cfg.max_clients;
         let client = &mut self.clients[index];
         let seq = client.chan.outgoing_sequence;
         let base = client
             .delta_seq
             .and_then(|delta_seq| client.frames.delta_base(delta_seq, seq));
-
-        let mut payload = MsgWriter::new();
-        for _ in 0..std::mem::take(&mut client.choke_count).min(255) {
-            write_svc_choke(&mut payload);
-        }
-        write_svc_time(&mut payload, self.sv_time as f32);
         let mut weapondata = WeaponRecords::new();
         let clientdata = match self.deltas.get("clientdata_t") {
             Some(schema) => {
@@ -466,6 +465,68 @@ impl<G: GameDll> Server<G> {
             });
         }
         Some(client.chan.build_packet(&payload))
+    }
+
+    /// The start of `SV_WriteClientdataToMessage` (ReHLDS `sv_main.cpp`, read 2026-11-22): one
+    /// `svc_choke` if any update was choked since the last one sent (however many: the source
+    /// writes the byte once and clears the count), then the view the game forced on the client
+    /// (`fixangle`): `svc_addangle` of the yaw turn in `avelocity[1]` for 2 (which it zeroes), a
+    /// `svc_setangle` of `angles` for any other non-zero value; `fixangle` is cleared either way.
+    pub(crate) fn write_choke_and_fixangle(&mut self, slot: u8, w: &mut MsgWriter) {
+        let client = &mut self.clients[usize::from(slot)];
+        if std::mem::take(&mut client.choke_count) != 0 {
+            write_svc_choke(w);
+        }
+        let id = self.edicts.client(slot);
+        let Some(edict) = self.edicts.get_mut(id) else {
+            return;
+        };
+        let vars = &mut edict.vars;
+        if vars.fixangle == 0 {
+            return;
+        }
+        if vars.fixangle == 2 {
+            write_svc_addangle(w, vars.avelocity.y);
+            vars.avelocity.y = 0.0;
+        } else {
+            write_svc_setangle(w, vars.angles);
+        }
+        vars.fixangle = 0;
+    }
+
+    /// The client data of `slot` as `svc_clientdata` against the zero baseline (the spawn answer
+    /// of `SV_WriteSpawn` sends it before the client has acknowledged any update), preceded by
+    /// the choke and `fixangle` messages of [`write_choke_and_fixangle`](Self::write_choke_and_fixangle).
+    /// Asks the game for the client data (the engine's `UpdateClientData` export) and, for a
+    /// client with `cl_lw`, the weapon data. Not kept as a delta base.
+    pub(crate) fn write_spawn_clientdata(&mut self, slot: u8, w: &mut MsgWriter) {
+        self.write_choke_and_fixangle(slot, w);
+        let client_data = self.call_game(|game, eng| game.update_client_data(eng, slot));
+        let weapon_list = if self.client_has_lw(slot) {
+            let mut list = [GoldSrcWeaponData::default(); 64];
+            self.call_game_synced(|game, eng| game.get_weapon_data(eng, slot, &mut list))
+                .then_some(list)
+        } else {
+            None
+        };
+        self.drain_outbox();
+        let Some(schema) = self.deltas.get("clientdata_t") else {
+            return;
+        };
+        let weapon_schema = self.deltas.get("weapon_data_t");
+        let weapondata = match (weapon_schema, &weapon_list) {
+            (Some(ws), Some(list)) => weapon_records(ws, list),
+            _ => WeaponRecords::new(),
+        };
+        let no_weapons = WeaponRecords::new();
+        let weapons = weapon_schema
+            .zip(weapon_list.as_ref())
+            .map(|(schema, _)| WeaponDelta {
+                schema,
+                from: &no_weapons,
+                to: &weapondata,
+            });
+        write_svc_clientdata_with_weapons(w, schema, None, &client_data, weapons, self.sv_time);
     }
 
     /// `host_client->lw`: the client's `cl_lw`, see `EngineApi::client_lw`.

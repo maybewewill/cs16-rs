@@ -358,7 +358,7 @@ impl<G: GameDll> Server<G> {
             let info = if client.is_free() {
                 String::new()
             } else {
-                view.userinfo.to_wire_string()
+                crate::signon::public_userinfo(&view.userinfo)
             };
             write_svc_updateuserinfo(&mut w, slot as u8, client.userid, &info, &[0; 16]);
         }

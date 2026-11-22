@@ -74,19 +74,20 @@ fn info_bytes(index: u8, frags: i16, deaths: i16, team: i16) -> (&'static str, V
 #[test]
 fn death_updates_scores_for_everyone() {
     let mut b = duel();
-    // The terrorist (index 2) kills the counter-terrorist (index 1). Reliable, in the order sent:
-    // the death notice, the killer's line (one frag, team 1; `MSG_ALL`) and the victim marked
-    // dead. Then, unreliable (`MSG_BROADCAST` in vanilla, so after the reliable stream in the
-    // packet), the victim's line (one death, team 2). The bench does not report which stream a
-    // message came on; the order is the evidence.
+    // The terrorist (index 2) kills the counter-terrorist (index 1). Reliable, in the order the
+    // engine delivers them: the victim marked dead (`MSG_ONE`, at once), then what goes to
+    // everyone (`MSG_ALL`) at the end of the frame (`SV_UpdateToReliableMessages`): the death
+    // notice and the killer's line (one frag, team 1). Then, unreliable (`MSG_BROADCAST` in
+    // vanilla, so after the reliable stream in the packet), the victim's line (one death, team
+    // 2). The bench does not report which stream a message came on; the order is the evidence.
     b.run(|game, eng| game.damage_player(eng, 0, Some(1), 500.0, dmg::BULLET));
     b.step(3);
     assert_eq!(
         scoreboard(&b),
         vec![
+            ("ScoreAttrib", vec![1, 1]),
             death_bytes(2, 1, 0, "world"),
             info_bytes(2, 1, 0, 1),
-            ("ScoreAttrib", vec![1, 1]),
             info_bytes(1, 0, 1, 2),
         ]
     );
@@ -100,8 +101,8 @@ fn death_updates_scores_for_everyone() {
     assert_eq!(
         scoreboard(&b),
         vec![
-            death_bytes(0, 2, 0, "worldspawn"),
             ("ScoreAttrib", vec![2, 1]),
+            death_bytes(0, 2, 0, "worldspawn"),
             info_bytes(2, 1, 1, 1),
         ]
     );
@@ -120,9 +121,9 @@ fn death_updates_scores_for_everyone() {
     assert_eq!(
         scoreboard(&b),
         vec![
+            ("ScoreAttrib", vec![1, 1]),
             death_bytes(1, 1, 0, "world"),
             info_bytes(1, -1, 2, 2),
-            ("ScoreAttrib", vec![1, 1]),
             info_bytes(1, -1, 2, 2),
         ]
     );
@@ -146,9 +147,9 @@ fn a_teammate_kill_costs_the_killer_a_frag_and_the_money() {
     assert_eq!(
         scoreboard(&b),
         vec![
+            ("ScoreAttrib", vec![1, 1]),
             death_bytes(2, 1, 0, "world"),
             info_bytes(2, -1, 0, 2),
-            ("ScoreAttrib", vec![1, 1]),
             info_bytes(1, 0, 1, 2),
         ]
     );
@@ -173,8 +174,8 @@ fn fall_death_message_as_regamedll() {
     assert_eq!(
         scoreboard(&b),
         vec![
-            death_bytes(0, 1, 0, "worldspawn"),
             ("ScoreAttrib", vec![1, 1]),
+            death_bytes(0, 1, 0, "worldspawn"),
             info_bytes(1, 0, 1, 2),
         ]
     );

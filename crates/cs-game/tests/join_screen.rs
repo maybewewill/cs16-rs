@@ -9,6 +9,7 @@ use common::{Bench, entity, stub_spawns};
 use cs_engine::{EngineApi, ServerConfig, ServerMap};
 use cs_game::CsGame;
 use cs_game::player::Team;
+use cs_proto48::messages::SvcMessage;
 use cs_proto48::usermsg::CsUserMsg;
 use glam::Vec3;
 
@@ -47,7 +48,6 @@ struct View {
     angles: Vec3,
     v_angle: Vec3,
     view_ofs: Vec3,
-    fixangle: i32,
     has_camera: bool,
     cam_time: f64,
 }
@@ -61,10 +61,18 @@ fn view(b: &mut Bench) -> View {
             angles: v.angles,
             v_angle: v.v_angle,
             view_ofs: v.view_ofs,
-            fixangle: v.fixangle,
             has_camera: p.intro_camera.is_some(),
             cam_time: p.intro_cam_time,
         }
+    })
+}
+
+/// The view the server last forced on the probe: the engine writes `svc_setangle` for a player's
+/// `fixangle` with its next client data and clears the field (`SV_WriteClientdataToMessage`).
+fn forced_view(b: &Bench) -> Option<Vec3> {
+    b.probe.messages().iter().rev().find_map(|m| match m {
+        SvcMessage::SetAngle(angles) => Some(*angles),
+        _ => None,
     })
 }
 
@@ -98,7 +106,7 @@ fn intro_camera_at_join() {
     assert_eq!(first.angles, Vec3::ZERO);
     assert_eq!(first.v_angle, first.angles);
     assert_eq!(first.view_ofs, Vec3::ZERO);
-    assert_eq!(first.fixangle, 1);
+    assert_eq!(forced_view(&b), Some(first.angles));
     assert!(first.has_camera);
     let join_time_plus_6 = first.cam_time;
     // It holds the view until its time is up (6 s after the join), then the second camera,
@@ -107,7 +115,9 @@ fn intro_camera_at_join() {
     assert_eq!(second.origin, CAM2);
     assert_eq!(second.angles, Vec3::new(0.0, 90.0, 0.0));
     assert_eq!(second.v_angle, second.angles);
-    assert_eq!((second.view_ofs, second.fixangle), (Vec3::ZERO, 1));
+    assert_eq!(second.view_ofs, Vec3::ZERO);
+    b.step(3);
+    assert_eq!(forced_view(&b), Some(second.angles));
     assert!(
         (second.cam_time - join_time_plus_6 - 6.0) >= 0.0
             && (second.cam_time - join_time_plus_6 - 6.0) < 0.1,
@@ -142,7 +152,9 @@ fn camera_without_a_target_gives_no_view() {
     let mut b = Bench::with_config(map, config("x"), &[], true);
     let at_join = view(&mut b);
     assert_eq!(at_join.origin, Vec3::new(100.0, 0.0, 1.0));
-    assert_eq!(at_join.v_angle, Vec3::ZERO);
+    // `v_angle` is zero at the join; the probe has taken the forced view (`svc_setangle` of the
+    // spot's angles) by now, as a client does, and sends its commands looking that way.
+    assert_eq!(at_join.v_angle, at_join.angles);
     assert_eq!(at_join.view_ofs.z, 17.0);
     b.idle_cmds = true;
     b.step(5);
@@ -166,7 +178,7 @@ fn no_camera_join_path_unchanged() {
     assert_eq!(v.origin, Vec3::new(100.0, 0.0, 1.0));
     assert_eq!((v.angles.y, v.v_angle), (90.0, Vec3::ZERO));
     assert_eq!(v.view_ofs, Vec3::new(0.0, 0.0, 17.0));
-    assert_eq!(v.fixangle, 1);
+    assert_eq!(forced_view(&b), Some(v.angles));
     assert!(!v.has_camera);
     b.step(700);
     let later = view(&mut b);

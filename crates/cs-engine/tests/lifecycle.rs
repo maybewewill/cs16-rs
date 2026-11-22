@@ -390,7 +390,15 @@ fn reliable_broadcast_reaches_everyone_past_new() {
     assert_eq!(opcodes(&b, svc::PRINT), 2);
     let log = b.opcode_log();
     let shout_at = log.iter().rposition(|&op| op == svc::PRINT);
-    let first_update = log.iter().position(|&op| op == svc::CLIENTDATA);
+    // The first client data is the `spawn` answer's (`SV_WriteSpawn`); the shout of the frame
+    // that answered `spawn` follows it (`sv.reliable_datagram`, flushed at the end of the
+    // frame) and comes before the first update.
+    let first_update = log
+        .iter()
+        .enumerate()
+        .filter(|(_, op)| **op == svc::CLIENTDATA)
+        .nth(1)
+        .map(|(i, _)| i);
     assert!(shout_at < first_update, "{log:?}");
 }
 

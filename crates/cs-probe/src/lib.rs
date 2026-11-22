@@ -558,6 +558,11 @@ impl<T: PacketTransport> ProbeClient<T> {
                     .cloned()
                     .unwrap_or_default();
             }
+            // The client takes the view the server forces (`svc_setangle`), as the engine's
+            // client does: the commands it sends from then on look that way.
+            SvcMessage::SetAngle(angles) => {
+                self.last_cmd.viewangles = angles;
+            }
             SvcMessage::UpdateUserInfo { slot, userinfo, .. } => {
                 self.userinfos.insert(slot, userinfo);
             }
