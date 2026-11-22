@@ -371,19 +371,19 @@ fn he_radius_damage_as_regamedll() {
             let victim = Vec3::new(d, 0.0, 101.0);
             game.place_player(eng, 1, victim);
             game.state_mut().players[1].as_mut().unwrap().health = 1000.0;
-            game.test_radius_damage(eng, src, Some(inflictor), Some(me), 100.0, 350.0, dmg::EXPLOSION);
+            game.test_radius_damage(eng, src, Some(inflictor), None, Some(me), 100.0, 350.0, dmg::EXPLOSION);
             let expected = (100.0_f32 - d * falloff).trunc();
             assert_eq!(health(game, 1), 1000.0 - expected, "distance {d}");
         }
         // Past the radius nothing happens.
         game.place_player(eng, 1, Vec3::new(351.0, 0.0, 101.0));
         game.state_mut().players[1].as_mut().unwrap().health = 1000.0;
-        game.test_radius_damage(eng, src, Some(inflictor), Some(me), 100.0, 350.0, dmg::EXPLOSION);
+        game.test_radius_damage(eng, src, Some(inflictor), None, Some(me), 100.0, 350.0, dmg::EXPLOSION);
         assert_eq!(health(game, 1), 1000.0);
         // A dead player takes nothing (`takedamage` is `DAMAGE_NO`).
         game.place_player(eng, 1, Vec3::new(10.0, 0.0, 101.0));
         game.state_mut().players[1].as_mut().unwrap().takes_damage = false;
-        game.test_radius_damage(eng, src, Some(inflictor), Some(me), 100.0, 350.0, dmg::EXPLOSION);
+        game.test_radius_damage(eng, src, Some(inflictor), None, Some(me), 100.0, 350.0, dmg::EXPLOSION);
         assert_eq!(health(game, 1), 1000.0);
     });
 }
@@ -461,7 +461,7 @@ fn friendly_fire_off_spares_a_teammate_but_not_the_thrower() {
         game.state_mut().players[1].as_mut().unwrap().health = 1000.0;
         game.state_mut().players[0].as_mut().unwrap().health = 1000.0;
         eng.ent_mut(me).unwrap().health = 1000.0;
-        game.test_radius_damage(eng, Vec3::new(0.0, 0.0, 0.0), Some(inflictor), Some(me), 100.0, 350.0, dmg::EXPLOSION);
+        game.test_radius_damage(eng, Vec3::new(0.0, 0.0, 0.0), Some(inflictor), Some(i32::from(Team::Ct.id())), Some(me), 100.0, 350.0, dmg::EXPLOSION);
         assert_eq!(health(game, 1), 1000.0, "a teammate (mp_friendlyfire is 0)");
         assert!(health(game, 0) < 1000.0, "the thrower hurts itself");
     });

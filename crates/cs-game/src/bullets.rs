@@ -136,7 +136,7 @@ pub fn apply_multi_damage(
 ) {
     let Some(victim) = mm.entity else { return };
     if let Some(slot) = player_slot(g, eng, victim) {
-        player::take_damage_with(g, eng, slot as u8, inflictor, attacker, mm.weapon, mm.amount, mm.bits);
+        player::take_damage_with(g, eng, slot as u8, inflictor, None, attacker, mm.weapon, mm.amount, mm.bits);
     }
 }
 
@@ -707,7 +707,7 @@ impl crate::CsGame {
         bits: u32,
     ) -> bool {
         let attacker = attacker.map(|a| eng.client_edict(a));
-        player::take_damage_with(&mut self.state, eng, slot, attacker, attacker, weapon, damage, bits)
+        player::take_damage_with(&mut self.state, eng, slot, attacker, None, attacker, weapon, damage, bits)
     }
 }
 

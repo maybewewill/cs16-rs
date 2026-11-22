@@ -40,9 +40,9 @@
 //!   (`NOXREF`), `DetonateUse`/`PreDetonate` (nothing sets them), `Explode2`/`Detonate2` and
 //!   `ShootSatchelCharge` (the C4, phase 2E) and `RadiusDamage2` (`CBaseMonster::RadiusDamage`
 //!   uses it for a damage of 80 or less; the HE grenade's is 100).
-//! - `m_iTeam` (the thrower's team, set by `ShootTimed2`) is kept in the edict's `i_step_left`
-//!   (a variable no game code of a grenade uses): the entity is checked out of its edict while it
-//!   runs its own explosion, which is when `TakeDamage` asks for it ([`grenade_team`]).
+//! - `m_iTeam` (the thrower's team, set by `ShootTimed2`) travels with the damage: the explosion
+//!   passes it down [`radius_damage`] to `CBasePlayer::TakeDamage`, which compares it with the
+//!   victim's team (the entity is checked out of its edict while it explodes).
 
 use cs_engine::collision::CONTENTS_WATER;
 use cs_engine::consts::{FL_ONGROUND, MOVETYPE_BOUNCE, SOLID_BBOX, SOLID_NOT};
@@ -57,7 +57,8 @@ use crate::bullets::{decal_trace, random_float};
 use crate::entity::{GameEntity, attach};
 use crate::observer::{FADETOBLACK_STAY, FFADE_IN, screen_fade_color};
 use crate::player::{
-    ATTN_NORM, CHAN_VOICE, DEAD_NO, EF_NODRAW, PITCH_NORM, dmg, player_slot, take_damage,
+    ATTN_NORM, CHAN_VOICE, DEAD_NO, EF_NODRAW, PITCH_NORM, dmg, player_slot,
+    take_damage_from_grenade,
 };
 use crate::weapons::core::CHAN_WEAPON;
 use crate::weapons::WeaponId;
@@ -125,6 +126,9 @@ pub struct Grenade {
     sg_smoke: i32,
     /// `m_angle`: the turn of the next puff, degrees.
     angle: i32,
+    /// `m_iTeam`: the team id of the thrower when it threw (HE only), what
+    /// `CBasePlayer::TakeDamage` compares with the victim's team.
+    team: i32,
 }
 
 impl Default for Grenade {
@@ -140,6 +144,7 @@ impl Default for Grenade {
             smoke_detonate: Vec3::ZERO,
             sg_smoke: 0,
             angle: 0,
+            team: 0,
         }
     }
 }
@@ -319,6 +324,7 @@ impl Grenade {
             return;
         };
         let (origin, owner, damage) = (v.origin, v.owner, v.dmg);
+        let team = self.team;
         // The first fireball, then a second one at a random place near it.
         let te = tempent::explosion(
             Vec3::new(origin.x, origin.y, origin.z + 20.0),
@@ -343,7 +349,7 @@ impl Grenade {
         if let Some(v) = eng.ent_mut(id) {
             v.owner = None;
         }
-        grenade_radius_damage(g, eng, origin, id, owner, damage, bits);
+        grenade_radius_damage(g, eng, origin, id, owner, damage, team, bits);
         Self::scorch(g, eng, tr);
         // `flRndSound = RANDOM_FLOAT(0, 1)`: unused, but it draws a number.
         let _ = random_float(g, 0.0, 1.0);
@@ -792,13 +798,6 @@ fn arm_fuse(
     }
 }
 
-/// `m_iTeam` of the grenade `id` (the team of the player that threw an HE grenade, when it
-/// threw it), `None` for an entity that is no grenade. What `CBasePlayer::TakeDamage` compares
-/// with the victim's team (`player.cpp` 966).
-pub(crate) fn grenade_team(eng: &EngineApi<'_>, id: EdictId) -> Option<i32> {
-    eng.ent(id).filter(|v| v.classname == "grenade").map(|v| v.i_step_left)
-}
-
 /// `CGrenade::ShootTimed2(pevOwner, vecStart, vecVelocity, time, iTeam, usEvent)`
 /// (`ggrenade.cpp` 926-968): the HE grenade. QUIRK: unlike the other two there is no
 /// `time < 0.1` shortcut.
@@ -818,7 +817,6 @@ pub(crate) fn shoot_timed2(
     if let Some(v) = eng.ent_mut(id) {
         v.gravity = 0.55;
         v.friction = 0.7;
-        v.i_step_left = team; // `m_iTeam = iTeam`
     }
     eng.set_model(id, "models/w_hegrenade.mdl");
     if let Some(v) = eng.ent_mut(id) {
@@ -831,6 +829,7 @@ pub(crate) fn shoot_timed2(
             think: Think::Tumble,
             touch: Touch::Bounce,
             event,
+            team,
             ..Grenade::default()
         }),
     );
@@ -908,6 +907,7 @@ pub(crate) fn shoot_smoke_grenade(
 /// bitsDamageType)` (`basemonster.cpp` 553, read 2026-11-22) as the grenade calls it from
 /// `origin`: a damage over 80 is [`radius_damage`] with the radius `flDamage * 3.5` (a
 /// `double` product). The other branch (`RadiusDamage2`) is not ported: no grenade has it.
+#[allow(clippy::too_many_arguments)]
 fn grenade_radius_damage(
     g: &mut GameState,
     eng: &mut EngineApi<'_>,
@@ -915,10 +915,11 @@ fn grenade_radius_damage(
     inflictor: EdictId,
     attacker: Option<EdictId>,
     damage: f32,
+    team: i32,
     bits: u32,
 ) {
     let radius = (f64::from(damage) * 3.5) as f32;
-    radius_damage(g, eng, origin, Some(inflictor), attacker, damage, radius, bits);
+    radius_damage(g, eng, origin, Some(inflictor), Some(team), attacker, damage, radius, bits);
 }
 
 /// `RadiusDamage(vecSrc, pevInflictor, pevAttacker, flDamage, flRadius, iClassIgnore,
@@ -936,6 +937,7 @@ pub(crate) fn radius_damage(
     eng: &mut EngineApi<'_>,
     src: Vec3,
     inflictor: Option<EdictId>,
+    inflictor_team: Option<i32>,
     attacker: Option<EdictId>,
     damage: f32,
     radius: f32,
@@ -969,7 +971,7 @@ pub(crate) fn radius_damage(
         if adjusted < 0.0 {
             adjusted = 0.0;
         }
-        take_damage(g, eng, slot as u8, inflictor, attacker, adjusted, bits);
+        take_damage_from_grenade(g, eng, slot as u8, inflictor, inflictor_team, attacker, adjusted, bits);
     }
 }
 
@@ -1209,19 +1211,31 @@ impl crate::CsGame {
         found
     }
 
-    /// `RadiusDamage(src, inflictor, attacker, damage, radius, CLASS_NONE, bits)`.
+    /// `RadiusDamage(src, inflictor, attacker, damage, radius, CLASS_NONE, bits)`, the inflictor
+    /// being a grenade of `inflictor_team` (a team id).
     #[allow(clippy::too_many_arguments)]
     pub fn test_radius_damage(
         &mut self,
         eng: &mut EngineApi<'_>,
         src: Vec3,
         inflictor: Option<EdictId>,
+        inflictor_team: Option<i32>,
         attacker: Option<EdictId>,
         damage: f32,
         radius: f32,
         bits: u32,
     ) {
-        radius_damage(&mut self.state, eng, src, inflictor, attacker, damage, radius, bits);
+        radius_damage(
+            &mut self.state,
+            eng,
+            src,
+            inflictor,
+            inflictor_team,
+            attacker,
+            damage,
+            radius,
+            bits,
+        );
     }
 
     /// `RadiusFlash(src, inflictor, attacker, damage, CLASS_NONE, DMG_BLAST)`.

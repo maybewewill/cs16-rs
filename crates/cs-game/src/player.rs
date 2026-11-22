@@ -1823,7 +1823,26 @@ pub(crate) fn take_damage(
     let weapon = attacker
         .and_then(|a| player_slot(g, eng, a))
         .and_then(|a| active_weapon_id(g, a));
-    take_damage_with(g, eng, slot, inflictor, attacker, weapon, damage, bits)
+    take_damage_with(g, eng, slot, inflictor, None, attacker, weapon, damage, bits)
+}
+
+/// `TakeDamage` for the damage of a grenade of team `inflictor_team` (`m_iTeam`), whose attacker
+/// may have left or changed team since the throw.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn take_damage_from_grenade(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    slot: u8,
+    inflictor: Option<EdictId>,
+    inflictor_team: Option<i32>,
+    attacker: Option<EdictId>,
+    damage: f32,
+    bits: u32,
+) -> bool {
+    let weapon = attacker
+        .and_then(|a| player_slot(g, eng, a))
+        .and_then(|a| active_weapon_id(g, a));
+    take_damage_with(g, eng, slot, inflictor, inflictor_team, attacker, weapon, damage, bits)
 }
 
 /// `CBasePlayer::TakeDamage` (ReGameDLL `player.cpp:909-1380`, read 2026-11-22) then
@@ -1835,7 +1854,7 @@ pub(crate) fn take_damage(
 /// In the source's order: a blast, an explosion or a fall sets the hit group to generic, a bullet
 /// at the shield's hit group is refused. An explosion (`DMG_EXPLOSION` or `DMG_BLAST`) has its
 /// own branch: a grenade of the victim's team hurts it only with friendly fire or if the victim
-/// threw it (`m_iTeam`, the team of the thrower when it threw: [`crate::grenade::grenade_team`]), armor takes its share with the explosion formula, there are two pain sounds, and it
+/// threw it (`m_iTeam`, the team of the thrower when it threw: given by [`crate::grenade`]), armor takes its share with the explosion formula, there are two pain sounds, and it
 /// returns before `m_bitsHUDDamage`. QUIRK: the `flBonus *= 2` for `DMG_BLAST` further down is
 /// unreachable in the source, because `DMG_BLAST` is caught by the explosion branch first.
 ///
@@ -1860,6 +1879,7 @@ pub(crate) fn take_damage_with(
     eng: &mut EngineApi<'_>,
     slot: u8,
     inflictor: Option<EdictId>,
+    inflictor_team: Option<i32>,
     attacker: Option<EdictId>,
     attacker_weapon: Option<WeaponId>,
     damage: f32,
@@ -1909,10 +1929,9 @@ pub(crate) fn take_damage_with(
         }
         // `pGrenade->m_iTeam == m_iTeam`: the team the grenade was thrown by, whoever the attacker
         // is now (a thrower that left or changed team does not make its grenade an enemy's).
-        let grenade_team = inflictor.and_then(|i| crate::grenade::grenade_team(eng, i));
         if bits & dmg::EXPLOSION != 0
             && inflictor_is_grenade
-            && grenade_team == Some(i32::from(victim_team.id()))
+            && inflictor_team == Some(i32::from(victim_team.id()))
             && !friendly_fire
             && attacker_slot != Some(index)
         {
