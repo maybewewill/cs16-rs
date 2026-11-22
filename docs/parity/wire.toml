@@ -196,7 +196,7 @@ evidence = "crates/cs-engine/tests/frames.rs::choked_updates_are_announced_in_th
 [[item]]
 id = "svc_resourcelist"
 status = "tested"
-evidence = "crates/cs-engine/src/signon.rs::tests::sendres_stage_requests_and_lists_resources; Known gap: our list has 730 resources against 781 of the original HLDS (golden capture 2026-11-22), 51 only in the original: 36 sounds, 10 models, 5 events; docs/parity/engine.toml resource_list_completeness"
+evidence = "crates/cs-engine/src/signon.rs::tests::sendres_stage_requests_and_lists_resources; the list is identical to the original HLDS (781 resources, player.mdl at index 141, 0 resource-list lines in the golden diff, 2026-11-22), in the order generic, sounds, models, decals, events of SV_CreateResourceList (the resource-order test of the phase 2D final fix wave); docs/parity/engine.toml resource_list_completeness"
 
 [[item]]
 id = "svc_newmovevars"

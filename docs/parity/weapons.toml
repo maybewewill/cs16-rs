@@ -45,7 +45,7 @@ evidence = "crates/cs-game/tests/weapon_core.rs::empty_sound_plays_while_the_fla
 [[item]]
 id = "weapon_fire_events"
 status = "tested"
-evidence = "crates/cs-engine/tests/events.rs::playback_reaches_pas_clients_not_the_shooter_with_lw, event_args_round_trip_on_the_wire, events_follow_the_pas_unless_global, an_invoker_outside_the_packet_is_sent_by_number_with_its_own_origin (EV_Playback, rehlds pr_cmds.cpp); crates/cs-game/tests/weapons_pistols.rs::pistol_events_carry_source_args; crates/cs-game/tests/weapons_auto.rs::auto_events_carry_source_args; crates/cs-game/tests/inventory.rs::every_weapon_event_resolves_after_activation (the 28 weapon events are precached in WeaponsPrecache order). Events are looked up by name at fire time (same index once precached). Known gap: 5 event scripts of the original resource list are missing (see resource_list_completeness in docs/parity/engine.toml)"
+evidence = "crates/cs-engine/tests/events.rs::playback_reaches_pas_clients_not_the_shooter_with_lw, event_args_round_trip_on_the_wire, events_follow_the_pas_unless_global, an_invoker_outside_the_packet_is_sent_by_number_with_its_own_origin (EV_Playback, rehlds pr_cmds.cpp); crates/cs-game/tests/weapons_pistols.rs::pistol_events_carry_source_args; crates/cs-game/tests/weapons_auto.rs::auto_events_carry_source_args; crates/cs-game/tests/inventory.rs::every_weapon_event_resolves_after_activation (the 28 weapon events are precached in WeaponsPrecache order). Events are looked up by name at fire time (same index once precached). The resource list now carries every event script of the original (781 entries, identical to the original HLDS, golden capture 2026-11-22; see resource_list_completeness in docs/parity/engine.toml)"
 
 [[item]]
 id = "weapon_brass_eject"
@@ -305,7 +305,7 @@ evidence = "crates/cs-game/tests/inventory.rs::round_restart_clears_weapons_on_t
 [[item]]
 id = "weapon_precache"
 status = "tested"
-evidence = "crates/cs-engine/tests/tempents.rs::full_weapon_precache_fits; crates/cs-game/tests/inventory.rs::every_weapon_event_resolves_after_activation. Known gap: our resource list has 730 entries against 781 of the original HLDS (build 10210, golden capture 2026-11-22): 51 are only in the original, 36 sounds, 10 models and 5 events"
+evidence = "crates/cs-engine/tests/tempents.rs::full_weapon_precache_fits (it uses hand-copied MODELS and SOUNDS lists, not the precache of the game, so it supports the claim about the table capacity only); crates/cs-game/tests/inventory.rs::every_weapon_event_resolves_after_activation (the events of the game's own precache). The game's resource list is identical to the original HLDS (build 10210, golden capture 2026-11-22): 781 entries, player.mdl at index 141, 0 resource-list lines in the golden diff. Its order (generic, sounds, models, decals, events, as SV_CreateResourceList) is the one asserted by the resource-order test of the phase 2D final fix wave (see resource_list_completeness in docs/parity/engine.toml)"
 
 [[item]]
 id = "weapon_data_prediction"
@@ -364,10 +364,30 @@ evidence = "Not ported: the game_player_equip map entity"
 
 [[item]]
 id = "weapon_flashlight_flashbat"
-status = "missing"
-evidence = "In progress (being fixed in parallel; the controller updates this at merge): the Flashlight and FlashBat messages and the battery drain of the flashlight (usermsg.toml)"
+status = "tested"
+evidence = "crates/cs-game/tests/hud_extras.rs::the_battery_is_charged_to_100_in_two_flashbat_messages_after_a_spawn, impulse_100_toggles_the_flashlight_when_the_rules_allow_it, an_empty_battery_turns_the_flashlight_off (the Flashlight and FlashBat messages and the battery charge and drain of the flashlight, usermsg.toml). The golden join diff of 2026-11-22 shows FlashBat 100 four times in both streams"
 
 [[item]]
 id = "weapon_hints_geiger"
-status = "missing"
-evidence = "In progress (being fixed in parallel; the controller updates this at merge): the yellow hint messages (HudTextArgs), the Geiger message, and the death-think pacing (PlayerDeathThink every frame; ours runs every 0.1 s)"
+status = "tested"
+evidence = "crates/cs-game/tests/hud_extras.rs: the hint messages (HudTextArgs: the_first_buy_hint_of_a_round_is_a_hudtextargs, a_client_with_autohelp_off_gets_only_the_forced_hints, hurting_a_teammate_hints_the_attacker_and_marks_the_victim, a_dry_weapon_hints_out_of_ammo_once and the friend and enemy hints), the Geiger message (the_geiger_counter_tells_its_range_once_two_seconds_after_the_spawn), and the pacing of the death think (a_body_on_the_ground_slows_down_at_every_command, a_dead_player_has_the_entity_think_of_player_death_think_too: PlayerDeathThink runs at every frame, gated as player.cpp:4853, and the 0.1 s entity think of the original is kept too). The golden join diff of 2026-11-22 shows a byte-identical HudTextArgs and Geiger 250 once"
+
+[[item]]
+id = "weapon_decal_reset_restart"
+status = "tested"
+evidence = "the decal-reset test added to crates/cs-game/tests/inventory.rs by the phase 2D final fix wave (the controller names it at merge): CleanUpMap ends with PLAYBACK_EVENT(FEV_GLOBAL | FEV_RELIABLE, 0, m_usResetDecals) (events/decal_reset.sc), rg_multiplay_gamerules.cpp 609-680"
+
+[[item]]
+id = "weapon_spectate_clears_inventory"
+status = "tested"
+evidence = "the spectate test added to crates/cs-game/tests/teams.rs by the phase 2D final fix wave (the controller names it at merge): choose_spectator calls RemoveAllItems(TRUE) after the kill (client.cpp 1925-1938), start_observer holsters the active item (player.cpp:4163); a player with an AK and ammo that types spectate in the freeze period ends with no items, weapons 0 and CurWeapon 0 0 0"
+
+[[item]]
+id = "weapon_corpse_throw"
+status = "tested"
+evidence = "the corpse-throw test added to crates/cs-game/tests/player.rs by the phase 2D final fix wave (the controller names it at merge): the m_iThrowDirection velocity switch and the angles.y / v_angle.y rewrite of CBasePlayer::Killed (player.cpp 2493-2547); throw_direction comes from SetAnimation"
+
+[[item]]
+id = "weapon_shotgun_empty_sound"
+status = "tested"
+evidence = "the underwater-shotgun test added to crates/cs-game/tests/weapons_special.rs by the phase 2D final fix wave (the controller names it at merge): the M3 and the XM1014 clear m_iPlayEmptySound in their PlayEmptySound (rg_wpn_m3.cpp 65-70, rg_wpn_xm1014.cpp 63-68), so the underwater branch of the weapon core clicks once"

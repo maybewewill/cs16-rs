@@ -160,42 +160,42 @@ status = "implemented"
 [[item]]
 id = "clientdata_t.vuser2[0]"
 status = "verified"
-evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game leaves it zero (nothing sets vuser2 yet); VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; vuser2 and vuser4 after joinclass as the original; docs/parity/checklists/phase2d-weapons.md V9)"
+evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game sets it (crates/cs-game/tests/weapon_prediction.rs::golden_values_after_joinclass); VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; vuser2 and vuser4 after joinclass as the original; docs/parity/checklists/phase2d-weapons.md V9)"
 
 [[item]]
 id = "clientdata_t.vuser2[1]"
 status = "verified"
-evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game leaves it zero (nothing sets vuser2 yet); VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; vuser2 and vuser4 after joinclass as the original; docs/parity/checklists/phase2d-weapons.md V9)"
+evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game sets it (crates/cs-game/tests/weapon_prediction.rs::golden_values_after_joinclass); VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; vuser2 and vuser4 after joinclass as the original; docs/parity/checklists/phase2d-weapons.md V9)"
 
 [[item]]
 id = "clientdata_t.vuser2[2]"
 status = "verified"
-evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game leaves it zero (nothing sets vuser2 yet); VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; vuser2 and vuser4 after joinclass as the original; docs/parity/checklists/phase2d-weapons.md V9)"
+evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game sets it (crates/cs-game/tests/weapon_prediction.rs::golden_values_after_joinclass); VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; vuser2 and vuser4 after joinclass as the original; docs/parity/checklists/phase2d-weapons.md V9)"
 
 [[item]]
 id = "clientdata_t.vuser3[0]"
 status = "tested"
-evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game leaves it zero (nothing sets vuser3 yet)"
+evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game sets it (crates/cs-game/tests/weapon_prediction.rs::golden_values_after_joinclass)"
 
 [[item]]
 id = "clientdata_t.vuser3[1]"
 status = "tested"
-evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game leaves it zero (nothing sets vuser3 yet)"
+evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game sets it (crates/cs-game/tests/weapon_prediction.rs::golden_values_after_joinclass)"
 
 [[item]]
 id = "clientdata_t.vuser3[2]"
 status = "tested"
-evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game leaves it zero (nothing sets vuser3 yet)"
+evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game sets it (crates/cs-game/tests/weapon_prediction.rs::golden_values_after_joinclass)"
 
 [[item]]
 id = "clientdata_t.vuser4[0]"
 status = "verified"
-evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game leaves it zero (nothing sets vuser4 yet); the schema has no third axis; VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; vuser2 and vuser4 after joinclass as the original; docs/parity/checklists/phase2d-weapons.md V9)"
+evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game sets it (crates/cs-game/tests/weapon_prediction.rs::golden_values_after_joinclass); the schema has no third axis; VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; vuser2 and vuser4 after joinclass as the original; docs/parity/checklists/phase2d-weapons.md V9)"
 
 [[item]]
 id = "clientdata_t.vuser4[1]"
 status = "verified"
-evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game leaves it zero (nothing sets vuser4 yet); the schema has no third axis; VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; vuser2 and vuser4 after joinclass as the original; docs/parity/checklists/phase2d-weapons.md V9)"
+evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game sets it (crates/cs-game/tests/weapon_prediction.rs::golden_values_after_joinclass); the schema has no third axis; VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; vuser2 and vuser4 after joinclass as the original; docs/parity/checklists/phase2d-weapons.md V9)"
 
 [[item]]
 id = "clientdata_t.fuser1"
@@ -282,35 +282,43 @@ status = "implemented"
 
 [[item]]
 id = "entity_state_t.endpos[0]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_t.endpos[1]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_t.endpos[2]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_t.startpos[0]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_t.startpos[1]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_t.startpos[2]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_t.impacttime"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_t.starttime"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_t.weaponmodel"
@@ -326,7 +334,8 @@ status = "implemented"
 
 [[item]]
 id = "entity_state_t.eflags"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_t.angles[2]"
@@ -346,27 +355,33 @@ status = "implemented"
 
 [[item]]
 id = "entity_state_t.controller[0]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_t.controller[1]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_t.controller[2]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_t.controller[3]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_t.blending[0]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_t.blending[1]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_t.body"
@@ -390,15 +405,18 @@ status = "implemented"
 
 [[item]]
 id = "entity_state_t.rendercolor.r"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_t.rendercolor.g"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_t.rendercolor.b"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_t.aiment"
@@ -406,19 +424,23 @@ status = "implemented"
 
 [[item]]
 id = "entity_state_t.basevelocity[0]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_t.basevelocity[1]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_t.basevelocity[2]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_t.iuser4"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_player_t.animtime"
@@ -530,27 +552,33 @@ status = "implemented"
 
 [[item]]
 id = "entity_state_player_t.controller[0]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; crates/cs-game/tests/player.rs::the_player_entity_carries_colormap_friction_gravity_and_blending; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_player_t.controller[1]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; crates/cs-game/tests/player.rs::the_player_entity_carries_colormap_friction_gravity_and_blending; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_player_t.controller[2]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; crates/cs-game/tests/player.rs::the_player_entity_carries_colormap_friction_gravity_and_blending; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_player_t.controller[3]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; crates/cs-game/tests/player.rs::the_player_entity_carries_colormap_friction_gravity_and_blending; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_player_t.blending[0]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; crates/cs-game/tests/player.rs::the_player_entity_carries_colormap_friction_gravity_and_blending; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_player_t.blending[1]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; crates/cs-game/tests/player.rs::the_player_entity_carries_colormap_friction_gravity_and_blending; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_player_t.body"
@@ -574,19 +602,23 @@ status = "implemented"
 
 [[item]]
 id = "entity_state_player_t.rendercolor.r"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; crates/cs-game/tests/player.rs::the_player_entity_carries_colormap_friction_gravity_and_blending; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_player_t.rendercolor.g"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; crates/cs-game/tests/player.rs::the_player_entity_carries_colormap_friction_gravity_and_blending; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_player_t.rendercolor.b"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; crates/cs-game/tests/player.rs::the_player_entity_carries_colormap_friction_gravity_and_blending; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_player_t.friction"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; crates/cs-game/tests/player.rs::the_player_entity_carries_colormap_friction_gravity_and_blending; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_player_t.usehull"
@@ -594,7 +626,8 @@ status = "implemented"
 
 [[item]]
 id = "entity_state_player_t.gravity"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; crates/cs-game/tests/player.rs::the_player_entity_carries_colormap_friction_gravity_and_blending; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_player_t.aiment"
@@ -602,15 +635,18 @@ status = "implemented"
 
 [[item]]
 id = "entity_state_player_t.basevelocity[0]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; crates/cs-game/tests/player.rs::the_player_entity_carries_colormap_friction_gravity_and_blending; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_player_t.basevelocity[1]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; crates/cs-game/tests/player.rs::the_player_entity_carries_colormap_friction_gravity_and_blending; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_player_t.basevelocity[2]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; crates/cs-game/tests/player.rs::the_player_entity_carries_colormap_friction_gravity_and_blending; on the wire and round-tripped"
 
 [[item]]
 id = "entity_state_player_t.spectator"
@@ -618,7 +654,8 @@ status = "implemented"
 
 [[item]]
 id = "entity_state_player_t.iuser4"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; crates/cs-game/tests/player.rs::the_player_entity_carries_colormap_friction_gravity_and_blending; on the wire and round-tripped"
 
 [[item]]
 id = "custom_entity_state_t.rendermode"
@@ -670,15 +707,18 @@ status = "implemented"
 
 [[item]]
 id = "custom_entity_state_t.rendercolor.r"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; on the wire and round-tripped"
 
 [[item]]
 id = "custom_entity_state_t.rendercolor.g"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; on the wire and round-tripped"
 
 [[item]]
 id = "custom_entity_state_t.rendercolor.b"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::entity_state_wire_round_trips_every_field; crates/cs-engine/src/game.rs::tests::player_state_carries_every_delta_field_of_its_edict, non_player_state_leaves_the_player_only_fields_zero, baselines_follow_create_baseline; on the wire and round-tripped"
 
 [[item]]
 id = "custom_entity_state_t.renderfx"

@@ -5,18 +5,18 @@ evidence = "crates/cs-proto48/src/usermsg.rs::tests::cs_usermsgs_roundtrip_clean
 
 [[item]]
 id = "Geiger"
-status = "missing"
-evidence = "In progress (being fixed in parallel; the controller updates this at merge): the radiation counter message; crates/cs-game has no sender yet"
+status = "tested"
+evidence = "crates/cs-game/tests/hud_extras.rs::the_geiger_counter_tells_its_range_once_two_seconds_after_the_spawn (the radiation counter message, sent once with the range two seconds after the spawn). The golden join diff of 2026-11-22 shows the same Geiger 250 once in both streams, but the item is not marked verified on that alone"
 
 [[item]]
 id = "Flashlight"
-status = "missing"
-evidence = "In progress (being fixed in parallel; the controller updates this at merge): the flashlight on/off message; the original join sequence has no Flashlight message at spawn"
+status = "tested"
+evidence = "crates/cs-game/tests/hud_extras.rs::impulse_100_toggles_the_flashlight_when_the_rules_allow_it and ::an_empty_battery_turns_the_flashlight_off (the on/off message; the original join sequence has no Flashlight message at spawn, and ours sends none either)"
 
 [[item]]
 id = "FlashBat"
-status = "missing"
-evidence = "In progress (being fixed in parallel; the controller updates this at merge): the flashlight battery message"
+status = "tested"
+evidence = "crates/cs-game/tests/hud_extras.rs::the_battery_is_charged_to_100_in_two_flashbat_messages_after_a_spawn. The golden join diff of 2026-11-22 shows FlashBat 100 four times in both streams, but the item is not marked verified on that alone"
 
 [[item]]
 id = "Health"
@@ -317,5 +317,5 @@ status = "implemented"
 
 [[item]]
 id = "HudTextArgs"
-status = "missing"
-evidence = "In progress (being fixed in parallel; the controller updates this at merge): the hint messages (yellow tips)"
+status = "tested"
+evidence = "crates/cs-game/tests/hud_extras.rs::the_first_buy_hint_of_a_round_is_a_hudtextargs and the other hint tests of that file (the hint messages, the yellow tips; ported from hintmessage.cpp in crates/cs-game/src/hint.rs). The golden join diff of 2026-11-22 shows a byte-identical HudTextArgs, but the item is not marked verified on that alone"

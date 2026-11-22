@@ -14,7 +14,10 @@ The Steam install of Half-Life (`...\steamapps\common\Half-Life`) holds `hlds.ex
 `cstrike` mod with `maps/de_dust2.bsp`. Nothing else has to be installed.
 
 1. Put a file `steam_appid.txt` with the single line `10` next to `hlds.exe`. Without it the
-   server stops with `Unable to initialize Steam`.
+   server stops with `Unable to initialize Steam`. First check whether a `steam_appid.txt` is
+   already there: if one is, back it up (copy it to `steam_appid.txt.bak`) before writing the
+   new one, and put it back afterwards. If it was overwritten without a backup, restore it with
+   Steam's "Verify integrity of game files" for Half-Life.
 2. Start it from that directory:
 
    ```sh

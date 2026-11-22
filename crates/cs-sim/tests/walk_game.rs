@@ -649,8 +649,10 @@ fn solid_brush_entities_block_movement() {
     assert!(touches.contains(&(player, brush)), "{touches:?}");
 }
 
+/// The engine-side ladder check against an inline box-overlap test, on the brush model's bounds
+/// with the one-unit spread the engine gives an entity (it no longer calls the legacy function).
 #[test]
-fn ladder_check_matches_the_legacy_overlap_test() {
+fn ladder_check_matches_the_overlap_test_on_spread_bounds() {
     let Ok(vfs) = Vfs::discover(None, VfsConfig::default()) else {
         return;
     };
@@ -667,8 +669,8 @@ fn ladder_check_matches_the_legacy_overlap_test() {
     for ladder in &ladders {
         // The entity the engine made of the ladder has the brush model's bounds one unit larger
         // on every side (`Mod_LoadSubmodels`, which `SetMinMaxSize` copies), and the game tests
-        // those: the legacy test on the lump's bounds has the same edges shifted by one unit.
-        // So the legacy test is run on the bounds with that spread, and what the test shows is
+        // those: the lump's bounds have the same edges shifted by one unit. So the inline
+        // overlap test below is run on the bounds with that spread, and what the test shows is
         // that the engine-side check is the same overlap test, whose box the original grows.
         let (lo, hi) = (ladder.mins - Vec3::ONE, ladder.maxs + Vec3::ONE);
         for hull in [Hull::Standing, Hull::Crouched] {
@@ -682,13 +684,13 @@ fn ladder_check_matches_the_legacy_overlap_test() {
                     for z in axis(lo.z, hi.z, ext.z) {
                         let pos = Vec3::new(x, y, z);
                         let (pmin, pmax) = (pos - ext, pos + ext);
-                        let legacy = pmin.cmple(hi).all() && pmax.cmpge(lo).all();
+                        let overlaps = pmin.cmple(hi).all() && pmax.cmpge(lo).all();
                         assert_eq!(
                             w.server.game().is_on_ladder(pos, hull),
-                            legacy,
+                            overlaps,
                             "{pos:?} {hull:?}"
                         );
-                        if legacy {
+                        if overlaps {
                             on += 1;
                         } else {
                             off += 1;

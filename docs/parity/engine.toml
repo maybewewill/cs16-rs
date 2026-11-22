@@ -21,7 +21,7 @@ evidence = "crates/cs-probe/src/lib.rs::tests::scripted_handshake_reaches_signon
 [[item]]
 id = "client_signon_order"
 status = "verified"
-evidence = "crates/cs-probe/src/lib.rs::tests::signon_chain_reaches_in_game; unverified against a real server, see docs/dev/reference-stand.md; VERIFIED 2026-11-22, method 1 (the original Steam CS 1.6 client build 10210 on our server, de_dust2; the original client accepts the order of our sign-on stages; docs/parity/checklists/phase2d-weapons.md V1)"
+evidence = "crates/cs-probe/src/lib.rs::tests::signon_chain_reaches_in_game; VERIFIED 2026-11-22, method 1 (the original Steam CS 1.6 client build 10210 on our server, de_dust2; the original client accepts the order of our sign-on stages; docs/parity/checklists/phase2d-weapons.md V1)"
 
 [[item]]
 id = "client_spawn_crc_munge"
@@ -86,7 +86,7 @@ evidence = "crates/cs-engine/src/map.rs::tests::real_map_pvs_hides_far_spawn; Se
 [[item]]
 id = "signon"
 status = "verified"
-evidence = "crates/cs-engine/tests/signon.rs::probe_reaches_in_game_within_200_frames; stage order unverified against a real server (working assumption, see signon_opcode_order_matches_golden_capture); VERIFIED 2026-11-22, method 1 (the original Steam CS 1.6 client build 10210 on our server, de_dust2; the original client completes the sign-on on our server and spawns; the earlier note 'stage order unverified against a real server' no longer holds; docs/parity/checklists/phase2d-weapons.md V1)"
+evidence = "crates/cs-engine/tests/signon.rs::probe_reaches_in_game_within_200_frames; VERIFIED 2026-11-22, method 1 (the original Steam CS 1.6 client build 10210 on our server, de_dust2; the original client completes the sign-on on our server and spawns; docs/parity/checklists/phase2d-weapons.md V1)"
 
 [[item]]
 id = "studio_hitbox_traces"
@@ -205,8 +205,8 @@ evidence = "crates/cs-engine/tests/tempents.rs::ambient_sound_from_a_point, soun
 
 [[item]]
 id = "resource_list_completeness"
-status = "missing"
-evidence = "Known gap: our resource list has 730 entries against 781 of the original HLDS (golden capture 2026-11-22). 51 are only in the original: 36 sounds, 10 models and 5 events. Without a sound or an event the client plays nothing for it"
+status = "tested"
+evidence = "The resource list is identical to the original HLDS (build 10210, golden capture 2026-11-22): 781 entries, player.mdl at index 141, 0 resource-list lines in the golden diff (it had 730 entries before the F2 fix: 36 sounds, 10 models and 5 events were missing). Tests: crates/cs-engine/src/signon.rs::tests::sendres_stage_requests_and_lists_resources and crates/cs-game/tests/inventory.rs::every_weapon_event_resolves_after_activation (every event of the game's precache is in the list). The order, generic then sounds, models, decals and events as SV_CreateResourceList writes it (rh_sv_main.cpp:5787), is asserted by the resource-order test of the phase 2D final fix wave"
 
 [[item]]
 id = "msgdest_broadcast_datagram"
@@ -220,13 +220,13 @@ evidence = "Known gap: the 1 s spacing of the userinfo broadcast (sendinfo_time)
 
 [[item]]
 id = "delta_encoder_callbacks"
-status = "missing"
-evidence = "Known gap: the game's Player_Encode and Entity_Encode delta encoder callbacks (the ReGameDLL hooks that change what an entity sends) are not called"
+status = "tested"
+evidence = "crates/cs-game/src/encoders.rs::tests::the_local_players_origin_is_unset_and_other_players_keep_theirs, an_entity_that_follows_another_sends_no_origin_until_it_stops, a_parametric_mover_sends_neither_origin_nor_angles, a_beam_sends_the_fields_its_type_uses, an_encoder_the_game_does_not_know_changes_nothing (Entity_Encode, Player_Encode and Custom_Encode, the ReGameDLL hooks that change what an entity sends); crates/cs-game/tests/fullpack.rs::the_local_players_origin_is_not_sent; the cost of the hook (at most one call per changed entity) is bounded by the engine test of the phase 2D final fix wave. The pre-join player angles stay a documented gap, as ruled"
 
 [[item]]
 id = "addtofullpack_filters"
-status = "missing"
-evidence = "Known gap: the AddToFullPack filters of ReHLDS/ReGameDLL (PVS/PAS-based and ownership checks of what an entity shows to a client) are only partly applied"
+status = "tested"
+evidence = "crates/cs-game/src/fullpack.rs (the AddToFullPack filters of ReGameDLL: the FL_SPECTATOR filter, the 1 s PVS grace, FL_SKIPLOCALHOST, and PVS culling by default); tests crates/cs-game/tests/fullpack.rs::a_spectator_flagged_entity_is_sent_to_nobody_but_itself, skiplocalhost_hides_an_owned_entity_from_a_predicting_owner_only, an_entity_keeps_its_place_in_the_packet_for_a_second_out_of_the_pvs. The pre-join player angles stay a documented gap, as ruled"
 
 [[item]]
 id = "update_rate_frame_batching"
@@ -237,3 +237,18 @@ evidence = "Known gap: our server sends about 60 updates a second (a datagram ev
 id = "newer_build_messages"
 status = "missing"
 evidence = "Known gap: HealthInfo, Account and ReqState, which the newer mp.dll of the original HLDS (build 10210) sends and ours does not (golden join diff 2026-11-22); our build number is 8684"
+
+[[item]]
+id = "entities_in_sphere"
+status = "tested"
+evidence = "the sphere-query tests of crates/cs-engine/src/api_entities.rs updated by the phase 2D final fix wave (the controller names them at merge): FindEntityInSphere (rh_pr_cmds.cpp:859-889) measures from the point to the absmin/absmax box of the entity, skips edicts with no classname and inactive client slots; an HE grenade 360 units from the origin with its hull edge inside 350 units is found"
+
+[[item]]
+id = "resource_list_order"
+status = "tested"
+evidence = "the resource-order test added to crates/cs-engine by the phase 2D final fix wave (the controller names it at merge): SV_CreateResourceList (rh_sv_main.cpp:5787) writes the generic resources, then the sounds, the models, the decals and the events"
+
+[[item]]
+id = "baseline_entity_numbers"
+status = "verified"
+evidence = "crates/cs-engine/src/game.rs::tests::baselines_follow_create_baseline (the baselines are the entities that CreateBaseline marks, crates/cs-engine/src/server.rs::baselined); VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; 51 baselines with the same entity numbers as the original; docs/parity/checklists/phase2d-weapons.md V10). The numbers only: the content of every baseline was not compared"
