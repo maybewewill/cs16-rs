@@ -281,6 +281,77 @@ pub fn meta_delta_schema() -> DeltaSchema {
     }
 }
 
+/// The changed-field marks (`FDT_MARK`) of one delta, as a game's conditional encoder sees them
+/// (`DELTA_SETBYINDEX`, `DELTA_UNSETBYINDEX`, `DELTA_FINDFIELD` of `rehlds/engine/delta.cpp`).
+/// A field whose mark is set goes on the wire.
+pub struct DeltaMarks<'a> {
+    schema: &'a DeltaSchema,
+    mask: u64,
+}
+
+impl<'a> DeltaMarks<'a> {
+    /// The marks of `schema`'s fields in `mask` (bit `n` for field `n`): what the writer hands
+    /// an encoder, and a test hands one.
+    pub fn new(schema: &'a DeltaSchema, mask: u64) -> Self {
+        Self { schema, mask }
+    }
+
+    /// The marks as a bit mask, bit `n` for field `n`.
+    pub fn mask(&self) -> u64 {
+        self.mask
+    }
+
+    /// `DELTA_FINDFIELD`: the index of field `name`, `None` when the schema has no such field.
+    pub fn find_field(&self, name: &str) -> Option<usize> {
+        self.schema.field_index(name)
+    }
+
+    /// `DELTA_SETBYINDEX`: marks field `index` as changed. An index out of range is ignored.
+    pub fn set(&mut self, index: usize) {
+        if index < self.schema.fields.len().min(64) {
+            self.mask |= 1u64 << index;
+        }
+    }
+
+    /// `DELTA_UNSETBYINDEX`: clears the mark of field `index`. An index out of range is ignored.
+    pub fn unset(&mut self, index: usize) {
+        if index < 64 {
+            self.mask &= !(1u64 << index);
+        }
+    }
+
+    /// Whether field `index` is marked.
+    pub fn is_set(&self, index: usize) -> bool {
+        index < 64 && self.mask & (1u64 << index) != 0
+    }
+}
+
+/// A conditional encoder (`delta_t::conditionalencode`): called with the record the delta starts
+/// from, the record it goes to and the marks of the fields that differ, it may set and clear
+/// marks. The schema is the one `marks` carries.
+pub type DeltaEncodeFn<'e> = &'e mut dyn FnMut(&DeltaRecord, &DeltaRecord, &mut DeltaMarks<'_>);
+
+/// The marks of the fields that differ between `from` and `to` (`DELTA_MarkDelta`), edited by the
+/// conditional encoder when there is one (`DELTA_CheckDelta`, `rehlds/engine/delta.cpp`: the
+/// encoder runs after the marking and before the fields are counted).
+fn delta_mask(
+    schema: &DeltaSchema,
+    from: &DeltaRecord,
+    to: &DeltaRecord,
+    encode: Option<DeltaEncodeFn<'_>>,
+) -> u64 {
+    let mut marks = DeltaMarks { schema, mask: 0 };
+    for (i, field) in schema.fields.iter().enumerate().take(64) {
+        if !from.values[i].equals_wire(&to.values[i], field) {
+            marks.mask |= 1u64 << i;
+        }
+    }
+    if let Some(encode) = encode {
+        encode(from, to, &mut marks);
+    }
+    marks.mask
+}
+
 /// Encode a `DeltaRecord` diff (`DELTA_WriteDelta`, `delta.cpp:622-865`) into an active
 /// bit-writing `MsgWriter`. Returns `true` if any fields differed (or `force` was set).
 pub fn write_delta(
@@ -291,16 +362,22 @@ pub fn write_delta(
     force: bool,
     time_base: f64,
 ) -> bool {
-    let mut mask: u64 = 0;
-    let mut last_bit: Option<usize> = None;
+    write_delta_encoded(w, schema, from, to, force, time_base, None)
+}
 
-    for (i, field) in schema.fields.iter().enumerate() {
-        let changed = !from.values[i].equals_wire(&to.values[i], field);
-        if changed {
-            mask |= 1u64 << i;
-            last_bit = Some(i);
-        }
-    }
+/// [`write_delta`] with the schema's conditional encoder (see [`DeltaEncodeFn`]): the fields it
+/// leaves marked are the ones written. Returns `true` if any field was marked.
+pub fn write_delta_encoded(
+    w: &mut MsgWriter,
+    schema: &DeltaSchema,
+    from: &DeltaRecord,
+    to: &DeltaRecord,
+    force: bool,
+    time_base: f64,
+    encode: Option<DeltaEncodeFn<'_>>,
+) -> bool {
+    let mask = delta_mask(schema, from, to, encode);
+    let last_bit = (mask != 0).then(|| 63 - mask.leading_zeros() as usize);
 
     if last_bit.is_none() && !force {
         return false;
@@ -392,11 +469,17 @@ pub fn write_delta(
 
 /// Check whether two records differ without writing anything (`DELTA_CheckDelta`).
 pub fn has_delta_changes(schema: &DeltaSchema, from: &DeltaRecord, to: &DeltaRecord) -> bool {
-    schema
-        .fields
-        .iter()
-        .enumerate()
-        .any(|(i, field)| !from.values[i].equals_wire(&to.values[i], field))
+    has_delta_changes_encoded(schema, from, to, None)
+}
+
+/// [`has_delta_changes`] after the schema's conditional encoder (see [`DeltaEncodeFn`]).
+pub fn has_delta_changes_encoded(
+    schema: &DeltaSchema,
+    from: &DeltaRecord,
+    to: &DeltaRecord,
+    encode: Option<DeltaEncodeFn<'_>>,
+) -> bool {
+    delta_mask(schema, from, to, encode) != 0
 }
 
 /// Decode a `DeltaRecord` diff (`DELTA_ParseDelta`, `delta.cpp:867-1069`) from an active

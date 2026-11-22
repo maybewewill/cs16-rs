@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use cs_cvar::CVarRegistry;
 use cs_engine::{
     consts,
-    EdictId, EngineApi, GameDll, MsgDest, PrecacheError, Server, ServerConfig, ServerMap,
+    EdictId, EngineApi, FullPackCtx, GameDll, MsgDest, PrecacheError, Server, ServerConfig, ServerMap,
 };
 use cs_probe::{ProbeClient, ProbeConfig};
 use cs_proto48::bitbuf::MsgWriter;
@@ -848,13 +848,18 @@ impl GameDll for TestGame {
     fn add_to_full_pack(
         &mut self,
         _eng: &mut EngineApi<'_>,
-        viewer: u8,
-        ent: u16,
+        ctx: &FullPackCtx<'_>,
         _state: &mut GoldSrcEntityState,
     ) -> bool {
+        // The engine asks about every entity; this game, like the source without its PVS
+        // history, takes the ones potentially visible (and the viewer's own) and records only
+        // those.
+        if !ctx.in_pvs && ctx.ent_id != ctx.viewer_id {
+            return false;
+        }
         self.add_to_full_pack_calls += 1;
-        self.add_to_full_pack_ents.insert(ent);
-        self.add_to_full_pack_pairs.insert((viewer, ent));
+        self.add_to_full_pack_ents.insert(ctx.ent);
+        self.add_to_full_pack_pairs.insert((ctx.viewer, ctx.ent));
         true
     }
 }

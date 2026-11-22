@@ -114,8 +114,8 @@ const CLIENT_SMOKE_SPRITES: [&str; 14] = [
     "sprites/rifle_smoke3.spr",
 ];
 
-/// The `PRECACHE_SOUND` calls of `ClientPrecache` (ReGameDLL `client.cpp`, read 2026-11-22),
-/// plus the flashlight sound (`SOUND_FLASHLIGHT_ON` and `_OFF` are the same file).
+/// The `PRECACHE_SOUND` calls of `ClientPrecache` that come before the models (ReGameDLL
+/// `client.cpp`, read 2026-11-22).
 const CLIENT_SOUNDS: [&str; 110] = [
     "weapons/dryfire_pistol.wav",
     "weapons/dryfire_rifle.wav",
@@ -220,23 +220,70 @@ const CLIENT_SOUNDS: [&str; 110] = [
     "debris/glass1.wav",
     "debris/glass2.wav",
     "debris/glass3.wav",
+    // `SOUND_FLASHLIGHT_ON` and `SOUND_FLASHLIGHT_OFF` (the same file), between the glass and
+    // the body splat.
+    "items/flashlight1.wav",
     "common/bodysplat.wav",
     "player/pl_pain2.wav",
     "player/pl_pain4.wav",
     "player/pl_pain5.wav",
     "player/pl_pain6.wav",
     "player/pl_pain7.wav",
-    "items/flashlight1.wav",
 ];
 
-/// The `PRECACHE_SOUND` calls of `CWorld::Precache` (`world.cpp`, read 2026-11-22) that do not
-/// belong to the weapons or the bots.
-const WORLD_SOUNDS: [&str; 14] = [
+/// The `PRECACHE_SOUND` calls of `ClientPrecache` that follow the models and the bounds it
+/// forces (client.cpp 4328-4338): the weapon-select sounds of the HUD and the Geiger counter.
+const CLIENT_HUD_SOUNDS: [&str; 11] = [
+    "common/wpn_hudoff.wav",
+    "common/wpn_hudon.wav",
+    "common/wpn_moveselect.wav",
+    "common/wpn_select.wav",
+    "common/wpn_denyselect.wav",
+    "player/geiger6.wav",
+    "player/geiger5.wav",
+    "player/geiger4.wav",
+    "player/geiger3.wav",
+    "player/geiger2.wav",
+    "player/geiger1.wav",
+];
+
+/// The `PRECACHE_GENERIC` calls of `ClientPrecache` (client.cpp 4361-4364): the textures of the
+/// scope overlay, which the engine also asks the client to check (`force_exactfile`).
+const CLIENT_GENERIC: [&str; 4] = [
+    "sprites/scope_arc.tga",
+    "sprites/scope_arc_nw.tga",
+    "sprites/scope_arc_ne.tga",
+    "sprites/scope_arc_sw.tga",
+];
+
+/// The sounds `BotPrecache` precaches (ReGameDLL `game_shared/bot/bot_util.cpp`, vanilla branch,
+/// read 2026-11-22; the `REGAMEDLL_FIXES` branch skips them when no bot can run): the vanilla
+/// server precaches them for every game, bots or not, after its model `sprites/smoke.spr`.
+const BOT_SOUNDS: [&str; 11] = [
+    "buttons/bell1.wav",
+    "buttons/blip1.wav",
+    "buttons/blip2.wav",
+    "buttons/button11.wav",
+    "buttons/latchunlocked2.wav",
+    "buttons/lightswitch2.wav",
+    "ambience/quail1.wav",
+    "events/tutor_msg.wav",
+    "events/enemy_died.wav",
+    "events/friend_died.wav",
+    "events/task_complete.wav",
+];
+
+/// The sounds `CWorld::Precache` precaches before the gibs (`world.cpp`, read 2026-11-22).
+const WORLD_SOUNDS_BEFORE_GIBS: [&str; 5] = [
     "common/null.wav",
     "items/suitchargeok1.wav",
     "items/gunpickup2.wav",
     "common/bodydrop3.wav",
     "common/bodydrop4.wav",
+];
+
+/// The sounds `CWorld::Precache` precaches after the gibs: the ricochets.
+const WORLD_SOUNDS: [&str; 9] = [
     "weapons/ric1.wav",
     "weapons/ric2.wav",
     "weapons/ric3.wav",
@@ -291,9 +338,28 @@ fn precache_model(eng: &mut EngineApi<'_>, name: &str) {
     }
 }
 
+fn precache_generic(eng: &mut EngineApi<'_>, name: &str) {
+    if let Err(err) = eng.precache_generic(name) {
+        tracing::error!(generic = %name, ?err, "generic file not precached");
+    }
+}
+
 fn precache_sound(eng: &mut EngineApi<'_>, name: &str) {
     if let Err(err) = eng.precache_sound(name) {
         tracing::error!(sound = %name, ?err, "sound not precached");
+    }
+}
+
+/// The end of `CWorld::Spawn` (world.cpp 215-272, vanilla branch, read 2026-11-22): the briefing of
+/// the map, `maps/<mapname>.txt`, or else `maps/default.txt`, is loaded and, when it holds
+/// anything, precached as a generic file (the client reads it for the briefing window).
+/// `briefings` are the briefing files that exist.
+pub(crate) fn precache_briefing(eng: &mut EngineApi<'_>, briefings: &std::collections::BTreeSet<String>) {
+    let map_file = format!("maps/{}.txt", eng.map_name());
+    if briefings.contains(&map_file) {
+        precache_generic(eng, &map_file);
+    } else if briefings.contains("maps/default.txt") {
+        precache_generic(eng, "maps/default.txt");
     }
 }
 
@@ -336,6 +402,10 @@ impl World {
         eng.set_cvar("sv_stepsize", "18");
         eng.set_cvar("room_type", "0");
 
+        // `InstallGameRules` runs `CVoiceGameMgr::Init` (game_shared/voice_gamemgr.cpp), whose first
+        // act is to precache the speaker icon; its two user messages (`VoiceMask`, `ReqState`)
+        // wait for the voice manager.
+        precache_model(eng, "sprites/voiceicon.spr");
         // The sound entity (`GetClassPtr<CCSSoundEnt>` then `Spawn`, world.cpp 299-308, which makes
         // it `SOLID_NOT`), made right after the game rules and before the precaches: an edict
         // with no model that the original keeps, so the map entities that follow have the same
@@ -346,8 +416,9 @@ impl World {
             v.solid = SOLID_NOT;
         }
         // `CWorld::Precache` (world.cpp 277-365): `WeaponsPrecache()` comes before
-        // `ClientPrecache()`, which comes before the world's own sounds and gibs, so the weapons'
-        // models have the low indices and the third-person ones follow the player models.
+        // `ClientPrecache()`, which comes before `BotPrecache()` and the world's own sounds and
+        // gibs, so the weapons' models have the low indices and the third-person ones follow the
+        // player models.
         crate::inventory::weapons_precache(eng);
         for name in CLIENT_SOUNDS {
             precache_sound(eng, name);
@@ -358,15 +429,27 @@ impl World {
         for name in CLIENT_WEAPON_MODELS {
             precache_model(eng, name);
         }
+        for name in CLIENT_HUD_SOUNDS {
+            precache_sound(eng, name);
+        }
         // `g_iShadowSprite`, which `InitHUD` sends in `ShadowIdx`.
         precache_model(eng, "sprites/shadow_circle.spr");
         // The end of `ClientPrecache` (client.cpp 4340-4364): the smoke sprites of the bullets
-        // (`REGAMEDLL_FIXES`' `gas_puff_01.spr` is not vanilla) and the reset of the decals.
+        // (`REGAMEDLL_FIXES`' `gas_puff_01.spr` is not vanilla), the scope textures and the
+        // reset of the decals.
         for name in CLIENT_SMOKE_SPRITES {
             precache_model(eng, name);
         }
+        for name in CLIENT_GENERIC {
+            precache_generic(eng, name);
+        }
         eng.precache_event("events/decal_reset.sc");
-        for name in WORLD_SOUNDS {
+        // `BotPrecache`, which the original calls whether or not bots are around.
+        precache_model(eng, "sprites/smoke.spr");
+        for name in BOT_SOUNDS {
+            precache_sound(eng, name);
+        }
+        for name in WORLD_SOUNDS_BEFORE_GIBS {
             precache_sound(eng, name);
         }
         // `sv_language` 1 is German, which has its own gibs.
@@ -375,6 +458,9 @@ impl World {
         } else {
             precache_model(eng, "models/hgibs.mdl");
             precache_model(eng, "models/agibs.mdl");
+        }
+        for name in WORLD_SOUNDS {
+            precache_sound(eng, name);
         }
         for (index, pattern) in LIGHT_STYLES {
             eng.light_style(index, pattern);
@@ -617,6 +703,10 @@ impl GameEntity for StaticBrush {
     /// An entry without a `*N` brush model is refused: there is nothing to collide with.
     fn spawn(&mut self, eng: &mut EngineApi<'_>, id: EdictId, keys: &[(String, String)]) -> bool {
         let (class, kind) = (self.class, self.kind);
+        if class == "func_breakable" {
+            // `CBreakable::Spawn` precaches before anything else.
+            breakable_precache(eng, keys);
+        }
         let Some(v) = eng.ent_mut(id) else {
             return false;
         };
@@ -675,6 +765,109 @@ impl GameEntity for StaticBrush {
         // solid: link it again for the traces to see it.
         eng.link_entity(id, false);
         true
+    }
+}
+
+/// `Materials` of `func_break.h` (ReGameDLL, read 2026-11-22): `matGlass` is the default of a
+/// `func_breakable` whose map gives no `material`.
+const MAT_GLASS: i32 = 0;
+const MAT_WOOD: i32 = 1;
+const MAT_METAL: i32 = 2;
+const MAT_FLESH: i32 = 3;
+const MAT_CINDER_BLOCK: i32 = 4;
+const MAT_CEILING_TILE: i32 = 5;
+const MAT_COMPUTER: i32 = 6;
+const MAT_UNBREAKABLE_GLASS: i32 = 7;
+const MAT_ROCKS: i32 = 8;
+/// `matLastMaterial`.
+const MAT_LAST: i32 = 10;
+
+/// `CBreakable::KeyValue` (the keys `material` and `gibmodel`) and `CBreakable::Precache`
+/// (`func_break.cpp`, read 2026-11-22): the gibs and sounds of the material, the sounds
+/// `MaterialSoundPrecache` adds, and the model of the gibs the map names (`gibmodel`, which
+/// replaces the material's). A `material` out of range is wood. Not ported: the object a
+/// breakable spawns (`spawnobject`), which is a Half-Life item the game does not have.
+fn breakable_precache(eng: &mut EngineApi<'_>, keys: &[(String, String)]) {
+    let mut material = MAT_GLASS;
+    let mut gib_model: Option<&str> = None;
+    for (key, value) in keys {
+        match key.as_str() {
+            "material" => {
+                let m = crate::menus::atoi(value);
+                material = if (0..MAT_LAST).contains(&m) { m } else { MAT_WOOD };
+            }
+            "gibmodel" => gib_model = Some(value),
+            _ => {}
+        }
+    }
+    let (default_gib, busts): (Option<&str>, &[&str]) = match material {
+        MAT_WOOD => (
+            Some("models/woodgibs.mdl"),
+            &["debris/bustcrate1.wav", "debris/bustcrate2.wav"],
+        ),
+        MAT_FLESH => (
+            Some("models/fleshgibs.mdl"),
+            &["debris/bustflesh1.wav", "debris/bustflesh2.wav"],
+        ),
+        MAT_COMPUTER => (
+            Some("models/computergibs.mdl"),
+            // The sparks come first, then the metal bursts.
+            &[
+                "buttons/spark5.wav",
+                "buttons/spark6.wav",
+                "debris/bustmetal1.wav",
+                "debris/bustmetal2.wav",
+            ],
+        ),
+        MAT_GLASS | MAT_UNBREAKABLE_GLASS => (
+            Some("models/glassgibs.mdl"),
+            &["debris/bustglass1.wav", "debris/bustglass2.wav"],
+        ),
+        MAT_METAL => (
+            Some("models/metalplategibs.mdl"),
+            &["debris/bustmetal1.wav", "debris/bustmetal2.wav"],
+        ),
+        MAT_CINDER_BLOCK => (
+            Some("models/cindergibs.mdl"),
+            &["debris/bustconcrete1.wav", "debris/bustconcrete2.wav"],
+        ),
+        MAT_ROCKS => (
+            Some("models/rockgibs.mdl"),
+            &["debris/bustconcrete1.wav", "debris/bustconcrete2.wav"],
+        ),
+        MAT_CEILING_TILE => (Some("models/ceilinggibs.mdl"), &["debris/bustceiling.wav"]),
+        _ => (None, &[]),
+    };
+    for sound in busts {
+        precache_sound(eng, sound);
+    }
+    // `MaterialSoundPrecache`: the sounds the material makes when hurt.
+    let hurt: &[&str] = match material {
+        MAT_WOOD => &["debris/wood1.wav", "debris/wood2.wav", "debris/wood3.wav"],
+        MAT_FLESH => &[
+            "debris/flesh1.wav",
+            "debris/flesh2.wav",
+            "debris/flesh3.wav",
+            "debris/flesh5.wav",
+            "debris/flesh6.wav",
+            "debris/flesh7.wav",
+        ],
+        MAT_GLASS | MAT_COMPUTER | MAT_UNBREAKABLE_GLASS => {
+            &["debris/glass1.wav", "debris/glass2.wav", "debris/glass3.wav"]
+        }
+        MAT_METAL => &["debris/metal1.wav", "debris/metal2.wav", "debris/metal3.wav"],
+        MAT_CINDER_BLOCK | MAT_ROCKS => {
+            &["debris/concrete1.wav", "debris/concrete2.wav", "debris/concrete3.wav"]
+        }
+        _ => &[],
+    };
+    for sound in hurt {
+        precache_sound(eng, sound);
+    }
+    // `if (m_iszGibModel) pGibName = STRING(m_iszGibModel)`: the map's model wins over the
+    // material's. Assumption: the maps give no empty `gibmodel`.
+    if let Some(name) = gib_model.or(default_gib) {
+        precache_model(eng, name);
     }
 }
 

@@ -14,7 +14,9 @@
 pub mod bullets;
 pub mod buy;
 pub mod chat;
+pub mod encoders;
 pub mod entity;
+pub mod fullpack;
 pub mod grenade;
 mod hint;
 pub mod hud_misc;
@@ -37,7 +39,7 @@ pub mod weapons;
 pub mod world;
 
 use cs_engine::{EdictId, EngineApi, GameDll};
-use cs_proto48::delta::{GoldSrcClientData, GoldSrcUserCmd};
+use cs_proto48::delta::{DeltaMarks, GoldSrcClientData, GoldSrcEntityState, GoldSrcUserCmd};
 use cs_proto48::usermsg::UserMsgRegistry;
 use cs_sim::pm::{PmShared, pm_init};
 use glam::Vec3;
@@ -73,6 +75,10 @@ pub struct GameState {
     /// has run, in the life of the game module (it is not reset with the map). `Precache` makes a
     /// player start its HUD over while it is set; `Spawn` does so whatever it is.
     pub init_hud_global: bool,
+    /// The map briefings that exist and are not empty: `maps/<map>.txt` and `maps/default.txt`
+    /// (`CWorld::Spawn` loads one with `LOAD_FILE_FOR_ME` and precaches it as a generic file).
+    /// Read by [`CsGame::load_motd`]; assumption: a file that exists is not empty.
+    briefings: std::collections::BTreeSet<String>,
     /// State of the game's own random numbers (`RANDOM_LONG`).
     rng: u32,
     /// The statics of `pm_shared` (the stuck table, the texture materials, the wade-step skip
@@ -98,6 +104,7 @@ impl GameState {
             map_cycle: mapcycle::MapCycle::default(),
             join_counter: 0,
             init_hud_global: true,
+            briefings: std::collections::BTreeSet::new(),
             rng: 0x2545_f491,
             pm_shared: pm_init(None),
             #[cfg(feature = "test-hooks")]
@@ -133,6 +140,8 @@ pub(crate) fn random_in(state: &mut u32, lo: i32, hi: i32) -> i32 {
 /// edicts).
 pub struct CsGame {
     state: GameState,
+    /// `g_PVSStatus`: when each client last saw each entity ([`fullpack`]).
+    pvs_history: fullpack::PvsHistory,
 }
 
 impl Default for CsGame {
@@ -147,6 +156,7 @@ impl CsGame {
     pub fn new() -> Self {
         Self {
             state: GameState::new(),
+            pvs_history: fullpack::PvsHistory::default(),
         }
     }
 
@@ -159,6 +169,11 @@ impl CsGame {
     /// materials of the textures). A missing file gives an empty table, every texture concrete.
     pub fn load_motd(&mut self, vfs: &cs_vfs::Vfs) {
         self.state.pm_shared = pm_init(vfs.read_bytes("sound/materials.txt").ok().as_deref());
+        self.state.briefings = vfs
+            .list_dir("maps", Some("txt"))
+            .into_iter()
+            .map(|name| format!("maps/{name}"))
+            .collect();
         self.state.motd = match vfs.read_bytes("motd.txt") {
             Ok(bytes) => bytes,
             Err(cs_vfs::VfsError::NotFound(_)) => Vec::new(),
@@ -614,6 +629,7 @@ impl GameDll for CsGame {
     fn server_deactivate(&mut self, _eng: &mut EngineApi<'_>) {
         self.state.players = std::array::from_fn(|_| None);
         self.state.reset_map();
+        self.pvs_history.clear();
     }
 
     /// Makes the entity of class `classname` (see [`create_entity`]) and spawns it. A class the
@@ -634,6 +650,9 @@ impl GameDll for CsGame {
             return false;
         }
         attach(eng, id, entity);
+        if classname == "worldspawn" {
+            world::precache_briefing(eng, &self.state.briefings);
+        }
         true
     }
 
@@ -721,5 +740,27 @@ impl GameDll for CsGame {
     /// `SetupVisibility`: an observer sees what the player it follows sees.
     fn setup_visibility(&mut self, eng: &mut EngineApi<'_>, slot: u8) -> Option<Vec3> {
         observer::setup_visibility(&self.state, eng, slot)
+    }
+
+    /// `AddToFullPack`: the filters of [`fullpack`].
+    fn add_to_full_pack(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        ctx: &cs_engine::FullPackCtx<'_>,
+        _state: &mut GoldSrcEntityState,
+    ) -> bool {
+        fullpack::add_to_full_pack(&mut self.pvs_history, eng, ctx)
+    }
+
+    /// `Entity_Encode`, `Player_Encode` and `Custom_Encode` (`RegisterEncoders`).
+    fn delta_encode(
+        &mut self,
+        encoder: &str,
+        current_player: u8,
+        from: &GoldSrcEntityState,
+        to: &GoldSrcEntityState,
+        marks: &mut DeltaMarks<'_>,
+    ) {
+        encoders::delta_encode(encoder, current_player, from, to, marks);
     }
 }

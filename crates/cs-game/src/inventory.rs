@@ -132,11 +132,12 @@ pub(crate) fn cs_model_name(id: WeaponId) -> Option<&'static str> {
     })
 }
 
-/// The sounds of `WeaponsPrecache` that belong to no weapon (`weapons.cpp` 405-424), and the
-/// pickup sounds this module plays.
+/// The sounds of `WeaponsPrecache` that belong to no weapon (`weapons.cpp` 411-423), in the
+/// source's order; `items/9mmclip1.wav` and `items/gunpickup2.wav` are precached by the ammo and
+/// the battery before, and are listed so that this module's pickup sounds are always there.
 const WEAPONS_SOUNDS: [&str; 12] = [
     "items/9mmclip1.wav",
-    "items/weapondrop1.wav",
+    "items/gunpickup2.wav",
     "weapons/debris1.wav",
     "weapons/debris2.wav",
     "weapons/debris3.wav",
@@ -145,8 +146,8 @@ const WEAPONS_SOUNDS: [&str; 12] = [
     "weapons/grenade_hit3.wav",
     "weapons/bullet_hit1.wav",
     "weapons/bullet_hit2.wav",
+    "items/weapondrop1.wav",
     "weapons/generic_reload.wav",
-    "items/gunpickup2.wav",
 ];
 
 /// The sprites and models of `WeaponsPrecache` that belong to no weapon (`weapons.cpp`
@@ -207,15 +208,19 @@ pub const WEAPON_EVENTS: [&str; 28] = [
     "events/famas.sc",
 ];
 
-/// The models of the world items `WeaponsPrecache` precaches first (weapons.cpp 305-330).
-const ITEM_MODELS: [&str; 7] = [
-    "models/w_kevlar.mdl",
-    "models/w_battery.mdl",
-    "models/w_antidote.mdl",
-    "models/w_security.mdl",
-    "models/w_longjump.mdl",
-    "models/w_assault.mdl",
-    "models/w_thighpack.mdl",
+/// What the world items `WeaponsPrecache` precaches first precache (weapons.cpp 315-322; ReGameDLL
+/// `items.cpp`, read 2026-11-22): `item_suit` (the kevlar model and its pickup sound), `item_battery`
+/// (the model and the gun pickup sound), `item_antidote`, `item_security`, `item_longjump`,
+/// `item_kevlar` (its model is already there), `item_assaultsuit` and `item_thighpack`: the model
+/// and the sound, if any.
+const ITEM_PRECACHE: [(&str, Option<&str>); 7] = [
+    ("models/w_kevlar.mdl", Some("items/tr_kevlar.wav")),
+    ("models/w_battery.mdl", Some("items/gunpickup2.wav")),
+    ("models/w_antidote.mdl", None),
+    ("models/w_security.mdl", None),
+    ("models/w_longjump.mdl", None),
+    ("models/w_assault.mdl", None),
+    ("models/w_thighpack.mdl", None),
 ];
 
 /// `WeaponsPrecache` (`weapons.cpp` 300-425, called by `CWorld::Precache`): the weapons' own
@@ -231,8 +236,13 @@ pub(crate) fn weapons_precache(eng: &mut EngineApi<'_>) {
     // the suit (`item_suit`: `CItemSuit::Precache` precaches the kevlar vest's model), the
     // battery, the antidote, the security item, the long jump module, the kevlar vest (already
     // there), the assault suit and the thigh pack, in that order.
-    for model in ITEM_MODELS {
+    for (model, sound) in ITEM_PRECACHE {
         precache_model(eng, model);
+        if let Some(sound) = sound
+            && let Err(err) = eng.precache_sound(sound)
+        {
+            tracing::error!(sound, ?err, "sound not precached");
+        }
     }
     // `precache_all` with the ammo boxes where the source precaches them: `ammo_338magnum`
     // after the AWP's group, `ammo_buckshot` after the XM1014's (the other ammo entities use
@@ -242,8 +252,26 @@ pub(crate) fn weapons_precache(eng: &mut EngineApi<'_>) {
             behavior.precache(eng);
         }
         match id {
-            WeaponId::Awp => precache_model(eng, "models/w_9mmclip.mdl"),
-            WeaponId::Xm1014 => precache_model(eng, "models/w_shotbox.mdl"),
+            // `C338MagnumAmmo::Precache` and `CBuckShotAmmo::Precache` (ammo.cpp, read 2026-11-22): a model and the
+            // sound every ammo box plays.
+            WeaponId::Awp => {
+                precache_model(eng, "models/w_9mmclip.mdl");
+                precache_ammo_sound(eng);
+            }
+            WeaponId::Xm1014 => {
+                precache_model(eng, "models/w_shotbox.mdl");
+                precache_ammo_sound(eng);
+            }
+            // `CC4::Precache` (wpn_c4.cpp 35-41): the C4's weapon itself is a later phase (the
+            // bomb), its resources are not, as the models and sounds after it take their
+            // indices from them.
+            WeaponId::C4 => {
+                precache_model(eng, "models/v_c4.mdl");
+                precache_model(eng, "models/w_backpack.mdl");
+                if let Err(err) = eng.precache_sound("weapons/c4_click.wav") {
+                    tracing::error!(?err, "sound not precached");
+                }
+            }
             _ => {}
         }
     }
@@ -251,6 +279,11 @@ pub(crate) fn weapons_precache(eng: &mut EngineApi<'_>) {
         eng.precache_event(event);
     }
     for id in crate::weapons::WEAPONS_PRECACHE_ORDER {
+        // The grenades' `w_` models are not their weapons' to precache: the original has
+        // them in `ClientPrecache`, after the player models ([`crate::world`]).
+        if matches!(id, WeaponId::Flashbang | WeaponId::HeGrenade | WeaponId::SmokeGrenade) {
+            continue;
+        }
         if let Some(model) = cs_model_name(id) {
             precache_model(eng, model);
         }
@@ -261,13 +294,19 @@ pub(crate) fn weapons_precache(eng: &mut EngineApi<'_>) {
     for model in WEAPONS_MODELS {
         precache_model(eng, model);
     }
-    for model in ARMOURY_MODELS {
-        precache_model(eng, model);
-    }
+    // (The armoury's models are its own to precache, in `Armoury::spawn`, as `CArmoury::Precache`
+    // does: `WeaponsPrecache` does not.)
     for sound in WEAPONS_SOUNDS {
         if let Err(err) = eng.precache_sound(sound) {
             tracing::error!(sound, ?err, "sound not precached");
         }
+    }
+}
+
+/// The pickup sound every ammo box precaches.
+fn precache_ammo_sound(eng: &mut EngineApi<'_>) {
+    if let Err(err) = eng.precache_sound("items/9mmclip1.wav") {
+        tracing::error!(?err, "sound not precached");
     }
 }
 

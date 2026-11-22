@@ -752,7 +752,9 @@ fn a_death_sends_its_messages_in_the_order_of_killed() {
         eng.set_cvar("mp_fadetoblack", "1");
         game.spawn_player(eng, 0, Team::Ct, 0);
     });
-    b.step(3);
+    // Long enough for the datagrams the spawn's messages need, which the rate limit spaces out
+    // (the sign-on list of the resources is longer than it was, which delays everything after it).
+    b.step(8);
     b.probe.clear_messages();
     b.run(|game, eng| game.damage_player(eng, 0, Some(1), 500.0, dmg::BULLET));
     b.step(3);

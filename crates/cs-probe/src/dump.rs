@@ -465,6 +465,15 @@ fn svc_line(
                     .map(|r| format!("{}:{}", r.res_type, r.filename))
                     .collect(),
             ));
+            // The index each model, sound, decal and event is sent under (what the server's
+            // precache order gave it): a resource at another index shows up here alone.
+            line.sets.push((
+                "resource indices".to_string(),
+                resources
+                    .iter()
+                    .map(|r| format!("{}:{}#{}", r.res_type, r.filename, r.index))
+                    .collect(),
+            ));
         }
         SvcMessage::UpdateUserInfo {
             slot,

@@ -108,6 +108,24 @@ impl GameDll for Rig {
     fn setup_visibility(&mut self, eng: &mut EngineApi<'_>, slot: u8) -> Option<glam::Vec3> {
         self.game.setup_visibility(eng, slot)
     }
+    fn add_to_full_pack(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        ctx: &cs_engine::FullPackCtx<'_>,
+        state: &mut cs_proto48::delta::GoldSrcEntityState,
+    ) -> bool {
+        self.game.add_to_full_pack(eng, ctx, state)
+    }
+    fn delta_encode(
+        &mut self,
+        encoder: &str,
+        current_player: u8,
+        from: &cs_proto48::delta::GoldSrcEntityState,
+        to: &cs_proto48::delta::GoldSrcEntityState,
+        marks: &mut cs_proto48::delta::DeltaMarks<'_>,
+    ) {
+        self.game.delta_encode(encoder, current_player, from, to, marks);
+    }
 }
 
 /// A server on a map running a [`Rig`], with one probe client in slot 0, and its clock.

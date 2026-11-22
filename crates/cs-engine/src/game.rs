@@ -4,7 +4,7 @@
 
 use cs_cvar::CVarRegistry;
 use cs_proto48::bitbuf::MsgWriter;
-use cs_proto48::delta::{GoldSrcClientData, GoldSrcEntityState, GoldSrcUserCmd, GoldSrcWeaponData};
+use cs_proto48::delta::{DeltaMarks, GoldSrcClientData, GoldSrcEntityState, GoldSrcUserCmd, GoldSrcWeaponData};
 use cs_proto48::info::InfoString;
 use cs_proto48::messages::{ENTITY_BEAM, ENTITY_NORMAL};
 use cs_proto48::usermsg::UserMsgRegistry;
@@ -16,7 +16,7 @@ use crate::map::ServerMap;
 use crate::precache::PrecacheTables;
 use crate::server::MAX_RELIABLE_BACKLOG;
 use crate::signon::default_light_styles;
-use crate::world::WorldLinks;
+use crate::world::{LinkSnapshot, WorldLinks};
 
 /// `FL_DUCKING` in `EntVars::flags`.
 const FL_DUCKING: u32 = 1 << 14;
@@ -367,16 +367,58 @@ pub trait GameDll {
     fn setup_visibility(&mut self, _eng: &mut EngineApi<'_>, _slot: u8) -> Option<Vec3> {
         None
     }
-    /// Whether `ent` goes into `viewer`'s packet; may adjust `state`.
+    /// `AddToFullPack` of the game library (`pfnAddToFullPack`): whether the entity `ctx.ent`
+    /// goes into the packet of `ctx.viewer`, and the state it carries. `state` is the plain copy
+    /// of the edict ([`entity_state_from_vars`]); the game may edit it. The engine asks for every
+    /// client slot, then for the other live edicts in index order until the list is full; it
+    /// skips the edicts the source's first two checks refuse (`EF_NODRAW` on another entity, no
+    /// model), which need no game state. Every other filter is the game's: see [`FullPackCtx`].
     fn add_to_full_pack(
         &mut self,
         _eng: &mut EngineApi<'_>,
-        _viewer: u8,
-        _ent: u16,
+        _ctx: &FullPackCtx<'_>,
         _state: &mut GoldSrcEntityState,
     ) -> bool {
         true
     }
+    /// A conditional delta encoder of the game (`DELTA_ADDENCODER` in `RegisterEncoders`): runs
+    /// for each entity delta whose `delta.lst` schema names `encoder` (`Entity_Encode`,
+    /// `Player_Encode`, `Custom_Encode`), after the changed fields are marked, and may set and
+    /// clear marks. `from` is the state the delta starts from (zero for a new entity written
+    /// against no base), `to` the state it goes to, `current_player` the slot of the client the
+    /// packet is for (`ENGINE_CURRENT_PLAYER`). The default leaves every mark as it is.
+    fn delta_encode(
+        &mut self,
+        _encoder: &str,
+        _current_player: u8,
+        _from: &GoldSrcEntityState,
+        _to: &GoldSrcEntityState,
+        _marks: &mut DeltaMarks<'_>,
+    ) {
+    }
+}
+
+/// What the engine tells the game about one `AddToFullPack` question: the arguments of the
+/// original (`ent`, `host`, `hostflags`, `pSet`) as the game can use them.
+#[derive(Debug, Clone, Copy)]
+pub struct FullPackCtx<'a> {
+    /// The entity asked about (`e`): its edict number.
+    pub ent: u16,
+    /// Its edict.
+    pub ent_id: EdictId,
+    /// The client the packet is for: its slot (`ENTINDEX(host) - 1`).
+    pub viewer: u8,
+    /// The viewer's player edict (`host`).
+    pub viewer_id: EdictId,
+    /// `hostflags`: bit 0 is the client's `cl_lw`.
+    pub hostflags: u8,
+    /// `ENGINE_CHECK_VISIBILITY(ent, pSet)`: the entity is potentially visible from the viewpoint
+    /// `SetupVisibility` chose (true when the viewer sees everything). The engine always
+    /// computes it; the original only asks when the entity has not been in the viewer's PVS for
+    /// a second.
+    pub in_pvs: bool,
+    /// The viewer edict's `headnode` and `leafnums` (`client->headnode`, `client->leafnums`).
+    pub viewer_leaves: &'a LinkSnapshot,
 }
 
 /// Network state of edict `index` built from its variables: the copy `AddToFullPack` of the

@@ -11,8 +11,9 @@ use crate::crypto::{
     com_block_sequence_crc_byte, com_munge, com_munge3, com_unmunge, com_unmunge3,
 };
 use crate::delta::{
-    DeltaRecord, DeltaRegistry, DeltaSchema, GoldSrcClientData, GoldSrcEntityState, GoldSrcUserCmd,
-    GoldSrcWeaponData, has_delta_changes, read_delta, read_delta_description, write_delta, write_delta_description,
+    DeltaEncodeFn, DeltaMarks, DeltaRecord, DeltaRegistry, DeltaSchema, GoldSrcClientData, GoldSrcEntityState, GoldSrcUserCmd,
+    GoldSrcWeaponData, has_delta_changes, has_delta_changes_encoded, read_delta, read_delta_description, write_delta,
+    write_delta_description, write_delta_encoded,
 };
 use crate::usermsg::{CsUserMsg, USERMSG_BASE_ID, UserMsgDesc, UserMsgRegistry, decode_cs_usermsg, encode_cs_usermsg};
 use crate::PROTOCOL_VERSION;
@@ -1698,6 +1699,33 @@ impl<'a> EntitySchemas<'a> {
     }
 }
 
+/// An entity-level conditional encoder: the delta schema's `encoder` name (`Entity_Encode`,
+/// `Player_Encode` or `Custom_Encode` in `delta.lst`), the state the delta starts from (all zero
+/// for a new entity written against no base), the state it goes to, and the marks to edit.
+pub type EntityEncodeFn<'e> =
+    &'e mut dyn FnMut(&str, &GoldSrcEntityState, &GoldSrcEntityState, &mut DeltaMarks<'_>);
+
+/// Runs `f` with the record-level encoder of `schema` for the entity `to`: the schema's
+/// conditional encoder `encode` wraps, `None` when either is missing.
+fn with_record_encoder<R>(
+    encode: &mut Option<EntityEncodeFn<'_>>,
+    schema: &DeltaSchema,
+    to: &GoldSrcEntityState,
+    f: impl FnOnce(Option<DeltaEncodeFn<'_>>) -> R,
+) -> R {
+    match (encode.as_mut(), schema.encoder.as_deref()) {
+        (Some(encode), Some(name)) => {
+            let wire_type = wire_entity_type(to.entity_type);
+            let mut hook = |from: &DeltaRecord, _to: &DeltaRecord, marks: &mut DeltaMarks<'_>| {
+                let from = GoldSrcEntityState::from_delta(to.number, wire_type, from, schema);
+                encode(name, &from, to, marks);
+            };
+            f(Some(&mut hook))
+        }
+        _ => f(None),
+    }
+}
+
 /// Write a full (`svc_packetentities`) entity snapshot (sorted by entity number).
 ///
 /// Each entity is delta-encoded against its entry in `baselines` (the records sent with
@@ -1712,6 +1740,20 @@ pub fn write_svc_packetentities_full(
     baselines: &BTreeMap<u16, (u8, DeltaRecord)>,
     entities: &[GoldSrcEntityState],
     server_time: f64,
+) {
+    write_svc_packetentities_full_encoded(w, reg, max_clients, baselines, entities, server_time, None);
+}
+
+/// [`write_svc_packetentities_full`] with the game's conditional encoders (see
+/// [`EntityEncodeFn`]).
+pub fn write_svc_packetentities_full_encoded(
+    w: &mut MsgWriter,
+    reg: &DeltaRegistry,
+    max_clients: u8,
+    baselines: &BTreeMap<u16, (u8, DeltaRecord)>,
+    entities: &[GoldSrcEntityState],
+    server_time: f64,
+    mut encode: Option<EntityEncodeFn<'_>>,
 ) {
     let Some(schemas) = EntitySchemas::from_registry(reg) else {
         return;
@@ -1749,7 +1791,9 @@ pub fn write_svc_packetentities_full(
         num_base = num;
         w.write_one_bit(custom);
         w.write_one_bit(false); // no offset into this packet's earlier entities
-        write_delta(w, schema, base, &rec, true, server_time);
+        with_record_encoder(&mut encode, schema, ent, |hook| {
+            write_delta_encoded(w, schema, base, &rec, true, server_time, hook)
+        });
     }
 
     w.write_bits(0, 16);
@@ -1793,6 +1837,26 @@ pub fn write_svc_packetentities_delta(
     to: &[GoldSrcEntityState],
     server_time: f64,
 ) {
+    write_svc_packetentities_delta_encoded(
+        w, reg, max_clients, delta_seq, baselines, from, to, server_time, None,
+    );
+}
+
+/// [`write_svc_packetentities_delta`] with the game's conditional encoders (see
+/// [`EntityEncodeFn`]): an entity none of whose marked fields remains after its encoder is
+/// omitted like an unchanged one (`DELTA_CheckDelta` runs the encoder).
+#[allow(clippy::too_many_arguments)]
+pub fn write_svc_packetentities_delta_encoded(
+    w: &mut MsgWriter,
+    reg: &DeltaRegistry,
+    max_clients: u8,
+    delta_seq: u8,
+    baselines: &BTreeMap<u16, (u8, DeltaRecord)>,
+    from: &BTreeMap<u16, (u8, impl Borrow<DeltaRecord>)>,
+    to: &[GoldSrcEntityState],
+    server_time: f64,
+    mut encode: Option<EntityEncodeFn<'_>>,
+) {
     let Some(schemas) = EntitySchemas::from_registry(reg) else {
         return;
     };
@@ -1821,7 +1885,10 @@ pub fn write_svc_packetentities_delta(
         let prev_entry = prev.map(|(ent_type, rec)| (wire_entity_type(*ent_type), rec.borrow()));
         let base = match matching_base(prev_entry, custom, schema) {
             Some(prev_rec) => {
-                if !has_delta_changes(schema, prev_rec, &rec) {
+                let changed = with_record_encoder(&mut encode, schema, ent, |hook| {
+                    has_delta_changes_encoded(schema, prev_rec, &rec, hook)
+                });
+                if !changed {
                     continue;
                 }
                 prev_rec
@@ -1836,7 +1903,9 @@ pub fn write_svc_packetentities_delta(
         };
         write_delta_entity_header(w, &mut num_base, num, false);
         w.write_one_bit(custom);
-        write_delta(w, schema, base, &rec, true, server_time);
+        with_record_encoder(&mut encode, schema, ent, |hook| {
+            write_delta_encoded(w, schema, base, &rec, true, server_time, hook)
+        });
     }
 
     w.write_bits(0, 16);
@@ -2449,6 +2518,60 @@ mod tests {
         assert_eq!(pe.expected_count, 3);
         assert_eq!(pe.removed, vec![5]);
         assert_eq!(decode_entities(&reg, max_clients, &pe.entities), to);
+    }
+
+    /// An encoder that unsets the origin of entity 1 (the local player of the game's
+    /// `Player_Encode`): the full and the delta writers leave the field out, the entity with
+    /// nothing else changed is omitted from a delta, and the encoder is told the schema's name
+    /// and the states the delta runs between.
+    #[test]
+    fn a_conditional_encoder_edits_the_marks_of_both_entity_writers() {
+        let reg = DeltaRegistry::cs16_default();
+        let max_clients = 16;
+        let seq = 7;
+        let calls = std::cell::RefCell::new(Vec::new());
+        let mut encode = |name: &str, from: &GoldSrcEntityState, to: &GoldSrcEntityState, marks: &mut DeltaMarks<'_>| {
+            calls.borrow_mut().push((name.to_string(), from.origin.x, to.number, to.origin.x));
+            if to.number == 1 {
+                for field in ["origin[0]", "origin[1]", "origin[2]"] {
+                    let index = marks.find_field(field).unwrap();
+                    marks.unset(index);
+                }
+            }
+        };
+
+        // Full: the player's origin never reaches the client, the other entity's does.
+        let to = vec![normal_ent(1, 100.0, 12), normal_ent(20, 500.0, 30)];
+        let mut w = MsgWriter::new();
+        write_svc_packetentities_full_encoded(
+            &mut w, &reg, max_clients, &BTreeMap::new(), &to, 12.5, Some(&mut encode),
+        );
+        let pe = parse_entities(w.as_slice(), max_clients, &BTreeMap::new(), None);
+        let seen = decode_entities(&reg, max_clients, &pe.entities);
+        assert_eq!(seen[0].origin, Vec3::ZERO, "origin of the local player not sent");
+        assert_eq!(seen[0].modelindex, 12);
+        assert_eq!(seen[1].origin, to[1].origin);
+        assert_eq!(calls.borrow()[0], ("Player_Encode".to_string(), 0.0, 1, 100.0));
+        assert_eq!(calls.borrow()[1].0, "Entity_Encode");
+
+        // Delta: the player moved and nothing else changed: no entry for it; the other did.
+        let from = entity_records(&reg, max_clients, &to);
+        let moved = vec![normal_ent(1, 132.5, 12), normal_ent(20, 600.0, 30)];
+        let mut w = MsgWriter::new();
+        write_svc_packetentities_delta_encoded(
+            &mut w, &reg, max_clients, seq, &BTreeMap::new(), &from, &moved, 12.5, Some(&mut encode),
+        );
+        let pe = parse_entities(w.as_slice(), max_clients, &BTreeMap::new(), Some((seq, from)));
+        let seen = decode_entities(&reg, max_clients, &pe.entities);
+        assert_eq!(seen[0].origin.x, 100.0, "entity 1: nothing left to send, the client keeps its state");
+        assert_eq!(seen[1].origin.x, 600.0);
+        // Without the encoder the same call sends both.
+        let from = entity_records(&reg, max_clients, &to);
+        let mut w = MsgWriter::new();
+        write_svc_packetentities_delta(&mut w, &reg, max_clients, seq, &BTreeMap::new(), &from, &moved, 12.5);
+        let pe = parse_entities(w.as_slice(), max_clients, &BTreeMap::new(), Some((seq, from)));
+        let seen = decode_entities(&reg, max_clients, &pe.entities);
+        assert_eq!(seen[0].origin.x, 132.5);
     }
 
     #[test]

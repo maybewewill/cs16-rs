@@ -6,17 +6,18 @@ use std::collections::BTreeMap;
 use cs_proto48::bitbuf::MsgWriter;
 use std::sync::Arc;
 
-use cs_proto48::delta::{DeltaRecord, GoldSrcEntityState, GoldSrcWeaponData};
+use cs_proto48::delta::{DeltaMarks, DeltaRecord, GoldSrcEntityState, GoldSrcWeaponData};
 use cs_proto48::event::write_svc_event;
 use cs_proto48::messages::{
     WeaponDelta, WeaponRecords, entity_schema_name, weapon_records, wire_entity_type,
-    write_svc_addangle, write_svc_choke, write_svc_clientdata_with_weapons, write_svc_setangle, write_svc_packetentities_delta, write_svc_packetentities_full, write_svc_time,
+    write_svc_addangle, write_svc_choke, write_svc_clientdata_with_weapons, write_svc_setangle, write_svc_packetentities_delta_encoded, write_svc_packetentities_full_encoded, write_svc_time,
 };
 use cs_transport::{MAX_UDP_PACKET, PacketTransport};
 
 use crate::client::ClientState;
 use crate::edict::{EdictId, EntVars};
-use crate::game::{GameDll, entity_state_from_vars};
+use crate::game::{FullPackCtx, GameDll, entity_state_from_vars};
+use crate::world::LinkSnapshot;
 use crate::server::{Server, ServerConfig};
 use crate::unlag::userinfo_lw;
 use crate::world::consts::EF_NODRAW;
@@ -365,8 +366,16 @@ impl<G: GameDll> Server<G> {
             None => DeltaRecord::default(),
         };
         let mut block = MsgWriter::new();
+        // `ENGINE_CURRENT_PLAYER` of the game's conditional encoders is this client's slot.
+        let game = &mut self.game;
+        let mut encode = |name: &str,
+                          from: &GoldSrcEntityState,
+                          to: &GoldSrcEntityState,
+                          marks: &mut DeltaMarks<'_>| {
+            game.delta_encode(name, slot, from, to, marks);
+        };
         match base {
-            Some(from) => write_svc_packetentities_delta(
+            Some(from) => write_svc_packetentities_delta_encoded(
                 &mut block,
                 &self.deltas,
                 max_clients,
@@ -375,14 +384,16 @@ impl<G: GameDll> Server<G> {
                 &from.entities,
                 &entities,
                 self.sv_time,
+                Some(&mut encode),
             ),
-            None => write_svc_packetentities_full(
+            None => write_svc_packetentities_full_encoded(
                 &mut block,
                 &self.deltas,
                 max_clients,
                 &self.baseline_records,
                 &entities,
                 self.sv_time,
+                Some(&mut encode),
             ),
         }
 
@@ -589,30 +600,48 @@ impl<G: GameDll> Server<G> {
             .unwrap_or(own_eye);
         let pvs = self.map.viewer_pvs(eye);
         let max_clients_u8 = self.cfg.max_clients;
-        let candidates: Vec<GoldSrcEntityState> = self
+        // The first two checks of the source's `AddToFullPack` (`EF_NODRAW` on another entity,
+        // no model) need no game state, so they are made here, before the state is copied; the
+        // world (edict 0) has a model but is never sent: the source starts at entity 1. The
+        // visibility test is made for every entity and handed to the game, which decides.
+        let candidates: Vec<(EdictId, bool, GoldSrcEntityState)> = self
             .edicts
             .iter_live()
             .filter(|(id, edict)| {
                 let v = &edict.vars;
-                *id == viewer
-                    // The world (edict 0) has a model but is never sent: the source starts at 1.
-                    || (id.index != 0
-                        && v.modelindex != 0
-                        && v.effects & EF_NODRAW == 0
-                        && self.entity_in_pvs(pvs.as_deref(), *id, v))
+                id.index != 0
+                    && v.modelindex != 0
+                    && (*id == viewer || v.effects & EF_NODRAW == 0)
             })
-            .map(|(id, edict)| entity_state_from_vars(id.index, &edict.vars, max_clients_u8))
+            .map(|(id, edict)| {
+                let in_pvs = self.entity_in_pvs(pvs.as_deref(), id, &edict.vars);
+                let state = entity_state_from_vars(id.index, &edict.vars, max_clients_u8);
+                (id, in_pvs, state)
+            })
             .collect();
+        let viewer_leaves = self
+            .world
+            .link_snapshot(viewer)
+            .unwrap_or_else(|| LinkSnapshot { leafnums: Vec::new(), headnode: -1, area: None });
+        let hostflags = u8::from(self.client_has_lw(slot));
         let max_clients = u16::from(self.cfg.max_clients);
         let mut accepted = Vec::new();
-        for mut state in candidates {
+        for (ent_id, in_pvs, mut state) in candidates {
             let ent = state.number;
             if ent > max_clients && accepted.len() >= MAX_PACKET_ENTITIES {
                 tracing::debug!(slot, "too many entities in the visible packet list");
                 break;
             }
-            if self.call_game_synced(|game, eng| game.add_to_full_pack(eng, slot, ent, &mut state))
-            {
+            let ctx = FullPackCtx {
+                ent,
+                ent_id,
+                viewer: slot,
+                viewer_id: viewer,
+                hostflags,
+                in_pvs,
+                viewer_leaves: &viewer_leaves,
+            };
+            if self.call_game_synced(|game, eng| game.add_to_full_pack(eng, &ctx, &mut state)) {
                 accepted.push(state);
             }
         }
