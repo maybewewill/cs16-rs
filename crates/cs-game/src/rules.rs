@@ -917,6 +917,10 @@ pub(crate) fn restart_round(g: &mut GameState, eng: &mut EngineApi<'_>) {
         }
     }
 
+    // `CleanUpMap` (vanilla runs it after the players are respawned): the armoury starts over,
+    // the grenades and every weapon box on the ground go.
+    crate::inventory::clean_up_map(g, eng);
+
     // Reset game variables.
     let rules = &mut g.rules;
     rules.intermission_end_time = 0.0;

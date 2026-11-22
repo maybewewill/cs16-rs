@@ -214,8 +214,8 @@ fn freeze_time_holds_players_then_round_starts() {
     b.probe.clear_messages();
     b.step(frames(2.3));
     assert!(!rules(&b).is_freeze_period());
-    assert_eq!(max_speed(&mut b, 0), 240.0);
-    assert_eq!(max_speed(&mut b, 1), 240.0);
+    assert_eq!(max_speed(&mut b, 0), 250.0);
+    assert_eq!(max_speed(&mut b, 1), 250.0);
     b.step(3);
     // The new clock is the round time (`mp_roundtime`, 2 minutes).
     let timer = b

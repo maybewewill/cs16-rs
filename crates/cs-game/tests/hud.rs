@@ -379,6 +379,10 @@ fn init_hud_sequence_as_regamedll() {
     assert_eq!(names[..SPAWN_ON_CONNECT.len()], *SPAWN_ON_CONNECT, "Spawn() of ClientPutInServer");
     let names = &names[SPAWN_ON_CONNECT.len()..];
     assert_eq!(names[0], "TextMsg");
+    // The weapon table of `WriteSigonMessages` is in the init buffer every client is sent.
+    let weapon_lists = names.iter().filter(|n| *n == "WeaponList").count();
+    assert_eq!(weapon_lists, cs_game::weapons::item_infos().len());
+    let names: Vec<String> = names.into_iter().filter(|n| n != "WeaponList").collect();
     let names = &names[1..];
     assert_eq!(names[..FIRST_MENU.len()], *FIRST_MENU, "the first command's PreThink");
     let names = &names[FIRST_MENU.len()..];
@@ -477,15 +481,17 @@ fn a_spawn_starts_the_hud_over_without_the_welcome() {
     // `SyncRoundTimer` (6133), then the HUD again, but not InitHUD or the rules' welcome. The stub
     // map has no buy zone, so standing at a spawn point counts as one and the last update of the
     // HUD shows its icon.
-    assert_eq!(
-        names,
-        [
-            "NVGToggle", "CurWeapon", "ScoreAttrib", "TeamInfo", "ScoreInfo", "ScreenFade",
-            "RoundTime", "ResetHUD", "Money", "StatusIcon", "ScoreAttrib", "RoundTime",
-            "TeamScore", "TeamScore", "SetFOV", "Health", "Battery", "Damage", "Train",
-            "StatusIcon",
-        ]
-    );
+    // A player that was not killed keeps what it carries, so `OnSpawnEquip` does not run
+    // `RemoveAllItems` (and its `CurWeapon`); the client is told every ammo count again
+    // (`m_rgAmmoLast` is -1: one `AmmoX` for each of the 32 ammo slots).
+    let mut expected: Vec<&str> = vec![
+        "NVGToggle", "ScoreAttrib", "TeamInfo", "ScoreInfo", "ScreenFade", "RoundTime",
+        "ResetHUD", "Money", "StatusIcon", "ScoreAttrib", "RoundTime", "TeamScore", "TeamScore",
+        "SetFOV", "Health", "Battery", "Damage", "Train",
+    ];
+    expected.extend(std::iter::repeat_n("AmmoX", 32));
+    expected.push("StatusIcon");
+    assert_eq!(names, expected);
     // `SVC_ROOMTYPE` (`room_type`, 0 here) goes first of all, before the user messages.
     let room_types = b.probes[0]
         .messages()

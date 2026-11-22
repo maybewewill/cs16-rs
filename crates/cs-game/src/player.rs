@@ -312,6 +312,9 @@ pub struct Player {
     /// 1 to 5; 0 is not used). Each list is the linked list `m_pNext` makes in C: the head
     /// (the weapon picked up last) first.
     pub(crate) items: [Vec<WeaponSlotItem>; MAX_ITEM_TYPES],
+    /// `m_bHasPrimary`: the player carries (or carried since it last lost its items) a primary
+    /// weapon; the armoury hands out no gun to such a player.
+    pub(crate) has_primary: bool,
     /// `m_pActiveItem`, by weapon id.
     pub(crate) active_item: Option<WeaponId>,
     /// `m_pLastItem`.
@@ -458,6 +461,7 @@ impl Player {
             tbd_prev: 0.0,
             weapons: 0,
             items: Default::default(),
+            has_primary: false,
             active_item: None,
             last_item: None,
             client_active_item: None,
@@ -851,6 +855,12 @@ pub(crate) fn spawn(
         // only for a player killed before (or under `REGAMEDLL_FIXES`, not vanilla), so a
         // joiner's first update sends no `HideWeapon`.
         p.client_hide_hud = -1;
+        // `Spawn` (player.cpp 6036-6048): nothing is left of the ammo or the primary weapon.
+        p.ammo = [0; crate::weapons::MAX_AMMO_SLOTS];
+        p.has_primary = false;
+    } else {
+        // A survivor keeps its ammo, but the client is told all of it again.
+        p.ammo_last = [-1; crate::weapons::MAX_AMMO_SLOTS];
     }
     p.hide_hud &=
         !(HIDEHUD_WEAPONS | HIDEHUD_HEALTH | HIDEHUD_TIMER | HIDEHUD_MONEY | HIDEHUD_CROSSHAIR);
@@ -944,7 +954,10 @@ pub(crate) fn spawn(
         crate::buy::send_item_status(eng, slot, false);
     }
     crate::hud_misc::on_spawn(g, eng, slot);
-    messages::cur_weapon_none(eng, slot);
+    // `PlayerSpawn` -> `OnSpawnEquip`: a player that lost its items gets the default ones; the
+    // `RemoveAllItems` in it sends the HUD update and the empty `CurWeapon`.
+    crate::inventory::on_spawn_equip(g, eng, slot, lost_items);
+    reset_max_speed(g, eng, slot);
     if let Some(p) = g.players[index].as_mut() {
         p.num_spawns += 1;
     }
@@ -2105,6 +2118,10 @@ fn killed(
 fn death_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let now = eng.time();
     let id = eng.client_edict(slot);
+    // `PlayerDeathThink`: "we drop the guns here" (`if (HasWeapons()) PackDeadPlayerItems()`).
+    if g.players[usize::from(slot)].as_ref().is_some_and(|p| now >= p.next_death_think) {
+        crate::inventory::death_think_pack(g, eng, slot);
+    }
     let Some(p) = g
         .players
         .get_mut(usize::from(slot))
@@ -2285,6 +2302,7 @@ pub(crate) fn client_command(
             // commands, then the living player's) does not matter.
             if !observer::command(g, eng, slot, argv)
                 && !crate::hud_misc::client_command(g, eng, slot, argv)
+                && !crate::inventory::client_command(g, eng, slot, argv)
                 && crate::buy::is_buy_command(command)
             {
                 crate::buy::client_command(g, eng, slot, argv);

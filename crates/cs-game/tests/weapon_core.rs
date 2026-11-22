@@ -794,7 +794,7 @@ fn reload_sound_reaches_nearby_players() {
         .messages()
         .into_iter()
         .filter_map(|m| match m {
-            CsUserMsg::Unknown { name, payload } if name == "ReloadSound" => Some(payload),
+            CsUserMsg::ReloadSound { volume, kind } => Some(vec![volume, kind]),
             _ => None,
         })
         .collect();

@@ -48,6 +48,10 @@ pub trait GameEntity: Send + 'static {
     ) {
     }
 
+    /// The round starts over and the map's entities are made again (`UTIL_RestartOther`): the
+    /// entity goes back to how it spawned. Only the `armoury_entity` does anything.
+    fn restart(&mut self, _eng: &mut EngineApi<'_>, _id: EdictId) {}
+
     /// `other` blocked this entity's push movement.
     fn blocked(
         &mut self,
@@ -92,7 +96,8 @@ pub fn create_entity(classname: &str) -> Option<Box<dyn GameEntity>> {
         "test_dispatch_replace_on_think" => Box::new(DispatchProbe(ProbeMode::ReplaceOnThink)),
         #[cfg(feature = "test-hooks")]
         "test_dispatch_create_on_think" => Box::new(DispatchProbe(ProbeMode::CreateOnThink)),
-        _ => return None,
+        "armoury_entity" => Box::new(crate::inventory::Armoury::default()),
+        other => Box::new(crate::inventory::WorldWeapon::of_class(other)?),
     };
     Some(entity)
 }
@@ -239,6 +244,9 @@ mod tests {
             "func_train",
             "func_pushable",
             "func_illusionary",
+            "armoury_entity",
+            "weapon_ak47",
+            "weapon_knife",
         ] {
             let entity = create_entity(class).unwrap_or_else(|| panic!("{class} missing"));
             assert_eq!(entity.classname(), class);

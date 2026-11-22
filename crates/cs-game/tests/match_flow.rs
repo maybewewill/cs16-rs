@@ -117,7 +117,7 @@ fn two_teams_play_a_round() {
     b.probe.clear_messages();
     b.step(frames(2.3));
     assert!(!rules(&b).is_freeze_period());
-    assert_eq!(max_speed(&mut b, 0), 240.0);
+    assert_eq!(max_speed(&mut b, 0), 250.0);
     b.step(3);
     let timer = b
         .messages()

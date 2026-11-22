@@ -17,6 +17,7 @@ pub mod chat;
 pub mod entity;
 pub mod hud_misc;
 pub mod intro;
+pub mod inventory;
 pub mod mapcycle;
 pub mod menus;
 mod messages;
@@ -332,6 +333,28 @@ impl CsGame {
         Some(&mut p.items[s][i].weapon)
     }
 
+    /// The weapons the player of `slot` carries, by inventory slot (primary first), the newest
+    /// of a slot first. For tests only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn carried_weapons(&self, slot: u8) -> Vec<weapons::WeaponId> {
+        self.state
+            .players
+            .get(usize::from(slot))
+            .and_then(Option::as_ref)
+            .map(|p| p.items.iter().flatten().map(|i| i.weapon.id).collect())
+            .unwrap_or_default()
+    }
+
+    /// `pev->weapons` and `m_bHasPrimary` of the player of `slot`. For tests only (cargo feature
+    /// `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn weapons_mask(&self, slot: u8) -> Option<(u32, bool)> {
+        let p = self.state.players.get(usize::from(slot))?.as_ref()?;
+        Some((p.weapons, p.has_primary))
+    }
+
     /// `(m_flNextAttack, m_bCanShoot, the active weapon, m_iFOV, m_iClientFOV)` of the player of
     /// `slot`. For tests only (cargo feature `test-hooks`).
     #[cfg(feature = "test-hooks")]
@@ -474,6 +497,8 @@ impl GameDll for CsGame {
     /// (the freeze period before the first round).
     fn server_activate(&mut self, eng: &mut EngineApi<'_>) {
         self.state.rules = rules::Rules::new(eng);
+        // `WriteSigonMessages`, after `LinkUserMessages`: the HUD's weapon table.
+        inventory::write_sigon_messages(eng);
     }
 
     fn server_deactivate(&mut self, _eng: &mut EngineApi<'_>) {

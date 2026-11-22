@@ -285,6 +285,8 @@ impl World {
             precache_model(eng, "models/hgibs.mdl");
             precache_model(eng, "models/agibs.mdl");
         }
+        // `WeaponsPrecache`.
+        crate::inventory::weapons_precache(eng);
         for (index, pattern) in LIGHT_STYLES {
             eng.light_style(index, pattern);
         }

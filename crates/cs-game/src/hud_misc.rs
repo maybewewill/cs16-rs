@@ -237,8 +237,8 @@ pub(crate) fn client_command(
         "radio1" => open_radio_menu(g, eng, slot, 1),
         "radio2" => open_radio_menu(g, eng, slot, 2),
         "radio3" => open_radio_menu(g, eng, slot, 3),
-        // `DropPlayerItem` / `DropShield`: the weapons come with phase 2D.
-        "drop" => {}
+        // `DropPlayerItem` (`DropShield` needs the shield, which is not ported).
+        "drop" => crate::inventory::drop_command(g, eng, slot, argv),
         _ => {
             let Some(&(group, choice, _)) = RADIO_ALIASES.iter().find(|(_, _, a)| *a == command)
             else {

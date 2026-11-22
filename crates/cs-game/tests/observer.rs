@@ -39,10 +39,16 @@ fn vars(b: &mut Bench, slot: u8) -> EntVars {
 }
 
 fn unknown(msgs: &[CsUserMsg], name: &str) -> Vec<Vec<u8>> {
+    // The messages the protocol crate has no variant for come back as `Unknown`; the others are
+    // put back into their bytes.
     msgs.iter()
         .filter_map(|m| match m {
             CsUserMsg::Unknown { name: n, payload } if n == name => Some(payload.clone()),
-            _ => None,
+            CsUserMsg::Unknown { .. } => None,
+            m => {
+                let (n, bytes) = cs_proto48::usermsg::encode_cs_usermsg(m);
+                (n == name).then_some(bytes)
+            }
         })
         .collect()
 }

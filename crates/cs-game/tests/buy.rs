@@ -236,7 +236,10 @@ fn buy_zone_icon_on_spawn() {
     // A terrorist is in it.
     spawn(&mut b, Team::Terrorist);
     settle(&mut b);
-    assert_eq!(icons(&b), [(1, Some([0, 160, 0]))]);
+    // `RemoveAllItems` of the default items runs `UpdateClientData` in the middle of the spawn,
+    // so the zone the player's last life ended in is forgotten (the icon goes) before the new
+    // one is found.
+    assert_eq!(icons(&b), [(0, None), (1, Some([0, 160, 0]))]);
 }
 
 #[test]
@@ -356,12 +359,12 @@ fn buy_armor_as_regamedll() {
     // original, tells the client it is a plain vest and keeps the helmet.
     b.run(|game, eng| game.damage_player(eng, 0, None, 40.0, dmg::GENERIC));
     with_player(&b, |p| assert!(p.armor < 100.0 && p.armor > 0.0));
+    b.step(5);
+    assert_eq!(purchase_log(&b), ["Battery 90"], "the HUD is told of the worn armor first");
     set_money(&mut b, 700);
     assert_eq!(
         buy(&mut b, "vest"),
         [
-            // The worn armor, which the HUD is told of first.
-            "Battery 90".to_string(),
             text("#Already_Have_Helmet_Bought_Kevlar", &[]),
             "ItemPickup item_kevlar".to_string(),
             "ArmorType 0".to_string(),
@@ -552,31 +555,20 @@ fn cannot_buy_outside_the_zone_or_without_money() {
 }
 
 #[test]
-fn weapon_purchase_refused_until_weapons() {
+fn shield_and_defuser_are_not_for_sale_yet() {
     let mut b = zones();
     spawn(&mut b, Team::Ct);
     settle(&mut b);
     set_money(&mut b, 16000);
-    // A weapon the team may buy: refused, nothing taken.
-    for line in ["m4a1", "usp", "AK47", "flash", "hegren", "sgren", "shield"] {
-        let log = buy(&mut b, line);
-        let expected = if line == "AK47" {
-            // The counter-terrorists cannot buy it: the alias says so, as the original does.
-            vec![text("#Alias_Not_Avail", &["#AK47"])]
-        } else {
-            vec![text("#Cannot_Buy_This", &[])]
-        };
-        assert_eq!(log, expected, "{line}");
-        assert_eq!(money(&b), 16000, "{line}");
-    }
-    // Ammo is bought for the weapons a player has: it has none.
-    for line in ["primammo", "secammo", "buyammo1", "buyammo2"] {
-        assert_eq!(buy(&mut b, line), Vec::<String>::new(), "{line}");
-    }
+    // The shield does not exist yet: refused, nothing taken.
+    assert_eq!(buy(&mut b, "shield"), [text("#Cannot_Buy_This", &[])]);
+    assert_eq!(money(&b), 16000);
     // The defuser is for a bomb map (2E); on this one the command is no use, and a terrorist's
     // is not available.
     assert_eq!(buy(&mut b, "defuser"), Vec::<String>::new());
     assert_eq!(money(&b), 16000);
+    // A weapon of the other team is said to be unavailable, as the original does.
+    assert_eq!(buy(&mut b, "AK47"), [text("#Alias_Not_Avail", &["#AK47"])]);
     spawn(&mut b, Team::Terrorist);
     place(&mut b, Vec3::new(-100.0, 0.0, 0.0));
     settle(&mut b);
@@ -589,7 +581,6 @@ fn weapon_purchase_refused_until_weapons() {
         [text("#Alias_Not_Avail", &["#TactShield_Desc"])]
     );
     assert_eq!(buy(&mut b, "m4a1"), [text("#Alias_Not_Avail", &["#M4A1"])]);
-    assert_eq!(buy(&mut b, "ak47"), [text("#Cannot_Buy_This", &[])]);
     assert_eq!(money(&b), 16000);
     with_player(&b, |p| {
         assert_eq!((p.armor, p.test_has_night_vision()), (0.0, false))
@@ -654,13 +645,14 @@ fn the_buy_menus_follow_the_clients_preference() {
     }));
     with_player(&t, |p| assert_eq!(p.menu, Menu::BuyRifle));
     set_money(&mut t, 5000);
-    assert_eq!(buy(&mut t, "menuselect 2"), [text("#Cannot_Buy_This", &[])]);
+    // Key 2 of the counter-terrorists' rifle menu is the Scout (2750).
+    assert_eq!(buy(&mut t, "menuselect 2"), ["Money 2250 true"]);
     assert_eq!(
         buy(&mut t, "menuselect 7"),
         Vec::<String>::new(),
         "no seventh rifle"
     );
-    assert_eq!(money(&t), 5000);
+    assert_eq!(money(&t), 2250);
     command(&mut t, 0, "buy");
     command(&mut t, 0, "menuselect 8");
     with_player(&t, |p| assert_eq!(p.menu, Menu::BuyItem));
@@ -670,14 +662,14 @@ fn the_buy_menus_follow_the_clients_preference() {
         [
             "ItemPickup item_kevlar",
             "ArmorType 0",
-            "Money 4350 true",
+            "Money 1600 true",
             "Battery 100"
         ]
     );
     // Key 6 the goggles; key 0 closes.
     assert_eq!(
         buy(&mut t, "menuselect 6"),
-        ["Money 3100 true", "ItemStatus 1"]
+        ["Money 350 true", "ItemStatus 1"]
     );
     command(&mut t, 0, "menuselect 10");
     with_player(&t, |p| assert_eq!(p.menu, Menu::Off));

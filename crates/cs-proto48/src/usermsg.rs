@@ -279,6 +279,34 @@ pub enum CsUserMsg {
     InitHud,
     BuyClose,
     ShowTimer,
+    /// `gmsgWeaponList` (`WriteSigonMessages`): one weapon of the HUD's weapon table. The ammo
+    /// types are the ammo registry's indices (`0xFF`, a byte of -1, for none).
+    WeaponList {
+        name: String,
+        ammo1_type: u8,
+        ammo1_max: u8,
+        ammo2_type: u8,
+        ammo2_max: u8,
+        slot: u8,
+        position: u8,
+        weapon_id: u8,
+        flags: u8,
+    },
+    /// `gmsgAmmoPickup` (`CBasePlayer::GiveAmmo`): the ammo index and how much was added.
+    AmmoPickup {
+        ammo_id: u8,
+        amount: u8,
+    },
+    /// `gmsgWeapPickup` (`CBasePlayerItem::AddToPlayer`): the id of the weapon picked up.
+    WeapPickup(u8),
+    /// `gmsgReloadSound` (`CBasePlayerWeapon::ReloadSound`): the volume byte and whether the
+    /// sound is a pistol's (1) or a shotgun's (0).
+    ReloadSound {
+        volume: u8,
+        kind: u8,
+    },
+    /// `gmsgCrosshair`.
+    Crosshair(u8),
     /// `gmsgSendCorpse` (registered as `ClCorpse`): a dead player's body, left to the client to
     /// draw. `origin` is the position times 128 as longs, `angles` are coords, `time_diff` is
     /// `(animtime - time) * 100` (ReGameDLL `CBasePlayer::SpawnClientSideCorpse`).
@@ -462,6 +490,27 @@ pub fn decode_cs_usermsg(name: &str, payload: &[u8]) -> Result<CsUserMsg, ProtoE
         "InitHUD" => CsUserMsg::InitHud,
         "BuyClose" => CsUserMsg::BuyClose,
         "ShowTimer" => CsUserMsg::ShowTimer,
+        "WeaponList" => CsUserMsg::WeaponList {
+            name: r.read_str()?,
+            ammo1_type: r.read_u8()?,
+            ammo1_max: r.read_u8()?,
+            ammo2_type: r.read_u8()?,
+            ammo2_max: r.read_u8()?,
+            slot: r.read_u8()?,
+            position: r.read_u8()?,
+            weapon_id: r.read_u8()?,
+            flags: r.read_u8()?,
+        },
+        "AmmoPickup" => CsUserMsg::AmmoPickup {
+            ammo_id: r.read_u8()?,
+            amount: r.read_u8()?,
+        },
+        "WeapPickup" => CsUserMsg::WeapPickup(r.read_u8()?),
+        "ReloadSound" => CsUserMsg::ReloadSound {
+            volume: r.read_u8()?,
+            kind: r.read_u8()?,
+        },
+        "Crosshair" => CsUserMsg::Crosshair(r.read_u8()?),
         "ClCorpse" => CsUserMsg::ClCorpse {
             model: r.read_str()?,
             origin: [r.read_i32()?, r.read_i32()?, r.read_i32()?],
@@ -760,6 +809,43 @@ pub fn encode_cs_usermsg(msg: &CsUserMsg) -> (&'static str, Vec<u8>) {
         CsUserMsg::InitHud => "InitHUD",
         CsUserMsg::BuyClose => "BuyClose",
         CsUserMsg::ShowTimer => "ShowTimer",
+        CsUserMsg::WeaponList {
+            name,
+            ammo1_type,
+            ammo1_max,
+            ammo2_type,
+            ammo2_max,
+            slot,
+            position,
+            weapon_id,
+            flags,
+        } => {
+            w.write_str(name);
+            for b in [
+                ammo1_type, ammo1_max, ammo2_type, ammo2_max, slot, position, weapon_id, flags,
+            ] {
+                w.write_u8(*b);
+            }
+            "WeaponList"
+        }
+        CsUserMsg::AmmoPickup { ammo_id, amount } => {
+            w.write_u8(*ammo_id);
+            w.write_u8(*amount);
+            "AmmoPickup"
+        }
+        CsUserMsg::WeapPickup(id) => {
+            w.write_u8(*id);
+            "WeapPickup"
+        }
+        CsUserMsg::ReloadSound { volume, kind } => {
+            w.write_u8(*volume);
+            w.write_u8(*kind);
+            "ReloadSound"
+        }
+        CsUserMsg::Crosshair(on) => {
+            w.write_u8(*on);
+            "Crosshair"
+        }
         CsUserMsg::ClCorpse {
             model,
             origin,
@@ -842,6 +928,21 @@ mod tests {
                 sprite_name: "buyzone".to_string(),
                 color: Some([0, 160, 0]),
             },
+            CsUserMsg::WeaponList {
+                name: "weapon_ak47".to_string(),
+                ammo1_type: 2,
+                ammo1_max: 90,
+                ammo2_type: 0xFF,
+                ammo2_max: 0xFF,
+                slot: 0,
+                position: 1,
+                weapon_id: 28,
+                flags: 0,
+            },
+            CsUserMsg::AmmoPickup { ammo_id: 5, amount: 24 },
+            CsUserMsg::WeapPickup(16),
+            CsUserMsg::ReloadSound { volume: 200, kind: 1 },
+            CsUserMsg::Crosshair(0),
         ];
 
         for m in msgs {

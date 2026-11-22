@@ -27,14 +27,21 @@
 //!   pickup sound, `ItemPickup`, `ArmorType`; the `Battery` message follows with the next client
 //!   data update. Not enough money is `#Not_Enough_Money` and `BlinkAccount`.
 //!
+//! Weapons (2D): [`buy_weapon_by_id`] is `BuyWeaponByWeaponID` (`client.cpp` 1595): `CanPlayerBuy`,
+//! `CanBuyThis` (a weapon the player's class of the map cannot have is `#Cannot_Buy_This`, one it
+//! already carries `#Cstrike_Already_Own_Weapon`), the price (`#Not_Enough_Money` and the account
+//! blinks), then the weapon the player holds in that slot is dropped (`DropPrimary`,
+//! `DropSecondary`) and the new one is given (`GiveNamedItem`) for its price. The ammo is bought
+//! a clip at a time ([`buy_ammo`]: `BuyAmmo`, `BuyGunAmmo`) and the grenades through the equipment
+//! menu ([`buy_item`]).
+//!
 //! Deviations and what waits for later tasks:
-//! - Weapons, grenades and the shield do not exist yet (2D): buying one, by a menu or an alias,
-//!   goes through `CanPlayerBuy` and the alias's team check of the original and is then refused
-//!   with `#Cannot_Buy_This`, nothing taken. The original also checks the price (and tells
-//!   `#Not_Enough_Money`) before it hands out the item. Ammo is bought for the weapons a player
-//!   carries, and a player carries none, so the ammo commands only run `CanPlayerBuy`, as the
-//!   original does with empty slots. `cl_autobuy`, `cl_rebuy` and their setters (they buy
-//!   weapons) are not ported.
+//! - The shield does not exist yet: buying it, by the menu or the alias, is refused with
+//!   `#Cannot_Buy_This`, nothing taken. `cl_autobuy`, `cl_rebuy` and their setters are not
+//!   ported (they buy weapons from the player's stored list).
+//! - The ammo clip is given as the `ammo_*` entity of the original does it
+//!   (`CBasePlayerAmmo::AddAmmo`: `GiveAmmo` of `buyClipSize`, then `items/9mmclip1.wav`); the sound
+//!   comes from the player's edict, not from an entity of its own (assumption: the same place).
 //! - The defuser (`MENU_SLOT_ITEM_DEFUSEKIT`) is sold to a counter-terrorist on a map with a
 //!   bomb target only; the bomb targets are 2E, so no map has one yet and the purchase is
 //!   refused silently, as the original does on a map without one. The menu then has no defuser
@@ -61,8 +68,13 @@ use crate::menus::{
     self, HUD_PRINTCENTER, MENU_KEY_0, MENU_KEY_1, MENU_KEY_2, MENU_KEY_3, MENU_KEY_4, MENU_KEY_5,
     MENU_KEY_6, MENU_KEY_7, MENU_KEY_8, Menu, VGUI_MENU_BUY_ITEM,
 };
+use crate::inventory::{self, PISTOL_SLOT, PRIMARY_WEAPON_SLOT};
 use crate::money;
 use crate::player::{ATTN_NORM, ArmorType, CHAN_ITEM, DEAD_NO, EF_NODRAW, PITCH_NORM, Team, player_slot};
+use crate::weapons::{
+    AmmoType, FLASHBANG_PRICE, HEGRENADE_PRICE, SMOKEGRENADE_PRICE, WeaponId, ammo_info_by_name,
+    is_primary_weapon, max_ammo_carry_for_weapon, weapon_info,
+};
 
 /// `SIGNAL_BUY` (`unisignals.h`): the player stands in a buy zone.
 pub const SIGNAL_BUY: u8 = 1 << 0;
@@ -403,7 +415,7 @@ fn item_sound(eng: &mut EngineApi<'_>, slot: u8, sample: &str) {
 
 /// The items a player buys by giving it the class of an item to touch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ArmorItem {
+pub(crate) enum ArmorItem {
     /// `item_kevlar` (`CItemKevlar::MyTouch`).
     Kevlar,
     /// `item_assaultsuit` (`CItemAssaultSuit::MyTouch`).
@@ -414,7 +426,12 @@ enum ArmorItem {
 /// once. The vest sets the armor type only when the player has none (so a player with a helmet
 /// keeps it) and always tells the client `ArmorType` 0; the assault suit sets the helmet and
 /// tells 1. Both fill the armor to 100.
-fn give_armor(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, item: ArmorItem) {
+pub(crate) fn give_armor_item(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    slot: u8,
+    item: ArmorItem,
+) {
     let Some(p) = g
         .players
         .get_mut(usize::from(slot))
@@ -443,8 +460,15 @@ fn give_armor(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, item: ArmorI
     eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::ArmorType(armor_type));
 }
 
-/// `BuyItem` (ReGameDLL `client.cpp`) for the equipment menu slot `item_slot`. Weapons (the
-/// grenades and the shield) are refused until they exist ([`refuse_weapon`]).
+/// What `BuyItem` gives for the money: an armor item, or a weapon class (a grenade).
+#[derive(Debug, Clone, Copy)]
+enum Purchase {
+    Armor(ArmorItem),
+    Weapon(&'static str),
+}
+
+/// `BuyItem` (ReGameDLL `client.cpp`) for the equipment menu slot `item_slot`. The shield is
+/// refused (it does not exist yet, see the module documentation).
 pub(crate) fn buy_item(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, item_slot: i32) {
     if !can_player_buy(g, eng, slot, true) {
         return;
@@ -472,7 +496,7 @@ pub(crate) fn buy_item(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, ite
                 if has_helmet {
                     say(eng, slot, "#Already_Have_Helmet_Bought_Kevlar");
                 }
-                purchase = Some((ArmorItem::Kevlar, KEVLAR_PRICE));
+                purchase = Some((Purchase::Armor(ArmorItem::Kevlar), KEVLAR_PRICE));
             }
         }
         SLOT_ITEM_VESTHELM => {
@@ -483,18 +507,53 @@ pub(crate) fn buy_item(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, ite
                 }
                 if account >= HELMET_PRICE {
                     say(eng, slot, "#Already_Have_Kevlar_Bought_Helmet");
-                    purchase = Some((ArmorItem::AssaultSuit, HELMET_PRICE));
+                    purchase = Some((Purchase::Armor(ArmorItem::AssaultSuit), HELMET_PRICE));
                 }
             } else if has_helmet {
                 if account >= KEVLAR_PRICE {
                     say(eng, slot, "#Already_Have_Helmet_Bought_Kevlar");
-                    purchase = Some((ArmorItem::AssaultSuit, KEVLAR_PRICE));
+                    purchase = Some((Purchase::Armor(ArmorItem::AssaultSuit), KEVLAR_PRICE));
                 }
             } else if account >= ASSAULTSUIT_PRICE {
-                purchase = Some((ArmorItem::AssaultSuit, ASSAULTSUIT_PRICE));
+                purchase = Some((Purchase::Armor(ArmorItem::AssaultSuit), ASSAULTSUIT_PRICE));
             }
         }
-        SLOT_ITEM_FLASHGREN | SLOT_ITEM_HEGREN | SLOT_ITEM_SMOKEGREN | SLOT_ITEM_SHIELD => {
+        SLOT_ITEM_FLASHGREN | SLOT_ITEM_HEGREN | SLOT_ITEM_SMOKEGREN => {
+            // `AmmoInventory(AMMO_*) >= MaxAmmoCarry(WEAPON_*)`: no room for another.
+            let (ammo, weapon, class, price) = match item_slot {
+                SLOT_ITEM_FLASHGREN => (
+                    AmmoType::Flashbang,
+                    WeaponId::Flashbang,
+                    "weapon_flashbang",
+                    FLASHBANG_PRICE,
+                ),
+                SLOT_ITEM_HEGREN => (
+                    AmmoType::HeGrenade,
+                    WeaponId::HeGrenade,
+                    "weapon_hegrenade",
+                    HEGRENADE_PRICE,
+                ),
+                _ => (
+                    AmmoType::SmokeGrenade,
+                    WeaponId::SmokeGrenade,
+                    "weapon_smokegrenade",
+                    SMOKEGRENADE_PRICE,
+                ),
+            };
+            let held = g.players[usize::from(slot)]
+                .as_ref()
+                .and_then(|p| p.ammo.get(ammo as usize).copied())
+                .unwrap_or(0);
+            if held >= max_ammo_carry_for_weapon(weapon) {
+                say(eng, slot, "#Cannot_Carry_Anymore");
+                return;
+            }
+            if account >= price {
+                purchase = Some((Purchase::Weapon(class), price));
+            }
+        }
+        SLOT_ITEM_SHIELD => {
+            // The shield is not ported: refused with nothing taken.
             say(eng, slot, "#Cannot_Buy_This");
             return;
         }
@@ -530,23 +589,198 @@ pub(crate) fn buy_item(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, ite
         not_enough_money(eng, slot);
         return;
     };
-    give_armor(g, eng, slot, item);
+    match item {
+        Purchase::Armor(armor) => give_armor_item(g, eng, slot, armor),
+        Purchase::Weapon(class) => {
+            inventory::give_named_item(g, eng, slot, class);
+        }
+    }
     money::add_account(g, eng, slot, -price, true);
 }
 
-/// A weapon is bought (`BuyWeaponByWeaponID`): the original takes the money and gives the item;
-/// there are no weapons yet (2D), so a purchase that passes `CanPlayerBuy` is refused with
-/// `#Cannot_Buy_This`, no money taken.
-fn refuse_weapon(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) {
-    if can_player_buy(g, eng, slot, true) {
-        say(eng, slot, "#Cannot_Buy_This");
+/// `CanBuyWeaponByMaptype` (`weapontype.cpp` 596) for a map with no VIP safety zone (none is
+/// ported): the weapons a team can buy.
+fn can_buy_weapon_by_maptype(team: Team, id: WeaponId) -> bool {
+    use WeaponId::*;
+    match team {
+        Team::Ct => matches!(
+            id,
+            P228 | Scout | Xm1014 | Aug | FiveSeven | Ump45 | Sg550 | Famas | Usp | Glock18 | Awp | Mp5n
+                | M249 | M3 | M4a1 | Tmp | Deagle | P90 | ShieldGun
+        ),
+        Team::Terrorist => matches!(
+            id,
+            P228 | Scout | Xm1014 | Mac10 | Elite | Ump45 | Galil | Usp | Glock18 | Awp | Mp5n | M249
+                | M3 | G3sg1 | Deagle | Sg552 | Ak47 | P90
+        ),
+        _ => false,
     }
 }
 
-/// `BuyAmmo`: ammo for the weapons in the primary (or secondary) slot. A player has no weapon in
-/// them yet, so this only asks `CanPlayerBuy`, which tells a player out of buy time.
-fn buy_ammo(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) {
-    can_player_buy(g, eng, slot, true);
+/// `CanBuyThis` (`client.cpp` 1133): a weapon the player already holds in its slot is
+/// `#Cstrike_Already_Own_Weapon`, one the map's rules keep from its team `#Cannot_Buy_This`.
+fn can_buy_this(g: &GameState, eng: &mut EngineApi<'_>, slot: u8, id: WeaponId) -> bool {
+    let Some(p) = g.players.get(usize::from(slot)).and_then(Option::as_ref) else {
+        return false;
+    };
+    // The shield does not exist, so there is none to forbid the Elites or to be forbidden by them.
+    let owns = |slot_index: usize| p.items[slot_index].first().is_some_and(|i| i.weapon.id == id);
+    if owns(PRIMARY_WEAPON_SLOT) || owns(PISTOL_SLOT) {
+        say(eng, slot, "#Cstrike_Already_Own_Weapon");
+        return false;
+    }
+    if !can_buy_weapon_by_maptype(p.team, id) {
+        say(eng, slot, "#Cannot_Buy_This");
+        return false;
+    }
+    true
+}
+
+/// `BuyWeaponByWeaponID` (`client.cpp` 1595, vanilla): the weapon `id` is bought when the player
+/// may buy at all, may have it and can pay; the weapon held in the slot is dropped first. The
+/// shield is refused (see the module documentation). True when it was bought.
+pub(crate) fn buy_weapon_by_id(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, id: WeaponId) -> bool {
+    if !can_player_buy(g, eng, slot, true) {
+        return false;
+    }
+    if !can_buy_this(g, eng, slot, id) {
+        return false;
+    }
+    if id == WeaponId::ShieldGun {
+        say(eng, slot, "#Cannot_Buy_This");
+        return false;
+    }
+    let Some(info) = weapon_info(id).filter(|i| !i.entity_name.is_empty()) else {
+        return false;
+    };
+    let account = g.players.get(usize::from(slot)).and_then(Option::as_ref).map_or(0, |p| p.money);
+    if account < info.cost {
+        not_enough_money(eng, slot);
+        return false;
+    }
+    if is_primary_weapon(id) {
+        inventory::drop_primary(g, eng, slot);
+    } else {
+        inventory::drop_secondary(g, eng, slot);
+    }
+    inventory::give_named_item(g, eng, slot, info.entity_name);
+    money::add_account(g, eng, slot, -info.cost, true);
+    true
+}
+
+/// `BuyGunAmmo` (`client.cpp` 2328, vanilla): one clip of the ammo of the weapon `id` the player
+/// carries, when the player can buy, uses ammo, is not full and can pay; with `blink_money` a
+/// player that cannot pay is told. The clip is given as the ammo entity of the original gives
+/// it (`CBasePlayerAmmo::AddAmmo`).
+fn buy_gun_ammo(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, id: WeaponId, blink_money: bool) -> bool {
+    if !can_player_buy(g, eng, slot, true) {
+        return false;
+    }
+    let Some(p) = g.players.get(usize::from(slot)).and_then(Option::as_ref) else {
+        return false;
+    };
+    let Some((s, i)) = p.find_item(id) else {
+        return false;
+    };
+    // Ensure that the weapon uses ammo.
+    let ammo_index = p.items[s][i].weapon.primary_ammo_type;
+    let Ok(index) = usize::try_from(ammo_index) else {
+        return false;
+    };
+    // Can only buy if the player does not already have full ammo.
+    let max = crate::weapons::item_info(id).map_or(0, |i| i.max_ammo1);
+    if p.ammo.get(index).is_none_or(|&have| have >= max) {
+        return false;
+    }
+    let Some(info) = weapon_info(id) else {
+        return false;
+    };
+    // Purchase the ammo if the player has enough money.
+    if p.money >= info.clip_cost {
+        let Some(ammo) = ammo_info_by_name(info.ammo_name1) else {
+            return false;
+        };
+        if crate::weapons::core::give_ammo(g, eng, slot, ammo.buy_clip_size, Some(ammo.ammo_name2), -1) != -1 {
+            item_sound(eng, slot, "items/9mmclip1.wav");
+        }
+        money::add_account(g, eng, slot, -info.clip_cost, true);
+        return true;
+    }
+    if blink_money {
+        // Not enough money.. let the player know.
+        not_enough_money(eng, slot);
+    }
+    false
+}
+
+/// `BuyAmmo` (`client.cpp` 2380): one clip for each weapon in the inventory slot `n_slot` (1
+/// primary, 2 pistol), from the head of the list, while each purchase works. True when every
+/// weapon of the slot got its clip (so a slot with no weapon is false).
+fn buy_ammo(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, n_slot: usize, blink_money: bool) -> bool {
+    if !can_player_buy(g, eng, slot, true) {
+        return false;
+    }
+    if !(PRIMARY_WEAPON_SLOT..=PISTOL_SLOT).contains(&n_slot) {
+        return false;
+    }
+    // Buy one ammo clip for all weapons in the given slot.
+    let ids: Vec<WeaponId> = g
+        .players
+        .get(usize::from(slot))
+        .and_then(Option::as_ref)
+        .map(|p| p.items[n_slot].iter().map(|i| i.weapon.id).collect())
+        .unwrap_or_default();
+    for id in ids {
+        if !buy_gun_ammo(g, eng, slot, id, blink_money) {
+            return false;
+        }
+    }
+    // The loop ends with `pItem == nullptr` only for a non-empty slot.
+    g.players
+        .get(usize::from(slot))
+        .and_then(Option::as_ref)
+        .is_some_and(|p| !p.items[n_slot].is_empty())
+}
+
+/// What `primammo`, `secammo` and the ammo keys of the buy menu do: "buy as much ammo as
+/// possible; blink money only if the player doesn't have enough for the first clip".
+fn buy_ammo_all(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, n_slot: usize) {
+    if buy_ammo(g, eng, slot, n_slot, true) {
+        // Bounded by the ammo the slot can hold: every round of the loop buys a clip or stops.
+        for _ in 0..256 {
+            if !buy_ammo(g, eng, slot, n_slot, false) {
+                break;
+            }
+        }
+    }
+}
+
+/// `BuyPistol`, `BuyShotgun`, `BuySubMachineGun`, `BuyRifle` and `BuyMachineGun`
+/// (`client.cpp` 1177-1290): the weapon a key of a weapon menu stands for, by team.
+fn menu_weapon(menu: Menu, team: Team, key: i32) -> Option<WeaponId> {
+    use WeaponId::*;
+    let ct = team == Team::Ct;
+    Some(match (menu, key) {
+        (Menu::BuyPistol, 1) => Glock18,
+        (Menu::BuyPistol, 2) => Usp,
+        (Menu::BuyPistol, 3) => P228,
+        (Menu::BuyPistol, 4) => Deagle,
+        (Menu::BuyPistol, 5) => if ct { FiveSeven } else { Elite },
+        (Menu::BuyShotgun, 1) => M3,
+        (Menu::BuyShotgun, 2) => Xm1014,
+        (Menu::BuySubMachineGun, 1) => if ct { Tmp } else { Mac10 },
+        (Menu::BuySubMachineGun, 2) => Mp5n,
+        (Menu::BuySubMachineGun, 3) => Ump45,
+        (Menu::BuySubMachineGun, 4) => P90,
+        (Menu::BuyRifle, 1) => if ct { Famas } else { Galil },
+        (Menu::BuyRifle, 2) => if ct { Scout } else { Ak47 },
+        (Menu::BuyRifle, 3) => if ct { M4a1 } else { Scout },
+        (Menu::BuyRifle, 4) => if ct { Aug } else { Sg552 },
+        (Menu::BuyRifle, 5) => if ct { Sg550 } else { Awp },
+        (Menu::BuyRifle, 6) => if ct { Awp } else { G3sg1 },
+        (Menu::BuyMachineGun, 1) => M249,
+        _ => return Option::None,
+    })
 }
 
 // ---- the menus ----
@@ -684,14 +918,15 @@ fn choose_buy_group(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, choice
                 "#BuyMachineGun",
             );
         }
-        SLOT_BUY_PRIMARY_AMMO | SLOT_BUY_SECONDARY_AMMO if in_zone(g) => buy_ammo(g, eng, slot),
+        SLOT_BUY_PRIMARY_AMMO if in_zone(g) => buy_ammo_all(g, eng, slot, PRIMARY_WEAPON_SLOT),
+        SLOT_BUY_SECONDARY_AMMO if in_zone(g) => buy_ammo_all(g, eng, slot, PISTOL_SLOT),
         SLOT_BUY_ITEM if in_zone(g) => show_item_menu(g, eng, slot),
         _ => {}
     }
 }
 
 /// The `menuselect` of a text menu client in a buy menu (`menu` is the one the player is in).
-/// The weapon menus' keys 1 to their last one are weapons, refused ([`refuse_weapon`]); any
+/// The weapon menus' keys 1 to their last one buy the weapon of the key ([`menu_weapon`]); any
 /// other key does nothing.
 pub(crate) fn menuselect(
     g: &mut GameState,
@@ -702,31 +937,31 @@ pub(crate) fn menuselect(
 ) {
     // The key counts are those of `BuyPistol` (1 to 5), `BuyShotgun` (1 to 2),
     // `BuySubMachineGun` (1 to 4), `BuyRifle` (1 to 6) and `BuyMachineGun` (only 1) in
-    // `client.cpp:1177-1285`. Task 2D replaces the refusal with the purchase.
-    let weapon_keys = match menu {
+    // `client.cpp:1177-1285`.
+    match menu {
         Menu::Buy => {
             choose_buy_group(g, eng, slot, choice);
-            return;
         }
         Menu::BuyItem => {
             buy_item(g, eng, slot, choice);
-            return;
         }
-        Menu::BuyPistol => 5,
-        Menu::BuyShotgun => 2,
-        Menu::BuySubMachineGun => 4,
-        Menu::BuyRifle => 6,
-        Menu::BuyMachineGun => 1,
+        Menu::BuyPistol
+        | Menu::BuyShotgun
+        | Menu::BuySubMachineGun
+        | Menu::BuyRifle
+        | Menu::BuyMachineGun => {
+            let team = team_of(g, slot);
+            if let Some(id) = menu_weapon(menu, team, choice) {
+                buy_weapon_by_id(g, eng, slot, id);
+            }
+        }
         Menu::Off
         | Menu::ChooseTeam
         | Menu::ChooseAppearance
         | Menu::Radio1
         | Menu::Radio2
         | Menu::Radio3
-        | Menu::ClientBuy => return,
-    };
-    if (1..=weapon_keys).contains(&choice) {
-        refuse_weapon(g, eng, slot);
+        | Menu::ClientBuy => {}
     }
 }
 
@@ -863,9 +1098,14 @@ pub(crate) fn client_command(
                 show_item_menu(g, eng, slot);
             }
         }
-        "buyammo1" | "buyammo2" => {
+        "buyammo1" => {
             if in_zone {
-                buy_ammo(g, eng, slot);
+                buy_ammo(g, eng, slot, PRIMARY_WEAPON_SLOT, true);
+            }
+        }
+        "buyammo2" => {
+            if in_zone {
+                buy_ammo(g, eng, slot, PISTOL_SLOT, true);
             }
         }
         alias => alias_command(g, eng, slot, alias),
@@ -884,14 +1124,17 @@ fn alias_command(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, command: 
             _ => matches!(team, Team::Terrorist | Team::Ct),
         };
         if allowed {
-            refuse_weapon(g, eng, slot);
+            if let Some(id) = crate::weapons::buy_alias_to_weapon_id(command) {
+                buy_weapon_by_id(g, eng, slot, id);
+            }
         } else {
             client_print(eng, slot, HUD_PRINTCENTER, "#Alias_Not_Avail", &[fail_name]);
         }
         return;
     }
     match command {
-        "primammo" | "secammo" => buy_ammo(g, eng, slot),
+        "primammo" => buy_ammo_all(g, eng, slot, PRIMARY_WEAPON_SLOT),
+        "secammo" => buy_ammo_all(g, eng, slot, PISTOL_SLOT),
         "vest" => buy_item(g, eng, slot, SLOT_ITEM_VEST),
         "vesthelm" => buy_item(g, eng, slot, SLOT_ITEM_VESTHELM),
         "flash" => buy_item(g, eng, slot, SLOT_ITEM_FLASHGREN),
