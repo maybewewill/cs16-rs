@@ -578,3 +578,37 @@ fn texture_lookup_defaults_to_concrete() {
     // Task 7 parses the table; until then every lookup answers concrete.
     assert!(matches!(pm_find_texture_type(&sh, "METAL"), b'C' | b'M'));
 }
+
+#[test]
+fn walk_move_applies_the_jump_penalty_ratio() {
+    // Friction first: 100 - 4 * (100 * 0.01) = 96. PM_ReduceTimers takes 10 off fuser2 (1000 -> 990),
+    // then PM_WalkMove scales vx by (100 - fuser2 * 0.001 * 19) * 0.01 = (100 - 18.81) * 0.01.
+    let (mut pm, mut sh, mut w) = on_floor();
+    pm.velocity = Vec3::new(100.0, 0.0, 0.0);
+    pm.fuser2 = 1000.0;
+    run_cmd(&mut pm, &mut sh, &mut w, 10);
+    let ratio = ((100.0 - 990.0f64 * 0.001 * 19.0) * 0.01) as f32;
+    assert_close(pm.velocity.x, 96.0 * ratio, 1e-3, "penalised vx");
+    assert!(pm.velocity.x < 80.0);
+}
+
+#[test]
+fn fly_move_bounce_branch_uses_entity_friction() {
+    // Airborne WALK player, first plane a wall, entity friction 0.5: overbounce
+    // 1 + bounce * (1 - friction) = 1.5, so vx = 200 - (-1) * (-200 * 1.5) = -100.
+    let mut w = BoxWorld::new();
+    w.solid(Vec3::new(100.0, -1000.0, -100.0), Vec3::new(110.0, 1000.0, 500.0), "WALL");
+    let (mut pm, mut sh) = standing_player(Vec3::new(0.0, 0.0, 200.0));
+    pm.friction = 0.5;
+    pm.velocity = Vec3::new(200.0, 0.0, 0.0);
+    let mut bounced = false;
+    for _ in 0..30 {
+        run_cmd(&mut pm, &mut sh, &mut w, 50);
+        if pm.velocity.x < 0.0 {
+            bounced = true;
+            break;
+        }
+    }
+    assert!(bounced, "never reached the wall");
+    assert_close(pm.velocity.x, -100.0, 1e-3, "bounced vx");
+}

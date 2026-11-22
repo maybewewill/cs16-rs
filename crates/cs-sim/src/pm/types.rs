@@ -6,8 +6,8 @@ use glam::Vec3;
 use super::consts::{MAX_CLIENTS, PLAYER_HULL_MAXS, PLAYER_HULL_MINS, PM_NORMAL};
 use super::materials::TextureTable;
 
-/// `movevars_t` without the sky fields. `Default` is the ReHLDS cvar defaults (rollspeed 200 as in
-/// `MoveVarsMsg::default`; the survey digest says 0 and is not authoritative).
+/// `movevars_t` without the sky fields. `Default` is the ReHLDS cvar defaults (including
+/// `sv_rollspeed "0.0"`, ReHLDS rh_sv_user.cpp:50, verified by Task 1).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MoveVars {
     pub gravity: f32,
@@ -52,7 +52,7 @@ impl Default for MoveVars {
             wave_height: 0.0,
             footsteps: true,
             rollangle: 0.0,
-            rollspeed: 200.0,
+            rollspeed: 0.0,
         }
     }
 }
