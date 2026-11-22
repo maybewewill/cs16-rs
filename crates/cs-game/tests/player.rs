@@ -761,20 +761,23 @@ fn a_death_sends_its_messages_in_the_order_of_killed() {
 
 /// The player's entity state carries `colormap`, `friction`, `gravity` and `blending` from its
 /// edict: the engine sets the colormap to the edict number when the player is put in the
-/// server, `Spawn` sets friction and gravity, the animation sets the blending
-/// (`AddToFullPack` copies all four into `entity_state_t`). The probe decodes them off the wire.
+/// server, `Spawn` sets friction and gravity, the animation sets the blending every frame
+/// (`StudioProcessGait`), and `AddToFullPack` copies all four into `entity_state_t`. The probe
+/// decodes them off the wire: the blending it sees is the edict's.
 #[test]
 fn the_player_entity_carries_colormap_friction_gravity_and_blending() {
     let mut b = Bench::stub(stub_spawns());
     common::join(&mut b, 0, 2, 1);
-    b.run(|_, eng| {
-        let id = eng.client_edict(0);
-        eng.ent_mut(id).unwrap().blending = [128, 127];
-    });
     b.step(10);
+    let edict_blending = b.run(|_, eng| {
+        let id = eng.client_edict(0);
+        eng.ent(id).unwrap().blending
+    });
     let state = b.probe.entities().get(&1).expect("the player is in its own packet").clone();
     assert_eq!(state.colormap, 1);
     assert_eq!((state.friction, state.gravity), (1.0, 1.0));
-    assert_eq!(state.blending, [128, 127]);
+    assert_eq!(state.blending, edict_blending);
+    // `CalculatePitchBlend` of a level view: (45 - 0) / 90 * 255 = 127.
+    assert_eq!(state.blending[1], 127);
 }
 
