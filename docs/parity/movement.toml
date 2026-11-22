@@ -2,7 +2,8 @@
 # 2026-11-22), the engine's pmove services (cs-engine pm and texture modules, ported from ReHLDS
 # pmove.cpp, pmovetst.cpp, sv_user.cpp, sv_pmove.cpp, pr_cmds.cpp and model.cpp, read 2026-11-22)
 # and the game side of SV_RunCmd (cs-game pmove.rs and player.rs).
-# Nothing here is `verified`: no dated check with the original client yet, see
+# Only movement_client_prediction is `verified` (2026-11-22, docs/parity/checklists/phase2d-weapons.md V6);
+# no other item has a dated check with the original client yet, see
 # docs/parity/checklists/pm-movement.md. An item is `tested` when a cited test asserts it (the
 # definition in docs/parity/README.md) and `implemented` when the code exists and no cited test
 # would fail if it broke. The tests compare with the sources, not with the original game; the
@@ -235,8 +236,8 @@ evidence = "crates/cs-game/tests/movement_world.rs::footsteps_reach_others_not_s
 
 [[item]]
 id = "movement_client_prediction"
-status = "missing"
-evidence = "cs_sim::pm is engine-neutral so the client can predict with it, but cs-client and cs-net still use the legacy cs_sim::pmove; the original client predicts with its own pm_shared."
+status = "verified"
+evidence = "cs_sim::pm is engine-neutral so the client can predict with it, but cs-client and cs-net still use the legacy cs_sim::pmove; the original client predicts with its own pm_shared.; VERIFIED 2026-11-22, method 1 (the original Steam CS 1.6 client build 10210 on our server, de_dust2; walking on the original client with its own prediction against our server; docs/parity/checklists/phase2d-weapons.md V6)"
 
 [[item]]
 id = "movement_physinfo_visents_studio"

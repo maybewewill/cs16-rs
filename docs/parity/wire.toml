@@ -13,7 +13,8 @@ evidence = "crates/cs-engine/tests/lifecycle.rs::kick_delivers_reason, game_kick
 
 [[item]]
 id = "svc_event"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-engine/tests/events.rs::event_args_round_trip_on_the_wire, delayed_events_carry_their_delay_and_queued_ones_ride_one_update, the_queue_holds_64_events_and_one_update_carries_31, events_follow_the_pas_unless_global; crates/cs-proto48/src/event.rs tests. Known gaps: MAX_EVENT_QUEUE 64 and RES_FATALIFMISSING are from memory; no event reaches the original client in a checked situation yet (the owner's checklist rows 2 and 5)"
 
 [[item]]
 id = "svc_version"
@@ -66,7 +67,8 @@ evidence = "crates/cs-engine/src/signon.rs::tests::new_stage_messages_in_order; 
 
 [[item]]
 id = "svc_deltadescription"
-status = "implemented"
+status = "verified"
+evidence = "crates/cs-proto48/src/delta_offsets.rs tests (the field offsets of the C structs from the ReHLDS headers; an unknown field is a parse error); VERIFIED 2026-11-22, method 1 (the original Steam CS 1.6 client build 10210 on our server, de_dust2; the sign-on with the delta descriptions' real offsets; the client connects and does not crash, where the faked offsets of the first build corrupted memory in CL_PredictMove; docs/parity/checklists/phase2d-weapons.md V1)"
 
 [[item]]
 id = "svc_clientdata"
@@ -96,7 +98,8 @@ status = "implemented"
 
 [[item]]
 id = "svc_event_reliable"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-engine/tests/events.rs::reliable_events_use_svc_event_reliable, reliable_hostonly_goes_to_the_invoker_alone_and_negative_delay_is_refused"
 
 [[item]]
 id = "svc_spawnbaseline"
@@ -105,8 +108,8 @@ evidence = "crates/cs-engine/src/signon.rs::tests::spawn_stage_messages_in_order
 
 [[item]]
 id = "svc_temp_entity"
-status = "implemented"
-evidence = "payload не разбирается"
+status = "tested"
+evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout (14 of the 59 TE types are built and parsed again, byte by byte), temp_entities_reach_their_destinations; crates/cs-proto48/src/messages.rs tests for TE_EXPLOSION. The other types are only skipped by length (docs/parity/tempents.toml). Known gap: lengths of TE_BEAMSPRITE (18) and TE_EXPLODEMODEL (107) look wrong, TE_DLIGHT is 12 bytes unverified; carried to the client phase"
 
 [[item]]
 id = "svc_setpause"
@@ -156,7 +159,8 @@ status = "implemented"
 
 [[item]]
 id = "svc_weaponanim"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-engine/tests/weapon_data.rs::weapon_anim_reaches_only_its_client; crates/cs-game/tests/weapon_prediction.rs::skiplocal_weapon_anims_skip_lw_clients"
 
 [[item]]
 id = "svc_decalname"
@@ -192,7 +196,7 @@ evidence = "crates/cs-engine/tests/frames.rs::choked_updates_are_announced_in_th
 [[item]]
 id = "svc_resourcelist"
 status = "tested"
-evidence = "crates/cs-engine/src/signon.rs::tests::sendres_stage_requests_and_lists_resources"
+evidence = "crates/cs-engine/src/signon.rs::tests::sendres_stage_requests_and_lists_resources; Known gap: our list has 730 resources against 781 of the original HLDS (golden capture 2026-11-22), 51 only in the original: 36 sounds, 10 models, 5 events; docs/parity/engine.toml resource_list_completeness"
 
 [[item]]
 id = "svc_newmovevars"

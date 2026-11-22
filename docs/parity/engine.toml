@@ -20,8 +20,8 @@ evidence = "crates/cs-probe/src/lib.rs::tests::scripted_handshake_reaches_signon
 
 [[item]]
 id = "client_signon_order"
-status = "implemented"
-evidence = "crates/cs-probe/src/lib.rs::tests::signon_chain_reaches_in_game; unverified against a real server, see docs/dev/reference-stand.md"
+status = "verified"
+evidence = "crates/cs-probe/src/lib.rs::tests::signon_chain_reaches_in_game; unverified against a real server, see docs/dev/reference-stand.md; VERIFIED 2026-11-22, method 1 (the original Steam CS 1.6 client build 10210 on our server, de_dust2; the original client accepts the order of our sign-on stages; docs/parity/checklists/phase2d-weapons.md V1)"
 
 [[item]]
 id = "client_spawn_crc_munge"
@@ -85,13 +85,13 @@ evidence = "crates/cs-engine/src/map.rs::tests::real_map_pvs_hides_far_spawn; Se
 
 [[item]]
 id = "signon"
-status = "tested"
-evidence = "crates/cs-engine/tests/signon.rs::probe_reaches_in_game_within_200_frames; stage order unverified against a real server (working assumption, see signon_opcode_order_matches_golden_capture)"
+status = "verified"
+evidence = "crates/cs-engine/tests/signon.rs::probe_reaches_in_game_within_200_frames; stage order unverified against a real server (working assumption, see signon_opcode_order_matches_golden_capture); VERIFIED 2026-11-22, method 1 (the original Steam CS 1.6 client build 10210 on our server, de_dust2; the original client completes the sign-on on our server and spawns; the earlier note 'stage order unverified against a real server' no longer holds; docs/parity/checklists/phase2d-weapons.md V1)"
 
 [[item]]
 id = "studio_hitbox_traces"
-status = "missing"
-evidence = "ReHLDS rehlds/engine/r_studio.cpp SV_HullForStudioModel (read 2026-11-21): a zero-size trace against an entity with a studio model clips its hitbox hulls and reports a hitgroup. Traces here hit the bounding box only, with no hitgroup, so no headshots or damage zones; the weapons of phase 2D need it"
+status = "tested"
+evidence = "crates/cs-engine/tests/studio_hitboxes.rs::hitboxes_give_their_hitgroups_and_misses_miss, clients_are_traced_with_a_grown_hull_and_others_with_none, sv_clienttrace_zero_traces_a_client_as_its_box, the_shield_hitbox_is_left_out_while_gamestate_is_one, the_pose_follows_the_blend_and_the_angles, pose_follows_sequence_and_frame, idle1_golden_points, bullet_hits_head_hitbox, flagged_model_traces_a_box_through_its_hitboxes_grown_by_half_its_size, pellets_and_players_cost_one_pose_each, bad_model_data_is_refused_quietly, hostile_pose_variables_do_not_panic (ReHLDS r_studio.cpp SV_HullForStudioModel, SetupBones and R_StudioHull, read 2026-11-22). Known gaps: no engine dump to compare the hitbox points with (idle1 points are cross-checked against the renderer's bone evaluation); sequence-group files are not read; controller and blending bytes are not on the wire; the sv_clienttrace cvar is a cstrike default of 1"
 
 [[item]]
 id = "think"
@@ -172,3 +172,68 @@ evidence = "crates/cs-engine/src/server.rs::tests::init_and_baselines_share_the_
 id = "packet_entities_cap"
 status = "tested"
 evidence = "crates/cs-engine/tests/frames.rs::packet_entities_follow_the_original_overflow_rule, oversized_frame_drops_the_whole_unreliable_part_as_hlds; crates/cs-engine/tests/lifecycle.rs::frame_after_shutdown_does_nothing; an update carries at most MAX_PACKET_ENTITIES = 256 entities (the client slots first, then the others in index order, the game is not asked about the rest), as SV_WriteEntitiesToClient (Too many entities in visible packet list) of ReHLDS sv_main.cpp (read 2026-11-21); an update whose entity block does not fit the datagram has its whole unreliable part dropped and the client gets the reliable data alone, as SV_SendClientDatagram and Netchan_Transmit do; frames after Server::shutdown read no datagram and send nothing (HLDS has no such state: it quits); not compared with the original server"
+
+[[item]]
+id = "event_playback"
+status = "tested"
+evidence = "crates/cs-engine/tests/events.rs::playback_reaches_pas_clients_not_the_shooter_with_lw, events_follow_the_pas_unless_global, update_replaces_the_queued_event_and_hostonly_keeps_to_the_invoker, bad_event_index_is_refused_quietly, the_queue_holds_64_events_and_one_update_carries_31 (ReHLDS pr_cmds.cpp EV_Playback and sv_main.cpp SV_EmitEvents_internal, read 2026-11-22). Known gap: FEV_NOTHOST means the invoker's own client here (cl_lw), MAX_EVENT_QUEUE 64 and RES_FATALIFMISSING are from memory - confirm"
+
+[[item]]
+id = "event_precache"
+status = "tested"
+evidence = "crates/cs-engine/tests/events.rs::precached_events_are_in_the_resource_list, precache_event_indexes_from_one_and_refuses_new_names_late; crates/cs-game/tests/inventory.rs::every_weapon_event_resolves_after_activation. Known gap: the events have no file transfer (download_size 0)"
+
+[[item]]
+id = "usercmd_random_seed"
+status = "tested"
+evidence = "crates/cs-engine/tests/weapon_data.rs::random_seed_follows_rehlds_and_halves_share_it, split_commands_run_both_halves_with_the_same_seed, seeds_through_a_lossy_move_follow_rehlds (the seed of a command is the sequence minus the index, backups use sequence minus cmdnum, a repeat uses 0: rehlds sv_user.cpp, read 2026-11-22)"
+
+[[item]]
+id = "client_lw_userinfo"
+status = "tested"
+evidence = "crates/cs-engine/tests/weapon_data.rs::client_lw_follows_the_userinfo, weapon_data_is_sent_only_to_lw_clients, no_weapon_data_when_the_game_has_none"
+
+[[item]]
+id = "decals"
+status = "tested"
+evidence = "crates/cs-engine/tests/tempents.rs::decal_index_follows_decals_wad, decal_helpers_choose_the_high_messages, decal_list_limits_and_resources (PF_DecalIndex, Decal_Init, decals in the resource list after the models, read 2026-11-22). Known gap: needs a live client check that the decal resources parse (owner checklist rows 3 and 11 shoot walls)"
+
+[[item]]
+id = "sound_flags_ambient"
+status = "tested"
+evidence = "crates/cs-engine/tests/tempents.rs::ambient_sound_from_a_point, sound_flags_reach_the_wire (PF_sound_I SND_* flags, ambient sounds)"
+
+[[item]]
+id = "resource_list_completeness"
+status = "missing"
+evidence = "Known gap: our resource list has 730 entries against 781 of the original HLDS (golden capture 2026-11-22). 51 are only in the original: 36 sounds, 10 models and 5 events. Without a sound or an event the client plays nothing for it"
+
+[[item]]
+id = "msgdest_broadcast_datagram"
+status = "missing"
+evidence = "Known gap (documented deferral): MsgDest::Broadcast messages go out at the end of the frame after the single-client messages; ReHLDS puts them in sv.datagram (MSG_BROADCAST). Order differences against the original are possible"
+
+[[item]]
+id = "sendinfo_time_spacing"
+status = "missing"
+evidence = "Known gap: the 1 s spacing of the userinfo broadcast (sendinfo_time) of the original is not kept; the updates go out at once"
+
+[[item]]
+id = "delta_encoder_callbacks"
+status = "missing"
+evidence = "Known gap: the game's Player_Encode and Entity_Encode delta encoder callbacks (the ReGameDLL hooks that change what an entity sends) are not called"
+
+[[item]]
+id = "addtofullpack_filters"
+status = "missing"
+evidence = "Known gap: the AddToFullPack filters of ReHLDS/ReGameDLL (PVS/PAS-based and ownership checks of what an entity shows to a client) are only partly applied"
+
+[[item]]
+id = "update_rate_frame_batching"
+status = "missing"
+evidence = "Known gap: our server sends about 60 updates a second (a datagram every 10 to 20 ms) where the original HLDS sends about 23.5 (41 to 45 ms); the frame batching of the original is not ported; svc_pings every 2 s where the original sends none (golden capture 2026-11-22)"
+
+[[item]]
+id = "newer_build_messages"
+status = "missing"
+evidence = "Known gap: HealthInfo, Account and ReqState, which the newer mp.dll of the original HLDS (build 10210) sends and ours does not (golden join diff 2026-11-22); our build number is 8684"

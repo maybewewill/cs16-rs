@@ -34,23 +34,28 @@ status = "implemented"
 
 [[item]]
 id = "clientdata_t.ammo_nails"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-engine/tests/weapon_data.rs::clientdata_ammo_fields_round_trip (the four reserve counters, a whole GoldSrcClientData compared after the wire); the game fills them from the ammo table: crates/cs-game/tests/weapon_prediction.rs::client_data_weapon_fields"
 
 [[item]]
 id = "clientdata_t.ammo_shells"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-engine/tests/weapon_data.rs::clientdata_ammo_fields_round_trip (the four reserve counters, a whole GoldSrcClientData compared after the wire); the game fills them from the ammo table: crates/cs-game/tests/weapon_prediction.rs::client_data_weapon_fields"
 
 [[item]]
 id = "clientdata_t.ammo_cells"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-engine/tests/weapon_data.rs::clientdata_ammo_fields_round_trip (the four reserve counters, a whole GoldSrcClientData compared after the wire); the game fills them from the ammo table: crates/cs-game/tests/weapon_prediction.rs::client_data_weapon_fields"
 
 [[item]]
 id = "clientdata_t.ammo_rockets"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-engine/tests/weapon_data.rs::clientdata_ammo_fields_round_trip (the four reserve counters, a whole GoldSrcClientData compared after the wire); the game fills them from the ammo table: crates/cs-game/tests/weapon_prediction.rs::client_data_weapon_fields"
 
 [[item]]
 id = "clientdata_t.m_iId"
-status = "implemented"
+status = "verified"
+evidence = "crates/cs-game/tests/weapon_prediction.rs::golden_values_after_joinclass, client_data_weapon_fields, client_data_weapon_fields_need_cl_lw; VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; m_iId 16 (the USP) as the original; docs/parity/checklists/phase2d-weapons.md V9)"
 
 [[item]]
 id = "clientdata_t.punchangle[2]"
@@ -62,7 +67,8 @@ status = "implemented"
 
 [[item]]
 id = "clientdata_t.weaponanim"
-status = "implemented"
+status = "verified"
+evidence = "crates/cs-game/tests/weapon_prediction.rs::golden_values_after_joinclass, client_data_weapon_fields, client_data_weapon_fields_need_cl_lw; VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; weaponanim 14 as the original; docs/parity/checklists/phase2d-weapons.md V9)"
 
 [[item]]
 id = "clientdata_t.health"
@@ -96,7 +102,8 @@ status = "implemented"
 
 [[item]]
 id = "clientdata_t.weapons"
-status = "implemented"
+status = "verified"
+evidence = "crates/cs-game/tests/weapon_prediction.rs::golden_values_after_joinclass, client_data_weapon_fields, client_data_weapon_fields_need_cl_lw; VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; weapons 0xa0010000: knife 29, USP 16, suit 31; docs/parity/checklists/phase2d-weapons.md V9)"
 
 [[item]]
 id = "clientdata_t.pushmsec"
@@ -152,18 +159,18 @@ status = "implemented"
 
 [[item]]
 id = "clientdata_t.vuser2[0]"
-status = "tested"
-evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game leaves it zero (nothing sets vuser2 yet)"
+status = "verified"
+evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game leaves it zero (nothing sets vuser2 yet); VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; vuser2 and vuser4 after joinclass as the original; docs/parity/checklists/phase2d-weapons.md V9)"
 
 [[item]]
 id = "clientdata_t.vuser2[1]"
-status = "tested"
-evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game leaves it zero (nothing sets vuser2 yet)"
+status = "verified"
+evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game leaves it zero (nothing sets vuser2 yet); VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; vuser2 and vuser4 after joinclass as the original; docs/parity/checklists/phase2d-weapons.md V9)"
 
 [[item]]
 id = "clientdata_t.vuser2[2]"
-status = "tested"
-evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game leaves it zero (nothing sets vuser2 yet)"
+status = "verified"
+evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game leaves it zero (nothing sets vuser2 yet); VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; vuser2 and vuser4 after joinclass as the original; docs/parity/checklists/phase2d-weapons.md V9)"
 
 [[item]]
 id = "clientdata_t.vuser3[0]"
@@ -182,13 +189,13 @@ evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_t
 
 [[item]]
 id = "clientdata_t.vuser4[0]"
-status = "tested"
-evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game leaves it zero (nothing sets vuser4 yet); the schema has no third axis"
+status = "verified"
+evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game leaves it zero (nothing sets vuser4 yet); the schema has no third axis; VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; vuser2 and vuser4 after joinclass as the original; docs/parity/checklists/phase2d-weapons.md V9)"
 
 [[item]]
 id = "clientdata_t.vuser4[1]"
-status = "tested"
-evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game leaves it zero (nothing sets vuser4 yet); the schema has no third axis"
+status = "verified"
+evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game leaves it zero (nothing sets vuser4 yet); the schema has no third axis; VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; vuser2 and vuser4 after joinclass as the original; docs/parity/checklists/phase2d-weapons.md V9)"
 
 [[item]]
 id = "clientdata_t.fuser1"
@@ -754,128 +761,160 @@ status = "implemented"
 
 [[item]]
 id = "weapon_data_t.m_flTimeWeaponIdle"
-status = "missing"
+status = "verified"
+evidence = "crates/cs-engine/tests/weapon_data.rs::weapon_data_round_trip_on_the_wire (a whole GoldSrcWeaponData with every schema field set is written and decoded and compared for equality), weapon_data_deltas_against_the_acked_frame, weapon_data_schema_matches_the_installed_delta_lst; crates/cs-game/tests/weapon_prediction.rs::weapon_data_round_trip_per_weapon; VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; weapon_data of the USP (12 rounds) and the knife (-1) after joinclass, field m_flTimeWeaponIdle; docs/parity/checklists/phase2d-weapons.md V9)"
 
 [[item]]
 id = "weapon_data_t.m_flNextPrimaryAttack"
-status = "missing"
+status = "verified"
+evidence = "crates/cs-engine/tests/weapon_data.rs::weapon_data_round_trip_on_the_wire (a whole GoldSrcWeaponData with every schema field set is written and decoded and compared for equality), weapon_data_deltas_against_the_acked_frame, weapon_data_schema_matches_the_installed_delta_lst; crates/cs-game/tests/weapon_prediction.rs::weapon_data_round_trip_per_weapon; VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; weapon_data of the USP (12 rounds) and the knife (-1) after joinclass, field m_flNextPrimaryAttack; docs/parity/checklists/phase2d-weapons.md V9)"
 
 [[item]]
 id = "weapon_data_t.m_flNextReload"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-engine/tests/weapon_data.rs::weapon_data_round_trip_on_the_wire (a whole GoldSrcWeaponData with every schema field set is written and decoded and compared for equality), weapon_data_deltas_against_the_acked_frame, weapon_data_schema_matches_the_installed_delta_lst; crates/cs-game/tests/weapon_prediction.rs::weapon_data_round_trip_per_weapon; the value at an idle spawn is the same in the original capture (zero), a firing sequence was not compared"
 
 [[item]]
 id = "weapon_data_t.m_fNextAimBonus"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-engine/tests/weapon_data.rs::weapon_data_round_trip_on_the_wire (a whole GoldSrcWeaponData with every schema field set is written and decoded and compared for equality), weapon_data_deltas_against_the_acked_frame, weapon_data_schema_matches_the_installed_delta_lst; crates/cs-game/tests/weapon_prediction.rs::weapon_data_round_trip_per_weapon; the value at an idle spawn is the same in the original capture (zero), a firing sequence was not compared"
 
 [[item]]
 id = "weapon_data_t.m_flNextSecondaryAttack"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-engine/tests/weapon_data.rs::weapon_data_round_trip_on_the_wire (a whole GoldSrcWeaponData with every schema field set is written and decoded and compared for equality), weapon_data_deltas_against_the_acked_frame, weapon_data_schema_matches_the_installed_delta_lst; crates/cs-game/tests/weapon_prediction.rs::weapon_data_round_trip_per_weapon; the value at an idle spawn is the same in the original capture (zero), a firing sequence was not compared"
 
 [[item]]
 id = "weapon_data_t.m_iClip"
-status = "missing"
+status = "verified"
+evidence = "crates/cs-engine/tests/weapon_data.rs::weapon_data_round_trip_on_the_wire (a whole GoldSrcWeaponData with every schema field set is written and decoded and compared for equality), weapon_data_deltas_against_the_acked_frame, weapon_data_schema_matches_the_installed_delta_lst; crates/cs-game/tests/weapon_prediction.rs::weapon_data_round_trip_per_weapon; VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; weapon_data of the USP (12 rounds) and the knife (-1) after joinclass, field m_iClip; docs/parity/checklists/phase2d-weapons.md V9)"
 
 [[item]]
 id = "weapon_data_t.m_flPumpTime"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-engine/tests/weapon_data.rs::weapon_data_round_trip_on_the_wire (a whole GoldSrcWeaponData with every schema field set is written and decoded and compared for equality), weapon_data_deltas_against_the_acked_frame, weapon_data_schema_matches_the_installed_delta_lst; crates/cs-game/tests/weapon_prediction.rs::weapon_data_round_trip_per_weapon; the value at an idle spawn is the same in the original capture (zero), a firing sequence was not compared"
 
 [[item]]
 id = "weapon_data_t.m_fInSpecialReload"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-engine/tests/weapon_data.rs::weapon_data_round_trip_on_the_wire (a whole GoldSrcWeaponData with every schema field set is written and decoded and compared for equality), weapon_data_deltas_against_the_acked_frame, weapon_data_schema_matches_the_installed_delta_lst; crates/cs-game/tests/weapon_prediction.rs::weapon_data_round_trip_per_weapon; the value at an idle spawn is the same in the original capture (zero), a firing sequence was not compared"
 
 [[item]]
 id = "weapon_data_t.m_fReloadTime"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-engine/tests/weapon_data.rs::weapon_data_round_trip_on_the_wire (a whole GoldSrcWeaponData with every schema field set is written and decoded and compared for equality), weapon_data_deltas_against_the_acked_frame, weapon_data_schema_matches_the_installed_delta_lst; crates/cs-game/tests/weapon_prediction.rs::weapon_data_round_trip_per_weapon; the value at an idle spawn is the same in the original capture (zero), a firing sequence was not compared"
 
 [[item]]
 id = "weapon_data_t.m_fInReload"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-engine/tests/weapon_data.rs::weapon_data_round_trip_on_the_wire (a whole GoldSrcWeaponData with every schema field set is written and decoded and compared for equality), weapon_data_deltas_against_the_acked_frame, weapon_data_schema_matches_the_installed_delta_lst; crates/cs-game/tests/weapon_prediction.rs::weapon_data_round_trip_per_weapon; the value at an idle spawn is the same in the original capture (zero), a firing sequence was not compared"
 
 [[item]]
 id = "weapon_data_t.m_fAimedDamage"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-engine/tests/weapon_data.rs::weapon_data_round_trip_on_the_wire (a whole GoldSrcWeaponData with every schema field set is written and decoded and compared for equality), weapon_data_deltas_against_the_acked_frame, weapon_data_schema_matches_the_installed_delta_lst; crates/cs-game/tests/weapon_prediction.rs::weapon_data_round_trip_per_weapon; the value at an idle spawn is the same in the original capture (zero), a firing sequence was not compared"
 
 [[item]]
 id = "weapon_data_t.m_fInZoom"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-engine/tests/weapon_data.rs::weapon_data_round_trip_on_the_wire (a whole GoldSrcWeaponData with every schema field set is written and decoded and compared for equality), weapon_data_deltas_against_the_acked_frame, weapon_data_schema_matches_the_installed_delta_lst; crates/cs-game/tests/weapon_prediction.rs::weapon_data_round_trip_per_weapon; the value at an idle spawn is the same in the original capture (zero), a firing sequence was not compared"
 
 [[item]]
 id = "weapon_data_t.m_iWeaponState"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-engine/tests/weapon_data.rs::weapon_data_round_trip_on_the_wire (a whole GoldSrcWeaponData with every schema field set is written and decoded and compared for equality), weapon_data_deltas_against_the_acked_frame, weapon_data_schema_matches_the_installed_delta_lst; crates/cs-game/tests/weapon_prediction.rs::weapon_data_round_trip_per_weapon; the value at an idle spawn is the same in the original capture (zero), a firing sequence was not compared"
 
 [[item]]
 id = "weapon_data_t.m_iId"
-status = "missing"
+status = "verified"
+evidence = "crates/cs-engine/tests/weapon_data.rs::weapon_data_round_trip_on_the_wire (a whole GoldSrcWeaponData with every schema field set is written and decoded and compared for equality), weapon_data_deltas_against_the_acked_frame, weapon_data_schema_matches_the_installed_delta_lst; crates/cs-game/tests/weapon_prediction.rs::weapon_data_round_trip_per_weapon; VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; weapon_data of the USP (12 rounds) and the knife (-1) after joinclass, field m_iId; docs/parity/checklists/phase2d-weapons.md V9)"
 
 [[item]]
 id = "weapon_data_t.fuser1"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-engine/tests/weapon_data.rs::weapon_data_round_trip_on_the_wire (a whole GoldSrcWeaponData with every schema field set is written and decoded and compared for equality), weapon_data_deltas_against_the_acked_frame, weapon_data_schema_matches_the_installed_delta_lst; crates/cs-game/tests/weapon_prediction.rs::weapon_data_round_trip_per_weapon; the value at an idle spawn is the same in the original capture (zero), a firing sequence was not compared"
 
 [[item]]
 id = "weapon_data_t.fuser2"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-engine/tests/weapon_data.rs::weapon_data_round_trip_on_the_wire (a whole GoldSrcWeaponData with every schema field set is written and decoded and compared for equality), weapon_data_deltas_against_the_acked_frame, weapon_data_schema_matches_the_installed_delta_lst; crates/cs-game/tests/weapon_prediction.rs::weapon_data_round_trip_per_weapon; the value at an idle spawn is the same in the original capture (zero), a firing sequence was not compared"
 
 [[item]]
 id = "weapon_data_t.fuser3"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-engine/tests/weapon_data.rs::weapon_data_round_trip_on_the_wire (a whole GoldSrcWeaponData with every schema field set is written and decoded and compared for equality), weapon_data_deltas_against_the_acked_frame, weapon_data_schema_matches_the_installed_delta_lst; crates/cs-game/tests/weapon_prediction.rs::weapon_data_round_trip_per_weapon; the value at an idle spawn is the same in the original capture (zero), a firing sequence was not compared"
 
 [[item]]
 id = "weapon_data_t.iuser1"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-engine/tests/weapon_data.rs::weapon_data_round_trip_on_the_wire (a whole GoldSrcWeaponData with every schema field set is written and decoded and compared for equality), weapon_data_deltas_against_the_acked_frame, weapon_data_schema_matches_the_installed_delta_lst; crates/cs-game/tests/weapon_prediction.rs::weapon_data_round_trip_per_weapon; the value at an idle spawn is the same in the original capture (zero), a firing sequence was not compared"
 
 [[item]]
 id = "event_t.entindex"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-engine/tests/events.rs::event_args_round_trip_on_the_wire (origin, angles, fparam1/2, iparam1/2, bparam1/2 asserted on the wire), an_invoker_outside_the_packet_is_sent_by_number_with_its_own_origin (EV_Playback and SV_EmitEvents of rehlds sv_main.cpp / pr_cmds.cpp, read 2026-11-22)"
 
 [[item]]
 id = "event_t.bparam1"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-engine/tests/events.rs::event_args_round_trip_on_the_wire (origin, angles, fparam1/2, iparam1/2, bparam1/2 asserted on the wire), an_invoker_outside_the_packet_is_sent_by_number_with_its_own_origin (EV_Playback and SV_EmitEvents of rehlds sv_main.cpp / pr_cmds.cpp, read 2026-11-22)"
 
 [[item]]
 id = "event_t.bparam2"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-engine/tests/events.rs::event_args_round_trip_on_the_wire (origin, angles, fparam1/2, iparam1/2, bparam1/2 asserted on the wire), an_invoker_outside_the_packet_is_sent_by_number_with_its_own_origin (EV_Playback and SV_EmitEvents of rehlds sv_main.cpp / pr_cmds.cpp, read 2026-11-22)"
 
 [[item]]
 id = "event_t.origin[0]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-engine/tests/events.rs::event_args_round_trip_on_the_wire (origin, angles, fparam1/2, iparam1/2, bparam1/2 asserted on the wire), an_invoker_outside_the_packet_is_sent_by_number_with_its_own_origin (EV_Playback and SV_EmitEvents of rehlds sv_main.cpp / pr_cmds.cpp, read 2026-11-22)"
 
 [[item]]
 id = "event_t.origin[1]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-engine/tests/events.rs::event_args_round_trip_on_the_wire (origin, angles, fparam1/2, iparam1/2, bparam1/2 asserted on the wire), an_invoker_outside_the_packet_is_sent_by_number_with_its_own_origin (EV_Playback and SV_EmitEvents of rehlds sv_main.cpp / pr_cmds.cpp, read 2026-11-22)"
 
 [[item]]
 id = "event_t.origin[2]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-engine/tests/events.rs::event_args_round_trip_on_the_wire (origin, angles, fparam1/2, iparam1/2, bparam1/2 asserted on the wire), an_invoker_outside_the_packet_is_sent_by_number_with_its_own_origin (EV_Playback and SV_EmitEvents of rehlds sv_main.cpp / pr_cmds.cpp, read 2026-11-22)"
 
 [[item]]
 id = "event_t.fparam1"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-engine/tests/events.rs::event_args_round_trip_on_the_wire (origin, angles, fparam1/2, iparam1/2, bparam1/2 asserted on the wire), an_invoker_outside_the_packet_is_sent_by_number_with_its_own_origin (EV_Playback and SV_EmitEvents of rehlds sv_main.cpp / pr_cmds.cpp, read 2026-11-22)"
 
 [[item]]
 id = "event_t.fparam2"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-engine/tests/events.rs::event_args_round_trip_on_the_wire (origin, angles, fparam1/2, iparam1/2, bparam1/2 asserted on the wire), an_invoker_outside_the_packet_is_sent_by_number_with_its_own_origin (EV_Playback and SV_EmitEvents of rehlds sv_main.cpp / pr_cmds.cpp, read 2026-11-22)"
 
 [[item]]
 id = "event_t.iparam1"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-engine/tests/events.rs::event_args_round_trip_on_the_wire (origin, angles, fparam1/2, iparam1/2, bparam1/2 asserted on the wire), an_invoker_outside_the_packet_is_sent_by_number_with_its_own_origin (EV_Playback and SV_EmitEvents of rehlds sv_main.cpp / pr_cmds.cpp, read 2026-11-22)"
 
 [[item]]
 id = "event_t.iparam2"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-engine/tests/events.rs::event_args_round_trip_on_the_wire (origin, angles, fparam1/2, iparam1/2, bparam1/2 asserted on the wire), an_invoker_outside_the_packet_is_sent_by_number_with_its_own_origin (EV_Playback and SV_EmitEvents of rehlds sv_main.cpp / pr_cmds.cpp, read 2026-11-22)"
 
 [[item]]
 id = "event_t.angles[0]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-engine/tests/events.rs::event_args_round_trip_on_the_wire (origin, angles, fparam1/2, iparam1/2, bparam1/2 asserted on the wire), an_invoker_outside_the_packet_is_sent_by_number_with_its_own_origin (EV_Playback and SV_EmitEvents of rehlds sv_main.cpp / pr_cmds.cpp, read 2026-11-22)"
 
 [[item]]
 id = "event_t.angles[1]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-engine/tests/events.rs::event_args_round_trip_on_the_wire (origin, angles, fparam1/2, iparam1/2, bparam1/2 asserted on the wire), an_invoker_outside_the_packet_is_sent_by_number_with_its_own_origin (EV_Playback and SV_EmitEvents of rehlds sv_main.cpp / pr_cmds.cpp, read 2026-11-22)"
 
 [[item]]
 id = "event_t.angles[2]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-engine/tests/events.rs::event_args_round_trip_on_the_wire (origin, angles, fparam1/2, iparam1/2, bparam1/2 asserted on the wire), an_invoker_outside_the_packet_is_sent_by_number_with_its_own_origin (EV_Playback and SV_EmitEvents of rehlds sv_main.cpp / pr_cmds.cpp, read 2026-11-22)"
 
 [[item]]
 id = "event_t.ducking"
-status = "missing"
+status = "implemented"
+evidence = "crates/cs-engine/src/events.rs: the invoker's FL_DUCKING is sent when the invoker is not in the packet; the one test (crates/cs-engine/tests/events.rs::event_args_round_trip_on_the_wire) only asserts the zero of an invoker inside the packet, so no test fails if the field broke"

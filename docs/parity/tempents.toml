@@ -1,0 +1,304 @@
+# Temporary entities (`svc_temp_entity`, the `TE_*` of `const.h`), weight 4: one item per type of the list,
+# TE_BEAMPOINTS (0) to TE_USERTRACER (127); 16 and 26 are unused numbers. Phase 2D added the builders
+# (crates/cs-proto48/src/tempent.rs) and `Server::send_temp_entity`. `tested` = a test builds the message
+# and checks its bytes against the layout of `const.h` (read 2026-11-22; the layouts of the builders are
+# the const.h comments, NOT compared with the original engine or client: no TE is `verified`);
+# `implemented` = the stream parser (crates/cs-proto48/src/messages.rs `skip_temp_entity`) takes the
+# payload with a fixed length, there is no builder and cs-game does not send it. Parser lengths of the
+# types without a builder are from memory of const.h and the engine - confirm; two look wrong and are
+# carried to the client phase (TE_BEAMSPRITE 18 and TE_EXPLODEMODEL 107).
+
+[[item]]
+id = "TE_BEAMPOINTS"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_BEAMENTPOINT"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_GUNSHOT"
+status = "tested"
+evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; builder tempent::gunshot. Vanilla ReGameDLL sends TE_GUNSHOTDECAL, nothing sends this one"
+
+[[item]]
+id = "TE_EXPLOSION"
+status = "tested"
+evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; builder tempent::explosion (flags NOADDITIVE, NODLIGHTS, NOSOUND, NOPARTICLES); sent twice by a grenade blast: crates/cs-game/tests/grenades.rs::grenade_bounces_and_detonates_on_time"
+
+[[item]]
+id = "TE_TAREXPLOSION"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_SMOKE"
+status = "tested"
+evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; builder tempent::smoke; the grenade's smoke puff: crates/cs-game/tests/grenades.rs::grenade_bounces_and_detonates_on_time, smoke_puffs_events"
+
+[[item]]
+id = "TE_TRACER"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_LIGHTNING"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_BEAMENTS"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_SPARKS"
+status = "tested"
+evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; builder tempent::sparks; sent for a bullet hitting a breakable/metal: crates/cs-game/src/bullets.rs (no game test asserts the choice)"
+
+[[item]]
+id = "TE_LAVASPLASH"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_TELEPORT"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_EXPLOSION2"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_BSPDECAL"
+status = "implemented"
+evidence = "parsed by skip_temp_entity (the optional model short after the entity); nothing sends it"
+
+[[item]]
+id = "TE_IMPLOSION"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_SPRITETRAIL"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_SPRITE"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_BEAMSPRITE"
+status = "implemented"
+evidence = "wire length in skip_temp_entity is 16 bytes and looks wrong (carried to the client phase); no builder, nothing sends it"
+
+[[item]]
+id = "TE_BEAMTORUS"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_BEAMDISK"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_BEAMCYLINDER"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_BEAMFOLLOW"
+status = "tested"
+evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; builder tempent::beam_follow; nothing sends it (vanilla has no TE_BEAMFOLLOW in the weapons)"
+
+[[item]]
+id = "TE_GLOWSPRITE"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_BEAMRING"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_STREAK_SPLASH"
+status = "tested"
+evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; builder tempent::streak_splash; the knife wall strike sends it (crates/cs-game/src/player.rs); no game test asserts the bytes"
+
+[[item]]
+id = "TE_DLIGHT"
+status = "tested"
+evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; builder tempent::dlight. The payload is 12 bytes (const.h lists a brightness byte too; the engine is believed not to read one: UNVERIFIED, documented in the builder); nothing sends it"
+
+[[item]]
+id = "TE_ELIGHT"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_TEXTMESSAGE"
+status = "implemented"
+evidence = "parsed by skip_temp_entity (channel, position, effect, colours, times and the string); nothing sends it"
+
+[[item]]
+id = "TE_LINE"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_BOX"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_KILLBEAM"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_LARGEFUNNEL"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_BLOODSTREAM"
+status = "tested"
+evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; builder tempent::blood_stream; nothing sends it"
+
+[[item]]
+id = "TE_SHOWLINE"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_BLOOD"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_DECAL"
+status = "tested"
+evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; builder tempent::decal and decal_for (the index below 256); crates/cs-engine/tests/tempents.rs::decal_index_follows_decals_wad, decal_helpers_choose_the_high_messages"
+
+[[item]]
+id = "TE_FIZZ"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_MODEL"
+status = "implemented"
+evidence = "crates/cs-game/src/weapons/core.rs eject_brass_late sends it (the brass shell) with the raw writer; no test asserts the bytes; the wire length is in skip_temp_entity"
+
+[[item]]
+id = "TE_EXPLODEMODEL"
+status = "implemented"
+evidence = "wire length in skip_temp_entity is 16 bytes and looks wrong (carried to the client phase); no builder, nothing sends it"
+
+[[item]]
+id = "TE_BREAKMODEL"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_GUNSHOTDECAL"
+status = "tested"
+evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; builder tempent::gunshot_decal; the bullet impact of cs-game (crates/cs-game/src/bullets.rs)"
+
+[[item]]
+id = "TE_SPRITE_SPRAY"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_ARMOR_RICOCHET"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_PLAYERDECAL"
+status = "implemented"
+evidence = "parsed by skip_temp_entity (the optional model short after the entity); nothing sends it"
+
+[[item]]
+id = "TE_BUBBLES"
+status = "implemented"
+evidence = "crates/cs-game/src/grenade.rs sends it for an underwater smoke grenade (raw writer, wire length in skip_temp_entity); no test asserts the bytes"
+
+[[item]]
+id = "TE_BUBBLETRAIL"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_BLOODSPRITE"
+status = "tested"
+evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; builder tempent::blood_sprite; the blood of a bullet hit: crates/cs-game/src/bullets.rs (no game test asserts the bytes)"
+
+[[item]]
+id = "TE_WORLDDECAL"
+status = "tested"
+evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; builder tempent::world_decal and world_decal_for; crates/cs-engine/tests/tempents.rs::decal_helpers_choose_the_high_messages"
+
+[[item]]
+id = "TE_WORLDDECALHIGH"
+status = "tested"
+evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; builder tempent::world_decal_high; crates/cs-engine/tests/tempents.rs::decal_helpers_choose_the_high_messages"
+
+[[item]]
+id = "TE_DECALHIGH"
+status = "tested"
+evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; builder tempent::decal_high; crates/cs-engine/tests/tempents.rs::decal_helpers_choose_the_high_messages"
+
+[[item]]
+id = "TE_PROJECTILE"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_SPRAY"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_PLAYERSPRITES"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_PARTICLEBURST"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_FIREFIELD"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_PLAYERATTACHMENT"
+status = "tested"
+evidence = "crates/cs-game/tests/hud_misc.rs::radio_reaches_the_team_with_sound (the radio icon: entity, offset 35, the radio sprite, 15 tenths of a second, asserted byte by byte); sent with the raw writer of cs-game, no builder"
+
+[[item]]
+id = "TE_KILLPLAYERATTACHMENTS"
+status = "tested"
+evidence = "crates/cs-game/tests/observer.rs::dead_player_becomes_an_observer_after_the_death_cam (the icon is killed for the followed player, the payload's last byte is asserted); sent with the raw writer of cs-game, no builder"
+
+[[item]]
+id = "TE_MULTIGUNSHOT"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+
+[[item]]
+id = "TE_USERTRACER"
+status = "implemented"
+evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"

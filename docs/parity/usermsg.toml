@@ -1,19 +1,22 @@
 [[item]]
 id = "CurWeapon"
-status = "tested"
-evidence = "crates/cs-proto48/src/usermsg.rs::tests::cs_usermsgs_roundtrip_cleanly"
+status = "verified"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::cs_usermsgs_roundtrip_cleanly; VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; the message is in the join, jointeam and joinclass sequences, which match the original message by message apart from HealthInfo, Account and ReqState (values that depend on the clock or the random spawn point are not compared); docs/parity/checklists/phase2d-weapons.md V8)"
 
 [[item]]
 id = "Geiger"
 status = "missing"
+evidence = "In progress (being fixed in parallel; the controller updates this at merge): the radiation counter message; crates/cs-game has no sender yet"
 
 [[item]]
 id = "Flashlight"
 status = "missing"
+evidence = "In progress (being fixed in parallel; the controller updates this at merge): the flashlight on/off message; the original join sequence has no Flashlight message at spawn"
 
 [[item]]
 id = "FlashBat"
 status = "missing"
+evidence = "In progress (being fixed in parallel; the controller updates this at merge): the flashlight battery message"
 
 [[item]]
 id = "Health"
@@ -49,15 +52,18 @@ status = "implemented"
 
 [[item]]
 id = "WeaponList"
-status = "missing"
+status = "verified"
+evidence = "crates/cs-game/tests/inventory.rs::weapon_list_at_join_as_regamedll (30 entries in the order of the original, WeaponList in the spawn answer); crates/cs-proto48/src/usermsg.rs::tests::cs_usermsgs_roundtrip_cleanly; VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; 30 entries; the weapon-selection HUD of the original client builds from it, method 1; docs/parity/checklists/phase2d-weapons.md V5, V8)"
 
 [[item]]
 id = "ResetHUD"
-status = "implemented"
+status = "verified"
+evidence = "VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; the message is in the join, jointeam and joinclass sequences, which match the original message by message apart from HealthInfo, Account and ReqState (values that depend on the clock or the random spawn point are not compared); docs/parity/checklists/phase2d-weapons.md V8)"
 
 [[item]]
 id = "InitHUD"
-status = "implemented"
+status = "verified"
+evidence = "VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; the message is in the join, jointeam and joinclass sequences, which match the original message by message apart from HealthInfo, Account and ReqState (values that depend on the clock or the random spawn point are not compared); docs/parity/checklists/phase2d-weapons.md V8)"
 
 [[item]]
 id = "ViewMode"
@@ -74,16 +80,18 @@ evidence = "crates/cs-proto48/src/usermsg.rs::tests::cs_usermsgs_roundtrip_clean
 
 [[item]]
 id = "ScoreAttrib"
-status = "implemented"
+status = "verified"
+evidence = "VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; the message is in the join, jointeam and joinclass sequences, which match the original message by message apart from HealthInfo, Account and ReqState (values that depend on the clock or the random spawn point are not compared); docs/parity/checklists/phase2d-weapons.md V8)"
 
 [[item]]
 id = "ScoreInfo"
-status = "tested"
-evidence = "crates/cs-proto48/src/usermsg.rs::tests::cs_usermsgs_roundtrip_cleanly"
+status = "verified"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::cs_usermsgs_roundtrip_cleanly; VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; the message is in the join, jointeam and joinclass sequences, which match the original message by message apart from HealthInfo, Account and ReqState (values that depend on the clock or the random spawn point are not compared); docs/parity/checklists/phase2d-weapons.md V8)"
 
 [[item]]
 id = "TeamInfo"
-status = "implemented"
+status = "verified"
+evidence = "VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; the message is in the join, jointeam and joinclass sequences, which match the original message by message apart from HealthInfo, Account and ReqState (values that depend on the clock or the random spawn point are not compared); docs/parity/checklists/phase2d-weapons.md V8)"
 
 [[item]]
 id = "TeamScore"
@@ -95,31 +103,38 @@ status = "missing"
 
 [[item]]
 id = "MOTD"
-status = "implemented"
+status = "verified"
+evidence = "VERIFIED 2026-11-22, method 1 (the original Steam CS 1.6 client build 10210 on our server, de_dust2; the MOTD window opens, titled with the hostname; the chunks are tested in crates/cs-game/tests/hud.rs::motd_is_sent_in_chunks; docs/parity/checklists/phase2d-weapons.md V2)"
 
 [[item]]
 id = "ServerName"
-status = "implemented"
+status = "verified"
+evidence = "VERIFIED 2026-11-22, method 1 (the original Steam CS 1.6 client build 10210 on our server, de_dust2; the MOTD window title follows the hostname cvar; docs/parity/checklists/phase2d-weapons.md V2)"
 
 [[item]]
 id = "AmmoPickup"
-status = "missing"
+status = "verified"
+evidence = "crates/cs-game/tests/inventory.rs::buy_drop_pickup_as_regamedll, ammo_buy_and_caps; VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; the AmmoPickup of the default give; docs/parity/checklists/phase2d-weapons.md V8)"
 
 [[item]]
 id = "WeapPickup"
-status = "missing"
+status = "verified"
+evidence = "crates/cs-game/tests/inventory.rs::buy_drop_pickup_as_regamedll (inventory.rs `WeapPickup` of AddToPlayer); VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; WeapPickup 29 (knife) and 16 (USP) at spawn; docs/parity/checklists/phase2d-weapons.md V8, V9)"
 
 [[item]]
 id = "ItemPickup"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-game/tests/buy.rs::buy_armor_as_regamedll, buy_night_vision_goggles (the item name is asserted: ItemPickup item_kevlar)"
 
 [[item]]
 id = "HideWeapon"
-status = "implemented"
+status = "verified"
+evidence = "VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; the message is in the join, jointeam and joinclass sequences, which match the original message by message apart from HealthInfo, Account and ReqState (values that depend on the clock or the random spawn point are not compared); docs/parity/checklists/phase2d-weapons.md V8)"
 
 [[item]]
 id = "SetFOV"
-status = "implemented"
+status = "verified"
+evidence = "VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; the message is in the join, jointeam and joinclass sequences, which match the original message by message apart from HealthInfo, Account and ReqState (values that depend on the clock or the random spawn point are not compared); docs/parity/checklists/phase2d-weapons.md V8)"
 
 [[item]]
 id = "ShowMenu"
@@ -131,11 +146,13 @@ status = "implemented"
 
 [[item]]
 id = "ScreenFade"
-status = "implemented"
+status = "verified"
+evidence = "VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; the message is in the join, jointeam and joinclass sequences, which match the original message by message apart from HealthInfo, Account and ReqState (values that depend on the clock or the random spawn point are not compared); docs/parity/checklists/phase2d-weapons.md V8)"
 
 [[item]]
 id = "AmmoX"
-status = "implemented"
+status = "verified"
+evidence = "crates/cs-game/tests/inventory.rs::buy_drop_pickup_as_regamedll, weapon_list_at_join_as_regamedll; crates/cs-game/tests/weapon_core.rs (the reserve told with AmmoX once, when it changes); VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; 32 AmmoX that zero each ammo slot in the sendents answer, then AmmoX 6=24 at spawn; docs/parity/checklists/phase2d-weapons.md V8)"
 
 [[item]]
 id = "SendAudio"
@@ -143,12 +160,13 @@ status = "implemented"
 
 [[item]]
 id = "RoundTime"
-status = "implemented"
+status = "verified"
+evidence = "VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; the message is in the join, jointeam and joinclass sequences, which match the original message by message apart from HealthInfo, Account and ReqState (values that depend on the clock or the random spawn point are not compared); docs/parity/checklists/phase2d-weapons.md V8)"
 
 [[item]]
 id = "Money"
-status = "tested"
-evidence = "crates/cs-proto48/src/usermsg.rs::tests::cs_usermsgs_roundtrip_cleanly"
+status = "verified"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::cs_usermsgs_roundtrip_cleanly; VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; the message is in the join, jointeam and joinclass sequences, which match the original message by message apart from HealthInfo, Account and ReqState (values that depend on the clock or the random spawn point are not compared); docs/parity/checklists/phase2d-weapons.md V8)"
 
 [[item]]
 id = "ArmorType"
@@ -173,19 +191,23 @@ evidence = "crates/cs-proto48/src/usermsg.rs::tests::cs_usermsgs_roundtrip_clean
 
 [[item]]
 id = "BarTime"
-status = "implemented"
+status = "verified"
+evidence = "VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; the message is in the join, jointeam and joinclass sequences, which match the original message by message apart from HealthInfo, Account and ReqState (values that depend on the clock or the random spawn point are not compared); docs/parity/checklists/phase2d-weapons.md V8)"
 
 [[item]]
 id = "ReloadSound"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-game/tests/weapon_core.rs::reload_sound_reaches_nearby_players (volume and kind are asserted)"
 
 [[item]]
 id = "Crosshair"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-game/tests/observer.rs::dead_player_becomes_an_observer_after_the_death_cam (Crosshair 1 for a roaming observer). The crosshair of the spawn on the original client is seen in docs/parity/checklists/phase2d-weapons.md V5 but its message is not compared byte by byte"
 
 [[item]]
 id = "NVGToggle"
-status = "implemented"
+status = "verified"
+evidence = "VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; the message is in the join, jointeam and joinclass sequences, which match the original message by message apart from HealthInfo, Account and ReqState (values that depend on the clock or the random spawn point are not compared); docs/parity/checklists/phase2d-weapons.md V8)"
 
 [[item]]
 id = "Radar"
@@ -197,7 +219,8 @@ status = "missing"
 
 [[item]]
 id = "VGUIMenu"
-status = "implemented"
+status = "verified"
+evidence = "VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; the message is in the join, jointeam and joinclass sequences, which match the original message by message apart from HealthInfo, Account and ReqState (values that depend on the clock or the random spawn point are not compared); docs/parity/checklists/phase2d-weapons.md V8)"
 
 [[item]]
 id = "AllowSpec"
@@ -295,3 +318,4 @@ status = "implemented"
 [[item]]
 id = "HudTextArgs"
 status = "missing"
+evidence = "In progress (being fixed in parallel; the controller updates this at merge): the hint messages (yellow tips)"

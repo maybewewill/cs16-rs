@@ -1,0 +1,373 @@
+# Weapons, items and economy of cs-game, phase 2D (ReGameDLL_CS vanilla `mp.dll` behaviour), weight 10.
+# `tested` = a named test asserts the item against the ReGameDLL_CS / ReHLDS source (master, read
+# 2026-11-22); `implemented` = the code is there and no cited test would fail if it broke;
+# `verified` = compared with the original game (Steam CS 1.6 build 10210) on 2026-11-22, the method and
+# the line in docs/parity/checklists/phase2d-weapons.md named in the evidence. A weapon's firing
+# behaviour is never `verified` here: the original client has not shot with our server yet (rows 1 to 20
+# of the checklist are the owner's). Every item that is not `tested` or better carries its known gap.
+# Shield, C4/bomb (2E), VIP, bots and autobuy/rebuy are not ported and are listed as `missing`.
+
+[[item]]
+id = "weapon_tables"
+status = "tested"
+evidence = "crates/cs-game/tests/weapon_tables.rs::prices_clips_and_ammo_match_weapontype_cpp, item_info_matches_get_item_info, ammo_indices_follow_precache_order, aliases_round_trip, weapon_struct_matches_weapontype_cpp, default_give_matches_clip_give_default; crates/cs-game/tests/weapon_core.rs::the_registry_has_every_weapon. The tables are ported row by row from weapontype.cpp, weapons.cpp and each wpn_*.cpp GetItemInfo (read 2026-11-22)."
+
+[[item]]
+id = "weapon_shared_random"
+status = "tested"
+evidence = "crates/cs-game/tests/weapon_tables.rs::shared_random_matches_util_cpp (util.cpp UTIL_SharedRandomLong/Float, checked against a second implementation); crates/cs-game/tests/bullets.rs::spread_uses_the_shared_seed; crates/cs-engine/tests/weapon_data.rs::random_seed_follows_rehlds_and_halves_share_it, split_commands_run_both_halves_with_the_same_seed, seeds_through_a_lossy_move_follow_rehlds (the per-command seed of sv_user.cpp). Assumptions: the float generator assumes f32 SSE arithmetic as the original binary; shared_random_long returns the low bound where C divides by zero. Not checked against the original client's own generator (the client prediction of cl_lw 1 is the owner's checklist row 3)."
+
+[[item]]
+id = "weapon_state_machine"
+status = "tested"
+evidence = "crates/cs-game/tests/weapon_core.rs::deploy_sets_next_attack_0_75, item_post_frame_timeline, can_attack_and_secondary_attack_tables, secondary_attack_is_masked_for_weapons_without_one, timers_count_down_in_post_think, can_shoot_after_freeze, defusing_blocks_the_shot_and_the_can_shoot_bit, spawn_clears_next_attack, game_over_clears_the_buttons, spawned_player_without_a_shield_has_gamestate_1, weapons_run_through_the_engine (CBasePlayerWeapon::ItemPostFrame order, weapons.cpp read 2026-11-22). Deviation: resume_zoom/last_zoom/eject_brass live on Player (CBasePlayer members), the weapon behaviour trait gets only &Weapon."
+
+[[item]]
+id = "weapon_reload"
+status = "tested"
+evidence = "crates/cs-game/tests/weapon_core.rs::default_reload_moves_ammo_into_the_clip, shotgun_reload_stages, reload_sound_reaches_nearby_players; per-weapon reload times and quirks: crates/cs-game/tests/weapons_pistols.rs::reload_quirks_and_idle, crates/cs-game/tests/weapons_special.rs::shotgun_special_reload_and_pump"
+
+[[item]]
+id = "weapon_kickback_punch"
+status = "tested"
+evidence = "crates/cs-game/tests/weapon_core.rs::kick_back_as_vanilla, kick_back_flips_the_direction_with_certainty_at_zero; crates/cs-game/tests/weapons_auto.rs::kickback_by_state, kickback_progression_follows_the_source_math. Quirk kept: Galil/Famas punch*1e7 clamps to +-131071 on the 18-bit event iparam (vanilla MSG_WriteSBits clamp)"
+
+[[item]]
+id = "weapon_zoom_fov"
+status = "tested"
+evidence = "crates/cs-game/tests/weapon_core.rs::fov_change_sends_set_fov, the_zoom_resumes_when_the_weapon_may_shoot; crates/cs-game/tests/weapons_special.rs::zoom_cycle_and_resume; crates/cs-game/tests/weapons_auto.rs::aug_sg552_zoom. Known gap: the zoomed max speed of the scoped rifles and snipers is mirrored into Weapon::max_speed on a zoom change (WeaponBehavior::max_speed gets only &Weapon), a core change later"
+
+[[item]]
+id = "weapon_empty_click"
+status = "tested"
+evidence = "crates/cs-game/tests/weapon_core.rs::empty_sound_plays_while_the_flag_is_set; crates/cs-game/tests/weapons_auto.rs::empty_clip_clicks_and_still_counts_the_shot. Known gap: the underwater click uses the base PlayEmptySound, not the M3/XM1014 overrides"
+
+[[item]]
+id = "weapon_fire_events"
+status = "tested"
+evidence = "crates/cs-engine/tests/events.rs::playback_reaches_pas_clients_not_the_shooter_with_lw, event_args_round_trip_on_the_wire, events_follow_the_pas_unless_global, an_invoker_outside_the_packet_is_sent_by_number_with_its_own_origin (EV_Playback, rehlds pr_cmds.cpp); crates/cs-game/tests/weapons_pistols.rs::pistol_events_carry_source_args; crates/cs-game/tests/weapons_auto.rs::auto_events_carry_source_args; crates/cs-game/tests/inventory.rs::every_weapon_event_resolves_after_activation (the 28 weapon events are precached in WeaponsPrecache order). Events are looked up by name at fire time (same index once precached). Known gap: 5 event scripts of the original resource list are missing (see resource_list_completeness in docs/parity/engine.toml)"
+
+[[item]]
+id = "weapon_brass_eject"
+status = "implemented"
+evidence = "crates/cs-game/src/weapons/core.rs eject_brass_late (CBasePlayerWeapon::EjectBrassLate, weapons.cpp 682): a TE_MODEL (106) shell at the eye, 9 down, 16 forward; the weapon-entity origin and yaw are taken as the player's (assumption); no test asserts the bytes. From memory - confirm: the shell flies out to the right (checklist row 5)"
+
+[[item]]
+id = "bullet_range_damage"
+status = "tested"
+evidence = "crates/cs-game/tests/bullets.rs::bullet_damage_falls_off_with_range (CBaseEntity::FireBullets3, cbase.cpp read 2026-11-22)"
+
+[[item]]
+id = "bullet_penetration"
+status = "tested"
+evidence = "crates/cs-game/tests/bullets.rs::penetration_by_material, a_bullet_goes_through_a_player_and_hurts_the_next."
+
+[[item]]
+id = "bullet_spread"
+status = "tested"
+evidence = "crates/cs-game/tests/bullets.rs::spread_uses_the_shared_seed, spread_displaces_along_right_and_up_of_the_view, buckshot_pellets, hostile_bullet_input_is_refused_quietly"
+
+[[item]]
+id = "bullet_hitgroup_headshot"
+status = "tested"
+evidence = "crates/cs-game/tests/bullets.rs::headshot_multiplier_and_armor_ratio; crates/cs-engine/tests/studio_hitboxes.rs::bullet_hits_head_hitbox, hitboxes_give_their_hitgroups_and_misses_miss (the hitgroup multipliers of CBasePlayer::TraceAttack)"
+
+[[item]]
+id = "bullet_armor_ratio"
+status = "tested"
+evidence = "crates/cs-game/tests/bullets.rs::armor_absorbs_as_regamedll (the per-weapon armor ratio and bonus of TakeDamage, player.cpp 1190-1230)"
+
+[[item]]
+id = "bullet_velocity_modifier"
+status = "tested"
+evidence = "crates/cs-game/tests/bullets.rs::velocity_modifier_on_hit (m_flVelocityModifier setter of TakeDamage; the PreThink part was done in 2C)"
+
+[[item]]
+id = "bullet_death_weapon_name"
+status = "tested"
+evidence = "crates/cs-game/tests/bullets.rs::death_msg_names_the_weapon_and_headshot (g_pevLastInflictor weapon names in DeathMsg)"
+
+[[item]]
+id = "bullet_impact_effects"
+status = "implemented"
+evidence = "crates/cs-game/src/bullets.rs: decals (TE_DECAL / TE_WORLDDECAL and the HIGH forms), TE_GUNSHOTDECAL, TE_SPARKS, TE_BLOODSPRITE and the streak splash of the knife wall hit are sent; their wire layouts are tested in crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, but no game test asserts which effect a bullet chooses. Known gap: server DecalGunshot is an empty stub in the source, the client plays the impact sounds"
+
+[[item]]
+id = "weapon_glock18"
+status = "tested"
+evidence = "crates/cs-game/tests/weapons_pistols.rs::pistol_rows_match_source, semi_auto_needs_release, pistol_events_carry_source_args, reload_quirks_and_idle, glock_burst_three_shots (wpn_glock18.cpp read 2026-11-22; the burst and the 0.2 s delay quirks). Known gap: the shield variants (shield models, `m_bShieldDrawn` states) are not ported"
+
+[[item]]
+id = "weapon_usp"
+status = "tested"
+evidence = "crates/cs-game/tests/weapons_pistols.rs::pistol_rows_match_source, semi_auto_needs_release, pistol_events_carry_source_args, reload_quirks_and_idle, usp_silencer_toggle_timing (wpn_usp.cpp). Known gap: the shield variants (shield models, `m_bShieldDrawn` states) are not ported"
+
+[[item]]
+id = "weapon_p228"
+status = "tested"
+evidence = "crates/cs-game/tests/weapons_pistols.rs::pistol_rows_match_source, semi_auto_needs_release, pistol_events_carry_source_args, reload_quirks_and_idle (wpn_p228.cpp). Known gap: the shield variants (shield models, `m_bShieldDrawn` states) are not ported"
+
+[[item]]
+id = "weapon_deagle"
+status = "tested"
+evidence = "crates/cs-game/tests/weapons_pistols.rs::pistol_rows_match_source, semi_auto_needs_release, pistol_events_carry_source_args, reload_quirks_and_idle (wpn_deagle.cpp). Known gap: the shield variants (shield models, `m_bShieldDrawn` states) are not ported"
+
+[[item]]
+id = "weapon_fiveseven"
+status = "tested"
+evidence = "crates/cs-game/tests/weapons_pistols.rs::pistol_rows_match_source, semi_auto_needs_release, pistol_events_carry_source_args, reload_quirks_and_idle (wpn_fiveseven.cpp). Known gap: the shield variants (shield models, `m_bShieldDrawn` states) are not ported"
+
+[[item]]
+id = "weapon_elite"
+status = "tested"
+evidence = "crates/cs-game/tests/weapons_pistols.rs::pistol_rows_match_source, semi_auto_needs_release, pistol_events_carry_source_args, reload_quirks_and_idle, elite_alternates_hands, elite_shoots_from_five_units_to_the_side (wpn_elite.cpp). The Elite cannot be bought with a shield (CanBuyThis). Known gap: the shield variants (shield models, `m_bShieldDrawn` states) are not ported"
+
+[[item]]
+id = "weapon_mac10"
+status = "tested"
+evidence = "crates/cs-game/tests/weapons_auto.rs::auto_rows_match_source, damage_and_range_match_source, accuracy_uses_integer_divisors, a_standing_shot_without_accuracy_loss_is_exact, spread_coefficients_by_stance, accuracy_reaches_every_cap, kickback_by_state (wpn_mac10.cpp)"
+
+[[item]]
+id = "weapon_tmp"
+status = "tested"
+evidence = "crates/cs-game/tests/weapons_auto.rs::auto_rows_match_source, damage_and_range_match_source, accuracy_uses_integer_divisors, a_standing_shot_without_accuracy_loss_is_exact, spread_coefficients_by_stance, accuracy_reaches_every_cap, tmp_has_no_muzzle_flash_on_a_real_shot (wpn_tmp.cpp)"
+
+[[item]]
+id = "weapon_mp5navy"
+status = "tested"
+evidence = "crates/cs-game/tests/weapons_auto.rs::auto_rows_match_source, damage_and_range_match_source, accuracy_uses_integer_divisors, a_standing_shot_without_accuracy_loss_is_exact, spread_coefficients_by_stance, accuracy_reaches_every_cap (wpn_mp5navy.cpp; the MP5N f64 spread arithmetic is kept)"
+
+[[item]]
+id = "weapon_ump45"
+status = "tested"
+evidence = "crates/cs-game/tests/weapons_auto.rs::auto_rows_match_source, damage_and_range_match_source, accuracy_uses_integer_divisors, a_standing_shot_without_accuracy_loss_is_exact, spread_coefficients_by_stance, accuracy_reaches_every_cap (wpn_ump45.cpp)"
+
+[[item]]
+id = "weapon_p90"
+status = "tested"
+evidence = "crates/cs-game/tests/weapons_auto.rs::auto_rows_match_source, damage_and_range_match_source, accuracy_uses_integer_divisors, a_standing_shot_without_accuracy_loss_is_exact, spread_coefficients_by_stance, accuracy_reaches_every_cap (wpn_p90.cpp)"
+
+[[item]]
+id = "weapon_ak47"
+status = "tested"
+evidence = "crates/cs-game/tests/weapons_auto.rs::auto_rows_match_source, damage_and_range_match_source, accuracy_uses_integer_divisors, a_standing_shot_without_accuracy_loss_is_exact, spread_coefficients_by_stance, accuracy_reaches_every_cap, kickback_progression_follows_the_source_math (wpn_ak47.cpp)"
+
+[[item]]
+id = "weapon_m4a1"
+status = "tested"
+evidence = "crates/cs-game/tests/weapons_auto.rs::auto_rows_match_source, damage_and_range_match_source, accuracy_uses_integer_divisors, a_standing_shot_without_accuracy_loss_is_exact, spread_coefficients_by_stance, accuracy_reaches_every_cap, m4a1_silencer (wpn_m4a1.cpp)"
+
+[[item]]
+id = "weapon_sg552"
+status = "tested"
+evidence = "crates/cs-game/tests/weapons_auto.rs::auto_rows_match_source, damage_and_range_match_source, accuracy_uses_integer_divisors, a_standing_shot_without_accuracy_loss_is_exact, spread_coefficients_by_stance, accuracy_reaches_every_cap, aug_sg552_zoom (wpn_sg552.cpp)"
+
+[[item]]
+id = "weapon_aug"
+status = "tested"
+evidence = "crates/cs-game/tests/weapons_auto.rs::auto_rows_match_source, damage_and_range_match_source, accuracy_uses_integer_divisors, a_standing_shot_without_accuracy_loss_is_exact, spread_coefficients_by_stance, accuracy_reaches_every_cap, aug_sg552_zoom (wpn_aug.cpp)"
+
+[[item]]
+id = "weapon_galil"
+status = "tested"
+evidence = "crates/cs-game/tests/weapons_auto.rs::auto_rows_match_source, damage_and_range_match_source, accuracy_uses_integer_divisors, a_standing_shot_without_accuracy_loss_is_exact, spread_coefficients_by_stance, accuracy_reaches_every_cap (wpn_galil.cpp; punch*1e7 clamps to +-131071 on the 18-bit event parameter)"
+
+[[item]]
+id = "weapon_famas"
+status = "tested"
+evidence = "crates/cs-game/tests/weapons_auto.rs::auto_rows_match_source, damage_and_range_match_source, accuracy_uses_integer_divisors, a_standing_shot_without_accuracy_loss_is_exact, spread_coefficients_by_stance, accuracy_reaches_every_cap, famas_burst (wpn_famas.cpp; same clamp)"
+
+[[item]]
+id = "weapon_m249"
+status = "tested"
+evidence = "crates/cs-game/tests/weapons_auto.rs::auto_rows_match_source, damage_and_range_match_source, accuracy_uses_integer_divisors, a_standing_shot_without_accuracy_loss_is_exact, spread_coefficients_by_stance, accuracy_reaches_every_cap (wpn_m249.cpp)"
+
+[[item]]
+id = "weapon_scout"
+status = "tested"
+evidence = "crates/cs-game/tests/weapons_special.rs::sniper_rows_match_source, sniper_shots_by_source, sniper_spread_by_stance, zoom_cycle_and_resume, scout_and_awp_deploy_delays (wpn_scout.cpp)"
+
+[[item]]
+id = "weapon_awp"
+status = "tested"
+evidence = "crates/cs-game/tests/weapons_special.rs::sniper_rows_match_source, sniper_shots_by_source, sniper_spread_by_stance, zoom_cycle_and_resume, scout_and_awp_deploy_delays (wpn_awp.cpp)"
+
+[[item]]
+id = "weapon_g3sg1"
+status = "tested"
+evidence = "crates/cs-game/tests/weapons_special.rs::sniper_rows_match_source, sniper_shots_by_source, sniper_spread_by_stance, zoom_cycle_and_resume, g3sg1_and_sg550_accuracy_growth_and_reset (wpn_g3sg1.cpp)"
+
+[[item]]
+id = "weapon_sg550"
+status = "tested"
+evidence = "crates/cs-game/tests/weapons_special.rs::sniper_rows_match_source, sniper_shots_by_source, sniper_spread_by_stance, zoom_cycle_and_resume, g3sg1_and_sg550_accuracy_growth_and_reset (wpn_sg550.cpp)"
+
+[[item]]
+id = "weapon_m3"
+status = "tested"
+evidence = "crates/cs-game/tests/weapons_special.rs::shotgun_special_reload_and_pump, shotgun_fire_timing, buckshot_spread; crates/cs-game/tests/bullets.rs::buckshot_pellets (wpn_m3.cpp)"
+
+[[item]]
+id = "weapon_xm1014"
+status = "tested"
+evidence = "crates/cs-game/tests/weapons_special.rs::shotgun_special_reload_and_pump, shotgun_fire_timing, buckshot_spread; crates/cs-game/tests/bullets.rs::buckshot_pellets (wpn_xm1014.cpp)"
+
+[[item]]
+id = "weapon_knife"
+status = "tested"
+evidence = "crates/cs-game/tests/weapons_special.rs::knife_slash_and_stab_damage_and_timing, knife_hull_intersection, knife_hit_sample_selection, knife_draws_by_branch, knife_wall_strike (wpn_knife.cpp, FindHullIntersection; m_iClip -1 at creation: crates/cs-game/tests/inventory.rs::default_items_by_team). Known gap: the shield variants (shield models, `m_bShieldDrawn` states) are not ported"
+
+[[item]]
+id = "weapon_hegrenade"
+status = "tested"
+evidence = "crates/cs-game/tests/grenades.rs::throw_velocity_from_pitch, he_radius_damage_as_regamedll, he_blast_is_the_throwers_kill_and_reaches_350_units, the_last_grenade_thrown_retires_the_weapon, holstering_a_grenade_forgets_the_pin_and_pushes_the_next_attack_back (wpn_hegrenade.cpp). Known gap: the shield variants (shield models, `m_bShieldDrawn` states) are not ported"
+
+[[item]]
+id = "weapon_flashbang"
+status = "tested"
+evidence = "crates/cs-game/tests/grenades.rs::flash_blinds_by_angle_and_distance, a_flashbang_retires_even_with_another_left_and_the_he_grenade_is_drawn_again, a_fuse_under_a_tenth_of_a_second_stops_the_flashbang_and_goes_off_at_once, the_flashbang_idle_has_the_sources_bug (wpn_flashbang.cpp). Known gap: the shield variants (shield models, `m_bShieldDrawn` states) are not ported"
+
+[[item]]
+id = "weapon_smokegrenade"
+status = "tested"
+evidence = "crates/cs-game/tests/grenades.rs::smoke_puffs_events, light_smoke_when_another_grenade_is_near_and_spent, a_flashbang_and_a_smoke_grenade_fly_as_the_source_makes_them (wpn_smokegrenade.cpp). Known gap: the shield variants (shield models, `m_bShieldDrawn` states) are not ported"
+
+[[item]]
+id = "grenade_flight_and_bounce"
+status = "tested"
+evidence = "crates/cs-game/tests/grenades.rs::grenade_bounces_and_detonates_on_time, bounce_touch_follows_the_source, a_see_through_breakable_throws_the_grenade_back_at_twice_the_speed, a_thrown_grenade_bounces_off_the_floor_of_a_real_map_and_goes_off, a_grenade_in_the_world_is_taken_out_of_it (ggrenade.cpp read 2026-11-22). Known gap: StudioFrameAdvance of the grenade model, the sound list of the bounce"
+
+[[item]]
+id = "grenade_blast_damage"
+status = "tested"
+evidence = "crates/cs-game/tests/grenades.rs::he_radius_damage_as_regamedll, he_blast_is_the_throwers_kill_and_reaches_350_units, friendly_fire_off_spares_a_teammate_but_not_the_thrower, a_grenade_keeps_the_team_of_the_thrower_for_friendly_fire. Known gap: RadiusDamage2 (the bomb's) is not ported (2E)"
+
+[[item]]
+id = "grenade_flash_blind"
+status = "tested"
+evidence = "crates/cs-game/tests/grenades.rs::flash_blinds_by_angle_and_distance, a_flash_does_not_lighten_the_blindness_the_player_has, a_dead_player_is_not_flashed_and_blindness_ends_with_the_spawn, a_blind_player_sees_no_name_in_the_status_bar (ScreenFade of RadiusFlash). The blindness is from memory of the client's look: checklist row 12"
+
+[[item]]
+id = "grenade_smoke"
+status = "tested"
+evidence = "crates/cs-game/tests/grenades.rs::smoke_puffs_events, light_smoke_when_another_grenade_is_near_and_spent"
+
+[[item]]
+id = "grenade_death_throw"
+status = "tested"
+evidence = "crates/cs-game/tests/grenades.rs::a_player_killed_holding_fire_and_a_grenade_throws_it, the_bounce_and_the_blast_leave_edict_state_a_round_restart_clears"
+
+[[item]]
+id = "weapon_default_items"
+status = "verified"
+evidence = "2026-11-22, method 1 (the original client, Steam build 10210, on our server, de_dust2): the spawn as a CT gives the knife and the USP 12/24, the crosshair and the weapon-selection HUD, as on an original listen server (docs/parity/checklists/phase2d-weapons.md, V5); method 2 (cs-probe --diff against the original HLDS build 10210, jointeam 2 and joinclass 5): the weapon bits, WeapPickup/AmmoPickup/AmmoX and the weapon data after joinclass match (docs/parity/checklists/phase2d-weapons.md, V8, V9). Tests: crates/cs-game/tests/inventory.rs::default_items_by_team, weapon_list_at_join_as_regamedll. Not checked: the Terrorist set (Glock) on the original client, the cvar-given extra items"
+
+[[item]]
+id = "weapon_list_message"
+status = "verified"
+evidence = "2026-11-22, method 1 (the weapon-selection HUD builds from our WeaponList) and method 2 (the join sequence matches the original HLDS message by message, WeaponList included; docs/parity/checklists/phase2d-weapons.md, V5, V8). Tests: crates/cs-game/tests/inventory.rs::weapon_list_at_join_as_regamedll; crates/cs-proto48/src/usermsg.rs::tests::cs_usermsgs_roundtrip_cleanly"
+
+[[item]]
+id = "weapon_buy"
+status = "tested"
+evidence = "crates/cs-game/tests/inventory.rs::buy_drop_pickup_as_regamedll, buying_a_primary_drops_the_old_one; crates/cs-game/tests/buy.rs::cannot_buy_outside_the_zone_or_without_money, buy_time_expires, the_buy_menus_follow_the_clients_preference (client.cpp BuyWeaponByWeaponID, read 2026-11-22). Deviation: REGAMEDLL_FIXES is not used, vanilla rules"
+
+[[item]]
+id = "weapon_buy_ammo"
+status = "tested"
+evidence = "crates/cs-game/tests/inventory.rs::ammo_buy_and_caps. Known gap: the ammo-buy sound is played from the player's edict"
+
+[[item]]
+id = "weapon_drop"
+status = "tested"
+evidence = "crates/cs-game/tests/inventory.rs::buy_drop_pickup_as_regamedll, hostile_weapon_commands_are_ignored, a_map_knife_cannot_be_picked_up"
+
+[[item]]
+id = "weapon_weaponbox"
+status = "tested"
+evidence = "crates/cs-game/tests/inventory.rs::death_packs_a_weaponbox, a_dead_players_ammo_is_in_the_box_and_comes_back_with_it, a_weapon_box_removes_itself_at_the_end_of_its_life, a_second_weapon_of_a_class_gives_its_ammo_to_the_first. Known gap: the pickup is checked from a 0.1 s think (no absolute-box touch hook in the engine); C4 pickup is 2E"
+
+[[item]]
+id = "weapon_armoury"
+status = "tested"
+evidence = "crates/cs-game/tests/inventory.rs::armoury_gives_items, armoury_racks_restart_by_the_share_of_the_terrorists (armoury_entity, weapons.cpp 2514-2830)"
+
+[[item]]
+id = "weapon_switch_commands"
+status = "tested"
+evidence = "crates/cs-game/tests/inventory.rs::weapon_switch_commands, lastinv_without_a_last_item_takes_the_first_other_weapon, hostile_weapon_commands_are_ignored"
+
+[[item]]
+id = "weapon_round_cleanup"
+status = "tested"
+evidence = "crates/cs-game/tests/inventory.rs::round_restart_clears_weapons_on_the_ground; crates/cs-game/tests/grenades.rs::the_bounce_and_the_blast_leave_edict_state_a_round_restart_clears"
+
+[[item]]
+id = "weapon_precache"
+status = "tested"
+evidence = "crates/cs-engine/tests/tempents.rs::full_weapon_precache_fits; crates/cs-game/tests/inventory.rs::every_weapon_event_resolves_after_activation. Known gap: our resource list has 730 entries against 781 of the original HLDS (build 10210, golden capture 2026-11-22): 51 are only in the original, 36 sounds, 10 models and 5 events"
+
+[[item]]
+id = "weapon_data_prediction"
+status = "tested"
+evidence = "crates/cs-game/tests/weapon_prediction.rs::weapon_data_round_trip_per_weapon, weapon_data_floors_the_timers_and_leaves_the_rest, weapon_data_of_a_slot_with_no_player_is_empty, a_knife_has_no_ammo_in_the_client_data; crates/cs-engine/tests/weapon_data.rs::weapon_data_is_sent_only_to_lw_clients, weapon_data_follows_changes_over_acked_deltas, weapon_data_deltas_against_the_acked_frame, weapon_data_schema_matches_the_installed_delta_lst, client_lw_follows_the_userinfo (sv_main.cpp SV_WriteClientdataToMessage). Spawn values: verified for the USP and the knife, see weapon_client_data_after_joinclass; the timers during a firing sequence are tested against the source only"
+
+[[item]]
+id = "weapon_client_data_after_joinclass"
+status = "verified"
+evidence = "2026-11-22, method 2 (cs-probe --diff, original HLDS build 10210 against our server, jointeam 2 and joinclass 5): the clientdata after joinclass matches in m_iId 16, weaponanim 14, weapons 0xa0010000 (knife 29, USP 16, suit 31), vuser2, vuser4 and weapon_data of the USP and the knife (docs/parity/checklists/phase2d-weapons.md, V9). Test: crates/cs-game/tests/weapon_prediction.rs::golden_values_after_joinclass, client_data_weapon_fields, client_data_weapon_fields_need_cl_lw"
+
+[[item]]
+id = "weapon_anim_message"
+status = "tested"
+evidence = "crates/cs-game/tests/weapon_prediction.rs::skiplocal_weapon_anims_skip_lw_clients; crates/cs-engine/tests/weapon_data.rs::weapon_anim_reaches_only_its_client (svc_weaponanim, SendWeaponAnim with skiplocal)"
+
+[[item]]
+id = "player_animation"
+status = "tested"
+evidence = "crates/cs-game/tests/weapon_prediction.rs::set_animation_picks_the_source_sequence, walking_and_running_pick_the_gait, a_jump_is_the_hop_gait_and_death_depends_on_the_hit_group, a_flinch_is_the_head_or_the_gut_flinch, the_frame_advances_in_post_think_and_the_gait_blends_follow_the_view, the_death_animation_plays_before_the_body_is_dead, set_animation_on_a_synthetic_model, hostile_angles_and_speeds_never_panic_the_animation (CBasePlayer::SetAnimation). Known gap: not compared with the original client's view of other players"
+
+[[item]]
+id = "weapon_hitbox_pose"
+status = "tested"
+evidence = "crates/cs-game/tests/weapon_prediction.rs::hitbox_pose_follows_the_player_animation; crates/cs-engine/tests/studio_hitboxes.rs::the_pose_follows_the_blend_and_the_angles, pose_follows_sequence_and_frame, idle1_golden_points. Known gap: no engine dump to compare the hitbox points with, the golden idle1 points are cross-checked against the renderer's bone evaluation; sequence group files are not read; controller and blending bytes are not on the wire yet"
+
+[[item]]
+id = "weapon_shield"
+status = "missing"
+evidence = "Not ported: the tactical shield (its models, the shield states of the pistols, the knife and the grenades, the shield buy). The engine's shield hitbox gate is done and tested: crates/cs-engine/tests/studio_hitboxes.rs::the_shield_hitbox_is_left_out_while_gamestate_is_one). Buying the shield is refused: crates/cs-game/tests/buy.rs::shield_and_defuser_are_not_for_sale_yet"
+
+[[item]]
+id = "weapon_c4_bomb"
+status = "missing"
+evidence = "Phase 2E: the C4 (wpn_c4.cpp), planting, defusing, the bomb weaponbox, BarTime/BarTime2, RadiusDamage2. A world C4 is touchable: crates/cs-game/tests/inventory.rs::a_world_c4_is_touchable_and_a_world_grenade_is_not (the pickup itself is 2E)"
+
+[[item]]
+id = "weapon_vip"
+status = "missing"
+evidence = "Phase 2E: the VIP (jointeam 3, its weapon rules, armor ratio halving, the VIP spawn)"
+
+[[item]]
+id = "weapon_bots"
+status = "missing"
+evidence = "Bots are not ported (their buy logic, the bot events and sounds); the bot-only hooks of the weapon code are skipped"
+
+[[item]]
+id = "weapon_autobuy_rebuy"
+status = "missing"
+evidence = "Not ported: the autobuy and rebuy commands and their cvars (client.cpp)"
+
+[[item]]
+id = "weapon_game_player_equip"
+status = "missing"
+evidence = "Not ported: the game_player_equip map entity"
+
+[[item]]
+id = "weapon_flashlight_flashbat"
+status = "missing"
+evidence = "In progress (being fixed in parallel; the controller updates this at merge): the Flashlight and FlashBat messages and the battery drain of the flashlight (usermsg.toml)"
+
+[[item]]
+id = "weapon_hints_geiger"
+status = "missing"
+evidence = "In progress (being fixed in parallel; the controller updates this at merge): the yellow hint messages (HudTextArgs), the Geiger message, and the death-think pacing (PlayerDeathThink every frame; ours runs every 0.1 s)"

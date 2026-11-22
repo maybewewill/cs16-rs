@@ -6,6 +6,8 @@ The game rules and HUD items of `cs-game` (teams, rounds, money, chat, observer,
 
 The player movement port (`cs_sim::pm`, the engine's pmove services and the `SV_RunCmd` glue in `cs-game`) lives in `movement.toml`, the `movement` category.
 
+The weapons, grenades, bullets, inventory and economy of `cs-game` (phase 2D) live in `weapons.toml` (the `weapons` category); the `TE_*` temporary entities in `tempents.toml` (the `tempents` category). The engine side of the weapons (events, weapon data in the client data, hitbox traces, decals, the command random seed) is in `engine.toml`, `delta.toml`, `wire.toml` and `usermsg.toml`. The first `verified` items are the ones compared on 2026-11-22 with the original client and the original HLDS; the evidence of each names the method and the line of `checklists/phase2d-weapons.md` (Part A).
+
 ## Statuses
 
 - `missing`: no code for the item.
