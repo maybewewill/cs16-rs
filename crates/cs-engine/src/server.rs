@@ -288,42 +288,35 @@ impl<G: GameDll> Server<G> {
         self.drop_timed_out_clients();
         self.queue_pings_if_due();
         self.broadcast_userinfo();
-        self.resend_changed_movevars();
         self.send_client_frames(net);
         self.send_farewells(net);
         self.frametime = 0.0;
     }
 
-    /// Sends `svc_newmovevars` to each client in the game whose last movevars differ from the
-    /// server's now. TEMPORARY placement: ReHLDS does this per command in `SV_RunCmd`
-    /// (`sv_user.cpp` ~1020-1028, read 2026-11-22): after `pfnPM_Move` it compares the client's
-    /// copy, which the game may have altered, with the copy it had before the command, skips
-    /// fake clients, and writes the message when they differ. The commands run in `usercmd.rs`
-    /// and the game does not alter the copy yet, so the check runs once per frame, for the
-    /// clients that are `Active`; a client past `new` but not yet in the game gets the
-    /// difference at its first frame in the game, one before `new` gets the current values in
-    /// that stage. Fake clients do not exist in the engine.
-    pub(crate) fn resend_changed_movevars(&mut self) {
+    /// `SV_RunCmd`'s movevars check (ReHLDS `sv_user.cpp` 1018-1030, read 2026-11-22), run for
+    /// the client of `slot` after the game's movement call: the client's own copy of the
+    /// movevars (what it was last sent) is compared with the server's now (the cvars; ReHLDS
+    /// also compares what `PM_Move` left in its copy, which the game here does not alter), and a
+    /// difference is written to the client's reliable channel as `svc_newmovevars`; the copy is
+    /// then the server's. Fake clients do not exist in the engine. A client that sends no
+    /// commands is not checked, so it gets a change when its next command runs, as in ReHLDS
+    /// (the check no longer runs once per frame for every client). A client whose copy is not set
+    /// yet (before the `new` stage) is not sent anything: `new` carries the current values. The
+    /// reliable backlog cap is applied by the `drain_outbox` that ends the move.
+    pub(crate) fn sync_client_movevars(&mut self, slot: u8) {
         let current = move_vars(&self.cvars, &self.map.entities);
-        let mut message: Option<MsgWriter> = None;
-        for client in &mut self.clients {
-            if client.state != ClientState::Active || client.movevars.as_ref() == Some(&current) {
-                continue;
-            }
-            if client.movevars.is_some() {
-                let w = message.get_or_insert_with(|| {
-                    let mut w = MsgWriter::new();
-                    write_svc_newmovevars(&mut w, &current);
-                    w
-                });
-                client.chan.write_reliable(w.as_slice());
-            }
-            client.movevars = Some(current.clone());
+        let Some(client) = self.clients.get_mut(usize::from(slot)) else {
+            return;
+        };
+        if client.state != ClientState::Active || client.movevars.as_ref() == Some(&current) {
+            return;
         }
-        if message.is_some() {
-            // Applies the reliable backlog cap to what was written; no game callback.
-            self.drain_messages();
+        if client.movevars.is_some() {
+            let mut w = MsgWriter::new();
+            write_svc_newmovevars(&mut w, &current);
+            client.chan.write_reliable(w.as_slice());
         }
+        client.movevars = Some(current);
     }
 
     pub fn config(&self) -> &ServerConfig {

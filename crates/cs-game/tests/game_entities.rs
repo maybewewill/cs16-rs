@@ -443,14 +443,9 @@ fn brush_entities_stay_solid() {
     let Some(vfs) = discover() else {
         return;
     };
-    let (map, bsp) = dust2(&vfs);
-    let bsp_ladders = bsp
-        .entities
-        .iter()
-        .filter(|e| e.classname() == "func_ladder")
-        .count();
+    let (map, _bsp) = dust2(&vfs);
     let mut b = Bench::on(map);
-    let (solid, unsolid_ok, hit, ladders, illusionary_ok) = b.run(|_game, eng| {
+    let (solid, unsolid_ok, hit, illusionary_ok) = b.run(|_game, eng| {
         let mut solid = 0;
         let mut unsolid_ok = true;
         let mut hit = 0;
@@ -483,32 +478,61 @@ fn brush_entities_stay_solid() {
                     && v.effects & 128 == 0;
             }
         }
-        // The ladders are moveents of a player's physents: stand in the first one.
-        let mut ladders = 0;
-        let mut as_moveent = false;
-        let mut after = None;
-        while let Some(id) = eng.find_by_classname(after, "func_ladder") {
-            after = Some(id);
-            let v = eng.ent(id).unwrap().clone();
-            ladders += 1;
-            if !as_moveent && v.maxs != v.mins {
-                let me = eng.client_edict(0);
-                eng.set_origin(me, (v.absmin + v.absmax) * 0.5);
-                let pe = eng.pm_physents(me);
-                as_moveent = pe.num_moveents() > 0
-                    && (0..pe.num_physents() as i32).all(|i| pe.edict_of(i) != Some(id));
-            }
-        }
-        // (de_dust2 has no ladder; a map that has one finds it among the moveents.)
-        assert!(ladders == 0 || as_moveent, "a ladder is a moveent, not a physent");
-        (solid, unsolid_ok, hit, ladders, illusionary_ok)
+        (solid, unsolid_ok, hit, illusionary_ok)
     });
     assert!(solid > 0, "de_dust2 has brush entities");
     assert!(unsolid_ok);
     assert!(hit > 0, "a trace into one of {solid} brush entities stops at it");
     assert!(illusionary_ok);
-    // Every `func_ladder` of the lump with a model spawned.
-    assert_eq!(ladders, bsp_ladders);
+    ladders_are_moveents_on_a_ladder_map(&vfs);
+}
+
+/// On the first stock map that has `func_ladder` entities (found by scanning the entity lumps),
+/// every ladder spawned, is not a physent of a player standing in it, and is among its moveents.
+fn ladders_are_moveents_on_a_ladder_map(vfs: &cs_vfs::Vfs) {
+    let Some((name, bsp)) = vfs.list_maps().into_iter().find_map(|name| {
+        let bsp = BspMap::load(vfs, &name).ok()?;
+        bsp.entities
+            .iter()
+            .any(|e| e.classname() == "func_ladder")
+            .then_some((name, bsp))
+    }) else {
+        return;
+    };
+    let lump_ladders = bsp
+        .entities
+        .iter()
+        .filter(|e| e.classname() == "func_ladder")
+        .count();
+    let raw = vfs.read_bytes(&format!("maps/{name}.bsp")).expect("read map");
+    let map = ServerMap::from_bsp(&name, &raw, Arc::new(bsp)).expect("BSP header");
+    let mut b = Bench::on(map);
+    let map_name = name.clone();
+    let (ladders, moveents) = b.run(move |_game, eng| {
+        let name = &map_name;
+        let mut ladders = 0;
+        let mut moveents = 0;
+        let mut after = None;
+        while let Some(id) = eng.find_by_classname(after, "func_ladder") {
+            after = Some(id);
+            ladders += 1;
+            let v = eng.ent(id).unwrap().clone();
+            // Stand in the ladder: it is a moveent and not a physent.
+            let me = eng.client_edict(0);
+            eng.set_origin(me, (v.absmin + v.absmax) * 0.5);
+            let pe = eng.pm_physents(me);
+            let in_physents = (0..pe.num_physents() as i32).any(|i| pe.edict_of(i) == Some(id));
+            let info = i32::from(id.index);
+            let in_moveents = (0..pe.num_moveents()).any(|i| pe.moveent(i).is_some_and(|m| m.info == info));
+            assert!(!in_physents, "{name}: a ladder is not a physent");
+            assert!(in_moveents, "{name}: a ladder is a moveent");
+            moveents += 1;
+        }
+        (ladders, moveents)
+    });
+    // Every `func_ladder` of the lump spawned.
+    assert_eq!(ladders, lump_ladders, "{name}");
+    assert_eq!(moveents, lump_ladders);
 }
 
 /// A `class` probe entity made by the game itself, as `spawn_entity` makes it.

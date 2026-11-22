@@ -186,6 +186,37 @@ impl Bench {
         }
     }
 
+    /// Connects a second probe client (the next free slot) and pumps both until it is in the
+    /// game. The bench's own `step` pumps only the first probe: use
+    /// [`step_both`](Self::step_both) from then on.
+    pub fn add_probe(&mut self, name: &str) -> ProbeClient<LoopbackEndpoint> {
+        let endpoint = self.hub.connect();
+        let cfg = ProbeConfig {
+            name: name.to_string(),
+            steam_id: 76_561_197_960_265_728 + u64::from(endpoint.id()),
+            cdkey_md5_hex: md5_hex(name.as_bytes()),
+        };
+        let mut probe = ProbeClient::new(endpoint, PeerAddr::Loopback(0), cfg);
+        probe.connect();
+        for _ in 0..400 {
+            self.step_both(&mut probe, 1);
+            if probe.state() == &ProbeState::InGame {
+                return probe;
+            }
+        }
+        panic!("the second probe did not get into the game");
+    }
+
+    /// Like [`step`](Self::step) with `other` pumped as well.
+    pub fn step_both(&mut self, other: &mut ProbeClient<LoopbackEndpoint>, frames: usize) {
+        for _ in 0..frames {
+            self.probe.pump(self.now);
+            other.pump(self.now);
+            self.now = ((self.now / 0.01).round() + 1.0) * 0.01;
+            self.server.frame(&mut self.hub, self.now);
+        }
+    }
+
     pub fn stub(entities: Vec<Entity>) -> Self {
         Self::on(ServerMap::stub_with_entities("test", entities))
     }
@@ -297,9 +328,25 @@ pub fn discover() -> Option<Vfs> {
 }
 
 pub fn dust2(vfs: &Vfs) -> ServerMap {
-    let bsp = BspMap::load(vfs, "de_dust2").expect("load de_dust2");
-    let raw = vfs.read_bytes("maps/de_dust2.bsp").expect("read de_dust2");
-    ServerMap::from_bsp("de_dust2", &raw, Arc::new(bsp)).expect("BSP header")
+    map_named(vfs, "de_dust2")
+}
+
+/// The stock map `name` as a server map.
+pub fn map_named(vfs: &Vfs, name: &str) -> ServerMap {
+    let bsp = BspMap::load(vfs, name).unwrap_or_else(|e| panic!("load {name}: {e:?}"));
+    let raw = vfs
+        .read_bytes(&format!("maps/{name}.bsp"))
+        .unwrap_or_else(|e| panic!("read {name}: {e:?}"));
+    ServerMap::from_bsp(name, &raw, Arc::new(bsp)).expect("BSP header")
+}
+
+/// The first installed map (in name order) whose entity lump has an entity of class `class`:
+/// scanned with `cs-assets`, not guessed.
+pub fn find_map_with_entity(vfs: &Vfs, class: &str) -> Option<String> {
+    vfs.list_maps().into_iter().find(|name| {
+        BspMap::load(vfs, name)
+            .is_ok_and(|bsp| bsp.entities.iter().any(|e| e.classname() == class))
+    })
 }
 
 /// Runs the console command `line` as the player of `slot`, at the start of the next frame, with

@@ -11,10 +11,11 @@
 //! player in first person (`OBS_IN_EYE`) is sent the data of the player it follows, but its own
 //! `iuser*`.
 //!
-//! The server side of the camera is `PM_SpectatorMove`: a roaming observer flies with friction
-//! and acceleration, through everything; one that follows takes the origin of its target on every
-//! command, so that the engine sends it what the target sees (see
-//! [`setup_visibility`], `GameDll::setup_visibility`).
+//! The server side of the camera is `PM_SpectatorMove`, run by `PM_Move` like any movement: a
+//! roaming observer flies with friction and acceleration, capped by `sv_spectatormaxspeed`,
+//! through everything. One that follows takes the origin of its target in
+//! [`setup_visibility`] (`GameDll::setup_visibility`: `UTIL_SetOrigin`), so that the engine sends
+//! it what the target sees.
 //!
 //! Constants: `OBS_*` are `pm_shared.h`, `CAMERA_MODE_*` and `FADETOBLACK_*` `observer.h`,
 //! `FFADE_*` `engine/shake.h`, `HIDEHUD_*` `cdll_dll.h` (all read 2026-11-22);
@@ -34,12 +35,12 @@
 //!   is found out by [`check_target`] (a free slot), as the original finds out by
 //!   `UTIL_PlayerByIndex`; a search then starts from the observer's own index, as with a null
 //!   handle.
-//! - Tracking mode copies the target's `angles` into the observer's `v_angle`
-//!   (assumption about `pmove->angles` after `PM_SpectatorMove`).
+//! - Tracking mode copies the target's `angles` through `PM_SpectatorMove`, which finds the
+//!   target among the observer's physents (within 256 units, as in the original); farther away
+//!   only the origin follows ([`setup_visibility`]).
 
 use cs_engine::consts::{FL_DUCKING, MOVETYPE_NONE, SOLID_NOT};
 use cs_engine::{EdictId, EngineApi, MsgDest};
-use cs_proto48::delta::GoldSrcUserCmd;
 use cs_proto48::messages::svc;
 use cs_proto48::usermsg::CsUserMsg;
 use glam::Vec3;
@@ -85,8 +86,6 @@ const FOLLOW_INTERVAL: f64 = 0.25;
 const INPUT_INTERVAL: f64 = 0.2;
 /// Seconds a followed player has been dead before its follower looks for another.
 const DEAD_TARGET_GRACE: f64 = 2.0;
-/// `sv_spectatormaxspeed`: the movement variable `PM_SpectatorMove` caps the speed by.
-const SPECTATOR_MAX_SPEED: f32 = 500.0;
 /// `IN_ATTACK`, `IN_JUMP`, `IN_ATTACK2`.
 const IN_ATTACK: u16 = 1 << 0;
 const IN_JUMP: u16 = 1 << 1;
@@ -715,127 +714,42 @@ pub(crate) fn on_spawn(p: &mut crate::player::Player) {
     p.pflag_observer = false;
 }
 
-/// What a command of an observer does to its camera. Moves the observer as `PM_SpectatorMove`
-/// does, after `PlayerPreThink` ([`think`]) ran.
-pub(crate) fn run_cmd(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, cmd: &GoldSrcUserCmd) {
+/// What `PlayerPreThink` does for an observer (`Observer_Think`). The movement is the engine's
+/// `PM_Move` after it (`PM_SpectatorMove`, [`crate::pmove::run_pmove`]).
+pub(crate) fn run_cmd(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     think(g, eng, slot);
-    if cmd.msec == 0 {
-        return;
-    }
-    let id = eng.client_edict(slot);
-    let Some(v) = eng.ent(id) else {
-        return;
-    };
-    // `PM_ShouldDoSpectMode`: a dying player is moved as a dead body.
-    if v.iuser1 == OBS_NONE || (v.iuser3 > 0 && v.deadflag != DEAD_DEAD) {
-        return;
-    }
-    if v.iuser1 == OBS_ROAMING {
-        roam(g, eng, slot, cmd);
-        return;
-    }
-    // All other modes track some kind of target, so the observer's PVS is the target's.
-    let Some(target) = u8::try_from(v.iuser2 - 1).ok().filter(|_| v.iuser2 > 0) else {
-        return;
-    };
-    let Some(tv) = g
-        .players
-        .get(usize::from(target))
-        .and_then(Option::as_ref)
-        .and_then(|_| eng.ent(eng.client_edict(target)))
-    else {
-        return;
-    };
-    let (origin, angles) = (tv.origin, tv.angles);
-    if let Some(v) = eng.ent_mut(id) {
-        // Use the target's position as our own, for the PVS; no velocity.
-        v.v_angle = angles;
-        v.velocity = Vec3::ZERO;
-    }
-    eng.set_origin(id, origin);
-}
-
-/// `AngleVectors` for the view angles of a command (pitch, yaw, no roll): the unit forward and
-/// right vectors.
-fn view_vectors(angles: Vec3) -> (Vec3, Vec3) {
-    let (sp, cp) = angles.x.to_radians().sin_cos();
-    let (sy, cy) = angles.y.to_radians().sin_cos();
-    (Vec3::new(cp * cy, cp * sy, -sp), Vec3::new(sy, -cy, 0.0))
-}
-
-fn finite(x: f32) -> f32 {
-    if x.is_finite() { x } else { 0.0 }
-}
-
-/// `PM_SpectatorMove` for `OBS_ROAMING`: friction (one and a half times the ground's), then
-/// acceleration along the wish of the command, capped by [`SPECTATOR_MAX_SPEED`]; the observer
-/// flies through everything. Like the original, a command that adds no speed does not move it.
-fn roam(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, cmd: &GoldSrcUserCmd) {
-    let id = eng.client_edict(slot);
-    let Some(v) = eng.ent(id) else {
-        return;
-    };
-    let dt = f32::from(cmd.msec) / 1000.0;
-    let params = g.move_params;
-    let (origin, mut velocity) = (v.origin, v.velocity);
-    let angles = Vec3::new(
-        finite(cmd.viewangles.x),
-        finite(cmd.viewangles.y),
-        finite(cmd.viewangles.z),
-    );
-
-    let speed = velocity.length();
-    if speed >= 1.0 {
-        // Extra friction.
-        let friction = params.friction * 1.5;
-        let control = speed.max(params.stop_speed);
-        let drop = friction * control * dt;
-        velocity *= (speed - drop).max(0.0) / speed;
-    } else {
-        velocity = Vec3::ZERO;
-    }
-
-    // Accelerate.
-    let (forward, right) = view_vectors(angles);
-    let wish = forward * finite(cmd.forwardmove)
-        + right * finite(cmd.sidemove)
-        + Vec3::Z * finite(cmd.upmove);
-    let wishdir = wish.normalize_or_zero();
-    // Clamp to the server's maximum speed.
-    let wishspeed = wish.length().min(SPECTATOR_MAX_SPEED);
-    let addspeed = wishspeed - velocity.dot(wishdir);
-    let mut moved = false;
-    if addspeed > 0.0 {
-        let accelspeed = (params.accelerate * dt * wishspeed).min(addspeed);
-        velocity += wishdir * accelspeed;
-        moved = true;
-    }
-    let new_origin = if moved { origin + velocity * dt } else { origin };
-    if let Some(v) = eng.ent_mut(id) {
-        v.velocity = velocity;
-        v.v_angle = angles;
-    }
-    if moved {
-        eng.set_origin(id, new_origin);
-    }
 }
 
 /// `SetupVisibility`: the point a player sees the world from. An observer that follows somebody
 /// uses the followed player, anybody else (and an observer that roams) the player itself: its
 /// origin plus its view offset, 18 units lower when it ducks.
-pub(crate) fn setup_visibility(g: &GameState, eng: &EngineApi<'_>, slot: u8) -> Option<Vec3> {
+pub(crate) fn setup_visibility(
+    g: &GameState,
+    eng: &mut EngineApi<'_>,
+    slot: u8,
+) -> Option<Vec3> {
     let p = g.players.get(usize::from(slot))?.as_ref()?;
-    let own = eng.ent(eng.client_edict(slot))?;
+    let own_id = eng.client_edict(slot);
+    let own = eng.ent(own_id)?;
     let mut view = own;
+    let mut follow = None;
     if own.iuser2 != 0
         && p.pflag_observer
         && let Some(target) = current_target(g, slot)
     {
-        view = eng.ent(eng.client_edict(target))?;
+        let target_id = eng.client_edict(target);
+        view = eng.ent(target_id)?;
+        follow = Some(view.origin);
     }
     let mut eye = view.origin + view.view_ofs;
     if view.flags & FL_DUCKING != 0 {
         eye.z += DUCK_EYE_DROP;
+    }
+    // `UTIL_SetOrigin(pPlayer->pev, m_hObserverTarget->pev->origin)` (client.cpp
+    // `SetupVisibility`, read 2026-11-22): the observer's origin follows its target, which
+    // `PM_SpectatorMove` cannot find among the physents beyond 256 units.
+    if let Some(origin) = follow {
+        eng.set_origin(own_id, origin);
     }
     Some(eye)
 }

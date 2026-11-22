@@ -197,6 +197,7 @@ status = "implemented"
 [[item]]
 id = "sv_accelerate"
 status = "implemented"
+evidence = "crates/cs-game/tests/movement_world.rs::movement_cvars_are_hard_locked; ACCEPTED DEVIATION: the registry default stays sv_accelerate 5 and sv_stopspeed 100 (vanilla game forces 5, 4 and 75 in RestartRound and once a second in Think, multiplay_gamerules.cpp 1697-1700 and 2567-2580, read 2026-11-22); the game forces the vanilla values, and changing the registry default would change the legacy client offline movement"
 
 [[item]]
 id = "sv_airaccelerate"

@@ -31,7 +31,6 @@ use cs_engine::{EdictId, EngineApi, GameDll};
 use cs_proto48::delta::{GoldSrcClientData, GoldSrcUserCmd};
 use cs_proto48::usermsg::UserMsgRegistry;
 use cs_sim::pm::{PmShared, pm_init};
-use cs_sim::pmove::MoveParams;
 use glam::Vec3;
 
 pub use entity::{GameEntity, create_entity};
@@ -45,8 +44,6 @@ pub struct GameState {
     pub last_ct_spawn: Option<EdictId>,
     /// The spawn point the last terrorist spawned at (`g_pLastTerroristSpawn`).
     pub last_t_spawn: Option<EdictId>,
-    /// Parameters of the player movement.
-    pub move_params: MoveParams,
     /// The players, by slot, from `client_put_in_server` to `client_disconnect`.
     pub players: [Option<Player>; MAX_PLAYERS],
     /// The message of the day, the bytes of `motd.txt` (`motdfile`): empty for none. See
@@ -80,7 +77,6 @@ impl GameState {
         Self {
             last_ct_spawn: None,
             last_t_spawn: None,
-            move_params: MoveParams::default(),
             players: std::array::from_fn(|_| None),
             motd: Vec::new(),
             num_terrorist_wins: 0,
@@ -291,6 +287,14 @@ impl CsGame {
     #[doc(hidden)]
     pub fn pm_world_flags(&self, eng: &mut EngineApi<'_>, slot: u8) -> Vec<(i32, bool, bool)> {
         pmove::world_flags(eng, slot)
+    }
+
+    /// Runs `RestartRound` now (not the delayed `sv_restart`). For tests only (cargo feature
+    /// `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn restart_round_now(&mut self, eng: &mut EngineApi<'_>) {
+        rules::restart_round(&mut self.state, eng);
     }
 
     /// Puts the player of `slot` at `origin`, stopped, to place a player

@@ -32,9 +32,9 @@
 //! `mp_flashlight` allows it (`HIDEHUD_FLASHLIGHT`, [`run_usercmd`]); `FlashlightTurnOn` will
 //! have to honour `FAllowFlashlight()` too.
 //!
-//! `WaterMove` (`PreThink`: drowning, `air_finished`, `DMG_DROWN` and its recovery) is not
-//! ported yet (Task 9 of the `pm_shared` plan); the movement does set `waterlevel` and
-//! `watertype` now.
+//! `WaterMove` (`PreThink`: drowning, `air_finished`, `DMG_DROWN` and its recovery) is in
+//! [`water_move`] and [`check_time_based_damage`]; `waterlevel` and `watertype` come from the
+//! movement.
 //!
 //! Fields of the client data ([`client_data`]) that stay zero for now:
 //! - `weaponanim`, `viewmodel`, `m_flNextAttack`, the ammo fields and the `iuser3` flags
@@ -46,8 +46,8 @@
 
 use cs_assets::bsp::SpawnTeam;
 use cs_engine::consts::{
-    FL_CLIENT, FL_DORMANT, FL_ONGROUND, FL_PROXY, FL_SPECTATOR, MOVETYPE_NONE, MOVETYPE_TOSS,
-    MOVETYPE_WALK, SOLID_NOT, SOLID_SLIDEBOX,
+    FL_CLIENT, FL_DORMANT, FL_INWATER, FL_ONGROUND, FL_PROXY, FL_SPECTATOR, MOVETYPE_NOCLIP,
+    MOVETYPE_NONE, MOVETYPE_TOSS, MOVETYPE_WALK, SOLID_NOT, SOLID_SLIDEBOX,
 };
 use cs_engine::{EdictId, EngineApi, MsgDest};
 use cs_proto48::delta::{GoldSrcClientData, GoldSrcUserCmd};
@@ -84,6 +84,11 @@ pub mod dmg {
     pub const FALL: u32 = 1 << 5;
     pub const BLAST: u32 = 1 << 6;
     pub const DROWN: u32 = 1 << 14;
+    pub const BURN: u32 = 1 << 3;
+    /// `DMG_PARALYZE`, the first of the time-based kinds (`DMG_PARALYZE << ITBD_*`).
+    pub const PARALYZE: u32 = 1 << 15;
+    pub const DROWNRECOVER: u32 = 1 << 19;
+    pub const ACID: u32 = 1 << 20;
     /// Counter-Strike's `DMG_EXPLOSION` (`dlls/util.h`).
     pub const EXPLOSION: u32 = 1 << 24;
     /// The kinds of damage the HUD has art for (`DMG_SHOWNHUD`: poison, acid, freeze, slow
@@ -115,6 +120,11 @@ pub const PLAYER_FALL_PUNCH_THRESHHOLD: f32 = 250.0;
 /// `ARMOR_RATIO` and `ARMOR_BONUS` (`player.h`).
 const ARMOR_RATIO: f32 = 0.5;
 const ARMOR_BONUS: f32 = 0.5;
+/// `ITBD_*` (`player.h`): the time-based damage kinds, `DMG_PARALYZE << index` (0 paralyze, 1 nerve
+/// gas, 2 poison, 3 radiation, 4 drown recover, 5 acid, 6 slow burn, 7 slow freeze).
+const ITBD_POISON: usize = 2;
+const ITBD_DROWN_RECOVER: usize = 4;
+const ITBD_END: usize = 8;
 /// `AIRTIME`: seconds a player can stay under water.
 const AIRTIME: f64 = 12.0;
 /// `HIDEHUD_*` (`cdll_dll.h`, read 2026-11-22).
@@ -127,11 +137,14 @@ const HIDEHUD_CROSSHAIR: i32 = 1 << 6;
 /// `CONTENTS_EMPTY` and `CONTENTS_WATER`.
 const CONTENT_EMPTY: i32 = -1;
 const CONTENT_WATER: i32 = -3;
+const CONTENT_SLIME: i32 = -4;
+const CONTENT_LAVA: i32 = -5;
 /// `EF_NODRAW` and `EF_NOINTERP`.
 pub(crate) const EF_NODRAW: u32 = 128;
 pub(crate) const EF_NOINTERP: u32 = 32;
 /// `CHAN_VOICE` and `CHAN_ITEM`, `ATTN_NORM`, `PITCH_NORM`.
 const CHAN_VOICE: u8 = 2;
+const CHAN_BODY: u8 = 4;
 pub(crate) const CHAN_ITEM: u8 = 3;
 pub(crate) const ATTN_NORM: f32 = 0.8;
 pub(crate) const PITCH_NORM: u8 = 100;
@@ -266,6 +279,13 @@ pub struct Player {
     pub(crate) last_hit_group: i32,
     /// `m_bitsDamageType`: the kinds of damage since the HUD was last told.
     pub(crate) damage_bits: u32,
+    /// `m_idrowndmg` and `m_idrownrestored`: the drowning damage taken and given back.
+    pub(crate) drown_dmg: i32,
+    pub(crate) drown_restored: i32,
+    /// `m_rgbTimeBasedDamage`: seconds-of-2 left of each time-based kind (`ITBD_*`).
+    pub(crate) time_based_damage: [u8; ITBD_END],
+    /// `m_tbdPrev`: server time of the last time-based damage check.
+    pub(crate) tbd_prev: f32,
     /// `pev->weapons`: only the suit bit for now.
     pub(crate) weapons: u32,
     /// `PFLAG_OBSERVER`: the player is an observer ([`observer::start_observer`] ran), so the
@@ -366,6 +386,10 @@ impl Player {
             client_health: -1,
             last_hit_group: HITGROUP_GENERIC,
             damage_bits: 0,
+            drown_dmg: 0,
+            drown_restored: 0,
+            time_based_damage: [0; ITBD_END],
+            tbd_prev: 0.0,
             weapons: 0,
             pflag_observer: false,
             obs: ObserverState::default(),
@@ -685,6 +709,11 @@ pub(crate) fn spawn(
     p.just_killed_teammate = false;
     p.receives_no_money_next_round = false;
     p.fall_velocity = 0.0;
+    // `Spawn`: no drowning damage to give back.
+    p.damage_bits &= !(dmg::DROWN | dmg::DROWNRECOVER);
+    p.time_based_damage[ITBD_DROWN_RECOVER] = 0;
+    p.drown_dmg = 0;
+    p.drown_restored = 0;
     // `Spawn`: `m_flVelocityModifier = 1`.
     p.velocity_modifier = 1.0;
     p.last_hit_group = HITGROUP_GENERIC;
@@ -887,6 +916,8 @@ fn run_cmd_body(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, cmd: &Gold
     rules::player_think(g, slot, cmd.buttons);
     let id = eng.client_edict(slot);
     if !game_over {
+        // `ItemPreFrame; WaterMove` come before the velocity modifier.
+        water_move(g, eng, slot);
         // `PreThink` (player.cpp:4825, read 2026-11-22): the flashlight is hidden from the HUD
         // unless `mp_flashlight` allows it (`FAllowFlashlight`), before `UpdateClientData`.
         let allow = eng.cvar_f32("mp_flashlight") != 0.0;
@@ -918,6 +949,9 @@ fn run_cmd_body(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, cmd: &Gold
                 p.velocity_modifier = 1.0;
             }
         }
+        // `UpdateClientData` (the `Damage` message) comes first in the source; the time-based
+        // damage check follows it.
+        check_time_based_damage(g, eng, slot);
     }
     let Some(p) = g.players.get(usize::from(slot)).and_then(Option::as_ref) else {
         return;
@@ -925,7 +959,9 @@ fn run_cmd_body(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, cmd: &Gold
     // An observer (the dead after their camera, the spectators) does not walk: it flies, or
     // follows a player (`PlayerPreThink` runs `Observer_Think` and returns).
     if p.pflag_observer && observer::mode_of(eng, slot) != observer::OBS_NONE {
-        observer::run_cmd(g, eng, slot, cmd);
+        observer::run_cmd(g, eng, slot);
+        // `PM_Move` takes the spectator branch (`PM_SpectatorMove`).
+        pmove::run_pmove(g, eng, slot, cmd);
         return;
     }
     if !p.in_play() {
@@ -936,17 +972,8 @@ fn run_cmd_body(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, cmd: &Gold
         // `PreThink` calls `PlayerDeathThink` before the movement and returns; the dead body
         // then goes through `PM_Move` (`MOVETYPE_TOSS`, or `MOVETYPE_NONE` once it has landed).
         death_think(g, eng, slot);
-        // Assumption: when the death camera has just started, the observer's own movement takes
-        // over with the next command (the observer moves on `pm` in a later task).
-        let watching = g
-            .players
-            .get(usize::from(slot))
-            .and_then(Option::as_ref)
-            .is_some_and(|p| p.pflag_observer)
-            && observer::mode_of(eng, slot) != observer::OBS_NONE;
-        if watching {
-            return;
-        }
+        // When the death camera has just started, the player is an observer now and the
+        // movement below is `PM_SpectatorMove` (`PM_Move` follows `PreThink` in `SV_RunCmd`).
     }
     if alive
         && let Some(v) = eng.ent(id)
@@ -963,6 +990,187 @@ fn run_cmd_body(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, cmd: &Gold
         }
     }
     pmove::run_pmove(g, eng, slot, cmd);
+}
+
+/// `CBasePlayer::WaterMove` (ReGameDLL `player.cpp`, read 2026-11-22, vanilla): breath, drowning
+/// damage, the drowning recovery flag, the swim sounds, and lava and slime damage; run from
+/// `PreThink` with the `waterlevel` the previous command's movement left. QUIRKS kept: the dead
+/// test is `health < 0` (a player at 0 health goes on); the "up for air" gasp plays whenever the
+/// player is not fully under water, whether it was in water or not (vanilla has no `FL_INWATER`
+/// test there); `pev->dmg` starts at 2 and grows by 1 per pain up to 5.
+fn water_move(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    let id = eng.client_edict(slot);
+    let time = eng.time() as f32;
+    let Some(v) = eng.ent(id) else {
+        return;
+    };
+    let (movetype, health, waterlevel, watertype, flags) =
+        (v.movetype, v.health, v.waterlevel, v.watertype, v.flags);
+    if movetype == MOVETYPE_NOCLIP || movetype == MOVETYPE_NONE || health < 0.0 {
+        return;
+    }
+    let (mut air_finished, mut pain_finished, mut pev_dmg, dmgtime) =
+        (v.air_finished, v.pain_finished, v.dmg, v.dmgtime);
+    if waterlevel != 3 {
+        // Not underwater: play 'up for air' sound.
+        if air_finished < time {
+            eng.emit_sound(id, CHAN_VOICE, "player/pl_wade1.wav", 1.0, ATTN_NORM, PITCH_NORM);
+        } else if air_finished < time + 9.0 {
+            eng.emit_sound(id, CHAN_VOICE, "player/pl_wade2.wav", 1.0, ATTN_NORM, PITCH_NORM);
+        }
+        air_finished = time + AIRTIME as f32;
+        pev_dmg = 2.0;
+        // If we took drowning damage, give it back slowly.
+        if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut)
+            && p.drown_dmg > p.drown_restored
+        {
+            p.time_based_damage[ITBD_DROWN_RECOVER] = 0;
+            p.damage_bits |= dmg::DROWNRECOVER;
+            p.damage_bits &= !dmg::DROWN;
+        }
+    } else {
+        // Fully under water: stop restoring damage while underwater.
+        if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+            p.time_based_damage[ITBD_DROWN_RECOVER] = 0;
+            p.damage_bits &= !dmg::DROWNRECOVER;
+        }
+        // Drown!
+        if time > air_finished {
+            if time > pain_finished {
+                // Take drowning damage.
+                pev_dmg += 1.0;
+                if pev_dmg > 5.0 {
+                    pev_dmg = 5.0;
+                }
+                take_damage(g, eng, slot, None, None, pev_dmg, dmg::DROWN);
+                pain_finished = time + 1.0;
+                // Track drowning damage, give it back when the player finally takes a breath.
+                if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+                    p.drown_dmg += pev_dmg as i32;
+                }
+            }
+        } else if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+            p.damage_bits &= !(dmg::DROWNRECOVER | dmg::DROWN);
+        }
+    }
+    if let Some(v) = eng.ent_mut(id) {
+        v.air_finished = air_finished;
+        v.pain_finished = pain_finished;
+        v.dmg = pev_dmg;
+    }
+
+    if waterlevel == 0 {
+        if let Some(v) = eng.ent_mut(id) {
+            v.flags &= !FL_INWATER;
+        }
+        return;
+    }
+
+    // Make bubbles.
+    let air = (air_finished - time) as i32;
+    if g.random_range(0, 0x1f) == 0 && g.random_range(0, AIRTIME as i32 - 1) >= air {
+        let sample = match g.random_range(0, 3) {
+            0 => "player/pl_swim1.wav",
+            1 => "player/pl_swim2.wav",
+            2 => "player/pl_swim3.wav",
+            _ => "player/pl_swim4.wav",
+        };
+        eng.emit_sound(id, CHAN_BODY, sample, 0.8, ATTN_NORM, PITCH_NORM);
+    }
+
+    if watertype == CONTENT_LAVA {
+        // Do damage.
+        if dmgtime < time {
+            take_damage(g, eng, slot, None, None, f32::from(waterlevel as u8) * 10.0, dmg::BURN);
+        }
+    } else if watertype == CONTENT_SLIME {
+        if let Some(v) = eng.ent_mut(id) {
+            v.dmgtime = time + 1.0;
+        }
+        take_damage(g, eng, slot, None, None, f32::from(waterlevel as u8) * 4.0, dmg::ACID);
+    }
+    if flags & FL_INWATER == 0
+        && let Some(v) = eng.ent_mut(id)
+    {
+        v.flags |= FL_INWATER;
+        v.dmgtime = 0.0;
+    }
+}
+
+/// `CBasePlayer::TakeHealth` (`CBaseMonster::TakeHealth` and `CBaseEntity::TakeHealth`,
+/// basemonster.cpp and cbase.cpp, read 2026-11-22) up to `max_health`, which is 100 for a player
+/// (assumption: the edict keeps none). Returns whether anything was given.
+fn take_health(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, health: f32, bits: u32) -> bool {
+    let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) else {
+        return false;
+    };
+    if !p.takes_damage {
+        return false;
+    }
+    // Clear out any damage types we healed.
+    p.damage_bits &= !(bits & !dmg::TIMEBASED);
+    if p.health >= 100.0 {
+        return false;
+    }
+    p.health = (p.health + health).min(100.0);
+    let value = p.health;
+    let id = eng.client_edict(slot);
+    if let Some(v) = eng.ent_mut(id) {
+        v.health = value;
+    }
+    true
+}
+
+/// `CBasePlayer::CheckTimeBasedDamage` (player.cpp, read 2026-11-22): every two seconds the
+/// counters of the time-based kinds run down. Of the kinds only the drowning recovery has an
+/// effect so far (up to 10 health back per check, from `m_idrowndmg - m_idrownrestored`); poison
+/// and the antidote wait for the items. QUIRK: the two-second test truncates the time
+/// difference to whole seconds first.
+fn check_time_based_damage(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    let time = eng.time() as f32;
+    let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) else {
+        return;
+    };
+    if p.damage_bits & dmg::TIMEBASED == 0 {
+        return;
+    }
+    if ((time - p.tbd_prev) as i64).abs() < 2 {
+        return;
+    }
+    p.tbd_prev = time;
+    for i in 0..ITBD_END {
+        let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) else {
+            return;
+        };
+        if p.damage_bits & (dmg::PARALYZE << i) == 0 {
+            continue;
+        }
+        let duration: u8 = match i {
+            ITBD_POISON => 5,
+            // Get up to 5*10 = 50 points back.
+            ITBD_DROWN_RECOVER => 4,
+            _ => 2,
+        };
+        let mut restore = 0;
+        if i == ITBD_DROWN_RECOVER && p.drown_dmg > p.drown_restored {
+            // This hack is used to RESTORE health after the player has been drowning.
+            restore = (p.drown_dmg - p.drown_restored).min(10);
+            p.drown_restored += restore;
+        }
+        if p.time_based_damage[i] != 0 {
+            // Decrement damage duration, detect when done.
+            p.time_based_damage[i] -= 1;
+            if p.time_based_damage[i] == 0 {
+                p.damage_bits &= !(dmg::PARALYZE << i);
+            }
+        } else {
+            // First time taking this damage type: init damage duration.
+            p.time_based_damage[i] = duration;
+        }
+        if restore > 0 {
+            take_health(g, eng, slot, restore as f32, dmg::GENERIC);
+        }
+    }
 }
 
 /// The fall part of `CBasePlayer::PostThink`: a player that lands faster than

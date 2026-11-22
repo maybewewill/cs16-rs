@@ -251,3 +251,23 @@ fn every_client_in_the_game_is_resent_exactly_once() {
     assert_eq!(last_movevars(&b).gravity, 650.0);
 }
 
+
+#[test]
+fn a_client_sending_no_commands_is_resent_with_its_next_command() {
+    // `SV_RunCmd` checks the movevars per command (ReHLDS `sv_user.cpp` 1018-1030, read
+    // 2026-11-22): a client that sends none gets nothing until it does.
+    let mut h = Harness::new(2);
+    let mut probe = in_game_probe(&mut h);
+    assert_eq!(newmovevars_count(&probe), 1);
+
+    probe.suppress_moves(true);
+    h.step(&mut [&mut probe], 20);
+    h.server.game_mut().act(|eng| eng.set_cvar("sv_gravity", "640"));
+    h.step(&mut [&mut probe], 100);
+    assert_eq!(newmovevars_count(&probe), 1, "no command, no resend");
+
+    probe.suppress_moves(false);
+    h.step(&mut [&mut probe], 50);
+    assert_eq!(newmovevars_count(&probe), 2, "resent with the next command");
+    assert_eq!(last_movevars(&probe).gravity, 640.0);
+}

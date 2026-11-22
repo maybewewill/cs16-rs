@@ -822,6 +822,12 @@ pub(crate) fn restart_round(g: &mut GameState, eng: &mut EngineApi<'_>) {
     tracing::info!(complete_reset = g.rules.complete_reset, "restarting the round");
     g.rules.total_rounds_played += 1;
 
+    // Hardlock the player accelaration to 5.0 (`RestartRound`, multiplay_gamerules.cpp
+    // 1697-1700, read 2026-11-22): set whatever they are.
+    for (name, value) in HARD_LOCKED_CVARS {
+        eng.set_cvar(name, value);
+    }
+
     // Tabulate the number of players on each team.
     g.rules.num_ct = teams::count_team_players(g, Team::Ct);
     g.rules.num_terrorist = teams::count_team_players(g, Team::Terrorist);
@@ -1011,6 +1017,15 @@ fn check_win_limit(g: &mut GameState, eng: &mut EngineApi<'_>) -> bool {
 
 // ---- the rules' Think ----
 
+/// The movement cvars the game forces (`sv_accelerate`, `sv_friction`, `sv_stopspeed`): the
+/// values of vanilla `RestartRound` and `Think`. The registry defaults of `sv_accelerate` and
+/// `sv_stopspeed` differ (5 and 100: accepted, see `docs/parity/cvars.toml`).
+const HARD_LOCKED_CVARS: [(&str, &str); 3] = [
+    ("sv_accelerate", "5"),
+    ("sv_friction", "4"),
+    ("sv_stopspeed", "75"),
+];
+
 /// `CHalfLifeMultiplay::Think`, run every server frame.
 pub(crate) fn think(g: &mut GameState, eng: &mut EngineApi<'_>) {
     let now = eng.time();
@@ -1038,6 +1053,13 @@ pub(crate) fn think(g: &mut GameState, eng: &mut EngineApi<'_>) {
     if now > g.rules.next_periodic_think {
         check_restart_round(g, eng);
         g.rules.next_periodic_think = now + 1.0;
+        // `Think` (multiplay_gamerules.cpp 2567-2580, read 2026-11-22): once a second, a
+        // movement cvar that is not its locked value is set back.
+        for (name, value) in HARD_LOCKED_CVARS {
+            if eng.cvar_f32(name) != value.parse::<f32>().unwrap_or(0.0) {
+                eng.set_cvar(name, value);
+            }
+        }
         g.rules.max_rounds = non_negative_cvar(eng, "mp_maxrounds");
         g.rules.max_rounds_won = non_negative_cvar(eng, "mp_winlimit");
     }

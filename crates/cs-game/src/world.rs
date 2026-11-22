@@ -629,4 +629,37 @@ mod tests {
         assert_eq!(brush_model_number("maps/x.bsp"), None);
         assert_eq!(brush_model_number("*x"), None);
     }
+
+    /// Every sample `PM_PlayStepSound` (families by step type, `irand` 0..=3 map to numbers 1 to 4,
+    /// tile also 5), `PM_Jump`/`PM_PlayWaterSounds` (wade 1 to 4) and `WaterMove` (the gasp and
+    /// the swim sounds) can play is in the precache list (`ClientPrecache`).
+    #[test]
+    fn every_sample_the_pm_tables_can_produce_is_precached() {
+        let families: [(&str, u32); 10] = [
+            ("step", 4),
+            ("metal", 4),
+            ("dirt", 4),
+            ("duct", 4),
+            ("grate", 4),
+            ("tile", 5),
+            ("slosh", 4),
+            ("wade", 4),
+            ("ladder", 4),
+            ("snow", 4),
+        ];
+        let mut wanted = Vec::new();
+        for (family, count) in families {
+            for n in 1..=count {
+                wanted.push(format!("player/pl_{family}{n}.wav"));
+            }
+        }
+        for n in 1..=4 {
+            wanted.push(format!("player/pl_swim{n}.wav"));
+        }
+        let missing: Vec<_> = wanted
+            .iter()
+            .filter(|w| !CLIENT_SOUNDS.contains(&w.as_str()))
+            .collect();
+        assert!(missing.is_empty(), "not precached: {missing:?}");
+    }
 }

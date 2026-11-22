@@ -290,6 +290,9 @@ impl<G: GameDll> Server<G> {
         self.call_game_synced_at(time, |game, eng| {
             game.run_usercmd(eng, slot, step, random_seed)
         });
+        // After `pfnPM_Move`, before `SV_FinishPMove` (`SV_RunCmd`): the movevars the client
+        // holds against the server's.
+        self.sync_client_movevars(slot);
         self.finish_player_cmd(slot);
         // `PlayerPostThink` and `CmdEnd` come after `SV_ProcessImpacts` (the relink and the
         // touches), still inside the lag-compensation window, with the command's time and frame
