@@ -32,10 +32,11 @@
 //!
 //! Deviations and what waits for later tasks:
 //! - The weapon name of a killer that is its own inflictor is the active item's name
-//!   (`m_pActiveItem->pszName()` without `weapon_`); there are no weapons until Phase 2D, so it is
-//!   `world` as for a player without an active item. `g_pevLastInflictor`
-//!   (`GetLastInflictor()`, what `CBasePlayer::Killed` passes as the inflictor) is 2D's, with the
-//!   grenades and the weapons that inflict.
+//!   (`m_pActiveItem->pszName()` without `weapon_`): the caller hands the attacker's active
+//!   weapon id down (`player::active_weapon_id`), `world` for a player that holds none.
+//!   `g_pevLastInflictor` (`GetLastInflictor()`, what `CBasePlayer::Killed` passes as the
+//!   inflictor) is the inflictor of the `TakeDamage` that killed, passed as an argument; a
+//!   suicide (`Kill`) has none.
 //! - The `m_iNumKilledByUnanswered` revenge statistics, the assists and the kill rarity of
 //!   `DeathNotice`/`SendDeathMessage` exist only in newer builds (`REGAMEDLL_ADD` writes the extra
 //!   death message fields) and are not ported; the byte vanilla writes for the headshot is
@@ -59,6 +60,7 @@ use crate::GameState;
 use crate::messages;
 use crate::money;
 use crate::player::{HITGROUP_HEAD, player_slot};
+use crate::weapons::{WeaponId, item_info};
 
 /// `CHalfLifeMultiplay::IPointsForKill`: what a kill is worth, whoever the players are.
 pub(crate) const fn points_for_kill() -> i32 {
@@ -69,11 +71,14 @@ pub(crate) const fn points_for_kill() -> i32 {
 /// 2026-11-22): the inflictor's classname without its `weapon_`, `monster_` or `func_` prefix. A
 /// killer that is no client with no inflictor is the world (`VARS(eoNullEntity)`): `worldspawn`
 /// (the original dereferences the null inflictor there; `REGAMEDLL_FIXES` says `world`). A client
-/// killer that is its own inflictor names its active weapon, `world` while there are no weapons.
+/// killer that is its own inflictor names its active weapon (`attacker_weapon`, its
+/// `pszName()`, a classname such as `weapon_ak47`), `world` when it holds none. A killer that is
+/// a client with no inflictor (`kill`, `Killed(pev, GIB_NEVER)`) is `world`.
 pub(crate) fn killer_weapon_name(
     eng: &EngineApi<'_>,
     inflictor: Option<EdictId>,
     attacker: Option<EdictId>,
+    attacker_weapon: Option<WeaponId>,
 ) -> String {
     let killer_is_client = attacker
         .and_then(|a| eng.ent(a))
@@ -85,6 +90,10 @@ pub(crate) fn killer_weapon_name(
         Some(i) if !(killer_is_client && Some(i) == attacker) => {
             eng.ent(i).map_or("world", |v| v.classname.as_str())
         }
+        // "If the inflictor is the killer, then it must be their current weapon doing the damage."
+        Some(_) => attacker_weapon
+            .and_then(item_info)
+            .map_or("world", |info| info.name),
         None if !killer_is_client => world_class,
         _ => "world",
     };
@@ -122,13 +131,14 @@ pub(crate) fn player_killed(
     slot: u8,
     attacker: Option<EdictId>,
     inflictor: Option<EdictId>,
+    attacker_weapon: Option<WeaponId>,
 ) {
     let index = usize::from(slot);
     let victim_edict = eng.client_edict(slot);
     // The killer is the attacker when that is a player; an attacker that is anything else is the
     // world as far as the scores are concerned.
     let killer = attacker.and_then(|a| player_slot(g, eng, a));
-    let weapon = killer_weapon_name(eng, inflictor, attacker);
+    let weapon = killer_weapon_name(eng, inflictor, attacker, attacker_weapon);
     let Some(victim) = g.players[index].as_ref() else {
         return;
     };

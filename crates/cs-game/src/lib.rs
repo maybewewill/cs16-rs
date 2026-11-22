@@ -11,6 +11,7 @@
 //! and the night vision; [`buy`] has the buy zones and the purchase of the equipment. The dead
 //! and the spectators watch through [`observer`].
 
+pub mod bullets;
 pub mod buy;
 pub mod chat;
 pub mod entity;

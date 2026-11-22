@@ -22,10 +22,10 @@
 //!
 //! ## Known gaps
 //!
-//! Not ported yet, each a later task: weapons and the active item, the economy rewards
-//! (`AddAccount`),
-//! `Pain` sounds, flinch, the momentum block of `TakeDamage` (see [`take_damage`]), the blast
-//! branch of `TakeDamage`, animations and the VIP.
+//! Not ported yet, each a later task: weapons and the active item (the weapon of an attacker is
+//! [`active_weapon_id`], `None` until they are wired), the flinch animations, the shield, the
+//! bomb and grenade flags of `TakeDamage`, and the VIP. Bullets and the damage they do
+//! (`TraceAttack`, `TakeDamage`, `Pain`) are in [`crate::bullets`] and here.
 //!
 //! The flashlight itself (`impulse 100`, `FlashlightTurnOn`, the `Flashlight`/`FlashBat`
 //! messages) is not ported: impulses are not handled yet. `PreThink` does hide its HUD unless
@@ -46,10 +46,11 @@
 
 use cs_assets::bsp::SpawnTeam;
 use cs_engine::consts::{
-    FL_CLIENT, FL_DORMANT, FL_INWATER, FL_ONGROUND, FL_PROXY, FL_SPECTATOR, MOVETYPE_NOCLIP,
-    MOVETYPE_NONE, MOVETYPE_TOSS, MOVETYPE_WALK, SOLID_NOT, SOLID_SLIDEBOX,
+    FL_CLIENT, FL_DORMANT, FL_DUCKING, FL_INWATER, FL_ONGROUND, FL_PROXY, FL_SPECTATOR,
+    MOVETYPE_NOCLIP, MOVETYPE_NONE, MOVETYPE_TOSS, MOVETYPE_WALK, SOLID_NOT,
+    SOLID_SLIDEBOX,
 };
-use cs_engine::{EdictId, EngineApi, MsgDest};
+use cs_engine::{EdictId, EngineApi, EntTrace, MsgDest};
 use cs_proto48::delta::{GoldSrcClientData, GoldSrcUserCmd};
 use cs_proto48::messages::svc;
 use cs_proto48::usermsg::CsUserMsg;
@@ -57,6 +58,7 @@ use cs_sim::pm::consts::PM_VEC_VIEW;
 use glam::Vec3;
 
 use crate::GameState;
+use crate::bullets;
 use crate::menus::{self, Menu};
 use crate::weapons::core as weapon_core;
 use crate::weapons::{MAX_AMMO_SLOTS, MAX_ITEM_TYPES, WeaponId, WeaponSlotItem};
@@ -67,6 +69,7 @@ use crate::pmove;
 use crate::rules;
 use crate::score;
 use crate::teams::{self, JoinState};
+use crate::weapons::WeaponId;
 use crate::world::{select_join_spawn_point, select_spawn_point};
 
 /// Most players a server holds (the slots of [`GameState::players`]).
@@ -110,6 +113,9 @@ const HITGROUP_CHEST: i32 = 2;
 const HITGROUP_STOMACH: i32 = 3;
 const HITGROUP_LEFTARM: i32 = 4;
 const HITGROUP_RIGHTARM: i32 = 5;
+const HITGROUP_LEFTLEG: i32 = 6;
+const HITGROUP_RIGHTLEG: i32 = 7;
+pub(crate) const HITGROUP_SHIELD: i32 = 8;
 
 /// `MAX_PLAYER_FATAL_FALL_SPEED`, `MAX_PLAYER_SAFE_FALL_SPEED`, `DAMAGE_FOR_FALL_SPEED` and
 /// `PLAYER_FALL_PUNCH_THRESHHOLD` (ReGameDLL `player.h`, read 2026-11-22).
@@ -144,7 +150,7 @@ const CONTENT_LAVA: i32 = -5;
 pub(crate) const EF_NODRAW: u32 = 128;
 pub(crate) const EF_NOINTERP: u32 = 32;
 /// `CHAN_VOICE` and `CHAN_ITEM`, `ATTN_NORM`, `PITCH_NORM`.
-const CHAN_VOICE: u8 = 2;
+pub(crate) const CHAN_VOICE: u8 = 2;
 const CHAN_BODY: u8 = 4;
 pub(crate) const CHAN_ITEM: u8 = 3;
 pub(crate) const ATTN_NORM: f32 = 0.8;
@@ -286,6 +292,11 @@ pub struct Player {
     pub(crate) client_health: i32,
     /// `m_LastHitGroup`.
     pub(crate) last_hit_group: i32,
+    /// `m_bHighDamage`: the last hit that made the player flinch was a hard one (over 60 on the
+    /// head, over 20 elsewhere); the death animation reads it.
+    pub(crate) high_damage: bool,
+    /// `m_vBlastVector`: from the inflictor of the last explosion to the player.
+    pub(crate) blast_vector: Vec3,
     /// `m_bitsDamageType`: the kinds of damage since the HUD was last told.
     pub(crate) damage_bits: u32,
     /// `m_idrowndmg` and `m_idrownrestored`: the drowning damage taken and given back.
@@ -433,6 +444,8 @@ impl Player {
             next_suicide_time: 0.0,
             client_health: -1,
             last_hit_group: HITGROUP_GENERIC,
+            high_damage: false,
+            blast_vector: Vec3::ZERO,
             damage_bits: 0,
             drown_dmg: 0,
             drown_restored: 0,
@@ -783,6 +796,7 @@ pub(crate) fn spawn(
     // `Spawn`: `m_flVelocityModifier = 1`.
     p.velocity_modifier = 1.0;
     p.last_hit_group = HITGROUP_GENERIC;
+    p.high_damage = false;
     observer::on_spawn(p);
     // `m_tmHandleSignals = 0`: the zones are looked at again with the first client data update.
     p.next_handle_signals = 0.0;
@@ -1366,21 +1380,273 @@ fn post_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     }
 }
 
-/// `CBasePlayer::TakeDamage` (ReGameDLL `player.cpp`, the branch for everything but explosions,
-/// which come with the grenades), then `CBaseMonster::TakeDamage`, which for a player resolves to
-/// `CBaseEntity::TakeDamage` (`cbase.cpp:660-712`, read 2026-11-22): refuses damage the rules
-/// forbid
-/// (`FPlayerCanTakeDamage`: a teammate's needs `mp_friendlyfire`), scales a teammate's (and
-/// one's own) by 0.35, lets armor absorb its share, takes the health off and kills the player at
-/// zero. `attacker` and `inflictor` are `None` for the world. Returns whether the player took
-/// damage and survived (the original's result).
+/// The id of the weapon the player of `slot` holds out (`m_pActiveItem->m_iId`), `None` when it
+/// holds none. Wired by the controller after Task 6 (the weapon state machine and the player's
+/// items); until then nobody holds a weapon.
+pub(crate) fn active_weapon_id(_g: &GameState, _slot: usize) -> Option<WeaponId> {
+    None
+}
+
+/// The armor ratio of an attacker holding `weapon` (the `switch (iGunType)` of
+/// `CBasePlayer::TakeDamage`, ReGameDLL `player.cpp`, read 2026-11-22), from the base `ratio`
+/// (which has the shield's 0.2 added already). The product is a `float` times a `double`
+/// constant, stored back into a `float`.
+pub fn weapon_armor_ratio(weapon: WeaponId, ratio: f32) -> f32 {
+    use WeaponId as W;
+    let factor = match weapon {
+        W::Aug | W::M4a1 => 1.4,
+        W::Awp => 1.95,
+        W::G3sg1 => 1.65,
+        W::Sg550 => 1.45,
+        W::M249 => 1.5,
+        W::Elite => 1.05,
+        W::Deagle => 1.5,
+        W::Glock18 => 1.05,
+        W::FiveSeven | W::P90 => 1.5,
+        W::Mac10 => 0.95,
+        W::P228 => 1.25,
+        W::Scout | W::Knife => 1.7,
+        W::Famas | W::Sg552 => 1.4,
+        W::Galil | W::Ak47 => 1.55,
+        _ => return ratio,
+    };
+    (f64::from(ratio) * factor) as f32
+}
+
+/// `CBasePlayer::ShouldDoLargeFlinch` (`player.cpp:9372`, read 2026-11-22): a ducking player
+/// never; a hit anywhere but the legs by one of the heavy rifles does.
+fn should_do_large_flinch(ducking: bool, hit_group: i32, weapon: Option<WeaponId>) -> bool {
+    use WeaponId as W;
+    if ducking {
+        return false;
+    }
+    if hit_group != HITGROUP_LEFTLEG && hit_group != HITGROUP_RIGHTLEG {
+        return matches!(
+            weapon,
+            Some(
+                W::Scout
+                    | W::Aug
+                    | W::Sg550
+                    | W::Galil
+                    | W::Famas
+                    | W::Awp
+                    | W::M3
+                    | W::M4a1
+                    | W::G3sg1
+                    | W::Deagle
+                    | W::Sg552
+                    | W::Ak47
+            )
+        );
+    }
+    false
+}
+
+/// `CBasePlayer::Pain` (`player.cpp:543`, read 2026-11-22): the sound of a hit. `RANDOM_LONG(0, 2)`
+/// is drawn first, whatever the sound; a helmet and the kevlar have their own sounds (the
+/// kevlar one not for a hit on the legs).
+fn pain(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, hit_group: i32, has_armor: bool) {
+    let temp = g.random_range(0, 2);
+    let id = eng.client_edict(slot);
+    let kevlar = g.players[usize::from(slot)].as_ref().map(|p| p.kevlar);
+    let sample = if hit_group == HITGROUP_HEAD {
+        if kevlar == Some(ArmorType::VestHelm) {
+            "player/bhit_helmet-1.wav"
+        } else {
+            match temp {
+                0 => "player/headshot1.wav",
+                1 => "player/headshot2.wav",
+                _ => "player/headshot3.wav",
+            }
+        }
+    } else if hit_group != HITGROUP_LEFTLEG && hit_group != HITGROUP_RIGHTLEG && has_armor {
+        "player/bhit_kevlar-1.wav"
+    } else {
+        match temp {
+            0 => "player/bhit_flesh-1.wav",
+            1 => "player/bhit_flesh-2.wav",
+            _ => "player/bhit_flesh-3.wav",
+        }
+    };
+    eng.emit_sound(id, CHAN_VOICE, sample, 1.0, ATTN_NORM, PITCH_NORM);
+}
+
+/// `CBasePlayer::TraceAttack` (ReGameDLL `player.cpp:670-822`, read 2026-11-22) for the player
+/// of `slot`: the hit group of the trace says how much of the damage counts (head x4, stomach
+/// x1.25, legs x0.75, the rest x1) and what the player's view does; the damage is then added to
+/// `mm` for `TakeDamage`. A teammate's shot makes no blood while friendly fire is off; the
+/// kevlar stops the blood of a body hit and the helmet that of a head hit (sparks instead).
 ///
-/// Left out for the tasks that need them: the active-item multipliers of the armor ratio, the
-/// VIP's, flinch and `TakeDamageImpulse` knockback, the `Pain` sound, the teammate-attack hints,
-/// the HUD damage message, and the momentum block of `CBaseEntity::TakeDamage` (a `MOVETYPE_WALK`
-/// or `MOVETYPE_STEP` victim whose inflictor is not the world gets `velocity += dir * min(1000,
-/// damage * (32 * 32 * 72 / size volume) * 5)`, `dir` from the inflictor's centre to the
-/// victim): it needs the inflictor entities, so it is ported with the weapons (2D).
+/// QUIRKS kept: the head multiplier applies before the blood test, so the punch uses the
+/// multiplied damage; `m_LastHitGroup` is stored before the shield test; `BloodSplat` has no
+/// body in the fetched sources (assumption: it does nothing). The shield branch is ported but
+/// `IsHittingShield` is false until the shield task (`HasShield`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn trace_attack(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    slot: usize,
+    attacker: Option<EdictId>,
+    mm: &mut bullets::MultiDamage,
+    damage: f32,
+    dir: Vec3,
+    tr: &EntTrace,
+    bits: u32,
+) {
+    let victim = eng.client_edict(slot as u8);
+    let hit_group = tr.trace.hitgroup;
+    let attacker_slot = attacker.and_then(|a| player_slot(g, eng, a));
+    let friendly_fire = eng.cvar_f32("mp_friendlyfire") != 0.0;
+    let attacker_team = attacker_slot.and_then(|a| g.players[a].as_ref()).map(|p| p.team);
+    let Some(p) = g.players[slot].as_mut() else { return };
+    let mut should_bleed = true;
+    let mut should_spark = false;
+    // `IsHittingShield`: no shield yet.
+    let hit_shield = false;
+    if attacker_team == Some(p.team) && !friendly_fire {
+        should_bleed = false;
+    }
+    if !p.takes_damage {
+        return;
+    }
+    p.last_hit_group = hit_group;
+    let kevlar = p.kevlar;
+    let mut damage = damage;
+    let mut punch_x = None;
+    let mut punch_z = None;
+    let mut punch_roll = false;
+    if hit_shield {
+        // BUGBUG kept: the damage is zeroed before the shield alters the punch.
+        damage = 0.0;
+        should_bleed = false;
+    } else {
+        match hit_group {
+            HITGROUP_HEAD => {
+                if kevlar == ArmorType::VestHelm {
+                    should_bleed = false;
+                    should_spark = true;
+                }
+                damage *= 4.0;
+                if should_bleed {
+                    punch_x = Some((damage * -0.5).max(-12.0));
+                    punch_roll = true;
+                }
+            }
+            HITGROUP_CHEST => {
+                if kevlar != ArmorType::None {
+                    should_bleed = false;
+                } else if should_bleed {
+                    punch_x = Some((damage * -0.1).max(-4.0));
+                }
+            }
+            HITGROUP_STOMACH => {
+                damage = (f64::from(damage) * 1.25) as f32;
+                if kevlar != ArmorType::None {
+                    should_bleed = false;
+                } else if should_bleed {
+                    punch_x = Some(((f64::from(damage) * -0.1) as f32).max(-4.0));
+                }
+            }
+            HITGROUP_LEFTARM | HITGROUP_RIGHTARM => {
+                if kevlar != ArmorType::None {
+                    should_bleed = false;
+                }
+            }
+            HITGROUP_LEFTLEG | HITGROUP_RIGHTLEG => {
+                damage = (f64::from(damage) * 0.75) as f32;
+            }
+            _ => {}
+        }
+    }
+    if punch_roll {
+        let r = bullets::random_float(g, -1.0, 1.0);
+        punch_z = Some((damage * r).clamp(-9.0, 9.0));
+    }
+    if let Some(v) = eng.ent_mut(victim) {
+        if let Some(x) = punch_x {
+            v.punchangle.x = x;
+        }
+        if let Some(z) = punch_z {
+            v.punchangle.z = z;
+        }
+    }
+    let end_pos = tr.trace.end_pos;
+    if should_bleed {
+        // `BloodSplat(...)`: no body in the source we have.
+        bullets::spawn_blood(eng, end_pos, bullets::BLOOD_COLOR_RED, damage);
+        bullets::trace_bleed(g, eng, victim, damage, dir, end_pos, bits);
+    } else if hit_group == HITGROUP_HEAD && should_spark {
+        // They hit a helmet.
+        let te = cs_proto48::tempent::streak_splash(end_pos, tr.trace.plane_normal, 5, 22, 25, 65);
+        eng.send_temp_entity(MsgDest::Pvs(end_pos), &te);
+    }
+    bullets::add_multi_damage(g, eng, mm, attacker, victim, damage, bits);
+}
+
+/// The part of `CBaseMonster::TakeDamage` a player runs (the health comes off, a player at zero
+/// dies). `damage` arrives truncated (`int(flDamage)`). The player's own bookkeeping of the
+/// hit (what the `Damage` message reports) follows `CBaseMonster::TakeDamage` as reviewed
+/// before (`basemonster.cpp:430-441`); `player_bits` is false for the explosion branch, which
+/// returns before `m_bitsDamageType`/`m_bitsHUDDamage` are set.
+///
+/// Assumption (`CBaseMonster::TakeDamage` is not among the fetched sources): it is the
+/// Half-Life monster's, which has no momentum push. The block of `CBaseEntity::TakeDamage`
+/// (`cbase.cpp:660-712`, `velocity += dir * min(1000, damage * ...)`) is not run for a player;
+/// the only knockback is `TakeDamageImpulse` ([`take_damage_with`]). A bullet that pushed a
+/// corpse 500 units a second is not what the game does.
+#[allow(clippy::too_many_arguments)]
+fn monster_take_damage(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    slot: u8,
+    inflictor: Option<EdictId>,
+    attacker: Option<EdictId>,
+    attacker_weapon: Option<WeaponId>,
+    damage: f32,
+    bits: u32,
+    player_bits: bool,
+) -> bool {
+    let index = usize::from(slot);
+    let id = eng.client_edict(slot);
+    let Some(p) = g.players[index].as_ref() else { return false };
+    if !p.takes_damage {
+        return false;
+    }
+    // Do the damage.
+    let Some(p) = g.players[index].as_mut() else { return false };
+    p.health -= damage;
+    if player_bits {
+        p.damage_bits |= bits;
+    }
+    // What the `Damage` message reports (`CBaseMonster::TakeDamage`, ReGameDLL
+    // `basemonster.cpp:430-441`, as reviewed): for a player, the inflictor when there is one
+    // (the old one stays otherwise) and the health lost. Nothing sets `pev->dmg_save`, so the
+    // message's armor byte is always 0 (the field is not kept).
+    if inflictor.is_some() {
+        p.dmg_inflictor = inflictor;
+    }
+    p.dmg_take += damage;
+    if player_bits {
+        // `m_bitsHUDDamage = -1` at the end of `CBasePlayer::TakeDamage` (player.cpp:1374): the
+        // next client data update sends the `Damage` message whatever the bits.
+        p.hud_damage = -1;
+    }
+    let health = p.health;
+    if let Some(v) = eng.ent_mut(id) {
+        v.health = health;
+    }
+    if health <= 0.0 {
+        // `g_pevLastInflictor = pevInflictor; Killed(pevAttacker, GIB_NORMAL);` the inflictor
+        // goes to the death message as an argument.
+        killed(g, eng, slot, attacker, inflictor, attacker_weapon);
+    }
+    // The observers that follow the player are told its health.
+    observer::notify_spec_health(g, eng, slot);
+    health > 0.0
+}
+
+/// `CBasePlayer::TakeDamage` (ReGameDLL `player.cpp:909-1380`, read 2026-11-22) for an attacker
+/// whose active weapon is found by [`active_weapon_id`]; see [`take_damage_with`].
 pub(crate) fn take_damage(
     g: &mut GameState,
     eng: &mut EngineApi<'_>,
@@ -1390,10 +1656,57 @@ pub(crate) fn take_damage(
     damage: f32,
     bits: u32,
 ) -> bool {
+    let weapon = attacker
+        .and_then(|a| player_slot(g, eng, a))
+        .and_then(|a| active_weapon_id(g, a));
+    take_damage_with(g, eng, slot, inflictor, attacker, weapon, damage, bits)
+}
+
+/// `CBasePlayer::TakeDamage` (ReGameDLL `player.cpp:909-1380`, read 2026-11-22) then
+/// `CBaseMonster::TakeDamage` ([`monster_take_damage`]). `attacker_weapon` is the active weapon
+/// of the attacker (`pAttack->m_pActiveItem->m_iId`; `None` for the world or an attacker with
+/// no weapon in hand). `attacker` and `inflictor` are `None` for the world. Returns whether the
+/// player took damage and survived (the original's result).
+///
+/// In the source's order: a blast, an explosion or a fall sets the hit group to generic, a bullet
+/// at the shield's hit group is refused. An explosion (`DMG_EXPLOSION` or `DMG_BLAST`) has its
+/// own branch: a grenade of the victim's team hurts it only with friendly fire or if the victim
+/// threw it (assumption: the grenade's `m_iTeam` is the thrower's team, grenades are a later
+/// task), armor takes its share with the explosion formula, there are two pain sounds, and it
+/// returns before `m_bitsHUDDamage`. QUIRK: the `flBonus *= 2` for `DMG_BLAST` further down is
+/// unreachable in the source, because `DMG_BLAST` is caught by the explosion branch first.
+///
+/// Everything else: `FPlayerCanTakeDamage` (a teammate's needs `mp_friendlyfire`, except a
+/// grenade), then for a player attacker (not the victim's own fall): a teammate's (and one's
+/// own) damage is scaled by 0.35 (`float * double`), the armor ratio takes the multiplier of
+/// the attacker's weapon, then the flinch: a standing victim hit by a heavy rifle outside the
+/// legs gets knocked back 170 units if it moves slower than 300 and its speed modifier set to
+/// 0.65, any other hit sets the modifier to 0.5 and `m_bHighDamage`. Armor absorbs
+/// `(1 - ratio) * damage * bonus` points where the hit group is armored; if it runs out the
+/// rest of the damage goes through at `armor / bonus`. Then `Pain`, `int(flDamage)` goes to
+/// [`monster_take_damage`], and the time-based damage counters of the hit's kinds reset.
+///
+/// Left out: the VIP's halved ratio and the shield's added 0.2 (VIP and shield tasks), the
+/// teammate-attack hints and `m_flLastAttackedTeammate`, `SetAnimation(PLAYER_FLINCH)` (the
+/// player animation task), `m_lastDamageAmount`, `m_bKilledByBomb`/`m_bKilledByGrenade`
+/// (bomb and grenade tasks), `LogAttack`, bots, the career tasks and the director/`HLTV`
+/// messages.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn take_damage_with(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    slot: u8,
+    inflictor: Option<EdictId>,
+    attacker: Option<EdictId>,
+    attacker_weapon: Option<WeaponId>,
+    damage: f32,
+    bits: u32,
+) -> bool {
     let index = usize::from(slot);
     if !damage.is_finite() {
         return false;
     }
+    let id = eng.client_edict(slot);
     let attacker_slot = attacker.and_then(|a| player_slot(g, eng, a));
     let friendly_fire = eng.cvar_f32("mp_friendlyfire") != 0.0;
     let Some(victim_team) = g
@@ -1409,35 +1722,148 @@ pub(crate) fn take_damage(
         .map(|p| p.team);
     // `PlayerRelationship` is `GR_TEAMMATE` for oneself and for the same team.
     let teammate = attacker_slot == Some(index) || attacker_team == Some(victim_team);
+    let inflictor_is_grenade = inflictor
+        .and_then(|i| eng.ent(i))
+        .is_some_and(|v| v.classname == "grenade");
+
+    let mut ratio = ARMOR_RATIO;
+    let bonus = ARMOR_BONUS;
+    let mut damage = damage;
 
     let Some(p) = g.players[index].as_mut() else {
         return false;
     };
     if bits & (dmg::EXPLOSION | dmg::BLAST | dmg::FALL) != 0 {
         p.last_hit_group = HITGROUP_GENERIC;
-    }
-    // `FPlayerCanTakeDamage`.
-    if attacker_slot.is_some() && teammate && attacker_slot != Some(index) && !friendly_fire {
+    } else if p.last_hit_group == HITGROUP_SHIELD && bits & dmg::BULLET != 0 {
         return false;
     }
-    // `pev->takedamage == DAMAGE_NO`, and already dead.
+    // `HasShield()` (flShieldRatio 0.2) and `m_bIsVIP` (ratio * 0.5): neither exists yet.
+
+    if bits & (dmg::EXPLOSION | dmg::BLAST) != 0 {
+        if !p.alive {
+            return false;
+        }
+        if bits & dmg::EXPLOSION != 0 && inflictor_is_grenade && attacker_team == Some(victim_team) {
+            // `pGrenade->m_iTeam == m_iTeam`.
+            if !friendly_fire && attacker_slot != Some(index) {
+                // If cvar friendlyfire is disabled and the victim is a teammate, ignore this damage.
+                return false;
+            }
+        }
+        if let Some(i) = inflictor {
+            let origin = eng.ent(id).map(|v| v.origin);
+            let inflictor_origin = eng.ent(i).map(|v| v.origin);
+            if let (Some(o), Some(io), Some(p)) = (origin, inflictor_origin, g.players[index].as_mut()) {
+                p.blast_vector = o - io;
+            }
+        }
+        let Some(p) = g.players[index].as_mut() else {
+            return false;
+        };
+        let hit_group = p.last_hit_group;
+        let armored = p.armor != 0.0 && p.is_armored(hit_group);
+        if armored {
+            let mut new = ratio * damage;
+            let mut armor = (damage - new) * bonus;
+            // Does this use more armor than we have?
+            if armor > p.armor {
+                new = damage - p.armor;
+                p.armor = 0.0;
+            } else {
+                if armor < 0.0 {
+                    armor = 1.0;
+                }
+                p.armor -= armor;
+            }
+            damage = new;
+            if p.armor <= 0.0 {
+                p.kevlar = ArmorType::None;
+            }
+        }
+        pain(g, eng, slot, hit_group, armored);
+        if g.players[index].as_ref().is_some_and(|p| p.health > damage) {
+            // `SetAnimation(PLAYER_FLINCH)` waits for the animation task.
+            pain(g, eng, slot, hit_group, false);
+        }
+        let took = monster_take_damage(
+            g,
+            eng,
+            slot,
+            inflictor,
+            attacker,
+            attacker_weapon,
+            damage.trunc(),
+            bits,
+            false,
+        );
+        reset_time_based_damage(g, index, bits);
+        return took;
+    }
+
+    // `FPlayerCanTakeDamage`; a grenade's damage is never refused here.
+    if attacker_slot.is_some() && teammate && attacker_slot != Some(index) && !friendly_fire
+        && !inflictor_is_grenade
+    {
+        return false;
+    }
+    // Already dead, and `pev->takedamage == DAMAGE_NO`.
     if !p.takes_damage || !p.alive {
         return false;
     }
-    let mut damage = damage;
-    if attacker_slot.is_some()
-        && !(attacker_slot == Some(index) && bits & dmg::FALL != 0)
-        && teammate
+    // `if ((bitsDamageType & DMG_BLAST) && IsMultiplayer()) flBonus *= 2;` is unreachable (see above).
+    if let Some(a) = attacker_slot
+        && !(a == index && bits & dmg::FALL != 0)
     {
-        damage *= 0.35;
+        if teammate {
+            // Vanilla: `flDamage *= 0.35` (a `double` product).
+            damage = (f64::from(damage) * 0.35) as f32;
+        }
+        if let Some(w) = attacker_weapon {
+            // `flRatio += flShieldRatio` (0 without a shield), then the weapon's multiplier.
+            ratio = weapon_armor_ratio(w, ratio);
+        }
+        let hit_group = g.players[index].as_ref().map_or(HITGROUP_GENERIC, |p| p.last_hit_group);
+        let ducking = eng.ent(id).is_some_and(|v| v.flags & FL_DUCKING != 0);
+        let attacker_origin = eng.ent(eng.client_edict(a as u8)).map(|v| v.origin);
+        let victim_vars = eng.ent(id).map(|v| (v.origin, v.velocity));
+        let Some(p) = g.players[index].as_mut() else {
+            return false;
+        };
+        if !should_do_large_flinch(ducking, hit_group, attacker_weapon) {
+            // `TakeDamageImpulse(pAttack, 0.0f, 0.5f)`.
+            p.velocity_modifier = 0.5;
+            p.high_damage = if hit_group == HITGROUP_HEAD { damage > 60.0 } else { damage > 20.0 };
+            // `SetAnimation(PLAYER_FLINCH)`: the animation task.
+        } else {
+            if let (Some((origin, velocity)), Some(ao)) = (victim_vars, attacker_origin)
+                && velocity.length() < 300.0
+            {
+                // `TakeDamageImpulse(pAttack, 170, 0.65f)`; 170 is the vanilla constant (the
+                // `knockback` cvar is `REGAMEDLL_ADD`).
+                let push = bullets::normalize_hl(origin - ao) * 170.0;
+                p.velocity_modifier = 0.65;
+                if let Some(v) = eng.ent_mut(id) {
+                    v.velocity += push;
+                }
+            }
+            // `SetAnimation(PLAYER_LARGE_FLINCH)`: the animation task.
+        }
     }
-    // Armor does not protect against falls and drowning.
-    if p.armor != 0.0 && bits & (dmg::DROWN | dmg::FALL) == 0 && p.is_armored(p.last_hit_group) {
-        let mut new = ARMOR_RATIO * damage;
-        let mut armor = (damage - new) * ARMOR_BONUS;
+
+    // Armor. It doesn't protect against fall or drown damage!
+    let Some(p) = g.players[index].as_mut() else {
+        return false;
+    };
+    let hit_group = p.last_hit_group;
+    let armored = p.armor != 0.0 && bits & (dmg::DROWN | dmg::FALL) == 0 && p.is_armored(hit_group);
+    if armored {
+        let mut new = ratio * damage;
+        let mut armor = (damage - new) * bonus;
+        // Does this use more armor than we have?
         if armor > p.armor {
-            // Uses more armor than there is.
-            armor = p.armor * (1.0 / ARMOR_BONUS);
+            armor = p.armor;
+            armor *= 1.0 / bonus;
             new = damage - armor;
             p.armor = 0.0;
         } else {
@@ -1451,32 +1877,33 @@ pub(crate) fn take_damage(
             p.kevlar = ArmorType::None;
         }
     }
-    // `CBaseMonster::TakeDamage` gets the damage as an integer: a player with half a point of
-    // health would look dead to the client.
-    p.health -= damage.trunc();
-    p.damage_bits |= bits;
-    // What the `Damage` message reports (`CBaseMonster::TakeDamage`, ReGameDLL
-    // `basemonster.cpp:430-441`, as reviewed): for a player, the inflictor when there is one
-    // (the old one stays otherwise) and the health lost. Nothing sets `pev->dmg_save`, so the
-    // message's armor byte is always 0 (the field is not kept).
-    if inflictor.is_some() {
-        p.dmg_inflictor = inflictor;
+    pain(g, eng, slot, hit_group, armored);
+
+    // This cast to INT is critical: a player with 0.5 health would look dead to the engine.
+    let took = monster_take_damage(
+        g,
+        eng,
+        slot,
+        inflictor,
+        attacker,
+        attacker_weapon,
+        damage.trunc(),
+        bits,
+        true,
+    );
+    reset_time_based_damage(g, index, bits);
+    took
+}
+
+/// Reset the damage time countdown for each type of time-based damage the player just sustained.
+fn reset_time_based_damage(g: &mut GameState, index: usize, bits: u32) {
+    if let Some(p) = g.players[index].as_mut() {
+        for (i, counter) in p.time_based_damage.iter_mut().enumerate() {
+            if bits & (dmg::PARALYZE << i) != 0 {
+                *counter = 0;
+            }
+        }
     }
-    p.dmg_take += damage.trunc();
-    // `m_bitsHUDDamage = -1` at the end of `CBasePlayer::TakeDamage` (player.cpp:1374): the next
-    // client data update sends the `Damage` message whatever the bits.
-    p.hud_damage = -1;
-    let health = p.health;
-    let id = eng.client_edict(slot);
-    if let Some(v) = eng.ent_mut(id) {
-        v.health = health;
-    }
-    if health <= 0.0 {
-        killed(g, eng, slot, attacker, inflictor);
-    }
-    // The observers that follow the player are told its health.
-    observer::notify_spec_health(g, eng, slot);
-    health > 0.0
 }
 
 /// `CBasePlayer::Kill`: the player kills itself. `false` when it cannot (it has not joined).
@@ -1499,7 +1926,8 @@ pub(crate) fn kill(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) -> bool
     if let Some(v) = eng.ent_mut(id) {
         v.health = 0.0;
     }
-    killed(g, eng, slot, Some(id), Some(id));
+    // `Killed(pev, GIB_NEVER)`: no inflictor was set, so the death notice names the world.
+    killed(g, eng, slot, Some(id), None, None);
     true
 }
 
@@ -1544,6 +1972,7 @@ fn killed(
     slot: u8,
     attacker: Option<EdictId>,
     inflictor: Option<EdictId>,
+    attacker_weapon: Option<WeaponId>,
 ) {
     let index = usize::from(slot);
     let id = eng.client_edict(slot);
@@ -1552,7 +1981,7 @@ fn killed(
         return;
     }
     // `PlayerKilled` with `DeathNotice`: the death notice, deaths, frags, money, scoreboard.
-    score::player_killed(g, eng, slot, attacker, inflictor);
+    score::player_killed(g, eng, slot, attacker, inflictor, attacker_weapon);
     // `NVGToggle 0` to the player and to the observers that watch it in first person.
     observer::killed_night_vision(g, eng, slot);
 
