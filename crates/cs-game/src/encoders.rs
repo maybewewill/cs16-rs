@@ -15,8 +15,8 @@
 use cs_engine::consts::MOVETYPE_FOLLOW;
 use cs_proto48::delta::{DeltaMarks, GoldSrcEntityState};
 
-/// `BEAM_POINTS` of the SDK (`beamdef.h`; assumption: that header is not among the fetched
-/// sources): a beam between two points.
+/// `BEAM_POINTS` (`customentity.h` of the SDK, `#define BEAM_POINTS 0x00`): a beam between two
+/// points.
 const BEAM_POINTS: u8 = 0;
 /// `BEAM_ENTPOINT`: a beam from an entity to a point.
 const BEAM_ENTPOINT: u8 = 1;

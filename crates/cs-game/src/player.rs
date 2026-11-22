@@ -802,6 +802,9 @@ pub(crate) fn put_in_server(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8
         return;
     };
     v.origin = origin;
+    // KNOWN GAP (accepted): the golden capture of HLDS shows zero `angles` for the pre-join
+    // player in its first entity states, though the source sets the camera's angles here (as
+    // this does); what zeroes them there was not found. Ours show the camera's angles.
     v.angles = angles;
     // The camera's `v_angle` is its angles; the spawn point's path leaves it zero.
     v.v_angle = if intro_view { angles } else { Vec3::ZERO };

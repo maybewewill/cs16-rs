@@ -121,3 +121,46 @@ fn a_metal_breakable_precaches_its_sounds_and_the_models_of_the_map() {
         "the map's `gibmodel` replaces the material's"
     );
 }
+
+fn bench_with_briefings(map_name: &str, files: &[&str]) -> Bench {
+    let vfs = cs_vfs::Vfs::from_memory(files.iter().map(|f| (f.to_string(), b"briefing".to_vec())));
+    let mut game = cs_game::CsGame::new();
+    game.load_motd(&vfs);
+    let map = cs_engine::ServerMap::stub_with_entities(
+        map_name,
+        vec![entity(&[("classname", "worldspawn")])],
+    );
+    let cfg = cs_engine::ServerConfig { max_clients: 2, max_edicts: 256, ..Default::default() };
+    Bench::with_game(map, cfg, &[], true, &[], game)
+}
+
+/// `CWorld::Spawn`: the map's briefing, else `maps/default.txt`, is a generic resource. The
+/// names `Vfs` lists are lower case and the map's may not be.
+#[test]
+fn the_map_briefing_or_the_default_one_is_precached() {
+    let b = bench_with_briefings("Test", &["maps/test.txt", "maps/default.txt"]);
+    let list = resources(&b);
+    index_of(&list, GENERIC, "maps/Test.txt");
+    assert!(!list.iter().any(|r| r.filename == "maps/default.txt"));
+    let b = bench_with_briefings("other", &["maps/default.txt"]);
+    index_of(&resources(&b), GENERIC, "maps/default.txt");
+    let b = bench_with_briefings("other", &[]);
+    assert!(!resources(&b).iter().any(|r| r.res_type == GENERIC && r.filename.starts_with("maps/")));
+}
+
+/// A `func_breakable` with no `material` is glass, one with a bad `material` is wood
+/// (`CBreakable::KeyValue`, `Precache`), each with the gibs of its material.
+#[test]
+fn a_breakable_defaults_to_glass_and_a_bad_material_is_wood() {
+    let brk = |extra: &[(&str, &str)]| {
+        let mut keys = vec![("classname", "func_breakable"), ("model", "*1")];
+        keys.extend_from_slice(extra);
+        Bench::stub(vec![entity(&[("classname", "worldspawn")]), entity(&keys)])
+    };
+    let list = resources(&brk(&[]));
+    index_of(&list, SOUND, "debris/bustglass1.wav");
+    index_of(&list, MODEL, "models/glassgibs.mdl");
+    let list = resources(&brk(&[("material", "42")]));
+    index_of(&list, SOUND, "debris/bustcrate1.wav");
+    index_of(&list, MODEL, "models/woodgibs.mdl");
+}

@@ -660,6 +660,7 @@ impl<G: GameDll> Server<G> {
                 max_clients,
                 &baselines[..count],
                 self.sv_time,
+                None,
             );
             w.len() <= room
         };
@@ -933,12 +934,21 @@ impl<G: GameDll> Server<G> {
         // spawn baselines, in the order `SV_ActivateServer` made them), then `SV_WriteSpawn`.
         let mut w = MsgWriter::new();
         w.write_bytes(&self.outbox.init);
+        // The game's conditional encoders run on baselines as well (`DELTA_WriteDelta`).
+        let game = &mut self.game;
+        let mut encode = |name: &str,
+                          from: &GoldSrcEntityState,
+                          to: &GoldSrcEntityState,
+                          marks: &mut cs_proto48::delta::DeltaMarks<'_>| {
+            game.delta_encode(name, slot, from, to, marks);
+        };
         write_spawn_baselines(
             &mut w,
             &self.deltas,
             self.cfg.max_clients,
             &self.baselines,
             self.sv_time,
+            Some(&mut encode),
         );
 
         // `SV_WriteSpawn`: a player is a sliding box that walks unless the game says otherwise;
@@ -1141,7 +1151,7 @@ mod tests {
             })
             .collect();
         let mut baselines = MsgWriter::new();
-        write_spawn_baselines(&mut baselines, &server.deltas, 32, &server.baselines, 100.0);
+        write_spawn_baselines(&mut baselines, &server.deltas, 32, &server.baselines, 100.0, None);
         let mut rest = MsgWriter::new();
         rest.write_bytes(&server.outbox.init);
         write_spawn_stage(

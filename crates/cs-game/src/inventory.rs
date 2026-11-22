@@ -133,11 +133,9 @@ pub(crate) fn cs_model_name(id: WeaponId) -> Option<&'static str> {
 }
 
 /// The sounds of `WeaponsPrecache` that belong to no weapon (`weapons.cpp` 411-423), in the
-/// source's order; `items/9mmclip1.wav` and `items/gunpickup2.wav` are precached by the ammo and
-/// the battery before, and are listed so that this module's pickup sounds are always there.
-const WEAPONS_SOUNDS: [&str; 12] = [
-    "items/9mmclip1.wav",
-    "items/gunpickup2.wav",
+/// source's order (`items/9mmclip1.wav` and `items/gunpickup2.wav` come earlier, from the ammo and
+/// the battery).
+const WEAPONS_SOUNDS: [&str; 10] = [
     "weapons/debris1.wav",
     "weapons/debris2.wav",
     "weapons/debris3.wav",

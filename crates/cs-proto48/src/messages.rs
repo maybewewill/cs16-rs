@@ -1502,6 +1502,19 @@ pub fn write_svc_spawnbaseline(
     baselines: &[(u16, GoldSrcEntityState)],
     server_time: f64,
 ) {
+    write_svc_spawnbaseline_encoded(w, reg, max_clients, baselines, server_time, None);
+}
+
+/// [`write_svc_spawnbaseline`] with the game's conditional encoders: `DELTA_WriteDelta` runs
+/// them for baselines too (ReHLDS `delta.cpp`).
+pub fn write_svc_spawnbaseline_encoded(
+    w: &mut MsgWriter,
+    reg: &DeltaRegistry,
+    max_clients: u8,
+    baselines: &[(u16, GoldSrcEntityState)],
+    server_time: f64,
+    mut encode: Option<EntityEncodeFn<'_>>,
+) {
     let Some(schemas) = EntitySchemas::from_registry(reg) else {
         return;
     };
@@ -1515,7 +1528,9 @@ pub fn write_svc_spawnbaseline(
         let rec = state.to_delta(schema);
         w.write_bits(*entnum as u32, 11);
         w.write_bits(ent_type as u32, 2);
-        write_delta(w, schema, &zero, &rec, true, server_time);
+        with_record_encoder(&mut encode, schema, state, |hook| {
+            write_delta_encoded(w, schema, &zero, &rec, true, server_time, hook)
+        });
     }
     w.write_bits(0xFFFF, 16);
     w.write_bits(0, 6); // 0 instance baselines

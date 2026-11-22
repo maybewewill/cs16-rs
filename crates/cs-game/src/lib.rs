@@ -172,6 +172,7 @@ impl CsGame {
         self.state.briefings = vfs
             .list_dir("maps", Some("txt"))
             .into_iter()
+            // `list_dir` names are lower case (`Vfs::normalize`).
             .map(|name| format!("maps/{name}"))
             .collect();
         self.state.motd = match vfs.read_bytes("motd.txt") {

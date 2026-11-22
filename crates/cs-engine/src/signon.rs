@@ -11,7 +11,7 @@ use cs_proto48::messages::{
     MoveVarsMsg, ResourceEntry, ServerInfoMsg, write_svc_cdtrack, write_svc_deltadescriptions,
     write_svc_lightstyle, write_svc_newmovevars, write_svc_print, write_svc_resourcelist,
     write_svc_resourcerequest, write_svc_sendextrainfo, write_svc_serverinfo, write_svc_setangle,
-    write_svc_setview, write_svc_signonnum, write_svc_spawnbaseline, write_svc_time,
+    write_svc_setview, write_svc_signonnum, write_svc_spawnbaseline_encoded, write_svc_time,
     write_svc_updateuserinfo, write_svc_userregs, write_svc_voiceinit,
 };
 use cs_proto48::usermsg::UserMsgRegistry;
@@ -224,8 +224,9 @@ pub(crate) fn write_spawn_baselines(
     max_clients: u8,
     baselines: &[(u16, GoldSrcEntityState)],
     time: f64,
+    encode: Option<cs_proto48::messages::EntityEncodeFn<'_>>,
 ) {
-    write_svc_spawnbaseline(w, deltas, max_clients, baselines, time);
+    write_svc_spawnbaseline_encoded(w, deltas, max_clients, baselines, time, encode);
 }
 
 /// `SV_WriteSpawn` (ReHLDS `sv_main.cpp`, read 2026-11-22) after the game put the player in:
@@ -397,7 +398,7 @@ mod tests {
         let mut init = MsgWriter::new();
         write_svc_print(&mut init, "init\n");
         w.write_bytes(init.as_slice());
-        write_spawn_baselines(&mut w, &deltas, 8, &[(40, state)], 1.0);
+        write_spawn_baselines(&mut w, &deltas, 8, &[(40, state)], 1.0, None);
         write_spawn_stage(
             &mut w,
             Vec3::new(0.0, 90.0, 5.0),

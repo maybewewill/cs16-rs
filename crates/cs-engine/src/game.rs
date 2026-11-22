@@ -372,14 +372,15 @@ pub trait GameDll {
     /// of the edict ([`entity_state_from_vars`]); the game may edit it. The engine asks for every
     /// client slot, then for the other live edicts in index order until the list is full; it
     /// skips the edicts the source's first two checks refuse (`EF_NODRAW` on another entity, no
-    /// model), which need no game state. Every other filter is the game's: see [`FullPackCtx`].
+    /// model), which need no game state. Every other filter is the game's: see [`FullPackCtx`]. The
+    /// default is the engine's own cull: potentially visible, or the viewer itself.
     fn add_to_full_pack(
         &mut self,
         _eng: &mut EngineApi<'_>,
-        _ctx: &FullPackCtx<'_>,
+        ctx: &FullPackCtx<'_>,
         _state: &mut GoldSrcEntityState,
     ) -> bool {
-        true
+        ctx.in_pvs || ctx.ent_id == ctx.viewer_id
     }
     /// A conditional delta encoder of the game (`DELTA_ADDENCODER` in `RegisterEncoders`): runs
     /// for each entity delta whose `delta.lst` schema names `encoder` (`Entity_Encode`,
@@ -802,6 +803,57 @@ mod tests {
                 &mut self.clients,
             )
         }
+    }
+
+    /// A game that overrides nothing it need not.
+    struct Bare;
+
+    impl GameDll for Bare {
+        fn usermsgs(&self) -> UserMsgRegistry {
+            UserMsgRegistry::cs16_default()
+        }
+        fn server_activate(&mut self, _: &mut EngineApi<'_>) {}
+        fn server_deactivate(&mut self, _: &mut EngineApi<'_>) {}
+        fn spawn_entity(&mut self, _: &mut EngineApi<'_>, _: EdictId, _: &str, _: &[(String, String)]) -> bool {
+            true
+        }
+        fn client_connect(&mut self, _: &mut EngineApi<'_>, _: u8) -> Result<(), String> {
+            Ok(())
+        }
+        fn client_put_in_server(&mut self, _: &mut EngineApi<'_>, _: u8) {}
+        fn client_disconnect(&mut self, _: &mut EngineApi<'_>, _: u8) {}
+        fn client_command(&mut self, _: &mut EngineApi<'_>, _: u8, _: &[String]) {}
+        fn client_userinfo_changed(&mut self, _: &mut EngineApi<'_>, _: u8) {}
+        fn run_usercmd(&mut self, _: &mut EngineApi<'_>, _: u8, _: &GoldSrcUserCmd, _: u32) {}
+        fn start_frame(&mut self, _: &mut EngineApi<'_>, _: f32) {}
+        fn update_client_data(&mut self, _: &mut EngineApi<'_>, _: u8) -> GoldSrcClientData {
+            GoldSrcClientData::default()
+        }
+    }
+
+    /// The default `add_to_full_pack` is the engine's own cull: what the viewer can see, and the
+    /// viewer itself.
+    #[test]
+    fn the_default_add_to_full_pack_culls_by_pvs() {
+        let mut f = Fixture::new(2);
+        let viewer = f.edicts.client(0);
+        let other = f.edicts.client(1);
+        let leaves = LinkSnapshot { leafnums: Vec::new(), headnode: -1, area: None };
+        let ctx = |ent_id: EdictId, in_pvs: bool| FullPackCtx {
+            ent: ent_id.index,
+            ent_id,
+            viewer: 0,
+            viewer_id: viewer,
+            hostflags: 0,
+            in_pvs,
+            viewer_leaves: &leaves,
+        };
+        let mut eng = f.api();
+        let mut state = GoldSrcEntityState::default();
+        let mut game = Bare;
+        assert!(game.add_to_full_pack(&mut eng, &ctx(other, true), &mut state));
+        assert!(!game.add_to_full_pack(&mut eng, &ctx(other, false), &mut state));
+        assert!(game.add_to_full_pack(&mut eng, &ctx(viewer, false), &mut state));
     }
 
     #[test]

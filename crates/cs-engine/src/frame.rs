@@ -579,11 +579,11 @@ impl<G: GameDll> Server<G> {
     /// (`SV_WriteEntitiesToClient`, `rehlds/engine/sv_main.cpp`, read 2026-11-21) the client
     /// slots are always asked, the other edicts in index order until the list is full, and
     /// the rest are not offered to the game. Client slots are the lowest edict numbers, so
-    /// they come first and the cap never cuts one. Candidates are the viewer's own player
-    /// edict, and every other live edict with a model and without `EF_NODRAW` that is
-    /// potentially visible from the viewer's eye (the game's `setup_visibility` may move it);
-    /// each goes out when the game's `add_to_full_pack` accepts it, with the game's edits. The
-    /// caller drains the outbox.
+    /// they come first and the cap never cuts one. Candidates are the live edicts with a model
+    /// (not the world), without `EF_NODRAW` unless the viewer's own; for each the engine works
+    /// out whether it is potentially visible from the viewer's eye (the game's
+    /// `setup_visibility` may move it) and the game's `add_to_full_pack` decides, with the
+    /// state it may edit ([`FullPackCtx`]). The caller drains the outbox.
     fn visible_entities(&mut self, slot: u8) -> Vec<GoldSrcEntityState> {
         let viewer = self.edicts.client(slot);
         let own_eye = self

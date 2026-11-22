@@ -207,8 +207,20 @@ impl Bench {
         send_moves: bool,
         events: &[&str],
     ) -> Self {
+        Self::with_game(map, cfg, userinfo, send_moves, events, CsGame::new())
+    }
+
+    /// [`with_config`](Self::with_config) with `game` already set up (its files loaded).
+    pub fn with_game(
+        map: ServerMap,
+        cfg: ServerConfig,
+        userinfo: &[(&str, &str)],
+        send_moves: bool,
+        events: &[&str],
+        game: CsGame,
+    ) -> Self {
         let rig = Rig {
-            game: CsGame::new(),
+            game,
             actions: Vec::new(),
             precache_events: events.iter().map(|e| e.to_string()).collect(),
         };

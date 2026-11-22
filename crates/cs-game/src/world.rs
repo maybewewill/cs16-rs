@@ -356,7 +356,9 @@ fn precache_sound(eng: &mut EngineApi<'_>, name: &str) {
 /// `briefings` are the briefing files that exist.
 pub(crate) fn precache_briefing(eng: &mut EngineApi<'_>, briefings: &std::collections::BTreeSet<String>) {
     let map_file = format!("maps/{}.txt", eng.map_name());
-    if briefings.contains(&map_file) {
+    // The names are lower case, the way `Vfs` keys its files; the file system is not case
+    // sensitive for the original.
+    if briefings.contains(&map_file.to_ascii_lowercase()) {
         precache_generic(eng, &map_file);
     } else if briefings.contains("maps/default.txt") {
         precache_generic(eng, "maps/default.txt");
