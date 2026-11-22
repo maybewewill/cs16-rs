@@ -8,9 +8,8 @@
 //! A player lives in [`GameState::players`], by slot, from `client_put_in_server` to
 //! `client_disconnect`. A fresh player is [`Team::Unassigned`]: invisible, not solid, taking no
 //! damage, until it has picked a team and an appearance ([`crate::teams`]) and spawns with
-//! [`spawn`]. The movement is `cs_sim::pmove` over the engine's traces (`EngineWorld`); the rest
-//! of `pm_shared` is not ported (a dying player moves like a walking one with no input, where
-//! the original runs `PM_Physics_Toss`).
+//! [`spawn`]. The movement is `cs_sim::pm`, the port of `pm_shared`, run by [`crate::pmove`] in the
+//! order of `SV_RunCmd` (`PlayerPreThink`, `PM_Move`, `PlayerPostThink`).
 //!
 //! A player that joins stands at the counter-terrorists' spawn point as in `ClientPutInServer`
 //! (without the telefrag the vanilla join path would do); the `trigger_camera` intro path (the
@@ -34,31 +33,27 @@
 //! have to honour `FAllowFlashlight()` too.
 //!
 //! `WaterMove` (`PreThink`: drowning, `air_finished`, `DMG_DROWN` and its recovery) is not
-//! ported: it needs `waterlevel` from the movement, which `cs_sim::pmove` does not compute (the
-//! `pm_shared` plan carries it); the edict's `waterlevel` stays 0 and a player never drowns.
+//! ported yet (Task 9 of the `pm_shared` plan); the movement does set `waterlevel` and
+//! `watertype` now.
 //!
 //! Fields of the client data ([`client_data`]) that stay zero for now:
-//! - `bInDuck`, `flDuckTime`, `flTimeStepSound`, `waterjumptime`, `flSwimTime`, `pushmsec`: the
-//!   state of `pm_shared`'s duck, step-sound and water-jump timers; `cs_sim::pmove` has no such
-//!   timers, they come with the faithful `pm_shared` port.
 //! - `weaponanim`, `viewmodel`, `m_flNextAttack`, the ammo fields and the `iuser3` flags
-//!   (`PLAYER_CAN_SHOOT`, `PLAYER_FREEZE_TIME_OVER`, `PLAYER_IN_BOMB_ZONE`, ...): they belong to
-//!   the weapons, the freeze period and the bomb zones.
-//! - `fuser1`-`fuser3`: set by the spectator and HLTV code.
+//!   (`PLAYER_CAN_SHOOT`, `PLAYER_IN_BOMB_ZONE`, `PLAYER_HOLDING_SHIELD`; only
+//!   `PLAYER_FREEZE_TIME_OVER` is set): they belong to the weapons and the bomb zones (2D, 2E).
+//! - `physinfo` (`ENGINE_GETPHYSINFO`): the movement does not read it.
 //! - `weapons` carries only the suit bit (`1 << WEAPON_SUIT`) that `PlayerSpawn` sets; the
 //!   weapon bits come with the weapons.
 
 use cs_assets::bsp::SpawnTeam;
 use cs_engine::consts::{
-    FL_CLIENT, FL_DORMANT, FL_DUCKING, FL_ONGROUND, FL_PROXY, FL_SPECTATOR, MOVETYPE_NONE,
-    MOVETYPE_TOSS, MOVETYPE_WALK, SOLID_NOT, SOLID_SLIDEBOX,
+    FL_CLIENT, FL_DORMANT, FL_ONGROUND, FL_PROXY, FL_SPECTATOR, MOVETYPE_NONE, MOVETYPE_TOSS,
+    MOVETYPE_WALK, SOLID_NOT, SOLID_SLIDEBOX,
 };
 use cs_engine::{EdictId, EngineApi, MsgDest};
 use cs_proto48::delta::{GoldSrcClientData, GoldSrcUserCmd};
 use cs_proto48::messages::svc;
 use cs_proto48::usermsg::CsUserMsg;
-use cs_sim::pmove::{MoveInputCmd, PlayerMoveState, VEC_VIEW, step_player_move};
-use cs_sim::walk_game::{EngineWorld, usercmd_to_move_input};
+use cs_sim::pm::consts::PM_VEC_VIEW;
 use glam::Vec3;
 
 use crate::GameState;
@@ -66,6 +61,7 @@ use crate::menus::{self, Menu};
 use crate::messages;
 use crate::money;
 use crate::observer::{self, ObserverState};
+use crate::pmove;
 use crate::rules;
 use crate::score;
 use crate::teams::{self, JoinState};
@@ -142,8 +138,11 @@ pub(crate) const PITCH_NORM: u8 = 100;
 /// `VEC_HULL_MIN`/`MAX` and `VEC_DUCK_HULL_MIN`/`MAX`.
 const HULL_MIN: Vec3 = Vec3::new(-16.0, -16.0, -36.0);
 const HULL_MAX: Vec3 = Vec3::new(16.0, 16.0, 36.0);
-const DUCK_HULL_MIN: Vec3 = Vec3::new(-16.0, -16.0, -18.0);
-const DUCK_HULL_MAX: Vec3 = Vec3::new(16.0, 16.0, 18.0);
+/// `VEC_VIEW`: the view offset of a standing player.
+const VEC_VIEW: f32 = PM_VEC_VIEW;
+/// `PLAYER_FREEZE_TIME_OVER` (`cdll_dll.h`, read 2026-11-22), a bit of `iuser3` in the client
+/// data. The name is inverted in the source: the bit is set while the freeze period is on.
+const PLAYER_FREEZE_TIME_OVER: i32 = 1 << 1;
 /// `WEAPON_SUIT`: the bit of `pev->weapons` that stands for the HEV suit.
 const WEAPON_SUIT: u32 = 31;
 /// `DEATH_ANIMATION_TIME` (`gamerules.h`): how long a death lasts before the corpse is sent.
@@ -250,10 +249,16 @@ pub struct Player {
     pub takes_damage: bool,
     /// `m_bNotKilled`: the player was alive when it last left the game, so it keeps its armor.
     pub(crate) not_killed: bool,
-    /// The movement state `cs_sim::pmove` carries between commands.
-    pub(crate) mv: PlayerMoveState,
     /// `m_flFallVelocity`.
     pub(crate) fall_velocity: f32,
+    /// `m_flVelocityModifier`: the share of its speed the player keeps (1 = all); it climbs back
+    /// to 1 by 0.01 a command on the ground (`PreThink`). 2D lowers it on a hit.
+    pub(crate) velocity_modifier: f32,
+    /// `pmove->oldangles`: the player's `v_angle` from before the command's angles were applied.
+    pub(crate) oldangles: Vec3,
+    /// `m_random_seed` (`CmdStart`): the seed of the command being run, for the weapons' spread.
+    #[allow(dead_code)] // read by the weapons (2D)
+    pub(crate) random_seed: u32,
     /// `m_fNextSuicideTime`.
     pub(crate) next_suicide_time: f64,
     /// `m_iClientHealth`: the health the client was last told.
@@ -354,8 +359,10 @@ impl Player {
             alive: false,
             takes_damage: false,
             not_killed: true,
-            mv: PlayerMoveState::default(),
             fall_velocity: 0.0,
+            velocity_modifier: 1.0,
+            oldangles: Vec3::ZERO,
+            random_seed: 0,
             next_suicide_time: 0.0,
             client_health: -1,
             last_hit_group: HITGROUP_GENERIC,
@@ -679,6 +686,8 @@ pub(crate) fn spawn(
     p.just_killed_teammate = false;
     p.receives_no_money_next_round = false;
     p.fall_velocity = 0.0;
+    // `Spawn`: `m_flVelocityModifier = 1`.
+    p.velocity_modifier = 1.0;
     p.last_hit_group = HITGROUP_GENERIC;
     observer::on_spawn(p);
     // `m_tmHandleSignals = 0`: the zones are looked at again with the first client data update.
@@ -687,7 +696,6 @@ pub(crate) fn spawn(
     // `PlayerSpawn`: `pev->weapons |= (1 << WEAPON_SUIT)`.
     p.weapons |= 1 << WEAPON_SUIT;
     p.reset_hud_state();
-    p.mv = PlayerMoveState::at_spawn(origin);
 
     if eng.ent(id).is_some_and(|v| v.modelindex == 0) {
         eng.set_model(id, "models/player.mdl");
@@ -721,6 +729,10 @@ pub(crate) fn spawn(
         v.nextthink = 0.0;
         // Overrides what the model set up: `pev->view_ofs = VEC_VIEW`.
         v.view_ofs = Vec3::new(0.0, 0.0, VEC_VIEW);
+        // `ResetStamina`: the jump stamina and the other `pm_shared` user floats.
+        v.fuser1 = 0.0;
+        v.fuser2 = 0.0;
+        v.fuser3 = 0.0;
     }
     eng.set_size(id, HULL_MIN, HULL_MAX);
     eng.set_origin(id, origin);
@@ -798,48 +810,103 @@ pub fn fall_damage(fall_velocity: f32) -> f32 {
     (fall_velocity - MAX_PLAYER_SAFE_FALL_SPEED) * DAMAGE_FOR_FALL_SPEED * 1.25
 }
 
-/// Moves the player of `slot` by one command (`SV_RunCmd` around `PM_Move`): `PlayerPreThink`,
-/// the movement, `PlayerPostThink`; a dead player moves with no input and runs
-/// `PlayerDeathThink`. Players that have not been spawned do not move.
+/// The command with every number the movement reads made finite (the engine refuses a
+/// non-finite command before the game sees it; a game called directly must not trust that).
+fn finite_cmd(cmd: &GoldSrcUserCmd) -> GoldSrcUserCmd {
+    let f = |x: f32| if x.is_finite() { x } else { 0.0 };
+    GoldSrcUserCmd {
+        viewangles: Vec3::new(f(cmd.viewangles.x), f(cmd.viewangles.y), f(cmd.viewangles.z)),
+        forwardmove: f(cmd.forwardmove),
+        sidemove: f(cmd.sidemove),
+        upmove: f(cmd.upmove),
+        impact_position: Vec3::new(
+            f(cmd.impact_position.x),
+            f(cmd.impact_position.y),
+            f(cmd.impact_position.z),
+        ),
+        ..*cmd
+    }
+}
+
+/// Runs one command of the player of `slot` (the game's part of ReHLDS `SV_RunCmd`, read
+/// 2026-11-22, around `PM_Move`): `CmdStart`, the view angles, `PlayerPreThink`, the movement
+/// ([`pmove::run_pmove`]), `PlayerPostThink`, `CmdEnd`. A command of 0 ms runs all of it, with a
+/// frame time of 0. A player that has not been spawned does not move; a dead one is run by
+/// `PlayerDeathThink` (which `PreThink` calls before the movement), then `PM_Physics_Toss` moves
+/// the body.
 pub(crate) fn run_usercmd(
     g: &mut GameState,
     eng: &mut EngineApi<'_>,
     slot: u8,
     cmd: &GoldSrcUserCmd,
+    random_seed: u32,
 ) {
-    if g.players
-        .get(usize::from(slot))
-        .is_none_or(Option::is_none)
-    {
+    let Some(p) = g
+        .players
+        .get_mut(usize::from(slot))
+        .and_then(Option::as_mut)
+    else {
         return;
+    };
+    let cmd = finite_cmd(cmd);
+    // `CmdStart`: `m_random_seed = random_seed`.
+    p.random_seed = random_seed;
+    // `SV_RunCmd`: the old angles are the view angles before the command's, which the game
+    // module can take over with `fixangle`.
+    let id = eng.client_edict(slot);
+    if let Some(v) = eng.ent_mut(id) {
+        p.oldangles = v.v_angle;
+        if v.fixangle == 0 {
+            v.v_angle = cmd.viewangles;
+        }
     }
+    run_cmd_body(g, eng, slot, &cmd);
+    pmove::cmd_end(eng, slot);
+}
+
+/// What `SV_RunCmd` runs between `CmdStart` and `CmdEnd`.
+fn run_cmd_body(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, cmd: &GoldSrcUserCmd) {
     // `PlayerPreThink`: the way into the game advances with the player's commands (not once the
     // match is over: `PreThink` returns after `PlayerThink` while `IsGameOver()`, so there is no
     // `JoiningThink`, and `PostThink` skips the fall damage).
     let game_over = g.rules.game_over();
     teams::pre_think(g, eng, slot);
     rules::player_think(g, slot, cmd.buttons);
+    let id = eng.client_edict(slot);
     if !game_over {
         // `PreThink` (player.cpp:4825, read 2026-11-22): the flashlight is hidden from the HUD
         // unless `mp_flashlight` allows it (`FAllowFlashlight`), before `UpdateClientData`.
         let allow = eng.cvar_f32("mp_flashlight") != 0.0;
-        if let Some(p) = g
+        let on_ground = eng.ent(id).is_some_and(|v| v.flags & FL_ONGROUND != 0);
+        let Some(p) = g
             .players
             .get_mut(usize::from(slot))
             .and_then(Option::as_mut)
-        {
-            if allow {
-                p.hide_hud &= !HIDEHUD_FLASHLIGHT;
-            } else {
-                p.hide_hud |= HIDEHUD_FLASHLIGHT;
+        else {
+            return;
+        };
+        if allow {
+            p.hide_hud &= !HIDEHUD_FLASHLIGHT;
+        } else {
+            p.hide_hud |= HIDEHUD_FLASHLIGHT;
+        }
+        // `PreThink` (player.cpp:4774-4786): on the ground the velocity modifier slows the
+        // player down and climbs back to 1. `real_t modvel = m_flVelocityModifier + 0.01` adds
+        // a double and stores a float.
+        if on_ground {
+            if p.velocity_modifier < 1.0 {
+                let modvel = (f64::from(p.velocity_modifier) + 0.01) as f32;
+                p.velocity_modifier = modvel;
+                if let Some(v) = eng.ent_mut(id) {
+                    v.velocity *= modvel;
+                }
+            }
+            if p.velocity_modifier > 1.0 {
+                p.velocity_modifier = 1.0;
             }
         }
     }
-    let Some(p) = g
-        .players
-        .get_mut(usize::from(slot))
-        .and_then(Option::as_mut)
-    else {
+    let Some(p) = g.players.get(usize::from(slot)).and_then(Option::as_ref) else {
         return;
     };
     // An observer (the dead after their camera, the spectators) does not walk: it flies, or
@@ -848,100 +915,44 @@ pub(crate) fn run_usercmd(
         observer::run_cmd(g, eng, slot, cmd);
         return;
     }
-    if cmd.msec == 0 || !p.in_play() {
+    if !p.in_play() {
         return;
     }
     let alive = p.alive;
-    let id = eng.client_edict(slot);
-    let Some(v) = eng.ent(id) else {
-        return;
-    };
-    if v.movetype == MOVETYPE_NONE {
-        // A body at rest does not move.
-        if !alive {
-            death_think(g, eng, slot);
-        }
-        return;
-    }
-    if alive && v.flags & FL_ONGROUND == 0 {
-        // `CBasePlayer::PreThink`: the fall speed of the last command.
-        p.fall_velocity = -v.velocity.z;
-    }
-    move_player(g, eng, slot, cmd, alive);
-    if alive {
-        if !game_over {
-            post_think(g, eng, slot);
-        }
-    } else {
+    if !alive {
+        // `PreThink` calls `PlayerDeathThink` before the movement and returns; the dead body
+        // then goes through `PM_Move` (`MOVETYPE_TOSS`, or `MOVETYPE_NONE` once it has landed).
         death_think(g, eng, slot);
+        // Assumption: when the death camera has just started, the observer's own movement takes
+        // over with the next command (the observer moves on `pm` in a later task).
+        let watching = g
+            .players
+            .get(usize::from(slot))
+            .and_then(Option::as_ref)
+            .is_some_and(|p| p.pflag_observer)
+            && observer::mode_of(eng, slot) != observer::OBS_NONE;
+        if watching {
+            return;
+        }
     }
-}
-
-/// Runs the movement of one command and writes the result to the edict.
-fn move_player(
-    g: &mut GameState,
-    eng: &mut EngineApi<'_>,
-    slot: u8,
-    cmd: &GoldSrcUserCmd,
-    alive: bool,
-) {
-    let id = eng.client_edict(slot);
-    let max_speed = match eng.ent(id).map(|v| v.max_speed) {
-        Some(s) if s.is_finite() && s > 0.0 => s,
-        _ => NO_ITEM_MAX_SPEED,
-    };
-    let input = if alive {
-        usercmd_to_move_input(cmd, max_speed)
-    } else {
-        MoveInputCmd::default()
-    };
-    let dt = f32::from(cmd.msec) / 1000.0;
-    let Some(p) = g
-        .players
-        .get_mut(usize::from(slot))
-        .and_then(Option::as_mut)
-    else {
-        return;
-    };
-    // Start from the edict, so a move the engine (or the game) made since the last command is
-    // not overwritten.
-    if let Some(v) = eng.ent(id) {
-        p.mv.origin = v.origin;
-        p.mv.velocity = v.velocity;
-        p.mv.on_ground = v.flags & FL_ONGROUND != 0;
+    if alive
+        && let Some(v) = eng.ent(id)
+        && v.flags & FL_ONGROUND == 0
+    {
+        // `CBasePlayer::PreThink`: the fall speed of the last command.
+        let fall = -v.velocity.z;
+        if let Some(p) = g
+            .players
+            .get_mut(usize::from(slot))
+            .and_then(Option::as_mut)
+        {
+            p.fall_velocity = fall;
+        }
     }
-    let world = EngineWorld::new(eng, id, &g.ladders);
-    step_player_move(&mut p.mv, &input, max_speed, &g.move_params, &world, dt);
-    // What the movement ran into reaches the engine as impacts, delivered after the command.
-    let touched = world.into_touched();
-    for other in touched {
-        eng.player_touched(id, other);
+    pmove::run_pmove(g, eng, slot, cmd);
+    if alive && !game_over {
+        post_think(g, eng, slot);
     }
-    let Some(v) = eng.ent_mut(id) else {
-        return;
-    };
-    let state = &p.mv;
-    v.v_angle = cmd.viewangles;
-    if alive {
-        v.angles.y = v.v_angle.y;
-    }
-    v.origin = state.origin;
-    v.velocity = state.velocity;
-    v.view_ofs.z = state.view_ofs_z;
-    v.flags &= !(FL_ONGROUND | FL_DUCKING);
-    if state.on_ground {
-        v.flags |= FL_ONGROUND;
-    }
-    if state.ducking {
-        v.flags |= FL_DUCKING;
-        v.mins = DUCK_HULL_MIN;
-        v.maxs = DUCK_HULL_MAX;
-    } else {
-        v.mins = HULL_MIN;
-        v.maxs = HULL_MAX;
-    }
-    v.size = v.maxs - v.mins;
-    // The engine links the player after the command.
 }
 
 /// The fall part of `CBasePlayer::PostThink`: a player that lands faster than
@@ -1261,7 +1272,6 @@ fn death_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     // Done "animating": a body on the ground stops colliding and moving.
     if v.movetype != MOVETYPE_NONE && on_ground {
         v.movetype = MOVETYPE_NONE;
-        p.mv.velocity = Vec3::ZERO;
     }
     if dying {
         v.deadflag = DEAD_DEAD;
@@ -1310,7 +1320,20 @@ pub(crate) fn client_data(
     // `iuser*` and death state.
     let source = observer::first_person_source(g, eng, slot).map(|t| (t, eng.client_edict(t)));
     let v = source.and_then(|(_, sid)| eng.ent(sid)).unwrap_or(own);
-    let data = GoldSrcClientData {
+    // `iuser3` (`sendweapons && pPlayer`, only `iuser1 == OBS_NONE && !pevOrg`): the bits of
+    // the player's own state, not the entity's value. Only FREEZE_TIME_OVER is set here; the
+    // others (CAN_SHOOT, IN_BOMB_ZONE, HOLDING_SHIELD) come with the weapons and the bomb
+    // zones (2D, 2E).
+    let iuser3 = if own.iuser1 == observer::OBS_NONE && source.is_none() {
+        if g.rules.is_freeze_period() {
+            PLAYER_FREEZE_TIME_OVER
+        } else {
+            0
+        }
+    } else {
+        own.iuser3
+    };
+    let mut data = GoldSrcClientData {
         origin: v.origin,
         velocity: v.velocity,
         view_ofs: v.view_ofs,
@@ -1323,10 +1346,22 @@ pub(crate) fn client_data(
         punchangle: v.punchangle,
         iuser1: own.iuser1,
         iuser2: own.iuser2,
-        iuser3: own.iuser3,
+        iuser3,
+        // The movement's state (`UpdateClientData`, client.cpp 5019-5081, read 2026-11-22):
+        // the followed player's for an observer in first person. `waterjumptime` is
+        // `int(teleport_time)`; `watertype` has no field in the client data. `fuser4` and
+        // `iuser4` are not sent.
+        b_in_duck: i32::from(v.b_in_duck),
+        fl_duck_time: v.fl_duck_time,
+        fl_time_step_sound: v.fl_time_step_sound,
+        fl_swim_time: v.fl_swim_time,
+        waterjumptime: v.teleport_time as i32,
+        pushmsec: v.pushmsec,
+        fuser1: v.fuser1,
+        fuser2: v.fuser2,
+        fuser3: v.fuser3,
         ..Default::default()
     };
-    let mut data = data;
     let weapons_of = source.map_or(slot, |(t, _)| t);
     if let Some(p) = g
         .players

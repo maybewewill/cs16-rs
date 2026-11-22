@@ -52,8 +52,11 @@ fn bench_on(map: ServerMap, userinfo: &[(&str, &str)]) -> Bench {
     let mut b = Bench::with_userinfo(map, 2, userinfo);
     b.idle_cmds = true;
     b.step(6);
-    b.server.game_mut().game.state_mut().move_params.gravity = 0.0;
-    b.run(|_, eng| size_zones(eng));
+    // The movement takes its gravity from the `sv_gravity` cvar (`movevars`), not from the game.
+    b.run(|_, eng| {
+        eng.set_cvar("sv_gravity", "0");
+        size_zones(eng);
+    });
     b.probe.clear_messages();
     b
 }

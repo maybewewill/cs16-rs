@@ -21,6 +21,7 @@ mod messages;
 pub mod money;
 pub mod observer;
 pub mod player;
+mod pmove;
 pub mod rules;
 mod score;
 pub mod teams;
@@ -29,6 +30,7 @@ pub mod world;
 use cs_engine::{EdictId, EngineApi, GameDll};
 use cs_proto48::delta::{GoldSrcClientData, GoldSrcUserCmd};
 use cs_proto48::usermsg::UserMsgRegistry;
+use cs_sim::pm::{PmShared, pm_init};
 use cs_sim::pmove::MoveParams;
 use glam::Vec3;
 
@@ -65,6 +67,9 @@ pub struct GameState {
     pub(crate) join_counter: u32,
     /// State of the game's own random numbers (`RANDOM_LONG`).
     rng: u32,
+    /// The statics of `pm_shared` (the stuck table, the texture materials, the wade-step skip
+    /// counter), built by `PM_Init` ([`CsGame::load_motd`] reads `sound/materials.txt` for it).
+    pm_shared: PmShared,
     /// Every call the dispatch delivered to a `test_dispatch` entity. For tests only (feature
     /// `test-hooks`).
     #[cfg(feature = "test-hooks")]
@@ -87,6 +92,7 @@ impl GameState {
             map_cycle: mapcycle::MapCycle::default(),
             join_counter: 0,
             rng: 0x2545_f491,
+            pm_shared: pm_init(None),
             #[cfg(feature = "test-hooks")]
             dispatch_log: Vec::new(),
         }
@@ -94,11 +100,7 @@ impl GameState {
 
     /// A random number in `lo..=hi` (xorshift32: the engine offers the game no generator).
     pub(crate) fn random_range(&mut self, lo: i32, hi: i32) -> i32 {
-        self.rng ^= self.rng << 13;
-        self.rng ^= self.rng >> 17;
-        self.rng ^= self.rng << 5;
-        let span = (hi - lo + 1).max(1) as u32;
-        lo + (self.rng % span) as i32
+        random_in(&mut self.rng, lo, hi)
     }
 
     /// Forgets what belonged to the previous map.
@@ -110,6 +112,15 @@ impl GameState {
         self.num_ct_wins = 0;
         self.rules = rules::Rules::default();
     }
+}
+
+/// One step of the game's generator (xorshift32) over `state`, a number in `lo..=hi`.
+pub(crate) fn random_in(state: &mut u32, lo: i32, hi: i32) -> i32 {
+    *state ^= *state << 13;
+    *state ^= *state >> 17;
+    *state ^= *state << 5;
+    let span = (hi - lo + 1).max(1) as u32;
+    lo + (*state % span) as i32
 }
 
 /// The game: [`GameState`] (with the players) and the entities (in the private data of their
@@ -137,7 +148,11 @@ impl CsGame {
     /// the `motdfile` cvar, which is not read: the name is fixed at its default), through
     /// `vfs`. A missing file means no
     /// message of the day, as in `SendMOTDToClient`, which then sends the server name alone.
+    ///
+    /// Also `PM_Init`: builds the statics of `pm_shared` from `sound/materials.txt` (the footstep
+    /// materials of the textures). A missing file gives an empty table, every texture concrete.
     pub fn load_motd(&mut self, vfs: &cs_vfs::Vfs) {
+        self.state.pm_shared = pm_init(vfs.read_bytes("sound/materials.txt").ok().as_deref());
         self.state.motd = match vfs.read_bytes("motd.txt") {
             Ok(bytes) => bytes,
             Err(cs_vfs::VfsError::NotFound(_)) => Vec::new(),
@@ -248,19 +263,49 @@ impl CsGame {
         true
     }
 
-    /// Puts the movement of the player of `slot` at `origin`, stopped, to place a player
+    /// Sets `m_flVelocityModifier` of the player of `slot`. `false` when nobody is in that slot.
+    /// For tests only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn set_velocity_modifier(&mut self, slot: u8, value: f32) -> bool {
+        let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut)
+        else {
+            return false;
+        };
+        p.velocity_modifier = value;
+        true
+    }
+
+    /// `m_flVelocityModifier` of the player of `slot`. For tests only (cargo feature
+    /// `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn velocity_modifier(&self, slot: u8) -> Option<f32> {
+        self.state
+            .players
+            .get(usize::from(slot))
+            .and_then(Option::as_ref)
+            .map(|p| p.velocity_modifier)
+    }
+
+    /// `(edict number, is a player, has a model)` of each physent the movement of the player of
+    /// `slot` sees, as `EnginePmWorld` answers `PmWorld::physent_is_player` and
+    /// `physent_has_model`. For tests only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn pm_world_flags(&self, eng: &mut EngineApi<'_>, slot: u8) -> Vec<(i32, bool, bool)> {
+        pmove::world_flags(eng, slot)
+    }
+
+    /// Puts the player of `slot` at `origin`, stopped, to place a player
     /// mid-air or elsewhere in tests. `false` when nobody is in that slot. For tests only
     /// (cargo feature `test-hooks`).
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn place_player(&mut self, eng: &mut EngineApi<'_>, slot: u8, origin: Vec3) -> bool {
-        let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut)
-        else {
+        if self.state.players.get(usize::from(slot)).is_none_or(Option::is_none) {
             return false;
-        };
-        p.mv.origin = origin;
-        p.mv.velocity = Vec3::ZERO;
-        p.mv.on_ground = false;
+        }
         let id = eng.client_edict(slot);
         if let Some(v) = eng.ent_mut(id) {
             v.velocity = Vec3::ZERO;
@@ -336,9 +381,9 @@ impl GameDll for CsGame {
         eng: &mut EngineApi<'_>,
         slot: u8,
         cmd: &GoldSrcUserCmd,
-        _random_seed: u32,
+        random_seed: u32,
     ) {
-        player::run_usercmd(&mut self.state, eng, slot, cmd);
+        player::run_usercmd(&mut self.state, eng, slot, cmd, random_seed);
     }
 
     /// `CHalfLifeMultiplay::Think`: the clock of the round and the match.

@@ -185,8 +185,10 @@ fn fall_damage_as_regamedll() {
             }
             let top = top.expect("a spawn point with free air above it");
             game.place_player(eng, 0, top);
-            let saved = game.state().move_params.gravity;
-            game.state_mut().move_params.gravity = gravity;
+            // Re-baselined: the movement takes its gravity from the `sv_gravity` cvar (the
+            // `movevars` of `SV_SetupPMove`), not from the game's own parameters.
+            let saved = eng.cvar_str("sv_gravity").unwrap_or_else(|| "800".to_string());
+            eng.set_cvar("sv_gravity", &gravity.to_string());
             let mut last_vz = 0.0;
             let mut landed = false;
             for _ in 0..1000 {
@@ -198,7 +200,7 @@ fn fall_damage_as_regamedll() {
                 }
                 last_vz = v.velocity.z;
             }
-            game.state_mut().move_params.gravity = saved;
+            eng.set_cvar("sv_gravity", &saved);
             (
                 settled,
                 landed,

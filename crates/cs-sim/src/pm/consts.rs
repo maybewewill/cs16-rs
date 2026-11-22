@@ -4,8 +4,6 @@
 //! section 3). Constants the headers of the fetched copies did not contain are marked "(HL SDK)":
 //! they come from the standard Half-Life SDK and are an assumption until checked.
 
-use glam::Vec3;
-
 // pm_shared.h
 /// `PM_DEAD_VIEWHEIGHT`: view offset of a dead player.
 pub const PM_DEAD_VIEWHEIGHT: f32 = -8.0;
@@ -171,15 +169,5 @@ pub const PITCH_NORM: i32 = 100;
 
 /// The four player hulls the engine copies into `playermove_t::player_mins/maxs`
 /// (ReHLDS `pmove.cpp` `pm_hullmins`/`pm_hullmaxs`, read 2026-11-22): standing, ducked, point, large.
-pub const PLAYER_HULL_MINS: [Vec3; 4] = [
-    Vec3::new(-16.0, -16.0, -36.0),
-    Vec3::new(-16.0, -16.0, -18.0),
-    Vec3::new(0.0, 0.0, 0.0),
-    Vec3::new(-32.0, -32.0, -32.0),
-];
-pub const PLAYER_HULL_MAXS: [Vec3; 4] = [
-    Vec3::new(16.0, 16.0, 36.0),
-    Vec3::new(16.0, 16.0, 18.0),
-    Vec3::new(0.0, 0.0, 0.0),
-    Vec3::new(32.0, 32.0, 32.0),
-];
+/// One copy only: the engine's own tables.
+pub use cs_engine::{PM_PLAYER_MAXS as PLAYER_HULL_MAXS, PM_PLAYER_MINS as PLAYER_HULL_MINS};

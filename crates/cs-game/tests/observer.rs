@@ -104,7 +104,10 @@ fn dead_player_becomes_an_observer_after_the_death_cam() {
     pump(&mut b, 0, 100, 0, 0.0);
     let v = vars(&mut b, 0);
     assert_eq!(v.iuser1, OBS_CHASE_FREE);
-    assert!(v.view_ofs.z > 0.0);
+    // Re-baselined for `PM_CheckParameters`: a dead player's view offset is `PM_DEAD_VIEWHEIGHT`
+    // (-8, as `Killed` sets it, player.cpp:3919), not the standing 17 the old movement kept. The
+    // death camera's guard (`view_ofs != 0`) still holds.
+    assert_eq!(v.view_ofs, Vec3::new(0.0, 0.0, -8.0));
 
     // The death camera: invisible, not solid, not moving by itself, the health 1, in the mode
     // the player used last (roaming, the first time).

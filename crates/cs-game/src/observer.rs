@@ -608,9 +608,6 @@ pub(crate) fn start_observer(
     p.pflag_observer = true;
     p.takes_damage = false;
     p.health = 1.0;
-    p.mv.ducking = false;
-    p.mv.origin = position;
-    p.mv.velocity = Vec3::ZERO;
     // Find a player to watch.
     p.obs.next_input = 0.0;
     let last_mode = p.obs.last_mode;
@@ -756,10 +753,6 @@ pub(crate) fn run_cmd(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, cmd:
         v.velocity = Vec3::ZERO;
     }
     eng.set_origin(id, origin);
-    if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
-        p.mv.origin = origin;
-        p.mv.velocity = Vec3::ZERO;
-    }
 }
 
 /// `AngleVectors` for the view angles of a command (pitch, yaw, no roll): the unit forward and
@@ -824,10 +817,6 @@ fn roam(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, cmd: &GoldSrcUserC
     }
     if moved {
         eng.set_origin(id, new_origin);
-    }
-    if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
-        p.mv.origin = new_origin;
-        p.mv.velocity = velocity;
     }
 }
 

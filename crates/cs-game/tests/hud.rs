@@ -584,16 +584,17 @@ fn health_and_armor_follow_the_player() {
     // flashlight bit back (11).
     // (From the start of the messages: the flashlight bit was told in the first update, which
     // follows the first command's `PreThink`, before the window of `before`.)
+    // Re-baselined for `SV_RunCmd` (ledger CARRY 53): the engine's 0-ms command runs
+    // `PreThink` too, so `PlayerDeathThink` starts the camera on that command and the test's
+    // 10-ms command of the same frame puts the flashlight bit back before the frame's update:
+    // the client is never told the intermediate 9.
     let hide: Vec<CsUserMsg> = b
         .messages(0)
         .into_iter()
         .filter(|(n, _)| n == "HideWeapon")
         .map(|(_, m)| m)
         .collect();
-    assert_eq!(
-        hide,
-        [CsUserMsg::HideWeapon(2), CsUserMsg::HideWeapon(9), CsUserMsg::HideWeapon(11)]
-    );
+    assert_eq!(hide, [CsUserMsg::HideWeapon(2), CsUserMsg::HideWeapon(11)]);
     // A player killed before gets the HUD elements back on its next spawn, and is told.
     let before_respawn = b.messages(0).len();
     assert!(b.run(|game, eng| game.respawn_player(eng, 0)));
