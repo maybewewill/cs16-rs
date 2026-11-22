@@ -453,6 +453,9 @@ fn bad_model_data_is_refused_quietly() {
     put_i32(&mut bad, seq_off + 156, 3); // an external sequence group
     cases.push(("animations in another file", bad));
 
+    // A run of no frames (it would walk the file without ever using up the frame).
+    cases.push(("run of no frames", zero_run_model(1)));
+
     for (name, bytes) in cases {
         let mut h = harness_with_model(bytes);
         let (id, t) = run(&mut h, |eng| {
@@ -541,9 +544,18 @@ const GIGN: &str = "models/player/gign/gign.mdl";
 /// A harness whose test model is the GIGN player model, with the parsed model for its
 /// sequences. `None` without the game.
 fn gign_harness() -> Option<(Harness, StudioModel)> {
-    let vfs = Vfs::discover(None, VfsConfig::default()).ok()?;
-    let bytes = vfs.read_bytes(GIGN).ok()?;
-    let model = StudioModel::load(&vfs, GIGN).ok()?;
+    let Ok(vfs) = Vfs::discover(None, VfsConfig::default()) else {
+        eprintln!("skipped: the installed game is not found (set CS16_GAMEDIR)");
+        return None;
+    };
+    let Ok(bytes) = vfs.read_bytes(GIGN) else {
+        eprintln!("skipped: {GIGN} is not in the installed game");
+        return None;
+    };
+    let Ok(model) = StudioModel::load(&vfs, GIGN) else {
+        eprintln!("skipped: {GIGN} does not parse");
+        return None;
+    };
     Some((harness_with_model(bytes), model))
 }
 
@@ -616,6 +628,64 @@ fn bullet_hits_head_hitbox() {
     assert!(top_of(&with_shield, 8).is_some(), "{with_shield:?}");
 }
 
+/// Golden points of `idle1` at frame 0 of the GIGN model (a player without a shield, a ray
+/// along +x through the middle of the player): taken once from the engine's output, after
+/// checking them against the model's data. The check, with the renderer's own pose
+/// (`StudioModel::evaluate_bones`, an independent implementation) of the same sequence:
+/// - the lowest hitbox points are the feet (hitboxes 3 and 6, bones at z -30.6 and -30.0, boxes
+///   reaching -37.0 and -36.6); the engine's lowest hit is z = -37;
+/// - the legs (groups 6 and 7) overlap along the middle line: left thigh/calf/foot centres at
+///   z -10, -25, -34, right ones at -12, -25, -34; hits z -36..-10 are legs;
+/// - the pelvis (hitbox 0, group 3, bone z -2.6, centre -3.0) and Spine1 (hitbox 7, group 3,
+///   bone z 3.2, centre 3.9) are boxes of 13.5 and 11 units: the stomach from z -7 to 10;
+/// - Spine2/Spine3 (hitboxes 8, 9, group 2, bones z 6.8 and 10.0, centres 9.5 and 12.1) and the
+///   neck: the chest above the stomach, z 11..20;
+/// - the head (hitbox 11, group 1, bone z 15.9, box 8.3 long along the bone's x, which points
+///   up, so its top is near 15.9 + 8.3 = 24..26): the engine's head is z 21..26;
+/// - the arms (groups 4, 5) are at |y| of 3 to 18, off the middle line, and the shield (group 8)
+///   is skipped by `gamestate` 1: neither is met.
+///
+/// The heights agree within the boxes' own thickness (the renderer poses a lerp of frames and
+/// is not the engine's code, so only agreement of that size is expected).
+#[test]
+fn idle1_golden_points() {
+    let Some((mut h, model)) = gign_harness() else {
+        return;
+    };
+    let idle1 = model.find_sequence("idle1").expect("idle1") as u16;
+    let s = sweep(&mut h, idle1, 0.0, true);
+    let at = |z: i32| s.iter().find(|(zz, _)| *zz == z).unwrap().1;
+    // (z, hitgroup); -1 is a miss.
+    let golden = [
+        (24, HEAD),
+        (15, CHEST),
+        (0, 3),
+        (-15, 6),
+        (-30, 7),
+        (40, -1),
+        (-50, -1),
+    ];
+    for (z, group) in golden {
+        assert_eq!(at(z), group, "z = {z}");
+    }
+    // A miss beside the model: the same height as the chest, 40 units to the side.
+    let beside = run(&mut h, move |eng| {
+        let id = studio_entity(
+            eng,
+            Vec3::ZERO,
+            Vec3::new(-16.0, -16.0, -36.0),
+            Vec3::new(16.0, 16.0, 36.0),
+            FL_CLIENT,
+        );
+        let v = eng.ent_mut(id).unwrap();
+        v.sequence = idle1;
+        v.gamestate = 1;
+        let t = ray(eng, Vec3::new(-100.0, 40.0, 15.0), Vec3::new(100.0, 40.0, 15.0));
+        (t.ent == Some(id), t.trace.hitgroup, t.trace.fraction)
+    });
+    assert_eq!(beside, (false, 0, 1.0));
+}
+
 #[test]
 fn pose_follows_sequence_and_frame() {
     let Some((mut h, model)) = gign_harness() else {
@@ -649,4 +719,113 @@ fn pose_follows_sequence_and_frame() {
     );
     // The same pose twice is the same hulls.
     assert_eq!(sweep(&mut h, stand, 0.0, true), standing);
+}
+
+/// A model with `boxes` head boxes whose one bone animates its z rotation by a run of no
+/// frames (`total` 0).
+fn zero_run_model(boxes: usize) -> Vec<u8> {
+    let mut animated = BoneDef::at(-1, [0.0, 0.0, 0.0]);
+    animated.rot_z_blend = [1, 0];
+    let defs: Vec<BoxDef> = (0..boxes)
+        .map(|_| BoxDef {
+            bone: 0,
+            group: HEAD,
+            min: [-5.0, -5.0, 60.0],
+            max: [5.0, 5.0, 72.0],
+        })
+        .collect();
+    let mut b = build_mdl(&[animated], &defs, 0, 1);
+    let runs_off = 244 + 112 + boxes * 32 + 176 + 12;
+    b[runs_off + 1] = 0;
+    b
+}
+
+#[test]
+fn a_pose_that_cannot_be_made_is_tried_once_per_call() {
+    let mut h = harness_with_model(zero_run_model(1));
+    let (setups, ent, id) = run(&mut h, |eng| {
+        let id = studio_entity(
+            eng,
+            Vec3::new(100.0, 0.0, 0.0),
+            STANDING_MINS,
+            STANDING_MAXS,
+            0,
+        );
+        let mut last = None;
+        for _ in 0..5 {
+            last = ray(eng, Vec3::new(0.0, 0.0, 66.0), Vec3::new(200.0, 0.0, 66.0)).ent;
+        }
+        (eng.studio_setups(), last, id)
+    });
+    assert_eq!(ent, Some(id), "traced as its box");
+    assert_eq!(setups, 1, "the failed pose is remembered");
+}
+
+#[test]
+fn flagged_model_traces_a_box_through_its_hitboxes_grown_by_half_its_size() {
+    // `STUDIO_TRACE_HITBOX` (0x200) in the header: a move of a box, not only a bullet, is
+    // clipped against the hitboxes, grown by `(maxs - mins) * 0.5` (here 4 on each side).
+    let head = || BoxDef {
+        bone: 0,
+        group: HEAD,
+        min: [-5.0, -5.0, 60.0],
+        max: [5.0, 5.0, 72.0],
+    };
+    let trace = |flags: i32| {
+        let mut h = harness_with_model(build_mdl(
+            &[BoneDef::at(-1, [0.0, 0.0, 0.0])],
+            &[head()],
+            flags,
+            1,
+        ));
+        run(&mut h, |eng| {
+            studio_entity(
+                eng,
+                Vec3::new(100.0, 0.0, 0.0),
+                STANDING_MINS,
+                STANDING_MAXS,
+                0,
+            );
+            eng.trace_box(
+                Vec3::new(0.0, 0.0, 66.0),
+                Vec3::splat(-4.0),
+                Vec3::splat(4.0),
+                Vec3::new(200.0, 0.0, 66.0),
+                MoveFilter::Normal,
+                None,
+            )
+        })
+    };
+    let flagged = trace(0x200);
+    assert_eq!(flagged.trace.hitgroup, HEAD);
+    assert!(near(flagged.trace.fraction, (91.0 - 0.03125) / 200.0), "{flagged:?}");
+    // Without the flag the same move meets the entity's own box (16 + 4 from its origin).
+    let plain = trace(0);
+    assert_eq!(plain.trace.hitgroup, 0);
+    assert!(near(plain.trace.fraction, (80.0 - 0.03125) / 200.0), "{plain:?}");
+}
+
+#[test]
+fn an_entity_moved_within_a_call_gets_a_fresh_pose() {
+    let mut h = harness_with_model(two_box_model());
+    let (first, second, setups) = run(&mut h, |eng| {
+        let id = studio_entity(
+            eng,
+            Vec3::new(100.0, 0.0, 0.0),
+            STANDING_MINS,
+            STANDING_MAXS,
+            0,
+        );
+        let shot = |eng: &EngineApi<'_>| {
+            ray(eng, Vec3::new(0.0, 0.0, 66.0), Vec3::new(300.0, 0.0, 66.0))
+                .trace
+                .fraction
+        };
+        let first = shot(eng);
+        eng.set_origin(id, Vec3::new(150.0, 0.0, 0.0));
+        (first, shot(eng), eng.studio_setups())
+    });
+    assert!(near(first, (95.0 - 0.03125) / 300.0), "{first}");
+    assert!(near(second, (145.0 - 0.03125) / 300.0), "{second}");
+    assert_eq!(setups, 2);
 }

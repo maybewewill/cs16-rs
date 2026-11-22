@@ -70,7 +70,9 @@ struct CacheEntry {
     /// Not in the key of the original's cache, which then serves a pose with the shield for
     /// one without (and the other way round) until it is flushed; here it is in the key.
     skip_shield: bool,
-    hulls: Rc<[StudioHull]>,
+    /// `None`: the pose could not be made (also remembered, so a model that cannot be posed
+    /// costs one attempt per pose and call).
+    hulls: Option<Rc<[StudioHull]>>,
 }
 
 /// `rgStudioCache`.
@@ -97,7 +99,7 @@ impl StudioCache {
         controller: [u8; 4],
         blending: [u8; 2],
         skip_shield: bool,
-    ) -> Option<Rc<[StudioHull]>> {
+    ) -> Option<Option<Rc<[StudioHull]>>> {
         self.entries
             .iter()
             .find(|c| {
@@ -111,7 +113,7 @@ impl StudioCache {
                     && c.controller == controller
                     && c.blending == blending
             })
-            .map(|c| Rc::clone(&c.hulls))
+            .map(|c| c.hulls.clone())
     }
 
     /// `R_AddToStudioCache`.
@@ -306,12 +308,17 @@ fn value_at(model: &StudioPoseData, pos: usize, n: i32) -> Option<f32> {
 
 /// Finds the run of animation values that holds frame `frame` of the channel at `start`:
 /// the position of its header and the frame's index in it (the `while` of the source).
-/// `None` when the data ends first.
+/// `None` when the data ends first, or at a run of no frames (a real run has at least one):
+/// every step then takes a frame off `frame` or is refused, so the walk is bounded by the
+/// frame number and the sizes of the runs, not by the file.
 fn find_run(model: &StudioPoseData, start: usize, frame: i32) -> Option<(usize, i32, i32, i32)> {
     let mut pos = start;
     let mut k = frame;
     loop {
         let (valid, total, _) = model.anim_value(pos)?;
+        if total == 0 {
+            return None;
+        }
         if i32::from(total) <= k {
             k -= i32::from(total);
             pos = pos.checked_add((usize::from(valid) + 1) * 2)?;
@@ -669,12 +676,12 @@ impl EngineApi<'_> {
             blending,
             skip_shield,
         ) {
-            return Some(hit);
+            return hit;
         }
-        let hulls: Rc<[StudioHull]> = build_hulls(
+        let hulls: Option<Rc<[StudioHull]>> = build_hulls(
             model, v.frame, sequence, angles, origin, size, controller, blending, skip_shield,
-        )?
-        .into();
+        )
+        .map(Into::into);
         let mut cache = self.studio_cache.borrow_mut();
         cache.setups += 1;
         cache.add(CacheEntry {
@@ -687,9 +694,9 @@ impl EngineApi<'_> {
             controller,
             blending,
             skip_shield,
-            hulls: Rc::clone(&hulls),
+            hulls: hulls.clone(),
         });
-        Some(hulls)
+        hulls
     }
 
     /// Bone setups the traces of this call made so far (cache misses). For tests that count
