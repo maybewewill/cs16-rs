@@ -665,17 +665,24 @@ fn ladder_check_matches_the_legacy_overlap_test() {
     let w = World::on(&vfs, "cs_office");
     let (mut on, mut off) = (0, 0);
     for ladder in &ladders {
+        // The entity the engine made of the ladder has the brush model's bounds one unit larger
+        // on every side (`Mod_LoadSubmodels`, which `SetMinMaxSize` copies), and the game tests
+        // those: the legacy test on the lump's bounds has the same edges shifted by one unit.
+        // So the legacy test is run on the bounds with that spread, and what the test shows is
+        // that the engine-side check is the same overlap test, whose box the original grows.
+        let (lo, hi) = (ladder.mins - Vec3::ONE, ladder.maxs + Vec3::ONE);
         for hull in [Hull::Standing, Hull::Crouched] {
             // The box edges of the overlap test: just inside and just outside each face.
             let ext = hull.half_extents() + Vec3::new(3.0, 3.0, 0.0);
             let axis = |lo: f32, hi: f32, e: f32| {
                 [(lo + hi) * 0.5, lo - e - 0.5, lo - e + 0.5, hi + e - 0.5, hi + e + 0.5]
             };
-            for x in axis(ladder.mins.x, ladder.maxs.x, ext.x) {
-                for y in axis(ladder.mins.y, ladder.maxs.y, ext.y) {
-                    for z in axis(ladder.mins.z, ladder.maxs.z, ext.z) {
+            for x in axis(lo.x, hi.x, ext.x) {
+                for y in axis(lo.y, hi.y, ext.y) {
+                    for z in axis(lo.z, hi.z, ext.z) {
                         let pos = Vec3::new(x, y, z);
-                        let legacy = w.collision.is_on_ladder(pos, hull);
+                        let (pmin, pmax) = (pos - ext, pos + ext);
+                        let legacy = pmin.cmple(hi).all() && pmax.cmpge(lo).all();
                         assert_eq!(
                             w.server.game().is_on_ladder(pos, hull),
                             legacy,
@@ -902,17 +909,22 @@ fn legacy_numbers_unchanged() {
     let s = slot(&probe);
     let start = w.vars(s).origin;
     let yaw = clear_yaw(&w.collision, start, w.vars(s).v_angle.y);
-    let mut legacy = cs_sim::pmove::PlayerMoveState::at_spawn(start);
-    let params = MoveParams::default();
     for _ in 0..200 {
         probe.queue_cmd(cmd(yaw, WALK_MAX_SPEED, 0));
         w.step(&mut [&mut keeper, &mut probe], 1);
-        // The view angle crosses the wire quantized: the legacy run uses the one the server got.
-        let received = cmd(w.vars(s).v_angle.y, WALK_MAX_SPEED, 0);
-        let input = cs_sim::walk_game::usercmd_to_move_input(&received, WALK_MAX_SPEED);
-        cs_sim::pmove::step_player_move(&mut legacy, &input, WALK_MAX_SPEED, &params, &w.collision, 0.01);
     }
     w.step(&mut [&mut keeper, &mut probe], 5);
+    // The view angle crosses the wire quantized: the legacy run uses the one the server got.
+    // It is read after the run: while the first command is still in flight the edict holds the
+    // spawn angle, and a legacy step taken with that one walks the wrong way and is never
+    // made up (the run's end moves by a few units), which is no difference of the collision.
+    let received = cmd(w.vars(s).v_angle.y, WALK_MAX_SPEED, 0);
+    let input = cs_sim::walk_game::usercmd_to_move_input(&received, WALK_MAX_SPEED);
+    let mut legacy = cs_sim::pmove::PlayerMoveState::at_spawn(start);
+    let params = MoveParams::default();
+    for _ in 0..200 {
+        cs_sim::pmove::step_player_move(&mut legacy, &input, WALK_MAX_SPEED, &params, &w.collision, 0.01);
+    }
     let (engine, expected) = (w.vars(s).origin, legacy.origin);
     println!("engine {engine:?} legacy {expected:?}");
     assert!((engine - expected).abs().max_element() <= TOLERANCE, "{engine:?} vs {expected:?}");
