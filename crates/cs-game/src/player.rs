@@ -686,6 +686,7 @@ pub(crate) fn player_slot(g: &GameState, eng: &EngineApi<'_>, id: EdictId) -> Op
 ///   (No `Flashlight` message: `Spawn` only sets `m_iFlashBattery = 99`.) `UpdateLocation` sends nothing (no bots, the player is `DEAD_NO` only
 ///   for the length of `Spawn`).
 fn spawn_on_connect(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    set_player_classname(eng, slot);
     crate::world::get_player_spawn_spot(g, eng, slot);
     // `Spawn` (player.cpp:5849, read 2026-11-22): `SET_PHYSICS_KEY_VALUE(edict(), "slj", "0")` and
     // `"hl", "1"`: the client's physics info, which goes to it with its client data.
@@ -722,6 +723,16 @@ fn spawn_on_connect(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     }
     observer::screen_fade(eng, slot, 0.001, 0.0, 0, observer::FFADE_IN);
     messages::sync_round_timer(g, eng, slot);
+}
+
+/// `pev->classname = MAKE_STRING("player")`, the first statement of `CBasePlayer::Spawn`
+/// (player.cpp, read 2026-11-22): `FindEntityByClassname`/`FindEntityInSphere` loops (grenades,
+/// flashes, spawn-point occupants) find the player by it.
+fn set_player_classname(eng: &mut EngineApi<'_>, slot: u8) {
+    let id = eng.client_edict(slot);
+    if let Some(v) = eng.ent_mut(id) {
+        v.classname = "player".to_string();
+    }
 }
 
 /// The physics keys of `Spawn` (`slj` off, `hl` on).
@@ -949,6 +960,7 @@ pub(crate) fn spawn(
         return false;
     }
     let id = eng.client_edict(slot);
+    set_player_classname(eng, slot);
     // `GetPlayerSpawnSpot`.
     let (origin, angles) = match select_spawn_point(g, eng, id, spawn_team) {
         Some(spot) => {
