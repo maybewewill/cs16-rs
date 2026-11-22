@@ -106,7 +106,9 @@ impl PrecacheTables {
     /// Sounds, then models, then generic files, then the event scripts (type
     /// [`res_type::EVENTSCRIPT`], flag `RES_FATALIFMISSING`, in `SV_CreateResourceList` order
     /// last, after the decals), each in index order without the empty entry 0. Submodel names (`*N`) get size 0; every other name
-    /// gets `size_of(name)`. Order is a working assumption about HLDS.
+    /// gets `size_of(name)`. The kinds come in the order sounds, models,
+    /// generic, events, which is not the order of `SV_CreateResourceList` (generic, sounds,
+    /// models, decals, events); only the events' place at the end agrees with it.
     pub fn resource_list(&self, size_of: &dyn Fn(&str) -> u32) -> Vec<ResourceEntry> {
         [
             (res_type::SOUND, &self.sounds),

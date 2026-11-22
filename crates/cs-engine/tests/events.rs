@@ -435,3 +435,66 @@ fn events_follow_the_pas_unless_global() {
     assert_eq!(events_of(&t).len(), 1, "a global event reaches everyone");
     assert_eq!(events_of(&t)[0].index, 2);
 }
+
+#[test]
+fn the_queue_holds_64_events_and_one_update_carries_31() {
+    let (mut h, mut a, mut b) = two_active();
+    h.server.game_mut().act(|eng| {
+        for i in 0..70 {
+            let shooter = eng.client_edict(0);
+            eng.playback_event(
+                0,
+                Some(shooter),
+                1,
+                0.0,
+                Vec3::ZERO,
+                Vec3::ZERO,
+                1.0 + i as f32,
+                0.0,
+                0,
+                0,
+                false,
+                false,
+            );
+        }
+    });
+    h.step(&mut [&mut a, &mut b], 30);
+    // 64 fit the queue (the other 6 were dropped); an update sends 31 and discards the rest.
+    let got = events_of(&b);
+    assert_eq!(got.len(), 31);
+    assert_eq!(got[0].args.unwrap().fparam1, 1.0);
+    assert_eq!(got[30].args.unwrap().fparam1, 31.0);
+    h.step(&mut [&mut a, &mut b], 30);
+    assert_eq!(events_of(&b).len(), 31, "nothing is left over");
+}
+
+#[test]
+fn reliable_hostonly_goes_to_the_invoker_alone_and_negative_delay_is_refused() {
+    let (mut h, mut a, mut b) = two_active();
+    h.server.game_mut().act(|eng| {
+        play(eng, FEV_RELIABLE | FEV_HOSTONLY, 0, 1);
+        let shooter = eng.client_edict(0);
+        for flags in [0, FEV_RELIABLE] {
+            eng.playback_event(
+                flags,
+                Some(shooter),
+                2,
+                -0.5,
+                Vec3::ZERO,
+                Vec3::ZERO,
+                1.0,
+                0.0,
+                0,
+                0,
+                false,
+                false,
+            );
+        }
+    });
+    h.step(&mut [&mut a, &mut b], 30);
+    let got = reliable_events_of(&a);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].0, 1);
+    assert!(reliable_events_of(&b).is_empty());
+    assert!(events_of(&a).is_empty() && events_of(&b).is_empty());
+}

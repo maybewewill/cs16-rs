@@ -15,6 +15,10 @@
 //!   invoker (an assumption): the game plays weapon events from the shooter's own command.
 //! - `EV_Precache_internal` loads the event script and stops the server when it is missing;
 //!   this engine does not look at the file.
+//! - A reliable event for a client whose reliable backlog is past `MAX_RELIABLE_BACKLOG` is
+//!   dropped (ReHLDS fragments it); a server without the `event_t` schema sends none.
+//! - A negative `delay` is refused (the source's `(int)` and `unsigned` conversions of it are
+//!   undefined or wrap).
 //! - `MAX_EVENT_QUEUE` (64) is from memory of the SDK's `event_state_t` (assumption); the
 //!   message carries at most 31 events anyway.
 
@@ -173,7 +177,13 @@ impl EngineApi<'_> {
     /// name is new (the source stops the server with an error), or when all 255 indices are
     /// taken.
     pub fn precache_event(&mut self, name: &str) -> u16 {
-        self.precache.precache_event(name).unwrap_or(0)
+        match self.precache.precache_event(name) {
+            Ok(index) => index,
+            Err(reason) => {
+                tracing::warn!(name, ?reason, "precache_event refused");
+                0
+            }
+        }
     }
 
     /// `PF_playbackevent` / `EV_Playback` (ReHLDS `rehlds/engine/pr_cmds.cpp`, read
@@ -218,6 +228,7 @@ impl EngineApi<'_> {
             || !fparam1.is_finite()
             || !fparam2.is_finite()
             || !delay.is_finite()
+            || delay < 0.0
         {
             return;
         }

@@ -173,7 +173,8 @@ fn write_fire_time(w: &mut MsgWriter, fire_time: Option<u16>) {
 }
 
 /// Reads the body of a `svc_event` (after the opcode) with an active bit reader. Without the
-/// `event_t` schema the arguments of an event cannot be decoded: they read as absent.
+/// `event_t` schema an event without arguments still reads; one with a delta is an error
+/// (the stream could not stay aligned).
 pub(crate) fn read_svc_event(
     r: &mut MsgReader<'_>,
     schema: Option<&DeltaSchema>,
@@ -188,9 +189,10 @@ pub(crate) fn read_svc_event(
         let mut args = None;
         if r.read_one_bit() {
             packet_index = Some(r.read_bits(11) as u16);
-            if r.read_one_bit()
-                && let (Some(schema), Some(zero)) = (schema, zero.as_ref())
-            {
+            if r.read_one_bit() {
+                let (Some(schema), Some(zero)) = (schema, zero.as_ref()) else {
+                    return Err(ProtoError::Delta("missing event_t".to_string()));
+                };
                 let rec = read_delta(r, schema, zero, server_time)?;
                 args = Some(EventArgs::from_delta(&rec, schema));
             }
