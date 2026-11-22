@@ -15,6 +15,7 @@ pub mod bullets;
 pub mod buy;
 pub mod chat;
 pub mod entity;
+pub mod grenade;
 pub mod hud_misc;
 pub mod intro;
 pub mod inventory;

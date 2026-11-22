@@ -54,7 +54,7 @@ use cs_engine::{EdictId, EngineApi, EntTrace, MsgDest};
 use cs_proto48::delta::{GoldSrcClientData, GoldSrcUserCmd};
 use cs_proto48::messages::svc;
 use cs_proto48::usermsg::CsUserMsg;
-use cs_sim::pm::consts::PM_VEC_VIEW;
+use cs_sim::pm::consts::{IN_ATTACK, PM_VEC_VIEW};
 use glam::Vec3;
 
 use crate::GameState;
@@ -423,6 +423,18 @@ pub struct Player {
     /// `m_flLastCommandTime[CMD_LISTMAPS]`: `listmaps` answers when the server time reaches
     /// this.
     pub(crate) next_listmaps: f64,
+    /// `m_blindUntilTime`: server time the flashbang's blindness counts as over, for the status
+    /// bar (`UpdateStatusBar` names no target while it lasts). `Blind` sets it, `Spawn` clears
+    /// it (`player.cpp` 5894, 8259, read 2026-11-22).
+    pub(crate) blind_until_time: f32,
+    /// `m_blindStartTime`: server time of the last flash that hit the player.
+    pub(crate) blind_start_time: f32,
+    /// `m_blindHoldTime`: seconds the screen stays white.
+    pub(crate) blind_hold_time: f32,
+    /// `m_blindFadeTime`: seconds the white takes to fade out.
+    pub(crate) blind_fade_time: f32,
+    /// `m_blindAlpha`: the opacity (0 to 255) of the white.
+    pub(crate) blind_alpha: i32,
 }
 
 impl Player {
@@ -511,7 +523,32 @@ impl Player {
             next_handle_signals: 0.0,
             time_check_allowed: 0,
             next_listmaps: 0.0,
+            blind_until_time: 0.0,
+            blind_start_time: 0.0,
+            blind_hold_time: 0.0,
+            blind_fade_time: 0.0,
+            blind_alpha: 0,
         }
+    }
+
+    /// `CBasePlayer::Blind(duration, holdTime, fadeTime, alpha)` (`player.cpp` 8257, read
+    /// 2026-11-22): remembers the flash that hit the player, `now` being `gpGlobals->time`. (The
+    /// `m_RadiusFlash` hook chain of `REGAMEDLL_API` has no default but this.)
+    pub(crate) fn blind(&mut self, now: f32, duration: f32, hold_time: f32, fade_time: f32, alpha: i32) {
+        self.blind_until_time = now + duration;
+        self.blind_start_time = now;
+        self.blind_hold_time = hold_time;
+        self.blind_fade_time = fade_time;
+        self.blind_alpha = alpha;
+    }
+
+    /// The reset of `Spawn` (`player.cpp` 5894-5898): no flash is left on the player.
+    fn clear_blindness(&mut self) {
+        self.blind_until_time = 0.0;
+        self.blind_start_time = 0.0;
+        self.blind_hold_time = 0.0;
+        self.blind_fade_time = 0.0;
+        self.blind_alpha = 0;
     }
 
     /// `m_bHasNightVision`. For tests only (cargo feature `test-hooks`).
@@ -911,6 +948,7 @@ pub(crate) fn spawn(
     p.velocity_modifier = 1.0;
     p.last_hit_group = HITGROUP_GENERIC;
     p.high_damage = false;
+    p.clear_blindness();
     observer::on_spawn(p);
     // `m_tmHandleSignals = 0`: the zones are looked at again with the first client data update.
     p.next_handle_signals = 0.0;
@@ -1797,8 +1835,8 @@ pub(crate) fn take_damage(
 /// In the source's order: a blast, an explosion or a fall sets the hit group to generic, a bullet
 /// at the shield's hit group is refused. An explosion (`DMG_EXPLOSION` or `DMG_BLAST`) has its
 /// own branch: a grenade of the victim's team hurts it only with friendly fire or if the victim
-/// threw it (assumption: the grenade's `m_iTeam` is the thrower's team, grenades are a later
-/// task), armor takes its share with the explosion formula, there are two pain sounds, and it
+/// threw it (assumption: the grenade's `m_iTeam` is the thrower's team, which [`crate::grenade`]
+/// stores but this reads from the attacker), armor takes its share with the explosion formula, there are two pain sounds, and it
 /// returns before `m_bitsHUDDamage`. QUIRK: the `flBonus *= 2` for `DMG_BLAST` further down is
 /// unreachable in the source, because `DMG_BLAST` is caught by the explosion branch first.
 ///
@@ -1815,7 +1853,7 @@ pub(crate) fn take_damage(
 /// Left out: the VIP's halved ratio and the shield's added 0.2 (VIP and shield tasks), the
 /// teammate-attack hints and `m_flLastAttackedTeammate`, `SetAnimation(PLAYER_FLINCH)` (the
 /// player animation task), `m_lastDamageAmount`, `m_bKilledByBomb`/`m_bKilledByGrenade`
-/// (bomb and grenade tasks), `LogAttack`, bots, the career tasks and the director/`HLTV`
+/// (only the death animation reads them: the player animation task, with the bomb), `LogAttack`, bots, the career tasks and the director/`HLTV`
 /// messages.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn take_damage_with(
@@ -2110,6 +2148,9 @@ fn killed(
     score::player_killed(g, eng, slot, attacker, inflictor, attacker_weapon);
     // `NVGToggle 0` to the player and to the observers that watch it in first person.
     observer::killed_night_vision(g, eng, slot);
+    // `Killed` (player.cpp 2365-2411, vanilla): a player that dies holding a grenade and the
+    // fire button throws it.
+    throw_grenade_on_death(g, eng, slot);
 
     // CBasePlayer::Killed.
     if let Some(p) = g.players[index].as_mut() {
@@ -2155,6 +2196,36 @@ fn killed(
         _ => "player/death6.wav",
     };
     eng.emit_sound(id, CHAN_VOICE, sample, 1.0, ATTN_NORM, PITCH_NORM);
+}
+
+/// The grenade switch of `CBasePlayer::Killed` (`player.cpp` 2365-2411, read 2026-11-22): a
+/// player whose active item is a grenade (HE, flashbang, smoke) and who holds the fire button
+/// while it has one throws it, from its eyes, with its `pev->angles` as the velocity (QUIRK: a
+/// vector of a few degrees, so the grenade drops at its feet), a fuse of 1.5 seconds. The ammo
+/// is not taken (`REGAMEDLL_FIXES` does).
+fn throw_grenade_on_death(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    let id = eng.client_edict(slot);
+    let Some(p) = g.players[usize::from(slot)].as_ref() else {
+        return;
+    };
+    let Some(weapon) = p.active_item.filter(|w| {
+        matches!(w, WeaponId::HeGrenade | WeaponId::Flashbang | WeaponId::SmokeGrenade)
+    }) else {
+        return;
+    };
+    let ammo_type = p
+        .active_item
+        .and_then(|w| p.find_item(w))
+        .map_or(-1, |(s, i)| p.items[s][i].weapon.primary_ammo_type);
+    let has_ammo = usize::try_from(ammo_type).ok().and_then(|i| p.ammo.get(i)).is_some_and(|&a| a != 0);
+    let Some(v) = eng.ent(id) else {
+        return;
+    };
+    if v.button & IN_ATTACK == 0 || !has_ammo {
+        return;
+    }
+    let (src, angles) = (v.origin + v.view_ofs, v.angles);
+    crate::grenade::throw_grenade(g, eng, slot, weapon, src, angles, 1.5);
 }
 
 /// `CBasePlayer::PlayerDeathThink` for a dead player, every `DEATH_THINK_INTERVAL`: a body on

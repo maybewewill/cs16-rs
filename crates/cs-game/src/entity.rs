@@ -97,6 +97,8 @@ pub fn create_entity(classname: &str) -> Option<Box<dyn GameEntity>> {
         #[cfg(feature = "test-hooks")]
         "test_dispatch_create_on_think" => Box::new(DispatchProbe(ProbeMode::CreateOnThink)),
         "armoury_entity" => Box::new(crate::inventory::Armoury::default()),
+        "grenade" => Box::new(crate::grenade::Grenade::default()),
+        "spark_shower" => Box::new(crate::grenade::SparkShower),
         other => Box::new(crate::inventory::WorldWeapon::of_class(other)?),
     };
     Some(entity)
@@ -245,6 +247,8 @@ mod tests {
             "func_pushable",
             "func_illusionary",
             "armoury_entity",
+            "grenade",
+            "spark_shower",
             "weapon_ak47",
             "weapon_knife",
         ] {

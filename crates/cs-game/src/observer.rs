@@ -23,9 +23,10 @@
 //!
 //! Deviations and gaps:
 //! - The state the first-person view copies from the followed player (the progress bar, the
-//!   blindness, the night vision, the C4 and defuser icons, its weapon) has nothing to copy yet:
-//!   those players do not exist until the weapons, the bomb and the night vision do. The messages
-//!   that clear that state when the mode changes are sent as the original sends them.
+//!   night vision, the C4 and defuser icons, its weapon) has nothing to copy yet: those players
+//!   do not exist until the bomb and the night vision do. The messages that clear that state
+//!   when the mode changes are sent as the original sends them. The blindness is copied (a
+//!   flashbang, [`crate::grenade`]).
 //! - `GetPlayerSpawnSpot` ([`crate::world::get_player_spawn_spot`]) does not fire the `target` of
 //!   the spawn point (the trigger entities do not exist yet; `spawn` skips it too).
 //! - The `mp_fadetoblack` of the dying player is the vanilla one: any value but 0 fades the
@@ -203,6 +204,21 @@ pub(crate) fn screen_fade(
     alpha: u8,
     flags: u16,
 ) {
+    screen_fade_color(eng, slot, [0, 0, 0], fade_time, hold, alpha, flags);
+}
+
+/// `UTIL_ScreenFade(player, color, fade_time, hold, alpha, flags)` (`util.cpp` 546-593, read
+/// 2026-11-22): `UTIL_ScreenFadeBuild` (the seconds as `FixedUnsigned16(value, 1 << 12)`, the
+/// colour truncated to bytes) and `UTIL_ScreenFadeWrite` (`ScreenFade` to the one player).
+pub(crate) fn screen_fade_color(
+    eng: &mut EngineApi<'_>,
+    slot: u8,
+    color: [u8; 3],
+    fade_time: f32,
+    hold: f32,
+    alpha: u8,
+    flags: u16,
+) {
     let fixed = |seconds: f32| (seconds * FADE_UNIT).clamp(0.0, 65535.0) as u16;
     eng.send_usermsg(
         MsgDest::One(slot),
@@ -210,15 +226,18 @@ pub(crate) fn screen_fade(
             duration: fixed(fade_time),
             hold_time: fixed(hold),
             flags,
-            color: [0, 0, 0, alpha],
+            color: [color[0], color[1], color[2], alpha],
         },
     );
 }
 
-/// `UpdateClientEffects`: what the observer's screen shows of the player it followed in first
-/// person is taken away when the mode changes. (The progress bar, blindness and night vision of
-/// the followed player are not copied: see the module docs.)
-fn update_client_effects(eng: &mut EngineApi<'_>, slot: u8, old_mode: i32) {
+/// `UpdateClientEffects` (`observer.cpp` 49-137, read 2026-11-22): what the observer's screen shows
+/// of the player it followed in first person is taken away when the mode changes. The one
+/// thing it copies is the blindness: while the followed player is blind from a flashbang (and
+/// `mp_fadetoblack` is not 1) the observer is faded white as the player is, for what is left of
+/// the flash; a flash that has passed fades the screen back in. (The progress bar and the night
+/// vision of the followed player are not copied: see the module docs.)
+fn update_client_effects(g: &GameState, eng: &mut EngineApi<'_>, slot: u8, old_mode: i32) {
     let mode = mode_of(eng, slot);
     let blindness_ok = eng.cvar_f32("mp_fadetoblack") as i32 != FADETOBLACK_STAY;
     if mode != OBS_IN_EYE && old_mode != OBS_IN_EYE {
@@ -226,7 +245,33 @@ fn update_client_effects(eng: &mut EngineApi<'_>, slot: u8, old_mode: i32) {
     }
     // `SetProgressBarTime(0)`.
     eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::BarTime(0));
-    if blindness_ok {
+    let mut clear_blindness = true;
+    if mode == OBS_IN_EYE
+        && blindness_ok
+        && let Some(target) = current_target(g, slot)
+        && let Some(p) = g.players.get(usize::from(target)).and_then(Option::as_ref)
+        && p.blind_start_time != 0.0
+        && p.blind_fade_time != 0.0
+    {
+        let now = eng.time() as f32;
+        let end_time = p.blind_fade_time + p.blind_hold_time + p.blind_start_time;
+        if end_time > now {
+            clear_blindness = false;
+            let mut fade_time = p.blind_fade_time;
+            let mut alpha = p.blind_alpha as f32;
+            let mut hold_time = p.blind_hold_time + p.blind_start_time - now;
+            if hold_time <= 0.0 {
+                hold_time = 0.0;
+                let ratio = (end_time - now) / fade_time;
+                alpha = p.blind_alpha as f32 * ratio;
+                fade_time *= ratio;
+            }
+            // `UTIL_ScreenFade(pObserver, Vector(255, 255, 255), fadeTime, holdTime, alpha)`:
+            // the float alpha is cut to an int, and to a byte on the wire.
+            screen_fade_color(eng, slot, [255, 255, 255], fade_time, hold_time, alpha as i32 as u8, FFADE_IN);
+        }
+    }
+    if blindness_ok && clear_blindness {
         // `UTIL_ScreenFade(pObserver, Vector(0, 0, 0), 0.001)`: the defaults of the rest, an
         // alpha of 0 and no flags.
         screen_fade(eng, slot, 0.001, 0.0, 0, FFADE_IN);
@@ -313,7 +358,7 @@ pub(crate) fn find_next_player(
     {
         v.iuser2 = index_of(t);
     }
-    update_client_effects(eng, slot, old_mode);
+    update_client_effects(g, eng, slot, old_mode);
 }
 
 /// `CBasePlayer::Observer_SetMode`: the observer of `slot` asks for mode `mode`. Mode and target
@@ -394,7 +439,7 @@ pub(crate) fn set_mode(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, mod
     }
     // `gmsgCrosshair`: the crosshair shows only while roaming.
     send_raw(eng, MsgDest::One(slot), "Crosshair", &[u8::from(mode == OBS_ROAMING)]);
-    update_client_effects(eng, slot, old_mode);
+    update_client_effects(g, eng, slot, old_mode);
     // Print the spectator mode on the client's screen.
     let shown = eng.ent(id).map_or(mode, |v| v.iuser1);
     print_center(eng, slot, &format!("#Spec_Mode{shown}"));

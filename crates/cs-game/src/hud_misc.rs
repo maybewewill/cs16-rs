@@ -42,8 +42,8 @@
 //!   The radar sends nothing to observers (only living players are told, player.cpp:7939), and
 //!   `nightvision` itself is for a living player only (client.cpp:3445).
 //! - `HintMessage` (`#Hint_spotted_a_friend`, `#Hint_spotted_an_enemy`) and the hostage branch of
-//!   the status bar need the hint queue and the hostages; they are not sent. `m_blindUntilTime`
-//!   (a flashbang) is never in the future yet.
+//!   the status bar need the hint queue and the hostages; they are not sent. A player a
+//!   flashbang blinded (`m_blindUntilTime` in the future) sees no name in the status bar.
 //! - `Location` (`UpdateLocation`, the place name of the player) is sent only by the bots and
 //!   Condition Zero (`AreRunningCZero`, the bot phrase list); the vanilla radio shows `#Game_radio`,
 //!   never `#Game_radio_location`. It is not sent.
@@ -183,7 +183,7 @@ pub(crate) fn on_spawn(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
 
 /// The observers that watch `slot` in first person (`IsObservingPlayer`: `OBS_IN_EYE` and
 /// `iuser2` its edict index; the original skips an edict whose flags are exactly `FL_DORMANT`).
-fn followers(g: &GameState, eng: &EngineApi<'_>, slot: u8) -> Vec<u8> {
+pub(crate) fn followers(g: &GameState, eng: &EngineApi<'_>, slot: u8) -> Vec<u8> {
     let index = i32::from(slot) + 1;
     (0..g.players.len() as u8)
         .filter(|&i| {
@@ -629,6 +629,8 @@ pub(crate) fn update_status_bar(g: &mut GameState, eng: &mut EngineApi<'_>, slot
     if me.hud.next_sbar_update >= now {
         return;
     }
+    // `gpGlobals->time >= m_blindUntilTime`: a player a flashbang blinded names no target.
+    let blind = (now as f32) < me.blind_until_time;
     let (team, old_state, old_string, mut disappear) = (
         me.team,
         me.hud.sbar_state,
@@ -655,7 +657,7 @@ pub(crate) fn update_status_bar(g: &mut GameState, eng: &mut EngineApi<'_>, slot
         // `FNullEnt(tr.pHit)`: the world counts as none.
         let target = tr
             .ent
-            .filter(|&hit| hit != eng.world())
+            .filter(|&hit| hit != eng.world() && !blind)
             .and_then(|hit| player_slot(g, eng, hit))
             .and_then(|t| {
                 let tp = g.players[t].as_ref()?;
