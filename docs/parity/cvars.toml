@@ -242,6 +242,11 @@ status = "tested"
 evidence = "crates/cs-engine/tests/movevars.rs::move_vars_follow_every_cvar; the movevars field of the same name follows the cvar"
 
 [[item]]
+id = "sv_clienttrace"
+status = "implemented"
+evidence = "crates/cs-engine/tests/studio_hitboxes.rs; default 1, FCVAR_SERVER from rehlds/engine/sv_main.cpp:204 (read 2026-11-22); 0 makes a point trace use the box instead of the hitboxes (SV_HullForStudioModel)"
+
+[[item]]
 id = "sv_rollangle"
 status = "tested"
 evidence = "crates/cs-engine/tests/movevars.rs::new_movement_cvars_have_rehlds_defaults, move_vars_follow_every_cvar; default and flags from rehlds/engine/sv_user.cpp:51 `sv_rollangle` default 0.0, no flags (read 2026-11-22)"
