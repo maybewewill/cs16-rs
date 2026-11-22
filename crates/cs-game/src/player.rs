@@ -1528,7 +1528,7 @@ pub(crate) fn trace_attack(
                 }
                 damage *= 4.0;
                 if should_bleed {
-                    punch_x = Some((damage * -0.5).max(-12.0));
+                    punch_x = Some(((f64::from(damage) * -0.5) as f32).max(-12.0));
                     punch_roll = true;
                 }
             }
@@ -1536,7 +1536,7 @@ pub(crate) fn trace_attack(
                 if kevlar != ArmorType::None {
                     should_bleed = false;
                 } else if should_bleed {
-                    punch_x = Some((damage * -0.1).max(-4.0));
+                    punch_x = Some(((f64::from(damage) * -0.1) as f32).max(-4.0));
                 }
             }
             HITGROUP_STOMACH => {
@@ -1587,7 +1587,7 @@ pub(crate) fn trace_attack(
 /// dies). `damage` arrives truncated (`int(flDamage)`). The player's own bookkeeping of the
 /// hit (what the `Damage` message reports) follows `CBaseMonster::TakeDamage` as reviewed
 /// before (`basemonster.cpp:430-441`); `player_bits` is false for the explosion branch, which
-/// returns before `m_bitsDamageType`/`m_bitsHUDDamage` are set.
+/// returns before `m_bitsHUDDamage` is set (the damage bits are ORed in either way).
 ///
 /// Assumption (`CBaseMonster::TakeDamage` is not among the fetched sources): it is the
 /// Half-Life monster's, which has no momentum push. The block of `CBaseEntity::TakeDamage`
@@ -1615,9 +1615,8 @@ fn monster_take_damage(
     // Do the damage.
     let Some(p) = g.players[index].as_mut() else { return false };
     p.health -= damage;
-    if player_bits {
-        p.damage_bits |= bits;
-    }
+    // `m_bitsDamageType |= bitsDamageType` is the first thing `CBaseMonster::TakeDamage` does.
+    p.damage_bits |= bits;
     // What the `Damage` message reports (`CBaseMonster::TakeDamage`, ReGameDLL
     // `basemonster.cpp:430-441`, as reviewed): for a player, the inflictor when there is one
     // (the old one stays otherwise) and the health lost. Nothing sets `pev->dmg_save`, so the

@@ -424,3 +424,70 @@ fn death_msg_names_the_weapon_and_headshot() {
     common::command(&mut b, 2, "kill");
     assert_eq!(death_msgs(&b), vec![death_bytes(3, 3, 0, "world")]);
 }
+
+#[test]
+fn spread_displaces_along_right_and_up_of_the_view() {
+    // `dir = forward + x * spread * right + y * spread * up`, the vectors from the view angles
+    // through pm's `angle_vectors`. A target placed on that exact ray is hit; none of a swapped,
+    // mirrored or negated ray would be (checked against the box, 16 wide, 36 high).
+    let angles = Vec3::new(25.0, 40.0, 15.0);
+    let (forward, right, up) = cs_sim::pm::math::angle_vectors(angles);
+    let spread = 0.1_f32;
+    let draw = |seed: u32| {
+        let x = shared_random_float(seed, -0.5, 0.5) + shared_random_float(seed + 1, -0.5, 0.5);
+        let y = shared_random_float(seed + 2, -0.5, 0.5) + shared_random_float(seed + 3, -0.5, 0.5);
+        (x, y)
+    };
+    let src = eye(Vec3::new(-100.0, 50.0, 0.0));
+    let at = |x: f32, y: f32, a: Vec3, b: Vec3| src + (forward + (x * spread) * a + (y * spread) * b) * 1000.0;
+    let outside = |p: Vec3, q: Vec3| {
+        let d = (p - q).abs();
+        d.x > 40.0 || d.y > 40.0 || d.z > 40.0
+    };
+    let seed = (0..2000_u32)
+        .step_by(4)
+        .find(|&s| {
+            let (x, y) = draw(s);
+            let real = at(x, y, right, up);
+            [at(y, x, right, up), at(x, y, up, right), at(-x, y, right, up), at(x, -y, right, up), at(x, y, -right, -up), src + forward * 1000.0]
+                .iter()
+                .all(|&other| outside(real, other))
+        })
+        .expect("a seed that separates every wrong ray");
+    let (x, y) = draw(seed);
+    let target = at(x, y, right, up);
+    let mut b = arena();
+    b.run(move |game, eng| {
+        put(eng, 0, Vec3::new(-100.0, 50.0, 0.0));
+        put(eng, 1, target);
+        let mut bullet = rifle_bullet(src, 1, seed);
+        bullet.dir = forward;
+        bullet.spread = spread;
+        game.test_fire_bullets3(eng, 0, None, angles, &bullet);
+    });
+    assert!(health(&mut b, 1) < 100.0, "the displaced ray hit its target");
+}
+
+#[test]
+fn hostile_bullet_input_is_refused_quietly() {
+    let mut b = arena();
+    b.run(|game, eng| {
+        put(eng, 0, Vec3::ZERO);
+        put(eng, 1, Vec3::new(216.0, 0.0, 0.0));
+        let mut bullet = rifle_bullet(eye(Vec3::ZERO), 2, 0);
+        bullet.dir = Vec3::new(f32::NAN, 0.0, 0.0);
+        game.test_fire_bullets3(eng, 0, None, Vec3::ZERO, &bullet);
+        let mut bullet = rifle_bullet(eye(Vec3::ZERO), 2, 0);
+        bullet.distance = 0.0;
+        game.test_fire_bullets3(eng, 0, None, Vec3::ZERO, &bullet);
+        let mut bullet = rifle_bullet(eye(Vec3::ZERO), i32::MAX, 0);
+        bullet.range_modifier = f32::NAN;
+        game.test_fire_bullets3(eng, 0, None, Vec3::new(f32::NAN, 0.0, 0.0), &bullet);
+        let bullet = rifle_bullet(eye(Vec3::ZERO), i32::MAX, 0);
+        game.test_fire_bullets3(eng, 0, None, Vec3::ZERO, &bullet);
+        // A stale attacker slot.
+        game.test_damage_with_weapon(eng, 1, Some(9), Some(WeaponId::Ak47), 10.0, dmg::BULLET);
+    });
+    // The shot with a huge penetration count went through the clamp and hit once or twice.
+    assert!(health(&mut b, 1) < 100.0);
+}

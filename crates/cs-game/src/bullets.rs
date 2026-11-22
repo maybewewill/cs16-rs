@@ -29,6 +29,7 @@
 use cs_engine::consts::{MOVETYPE_PUSH, SOLID_BSP};
 use cs_engine::{EdictId, EngineApi, EntTrace, MoveFilter, MsgDest};
 use cs_proto48::tempent;
+use cs_sim::pm::math::angle_vectors;
 use cs_sim::pm::pm_find_texture_type;
 use glam::Vec3;
 
@@ -76,10 +77,10 @@ const DECAL_NAMES: [&str; 42] = [
 ];
 
 /// `RANDOM_FLOAT(low, high)` of the engine, from the game's generator (assumption: the engine's
-/// own sequence is not reproducible, only its range and distribution matter).
+/// own sequence is not reproducible, only its range and distribution matter). Shared with
+/// `hud_misc`.
 pub(crate) fn random_float(g: &mut GameState, low: f32, high: f32) -> f32 {
-    let r = g.random_range(0, 0x7fff) as f32 / 32767.0;
-    low + (high - low) * r
+    low + (high - low) * (g.random_range(0, 65535) as f32 / 65535.0)
 }
 
 /// `Vector::Normalize()` of the Half-Life SDK: the zero vector gives `(0, 0, 1)`.
@@ -387,17 +388,6 @@ pub fn bullet_penetration(kind: BulletType) -> (i32, f32) {
     }
 }
 
-/// `UTIL_MakeVectors(angles)`: `(forward, right, up)` as the engine's `AngleVectors` gives them.
-pub fn make_vectors(angles: Vec3) -> (Vec3, Vec3, Vec3) {
-    let (sp, cp) = angles.x.to_radians().sin_cos();
-    let (sy, cy) = angles.y.to_radians().sin_cos();
-    let (sr, cr) = angles.z.to_radians().sin_cos();
-    let forward = Vec3::new(cp * cy, cp * sy, -sp);
-    let right = Vec3::new(-sr * sp * cy + cr * sy, -sr * sp * sy - cr * cy, -sr * cp);
-    let up = Vec3::new(cr * sp * cy + sr * sy, cr * sp * sy - sr * cy, cr * cp);
-    (forward, right, up)
-}
-
 /// The arguments of `FireBullets3` besides the shooter.
 #[derive(Debug, Clone, Copy)]
 pub struct Bullet {
@@ -455,7 +445,8 @@ pub fn fire_bullets3(
     let attacker = attacker.unwrap_or(shooter);
     let (mut power, pen_distance) = bullet_penetration(bullet.kind);
     let mut current_damage = bullet.damage;
-    let mut penetration = bullet.penetration;
+    // Hostile input: a sane number of passes (the weapons use 1 to 3).
+    let mut penetration = bullet.penetration.clamp(0, 16);
     let mut src = bullet.src;
     let mut distance = bullet.distance;
     let mut mm = MultiDamage::new(weapon);
@@ -479,6 +470,11 @@ pub fn fire_bullets3(
         }
     }
 
+    if !(bullet.src.is_finite() && bullet.dir.is_finite() && bullet.spread.is_finite()
+        && bullet.distance.is_finite() && bullet.range_modifier.is_finite())
+    {
+        return Vec3::ZERO;
+    }
     let dir = bullet.dir + (x * bullet.spread) * v_right + (y * bullet.spread) * v_up;
     let mut end = src + dir * distance;
     let mut damage_modifier = 0.5_f32;
@@ -640,7 +636,7 @@ impl crate::CsGame {
         bullet: &Bullet,
     ) -> Vec3 {
         let shooter = eng.client_edict(slot);
-        let (_, right, up) = make_vectors(angles);
+        let (_, right, up) = angle_vectors(angles);
         fire_bullets3(&mut self.state, eng, shooter, None, weapon, right, up, bullet)
     }
 
@@ -657,7 +653,7 @@ impl crate::CsGame {
         distance: f32,
     ) {
         let shooter = eng.client_edict(slot);
-        let (forward, right, up) = make_vectors(angles);
+        let (forward, right, up) = angle_vectors(angles);
         fire_bullets(
             &mut self.state, eng, shooter, None, None, right, up, shots, src, forward, spread,
             distance, BulletType::PlayerBuckshot, 0,

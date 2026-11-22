@@ -59,6 +59,7 @@ use cs_proto48::usermsg::CsUserMsg;
 use glam::Vec3;
 
 use crate::GameState;
+use crate::bullets::random_float;
 use crate::chat::HUD_PRINTCENTER;
 use crate::menus::{
     self, MENU_KEY_0, MENU_KEY_1, MENU_KEY_2, MENU_KEY_3, MENU_KEY_4, MENU_KEY_5, MENU_KEY_6,
@@ -205,12 +206,6 @@ fn switch_night_vision_off(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8)
             p.night_vision_on = false;
         }
     }
-}
-
-/// A float in `lo..=hi` derived from the game's own `random_range` (the engine offers the game no
-/// `RANDOM_FLOAT`); the original's `RANDOM_FLOAT(lo, hi)` is the engine's generator.
-fn random_float(g: &mut GameState, lo: f32, hi: f32) -> f32 {
-    lo + (hi - lo) * (g.random_range(0, 65535) as f32 / 65535.0)
 }
 
 /// The commands of this module (`ClientCommand_` of ReGameDLL `client.cpp`): `ignorerad`, and
