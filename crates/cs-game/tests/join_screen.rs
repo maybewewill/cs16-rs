@@ -174,9 +174,13 @@ fn no_camera_join_path_unchanged() {
         true,
     );
     b.idle_cmds = true;
+    b.step(5);
     let v = view(&mut b);
     assert_eq!(v.origin, Vec3::new(100.0, 0.0, 1.0));
-    assert_eq!((v.angles.y, v.v_angle), (90.0, Vec3::ZERO));
+    // The spot's angles (the forced view below). `v_angle` is not asserted: it is zero until the
+    // probe's first command and then whatever that command looks along, which depends on how
+    // many frames sign-on took.
+    assert_eq!(v.angles.y, 90.0);
     assert_eq!(v.view_ofs, Vec3::new(0.0, 0.0, 17.0));
     assert_eq!(forced_view(&b), Some(v.angles));
     assert!(!v.has_camera);

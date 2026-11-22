@@ -158,6 +158,20 @@ fn throw_velocity_from_pitch() {
             let me_vars = eng.ent(eng.client_edict(0)).unwrap().clone();
             let expected = forward * speed + me_vars.velocity;
             assert!(approx3(g.velocity, expected, 0.05), "{:?} vs {expected:?}", g.velocity);
+            // Hard numbers, not the formula: a level throw is bent 10 degrees up and flies at
+            // (90 + 10) * 6 = 600 along it: 600 * cos 10 and 600 * sin 10.
+            if pitch == 0.0 && yaw == 0.0 {
+                let level = g.velocity - me_vars.velocity;
+                assert!(approx3(level, Vec3::new(590.885, 0.0, 104.189), 0.05), "{level:?}");
+            }
+            // A pitch of 45 down bends to 40: (90 - 40) * 6 = 300 along it.
+            if pitch == 45.0 {
+                assert!(approx((g.velocity - me_vars.velocity).length(), 300.0, 0.05));
+            }
+            // A steep throw up is capped at 750.
+            if pitch == -30.0 {
+                assert!(approx((g.velocity - me_vars.velocity).length(), 750.0, 0.05));
+            }
             let start = me_vars.origin + me_vars.view_ofs + forward * 16.0;
             assert!(approx3(g.origin, start, 0.05), "{:?} vs {start:?}", g.origin);
             assert_eq!(g.classname, "grenade");
@@ -437,7 +451,10 @@ fn friendly_fire_off_spares_a_teammate_but_not_the_thrower() {
     let mut b = arena(Vec3::new(5000.0, 0.0, 0.0));
     b.run(|game, eng| {
         let me = eng.client_edict(0);
-        let inflictor = eng.create_entity("grenade").unwrap();
+        // A grenade the probe threw (it keeps the thrower's team).
+        arm(game, eng, WeaponId::HeGrenade, 1);
+        throw(game, eng, WeaponId::HeGrenade);
+        let inflictor = game.grenades(eng)[0];
         // The terrorist changes sides.
         game.state_mut().players[1].as_mut().unwrap().team = Team::Ct;
         game.place_player(eng, 1, Vec3::new(50.0, 0.0, 1.0));
@@ -961,4 +978,31 @@ fn a_thrown_grenade_bounces_off_the_floor_of_a_real_map_and_goes_off() {
     let fuse = exploded_at.expect("it went off") - t0;
     assert!((1.55..=1.85).contains(&fuse), "went off {fuse} s after the throw");
     assert!(b.run(move |_, eng| eng.ent(grenade).is_none()), "gone after the last puff of smoke");
+}
+
+#[test]
+fn a_grenade_keeps_the_team_of_the_thrower_for_friendly_fire() {
+    // `pGrenade->m_iTeam == m_iTeam`: the thrower (a counter-terrorist) changes sides after the
+    // throw; its grenade still spares the counter-terrorist next to it (mp_friendlyfire is 0)
+    // and hurts the terrorist.
+    for (victim_team, hurt) in [(Team::Ct, false), (Team::Terrorist, true)] {
+        let mut b = arena(Vec3::new(100.0, 0.0, 1.0));
+        b.run(move |game, eng| {
+            arm(game, eng, WeaponId::HeGrenade, 1);
+            throw(game, eng, WeaponId::HeGrenade);
+            let grenade = game.grenades(eng)[0];
+            game.state_mut().players[0].as_mut().unwrap().team = Team::Terrorist;
+            game.state_mut().players[1].as_mut().unwrap().team = victim_team;
+            let at = eng.time() + 0.01;
+            let v = eng.ent_mut(grenade).unwrap();
+            v.velocity = Vec3::ZERO;
+            v.origin = Vec3::ZERO;
+            v.dmgtime = 0.0;
+            v.nextthink = at;
+        });
+        b.step(60);
+        b.run(move |game, _| {
+            assert_eq!(health(game, 1) < 1000.0, hurt, "{victim_team:?}");
+        });
+    }
 }

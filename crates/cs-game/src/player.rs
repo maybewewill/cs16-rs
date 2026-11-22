@@ -1835,8 +1835,7 @@ pub(crate) fn take_damage(
 /// In the source's order: a blast, an explosion or a fall sets the hit group to generic, a bullet
 /// at the shield's hit group is refused. An explosion (`DMG_EXPLOSION` or `DMG_BLAST`) has its
 /// own branch: a grenade of the victim's team hurts it only with friendly fire or if the victim
-/// threw it (assumption: the grenade's `m_iTeam` is the thrower's team, which [`crate::grenade`]
-/// stores but this reads from the attacker), armor takes its share with the explosion formula, there are two pain sounds, and it
+/// threw it (`m_iTeam`, the team of the thrower when it threw: [`crate::grenade::grenade_team`]), armor takes its share with the explosion formula, there are two pain sounds, and it
 /// returns before `m_bitsHUDDamage`. QUIRK: the `flBonus *= 2` for `DMG_BLAST` further down is
 /// unreachable in the source, because `DMG_BLAST` is caught by the explosion branch first.
 ///
@@ -1908,12 +1907,17 @@ pub(crate) fn take_damage_with(
         if !p.alive {
             return false;
         }
-        if bits & dmg::EXPLOSION != 0 && inflictor_is_grenade && attacker_team == Some(victim_team) {
-            // `pGrenade->m_iTeam == m_iTeam`.
-            if !friendly_fire && attacker_slot != Some(index) {
-                // If cvar friendlyfire is disabled and the victim is a teammate, ignore this damage.
-                return false;
-            }
+        // `pGrenade->m_iTeam == m_iTeam`: the team the grenade was thrown by, whoever the attacker
+        // is now (a thrower that left or changed team does not make its grenade an enemy's).
+        let grenade_team = inflictor.and_then(|i| crate::grenade::grenade_team(eng, i));
+        if bits & dmg::EXPLOSION != 0
+            && inflictor_is_grenade
+            && grenade_team == Some(i32::from(victim_team.id()))
+            && !friendly_fire
+            && attacker_slot != Some(index)
+        {
+            // If cvar friendlyfire is disabled and the victim is a teammate, ignore this damage.
+            return false;
         }
         if let Some(i) = inflictor {
             let origin = eng.ent(id).map(|v| v.origin);

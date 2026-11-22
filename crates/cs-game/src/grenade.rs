@@ -40,9 +40,9 @@
 //!   (`NOXREF`), `DetonateUse`/`PreDetonate` (nothing sets them), `Explode2`/`Detonate2` and
 //!   `ShootSatchelCharge` (the C4, phase 2E) and `RadiusDamage2` (`CBaseMonster::RadiusDamage`
 //!   uses it for a damage of 80 or less; the HE grenade's is 100).
-//! - The grenade's `m_iTeam` is the team of the thrower while it is a player; the explosion
-//!   branch of `CBasePlayer::TakeDamage` takes the attacker's own team (see its docs), which
-//!   differs only when the thrower has left the team or the game since the throw.
+//! - `m_iTeam` (the thrower's team, set by `ShootTimed2`) is kept in the edict's `i_step_left`
+//!   (a variable no game code of a grenade uses): the entity is checked out of its edict while it
+//!   runs its own explosion, which is when `TakeDamage` asks for it ([`grenade_team`]).
 
 use cs_engine::collision::CONTENTS_WATER;
 use cs_engine::consts::{FL_ONGROUND, MOVETYPE_BOUNCE, SOLID_BBOX, SOLID_NOT};
@@ -125,10 +125,6 @@ pub struct Grenade {
     sg_smoke: i32,
     /// `m_angle`: the turn of the next puff, degrees.
     angle: i32,
-    /// `m_iTeam`: the team of the thrower (HE only). `CBasePlayer::TakeDamage` reads it in the
-    /// source; ours takes the attacker's own team (see the module notes), so nothing reads it.
-    #[allow(dead_code)]
-    team: i32,
 }
 
 impl Default for Grenade {
@@ -144,7 +140,6 @@ impl Default for Grenade {
             smoke_detonate: Vec3::ZERO,
             sg_smoke: 0,
             angle: 0,
-            team: 0,
         }
     }
 }
@@ -797,6 +792,13 @@ fn arm_fuse(
     }
 }
 
+/// `m_iTeam` of the grenade `id` (the team of the player that threw an HE grenade, when it
+/// threw it), `None` for an entity that is no grenade. What `CBasePlayer::TakeDamage` compares
+/// with the victim's team (`player.cpp` 966).
+pub(crate) fn grenade_team(eng: &EngineApi<'_>, id: EdictId) -> Option<i32> {
+    eng.ent(id).filter(|v| v.classname == "grenade").map(|v| v.i_step_left)
+}
+
 /// `CGrenade::ShootTimed2(pevOwner, vecStart, vecVelocity, time, iTeam, usEvent)`
 /// (`ggrenade.cpp` 926-968): the HE grenade. QUIRK: unlike the other two there is no
 /// `time < 0.1` shortcut.
@@ -816,6 +818,7 @@ pub(crate) fn shoot_timed2(
     if let Some(v) = eng.ent_mut(id) {
         v.gravity = 0.55;
         v.friction = 0.7;
+        v.i_step_left = team; // `m_iTeam = iTeam`
     }
     eng.set_model(id, "models/w_hegrenade.mdl");
     if let Some(v) = eng.ent_mut(id) {
@@ -828,7 +831,6 @@ pub(crate) fn shoot_timed2(
             think: Think::Tumble,
             touch: Touch::Bounce,
             event,
-            team,
             ..Grenade::default()
         }),
     );
@@ -1138,6 +1140,9 @@ pub fn create_spark_shower(g: &mut GameState, eng: &mut EngineApi<'_>, origin: V
         v.effects |= EF_NODRAW;
         v.speed = speed;
         v.angles = Vec3::ZERO;
+        // `DispatchSpawn` gives the box around the origin before the entity is linked.
+        v.absmin = origin - Vec3::ONE;
+        v.absmax = origin + Vec3::ONE;
     }
     schedule(eng, id, 0.1);
     // Need a model, just use the grenade, we don't draw it anyway.
