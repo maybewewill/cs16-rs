@@ -13,13 +13,17 @@ use common::{Bench, spawns};
 use cs_engine::{EngineApi, EntTrace, GameDll, MoveFilter};
 use cs_game::CsGame;
 use cs_game::player::Team;
-use cs_game::weapons::knife::find_hull_intersection;
+use cs_game::weapons::knife::{find_hull_intersection, knife_hit_sample};
+use cs_game::weapons::snipers::TestCall;
 use cs_game::weapons::shotguns::{M3_CONE_VECTOR, XM1014_CONE_VECTOR};
 use cs_game::weapons::{
+    shared_random_float,
     ITEM_FLAG_NOFIREUNDERWATER, WEAPON_NOCLIP, Weapon, WeaponId, default_give, item_info,
     new_weapon,
 };
 use cs_proto48::delta::GoldSrcUserCmd;
+use cs_proto48::event::EventArgs;
+use cs_proto48::messages::SvcMessage;
 use glam::Vec3;
 
 const IN_ATTACK: u16 = 1 << 0;
@@ -661,5 +665,351 @@ fn knife_hull_intersection() {
         assert_eq!(tr.ent, Some(me));
         assert_eq!(tr.trace.fraction, 0.5);
         assert_eq!(tr.trace.end_pos, Vec3::new(24.0, 0.0, 17.0));
+    });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Review fixes: stances, accuracy, deploy delays, the knife's wall strike.
+// ---------------------------------------------------------------------------------------------
+
+const FL_ONGROUND: u32 = 1 << 9;
+const FL_DUCKING: u32 = 1 << 14;
+
+/// The arguments of the last event the probe was sent that carried any.
+fn last_event_args(b: &Bench) -> EventArgs {
+    b.probe
+        .messages()
+        .iter()
+        .rev()
+        .find_map(|m| match m {
+            // All-zero arguments are not sent (`nullargs`): they read as zeros.
+            SvcMessage::Event(events) => events.last().map(|e| e.args.unwrap_or_default()),
+            _ => None,
+        })
+        .expect("the probe was sent an event")
+}
+
+/// What the wire keeps of an event's `fparam` (`DT_FLOAT | DT_SIGNED`, scale 100): hundredths.
+fn near_wire(got: f32, expected: f32) -> bool {
+    (got - expected).abs() <= 0.0101
+}
+
+/// A command seed whose first spread number is large, so that a spread is told from its
+/// neighbour on the wire: returns `(seed, x, y)` as `FireBullets3` computes them.
+fn spread_seed() -> (u32, f32, f32) {
+    for seed in 0..10_000_u32 {
+        let x = shared_random_float(seed, -0.5, 0.5) + shared_random_float(seed + 1, -0.5, 0.5);
+        let y = shared_random_float(seed + 2, -0.5, 0.5) + shared_random_float(seed + 3, -0.5, 0.5);
+        if x.abs() > 0.7 && y.abs() > 0.3 {
+            return (seed, x, y);
+        }
+    }
+    panic!("no seed");
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Stance {
+    Air,
+    Fast,
+    Medium,
+    Slow,
+    Duck,
+    Stand,
+}
+
+/// Puts the probe in `stance` as the sources read it: `pev->flags` and `pev->velocity`.
+fn set_stance(eng: &mut EngineApi<'_>, stance: Stance) {
+    let me = eng.client_edict(0);
+    let v = eng.ent_mut(me).unwrap();
+    v.velocity = Vec3::ZERO;
+    v.flags &= !(FL_ONGROUND | FL_DUCKING);
+    match stance {
+        Stance::Air => {}
+        Stance::Fast => {
+            v.flags |= FL_ONGROUND;
+            v.velocity = Vec3::new(200.0, 0.0, 0.0);
+        }
+        Stance::Medium => {
+            v.flags |= FL_ONGROUND;
+            v.velocity = Vec3::new(100.0, 0.0, 0.0);
+        }
+        Stance::Slow => {
+            v.flags |= FL_ONGROUND;
+            v.velocity = Vec3::new(0.5, 0.0, 0.0);
+        }
+        Stance::Duck => v.flags |= FL_ONGROUND | FL_DUCKING,
+        Stance::Stand => v.flags |= FL_ONGROUND,
+    }
+}
+
+/// One shot of `id` in `stance`, zoomed or not, with `accuracy` (for the guns that use it);
+/// returns the event's `(fparam1, fparam2)`.
+fn shoot(id: WeaponId, stance: Stance, zoomed: bool, accuracy: f32, seed: u32) -> (f32, f32) {
+    let mut b = Bench::stub_with_events(
+        spawns(4, 4),
+        &["events/scout.sc", "events/awp.sc", "events/g3sg1.sc", "events/sg550.sc"],
+    );
+    b.run(move |game, eng| {
+        eng.set_cvar("sv_gravity", "0");
+        game.client_put_in_server(eng, 1);
+        assert!(game.spawn_player(eng, 0, Team::Ct, 0));
+        assert!(game.spawn_player(eng, 1, Team::Terrorist, 0));
+        game.end_freeze_period(eng);
+        let (me, other) = (eng.client_edict(0), eng.client_edict(1));
+        eng.set_origin(me, Vec3::ZERO);
+        eng.set_origin(other, Vec3::new(3000.0, 0.0, 17.0));
+        arm(game, eng, id, 10, 40);
+        let me = eng.client_edict(0);
+        eng.ent_mut(me).unwrap().fov = if zoomed { 40.0 } else { 90.0 };
+        game.set_fov(0, if zoomed { 40 } else { 90 });
+        let now = eng.time() as f32;
+        let w = weapon(game, id);
+        w.accuracy = accuracy;
+        w.last_fire = now;
+        set_stance(eng, stance);
+        game.test_weapon_call(eng, 0, id, TestCall::Primary, seed);
+    });
+    b.step(3);
+    let a = last_event_args(&b);
+    (a.fparam1, a.fparam2)
+}
+
+#[test]
+fn sniper_spread_by_stance() {
+    let (seed, x, y) = spread_seed();
+    let both = |got: (f32, f32), spread: f32, scale: f32, what: &str| {
+        assert!(near_wire(got.0, x * spread * scale), "{what}: x {} vs {}", got.0, x * spread * scale);
+        assert!(near_wire(got.1, y * spread * scale), "{what}: y {} vs {}", got.1, y * spread * scale);
+    };
+
+    // The Scout (the event carries the direction times 1000): 0.2 in the air, 0.075 above 170
+    // units/s, 0 ducking, 0.007 otherwise; 0.025 more unzoomed.
+    for (stance, base) in [
+        (Stance::Air, 0.2_f32),
+        (Stance::Fast, 0.075),
+        (Stance::Medium, 0.007),
+        (Stance::Duck, 0.0),
+        (Stance::Stand, 0.007),
+    ] {
+        for zoomed in [false, true] {
+            let spread = if zoomed { base } else { base + 0.025 };
+            both(shoot(WeaponId::Scout, stance, zoomed, 0.0, seed), spread, 1000.0, &format!("scout {stance:?} {zoomed}"));
+        }
+    }
+
+    // The AWP: 0.85, 0.25 above 140, 0.1 above 10, 0 ducking, 0.001; 0.08 more unzoomed.
+    for (stance, base) in [
+        (Stance::Air, 0.85_f32),
+        (Stance::Fast, 0.25),
+        (Stance::Medium, 0.1),
+        (Stance::Slow, 0.001),
+        (Stance::Duck, 0.0),
+        (Stance::Stand, 0.001),
+    ] {
+        for zoomed in [false, true] {
+            let spread = if zoomed { base } else { base + 0.08 };
+            both(shoot(WeaponId::Awp, stance, zoomed, 0.0, seed), spread, 1.0, &format!("awp {stance:?} {zoomed}"));
+        }
+    }
+
+    // The G3SG1: the shot's accuracy is the one the fire function computes, 0.55 for a shot
+    // at the very time of the last one; the spread is `(1 - accuracy) * spread`: 0.45 in the
+    // air, 0.15 for any movement, 0.035 ducking, 0.055; 0.025 more unzoomed.
+    for (stance, base) in [
+        (Stance::Air, 0.45_f32),
+        (Stance::Slow, 0.15),
+        (Stance::Fast, 0.15),
+        (Stance::Duck, 0.035),
+        (Stance::Stand, 0.055),
+    ] {
+        for zoomed in [false, true] {
+            let spread = (1.0 - 0.55_f32) * if zoomed { base } else { base + 0.025 };
+            both(shoot(WeaponId::G3sg1, stance, zoomed, 0.0, seed), spread, 1.0, &format!("g3sg1 {stance:?} {zoomed}"));
+        }
+    }
+
+    // The SG550: the spread is made from the accuracy before the shot (0.3 here): `0.45 *
+    // (1 - accuracy)` in the air, 0.15 for any movement, `0.04 * (1 - accuracy)` ducking,
+    // `0.05 * (1 - accuracy)`; 0.025 more unzoomed.
+    let rest = 1.0_f32 - 0.3;
+    for (stance, base) in [
+        (Stance::Air, (0.45 * f64::from(rest)) as f32),
+        (Stance::Slow, 0.15),
+        (Stance::Fast, 0.15),
+        (Stance::Duck, (0.04 * f64::from(rest)) as f32),
+        (Stance::Stand, (0.05 * f64::from(rest)) as f32),
+    ] {
+        for zoomed in [false, true] {
+            let spread = if zoomed { base } else { base + 0.025 };
+            both(shoot(WeaponId::Sg550, stance, zoomed, 0.3, seed), spread, 1.0, &format!("sg550 {stance:?} {zoomed}"));
+        }
+    }
+}
+
+#[test]
+fn g3sg1_and_sg550_accuracy_growth_and_reset() {
+    let mut b = arena(3000.0, 0.0);
+    b.run(|game, eng| {
+        // The G3SG1: the first shot sets 0.98, a later one `(time - last) * 0.3 + 0.55` capped
+        // at 0.98, a click on the empty gun updates it too; a reload and a deploy set 0.2.
+        let id = WeaponId::G3sg1;
+        arm(game, eng, id, 10, 40);
+        assert_eq!(weapon(game, id).accuracy, 0.2, "the deploy");
+        assert_eq!(weapon(game, id).last_fire, 0.0);
+        game.test_weapon_call(eng, 0, id, TestCall::Primary, 0);
+        assert_eq!(weapon(game, id).accuracy, 0.98, "no last shot");
+        let now = eng.time() as f32;
+        assert_eq!(weapon(game, id).last_fire, now);
+        weapon(game, id).last_fire = now - 0.5;
+        game.test_weapon_call(eng, 0, id, TestCall::Primary, 0);
+        assert!(approx(weapon(game, id).accuracy, 0.5 * 0.3 + 0.55), "{}", weapon(game, id).accuracy);
+        weapon(game, id).last_fire = now - 3.0;
+        game.test_weapon_call(eng, 0, id, TestCall::Primary, 0);
+        assert_eq!(weapon(game, id).accuracy, 0.98, "capped");
+        let w = weapon(game, id);
+        w.clip = 0;
+        w.last_fire = now - 0.5;
+        game.test_weapon_call(eng, 0, id, TestCall::Primary, 0);
+        assert!(approx(weapon(game, id).accuracy, 0.7), "an empty click updates it as well");
+        assert_eq!(weapon(game, id).clip, 0);
+        weapon(game, id).accuracy = 0.9;
+        game.test_weapon_call(eng, 0, id, TestCall::Reload, 0);
+        assert!(weapon(game, id).in_reload);
+        assert_eq!(weapon(game, id).accuracy, 0.2, "the reload");
+
+        // The SG550: `(time - last) * 0.35 + 0.65`, capped; with no last shot the accuracy is
+        // left as it was (no `else`), the deploy and the reload do not touch it.
+        let id = WeaponId::Sg550;
+        assert!(game.give_weapon(eng, 0, new_weapon(id).unwrap(), 10, 40));
+        weapon(game, id).accuracy = 0.5;
+        assert!(game.select_weapon(eng, 0, id));
+        assert_eq!(weapon(game, id).accuracy, 0.5, "the deploy leaves it");
+        game.test_weapon_call(eng, 0, id, TestCall::Primary, 0);
+        assert_eq!(weapon(game, id).accuracy, 0.5, "no last shot: unchanged");
+        let now = eng.time() as f32;
+        assert_eq!(weapon(game, id).last_fire, now);
+        weapon(game, id).last_fire = now - 0.5;
+        game.test_weapon_call(eng, 0, id, TestCall::Primary, 0);
+        assert!(approx(weapon(game, id).accuracy, 0.5 * 0.35 + 0.65), "{}", weapon(game, id).accuracy);
+        weapon(game, id).last_fire = now - 3.0;
+        game.test_weapon_call(eng, 0, id, TestCall::Primary, 0);
+        assert_eq!(weapon(game, id).accuracy, 0.98);
+        weapon(game, id).accuracy = 0.4;
+        game.test_weapon_call(eng, 0, id, TestCall::Reload, 0);
+        assert!(weapon(game, id).in_reload);
+        assert_eq!(weapon(game, id).accuracy, 0.4, "the SG550 reload leaves it");
+    });
+}
+
+#[test]
+fn scout_and_awp_deploy_delays() {
+    let mut b = arena(300.0, 0.0);
+    b.run(|game, eng| {
+        for (id, delay) in [(WeaponId::Scout, 1.25_f32), (WeaponId::Awp, 1.45)] {
+            assert!(game.give_weapon(eng, 0, new_weapon(id).unwrap(), 10, 40));
+            assert!(game.select_weapon(eng, 0, id));
+            let (next_attack, ..) = game.player_weapon_state(0).unwrap();
+            // Both the player and the weapon wait the delay, the secondary a second.
+            assert_eq!(next_attack, delay, "{id:?}");
+            let w = weapon(game, id);
+            assert_eq!(w.next_primary_attack, delay, "{id:?}");
+            assert_eq!(w.next_secondary_attack, 1.0, "{id:?}");
+        }
+        // The G3SG1 and the SG550 keep the default deploy: only the player's 0.75 s.
+        for id in [WeaponId::G3sg1, WeaponId::Sg550] {
+            assert!(game.give_weapon(eng, 0, new_weapon(id).unwrap(), 10, 40));
+            assert!(game.select_weapon(eng, 0, id));
+            assert_eq!(game.player_weapon_state(0).unwrap().0, 0.75, "{id:?}");
+            let w = weapon(game, id);
+            assert_eq!((w.next_primary_attack, w.next_secondary_attack), (0.0, 0.0), "{id:?}");
+        }
+    });
+}
+
+#[test]
+fn knife_hit_sample_selection() {
+    assert_eq!(knife_hit_sample(0), "weapons/knife_hit1.wav");
+    assert_eq!(knife_hit_sample(1), "weapons/knife_hit2.wav");
+    assert_eq!(knife_hit_sample(2), "weapons/knife_hit3.wav");
+    assert_eq!(knife_hit_sample(3), "weapons/knife_hit4.wav");
+}
+
+/// The numbers a call drew from the generator, found by replaying `draws` from the same state.
+fn rng_after(game: &mut CsGame, start: u32, draws: &[(i32, i32)]) -> u32 {
+    game.test_set_rng(start);
+    for &(lo, hi) in draws {
+        game.test_random_long(lo, hi);
+    }
+    game.test_rng()
+}
+
+#[test]
+fn knife_draws_by_branch() {
+    // On the stub map: a slash that misses draws the slash sound's `RANDOM_LONG(0, 1)`.
+    let mut b = arena(40.0, 0.0);
+    b.run(|game, eng| {
+        arm(game, eng, WeaponId::Knife, WEAPON_NOCLIP, 0);
+        let start = 0x1234_5678;
+        // (A hit on a player also draws in `TakeDamage`; only the miss and the wall are exact.)
+        let other = eng.client_edict(1);
+        eng.set_origin(other, Vec3::new(900.0, 0.0, 17.0));
+        game.test_set_rng(start);
+        assert!(!game.test_weapon_call(eng, 0, WeaponId::Knife, TestCall::Primary, 0));
+        assert_eq!(game.test_rng(), rng_after(game, start, &[(0, 1)]), "a miss draws the slash sound");
+    });
+}
+
+#[test]
+fn knife_wall_strike() {
+    let Some(vfs) = common::discover() else {
+        eprintln!("no game directory: skipped");
+        return;
+    };
+    let mut b = Bench::on(common::dust2(&vfs));
+    b.run(|game, eng| {
+        assert!(game.spawn_player(eng, 0, Team::Ct, 0));
+        game.end_freeze_period(eng);
+        arm(game, eng, WeaponId::Knife, WEAPON_NOCLIP, 0);
+        let me = eng.client_edict(0);
+        // Find a wall within 200 units and stand 30 units from it, looking at it.
+        let (origin, ofs) = {
+            let v = eng.ent(me).unwrap();
+            (v.origin, v.view_ofs)
+        };
+        let eye = origin + ofs;
+        let mut found = None;
+        for k in 0..16 {
+            let yaw = (k as f32) * 22.5;
+            let dir = Vec3::new(yaw.to_radians().cos(), yaw.to_radians().sin(), 0.0);
+            let t = eng.trace_line(eye, eye + dir * 200.0, MoveFilter::Normal, Some(me));
+            if t.trace.fraction < 1.0 && t.trace.fraction * 200.0 > 40.0 && !t.trace.start_solid {
+                found = Some((yaw, dir, t.trace.end_pos));
+                break;
+            }
+        }
+        let (yaw, dir, hit) = found.expect("a wall near the spawn");
+        let new_eye = hit - dir * 30.0;
+        {
+            let v = eng.ent_mut(me).unwrap();
+            v.origin = new_eye - ofs;
+            v.v_angle = Vec3::new(0.0, yaw, 0.0);
+        }
+
+        // The slash hits the wall: no victim, the hit timers (0.4 / 0.5), and the wall branch
+        // draws `RANDOM_LONG(0, 1)` (the texture test) then `RANDOM_LONG(0, 3)` (the strike's
+        // pitch).
+        let start = 0x0bad_cafe;
+        game.test_set_rng(start);
+        assert!(game.test_weapon_call(eng, 0, WeaponId::Knife, TestCall::Primary, 0));
+        let w = weapon(game, WeaponId::Knife);
+        assert_eq!(w.next_primary_attack, 0.4);
+        assert_eq!(w.next_secondary_attack, 0.5);
+        assert_eq!(game.test_rng(), rng_after(game, start, &[(0, 1), (0, 3)]));
+
+        // The stab at the same wall: 1.1 s, the same draws.
+        game.test_set_rng(start);
+        assert!(game.test_weapon_call(eng, 0, WeaponId::Knife, TestCall::Secondary, 0));
+        assert_eq!(weapon(game, WeaponId::Knife).next_primary_attack, 1.1);
+        assert_eq!(game.test_rng(), rng_after(game, start, &[(0, 1), (0, 3)]));
     });
 }

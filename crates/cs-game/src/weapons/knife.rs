@@ -22,7 +22,6 @@
 //! the knife sets it (the inventory task).
 
 use cs_engine::collision::Hull;
-use cs_engine::consts::{MOVETYPE_PUSH, SOLID_BSP};
 use cs_engine::{EdictId, EngineApi, EntTrace, MoveFilter};
 use cs_sim::pm::math::angle_vectors;
 use glam::{Vec2, Vec3};
@@ -31,11 +30,8 @@ use super::core::{CHAN_WEAPON, PlayerAnim, WeaponCtx};
 use super::info::{WPNSTATE_SHIELD_DRAWN, WeaponId};
 use super::snipers::{gun_position, precache_model, precache_sound};
 use super::weapon::{Weapon, WeaponBehavior};
-use crate::bullets::{MultiDamage, apply_multi_damage, trace_attack};
+use crate::bullets::{DMG_NEVERGIB, MultiDamage, apply_multi_damage, is_bsp_model, trace_attack};
 use crate::player::{ATTN_NORM, CHAN_ITEM, DEAD_NO, PITCH_NORM, dmg, player_slot};
-
-/// `DMG_NEVERGIB`.
-const DMG_NEVERGIB: u32 = 1 << 12;
 
 /// `KNIFE_*` (`weapons.h`).
 pub const KNIFE_BODYHIT_VOLUME: f32 = 128.0;
@@ -66,11 +62,6 @@ const KNIFE_SHIELD_DOWN: i32 = 6;
 /// tries.
 const VEC_DUCK_HULL_MIN: Vec3 = Vec3::new(-16.0, -16.0, -18.0);
 const VEC_DUCK_HULL_MAX: Vec3 = Vec3::new(16.0, 16.0, 32.0);
-
-/// `IsBSPModel` of the entity a trace hit (the world counts).
-fn is_bsp_model(eng: &EngineApi<'_>, hit: EdictId) -> bool {
-    hit == eng.world() || eng.ent(hit).is_some_and(|v| v.solid == SOLID_BSP || v.movetype == MOVETYPE_PUSH)
-}
 
 /// `FindHullIntersection(vecSrc, tr, mins, maxs, pEntity)` (`wpn_knife.cpp`, read 2026-11-22):
 /// when the hull trace found something, looks for the point on its surface a line would hit.
@@ -113,6 +104,17 @@ pub fn find_hull_intersection(
                 }
             }
         }
+    }
+}
+
+/// The sample of a slash that hit a player: `switch (RANDOM_LONG(0, 3))` (0 to 3 give
+/// `knife_hit1` to `knife_hit4`; the source has no `default`, the draw never leaves 0..=3).
+pub fn knife_hit_sample(n: i32) -> &'static str {
+    match n {
+        0 => "weapons/knife_hit1.wav",
+        1 => "weapons/knife_hit2.wav",
+        2 => "weapons/knife_hit3.wav",
+        _ => "weapons/knife_hit4.wav",
     }
 }
 
@@ -187,7 +189,7 @@ impl Knife {
                 // Calculate the point of intersection of the line (or hull) and the object we
                 // hit: an approximation of the "best" intersection.
                 let hit = tr.ent.unwrap_or_else(|| w.eng.world());
-                if is_bsp_model(w.eng, hit) {
+                if hit == w.eng.world() || is_bsp_model(w.eng, hit) {
                     find_hull_intersection(w.eng, src, &mut tr, VEC_DUCK_HULL_MIN, VEC_DUCK_HULL_MAX, id);
                 }
             }
@@ -305,12 +307,7 @@ impl Knife {
             // classified entity of the game so far).
             if player_slot(w.g, w.eng, hit).is_some() {
                 // Play thwack or smack sound.
-                let sample = match w.random_long(0, 3) {
-                    0 => "weapons/knife_hit1.wav",
-                    1 => "weapons/knife_hit2.wav",
-                    2 => "weapons/knife_hit3.wav",
-                    _ => "weapons/knife_hit4.wav",
-                };
+                let sample = knife_hit_sample(w.random_long(0, 3));
                 let id = w.edict();
                 w.eng.emit_sound(id, CHAN_WEAPON, sample, 1.0, ATTN_NORM, PITCH_NORM);
                 if !Self::is_alive(w, hit) {

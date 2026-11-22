@@ -31,16 +31,12 @@ use cs_engine::event_flags::FEV_NOTHOST;
 use cs_sim::pm::math::angle_vectors;
 use glam::Vec3;
 
-use super::core::{PlayerAnim, WeaponCtx};
+use super::core::{DEFAULT_FOV, EF_MUZZLEFLASH, PlayerAnim, WeaponCtx};
 use super::info::{BulletType, WeaponId};
 use super::random::shared_random_float;
 use super::weapon::{Weapon, WeaponBehavior};
 use crate::player::{CHAN_ITEM, PITCH_NORM};
 
-/// `DEFAULT_FOV`.
-pub(super) const DEFAULT_FOV: u8 = 90;
-/// `EF_MUZZLEFLASH`.
-pub(super) const EF_MUZZLEFLASH: u32 = 2;
 /// `FL_ONGROUND`, `FL_DUCKING` (`pev->flags`).
 const FL_ONGROUND: u32 = cs_engine::consts::FL_ONGROUND;
 const FL_DUCKING: u32 = cs_engine::consts::FL_DUCKING;
@@ -876,5 +872,69 @@ impl WeaponBehavior for Sg550 {
 
     fn item_post_frame_extra(&mut self, w: &mut WeaponCtx<'_, '_>) {
         sync_speed(w, SG550_MAX_SPEED, SG550_MAX_SPEED_ZOOM);
+    }
+}
+
+/// What [`crate::CsGame::test_weapon_call`] runs on a weapon.
+#[cfg(feature = "test-hooks")]
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TestCall {
+    Primary,
+    Secondary,
+    Reload,
+}
+
+/// Entry points for the tests (cargo feature `test-hooks`): the weapon's own methods run
+/// directly, without the movement of a command (which would clear `FL_ONGROUND` on a map with
+/// no floor), with the player's command seed set.
+#[cfg(feature = "test-hooks")]
+#[doc(hidden)]
+impl crate::CsGame {
+    /// Runs `call` on weapon `id` of the player of `slot` with `m_random_seed = seed`, and
+    /// returns what `Swing`/`Stab` return for the knife (false for every other call).
+    pub fn test_weapon_call(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        slot: u8,
+        id: WeaponId,
+        call: TestCall,
+        seed: u32,
+    ) -> bool {
+        if let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+            p.random_seed = seed;
+        }
+        super::core::with_weapon(&mut self.state, eng, slot, id, |b, w| match call {
+            TestCall::Primary if id == WeaponId::Knife => super::knife::Knife.swing(w, true),
+            TestCall::Secondary if id == WeaponId::Knife => super::knife::Knife.stab(w, true),
+            TestCall::Primary => {
+                b.primary_attack(w);
+                false
+            }
+            TestCall::Secondary => {
+                b.secondary_attack(w);
+                false
+            }
+            TestCall::Reload => {
+                b.reload(w);
+                false
+            }
+        })
+        .unwrap_or(false)
+    }
+
+    /// The game's random generator state, to compare how many numbers a call drew.
+    pub fn test_rng(&self) -> u32 {
+        self.state.rng
+    }
+
+    /// Sets the game's random generator state.
+    pub fn test_set_rng(&mut self, state: u32) {
+        self.state.rng = state;
+    }
+
+    /// `RANDOM_LONG(lo, hi)` of the game's generator.
+    pub fn test_random_long(&mut self, lo: i32, hi: i32) -> i32 {
+        self.state.random_range(lo, hi)
     }
 }

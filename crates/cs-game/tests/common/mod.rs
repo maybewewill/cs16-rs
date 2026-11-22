@@ -25,6 +25,9 @@ pub type Action = Box<dyn FnOnce(&mut CsGame, &mut EngineApi<'_>)>;
 pub struct Rig {
     pub game: CsGame,
     pub actions: Vec<Action>,
+    /// Event scripts to precache before the game activates (the game does not precache the
+    /// weapons' events yet).
+    pub precache_events: Vec<String>,
 }
 
 impl GameDll for Rig {
@@ -32,6 +35,9 @@ impl GameDll for Rig {
         self.game.usermsgs()
     }
     fn server_activate(&mut self, eng: &mut EngineApi<'_>) {
+        for name in &self.precache_events {
+            eng.precache_event(name);
+        }
         self.game.server_activate(eng);
     }
     fn server_deactivate(&mut self, eng: &mut EngineApi<'_>) {
@@ -122,14 +128,22 @@ impl Bench {
     /// Like [`with_slots`](Self::with_slots), the probe's `connect` userinfo carrying `userinfo`
     /// in place of its defaults.
     pub fn with_userinfo(map: ServerMap, max_clients: u8, userinfo: &[(&str, &str)]) -> Self {
-        Self::with_probe_moves(map, max_clients, userinfo, true)
+        Self::with_probe_moves(map, max_clients, userinfo, true, &[])
     }
 
     /// A stub-map server whose probe sends no `clc_move` at all (so the game runs no command
     /// of it) until `probe.suppress_moves(false)`.
     pub fn stub_without_moves(entities: Vec<Entity>) -> Self {
         let map = ServerMap::stub_with_entities("test", entities);
-        Self::with_probe_moves(map, 2, &[], false)
+        Self::with_probe_moves(map, 2, &[], false, &[])
+    }
+
+    /// Like [`stub_without_moves`](Self::stub_without_moves), the probe not predicting
+    /// (`cl_lw 0`, so it is sent the events of its own shots) and the event scripts `events`
+    /// precached.
+    pub fn stub_with_events(entities: Vec<Entity>, events: &[&str]) -> Self {
+        let map = ServerMap::stub_with_entities("test", entities);
+        Self::with_probe_moves(map, 2, &[("cl_lw", "0")], false, events)
     }
 
     fn with_probe_moves(
@@ -137,6 +151,7 @@ impl Bench {
         max_clients: u8,
         userinfo: &[(&str, &str)],
         send_moves: bool,
+        events: &[&str],
     ) -> Self {
         let cfg = ServerConfig {
             max_clients,
@@ -146,6 +161,7 @@ impl Bench {
         let rig = Rig {
             game: CsGame::new(),
             actions: Vec::new(),
+            precache_events: events.iter().map(|e| e.to_string()).collect(),
         };
         let mut server = Server::new(
             cfg,

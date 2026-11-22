@@ -49,9 +49,9 @@ use crate::player::{ATTN_NORM, CHAN_ITEM, PITCH_NORM, Player};
 /// `CHAN_WEAPON`.
 pub const CHAN_WEAPON: u8 = 1;
 /// `EF_MUZZLEFLASH`.
-const EF_MUZZLEFLASH: u32 = 2;
+pub(crate) const EF_MUZZLEFLASH: u32 = 2;
 /// `DEFAULT_FOV`.
-const DEFAULT_FOV: u8 = 90;
+pub(crate) const DEFAULT_FOV: u8 = 90;
 /// `MAX_DIST_RELOAD_SOUND` (`weapons.h`): how far a reload is heard on the radar HUD.
 const MAX_DIST_RELOAD_SOUND: f32 = 512.0;
 /// `GLOCK18_DAMAGE`: the damage of a Glock 18 bullet (`CSPlayerWeapon()->m_flBaseDamage` of

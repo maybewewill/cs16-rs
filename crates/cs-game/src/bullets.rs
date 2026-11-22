@@ -26,7 +26,7 @@
 //! - Entities that are not players do not take damage yet (the game has no damageable map
 //!   entities), so `CBaseEntity::TraceAttack` has nothing to add for them.
 
-use cs_engine::consts::{MOVETYPE_PUSH, SOLID_BSP};
+use cs_engine::consts::{MOVETYPE_PUSHSTEP, SOLID_BSP};
 use cs_engine::{EdictId, EngineApi, EntTrace, MoveFilter, MsgDest};
 use cs_proto48::tempent;
 use cs_sim::pm::math::angle_vectors;
@@ -38,7 +38,7 @@ use crate::weapons::{BulletType, WeaponId, shared_random_float};
 use crate::GameState;
 
 /// `DMG_NEVERGIB`, `DMG_ALWAYSGIB` (`common/const.h`).
-const DMG_NEVERGIB: u32 = 1 << 12;
+pub(crate) const DMG_NEVERGIB: u32 = 1 << 12;
 const DMG_ALWAYSGIB: u32 = 1 << 13;
 /// `DMG_SLASH`, `DMG_CLUB`, `DMG_MORTAR` (`TraceBleed` lists them).
 const DMG_SLASH: u32 = 1 << 2;
@@ -187,9 +187,15 @@ pub fn spawn_blood(eng: &mut EngineApi<'_>, spot: Vec3, color: u8, damage: f32) 
     blood_drips(eng, spot, color, damage as i32);
 }
 
-/// `IsBSPModel` of the entity `id`: a brush model that is solid or pushes.
-fn is_bsp_model(eng: &EngineApi<'_>, id: EdictId) -> bool {
-    eng.ent(id).is_some_and(|v| v.solid == SOLID_BSP || v.movetype == MOVETYPE_PUSH)
+/// `CBaseEntity::IsBSPModel` (`rg_cbase.h:103`, read 2026-11-22): `pev->solid == SOLID_BSP ||
+/// pev->movetype == MOVETYPE_PUSHSTEP`. (Not `MOVETYPE_PUSH`: the source says PUSHSTEP.)
+pub(crate) fn is_bsp_model_vars(solid: u8, movetype: u8) -> bool {
+    solid == SOLID_BSP || movetype == MOVETYPE_PUSHSTEP
+}
+
+/// `IsBSPModel` of the entity `id`.
+pub(crate) fn is_bsp_model(eng: &EngineApi<'_>, id: EdictId) -> bool {
+    eng.ent(id).is_some_and(|v| is_bsp_model_vars(v.solid, v.movetype))
 }
 
 /// `UTIL_DecalTrace(pTrace, decalNumber)`: a decal where a trace ended, on the world or on a
@@ -701,5 +707,20 @@ impl crate::CsGame {
     ) -> bool {
         let attacker = attacker.map(|a| eng.client_edict(a));
         player::take_damage_with(&mut self.state, eng, slot, attacker, attacker, weapon, damage, bits)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cs_engine::consts::{MOVETYPE_NONE, MOVETYPE_PUSH, SOLID_BBOX};
+
+    /// `IsBSPModel`: `SOLID_BSP` or `MOVETYPE_PUSHSTEP`; a `MOVETYPE_PUSH` box is not one.
+    #[test]
+    fn is_bsp_model_predicate() {
+        assert!(is_bsp_model_vars(SOLID_BSP, MOVETYPE_NONE));
+        assert!(is_bsp_model_vars(SOLID_BBOX, MOVETYPE_PUSHSTEP));
+        assert!(!is_bsp_model_vars(SOLID_BBOX, MOVETYPE_PUSH));
+        assert!(!is_bsp_model_vars(SOLID_BBOX, MOVETYPE_NONE));
     }
 }
