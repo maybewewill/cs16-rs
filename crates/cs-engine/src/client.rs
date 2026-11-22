@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use cs_proto48::delta::GoldSrcUserCmd;
+use cs_proto48::messages::MoveVarsMsg;
 use cs_proto48::netchan::{FRAGMENT_S2C_MAX_SIZE, NetChan};
 use cs_transport::PeerAddr;
 
@@ -97,6 +98,9 @@ pub(crate) struct Client {
     /// Average round trip of the client in seconds (`client_t::latency`), refreshed with every
     /// datagram accepted from it; what lag compensation rewinds by.
     pub(crate) latency: f64,
+    /// The movevars this client was last sent (ReHLDS `client_t::movevars`, set when the `new`
+    /// stage writes them and when a change is sent); `None` before that.
+    pub(crate) movevars: Option<MoveVarsMsg>,
 }
 
 impl Client {
@@ -126,6 +130,7 @@ impl Client {
             clear_time: 0.0,
             choke_count: 0,
             latency: 0.0,
+            movevars: None,
         }
     }
 

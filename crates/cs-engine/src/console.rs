@@ -116,9 +116,8 @@ impl<G: GameDll> Server<G> {
     /// - `quit`, `exit`: [`ConsoleOutcome::Quit`].
     /// - `<cvar>` shows a cvar, `<cvar> <value>` sets it (further arguments are ignored).
     ///   The registry has no read-only flag, so every registered cvar can be set. Setting an
-    ///   `sv_*` movement cvar changes what clients that sign on later are sent in
-    ///   `svc_newmovevars`; clients already past the `new` stage keep the values they were
-    ///   sent (there is no `svc_newmovevars` resend yet).
+    ///   movement cvar changes what clients that sign on later are sent in `svc_newmovevars`;
+    ///   clients already in the game are sent it again on the next frame.
     pub fn console_command(&mut self, line: &str) -> ConsoleOutcome {
         let argv = tokenize_goldsrc_line(clip_line(line));
         let Some(name) = argv.first() else {

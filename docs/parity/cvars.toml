@@ -44,6 +44,11 @@ id = "cl_righthand"
 status = "implemented"
 
 [[item]]
+id = "edgefriction"
+status = "tested"
+evidence = "crates/cs-engine/tests/movevars.rs::new_movement_cvars_have_rehlds_defaults, move_vars_follow_every_cvar; default and flags from ReHLDS sv_main.cpp, sv_user.cpp, sv_phys.cpp (read 2026-11-22)"
+
+[[item]]
 id = "fov_default"
 status = "implemented"
 
@@ -105,6 +110,11 @@ evidence = "crates/cs-game/tests/buy.rs::buy_time_expires"
 [[item]]
 id = "mp_c4timer"
 status = "implemented"
+
+[[item]]
+id = "mp_footsteps"
+status = "tested"
+evidence = "crates/cs-engine/tests/movevars.rs::new_movement_cvars_have_rehlds_defaults, move_vars_follow_every_cvar; default and flags from ReHLDS sv_main.cpp, sv_user.cpp, sv_phys.cpp (read 2026-11-22)"
 
 [[item]]
 id = "mp_freezetime"
@@ -225,8 +235,53 @@ id = "sv_maxvelocity"
 status = "implemented"
 
 [[item]]
+id = "sv_rollangle"
+status = "tested"
+evidence = "crates/cs-engine/tests/movevars.rs::new_movement_cvars_have_rehlds_defaults, move_vars_follow_every_cvar; default and flags from ReHLDS sv_main.cpp, sv_user.cpp, sv_phys.cpp (read 2026-11-22)"
+
+[[item]]
+id = "sv_rollspeed"
+status = "tested"
+evidence = "crates/cs-engine/tests/movevars.rs::new_movement_cvars_have_rehlds_defaults, move_vars_follow_every_cvar; default and flags from ReHLDS sv_main.cpp, sv_user.cpp, sv_phys.cpp (read 2026-11-22)"
+
+[[item]]
+id = "sv_skycolor_b"
+status = "tested"
+evidence = "crates/cs-engine/tests/movevars.rs::new_movement_cvars_have_rehlds_defaults, move_vars_follow_every_cvar; default and flags from ReHLDS sv_main.cpp, sv_user.cpp, sv_phys.cpp (read 2026-11-22)"
+
+[[item]]
+id = "sv_skycolor_g"
+status = "tested"
+evidence = "crates/cs-engine/tests/movevars.rs::new_movement_cvars_have_rehlds_defaults, move_vars_follow_every_cvar; default and flags from ReHLDS sv_main.cpp, sv_user.cpp, sv_phys.cpp (read 2026-11-22)"
+
+[[item]]
+id = "sv_skycolor_r"
+status = "tested"
+evidence = "crates/cs-engine/tests/movevars.rs::new_movement_cvars_have_rehlds_defaults, move_vars_follow_every_cvar; default and flags from ReHLDS sv_main.cpp, sv_user.cpp, sv_phys.cpp (read 2026-11-22)"
+
+[[item]]
 id = "sv_skyname"
 status = "implemented"
+
+[[item]]
+id = "sv_skyvec_x"
+status = "tested"
+evidence = "crates/cs-engine/tests/movevars.rs::new_movement_cvars_have_rehlds_defaults, move_vars_follow_every_cvar; default and flags from ReHLDS sv_main.cpp, sv_user.cpp, sv_phys.cpp (read 2026-11-22)"
+
+[[item]]
+id = "sv_skyvec_y"
+status = "tested"
+evidence = "crates/cs-engine/tests/movevars.rs::new_movement_cvars_have_rehlds_defaults, move_vars_follow_every_cvar; default and flags from ReHLDS sv_main.cpp, sv_user.cpp, sv_phys.cpp (read 2026-11-22)"
+
+[[item]]
+id = "sv_skyvec_z"
+status = "tested"
+evidence = "crates/cs-engine/tests/movevars.rs::new_movement_cvars_have_rehlds_defaults, move_vars_follow_every_cvar; default and flags from ReHLDS sv_main.cpp, sv_user.cpp, sv_phys.cpp (read 2026-11-22)"
+
+[[item]]
+id = "sv_spectatormaxspeed"
+status = "tested"
+evidence = "crates/cs-engine/tests/movevars.rs::new_movement_cvars_have_rehlds_defaults, move_vars_follow_every_cvar; default and flags from ReHLDS sv_main.cpp, sv_user.cpp, sv_phys.cpp (read 2026-11-22)"
 
 [[item]]
 id = "sv_stepsize"
@@ -249,8 +304,18 @@ id = "sv_unlagsamples"
 status = "implemented"
 
 [[item]]
+id = "sv_wateraccelerate"
+status = "tested"
+evidence = "crates/cs-engine/tests/movevars.rs::new_movement_cvars_have_rehlds_defaults, move_vars_follow_every_cvar; default and flags from ReHLDS sv_main.cpp, sv_user.cpp, sv_phys.cpp (read 2026-11-22)"
+
+[[item]]
 id = "sv_wateramp"
 status = "implemented"
+
+[[item]]
+id = "sv_waterfriction"
+status = "tested"
+evidence = "crates/cs-engine/tests/movevars.rs::new_movement_cvars_have_rehlds_defaults, move_vars_follow_every_cvar; default and flags from ReHLDS sv_main.cpp, sv_user.cpp, sv_phys.cpp (read 2026-11-22)"
 
 [[item]]
 id = "sv_zmax"

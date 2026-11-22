@@ -9,7 +9,7 @@ use cs_proto48::delta::{DeltaRecord, DeltaRegistry, DeltaSchema, GoldSrcEntitySt
 use cs_proto48::handshake::tokenize_goldsrc_line;
 use cs_proto48::messages::{
     ClcMessage, ServerInfoMsg, entity_schema_name, parse_clc_stream, wire_entity_type,
-    write_svc_stufftext,
+    write_svc_newmovevars, write_svc_stufftext,
 };
 use cs_proto48::usermsg::UserMsgRegistry;
 use cs_transport::{PacketTransport, PeerAddr};
@@ -288,9 +288,39 @@ impl<G: GameDll> Server<G> {
         self.drop_timed_out_clients();
         self.queue_pings_if_due();
         self.broadcast_userinfo();
+        self.resend_changed_movevars();
         self.send_client_frames(net);
         self.send_farewells(net);
         self.frametime = 0.0;
+    }
+
+    /// Sends `svc_newmovevars` to each client in the game whose last movevars differ from the
+    /// server's now. ReHLDS does this in `SV_RunCmd` (`sv_user.cpp`, read 2026-11-22): after
+    /// `pfnPM_Move` it compares the client's copy, which the game may have altered, with the
+    /// copy it had before the command and writes the message when they differ. The game does not
+    /// alter the copy here yet and the commands are run elsewhere, so the check runs once per
+    /// frame, for the clients that are `Active`; a client that is still signing on gets the
+    /// difference at its first frame in the game. Fake clients (which the original skips) do not
+    /// exist in the engine.
+    pub(crate) fn resend_changed_movevars(&mut self) {
+        let current = move_vars(&self.cvars, &self.map.entities);
+        let mut w = MsgWriter::new();
+        write_svc_newmovevars(&mut w, &current);
+        let mut sent = false;
+        for client in &mut self.clients {
+            if client.state != ClientState::Active || client.movevars.as_ref() == Some(&current) {
+                continue;
+            }
+            if client.movevars.is_some() {
+                client.chan.write_reliable(w.as_slice());
+                sent = true;
+            }
+            client.movevars = Some(current.clone());
+        }
+        if sent {
+            // Enforces the reliable backlog cap on what was written.
+            self.drain_outbox();
+        }
     }
 
     pub fn config(&self) -> &ServerConfig {
@@ -756,17 +786,20 @@ impl<G: GameDll> Server<G> {
         };
         let userinfos = self.userinfo_entries(|c| c.state == ClientState::Active);
         let mut w = MsgWriter::new();
+        let movevars = move_vars(&self.cvars, &self.map.entities);
         write_new_stage(
             &mut w,
             &info,
             self.cfg.build,
             &self.deltas,
-            &move_vars(&self.cvars, &self.map.entities),
+            &movevars,
             &self.usermsgs,
             &userinfos,
         );
         let client = &mut self.clients[usize::from(slot)];
         client.chan.write_reliable(w.as_slice());
+        // `client->pGameClient->SetMoveVars(sv_movevars)` at the end of `SV_SendResources`.
+        client.movevars = Some(movevars);
         client.state = ClientState::Signon(SignonStage::AwaitSendRes);
     }
 

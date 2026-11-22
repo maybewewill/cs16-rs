@@ -214,6 +214,13 @@ impl EngineApi<'_> {
         self.cvars.get(name).map(|c| c.value.clone())
     }
 
+    /// The server's current movevars (ReHLDS `SV_SetMoveVars`, read 2026-11-22, which the
+    /// original refreshes whenever one of its cvars changes): an owned copy, built from the
+    /// cvars as they are now. What a client was last sent can differ until the next frame.
+    pub fn move_vars(&self) -> cs_proto48::messages::MoveVarsMsg {
+        crate::signon::move_vars(self.cvars, &self.map.entities)
+    }
+
     /// Sets cvar `name` (case-insensitive) to `value`; a name that is not registered is
     /// ignored.
     pub fn set_cvar(&mut self, name: &str, value: &str) {

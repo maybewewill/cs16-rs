@@ -74,36 +74,55 @@ pub(crate) fn banner(build: i32, spawn_count: u32) -> String {
     format!("\x02\nBUILD {build} SERVER (0 CRC)\nServer # {spawn_count}\n")
 }
 
-/// Movement variables from the `sv_*` cvars that exist, defaults otherwise (`SV_SetMoveVars`,
-/// ReHLDS `sv_main.cpp`, read 2026-11-22: `sv_zmax` is `zmax`, `sv_wateramp` is the wave height,
-/// `sv_skyname` the sky). The sky name is the world entity's `skyname` key when it has one, else
+/// Movement variables from the cvars that exist, defaults otherwise (`SV_SetMoveVars`, ReHLDS
+/// `sv_main.cpp`, read 2026-11-22: every field has its own cvar; `sv_zmax` is `zmax`,
+/// `sv_wateramp` the wave height, `edgefriction` the edge friction, `mp_footsteps` the footsteps
+/// flag, `sv_skyname` the sky; `entgravity` is always 1). The sky name is the world entity's `skyname` key when it has one, else
 /// the cvar when it is not empty. Either way it is cut to what `movevars_t::skyName` holds, 32
 /// bytes with the terminator (`Q_strncpy(movevars->skyName, sv_skyname.string,
 /// sizeof(movevars->skyName) - 1)`, `SV_SetMoveVars`, ReHLDS `sv_main.cpp`, read 2026-11-22), so
 /// 31 bytes at most (the finding's "32 characters" counted the terminator; the source wins).
 pub(crate) fn move_vars(cvars: &CVarRegistry, entities: &[Entity]) -> MoveVarsMsg {
-    let mut mv = MoveVarsMsg::default();
-    let fields: [(&str, &mut f32); 9] = [
+    let mut mv = MoveVarsMsg {
+        // The first assignment of `SV_SetMoveVars`; the game scales it per player.
+        entgravity: 1.0,
+        ..MoveVarsMsg::default()
+    };
+    let [sky_r, sky_g, sky_b] = &mut mv.skycolor;
+    let [vec_x, vec_y, vec_z] = &mut mv.skyvec;
+    let fields: [(&str, &mut f32); 23] = [
         ("sv_gravity", &mut mv.gravity),
         ("sv_stopspeed", &mut mv.stopspeed),
         ("sv_maxspeed", &mut mv.maxspeed),
+        ("sv_spectatormaxspeed", &mut mv.spectatormaxspeed),
         ("sv_accelerate", &mut mv.accelerate),
         ("sv_airaccelerate", &mut mv.airaccelerate),
+        ("sv_wateraccelerate", &mut mv.wateraccelerate),
         ("sv_friction", &mut mv.friction),
-        ("sv_stepsize", &mut mv.stepsize),
+        ("edgefriction", &mut mv.edgefriction),
+        ("sv_waterfriction", &mut mv.waterfriction),
         ("sv_bounce", &mut mv.bounce),
+        ("sv_stepsize", &mut mv.stepsize),
         ("sv_maxvelocity", &mut mv.maxvelocity),
+        ("sv_zmax", &mut mv.zmax),
+        ("sv_wateramp", &mut mv.wave_height),
+        ("sv_rollangle", &mut mv.rollangle),
+        ("sv_rollspeed", &mut mv.rollspeed),
+        ("sv_skycolor_r", sky_r),
+        ("sv_skycolor_g", sky_g),
+        ("sv_skycolor_b", sky_b),
+        ("sv_skyvec_x", vec_x),
+        ("sv_skyvec_y", vec_y),
+        ("sv_skyvec_z", vec_z),
     ];
     for (name, field) in fields {
         if let Some(cvar) = cvars.get(name) {
             *field = cvar.as_f32();
         }
     }
-    if let Some(cvar) = cvars.get("sv_zmax") {
-        mv.zmax = cvar.as_f32();
-    }
-    if let Some(cvar) = cvars.get("sv_wateramp") {
-        mv.wave_height = cvar.as_f32();
+    if let Some(cvar) = cvars.get("mp_footsteps") {
+        // `movevars->footsteps = sv_footsteps.value` stores a float in an int: 0.5 is off.
+        mv.footsteps = cvar.as_f32() as i32 != 0;
     }
     let lump_sky = entities
         .iter()

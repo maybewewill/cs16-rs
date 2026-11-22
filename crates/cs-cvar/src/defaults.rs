@@ -78,6 +78,25 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     reg.register("sv_language", "0", CVarFlags::NONE, "Server language (1 is German)");
     reg.register("sv_maxvelocity", "2000", CVarFlags::NONE, "Maximum speed of any entity on an axis");
     reg.register("sv_bounce", "1", srv, "Bounce of a walking entity off a wall");
+    // The rest of the movevars (`SV_SetMoveVars`), defaults and flags from ReHLDS `sv_main.cpp`,
+    // `sv_user.cpp` and `sv_phys.cpp` (read 2026-11-22). `edgefriction` and `mp_footsteps` are
+    // the engine's own cvars (the names are `sv_edgefriction` and `sv_footsteps` in its source);
+    // the game only reads them (`PM_PlayStepSound`, "FIXME mp_footsteps needs to be a movevar").
+    // `sv_rollspeed` is "0.0" there (the message default of `MoveVarsMsg` says 200: not the
+    // engine's value). The sky colour and vector cvars are flagless 0, as there.
+    reg.register("sv_spectatormaxspeed", "500", CVarFlags::NONE, "Movement speed of a spectator");
+    reg.register("sv_wateraccelerate", "10", srv, "Acceleration in water");
+    reg.register("edgefriction", "2", srv, "Friction multiplier near a ledge");
+    reg.register("sv_waterfriction", "1", srv, "Friction in water");
+    reg.register("sv_rollangle", "0", CVarFlags::NONE, "Largest view roll when strafing (degrees)");
+    reg.register("sv_rollspeed", "0", CVarFlags::NONE, "Sideways speed at which the view reaches the full roll");
+    reg.register("mp_footsteps", "1", srv, "Players' footsteps are heard (0 or 1)");
+    reg.register("sv_skycolor_r", "0", CVarFlags::NONE, "Sky colour, red");
+    reg.register("sv_skycolor_g", "0", CVarFlags::NONE, "Sky colour, green");
+    reg.register("sv_skycolor_b", "0", CVarFlags::NONE, "Sky colour, blue");
+    reg.register("sv_skyvec_x", "0", CVarFlags::NONE, "Sky light direction, x");
+    reg.register("sv_skyvec_y", "0", CVarFlags::NONE, "Sky light direction, y");
+    reg.register("sv_skyvec_z", "0", CVarFlags::NONE, "Sky light direction, z");
     reg.register("sv_cheats", "0", srv, "Allow cheat commands (0 or 1)");
     reg.register("sv_unlag", "1", CVarFlags::NONE, "Lag compensation of the players' shots (0 or 1)");
     reg.register("sv_maxunlag", "0.5", CVarFlags::NONE, "Longest time lag compensation goes back (seconds, 0 for no limit)");
