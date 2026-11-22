@@ -34,8 +34,9 @@ pub const WJ_HEIGHT: f32 = 8.0;
 pub const STOP_EPSILON: f64 = 0.1;
 /// `MAX_CLIMB_SPEED`.
 pub const MAX_CLIMB_SPEED: f32 = 200.0;
-/// `PLAYER_DUCKING_MULTIPLIER`.
-pub const PLAYER_DUCKING_MULTIPLIER: f32 = 0.333;
+/// `PLAYER_DUCKING_MULTIPLIER` (a `double` literal in C). `PM_Duck` first stores it in a
+/// `real_t` (`float`) local; `PM_LadderMove` multiplies a `float` by it in `double`.
+pub const PLAYER_DUCKING_MULTIPLIER: f64 = 0.333;
 /// `PM_CHECKSTUCK_MINTIME` seconds (a `double` literal in C).
 pub const PM_CHECKSTUCK_MINTIME: f64 = 0.05;
 /// `TIME_TO_DUCK` seconds.

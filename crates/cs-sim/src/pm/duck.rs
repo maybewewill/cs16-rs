@@ -38,7 +38,8 @@ pub(crate) fn pm_duck(c: &mut PmCtx<'_>) {
         return;
     }
 
-    let mult: f32 = PLAYER_DUCKING_MULTIPLIER;
+    // `real_t mult = PLAYER_DUCKING_MULTIPLIER;` — the double literal stored in a float local.
+    let mult = PLAYER_DUCKING_MULTIPLIER as f32;
 
     c.pm.cmd.forwardmove *= mult;
     c.pm.cmd.sidemove *= mult;

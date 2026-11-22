@@ -4,7 +4,7 @@ use glam::Vec3;
 
 use super::consts::{
     CONTENTS_SOLID, FL_DUCKING, IN_BACK, IN_FORWARD, IN_JUMP, IN_MOVELEFT, IN_MOVERIGHT, MAX_CLIMB_SPEED,
-    MOVETYPE_FLY, MOVETYPE_NOCLIP, MOVETYPE_WALK,
+    MOVETYPE_FLY, MOVETYPE_NOCLIP, MOVETYPE_WALK, PLAYER_DUCKING_MULTIPLIER,
 };
 use super::math::{angle_vectors, cross, dot, vector_ma, vector_normalize, vector_scale, vector_subtract};
 use super::types::PmCtx;
@@ -61,9 +61,8 @@ pub(crate) fn pm_ladder_move(c: &mut PmCtx<'_>, ladder: usize) {
         let (vpn, v_right, _) = angle_vectors(c.pm.angles);
 
         if (c.pm.flags & FL_DUCKING) != 0 {
-            // PLAYER_DUCKING_MULTIPLIER as the C `double` literal 0.333 (not the widened f32).
-            const DUCKING_MULTIPLIER: f64 = 0.333;
-            fl_speed = (f64::from(fl_speed) * DUCKING_MULTIPLIER) as f32;
+            // `flSpeed *= PLAYER_DUCKING_MULTIPLIER;` — float times the double literal, in double.
+            fl_speed = (f64::from(fl_speed) * PLAYER_DUCKING_MULTIPLIER) as f32;
         }
 
         let buttons = i32::from(c.pm.cmd.buttons);
