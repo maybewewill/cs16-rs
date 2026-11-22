@@ -319,8 +319,8 @@ impl GameEntity for InfoPlayer {
 }
 
 /// `func_ladder` (`CLadder`, ReGameDLL `triggers.cpp`, read 2026-11-22): a non-solid brush
-/// whose `skin` is `CONTENTS_LADDER`, invisible unless `showtriggers` is set. Movement finds
-/// ladders by their bounds (see [`ladder_bounds`]).
+/// whose `skin` is `CONTENTS_LADDER`, invisible unless `showtriggers` is set. The movement finds
+/// it as a moveent of its physents (`SOLID_NOT` with this skin).
 pub(crate) struct FuncLadder;
 
 impl GameEntity for FuncLadder {
@@ -347,22 +347,6 @@ impl GameEntity for FuncLadder {
         v.movetype = MOVETYPE_PUSH;
         true
     }
-}
-
-/// World-space bounds of every `func_ladder` of the map, in entity order: all the ladder test of
-/// the movement reads.
-pub fn ladder_bounds(eng: &EngineApi<'_>) -> Vec<(Vec3, Vec3)> {
-    let mut bounds = Vec::new();
-    let mut after = None;
-    while let Some(id) = eng.find_by_classname(after, "func_ladder") {
-        after = Some(id);
-        if let Some(v) = eng.ent(id)
-            && v.maxs != v.mins
-        {
-            bounds.push((v.origin + v.mins, v.origin + v.maxs));
-        }
-    }
-    bounds
 }
 
 /// How a [`StaticBrush`] behaves.

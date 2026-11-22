@@ -9,7 +9,8 @@
 //! positions of the other players, the relink and the delivery of the touches) is in
 //! `cs-engine`'s `usercmd.rs`. The order inside [`crate::player::run_usercmd`] is that of
 //! `SV_RunCmd`: `CmdStart`, `oldangles`/`v_angle`, `PlayerPreThink`, [`run_pmove`] (setup,
-//! `PM_Move`, finish, impacts), `PlayerPostThink`, [`cmd_end`].
+//! `PM_Move`, finish, impacts queued); the engine relinks and touches; then `PlayerPostThink`
+//! and [`cmd_end`].
 //!
 //! Deviations, on purpose:
 //! - ReHLDS keeps one static `playermove_t` for all the players, so `onground`, `waterlevel`,
@@ -18,12 +19,15 @@
 //!   entvars, `onground` from `FL_ONGROUND` and `groundentity`, `oldwaterlevel` = `waterlevel`).
 //!   `PM_CategorizePosition` computes all of them again before anything reads them, so the
 //!   result is the same.
-//! - `PlayerPostThink` and the delivery of the touches run after the game call, in the engine
-//!   (`SV_ProcessImpacts` relinks the player with the size `CmdEnd` has already set).
-//! - `Sys_FloatTime` is the engine's simulation time (assumption: `EngineApi` has no wall
-//!   clock; `PM_CheckStuck` only uses it to space its retries).
+//! - `SV_ProcessImpacts` sets `v.velocity = tr.deltavelocity` for each touch before
+//!   `SV_Impact`; the engine API reports only which entity was touched
+//!   (`EngineApi::player_touched`), so the touches see the velocity the command ended with.
+//! - `PlayerPostThink` and `CmdEnd` are a second game call (`GameDll::post_usercmd`) after
+//!   the engine's `SV_ProcessImpacts` (relink, touches), so a game call never nests a touch.
+//! - `Sys_FloatTime` is the engine's frame real time (`EngineApi::realtime`).
 //! - `RandomLong` is the game's own generator ([`GameState`] `random_range`); the engine offers
-//!   the game none, and the server's footstep variants never need to match a client's.
+//!   the game none. The server's and the client's streams are independent in the original too,
+//!   so the footstep variants never need to match.
 
 use cs_engine::consts::{FL_DUCKING, FL_ONGROUND};
 use cs_engine::{EdictId, EngineApi, EntVars, PmPhysEnts, PmTraceResult};
@@ -185,7 +189,7 @@ impl PmWorld for EnginePmWorld<'_, '_> {
     }
 
     fn sys_float_time(&mut self) -> f64 {
-        self.eng.time()
+        self.eng.realtime()
     }
 
     fn physent_by_info(&self, info: i32) -> Option<(Vec3, Vec3)> {

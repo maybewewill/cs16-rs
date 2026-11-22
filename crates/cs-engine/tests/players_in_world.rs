@@ -298,6 +298,32 @@ fn touches_the_movement_reports_arrive_as_impacts() {
 }
 
 #[test]
+fn post_usercmd_runs_after_the_impacts_of_the_command() {
+    let mut h = harness(TestGame::default());
+    let mut probe = joined(&mut h);
+    h.server
+        .game_mut()
+        .act(|eng| {
+            solid_box(eng, "wall", SOLID_BBOX, Vec3::new(0.0, 500.0, 0.0), 8.0);
+        });
+    h.step(&mut [&mut probe], 1);
+    let wall = find(&h, "wall").expect("wall");
+    h.server.game_mut().usercmd_touches = vec![wall];
+    let calls = h.server.game().post_usercmd_marks.len();
+    let runs = h.server.game().usercmd_times.len();
+    probe.queue_cmd(forward(10));
+    h.step(&mut [&mut probe], 1);
+    let game = h.server.game();
+    // `PlayerPostThink` sees the touches of its command already delivered (the two of one
+    // impact), and runs at the command's time.
+    let (time, touches) = *game.post_usercmd_marks[calls..].last().expect("post_usercmd ran");
+    assert_eq!(touches, game.touch_log.len());
+    assert!(touches >= 2, "{:?}", game.touch_log);
+    assert_eq!(time, *game.usercmd_times[runs..].last().unwrap());
+    assert_eq!(game.post_usercmd_marks.len() - calls, game.usercmd_times.len() - runs);
+}
+
+#[test]
 fn commands_run_at_their_clients_time_base() {
     let mut h = harness(TestGame::default());
     let mut probe = joined(&mut h);

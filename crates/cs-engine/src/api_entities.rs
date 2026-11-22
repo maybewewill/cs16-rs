@@ -30,6 +30,12 @@ impl EngineApi<'_> {
         self.time
     }
 
+    /// The server's real time in seconds (HLDS `realtime`, `Sys_FloatTime`): the same for every
+    /// call of one frame, so the commands of a frame batch share it.
+    pub fn realtime(&self) -> f64 {
+        self.realtime
+    }
+
     /// Seconds of the current server frame (HLDS `host_frametime`: the real time since the
     /// previous frame, at most 0.25); 0 for a call made outside a frame (server start-up, a map
     /// change).

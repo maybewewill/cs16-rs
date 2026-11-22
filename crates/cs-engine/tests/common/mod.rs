@@ -295,6 +295,8 @@ pub struct TestGame {
     pub usercmd_touches: Vec<EdictId>,
     /// `eng.time()` of every `server_activate` call.
     pub activate_times: Vec<f64>,
+    /// `(eng.time(), touch_log.len())` at every `post_usercmd` call.
+    pub post_usercmd_marks: Vec<(f64, usize)>,
 
     pub server_activate_calls: usize,
     pub server_deactivate_calls: usize,
@@ -636,6 +638,10 @@ impl GameDll for TestGame {
         if let Some(hook) = self.usercmd_hook.0.as_mut() {
             hook(eng, slot);
         }
+    }
+
+    fn post_usercmd(&mut self, eng: &mut EngineApi<'_>, _slot: u8, _cmd: &GoldSrcUserCmd) {
+        self.post_usercmd_marks.push((eng.time(), self.touch_log.len()));
     }
 
     fn start_frame(&mut self, eng: &mut EngineApi<'_>, _frametime: f32) {

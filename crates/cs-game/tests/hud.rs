@@ -68,6 +68,9 @@ impl GameDll for Rig {
     ) {
         self.game.run_usercmd(eng, slot, cmd, random_seed);
     }
+    fn post_usercmd(&mut self, eng: &mut EngineApi<'_>, slot: u8, cmd: &GoldSrcUserCmd) {
+        self.game.post_usercmd(eng, slot, cmd);
+    }
     fn start_frame(&mut self, eng: &mut EngineApi<'_>, frametime: f32) {
         for action in std::mem::take(&mut self.actions) {
             action(&mut self.game, eng);
@@ -565,7 +568,7 @@ fn health_and_armor_follow_the_player() {
                 msec: 10,
                 ..Default::default()
             };
-            game.run_usercmd(eng, 0, &cmd, 0);
+            run_cmd(game, eng, 0, &cmd, 0);
         });
     }
     let health: Vec<CsUserMsg> = b
@@ -584,10 +587,10 @@ fn health_and_armor_follow_the_player() {
     // flashlight bit back (11).
     // (From the start of the messages: the flashlight bit was told in the first update, which
     // follows the first command's `PreThink`, before the window of `before`.)
-    // Re-baselined for `SV_RunCmd` (ledger CARRY 53): the engine's 0-ms command runs
-    // `PreThink` too, so `PlayerDeathThink` starts the camera on that command and the test's
-    // 10-ms command of the same frame puts the flashlight bit back before the frame's update:
-    // the client is never told the intermediate 9.
+    // Re-baselined for `SV_RunCmd` (ledger CARRY 53): the engine's 0-ms command runs `PreThink`
+    // too, so `PlayerDeathThink` starts the camera on that command. As in vanilla, `PreThink`
+    // sets the flashlight bit again before `UpdateClientData` sends the hidden elements, so the
+    // client is never told the intermediate 9.
     let hide: Vec<CsUserMsg> = b
         .messages(0)
         .into_iter()
@@ -673,7 +676,7 @@ fn command_of(b: &mut Bench, slot: u8) {
             msec: 10,
             ..Default::default()
         };
-        game.run_usercmd(eng, slot, &cmd, 0);
+        run_cmd(game, eng, slot, &cmd, 0);
     });
     b.step(2);
 }
@@ -748,4 +751,10 @@ fn every_hit_sends_the_damage_message_with_the_integer_health_lost() {
     let second = damage(&b, before);
     assert!(!second.is_empty());
     assert!(second.iter().all(|m| matches!(m, CsUserMsg::Damage { health_damage: 0, .. })));
+}
+
+/// One command as the engine runs it: `run_usercmd`, then `post_usercmd`.
+fn run_cmd(game: &mut CsGame, eng: &mut EngineApi<'_>, slot: u8, cmd: &GoldSrcUserCmd, seed: u32) {
+    game.run_usercmd(eng, slot, cmd, seed);
+    game.post_usercmd(eng, slot, cmd);
 }

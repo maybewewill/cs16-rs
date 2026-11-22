@@ -265,7 +265,7 @@ impl<G: GameDll> Server<G> {
     /// One step of `SV_RunCmd`: the game's `run_usercmd` at the client's `svtimebase` (the time
     /// at the end of this step) with the step's own frame time, `EngineApi::time` and
     /// `EngineApi::frametime` of the call; then `SV_ProcessImpacts`, see
-    /// [`finish_player_cmd`](Self::finish_player_cmd).
+    /// [`finish_player_cmd`](Self::finish_player_cmd), then the game's `post_usercmd`.
     fn run_player_cmd(&mut self, slot: u8, step: &GoldSrcUserCmd, random_seed: u32, time: f64) {
         let host_frametime = std::mem::replace(&mut self.frametime, f64::from(step.msec) * 0.001);
         // Touches reported outside a command are not this command's.
@@ -290,8 +290,12 @@ impl<G: GameDll> Server<G> {
         self.call_game_synced_at(time, |game, eng| {
             game.run_usercmd(eng, slot, step, random_seed)
         });
-        self.frametime = host_frametime;
         self.finish_player_cmd(slot);
+        // `PlayerPostThink` and `CmdEnd` come after `SV_ProcessImpacts` (the relink and the
+        // touches), still inside the lag-compensation window, with the command's time and frame
+        // time (`gGlobalVariables.frametime = frametime`).
+        self.call_game_synced_at(time, |game, eng| game.post_usercmd(eng, slot, step));
+        self.frametime = host_frametime;
         self.restore_move();
     }
 

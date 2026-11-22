@@ -505,7 +505,7 @@ fn pump(b: &mut Bench, slot: u8, n: usize) {
             msec: 10,
             ..Default::default()
         };
-        b.run(move |game, eng| game.run_usercmd(eng, slot, &cmd, 0));
+        b.run(move |game, eng| common::run_cmd(game, eng, slot, &cmd, 0));
     }
 }
 
@@ -541,7 +541,7 @@ fn late_probe_watches(mode: &str) -> Bench {
         buttons: 1 << 1,
         ..Default::default()
     };
-    b.run(move |game, eng| game.run_usercmd(eng, 0, &jump, 0));
+    b.run(move |game, eng| common::run_cmd(game, eng, 0, &jump, 0));
     pump(&mut b, 0, 50);
     let mode = mode.to_string();
     b.run(move |game, eng| game.client_command(eng, 0, &["specmode".into(), mode]));

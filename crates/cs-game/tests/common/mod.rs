@@ -70,6 +70,9 @@ impl GameDll for Rig {
     ) {
         self.game.run_usercmd(eng, slot, cmd, random_seed);
     }
+    fn post_usercmd(&mut self, eng: &mut EngineApi<'_>, slot: u8, cmd: &GoldSrcUserCmd) {
+        self.game.post_usercmd(eng, slot, cmd);
+    }
     fn start_frame(&mut self, eng: &mut EngineApi<'_>, frametime: f32) {
         for action in std::mem::take(&mut self.actions) {
             action(&mut self.game, eng);
@@ -319,7 +322,7 @@ pub fn commands_of(game: &mut CsGame, eng: &mut EngineApi<'_>, slot: u8, n: usiz
             msec: 10,
             ..Default::default()
         };
-        game.run_usercmd(eng, slot, &cmd, 0);
+        run_cmd(game, eng, slot, &cmd, 0);
     }
 }
 
@@ -338,4 +341,16 @@ pub fn join(b: &mut Bench, slot: u8, team_choice: u8, class: u8) {
     command(b, slot, &format!("jointeam {team_choice}"));
     command(b, slot, &format!("joinclass {class}"));
     b.step(2);
+}
+
+/// One command as the engine runs it: `run_usercmd`, then (the touches left out) `post_usercmd`.
+pub fn run_cmd(
+    game: &mut CsGame,
+    eng: &mut EngineApi<'_>,
+    slot: u8,
+    cmd: &GoldSrcUserCmd,
+    random_seed: u32,
+) {
+    game.run_usercmd(eng, slot, cmd, random_seed);
+    game.post_usercmd(eng, slot, cmd);
 }

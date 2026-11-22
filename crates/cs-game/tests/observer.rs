@@ -30,7 +30,7 @@ fn cmd(buttons: u16, forwardmove: f32) -> GoldSrcUserCmd {
 /// `n` frames in which the player of `slot` sends the command `c` (a frame is 10 ms).
 fn pump(b: &mut Bench, slot: u8, n: usize, buttons: u16, forwardmove: f32) {
     for _ in 0..n {
-        b.run(move |game, eng| game.run_usercmd(eng, slot, &cmd(buttons, forwardmove), 0));
+        b.run(move |game, eng| common::run_cmd(game, eng, slot, &cmd(buttons, forwardmove), 0));
     }
 }
 

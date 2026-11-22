@@ -36,7 +36,7 @@ fn connected_player_waits_unassigned() {
             forwardmove: 250.0,
             ..Default::default()
         };
-        game.run_usercmd(eng, 0, &walk, 0);
+        common::run_cmd(game, eng, 0, &walk, 0);
         game.client_command(eng, 0, &["kill".to_string()]);
         game.client_command(eng, 0, &[]);
         let v = eng.ent(id).unwrap().clone();
@@ -169,7 +169,7 @@ fn fall_damage_as_regamedll() {
                 game.spawn_player(eng, 0, team, 0);
                 // Settle on the floor first: the spawn point is one unit above it.
                 for _ in 0..50 {
-                    game.run_usercmd(eng, 0, &cmd(10), 0);
+                    common::run_cmd(game, eng, 0, &cmd(10), 0);
                 }
                 settled = (
                     eng.ent(id).unwrap().flags & FL_ONGROUND != 0,
@@ -192,7 +192,7 @@ fn fall_damage_as_regamedll() {
             let mut last_vz = 0.0;
             let mut landed = false;
             for _ in 0..1000 {
-                game.run_usercmd(eng, 0, &cmd(10), 0);
+                common::run_cmd(game, eng, 0, &cmd(10), 0);
                 let v = eng.ent(id).unwrap();
                 if v.flags & FL_ONGROUND != 0 {
                     landed = true;
@@ -426,7 +426,7 @@ fn a_dying_player_ends_up_dead_and_can_respawn() {
     let mut frames = 0;
     let deadflag = loop {
         let flag = b.run(|game, eng| {
-            game.run_usercmd(eng, 0, &cmd(10), 0);
+            common::run_cmd(game, eng, 0, &cmd(10), 0);
             eng.ent(eng.client_edict(0)).unwrap().deadflag
         });
         frames += 1;
@@ -531,7 +531,7 @@ fn a_disconnected_player_leaves_the_game() {
     assert_eq!(flags, (FL_DORMANT, SOLID_NOT));
     // Commands of the empty slot are ignored.
     b.run(|game, eng| {
-        game.run_usercmd(eng, 0, &cmd(10), 0);
+        common::run_cmd(game, eng, 0, &cmd(10), 0);
         game.client_command(eng, 0, &["kill".to_string()]);
     });
 }
@@ -592,12 +592,12 @@ fn a_dead_player_leaves_a_corpse() {
     };
     // No corpse while the player is dying or has just died.
     for _ in 0..50 {
-        b.run(|game, eng| game.run_usercmd(eng, 0, &cmd(10), 0));
+        b.run(|game, eng| common::run_cmd(game, eng, 0, &cmd(10), 0));
     }
     assert!(corpses(&b).is_empty());
     // It is sent once, three seconds after the death was over.
     for _ in 0..800 {
-        b.run(|game, eng| game.run_usercmd(eng, 0, &cmd(10), 0));
+        b.run(|game, eng| common::run_cmd(game, eng, 0, &cmd(10), 0));
     }
     b.step(5);
     let corpses = corpses(&b);

@@ -54,7 +54,7 @@ fn dust2_bench() -> Option<Bench> {
     b.run(|game, eng| {
         assert!(game.spawn_player(eng, 0, Team::Ct, 0));
         for _ in 0..50 {
-            game.run_usercmd(eng, 0, &idle(10), 0);
+            common::run_cmd(game, eng, 0, &idle(10), 0);
         }
         assert_ne!(vars(eng, 0).flags & FL_ONGROUND, 0, "settled on the floor");
         // The weapons set the speed; the movement takes the entity's `maxspeed`.
@@ -83,7 +83,7 @@ fn run_cmd_follows_sv_runcmd() {
             viewangles: Vec3::new(20.0, 90.0, 0.0),
             ..cmd(10, IN_FORWARD, 0.0, 90.0)
         };
-        game.run_usercmd(eng, 0, &c, 7);
+        common::run_cmd(game, eng, 0, &c, 7);
         let v = vars(eng, 0);
         // `PlayerPreThink` runs before the movement: on the ground the modifier takes
         // `velocity *= 0.5 + 0.01` first (the world has no floor, so the movement then finds
@@ -110,7 +110,7 @@ fn run_cmd_follows_sv_runcmd() {
         let v = eng.ent_mut(id).unwrap();
         v.fixangle = 1;
         v.v_angle = Vec3::new(1.0, 2.0, 0.0);
-        game.run_usercmd(eng, 0, &cmd(10, 0, 0.0, 170.0), 0);
+        common::run_cmd(game, eng, 0, &cmd(10, 0, 0.0, 170.0), 0);
         let v = vars(eng, 0);
         assert_eq!(v.v_angle.y, 2.0, "fixangle keeps the game's view angles");
     });
@@ -129,7 +129,7 @@ fn zero_msec_command_runs_think() {
         let origin = vars(eng, 0).origin;
         // 0 ms: `PreThink` (the modifier), `PM_Move` with a frame time of 0 (the buttons are
         // taken, nothing moves) and `PostThink` all run.
-        game.run_usercmd(eng, 0, &cmd(0, IN_FORWARD, 0.0, 33.0), 0);
+        common::run_cmd(game, eng, 0, &cmd(0, IN_FORWARD, 0.0, 33.0), 0);
         let v = vars(eng, 0);
         assert_eq!(game.velocity_modifier(0), Some(0.51));
         assert!((v.velocity.x - 51.0).abs() < 1e-3);
@@ -147,7 +147,7 @@ fn zero_msec_jump_still_acts_on_dust2() {
     };
     b.run(|game, eng| {
         let before = vars(eng, 0);
-        game.run_usercmd(eng, 0, &cmd(0, IN_JUMP, 0.0, 0.0), 0);
+        common::run_cmd(game, eng, 0, &cmd(0, IN_JUMP, 0.0, 0.0), 0);
         let v = vars(eng, 0);
         // `PM_Jump` sets the jump speed whatever the frame time: sqrt(2 * 800 * 45).
         assert!((v.velocity.z - 268.3282).abs() < 0.01, "{}", v.velocity.z);
@@ -176,7 +176,7 @@ fn walking_reaches_250_on_dust2() {
             .expect("a free direction from the spawn point");
         let mut peak = 0.0f32;
         for _ in 0..60 {
-            game.run_usercmd(eng, 0, &cmd(10, IN_FORWARD, 400.0, yaw), 0);
+            common::run_cmd(game, eng, 0, &cmd(10, IN_FORWARD, 400.0, yaw), 0);
             peak = peak.max(horizontal(eng.ent(id).unwrap().velocity));
         }
         let v = vars(eng, 0);
@@ -202,10 +202,10 @@ fn jump_apex_is_45_units() {
         let id = eng.client_edict(0);
         let floor = vars(eng, 0).origin.z;
         let mut apex = floor;
-        game.run_usercmd(eng, 0, &cmd(10, IN_JUMP, 0.0, 0.0), 0);
+        common::run_cmd(game, eng, 0, &cmd(10, IN_JUMP, 0.0, 0.0), 0);
         let mut airborne = false;
         for _ in 0..200 {
-            game.run_usercmd(eng, 0, &idle(10), 0);
+            common::run_cmd(game, eng, 0, &idle(10), 0);
             let v = eng.ent(id).unwrap();
             apex = apex.max(v.origin.z);
             airborne |= v.flags & FL_ONGROUND == 0;
@@ -234,7 +234,7 @@ fn duck_view_and_hull_over_four_tenths() {
         // Holding duck: the view eases from 17 to 12 over 0.4 s, the hull stays standing until
         // then and `FL_DUCKING` comes with the end of the transition.
         for _ in 0..20 {
-            game.run_usercmd(eng, 0, &cmd(10, IN_DUCK, 0.0, 0.0), 0);
+            common::run_cmd(game, eng, 0, &cmd(10, IN_DUCK, 0.0, 0.0), 0);
         }
         let v = vars(eng, 0);
         assert!(v.b_in_duck, "in the middle of the duck");
@@ -254,7 +254,7 @@ fn duck_view_and_hull_over_four_tenths() {
         );
         // 5 more tenths of a second: ducked.
         for _ in 0..30 {
-            game.run_usercmd(eng, 0, &cmd(10, IN_DUCK, 0.0, 0.0), 0);
+            common::run_cmd(game, eng, 0, &cmd(10, IN_DUCK, 0.0, 0.0), 0);
         }
         let v = vars(eng, 0);
         assert!(!v.b_in_duck);
@@ -267,7 +267,7 @@ fn duck_view_and_hull_over_four_tenths() {
             (Vec3::new(-16.0, -16.0, -18.0), Vec3::new(16.0, 16.0, 32.0))
         );
         // Letting go stands the player up again.
-        game.run_usercmd(eng, 0, &idle(10), 0);
+        common::run_cmd(game, eng, 0, &idle(10), 0);
         let v = vars(eng, 0);
         assert_eq!(v.flags & FL_DUCKING, 0);
         assert_eq!(v.view_ofs.z, 17.0);
@@ -345,12 +345,12 @@ fn stairs_are_climbed() {
         eng.ent_mut(id).unwrap().max_speed = 250.0;
         eng.ent_mut(id).unwrap().fixangle = 0;
         for _ in 0..10 {
-            game.run_usercmd(eng, 0, &idle(10), 0);
+            common::run_cmd(game, eng, 0, &idle(10), 0);
         }
         let start = vars(eng, 0).origin;
         let mut best = start.z;
         for _ in 0..80 {
-            game.run_usercmd(eng, 0, &cmd(10, IN_FORWARD, 400.0, yaw), 0);
+            common::run_cmd(game, eng, 0, &cmd(10, IN_FORWARD, 400.0, yaw), 0);
             best = best.max(eng.ent(id).unwrap().origin.z);
         }
         let v = vars(eng, 0);
@@ -380,7 +380,7 @@ fn landing_punch_reaches_client_data() {
         let mut last_vz = 0.0;
         let mut landed = false;
         for _ in 0..200 {
-            game.run_usercmd(eng, 0, &idle(10), 0);
+            common::run_cmd(game, eng, 0, &idle(10), 0);
             let v = eng.ent(id).unwrap();
             if v.flags & FL_ONGROUND != 0 {
                 landed = true;
@@ -404,7 +404,7 @@ fn landing_punch_reaches_client_data() {
         assert_eq!(data.punchangle, v.punchangle);
         assert_eq!(v.health, 100.0, "no damage below the safe speed");
         // The next command decays it.
-        game.run_usercmd(eng, 0, &idle(10), 0);
+        common::run_cmd(game, eng, 0, &idle(10), 0);
         assert!(vars(eng, 0).punchangle.z < expected);
     });
 }
@@ -419,13 +419,13 @@ fn client_data_carries_duck_step_swim_fields() {
         // Walking sets the step-sound timer (`PM_UpdateStepSound`), ducking the duck timers;
         // the client data is what the edict has.
         for _ in 0..40 {
-            game.run_usercmd(eng, 0, &cmd(10, IN_FORWARD, 400.0, 0.0), 0);
+            common::run_cmd(game, eng, 0, &cmd(10, IN_FORWARD, 400.0, 0.0), 0);
         }
         let v = vars(eng, 0);
         let data = game.update_client_data(eng, 0);
         assert!(v.fl_time_step_sound > 0, "a step timer is running");
         assert_eq!(data.fl_time_step_sound, v.fl_time_step_sound);
-        game.run_usercmd(eng, 0, &cmd(10, IN_DUCK, 0.0, 0.0), 0);
+        common::run_cmd(game, eng, 0, &cmd(10, IN_DUCK, 0.0, 0.0), 0);
         let v = vars(eng, 0);
         let data = game.update_client_data(eng, 0);
         assert!(v.b_in_duck && v.fl_duck_time > 0);
@@ -483,7 +483,7 @@ fn hostile_usercmds_keep_the_player_finite() {
     fn check(game: &mut CsGame, eng: &mut EngineApi<'_>, cmds: &[GoldSrcUserCmd]) {
         for round in 0..6 {
             for c in cmds {
-                game.run_usercmd(eng, 0, c, 0xdead_beef);
+                common::run_cmd(game, eng, 0, c, 0xdead_beef);
                 let v = vars(eng, 0);
                 for (name, x) in [
                     ("origin", v.origin),
@@ -548,7 +548,7 @@ fn players_block_each_other_through_physents() {
             }
             let mut front = 0.0f32;
             for _ in 0..60 {
-                game.run_usercmd(eng, 0, &cmd(10, IN_FORWARD, 400.0, 0.0), 0);
+                common::run_cmd(game, eng, 0, &cmd(10, IN_FORWARD, 400.0, 0.0), 0);
                 front = front.max(vars(eng, 0).origin.x);
             }
             front
@@ -568,7 +568,7 @@ fn a_player_stuck_in_another_is_nudged_out_by_the_flailing_rule() {
     // physent it is stuck in is a player: `physent_is_player` of the engine's world.
     let mut b = two_players(Vec3::new(30.0, 0.0, 0.0));
     b.run(|game, eng| {
-        game.run_usercmd(eng, 0, &cmd(10, IN_JUMP, 0.0, 0.0), 0);
+        common::run_cmd(game, eng, 0, &cmd(10, IN_JUMP, 0.0, 0.0), 0);
         let gap = vars(eng, 1).origin.x - vars(eng, 0).origin.x;
         assert!(
             gap.abs() >= 32.0 - 0.01,
@@ -578,7 +578,7 @@ fn a_player_stuck_in_another_is_nudged_out_by_the_flailing_rule() {
     // Not pressing anything the player stays where it is, stuck.
     let mut b = two_players(Vec3::new(30.0, 0.0, 0.0));
     b.run(|game, eng| {
-        game.run_usercmd(eng, 0, &idle(10), 0);
+        common::run_cmd(game, eng, 0, &idle(10), 0);
         let gap = vars(eng, 1).origin.x - vars(eng, 0).origin.x;
         assert!(gap.abs() < 32.0, "still stuck: gap {gap}");
     });
@@ -632,4 +632,57 @@ fn the_world_knows_players_and_models() {
         let info = i32::from(brush.index);
         assert!(flags.contains(&(info, false, true)), "{info} in {flags:?}");
     });
+}
+
+/// A ducked player is relinked by the engine (`SV_ProcessImpacts`) with the movement's ducking
+/// hull (top at 18), before `CmdEnd` gives the entity `VEC_DUCK_HULL` (top at 32). A trigger
+/// whose bottom is between the two is not touched; one reaching below 18 is.
+#[test]
+fn a_ducked_player_is_relinked_with_the_movement_hull() {
+    let touches = |trigger_z: f32| {
+        let mut b = Bench::stub(spawns(4, 4));
+        b.run(move |game, eng| {
+            eng.set_cvar("sv_gravity", "0");
+            assert!(game.spawn_player(eng, 0, Team::Ct, 0));
+            let me = eng.client_edict(0);
+            game.place_player(eng, 0, Vec3::ZERO);
+            // Ducked as a previous command left it: the flag, the entity's `VEC_DUCK_HULL`.
+            let v = eng.ent_mut(me).unwrap();
+            v.fixangle = 0;
+            v.flags |= FL_DUCKING;
+            v.oldbuttons = i32::from(IN_DUCK);
+            v.view_ofs = Vec3::new(0.0, 0.0, 12.0);
+            eng.set_size(
+                me,
+                Vec3::new(-16.0, -16.0, -18.0),
+                Vec3::new(16.0, 16.0, 32.0),
+            );
+            let trigger = eng.create_entity("test_dispatch").expect("free edict");
+            assert!(game.spawn_entity(eng, trigger, "test_dispatch", &[]));
+            eng.ent_mut(trigger).unwrap().solid = cs_engine::consts::SOLID_TRIGGER;
+            eng.set_size(trigger, Vec3::splat(-5.0), Vec3::splat(5.0));
+            eng.set_origin(trigger, Vec3::new(0.0, 0.0, trigger_z));
+        });
+        for _ in 0..5 {
+            b.probe.queue_cmd(cmd(10, IN_DUCK, 0.0, 0.0));
+            b.step(1);
+        }
+        let v = b.run(|_, eng| vars(eng, 0));
+        assert_ne!(v.flags & FL_DUCKING, 0, "still ducked");
+        assert_eq!(v.maxs.z, 32.0, "CmdEnd's size");
+        b.server
+            .game()
+            .game
+            .state()
+            .dispatch_log
+            .iter()
+            .filter(|e| matches!(e, cs_game::entity::DispatchEvent::Touch { .. }))
+            .count()
+    };
+    assert_eq!(
+        touches(30.0),
+        0,
+        "the bottom at 25 is above the movement's hull"
+    );
+    assert!(touches(10.0) > 0, "the bottom at 5 is inside it");
 }

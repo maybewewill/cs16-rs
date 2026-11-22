@@ -485,6 +485,7 @@ impl<G: GameDll> Server<G> {
             &mut self.views,
         );
         eng.time = time;
+        eng.realtime = self.real_time;
         f(&mut self.game, &mut eng)
     }
 

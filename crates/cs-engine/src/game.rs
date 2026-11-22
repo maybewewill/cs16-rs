@@ -123,6 +123,9 @@ pub struct EngineApi<'a> {
     pub(crate) sv_time: f64,
     /// Seconds of the current server frame (`host_frametime`); 0 outside a frame.
     pub(crate) frametime: f32,
+    /// The server's real time of the current frame (HLDS `realtime`); 0 where the engine has
+    /// not set it (unit-test fixtures).
+    pub(crate) realtime: f64,
     pub(crate) outbox: &'a mut Outbox,
     pub(crate) clients: &'a mut [ClientView],
 }
@@ -153,6 +156,7 @@ impl<'a> EngineApi<'a> {
             time,
             sv_time: time,
             frametime,
+            realtime: 0.0,
             outbox,
             clients,
         }
@@ -240,6 +244,11 @@ pub trait GameDll {
         cmd: &GoldSrcUserCmd,
         random_seed: u32,
     );
+    /// The rest of `SV_RunCmd` after `run_usercmd` and the engine's `SV_ProcessImpacts` (the
+    /// player relinked, the triggers it met and the impacts of its movement touched):
+    /// `PlayerPostThink` and `CmdEnd`. Called with the same `eng.time()` as `run_usercmd`, inside
+    /// the same lag-compensation window. Default: nothing.
+    fn post_usercmd(&mut self, _eng: &mut EngineApi<'_>, _slot: u8, _cmd: &GoldSrcUserCmd) {}
     /// Called at the start of every physics pass (HLDS `StartFrame`), after the frame's
     /// datagrams were handled, with the seconds of the frame (`host_frametime`).
     fn start_frame(&mut self, eng: &mut EngineApi<'_>, frametime: f32);

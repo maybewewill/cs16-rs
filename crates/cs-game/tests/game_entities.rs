@@ -79,6 +79,9 @@ impl GameDll for Rig {
     ) {
         self.game.run_usercmd(eng, slot, cmd, random_seed);
     }
+    fn post_usercmd(&mut self, eng: &mut EngineApi<'_>, slot: u8, cmd: &GoldSrcUserCmd) {
+        self.game.post_usercmd(eng, slot, cmd);
+    }
     fn start_frame(&mut self, eng: &mut EngineApi<'_>, frametime: f32) {
         for action in std::mem::take(&mut self.actions) {
             action(&mut self.game, eng);
@@ -447,7 +450,7 @@ fn brush_entities_stay_solid() {
         .filter(|e| e.classname() == "func_ladder")
         .count();
     let mut b = Bench::on(map);
-    let (solid, unsolid_ok, hit, ladders, illusionary_ok) = b.run(|game, eng| {
+    let (solid, unsolid_ok, hit, ladders, illusionary_ok) = b.run(|_game, eng| {
         let mut solid = 0;
         let mut unsolid_ok = true;
         let mut hit = 0;
@@ -480,13 +483,31 @@ fn brush_entities_stay_solid() {
                     && v.effects & 128 == 0;
             }
         }
-        (solid, unsolid_ok, hit, game.state().ladders.len(), illusionary_ok)
+        // The ladders are moveents of a player's physents: stand in the first one.
+        let mut ladders = 0;
+        let mut as_moveent = false;
+        let mut after = None;
+        while let Some(id) = eng.find_by_classname(after, "func_ladder") {
+            after = Some(id);
+            let v = eng.ent(id).unwrap().clone();
+            ladders += 1;
+            if !as_moveent && v.maxs != v.mins {
+                let me = eng.client_edict(0);
+                eng.set_origin(me, (v.absmin + v.absmax) * 0.5);
+                let pe = eng.pm_physents(me);
+                as_moveent = pe.num_moveents() > 0
+                    && (0..pe.num_physents() as i32).all(|i| pe.edict_of(i) != Some(id));
+            }
+        }
+        // (de_dust2 has no ladder; a map that has one finds it among the moveents.)
+        assert!(ladders == 0 || as_moveent, "a ladder is a moveent, not a physent");
+        (solid, unsolid_ok, hit, ladders, illusionary_ok)
     });
     assert!(solid > 0, "de_dust2 has brush entities");
     assert!(unsolid_ok);
     assert!(hit > 0, "a trace into one of {solid} brush entities stops at it");
     assert!(illusionary_ok);
-    // Every `func_ladder` of the lump with a model gave its bounds.
+    // Every `func_ladder` of the lump with a model spawned.
     assert_eq!(ladders, bsp_ladders);
 }
 

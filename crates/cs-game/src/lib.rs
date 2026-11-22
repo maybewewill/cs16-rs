@@ -41,8 +41,6 @@ use player::{MAX_PLAYERS, Player};
 
 /// What the game keeps outside its entities: handed to every entity call.
 pub struct GameState {
-    /// World-space bounds of the map's ladders, found when the map is activated.
-    pub ladders: Vec<(Vec3, Vec3)>,
     /// The spawn point the last counter-terrorist spawned at (`g_pLastCTSpawn`).
     pub last_ct_spawn: Option<EdictId>,
     /// The spawn point the last terrorist spawned at (`g_pLastTerroristSpawn`).
@@ -80,7 +78,6 @@ pub struct GameState {
 impl GameState {
     fn new() -> Self {
         Self {
-            ladders: Vec::new(),
             last_ct_spawn: None,
             last_t_spawn: None,
             move_params: MoveParams::default(),
@@ -105,7 +102,6 @@ impl GameState {
 
     /// Forgets what belonged to the previous map.
     fn reset_map(&mut self) {
-        self.ladders.clear();
         self.last_ct_spawn = None;
         self.last_t_spawn = None;
         self.num_terrorist_wins = 0;
@@ -321,10 +317,9 @@ impl GameDll for CsGame {
         messages::link_user_messages()
     }
 
-    /// Every entity of the map has spawned: finds the ladders and starts the rules of the map
+    /// Every entity of the map has spawned: starts the rules of the map
     /// (the freeze period before the first round).
     fn server_activate(&mut self, eng: &mut EngineApi<'_>) {
-        self.state.ladders = world::ladder_bounds(eng);
         self.state.rules = rules::Rules::new(eng);
     }
 
@@ -384,6 +379,11 @@ impl GameDll for CsGame {
         random_seed: u32,
     ) {
         player::run_usercmd(&mut self.state, eng, slot, cmd, random_seed);
+    }
+
+    /// `PlayerPostThink` and `CmdEnd`, after the engine's `SV_ProcessImpacts`.
+    fn post_usercmd(&mut self, eng: &mut EngineApi<'_>, slot: u8, _cmd: &GoldSrcUserCmd) {
+        player::post_usercmd(&mut self.state, eng, slot);
     }
 
     /// `CHalfLifeMultiplay::Think`: the clock of the round and the match.

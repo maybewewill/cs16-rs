@@ -257,7 +257,6 @@ pub struct Player {
     /// `pmove->oldangles`: the player's `v_angle` from before the command's angles were applied.
     pub(crate) oldangles: Vec3,
     /// `m_random_seed` (`CmdStart`): the seed of the command being run, for the weapons' spread.
-    #[allow(dead_code)] // read by the weapons (2D)
     pub(crate) random_seed: u32,
     /// `m_fNextSuicideTime`.
     pub(crate) next_suicide_time: f64,
@@ -830,7 +829,8 @@ fn finite_cmd(cmd: &GoldSrcUserCmd) -> GoldSrcUserCmd {
 
 /// Runs one command of the player of `slot` (the game's part of ReHLDS `SV_RunCmd`, read
 /// 2026-11-22, around `PM_Move`): `CmdStart`, the view angles, `PlayerPreThink`, the movement
-/// ([`pmove::run_pmove`]), `PlayerPostThink`, `CmdEnd`. A command of 0 ms runs all of it, with a
+/// ([`pmove::run_pmove`]); the engine then relinks the player and touches what it met, and
+/// [`post_usercmd`] runs `PlayerPostThink` and `CmdEnd`. A command of 0 ms runs all of it, with a
 /// frame time of 0. A player that has not been spawned does not move; a dead one is run by
 /// `PlayerDeathThink` (which `PreThink` calls before the movement), then `PM_Physics_Toss` moves
 /// the body.
@@ -861,6 +861,19 @@ pub(crate) fn run_usercmd(
         }
     }
     run_cmd_body(g, eng, slot, &cmd);
+}
+
+/// The rest of `SV_RunCmd` after the engine's `SV_ProcessImpacts`: `PlayerPostThink` (the fall
+/// damage; not for the dead, observers and players not in play, nor once the match is over), then
+/// `CmdEnd`.
+pub(crate) fn post_usercmd(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    let Some(p) = g.players.get(usize::from(slot)).and_then(Option::as_ref) else {
+        return;
+    };
+    let observing = p.pflag_observer && observer::mode_of(eng, slot) != observer::OBS_NONE;
+    if !observing && p.in_play() && p.alive && !g.rules.game_over() {
+        post_think(g, eng, slot);
+    }
     pmove::cmd_end(eng, slot);
 }
 
@@ -950,9 +963,6 @@ fn run_cmd_body(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, cmd: &Gold
         }
     }
     pmove::run_pmove(g, eng, slot, cmd);
-    if alive && !game_over {
-        post_think(g, eng, slot);
-    }
 }
 
 /// The fall part of `CBasePlayer::PostThink`: a player that lands faster than
@@ -1212,6 +1222,8 @@ fn killed(
         v.solid = SOLID_NOT;
         v.angles.x = 0.0;
         v.angles.z = 0.0;
+        // `Killed` (player.cpp:3919, read 2026-11-22): `pev->view_ofs = Vector(0, 0, -8)`.
+        v.view_ofs = Vec3::new(0.0, 0.0, -8.0);
     }
     // The camera of the dying: it chases the killer, or the screen fades to black.
     observer::killed(g, eng, slot, attacker);

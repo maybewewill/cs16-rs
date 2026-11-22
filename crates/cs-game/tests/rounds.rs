@@ -125,7 +125,7 @@ fn forward(slot: u8, n: usize) -> impl FnOnce(&mut CsGame, &mut EngineApi<'_>) {
                 forwardmove: 400.0,
                 ..Default::default()
             };
-            game.run_usercmd(eng, slot, &cmd, 0);
+            common::run_cmd(game, eng, slot, &cmd, 0);
         }
     }
 }
@@ -454,7 +454,7 @@ fn win_limit_changes_the_map() {
             buttons: 2,
             ..Default::default()
         };
-        game.run_usercmd(eng, 1, &cmd, 0);
+        common::run_cmd(game, eng, 1, &cmd, 0);
     });
     b.step(3);
     assert_eq!(
