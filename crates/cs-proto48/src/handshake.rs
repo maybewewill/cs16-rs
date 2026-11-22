@@ -305,7 +305,13 @@ pub fn parse_oob_packet(raw: &[u8]) -> Result<OobPacket, ProtoError> {
 
     if cmd == "connect" && tokens.len() >= 5 {
         let protocol = tokens[1].parse::<u32>().unwrap_or(0);
-        let challenge = tokens[2].parse::<u32>().unwrap_or(0);
+        // The client keeps the challenge in an `int` and prints it with `%i`, so a challenge
+        // above `i32::MAX` comes back negative: read it as a signed number and keep its bits.
+        let challenge = tokens[2]
+            .parse::<i64>()
+            .ok()
+            .and_then(|v| i32::try_from(v).ok().map(|v| v as u32).or_else(|| u32::try_from(v).ok()))
+            .unwrap_or(0);
         let protinfo = InfoString::parse(&tokens[3]);
         let userinfo = InfoString::parse(&tokens[4]);
         return Ok(OobPacket::Connect {
@@ -358,6 +364,20 @@ pub fn tokenize_goldsrc_line(line: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::crypto::md5_hex;
+
+    #[test]
+    fn connect_accepts_a_challenge_printed_as_a_negative_int() {
+        let raw = b"\xFF\xFF\xFF\xFFconnect 48 -123 \"\\prot\\2\" \"\\name\\P\"\n";
+        match parse_oob_packet(raw).unwrap() {
+            OobPacket::Connect { challenge, .. } => assert_eq!(challenge, (-123i32) as u32),
+            other => panic!("unexpected: {other:?}"),
+        }
+        let raw = b"\xFF\xFF\xFF\xFFconnect 48 3000000000 \"\\prot\\2\" \"\\name\\P\"\n";
+        match parse_oob_packet(raw).unwrap() {
+            OobPacket::Connect { challenge, .. } => assert_eq!(challenge, 3_000_000_000),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
 
     #[test]
     fn handshake_packets_roundtrip_exactly() {
