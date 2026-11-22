@@ -141,6 +141,8 @@ pub struct EngineApi<'a> {
     pub(crate) realtime: f64,
     pub(crate) outbox: &'a mut Outbox,
     pub(crate) clients: &'a mut [ClientView],
+    /// The studio poses the traces of this call made (`rgStudioCache`).
+    pub(crate) studio_cache: crate::studio::SharedStudioCache,
 }
 
 impl<'a> EngineApi<'a> {
@@ -172,6 +174,7 @@ impl<'a> EngineApi<'a> {
             realtime: 0.0,
             outbox,
             clients,
+            studio_cache: Default::default(),
         }
     }
 }

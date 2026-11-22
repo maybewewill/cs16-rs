@@ -199,7 +199,8 @@ fn load_decal_names(vfs: &Vfs) -> Vec<String> {
 }
 
 /// The server as `serve` starts it: the engine on `map` with `game`, the Protocol 48 deltas,
-/// the vanilla cvars and the decal list of the game directory.
+/// the vanilla cvars, the decal list of the game directory and the game files as the studio
+/// model loader (the players' hitboxes).
 fn new_server<G: GameDll>(cfg: ServerConfig, map: ServerMap, game: G, vfs: &Vfs) -> Server<G> {
     let mut server = Server::new(
         cfg,
@@ -209,6 +210,8 @@ fn new_server<G: GameDll>(cfg: ServerConfig, map: ServerMap, game: G, vfs: &Vfs)
         vanilla_cvars(),
     );
     server.set_decals(load_decal_names(vfs));
+    let model_vfs = vfs.clone();
+    server.set_model_loader(Arc::new(move |name| model_vfs.read_bytes(name).ok()));
     server
 }
 

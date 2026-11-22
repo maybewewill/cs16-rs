@@ -238,6 +238,13 @@ impl<G: GameDll> Server<G> {
         self.precache.decal_index(name)
     }
 
+    /// Gives the engine the way to read game files, so that the studio models the game
+    /// precaches (players, above all) are traced by their hitboxes. Models precached already
+    /// are read now; the setting survives a map change. Without it every entity is a box.
+    pub fn set_model_loader(&mut self, loader: crate::precache::ModelLoader) {
+        self.precache.set_model_loader(Some(loader));
+    }
+
     /// Fresh precache tables for `map`, before the game activates it.
     pub(crate) fn map_precache(map: &ServerMap) -> PrecacheTables {
         let precache = PrecacheTables::new(&map.path, map.submodel_count);

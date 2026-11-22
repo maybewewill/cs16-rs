@@ -2,8 +2,14 @@
 //! protocol refers to by index.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use cs_assets::mdl::StudioPoseData;
 use cs_proto48::messages::ResourceEntry;
+
+/// Reads the bytes of a game file (`models/player/gign/gign.mdl`) for the engine: the owner of
+/// the server gives it the virtual file system, which the engine does not depend on.
+pub type ModelLoader = Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>;
 
 pub const MAX_MODELS: usize = 512;
 pub const MAX_SOUNDS: usize = 512;
@@ -46,6 +52,11 @@ pub struct PrecacheTables {
     /// The decal names of `decals.wad` in the order of `sv_decalnames`; see
     /// [`decal_names_from_wads`]. Empty until the server sets them; it keeps them across maps.
     decals: Vec<String>,
+    /// Where a precached `.mdl` is read from; without it no studio model is known and every
+    /// entity is traced as its box.
+    loader: Option<ModelLoader>,
+    /// The studio models read at precache, by model index (`Mod_Extradata` of the original).
+    studio: HashMap<u16, Arc<StudioPoseData>>,
 }
 
 impl PrecacheTables {
@@ -68,6 +79,8 @@ impl PrecacheTables {
             events: Table::new("event", MAX_EVENTS),
             locked: false,
             decals: Vec::new(),
+            loader: None,
+            studio: HashMap::new(),
         }
     }
 
@@ -100,7 +113,61 @@ impl PrecacheTables {
     }
 
     pub fn precache_model(&mut self, name: &str) -> Result<u16, PrecacheError> {
-        self.models.insert(name, self.locked)
+        let index = self.models.insert(name, self.locked)?;
+        self.load_studio(index, name);
+        Ok(index)
+    }
+
+    /// Sets where studio models are read from and reads the `.mdl` models precached so far.
+    pub fn set_model_loader(&mut self, loader: Option<ModelLoader>) {
+        self.loader = loader;
+        let names: Vec<(u16, String)> = self
+            .models
+            .names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (i as u16, n.clone()))
+            .collect();
+        for (index, name) in names {
+            self.load_studio(index, &name);
+        }
+    }
+
+    /// The loader, to hand on to the tables of the next map.
+    pub fn model_loader(&self) -> Option<ModelLoader> {
+        self.loader.clone()
+    }
+
+    /// The studio model with model index `index`, `None` for a brush model, a missing file or
+    /// one the loader could not read or parse.
+    pub fn studio_model(&self, index: u16) -> Option<&Arc<StudioPoseData>> {
+        self.studio.get(&index)
+    }
+
+    /// `Mod_LoadStudioModel` for the pose data the traces use: reads and parses the file once
+    /// per index. A file that cannot be read or parsed is reported and traced as a box.
+    fn load_studio(&mut self, index: u16, name: &str) {
+        let is_mdl = name
+            .rsplit_once('.')
+            .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("mdl"));
+        if index == 0 || !is_mdl || self.studio.contains_key(&index) {
+            return;
+        }
+        let Some(loader) = &self.loader else {
+            return;
+        };
+        let Some(bytes) = loader(name) else {
+            tracing::warn!(model = name, "model file not found; traced as a box");
+            return;
+        };
+        match StudioPoseData::parse(&bytes) {
+            Ok(model) => {
+                self.studio.insert(index, Arc::new(model));
+            }
+            Err(error) => {
+                tracing::warn!(model = name, %error, "model refused; traced as a box");
+            }
+        }
     }
 
     pub fn precache_sound(&mut self, name: &str) -> Result<u16, PrecacheError> {

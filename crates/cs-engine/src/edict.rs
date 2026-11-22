@@ -77,6 +77,14 @@ pub struct EntVars {
     pub frame: f32,
     pub animtime: f32,
     pub framerate: f32,
+    /// `entvars_t::controller`: the four bone controller positions (the head turn and the like)
+    /// a studio model is posed with.
+    pub controller: [u8; 4],
+    /// `entvars_t::blending`: the two sequence blend weights a studio model is posed with.
+    pub blending: [u8; 2],
+    /// `entvars_t::gamestate`: CS sets it to 1 on a player who carries no shield, which
+    /// leaves the shield hitbox out of traces.
+    pub gamestate: i32,
     pub scale: f32,
     pub body: u8,
     pub skin: i16,

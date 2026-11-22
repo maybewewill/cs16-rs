@@ -105,6 +105,12 @@ const BOX_CHILDREN: [[i32; 2]; 6] = {
 };
 
 impl BoxHull {
+    /// A hull of six given planes, ordered as `SV_HullForBox`'s: the same clipnodes walk them
+    /// (`studio_hull` of `SV_InitStudioHull` has the same children).
+    pub(crate) fn from_planes(planes: [Plane; 6]) -> Self {
+        Self { planes }
+    }
+
     /// `SV_HullForBox`: the hull of the box `mins..maxs`.
     pub(crate) fn new(mins: Vec3, maxs: Vec3) -> Self {
         let plane = |i: usize, dist: f32| {
@@ -138,6 +144,10 @@ pub struct TraceResult {
     pub start_solid: bool,
     pub hit_sky: bool,
     pub hit_solid: bool,
+    /// `trace_t::hitgroup` (`tr.iHitgroup` of the game): the hitgroup of the studio hitbox a
+    /// trace hit (`HITGROUP_HEAD` is 1 and so on), 0 (`HITGROUP_GENERIC`) for anything else,
+    /// brush and box hits included.
+    pub hitgroup: i32,
 }
 
 impl TraceResult {
@@ -150,6 +160,7 @@ impl TraceResult {
             start_solid: false,
             hit_sky: false,
             hit_solid: false,
+            hitgroup: 0,
         }
     }
 }
@@ -298,6 +309,7 @@ impl WorldCollision {
             start_solid: ctx.start_solid,
             hit_sky: ctx.hit_sky,
             hit_solid: ctx.fraction < 1.0 || ctx.start_solid,
+            hitgroup: 0,
         }
     }
 

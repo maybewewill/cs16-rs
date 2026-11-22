@@ -696,6 +696,218 @@ fn decode_mesh_tristrips(
     out
 }
 
+// ---------------------------------------------------------------------------------------------
+// Raw pose data
+//
+// The server poses a model for hitbox traces exactly as the engine does (ReHLDS
+// `r_studio.cpp`): it walks the file's own animation values, with their run-length quirks,
+// instead of the per-frame table `StudioModel` decodes for drawing. That needs the file as it
+// is, so this part keeps the bytes and the few header fields the walk starts from.
+// ---------------------------------------------------------------------------------------------
+
+/// `MAXSTUDIOBONES`: bones the engine's pose arrays hold.
+pub const MAXSTUDIOBONES: usize = 128;
+/// `MAXSTUDIOCONTROLLERS`: entries of the controller adjustment array.
+pub const MAXSTUDIOCONTROLLERS: usize = 8;
+/// `STUDIO_NUM_HULLS`: hitboxes the engine's hull arrays hold.
+pub const STUDIO_NUM_HULLS: usize = 128;
+/// `STUDIO_TRACE_HITBOX`: the model header flag that makes every trace use the hitboxes.
+pub const STUDIO_TRACE_HITBOX: i32 = 0x0200;
+
+/// `mstudiobone_t`, without the name.
+#[derive(Debug, Clone, Copy)]
+pub struct RawBone {
+    pub parent: i32,
+    /// Controller (index into the adjustment array) of each of the six channels, `-1` for none.
+    pub bonecontroller: [i32; 6],
+    /// The channel defaults: position (0..3), then rotation (3..6, radians).
+    pub value: [f32; 6],
+    pub scale: [f32; 6],
+}
+
+/// `mstudiobonecontroller_t`, without the bone.
+#[derive(Debug, Clone, Copy)]
+pub struct RawController {
+    /// `type`: `STUDIO_X` and the like, `STUDIO_RLOOP` for a wrapping one.
+    pub kind: i32,
+    pub start: f32,
+    pub end: f32,
+    pub index: i32,
+}
+
+/// The part of `mstudioseqdesc_t` a pose needs.
+#[derive(Debug, Clone, Copy)]
+pub struct RawSequence {
+    pub numframes: i32,
+    pub numblends: i32,
+    pub blendstart: [f32; 2],
+    pub blendend: [f32; 2],
+    /// `0` for animations in the file itself; those of another sequence group are not read.
+    pub seqgroup: i32,
+    /// Byte offset of the animations (`animindex`), in the file for group 0.
+    pub animindex: usize,
+}
+
+/// `mstudiobbox_t`.
+#[derive(Debug, Clone, Copy)]
+pub struct RawHitbox {
+    pub bone: usize,
+    pub group: i32,
+    pub bbmin: Vec3,
+    pub bbmax: Vec3,
+}
+
+/// A model as the engine's pose code reads it. Built by [`StudioPoseData::parse`], which
+/// refuses a file whose tables do not fit in it, so the accessors may rely on the counts (the
+/// animation values themselves are bounds-checked on every read).
+#[derive(Debug, Clone)]
+pub struct StudioPoseData {
+    pub name: String,
+    /// `studiohdr_t::flags`.
+    pub flags: i32,
+    pub bones: Vec<RawBone>,
+    pub controllers: Vec<RawController>,
+    pub sequences: Vec<RawSequence>,
+    pub hitboxes: Vec<RawHitbox>,
+    data: Vec<u8>,
+}
+
+impl StudioPoseData {
+    /// Reads the tables a pose needs from the bytes of a `.mdl` file. Refuses (never panics)
+    /// a file that is not IDST v10, is cut short, has more bones or hitboxes than the engine's
+    /// arrays hold, a bone whose parent does not come before it, a controller reference
+    /// outside the adjustment array, or a hitbox on a bone that does not exist.
+    pub fn parse(data: &[u8]) -> Result<Self, MdlError> {
+        if data.len() < 244 || &data[0..4] != MDL_MAGIC || read_i32(data, 4)? != MDL_VERSION {
+            return Err(MdlError::InvalidHeader);
+        }
+        let name = read_cstr(&data[8..72]);
+        let flags = read_i32(data, 136)?;
+        let count = |at: usize| -> Result<usize, MdlError> {
+            usize::try_from(read_i32(data, at)?).map_err(|_| MdlError::Truncated("negative count"))
+        };
+        let num_bones = count(140)?;
+        let bone_index = count(144)?;
+        let num_controllers = count(148)?;
+        let controller_index = count(152)?;
+        let num_hitboxes = count(156)?;
+        let hitbox_index = count(160)?;
+        let num_seq = count(164)?;
+        let seq_index = count(168)?;
+        if num_bones > MAXSTUDIOBONES
+            || num_controllers > MAXSTUDIOCONTROLLERS
+            || num_hitboxes > STUDIO_NUM_HULLS
+            || num_seq > 2048
+        {
+            return Err(MdlError::Truncated("table larger than the engine's"));
+        }
+
+        let mut bones = Vec::with_capacity(num_bones);
+        for i in 0..num_bones {
+            let base = bone_index.saturating_add(i * 112);
+            let parent = read_i32(data, base + 32)?;
+            if parent < -1 || parent >= i as i32 {
+                return Err(MdlError::Truncated("bone parent"));
+            }
+            let mut bone = RawBone {
+                parent,
+                bonecontroller: [-1; 6],
+                value: [0.0; 6],
+                scale: [0.0; 6],
+            };
+            for c in 0..6 {
+                let controller = read_i32(data, base + 40 + c * 4)?;
+                if !(-1..MAXSTUDIOCONTROLLERS as i32).contains(&controller) {
+                    return Err(MdlError::Truncated("bone controller"));
+                }
+                bone.bonecontroller[c] = controller;
+                bone.value[c] = read_f32(data, base + 64 + c * 4)?;
+                bone.scale[c] = read_f32(data, base + 88 + c * 4)?;
+            }
+            bones.push(bone);
+        }
+
+        let mut controllers = Vec::with_capacity(num_controllers);
+        for i in 0..num_controllers {
+            let base = controller_index.saturating_add(i * 24);
+            let index = read_i32(data, base + 20)?;
+            if index < 0 {
+                return Err(MdlError::Truncated("controller index"));
+            }
+            controllers.push(RawController {
+                kind: read_i32(data, base + 4)?,
+                start: read_f32(data, base + 8)?,
+                end: read_f32(data, base + 12)?,
+                index,
+            });
+        }
+
+        let mut hitboxes = Vec::with_capacity(num_hitboxes);
+        for i in 0..num_hitboxes {
+            let base = hitbox_index.saturating_add(i * 32);
+            let bone = usize::try_from(read_i32(data, base)?)
+                .ok()
+                .filter(|&b| b < num_bones)
+                .ok_or(MdlError::Truncated("hitbox bone"))?;
+            let v = |at: usize| -> Result<Vec3, MdlError> {
+                Ok(Vec3::new(
+                    read_f32(data, base + at)?,
+                    read_f32(data, base + at + 4)?,
+                    read_f32(data, base + at + 8)?,
+                ))
+            };
+            hitboxes.push(RawHitbox {
+                bone,
+                group: read_i32(data, base + 4)?,
+                bbmin: v(8)?,
+                bbmax: v(20)?,
+            });
+        }
+
+        let mut sequences = Vec::with_capacity(num_seq);
+        for i in 0..num_seq {
+            let base = seq_index.saturating_add(i * 176);
+            sequences.push(RawSequence {
+                numframes: read_i32(data, base + 56)?,
+                numblends: read_i32(data, base + 120)?,
+                animindex: count(base + 124)?,
+                blendstart: [read_f32(data, base + 136)?, read_f32(data, base + 140)?],
+                blendend: [read_f32(data, base + 144)?, read_f32(data, base + 148)?],
+                seqgroup: read_i32(data, base + 156)?,
+            });
+        }
+
+        Ok(Self {
+            name,
+            flags,
+            bones,
+            controllers,
+            sequences,
+            hitboxes,
+            data: data.to_vec(),
+        })
+    }
+
+    /// The six animation offsets (`mstudioanim_t::offset`) of bone `bone` of the blend whose
+    /// first `mstudioanim_t` is at byte `anim_base`, and the byte position of that entry (the
+    /// offsets are relative to it). `None` when they are outside the file.
+    pub fn anim_entry(&self, anim_base: usize, bone: usize) -> Option<(usize, [u16; 6])> {
+        let at = anim_base.checked_add(bone.checked_mul(12)?)?;
+        let mut offsets = [0u16; 6];
+        for (i, slot) in offsets.iter_mut().enumerate() {
+            *slot = read_u16(&self.data, at.checked_add(i * 2)?).ok()?;
+        }
+        Some((at, offsets))
+    }
+
+    /// The `mstudioanimvalue_t` at byte `pos`: `(num.valid, num.total, value)` (the same two
+    /// bytes read three ways, as the union is). `None` outside the file.
+    pub fn anim_value(&self, pos: usize) -> Option<(u8, u8, i16)> {
+        let bytes = self.data.get(pos..pos.checked_add(2)?)?;
+        Some((bytes[0], bytes[1], i16::from_le_bytes([bytes[0], bytes[1]])))
+    }
+}
+
 fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, MdlError> {
     let arr: [u8; 2] = bytes
         .get(offset..offset + 2)

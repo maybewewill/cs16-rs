@@ -23,6 +23,7 @@ mod physics;
 mod physics_move;
 mod physics_water;
 mod rng;
+mod studio;
 mod texture;
 mod touch;
 mod trace_ents;
@@ -60,7 +61,7 @@ pub use pm::{
     PmTraceResult,
 };
 pub use precache::{
-    MAX_DECALS, MAX_GENERIC, MAX_MODELS, MAX_SOUNDS, PrecacheError, PrecacheTables,
+    MAX_DECALS, MAX_GENERIC, MAX_MODELS, MAX_SOUNDS, ModelLoader, PrecacheError, PrecacheTables,
     decal_names_from_wads, res_type, wad_lump_names,
 };
 pub use server::{

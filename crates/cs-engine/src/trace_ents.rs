@@ -18,12 +18,14 @@
 //!   current sequence bounding box. Players are `SOLID_SLIDEBOX` in CS 1.6, so by default it
 //!   never runs and skipping it only adds exact clips. The cvar's widening to players would
 //!   need the studio sequence bounding boxes, which the engine does not read.
-//! - `SV_HullForStudioModel` (`r_studio.cpp`): in the original a zero-size trace (every bullet)
-//!   against an entity with a studio model clips against its hitbox hulls (unless
-//!   `FTRACE_SIMPLEBOX`; for clients only when `sv_clienttrace != 0`) and the result carries a
-//!   `hitgroup`. Here every studio entity is clipped as its bounding box and there is no
-//!   `hitgroup`: no headshots or damage zones yet (parity registry `studio_hitbox_traces`;
-//!   the weapons of phase 2D need it).
+//! - `FTRACE_SIMPLEBOX` (`trace_flags` of the game's globals): the engine has no such flag.
+//!   Vanilla never sets it.
+//!
+//! `SV_HullForStudioModel` and the multi-hull clip of `SV_SingleClipMoveToEntity` are in
+//! `studio.rs` and [`clip_studio_hulls`]: a zero-size trace (every bullet) against an entity with
+//! a studio model the engine read (see `PrecacheTables::set_model_loader`) clips against its
+//! hitbox hulls (for clients only when `sv_clienttrace != 0`), and the result carries a
+//! `hitgroup`. Any other studio entity is still clipped as its box.
 //!
 //! Where the original stops the server (`Sys_Error`: a `SOLID_BSP` entity without a brush
 //! model or without `MOVETYPE_PUSH`/`MOVETYPE_PUSHSTEP`), the entity is not hit.
@@ -48,6 +50,7 @@ use crate::collision::{
 };
 use crate::edict::{EdictId, EntVars};
 use crate::game::EngineApi;
+use crate::studio::StudioHull;
 use crate::world::consts::{
     FL_MONSTER, FL_MONSTERCLIP, MOVETYPE_PUSH, MOVETYPE_PUSHSTEP, SOLID_BSP, SOLID_NOT,
     SOLID_TRIGGER,
@@ -156,6 +159,33 @@ pub(crate) fn bsp_offset(hull: Hull, mins: Vec3, origin: Vec3) -> Vec3 {
     } else {
         hull.clip_mins() - mins + origin
     }
+}
+
+/// The multi-hull branch of `SV_SingleClipMoveToEntity` (rehlds `world.cpp`, read 2026-11-22):
+/// the segment `start..end` is traced through every hitbox hull and the nearest hit kept, as
+/// the source keeps it (a hull replaces the result when it is the first, starts or stays in
+/// solid, or is nearer); the hitgroup is that of the hull kept last. As for a box hull, a trace
+/// that never leaves solid keeps fraction 1.
+fn clip_studio_hulls(hulls: &[StudioHull], start: Vec3, end: Vec3) -> TraceResult {
+    let mut trace = TraceResult {
+        all_solid: true,
+        ..TraceResult::clear(end)
+    };
+    let mut last = 0;
+    for (i, h) in hulls.iter().enumerate() {
+        let mut hit = NO_COLLISION.trace_local(Geometry::Box(&h.hull), start, end);
+        if hit.all_solid {
+            hit.fraction = 1.0;
+        }
+        if i == 0 || hit.all_solid || hit.start_solid || hit.fraction < trace.fraction {
+            let was_start_solid = trace.start_solid;
+            trace = hit;
+            trace.start_solid |= was_start_solid;
+            last = i;
+        }
+    }
+    trace.hitgroup = hulls.get(last).map_or(0, |h| h.group);
+    trace
 }
 
 /// `SV_MoveBounds`: the box that holds the whole move.
@@ -515,6 +545,14 @@ impl EngineApi<'_> {
                 rotated,
                 false,
             )
+        } else if let Some(hulls) = self
+            .precache
+            .studio_model(v.modelindex)
+            .and_then(|model| self.studio_hulls(v, model, origin, mins, maxs))
+        {
+            // `SV_HullForStudioModel`: one hull per hitbox, already in world space (its offset
+            // is zero), and the hitgroup of the one hit.
+            (clip_studio_hulls(&hulls, start, end), false, true)
         } else {
             // A hull made of the entity's box grown by the moving box.
             let boxhull = BoxHull::new(v.mins - maxs, v.maxs - mins);

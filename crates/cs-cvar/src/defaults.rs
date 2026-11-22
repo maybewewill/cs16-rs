@@ -78,6 +78,9 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     reg.register("sv_language", "0", CVarFlags::NONE, "Server language (1 is German)");
     reg.register("sv_maxvelocity", "2000", CVarFlags::NONE, "Maximum speed of any entity on an axis");
     reg.register("sv_bounce", "1", srv, "Bounce of a walking entity off a wall");
+    // ReHLDS `sv_main.cpp` (read 2026-11-22): "1", FCVAR_SERVER. 0 traces players as boxes; the
+    // value times 0.5 is how much a bullet's hitbox hull is grown.
+    reg.register("sv_clienttrace", "1", srv, "Size of the hitbox hull a bullet traces a player with (0: the box)");
     // The rest of the movevars (`SV_SetMoveVars`), defaults and flags from ReHLDS `sv_main.cpp`,
     // `sv_user.cpp` and `sv_phys.cpp` (read 2026-11-22). `edgefriction` and `mp_footsteps` are
     // the engine's own cvars (the names are `sv_edgefriction` and `sv_footsteps` in its source);

@@ -152,8 +152,10 @@ impl<G: GameDll> Server<G> {
         self.sv_time = SV_TIME_AT_MAP_START;
         self.warned_movetypes.clear();
         let decals = self.precache.decals().to_vec();
+        let loader = self.precache.model_loader();
         self.precache = Self::map_precache(&map);
         self.precache.set_decals(decals);
+        self.precache.set_model_loader(loader);
         self.world = WorldLinks::new(map.world_bounds());
         self.map = map;
         self.activate_map();
