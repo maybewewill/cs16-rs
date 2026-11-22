@@ -376,7 +376,8 @@ fn physents_start_with_the_world_and_keep_ladders_apart() {
         assert_eq!((world.info, world.player, world.solid), (0, 0, 4));
         assert_eq!(world.movetype, 0);
         assert!(world.is_brush_model);
-        assert_eq!(world.model_maxs, Vec3::splat(4096.0));
+        // The world model, one unit larger than the BSP says (`Mod_LoadSubmodels`).
+        assert_eq!(world.model_maxs, Vec3::splat(4097.0));
         assert_eq!(pe.edict_of(0), Some(eng.world()));
 
         // world, water, door and crate are physents; the ladder is a moveent alone.

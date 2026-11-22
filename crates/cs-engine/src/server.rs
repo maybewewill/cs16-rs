@@ -631,8 +631,13 @@ impl<G: GameDll> Server<G> {
     /// `tracing::error!` reports how many were skipped.
     fn compute_baselines(&mut self) {
         let max_clients = self.cfg.max_clients;
-        // `sv_playermodel` (`SV_FindModelNumbers`): 0 when the game never precached it.
-        let player_model = self.precache.model_index("models/player.mdl").unwrap_or(0);
+        // `sv_playermodel` (`SV_FindModelNumbers`, ReHLDS `sv_main.cpp` 666-681): -1 when the
+        // game never precached it; as the state's `u16` modelindex that is `u16::MAX`, which
+        // the 10-bit wire field cuts to 1023, as the `int` -1 is cut in the original.
+        let player_model = self
+            .precache
+            .model_index("models/player.mdl")
+            .unwrap_or(u16::MAX);
         let mut baselines: Vec<(u16, GoldSrcEntityState)> = self
             .edicts
             .iter_live()

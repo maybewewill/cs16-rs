@@ -789,6 +789,8 @@ pub(crate) fn physent_from_edict(
         SOLID_BBOX => (PhysModel::None, v.mins, v.maxs),
         _ => (PhysModel::None, v.mins, v.maxs),
     };
+    // The bounds are the loaded ones, with the one-unit spread of `Mod_LoadSubmodels` (see
+    // `WorldCollision::from_bsp`), as `PM_GetModelBounds` reads them in the original.
     let (model_mins, model_maxs) = match (model, coll) {
         (PhysModel::Brush(m), Some(c)) => c.model_bounds(m).unwrap_or((Vec3::ZERO, Vec3::ZERO)),
         _ => (Vec3::ZERO, Vec3::ZERO),

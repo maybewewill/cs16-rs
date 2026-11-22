@@ -1636,6 +1636,9 @@ mod tests {
             impacttime: 12.5,
             starttime: 11.25,
             iuser4: 3,
+            usehull: 1,
+            spectator: true,
+            gaitsequence: 9,
             ..Default::default()
         };
         for (name, player) in [("entity_state_player_t", true), ("entity_state_t", false)] {
@@ -1661,6 +1664,7 @@ mod tests {
                 assert_eq!((got.friction, got.gravity), (1.0, 1.0));
                 // `eflags` and the parametric movement are not in `entity_state_player_t`.
                 assert_eq!(got.eflags, 0);
+                assert_eq!((got.usehull, got.spectator, got.gaitsequence), (1, true, 9));
             } else {
                 // Only `entity_state_player_t` names them.
                 assert_eq!((got.friction, got.gravity), (0.0, 0.0));
@@ -1670,6 +1674,57 @@ mod tests {
                 assert!((got.impacttime - 12.5).abs() < 0.02 && (got.starttime - 11.25).abs() < 0.02);
             }
         }
+    }
+
+    /// A delta of the new fields against a previous state that is not zero: only the fields that
+    /// changed are on the wire, the rest are the previous record's.
+    #[test]
+    fn entity_state_delta_against_a_non_zero_previous_state() {
+        let reg = DeltaRegistry::cs16_default();
+        let schema = reg.get("entity_state_player_t").unwrap();
+        let prev = GoldSrcEntityState {
+            number: 1,
+            entity_type: 1,
+            colormap: 1,
+            controller: [1, 2, 3, 4],
+            blending: [128, 127],
+            friction: 1.0,
+            gravity: 1.0,
+            basevelocity: Vec3::new(8.0, 0.0, 0.0),
+            rendercolor: [5, 6, 7],
+            iuser4: 1,
+            ..Default::default()
+        };
+        let next = GoldSrcEntityState {
+            blending: [200, 127],
+            controller: [1, 2, 9, 4],
+            friction: 0.5,
+            gravity: 1.0,
+            basevelocity: Vec3::new(8.0, 16.0, 0.0),
+            rendercolor: [5, 60, 7],
+            iuser4: 2,
+            ..prev.clone()
+        };
+        let (from, to) = (prev.to_delta(schema), next.to_delta(schema));
+        let mut w = MsgWriter::new();
+        w.start_bit_writing();
+        assert!(write_delta(&mut w, schema, &from, &to, false, 20.0));
+        w.end_bit_writing();
+        let mut r = MsgReader::new(w.as_slice());
+        r.start_bit_reading();
+        let out = read_delta(&mut r, schema, &from, 20.0).unwrap();
+        r.end_bit_reading().unwrap();
+        let got = GoldSrcEntityState::from_delta(1, 1, &out, schema);
+        assert_eq!(got.blending, [200, 127]);
+        assert_eq!(got.controller, [1, 2, 9, 4]);
+        assert_eq!((got.friction, got.gravity), (0.5, 1.0));
+        assert_eq!(got.basevelocity, next.basevelocity);
+        assert_eq!(got.rendercolor, [5, 60, 7]);
+        assert_eq!((got.iuser4, got.colormap), (2, 1));
+        // Nothing changed: nothing to write.
+        let mut w = MsgWriter::new();
+        w.start_bit_writing();
+        assert!(!write_delta(&mut w, schema, &to, &to, false, 20.0));
     }
 
     /// `svc_deltadescription` for `clientdata_t` carries the real C offsets of the 32-bit

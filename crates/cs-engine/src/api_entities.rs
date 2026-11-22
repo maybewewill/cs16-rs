@@ -205,11 +205,7 @@ impl EngineApi<'_> {
         vars.model = name.to_string();
         vars.modelindex = index;
         if let Some((mins, maxs)) = bounds {
-            // `Mod_LoadSubmodels` stores every brush model one unit larger on each side than
-            // the BSP says, and `SetMinMaxSize` copies those bounds: the baselines of the
-            // original carry them (read off the golden capture of de_dust2, 2026-11-22; the
-            // function itself was not fetched).
-            let (mins, maxs) = (mins - Vec3::ONE, maxs + Vec3::ONE);
+            // The loaded model bounds already carry the one-unit spread of `Mod_LoadSubmodels`.
             vars.mins = mins;
             vars.maxs = maxs;
             vars.size = maxs - mins;
@@ -986,8 +982,7 @@ mod tests {
         let (mins, maxs) = collision.model_bounds(1).expect("model 1");
         let v = eng.ent(id).unwrap();
         assert_eq!((v.model.as_str(), v.modelindex), ("*1", 2));
-        // The brush model's bounds are one unit larger on every side (`Mod_LoadSubmodels`).
-        assert_eq!((v.mins, v.maxs), (mins - Vec3::ONE, maxs + Vec3::ONE));
+        assert_eq!((v.mins, v.maxs), (mins, maxs));
 
         let (wmins, wmaxs) = collision.model_bounds(0).expect("world");
         let start = (wmins + wmaxs) * 0.5;

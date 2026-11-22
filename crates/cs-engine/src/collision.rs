@@ -198,7 +198,17 @@ impl WorldCollision {
             nodes: map.nodes.clone(),
             clipnodes: map.clipnodes.clone(),
             leaf_contents: map.leafs.iter().map(|l| l.contents).collect(),
-            models: map.models.clone(),
+            // `Mod_LoadSubmodels` (ReHLDS `model.cpp`, read 2026-11-22): every model, the world
+            // included, is stored one unit larger on each side than the BSP says.
+            models: map
+                .models
+                .iter()
+                .map(|m| BspModel {
+                    mins: m.mins - Vec3::ONE,
+                    maxs: m.maxs + Vec3::ONE,
+                    ..*m
+                })
+                .collect(),
         }
     }
 
@@ -658,7 +668,8 @@ mod tests {
         };
         let bsp = BspMap::load(&vfs, "de_dust2").expect("de_dust2 parses");
         let world = WorldCollision::from_bsp(&bsp);
-        let (mins, maxs) = world.model_bounds(0).expect("world model");
+        // The characterization samples the BSP's own bounds, not the enlarged loaded ones.
+        let (mins, maxs) = (bsp.models[0].mins, bsp.models[0].maxs);
 
         let mut state: u64 = 0xC516;
         let mut unit = move || {
