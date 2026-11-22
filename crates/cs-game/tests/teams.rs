@@ -552,7 +552,9 @@ fn every_team_is_told_to_the_joiner() {
     // The player of slot 0 enters again: it is told the team of everyone in the game.
     b.probe.clear_messages();
     b.run(|game, eng| game.client_put_in_server(eng, 0));
-    b.step(2);
+    // The teams are told by the first `UpdateClientData` (`m_fInitHUD`), which runs in the
+    // `PreThink` of the player's next command, not with the engine's next update.
+    b.step(6);
     let new = b.messages();
     assert!(new.iter().any(|m| matches!(
         m,

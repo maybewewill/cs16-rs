@@ -375,11 +375,14 @@ fn pistol_rows_match_source() {
         // The first shot: no decay of the accuracy (`m_flLastFire` is 0), the damage of the row,
         // the cycle time, the idle and the recoil.
         let before = a.run(|game, _| health(game, 1));
-        let ft = a.run(move |game, eng| {
+        let (ft, flash) = a.run(move |game, eng| {
             let ft = eng.frametime();
             press(game, eng, IN_ATTACK);
-            ft
+            // The flash lives for the frame: the engine clears it at the end (`SV_CleanupEnts`).
+            let flash = eng.ent(eng.client_edict(0)).unwrap().effects & EF_MUZZLEFLASH;
+            (ft, flash)
         });
+        assert_eq!(flash, EF_MUZZLEFLASH, "{:?}", row.id);
         let (damage, cycle, idle, recoil, accuracy) =
             (row.damage, row.cycle, row.idle, row.recoil, row.deploy_accuracy);
         a.run(move |game, eng| {
@@ -394,7 +397,6 @@ fn pistol_rows_match_source() {
             assert_eq!(w.shots_fired, 1);
             let v = eng.ent(eng.client_edict(0)).unwrap();
             assert!(approx(v.punchangle.x, -recoil), "{row_id:?} recoil {}", v.punchangle.x);
-            assert_eq!(v.effects & EF_MUZZLEFLASH, EF_MUZZLEFLASH);
         });
 
         // The next shot, after the button is released and a little time has passed: the accuracy

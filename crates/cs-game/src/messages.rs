@@ -543,6 +543,8 @@ fn init_hud(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) {
 }
 
 /// `CBasePlayer::UpdateClientData` for the player of `slot`: what the client does not know yet.
+/// Called from `PreThink` on every command (player.cpp:4831, read 2026-11-22) and from
+/// `RemoveAllItems`; not by the engine's `UpdateClientData` export.
 /// On the first update after a spawn (`m_fInitHUD`) the HUD starts over: `ResetHUD`, once per
 /// entry `InitHUD` and the rules' welcome, the money, the bomb icon, the round timer, the
 /// weather and the team scores; then, every update, what changed: the hidden HUD elements, the
@@ -556,6 +558,8 @@ pub(crate) fn update_client_data(g: &mut GameState, eng: &mut EngineApi<'_>, slo
     let (start_over, first_entry) = (p.init_hud, !p.game_hud_initialized);
     p.init_hud = false;
     if start_over {
+        // `m_fInitHUD = FALSE; gInitHUD = FALSE;`
+        g.init_hud_global = false;
         // Vanilla (`m_signals.Update()`): the zones the player touched count as the ones it
         // stands in, with no icon message for the change.
         p.signals.update();

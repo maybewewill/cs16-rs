@@ -509,9 +509,14 @@ fn timers_count_down_in_post_think() {
 #[test]
 fn fov_change_sends_set_fov() {
     let mut b = armed(WeaponId::Usp);
+    // The first command tells the client everything (`UpdateClientData` runs in `PreThink`).
+    b.run(|game, eng| common::run_cmd(game, eng, 0, &cmd(), 0));
     b.step(2);
     b.probe.clear_messages();
-    b.run(|game, _| game.set_fov(0, 55));
+    b.run(|game, eng| {
+        game.set_fov(0, 55);
+        common::run_cmd(game, eng, 0, &cmd(), 0);
+    });
     b.step(2);
     let msgs = b.messages();
     assert!(msgs.contains(&CsUserMsg::SetFov(55)), "{msgs:?}");
@@ -529,20 +534,50 @@ fn fov_change_sends_set_fov() {
     );
     // Nothing more while it stays.
     b.probe.clear_messages();
+    b.run(|game, eng| common::run_cmd(game, eng, 0, &cmd(), 0));
     b.step(2);
     let msgs = b.messages();
     assert!(!msgs.iter().any(|m| matches!(m, CsUserMsg::SetFov(_) | CsUserMsg::CurWeapon { .. })));
 }
 
+/// `CBasePlayer::UpdateClientData` runs in `PreThink` (player.cpp:4831, read 2026-11-22), on every
+/// command; the engine's `UpdateClientData` export (client.cpp:5020) only fills the structure of
+/// the update and sends nothing.
+#[test]
+fn the_hud_update_belongs_to_pre_think_not_to_the_export() {
+    let mut b = armed(WeaponId::Usp);
+    b.run(|game, eng| common::run_cmd(game, eng, 0, &cmd(), 0));
+    b.step(10);
+    b.probe.clear_messages();
+    b.run(|game, eng| {
+        game.set_fov(0, 55);
+        let data = game.update_client_data(eng, 0);
+        assert_eq!(data.fov, 90.0, "the structure has what the edict has, not the new FOV yet");
+    });
+    b.step(5);
+    assert!(!b.messages().iter().any(|m| matches!(m, CsUserMsg::SetFov(_))), "{:?}", b.messages());
+    // The next command's `PreThink` tells it and sets the edict's field.
+    b.run(|game, eng| {
+        common::run_cmd(game, eng, 0, &cmd(), 0);
+        assert_eq!(eng.ent(eng.client_edict(0)).unwrap().fov, 55.0);
+    });
+    b.step(2);
+    assert!(b.messages().contains(&CsUserMsg::SetFov(55)));
+}
+
 #[test]
 fn cur_weapon_follows_the_clip_and_the_active_item() {
     let mut b = armed(WeaponId::Usp);
+    // The first command tells the client everything (`UpdateClientData` runs in `PreThink`).
+    b.run(|game, eng| common::run_cmd(game, eng, 0, &cmd(), 0));
     b.step(2);
     b.probe.clear_messages();
     b.run(|game, eng| {
-        // A shot: the clip is 11.
+        // A shot: the clip is 11. The shot is fired in `PostThink`, after the `PreThink` that
+        // sends `CurWeapon`, so the client hears of it with the next command.
         weapon(game, WeaponId::Usp).next_primary_attack = 0.0;
         press(game, eng, IN_ATTACK);
+        common::run_cmd(game, eng, 0, &cmd(), 0);
     });
     b.step(2);
     let cur: Vec<_> = b
@@ -553,10 +588,14 @@ fn cur_weapon_follows_the_clip_and_the_active_item() {
             _ => None,
         })
         .collect();
-    assert_eq!(cur, [(true, 16, 11)]);
+    // The last word is the clip after the shot (the command that fired it told the old one).
+    assert_eq!(cur.last(), Some(&(true, 16, 11)), "{cur:?}");
     // The reserve is told with `AmmoX` once, when it changes.
     b.probe.clear_messages();
-    b.run(|game, _| game.set_player_ammo(0, ammo_index("45ACP") as usize, 30));
+    b.run(|game, eng| {
+        game.set_player_ammo(0, ammo_index("45ACP") as usize, 30);
+        common::run_cmd(game, eng, 0, &cmd(), 0);
+    });
     b.step(2);
     let ammo: Vec<_> = b
         .messages()

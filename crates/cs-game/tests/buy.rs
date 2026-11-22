@@ -236,13 +236,15 @@ fn buy_zone_icon_on_spawn() {
     // A terrorist is in it.
     spawn(&mut b, Team::Terrorist);
     settle(&mut b);
-    // The engine builds a client's update (and so calls `UpdateClientData`) only every
-    // `1 / cl_updaterate` seconds, so whether the zone's touch of the spawn frame is already
-    // raised when the update runs depends on the phase. When it is, `m_fInitHUD`'s
-    // `m_signals.Update()` (player.cpp 7600-7607, vanilla) makes it the state and clears the
-    // signal, and `HandleSignals` (due: `m_tmHandleSignals = 0`, 7908) finds state BUY and signal
-    // 0: `BuyZoneIcon_Clear`; the next look, half a second later, sets the icon. Vanilla quirk.
-    assert_eq!(icons(&b), [(0, None), (1, Some([0, 160, 0]))]);
+    // `UpdateClientData` runs in `PreThink` (player.cpp:4831), before the movement and the touches
+    // of that command, so the order does not depend on when the engine builds an update: the
+    // first command after the spawn finds `m_fInitHUD`, whose `m_signals.Update()` (7600-7607,
+    // vanilla) takes the signals raised so far as the state, and the zone's touch comes after it
+    // (`PM_Move`, `SV_ProcessImpacts`); `HandleSignals` (due: `m_tmHandleSignals` is 0, 7908)
+    // finds state and signal both 0 and sends nothing, and the next look, half a second later,
+    // finds the signal and sets the icon: one icon, no clear before it. (The clear of the
+    // earlier expectation was an artefact of the update running at the end of the frame.)
+    assert_eq!(icons(&b), [(1, Some([0, 160, 0]))]);
 }
 
 #[test]

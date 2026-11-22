@@ -252,7 +252,7 @@ fn radio_is_limited_and_silent_for_the_dead_and_the_deaf() {
 #[test]
 fn radar_shows_teammates_only() {
     let mut b = bench();
-    // Both players run UpdateClientData as if the engine had asked, after the radar is due.
+    // Both players run a command (`PreThink`, which runs `UpdateClientData`), after the radar is due.
     b.step(150);
     b.probe.clear_messages();
     let origins = b.run(|game: &mut CsGame, eng: &mut EngineApi<'_>| {
@@ -260,7 +260,7 @@ fn radar_shows_teammates_only() {
         let mut origins = Vec::new();
         for (slot, origin) in [(1u8, Vec3::new(-640.0, 320.0, 48.0)), (2, Vec3::new(960.0, -480.0, 48.0))] {
             game.place_player(eng, slot, origin);
-            game.update_client_data(eng, slot);
+            common::commands_of(game, eng, slot, 1);
             origins.push(origin);
         }
         origins
@@ -283,12 +283,12 @@ fn radar_shows_teammates_only() {
     b.probe.clear_messages();
     b.run(|game, eng| {
         game.place_player(eng, 2, Vec3::new(960.0, -480.0, 48.0 + 8.0));
-        game.update_client_data(eng, 2);
+        common::commands_of(game, eng, 2, 1);
     });
     b.step(120);
     b.run(|game, eng| {
         game.place_player(eng, 2, Vec3::new(960.0, -480.0, 48.0 + 8.0));
-        game.update_client_data(eng, 2);
+        common::commands_of(game, eng, 2, 1);
     });
     b.step(3);
     assert!(
@@ -303,7 +303,7 @@ fn radar_shows_teammates_only() {
     b.probe.clear_messages();
     b.run(|game, eng| {
         game.place_player(eng, 2, Vec3::new(-960.0, 480.0, 48.0));
-        game.update_client_data(eng, 2);
+        common::commands_of(game, eng, 2, 1);
     });
     b.step(3);
     assert!(!b.messages().iter().any(|m| matches!(m, CsUserMsg::Radar { .. })));
@@ -799,7 +799,7 @@ fn the_radar_is_sent_at_most_once_a_second() {
     let hop = |b: &mut Bench, x: f32| {
         b.run(move |game: &mut CsGame, eng: &mut EngineApi<'_>| {
             game.place_player(eng, 2, Vec3::new(x, -480.0, 48.0));
-            game.update_client_data(eng, 2);
+            common::commands_of(game, eng, 2, 1);
         });
         b.step(2);
     };

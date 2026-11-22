@@ -547,7 +547,8 @@ impl Player {
     /// `m_bitsHUDDamage`, `m_iClientFOV`, `m_iFOV`, `m_iClientHideHUD`, `m_iTrain`).
     fn reset_hud_state(&mut self) {
         self.init_hud = true;
-        self.client_health = -1;
+        // `m_iClientHealth` is not part of it: `Spawn` leaves it, so a respawn that finds the
+        // client already knows the health (a joiner's 100) does not send `Health` again.
         self.client_battery = -1;
         self.hud_damage = -1;
         self.damage_bits = 0;
@@ -601,6 +602,16 @@ pub(crate) fn player_slot(g: &GameState, eng: &EngineApi<'_>, id: EdictId) -> Op
 ///   for the length of `Spawn`).
 fn spawn_on_connect(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     crate::world::get_player_spawn_spot(g, eng, slot);
+    // `Spawn` (player.cpp:5849, read 2026-11-22): `SET_PHYSICS_KEY_VALUE(edict(), "slj", "0")` and
+    // `"hl", "1"`: the client's physics info, which goes to it with its client data.
+    set_physics_keys(eng, slot);
+    // `Spawn` (player.cpp:6036-6058, read 2026-11-22): `ClientPutInServer` sets `m_bNotKilled`
+    // before it, so the player keeps what it has and `m_rgAmmoLast[i] = -1` makes the first
+    // `SendAmmoUpdate` tell the client every ammo count, zeros included (32 `AmmoX`).
+    if let Some(p) = g.players[usize::from(slot)].as_mut() {
+        p.ammo_last = [-1; crate::weapons::MAX_AMMO_SLOTS];
+    }
+    eng.set_view(eng.client_edict(slot), eng.client_edict(slot));
     send_room_type(eng, slot);
     crate::hud_misc::on_spawn(g, eng, slot);
     eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::BarTime(0));
@@ -620,6 +631,12 @@ fn spawn_on_connect(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     messages::sync_round_timer(g, eng, slot);
 }
 
+/// The physics keys of `Spawn` (`slj` off, `hl` on).
+fn set_physics_keys(eng: &mut EngineApi<'_>, slot: u8) {
+    eng.set_physics_key(slot, "slj", "0");
+    eng.set_physics_key(slot, "hl", "1");
+}
+
 /// `SVC_ROOMTYPE` with the `room_type` cvar (`Spawn`).
 fn send_room_type(eng: &mut EngineApi<'_>, slot: u8) {
     let room_type = eng.cvar_f32("room_type") as i32 as i16 as u16;
@@ -637,9 +654,9 @@ fn send_room_type(eng: &mut EngineApi<'_>, slot: u8) {
 ///
 /// Known gaps: the original's no-camera path ends with `pev->angles = gpGlobals->v_forward`, a
 /// stale global (the last `MakeVectors`, a direction vector used as angles), which is not
-/// reproduced; the spot's angles stand. The original keeps the player as a `MOVETYPE_NOCLIP`
-/// spectator with `models/player.mdl` while it looks at the menus; here it is `MOVETYPE_NONE`
-/// with no model.
+/// reproduced; the spot's angles stand. Like the original it keeps the player as a
+/// `MOVETYPE_NOCLIP` spectator with `models/player.mdl` while it looks at the menus (the golden
+/// capture of HLDS: `spectator`, `movetype 8` and the model index in its entity state).
 pub(crate) fn put_in_server(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let index = usize::from(slot);
     if index >= MAX_PLAYERS {
@@ -690,18 +707,20 @@ pub(crate) fn put_in_server(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8
     v.v_angle = if intro_view { angles } else { Vec3::ZERO };
     v.flags = FL_CLIENT | FL_SPECTATOR;
     v.solid = SOLID_NOT;
-    v.movetype = MOVETYPE_NONE;
+    v.movetype = MOVETYPE_NOCLIP;
     v.effects = EF_NODRAW | EF_NOINTERP;
-    v.modelindex = 0;
     v.deadflag = DEAD_DEAD;
     v.health = 100.0;
     v.velocity = Vec3::ZERO;
     v.punchangle = Vec3::ZERO;
     v.fixangle = 1;
+    // `SET_CLIENT_MAXSPEED(ENT(pev), 1)`. No `fov`: `Spawn` leaves `pev->fov` as the engine
+    // cleared it, the first `UpdateClientData` sets it with `SetFOV`.
     v.max_speed = 1.0;
-    v.fov = DEFAULT_FOV;
     v.view_ofs = view_ofs;
     eng.set_origin(id, origin);
+    // `SET_MODEL(ENT(pev), "models/player.mdl")`: the player has a model, though it is not drawn.
+    eng.set_model(id, "models/player.mdl");
     // The end of `ClientPutInServer` (client.cpp:735-749, read 2026-11-22): everyone is told the
     // player connected, `%` of the name made a space (the text is a format string).
     let name = eng
@@ -845,6 +864,7 @@ pub(crate) fn spawn(
     p.team = team;
     p.class = class;
     p.health = 100.0;
+    set_physics_keys(eng, slot);
     // A player killed before starts with nothing (`Spawn`: armor, kevlar and the goggles).
     let lost_items = !p.not_killed;
     if lost_items {
@@ -949,6 +969,8 @@ pub(crate) fn spawn(
     // `UTIL_ScreenFade(this, Vector(0, 0, 0), 0.001)` that clears a fade left from the death
     // (6132), and `SyncRoundTimer` (6133). (`UpdateLocation` is not ported.) The first client
     // data update (`m_fInitHUD`) sends the round timer again, as `UpdateClientData` does.
+    // `SET_VIEW(ENT(pev), ENT(pev))` (5882): the view is the player's own again.
+    eng.set_view(id, id);
     send_room_type(eng, slot);
     if lost_items {
         crate::buy::send_item_status(eng, slot, false);
@@ -957,6 +979,9 @@ pub(crate) fn spawn(
     // `PlayerSpawn` -> `OnSpawnEquip`: a player that lost its items gets the default ones; the
     // `RemoveAllItems` in it sends the HUD update and the empty `CurWeapon`.
     crate::inventory::on_spawn_equip(g, eng, slot, lost_items);
+    // `m_bNotKilled = true; m_bIsDefusing = false;` and "get rid of the progress bar":
+    // `SetProgressBarTime(0)` (player.cpp:6085-6092, read 2026-11-22), before `ResetMaxSpeed`.
+    eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::BarTime(0));
     reset_max_speed(g, eng, slot);
     if let Some(p) = g.players[index].as_mut() {
         p.num_spawns += 1;
@@ -1109,9 +1134,6 @@ fn run_cmd_body(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, cmd: &Gold
         // `ItemPreFrame; WaterMove` come before the velocity modifier.
         weapon_core::player_item_pre_frame(g, eng, slot);
         water_move(g, eng, slot);
-        // `PreThink` (player.cpp:4825, read 2026-11-22): the flashlight is hidden from the HUD
-        // unless `mp_flashlight` allows it (`FAllowFlashlight`), before `UpdateClientData`.
-        let allow = eng.cvar_f32("mp_flashlight") != 0.0;
         let on_ground = eng.ent(id).is_some_and(|v| v.flags & FL_ONGROUND != 0);
         let Some(p) = g
             .players
@@ -1120,11 +1142,6 @@ fn run_cmd_body(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, cmd: &Gold
         else {
             return;
         };
-        if allow {
-            p.hide_hud &= !HIDEHUD_FLASHLIGHT;
-        } else {
-            p.hide_hud |= HIDEHUD_FLASHLIGHT;
-        }
         // `PreThink` (player.cpp:4774-4786): on the ground the velocity modifier slows the
         // player down and climbs back to 1. `real_t modvel = m_flVelocityModifier + 0.01` adds
         // a double and stores a float.
@@ -1140,8 +1157,22 @@ fn run_cmd_body(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, cmd: &Gold
                 p.velocity_modifier = 1.0;
             }
         }
-        // `UpdateClientData` (the `Damage` message) comes first in the source; the time-based
-        // damage check follows it.
+        // `PreThink` (player.cpp:4825, read 2026-11-22): the flashlight is hidden from the HUD
+        // unless `mp_flashlight` allows it (`FAllowFlashlight`), before `UpdateClientData`. (The
+        // idle check before it, `DropIdlePlayer`, is not ported.)
+        let allow = eng.cvar_f32("mp_flashlight") != 0.0;
+        if allow {
+            p.hide_hud &= !HIDEHUD_FLASHLIGHT;
+        } else {
+            p.hide_hud |= HIDEHUD_FLASHLIGHT;
+        }
+        // `UpdateClientData` (player.cpp:4831, read 2026-11-22): "JOHN: checks if new client data
+        // (for HUD and view control) needs to be sent to the client", on every command, before
+        // that command's movement and touches, and not once the match is over (`PreThink` has
+        // returned). Not the engine's `UpdateClientData` export ([`client_data`]), which only
+        // fills the structure of the update.
+        messages::update_client_data(g, eng, slot);
+        // The time-based damage check follows it.
         check_time_based_damage(g, eng, slot);
     }
     let Some(p) = g.players.get(usize::from(slot)).and_then(Option::as_ref) else {
@@ -2234,7 +2265,9 @@ pub(crate) fn client_data(
         health: v.health,
         maxspeed: v.max_speed,
         fov: v.fov,
-        deadflag: own.deadflag,
+        // `deadflag` is not filled: the `UpdateClientData` export (client.cpp:5020, read
+        // 2026-11-22) leaves it as the engine cleared it, and the golden capture of HLDS sends 0
+        // for a player that is dead or not yet in the game.
         punchangle: v.punchangle,
         iuser1: own.iuser1,
         iuser2: own.iuser2,
@@ -2243,6 +2276,7 @@ pub(crate) fn client_data(
         // the followed player's for an observer in first person. `waterjumptime` is
         // `int(teleport_time)`; `watertype` has no field in the client data. `fuser4` and
         // `iuser4` are not sent.
+        physinfo: eng.physics_info(slot),
         b_in_duck: i32::from(v.b_in_duck),
         fl_duck_time: v.fl_duck_time,
         fl_time_step_sound: v.fl_time_step_sound,
@@ -2262,7 +2296,6 @@ pub(crate) fn client_data(
     {
         data.weapons = p.weapons;
     }
-    messages::update_client_data(g, eng, slot);
     data
 }
 

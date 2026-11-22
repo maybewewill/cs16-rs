@@ -64,6 +64,10 @@ pub struct GameState {
     /// How many players have entered the server since the game started (the user id the team
     /// balance orders by).
     pub(crate) join_counter: u32,
+    /// `gInitHUD` (player.cpp:31): true until the first `UpdateClientData` that starts a HUD over
+    /// has run, in the life of the game module (it is not reset with the map). `Precache` makes a
+    /// player start its HUD over while it is set; `Spawn` does so whatever it is.
+    pub(crate) init_hud_global: bool,
     /// State of the game's own random numbers (`RANDOM_LONG`).
     rng: u32,
     /// The statics of `pm_shared` (the stuck table, the texture materials, the wade-step skip
@@ -88,6 +92,7 @@ impl GameState {
             rules: rules::Rules::default(),
             map_cycle: mapcycle::MapCycle::default(),
             join_counter: 0,
+            init_hud_global: true,
             rng: 0x2545_f491,
             pm_shared: pm_init(None),
             #[cfg(feature = "test-hooks")]

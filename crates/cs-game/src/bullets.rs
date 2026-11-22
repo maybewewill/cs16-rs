@@ -29,6 +29,7 @@
 use cs_engine::consts::{MOVETYPE_PUSHSTEP, SOLID_BSP};
 use cs_engine::{EdictId, EngineApi, EntTrace, MoveFilter, MsgDest};
 use cs_proto48::tempent;
+#[cfg(feature = "test-hooks")]
 use cs_sim::pm::math::angle_vectors;
 use cs_sim::pm::pm_find_texture_type;
 use glam::Vec3;
