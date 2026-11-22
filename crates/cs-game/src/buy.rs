@@ -76,13 +76,15 @@ use crate::weapons::{
     is_primary_weapon, max_ammo_carry_for_weapon, weapon_info,
 };
 
-/// `SIGNAL_BUY`, `SIGNAL_BOMB`, `SIGNAL_RESCUE`, `SIGNAL_ESCAPE`, `SIGNAL_VIPSAFETY`
-/// (`unisignals.h`): the player stands in a buy zone, a bomb site, a hostage rescue zone, an
-/// escape zone, a VIP safety zone.
+/// `SIGNAL_BUY` (`unisignals.h`): the player stands in a buy zone.
 pub const SIGNAL_BUY: u8 = 1 << 0;
+/// `SIGNAL_BOMB`: the player stands in a bomb site (`func_bomb_target`, carrier only).
 pub const SIGNAL_BOMB: u8 = 1 << 1;
+/// `SIGNAL_RESCUE`: the player stands in a hostage rescue zone.
 pub const SIGNAL_RESCUE: u8 = 1 << 2;
+/// `SIGNAL_ESCAPE`: the player stands in an escape zone.
 pub const SIGNAL_ESCAPE: u8 = 1 << 3;
+/// `SIGNAL_VIPSAFETY`: the player stands in a VIP safety zone.
 pub const SIGNAL_VIPSAFETY: u8 = 1 << 4;
 /// `MIN_BUY_TIME` (`player.h`, vanilla): the least `mp_buytime` allows, in seconds.
 pub const MIN_BUY_TIME: i32 = 15;

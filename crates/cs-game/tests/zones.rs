@@ -361,7 +361,7 @@ fn map_parameters_buying_and_bombradius() {
 }
 
 #[test]
-fn map_parameters_close_the_buy_menu_to_a_team() {
+fn map_parameters_refuse_purchases_of_the_team_kept_out() {
     // A buy zone for each team round their spawn points; only the terrorists may buy.
     let mut map = stub_spawns();
     map.push(params(&[("buying", "2")]));
@@ -398,6 +398,79 @@ fn map_parameters_close_the_buy_menu_to_a_team() {
     });
     let r = &b.server.game().game.state().rules;
     assert_eq!((r.bomb_radius(), r.ct_cant_buy(), r.t_cant_buy()), (700.0, true, true));
+}
+
+/// A probe of `team` in a buy zone of a stub map with `extra` entities, that tries `vest`: the
+/// money it has left and the centre-print texts it got.
+fn try_vest(extra: Vec<Entity>, team: Team, vip: bool) -> (i32, Vec<String>) {
+    let mut map = stub_spawns();
+    map.extend(extra);
+    map.push(entity(&[("classname", "func_buyzone"), ("origin", "200 0 0")]));
+    let mut b = bench(map);
+    spawn_at(&mut b, team, Vec3::new(200.0, 0.0, 0.0));
+    set_player(&mut b, |p| {
+        p.money = 16000;
+        p.is_vip = vip;
+    });
+    settle(&mut b);
+    assert_eq!(signals(&b) & SIGNAL_BUY, SIGNAL_BUY);
+    b.probe.clear_messages();
+    command(&mut b, 0, "vest");
+    b.step(5);
+    (with_player(&b, |p| p.money), centre_texts(&b))
+}
+
+#[test]
+fn buying_3_refuses_both_teams() {
+    for (team, text) in [(Team::Ct, "#CT_cant_buy"), (Team::Terrorist, "#Terrorist_cant_buy")] {
+        let (money, told) = try_vest(vec![params(&[("buying", "3")])], team, false);
+        assert_eq!(money, 16000, "{team:?} bought");
+        assert_eq!(told, [text]);
+    }
+}
+
+#[test]
+fn buying_1_refuses_the_terrorists_only() {
+    let (money, told) = try_vest(vec![params(&[("buying", "1")])], Team::Terrorist, false);
+    assert_eq!((money, told), (16000, vec!["#Terrorist_cant_buy".to_string()]));
+    let (money, told) = try_vest(vec![params(&[("buying", "1")])], Team::Ct, false);
+    assert!(money < 16000, "{told:?}");
+}
+
+#[test]
+fn the_vip_cannot_buy() {
+    let (money, told) = try_vest(vec![], Team::Ct, true);
+    assert_eq!((money, told), (16000, vec!["#VIP_cant_buy".to_string()]));
+}
+
+#[test]
+fn a_terrorist_in_a_vip_safety_zone_is_told_once_what_it_is() {
+    let mut b = bench(all_zones());
+    spawn_at(&mut b, Team::Terrorist, VIP_AT);
+    settle(&mut b);
+    let hints = |b: &Bench| -> Vec<Vec<u8>> {
+        b.messages()
+            .iter()
+            .filter_map(|m| match m {
+                CsUserMsg::Unknown { name, payload } if name == "HudTextArgs" => {
+                    Some(payload.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let texts: Vec<String> = hints(&b)
+        .iter()
+        .map(|p| String::from_utf8_lossy(&p[..p.iter().position(|&c| c == 0).unwrap()]).into_owned())
+        .collect();
+    assert!(texts.contains(&"#Hint_terrorist_vip_zone".to_string()), "{texts:?}");
+    // Leaving and coming back does not repeat it (`DHF_IN_VIPSAFETY_ZONE`).
+    b.probe.clear_messages();
+    place(&mut b, NOWHERE);
+    settle(&mut b);
+    place(&mut b, VIP_AT);
+    settle(&mut b);
+    assert!(hints(&b).is_empty());
 }
 
 #[test]
