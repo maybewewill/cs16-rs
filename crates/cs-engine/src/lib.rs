@@ -14,6 +14,7 @@ pub mod map;
 pub mod mapents;
 mod movestep;
 pub mod oob;
+pub mod pm;
 pub mod precache;
 pub mod server;
 mod signon;
@@ -49,6 +50,11 @@ pub use oob::{
     CHALLENGE_BUCKET_SECS, ChallengeIssuer, ConnectRequest, MAX_INFO_STRING, MAX_NAME_BYTES,
     OOB_GLOBAL_REPLIES_PER_SEC, OobContext, OobLimiter, OobOutcome, handle_oob,
     sanitize_name,
+};
+pub use pm::{
+    CONTENTS_LADDER, MAX_MOVEENTS, MAX_PHYSENTS, PM_GLASS_IGNORE, PM_NORMAL, PM_PLAYER_MAXS,
+    PM_PLAYER_MINS, PM_STUDIO_BOX, PM_STUDIO_IGNORE, PM_WORLD_ONLY, PhysEntView, PmPhysEnts,
+    PmTraceResult,
 };
 pub use precache::{MAX_GENERIC, MAX_MODELS, MAX_SOUNDS, PrecacheError, PrecacheTables, res_type};
 pub use server::{

@@ -458,7 +458,9 @@ impl WorldLinks {
 
     /// Indices of the entities in the tree whose absolute box touches `mins..maxs`, with their
     /// list, node by node in the order `SV_TouchLinks` visits them (a node's triggers, then its
-    /// solids, then the larger-coordinate child's subtree, then the other).
+    /// solids, then the larger-coordinate child's subtree, then the other). `check_boxes`
+    /// tests each entity's own box against `mins..maxs`.
+    #[allow(clippy::too_many_arguments)]
     fn collect(
         &self,
         edicts: &EdictPool,
@@ -466,6 +468,7 @@ impl WorldLinks {
         maxs: Vec3,
         want_trigger: bool,
         want_solid: bool,
+        check_boxes: bool,
         out: &mut Vec<EdictId>,
     ) {
         let mut stack = vec![0usize];
@@ -485,7 +488,7 @@ impl WorldLinks {
                         continue;
                     };
                     let v = &edict.vars;
-                    if bounds_intersect(mins, maxs, v.absmin, v.absmax) {
+                    if !check_boxes || bounds_intersect(mins, maxs, v.absmin, v.absmax) {
                         out.push(link.id);
                     }
                 }
@@ -512,7 +515,20 @@ impl WorldLinks {
         maxs: Vec3,
         out: &mut Vec<EdictId>,
     ) {
-        self.collect(edicts, mins, maxs, false, true, out);
+        self.collect(edicts, mins, maxs, false, true, true, out);
+    }
+
+    /// Every solid-list entity of the nodes `SV_AddLinksToPM_` walks for the reach box
+    /// `mins..maxs`, in its order. Unlike [`solids_in_box`](Self::solids_in_box) the entities'
+    /// own boxes are not tested: the caller does (the original tests a client at its true box).
+    pub(crate) fn solids_in_tree(
+        &self,
+        edicts: &EdictPool,
+        mins: Vec3,
+        maxs: Vec3,
+        out: &mut Vec<EdictId>,
+    ) {
+        self.collect(edicts, mins, maxs, false, true, false, out);
     }
 
     /// The solid-list entities of the nodes `SV_LinkContents` visits for `pos` (the root down
@@ -723,7 +739,7 @@ impl EngineApi<'_> {
         if area.is_some() && touch_triggers && !killed {
             let mut found = Vec::new();
             self.world
-                .collect(self.edicts, absmin, absmax, true, false, &mut found);
+                .collect(self.edicts, absmin, absmax, true, false, true, &mut found);
             for touch in found {
                 let Some(t) = self.edicts.get(touch).map(|e| &e.vars) else {
                     continue;
@@ -782,7 +798,7 @@ impl EngineApi<'_> {
         }
         let mut found = Vec::new();
         self.world
-            .collect(self.edicts, mins, maxs, true, true, &mut found);
+            .collect(self.edicts, mins, maxs, true, true, true, &mut found);
         found.sort_unstable_by_key(|id| id.index);
         found
     }

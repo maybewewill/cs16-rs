@@ -61,7 +61,7 @@ pub(crate) enum Geometry<'a> {
 
 impl Geometry<'_> {
     /// The node the walk starts at (`hull->firstclipnode`).
-    fn root(self, world: &WorldCollision) -> i32 {
+    pub(crate) fn root(self, world: &WorldCollision) -> i32 {
         match self {
             Self::Bsp { model, hull } => world
                 .models
@@ -306,7 +306,7 @@ impl WorldCollision {
     }
 
     /// `SV_HullPointContents` from node `node_idx` of `geo`.
-    fn geo_point_contents(&self, geo: Geometry<'_>, mut node_idx: i32, p: Vec3) -> i32 {
+    pub(crate) fn geo_point_contents(&self, geo: Geometry<'_>, mut node_idx: i32, p: Vec3) -> i32 {
         let mut guard = 0usize;
         while node_idx >= 0 && guard < 4096 {
             guard += 1;
@@ -319,8 +319,26 @@ impl WorldCollision {
         self.geo_leaf_contents(geo, node_idx)
     }
 
+    /// `(firstclipnode, lastclipnode)` of the `hull_t` of `geo`: the first node of the hull and
+    /// the last node of the array it indexes (the nodes for the point hull, the clipnodes for the
+    /// others; a box hull is its six nodes). `None` for a model out of range.
+    pub(crate) fn hull_range(&self, geo: Geometry<'_>) -> Option<(i32, i32)> {
+        match geo {
+            Geometry::Bsp { model, hull } => {
+                let first = self.models.get(model)?.head_nodes[hull as usize];
+                let len = if hull == Hull::Point {
+                    self.nodes.len()
+                } else {
+                    self.clipnodes.len()
+                };
+                Some((first, len as i32 - 1))
+            }
+            Geometry::Box(_) => Some((0, 5)),
+        }
+    }
+
     /// Plane and children of node `idx` of `geo`; `None` out of range.
-    fn geo_node(&self, geo: Geometry<'_>, idx: i32) -> Option<(Plane, [i32; 2])> {
+    pub(crate) fn geo_node(&self, geo: Geometry<'_>, idx: i32) -> Option<(Plane, [i32; 2])> {
         let idx = usize::try_from(idx).ok()?;
         match geo {
             Geometry::Bsp {
@@ -343,7 +361,7 @@ impl WorldCollision {
     }
 
     /// Contents of the leaf `idx` (negative) of `geo`.
-    fn geo_leaf_contents(&self, geo: Geometry<'_>, idx: i32) -> i32 {
+    pub(crate) fn geo_leaf_contents(&self, geo: Geometry<'_>, idx: i32) -> i32 {
         match geo {
             Geometry::Bsp {
                 hull: Hull::Point, ..

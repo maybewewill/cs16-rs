@@ -9,8 +9,15 @@ use glam::Vec3;
 use crate::collision::{CONTENTS_EMPTY, Hull, MAX_WORLD_COORD, TraceResult};
 use crate::edict::{EdictId, EntVars};
 use crate::game::EngineApi;
+use crate::collision::NO_COLLISION;
+use crate::pm::{
+    self, CONTENTS_LADDER, MAX_MOVEENTS, MAX_PHYSENTS, PmPhysEnts, PmTraceResult,
+    physent_from_edict, reach_box, world_physent,
+};
 use crate::trace_ents::{EntTrace, move_bounds};
-use crate::world::consts::{FL_CLIENT, FL_MONSTERCLIP, SOLID_BBOX, SOLID_BSP, SOLID_SLIDEBOX};
+use crate::world::consts::{
+    FL_CLIENT, FL_MONSTERCLIP, SOLID_BBOX, SOLID_BSP, SOLID_NOT, SOLID_SLIDEBOX,
+};
 use crate::world::free_entity;
 use crate::mapents::MAX_VALUE_BYTES;
 use crate::precache::PrecacheError;
@@ -363,6 +370,11 @@ impl EngineApi<'_> {
             let Some(solid) = self.edicts.get(id).map(|e| e.vars.solid) else {
                 continue;
             };
+            // `SV_IsCollidableInPM` lets a `SOLID_NOT` brush (water) through; a trace never
+            // hits one.
+            if solid == SOLID_NOT {
+                continue;
+            }
             let true_origin = self.world.moved_player(id).map(|m| m.true_origin);
             let hit = self
                 .clip_to_entity_at(id, true_origin, start, mins, maxs, end, solid == SOLID_BSP)
@@ -384,8 +396,158 @@ impl EngineApi<'_> {
         }
     }
 
-    /// `SV_AddLinksToPM_` and `SV_IsCollidableInPM` for entity `id` against the box
-    /// `mins..maxs` (see [`trace_player_move`](Self::trace_player_move)).
+    /// `SV_AddLinksToPM` for `player` (ReHLDS `sv_user.cpp`, read 2026-11-22): the world first,
+    /// then the area-tree walk within 256 units of the player's origin. Ladders (`SOLID_NOT`
+    /// with `skin` `CONTENTS_LADDER`) go only into the moveents. Another player is met at its
+    /// true (not lag-rewound) origin and dead players are left out. Entities are taken in the
+    /// tree's order, not in edict order; at most `MAX_PHYSENTS` physents and `MAX_MOVEENTS`
+    /// moveents. A stale `player` gives an empty list (not even the world); a player whose
+    /// origin is outside the world gets the world alone. See `pm.rs` for what is left out.
+    pub fn pm_physents(&self, player: EdictId) -> PmPhysEnts {
+        let mut out = PmPhysEnts::default();
+        let Some(origin) = self.edicts.get(player).map(|e| e.vars.origin) else {
+            return out;
+        };
+        let coll = self.map.collision();
+        out.push_physent(world_physent(self.world(), coll));
+        if !in_world(origin) {
+            return out;
+        }
+        let (mins, maxs) = reach_box(origin);
+        let mut candidates = Vec::new();
+        self.world
+            .solids_in_tree(self.edicts, mins, maxs, &mut candidates);
+        let max_clients = u16::from(self.edicts.max_clients());
+        for id in candidates {
+            let Some(check) = self.edicts.get(id).map(|e| &e.vars) else {
+                continue;
+            };
+            if !self.collidable_in_pm(id, player, mins, maxs) {
+                continue;
+            }
+            let client_slot = (1..=max_clients).contains(&id.index);
+            let true_origin = self.world.moved_player(id).map(|m| m.true_origin);
+            let pe = physent_from_edict(id, check, client_slot, true_origin, coll);
+            // `check->v.solid || check->v.skin != -16`: only a ladder goes to the moveents.
+            if check.solid != SOLID_NOT || i32::from(check.skin) != CONTENTS_LADDER {
+                if out.num_physents() >= MAX_PHYSENTS {
+                    break;
+                }
+                out.push_physent(pe);
+            } else if out.num_moveents() < MAX_MOVEENTS {
+                out.push_moveent(pe);
+            }
+        }
+        out
+    }
+
+    /// `_PM_PlayerTrace` (ReHLDS `pmovetst.cpp`, read 2026-11-22): the player's hull
+    /// `usehull` (0 stand, 1 duck, 2 point, 3 large) traced from `start` to `end` through
+    /// every physent of `pe` in order (BSP hulls by the map `{0 -> 1, 1 -> 3, 2 -> 0,
+    /// 3 -> 2}`, box hulls for the rest, rotated brush models), the flags `PM_WORLD_ONLY` and
+    /// `PM_GLASS_IGNORE` honoured and the physent `ignore_pe` (-1: none) skipped. A trace
+    /// that hits nothing has `ent` -1 and a zero normal. A `start` or `end` outside the world
+    /// (non-finite or beyond `MAX_WORLD_COORD`) or a `usehull` outside `0..=3` hits nothing.
+    pub fn pm_player_trace(
+        &self,
+        pe: &PmPhysEnts,
+        start: Vec3,
+        end: Vec3,
+        usehull: i32,
+        trace_flags: i32,
+        ignore_pe: i32,
+    ) -> PmTraceResult {
+        if !in_world(start) || !in_world(end) {
+            return PmTraceResult::miss(if in_world(end) { end } else { Vec3::ZERO });
+        }
+        let coll = self.map.collision().unwrap_or(&NO_COLLISION);
+        pm::player_trace(
+            coll,
+            pe.physents_slice(),
+            start,
+            end,
+            usehull,
+            trace_flags,
+            ignore_pe,
+        )
+    }
+
+    /// `_PM_TestPlayerPosition` (ReHLDS `pmovetst.cpp`, read 2026-11-22): the index of the
+    /// first physent whose hull holds `pos` in solid, or -1, and the trace the original
+    /// fills. Quirk: that trace is taken at `trace_origin` (`pmove->origin`), not at `pos`.
+    /// Input outside the world, or a `usehull` outside `0..=3`, gives -1.
+    pub fn pm_test_player_position(
+        &self,
+        pe: &PmPhysEnts,
+        trace_origin: Vec3,
+        pos: Vec3,
+        usehull: i32,
+    ) -> (i32, PmTraceResult) {
+        if !in_world(trace_origin) || !in_world(pos) {
+            return (-1, PmTraceResult::miss(Vec3::ZERO));
+        }
+        let coll = self.map.collision().unwrap_or(&NO_COLLISION);
+        pm::test_player_position(coll, pe.physents_slice(), trace_origin, pos, usehull)
+    }
+
+    /// `PM_PointContents` (ReHLDS `pmovetst.cpp`, read 2026-11-22): `(contents,
+    /// truecontents)`. The true contents are the world model's alone. The contents fold the
+    /// water currents into water and are overridden by a non-solid brush physent holding `p`
+    /// (a `func_water`'s `skin`); solid wins. `p` outside the world is empty.
+    pub fn pm_point_contents(&self, pe: &PmPhysEnts, p: Vec3) -> (i32, i32) {
+        if !in_world(p) {
+            return (CONTENTS_EMPTY, CONTENTS_EMPTY);
+        }
+        let coll = self.map.collision().unwrap_or(&NO_COLLISION);
+        pm::point_contents(coll, pe.physents_slice(), p)
+    }
+
+    /// The test of `PM_Ladder` for moveent `index`: a brush model with `skin`
+    /// `CONTENTS_LADDER` whose hull for `usehull`, shifted as `PM_HullForBsp` does, holds
+    /// `origin` (its contents are not `CONTENTS_EMPTY`). `false` for a bad index, `usehull` or
+    /// `origin`.
+    pub fn pm_ladder_contains(
+        &self,
+        pe: &PmPhysEnts,
+        index: usize,
+        origin: Vec3,
+        usehull: i32,
+    ) -> bool {
+        let Some(moveent) = pe.moveent_at(index) else {
+            return false;
+        };
+        if !in_world(origin) {
+            return false;
+        }
+        let coll = self.map.collision().unwrap_or(&NO_COLLISION);
+        pm::ladder_contains(coll, moveent, origin, usehull)
+    }
+
+    /// `PM_TraceModel` (ReHLDS `pmovetst.cpp`, read 2026-11-22) against moveent `index`: the
+    /// point hull of its brush model from `start` to `end`, as `(fraction, plane normal)`;
+    /// `(1, 0)` for a miss, a bad index, a moveent that is no brush model or input outside the
+    /// world.
+    pub fn pm_trace_model(
+        &self,
+        pe: &PmPhysEnts,
+        index: usize,
+        start: Vec3,
+        end: Vec3,
+    ) -> (f32, Vec3) {
+        let Some(moveent) = pe.moveent_at(index) else {
+            return (1.0, Vec3::ZERO);
+        };
+        if !in_world(start) || !in_world(end) {
+            return (1.0, Vec3::ZERO);
+        }
+        let coll = self.map.collision().unwrap_or(&NO_COLLISION);
+        pm::trace_model(coll, moveent, start, end)
+    }
+
+    /// `SV_AddLinksToPM_`'s tests and `SV_IsCollidableInPM` for entity `id` against the box
+    /// `mins..maxs` (see [`trace_player_move`](Self::trace_player_move)): the entity is a kind
+    /// the movement lists (`SOLID_BSP`, `SOLID_BBOX`, `SOLID_SLIDEBOX`, or `SOLID_NOT` with a
+    /// model and a `skin`, water and ladders).
     fn collidable_in_pm(&self, id: EdictId, player: EdictId, mins: Vec3, maxs: Vec3) -> bool {
         let Some(v) = self.edicts.get(id).map(|e| &e.vars) else {
             return false;
@@ -397,7 +559,8 @@ impl EngineApi<'_> {
             .map_or((v.absmin, v.absmax), |m| (m.true_absmin, m.true_absmax));
         id.index != player.index
             && v.owner.is_none_or(|o| o.index != player.index)
-            && matches!(v.solid, SOLID_BSP | SOLID_BBOX | SOLID_SLIDEBOX)
+            && !(v.solid == SOLID_NOT && (v.skin == 0 || v.modelindex == 0))
+            && matches!(v.solid, SOLID_BSP | SOLID_BBOX | SOLID_SLIDEBOX | SOLID_NOT)
             && !(v.flags & FL_MONSTERCLIP != 0 && v.solid == SOLID_BSP)
             && !(v.flags & FL_CLIENT != 0 && v.health <= 0.0)
             && !(v.mins.z == 0.0 && v.maxs.z == 1.0)
