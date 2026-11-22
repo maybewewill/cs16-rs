@@ -592,8 +592,8 @@ pub(crate) fn player_slot(g: &GameState, eng: &EngineApi<'_>, id: EdictId) -> Op
 /// - the messages, in the order of `Spawn`: `SVC_ROOMTYPE`, `NVGToggle 0`, then (after
 ///   `PlayerSpawn`, which returns at once for `m_bJustConnected`: no suit bit, no equipment, no
 ///   model) `SetProgressBarTime(0)` (`BarTime 0`), `SetScoreboardAttributes`, `TeamInfo` and
-///   `ScoreInfo` to everyone (team `UNASSIGNED`), `UTIL_ScreenFade(0.001)`, `SyncRoundTimer` and
-///   `Flashlight 0, 99`. `UpdateLocation` sends nothing (no bots, the player is `DEAD_NO` only
+///   `ScoreInfo` to everyone (team `UNASSIGNED`), `UTIL_ScreenFade(0.001)` and `SyncRoundTimer`.
+///   (No `Flashlight` message: `Spawn` only sets `m_iFlashBattery = 99`.) `UpdateLocation` sends nothing (no bots, the player is `DEAD_NO` only
 ///   for the length of `Spawn`).
 fn spawn_on_connect(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     crate::world::get_player_spawn_spot(g, eng, slot);
@@ -614,8 +614,6 @@ fn spawn_on_connect(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     }
     observer::screen_fade(eng, slot, 0.001, 0.0, 0, observer::FFADE_IN);
     messages::sync_round_timer(g, eng, slot);
-    // `m_iFlashBattery = 99` (`Spawn`), the message with the flashlight off.
-    messages::send_raw(eng, MsgDest::One(slot), "Flashlight", &[0, 99]);
 }
 
 /// `SVC_ROOMTYPE` with the `room_type` cvar (`Spawn`).
@@ -630,13 +628,14 @@ fn send_room_type(eng: &mut EngineApi<'_>, slot: u8) {
 /// With a `trigger_camera` that has a target it stands at the camera, looking at the target, with
 /// no view offset ([`intro::join_view`]); else it stands at the counter-terrorists' spawn point
 /// (the `GetPlayerSpawnSpot` of the original's no-camera path) with `v_angle` zero and the
-/// spot's angles, and keeps the view offset `VEC_VIEW`. Known gap: the original's no-camera path
-/// ends with `pev->angles = gpGlobals->v_forward`, a stale global (the last `MakeVectors`, a
-/// direction vector used as angles), which is not reproduced; the spot's angles stand.
+/// spot's angles, and keeps the view offset `VEC_VIEW`. It begins with the `Spawn()` of the
+/// original ([`spawn_on_connect`]).
 ///
-/// It begins with the `Spawn()` of the original ([`spawn_on_connect`]). The original keeps the player as a
-/// `MOVETYPE_NOCLIP` spectator with `models/player.mdl` while it looks at the menus; with no
-/// menus yet, this is `MOVETYPE_NONE` and no model.
+/// Known gaps: the original's no-camera path ends with `pev->angles = gpGlobals->v_forward`, a
+/// stale global (the last `MakeVectors`, a direction vector used as angles), which is not
+/// reproduced; the spot's angles stand. The original keeps the player as a `MOVETYPE_NOCLIP`
+/// spectator with `models/player.mdl` while it looks at the menus; here it is `MOVETYPE_NONE`
+/// with no model.
 pub(crate) fn put_in_server(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let index = usize::from(slot);
     if index >= MAX_PLAYERS {

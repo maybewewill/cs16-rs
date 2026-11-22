@@ -287,10 +287,10 @@ fn usermsgs_registered_in_regamedll_order() {
 /// The user messages of `Spawn()` inside `ClientPutInServer` for a player that has only connected
 /// (`m_bJustConnected`: `PlayerSpawn` returns at once), in the order of `player.cpp` `Spawn`:
 /// the goggles off (`NVGToggle`), `SetProgressBarTime(0)`, `SetScoreboardAttributes`, `TeamInfo`,
-/// `ScoreInfo`, the fade, `SyncRoundTimer` and the flashlight. (`SVC_ROOMTYPE` goes first.)
+/// `ScoreInfo`, the fade and `SyncRoundTimer`. (`SVC_ROOMTYPE` goes first; `Spawn` sends no
+/// `Flashlight`.)
 pub const SPAWN_ON_CONNECT: &[&str] = &[
     "NVGToggle", "BarTime", "ScoreAttrib", "TeamInfo", "ScoreInfo", "ScreenFade", "RoundTime",
-    "Flashlight",
 ];
 
 /// What the first command's `PlayerPreThink` sends: the join menus (`JoiningThink`).
