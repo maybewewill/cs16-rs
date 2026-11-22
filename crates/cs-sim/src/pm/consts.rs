@@ -54,8 +54,9 @@ pub const PM_PLAYER_MIN_BOUNCE_SPEED: i32 = 350;
 pub const PM_PLAYER_FALL_PUNCH_THRESHHOLD: i32 = 250;
 /// `BUNNYJUMP_MAX_SPEED_FACTOR`.
 pub const BUNNYJUMP_MAX_SPEED_FACTOR: f32 = 1.2;
-/// `HalfHumanHeight` (HL SDK).
-pub const HALF_HUMAN_HEIGHT: i32 = 32;
+/// `HalfHumanHeight`: `const float HalfHumanHeight = 36.0f;` in ReGameDLL `game_shared/bot/nav.h:145`
+/// (read 2026-11-22). The source loop `for (i = 0; i < HalfHumanHeight; i++)` runs 36 times.
+pub const HALF_HUMAN_HEIGHT: i32 = 36;
 
 // pm_defs.h
 /// `MAX_PHYSENTS`, `MAX_MOVEENTS`, `MAX_CLIP_PLANES`.

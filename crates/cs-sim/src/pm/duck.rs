@@ -140,7 +140,8 @@ pub(crate) fn pm_unduck(c: &mut PmCtx<'_>) {
 /// at the origin is stuck, walks the origin by `direction` units up to `HalfHumanHeight` times
 /// looking for a free spot; restores the origin when none is found.
 ///
-/// `HalfHumanHeight` is not defined in the fetched headers (it comes from the HL SDK, 32): assumption.
+/// `HalfHumanHeight` is 36 (`game_shared/bot/nav.h:145`, `const float`, read 2026-11-22); the C loop bound is a
+/// float compared with an `int` counter, i.e. 36 iterations.
 pub(crate) fn pm_fix_player_crouch_stuck(c: &mut PmCtx<'_>, direction: i32) {
     let (hitent, _) = c.test_position(c.pm.origin);
 
@@ -171,4 +172,95 @@ pub(crate) fn pm_spline_fraction(value: f32, scale: f32) -> f32 {
 
     // Nice little ease-in, ease-out spline-like curve
     3.0 * value_squared - 2.0 * value_squared * value
+}
+
+#[cfg(test)]
+mod tests {
+    use glam::Vec3;
+
+    use super::*;
+    use crate::pm::{PlayerMove, PmTrace, PmWorld, pm_init};
+
+    /// A world where the hull is stuck (physent 0) while the test position is below `free_z`.
+    struct Ceiling {
+        free_z: f32,
+    }
+
+    impl PmWorld for Ceiling {
+        fn player_trace(&mut self, _s: Vec3, e: Vec3, _h: i32, _f: i32, _i: i32) -> PmTrace {
+            PmTrace::miss(e)
+        }
+        fn test_player_position(&mut self, o: Vec3, p: Vec3, _h: i32) -> (i32, PmTrace) {
+            (if p[2] < self.free_z { 0 } else { -1 }, PmTrace::miss(o))
+        }
+        fn point_contents(&mut self, _p: Vec3) -> (i32, i32) {
+            (-1, -1)
+        }
+        fn num_moveents(&self) -> usize {
+            0
+        }
+        fn ladder_contains(&mut self, _m: usize, _o: Vec3, _h: i32) -> bool {
+            false
+        }
+        fn moveent_bounds(&self, _m: usize) -> (Vec3, Vec3) {
+            (Vec3::ZERO, Vec3::ZERO)
+        }
+        fn moveent_origin(&self, _m: usize) -> Vec3 {
+            Vec3::ZERO
+        }
+        fn trace_model(&mut self, _m: usize, _s: Vec3, _e: Vec3) -> (f32, Vec3) {
+            (1.0, Vec3::ZERO)
+        }
+        fn trace_texture(&mut self, _g: i32, _s: Vec3, _e: Vec3) -> Option<String> {
+            None
+        }
+        fn play_sound(&mut self, _c: i32, _s: &str, _v: f32, _a: f32, _f: i32, _p: i32) {}
+        fn random_long(&mut self, low: i32, _high: i32) -> i32 {
+            low
+        }
+        fn sys_float_time(&mut self) -> f64 {
+            0.0
+        }
+        fn physent_by_info(&self, _i: i32) -> Option<(Vec3, Vec3)> {
+            None
+        }
+    }
+
+    fn crouch_fix(free_z: f32) -> Vec3 {
+        let mut pm = PlayerMove { origin: Vec3::ZERO, ..PlayerMove::default() };
+        let mut sh = pm_init(None);
+        let mut w = Ceiling { free_z };
+        pm_fix_player_crouch_stuck(&mut PmCtx { pm: &mut pm, sh: &mut sh, w: &mut w }, STUCK_MOVEUP);
+        pm.origin
+    }
+
+    #[test]
+    fn crouch_stuck_climbs_up_to_36_units_then_restores() {
+        // Already free: untouched.
+        assert_eq!(crouch_fix(0.0), Vec3::ZERO);
+        // Free from z = 33 (would fail with a 32 bound) and exactly 36 (the 36th step): found.
+        assert_eq!(crouch_fix(33.0), Vec3::new(0.0, 0.0, 33.0));
+        assert_eq!(crouch_fix(36.0), Vec3::new(0.0, 0.0, 36.0));
+        // Free only from 37: HalfHumanHeight (36) steps fail and the origin is restored.
+        assert_eq!(crouch_fix(37.0), Vec3::ZERO);
+    }
+
+    #[test]
+    fn spline_fraction_stays_17_when_flducktime_is_above_1000() {
+        // time = 1 - 1100/1000 = -0.1 < 0: duckFraction keeps its initial PM_VEC_VIEW (17), so
+        // view = (12 - 18) * 17 + 17 * (1 - 17) = -102 - 272 = -374 (a quirk of the source).
+        let mut pm = PlayerMove {
+            onground: 0,
+            b_in_duck: true,
+            fl_duck_time: 1100.0,
+            oldbuttons: IN_DUCK,
+            ..PlayerMove::default()
+        };
+        pm.cmd.buttons = IN_DUCK as u16;
+        let mut sh = pm_init(None);
+        let mut w = Ceiling { free_z: 0.0 };
+        pm_duck(&mut PmCtx { pm: &mut pm, sh: &mut sh, w: &mut w });
+        assert_eq!(pm.view_ofs[2], -374.0);
+        assert!(pm.b_in_duck);
+    }
 }
