@@ -10,7 +10,7 @@ use common::{Bench, command, enter, join, spawns};
 use cs_engine::GameDll;
 use cs_engine::consts::{MOVETYPE_WALK, SOLID_SLIDEBOX};
 use cs_game::menus::Menu;
-use cs_game::player::{DEAD_DYING, Player, Team};
+use cs_game::player::{DEAD_DEAD, DEAD_DYING, Player, Team};
 use cs_game::teams::JoinState;
 use cs_proto48::delta::GoldSrcUserCmd;
 use cs_proto48::usermsg::CsUserMsg;
@@ -333,7 +333,9 @@ fn switching_team_alive_kills_as_regamedll() {
     // A suicide: a frag less and a death more.
     assert_eq!((p.frags, p.deaths), (4, 1));
     let deadflag = b.run(|_, eng| eng.ent(eng.client_edict(0)).unwrap().deadflag);
-    assert_eq!(deadflag, DEAD_DYING);
+    // `PlayerDeathThink` runs in every command now, and this server has no model loader, so there
+    // is no death animation to wait for: the body is `DEAD_DEAD` at its first command.
+    assert!(deadflag == DEAD_DYING || deadflag == DEAD_DEAD, "{deadflag}");
     b.step(2);
     let msgs = b.messages();
     let new = &msgs;

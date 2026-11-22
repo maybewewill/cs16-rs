@@ -49,8 +49,8 @@
 //! - `BuyZoneIcon_Clear` is also called by `CBasePlayer::Disappear`, which only the escape
 //!   zone (`func_escapezone`, `triggers.cpp:2069`, 2E) calls; it has no caller here yet and
 //!   the 2E escape port must add the call.
-//! - `HintMessage("#Hint_use_nightvision")` (first night vision purchase) has no hint queue
-//!   behind it and is not sent, like the hints of [`crate::money`].
+//! - `HintMessage("#Hint_use_nightvision")` (first night vision purchase) goes through
+//!   [`crate::hint`].
 //! - `m_bCTCantBuy`/`m_bTCantBuy` are never set by a vanilla multiplayer game and the VIP does
 //!   not exist yet, so the checks on them are left out. The tutor is not ported.
 //! - A `func_buyzone`'s `angles` (one-way touch, `SetMovedir`) only matter to the generic
@@ -566,6 +566,11 @@ pub(crate) fn buy_item(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, ite
                 return;
             }
             if account >= NVG_PRICE {
+                // The first purchase comes with a hint on how to use the goggles
+                // (client.cpp:1494, read 2026-11-22).
+                if crate::hint::first_time(g, slot, crate::hint::dhf::NIGHTVISION) {
+                    crate::hint::hint(g, eng, slot, "#Hint_use_nightvision");
+                }
                 item_sound(eng, slot, "items/equip_nvg.wav");
                 if let Some(p) = g.players[usize::from(slot)].as_mut() {
                     p.has_night_vision = true;

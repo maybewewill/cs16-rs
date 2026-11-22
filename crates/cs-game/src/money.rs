@@ -25,8 +25,9 @@
 //!   a bomb target). `MarkLivingPlayersOnTeamAsNotReceivingMoneyNextRound` is only called by
 //!   those objective branches of the round timer, so it comes with them; the flag it sets
 //!   ([`crate::player::Player::receives_no_money_next_round`]) is honoured here.
-//! - `HintMessage` (`#Hint_careful_around_teammates`, `#Hint_cannot_play_because_tk`) has no
-//!   hint queue behind it yet and is not sent.
+//! - The hints of `PlayerKilled` (`#Hint_careful_around_teammates`,
+//!   `#Hint_win_round_by_killing_enemy`) go through [`crate::hint`]; `#Hint_reward_for_killing_vip`
+//!   waits for the VIP.
 //! - The blink of the freeze period (`MONEY_BLINK_AMOUNT`, 30 in `player.h`) belongs to the tutor
 //!   (`TheTutor`), which does not exist, so the constant is not defined; [`blink_account`] is the
 //!   buy menu's.
@@ -305,8 +306,17 @@ pub(crate) fn killed_by(
             // the console kick's default text.
             eng.kick(killer_slot, "Kicked by server");
         }
+        // The first teammate the player kills is a lesson (`DHF_FRIEND_KILLED`, cleared by
+        // every spawn).
+        if crate::hint::first_time(g, killer_slot, crate::hint::dhf::FRIEND_KILLED) {
+            crate::hint::hint(g, eng, killer_slot, "#Hint_careful_around_teammates");
+        }
     } else {
+        // (`#Hint_reward_for_killing_vip`: there is no VIP.)
         add_account(g, eng, killer_slot, REWARD_KILLED_ENEMY, true);
+        if crate::hint::first_time(g, killer_slot, crate::hint::dhf::ENEMY_KILLED) {
+            crate::hint::hint(g, eng, killer_slot, "#Hint_win_round_by_killing_enemy");
+        }
     }
 }
 

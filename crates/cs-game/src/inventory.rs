@@ -18,8 +18,7 @@
 //!
 //! Not ported, each named where it matters: the shield (`DropShield`, the shield pickup rules,
 //! `ITEM_FLAG_CUSTOM` handling aside) and the VIP's limits (neither exists), the C4 (phase 2E), the
-//! `game_player_equip` entity of `OnSpawnEquip`, bots, the hint queue (`HintMessage`), the
-//! tutor, and the cheat impulses (101, 102, ...).
+//! `game_player_equip` entity of `OnSpawnEquip`, bots, the tutor, and the cheat impulses (101, 102, ...).
 
 use cs_engine::consts::{FL_ONGROUND, MOVETYPE_TOSS, SOLID_BBOX, SOLID_TRIGGER};
 use cs_engine::{EdictId, EngineApi, MsgDest};

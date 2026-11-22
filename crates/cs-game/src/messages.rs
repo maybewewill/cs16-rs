@@ -542,14 +542,48 @@ fn init_hud(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) {
     }
 }
 
+/// The ammo hint of `UpdateClientData` (player.cpp:7893, read 2026-11-22): the first time the
+/// active weapon, one that is not used up by firing (`ITEM_FLAG_EXHAUSTIBLE`: the grenades and
+/// the C4), has no ammo in the clip and none in reserve, the player is told
+/// (`#Hint_out_of_ammo`). `AmmoInventory(-1)` is -1: a weapon with no primary ammo type (the
+/// knife) counts as empty on the reserve side, but its clip is not 0.
+fn out_of_ammo_hint(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    let Some(p) = g.players.get(usize::from(slot)).and_then(Option::as_ref) else {
+        return;
+    };
+    if p.display_history & crate::hint::dhf::AMMO_EXHAUSTED != 0 {
+        return;
+    }
+    let Some(id) = p.active_item else {
+        return;
+    };
+    let Some((s, i)) = p.find_item(id) else {
+        return;
+    };
+    let weapon = &p.items[s][i].weapon;
+    let flags = crate::weapons::item_info(id).map_or(0, |i| i.flags);
+    if flags & crate::weapons::ITEM_FLAG_EXHAUSTIBLE != 0 {
+        return;
+    }
+    let reserve = usize::try_from(weapon.primary_ammo_type)
+        .ok()
+        .and_then(|t| p.ammo.get(t).copied())
+        .unwrap_or(-1);
+    if reserve < 1 && weapon.clip == 0 {
+        crate::hint::first_time(g, slot, crate::hint::dhf::AMMO_EXHAUSTED);
+        crate::hint::hint(g, eng, slot, "#Hint_out_of_ammo");
+    }
+}
+
 /// `CBasePlayer::UpdateClientData` for the player of `slot`: what the client does not know yet.
 /// Called from `PreThink` on every command (player.cpp:4831, read 2026-11-22) and from
 /// `RemoveAllItems`; not by the engine's `UpdateClientData` export.
 /// On the first update after a spawn (`m_fInitHUD`) the HUD starts over: `ResetHUD`, once per
 /// entry `InitHUD` and the rules' welcome, the money, the bomb icon, the round timer, the
 /// weather and the team scores; then, every update, what changed: the hidden HUD elements, the
-/// field of view, the health, the armor, the damage and the train HUD. Without the flashlight,
-/// the ammo, the weapons (their `CurWeapon`) and the status bar, which come with their tasks.
+/// field of view, the health, the armor, the damage, the flashlight battery (`FlashBat`), the
+/// train HUD, the ammo, the weapons (their `CurWeapon`), the status bar and the out-of-ammo
+/// hint.
 pub(crate) fn update_client_data(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let index = usize::from(slot);
     let Some(p) = g.players.get_mut(index).and_then(Option::as_mut) else {
@@ -641,6 +675,11 @@ pub(crate) fn update_client_data(g: &mut GameState, eng: &mut EngineApi<'_>, slo
         // Non-time-based kinds are not shown again.
         p.damage_bits &= dmg::TIMEBASED;
     }
+    // "Update Flashlight": the battery drains or charges, `FlashBat`.
+    crate::suit::update_flashlight(g, eng, slot);
+    let Some(p) = g.players.get_mut(index).and_then(Option::as_mut) else {
+        return;
+    };
     if p.train_new {
         send_raw(eng, MsgDest::One(slot), "Train", &[0]);
         p.train_new = false;
@@ -655,6 +694,7 @@ pub(crate) fn update_client_data(g: &mut GameState, eng: &mut EngineApi<'_>, slo
     p.client_active_item = p.active_item;
     p.client_fov = p.fov;
     crate::hud_misc::update_status_bar(g, eng, slot);
+    out_of_ammo_hint(g, eng, slot);
     // The end of `UpdateClientData`: every half second the zones the player is in.
     crate::buy::handle_signals_when_due(g, eng, slot);
     crate::hud_misc::update_radar(g, eng, slot);

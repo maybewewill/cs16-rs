@@ -100,6 +100,7 @@ pub fn create_entity(classname: &str) -> Option<Box<dyn GameEntity>> {
         "armoury_entity" => Box::new(crate::inventory::Armoury::default()),
         "grenade" => Box::new(crate::grenade::Grenade::default()),
         "spark_shower" => Box::new(crate::grenade::SparkShower),
+        "spraycan" => Box::new(crate::spray::SprayCan),
         other => Box::new(crate::inventory::WorldWeapon::of_class(other)?),
     };
     Some(entity)

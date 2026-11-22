@@ -27,10 +27,11 @@
 //! bomb and grenade flags of `TakeDamage`, and the VIP. Bullets and the damage they do
 //! (`TraceAttack`, `TakeDamage`, `Pain`) are in [`crate::bullets`] and here.
 //!
-//! The flashlight itself (`impulse 100`, `FlashlightTurnOn`, the `Flashlight`/`FlashBat`
-//! messages) is not ported: impulses are not handled yet. `PreThink` does hide its HUD unless
-//! `mp_flashlight` allows it (`HIDEHUD_FLASHLIGHT`, [`run_usercmd`]); `FlashlightTurnOn` will
-//! have to honour `FAllowFlashlight()` too.
+//! The flashlight (`impulse 100`, the battery and its `Flashlight`/`FlashBat` messages), the
+//! Geiger counter and the spray (`impulse 201`) are in [`crate::suit`] and [`crate::spray`], the
+//! hints (`HintMessage`, `m_flDisplayHistory`) in [`crate::hint`]. `PreThink` hides the
+//! flashlight from the HUD unless `mp_flashlight` allows it (`HIDEHUD_FLASHLIGHT`,
+//! [`run_usercmd`]), and `FlashlightTurnOn` honours `FAllowFlashlight()` too.
 //!
 //! `WaterMove` (`PreThink`: drowning, `air_finished`, `DMG_DROWN` and its recovery) is in
 //! [`water_move`] and [`check_time_based_damage`]; `waterlevel` and `watertype` come from the
@@ -173,7 +174,7 @@ const PLAYER_IN_BOMB_ZONE: i32 = cs_sim::pm::consts::PLAYER_IN_BOMB_ZONE;
 const SIGNAL_BOMB: u8 = 1 << 1;
 const PLAYER_HOLDING_SHIELD: i32 = cs_sim::pm::consts::PLAYER_HOLDING_SHIELD;
 /// `WEAPON_SUIT`: the bit of `pev->weapons` that stands for the HEV suit.
-const WEAPON_SUIT: u32 = 31;
+pub(crate) const WEAPON_SUIT: u32 = 31;
 /// `DEATH_ANIMATION_TIME` (`gamerules.h`): how long a death lasts before the corpse is sent.
 const DEATH_ANIMATION_TIME: f64 = 3.0;
 /// `DEFAULT_FOV`.
@@ -191,8 +192,6 @@ const OBSERVER_MAX_SPEED: f32 = 900.0;
 const FROZEN_MAX_SPEED: f32 = 1.0;
 /// Seconds between two suicides (`ClientKill`).
 const SUICIDE_DELAY: f64 = 1.0;
-/// Seconds between two runs of `PlayerDeathThink`.
-const DEATH_THINK_INTERVAL: f64 = 0.1;
 
 /// The team of a player; [`id`](Team::id) is the number the scoreboard messages carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -364,8 +363,6 @@ pub struct Player {
     pub(crate) buttons_pressed: u16,
     /// Server time of the death, `m_fDeadTime` once the player is `DEAD_DEAD`.
     pub(crate) dead_time: f64,
-    /// Server time of the next `PlayerDeathThink`.
-    next_death_think: f64,
     /// `m_iJoiningState`: where the player is on its way into the game ([`crate::teams`]).
     pub joining: JoinState,
     /// `m_pIntroCamera`: the `trigger_camera` whose view the joining player has
@@ -440,6 +437,24 @@ pub struct Player {
     pub(crate) blind_fade_time: f32,
     /// `m_blindAlpha`: the opacity (0 to 255) of the white.
     pub(crate) blind_alpha: i32,
+    /// `m_hintMessageQueue`: the hints waiting to be shown ([`crate::hint`]).
+    pub(crate) hint_queue: crate::hint::HintQueue,
+    /// `m_flDisplayHistory`: the hints the player has been shown (`DHF_*`).
+    pub(crate) display_history: u32,
+    /// `m_bShowHints`: the client's `_ah` (`cl_autohelp`).
+    pub(crate) show_hints: bool,
+    /// `m_iFlashBattery`: the flashlight's charge, 0 to 100 ([`crate::suit`]).
+    pub(crate) flash_battery: i32,
+    /// `m_flFlashLightTime`: server time the battery changes next, 0 for never.
+    pub(crate) flash_light_time: f32,
+    /// `m_flgeigerRange`: distance to the nearest radiation source (1000 for none).
+    pub(crate) geiger_range: f32,
+    /// `m_flgeigerDelay`: server time of the next Geiger update.
+    pub(crate) geiger_delay: f32,
+    /// `m_igeigerRangePrev`: the range last told to the client (before the division by 4).
+    pub(crate) geiger_range_prev: i32,
+    /// `m_flNextDecalTime`: server time the player may spray again ([`crate::spray`]).
+    pub(crate) next_decal_time: f32,
 }
 
 impl Player {
@@ -500,7 +515,6 @@ impl Player {
             obs: ObserverState::default(),
             buttons_pressed: 0,
             dead_time: 0.0,
-            next_death_think: 0.0,
             joining: JoinState::ShowLText,
             intro_camera: None,
             intro_cam_time: 0.0,
@@ -534,7 +548,33 @@ impl Player {
             blind_hold_time: 0.0,
             blind_fade_time: 0.0,
             blind_alpha: 0,
+            hint_queue: Default::default(),
+            display_history: 0,
+            show_hints: true,
+            flash_battery: 99,
+            flash_light_time: 1.0,
+            geiger_range: 1000.0,
+            geiger_delay: 0.0,
+            geiger_range_prev: 1000,
+            next_decal_time: 0.0,
         }
+    }
+
+    /// What `CBasePlayer::Spawn` and `Precache` reset of the hints, the flashlight and the Geiger
+    /// counter (`player.cpp` 5851, 5866, 5967, 5973-5978, 6165-6166, read 2026-11-22), `now` being
+    /// `gpGlobals->time`: the hint queue starts over and the spawn forgets the round's hints
+    /// (`DHM_ROUND_CLEAR`); the next spray may come at once; the Geiger counter waits two seconds
+    /// and starts at range 1000; the flashlight's battery is 99 with its clock due (the first
+    /// `UpdateClientData` charges it to 100 and tells the client: `FlashBat`).
+    pub(crate) fn on_spawn_hud_extras(&mut self, now: f32) {
+        self.hint_queue.reset();
+        self.display_history &= !crate::hint::dhf::ROUND_CLEAR;
+        self.next_decal_time = 0.0;
+        self.geiger_delay = now + 2.0;
+        self.flash_battery = 99;
+        self.flash_light_time = 1.0;
+        self.geiger_range = 1000.0;
+        self.geiger_range_prev = 1000;
     }
 
     /// `CBasePlayer::Blind(duration, holdTime, fadeTime, alpha)` (`player.cpp` 8257, read
@@ -658,7 +698,9 @@ fn spawn_on_connect(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     // before it, so the player keeps what it has and `m_rgAmmoLast[i] = -1` makes the first
     // `SendAmmoUpdate` tell the client every ammo count, zeros included (32 `AmmoX`).
     let init_global = g.init_hud_global;
+    let now = eng.time() as f32;
     if let Some(p) = g.players[usize::from(slot)].as_mut() {
+        p.on_spawn_hud_extras(now);
         p.ammo_last = [-1; crate::weapons::MAX_AMMO_SLOTS];
         // `Precache` and `Spawn` (player.cpp:6178, 6030): `m_fInitHUD = TRUE`.
         if init_global {
@@ -720,6 +762,7 @@ pub(crate) fn put_in_server(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8
     // `CheckStartMoney`: `mp_startmoney` clamped to the account's limits.
     let mut player = Player::new(money::check_start_money(eng));
     player.vgui_menus = prefers_vgui_menus(eng, slot);
+    player.show_hints = crate::hint::prefers_hints(eng, slot);
     player.chat = crate::chat::ChatState::entered(eng.client_key(slot, "name").unwrap_or(""));
     g.join_counter += 1;
     player.join_order = g.join_counter;
@@ -807,6 +850,7 @@ fn prefers_vgui_menus(eng: &EngineApi<'_>, slot: u8) -> bool {
 /// spectator) is `urban`. The name part is [`crate::chat::name_changed`].
 pub(crate) fn userinfo_changed(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let vgui = prefers_vgui_menus(eng, slot);
+    let hints = crate::hint::prefers_hints(eng, slot);
     let Some(p) = g
         .players
         .get_mut(usize::from(slot))
@@ -815,6 +859,7 @@ pub(crate) fn userinfo_changed(g: &mut GameState, eng: &mut EngineApi<'_>, slot:
         return;
     };
     p.vgui_menus = vgui;
+    p.show_hints = hints;
     let model = model_name(p.team, p.class);
     if eng.client_key(slot, "model") != Some(model) {
         eng.set_client_key(slot, "model", model);
@@ -960,6 +1005,7 @@ pub(crate) fn spawn(
     p.last_hit_group = HITGROUP_GENERIC;
     p.high_damage = false;
     p.clear_blindness();
+    p.on_spawn_hud_extras(time as f32);
     observer::on_spawn(p);
     // `m_tmHandleSignals = 0`: the zones are looked at again with the first client data update.
     p.next_handle_signals = 0.0;
@@ -1191,6 +1237,9 @@ fn run_cmd_body(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, cmd: &Gold
     // match is over: `PreThink` returns after `PlayerThink` while `IsGameOver()`, so there is no
     // `JoiningThink`, and `PostThink` skips the fall damage).
     let game_over = g.rules.game_over();
+    // `m_hintMessageQueue.Update(this)`: "Hint messages should be updated even if the game is
+    // over".
+    crate::hint::update_queue(g, eng, slot);
     teams::pre_think(g, eng, slot);
     rules::player_think(g, slot, cmd.buttons);
     weapon_player_think(g, eng, slot);
@@ -1239,6 +1288,8 @@ fn run_cmd_body(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, cmd: &Gold
         messages::update_client_data(g, eng, slot);
         // The time-based damage check follows it.
         check_time_based_damage(g, eng, slot);
+        // `CheckSuitUpdate`: the Geiger counter.
+        crate::suit::check_suit_update(g, eng, slot);
     }
     let Some(p) = g.players.get(usize::from(slot)).and_then(Option::as_ref) else {
         return;
@@ -1283,6 +1334,17 @@ fn run_cmd_body(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, cmd: &Gold
         {
             p.fall_velocity = fall;
         }
+    }
+    // `PreThink` (player.cpp:5011, read 2026-11-22): the first time in a round the player may buy,
+    // it is told how.
+    if alive
+        && g.players[usize::from(slot)]
+            .as_ref()
+            .is_some_and(|p| p.display_history & crate::hint::dhf::ROUND_STARTED == 0)
+        && crate::buy::can_player_buy(g, eng, slot, false)
+    {
+        crate::hint::hint(g, eng, slot, "#Hint_press_buy_to_purchase");
+        crate::hint::first_time(g, slot, crate::hint::dhf::ROUND_STARTED);
     }
     pmove::run_pmove(g, eng, slot, cmd);
 }
@@ -1499,14 +1561,22 @@ fn weapon_player_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     }
 }
 
-/// `CBasePlayer::ImpulseCommands` (`player.cpp` 6816), what is ported: `pev->impulse` is
-/// consumed (set to 0) once the weapons have had their turn. Not ported: `PlayerUse` (the use
-/// key), impulse 100 (the flashlight), 201 (the spray) and the cheat impulses (they need
-/// `sv_cheats`-like `g_flWeaponCheat`, off on a server). DEFERRED (Task 12 review): impulse 100 and
-/// 201 belong to the flashlight and spray tasks, not to the weapons; impulse 101 and the other cheat
-/// impulses are not ported.
-pub(crate) fn impulse_commands(_g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+/// `CBasePlayer::ImpulseCommands` (`player.cpp` 6816, read 2026-11-22), what is ported: impulse
+/// 100 (the flashlight, [`crate::suit::flashlight_toggle`]) and 201 (the spray,
+/// [`crate::spray::paint_decal`]); `pev->impulse` is consumed (set to 0) afterwards, whatever it
+/// was. Not ported: `PlayerUse` (the use key), impulse 99 (the logo message, a development
+/// switch) and the cheat impulses (`CheatImpulseCommands` needs `g_flWeaponCheat`, off on a
+/// server), so any other impulse is just consumed.
+pub(crate) fn impulse_commands(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let id = eng.client_edict(slot);
+    let impulse = eng.ent(id).map_or(0, |v| v.impulse);
+    match impulse {
+        // "temporary flashlight for level designers"
+        100 => crate::suit::flashlight_toggle(g, eng, slot),
+        // "paint decal"
+        201 => crate::spray::paint_decal(g, eng, slot),
+        _ => {}
+    }
     if let Some(v) = eng.ent_mut(id) {
         v.impulse = 0;
     }
@@ -1913,7 +1983,7 @@ pub(crate) fn take_damage_from_grenade(
 /// [`monster_take_damage`], and the time-based damage counters of the hit's kinds reset.
 ///
 /// Left out: the VIP's halved ratio and the shield's added 0.2 (VIP and shield tasks), the
-/// teammate-attack hints and `m_flLastAttackedTeammate`, `m_lastDamageAmount`,
+/// teammate-attack message (`#Game_teammate_attack`) and `m_flLastAttackedTeammate`, `m_lastDamageAmount`,
 /// `m_bKilledByBomb`/`m_bKilledByGrenade` (bomb task), `LogAttack`, bots, the career tasks and
 /// the director/`HLTV`
 /// messages.
@@ -2047,6 +2117,12 @@ pub(crate) fn take_damage_with(
         && !(a == index && bits & dmg::FALL != 0)
     {
         if teammate {
+            // "warn about team attacks" (player.cpp:1139, read 2026-11-22). QUIRK (vanilla, not
+            // `REGAMEDLL_FIXES`): the history that is looked at and set is the victim's, the
+            // hint goes to the attacker.
+            if a != index && crate::hint::first_time(g, slot, crate::hint::dhf::FRIEND_INJURED) {
+                crate::hint::hint(g, eng, a as u8, "#Hint_try_not_to_injure_teammates");
+            }
             // Vanilla: `flDamage *= 0.35` (a `double` product).
             damage = (f64::from(damage) * 0.35) as f32;
         }
@@ -2225,14 +2301,12 @@ fn killed(
     throw_grenade_on_death(g, eng, slot);
 
     // CBasePlayer::Killed.
+    let mut punished_for_tk = false;
     if let Some(p) = g.players[index].as_mut() {
-        // A player punished for a team kill is told why it cannot play
-        // (`#Hint_cannot_play_because_tk` needs the hint queue, not ported yet).
-        p.punished_for_tk = false;
+        punished_for_tk = std::mem::take(&mut p.punished_for_tk);
         p.alive = false;
         p.takes_damage = false;
         p.dead_time = now;
-        p.next_death_think = now + DEATH_THINK_INTERVAL;
         p.client_health = 0;
     }
     if let Some(v) = eng.ent_mut(id) {
@@ -2247,6 +2321,11 @@ fn killed(
         v.angles.z = 0.0;
         // `Killed` (player.cpp:3919, read 2026-11-22): `pev->view_ofs = Vector(0, 0, -8)`.
         v.view_ofs = Vec3::new(0.0, 0.0, -8.0);
+    }
+    // `Killed` (player.cpp:2606, read 2026-11-22): a player punished for a team kill is told
+    // why it cannot play (shown to the dead, whatever `_ah` says).
+    if punished_for_tk {
+        crate::hint::hint_message(g, eng, slot, "#Hint_cannot_play_because_tk", true, true);
     }
     // The camera of the dying: it chases the killer, or the screen fades to black.
     observer::killed(g, eng, slot, attacker);
@@ -2268,6 +2347,11 @@ fn killed(
         _ => "player/death6.wav",
     };
     eng.emit_sound(id, CHAN_VOICE, sample, 1.0, ATTN_NORM, PITCH_NORM);
+    // `Killed` ends (player.cpp:2634, read 2026-11-22), for a player that was not gibbed, by
+    // telling the dead how to change the view, once.
+    if crate::hint::first_time(g, slot, crate::hint::dhf::SPEC_DUCK) {
+        crate::hint::hint_message(g, eng, slot, "#Spec_Duck", true, true);
+    }
 }
 
 /// The grenade switch of `CBasePlayer::Killed` (`player.cpp` 2365-2411, read 2026-11-22): a
@@ -2300,8 +2384,10 @@ fn throw_grenade_on_death(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) 
     crate::grenade::throw_grenade(g, eng, slot, weapon, src, angles, 1.5);
 }
 
-/// `CBasePlayer::PlayerDeathThink` (`player.cpp` 3977-4080, read 2026-11-22) for a dead player, every
-/// `DEATH_THINK_INTERVAL` (the pacing is this port's): a body on the ground slows down; the
+/// `CBasePlayer::PlayerDeathThink` (`player.cpp` 3977-4080, read 2026-11-22) for a dead player,
+/// on every command (`PreThink` calls it each frame; the entity think of `SetThink` every tenth
+/// of a second is not run, as the engine runs the player's commands, not its think): a body on
+/// the ground slows down by 20 units a second per call; the
 /// guns are dropped; while the death animation plays (`DEAD_DYING`, the sequence not finished)
 /// the frame advances (`StudioFrameAdvance`) and nothing else happens; then a body on the
 /// ground stops colliding, `DEAD_DYING` becomes `DEAD_DEAD` (the time is taken), the animation
@@ -2316,24 +2402,17 @@ fn throw_grenade_on_death(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) 
 fn death_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let now = eng.time();
     let id = eng.client_edict(slot);
-    // `PlayerDeathThink`: "we drop the guns here" (`if (HasWeapons()) PackDeadPlayerItems()`).
-    if g.players[usize::from(slot)].as_ref().is_some_and(|p| now >= p.next_death_think) {
-        crate::inventory::death_think_pack(g, eng, slot);
-    }
-    let Some(p) = g
-        .players
-        .get_mut(usize::from(slot))
-        .and_then(Option::as_mut)
-    else {
-        return;
-    };
-    if now < p.next_death_think {
+    // `if (m_iJoiningState != JOINED) return;`
+    if g.players[usize::from(slot)]
+        .as_ref()
+        .is_none_or(|p| p.joining != JoinState::Joined)
+    {
         return;
     }
-    p.next_death_think = now + DEATH_THINK_INTERVAL;
     let Some(v) = eng.ent_mut(id) else {
         return;
     };
+    // "If the anim is done playing, go to the next state": a body on the ground slows down.
     if v.flags & FL_ONGROUND != 0 {
         let forward = v.velocity.length() - 20.0;
         v.velocity = if forward <= 0.0 {
@@ -2342,6 +2421,11 @@ fn death_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
             v.velocity.normalize() * forward
         };
     }
+    // `PlayerDeathThink`: "we drop the guns here" (`if (HasWeapons()) PackDeadPlayerItems()`).
+    crate::inventory::death_think_pack(g, eng, slot);
+    let Some(v) = eng.ent(id) else {
+        return;
+    };
     // "If the anim is not done playing, go on animating."
     let (modelindex, dying) = (v.modelindex, v.deadflag == DEAD_DYING);
     let animating = modelindex != 0

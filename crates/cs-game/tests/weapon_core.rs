@@ -498,10 +498,11 @@ fn timers_count_down_in_post_think() {
         press(game, eng, 0);
         assert_eq!(weapon(game, usp).time_weapon_idle, 1000.0);
 
-        // `pt_end` runs for the dead as well (`PostThink` jumps to it).
+        // `pt_end` runs for the dead as well (`PostThink` jumps to it). (Only the engine's
+        // `PostThink` half: the next `PreThink` would pack the dead player's weapons into a box.)
         weapon(game, usp).next_secondary_attack = 0.5;
         game.damage_player(eng, 0, None, 500.0, 0);
-        common::run_cmd(game, eng, 0, &cmd(), 0);
+        game.post_usercmd(eng, 0, &cmd());
         assert_eq!(weapon(game, usp).next_secondary_attack, 0.5_f32 - ft);
     });
 }

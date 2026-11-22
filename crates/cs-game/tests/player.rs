@@ -513,13 +513,15 @@ fn client_data_reflects_the_player() {
     assert_eq!(health.last(), Some(&70));
 
     // Dead: the dead flag, and the client was told zero.
-    let data = b.run(|game, eng| {
+    // (The deadflag is read in the same call: `PlayerDeathThink` runs in every command, and
+    // this server has no model loader, so no death animation holds the body in `DEAD_DYING`.)
+    let (data, dead) = b.run(|game, eng| {
         game.client_command(eng, 0, &["kill".to_string()]);
-        game.update_client_data(eng, 0)
+        let data = game.update_client_data(eng, 0);
+        (data, eng.ent(eng.client_edict(0)).unwrap().deadflag)
     });
     // The export leaves `deadflag` out (client.cpp:5020, read 2026-11-22); the edict has it.
     assert_eq!(data.deadflag, 0);
-    let dead = b.run(|_, eng| eng.ent(eng.client_edict(0)).unwrap().deadflag);
     assert_eq!(dead, DEAD_DYING);
     assert!(data.health <= 0.0);
     // `SendFOV(0)` on death.

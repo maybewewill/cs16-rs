@@ -61,6 +61,7 @@ pub const BLOOD_COLOR_RED: u8 = 247;
 
 /// `DECAL_*` (`decals.h`): the number of a decal in the game's table.
 pub mod decal_number {
+    pub const LAMBDA6: usize = 10;
     pub const BLOOD1: usize = 13;
     pub const YBLOOD1: usize = 19;
     pub const GLASSBREAK1: usize = 25;

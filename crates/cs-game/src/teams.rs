@@ -403,6 +403,10 @@ fn get_into_game(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     if let Some(p) = g.players[usize::from(slot)].as_ref() {
         messages::score_info(eng, u16::from(slot) + 1, p);
     }
+    // The end of the branch (player.cpp:10819, read 2026-11-22): how to change the view, once.
+    if crate::hint::first_time(g, slot, crate::hint::dhf::SPEC_DUCK) {
+        crate::hint::hint_message(g, eng, slot, "#Spec_Duck", true, true);
+    }
 }
 
 /// `CBasePlayer::StartObserver` ([`observer::start_observer`]) at a spawn point of

@@ -329,6 +329,9 @@ const FIRST_UPDATE: &[&str] = &[
     "Health",
     "Battery",
     "Damage",
+    // The flashlight clock is due after the `Spawn()` (`m_flFlashLightTime = 1`,
+    // `m_iFlashBattery = 99`): the battery charges to 100 and the client is told (`FlashBat`).
+    "FlashBat",
     "Train",
     // `m_rgAmmoLast` is -1 after the `Spawn()` of the join: all 32 ammo counts, zeros too
     // (`SendAmmoUpdate`).
@@ -361,7 +364,12 @@ fn join_hud_messages_as_regamedll() {
     // The team menu is the second command's `PlayerThink`, after the first update.
     expected.push("VGUIMenu");
     assert_eq!(names[..expected.len()], *expected);
-    assert!(names[expected.len()..].iter().all(|n| n == "ShowMenu" || n == "VGUIMenu"));
+    // What follows is the team menu and the second `FlashBat 100`: the clock of the full battery
+    // runs out 0.2 s after the first (`m_flFlashLightTime = 0`), as HLDS sent it twice.
+    assert!(names[expected.len()..]
+        .iter()
+        .all(|n| n == "ShowMenu" || n == "VGUIMenu" || n == "FlashBat"));
+    assert_eq!(names.iter().filter(|n| *n == "FlashBat").count(), 2);
     // `RoundTime` once, from the first update (the `Spawn()` of the join sent one the engine
     // cleared); no `ShowTimer`; `HideWeapon` once, the flashlight bit only.
     assert_eq!(names.iter().filter(|n| *n == "RoundTime").count(), 1);
@@ -406,7 +414,12 @@ fn init_hud_sequence_as_regamedll() {
     let names = &names[FIRST_MENU.len()..];
     assert_eq!(names[..FIRST_UPDATE.len()], *FIRST_UPDATE, "the first player's HUD");
     assert_eq!(names[FIRST_UPDATE.len()], "VGUIMenu", "the second command's team menu");
-    assert!(names[FIRST_UPDATE.len()..].iter().all(|n| n == "ShowMenu" || n == "VGUIMenu"));
+    // The team menu, and the second `FlashBat 100` 0.2 s after the first (the golden capture of
+    // HLDS has two).
+    assert!(names[FIRST_UPDATE.len()..]
+        .iter()
+        .all(|n| n == "ShowMenu" || n == "VGUIMenu" || n == "FlashBat"));
+    assert_eq!(names.iter().filter(|n| *n == "FlashBat").count(), 2);
 
     let msgs = b.messages(0);
     let find = |name: &str| -> Vec<CsUserMsg> {
@@ -512,10 +525,13 @@ fn a_spawn_starts_the_hud_over_without_the_welcome() {
     let mut expected: Vec<&str> = vec![
         "NVGToggle", "BarTime", "ScoreAttrib", "ScreenFade", "RoundTime", "TeamInfo", "ScoreInfo",
         "ResetHUD", "Money", "StatusIcon", "ScoreAttrib", "RoundTime", "TeamScore", "TeamScore",
-        "SetFOV", "Battery", "Damage", "Train",
+        "SetFOV", "Battery", "Damage", "FlashBat", "Train",
     ];
     expected.extend(std::iter::repeat_n("AmmoX", 32));
     expected.push("StatusIcon");
+    // The first command that could buy queued `#Hint_press_buy_to_purchase` (a spawn point counts
+    // as a buy zone on the stub map); the next command's `PreThink` shows it.
+    expected.push("HudTextArgs");
     assert_eq!(names, expected);
     // `SVC_ROOMTYPE` (`room_type`, 0 here) goes first of all, before the user messages.
     let room_types = b.probes[0]
@@ -612,7 +628,9 @@ fn health_and_armor_follow_the_player() {
     let names: Vec<&str> = after.iter().map(|(n, _)| n.as_str()).collect();
     // The second `Damage` is the original's: the kinds the HUD was told (a bullet) differ from
     // those kept (a bullet is not a time-based kind), so it is sent once more, empty.
-    assert_eq!(names, ["Health", "Battery", "Damage", "Damage"]);
+    // The spawn is over two seconds old: `m_flgeigerDelay` is due, and the Geiger counter tells
+    // the client its starting range (1000 / 4 against the 1000 it was never told).
+    assert_eq!(names, ["Health", "Battery", "Damage", "Damage", "Geiger"]);
     // `ARMOR_RATIO` 0.5, `ARMOR_BONUS` 0.5: 10 points to the health (90 left), 5 to the armor.
     // The message's armor byte is always 0: nothing sets `dmg_save` in the original.
     assert_eq!(after[0].1, CsUserMsg::Health(90));

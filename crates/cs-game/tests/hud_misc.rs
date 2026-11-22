@@ -606,6 +606,11 @@ fn a_dead_observer_gets_the_teammate_status_bar_from_2048_units() {
     // Alive, the probe sees an enemy (slot 2): the enemy format is on its screen.
     b.step(40);
     b.probe.clear_messages();
+    // The stub map has no floor, and `PlayerDeathThink` has no death animation to wait for on
+    // this server (no model loader), so the body is `DEAD_DEAD` at its first command and
+    // `PM_Move` takes the spectator branch at once: without gravity the bodies hang where they
+    // are, the dead probe's eyes at 92 looking at the enemy's box.
+    b.run(|_, eng| eng.set_cvar("sv_gravity", "0"));
     b.run(|game: &mut CsGame, eng: &mut EngineApi<'_>| {
         game.place_player(eng, 0, Vec3::new(0.0, 0.0, 100.0));
         game.place_player(eng, 2, Vec3::new(200.0, 0.0, 100.0));

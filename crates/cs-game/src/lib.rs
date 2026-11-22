@@ -16,6 +16,7 @@ pub mod buy;
 pub mod chat;
 pub mod entity;
 pub mod grenade;
+mod hint;
 pub mod hud_misc;
 pub mod intro;
 pub mod inventory;
@@ -29,6 +30,8 @@ mod player_anim;
 mod pmove;
 pub mod rules;
 mod score;
+pub mod spray;
+mod suit;
 pub mod teams;
 pub mod weapons;
 pub mod world;
@@ -557,6 +560,31 @@ impl CsGame {
         }
         eng.set_origin(id, origin);
         true
+    }
+
+    /// `m_iFlashBattery` of the player of `slot`. For tests only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn flash_battery(&self, slot: u8) -> Option<i32> {
+        self.state.players.get(usize::from(slot)).and_then(Option::as_ref).map(|p| p.flash_battery)
+    }
+
+    /// Sets `m_iFlashBattery` of the player of `slot`. For tests only (cargo feature
+    /// `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn set_flash_battery(&mut self, slot: u8, battery: i32) {
+        if let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+            p.flash_battery = battery;
+        }
+    }
+
+    /// `m_flDisplayHistory` (`DHF_*`) of the player of `slot`. For tests only (cargo feature
+    /// `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn display_history(&self, slot: u8) -> Option<u32> {
+        self.state.players.get(usize::from(slot)).and_then(Option::as_ref).map(|p| p.display_history)
     }
 }
 

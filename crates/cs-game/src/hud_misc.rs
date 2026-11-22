@@ -41,8 +41,9 @@
 //!   switched off at its spawn (player.cpp:6066-6081) and, at its death, by [`crate::observer`].
 //!   The radar sends nothing to observers (only living players are told, player.cpp:7939), and
 //!   `nightvision` itself is for a living player only (client.cpp:3445).
-//! - `HintMessage` (`#Hint_spotted_a_friend`, `#Hint_spotted_an_enemy`) and the hostage branch of
-//!   the status bar need the hint queue and the hostages; they are not sent. A player a
+//! - `HintMessage` (`#Hint_spotted_a_friend`, `#Hint_spotted_an_enemy`) goes through
+//!   [`crate::hint`]; the hostage branch of the status bar (and its hints) needs the hostages and
+//!   is not ported. A player a
 //!   flashbang blinded (`m_blindUntilTime` in the future) sees no name in the status bar.
 //! - `Location` (`UpdateLocation`, the place name of the player) is sent only by the bots and
 //!   Condition Zero (`AreRunningCZero`, the bot phrase list); the vanilla radio shows `#Game_radio`,
@@ -647,6 +648,7 @@ pub(crate) fn update_status_bar(g: &mut GameState, eng: &mut EngineApi<'_>, slot
         MAX_ID_RANGE
     };
     let observing = v.iuser1 != OBS_NONE;
+    let spectator = v.flags & FL_SPECTATOR != 0;
     let mut state = [0i32; SBAR_END];
     let mut text = old_string.clone();
 
@@ -680,7 +682,10 @@ pub(crate) fn update_status_bar(g: &mut GameState, eng: &mut EngineApi<'_>, slot
                 }
                 .to_string();
                 state[SBAR_ID_TARGETHEALTH] = health_percent(health);
-                // `#Hint_spotted_a_friend` needs the hint queue.
+                // The first friend a (non-spectating) player sees is a hint (player.cpp:8332).
+                if !spectator && crate::hint::first_time(g, slot, crate::hint::dhf::FRIEND_SEEN) {
+                    crate::hint::hint(g, eng, slot, "#Hint_spotted_a_friend");
+                }
             } else {
                 text = if playerid != PLAYERID_MODE_TEAMONLY && playerid != PLAYERID_MODE_OFF {
                     SBAR_FORMAT_ENEMY
@@ -688,7 +693,10 @@ pub(crate) fn update_status_bar(g: &mut GameState, eng: &mut EngineApi<'_>, slot
                     SBAR_FORMAT_NONE
                 }
                 .to_string();
-                // `#Hint_spotted_an_enemy` needs the hint queue.
+                // So is the first enemy (player.cpp:8353).
+                if crate::hint::first_time(g, slot, crate::hint::dhf::ENEMY_SEEN) {
+                    crate::hint::hint(g, eng, slot, "#Hint_spotted_an_enemy");
+                }
             }
             disappear = now + SBAR_HOLD;
         }

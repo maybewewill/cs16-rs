@@ -47,7 +47,8 @@
 //!   ported (the original's extra call is marked as probably unnecessary by its own TODO).
 //! - The `SVC_DIRECTOR` death event to `MSG_SPEC` (HLTV), the log lines (`UTIL_LogPrintf`),
 //!   `FireTargets("game_playerdie"/"game_playerkill")`, the vehicle driver as killer, the hints
-//!   (`#Hint_careful_around_teammates`, `#Hint_win_round_by_killing_enemy`: no hint queue yet),
+//!   (`#Hint_careful_around_teammates`, `#Hint_win_round_by_killing_enemy` are sent by
+//!   [`crate::money::killed_by`]),
 //!   the VIP kill reward and the decal timer are not ported.
 //! - `SCORE_STATUS_BOMB` and `SCORE_STATUS_VIP` come with the bomb and the VIP (2E); the
 //!   defuser kit flag is `BUILD_LATEST` only.

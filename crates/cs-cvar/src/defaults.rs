@@ -134,6 +134,8 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     reg.register("mp_forcechasecam", "0", srv, "Chase camera of the dead: 0 anyone (then mp_forcecamera decides); 1 teammates only; 2 first person only");
     // `game.cpp`: `{ "mp_flashlight", "0", FCVAR_SERVER }`; `FAllowFlashlight`.
     reg.register("mp_flashlight", "0", srv, "Allow players to use the flashlight (0 or 1)");
+    // The engine's `decalfrequency` (`CVAR_GET_FLOAT` in `ImpulseCommands`, impulse 201): seconds between two sprays.
+    reg.register("decalfrequency", "30", srv, "Seconds between two sprays of a player's logo");
     reg.register("mp_fadetoblack", "0", srv, "Fade a dead player's screen to black (1 stays black)");
     // `game.cpp`: `{ "mp_playerid", "0", FCVAR_SERVER }`; 0 names everyone, 1 teammates only, 2 nobody.
     reg.register("mp_playerid", "0", srv, "Who the status bar names (0 all, 1 teammates, 2 nobody)");
