@@ -134,7 +134,7 @@ impl Arena {
     fn new() -> Self {
         let map = ServerMap::stub_with_entities("test", spawns(4, 4));
         let cfg = ServerConfig { max_clients: 2, max_edicts: 256, ..ServerConfig::default() };
-        let rig = EventRig { rig: Rig { game: CsGame::new(), actions: Vec::new() } };
+        let rig = EventRig { rig: Rig { game: CsGame::new(), actions: Vec::new(), precache_events: Vec::new() } };
         let server = Server::new(
             cfg,
             map,
