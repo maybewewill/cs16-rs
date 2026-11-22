@@ -246,6 +246,8 @@ pub struct TestGame {
     pub random_seeds: Vec<u32>,
     /// The `msec` of every command `run_usercmd` received, in call order.
     pub usercmd_msecs: Vec<u8>,
+    /// Every command `run_usercmd` received, in call order.
+    pub usercmd_cmds: Vec<GoldSrcUserCmd>,
 
     /// `(classname, keys)` of every `spawn_entity` call, in call order.
     pub spawned: Vec<(String, Vec<(String, String)>)>,
@@ -297,6 +299,8 @@ pub struct TestGame {
     pub activate_times: Vec<f64>,
     /// `(eng.time(), touch_log.len())` at every `post_usercmd` call.
     pub post_usercmd_marks: Vec<(f64, usize)>,
+    /// `eng.time()` of every `touch` call, parallel to `touch_log`.
+    pub touch_times: Vec<f64>,
 
     pub server_activate_calls: usize,
     pub server_deactivate_calls: usize,
@@ -620,6 +624,7 @@ impl GameDll for TestGame {
         self.usercmd_frametimes.push(eng.frametime());
         self.random_seeds.push(random_seed);
         self.usercmd_msecs.push(cmd.msec);
+        self.usercmd_cmds.push(cmd.clone());
         if self.flood_per_usercmd > 0 {
             // `svc_nop` bytes.
             send_chunked(
@@ -702,6 +707,7 @@ impl GameDll for TestGame {
 
     fn touch(&mut self, eng: &mut EngineApi<'_>, toucher: EdictId, other: EdictId) {
         self.touch_log.push((toucher.index, other.index));
+        self.touch_times.push(eng.time());
         if let Some(v) = eng.ent(toucher).filter(|v| v.classname == "test_mover") {
             self.mover_touch_states
                 .push((toucher.index, v.origin, v.velocity, v.flags));

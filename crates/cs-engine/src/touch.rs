@@ -126,7 +126,11 @@ impl<G: GameDll> Server<G> {
             {
                 continue;
             }
-            self.call_game(|game, eng| game.touch(eng, toucher, other));
+            // ReHLDS dispatches a command's touches at its `svtimebase` (`gpGlobals->time` is
+            // still the command's); other touches run at the server time.
+            let time = self.world.touch_time.unwrap_or(self.sv_time);
+            self.sync_views();
+            self.call_game_synced_at(time, |game, eng| game.touch(eng, toucher, other));
             self.drain_messages();
         }
         self.world.dispatching = false;

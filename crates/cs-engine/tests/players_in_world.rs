@@ -324,6 +324,85 @@ fn post_usercmd_runs_after_the_impacts_of_the_command() {
 }
 
 #[test]
+fn the_touches_of_a_command_run_at_its_time() {
+    let mut h = harness(TestGame::default());
+    let mut probe = joined(&mut h);
+    h.server
+        .game_mut()
+        .act(|eng| {
+            solid_box(eng, "wall", SOLID_BBOX, Vec3::new(0.0, 500.0, 0.0), 8.0);
+        });
+    h.step(&mut [&mut probe], 1);
+    let wall = find(&h, "wall").expect("wall");
+    h.server.game_mut().usercmd_touches = vec![wall];
+    let runs = h.server.game().usercmd_times.len();
+    let logged = h.server.game().touch_log.len();
+    // Commands of 10, 20 and 30 ms in one packet run at three different times, none of them
+    // the server time `sv_time` of the frame (`SV_EstablishTimeBase`).
+    for msec in [10, 20, 30] {
+        probe.queue_cmd(forward(msec));
+    }
+    h.step(&mut [&mut probe], 1);
+    let game = h.server.game();
+    let cmd_times = &game.usercmd_times[runs..];
+    let touch_times = &game.touch_times[logged..];
+    assert!(cmd_times.len() >= 3, "{cmd_times:?}");
+    // Two touches per impact, one impact per command, in command order.
+    let expected: Vec<f64> = cmd_times.iter().flat_map(|&t| [t, t]).collect();
+    assert_eq!(touch_times[..expected.len()], expected[..], "{touch_times:?}");
+    assert!(cmd_times.windows(2).all(|w| w[0] < w[1]), "{cmd_times:?}");
+}
+
+/// `SV_ParseMove` hands a frozen player's commands to `SV_ClearMoveCmds`: no time, no moves, no
+/// buttons, no impulse, and the view where `v_angle` is.
+#[test]
+fn a_frozen_player_gets_commands_without_movement() {
+    let mut h = harness(TestGame::default());
+    let mut probe = joined(&mut h);
+    let me = player_id(&h);
+    h.server.game_mut().act(move |eng| {
+        let v = eng.ent_mut(me).unwrap();
+        v.flags |= cs_engine::consts::FL_FROZEN;
+        v.v_angle = Vec3::new(0.0, 77.0, 0.0);
+    });
+    h.step(&mut [&mut probe], 1);
+    let jump = |msec| GoldSrcUserCmd {
+        buttons: 1 << 1,
+        impulse: 5,
+        sidemove: 100.0,
+        upmove: 50.0,
+        viewangles: Vec3::new(0.0, 10.0, 0.0),
+        ..forward(msec)
+    };
+    let seen = h.server.game().usercmd_cmds.len();
+    for _ in 0..3 {
+        probe.queue_cmd(jump(10));
+    }
+    h.step(&mut [&mut probe], 1);
+    let cmds = &h.server.game().usercmd_cmds[seen..];
+    assert!(cmds.len() >= 3, "{}", cmds.len());
+    for c in cmds {
+        assert_eq!((c.msec, c.buttons, c.impulse), (0, 0, 0), "{c:?}");
+        assert_eq!((c.forwardmove, c.sidemove, c.upmove), (0.0, 0.0, 0.0), "{c:?}");
+        assert_eq!(c.viewangles, Vec3::new(0.0, 77.0, 0.0), "{c:?}");
+    }
+
+    // Thawed, the same commands arrive as sent.
+    h.server.game_mut().act(move |eng| {
+        eng.ent_mut(me).unwrap().flags &= !cs_engine::consts::FL_FROZEN;
+    });
+    h.step(&mut [&mut probe], 1);
+    let seen = h.server.game().usercmd_cmds.len();
+    probe.queue_cmd(jump(10));
+    h.step(&mut [&mut probe], 1);
+    let c = h.server.game().usercmd_cmds[seen..]
+        .iter()
+        .find(|c| c.msec > 0)
+        .expect("a command with time ran");
+    assert_eq!((c.buttons, c.forwardmove), (1 << 1, 250.0), "{c:?}");
+}
+
+#[test]
 fn commands_run_at_their_clients_time_base() {
     let mut h = harness(TestGame::default());
     let mut probe = joined(&mut h);

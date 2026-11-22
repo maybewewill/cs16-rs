@@ -507,6 +507,45 @@ fn pm_trace_maps_usehull_to_bsp_hulls() {
     });
 }
 
+/// A hostile hull whose clipnode points at itself on both sides: a segment that crosses its
+/// plane is walked on both sides at every level, which costs `2^depth` without a node budget.
+/// The walk must end (the harness would hang otherwise) and hit nothing it has no data for.
+#[test]
+fn pm_trace_through_a_cyclic_hull_ends() {
+    let mut bsp = synthetic_bsp();
+    bsp.planes.push(Plane {
+        normal: Vec3::X,
+        dist: 0.0,
+        plane_type: 0,
+    });
+    let cyclic = bsp.clipnodes.len() as i16;
+    bsp.clipnodes.push(ClipNode {
+        plane: bsp.planes.len() as i32 - 1,
+        children: [cyclic, cyclic],
+    });
+    // A hull whose first node is also the last reads as having no clipnodes: one more after it.
+    bsp.clipnodes.push(ClipNode {
+        plane: bsp.planes.len() as i32 - 1,
+        children: [EMPTY as i16, EMPTY as i16],
+    });
+    bsp.models[0].head_nodes[1] = i32::from(cyclic);
+    let mut h = harness_on("pmtest", &header_only(), bsp);
+    run(&mut h, |eng| {
+        let p = player(eng, Vec3::new(0.0, 0.0, 50.0));
+        let pe = eng.pm_physents(p);
+        // usehull 0 is BSP hull 1, the cyclic one; the segment crosses x = 0.
+        let t = eng.pm_player_trace(
+            &pe,
+            Vec3::new(-100.0, 0.0, 50.0),
+            Vec3::new(100.0, 0.0, 50.0),
+            0,
+            PM_NORMAL,
+            -1,
+        );
+        assert!(t.fraction.is_finite() && (0.0..=1.0).contains(&t.fraction), "{t:?}");
+    });
+}
+
 #[test]
 fn pm_trace_flags_world_only_and_glass() {
     let mut h = synthetic();

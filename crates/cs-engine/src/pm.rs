@@ -246,6 +246,14 @@ fn plane_dist(plane: &Plane, p: Vec3) -> f32 {
 /// Deepest recursion of the hull walk; a malformed map with a cyclic hull ends there.
 const MAX_WALK_DEPTH: u32 = 4096;
 
+/// Nodes one hull walk may visit: twice the node count of the hull plus slack. A valid tree is
+/// walked in at most one visit per node and leaf; a cyclic hull would otherwise cost `2^depth`
+/// visits (both sides of a plane are walked when the segment crosses it). Like the `budget` of
+/// `texture.rs`; an exhausted walk stops and reports nothing hit further.
+fn walk_budget(last: i32) -> usize {
+    (usize::try_from(last).unwrap_or(0) + 1) * 2 + 16
+}
+
 /// `PM_HullPointContents(hull, hull->firstclipnode, p)` for `geo` (`CONTENTS_EMPTY` for a hull
 /// of a model out of range; the original stops the server on a bad node number). A hull with
 /// no clipnode (`firstclipnode >= lastclipnode`) is -1, as in the source.
@@ -265,6 +273,8 @@ struct Walk<'a> {
     geo: Geometry<'a>,
     first: i32,
     last: i32,
+    /// Visits left, see [`walk_budget`].
+    budget: std::cell::Cell<usize>,
 }
 
 impl Walk<'_> {
@@ -305,6 +315,10 @@ impl Walk<'_> {
         if depth > MAX_WALK_DEPTH {
             return true;
         }
+        let Some(left) = self.budget.get().checked_sub(1) else {
+            return true;
+        };
+        self.budget.set(left);
 
         let Some((plane, children)) = self.coll.geo_node(self.geo, num) else {
             return true;
@@ -427,6 +441,7 @@ fn hull_check(
             geo,
             first,
             last,
+            budget: std::cell::Cell::new(walk_budget(last)),
         };
         walk.check(geo.root(coll), 0.0, 1.0, start_l, end_l, &mut total, 0);
     }

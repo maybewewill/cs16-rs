@@ -307,7 +307,9 @@ impl<G: GameDll> Server<G> {
     /// commands is not checked, so it gets a change when its next command runs, as in ReHLDS
     /// (the check no longer runs once per frame for every client). A client whose copy is not set
     /// yet (before the `new` stage) is not sent anything: `new` carries the current values. The
-    /// reliable backlog cap is applied by the `drain_outbox` that ends the move.
+    /// reliable write here is direct and is NOT subject to `MAX_RELIABLE_BACKLOG` (only what the
+    /// game queues goes through the capped outbox): it is one small message per change of a
+    /// cvar, and `move_vars` never yields a NaN, so an unchanged value never compares unequal.
     pub(crate) fn sync_client_movevars(&mut self, slot: u8) {
         // Built once per frame, not per command: a cvar the game changes during a frame reaches
         // the clients with their first command of the next one.

@@ -348,6 +348,9 @@ pub(crate) struct WorldLinks {
     touches_dropped: usize,
     /// The server is inside its touch dispatch loop (`touch.rs`).
     pub(crate) dispatching: bool,
+    /// The time the touches being dispatched run at: the command's `svtimebase` while
+    /// `SV_ProcessImpacts` delivers a command's touches, `None` (the server time) otherwise.
+    pub(crate) touch_time: Option<f64>,
     /// Touches the movement of the player being run found, as `(player, other)`, until the
     /// engine turns them into impacts after the command (`EngineApi::player_touched`).
     pub(crate) player_impacts: Vec<(EdictId, EdictId)>,
@@ -375,6 +378,7 @@ impl WorldLinks {
             frame_touches: 0,
             touches_dropped: 0,
             dispatching: false,
+            touch_time: None,
             player_impacts: Vec::new(),
             moved_players: Vec::new(),
             force_retouch: 0.0,

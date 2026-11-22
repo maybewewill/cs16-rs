@@ -13,7 +13,7 @@ use crate::game::GameDll;
 use crate::lifecycle::NAME_CHANGE_MIN_INTERVAL_SECS;
 use crate::oob::{MAX_INFO_STRING, sanitize_name};
 use crate::server::Server;
-use crate::world::consts::SOLID_NOT;
+use crate::world::consts::{FL_FROZEN, SOLID_NOT};
 
 /// Movement time, in milliseconds, a client may bank ahead of the commands it sends.
 pub const MAX_BANKED_MS: f64 = 500.0;
@@ -87,6 +87,23 @@ pub fn select_cmds_to_run(
     }
     run.extend(new.iter().rev().cloned());
     run
+}
+
+/// `SV_ClearMoveCmds` (ReHLDS `sv_user.cpp`, read 2026-11-22), for a frozen player: the first
+/// `numcmds` commands lose their `msec`, moves and buttons and the `impulse` (the player is
+/// frozen), and look where `v_angle` looks.
+fn clear_move_cmds(cmds: &[GoldSrcUserCmd], numcmds: usize, v_angle: glam::Vec3) -> Vec<GoldSrcUserCmd> {
+    let mut out = cmds.to_vec();
+    for cmd in out.iter_mut().take(numcmds) {
+        cmd.msec = 0;
+        cmd.forwardmove = 0.0;
+        cmd.sidemove = 0.0;
+        cmd.upmove = 0.0;
+        cmd.buttons = 0;
+        cmd.impulse = 0;
+        cmd.viewangles = v_angle;
+    }
+    out
 }
 
 /// Longest step, in milliseconds, one user command may give the game; longer ones are split.
@@ -198,6 +215,23 @@ impl<G: GameDll> Server<G> {
         if self.clients[index].state != ClientState::Active {
             return;
         }
+        // `SV_ParseMove` (ReHLDS `sv_user.cpp`, read 2026-11-22): a frozen player gets no
+        // movement. `SV_ClearMoveCmds` strips the new commands (not the backups) and keeps the
+        // view where it is, and `net_drop = 0` replays nothing. (The server pause and the
+        // singleplayer console of the same condition do not exist here.)
+        let frozen = self
+            .edicts
+            .get(self.edicts.client(slot))
+            .filter(|e| e.vars.flags & FL_FROZEN != 0)
+            .map(|e| e.vars.v_angle);
+        let cleared;
+        let (cmds_newest_first, dropped) = if let Some(v_angle) = frozen {
+            let new = cmds_newest_first.len() - usize::from(num_backup).min(cmds_newest_first.len());
+            cleared = clear_move_cmds(cmds_newest_first, new, v_angle);
+            (&cleared[..], 0)
+        } else {
+            (cmds_newest_first, dropped)
+        };
         let run = select_cmds_to_run(
             cmds_newest_first,
             num_backup,
@@ -293,7 +327,7 @@ impl<G: GameDll> Server<G> {
         // After `pfnPM_Move`, before `SV_FinishPMove` (`SV_RunCmd`): the movevars the client
         // holds against the server's.
         self.sync_client_movevars(slot);
-        self.finish_player_cmd(slot);
+        self.finish_player_cmd(slot, time);
         // `PlayerPostThink` and `CmdEnd` come after `SV_ProcessImpacts` (the relink and the
         // touches), still inside the lag-compensation window, with the command's time and frame
         // time (`gGlobalVariables.frametime = frametime`).
@@ -307,7 +341,9 @@ impl<G: GameDll> Server<G> {
     /// reported (`EngineApi::player_touched`) as `SV_Impact(other, player)`; the touches are
     /// delivered at once, after the call that found them. The touches of a non-solid player are
     /// dropped, and so are those reported for another player than `slot`'s.
-    fn finish_player_cmd(&mut self, slot: u8) {
+    /// The touches are delivered at the command's `time` (its `svtimebase`, which ReHLDS leaves in
+    /// `gpGlobals->time` through `SV_ProcessImpacts`).
+    fn finish_player_cmd(&mut self, slot: u8, time: f64) {
         let player = self.edicts.client(slot);
         let touched = std::mem::take(&mut self.world.player_impacts);
         let solid = self.edicts.get(player).is_some_and(|e| e.vars.solid != SOLID_NOT);
@@ -317,7 +353,9 @@ impl<G: GameDll> Server<G> {
                 self.impact(other, player);
             }
         }
+        self.world.touch_time = Some(time);
         self.dispatch_touches();
+        self.world.touch_time = None;
     }
 
     /// Counts an unparsable payload from `slot` as a bad move; an `Active` client is dropped

@@ -83,6 +83,10 @@ pub(crate) fn banner(build: i32, spawn_count: u32) -> String {
 /// sv_skyname.string, sizeof(movevars->skyName) - 1)`, `SV_SetMoveVars`, ReHLDS `sv_main.cpp`,
 /// read 2026-11-22), so 31 bytes at most (the finding's "32 characters" counted the
 /// terminator; the source wins).
+///
+/// DEVIATION (documented): a cvar value that is not finite (NaN, infinity) becomes 0.0. NaN
+/// compares unequal to itself, so a NaN on the wire (and in `pm`) would make the movevars resend
+/// of `sync_client_movevars` fire on every command.
 pub(crate) fn move_vars(cvars: &CVarRegistry, entities: &[Entity]) -> MoveVarsMsg {
     let mut mv = MoveVarsMsg {
         // The first assignment of `SV_SetMoveVars`; the game scales it per player.
@@ -118,7 +122,8 @@ pub(crate) fn move_vars(cvars: &CVarRegistry, entities: &[Entity]) -> MoveVarsMs
     ];
     for (name, field) in fields {
         if let Some(cvar) = cvars.get(name) {
-            *field = cvar.as_f32();
+            let value = cvar.as_f32();
+            *field = if value.is_finite() { value } else { 0.0 };
         }
     }
     if let Some(cvar) = cvars.get("mp_footsteps") {
@@ -454,6 +459,18 @@ mod tests {
 
         let empty = move_vars(&CVarRegistry::new_empty(), &[]);
         assert_eq!(empty, MoveVarsMsg::default());
+    }
+
+    #[test]
+    fn move_vars_turn_a_non_finite_cvar_into_zero() {
+        let mut cvars = CVarRegistry::new_with_defaults();
+        cvars.set("sv_gravity", "nan");
+        cvars.set("sv_friction", "inf");
+        cvars.set("sv_stopspeed", "-inf");
+        let mv = move_vars(&cvars, &[]);
+        assert_eq!((mv.gravity, mv.friction, mv.stopspeed), (0.0, 0.0, 0.0));
+        // Equal to itself, so a resend compare does not fire every command.
+        assert_eq!(mv, move_vars(&cvars, &[]));
     }
 
     #[test]
