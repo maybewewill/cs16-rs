@@ -206,7 +206,7 @@ evidence = "crates/cs-engine/tests/tempents.rs::ambient_sound_from_a_point, soun
 [[item]]
 id = "resource_list_completeness"
 status = "tested"
-evidence = "The resource list is identical to the original HLDS (build 10210, golden capture 2026-11-22): 781 entries, player.mdl at index 141, 0 resource-list lines in the golden diff (it had 730 entries before the F2 fix: 36 sounds, 10 models and 5 events were missing). Tests: crates/cs-engine/src/signon.rs::tests::sendres_stage_requests_and_lists_resources and crates/cs-game/tests/inventory.rs::every_weapon_event_resolves_after_activation (every event of the game's precache is in the list). The order, generic then sounds, models, decals and events as SV_CreateResourceList writes it (rh_sv_main.cpp:5787), is asserted by the resource-order test of the phase 2D final fix wave"
+evidence = "The resource list is identical to the original HLDS (build 10210, golden capture 2026-11-22): 781 entries, player.mdl at index 141, 0 resource-list lines in the golden diff (it had 730 entries before the F2 fix: 36 sounds, 10 models and 5 events were missing). Tests: crates/cs-engine/src/signon.rs::tests::sendres_stage_requests_and_lists_resources and crates/cs-game/tests/inventory.rs::every_weapon_event_resolves_after_activation (every event of the game's precache is in the list). The order, generic then sounds, models, decals and events as SV_CreateResourceList writes it (rh_sv_main.cpp:5787), is asserted by crates/cs-engine/src/precache.rs::tests::resource_list_orders_generic_sounds_models_decals_events"
 
 [[item]]
 id = "msgdest_broadcast_datagram"
@@ -221,7 +221,7 @@ evidence = "Known gap: the 1 s spacing of the userinfo broadcast (sendinfo_time)
 [[item]]
 id = "delta_encoder_callbacks"
 status = "tested"
-evidence = "crates/cs-game/src/encoders.rs::tests::the_local_players_origin_is_unset_and_other_players_keep_theirs, an_entity_that_follows_another_sends_no_origin_until_it_stops, a_parametric_mover_sends_neither_origin_nor_angles, a_beam_sends_the_fields_its_type_uses, an_encoder_the_game_does_not_know_changes_nothing (Entity_Encode, Player_Encode and Custom_Encode, the ReGameDLL hooks that change what an entity sends); crates/cs-game/tests/fullpack.rs::the_local_players_origin_is_not_sent; the cost of the hook (at most one call per changed entity) is bounded by the engine test of the phase 2D final fix wave. The pre-join player angles stay a documented gap, as ruled"
+evidence = "crates/cs-game/src/encoders.rs::tests::the_local_players_origin_is_unset_and_other_players_keep_theirs, an_entity_that_follows_another_sends_no_origin_until_it_stops, a_parametric_mover_sends_neither_origin_nor_angles, a_beam_sends_the_fields_its_type_uses, an_encoder_the_game_does_not_know_changes_nothing (Entity_Encode, Player_Encode and Custom_Encode, the ReGameDLL hooks that change what an entity sends); crates/cs-game/tests/fullpack.rs::the_local_players_origin_is_not_sent; the cost of the hook (at most one call per changed entity) is bounded by crates/cs-proto48/src/messages.rs::tests::the_delta_encoder_runs_once_per_changed_entity; The pre-join player angles stay a documented gap, as ruled"
 
 [[item]]
 id = "addtofullpack_filters"

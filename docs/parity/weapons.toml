@@ -305,7 +305,7 @@ evidence = "crates/cs-game/tests/inventory.rs::round_restart_clears_weapons_on_t
 [[item]]
 id = "weapon_precache"
 status = "tested"
-evidence = "crates/cs-engine/tests/tempents.rs::full_weapon_precache_fits (it uses hand-copied MODELS and SOUNDS lists, not the precache of the game, so it supports the claim about the table capacity only); crates/cs-game/tests/inventory.rs::every_weapon_event_resolves_after_activation (the events of the game's own precache). The game's resource list is identical to the original HLDS (build 10210, golden capture 2026-11-22): 781 entries, player.mdl at index 141, 0 resource-list lines in the golden diff. Its order (generic, sounds, models, decals, events, as SV_CreateResourceList) is the one asserted by the resource-order test of the phase 2D final fix wave (see resource_list_completeness in docs/parity/engine.toml)"
+evidence = "crates/cs-engine/tests/tempents.rs::full_weapon_precache_fits (it uses hand-copied MODELS and SOUNDS lists, not the precache of the game, so it supports the claim about the table capacity only); crates/cs-game/tests/inventory.rs::every_weapon_event_resolves_after_activation (the events of the game's own precache). The game's resource list is identical to the original HLDS (build 10210, golden capture 2026-11-22): 781 entries, player.mdl at index 141, 0 resource-list lines in the golden diff. Its order (generic, sounds, models, decals, events, as SV_CreateResourceList) is the one asserted by crates/cs-engine/src/precache.rs::tests::resource_list_orders_generic_sounds_models_decals_events (see resource_list_completeness in docs/parity/engine.toml)"
 
 [[item]]
 id = "weapon_data_prediction"

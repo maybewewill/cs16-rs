@@ -22,8 +22,8 @@
 //!
 //! Not ported, and named:
 //!
-//! - `Spawn` (`SET_MODEL`, `FallInit`, the entity half of a weapon) belongs to the weapon entity
-//!   of Task 12. What it writes into the weapon is covered: `m_iDefaultAmmo` by
+//! - `Spawn` (`SET_MODEL`, `FallInit`, the entity half of a weapon) is the weapon entity's
+//!   ([`crate::inventory`], `apply_spawn_fields`). What it writes into the weapon is covered: `m_iDefaultAmmo` by
 //!   [`Weapon::new`](super::weapon::Weapon::new), and `m_flAccuracy`, which every `Deploy`
 //!   writes again before a shot is possible. `m_bBurstFire` is only ever written (false).
 //! - `GetAutoaimVector(AUTOAIM_10DEGREES)` at the top of every `WeaponIdle` (no weapon of
