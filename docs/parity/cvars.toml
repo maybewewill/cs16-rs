@@ -201,11 +201,13 @@ evidence = "crates/cs-game/tests/movement_world.rs::movement_cvars_are_hard_lock
 
 [[item]]
 id = "sv_airaccelerate"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-engine/tests/movevars.rs::move_vars_follow_every_cvar; the movevars field of the same name follows the cvar"
 
 [[item]]
 id = "sv_bounce"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-engine/tests/movevars.rs::move_vars_follow_every_cvar; the movevars field of the same name follows the cvar"
 
 [[item]]
 id = "sv_cheats"
@@ -213,11 +215,13 @@ status = "implemented"
 
 [[item]]
 id = "sv_friction"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-engine/tests/movevars.rs::move_vars_follow_every_cvar; the movevars field of the same name follows the cvar; the game forces 4 (crates/cs-game/tests/movement_world.rs::movement_cvars_are_hard_locked), the registry default stays as it was (accepted deviation, see sv_accelerate)"
 
 [[item]]
 id = "sv_gravity"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-engine/tests/movevars.rs::move_vars_follow_every_cvar; the movevars field of the same name follows the cvar; a change reaches a client in the game with its next command (crates/cs-engine/tests/movevars.rs::changed_movevars_are_resent_once), and the player movement uses it (crates/cs-game/tests/player.rs::fall_damage_as_regamedll sets it)"
 
 [[item]]
 id = "sv_language"
@@ -225,7 +229,8 @@ status = "implemented"
 
 [[item]]
 id = "sv_maxspeed"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-engine/tests/movevars.rs::move_vars_follow_every_cvar; the movevars field of the same name follows the cvar"
 
 [[item]]
 id = "sv_maxunlag"
@@ -233,7 +238,8 @@ status = "implemented"
 
 [[item]]
 id = "sv_maxvelocity"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-engine/tests/movevars.rs::move_vars_follow_every_cvar; the movevars field of the same name follows the cvar"
 
 [[item]]
 id = "sv_rollangle"
@@ -286,11 +292,13 @@ evidence = "crates/cs-engine/tests/movevars.rs::new_movement_cvars_have_rehlds_d
 
 [[item]]
 id = "sv_stepsize"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-engine/tests/movevars.rs::move_vars_follow_every_cvar; the movevars field of the same name follows the cvar"
 
 [[item]]
 id = "sv_stopspeed"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-engine/tests/movevars.rs::move_vars_follow_every_cvar; the movevars field of the same name follows the cvar; the game forces 75 (crates/cs-game/tests/movement_world.rs::movement_cvars_are_hard_locked), the registry default stays 100 (accepted deviation, see sv_accelerate)"
 
 [[item]]
 id = "sv_unlag"
@@ -311,7 +319,8 @@ evidence = "crates/cs-engine/tests/movevars.rs::new_movement_cvars_have_rehlds_d
 
 [[item]]
 id = "sv_wateramp"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-engine/tests/movevars.rs::move_vars_follow_every_cvar; the movevars field of the same name follows the cvar"
 
 [[item]]
 id = "sv_waterfriction"
@@ -320,7 +329,8 @@ evidence = "crates/cs-engine/tests/movevars.rs::new_movement_cvars_have_rehlds_d
 
 [[item]]
 id = "sv_zmax"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-engine/tests/movevars.rs::move_vars_follow_every_cvar; the movevars field of the same name follows the cvar"
 
 [[item]]
 id = "texgamma"

@@ -53,6 +53,19 @@ What was found:
   clean-up of `cs-game`) carries the same GPL v2-or-later header with the linking exception as
   the other engine sources. Earlier notes placed it in ReGameDLL_CS (`game_shared`); that was a
   mistake.
+- pm_shared port (read 2026-11-22; ReGameDLL_CS and ReHLDS master, the headers of the fetched
+  copies checked): ReGameDLL_CS `regamedll/pm_shared/pm_shared.h`, `pm_defs.h`, `pm_movevars.h`,
+  `pm_materials.h`, `pm_info.h`, `regamedll/game_shared/bot/nav.h` and `regamedll/dlls/player.cpp`
+  carry the GPL v2-or-later header with the linking exception. `regamedll/pm_shared/pm_shared.cpp`
+  (the ported movement code), `pm_math.cpp` and, among the `dlls` files, `client.cpp`,
+  `multiplay_gamerules.cpp` and `doors.cpp` begin with `#include "precompiled.h"` and have no
+  licence header, so the repository `LICENSE` (MIT) is the notice that applies to them. The ReHLDS
+  engine files `pmove.cpp`, `pmovetst.cpp`, `sv_user.cpp`, `sv_pmove.cpp`, `sv_main.cpp`,
+  `pr_cmds.cpp`, `model.cpp` and `tmessage.cpp` carry the GPL v2-or-later header with the linking
+  exception. `THIRD-PARTY-NOTICES.md` says what was taken from each. The `FL_*`,
+  `MOVETYPE_*`, `IN_*` and `CONTENTS_*` values in `crates/cs-sim/src/pm/consts.rs` are numeric
+  values only, of the kind already listed under the Valve Half-Life SDK caveat; the ones marked
+  there as `(HL SDK)` come from the standard SDK and are an assumption until checked.
 - ReHLDS `rehlds/common/const.h`, `usercmd.h` and `entity_state.h` carry Valve LLC's notice,
   which restricts use, distribution and modification to non-commercial enhancements to products
   from Valve LLC; `rehlds/common/qlimits.h` and `rehlds/public/rehlds/edict.h` carry a plain

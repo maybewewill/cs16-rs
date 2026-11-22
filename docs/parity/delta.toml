@@ -1,6 +1,7 @@
 [[item]]
 id = "clientdata_t.flTimeStepSound"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-game/tests/movement.rs::client_data_carries_duck_step_swim_fields; the step-sound timer of the edict, which PM_UpdateStepSound sets, is sent as it is"
 
 [[item]]
 id = "clientdata_t.origin[0]"
@@ -74,7 +75,8 @@ status = "implemented"
 
 [[item]]
 id = "clientdata_t.flDuckTime"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-game/tests/movement.rs::client_data_carries_duck_step_swim_fields; the duck timer of the edict (PM_Duck) is sent as it is"
 
 [[item]]
 id = "clientdata_t.view_ofs[2]"
@@ -98,7 +100,8 @@ status = "implemented"
 
 [[item]]
 id = "clientdata_t.pushmsec"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-game/tests/movement.rs::client_data_carries_duck_step_swim_fields, crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; 11 bits"
 
 [[item]]
 id = "clientdata_t.deadflag"
@@ -114,15 +117,18 @@ status = "implemented"
 
 [[item]]
 id = "clientdata_t.bInDuck"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-game/tests/movement.rs::client_data_carries_duck_step_swim_fields; the in-duck flag of the edict (PM_Duck) is sent as it is"
 
 [[item]]
 id = "clientdata_t.flSwimTime"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-game/tests/movement.rs::client_data_carries_duck_step_swim_fields, crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the swim timer of the edict (PM_WaterMove, PM_Jump) is sent as it is, 10 bits"
 
 [[item]]
 id = "clientdata_t.waterjumptime"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-game/tests/movement.rs::client_data_carries_duck_step_swim_fields, crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the integer part of teleport_time as UpdateClientData does, 15 bits"
 
 [[item]]
 id = "clientdata_t.waterlevel"
@@ -146,47 +152,58 @@ status = "implemented"
 
 [[item]]
 id = "clientdata_t.vuser2[0]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game leaves it zero (nothing sets vuser2 yet)"
 
 [[item]]
 id = "clientdata_t.vuser2[1]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game leaves it zero (nothing sets vuser2 yet)"
 
 [[item]]
 id = "clientdata_t.vuser2[2]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game leaves it zero (nothing sets vuser2 yet)"
 
 [[item]]
 id = "clientdata_t.vuser3[0]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game leaves it zero (nothing sets vuser3 yet)"
 
 [[item]]
 id = "clientdata_t.vuser3[1]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game leaves it zero (nothing sets vuser3 yet)"
 
 [[item]]
 id = "clientdata_t.vuser3[2]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game leaves it zero (nothing sets vuser3 yet)"
 
 [[item]]
 id = "clientdata_t.vuser4[0]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game leaves it zero (nothing sets vuser4 yet); the schema has no third axis"
 
 [[item]]
 id = "clientdata_t.vuser4[1]"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the wire carries it, cs-game leaves it zero (nothing sets vuser4 yet); the schema has no third axis"
 
 [[item]]
 id = "clientdata_t.fuser1"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-game/tests/movement.rs::client_data_carries_duck_step_swim_fields, crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the stamina floats of the edict (PM_Jump, PM_ReduceTimers)"
 
 [[item]]
 id = "clientdata_t.fuser2"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-game/tests/movement.rs::client_data_carries_duck_step_swim_fields, crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; the jump penalty of the edict (PM_Jump, PM_ReduceTimers)"
 
 [[item]]
 id = "clientdata_t.fuser3"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-game/tests/movement.rs::client_data_carries_duck_step_swim_fields, crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; sent as the edict has it (fuser4 is not sent)"
 
 [[item]]
 id = "entity_state_t.animtime"

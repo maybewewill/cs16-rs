@@ -1,0 +1,244 @@
+# Player movement: pm_shared (cs_sim::pm, ported from ReGameDLL_CS pm_shared, vanilla branch, read
+# 2026-11-22), the engine's pmove services (cs-engine pm and texture modules, ported from ReHLDS
+# pmove.cpp, pmovetst.cpp, sv_user.cpp, sv_pmove.cpp, pr_cmds.cpp and model.cpp, read 2026-11-22)
+# and the game side of SV_RunCmd (cs-game pmove.rs and player.rs).
+# Nothing here is `verified`: no dated check with the original client yet, see
+# docs/parity/checklists/pm-movement.md. An item is `tested` when a cited test asserts it (the
+# definition in docs/parity/README.md) and `implemented` when the code exists and no cited test
+# would fail if it broke. The tests compare with the sources, not with the original game; the
+# BoxWorld of cs-sim's tests is a box-sweep test world, not bit-exact to PM_RecursiveHullCheck,
+# and the engine's own traces are compared with the legacy hull trace on de_dust2.
+# Accepted deviations that touch every item: float expressions that mix float and double are
+# computed in f64 where C does (named where it matters); sin and cos are Rust's, which may differ
+# from the C runtime by one ulp (assumption); the console messages of the source are not printed;
+# a NaN or infinite value in a command is made finite or reset as PM_CheckVelocity does.
+
+[[item]]
+id = "movement_player_move_order"
+status = "tested"
+evidence = "crates/cs-sim/tests/pm_walk.rs::player_move_runs_in_source_order, move_tail_mirrors_ground_flag_and_single_player_friction, texture_lookup_defaults_to_concrete; PM_PlayerMove calls its parts in the source's order (stubs and engine callbacks included), PM_Move mirrors FL_ONGROUND and uses the single-player friction 1. Deviation: the stuck tables are indexed by the player slot modulo 32 (the C code would index out of bounds on a bogus slot)."
+
+[[item]]
+id = "movement_check_parameters_roll_punch"
+status = "tested"
+evidence = "crates/cs-sim/tests/pm_walk.rs::check_parameters_scales_and_rolls, punch_angle_decays; PM_CheckParameters (the moves scaled down to maxspeed, clientmaxspeed, frozen or dead players have no move, the dead view offset PM_DEAD_VIEWHEIGHT), PM_CalcRoll with sv_rollangle and sv_rollspeed, PM_DropPunchAngle (len -= (10 + len * 0.5) * frametime in double). Quirk kept: PM_CheckParameters runs before the frametime is recomputed."
+
+[[item]]
+id = "movement_timers"
+status = "tested"
+evidence = "crates/cs-sim/tests/pm_walk.rs::timers_reduce_by_msec, msec_zero_changes_no_position; PM_ReduceTimers (flTimeStepSound, flDuckTime, flSwimTime, the fuser2 jump penalty) and a command of 0 ms, which runs the whole of PM_Move with frametime 0 and moves nothing."
+
+[[item]]
+id = "movement_water_level"
+status = "tested"
+evidence = "crates/cs-sim/tests/pm_ladder_water.rs::water_levels_one_two_three; crates/cs-game/tests/movement_world.rs::water_is_swum_on_a_real_map, func_water_gives_the_player_water_on_a_stock_map; PM_CheckWater (feet, waist and head probes, the water type, the current as basevelocity) on the test world and on a stock map (a pool found by a point-contents scan, and a func_water entity)."
+
+[[item]]
+id = "movement_categorize_position"
+status = "tested"
+evidence = "crates/cs-sim/tests/pm_walk.rs::no_hit_trace_leaves_player_airborne, landing_sets_punch_and_clears_fall_velocity, move_tail_mirrors_ground_flag_and_single_player_friction; PM_CategorizePosition (the ground probe below the player, the normal.z > 0.7 rule, leaving the ground when moving up fast). Quirk kept: a trace that hits nothing leaves the plane normal at zero and the entity at -1, so the player is airborne."
+
+[[item]]
+id = "movement_friction_edge"
+status = "tested"
+evidence = "crates/cs-sim/tests/pm_walk.rs::friction_uses_stopspeed_control, edge_friction_applies_over_a_drop; PM_Friction with sv_friction, sv_stopspeed and the edge friction over a drop (edgefriction). The game forces sv_friction 4 and sv_stopspeed 75, see movement_hard_locks."
+
+[[item]]
+id = "movement_accelerate_walk_step"
+status = "tested"
+evidence = "crates/cs-sim/tests/pm_walk.rs::ground_acceleration_matches_pm_accelerate, running_converges_to_maxspeed, steps_up_to_stepsize_and_not_higher, walk_move_applies_the_jump_penalty_ratio; crates/cs-game/tests/movement.rs::walking_reaches_250_on_dust2, stairs_are_climbed; PM_Accelerate, PM_WalkMove (the step up to 18 units, the down probe, the fuser2 jump penalty ratio). Accepted deviation: the dead VectorScale rescales of wishvel in PM_WalkMove and PM_AirMove are omitted."
+
+[[item]]
+id = "movement_air_move"
+status = "implemented"
+evidence = "crates/cs-sim/src/pm/walk.rs holds PM_AirAccelerate and PM_AirMove (the wishspd cap of 30, sv_airaccelerate); no test isolates the air acceleration or the air strafe, and the jump and fall tests do not assert on it."
+
+[[item]]
+id = "movement_fly_move_clip"
+status = "tested"
+evidence = "crates/cs-sim/tests/pm_walk.rs::wall_slide_clips_velocity, fly_move_bounce_branch_uses_entity_friction, touches_are_recorded_once_per_entity; PM_FlyMove (up to 4 bumps, the clip planes, the touched list without repeats), PM_ClipVelocity (STOP_EPSILON in double, the bounce overbounce 1 + bounce * (1 - friction) in double). Accepted deviation: the touched list has no 600 cap (the per-entity dedupe bounds it)."
+
+[[item]]
+id = "movement_gravity"
+status = "tested"
+evidence = "crates/cs-sim/tests/pm_walk.rs::falling_uses_half_step_gravity; crates/cs-game/tests/movement.rs::jump_apex_is_45_units; PM_AddCorrectGravity and PM_FixupGravityVelocity (half a step of gravity before and after the move, in double), with sv_gravity from the movevars and the entity gravity."
+
+[[item]]
+id = "movement_stuck"
+status = "tested"
+evidence = "crates/cs-sim/tests/pm_walk.rs::stuck_player_is_nudged_by_the_table; crates/cs-sim/src/pm/stuck.rs::tests::stuck_table_has_the_source_order, server_walks_the_table_once_per_interval_and_copies_only_the_big_offsets, server_small_offsets_leave_the_origin_alone, client_takes_the_first_free_offset_at_once; crates/cs-game/tests/movement.rs::a_player_stuck_in_another_is_nudged_out_by_the_flailing_rule; PM_CreateStuckTable, PM_CheckStuck and the retry interval of 50 ms. Accepted deviations: Sys_FloatTime is the engine's frame real time; the client branch that asks whether the blocking physent has a model is not reached on the server and is not covered by a test."
+
+[[item]]
+id = "movement_duck"
+status = "tested"
+evidence = "crates/cs-sim/tests/pm_duck_jump.rs::duck_takes_four_tenths_and_follows_the_spline, duck_in_the_air_is_immediate, duck_jump_rules_as_source; crates/cs-game/tests/movement.rs::duck_view_and_hull_over_four_tenths; PM_Duck with the spline view offset, the hull switch at 400 ms and the 0.333 scale of the command's moves (a float local in PM_Duck). Quirks kept: the view offset runs from 17 down to -6 during the transition and is 12 only at the end; a duck time below zero leaves the fraction at 17; the duck time compare is in double."
+
+[[item]]
+id = "movement_unduck_crouch_stuck"
+status = "tested"
+evidence = "crates/cs-sim/tests/pm_duck_jump.rs::unduck_is_blocked_under_a_low_ceiling; crates/cs-sim/src/pm/duck.rs::tests::crouch_stuck_climbs_up_to_36_units_then_restores, spline_fraction_stays_17_when_flducktime_is_above_1000; PM_UnDuck (the trace with the standing hull, the rollback of usehull) and PM_FixPlayerCrouchStuck (HalfHumanHeight 36 from game_shared nav.h)."
+
+[[item]]
+id = "movement_jump_stamina"
+status = "tested"
+evidence = "crates/cs-sim/tests/pm_duck_jump.rs::jump_speed_is_268_and_stamina_reduces_the_next, holding_jump_does_not_rejump; crates/cs-sim/src/pm/jump.rs::tests::jump_height_is_sqrt_of_72000, ground_jump_sets_speed_stamina_and_the_gravity_half_step, dead_players_only_mark_the_button; crates/cs-game/tests/movement.rs::jump_apex_is_45_units, zero_msec_jump_still_acts_on_dust2; PM_Jump (sqrt(2 * 800 * 45), the hard-coded 800, the fuser2 stamina, the step sound call). Not compared with the original client: the apex is 45 units by the source, see the checklist."
+
+[[item]]
+id = "movement_mega_bunny"
+status = "tested"
+evidence = "crates/cs-sim/tests/pm_duck_jump.rs::mega_bunny_jumping_is_capped; crates/cs-sim/src/pm/jump.rs::tests::mega_bunny_jumping_crops_to_point_eight_of_the_limit; PM_PreventMegaBunnyJumping (maxspeed * 1.2 limit, crop factor 0.8). Quirk kept: PM_AddCorrectGravity's vertical velocity of -4 enters the speed that is compared."
+
+[[item]]
+id = "movement_ladder"
+status = "tested"
+evidence = "crates/cs-sim/tests/pm_ladder_water.rs::climbs_a_ladder_at_200, jumps_off_a_ladder_along_its_normal, climbs_sideways_along_the_ladder, the_first_of_two_overlapping_ladders_wins; crates/cs-sim/src/pm/ladder.rs::tests::ducking_scales_the_climb_speed_by_the_double_literal, ducking_multiplier_is_the_c_double_not_the_widened_f32, maxspeed_caps_the_climb_speed, on_the_floor_moving_away_from_the_ladder_adds_the_climb_push, a_missed_centre_trace_keeps_the_velocity_but_still_flies, noclip_does_nothing; crates/cs-game/tests/movement_world.rs::a_ladder_is_climbed_on_a_real_map; crates/cs-game/tests/game_entities.rs::brush_entities_stay_solid (func_ladder entities are moveents on a ladder map); PM_Ladder and PM_LadderMove (the 200 cap by maxspeed, the 0.333 duck factor as a double product, the jump off along the normal at 270). Compiled func_ladder brushes are solid in their own hulls and PM_TraceModel hits them (found on the as_oilrig map, confirmed by the real-map test). Not ported: PM_Ladder reads the model bounds only, never the entity origin (as in the source), so PmWorld::moveent_origin is unused."
+
+[[item]]
+id = "movement_water_move"
+status = "tested"
+evidence = "crates/cs-sim/tests/pm_ladder_water.rs::swimming_up_with_upmove, swimming_sinks_and_is_slower, currents_push_through_basevelocity; crates/cs-game/tests/movement_world.rs::water_is_swum_on_a_real_map; PM_WaterMove (sink at -60, wishspeed * 0.8 in double, sv_wateraccelerate and sv_waterfriction, the step probe out of the water). The real-map test pins the idle sink at 48, the swim at 200 and the first jump command at 96, derived from the formulas."
+
+[[item]]
+id = "movement_water_jump"
+status = "tested"
+evidence = "crates/cs-sim/tests/pm_ladder_water.rs::water_jump_lifts_out_at_a_ledge, no_water_jump_when_the_wall_is_too_high_or_the_player_backs_in; crates/cs-sim/tests/pm_duck_jump.rs::jumping_in_deep_water_swims_up; crates/cs-sim/src/pm/jump.rs::tests::water_jump_velocity_by_liquid_and_wade_once_per_second, water_jump_timer_counts_down_and_blocks_the_jump; PM_CheckWaterJump (the two probes with the restored hull), PM_WaterJump (the timer in waterjumptime) and the water branch of PM_Jump (100, 80 or 50 by liquid)."
+
+[[item]]
+id = "movement_water_sounds"
+status = "tested"
+evidence = "crates/cs-sim/tests/pm_ladder_water.rs::entering_and_leaving_water_plays_wade; PM_PlayWaterSounds (pl_wade1 to pl_wade4 by RandomLong(0, 3) on CHAN_BODY when the water level changes). RandomLong is the game's own xorshift generator (the engine offers none): the variant sequence differs from the engine's, as the server and the client streams differ in the original."
+
+[[item]]
+id = "movement_step_sounds"
+status = "tested"
+evidence = "crates/cs-sim/tests/pm_sound.rs::step_sounds_alternate_feet_by_material, step_timing_and_volume_as_source, wade_skips_three_of_four, footsteps_off_in_multiplayer_is_silent, runfuncs_off_still_toggles_the_foot; crates/cs-sim/src/pm/sound.rs::tests::ladder_step_uses_ladder_timing_and_skips_water_probes, ducking_scales_volume_below_950_ms_of_duck_time, knee_water_wades_and_feet_water_sloshes, early_outs_of_the_step_timer, texture_type_maps_to_step_type, snow_and_unknown_step_types_have_their_samples; PM_UpdateStepSound, PM_PlayStepSound, PM_MapTextureTypeStepType. Quirks kept: wading plays 3 of 4 steps (the iSkipStep counter skips the first); the step sample list of cs-game is checked against the pm tables by crates/cs-game/src/world.rs::tests::every_sample_the_pm_tables_can_produce_is_precached (the family list is hand-written)."
+
+[[item]]
+id = "movement_materials"
+status = "tested"
+evidence = "crates/cs-sim/tests/pm_sound.rs::materials_parse_like_pm_init_texture_types, materials_parse_hostile_bytes, texture_prefixes_are_stripped; PM_InitTextureTypes (sound/materials.txt, memfgets chunks of 510 bytes, the case-insensitive sort and the binary search on 16 characters, a miss is concrete C) and PM_FindTextureType (the prefix strip, a one-character name clamped where the source overruns). memfgets is the ReHLDS tmessage.cpp one (read 2026-11-22). GameState::load_motd rebuilds the table from the game's materials.txt; a missing file means an empty table."
+
+[[item]]
+id = "movement_falling_landing_punch"
+status = "tested"
+evidence = "crates/cs-sim/tests/pm_walk.rs::landing_sets_punch_and_clears_fall_velocity; crates/cs-sim/tests/pm_sound.rs::landing_volume_thresholds; crates/cs-game/tests/movement.rs::landing_punch_reaches_client_data; crates/cs-game/tests/player.rs::fall_damage_as_regamedll; PM_CheckFalling (the punch fall * 0.013 in double, the landing sound thresholds, the fall velocity reset), and the damage from the fall velocity in PlayerPostThink. Quirks kept: 350 plays at 0.85 and 290 or less is silent."
+
+[[item]]
+id = "movement_noclip_toss"
+status = "tested"
+evidence = "crates/cs-sim/tests/pm_walk.rs::noclip_and_toss_move_as_source; PM_NoClip and PM_Physics_Toss (a player in TOSS or FLY is turned back to WALK, as the source does). Accepted deviation: the source has no PM_CheckVelocity after PM_NoClip, so a NaN command could leave a NaN origin there; the game makes a command's floats finite first and the engine refuses non-finite commands."
+
+[[item]]
+id = "movement_spectator"
+status = "tested"
+evidence = "crates/cs-sim/tests/pm_ladder_water.rs::roaming_spectator_flies_at_spectatormaxspeed, roaming_spectator_without_input_only_slows_down, chasing_spectator_takes_the_target_origin; crates/cs-game/tests/movement_world.rs::observer_roams_and_chases_through_pm; PM_SpectatorMove (roaming friction * 1.5, sv_spectatormaxspeed, the early return when addspeed is not positive) and the chase and in-eye modes through physent_by_info(iuser2). A target farther than 256 units is only found because SetupVisibility moves the observer's origin to it (ported in observer::setup_visibility). Not ported: the iJumpSpectator client branch."
+
+[[item]]
+id = "movement_hostile_input"
+status = "tested"
+evidence = "crates/cs-sim/tests/pm_walk.rs::nan_velocity_is_reset, hostile_cmds_do_not_break_the_move; crates/cs-game/tests/movement.rs::hostile_usercmds_keep_the_player_finite; PM_CheckVelocity resets a NaN velocity or origin to 0 (IS_NAN also matches infinity, a quirk), and the game's run_usercmd makes the command's floats finite first."
+
+[[item]]
+id = "movement_engine_physents"
+status = "tested"
+evidence = "crates/cs-engine/tests/pm_services.rs::physents_start_with_the_world_and_keep_ladders_apart, dead_and_distant_entities_are_not_physents, physents_come_in_area_tree_order_not_edict_order, a_lag_rewound_player_is_a_physent_at_its_true_origin; SV_AddLinksToPM, SV_IsCollidableInPM and SV_CopyEdictToPhysent (the world first, the area-tree order, 256 units, ladders as moveents, a lag-rewound player at its true origin). Accepted deviations: the groupinfo filter and the SV_AllowPhysent hook do not exist; visents are not built; when the 600th physent is taken the walk stops, where the original goes on with the other nodes; stale unused physent fields are zero here."
+
+[[item]]
+id = "movement_engine_player_trace"
+status = "tested"
+evidence = "crates/cs-engine/tests/pm_services.rs::pm_trace_maps_usehull_to_bsp_hulls, pm_trace_rotated_brush_uses_the_rotation, pm_trace_quirks, pm_services_refuse_bad_input, world_player_trace_matches_hull_trace_on_dust2; PM_PlayerTrace on _PM_PlayerTrace with PM_RecursiveHullCheck (hull per usehull, a rotated brush, the first trace that is not later replaced at an equal fraction, 2700 de_dust2 world traces equal to the legacy trace_hull). Accepted deviations: studio hitbox hulls are not built (the vanilla CS player path never reaches them); a usehull outside 0 to 3 hits nothing."
+
+[[item]]
+id = "movement_engine_glass_world_only"
+status = "tested"
+evidence = "crates/cs-engine/tests/pm_services.rs::pm_trace_flags_world_only_and_glass; PM_WORLD_ONLY (physent 0 only) and PM_GLASS_IGNORE (a solid brush with a render mode is looked through), and the ignore-by-index argument; PM_STUDIO_IGNORE and PM_STUDIO_BOX change nothing here (no studio hulls)."
+
+[[item]]
+id = "movement_engine_test_position"
+status = "tested"
+evidence = "crates/cs-engine/tests/pm_services.rs::test_player_position_traces_at_pm_origin; _PM_TestPlayerPosition. Quirk kept: the trace it fills is built from the player's own origin, not from the tested position."
+
+[[item]]
+id = "movement_engine_point_contents"
+status = "tested"
+evidence = "crates/cs-engine/tests/pm_services.rs::point_contents_sees_water_brushes; crates/cs-game/tests/movement_world.rs::func_water_gives_the_player_water_on_a_stock_map; PM_PointContents and PM_LinkContents (world contents first, then the special-contents brush entities such as func_water). A world without a model (a stub map) is empty space (assumption: the original reads the pointer unguarded)."
+
+[[item]]
+id = "movement_engine_trace_model"
+status = "tested"
+evidence = "crates/cs-engine/tests/pm_services.rs::ladder_contains_and_trace_model; crates/cs-game/tests/movement_world.rs::a_ladder_is_climbed_on_a_real_map; PM_Ladder test through the moveents and PM_TraceModel. Assumption: the original leaves the trace uninitialised (trace_t trace;); here it starts as SV_SingleClipMoveToEntity does (fraction 1, nothing hit), and a trace that never leaves solid keeps fraction 1."
+
+[[item]]
+id = "movement_engine_trace_texture"
+status = "tested"
+evidence = "crates/cs-engine/src/texture.rs::tests::the_walk_finds_the_face_the_line_crosses_inside_its_box, water_faces_cover_the_whole_plane, scroll_and_special_faces_take_the_texture_size, a_tree_that_leads_back_to_itself_ends, a_very_deep_chain_of_nodes_is_cut_off; crates/cs-engine/tests/pm_command_path.rs::trace_texture_names_the_face_the_line_crosses, trace_texture_follows_the_origin_and_angles_of_a_brush_entity, trace_texture_refuses_what_has_no_brush_model_or_no_finite_line, trace_texture_on_the_stub_map_finds_nothing, trace_texture_names_the_floor; TraceTexture and SurfaceAtPoint with the CalcSurfaceExtents overrides of Mod_LoadFaces (sky, scroll, water, laser and special faces). Accepted deviation: the walk has a depth cap of 256 against cyclic trees; the face extents are computed on demand (assumption: the decoded texture width and height are the miptex size)."
+
+[[item]]
+id = "movement_engine_pm_sound"
+status = "tested"
+evidence = "crates/cs-engine/tests/pm_command_path.rs::pm_sound_skips_the_mover, pm_sound_on_the_static_channel_skips_the_mover_too, pm_sound_on_a_single_client_server_skips_the_mover, an_ordinary_sound_still_reaches_the_emitter, a_sound_from_something_that_is_not_a_player_skips_nobody; PM_SV_PlaySound (SV_StartSound with the mover excluded, volume (int)(v * 255) truncated, the channel and pitch clamps of SV_BuildSoundMsg).  A sample that is not precached is refused (asserted by pm_sound_skips_the_mover with a name that is not precached)."
+
+[[item]]
+id = "movement_engine_movevars"
+status = "tested"
+evidence = "crates/cs-engine/tests/movevars.rs::move_vars_follow_every_cvar, new_movement_cvars_have_rehlds_defaults, changed_movevars_are_resent_once, unchanged_movevars_are_not_resent, only_clients_in_the_game_are_resent_and_a_signing_on_client_gets_the_new_value, every_client_in_the_game_is_resent_exactly_once, a_client_sending_no_commands_is_resent_with_its_next_command; SV_SetMoveVars builds every field from its own cvar and svc_newmovevars is resent from the per-command path after the game's movement (rh_sv_user.cpp 1018-1030), comparing the client's own copy. Accepted deviations: the check uses a per-frame cache of the movevars, so a cvar changed during a frame reaches a client with its first command of the next frame; a client that sends no commands gets no resend until it does; no fake clients exist to skip."
+
+[[item]]
+id = "movement_engine_zero_msec"
+status = "tested"
+evidence = "crates/cs-engine/tests/pm_command_path.rs::zero_msec_commands_reach_the_game, a_zero_msec_command_takes_nothing_from_the_budget; crates/cs-game/tests/movement.rs::zero_msec_command_runs_think, zero_msec_jump_still_acts_on_dust2; a command with msec 0 reaches the game and runs PreThink, PM_Move with frametime 0 and PostThink, as vanilla. Only a command that asked for time and got none from the msec budget is skipped. Accepted deviation: ReHLDS also runs the moves of a spawned client that has not begun; here only a client that is in the game does."
+
+[[item]]
+id = "movement_engine_moving_ground"
+status = "tested"
+evidence = "crates/cs-engine/tests/pm_command_path.rs::a_conveyor_moves_a_standing_player, a_base_velocity_nothing_renewed_is_folded_into_the_velocity; SV_CheckMovingGround before the game call (the conveyor and the ground's basevelocity folded into the velocity)."
+
+[[item]]
+id = "movement_game_setup_finish"
+status = "tested"
+evidence = "crates/cs-game/tests/movement.rs::run_cmd_follows_sv_runcmd, players_block_each_other_through_physents, the_world_knows_players_and_models, landing_punch_reaches_client_data; SV_SetupPMove and SV_FinishPMove (the playermove_t fields in and out, oldangles from the previous v_angle, v_angle from the command unless fixangle, the angles (-pitch / 3, yaw, roll), the velocity modifier applied before the move, the impacts queued). Accepted deviations: every command starts from its own edict (the static pmove of ReHLDS carries onground, waterlevel and watertype over from the previous player, and PM_CategorizePosition recomputes them before they are read); a touch does not set the velocity to the touch's deltavelocity (the engine API reports only which entity was touched)."
+
+[[item]]
+id = "movement_game_post_think_order"
+status = "tested"
+evidence = "crates/cs-engine/tests/players_in_world.rs::post_usercmd_runs_after_the_impacts_of_the_command; crates/cs-game/tests/movement.rs::a_ducked_player_is_relinked_with_the_movement_hull; the order of SV_RunCmd: moving-ground check, CmdStart, PreThink, PM_Move, relink and touches, PostThink, CmdEnd (GameDll::post_usercmd is called by the engine after the relink). Accepted deviation: the relink sees the movement hull, and CmdEnd's hull change is applied after PostThink; touches are delivered after the game call and never nest."
+
+[[item]]
+id = "movement_game_client_data"
+status = "tested"
+evidence = "crates/cs-game/tests/movement.rs::client_data_carries_duck_step_swim_fields; crates/cs-proto48/src/delta.rs::tests::new_clientdata_fields_round_trip; UpdateClientData sends bInDuck, flDuckTime, flTimeStepSound, flSwimTime, waterjumptime (int of teleport_time), pushmsec, fuser1 to fuser3 (not fuser4) and iuser3 (FREEZE_TIME_OVER while the freeze period lasts), from the followed player for OBS_IN_EYE. The wire fields round trip. Not sent: physinfo (the movement does not read it); iuser3's CAN_SHOOT, IN_BOMB_ZONE and HOLDING_SHIELD bits wait for the weapons and objectives."
+
+[[item]]
+id = "movement_hard_locks"
+status = "tested"
+evidence = "crates/cs-game/tests/movement_world.rs::movement_cvars_are_hard_locked; RestartRound sets sv_accelerate 5, sv_friction 4 and sv_stopspeed 75, and Think's once-a-second block resets them when they differ (multiplay_gamerules.cpp 1697-1700 and 2567-2580, read 2026-11-22). ACCEPTED DEVIATION: the registry defaults stay sv_accelerate 5 and sv_stopspeed 100 (ReHLDS: 10 and 100), see docs/parity/cvars.toml."
+
+[[item]]
+id = "movement_drowning"
+status = "tested"
+evidence = "crates/cs-game/tests/movement_world.rs::drowning_as_regamedll; CBasePlayer::WaterMove (air_finished = time + 12, pain every second after it with damage 2 growing to 5, m_idrowndmg, the recovery through CheckTimeBasedDamage and DMG_DROWNRECOVER, lava and slime damage, the swim sounds). Quirks kept: no FL_INWATER test on the gasp sound; the time-based damage compares whole seconds. Accepted deviations: the test sets the edict's waterlevel by hand on a stub map, so the link from PM_CheckWater to drowning is covered only through waterlevel in the real-map water test; max_health is assumed 100; poison and antidote only run their counters."
+
+[[item]]
+id = "movement_func_water"
+status = "tested"
+evidence = "crates/cs-game/tests/movement_world.rs::func_water_spawns_as_a_non_solid_special_contents_door, func_water_gives_the_player_water_on_a_stock_map; func_water is registered with func_door (CBaseDoor::Spawn spawn part, doors.cpp 192-215, read 2026-11-22): a *N model, SOLID_NOT when the skin is non-zero or the door is passable, MOVETYPE_PUSH. Accepted deviations: SF_DOOR_ACTUALLY_WATER is not set; the stock-map test does not yet prove the entity (not the world) supplies the contents."
+
+[[item]]
+id = "movement_game_observer_visibility"
+status = "tested"
+evidence = "crates/cs-game/tests/movement_world.rs::observer_roams_and_chases_through_pm; crates/cs-game/tests/observer.rs::dead_player_becomes_an_observer_after_the_death_cam, spectator_team_roams; the observer moves through PM_SpectatorMove and the roaming cap is the sv_spectatormaxspeed movevar; SetupVisibility moves a chasing observer's origin to its target, as the source does."
+
+[[item]]
+id = "movement_footsteps_others"
+status = "tested"
+evidence = "crates/cs-game/tests/movement_world.rs::footsteps_reach_others_not_self; a step sound is sent to the other players and not to the mover (PM_PlaySound through PM_SV_PlaySound, the mover's own client plays it from prediction); two probes on de_dust2."
+
+[[item]]
+id = "movement_client_prediction"
+status = "missing"
+evidence = "cs_sim::pm is engine-neutral so the client can predict with it, but cs-client and cs-net still use the legacy cs_sim::pmove; the original client predicts with its own pm_shared."
+
+[[item]]
+id = "movement_physinfo_visents_studio"
+status = "missing"
+evidence = "Not built: physinfo strings (slj and the like), visents and PM_TraceLine, studio hitbox hulls (PM_HullForStudioModel), the groupinfo filter, PM_CheckStuck's client-only nudge test against a real model, the iJumpSpectator client branch, and the REGAMEDLL_FIXES and REGAMEDLL_ADD variants of pm_shared (the target is vanilla)."
