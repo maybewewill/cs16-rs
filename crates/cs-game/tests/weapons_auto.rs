@@ -874,3 +874,223 @@ fn auto_events_carry_source_args() {
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].1.bparam1, 1);
 }
+
+// ------------------------------------------------------------------ the review's additions
+
+/// The seed whose four shared draws give the largest spread factors (the least quantised wire
+/// values), and the factors `(x, y)` of the source: `x = SharedRandomFloat(seed, -0.5, 0.5) +
+/// SharedRandomFloat(seed + 1, -0.5, 0.5)`, `y` the same from `seed + 2` and `seed + 3`.
+fn spread_seed() -> (u32, f32, f32) {
+    use cs_game::weapons::shared_random_float as sr;
+    let factors = |seed: u32| {
+        (
+            sr(seed, -0.5, 0.5) + sr(seed + 1, -0.5, 0.5),
+            sr(seed + 2, -0.5, 0.5) + sr(seed + 3, -0.5, 0.5),
+        )
+    };
+    let seed = (0..256_u32)
+        .max_by(|&a, &b| {
+            let m = |s| {
+                let (x, y) = factors(s);
+                x.abs().min(y.abs())
+            };
+            m(a).total_cmp(&m(b))
+        })
+        .unwrap();
+    let (x, y) = factors(seed);
+    (seed, x, y)
+}
+
+/// The `flSpread` the source computes for a gun (`*::PrimaryAttack`), as a C `double`
+/// expression of the accuracy cut to the `float` parameter.
+fn source_spread(id: WeaponId, stance: Stance, acc: f32, silenced: bool, burst: bool) -> f32 {
+    let a = f64::from(acc);
+    let air = matches!(stance, Stance::Air);
+    let moving = matches!(stance, Stance::Moving);
+    let s: f64 = match id {
+        WeaponId::Mac10 => if air { 0.375 * a } else { 0.03 * a },
+        WeaponId::Tmp => if air { 0.25 * a } else { 0.03 * a },
+        WeaponId::Mp5n => if air { 0.2 * a } else { 0.04 * a },
+        WeaponId::Ump45 => if air { 0.24 * a } else { 0.04 * a },
+        WeaponId::P90 => if air { 0.3 * a } else if moving { 0.115 * a } else { 0.045 * a },
+        WeaponId::Galil => if air { 0.04 + 0.3 * a } else if moving { 0.04 + 0.07 * a } else { 0.0375 * a },
+        WeaponId::Famas => if air { 0.030 + 0.3 * a } else if moving { 0.030 + 0.07 * a } else { 0.02 * a },
+        WeaponId::Ak47 => if air { 0.04 + 0.4 * a } else if moving { 0.04 + 0.07 * a } else { 0.0275 * a },
+        WeaponId::M4a1 => {
+            if air { 0.035 + 0.4 * a } else if moving { 0.035 + 0.07 * a } else if silenced { 0.025 * a } else { 0.02 * a }
+        }
+        WeaponId::Aug => if air { 0.035 + 0.4 * a } else if moving { 0.035 + 0.07 * a } else { 0.02 * a },
+        WeaponId::Sg552 => if air { 0.035 + 0.45 * a } else if moving { 0.035 + 0.075 * a } else { 0.02 * a },
+        WeaponId::M249 => if air { 0.045 + 0.5 * a } else if moving { 0.045 + 0.095 * a } else { 0.03 * a },
+        _ => unreachable!(),
+    };
+    let mut spread = s as f32;
+    // `FamasFire`: full auto adds 0.01f, a burst does not.
+    if id == WeaponId::Famas && !burst {
+        spread += 0.01;
+    }
+    spread
+}
+
+/// What `fparam1`/`fparam2` become on the wire: `(v * 100)` cut to an int, over 100.
+fn wire_float(v: f32) -> f32 {
+    ((f64::from(v) * 100.0) as i32) as f32 / 100.0
+}
+
+#[test]
+fn spread_coefficients_by_stance() {
+    let (seed, fx, fy) = spread_seed();
+    assert!(fx.abs() > 0.5 && fy.abs() > 0.5, "{fx} {fy}");
+    let acc = 0.8_f32;
+    // (gun, silenced, burst) variants.
+    let mut variants: Vec<(WeaponId, bool, bool)> = GUNS.iter().map(|&g| (g, false, false)).collect();
+    variants.push((WeaponId::M4a1, true, false));
+    variants.push((WeaponId::Famas, false, true));
+    for (id, silenced, burst) in variants {
+        let mut a = armed(id, 100, 90);
+        for stance in [Stance::Air, Stance::Moving, Stance::Ducking, Stance::Standing] {
+            a.watcher.clear_messages();
+            a.run(move |game, eng| {
+                // `CmdStart` takes the command's random seed (the movement it runs does not
+                // matter: the stance is set after it).
+                game.run_usercmd(eng, 0, &cmd(), seed);
+                stand(eng, stance);
+                let w = weapon(game, id);
+                w.accuracy = acc;
+                w.next_primary_attack = 0.0;
+                w.weapon_state = 0;
+                if silenced {
+                    w.weapon_state |= 4;
+                }
+                if burst {
+                    w.weapon_state |= 1 << 4;
+                }
+                press(game, eng, IN_ATTACK);
+            });
+            a.step(3);
+            let events = a.events();
+            assert_eq!(events.len(), 1, "{id:?} {stance:?}: {events:?}");
+            let spread = source_spread(id, stance, acc, silenced, burst);
+            let args = events[0].1;
+            let label = format!("{id:?} {stance:?} silenced {silenced} burst {burst}");
+            assert!((args.fparam1 - wire_float(fx * spread)).abs() < 1e-5, "{label}: x {}", args.fparam1);
+            assert!((args.fparam2 - wire_float(fy * spread)).abs() < 1e-5, "{label}: y {}", args.fparam2);
+        }
+    }
+}
+
+/// `KickBack` of the source, done by hand: the punch after one more shot.
+fn source_kick(
+    punch: Vec3,
+    shots: i32,
+    direction: i32,
+    (up_base, lat_base, up_mod, lat_mod, up_max, lat_max): (f32, f32, f32, f32, f32, f32),
+) -> Vec3 {
+    let (up, lateral) = if shots == 1 {
+        (up_base, lat_base)
+    } else {
+        (shots as f32 * up_mod + up_base, shots as f32 * lat_mod + lat_base)
+    };
+    let mut p = punch;
+    p.x -= up;
+    if p.x < -up_max {
+        p.x = -up_max;
+    }
+    if direction == 1 {
+        p.y += lateral;
+        if p.y > lat_max {
+            p.y = lat_max;
+        }
+    } else {
+        p.y -= lateral;
+        if p.y < -lat_max {
+            p.y = -lat_max;
+        }
+    }
+    p
+}
+
+#[test]
+fn kickback_progression_follows_the_source_math() {
+    // A standing player's `KickBack` arguments: the modifiers grow the kick with the shots, the
+    // maxima stop the punch, and the direction flips by chance (read back from the weapon
+    // before each shot, so the expectation follows it).
+    let cases = [
+        (WeaponId::Ak47, (1.0, 0.375, 0.175, 0.0375, 5.75, 1.75)),
+        (WeaponId::Mac10, (0.775, 0.425, 0.2, 0.03, 3.0, 2.75)),
+    ];
+    for (id, args) in cases {
+        let mut a = armed(id, 100, 90);
+        a.run(move |game, eng| {
+            let edict = eng.client_edict(0);
+            let (mut hit_up_max, mut hit_lat_max) = (false, false);
+            for shot in 1..=40 {
+                let w = weapon(game, id);
+                w.next_primary_attack = 0.0;
+                w.accuracy = 0.0;
+                let direction = w.direction;
+                let punch = eng.ent(edict).unwrap().punchangle;
+                press(game, eng, IN_ATTACK);
+                let shots = weapon(game, id).shots_fired;
+                assert_eq!(shots, shot, "{id:?}");
+                let expected = source_kick(punch, shots, direction, args);
+                let got = eng.ent(edict).unwrap().punchangle;
+                assert!(
+                    (got - expected).abs().max_element() < 1e-4,
+                    "{id:?} shot {shot}: {got} != {expected}"
+                );
+                hit_up_max |= got.x == -args.4;
+                hit_lat_max |= got.y.abs() == args.5;
+            }
+            assert!(hit_up_max && hit_lat_max, "{id:?}: the maxima were never reached");
+        });
+    }
+}
+
+#[test]
+fn tmp_has_no_muzzle_flash_on_a_real_shot() {
+    let mut a = armed(WeaponId::Tmp, 30, 90);
+    a.run(|game, eng| {
+        let edict = eng.client_edict(0);
+        eng.ent_mut(edict).unwrap().effects = 0;
+        press(game, eng, IN_ATTACK);
+        assert_eq!(weapon(game, WeaponId::Tmp).clip, 29, "the shot was fired");
+        assert_eq!(eng.ent(edict).unwrap().effects & EF_MUZZLEFLASH, 0);
+    });
+    // The MAC-10 next to it does flash.
+    let mut a = armed(WeaponId::Mac10, 30, 90);
+    a.run(|game, eng| {
+        let edict = eng.client_edict(0);
+        eng.ent_mut(edict).unwrap().effects = 0;
+        press(game, eng, IN_ATTACK);
+        assert_ne!(eng.ent(edict).unwrap().effects & EF_MUZZLEFLASH, 0);
+    });
+}
+
+#[test]
+fn accuracy_reaches_every_cap() {
+    // Far enough for the UMP45 (15 shots: 225 / 210 = 1) and the P90 (14: 196 / 175 = 1) to hit
+    // their caps of 1.0, and every other gun its own.
+    for acc in &ACCURACIES {
+        let id = acc.id;
+        let mut a = armed(id, 100, 90);
+        a.run(move |game, eng| {
+            let mut capped_at = None;
+            for shots in 1..=20 {
+                weapon(game, id).next_primary_attack = 0.0;
+                press(game, eng, IN_ATTACK);
+                let got = weapon(game, id).accuracy;
+                assert_eq!(got, acc.after(shots), "{id:?} after {shots} shots");
+                if got == acc.cap && capped_at.is_none() {
+                    capped_at = Some(shots);
+                }
+            }
+            let at = capped_at.unwrap_or_else(|| panic!("{id:?} never reached its cap"));
+            match id {
+                WeaponId::Ump45 => assert_eq!(at, 15),
+                WeaponId::P90 => assert_eq!(at, 14),
+                _ => {}
+            }
+        });
+    }
+}
