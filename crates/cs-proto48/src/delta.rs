@@ -1313,8 +1313,15 @@ mod tests {
 
     #[test]
     fn new_clientdata_fields_round_trip() {
+        use crate::messages::{
+            SvcMessage, SvcParseContext, parse_svc_stream, write_svc_clientdata,
+            write_svc_deltadescriptions,
+        };
+
         let reg = DeltaRegistry::cs16_default();
         let schema = reg.get("clientdata_t").unwrap();
+        // Values inside the widths the schema gives (flSwimTime 10 bits, waterjumptime 15,
+        // pushmsec 11, fuser1 9, fuser2 14, fuser3 10, the vuser axes 9); all of them unsigned.
         let data = GoldSrcClientData {
             fl_swim_time: 321,
             waterjumptime: 12_345,
@@ -1323,16 +1330,31 @@ mod tests {
             fuser2: 9_000.0,
             fuser3: 500.0,
             vuser2: Vec3::new(1.0, 2.0, 3.0),
-            vuser3: Vec3::new(-4.0, 5.0, 255.0),
+            vuser3: Vec3::new(4.0, 5.0, 255.0),
             // The schema has no third axis for `vuser4`.
             vuser4: Vec3::new(6.0, 7.0, 0.0),
             ..Default::default()
         };
-        let back = GoldSrcClientData::from_delta(&data.to_delta(schema), schema);
-        assert_eq!(back, data);
-        // The schema carries every one of them; a zero record leaves them zero.
+        // In memory: `to_delta` then `from_delta`.
+        assert_eq!(GoldSrcClientData::from_delta(&data.to_delta(schema), schema), data);
+        // A zero record leaves them all zero.
         let zero = GoldSrcClientData::from_delta(&schema.zero_record(), schema);
         assert_eq!(zero, GoldSrcClientData::default());
+
+        // Over the wire: `svc_clientdata` as the server writes it and the client parses it.
+        let mut w = MsgWriter::new();
+        write_svc_deltadescriptions(&mut w, &reg);
+        write_svc_clientdata(&mut w, schema, None, &data, 1.0);
+        let mut ctx = SvcParseContext::new();
+        let parsed = parse_svc_stream(w.as_slice(), &mut ctx).unwrap();
+        let got = parsed
+            .iter()
+            .find_map(|m| match m {
+                SvcMessage::ClientData { parsed, .. } => Some(parsed.clone()),
+                _ => None,
+            })
+            .expect("the clientdata message");
+        assert_eq!(got, data);
     }
 
     #[test]

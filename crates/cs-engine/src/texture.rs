@@ -1,7 +1,7 @@
 //! `TraceTexture`: the name of the texture a line hits on a brush model. Ported from ReHLDS
 //! `rehlds/engine/pr_cmds.cpp` (`TraceTexture`, `SurfaceAtPoint`) and
-//! `rehlds/engine/model.cpp` (`CalcSurfaceExtents`, for the `texturemins` and `extents`
-//! the walk compares against), read 2026-11-22.
+//! `rehlds/engine/model.cpp` (`CalcSurfaceExtents` and the overrides `Mod_LoadFaces` applies
+//! after it, for the `texturemins` and `extents` the walk compares against), read 2026-11-22.
 //!
 //! The name is the one the map stores, up to 16 characters, with the `{`, `!`, `-0` and similar
 //! prefixes still on: cutting them is the job of the caller (`pm_shared`'s
@@ -14,17 +14,34 @@ use crate::edict::EdictId;
 use crate::game::EngineApi;
 use crate::trace_ents::{angle_vectors, brush_model};
 
+/// `TEX_SPECIAL` (`texinfo` flag bit 0: no lightmap, the surface is tiled or turbulent).
+const TEX_SPECIAL: i32 = 1;
+/// Deepest node chain the walk follows. A real tree is far shallower; the cap keeps the
+/// recursion's stack use small for a hostile map (the `budget` bounds the work).
+const MAX_WALK_DEPTH: u32 = 256;
+
 /// A face's `texturemins` and `extents` (`msurface_t`), as `CalcSurfaceExtents` makes them.
 struct SurfaceExtents {
     texturemins: [i32; 2],
     extents: [i32; 2],
 }
 
-/// `CalcSurfaceExtents` (`rehlds/engine/model.cpp`, read 2026-11-22): the texture-space box of
-/// the face, in whole 16-unit lumps. The engine does this at load for every face; here it is
-/// done for the faces a trace looks at. The dot products are taken in double and stored as
-/// `float`, as the source has it (the `FIXED: loss of floating point` there). `None` for a face
-/// whose edges or vertices are outside the map's arrays.
+/// `CalcSurfaceExtents` and then the overrides of `Mod_LoadFaces` (`rehlds/engine/model.cpp`,
+/// read 2026-11-22): the texture-space box of the face, in whole 16-unit lumps. The engine does
+/// this at load for every face; here it is done for the faces a trace looks at. The dot
+/// products are taken in double and stored as `float`, as the source has it (the `FIXED: loss
+/// of floating point` there). `None` for a face whose edges or vertices are outside the map's
+/// arrays.
+///
+/// The overrides, in the source's order by the name of the face's texture: `sky*` keeps the
+/// computed box; `scroll*` (case-sensitive) takes the texture's width and height as `extents`
+/// (`texturemins` stay); `!*`, `laser*` and `water*` (the last two case-insensitive) take
+/// `texturemins` -8192 and `extents` 16384 on both axes, so every point of the plane is in the
+/// face; any other face whose texinfo has `TEX_SPECIAL` takes the texture's width and height.
+/// The original also sets `TEX_SPECIAL` on the texinfo of a turbulent face, which only matters
+/// to the load-time size check and is not kept here. Assumption: the width and height of
+/// [`DecodedTexture`](cs_assets::wad::DecodedTexture) are those of the map's miptex (a texture
+/// the loader could not find is a checkerboard of its own size).
 fn surface_extents(bsp: &BspMap, face: &Face, tex: &TexInfo) -> Option<SurfaceExtents> {
     let mut mins = [999_999.0f32; 2];
     let mut maxs = [-99_999.0f32; 2];
@@ -63,6 +80,27 @@ fn surface_extents(bsp: &BspMap, face: &Face, tex: &TexInfo) -> Option<SurfaceEx
         out.texturemins[i] = bmins.wrapping_mul(16);
         out.extents[i] = bmaxs.wrapping_sub(bmins).wrapping_mul(16);
     }
+    let texture = usize::try_from(tex.miptex)
+        .ok()
+        .and_then(|m| bsp.textures.get(m));
+    if let Some(texture) = texture {
+        let name = texture.name.as_bytes();
+        let starts = |prefix: &[u8]| name.starts_with(prefix);
+        let starts_nocase = |prefix: &[u8]| {
+            name.len() >= prefix.len() && name[..prefix.len()].eq_ignore_ascii_case(prefix)
+        };
+        let size = [texture.width as i32, texture.height as i32];
+        if starts(b"sky") {
+            // Keeps the computed box.
+        } else if starts(b"scroll") {
+            out.extents = size;
+        } else if starts(b"!") || starts_nocase(b"laser") || starts_nocase(b"water") {
+            out.extents = [16384; 2];
+            out.texturemins = [-8192; 2];
+        } else if tex.flags & TEX_SPECIAL != 0 {
+            out.extents = size;
+        }
+    }
     Some(out)
 }
 
@@ -79,8 +117,9 @@ fn surface_at_point(
     start: Vec3,
     end: Vec3,
     budget: &mut usize,
+    depth: u32,
 ) -> Option<usize> {
-    if node < 0 {
+    if node < 0 || depth > MAX_WALK_DEPTH {
         // `node->contents < 0`: a leaf.
         return None;
     }
@@ -92,7 +131,7 @@ fn surface_at_point(
     let s = usize::from(front < 0.0);
     let t = usize::from(back < 0.0);
     if t == s {
-        return surface_at_point(bsp, i32::from(n.children[s]), start, end, budget);
+        return surface_at_point(bsp, i32::from(n.children[s]), start, end, budget, depth + 1);
     }
     let frac = front / (front - back);
     let mid = Vec3::new(
@@ -100,7 +139,7 @@ fn surface_at_point(
         (end.y - start.y) * frac + start.y,
         (end.z - start.z) * frac + start.z,
     );
-    if let Some(face) = surface_at_point(bsp, i32::from(n.children[s]), start, mid, budget) {
+    if let Some(face) = surface_at_point(bsp, i32::from(n.children[s]), start, mid, budget, depth + 1) {
         return Some(face);
     }
     let first = usize::from(n.first_face);
@@ -126,7 +165,7 @@ fn surface_at_point(
             return Some(index);
         }
     }
-    surface_at_point(bsp, i32::from(n.children[s ^ 1]), mid, end, budget)
+    surface_at_point(bsp, i32::from(n.children[s ^ 1]), mid, end, budget, depth + 1)
 }
 
 impl EngineApi<'_> {
@@ -164,7 +203,7 @@ impl EngineApi<'_> {
             end = turn(end);
         }
         let mut budget = bsp.nodes.len();
-        let face = surface_at_point(bsp, root, start, end, &mut budget)?;
+        let face = surface_at_point(bsp, root, start, end, &mut budget, 0)?;
         let tex = bsp.texinfos.get(usize::from(bsp.faces.get(face)?.texinfo))?;
         let texture = bsp.textures.get(usize::try_from(tex.miptex).ok()?)?;
         Some(texture.name.clone())
@@ -251,6 +290,7 @@ mod tests {
                 Vec3::new(x, y, 10.0),
                 Vec3::new(x, y, -10.0),
                 &mut budget,
+                0,
             )
         };
         assert_eq!(down(32.0, 32.0), Some(0));
@@ -259,7 +299,7 @@ mod tests {
         let mut budget = bsp.nodes.len();
         let start = Vec3::new(32.0, 32.0, 10.0);
         assert_eq!(
-            surface_at_point(&bsp, 0, start, start + Vec3::X, &mut budget),
+            surface_at_point(&bsp, 0, start, start + Vec3::X, &mut budget, 0),
             None
         );
     }
@@ -275,7 +315,89 @@ mod tests {
             Vec3::new(500.0, 500.0, 10.0),
             Vec3::new(500.0, 500.0, -10.0),
             &mut budget,
+            0,
         );
         assert_eq!(found, None);
+    }
+
+    /// Runs the walk straight down at `(x, y)` over a copy of the one-face map whose texture is
+    /// called `name` and is `size` x `size`, with `flags` on its texinfo.
+    fn down_over(name: &str, size: u32, flags: i32, x: f32, y: f32) -> Option<usize> {
+        let mut bsp = one_face_bsp();
+        bsp.textures[0].name = name.to_string();
+        bsp.textures[0].width = size;
+        bsp.textures[0].height = size;
+        bsp.texinfos[0].flags = flags;
+        let mut budget = bsp.nodes.len();
+        surface_at_point(
+            &bsp,
+            0,
+            Vec3::new(x, y, 10.0),
+            Vec3::new(x, y, -10.0),
+            &mut budget,
+            0,
+        )
+    }
+
+    #[test]
+    fn water_faces_cover_the_whole_plane() {
+        // The 64 x 64 polygon box does not hold (500, 500); a turbulent face's does.
+        assert_eq!(down_over("floor", 16, 0, 500.0, 500.0), None);
+        for name in ["!water", "!lava", "WATER_1", "laser1", "Laser2"] {
+            assert_eq!(down_over(name, 16, 0, 500.0, 500.0), Some(0), "{name}");
+            assert_eq!(down_over(name, 16, 0, -8000.0, 8000.0), Some(0), "{name}");
+            // 16384 wide from -8192: 8200 is past it.
+            assert_eq!(down_over(name, 16, 0, 8200.0, 0.0), None, "{name}");
+        }
+        // Only a prefix counts.
+        assert_eq!(down_over("a_water", 16, 0, 500.0, 500.0), None);
+    }
+
+    #[test]
+    fn scroll_and_special_faces_take_the_texture_size() {
+        // Texture space starts at 0 and spans the texture: 128 here, not the polygon's 64.
+        for (name, flags) in [("scroll1", 0), ("floor", TEX_SPECIAL)] {
+            assert_eq!(down_over(name, 128, flags, 100.0, 100.0), Some(0), "{name}");
+            assert_eq!(down_over(name, 128, flags, 140.0, 100.0), None, "{name}");
+        }
+        // `Scroll` with a capital is an ordinary face.
+        assert_eq!(down_over("Scroll1", 128, 0, 100.0, 100.0), None);
+        // `sky` keeps its computed box.
+        assert_eq!(down_over("sky", 128, 0, 100.0, 100.0), None);
+        assert_eq!(down_over("sky", 128, 0, 32.0, 32.0), Some(0));
+    }
+
+    #[test]
+    fn a_very_deep_chain_of_nodes_is_cut_off() {
+        let mut bsp = one_face_bsp();
+        // A chain of nodes each passing the line on to the next, with the face at the end.
+        let depth = MAX_WALK_DEPTH as usize + 10;
+        let tail = bsp.nodes[0];
+        // A plane the line stays in front of: each chain node just passes it on.
+        bsp.planes.push(Plane {
+            normal: Vec3::X,
+            dist: -1000.0,
+            plane_type: 0,
+        });
+        bsp.nodes = (0..depth)
+            .map(|i| Node {
+                plane: 1,
+                children: [(i + 1) as i16, (i + 1) as i16],
+                num_faces: 0,
+                ..tail
+            })
+            .collect();
+        bsp.nodes.push(tail);
+        let mut budget = bsp.nodes.len();
+        let start = Vec3::new(32.0, 32.0, 10.0);
+        let end = Vec3::new(32.0, 32.0, -10.0);
+        assert_eq!(surface_at_point(&bsp, 0, start, end, &mut budget, 0), None);
+        // The same line is found when the chain is short.
+        bsp.nodes.drain(5..depth);
+        for (i, n) in bsp.nodes.iter_mut().enumerate().take(5) {
+            n.children = [(i + 1) as i16, (i + 1) as i16];
+        }
+        let mut budget = bsp.nodes.len();
+        assert_eq!(surface_at_point(&bsp, 0, start, end, &mut budget, 0), Some(0));
     }
 }

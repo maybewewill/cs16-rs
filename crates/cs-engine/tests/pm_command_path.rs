@@ -225,6 +225,31 @@ fn pm_sound_on_the_static_channel_skips_the_mover_too() {
     assert!(sounds(&b).is_empty());
 }
 
+/// One client on the server: a static-channel sound is broadcast instead of sent reliably to
+/// everyone, and `MSG_FL_ONE` still leaves the mover out.
+#[test]
+fn pm_sound_on_a_single_client_server_skips_the_mover() {
+    let game = TestGame {
+        precache_sounds: vec![STEP.to_string()],
+        ..TestGame::default()
+    };
+    let mut h = Harness::with_game(1, game);
+    let mut a = joined(&mut h, "A");
+    run(&mut h, |eng| {
+        let me = eng.client_edict(0);
+        assert!(eng.pm_play_sound(me, 6, STEP, 1.0, 1.0, 0, 100));
+    });
+    h.step(&mut [&mut a], 30);
+    assert!(sounds(&a).is_empty(), "{:?}", sounds(&a));
+    // The same call from an emitter that is not the mover reaches it.
+    run(&mut h, |eng| {
+        let me = eng.client_edict(0);
+        assert!(eng.emit_sound(me, 6, STEP, 1.0, 1.0, 100));
+    });
+    h.step(&mut [&mut a], 30);
+    assert_eq!(sounds(&a).len(), 1);
+}
+
 #[test]
 fn an_ordinary_sound_still_reaches_the_emitter() {
     let (mut h, mut a, mut b) = two_players();

@@ -69,7 +69,8 @@ struct Scenario {
     /// The game moves the target during the shooter's command, to its true x plus 100.
     game_moves_target: bool,
     /// Triggers at the target's true place and at the place it is rewound to; the target sends
-    /// no command, so nothing is meant to touch them.
+    /// no command of its own in the measured frame (its idle 0 ms commands touch the trigger it
+    /// stands in), so nothing is meant to touch the rewound one.
     triggers: bool,
     /// Run on de_dust2 (needs the installed game).
     dust2: bool,
@@ -615,6 +616,20 @@ fn rewinding_and_restoring_touch_no_triggers() {
         "{:?}",
         o.touches
     );
+    // And the rewind does not change what that trigger is touched by: the same run without a
+    // rewind (`sv_unlag 0`) has the same touches of it.
+    let of_true_trigger = |o: &Outcome| {
+        o.touches.iter().filter(|&&(a, b)| a != o.rewound_trigger && b != o.rewound_trigger).count()
+    };
+    let plain = run(&Scenario {
+        lerp: 50,
+        hold: 10,
+        triggers: true,
+        cvars: vec![("sv_unlag", "0")],
+        ..Scenario::default()
+    });
+    assert!(of_true_trigger(&o) > 0, "{:?}", o.touches);
+    assert_eq!(of_true_trigger(&o), of_true_trigger(&plain), "{:?} {:?}", o.touches, plain.touches);
 }
 
 #[test]

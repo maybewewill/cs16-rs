@@ -691,14 +691,17 @@ fn menu_messages(b: &Bench) -> usize {
 #[test]
 fn menus_only_reach_a_client_that_is_in_game() {
     // The engine puts the player in the server before the client has begun; the menus wait for
-    // its first command (`PlayerPreThink`), however many frames pass.
-    let mut b = Bench::stub(spawns(2, 2));
+    // its first command (`PlayerPreThink`), however many frames pass. A client always sends a
+    // move (a placeholder of 0 ms when it has no command), and the game runs it like any other,
+    // so this client is one that sends none: the probe's `suppress_moves`.
+    let mut b = Bench::stub_without_moves(spawns(2, 2));
     b.step(30);
     assert_eq!(menu_messages(&b), 0);
     let p = player(&b, 0);
     assert_eq!((p.joining, p.menu), (JoinState::ShowLText, Menu::Off));
 
     // The first commands bring the menu.
+    b.probe.suppress_moves(false);
     for _ in 0..4 {
         b.probe.queue_cmd(GoldSrcUserCmd {
             msec: 10,

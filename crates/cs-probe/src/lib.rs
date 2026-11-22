@@ -128,6 +128,8 @@ pub struct ProbeClient<T: PacketTransport> {
     withheld_reliable_ack: Option<u32>,
     /// Outgoing `clc_move` messages still to be sent with a corrupted checksum (test hook).
     corrupt_moves: u32,
+    /// Test hook: no `clc_move` in outgoing packets, not even the `msec` 0 placeholder.
+    moves_suppressed: bool,
     #[cfg(not(target_arch = "wasm32"))]
     capture: Option<CaptureWriter>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -164,6 +166,7 @@ impl<T: PacketTransport> ProbeClient<T> {
             delta_suppressed: false,
             withheld_reliable_ack: None,
             corrupt_moves: 0,
+            moves_suppressed: false,
             #[cfg(not(target_arch = "wasm32"))]
             capture: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -278,6 +281,13 @@ impl<T: PacketTransport> ProbeClient<T> {
     /// server cannot parse the packets that carry them.
     pub fn corrupt_next_moves(&mut self, n: u32) {
         self.corrupt_moves = n;
+    }
+
+    /// Test hook: while `suppressed`, outgoing packets carry no `clc_move` at all (by default
+    /// every packet has one: the queued commands, or the last one again with `msec` 0), so the
+    /// server runs no command of this client. Queued commands wait.
+    pub fn suppress_moves(&mut self, suppressed: bool) {
+        self.moves_suppressed = suppressed;
     }
 
     /// Test hook: sequence number the next netchan packet will carry; `None` before the server
@@ -600,7 +610,12 @@ impl<T: PacketTransport> ProbeClient<T> {
         };
         let mut unreliable = MsgWriter::new();
 
-        if let Some(schema) = self.ctx.deltas.get("usercmd_t") {
+        if let Some(schema) = self
+            .ctx
+            .deltas
+            .get("usercmd_t")
+            .filter(|_| !self.moves_suppressed)
+        {
             let take = self.cmd_queue.len().min(MAX_NEW_CMDS);
             let mut new_cmds: Vec<GoldSrcUserCmd> = self.cmd_queue.drain(..take).collect();
             match new_cmds.last() {
@@ -1269,6 +1284,33 @@ mod tests {
             }
         }
         assert_eq!(parsed, vec![false, true]);
+    }
+
+    #[test]
+    fn suppressed_moves_leave_the_packets_without_a_clc_move() {
+        let (mut server, mut probe) = ScriptedServer::new();
+        let mut now = handshake(&mut server, &mut probe);
+        server.recv_clc();
+        let schema = server.reg.get("usercmd_t").unwrap().clone();
+        let mut moves_in_packets = |probe: &mut ProbeClient<_>, now: &mut f64| {
+            *now += SEND_INTERVAL;
+            probe.pump(*now);
+            let mut count = 0;
+            for d in server.recv_raw() {
+                let inc = server.chan.process_packet(&d).unwrap().unwrap();
+                let msgs = parse_clc_stream(&inc.payload, &schema, inc.sequence).unwrap();
+                count += msgs
+                    .iter()
+                    .filter(|m| matches!(m, ClcMessage::Move { .. }))
+                    .count();
+            }
+            count
+        };
+        assert_eq!(moves_in_packets(&mut probe, &mut now), 1);
+        probe.suppress_moves(true);
+        assert_eq!(moves_in_packets(&mut probe, &mut now), 0);
+        probe.suppress_moves(false);
+        assert_eq!(moves_in_packets(&mut probe, &mut now), 1);
     }
 
     #[test]

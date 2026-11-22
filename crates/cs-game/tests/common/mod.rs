@@ -119,6 +119,22 @@ impl Bench {
     /// Like [`with_slots`](Self::with_slots), the probe's `connect` userinfo carrying `userinfo`
     /// in place of its defaults.
     pub fn with_userinfo(map: ServerMap, max_clients: u8, userinfo: &[(&str, &str)]) -> Self {
+        Self::with_probe_moves(map, max_clients, userinfo, true)
+    }
+
+    /// A stub-map server whose probe sends no `clc_move` at all (so the game runs no command
+    /// of it) until `probe.suppress_moves(false)`.
+    pub fn stub_without_moves(entities: Vec<Entity>) -> Self {
+        let map = ServerMap::stub_with_entities("test", entities);
+        Self::with_probe_moves(map, 2, &[], false)
+    }
+
+    fn with_probe_moves(
+        map: ServerMap,
+        max_clients: u8,
+        userinfo: &[(&str, &str)],
+        send_moves: bool,
+    ) -> Self {
         let cfg = ServerConfig {
             max_clients,
             max_edicts: 256,
@@ -146,6 +162,7 @@ impl Bench {
         for (key, value) in userinfo {
             probe.set_userinfo(key, value);
         }
+        probe.suppress_moves(!send_moves);
         probe.connect();
         let mut now = 0.0;
         for _ in 0..300 {

@@ -277,7 +277,8 @@ impl<G: GameDll> Server<G> {
         // feet sets its `basevelocity`, and a base velocity nothing renewed is folded into the
         // `velocity`. Not ported here: `impulse` and `clbasevelocity` (no `EntVars` field for
         // them), and the `v_angle` / `pmove->oldangles` update, which the game does itself (the
-        // engine has no `pmove` to hand the old angles to).
+        // engine has no `pmove` to hand the old angles to: cs-game owns `SV_SetupPMove`, and
+        // Task 8 of the pm_shared plan takes the angles).
         let player = self.edicts.client(slot);
         if let Some(v) = self.edicts.get_mut(player).map(|e| &mut e.vars) {
             v.button = i32::from(step.buttons);

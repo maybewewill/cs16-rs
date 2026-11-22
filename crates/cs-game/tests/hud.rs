@@ -281,6 +281,9 @@ fn usermsgs_registered_in_regamedll_order() {
     }
 }
 
+/// What the first command's `PlayerPreThink` sends: the join menus (`JoiningThink`).
+const FIRST_MENU: &[&str] = &["ShowMenu", "StatusIcon", "ItemStatus", "VGUIMenu"];
+
 /// The messages a first player gets when its first client data update runs.
 const FIRST_UPDATE: &[&str] = &[
     // CBasePlayer::UpdateClientData, m_fInitHUD
@@ -306,6 +309,8 @@ const FIRST_UPDATE: &[&str] = &[
     "RoundTime",
     "TeamScore",
     "TeamScore",
+    // `PreThink` ran before this update and set the flashlight bit (`mp_flashlight` is 0).
+    "HideWeapon",
     "SetFOV",
     "Health",
     "Battery",
@@ -319,10 +324,14 @@ fn init_hud_sequence_as_regamedll() {
     b.step(20);
     let names = b.names_from(0, 0);
     // `ClientPutInServer` ends with `#Game_connected` to everyone, the newcomer included. The
-    // team menu comes from the player's commands (`teams::pre_think`), after the first update,
-    // so the HUD is the first thing the client gets after it, once.
+    // client's first command runs in the packet that makes it active (the engine runs the moves
+    // that follow `sendents` in the same packet, as ReHLDS runs them after `begin`), and
+    // `PlayerPreThink` runs for every command, so the team menu (`teams::pre_think`) goes out
+    // before the first update, which is built at the end of that frame: the HUD follows it, once.
     assert_eq!(names[0], "TextMsg");
     let names = &names[1..];
+    assert_eq!(names[..FIRST_MENU.len()], *FIRST_MENU, "the first command's PreThink");
+    let names = &names[FIRST_MENU.len()..];
     assert_eq!(names[..FIRST_UPDATE.len()], *FIRST_UPDATE, "the first player's HUD");
     assert!(names[FIRST_UPDATE.len()..].iter().all(|n| n == "ShowMenu" || n == "VGUIMenu"));
 
@@ -361,9 +370,10 @@ fn init_hud_sequence_as_regamedll() {
     );
     assert_eq!(find("ScoreAttrib")[0], CsUserMsg::ScoreAttrib { player_id: 1, flags: 1 });
     assert_eq!(find("SetFOV"), [CsUserMsg::SetFov(90)]);
-    // A joiner's cached hide-HUD value is already 0 (vanilla), so no `HideWeapon`; the
-    // flashlight bit comes with the first command (`flashlight_cvar_hides_the_flashlight_hud`).
-    assert!(find("HideWeapon").is_empty());
+    // A joiner's cached hide-HUD value is 0 (vanilla), and the first command's `PreThink` set
+    // the flashlight bit before this first update (`flashlight_cvar_hides_the_flashlight_hud`),
+    // so the update tells it, once.
+    assert_eq!(find("HideWeapon"), [CsUserMsg::HideWeapon(2)]);
     assert_eq!(find("Health"), [CsUserMsg::Health(100)]);
     assert_eq!(find("Battery"), [CsUserMsg::Battery(0)]);
     assert_eq!(
@@ -572,10 +582,11 @@ fn health_and_armor_follow_the_player() {
     // The flashlight bit of `PreThink` (2) went first; `StartObserver` then sets the hidden
     // elements to the weapons and the health (1 | 8) and the next command's `PreThink` puts the
     // flashlight bit back (11).
+    // (From the start of the messages: the flashlight bit was told in the first update, which
+    // follows the first command's `PreThink`, before the window of `before`.)
     let hide: Vec<CsUserMsg> = b
         .messages(0)
         .into_iter()
-        .skip(before)
         .filter(|(n, _)| n == "HideWeapon")
         .map(|(_, m)| m)
         .collect();
@@ -682,9 +693,13 @@ fn flashlight_cvar_hides_the_flashlight_hud() {
             .map(|(_, m)| m)
             .collect()
     };
+    // The bit was set by the first command's `PreThink` (the sign-on's placeholder move) and
+    // told in the first update, so it is in the messages from the start; a later command does
+    // not tell it again.
     let before = b.messages(0).len();
     command_of(&mut b, 0);
-    assert_eq!(hide(&b, before), [CsUserMsg::HideWeapon(2)]);
+    assert_eq!(hide(&b, 0), [CsUserMsg::HideWeapon(2)]);
+    assert_eq!(hide(&b, before), []);
     // The cvar allows it: the bit goes, the client is told once.
     b.run(|_, eng| eng.set_cvar("mp_flashlight", "1"));
     let before = b.messages(0).len();
