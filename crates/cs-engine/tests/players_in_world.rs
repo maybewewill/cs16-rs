@@ -275,9 +275,12 @@ fn touches_the_movement_reports_arrive_as_impacts() {
     // A player that is not solid gets no impacts.
     h.server.game_mut().act(move |eng| eng.ent_mut(me).unwrap().solid = SOLID_NOT);
     h.step(&mut [&mut probe], 1);
+    // The 0 ms command of that idle frame ran before the action made the player not solid, so
+    // it reported its touch like any command (it no longer skipped, see `handle_move`).
+    let logged = h.server.game().touch_log.len();
     probe.queue_cmd(forward(10));
     h.step(&mut [&mut probe], 1);
-    assert_eq!(h.server.game().touch_log.len(), 2);
+    assert_eq!(h.server.game().touch_log.len(), logged);
 
     // Touches reported with no command running are dropped, not kept for the next one.
     h.server.game_mut().usercmd_touches.clear();
@@ -291,7 +294,7 @@ fn touches_the_movement_reports_arrive_as_impacts() {
     h.step(&mut [&mut probe], 1);
     probe.queue_cmd(forward(10));
     h.step(&mut [&mut probe], 1);
-    assert_eq!(h.server.game().touch_log.len(), 2);
+    assert_eq!(h.server.game().touch_log.len(), logged);
 }
 
 #[test]

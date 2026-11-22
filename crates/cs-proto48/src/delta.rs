@@ -819,6 +819,19 @@ pub struct GoldSrcClientData {
     pub iuser3: i32,
     pub iuser4: i32,
     pub physinfo: String,
+    /// `flSwimTime` (10 bits on the wire).
+    pub fl_swim_time: i32,
+    /// `waterjumptime` (15 bits).
+    pub waterjumptime: i32,
+    /// `pushmsec` (11 bits).
+    pub pushmsec: i32,
+    pub fuser1: f32,
+    pub fuser2: f32,
+    pub fuser3: f32,
+    pub vuser2: Vec3,
+    pub vuser3: Vec3,
+    /// Only axes 0 and 1 are in the schema; `from_delta` gives axis 2 as 0.
+    pub vuser4: Vec3,
 }
 
 impl GoldSrcClientData {
@@ -853,10 +866,30 @@ impl GoldSrcClientData {
         rec.set_i32(schema, "iuser3", self.iuser3);
         rec.set_i32(schema, "iuser4", self.iuser4);
         rec.set_str(schema, "physinfo", &self.physinfo);
+        rec.set_i32(schema, "flSwimTime", self.fl_swim_time);
+        rec.set_i32(schema, "waterjumptime", self.waterjumptime);
+        rec.set_i32(schema, "pushmsec", self.pushmsec);
+        rec.set_f32(schema, "fuser1", self.fuser1);
+        rec.set_f32(schema, "fuser2", self.fuser2);
+        rec.set_f32(schema, "fuser3", self.fuser3);
+        for (name, v) in [("vuser2", self.vuser2), ("vuser3", self.vuser3)] {
+            rec.set_f32(schema, &format!("{name}[0]"), v.x);
+            rec.set_f32(schema, &format!("{name}[1]"), v.y);
+            rec.set_f32(schema, &format!("{name}[2]"), v.z);
+        }
+        rec.set_f32(schema, "vuser4[0]", self.vuser4.x);
+        rec.set_f32(schema, "vuser4[1]", self.vuser4.y);
         rec
     }
 
     pub fn from_delta(rec: &DeltaRecord, schema: &DeltaSchema) -> Self {
+        let vec3 = |name: &str| {
+            Vec3::new(
+                rec.get_f32(schema, &format!("{name}[0]")),
+                rec.get_f32(schema, &format!("{name}[1]")),
+                rec.get_f32(schema, &format!("{name}[2]")),
+            )
+        };
         Self {
             origin: Vec3::new(
                 rec.get_f32(schema, "origin[0]"),
@@ -893,6 +926,19 @@ impl GoldSrcClientData {
             iuser3: rec.get_i32(schema, "iuser3"),
             iuser4: rec.get_i32(schema, "iuser4"),
             physinfo: rec.get_str(schema, "physinfo").to_string(),
+            fl_swim_time: rec.get_i32(schema, "flSwimTime"),
+            waterjumptime: rec.get_i32(schema, "waterjumptime"),
+            pushmsec: rec.get_i32(schema, "pushmsec"),
+            fuser1: rec.get_f32(schema, "fuser1"),
+            fuser2: rec.get_f32(schema, "fuser2"),
+            fuser3: rec.get_f32(schema, "fuser3"),
+            vuser2: vec3("vuser2"),
+            vuser3: vec3("vuser3"),
+            vuser4: Vec3::new(
+                rec.get_f32(schema, "vuser4[0]"),
+                rec.get_f32(schema, "vuser4[1]"),
+                0.0,
+            ),
         }
     }
 }
@@ -1264,6 +1310,30 @@ event_t none
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_clientdata_fields_round_trip() {
+        let reg = DeltaRegistry::cs16_default();
+        let schema = reg.get("clientdata_t").unwrap();
+        let data = GoldSrcClientData {
+            fl_swim_time: 321,
+            waterjumptime: 12_345,
+            pushmsec: 1_500,
+            fuser1: 77.0,
+            fuser2: 9_000.0,
+            fuser3: 500.0,
+            vuser2: Vec3::new(1.0, 2.0, 3.0),
+            vuser3: Vec3::new(-4.0, 5.0, 255.0),
+            // The schema has no third axis for `vuser4`.
+            vuser4: Vec3::new(6.0, 7.0, 0.0),
+            ..Default::default()
+        };
+        let back = GoldSrcClientData::from_delta(&data.to_delta(schema), schema);
+        assert_eq!(back, data);
+        // The schema carries every one of them; a zero record leaves them zero.
+        let zero = GoldSrcClientData::from_delta(&schema.zero_record(), schema);
+        assert_eq!(zero, GoldSrcClientData::default());
+    }
 
     #[test]
     fn parses_real_cs16_delta_lst_and_roundtrips_meta_wire_and_records() {

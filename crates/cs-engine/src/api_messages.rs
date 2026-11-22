@@ -36,6 +36,10 @@ fn sound_entity_fits(index: u16) -> bool {
 
 /// Highest sound channel (3 bits on the wire).
 const MAX_SOUND_CHANNEL: u8 = 7;
+/// `CHAN_NETWORKVOICE_BASE`, which `SV_BuildSoundMsg` makes of a channel above 7.
+const CHAN_NETWORKVOICE_BASE: u8 = 4;
+/// The `svc_sound` flag bits that fit the wire (9).
+const SND_FIELD_MASK: u32 = 0x1FF;
 /// `CHAN_STATIC`: a sound on this channel is broadcast, not limited to the PAS.
 const CHAN_STATIC: u8 = 6;
 /// Highest sound attenuation (the byte on the wire is `attenuation * 64`).
@@ -100,6 +104,14 @@ impl EngineApi<'_> {
     /// within one call) is skipped; the message is dropped for it and counted in
     /// `NetStats::outbox_dropped`.
     pub fn send(&mut self, dest: MsgDest, bytes: &[u8]) {
+        self.send_except(dest, bytes, None);
+    }
+
+    /// [`send`](Self::send), skipping the client `except` where the destination is the
+    /// unreliable queue of many (`SV_Multicast` with `MSG_FL_ONE` skips `host_client`, ReHLDS
+    /// `rehlds/engine/sv_main.cpp`, read 2026-11-22). Only `Broadcast` and `Pas` honour it; the
+    /// other destinations are not used with it.
+    fn send_except(&mut self, dest: MsgDest, bytes: &[u8], except: Option<usize>) {
         if bytes.is_empty() || bytes.len() > MAX_SEND_BYTES {
             return;
         }
@@ -125,7 +137,7 @@ impl EngineApi<'_> {
             }
             MsgDest::Broadcast => {
                 for (slot, view) in self.clients.iter().enumerate() {
-                    if view.state == ClientState::Active {
+                    if view.state == ClientState::Active && Some(slot) != except {
                         self.outbox.push_unreliable(slot, bytes);
                     }
                 }
@@ -142,7 +154,7 @@ impl EngineApi<'_> {
                 }
                 let row = self.map.pas_row(point);
                 for slot in 0..self.clients.len() {
-                    if self.clients[slot].state != ClientState::Active {
+                    if self.clients[slot].state != ClientState::Active || Some(slot) == except {
                         continue;
                     }
                     let origin = self
@@ -198,9 +210,9 @@ impl EngineApi<'_> {
     /// `CHAN_STATIC` and `SND_STOP` sounds in multiplayer): the reliable stream of every client
     /// with `client->active`, which `SV_Spawn_f` sets (`sv_main.cpp`, read 2026-11-21) and
     /// which is our `Active` state, not the wider "past `new`" of [`MsgDest::All`].
-    fn send_reliable_to_active(&mut self, bytes: &[u8]) {
+    fn send_reliable_to_active(&mut self, bytes: &[u8], except: Option<usize>) {
         for slot in 0..self.clients.len() {
-            if self.clients[slot].state == ClientState::Active {
+            if self.clients[slot].state == ClientState::Active && Some(slot) != except {
                 self.outbox.push_reliable(slot, bytes);
             }
         }
@@ -277,7 +289,54 @@ impl EngineApi<'_> {
         attenuation: f32,
         pitch: u8,
     ) -> bool {
-        self.start_sound(ent, channel, sample, volume, attenuation, pitch, 0)
+        if !volume.is_finite() {
+            return false;
+        }
+        let volume = (volume.clamp(0.0, 1.0) * f32::from(FULL_VOLUME)).round() as u8;
+        self.start_sound(ent, channel, sample, volume, attenuation, pitch, 0, None)
+    }
+
+    /// `PM_SV_PlaySound` (ReHLDS `rehlds/engine/sv_pmove.cpp`, read 2026-11-22), the sound the
+    /// movement code of the game plays for `player`: `SV_StartSound(1, ...)`, so the sound goes
+    /// out as [`emit_sound`](Self::emit_sound) does (from the middle of the player's box, to the
+    /// clients that can hear that point) except that the player's own client does not get it
+    /// (`MSG_FL_ONE`: `SV_Multicast` skips `host_client`; that client predicts the sound
+    /// itself). The same on `CHAN_STATIC`, which goes to every active client but that one.
+    /// `volume` is sent as `(int)(volume * 255.0)`, truncated, not rounded.
+    ///
+    /// The arguments are cut to what the wire holds as `SV_BuildSoundMsg` does (`sv_main.cpp`,
+    /// read 2026-11-22): a channel below 0 is 0 (`CHAN_AUTO`) and one above 7 is 4
+    /// (`CHAN_NETWORKVOICE_BASE`), the volume is held to 0..=255, the pitch to 0..=255, and the
+    /// attenuation to what [`emit_sound`](Self::emit_sound) holds it to. `flags` are the
+    /// `SND_FL_*` bits, ORed into the message (only the low 9 bits fit the wire). Refused like
+    /// `emit_sound` (a stale entity, a sample not in the sound precache, a non-finite volume or
+    /// attenuation); `player` need not be a client, then nobody is skipped.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pm_play_sound(
+        &mut self,
+        player: crate::edict::EdictId,
+        channel: i32,
+        sample: &str,
+        volume: f32,
+        attenuation: f32,
+        flags: i32,
+        pitch: i32,
+    ) -> bool {
+        if !volume.is_finite() {
+            return false;
+        }
+        // `(int)(volume * 255.0)`: the product is a double, cut toward zero.
+        let volume = ((f64::from(volume) * 255.0) as i32).clamp(0, 255) as u8;
+        let channel = match channel {
+            ..=-1 => 0,
+            0..=7 => channel as u8,
+            _ => CHAN_NETWORKVOICE_BASE,
+        };
+        let pitch = pitch.clamp(0, 255) as u8;
+        let flags = (flags as u32) & SND_FIELD_MASK;
+        let except = (player.index >= 1 && usize::from(player.index) <= self.clients.len())
+            .then(|| usize::from(player.index) - 1);
+        self.start_sound(player, channel, sample, volume, attenuation, pitch, flags, except)
     }
 
     /// Stops the sound `sample` on `channel` of `ent` (`svc_sound` with `SND_STOP`), for
@@ -285,25 +344,35 @@ impl EngineApi<'_> {
     /// (`SV_StartSound_internal` sends PAS only for `channel != CHAN_STATIC && !(flags &
     /// SND_STOP)`). Refused like [`emit_sound`](Self::emit_sound).
     pub fn stop_sound(&mut self, ent: crate::edict::EdictId, channel: u8, sample: &str) -> bool {
-        self.start_sound(ent, channel, sample, 1.0, 1.0, NORMAL_PITCH, SND_FL_STOP)
+        self.start_sound(
+            ent,
+            channel,
+            sample,
+            FULL_VOLUME,
+            1.0,
+            NORMAL_PITCH,
+            SND_FL_STOP,
+            None,
+        )
     }
 
     /// `SV_StartSound_internal`: builds the message and picks the audience; `extra_flags` is
-    /// added to the `svc_sound` flags.
+    /// added to the `svc_sound` flags, `volume` is the byte on the wire, and `except` is the
+    /// slot `recipients == 1` (`MSG_FL_ONE`) leaves out.
     #[allow(clippy::too_many_arguments)]
     fn start_sound(
         &mut self,
         ent: crate::edict::EdictId,
         channel: u8,
         sample: &str,
-        volume: f32,
+        volume: u8,
         attenuation: f32,
         pitch: u8,
         extra_flags: u32,
+        except: Option<usize>,
     ) -> bool {
         if channel > MAX_SOUND_CHANNEL
             || !sound_entity_fits(ent.index)
-            || !volume.is_finite()
             || !attenuation.is_finite()
         {
             return false;
@@ -319,7 +388,6 @@ impl EngineApi<'_> {
         let Some(sound_index) = self.precache.sound_index(sample).filter(|&i| i != 0) else {
             return false;
         };
-        let volume = (volume.clamp(0.0, 1.0) * f32::from(FULL_VOLUME)).round() as u8;
         let attenuation = attenuation.clamp(0.0, MAX_ATTENUATION);
         let mut flags = extra_flags;
         if volume != FULL_VOLUME {
@@ -346,11 +414,11 @@ impl EngineApi<'_> {
             },
         );
         if channel != CHAN_STATIC && extra_flags & SND_FL_STOP == 0 {
-            self.send(MsgDest::Pas(origin), w.as_slice());
+            self.send_except(MsgDest::Pas(origin), w.as_slice(), except);
         } else if self.clients.len() > 1 {
-            self.send_reliable_to_active(w.as_slice());
+            self.send_reliable_to_active(w.as_slice(), except);
         } else {
-            self.send(MsgDest::Broadcast, w.as_slice());
+            self.send_except(MsgDest::Broadcast, w.as_slice(), except);
         }
         true
     }

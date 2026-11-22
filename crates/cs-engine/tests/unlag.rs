@@ -111,6 +111,8 @@ struct Outcome {
     link_after: Option<LinkSnapshot>,
     /// Every touch the game was told of, in the whole run.
     touches: Vec<(u16, u16)>,
+    /// The index of the trigger placed where the rewind puts the target (`triggers` only).
+    rewound_trigger: u16,
     /// `pos` of the scenario, to compute where the rewind should have put the target.
     pos: Rc<dyn Fn(f64) -> f32>,
 }
@@ -252,15 +254,18 @@ fn run(scn: &Scenario) -> Outcome {
     let health_at = move |t: f64| if die_at.is_some_and(|d| t >= d) { 0.0 } else { 100.0 };
     let true_x = pos(now0 + scn.hold as f64 * FRAME);
 
+    let rewound_trigger = Rc::new(Cell::new(0u16));
     if scn.triggers {
         // One where the target will be for real, one where the rewind puts it (lerp 50).
         let rewound_x = pos(time - scn.hold as f64 * FRAME - 0.05);
+        let rewound_trigger = Rc::clone(&rewound_trigger);
         h.server.game_mut().act(move |eng| {
             for x in [true_x, rewound_x] {
                 let id = eng.create_entity("test_trigger").expect("free edict");
                 eng.ent_mut(id).unwrap().solid = SOLID_TRIGGER;
                 eng.set_size(id, Vec3::splat(-10.0), Vec3::splat(10.0));
                 eng.set_origin(id, Vec3::new(x, 0.0, 0.0));
+                rewound_trigger.set(id.index);
             }
         });
     }
@@ -307,7 +312,9 @@ fn run(scn: &Scenario) -> Outcome {
             if slot == 1 {
                 own_x.set(eng.ent(eng.client_edict(1)).unwrap().origin.x);
             }
-            if slot != 0 {
+            // The idle frames' commands of 0 ms run too (as in `SV_RunCmd`); the measured
+            // command is the one with time.
+            if slot != 0 || eng.frametime() == 0.0 {
                 return;
             }
             marks.set(marks.get() + 1);
@@ -342,6 +349,9 @@ fn run(scn: &Scenario) -> Outcome {
     let target_id = h.server.edicts().client(1);
     let mut before = places(&h, 1);
     let mut link_before = None;
+    // The target's own commands (also those of 0 ms) touch the triggers it stands in; only
+    // what happens from here on, with the rewind, is looked at.
+    let touches_from = h.server.game().touch_log.len();
     round(
         &mut h,
         &mut shooter,
@@ -391,7 +401,8 @@ fn run(scn: &Scenario) -> Outcome {
         target_saw_self_x: own_x.get(),
         link_before,
         link_after,
-        touches: h.server.game().touch_log.clone(),
+        touches: h.server.game().touch_log[touches_from..].to_vec(),
+        rewound_trigger: rewound_trigger.get(),
         pos,
     }
 }
@@ -598,7 +609,12 @@ fn rewinding_and_restoring_touch_no_triggers() {
     });
     // The rewind really crossed both triggers' places.
     assert!(o.true_x - o.seen.0.x > SPEED * 0.13);
-    assert!(o.touches.is_empty(), "{:?}", o.touches);
+    // (The target really stands in the other trigger, so that one is touched.)
+    assert!(
+        o.touches.iter().all(|&(a, b)| a != o.rewound_trigger && b != o.rewound_trigger),
+        "{:?}",
+        o.touches
+    );
 }
 
 #[test]

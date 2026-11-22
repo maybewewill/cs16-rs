@@ -212,7 +212,12 @@ impl<G: GameDll> Server<G> {
                 continue;
             }
             let msec = self.clients[index].budget.take(cmd.msec);
-            if msec == 0 {
+            // A command that asked for time and got none is the budget's refusal (the speedhack
+            // bound) and does not run. A command of 0 ms is not special to `SV_RunCmd` (ReHLDS
+            // `rehlds/engine/sv_user.cpp`, read 2026-11-22): it reaches the game with a frame
+            // time of 0 (the client sends one every frame it has no movement to send), and the
+            // budget gives it nothing and takes nothing.
+            if msec == 0 && cmd.msec != 0 {
                 continue;
             }
             let granted = GoldSrcUserCmd {
@@ -266,6 +271,18 @@ impl<G: GameDll> Server<G> {
         // Touches reported outside a command are not this command's.
         self.world.player_impacts.clear();
         self.sync_views();
+        // `SV_RunCmd` (ReHLDS `rehlds/engine/sv_user.cpp`, read 2026-11-22), before the game
+        // runs: `v.button` is the command's buttons, then `SV_CheckMovingGround` with the
+        // command's frame time, `(float)(ucmd->msec * 0.001)`: a conveyor under the player's
+        // feet sets its `basevelocity`, and a base velocity nothing renewed is folded into the
+        // `velocity`. Not ported here: `impulse` and `clbasevelocity` (no `EntVars` field for
+        // them), and the `v_angle` / `pmove->oldangles` update, which the game does itself (the
+        // engine has no `pmove` to hand the old angles to).
+        let player = self.edicts.client(slot);
+        if let Some(v) = self.edicts.get_mut(player).map(|e| &mut e.vars) {
+            v.button = i32::from(step.buttons);
+        }
+        self.check_moving_ground(player, (f64::from(step.msec) * 0.001) as f32);
         // `SV_RunCmd`: the other players are where this client saw them for the command, and
         // are put back after `SV_ProcessImpacts`.
         self.setup_move(slot);

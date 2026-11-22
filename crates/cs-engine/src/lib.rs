@@ -22,6 +22,7 @@ mod physics;
 mod physics_move;
 mod physics_water;
 mod rng;
+mod texture;
 mod touch;
 mod trace_ents;
 mod unlag;

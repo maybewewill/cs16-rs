@@ -72,7 +72,14 @@ fn forward_cmds_move_the_player() {
 
     // Working assumption: the seed is the packet's sequence minus the command's index from
     // the newest, so successive commands get successive seeds.
-    let seeds = &h.server.game().random_seeds[seeds_before..];
+    // (The idle frames' commands of 0 ms run as well; they are left out.)
+    let game = h.server.game();
+    let seeds: Vec<u32> = game.usercmd_msecs[seeds_before..]
+        .iter()
+        .zip(&game.random_seeds[seeds_before..])
+        .filter(|(ms, _)| **ms != 0)
+        .map(|(_, seed)| *seed)
+        .collect();
     assert_eq!(seeds.len(), 100);
     assert!(seeds.windows(2).all(|w| w[1] == w[0] + 1), "{seeds:?}");
 }
@@ -86,8 +93,13 @@ fn long_cmd_reaches_the_game_in_steps_of_at_most_50_ms() {
 
     // The bank is full after sign-on, so all 200 ms are granted.
     drive(&mut h, &mut probe, &forward(200), 1);
-    let steps = &h.server.game().usercmd_msecs[before..];
-    assert_eq!(steps, &[50, 50, 50, 50]);
+    // (Commands of 0 ms from the idle frames run too and are left out.)
+    let steps: Vec<u8> = h.server.game().usercmd_msecs[before..]
+        .iter()
+        .copied()
+        .filter(|&ms| ms != 0)
+        .collect();
+    assert_eq!(steps, [50, 50, 50, 50]);
     assert!(steps.iter().all(|&ms| ms <= MAX_USERCMD_STEP_MS));
     let moved = origin_x(&h, 0) - start;
     assert!((moved - 50.0).abs() <= 0.01, "moved {moved}");
@@ -157,7 +169,9 @@ fn bad_move_checksum_is_ignored_then_client_dropped() {
     let mut h = Harness::new(4);
     let mut probe = joined(&mut h, "Player");
     let start = origin_x(&h, 0);
-    let runs = h.server.game().run_usercmd_calls;
+    let timed_runs =
+        |h: &Harness| h.server.game().usercmd_msecs.iter().filter(|&&ms| ms != 0).count();
+    let runs = timed_runs(&h);
 
     // The only command that would move the player travels in the corrupted packet.
     probe.corrupt_next_moves(1);
@@ -165,7 +179,8 @@ fn bad_move_checksum_is_ignored_then_client_dropped() {
     h.step(&mut [&mut probe], 20);
     assert_eq!(h.server.client_state(0), ClientState::Active);
     assert_eq!(origin_x(&h, 0), start);
-    assert_eq!(h.server.game().run_usercmd_calls, runs);
+    // (Commands of 0 ms from the idle frames are not moves and run.)
+    assert_eq!(timed_runs(&h), runs);
 
     // One short of the limit, then good moves: the count starts over.
     probe.corrupt_next_moves(MAX_CONSECUTIVE_BAD_MOVES - 1);

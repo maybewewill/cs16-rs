@@ -115,6 +115,40 @@ pub struct EntVars {
     pub iuser2: i32,
     pub iuser3: i32,
     pub iuser4: i32,
+    // The player movement state of `pm_shared` that lives in `entvars_t` (the names of the
+    // original in the comments). The game reads and writes it around each command; the engine
+    // only sets `button` and sends part of it in `clientdata_t`. All of it is cleared with the
+    // rest of the variables, as `ED_ClearEdict` does.
+    /// `bInDuck`: the player is in the middle of the duck transition.
+    pub b_in_duck: bool,
+    /// `flDuckTime`: milliseconds of the duck transition left (an `int` in `entvars_t`).
+    pub fl_duck_time: i32,
+    /// `flTimeStepSound`: milliseconds until the next footstep sound.
+    pub fl_time_step_sound: i32,
+    /// `iStepLeft`: which foot steps next.
+    pub i_step_left: i32,
+    /// `flFallVelocity`: the downward speed the player had before the last landing.
+    pub fl_fall_velocity: f32,
+    /// `flSwimTime`: milliseconds a swimmer may stay under water before it starts to drown.
+    pub fl_swim_time: i32,
+    /// `oldbuttons`: the buttons of the command before.
+    pub oldbuttons: i32,
+    /// `button`: the buttons of the command being run; the engine sets it from the command
+    /// (`SV_RunCmd`) before the game runs.
+    pub button: i32,
+    /// `teleport_time`, which is the `waterjumptime` of a player: milliseconds of a water
+    /// jump left.
+    pub teleport_time: f32,
+    pub fuser1: f32,
+    pub fuser2: f32,
+    pub fuser3: f32,
+    pub fuser4: f32,
+    pub vuser1: Vec3,
+    pub vuser2: Vec3,
+    pub vuser3: Vec3,
+    pub vuser4: Vec3,
+    /// `pushmsec`: milliseconds of push the player's movement carries (`clientdata_t`).
+    pub pushmsec: i32,
     /// Server time at which the game's `think` is next called for this entity; 0 means no
     /// think is scheduled. The engine sets it to 0 just before each call.
     pub nextthink: f64,
