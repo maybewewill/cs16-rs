@@ -206,6 +206,17 @@ pub const WEAPON_EVENTS: [&str; 28] = [
     "events/famas.sc",
 ];
 
+/// The models of the world items `WeaponsPrecache` precaches first (weapons.cpp 305-330).
+const ITEM_MODELS: [&str; 7] = [
+    "models/w_battery.mdl",
+    "models/w_antidote.mdl",
+    "models/w_security.mdl",
+    "models/w_longjump.mdl",
+    "models/w_kevlar.mdl",
+    "models/w_assault.mdl",
+    "models/w_thighpack.mdl",
+];
+
 /// `WeaponsPrecache` (`weapons.cpp` 300-425, called by `CWorld::Precache`): the weapons' own
 /// `Precache` in the order of the game ([`crate::weapons::precache_all`]), the weapon box,
 /// the models of the weapons lying in the world and of the armoury's items, the effects of
@@ -215,7 +226,25 @@ pub const WEAPON_EVENTS: [&str; 28] = [
 /// plays (`FireRemaining`) are precached, which the weapons need once the server is running (the events are precached here in the source's order
 /// as well, [`WEAPON_EVENTS`], so a weapon that looks its event up by name always finds it).
 pub(crate) fn weapons_precache(eng: &mut EngineApi<'_>) {
-    crate::weapons::precache_all(eng);
+    // The common world objects (`UTIL_PrecacheOther("item_*")`) come first: the models of
+    // the battery, the antidote, the security item, the long jump module, the kevlar vest, the
+    // assault suit and the thigh pack, in that order (the suit has none).
+    for model in ITEM_MODELS {
+        precache_model(eng, model);
+    }
+    // `precache_all` with the ammo boxes where the source precaches them: `ammo_338magnum`
+    // after the AWP's group, `ammo_buckshot` after the XM1014's (the other ammo entities use
+    // models that are already there).
+    for id in crate::weapons::WEAPONS_PRECACHE_ORDER {
+        if let Some(mut behavior) = crate::weapons::new_weapon(id) {
+            behavior.precache(eng);
+        }
+        match id {
+            WeaponId::Awp => precache_model(eng, "models/w_9mmclip.mdl"),
+            WeaponId::Xm1014 => precache_model(eng, "models/w_shotbox.mdl"),
+            _ => {}
+        }
+    }
     for event in WEAPON_EVENTS {
         eng.precache_event(event);
     }

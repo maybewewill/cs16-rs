@@ -95,6 +95,24 @@ const CLIENT_WEAPON_MODELS: [&str; 44] = [
     "models/w_shield.mdl",
 ];
 
+/// The sprites `ClientPrecache` precaches after the shadow (client.cpp 4342-4358, vanilla).
+const CLIENT_SMOKE_SPRITES: [&str; 14] = [
+    "sprites/wall_puff1.spr",
+    "sprites/wall_puff2.spr",
+    "sprites/wall_puff3.spr",
+    "sprites/wall_puff4.spr",
+    "sprites/black_smoke1.spr",
+    "sprites/black_smoke2.spr",
+    "sprites/black_smoke3.spr",
+    "sprites/black_smoke4.spr",
+    "sprites/fast_wallpuff1.spr",
+    "sprites/pistol_smoke1.spr",
+    "sprites/pistol_smoke2.spr",
+    "sprites/rifle_smoke1.spr",
+    "sprites/rifle_smoke2.spr",
+    "sprites/rifle_smoke3.spr",
+];
+
 /// The `PRECACHE_SOUND` calls of `ClientPrecache` (ReGameDLL `client.cpp`, read 2026-11-22),
 /// plus the flashlight sound (`SOUND_FLASHLIGHT_ON` and `_OFF` are the same file).
 const CLIENT_SOUNDS: [&str; 110] = [
@@ -317,6 +335,13 @@ impl World {
         eng.set_cvar("sv_stepsize", "18");
         eng.set_cvar("room_type", "0");
 
+        // `CWorld::Precache` (world.cpp 277-365): `WeaponsPrecache()` comes before
+        // `ClientPrecache()`, which comes before the world's own sounds and gibs, so the weapons'
+        // models have the low indices and the third-person ones follow the player models.
+        crate::inventory::weapons_precache(eng);
+        // `g_sModelIndexRadio` of `W_Precache`: the icon over a player that used the radio (the
+        // source has it among the weapons' sprites; here it follows them).
+        precache_model(eng, crate::hud_misc::RADIO_SPRITE);
         for name in CLIENT_SOUNDS {
             precache_sound(eng, name);
         }
@@ -328,8 +353,12 @@ impl World {
         }
         // `g_iShadowSprite`, which `InitHUD` sends in `ShadowIdx`.
         precache_model(eng, "sprites/shadow_circle.spr");
-        // `g_sModelIndexRadio` of `W_Precache`: the icon over a player that used the radio.
-        precache_model(eng, crate::hud_misc::RADIO_SPRITE);
+        // The end of `ClientPrecache` (client.cpp 4340-4364): the smoke sprites of the bullets
+        // (`REGAMEDLL_FIXES`' `gas_puff_01.spr` is not vanilla) and the reset of the decals.
+        for name in CLIENT_SMOKE_SPRITES {
+            precache_model(eng, name);
+        }
+        eng.precache_event("events/decal_reset.sc");
         for name in WORLD_SOUNDS {
             precache_sound(eng, name);
         }
@@ -340,8 +369,6 @@ impl World {
             precache_model(eng, "models/hgibs.mdl");
             precache_model(eng, "models/agibs.mdl");
         }
-        // `WeaponsPrecache`.
-        crate::inventory::weapons_precache(eng);
         for (index, pattern) in LIGHT_STYLES {
             eng.light_style(index, pattern);
         }

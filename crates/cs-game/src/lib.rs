@@ -122,8 +122,8 @@ pub(crate) fn random_in(state: &mut u32, lo: i32, hi: i32) -> i32 {
     *state ^= *state << 13;
     *state ^= *state >> 17;
     *state ^= *state << 5;
-    let span = (hi - lo + 1).max(1) as u32;
-    lo + (*state % span) as i32
+    let span = hi.wrapping_sub(lo).wrapping_add(1).max(1) as u32;
+    lo.wrapping_add((*state % span) as i32)
 }
 
 /// The game: [`GameState`] (with the players) and the entities (in the private data of their

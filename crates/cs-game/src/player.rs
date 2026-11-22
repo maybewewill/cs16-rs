@@ -193,9 +193,6 @@ const FROZEN_MAX_SPEED: f32 = 1.0;
 const SUICIDE_DELAY: f64 = 1.0;
 /// Seconds between two runs of `PlayerDeathThink`.
 const DEATH_THINK_INTERVAL: f64 = 0.1;
-/// Longest a player stays `DEAD_DYING` in the air. Assumption: the original waits for the end
-/// of the death animation (a few seconds), which does not exist here.
-const DYING_MAX_SECONDS: f64 = 3.0;
 
 /// The team of a player; [`id`](Team::id) is the number the scoreboard messages carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -2298,9 +2295,19 @@ fn throw_grenade_on_death(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) 
     crate::grenade::throw_grenade(g, eng, slot, weapon, src, angles, 1.5);
 }
 
-/// `CBasePlayer::PlayerDeathThink` for a dead player, every `DEATH_THINK_INTERVAL`: a body on
-/// the ground slows down; once it is on the ground (or after `DYING_MAX_SECONDS` in the air)
-/// it stops moving and is `DEAD_DEAD`. Becoming respawnable is the round rules' business.
+/// `CBasePlayer::PlayerDeathThink` (`player.cpp` 3977-4080, read 2026-11-22) for a dead player, every
+/// `DEATH_THINK_INTERVAL` (the pacing is this port's): a body on the ground slows down; the
+/// guns are dropped; while the death animation plays (`DEAD_DYING`, the sequence not finished)
+/// the frame advances (`StudioFrameAdvance`) and nothing else happens; then a body on the
+/// ground stops colliding, `DEAD_DYING` becomes `DEAD_DEAD` (the time is taken), the animation
+/// stops (`StopAnimation`: `framerate = 0`, the vanilla inline of the animating base class;
+/// assumption, its header is not among the fetched sources) and the model stops interpolating
+/// (`EF_NOINTERP`); a player dead for `DEATH_ANIMATION_TIME` leaves a corpse and goes to the
+/// death camera. Becoming respawnable is the round rules' business.
+///
+/// Assumption: a player whose model the engine has not loaded (a test server without a model
+/// loader) has no animation to wait for, so it is not held in `DEAD_DYING`; with the model the
+/// wait is the source's.
 fn death_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let now = eng.time();
     let id = eng.client_edict(slot);
@@ -2319,12 +2326,10 @@ fn death_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
         return;
     }
     p.next_death_think = now + DEATH_THINK_INTERVAL;
-    let died = p.dead_time;
     let Some(v) = eng.ent_mut(id) else {
         return;
     };
-    let on_ground = v.flags & FL_ONGROUND != 0;
-    if on_ground {
+    if v.flags & FL_ONGROUND != 0 {
         let forward = v.velocity.length() - 20.0;
         v.velocity = if forward <= 0.0 {
             Vec3::ZERO
@@ -2332,18 +2337,33 @@ fn death_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
             v.velocity.normalize() * forward
         };
     }
-    let dying = v.deadflag == DEAD_DYING;
-    if dying && !on_ground && now - died < DYING_MAX_SECONDS {
+    // "If the anim is not done playing, go on animating."
+    let (modelindex, dying) = (v.modelindex, v.deadflag == DEAD_DYING);
+    let animating = modelindex != 0
+        && dying
+        && eng.studio_model(modelindex).is_some()
+        && g.players[usize::from(slot)].as_ref().is_some_and(|p| !p.anim.sequence_finished);
+    if animating {
+        player_anim::studio_frame_advance(g, eng, slot);
         return;
     }
+    let Some(p) = g.players[usize::from(slot)].as_mut() else {
+        return;
+    };
+    let Some(v) = eng.ent_mut(id) else {
+        return;
+    };
     // Done "animating": a body on the ground stops colliding and moving.
-    if v.movetype != MOVETYPE_NONE && on_ground {
+    if v.movetype != MOVETYPE_NONE && v.flags & FL_ONGROUND != 0 {
         v.movetype = MOVETYPE_NONE;
     }
     if dying {
         v.deadflag = DEAD_DEAD;
         p.dead_time = now;
     }
+    // `StopAnimation()`, and `pev->effects |= EF_NOINTERP`.
+    v.framerate = 0.0;
+    v.effects |= EF_NOINTERP;
     // A player dead for `DEATH_ANIMATION_TIME` leaves a corpse and goes to the death camera.
     if v.deadflag != DEAD_RESPAWNABLE && !p.pflag_observer && now > p.dead_time + DEATH_ANIMATION_TIME {
         let origin = [
@@ -2352,7 +2372,8 @@ fn death_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
             (v.origin.z * 128.0) as i32,
         ];
         let (angles, body) = (v.angles, v.body);
-        let time_diff = ((f64::from(v.animtime) - now) * 100.0) as i32;
+        // `float timeDiff = pev->animtime - gpGlobals->time; WRITE_LONG(timeDiff * 100)`.
+        let time_diff = ((v.animtime - now as f32) * 100.0) as i32;
         let sequence = v.sequence as u8;
         let (team, player_id) = (p.team.id(), id.index as u8);
         let model = eng.client_key(slot, "model").unwrap_or("urban").to_string();

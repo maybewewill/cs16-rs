@@ -255,8 +255,8 @@ struct Pev {
 impl Pev {
     fn read(v: &cs_engine::EntVars) -> Self {
         Self {
-            sequence: i32::from(v.sequence),
             // The `int` of C: a -1 (`ACT_INVALID`) stored there comes back as -1.
+            sequence: i32::from(v.sequence as i16),
             gaitsequence: i32::from(v.gaitsequence as i16),
             frame: v.frame,
             animtime: v.animtime,

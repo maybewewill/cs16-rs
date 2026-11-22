@@ -348,6 +348,9 @@ fn golden_values_after_joinclass() {
     let mut b = Bench::with_slots(map, 2);
     // With the game's models (the animation lookups need the player model), when it is installed.
     let vfs = discover().map(Arc::new);
+    if vfs.is_none() {
+        eprintln!("NOTE: the installed game was not found; the golden sequence numbers are not checked");
+    }
     if let Some(vfs) = &vfs {
         let vfs = Arc::clone(vfs);
         b.server.set_model_loader(Arc::new(move |name| vfs.read_bytes(name).ok()));
@@ -400,7 +403,12 @@ fn golden_values_after_joinclass() {
 /// The player model of the installed game and a server whose engine has it, a counter-terrorist
 /// with the USP out of the freeze period. `None` without the game.
 fn with_model() -> Option<(Bench, StudioPoseData)> {
-    let vfs = discover()?;
+    let Some(vfs) = discover() else {
+        eprintln!(
+            "SKIPPED: the installed game was not found (set CS16_GAMEDIR); the test reads the real models/player.mdl"
+        );
+        return None;
+    };
     let bytes = vfs.read_bytes("models/player.mdl").ok()?;
     let model = StudioPoseData::parse(&bytes).expect("the player model parses");
     let mut b = arena(&[]);
@@ -691,36 +699,258 @@ fn the_frame_advances_in_post_think_and_the_gait_blends_follow_the_view() {
     }
 }
 
+/// `DEAD_DYING` and `DEAD_DEAD`.
+const DEAD_DYING: i32 = 1;
+const DEAD_DEAD: i32 = 2;
+const SOLID_SLIDEBOX: u8 = 3;
+
+/// The height of the highest point of the player of slot 0 that a shot straight down hits,
+/// over a grid of shots around it (a lying body is not under its origin). `None`: none hits.
+fn top_of_player(eng: &EngineApi<'_>) -> Option<f32> {
+    let id = eng.client_edict(0);
+    let origin = eng.ent(id).unwrap().origin;
+    let mut top: Option<f32> = None;
+    for ix in -8..=8 {
+        for iy in -8..=8 {
+            let at = origin + Vec3::new(ix as f32 * 8.0, iy as f32 * 8.0, 0.0);
+            let t = eng.trace_line(
+                at + Vec3::new(0.0, 0.0, 200.0),
+                at - Vec3::new(0.0, 0.0, 50.0),
+                cs_engine::MoveFilter::Normal,
+                None,
+            );
+            if t.ent == Some(id) {
+                top = Some(top.map_or(t.trace.end_pos.z, |z| z.max(t.trace.end_pos.z)));
+            }
+        }
+    }
+    top
+}
+
+/// Kills the player of slot 0 with a hit in the head (the world's damage).
+fn kill_in_the_head(b: &mut Bench) {
+    b.run(|game, eng| {
+        game.set_last_hit_group(0, 1);
+        game.damage_player(eng, 0, None, 1000.0, 32);
+    });
+}
+
+#[test]
+fn the_death_animation_plays_before_the_body_is_dead() {
+    let Some((mut b, model)) = with_model() else {
+        return;
+    };
+    kill_in_the_head(&mut b);
+    // The first command after the kill: the death sequence, from its start.
+    let died = b.run(|game, eng| {
+        let v = eng.ent(eng.client_edict(0)).unwrap();
+        (i32::from(v.sequence), v.deadflag, v.frame, game.anim_state(0).unwrap())
+    });
+    // (`TakeDamage` of the world leaves `m_LastHitGroup` generic: one of the random picks.)
+    let activity = activity_of(&model, died.0);
+    assert!(matches!(activity, 36..=38 | 66..=69), "a death sequence: {activity}");
+    assert_eq!(died.1, DEAD_DYING);
+    // One second on: still dying, the frame is part of the way through the sequence (the
+    // sequence is not finished, `PlayerDeathThink` goes on animating).
+    b.step(100);
+    let mid = b.run(|game, eng| {
+        let v = eng.ent(eng.client_edict(0)).unwrap();
+        (v.deadflag, v.frame, v.framerate, game.anim_state(0).unwrap().2)
+    });
+    assert_eq!(mid.0, DEAD_DYING, "the death animation is not over after a second");
+    assert!(mid.1 > 0.0 && mid.1 < 255.0, "mid-sequence: {}", mid.1);
+    assert_eq!((mid.2, mid.3), (1.0, false));
+    // The animation ends (the sequence is a second and a half long): the body is dead, the
+    // frame is at its last and `StopAnimation` stopped it (`EF_NOINTERP` is cleared by the engine at the end of the frame).
+    b.step(150);
+    let dead = b.run(|game, eng| {
+        let v = eng.ent(eng.client_edict(0)).unwrap();
+        (v.deadflag, v.frame, v.framerate, game.anim_state(0).unwrap().2)
+    });
+    assert_eq!(dead, (DEAD_DEAD, 255.0, 0.0, true));
+    // Three seconds after it, the corpse is sent with the sequence and the time the animation
+    // stopped at (`animtime - time`, in hundredths, so negative).
+    b.step(450);
+    let corpse = b
+        .messages()
+        .into_iter()
+        .find_map(|m| match m {
+            cs_proto48::usermsg::CsUserMsg::ClCorpse { sequence, time_diff, .. } => {
+                Some((sequence, time_diff))
+            }
+            _ => None,
+        })
+        .expect("a ClCorpse was sent");
+    assert_eq!(i32::from(corpse.0), died.0, "the corpse lies in the death sequence");
+    assert!(corpse.1 < 0, "the animation stopped before the corpse was sent: {}", corpse.1);
+}
+
 #[test]
 fn hitbox_pose_follows_the_player_animation() {
     let Some((mut b, _model)) = with_model() else {
         return;
     };
-    // A shot straight down onto a standing player hits it high; with the player at the end of
-    // its death animation (it lies down) the same shot lands much lower: the engine poses the
-    // hitboxes from the `sequence` and `frame` the animation wrote.
-    let (standing_z, lying_z) = b.run(|game, eng| {
-        respawn(game, eng, "onehanded");
+    // A shot straight down onto a standing player hits it high. Killed, the player plays its
+    // death animation to the end and lies down; the same shot at the body (made solid again
+    // by the test, a corpse is not) lands much lower: the engine poses the hitboxes from the
+    // `sequence` and `frame` the animation advanced to, nothing written by hand.
+    let standing_z = b
+        .run(|game, eng| {
+            respawn(game, eng, "onehanded");
+            top_of_player(eng)
+        })
+        .expect("the standing player is hit");
+    kill_in_the_head(&mut b);
+    b.step(300);
+    let lying_z = b.run(|_game, eng| {
         let id = eng.client_edict(0);
-        let origin = eng.ent(id).unwrap().origin;
-        let from = origin + Vec3::new(0.0, 0.0, 200.0);
-        let to = origin - Vec3::new(0.0, 0.0, 50.0);
-        let shot = |eng: &EngineApi<'_>| {
-            let t = eng.trace_line(from, to, cs_engine::MoveFilter::Normal, None);
-            (t.trace.end_pos.z, t.ent)
-        };
-        let (z0, hit0) = shot(eng);
-        assert_eq!(hit0, Some(id), "the standing player is hit");
-        game.set_animation(eng, 0, PlayerAnim::Die, 1);
-        // The end of the death: the last frame of the sequence.
-        eng.ent_mut(id).unwrap().frame = 255.0;
-        let (z1, _) = shot(eng);
-        (z0, z1)
+        let v = eng.ent_mut(id).unwrap();
+        assert_eq!(v.deadflag, DEAD_DEAD);
+        v.solid = SOLID_SLIDEBOX;
+        top_of_player(eng).expect("the body is hit")
     });
     assert!(
         lying_z < standing_z - 10.0,
         "the pose of the death animation's end is lower: {lying_z} against {standing_z}"
     );
+}
+
+// ---- a synthetic player model: runs without the game files ------------------------------------
+
+/// One sequence of the synthetic model: `(label, activity, weight, frames, fps, flags)`.
+type Seq = (&'static str, i32, i32, i32, f32, i32);
+
+const SYNTHETIC: [Seq; 18] = [
+    ("dummy", 0, 0, 61, 24.0, 1),
+    ("idle1", 1, 1, 61, 15.0, 1),
+    ("walk", 3, 1, 33, 30.0, 1),
+    ("run", 4, 1, 37, 60.0, 1),
+    ("crouchrun", 17, 1, 31, 30.0, 1),
+    ("crouch_idle", 18, 1, 31, 10.0, 1),
+    ("jump", 7, 1, 61, 30.0, 0),
+    ("longjump", 8, 1, 61, 30.0, 0),
+    ("ref_aim_onehanded", 0, 0, 2, 30.0, 1),
+    ("ref_shoot_onehanded", 0, 0, 7, 15.0, 0),
+    ("crouch_aim_onehanded", 0, 0, 2, 30.0, 1),
+    ("crouch_shoot_onehanded", 0, 0, 7, 15.0, 0),
+    ("gut_flinch", 0, 0, 2, 30.0, 0),
+    ("head_flinch", 0, 0, 2, 30.0, 0),
+    ("death2", 36, 2, 41, 30.0, 0),
+    ("head", 66, 1, 56, 30.0, 0),
+    ("crouch_die", 0, 0, 31, 30.0, 0),
+    ("left", 36, 1, 66, 30.0, 0),
+];
+
+/// A `.mdl` (IDST v10) of one bone and the sequences of [`SYNTHETIC`]: what `StudioPoseData`
+/// reads (labels, fps, flags, activities, weights, frames), nothing else.
+fn synthetic_player_model() -> Vec<u8> {
+    let (bone_off, seq_off) = (244usize, 244usize + 112);
+    let mut b = vec![0u8; seq_off + SYNTHETIC.len() * 176];
+    b[0..4].copy_from_slice(b"IDST");
+    b[4..8].copy_from_slice(&10i32.to_le_bytes());
+    b[8..8 + 6].copy_from_slice(b"player");
+    let put = |b: &mut Vec<u8>, at: usize, v: i32| b[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    put(&mut b, 140, 1);
+    put(&mut b, 144, bone_off as i32);
+    put(&mut b, 164, SYNTHETIC.len() as i32);
+    put(&mut b, 168, seq_off as i32);
+    put(&mut b, bone_off + 32, -1);
+    for c in 0..6 {
+        put(&mut b, bone_off + 40 + c * 4, -1);
+    }
+    for (i, (label, activity, weight, frames, fps, flags)) in SYNTHETIC.iter().enumerate() {
+        let at = seq_off + i * 176;
+        b[at..at + label.len()].copy_from_slice(label.as_bytes());
+        b[at + 32..at + 36].copy_from_slice(&fps.to_le_bytes());
+        put(&mut b, at + 36, *flags);
+        put(&mut b, at + 40, *activity);
+        put(&mut b, at + 44, *weight);
+        put(&mut b, at + 56, *frames);
+        put(&mut b, at + 120, 1);
+    }
+    b
+}
+
+fn synthetic_index(label: &str) -> i32 {
+    SYNTHETIC.iter().position(|s| s.0 == label).expect("a label of the fixture") as i32
+}
+
+/// The same checks as the real model's, on the fixture: they run whether the game is installed
+/// or not.
+#[test]
+fn set_animation_on_a_synthetic_model() {
+    let bytes = synthetic_player_model();
+    let model = StudioPoseData::parse(&bytes).expect("the fixture parses");
+    assert_eq!(model.sequences.len(), SYNTHETIC.len());
+    assert_eq!(model.sequences[9].label, "ref_shoot_onehanded");
+    let map = cs_engine::ServerMap::stub_with_entities("test", spawns(4, 4));
+    let mut b = Bench::with_slots(map, 2);
+    // The player's model on the server is the team's (`models/player/urban/urban.mdl` for the
+    // class joined here), so every player model is the fixture.
+    b.server.set_model_loader(Arc::new(move |name| {
+        name.starts_with("models/player").then(|| bytes.clone())
+    }));
+    join(&mut b, 0, 2, 5);
+
+    // The spawn: an `ACT_IDLE` sequence (the only one: `idle1`).
+    let spawned = animate(&mut b, |game, eng| {
+        game.respawn_player(eng, 0);
+    });
+    assert_eq!(spawned.sequence, synthetic_index("idle1"));
+
+    // Shooting standing and ducking, reloading has no sequence in the fixture (falls to 0).
+    let shot = animate(&mut b, |game, eng| {
+        game.set_anim_extension(0, "onehanded");
+        game.set_animation(eng, 0, PlayerAnim::Attack1, 0);
+    });
+    assert_eq!(shot.sequence, synthetic_index("ref_shoot_onehanded"));
+    assert_eq!((shot.frame, shot.framerate, shot.activity), (0.0, 1.0, 28));
+    let crouch = animate(&mut b, |game, eng| {
+        let id = eng.client_edict(0);
+        eng.ent_mut(id).unwrap().flags |= FL_DUCKING;
+        game.set_animation(eng, 0, PlayerAnim::Attack1, 0);
+    });
+    assert_eq!(crouch.sequence, synthetic_index("crouch_shoot_onehanded"));
+
+    // The gait by speed.
+    let run = animate(&mut b, |game, eng| {
+        game.respawn_player(eng, 0);
+        game.set_anim_extension(0, "onehanded");
+        let id = eng.client_edict(0);
+        let v = eng.ent_mut(id).unwrap();
+        v.flags |= 1 << 9;
+        v.velocity = Vec3::new(250.0, 0.0, 0.0);
+        game.set_animation(eng, 0, PlayerAnim::Walk, 0);
+    });
+    assert_eq!(run.gait, synthetic_index("run"));
+    let walk = animate(&mut b, |game, eng| {
+        let id = eng.client_edict(0);
+        eng.ent_mut(id).unwrap().velocity = Vec3::new(100.0, 0.0, 0.0);
+        game.set_animation(eng, 0, PlayerAnim::Walk, 0);
+    });
+    assert_eq!(walk.gait, synthetic_index("walk"));
+    assert_eq!(walk.sequence, synthetic_index("ref_aim_onehanded"));
+    let jump = animate(&mut b, |game, eng| {
+        game.respawn_player(eng, 0);
+        game.set_animation(eng, 0, PlayerAnim::Idle, 0);
+        game.set_animation(eng, 0, PlayerAnim::Jump, 0);
+    });
+    assert_eq!(jump.gait, synthetic_index("jump"));
+
+    // Death by hit group: the head's sequence, and a generic hit picks among the weighted
+    // `ACT_DIESIMPLE` ones (`death2` and `left`).
+    let head = animate(&mut b, |game, eng| {
+        game.respawn_player(eng, 0);
+        game.set_animation(eng, 0, PlayerAnim::Idle, 0);
+        game.set_animation(eng, 0, PlayerAnim::Die, 1);
+    });
+    assert_eq!(head.sequence, synthetic_index("head"));
+    let flinch = animate(&mut b, |game, eng| {
+        game.respawn_player(eng, 0);
+        game.set_animation(eng, 0, PlayerAnim::Idle, 0);
+        game.set_animation(eng, 0, PlayerAnim::Flinch, 3);
+    });
+    assert_eq!(flinch.sequence, synthetic_index("gut_flinch"));
 }
 
 #[test]
