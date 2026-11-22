@@ -69,9 +69,12 @@ impl ChallengeIssuer {
             || challenge == self.challenge_for(addr, current.wrapping_sub(1))
     }
 
-    /// Never 0, so that "no challenge" and "challenge 0" cannot be confused.
+    /// Never 0, so that "no challenge" and "challenge 0" cannot be confused, and never above
+    /// `i32::MAX`: the original client keeps the challenge in an `int` (found with the original
+    /// client on 2026-11-22: a challenge with the top bit set came back as a negative number and
+    /// the connect was refused with "Bad challenge.").
     fn challenge_for(&self, addr: &PeerAddr, window: i64) -> u32 {
-        match self.key.hash_one((addr, window)) as u32 {
+        match self.key.hash_one((addr, window)) as u32 & 0x7FFF_FFFF {
             0 => 1,
             challenge => challenge,
         }
@@ -406,6 +409,18 @@ mod tests {
                 assert!(issuer.check(&addr(1), challenge, NOW));
             }
             other => panic!("unexpected reply: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn challenges_fit_the_client_int() {
+        let issuer = ChallengeIssuer::new();
+        for port in 0..2000u16 {
+            let a = PeerAddr::Udp(SocketAddr::from(([10, 0, 0, 1], port)));
+            for t in [0.0, 30.0, 1e6] {
+                let c = issuer.issue(&a, t);
+                assert!(c != 0 && c <= i32::MAX as u32, "{c}");
+            }
         }
     }
 

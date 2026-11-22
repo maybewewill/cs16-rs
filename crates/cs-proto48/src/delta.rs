@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use glam::Vec3;
 
 use crate::bitbuf::{MsgReader, MsgWriter, ProtoError};
+use crate::delta_offsets::field_layout;
 
 pub const DELTA_MAX_FIELDS: usize = 56;
 
@@ -634,18 +635,21 @@ pub fn parse_delta_lst(source: &str) -> Result<Vec<DeltaSchema>, ProtoError> {
                 1.0
             };
 
-            let field_size = match field_type & !DT_SIGNED {
-                DT_BYTE => 1,
-                DT_SHORT => 2,
-                DT_STRING => 1,
-                _ => 4,
-            };
+            // The real `offsetof` of the member in the original client's C struct: the client
+            // stores each decoded value there. An unknown struct or member is a hard error,
+            // like ReHLDS `DELTA_FindOffset`.
+            let layout = field_layout(struct_name, &field_name).ok_or_else(|| {
+                ProtoError::Delta(format!(
+                    "no C struct offset for field '{field_name}' of delta struct '{struct_name}'"
+                ))
+            })?;
 
             fields.push(DeltaFieldDesc {
                 field_type,
                 name: field_name,
-                field_offset: (fields.len() * 4) as u16,
-                field_size,
+                field_offset: layout.offset,
+                // ReHLDS `DELTA_ParseField` sets `fieldSize = 1` for every parsed field.
+                field_size: 1,
                 significant_bits,
                 premultiply,
                 postmultiply,
@@ -1535,5 +1539,90 @@ mod tests {
         assert_eq!(decoded_ent.sequence, 7);
         assert_eq!(decoded_ent.weaponmodel, 19);
         assert!((decoded_ent.animtime - 10.25).abs() < 0.02);
+    }
+
+    /// `svc_deltadescription` for `clientdata_t` carries the real C offsets of the 32-bit
+    /// struct (`fieldOffset` of the meta delta), and the ReHLDS `fieldSize` of 1.
+    #[test]
+    fn clientdata_description_wire_carries_real_c_offsets() {
+        let reg = DeltaRegistry::cs16_default();
+        let schema = reg.get("clientdata_t").unwrap();
+        let mut w = MsgWriter::new();
+        write_delta_description(&mut w, schema);
+        let mut r = MsgReader::new(w.as_slice());
+        let on_wire = read_delta_description(&mut r).unwrap();
+        assert_eq!(on_wire.name, "clientdata_t");
+        let offset = |name: &str| {
+            on_wire
+                .fields
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap_or_else(|| panic!("{name} not on the wire"))
+                .field_offset
+        };
+        // The values IDA shows for the original client's clientdata_t.
+        assert_eq!(offset("viewmodel"), 24);
+        assert_eq!(offset("origin[0]"), 0);
+        assert_eq!(offset("origin[2]"), 8);
+        assert_eq!(offset("velocity[0]"), 12);
+        assert_eq!(offset("punchangle[2]"), 36);
+        assert_eq!(offset("view_ofs[2]"), 60);
+        assert_eq!(offset("m_flNextAttack"), 124);
+        assert_eq!(offset("physinfo"), 140);
+        assert_eq!(offset("fuser3"), 420);
+        assert_eq!(offset("vuser4[1]"), 468);
+        assert!(on_wire.fields.iter().all(|f| f.field_size == 1));
+        let entity = reg.get("entity_state_player_t").unwrap();
+        assert_eq!(
+            entity.fields.iter().find(|f| f.name == "modelindex").unwrap().field_offset,
+            40
+        );
+    }
+
+    /// Every described field of every built-in struct has a real, distinct-per-member offset.
+    #[test]
+    fn built_in_schemas_have_no_fake_offsets() {
+        let reg = DeltaRegistry::cs16_default();
+        for schema in reg.iter() {
+            for f in &schema.fields {
+                let layout = field_layout(&schema.name, &f.name)
+                    .unwrap_or_else(|| panic!("{}.{} has no layout", schema.name, f.name));
+                assert_eq!(f.field_offset, layout.offset, "{}.{}", schema.name, f.name);
+            }
+            let mut offsets: Vec<u16> = schema.fields.iter().map(|f| f.field_offset).collect();
+            offsets.sort_unstable();
+            offsets.dedup();
+            assert_eq!(offsets.len(), schema.fields.len(), "{} reuses an offset", schema.name);
+        }
+    }
+
+    /// The hard-coded meta delta agrees with the `delta_description_s` layout.
+    #[test]
+    fn meta_delta_offsets_match_the_c_struct() {
+        for f in &meta_delta_schema().fields {
+            assert_eq!(
+                f.field_offset,
+                field_layout("delta_description_t", &f.name).unwrap().offset,
+                "{}",
+                f.name
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_field_or_struct_is_a_parse_error() {
+        let bad_field = "clientdata_t none
+{
+	DEFINE_DELTA( not_a_member, DT_INTEGER, 8, 1.0 )
+}
+";
+        let err = parse_delta_lst(bad_field).unwrap_err().to_string();
+        assert!(err.contains("not_a_member"), "{err}");
+        let bad_struct = "mystery_t none
+{
+	DEFINE_DELTA( flags, DT_INTEGER, 8, 1.0 )
+}
+";
+        assert!(parse_delta_lst(bad_struct).is_err());
     }
 }
