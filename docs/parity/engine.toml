@@ -241,12 +241,12 @@ evidence = "Known gap: HealthInfo, Account and ReqState, which the newer mp.dll 
 [[item]]
 id = "entities_in_sphere"
 status = "tested"
-evidence = "the sphere-query tests of crates/cs-engine/src/api_entities.rs updated by the phase 2D final fix wave (the controller names them at merge): FindEntityInSphere (rh_pr_cmds.cpp:859-889) measures from the point to the absmin/absmax box of the entity, skips edicts with no classname and inactive client slots; an HE grenade 360 units from the origin with its hull edge inside 350 units is found"
+evidence = "crates/cs-engine/src/api_entities.rs::tests::entities_in_sphere_is_the_distance_to_the_box_and_skips_the_unlisted, a_hull_edge_inside_the_radius_counts_though_the_origin_is_outside; FindEntityInSphere (rh_pr_cmds.cpp:859-889) measures from the point to the absmin/absmax box of the entity, skips edicts with no classname and inactive client slots; an HE grenade 360 units from the origin with its hull edge inside 350 units is found"
 
 [[item]]
 id = "resource_list_order"
 status = "tested"
-evidence = "the resource-order test added to crates/cs-engine by the phase 2D final fix wave (the controller names it at merge): SV_CreateResourceList (rh_sv_main.cpp:5787) writes the generic resources, then the sounds, the models, the decals and the events"
+evidence = "crates/cs-engine/src/precache.rs::tests::resource_list_orders_generic_sounds_models_decals_events; SV_CreateResourceList (rh_sv_main.cpp:5787) writes the generic resources, then the sounds, the models, the decals and the events"
 
 [[item]]
 id = "baseline_entity_numbers"
