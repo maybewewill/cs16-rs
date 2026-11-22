@@ -8,6 +8,11 @@
 //! was sent: a count of what the server did, not of time, so a command is not sent before the
 //! server has had frames to show the menu it answers. Exits with status 0 only when the probe
 //! reached `InGame`.
+//!
+//! Offline, on capture files:
+//!
+//! - `cs-probe --dump CAPTURE [--from S] [--to S] [--no-entities]` prints one line per message.
+//! - `cs-probe --diff A B [--no-entities]` prints what differs between two captures.
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> std::process::ExitCode {
@@ -38,7 +43,8 @@ mod native {
 
     pub const USAGE: &str =
         "usage: cs-probe --connect <ip:port> [--name N] [--seconds S] [--capture FILE] [--walk] \
-         [--cmd \"<line>\"]... [--cmd-gap N]";
+         [--cmd \"<line>\"]... [--cmd-gap N]\n       cs-probe --dump CAPTURE [--from S] [--to S] \
+         [--no-entities]\n       cs-probe --diff A B [--no-entities]";
 
     /// Steam ID sent in the LAN auth ticket (`sv_lan 1` does not check it).
     const LAN_STEAM_ID: u64 = 76_561_197_960_265_729;
@@ -131,8 +137,110 @@ mod native {
         datagrams_in >= baseline.saturating_add(gap) && gap != u64::MAX
     }
 
+    /// What the offline modes were asked to do.
+    #[derive(Debug, PartialEq)]
+    pub enum Offline {
+        Dump {
+            path: PathBuf,
+            from: Option<f64>,
+            to: Option<f64>,
+            entities: bool,
+        },
+        Diff {
+            a: PathBuf,
+            b: PathBuf,
+            entities: bool,
+        },
+    }
+
+    /// `Some` when `args` ask for `--dump` or `--diff`.
+    pub fn parse_offline(args: &[String]) -> Option<Result<Offline, String>> {
+        let mode = args.first()?.as_str();
+        if mode != "--dump" && mode != "--diff" {
+            return None;
+        }
+        Some(parse_offline_mode(mode, &args[1..]))
+    }
+
+    fn parse_offline_mode(mode: &str, args: &[String]) -> Result<Offline, String> {
+        let mut files = Vec::new();
+        let (mut from, mut to, mut entities) = (None, None, true);
+        let mut args = args.iter();
+        while let Some(arg) = args.next() {
+            let mut seconds = |name: &str| -> Result<f64, String> {
+                let v = args.next().ok_or(format!("{name} needs a value"))?;
+                v.parse::<f64>()
+                    .ok()
+                    .filter(|s| s.is_finite())
+                    .ok_or(format!("{name}: not a number of seconds: {v}"))
+            };
+            match arg.as_str() {
+                "--no-entities" => entities = false,
+                "--from" if mode == "--dump" => from = Some(seconds("--from")?),
+                "--to" if mode == "--dump" => to = Some(seconds("--to")?),
+                other if other.starts_with("--") => {
+                    return Err(format!("{mode}: unknown argument `{other}`"));
+                }
+                file => files.push(PathBuf::from(file)),
+            }
+        }
+        match (mode, files.len()) {
+            ("--dump", 1) => Ok(Offline::Dump {
+                path: files.remove(0),
+                from,
+                to,
+                entities,
+            }),
+            ("--diff", 2) => {
+                let b = files.remove(1);
+                Ok(Offline::Diff {
+                    a: files.remove(0),
+                    b,
+                    entities,
+                })
+            }
+            ("--dump", _) => Err("--dump needs one capture file".to_string()),
+            _ => Err("--diff needs two capture files".to_string()),
+        }
+    }
+
+    fn load(path: &std::path::Path) -> Result<cs_probe::dump::Decoded, String> {
+        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let records = cs_probe::read_capture(&bytes)
+            .map_err(|e| format!("{}: unreadable capture: {e}", path.display()))?;
+        Ok(cs_probe::dump::decode_capture(&records))
+    }
+
+    fn run_offline(mode: Offline) -> Result<ExitCode, String> {
+        match mode {
+            Offline::Dump {
+                path,
+                from,
+                to,
+                entities,
+            } => {
+                let decoded = load(&path)?;
+                let opts = cs_probe::dump::DumpOptions { from, to, entities };
+                print!("{}", cs_probe::dump::format_dump(&decoded, &opts));
+            }
+            Offline::Diff { a, b, entities } => {
+                let report = cs_probe::diff::diff_captures(
+                    &load(&a)?,
+                    &load(&b)?,
+                    &cs_probe::diff::DiffOptions { entities },
+                );
+                print!("{}", report.format());
+            }
+        }
+        Ok(ExitCode::SUCCESS)
+    }
+
     pub fn run(args: impl Iterator<Item = String>) -> Result<ExitCode, String> {
-        let args = parse_args(args)?;
+        let args: Vec<String> = args.collect();
+        if let Some(offline) = parse_offline(&args) {
+            return run_offline(offline?);
+        }
+        let args = parse_args(args.into_iter())?;
         let bind = if args.server.is_ipv4() {
             "0.0.0.0:0"
         } else {
@@ -229,13 +337,46 @@ mod native {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    use super::native::{gap_elapsed, parse_args_for_tests};
+    use super::native::{Offline, gap_elapsed, parse_args_for_tests, parse_offline};
 
     fn args(list: &[&str]) -> impl Iterator<Item = String> + use<> {
         list.iter()
             .map(|s| s.to_string())
             .collect::<Vec<_>>()
             .into_iter()
+    }
+
+    #[test]
+    fn offline_modes_are_parsed() {
+        let v = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(parse_offline(&v(&["--connect", "127.0.0.1:1"])).is_none());
+        assert_eq!(
+            parse_offline(&v(&["--dump", "a.cs48cap", "--from", "1.5", "--no-entities"])),
+            Some(Ok(Offline::Dump {
+                path: "a.cs48cap".into(),
+                from: Some(1.5),
+                to: None,
+                entities: false
+            }))
+        );
+        assert_eq!(
+            parse_offline(&v(&["--diff", "a", "b"])),
+            Some(Ok(Offline::Diff {
+                a: "a".into(),
+                b: "b".into(),
+                entities: true
+            }))
+        );
+        for bad in [
+            &["--dump"][..],
+            &["--dump", "a", "b"],
+            &["--diff", "a"],
+            &["--dump", "a", "--from"],
+            &["--dump", "a", "--from", "x"],
+            &["--diff", "a", "b", "--from", "1"],
+        ] {
+            assert!(parse_offline(&v(bad)).unwrap().is_err(), "{bad:?}");
+        }
     }
 
     #[test]

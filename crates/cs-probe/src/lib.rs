@@ -7,6 +7,10 @@
 //! against a reference server.
 
 pub mod capture;
+pub mod diff;
+pub mod dump;
+#[cfg(test)]
+mod test_support;
 
 use std::collections::{BTreeMap, VecDeque};
 
