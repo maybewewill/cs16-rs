@@ -102,9 +102,10 @@ impl<G: GameDll> Server<G> {
     /// dispatch order and the character cleaning of echoed text.
     ///
     /// Commands:
-    /// - `status`: lines `hostname: <ServerConfig::hostname>` (the one source of the name: the
-    ///   same text is in `svc_serverinfo` and the A2S info reply; the `hostname` cvar is not
-    ///   consulted) and `map: <name>`, then one line per connected client, columns separated by
+    /// - `status`: lines `hostname: <the hostname cvar>` (the one source of the name, as in the
+    ///   original: [`Server::hostname`], which `--hostname` and a console `hostname X` both
+    ///   set; the same text is in `svc_serverinfo`, the A2S info reply and the game's MOTD
+    ///   title) and `map: <name>`, then one line per connected client, columns separated by
     ///   one space: `<slot> <userid> "<name>" <state> <ping>ms <address>`. The slot is 1-based as in
     ///   HLDS, the state `connecting` (signing on) or `active`.
     /// - `kick <#userid | slot | name> [reason]`: `#N` is a userid, a bare number a `status`
@@ -158,7 +159,7 @@ impl<G: GameDll> Server<G> {
     fn console_status(&self) -> ConsoleOutcome {
         let mut text = format!(
             "hostname: {}\nmap: {}\n",
-            clean(&self.cfg.hostname),
+            clean(&self.hostname()),
             clean(&self.map.name)
         );
         for (index, client) in self.clients.iter().enumerate() {

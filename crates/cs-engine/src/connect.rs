@@ -88,7 +88,7 @@ impl<G: GameDll> Server<G> {
             })
             .collect();
         let query = cs16_server_query_info(
-            &self.cfg.hostname,
+            &self.hostname(),
             &self.map.name,
             players.len(),
             usize::from(self.cfg.max_clients),

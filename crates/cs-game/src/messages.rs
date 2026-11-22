@@ -390,6 +390,23 @@ pub(crate) fn set_scoreboard_attributes(g: &GameState, eng: &mut EngineApi<'_>, 
     }
 }
 
+/// `SetScoreboardAttributes` as `Spawn()` of `ClientPutInServer` runs it: `Spawn` has just set
+/// `pev->deadflag = DEAD_NO`, so the player is shown alive (flags 0); `ClientPutInServer` makes
+/// it `DEAD_DEAD` only afterwards. The first `InitHUD` shows it dead.
+pub(crate) fn set_scoreboard_attributes_alive(g: &GameState, eng: &mut EngineApi<'_>, slot: usize) {
+    for (dest, other) in g.players.iter().enumerate() {
+        if other.is_some() {
+            eng.send_usermsg(
+                MsgDest::One(dest as u8),
+                &CsUserMsg::ScoreAttrib {
+                    player_id: entity_index(slot),
+                    flags: 0,
+                },
+            );
+        }
+    }
+}
+
 /// `gmsgRoundTime` to `slot` (`CBasePlayer::SyncRoundTimer`): the seconds left on the round
 /// clock (`GetRoundRemainingTimeReal`, which is `GetRoundRemainingTime` in vanilla), or 0 when
 /// it has run out. The freeze period counts down the freeze time. (The bomb and career

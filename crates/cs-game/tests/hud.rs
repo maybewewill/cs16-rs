@@ -284,6 +284,15 @@ fn usermsgs_registered_in_regamedll_order() {
     }
 }
 
+/// The user messages of `Spawn()` inside `ClientPutInServer` for a player that has only connected
+/// (`m_bJustConnected`: `PlayerSpawn` returns at once), in the order of `player.cpp` `Spawn`:
+/// the goggles off (`NVGToggle`), `SetProgressBarTime(0)`, `SetScoreboardAttributes`, `TeamInfo`,
+/// `ScoreInfo`, the fade, `SyncRoundTimer` and the flashlight. (`SVC_ROOMTYPE` goes first.)
+pub const SPAWN_ON_CONNECT: &[&str] = &[
+    "NVGToggle", "BarTime", "ScoreAttrib", "TeamInfo", "ScoreInfo", "ScreenFade", "RoundTime",
+    "Flashlight",
+];
+
 /// What the first command's `PlayerPreThink` sends: the join menus (`JoiningThink`).
 const FIRST_MENU: &[&str] = &["ShowMenu", "StatusIcon", "ItemStatus", "VGUIMenu"];
 
@@ -321,6 +330,41 @@ const FIRST_UPDATE: &[&str] = &[
     "Train",
 ];
 
+/// What a joining client is sent up to the team menu, as ReGameDLL sends it: the `Spawn()` of
+/// `ClientPutInServer`, `#Game_connected`, the menus of the first command's `PreThink`, the first
+/// `UpdateClientData` (ResetHUD, InitHUD, the rules' `InitHUD`, Money, ..., RoundTime, HideWeapon,
+/// ...). Exact order, and the wire's `ClientData.weapons` has no `WEAPON_SUIT` bit before the
+/// player has joined (`PlayerSpawn` gives the suit, and it returns at once for a joiner).
+/// What the original client does with the round timer it is told here is not decided by this
+/// test (see the join-screen report).
+#[test]
+fn join_hud_messages_as_regamedll() {
+    let mut b = Bench::with_one_client(2, b"");
+    b.step(20);
+    let names = b.names_from(0, 0);
+    let mut expected: Vec<&str> = SPAWN_ON_CONNECT.to_vec();
+    expected.push("TextMsg");
+    expected.extend(FIRST_MENU);
+    expected.extend(FIRST_UPDATE);
+    assert_eq!(names[..expected.len()], *expected);
+    assert!(names[expected.len()..].iter().all(|n| n == "ShowMenu" || n == "VGUIMenu"));
+    // `RoundTime` twice: `Spawn()` and the first update; no `ShowTimer`; `HideWeapon` once, the
+    // flashlight bit only.
+    assert_eq!(names.iter().filter(|n| *n == "RoundTime").count(), 2);
+    assert!(!names.iter().any(|n| n == "ShowTimer"));
+    let hides: Vec<CsUserMsg> = b
+        .messages(0)
+        .into_iter()
+        .filter(|(n, _)| n == "HideWeapon")
+        .map(|(_, m)| m)
+        .collect();
+    assert_eq!(hides, [CsUserMsg::HideWeapon(2)]);
+    // The client data as the probe decoded it from the wire (the last one received, before any
+    // team was chosen): no `WEAPON_SUIT` bit.
+    let data = b.probes[0].client_data().expect("the probe received client data");
+    assert_eq!(data.weapons & (1 << 31), 0, "WEAPON_SUIT before joining");
+}
+
 #[test]
 fn init_hud_sequence_as_regamedll() {
     let mut b = Bench::with_one_client(2, b"");
@@ -331,6 +375,9 @@ fn init_hud_sequence_as_regamedll() {
     // that follow `sendents` in the same packet, as ReHLDS runs them after `begin`), and
     // `PlayerPreThink` runs for every command, so the team menu (`teams::pre_think`) goes out
     // before the first update, which is built at the end of that frame: the HUD follows it, once.
+    // Before it, the messages of the `Spawn()` that `ClientPutInServer` runs (`SPAWN_ON_CONNECT`).
+    assert_eq!(names[..SPAWN_ON_CONNECT.len()], *SPAWN_ON_CONNECT, "Spawn() of ClientPutInServer");
+    let names = &names[SPAWN_ON_CONNECT.len()..];
     assert_eq!(names[0], "TextMsg");
     let names = &names[1..];
     assert_eq!(names[..FIRST_MENU.len()], *FIRST_MENU, "the first command's PreThink");
@@ -350,10 +397,9 @@ fn init_hud_sequence_as_regamedll() {
         find("ScoreInfo")[0],
         CsUserMsg::ScoreInfo { player_id: 1, frags: 0, deaths: 0, class_id: 0, team_id: 0 }
     );
-    assert_eq!(
-        find("TeamInfo"),
-        [CsUserMsg::TeamInfo { player_id: 1, team_name: "UNASSIGNED".into() }]
-    );
+    // Once from `Spawn()` of the join, once from `InitHUD`.
+    let unassigned = CsUserMsg::TeamInfo { player_id: 1, team_name: "UNASSIGNED".into() };
+    assert_eq!(find("TeamInfo"), [unassigned.clone(), unassigned]);
     // The terrorists' score first, then the counter-terrorists' (InitHUD), the other way
     // round in UpdateClientData.
     let scores: Vec<String> = find("TeamScore")
@@ -371,7 +417,9 @@ fn init_hud_sequence_as_regamedll() {
         find("ServerName"),
         [CsUserMsg::ServerName("Counter-Strike 1.6 Rust".into())]
     );
-    assert_eq!(find("ScoreAttrib")[0], CsUserMsg::ScoreAttrib { player_id: 1, flags: 1 });
+    // `Spawn()` shows the player alive (it is `DEAD_NO` for the length of `Spawn`), `InitHUD` dead.
+    assert_eq!(find("ScoreAttrib")[0], CsUserMsg::ScoreAttrib { player_id: 1, flags: 0 });
+    assert_eq!(find("ScoreAttrib")[1], CsUserMsg::ScoreAttrib { player_id: 1, flags: 1 });
     assert_eq!(find("SetFOV"), [CsUserMsg::SetFov(90)]);
     // A joiner's cached hide-HUD value is 0 (vanilla), and the first command's `PreThink` set
     // the flashlight bit before this first update (`flashlight_cvar_hides_the_flashlight_hud`),
@@ -385,8 +433,10 @@ fn init_hud_sequence_as_regamedll() {
             armor_damage: 0,
             health_damage: 0,
             damage_bits: 0,
-            // From inside the player, which waits at the first counter-terrorist spawn point.
-            origin: glam::Vec3::new(100.0, 0.0, 1.0)
+            // From inside the player, which waits at a counter-terrorist spawn point: the first
+            // one after the terrorist point `Spawn()` of the join recorded as the last (this
+            // map lists them alternately: vanilla's search goes on from that entity).
+            origin: glam::Vec3::new(200.0, 0.0, 1.0)
         }]
     );
 
@@ -397,12 +447,16 @@ fn init_hud_sequence_as_regamedll() {
     b.step(20);
     let names = b.names_from(second, 0);
     let scoreboard = names.iter().filter(|n| *n == "TeamInfo").count();
-    assert_eq!(scoreboard, 2);
+    assert_eq!(scoreboard, 3);
     assert_eq!(names.iter().filter(|n| *n == "InitHUD").count(), 1);
-    assert_eq!(names.iter().filter(|n| *n == "ScoreInfo").count(), 3);
+    assert_eq!(names.iter().filter(|n| *n == "ScoreInfo").count(), 4);
     // The newcomer's marks go to every player (`SetBombIcon` ends in `SetScoreboardAttributes`).
-    // The first one hears the connect line (`#Game_connected`) of the second.
-    assert_eq!(b.names_from(0, before), ["TextMsg", "ScoreAttrib"]);
+    // The first one hears the `Spawn()` of the second's join (its mark, `TeamInfo`, `ScoreInfo`),
+    // the connect line (`#Game_connected`) and the mark of the second's first update.
+    assert_eq!(
+        b.names_from(0, before),
+        ["ScoreAttrib", "TeamInfo", "ScoreInfo", "TextMsg", "ScoreAttrib"]
+    );
     assert_eq!(
         b.messages(0).last().unwrap().1,
         CsUserMsg::ScoreAttrib { player_id: 2, flags: 1 }
@@ -438,7 +492,8 @@ fn a_spawn_starts_the_hud_over_without_the_welcome() {
         .iter()
         .filter(|m| matches!(m, SvcMessage::RoomType(0)))
         .count();
-    assert_eq!(room_types, 1);
+    // The join's `Spawn()` and this one.
+    assert_eq!(room_types, 2);
 }
 
 #[test]
@@ -638,7 +693,7 @@ fn full_server_init_hud_fits() {
     let last = b.messages(31);
     // (and its own spawn's `TeamInfo` to everyone, which `Spawn` sends before the first update)
     let teams = last.iter().filter(|(n, _)| n == "TeamInfo").count();
-    assert_eq!(teams, 33);
+    assert_eq!(teams, 34);
     let motd = last.iter().filter(|(n, _)| n == "MOTD").count();
     assert_eq!(motd, 26);
     // The 31 players alive when it came in are on its radar.

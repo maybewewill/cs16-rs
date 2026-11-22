@@ -583,12 +583,58 @@ pub(crate) fn player_slot(g: &GameState, eng: &EngineApi<'_>, id: EdictId) -> Op
     slot_of(eng, id).filter(|&s| g.players[s].is_some())
 }
 
+/// The `pPlayer->Spawn()` that `ClientPutInServer` runs for a player that has only connected
+/// (`m_bJustConnected`, `m_bNotKilled` true; ReGameDLL `player.cpp` `Spawn`, read 2026-11-22),
+/// what survives of it once `ClientPutInServer` has overwritten the player's state:
+/// - `GetPlayerSpawnSpot` for a player on no team (`EntSelectSpawnPoint`: the first
+///   `info_player_deathmatch`, which becomes `g_pLastCTSpawn`), which puts the player there;
+/// - `m_fInitHUD` (a new [`Player`] has it set) and the `m_iHideHUD` clears (nothing to clear);
+/// - the messages, in the order of `Spawn`: `SVC_ROOMTYPE`, `NVGToggle 0`, then (after
+///   `PlayerSpawn`, which returns at once for `m_bJustConnected`: no suit bit, no equipment, no
+///   model) `SetProgressBarTime(0)` (`BarTime 0`), `SetScoreboardAttributes`, `TeamInfo` and
+///   `ScoreInfo` to everyone (team `UNASSIGNED`), `UTIL_ScreenFade(0.001)`, `SyncRoundTimer` and
+///   `Flashlight 0, 99`. `UpdateLocation` sends nothing (no bots, the player is `DEAD_NO` only
+///   for the length of `Spawn`).
+fn spawn_on_connect(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    crate::world::get_player_spawn_spot(g, eng, slot);
+    send_room_type(eng, slot);
+    crate::hud_misc::on_spawn(g, eng, slot);
+    eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::BarTime(0));
+    messages::set_scoreboard_attributes_alive(g, eng, usize::from(slot));
+    let id = eng.client_edict(slot);
+    if let Some(p) = g.players[usize::from(slot)].as_ref() {
+        eng.send_usermsg(
+            MsgDest::All,
+            &CsUserMsg::TeamInfo {
+                player_id: id.index as u8,
+                team_name: teams::team_name(p.team).to_string(),
+            },
+        );
+        messages::score_info(eng, id.index, p);
+    }
+    observer::screen_fade(eng, slot, 0.001, 0.0, 0, observer::FFADE_IN);
+    messages::sync_round_timer(g, eng, slot);
+    // `m_iFlashBattery = 99` (`Spawn`), the message with the flashlight off.
+    messages::send_raw(eng, MsgDest::One(slot), "Flashlight", &[0, 99]);
+}
+
+/// `SVC_ROOMTYPE` with the `room_type` cvar (`Spawn`).
+fn send_room_type(eng: &mut EngineApi<'_>, slot: u8) {
+    let room_type = eng.cvar_f32("room_type") as i32 as i16 as u16;
+    let [lo, hi] = room_type.to_le_bytes();
+    eng.send(MsgDest::One(slot), &[svc::ROOMTYPE, lo, hi]);
+}
+
 /// `ClientPutInServer` of a multiplayer game (ReGameDLL `client.cpp`, read 2026-11-22): the
 /// player enters with no team, invisible, not solid and taking no damage, until it is spawned.
 /// With a `trigger_camera` that has a target it stands at the camera, looking at the target, with
 /// no view offset ([`intro::join_view`]); else it stands at the counter-terrorists' spawn point
 /// (the `GetPlayerSpawnSpot` of the original's no-camera path) with `v_angle` zero and the
-/// spot's angles, and keeps the view offset `VEC_VIEW`. The original keeps the player as a
+/// spot's angles, and keeps the view offset `VEC_VIEW`. Known gap: the original's no-camera path
+/// ends with `pev->angles = gpGlobals->v_forward`, a stale global (the last `MakeVectors`, a
+/// direction vector used as angles), which is not reproduced; the spot's angles stand.
+///
+/// It begins with the `Spawn()` of the original ([`spawn_on_connect`]). The original keeps the player as a
 /// `MOVETYPE_NOCLIP` spectator with `models/player.mdl` while it looks at the menus; with no
 /// menus yet, this is `MOVETYPE_NONE` and no model.
 pub(crate) fn put_in_server(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
@@ -614,6 +660,7 @@ pub(crate) fn put_in_server(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8
     }
     g.players[index] = Some(player);
     let id = eng.client_edict(slot);
+    spawn_on_connect(g, eng, slot);
     let (origin, angles, view_ofs) = match view {
         Some((origin, angles)) => (origin, angles, Vec3::ZERO),
         None => {
@@ -893,9 +940,7 @@ pub(crate) fn spawn(
     // `UTIL_ScreenFade(this, Vector(0, 0, 0), 0.001)` that clears a fade left from the death
     // (6132), and `SyncRoundTimer` (6133). (`UpdateLocation` is not ported.) The first client
     // data update (`m_fInitHUD`) sends the round timer again, as `UpdateClientData` does.
-    let room_type = eng.cvar_f32("room_type") as i32 as i16 as u16;
-    let [lo, hi] = room_type.to_le_bytes();
-    eng.send(MsgDest::One(slot), &[svc::ROOMTYPE, lo, hi]);
+    send_room_type(eng, slot);
     if lost_items {
         crate::buy::send_item_status(eng, slot, false);
     }

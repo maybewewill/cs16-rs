@@ -71,16 +71,17 @@ fn status_lists_connected_clients() {
         lines[3]
     );
 
-    // One source for the name: the configuration. The `hostname` cvar is not consulted, so
-    // `status`, `svc_serverinfo` and the A2S info reply cannot disagree.
+    // One source for the name: the `hostname` cvar. After a console `hostname X`, `status`,
+    // the `svc_serverinfo` of the next client and the server's name agree.
     out(&mut h, "hostname \"My Server\"");
-    let configured = h.server.config().hostname.clone();
-    assert!(out(&mut h, "status").starts_with(&format!("hostname: {configured}\nmap: test\n")));
-    let served = a.messages().iter().find_map(|m| match m {
+    assert_eq!(h.server.hostname(), "My Server");
+    assert!(out(&mut h, "status").starts_with("hostname: My Server\nmap: test\n"));
+    let c = joined(&mut h, "Carol", &mut [&mut a, &mut b]);
+    let served = c.messages().iter().find_map(|m| match m {
         SvcMessage::ServerInfo(info) => Some(info.hostname.clone()),
         _ => None,
     });
-    assert_eq!(served, Some(configured));
+    assert_eq!(served.as_deref(), Some("My Server"));
 }
 
 #[test]

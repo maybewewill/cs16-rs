@@ -171,6 +171,16 @@ impl NetStats {
 }
 
 impl<G: GameDll> Server<G> {
+    /// The server's name: the `hostname` cvar, which [`Server::new`] sets from
+    /// `ServerConfig::hostname` and the console may change (the original has this one cvar for
+    /// `status`, `svc_serverinfo`, the A2S info reply and the MOTD title). A registry with no
+    /// such cvar gives the configured name.
+    pub fn hostname(&self) -> String {
+        self.cvars
+            .get("hostname")
+            .map_or_else(|| self.cfg.hostname.clone(), |c| c.value.clone())
+    }
+
     pub fn new(
         cfg: ServerConfig,
         map: ServerMap,
@@ -812,7 +822,7 @@ impl<G: GameDll> Server<G> {
             player_slot: slot,
             is_deathmatch: true,
             game_dir: self.cfg.game_dir.clone(),
-            hostname: self.cfg.hostname.clone(),
+            hostname: self.hostname(),
             map_path: self.map.path.clone(),
             map_cycle: String::new(),
             vac_secure: false,

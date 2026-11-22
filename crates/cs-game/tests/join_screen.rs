@@ -174,61 +174,6 @@ fn no_camera_join_path_unchanged() {
     assert!(!later.has_camera);
 }
 
-/// The messages a joining client gets before it chooses a team, as ReGameDLL sends them
-/// (`UpdateClientData` after `m_fInitHUD`, `SyncRoundTimer`): the round timer is told once, after
-/// the money, as the seconds left on the round clock (the freeze period of a young server), and
-/// the server hides nothing of it: no `ShowTimer`, no `HIDEHUD_TIMER` or `HIDEHUD_ALL` in
-/// `HideWeapon` (the only bit is the flashlight's). The source has no server-side reason for the
-/// original client not to draw a joiner's timer (see the report): this pins what is sent.
-#[test]
-fn round_timer_hidden_until_joined() {
-    let map = ServerMap::stub_with_entities("test", stub_spawns());
-    let mut b = Bench::with_config(map, config("x"), &[], true);
-    b.idle_cmds = true;
-    b.step(20);
-    let msgs = b.messages();
-    let times: Vec<u16> = msgs
-        .iter()
-        .filter_map(|m| match m {
-            CsUserMsg::RoundTime(t) => Some(*t),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(times.len(), 1, "told once, in the first client data update");
-    assert!(times[0] > 0 && times[0] <= 8, "{}", times[0]);
-    assert!(msgs.iter().all(|m| !matches!(m, CsUserMsg::ShowTimer)));
-    let hides: Vec<u8> = msgs
-        .iter()
-        .filter_map(|m| match m {
-            CsUserMsg::HideWeapon(bits) => Some(*bits),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(hides, [1 << 1], "only the flashlight is hidden");
-    // The round timer comes after the money in that update.
-    let money = msgs.iter().position(|m| matches!(m, CsUserMsg::Money { .. }));
-    let timer = msgs.iter().position(|m| matches!(m, CsUserMsg::RoundTime(_)));
-    assert!(money < timer);
-
-    // A server that has run past the freeze period (the round clock now counts the round time)
-    // tells a newcomer once as well.
-    b.step(1000);
-    let mut late = b.add_probe("late");
-    b.step_both(&mut late, 40);
-    let told: Vec<u16> = late
-        .messages()
-        .iter()
-        .filter_map(|m| match m {
-            cs_proto48::messages::SvcMessage::UserMsg {
-                decoded: CsUserMsg::RoundTime(t),
-                ..
-            } => Some(*t),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(told.len(), 1, "once, whatever the round has come to: {told:?}");
-}
-
 #[test]
 fn server_name_follows_hostname() {
     // `--hostname` sets the `hostname` cvar (the server's configuration is its source), and the
