@@ -66,6 +66,9 @@ pub(crate) struct Outbox {
     /// The commands `EngineApi::run_player_move` queued, run in order after the game call that
     /// queued them returns (the game is never called from inside a game call).
     pub(crate) fake_moves: Vec<FakeMove>,
+    /// Moves `EngineApi::run_player_move` refused (not finite, not a fake client's slot, queue
+    /// full); the server adds them to `NetStats::fake_moves_dropped`.
+    pub(crate) fake_moves_dropped: u64,
 }
 
 /// One `PF_RunPlayerMove_I` waiting to run.
@@ -97,6 +100,7 @@ impl Outbox {
             reliable_all: MsgWriter::new(),
             fake_created: Vec::new(),
             fake_moves: Vec::new(),
+            fake_moves_dropped: 0,
         }
     }
 
@@ -323,7 +327,8 @@ impl EngineApi<'_> {
     /// does not take part in lag compensation (`SV_SetupMove` and `SV_RestoreMove` are skipped
     /// for it) and is never sent movevars. Nothing is queued for a slot that is not a fake
     /// client (the source would run it for any client; that is not supported here), for numbers
-    /// that are not finite, or when `MAX_QUEUED_FAKE_MOVES` are already waiting.
+    /// that are not finite, or when `MAX_QUEUED_FAKE_MOVES` are already waiting; each refusal is
+    /// counted in `NetStats::fake_moves_dropped`.
     #[allow(clippy::too_many_arguments)]
     pub fn run_player_move(
         &mut self,
@@ -343,6 +348,7 @@ impl EngineApi<'_> {
             || !upmove.is_finite()
             || self.outbox.fake_moves.len() >= MAX_QUEUED_FAKE_MOVES
         {
+            self.outbox.fake_moves_dropped += 1;
             return;
         }
         let cmd = GoldSrcUserCmd {

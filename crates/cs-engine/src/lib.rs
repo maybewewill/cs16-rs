@@ -74,7 +74,7 @@ pub use signon::{
 pub use touch::MAX_TOUCHES_PER_FRAME;
 pub use trace_ents::{EntTrace, MoveFilter};
 pub use usercmd::{
-    MAX_BANKED_MS, MAX_CONSECUTIVE_BAD_MOVES, MAX_DROPPED_REPLAY, MAX_FAKE_MOVES_PER_DRAIN, MAX_USERCMD_STEP_MS, MsecBudget,
+    MAX_BANKED_MS, MAX_CONSECUTIVE_BAD_MOVES, MAX_DROPPED_REPLAY, MAX_USERCMD_STEP_MS, MsecBudget,
     STRINGCMD_BURST, STRINGCMD_RATE_PER_SEC, select_cmds_to_run, select_cmds_with_seeds, split_usercmd, usercmd_is_finite,
 };
 #[doc(hidden)]

@@ -535,6 +535,7 @@ impl GameDll for TestGame {
 
     fn server_deactivate(&mut self, eng: &mut EngineApi<'_>) {
         self.server_deactivate_calls += 1;
+        self.call_order.push("deactivate".to_string());
         if let Some(map) = &self.change_level_on_deactivate {
             eng.change_level(map);
         }
@@ -594,8 +595,9 @@ impl GameDll for TestGame {
         }
     }
 
-    fn client_disconnect(&mut self, _eng: &mut EngineApi<'_>, _slot: u8) {
+    fn client_disconnect(&mut self, _eng: &mut EngineApi<'_>, slot: u8) {
         self.client_disconnect_calls += 1;
+        self.call_order.push(format!("disconnect:{slot}"));
     }
 
     fn server_command(&mut self, _eng: &mut EngineApi<'_>, argv: &[String]) -> Option<String> {

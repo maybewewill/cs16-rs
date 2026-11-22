@@ -19,7 +19,7 @@ use crate::world::consts::{FL_FROZEN, SOLID_NOT};
 
 /// Fake-client moves `Server::run_fake_moves` runs in one drain; what a game queues beyond that
 /// while they run (a think that moves a bot again, and again) is dropped.
-pub const MAX_FAKE_MOVES_PER_DRAIN: usize = 4096;
+pub(crate) const MAX_FAKE_MOVES_PER_DRAIN: usize = 4096;
 /// Movement time, in milliseconds, a client may bank ahead of the commands it sends.
 pub const MAX_BANKED_MS: f64 = 500.0;
 /// From this many dropped packets on, lost commands are no longer replayed.
@@ -408,13 +408,17 @@ impl<G: GameDll> Server<G> {
         let mut budget = MAX_FAKE_MOVES_PER_DRAIN;
         while budget > 0 && !self.outbox.fake_moves.is_empty() {
             let batch = std::mem::take(&mut self.outbox.fake_moves);
-            for FakeMove { slot, cmd } in batch.into_iter().take(budget) {
+            let kept = batch.len().min(budget);
+            self.net_stats.fake_moves_dropped += (batch.len() - kept) as u64;
+            for FakeMove { slot, cmd } in batch.into_iter().take(kept) {
                 budget -= 1;
                 self.run_fake_move(slot, &cmd);
                 self.drain_messages();
                 self.dispatch_touches();
             }
         }
+        // Over the budget: the rest is dropped and counted.
+        self.net_stats.fake_moves_dropped += self.outbox.fake_moves.len() as u64;
         self.outbox.fake_moves.clear();
         self.in_fake_moves = false;
     }

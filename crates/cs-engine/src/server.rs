@@ -156,6 +156,9 @@ pub struct NetStats {
     /// Messages `EngineApi::send` dropped because the buffer of a target slot already held more
     /// than [`MAX_RELIABLE_BACKLOG`] bytes within one game call (a game looping sends).
     pub outbox_dropped: u64,
+    /// Fake-client moves dropped: refused by `EngineApi::run_player_move` (not finite, not a
+    /// fake client, queue full) or left over when a drain ran `MAX_FAKE_MOVES_PER_DRAIN`.
+    pub fake_moves_dropped: u64,
     /// Datagrams the transport refused to send: updates, sign-on datagrams, farewells and
     /// connectionless replies.
     pub send_failures: u64,
@@ -589,6 +592,7 @@ impl<G: GameDll> Server<G> {
         self.adopt_fake_clients();
         loop {
             self.net_stats.outbox_dropped += std::mem::take(&mut self.outbox.dropped);
+            self.net_stats.fake_moves_dropped += std::mem::take(&mut self.outbox.fake_moves_dropped);
             for (slot, client) in self.clients.iter_mut().enumerate() {
                 let reliable = std::mem::take(&mut self.outbox.reliable[slot]);
                 let unreliable = std::mem::take(&mut self.outbox.unreliable[slot]);

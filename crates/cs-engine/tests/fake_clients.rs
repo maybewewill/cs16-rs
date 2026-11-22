@@ -317,7 +317,15 @@ fn level_change_drops_fake_clients_as_rehlds() {
 
     // `SV_InactivateClients`: "Dropping fakeclient on level change"; the real client signs on
     // again.
+    h.server.game_mut().call_order.clear();
     h.server.change_map(ServerMap::stub("next"));
+    // `Host_Changelevel_f` (`host_cmd.cpp` 1102-1103, read 2026-11-23): `SV_InactivateClients`
+    // (the bot is dropped, the game hears its disconnect) before `SV_ServerShutdown` (the
+    // game's `ServerDeactivate`).
+    let order = &h.server.game().call_order;
+    let disconnect = order.iter().position(|c| *c == format!("disconnect:{bot}")).expect("disconnect");
+    let deactivate = order.iter().position(|c| c == "deactivate").expect("deactivate");
+    assert!(disconnect < deactivate, "{order:?}");
     assert_eq!(h.server.client_state(bot), ClientState::Free);
     assert_eq!(h.server.fake_client_count(), 0);
     assert_eq!(h.server.game().client_disconnect_calls, 1);
@@ -352,7 +360,7 @@ fn real_clients_unchanged() {
     let lines: Vec<&str> = status.lines().collect();
     assert_eq!(lines.len(), 4, "{status}");
     assert!(lines[2].starts_with("1 ") && lines[2].contains("\"Alice\"") && lines[2].contains("ms "), "{status}");
-    assert!(lines[3].starts_with("2 ") && lines[3].ends_with("\"Bot\" active BOT"), "{status}");
+    assert!(lines[3].starts_with("2 ") && lines[3].ends_with("\"Bot\" active 0ms BOT"), "{status}");
 
     // `kick` finds a bot by name.
     assert!(console(&mut h, "kick Bot gone").starts_with("Kicked \"Bot\""));
@@ -380,4 +388,62 @@ fn real_clients_unchanged() {
         panic!("expected the info");
     };
     assert_eq!((info.players, info.bots), (2, 1));
+}
+
+#[test]
+fn refused_and_dropped_moves_are_counted() {
+    let mut h = Harness::with_game(2, game());
+    let bot = spawn_bot(&mut h, "Bot");
+    assert_eq!(h.server.net_stats().fake_moves_dropped, 0);
+    // Refused at the call: a slot that is not a fake client, numbers that are not finite, and
+    // everything past the 1024 the queue holds.
+    h.server.game_mut().act(move |eng| {
+        eng.run_player_move(1, Vec3::ZERO, 1.0, 0.0, 0.0, 0, 0, 10);
+        eng.run_player_move(bot, Vec3::ZERO, f32::NAN, 0.0, 0.0, 0, 0, 10);
+        for _ in 0..1030 {
+            eng.run_player_move(bot, Vec3::ZERO, 1.0, 0.0, 0.0, 0, 0, 1);
+        }
+    });
+    h.step(&mut [], 1);
+    assert_eq!(h.server.net_stats().fake_moves_dropped, 2 + 6);
+    assert_eq!(h.server.game().usercmd_cmds.len(), 1024);
+
+    // A bot whose every move queues two more outruns the budget of a drain: the rest is
+    // dropped and counted, and the work stays bounded.
+    let before = (h.server.game().usercmd_cmds.len(), h.server.net_stats().fake_moves_dropped);
+    h.server.game_mut().usercmd_hook.set(move |eng, slot| {
+        if slot == bot {
+            eng.run_player_move(bot, Vec3::ZERO, 2.0, 0.0, 0.0, 0, 0, 1);
+            eng.run_player_move(bot, Vec3::ZERO, 2.0, 0.0, 0.0, 0, 0, 1);
+        }
+    });
+    h.server
+        .game_mut()
+        .act(move |eng| eng.run_player_move(bot, Vec3::ZERO, 2.0, 0.0, 0.0, 0, 0, 1));
+    h.step(&mut [], 1);
+    let ran = h.server.game().usercmd_cmds.len() - before.0;
+    assert_eq!(ran, 4096);
+    assert!(h.server.net_stats().fake_moves_dropped > before.1);
+}
+
+#[test]
+fn a_bot_freed_in_the_drain_gets_no_further_step() {
+    let mut h = Harness::with_game(2, game());
+    let bot = spawn_bot(&mut h, "Bot");
+    // The game kicks the bot in its first step; the rest of that move (a split command) and the
+    // move queued after it do not run.
+    h.server.game_mut().usercmd_hook.set(move |eng, slot| {
+        if slot == bot {
+            eng.kick(slot, "out");
+        }
+    });
+    h.server.game_mut().act(move |eng| {
+        eng.run_player_move(bot, Vec3::ZERO, 1.0, 0.0, 0.0, 0, 0, 200);
+        eng.run_player_move(bot, Vec3::ZERO, 2.0, 0.0, 0.0, 0, 0, 10);
+    });
+    h.step(&mut [], 1);
+    assert_eq!(h.server.client_state(bot), ClientState::Free);
+    assert_eq!(h.server.game().usercmd_cmds.len(), 1);
+    assert_eq!(h.server.game().usercmd_cmds[0].forwardmove, 1.0);
+    assert_eq!(h.server.game().client_disconnect_calls, 1);
 }

@@ -172,10 +172,11 @@ impl<G: GameDll> Server<G> {
             };
             let name = self.views[index].userinfo.get("name").unwrap_or("");
             if client.fake {
-                // The ping and address columns read `BOT` (assumption: the source of
-                // `Host_Status_f` is not among the files read).
+                // `Host_Status_f` (ReHLDS `host_cmd.cpp` 625-635, read 2026-11-23) prints `BOT`
+                // where a client's unique id is and still prints the ping (0, `SV_CalcPing`);
+                // here the address column, which a bot has none of, reads `BOT`.
                 text.push_str(&format!(
-                    "{} {} \"{}\" {} BOT\n",
+                    "{} {} \"{}\" {} 0ms BOT\n",
                     index + 1,
                     client.userid,
                     clean(name),
