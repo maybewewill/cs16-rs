@@ -1098,9 +1098,13 @@ pub(crate) fn player_think(g: &mut GameState, slot: u8, buttons: u16) {
     else {
         return;
     };
-    let pressed = buttons & !p.last_buttons;
+    // `buttonsChanged = m_afButtonLast ^ pev->button; m_afButtonPressed = buttonsChanged &
+    // pev->button; m_afButtonReleased = buttonsChanged & ~pev->button`.
+    let changed = p.last_buttons ^ buttons;
+    let pressed = changed & buttons;
     p.last_buttons = buttons;
     p.buttons_pressed = pressed;
+    p.buttons_released = changed & !buttons;
     if g.rules.game_over && pressed & INTERMISSION_BUTTONS != 0 {
         g.rules.end_intermission_button_hit = true;
     }

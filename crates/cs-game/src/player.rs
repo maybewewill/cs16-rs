@@ -55,11 +55,12 @@ use cs_engine::{EdictId, EngineApi, EntTrace, MsgDest};
 use cs_proto48::delta::{GoldSrcClientData, GoldSrcUserCmd};
 use cs_proto48::messages::svc;
 use cs_proto48::usermsg::CsUserMsg;
-use cs_sim::pm::consts::{IN_ATTACK, IN_JUMP, PM_VEC_VIEW};
+use cs_sim::pm::consts::{IN_ATTACK, IN_JUMP, IN_USE, PM_VEC_VIEW};
 use glam::Vec3;
 
 use crate::GameState;
 use crate::bullets;
+use crate::entity::{FCAP_CONTINUOUS_USE, FCAP_IMPULSE_USE, FCAP_ONOFF_USE, UseType};
 use crate::menus::{self, Menu};
 use crate::intro;
 use crate::weapons::core::{self as weapon_core, PlayerAnim};
@@ -357,6 +358,8 @@ pub struct Player {
     pub(crate) obs: ObserverState,
     /// `m_afButtonPressed`: the buttons that went down with the last command.
     pub(crate) buttons_pressed: u16,
+    /// `m_afButtonReleased`: the buttons that went up with the last command.
+    pub(crate) buttons_released: u16,
     /// Server time of the death, `m_fDeadTime` once the player is `DEAD_DEAD`.
     pub(crate) dead_time: f64,
     /// `m_iJoiningState`: where the player is on its way into the game ([`crate::teams`]).
@@ -510,6 +513,7 @@ impl Player {
             pflag_observer: false,
             obs: ObserverState::default(),
             buttons_pressed: 0,
+            buttons_released: 0,
             dead_time: 0.0,
             joining: JoinState::ShowLText,
             intro_camera: None,
@@ -1556,9 +1560,9 @@ fn weapon_player_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
         return;
     };
     if game_over {
-        // Clear attack/use commands from the player. (`m_afButtonReleased` is not kept by
-        // this port: there is no such field to zero.)
+        // Clear attack/use commands from the player.
         p.buttons_pressed = 0;
+        p.buttons_released = 0;
         if let Some(v) = eng.ent_mut(id) {
             v.button = 0;
         }
@@ -1574,13 +1578,94 @@ fn weapon_player_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     }
 }
 
-/// `CBasePlayer::ImpulseCommands` (`player.cpp` 6816, read 2026-11-22), what is ported: impulse
-/// 100 (the flashlight, [`crate::suit::flashlight_toggle`]) and 201 (the spray,
-/// [`crate::spray::paint_decal`]); `pev->impulse` is consumed (set to 0) afterwards, whatever it
-/// was. Not ported: `PlayerUse` (the use key), impulse 99 (the logo message, a development
-/// switch) and the cheat impulses (`CheatImpulseCommands` needs `g_flWeaponCheat`, off on a
-/// server), so any other impulse is just consumed.
+/// `VIEW_FIELD_NARROW` (`util.h`): "+-45 degrees, more narrow check used to set up ranged
+/// attacks", the cosine the use key's target must beat. A `double` literal stored in a float.
+const VIEW_FIELD_NARROW: f32 = 0.7;
+
+/// `CBasePlayer::PlayerUse` (`player.cpp:4263`, read 2026-11-23, vanilla), what is ported: the
+/// use key finds the usable entity (`FCAP_IMPULSE_USE`, `FCAP_CONTINUOUS_USE` or
+/// `FCAP_ONOFF_USE`) among those within `MAX_PLAYER_USE_RADIUS` of the player's origin whose
+/// direction from the eyes is the closest to where the view points (the cosine must beat
+/// [`VIEW_FIELD_NARROW`]; the entity's position is its brush model origin `absmin + size * 0.5`,
+/// `VecBModelOrigin`), through walls ("TODO: traceline here to prevent +USEing buttons through
+/// walls"). If one is found, a press plays `common/wpn_select.wav` (volume 0.4); a held key on a
+/// continuous entity or a press on an impulse or on-off one then uses it (`Use(this, this,
+/// USE_SET, 1)`), and a release of the key on an on-off entity does so with value 0 ("This is an
+/// 'off' use"). If none is found, a press plays `common/wpn_denyselect.wav` (`UseEmpty`).
+///
+/// Not ported (gaps): `DetachTank` and the train control (`func_tank` and `func_train` are not
+/// ported, so `m_pTank` is always empty and `PFLAG_ONTRAIN` never set), `PFLAG_USING` (nothing
+/// reads it), and the hostage branch of `useNewHostages` (`!TheNavAreaList.empty() &&
+/// cv_hostage_ai_enable`: it needs the Condition Zero navigation areas, which the classic hostage
+/// of this port does not have). QUIRK kept: `ImpulseCommands`, which calls this, runs from
+/// `ItemPostFrame`, and that returns before it while `m_flNextAttack` is above 0, so the use key
+/// is dead during a weapon's deploy or attack delay.
+pub(crate) fn player_use(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    let id = eng.client_edict(slot);
+    let Some(p) = g.players.get(usize::from(slot)).and_then(Option::as_ref) else {
+        return;
+    };
+    let (pressed, released) = (i32::from(p.buttons_pressed), i32::from(p.buttons_released));
+    let Some(v) = eng.ent(id) else {
+        return;
+    };
+    let button = v.button;
+    // Was use pressed or released?
+    if (button | pressed | released) & IN_USE == 0 {
+        return;
+    }
+    let (origin, view_ofs, v_angle) = (v.origin, v.view_ofs, v.v_angle);
+    // So we know which way we are facing.
+    let (forward, _, _) = cs_sim::pm::math::angle_vectors(v_angle);
+    let mut max_dot = VIEW_FIELD_NARROW;
+    let mut closest = None;
+    for object in eng.entities_in_sphere(origin, crate::world::MAX_PLAYER_USE_RADIUS) {
+        let caps = crate::entity::object_caps_of(eng, object);
+        if caps & (FCAP_IMPULSE_USE | FCAP_CONTINUOUS_USE | FCAP_ONOFF_USE) == 0 {
+            continue;
+        }
+        let Some(o) = eng.ent(object) else {
+            continue;
+        };
+        // `VecBModelOrigin(pObject->pev) - (pev->origin + pev->view_ofs)`, `NormalizeInPlace`.
+        let los = bullets::normalize_reciprocal((o.absmin + o.size * 0.5) - (origin + view_ofs));
+        let dot = los.dot(forward);
+        // Only if the item is in front of the user.
+        if dot > max_dot {
+            max_dot = dot;
+            closest = Some(object);
+        }
+    }
+    let Some(object) = closest else {
+        if pressed & IN_USE != 0 {
+            // `UseEmpty`.
+            eng.emit_sound(id, CHAN_ITEM, "common/wpn_denyselect.wav", 0.4, ATTN_NORM, PITCH_NORM);
+        }
+        return;
+    };
+    let caps = crate::entity::object_caps_of(eng, object);
+    if pressed & IN_USE != 0 {
+        eng.emit_sound(id, CHAN_ITEM, "common/wpn_select.wav", 0.4, ATTN_NORM, PITCH_NORM);
+    }
+    if (button & IN_USE != 0 && caps & FCAP_CONTINUOUS_USE != 0)
+        || (pressed & IN_USE != 0 && caps & (FCAP_IMPULSE_USE | FCAP_ONOFF_USE) != 0)
+    {
+        crate::entity::use_entity(g, eng, object, Some(id), Some(id), UseType::Set, 1.0);
+    } else if released & IN_USE != 0 && caps & FCAP_ONOFF_USE != 0 {
+        // UNDONE (the source): send different USE codes for ON/OFF. "BUGBUG This is an 'off' use".
+        crate::entity::use_entity(g, eng, object, Some(id), Some(id), UseType::Set, 0.0);
+    }
+}
+
+/// `CBasePlayer::ImpulseCommands` (`player.cpp` 6816, read 2026-11-22), what is ported:
+/// `PlayerUse` ([`player_use`], "Handle use events", first), then impulse 100 (the flashlight,
+/// [`crate::suit::flashlight_toggle`]) and 201 (the spray, [`crate::spray::paint_decal`]);
+/// `pev->impulse` is consumed (set to 0) afterwards, whatever it was. Not ported: impulse 99 (the
+/// logo message, a development switch) and the cheat impulses (`CheatImpulseCommands` needs
+/// `g_flWeaponCheat`, off on a server), so any other impulse is just consumed.
 pub(crate) fn impulse_commands(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    // Handle use events.
+    player_use(g, eng, slot);
     let id = eng.client_edict(slot);
     let impulse = eng.ent(id).map_or(0, |v| v.impulse);
     match impulse {

@@ -23,8 +23,9 @@
 //!   `SetDmgPenetrationLevel` (empty without `REGAMEDLL_API`).
 //! - The shield (`HasShield` is false until the shield task): the shield hit branches are ported,
 //!   `IsHittingShield` never says yes yet.
-//! - Entities that are not players do not take damage yet (the game has no damageable map
-//!   entities), so `CBaseEntity::TraceAttack` has nothing to add for them.
+//! - An entity that is not a player takes the shot through its class
+//!   ([`GameEntity::trace_attack`](crate::GameEntity::trace_attack), [`GameEntity::take_damage`](crate::GameEntity::take_damage)):
+//!   a class that does not take damage adds nothing, as `CBaseEntity::TraceAttack` does.
 
 use cs_engine::consts::{MOVETYPE_PUSHSTEP, SOLID_BSP};
 use cs_engine::{EdictId, EngineApi, EntTrace, MoveFilter, MsgDest};
@@ -34,6 +35,7 @@ use cs_sim::pm::math::angle_vectors;
 use cs_sim::pm::pm_find_texture_type;
 use glam::Vec3;
 
+use crate::entity;
 use crate::player::{self, HITGROUP_SHIELD, dmg, player_slot};
 use crate::weapons::{BulletType, WeaponId, shared_random_float};
 use crate::GameState;
@@ -91,6 +93,18 @@ pub(crate) fn normalize_hl(v: Vec3) -> Vec3 {
     if len == 0.0 { Vec3::Z } else { v / len }
 }
 
+/// `Vector::Normalize()` / `NormalizeInPlace()` as `Vector` has them in the source: the length's
+/// reciprocal times each component, the zero vector `(0, 0, 1)`. (Assumption: `vector.h` is not
+/// among the fetched sources; this is the Half-Life SDK's.)
+pub(crate) fn normalize_reciprocal(v: Vec3) -> Vec3 {
+    let len = v.length();
+    if len == 0.0 {
+        return Vec3::Z;
+    }
+    let inv = 1.0 / len;
+    Vec3::new(v.x * inv, v.y * inv, v.z * inv)
+}
+
 /// `gMultiDamage`: the damage one shot has gathered for one entity. `weapon` is the active
 /// weapon of the attacker (what `TakeDamage` reads from `pAttack->m_pActiveItem`).
 #[derive(Debug, Clone, Copy)]
@@ -138,6 +152,9 @@ pub fn apply_multi_damage(
     let Some(victim) = mm.entity else { return };
     if let Some(slot) = player_slot(g, eng, victim) {
         player::take_damage_with(g, eng, slot as u8, inflictor, None, attacker, mm.weapon, mm.amount, mm.bits);
+    } else {
+        // `hEnt->TakeDamage(...)` of an entity that is not a player (a stale one is no entity).
+        entity::take_damage_of(g, eng, victim, inflictor, attacker, mm.amount, mm.bits);
     }
 }
 
@@ -609,9 +626,10 @@ pub fn fire_bullets(
 }
 
 /// `TraceAttack` of the entity `victim` (a virtual call in the source): `CBasePlayer::TraceAttack`
-/// for a player, `CBaseEntity::TraceAttack` (nothing to do: no other entity takes damage yet)
-/// for the rest. `inflictor` is the first argument `AddMultiDamage` gets (the source passes the
-/// attacker there), `tr` the trace that hit.
+/// for a player, the class's [`GameEntity::trace_attack`](crate::GameEntity::trace_attack) for
+/// the rest (`CBaseEntity::TraceAttack` unless the class has its own; the world and an edict
+/// with no game class do nothing). The attacker is the first argument `AddMultiDamage` gets (the
+/// source passes it there), `tr` the trace that hit.
 #[allow(clippy::too_many_arguments)]
 pub fn trace_attack(
     g: &mut GameState,
@@ -624,8 +642,13 @@ pub fn trace_attack(
     tr: &EntTrace,
     bits: u32,
 ) {
-    let Some(slot) = player_slot(g, eng, victim) else { return };
-    player::trace_attack(g, eng, slot, attacker, mm, damage, dir, tr, bits);
+    if let Some(slot) = player_slot(g, eng, victim) {
+        player::trace_attack(g, eng, slot, attacker, mm, damage, dir, tr, bits);
+        return;
+    }
+    entity::with_entity(g, eng, victim, |entity, g, eng| {
+        entity.trace_attack(g, eng, victim, attacker, mm, damage, dir, tr, bits);
+    });
 }
 
 /// Entry points for the tests (cargo feature `test-hooks`): the weapons that fire bullets come

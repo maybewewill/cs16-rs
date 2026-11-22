@@ -924,13 +924,14 @@ fn grenade_radius_damage(
 
 /// `RadiusDamage(vecSrc, pevInflictor, pevAttacker, flDamage, flRadius, iClassIgnore,
 /// bitsDamageType)` (`combat.cpp` 243-335, read 2026-11-22), `iClassIgnore` being `CLASS_NONE`:
-/// every player with `takedamage` within `radius` of `src` (one unit up, "in case grenade is
-/// lying on the ground") takes `damage - distance * (damage / radius)` of damage (`0` at the
-/// farthest, never negative: the vanilla build hurts with 0), `distance` from `src` to the
-/// player's origin, through walls. A blast does not travel into or out of the water: a blast
-/// in the water hurts only players with their feet in it, one out of it only those whose head
-/// is out (`waterlevel` 3 is "under"). The Condition Zero line-of-sight variant (`AreRunningCZero`)
-/// is not ported. A missing attacker is the inflictor.
+/// every entity with `takedamage` within `radius` of `src` (one unit up, "in case grenade is
+/// lying on the ground"), a player or any other class (a hostage, a breakable), takes
+/// `damage - distance * (damage / radius)` of damage (`0` at the farthest, never negative: the
+/// vanilla build hurts with 0), `distance` from `src` to the entity's origin, through walls. A
+/// blast does not travel into or out of the water: a blast in the water hurts only entities
+/// with their feet in it, one out of it only those whose head is out (`waterlevel` 3 is
+/// "under"). The Condition Zero line-of-sight variant (`AreRunningCZero`) is not ported. A
+/// missing attacker is the inflictor.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn radius_damage(
     g: &mut GameState,
@@ -950,10 +951,12 @@ pub(crate) fn radius_damage(
     let attacker = attacker.or(inflictor);
     // Iterate on all entities in the vicinity.
     for entity in eng.entities_in_sphere(src, radius) {
-        let Some(slot) = player_slot(g, eng, entity) else {
-            continue;
+        let slot = player_slot(g, eng, entity);
+        let takes_damage = match slot {
+            Some(s) => g.players[s].as_ref().is_some_and(|p| p.takes_damage),
+            None => crate::entity::entity_takes_damage(eng, entity),
         };
-        if !g.players[slot].as_ref().is_some_and(|p| p.takes_damage) {
+        if !takes_damage {
             continue;
         }
         let Some(v) = eng.ent(entity) else {
@@ -971,7 +974,83 @@ pub(crate) fn radius_damage(
         if adjusted < 0.0 {
             adjusted = 0.0;
         }
-        take_damage_from_grenade(g, eng, slot as u8, inflictor, inflictor_team, attacker, adjusted, bits);
+        match slot {
+            Some(s) => {
+                take_damage_from_grenade(g, eng, s as u8, inflictor, inflictor_team, attacker, adjusted, bits);
+            }
+            None => {
+                crate::entity::take_damage_of(g, eng, entity, inflictor, attacker, adjusted, bits);
+            }
+        }
+    }
+}
+
+/// `RadiusDamage2(vecSrc, pevInflictor, pevAttacker, flDamage, flRadius, iClassIgnore,
+/// bitsDamageType)` (`combat.cpp` 337-402, read 2026-11-22), `iClassIgnore` being `CLASS_NONE`
+/// (the blast the planted C4 uses): as [`radius_damage`], but an entity is hurt only if a line
+/// from the blast to its `BodyTarget` (passing the inflictor) reaches the point or ends on the
+/// entity, and the damage is capped at 75. A line that reaches the point hurts through
+/// `TakeDamage`; one that ends on the entity hurts through `TraceAttack` and `ApplyMultiDamage`,
+/// so the entity's own hit handling (a player's hit group, its armour) sees the shot. A start
+/// inside a solid counts as a fraction of 0 at the blast's position. A missing attacker is the
+/// inflictor. A player's `BodyTarget` draws `RANDOM_FLOAT(0.5, 1.1)` once per player.
+#[allow(clippy::too_many_arguments)]
+pub fn radius_damage2(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    src: Vec3,
+    inflictor: Option<EdictId>,
+    attacker: Option<EdictId>,
+    damage: f32,
+    radius: f32,
+    bits: u32,
+) {
+    let falloff = if radius != 0.0 { damage / radius } else { 1.0 };
+    let in_water = eng.point_contents_ents(src) == CONTENTS_WATER;
+    // In case grenade is lying on the ground.
+    let src = Vec3::new(src.x, src.y, src.z + 1.0);
+    let attacker = attacker.or(inflictor);
+    for entity in eng.entities_in_sphere(src, radius) {
+        let slot = player_slot(g, eng, entity);
+        let takes_damage = match slot {
+            Some(s) => g.players[s].as_ref().is_some_and(|p| p.takes_damage),
+            None => crate::entity::entity_takes_damage(eng, entity),
+        };
+        if !takes_damage {
+            continue;
+        }
+        let Some(v) = eng.ent(entity) else {
+            continue;
+        };
+        // Blasts don't travel into or out of water.
+        if in_water && v.waterlevel == 0 {
+            continue;
+        }
+        if !in_water && v.waterlevel == 3 {
+            continue;
+        }
+        let origin = v.origin;
+        let spot = crate::entity::body_target_of(g, eng, entity, src);
+        let mut tr = eng.trace_line(src, spot, MoveFilter::Normal, inflictor);
+        if tr.trace.fraction == 1.0 || tr.ent == Some(entity) {
+            if tr.trace.start_solid {
+                tr.trace.end_pos = src;
+                tr.trace.fraction = 0.0;
+            }
+            let mut adjusted = damage - (src - origin).length() * falloff;
+            // `< 0` gives 0, `> 75` gives 75 (a NaN passes both tests, as it does `clamp`).
+            adjusted = adjusted.clamp(0.0, 75.0);
+            if tr.trace.fraction == 1.0 {
+                crate::entity::take_damage_of(g, eng, entity, inflictor, attacker, adjusted, bits);
+            } else {
+                // `ClearMultiDamage(); pEntity->TraceAttack(pevInflictor, ...)`.
+                let mut mm = crate::bullets::MultiDamage::new(None);
+                mm.clear();
+                let dir = crate::bullets::normalize_reciprocal(tr.trace.end_pos - src);
+                crate::bullets::trace_attack(g, eng, entity, inflictor, &mut mm, adjusted, dir, &tr, bits);
+                crate::bullets::apply_multi_damage(g, eng, &mm, inflictor, attacker);
+            }
+        }
     }
 }
 

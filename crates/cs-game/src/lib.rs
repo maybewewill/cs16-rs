@@ -34,6 +34,7 @@ pub mod rules;
 mod score;
 pub mod spray;
 mod suit;
+pub mod targets;
 pub mod teams;
 pub mod weapons;
 pub mod world;
@@ -84,6 +85,10 @@ pub struct GameState {
     /// The statics of `pm_shared` (the stuck table, the texture materials, the wade-step skip
     /// counter), built by `PM_Init` ([`CsGame::load_motd`] reads `sound/materials.txt` for it).
     pm_shared: PmShared,
+    /// The `delay` and `killtarget` keys of the map entities that have them
+    /// (`CBaseDelay::m_flDelay`, `m_iszKillTarget`), by edict: what [`targets::use_targets`]
+    /// reads for the entity that is being used up, which is out of its edict at the time.
+    pub(crate) delay_keys: std::collections::HashMap<EdictId, targets::DelayKeys>,
     /// Every call the dispatch delivered to a `test_dispatch` entity. For tests only (feature
     /// `test-hooks`).
     #[cfg(feature = "test-hooks")]
@@ -107,6 +112,7 @@ impl GameState {
             briefings: std::collections::BTreeSet::new(),
             rng: 0x2545_f491,
             pm_shared: pm_init(None),
+            delay_keys: std::collections::HashMap::new(),
             #[cfg(feature = "test-hooks")]
             dispatch_log: Vec::new(),
         }
@@ -124,6 +130,7 @@ impl GameState {
         self.num_terrorist_wins = 0;
         self.num_ct_wins = 0;
         self.rules = rules::Rules::default();
+        self.delay_keys.clear();
     }
 }
 
@@ -651,6 +658,7 @@ impl GameDll for CsGame {
         if !entity.spawn(eng, id, keys) {
             return false;
         }
+        targets::note_keys(&mut self.state, id, keys);
         attach(eng, id, entity);
         if classname == "worldspawn" {
             world::precache_briefing(eng, &self.state.briefings);
