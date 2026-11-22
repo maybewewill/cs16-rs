@@ -8,7 +8,8 @@ use std::rc::Rc;
 
 use common::{Harness, TestGame};
 use cs_engine::{
-    ClientState, MAX_MODELS, MAX_SOUNDS, MsgDest, PrecacheTables, ServerMap, decal_names_from_wads,
+    ClientState, MAX_DECALS, MAX_MODELS, MAX_SOUNDS, MsgDest, PrecacheTables, ServerMap,
+    decal_names_from_wads, res_type,
     wad_lump_names,
 };
 use cs_probe::{ProbeClient, ProbeState};
@@ -287,6 +288,59 @@ fn decal_index_follows_decals_wad() {
     }
     // The reversal of the merge: `reflect1`, the first lump of the file, comes last.
     assert_eq!(tables.decal_index("reflect1"), merged.len() as i32 - 1);
+}
+
+/// `UTIL_DecalTrace`: an index of 256 and up is the HIGH message with `index - 256`.
+#[test]
+fn decal_helpers_choose_the_high_messages() {
+    assert_eq!(tempent::decal_for(POS, 255, 7), Some(tempent::decal(POS, 255, 7)));
+    assert_eq!(tempent::decal_for(POS, 256, 7), Some(tempent::decal_high(POS, 0, 7)));
+    assert_eq!(tempent::decal_for(POS, 511, 7), Some(tempent::decal_high(POS, 255, 7)));
+    assert_eq!(tempent::decal_for(POS, 512, 7), None);
+    assert_eq!(tempent::decal_for(POS, -1, 7), None);
+    assert_eq!(tempent::world_decal_for(POS, 0), Some(tempent::world_decal(POS, 0)));
+    assert_eq!(tempent::world_decal_for(POS, 300), Some(tempent::world_decal_high(POS, 44)));
+    assert_eq!(tempent::world_decal_for(POS, 1000), None);
+    assert_eq!(tempent::world_decal_for(POS, -5), None);
+}
+
+/// Decal names keep 15 characters, a wad is cut at the table size before the merge, and the
+/// decals are in the resource list after the models.
+#[test]
+fn decal_list_limits_and_resources() {
+    let mut t = PrecacheTables::new("maps/x.bsp", 1);
+    t.set_decals(strings(&["0123456789abcdefghij", "{shot1"]));
+    assert_eq!(t.decals(), &strings(&["0123456789abcde", "{shot1"])[..]);
+    assert_eq!(t.decal_index("0123456789abcde"), 0);
+    assert_eq!(t.decal_index("0123456789abcdefghij"), -1);
+
+    let many: Vec<String> = (0..100_000).map(|i| format!("d{i}")).collect();
+    let merged = decal_names_from_wads(&[many.clone(), many]);
+    assert_eq!(merged.len(), MAX_DECALS);
+    let mut wad = wad_with(&["a"]);
+    wad[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert_eq!(wad_lump_names(&wad), None, "a directory that does not fit");
+    let mut big = wad_with(&vec!["x"; 600]);
+    big[4..8].copy_from_slice(&600u32.to_le_bytes());
+    assert_eq!(wad_lump_names(&big).map(|n| n.len()), Some(MAX_DECALS));
+
+    t.precache_model("models/a.mdl").unwrap();
+    t.precache_generic("hud.txt").unwrap();
+    let list = t.resource_list(&|_| 0);
+    let types: Vec<(u8, u16, &str)> = list
+        .iter()
+        .map(|r| (r.res_type, r.index, r.filename.as_str()))
+        .collect();
+    assert_eq!(
+        types,
+        vec![
+            (res_type::MODEL, 1, "maps/x.bsp"),
+            (res_type::MODEL, 2, "models/a.mdl"),
+            (res_type::DECAL, 0, "0123456789abcde"),
+            (res_type::DECAL, 1, "{shot1"),
+            (res_type::GENERIC, 1, "hud.txt"),
+        ]
+    );
 }
 
 #[test]

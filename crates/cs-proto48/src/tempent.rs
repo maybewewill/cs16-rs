@@ -121,13 +121,15 @@ pub fn beam_follow(
     })
 }
 
-/// `TE_DLIGHT`: `coord x3`, `byte` radius in tens, `byte x3` colour, `byte` life in tenths,
+/// `TE_DLIGHT`: UNVERIFIED layout, 12 bytes. `coord x3`, `byte` radius in tens, `byte x3` colour, `byte` life in tenths,
 /// `byte` decay rate in tenths.
 ///
-/// Assumption: `const.h` lists an extra `byte (brightness)` after the colour, but the client
-/// parser (`CL_ParseTempEntity`, not in the sources fetched) reads 12 bytes, as every other
-/// implementation of the message does (Xash3D `CL_ParseTempEntity`, AMX Mod X
-/// `TE_DLIGHT` docs). The 12-byte layout is what this builds.
+/// Unverified: `const.h` lists an extra `byte (brightness)` after the colour (13 bytes), while
+/// the client parser of the HL engine reads radius, r, g, b, life and decay (recalled from
+/// memory, not fetched or checked against a capture). The 12-byte layout is what this builds.
+/// Nothing in the weapon set sends `TE_DLIGHT`, and the round-trip test in
+/// `cs-engine/tests/tempents.rs` only shows that the builder and the parser agree, not that
+/// either is right.
 pub fn dlight(position: Vec3, radius: u8, color: [u8; 3], life: u8, decay: u8) -> TempEntity {
     TempEntity::new(te::DLIGHT, |w| {
         coords(w, position);
@@ -209,6 +211,26 @@ pub fn decal_high(position: Vec3, decal: u8, entity: u16) -> TempEntity {
         w.write_u8(decal);
         w.write_u16(entity);
     })
+}
+
+/// `UTIL_DecalTrace` / `UTIL_GunshotDecalTrace`'s choice for a decal on a brush entity:
+/// `TE_DECAL` for an index below 256, else `TE_DECALHIGH` with `index - 256`. `None` for a
+/// negative index (the original sends nothing) or one over 511, which a byte cannot carry.
+pub fn decal_for(position: Vec3, index: i32, entity: u16) -> Option<TempEntity> {
+    match index {
+        0..=255 => Some(decal(position, index as u8, entity)),
+        256..=511 => Some(decal_high(position, (index - 256) as u8, entity)),
+        _ => None,
+    }
+}
+
+/// [`decal_for`] for the world: `TE_WORLDDECAL` or `TE_WORLDDECALHIGH`.
+pub fn world_decal_for(position: Vec3, index: i32) -> Option<TempEntity> {
+    match index {
+        0..=255 => Some(world_decal(position, index as u8)),
+        256..=511 => Some(world_decal_high(position, (index - 256) as u8)),
+        _ => None,
+    }
 }
 
 /// `TE_WORLDDECAL` (`UTIL_DecalTrace` on the world): `coord x3`, `byte` decal index.

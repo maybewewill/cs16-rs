@@ -15,6 +15,8 @@ pub const MAX_EVENTS: usize = 256;
 /// bits (ReHLDS `rehlds/engine/decals.h`, read 2026-11-22). `Decal_Init` stops the server with
 /// an error past it; here the list is cut instead.
 pub const MAX_DECALS: usize = 512;
+/// Characters of a decal name the server keeps (`decalname_t::name` is 16 with the NUL).
+const MAX_DECAL_NAME: usize = 15;
 
 /// Resource types of `svc_resourcelist`.
 pub mod res_type {
@@ -73,6 +75,13 @@ impl PrecacheTables {
     /// `Decal_Init`), cut to [`MAX_DECALS`].
     pub fn set_decals(&mut self, mut names: Vec<String>) {
         names.truncate(MAX_DECALS);
+        // `Q_strncpy(sv_decalnames[i].name, ..., sizeof(name) - 1)`: 15 characters (lump names
+        // are one byte per character).
+        for name in &mut names {
+            if let Some((end, _)) = name.char_indices().nth(MAX_DECAL_NAME) {
+                name.truncate(end);
+            }
+        }
         self.decals = names;
     }
 
@@ -133,26 +142,23 @@ impl PrecacheTables {
         self.locked = true;
     }
 
-    /// Sounds, then models, then generic files, then the event scripts (type
-    /// [`res_type::EVENTSCRIPT`], flag `RES_FATALIFMISSING`, in `SV_CreateResourceList` order
-    /// last, after the decals), each in index order without the empty entry 0. Submodel names (`*N`) get size 0; every other name
-    /// gets `size_of(name)`. The kinds come in the order sounds, models,
-    /// generic, events, which is not the order of `SV_CreateResourceList` (generic, sounds,
-    /// models, decals, events); only the events' place at the end agrees with it.
+    /// Sounds, then models, then decals, then generic files, then the event scripts. Sounds,
+    /// models and generic files are in index order without the empty entry 0; submodel names
+    /// (`*N`) get size 0 and every other name gets `size_of(name)`. The decals are
+    /// `SV_CreateResourceList`'s `SV_AddResource(t_decal, sv_decalnames[i].name,
+    /// Draw_DecalSize(i), 0, i)` (ReHLDS `rehlds/engine/sv_main.cpp`, read 2026-11-22), after the
+    /// models, from index 0, with size 0 here (no file transfer). The event scripts (type
+    /// [`res_type::EVENTSCRIPT`], flag `RES_FATALIFMISSING`) come last, after the decals, as in
+    /// `SV_CreateResourceList`. The rest of the order is a working assumption about HLDS
+    /// (ReHLDS lists generic files first).
     pub fn resource_list(&self, size_of: &dyn Fn(&str) -> u32) -> Vec<ResourceEntry> {
-        [
-            (res_type::SOUND, &self.sounds),
-            (res_type::MODEL, &self.models),
-            (res_type::GENERIC, &self.generic),
-        ]
-        .into_iter()
-        .flat_map(|(res_type, table)| {
+        let named = |res_type, table: &Table| -> Vec<ResourceEntry> {
             table
                 .names
                 .iter()
                 .enumerate()
                 .skip(1)
-                .map(move |(index, name)| ResourceEntry {
+                .map(|(index, name)| ResourceEntry {
                     res_type,
                     filename: name.clone(),
                     // Lossless: a table never holds more than 512 names.
@@ -165,8 +171,18 @@ impl PrecacheTables {
                     flags: 0,
                     md5: None,
                 })
-        })
-        .chain(self.events.names.iter().enumerate().skip(1).map(|(index, name)| ResourceEntry {
+                .collect()
+        };
+        let decals = self.decals.iter().enumerate().map(|(index, name)| ResourceEntry {
+            res_type: res_type::DECAL,
+            filename: name.clone(),
+            // Lossless: at most `MAX_DECALS` names.
+            index: index as u16,
+            download_size: 0,
+            flags: 0,
+            md5: None,
+        });
+        let events = self.events.names.iter().enumerate().skip(1).map(|(index, name)| ResourceEntry {
             res_type: res_type::EVENTSCRIPT,
             filename: name.clone(),
             // Lossless: the table never holds more than 256 names.
@@ -174,8 +190,13 @@ impl PrecacheTables {
             download_size: size_of(name),
             flags: RES_FATALIFMISSING,
             md5: None,
-        }))
-        .collect()
+        });
+        let mut list = named(res_type::SOUND, &self.sounds);
+        list.extend(named(res_type::MODEL, &self.models));
+        list.extend(decals);
+        list.extend(named(res_type::GENERIC, &self.generic));
+        list.extend(events);
+        list
     }
 }
 
@@ -194,7 +215,9 @@ pub fn wad_lump_names(wad: &[u8]) -> Option<Vec<String>> {
         let b = wad.get(at..at + 4)?;
         usize::try_from(u32::from_le_bytes([b[0], b[1], b[2], b[3]])).ok()
     };
-    let count = word(4)?;
+    // A wad with more lumps than the server keeps is cut, so a hostile directory cannot make
+    // the merge slow; `Decal_Init` stops the server on such a wad.
+    let count = word(4)?.min(MAX_DECALS);
     let table = word(8)?;
     let end = table.checked_add(count.checked_mul(32)?)?;
     if end > wad.len() {
@@ -231,8 +254,10 @@ pub fn decal_names_from_wads(wads: &[Vec<String>]) -> Vec<String> {
     let Some((first, later)) = wads.split_first() else {
         return Vec::new();
     };
-    let mut names = first.clone();
+    // Each list is cut to the table size before the merge, whose search is quadratic.
+    let mut names: Vec<String> = first.iter().take(MAX_DECALS).cloned().collect();
     for wad in later {
+        let wad = &wad[..wad.len().min(MAX_DECALS)];
         // The end of `list` is the head of the original linked list: pushing is its prepend.
         let mut list: Vec<String> = Vec::new();
         for lump in names.iter().chain(wad) {

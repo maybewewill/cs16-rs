@@ -232,6 +232,12 @@ impl<G: GameDll> Server<G> {
         self.precache.set_decals(names);
     }
 
+    /// `PF_DecalIndex` for the host: the index of decal `name`, or -1 (see
+    /// [`EngineApi::decal_index`]).
+    pub fn decal_index(&self, name: &str) -> i32 {
+        self.precache.decal_index(name)
+    }
+
     /// Fresh precache tables for `map`, before the game activates it.
     pub(crate) fn map_precache(map: &ServerMap) -> PrecacheTables {
         let precache = PrecacheTables::new(&map.path, map.submodel_count);

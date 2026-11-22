@@ -590,3 +590,31 @@ fn spoofed_fragment_headers_do_not_drop_the_client() {
     assert_eq!(h.server.client_state(0), ClientState::Active);
     assert_eq!(h.server.client_state(1), ClientState::Active);
 }
+
+/// `SV_RunCmd`: `if (ucmd->impulse) v.impulse = ucmd->impulse`; a later command without an
+/// impulse leaves it for the game to clear.
+#[test]
+fn a_non_zero_impulse_is_stored_and_a_zero_keeps_it() {
+    let mut h = Harness::new(4);
+    let mut probe = joined(&mut h, "Player");
+    let impulse_of = |h: &Harness| {
+        let edicts = h.server.edicts();
+        edicts.get(edicts.client(0)).expect("client edict").vars.impulse
+    };
+    assert_eq!(impulse_of(&h), 0);
+    let with = GoldSrcUserCmd {
+        msec: 10,
+        impulse: 101,
+        ..Default::default()
+    };
+    drive(&mut h, &mut probe, &with, 3);
+    assert_eq!(impulse_of(&h), 101);
+    drive(&mut h, &mut probe, &forward(10), 3);
+    assert_eq!(impulse_of(&h), 101, "a zero impulse does not clear it");
+    let other = GoldSrcUserCmd {
+        impulse: 100,
+        ..with
+    };
+    drive(&mut h, &mut probe, &other, 3);
+    assert_eq!(impulse_of(&h), 100);
+}

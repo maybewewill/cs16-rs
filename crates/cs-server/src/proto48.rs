@@ -10,7 +10,10 @@ use std::time::Duration;
 
 use cs_assets::bsp::BspMap;
 use cs_cvar::CVarRegistry;
-use cs_engine::{ConsoleOutcome, GameDll, Server, ServerConfig, ServerMap};
+use cs_engine::{
+    ConsoleOutcome, GameDll, Server, ServerConfig, ServerMap, decal_names_from_wads,
+    wad_lump_names,
+};
 use cs_game::CsGame;
 use cs_platform::{Clock, NativeClock};
 use cs_proto48::delta::DeltaRegistry;
@@ -181,6 +184,34 @@ fn start(args: &[String]) -> Result<(), String> {
     }
 }
 
+/// The decal names the engine holds (`Decal_Init`, ReHLDS `rehlds/engine/decals.cpp`, read
+/// 2026-11-22): the lump names of `valve/decals.wad` (`DEFAULTGAME`) and then of
+/// `cstrike/decals.wad` (`GAME`), merged as the engine does. A wad that is missing or is not a
+/// WAD3 is left out; with neither, the list is empty and `decal_index` answers -1.
+fn load_decal_names(vfs: &Vfs) -> Vec<String> {
+    let lumps = |dir: &str| {
+        std::fs::read(vfs.root().join(dir).join("decals.wad"))
+            .ok()
+            .and_then(|bytes| wad_lump_names(&bytes))
+    };
+    let wads: Vec<Vec<String>> = ["valve", "cstrike"].into_iter().filter_map(lumps).collect();
+    decal_names_from_wads(&wads)
+}
+
+/// The server as `serve` starts it: the engine on `map` with `game`, the Protocol 48 deltas,
+/// the vanilla cvars and the decal list of the game directory.
+fn new_server<G: GameDll>(cfg: ServerConfig, map: ServerMap, game: G, vfs: &Vfs) -> Server<G> {
+    let mut server = Server::new(
+        cfg,
+        map,
+        game,
+        DeltaRegistry::cs16_default(),
+        vanilla_cvars(),
+    );
+    server.set_decals(load_decal_names(vfs));
+    server
+}
+
 /// Binds the socket and runs `game` on `map` until the operator stops the server.
 fn serve<G: GameDll>(
     opts: &Options,
@@ -198,13 +229,7 @@ fn serve<G: GameDll>(
         max_clients: opts.max_players,
         ..ServerConfig::default()
     };
-    let mut server = Server::new(
-        cfg,
-        map,
-        game,
-        DeltaRegistry::cs16_default(),
-        vanilla_cvars(),
-    );
+    let mut server = new_server(cfg, map, game, vfs);
     info!(
         addr = %net.local_addr(),
         map = %map_name,
@@ -257,6 +282,30 @@ mod tests {
     use super::*;
 
     type WalkServer = Server<WalkGame>;
+
+    /// A server built as `serve` builds it knows the decals of the installed game.
+    #[test]
+    fn server_knows_the_decals_of_the_game() {
+        let Ok(vfs) = Vfs::discover(None, VfsConfig::default()) else {
+            eprintln!("SKIPPED: no game directory (set CS16_GAMEDIR)");
+            return;
+        };
+        if !vfs.root().join("valve").join("decals.wad").is_file()
+            && !vfs.root().join("cstrike").join("decals.wad").is_file()
+        {
+            eprintln!("SKIPPED: the game directory has no decals.wad");
+            return;
+        }
+        let server = new_server(
+            ServerConfig::default(),
+            ServerMap::stub("start"),
+            WalkGame::new(MoveParams::default()),
+            &vfs,
+        );
+        assert!(server.decal_index("{shot1") >= 0);
+        assert!(server.decal_index("{blood1") >= 0);
+        assert_eq!(server.decal_index("{no such decal"), -1);
+    }
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
