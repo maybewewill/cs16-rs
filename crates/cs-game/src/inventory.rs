@@ -152,7 +152,7 @@ const WEAPONS_SOUNDS: [&str; 12] = [
 
 /// The sprites and models of `WeaponsPrecache` that belong to no weapon (`weapons.cpp`
 /// 381-402): explosions, smoke, blood, the radio icon, the laser.
-const WEAPONS_MODELS: [&str; 17] = [
+const WEAPONS_MODELS: [&str; 18] = [
     "sprites/zerogxplode.spr",
     "sprites/WXplo1.spr",
     "sprites/steam1.spr",
@@ -163,6 +163,8 @@ const WEAPONS_MODELS: [&str; 17] = [
     "sprites/eexplo.spr",
     "sprites/fexplo.spr",
     "sprites/fexplo1.spr",
+    // `g_sModelIndexRadio`: the icon over a player that used the radio.
+    crate::hud_misc::RADIO_SPRITE,
     "sprites/b-tele1.spr",
     "sprites/c-tele1.spr",
     "sprites/ledglow.spr",
@@ -208,11 +210,11 @@ pub const WEAPON_EVENTS: [&str; 28] = [
 
 /// The models of the world items `WeaponsPrecache` precaches first (weapons.cpp 305-330).
 const ITEM_MODELS: [&str; 7] = [
+    "models/w_kevlar.mdl",
     "models/w_battery.mdl",
     "models/w_antidote.mdl",
     "models/w_security.mdl",
     "models/w_longjump.mdl",
-    "models/w_kevlar.mdl",
     "models/w_assault.mdl",
     "models/w_thighpack.mdl",
 ];
@@ -227,8 +229,9 @@ const ITEM_MODELS: [&str; 7] = [
 /// as well, [`WEAPON_EVENTS`], so a weapon that looks its event up by name always finds it).
 pub(crate) fn weapons_precache(eng: &mut EngineApi<'_>) {
     // The common world objects (`UTIL_PrecacheOther("item_*")`) come first: the models of
-    // the battery, the antidote, the security item, the long jump module, the kevlar vest, the
-    // assault suit and the thigh pack, in that order (the suit has none).
+    // the suit (`item_suit`: `CItemSuit::Precache` precaches the kevlar vest's model), the
+    // battery, the antidote, the security item, the long jump module, the kevlar vest (already
+    // there), the assault suit and the thigh pack, in that order.
     for model in ITEM_MODELS {
         precache_model(eng, model);
     }

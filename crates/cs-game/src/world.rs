@@ -325,9 +325,9 @@ impl World {
         }
     }
 
-    /// `CWorld::Precache` without the weapons (`WeaponsPrecache`), the bots (`BotPrecache`),
-    /// the sentences, the texture types and the sound entity: the server settings, the common
-    /// resources, the player's (`ClientPrecache`) and the light styles.
+    /// `CWorld::Precache` without the bots (`BotPrecache`), the sentences, the texture types and
+    /// the sound entity: the server settings, the weapons (`WeaponsPrecache`), the player's
+    /// (`ClientPrecache`), the common resources and the light styles.
     /// ReGameDLL `world.cpp`, `client.cpp`, read 2026-11-22.
     fn precache(eng: &mut EngineApi<'_>, id: EdictId) {
         eng.set_cvar("sv_gravity", "800");
@@ -339,9 +339,6 @@ impl World {
         // `ClientPrecache()`, which comes before the world's own sounds and gibs, so the weapons'
         // models have the low indices and the third-person ones follow the player models.
         crate::inventory::weapons_precache(eng);
-        // `g_sModelIndexRadio` of `W_Precache`: the icon over a player that used the radio (the
-        // source has it among the weapons' sprites; here it follows them).
-        precache_model(eng, crate::hud_misc::RADIO_SPRITE);
         for name in CLIENT_SOUNDS {
             precache_sound(eng, name);
         }
