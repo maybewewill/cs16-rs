@@ -130,6 +130,9 @@ pub struct Server<G: GameDll> {
     pub(crate) farewells: Vec<(PeerAddr, Vec<u8>)>,
     /// Server time the next `svc_pings` is due.
     pub(crate) next_pings_at: f64,
+    /// The queued fake-client moves are being run (`Server::run_fake_moves`): a drain made while
+    /// they run leaves the rest of the queue to that loop.
+    pub(crate) in_fake_moves: bool,
 }
 
 /// Monotonic counts of what the server refused, dropped or failed to send.
@@ -242,6 +245,7 @@ impl<G: GameDll> Server<G> {
             shutting_down: false,
             farewells: Vec::new(),
             next_pings_at: 0.0,
+            in_fake_moves: false,
         };
         server.activate_map();
         server
@@ -347,7 +351,8 @@ impl<G: GameDll> Server<G> {
     /// movevars (what it was last sent) is compared with the server's now (the cvars; ReHLDS
     /// also compares what `PM_Move` left in its copy, which the game here does not alter), and a
     /// difference is written to the client's reliable channel as `svc_newmovevars`; the copy is
-    /// then the server's. Fake clients do not exist in the engine. A client that sends no
+    /// then the server's. Fake clients are never checked (`!host_client->fakeclient`, `sv_user.cpp`
+    /// 1027, read 2026-11-23): `run_player_cmd` does not call this for them. A client that sends no
     /// commands is not checked, so it gets a change when its next command runs, as in ReHLDS
     /// (the check no longer runs once per frame for every client). A client whose copy is not set
     /// yet (before the `new` stage) is not sent anything: `new` carries the current values. The
@@ -387,6 +392,19 @@ impl<G: GameDll> Server<G> {
 
     pub fn client_count(&self) -> usize {
         self.clients.iter().filter(|c| !c.is_free()).count()
+    }
+
+    /// `SV_GetFakeClientCount` (ReHLDS `sv_main.cpp` 2770-2782, read 2026-11-23): the clients
+    /// made with `EngineApi::create_fake_client`; the `bots` of the server info.
+    pub fn fake_client_count(&self) -> usize {
+        self.clients.iter().filter(|c| !c.is_free() && c.fake).count()
+    }
+
+    /// Whether the client in `slot` is a fake client (a bot); false for a free slot.
+    pub fn is_fake_client(&self, slot: u8) -> bool {
+        self.clients
+            .get(usize::from(slot))
+            .is_some_and(|c| !c.is_free() && c.fake)
     }
 
     /// Userid of the client in `slot`; `None` for a free slot.
@@ -450,6 +468,16 @@ impl<G: GameDll> Server<G> {
         self.world.pending_touch_count()
     }
 
+    /// Events queued for the client in `slot`, waiting for its next update; 0 for a slot out of
+    /// range. Test aid.
+    #[doc(hidden)]
+    pub fn queued_event_count(&self, slot: u8) -> usize {
+        self.outbox
+            .events
+            .get(usize::from(slot))
+            .map_or(0, |q| q.ei.iter().filter(|e| e.index != 0).count())
+    }
+
     pub fn spawn_count(&self) -> u32 {
         self.spawn_count
     }
@@ -500,6 +528,7 @@ impl<G: GameDll> Server<G> {
 
     /// Copies the sign-on state of every slot into what the game sees of it.
     pub(crate) fn sync_views(&mut self) {
+        self.adopt_fake_clients();
         for (view, client) in self.views.iter_mut().zip(&self.clients) {
             view.state = client.state;
         }
@@ -551,17 +580,21 @@ impl<G: GameDll> Server<G> {
     pub(crate) fn drain_outbox(&mut self) {
         self.drain_messages();
         self.dispatch_touches();
+        self.run_fake_moves();
     }
 
     /// Moves what the game queued to the clients, carries out its kicks (telling the kicked
     /// client why) and drops clients over the reliable backlog cap.
     pub(crate) fn drain_messages(&mut self) {
+        self.adopt_fake_clients();
         loop {
             self.net_stats.outbox_dropped += std::mem::take(&mut self.outbox.dropped);
             for (slot, client) in self.clients.iter_mut().enumerate() {
                 let reliable = std::mem::take(&mut self.outbox.reliable[slot]);
                 let unreliable = std::mem::take(&mut self.outbox.unreliable[slot]);
-                if client.is_free() {
+                // What is written to a fake client is dropped (`svc_*` messages to a bot at
+                // `PF_MessageEnd_I`, ReHLDS `pr_cmds.cpp` 2213-2247, read 2026-11-23).
+                if client.is_free() || client.fake {
                     continue;
                 }
                 if !reliable.is_empty() {
@@ -597,7 +630,8 @@ impl<G: GameDll> Server<G> {
         }
         let bytes = std::mem::replace(&mut self.outbox.reliable_all, MsgWriter::new());
         for client in &mut self.clients {
-            if client.state.is_in_game() {
+            // `SV_UpdateToReliableMessages` skips `fakeclient` (`sv_main.cpp` 5216-5229).
+            if client.state.is_in_game() && !client.fake {
                 client.chan.write_reliable(bytes.as_slice());
             }
         }
@@ -618,7 +652,9 @@ impl<G: GameDll> Server<G> {
         self.clients
             .iter()
             .enumerate()
-            .filter(|(_, c)| !c.is_free() && c.chan.pending_reliable_bytes() > MAX_RELIABLE_BACKLOG)
+            .filter(|(_, c)| {
+                !c.is_free() && !c.fake && c.chan.pending_reliable_bytes() > MAX_RELIABLE_BACKLOG
+            })
             .map(|(slot, _)| slot as u8)
             .collect()
     }

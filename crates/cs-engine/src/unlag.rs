@@ -25,8 +25,9 @@
 //! - When the frame a client acknowledges is no longer among the 64 kept, its latency stays at
 //!   the last value measured (see `note_accepted`); HLDS computes a wrong small one from the
 //!   newer frame in that slot.
-//! - HLDS skips `SV_SetupMove` and `SV_RestoreMove` for fake clients; the engine has no bots
-//!   yet, so `lag_compensation_active` does not look at that.
+//! - HLDS skips `SV_SetupMove` and `SV_RestoreMove` for fake clients (`SV_RunCmd`,
+//!   `sv_user.cpp`, read 2026-11-23): `lag_compensation_active` is false for them, and
+//!   `run_player_cmd` does not call `setup_move` or `restore_move` for them at all.
 
 use crate::world::consts::EF_NOINTERP;
 use std::collections::BTreeSet;
@@ -118,12 +119,17 @@ impl<G: GameDll> Server<G> {
 
     /// `SV_IsLagCompensationActive`: `sv_unlag` is on, there is more than one player slot and
     /// the client is active with both `cl_lw` and `cl_lc` set in its userinfo.
-    pub(crate) fn lag_compensation_active(&self, slot: u8) -> bool {
+    #[doc(hidden)]
+    pub fn lag_compensation_active(&self, slot: u8) -> bool {
         let index = usize::from(slot);
+        if index >= self.clients.len() {
+            return false;
+        }
         let info = &self.views[index].userinfo;
         self.unlag_cvar("sv_unlag") != 0.0
             && self.cfg.max_clients > 1
             && self.clients[index].state == ClientState::Active
+            && !self.clients[index].fake
             && userinfo_lw(info)
             && info_atoi(info.get("cl_lc")) != 0
     }

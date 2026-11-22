@@ -171,6 +171,18 @@ impl<G: GameDll> Server<G> {
                 _ => "connecting",
             };
             let name = self.views[index].userinfo.get("name").unwrap_or("");
+            if client.fake {
+                // The ping and address columns read `BOT` (assumption: the source of
+                // `Host_Status_f` is not among the files read).
+                text.push_str(&format!(
+                    "{} {} \"{}\" {} BOT\n",
+                    index + 1,
+                    client.userid,
+                    clean(name),
+                    state,
+                ));
+                continue;
+            }
             let addr = client.addr.map_or_else(String::new, |a| a.to_string());
             text.push_str(&format!(
                 "{} {} \"{}\" {} {}ms {}\n",

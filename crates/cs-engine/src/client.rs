@@ -97,6 +97,10 @@ pub(crate) struct Client {
     /// The movevars this client was last sent (ReHLDS `client_t::movevars`, set when the `new`
     /// stage writes them and when a change is sent); `None` before that.
     pub(crate) movevars: Option<MoveVarsMsg>,
+    /// `client_t::fakeclient`: a bot the game created with `EngineApi::create_fake_client`. It
+    /// has no address and no netchan peer: nothing is built or sent for it, it is never timed
+    /// out and its reliable queue never fills. Its `state` is `Active` from creation.
+    pub(crate) fake: bool,
 }
 
 impl Client {
@@ -127,6 +131,24 @@ impl Client {
             choke_count: 0,
             latency: 0.0,
             movevars: None,
+            fake: false,
+        }
+    }
+
+    /// A fake client taking its slot at `now` (`CreateFakeClient_internal`: `active`,
+    /// `spawned`, `fully_connected`, `connected` and `fakeclient` all set, no address). The game
+    /// puts it in the server itself, so `put_in_server` is already set: releasing it reports
+    /// `client_disconnect` as `SV_DropClient` does for a `spawned` client.
+    pub(crate) fn fake_client(userid: i32, now: f64) -> Self {
+        Self {
+            state: ClientState::Active,
+            userid,
+            connected_at: now,
+            signon_since: now,
+            last_heard: now,
+            put_in_server: true,
+            fake: true,
+            ..Self::free()
         }
     }
 

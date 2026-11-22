@@ -59,7 +59,24 @@ pub(crate) struct Outbox {
     /// server appends it to the reliable stream of every client in the game at the end of the
     /// frame (`SV_UpdateToReliableMessages`), after what the game sent to single clients.
     pub(crate) reliable_all: MsgWriter,
+    /// Slots `EngineApi::create_fake_client` took since the server last looked: the game sees the
+    /// slot taken at once (its `ClientView`), the server gives it its `Client` before the next
+    /// call into the game and before it drains (`Server::adopt_fake_clients`).
+    pub(crate) fake_created: Vec<u8>,
+    /// The commands `EngineApi::run_player_move` queued, run in order after the game call that
+    /// queued them returns (the game is never called from inside a game call).
+    pub(crate) fake_moves: Vec<FakeMove>,
 }
+
+/// One `PF_RunPlayerMove_I` waiting to run.
+#[derive(Debug, Clone)]
+pub(crate) struct FakeMove {
+    pub(crate) slot: u8,
+    pub(crate) cmd: GoldSrcUserCmd,
+}
+
+/// Moves `EngineApi::run_player_move` may have queued at once; further ones are refused.
+pub(crate) const MAX_QUEUED_FAKE_MOVES: usize = 1024;
 
 impl Outbox {
     /// One reliable and one unreliable writer per slot.
@@ -78,6 +95,8 @@ impl Outbox {
             event_schema: None,
             discard_direct: None,
             reliable_all: MsgWriter::new(),
+            fake_created: Vec::new(),
+            fake_moves: Vec::new(),
         }
     }
 
@@ -142,6 +161,8 @@ pub(crate) struct ClientView {
     pub(crate) state: ClientState,
     /// Set when the game changed `userinfo`; the server broadcasts it.
     pub(crate) userinfo_dirty: bool,
+    /// `client_t::fakeclient`: the slot holds a bot made by `EngineApi::create_fake_client`.
+    pub(crate) fake: bool,
 }
 
 /// Engine services available to the game during one call. Everything the game does to the
@@ -239,6 +260,102 @@ impl EngineApi<'_> {
             .get(usize::from(slot))
             .filter(|c| c.in_use)
             .map_or_else(String::new, |c| c.physinfo.to_wire_string())
+    }
+
+    /// `PF_CreateFakeClient_I` / `CreateFakeClient_internal` (ReHLDS `pr_cmds.cpp` 1975-2033, read
+    /// 2026-11-23): takes the first free slot for a bot called `name` and returns its number;
+    /// `None` when every slot is taken. The slot has no address and no netchan peer, and the
+    /// engine never sends it anything: it counts as in the game from the start (`active`,
+    /// `spawned`, `connected`), the edict gets `FL_FAKECLIENT | FL_CLIENT` (the flags are
+    /// assigned, as in the source), and the userinfo is `name`, `model` `gordon`, `topcolor` 1,
+    /// `bottomcolor` 1 and `*bot` 1 (the source has no `*bot`: ReGameDLL's `AddBot` sets it
+    /// right after; here it is there from the start), marked for broadcast (`sendinfo`).
+    ///
+    /// As in the source `ClientConnect` is not called and the game puts the bot in the server
+    /// itself (`ClientPutInServer`). Two deviations, both because the engine never calls the
+    /// game from inside a game call: `SV_ExtractFromUserinfo` of the source calls
+    /// `pfnClientUserInfoChanged`, which is not done here; and the name is sanitised and made
+    /// unique as a connecting client's is (`SV_CheckForDuplicateNames`, which the source also
+    /// runs from `SV_ExtractFromUserinfo`), so the bot may be called `(1)name`. The userid
+    /// comes from the same counter as the clients' (`g_userid++`), taken when the server adopts
+    /// the slot.
+    pub fn create_fake_client(&mut self, name: &str) -> Option<u8> {
+        let slot = self.clients.iter().position(|c| !c.in_use)?;
+        let slot_u8 = u8::try_from(slot).ok()?;
+        let name = crate::connect::unique_name_among(self.clients, &crate::oob::sanitize_name(name), None);
+        let mut userinfo = InfoString::default();
+        userinfo.set("name", name);
+        userinfo.set("model", "gordon");
+        userinfo.set("topcolor", "1");
+        userinfo.set("bottomcolor", "1");
+        userinfo.set("*bot", "1");
+        let edict = self.edicts.client(slot_u8);
+        self.edicts.get_mut(edict)?.vars.flags =
+            crate::world::consts::FL_FAKECLIENT | crate::world::consts::FL_CLIENT;
+        self.clients[slot] = ClientView {
+            userinfo,
+            in_use: true,
+            active: true,
+            state: ClientState::Active,
+            userinfo_dirty: true,
+            fake: true,
+            ..ClientView::default()
+        };
+        self.outbox.fake_created.push(slot_u8);
+        Some(slot_u8)
+    }
+
+    /// Whether `slot` holds a fake client (`client_t::fakeclient`); false for a real client, a
+    /// free slot or a slot out of range.
+    pub fn is_fake_client(&self, slot: u8) -> bool {
+        self.clients.get(usize::from(slot)).is_some_and(|c| c.in_use && c.fake)
+    }
+
+    /// `PF_RunPlayerMove_I` (ReHLDS `pr_cmds.cpp` 2035-2066, `SV_RunCmd` in `sv_user.cpp`, read
+    /// 2026-11-23): runs one user command for the fake client in `slot`, as `SV_RunCmd` does for
+    /// a client's, with the game's `run_usercmd` and `post_usercmd` and the engine's
+    /// `SV_ProcessImpacts` in between. The command is built from the arguments (`random_seed`
+    /// 0, every other field zero), a command of more than 50 ms is split in halves, and the
+    /// time base is `host_frametime + sv.time - msec / 1000`.
+    ///
+    /// The command runs after the game call that made this one returns, not inside it (the
+    /// engine never calls the game from inside a game call), in the order queued. A fake client
+    /// does not take part in lag compensation (`SV_SetupMove` and `SV_RestoreMove` are skipped
+    /// for it) and is never sent movevars. Nothing is queued for a slot that is not a fake
+    /// client (the source would run it for any client; that is not supported here), for numbers
+    /// that are not finite, or when `MAX_QUEUED_FAKE_MOVES` are already waiting.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_player_move(
+        &mut self,
+        slot: u8,
+        viewangles: Vec3,
+        forwardmove: f32,
+        sidemove: f32,
+        upmove: f32,
+        buttons: u16,
+        impulse: u8,
+        msec: u8,
+    ) {
+        if !self.is_fake_client(slot)
+            || !viewangles.is_finite()
+            || !forwardmove.is_finite()
+            || !sidemove.is_finite()
+            || !upmove.is_finite()
+            || self.outbox.fake_moves.len() >= MAX_QUEUED_FAKE_MOVES
+        {
+            return;
+        }
+        let cmd = GoldSrcUserCmd {
+            viewangles,
+            forwardmove,
+            sidemove,
+            upmove,
+            buttons,
+            impulse,
+            msec,
+            ..GoldSrcUserCmd::default()
+        };
+        self.outbox.fake_moves.push(FakeMove { slot, cmd });
     }
 
     /// Queues a kick; a second kick of the same slot keeps the first reason.

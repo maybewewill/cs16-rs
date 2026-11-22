@@ -10,7 +10,8 @@
 //!
 //! Differences from the source:
 //! - The `groupinfo` filter of `EV_Playback` is not modelled (the engine has no `groupinfo`).
-//! - No fake clients exist in this engine, so the `fakeclient` skips never apply.
+//! - The `fakeclient` skips (`EV_Playback`, `EV_PlayReliableEvent`, read 2026-11-23): a fake
+//!   client is never an audience, neither for a queued event nor for a reliable one.
 //! - `host_client`, which `FEV_NOTHOST` compares with, is modelled as the client of the
 //!   invoker (an assumption): the game plays weapon events from the shooter's own command.
 //! - `EV_Precache_internal` loads the event script and stops the server when it is missing;
@@ -293,7 +294,7 @@ impl EngineApi<'_> {
 
         let row = self.map.pas_row(event_origin);
         for slot in 0..max_clients {
-            if self.clients[slot].state != ClientState::Active {
+            if self.clients[slot].state != ClientState::Active || self.clients[slot].fake {
                 continue;
             }
             let client_edict = self.edicts.client(slot as u8);

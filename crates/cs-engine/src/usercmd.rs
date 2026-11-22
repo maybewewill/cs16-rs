@@ -11,12 +11,15 @@
 use cs_proto48::delta::GoldSrcUserCmd;
 
 use crate::client::ClientState;
-use crate::game::GameDll;
+use crate::game::{FakeMove, GameDll};
 use crate::lifecycle::NAME_CHANGE_MIN_INTERVAL_SECS;
 use crate::oob::{MAX_INFO_STRING, sanitize_name};
 use crate::server::Server;
 use crate::world::consts::{FL_FROZEN, SOLID_NOT};
 
+/// Fake-client moves `Server::run_fake_moves` runs in one drain; what a game queues beyond that
+/// while they run (a think that moves a bot again, and again) is dropped.
+pub const MAX_FAKE_MOVES_PER_DRAIN: usize = 4096;
 /// Movement time, in milliseconds, a client may bank ahead of the commands it sends.
 pub const MAX_BANKED_MS: f64 = 500.0;
 /// From this many dropped packets on, lost commands are no longer replayed.
@@ -366,21 +369,76 @@ impl<G: GameDll> Server<G> {
         }
         self.check_moving_ground(player, (f64::from(step.msec) * 0.001) as f32);
         // `SV_RunCmd`: the other players are where this client saw them for the command, and
-        // are put back after `SV_ProcessImpacts`.
-        self.setup_move(slot);
+        // are put back after `SV_ProcessImpacts`. Not for a fake client (`if
+        // (!host_client->fakeclient) SV_SetupMove(host_client)`, `sv_user.cpp`, read 2026-11-23).
+        let fake = self.clients[usize::from(slot)].fake;
+        if !fake {
+            self.setup_move(slot);
+        }
         self.call_game_synced_at(time, |game, eng| {
             game.run_usercmd(eng, slot, step, random_seed)
         });
         // After `pfnPM_Move`, before `SV_FinishPMove` (`SV_RunCmd`): the movevars the client
-        // holds against the server's.
-        self.sync_client_movevars(slot);
+        // holds against the server's; a fake client has none (`!host_client->fakeclient`).
+        if !fake {
+            self.sync_client_movevars(slot);
+        }
         self.finish_player_cmd(slot, time);
         // `PlayerPostThink` and `CmdEnd` come after `SV_ProcessImpacts` (the relink and the
         // touches), still inside the lag-compensation window, with the command's time and frame
         // time (`gGlobalVariables.frametime = frametime`).
         self.call_game_synced_at(time, |game, eng| game.post_usercmd(eng, slot, step));
         self.frametime = host_frametime;
-        self.restore_move();
+        if !fake {
+            self.restore_move();
+        }
+    }
+
+    /// Runs the moves `EngineApi::run_player_move` queued, after the game call that queued them
+    /// returned (`PF_RunPlayerMove_I`, ReHLDS `pr_cmds.cpp` 2035-2066, read 2026-11-23), each
+    /// followed by what a client's move is followed by: the game's queued messages and kicks, and
+    /// the touches. A move made while these run (by the game's thinks inside them) joins the
+    /// queue and is run by the same loop, at most [`MAX_FAKE_MOVES_PER_DRAIN`] in all; the rest
+    /// is dropped.
+    pub(crate) fn run_fake_moves(&mut self) {
+        if self.in_fake_moves || self.outbox.fake_moves.is_empty() {
+            return;
+        }
+        self.in_fake_moves = true;
+        let mut budget = MAX_FAKE_MOVES_PER_DRAIN;
+        while budget > 0 && !self.outbox.fake_moves.is_empty() {
+            let batch = std::mem::take(&mut self.outbox.fake_moves);
+            for FakeMove { slot, cmd } in batch.into_iter().take(budget) {
+                budget -= 1;
+                self.run_fake_move(slot, &cmd);
+                self.drain_messages();
+                self.dispatch_touches();
+            }
+        }
+        self.outbox.fake_moves.clear();
+        self.in_fake_moves = false;
+    }
+
+    /// The body of `PF_RunPlayerMove_I` after the command is built: `svtimebase` is
+    /// `host_frametime + sv.time - msec / 1000`, `SV_PreRunCmd` is empty, `SV_RunCmd(&cmd, 0,
+    /// FALSE)` (the random seed 0) runs the command in halves while it is longer than 50 ms
+    /// (see [`split_usercmd`]), and `lastcmd` becomes the command. A bot that was kicked or
+    /// freed by what a step did gets no further step.
+    fn run_fake_move(&mut self, slot: u8, cmd: &GoldSrcUserCmd) {
+        let index = usize::from(slot);
+        if !self.clients[index].fake || self.clients[index].state != ClientState::Active {
+            return;
+        }
+        let mut svtimebase = self.frametime + self.sv_time - f64::from(cmd.msec) / 1000.0;
+        for step in split_usercmd(cmd) {
+            svtimebase += f64::from(step.msec) * 0.001;
+            self.run_player_cmd(slot, &step, 0, svtimebase);
+            let kicked = self.outbox.kicks.iter().any(|(kicked, _)| *kicked == slot);
+            if kicked || !self.clients[index].fake {
+                return;
+            }
+        }
+        self.clients[index].last_cmd = cmd.clone();
     }
 
     /// `SV_ProcessImpacts` (`sv_user.cpp`): unless the player's edict is `SOLID_NOT`, links it

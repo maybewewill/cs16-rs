@@ -92,7 +92,7 @@ impl<G: GameDll> Server<G> {
             &self.map.name,
             players.len(),
             usize::from(self.cfg.max_clients),
-            0,
+            self.fake_client_count(),
         );
         (players, query)
     }
@@ -150,30 +150,31 @@ impl<G: GameDll> Server<G> {
     /// uses it; a prefixed name is cut on a character boundary to stay within
     /// [`MAX_NAME_BYTES`].
     pub(crate) fn unique_name(&self, name: &str, except: Option<u8>) -> String {
-        let taken = |candidate: &str| {
-            self.clients
-                .iter()
-                .zip(&self.views)
-                .enumerate()
-                .any(|(slot, (c, v))| {
-                    Some(slot as u8) != except
-                        && !c.is_free()
-                        && v.userinfo
-                            .get("name")
-                            .is_some_and(|n| n.eq_ignore_ascii_case(candidate))
-                })
-        };
-        let mut candidate = name.to_string();
-        let mut n = 1;
-        while taken(&candidate) {
-            let prefix = format!("({n})");
-            let mut end = name.len().min(MAX_NAME_BYTES.saturating_sub(prefix.len()));
-            while !name.is_char_boundary(end) {
-                end -= 1;
-            }
-            candidate = format!("{prefix}{}", &name[..end]);
-            n += 1;
-        }
-        candidate
+        unique_name_among(&self.views, name, except)
     }
+}
+
+/// [`Server::unique_name`] over the slots the game sees; `create_fake_client` names a bot with it.
+pub(crate) fn unique_name_among(views: &[ClientView], name: &str, except: Option<u8>) -> String {
+    let taken = |candidate: &str| {
+        views.iter().enumerate().any(|(slot, v)| {
+            Some(slot as u8) != except
+                && v.in_use
+                && v.userinfo
+                    .get("name")
+                    .is_some_and(|n| n.eq_ignore_ascii_case(candidate))
+        })
+    };
+    let mut candidate = name.to_string();
+    let mut n = 1;
+    while taken(&candidate) {
+        let prefix = format!("({n})");
+        let mut end = name.len().min(MAX_NAME_BYTES.saturating_sub(prefix.len()));
+        while !name.is_char_boundary(end) {
+            end -= 1;
+        }
+        candidate = format!("{prefix}{}", &name[..end]);
+        n += 1;
+    }
+    candidate
 }

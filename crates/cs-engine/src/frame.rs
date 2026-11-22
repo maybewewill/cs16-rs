@@ -247,7 +247,9 @@ impl<G: GameDll> Server<G> {
         for slot in 0..self.cfg.max_clients {
             let index = usize::from(slot);
             let client = &self.clients[index];
-            if client.is_free() {
+            // `SV_SendClientMessages` skips `fakeclient` (`sv_main.cpp` 5293): no update is
+            // built, no event queue is kept, nothing is sent.
+            if client.is_free() || client.fake {
                 continue;
             }
             let can_send = self.real_time >= client.clear_time;

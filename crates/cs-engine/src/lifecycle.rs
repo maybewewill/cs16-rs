@@ -139,6 +139,7 @@ impl<G: GameDll> Server<G> {
     ///
     /// [`frame`]: Server::frame
     pub fn change_map(&mut self, map: ServerMap) {
+        self.inactivate_fake_clients();
         self.with_game(|game, eng| game.server_deactivate(eng));
         for (client, view) in self.clients.iter_mut().zip(&mut self.views) {
             client.put_in_server = false;
@@ -178,6 +179,33 @@ impl<G: GameDll> Server<G> {
     /// forgotten here whether or not the map loads.
     pub fn take_pending_change_level(&mut self) -> Option<String> {
         self.outbox.change_level.take()
+    }
+
+    /// The fake-client part of `SV_InactivateClients` (ReHLDS `sv_main.cpp` 7862-7872, read
+    /// 2026-11-23): on a level change every fake client is dropped ("Dropping fakeclient on level
+    /// change"), the game hearing `client_disconnect` for it as for any client that was put in;
+    /// the real clients are sent to sign on again by the caller. A bot is told nothing and
+    /// nobody is told why.
+    fn inactivate_fake_clients(&mut self) {
+        for slot in 0..self.cfg.max_clients {
+            if self.clients[usize::from(slot)].fake {
+                self.release_slot(slot, None);
+            }
+        }
+        self.drain_outbox();
+    }
+
+    /// Gives the `Client` to each slot `EngineApi::create_fake_client` took since the last call:
+    /// its userid is the next one (`g_userid++`), taken in the order the slots were created.
+    pub(crate) fn adopt_fake_clients(&mut self) {
+        for slot in std::mem::take(&mut self.outbox.fake_created) {
+            let index = usize::from(slot);
+            // The view says whether the slot is still the bot's (it may have been freed again).
+            if self.views[index].fake && self.views[index].in_use {
+                self.clients[index] = Client::fake_client(self.next_userid, self.real_time);
+                self.next_userid += 1;
+            }
+        }
     }
 
     /// Releases the client in `slot`, sending it `svc_disconnect(reason)` at the end of the
@@ -306,7 +334,8 @@ impl<G: GameDll> Server<G> {
     pub(crate) fn drop_timed_out_clients(&mut self) {
         for slot in 0..self.cfg.max_clients {
             let client = &self.clients[usize::from(slot)];
-            if client.is_free() {
+            // `SV_CheckTimeouts` skips `fakeclient` (`sv_main.cpp` 4041).
+            if client.is_free() || client.fake {
                 continue;
             }
             let stalled = matches!(client.state, ClientState::Signon(_))
@@ -340,7 +369,7 @@ impl<G: GameDll> Server<G> {
         for client in self
             .clients
             .iter_mut()
-            .filter(|c| c.state == ClientState::Active)
+            .filter(|c| c.state == ClientState::Active && !c.fake)
         {
             if client.queue_unreliable(w.as_slice()) {
                 self.net_stats.unreliable_dropped += 1;
@@ -369,7 +398,7 @@ impl<G: GameDll> Server<G> {
         if w.is_empty() {
             return;
         }
-        for client in self.clients.iter_mut().filter(|c| c.state.is_in_game()) {
+        for client in self.clients.iter_mut().filter(|c| c.state.is_in_game() && !c.fake) {
             client.chan.write_reliable(w.as_slice());
         }
         // Enforces the reliable backlog cap on what was written.
