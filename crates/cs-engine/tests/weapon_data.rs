@@ -14,7 +14,7 @@ use cs_proto48::messages::{
     SvcMessage, SvcParseContext, WeaponDelta, WeaponRecords, parse_svc_stream, weapon_records,
     write_svc_clientdata_with_weapons,
 };
-use cs_transport::LoopbackEndpoint;
+use cs_transport::{Faults, LoopbackEndpoint};
 use cs_vfs::{Vfs, VfsConfig};
 
 type Probe = ProbeClient<LoopbackEndpoint>;
@@ -235,9 +235,11 @@ fn weapon_data_deltas_against_the_acked_frame() {
 #[test]
 fn weapon_data_schema_matches_the_installed_delta_lst() {
     let Ok(vfs) = Vfs::discover(None, VfsConfig::default()) else {
+        eprintln!("skipped: no installed game found (set CS16_GAMEDIR)");
         return;
     };
     let Ok(text) = vfs.read_string_lossy("delta.lst") else {
+        eprintln!("skipped: the installed game has no delta.lst");
         return;
     };
     let installed = parse_delta_lst(&text).expect("the installed delta.lst parses");
@@ -248,7 +250,10 @@ fn weapon_data_schema_matches_the_installed_delta_lst() {
     let builtin = DeltaRegistry::cs16_default();
     let builtin = builtin.get("weapon_data_t").unwrap();
     assert_eq!(installed.fields.len(), 18);
-    assert_eq!(format!("{:?}", installed.fields), format!("{:?}", builtin.fields));
+    assert_eq!(installed.fields.len(), builtin.fields.len());
+    for (installed, builtin) in installed.fields.iter().zip(&builtin.fields) {
+        assert_eq!(installed, builtin, "{}", builtin.name);
+    }
     // The clientdata ammo fields too.
     let installed_cd = parse_delta_lst(&text).unwrap();
     let installed_cd = installed_cd.iter().find(|s| s.name == "clientdata_t").unwrap();
@@ -372,4 +377,64 @@ fn split_commands_run_both_halves_with_the_same_seed() {
         .collect();
     assert_eq!(split.len(), 2, "{split:?}");
     assert_eq!(split[0], split[1]);
+}
+
+#[test]
+fn seeds_through_a_lossy_move_follow_rehlds() {
+    // Commands of 11, 12, ... ms, one per packet, so a command is known by its `msec`. Three
+    // packets in a row are lost (more than the two backups every packet carries): the next
+    // packet repeats the last command run (seed 0, `SV_RunCmd(&lastcmd, 0, FALSE)`), then
+    // replays the two backups with `incoming_sequence - cmdnum`, then runs its new command with
+    // `incoming_sequence`.
+    let mut h = Harness::new(4);
+    let mut probe = h.add_probe("Player");
+    h.step(&mut [&mut probe], 200);
+    assert_eq!(probe.state(), &ProbeState::InGame);
+    // Let the idle commands of the sign-on frames pass.
+    let before = h.server.game().random_seeds.len();
+    let send = |h: &mut Harness, probe: &mut Probe, k: u8| {
+        probe.queue_cmd(cmd(11 + k));
+        h.step(&mut [probe], 1);
+    };
+    for k in 0..5 {
+        send(&mut h, &mut probe, k);
+    }
+    probe.transport_mut().set_faults(Faults {
+        drop_every: 1,
+        ..Faults::default()
+    });
+    for k in 5..8 {
+        send(&mut h, &mut probe, k);
+    }
+    probe.transport_mut().set_faults(Faults::default());
+    for k in 8..12 {
+        send(&mut h, &mut probe, k);
+    }
+    h.step(&mut [&mut probe], 10);
+
+    let game = h.server.game();
+    let run: Vec<(u8, u32)> = game.usercmd_msecs[before..]
+        .iter()
+        .copied()
+        .zip(game.random_seeds[before..].iter().copied())
+        .filter(|(msec, _)| *msec != 0)
+        .collect();
+    let s0 = run[0].1;
+    assert_eq!(run[0].0, 11);
+    let expected: Vec<(u8, u32)> = vec![
+        (11, s0),
+        (12, s0 + 1),
+        (13, s0 + 2),
+        (14, s0 + 3),
+        (15, s0 + 4),
+        // Packet s0 + 5 .. s0 + 7 lost; in packet s0 + 8 the command of s0 + 5 is not carried.
+        (15, 0),
+        (17, s0 + 6),
+        (18, s0 + 7),
+        (19, s0 + 8),
+        (20, s0 + 9),
+        (21, s0 + 10),
+        (22, s0 + 11),
+    ];
+    assert_eq!(run, expected);
 }

@@ -96,6 +96,7 @@ fn svc_stream_survives_garbage_with_long_lived_context() {
         ("baselines", ctx.baselines.len()),
         ("instance_baselines", ctx.instance_baselines.len()),
         ("clientdata_history", ctx.clientdata_history.len()),
+        ("weapondata_history", ctx.weapondata_history.len()),
         ("entity_frames", ctx.entity_frames.len()),
         ("entity_frames entities", frame_entities),
         (

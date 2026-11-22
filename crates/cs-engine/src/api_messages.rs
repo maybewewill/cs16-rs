@@ -16,7 +16,7 @@ use glam::Vec3;
 use crate::client::ClientState;
 use crate::game::EngineApi;
 use crate::signon::{INIT_BUFFER_BUDGET, MAX_LIGHTSTYLES};
-use crate::unlag::info_atoi;
+use crate::unlag::userinfo_lw;
 
 /// Bytes of text `client_print`, `print_all`, `center_print` and `stufftext` send at most.
 pub const MAX_MESSAGE_TEXT: usize = 1024;
@@ -454,7 +454,7 @@ impl EngineApi<'_> {
     pub fn client_lw(&self, slot: u8) -> bool {
         self.clients
             .get(usize::from(slot))
-            .is_some_and(|c| info_atoi(c.userinfo.get("cl_lw")) != 0)
+            .is_some_and(|c| userinfo_lw(&c.userinfo))
     }
 
     /// Sets light style `index` to `pattern` (`a` dark to `z` bright, one letter per tenth of a

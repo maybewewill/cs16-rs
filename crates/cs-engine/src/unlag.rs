@@ -95,6 +95,12 @@ pub(crate) fn info_atoi(value: Option<&str>) -> i64 {
     if negative { -n } else { n }
 }
 
+/// `cl->lw` of ReHLDS (`SV_ExtractFromUserinfo`): `cl_lw` read as `atoi(..) != 0`, false when
+/// the key is missing or empty. The one place `cl_lw` is read.
+pub(crate) fn userinfo_lw(info: &cs_proto48::info::InfoString) -> bool {
+    info_atoi(info.get("cl_lw")) != 0
+}
+
 /// The frames a rewind interpolates between, and the players it must not move.
 struct UnlagFrames {
     older: u32,
@@ -119,7 +125,7 @@ impl<G: GameDll> Server<G> {
         self.unlag_cvar("sv_unlag") != 0.0
             && self.cfg.max_clients > 1
             && self.clients[index].state == ClientState::Active
-            && info_atoi(info.get("cl_lw")) != 0
+            && userinfo_lw(info)
             && info_atoi(info.get("cl_lc")) != 0
     }
 

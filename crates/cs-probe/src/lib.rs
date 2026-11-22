@@ -19,7 +19,7 @@ use cs_proto48::handshake::{
     encode_getchallenge, lan_steam_auth_ticket, parse_oob_packet,
 };
 use cs_proto48::messages::{
-    PacketEntitiesMsg, ServerInfoMsg, SvcMessage, SvcParseContext, entity_schema_name,
+    PacketEntitiesMsg, ServerInfoMsg, SvcMessage, SvcParseContext, WeaponRecords, entity_schema_name,
     parse_svc_stream, write_clc_delta, write_clc_move, write_clc_resourcelist, write_clc_stringcmd,
 };
 use cs_proto48::netchan::{FRAGMENT_C2S_SIZE, NetChan, SplitPacketAssembler};
@@ -104,6 +104,8 @@ pub struct ProbeClient<T: PacketTransport> {
     server_info: Option<ServerInfoMsg>,
     entities: BTreeMap<u16, GoldSrcEntityState>,
     client_data: Option<GoldSrcClientData>,
+    /// The `weapon_data_t` list of the last `svc_clientdata` received.
+    weapon_records: WeaponRecords,
     userinfos: BTreeMap<u8, String>,
     opcode_log: Vec<u8>,
     /// The last [`MESSAGE_LOG_CAPACITY`] messages received, without the per-update ones.
@@ -152,6 +154,7 @@ impl<T: PacketTransport> ProbeClient<T> {
             server_info: None,
             entities: BTreeMap::new(),
             client_data: None,
+            weapon_records: WeaponRecords::new(),
             userinfos: BTreeMap::new(),
             opcode_log: Vec::new(),
             messages: VecDeque::new(),
@@ -342,16 +345,10 @@ impl<T: PacketTransport> ProbeClient<T> {
         let Some(schema) = self.ctx.deltas.get("weapon_data_t") else {
             return BTreeMap::new();
         };
-        self.ctx
-            .weapondata_history
-            .get(&self.ctx.last_incoming_seq)
-            .map(|records| {
-                records
-                    .iter()
-                    .map(|(&index, record)| (index, GoldSrcWeaponData::from_delta(record, schema)))
-                    .collect()
-            })
-            .unwrap_or_default()
+        self.weapon_records
+            .iter()
+            .map(|(&index, record)| (index, GoldSrcWeaponData::from_delta(record, schema)))
+            .collect()
     }
 
     pub fn userinfos(&self) -> &BTreeMap<u8, String> {
@@ -548,7 +545,15 @@ impl<T: PacketTransport> ProbeClient<T> {
             }
             SvcMessage::SignonNum(1) if signon => self.send_stringcmd("sendents"),
             SvcMessage::PacketEntities(update) => self.apply_entities(&update, now),
-            SvcMessage::ClientData { parsed, .. } => self.client_data = Some(parsed),
+            SvcMessage::ClientData { parsed, .. } => {
+                self.client_data = Some(parsed);
+                self.weapon_records = self
+                    .ctx
+                    .weapondata_history
+                    .get(&self.ctx.last_incoming_seq)
+                    .cloned()
+                    .unwrap_or_default();
+            }
             SvcMessage::UpdateUserInfo { slot, userinfo, .. } => {
                 self.userinfos.insert(slot, userinfo);
             }
@@ -589,6 +594,7 @@ impl<T: PacketTransport> ProbeClient<T> {
         self.ctx.entity_frames.clear();
         self.ctx.clientdata_history.clear();
         self.ctx.weapondata_history.clear();
+        self.weapon_records.clear();
         self.server_info = None;
         self.client_data = None;
         self.sent_cmds.clear();

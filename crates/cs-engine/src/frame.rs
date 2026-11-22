@@ -17,7 +17,7 @@ use crate::client::ClientState;
 use crate::edict::{EdictId, EntVars};
 use crate::game::{GameDll, entity_state_from_vars};
 use crate::server::{Server, ServerConfig};
-use crate::unlag::info_atoi;
+use crate::unlag::userinfo_lw;
 
 /// Updates remembered per client as delta bases.
 pub const UPDATE_BACKUP: usize = 64;
@@ -456,7 +456,7 @@ impl<G: GameDll> Server<G> {
 
     /// `host_client->lw`: the client's `cl_lw`, see `EngineApi::client_lw`.
     fn client_has_lw(&self, slot: u8) -> bool {
-        info_atoi(self.views[usize::from(slot)].userinfo.get("cl_lw")) != 0
+        userinfo_lw(&self.views[usize::from(slot)].userinfo)
     }
 
     /// The players among `states`, as lag compensation will need them later.
