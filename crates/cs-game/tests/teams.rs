@@ -677,6 +677,7 @@ fn commands_before_the_player_is_in_the_game_are_harmless() {
     // Right after it entered (before any menu) `joinclass` is refused.
     b.run(|game, eng| {
         game.client_put_in_server(eng, 2);
+        eng.test_set_client_active(2, true);
         game.client_command(eng, 2, &["joinclass".to_string(), "1".to_string()]);
         game.client_command(eng, 2, &["jointeam".to_string(), "1".to_string()]);
     });

@@ -338,7 +338,10 @@ impl Bench {
 
     /// Puts a second client in the server (slot 1), as the engine does when one signs on.
     pub fn enter_second_client(&mut self) {
-        self.run(|game, eng| game.client_put_in_server(eng, 1));
+        self.run(|game, eng| {
+            game.client_put_in_server(eng, 1);
+            eng.test_set_client_active(1, true);
+        });
     }
 
     /// The game's user messages the probe has received, in order.
@@ -454,6 +457,9 @@ pub fn commands_of(game: &mut CsGame, eng: &mut EngineApi<'_>, slot: u8, n: usiz
 pub fn enter(b: &mut Bench, slot: u8) {
     b.run(move |game, eng| {
         game.client_put_in_server(eng, slot);
+        if slot != 0 {
+            eng.test_set_client_active(slot, true);
+        }
         commands_of(game, eng, slot, 3);
     });
     b.step(2);

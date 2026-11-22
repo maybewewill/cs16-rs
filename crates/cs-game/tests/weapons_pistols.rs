@@ -155,6 +155,7 @@ impl Arena {
         a.run(|game, eng| {
             eng.set_cvar("sv_gravity", "0");
             game.client_put_in_server(eng, 1);
+            eng.test_set_client_active(1, true);
             assert!(game.spawn_player(eng, 0, Team::Ct, 0));
             assert!(game.spawn_player(eng, 1, Team::Terrorist, 0));
             game.end_freeze_period(eng);

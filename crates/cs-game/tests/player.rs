@@ -715,6 +715,7 @@ fn a_death_sends_its_messages_in_the_order_of_killed() {
     b.enter_second_client();
     b.run(|game, eng| {
         game.client_put_in_server(eng, 2);
+        eng.test_set_client_active(2, true);
         game.spawn_player(eng, 0, Team::Ct, 0);
         game.spawn_player(eng, 1, Team::Terrorist, 0);
         game.spawn_player(eng, 2, Team::Ct, 0);

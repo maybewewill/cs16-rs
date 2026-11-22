@@ -295,7 +295,11 @@ fn spawn_points_come_from_the_lump_by_team() {
     let picks = b.run(|game, eng| {
         let me = eng.client_edict(0);
         let other = eng.client_edict(1);
+        // A real player, as `Spawn` and the engine make it: the sphere search lists it only
+        // with a classname and an active client slot.
+        eng.test_set_client_active(1, true);
         let v = eng.ent_mut(other).unwrap();
+        v.classname = "player".to_string();
         v.flags = FL_CLIENT;
         v.deadflag = 2;
         eng.set_origin(other, Vec3::new(100.0, 0.0, 0.0));

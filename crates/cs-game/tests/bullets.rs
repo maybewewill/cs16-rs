@@ -29,7 +29,9 @@ fn arena() -> Bench {
     b.run(|game, eng| {
         eng.set_cvar("sv_gravity", "0");
         game.client_put_in_server(eng, 1);
+        eng.test_set_client_active(1, true);
         game.client_put_in_server(eng, 2);
+        eng.test_set_client_active(2, true);
         assert!(game.spawn_player(eng, 0, Team::Ct, 0));
         assert!(game.spawn_player(eng, 1, Team::Terrorist, 0));
         assert!(game.spawn_player(eng, 2, Team::Terrorist, 0));
