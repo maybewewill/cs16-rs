@@ -375,19 +375,19 @@ evidence = "crates/cs-game/tests/hud_extras.rs: the hint messages (HudTextArgs: 
 [[item]]
 id = "weapon_decal_reset_restart"
 status = "tested"
-evidence = "the decal-reset test added to crates/cs-game/tests/inventory.rs by the phase 2D final fix wave (the controller names it at merge): CleanUpMap ends with PLAYBACK_EVENT(FEV_GLOBAL | FEV_RELIABLE, 0, m_usResetDecals) (events/decal_reset.sc), rg_multiplay_gamerules.cpp 609-680"
+evidence = "crates/cs-game/tests/rounds.rs::restart_round_resets_the_decals; CleanUpMap ends with PLAYBACK_EVENT(FEV_GLOBAL | FEV_RELIABLE, 0, m_usResetDecals) (events/decal_reset.sc), rg_multiplay_gamerules.cpp 609-680"
 
 [[item]]
 id = "weapon_spectate_clears_inventory"
 status = "tested"
-evidence = "the spectate test added to crates/cs-game/tests/teams.rs by the phase 2D final fix wave (the controller names it at merge): choose_spectator calls RemoveAllItems(TRUE) after the kill (client.cpp 1925-1938), start_observer holsters the active item (player.cpp:4163); a player with an AK and ammo that types spectate in the freeze period ends with no items, weapons 0 and CurWeapon 0 0 0"
+evidence = "crates/cs-game/tests/rounds.rs::spectating_in_the_freeze_period_gives_up_the_inventory; choose_spectator calls RemoveAllItems(TRUE) after the kill (client.cpp 1925-1938), start_observer holsters the active item (player.cpp:4163); a player with an AK and ammo that types spectate in the freeze period ends with no items, weapons 0 and CurWeapon 0 0 0"
 
 [[item]]
 id = "weapon_corpse_throw"
 status = "tested"
-evidence = "the corpse-throw test added to crates/cs-game/tests/player.rs by the phase 2D final fix wave (the controller names it at merge): the m_iThrowDirection velocity switch and the angles.y / v_angle.y rewrite of CBasePlayer::Killed (player.cpp 2493-2547); throw_direction comes from SetAnimation"
+evidence = "crates/cs-game/tests/player.rs::a_ducking_corpse_is_thrown_backwards, crates/cs-game/tests/player.rs::a_corpse_hit_in_the_arm_flies_along_the_attackers_aim; the m_iThrowDirection velocity switch and the angles.y / v_angle.y rewrite of CBasePlayer::Killed (player.cpp 2493-2547); throw_direction comes from SetAnimation"
 
 [[item]]
 id = "weapon_shotgun_empty_sound"
 status = "tested"
-evidence = "the underwater-shotgun test added to crates/cs-game/tests/weapons_special.rs by the phase 2D final fix wave (the controller names it at merge): the M3 and the XM1014 clear m_iPlayEmptySound in their PlayEmptySound (rg_wpn_m3.cpp 65-70, rg_wpn_xm1014.cpp 63-68), so the underwater branch of the weapon core clicks once"
+evidence = "crates/cs-game/tests/weapon_core.rs::a_shotgun_clicks_once_when_fired_under_water; the M3 and the XM1014 clear m_iPlayEmptySound in their PlayEmptySound (rg_wpn_m3.cpp 65-70, rg_wpn_xm1014.cpp 63-68), so the underwater branch of the weapon core clicks once"
