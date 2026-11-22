@@ -4,7 +4,7 @@ use glam::Vec3;
 
 use super::consts::{
     CONTENTS_SOLID, FL_DUCKING, IN_BACK, IN_FORWARD, IN_JUMP, IN_MOVELEFT, IN_MOVERIGHT, MAX_CLIMB_SPEED,
-    MOVETYPE_FLY, MOVETYPE_NOCLIP, MOVETYPE_WALK, PLAYER_DUCKING_MULTIPLIER,
+    MOVETYPE_FLY, MOVETYPE_NOCLIP, MOVETYPE_WALK,
 };
 use super::math::{angle_vectors, cross, dot, vector_ma, vector_normalize, vector_scale, vector_subtract};
 use super::types::PmCtx;
@@ -61,7 +61,9 @@ pub(crate) fn pm_ladder_move(c: &mut PmCtx<'_>, ladder: usize) {
         let (vpn, v_right, _) = angle_vectors(c.pm.angles);
 
         if (c.pm.flags & FL_DUCKING) != 0 {
-            fl_speed = (f64::from(fl_speed) * f64::from(PLAYER_DUCKING_MULTIPLIER)) as f32;
+            // PLAYER_DUCKING_MULTIPLIER as the C `double` literal 0.333 (not the widened f32).
+            const DUCKING_MULTIPLIER: f64 = 0.333;
+            fl_speed = (f64::from(fl_speed) * DUCKING_MULTIPLIER) as f32;
         }
 
         let buttons = i32::from(c.pm.cmd.buttons);
@@ -189,6 +191,15 @@ mod tests {
         run(&mut pm, &mut world(false));
         let expected = (200.0f64 * 0.333) as f32;
         assert_eq!(pm.velocity, Vec3::new(0.0, 0.0, expected));
+    }
+
+    #[test]
+    fn ducking_multiplier_is_the_c_double_not_the_widened_f32() {
+        // 69 * 0.333 (double) rounds to a different f32 than 69 * f64::from(0.333f32).
+        let mut pm = PlayerMove { maxspeed: 69.0, flags: FL_DUCKING, ..PlayerMove::default() };
+        pm.cmd.buttons = IN_FORWARD as u16;
+        run(&mut pm, &mut world(false));
+        assert_eq!(pm.velocity.z, (69.0f64 * 0.333) as f32);
     }
 
     #[test]

@@ -77,8 +77,53 @@ fn jumps_off_a_ladder_along_its_normal() {
     assert_eq!(pm.movetype, MOVETYPE_WALK);
     assert_close(pm.velocity.x, -270.0, 1e-3, "jump velocity along the normal");
     assert_close(pm.velocity.y, 0.0, 1e-3, "no sideways component");
-    // The ladder still counts for this frame: the jump key is not PM_Jump's (p_ladder is set).
-    assert!(pm.origin.x < 10.0, "moved away from the ladder: {}", pm.origin.x);
+    // PM_AirMove moves by velocity * frametime in the same frame: -270 * 0.01 = -2.7.
+    assert_close(pm.origin.x, 10.0 - 2.7, 1e-3, "displacement away from the ladder");
+}
+
+#[test]
+fn climbs_sideways_along_the_ladder() {
+    // Facing the ladder (yaw 0): v_right = (0,-1,0). IN_MOVERIGHT: right = +200, velocity
+    // (0,-200,0); normal.v = 0, so lateral = velocity and the result is (0,-200,0). IN_MOVELEFT
+    // mirrors it.
+    let (mut pm, mut sh, mut w) = at_ladder();
+    pm.cmd.buttons = IN_MOVERIGHT as u16;
+    run_cmd(&mut pm, &mut sh, &mut w, 10);
+    assert_close(pm.velocity.y, -200.0, 1e-3, "right");
+    assert_close(pm.velocity.z, 0.0, 1e-3, "right z");
+
+    let (mut pm, mut sh, mut w) = at_ladder();
+    pm.cmd.buttons = IN_MOVELEFT as u16;
+    run_cmd(&mut pm, &mut sh, &mut w, 10);
+    assert_close(pm.velocity.y, 200.0, 1e-3, "left");
+}
+
+#[test]
+fn the_first_of_two_overlapping_ladders_wins() {
+    // Both ladders contain the player; PM_Ladder returns the first (moveent 0), so only its
+    // bounds are asked for and its normal (-x) gives the jump velocity.
+    let (mut pm, mut sh, mut w) = at_ladder();
+    w.ladder(Vec3::new(20.0, -16.0, 0.0), Vec3::new(24.0, 16.0, 200.0), Vec3::new(0.0, -1.0, 0.0));
+    pm.cmd.buttons = IN_JUMP as u16;
+    run_cmd(&mut pm, &mut sh, &mut w, 10);
+    let calls = w.calls();
+    assert!(calls.contains(&pm_support::Call::MoveentBounds(0)));
+    assert!(!calls.contains(&pm_support::Call::MoveentBounds(1)));
+    assert!(!calls.contains(&pm_support::Call::LadderContains(1)));
+    assert_close(pm.velocity.x, -270.0, 1e-3, "normal of ladder 0");
+}
+
+#[test]
+fn swimming_up_with_upmove() {
+    // upmove 100, no horizontal input: wishvel.z = +100 (no sinking drift); wishspeed =
+    // 100 * 0.8 = 80; velocity 0 so accelspeed = 10 * 0.01 * 80 = 8 -> velocity.z = +8.
+    let (mut pm, mut sh, mut w) = pool(100.0);
+    pm.origin.z = 60.0;
+    pm.cmd.upmove = 100.0;
+    run_cmd(&mut pm, &mut sh, &mut w, 10);
+    assert_eq!(pm.waterlevel, 3);
+    assert_close(pm.velocity.z, 8.0, 1e-4, "swim up velocity");
+    assert_close(pm.origin.z, 60.08, 1e-3, "origin");
 }
 
 #[test]
