@@ -350,14 +350,24 @@ impl GameEntity for FuncLadder {
 }
 
 /// How a [`StaticBrush`] behaves.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BrushKind {
     /// Solid and pushing (`MOVETYPE_PUSH`, `SOLID_BSP`), but it never moves: there is no door,
     /// button or train logic yet.
     Solid,
     /// `func_illusionary`: visible, never solid.
     Illusionary,
+    /// `func_door` and `func_water` (`CBaseDoor::Spawn`, doors.cpp 192-215, read 2026-11-22): a
+    /// door with a nonzero `skin` has special contents (water, slime...) and is never solid;
+    /// otherwise `SF_DOOR_PASSABLE` makes it non-solid. Only the spawn part: the movement is
+    /// phase 7.
+    Door,
+    /// `func_door_rotating` (`CRotDoor::Spawn`): solid unless `SF_DOOR_PASSABLE`; no `skin`.
+    RotatingDoor,
 }
+
+/// `SF_DOOR_PASSABLE`.
+const SF_DOOR_PASSABLE: u32 = 1 << 3;
 
 /// The brush model number `N` of a model named `*N`; `None` for the world (`*0`) and any other
 /// name.
@@ -390,7 +400,7 @@ impl GameEntity for StaticBrush {
     }
 
     /// An entry without a `*N` brush model is refused: there is nothing to collide with.
-    fn spawn(&mut self, eng: &mut EngineApi<'_>, id: EdictId, _keys: &[(String, String)]) -> bool {
+    fn spawn(&mut self, eng: &mut EngineApi<'_>, id: EdictId, keys: &[(String, String)]) -> bool {
         let (class, kind) = (self.class, self.kind);
         let Some(v) = eng.ent_mut(id) else {
             return false;
@@ -408,6 +418,21 @@ impl GameEntity for StaticBrush {
                     v.angles = Vec3::ZERO;
                     v.flags |= FL_WORLDBRUSH;
                 }
+            }
+            BrushKind::Door | BrushKind::RotatingDoor => {
+                // `skin` is a key of the entity; the engine copies only `spawnflags`.
+                if kind == BrushKind::Door
+                    && let Some((_, value)) = keys.iter().find(|(k, _)| k == "skin")
+                {
+                    v.skin = crate::menus::atoi(value).clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+                }
+                let special = kind == BrushKind::Door && v.skin != 0;
+                v.solid = if special || v.spawnflags & SF_DOOR_PASSABLE != 0 {
+                    SOLID_NOT
+                } else {
+                    SOLID_BSP
+                };
+                v.movetype = MOVETYPE_PUSH;
             }
             BrushKind::Illusionary => {
                 v.angles = Vec3::ZERO;
@@ -630,29 +655,13 @@ mod tests {
         assert_eq!(brush_model_number("*x"), None);
     }
 
-    /// Every sample `PM_PlayStepSound` (families by step type, `irand` 0..=3 map to numbers 1 to 4,
-    /// tile also 5), `PM_Jump`/`PM_PlayWaterSounds` (wade 1 to 4) and `WaterMove` (the gasp and
-    /// the swim sounds) can play is in the precache list (`ClientPrecache`).
+    /// Every sample the movement tables can play (`cs_sim::pm::all_sample_names`: the step
+    /// families and the wade sounds) and the ones `WaterMove` plays (the gasp and the swim
+    /// sounds) are in the precache list (`ClientPrecache`); a new family fails the test.
     #[test]
     fn every_sample_the_pm_tables_can_produce_is_precached() {
-        let families: [(&str, u32); 10] = [
-            ("step", 4),
-            ("metal", 4),
-            ("dirt", 4),
-            ("duct", 4),
-            ("grate", 4),
-            ("tile", 5),
-            ("slosh", 4),
-            ("wade", 4),
-            ("ladder", 4),
-            ("snow", 4),
-        ];
-        let mut wanted = Vec::new();
-        for (family, count) in families {
-            for n in 1..=count {
-                wanted.push(format!("player/pl_{family}{n}.wav"));
-            }
-        }
+        let mut wanted = cs_sim::pm::all_sample_names();
+        assert!(wanted.len() >= 40, "{wanted:?}");
         for n in 1..=4 {
             wanted.push(format!("player/pl_swim{n}.wav"));
         }

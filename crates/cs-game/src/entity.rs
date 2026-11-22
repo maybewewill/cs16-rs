@@ -69,8 +69,11 @@ pub fn create_entity(classname: &str) -> Option<Box<dyn GameEntity>> {
         "func_ladder" => Box::new(FuncLadder),
         "func_buyzone" => Box::new(BuyZone::default()),
         "func_wall" => Box::new(StaticBrush::new("func_wall", BrushKind::Solid)),
-        "func_door" => Box::new(StaticBrush::new("func_door", BrushKind::Solid)),
-        "func_door_rotating" => Box::new(StaticBrush::new("func_door_rotating", BrushKind::Solid)),
+        "func_door" => Box::new(StaticBrush::new("func_door", BrushKind::Door)),
+        "func_water" => Box::new(StaticBrush::new("func_water", BrushKind::Door)),
+        "func_door_rotating" => {
+            Box::new(StaticBrush::new("func_door_rotating", BrushKind::RotatingDoor))
+        }
         "func_breakable" => Box::new(StaticBrush::new("func_breakable", BrushKind::Solid)),
         "func_button" => Box::new(StaticBrush::new("func_button", BrushKind::Solid)),
         "func_plat" => Box::new(StaticBrush::new("func_plat", BrushKind::Solid)),
@@ -225,6 +228,7 @@ mod tests {
             "func_wall",
             "func_door",
             "func_door_rotating",
+            "func_water",
             "func_breakable",
             "func_button",
             "func_plat",

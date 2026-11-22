@@ -6,7 +6,7 @@ mod common;
 
 use common::{Bench, command, discover, find_map_with_entity, map_named, spawns};
 use cs_engine::consts::FL_ONGROUND;
-use cs_engine::{EngineApi, EntVars};
+use cs_engine::{EngineApi, EntVars, GameDll};
 use cs_game::observer::OBS_ROAMING;
 use cs_game::player::Team;
 use cs_proto48::delta::GoldSrcUserCmd;
@@ -275,6 +275,14 @@ fn drive(
     })
 }
 
+/// `cmd` looking `pitch` degrees down (positive) along its yaw.
+fn look(pitch: f32, c: GoldSrcUserCmd) -> GoldSrcUserCmd {
+    GoldSrcUserCmd {
+        viewangles: Vec3::new(pitch, c.viewangles.y, 0.0),
+        ..c
+    }
+}
+
 #[test]
 fn a_ladder_is_climbed_on_a_real_map() {
     let Some(vfs) = discover() else {
@@ -322,43 +330,57 @@ fn a_ladder_is_climbed_on_a_real_map() {
             let on_ladder = run.iter().any(|r| r.0 == MOVETYPE_FLY);
             let rise = run.last().unwrap().1.z - origin.z;
             if on_ladder && rise > 30.0 {
-                climbed = Some((name.clone(), rise));
+                climbed = Some((origin, yaw));
                 break 'ladders;
             }
         }
     }
-    let (map, rise) = climbed.expect("a ladder on the map is climbed");
-    assert!(rise > 30.0, "{map}: rose {rise}");
+    let (origin, yaw) = climbed.expect("a ladder on the map is climbed");
+
+    // `PM_LadderMove`: the climb speed is `min(MAX_CLIMB_SPEED 200, maxspeed 250)`. Facing the
+    // ladder level with IN_FORWARD, `velocity = forward * 200` is all into the face; the
+    // decomposition turns it into 200 along the ladder's vertical (`normal x perp` = +z), with
+    // nothing lateral. Allow 0.5 for `cos`/`sin` of the yaw in single precision.
+    let up = drive(&mut b, origin, 10, cmd(10, IN_FORWARD, 200.0, yaw));
+    let first = up.iter().find(|r| r.0 == MOVETYPE_FLY).expect("on the ladder");
+    assert!((first.2.z - 200.0).abs() < 0.5, "climb speed {:?}", first.2);
+    assert!(first.2.truncate().length() < 0.5, "lateral {:?}", first.2);
+    assert!(up.last().unwrap().1.z > origin.z + 10.0, "climbs");
+
+    // Looking `pitch` down, the same command is `forward = 200 * (cos, -sin)` of the view:
+    // into the face 200 cos(pitch), vertical -200 sin(pitch); the conversion adds
+    // +200 cos(pitch) up, so z = 200 (cos - sin): at 60 degrees -73.2, a descent.
+    let down = drive(&mut b, origin, 10, look(60.0, cmd(10, IN_FORWARD, 200.0, yaw)));
+    let first = down.iter().find(|r| r.0 == MOVETYPE_FLY).expect("on the ladder");
+    let expected = 200.0 * (60.0f32.to_radians().cos() - 60.0f32.to_radians().sin());
+    assert!((first.2.z - expected).abs() < 1.0, "{:?} expected z {expected}", first.2);
+    assert!(first.2.z < -60.0);
+    assert!(down.last().unwrap().1.z < origin.z, "descends");
 }
 
-#[test]
-fn water_is_swum_on_a_real_map() {
-    let Some(vfs) = discover() else {
-        return;
-    };
-    // Maps with water: the world's water textures (`!name`) are in their texture list; the
-    // first of them that has a deep pool the scan finds is used.
-    let candidates: Vec<String> = vfs
-        .list_maps()
-        .into_iter()
-        .filter(|name| {
-            cs_assets::bsp::BspMap::load(&vfs, name)
-                .is_ok_and(|bsp| bsp.textures.iter().any(|t| t.name.starts_with('!')))
-        })
-        .collect();
-    let mut found = None;
-    for name in candidates {
-        let bounds = {
-            let bsp = cs_assets::bsp::BspMap::load(&vfs, &name).expect("load");
-            let m = bsp.models[0];
-            (m.mins, m.maxs)
-        };
-        let mut b = Bench::on(map_named(&vfs, &name));
+/// The first stock map (`preferred` first, then in name order) whose world has a pool deep
+/// enough to swim in, with the points the scan found: water at the point and 36 units above and
+/// below it, and 150 units on along +x, so a short swim stays in the water.
+fn find_pool(vfs: &cs_vfs::Vfs, preferred: &str) -> Option<(String, Bench, Vec<Vec3>)> {
+    let mut names = vec![preferred.to_string()];
+    names.extend(vfs.list_maps());
+    for name in names {
+        if !vfs.exists(&format!("maps/{name}.bsp")) {
+            continue;
+        }
+        let bsp = cs_assets::bsp::BspMap::load(vfs, &name).expect("load");
+        if !bsp.textures.iter().any(|t| t.name.starts_with('!')) {
+            continue;
+        }
+        let m = bsp.models[0];
+        let bounds = (m.mins, m.maxs);
+        let mut b = Bench::on(map_named(vfs, &name));
         b.run(|game, eng| assert!(game.spawn_player(eng, 0, Team::Ct, 0)));
-        // Points in the water with water over the head too (a coarse scan of the world's box).
         let spots: Vec<Vec3> = b.run(move |_, eng| {
             let mut out = Vec::new();
-            let step = 32.0;
+            let step = 64.0;
+            let wet =
+                |eng: &EngineApi<'_>, q: Vec3| eng.point_contents(q, Hull::Point) == CONTENTS_WATER;
             let mut x = bounds.0.x + 8.0;
             while x < bounds.1.x {
                 let mut y = bounds.0.y + 8.0;
@@ -366,11 +388,15 @@ fn water_is_swum_on_a_real_map() {
                     let mut z = bounds.0.z + 8.0;
                     while z < bounds.1.z {
                         let p = Vec3::new(x, y, z);
-                        let wet = |q: Vec3| eng.point_contents(q, Hull::Point) == CONTENTS_WATER;
-                        if wet(p)
-                            && wet(p + Vec3::Z * 36.0)
-                            && wet(p - Vec3::Z * 36.0)
+                        if wet(eng, p)
+                            && wet(eng, p + Vec3::Z * 36.0)
+                            && wet(eng, p - Vec3::Z * 36.0)
+                            && wet(eng, p + Vec3::X * 150.0)
                             && !eng.trace_hull(p, p, Hull::Standing).start_solid
+                            && eng
+                                .trace_hull(p, p + Vec3::X * 150.0, Hull::Standing)
+                                .fraction
+                                == 1.0
                         {
                             out.push(p);
                         }
@@ -383,36 +409,151 @@ fn water_is_swum_on_a_real_map() {
             out
         });
         if !spots.is_empty() {
-            found = Some((name, b, spots));
-            break;
+            return Some((name, b, spots));
         }
     }
-    let Some((name, mut b, spots)) = found else {
+    None
+}
+
+/// The stock map the water test tries first (the first with a pool the scan finds in this
+/// installation; any other is found by the scan).
+const PREFERRED_WATER_MAP: &str = "c0a0d";
+
+#[test]
+fn water_is_swum_on_a_real_map() {
+    let Some(vfs) = discover() else {
+        return;
+    };
+    let Some((name, mut b, spots)) = find_pool(&vfs, PREFERRED_WATER_MAP) else {
         panic!("no stock map has a deep pool the scan can find");
     };
 
     let mut swum = false;
     for spot in spots.into_iter().take(40) {
-        let idle = drive(&mut b, spot, 100, cmd(10, 0, 0.0, 0.0));
+        // Idle: `PM_WaterMove` drifts towards the bottom (`wishvel.z -= 60`, `wishspeed 60 * 0.8`
+        // = 48); friction takes 4% a command and the acceleration is 5 * 0.01 * 48 = 2.4, so the
+        // sink speed settles at exactly 48.
+        let idle = drive(&mut b, spot, 150, cmd(10, 0, 0.0, 0.0));
         let last = idle.last().unwrap();
         if last.3 < 2 {
             continue;
         }
-        // In water: the type is water, the player sinks slowly instead of falling
-        // (`PM_WaterMove` sinks at 60), never at gravity's pace.
         assert_eq!(last.4, CONTENTS_WATER, "{name}");
-        assert!(idle.iter().all(|r| r.2.z > -120.0), "sank like a stone");
-        // Swimming forward moves it; jumping pushes up at 100 (water).
-        let swim = drive(&mut b, spot, 60, cmd(10, IN_FORWARD, 250.0, 0.0));
-        let moved = (swim.last().unwrap().1 - spot).truncate().length();
-        assert!(moved > 20.0 || swim.iter().any(|r| r.3 < 2), "swam {moved}");
+        assert!((last.2.z + 48.0).abs() < 0.1, "sink speed {:?}", last.2);
+
+        // Swimming forward at forwardmove 250 (maxspeed 250): `wishspeed = 250 * 0.8 = 200`; each
+        // command friction takes 4% and the acceleration adds `min(5 * 0.01 * 200 = 10,
+        // 200 - speed)`, so the speed settles at 200 (192 + 8).
+        let swim = drive(&mut b, spot, 40, cmd(10, IN_FORWARD, 250.0, 0.0));
+        let wet = swim.iter().filter(|r| r.3 >= 2).count();
+        assert!(wet * 5 >= swim.len() * 4, "in the water for {wet} of {} commands", swim.len());
+        let travelled = (swim.last().unwrap().1 - spot).truncate().length();
+        assert!(travelled > 20.0, "swam {travelled}");
+        let speed = swim.last().unwrap().2.truncate().length();
+        assert!((199.0..=200.01).contains(&speed), "swim speed {speed}");
+        assert!(swim[0].2.length() < 20.0, "starts from rest: {:?}", swim[0].2);
+
+        // Jumping in water: `PM_Jump` sets `velocity.z = 100`; `PM_WaterMove` friction takes 4%
+        // of it: 96 on the first command, which then rises by 0.96 a command.
         let up = drive(&mut b, spot, 20, cmd(10, IN_JUMP, 0.0, 0.0));
-        assert!(
-            up.iter().any(|r| r.2.z > 40.0) || up.last().unwrap().1.z > spot.z + 10.0,
-            "jumping rises in water"
-        );
+        assert!((up[0].2.z - 96.0).abs() < 0.01, "jump speed {:?}", up[0].2);
+        let rise = up.last().unwrap().1.z - spot.z;
+        assert!(rise > 15.0, "rose {rise}");
         swum = true;
         break;
     }
     assert!(swum, "{name}: the player was in water (waterlevel 2 or more) somewhere");
+}
+
+/// `func_water` spawns as `CBaseDoor::Spawn` does for a door with special contents: its `skin`
+/// is the contents and it is not solid (a stub map: no collision data, so only the spawn is
+/// checked; the stock-map test below checks the movement's view of it).
+#[test]
+fn func_water_spawns_as_a_non_solid_special_contents_door() {
+    let mut b = Bench::stub(spawns(2, 2));
+    // (class, model, keys): the stub map has no brush models, so the entities are made by hand
+    // with the model name the engine would have set.
+    type Case<'a> = (&'a str, &'a str, Vec<(&'a str, &'a str)>);
+    let cases: [Case<'_>; 5] = [
+        ("func_water", "*1", vec![("skin", "-3")]),
+        ("func_door", "*2", vec![]),
+        ("func_door", "*3", vec![("spawnflags", "8")]),
+        ("func_door", "*4", vec![("skin", "-4")]),
+        ("func_door_rotating", "*5", vec![("skin", "-3")]),
+    ];
+    let seen = b.run(move |game, eng| {
+        let mut out = Vec::new();
+        for (class, model, keys) in cases {
+            let id = eng.create_entity(class).expect("free edict");
+            eng.ent_mut(id).unwrap().model = model.to_string();
+            if let Some((_, flags)) = keys.iter().find(|(k, _)| *k == "spawnflags") {
+                eng.ent_mut(id).unwrap().spawnflags = flags.parse().unwrap();
+            }
+            let keys: Vec<(String, String)> = keys
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            assert!(game.spawn_entity(eng, id, class, &keys), "{class} {model}");
+            let v = eng.ent(id).unwrap();
+            out.push((model, v.skin, v.solid, v.movetype));
+        }
+        out
+    });
+    let state_of = |model: &str| seen.iter().find(|e| e.0 == model).map(|e| (e.1, e.2, e.3));
+    // Water: skin -3, SOLID_NOT (0), MOVETYPE_PUSH (7).
+    assert_eq!(state_of("*1"), Some((-3, 0, 7)), "{seen:?}");
+    // A plain door is solid (SOLID_BSP 4); SF_DOOR_PASSABLE makes it not solid; a door with a
+    // special-contents skin is not solid either.
+    assert_eq!(state_of("*2"), Some((0, 4, 7)), "{seen:?}");
+    assert_eq!(state_of("*3"), Some((0, 0, 7)), "{seen:?}");
+    assert_eq!(state_of("*4"), Some((-4, 0, 7)), "{seen:?}");
+    // A rotating door has no skin rule (`CRotDoor::Spawn`): it stays solid.
+    assert_eq!(state_of("*5").map(|e| e.1), Some(4), "{seen:?}");
+}
+
+#[test]
+fn func_water_gives_the_player_water_on_a_stock_map() {
+    let Some(vfs) = discover() else {
+        return;
+    };
+    let Some(name) = find_map_with_entity(&vfs, "func_water") else {
+        eprintln!("no stock map has a func_water: skipped");
+        return;
+    };
+    let mut b = Bench::on(map_named(&vfs, &name));
+    b.run(|game, eng| assert!(game.spawn_player(eng, 0, Team::Ct, 0)));
+    let pools: Vec<(Vec3, i16)> = b.run(|_, eng| {
+        let mut out = Vec::new();
+        let mut after = None;
+        while let Some(id) = eng.find_by_classname(after, "func_water") {
+            after = Some(id);
+            let v = eng.ent(id).unwrap();
+            assert_eq!(v.solid, 0, "func_water is not solid");
+            out.push(((v.absmin + v.absmax) * 0.5, v.skin));
+        }
+        out
+    });
+    assert!(!pools.is_empty(), "{name} spawned its func_water");
+    // At the centre of one of them the movement's point contents is water, and a player there
+    // has a waterlevel.
+    let mut found = false;
+    for (centre, skin) in pools {
+        if i32::from(skin) != CONTENTS_WATER {
+            continue;
+        }
+        let (contents, level) = b.run(move |game, eng| {
+            game.place_player(eng, 0, centre);
+            let me = eng.client_edict(0);
+            let pe = eng.pm_physents(me);
+            let contents = eng.pm_point_contents(&pe, centre).0;
+            eng.ent_mut(me).unwrap().max_speed = 250.0;
+            common::run_cmd(game, eng, 0, &cmd(10, 0, 0.0, 0.0), 0);
+            (contents, vars(eng, 0).waterlevel)
+        });
+        if contents == CONTENTS_WATER && level > 0 {
+            found = true;
+            break;
+        }
+    }
+    assert!(found, "{name}: a player in a func_water has water");
 }

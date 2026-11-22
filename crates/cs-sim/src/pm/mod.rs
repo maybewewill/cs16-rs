@@ -22,6 +22,7 @@ mod types;
 mod walk;
 
 pub use materials::TextureTable;
+pub use sound::all_sample_names;
 pub use types::{MoveVars, PlayerMove, PmCmd, PmShared, PmTrace, PmWorld};
 
 pub(crate) use types::PmCtx;

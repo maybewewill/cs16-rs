@@ -102,6 +102,48 @@ pub(crate) fn pm_update_step_sound(c: &mut PmCtx<'_>) {
     }
 }
 
+/// The file family of a step type: `player/pl_<family><n>.wav` (the `switch (step)` of
+/// `PM_PlayStepSound`; everything else, and `STEP_CONCRETE`, is `step`).
+fn step_family(step: i32) -> &'static str {
+    match step {
+        STEP_METAL => "metal",
+        STEP_DIRT => "dirt",
+        STEP_VENT => "duct",
+        STEP_GRATE => "grate",
+        STEP_TILE => "tile",
+        STEP_SLOSH => "slosh",
+        STEP_WADE => "wade",
+        STEP_LADDER => "ladder",
+        STEP_SNOW => "snow",
+        _ => "step",
+    }
+}
+
+/// Every sample name the movement code can play: the step families (samples 1 to 4, tile 1 to 5)
+/// and the wade sounds of a water jump and of entering or leaving water (`pl_wade1-4`, already
+/// in the wade family). For the game's precache list.
+pub fn all_sample_names() -> Vec<String> {
+    let mut names = Vec::new();
+    for step in [
+        STEP_CONCRETE,
+        STEP_METAL,
+        STEP_DIRT,
+        STEP_VENT,
+        STEP_GRATE,
+        STEP_TILE,
+        STEP_SLOSH,
+        STEP_WADE,
+        STEP_LADDER,
+        STEP_SNOW,
+    ] {
+        let count = if step == STEP_TILE { 5 } else { 4 };
+        for n in 1..=count {
+            names.push(format!("player/pl_{}{n}.wav", step_family(step)));
+        }
+    }
+    names
+}
+
 /// `PM_PlayStepSound(step, fvol)` (pm_shared.cpp 171-322, read 2026-11-22).
 ///
 /// Quirks kept: `iStepLeft` toggles before the `runfuncs` check (a replayed command still swaps
@@ -128,19 +170,7 @@ pub(crate) fn pm_play_step_sound(c: &mut PmCtx<'_>, step: i32, fvol: f32) {
 
     // irand - 0,1 for right foot, 2,3 for left foot
     // used to alternate left and right foot
-    let family = match step {
-        STEP_METAL => "metal",
-        STEP_DIRT => "dirt",
-        STEP_VENT => "duct",
-        STEP_GRATE => "grate",
-        STEP_TILE => "tile",
-        STEP_SLOSH => "slosh",
-        STEP_WADE => "wade",
-        STEP_LADDER => "ladder",
-        STEP_SNOW => "snow",
-        // `default:` and STEP_CONCRETE
-        _ => "step",
-    };
+    let family = step_family(step);
 
     // The sample number for irand 0..3: right foot 1, 3; left foot 2, 4 (wade: 1, 2, 3, 4).
     let mut number = match (step == STEP_WADE, irand) {

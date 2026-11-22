@@ -98,7 +98,7 @@ pub mod dmg {
         (1 << 17) | (1 << 20) | (1 << 4) | (1 << 22) | (1 << 14) | (1 << 3) | (1 << 21) | (1 << 16)
             | (1 << 18) | (1 << 8);
     /// `DMG_TIMEBASED`: the kinds that last (Half-Life SDK, assumption as above).
-    pub const TIMEBASED: u32 = !0x3fff;
+    pub const TIMEBASED: u32 = !0x3fff & 0x7fff_ffff;
 }
 
 /// Hit groups (`common/const.h`).

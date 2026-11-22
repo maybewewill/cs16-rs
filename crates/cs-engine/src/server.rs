@@ -102,6 +102,9 @@ pub struct Server<G: GameDll> {
     pub(crate) limiter: OobLimiter,
     /// Replies to connectionless datagrams without a valid challenge, all addresses together.
     pub(crate) oob_budget: TokenBucket,
+    /// The movevars as the cvars had them when the first command of this frame was checked
+    /// (`sync_client_movevars`); dropped at the start of every frame.
+    pub(crate) frame_movevars: Option<cs_proto48::messages::MoveVarsMsg>,
     pub(crate) spawn_count: u32,
     pub(crate) next_userid: i32,
     /// Real time of the latest frame, as the host gave it. Network timers (timeouts, rates,
@@ -204,6 +207,7 @@ impl<G: GameDll> Server<G> {
             challenges: ChallengeIssuer::new(),
             limiter: OobLimiter::new(),
             oob_budget: TokenBucket::new(OOB_GLOBAL_REPLIES_PER_SEC, OOB_GLOBAL_REPLIES_PER_SEC),
+            frame_movevars: None,
             spawn_count: 1,
             next_userid: 1,
             real_time: 0.0,
@@ -274,6 +278,7 @@ impl<G: GameDll> Server<G> {
         self.frametime = real_dt.min(MAX_FRAMETIME);
         self.accrue_client_time(real_dt);
         self.oob_budget.refill(real_dt);
+        self.frame_movevars = None;
         for _ in 0..MAX_DATAGRAMS_PER_FRAME {
             let Some((from, data)) = net.recv() else {
                 break;
@@ -304,7 +309,12 @@ impl<G: GameDll> Server<G> {
     /// yet (before the `new` stage) is not sent anything: `new` carries the current values. The
     /// reliable backlog cap is applied by the `drain_outbox` that ends the move.
     pub(crate) fn sync_client_movevars(&mut self, slot: u8) {
-        let current = move_vars(&self.cvars, &self.map.entities);
+        // Built once per frame, not per command: a cvar the game changes during a frame reaches
+        // the clients with their first command of the next one.
+        let current = self
+            .frame_movevars
+            .get_or_insert_with(|| move_vars(&self.cvars, &self.map.entities))
+            .clone();
         let Some(client) = self.clients.get_mut(usize::from(slot)) else {
             return;
         };
