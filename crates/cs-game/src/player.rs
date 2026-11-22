@@ -796,6 +796,8 @@ pub(crate) fn spawn(
     p.client_active_item = None;
     // `Spawn` (player.cpp 5937): no shooting during the freeze period.
     p.can_shoot = !freeze;
+    // `Spawn` (player.cpp 5972): `m_flNextAttack = UTIL_WeaponTimeBase()`, 0.
+    p.next_attack = 0.0;
     // `Spawn` (player.cpp 5841-5843): a player without a shield has `HITGROUP_SHIELD_DISABLED`
     // (1) in `gamestate`, so the engine's studio traces skip the shield's hit box.
     let shield_state = if p.owns_shield { HITGROUP_SHIELD_ENABLED } else { HITGROUP_SHIELD_DISABLED };
@@ -1278,7 +1280,8 @@ fn weapon_player_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
         return;
     };
     if game_over {
-        // Clear attack/use commands from the player.
+        // Clear attack/use commands from the player. (`m_afButtonReleased` is not kept by
+        // this port: there is no such field to zero.)
         p.buttons_pressed = 0;
         if let Some(v) = eng.ent_mut(id) {
             v.button = 0;

@@ -607,6 +607,34 @@ fn can_shoot_after_freeze() {
 }
 
 #[test]
+fn defusing_blocks_the_shot_and_the_can_shoot_bit() {
+    let mut b = armed(WeaponId::Usp);
+    b.run(|game, eng| {
+        game.set_defusing(0, true);
+        weapon(game, WeaponId::Usp).next_primary_attack = 0.0;
+        press(game, eng, IN_ATTACK);
+        assert_eq!(weapon(game, WeaponId::Usp).glock18_shots_fired, 0, "defusing");
+        let data = game.update_client_data(eng, 0);
+        assert_eq!(data.iuser3 & 1, 0, "PLAYER_CAN_SHOOT is off while defusing");
+        game.set_defusing(0, false);
+        press(game, eng, IN_ATTACK);
+        assert_eq!(weapon(game, WeaponId::Usp).glock18_shots_fired, 1);
+        let data = game.update_client_data(eng, 0);
+        assert_eq!(data.iuser3 & 1, 1);
+    });
+}
+
+#[test]
+fn spawn_clears_next_attack() {
+    let mut b = armed(WeaponId::Usp);
+    b.run(|game, eng| {
+        game.set_next_attack(0, 5.0);
+        assert!(game.respawn_player(eng, 0));
+        assert_eq!(game.player_weapon_state(0).unwrap().0, 0.0);
+    });
+}
+
+#[test]
 fn game_over_clears_the_buttons() {
     let mut b = armed(WeaponId::Usp);
     b.run(|game, eng| {

@@ -419,6 +419,16 @@ impl CsGame {
         }
     }
 
+    /// Sets `m_bIsDefusing` of the player of `slot`. For tests only (cargo feature
+    /// `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn set_defusing(&mut self, slot: u8, defusing: bool) {
+        if let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+            p.is_defusing = defusing;
+        }
+    }
+
     /// Runs `ResetMaxSpeed` of the player of `slot`. For tests only (cargo feature `test-hooks`).
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]

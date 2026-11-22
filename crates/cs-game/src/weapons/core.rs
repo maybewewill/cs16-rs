@@ -256,6 +256,10 @@ impl<'a, 'e> WeaponCtx<'a, 'e> {
     /// are looked up by name (a name that is not precached is model 0); `m_flNextAttack` is
     /// set to 0.75 s relative, the idle to 1.5 s; the FOV is back to 90 and the zoom to resume
     /// forgotten.
+    ///
+    /// DEVIATION (assumption): C stores the model names as strings in `pev->viewmodel` and
+    /// `pev->weaponmodel`; here the fields are the model indices (Task 4's `u16`), so the
+    /// names are resolved through the precache table when deployed.
     pub fn default_deploy(
         &mut self,
         me: &dyn WeaponBehavior,
