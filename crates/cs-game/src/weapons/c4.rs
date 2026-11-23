@@ -13,6 +13,19 @@
 //!   `#Bomb_Planted`, `weapons/c4_plant.wav`, `body = 0`, and retires the weapon.
 //! - `CC4::WeaponIdle`: releasing attack while arming cancels arming and unfreezes; vanilla quirk
 //!   when idle expires does not bump `time_weapon_idle = 20.0` and plays `C4_DRAW` then `C4_IDLE1`.
+//!
+//! Not ported (read 2026-11-23):
+//! - The `pev->speed` timer override (`CC4::PrimaryAttack`, `wpn_c4.cpp` 173-176:
+//!   `m_iC4Timer = int(pev->speed)`). `pev->speed` is only ever set by the `detonatedelay` key of
+//!   a map-placed `weapon_c4`, which is not ported (next item), so a carried C4 always has 0 and
+//!   the override never fires here.
+//! - The scripted bomb: `CC4::KeyValue` (`detonatedelay`, `detonatetarget`, `defusetarget`),
+//!   `CC4::Use` (a `weapon_c4` with a targetname that a trigger plants as player 1's bomb) and
+//!   `CC4::Spawn` with a targetname (`wpn_c4.cpp` 310-380).
+//! - `SVC_DIRECTOR` messages (the HLTV `DRC_CMD_EVENT` of the plant) and the log lines
+//!   (`Planted_The_Bomb`, `Got_The_Bomb`, `Dropped_The_Bomb`): the server has no HLTV client and
+//!   no log sink. The bot, career and tutor hooks (`TheBots->OnEvent`, `TheCareerTasks`) are the
+//!   bots' and are not driven from here.
 
 use cs_engine::EngineApi;
 use cs_engine::consts::FL_ONGROUND;

@@ -22,11 +22,13 @@
 //! `UTIL_ScreenFade` is `util.h`/`util.cpp` (read 2026-11-22).
 //!
 //! Deviations and gaps:
-//! - The state the first-person view copies from the followed player (the progress bar, the
-//!   night vision, the C4 and defuser icons, its weapon) has nothing to copy yet: those players
-//!   do not exist until the bomb and the night vision do. The messages that clear that state
-//!   when the mode changes are sent as the original sends them. The blindness is copied (a
-//!   flashbang, [`crate::grenade`]).
+//! - The state the first-person view copies from the followed player is only partly there. NOT
+//!   ported (the bomb and the defuser exist now, the observer side of them does not):
+//!   `m_iObserverC4State` and `m_bObserverHasDefuser` (the C4 and defuser icons an observer
+//!   sees on the player it follows, and their `StatusIcon` updates in `UpdateClientData`) and
+//!   `SetProgressBarTime2` (the plant/defuse bar an observer sees, with the time already run).
+//!   The messages that clear that state when the mode changes are sent as the original sends
+//!   them. The blindness is copied (a flashbang, [`crate::grenade`]).
 //! - `GetPlayerSpawnSpot` ([`crate::world::get_player_spawn_spot`]) does not fire the `target` of
 //!   the spawn point (the trigger entities do not exist yet; `spawn` skips it too).
 //! - The `mp_fadetoblack` of the dying player is the vanilla one: any value but 0 fades the
@@ -559,7 +561,7 @@ fn check_target(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
 
 /// `CBasePlayer::Observer_CheckProperties`: in first person the observer takes the field of view
 /// of the player it follows; otherwise the default one. (The weapon, C4 and defuser icons of the
-/// followed player have nothing to show yet.)
+/// followed player and `SetProgressBarTime2` are not ported: see the module doc.)
 fn check_properties(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let target = if mode_of(eng, slot) == OBS_IN_EYE {
         current_target(g, slot)

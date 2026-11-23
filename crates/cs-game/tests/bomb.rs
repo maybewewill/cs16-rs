@@ -627,3 +627,30 @@ fn bomb_in_water_vanishes_without_exploding() {
         assert!(eng.ent(bomb).is_none(), "vanilla water bomb is deleted");
     });
 }
+
+/// `Spawn` does not clear `m_bHasDefuser` itself (`player.cpp` 5984): a killed player's kit goes
+/// through `RemoveAllItems` (`GiveDefaultItems`) and `RemoveDefuser`, which tells the client
+/// (`StatusIcon` hide, `ItemStatus`, `BarTime 0`).
+#[test]
+fn a_respawn_takes_the_defuser_through_remove_defuser() {
+    let mut b = bomb_arena(vec![]);
+    b.run(|game, _| {
+        game.test_set_defuser(0, true);
+        game.test_set_not_killed(0, false);
+    });
+    b.probe.clear_messages();
+    b.run(|game, eng| game.restart_round_now(eng));
+    b.step(4);
+    let msgs = b.messages();
+    assert!(
+        msgs.contains(&CsUserMsg::StatusIcon {
+            status: 0,
+            sprite_name: "defuser".to_string(),
+            color: None,
+        }),
+        "the kit must be taken with a StatusIcon hide, got {msgs:?}"
+    );
+    assert!(msgs.contains(&CsUserMsg::BarTime(0)));
+    assert!(msgs.contains(&CsUserMsg::ItemStatus(0)));
+    assert!(!b.run(|game, _| game.state().players[0].as_ref().unwrap().has_defuser));
+}

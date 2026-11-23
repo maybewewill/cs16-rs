@@ -150,6 +150,14 @@ pub trait GameEntity: Send + 'static {
         false
     }
 
+    /// Where the `weapon_c4` of this dropped C4 lies, for `InitHUD`'s `BombDrop`
+    /// (`pWeaponC4->pev->origin`); `own_origin` is this entity's current origin. `None` when
+    /// this is no dropped bomb. A map `weapon_c4` is where it is; the C4 in a weapon box stays
+    /// where it was packed (the box moves, the packed weapon's origin does not).
+    fn dropped_bomb_origin(&self, own_origin: glam::Vec3) -> Option<glam::Vec3> {
+        self.is_dropped_bomb().then_some(own_origin)
+    }
+
     /// Whether this entity is a planted C4 (`CGrenade::m_bIsC4`).
     fn is_planted_c4(&self) -> bool {
         false

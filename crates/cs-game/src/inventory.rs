@@ -913,8 +913,11 @@ pub(crate) fn drop_command(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8,
 /// units a second. A weapon that cannot be dropped (the grenades say no) is refused with
 /// `#Weapon_Cannot_Be_Dropped`. The player is first taken off the weapon (`GetNextBestWeapon`);
 /// the weapon leaves the HUD (`pev->weapons`); a dropped primary clears `m_bHasPrimary`. The box
-/// lives `ITEM_KILL_DELAY` seconds. Returns the box. (The C4's extras and the VIP are not
-/// ported.)
+/// lives `ITEM_KILL_DELAY` seconds. Returns the box. The C4's extras are ported (`m_bHasC4`,
+/// the bomb icon and bar, `m_bBombDropped`, `#Game_bomb_drop` and `BombDrop` to the living
+/// terrorists while the round is not restarting), and the VIP cannot drop (`#Weapon_Cannot_Be_
+/// Dropped`). Not ported: `SVC_DIRECTOR`, the `Dropped_The_Bomb` log line, the bots' and the
+/// tutor's events.
 pub(crate) fn drop_player_item(
     g: &mut GameState,
     eng: &mut EngineApi<'_>,
@@ -1053,6 +1056,9 @@ pub(crate) fn create_weapon_box(
     if id == WeaponId::C4 {
         weapon_box.is_bomb = true;
         weapon_box.next_bomb_think = now + 1.0;
+        weapon_box.bomb_weapon_origin = owner
+            .and_then(|s| eng.ent(eng.client_edict(s)).map(|v| v.origin))
+            .unwrap_or(origin);
     }
 
     // `PackWeapon`.
@@ -1208,6 +1214,9 @@ pub(crate) struct WeaponBox {
     is_bomb: bool,
     /// Next server time `BombThink` broadcasts `BombDrop` to living terrorists (every 1.0 s).
     next_bomb_think: f64,
+    /// Where the packed `weapon_c4` lies: the dropper's origin when it was dropped. The weapon
+    /// entity inside a box is not moved with it, and `InitHUD` reads its `pev->origin`.
+    bomb_weapon_origin: Vec3,
     /// The touch box has been grown (see [`WeaponBox::think`]).
     widened: bool,
 }
@@ -1221,6 +1230,7 @@ impl WeaponBox {
             kill_time,
             is_bomb: false,
             next_bomb_think: 0.0,
+            bomb_weapon_origin: Vec3::ZERO,
             widened: false,
         }
     }
@@ -1265,6 +1275,10 @@ impl GameEntity for WeaponBox {
 
     fn is_dropped_bomb(&self) -> bool {
         self.is_bomb
+    }
+
+    fn dropped_bomb_origin(&self, _own_origin: Vec3) -> Option<Vec3> {
+        self.is_bomb.then_some(self.bomb_weapon_origin)
     }
 
     /// `CWeaponBox::Kill` at the end of its life (replaced by `CWeaponBox::BombThink` when
@@ -1648,9 +1662,8 @@ const SF_NORESPAWN: u32 = 1 << 30;
 pub(crate) fn dropped_bomb_origin(eng: &EngineApi<'_>) -> Option<Vec3> {
     eng.entity_ids().into_iter().find_map(|id| {
         let ent = eng.private::<Box<dyn GameEntity>>(id)?;
-        ent.is_dropped_bomb()
-            .then(|| eng.ent(id).map(|v| v.origin))
-            .flatten()
+        let own = eng.ent(id)?.origin;
+        ent.dropped_bomb_origin(own)
     })
 }
 
@@ -1691,9 +1704,11 @@ impl GameEntity for ItemThighPack {
         let origin = eng.ent(id).map_or(Vec3::ZERO, |v| v.origin);
         eng.set_origin(id, origin);
         eng.set_size(id, Vec3::new(-16.0, -16.0, 0.0), Vec3::new(16.0, 16.0, 16.0));
-        // On maps with geometry this lands on the floor; floorless stub maps keep the entity.
-        let _ = eng.drop_to_floor(id);
-        true
+        // `CItem::Spawn` (`items.cpp` 102-106, read 2026-11-23): `if (!DROP_TO_FLOOR(ENT(pev)))
+        // UTIL_Remove(this)`. Only a 0 (no floor within 256 units) removes the kit; -1 (it starts
+        // stuck) does not. Deviation: the stub map (no geometry, only the tests') has no floor to
+        // land on, so there the kit is kept.
+        !(eng.drop_to_floor(id) == 0 && eng.has_world_collision())
     }
 
     fn touch(&mut self, g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId, other: EdictId) {

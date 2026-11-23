@@ -594,14 +594,19 @@ fn defuser_drops_at_death() {
 fn init_hud_shows_a_dropped_bomb() {
     let mut b = bomb_arena(false, vec![]);
     assert!(b.run(|game, _| game.state().players[0].as_ref().unwrap().has_c4));
+    // `InitHUD` sends `pWeaponC4->pev->origin`: where the weapon was when it was packed (the
+    // dropper's origin), not where the weapon box has flown since (`multiplay_gamerules.cpp`
+    // 3544): the box is moved away here and the late joiner must still be told the drop spot.
     let expected_origin = b.run(|game, eng| {
         game.place_player(eng, 0, Vec3::new(250.0, -150.0, 0.0));
+        let dropper_origin = eng.ent(eng.client_edict(0)).unwrap().origin;
         game.client_command(eng, 0, &["drop".to_string(), "weapon_c4".to_string()]);
         let box_id = eng.find_by_classname(None, "weaponbox").unwrap();
         let v = eng.ent_mut(box_id).unwrap();
         v.velocity = Vec3::ZERO;
         v.flags |= FL_ONGROUND;
-        v.origin
+        v.origin += Vec3::new(120.0, 80.0, 0.0);
+        dropper_origin
     });
     b.step(5);
 

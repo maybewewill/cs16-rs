@@ -1,4 +1,4 @@
-//! The thrown grenades: `CGrenade` (the entity `grenade`, ReGameDLL_CS `ggrenade.cpp`), the
+//! The thrown grenades and the planted C4: `CGrenade` (the entity `grenade`, ReGameDLL_CS `ggrenade.cpp`), the
 //! blast and flash of `combat.cpp` (`RadiusDamage`, `RadiusFlash`, `PlayerBlind`) and the
 //! `spark_shower` the explosions throw (`explode.cpp`, `CShower`), read 2026-11-22, the vanilla
 //! build (`CLIENT_WEAPONS`, `REGAMEDLL_API`, none of `REGAMEDLL_FIXES`, `REGAMEDLL_ADD`,
@@ -37,9 +37,11 @@
 //! - `CGrenade::Spawn` sets `m_fRegisteredSound` and `ShootTimed*` set `m_bJustBlew`: no code of
 //!   the vanilla build reads either (the first was for the danger sound, the second for the C4).
 //! - `ShootContact`/`ExplodeTouch`/`DangerSoundThink` (the M203 grenade), `SG_Explode`
-//!   (`NOXREF`), `DetonateUse`/`PreDetonate` (nothing sets them), `Explode2`/`Detonate2` and
-//!   `ShootSatchelCharge` (the C4, phase 2E) and `RadiusDamage2` (`CBaseMonster::RadiusDamage`
-//!   uses it for a damage of 80 or less; the HE grenade's is 100).
+//!   (`NOXREF`) and `DetonateUse`/`PreDetonate` (nothing sets them). The C4 is ported (phase 2E:
+//!   `ShootSatchelCharge`, `C4Think`, `Detonate2`/`Explode2`, the defusal): its blast is
+//!   `CBaseMonster::RadiusDamage(bombradius, ...)`, which with the default radius of 500 is
+//!   `RadiusDamage(500, 1750)` and only for a map `bombradius` of 80 or less is
+//!   `RadiusDamage2` ([`radius_damage2`], ported). The HE grenade's damage is 100.
 //! - `m_iTeam` (the thrower's team, set by `ShootTimed2`) travels with the damage: the explosion
 //!   passes it down [`radius_damage`] to `CBasePlayer::TakeDamage`, which compares it with the
 //!   victim's team (the entity is checked out of its edict while it explodes).

@@ -61,6 +61,12 @@ impl EngineApi<'_> {
         &self.map.name
     }
 
+    /// Whether the map has collision geometry. The stub map (no BSP) has none: nothing can land
+    /// on a floor there, so a game that removes what `drop_to_floor` cannot land must keep it.
+    pub fn has_world_collision(&self) -> bool {
+        self.map.collision().is_some()
+    }
+
     /// Worldspawn (index 0); always live.
     pub fn world(&self) -> EdictId {
         self.edicts.world()

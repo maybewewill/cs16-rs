@@ -1,8 +1,8 @@
 //! The grenades and the C4: `CHEGrenade`, `CFlashbang` and `CSmokeGrenade` (ReGameDLL_CS
 //! `wpn_shared/wpn_hegrenade.cpp`, `wpn_flashbang.cpp`, `wpn_smokegrenade.cpp`, read
 //! 2026-11-22), the vanilla branch (`CLIENT_WEAPONS`, not `REGAMEDLL_FIXES`). The thrown
-//! grenade itself is [`crate::grenade`]. The C4 waits for the bomb of phase 2E (it refuses to
-//! deploy until then).
+//! grenade itself is [`crate::grenade`]. The C4 is [`super::c4`] and the planted bomb is in
+//! [`crate::grenade`] too (phase 2E).
 //!
 //! What the three have in common:
 //!
