@@ -37,6 +37,77 @@ pub struct MdlDrawInstance<'a> {
     pub attached_model: Option<&'a str>,
 }
 
+/// A studio entity of the scene API.
+pub struct StudioInstance<'a> {
+    pub model_path: &'a str,
+    pub transform: Mat4,
+    pub sequence: i32,
+    /// `entity_state_t::frame`.
+    pub frame: f32,
+    pub animtime: f32,
+    pub framerate: f32,
+    /// Client time in seconds.
+    pub now: f32,
+    pub body: i32,
+    pub light_rgb: Vec3,
+}
+
+enum SeqSel<'a> {
+    Name(&'a str),
+    Index(usize),
+}
+
+enum FrameSel {
+    /// Seconds since the animation start (legacy path), multiplied by the sequence fps.
+    TimeSec(f32),
+    Entity {
+        frame: f32,
+        animtime: f32,
+        framerate: f32,
+        now: f32,
+    },
+}
+
+struct InnerInst<'a> {
+    model_path: &'a str,
+    transform: Mat4,
+    seq: SeqSel<'a>,
+    frame: FrameSel,
+    loop_anim: bool,
+    light_rgb: Vec3,
+    flip_winding: bool,
+    attached_model: Option<&'a str>,
+    body: i32,
+}
+
+/// Animation frame of a studio entity: its `frame` plus the time since `animtime` at
+/// `framerate` times the sequence fps (assumption: the studio frame setup of Xash was not
+/// fetched; this is the plain GoldSrc formula).
+pub fn studio_frame(frame: f32, animtime: f32, framerate: f32, now: f32, fps: f32) -> f32 {
+    frame + (now - animtime).max(0.0) * fps * framerate
+}
+
+/// Submodel of body part `index` selected by the entity's `body` value:
+/// `(body / base) % submodel_count`, where `base` is the product of the submodel counts of the
+/// earlier body parts (assumption: the studio compiler's layout, first part varies fastest).
+pub fn bodypart_submodel(
+    parts: &[cs_assets::mdl::MdlBodyPart],
+    index: usize,
+    body: i32,
+) -> Option<&cs_assets::mdl::MdlSubModel> {
+    let part = parts.get(index)?;
+    let count = part.submodels.len() as i64;
+    if count == 0 {
+        return None;
+    }
+    let base: i64 = parts[..index]
+        .iter()
+        .map(|p| (p.submodels.len() as i64).max(1))
+        .product();
+    let pick = (i64::from(body.max(0)) / base) % count;
+    part.submodels.get(pick as usize)
+}
+
 struct CachedGpuModel {
     mdl: StudioModel,
     tex_bgs: Vec<(wgpu::BindGroup, bool)>, // (bind_group, alpha_test)
@@ -323,6 +394,69 @@ impl MdlRenderer {
         gamma: f32,
         brightness: f32,
     ) -> PreparedMdlPass {
+        let inner: Vec<InnerInst<'_>> = instances
+            .iter()
+            .map(|i| InnerInst {
+                model_path: i.model_path,
+                transform: i.transform,
+                seq: SeqSel::Name(i.sequence_hint),
+                frame: FrameSel::TimeSec(i.anim_time_sec),
+                loop_anim: i.loop_anim,
+                light_rgb: i.light_rgb,
+                flip_winding: i.flip_winding,
+                attached_model: i.attached_model,
+                body: 0,
+            })
+            .collect();
+        self.prepare_inner(device, queue, vfs, &inner, view_proj, gamma, brightness)
+    }
+
+    /// Skin and upload studio model entities of the scene API (sequence index, entity frame,
+    /// body group), for one render pass.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_studio(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        vfs: &Vfs,
+        instances: &[StudioInstance<'_>],
+        view_proj: Mat4,
+        gamma: f32,
+        brightness: f32,
+    ) -> PreparedMdlPass {
+        let inner: Vec<InnerInst<'_>> = instances
+            .iter()
+            .map(|i| InnerInst {
+                model_path: i.model_path,
+                transform: i.transform,
+                seq: SeqSel::Index(i.sequence.max(0) as usize),
+                frame: FrameSel::Entity {
+                    frame: i.frame,
+                    animtime: i.animtime,
+                    framerate: i.framerate,
+                    now: i.now,
+                },
+                loop_anim: true,
+                light_rgb: i.light_rgb,
+                flip_winding: false,
+                attached_model: None,
+                body: i.body,
+            })
+            .collect();
+        self.prepare_inner(device, queue, vfs, &inner, view_proj, gamma, brightness)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_inner(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        vfs: &Vfs,
+        instances: &[InnerInst<'_>],
+        view_proj: Mat4,
+        gamma: f32,
+        brightness: f32,
+    ) -> PreparedMdlPass {
         let mut all_verts: Vec<MdlGpuVertex> = Vec::new();
         let mut draws: Vec<PreparedDraw> = Vec::new();
         let mut uniform_bytes: Vec<u8> = Vec::new();
@@ -339,22 +473,32 @@ impl MdlRenderer {
                 continue;
             };
 
-            let seq_idx = cached
-                .mdl
-                .find_sequence(inst.sequence_hint)
-                .unwrap_or(0);
+            let seq_idx = match inst.seq {
+                SeqSel::Name(name) => cached.mdl.find_sequence(name).unwrap_or(0),
+                SeqSel::Index(i) if i < cached.mdl.sequences.len() => i,
+                SeqSel::Index(_) => 0,
+            };
             let fps = cached
                 .mdl
                 .sequences
                 .get(seq_idx)
                 .map(|s| s.fps)
                 .unwrap_or(30.0);
-            let frame = inst.anim_time_sec * fps;
+            let frame = match inst.frame {
+                FrameSel::TimeSec(t) => t * fps,
+                FrameSel::Entity {
+                    frame,
+                    animtime,
+                    framerate,
+                    now,
+                } => studio_frame(frame, animtime, framerate, now, fps),
+            };
             let bones = cached.mdl.evaluate_bones_ex(seq_idx, frame, inst.loop_anim);
 
             let mut push_model = |m_key: &str, cached_m: &CachedGpuModel, m_bones: &[Mat4]| {
-                for bp in &cached_m.mdl.bodyparts {
-                    let Some(sub) = bp.submodels.first() else {
+                for bi in 0..cached_m.mdl.bodyparts.len() {
+                    let Some(sub) = bodypart_submodel(&cached_m.mdl.bodyparts, bi, inst.body)
+                    else {
                         continue;
                     };
                     for mesh in &sub.meshes {
@@ -512,4 +656,45 @@ pub fn viewmodel_transform(
 pub fn player_model_transform(origin: Vec3, yaw_deg: f32, _crouched: bool) -> Mat4 {
     let rot = Quat::from_rotation_z(yaw_deg.to_radians());
     Mat4::from_rotation_translation(rot, origin)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cs_assets::mdl::{MdlBodyPart, MdlSubModel};
+
+    fn part(n: usize) -> MdlBodyPart {
+        MdlBodyPart {
+            name: String::new(),
+            submodels: (0..n)
+                .map(|i| MdlSubModel {
+                    name: format!("s{i}"),
+                    meshes: Vec::new(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn body_selects_submodels_per_part() {
+        let parts = [part(3), part(2)];
+        let name = |i, body| bodypart_submodel(&parts, i, body).map(|s| s.name.clone());
+        assert_eq!(name(0, 0).as_deref(), Some("s0"));
+        assert_eq!(name(0, 4).as_deref(), Some("s1"));
+        assert_eq!(name(1, 0).as_deref(), Some("s0"));
+        // base of part 1 is 3: body 3..5 -> second submodel.
+        assert_eq!(name(1, 3).as_deref(), Some("s1"));
+        assert_eq!(name(1, 5).as_deref(), Some("s1"));
+        assert_eq!(name(0, -7).as_deref(), Some("s0"));
+        assert!(bodypart_submodel(&parts, 2, 0).is_none());
+        assert!(bodypart_submodel(&[part(0)], 0, 0).is_none());
+    }
+
+    #[test]
+    fn studio_frame_advances_with_framerate() {
+        assert_eq!(studio_frame(2.0, 10.0, 1.0, 11.0, 30.0), 32.0);
+        assert_eq!(studio_frame(2.0, 10.0, 0.0, 15.0, 30.0), 2.0);
+        // animtime in the future: no negative advance.
+        assert_eq!(studio_frame(0.0, 12.0, 1.0, 11.0, 30.0), 0.0);
+    }
 }

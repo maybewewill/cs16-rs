@@ -7,6 +7,32 @@ use thiserror::Error;
 pub const SPR_MAGIC: &[u8; 4] = b"IDSP";
 pub const SPR_VERSION: i32 = 2;
 
+/// `IDSP` header `type` field, values 0..=4 as stored on disk.
+///
+/// Xash3D FWGS names the same values `SPR_FWD_PARALLEL_UPRIGHT`, `SPR_FACING_UPRIGHT`,
+/// `SPR_FWD_PARALLEL`, `SPR_ORIENTED`, `SPR_FWD_PARALLEL_ORIENTED`
+/// (`ref/gl/gl_sprite.c`, `R_DrawSpriteModel`, read 2026-11-23).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpriteType {
+    ParallelUpright = 0,
+    FacingUpright = 1,
+    Parallel = 2,
+    Oriented = 3,
+    ParallelOriented = 4,
+}
+
+impl SpriteType {
+    pub fn from_raw(raw: i32) -> Self {
+        match raw {
+            0 => Self::ParallelUpright,
+            1 => Self::FacingUpright,
+            3 => Self::Oriented,
+            4 => Self::ParallelOriented,
+            _ => Self::Parallel,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpriteTexFormat {
     Normal = 0,
@@ -36,6 +62,7 @@ pub struct SpriteFrame {
 
 #[derive(Debug, Clone)]
 pub struct GoldSrcSprite {
+    pub sprite_type: SpriteType,
     pub tex_format: SpriteTexFormat,
     pub max_width: u32,
     pub max_height: u32,
@@ -56,6 +83,7 @@ impl GoldSrcSprite {
         if version != SPR_VERSION {
             return Err(SprError::InvalidHeader);
         }
+        let sprite_type = SpriteType::from_raw(read_i32(data, 8)?);
         let tex_fmt_raw = read_i32(data, 12)?;
         let tex_format = match tex_fmt_raw {
             1 => SpriteTexFormat::Additive,
@@ -101,6 +129,7 @@ impl GoldSrcSprite {
         }
 
         Ok(Self {
+            sprite_type,
             tex_format,
             max_width,
             max_height,
@@ -180,4 +209,43 @@ fn read_i32(bytes: &[u8], offset: usize) -> Result<i32, SprError> {
         .try_into()
         .map_err(|_| SprError::Truncated("i32"))?;
     Ok(i32::from_le_bytes(arr))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One 1x1 frame, 2-colour palette, with the given header `type` and `texFormat`.
+    fn tiny_sprite(sprite_type: i32, tex_format: i32) -> Vec<u8> {
+        let mut d = Vec::new();
+        d.extend_from_slice(SPR_MAGIC);
+        for v in [SPR_VERSION, sprite_type, tex_format, 0, 1, 1, 1, 0, 0] {
+            d.extend_from_slice(&v.to_le_bytes());
+        }
+        d.extend_from_slice(&2u16.to_le_bytes());
+        d.extend_from_slice(&[10, 20, 30, 40, 50, 60]);
+        d.extend_from_slice(&0i32.to_le_bytes()); // single frame
+        for v in [-1i32, 1, 1, 1] {
+            d.extend_from_slice(&v.to_le_bytes()); // origin x/y, width, height
+        }
+        d.push(0);
+        d
+    }
+
+    #[test]
+    fn header_type_is_parsed() {
+        for (raw, want) in [
+            (0, SpriteType::ParallelUpright),
+            (1, SpriteType::FacingUpright),
+            (2, SpriteType::Parallel),
+            (3, SpriteType::Oriented),
+            (4, SpriteType::ParallelOriented),
+            (9, SpriteType::Parallel),
+        ] {
+            let spr = GoldSrcSprite::parse(&tiny_sprite(raw, 0)).expect("parse");
+            assert_eq!(spr.sprite_type, want, "raw type {raw}");
+            assert_eq!(spr.frames.len(), 1);
+            assert_eq!((spr.frames[0].origin_x, spr.frames[0].origin_y), (-1, 1));
+        }
+    }
 }

@@ -17,6 +17,18 @@ var t_diffuse: texture_2d<f32>;
 @group(1) @binding(1)
 var s_diffuse: sampler;
 
+// Per-entity data (dynamic offset). Slot 0 is identity/mode 0, used by the world pass.
+// params.x modes: 0 world, 1 TransColor, 2 TransAdd (blend ONE,ONE), 3 TransAlpha, 4 alpha blend.
+// color.rgb = rendercolor, color.a = entity blend.
+struct EntityUniforms {
+    model: mat4x4<f32>,
+    color: vec4<f32>,
+    params: vec4<f32>,
+};
+
+@group(2) @binding(0)
+var<uniform> ent: EntityUniforms;
+
 const FLAG_ALPHATEST: u32 = 1u;
 const FLAG_WATER: u32 = 2u;
 const FLAG_NO_LIGHTMAP: u32 = 4u;
@@ -41,7 +53,7 @@ struct VsOut {
 @vertex
 fn vs_main(in: VsIn) -> VsOut {
     var out: VsOut;
-    out.clip_pos = u.view_proj * vec4<f32>(in.position, 1.0);
+    out.clip_pos = u.view_proj * (ent.model * vec4<f32>(in.position, 1.0));
     out.uv = in.uv;
     out.lm_uv = in.lm_uv;
     out.alpha = in.alpha;
@@ -59,7 +71,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     }
 
     let albedo = textureSample(t_diffuse, s_diffuse, uv);
+    let ent_mode = i32(ent.params.x);
     if (in.flags & FLAG_ALPHATEST) != 0u && albedo.a < 0.5 {
+        discard;
+    }
+    if ent_mode == 3 && albedo.a < 0.25 {
         discard;
     }
 
@@ -84,5 +100,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let gamma_exp = 2.5 / gamma_val;
     let final_rgb = pow(clamp(lit * brightness, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(gamma_exp));
 
+    if ent_mode == 1 {
+        // kRenderTransColor: flat rendercolor with renderamt alpha, no texture.
+        return vec4<f32>(ent.color.rgb, ent.color.a);
+    }
+    if ent_mode == 2 {
+        // kRenderTransAdd: pipeline blends ONE,ONE, so scale the color by the blend.
+        return vec4<f32>(final_rgb * ent.color.a, 1.0);
+    }
+    if ent_mode == 4 {
+        return vec4<f32>(final_rgb, albedo.a * in.alpha * ent.color.a);
+    }
     return vec4<f32>(final_rgb, albedo.a * in.alpha);
 }

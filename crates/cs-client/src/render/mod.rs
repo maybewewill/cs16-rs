@@ -4,7 +4,9 @@
 pub mod bsp_renderer;
 pub mod fx_renderer;
 pub mod mdl_renderer;
+pub mod scene;
 pub mod skybox;
+pub mod sprite_renderer;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -22,8 +24,12 @@ use winit::window::Window;
 use crate::camera::Camera;
 use crate::render::bsp_renderer::{BspRenderStats, BspRenderer};
 use crate::render::fx_renderer::FxRenderer;
-use crate::render::mdl_renderer::{MdlDrawInstance, MdlRenderer};
+use crate::render::mdl_renderer::{MdlDrawInstance, MdlRenderer, StudioInstance};
+use crate::render::scene::{
+    BrushDraw, DrawLists, ModelKind, ModelRegistry, SceneFrame, build_draw_lists,
+};
 use crate::render::skybox::SkyboxRenderer;
+use crate::render::sprite_renderer::SpriteRenderer;
 
 pub struct RenderSettings<'a> {
     pub gamma: f32,
@@ -58,6 +64,14 @@ pub struct Renderer {
     pub skybox: SkyboxRenderer,
     pub mdl_world: MdlRenderer,
     pub mdl_view: MdlRenderer,
+    /// Studio entities of the scene API (separate buffers from `mdl_world`, which the legacy
+    /// path refills every frame).
+    mdl_scene: MdlRenderer,
+    sprites: SpriteRenderer,
+    /// Precache model table of the scene API.
+    models: ModelRegistry,
+    /// Entities of the scene API for the next frame; `None` keeps the legacy path in charge.
+    entity_scene: Option<SceneFrame>,
     pub fx: FxRenderer,
     pub egui_renderer: egui_wgpu::Renderer,
     pub adapter_name: String,
@@ -134,6 +148,8 @@ impl Renderer {
         let skybox = SkyboxRenderer::new(&device, format);
         let mdl_world = MdlRenderer::new(&device, format);
         let mdl_view = MdlRenderer::new(&device, format);
+        let mdl_scene = MdlRenderer::new(&device, format);
+        let sprites = SpriteRenderer::new(&device, format);
         let fx = FxRenderer::new(&device, format);
         let egui_renderer = egui_wgpu::Renderer::new(
             &device,
@@ -155,6 +171,10 @@ impl Renderer {
             skybox,
             mdl_world,
             mdl_view,
+            mdl_scene,
+            sprites,
+            models: ModelRegistry::default(),
+            entity_scene: None,
             fx,
             egui_renderer,
             adapter_name: adapter_info.name,
@@ -183,6 +203,23 @@ impl Renderer {
     pub fn clear_model_caches(&mut self) {
         self.mdl_world.clear_cache();
         self.mdl_view.clear_cache();
+        self.mdl_scene.clear_cache();
+        self.sprites.clear_cache();
+    }
+
+    /// Install the precache model table (`modelindex` -> `*N` / `.mdl` / `.spr`) used to resolve
+    /// scene entities. Call on every new map / precache list.
+    #[allow(dead_code)] // called by the shell in Task 8b
+    pub fn set_model_registry(&mut self, models: ModelRegistry) {
+        self.models = models;
+    }
+
+    /// Provide the entities of the next frame through the scene API. While a scene is set the
+    /// world pass skips the BSP submodels (they are drawn as entities with their transform).
+    /// `None` returns to the legacy `SceneDynamicData` path.
+    #[allow(dead_code)] // called by the shell in Task 8b
+    pub fn set_entity_scene(&mut self, scene: Option<SceneFrame>) {
+        self.entity_scene = scene;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -276,6 +313,16 @@ impl Renderer {
         // Prepare dynamic 3D world models, FX, and viewmodel before opening render passes
         let mut prepared_world_mdls = None;
         let mut prepared_viewmodel = None;
+        let mut prepared_solid_brushes = Vec::new();
+        let mut prepared_trans_brushes = Vec::new();
+        let mut prepared_scene_studio = None;
+        let mut prepared_sprites = None;
+
+        let draw_lists: Option<DrawLists> = self
+            .entity_scene
+            .as_ref()
+            .map(|scene| build_draw_lists(scene, &self.models));
+        self.bsp.set_skip_submodels(draw_lists.is_some());
 
         if self.bsp.has_map() {
             let proj = camera.proj_matrix(vw, vh, settings.fov_deg, settings.aspect_mode);
@@ -303,6 +350,73 @@ impl Renderer {
                         vfs,
                         std::slice::from_ref(vm),
                         vm_vp,
+                        settings.gamma,
+                        settings.brightness,
+                    ));
+                }
+            }
+
+            if let (Some(lists), Some(frame), Some(vfs)) =
+                (&draw_lists, &self.entity_scene, scene.vfs)
+            {
+                let brushes: Vec<&BrushDraw> = lists
+                    .solid_brush
+                    .iter()
+                    .chain(lists.trans_brush.iter())
+                    .collect();
+                let (solid, trans) = self
+                    .bsp
+                    .prepare_entities(&self.device, &self.queue, &brushes)
+                    .into_iter()
+                    .partition(|p| p.is_opaque());
+                prepared_solid_brushes = solid;
+                prepared_trans_brushes = trans;
+
+                let studio: Vec<StudioInstance<'_>> = lists
+                    .studio
+                    .iter()
+                    .filter_map(|d| {
+                        let entry = self.models.get(d.model)?;
+                        (entry.kind == ModelKind::Studio).then(|| StudioInstance {
+                            model_path: entry.name.as_str(),
+                            transform: d.matrix,
+                            sequence: d.sequence,
+                            frame: d.frame,
+                            animtime: d.animtime,
+                            framerate: d.framerate,
+                            now: frame.time,
+                            body: d.body,
+                            // Assumption: flat ambient until the shell samples the BSP lightgrid.
+                            light_rgb: Vec3::splat(0.8),
+                        })
+                    })
+                    .collect();
+                if !studio.is_empty() {
+                    prepared_scene_studio = Some(self.mdl_scene.prepare_studio(
+                        &self.device,
+                        &self.queue,
+                        vfs,
+                        &studio,
+                        view_proj,
+                        settings.gamma,
+                        settings.brightness,
+                    ));
+                }
+
+                if !lists.sprites.is_empty() {
+                    let paths: Vec<Option<&str>> = lists
+                        .sprites
+                        .iter()
+                        .map(|d| self.models.get(d.model).map(|e| e.name.as_str()))
+                        .collect();
+                    prepared_sprites = Some(self.sprites.prepare(
+                        &self.device,
+                        &self.queue,
+                        vfs,
+                        &lists.sprites,
+                        &paths,
+                        &frame.view,
+                        view_proj,
                         settings.gamma,
                         settings.brightness,
                     ));
@@ -382,6 +496,15 @@ impl Renderer {
                     scene.hidden_bsp_models,
                 );
 
+                self.bsp.draw_entities(
+                    &mut pass,
+                    &prepared_solid_brushes,
+                    settings.use_nearest_filter,
+                );
+                if let Some(ref studio) = prepared_scene_studio {
+                    self.mdl_scene.draw(&mut pass, studio);
+                }
+
                 if let Some(ref world_mdls) = prepared_world_mdls {
                     self.mdl_world.draw(&mut pass, world_mdls);
                 }
@@ -395,6 +518,17 @@ impl Renderer {
                 );
 
                 self.fx.draw(&mut pass);
+
+                // Translucent brush entities (far to near) and sprites come last, as in
+                // `R_DrawEntitiesOnList`.
+                self.bsp.draw_entities(
+                    &mut pass,
+                    &prepared_trans_brushes,
+                    settings.use_nearest_filter,
+                );
+                if let Some(ref spr) = prepared_sprites {
+                    self.sprites.draw(&mut pass, spr);
+                }
             }
         }
 
@@ -585,4 +719,43 @@ fn create_depth_view(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Te
         view_formats: &[],
     });
     tex.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Headless device for pipeline/shader validation; `None` when the machine has no adapter
+    /// (the GPU test then returns without assertions, like the other environment-dependent tests).
+    fn headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        }))
+        .ok()?;
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("cs16-test-device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            ..Default::default()
+        }))
+        .ok()
+    }
+
+    #[test]
+    fn scene_renderers_build_on_a_headless_device() {
+        let Some((device, queue)) = headless_device() else {
+            return;
+        };
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let mut bsp = BspRenderer::new(&device, format);
+        let _sprites = SpriteRenderer::new(&device, format);
+        let _mdl = MdlRenderer::new(&device, format);
+        // No map uploaded: entity preparation is a no-op, not a panic.
+        let draws: Vec<&BrushDraw> = Vec::new();
+        assert!(bsp.prepare_entities(&device, &queue, &draws).is_empty());
+    }
 }
