@@ -221,7 +221,8 @@ pub enum Priority {
 pub struct TempEnt {
     pub flags: u32,
     pub priority: Priority,
-    /// Time of death, in client time.
+    /// Priority: [`Priority::High`] survives when the pool is full.
+    pub born: f64,
     pub die: f64,
     pub model: ModelRef,
     /// The last frame number (`frameMax`).
@@ -269,6 +270,7 @@ impl TempEnt {
         Self {
             flags,
             priority: Priority::Low,
+            born: now,
             die: now + DEFAULT_LIFE,
             model,
             frame_max: frame_count.saturating_sub(1),

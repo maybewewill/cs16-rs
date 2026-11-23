@@ -9,11 +9,18 @@ use glam::Vec3;
 use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player};
 use tracing::{info, warn};
 
+struct ActiveSound {
+    entity: Option<u16>,
+    channel: Option<u8>,
+    player: Player,
+}
+
 pub struct AudioEngine {
     sink: Option<MixerDeviceSink>,
     cache: HashMap<String, Option<Arc<[u8]>>>,
     menu_music: Option<Player>,
     menu_music_started: bool,
+    active: Vec<ActiveSound>,
 }
 
 impl AudioEngine {
@@ -34,6 +41,7 @@ impl AudioEngine {
             cache: HashMap::new(),
             menu_music: None,
             menu_music_started: false,
+            active: Vec::new(),
         }
     }
 
@@ -77,9 +85,49 @@ impl AudioEngine {
         }
     }
 
+    /// Stop any playing sound on `(entity, channel)`.
+    pub fn stop_channel(&mut self, entity: u16, channel: u8) {
+        self.active.retain(|entry| {
+            let matches = entry.entity == Some(entity) && entry.channel == Some(channel);
+            if matches {
+                entry.player.stop();
+            }
+            !matches
+        });
+    }
+
+    /// Stop all active world/UI sounds (keeps menu music untouched).
+    pub fn stop_all(&mut self) {
+        for entry in self.active.drain(..) {
+            entry.player.stop();
+        }
+    }
+
+    fn prune_finished(&mut self) {
+        self.active.retain(|entry| !entry.player.empty());
+    }
+
     /// Play a non-positional sound (e.g. `"UI/buttonclick.wav"` or `"radio/ctwin.wav"`).
     pub fn play_2d(&mut self, vfs: Option<&Vfs>, sound_path: &str, volume: f32) {
-        if volume <= 0.005 || sound_path.is_empty() {
+        self.play_2d_tracked(vfs, sound_path, volume, None, None);
+    }
+
+    /// Play a tracked non-positional sound on an optional `(entity, channel)`.
+    pub fn play_2d_tracked(
+        &mut self,
+        vfs: Option<&Vfs>,
+        sound_path: &str,
+        volume: f32,
+        entity: Option<u16>,
+        channel: Option<u8>,
+    ) {
+        self.prune_finished();
+        if let (Some(e), Some(c)) = (entity, channel)
+            && c != 0
+        {
+            self.stop_channel(e, c);
+        }
+        if !volume.is_finite() || volume <= 0.005 || sound_path.is_empty() {
             return;
         }
         let Some(bytes) = self.load_cached(vfs, sound_path) else {
@@ -92,12 +140,16 @@ impl AudioEngine {
             let player = Player::connect_new(sink.mixer());
             player.set_volume(volume.clamp(0.0, 1.5));
             player.append(source);
-            player.detach();
+            self.active.push(ActiveSound {
+                entity,
+                channel,
+                player,
+            });
         }
     }
 
     /// Play a 3D world sound attenuated by distance from the listener.
-    pub fn play_3d(
+    pub fn play_3d_tracked(
         &mut self,
         vfs: Option<&Vfs>,
         sound_path: &str,
@@ -105,15 +157,17 @@ impl AudioEngine {
         listener_pos: Vec3,
         base_volume: f32,
         master_volume: f32,
+        entity: Option<u16>,
+        channel: Option<u8>,
     ) {
         let dist = pos.distance(listener_pos);
         let max_dist = 1800.0f32;
-        if dist >= max_dist {
+        if !dist.is_finite() || dist >= max_dist {
             return;
         }
         let atten = (1.0 - dist / max_dist).powf(1.35);
         let vol = base_volume * master_volume * atten;
-        self.play_2d(vfs, sound_path, vol);
+        self.play_2d_tracked(vfs, sound_path, vol, entity, channel);
     }
 
     fn load_cached(&mut self, vfs: Option<&Vfs>, rel: &str) -> Option<Arc<[u8]>> {

@@ -49,14 +49,27 @@ pub struct CVar {
 
 impl CVar {
     pub fn as_f32(&self) -> f32 {
-        self.value.trim().parse::<f32>().unwrap_or(0.0)
+        self.value
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|v| v.is_finite())
+            .unwrap_or(0.0)
     }
 
     pub fn as_i32(&self) -> i32 {
         self.value
             .trim()
             .parse::<i32>()
-            .or_else(|_| self.value.trim().parse::<f32>().map(|f| f as i32))
+            .or_else(|_| {
+                self.value
+                    .trim()
+                    .parse::<f32>()
+                    .ok()
+                    .filter(|f| f.is_finite())
+                    .map(|f| f as i32)
+                    .ok_or(())
+            })
             .unwrap_or(0)
     }
 
@@ -97,6 +110,7 @@ pub enum EngineAction {
     Connect(String),
     Screenshot(Option<String>),
     OpenBuyMenu,
+    OpenBuyEquipMenu,
     BuyItem(String),
     ChooseTeam,
     GiveWeapon(String),
@@ -634,15 +648,23 @@ impl CVarRegistry {
             "screenshot" => {
                 actions.push(EngineAction::Screenshot(args.first().cloned()));
             }
-            "buy" | "buyequip" => {
+            "buy" => {
                 if let Some(item) = args.first() {
                     actions.push(EngineAction::BuyItem(item.clone()));
                 } else {
                     actions.push(EngineAction::OpenBuyMenu);
                 }
             }
-            "buyammo1" | "primammo" => actions.push(EngineAction::BuyItem("primammo".into())),
-            "buyammo2" | "secammo" => actions.push(EngineAction::BuyItem("secammo".into())),
+            "buyequip" => {
+                if let Some(item) = args.first() {
+                    actions.push(EngineAction::BuyItem(item.clone()));
+                } else {
+                    actions.push(EngineAction::OpenBuyEquipMenu);
+                }
+            }
+            "buyammo1" | "buyammo2" | "primammo" | "secammo" => {
+                actions.push(EngineAction::BuyItem(cmd));
+            }
             "ak47" | "m4a1" | "awp" | "deagle" | "usp" | "glock" | "p228" | "fiveseven"
             | "elites" | "elite" | "m3" | "xm1014" | "mp5" | "mac10" | "tmp" | "ump45"
             | "p90" | "famas" | "galil" | "aug" | "sg552" | "scout" | "g3sg1" | "sg550"
@@ -933,5 +955,38 @@ mod tests {
         reg.execute_script(&text);
         assert!(reg.get_f32("sensitivity") > 0.0);
         assert!(reg.binds().len() >= 5);
+    }
+
+    #[test]
+    fn rejects_non_finite_cvars_and_preserves_buy_commands() {
+        let mut reg = CVarRegistry::new_with_defaults();
+        reg.set("sensitivity", "nan");
+        assert_eq!(reg.get_f32("sensitivity"), 0.0);
+        reg.set("sensitivity", "inf");
+        assert_eq!(reg.get_f32("sensitivity"), 0.0);
+        reg.set("fps_max", "-inf");
+        assert_eq!(reg.get_i32("fps_max"), 0);
+
+        assert_eq!(reg.execute_script("buy"), vec![EngineAction::OpenBuyMenu]);
+        assert_eq!(
+            reg.execute_script("buyequip"),
+            vec![EngineAction::OpenBuyEquipMenu]
+        );
+        assert_eq!(
+            reg.execute_script("buyammo1"),
+            vec![EngineAction::BuyItem("buyammo1".into())]
+        );
+        assert_eq!(
+            reg.execute_script("buyammo2"),
+            vec![EngineAction::BuyItem("buyammo2".into())]
+        );
+        assert_eq!(
+            reg.execute_script("primammo"),
+            vec![EngineAction::BuyItem("primammo".into())]
+        );
+        assert_eq!(
+            reg.execute_script("secammo"),
+            vec![EngineAction::BuyItem("secammo".into())]
+        );
     }
 }

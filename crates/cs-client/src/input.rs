@@ -80,12 +80,20 @@ pub struct CmdClock {
 }
 
 impl CmdClock {
-    /// The milliseconds of a frame of `dt` seconds, 1 to 100 (`CL_CreateCmd` clamps the frame
-    /// to 100 ms; an overlong frame drops its excess).
+    /// The milliseconds of a frame of `dt` seconds, 0 to 100 (`CL_CreateCmd` clamps the frame
+    /// to 100 ms, allows 0 ms on sub-millisecond frames while banking the remainder, and drops
+    /// excess after hitches).
     pub fn msec(&mut self, dt: f64) -> u8 {
-        let total = self.carry + dt.max(0.0) * 1000.0;
-        let ms = total.floor().clamp(1.0, 100.0);
-        self.carry = (total - ms).clamp(0.0, 1.0);
+        if !dt.is_finite() || dt <= 0.0 {
+            return 0;
+        }
+        let total = self.carry + dt * 1000.0;
+        let ms = total.floor().clamp(0.0, 100.0);
+        self.carry = if total > 100.0 {
+            0.0
+        } else {
+            (total - ms).clamp(0.0, 1.0)
+        };
         ms as u8
     }
 
@@ -95,14 +103,24 @@ impl CmdClock {
     /// by at most `frametime * 0.05` a frame (`CL_DriftInterpolationAmount`), rounded to
     /// milliseconds and kept in 0..=100.
     pub fn lerp_msec(&mut self, interp: f32, frametime: f32) -> i16 {
-        let goal = (interp * 1000.0).round() / 1000.0;
+        let safe_interp = if interp.is_finite() { interp } else { 0.1 };
+        let goal = (safe_interp * 1000.0).round() / 1000.0;
         if goal != self.interp_amount {
-            let max_move = frametime * 0.05;
+            let safe_dt = if frametime.is_finite() {
+                frametime.max(0.0)
+            } else {
+                0.0
+            };
+            let max_move = safe_dt * 0.05;
             let diff = (goal - self.interp_amount).clamp(-max_move, max_move);
             self.interp_amount += diff;
         }
         ((self.interp_amount * 1000.0).round() as i32).clamp(0, 100) as i16
     }
+}
+
+fn finite_or_zero(v: f32) -> f32 {
+    if v.is_finite() { v } else { 0.0 }
 }
 
 /// One usercmd.
@@ -131,17 +149,27 @@ pub fn build_usercmd(
     set(held.on("speed"), button::RUN);
     set(held.on("showscores"), button::SCORE);
 
-    let walk = if held.on("speed") { speeds.walk_key } else { 1.0 };
+    let forward_speed = finite_or_zero(speeds.forward);
+    let back_speed = finite_or_zero(speeds.back);
+    let side_speed = finite_or_zero(speeds.side);
+    let up_speed = finite_or_zero(speeds.up);
+    let walk_key = finite_or_zero(speeds.walk_key);
+    let walk = if held.on("speed") { walk_key } else { 1.0 };
     // `CL_KeyMove`: each key adds its speed (the forward and back keys cancel).
     let key = |on: &str| f32::from(held.on(on));
+    let safe_angles = Vec3::new(
+        finite_or_zero(view_angles.x),
+        finite_or_zero(view_angles.y),
+        finite_or_zero(view_angles.z),
+    );
     GoldSrcUserCmd {
         lerp_msec: p.lerp_msec,
         msec: p.msec,
-        viewangles: view_angles,
-        forwardmove: (key("forward") * speeds.forward - key("back") * speeds.back) * walk,
-        sidemove: (key("moveright") - key("moveleft")) * speeds.side * walk,
+        viewangles: safe_angles,
+        forwardmove: (key("forward") * forward_speed - key("back") * back_speed) * walk,
+        sidemove: (key("moveright") - key("moveleft")) * side_speed * walk,
         // +moveup / +movedown: swimming and ladders (jump and duck are buttons).
-        upmove: (key("moveup") - key("movedown")) * speeds.up,
+        upmove: (key("moveup") - key("movedown")) * up_speed,
         lightlevel: 128,
         buttons,
         impulse: p.impulse,
@@ -331,12 +359,48 @@ mod tests {
     #[test]
     fn frame_times_carry_their_remainder() {
         let mut c = CmdClock::default();
+        // Sub-millisecond frames return 0 ms and bank remainder until >= 1 ms.
+        assert_eq!(c.msec(0.0006), 0);
+        assert_eq!(c.msec(0.0006), 1);
+        let mut c2 = CmdClock::default();
         // 6.9 ms frames: the sent milliseconds add up to the real time, within one ms.
-        let total: u32 = (0..1000).map(|_| u32::from(c.msec(0.0069))).sum();
+        let total: u32 = (0..1000).map(|_| u32::from(c2.msec(0.0069))).sum();
         assert!((6899..=6900).contains(&total), "{total}");
-        // A hitch is clamped to 100 ms and does not bank the excess.
-        assert_eq!(c.msec(1.0), 100);
-        assert!(c.msec(0.0001) >= 1);
+        // A hitch is clamped to 100 ms and drops excess without banking remainder.
+        let mut c3 = CmdClock::default();
+        assert_eq!(c3.msec(0.0008), 0);
+        assert_eq!(c3.msec(0.25), 100);
+        assert_eq!(c3.msec(0.0005), 0);
+        assert_eq!(c3.msec(-0.1), 0);
+        assert_eq!(c3.msec(f64::NAN), 0);
+    }
+
+    #[test]
+    fn non_finite_inputs_do_not_panic_or_leak_to_usercmd() {
+        let mut c = CmdClock::default();
+        assert_eq!(c.lerp_msec(0.1, -0.05), 0);
+        assert_eq!(c.lerp_msec(f32::NAN, f32::NAN), 0);
+
+        let mut actions = HashSet::new();
+        actions.insert("forward".into());
+        let held = Held {
+            actions: Some(&actions),
+            ..Default::default()
+        };
+        let cmd = build_usercmd(
+            &held,
+            Vec3::new(f32::NAN, f32::INFINITY, f32::NEG_INFINITY),
+            CmdParams::default(),
+            &MoveSpeeds {
+                forward: f32::NAN,
+                back: f32::INFINITY,
+                side: f32::NAN,
+                up: f32::NEG_INFINITY,
+                walk_key: f32::NAN,
+            },
+        );
+        assert!(cmd.viewangles.is_finite());
+        assert!(cmd.forwardmove.is_finite() && cmd.sidemove.is_finite() && cmd.upmove.is_finite());
     }
 
     #[test]

@@ -75,8 +75,17 @@ pub const CONSISTENCY_REASON: &str = "consistency required: set mp_consistency 0
 pub const MESSAGE_LOG_CAPACITY: usize = 1024;
 /// Console lines [`Connection::console_log`] keeps.
 pub const CONSOLE_LOG_CAPACITY: usize = 256;
+/// Draining console buffer capacity ([`Connection::take_console_lines`]).
+const PENDING_CONSOLE_CAPACITY: usize = 1024;
 /// Reason given when `svc_resourcelist` arrives before `svc_serverinfo`.
 pub const NO_SERVERINFO_REASON: &str = "resourcelist before serverinfo";
+
+/// A view-angle change forced by the server (`svc_setangle` / `svc_addangle`) for the shell camera.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ViewAngleUpdate {
+    Set(glam::Vec3),
+    AddYaw(f32),
+}
 
 /// Identity and settings a connection starts with.
 #[derive(Debug, Clone)]
@@ -206,7 +215,9 @@ pub struct Connection<T: PacketTransport> {
     /// The resource list arrived and a download or the `spawn` still waits.
     awaiting_resources: bool,
     console: VecDeque<String>,
+    pending_console: VecDeque<String>,
     shell_commands: VecDeque<ConsoleCommand>,
+    view_angle_updates: Vec<ViewAngleUpdate>,
     /// When the sign-on last advanced; `None` until the next pump stamps it.
     signon_progress: Option<f64>,
     /// When the downloads of this sign-on started waiting; `None` when none wait.
@@ -271,7 +282,9 @@ impl<T: PacketTransport> Connection<T> {
             fx_world: Box::new(NoWorld),
             awaiting_resources: false,
             console: VecDeque::new(),
+            pending_console: VecDeque::new(),
             shell_commands: VecDeque::new(),
+            view_angle_updates: Vec::new(),
             signon_progress: None,
             download_started: None,
             buffered_fragments: 0,
@@ -527,11 +540,27 @@ impl<T: PacketTransport> Connection<T> {
         &self.console
     }
 
+    /// Drains new console lines since the last call without losing prints once `console_log`
+    /// reaches capacity.
+    pub fn take_console_lines(&mut self) -> Vec<String> {
+        self.pending_console.drain(..).collect()
+    }
+
+    /// Server-forced view angle updates (`svc_setangle`, `svc_addangle`) since the last call.
+    pub fn take_view_angle_updates(&mut self) -> Vec<ViewAngleUpdate> {
+        std::mem::take(&mut self.view_angle_updates)
+    }
+
     fn print(&mut self, line: impl Into<String>) {
+        let text = line.into();
         if self.console.len() >= CONSOLE_LOG_CAPACITY {
             self.console.pop_front();
         }
-        self.console.push_back(line.into());
+        self.console.push_back(text.clone());
+        if self.pending_console.len() >= PENDING_CONSOLE_CAPACITY {
+            self.pending_console.pop_front();
+        }
+        self.pending_console.push_back(text);
     }
 
     /// `svc_stufftext`: the text goes through the line splitter and runs unprivileged
@@ -1113,11 +1142,20 @@ impl<T: PacketTransport> Connection<T> {
             // The client takes the view the server forces (`svc_setangle`), as the engine's
             // client does: the commands it sends from then on look that way.
             SvcMessage::SetAngle(angles) => {
-                self.last_cmd.viewangles = angles;
+                let clean = glam::Vec3::new(
+                    if angles.x.is_finite() { angles.x } else { 0.0 },
+                    if angles.y.is_finite() { angles.y } else { 0.0 },
+                    if angles.z.is_finite() { angles.z } else { 0.0 },
+                );
+                self.last_cmd.viewangles = clean;
+                self.view_angle_updates.push(ViewAngleUpdate::Set(clean));
             }
             // `svc_addangle` turns the view by a yaw.
             SvcMessage::AddAngle(yaw) => {
-                self.last_cmd.viewangles.y += yaw;
+                if yaw.is_finite() {
+                    self.last_cmd.viewangles.y += yaw;
+                    self.view_angle_updates.push(ViewAngleUpdate::AddYaw(yaw));
+                }
             }
             SvcMessage::UpdateUserInfo { slot, userinfo, .. } => {
                 self.userinfos.insert(slot, userinfo);
@@ -1274,6 +1312,7 @@ impl<T: PacketTransport> Connection<T> {
         self.frame_times.clear();
         self.cmd_queue.clear();
         self.sent_cmds.clear();
+        self.view_angle_updates.clear();
         self.last_entity_seq = None;
         self.resources.clear();
         self.precache.clear();
@@ -1625,5 +1664,32 @@ mod fx_tests {
         conn.send_netchan_packet(1.0);
         assert!(!conn.cmd_queue.is_empty(), "overflow cmds kept for next packet");
         assert!(conn.cmd_queue.len() < 16, "at least some cmds were sent");
+    }
+
+    #[test]
+    fn setangle_and_console_lines_drain_past_ring_capacity() {
+        let mut conn = connection();
+        conn.handle_svc(
+            SvcMessage::SetAngle(glam::Vec3::new(12.5, 90.0, f32::NAN)),
+            0.0,
+        );
+        conn.handle_svc(SvcMessage::AddAngle(15.0), 0.0);
+        assert_eq!(
+            conn.take_view_angle_updates(),
+            vec![
+                ViewAngleUpdate::Set(glam::Vec3::new(12.5, 90.0, 0.0)),
+                ViewAngleUpdate::AddYaw(15.0),
+            ]
+        );
+        assert!(conn.take_view_angle_updates().is_empty());
+
+        for i in 0..(CONSOLE_LOG_CAPACITY + 20) {
+            conn.handle_svc(SvcMessage::Print(format!("line {i}\n")), 0.0);
+        }
+        let drained = conn.take_console_lines();
+        assert_eq!(drained.len(), CONSOLE_LOG_CAPACITY + 20);
+        assert_eq!(drained.last().map(String::as_str), Some("line 275"));
+        conn.handle_svc(SvcMessage::Print("after full\n".to_string()), 0.0);
+        assert_eq!(conn.take_console_lines(), vec!["after full".to_string()]);
     }
 }

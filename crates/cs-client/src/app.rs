@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use cs_assets::bsp::BspMap;
 use cs_assets::scheme::{LocalizationTable, SkyboxTextures, VguiColors, load_menu_background};
-use cs_clientcore::hud::DeathNotice;
-use cs_clientcore::{ConnState, SoundCommand};
+use cs_clientcore::hud::{DeathNotice, HudState, VguiMenuState};
+use cs_clientcore::{ConnState, ConsoleCommand, SoundCommand, ViewAngleUpdate};
 use cs_cvar::{CVarRegistry, EngineAction};
 use cs_local::LocalOptions;
 use cs_pm::collision::WorldCollision;
@@ -33,6 +33,7 @@ use crate::input::{
 };
 use crate::render::bsp_renderer::BspRenderStats;
 use crate::render::mdl_renderer::{StudioInstance, viewmodel_transform};
+use crate::render::scene::ModelRegistry;
 use crate::render::{RenderSettings, Renderer, SceneDynamicData};
 use crate::session::Session;
 use crate::ui::chat::ChatInputUi;
@@ -119,7 +120,6 @@ pub struct Cs16App {
     feeds: HudFeeds,
     weapon_switch_timer: f32,
     last_weapon: Option<u8>,
-    console_seen: usize,
 
     menu_ui: MainMenuUi,
     console_ui: ConsoleUi,
@@ -207,7 +207,6 @@ impl Cs16App {
             feeds: HudFeeds::default(),
             weapon_switch_timer: 0.0,
             last_weapon: None,
-            console_seen: 0,
             menu_ui: MainMenuUi::default(),
             console_ui,
             options_ui: OptionsUi::default(),
@@ -286,7 +285,12 @@ impl Cs16App {
             self.session.connection_predictor_materials(&txt);
         }
         self.session.set_map(&map.name, Some(collision));
+        self.feeds = HudFeeds::default();
+        self.last_weapon = None;
+        self.weapon_switch_timer = 0.0;
+        self.audio.stop_all();
         if let Some(rt) = &mut self.runtime {
+            rt.renderer.set_model_registry(ModelRegistry::default());
             rt.renderer.clear_model_caches();
         }
         self.cvars.info(format!(
@@ -310,6 +314,7 @@ impl Cs16App {
         let opts = LocalOptions {
             bots: self.cvars.get_i32("bot_quota").clamp(0, 31) as u32,
             player_name: self.cvars.get_str("name").to_string(),
+            hostname: self.cvars.get_str("hostname").to_string(),
             // The shell draws the server's text menus and answers them with `menuselect`.
             text_menus: true,
             ..LocalOptions::default()
@@ -317,6 +322,19 @@ impl Cs16App {
         match Session::start_local(&vfs, map_name, &opts) {
             Ok(session) => {
                 self.session = session;
+                for name in [
+                    "bot_difficulty",
+                    "mp_roundtime",
+                    "mp_freezetime",
+                    "mp_startmoney",
+                    "sv_gravity",
+                    "sv_airaccelerate",
+                ] {
+                    let val = self.cvars.get_str(name);
+                    if !val.is_empty() {
+                        let _ = self.session.server_console(&format!("{name} {val}"));
+                    }
+                }
                 if let Err(err) = self.load_map(map_name) {
                     error!(map = map_name, %err, "Failed to load BSP map");
                     self.cvars.error(format!("Failed to load map \"{map_name}\": {err}"));
@@ -350,7 +368,7 @@ impl Cs16App {
         self.feeds = HudFeeds::default();
         self.view_stats = ViewStats::default();
         self.last_weapon = None;
-        self.console_seen = 0;
+        self.weapon_switch_timer = 0.0;
         self.menu_ui.visible = false;
         self.console_ui.open = false;
         self.options_ui.open = false;
@@ -367,13 +385,22 @@ impl Cs16App {
         if let Some(rt) = &mut self.runtime {
             rt.renderer.unload_map();
             rt.renderer.set_entity_scene(None);
+            rt.renderer.set_model_registry(ModelRegistry::default());
             rt.renderer.clear_model_caches();
             rt.window.set_title("Counter-Strike 1.6 (Rust)");
         }
+        self.audio.stop_all();
+        self.feeds = HudFeeds::default();
         self.view_stats = ViewStats::default();
         self.menu_ui.visible = true;
         self.chat_ui.open = false;
         self.active_actions.clear();
+        self.mouse1_held = false;
+        self.mouse2_held = false;
+        self.pending_impulse = 0;
+        self.cmd_clock = CmdClock::default();
+        self.last_weapon = None;
+        self.weapon_switch_timer = 0.0;
         self.cvars.set_forward_unknown(false);
         self.sync_cursor_capture();
     }
@@ -414,29 +441,54 @@ impl Cs16App {
     /// Plays what the client core queued: the sounds of the server's messages, of the events
     /// and temp entities, and of the predicted footsteps.
     fn play_sounds(&mut self, listener: Vec3, local_entity: Option<u16>) {
-        let master = self.cvars.get_f32("volume").clamp(0.0, 1.0);
+        let master = finite_or(self.cvars.get_f32("volume"), 1.0).clamp(0.0, 1.0);
         for cmd in self.session.take_sounds() {
-            let (SoundCommand::Start(s) | SoundCommand::Ambient(s)) = cmd else {
-                continue;
-            };
-            if s.is_stop() || s.is_sentence() {
-                continue;
-            }
-            let Some(name) = s.name.as_deref() else {
-                continue;
-            };
-            if name.starts_with(['!', '#', '*']) {
-                continue;
-            }
-            if Some(s.entity) == local_entity {
-                self.audio.play_2d(self.vfs.as_ref(), name, s.volume * master);
-            } else {
-                self.audio
-                    .play_3d(self.vfs.as_ref(), name, s.origin, listener, s.volume, master);
+            match cmd {
+                SoundCommand::Stop { entity, channel } => {
+                    self.audio.stop_channel(entity, channel);
+                }
+                SoundCommand::Start(s) | SoundCommand::Ambient(s) => {
+                    if s.is_stop() {
+                        self.audio.stop_channel(s.entity, s.channel);
+                        continue;
+                    }
+                    if s.is_sentence() {
+                        continue;
+                    }
+                    let Some(name) = s.name.as_deref() else {
+                        continue;
+                    };
+                    if name.starts_with(['!', '#', '*']) || !s.volume.is_finite() {
+                        continue;
+                    }
+                    if Some(s.entity) == local_entity {
+                        self.audio.play_2d_tracked(
+                            self.vfs.as_ref(),
+                            name,
+                            s.volume * master,
+                            Some(s.entity),
+                            Some(s.channel),
+                        );
+                    } else if s.origin.is_finite() {
+                        self.audio.play_3d_tracked(
+                            self.vfs.as_ref(),
+                            name,
+                            s.origin,
+                            listener,
+                            s.volume,
+                            master,
+                            Some(s.entity),
+                            Some(s.channel),
+                        );
+                    }
+                }
+                SoundCommand::Fade { .. } => {}
             }
         }
         for s in self.session.take_predicted_sounds() {
-            self.audio.play_2d(self.vfs.as_ref(), &s.sample, s.volume * master);
+            if s.volume.is_finite() {
+                self.audio.play_2d(self.vfs.as_ref(), &s.sample, s.volume * master);
+            }
         }
     }
 
@@ -456,29 +508,44 @@ impl Cs16App {
                         feeds.chat.push((text, now));
                     }
                 }
+                let mut got_dest4 = false;
                 for line in hud.text.drain(..) {
                     let text = format_message(&line.message, &line.params, loc);
                     if text.is_empty() {
                         continue;
                     }
                     match line.dest {
-                        4 => feeds.center = Some((text, now)),
+                        4 => {
+                            feeds.center = Some((text, now));
+                            got_dest4 = true;
+                        }
                         3 | 5 => feeds.chat.push((text, now)),
                         1 => feeds.notify.push((text, now)),
                         _ => {}
                     }
                 }
-                if let Some(text) = hud.center_print.take() {
+                if let Some(text) = hud.center_print.take()
+                    && !got_dest4
+                {
                     let text = format_message(&text, &[], loc);
                     feeds.center = Some((text, now));
                 }
-                // A menu that came: remember when, so it expires by its own display time.
+                if hud
+                    .menu
+                    .as_ref()
+                    .is_some_and(|m| !m.multipart && (m.keys == 0 || m.text.is_empty()))
+                {
+                    hud.menu = None;
+                }
+                // A menu that came: remember when (once complete), so it expires by its display time.
                 match (&hud.menu, &feeds.menu_since) {
+                    (Some(m), _) if m.multipart => feeds.menu_since = None,
                     (Some(m), Some((_, t))) if *t == m.text => {}
                     (Some(m), _) => feeds.menu_since = Some((now, m.text.clone())),
                     (None, _) => feeds.menu_since = None,
                 }
                 if let Some(m) = &hud.menu
+                    && !m.multipart
                     && m.display_time > 0
                     && let Some((since, _)) = &feeds.menu_since
                     && now - since > f64::from(m.display_time)
@@ -606,6 +673,7 @@ impl Cs16App {
                     }
                     // Commands the server runs: the client sends them as `clc_stringcmd`.
                     EngineAction::OpenBuyMenu => self.forward_to_server("buy"),
+                    EngineAction::OpenBuyEquipMenu => self.forward_to_server("buyequip"),
                     EngineAction::BuyItem(item) => self.forward_to_server(&item),
                     EngineAction::ChooseTeam => self.forward_to_server("chooseteam"),
                     EngineAction::GiveWeapon(w) => self.forward_to_server(&format!("give {w}")),
@@ -630,13 +698,25 @@ impl Cs16App {
                     }
                     EngineAction::SelectSlot(slot) => self.select_slot(slot),
                     EngineAction::Impulse(n) => self.pending_impulse = n,
-                    EngineAction::Forward(tokens) => match route_unknown(&tokens) {
-                        ConsoleRoute::Server(line) => self.forward_to_server(&line),
-                        ConsoleRoute::Local(line) => self.session.execute_local(&line),
-                        ConsoleRoute::Denied => {
-                            self.cvars.warn("that command stays on this machine");
+                    EngineAction::Forward(tokens) => {
+                        if let Some(name) = tokens.first()
+                            && self.session.has_client_cvar(name)
+                        {
+                            if let Some(val) = tokens.get(1) {
+                                self.session.set_client_cvar(name, val);
+                            } else if let Some(cur) = self.session.client_cvar(name) {
+                                self.cvars.info(format!("\"{name}\" is \"{cur}\""));
+                            }
+                            continue;
                         }
-                    },
+                        match route_unknown(&tokens) {
+                            ConsoleRoute::Server(line) => self.forward_to_server(&line),
+                            ConsoleRoute::Local(line) => self.session.execute_local(&line),
+                            ConsoleRoute::Denied => {
+                                self.cvars.warn("that command stays on this machine");
+                            }
+                        }
+                    }
                     EngineAction::SetPos(_) => {
                         self.cvars.warn("setpos needs the server's cheats; use noclip");
                     }
@@ -752,21 +832,42 @@ impl Cs16App {
             return false;
         }
 
-        // A menu of the server takes the digit keys its mask enables.
+        // A menu of the server takes the digit keys its mask enables (once complete).
         if pressed
             && !event.repeat
             && let Some(digit) = digit_of(code)
         {
-            let keys = self
+            let text_keys = self
                 .session
-                .with_hud(|h| h.menu.as_ref().map(|m| m.keys))
+                .with_hud(|h| {
+                    h.menu
+                        .as_ref()
+                        .filter(|m| !m.multipart && m.keys != 0 && !m.text.is_empty())
+                        .map(|m| m.keys)
+                })
                 .flatten();
-            if let Some(keys) = keys
+            if let Some(keys) = text_keys
                 && menu_key_enabled(keys, digit)
             {
                 let n = if digit == 0 { 10 } else { digit };
                 self.session.send_stringcmd(&format!("menuselect {n}"));
                 self.session.with_hud_mut(|h| h.menu = None);
+                return true;
+            }
+            let vgui_target = self
+                .session
+                .with_hud(|h| {
+                    h.vgui_menu
+                        .as_ref()
+                        .filter(|v| !v.multipart && v.keys != 0 && menu_key_enabled(v.keys, digit))
+                        .map(|v| v.menu_id)
+                })
+                .flatten();
+            if let Some(menu_id) = vgui_target {
+                let n = if digit == 0 { 10 } else { digit };
+                let cmd = vgui_menu_select_command(menu_id, n);
+                self.session.send_stringcmd(&cmd);
+                self.session.with_hud_mut(|h| h.vgui_menu = None);
                 return true;
             }
         }
@@ -787,29 +888,28 @@ impl Cs16App {
     /// The scoreboard rows from the HUD state.
     fn score_rows(&self, names: &BTreeMap<u8, String>) -> (Vec<ScoreRow>, i16, i16) {
         self.session
-            .with_hud(|hud| {
-                let rows = hud
-                    .players
-                    .iter()
-                    .filter(|(_, p)| p.team == "CT" || p.team == "TERRORIST")
-                    .map(|(slot, p)| ScoreRow {
-                        slot: *slot,
-                        name: names.get(slot).cloned().unwrap_or_else(|| format!("player {slot}")),
-                        frags: p.frags,
-                        deaths: p.deaths,
-                        team: p.team.clone(),
-                        dead: p.attrib & 1 != 0,
-                        bomb: p.attrib & 2 != 0,
-                        vip: p.attrib & 4 != 0,
-                    })
-                    .collect();
-                (
-                    rows,
-                    hud.team_scores.get("CT").copied().unwrap_or(0),
-                    hud.team_scores.get("TERRORIST").copied().unwrap_or(0),
-                )
-            })
+            .with_hud(|hud| build_score_rows(hud, names))
             .unwrap_or_default()
+    }
+
+    fn apply_view_angle_updates(&mut self) {
+        for upd in self.session.take_view_angle_updates() {
+            match upd {
+                ViewAngleUpdate::Set(angles) => {
+                    if angles.x.is_finite() {
+                        self.camera.pitch_deg = angles.x.clamp(-89.0, 89.0);
+                    }
+                    if angles.y.is_finite() {
+                        self.camera.yaw_deg = angles.y.rem_euclid(360.0);
+                    }
+                }
+                ViewAngleUpdate::AddYaw(yaw) => {
+                    if yaw.is_finite() {
+                        self.camera.yaw_deg = (self.camera.yaw_deg + yaw).rem_euclid(360.0);
+                    }
+                }
+            }
+        }
     }
 
     fn render_and_step(&mut self, event_loop: &ActiveEventLoop) {
@@ -822,10 +922,19 @@ impl Cs16App {
         self.fps_smooth = self.fps_smooth * 0.9 + inst_fps * 0.1;
         self.frame_ms_smooth = self.frame_ms_smooth * 0.9 + (raw_dt * 1000.0) * 0.1;
 
-        // 1. Input as a usercmd, then the session's frame (the local server, or the socket).
+        if self.session.is_active() {
+            let desired_name = self.cvars.get_str("name").to_string();
+            if self.session.client_cvar("name").as_deref() != Some(desired_name.as_str()) {
+                self.session.set_client_cvar("name", &desired_name);
+            }
+        }
+
+        // 1. Apply any pending server-forced view angles, send usercmd, then step the session.
         self.cvars.set_forward_unknown(self.session.is_active());
+        self.apply_view_angle_updates();
         self.queue_usercmd(f64::from(dt));
         self.session.advance(f64::from(dt));
+        self.apply_view_angle_updates();
 
         // The connection ended (kicked, timed out, rejected, the server shut down).
         if let Some(state) = self.session.state()
@@ -849,33 +958,40 @@ impl Cs16App {
             self.end_session();
         }
 
-        // Text the server stuffed that the connection does not run itself.
-        // A server's text never reaches the server again: nothing is forwarded while it runs.
+        // Text the server stuffed: dispatch only an explicit safe allowlist (never re-parse
+        // unquoted server arguments through `CVarRegistry::execute_script`).
         for cmd in self.session.take_shell_commands() {
-            let line = format!("{} {}", cmd.name, cmd.args.join(" "));
-            self.cvars.set_forward_unknown(false);
-            let actions = self.cvars.execute_script(line.trim());
-            let actions: Vec<EngineAction> = actions
-                .into_iter()
-                .filter(|a| !matches!(a, EngineAction::Forward(_)))
-                .collect();
-            self.process_actions(actions, event_loop);
+            let master = finite_or(self.cvars.get_f32("volume"), 1.0).clamp(0.0, 1.0);
+            match classify_shell_command(&cmd) {
+                Some(ShellStuffAction::CloseMenu) => {
+                    self.session.with_hud_mut(|h| {
+                        h.menu = None;
+                        h.vgui_menu = None;
+                    });
+                }
+                Some(ShellStuffAction::PlaySound(sample)) => {
+                    self.audio.play_2d(self.vfs.as_ref(), &sample, master);
+                }
+                Some(ShellStuffAction::StopSound) => self.audio.stop_all(),
+                Some(ShellStuffAction::Echo(text)) => self.cvars.info(text),
+                None => {}
+            }
         }
         self.cvars.set_forward_unknown(self.session.is_active());
-        let lines = self.session.console_lines();
-        for line in lines.iter().skip(self.console_seen) {
-            self.cvars.info(line.clone());
+        for line in self.session.take_console_lines() {
+            self.cvars.info(line);
         }
-        self.console_seen = lines.len();
 
         let time_sec = self.start_time.elapsed().as_secs_f32();
         let in_game = self.is_in_game();
         let show_scores =
             self.active_actions.contains("showscores") && in_game && !self.menu_ui.visible;
-        let mp3_vol = self.cvars.get_f32("mp3volume").clamp(0.0, 1.0);
+        let mp3_vol = finite_or(self.cvars.get_f32("mp3volume"), 0.8).clamp(0.0, 1.0);
         let want_menu_music = !self.session.is_active() && self.launch.auto_screenshot.is_none();
         self.audio
             .sync_menu_music(self.vfs.as_ref(), want_menu_music, mp3_vol);
+
+        let default_fov = finite_or(self.cvars.get_f32("fov_default"), 90.0).clamp(60.0, 120.0);
 
         // 2. The frame of the session.
         let mut view: Option<FrameView> = None;
@@ -885,9 +1001,13 @@ impl Cs16App {
                 frametime: f64::from(dt),
                 right_hand: self.cvars.get_bool("cl_righthand"),
                 draw_viewmodel: self.cvars.get_bool("r_drawviewmodel"),
-                default_fov: self.cvars.get_f32("fov_default").clamp(60.0, 120.0),
+                default_fov,
             };
-            let angles = Vec3::new(self.camera.pitch_deg, self.camera.yaw_deg, 0.0);
+            let angles = Vec3::new(
+                finite_or(self.camera.pitch_deg, 0.0),
+                finite_or(self.camera.yaw_deg, 0.0),
+                0.0,
+            );
             if let Some((frame, registry)) = self.session.build_view(angles, &inputs) {
                 if let (Some(reg), Some(rt)) = (registry, &mut self.runtime) {
                     rt.renderer.set_model_registry(reg);
@@ -900,7 +1020,9 @@ impl Cs16App {
 
         if let Some(v) = &view {
             self.view_stats = v.stats;
-            self.camera.position = v.eye;
+            if v.eye.is_finite() {
+                self.camera.position = v.eye;
+            }
             let local_entity = self.session.local_slot().map(|s| u16::from(s) + 1);
             self.play_sounds(v.eye, local_entity);
         }
@@ -919,7 +1041,20 @@ impl Cs16App {
         let center = self.feeds.center.as_ref().map(|(c, _)| c.clone());
         let menu_lines_now: Option<Vec<String>> = self
             .session
-            .with_hud(|h| h.menu.as_ref().map(|m| menu_lines(&m.text, self.loc.as_ref())))
+            .with_hud(|h| {
+                if let Some(m) = h
+                    .menu
+                    .as_ref()
+                    .filter(|m| !m.multipart && m.keys != 0 && !m.text.is_empty())
+                {
+                    Some(menu_lines(&m.text, self.loc.as_ref()))
+                } else {
+                    h.vgui_menu
+                        .as_ref()
+                        .filter(|v| !v.multipart && v.keys != 0)
+                        .map(vgui_menu_fallback_lines)
+                }
+            })
             .flatten();
         let motd_text: Option<String> = self
             .feeds
@@ -933,7 +1068,10 @@ impl Cs16App {
             .session
             .with_hud(|h| h.server_name.clone())
             .unwrap_or_default();
-        let scoped = view.as_ref().is_some_and(|v| v.fov < 60.0);
+        // Sniper scope overlay applies at <= 40 deg (AWP/Scout/auto-sniper), keeping AUG/SG552 (55 deg) unmasked.
+        let scoped = view
+            .as_ref()
+            .is_some_and(|v| v.fov.is_finite() && v.fov > 0.0 && v.fov <= 40.0);
         let alive = view.as_ref().is_some_and(|v| v.alive);
 
         // 3. egui: HUD, menus, console.
@@ -1065,27 +1203,38 @@ impl Cs16App {
 
         // 4. The 3D frame.
         let mut render_cam = self.camera.clone();
-        let mut fov = self.cvars.get_f32("fov_default").clamp(60.0, 120.0);
+        let mut fov = default_fov;
         let mut viewmodel_inst: Option<(String, glam::Mat4, i32, i32, f32, bool)> = None;
         let mut beams = Vec::new();
         let mut points = Vec::new();
         let mut scene = None;
         let mut sensitivity_scale = 1.0;
         if let Some(v) = view {
-            render_cam.pitch_deg = (render_cam.pitch_deg + v.punch.x).clamp(-89.0, 89.0);
-            render_cam.yaw_deg = (render_cam.yaw_deg + v.punch.y).rem_euclid(360.0);
-            render_cam.roll_deg = v.punch.z;
-            fov = v.fov;
-            sensitivity_scale = (v.fov / 90.0).clamp(0.2, 1.0);
+            let punch_x = finite_or(v.punch.x, 0.0);
+            let punch_y = finite_or(v.punch.y, 0.0);
+            let punch_z = finite_or(v.punch.z, 0.0);
+            render_cam.pitch_deg = (finite_or(render_cam.pitch_deg, 0.0) + punch_x).clamp(-89.0, 89.0);
+            render_cam.yaw_deg = (finite_or(render_cam.yaw_deg, 0.0) + punch_y).rem_euclid(360.0);
+            render_cam.roll_deg = punch_z.clamp(-90.0, 90.0);
+            fov = finite_or(v.fov, default_fov).clamp(10.0, 120.0);
+            sensitivity_scale = (fov / 90.0).clamp(0.2, 1.0);
             if let Some(vm) = &v.viewmodel {
+                let eye = if v.eye.is_finite() { v.eye } else { Vec3::ZERO };
                 let xf = viewmodel_transform(
-                    v.eye,
+                    eye,
                     render_cam.yaw_deg,
                     render_cam.pitch_deg,
                     Vec3::ZERO,
-                    vm.flip,
+                    vm.right_hand,
                 );
-                viewmodel_inst = Some((vm.path.clone(), xf, vm.sequence, vm.body, vm.animtime, vm.flip));
+                viewmodel_inst = Some((
+                    vm.path.clone(),
+                    xf,
+                    vm.sequence,
+                    vm.body,
+                    vm.animtime,
+                    vm.right_hand,
+                ));
             }
             beams = v.beams;
             points = v.points;
@@ -1106,15 +1255,15 @@ impl Cs16App {
             .get_str("gl_texturemode")
             .eq_ignore_ascii_case("GL_NEAREST");
         let settings = RenderSettings {
-            gamma: self.cvars.get_f32("gamma").clamp(1.0, 4.0),
-            brightness: self.cvars.get_f32("brightness").clamp(0.3, 2.5),
+            gamma: finite_or(self.cvars.get_f32("gamma"), 2.2).clamp(1.0, 4.0),
+            brightness: finite_or(self.cvars.get_f32("brightness"), 1.0).clamp(0.3, 2.5),
             fov_deg: fov,
             aspect_mode: self.cvars.get_str("vid_aspect_mode"),
             use_nearest_filter: use_nearest,
             debug_mode,
             time_sec,
         };
-        let vm_ref = viewmodel_inst.as_ref().map(|(path, xf, seq, body, started, flip)| {
+        let vm_ref = viewmodel_inst.as_ref().map(|(path, xf, seq, body, started, right_hand)| {
             StudioInstance {
                 model_path: path.as_str(),
                 transform: *xf,
@@ -1125,7 +1274,7 @@ impl Cs16App {
                 now: sess_now as f32,
                 body: *body,
                 light_rgb: Vec3::splat(0.95),
-                flip_winding: *flip,
+                flip_winding: *right_hand,
                 attached_model: None,
             }
         });
@@ -1441,4 +1590,181 @@ fn physical_key_to_goldsrc(code: KeyCode) -> Option<&'static str> {
         KeyCode::F5 => "f5",
         _ => return None,
     })
+}
+
+fn finite_or(v: f32, fallback: f32) -> f32 {
+    if v.is_finite() { v } else { fallback }
+}
+
+/// Converts 1-based `HudState.players` entity keys to 0-based `ScoreRow.slot` and `names` keys.
+fn build_score_rows(hud: &HudState, names: &BTreeMap<u8, String>) -> (Vec<ScoreRow>, i16, i16) {
+    let rows = hud
+        .players
+        .iter()
+        .filter(|(_, p)| p.team == "CT" || p.team == "TERRORIST")
+        .filter_map(|(slot, p)| {
+            let slot0 = slot.checked_sub(1)?;
+            Some(ScoreRow {
+                slot: slot0,
+                name: names
+                    .get(&slot0)
+                    .cloned()
+                    .unwrap_or_else(|| format!("player {slot}")),
+                frags: p.frags,
+                deaths: p.deaths,
+                team: p.team.clone(),
+                dead: p.attrib & 1 != 0,
+                bomb: p.attrib & 2 != 0,
+                vip: p.attrib & 4 != 0,
+            })
+        })
+        .collect();
+    (
+        rows,
+        hud.team_scores.get("CT").copied().unwrap_or(0),
+        hud.team_scores.get("TERRORIST").copied().unwrap_or(0),
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ShellStuffAction {
+    CloseMenu,
+    PlaySound(String),
+    StopSound,
+    Echo(String),
+}
+
+/// Allowlisted `svc_stufftext` commands handled by the shell without re-parsing through `execute_script`.
+fn classify_shell_command(cmd: &ConsoleCommand) -> Option<ShellStuffAction> {
+    match cmd.name.to_ascii_lowercase().as_str() {
+        "slot10" => Some(ShellStuffAction::CloseMenu),
+        "stopsound" => Some(ShellStuffAction::StopSound),
+        "echo" => Some(ShellStuffAction::Echo(cmd.args.join(" "))),
+        "spk" | "play" => {
+            if cmd.args.len() != 1 {
+                return None;
+            }
+            let sample = cmd.args[0].trim();
+            if sample.is_empty()
+                || sample.starts_with(['/', '\\'])
+                || sample.contains("..")
+                || sample.contains([';', '\n', '\r', '\0'])
+            {
+                return None;
+            }
+            Some(ShellStuffAction::PlaySound(sample.to_string()))
+        }
+        _ => None,
+    }
+}
+
+fn vgui_menu_fallback_lines(menu: &VguiMenuState) -> Vec<String> {
+    match menu.menu_id {
+        2 => vec![
+            "Select Team".into(),
+            String::new(),
+            "1. Terrorist Force".into(),
+            "2. Counter-Terrorist Force".into(),
+            String::new(),
+            "5. Auto-Assign".into(),
+            "6. Spectator".into(),
+        ],
+        3 | 26 => vec![
+            "Select Class".into(),
+            String::new(),
+            "1 - 4. Choose Appearance".into(),
+            "5. Auto-Select".into(),
+        ],
+        4..=10 => vec![
+            "Buy Menu".into(),
+            String::new(),
+            "Press 1-8 to select, 0 to exit".into(),
+        ],
+        id => vec![
+            format!("Server Menu #{id}"),
+            String::new(),
+            "Press number key to select, 0 to exit".into(),
+        ],
+    }
+}
+
+fn vgui_menu_select_command(menu_id: u8, n: u8) -> String {
+    match menu_id {
+        2 => format!("jointeam {n}"),
+        3 | 26 => format!("joinclass {n}"),
+        _ => format!("menuselect {n}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cs_clientcore::hud::PlayerScore;
+
+    #[test]
+    fn score_rows_align_one_based_players_with_zero_based_slots_and_names() {
+        let mut hud = HudState::default();
+        hud.players.insert(
+            1,
+            PlayerScore {
+                team: "CT".to_string(),
+                frags: 5,
+                deaths: 1,
+                attrib: 0,
+                ..Default::default()
+            },
+        );
+        let mut names = BTreeMap::new();
+        names.insert(0, "Alpha".to_string());
+        let (rows, _, _) = build_score_rows(&hud, &names);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].slot, 0);
+        assert_eq!(rows[0].name, "Alpha");
+    }
+
+    #[test]
+    fn shell_stufftext_allowlist_blocks_command_injection() {
+        let injected = ConsoleCommand {
+            name: "spk".into(),
+            args: vec!["x; bind w quit; kill".into()],
+        };
+        assert_eq!(classify_shell_command(&injected), None);
+
+        let evil_path = ConsoleCommand {
+            name: "spk".into(),
+            args: vec!["../secret".into()],
+        };
+        assert_eq!(classify_shell_command(&evil_path), None);
+
+        let good_spk = ConsoleCommand {
+            name: "spk".into(),
+            args: vec!["radio/ctwin.wav".into()],
+        };
+        assert_eq!(
+            classify_shell_command(&good_spk),
+            Some(ShellStuffAction::PlaySound("radio/ctwin.wav".into()))
+        );
+
+        let slot10 = ConsoleCommand {
+            name: "slot10".into(),
+            args: Vec::new(),
+        };
+        assert_eq!(classify_shell_command(&slot10), Some(ShellStuffAction::CloseMenu));
+    }
+
+    #[test]
+    fn vgui_menu_fallback_renders_and_maps_selection_commands() {
+        let m = VguiMenuState {
+            menu_id: 2,
+            keys: 0b110011,
+            time: 0,
+            multipart: false,
+            name: String::new(),
+        };
+        let lines = vgui_menu_fallback_lines(&m);
+        assert!(lines[0].contains("Team"));
+        assert_eq!(vgui_menu_select_command(2, 2), "jointeam 2");
+        assert_eq!(vgui_menu_select_command(26, 1), "joinclass 1");
+        assert_eq!(vgui_menu_select_command(4, 3), "menuselect 3");
+    }
 }

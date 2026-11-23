@@ -938,6 +938,38 @@ impl StudioPoseData {
     }
 }
 
+/// Union bounding box across all sequence descriptors (`mstudioseqdesc_t::bbmin`/`bbmax`),
+/// used for `svc_consistency` `ModelSameBounds` checks.
+pub fn studio_bounds(data: &[u8]) -> Option<([f32; 3], [f32; 3])> {
+    if data.len() < 244 || &data[0..4] != MDL_MAGIC || read_i32(data, 4).ok()? != MDL_VERSION {
+        return None;
+    }
+    let num_seq = usize::try_from(read_i32(data, 164).ok()?).ok()?;
+    let seq_index = usize::try_from(read_i32(data, 168).ok()?).ok()?;
+    if num_seq == 0 {
+        return Some(([0.0; 3], [0.0; 3]));
+    }
+    let end = seq_index.checked_add(num_seq.checked_mul(176)?)?;
+    if end > data.len() {
+        return None;
+    }
+    let mut mins = [f32::INFINITY; 3];
+    let mut maxs = [f32::NEG_INFINITY; 3];
+    for i in 0..num_seq {
+        let base = seq_index + i * 176;
+        for axis in 0..3 {
+            let lo = read_f32(data, base + 96 + axis * 4).ok()?;
+            let hi = read_f32(data, base + 108 + axis * 4).ok()?;
+            if !lo.is_finite() || !hi.is_finite() {
+                return None;
+            }
+            mins[axis] = mins[axis].min(lo);
+            maxs[axis] = maxs[axis].max(hi);
+        }
+    }
+    Some((mins, maxs))
+}
+
 fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, MdlError> {
     let arr: [u8; 2] = bytes
         .get(offset..offset + 2)
@@ -972,4 +1004,41 @@ fn read_f32(bytes: &[u8], offset: usize) -> Result<f32, MdlError> {
         .try_into()
         .map_err(|_| MdlError::Truncated("f32"))?;
     Ok(f32::from_le_bytes(arr))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn studio_bounds_computes_union_over_sequences_and_rejects_bad_data() {
+        assert!(studio_bounds(&[0u8; 64]).is_none());
+
+        let seq_base = 244usize;
+        let mut buf = vec![0u8; seq_base + 2 * 176];
+        buf[0..4].copy_from_slice(MDL_MAGIC);
+        buf[4..8].copy_from_slice(&MDL_VERSION.to_le_bytes());
+        buf[164..168].copy_from_slice(&2i32.to_le_bytes());
+        buf[168..172].copy_from_slice(&(seq_base as i32).to_le_bytes());
+
+        let write_box = |dst: &mut [u8], seq: usize, mn: [f32; 3], mx: [f32; 3]| {
+            let b = seq_base + seq * 176;
+            for (i, v) in mn.iter().enumerate() {
+                dst[b + 96 + i * 4..b + 100 + i * 4].copy_from_slice(&v.to_le_bytes());
+            }
+            for (i, v) in mx.iter().enumerate() {
+                dst[b + 108 + i * 4..b + 112 + i * 4].copy_from_slice(&v.to_le_bytes());
+            }
+        };
+
+        write_box(&mut buf, 0, [-10.0, -5.0, 0.0], [10.0, 20.0, 36.0]);
+        write_box(&mut buf, 1, [-16.0, -2.0, -4.0], [8.0, 25.0, 12.0]);
+        assert_eq!(
+            studio_bounds(&buf),
+            Some(([-16.0, -5.0, -4.0], [10.0, 25.0, 36.0]))
+        );
+
+        write_box(&mut buf, 1, [f32::NAN, 0.0, 0.0], [1.0, 1.0, 1.0]);
+        assert!(studio_bounds(&buf).is_none());
+    }
 }

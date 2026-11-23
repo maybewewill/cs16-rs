@@ -8,7 +8,8 @@ use std::net::ToSocketAddrs;
 use std::sync::Arc;
 
 use cs_clientcore::{
-    ConnState, Connection, ConnectionConfig, ConsoleCommand, SoundCommand,
+    ConnState, Connection, ConnectionConfig, ConsoleCommand, ResourceFiles, SoundCommand,
+    ViewAngleUpdate,
 };
 use cs_clientcore::hud::HudState;
 use cs_local::{FRAME_SECS, LocalGame, LocalOptions};
@@ -73,6 +74,28 @@ macro_rules! with_conn_mut {
     };
 }
 
+struct VfsResourceFiles(Vfs);
+
+impl ResourceFiles for VfsResourceFiles {
+    fn exists(&self, path: &str) -> bool {
+        self.0.exists(path)
+    }
+
+    fn md5(&self, path: &str) -> Option<[u8; 16]> {
+        self.0
+            .read_bytes(path)
+            .ok()
+            .map(|b| cs_proto48::crypto::md5_digest(&b))
+    }
+
+    fn studio_bounds(&self, path: &str) -> Option<([f32; 3], [f32; 3])> {
+        self.0
+            .read_bytes(path)
+            .ok()
+            .and_then(|b| cs_assets::mdl::studio_bounds(&b))
+    }
+}
+
 /// A session and the things the shell keeps for it.
 pub struct Session {
     kind: Kind,
@@ -80,7 +103,6 @@ pub struct Session {
     map_name: Option<String>,
     collision: Option<Arc<WorldCollision>>,
     vfs: Option<Vfs>,
-    fx_world_set: bool,
 }
 
 impl Session {
@@ -91,7 +113,6 @@ impl Session {
             map_name: None,
             collision: None,
             vfs: None,
-            fx_world_set: false,
         }
     }
 
@@ -125,6 +146,9 @@ impl Session {
         let steam_id = 76_561_197_960_265_728 + u64::from(std::process::id());
         let cfg = ConnectionConfig::new(name, steam_id, &md5_hex(b"cs16-rs client"));
         let mut conn = Connection::new(transport, PeerAddr::Udp(peer), cfg);
+        if let Some(v) = vfs {
+            conn.set_files(Box::new(VfsResourceFiles(v.clone())));
+        }
         // Text menus answered with `menuselect`: the shell draws the server's `ShowMenu`.
         conn.set_userinfo("_vgui_menus", "0");
         conn.connect();
@@ -146,7 +170,6 @@ impl Session {
             c.frames_mut().set_remote_is_local(local);
             c.set_fx_world(Box::new(MapFxWorld::new(collision, vfs, names)));
         }, else ());
-        self.fx_world_set = true;
     }
 
     pub fn is_active(&self) -> bool {
@@ -206,6 +229,7 @@ impl Session {
     pub fn set_map(&mut self, name: &str, collision: Option<Arc<WorldCollision>>) {
         self.map_name = Some(name.to_string());
         self.collision = collision.clone();
+        self.view.reset_map();
         self.view
             .set_map_bounds(collision.as_deref());
         let vfs = self.vfs.clone();
@@ -310,9 +334,26 @@ impl Session {
         }, else 0.0)
     }
 
-    /// The console text the connection printed (`Con_Printf`), for the shell's console.
-    pub fn console_lines(&self) -> Vec<String> {
-        with_conn!(self, c => c.console_log().iter().cloned().collect(), else Vec::new())
+    /// Drains new console lines (`Con_Printf`) since the last call.
+    pub fn take_console_lines(&mut self) -> Vec<String> {
+        with_conn_mut!(self, c => c.take_console_lines(), else Vec::new())
+    }
+
+    /// Drains server-forced view angle updates (`svc_setangle`, `svc_addangle`) since the last call.
+    pub fn take_view_angle_updates(&mut self) -> Vec<ViewAngleUpdate> {
+        with_conn_mut!(self, c => c.take_view_angle_updates(), else Vec::new())
+    }
+
+    pub fn has_client_cvar(&self, name: &str) -> bool {
+        with_conn!(self, c => c.cvars().find(name).is_some(), else false)
+    }
+
+    pub fn client_cvar(&self, name: &str) -> Option<String> {
+        with_conn!(self, c => c.cvars().find(name).map(|v| v.value.clone()), else None)
+    }
+
+    pub fn set_client_cvar(&mut self, name: &str, value: &str) {
+        with_conn_mut!(self, c => c.set_cvar(name, value), else ());
     }
 
     #[cfg(test)]

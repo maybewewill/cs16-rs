@@ -464,11 +464,7 @@ pub fn draw_cs16_hud(ctx: &egui::Context, sprites: Option<&HudSprites>, hud: &Hu
             .cloned()
             .unwrap_or_else(|| format!("player {slot}"))
     };
-    let team_of = |slot: u8| -> Color32 {
-        slot.checked_sub(1)
-            .and_then(|s| state.players.get(&s))
-            .map_or(HUD_AMBER, |p| team_color(&p.team))
-    };
+    let team_of = |slot: u8| -> Color32 { killfeed_team_color(state, slot) };
     for entry in hud.feed {
         let mut cursor_x = screen.right() - 16.0 * scale;
         let victim = name_of(entry.victim);
@@ -584,13 +580,21 @@ pub fn draw_cs16_hud(ctx: &egui::Context, sprites: Option<&HudSprites>, hud: &Hu
     }
 }
 
+/// Team color for a 1-based killfeed player entity index in `HudState::players`.
+fn killfeed_team_color(state: &HudState, slot: u8) -> Color32 {
+    state
+        .players
+        .get(&slot)
+        .map_or(HUD_AMBER, |p| team_color(&p.team))
+}
+
 /// The weapon sprite of a `DeathMsg` weapon name (`d_<name>` in `hud.txt`).
 fn killfeed_sprite_name(weapon: &str) -> String {
     let w = weapon.to_ascii_lowercase();
     match w.as_str() {
         "mp5" => "d_mp5navy".to_string(),
         "glock" => "d_glock18".to_string(),
-        "grenade" | "hegrenade" => "d_hegrenade".to_string(),
+        "grenade" | "hegrenade" => "d_grenade".to_string(),
         "" => "d_skull".to_string(),
         other => format!("d_{other}"),
     }
@@ -729,7 +733,22 @@ mod tests {
     fn killfeed_names_map_to_hud_sprites() {
         assert_eq!(killfeed_sprite_name("ak47"), "d_ak47");
         assert_eq!(killfeed_sprite_name("mp5"), "d_mp5navy");
-        assert_eq!(killfeed_sprite_name("grenade"), "d_hegrenade");
+        assert_eq!(killfeed_sprite_name("grenade"), "d_grenade");
+        assert_eq!(killfeed_sprite_name("hegrenade"), "d_grenade");
         assert_eq!(killfeed_sprite_name(""), "d_skull");
+    }
+
+    #[test]
+    fn killfeed_team_color_reads_one_based_player_slot() {
+        let mut state = HudState::default();
+        state.players.insert(
+            1,
+            cs_clientcore::hud::PlayerScore {
+                team: "CT".to_string(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(killfeed_team_color(&state, 1), team_color("CT"));
+        assert_eq!(killfeed_team_color(&state, 0), HUD_AMBER);
     }
 }

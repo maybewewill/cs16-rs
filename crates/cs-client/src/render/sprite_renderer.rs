@@ -6,9 +6,6 @@
 //! (`R_GetSpriteFrameInterpolant`), the "sprite lightmap" pass for lit alpha-test sprites,
 //! occlusion of glow sprites by world geometry, and angled frame groups.
 
-// Consumed by the shell in Task 8b.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};

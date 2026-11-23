@@ -38,11 +38,14 @@ impl Camera {
 
     /// The up vector of the view: world up turned about the view direction by the roll.
     fn view_up(&self) -> Vec3 {
-        if self.roll_deg == 0.0 {
-            Vec3::Z
-        } else {
-            glam::Quat::from_axis_angle(self.forward(), (-self.roll_deg).to_radians()) * Vec3::Z
+        if !self.roll_deg.is_finite() || self.roll_deg == 0.0 {
+            return Vec3::Z;
         }
+        let fwd = self.forward();
+        if !fwd.is_finite() || fwd.length_squared() < 1e-6 {
+            return Vec3::Z;
+        }
+        glam::Quat::from_axis_angle(fwd.normalize(), self.roll_deg.to_radians()) * Vec3::Z
     }
 
     pub fn right(&self) -> Vec3 {
@@ -53,8 +56,18 @@ impl Camera {
 
     /// Apply raw mouse delta using exact GoldSrc `sensitivity * m_yaw / m_pitch` degrees per count.
     pub fn apply_mouse_delta(&mut self, dx: f32, dy: f32, sensitivity: f32, m_yaw: f32, m_pitch: f32) {
-        self.yaw_deg = (self.yaw_deg - dx * sensitivity * m_yaw).rem_euclid(360.0);
-        self.pitch_deg = (self.pitch_deg + dy * sensitivity * m_pitch).clamp(-89.0, 89.0);
+        if !(dx.is_finite()
+            && dy.is_finite()
+            && sensitivity.is_finite()
+            && m_yaw.is_finite()
+            && m_pitch.is_finite())
+        {
+            return;
+        }
+        let yaw = if self.yaw_deg.is_finite() { self.yaw_deg } else { 0.0 };
+        let pitch = if self.pitch_deg.is_finite() { self.pitch_deg } else { 0.0 };
+        self.yaw_deg = (yaw - dx * sensitivity * m_yaw).rem_euclid(360.0);
+        self.pitch_deg = (pitch + dy * sensitivity * m_pitch).clamp(-89.0, 89.0);
     }
 
     pub fn view_matrix(&self) -> Mat4 {
@@ -69,13 +82,16 @@ impl Camera {
     /// Compute wgpu-compatible right-handed perspective matrix (`z in [0, 1]`)
     /// using GoldSrc Hor+ FOV (horizontal `fov_deg` at 4:3 -> constant vertical FOV).
     pub fn proj_matrix(&self, viewport_w: f32, viewport_h: f32, fov_deg: f32, aspect_mode: &str) -> Mat4 {
-        let fov_clamped = fov_deg.clamp(10.0, 120.0);
+        let safe_fov = if fov_deg.is_finite() { fov_deg } else { 90.0 };
+        let fov_clamped = safe_fov.clamp(10.0, 120.0);
         // Classic 4:3 vertical FOV corresponding to horizontal fov_default (90 deg -> ~73.74 deg)
         let vfov = 2.0 * ((fov_clamped.to_radians() * 0.5).tan() * (3.0 / 4.0)).atan();
         let aspect = if aspect_mode.eq_ignore_ascii_case("4:3_stretch") {
             4.0 / 3.0
+        } else if viewport_w.is_finite() && viewport_h.is_finite() {
+            (viewport_w.max(1.0) / viewport_h.max(1.0)).max(0.1)
         } else {
-            (viewport_w / viewport_h.max(1.0)).max(0.1)
+            4.0 / 3.0
         };
         perspective_rh_zo(vfov, aspect, 4.0, 16384.0)
     }
@@ -85,8 +101,10 @@ impl Camera {
         let vfov = 2.0 * ((90.0f32.to_radians() * 0.5).tan() * (3.0 / 4.0)).atan();
         let aspect = if aspect_mode.eq_ignore_ascii_case("4:3_stretch") {
             4.0 / 3.0
+        } else if viewport_w.is_finite() && viewport_h.is_finite() {
+            (viewport_w.max(1.0) / viewport_h.max(1.0)).max(0.1)
         } else {
-            (viewport_w / viewport_h.max(1.0)).max(0.1)
+            4.0 / 3.0
         };
         perspective_rh_zo(vfov, aspect, 1.0, 256.0)
     }
@@ -131,5 +149,24 @@ mod tests {
         assert!(ndc.x.abs() < 1e-4);
         assert!(ndc.y.abs() < 1e-4);
         assert!(ndc.z > 0.0 && ndc.z < 1.0);
+    }
+
+    #[test]
+    fn roll_sign_and_non_finite_guards_hold() {
+        let mut cam = Camera {
+            roll_deg: 90.0,
+            ..Camera::default()
+        };
+        let up = cam.view_up();
+        assert!((up - Vec3::new(0.0, -1.0, 0.0)).length() < 1e-5, "{up:?}");
+
+        cam.apply_mouse_delta(f32::NAN, 10.0, 3.0, 0.022, 0.022);
+        assert!(cam.yaw_deg.is_finite() && cam.pitch_deg.is_finite());
+
+        cam.roll_deg = f32::NAN;
+        assert_eq!(cam.view_up(), Vec3::Z);
+        let vm = cam.view_matrix();
+        let pm = cam.proj_matrix(f32::NAN, 800.0, f32::NAN, "widescreen");
+        assert!(vm.is_finite() && pm.is_finite());
     }
 }

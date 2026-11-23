@@ -25,6 +25,7 @@ pub use commands::{CMD_FILTERABLE, CMD_PRIVILEGED, CMD_STUFFTEXT_OK, CommandRegi
 pub use connection::{
     CONSISTENCY_REASON, ConnState, ConnStats, Connection, ConnectionConfig, ConsistencyPolicy,
     DatagramTap, MAX_CMDRATE, MESSAGE_LOG_CAPACITY, MIN_CMDRATE, NO_SERVERINFO_REASON,
+    ViewAngleUpdate,
 };
 pub use cvars::{ClientCvars, Cvar};
 pub use entities::{ClientEntity, EntityStore, ModelKind};

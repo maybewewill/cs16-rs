@@ -129,7 +129,9 @@ pub struct ViewmodelView {
     pub body: i32,
     /// Client time the sequence started.
     pub animtime: f32,
-    pub flip: bool,
+    /// Mirrors the viewmodel for right-handed display (`cl_righthand`); CS 1.6 `v_*.mdl`
+    /// models are authored left-handed.
+    pub right_hand: bool,
 }
 
 /// Counts of what a frame holds, for the net graph and the tests.
@@ -224,6 +226,17 @@ impl ViewBuilder {
     /// The shared model names a [`MapFxWorld`] reads.
     pub fn names(&self) -> Rc<RefCell<BTreeMap<u16, String>>> {
         Rc::clone(&self.names)
+    }
+
+    /// Drops per-map scene state on map change (`changelevel`).
+    pub fn reset_map(&mut self) {
+        self.beams.clear();
+        self.glows.clear();
+        self.client_models.clear();
+        self.anim = None;
+        self.last_weaponanim = -1;
+        self.last_viewmodel = -1;
+        self.models_key = 0;
     }
 
     /// The submodel bounds of the loaded map, for the translucent sort centres.
@@ -327,7 +340,7 @@ impl ViewBuilder {
         let local_number = slot.map(|s| u16::from(s) + 1);
         // The predicted player (the server's origin while the map's collision is not set).
         let prediction = conn.predictor().prediction().clone();
-        let (eye, punch, mut fov, alive, weaponanim, viewmodel_index) = match &cd {
+        let (mut eye, mut punch, mut fov, alive, weaponanim, viewmodel_index) = match &cd {
             Some(cd) => (
                 if prediction.predicted {
                     prediction.simorg + prediction.viewheight
@@ -346,8 +359,19 @@ impl ViewBuilder {
             ),
             None => (Vec3::ZERO, Vec3::ZERO, 0.0, false, 0, 0),
         };
-        if !(10.0..=120.0).contains(&fov) {
-            fov = inputs.default_fov;
+        if !eye.is_finite() {
+            eye = Vec3::ZERO;
+        }
+        if !punch.is_finite() {
+            punch = Vec3::ZERO;
+        }
+        let fallback_fov = if inputs.default_fov.is_finite() {
+            inputs.default_fov.clamp(10.0, 120.0)
+        } else {
+            90.0
+        };
+        if !fov.is_finite() || !(10.0..=120.0).contains(&fov) {
+            fov = fallback_fov;
         }
 
         let emitted = conn.frames_mut().emit(&EmitInputs {
@@ -421,7 +445,7 @@ impl ViewBuilder {
         self.glows.drain(..overflow);
 
         self.update_view_anim(conn.fx_mut(), &fired, weaponanim, viewmodel_index, time);
-        let viewmodel = self.viewmodel(conn, alive, viewmodel_index, inputs);
+        let viewmodel = self.viewmodel(conn, alive, fov, viewmodel_index, inputs);
 
         let beams: Vec<FxBeam> = self
             .beams
@@ -484,7 +508,7 @@ impl ViewBuilder {
         r.frame = e.frame;
         r.sequence = i32::from(e.sequence);
         r.animtime = s.animtime;
-        r.framerate = if s.framerate == 0.0 { 1.0 } else { s.framerate };
+        r.framerate = s.framerate;
         r.skin = i32::from(s.skin);
         r.body = i32::from(s.body);
         r.effects = s.effects;
@@ -509,6 +533,7 @@ impl ViewBuilder {
         let mut r = RenderEntity::new(index.wrapping_add(4096), model, t.origin);
         r.angles = t.angles;
         r.frame = t.frame;
+        r.animtime = t.born as f32;
         r.framerate = t.framerate;
         r.body = t.body as i32;
         r.rendermode = EntRenderMode::from_raw(match t.render_mode {
@@ -656,10 +681,12 @@ impl ViewBuilder {
         &self,
         conn: &Connection<T>,
         alive: bool,
+        fov: f32,
         viewmodel_index: i32,
         inputs: &ViewInputs,
     ) -> Option<ViewmodelView> {
-        if !alive || !inputs.draw_viewmodel || viewmodel_index <= 0 {
+        // Hide the viewmodel at sniper scope zoom tiers (<= 40 deg), keeping AUG/SG552 (55 deg).
+        if !alive || !inputs.draw_viewmodel || viewmodel_index <= 0 || fov <= 40.0 {
             return None;
         }
         let path = conn.precache().model(u16::try_from(viewmodel_index).ok()?)?;
@@ -676,8 +703,7 @@ impl ViewBuilder {
             sequence: anim.sequence,
             body: anim.body,
             animtime: anim.started,
-            // The view models are authored for the right hand.
-            flip: !inputs.right_hand,
+            right_hand: inputs.right_hand,
         })
     }
 }

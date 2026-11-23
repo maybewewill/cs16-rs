@@ -557,6 +557,13 @@ impl HudState {
                         });
                     }
                 }
+                if self
+                    .menu
+                    .as_ref()
+                    .is_some_and(|m| !m.multipart && (m.keys == 0 || m.text.is_empty()))
+                {
+                    self.menu = None;
+                }
             }
             CsUserMsg::VguiMenu {
                 menu_id,
@@ -1402,5 +1409,51 @@ mod tests {
             0.0,
         );
         assert!(h.current_weapon.is_none());
+    }
+
+    #[test]
+    fn reset_menu_clears_open_menu_while_multipart_prefix_stays_open() {
+        let mut h = HudState::default();
+        h.handle(
+            &um(
+                "ShowMenu",
+                CsUserMsg::ShowMenu {
+                    keys_bitmask: 0b11,
+                    display_time: 10,
+                    multipart: false,
+                    text: "1. CT\n2. T\n".to_string(),
+                },
+            ),
+            0.0,
+        );
+        assert!(h.menu.is_some());
+
+        h.handle(
+            &um(
+                "ShowMenu",
+                CsUserMsg::ShowMenu {
+                    keys_bitmask: 0,
+                    display_time: 0,
+                    multipart: false,
+                    text: String::new(),
+                },
+            ),
+            0.0,
+        );
+        assert!(h.menu.is_none());
+
+        h.handle(
+            &um(
+                "ShowMenu",
+                CsUserMsg::ShowMenu {
+                    keys_bitmask: 0b11,
+                    display_time: 10,
+                    multipart: true,
+                    text: String::new(),
+                },
+            ),
+            0.0,
+        );
+        assert!(h.menu.as_ref().is_some_and(|m| m.multipart));
     }
 }

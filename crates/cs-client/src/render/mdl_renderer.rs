@@ -83,8 +83,9 @@ pub fn studio_frame(
             f += span;
         }
     } else {
-        if f >= span - 1.001 {
-            f = span - 1.001;
+        let max_f = (span - 0.001).max(0.0);
+        if f >= max_f {
+            f = max_f;
         }
         if f < 0.0 {
             f = 0.0;
@@ -639,10 +640,15 @@ mod tests {
         assert_eq!(studio_frame(128.0, 10.0, 1.0, 10.0, 30.0, 41, false), 20.0);
         // one second at fps 30 advances 30 frames: 20 + 30 = 50 wraps modulo 40 -> 10.
         assert_eq!(studio_frame(128.0, 10.0, 1.0, 11.0, 30.0, 41, true), 10.0);
-        // non-looping clamps to numframes - 1.001.
+        // non-looping clamps to numframes - 1.001 (span - 0.001).
         assert_eq!(
             studio_frame(128.0, 10.0, 1.0, 11.0, 30.0, 41, false),
-            (40.0f64 - 1.001) as f32
+            (40.0f64 - 0.001) as f32
+        );
+        // 2-frame non-looping sequence advances past frame 0 to 1 - 0.001.
+        assert_eq!(
+            studio_frame(0.0, 10.0, 1.0, 11.0, 30.0, 2, false),
+            (1.0f64 - 0.001) as f32
         );
         // framerate 0 freezes the animation at the scaled frame byte.
         assert_eq!(studio_frame(64.0, 10.0, 0.0, 15.0, 30.0, 41, true), 10.0);

@@ -13,9 +13,6 @@
 //! `R_DrawBrushModel`), `ref/gl/gl_sprite.c` (`R_DrawSpriteModel`, `R_SpriteGlowBlend`).
 //! The Valve HLSDK is read-for-behaviour only and nothing is ported from it.
 
-// The shell (Task 8b) is the consumer of this API; until it lands only the tests use parts of it.
-#![allow(dead_code)]
-
 use cs_assets::spr::SpriteType;
 use glam::{Mat4, Vec3, Vec4};
 
@@ -30,9 +27,13 @@ pub const RENDERFX_PULSE_SLOW: u8 = 1;
 pub const RENDERFX_PULSE_FAST: u8 = 2;
 pub const RENDERFX_PULSE_SLOW_WIDE: u8 = 3;
 pub const RENDERFX_PULSE_FAST_WIDE: u8 = 4;
+#[allow(dead_code)]
 pub const RENDERFX_FADE_SLOW: u8 = 5;
+#[allow(dead_code)]
 pub const RENDERFX_FADE_FAST: u8 = 6;
+#[allow(dead_code)]
 pub const RENDERFX_SOLID_SLOW: u8 = 7;
+#[allow(dead_code)]
 pub const RENDERFX_SOLID_FAST: u8 = 8;
 pub const RENDERFX_STROBE_SLOW: u8 = 9;
 pub const RENDERFX_STROBE_FAST: u8 = 10;
@@ -216,6 +217,7 @@ impl ModelRegistry {
         self.entries.get(handle.0 as usize).and_then(|e| e.as_ref())
     }
 
+    #[allow(dead_code)]
     pub fn iter(&self) -> impl Iterator<Item = (ModelHandle, &ModelEntry)> {
         self.entries
             .iter()
@@ -538,8 +540,11 @@ pub struct StudioDraw {
     pub animtime: f32,
     pub framerate: f32,
     pub body: i32,
+    #[allow(dead_code)]
     pub skin: i32,
+    #[allow(dead_code)]
     pub mode: EntRenderMode,
+    #[allow(dead_code)]
     pub blend: f32,
     pub attached: Option<ModelHandle>,
 }
