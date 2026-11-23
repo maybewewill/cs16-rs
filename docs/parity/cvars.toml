@@ -14,6 +14,7 @@ status = "implemented"
 [[item]]
 id = "bot_quota"
 status = "implemented"
+evidence = "crates/cs-game/src/bots.rs (enable_cvar_bot_quota on cs-server --proto48 --bots N; quota maintenance loop); crates/cs-server/src/proto48.rs::tests::vanilla_round_time asserts vanilla default 0"
 
 [[item]]
 id = "brightness"
@@ -109,7 +110,8 @@ evidence = "crates/cs-game/tests/buy.rs::buy_time_expires"
 
 [[item]]
 id = "mp_c4timer"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-game/tests/bomb.rs::c4_beeps_blinks_and_detonates_at_c4timer (clamped 10..90); crates/cs-game/tests/objective_rounds.rs::bomb_exploded_wins_for_terrorists, time_up_on_a_bomb_map_is_target_saved"
 
 [[item]]
 id = "mp_footsteps"
@@ -1868,8 +1870,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.
 
 [[item]]
 id = "mp_hostagepenalty"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "implemented"
+evidence = "registered in crates/cs-cvar/src/defaults.rs; enforced in crates/cs-game/src/hostage.rs::apply_hostage_penalty (#Hint_removed_for_next_hostage_killed warning and eng.kick after exceeding penalty; not yet covered by a dedicated penalty-threshold test)"
 
 [[item]]
 id = "mp_infinite_ammo"

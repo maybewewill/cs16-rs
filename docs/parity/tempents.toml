@@ -37,7 +37,7 @@ evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, c
 [[item]]
 id = "TE_SMOKE"
 status = "tested"
-evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; builder tempent::smoke; the grenade's smoke puff: crates/cs-game/tests/grenades.rs::grenade_bounces_and_detonates_on_time, smoke_puffs_events"
+evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; builder tempent::smoke; grenade/C4 post-blast smoke puffs: crates/cs-game/tests/grenades.rs::grenade_bounces_and_detonates_on_time, smoke_puffs_events and crates/cs-game/tests/bomb.rs::c4_beeps_blinks_and_detonates_at_c4timer"
 
 [[item]]
 id = "TE_TRACER"
@@ -57,7 +57,7 @@ evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, c
 [[item]]
 id = "TE_SPARKS"
 status = "tested"
-evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; builder tempent::sparks; sent for a bullet hitting a breakable/metal: crates/cs-game/src/bullets.rs (no game test asserts the choice)"
+evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; builder tempent::sparks; sent for bullet/glass impacts (crates/cs-game/src/bullets.rs) and spark_shower C4/explosion sparks (crates/cs-game/src/grenade.rs)"
 
 [[item]]
 id = "TE_LAVASPLASH"
@@ -91,8 +91,8 @@ evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, c
 
 [[item]]
 id = "TE_SPRITE"
-status = "missing"
-evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+status = "tested"
+evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; builder tempent::sprite (crates/cs-proto48/src/tempent.rs); 4 C4 explosion fireballs in CGrenade::Explode2 verified by crates/cs-game/tests/bomb.rs::c4_beeps_blinks_and_detonates_at_c4timer"
 
 [[item]]
 id = "TE_BEAMSPRITE"
@@ -121,8 +121,8 @@ evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layou
 
 [[item]]
 id = "TE_GLOWSPRITE"
-status = "missing"
-evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
+status = "tested"
+evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; builder tempent::glow_sprite (crates/cs-proto48/src/tempent.rs); planted C4 LED blink in crates/cs-game/tests/bomb.rs::c4_beeps_blinks_and_detonates_at_c4timer"
 
 [[item]]
 id = "TE_BEAMRING"

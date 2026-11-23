@@ -1,21 +1,21 @@
 # Bot AI, navigation mesh (.nav), and CZ/ZBot behavior parity (weight 4).
-# Legacy cs-sim/src/bots.rs has a basic grid NavGraph and simple offline AI;
-# Phase 2E connects minimal bots to cs-engine fake clients, while full ZBot parity is Phase 12.
+# Phase 2E connected minimal NavGraph bots to cs-engine fake clients (crates/cs-game/src/bots.rs)
+# for basic combat and objective play (plant, defuse, hostage rescue); full ZBot / .nav parity is Phase 12.
 
 [[item]]
 id = "bot_legacy_sim_brain"
-status = "implemented"
-evidence = "crates/cs-sim/src/bots.rs (legacy offline NavGraph and think_bot AI used by MatchWorld, not yet wired to cs-engine fake clients)"
+status = "tested"
+evidence = "crates/cs-sim/src/bots.rs (directed NavGraph with ceiling-safe stair climb and think_bot_with AI used by MatchWorld and cs-game engine bots); tested in crates/cs-game/tests/bots.rs::bots_move_and_shoot_an_enemy, a_round_with_bots_ends and crates/cs-game/tests/full_round.rs::*"
 
 [[item]]
 id = "bot_engine_fake_client_bridge"
-status = "missing"
-evidence = "Phase 2E: cs-game bot driver using EngineApi fake clients and run_player_move"
+status = "tested"
+evidence = "crates/cs-game/tests/bots.rs::bot_add_joins_a_team_and_spawns, bots_move_and_shoot_an_enemy, bots_buy_at_round_start, bot_kick_frees_the_slot, a_round_with_bots_ends (cs-game bot driver using EngineApi::create_fake_client and run_player_move, 30 Hz command/10 Hz think pacing, IsBot rules branches)"
 
 [[item]]
 id = "bot_add_kick_quota_commands"
-status = "missing"
-evidence = "Phase 2E / 12: bot_add, bot_add_t, bot_add_ct, bot_kick, bot_quota, bot_quota_match on cs-engine/cs-game"
+status = "tested"
+evidence = "crates/cs-game/tests/bots.rs::bot_add_joins_a_team_and_spawns, bot_kick_frees_the_slot (bot_add, bot_add_t, bot_add_ct, bot_kick implemented and tested); bot_quota maintenance wired in crates/cs-game/src/bots.rs and cs-server --proto48 --bots (crates/cs-server/src/proto48.rs::tests::vanilla_round_time); bot_quota_match and ZBot subcommands remain Phase 12"
 
 [[item]]
 id = "bot_navmesh_generation"
@@ -50,17 +50,17 @@ evidence = "Phase 12: Easy/Normal/Hard/Expert reaction time, aggression, teamwor
 [[item]]
 id = "bot_buy_economy_and_loadouts"
 status = "missing"
-evidence = "Phase 12: economy-aware save/eco/force/full-buy decisions and weapon preferences"
+evidence = "Phase 2E has fixed round-start alias buying (crates/cs-game/tests/bots.rs::bots_buy_at_round_start); Phase 12: economy-aware save/eco/force/full-buy decisions and weapon preferences"
 
 [[item]]
 id = "bot_pathfinding_stairs_ladders_doors"
 status = "missing"
-evidence = "Phase 12: A* pathfinding across nav areas, ladders, crouch passages, jumps, and func_door/func_breakable obstacles"
+evidence = "Phase 2E directed NavGraph adds ceiling-safe stair climb and doorway traces; Phase 12: A* pathfinding across nav areas, ladders, crouch passages, jumps, and func_door/func_breakable obstacles"
 
 [[item]]
 id = "bot_combat_aim_burst_recoil"
 status = "missing"
-evidence = "Phase 12: weapon-aware engagement distance, burst control, sniper zoom, knife/grenade usage, and recoil compensation"
+evidence = "Phase 2E has minimal LOS aim/fire in cs_sim::bots (crates/cs-game/tests/bots.rs::bots_move_and_shoot_an_enemy); Phase 12: weapon-aware engagement distance, burst control, sniper zoom, knife/grenade usage, and recoil compensation"
 
 [[item]]
 id = "bot_cover_and_hiding_spots"
@@ -74,18 +74,18 @@ evidence = "Phase 12: sniper/defensive camping and ambush spots"
 
 [[item]]
 id = "bot_bomb_plant_and_guard"
-status = "missing"
-evidence = "Phase 2E (basic) / Phase 12 (full): Terrorist bomb carrier pathing to bombsites, planting, and post-plant defense"
+status = "tested"
+evidence = "crates/cs-game/tests/full_round.rs::a_bot_plants_and_the_bomb_explodes_on_de_dust2 (Phase 2E NavGraph carrier pathing to func_bomb_target and arming C4; full ZBot post-plant site guarding remains Phase 12)"
 
 [[item]]
 id = "bot_bomb_search_and_defuse"
-status = "missing"
-evidence = "Phase 2E (basic) / Phase 12 (full): CT bombsite checking, covering defuser, and defusing C4"
+status = "tested"
+evidence = "crates/cs-game/tests/full_round.rs::a_bot_defuses_a_planted_bomb (Phase 2E CT pathing to live planted C4, slow approach and +use defusal; full ZBot multi-site checking and cover remain Phase 12)"
 
 [[item]]
 id = "bot_hostage_rescue_and_guard"
-status = "missing"
-evidence = "Phase 2E (basic) / Phase 12 (full): CT hostage escorting to rescue zones and T hostage guarding"
+status = "tested"
+evidence = "crates/cs-game/tests/full_round.rs::a_bot_rescues_a_hostage_on_cs_office (Phase 2E CT pathing to hostage, +use follow pulse and escort to rescue zone; full ZBot T hostage guarding remains Phase 12)"
 
 [[item]]
 id = "bot_vip_escort_and_assassination"

@@ -48,7 +48,8 @@ status = "implemented"
 
 [[item]]
 id = "TextMsg"
-status = "implemented"
+status = "verified"
+evidence = "crates/cs-game/tests/bomb.rs::cannot_plant_outside_bomb_zone_or_in_air, planting_freezes_progresses_and_plants_after_three_seconds, releasing_attack_or_leaving_zone_cancels_plant; crates/cs-game/tests/objective_rounds.rs::*; crates/cs-game/tests/vip_escape.rs::*; VERIFIED 2026-11-22/2026-11-23, method 2 (live HLDS build 10210 vs cs-server --proto48: `#Game_connected`, `#Game_join_terrorist`/`#Game_join_ct`, `#Game_scoring`, and `#Game_bomb_drop` on de_dust2 match; docs/parity/checklists/phase2d-weapons.md V7, V8 and docs/parity/checklists/phase2e-objectives.md E1-E3)"
 
 [[item]]
 id = "WeaponList"
@@ -81,7 +82,7 @@ evidence = "crates/cs-proto48/src/usermsg.rs::tests::cs_usermsgs_roundtrip_clean
 [[item]]
 id = "ScoreAttrib"
 status = "verified"
-evidence = "VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; the message is in the join, jointeam and joinclass sequences, which match the original message by message apart from HealthInfo, Account and ReqState (values that depend on the clock or the random spawn point are not compared); docs/parity/checklists/phase2d-weapons.md V8)"
+evidence = "crates/cs-game/tests/bomb_carrier.rs::the_carrier_has_the_bomb_attrib_and_icon; crates/cs-game/tests/vip_escape.rs::a_vip_is_picked_and_equipped; VERIFIED 2026-11-22 and 2026-11-23, method 2 (golden capture diff: cs-probe --diff of original HLDS build 10210 against cs-server --proto48: dead bit 1 on join, alive bit 0, SCORE_STATUS_BOMB bit 2 on de_dust2 carrier + cleared on drop, SCORE_STATUS_VIP bit 4 on as_oilrig VIP; docs/parity/checklists/phase2d-weapons.md V8 and docs/parity/checklists/phase2e-objectives.md E1-E3)"
 
 [[item]]
 id = "ScoreInfo"
@@ -156,7 +157,8 @@ evidence = "crates/cs-game/tests/inventory.rs::buy_drop_pickup_as_regamedll, wea
 
 [[item]]
 id = "SendAudio"
-status = "implemented"
+status = "verified"
+evidence = "crates/cs-game/tests/hud_misc.rs::radio_reaches_the_team_with_sound; crates/cs-game/tests/objective_rounds.rs::bomb_exploded_wins_for_terrorists, bomb_defused_wins_for_cts, all_hostages_rescued_wins_for_cts; crates/cs-game/tests/vip_escape.rs::vip_escape_ends_the_round, vip_killed_rewards_the_killer; VERIFIED 2026-11-23, method 2 (live HLDS build 10210 vs cs-server --proto48: cs_office `%!MRAD_MOVEOUT`, as_oilrig `%!MRAD_VIP` with pitch=100; docs/parity/checklists/phase2e-objectives.md E1, E3)"
 
 [[item]]
 id = "RoundTime"
@@ -186,8 +188,8 @@ status = "missing"
 
 [[item]]
 id = "StatusIcon"
-status = "tested"
-evidence = "crates/cs-proto48/src/usermsg.rs::tests::cs_usermsgs_roundtrip_cleanly"
+status = "verified"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::cs_usermsgs_roundtrip_cleanly; crates/cs-game/tests/zones.rs::zones_raise_their_signals_and_icons; crates/cs-game/tests/bomb_carrier.rs::the_carrier_has_the_bomb_attrib_and_icon; VERIFIED 2026-11-23, method 2 (live HLDS build 10210 vs cs-server --proto48: `defuser`/`c4`/`buyzone`/`rescue` icons on cs_office and `c4` on/off on de_dust2 T spawn + drop weapon_c4; docs/parity/checklists/phase2e-objectives.md E1, E2)"
 
 [[item]]
 id = "BarTime"
@@ -228,11 +230,13 @@ status = "missing"
 
 [[item]]
 id = "BombDrop"
-status = "implemented"
+status = "verified"
+evidence = "crates/cs-game/tests/bomb.rs::planting_freezes_progresses_and_plants_after_three_seconds; crates/cs-game/tests/bomb_carrier.rs::dropping_the_bomb_sends_bomb_drop, a_dead_carrier_drops_the_backpack, init_hud_shows_a_dropped_bomb; VERIFIED 2026-11-23, method 2 (live HLDS build 10210 vs cs-server --proto48 on de_dust2: drop weapon_c4 sends immediate BombDrop(-832, -704, 164, planted=false) then 1 Hz resting BombDrop(-704, -704, 128, planted=false); docs/parity/checklists/phase2e-objectives.md E2)"
 
 [[item]]
 id = "BombPickup"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-game/tests/bomb_carrier.rs::only_terrorists_pick_up_the_bomb; crates/cs-game/tests/bomb.rs::c4_beeps_blinks_and_detonates_at_c4timer; crates/cs-game/tests/objective_rounds.rs::give_c4_rotates"
 
 [[item]]
 id = "ClCorpse"
@@ -241,11 +245,13 @@ evidence = "crates/cs-proto48/src/usermsg.rs::tests::clcorpse_roundtrips"
 
 [[item]]
 id = "HostagePos"
-status = "implemented"
+status = "verified"
+evidence = "crates/cs-game/tests/hostages.rs::cs_office_hostages_spawn_as_hlds; VERIFIED 2026-11-23, method 2 (live HLDS build 10210 vs cs-server --proto48 on cs_office: HostagePos flag=1 for hostage_id=1..4 at exact spawn coordinates sent on both InitHUD and CT spawn; docs/parity/checklists/phase2e-objectives.md E1)"
 
 [[item]]
 id = "HostageK"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-game/tests/hostages.rs::killing_a_hostage_costs_money_and_sends_hostage_k, rescue_in_the_zone_pays_the_rescuer"
 
 [[item]]
 id = "HLTV"
@@ -277,7 +283,8 @@ status = "missing"
 
 [[item]]
 id = "Scenario"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::cs_usermsgs_roundtrip_cleanly; crates/cs-game/tests/bomb.rs::c4_beeps_blinks_and_detonates_at_c4timer (active bomb ticking sprite/flash and clear on detonation/defuse)"
 
 [[item]]
 id = "BotVoice"
@@ -293,11 +300,13 @@ status = "missing"
 
 [[item]]
 id = "BarTime2"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::cs_usermsgs_roundtrip_cleanly; crates/cs-game/src/player.rs::set_progress_bar_time2 (wire codec tested; observer resume caller not yet wired)"
 
 [[item]]
 id = "ItemStatus"
-status = "implemented"
+status = "verified"
+evidence = "crates/cs-game/tests/bomb_carrier.rs::defuser_purchase_as_regamedll, defuser_drops_at_death; crates/cs-game/tests/buy.rs::shield_and_defuser_are_not_for_sale_yet (`ItemStatus(2)` defuser bit); VERIFIED 2026-11-23, method 2 (live HLDS build 10210 vs cs-server --proto48: `ItemStatus(0)` emitted in InitHUD and spawn on de_dust2, cs_office, and as_oilrig; docs/parity/checklists/phase2e-objectives.md E1-E3)"
 
 [[item]]
 id = "Location"
@@ -313,7 +322,8 @@ status = "missing"
 
 [[item]]
 id = "ShowTimer"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-game/tests/objective_rounds.rs::give_c4_rotates (sent at round restart on bomb maps); crates/cs-game/tests/hud.rs::init_hud_sequence_as_regamedll (omitted at initial HUD setup)"
 
 [[item]]
 id = "HudTextArgs"

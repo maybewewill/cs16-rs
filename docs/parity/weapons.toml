@@ -1,11 +1,11 @@
-# Weapons, items and economy of cs-game, phase 2D (ReGameDLL_CS vanilla `mp.dll` behaviour), weight 10.
+# Weapons, items and economy of cs-game, phases 2D-2E (ReGameDLL_CS vanilla `mp.dll` behaviour), weight 10.
 # `tested` = a named test asserts the item against the ReGameDLL_CS / ReHLDS source (master, read
-# 2026-11-22); `implemented` = the code is there and no cited test would fail if it broke;
-# `verified` = compared with the original game (Steam CS 1.6 build 10210) on 2026-11-22, the method and
-# the line in docs/parity/checklists/phase2d-weapons.md named in the evidence. A weapon's firing
-# behaviour is never `verified` here: the original client has not shot with our server yet (rows 1 to 20
-# of the checklist are the owner's). Every item that is not `tested` or better carries its known gap.
-# Shield, C4/bomb (2E), VIP, bots and autobuy/rebuy are not ported and are listed as `missing`.
+# 2026-11-22 / 2026-11-23); `implemented` = the code is there and no cited test would fail if it broke;
+# `verified` = compared with the original game (Steam CS 1.6 build 10210) on 2026-11-22 / 2026-11-23,
+# naming the method and checklist row (`docs/parity/checklists/phase2d-weapons.md` or
+# `phase2e-objectives.md`). Live weapon firing is still unchecked on the original client (rows 1 to 20
+# of phase2d-weapons.md). Shield, autobuy/rebuy and game_player_equip are not ported (`missing`);
+# C4/bomb, defuser, VIP and minimal engine bots landed in phase 2E (`tested`, with partial HLDS diffs).
 
 [[item]]
 id = "weapon_tables"
@@ -240,7 +240,7 @@ evidence = "crates/cs-game/tests/grenades.rs::grenade_bounces_and_detonates_on_t
 [[item]]
 id = "grenade_blast_damage"
 status = "tested"
-evidence = "crates/cs-game/tests/grenades.rs::he_radius_damage_as_regamedll, he_blast_is_the_throwers_kill_and_reaches_350_units, friendly_fire_off_spares_a_teammate_but_not_the_thrower, a_grenade_keeps_the_team_of_the_thrower_for_friendly_fire. Known gap: RadiusDamage2 (the bomb's) is not ported (2E)"
+evidence = "crates/cs-game/tests/grenades.rs::he_radius_damage_as_regamedll, he_blast_is_the_throwers_kill_and_reaches_350_units, friendly_fire_off_spares_a_teammate_but_not_the_thrower, a_grenade_keeps_the_team_of_the_thrower_for_friendly_fire; crates/cs-game/tests/entity_use_damage.rs::radius_damage_reaches_entities, radius_damage2_caps_the_damage, radius_damage2_with_an_inflictor_pushes_through_the_trace; crates/cs-game/tests/bomb.rs::bomb_explosion_uses_map_radius_times_three_point_five (RadiusDamage2 ported in Phase 2E)"
 
 [[item]]
 id = "grenade_flash_blind"
@@ -285,7 +285,7 @@ evidence = "crates/cs-game/tests/inventory.rs::buy_drop_pickup_as_regamedll, hos
 [[item]]
 id = "weapon_weaponbox"
 status = "tested"
-evidence = "crates/cs-game/tests/inventory.rs::death_packs_a_weaponbox, a_dead_players_ammo_is_in_the_box_and_comes_back_with_it, a_weapon_box_removes_itself_at_the_end_of_its_life, a_second_weapon_of_a_class_gives_its_ammo_to_the_first. Known gap: the pickup is checked from a 0.1 s think (no absolute-box touch hook in the engine); C4 pickup is 2E"
+evidence = "crates/cs-game/tests/inventory.rs::death_packs_a_weaponbox, a_dead_players_ammo_is_in_the_box_and_comes_back_with_it, a_weapon_box_removes_itself_at_the_end_of_its_life, a_second_weapon_of_a_class_gives_its_ammo_to_the_first; crates/cs-game/tests/bomb_carrier.rs::dropping_the_bomb_sends_bomb_drop, a_dead_carrier_drops_the_backpack, only_terrorists_pick_up_the_bomb (C4 backpack CWeaponBox::BombThink 1 Hz BombDrop and T-only pickup, Phase 2E). Partial live HLDS check on de_dust2 (drop weapon_c4 -> immediate + 1 Hz BombDrop at exact floor coords), docs/parity/checklists/phase2e-objectives.md E2."
 
 [[item]]
 id = "weapon_armoury"
@@ -339,18 +339,18 @@ evidence = "Not ported: the tactical shield (its models, the shield states of th
 
 [[item]]
 id = "weapon_c4_bomb"
-status = "missing"
-evidence = "Phase 2E: the C4 (wpn_c4.cpp), planting, defusing, the bomb weaponbox, BarTime/BarTime2, RadiusDamage2. A world C4 is touchable: crates/cs-game/tests/inventory.rs::a_world_c4_is_touchable_and_a_world_grenade_is_not (the pickup itself is 2E)"
+status = "tested"
+evidence = "crates/cs-game/tests/bomb.rs::cannot_plant_outside_bomb_zone_or_in_air, planting_freezes_progresses_and_plants_after_three_seconds, releasing_attack_or_leaving_zone_cancels_plant, c4_beeps_blinks_and_detonates_at_c4timer, bomb_explosion_uses_map_radius_times_three_point_five, ct_defuses_in_ten_or_five_seconds_and_t_cannot, bomb_in_water_vanishes_without_exploding; crates/cs-game/tests/objective_rounds.rs::bomb_exploded_wins_for_terrorists, bomb_defused_wins_for_cts; crates/cs-game/tests/inventory.rs::a_world_c4_is_touchable_and_a_world_grenade_is_not (wpn_c4.cpp, ggrenade.cpp C4Think/DefuseBombStart/DefuseBombEnd/Explode2, combat.cpp RadiusDamage2). Partial live HLDS check on de_dust2 (T spawn C4 + drop weapon_c4 -> StatusIcon/ScoreAttrib/TextMsg/BombDrop), docs/parity/checklists/phase2e-objectives.md E2"
 
 [[item]]
 id = "weapon_vip"
-status = "missing"
-evidence = "Phase 2E: the VIP (jointeam 3, its weapon rules, armor ratio halving, the VIP spawn)"
+status = "tested"
+evidence = "crates/cs-game/tests/vip_escape.rs::a_vip_is_picked_and_equipped, the_vip_cannot_buy, vip_escape_ends_the_round, vip_killed_rewards_the_killer, as_oilrig_loads_and_picks_a_vip (jointeam 3 / become_vip queue, model vip, 200 armor, 227 maxspeed, USP+knife only, no buy, as_ buy menu restrictions, half armor ratio, REWARD_KILLED_VIP). Partial live HLDS check on as_oilrig (VIP join sequence & spawn), docs/parity/checklists/phase2e-objectives.md E3"
 
 [[item]]
 id = "weapon_bots"
-status = "missing"
-evidence = "Bots are not ported (their buy logic, the bot events and sounds); the bot-only hooks of the weapon code are skipped"
+status = "tested"
+evidence = "crates/cs-game/tests/bots.rs::bot_add_joins_a_team_and_spawns, bots_move_and_shoot_an_enemy, bots_buy_at_round_start, bot_kick_frees_the_slot, a_round_with_bots_ends; crates/cs-game/tests/full_round.rs::a_bot_plants_and_the_bomb_explodes_on_de_dust2, a_bot_defuses_a_planted_bomb, a_bot_rescues_a_hostage_on_cs_office (Phase 2E engine fake-client bots buying via aliases, shooting, and playing C4/hostage objectives; full ZBot/Radio/Chatter hooks remain Phase 12)"
 
 [[item]]
 id = "weapon_autobuy_rebuy"
@@ -394,13 +394,13 @@ evidence = "crates/cs-game/tests/weapon_core.rs::a_shotgun_clicks_once_when_fire
 
 [[item]]
 id = "weapon_defuser"
-status = "missing"
-evidence = "Phase 2E: CT defuse kit (item_thighpack, purchase, body flag, drop on death, 5s vs 10s defuse)"
+status = "tested"
+evidence = "crates/cs-game/tests/bomb_carrier.rs::defuser_purchase_as_regamedll, defuser_drops_at_death; crates/cs-game/tests/buy.rs::shield_and_defuser_are_not_for_sale_yet; crates/cs-game/tests/bomb.rs::ct_defuses_in_ten_or_five_seconds_and_t_cannot (item_thighpack purchase $200, ItemStatus 2, body flag, drop on death, 5s vs 10s defuse)"
 
 [[item]]
 id = "weapon_c4_carrier_drop_pickup"
-status = "missing"
-evidence = "Phase 2E: GiveC4 rotation, carrying C4, manual drop, death backpack weaponbox, BombDrop/BombPickup"
+status = "tested"
+evidence = "crates/cs-game/tests/bomb_carrier.rs::the_carrier_has_the_bomb_attrib_and_icon, dropping_the_bomb_sends_bomb_drop, a_dead_carrier_drops_the_backpack, only_terrorists_pick_up_the_bomb, init_hud_shows_a_dropped_bomb; crates/cs-game/tests/objective_rounds.rs::give_c4_rotates (GiveC4 rotation, carrying C4, manual drop, death backpack weaponbox, BombDrop/BombPickup). Partial live HLDS check on de_dust2 (spawn C4 + drop weapon_c4 -> immediate and 1 Hz BombDrop at resting floor), docs/parity/checklists/phase2e-objectives.md E2"
 
 [[item]]
 id = "weapon_shield_pistol_knife_grenade_variants"
