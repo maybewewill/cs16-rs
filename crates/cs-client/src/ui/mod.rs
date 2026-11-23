@@ -1,12 +1,12 @@
-//! VGUI2 UI orchestrator plus classic in-game HUD, Buy Menu, Scoreboard, Team Select, crosshair, and `net_graph`.
+//! VGUI2 UI orchestrator plus the in-game HUD, the scoreboard, the server menus, the crosshair and `net_graph`.
 
-pub mod buy_menu;
+pub mod chat;
 pub mod console;
 pub mod hud;
 pub mod main_menu;
 pub mod options;
 pub mod scoreboard;
-pub mod team_menu;
+pub mod server_menu;
 pub mod vgui_assets;
 pub mod vgui_theme;
 

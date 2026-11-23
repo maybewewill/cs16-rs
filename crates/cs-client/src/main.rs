@@ -3,8 +3,12 @@
 mod app;
 mod audio;
 mod camera;
+mod hudtext;
+mod input;
 mod render;
+mod session;
 mod ui;
+mod view;
 
 use std::path::PathBuf;
 

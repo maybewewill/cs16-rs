@@ -237,7 +237,7 @@ evidence = "crates/cs-game/tests/movement_world.rs::footsteps_reach_others_not_s
 [[item]]
 id = "movement_client_prediction"
 status = "verified"
-evidence = "cs_sim::pm is engine-neutral so the client can predict with it, but cs-client and cs-net still use the legacy cs_sim::pmove; the original client predicts with its own pm_shared.; VERIFIED 2026-11-22, method 1 (the original Steam CS 1.6 client build 10210 on our server, de_dust2; walking on the original client with its own prediction against our server; docs/parity/checklists/phase2d-weapons.md V6)"
+evidence = "cs_sim::pm is engine-neutral and cs-clientcore predicts the local player with it (cs-pm); the original client predicts with its own pm_shared.; VERIFIED 2026-11-22, method 1 (the original Steam CS 1.6 client build 10210 on our server, de_dust2; walking on the original client with its own prediction against our server; docs/parity/checklists/phase2d-weapons.md V6)"
 
 [[item]]
 id = "movement_physinfo_visents_studio"

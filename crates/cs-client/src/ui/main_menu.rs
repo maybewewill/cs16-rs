@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use cs_cvar::{CVarRegistry, EngineAction};
-use cs_net::{LanServerInfo, discover_lan_servers};
+use cs_proto48::query::{ServerQueryInfo, discover_goldsrc_lan_servers};
 use egui::{Color32, CornerRadius, FontId, Pos2, Rect, RichText, Stroke, TextureHandle};
 
 use crate::ui::vgui_assets::show_steam2003_window;
@@ -34,7 +34,7 @@ pub struct MainMenuUi {
     server_tab: ServerBrowserTab,
     pub selected_map: String,
     connect_addr: String,
-    lan_servers: Vec<LanServerInfo>,
+    lan_servers: Vec<ServerQueryInfo>,
 }
 
 impl Default for MainMenuUi {
@@ -338,8 +338,8 @@ impl MainMenuUi {
                                         ui.label("");
                                         ui.end_row();
                                         for srv in &self.lan_servers {
-                                            ui.label(&srv.hostname);
-                                            ui.label(&srv.map_name);
+                                            ui.label(&srv.name);
+                                            ui.label(&srv.map);
                                             ui.label(format!("{}/{}", srv.players, srv.max_players));
                                             ui.label(format!("{} ms", srv.ping_ms));
                                             if ui
@@ -370,7 +370,7 @@ impl MainMenuUi {
                             .add(egui::Button::new("Refresh LAN").corner_radius(CornerRadius::ZERO))
                             .clicked()
                         {
-                            self.lan_servers = discover_lan_servers(Duration::from_millis(120));
+                            self.lan_servers = discover_goldsrc_lan_servers(Duration::from_millis(300));
                         }
                     });
                 },

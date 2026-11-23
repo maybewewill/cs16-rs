@@ -25,18 +25,6 @@ struct MdlUniforms {
     params: [f32; 4],
 }
 
-pub struct MdlDrawInstance<'a> {
-    pub model_path: &'a str,
-    pub transform: Mat4,
-    pub sequence_hint: &'a str,
-    pub anim_time_sec: f32,
-    pub loop_anim: bool,
-    pub light_rgb: Vec3,
-    pub flip_winding: bool,
-    /// Optional `EF_BONEMERGE` attached weapon (`models/p_ak47.mdl`) merged onto matching player bones!
-    pub attached_model: Option<&'a str>,
-}
-
 /// A studio entity of the scene API.
 pub struct StudioInstance<'a> {
     pub model_path: &'a str,
@@ -50,34 +38,10 @@ pub struct StudioInstance<'a> {
     pub now: f32,
     pub body: i32,
     pub light_rgb: Vec3,
-}
-
-enum SeqSel<'a> {
-    Name(&'a str),
-    Index(usize),
-}
-
-enum FrameSel {
-    /// Seconds since the animation start (legacy path), multiplied by the sequence fps.
-    TimeSec(f32),
-    Entity {
-        frame: f32,
-        animtime: f32,
-        framerate: f32,
-        now: f32,
-    },
-}
-
-struct InnerInst<'a> {
-    model_path: &'a str,
-    transform: Mat4,
-    seq: SeqSel<'a>,
-    frame: FrameSel,
-    loop_anim: bool,
-    light_rgb: Vec3,
-    flip_winding: bool,
-    attached_model: Option<&'a str>,
-    body: i32,
+    /// Mirror the model (the left-handed view model, `cl_righthand 0`).
+    pub flip_winding: bool,
+    /// A studio model merged onto this one's bones (`EF_BONEMERGE`).
+    pub attached_model: Option<&'a str>,
 }
 
 /// `STUDIO_LOOPING` sequence flag.
@@ -423,35 +387,6 @@ impl MdlRenderer {
         }
     }
 
-    /// Skin and upload a batch of StudioModel instances for one render pass (world models OR viewmodel).
-    #[allow(clippy::too_many_arguments)]
-    pub fn prepare(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        vfs: &Vfs,
-        instances: &[MdlDrawInstance<'_>],
-        view_proj: Mat4,
-        gamma: f32,
-        brightness: f32,
-    ) -> PreparedMdlPass {
-        let inner: Vec<InnerInst<'_>> = instances
-            .iter()
-            .map(|i| InnerInst {
-                model_path: i.model_path,
-                transform: i.transform,
-                seq: SeqSel::Name(i.sequence_hint),
-                frame: FrameSel::TimeSec(i.anim_time_sec),
-                loop_anim: i.loop_anim,
-                light_rgb: i.light_rgb,
-                flip_winding: i.flip_winding,
-                attached_model: i.attached_model,
-                body: 0,
-            })
-            .collect();
-        self.prepare_inner(device, queue, vfs, &inner, view_proj, gamma, brightness)
-    }
-
     /// Skin and upload studio model entities of the scene API (sequence index, entity frame,
     /// body group), for one render pass.
     #[allow(clippy::too_many_arguments)]
@@ -461,39 +396,6 @@ impl MdlRenderer {
         queue: &wgpu::Queue,
         vfs: &Vfs,
         instances: &[StudioInstance<'_>],
-        view_proj: Mat4,
-        gamma: f32,
-        brightness: f32,
-    ) -> PreparedMdlPass {
-        let inner: Vec<InnerInst<'_>> = instances
-            .iter()
-            .map(|i| InnerInst {
-                model_path: i.model_path,
-                transform: i.transform,
-                seq: SeqSel::Index(i.sequence.max(0) as usize),
-                frame: FrameSel::Entity {
-                    frame: i.frame,
-                    animtime: i.animtime,
-                    framerate: i.framerate,
-                    now: i.now,
-                },
-                loop_anim: true,
-                light_rgb: i.light_rgb,
-                flip_winding: false,
-                attached_model: None,
-                body: i.body,
-            })
-            .collect();
-        self.prepare_inner(device, queue, vfs, &inner, view_proj, gamma, brightness)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn prepare_inner(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        vfs: &Vfs,
-        instances: &[InnerInst<'_>],
         view_proj: Mat4,
         gamma: f32,
         brightness: f32,
@@ -514,10 +416,10 @@ impl MdlRenderer {
                 continue;
             };
 
-            let seq_idx = match inst.seq {
-                SeqSel::Name(name) => cached.mdl.find_sequence(name).unwrap_or(0),
-                SeqSel::Index(i) if i < cached.mdl.sequences.len() => i,
-                SeqSel::Index(_) => 0,
+            let seq_idx = if (inst.sequence.max(0) as usize) < cached.mdl.sequences.len() {
+                inst.sequence.max(0) as usize
+            } else {
+                0
             };
             let fps = cached
                 .mdl
@@ -525,27 +427,23 @@ impl MdlRenderer {
                 .get(seq_idx)
                 .map(|s| s.fps)
                 .unwrap_or(30.0);
-            let (frame, loop_anim) = match inst.frame {
-                FrameSel::TimeSec(t) => (t * fps, inst.loop_anim),
-                FrameSel::Entity {
-                    frame,
-                    animtime,
-                    framerate,
-                    now,
-                } => {
-                    let (numframes, looping) = cached
-                        .mdl
-                        .sequences
-                        .get(seq_idx)
-                        .map(|s| (s.num_frames, s.flags & STUDIO_LOOPING != 0))
-                        .unwrap_or((1, false));
-                    // The estimate already wrapped or clamped the frame.
-                    (
-                        studio_frame(frame, animtime, framerate, now, fps, numframes, looping),
-                        false,
-                    )
-                }
-            };
+            let (numframes, looping) = cached
+                .mdl
+                .sequences
+                .get(seq_idx)
+                .map(|s| (s.num_frames, s.flags & STUDIO_LOOPING != 0))
+                .unwrap_or((1, false));
+            // The estimate already wrapped or clamped the frame.
+            let frame = studio_frame(
+                inst.frame,
+                inst.animtime,
+                inst.framerate,
+                inst.now,
+                fps,
+                numframes,
+                looping,
+            );
+            let loop_anim = false;
             let bones = cached.mdl.evaluate_bones_ex(seq_idx, frame, loop_anim);
 
             let mut push_model = |m_key: &str, cached_m: &CachedGpuModel, m_bones: &[Mat4]| {
@@ -701,14 +599,6 @@ pub fn viewmodel_transform(
     };
     let pos = eye + rot * bob_offset;
     Mat4::from_scale_rotation_translation(scale, rot, pos)
-}
-
-/// Build a third-person player model transform.
-/// GoldSrc player MDLs (`models/player/*/*.mdl`) are authored centered on the hull origin
-/// (`Z = -36` feet to `Z = +25..32` head in standing animations), matching `pev->origin` directly.
-pub fn player_model_transform(origin: Vec3, yaw_deg: f32, _crouched: bool) -> Mat4 {
-    let rot = Quat::from_rotation_z(yaw_deg.to_radians());
-    Mat4::from_rotation_translation(rot, origin)
 }
 
 #[cfg(test)]

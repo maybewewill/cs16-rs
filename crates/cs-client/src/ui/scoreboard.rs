@@ -2,22 +2,33 @@
 //! and `ClientScheme.res` (translucent rounded black frame, 1px amber border & dividers,
 //! amber hostname & headers, CT `153 204 255` and T `255 64 64` rows).
 
-use cs_assets::bsp::SpawnTeam;
-use cs_sim::rules::PlayerState;
-use cs_sim::weapons::WeaponId;
 use egui::{Color32, CornerRadius, FontId, Pos2, Rect, Stroke, Vec2};
 
 use crate::ui::vgui_assets::ClientPalette;
+
+/// One row of the board, from `ScoreInfo`, `TeamInfo`, `ScoreAttrib` and the userinfo name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScoreRow {
+    pub slot: u8,
+    pub name: String,
+    pub frags: i16,
+    pub deaths: i16,
+    /// `TERRORIST`, `CT`, `SPECTATOR`, `UNASSIGNED` (the `TeamInfo` text).
+    pub team: String,
+    pub dead: bool,
+    pub bomb: bool,
+    pub vip: bool,
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn show_scoreboard(
     ctx: &egui::Context,
     hostname: &str,
     _map_name: &str,
-    ct_score: u32,
-    t_score: u32,
-    players: &[PlayerState],
-    local_id: u32,
+    ct_score: i16,
+    t_score: i16,
+    players: &[ScoreRow],
+    local_slot: Option<u8>,
     cp: ClientPalette,
 ) {
     let screen = ctx.content_rect();
@@ -107,12 +118,12 @@ pub fn show_scoreboard(
     // 3. Render both teams (`Counter-Terrorists` + `Terrorists`) in exact `ScoreBoard.res` style
     let row_h = (14.5 * scale).clamp(16.0, 24.0);
     let teams = [
-        ("Counter-Terrorists", SpawnTeam::CounterTerrorist, ct_score, cp.team_ct),
-        ("Terrorists", SpawnTeam::Terrorist, t_score, cp.team_t),
+        ("Counter-Terrorists", "CT", ct_score, cp.team_ct),
+        ("Terrorists", "TERRORIST", t_score, cp.team_t),
     ];
 
     for (team_idx, (title, team, team_rounds, col)) in teams.iter().enumerate() {
-        let mut team_players: Vec<&PlayerState> =
+        let mut team_players: Vec<&ScoreRow> =
             players.iter().filter(|p| p.team == *team).collect();
         team_players.sort_by(|a, b| b.frags.cmp(&a.frags).then(a.deaths.cmp(&b.deaths)));
 
@@ -145,7 +156,7 @@ pub fn show_scoreboard(
                 break;
             }
             // Subtle translucent white highlight band behind the local player's row
-            if p.id == local_id {
+            if Some(p.slot) == local_slot {
                 let hi_rect = Rect::from_min_size(
                     Pos2::new(x_name - 4.0, y - 1.0),
                     Vec2::new((x_ping - x_name) + 8.0, row_h),
@@ -153,7 +164,7 @@ pub fn show_scoreboard(
                 painter.rect_filled(hi_rect, 0.0, Color32::from_rgba_unmultiplied(255, 255, 255, 28));
             }
 
-            let row_col = if p.alive {
+            let row_col = if !p.dead {
                 *col
             } else {
                 Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), 155)
@@ -167,10 +178,12 @@ pub fn show_scoreboard(
                 row_col,
             );
 
-            let status = if !p.alive {
+            let status = if p.dead {
                 "Dead"
-            } else if p.has_weapon(WeaponId::C4) {
+            } else if p.bomb {
                 "Bomb"
+            } else if p.vip {
+                "VIP"
             } else {
                 ""
             };
@@ -201,7 +214,7 @@ pub fn show_scoreboard(
             painter.text(
                 Pos2::new(x_ping, y),
                 egui::Align2::RIGHT_TOP,
-                if p.is_bot { "BOT" } else { "5" },
+                "",
                 font_row.clone(),
                 row_col,
             );

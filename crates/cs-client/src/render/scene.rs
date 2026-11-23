@@ -249,6 +249,8 @@ pub struct RenderEntity {
     pub renderfx: u8,
     /// `entity_state_t::scale`; 0 means 1.
     pub scale: f32,
+    /// A studio model merged onto this one's bones (`EF_BONEMERGE`: the weapon a player holds).
+    pub attached: Option<ModelHandle>,
 }
 
 impl RenderEntity {
@@ -272,6 +274,7 @@ impl RenderEntity {
             rendercolor: [0, 0, 0],
             renderfx: 0,
             scale: 0.0,
+            attached: None,
         }
     }
 }
@@ -538,6 +541,7 @@ pub struct StudioDraw {
     pub skin: i32,
     pub mode: EntRenderMode,
     pub blend: f32,
+    pub attached: Option<ModelHandle>,
 }
 
 /// A sprite entity ready to draw.
@@ -646,6 +650,7 @@ pub fn build_draw_lists(scene: &SceneFrame, registry: &ModelRegistry) -> DrawLis
                 skin: e.skin,
                 mode: e.rendermode,
                 blend,
+                attached: e.attached,
             }),
             ModelKind::Sprite => lists.sprites.push(SpriteDraw {
                 model: e.model,

@@ -1,5 +1,5 @@
 # GoldSrc rendering parity (cs-assets parsers + cs-client wgpu renderer, weight 10).
-# Legacy cs-client renderers work against the offline MatchWorld/cs-net prototype;
+# The cs-client renderers draw the entities of cs-clientcore by modelindex (the legacy MatchWorld/cs-net path is gone);
 # driving the renderer from Protocol 48 entities and full GoldSrc visual parity belong to Phase 3 and Phase 8.
 
 [[item]]

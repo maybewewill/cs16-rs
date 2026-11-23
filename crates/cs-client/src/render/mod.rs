@@ -1,5 +1,6 @@
-//! Top-level wgpu renderer coordinating BSP world, Skybox, 3D StudioModels (players/props),
-//! 3D FX (decals/tracers/smoke/C4), depth-cleared first-person Viewmodel, and VGUI2/HUD overlay.
+//! Top-level wgpu renderer coordinating BSP world, Skybox, the entities of the scene API (brush
+//! models, studio models, sprites), flat 3D FX (beams, glows), the depth-cleared first-person
+//! view model, and the VGUI2/HUD overlay.
 
 pub mod bsp_renderer;
 pub mod fx_renderer;
@@ -13,8 +14,6 @@ use std::sync::Arc;
 
 use cs_assets::bsp::BspMap;
 use cs_assets::scheme::SkyboxTextures;
-use cs_sim::grenades::{ActiveGrenade, SmokeCloud};
-use cs_sim::rules::{BulletTracer, ImpactDecal, PlantedC4};
 use cs_vfs::Vfs;
 use egui_wgpu::ScreenDescriptor;
 use glam::Vec3;
@@ -23,8 +22,8 @@ use winit::window::Window;
 
 use crate::camera::Camera;
 use crate::render::bsp_renderer::{BspRenderStats, BspRenderer};
-use crate::render::fx_renderer::FxRenderer;
-use crate::render::mdl_renderer::{MdlDrawInstance, MdlRenderer, StudioInstance};
+use crate::render::fx_renderer::{FxBeam, FxPoint, FxRenderer};
+use crate::render::mdl_renderer::{MdlRenderer, StudioInstance};
 use crate::render::scene::{
     BrushDraw, DrawLists, ModelKind, ModelRegistry, SceneFrame, build_draw_lists,
 };
@@ -41,17 +40,13 @@ pub struct RenderSettings<'a> {
     pub time_sec: f32,
 }
 
+/// What the shell hands the renderer next to the entity scene.
 pub struct SceneDynamicData<'a> {
     pub vfs: Option<&'a Vfs>,
-    pub world_models: &'a [MdlDrawInstance<'a>],
-    pub viewmodel: Option<MdlDrawInstance<'a>>,
-    pub decals: &'a [ImpactDecal],
-    pub tracers: &'a [BulletTracer],
-    pub grenades: &'a [ActiveGrenade],
-    pub smokes: &'a [SmokeCloud],
-    pub planted_c4: Option<&'a PlantedC4>,
-    pub muzzle_flashes: &'a [Vec3],
-    pub hidden_bsp_models: &'a [usize],
+    /// The first-person view model, drawn in its own depth-cleared pass.
+    pub viewmodel: Option<StudioInstance<'a>>,
+    pub beams: &'a [FxBeam],
+    pub points: &'a [FxPoint],
 }
 
 pub struct Renderer {
@@ -62,15 +57,13 @@ pub struct Renderer {
     depth_view: wgpu::TextureView,
     pub bsp: BspRenderer,
     pub skybox: SkyboxRenderer,
-    pub mdl_world: MdlRenderer,
     pub mdl_view: MdlRenderer,
-    /// Studio entities of the scene API (separate buffers from `mdl_world`, which the legacy
-    /// path refills every frame).
+    /// Studio entities of the scene API.
     mdl_scene: MdlRenderer,
     sprites: SpriteRenderer,
     /// Precache model table of the scene API.
     models: ModelRegistry,
-    /// Entities of the scene API for the next frame; `None` keeps the legacy path in charge.
+    /// Entities of the scene API for the next frame; `None` draws the world alone.
     entity_scene: Option<SceneFrame>,
     pub fx: FxRenderer,
     pub egui_renderer: egui_wgpu::Renderer,
@@ -146,7 +139,6 @@ impl Renderer {
         let depth_view = create_depth_view(&device, config.width, config.height);
         let bsp = BspRenderer::new(&device, format);
         let skybox = SkyboxRenderer::new(&device, format);
-        let mdl_world = MdlRenderer::new(&device, format);
         let mdl_view = MdlRenderer::new(&device, format);
         let mdl_scene = MdlRenderer::new(&device, format);
         let sprites = SpriteRenderer::new(&device, format);
@@ -169,7 +161,6 @@ impl Renderer {
             depth_view,
             bsp,
             skybox,
-            mdl_world,
             mdl_view,
             mdl_scene,
             sprites,
@@ -201,7 +192,6 @@ impl Renderer {
     }
 
     pub fn clear_model_caches(&mut self) {
-        self.mdl_world.clear_cache();
         self.mdl_view.clear_cache();
         self.mdl_scene.clear_cache();
         self.sprites.clear_cache();
@@ -209,15 +199,13 @@ impl Renderer {
 
     /// Install the precache model table (`modelindex` -> `*N` / `.mdl` / `.spr`) used to resolve
     /// scene entities. Call on every new map / precache list.
-    #[allow(dead_code)] // called by the shell in Task 8b
     pub fn set_model_registry(&mut self, models: ModelRegistry) {
         self.models = models;
     }
 
     /// Provide the entities of the next frame through the scene API. While a scene is set the
     /// world pass skips the BSP submodels (they are drawn as entities with their transform).
-    /// `None` returns to the legacy `SceneDynamicData` path.
-    #[allow(dead_code)] // called by the shell in Task 8b
+    /// `None` draws the world alone.
     pub fn set_entity_scene(&mut self, scene: Option<SceneFrame>) {
         self.entity_scene = scene;
     }
@@ -311,7 +299,6 @@ impl Renderer {
         );
 
         // Prepare dynamic 3D world models, FX, and viewmodel before opening render passes
-        let mut prepared_world_mdls = None;
         let mut prepared_viewmodel = None;
         let mut prepared_solid_brushes = Vec::new();
         let mut prepared_trans_brushes = Vec::new();
@@ -329,31 +316,18 @@ impl Renderer {
             let view_mat = camera.view_matrix();
             let view_proj = proj * view_mat;
 
-            if let Some(vfs) = scene.vfs {
-                if !scene.world_models.is_empty() {
-                    prepared_world_mdls = Some(self.mdl_world.prepare(
-                        &self.device,
-                        &self.queue,
-                        vfs,
-                        scene.world_models,
-                        view_proj,
-                        settings.gamma,
-                        settings.brightness,
-                    ));
-                }
-                if let Some(ref vm) = scene.viewmodel {
-                    let vm_proj = camera.viewmodel_proj_matrix(vw, vh, settings.aspect_mode);
-                    let vm_vp = vm_proj * view_mat;
-                    prepared_viewmodel = Some(self.mdl_view.prepare(
-                        &self.device,
-                        &self.queue,
-                        vfs,
-                        std::slice::from_ref(vm),
-                        vm_vp,
-                        settings.gamma,
-                        settings.brightness,
-                    ));
-                }
+            if let (Some(vfs), Some(vm)) = (scene.vfs, scene.viewmodel.as_ref()) {
+                let vm_proj = camera.viewmodel_proj_matrix(vw, vh, settings.aspect_mode);
+                let vm_vp = vm_proj * view_mat;
+                prepared_viewmodel = Some(self.mdl_view.prepare_studio(
+                    &self.device,
+                    &self.queue,
+                    vfs,
+                    std::slice::from_ref(vm),
+                    vm_vp,
+                    settings.gamma,
+                    settings.brightness,
+                ));
             }
 
             if let (Some(lists), Some(_)) = (&draw_lists, &self.entity_scene) {
@@ -391,6 +365,11 @@ impl Renderer {
                             body: d.body,
                             // Assumption: flat ambient until the shell samples the BSP lightgrid.
                             light_rgb: Vec3::splat(0.8),
+                            flip_winding: false,
+                            attached_model: d
+                                .attached
+                                .and_then(|h| self.models.get(h))
+                                .map(|e| e.name.as_str()),
                         })
                     })
                     .collect();
@@ -436,13 +415,8 @@ impl Renderer {
                 camera.position,
                 cam_right,
                 cam_up,
-                scene.decals,
-                scene.tracers,
-                scene.grenades,
-                scene.smokes,
-                scene.planted_c4,
-                scene.muzzle_flashes,
-                settings.time_sec,
+                scene.beams,
+                scene.points,
             );
         }
 
@@ -496,7 +470,7 @@ impl Renderer {
                     settings.time_sec,
                     settings.debug_mode,
                     settings.use_nearest_filter,
-                    scene.hidden_bsp_models,
+                    &[],
                 );
 
                 self.bsp.draw_entities(
@@ -506,10 +480,6 @@ impl Renderer {
                 );
                 if let Some(ref studio) = prepared_scene_studio {
                     self.mdl_scene.draw(&mut pass, studio);
-                }
-
-                if let Some(ref world_mdls) = prepared_world_mdls {
-                    self.mdl_world.draw(&mut pass, world_mdls);
                 }
 
                 self.skybox.draw(

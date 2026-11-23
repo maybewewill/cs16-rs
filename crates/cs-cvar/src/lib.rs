@@ -114,6 +114,10 @@ pub enum EngineAction {
     OpenRadio(u8),
     Spray,
     ActionInput { name: String, pressed: bool },
+    /// A command the console does not know, handed on while the client is connected
+    /// ([`CVarRegistry::set_forward_unknown`]): the shell sends the line to the server
+    /// (`jointeam`, `menuselect`, `radio1` and the rest of the game's own commands).
+    Forward(String),
 }
 
 const KNOWN_COMMANDS: &[(&str, &str)] = &[
@@ -166,6 +170,7 @@ pub struct CVarRegistry {
     log: VecDeque<ConsoleLine>,
     history: VecDeque<String>,
     dirty: bool,
+    forward_unknown: bool,
 }
 
 impl Default for CVarRegistry {
@@ -183,7 +188,14 @@ impl CVarRegistry {
             log: VecDeque::with_capacity(256),
             history: VecDeque::with_capacity(MAX_HISTORY),
             dirty: false,
+            forward_unknown: false,
         }
+    }
+
+    /// While set, a command nobody knows becomes [`EngineAction::Forward`] instead of an
+    /// "Unknown command" warning: a connected client sends it to the server.
+    pub fn set_forward_unknown(&mut self, forward: bool) {
+        self.forward_unknown = forward;
     }
 
     pub fn new_with_defaults() -> Self {
@@ -672,8 +684,9 @@ impl CVarRegistry {
                         let new_val = args.join(" ");
                         self.set(&cmd, new_val);
                     }
+                } else if self.forward_unknown {
+                    actions.push(EngineAction::Forward(tokens.join(" ")));
                 } else {
-                    // Ignore unknown commands silently when coming from a user's legacy CS 1.6 config?
                     // Print classic GoldSrc message so interactive console feedback is clear.
                     self.warn(format!("Unknown command: {}", tokens[0]));
                 }

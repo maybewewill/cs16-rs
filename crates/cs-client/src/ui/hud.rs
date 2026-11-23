@@ -4,20 +4,18 @@
 //! Sprite-Digit Money & Clip/Reserve Ammo, Translucent Radar, Weapon-Icon Killfeed,
 //! Top Bucket Selector, AWP Sniper Scope, and C4 Plant/Defuse Bar.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-use cs_assets::bsp::SpawnTeam;
 use cs_assets::scheme::{HudSpriteEntry, load_hud_txt};
 use cs_assets::spr::GoldSrcSprite;
-use cs_sim::rules::{ChatMessage, KillFeedEntry, PlantedC4, PlayerState, RoundPhase};
-use cs_sim::weapons::WeaponId;
+use cs_clientcore::HudState;
+use cs_clientcore::hud::{DeathNotice, ScreenFade, StatusIcon};
 use cs_vfs::Vfs;
 use egui::{Color32, FontId, Pos2, Rect, Stroke, TextureHandle, Vec2};
 use glam::Vec3;
 
 const HUD_AMBER: Color32 = Color32::from_rgb(255, 160, 0);
 const HUD_RED: Color32 = Color32::from_rgb(255, 24, 16);
-const HUD_GREEN: Color32 = Color32::from_rgb(0, 196, 0);
 const TEAM_CT_COLOR: Color32 = Color32::from_rgb(153, 204, 255);
 const TEAM_T_COLOR: Color32 = Color32::from_rgb(255, 64, 64);
 
@@ -189,38 +187,72 @@ impl HudSprites {
     }
 }
 
-pub struct HudState<'a> {
-    pub local: &'a PlayerState,
-    pub all_players: &'a [PlayerState],
-    pub phase: RoundPhase,
-    pub phase_timer: f32,
-    pub in_buy_zone: bool,
-    pub in_bomb_zone: bool,
-    pub in_rescue_zone: bool,
-    pub planted_c4: Option<&'a PlantedC4>,
-    pub killfeed: &'a [KillFeedEntry],
-    pub chat: &'a [ChatMessage],
-    pub banner: Option<&'a str>,
+/// What the HUD draws one frame: the state the server's messages built, the shell's own timed
+/// logs, and the local player's place for the radar.
+pub struct HudView<'a> {
+    pub hud: &'a HudState,
+    /// The session clock (what `RoundTime` and the bars count against).
+    pub now: f64,
     pub time_sec: f32,
+    pub names: &'a BTreeMap<u8, String>,
+    /// The weapons the player carries (`weapon_id`s).
+    pub owned: &'a HashSet<u8>,
+    pub feed: &'a [DeathNotice],
+    pub chat: &'a [String],
+    pub notify: &'a [String],
+    pub center: Option<&'a str>,
     pub weapon_switch_timer: f32,
-    pub spectate_target: Option<&'a PlayerState>,
-    pub spectate_free: bool,
-    pub radio_menu: Option<u8>,
+    pub alive: bool,
+    /// A sniper scope is up (the fov is narrow).
+    pub scoped: bool,
+    pub eye: Vec3,
+    pub yaw_deg: f32,
 }
 
-pub fn draw_cs16_hud(
-    ctx: &egui::Context,
-    sprites: Option<&HudSprites>,
-    hud: &HudState<'_>,
-) {
+/// The seconds a `ScreenFade` message is shown for, and its colour alpha now (0..=255).
+/// Assumption: `duration` and `hold_time` are in 1/4096 s, `FFADE_IN` (flag bit 0 clear) holds
+/// the colour for `hold_time` and then fades out over `duration`; `FFADE_OUT` fades in over
+/// `duration`; `FFADE_STAYOUT` (bit 2) keeps it.
+pub fn screen_fade_alpha(fade: &ScreenFade, now: f64) -> f32 {
+    let dur = f64::from(fade.duration) / 4096.0;
+    let hold = f64::from(fade.hold_time) / 4096.0;
+    let t = (now - fade.started_at).max(0.0);
+    let a = f64::from(fade.color[3]);
+    let fade_out = fade.flags & 1 != 0;
+    let stay = fade.flags & 4 != 0;
+    let v = if fade_out {
+        let k = if dur > 0.0 { (t / dur).clamp(0.0, 1.0) } else { 1.0 };
+        if stay || t < dur + hold { a * k } else { 0.0 }
+    } else if t < hold {
+        a
+    } else if dur > 0.0 {
+        a * (1.0 - ((t - hold) / dur).clamp(0.0, 1.0))
+    } else {
+        0.0
+    };
+    v as f32
+}
+
+fn status_color(icon: &StatusIcon, flash_on: bool) -> Option<Color32> {
+    if icon.status == 0 || (icon.status == 2 && !flash_on) {
+        return None;
+    }
+    Some(match icon.color {
+        Some([r, g, b]) => Color32::from_rgb(r, g, b),
+        None => HUD_AMBER,
+    })
+}
+
+pub fn draw_cs16_hud(ctx: &egui::Context, sprites: Option<&HudSprites>, hud: &HudView<'_>) {
     let screen = ctx.content_rect();
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Background,
         egui::Id::unique("cs16_authentic_hud"),
     ));
+    let state = hud.hud;
 
-    // 1. NightVision green scanline overlay (`N`) + AWP / Scout sniper scope mask
-    if hud.local.alive && hud.local.nvg_active {
+    // 1. Night vision overlay and the sniper scope mask.
+    if hud.alive && state.night_vision {
         painter.rect_filled(screen, 0.0, Color32::from_rgba_unmultiplied(20, 215, 45, 78));
         let mut sy = screen.top();
         let line_col = Color32::from_rgba_unmultiplied(0, 30, 0, 55);
@@ -232,122 +264,89 @@ pub fn draw_cs16_hud(
             sy += 3.0;
         }
     }
-    if hud.local.alive && hud.local.zoom_level > 0 && hud.local.active_weapon_id().spec().double_zoom {
+    if hud.alive && hud.scoped {
         draw_sniper_scope(&painter, screen);
     }
 
-    // 2. Damage red vignette & Flashbang whiteout
-    if hud.local.damage_flash > 0.02 {
-        let a = (hud.local.damage_flash.clamp(0.0, 1.0) * 90.0) as u8;
-        painter.rect_filled(screen, 0.0, Color32::from_rgba_unmultiplied(180, 15, 10, a));
-    }
-    if hud.local.flash_alpha > 0.01 {
-        let a = (hud.local.flash_alpha.clamp(0.0, 1.0) * 255.0) as u8;
-        painter.rect_filled(screen, 0.0, Color32::from_rgba_unmultiplied(255, 255, 255, a));
+    // 2. The server's screen fade (flashbang whiteout, death fade).
+    if let Some(fade) = &state.screen_fade {
+        let a = screen_fade_alpha(fade, hud.now).clamp(0.0, 255.0) as u8;
+        if a > 0 {
+            let [r, g, b, _] = fade.color;
+            painter.rect_filled(screen, 0.0, Color32::from_rgba_unmultiplied(r, g, b, a));
+        }
     }
 
     let scale = (screen.height() / 768.0).clamp(0.85, 1.45);
     let bottom_y = screen.bottom() - 40.0 * scale;
+    let flash_on = (hud.time_sec * 6.0).sin() > 0.0;
 
-    // 3. Bottom-left: Health & Armor (exact CS 1.6 `640hud7` cross, suit, and digits)
-    let hp_color = if hud.local.health <= 25 {
-        HUD_RED
-    } else {
-        HUD_AMBER
-    };
-    let hp_x = 18.0 * scale;
-    if let Some(sp) = sprites {
-        let _ = sp.draw_sprite(&painter, "cross", Pos2::new(hp_x, bottom_y + 1.0), scale, hp_color);
-        sp.draw_number(&painter, hud.local.health, Pos2::new(hp_x + 32.0 * scale, bottom_y), scale, hp_color, 1);
-
-        let armor_x = hp_x + 150.0 * scale;
-        let shield_name = if hud.local.has_helmet {
-            "suithelmet_full"
+    // 3. Bottom-left: health and armor (`640hud7` cross, suit, digits).
+    if hud.alive || state.health > 0 {
+        let hp_color = if state.health <= 25 { HUD_RED } else { HUD_AMBER };
+        let hp_x = 18.0 * scale;
+        let health = i32::from(state.health);
+        let armor = i32::from(state.armor);
+        if let Some(sp) = sprites {
+            let _ = sp.draw_sprite(&painter, "cross", Pos2::new(hp_x, bottom_y + 1.0), scale, hp_color);
+            sp.draw_number(&painter, health, Pos2::new(hp_x + 32.0 * scale, bottom_y), scale, hp_color, 1);
+            let armor_x = hp_x + 150.0 * scale;
+            let shield_name = if state.armor_type == 1 { "suithelmet_full" } else { "suit_full" };
+            let _ = sp.draw_sprite(&painter, shield_name, Pos2::new(armor_x, bottom_y + 1.0), scale, HUD_AMBER);
+            sp.draw_number(&painter, armor, Pos2::new(armor_x + 32.0 * scale, bottom_y), scale, HUD_AMBER, 1);
         } else {
-            "suit_full"
-        };
-        let _ = sp.draw_sprite(&painter, shield_name, Pos2::new(armor_x, bottom_y + 1.0), scale, HUD_AMBER);
-        sp.draw_number(&painter, hud.local.armor, Pos2::new(armor_x + 32.0 * scale, bottom_y), scale, HUD_AMBER, 1);
-    } else {
-        painter.text(
-            Pos2::new(hp_x, bottom_y),
-            egui::Align2::LEFT_TOP,
-            format!("+ {:3}    A {:3}", hud.local.health, hud.local.armor),
-            FontId::monospace(24.0 * scale),
-            hp_color,
-        );
+            painter.text(
+                Pos2::new(hp_x, bottom_y),
+                egui::Align2::LEFT_TOP,
+                format!("+ {health:3}    A {armor:3}"),
+                FontId::monospace(24.0 * scale),
+                hp_color,
+            );
+        }
     }
 
-    // 4. Left-margin iconic CS 1.6 status icons (REAL `640hud7` sprites: buyzone cart, C4, defuser pliers)
-    if hud.local.alive {
+    // 4. Left-margin status icons: buy zone, bomb, defuser, rescue zone... as the server shows
+    // them (`StatusIcon`), with the colour and the flashing it asks for.
+    if hud.alive {
         let mut icon_y = screen.center().y - 16.0 * scale;
         let icon_x = 18.0 * scale;
         if let Some(sp) = sprites {
-            if hud.in_buy_zone {
-                let _ = sp.draw_sprite(&painter, "buyzone", Pos2::new(icon_x, icon_y), scale, HUD_GREEN);
-                icon_y += 38.0 * scale;
-            }
-            if hud.local.has_weapon(WeaponId::C4) {
-                let c4_col = if hud.in_bomb_zone {
-                    if (hud.time_sec * 6.0).sin() > 0.0 { HUD_RED } else { HUD_GREEN }
-                } else {
-                    HUD_GREEN
+            for (name, icon) in &state.status_icons {
+                let Some(col) = status_color(icon, flash_on) else {
+                    continue;
                 };
-                let _ = sp.draw_sprite(&painter, "c4", Pos2::new(icon_x, icon_y), scale, c4_col);
-                icon_y += 38.0 * scale;
-            }
-            if hud.local.has_defuser {
-                let _ = sp.draw_sprite(&painter, "defuser", Pos2::new(icon_x, icon_y), scale, HUD_GREEN);
-                icon_y += 38.0 * scale;
-            }
-            if hud.in_rescue_zone {
-                let _ = sp.draw_sprite(&painter, "rescue", Pos2::new(icon_x, icon_y), scale, HUD_GREEN);
+                if sp
+                    .draw_sprite(&painter, name, Pos2::new(icon_x, icon_y), scale, col)
+                    .is_some()
+                {
+                    icon_y += 38.0 * scale;
+                }
             }
         }
     }
 
-    // 5. Bottom-center: Authentic `640hud7` Round Timer (stopwatch + sprite digits) OR Pulsing Red C4
+    // 5. Bottom-centre: the round timer (stopwatch and sprite digits).
     let center_x = screen.center().x;
-    if hud.phase == RoundPhase::BombPlanted {
-        let pulse = (hud.time_sec * 5.0).sin() > 0.0;
-        let col = if pulse { HUD_RED } else { Color32::from_rgb(120, 15, 10) };
-        if let Some(sp) = sprites {
-            let spr = if pulse { "bombticking" } else { "bombticking1" };
-            if sp
-                .draw_sprite(&painter, spr, Pos2::new(center_x - 16.0 * scale, bottom_y - 4.0 * scale), scale, col)
-                .is_none()
-            {
-                let _ = sp.draw_sprite(&painter, "c4", Pos2::new(center_x - 16.0 * scale, bottom_y - 4.0 * scale), scale, col);
-            }
-        }
-    } else {
-        let secs_total = hud.phase_timer.max(0.0).ceil() as i32;
+    if state.timer_visible {
+        let secs_total = state.round_seconds_left(hud.now).ceil() as i32;
         let mins = secs_total / 60;
         let secs = secs_total % 60;
-        let timer_col = if secs_total <= 10 && hud.phase == RoundPhase::Live {
-            HUD_RED
-        } else {
-            HUD_AMBER
-        };
+        let timer_col = if secs_total <= 10 { HUD_RED } else { HUD_AMBER };
         if let Some(sp) = sprites {
             let total_w = 24.0 * scale + 8.0 * scale + 21.0 * scale + 10.0 * scale + 42.0 * scale;
             let mut tx = center_x - total_w * 0.5;
             let _ = sp.draw_sprite(&painter, "stopwatch", Pos2::new(tx, bottom_y + 1.0), scale, timer_col);
             tx += 32.0 * scale;
             tx += sp.draw_number(&painter, mins, Pos2::new(tx, bottom_y), scale, timer_col, 1);
-            // Crisp CS 1.6 pixel colon between minutes and seconds
             let dot_sz = (3.0 * scale).max(2.0);
             let colon_x = tx + 3.0 * scale;
-            painter.rect_filled(
-                Rect::from_min_size(Pos2::new(colon_x, bottom_y + 7.0 * scale), Vec2::splat(dot_sz)),
-                0.0,
-                timer_col,
-            );
-            painter.rect_filled(
-                Rect::from_min_size(Pos2::new(colon_x, bottom_y + 16.0 * scale), Vec2::splat(dot_sz)),
-                0.0,
-                timer_col,
-            );
+            for dy in [7.0, 16.0] {
+                painter.rect_filled(
+                    Rect::from_min_size(Pos2::new(colon_x, bottom_y + dy * scale), Vec2::splat(dot_sz)),
+                    0.0,
+                    timer_col,
+                );
+            }
             tx += 10.0 * scale;
             sp.draw_number(&painter, secs, Pos2::new(tx, bottom_y), scale, timer_col, 2);
         } else {
@@ -361,73 +360,80 @@ pub fn draw_cs16_hud(
         }
     }
 
-    // 6. Bottom-right: Real `640hud7` Money (`$` sprite + digits) & Clip | Reserve Ammo
+    // 6. Bottom-right: money and the clip over the reserve of the weapon in hand.
     let right_x = screen.right() - 22.0 * scale;
     let money_y = bottom_y - 36.0 * scale;
-    if let Some(sp) = sprites {
-        let num_w = sp.draw_number_right(&painter, hud.local.money, right_x, money_y, scale, HUD_AMBER, 1);
-        let dollar_x = (right_x - num_w - 22.0 * scale).min(right_x - 110.0 * scale);
-        let _ = sp.draw_sprite(&painter, "dollar", Pos2::new(dollar_x, money_y), scale, HUD_AMBER);
-    } else {
-        painter.text(
-            Pos2::new(right_x, money_y),
-            egui::Align2::RIGHT_TOP,
-            format!("$ {}", hud.local.money),
-            FontId::monospace(22.0 * scale),
-            HUD_AMBER,
-        );
-    }
-
-    if let Some(w) = hud.local.active_weapon() {
-        let spec = w.id.spec();
-        if spec.clip_size > 0 {
-            let ammo_col = if w.clip == 0 { HUD_RED } else { HUD_AMBER };
-            if let Some(sp) = sprites {
-                let res_w = sp.draw_number_right(&painter, w.reserve as i32, right_x, bottom_y, scale, HUD_AMBER, 1);
-                let div_x = (right_x - res_w.max(64.0 * scale) - 12.0 * scale).round();
-                if sp
-                    .draw_sprite(&painter, "divider", Pos2::new(div_x, bottom_y - 6.0 * scale), scale, HUD_AMBER)
-                    .is_none()
-                {
-                    painter.line_segment(
-                        [Pos2::new(div_x, bottom_y), Pos2::new(div_x, bottom_y + 26.0 * scale)],
-                        Stroke::new(2.0, HUD_AMBER),
-                    );
-                }
-                sp.draw_number_right(
-                    &painter,
-                    w.clip as i32,
-                    div_x - 10.0 * scale,
-                    bottom_y,
-                    scale,
-                    ammo_col,
-                    1,
-                );
-            } else {
-                painter.text(
-                    Pos2::new(right_x, bottom_y),
-                    egui::Align2::RIGHT_TOP,
-                    format!("{} | {}", w.clip, w.reserve),
-                    FontId::monospace(24.0 * scale),
-                    ammo_col,
-                );
-            }
+    if hud.alive {
+        if let Some(sp) = sprites {
+            let num_w = sp.draw_number_right(&painter, state.money, right_x, money_y, scale, HUD_AMBER, 1);
+            let dollar_x = (right_x - num_w - 22.0 * scale).min(right_x - 110.0 * scale);
+            let _ = sp.draw_sprite(&painter, "dollar", Pos2::new(dollar_x, money_y), scale, HUD_AMBER);
+        } else {
+            painter.text(
+                Pos2::new(right_x, money_y),
+                egui::Align2::RIGHT_TOP,
+                format!("$ {}", state.money),
+                FontId::monospace(22.0 * scale),
+                HUD_AMBER,
+            );
         }
     }
 
-    // 7. Top-left: Authentic CS 1.6 Translucent Radar (`radar640.spr`) — clean, no extra text underneath
+    if hud.alive
+        && let Some(cur) = state.current_weapon
+        && cur.clip >= 0
+    {
+        let reserve = state
+            .weapons
+            .get(&cur.weapon_id)
+            .and_then(|w| state.ammo.get(&w.ammo1_type))
+            .copied()
+            .unwrap_or(0);
+        let ammo_col = if cur.clip == 0 { HUD_RED } else { HUD_AMBER };
+        if let Some(sp) = sprites {
+            let res_w = sp.draw_number_right(&painter, i32::from(reserve), right_x, bottom_y, scale, HUD_AMBER, 1);
+            let div_x = (right_x - res_w.max(64.0 * scale) - 12.0 * scale).round();
+            if sp
+                .draw_sprite(&painter, "divider", Pos2::new(div_x, bottom_y - 6.0 * scale), scale, HUD_AMBER)
+                .is_none()
+            {
+                painter.line_segment(
+                    [Pos2::new(div_x, bottom_y), Pos2::new(div_x, bottom_y + 26.0 * scale)],
+                    Stroke::new(2.0, HUD_AMBER),
+                );
+            }
+            sp.draw_number_right(&painter, i32::from(cur.clip), div_x - 10.0 * scale, bottom_y, scale, ammo_col, 1);
+        } else {
+            painter.text(
+                Pos2::new(right_x, bottom_y),
+                egui::Align2::RIGHT_TOP,
+                format!("{} | {}", cur.clip, reserve),
+                FontId::monospace(24.0 * scale),
+                ammo_col,
+            );
+        }
+    }
+
+    // 7. Top-left: the radar of the teammates the server reports (`Radar`) and the bomb.
     draw_radar(&painter, sprites, hud, scale);
 
-    // 8. Top-center: Classic CS 1.6 weapon slot bucket strip (`bucket1..5`) briefly after switching weapons
-    if hud.weapon_switch_timer > 0.01 && hud.local.alive
+    // 8. Top-centre: the weapon slot strip (`bucket1..5`) briefly after a switch.
+    if hud.weapon_switch_timer > 0.01
+        && hud.alive
         && let Some(sp) = sprites
     {
         let alpha = ((hud.weapon_switch_timer / 0.4).min(1.0) * 235.0) as u8;
-        let active_slot = hud.local.active_weapon_id().spec().slot as u8;
+        let active_slot = state
+            .current_weapon
+            .and_then(|c| state.weapons.get(&c.weapon_id))
+            .map_or(0, |w| w.slot + 1);
         let start_x = screen.left() + 148.0 * scale;
         let top_y = 14.0 * scale;
         for slot in 1..=5u8 {
-            let has_slot = hud.local.weapons.iter().any(|w| w.id.spec().slot as u8 == slot);
+            let has_slot = state
+                .weapons
+                .values()
+                .any(|w| w.slot + 1 == slot && hud.owned.contains(&w.weapon_id));
             let col = if slot == active_slot {
                 Color32::from_rgba_unmultiplied(255, 200, 30, alpha)
             } else if has_slot {
@@ -439,29 +445,43 @@ pub fn draw_cs16_hud(
             let _ = sp.draw_sprite(
                 &painter,
                 &b_name,
-                Pos2::new(start_x + ((slot - 1) as f32) * 28.0 * scale, top_y),
+                Pos2::new(start_x + f32::from(slot - 1) * 28.0 * scale, top_y),
                 scale,
                 col,
             );
         }
     }
 
-    // 9. Top-right: Authentic CS 1.6 Killfeed with REAL `d_*` weapon silhouette sprites + `d_headshot`!
+    // 9. Top-right: the killfeed with the `d_*` weapon sprites and `d_headshot`.
     let mut kf_y = 16.0 * scale;
     let kf_font = FontId::proportional((12.5 * scale).clamp(12.0, 17.0));
-    for entry in hud.killfeed {
+    let name_of = |slot: u8| -> String {
+        if slot == 0 {
+            return "world".to_string();
+        }
+        hud.names
+            .get(&(slot - 1))
+            .cloned()
+            .unwrap_or_else(|| format!("player {slot}"))
+    };
+    let team_of = |slot: u8| -> Color32 {
+        slot.checked_sub(1)
+            .and_then(|s| state.players.get(&s))
+            .map_or(HUD_AMBER, |p| team_color(&p.team))
+    };
+    for entry in hud.feed {
         let mut cursor_x = screen.right() - 16.0 * scale;
-        let v_col = team_color(entry.victim_team);
-        let k_col = team_color(entry.killer_team);
+        let victim = name_of(entry.victim);
+        let killer = name_of(entry.killer);
+        let v_col = team_of(entry.victim);
+        let k_col = team_of(entry.killer);
 
-        // Victim name (rightmost)
-        let v_galley = painter.layout_no_wrap(entry.victim_name.clone(), kf_font.clone(), v_col);
+        let v_galley = painter.layout_no_wrap(victim.clone(), kf_font.clone(), v_col);
         cursor_x -= v_galley.size().x;
-        painter.text(Pos2::new(cursor_x + 1.0, kf_y + 1.0), egui::Align2::LEFT_TOP, &entry.victim_name, kf_font.clone(), Color32::from_black_alpha(190));
-        painter.text(Pos2::new(cursor_x, kf_y), egui::Align2::LEFT_TOP, &entry.victim_name, kf_font.clone(), v_col);
+        painter.text(Pos2::new(cursor_x + 1.0, kf_y + 1.0), egui::Align2::LEFT_TOP, &victim, kf_font.clone(), Color32::from_black_alpha(190));
+        painter.text(Pos2::new(cursor_x, kf_y), egui::Align2::LEFT_TOP, &victim, kf_font.clone(), v_col);
         cursor_x -= 8.0 * scale;
 
-        // Optional real `d_headshot` sprite
         let mut drew_icon = false;
         if let Some(sp) = sprites {
             if entry.headshot
@@ -472,9 +492,9 @@ pub fn draw_cs16_hud(
                 cursor_x -= 4.0 * scale;
             }
             let d_spr = killfeed_sprite_name(&entry.weapon);
-            if let Some(w_sz) = sp.sprite_size(d_spr, scale) {
+            if let Some(w_sz) = sp.sprite_size(&d_spr, scale) {
                 cursor_x -= w_sz.x;
-                let _ = sp.draw_sprite(&painter, d_spr, Pos2::new(cursor_x, kf_y), scale, HUD_AMBER);
+                let _ = sp.draw_sprite(&painter, &d_spr, Pos2::new(cursor_x, kf_y), scale, HUD_AMBER);
                 drew_icon = true;
             }
         }
@@ -490,105 +510,62 @@ pub fn draw_cs16_hud(
         }
         cursor_x -= 8.0 * scale;
 
-        // Killer name (leftmost)
-        let k_galley = painter.layout_no_wrap(entry.killer_name.clone(), kf_font.clone(), k_col);
-        cursor_x -= k_galley.size().x;
-        painter.text(Pos2::new(cursor_x + 1.0, kf_y + 1.0), egui::Align2::LEFT_TOP, &entry.killer_name, kf_font.clone(), Color32::from_black_alpha(190));
-        painter.text(Pos2::new(cursor_x, kf_y), egui::Align2::LEFT_TOP, &entry.killer_name, kf_font.clone(), k_col);
-
+        if entry.killer != 0 && entry.killer != entry.victim {
+            let k_galley = painter.layout_no_wrap(killer.clone(), kf_font.clone(), k_col);
+            cursor_x -= k_galley.size().x;
+            painter.text(Pos2::new(cursor_x + 1.0, kf_y + 1.0), egui::Align2::LEFT_TOP, &killer, kf_font.clone(), Color32::from_black_alpha(190));
+            painter.text(Pos2::new(cursor_x, kf_y), egui::Align2::LEFT_TOP, &killer, kf_font.clone(), k_col);
+        }
         kf_y += 20.0 * scale;
     }
 
-    // 10. Plant / Defuse progress bar (exact amber outline + fill bar in CS 1.6)
-    let (prog_label, progress) = if hud.local.plant_progress > 0.0 {
-        (Some("Planting C4..."), hud.local.plant_progress)
-    } else if hud.local.defuse_progress > 0.0 {
-        (
-            Some(if hud.local.has_defuser {
-                "Defusing bomb with defuse kit..."
-            } else {
-                "Defusing bomb..."
-            }),
-            hud.local.defuse_progress,
-        )
-    } else {
-        (None, 0.0)
-    };
-    if let Some(label) = prog_label {
-        let bar_w = 220.0 * scale;
-        let bar_h = 10.0 * scale;
-        let bar_rect = Rect::from_center_size(
-            Pos2::new(center_x, screen.center().y + 92.0 * scale),
-            Vec2::new(bar_w, bar_h),
-        );
-        painter.rect_filled(bar_rect, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 180));
-        let fill_rect = Rect::from_min_size(bar_rect.min, Vec2::new(bar_w * progress.clamp(0.0, 1.0), bar_h));
-        painter.rect_filled(fill_rect, 0.0, HUD_AMBER);
-        painter.rect_stroke(bar_rect, 0.0, Stroke::new(1.0, HUD_AMBER), egui::StrokeKind::Outside);
-        painter.text(
-            Pos2::new(center_x, bar_rect.top() - 6.0),
-            egui::Align2::CENTER_BOTTOM,
-            label,
-            FontId::proportional(13.0 * scale),
-            HUD_AMBER,
-        );
+    // 10. The plant / defuse bar (`BarTime`).
+    if let Some(bar) = &state.bar
+        && bar.duration > 0
+    {
+        let elapsed = (hud.now - bar.started_at).max(0.0) as f32;
+        let progress = (f32::from(bar.start_percent) / 100.0
+            + elapsed / f32::from(bar.duration))
+        .clamp(0.0, 1.0);
+        if progress < 1.0 {
+            let bar_w = 220.0 * scale;
+            let bar_h = 10.0 * scale;
+            let bar_rect = Rect::from_center_size(
+                Pos2::new(center_x, screen.center().y + 92.0 * scale),
+                Vec2::new(bar_w, bar_h),
+            );
+            painter.rect_filled(bar_rect, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 180));
+            let fill_rect = Rect::from_min_size(bar_rect.min, Vec2::new(bar_w * progress, bar_h));
+            painter.rect_filled(fill_rect, 0.0, HUD_AMBER);
+            painter.rect_stroke(bar_rect, 0.0, Stroke::new(1.0, HUD_AMBER), egui::StrokeKind::Outside);
+        }
     }
 
-    // 11. Authentic CS 1.6 center status print (ONLY for real events: Bomb planted / Team wins)
-    if let Some(banner_text) = hud.banner {
+    // 11. Centre text (`HUD_PRINTCENTER`, the centre print).
+    if let Some(text) = hud.center {
         let b_pos = Pos2::new(center_x, screen.top() + screen.height() * 0.34);
         let b_font = FontId::proportional(16.0 * scale);
-        painter.text(b_pos + Vec2::new(1.0, 1.0), egui::Align2::CENTER_CENTER, banner_text, b_font.clone(), Color32::from_black_alpha(200));
-        painter.text(b_pos, egui::Align2::CENTER_CENTER, banner_text, b_font, Color32::from_rgb(255, 196, 64));
+        painter.text(b_pos + Vec2::new(1.0, 1.0), egui::Align2::CENTER_CENTER, text, b_font.clone(), Color32::from_black_alpha(200));
+        painter.text(b_pos, egui::Align2::CENTER_CENTER, text, b_font, Color32::from_rgb(255, 196, 64));
     }
 
-    // 12. Chat log bottom-left above Health
-    let chat_font = FontId::proportional(13.0 * scale);
+    // 12. Notifications under the radar, chat bottom-left above the health.
+    let note_font = FontId::proportional(13.0 * scale);
+    let mut ny = 150.0 * scale;
+    for line in hud.notify {
+        painter.text(Pos2::new(22.0 * scale, ny), egui::Align2::LEFT_TOP, line, note_font.clone(), Color32::from_rgb(255, 220, 110));
+        ny += 16.0 * scale;
+    }
     let mut cy = bottom_y - 46.0 * scale;
-    for msg in hud.chat.iter().rev().take(5) {
-        let name_col = msg.team.map(team_color).unwrap_or(HUD_AMBER);
-        let prefix = format!("{} : ", msg.sender);
-        let p_galley = painter.layout_no_wrap(prefix.clone(), chat_font.clone(), name_col);
+    for line in hud.chat.iter().rev().take(5) {
         let x = 22.0 * scale;
-        painter.text(Pos2::new(x + 1.0, cy + 1.0), egui::Align2::LEFT_BOTTOM, &prefix, chat_font.clone(), Color32::from_black_alpha(180));
-        painter.text(Pos2::new(x, cy), egui::Align2::LEFT_BOTTOM, &prefix, chat_font.clone(), name_col);
-        painter.text(
-            Pos2::new(x + p_galley.size().x, cy),
-            egui::Align2::LEFT_BOTTOM,
-            &msg.text,
-            chat_font.clone(),
-            Color32::from_rgb(255, 220, 110),
-        );
+        painter.text(Pos2::new(x + 1.0, cy + 1.0), egui::Align2::LEFT_BOTTOM, line, note_font.clone(), Color32::from_black_alpha(180));
+        painter.text(Pos2::new(x, cy), egui::Align2::LEFT_BOTTOM, line, note_font.clone(), Color32::from_rgb(255, 220, 110));
         cy -= 17.0 * scale;
     }
 
-    // 13. Classic CS 1.6 Radio Command menu (`Z` / `X` / `C`) on left side
-    if let Some(rm) = hud.radio_menu
-        && hud.local.alive
-    {
-        let items = radio_menu_entries(rm);
-        let title = match rm {
-            1 => "Radio Commands",
-            2 => "Group Radio Commands",
-            _ => "Radio Responses/Reports",
-        };
-        let rx = 24.0 * scale;
-        let mut ry = screen.center().y - 195.0 * scale;
-        let rfont = FontId::proportional(13.5 * scale);
-        painter.text(Pos2::new(rx, ry), egui::Align2::LEFT_TOP, title, rfont.clone(), HUD_AMBER);
-        ry += 22.0 * scale;
-        for (idx, (label, _)) in items.iter().enumerate() {
-            let line = format!("{}. {label}", idx + 1);
-            painter.text(Pos2::new(rx + 1.0, ry + 1.0), egui::Align2::LEFT_TOP, &line, rfont.clone(), Color32::from_black_alpha(190));
-            painter.text(Pos2::new(rx, ry), egui::Align2::LEFT_TOP, &line, rfont.clone(), Color32::WHITE);
-            ry += 17.0 * scale;
-        }
-        ry += 8.0 * scale;
-        painter.text(Pos2::new(rx, ry), egui::Align2::LEFT_TOP, "0. Exit", rfont, Color32::WHITE);
-    }
-
-    // 14. Authentic CS 1.6 Spectator Letterbox Bars (`BottomSpectator.res`) when dead!
-    if !hud.local.alive {
+    // 13. The spectator letterbox bars while dead.
+    if !hud.alive {
         let bar_h = 54.0 * scale;
         let top_bar = Rect::from_min_size(screen.min, Vec2::new(screen.width(), bar_h));
         let bot_bar = Rect::from_min_size(
@@ -597,124 +574,29 @@ pub fn draw_cs16_hud(
         );
         painter.rect_filled(top_bar, 0.0, Color32::from_black_alpha(225));
         painter.rect_filled(bot_bar, 0.0, Color32::from_black_alpha(225));
-        painter.line_segment(
-            [Pos2::new(screen.left(), top_bar.bottom()), Pos2::new(screen.right(), top_bar.bottom())],
-            Stroke::new(1.0, Color32::from_rgba_unmultiplied(188, 112, 0, 150)),
-        );
-        painter.line_segment(
-            [Pos2::new(screen.left(), bot_bar.top()), Pos2::new(screen.right(), bot_bar.top())],
-            Stroke::new(1.0, Color32::from_rgba_unmultiplied(188, 112, 0, 150)),
-        );
-
-        let (label, sub) = if hud.spectate_free {
-            (
-                "Free Look Spectator".to_string(),
-                "WASD: Fly  |  Mouse1: Follow Teammate  |  Mouse2: Toggle Mode".to_string(),
-            )
-        } else if let Some(tgt) = hud.spectate_target {
-            (
-                format!(
-                    "{}   ({} HP  |  ${}  |  {})",
-                    tgt.name,
-                    tgt.health,
-                    tgt.money,
-                    tgt.active_weapon_id().spec().display_name
-                ),
-                "Mouse1: Next Player  |  Mouse2: Free Look".to_string(),
-            )
-        } else {
-            (
-                "Spectating — Waiting for next round".to_string(),
-                "Mouse2: Free Look".to_string(),
-            )
-        };
         painter.text(
-            Pos2::new(center_x, bot_bar.top() + 18.0 * scale),
+            Pos2::new(center_x, bot_bar.top() + 27.0 * scale),
             egui::Align2::CENTER_CENTER,
-            label,
+            "Spectating",
             FontId::proportional(15.0 * scale),
             HUD_AMBER,
         );
-        painter.text(
-            Pos2::new(center_x, bot_bar.top() + 38.0 * scale),
-            egui::Align2::CENTER_CENTER,
-            sub,
-            FontId::proportional(11.5 * scale),
-            Color32::from_rgb(190, 165, 110),
-        );
     }
 }
 
-pub fn radio_menu_entries(group: u8) -> &'static [(&'static str, &'static str)] {
-    match group {
-        1 => &[
-            ("Cover Me", "radio/ct_coverme.wav"),
-            ("You Take the Point", "radio/ct_point.wav"),
-            ("Hold This Position", "radio/position.wav"),
-            ("Regroup Team", "radio/regroup.wav"),
-            ("Follow Me", "radio/followme.wav"),
-            ("Taking Fire, Need Assistance!", "radio/fireassis.wav"),
-        ],
-        2 => &[
-            ("Go go go!", "radio/com_go.wav"),
-            ("Team, Fall Back!", "radio/fallback.wav"),
-            ("Stick Together, Team", "radio/sticktog.wav"),
-            ("Get in Position", "radio/com_getinpos.wav"),
-            ("Storm the Front!", "radio/stormfront.wav"),
-            ("Report in, Team", "radio/com_reportin.wav"),
-        ],
-        _ => &[
-            ("Affirmative / Roger That", "radio/ct_affirm.wav"),
-            ("Enemy Spotted", "radio/ct_enemys.wav"),
-            ("Need Backup", "radio/ct_backup.wav"),
-            ("Sector Clear", "radio/clear.wav"),
-            ("I'm in Position", "radio/ct_inpos.wav"),
-            ("Reporting In", "radio/ct_reportingin.wav"),
-            ("She's gonna Blow!", "radio/blow.wav"),
-            ("Negative", "radio/negative.wav"),
-            ("Enemy Down", "radio/enemydown.wav"),
-        ],
+/// The weapon sprite of a `DeathMsg` weapon name (`d_<name>` in `hud.txt`).
+fn killfeed_sprite_name(weapon: &str) -> String {
+    let w = weapon.to_ascii_lowercase();
+    match w.as_str() {
+        "mp5" => "d_mp5navy".to_string(),
+        "glock" => "d_glock18".to_string(),
+        "grenade" | "hegrenade" => "d_hegrenade".to_string(),
+        "" => "d_skull".to_string(),
+        other => format!("d_{other}"),
     }
 }
 
-fn killfeed_sprite_name(weapon: &str) -> &'static str {
-    match weapon.to_ascii_lowercase().as_str() {
-        "knife" => "d_knife",
-        "ak47" | "cv-47" => "d_ak47",
-        "m4a1" => "d_m4a1",
-        "awp" => "d_awp",
-        "deagle" => "d_deagle",
-        "usp" => "d_usp",
-        "glock" | "glock18" => "d_glock18",
-        "p228" => "d_p228",
-        "fiveseven" => "d_fiveseven",
-        "elite" | "elites" => "d_elite",
-        "m3" => "d_m3",
-        "xm1014" => "d_xm1014",
-        "mp5" | "mp5navy" => "d_mp5navy",
-        "mac10" => "d_mac10",
-        "tmp" => "d_tmp",
-        "ump45" => "d_ump45",
-        "p90" => "d_p90",
-        "galil" => "d_galil",
-        "famas" => "d_famas",
-        "aug" => "d_aug",
-        "sg552" => "d_sg552",
-        "scout" => "d_scout",
-        "g3sg1" => "d_g3sg1",
-        "sg550" => "d_sg550",
-        "m249" => "d_m249",
-        "hegrenade" | "hegren" | "grenade" => "d_grenade",
-        _ => "d_skull",
-    }
-}
-
-fn draw_radar(
-    painter: &egui::Painter,
-    sprites: Option<&HudSprites>,
-    hud: &HudState<'_>,
-    scale: f32,
-) {
+fn draw_radar(painter: &egui::Painter, sprites: Option<&HudSprites>, hud: &HudView<'_>, scale: f32) {
     let radius = 58.0 * scale;
     let center = Pos2::new(14.0 * scale + radius, 14.0 * scale + radius);
     let rect = Rect::from_center_size(center, Vec2::splat(radius * 2.0));
@@ -729,55 +611,42 @@ fn draw_radar(
     } else {
         painter.circle_filled(center, radius, Color32::from_rgba_unmultiplied(12, 48, 16, 155));
         painter.circle_stroke(center, radius, Stroke::new(1.2, Color32::from_rgba_unmultiplied(80, 210, 80, 180)));
-        painter.line_segment([Pos2::new(center.x - radius, center.y), Pos2::new(center.x + radius, center.y)], Stroke::new(1.0, Color32::from_rgba_unmultiplied(70, 180, 70, 100)));
-        painter.line_segment([Pos2::new(center.x, center.y - radius), Pos2::new(center.x, center.y + radius)], Stroke::new(1.0, Color32::from_rgba_unmultiplied(70, 180, 70, 100)));
     }
 
-    // FOV wedge lines (exact CS 1.6 90-deg radar cone)
     let cone_col = Color32::from_rgba_unmultiplied(165, 255, 165, 120);
     let diag = radius * 0.707;
     painter.line_segment([center, Pos2::new(center.x - diag, center.y - diag)], Stroke::new(1.0, cone_col));
     painter.line_segment([center, Pos2::new(center.x + diag, center.y - diag)], Stroke::new(1.0, cone_col));
 
-    let yaw = hud.local.yaw_deg.to_radians();
+    let yaw = hud.yaw_deg.to_radians();
     let fwd = Vec3::new(yaw.cos(), yaw.sin(), 0.0);
     let right = Vec3::new(yaw.sin(), -yaw.cos(), 0.0);
     let radar_range = 1900.0f32;
-
-    // Teammate blips
-    for p in hud.all_players {
-        if !p.alive || p.id == hud.local.id || p.team != hud.local.team {
-            continue;
-        }
-        let delta = p.mv.origin - hud.local.mv.origin;
-        let rx = delta.dot(right) / radar_range;
-        let ry = -delta.dot(fwd) / radar_range;
-        let mut v = Vec2::new(rx, ry);
-        if v.length() > 0.88 {
-            v = v.normalized() * 0.88;
-        }
-        let blip = center + v * radius;
-        let col = if p.has_weapon(WeaponId::C4) {
-            Color32::from_rgb(255, 80, 30)
-        } else {
-            Color32::from_rgb(175, 255, 175)
-        };
-        painter.rect_filled(Rect::from_center_size(blip, Vec2::splat(4.0 * scale)), 0.0, col);
-    }
-
-    // Blinking red planted C4 dot
-    if let Some(c4) = hud.planted_c4
-        && (hud.time_sec * 4.5).sin() > 0.0
-    {
-        let delta = c4.position - hud.local.mv.origin;
+    let blip_at = |pos: Vec3| -> Pos2 {
+        let delta = pos - hud.eye;
         let mut v = Vec2::new(delta.dot(right) / radar_range, -delta.dot(fwd) / radar_range);
         if v.length() > 0.88 {
             v = v.normalized() * 0.88;
         }
-        painter.rect_filled(Rect::from_center_size(center + v * radius, Vec2::splat(5.0 * scale)), 0.0, HUD_RED);
-    }
+        center + v * radius
+    };
 
-    // Local center dot
+    for pos in hud.hud.radar.values() {
+        painter.rect_filled(
+            Rect::from_center_size(blip_at(*pos), Vec2::splat(4.0 * scale)),
+            0.0,
+            Color32::from_rgb(175, 255, 175),
+        );
+    }
+    if let Some((pos, _planted)) = hud.hud.bomb
+        && (hud.time_sec * 4.5).sin() > 0.0
+    {
+        painter.rect_filled(
+            Rect::from_center_size(blip_at(pos), Vec2::splat(5.0 * scale)),
+            0.0,
+            HUD_RED,
+        );
+    }
     painter.rect_filled(Rect::from_center_size(center, Vec2::splat(3.0 * scale)), 0.0, Color32::WHITE);
 }
 
@@ -815,9 +684,52 @@ fn draw_sniper_scope(painter: &egui::Painter, screen: Rect) {
     painter.circle_filled(center, 2.2, Color32::from_rgb(230, 30, 20));
 }
 
-pub fn team_color(team: SpawnTeam) -> Color32 {
+/// The colour of a `TeamInfo` team name.
+pub fn team_color(team: &str) -> Color32 {
     match team {
-        SpawnTeam::CounterTerrorist => TEAM_CT_COLOR,
-        SpawnTeam::Terrorist => TEAM_T_COLOR,
+        "CT" => TEAM_CT_COLOR,
+        "TERRORIST" => TEAM_T_COLOR,
+        _ => HUD_AMBER,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fade(flags: u16, duration: u16, hold: u16) -> ScreenFade {
+        ScreenFade {
+            duration,
+            hold_time: hold,
+            flags,
+            color: [255, 255, 255, 200],
+            started_at: 10.0,
+        }
+    }
+
+    #[test]
+    fn a_flash_holds_then_fades() {
+        // FFADE_IN: the colour holds for one second, then fades out over two.
+        let f = fade(0, 8192, 4096);
+        assert_eq!(screen_fade_alpha(&f, 10.0), 200.0);
+        assert_eq!(screen_fade_alpha(&f, 10.9), 200.0);
+        assert!((screen_fade_alpha(&f, 12.0) - 100.0).abs() < 1.0);
+        assert_eq!(screen_fade_alpha(&f, 14.0), 0.0);
+    }
+
+    #[test]
+    fn a_fade_out_rises_and_can_stay() {
+        let f = fade(1 | 4, 4096, 0);
+        assert_eq!(screen_fade_alpha(&f, 10.0), 0.0);
+        assert!((screen_fade_alpha(&f, 10.5) - 100.0).abs() < 1.0);
+        assert_eq!(screen_fade_alpha(&f, 99.0), 200.0);
+    }
+
+    #[test]
+    fn killfeed_names_map_to_hud_sprites() {
+        assert_eq!(killfeed_sprite_name("ak47"), "d_ak47");
+        assert_eq!(killfeed_sprite_name("mp5"), "d_mp5navy");
+        assert_eq!(killfeed_sprite_name("grenade"), "d_hegrenade");
+        assert_eq!(killfeed_sprite_name(""), "d_skull");
     }
 }
