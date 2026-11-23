@@ -1,12 +1,12 @@
 # cs16-rs
 
-**Counter-Strike 1.6** rewrite in pure Rust, with the protocol layer ported from ReHLDS / ReGameDLL_CS (`#![forbid(unsafe_code)]`, Rust edition 2024) preserving the authentic GoldSrc visual style, **1-to-1 Valve VGUI2 interface** (`ClientScheme.res` + `TrackerScheme.res` + `BackgroundPanel.res`), developer console (`~`), `CVar`/`config.cfg` engine, `pm_shared` movement physics, ReGameDLL-calibrated `KickBack` gunplay across **all 28 CS 1.6 weapons**, `EF_BONEMERGE` third-person weapons, hostage rescue & bomb defusal modes, offline bots, and 100 Hz UDP multiplayer with LAN server discovery. For the licensing of ReHLDS and ReGameDLL_CS, see [`docs/LICENSING.md`](docs/LICENSING.md).
+**Counter-Strike 1.6** rewrite in pure Rust (`#![forbid(unsafe_code)]`, Rust edition 2024), with the server/game logic ported from ReHLDS / ReGameDLL_CS and the Protocol 48 client/renderer ported from Xash3D FWGS and `cs16-client` events (`THIRD-PARTY-NOTICES.md`), featuring GoldSrc BSP/MDL/SPR rendering, VGUI2 menu/console/options (`TrackerScheme.res` + `BackgroundLayout.txt`), developer console (`~`), `CVar`/`config.cfg` engine, `pm_shared` movement physics, ReGameDLL-calibrated `KickBack` gunplay across **all 28 CS 1.6 weapons**, `EF_BONEMERGE` third-person weapons, hostage rescue & bomb defusal modes, offline bots, and 100 Hz UDP multiplayer with LAN server discovery. For the licensing of all four reference projects, see [`docs/LICENSING.md`](docs/LICENSING.md).
 
 Assets are mounted **read-only** directly from an existing Steam Half-Life / Counter-Strike 1.6 installation (`cstrike`, `valve`, `platform`, optional `cstrike_hd`); zero Valve assets are stored in this repository.
 
 Copyright (C) 2026 cs16-rs contributors. Licensed under GPL-3.0-or-later; see LICENSE. See [`docs/LICENSING.md`](docs/LICENSING.md) for the licensing decision and reference-project attribution.
 
-## Workspace Architecture (13 Crates)
+## Workspace Architecture (16 Crates)
 
 - **`cs-vfs`** — Multi-layer case-insensitive GoldSrc VFS (`cstrike_downloads` → optional `cstrike_hd` → `cstrike` → `valve` → `platform`) with automatic Steam `libraryfolders.vdf` discovery.
 - **`cs-cvar`** — Quake/GoldSrc command & CVar engine (`bind`, `unbind`, `alias`, `exec`, `toggle`, `cvarlist`, `cmdlist`, `find`, `map`, `connect`, `buy`, `give`, `god`, `noclip`, `sv_restart`, `bot_add`/`_t`/`_ct`, `bot_kick`, `say`/`say_team`, `radio1..3`, `nightvision`, `impulse 201`, `screenshot`, `Tab` autocomplete, local `config.cfg` persistence).
@@ -14,13 +14,14 @@ Copyright (C) 2026 cs16-rs contributors. Licensed under GPL-3.0-or-later; see LI
 - **`cs-sim`** — Deterministic 100 Hz game simulation:
   - GoldSrc BSP hull tracing (`Point`/`Standing`/`Large`/`Crouched`) + anatomical 6-hitbox player raycast + wallbang material penetration + shattering `func_breakable` glass/vents + interactive `func_door`s.
   - Full `pm_shared` physics (counter-strafing, air-strafe/bunnyhop `wishspd` cap 30, 18u stairs, duck-jump, ladders, fall damage, surface footsteps).
-  - `pm` module: the original `pm_shared` movement code of ReGameDLL_CS (vanilla branch), ported function by function behind a `PmWorld` trait, so the server and a client's prediction can share it. The older `pmove` above stays for the `cs-sim` tests only.
+  - Older prototype `pmove` physics module remains for legacy `cs-sim` unit tests; shared `pm_shared` movement now lives in **`cs-pm`**.
   - **All 28 CS 1.6 weapons + C4 + NightVision**: Knife, Glock-18 (burst), USP (silencer), P228, Deagle, Five-SeveN, Dual Elites, M3 & XM1014 (interruptible shell-by-shell reload), MAC-10, TMP, MP5, UMP-45, P90, Galil, FAMAS (burst), AK-47, M4A1 (silencer), SG552, AUG, Scout, AWP, G3SG1, SG550, M249, HE/Flash/Smoke grenades, C4 — with ReGameDLL `KickBack` recoil & `PM_DropPunchAngle` spring recovery.
   - Both **Bomb/Defuse (`de_*`)** and **Hostage Rescue (`cs_*`)** modes, persistent round corpses, economy (`$800..$16000` + loss bonus), automatic BSP `NavGraph` generator + Bot AI.
-- **`cs-proto48`** — `#![forbid(unsafe_code)]` implementation of Valve's **GoldSrc Protocol 48** (Counter-Strike 1.6 / Half-Life 1 network wire protocol), ported deterministically from `ReHLDS` and `ReGameDLL_CS`.
+- **`cs-pm`** — Shared GoldSrc `pm_shared` movement physics and BSP/box hull collision (`PM_Move`, `PM_RecursiveHullCheck`, surface materials) ported from ReGameDLL_CS & ReHLDS behind the `PmWorld` trait so `cs-game` and `cs-clientcore` prediction run identical movement.
+- **`cs-proto48`** — `#![forbid(unsafe_code)]` implementation of Valve's **GoldSrc Protocol 48** (Counter-Strike 1.6 / Half-Life 1 network wire protocol), ported deterministically from `ReHLDS`, `ReGameDLL_CS`, and `Xash3D FWGS`.
 - **`cs-platform`** — Platform seams shared by native and `wasm32` builds: the `Clock` time source (`NativeClock`, `ManualClock`).
 - **`cs-transport`** — Datagram transports behind one `PacketTransport` trait: non-blocking UDP and an in-process loopback hub with injectable loss, duplication and reordering.
-- **`cs-game`** — The game logic of CS 1.6 (the `mp.dll` equivalent) behind the engine's `GameDll` trait, ported from ReGameDLL_CS (vanilla `mp.dll` rules): team and class menus, spawning, freeze periods, timers, win conditions, economy/loser bonus, scoreboard/kill messages, chat, radio, radar/status bar, spectator observer, buy zones, map cycles, **all 28 weapons/grenades**, **C4 bomb planting/defusing/drop/pickup & defuser kits (`de_*`)**, **classic hostages + `CLocalNav` (`cs_*`)**, **VIP assassination & escape (`as_*` / `es_*`)**, and **engine-hosted fake-client bots** (`bot_add*`/`bot_kick`/`bot_quota`) with BSP `NavGraph` combat & objective play. Still unported: tactical shield, `autobuy`/`rebuy`, interactive Phase 7 map entities (`func_door`/`func_breakable`/`func_button`/`ambient_generic`), and full ZBot/`.nav` AI (Phase 12). Player movement runs through `cs_sim::pm` in `SV_RunCmd` order.
+- **`cs-game`** — The game logic of CS 1.6 (the `mp.dll` equivalent) behind the engine's `GameDll` trait, ported from ReGameDLL_CS (vanilla `mp.dll` rules): team and class menus, spawning, freeze periods, timers, win conditions, economy/loser bonus, scoreboard/kill messages, chat, radio, radar/status bar, spectator observer, buy zones, map cycles, **all 28 weapons/grenades**, **C4 bomb planting/defusing/drop/pickup & defuser kits (`de_*`)**, **classic hostages + `CLocalNav` (`cs_*`)**, **VIP assassination & escape (`as_*` / `es_*`)**, and **engine-hosted fake-client bots** (`bot_add*`/`bot_kick`/`bot_quota`) with BSP `NavGraph` combat & objective play. Still unported: tactical shield, `autobuy`/`rebuy`, interactive Phase 7 map entities (`func_door`/`func_breakable`/`func_button`/`ambient_generic`), and full ZBot/`.nav` AI (Phase 12). Player movement runs through `cs-pm` (`cs_pm::pm`) in `SV_RunCmd` order.
 - **`cs-engine`** — Protocol 48 server engine, the equivalent of the original dedicated server: connectionless queries, connect and sign-on, per-client delta frames with PVS culling, user commands, fake clients (`CreateFakeClient` / `RunPlayerMove`), timeouts and map changes, with the game behind a `GameDll` trait.
 - **`cs-probe`** — Headless Protocol 48 test client (library and `cs-probe` binary): connects, signs on, walks and records/diffs captures, used by the engine's tests and against live HLDS.
 - **`cs-clientcore`** — The platform-free Protocol 48 client: connection and sign-on, precache tables, entity frames and interpolation, movement prediction on `cs-pm`, events, temp entities, sound queue and HUD state from the server's messages.
@@ -44,40 +45,34 @@ cargo run --release -p cs-client -- --map de_dust2 --exec "net_graph 1"
 cargo run --release -p cs-client -- --map cs_office
 ```
 
-### Dedicated Server + Multiplayer (with LAN Discovery)
+### Dedicated Server + Multiplayer (with LAN Discovery & Original CS 1.6 Compatibility)
 
-Terminal 1 (start headless 100 Hz server):
+Terminal 1 (start headless 100 Hz Protocol 48 server):
 
 ```powershell
 cargo run --release -p cs-server -- --map de_dust2 --port 27015
 ```
 
-Terminal 2 (connect directly or click **Find Servers → LAN → Refresh LAN**):
+Terminal 2 (connect from `cs-client` or click **Find Servers → LAN → Refresh LAN**, or connect from the original Counter-Strike 1.6 client console with `connect 127.0.0.1:27015`):
 
 ```powershell
 cargo run --release -p cs-client -- --exec "connect 127.0.0.1:27015"
 ```
 
-### Protocol 48 Server for the Original CS 1.6 Client
+Optional flags: `--port <n>` (default 27015), `--maxplayers <n>` (default 16), `--bots <n>` (sets initial `bot_quota`), `--hostname <name>`, `--gamedir <path>`, `--walk-game` (run the older walking-only `WalkGame` instead of `cs-game`); `--proto48` is still accepted for compatibility and does nothing (the server is always Protocol 48).
 
-```powershell
-cargo run -p cs-server -- --proto48 --map de_dust2
-```
-
-Optional flags: `--port <n>` (default 27015), `--maxplayers <n>` (default 16), `--bots <n>` (sets initial `bot_quota` in `--proto48` too), `--hostname <name>`, `--gamedir <path>`, `--walk-game` (run the older walking-only `WalkGame` instead of `cs-game`). Then, in the original Counter-Strike 1.6 client, open the console (`~`) and type `connect 127.0.0.1:27015`.
-
-Since phases 2C–2E this mode runs `cs-game`, ported from ReGameDLL_CS (vanilla `mp.dll` behaviour; the 2C game as a whole has not been compared with the original client, only its join and message streams and the checks listed below): team/class menus (VGUI and text), spawns, freeze periods, timers, money rewards and loser bonus, scoreboard and kill feed, chat, radio, radar, crosshair status bar, spectator observer, buy zones, map cycle (`changelevel`), all 24 buyable guns + knife + 3 grenades, hit-group/hitbox combat and client weapon prediction (`cl_lw 1`), and map objectives:
+Since phases 2C–2E `cs-server` runs `cs-game`, ported from ReGameDLL_CS (vanilla `mp.dll` behaviour; the 2C game as a whole has not been compared with the original client, only its join and message streams and the checks listed below): team/class menus (VGUI and text), spawns, freeze periods, timers, money rewards and loser bonus, scoreboard and kill feed, chat, radio, radar, crosshair status bar, spectator observer, buy zones, map cycle (`changelevel`), all 24 buyable guns + knife + 3 grenades, hit-group/hitbox combat and client weapon prediction (`cl_lw 1`), and map objectives:
 
 - **Bomb defusal (`de_*`)**: `func_bomb_target` / `info_bomb_target`, `GiveC4` rotation, carrying/dropping/picking up the C4 (`CWeaponBox::BombThink`), planting/cancelling (`BarTime`), accelerating beeps & `TE_GLOWSPRITE` LED blinks, detonation (`TE_SPRITE`, `RadiusDamage2`, firing zone targets), and CT defusal (`10 s` / `5 s` with bought or dropped `item_thighpack`).
 - **Hostage rescue (`cs_*`)**: `func_hostage_rescue` / `info_hostage_rescue`, classic `CHostage` + `CLocalNav` `+use` following/rescue/injury penalties/`HostageK`, round restarts and `mp_hostagepenalty`.
 - **VIP & Escape (`as_*` / `es_*`)**: `func_vip_safetyzone` / `info_vip_start`, `become_vip` / `jointeam 3` queue, `vip` model/200 armor/half armor ratio/`as_` buy restrictions, `func_escapezone` ratio and 3-round `SwapAllPlayers`, plus `info_map_parameters` (`buying`/`bombradius`).
 - **Engine-backed bots**: ReHLDS `CreateFakeClient` / `RunPlayerMove` bots driven by `cs_sim::bots`'s directed `NavGraph` (`bot_add`, `bot_add_t`, `bot_add_ct`, `bot_kick`, `bot_quota`), buying loadout aliases, fighting in LOS, planting/defusing C4 and rescuing hostages.
 
-Since the pm_shared port the movement of this mode is the original `pm_shared` code (`cs_sim::pm`) with the engine's physents, traces and movevars (`cs-engine`'s `pm` and `texture` modules): run, jump, duck, stairs, ladders, water, drowning, spectators and footsteps follow ReGameDLL_CS and ReHLDS. It is tested against the sources and has **not been compared with the original client yet**; the manual checks are in [`docs/parity/checklists/pm-movement.md`](docs/parity/checklists/pm-movement.md).
+Since the `pm_shared` port the movement of both `cs-game` and `cs-clientcore` prediction uses the shared `cs-pm` code (`PM_Move` with engine/world traces, movevars, and surface materials in `cs-engine`'s `pm` and `texture` modules): run, jump, duck, stairs, ladders, water, drowning, spectators and footsteps follow ReGameDLL_CS and ReHLDS, and Phase 3 headless runs against stock HLDS verified movement prediction on `de_dust2` and `cs_office` (see `docs/parity/checklists/phase3-clientcore.md` and `docs/parity/checklists/pm-movement.md`).
 
 Phase 2E status, honestly: the objectives are ported from the sources and covered by the automated suite, but the original client has not played a full round of `de_dust2` or `cs_office` on this server yet (the owner's Part B in the 2E checklist is open). Against the live original server only three join scenarios were diffed (`cs_office` hostage baselines and `HostagePos`, `de_dust2` `GiveC4` and `drop weapon_c4`, `as_oilrig` VIP join); planting, beeps, detonation and defusal, hostage following, rescue and the penalty, the VIP and escape rounds, and the bots playing them are tested against the source only. Not ported: `SVC_DIRECTOR` (HLTV) messages and the log lines of the objectives, the scripted `weapon_c4`, the observer's C4/defuser icons and `SetProgressBarTime2`, the Condition Zero hostage AI, and ZBot behaviour beyond the minimal `NavGraph` bots (post-plant guarding is phase 12).
 
-Live `hlds.exe` (build 10210) `cs-probe --diff` captures verified `cs_office` (`hostage_entity` baselines `#59..#62`, `HostagePos`, `StatusIcon`, `ItemStatus`), `de_dust2` (`GiveC4`, `ScoreAttrib` bomb bit, `drop weapon_c4` & 1 Hz `BombDrop`), and `as_oilrig` (`info_vip_start` spawn, `ScoreAttrib` VIP bit, VIP join audio/HUD). Manual checklists for the original client live in [`docs/parity/checklists/phase2c-game.md`](docs/parity/checklists/phase2c-game.md), [`docs/parity/checklists/phase2d-weapons.md`](docs/parity/checklists/phase2d-weapons.md), and [`docs/parity/checklists/phase2e-objectives.md`](docs/parity/checklists/phase2e-objectives.md). Ledger totals (`cargo xtask parity`): **4.2% verified**, **37.3% tested**, **47.8% implemented**. Remaining gaps: tactical shield, `autobuy`/`rebuy`, `game_player_equip`, interactive Phase 7 map entities (doors/buttons/lifts/trains/breakables), full ZBot `.nav` AI (Phase 12), and HLDS update-rate frame batching (`~24 Hz` vs our `~55–60 Hz`).
+Live `hlds.exe` (build 10210) `cs-probe --diff` captures verified `cs_office` (`hostage_entity` baselines `#59..#62`, `HostagePos`, `StatusIcon`, `ItemStatus`), `de_dust2` (`GiveC4`, `ScoreAttrib` bomb bit, `drop weapon_c4` & 1 Hz `BombDrop`), and `as_oilrig` (`info_vip_start` spawn, `ScoreAttrib` VIP bit, VIP join audio/HUD). Manual checklists for the original client live in [`docs/parity/checklists/phase2c-game.md`](docs/parity/checklists/phase2c-game.md), [`docs/parity/checklists/phase2d-weapons.md`](docs/parity/checklists/phase2d-weapons.md), and [`docs/parity/checklists/phase2e-objectives.md`](docs/parity/checklists/phase2e-objectives.md). Ledger totals (`cargo xtask parity`, 2026-11-24): **5.1% verified**, **39.1% tested**, **49.4% implemented**. Remaining gaps: tactical shield, `autobuy`/`rebuy`, `game_player_equip`, interactive Phase 7 map entities (doors/buttons/lifts/trains/breakables), full ZBot `.nav` AI (Phase 12), and HLDS update-rate frame batching (`~24 Hz` vs our `~55–60 Hz`).
 
 Since phase 2B the world is real: players collide with each other, brush entities (`func_wall`, `func_breakable` and the like) are solid, and entities from the map's entity lump are linked into the world with traces against them, touches, the movement types (toss, bounce, fly, step, push) and pushers, ported from ReHLDS (not yet compared with the original server). Client commands are lag compensated and sounds travel through the PAS.
 
@@ -108,7 +103,7 @@ Compatibility with the original client and HLDS is verified in part (connect, MO
 | `WASD` / `Space` / `Ctrl` / `Shift` | Move / Jump / Crouch / Walk |
 | `Mouse1` / `Mouse2` / `R` | Fire / Zoom, Silencer, Burst-Fire or Heavy Knife / Reload |
 | `1`–`5` / `Q` / `G` | Weapon Slots / Last Weapon (`lastinv`) / Drop Weapon |
-| `B` (`B-4-2`, `B-4-3`, `B-5-1`, `B-8-2`) | 1-to-1 VGUI2 Buy Menu + Quick-Buy Hotkeys + `F1` Autobuy |
+| `B` | Server Text Buy Menu (`1`–`9`/`0`, `buyequip`) |
 | `,` / `.` | Buy Primary / Secondary Ammo |
 | `E` | Defuse C4 / Open Door / Lead Hostage (`cs_*`) |
 | `N` / `T` | Toggle NightVision Goggles / Spray Lambda Logo |

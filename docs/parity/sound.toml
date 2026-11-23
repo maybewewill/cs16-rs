@@ -19,7 +19,7 @@ evidence = "crates/cs-client/src/audio.rs (media/gamestartup.mp3 / Half-Life01.m
 [[item]]
 id = "sound_protocol48_svc_sound_driver"
 status = "tested"
-evidence = "crates/cs-clientcore/tests/effects.rs::golden_sounds_become_commands_with_their_names (svc_sound, ambient and event sounds become SoundCommands by name); crates/cs-client/src/audio.rs plays them with rodio; live on the original HLDS 12 shot sounds and the map ambients arrived (A14 of docs/parity/checklists/phase3-clientcore.md); how they sound is Part B, not done"
+evidence = "crates/cs-clientcore/src/sound.rs::tests::a_sound_starts_by_its_precache_name, static_channel_goes_to_the_ambient_path, stop_sound_splits_entity_and_channel, static_sound_and_fade_are_commands (svc_sound, svc_spawnstaticsound, svc_stopsound, svc_soundfade -> SoundCommands); crates/cs-clientcore/src/events.rs::tests::weapon_fire_event_produces_view_anim_and_shell, a_vehicle_event_starts_and_stops_its_sound (event sounds); crates/cs-clientcore/tests/effects.rs::golden_sounds_become_commands_with_their_names (golden svc_sound/spawnstaticsound stream by precache name); crates/cs-client/src/audio.rs plays them with rodio; live on the original HLDS 12 shot sounds and the map ambients arrived (A14 of docs/parity/checklists/phase3-clientcore.md); how they sound is Part B, not done"
 
 [[item]]
 id = "sound_channels_and_priorities"

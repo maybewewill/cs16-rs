@@ -52,7 +52,7 @@ evidence = "crates/cs-pm/tests/pm_walk.rs::ground_acceleration_matches_pm_accele
 [[item]]
 id = "movement_air_move"
 status = "implemented"
-evidence = "crates/cs-sim/src/pm/walk.rs holds PM_AirAccelerate and PM_AirMove (the wishspd cap of 30, sv_airaccelerate); no test isolates the air acceleration or the air strafe, and the jump and fall tests do not assert on it."
+evidence = "crates/cs-pm/src/pm/walk.rs holds PM_AirAccelerate and PM_AirMove (the wishspd cap of 30, sv_airaccelerate); no test isolates the air acceleration or the air strafe, and the jump and fall tests do not assert on it."
 
 [[item]]
 id = "movement_fly_move_clip"

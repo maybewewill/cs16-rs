@@ -195,7 +195,7 @@ evidence = "Phase 10: rendering modified .res layouts downloaded from servers or
 [[item]]
 id = "ui_hud_protocol48_usermsg_driver"
 status = "implemented"
-evidence = "crates/cs-client/src/ui/hud.rs HudView over cs_clientcore::HudState (health, armor, money, ammo, timer, status icons, kill feed, chat, centre text, radar, bomb, bar, screen fade); crates/cs-client/src/hudtext.rs; tests view::tests::a_golden_replay_builds_scenes_without_a_gpu and session::tests::a_local_game_plays_through_the_session_layer. Phase 10 replaces the drawing with the .res interpreter"
+evidence = "crates/cs-client/src/ui/hud.rs HudView over cs_clientcore::HudState (health, armor, money, ammo, timer, status icons, kill feed, chat, centre text, radar, bomb, bar, screen fade; egui drawing is a Part B visual check with no automated test); crates/cs-client/src/hudtext.rs (tests crates/cs-client/src/hudtext.rs::tests::slots_take_their_parameters, a_plain_message_keeps_its_parameters, html_becomes_text); HUD state aggregation tested in crates/cs-clientcore/tests/effects.rs::hud_state_after_golden_join. Phase 10 replaces the drawing with the .res interpreter"
 
 [[item]]
 id = "ui_hud_overview_map"

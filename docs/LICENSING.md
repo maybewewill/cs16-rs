@@ -12,19 +12,21 @@ Until 2026-11-21 the project was licensed under MIT.
 
 ## Reference projects
 
-The repository-level licences of both reference projects were checked on 2026-11-20 by reading
-their `LICENSE` files on the GitHub `master` branch:
+The repository-level licences of ReHLDS and ReGameDLL_CS were checked on 2026-11-20 by reading
+their `LICENSE` files on the GitHub `master` branch; Xash3D FWGS and cs16-client were checked by
+reading their source file headers on 2026-11-23:
 
-| Project | Repository `LICENSE` | Copyright line |
+| Project | Repository / File Licence | Copyright line |
 |---|---|---|
-| ReHLDS | MIT | Copyright (c) 2014–2025 ReHLDS Contributors |
-| ReGameDLL_CS | MIT | Copyright (c) 2015–2025 ReGameDLL_CS Contributors |
-| Xash3D FWGS | GPL-3.0-or-later (as recorded in the module documentation of the ported files; not rechecked on the upstream `master` for this table) | Xash3D FWGS contributors |
-| cs16-client | GPL-2.0-or-later (the `event_*.cpp` files only) | cs16-client contributors |
+| ReHLDS | MIT (`LICENSE`) / GPL-2.0-or-later + linking exception (`.cpp`) | Copyright (c) 2014–2025 ReHLDS Contributors |
+| ReGameDLL_CS | MIT (`LICENSE`) | Copyright (c) 2015–2025 ReGameDLL_CS Contributors |
+| Xash3D FWGS | GPL-3.0-or-later (per ported module headers) | Copyright (C) 2007–2018 Uncle Mike; Xash3D FWGS contributors |
+| cs16-client | GPL-2.0-or-later (per event/header files used) | cs16-client contributors |
 
 `LICENSE` at the repository root holds the GPL v3 text; `THIRD-PARTY-NOTICES.md` holds the
-upstream copyright and permission notices of ReHLDS and ReGameDLL_CS. The protocol crate
-`crates/cs-proto48` is ported from ReHLDS and ReGameDLL_CS.
+upstream copyright and permission notices of all four reference projects (ReHLDS, ReGameDLL_CS,
+Xash3D FWGS, and cs16-client). The protocol crate `crates/cs-proto48` is ported from ReHLDS,
+ReGameDLL_CS, and Xash3D FWGS.
 
 ## Resolved — file headers in the reference projects
 
@@ -65,7 +67,7 @@ What was found:
   engine files `pmove.cpp`, `pmovetst.cpp`, `sv_user.cpp`, `sv_pmove.cpp`, `sv_main.cpp`,
   `pr_cmds.cpp`, `model.cpp` and `tmessage.cpp` carry the GPL v2-or-later header with the linking
   exception. `THIRD-PARTY-NOTICES.md` says what was taken from each. The `FL_*`,
-  `MOVETYPE_*`, `IN_*` and `CONTENTS_*` values in `crates/cs-sim/src/pm/consts.rs` are numeric
+  `MOVETYPE_*`, `IN_*` and `CONTENTS_*` values in `crates/cs-pm/src/pm/consts.rs` are numeric
   values only, of the kind already listed under the Valve Half-Life SDK caveat; the ones marked
   there as `(HL SDK)` come from the standard SDK and are an assumption until checked.
 - Phase 2D weapons port (read 2026-11-22; ReGameDLL_CS and ReHLDS master, the first 40 lines of each fetched copy checked): ReGameDLL_CS `regamedll/dlls/player.cpp`, `player.h`, `cbase.h`, `client.h`, `gamerules.h`, `util.h`, `weapons.h`, `weapontype.h`, `cdll_dll.h`, `decals.h`, `regamedll/common/const.h`, `entity_state.h`, `usercmd.h`, `weaponinfo.h`, `event_flags.h`, `regamedll/engine/studio.h`, `regamedll/pm_shared/pm_defs.h` and `pm_materials.h` carry the GPL v2-or-later header with the linking exception. These `dlls` files begin with `#include "precompiled.h"` (or with declarations) and have no licence header, so the repository `LICENSE` (MIT) is the notice that applies to them: `weapons.cpp`, `weapontype.cpp`, `cbase.cpp`, `combat.cpp`, `ggrenade.cpp`, `util.cpp`, `client.cpp`, `gamerules.cpp`, `multiplay_gamerules.cpp` and every `wpn_*.cpp` (`wpn_ak47.cpp` to `wpn_xm1014.cpp`, `wpn_c4.cpp` read for the survey only and not ported). `regamedll/dlls/eiface.h` has no licence header either. The ReHLDS engine files `sv_main.cpp`, `sv_user.cpp`, `sv_phys.cpp`, `pr_cmds.cpp`, `world.cpp` and `r_studio.cpp` carry the GPL v2-or-later header with the linking exception; of ReHLDS `decals.cpp`, `decals.h`, `wad.cpp`, and the `common/` headers `event_flags.h`, `event_args.h`, `weaponinfo.h`, `resource.h`, and `engine/delta.h` read for numeric values and layouts, the licence headers were NOT checked in this task: treat them like `common/const.h` (Valve's notice, numbers and names only) until they are. `THIRD-PARTY-NOTICES.md` says what was taken from each. `r_studio.cpp` was before listed as read for documentation only; since phase 2D `SV_HullForStudioModel`, `SV_StudioSetupBones` and `R_StudioHull` are ported (`crates/cs-engine/src/studio.rs`), so that row is changed.
@@ -76,14 +78,15 @@ What was found:
   from Valve LLC; `rehlds/common/qlimits.h` and `rehlds/public/rehlds/edict.h` carry a plain
   Valve copyright line without terms of use.
 
-- Phase 3 client port (read 2026-11-23): Xash3D FWGS `engine/client/cl_main.c`, `cl_parse.c`, `cl_parse_gs.c`, `cl_frame.c`, `cl_events.c`, `cl_tent.c`, `cl_custom.c`, `s_main.c`, `dll_int/cl_pmove.c`, `engine/common/cmd.c`, `cvar.c`, `net_chan.c`, `public/matrixlib.c`, `xash3d_mathlib.c`, `xash3d_mathlib.h` and `ref/gl/gl_rmain.c`, `gl_rsurf.c`, `gl_sprite.c`, `gl_studio.c`, `gl_local.h` are GPL-3.0-or-later and compatible with this project's licence; the behaviour of `cs-clientcore` and of the `cs-client` renderer was ported from them function by function (`THIRD-PARTY-NOTICES.md` lists each file and what was taken). cs16-client `cl_dll/events/event_*.cpp` are GPL-2.0-or-later ("or later" makes them usable under GPL-3.0-or-later); the per-weapon constants of the 30 weapon events and the smoke grenade clouds come from them. The Valve-licensed helper files those events call (`EV_GetDefaultShellInfo`, `EV_GetGunPosition`, `HUD_TempEntUpdate`, the `cl_dll/hud*.cpp` code) were NOT ported: Xash3D leaves the temp entity update to the client library, so the shell kinematics, the gun position and the temp entity update are our own clean-room design, written by an author who did not read the Valve files (an earlier transliteration of them was removed in phase 3 review).
+- Phase 3 client port (read 2026-11-23; `cl_main.c` `CL_ComputeClientInterpolationAmount` also consulted 2026-11-24): Xash3D FWGS `engine/client/cl_main.c`, `engine/client/parse/cl_parse.c`, `engine/client/parse/cl_parse_gs.c`, `cl_frame.c`, `cl_events.c`, `cl_tent.c`, `cl_custom.c`, `engine/client/sound/s_main.c`, `dll_int/cl_pmove.c`, `engine/common/cmd.c`, `cvar.c`, `net_chan.c`, `engine/client/client.h`, `engine/common/netchan.h`, `protocol.h`, `public/matrixlib.c`, `xash3d_mathlib.c`, `xash3d_mathlib.h` and `ref/gl/gl_rmain.c`, `gl_rsurf.c`, `gl_sprite.c`, `gl_studio.c`, `gl_local.h` are GPL-3.0-or-later and compatible with this project's licence; the behaviour of `cs-clientcore`, the Phase 3 protocol/asset additions, and the `cs-client` renderer was ported from them function by function (`THIRD-PARTY-NOTICES.md` lists each file and what was taken; `common/const.h` lines 698–720 `kRenderFx*` numeric values carry Valve LLC's notice and fall under the caveat below). cs16-client `cl_dll/events/event_*.cpp` and `dlls/wpn_shared.h` are GPL-2.0-or-later ("or later" makes them usable under GPL-3.0-or-later); the per-weapon constants, `*_SHOOT*` view-model enums, vehicle/reset/explosion events, and smoke grenade clouds come from them. The Valve-licensed helper files those events call (`EV_GetDefaultShellInfo`, `EV_GetGunPosition`, `HUD_TempEntUpdate`, the `cl_dll/hud*.cpp` code) were NOT ported: Xash3D leaves the temp entity update to the client library, so the shell kinematics, the gun position and the temp entity update are our own clean-room design, written by an author who did not read the Valve files (an earlier transliteration of them was removed in phase 3 review).
 
-Decision: the project owner chose GPL-3.0-or-later because it is compatible with both readings
-of the reference projects' licensing.
+Decision: the project owner chose GPL-3.0-or-later because it is compatible with the licensing
+of all four upstream reference projects (ReHLDS, ReGameDLL_CS, Xash3D FWGS, and cs16-client).
 
-Porting code from ReHLDS and ReGameDLL_CS is allowed again, with the source of ported code
-named in `THIRD-PARTY-NOTICES.md`. Code copied from the Valve Half-Life SDK headers stays
-excluded; see [Valve Half-Life SDK caveat](#valve-half-life-sdk-caveat) for what was taken.
+Porting code from ReHLDS, ReGameDLL_CS, Xash3D FWGS, and the `cs16-client` event files listed in
+`THIRD-PARTY-NOTICES.md` is allowed, with each ported file's source named in `THIRD-PARTY-NOTICES.md`.
+Code copied from the Valve Half-Life SDK headers stays excluded; see
+[Valve Half-Life SDK caveat](#valve-half-life-sdk-caveat) for what was taken.
 
 ## Copyright notice
 
@@ -106,17 +109,18 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 ## Valve Half-Life SDK caveat
 
-Parts of ReHLDS and ReGameDLL_CS originate from Valve's Half-Life SDK. Code that originates
-from the Half-Life SDK carries Valve's SDK licence regardless of the licence of the reference
-project it was read from, and no such code was copied.
+Parts of ReHLDS, ReGameDLL_CS, and Xash3D FWGS originate from Valve's Half-Life SDK. Code that
+originates from the Half-Life SDK carries Valve's SDK licence regardless of the licence of the
+reference project it was read from, and no such code was copied.
 
-What was taken from the headers that carry Valve's notice (`const.h`, `usercmd.h`,
-`entity_state.h`, `qlimits.h`, `edict.h`) is the numeric constants and names the original
-client, the game libraries and the wire protocol require to match: the `SOLID_*`, `MOVETYPE_*`,
-`FL_*`, `CONTENTS_*` and `EF_*` constants, `MAX_PACKET_ENTITIES`, `MAX_ENT_LEAFS`,
-`MAX_LIGHTSTYLE_SIZE`, and the field names and types of `usercmd_t`, `clientdata_t` and
-`entity_state_t`. `THIRD-PARTY-NOTICES.md` lists them file by file. Whether taking these
-numbers and names is acceptable under GPL-3.0-or-later is an open question for the owner.
+What was taken from the headers that carry Valve's notice (ReHLDS `const.h`, `usercmd.h`,
+`entity_state.h`, `qlimits.h`, `edict.h`, `customentity.h`; Xash3D FWGS `common/const.h` lines
+698–720 `kRenderFx*`) is the numeric constants and names the original client, the game libraries
+and the wire protocol require to match: the `SOLID_*`, `MOVETYPE_*`, `FL_*`, `CONTENTS_*`,
+`EF_*` and `kRenderFx*` constants, `MAX_PACKET_ENTITIES`, `MAX_ENT_LEAFS`, `MAX_LIGHTSTYLE_SIZE`,
+and the field names and types of `usercmd_t`, `clientdata_t` and `entity_state_t`.
+`THIRD-PARTY-NOTICES.md` lists them file by file. Whether taking these numbers and names is
+acceptable under GPL-3.0-or-later is an open question for the owner.
 
 ## Valve assets
 

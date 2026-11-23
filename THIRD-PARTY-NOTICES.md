@@ -36,11 +36,11 @@ function names its source file, function and the date read in its doc comment):
 | `cmodel.cpp` | `CM_CalcPAS` (the PAS built from the PVS rows). |
 | `mathlib.cpp` | `AngleVectors`, `AngleVectorsTranspose`. |
 | `unicode_strtools.cpp` | `Q_StripUnprintableAndSpace` (with the `Q_iswprint` table it uses): the behaviour of the chat text clean-up of `crates/cs-game/src/chat.rs`, ported by function (master, read 2026-11-22). The file begins with the GPL v2-or-later header with the linking exception, like the other engine sources; it is the ReHLDS file `rehlds/engine/unicode_strtools.cpp`, not a ReGameDLL_CS file. |
-| `pmove.cpp` | The player hull tables (`player_mins`, `player_maxs`, `pm_hullminsmaxs`) and the physent bookkeeping of the engine side of `pmove` (`crates/cs-engine/src/pm.rs`), read 2026-11-22. |
-| `pmovetst.cpp` | `PM_RecursiveHullCheck`, `PM_HullPointContents`, `PM_HullForBox`, `PM_HullForBsp`, `_PM_PlayerTrace`, `_PM_TestPlayerPosition`, `PM_LinkContents`, `PM_PointContents`, `PM_TraceModel` (`crates/cs-engine/src/pm.rs`), read 2026-11-22. |
+| `pmove.cpp` | The player hull tables (`player_mins`, `player_maxs`, `pm_hullminsmaxs`) and the physent bookkeeping of the engine side of `pmove` (`crates/cs-pm/src/physent.rs`, `crates/cs-engine/src/pm.rs`), read 2026-11-22. |
+| `pmovetst.cpp` | `PM_RecursiveHullCheck`, `PM_HullPointContents`, `PM_HullForBox`, `PM_HullForBsp`, `_PM_PlayerTrace`, `_PM_TestPlayerPosition`, `PM_LinkContents`, `PM_PointContents`, `PM_TraceModel` (`crates/cs-pm/src/collision.rs`, `crates/cs-pm/src/physent.rs`), read 2026-11-22. |
 | `sv_pmove.cpp` | `PM_SV_TraceTexture` and `PM_SV_PlaySound` (what the engine does when `pm_shared` asks for the texture under the player or plays a sound), read 2026-11-22. The other `PM_SV_*` callbacks only forward to the functions above. |
 | `model.cpp` | `CalcSurfaceExtents` and the overrides `Mod_LoadFaces` applies to `texturemins` and `extents` (for `TraceTexture`, `crates/cs-engine/src/texture.rs`), read 2026-11-22. |
-| `tmessage.cpp` | `memfgets` (the 510-byte chunking of `PM_InitTextureTypes` reading `sound/materials.txt`, `crates/cs-sim/src/pm/materials.rs`), read 2026-11-22. |
+| `tmessage.cpp` | `memfgets` (the 510-byte chunking of `PM_InitTextureTypes` reading `sound/materials.txt`, `crates/cs-pm/src/pm/materials.rs`), read 2026-11-22. |
 | `r_studio.cpp` | Phase 2D (read 2026-11-22): `SV_HullForStudioModel`, `SV_StudioSetupBones` (the bone pose of a sequence frame with the blend and the controllers) and `R_StudioHull` (the hitbox hulls), ported function by function into `crates/cs-engine/src/studio.rs`, with the hitgroup of the clipped hitbox. `SV_CheckSphereIntersection` is not ported. The file carries the GPL v2-or-later header with the linking exception. |
 | `pr_cmds.cpp`, `sv_user.cpp`, `sv_main.cpp` (phase 2E, read 2026-11-23) | Engine fake clients (`crates/cs-engine` + `crates/cs-engine/tests/fake_clients.rs`): `CreateFakeClient_internal`, `PF_RunPlayerMove_I`, `PF_MessageEnd_I` and `EV_Playback` fake-client skips (`pr_cmds.cpp`); `SV_RunCmd` fake-client paths skipping `SV_SetupMove`/`SV_RestoreMove`/movevars and empty `SV_PreRunCmd` (`sv_user.cpp`); `SV_InactivateClients`, `SV_CheckTimeouts`, `SV_SendClientMessages`, `SV_UpdateToReliableMessages`, `SV_GetFakeClientCount` (`sv_main.cpp`). All three files carry the GPL v2-or-later header with the linking exception. |
 | `sv_main.cpp`, `sv_user.cpp`, `pr_cmds.cpp`, `world.cpp`, `sv_phys.cpp` (phase 2D, read 2026-11-22) | `SV_WriteClientdataToMessage` (the weapon data of `cl_lw` clients with its delta against the acknowledged frame), `SV_EmitEvents` and `SV_EmitEvents_internal` (the event queue), `SV_CreateResourceList` (events and decals in the resource list), `PF_precache_event` / `EV_Precache_internal`, `EV_Playback` and `PF_playbackevent` (flags, origin and angles filled from the invoker), `PF_DecalIndex`, `PF_sound_I` flags and ambient sounds, `SV_RunCmd` / `SV_ParseMove` (the per-command random seed from the sequence, backups and repeats, and `cl_lw` from the userinfo), `SV_ClipMoveToEntity` with the hit boxes of studio models (`sv_clienttrace`), `SV_HullForEntity`. |
@@ -113,9 +113,9 @@ function names its source file, function and the date read in its doc comment.
 | `util.cpp`, `util.h` | `UTIL_ScreenFade`, `UTIL_ClientPrintAll`/`ClientPrint` and their destinations (`HUD_PRINT*`, `HUD_PRINTRADIO`), `DMG_EXPLOSION`, `UTIL_PlayerByIndex`, the `UTIL_*` message helpers. |
 | `weapontype.cpp`, `weapontype.h`, `weapons.cpp` | `g_weaponBuyAliasInfo` (the buy aliases), the prices `KEVLAR_PRICE`, `HELMET_PRICE`, `ASSAULTSUIT_PRICE`, `NVG_PRICE`; `W_Precache` (the `radio.spr` precache). |
 | `unisignals.h`, `cdll_dll.h`, `observer.cpp`, `observer.h` | `CUnifiedSignals` and `SIGNAL_BUY`; `HIDEHUD_*`, `SCORE_STATUS_*`, `WEAPON_SUIT` and the other `cdll_dll.h` constants (`cdll_dll.h` was read; its header is the GPL v2-or-later one); `CBasePlayer::Observer_*` (`Observer_FindNextPlayer`, `Observer_HandleButtons`, `Observer_SetMode`, `Observer_CheckTarget`, `Observer_CheckProperties`), `CAMERA_MODE_*`, `FADETOBLACK_*`. |
-| `regamedll/pm_shared/pm_shared.cpp`, `pm_math.cpp` | The player movement code, ported function by function (vanilla branch: the code not under `REGAMEDLL_FIXES`, `REGAMEDLL_ADD`, `REGAMEDLL_API`; read 2026-11-22; `crates/cs-sim/src/pm/`): `PM_Move` and `PM_PlayerMove`, `PM_CheckParameters`, `PM_CalcRoll`, `PM_DropPunchAngle`, `PM_ReduceTimers`, `PM_CheckWater`, `PM_CategorizePosition`, `PM_CheckFalling`, `PM_Friction`, `PM_Accelerate`, `PM_AirAccelerate`, `PM_AirMove`, `PM_WalkMove`, `PM_FlyMove`, `PM_ClipVelocity`, `PM_AddCorrectGravity`, `PM_FixupGravityVelocity`, `PM_CheckStuck` with the stuck table, `PM_Duck`, `PM_UnDuck`, `PM_FixPlayerCrouchStuck`, the duck spline, `PM_Jump`, `PM_PreventMegaBunnyJumping`, `PM_Ladder`, `PM_LadderMove`, `PM_WaterMove`, `PM_CheckWaterJump`, `PM_WaterJump`, `PM_PlayWaterSounds`, `PM_UpdateStepSound`, `PM_PlayStepSound`, `PM_CatagorizeTextureType`, `PM_MapTextureTypeStepType`, `PM_InitTextureTypes` and `PM_FindTextureType`, `PM_NoClip`, `PM_Physics_Toss`, `PM_SpectatorMove`, `PM_ShouldDoSpectMode`, and the constants of the file; from `pm_math.cpp` the vector helpers (`AngleVectors`, `VectorNormalize` and the like). Both files begin with `#include "precompiled.h"` and have no licence header, so the repository `LICENSE` (MIT) is the notice that applies to them. |
-| `regamedll/pm_shared/pm_shared.h`, `pm_defs.h`, `pm_movevars.h`, `pm_materials.h`, `pm_info.h` | Numeric values and names only (`crates/cs-sim/src/pm/consts.rs`, `types.rs`): from `pm_shared.h` the `PM_*` and `OBS_*` constants and the function list; from `pm_defs.h` `MAX_PHYSENTS`, `MAX_MOVEENTS`, `MAX_CLIP_PLANES`, the `PM_*` trace flags (`PM_STUDIO_IGNORE`, `PM_STUDIO_BOX`, `PM_GLASS_IGNORE`, `PM_WORLD_ONLY`) and the field names of `playermove_t`, `physent_t` and `pmtrace_t`; from `pm_movevars.h` the field names of `movevars_t`; from `pm_materials.h` `MAX_TEXTURES`, `MAX_TEXTURENAME_LENGHT` and the `CHAR_TEX_*` values. `pm_info.h` was read and nothing was taken from it (`physinfo` is not sent). All five carry the GPL v2-or-later header with the linking exception. |
-| `regamedll/game_shared/bot/nav.h` | One constant: `HalfHumanHeight` (36, line 145), the climb limit of the crouch-stuck fix (`PM_FixPlayerCrouchStuck`, `crates/cs-sim/src/pm/duck.rs`). The file carries the GPL v2-or-later header with the linking exception. |
+| `regamedll/pm_shared/pm_shared.cpp`, `pm_math.cpp` | The player movement code, ported function by function (vanilla branch: the code not under `REGAMEDLL_FIXES`, `REGAMEDLL_ADD`, `REGAMEDLL_API`; read 2026-11-22; `crates/cs-pm/src/pm/`): `PM_Move` and `PM_PlayerMove`, `PM_CheckParameters`, `PM_CalcRoll`, `PM_DropPunchAngle`, `PM_ReduceTimers`, `PM_CheckWater`, `PM_CategorizePosition`, `PM_CheckFalling`, `PM_Friction`, `PM_Accelerate`, `PM_AirAccelerate`, `PM_AirMove`, `PM_WalkMove`, `PM_FlyMove`, `PM_ClipVelocity`, `PM_AddCorrectGravity`, `PM_FixupGravityVelocity`, `PM_CheckStuck` with the stuck table, `PM_Duck`, `PM_UnDuck`, `PM_FixPlayerCrouchStuck`, the duck spline, `PM_Jump`, `PM_PreventMegaBunnyJumping`, `PM_Ladder`, `PM_LadderMove`, `PM_WaterMove`, `PM_CheckWaterJump`, `PM_WaterJump`, `PM_PlayWaterSounds`, `PM_UpdateStepSound`, `PM_PlayStepSound`, `PM_CatagorizeTextureType`, `PM_MapTextureTypeStepType`, `PM_InitTextureTypes` and `PM_FindTextureType`, `PM_NoClip`, `PM_Physics_Toss`, `PM_SpectatorMove`, `PM_ShouldDoSpectMode`, and the constants of the file; from `pm_math.cpp` the vector helpers (`AngleVectors`, `VectorNormalize` and the like). Both files begin with `#include "precompiled.h"` and have no licence header, so the repository `LICENSE` (MIT) is the notice that applies to them. |
+| `regamedll/pm_shared/pm_shared.h`, `pm_defs.h`, `pm_movevars.h`, `pm_materials.h`, `pm_info.h` | Numeric values and names only (`crates/cs-pm/src/pm/consts.rs`, `types.rs`): from `pm_shared.h` the `PM_*` and `OBS_*` constants and the function list; from `pm_defs.h` `MAX_PHYSENTS`, `MAX_MOVEENTS`, `MAX_CLIP_PLANES`, the `PM_*` trace flags (`PM_STUDIO_IGNORE`, `PM_STUDIO_BOX`, `PM_GLASS_IGNORE`, `PM_WORLD_ONLY`) and the field names of `playermove_t`, `physent_t` and `pmtrace_t`; from `pm_movevars.h` the field names of `movevars_t`; from `pm_materials.h` `MAX_TEXTURES`, `MAX_TEXTURENAME_LENGHT` and the `CHAR_TEX_*` values. `pm_info.h` was read and nothing was taken from it (`physinfo` is not sent). All five carry the GPL v2-or-later header with the linking exception. |
+| `regamedll/game_shared/bot/nav.h` | One constant: `HalfHumanHeight` (36, line 145), the climb limit of the crouch-stuck fix (`PM_FixPlayerCrouchStuck`, `crates/cs-pm/src/pm/duck.rs`). The file carries the GPL v2-or-later header with the linking exception. |
 | `doors.cpp` | `CBaseDoor::Spawn` and `CRotDoor::Spawn` (the spawn part: solidity by `skin` and `SF_DOOR_PASSABLE`, `MOVETYPE_PUSH`), for `func_door`, `func_door_rotating` and `func_water` in `cs-game`'s `world.rs`, read 2026-11-22. It begins with `#include "precompiled.h"` and has no licence header. |
 | `regamedll/engine/shake.h` | `FFADE_*` values. |
 
@@ -177,36 +177,61 @@ SOFTWARE.
 ## Xash3D FWGS
 
 Upstream: https://github.com/FWGS/xash3d-fwgs (GPL-3.0-or-later, as the module documentation of
-the files below records). Phase 3 (the client core and the renderer) was ported from it; the
-files below were read on 2026-11-23 and the behaviour was ported function by function, each
-module naming its source file and function in its doc comment. Code ported from them is
-distributed in this repository under GPL-3.0-or-later; see `docs/LICENSING.md`. Files not
-listed here were not examined.
+the files below records). Phase 3 (the client core, protocol additions, asset animation/sprite
+helpers, and renderer) was ported from it; the files below were read on 2026-11-23 (with
+`engine/client/cl_main.c` `CL_ComputeClientInterpolationAmount` also consulted on 2026-11-24) and
+the behaviour was ported function by function, each module naming its source file and function in
+its doc comment. `common/const.h` (lines 698–720 `kRenderFx*` numeric values, cited in
+`crates/cs-client/src/render/scene.rs`) carries Valve LLC's Half-Life SDK header and was read for
+numeric constants only (see the Valve Half-Life SDK caveat in `docs/LICENSING.md`). Code ported
+from Xash3D FWGS is distributed in this repository under GPL-3.0-or-later; see `docs/LICENSING.md`.
+Files not listed here were not examined.
+
+```text
+Copyright (C) 2007–2018 Uncle Mike
+Copyright (C) Xash3D FWGS contributors
+
+This program is free software: you can redistribute it and/or modify it under the terms of the
+GNU General Public License as published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+```
 
 | File (Xash3D FWGS) | Where | What was taken |
 |---|---|---|
 | `engine/client/cl_main.c` | `crates/cs-clientcore/src/connection.rs`, `commands.rs`, `cvars.rs`, `resources.rs`, `frames.rs`, `interp.rs`; `crates/cs-client/src/input.rs` | The connect sequence (`getchallenge`, `connect`, `new`, `sendres`, `spawn`, `sendents`), the client commands and cvars the connection reads with their flags and defaults, `CL_ComputeClientInterpolationAmount`, `CL_WritePacket` (command rate bounds, backup commands), the console command flags. |
-| `engine/client/cl_parse.c`, `cl_parse_gs.c` | `crates/cs-clientcore/src/resources.rs`, `precache.rs`, `frames.rs`, `hud.rs`, `sound.rs` | `CL_ParseResourceList`, `CL_ParseServerInfo`, the precache tables, `CL_RegisterUserMessage` and `CL_ParseUserMessage` (registration and framing of the game's messages), the sound message parsing, the `svc_sendcvarvalue` answers. |
+| `engine/client/parse/cl_parse.c`, `engine/client/parse/cl_parse_gs.c` | `crates/cs-proto48/src/messages.rs`; `crates/cs-clientcore/src/resources.rs`, `precache.rs`, `frames.rs`, `hud.rs`, `sound.rs` | `CL_ParseResourceList`, `CL_ParseServerInfo`, the precache tables, `CL_RegisterUserMessage` and `CL_ParseUserMessage` (registration and framing of the game's messages), `CL_ParseParticles`, `CL_ParseSpawnStaticSound`, `CL_ParseCustomization`, `CL_ParseSoundFade`, the sound message parsing, and the `svc_sendcvarvalue` answers. |
 | `engine/client/cl_frame.c` | `crates/cs-clientcore/src/frames.rs`, `interp.rs`, `entities.rs` | `CL_ParsePacketEntities`, `CL_DeltaEntity`, the frame ring and the delta base rule, `CL_LinkPlayers`, `CL_LinkPacketEntities`, the interpolation and extrapolation of entities (`ex_interp`, teleport detection, the studio lerp). |
 | `engine/client/dll_int/cl_pmove.c` | `crates/cs-clientcore/src/predict.rs` | `CL_PredictMovement`, `CL_CheckPredictionError`, `CL_RunUsercmd`, the `playermove_t` setup and the prediction error smoothing. |
 | `engine/client/cl_events.c` | `crates/cs-clientcore/src/events.rs` | `CL_ParseEvent`, `CL_ParseReliableEvent`, `CL_QueueEvent`, `CL_FireEvents`, `CL_FireEvent`, `CL_PlaybackEvent`, `CL_FindEmptyEvent`. |
-| `engine/client/cl_tent.c` | `crates/cs-clientcore/src/tempents.rs` | The temp entity pool and the handlers of the `TE_*` messages. The per-frame update of the temp entities and the shell physics are NOT ported: Xash3D leaves them to the client library, so they are our own clean-room design (documented in `tempents.rs`). |
+| `engine/client/cl_tent.c` | `crates/cs-proto48/src/messages.rs`, `tempent.rs`; `crates/cs-clientcore/src/tempents.rs` | `CL_ParseTempEntity` wire decoding, the temp entity pool and the handlers of the `TE_*` messages. The per-frame update of the temp entities and the shell physics are NOT ported: Xash3D leaves them to the client library, so they are our own clean-room design (documented in `tempents.rs`). |
 | `engine/client/cl_custom.c`, `engine/common/net_chan.c` | `crates/cs-clientcore/src/resources.rs` | The custom resource list handling and the file stream size limit (`MAX_NETCHAN_DECOMPRESSED_SIZE`). |
-| `engine/client/s_main.c` | `crates/cs-clientcore/src/sound.rs` | The arguments and flags of the sound start, ambient and stop commands. |
+| `engine/client/sound/s_main.c` | `crates/cs-clientcore/src/sound.rs` | The arguments and flags of the sound start, ambient and stop commands. |
 | `engine/common/cmd.c`, `engine/common/cvar.c` | `crates/cs-clientcore/src/commands.rs`, `cvars.rs` | `Cbuf_ExecuteCommandsFromBuffer`, the command tokenizer, the cvar flag set and the privileged and filterable command rules. |
+| `engine/client/client.h`, `engine/common/netchan.h`, `engine/common/protocol.h` | `crates/cs-clientcore/src/frames.rs`, `interp.rs` | Protocol/client header constants (`MAX_EX_INTERP`, `CL_UPDATE_MASK`, protocol opcode/rate bounds). |
 | `public/matrixlib.c`, `public/xash3d_mathlib.c`, `public/xash3d_mathlib.h` | `crates/cs-clientcore/src/interp.rs` | Angle and quaternion helpers. |
-| `ref/gl/gl_rmain.c`, `gl_rsurf.c`, `gl_sprite.c`, `gl_studio.c`, `gl_local.h` | `crates/cs-client/src/render/scene.rs`, `bsp_renderer.rs`, `mdl_renderer.rs`, `sprite_renderer.rs` | The entity draw order and transparency sorting, render modes and render FX (pulse, distort, hologram, glow), the studio frame and looping rules, the sprite drawing (`R_DrawSpriteModel`) and the BSP surface and lightmap rules. |
+| `ref/gl/gl_rmain.c`, `gl_rsurf.c`, `gl_sprite.c`, `gl_studio.c`, `gl_local.h` | `crates/cs-assets/src/mdl.rs`, `spr.rs`; `crates/cs-client/src/render/scene.rs`, `bsp_renderer.rs`, `mdl_renderer.rs`, `sprite_renderer.rs` | The entity draw order and transparency sorting, render modes and render FX (pulse, distort, hologram, glow), `R_StudioEstimateFrame` / studio frame and looping rules, `R_DrawSpriteModel` / sprite drawing and the BSP surface and lightmap rules. |
+| `common/const.h` (Valve Half-Life SDK header) | `crates/cs-client/src/render/scene.rs` | Numeric values and names only: `kRenderFx*` (lines 698–720, read 2026-11-23). Carries Valve LLC's non-commercial SDK notice; see the Valve Half-Life SDK caveat in `docs/LICENSING.md`. |
 
 ## cs16-client
 
-Upstream: https://github.com/Velaron/cs16-client (GPL-2.0-or-later; the Counter-Strike 1.6
-client library for Xash3D FWGS). Only the weapon event files `cl_dll/events/event_*.cpp` (read
-2026-11-23) were used: the 30 weapon events of `crates/cs-clientcore/src/events.rs` take their
-per-weapon constants from them (the sounds, the view model animation numbers, the shell
-offsets, the bullet type and the penetration; the table `WEAPONS`), and
-`event_createsmoke.cpp` is the source of the smoke grenade clouds
-(`crates/cs-clientcore/src/tempents.rs`, `spawn_smoke_clouds`). The helper code those files
-call (`EV_GetDefaultShellInfo`, `EV_GetGunPosition`, `HUD_TempEntUpdate` and the rest of the
-`cl_dll` code) is in Valve-licensed files and is NOT ported: the shell and gun placement, the
-shell physics and the temp entity update are our own clean-room design. The HUD code of
-`cl_dll/hud*.cpp` was not read for porting.
+Upstream: https://github.com/FWGS/cs16-client (GPL-2.0-or-later with Valve Half-Life linking
+exception; the Counter-Strike 1.6 client library for Xash3D FWGS).
+
+```text
+This program is free software; you can redistribute it and/or modify it under the terms of the
+GNU General Public License as published by the Free Software Foundation; either version 2 of the
+License, or (at your option) any later version.
+```
+
+Only the weapon/effect event files `cl_dll/events/event_*.cpp` and `dlls/wpn_shared.h` (read
+2026-11-23) were used: `crates/cs-clientcore/src/events.rs` takes its per-weapon and view-model
+`*_SHOOT*` animation enum constants from the weapon event files and `dlls/wpn_shared.h` (the
+sounds, the view model animation numbers, the shell offsets, the bullet type and the penetration;
+the table `WEAPONS`), `event_vehicle.cpp` supplies `EV_Vehicle` (`iparam1` bit-packing and engine
+sound table), `event_decal_reset.cpp` and `event_createexplo.cpp` supply reset/explosion event
+handling (`events.rs`), and `event_createsmoke.cpp` supplies the smoke grenade clouds
+(`crates/cs-clientcore/src/tempents.rs`, `spawn_smoke_clouds`). The helper code those files call
+(`EV_GetDefaultShellInfo`, `EV_GetGunPosition`, `HUD_TempEntUpdate` and the rest of the `cl_dll`
+code) is in Valve-licensed files and is NOT ported: the shell and gun placement, the shell
+physics and the temp entity update are our own clean-room design. The HUD code of `cl_dll/hud*.cpp`
+was not read for porting.
