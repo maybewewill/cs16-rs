@@ -42,7 +42,7 @@ use crate::events::{FiredEvent, FxEnv};
 use crate::hud::ClientEffects;
 use crate::precache::PrecacheTables;
 use crate::resources::{AllFilesPresent, ResourceFiles, ResourceManager, parse_file_stream};
-use crate::tempents::NoWorld;
+use crate::tempents::{FxWorld, NoWorld};
 
 /// Reliable bytes the connection lets pile up unacknowledged before it gives the server up:
 /// stuffed commands forwarded to a server that does not answer, mostly.
@@ -196,6 +196,9 @@ pub struct Connection<T: PacketTransport> {
     precache: PrecacheTables,
     /// Events, temp entities, sounds and the HUD state the svc stream builds (task 6).
     fx: ClientEffects,
+    /// What temp entities and events see of the world and the local weapon; the shell sets it.
+    fx_local: FxLocal,
+    fx_world: Box<dyn FxWorld>,
     /// The resource list arrived and a download or the `spawn` still waits.
     awaiting_resources: bool,
     console: VecDeque<String>,
@@ -259,6 +262,8 @@ impl<T: PacketTransport> Connection<T> {
             resources: ResourceManager::default(),
             precache: PrecacheTables::default(),
             fx: ClientEffects::default(),
+            fx_local: FxLocal::default(),
+            fx_world: Box::new(NoWorld),
             awaiting_resources: false,
             console: VecDeque::new(),
             shell_commands: VecDeque::new(),
@@ -744,6 +749,22 @@ impl<T: PacketTransport> Connection<T> {
         &mut self.fx
     }
 
+    /// Gives the effects the world they collide with and the models they animate with (the
+    /// shell's map and model cache); the default is [`NoWorld`].
+    pub fn set_fx_world(&mut self, world: Box<dyn FxWorld>) {
+        self.fx_world = world;
+    }
+
+    /// The local player's current weapon state bits (`m_iWeaponState`), whether a shield is
+    /// held, and `cl_righthand`: what the weapon events consult.
+    pub fn set_fx_local(&mut self, weapon_state: i32, holding_shield: bool, right_hand: bool) {
+        self.fx_local = FxLocal {
+            weapon_state,
+            holding_shield,
+            right_hand,
+        };
+    }
+
     /// Runs what the engine runs right before a frame is drawn: fires the due events and steps
     /// the temp entities (`CL_FireEvents`, `CL_TempEntUpdate`), at client time `now`.
     /// The gravity is the server's (`movevars.gravity`), 800 before the movevars arrive.
@@ -756,6 +777,8 @@ impl<T: PacketTransport> Connection<T> {
             self.ctx.max_clients,
             self.server_info.as_ref().map(|i| i.player_slot),
             self.client_data.as_ref(),
+            self.fx_world.as_ref(),
+            self.fx_local,
         );
         self.fx.update(&env, gravity)
     }
@@ -941,9 +964,6 @@ impl<T: PacketTransport> Connection<T> {
         // Task 6 hook: every parsed message also goes to the effect modules (events, temp
         // entities, sound, HUD). They run before the match below, so an event sees the entity
         // update of the message before it, which `apply_entities` stored.
-        if matches!(message, SvcMessage::ServerInfo(_)) {
-            self.fx.clear_effects();
-        }
         let env = fx_env(
             now,
             &self.precache,
@@ -951,6 +971,8 @@ impl<T: PacketTransport> Connection<T> {
             self.ctx.max_clients,
             self.server_info.as_ref().map(|i| i.player_slot),
             self.client_data.as_ref(),
+            self.fx_world.as_ref(),
+            self.fx_local,
         );
         self.fx.handle(&message, &env);
 
@@ -1281,8 +1303,17 @@ impl<T: PacketTransport> Connection<T> {
     }
 }
 
+/// The local weapon facts the shell supplies to the weapon events.
+#[derive(Debug, Clone, Copy, Default)]
+struct FxLocal {
+    weapon_state: i32,
+    holding_shield: bool,
+    right_hand: bool,
+}
+
 /// The environment of the effect modules, from the connection's fields (a function, not a
 /// method, so the caller can borrow `fx` mutably beside it).
+#[allow(clippy::too_many_arguments)]
 fn fx_env<'a>(
     now: f64,
     precache: &'a PrecacheTables,
@@ -1290,8 +1321,13 @@ fn fx_env<'a>(
     max_clients: u8,
     player_slot: Option<u8>,
     client_data: Option<&GoldSrcClientData>,
+    world: &'a dyn FxWorld,
+    local: FxLocal,
 ) -> FxEnv<'a> {
-    let mut env = FxEnv::new(now, precache, entities, &NoWorld);
+    let mut env = FxEnv::new(now, precache, entities, world);
+    env.weapon_state = local.weapon_state;
+    env.holding_shield = local.holding_shield;
+    env.right_hand = local.right_hand;
     env.max_clients = u16::from(max_clients);
     env.local_player = player_slot.map_or(0, |slot| u16::from(slot) + 1);
     if let Some(cd) = client_data {
@@ -1299,4 +1335,83 @@ fn fx_env<'a>(
         env.local_velocity = cd.velocity;
     }
     env
+}
+
+#[cfg(test)]
+mod fx_tests {
+    use super::*;
+    use crate::tempents::ModelRef;
+    use cs_proto48::messages::ResourceEntry;
+    use cs_transport::LoopbackHub;
+
+    struct Frames(u32);
+
+    impl FxWorld for Frames {
+        fn frame_count(&self, _model: &ModelRef) -> u32 {
+            self.0
+        }
+    }
+
+    fn connection() -> Connection<cs_transport::LoopbackEndpoint> {
+        let hub = LoopbackHub::new();
+        let cfg = ConnectionConfig::new("t", 1, "0123456789abcdef0123456789abcdef");
+        let mut conn = Connection::new(hub.connect(), PeerAddr::Loopback(0), cfg);
+        conn.precache.add(&[ResourceEntry {
+            res_type: crate::resources::res_type::MODEL,
+            filename: "sprites/smoke.spr".into(),
+            index: 4,
+            download_size: 0,
+            flags: 0,
+            md5: None,
+        }]);
+        conn
+    }
+
+    fn smoke() -> SvcMessage {
+        let te = cs_proto48::tempent::smoke(glam::Vec3::ZERO, 4, 20, 10);
+        SvcMessage::TempEntity {
+            te_type: te.te_type,
+            raw: te.payload,
+        }
+    }
+
+    #[test]
+    fn the_shells_world_gives_sprites_their_frames() {
+        // Without a world every sprite has one frame and its animation is over at once.
+        let mut bare = connection();
+        bare.handle_svc(smoke(), 0.0);
+        assert_eq!(bare.fx().tempents.active().len(), 1);
+        bare.update_effects(0.05);
+        assert!(bare.fx().tempents.active().is_empty());
+
+        // With a world that reports five frames the smoke lives its 0.4 seconds.
+        let mut conn = connection();
+        conn.set_fx_world(Box::new(Frames(5)));
+        conn.handle_svc(smoke(), 0.0);
+        conn.update_effects(0.05);
+        assert_eq!(conn.fx().tempents.active().len(), 1);
+        assert_eq!(conn.fx().tempents.active()[0].frame_max, 4);
+        conn.update_effects(0.5);
+        assert!(conn.fx().tempents.active().is_empty());
+    }
+
+    #[test]
+    fn the_local_weapon_facts_reach_the_events() {
+        let mut conn = connection();
+        conn.set_fx_local(2, true, true);
+        let env = fx_env(
+            0.0,
+            &conn.precache,
+            &conn.entities,
+            32,
+            Some(0),
+            None,
+            conn.fx_world.as_ref(),
+            conn.fx_local,
+        );
+        assert_eq!(
+            (env.weapon_state, env.holding_shield, env.right_hand, env.local_player),
+            (2, true, true, 1)
+        );
+    }
 }

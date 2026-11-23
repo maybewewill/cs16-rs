@@ -16,12 +16,10 @@
 //! Handlers: the 30 weapon events of cs16-client `cl_dll/events/event_*.cpp` (GPL-2.0-or-later,
 //! read 2026-11-23), whose per-weapon constants - the sounds, the animation numbers, the shell
 //! offsets, the bullet type and the penetration - are the table [`WEAPONS`]. The helpers those
-//! files call (`EV_GetDefaultShellInfo`, `EV_GetGunPosition`, `EV_EjectBrass`,
-//! `EV_HLDM_FireBullets`) live in Valve-licensed files that may not be ported; they were
-//! re-derived from their documented behaviour and are marked "assumption" where the original
-//! text could not settle a number. The impacts of the bullets (decals, smoke, penetration) need
-//! a trace against the map and the players, which is the shell's: [`BulletFire`] carries what
-//! the original passes to `EV_HLDM_FireBullets`.
+//! files call live in Valve-licensed files that may not be ported, so the shell's placement and
+//! ejection and the gun position are placeholders marked `clean-room replacement pending
+//! (phase 3 T6b)`. The impacts of the bullets (decals, smoke, penetration) need a trace against
+//! the map and the players, which is the shell's: [`BulletFire`] carries the call's arguments.
 
 use std::collections::BTreeMap;
 
@@ -48,10 +46,9 @@ pub mod fev {
     pub const CLIENT: u32 = 1 << 6;
 }
 
-/// The view height of a standing player (`DEFAULT_VIEWHEIGHT` as the CS client uses it).
+/// The view height of a standing player (Xash3D FWGS `cl_tent.c` `CL_UpdateFlashlight`: 28;
+/// 12 when ducking).
 pub const DEFAULT_VIEWHEIGHT: f32 = 28.0;
-/// The view height of a ducking player (`VEC_DUCK_VIEW`).
-pub const DUCK_VIEWHEIGHT: f32 = 12.0;
 
 /// What the effect modules need to know about the connection.
 #[derive(Clone, Copy)]
@@ -65,7 +62,7 @@ pub struct FxEnv<'a> {
     pub max_clients: u16,
     /// The entity number of the local player (slot + 1); 0 when not known.
     pub local_player: u16,
-    /// `clientdata.view_ofs` of the local player (`EV_LocalPlayerViewheight`).
+    /// `clientdata.view_ofs` of the local player (the predicted view height).
     pub local_view_ofs: Vec3,
     /// `clientdata.velocity` of the local player.
     pub local_velocity: Vec3,
@@ -171,7 +168,7 @@ impl EventQueue {
                 .position(|s| s.as_ref().is_some_and(|e| e.flags & fev::RELIABLE == 0));
         }
         let Some(slot) = slot else {
-            self.dropped += 1;
+            self.dropped = self.dropped.saturating_add(1);
             return;
         };
         self.slots[slot] = Some(QueuedEvent {
@@ -374,8 +371,8 @@ pub enum BulletType {
 }
 
 impl BulletType {
-    /// The penetration power of the ammunition (`EV_DescribeBulletTypeParameters`; the same
-    /// numbers as the server's `ReGameDLL`). Buckshot has none.
+    /// The penetration power of the ammunition: the ammunition table of `ReGameDLL_CS`
+    /// (`CBaseEntity::FireBullets3`), as `cs-game` `bullets.rs` has it. Buckshot has none.
     pub fn penetration_power(self) -> i32 {
         match self {
             BulletType::Nine => 21,
@@ -494,15 +491,13 @@ enum Spread {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // clean-room placement pending (phase 3 T6b)
 struct Shell {
     model: &'static str,
     /// (forward, up, right) offsets for the local player, left- and right-handed.
     left: [f32; 3],
     right: [f32; 3],
 }
-
-/// The shell offsets of every other player (`20, -12, 4`).
-const REMOTE_SHELL: [f32; 3] = [20.0, -12.0, 4.0];
 
 const RSHELL: &str = "models/rshell.mdl";
 const PSHELL: &str = "models/pshell.mdl";
@@ -520,8 +515,10 @@ struct Weapon {
     distance: f32,
     penetration: i32,
     spread: Spread,
-    /// Whether `iparam1/2` (the recoil in hundredths of a degree) turns the aim.
-    aim_offset: bool,
+    /// The divisor that turns `iparam1/2` (the punch the server sends) into degrees added to
+    /// the aim: 100 for most guns, 1e7 for the Famas and the Galil (whose events the server
+    /// fills with `punchangle * 10000000`, `cs-game` `weapons/rifles.rs`); 0 for none.
+    aim_div: f32,
 }
 
 const fn shell(model: &'static str, left: [f32; 3], right: [f32; 3]) -> Option<Shell> {
@@ -545,7 +542,7 @@ macro_rules! weapon {
             distance: 8192.0,
             penetration: $pen,
             spread: Spread::Args,
-            aim_offset: true,
+            aim_div: 100.0,
         }
     };
 }
@@ -563,7 +560,7 @@ static WEAPONS: &[Weapon] = &[
         anim: Anim::Elite,
         shell: shell(PSHELL, [35.0, -11.0, 16.0], [35.0, -11.0, 16.0]),
         spread: Spread::Elite,
-        aim_offset: false,
+        aim_div: 0.0,
         ..weapon!("elite_left", &[], Anim::Elite, None, BulletType::Nine, 2)
     },
     Weapon {
@@ -572,20 +569,26 @@ static WEAPONS: &[Weapon] = &[
         anim: Anim::Elite,
         shell: shell(PSHELL, [35.0, -11.0, -16.0], [35.0, -11.0, -16.0]),
         spread: Spread::Elite,
-        aim_offset: false,
+        aim_div: 0.0,
         ..weapon!("elite_right", &[], Anim::Elite, None, BulletType::Nine, 2)
     },
-    weapon!("famas", &["weapons/famas-1.wav", "weapons/famas-2.wav"], Anim::Random(3, 5), std_shell(RSHELL, 17.0, -8.0, 14.0), BulletType::Mm556, 2),
+    Weapon {
+        aim_div: 1.0e7,
+        ..weapon!("famas", &["weapons/famas-1.wav", "weapons/famas-2.wav"], Anim::Random(3, 5), std_shell(RSHELL, 17.0, -8.0, 14.0), BulletType::Mm556, 2)
+    },
     weapon!("fiveseven", &["weapons/fiveseven-1.wav"], Anim::EmptyAware { shoot: (1, 2), empty: 3 }, std_shell(PSHELL, 36.0, -14.0, 14.0), BulletType::Mm57, 2),
     weapon!("g3sg1", &["weapons/g3sg1-1.wav"], Anim::Random(1, 2), shell(RSHELL, [20.0, -8.0, -10.0], [17.0, -8.0, 10.0]), BulletType::Mm762, 2),
-    weapon!("galil", &["weapons/galil-1.wav", "weapons/galil-2.wav"], Anim::Random(3, 5), std_shell(RSHELL, 20.0, -8.0, 10.0), BulletType::Mm556, 2),
+    Weapon {
+        aim_div: 1.0e7,
+        ..weapon!("galil", &["weapons/galil-1.wav", "weapons/galil-2.wav"], Anim::Random(3, 5), std_shell(RSHELL, 20.0, -8.0, 10.0), BulletType::Mm556, 2)
+    },
     Weapon {
         pick: Pick::Glock,
         distance: 4096.0,
         ..weapon!("glock18", &["weapons/glock18-1.wav", "weapons/glock18-2.wav"], Anim::Glock, std_shell(PSHELL, 36.0, -14.0, 14.0), BulletType::Nine, 2)
     },
     Weapon {
-        aim_offset: false,
+        aim_div: 0.0,
         ..weapon!("knife", &["weapons/knife_miss1.wav"], Anim::Knife, None, BulletType::Nine, 0)
     },
     weapon!("m249", &["weapons/m249-1.wav", "weapons/m249-2.wav"], Anim::Random(1, 2), std_shell(RSHELL, 20.0, -10.0, 13.0), BulletType::Mm556, 2),
@@ -734,10 +737,10 @@ fn fire(w: &Weapon, ev: &QueuedEvent, env: &FxEnv, rng: &mut FxRandom) -> Weapon
     let idx = a.entindex;
     let local = env.is_local(idx);
     let origin = a.origin;
-    let angles = if w.aim_offset {
+    let angles = if w.aim_div != 0.0 {
         Vec3::new(
-            a.iparam1 as f32 / 100.0 + a.angles.x,
-            a.iparam2 as f32 / 100.0 + a.angles.y,
+            a.iparam1 as f32 / w.aim_div + a.angles.x,
+            a.iparam2 as f32 / w.aim_div + a.angles.y,
             a.angles.z,
         )
     } else {
@@ -745,15 +748,14 @@ fn fire(w: &Weapon, ev: &QueuedEvent, env: &FxEnv, rng: &mut FxRandom) -> Weapon
     };
     let (forward, right, up) = angle_vectors(angles);
 
-    // `EV_GetGunPosition` and the view height of `EV_GetDefaultShellInfo`.
-    let mut view_ofs = Vec3::new(0.0, 0.0, DEFAULT_VIEWHEIGHT);
-    if env.is_player(idx) {
-        if local {
-            view_ofs = env.local_view_ofs;
-        } else if a.ducking == 1 {
-            view_ofs.z = DUCK_VIEWHEIGHT;
-        }
-    }
+    // clean-room replacement pending (phase 3 T6b)
+    // PLACEHOLDER: the eye of the local player is `clientdata.view_ofs`; another player's eye
+    // is taken at the origin. The real gun position, standing or ducking, is T6b's.
+    let eye = if local {
+        origin + env.local_view_ofs
+    } else {
+        origin
+    };
 
     let (view_anim, muzzle_flash) = if local {
         let seq = pick_anim(w, a, env, rng);
@@ -767,34 +769,21 @@ fn fire(w: &Weapon, ev: &QueuedEvent, env: &FxEnv, rng: &mut FxRandom) -> Weapon
         (None, false)
     };
 
-    let shell = w.shell.map(|s| {
-        let [f, u, r] = if local {
-            if env.right_hand { s.right } else { s.left }
-        } else {
-            REMOTE_SHELL
-        };
-        // `EV_GetDefaultShellInfo`: the shell leaves to the side the gun is held on, with a
-        // random push (assumption: the spread of the random numbers is the one of the file).
-        let direction = if r > 0.0 { -1.0 } else { 1.0 };
-        let fr = rng.float(50.0, 70.0);
-        let fu = rng.float(75.0, 175.0);
-        let ff = rng.float(25.0, 250.0);
-        let velocity = ev.velocity * 0.5 + right * (fr * direction) + up * fu + forward * ff;
-        let position =
-            ev.velocity * 0.1 + origin + view_ofs + up * u + forward * f + right * r;
-        ShellEject {
-            origin: position,
-            velocity,
-            yaw: angles.y,
-            model: s.model,
-            kind: te_bounce::SHELL,
-        }
+    // clean-room replacement pending (phase 3 T6b)
+    // PLACEHOLDER: the shell appears at the eye with no velocity of its own. The offsets in
+    // `Shell` (from the GPL-2+ event files) and the kinematics of its ejection are T6b's.
+    let shell = w.shell.map(|s| ShellEject {
+        origin: eye,
+        velocity: Vec3::ZERO,
+        yaw: angles.y,
+        model: s.model,
+        kind: te_bounce::SHELL,
     });
 
     let sound = Some(event_sound(pick_sound(w, a, env, rng), ev));
 
     // `EV_FireElite` moves the muzzle five units to its own side.
-    let mut gun = origin + view_ofs;
+    let mut gun = eye;
     if matches!(w.anim, Anim::Elite) {
         gun += if w.name == "elite_right" { right * 5.0 } else { right * -5.0 };
     }
@@ -1031,19 +1020,13 @@ mod tests {
         let shell = fx.shell.as_ref().expect("an AK-47 ejects a shell");
         assert_eq!(shell.model, "models/rshell.mdl");
         assert_eq!(shell.kind, te_bounce::SHELL);
-        // The origin and the angles came from the entity: yaw 90 turns the forward axis to +y,
-        // and the local offsets (20 forward, -8 up, -10 right) apply to the view height 17.
+        // The origin and the angles came from the entity; the shell is the placeholder at the
+        // eye (view height 17) with no velocity (T6b).
         assert!((fired[0].args.origin - Vec3::new(100.0, 200.0, 50.0)).length() < 1e-3);
-        let (forward, right, up) = angle_vectors(Vec3::new(1.5, 90.0 - 0.5, 0.0));
-        let expect = Vec3::new(100.0, 200.0, 50.0)
-            + Vec3::new(0.0, 0.0, 17.0)
-            + forward * 20.0
-            + up * -8.0
-            + right * -10.0;
-        assert!((shell.origin - expect).length() < 1e-3, "{:?} vs {:?}", shell.origin, expect);
+        let (forward, _right, _up) = angle_vectors(Vec3::new(1.5, 90.0 - 0.5, 0.0));
+        assert!((shell.origin - Vec3::new(100.0, 200.0, 67.0)).length() < 1e-3);
         assert!((shell.yaw - 89.5).abs() < 1e-4);
-        // Thrown to the right of the gun and up.
-        assert!(shell.velocity.z > 0.0);
+        assert_eq!(shell.velocity, Vec3::ZERO);
 
         let sound = fx.sound.as_ref().unwrap();
         assert!(sound.name.as_deref().unwrap().starts_with("weapons/ak47-"));
@@ -1074,9 +1057,9 @@ mod tests {
         assert!(!fx.local);
         assert!(fx.view_anim.is_none());
         assert!(!fx.muzzle_flash);
-        // `20, -12, 4` from a standing player's eye (28) with a zero aim: forward is +x, right -y.
+        // The placeholder: at the other player's origin, no velocity.
         let shell = fx.shell.as_ref().unwrap();
-        assert!((shell.origin - Vec3::new(20.0, -4.0, 26.0)).length() < 1e-4, "{:?}", shell.origin);
+        assert_eq!(shell.origin, Vec3::new(0.0, 0.0, 10.0));
         assert_eq!(fired[0].args.angles, Vec3::ZERO);
     }
 
@@ -1318,6 +1301,68 @@ mod tests {
         assert_eq!(ev.flags, fev::CLIENT);
         assert_eq!(ev.args.entindex, 6);
         assert_eq!(ev.fire_time, 3.5);
+    }
+
+    /// The arguments the server's weapons hand to `PLAYBACK_EVENT_FULL`, built with the casts
+    /// of `cs-game` (`weapons/rifles.rs` `int_x1e7`, `pistols.rs` `(p.x * 100.0) as i32`,
+    /// `snipers.rs`), and fired through the queue.
+    #[test]
+    fn the_servers_own_event_arguments_turn_the_aim_by_the_right_divisor() {
+        let precache = events_table(&[
+            "events/famas.sc",
+            "events/galil.sc",
+            "events/usp.sc",
+            "events/scout.sc",
+            "events/glock18.sc",
+        ]);
+        let mut entities = BTreeMap::new();
+        entities.insert(1, state(1, Vec3::ZERO, Vec3::ZERO));
+        let mut env = FxEnv::new(0.0, &precache, &entities, &NoWorld);
+        env.local_player = 1;
+        let punch = Vec3::new(-2.0, 0.5, 0.0);
+        let x1e7 = |v: f32| (v * 10_000_000.0) as i32;
+        let x100 = |v: f32| (v * 100.0) as i32;
+        let spread = (0.03_f32, -0.02_f32);
+        let cases: [(u16, i32, i32); 5] = [
+            (1, x1e7(punch.x), x1e7(punch.y)),
+            (2, x1e7(punch.x), x1e7(punch.y)),
+            (3, x100(punch.x), 0),
+            (4, x100(punch.x), x100(punch.y)),
+            (5, x100(punch.x), x100(punch.y)),
+        ];
+        for (index, iparam1, iparam2) in cases {
+            let mut q = EventQueue::default();
+            q.queue(
+                fev::SERVER,
+                index,
+                0.0,
+                0.0,
+                EventArgs {
+                    entindex: 1,
+                    fparam1: spread.0,
+                    fparam2: spread.1,
+                    iparam1,
+                    iparam2,
+                    ..Default::default()
+                },
+                Vec3::ZERO,
+            );
+            let fired = q.fire_due(&env, &mut FxRandom::new(5));
+            let EventFx::Weapon(fx) = &fired[0].fx else {
+                panic!("{:?}", fired[0].fx);
+            };
+            let b = fx.bullets.as_ref().unwrap();
+            // The aim is the punch itself, not the punch times 100000.
+            let y = if index == 3 { 0.0 } else { punch.y };
+            let (expect, ..) = angle_vectors(Vec3::new(punch.x, y, 0.0));
+            assert!(
+                (b.forward - expect).length() < 1e-3,
+                "event {index}: {:?} vs {expect:?}",
+                b.forward
+            );
+            let div = if index == 4 { 1000.0 } else { 1.0 };
+            assert_eq!(b.spread, [spread.0 / div, spread.1 / div]);
+        }
     }
 
     #[test]

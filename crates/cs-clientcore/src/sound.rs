@@ -98,7 +98,7 @@ impl SoundStart {
             origin,
             volume,
             attenuation,
-            pitch: pitch.max(2),
+            pitch: norm_pitch(pitch),
             flags: 0,
         }
     }
@@ -166,7 +166,15 @@ impl SoundQueue {
                 let flags = s.flags & !(cs_proto48::messages::SND_FL_LARGE_INDEX as u16);
                 let sentence = u32::from(flags) & SND_FL_SENTENCE != 0;
                 let Some(name) = resolve(precache, s.sound_index, sentence) else {
-                    self.unknown_sounds += 1;
+                    self.unknown_sounds = self.unknown_sounds.saturating_add(1);
+                    // A sound to stop is stopped whether or not its file is known: the
+                    // entity and channel are all `S_StopSound` needs.
+                    if u32::from(flags) & SND_FL_STOP != 0 {
+                        self.push(SoundCommand::Stop {
+                            entity: s.entity,
+                            channel: s.channel,
+                        });
+                    }
                     return;
                 };
                 let start = SoundStart {
@@ -189,7 +197,7 @@ impl SoundQueue {
             SvcMessage::SpawnStaticSound(s) => {
                 let sentence = u32::from(s.flags) & SND_FL_SENTENCE != 0;
                 let Some(name) = resolve(precache, s.sound_index, sentence) else {
-                    self.unknown_sounds += 1;
+                    self.unknown_sounds = self.unknown_sounds.saturating_add(1);
                     return;
                 };
                 self.push(SoundCommand::Ambient(SoundStart {
@@ -307,6 +315,25 @@ mod tests {
             panic!();
         };
         assert_eq!(s.flags, 0);
+    }
+
+    #[test]
+    fn an_unprecached_stop_still_stops() {
+        let mut q = SoundQueue::default();
+        q.handle(&sound(SND_FL_STOP, chan::ITEM, 99), &tables());
+        assert_eq!(
+            q.pending(),
+            &[SoundCommand::Stop {
+                entity: 3,
+                channel: chan::ITEM
+            }]
+        );
+    }
+
+    #[test]
+    fn a_client_sound_of_pitch_one_plays_normal() {
+        let s = SoundStart::by_name("a.wav", 0, chan::AUTO, Vec3::ZERO, 1.0, 1.0, 1);
+        assert_eq!(s.pitch, PITCH_NORM);
     }
 
     #[test]

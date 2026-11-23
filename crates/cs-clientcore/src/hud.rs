@@ -23,14 +23,20 @@ use glam::Vec3;
 
 use crate::events::{EventFx, FiredEvent, FxEnv, EventQueue, ViewAnim};
 use crate::sound::{SoundCommand, SoundQueue};
-use crate::tempents::{
-    FxRandom, ModelRef, RenderEffect, TempEntClock, TempEnts, te_bounce,
-};
+use crate::tempents::{FxRandom, ModelRef, RenderEffect, TempEntClock, TempEnts};
 
 /// The entries each log of the HUD keeps (oldest dropped).
 pub const LOG_CAPACITY: usize = 64;
 /// Messages of unknown name kept for mods.
 pub const UNKNOWN_CAPACITY: usize = 256;
+/// Bytes of MOTD kept (a longer one is cut).
+pub const MAX_MOTD_BYTES: usize = 64 * 1024;
+/// Bytes of a multipart menu kept.
+pub const MAX_MENU_BYTES: usize = 8 * 1024;
+/// Status icons shown at once.
+pub const MAX_STATUS_ICONS: usize = 64;
+/// Teams with a score.
+pub const MAX_TEAM_SCORES: usize = 16;
 
 /// One weapon of the HUD's weapon table (`WeaponList`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -269,6 +275,15 @@ pub struct HudState {
     pub hud_resets: u32,
 }
 
+/// The longest prefix of `text` of at most `max` bytes that ends on a character boundary.
+fn truncated(text: &str, max: usize) -> String {
+    let mut end = text.len().min(max);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
+}
+
 fn push_bounded<T>(log: &mut VecDeque<T>, entry: T) {
     if log.len() >= LOG_CAPACITY {
         log.pop_front();
@@ -379,7 +394,9 @@ impl HudState {
             } => {
                 if *status == 0 {
                     self.status_icons.remove(sprite_name);
-                } else {
+                } else if self.status_icons.len() < MAX_STATUS_ICONS
+                    || self.status_icons.contains_key(sprite_name)
+                {
                     self.status_icons.insert(
                         sprite_name.clone(),
                         StatusIcon {
@@ -418,7 +435,11 @@ impl HudState {
                 self.players.entry(*player_id).or_default().team = team_name.clone();
             }
             CsUserMsg::TeamScore { team_name, score } => {
-                self.team_scores.insert(team_name.clone(), *score);
+                if self.team_scores.len() < MAX_TEAM_SCORES
+                    || self.team_scores.contains_key(team_name)
+                {
+                    self.team_scores.insert(team_name.clone(), *score);
+                }
             }
             CsUserMsg::DeathMsg {
                 killer_id,
@@ -450,14 +471,20 @@ impl HudState {
                 dest,
                 message,
                 params,
-            } => push_bounded(
-                &mut self.text,
-                TextLine {
-                    dest: *dest,
-                    message: message.clone(),
-                    params: params.clone(),
-                },
-            ),
+            } => {
+                // `HUD_PRINTCENTER`: the line is the centre print.
+                if *dest == 4 {
+                    self.center_print = Some(message.clone());
+                }
+                push_bounded(
+                    &mut self.text,
+                    TextLine {
+                        dest: *dest,
+                        message: message.clone(),
+                        params: params.clone(),
+                    },
+                );
+            }
             CsUserMsg::SendAudio {
                 sender_id,
                 audio_code,
@@ -509,7 +536,9 @@ impl HudState {
                 // `multipart` byte means more follows, as in the original HUD).
                 match &mut self.menu {
                     Some(menu) if menu.multipart => {
-                        menu.text.push_str(text);
+                        if menu.text.len() + text.len() <= MAX_MENU_BYTES {
+                            menu.text.push_str(text);
+                        }
                         menu.keys = *keys_bitmask;
                         menu.display_time = *display_time;
                         menu.multipart = *multipart;
@@ -519,7 +548,7 @@ impl HudState {
                             keys: *keys_bitmask,
                             display_time: *display_time,
                             multipart: *multipart,
-                            text: text.clone(),
+                            text: truncated(text, MAX_MENU_BYTES),
                         });
                     }
                 }
@@ -550,7 +579,8 @@ impl HudState {
                     self.motd.clear();
                     self.motd_complete = false;
                 }
-                self.motd.push_str(text);
+                let room = MAX_MOTD_BYTES.saturating_sub(self.motd.len());
+                self.motd.push_str(&truncated(text, room));
                 self.motd_complete = *finished;
             }
             CsUserMsg::ServerName(n) => self.server_name = n.clone(),
@@ -615,7 +645,7 @@ impl HudState {
             // `ResetHUD` starts a life over: what is drawn from the last one goes; the values
             // the server sends again (health, money, ammo) stay until it does (assumption).
             CsUserMsg::ResetHud => {
-                self.hud_resets += 1;
+                self.hud_resets = self.hud_resets.saturating_add(1);
                 self.bar = None;
                 self.menu = None;
                 self.vgui_menu = None;
@@ -628,7 +658,7 @@ impl HudState {
             }
             CsUserMsg::InitHud => self.initialized = true,
             CsUserMsg::Unknown { name, payload } => {
-                self.unknown_total += 1;
+                self.unknown_total = self.unknown_total.saturating_add(1);
                 if self.unknown_messages.len() >= UNKNOWN_CAPACITY {
                     self.unknown_messages.pop_front();
                 }
@@ -675,6 +705,11 @@ impl ClientEffects {
     /// fire in [`ClientEffects::update`].
     pub fn handle(&mut self, msg: &SvcMessage, env: &FxEnv) {
         match msg {
+            // A new server: the effects of the old map and the HUD of the old game go.
+            SvcMessage::ServerInfo(_) => {
+                self.clear_effects();
+                self.hud = HudState::default();
+            }
             SvcMessage::Event(_) | SvcMessage::EventReliable { .. } => {
                 self.events.handle(msg, env);
             }
@@ -721,7 +756,7 @@ impl ClientEffects {
                             Vec3::new(0.0, shell.yaw, 0.0),
                             2.5,
                             ModelRef::Client(shell.model),
-                            te_bounce::SHELL,
+                            shell.kind,
                             env.world,
                             &mut self.rng,
                             env.time,
@@ -735,7 +770,10 @@ impl ClientEffects {
                     self.sounds.push(SoundCommand::Start(sound.clone()));
                 }
                 EventFx::Vehicle(command) => self.sounds.push(command.clone()),
-                EventFx::DecalReset => self.tempents.clear_round(),
+                EventFx::DecalReset => {
+                    self.tempents.clear_round();
+                    self.hud.corpses.clear();
+                }
                 EventFx::CreateSmoke { first: true, args } => {
                     self.tempents
                         .spawn_smoke_clouds(args.origin, env.world, &mut self.rng, env.time);
@@ -1118,6 +1156,171 @@ mod tests {
         assert_eq!(fx.sounds.pending().len(), 1);
         // The shell lives 2.5 seconds, as `EV_EjectBrass` asks.
         assert_eq!(shell.die, 7.5);
+    }
+
+    fn server_info() -> SvcMessage {
+        SvcMessage::ServerInfo(Box::new(cs_proto48::messages::ServerInfoMsg {
+            protocol: 48,
+            spawn_count: 1,
+            map_crc: 0,
+            client_dll_md5: [0; 16],
+            max_clients: 8,
+            player_slot: 0,
+            is_deathmatch: true,
+            game_dir: "cstrike".into(),
+            hostname: String::new(),
+            map_path: "maps/x.bsp".into(),
+            map_cycle: String::new(),
+            vac_secure: false,
+        }))
+    }
+
+    #[test]
+    fn a_new_server_resets_the_hud_and_the_effects() {
+        let precache = crate::precache::PrecacheTables::default();
+        let entities = BTreeMap::new();
+        let env = FxEnv::new(1.0, &precache, &entities, &NoWorld);
+        let mut fx = ClientEffects::with_seed(1);
+        fx.hud.handle(&um("Health", CsUserMsg::Health(50)), 0.0);
+        fx.tempents
+            .spawn_smoke_clouds(Vec3::ZERO, &NoWorld, &mut FxRandom::new(1), 0.0);
+        fx.handle(&server_info(), &env);
+        assert_eq!(fx.hud.health, 0);
+        assert!(fx.tempents.active().is_empty());
+    }
+
+    #[test]
+    fn a_new_round_clears_the_corpses() {
+        let mut precache = crate::precache::PrecacheTables::default();
+        precache.add(&[cs_proto48::messages::ResourceEntry {
+            res_type: crate::resources::res_type::EVENTSCRIPT,
+            filename: "events/decal_reset.sc".into(),
+            index: 1,
+            download_size: 0,
+            flags: 0,
+            md5: None,
+        }]);
+        let entities = BTreeMap::new();
+        let env = FxEnv::new(1.0, &precache, &entities, &NoWorld);
+        let mut fx = ClientEffects::with_seed(1);
+        fx.hud.handle(
+            &um(
+                "ClCorpse",
+                CsUserMsg::ClCorpse {
+                    model: "leet".into(),
+                    origin: [0; 3],
+                    angles: Vec3::ZERO,
+                    time_diff: 0,
+                    sequence: 0,
+                    body: 0,
+                    team: 1,
+                    player_id: 2,
+                },
+            ),
+            0.0,
+        );
+        assert_eq!(fx.hud.corpses.len(), 1);
+        fx.events.queue(
+            crate::events::fev::SERVER,
+            1,
+            0.0,
+            1.0,
+            Default::default(),
+            Vec3::ZERO,
+        );
+        fx.update(&env, 800.0);
+        assert!(fx.hud.corpses.is_empty());
+    }
+
+    #[test]
+    fn the_hud_collections_are_capped() {
+        let mut h = HudState::default();
+        let long = "x".repeat(MAX_MOTD_BYTES);
+        for _ in 0..3 {
+            h.handle(
+                &um(
+                    "MOTD",
+                    CsUserMsg::Motd {
+                        finished: false,
+                        text: long.clone(),
+                    },
+                ),
+                0.0,
+            );
+        }
+        assert_eq!(h.motd.len(), MAX_MOTD_BYTES);
+        for i in 0..MAX_STATUS_ICONS + 10 {
+            h.handle(
+                &um(
+                    "StatusIcon",
+                    CsUserMsg::StatusIcon {
+                        status: 1,
+                        sprite_name: format!("icon{i}"),
+                        color: None,
+                    },
+                ),
+                0.0,
+            );
+        }
+        assert_eq!(h.status_icons.len(), MAX_STATUS_ICONS);
+        for i in 0..MAX_TEAM_SCORES + 10 {
+            h.handle(
+                &um(
+                    "TeamScore",
+                    CsUserMsg::TeamScore {
+                        team_name: format!("team{i}"),
+                        score: 1,
+                    },
+                ),
+                0.0,
+            );
+        }
+        assert_eq!(h.team_scores.len(), MAX_TEAM_SCORES);
+        // A team already known still updates.
+        h.handle(
+            &um(
+                "TeamScore",
+                CsUserMsg::TeamScore {
+                    team_name: "team0".into(),
+                    score: 9,
+                },
+            ),
+            0.0,
+        );
+        assert_eq!(h.team_scores["team0"], 9);
+        let chunk = "m".repeat(MAX_MENU_BYTES / 2 + 1);
+        for _ in 0..4 {
+            h.handle(
+                &um(
+                    "ShowMenu",
+                    CsUserMsg::ShowMenu {
+                        keys_bitmask: 1,
+                        display_time: -1,
+                        multipart: true,
+                        text: chunk.clone(),
+                    },
+                ),
+                0.0,
+            );
+        }
+        assert!(h.menu.as_ref().unwrap().text.len() <= MAX_MENU_BYTES);
+    }
+
+    #[test]
+    fn centre_text_sets_the_centre_print() {
+        let mut h = HudState::default();
+        h.handle(
+            &um(
+                "TextMsg",
+                CsUserMsg::TextMsg {
+                    dest: 4,
+                    message: "Round start".into(),
+                    params: vec![],
+                },
+            ),
+            0.0,
+        );
+        assert_eq!(h.center_print.as_deref(), Some("Round start"));
     }
 
     #[test]
