@@ -243,3 +243,23 @@ evidence = "cs_sim::pm is engine-neutral so the client can predict with it, but 
 id = "movement_physinfo_visents_studio"
 status = "missing"
 evidence = "Not built: physinfo strings (slj and the like), visents and PM_TraceLine, studio hitbox hulls (PM_HullForStudioModel), the groupinfo filter, PM_CheckStuck's client-only nudge test against a real model, the iJumpSpectator client branch, and the REGAMEDLL_FIXES and REGAMEDLL_ADD variants of pm_shared (the target is vanilla)."
+
+[[item]]
+id = "movement_our_client_prediction"
+status = "missing"
+evidence = "Phase 3: cs-clientcore client-side prediction using cs_sim::pm instead of legacy cs_sim::pmove"
+
+[[item]]
+id = "movement_differential_traces_hlds"
+status = "missing"
+evidence = "Phase 6: differential usercmd trace test comparing cs-sim/cs-engine origins and velocities against reference HLDS over 60+ seconds within 0.03125 units"
+
+[[item]]
+id = "movement_pushable_objects"
+status = "missing"
+evidence = "Phase 6 / 7: player pushing and riding func_pushable entities in pm_shared/game"
+
+[[item]]
+id = "movement_moving_platforms"
+status = "missing"
+evidence = "Phase 6 / 7: player movement on moving platforms, trains, and vehicles (func_plat, func_train, func_tracktrain, func_vehicle)"

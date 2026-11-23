@@ -1,0 +1,253 @@
+# VGUI2 UI, HUD, fonts, and localization parity (weight 8).
+# Legacy cs-client/src/ui/* implements hardcoded egui screens for the offline prototype;
+# Phase 10 replaces hardcoded layouts with a real VGUI2 .res interpreter reading cstrike/resource/*.res and valve/resource/*.res.
+
+[[item]]
+id = "ui_scheme_background_and_hud_txt_parsers"
+status = "tested"
+evidence = "crates/cs-assets/src/lib.rs::parses_scheme_background_and_hud_if_installed (TrackerScheme.res, BackgroundLayout.txt, hud.txt)"
+
+[[item]]
+id = "ui_localization_utf16le_parser"
+status = "tested"
+evidence = "crates/cs-assets/src/lib.rs::parses_real_sprites_and_materials_if_installed (ClientScheme.res, cstrike_english.txt UTF-16LE tokens, classes/*.res, maps/*.txt)"
+
+[[item]]
+id = "ui_screen_main_menu_and_new_game"
+status = "implemented"
+evidence = "crates/cs-client/src/ui/main_menu.rs (hardcoded egui main menu, New Game, Find Servers stub, Quit; not .res-driven)"
+
+[[item]]
+id = "ui_screen_buy_menu_vgui"
+status = "implemented"
+evidence = "crates/cs-client/src/ui/buy_menu.rs (hardcoded egui Buy Menu using classes/*.res and gfx/vgui/*.tga for legacy MatchWorld)"
+
+[[item]]
+id = "ui_screen_team_and_class_menu"
+status = "implemented"
+evidence = "crates/cs-client/src/ui/team_menu.rs (hardcoded egui TeamMenu and ClassMenu for legacy MatchWorld)"
+
+[[item]]
+id = "ui_screen_scoreboard_tab"
+status = "implemented"
+evidence = "crates/cs-client/src/ui/scoreboard.rs (hardcoded egui TAB scoreboard for legacy MatchWorld)"
+
+[[item]]
+id = "ui_screen_options_dialog"
+status = "implemented"
+evidence = "crates/cs-client/src/ui/options.rs (hardcoded egui Options dialog bound to subset of CVars)"
+
+[[item]]
+id = "ui_screen_developer_console"
+status = "implemented"
+evidence = "crates/cs-client/src/ui/console.rs (hardcoded egui console with history and Tab autocomplete)"
+
+[[item]]
+id = "ui_hud_health_armor_ammo_money_timer"
+status = "implemented"
+evidence = "crates/cs-client/src/ui/hud.rs (hud.txt sprites for health, armor, ammo, money, timer driven by legacy WorldSnapshot)"
+
+[[item]]
+id = "ui_hud_crosshair_and_awp_scope"
+status = "implemented"
+evidence = "crates/cs-client/src/ui/mod.rs and hud.rs (dynamic crosshair and sniper scope overlay for legacy client)"
+
+[[item]]
+id = "ui_hud_radar_and_nvg_overlay"
+status = "implemented"
+evidence = "crates/cs-client/src/ui/hud.rs (basic radar and green NightVision tint for legacy client)"
+
+[[item]]
+id = "ui_hud_killfeed_chat_radio_netgraph"
+status = "implemented"
+evidence = "crates/cs-client/src/ui/hud.rs and mod.rs (killfeed, chat, radio menus, net_graph for legacy client)"
+
+[[item]]
+id = "ui_vgui2_res_layout_interpreter"
+status = "missing"
+evidence = "Phase 10: declarative VGUI2 .res layout and scheme interpreter replacing hardcoded egui screens"
+
+[[item]]
+id = "ui_vgui2_control_panel"
+status = "missing"
+evidence = "Phase 10: VGUI2 Panel control"
+
+[[item]]
+id = "ui_vgui2_control_label"
+status = "missing"
+evidence = "Phase 10: VGUI2 Label control"
+
+[[item]]
+id = "ui_vgui2_control_button"
+status = "missing"
+evidence = "Phase 10: VGUI2 Button control"
+
+[[item]]
+id = "ui_vgui2_control_image_panel"
+status = "missing"
+evidence = "Phase 10: VGUI2 ImagePanel control"
+
+[[item]]
+id = "ui_vgui2_control_frame"
+status = "missing"
+evidence = "Phase 10: VGUI2 Frame draggable/closable window control"
+
+[[item]]
+id = "ui_vgui2_control_list_panel"
+status = "missing"
+evidence = "Phase 10: VGUI2 ListPanel sortable table control"
+
+[[item]]
+id = "ui_vgui2_control_rich_text"
+status = "missing"
+evidence = "Phase 10: VGUI2 RichText colored/scrollable text control"
+
+[[item]]
+id = "ui_vgui2_control_combo_box"
+status = "missing"
+evidence = "Phase 10: VGUI2 ComboBox dropdown control"
+
+[[item]]
+id = "ui_vgui2_control_slider"
+status = "missing"
+evidence = "Phase 10: VGUI2 Slider control"
+
+[[item]]
+id = "ui_vgui2_control_check_button"
+status = "missing"
+evidence = "Phase 10: VGUI2 CheckButton control"
+
+[[item]]
+id = "ui_vgui2_control_text_entry"
+status = "missing"
+evidence = "Phase 10: VGUI2 TextEntry input control"
+
+[[item]]
+id = "ui_vgui2_control_property_sheet"
+status = "missing"
+evidence = "Phase 10: VGUI2 PropertySheet tabbed container control"
+
+[[item]]
+id = "ui_truetype_font_rasterizer"
+status = "missing"
+evidence = "Phase 10: TrueType font loading (including marlett.ttf) and scheme font metrics matching original CS 1.6"
+
+[[item]]
+id = "ui_all_languages_localization"
+status = "missing"
+evidence = "Phase 10: loading gameui_*.txt, valve_*.txt, serverbrowser_*.txt, and non-English cstrike_*.txt localization"
+
+[[item]]
+id = "ui_screen_motd_html"
+status = "missing"
+evidence = "Phase 10: MOTD.res panel with HTML subset rendering for server MOTD"
+
+[[item]]
+id = "ui_screen_server_browser_full"
+status = "missing"
+evidence = "Phase 10: DialogServerBrowser.res (Internet, Favorites, History, Spectate, LAN, Friends, Filters)"
+
+[[item]]
+id = "ui_screen_spectator_and_bottom_bar"
+status = "missing"
+evidence = "Phase 10: Spectator.res / BottomSpectator.res / spectatormenu.txt letterbox controls"
+
+[[item]]
+id = "ui_screen_command_menu"
+status = "missing"
+evidence = "Phase 10: commandmenu.txt (+commandmenu) popup hierarchy"
+
+[[item]]
+id = "ui_screen_loading_dialog"
+status = "missing"
+evidence = "Phase 10: LoadingDialog.res progress bar, map loading banner, and error/VAC/kick dialogs"
+
+[[item]]
+id = "ui_screen_player_list_mute"
+status = "missing"
+evidence = "Phase 10: PlayerListDialog.res mute player and info dialog"
+
+[[item]]
+id = "ui_screen_demo_player_dialog"
+status = "missing"
+evidence = "Phase 10: DemoPlayerDialog.res / DemoPlayerFileDialog.res transport UI"
+
+[[item]]
+id = "ui_screen_options_all_tabs"
+status = "missing"
+evidence = "Phase 10: all OptionsSub*.res tabs (Multiplayer, Keyboard, Mouse, Audio, Video, Voice, Lock/ContentControl)"
+
+[[item]]
+id = "ui_screen_create_server_gameplay_page"
+status = "missing"
+evidence = "Phase 10: CreateMultiplayerGameServerPage.res and CreateMultiplayerGameGameplayPage.res driven by user.scr / settings.scr"
+
+[[item]]
+id = "ui_screen_password_and_error_dialogs"
+status = "missing"
+evidence = "Phase 10: DialogServerPassword.res and disconnection/connection-lost dialogs"
+
+[[item]]
+id = "ui_custom_server_vgui_res_support"
+status = "missing"
+evidence = "Phase 10: rendering modified .res layouts downloaded from servers or mods"
+
+[[item]]
+id = "ui_hud_protocol48_usermsg_driver"
+status = "missing"
+evidence = "Phase 3 / 10: driving all HUD elements from Protocol 48 usermsgs instead of legacy WorldSnapshot"
+
+[[item]]
+id = "ui_hud_overview_map"
+status = "missing"
+evidence = "Phase 10: overviews/<map>.txt overview map and spectator radar map rendering"
+
+[[item]]
+id = "ui_hud_status_icons_all"
+status = "missing"
+evidence = "Phase 10: StatusIcon HUD icons (buyzone, c4 blinking, defuser, rescue, escape, vipsafety)"
+
+[[item]]
+id = "ui_hud_progress_bar_bartime"
+status = "missing"
+evidence = "Phase 10: BarTime / BarTime2 planting and defusing progress bar"
+
+[[item]]
+id = "ui_hud_center_and_hint_text"
+status = "missing"
+evidence = "Phase 10: TextMsg HUD_PRINTCENTER, localized #Tokens, and HudTextArgs tutor/hint banners"
+
+[[item]]
+id = "ui_hud_player_id_status_bar"
+status = "missing"
+evidence = "Phase 10: StatusText / StatusValue player name/HP status bar"
+
+[[item]]
+id = "ui_hud_text_menus_showmenu"
+status = "missing"
+evidence = "Phase 10: classic ShowMenu yellow text menus (AMX Mod X menus and _vgui_menus 0)"
+
+[[item]]
+id = "ui_hud_hudtext_and_amx_dhud"
+status = "missing"
+evidence = "Phase 10: titles.txt / HudText / AMX HUD and DHUD channels with fade/fx"
+
+[[item]]
+id = "ui_hud_weapon_selection_buckets"
+status = "missing"
+evidence = "Phase 10: WeaponList-driven HUD weapon buckets and fastswitch behavior"
+
+[[item]]
+id = "ui_hud_damage_direction_and_type_icons"
+status = "missing"
+evidence = "Phase 10: Damage usermsg red directional indicators and dmg_* hazard icons"
+
+[[item]]
+id = "ui_hud_flashlight_and_battery_icon"
+status = "missing"
+evidence = "Phase 10: Flashlight / FlashBat HUD beam and battery meter"
+
+[[item]]
+id = "ui_hud_scenario_and_hostage_indicators"
+status = "missing"
+evidence = "Phase 10: Scenario / BombDrop / HostagePos / HostageK HUD and radar blips"

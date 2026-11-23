@@ -3,19 +3,20 @@
 # (crates/cs-proto48/src/tempent.rs) and `Server::send_temp_entity`. `tested` = a test builds the message
 # and checks its bytes against the layout of `const.h` (read 2026-11-22; the layouts of the builders are
 # the const.h comments, NOT compared with the original engine or client: no TE is `verified`);
-# `implemented` = the stream parser (crates/cs-proto48/src/messages.rs `skip_temp_entity`) takes the
-# payload with a fixed length, there is no builder and cs-game does not send it. Parser lengths of the
-# types without a builder are from memory of const.h and the engine - confirm; two look wrong and are
-# carried to the client phase (TE_BEAMSPRITE 18 and TE_EXPLODEMODEL 107).
+# `missing` includes `TE_*` types that only have a byte-skip length in `skip_temp_entity`
+# (crates/cs-proto48/src/messages.rs) with no builder, no typed decode, no game emitter, and no
+# client renderer. Parser lengths of the types without a builder are from memory of const.h and the
+# engine - confirm; two look wrong and are carried to the client phase (TE_BEAMSPRITE 18 and
+# TE_EXPLODEMODEL 107).
 
 [[item]]
 id = "TE_BEAMPOINTS"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
 id = "TE_BEAMENTPOINT"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
@@ -30,7 +31,7 @@ evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layou
 
 [[item]]
 id = "TE_TAREXPLOSION"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
@@ -40,17 +41,17 @@ evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layou
 
 [[item]]
 id = "TE_TRACER"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
 id = "TE_LIGHTNING"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
 id = "TE_BEAMENTS"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
@@ -60,57 +61,57 @@ evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layou
 
 [[item]]
 id = "TE_LAVASPLASH"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
 id = "TE_TELEPORT"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
 id = "TE_EXPLOSION2"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
 id = "TE_BSPDECAL"
-status = "implemented"
+status = "missing"
 evidence = "parsed by skip_temp_entity (the optional model short after the entity); nothing sends it"
 
 [[item]]
 id = "TE_IMPLOSION"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
 id = "TE_SPRITETRAIL"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
 id = "TE_SPRITE"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
 id = "TE_BEAMSPRITE"
-status = "implemented"
+status = "missing"
 evidence = "wire length in skip_temp_entity is 16 bytes and looks wrong (carried to the client phase); no builder, nothing sends it"
 
 [[item]]
 id = "TE_BEAMTORUS"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
 id = "TE_BEAMDISK"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
 id = "TE_BEAMCYLINDER"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
@@ -120,12 +121,12 @@ evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layou
 
 [[item]]
 id = "TE_GLOWSPRITE"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
 id = "TE_BEAMRING"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
@@ -140,32 +141,32 @@ evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layou
 
 [[item]]
 id = "TE_ELIGHT"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
 id = "TE_TEXTMESSAGE"
-status = "implemented"
+status = "missing"
 evidence = "parsed by skip_temp_entity (channel, position, effect, colours, times and the string); nothing sends it"
 
 [[item]]
 id = "TE_LINE"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
 id = "TE_BOX"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
 id = "TE_KILLBEAM"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
 id = "TE_LARGEFUNNEL"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
@@ -175,12 +176,12 @@ evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layou
 
 [[item]]
 id = "TE_SHOWLINE"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
 id = "TE_BLOOD"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
@@ -190,22 +191,22 @@ evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layou
 
 [[item]]
 id = "TE_FIZZ"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
 id = "TE_MODEL"
-status = "implemented"
+status = "missing"
 evidence = "crates/cs-game/src/weapons/core.rs eject_brass_late sends it (the brass shell) with the raw writer; no test asserts the bytes; the wire length is in skip_temp_entity"
 
 [[item]]
 id = "TE_EXPLODEMODEL"
-status = "implemented"
+status = "missing"
 evidence = "wire length in skip_temp_entity is 16 bytes and looks wrong (carried to the client phase); no builder, nothing sends it"
 
 [[item]]
 id = "TE_BREAKMODEL"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
@@ -215,27 +216,27 @@ evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layou
 
 [[item]]
 id = "TE_SPRITE_SPRAY"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
 id = "TE_ARMOR_RICOCHET"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
 id = "TE_PLAYERDECAL"
-status = "implemented"
+status = "missing"
 evidence = "parsed by skip_temp_entity (the optional model short after the entity); nothing sends it"
 
 [[item]]
 id = "TE_BUBBLES"
-status = "implemented"
+status = "missing"
 evidence = "crates/cs-game/src/grenade.rs sends it for an underwater smoke grenade (raw writer, wire length in skip_temp_entity); no test asserts the bytes"
 
 [[item]]
 id = "TE_BUBBLETRAIL"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
@@ -260,27 +261,27 @@ evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layou
 
 [[item]]
 id = "TE_PROJECTILE"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
 id = "TE_SPRAY"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
 id = "TE_PLAYERSPRITES"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
 id = "TE_PARTICLEBURST"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
 id = "TE_FIREFIELD"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
@@ -295,10 +296,10 @@ evidence = "crates/cs-game/tests/observer.rs::dead_player_becomes_an_observer_af
 
 [[item]]
 id = "TE_MULTIGUNSHOT"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"
 
 [[item]]
 id = "TE_USERTRACER"
-status = "implemented"
+status = "missing"
 evidence = "wire length in cs_proto48::messages::skip_temp_entity; no builder, cs-game does not send it; the length is from memory - confirm"

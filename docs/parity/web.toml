@@ -1,0 +1,87 @@
+# Browser / WebAssembly client, transport, and hosting parity (weight 5).
+# Phase 4 target: wasm32 client with WebGPU/WebGL2, user-selected asset folder, WebSocket/WebTransport, and WS->UDP relay.
+
+[[item]]
+id = "web_platform_clock_abstraction"
+status = "tested"
+evidence = "crates/cs-platform/src/lib.rs::manual_clock_advances, native_clock_is_monotonic (Clock trait seam for native and wasm32)"
+
+[[item]]
+id = "web_library_crates_wasm32_check"
+status = "implemented"
+evidence = ".github/workflows/ci.yml verifies cargo check --target wasm32-unknown-unknown across 10 library crates; no wasm32 tests or browser bundle yet"
+
+[[item]]
+id = "web_cs_web_crate_and_js_glue"
+status = "missing"
+evidence = "Phase 4: cs-web wasm32 entrypoint, canvas lifecycle, and JS/DOM bindings"
+
+[[item]]
+id = "web_wgpu_webgpu_backend"
+status = "missing"
+evidence = "Phase 4: wgpu WebGPU surface and shader compatibility in Chromium/Firefox"
+
+[[item]]
+id = "web_wgpu_webgl2_fallback"
+status = "missing"
+evidence = "Phase 4: wgpu WebGL2 fallback within 2048x2048 lightmap atlas and uniform limits"
+
+[[item]]
+id = "web_vfs_show_directory_picker"
+status = "missing"
+evidence = "Phase 4: VfsBackend over File System Access API (showDirectoryPicker) for local Half-Life assets"
+
+[[item]]
+id = "web_vfs_webkitdirectory_and_drag_drop"
+status = "missing"
+evidence = "Phase 4: fallback asset import via input webkitdirectory and drag-and-drop"
+
+[[item]]
+id = "web_vfs_browser_storage_cache"
+status = "missing"
+evidence = "Phase 4: lazy reading and IndexedDB / OPFS caching of mounted game assets"
+
+[[item]]
+id = "web_transport_websocket"
+status = "missing"
+evidence = "Phase 4: PacketTransport WebSocket implementation for browser and server"
+
+[[item]]
+id = "web_transport_webtransport_datagrams"
+status = "missing"
+evidence = "Phase 4: PacketTransport WebTransport datagram implementation for low-latency play"
+
+[[item]]
+id = "web_server_web_port_and_static_hosting"
+status = "missing"
+evidence = "Phase 4: cs-server --web-port serving the wasm web client and accepting WS/WT game connections"
+
+[[item]]
+id = "web_relay_ws_to_udp_with_limits"
+status = "missing"
+evidence = "Phase 4: cs-relay WS->UDP proxy with allowlist, per-client rate/session caps, and protocol packet validation"
+
+[[item]]
+id = "web_input_pointer_lock_raw_fullscreen"
+status = "missing"
+evidence = "Phase 4: browser Pointer Lock API, unadjustedMovement raw mouse, and fullscreen handling"
+
+[[item]]
+id = "web_input_gamepad_and_touch"
+status = "missing"
+evidence = "Phase 4: Web Gamepad API and touch controls"
+
+[[item]]
+id = "web_audio_user_gesture_unlock"
+status = "missing"
+evidence = "Phase 4: starting browser audio cleanly on first user gesture"
+
+[[item]]
+id = "web_pwa_install_and_offline_bots"
+status = "missing"
+evidence = "Phase 4: installable PWA manifest/service worker and offline play with bots in browser"
+
+[[item]]
+id = "web_listen_server_webrtc_stretch"
+status = "missing"
+evidence = "Phase 4 (stretch): in-browser listen server via WebRTC DataChannels and cs-master signaling"

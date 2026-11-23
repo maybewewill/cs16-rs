@@ -86,15 +86,18 @@ evidence = "crates/cs-proto48/src/messages.rs::tests::sound_pings_and_clc_resour
 
 [[item]]
 id = "svc_particle"
-status = "implemented"
+status = "missing"
+evidence = "parse_svc_message only skips payload bytes and returns SvcMessage::Ignored; no typed decode or writer"
 
 [[item]]
 id = "svc_damage"
-status = "implemented"
+status = "missing"
+evidence = "parse_svc_message only skips payload bytes and returns SvcMessage::Ignored; no typed decode or writer"
 
 [[item]]
 id = "svc_spawnstatic"
-status = "implemented"
+status = "missing"
+evidence = "parse_svc_message only skips payload bytes and returns SvcMessage::Ignored; no typed decode or writer"
 
 [[item]]
 id = "svc_event_reliable"
@@ -126,23 +129,28 @@ status = "implemented"
 
 [[item]]
 id = "svc_killedmonster"
-status = "implemented"
+status = "missing"
+evidence = "parse_svc_message returns SvcMessage::Ignored; no typed decode or writer"
 
 [[item]]
 id = "svc_foundsecret"
-status = "implemented"
+status = "missing"
+evidence = "parse_svc_message returns SvcMessage::Ignored; no typed decode or writer"
 
 [[item]]
 id = "svc_spawnstaticsound"
-status = "implemented"
+status = "missing"
+evidence = "parse_svc_message only skips payload bytes and returns SvcMessage::Ignored; no typed decode or writer"
 
 [[item]]
 id = "svc_intermission"
-status = "implemented"
+status = "missing"
+evidence = "parse_svc_message returns SvcMessage::Ignored; no typed decode or writer"
 
 [[item]]
 id = "svc_finale"
-status = "implemented"
+status = "missing"
+evidence = "parse_svc_message only skips payload bytes and returns SvcMessage::Ignored; no typed decode or writer"
 
 [[item]]
 id = "svc_cdtrack"
@@ -151,11 +159,13 @@ evidence = "crates/cs-engine/src/signon.rs::tests::new_stage_messages_in_order"
 
 [[item]]
 id = "svc_restore"
-status = "implemented"
+status = "missing"
+evidence = "parse_svc_message only skips payload bytes and returns SvcMessage::Ignored; no typed decode or writer"
 
 [[item]]
 id = "svc_cutscene"
-status = "implemented"
+status = "missing"
+evidence = "parse_svc_message only skips payload bytes and returns SvcMessage::Ignored; no typed decode or writer"
 
 [[item]]
 id = "svc_weaponanim"
@@ -210,27 +220,33 @@ evidence = "crates/cs-engine/src/signon.rs::tests::sendres_stage_requests_and_li
 
 [[item]]
 id = "svc_customization"
-status = "implemented"
+status = "missing"
+evidence = "parse_svc_message only skips payload bytes and returns SvcMessage::Ignored; no typed decode or writer"
 
 [[item]]
 id = "svc_crosshairangle"
-status = "implemented"
+status = "missing"
+evidence = "parse_svc_message only skips payload bytes and returns SvcMessage::Ignored; no typed decode or writer"
 
 [[item]]
 id = "svc_soundfade"
-status = "implemented"
+status = "missing"
+evidence = "parse_svc_message only skips payload bytes and returns SvcMessage::Ignored; no typed decode or writer"
 
 [[item]]
 id = "svc_filetxferfailed"
-status = "implemented"
+status = "missing"
+evidence = "parse_svc_message only skips payload bytes and returns SvcMessage::Ignored; no typed decode or writer"
 
 [[item]]
 id = "svc_hltv"
-status = "implemented"
+status = "missing"
+evidence = "parse_svc_message only skips payload bytes and returns SvcMessage::Ignored; no typed decode or writer"
 
 [[item]]
 id = "svc_director"
-status = "implemented"
+status = "missing"
+evidence = "parse_svc_message only skips payload bytes and returns SvcMessage::Ignored; no typed decode or writer"
 
 [[item]]
 id = "svc_voiceinit"
@@ -247,7 +263,8 @@ evidence = "crates/cs-engine/src/signon.rs::tests::new_stage_messages_in_order"
 
 [[item]]
 id = "svc_timescale"
-status = "implemented"
+status = "missing"
+evidence = "parse_svc_message only skips payload bytes and returns SvcMessage::Ignored; no typed decode or writer"
 
 [[item]]
 id = "svc_resourcelocation"
@@ -263,7 +280,8 @@ status = "implemented"
 
 [[item]]
 id = "svc_exec"
-status = "implemented"
+status = "missing"
+evidence = "parse_svc_message only skips payload bytes and returns SvcMessage::Ignored; no typed decode or writer"
 
 [[item]]
 id = "clc_bad"
@@ -296,7 +314,8 @@ evidence = "crates/cs-proto48/src/messages.rs::tests::sound_pings_and_clc_resour
 
 [[item]]
 id = "clc_tmove"
-status = "implemented"
+status = "missing"
+evidence = "parse_clc_message skips payload with no ClcMessage variant or writer"
 
 [[item]]
 id = "clc_fileconsistency"
@@ -309,7 +328,8 @@ status = "implemented"
 
 [[item]]
 id = "clc_hltv"
-status = "implemented"
+status = "missing"
+evidence = "parse_clc_message skips payload with no ClcMessage variant or writer"
 
 [[item]]
 id = "clc_cvarvalue"

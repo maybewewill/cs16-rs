@@ -1,0 +1,213 @@
+# GoldSrc rendering parity (cs-assets parsers + cs-client wgpu renderer, weight 10).
+# Legacy cs-client renderers work against the offline MatchWorld/cs-net prototype;
+# driving the renderer from Protocol 48 entities and full GoldSrc visual parity belong to Phase 3 and Phase 8.
+
+[[item]]
+id = "render_bsp_v30_parser_and_lightmap_atlas"
+status = "tested"
+evidence = "crates/cs-assets/src/lib.rs::parses_real_cs16_maps_if_installed (BSP v30 geometry, batches, PVS, and lightmap atlas)"
+
+[[item]]
+id = "render_mdl_v10_and_wad3_parser"
+status = "tested"
+evidence = "crates/cs-assets/src/lib.rs::parses_real_viewmodels_and_player_models_if_installed, parses_real_wad_and_miptex_if_installed, parses_real_sprites_and_materials_if_installed"
+
+[[item]]
+id = "render_camera_projection"
+status = "tested"
+evidence = "crates/cs-client/src/camera.rs::camera_projects_point_in_front_into_wgpu_ndc"
+
+[[item]]
+id = "render_bsp_world_and_overbright_lightmaps"
+status = "implemented"
+evidence = "crates/cs-client/src/render/bsp_renderer.rs and shaders/bsp.wgsl (legacy prototype, not yet driven by Protocol 48 entities)"
+
+[[item]]
+id = "render_bsp_pvs_culling_and_dynamic_brush_hide"
+status = "implemented"
+evidence = "crates/cs-client/src/render/bsp_renderer.rs (PVS culling and hidden_bsp_models for legacy prototype)"
+
+[[item]]
+id = "render_bsp_alpha_test_and_texturemode"
+status = "implemented"
+evidence = "crates/cs-client/src/render/bsp_renderer.rs (alpha-tested grates, transparent/additive brushes, live gl_texturemode)"
+
+[[item]]
+id = "render_skybox_6face"
+status = "implemented"
+evidence = "crates/cs-client/src/render/skybox.rs and shaders/skybox.wgsl (6-face GoldSrc skybox)"
+
+[[item]]
+id = "render_mdl_basic_skinning_and_bonemerge"
+status = "implemented"
+evidence = "crates/cs-client/src/render/mdl_renderer.rs (StudioModel v10 bones, RLE animations, EF_BONEMERGE p_*.mdl, companion *T.mdl)"
+
+[[item]]
+id = "render_viewmodel_and_righthand"
+status = "implemented"
+evidence = "crates/cs-client/src/render/mdl_renderer.rs (depth-cleared first-person viewmodel with cl_righthand and r_drawviewmodel)"
+
+[[item]]
+id = "render_basic_fx_decals_tracers_smoke_muzzle"
+status = "implemented"
+evidence = "crates/cs-client/src/render/fx_renderer.rs (legacy prototype quads for decals, tracers, smoke, muzzleflash, C4 LED)"
+
+[[item]]
+id = "render_screenshot_gpu_readback"
+status = "implemented"
+evidence = "crates/cs-client/src/render/mod.rs (F5 / screenshot PNG readback)"
+
+[[item]]
+id = "render_basic_gamma_brightness_shader"
+status = "implemented"
+evidence = "crates/cs-client/src/render/shaders/bsp.wgsl (gamma/brightness uniforms and debug_mode lightmap/fullbright)"
+
+[[item]]
+id = "render_protocol48_entity_driven_pipeline"
+status = "missing"
+evidence = "Phase 3: render arbitrary Protocol 48 server entities by modelindex (brush, studio, sprite) via cs-clientcore"
+
+[[item]]
+id = "render_lightstyles_and_switchable_lights"
+status = "missing"
+evidence = "Phase 8: GoldSrc lightstyle animation patterns and switchable map lights (svc_lightstyle)"
+
+[[item]]
+id = "render_dynamic_lights"
+status = "missing"
+evidence = "Phase 8: dynamic dlights and elights (muzzleflashes, TE_DLIGHT, TE_ELIGHT, explosions)"
+
+[[item]]
+id = "render_rendermode_color_texture_glow_solid_additive"
+status = "missing"
+evidence = "Phase 8: full GoldSrc rendermode support (Normal, Color, Texture, Glow, Solid, Additive)"
+
+[[item]]
+id = "render_renderfx_all"
+status = "missing"
+evidence = "Phase 8: full GoldSrc renderfx (pulse, strobe, hologram, distort, etc.)"
+
+[[item]]
+id = "render_water_warp_and_ripples"
+status = "missing"
+evidence = "Phase 8: GoldSrc water surface warp and underwater distortion"
+
+[[item]]
+id = "render_scrolling_textures"
+status = "missing"
+evidence = "Phase 8: scrolling conveyor/water textures (scroll*)"
+
+[[item]]
+id = "render_animated_and_toggleable_textures"
+status = "missing"
+evidence = "Phase 8: GoldSrc frame-animated (+0..+9) and toggleable (+A..+J) BSP textures"
+
+[[item]]
+id = "render_fog"
+status = "missing"
+evidence = "Phase 8: distance fog from env_fog / Fog usermsg"
+
+[[item]]
+id = "render_mdl_sequence_blending"
+status = "missing"
+evidence = "Phase 8: StudioModel sequence transitions and multi-blender interpolation"
+
+[[item]]
+id = "render_mdl_bone_controllers"
+status = "missing"
+evidence = "Phase 8: StudioModel bone controllers (mouth, head/spine aim, turrets)"
+
+[[item]]
+id = "render_mdl_gait_animation"
+status = "missing"
+evidence = "Phase 8: client-side player gaitsequence blending with upper-body aim/shoot sequence"
+
+[[item]]
+id = "render_mdl_attachments"
+status = "missing"
+evidence = "Phase 8: StudioModel attachment points for muzzleflashes and effects"
+
+[[item]]
+id = "render_mdl_animation_events"
+status = "missing"
+evidence = "Phase 8: client-side StudioModel animation events (shell eject, footsteps, muzzle)"
+
+[[item]]
+id = "render_mdl_chrome_additive_masked_flags"
+status = "missing"
+evidence = "Phase 8: STUDIO_NF_CHROME, STUDIO_NF_ADDITIVE, STUDIO_NF_MASKED, STUDIO_NF_FLATSHADE"
+
+[[item]]
+id = "render_mdl_floor_point_lighting"
+status = "missing"
+evidence = "Phase 8: sampling BSP floor lightmap color for StudioModel ambient/directional lighting"
+
+[[item]]
+id = "render_mdl_bodygroups_and_skins"
+status = "missing"
+evidence = "Phase 8: entity pev bodygroup/skin selection on all rendered StudioModels"
+
+[[item]]
+id = "render_mdl_sequence_groups"
+status = "missing"
+evidence = "Phase 8: external sequence group files (*01.mdl, etc.)"
+
+[[item]]
+id = "render_tempents_all_effects"
+status = "missing"
+evidence = "Phase 8: visual rendering of all GoldSrc TE_* temporary entities"
+
+[[item]]
+id = "render_beams_and_lasers"
+status = "missing"
+evidence = "Phase 8: beam, env_beam, env_laser, and TE_BEAM* rendering"
+
+[[item]]
+id = "render_sprites_all_orientations"
+status = "missing"
+evidence = "Phase 8: SPR v2 world entities and tempents across all 5 GoldSrc sprite orientation modes"
+
+[[item]]
+id = "render_particles_and_tracers"
+status = "missing"
+evidence = "Phase 8: GoldSrc particle bursts, sparks, and tracer streaks"
+
+[[item]]
+id = "render_brass_shells"
+status = "missing"
+evidence = "Phase 8: client physics and rendering for TE_MODEL / ejected brass casings"
+
+[[item]]
+id = "render_decals_wad_and_custom_sprays"
+status = "missing"
+evidence = "Phase 8: decals.wad projection on BSP faces and custom player spray decals (tempdecal.wad)"
+
+[[item]]
+id = "render_view_bob_roll_punch_and_lag"
+status = "missing"
+evidence = "Phase 8: cl_bob view bobbing, view roll, punchangle camera kick, and viewmodel lag/sway"
+
+[[item]]
+id = "render_screen_fade_and_shake"
+status = "missing"
+evidence = "Phase 8: ScreenFade (flashbang/fadetoblack) and ScreenShake camera effects"
+
+[[item]]
+id = "render_flashlight_dynamic_beam"
+status = "missing"
+evidence = "Phase 8: dynamic spotlight projection for impulse 100 flashlights"
+
+[[item]]
+id = "render_gamma_texgamma_exact_pipeline"
+status = "missing"
+evidence = "Phase 8: exact GoldSrc gamma/texgamma/brightness/overbright color pipeline matching reference screenshots"
+
+[[item]]
+id = "render_msaa_and_anisotropy"
+status = "missing"
+evidence = "Phase 8 (enhancement): configurable MSAA and anisotropic texture filtering"
+
+[[item]]
+id = "render_widescreen_fov_and_software_mode"
+status = "missing"
+evidence = "Phase 8 (enhancement): Hor+ widescreen FOV without clipping, uncapped high-FPS interpolation, and software-renderer look mode"

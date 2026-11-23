@@ -73,6 +73,7 @@ pub struct CategoryScore {
 pub struct Report {
     pub categories: Vec<CategoryScore>,
     pub verified_pct: f64,
+    pub tested_pct: f64,
     pub implemented_pct: f64,
 }
 
@@ -212,11 +213,13 @@ pub fn score(cats: &[Category], weights: &Weights) -> Report {
         100.0 * weighted / weight_sum as f64
     };
     let verified_pct = pct(|c| c.verified);
+    let tested_pct = pct(|c| c.tested);
     let implemented_pct = pct(|c| c.implemented);
 
     Report {
         categories,
         verified_pct,
+        tested_pct,
         implemented_pct,
     }
 }
@@ -441,6 +444,7 @@ mod tests {
         .unwrap();
         let r = score(&[a], &w);
         assert_eq!(r.verified_pct, 30.0);
+        assert_eq!(r.tested_pct, 60.0);
         assert_eq!(r.implemented_pct, 60.0);
     }
 
@@ -495,6 +499,7 @@ mod tests {
         let w = parse_weights("a = 60\nb = 40").unwrap();
         let r = score(&[], &w);
         assert_eq!(r.verified_pct.to_bits(), 0.0f64.to_bits());
+        assert_eq!(r.tested_pct.to_bits(), 0.0f64.to_bits());
         assert_eq!(r.implemented_pct.to_bits(), 0.0f64.to_bits());
     }
 

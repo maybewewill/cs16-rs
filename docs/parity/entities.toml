@@ -142,3 +142,665 @@ evidence = "The hint queue exists (crates/cs-game/src/hint.rs, tests in hud_extr
 id = "game_shield"
 status = "missing"
 evidence = "Not ported: the tactical shield (its models, the shield states, the shield buy); buying it is refused: crates/cs-game/tests/buy.rs::shield_and_defuser_are_not_for_sale_yet. The engine's shield hitbox gate is done (docs/parity/engine.toml studio_hitbox_traces)"
+
+# Phase 2E Wave 1 entity interaction and map/game entity classes (extracted from original mp.dll exports and all 25 stock CS 1.6 BSP maps, excluding weapon_* tracked in weapons.toml and HL1 single-player-only relics).
+
+[[item]]
+id = "entity_use_and_damage"
+status = "tested"
+evidence = "crates/cs-game/tests/entity_use_damage.rs::use_key_uses_the_entity_in_front, continuous_use_repeats_while_held, a_bullet_damages_a_damageable_entity, radius_damage_reaches_entities, use_targets_fires_by_targetname (Phase 2E W1: PlayerUse, TraceAttack/TakeDamage on entities, SUB_UseTargets/FireTargets)"
+
+[[item]]
+id = "worldspawn"
+status = "tested"
+evidence = "crates/cs-game/tests/game_entities.rs::world_precaches_player_models_and_sounds, the_world_keys_reach_the_probe_in_the_movevars"
+
+[[item]]
+id = "player"
+status = "tested"
+evidence = "crates/cs-game/tests/player.rs::spawned_player_has_regamedll_defaults"
+
+[[item]]
+id = "info_player_start"
+status = "tested"
+evidence = "crates/cs-game/tests/game_entities.rs::spawn_points_come_from_the_lump_by_team, spawn_points_of_de_dust2_are_the_lumps_by_team"
+
+[[item]]
+id = "info_player_deathmatch"
+status = "tested"
+evidence = "crates/cs-game/tests/game_entities.rs::spawn_points_come_from_the_lump_by_team, spawn_points_of_de_dust2_are_the_lumps_by_team"
+
+[[item]]
+id = "info_target"
+status = "tested"
+evidence = "crates/cs-game/tests/join_screen.rs::intro_camera_at_join"
+
+[[item]]
+id = "func_ladder"
+status = "tested"
+evidence = "crates/cs-game/tests/movement_world.rs::a_ladder_is_climbed_on_a_real_map"
+
+[[item]]
+id = "func_water"
+status = "tested"
+evidence = "crates/cs-game/tests/movement_world.rs::func_water_spawns_as_a_non_solid_special_contents_door, func_water_gives_the_player_water_on_a_stock_map"
+
+[[item]]
+id = "func_buyzone"
+status = "tested"
+evidence = "crates/cs-game/tests/buy.rs::buy_zone_icon_on_spawn, buy_zones_of_a_real_map"
+
+[[item]]
+id = "func_bomb_target"
+status = "tested"
+evidence = "crates/cs-game/tests/zones.rs::zones_raise_their_signals_and_icons, bomb_target_use_fires_targets"
+
+[[item]]
+id = "info_bomb_target"
+status = "tested"
+evidence = "crates/cs-game/tests/zones.rs::map_flags_as_check_map_conditions"
+
+[[item]]
+id = "func_hostage_rescue"
+status = "tested"
+evidence = "crates/cs-game/tests/zones.rs::zones_raise_their_signals_and_icons, map_flags_as_check_map_conditions"
+
+[[item]]
+id = "info_hostage_rescue"
+status = "tested"
+evidence = "crates/cs-game/tests/zones.rs::map_flags_as_check_map_conditions"
+
+[[item]]
+id = "func_escapezone"
+status = "tested"
+evidence = "crates/cs-game/tests/zones.rs::a_terrorist_escapes_once_and_the_team_is_told"
+
+[[item]]
+id = "func_vip_safetyzone"
+status = "tested"
+evidence = "crates/cs-game/tests/zones.rs::the_vip_that_reaches_a_safety_zone_disappears_and_is_paid"
+
+[[item]]
+id = "info_vip_start"
+status = "tested"
+evidence = "crates/cs-game/tests/zones.rs::map_flags_as_check_map_conditions"
+
+[[item]]
+id = "info_map_parameters"
+status = "tested"
+evidence = "crates/cs-game/tests/zones.rs::map_parameters_buying_and_bombradius, map_parameters_refuse_purchases_of_the_team_kept_out"
+
+[[item]]
+id = "func_wall"
+status = "tested"
+evidence = "crates/cs-game/tests/game_entities.rs::brush_entities_stay_solid"
+
+[[item]]
+id = "func_illusionary"
+status = "tested"
+evidence = "crates/cs-game/tests/game_entities.rs::brush_entities_stay_solid"
+
+[[item]]
+id = "armoury_entity"
+status = "tested"
+evidence = "crates/cs-game/tests/inventory.rs::armoury_gives_items, armoury_racks_restart_by_the_share_of_the_terrorists"
+
+[[item]]
+id = "weaponbox"
+status = "tested"
+evidence = "crates/cs-game/tests/inventory.rs::death_packs_a_weaponbox, a_weapon_box_removes_itself_at_the_end_of_its_life"
+
+[[item]]
+id = "grenade"
+status = "tested"
+evidence = "crates/cs-game/tests/grenades.rs::grenade_bounces_and_detonates_on_time, he_radius_damage_as_regamedll"
+
+[[item]]
+id = "DelayedUse"
+status = "tested"
+evidence = "crates/cs-game/tests/entity_use_damage.rs::delay_uses_the_targets_later_through_a_delayed_use_entity"
+
+[[item]]
+id = "trigger_camera"
+status = "implemented"
+evidence = "intro camera spawn works (crates/cs-game/tests/join_screen.rs::intro_camera_at_join, dust2_joiner_looks_through_the_first_camera); Use/FollowTarget/Move camera control is not ported (Phase 7)"
+
+[[item]]
+id = "spark_shower"
+status = "implemented"
+evidence = "spawn stub in crates/cs-game/src/grenade.rs; no dedicated behaviour test"
+
+[[item]]
+id = "func_door"
+status = "missing"
+evidence = "only a static solid StaticBrush placeholder exists in crates/cs-game/src/world.rs; interactive open/break/press/move logic is Phase 7"
+
+[[item]]
+id = "func_door_rotating"
+status = "missing"
+evidence = "only a static solid StaticBrush placeholder exists in crates/cs-game/src/world.rs; interactive open/break/press/move logic is Phase 7"
+
+[[item]]
+id = "func_breakable"
+status = "missing"
+evidence = "only a static solid StaticBrush placeholder exists in crates/cs-game/src/world.rs; interactive open/break/press/move logic is Phase 7"
+
+[[item]]
+id = "func_button"
+status = "missing"
+evidence = "only a static solid StaticBrush placeholder exists in crates/cs-game/src/world.rs; interactive open/break/press/move logic is Phase 7"
+
+[[item]]
+id = "func_plat"
+status = "missing"
+evidence = "only a static solid StaticBrush placeholder exists in crates/cs-game/src/world.rs; interactive open/break/press/move logic is Phase 7"
+
+[[item]]
+id = "func_train"
+status = "missing"
+evidence = "only a static solid StaticBrush placeholder exists in crates/cs-game/src/world.rs; interactive open/break/press/move logic is Phase 7"
+
+[[item]]
+id = "func_pushable"
+status = "missing"
+evidence = "only a static solid StaticBrush placeholder exists in crates/cs-game/src/world.rs; interactive open/break/press/move logic is Phase 7"
+
+[[item]]
+id = "hostage_entity"
+status = "missing"
+evidence = "Phase 2E: classic CHostage and CLocalNav"
+
+[[item]]
+id = "item_thighpack"
+status = "missing"
+evidence = "Phase 2E: defuser kit entity and pickup"
+
+[[item]]
+id = "env_bombglow"
+status = "missing"
+evidence = "Phase 2E: planted C4 glow indicator entity"
+
+[[item]]
+id = "ambient_generic"
+status = "missing"
+evidence = "Phase 7 / 9: map ambient sound entity"
+
+[[item]]
+id = "ammo_338magnum"
+status = "missing"
+evidence = "Phase 7: world ammo entity"
+
+[[item]]
+id = "ammo_357sig"
+status = "missing"
+evidence = "Phase 7: world ammo entity"
+
+[[item]]
+id = "ammo_45acp"
+status = "missing"
+evidence = "Phase 7: world ammo entity"
+
+[[item]]
+id = "ammo_50ae"
+status = "missing"
+evidence = "Phase 7: world ammo entity"
+
+[[item]]
+id = "ammo_556nato"
+status = "missing"
+evidence = "Phase 7: world ammo entity"
+
+[[item]]
+id = "ammo_556natobox"
+status = "missing"
+evidence = "Phase 7: world ammo entity"
+
+[[item]]
+id = "ammo_57mm"
+status = "missing"
+evidence = "Phase 7: world ammo entity"
+
+[[item]]
+id = "ammo_762nato"
+status = "missing"
+evidence = "Phase 7: world ammo entity"
+
+[[item]]
+id = "ammo_9mm"
+status = "missing"
+evidence = "Phase 7: world ammo entity"
+
+[[item]]
+id = "ammo_buckshot"
+status = "missing"
+evidence = "Phase 7: world ammo entity"
+
+[[item]]
+id = "beam"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "bodyque"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet (corpses currently use ClCorpse tempent)"
+
+[[item]]
+id = "button_target"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "cycler"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "cycler_sprite"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "env_beam"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "env_blood"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "env_bubbles"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "env_debris"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "env_explosion"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "env_fade"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "env_fog"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "env_funnel"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "env_global"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "env_glow"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "env_laser"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "env_lightning"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "env_message"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "env_rain"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "env_render"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "env_shake"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "env_shooter"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "env_snow"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "env_sound"
+status = "missing"
+evidence = "Phase 7 / 9: map/game entity class not ported yet"
+
+[[item]]
+id = "env_spark"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "env_sprite"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "func_conveyor"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "func_friction"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "func_grencatch"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "func_guntarget"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "func_pendulum"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "func_platrot"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "func_rain"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "func_rot_button"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "func_rotating"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "func_snow"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "func_tracktrain"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "func_traincontrols"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "func_vehicle"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "func_vehiclecontrols"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "func_wall_toggle"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "func_weaponcheck"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "game_counter"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "game_counter_set"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "game_end"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "game_player_equip"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "game_player_hurt"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "game_player_team"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "game_score"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "game_team_master"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "game_team_set"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "game_text"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "game_zone_player"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "gibshooter"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "info_intermission"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "info_null"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "info_teleport_destination"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "infodecal"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "item_assaultsuit"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "item_generic"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "item_kevlar"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "light"
+status = "missing"
+evidence = "Phase 7 / 8: switchable/dynamic light style map entity not ported yet"
+
+[[item]]
+id = "light_environment"
+status = "missing"
+evidence = "Phase 7 / 8: map light entity class not handled yet"
+
+[[item]]
+id = "light_spot"
+status = "missing"
+evidence = "Phase 7 / 8: switchable spotlight entity not ported yet"
+
+[[item]]
+id = "momentary_door"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "momentary_rot_button"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "multi_manager"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "multisource"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "path_corner"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "path_track"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "player_weaponstrip"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "soundent"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "speaker"
+status = "missing"
+evidence = "Phase 7 / 9: map/game entity class not ported yet"
+
+[[item]]
+id = "target_cdaudio"
+status = "missing"
+evidence = "Phase 7 / 9: map/game entity class not ported yet"
+
+[[item]]
+id = "trigger"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "trigger_auto"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "trigger_cdaudio"
+status = "missing"
+evidence = "Phase 7 / 9: map/game entity class not ported yet"
+
+[[item]]
+id = "trigger_changetarget"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "trigger_counter"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "trigger_gravity"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "trigger_hurt"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "trigger_multiple"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "trigger_once"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "trigger_push"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "trigger_relay"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"
+
+[[item]]
+id = "trigger_teleport"
+status = "missing"
+evidence = "Phase 7: map/game entity class not ported yet"

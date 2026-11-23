@@ -1,0 +1,113 @@
+# Bot AI, navigation mesh (.nav), and CZ/ZBot behavior parity (weight 4).
+# Legacy cs-sim/src/bots.rs has a basic grid NavGraph and simple offline AI;
+# Phase 2E connects minimal bots to cs-engine fake clients, while full ZBot parity is Phase 12.
+
+[[item]]
+id = "bot_legacy_sim_brain"
+status = "implemented"
+evidence = "crates/cs-sim/src/bots.rs (legacy offline NavGraph and think_bot AI used by MatchWorld, not yet wired to cs-engine fake clients)"
+
+[[item]]
+id = "bot_engine_fake_client_bridge"
+status = "missing"
+evidence = "Phase 2E: cs-game bot driver using EngineApi fake clients and run_player_move"
+
+[[item]]
+id = "bot_add_kick_quota_commands"
+status = "missing"
+evidence = "Phase 2E / 12: bot_add, bot_add_t, bot_add_ct, bot_kick, bot_quota, bot_quota_match on cs-engine/cs-game"
+
+[[item]]
+id = "bot_navmesh_generation"
+status = "missing"
+evidence = "Phase 12: Condition Zero / CSBot automatic navigation mesh generation on BSP geometry"
+
+[[item]]
+id = "bot_nav_file_read_write"
+status = "missing"
+evidence = "Phase 12: reading and writing Valve .nav binary navigation mesh files"
+
+[[item]]
+id = "bot_nav_place_names"
+status = "missing"
+evidence = "Phase 12: .nav place names for location-aware radio and bot chatter"
+
+[[item]]
+id = "bot_nav_edit_commands"
+status = "missing"
+evidence = "Phase 12: bot_nav_* mesh editing and visualization commands"
+
+[[item]]
+id = "bot_profile_db_parser"
+status = "missing"
+evidence = "Phase 12: BotProfile.db parser for bot names, weapons, skin, voice pitch, and skill templates"
+
+[[item]]
+id = "bot_difficulty_profiles"
+status = "missing"
+evidence = "Phase 12: Easy/Normal/Hard/Expert reaction time, aggression, teamwork, and aim skill profiles"
+
+[[item]]
+id = "bot_buy_economy_and_loadouts"
+status = "missing"
+evidence = "Phase 12: economy-aware save/eco/force/full-buy decisions and weapon preferences"
+
+[[item]]
+id = "bot_pathfinding_stairs_ladders_doors"
+status = "missing"
+evidence = "Phase 12: A* pathfinding across nav areas, ladders, crouch passages, jumps, and func_door/func_breakable obstacles"
+
+[[item]]
+id = "bot_combat_aim_burst_recoil"
+status = "missing"
+evidence = "Phase 12: weapon-aware engagement distance, burst control, sniper zoom, knife/grenade usage, and recoil compensation"
+
+[[item]]
+id = "bot_cover_and_hiding_spots"
+status = "missing"
+evidence = "Phase 12: computing and using hiding spots, reload cover, and flash/retreat behavior"
+
+[[item]]
+id = "bot_ambush_and_camping"
+status = "missing"
+evidence = "Phase 12: sniper/defensive camping and ambush spots"
+
+[[item]]
+id = "bot_bomb_plant_and_guard"
+status = "missing"
+evidence = "Phase 2E (basic) / Phase 12 (full): Terrorist bomb carrier pathing to bombsites, planting, and post-plant defense"
+
+[[item]]
+id = "bot_bomb_search_and_defuse"
+status = "missing"
+evidence = "Phase 2E (basic) / Phase 12 (full): CT bombsite checking, covering defuser, and defusing C4"
+
+[[item]]
+id = "bot_hostage_rescue_and_guard"
+status = "missing"
+evidence = "Phase 2E (basic) / Phase 12 (full): CT hostage escorting to rescue zones and T hostage guarding"
+
+[[item]]
+id = "bot_vip_escort_and_assassination"
+status = "missing"
+evidence = "Phase 12: VIP escape pathing, CT escorting, and T assassination tactics on as_* maps"
+
+[[item]]
+id = "bot_sound_and_vision_perception"
+status = "missing"
+evidence = "Phase 12: hearing footsteps/gunshots/reloads and line-of-sight/smoke/flashblind perception"
+
+[[item]]
+id = "bot_radio_and_chatter"
+status = "missing"
+evidence = "Phase 12: bot radio commands, voice chatter, and responding to human player radio calls"
+
+[[item]]
+id = "bot_team_coordination"
+status = "missing"
+evidence = "Phase 12: coordinated pushes, site calls, and follow/hold commands"
+
+[[item]]
+id = "bot_weapon_restriction_cvars"
+status = "missing"
+evidence = "Phase 12: bot_allow_pistols/shotguns/sub_machine_guns/rifles/snipers/machine_guns/grenades/shield/rogues"

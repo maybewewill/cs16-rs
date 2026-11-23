@@ -102,8 +102,8 @@ fn run_parity(mut args: impl Iterator<Item = String>) -> Result<ExitCode, String
         );
     }
     println!(
-        "TOTAL verified: {:.1}%  implemented: {:.1}%",
-        report.verified_pct, report.implemented_pct
+        "TOTAL verified: {:.1}%  tested: {:.1}%  implemented: {:.1}%",
+        report.verified_pct, report.tested_pct, report.implemented_pct
     );
 
     match min {

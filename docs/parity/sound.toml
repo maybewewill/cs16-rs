@@ -1,0 +1,92 @@
+# GoldSrc audio engine parity (weight 4).
+# Currently only basic rodio 2D/3D WAV and menu MP3 playback exist for the legacy prototype in crates/cs-client/src/audio.rs.
+
+[[item]]
+id = "sound_wav_2d_playback"
+status = "implemented"
+evidence = "crates/cs-client/src/audio.rs (rodio WAV decoding, VFS byte caching, 2D playback)"
+
+[[item]]
+id = "sound_basic_3d_distance_attenuation"
+status = "implemented"
+evidence = "crates/cs-client/src/audio.rs (simple linear-power distance falloff without stereo panning or channels)"
+
+[[item]]
+id = "sound_mp3_menu_music"
+status = "implemented"
+evidence = "crates/cs-client/src/audio.rs (media/gamestartup.mp3 / Half-Life01.mp3 menu playback)"
+
+[[item]]
+id = "sound_protocol48_svc_sound_driver"
+status = "missing"
+evidence = "Phase 3: driving client sound playback from Protocol 48 svc_sound / svc_stopsound / svc_spawnstaticsound / events"
+
+[[item]]
+id = "sound_channels_and_priorities"
+status = "missing"
+evidence = "Phase 9: GoldSrc CHAN_* per-entity channels, replacement rules, and channel capacity/priorities"
+
+[[item]]
+id = "sound_goldsrc_attenuation_and_stereo_panning"
+status = "missing"
+evidence = "Phase 9: ATTN_* distance attenuation curves and listener-relative stereo panning"
+
+[[item]]
+id = "sound_pitch_shifting"
+status = "missing"
+evidence = "Phase 9: per-sound pitch modulation from svc_sound / sentences"
+
+[[item]]
+id = "sound_looped_wav_cue_points"
+status = "missing"
+evidence = "Phase 9: parsing RIFF cue/smpl chunks for seamlessly looping ambient/machinery WAVs"
+
+[[item]]
+id = "sound_sentences_txt_and_vox"
+status = "missing"
+evidence = "Phase 9: sentences.txt parser and VOX/word-concatenation playback (!sentence syntax)"
+
+[[item]]
+id = "sound_roomtype_dsp_and_env_sound"
+status = "missing"
+evidence = "Phase 9: GoldSrc room_type reverb/echo DSP presets driven by env_sound and svc_roomtype"
+
+[[item]]
+id = "sound_ambient_generic_entities"
+status = "missing"
+evidence = "Phase 9: ambient_generic volume ramping, fade-in/out, and toggle states"
+
+[[item]]
+id = "sound_soundfade_and_stopsound"
+status = "missing"
+evidence = "Phase 9: svc_soundfade, svc_stopsound, and SND_STOP handling"
+
+[[item]]
+id = "sound_cdtrack_and_mp3_commands"
+status = "missing"
+evidence = "Phase 9: svc_cdtrack, mp3 play/loop/stop console commands, and MP3FadeTime"
+
+[[item]]
+id = "sound_material_impact_and_client_footsteps"
+status = "missing"
+evidence = "Phase 9: local predicted footsteps and material bullet/ricochet sound effects"
+
+[[item]]
+id = "sound_occlusion_and_water_muffling"
+status = "missing"
+evidence = "Phase 9: GoldSrc underwater low-pass/muffling and distance culling"
+
+[[item]]
+id = "sound_voice_opus_native"
+status = "missing"
+evidence = "Phase 9: Opus voice chat capture, jitter buffer, and playback between cs16-rs clients"
+
+[[item]]
+id = "sound_voice_goldsrc_compat_stretch"
+status = "missing"
+evidence = "Phase 9 (stretch): Speex/Miles voice codec interop with original CS 1.6 clients"
+
+[[item]]
+id = "sound_web_audio_backend"
+status = "missing"
+evidence = "Phase 4 / 9: WebAudio backend for wasm32 builds with user-gesture audio unlock"

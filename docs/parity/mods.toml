@@ -1,0 +1,82 @@
+# Built-in WASM modding API, sandboxed host, SDK, and auto-download parity (weight 5).
+# Phase 5 target: versioned mod ABI, pre/post hookchains on EngineApi/GameDll, wasmi sandbox, asset packs, and client mod auto-download.
+
+[[item]]
+id = "mods_engine_game_trait_boundary"
+status = "tested"
+evidence = "crates/cs-engine/tests/lifecycle.rs::start_frame_is_called_once_per_frame, crates/cs-engine/tests/mapents.rs::map_entities_reach_the_game_with_parsed_vars (private-field EngineApi and GameDll seam prepared for pre/post mod hookchains)"
+
+[[item]]
+id = "mods_api_crate_and_versioned_abi"
+status = "missing"
+evidence = "Phase 5: cs-mod-api crate defining stable versioned ABI types, hook ids, and native signatures"
+
+[[item]]
+id = "mods_hookchains_pre_post"
+status = "missing"
+evidence = "Phase 5: ReAPI-style pre/post hookchains around GameDll and EngineApi calls with override/supercede support"
+
+[[item]]
+id = "mods_server_natives"
+status = "missing"
+evidence = "Phase 5: server natives for entities, messages, cvars, commands, menus, timers, traces, sound, and mod storage"
+
+[[item]]
+id = "mods_host_wasmi_runtime"
+status = "missing"
+evidence = "Phase 5: cs-mod-host executing server/client WASM mods via wasmi across native and wasm32"
+
+[[item]]
+id = "mods_runtime_trait_jit_seam"
+status = "missing"
+evidence = "Phase 5: ModRuntime trait allowing future JIT backend swap"
+
+[[item]]
+id = "mods_sandbox_manifest_permissions_and_limits"
+status = "missing"
+evidence = "Phase 5: capability permissions from mod.toml, fuel/memory budgets per frame, and fault isolation"
+
+[[item]]
+id = "mods_package_csmod_and_mod_toml"
+status = "missing"
+evidence = "Phase 5: loading folder and .csmod archive mods from mods/ with mod.toml metadata and dependencies"
+
+[[item]]
+id = "mods_vfs_asset_pack_layer"
+status = "missing"
+evidence = "Phase 5: VFS mods/<id>/ overlay layer above cstrike"
+
+[[item]]
+id = "mods_client_wasm_hud_and_panels"
+status = "missing"
+evidence = "Phase 5: client-side WASM mods for custom HUD drawing, panels, usermsgs, and input"
+
+[[item]]
+id = "mods_auto_download_hash_and_capability_negotiation"
+status = "missing"
+evidence = "Phase 5: automatic server-to-client mod/asset download, hash verification, first-join prompt, and userinfo capability negotiation"
+
+[[item]]
+id = "mods_sdk_crate_macros_and_hot_reload"
+status = "missing"
+evidence = "Phase 5: cs-mod-sdk crate, hook attribute macros, project template, and server hot reload"
+
+[[item]]
+id = "mods_ref_deathmatch"
+status = "missing"
+evidence = "Phase 5: reference Deathmatch mod"
+
+[[item]]
+id = "mods_ref_gungame"
+status = "missing"
+evidence = "Phase 5: reference GunGame mod"
+
+[[item]]
+id = "mods_ref_zombie"
+status = "missing"
+evidence = "Phase 5: reference Zombie Plague/Infection mod"
+
+[[item]]
+id = "mods_ref_admin_menu_stats_and_hud"
+status = "missing"
+evidence = "Phase 5: reference admin menu, player stats, and custom HUD mods"

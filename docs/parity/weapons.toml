@@ -391,3 +391,28 @@ evidence = "crates/cs-game/tests/player.rs::a_ducking_corpse_is_thrown_backwards
 id = "weapon_shotgun_empty_sound"
 status = "tested"
 evidence = "crates/cs-game/tests/weapon_core.rs::a_shotgun_clicks_once_when_fired_under_water; the M3 and the XM1014 clear m_iPlayEmptySound in their PlayEmptySound (rg_wpn_m3.cpp 65-70, rg_wpn_xm1014.cpp 63-68), so the underwater branch of the weapon core clicks once"
+
+[[item]]
+id = "weapon_defuser"
+status = "missing"
+evidence = "Phase 2E: CT defuse kit (item_thighpack, purchase, body flag, drop on death, 5s vs 10s defuse)"
+
+[[item]]
+id = "weapon_c4_carrier_drop_pickup"
+status = "missing"
+evidence = "Phase 2E: GiveC4 rotation, carrying C4, manual drop, death backpack weaponbox, BombDrop/BombPickup"
+
+[[item]]
+id = "weapon_shield_pistol_knife_grenade_variants"
+status = "missing"
+evidence = "Phase 6: tactical shield states and animations for pistols, knife, and grenades"
+
+[[item]]
+id = "weapon_client_prediction"
+status = "missing"
+evidence = "Phase 3 / 6: our own cs-clientcore weapon prediction matching ReGameDLL/original client cl_lw 1"
+
+[[item]]
+id = "weapon_differential_verification"
+status = "missing"
+evidence = "Phase 6: differential verification of fire rates, damage falloff, penetration, and spread against reference HLDS across all 28 weapons"
