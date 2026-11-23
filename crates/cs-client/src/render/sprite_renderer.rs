@@ -418,7 +418,7 @@ impl SpriteRenderer {
             let mut alpha = d.blend;
             if d.mode == EntRenderMode::Glow {
                 let (brightness_mul, scale_mul) =
-                    glow_blend((d.origin - view.origin).length(), 0);
+                    glow_blend((d.origin - view.origin).length(), d.renderfx);
                 alpha *= brightness_mul;
                 scale *= scale_mul;
                 if alpha <= 0.01 {

@@ -23,8 +23,28 @@ use glam::{Mat4, Vec3, Vec4};
 /// the protocol-48 reader in `cs-proto48` also uses for `effects`).
 pub const EF_NODRAW: u32 = 128;
 
-/// `kRenderFxNoDissipation` (assumption: value 14 from the GoldSrc `kRenderFx` enum order).
+/// `kRenderFx*` values (`const.h` of the Xash3D FWGS common headers, lines 698-720, read
+/// 2026-11-23).
+pub const RENDERFX_NONE: u8 = 0;
+pub const RENDERFX_PULSE_SLOW: u8 = 1;
+pub const RENDERFX_PULSE_FAST: u8 = 2;
+pub const RENDERFX_PULSE_SLOW_WIDE: u8 = 3;
+pub const RENDERFX_PULSE_FAST_WIDE: u8 = 4;
+pub const RENDERFX_FADE_SLOW: u8 = 5;
+pub const RENDERFX_FADE_FAST: u8 = 6;
+pub const RENDERFX_SOLID_SLOW: u8 = 7;
+pub const RENDERFX_SOLID_FAST: u8 = 8;
+pub const RENDERFX_STROBE_SLOW: u8 = 9;
+pub const RENDERFX_STROBE_FAST: u8 = 10;
+pub const RENDERFX_STROBE_FASTER: u8 = 11;
+pub const RENDERFX_FLICKER_SLOW: u8 = 12;
+pub const RENDERFX_FLICKER_FAST: u8 = 13;
 pub const RENDERFX_NO_DISSIPATION: u8 = 14;
+pub const RENDERFX_DISTORT: u8 = 15;
+pub const RENDERFX_HOLOGRAM: u8 = 16;
+pub const RENDERFX_DEAD_PLAYER: u8 = 17;
+pub const RENDERFX_EXPLODE: u8 = 18;
+pub const RENDERFX_LIGHT_MULTIPLIER: u8 = 21;
 
 /// GoldSrc `kRender*` entity render modes (`entity_state_t::rendermode`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,12 +71,29 @@ impl EntRenderMode {
         }
     }
 
-    /// Entities that are drawn in the solid pass.
-    ///
-    /// Assumption: Xash's `R_ModelOpaque` (not fetched) treats `kRenderNormal` and
-    /// `kRenderTransAlpha` as opaque; the other modes go to the sorted translucent list.
+    /// `R_ModelOpaque`: only `kRenderNormal` (`ref/gl/gl_local.h:76`, read 2026-11-23).
     pub fn is_opaque(self) -> bool {
-        matches!(self, Self::Normal | Self::TransAlpha)
+        self == Self::Normal
+    }
+}
+
+/// `R_OpaqueEntity` (`ref/gl/gl_rmain.c:63-77`): solid pass only for `kRenderNormal` with a
+/// renderfx of none, dead player, light multiplier or explode.
+pub fn is_opaque_entity(mode: EntRenderMode, renderfx: u8) -> bool {
+    mode.is_opaque()
+        && matches!(
+            renderfx,
+            RENDERFX_NONE | RENDERFX_DEAD_PLAYER | RENDERFX_LIGHT_MULTIPLIER | RENDERFX_EXPLODE
+        )
+}
+
+/// `R_RankForRenderMode` (`ref/gl/gl_rmain.c:30-42`): tie-break of the translucent sort.
+pub fn render_mode_rank(mode: EntRenderMode) -> u8 {
+    match mode {
+        EntRenderMode::TransTexture => 1,
+        EntRenderMode::TransAdd => 2,
+        EntRenderMode::Glow => 3,
+        _ => 0,
     }
 }
 
@@ -79,10 +116,14 @@ pub enum ModelKind {
     Unknown,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ModelEntry {
     pub name: String,
     pub kind: ModelKind,
+    /// `(mins + maxs) / 2` of the model, used by the translucent sort (`R_TransEntityCompare`).
+    /// Zero until [`ModelRegistry::set_brush_bounds`] fills brush submodels; studio models and
+    /// sprites stay at zero (assumption: their bounds are centred on the origin).
+    pub center: Vec3,
 }
 
 /// Parse a `*N` brush submodel name (`"*12"` -> `Some(12)`).
@@ -121,8 +162,10 @@ impl ModelRegistry {
     /// Build from the precache list where element `i` is the model with `modelindex == i`
     /// (element 0 is the empty slot). Empty names stay unregistered.
     pub fn from_precache<S: AsRef<str>>(names: &[S]) -> Self {
+        // modelindex is a u16 on our side; ignore anything past it.
         let entries = names
             .iter()
+            .take(usize::from(u16::MAX) + 1)
             .enumerate()
             .map(|(i, n)| {
                 let name = n.as_ref();
@@ -132,11 +175,24 @@ impl ModelRegistry {
                     Some(ModelEntry {
                         name: name.to_string(),
                         kind: classify_model(name),
+                        center: Vec3::ZERO,
                     })
                 }
             })
             .collect();
         Self { entries }
+    }
+
+    /// Fill the sort centres of `*N` entries from the world BSP's submodel bounds
+    /// (`bounds[n] = (mins, maxs)` of submodel `n`).
+    pub fn set_brush_bounds(&mut self, bounds: &[(Vec3, Vec3)]) {
+        for e in self.entries.iter_mut().flatten() {
+            if let ModelKind::Brush(n) = e.kind
+                && let Some((mins, maxs)) = bounds.get(n as usize)
+            {
+                e.center = (*mins + *maxs) * 0.5;
+            }
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -184,6 +240,9 @@ pub struct RenderEntity {
     pub skin: i32,
     pub body: i32,
     pub effects: u32,
+    /// `cl_entity_t::player`: the entity is a player model, whose studio pitch is zeroed
+    /// (`ref/gl/gl_studio.c:543`).
+    pub player: bool,
     pub rendermode: EntRenderMode,
     pub renderamt: u8,
     pub rendercolor: [u8; 3],
@@ -207,6 +266,7 @@ impl RenderEntity {
             skin: 0,
             body: 0,
             effects: 0,
+            player: false,
             rendermode: EntRenderMode::Normal,
             renderamt: 255,
             rendercolor: [0, 0, 0],
@@ -284,16 +344,19 @@ pub fn brush_matrix(origin: Vec3, angles: Vec3) -> Mat4 {
 
 /// Transform of a studio model entity.
 ///
-/// Assumption (the studio drawing code is not fetched): the studio path negates the pitch before
-/// building the matrix, as GoldSrc stores studio pitch with the opposite sign of brush pitch.
-pub fn studio_matrix(origin: Vec3, angles: Vec3, scale: f32) -> Mat4 {
+/// `R_StudioSetupModel`'s matrix (`ref/gl/gl_studio.c:535-545`, read 2026-11-23): the pitch is
+/// negated ("stupid quake bug") and zeroed for players ("don't rotate clients, only aim").
+/// The engine builds this matrix with scale 1; `scale` here is the entity scale applied to the
+/// whole transform (assumption: the studio vertex path scales the same way).
+pub fn studio_matrix(origin: Vec3, angles: Vec3, scale: f32, player: bool) -> Mat4 {
     let s = if scale > 0.0 { scale } else { 1.0 };
-    entity_matrix(origin, Vec3::new(-angles.x, angles.y, angles.z), s)
+    let pitch = if player { 0.0 } else { -angles.x };
+    entity_matrix(origin, Vec3::new(pitch, angles.y, angles.z), s)
 }
 
 /// Port of `CL_FxBlend` (`ref/gl/gl_rmain.c`, read 2026-11-23), returning the 0..=255 blend.
 ///
-/// Deviations: the fade/solid fx mutate `renderamt` in the engine (state kept per entity); here
+/// `kRenderFx` ids follow `const.h` (distort 15, hologram 16). Deviations: the fade/solid fx mutate `renderamt` in the engine (state kept per entity); here
 /// they return the current `renderamt` unchanged. Hologram/distort add `COM_RandomLong(-32, 31)`
 /// in the engine; here the jitter is omitted. Both are assumptions to revisit with the shell.
 pub fn fx_blend(e: &RenderEntity, time: f32, view: &ViewBasis) -> i32 {
@@ -305,19 +368,20 @@ pub fn fx_blend(e: &RenderEntity, time: f32, view: &ViewBasis) -> i32 {
     let pulse = |scale: f64, speed: f64| (f64::from(amt) + scale * (t * speed + off).sin()) as i32;
     let gate = |v: f64| if (v as i32) < 0 { 0 } else { amt };
     match e.renderfx {
-        1 => pulse(64.0, 2.0),
-        2 => pulse(64.0, 8.0),
-        3 => pulse(16.0, 2.0),
-        4 => pulse(16.0, 8.0),
+        // gl_rmain.c:1228-1237: Wide pulses swing by 0x40, the others by 0x10.
+        RENDERFX_PULSE_SLOW_WIDE => pulse(64.0, 2.0),
+        RENDERFX_PULSE_FAST_WIDE => pulse(64.0, 8.0),
+        RENDERFX_PULSE_SLOW => pulse(16.0, 2.0),
+        RENDERFX_PULSE_FAST => pulse(16.0, 8.0),
         // 5 FadeSlow, 6 FadeFast, 7 SolidSlow, 8 SolidFast: see the doc comment.
-        9 => gate(20.0 * (t * 4.0 + off).sin()),
-        10 => gate(20.0 * (t * 16.0 + off).sin()),
-        11 => gate(20.0 * (t * 36.0 + off).sin()),
-        12 => gate(20.0 * ((t * 2.0).sin() + (t * 17.0 + off).sin())),
-        13 => gate(20.0 * ((t * 16.0).sin() + (t * 23.0 + off).sin())),
-        // 15 Hologram, 16 Distort
-        15 | 16 => {
-            let dist = if e.renderfx == 16 {
+        RENDERFX_STROBE_SLOW => gate(20.0 * (t * 4.0 + off).sin()),
+        RENDERFX_STROBE_FAST => gate(20.0 * (t * 16.0 + off).sin()),
+        RENDERFX_STROBE_FASTER => gate(20.0 * (t * 36.0 + off).sin()),
+        RENDERFX_FLICKER_SLOW => gate(20.0 * ((t * 2.0).sin() + (t * 17.0 + off).sin())),
+        RENDERFX_FLICKER_FAST => gate(20.0 * ((t * 16.0).sin() + (t * 23.0 + off).sin())),
+        RENDERFX_DISTORT | RENDERFX_HOLOGRAM => {
+            // Distort turns the distance fade off (dist = 1).
+            let dist = if e.renderfx == RENDERFX_DISTORT {
                 1.0
             } else {
                 (e.origin - view.origin).dot(view.forward)
@@ -450,8 +514,15 @@ pub struct BrushDraw {
     pub mode: EntRenderMode,
     /// 0..=1 blend (`CL_FxBlend / 255` for non-opaque modes, 1 for opaque ones).
     pub blend: f32,
+    /// Raw `renderamt / 255`: `kRenderTransColor` uses it instead of the fx blend
+    /// (`gl_rsurf.c:1773`).
+    pub amt: f32,
     pub color: [f32; 3],
+    /// In the solid pass (`R_OpaqueEntity`) rather than the sorted translucent one.
+    pub solid: bool,
+    /// Translucent sort key (`R_TransEntityCompare`).
     pub distance_sq: f32,
+    pub rank: u8,
 }
 
 /// A studio model entity ready to draw.
@@ -479,8 +550,10 @@ pub struct SpriteDraw {
     pub scale: f32,
     pub mode: EntRenderMode,
     pub blend: f32,
+    pub renderfx: u8,
     pub color: [f32; 3],
     pub distance_sq: f32,
+    pub rank: u8,
 }
 
 /// Draw lists of one frame. `solid_*` are in submission order; translucent and sprite lists are
@@ -508,8 +581,9 @@ pub fn render_color(c: [u8; 3]) -> [f32; 3] {
 }
 
 /// Split the frame's entities into draw lists (`R_AddEntity` + `R_DrawEntitiesOnList`,
-/// `ref/gl/gl_rmain.c`, read 2026-11-23): drop `EF_NODRAW` and invisible translucent entities,
-/// draw opaque ones first, then translucent ones far to near.
+/// `ref/gl/gl_rmain.c:236-290, 819-935`, read 2026-11-23): drop `EF_NODRAW` and non-`Normal`
+/// entities whose fx blend is zero, put `R_OpaqueEntity` ones in the solid pass and the rest in
+/// the translucent pass, sorted by `R_TransEntityCompare`.
 pub fn build_draw_lists(scene: &SceneFrame, registry: &ModelRegistry) -> DrawLists {
     let mut lists = DrawLists::default();
     for e in &scene.entities {
@@ -519,21 +593,29 @@ pub fn build_draw_lists(scene: &SceneFrame, registry: &ModelRegistry) -> DrawLis
         let Some(entry) = registry.get(e.model) else {
             continue;
         };
-        let opaque = e.rendermode.is_opaque();
-        let blend_i = if opaque {
-            255
+        // R_AddEntity: `!R_ModelOpaque(rendermode) && CL_FxBlend(e) <= 0` is invisible. The
+        // translucent pass then uses `CL_FxBlend / 255` for every non-Normal mode and 1 for
+        // Normal ("draw as solid but sorted by distance").
+        let (blend, amt) = if e.rendermode.is_opaque() {
+            (1.0, 1.0)
         } else {
-            fx_blend(e, scene.time, &scene.view).clamp(0, 255)
+            let b = fx_blend(e, scene.time, &scene.view);
+            if b <= 0 {
+                continue;
+            }
+            (b.clamp(0, 255) as f32 / 255.0, f32::from(e.renderamt) / 255.0)
         };
-        if !opaque && blend_i <= 0 {
-            continue;
-        }
-        let blend = if e.rendermode == EntRenderMode::Normal {
-            1.0
+        let solid = is_opaque_entity(e.rendermode, e.renderfx);
+        let rank = render_mode_rank(e.rendermode);
+        // R_TransEntityCompare: distance to origin + model centre; TransAlpha brushes sort at
+        // 1e9 so they draw first among the translucent ones.
+        let distance_sq = if matches!(entry.kind, ModelKind::Brush(_))
+            && e.rendermode == EntRenderMode::TransAlpha
+        {
+            1_000_000_000.0
         } else {
-            blend_i as f32 / 255.0
+            (scene.view.origin - (e.origin + entry.center)).length_squared()
         };
-        let distance_sq = (e.origin - scene.view.origin).length_squared();
         match entry.kind {
             ModelKind::Brush(n) => {
                 let draw = BrushDraw {
@@ -541,10 +623,13 @@ pub fn build_draw_lists(scene: &SceneFrame, registry: &ModelRegistry) -> DrawLis
                     matrix: brush_matrix(e.origin, e.angles),
                     mode: e.rendermode,
                     blend,
+                    amt,
                     color: render_color(e.rendercolor),
+                    solid,
                     distance_sq,
+                    rank,
                 };
-                if opaque {
+                if solid {
                     lists.solid_brush.push(draw);
                 } else {
                     lists.trans_brush.push(draw);
@@ -552,7 +637,7 @@ pub fn build_draw_lists(scene: &SceneFrame, registry: &ModelRegistry) -> DrawLis
             }
             ModelKind::Studio => lists.studio.push(StudioDraw {
                 model: e.model,
-                matrix: studio_matrix(e.origin, e.angles, e.scale),
+                matrix: studio_matrix(e.origin, e.angles, e.scale, e.player),
                 sequence: e.sequence,
                 frame: e.frame,
                 animtime: e.animtime,
@@ -570,19 +655,25 @@ pub fn build_draw_lists(scene: &SceneFrame, registry: &ModelRegistry) -> DrawLis
                 scale: if e.scale > 0.0 { e.scale } else { 1.0 },
                 mode: e.rendermode,
                 blend,
+                renderfx: e.renderfx,
                 color: render_color(e.rendercolor),
                 distance_sq,
+                rank,
             }),
             ModelKind::World | ModelKind::Unknown => {}
         }
     }
-    let far_to_near = |a: f32, b: f32| b.total_cmp(&a);
-    lists
-        .trans_brush
-        .sort_by(|a, b| far_to_near(a.distance_sq, b.distance_sq));
-    lists
-        .sprites
-        .sort_by(|a, b| far_to_near(a.distance_sq, b.distance_sq));
+    // Far first, then by render mode rank.
+    lists.trans_brush.sort_by(|a, b| {
+        b.distance_sq
+            .total_cmp(&a.distance_sq)
+            .then(a.rank.cmp(&b.rank))
+    });
+    lists.sprites.sort_by(|a, b| {
+        b.distance_sq
+            .total_cmp(&a.distance_sq)
+            .then(a.rank.cmp(&b.rank))
+    });
     lists
 }
 
@@ -676,32 +767,77 @@ mod tests {
 
     #[test]
     fn studio_matrix_scale_and_pitch_sign() {
-        let m = studio_matrix(Vec3::ZERO, Vec3::ZERO, 2.0);
+        let m = studio_matrix(Vec3::ZERO, Vec3::ZERO, 2.0, false);
         assert!(approx(m.transform_vector3(Vec3::X), Vec3::new(2.0, 0.0, 0.0)));
-        let m0 = studio_matrix(Vec3::ZERO, Vec3::ZERO, 0.0);
+        let m0 = studio_matrix(Vec3::ZERO, Vec3::ZERO, 0.0, false);
         assert!(approx(m0.transform_vector3(Vec3::X), Vec3::X), "scale 0 means 1");
-        let m = studio_matrix(Vec3::ZERO, Vec3::new(30.0, 0.0, 0.0), 1.0);
+        let m = studio_matrix(Vec3::ZERO, Vec3::new(30.0, 0.0, 0.0), 1.0, false);
         assert!(m.transform_vector3(Vec3::X).z > 0.0, "negated pitch lifts the nose");
+        // gl_studio.c:543: players only aim, the model is not pitched.
+        let m = studio_matrix(Vec3::ZERO, Vec3::new(30.0, 0.0, 0.0), 1.0, true);
+        assert!(approx(m.transform_vector3(Vec3::X), Vec3::X));
     }
 
     #[test]
-    fn fx_blend_modes() {
+    fn fx_blend_pulse_constants_per_id() {
+        // const.h:699-703 and gl_rmain.c:1228-1237: Wide = 0x40, plain = 0x10; Slow = x2, Fast = x8.
         let r = registry();
-        let h = r.resolve(5).unwrap();
-        let mut e = RenderEntity::new(1, h, Vec3::ZERO);
+        let mut e = RenderEntity::new(1, r.resolve(5).unwrap(), Vec3::ZERO);
         e.renderamt = 100;
+        let t = 1.5f64;
+        let off = 363.0f64;
+        for (id, swing, speed) in [
+            (RENDERFX_PULSE_SLOW, 16.0, 2.0),
+            (RENDERFX_PULSE_FAST, 16.0, 8.0),
+            (RENDERFX_PULSE_SLOW_WIDE, 64.0, 2.0),
+            (RENDERFX_PULSE_FAST_WIDE, 64.0, 8.0),
+        ] {
+            e.renderfx = id;
+            let want = (100.0 + swing * (t * speed + off).sin()) as i32;
+            assert_eq!(fx_blend(&e, t as f32, &view()), want, "renderfx {id}");
+        }
+        e.renderfx = RENDERFX_NONE;
         assert_eq!(fx_blend(&e, 3.0, &view()), 100);
-        e.renderfx = 1;
-        let b = fx_blend(&e, 3.0, &view());
-        assert!((100 - 64..=100 + 64).contains(&b));
-        e.renderfx = 16; // distort: fixed 180 once in front of the camera
+    }
+
+    #[test]
+    fn fx_blend_distort_and_hologram() {
+        let r = registry();
+        let mut e = RenderEntity::new(1, r.resolve(5).unwrap(), Vec3::new(300.0, 0.0, 0.0));
+        e.renderamt = 100;
+        // const.h:714-715: 15 = Distort (no distance fade), 16 = Hologram (distance fade).
+        e.renderfx = RENDERFX_DISTORT;
+        assert_eq!(fx_blend(&e, 0.0, &view()), 180);
+        e.renderfx = RENDERFX_HOLOGRAM;
+        assert_eq!(fx_blend(&e, 0.0, &view()), 90);
         e.origin = Vec3::new(50.0, 0.0, 0.0);
         assert_eq!(fx_blend(&e, 0.0, &view()), 180);
-        e.renderfx = 15; // hologram fades with distance, hidden behind the view
-        e.origin = Vec3::new(300.0, 0.0, 0.0);
-        assert_eq!(fx_blend(&e, 0.0, &view()), 90);
         e.origin = Vec3::new(-10.0, 0.0, 0.0);
         assert_eq!(fx_blend(&e, 0.0, &view()), 0);
+        e.renderfx = RENDERFX_DISTORT;
+        assert_eq!(fx_blend(&e, 0.0, &view()), 180, "distort ignores the view side");
+    }
+
+    #[test]
+    fn opaque_entity_rules() {
+        use EntRenderMode::*;
+        assert!(is_opaque_entity(Normal, RENDERFX_NONE));
+        assert!(is_opaque_entity(Normal, RENDERFX_DEAD_PLAYER));
+        assert!(is_opaque_entity(Normal, RENDERFX_EXPLODE));
+        assert!(is_opaque_entity(Normal, RENDERFX_LIGHT_MULTIPLIER));
+        assert!(!is_opaque_entity(Normal, RENDERFX_PULSE_SLOW));
+        assert!(!is_opaque_entity(Normal, RENDERFX_HOLOGRAM));
+        assert!(!is_opaque_entity(TransAlpha, RENDERFX_NONE), "gl_local.h:76");
+        assert!(!is_opaque_entity(TransAdd, RENDERFX_NONE));
+    }
+
+    #[test]
+    fn precache_list_is_capped_at_u16() {
+        let names: Vec<String> = (0..70_000).map(|i| format!("models/m{i}.mdl")).collect();
+        let r = ModelRegistry::from_precache(&names);
+        assert_eq!(r.len(), 65_536);
+        assert!(r.resolve(65_535).is_some());
+        assert!(r.resolve(65_536).is_none());
     }
 
     #[test]
@@ -821,6 +957,11 @@ mod tests {
         puff_near.index = 8;
         puff_near.origin = Vec3::new(50.0, 0.0, 0.0);
         puff_near.scale = 0.5;
+        let mut alpha_grate = RenderEntity::new(12, h(2), Vec3::new(1.0, 0.0, 0.0));
+        alpha_grate.rendermode = EntRenderMode::TransAlpha;
+        alpha_grate.renderamt = 255;
+        let mut pulsing = RenderEntity::new(13, h(4), Vec3::new(2.0, 0.0, 0.0));
+        pulsing.renderfx = RENDERFX_PULSE_SLOW;
         let world = RenderEntity::new(9, h(1), Vec3::ZERO);
         let unknown = RenderEntity::new(10, h(6), Vec3::ZERO);
         let missing = RenderEntity::new(11, ModelHandle(40), Vec3::ZERO);
@@ -830,27 +971,57 @@ mod tests {
             view: view(),
             entities: vec![
                 glass_far, door, glass_near, hidden, nodraw, gun, puff_far, puff_near, world,
-                unknown, missing,
+                unknown, missing, alpha_grate, pulsing,
             ],
         };
         let l = build_draw_lists(&scene, &r);
         assert_eq!(l.solid_brush.len(), 1);
         assert_eq!(l.solid_brush[0].submodel, 1);
         assert_eq!(l.solid_brush[0].blend, 1.0);
-        assert_eq!(l.trans_brush.len(), 2, "renderamt 0 and nodraw are dropped");
-        assert!(l.trans_brush[0].distance_sq > l.trans_brush[1].distance_sq);
-        assert_eq!(l.trans_brush[0].submodel, 12);
-        assert!((l.trans_brush[0].blend - 128.0 / 255.0).abs() < 1e-6);
-        assert_eq!(l.studio.len(), 1);
+        assert_eq!(l.trans_brush.len(), 3, "renderamt 0 and nodraw are dropped");
+        // TransAlpha brushes sort at 1e9: first among the translucent ones (gl_rmain.c:96-104).
+        assert_eq!(l.trans_brush[0].mode, EntRenderMode::TransAlpha);
+        assert!(!l.trans_brush[0].solid);
+        assert_eq!(l.trans_brush[0].distance_sq, 1_000_000_000.0);
+        assert!(l.trans_brush[1].distance_sq > l.trans_brush[2].distance_sq);
+        assert_eq!(l.trans_brush[1].submodel, 12);
+        assert!((l.trans_brush[1].blend - 128.0 / 255.0).abs() < 1e-6);
+        assert!((l.trans_brush[1].amt - 128.0 / 255.0).abs() < 1e-6);
+        assert_eq!(l.studio.len(), 2, "a Normal entity with a pulse fx is still drawn");
         assert_eq!(l.sprites.len(), 2);
         assert!(l.sprites[0].distance_sq > l.sprites[1].distance_sq);
         assert_eq!(l.sprites[0].scale, 1.0, "scale 0 means 1");
         assert_eq!(l.sprites[1].scale, 0.5);
         assert_eq!(l.sprites[0].color, [1.0; 3], "all-zero rendercolor is white");
+        assert!(l.solid_brush[0].solid);
         // The door's yaw rotated its matrix.
         assert!(approx(
             l.solid_brush[0].matrix.transform_vector3(Vec3::X),
             Vec3::Y
         ));
+    }
+
+    #[test]
+    fn translucent_sort_uses_the_model_centre() {
+        let mut r = registry();
+        // *1 is centred 1000 units along +X, *12 sits on the origin.
+        let mut bounds = vec![(Vec3::ZERO, Vec3::ZERO); 13];
+        bounds[1] = (Vec3::new(900.0, -10.0, -10.0), Vec3::new(1100.0, 10.0, 10.0));
+        r.set_brush_bounds(&bounds);
+        let h = |i| r.resolve(i).unwrap();
+        let mut a = RenderEntity::new(1, h(2), Vec3::ZERO); // centre at x=1000
+        a.rendermode = EntRenderMode::TransTexture;
+        a.renderamt = 100;
+        let mut b = RenderEntity::new(2, h(3), Vec3::new(500.0, 0.0, 0.0)); // centre at x=500
+        b.rendermode = EntRenderMode::TransTexture;
+        b.renderamt = 100;
+        let scene = SceneFrame {
+            time: 0.0,
+            view: view(),
+            entities: vec![b, a],
+        };
+        let l = build_draw_lists(&scene, &r);
+        assert_eq!(l.trans_brush[0].submodel, 1, "far centre first");
+        assert_eq!(l.trans_brush[0].distance_sq, 1_000_000.0);
     }
 }

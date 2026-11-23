@@ -356,9 +356,8 @@ impl Renderer {
                 }
             }
 
-            if let (Some(lists), Some(frame), Some(vfs)) =
-                (&draw_lists, &self.entity_scene, scene.vfs)
-            {
+            if let (Some(lists), Some(_)) = (&draw_lists, &self.entity_scene) {
+                // Brush entities need no assets from the VFS: prepare them unconditionally.
                 let brushes: Vec<&BrushDraw> = lists
                     .solid_brush
                     .iter()
@@ -371,7 +370,11 @@ impl Renderer {
                     .partition(|p| p.is_opaque());
                 prepared_solid_brushes = solid;
                 prepared_trans_brushes = trans;
+            }
 
+            if let (Some(lists), Some(frame), Some(vfs)) =
+                (&draw_lists, &self.entity_scene, scene.vfs)
+            {
                 let studio: Vec<StudioInstance<'_>> = lists
                     .studio
                     .iter()
@@ -725,8 +728,9 @@ fn create_depth_view(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Te
 mod tests {
     use super::*;
 
-    /// Headless device for pipeline/shader validation; `None` when the machine has no adapter
-    /// (the GPU test then returns without assertions, like the other environment-dependent tests).
+    /// Headless device for pipeline/shader validation; `None` when the machine has no adapter.
+    /// The GPU test below is a no-op in that case (it returns without assertions, like the other
+    /// environment-dependent tests), so a green run does not prove the WGSL compiles.
     fn headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {

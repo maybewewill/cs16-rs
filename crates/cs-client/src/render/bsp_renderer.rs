@@ -49,12 +49,14 @@ pub struct PreparedBrushEntity {
     slot: u32,
     submodel: usize,
     mode: EntRenderMode,
+    solid: bool,
 }
 
 impl PreparedBrushEntity {
-    /// Drawn in the solid pass (as opposed to the sorted translucent pass).
+    /// Drawn in the solid pass (as opposed to the sorted translucent pass): the entity's
+    /// `R_OpaqueEntity` result, not just its render mode.
     pub fn is_opaque(&self) -> bool {
-        self.mode.is_opaque()
+        self.solid
     }
 }
 
@@ -73,15 +75,21 @@ pub(crate) fn group_batches_by_model(batches: &[RenderBatch]) -> Vec<Vec<usize>>
 /// (`ref/gl/gl_rsurf.c`, Xash3D FWGS, read 2026-11-23).
 ///
 /// - `kRenderNormal`: plain world shading.
-/// - `kRenderTransColor`: untextured `rendercolor` with `renderamt` alpha, alpha blended.
+/// - `kRenderTransColor`: untextured `rendercolor` with the raw `renderamt` as alpha (not the fx
+///   blend, `gl_rsurf.c:1773`), alpha blended.
 /// - `kRenderTransAdd`: `GL_ONE, GL_ONE`, color scaled by the blend, no depth write.
 /// - `kRenderTransAlpha`: alpha test at 0.25, no blending (the non-Quake-compatible branch).
 /// - everything else (`TransTexture`, `Glow`, unknown): alpha blend with the blend as alpha, no
 ///   depth write.
-fn entity_shader_params(mode: EntRenderMode, blend: f32, color: [f32; 3]) -> ([f32; 4], f32) {
+fn entity_shader_params(
+    mode: EntRenderMode,
+    blend: f32,
+    amt: f32,
+    color: [f32; 3],
+) -> ([f32; 4], f32) {
     match mode {
         EntRenderMode::Normal => ([1.0; 4], ENT_MODE_WORLD),
-        EntRenderMode::TransColor => ([color[0], color[1], color[2], blend], ENT_MODE_TRANS_COLOR),
+        EntRenderMode::TransColor => ([color[0], color[1], color[2], amt], ENT_MODE_TRANS_COLOR),
         EntRenderMode::TransAdd => ([1.0, 1.0, 1.0, blend], ENT_MODE_ADD),
         EntRenderMode::TransAlpha => ([1.0; 4], ENT_MODE_TRANS_ALPHA),
         EntRenderMode::TransTexture | EntRenderMode::Glow => ([1.0, 1.0, 1.0, blend], ENT_MODE_BLEND),
@@ -532,7 +540,7 @@ impl BspRenderer {
             {
                 continue;
             }
-            let (color, mode) = entity_shader_params(d.mode, d.blend, d.color);
+            let (color, mode) = entity_shader_params(d.mode, d.blend, d.amt, d.color);
             let u = EntityUniforms {
                 model: d.matrix.to_cols_array_2d(),
                 color,
@@ -545,6 +553,7 @@ impl BspRenderer {
                 slot: i as u32 + 1,
                 submodel,
                 mode: d.mode,
+                solid: d.solid,
             });
         }
         if !bytes.is_empty() {
@@ -801,27 +810,27 @@ mod tests {
     fn render_mode_shader_params() {
         let c = [0.5, 0.25, 1.0];
         assert_eq!(
-            entity_shader_params(EntRenderMode::Normal, 0.3, c),
+            entity_shader_params(EntRenderMode::Normal, 0.3, 0.9, c),
             ([1.0; 4], ENT_MODE_WORLD)
         );
         assert_eq!(
-            entity_shader_params(EntRenderMode::TransColor, 0.3, c),
-            ([0.5, 0.25, 1.0, 0.3], ENT_MODE_TRANS_COLOR)
+            entity_shader_params(EntRenderMode::TransColor, 0.3, 0.9, c),
+            ([0.5, 0.25, 1.0, 0.9], ENT_MODE_TRANS_COLOR)
         );
         assert_eq!(
-            entity_shader_params(EntRenderMode::TransAdd, 0.3, c),
+            entity_shader_params(EntRenderMode::TransAdd, 0.3, 0.9, c),
             ([1.0, 1.0, 1.0, 0.3], ENT_MODE_ADD)
         );
         assert_eq!(
-            entity_shader_params(EntRenderMode::TransAlpha, 0.3, c).1,
+            entity_shader_params(EntRenderMode::TransAlpha, 0.3, 0.9, c).1,
             ENT_MODE_TRANS_ALPHA
         );
         assert_eq!(
-            entity_shader_params(EntRenderMode::TransTexture, 0.3, c).1,
+            entity_shader_params(EntRenderMode::TransTexture, 0.3, 0.9, c).1,
             ENT_MODE_BLEND
         );
         assert_eq!(
-            entity_shader_params(EntRenderMode::Glow, 0.3, c).1,
+            entity_shader_params(EntRenderMode::Glow, 0.3, 0.9, c).1,
             ENT_MODE_BLEND
         );
     }

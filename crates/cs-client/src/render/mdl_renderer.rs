@@ -80,11 +80,53 @@ struct InnerInst<'a> {
     body: i32,
 }
 
-/// Animation frame of a studio entity: its `frame` plus the time since `animtime` at
-/// `framerate` times the sequence fps (assumption: the studio frame setup of Xash was not
-/// fetched; this is the plain GoldSrc formula).
-pub fn studio_frame(frame: f32, animtime: f32, framerate: f32, now: f32, fps: f32) -> f32 {
-    frame + (now - animtime).max(0.0) * fps * framerate
+/// `STUDIO_LOOPING` sequence flag.
+pub const STUDIO_LOOPING: i32 = 1;
+
+/// Animation frame of a studio entity: port of `R_StudioEstimateFrame` (Xash3D FWGS
+/// `ref/gl/gl_studio.c:565-590`, read 2026-11-23, interpolation on).
+///
+/// `frame` is the 0..255 entity frame byte scaled to `numframes - 1` (0 when the sequence has at
+/// most one frame); the time since `animtime` advances it at `framerate * fps`. Looping
+/// sequences wrap modulo `numframes - 1`, others clamp to `numframes - 1.001`.
+pub fn studio_frame(
+    frame: f32,
+    animtime: f32,
+    framerate: f32,
+    now: f32,
+    fps: f32,
+    numframes: usize,
+    looping: bool,
+) -> f32 {
+    // C computes `dfdt` in double and the frame in float.
+    let dfdt = if now < animtime {
+        0.0
+    } else {
+        f64::from(now - animtime) * f64::from(framerate) * f64::from(fps)
+    };
+    let span = numframes.saturating_sub(1) as f64;
+    let mut f = if numframes <= 1 {
+        0.0
+    } else {
+        f64::from(frame * span as f32 / 256.0)
+    };
+    f += dfdt;
+    if looping {
+        if numframes > 1 {
+            f -= ((f / span) as i64) as f64 * span;
+        }
+        if f < 0.0 {
+            f += span;
+        }
+    } else {
+        if f >= span - 1.001 {
+            f = span - 1.001;
+        }
+        if f < 0.0 {
+            f = 0.0;
+        }
+    }
+    f as f32
 }
 
 /// Submodel of body part `index` selected by the entity's `body` value:
@@ -102,8 +144,7 @@ pub fn bodypart_submodel(
     }
     let base: i64 = parts[..index]
         .iter()
-        .map(|p| (p.submodels.len() as i64).max(1))
-        .product();
+        .try_fold(1i64, |acc, p| acc.checked_mul((p.submodels.len() as i64).max(1)))?;
     let pick = (i64::from(body.max(0)) / base) % count;
     part.submodels.get(pick as usize)
 }
@@ -484,16 +525,28 @@ impl MdlRenderer {
                 .get(seq_idx)
                 .map(|s| s.fps)
                 .unwrap_or(30.0);
-            let frame = match inst.frame {
-                FrameSel::TimeSec(t) => t * fps,
+            let (frame, loop_anim) = match inst.frame {
+                FrameSel::TimeSec(t) => (t * fps, inst.loop_anim),
                 FrameSel::Entity {
                     frame,
                     animtime,
                     framerate,
                     now,
-                } => studio_frame(frame, animtime, framerate, now, fps),
+                } => {
+                    let (numframes, looping) = cached
+                        .mdl
+                        .sequences
+                        .get(seq_idx)
+                        .map(|s| (s.num_frames, s.flags & STUDIO_LOOPING != 0))
+                        .unwrap_or((1, false));
+                    // The estimate already wrapped or clamped the frame.
+                    (
+                        studio_frame(frame, animtime, framerate, now, fps, numframes, looping),
+                        false,
+                    )
+                }
             };
-            let bones = cached.mdl.evaluate_bones_ex(seq_idx, frame, inst.loop_anim);
+            let bones = cached.mdl.evaluate_bones_ex(seq_idx, frame, loop_anim);
 
             let mut push_model = |m_key: &str, cached_m: &CachedGpuModel, m_bones: &[Mat4]| {
                 for bi in 0..cached_m.mdl.bodyparts.len() {
@@ -691,10 +744,23 @@ mod tests {
     }
 
     #[test]
-    fn studio_frame_advances_with_framerate() {
-        assert_eq!(studio_frame(2.0, 10.0, 1.0, 11.0, 30.0), 32.0);
-        assert_eq!(studio_frame(2.0, 10.0, 0.0, 15.0, 30.0), 2.0);
+    fn studio_frame_follows_estimate_frame() {
+        // frame byte 128 of a 41-frame sequence: 128 * 40 / 256 = 20.
+        assert_eq!(studio_frame(128.0, 10.0, 1.0, 10.0, 30.0, 41, false), 20.0);
+        // one second at fps 30 advances 30 frames: 20 + 30 = 50 wraps modulo 40 -> 10.
+        assert_eq!(studio_frame(128.0, 10.0, 1.0, 11.0, 30.0, 41, true), 10.0);
+        // non-looping clamps to numframes - 1.001.
+        assert_eq!(
+            studio_frame(128.0, 10.0, 1.0, 11.0, 30.0, 41, false),
+            (40.0f64 - 1.001) as f32
+        );
+        // framerate 0 freezes the animation at the scaled frame byte.
+        assert_eq!(studio_frame(64.0, 10.0, 0.0, 15.0, 30.0, 41, true), 10.0);
         // animtime in the future: no negative advance.
-        assert_eq!(studio_frame(0.0, 12.0, 1.0, 11.0, 30.0), 0.0);
+        assert_eq!(studio_frame(0.0, 12.0, 1.0, 11.0, 30.0, 41, true), 0.0);
+        // single-frame sequences: the frame term is 0; the engine still adds the time term when
+        // looping (bone evaluation ignores it for one-frame sequences) and clamps otherwise.
+        assert_eq!(studio_frame(200.0, 0.0, 1.0, 5.0, 30.0, 1, true), 150.0);
+        assert_eq!(studio_frame(200.0, 0.0, 1.0, 5.0, 30.0, 1, false), 0.0);
     }
 }

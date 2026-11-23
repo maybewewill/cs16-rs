@@ -412,10 +412,13 @@ impl StudioModel {
             if nf <= 1 {
                 (0, 0, 0.0)
             } else if loop_anim {
-                let f_wrapped = frame_time.rem_euclid(nf as f32);
-                let i0 = (f_wrapped.floor() as usize).min(nf - 1);
-                let i1 = if i0 + 1 < nf { i0 + 1 } else { 0 };
-                (i0, i1, f_wrapped - f_wrapped.floor())
+                // A looping studio sequence repeats every `numframes - 1` frames: its last frame
+                // equals the first (`R_StudioEstimateFrame`, Xash3D FWGS `ref/gl/gl_studio.c`,
+                // read 2026-11-23).
+                let period = (nf - 1) as f32;
+                let f_wrapped = frame_time.rem_euclid(period);
+                let i0 = (f_wrapped.floor() as usize).min(nf - 2);
+                (i0, i0 + 1, f_wrapped - f_wrapped.floor())
             } else {
                 let f_clamped = frame_time.clamp(0.0, (nf - 1) as f32);
                 let i0 = (f_clamped.floor() as usize).min(nf - 1);
