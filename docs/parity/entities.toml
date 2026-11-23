@@ -306,9 +306,14 @@ status = "missing"
 evidence = "only a static solid StaticBrush placeholder exists in crates/cs-game/src/world.rs; interactive open/break/press/move logic is Phase 7"
 
 [[item]]
-id = "hostage_entity"
+id = "hostage_entity_spawn"
 status = "verified"
-evidence = "crates/cs-game/tests/hostages.rs::use_toggles_follow_with_the_one_second_gate, a_hostage_follows_its_leader_around_a_corner, hostage_touch_pushes, killing_a_hostage_costs_money_and_sends_hostage_k, rescue_in_the_zone_pays_the_rescuer, hostages_restart_to_their_spawn, cs_office_hostages_spawn_as_hlds; crates/cs-game/tests/full_round.rs::a_bot_rescues_a_hostage_on_cs_office; classic CHostage + CLocalNav (!m_improv). VERIFIED 2026-11-23, method 2 (live HLDS build 10210 vs cs-server --proto48 on cs_office, maxplayers 8: identical svc_spawnbaseline #59..#62 edict indices, origins (1784, 734, -159.875), (1744, 802, -159.875), (2064, -384, -159.875), (2000, -384, -159.875), yaw angles, modelindex=377, movetype=4, solid=3, mins/maxs [-10,-10,0]..[10,10,62], framerate=1, plus identical HostagePos flag=1 stream at InitHUD and CT spawn; minor baseline diffs: HLDS sends animated frame and skin=1; docs/parity/checklists/phase2e-objectives.md E1)"
+evidence = "crates/cs-game/tests/hostages.rs::cs_office_hostages_spawn_as_hlds; VERIFIED 2026-11-23, method 2 (live HLDS build 10210 vs cs-server --proto48 on cs_office, maxplayers 8: identical svc_spawnbaseline #59..#62 edict indices, origins (1784, 734, -159.875), (1744, 802, -159.875), (2064, -384, -159.875), (2000, -384, -159.875), yaw angles, modelindex=377, movetype=4, solid=3, mins/maxs [-10,-10,0]..[10,10,62], framerate=1, plus the identical HostagePos flag=1 stream at InitHUD and CT spawn; minor baseline diffs: HLDS sends animated frame and skin=1; docs/parity/checklists/phase2e-objectives.md E1). Only the spawn and the join stream are compared with the original; the behaviour is hostage_entity_behaviour"
+
+[[item]]
+id = "hostage_entity_behaviour"
+status = "tested"
+evidence = "crates/cs-game/tests/hostages.rs::use_toggles_follow_with_the_one_second_gate, a_hostage_follows_its_leader_around_a_corner, hostage_touch_pushes, killing_a_hostage_costs_money_and_sends_hostage_k, the_nth_hostage_kill_removes_the_terrorist, rescue_in_the_zone_pays_the_rescuer, hostages_restart_to_their_spawn, the_furthest_traversable_node_is_written_back; crates/cs-game/tests/full_round.rs::a_bot_rescues_a_hostage_on_cs_office; classic CHostage + CLocalNav (!m_improv), ported from the sources (hostage.cpp, hostage_localnav.cpp, read 2026-11-23). Following, rescue, damage and the penalty are not compared with the original server or client (docs/parity/checklists/phase2e-objectives.md rows 5 and 6 are the owner checks); not ported: SVC_DIRECTOR messages and the log lines (module doc of crates/cs-game/src/hostage.rs)"
 
 [[item]]
 id = "item_thighpack"

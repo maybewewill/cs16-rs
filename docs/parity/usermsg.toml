@@ -49,7 +49,7 @@ status = "implemented"
 [[item]]
 id = "TextMsg"
 status = "verified"
-evidence = "crates/cs-game/tests/bomb.rs::cannot_plant_outside_bomb_zone_or_in_air, planting_freezes_progresses_and_plants_after_three_seconds, releasing_attack_or_leaving_zone_cancels_plant; crates/cs-game/tests/objective_rounds.rs::*; crates/cs-game/tests/vip_escape.rs::*; VERIFIED 2026-11-22/2026-11-23, method 2 (live HLDS build 10210 vs cs-server --proto48: `#Game_connected`, `#Game_join_terrorist`/`#Game_join_ct`, `#Game_scoring`, and `#Game_bomb_drop` on de_dust2 match; docs/parity/checklists/phase2d-weapons.md V7, V8 and docs/parity/checklists/phase2e-objectives.md E1-E3)"
+evidence = "crates/cs-game/tests/bomb.rs::cannot_plant_outside_bomb_zone_or_in_air, planting_freezes_progresses_and_plants_after_three_seconds, releasing_attack_or_leaving_zone_cancels_plant; crates/cs-game/tests/objective_rounds.rs::*; crates/cs-game/tests/vip_escape.rs::*; VERIFIED 2026-11-22/2026-11-23, method 2 (live HLDS build 10210 vs cs-server --proto48: the strings `#Game_connected`, `#Game_join_terrorist`/`#Game_join_ct`, `#Game_scoring` (phase 2C/2D captures) and `#Game_bomb_drop` (de_dust2, checklist E2) match; every other TextMsg string (`#Bomb_Planted`, `#Target_Bombed`, `#Bomb_Defused`, `#VIP_Escaped`, `#Hostage_Rescued`, `#C4_Plant_*`, ...) is tested against the source only; docs/parity/checklists/phase2d-weapons.md V7, V8 and docs/parity/checklists/phase2e-objectives.md E1-E3)"
 
 [[item]]
 id = "WeaponList"
@@ -306,7 +306,7 @@ evidence = "crates/cs-proto48/src/usermsg.rs::tests::cs_usermsgs_roundtrip_clean
 [[item]]
 id = "ItemStatus"
 status = "verified"
-evidence = "crates/cs-game/tests/bomb_carrier.rs::defuser_purchase_as_regamedll, defuser_drops_at_death; crates/cs-game/tests/buy.rs::shield_and_defuser_are_not_for_sale_yet (`ItemStatus(2)` defuser bit); VERIFIED 2026-11-23, method 2 (live HLDS build 10210 vs cs-server --proto48: `ItemStatus(0)` emitted in InitHUD and spawn on de_dust2, cs_office, and as_oilrig; docs/parity/checklists/phase2e-objectives.md E1-E3)"
+evidence = "crates/cs-game/tests/bomb_carrier.rs::defuser_purchase_as_regamedll, defuser_drops_at_death; crates/cs-game/tests/buy.rs::shield_and_defuser_are_not_for_sale_yet (`ItemStatus(2)` defuser bit); VERIFIED 2026-11-23 for the value 0 only, method 2 (live HLDS build 10210 vs cs-server --proto48: `ItemStatus(0)` emitted in InitHUD and spawn on de_dust2, cs_office, and as_oilrig; docs/parity/checklists/phase2e-objectives.md E1-E3). The values 1 (night vision), 2 (defuser) and 3 are tested against the source only (crates/cs-game/tests/bomb_carrier.rs::defuser_purchase_as_regamedll, defuser_drops_at_death), not compared with the original"
 
 [[item]]
 id = "Location"

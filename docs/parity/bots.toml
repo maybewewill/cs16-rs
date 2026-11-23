@@ -10,12 +10,17 @@ evidence = "crates/cs-sim/src/bots.rs (directed NavGraph with ceiling-safe stair
 [[item]]
 id = "bot_engine_fake_client_bridge"
 status = "tested"
-evidence = "crates/cs-game/tests/bots.rs::bot_add_joins_a_team_and_spawns, bots_move_and_shoot_an_enemy, bots_buy_at_round_start, bot_kick_frees_the_slot, a_round_with_bots_ends (cs-game bot driver using EngineApi::create_fake_client and run_player_move, 30 Hz command/10 Hz think pacing, IsBot rules branches)"
+evidence = "crates/cs-game/tests/bots.rs::bot_add_joins_a_team_and_spawns, bots_move_and_shoot_an_enemy, bots_buy_at_round_start, bot_kick_frees_the_slot, a_round_with_bots_ends (cs-game bot driver using EngineApi::create_fake_client and run_player_move, 30 Hz command/10 Hz think pacing); crates/cs-game/tests/bots.rs::a_map_without_bots_builds_no_nav, a_full_team_costs_no_fake_client (a server without bots pays nothing; AddBot settles the team before it creates the client). The IsBot branches of the rules (bots skip the MOTD and menus) are not separately tested"
 
 [[item]]
-id = "bot_add_kick_quota_commands"
+id = "bot_add_kick_commands"
 status = "tested"
-evidence = "crates/cs-game/tests/bots.rs::bot_add_joins_a_team_and_spawns, bot_kick_frees_the_slot (bot_add, bot_add_t, bot_add_ct, bot_kick implemented and tested); bot_quota maintenance wired in crates/cs-game/src/bots.rs and cs-server --proto48 --bots (crates/cs-server/src/proto48.rs::tests::vanilla_round_time); bot_quota_match and ZBot subcommands remain Phase 12"
+evidence = "crates/cs-game/tests/bots.rs::bot_add_joins_a_team_and_spawns, bot_kick_frees_the_slot, a_full_team_costs_no_fake_client (bot_add, bot_add_t, bot_add_ct, bot_kick); bot_quota_match and ZBot subcommands remain Phase 12"
+
+[[item]]
+id = "bot_quota_maintenance"
+status = "implemented"
+evidence = "crates/cs-game/src/bots.rs::maintain_quota (every 0.5 s adds a bot below bot_quota, kicks one above it), wired in cs-server --proto48 --bots (crates/cs-server/src/proto48.rs::tests::vanilla_round_time only starts the server with it); no test drives maintain_quota itself"
 
 [[item]]
 id = "bot_navmesh_generation"
@@ -75,7 +80,7 @@ evidence = "Phase 12: sniper/defensive camping and ambush spots"
 [[item]]
 id = "bot_bomb_plant_and_guard"
 status = "tested"
-evidence = "crates/cs-game/tests/full_round.rs::a_bot_plants_and_the_bomb_explodes_on_de_dust2 (Phase 2E NavGraph carrier pathing to func_bomb_target and arming C4; full ZBot post-plant site guarding remains Phase 12)"
+evidence = "PLANT ONLY: crates/cs-game/tests/full_round.rs::a_bot_plants_and_the_bomb_explodes_on_de_dust2 (Phase 2E NavGraph carrier pathing to func_bomb_target and arming C4). Guarding the site after the plant (ZBot post-plant behaviour) is not ported: Phase 12"
 
 [[item]]
 id = "bot_bomb_search_and_defuse"
