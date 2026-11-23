@@ -1,0 +1,18 @@
+[package]
+name = "cs-clientcore"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+cs-proto48.workspace = true
+cs-transport.workspace = true
+
+[dev-dependencies]
+cs-cvar.workspace = true
+cs-engine.workspace = true
+glam.workspace = true

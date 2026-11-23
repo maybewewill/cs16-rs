@@ -9,6 +9,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+cs-clientcore.workspace = true
 cs-proto48.workspace = true
 cs-transport.workspace = true
 

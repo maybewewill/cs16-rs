@@ -569,6 +569,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "cs-clientcore"
+version = "0.1.0"
+dependencies = [
+ "cs-cvar",
+ "cs-engine",
+ "cs-proto48",
+ "cs-transport",
+ "glam",
+]
+
+[[package]]
 name = "cs-cvar"
 version = "0.1.0"
 
@@ -636,6 +647,7 @@ dependencies = [
 name = "cs-probe"
 version = "0.1.0"
 dependencies = [
+ "cs-clientcore",
  "cs-platform",
  "cs-proto48",
  "cs-transport",

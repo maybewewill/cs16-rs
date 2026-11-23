@@ -9,6 +9,7 @@ members = [
     "crates/cs-pm",
     "crates/cs-engine",
     "crates/cs-probe",
+    "crates/cs-clientcore",
     "crates/cs-sim",
     "crates/cs-game",
     "crates/cs-net",
@@ -52,6 +53,7 @@ cs-transport = { path = "crates/cs-transport" }
 cs-pm = { path = "crates/cs-pm" }
 cs-engine = { path = "crates/cs-engine" }
 cs-probe = { path = "crates/cs-probe" }
+cs-clientcore = { path = "crates/cs-clientcore" }
 cs-sim = { path = "crates/cs-sim" }
 cs-game = { path = "crates/cs-game" }
 cs-net = { path = "crates/cs-net" }

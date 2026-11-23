@@ -3,8 +3,10 @@
 //! drive servers with it over a loopback transport; the binary connects to a real server over
 //! UDP and records every datagram to a capture file (see [`capture`]).
 //!
-//! The sign-on sequence is a working assumption (recalled HLDS behaviour), not yet verified
-//! against a reference server.
+//! The connection itself is `cs-clientcore`'s [`Connection`](cs_clientcore::Connection): the
+//! probe is that client with a configuration that suits a tool (no game files, so a server
+//! that demands file consistency is left) and the capture recording on top. Its sign-on
+//! sequence is verified against stock HLDS build 10210 (`docs/dev/reference-stand.md`).
 
 pub mod capture;
 pub mod diff;
@@ -14,40 +16,27 @@ mod test_support;
 
 use std::collections::{BTreeMap, VecDeque};
 
-use cs_proto48::CONNECTIONLESS_HEADER;
-use cs_proto48::bitbuf::MsgWriter;
-use cs_proto48::crypto::com_munge2;
+use cs_clientcore::{Connection, ConnectionConfig, ConsistencyPolicy};
+#[cfg(not(target_arch = "wasm32"))]
+use cs_clientcore::DatagramTap;
 use cs_proto48::delta::{GoldSrcClientData, GoldSrcEntityState, GoldSrcUserCmd, GoldSrcWeaponData};
-use cs_proto48::handshake::{
-    OobPacket, default_cs16_protinfo, default_cs16_userinfo, encode_connect_48,
-    encode_getchallenge, lan_steam_auth_ticket, parse_oob_packet,
-};
-use cs_proto48::messages::{
-    PacketEntitiesMsg, ServerInfoMsg, SvcMessage, SvcParseContext, WeaponRecords, entity_schema_name,
-    parse_svc_stream, write_clc_delta, write_clc_move, write_clc_resourcelist, write_clc_stringcmd,
-};
-use cs_proto48::netchan::{FRAGMENT_C2S_SIZE, NetChan, SplitPacketAssembler};
+use cs_proto48::messages::{ServerInfoMsg, SvcMessage};
 use cs_transport::{PacketTransport, PeerAddr};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use capture::CaptureWriter;
 pub use capture::{CAPTURE_MAGIC, CaptureRecord, Direction, read_capture};
+pub use cs_clientcore::ConnState as ProbeState;
+pub use cs_clientcore::ConnStats as ProbeStats;
+pub use cs_clientcore::MESSAGE_LOG_CAPACITY;
 
-/// Minimum spacing between two netchan packets (at most 100 packets per second).
+#[cfg(test)]
+use cs_clientcore::{CONSISTENCY_REASON, NO_SERVERINFO_REASON};
+
+/// Minimum spacing between two netchan packets (at most 100 packets per second): the interval
+/// of the default `cl_cmdrate` 100.
+#[cfg(test)]
 const SEND_INTERVAL: f64 = 0.01;
-/// A connectionless handshake packet is resent when no answer arrived within this time.
-const HANDSHAKE_RESEND: f64 = 1.0;
-/// Previously sent commands repeated in every `clc_move` as backups.
-const MAX_BACKUP_CMDS: usize = 2;
-/// Queued commands sent as new commands in one packet; the rest wait for the next packet, so
-/// the `clc_move` body stays far below its one-byte length limit.
-const MAX_NEW_CMDS: usize = 16;
-/// Reason given when the server demands file consistency checks the probe cannot answer.
-const CONSISTENCY_REASON: &str = "consistency required: set mp_consistency 0";
-/// Messages [`ProbeClient::messages`] keeps.
-pub const MESSAGE_LOG_CAPACITY: usize = 1024;
-/// Reason given when `svc_resourcelist` arrives before `svc_serverinfo`.
-const NO_SERVERINFO_REASON: &str = "resourcelist before serverinfo";
 
 /// Identity the probe connects with.
 #[derive(Debug, Clone)]
@@ -57,667 +46,203 @@ pub struct ProbeConfig {
     pub cdkey_md5_hex: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum ProbeState {
-    Idle,
-    AwaitChallenge,
-    AwaitConnection,
-    Signon,
-    InGame,
-    Rejected(String),
-    Disconnected(String),
-}
+/// Writes the datagrams of a connection to a capture file.
+#[cfg(not(target_arch = "wasm32"))]
+struct CaptureTap(CaptureWriter);
 
-impl ProbeState {
-    fn is_terminal(&self) -> bool {
-        matches!(self, ProbeState::Rejected(_) | ProbeState::Disconnected(_))
+#[cfg(not(target_arch = "wasm32"))]
+impl DatagramTap for CaptureTap {
+    fn record(&mut self, sent: bool, time: f64, data: &[u8]) -> std::io::Result<()> {
+        self.0.push(&CaptureRecord {
+            dir: if sent { Direction::Sent } else { Direction::Received },
+            time,
+            data: data.to_vec(),
+        })
     }
-}
-
-#[derive(Default, Debug, Clone, Copy)]
-pub struct ProbeStats {
-    pub datagrams_in: u64,
-    pub bytes_in: u64,
-    pub largest_datagram: usize,
-    pub full_updates: u64,
-    pub delta_updates: u64,
-    /// Entity updates received during the last second of the caller's clock.
-    pub frames_in_last_second: u32,
-    /// Size in bytes of the most recent datagram received from the server.
-    pub last_datagram: usize,
-    /// Datagrams from the server that could not be parsed (or were not understood).
-    pub parse_errors: u64,
 }
 
 /// Headless client over any [`PacketTransport`]. It never reads the system clock: the caller
 /// passes its time to [`ProbeClient::pump`].
 pub struct ProbeClient<T: PacketTransport> {
-    transport: T,
-    server: PeerAddr,
-    cfg: ProbeConfig,
-    state: ProbeState,
-    chan: Option<NetChan>,
-    ctx: SvcParseContext,
-    splits: SplitPacketAssembler,
-    challenge: u32,
-    /// When the current connectionless handshake packet was last sent; `None` sends it on the
-    /// next pump.
-    handshake_sent_at: Option<f64>,
-    /// Earliest time the next netchan packet may go out.
-    next_send_at: f64,
-    server_info: Option<ServerInfoMsg>,
-    entities: BTreeMap<u16, GoldSrcEntityState>,
-    client_data: Option<GoldSrcClientData>,
-    /// The `weapon_data_t` list of the last `svc_clientdata` received.
-    weapon_records: WeaponRecords,
-    userinfos: BTreeMap<u8, String>,
-    opcode_log: Vec<u8>,
-    /// The last [`MESSAGE_LOG_CAPACITY`] messages received, without the per-update ones.
-    messages: VecDeque<SvcMessage>,
-    stats: ProbeStats,
-    /// Arrival times of entity updates within the last second.
-    frame_times: VecDeque<f64>,
-    cmd_queue: VecDeque<GoldSrcUserCmd>,
-    /// Userinfo keys that replace the defaults in the `connect` packet.
-    userinfo_overrides: Vec<(String, String)>,
-    /// Last sent commands, newest first, repeated as backups.
-    sent_cmds: VecDeque<GoldSrcUserCmd>,
-    /// Most recent command taken from the queue; repeated with `msec = 0` when the queue is empty.
-    last_cmd: GoldSrcUserCmd,
-    /// Low byte of the netchan sequence of the last entity update.
-    last_entity_seq: Option<u8>,
-    forced_delta_seq: Option<u8>,
-    /// Test hook: `clc_delta` is left out of outgoing packets.
-    delta_suppressed: bool,
-    /// Test hook: the reliable acknowledgement bit outgoing packets carry instead of the
-    /// channel's own.
-    withheld_reliable_ack: Option<u32>,
-    /// Outgoing `clc_move` messages still to be sent with a corrupted checksum (test hook).
-    corrupt_moves: u32,
-    /// Test hook: no `clc_move` in outgoing packets, not even the `msec` 0 placeholder.
-    moves_suppressed: bool,
-    #[cfg(not(target_arch = "wasm32"))]
-    capture: Option<CaptureWriter>,
-    #[cfg(not(target_arch = "wasm32"))]
-    capture_error: Option<std::io::Error>,
+    core: Connection<T>,
 }
 
 impl<T: PacketTransport> ProbeClient<T> {
     pub fn new(transport: T, server: PeerAddr, cfg: ProbeConfig) -> Self {
+        let mut core_cfg = ConnectionConfig::new(&cfg.name, cfg.steam_id, &cfg.cdkey_md5_hex);
+        // The probe has no game files to hash.
+        core_cfg.consistency = ConsistencyPolicy::Refuse;
+        // It observes: a stuffed `kill` must not make its player act.
+        core_cfg.forward_stufftext = false;
         Self {
-            transport,
-            server,
-            cfg,
-            state: ProbeState::Idle,
-            chan: None,
-            ctx: SvcParseContext::new(),
-            splits: SplitPacketAssembler::default(),
-            challenge: 0,
-            handshake_sent_at: None,
-            next_send_at: f64::NEG_INFINITY,
-            server_info: None,
-            entities: BTreeMap::new(),
-            client_data: None,
-            weapon_records: WeaponRecords::new(),
-            userinfos: BTreeMap::new(),
-            opcode_log: Vec::new(),
-            messages: VecDeque::new(),
-            stats: ProbeStats::default(),
-            frame_times: VecDeque::new(),
-            cmd_queue: VecDeque::new(),
-            userinfo_overrides: Vec::new(),
-            sent_cmds: VecDeque::new(),
-            last_cmd: GoldSrcUserCmd::default(),
-            last_entity_seq: None,
-            forced_delta_seq: None,
-            delta_suppressed: false,
-            withheld_reliable_ack: None,
-            corrupt_moves: 0,
-            moves_suppressed: false,
-            #[cfg(not(target_arch = "wasm32"))]
-            capture: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            capture_error: None,
+            core: Connection::new(transport, server, core_cfg),
         }
+    }
+
+    /// The client core under the probe.
+    pub fn core(&self) -> &Connection<T> {
+        &self.core
+    }
+
+    pub fn core_mut(&mut self) -> &mut Connection<T> {
+        &mut self.core
     }
 
     /// Starts the handshake; `getchallenge` goes out on the next [`pump`](Self::pump).
     pub fn connect(&mut self) {
-        self.state = ProbeState::AwaitChallenge;
-        self.handshake_sent_at = None;
+        self.core.connect();
     }
 
     /// Receives everything waiting, advances the state, then sends: a connectionless handshake
     /// packet when one is due, or one netchan packet when `now` is at least 0.01 s past the
     /// previous one.
     pub fn pump(&mut self, now: f64) {
-        while let Some((from, data)) = self.transport.recv() {
-            if from != self.server {
-                continue;
-            }
-            self.record(Direction::Received, now, &data);
-            self.stats.datagrams_in += 1;
-            self.stats.bytes_in += data.len() as u64;
-            self.stats.largest_datagram = self.stats.largest_datagram.max(data.len());
-            self.stats.last_datagram = data.len();
-            self.handle_datagram(&data, now);
-        }
-
-        while self.frame_times.front().is_some_and(|&t| t <= now - 1.0) {
-            self.frame_times.pop_front();
-        }
-        self.stats.frames_in_last_second = self.frame_times.len() as u32;
-
-        match self.state {
-            ProbeState::AwaitChallenge | ProbeState::AwaitConnection => {
-                if self
-                    .handshake_sent_at
-                    .is_none_or(|t| now - t >= HANDSHAKE_RESEND)
-                {
-                    let packet = if self.state == ProbeState::AwaitChallenge {
-                        encode_getchallenge(true)
-                    } else {
-                        let mut userinfo = default_cs16_userinfo(&self.cfg.name);
-                        for (key, value) in &self.userinfo_overrides {
-                            userinfo.set(key, value);
-                        }
-                        encode_connect_48(
-                            self.challenge,
-                            &default_cs16_protinfo(&self.cfg.cdkey_md5_hex),
-                            &userinfo,
-                            &lan_steam_auth_ticket(self.cfg.steam_id),
-                        )
-                    };
-                    self.send(&packet, now);
-                    self.handshake_sent_at = Some(now);
-                }
-            }
-            ProbeState::Signon | ProbeState::InGame => {
-                if now >= self.next_send_at {
-                    self.send_netchan_packet(now);
-                    self.next_send_at = now + SEND_INTERVAL;
-                }
-            }
-            ProbeState::Idle | ProbeState::Rejected(_) | ProbeState::Disconnected(_) => {}
-        }
+        self.core.pump(now);
     }
 
     /// Sets a userinfo key sent in the `connect` packet in place of the default (call before
     /// [`connect`](Self::connect)), e.g. `_vgui_menus` `0` for a client that wants text menus.
     pub fn set_userinfo(&mut self, key: &str, value: &str) {
-        self.userinfo_overrides.push((key.to_string(), value.to_string()));
+        self.core.set_userinfo(key, value);
     }
 
     pub fn queue_cmd(&mut self, cmd: GoldSrcUserCmd) {
-        self.cmd_queue.push_back(cmd);
+        self.core.queue_cmd(cmd);
     }
 
     /// Queues a reliable string command. Ignored before the server accepted the connection
     /// (there is no channel to carry it yet).
     pub fn send_stringcmd(&mut self, cmd: &str) {
-        if let Some(chan) = self.chan.as_mut() {
-            let mut w = MsgWriter::new();
-            write_clc_stringcmd(&mut w, cmd);
-            chan.write_reliable(&w.into_bytes());
-        }
+        self.core.send_stringcmd(cmd);
     }
 
     /// Overrides the sequence sent in `clc_delta`; `None` restores the last entity update's.
     pub fn force_delta_seq(&mut self, seq: Option<u8>) {
-        self.forced_delta_seq = seq;
+        self.core.force_delta_seq(seq);
     }
 
     /// Test hook: while `true`, outgoing packets carry no `clc_delta`, which asks the server for
     /// full updates.
     pub fn suppress_delta(&mut self, suppress: bool) {
-        self.delta_suppressed = suppress;
+        self.core.suppress_delta(suppress);
     }
 
     /// Test hook: while `true`, outgoing packets keep acknowledging the reliable message state
     /// of the moment the hook was set, so the server never sees later reliable messages
     /// acknowledged and keeps resending them. `None` before the server accepted the connection.
     pub fn withhold_reliable_ack(&mut self, withhold: bool) {
-        self.withheld_reliable_ack = if withhold {
-            self.chan.as_ref().map(|c| c.incoming_reliable_sequence)
-        } else {
-            None
-        };
+        self.core.withhold_reliable_ack(withhold);
     }
 
     /// Test hook: flips the checksum byte of the next `n` outgoing `clc_move` messages, so the
     /// server cannot parse the packets that carry them.
     pub fn corrupt_next_moves(&mut self, n: u32) {
-        self.corrupt_moves = n;
+        self.core.corrupt_next_moves(n);
     }
 
     /// Test hook: while `suppressed`, outgoing packets carry no `clc_move` at all (by default
     /// every packet has one: the queued commands, or the last one again with `msec` 0), so the
     /// server runs no command of this client. Queued commands wait.
     pub fn suppress_moves(&mut self, suppressed: bool) {
-        self.moves_suppressed = suppressed;
+        self.core.suppress_moves(suppressed);
     }
 
     /// Test hook: sequence number the next netchan packet will carry; `None` before the server
     /// accepted the connection.
     pub fn outgoing_sequence(&self) -> Option<u32> {
-        self.chan.as_ref().map(|c| c.outgoing_sequence)
+        self.core.outgoing_sequence()
     }
 
     /// Test hook: sequence number of the last netchan packet received from the server; `None`
     /// before the server accepted the connection.
     pub fn incoming_sequence(&self) -> Option<u32> {
-        self.chan.as_ref().map(|c| c.incoming_sequence)
+        self.core.incoming_sequence()
     }
 
     pub fn state(&self) -> &ProbeState {
-        &self.state
+        self.core.state()
     }
 
     pub fn server_info(&self) -> Option<&ServerInfoMsg> {
-        self.server_info.as_ref()
+        self.core.server_info()
     }
 
     pub fn player_slot(&self) -> Option<u8> {
-        self.server_info.as_ref().map(|info| info.player_slot)
+        self.core.player_slot()
     }
 
     pub fn entities(&self) -> &BTreeMap<u16, GoldSrcEntityState> {
-        &self.entities
+        self.core.entities()
     }
 
     /// Spawn baselines received for the current map, decoded, by entity number.
     pub fn baselines(&self) -> BTreeMap<u16, GoldSrcEntityState> {
-        let deltas = &self.ctx.deltas;
-        let max_clients = self.ctx.max_clients;
-        self.ctx
-            .baselines
-            .iter()
-            .filter_map(|(&number, (ent_type, rec))| {
-                let schema = deltas.get(entity_schema_name(number, *ent_type, max_clients))?;
-                Some((number, GoldSrcEntityState::from_delta(number, *ent_type, rec, schema)))
-            })
-            .collect()
+        self.core.baselines()
     }
 
     pub fn client_data(&self) -> Option<&GoldSrcClientData> {
-        self.client_data.as_ref()
+        self.core.client_data()
     }
 
     /// The `weapon_data_t` list of the last `svc_clientdata` the server sent, as the client
     /// rebuilds it from the deltas, by weapon index; an index not listed is all zero.
     pub fn weapon_data(&self) -> BTreeMap<u8, GoldSrcWeaponData> {
-        let Some(schema) = self.ctx.deltas.get("weapon_data_t") else {
-            return BTreeMap::new();
-        };
-        self.weapon_records
-            .iter()
-            .map(|(&index, record)| (index, GoldSrcWeaponData::from_delta(record, schema)))
-            .collect()
+        self.core.weapon_data()
     }
 
     pub fn userinfos(&self) -> &BTreeMap<u8, String> {
-        &self.userinfos
+        self.core.userinfos()
     }
 
     /// Forgets the logged messages, so a test can tell what arrives from now on.
     pub fn clear_messages(&mut self) {
-        self.messages.clear();
+        self.core.clear_messages();
     }
 
     /// The last 1024 messages received, oldest first, without `svc_nop`, `svc_time`,
     /// `svc_clientdata` and the entity updates that every frame carries. User messages are
     /// decoded. A map change does not clear it.
     pub fn messages(&self) -> &VecDeque<SvcMessage> {
-        &self.messages
+        self.core.messages()
     }
 
     /// Opcode of every decoded server message in arrival order; a user message by its id.
     pub fn opcode_log(&self) -> &[u8] {
-        &self.opcode_log
+        self.core.opcode_log()
     }
 
     pub fn stats(&self) -> ProbeStats {
-        self.stats
+        self.core.stats()
     }
 
     /// The transport the probe talks through.
     pub fn transport(&self) -> &T {
-        &self.transport
+        self.core.transport()
     }
 
     pub fn transport_mut(&mut self) -> &mut T {
-        &mut self.transport
+        self.core.transport_mut()
     }
 
     /// Records every datagram exchanged with the server from now on.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn set_capture(&mut self, w: CaptureWriter) {
-        self.capture = Some(w);
+        self.core.set_tap(Box::new(CaptureTap(w)));
     }
 
     /// The error that stopped the capture, if writing it failed.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn capture_error(&self) -> Option<&std::io::Error> {
-        self.capture_error.as_ref()
+        self.core.tap_error()
     }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn record(&mut self, dir: Direction, time: f64, data: &[u8]) {
-        if let Some(w) = self.capture.as_mut() {
-            let record = CaptureRecord {
-                dir,
-                time,
-                data: data.to_vec(),
-            };
-            if let Err(e) = w.push(&record) {
-                self.capture = None;
-                self.capture_error = Some(e);
-            }
-        }
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn record(&mut self, _dir: Direction, _time: f64, _data: &[u8]) {}
-
-    /// Sends one datagram to the server. A send error is treated like a datagram lost on the
-    /// network: handshake packets are resent and netchan reliable data is retransmitted.
-    fn send(&mut self, data: &[u8], now: f64) {
-        self.record(Direction::Sent, now, data);
-        let _ = self.transport.send(self.server, data);
-    }
-
-    fn handle_datagram(&mut self, data: &[u8], now: f64) {
-        let Some(datagram) = self.splits.push(data) else {
-            return;
-        };
-        if datagram.starts_with(&CONNECTIONLESS_HEADER.to_le_bytes()) {
-            self.handle_connectionless(&datagram);
-        } else {
-            self.handle_netchan(&datagram, now);
-        }
-    }
-
-    fn handle_connectionless(&mut self, datagram: &[u8]) {
-        match parse_oob_packet(datagram) {
-            Err(_) | Ok(OobPacket::Unknown(_)) => self.stats.parse_errors += 1,
-            Ok(OobPacket::S2cChallenge { challenge, .. })
-                if self.state == ProbeState::AwaitChallenge =>
-            {
-                self.challenge = challenge;
-                self.state = ProbeState::AwaitConnection;
-                self.handshake_sent_at = None;
-            }
-            Ok(OobPacket::S2cConnection { .. }) if self.state == ProbeState::AwaitConnection => {
-                self.state = ProbeState::Signon;
-                self.chan = Some(NetChan::new(FRAGMENT_C2S_SIZE));
-                self.next_send_at = f64::NEG_INFINITY;
-                self.send_stringcmd("new");
-            }
-            Ok(OobPacket::S2cReject(reason))
-                if matches!(
-                    self.state,
-                    ProbeState::AwaitChallenge | ProbeState::AwaitConnection
-                ) =>
-            {
-                self.state = ProbeState::Rejected(reason.trim_end_matches('\n').to_string());
-            }
-            // Late duplicates of handshake answers, prints and the like.
-            Ok(_) => {}
-        }
-    }
-
-    fn handle_netchan(&mut self, datagram: &[u8], now: f64) {
-        let Some(chan) = self.chan.as_mut() else {
-            self.stats.parse_errors += 1;
-            return;
-        };
-        let incoming = match chan.process_packet(datagram) {
-            Ok(Some(incoming)) => incoming,
-            // Duplicate or out-of-order packet.
-            Ok(None) => return,
-            Err(_) => {
-                self.stats.parse_errors += 1;
-                return;
-            }
-        };
-        self.ctx.last_incoming_seq = (incoming.sequence & 0xFF) as u8;
-
-        let mut failed = false;
-        let streams = std::iter::once(incoming.payload).chain(incoming.completed_normal_stream);
-        for stream in streams {
-            match parse_svc_stream(&stream, &mut self.ctx) {
-                Ok(messages) => {
-                    for message in messages {
-                        self.opcode_log.push(message.opcode());
-                        self.log_message(&message);
-                        self.handle_svc(message, now);
-                    }
-                }
-                Err(_) => failed = true,
-            }
-        }
-        if failed {
-            self.stats.parse_errors += 1;
-        }
-    }
-
-    /// Keeps `message` in the bounded message log unless it is one of the per-update ones.
-    fn log_message(&mut self, message: &SvcMessage) {
-        if matches!(
-            message,
-            SvcMessage::Nop
-                | SvcMessage::Time(_)
-                | SvcMessage::ClientData { .. }
-                | SvcMessage::PacketEntities(_)
-        ) {
-            return;
-        }
-        if self.messages.len() >= MESSAGE_LOG_CAPACITY {
-            self.messages.pop_front();
-        }
-        self.messages.push_back(message.clone());
-    }
-
-    fn handle_svc(&mut self, message: SvcMessage, now: f64) {
-        let signon = self.state == ProbeState::Signon;
-        match message {
-            SvcMessage::Disconnect(reason) if !self.state.is_terminal() => {
-                self.state = ProbeState::Disconnected(reason.trim_end_matches('\n').to_string());
-            }
-            SvcMessage::ServerInfo(info) => {
-                self.server_info = Some(*info);
-                if signon {
-                    self.send_stringcmd("sendres");
-                }
-            }
-            SvcMessage::ResourceRequest { .. } if signon => {
-                if let Some(chan) = self.chan.as_mut() {
-                    let mut w = MsgWriter::new();
-                    write_clc_resourcelist(&mut w, &[]);
-                    chan.write_reliable(&w.into_bytes());
-                }
-            }
-            SvcMessage::ResourceList {
-                consistency_indices,
-                ..
-            } if signon => {
-                if consistency_indices.is_empty() {
-                    self.send_spawn();
-                } else {
-                    self.state = ProbeState::Disconnected(CONSISTENCY_REASON.to_string());
-                }
-            }
-            SvcMessage::SignonNum(1) if signon => self.send_stringcmd("sendents"),
-            SvcMessage::PacketEntities(update) => self.apply_entities(&update, now),
-            SvcMessage::ClientData { parsed, .. } => {
-                self.client_data = Some(parsed);
-                self.weapon_records = self
-                    .ctx
-                    .weapondata_history
-                    .get(&self.ctx.last_incoming_seq)
-                    .cloned()
-                    .unwrap_or_default();
-            }
-            // The client takes the view the server forces (`svc_setangle`), as the engine's
-            // client does: the commands it sends from then on look that way.
-            SvcMessage::SetAngle(angles) => {
-                self.last_cmd.viewangles = angles;
-            }
-            // `svc_addangle` turns the view by a yaw.
-            SvcMessage::AddAngle(yaw) => {
-                self.last_cmd.viewangles.y += yaw;
-            }
-            SvcMessage::UpdateUserInfo { slot, userinfo, .. } => {
-                self.userinfos.insert(slot, userinfo);
-            }
-            SvcMessage::StuffText(text)
-                if matches!(self.state, ProbeState::Signon | ProbeState::InGame)
-                    && is_reconnect(&text) =>
-            {
-                self.state = ProbeState::Signon;
-                self.forget_map();
-                self.send_stringcmd("new");
-            }
-            _ => {}
-        }
-    }
-
-    /// `spawn <spawn_count> <crc>`: the map CRC munged with `COM_Munge2` keyed by
-    /// `(-1 - spawn_count) & 0xFF`, printed as a signed 32-bit integer.
-    /// Without `svc_serverinfo` there is no spawn count or map CRC to answer with, so the probe
-    /// stops instead of waiting in `Signon` forever.
-    fn send_spawn(&mut self) {
-        let Some(info) = self.server_info.as_ref() else {
-            self.state = ProbeState::Disconnected(NO_SERVERINFO_REASON.to_string());
-            return;
-        };
-        let spawn_count = info.spawn_count;
-        let mut crc = info.map_crc.to_le_bytes();
-        com_munge2(&mut crc, (-1i32).wrapping_sub(spawn_count as i32) & 0xFF);
-        let crc = i32::from_le_bytes(crc);
-        self.send_stringcmd(&format!("spawn {spawn_count} {crc}"));
-    }
-
-    /// Drops everything that belongs to the previous map before a `reconnect` sign-on. The
-    /// channel, user infos, stats, opcode log and the caller's `force_delta_seq` stay.
-    fn forget_map(&mut self) {
-        self.entities.clear();
-        self.ctx.baselines.clear();
-        self.ctx.instance_baselines.clear();
-        self.ctx.entity_frames.clear();
-        self.ctx.clientdata_history.clear();
-        self.ctx.weapondata_history.clear();
-        self.weapon_records.clear();
-        self.server_info = None;
-        self.client_data = None;
-        self.sent_cmds.clear();
-        self.last_entity_seq = None;
-    }
-
-    /// Replaces the entity view with the complete frame the parser rebuilt from this update.
-    fn apply_entities(&mut self, update: &PacketEntitiesMsg, now: f64) {
-        let deltas = &self.ctx.deltas;
-        let max_clients = self.ctx.max_clients;
-        self.entities = update
-            .entities
-            .iter()
-            .filter_map(|(&number, (ent_type, rec))| {
-                let schema = deltas.get(entity_schema_name(number, *ent_type, max_clients))?;
-                let state = GoldSrcEntityState::from_delta(number, *ent_type, rec, schema);
-                Some((number, state))
-            })
-            .collect();
-
-        if update.is_delta {
-            self.stats.delta_updates += 1;
-        } else {
-            self.stats.full_updates += 1;
-        }
-        self.frame_times.push_back(now);
-        self.last_entity_seq = Some(self.ctx.last_incoming_seq);
-        if self.state == ProbeState::Signon {
-            self.state = ProbeState::InGame;
-        }
-    }
-
-    /// One netchan packet: `clc_move` with the queued commands (or the last command repeated
-    /// with `msec = 0`) plus up to two backups, then `clc_delta` when there is a delta base.
-    fn send_netchan_packet(&mut self, now: f64) {
-        let Some(chan) = self.chan.as_mut() else {
-            return;
-        };
-        let mut unreliable = MsgWriter::new();
-
-        if let Some(schema) = self
-            .ctx
-            .deltas
-            .get("usercmd_t")
-            .filter(|_| !self.moves_suppressed)
-        {
-            let take = self.cmd_queue.len().min(MAX_NEW_CMDS);
-            let mut new_cmds: Vec<GoldSrcUserCmd> = self.cmd_queue.drain(..take).collect();
-            match new_cmds.last() {
-                Some(last) => self.last_cmd = last.clone(),
-                None => new_cmds.push(GoldSrcUserCmd {
-                    msec: 0,
-                    ..self.last_cmd.clone()
-                }),
-            }
-
-            let cmds_newest_first: Vec<GoldSrcUserCmd> = new_cmds
-                .iter()
-                .rev()
-                .chain(self.sent_cmds.iter())
-                .cloned()
-                .collect();
-            let mut mv = MsgWriter::new();
-            write_clc_move(
-                &mut mv,
-                schema,
-                chan.outgoing_sequence,
-                0,
-                self.sent_cmds.len() as u8,
-                &cmds_newest_first,
-            );
-            let mut mv = mv.into_bytes();
-            if self.corrupt_moves > 0 {
-                self.corrupt_moves -= 1;
-                // Opcode, length, then the checksum byte.
-                mv[2] ^= 0xFF;
-            }
-            unreliable.write_bytes(&mv);
-            for cmd in new_cmds {
-                self.sent_cmds.push_front(cmd);
-            }
-            self.sent_cmds.truncate(MAX_BACKUP_CMDS);
-        }
-
-        if let Some(seq) = self.forced_delta_seq.or(self.last_entity_seq)
-            && !self.delta_suppressed
-        {
-            write_clc_delta(&mut unreliable, seq);
-        }
-        let packet = match self.withheld_reliable_ack {
-            Some(ack) => {
-                let own = std::mem::replace(&mut chan.incoming_reliable_sequence, ack);
-                let packet = chan.build_packet(&unreliable.into_bytes());
-                chan.incoming_reliable_sequence = own;
-                packet
-            }
-            None => chan.build_packet(&unreliable.into_bytes()),
-        };
-        self.send(&packet, now);
-    }
-}
-
-/// Whether a `svc_stufftext` text contains the command `reconnect`.
-fn is_reconnect(text: &str) -> bool {
-    text.split(['\n', ';']).any(|cmd| cmd.trim() == "reconnect")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cs_proto48::bitbuf::MsgWriter;
+    use cs_proto48::handshake::{OobPacket, lan_steam_auth_ticket, parse_oob_packet};
+    use cs_proto48::netchan::NetChan;
     use cs_proto48::crypto::{com_unmunge2, md5_hex};
     use cs_proto48::delta::DeltaRegistry;
     use cs_proto48::handshake::{encode_s2c_challenge, encode_s2c_connection, encode_s2c_reject};
@@ -1217,7 +742,7 @@ mod tests {
         assert_eq!(probe.entities().len(), 1);
         assert!(probe.server_info().is_some());
         assert!(probe.client_data().is_some());
-        assert!(!probe.ctx.clientdata_history.is_empty());
+        assert!(!probe.core().parse_context().clientdata_history.is_empty());
         probe.force_delta_seq(Some(9));
 
         let reply = exchange(
@@ -1231,10 +756,10 @@ mod tests {
         assert!(probe.entities().is_empty());
         assert!(probe.server_info().is_none());
         assert!(probe.client_data().is_none());
-        assert!(probe.ctx.baselines.is_empty());
-        assert!(probe.ctx.entity_frames.is_empty());
-        assert!(probe.ctx.clientdata_history.is_empty());
-        assert!(probe.last_entity_seq.is_none());
+        assert!(probe.core().parse_context().baselines.is_empty());
+        assert!(probe.core().parse_context().entity_frames.is_empty());
+        assert!(probe.core().parse_context().clientdata_history.is_empty());
+        assert!(probe.core().last_entity_seq().is_none());
         // The caller's override survives the reconnect.
         assert!(reply.iter().flatten().any(|m| m == &ClcMessage::Delta(9)));
     }
@@ -1271,10 +796,10 @@ mod tests {
     fn message_log_keeps_the_last_1024() {
         let (_server, mut probe) = ScriptedServer::new();
         for i in 0..MESSAGE_LOG_CAPACITY + 10 {
-            probe.log_message(&SvcMessage::Print(i.to_string()));
+            probe.core_mut().log_message(&SvcMessage::Print(i.to_string()));
         }
-        probe.log_message(&SvcMessage::Nop);
-        probe.log_message(&SvcMessage::Time(2.0));
+        probe.core_mut().log_message(&SvcMessage::Nop);
+        probe.core_mut().log_message(&SvcMessage::Time(2.0));
         assert_eq!(probe.messages().len(), MESSAGE_LOG_CAPACITY);
         assert_eq!(probe.messages().front(), Some(&SvcMessage::Print("10".to_string())));
         assert_eq!(
