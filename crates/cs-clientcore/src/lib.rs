@@ -10,6 +10,9 @@
 pub mod commands;
 pub mod connection;
 pub mod cvars;
+pub mod entities;
+pub mod frames;
+pub mod interp;
 pub mod precache;
 pub mod resources;
 
@@ -19,5 +22,8 @@ pub use connection::{
     DatagramTap, MAX_CMDRATE, MESSAGE_LOG_CAPACITY, MIN_CMDRATE, NO_SERVERINFO_REASON,
 };
 pub use cvars::{ClientCvars, Cvar};
+pub use entities::{ClientEntity, EntityStore, ModelKind};
+pub use frames::{ClientClock, ClientFrames, DeltaRefusal, Frame, FrameOutcome, FrameRing};
+pub use interp::{EmitInputs, EmitResult, EntityKind, InterpSettings, VisibleEntity};
 pub use precache::{PrecacheEntry, PrecacheTables};
 pub use resources::{AllFilesPresent, ResourceFiles, ResourceManager, res_type};

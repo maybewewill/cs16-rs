@@ -37,6 +37,7 @@ use cs_transport::{PacketTransport, PeerAddr};
 
 use crate::commands::{CommandRegistry, ConsoleCommand, split_lines, tokenize};
 use crate::cvars::{CVAR_PRIVILEGED, CVAR_PROTECTED, CVAR_USERINFO, ClientCvars};
+use crate::frames::{ClientFrames, FrameOutcome};
 use crate::precache::PrecacheTables;
 use crate::resources::{AllFilesPresent, ResourceFiles, ResourceManager, parse_file_stream};
 
@@ -167,6 +168,8 @@ pub struct Connection<T: PacketTransport> {
     next_send_at: f64,
     server_info: Option<ServerInfoMsg>,
     entities: BTreeMap<u16, GoldSrcEntityState>,
+    /// Task 4 hook: frame ring, entity store and interpolation (`frames.rs`).
+    frames: ClientFrames,
     client_data: Option<GoldSrcClientData>,
     /// The `weapon_data_t` list of the last `svc_clientdata` received.
     weapon_records: WeaponRecords,
@@ -234,6 +237,7 @@ impl<T: PacketTransport> Connection<T> {
             next_send_at: f64::NEG_INFINITY,
             server_info: None,
             entities: BTreeMap::new(),
+            frames: ClientFrames::new(),
             client_data: None,
             weapon_records: WeaponRecords::new(),
             userinfos: BTreeMap::new(),
@@ -668,6 +672,16 @@ impl<T: PacketTransport> Connection<T> {
         &self.entities
     }
 
+    /// Task 4 hook: the frame ring, the entity store and the clock.
+    pub fn frames(&self) -> &ClientFrames {
+        &self.frames
+    }
+
+    /// Task 4 hook: advance the clock (`advance`) and list the visible entities (`emit`).
+    pub fn frames_mut(&mut self) -> &mut ClientFrames {
+        &mut self.frames
+    }
+
     /// Spawn baselines received for the current map, decoded, by entity number.
     pub fn baselines(&self) -> BTreeMap<u16, GoldSrcEntityState> {
         let deltas = &self.ctx.deltas;
@@ -892,6 +906,14 @@ impl<T: PacketTransport> Connection<T> {
 
     fn handle_svc(&mut self, message: SvcMessage, now: f64) {
         let signon = self.state == ConnState::Signon;
+        // Task 4 hook: every parsed message goes to the frame store first.
+        if matches!(message, SvcMessage::PacketEntities(_)) {
+            self.frames.apply_cvars(&self.cvars);
+        }
+        let sequence = self.chan.as_ref().map_or(0, |c| c.incoming_sequence);
+        let frame_outcome =
+            self.frames
+                .handle(&message, &self.ctx, &self.precache, sequence, now);
         match message {
             SvcMessage::Disconnect(reason) if !self.state.is_terminal() => {
                 self.state = ConnState::Disconnected(reason.trim_end_matches('\n').to_string());
@@ -928,6 +950,11 @@ impl<T: PacketTransport> Connection<T> {
                 if signon && n == 1 {
                     self.send_stringcmd("sendents");
                 }
+            }
+            // Task 4 hook: an update the frame store refused is not acknowledged (the server
+            // then sends a full one).
+            SvcMessage::PacketEntities(_) if matches!(frame_outcome, FrameOutcome::Refused(_)) => {
+                self.last_entity_seq = None;
             }
             SvcMessage::PacketEntities(update) => self.apply_entities(&update, now),
             SvcMessage::ClientData { parsed, .. } => {
@@ -1088,6 +1115,7 @@ impl<T: PacketTransport> Connection<T> {
     /// channel, user infos, stats, opcode log, cvars and the caller's `force_delta_seq` stay.
     fn forget_map(&mut self) {
         self.entities.clear();
+        self.frames.reset();
         self.ctx.baselines.clear();
         self.ctx.instance_baselines.clear();
         self.ctx.entity_frames.clear();

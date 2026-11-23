@@ -11,8 +11,8 @@ workspace = true
 [dependencies]
 cs-proto48.workspace = true
 cs-transport.workspace = true
+glam.workspace = true
 
 [dev-dependencies]
 cs-cvar.workspace = true
 cs-engine.workspace = true
-glam.workspace = true
