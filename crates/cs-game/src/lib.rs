@@ -194,6 +194,12 @@ impl CsGame {
         self.state.bots.quota_enabled = true;
     }
 
+    /// Whether the bot navigation graph has been built: it is built on the first frame that has
+    /// a bot, so a server without bots never builds it.
+    pub fn bot_nav_built(&self) -> bool {
+        self.state.bots.nav.is_some()
+    }
+
     /// Reads the message of the day, `motd.txt` of the game directories (`LOAD_FILE_FOR_ME` of
     /// the `motdfile` cvar, which is not read: the name is fixed at its default), through
     /// `vfs`. A missing file means no
@@ -621,6 +627,16 @@ impl CsGame {
     pub fn test_set_defuser(&mut self, slot: u8, has: bool) {
         if let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
             p.has_defuser = has;
+        }
+    }
+
+    /// Sets `m_bNotKilled` of the player of `slot` (false: the next spawn takes its items). For
+    /// tests only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn test_set_not_killed(&mut self, slot: u8, not_killed: bool) {
+        if let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+            p.not_killed = not_killed;
         }
     }
 

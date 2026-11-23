@@ -138,7 +138,7 @@ pub struct Rules {
     /// `m_iUnBalancedRounds`: rounds in a row the teams were two or more players apart.
     unbalanced_rounds: i32,
     /// `m_iNumCT` and `m_iNumTerrorist`: the players of each team (at the last count).
-    num_ct: usize,
+    pub(crate) num_ct: usize,
     pub(crate) num_terrorist: usize,
     /// `m_iTotalGunCount`, `m_iTotalGrenadeCount`, `m_iTotalArmourCount`: what the armoury
     /// racks of the map hold in all (never reset but by the rules being made).
@@ -195,8 +195,8 @@ pub struct Rules {
     pub(crate) vip_queue: [Option<u8>; 5],
     /// `m_iConsecutiveVIP`: rounds the current VIP has served consecutively.
     pub(crate) consecutive_vip: i32,
-    /// `m_iLastPick`: last CT slot selected by `PickNextVIP` rotation after 3 VIP rounds.
-    pub(crate) last_vip_pick: Option<u8>,
+    /// `m_iLastPick`: 1-based index of the CT `PickNextVIP` takes next (starts at 1).
+    pub(crate) last_vip_pick: i32,
     /// `m_flRequiredEscapeRatio`: fraction of terrorists that must escape (`0.5`).
     pub(crate) required_escape_ratio: f32,
     /// `m_iNumEscapers`: total terrorists participating in this escape round.
@@ -261,7 +261,7 @@ impl Default for Rules {
             vip_slot: None,
             vip_queue: [None; 5],
             consecutive_vip: 0,
-            last_vip_pick: None,
+            last_vip_pick: 1,
             required_escape_ratio: 0.5,
             num_escapers: 0,
             have_escaped: 0,
@@ -474,6 +474,11 @@ impl Rules {
     /// `m_pVIP`: current VIP slot, if any.
     pub fn vip_slot(&self) -> Option<u8> {
         self.vip_slot
+    }
+
+    /// `m_iConsecutiveVIP`: rounds the current VIP has served (10 after the VIP killed itself).
+    pub fn consecutive_vip(&self) -> i32 {
+        self.consecutive_vip
     }
 
     /// `m_iNumEscapers`.
@@ -989,8 +994,10 @@ pub(crate) fn check_win_conditions(g: &mut GameState, eng: &mut EngineApi<'_>) {
 
 /// `CHalfLifeMultiplay::ClientDisconnected` (ReGameDLL `multiplay_gamerules.cpp:3580`, read
 /// 2026-11-22), called by `ClientDisconnect` after it made the player dormant: the player is
-/// `DEAD_DEAD` and `SetScoreboardAttributes()` tells everyone; then (the items, the VIP and the
-/// votes have nothing to release yet) its scoreboard line is emptied (`ScoreInfo` with nothing,
+/// `DEAD_DEAD` and `SetScoreboardAttributes()` tells everyone; then a carried C4 is dropped (the
+/// defuser is not: vanilla finds nothing to drop), the VIP slot is released
+/// ([`crate::vip::on_disconnect`]: only `m_pVIP = nullptr`; the votes are not ported), its
+/// scoreboard line is emptied (`ScoreInfo` with nothing,
 /// `TeamInfo` `UNASSIGNED`), the observers that followed it move on ([`observer::on_target_left`])
 /// and `CheckWinConditions` runs last. The player is dormant, so `InitializePlayerCounts` no longer
 /// counts it: here it is removed from [`GameState::players`] before the check. (The empty

@@ -183,6 +183,38 @@ fn select_default_team(g: &mut GameState, eng: &EngineApi<'_>) -> Option<Team> {
     (!team_full(g, eng, other)).then_some(other)
 }
 
+/// The team `CCSBotManager::AddBot` (`cs_bot_manager.cpp` 1577-1613, read 2026-11-23) settles on
+/// before it creates the bot: the requested team, or the `bot_join_team` cvar's (`T`, `CT`), or
+/// `SelectDefaultTeam`; `None` ("Could not add bot to the game") when there is none, the team is
+/// full or `TeamStacked(team, UNASSIGNED)`. Nothing is created when it says `None`.
+pub(crate) fn bot_team_slot(
+    g: &mut GameState,
+    eng: &EngineApi<'_>,
+    requested: Option<Team>,
+) -> Option<Team> {
+    let preferred = match requested {
+        Some(team @ (Team::Terrorist | Team::Ct)) => Some(team),
+        _ => {
+            let cvar = eng.cvar_str("bot_join_team").unwrap_or_default();
+            if cvar.eq_ignore_ascii_case("T") {
+                Some(Team::Terrorist)
+            } else if cvar.eq_ignore_ascii_case("CT") {
+                Some(Team::Ct)
+            } else {
+                None
+            }
+        }
+    };
+    let team = match preferred {
+        Some(team) => team,
+        None => select_default_team(g, eng)?,
+    };
+    if team_full(g, eng, team) || team_stacked(g, eng, team, Team::Unassigned) {
+        return None;
+    }
+    Some(team)
+}
+
 /// `TeamInfo` of the player of `slot` to everyone, then its `ScoreAttrib` to every player
 /// (`CBasePlayer::TeamChangeUpdate`, [`messages::set_scoreboard_attributes`]; only the dead flag:
 /// the bomb and the VIP come later).
@@ -607,15 +639,9 @@ pub(crate) fn handle_menu_choose_team(
     };
     p.team_changed = true;
     p.team = team;
-    let clear_vip = is_vip && team != Team::Ct;
-    if clear_vip {
-        p.is_vip = false;
-    }
+    // Vanilla keeps `m_bIsVIP`, `m_pVIP` and `m_iConsecutiveVIP` through a team change (nothing in
+    // `CBasePlayer::JoiningThink`/`HandleMenu_ChooseTeam` clears them, read 2026-11-23).
     team_change_update(g, eng, slot);
-    if clear_vip && g.rules.vip_slot == Some(slot) {
-        g.rules.vip_slot = None;
-        g.rules.consecutive_vip = 0;
-    }
     let text = if is_terrorist {
         "#Game_join_terrorist"
     } else {
@@ -659,17 +685,13 @@ fn choose_spectator(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) -> boo
     let Some(p) = g.players[usize::from(slot)].as_mut() else {
         return false;
     };
-    let was_vip = p.is_vip;
-    p.is_vip = false;
+    // `m_bIsVIP`, `m_pVIP` and `m_iConsecutiveVIP` are left alone, as `CMD_Spectate`/`CBasePlayer::
+    // StartObserver` leave them (read 2026-11-23).
     p.team = Team::Spectator;
     p.joining = JoinState::Joined;
     // The account is emptied.
     p.money = 0;
     let (frags, deaths) = (p.frags, p.deaths);
-    if was_vip && g.rules.vip_slot == Some(slot) {
-        g.rules.vip_slot = None;
-        g.rules.consecutive_vip = 0;
-    }
     messages::money(eng, slot, 0);
     // Sent with no team and no class, as the original does: `MSG_BROADCAST`, unreliable
     // (`REGAMEDLL_FIXES` would use `MSG_ALL`; client.cpp:1962, read 2026-11-22).

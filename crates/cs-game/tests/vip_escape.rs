@@ -635,3 +635,117 @@ fn as_oilrig_loads_and_picks_a_vip() {
         );
     });
 }
+
+/// Three CTs and a T on an `as_` stub map; the first CT is the VIP after the first restart.
+fn three_cts_bench() -> Bench {
+    let mut b = setup_vip_bench(vec![spawn_at("info_vip_start", "500 0 0")], 5, false);
+    for slot in 1..4 {
+        enter(&mut b, slot);
+    }
+    join(&mut b, 0, 2, 1);
+    join(&mut b, 1, 2, 1);
+    join(&mut b, 2, 2, 1);
+    join(&mut b, 3, 1, 1);
+    b.run(|game, eng| {
+        game.restart_round_now(eng);
+        game.end_freeze_period(eng);
+    });
+    b.step(6);
+    b
+}
+
+/// `CBasePlayer::Kill` (`player.cpp` 10979): `if (m_pVIP == this) m_iConsecutiveVIP = 10`, so the
+/// next `PickNextVIP` takes the rotation branch (the `m_iLastPick`-th CT: the second one first).
+#[test]
+fn a_vip_suicide_forces_the_next_pick() {
+    let mut b = three_cts_bench();
+    assert_eq!(b.run(|game, _| game.state().rules.vip_slot()), Some(0));
+    command(&mut b, 0, "kill");
+    assert_eq!(b.run(|game, _| game.state().rules.consecutive_vip()), 10);
+    b.run(|game, eng| {
+        game.restart_round_now(eng);
+        // `m_iLastPick` 1 -> 2: the second CT in entity order.
+        assert_eq!(game.state().rules.vip_slot(), Some(1));
+        assert!(!game.state().players[0].as_ref().unwrap().is_vip);
+        assert!(game.state().players[1].as_ref().unwrap().is_vip);
+    });
+}
+
+/// `PickNextVIP` rotation: `m_iLastPick` counts CTs in entity order, wraps past `m_iNumCT` to 1,
+/// and a pick that is the current VIP is swapped for `pLastPlayer` (the previous non-spectator).
+#[test]
+fn the_rotation_counts_cts_and_swaps_a_pick_that_is_the_vip() {
+    let mut b = three_cts_bench();
+    // Rotation 1: last pick 2 -> CT slot 1. Rotation 2: 3 -> slot 2.
+    for expected in [1u8, 2] {
+        let vip = b.run(|game, _| game.state().rules.vip_slot().unwrap());
+        b.step(110); // `ClientKill` refuses a second suicide within a second.
+        command(&mut b, vip, "kill");
+        b.run(move |game, eng| {
+            game.restart_round_now(eng);
+            assert_eq!(game.state().rules.vip_slot(), Some(expected));
+        });
+    }
+    // Rotation 3: last pick 4 wraps to 1 -> slot 0.
+    b.step(110);
+    command(&mut b, 2, "kill");
+    b.run(|game, eng| {
+        game.restart_round_now(eng);
+        assert_eq!(game.state().rules.vip_slot(), Some(0));
+    });
+    // Rotation 4: last pick 2 -> slot 1 again.
+    b.step(110);
+    command(&mut b, 0, "kill");
+    b.run(|game, eng| {
+        game.restart_round_now(eng);
+        assert_eq!(game.state().rules.vip_slot(), Some(1));
+    });
+    // Slot 2 queues for the VIP and becomes it; when it kills itself, last pick 3 is slot 2, the
+    // current VIP, so the previous non-spectator player (slot 1) takes over.
+    b.run(|game, eng| {
+        game.client_command(eng, 2, &["become_vip".to_string()]);
+        game.restart_round_now(eng);
+        assert_eq!(game.state().rules.vip_slot(), Some(2));
+    });
+    b.step(110);
+    command(&mut b, 2, "kill");
+    b.run(|game, eng| {
+        game.restart_round_now(eng);
+        assert_eq!(game.state().rules.vip_slot(), Some(1));
+        assert!(game.state().players[1].as_ref().unwrap().is_vip);
+        assert!(!game.state().players[2].as_ref().unwrap().is_vip);
+    });
+}
+
+/// `ClientDisconnected` (`multiplay_gamerules.cpp` 3604-3607): only `m_pVIP = nullptr`;
+/// `m_iConsecutiveVIP` is left as it was.
+#[test]
+fn a_vip_leaving_only_clears_the_vip_pointer() {
+    let mut b = three_cts_bench();
+    let before = b.run(|game, _| game.state().rules.consecutive_vip());
+    assert!(before > 0);
+    b.run(|game, eng| game.client_disconnect(eng, 0));
+    b.run(move |game, _| {
+        assert_eq!(game.state().rules.vip_slot(), None);
+        assert_eq!(game.state().rules.consecutive_vip(), before);
+    });
+}
+
+/// A team change keeps `m_bIsVIP`, `m_pVIP` and `m_iConsecutiveVIP` in vanilla: a dead VIP may
+/// change team (only while someone waits in the queue) and stays the VIP.
+#[test]
+fn a_dead_vip_changing_team_stays_the_vip() {
+    let mut b = three_cts_bench();
+    b.run(|game, eng| {
+        game.client_command(eng, 1, &["become_vip".to_string()]);
+    });
+    command(&mut b, 0, "kill");
+    command(&mut b, 0, "jointeam 1");
+    b.run(|game, _| {
+        let p0 = game.state().players[0].as_ref().unwrap();
+        assert_eq!(p0.team, Team::Terrorist);
+        assert!(p0.is_vip);
+        assert_eq!(game.state().rules.vip_slot(), Some(0));
+        assert_eq!(game.state().rules.consecutive_vip(), 10);
+    });
+}

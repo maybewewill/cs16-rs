@@ -18,22 +18,30 @@ pub const VIP_MAX_SPEED: f32 = 227.0;
 /// VIP spawn vest+helmet armor (`CBasePlayer::Spawn`, `player.cpp:6098`).
 pub const VIP_ARMOR: f32 = 200.0;
 
-/// `CHalfLifeMultiplay::StackVIPQueue` (`multiplay_gamerules.cpp` 2191-2204): compacts occupied
-/// entries toward the front of `m_pVIPQueue` while preserving FIFO order.
+/// `CHalfLifeMultiplay::StackVIPQueue` (`multiplay_gamerules.cpp` 2190-2204, read 2026-11-23),
+/// ported as written. Quirk kept: the loop runs `i = MAX_VIP_QUEUES - 2 .. 1` and shifts at most
+/// one step per call, so it does not fully compact a sparse queue.
 pub(crate) fn stack_vip_queue(g: &mut GameState) {
-    let mut write = 0usize;
-    for read in 0..MAX_VIP_QUEUES {
-        if let Some(slot) = g.rules.vip_queue[read].take() {
-            g.rules.vip_queue[write] = Some(slot);
-            write += 1;
+    let q = &mut g.rules.vip_queue;
+    for i in (1..=MAX_VIP_QUEUES - 2).rev() {
+        if q[i - 1].is_some() {
+            if q[i].is_none() {
+                q[i] = q[i + 1];
+                q[i + 1] = None;
+            }
+        } else {
+            q[i - 1] = q[i];
+            q[i] = q[i + 1];
+            q[i + 1] = None;
         }
     }
 }
 
-/// Drops any queue entry whose player left or is no longer on Counter-Terrorists, then compacts.
+/// The first loop of `IsVIPQueueEmpty`/`AddToVIPQueue`: a queued player who is no longer a CT is
+/// dropped (a freed slot is dropped too: deviation, the original keeps a dangling pointer).
 fn prune_vip_queue(g: &mut GameState) {
     for entry in &mut g.rules.vip_queue {
-        let valid_ct = entry.is_some_and(|slot| {
+        let valid_ct = entry.is_none_or(|slot| {
             g.players
                 .get(usize::from(slot))
                 .and_then(Option::as_ref)
@@ -43,19 +51,20 @@ fn prune_vip_queue(g: &mut GameState) {
             *entry = None;
         }
     }
-    stack_vip_queue(g);
 }
 
 /// `CHalfLifeMultiplay::IsVIPQueueEmpty` (`multiplay_gamerules.cpp` 2206-2218).
 pub(crate) fn is_vip_queue_empty(g: &mut GameState) -> bool {
     prune_vip_queue(g);
-    g.rules.vip_queue[0].is_none()
+    stack_vip_queue(g);
+    g.rules.vip_queue.iter().all(Option::is_none)
 }
 
 /// `CHalfLifeMultiplay::AddToVIPQueue` (`multiplay_gamerules.cpp` 2220-2258): queues `slot` (when
 /// a CT) for the next VIP pick, informing them of their 1-based queue position or full queue.
 pub(crate) fn add_to_vip_queue(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) -> bool {
     prune_vip_queue(g);
+    stack_vip_queue(g);
     let is_ct = g
         .players
         .get(usize::from(slot))
@@ -93,11 +102,12 @@ pub(crate) fn add_to_vip_queue(g: &mut GameState, eng: &mut EngineApi<'_>, slot:
     false
 }
 
-/// `CHalfLifeMultiplay::ResetCurrentVIP` (`multiplay_gamerules.cpp` 2260-2302, CS 1.6 vanilla):
-/// restores a random regular CT skin to the current VIP and strips VIP status (`m_bIsVIP = false`,
-/// `m_bNotKilled = false` so they respawn with regular gear).
+/// `CHalfLifeMultiplay::ResetCurrentVIP` (`multiplay_gamerules.cpp` 2260-2302, CS 1.6 vanilla,
+/// read 2026-11-23): restores a random regular CT skin to the current VIP and strips VIP status
+/// (`m_bIsVIP = false`, `m_bNotKilled = false`). Quirk kept: `m_pVIP` itself is not cleared (only
+/// `MakeVIP` and a disconnect change it).
 pub(crate) fn reset_current_vip(g: &mut GameState, eng: &mut EngineApi<'_>) {
-    let Some(slot) = g.rules.vip_slot.take() else {
+    let Some(slot) = g.rules.vip_slot else {
         return;
     };
     let roll = g.random_range(0, 4);
@@ -144,65 +154,72 @@ pub(crate) fn make_vip(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     g.rules.consecutive_vip = 1;
 }
 
-/// `CHalfLifeMultiplay::PickNextVIP` (`multiplay_gamerules.cpp` 2305-2395): promotes from the VIP
-/// queue if non-empty; else rotates after 3 consecutive rounds; else picks the first available CT
-/// when no VIP is active. `RestartRound` increments `consecutive_vip` afterward.
+/// `CHalfLifeMultiplay::PickNextVIP` (`multiplay_gamerules.cpp` 2305-2395, read 2026-11-23),
+/// statement by statement: (1) a non-empty queue promotes its first entry; (2) else, with
+/// `m_iConsecutiveVIP >= 3`, the `m_iLastPick`-th CT in entity order takes over (quirks kept: the
+/// pick is stale when `m_iNumCT` is, a pick equal to the current VIP is swapped for the previous
+/// non-spectator player, who may be a T); (3) else, with no VIP, the first CT. `RestartRound`
+/// increments `m_iConsecutiveVIP` afterwards. Players are walked in slot order (the engine's
+/// `UTIL_FindEntityByClassname("player")` order); a free slot stands for a dormant edict.
 pub(crate) fn pick_next_vip(g: &mut GameState, eng: &mut EngineApi<'_>) {
     if !is_vip_queue_empty(g) {
+        // Remove the current VIP from his VIP status and make him a regular CT.
         if g.rules.vip_slot.is_some() {
             reset_current_vip(g, eng);
         }
-        let next = g.rules.vip_queue[0].take();
-        stack_vip_queue(g);
-        if let Some(slot) = next
-            && g.players
-                .get(usize::from(slot))
-                .and_then(Option::as_ref)
-                .is_some_and(|p| p.team == Team::Ct)
-        {
-            make_vip(g, eng, slot);
-            g.rules.consecutive_vip = 0;
-        }
-        return;
-    }
-
-    let exclude = if g.rules.vip_slot.is_some() {
-        if g.rules.consecutive_vip < 3 {
-            return;
-        }
-        let prev = g.rules.vip_slot;
-        reset_current_vip(g, eng);
-        prev
-    } else {
-        None
-    };
-
-    let max = g.players.len();
-    let start = if exclude.is_some() {
-        g.rules
-            .last_vip_pick
-            .map_or(0, |s| (usize::from(s) + 1) % max)
-    } else {
-        0
-    };
-    let mut picked = None;
-    let mut fallback = None;
-    for offset in 0..max {
-        let idx = (start + offset) % max;
-        if g.players[idx].as_ref().is_some_and(|p| p.team == Team::Ct) {
-            let slot = idx as u8;
-            if Some(slot) == exclude {
-                fallback = Some(slot);
-            } else {
-                picked = Some(slot);
-                break;
+        for i in 0..MAX_VIP_QUEUES {
+            if let Some(slot) = g.rules.vip_queue[i] {
+                make_vip(g, eng, slot);
+                g.rules.vip_queue[i] = None;
+                stack_vip_queue(g);
+                g.rules.consecutive_vip = 0;
+                return;
             }
         }
-    }
-    if let Some(slot) = picked.or(fallback) {
-        g.rules.last_vip_pick = Some(slot);
-        make_vip(g, eng, slot);
-        g.rules.consecutive_vip = 0;
+    } else if g.rules.consecutive_vip >= 3 {
+        g.rules.last_vip_pick += 1;
+        if g.rules.last_vip_pick > g.rules.num_ct as i32 {
+            g.rules.last_vip_pick = 1;
+        }
+        let mut count = 1;
+        let mut last_player: Option<u8> = None;
+        for idx in 0..g.players.len() {
+            let Some(team) = g.players[idx].as_ref().map(|p| p.team) else {
+                continue;
+            };
+            let slot = idx as u8;
+            if team == Team::Ct && count == g.rules.last_vip_pick {
+                let mut pick = slot;
+                if g.rules.vip_slot == Some(slot)
+                    && let Some(prev) = last_player
+                {
+                    pick = prev;
+                }
+                // Remove the current VIP from his VIP status and make him a regular CT.
+                if g.rules.vip_slot.is_some() {
+                    reset_current_vip(g, eng);
+                }
+                make_vip(g, eng, pick);
+                g.rules.consecutive_vip = 0;
+                break;
+            }
+            if team == Team::Ct {
+                count += 1;
+            }
+            if team != Team::Spectator {
+                last_player = Some(slot);
+            }
+        }
+    } else if g.rules.vip_slot.is_none() {
+        // There is no VIP and no one waiting: just pick the first CT player we can find.
+        let first = g
+            .players
+            .iter()
+            .position(|p| p.as_ref().is_some_and(|p| p.team == Team::Ct));
+        if let Some(idx) = first {
+            make_vip(g, eng, idx as u8);
+            g.rules.consecutive_vip = 0;
+        }
     }
 }
 
@@ -220,21 +237,18 @@ pub(crate) fn become_vip_command(g: &mut GameState, eng: &mut EngineApi<'_>, slo
     add_to_vip_queue(g, eng, slot);
 }
 
-/// Releases any VIP slot, queue slot, or rotation cursor held by a disconnecting player
-/// (`ClientDisconnected`, `multiplay_gamerules.cpp:3604-3607`).
+/// `CHalfLifeMultiplay::ClientDisconnected` (`multiplay_gamerules.cpp` 3604-3607, read
+/// 2026-11-23): only `m_pVIP = nullptr` when the leaver is the VIP; `m_iConsecutiveVIP` and
+/// `m_iLastPick` are kept. Deviation: queue entries are slots here, not pointers, so a leaver's
+/// entry is purged (the original leaves a dangling pointer that `IsVIPQueueEmpty` would test).
 pub(crate) fn on_disconnect(g: &mut GameState, slot: u8) {
     for entry in &mut g.rules.vip_queue {
         if *entry == Some(slot) {
             *entry = None;
         }
     }
-    stack_vip_queue(g);
     if g.rules.vip_slot == Some(slot) {
         g.rules.vip_slot = None;
-        g.rules.consecutive_vip = 0;
-    }
-    if g.rules.last_vip_pick == Some(slot) {
-        g.rules.last_vip_pick = None;
     }
 }
 
@@ -244,9 +258,15 @@ mod tests {
     use crate::player::Player;
 
     #[test]
-    fn stack_vip_queue_compacts_preserving_order() {
+    fn stack_vip_queue_is_the_one_pass_loop_of_the_source() {
+        // `i = 3`: `[2]` empty -> `[2] = [3]`, `[3] = [4]`; `i = 1`: `[0]` empty -> `[0] = [1]`,
+        // `[1] = [2]`, `[2] = [3]` ... one pass, not a full compaction (the quirk is kept).
         let mut g = GameState::new();
         g.rules.vip_queue = [None, Some(3), None, Some(1), Some(4)];
+        stack_vip_queue(&mut g);
+        assert_eq!(g.rules.vip_queue, [Some(3), Some(1), None, Some(4), None]);
+        // A queue that is already packed stays as it is.
+        g.rules.vip_queue = [Some(3), Some(1), Some(4), None, None];
         stack_vip_queue(&mut g);
         assert_eq!(g.rules.vip_queue, [Some(3), Some(1), Some(4), None, None]);
     }

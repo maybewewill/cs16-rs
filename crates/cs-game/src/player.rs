@@ -1032,7 +1032,8 @@ pub(crate) fn spawn(
         p.armor = 0.0;
         p.kevlar = ArmorType::None;
         p.has_night_vision = false;
-        p.has_defuser = false;
+        // `m_bHasDefuser` is not touched here: `RemoveAllItems` (through `GiveDefaultItems`)
+        // takes the kit with `RemoveDefuser`, which tells the client (player.cpp 1854, 10618).
         // `Spawn` (player.cpp:6030-6039) starts the client's cached `m_iClientHideHUD` over
         // only for a player killed before (or under `REGAMEDLL_FIXES`, not vanilla), so a
         // joiner's first update sends no `HideWeapon`.
@@ -2291,11 +2292,10 @@ pub(crate) fn take_damage_from_grenade(
 /// rest of the damage goes through at `armor / bonus`. Then `Pain`, `int(flDamage)` goes to
 /// [`monster_take_damage`], and the time-based damage counters of the hit's kinds reset.
 ///
-/// Left out: the VIP's halved ratio and the shield's added 0.2 (VIP and shield tasks), the
-/// teammate-attack message (`#Game_teammate_attack`) and `m_flLastAttackedTeammate`, `m_lastDamageAmount`,
-/// `m_bKilledByBomb`/`m_bKilledByGrenade` (bomb task), `LogAttack`, bots, the career tasks and
-/// the director/`HLTV`
-/// messages.
+/// The VIP's halved armor ratio and `m_bKilledByBomb`/`m_bKilledByGrenade` (the bomb and grenade
+/// death flags) are ported. Left out: the shield's added 0.2 (no shield), the teammate-attack
+/// message (`#Game_teammate_attack`) and `m_flLastAttackedTeammate`, `m_lastDamageAmount`,
+/// `LogAttack`, bots, the career tasks and the director/`HLTV` messages.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn take_damage_with(
     g: &mut GameState,
@@ -2555,6 +2555,11 @@ pub(crate) fn kill(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) -> bool
     }
     // `Killed(pev, GIB_NEVER)`: no inflictor was set, so the death notice names the world.
     killed(g, eng, slot, Some(id), None, None);
+    // `if (m_pVIP == this) m_iConsecutiveVIP = 10` (`player.cpp` 10979, read 2026-11-23): a VIP's
+    // suicide forces a new VIP next round.
+    if g.rules.vip_slot == Some(slot) {
+        g.rules.consecutive_vip = 10;
+    }
     true
 }
 
@@ -2587,8 +2592,12 @@ pub(crate) fn client_kill(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) 
 /// animating on the plain player model, lies down (`view_ofs` -8, `DEAD_DYING`, not solid, off
 /// the ground), its HUD health and weapon go, the field of view resets, the rules look at the
 /// teams again, it counts as not killed, the buy zone icon goes and `PlayerDeathThink` takes it
-/// over. A player that carries the C4 drops it and one with a defuser loses it
-/// (`DropPlayerItem("weapon_c4")`, `RemoveDefuser`: tasks 4 and 5, so nothing happens yet).
+/// over. A player that carries the C4 drops it (`DropPlayerItem("weapon_c4")`); one with a
+/// defuser loses it (`RemoveDefuser`) and `GiveNamedItem("item_thighpack")` spawns a kit at its
+/// feet. Quirk kept: `GiveNamedItem` also dispatches the kit's touch to the player, but
+/// `CItem::ItemTouch` refuses a player whose `deadflag != DEAD_NO` (`items.cpp` 111, read
+/// 2026-11-23) and `Disappear` has just set `DEAD_DYING`, so the kit lies on the floor for the
+/// other CTs and the escaped CT does not get it back.
 ///
 /// Not ported: `DetachTank` (there is no `func_tank`), the `CSound` reset of the player's sound
 /// slot (the game has no sound entity), `SetSuitUpdate(nullptr, ...)` (no suit sentence queue).

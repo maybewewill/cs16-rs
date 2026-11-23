@@ -47,9 +47,6 @@ use crate::rules;
 use crate::entity::UseType;
 use crate::targets;
 
-/// `REWARD_VIP_HAVE_SELF_RESCUED` (`gamerules.h`): what the VIP is paid for reaching a safety
-/// zone.
-const REWARD_VIP_HAVE_SELF_RESCUED: i32 = 2500;
 /// `MAX_BOMB_RADIUS` (`mapinfo.h`): the largest `bombradius` a map may ask for.
 const MAX_BOMB_RADIUS: f32 = 2048.0;
 
@@ -241,7 +238,7 @@ impl GameEntity for VipSafetyZone {
             tracing::info!(slot, "Escaped_As_VIP");
             p.escaped = true;
             crate::player::disappear(g, eng, slot as u8);
-            money::add_account(g, eng, slot as u8, REWARD_VIP_HAVE_SELF_RESCUED, true);
+            money::add_account(g, eng, slot as u8, money::REWARD_VIP_HAVE_SELF_RESCUED, true);
         }
     }
 }

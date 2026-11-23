@@ -85,8 +85,15 @@ pub const REWARD_RESCUED_HOSTAGE: i32 = 750;
 pub const REWARD_KILLED_ENEMY: i32 = 300;
 /// `REWARD_KILLED_VIP`.
 pub const REWARD_KILLED_VIP: i32 = 2500;
-/// `REWARD_TOOK_HOSTAGE`: surviving hostage bonus in `RestartRound` (capped at 2000).
+/// `REWARD_TOOK_HOSTAGE`: surviving hostage bonus in `RestartRound` (capped at 2000), and the
+/// individual CT bonus on a hostage's first touch.
 pub const REWARD_TOOK_HOSTAGE: i32 = 150;
+/// `REWARD_TAKEN_HOSTAGE` (`gamerules.h`): the rescuer's bonus when a hostage reaches a rescue zone.
+pub const REWARD_TAKEN_HOSTAGE: i32 = 1000;
+/// `REWARD_TOOK_HOSTAGE_ACC` (`gamerules.h`): the CT team pool bonus on a hostage's first touch.
+pub const REWARD_TOOK_HOSTAGE_ACC: i32 = 100;
+/// `REWARD_VIP_HAVE_SELF_RESCUED` (`gamerules.h`): what the VIP is paid for reaching a safety zone.
+pub const REWARD_VIP_HAVE_SELF_RESCUED: i32 = 2500;
 /// `PAYBACK_FOR_KILLED_TEAMMATES`.
 pub const PAYBACK_FOR_KILLED_TEAMMATES: i32 = -3300;
 /// The team kill that `mp_autokick` kicks for (`killer->m_iTeamKills == 3`).
