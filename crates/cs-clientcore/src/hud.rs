@@ -1132,6 +1132,7 @@ mod tests {
             download_size: 0,
             flags: 0,
             md5: None,
+            reserved: None,
         }]);
         let entities = BTreeMap::new();
         let env = FxEnv::new(5.0, &precache, &entities, &NoWorld);
@@ -1199,6 +1200,7 @@ mod tests {
             download_size: 0,
             flags: 0,
             md5: None,
+            reserved: None,
         }]);
         let entities = BTreeMap::new();
         let env = FxEnv::new(1.0, &precache, &entities, &NoWorld);

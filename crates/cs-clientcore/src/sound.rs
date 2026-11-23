@@ -259,6 +259,7 @@ mod tests {
             download_size: 0,
             flags: 0,
             md5: None,
+            reserved: None,
         }]);
         t
     }
