@@ -621,6 +621,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "cs-local"
+version = "0.1.0"
+dependencies = [
+ "cs-assets",
+ "cs-clientcore",
+ "cs-cvar",
+ "cs-engine",
+ "cs-game",
+ "cs-proto48",
+ "cs-transport",
+ "cs-vfs",
+]
+
+[[package]]
 name = "cs-net"
 version = "0.1.0"
 dependencies = [
