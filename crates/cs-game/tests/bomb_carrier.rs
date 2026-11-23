@@ -180,7 +180,15 @@ fn sound_indices(b: &Bench) -> Vec<(u16, u8)> {
 #[test]
 fn the_carrier_has_the_bomb_attrib_and_icon() {
     let mut b = bomb_arena(false, vec![]);
-    assert!(b.run(|game, eng| game.give_c4(eng, 0)));
+    // `restart_round_now` already invokes `GiveC4 -> MakeBomber`; verify a fresh restart emits
+    // `StatusIcon("c4")` and `ScoreAttrib(BOMB)` and that giving a second C4 fails.
+    b.run(|game, eng| {
+        game.restart_round_now(eng);
+        game.end_freeze_period(eng);
+        game.place_player(eng, 0, T_SPAWN);
+        game.place_player(eng, 1, CT_SPAWN);
+        assert!(!game.give_c4(eng, 0));
+    });
     b.step(12);
 
     b.run(|game, eng| {
@@ -214,12 +222,12 @@ fn the_carrier_has_the_bomb_attrib_and_icon() {
         color: GREEN,
     }));
 
-    // Leaving returns it to steady green.
+    // Leaving returns it to steady green (wait up to two 0.5 s HandleSignals cycles to clear).
     b.probe.clear_messages();
     b.run(|game, eng| {
         game.place_player(eng, 0, T_SPAWN);
     });
-    step_cmd(&mut b, 0, 70);
+    step_cmd(&mut b, 0, 120);
     b.step(12);
     assert!(probe_msgs_from(&b).contains(&CsUserMsg::StatusIcon {
         status: STATUSICON_SHOW,
@@ -231,9 +239,7 @@ fn the_carrier_has_the_bomb_attrib_and_icon() {
 #[test]
 fn dropping_the_bomb_sends_bomb_drop() {
     let mut b = bomb_arena(false, vec![]);
-    assert!(b.run(|game, eng| game.give_c4(eng, 0)));
-    b.step(12);
-    b.probe.clear_messages();
+    assert!(b.run(|game, _| game.state().players[0].as_ref().unwrap().has_c4));
 
     b.run(|game, eng| {
         game.client_command(eng, 0, &["drop".to_string(), "weapon_c4".to_string()]);
@@ -295,12 +301,17 @@ fn a_dead_carrier_drops_the_backpack() {
         game.client_command(eng, 2, &["joinclass".to_string(), "1".to_string()]);
         commands_of(game, eng, 2, 1);
         game.restart_round_now(eng);
+        // First restart after adding T slot 2 rotates C4 to slot 2; restart once more to rotate back to slot 0.
+        game.restart_round_now(eng);
         game.end_freeze_period(eng);
         game.place_player(eng, 0, T_SPAWN);
         game.place_player(eng, 1, CT_SPAWN);
         game.place_player(eng, 2, Vec3::new(-300.0, 0.0, 0.0));
     });
-    assert!(b.run(|game, eng| game.give_c4(eng, 0)));
+    b.run(|game, _| {
+        assert!(game.state().players[0].as_ref().unwrap().has_c4);
+        assert!(!game.state().players[2].as_ref().unwrap().has_c4);
+    });
     b.step(12);
     b.probe.clear_messages();
 
@@ -323,8 +334,8 @@ fn a_dead_carrier_drops_the_backpack() {
 
     // Disconnecting carrier also drops C4.
     let mut b2 = bomb_arena(false, vec![]);
-    b2.run(|game, eng| {
-        assert!(game.give_c4(eng, 0));
+    b2.run(|game, _| {
+        assert!(game.state().players[0].as_ref().unwrap().has_c4);
     });
     b2.run(|game, eng| {
         game.client_disconnect(eng, 0);
@@ -336,7 +347,7 @@ fn a_dead_carrier_drops_the_backpack() {
 #[test]
 fn only_terrorists_pick_up_the_bomb() {
     let mut b = bomb_arena(false, vec![]);
-    assert!(b.run(|game, eng| game.give_c4(eng, 0)));
+    assert!(b.run(|game, _| game.state().players[0].as_ref().unwrap().has_c4));
     b.run(|game, eng| {
         game.client_command(eng, 0, &["drop".to_string(), "weapon_c4".to_string()]);
     });
@@ -582,7 +593,7 @@ fn defuser_drops_at_death() {
 #[test]
 fn init_hud_shows_a_dropped_bomb() {
     let mut b = bomb_arena(false, vec![]);
-    assert!(b.run(|game, eng| game.give_c4(eng, 0)));
+    assert!(b.run(|game, _| game.state().players[0].as_ref().unwrap().has_c4));
     let expected_origin = b.run(|game, eng| {
         game.place_player(eng, 0, Vec3::new(250.0, -150.0, 0.0));
         game.client_command(eng, 0, &["drop".to_string(), "weapon_c4".to_string()]);

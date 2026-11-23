@@ -174,14 +174,15 @@ fn two_teams_play_a_round() {
     b.step(frames(5.3));
 
     // The next round: everybody alive again in a new freeze period, the score stays, the
-    // winners got 3000 (no bomb target on this map yet; the original pays 3250 on de_dust2) and
-    // the losers the loser bonus of 1400.
+    // winners got 3250 on a bomb map like de_dust2 (3000 without objectives) and the losers the
+    // loser bonus of 1400.
     assert_eq!(rules(&b).win_status(), WinStatus::None);
     assert!(rules(&b).is_freeze_period());
     for slot in 0..4usize {
         assert!(player(&b, slot).alive, "slot {slot} respawned");
     }
-    assert_eq!((money(&b, 2), money(&b, 3)), (3800, 3800));
+    let expected_ct = 800 + if rules(&b).map_has_bomb_target() { 3250 } else { 3000 };
+    assert_eq!((money(&b, 2), money(&b, 3)), (expected_ct, expected_ct));
     assert_eq!((money(&b, 0), money(&b, 1)), (2200, 2200));
     assert_eq!(rules(&b).total_rounds_played(), 1);
     assert!(

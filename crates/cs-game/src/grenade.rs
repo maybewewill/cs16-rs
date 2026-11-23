@@ -1090,6 +1090,10 @@ impl GameEntity for Grenade {
         self.is_c4
     }
 
+    fn is_planted_live_c4(&self) -> bool {
+        self.is_c4 && !self.just_blew
+    }
+
     fn use_(
         &mut self,
         g: &mut GameState,

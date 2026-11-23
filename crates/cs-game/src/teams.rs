@@ -382,9 +382,24 @@ fn get_into_game(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     p.chat.ignore = crate::chat::IgnoreMsg::None;
     p.joining = JoinState::Joined;
     let (team, class) = (p.team, p.class);
+    if g.rules.map_has_escape_zone() && team == Team::Ct {
+        p.money = 0;
+        let start = money::check_start_money(eng);
+        money::add_account(g, eng, slot, start, true);
+    }
     if rules::can_respawn(g, eng, slot) {
         spawn(g, eng, slot, team, class);
         rules::check_win_conditions(g, eng);
+        if g.rules.restart_round_time() == 0.0
+            && g.rules.map_has_bomb_target()
+            && !rules::is_there_a_bomber(g)
+            && !rules::is_there_a_bomb(eng)
+        {
+            rules::give_c4_to_terrorists(g, eng);
+        }
+        if team == Team::Terrorist {
+            g.rules.num_escapers += 1;
+        }
         return;
     }
     // Watching until the next round.

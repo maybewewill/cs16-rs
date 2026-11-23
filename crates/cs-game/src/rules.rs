@@ -47,25 +47,25 @@
 //! The money of a round (`m_iAccountCT`, `m_iAccountTerrorist`, the loser bonus and its streaks)
 //! is [`crate::money`]'s; `RestartRound` settles it here.
 //!
-//! Left for later tasks: the map objectives (2E): the bomb, the
-//! hostages, the VIP and the escape zones. Their branches in [`check_win_conditions`] and
-//! [`check_round_time_expired`] are stubs: no entity of those classes exists yet, so a map has
-//! no objective, and a round that runs out of time on such a map simply goes on, as
-//! `CheckRoundTimeExpired` does (it pushes the round start 60 seconds forward). `CleanUpMap`
-//! (re-creating the map's breakables and doors) has nothing to clean yet.
+//! Left for later tasks (T9 VIP/escape): `PickNextVIP` / VIP rotation / team selection (2E).
+//! Objective win conditions (`VIP`, `Prison`, `Bomb`, `TeamExtermination`, `HostageRescue`),
+//! `CheckRoundTimeExpired`, objective rewards, `GiveC4` rotation, and hostage `RePosition` follow
+//! vanilla ReGameDLL_CS (`multiplay_gamerules.cpp`).
 
+use cs_engine::consts::SOLID_NOT;
 use cs_engine::{EngineApi, MsgDest};
 use cs_proto48::messages::svc;
 use cs_proto48::usermsg::CsUserMsg;
 
 use crate::GameState;
 use crate::chat;
+use crate::entity::GameEntity;
 use crate::hud_misc;
 use crate::menus::{self, Menu};
 use crate::messages;
 use crate::money::{self, Economy};
 use crate::observer;
-use crate::player::{self, PITCH_NORM, Team};
+use crate::player::{self, DEAD_DEAD, DEAD_NO, DEAD_RESPAWNABLE, PITCH_NORM, Team};
 use crate::teams::{self, JoinState};
 
 /// `ROUND_RESPAWN_TIME` (`gamerules.h`): seconds into a round after which a joining player waits
@@ -188,6 +188,29 @@ pub struct Rules {
     pub hostages_rescued: i32,
     /// `m_iHostagesTouched`: hostages first touched by CTs in the current round.
     pub hostages_touched: i32,
+    /// `m_iC4Guy`: 1-based rotating index of the terrorist who receives the C4.
+    pub(crate) c4_guy: i32,
+    /// `m_pVIP`: player slot currently designated as the VIP on `as_` maps.
+    pub(crate) vip_slot: Option<u8>,
+    /// `m_pVIPQueue[MAX_VIP_QUEUES]`: player slots queued to become the next VIP.
+    #[allow(dead_code)]
+    pub(crate) vip_queue: [Option<u8>; 5],
+    /// `m_iConsecutiveVIP`: rounds the current VIP has served consecutively.
+    #[allow(dead_code)]
+    pub(crate) consecutive_vip: i32,
+    /// `m_iLastPick`: rotating CT index used by `PickNextVIP` after 3 VIP rounds.
+    #[allow(dead_code)]
+    pub(crate) last_vip_pick: i32,
+    /// `m_flRequiredEscapeRatio`: fraction of terrorists that must escape (`0.5`).
+    pub(crate) required_escape_ratio: f32,
+    /// `m_iNumEscapers`: total terrorists participating in this escape round.
+    pub(crate) num_escapers: i32,
+    /// `m_iHaveEscaped`: terrorists who have reached `func_escapezone` this round.
+    pub(crate) have_escaped: i32,
+    /// `m_flEscapeRatio`: computed `have_escaped / num_escapers` ratio.
+    pub(crate) escape_ratio: f32,
+    /// `m_iNumEscapeRounds`: escape rounds played since the last team swap.
+    pub(crate) num_escape_rounds: i32,
 }
 
 impl Default for Rules {
@@ -238,6 +261,16 @@ impl Default for Rules {
             c4_timer: 45,
             hostages_rescued: 0,
             hostages_touched: 0,
+            c4_guy: 0,
+            vip_slot: None,
+            vip_queue: [None; 5],
+            consecutive_vip: 0,
+            last_vip_pick: 0,
+            required_escape_ratio: 0.5,
+            num_escapers: 0,
+            have_escaped: 0,
+            escape_ratio: 0.0,
+            num_escape_rounds: 0,
         }
     }
 }
@@ -441,6 +474,21 @@ impl Rules {
     pub fn intermission_start_time(&self) -> f64 {
         self.intermission_start_time
     }
+
+    /// `m_pVIP`: current VIP slot, if any.
+    pub fn vip_slot(&self) -> Option<u8> {
+        self.vip_slot
+    }
+
+    /// `m_iNumEscapers`.
+    pub fn num_escapers(&self) -> i32 {
+        self.num_escapers
+    }
+
+    /// `m_iHaveEscaped`.
+    pub fn have_escaped(&self) -> i32 {
+        self.have_escaped
+    }
 }
 
 /// A cvar that must not be negative (`mp_maxrounds`, `mp_winlimit`): a negative value is written
@@ -516,6 +564,7 @@ fn initialize_player_counts(g: &mut GameState) -> Counts {
     r.num_ct = 0;
     r.num_spawnable_terrorist = 0;
     r.num_spawnable_ct = 0;
+    r.have_escaped = 0;
     for p in g.players.iter().flatten() {
         let spawnable = p.menu != Menu::ChooseAppearance;
         match p.team {
@@ -535,6 +584,9 @@ fn initialize_player_counts(g: &mut GameState) -> Counts {
                     c.alive_terrorist += 1;
                 } else {
                     c.dead_terrorist += 1;
+                }
+                if p.escaped {
+                    r.have_escaped += 1;
                 }
             }
             _ => {}
@@ -589,12 +641,59 @@ fn terminate_round(g: &mut GameState, eng: &EngineApi<'_>, delay: f64, status: W
     g.rules.restart_round_time = eng.time() + delay;
 }
 
+/// Shared helper for winning round outcomes (`Target_Bombed`, `Target_Defused`, `Round_Cts`,
+/// `Round_Ts`, `VIP_*`, `Prison_*`, `Hostage_*`, `Target_Saved`).
+#[allow(clippy::too_many_arguments)]
+fn win_round(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    winner: Team,
+    audio: &str,
+    reward: i32,
+    sentence: &str,
+    delay: f64,
+    guard_wins: bool,
+) {
+    broadcast(eng, audio);
+    let status = match winner {
+        Team::Ct => {
+            g.rules.economy.add_ct_account(reward);
+            WinStatus::Cts
+        }
+        Team::Terrorist => {
+            g.rules.economy.add_terrorist_account(reward);
+            WinStatus::Terrorists
+        }
+        _ => WinStatus::Draw,
+    };
+    let inc_win = |g: &mut GameState| match winner {
+        Team::Ct => g.num_ct_wins += 1,
+        Team::Terrorist => g.num_terrorist_wins += 1,
+        _ => {}
+    };
+    if guard_wins {
+        if !g.rules.needed_players {
+            inc_win(g);
+            update_team_scores(g, eng);
+        }
+        end_round_message(eng, sentence);
+        terminate_round(g, eng, delay, status);
+    } else {
+        // Vanilla time-expiry outcomes update wins unconditionally and call `UpdateTeamScores`
+        // after `TerminateRound` (`multiplay_gamerules.cpp` 2905-3014).
+        inc_win(g);
+        end_round_message(eng, sentence);
+        terminate_round(g, eng, delay, status);
+        update_team_scores(g, eng);
+    }
+}
+
 /// `Round_Cts`: the counter-terrorists win the round (and are paid for it when the next one
 /// starts).
 fn round_cts(g: &mut GameState, eng: &mut EngineApi<'_>, delay: f64) {
     tracing::info!(needed_players = g.rules.needed_players, "round won by the counter-terrorists");
     broadcast(eng, "ctwin");
-    g.rules.economy.round_won(Team::Ct);
+    g.rules.economy.round_won(Team::Ct, g.rules.map_has_bomb_target);
     if !g.rules.needed_players {
         g.num_ct_wins += 1;
         update_team_scores(g, eng);
@@ -607,7 +706,7 @@ fn round_cts(g: &mut GameState, eng: &mut EngineApi<'_>, delay: f64) {
 fn round_ts(g: &mut GameState, eng: &mut EngineApi<'_>, delay: f64) {
     tracing::info!(needed_players = g.rules.needed_players, "round won by the terrorists");
     broadcast(eng, "terwin");
-    g.rules.economy.round_won(Team::Terrorist);
+    g.rules.economy.round_won(Team::Terrorist, g.rules.map_has_bomb_target);
     if !g.rules.needed_players {
         g.num_terrorist_wins += 1;
         update_team_scores(g, eng);
@@ -655,9 +754,140 @@ fn needed_players_check(g: &mut GameState, eng: &mut EngineApi<'_>) -> bool {
     false
 }
 
+/// `VIPRoundEndCheck` (`multiplay_gamerules.cpp` 1157-1174): VIP escaped or assassinated on maps
+/// with a `func_vip_safetyzone`.
+fn vip_round_end_check(g: &mut GameState, eng: &mut EngineApi<'_>) -> bool {
+    let Some(vip) = g.rules.vip_slot else {
+        return false;
+    };
+    if !g.rules.map_has_vip_safety_zone {
+        return false;
+    }
+    let escaped = g
+        .players
+        .get(usize::from(vip))
+        .and_then(Option::as_ref)
+        .is_some_and(|p| p.escaped);
+    if escaped {
+        win_round(
+            g,
+            eng,
+            Team::Ct,
+            "ctwin",
+            money::REWARD_VIP_ESCAPED,
+            "#VIP_Escaped",
+            ROUND_BEGIN_DELAY,
+            true,
+        );
+        return true;
+    }
+    let dead = eng
+        .ent(eng.client_edict(vip))
+        .is_none_or(|v| v.deadflag != DEAD_NO);
+    if dead {
+        win_round(
+            g,
+            eng,
+            Team::Terrorist,
+            "terwin",
+            money::REWARD_VIP_ASSASSINATED,
+            "#VIP_Assassinated",
+            ROUND_BEGIN_DELAY,
+            true,
+        );
+        return true;
+    }
+    false
+}
+
+/// `PrisonRoundEndCheck` (`multiplay_gamerules.cpp` 1247-1270): escape ratio check on `es_` maps.
+fn prison_round_end_check(g: &mut GameState, eng: &mut EngineApi<'_>, c: &Counts) -> bool {
+    if !g.rules.map_has_escape_zone {
+        return false;
+    }
+    // Note: vanilla computes `real_t(m_iHaveEscaped) / real_t(m_iNumEscapers)`; 0/0 yields `NaN`,
+    // making the `<` and `>=` comparisons false as in IEEE 754 C++.
+    let ratio = (g.rules.have_escaped as f32) / (g.rules.num_escapers as f32);
+    g.rules.escape_ratio = ratio;
+    if ratio >= g.rules.required_escape_ratio {
+        win_round(
+            g,
+            eng,
+            Team::Terrorist,
+            "terwin",
+            money::REWARD_TERRORISTS_ESCAPED,
+            "#Terrorists_Escaped",
+            ROUND_BEGIN_DELAY,
+            true,
+        );
+        return true;
+    }
+    if c.alive_terrorist == 0 && ratio < g.rules.required_escape_ratio {
+        let reward = ((1.0 - ratio) * money::REWARD_CTS_PREVENT_ESCAPE as f32) as i32;
+        win_round(
+            g,
+            eng,
+            Team::Ct,
+            "ctwin",
+            reward,
+            "#CTs_PreventEscape",
+            ROUND_BEGIN_DELAY,
+            true,
+        );
+        return true;
+    }
+    if c.alive_terrorist == 0 && c.dead_terrorist != 0 && g.rules.num_spawnable_ct > 0 {
+        let reward = ((1.0 - ratio) * money::REWARD_ESCAPING_TERRORISTS_NEUTRALIZED as f32) as i32;
+        win_round(
+            g,
+            eng,
+            Team::Ct,
+            "ctwin",
+            reward,
+            "#Escaping_Terrorists_Neutralized",
+            ROUND_BEGIN_DELAY,
+            true,
+        );
+        return true;
+    }
+    false
+}
+
+/// `BombRoundEndCheck` (`multiplay_gamerules.cpp` 1327-1340): target bombed or bomb defused.
+fn bomb_round_end_check(g: &mut GameState, eng: &mut EngineApi<'_>) -> bool {
+    if g.rules.target_bombed && g.rules.map_has_bomb_target {
+        win_round(
+            g,
+            eng,
+            Team::Terrorist,
+            "terwin",
+            money::REWARD_TARGET_BOMB,
+            "#Target_Bombed",
+            ROUND_BEGIN_DELAY,
+            true,
+        );
+        return true;
+    }
+    if g.rules.bomb_defused && g.rules.map_has_bomb_target {
+        g.rules.economy.add_terrorist_account(money::REWARD_BOMB_PLANTED);
+        win_round(
+            g,
+            eng,
+            Team::Ct,
+            "ctwin",
+            money::REWARD_BOMB_DEFUSED,
+            "#Bomb_Defused",
+            ROUND_BEGIN_DELAY,
+            true,
+        );
+        return true;
+    }
+    false
+}
+
 /// `TeamExterminationCheck`: a team with no player alive loses the round; with no player alive
-/// on either side the round is a draw. (The terrorists' win is held back in vanilla while a
-/// planted bomb ticks: no bomb exists yet.)
+/// on either side the round is a draw. While a planted live C4 ticks (`!m_bJustBlew`), CTs do not
+/// win by eliminating all terrorists.
 fn team_extermination_check(g: &mut GameState, eng: &mut EngineApi<'_>, c: &Counts) -> bool {
     let r = &g.rules;
     let both_play = r.num_ct > 0
@@ -666,8 +896,21 @@ fn team_extermination_check(g: &mut GameState, eng: &mut EngineApi<'_>, c: &Coun
         && r.num_spawnable_terrorist > 0;
     if both_play {
         if c.alive_terrorist == 0 && c.dead_terrorist != 0 && c.alive_ct > 0 {
-            round_cts(g, eng, ROUND_BEGIN_DELAY);
-            return true;
+            let mut nowin = false;
+            let mut cursor = None;
+            while let Some(id) = eng.find_by_classname(cursor, "grenade") {
+                cursor = Some(id);
+                if eng
+                    .private::<Box<dyn GameEntity>>(id)
+                    .is_some_and(|e| e.is_planted_live_c4())
+                {
+                    nowin = true;
+                }
+            }
+            if !nowin {
+                round_cts(g, eng, ROUND_BEGIN_DELAY);
+                return true;
+            }
         } else if c.alive_ct == 0 && c.dead_ct != 0 {
             round_ts(g, eng, ROUND_BEGIN_DELAY);
             return true;
@@ -679,10 +922,44 @@ fn team_extermination_check(g: &mut GameState, eng: &mut EngineApi<'_>, c: &Coun
     false
 }
 
-/// `CheckWinConditions`: called whenever a player's state changes. Starts the game once both
-/// teams have a player and ends the round when a team has been exterminated. Does nothing once
-/// the round has been won. The VIP, prison escape, bomb and hostage rescue checks are the map
-/// objectives (2E): no map has any yet.
+/// `HostageRescueRoundEndCheck` (`multiplay_gamerules.cpp` 1473-1510, vanilla): ends in CT win
+/// when all hostages are either dead or rescued and at least half were rescued.
+fn hostage_rescue_round_end_check(g: &mut GameState, eng: &mut EngineApi<'_>) -> bool {
+    let mut hostages_count = 0i32;
+    let mut any_alive = false;
+    let mut cursor = None;
+    while let Some(id) = eng.find_by_classname(cursor, "hostage_entity") {
+        cursor = Some(id);
+        hostages_count += 1;
+        if eng
+            .private::<Box<dyn GameEntity>>(id)
+            .is_some_and(|e| e.is_alive(eng, id))
+        {
+            any_alive = true;
+        }
+    }
+    if !any_alive
+        && hostages_count > 0
+        && (g.rules.hostages_rescued as f32) >= (hostages_count as f32) * 0.5
+    {
+        win_round(
+            g,
+            eng,
+            Team::Ct,
+            "ctwin",
+            money::REWARD_ALL_HOSTAGES_RESCUED,
+            "#All_Hostages_Rescued",
+            ROUND_BEGIN_DELAY,
+            true,
+        );
+        return true;
+    }
+    false
+}
+
+/// `CheckWinConditions` (`multiplay_gamerules.cpp` 884-943, vanilla): called whenever a player's
+/// or objective's state changes. Checks NeededPlayers, VIP, PrisonEscape, Bomb, TeamExtermination,
+/// and HostageRescue in exact source order.
 pub(crate) fn check_win_conditions(g: &mut GameState, eng: &mut EngineApi<'_>) {
     // If a winner has already been determined and the game has started, get out of here.
     if g.rules.game_started && g.rules.round_win_status != WinStatus::None {
@@ -694,10 +971,24 @@ pub(crate) fn check_win_conditions(g: &mut GameState, eng: &mut EngineApi<'_>) {
     if needed_players_check(g, eng) {
         return;
     }
-    // VIP/assassination, prison escape, bomb: 2E.
-    // Team extermination. The hostage rescue check that follows it (2E) has nothing to check
-    // yet, so whether the round ended is of no more interest: if not, it is still in progress.
-    let _ended = team_extermination_check(g, eng, &counts);
+    // Assassination / VIP scenario check.
+    if vip_round_end_check(g, eng) {
+        return;
+    }
+    // Prison escape check.
+    if prison_round_end_check(g, eng, &counts) {
+        return;
+    }
+    // Bomb check.
+    if bomb_round_end_check(g, eng) {
+        return;
+    }
+    // Team extermination check.
+    if team_extermination_check(g, eng, &counts) {
+        return;
+    }
+    // Hostage rescue check.
+    let _ = hostage_rescue_round_end_check(g, eng);
 }
 
 /// `CHalfLifeMultiplay::ClientDisconnected` (ReGameDLL `multiplay_gamerules.cpp:3580`, read
@@ -747,22 +1038,24 @@ fn check_freeze_period_expired(g: &mut GameState, eng: &mut EngineApi<'_>) {
     on_round_freeze_end(g, eng);
 }
 
-/// `OnRoundFreezeEnd` (`multiplay_gamerules.cpp`, read 2026-11-22): the round starts. Nobody is
-/// frozen any more, the round clock starts counting down the round time, and the first joined
-/// CT and the first joined T call out a random start sentence over the radio
-/// (`RANDOM_LONG(0, 3)`: MOVEOUT, LETSGO, LOCKNLOAD or GO, the same for both teams). The map
-/// objectives that change the sentences (`m_bMapHasEscapeZone`: ELIM/GETOUT,
-/// `m_bMapHasVIPSafetyZone`: VIP/LOCKNLOAD) are 2E. The call is `Radio(sentence)` without a
-/// verbose text, so the teammates get the `SendAudio` and the icon, no `TextMsg`. Vanilla's
-/// `pev->flags == FL_DORMANT` test (an equality, never true for a joined player) is dropped.
+/// `OnRoundFreezeEnd` (`multiplay_gamerules.cpp` 2776-2881, read 2026-11-23): the round starts.
+/// Nobody is frozen any more, the round clock starts counting down the round time, and the first
+/// joined CT and first joined T call out their scenario start sentence over the radio.
 pub(crate) fn on_round_freeze_end(g: &mut GameState, eng: &mut EngineApi<'_>) {
     // Freeze period expired: kill the flag.
     g.rules.freeze_period = false;
-    let sentence = match g.random_range(0, 3) {
+    let default_sentence = match g.random_range(0, 3) {
         0 => "%!MRAD_MOVEOUT",
         1 => "%!MRAD_LETSGO",
         2 => "%!MRAD_LOCKNLOAD",
         _ => "%!MRAD_GO",
+    };
+    let (ct_sentence, t_sentence) = if g.rules.map_has_escape_zone {
+        ("%!MRAD_ELIM", "%!MRAD_GETOUT")
+    } else if g.rules.map_has_vip_safety_zone {
+        ("%!MRAD_VIP", "%!MRAD_LOCKNLOAD")
+    } else {
+        (default_sentence, default_sentence)
     };
     // Reset the round time.
     g.rules.round_start_time = eng.time();
@@ -776,10 +1069,10 @@ pub(crate) fn on_round_freeze_end(g: &mut GameState, eng: &mut EngineApi<'_>) {
         if p.joining == JoinState::Joined {
             if p.team == Team::Ct && !ct_played {
                 ct_played = true;
-                hud_misc::radio(g, eng, slot, sentence, "");
+                hud_misc::radio(g, eng, slot, ct_sentence, "");
             } else if p.team == Team::Terrorist && !t_played {
                 t_played = true;
-                hud_misc::radio(g, eng, slot, sentence, "");
+                hud_misc::radio(g, eng, slot, t_sentence, "");
             }
             if g.players[usize::from(slot)]
                 .as_ref()
@@ -796,18 +1089,99 @@ pub(crate) fn on_round_freeze_end(g: &mut GameState, eng: &mut EngineApi<'_>) {
     }
 }
 
-/// `CheckRoundTimeExpired`: when the round clock runs out and nobody has won, the objective of
-/// the map decides who does (the bomb saved, the hostages not rescued, the escape or the VIP
-/// failed: 2E, no map has one yet). On a map with none the round goes on and the clock restarts
-/// with 60 more seconds.
+/// `CHalfLifeMultiplay::IsBombPlanted` (`multiplay_gamerules.cpp` 3196-3212): true when the map
+/// has a bomb target and a planted C4 (`grenade` with `m_bIsC4`) exists.
+pub(crate) fn is_bomb_planted(g: &GameState, eng: &EngineApi<'_>) -> bool {
+    if !g.rules.map_has_bomb_target {
+        return false;
+    }
+    let mut cursor = None;
+    while let Some(id) = eng.find_by_classname(cursor, "grenade") {
+        cursor = Some(id);
+        if eng
+            .private::<Box<dyn GameEntity>>(id)
+            .is_some_and(|e| e.is_planted_c4())
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// `CHalfLifeMultiplay::MarkLivingPlayersOnTeamAsNotReceivingMoneyNextRound` (`multiplay_gamerules.cpp`
+/// 3214-3231): living players on `team` forfeit round bonus money at the next `RestartRound`.
+fn mark_living_players_no_money(g: &mut GameState, eng: &EngineApi<'_>, team: Team) {
+    for (slot, slot_p) in g.players.iter_mut().enumerate() {
+        let Some(p) = slot_p.as_mut() else {
+            continue;
+        };
+        if p.team != team {
+            continue;
+        }
+        let id = eng.client_edict(slot as u8);
+        if eng
+            .ent(id)
+            .is_some_and(|v| v.health > 0.0 && v.deadflag == DEAD_NO)
+        {
+            p.receives_no_money_next_round = true;
+        }
+    }
+}
+
+/// `CheckRoundTimeExpired` (`multiplay_gamerules.cpp` 3027-3112): when the round clock runs out
+/// (and no planted C4 is holding the round open), the objective of the map decides who wins:
+/// bomb saved -> hostages not rescued -> escape prevented -> VIP not escaped. On a map with no
+/// objective the clock moves forward by 60 seconds.
 fn check_round_time_expired(g: &mut GameState, eng: &mut EngineApi<'_>) {
     let now = eng.time();
-    // Not expired, or somebody has won already (the restart is due). The bomb planted, the
-    // other reason the round goes on, needs the bomb (2E).
-    if g.rules.round_remaining(now) > 0.0 || g.rules.round_win_status != WinStatus::None {
+    if g.rules.round_remaining(now) > 0.0
+        || g.rules.round_win_status != WinStatus::None
+        || is_bomb_planted(g, eng)
+    {
         return;
     }
-    // Bomb target / hostages / escape zone / VIP safety zone: 2E.
+    if g.rules.map_has_bomb_target {
+        win_round(
+            g,
+            eng,
+            Team::Ct,
+            "ctwin",
+            money::REWARD_TARGET_BOMB_SAVED,
+            "#Target_Saved",
+            ROUND_BEGIN_DELAY,
+            false,
+        );
+        mark_living_players_no_money(g, eng, Team::Terrorist);
+    } else if eng.find_by_classname(None, "hostage_entity").is_some() {
+        win_round(
+            g,
+            eng,
+            Team::Terrorist,
+            "terwin",
+            money::REWARD_HOSTAGE_NOT_RESCUED,
+            "#Hostages_Not_Rescued",
+            ROUND_BEGIN_DELAY,
+            false,
+        );
+        mark_living_players_no_money(g, eng, Team::Ct);
+    } else if g.rules.map_has_escape_zone {
+        broadcast(eng, "ctwin");
+        g.num_ct_wins += 1;
+        end_round_message(eng, "#Terrorists_Not_Escaped");
+        terminate_round(g, eng, ROUND_BEGIN_DELAY, WinStatus::Cts);
+        update_team_scores(g, eng);
+    } else if g.rules.map_has_vip_safety_zone {
+        win_round(
+            g,
+            eng,
+            Team::Terrorist,
+            "terwin",
+            money::REWARD_VIP_NOT_ESCAPED,
+            "#VIP_Not_Escaped",
+            ROUND_BEGIN_DELAY,
+            false,
+        );
+    }
     // This is done so that the portion of code has enough time to do its thing.
     g.rules.round_start_time = now + 60.0;
 }
@@ -935,8 +1309,107 @@ fn switch_team(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
 }
 
 /// Gives C4 to a specific living player slot (`CBasePlayer::MakeBomber`).
+#[cfg(feature = "test-hooks")]
 pub(crate) fn give_c4(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) -> bool {
     player::make_bomber(g, eng, slot)
+}
+
+/// `CHalfLifeMultiplay::IsThereABomber` (`multiplay_gamerules.cpp` 2101-2123): true when any
+/// non-CT player currently carries C4 (`m_bHasC4`).
+pub(crate) fn is_there_a_bomber(g: &GameState) -> bool {
+    g.players
+        .iter()
+        .flatten()
+        .any(|p| p.team != Team::Ct && p.has_c4)
+}
+
+/// `CHalfLifeMultiplay::IsThereABomb` (`multiplay_gamerules.cpp` 2125-2143): true when a planted
+/// C4 (`grenade` with `m_bIsC4`), a world `weapon_c4`, or a boxed dropped C4 exists.
+pub(crate) fn is_there_a_bomb(eng: &EngineApi<'_>) -> bool {
+    let mut cursor = None;
+    while let Some(id) = eng.find_by_classname(cursor, "grenade") {
+        cursor = Some(id);
+        if eng
+            .private::<Box<dyn GameEntity>>(id)
+            .is_some_and(|e| e.is_planted_c4())
+        {
+            return true;
+        }
+    }
+    if eng.find_by_classname(None, "weapon_c4").is_some() {
+        return true;
+    }
+    let mut box_cursor = None;
+    while let Some(id) = eng.find_by_classname(box_cursor, "weaponbox") {
+        box_cursor = Some(id);
+        if eng
+            .private::<Box<dyn GameEntity>>(id)
+            .is_some_and(|e| e.is_dropped_bomb())
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// `CHalfLifeMultiplay::GiveC4` (`multiplay_gamerules.cpp` 690-785, vanilla): hands C4 to the
+/// next living terrorist in rotating index order (`m_iC4Guy`), falling back to the first living
+/// terrorist if none received it.
+pub(crate) fn give_c4_to_terrorists(g: &mut GameState, eng: &mut EngineApi<'_>) -> Option<u8> {
+    let team_count = g.rules.num_terrorist as i32;
+    g.rules.c4_guy += 1;
+    if g.rules.c4_guy > team_count {
+        g.rules.c4_guy = 1;
+    }
+
+    let mut temp = 0i32;
+    let mut chosen = None;
+    for slot in 0..g.players.len() {
+        let slot_u8 = slot as u8;
+        let living_t = g.players[slot]
+            .as_ref()
+            .is_some_and(|p| p.team == Team::Terrorist)
+            && eng
+                .ent(eng.client_edict(slot_u8))
+                .is_some_and(|v| v.deadflag == DEAD_NO);
+        if !living_t {
+            continue;
+        }
+        temp += 1;
+        if temp == g.rules.c4_guy && player::make_bomber(g, eng, slot_u8) {
+            chosen = Some(slot_u8);
+            break;
+        }
+    }
+
+    if !is_there_a_bomber(g) {
+        g.rules.c4_guy = 0;
+        for slot in 0..g.players.len() {
+            let slot_u8 = slot as u8;
+            let living_t = g.players[slot]
+                .as_ref()
+                .is_some_and(|p| p.team == Team::Terrorist)
+                && eng
+                    .ent(eng.client_edict(slot_u8))
+                    .is_some_and(|v| v.deadflag == DEAD_NO);
+            if living_t && player::make_bomber(g, eng, slot_u8) {
+                return Some(slot_u8);
+            }
+        }
+    }
+    chosen
+}
+
+/// `CHalfLifeMultiplay::SwapAllPlayers` (`multiplay_gamerules.cpp` 1512-1539): switches every
+/// player's team and swaps CT/T team scores.
+fn swap_all_players(g: &mut GameState, eng: &mut EngineApi<'_>) {
+    for slot in 0..g.players.len() {
+        if g.players[slot].is_some() {
+            switch_team(g, eng, slot as u8);
+        }
+    }
+    std::mem::swap(&mut g.num_terrorist_wins, &mut g.num_ct_wins);
+    update_team_scores(g, eng);
 }
 
 /// `CBasePlayer::CanSwitchTeam`: a player of the team that must give players away (no VIP
@@ -988,6 +1461,13 @@ pub(crate) fn restart_round(g: &mut GameState, eng: &mut EngineApi<'_>) {
     g.rules.num_ct = teams::count_team_players(g, Team::Ct);
     g.rules.num_terrorist = teams::count_team_players(g, Team::Terrorist);
 
+    // Reset the dropped bomb on everyone's radar and show the round timer on bomb maps.
+    if g.rules.map_has_bomb_target {
+        eng.send_usermsg(MsgDest::All, &CsUserMsg::BombPickup);
+        eng.send_usermsg(MsgDest::All, &CsUserMsg::ShowTimer);
+    }
+    g.rules.bomb_dropped = false;
+
     let balance = eng.cvar_f32("mp_autoteambalance") > 0.0;
     if balance && g.rules.unbalanced_rounds >= 1 {
         balance_teams(g, eng);
@@ -1031,14 +1511,57 @@ pub(crate) fn restart_round(g: &mut GameState, eng: &mut EngineApi<'_>) {
     g.rules.round_time_secs = g.rules.intro_round_time;
 
     // Check to see if there's a mapping info paramater entity, then what the map has
-    // (`RestartRound`, multiplay_gamerules.cpp 1853-1857, read 2026-11-23). The escape and VIP
-    // rounds that follow in the source are not ported yet (see the module documentation).
+    // (`RestartRound`, multiplay_gamerules.cpp 1853-1901, vanilla).
     crate::zones::check_map_info(g);
     g.rules.check_map_conditions(eng);
-    // The hostages, the VIP and the escape rounds are not ported (see the module documentation).
+
+    if g.rules.map_has_escape_zone {
+        g.rules.num_escapers = 0;
+        g.rules.have_escaped = 0;
+        if g.rules.num_escape_rounds >= 3 {
+            swap_all_players(g, eng);
+            g.rules.num_escape_rounds = 0;
+        }
+        g.rules.num_escape_rounds += 1;
+    }
+
+    // VIP selection (`PickNextVIP` / `m_iConsecutiveVIP++`, `multiplay_gamerules.cpp:1874-1878`)
+    // is wired in T9.
+
+    // Surviving hostage bonus (`mp:1880-1901`) and `CHostage::RePosition` (`UTIL_RestartOther`).
+    let mut acct_tmp = 0i32;
+    let mut hostage_ids = Vec::new();
+    let mut cursor = None;
+    while let Some(id) = eng.find_by_classname(cursor, "hostage_entity") {
+        hostage_ids.push(id);
+        cursor = Some(id);
+    }
+    for id in hostage_ids {
+        if acct_tmp >= 2000 {
+            break;
+        }
+        if let Some(v) = eng.ent(id)
+            && v.solid != SOLID_NOT
+        {
+            acct_tmp += money::REWARD_TOOK_HOSTAGE;
+            if v.deadflag == DEAD_DEAD
+                && let Some(vm) = eng.ent_mut(id)
+            {
+                vm.deadflag = DEAD_RESPAWNABLE;
+            }
+        }
+        crate::entity::with_entity(g, eng, id, |entity, g, eng| {
+            entity.restart(g, eng, id);
+        });
+    }
+
     // Scale up the loser bonus when teams fall into losing streaks, and assign it.
     let status = g.rules.round_win_status;
-    g.rules.economy.settle(status);
+    let rescued_hostages = g.rules.hostages_rescued;
+    let is_escape_map = g.rules.map_has_escape_zone;
+    g.rules
+        .economy
+        .settle(status, acct_tmp, rescued_hostages, is_escape_map);
     // The round time stamp must be set before the players are spawned.
     g.rules.round_start_time = now;
     if g.rules.complete_reset {
@@ -1056,6 +1579,14 @@ pub(crate) fn restart_round(g: &mut GameState, eng: &mut EngineApi<'_>) {
         p.num_spawns = 0;
         p.team_changed = false;
         let (team, paid, has_c4) = (p.team, !p.receives_no_money_next_round, p.has_c4);
+        if team == Team::Terrorist && is_escape_map {
+            // `RestartRound` (`mp:2026-2030`): on escape maps, terrorists start each round with
+            // default gear ("remove the Ts guns").
+            p.not_killed = false;
+        }
+        if team == Team::Terrorist {
+            g.rules.num_escapers += 1;
+        }
         // The players of the teams are paid for the last round.
         if let Some(sum) = g.rules.economy.payout(team)
             && paid
@@ -1072,11 +1603,13 @@ pub(crate) fn restart_round(g: &mut GameState, eng: &mut EngineApi<'_>) {
         }
     }
 
-    // `UTIL_RestartOther("hostage_entity")` (`RestartRound`, multiplay_gamerules.cpp:1922) and
-    // `CleanUpMap`: the hostages reset, the armoury starts over, and every weapon box goes.
-    crate::hostage::restart_round(g, eng);
+    // `CleanUpMap`: the armoury starts over and every grenade / weapon box / thighpack goes.
     crate::bots::on_round_restart(g);
     crate::inventory::clean_up_map(g, eng);
+
+    if g.rules.map_has_bomb_target {
+        give_c4_to_terrorists(g, eng);
+    }
 
     // Reset game variables.
     let rules = &mut g.rules;

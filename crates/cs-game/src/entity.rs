@@ -155,6 +155,11 @@ pub trait GameEntity: Send + 'static {
         false
     }
 
+    /// Whether this entity is a planted, unexploded C4 (`CGrenade::m_bIsC4 && !m_bJustBlew`).
+    fn is_planted_live_c4(&self) -> bool {
+        false
+    }
+
     /// Whether this entity is a hostage (`CLASS_HUMAN_PASSIVE`).
     fn is_hostage(&self) -> bool {
         false

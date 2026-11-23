@@ -247,7 +247,13 @@ fn a_terrorist_escapes_once_and_the_team_is_told() {
     place(&mut b, ESCAPE_AT);
     b.step(5);
     assert!(with_player(&b, |p| p.escaped));
-    assert_eq!(centre_texts(&b), ["#Terrorist_Escaped"]);
+    // `CEscapeZone::EscapeTouch` calls `CheckWinConditions` (`#Terrorists_Escaped`, `MsgDest::All` ->
+    // server reliable datagram) before sending `#Terrorist_Escaped` (`MsgDest::One(slot)` -> per-client
+    // reliable buffer); per-client reliable messages precede server-wide reliable messages in the packet.
+    assert_eq!(
+        centre_texts(&b),
+        ["#Terrorist_Escaped", "#Terrorists_Escaped"]
+    );
     // It does not escape twice, and a terrorist never signals the zone.
     b.probe.clear_messages();
     b.step(5);

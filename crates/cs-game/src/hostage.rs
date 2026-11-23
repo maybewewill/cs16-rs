@@ -17,7 +17,7 @@ use glam::Vec3;
 
 use crate::GameState;
 use crate::bullets::{BLOOD_COLOR_RED, MultiDamage, add_multi_damage, random_float, spawn_blood, trace_bleed};
-use crate::entity::{FCAP_ACROSS_TRANSITION, FCAP_ONOFF_USE, GameEntity, UseType, with_entity};
+use crate::entity::{FCAP_ACROSS_TRANSITION, FCAP_ONOFF_USE, GameEntity, UseType};
 use crate::hint::{dhf, first_time, hint, hint_message};
 use crate::hostage_localnav::{
     HOSTAGE_STEPSIZE, LocalNav, MAX_NODES, MAX_UNIT_Z_SLOPE, PathTraversable,
@@ -561,6 +561,11 @@ impl GameEntity for Hostage {
     }
 
     fn takes_damage(&self) -> bool {
+        self.takedamage
+    }
+
+    /// Vanilla `CHostage::IsAlive` (`hostage.h:97`): `pev->takedamage == DAMAGE_YES`.
+    fn is_alive(&self, _eng: &EngineApi<'_>, _id: EdictId) -> bool {
         self.takedamage
     }
 
@@ -1148,21 +1153,6 @@ pub(crate) fn send_hostage_pos_to_player(_g: &GameState, eng: &mut EngineApi<'_>
 pub(crate) fn entity_is_hostage(eng: &EngineApi<'_>, id: EdictId) -> bool {
     eng.private::<Box<dyn GameEntity>>(id)
         .is_some_and(|e| e.is_hostage())
-}
-
-/// `RestartRound` (`CHostage::RePosition` for every `"hostage_entity"`).
-pub(crate) fn restart_round(g: &mut GameState, eng: &mut EngineApi<'_>) {
-    let mut ids = Vec::new();
-    let mut cursor = None;
-    while let Some(id) = eng.find_by_classname(cursor, "hostage_entity") {
-        ids.push(id);
-        cursor = Some(id);
-    }
-    for id in ids {
-        with_entity(g, eng, id, |entity, g, eng| {
-            entity.restart(g, eng, id);
-        });
-    }
 }
 
 /// Test/bot helper using [`random_in`] directly when testing damage/sound distribution.

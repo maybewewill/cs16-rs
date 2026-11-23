@@ -19,15 +19,12 @@
 //!   `mp_tkpunish` ([`punish_team_kill`], from `RoundRespawn`).
 //!
 //! Deviations and what waits for later tasks:
-//! - The rewards of the map objectives (bomb planted/defused/exploded, hostages, VIP, escape) and
-//!   their loser-bonus branches are 2E; this build has maps with no objective, so the win reward
-//!   is the plain `RR_CTS_WIN`/`RR_TERRORISTS_WIN` of 3000 (the original pays 3250 on a map with
-//!   a bomb target). `MarkLivingPlayersOnTeamAsNotReceivingMoneyNextRound` is only called by
-//!   those objective branches of the round timer, so it comes with them; the flag it sets
-//!   ([`crate::player::Player::receives_no_money_next_round`]) is honoured here.
+//! - The rewards of the map objectives (bomb planted/defused/exploded/saved, hostages, VIP,
+//!   escape) and their loser-bonus branches follow vanilla `mp.dll` (`RewardAccount`,
+//!   `CheckWinConditions`, `CheckRoundTimeExpired`, `RestartRound`).
 //! - The hints of `PlayerKilled` (`#Hint_careful_around_teammates`,
 //!   `#Hint_win_round_by_killing_enemy`) go through [`crate::hint`]; `#Hint_reward_for_killing_vip`
-//!   waits for the VIP.
+//!   waits for T9 VIP.
 //! - The blink of the freeze period (`MONEY_BLINK_AMOUNT`, 30 in `player.h`) belongs to the tutor
 //!   (`TheTutor`), which does not exist, so the constant is not defined; [`blink_account`] is the
 //!   buy menu's.
@@ -44,10 +41,36 @@ use crate::rules::WinStatus;
 pub const MAX_ACCOUNT: i32 = 16000;
 /// The least `mp_startmoney` (`CheckStartMoney`).
 pub const MIN_START_MONEY: i32 = 800;
+/// `REWARD_TARGET_BOMB`.
+pub const REWARD_TARGET_BOMB: i32 = 3500;
+/// `REWARD_VIP_ESCAPED`.
+pub const REWARD_VIP_ESCAPED: i32 = 3500;
+/// `REWARD_VIP_ASSASSINATED`.
+pub const REWARD_VIP_ASSASSINATED: i32 = 3250;
+/// `REWARD_TERRORISTS_ESCAPED`.
+pub const REWARD_TERRORISTS_ESCAPED: i32 = 3150;
+/// `REWARD_CTS_PREVENT_ESCAPE`.
+pub const REWARD_CTS_PREVENT_ESCAPE: i32 = 3500;
+/// `REWARD_ESCAPING_TERRORISTS_NEUTRALIZED`.
+pub const REWARD_ESCAPING_TERRORISTS_NEUTRALIZED: i32 = 3250;
+/// `REWARD_BOMB_DEFUSED`.
+pub const REWARD_BOMB_DEFUSED: i32 = 3250;
+/// `REWARD_BOMB_PLANTED`: paid to the terrorist team when the planted bomb is defused.
+pub const REWARD_BOMB_PLANTED: i32 = 800;
+/// `REWARD_BOMB_EXPLODED`: paid to the terrorist team for winning by elimination on a bomb map.
+pub const REWARD_BOMB_EXPLODED: i32 = 3250;
 /// `REWARD_CTS_WIN`: what the counter-terrorists are paid for a round won (no bomb target).
 pub const REWARD_CTS_WIN: i32 = 3000;
 /// `REWARD_TERRORISTS_WIN`: what the terrorists are paid for a round won (no bomb target).
 pub const REWARD_TERRORISTS_WIN: i32 = 3000;
+/// `REWARD_ALL_HOSTAGES_RESCUED`.
+pub const REWARD_ALL_HOSTAGES_RESCUED: i32 = 2500;
+/// `REWARD_TARGET_BOMB_SAVED`.
+pub const REWARD_TARGET_BOMB_SAVED: i32 = 3250;
+/// `REWARD_HOSTAGE_NOT_RESCUED`.
+pub const REWARD_HOSTAGE_NOT_RESCUED: i32 = 3250;
+/// `REWARD_VIP_NOT_ESCAPED`.
+pub const REWARD_VIP_NOT_ESCAPED: i32 = 3250;
 /// `REWARD_LOSER_BONUS_DEFAULT`: the loser bonus of a new match.
 pub const REWARD_LOSER_BONUS_DEFAULT: i32 = 1400;
 /// `REWARD_LOSER_BONUS_MIN`: the loser bonus after a losing streak was broken.
@@ -56,8 +79,14 @@ pub const REWARD_LOSER_BONUS_MIN: i32 = 1500;
 pub const REWARD_LOSER_BONUS_MAX: i32 = 3000;
 /// `REWARD_LOSER_BONUS_ADD`: what the loser bonus grows by for each round lost in a streak.
 pub const REWARD_LOSER_BONUS_ADD: i32 = 500;
+/// `REWARD_RESCUED_HOSTAGE`: per rescued hostage settled into `m_iAccountCT` on round restart.
+pub const REWARD_RESCUED_HOSTAGE: i32 = 750;
 /// `REWARD_KILLED_ENEMY`.
 pub const REWARD_KILLED_ENEMY: i32 = 300;
+/// `REWARD_KILLED_VIP`.
+pub const REWARD_KILLED_VIP: i32 = 2500;
+/// `REWARD_TOOK_HOSTAGE`: surviving hostage bonus in `RestartRound` (capped at 2000).
+pub const REWARD_TOOK_HOSTAGE: i32 = 150;
 /// `PAYBACK_FOR_KILLED_TEAMMATES`.
 pub const PAYBACK_FOR_KILLED_TEAMMATES: i32 = -3300;
 /// The team kill that `mp_autokick` kicks for (`killer->m_iTeamKills == 3`).
@@ -117,12 +146,24 @@ impl Economy {
         self.loser_bonus
     }
 
-    /// `Round_Cts` and `Round_Ts`: the winners earn the win reward (the objective rewards of the
-    /// bomb maps are 2E).
-    pub(crate) fn round_won(&mut self, team: Team) {
+    /// `Round_Cts` and `Round_Ts`: the winners earn the win reward (3250 on a map with a bomb
+    /// target, else 3000).
+    pub(crate) fn round_won(&mut self, team: Team, has_bomb_target: bool) {
         match team {
-            Team::Ct => self.account_ct += REWARD_CTS_WIN,
-            Team::Terrorist => self.account_terrorist += REWARD_TERRORISTS_WIN,
+            Team::Ct => {
+                self.account_ct += if has_bomb_target {
+                    REWARD_BOMB_DEFUSED
+                } else {
+                    REWARD_CTS_WIN
+                };
+            }
+            Team::Terrorist => {
+                self.account_terrorist += if has_bomb_target {
+                    REWARD_BOMB_EXPLODED
+                } else {
+                    REWARD_TERRORISTS_WIN
+                };
+            }
             Team::Unassigned | Team::Spectator => {}
         }
     }
@@ -131,13 +172,24 @@ impl Economy {
         self.account_ct += amount;
     }
 
-    /// The part of `RestartRound` that scales the loser bonus and assigns it. The team that won
-    /// the round ends its own losing streak (a bonus that a streak had grown falls back to the
-    /// minimum) and adds a lost round to the other team's. While a team has lost twice in a row
-    /// the bonus grows by 500 each time this runs, as long as it is below the maximum (a bonus of
-    /// 2900 still grows to 3400, as in the original; a draw does not touch the streaks but still
-    /// grows the bonus). The loser of the round is paid the bonus.
-    pub(crate) fn settle(&mut self, status: WinStatus) {
+    pub(crate) fn add_terrorist_account(&mut self, amount: i32) {
+        self.account_terrorist += amount;
+    }
+
+    /// The part of `RestartRound` that scales the loser bonus and assigns it (`mp:1904-1959`).
+    /// The team that won the round ends its own losing streak (a bonus that a streak had grown
+    /// falls back to the minimum) and adds a lost round to the other team's. While a team has lost
+    /// twice in a row the bonus grows by 500 each time this runs, as long as it is below the
+    /// maximum (a draw does not touch the streaks but still grows the bonus). The surviving
+    /// hostage bonus (`acct_tmp`) goes to the round winner, the loser of the round is paid the
+    /// bonus (except terrorists on an escape map), and CTs always earn 750 per rescued hostage.
+    pub(crate) fn settle(
+        &mut self,
+        status: WinStatus,
+        alive_hostage_bonus: i32,
+        rescued_hostages: i32,
+        is_escape_map: bool,
+    ) {
         // Scale up the loser bonus when teams fall into losing streaks.
         match status {
             WinStatus::Terrorists => {
@@ -163,12 +215,21 @@ impl Economy {
         {
             self.loser_bonus += REWARD_LOSER_BONUS_ADD;
         }
-        // Assign the losing bonus.
+        // Assign the winning and losing bonuses.
         match status {
-            WinStatus::Terrorists => self.account_ct += self.loser_bonus,
-            WinStatus::Cts => self.account_terrorist += self.loser_bonus,
+            WinStatus::Terrorists => {
+                self.account_terrorist += alive_hostage_bonus;
+                self.account_ct += self.loser_bonus;
+            }
+            WinStatus::Cts => {
+                self.account_ct += alive_hostage_bonus;
+                if !is_escape_map {
+                    self.account_terrorist += self.loser_bonus;
+                }
+            }
             WinStatus::None | WinStatus::Draw => {}
         }
+        self.account_ct += rescued_hostages * REWARD_RESCUED_HOSTAGE;
     }
 
     /// `m_bCompleteReset` of `RestartRound`: a new match pays nothing extra and starts the
@@ -350,25 +411,25 @@ mod tests {
     #[test]
     fn a_draw_pays_nothing_and_keeps_the_streaks() {
         let mut e = Economy::default();
-        e.settle(WinStatus::Draw);
+        e.settle(WinStatus::Draw, 0, 0, false);
         assert_eq!((e.account_ct(), e.account_terrorist()), (0, 0));
         assert_eq!(e.consecutive_ct_loses() + e.consecutive_terrorist_loses(), 0);
         assert_eq!(e.loser_bonus(), REWARD_LOSER_BONUS_DEFAULT);
         // A streak in progress keeps growing the bonus through a draw, as the original's check
         // does not look at the result of the round.
-        e.settle(WinStatus::Terrorists);
-        e.settle(WinStatus::Terrorists);
+        e.settle(WinStatus::Terrorists, 0, 0, false);
+        e.settle(WinStatus::Terrorists, 0, 0, false);
         assert_eq!(e.loser_bonus(), 1900);
-        e.settle(WinStatus::Draw);
+        e.settle(WinStatus::Draw, 0, 0, false);
         assert_eq!(e.loser_bonus(), 2400);
     }
 
     #[test]
     fn the_win_reward_goes_to_the_winners() {
         let mut e = Economy::default();
-        e.round_won(Team::Ct);
+        e.round_won(Team::Ct, false);
         assert_eq!((e.account_ct(), e.account_terrorist()), (REWARD_CTS_WIN, 0));
-        e.round_won(Team::Terrorist);
+        e.round_won(Team::Terrorist, false);
         assert_eq!(e.account_terrorist(), REWARD_TERRORISTS_WIN);
         e.reset_match();
         assert_eq!((e.account_ct(), e.account_terrorist()), (0, 0));
