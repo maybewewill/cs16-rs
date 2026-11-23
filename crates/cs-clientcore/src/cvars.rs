@@ -94,6 +94,10 @@ impl ClientCvars {
             ("topcolor", "30", userinfo | CVAR_FILTERABLE),
             ("bottomcolor", "6", userinfo | CVAR_FILTERABLE),
             ("cl_nointerp", "0", 0),
+            // Task 5 (prediction.rs): `cl_nopred`, `cl_nosmooth`, `cl_smoothtime` (cl_pmove.c).
+            ("cl_nopred", "0", 0),
+            ("cl_nosmooth", "0", CVAR_ARCHIVE),
+            ("cl_smoothtime", "0.1", CVAR_ARCHIVE),
             ("cl_allowdownload", "1", CVAR_ARCHIVE),
             ("cl_download_ingame", "1", CVAR_ARCHIVE),
             // Assumption: Xash defaults the stufftext filter on; its definition is in a file

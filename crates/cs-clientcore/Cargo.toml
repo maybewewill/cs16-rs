@@ -9,10 +9,14 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+cs-pm.workspace = true
 cs-proto48.workspace = true
 cs-transport.workspace = true
 glam.workspace = true
 
 [dev-dependencies]
+cs-assets.workspace = true
 cs-cvar.workspace = true
 cs-engine.workspace = true
+cs-game = { workspace = true, features = ["test-hooks"] }
+cs-vfs.workspace = true

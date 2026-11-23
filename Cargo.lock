@@ -572,10 +572,14 @@ dependencies = [
 name = "cs-clientcore"
 version = "0.1.0"
 dependencies = [
+ "cs-assets",
  "cs-cvar",
  "cs-engine",
+ "cs-game",
+ "cs-pm",
  "cs-proto48",
  "cs-transport",
+ "cs-vfs",
  "glam",
 ]
 

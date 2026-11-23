@@ -342,7 +342,8 @@ fn pure_origin(ent: &ClientEntity, t: f64) -> (Vec3, Vec3) {
 }
 
 /// `CL_ComputePlayerOrigin`: interpolates a player that is not the local one.
-fn compute_player_origin(ent: &mut ClientEntity, time: f64, settings: &InterpSettings) {
+// Task 5 hook: `pub(crate)` so the predictor can pose the other players.
+pub(crate) fn compute_player_origin(ent: &mut ClientEntity, time: f64, settings: &InterpSettings) {
     if !ent.player {
         return;
     }

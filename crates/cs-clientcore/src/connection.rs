@@ -41,6 +41,8 @@ use crate::frames::{ClientFrames, FrameOutcome};
 use crate::events::{FiredEvent, FxEnv};
 use crate::hud::ClientEffects;
 use crate::precache::PrecacheTables;
+// Task 5 hook: movement prediction (`predict.rs`).
+use crate::predict::{self, PredictInputs, Predictor};
 use crate::resources::{AllFilesPresent, ResourceFiles, ResourceManager, parse_file_stream};
 use crate::tempents::{FxWorld, NoWorld};
 
@@ -173,6 +175,8 @@ pub struct Connection<T: PacketTransport> {
     entities: BTreeMap<u16, GoldSrcEntityState>,
     /// Task 4 hook: frame ring, entity store and interpolation (`frames.rs`).
     frames: ClientFrames,
+    /// Task 5 hook: the movement prediction of the local player (`predict.rs`).
+    predict: Predictor,
     client_data: Option<GoldSrcClientData>,
     /// The `weapon_data_t` list of the last `svc_clientdata` received.
     weapon_records: WeaponRecords,
@@ -246,6 +250,7 @@ impl<T: PacketTransport> Connection<T> {
             server_info: None,
             entities: BTreeMap::new(),
             frames: ClientFrames::new(),
+            predict: Predictor::new(),
             client_data: None,
             weapon_records: WeaponRecords::new(),
             userinfos: BTreeMap::new(),
@@ -302,6 +307,8 @@ impl<T: PacketTransport> Connection<T> {
     /// packet when one is due, or one netchan packet when `now` is past the `cl_cmdrate`
     /// interval since the previous one.
     pub fn pump(&mut self, now: f64) {
+        // Task 5 hook: the clock commands are stamped with.
+        self.predict.set_now(now);
         while let Some((from, data)) = self.transport.recv() {
             if from != self.server {
                 continue;
@@ -365,6 +372,48 @@ impl<T: PacketTransport> Connection<T> {
             }
             ConnState::Idle | ConnState::Rejected(_) | ConnState::Disconnected(_) => {}
         }
+        // Task 5 hook: replay the commands the server has not answered.
+        self.run_prediction(now);
+    }
+
+    /// Task 5 hook: `CL_PredictMovement` once per pump, after the packets were read and the
+    /// commands sent.
+    fn run_prediction(&mut self, now: f64) {
+        if self.state != ConnState::InGame {
+            return;
+        }
+        let Some(chan) = self.chan.as_ref() else {
+            return;
+        };
+        let (ack, outgoing) = (chan.incoming_acknowledged, chan.outgoing_sequence);
+        self.predict.apply_cvars(&self.cvars);
+        let poses = predict::player_poses(&mut self.frames);
+        let movevars = self
+            .movevars
+            .as_ref()
+            .map(predict::movevars_from_msg)
+            .unwrap_or_default();
+        let frames = &self.frames;
+        let inputs = PredictInputs {
+            now,
+            incoming_acknowledged: ack,
+            outgoing_sequence: outgoing,
+            frame: if frames.valid_sequence != 0 {
+                frames.current_frame()
+            } else {
+                None
+            },
+            playernum: frames.entities.playernum,
+            max_clients: frames.entities.max_clients,
+            precache: &self.precache,
+            movevars,
+            max_velocity: frames.entities.max_velocity,
+            poses: &poses,
+            entities: Some(&frames.entities),
+            remote_is_local: frames.settings.remote_is_local,
+            intermission: false,
+        };
+        self.predict.update(&inputs);
     }
 
     /// Seconds between two netchan packets: `1 / cl_cmdrate`, with the cvar clamped to 10..100
@@ -386,6 +435,8 @@ impl<T: PacketTransport> Connection<T> {
     }
 
     pub fn queue_cmd(&mut self, cmd: GoldSrcUserCmd) {
+        // Task 5 hook: the prediction runs the command before it is sent.
+        self.predict.push_cmd(cmd.clone());
         self.cmd_queue.push_back(cmd);
     }
 
@@ -693,6 +744,24 @@ impl<T: PacketTransport> Connection<T> {
     /// Task 4 hook: advance the clock (`advance`) and list the visible entities (`emit`).
     pub fn frames_mut(&mut self) -> &mut ClientFrames {
         &mut self.frames
+    }
+
+    /// Task 5 hook: the movement prediction (`cl.simorg`, the error checks, the sounds).
+    pub fn predictor(&self) -> &Predictor {
+        &self.predict
+    }
+
+    pub fn predictor_mut(&mut self) -> &mut Predictor {
+        &mut self.predict
+    }
+
+    /// Task 5 hook: the map's collision hulls, which the prediction walks in (the shell loads
+    /// the BSP; `WorldCollision::from_bsp`).
+    pub fn set_world_collision(
+        &mut self,
+        world: Option<std::sync::Arc<cs_pm::collision::WorldCollision>>,
+    ) {
+        self.predict.set_world(world);
     }
 
     /// Spawn baselines received for the current map, decoded, by entity number.
@@ -1187,6 +1256,7 @@ impl<T: PacketTransport> Connection<T> {
     fn forget_map(&mut self) {
         self.entities.clear();
         self.frames.reset();
+        self.predict.reset();
         self.ctx.baselines.clear();
         self.ctx.instance_baselines.clear();
         self.ctx.entity_frames.clear();
@@ -1249,13 +1319,22 @@ impl<T: PacketTransport> Connection<T> {
         {
             let take = self.cmd_queue.len().min(MAX_NEW_CMDS);
             let mut new_cmds: Vec<GoldSrcUserCmd> = self.cmd_queue.drain(..take).collect();
+            // Task 5 hook: the prediction learns which packet carries which commands (the
+            // server acknowledges packets).
+            let mut placeholder = None;
             match new_cmds.last() {
                 Some(last) => self.last_cmd = last.clone(),
-                None => new_cmds.push(GoldSrcUserCmd {
-                    msec: 0,
-                    ..self.last_cmd.clone()
-                }),
+                None => {
+                    let held = GoldSrcUserCmd {
+                        msec: 0,
+                        ..self.last_cmd.clone()
+                    };
+                    placeholder = Some(held.clone());
+                    new_cmds.push(held);
+                }
             }
+            self.predict
+                .packet_sent(chan.outgoing_sequence, take, placeholder);
 
             let cmds_newest_first: Vec<GoldSrcUserCmd> = new_cmds
                 .iter()

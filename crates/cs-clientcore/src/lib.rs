@@ -16,6 +16,7 @@ pub mod interp;
 pub mod events;
 pub mod hud;
 pub mod precache;
+pub mod predict;
 pub mod resources;
 pub mod sound;
 pub mod tempents;
@@ -30,6 +31,10 @@ pub use entities::{ClientEntity, EntityStore, ModelKind};
 pub use frames::{ClientClock, ClientFrames, DeltaRefusal, Frame, FrameOutcome, FrameRing};
 pub use interp::{EmitInputs, EmitResult, EntityKind, InterpSettings, VisibleEntity};
 pub use precache::{PrecacheEntry, PrecacheTables};
+pub use predict::{
+    LocalState, PlayerPose, PredictInputs, PredictSettings, PredictedSound, Prediction,
+    PredictionCheck, Predictor, WeaponState, split_usercmd,
+};
 pub use resources::{AllFilesPresent, ResourceFiles, ResourceManager, res_type};
 pub use events::{EventFx, EventQueue, FiredEvent, FxEnv};
 pub use hud::{ClientEffects, HudState};
