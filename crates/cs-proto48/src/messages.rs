@@ -309,6 +309,120 @@ pub struct PacketEntitiesMsg {
     pub removed: Vec<u16>,
 }
 
+/// `svc_particle` (`SV_StartParticle`): `coord x3` origin, `char x3` direction, `byte` count,
+/// `byte` colour. Xash3D FWGS `CL_ParseParticles` (read 2026-11-23): the direction is the
+/// chars times 1/16, and a count of 255 means 1024.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ParticleMsg {
+    pub origin: Vec3,
+    /// The direction chars as sent; see [`ParticleMsg::direction`].
+    pub direction: [i8; 3],
+    /// The count byte as sent; see [`ParticleMsg::effective_count`].
+    pub count: u8,
+    pub color: u8,
+}
+
+impl ParticleMsg {
+    /// The direction in world units (`char * 0.0625`).
+    pub fn direction(&self) -> Vec3 {
+        Vec3::new(
+            self.direction[0] as f32 * 0.0625,
+            self.direction[1] as f32 * 0.0625,
+            self.direction[2] as f32 * 0.0625,
+        )
+    }
+
+    /// The particle count: the wire byte, with 255 standing for 1024.
+    pub fn effective_count(&self) -> u32 {
+        if self.count == 255 { 1024 } else { self.count as u32 }
+    }
+}
+
+/// `svc_damage`: `byte` armor, `byte` blood, `coord x3` origin of the hit. Not sent by
+/// ReHLDS or ReGameDLL; Xash3D FWGS reads nothing for it (`cl_parse_gs.c`, read 2026-11-23),
+/// so the 8-byte layout is the Quake one, kept as an assumption.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DamageMsg {
+    pub armor: u8,
+    pub blood: u8,
+    pub origin: Vec3,
+}
+
+/// `svc_spawnstatic`: a static client entity. Layout: `short` model index, `byte` sequence,
+/// `byte` frame, `short` colormap, `byte` skin, then `coord` and `byte` angle for each of the
+/// three axes in turn, `byte` render mode and, for a render mode other than 0, `byte` amount,
+/// `byte x3` colour, `byte` effects. Not sent by ReHLDS; Xash3D FWGS reads nothing for it
+/// (`cl_parse_gs.c`, read 2026-11-23), so the layout is the one the stream parser always
+/// took, kept as an assumption.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpawnStaticMsg {
+    pub model_index: u16,
+    pub sequence: u8,
+    pub frame: u8,
+    pub colormap: u16,
+    pub skin: u8,
+    pub origin: Vec3,
+    /// The three angle bytes as sent (`byte * 360 / 256` degrees).
+    pub angles: [u8; 3],
+    pub render_mode: u8,
+    /// Present for a render mode other than 0.
+    pub render: Option<SpawnStaticRender>,
+}
+
+/// The render fields of [`SpawnStaticMsg`] for a render mode other than 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpawnStaticRender {
+    pub amount: u8,
+    pub color: [u8; 3],
+    pub effects: u8,
+}
+
+/// `svc_spawnstaticsound`: an ambient sound. `coord x3` origin, `short` sound index, `byte`
+/// volume (of 255), `byte` attenuation (in 1/64), `short` entity, `byte` pitch, `byte` flags.
+/// Xash3D FWGS `CL_ParseSpawnStaticSound` (read 2026-11-23).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpawnStaticSoundMsg {
+    pub origin: Vec3,
+    pub sound_index: u16,
+    pub volume: u8,
+    /// The attenuation byte as sent; see [`SpawnStaticSoundMsg::attenuation`].
+    pub attenuation: u8,
+    pub entity: u16,
+    pub pitch: u8,
+    pub flags: u8,
+}
+
+impl SpawnStaticSoundMsg {
+    /// The attenuation as the engine uses it (`byte / 64`).
+    pub fn attenuation(&self) -> f32 {
+        self.attenuation as f32 / 64.0
+    }
+}
+
+/// `svc_customization`: a player's custom resource (a spray). `byte` player, `byte` type,
+/// string file name, `short` index, `long` download size, `byte` flags and, with `RES_CUSTOM`,
+/// 16 bytes of MD5. Xash3D FWGS `CL_ParseCustomization` (read 2026-11-23).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomizationMsg {
+    pub player: u8,
+    pub res_type: u8,
+    pub filename: String,
+    pub index: u16,
+    pub download_size: u32,
+    pub flags: u8,
+    pub md5: Option<[u8; 16]>,
+}
+
+/// `svc_soundfade`: `byte x4`, percent, hold time, fade-out seconds, fade-in seconds. Xash3D
+/// FWGS `CL_ParseSoundFade` (read 2026-11-23).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SoundFadeMsg {
+    pub percent: u8,
+    pub hold_time: u8,
+    pub fade_out: u8,
+    pub fade_in: u8,
+}
+
 /// High-level decoded GoldSrc `svc_*` server message.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SvcMessage {
@@ -409,6 +523,19 @@ pub enum SvcMessage {
         args: crate::event::EventArgs,
         fire_time: Option<u16>,
     },
+    Particle(ParticleMsg),
+    Damage(DamageMsg),
+    SpawnStatic(Box<SpawnStaticMsg>),
+    SpawnStaticSound(SpawnStaticSoundMsg),
+    Customization(CustomizationMsg),
+    /// `svc_crosshairangle`: two chars, each `* 0.2` degrees (`CL_ParseCrosshairAngle`).
+    CrosshairAngle {
+        pitch: i8,
+        yaw: i8,
+    },
+    SoundFade(SoundFadeMsg),
+    /// `svc_timescale`: the new time scale.
+    TimeScale(f32),
     Ignored(u8),
 }
 
@@ -458,6 +585,14 @@ impl SvcMessage {
             SvcMessage::UserMsg { id, .. } => *id,
             SvcMessage::Event(_) => svc::EVENT,
             SvcMessage::EventReliable { .. } => svc::EVENT_RELIABLE,
+            SvcMessage::Particle(_) => svc::PARTICLE,
+            SvcMessage::Damage(_) => svc::DAMAGE,
+            SvcMessage::SpawnStatic(_) => svc::SPAWNSTATIC,
+            SvcMessage::SpawnStaticSound(_) => svc::SPAWNSTATICSOUND,
+            SvcMessage::Customization(_) => svc::CUSTOMIZATION,
+            SvcMessage::CrosshairAngle { .. } => svc::CROSSHAIRANGLE,
+            SvcMessage::SoundFade(_) => svc::SOUNDFADE,
+            SvcMessage::TimeScale(_) => svc::TIMESCALE,
             SvcMessage::Ignored(op) => *op,
         }
     }
@@ -727,20 +862,60 @@ fn parse_one_svc(
             Ok(SvcMessage::Pings(pings))
         }
         svc::PARTICLE => {
-            let _ = r.read_bytes(11)?; // 3 coords (6) + 3 dir i8 (3) + count (1) + color (1)
-            Ok(SvcMessage::Ignored(op))
+            let origin = Vec3::new(r.read_coord()?, r.read_coord()?, r.read_coord()?);
+            let direction = [r.read_i8()?, r.read_i8()?, r.read_i8()?];
+            let count = r.read_u8()?;
+            let color = r.read_u8()?;
+            Ok(SvcMessage::Particle(ParticleMsg {
+                origin,
+                direction,
+                count,
+                color,
+            }))
         }
         svc::DAMAGE => {
-            let _ = r.read_bytes(8)?; // armor(1) + blood(1) + 3 coords(6)
-            Ok(SvcMessage::Ignored(op))
+            let armor = r.read_u8()?;
+            let blood = r.read_u8()?;
+            let origin = Vec3::new(r.read_coord()?, r.read_coord()?, r.read_coord()?);
+            Ok(SvcMessage::Damage(DamageMsg {
+                armor,
+                blood,
+                origin,
+            }))
         }
         svc::SPAWNSTATIC => {
-            let _ = r.read_bytes(16)?; // short+byte+byte+short+byte + 3*(short+byte)
-            let rendermode = r.read_u8()?;
-            if rendermode != 0 {
-                let _ = r.read_bytes(5)?;
+            let model_index = r.read_u16()?;
+            let sequence = r.read_u8()?;
+            let frame = r.read_u8()?;
+            let colormap = r.read_u16()?;
+            let skin = r.read_u8()?;
+            let mut origin = Vec3::ZERO;
+            let mut angles = [0u8; 3];
+            for axis in 0..3 {
+                origin[axis] = r.read_coord()?;
+                angles[axis] = r.read_u8()?;
             }
-            Ok(SvcMessage::Ignored(op))
+            let render_mode = r.read_u8()?;
+            let render = if render_mode != 0 {
+                Some(SpawnStaticRender {
+                    amount: r.read_u8()?,
+                    color: [r.read_u8()?, r.read_u8()?, r.read_u8()?],
+                    effects: r.read_u8()?,
+                })
+            } else {
+                None
+            };
+            Ok(SvcMessage::SpawnStatic(Box::new(SpawnStaticMsg {
+                model_index,
+                sequence,
+                frame,
+                colormap,
+                skin,
+                origin,
+                angles,
+                render_mode,
+                render,
+            })))
         }
         svc::EVENT_RELIABLE => {
             r.start_bit_reading();
@@ -817,8 +992,15 @@ fn parse_one_svc(
         svc::CENTERPRINT => Ok(SvcMessage::CenterPrint(r.read_str()?)),
         svc::KILLEDMONSTER | svc::FOUNDSECRET | svc::INTERMISSION => Ok(SvcMessage::Ignored(op)),
         svc::SPAWNSTATICSOUND => {
-            let _ = r.read_bytes(14)?; // 3*coord(6) + short(2) + byte(1) + byte(1) + short(2) + byte(1) + byte(1)
-            Ok(SvcMessage::Ignored(op))
+            Ok(SvcMessage::SpawnStaticSound(SpawnStaticSoundMsg {
+                origin: Vec3::new(r.read_coord()?, r.read_coord()?, r.read_coord()?),
+                sound_index: r.read_u16()?,
+                volume: r.read_u8()?,
+                attenuation: r.read_u8()?,
+                entity: r.read_u16()?,
+                pitch: r.read_u8()?,
+                flags: r.read_u8()?,
+            }))
         }
         svc::FINALE | svc::CUTSCENE | svc::EXEC => {
             let _ = r.read_str()?;
@@ -944,25 +1126,37 @@ fn parse_one_svc(
             reserved: r.read_i32()?,
         }),
         svc::CUSTOMIZATION => {
-            let _player = r.read_u8()?;
-            let _type = r.read_u8()?;
-            let _name = r.read_str()?;
-            let _index = r.read_u16()?;
-            let _dl_size = r.read_u32()?;
+            let player = r.read_u8()?;
+            let res_type = r.read_u8()?;
+            let filename = r.read_str()?;
+            let index = r.read_u16()?;
+            let download_size = r.read_u32()?;
             let flags = r.read_u8()?;
-            if (flags as u32 & RES_CUSTOM) != 0 {
-                let _ = r.read_bytes(16)?;
-            }
-            Ok(SvcMessage::Ignored(op))
+            let md5 = if (flags as u32 & RES_CUSTOM) != 0 {
+                Some(r.read_bytes(16)?.try_into().expect("16 bytes"))
+            } else {
+                None
+            };
+            Ok(SvcMessage::Customization(CustomizationMsg {
+                player,
+                res_type,
+                filename,
+                index,
+                download_size,
+                flags,
+                md5,
+            }))
         }
-        svc::CROSSHAIRANGLE => {
-            let _ = r.read_bytes(2)?;
-            Ok(SvcMessage::Ignored(op))
-        }
-        svc::SOUNDFADE => {
-            let _ = r.read_bytes(4)?;
-            Ok(SvcMessage::Ignored(op))
-        }
+        svc::CROSSHAIRANGLE => Ok(SvcMessage::CrosshairAngle {
+            pitch: r.read_i8()?,
+            yaw: r.read_i8()?,
+        }),
+        svc::SOUNDFADE => Ok(SvcMessage::SoundFade(SoundFadeMsg {
+            percent: r.read_u8()?,
+            hold_time: r.read_u8()?,
+            fade_out: r.read_u8()?,
+            fade_in: r.read_u8()?,
+        })),
         svc::FILETXFERFAILED => {
             let _ = r.read_str()?;
             Ok(SvcMessage::Ignored(op))
@@ -990,10 +1184,7 @@ fn parse_one_svc(
             fallback_dir: r.read_str()?,
             cheats: r.read_u8()? != 0,
         }),
-        svc::TIMESCALE => {
-            let _ = r.read_f32()?;
-            Ok(SvcMessage::Ignored(op))
-        }
+        svc::TIMESCALE => Ok(SvcMessage::TimeScale(r.read_f32()?)),
         svc::RESOURCELOCATION => Ok(SvcMessage::ResourceLocation(r.read_str()?)),
         svc::SENDCVARVALUE => Ok(SvcMessage::SendCvarValue(r.read_str()?)),
         svc::SENDCVARVALUE2 => Ok(SvcMessage::SendCvarValue2 {
@@ -1193,7 +1384,7 @@ fn skip_temp_entity(r: &mut MsgReader<'_>) -> Result<(u8, Vec<u8>), ProtoError> 
         15 => {
             let _ = r.read_bytes(19)?;
         }
-        18 | 28 | 107 => {
+        18 | 28 => {
             let _ = r.read_bytes(16)?;
         }
         27 => {
@@ -1249,14 +1440,10 @@ fn skip_temp_entity(r: &mut MsgReader<'_>) -> Result<(u8, Vec<u8>), ProtoError> 
             let _ = r.read_bytes(7)?;
         }
         112 => {
-            // TE_PLAYERDECAL
-            let _player = r.read_u8()?;
-            let _coords = r.read_bytes(6)?;
-            let ent = r.read_i16()?;
-            let _decal = r.read_u8()?;
-            if ent != 0 {
-                let _ = r.read_i16()?;
-            }
+            // TE_PLAYERDECAL: player byte, 3 coords, entity short, decal byte. `const.h` also
+            // lists an optional model short; Xash3D FWGS `CL_ParseTempEntity` (read
+            // 2026-11-23) reads none, and nothing sends this effect (assumption: follow Xash).
+            let _ = r.read_bytes(10)?;
         }
         113 | 114 => {
             let _ = r.read_bytes(19)?;
@@ -1271,9 +1458,9 @@ fn skip_temp_entity(r: &mut MsgReader<'_>) -> Result<(u8, Vec<u8>), ProtoError> 
             let _ = r.read_bytes(18)?;
         }
         121 => {
-            let _ = r.read_bytes(5)?;
+            let _ = r.read_bytes(6)?;
         }
-        123 => {
+        107 | 123 => {
             let _ = r.read_bytes(13)?;
         }
         124 => {
@@ -1325,6 +1512,106 @@ pub fn write_svc_temp_entity(w: &mut MsgWriter, te_type: u8, payload: &[u8]) {
     w.write_u8(svc::TEMP_ENTITY);
     w.write_u8(te_type);
     w.write_bytes(payload);
+}
+
+fn write_coords(w: &mut MsgWriter, v: Vec3) {
+    w.write_coord(v.x);
+    w.write_coord(v.y);
+    w.write_coord(v.z);
+}
+
+/// `svc_particle`, the layout of [`ParticleMsg`].
+pub fn write_svc_particle(w: &mut MsgWriter, m: &ParticleMsg) {
+    w.write_u8(svc::PARTICLE);
+    write_coords(w, m.origin);
+    for d in m.direction {
+        w.write_i8(d);
+    }
+    w.write_u8(m.count);
+    w.write_u8(m.color);
+}
+
+/// `svc_damage`, the layout of [`DamageMsg`].
+pub fn write_svc_damage(w: &mut MsgWriter, m: &DamageMsg) {
+    w.write_u8(svc::DAMAGE);
+    w.write_u8(m.armor);
+    w.write_u8(m.blood);
+    write_coords(w, m.origin);
+}
+
+/// `svc_spawnstatic`, the layout of [`SpawnStaticMsg`]. The render fields are written only
+/// for a render mode other than 0.
+pub fn write_svc_spawnstatic(w: &mut MsgWriter, m: &SpawnStaticMsg) {
+    w.write_u8(svc::SPAWNSTATIC);
+    w.write_u16(m.model_index);
+    w.write_u8(m.sequence);
+    w.write_u8(m.frame);
+    w.write_u16(m.colormap);
+    w.write_u8(m.skin);
+    for axis in 0..3 {
+        w.write_coord(m.origin[axis]);
+        w.write_u8(m.angles[axis]);
+    }
+    w.write_u8(m.render_mode);
+    if m.render_mode != 0 {
+        let render = m.render.unwrap_or(SpawnStaticRender {
+            amount: 0,
+            color: [0; 3],
+            effects: 0,
+        });
+        w.write_u8(render.amount);
+        w.write_bytes(&render.color);
+        w.write_u8(render.effects);
+    }
+}
+
+/// `svc_spawnstaticsound`, the layout of [`SpawnStaticSoundMsg`].
+pub fn write_svc_spawnstaticsound(w: &mut MsgWriter, m: &SpawnStaticSoundMsg) {
+    w.write_u8(svc::SPAWNSTATICSOUND);
+    write_coords(w, m.origin);
+    w.write_u16(m.sound_index);
+    w.write_u8(m.volume);
+    w.write_u8(m.attenuation);
+    w.write_u16(m.entity);
+    w.write_u8(m.pitch);
+    w.write_u8(m.flags);
+}
+
+/// `svc_customization`, the layout of [`CustomizationMsg`]. The MD5 is written when `flags`
+/// has `RES_CUSTOM` (bit 2), zeros if `md5` is `None`.
+pub fn write_svc_customization(w: &mut MsgWriter, m: &CustomizationMsg) {
+    w.write_u8(svc::CUSTOMIZATION);
+    w.write_u8(m.player);
+    w.write_u8(m.res_type);
+    w.write_str(&m.filename);
+    w.write_u16(m.index);
+    w.write_u32(m.download_size);
+    w.write_u8(m.flags);
+    if (m.flags as u32 & RES_CUSTOM) != 0 {
+        w.write_bytes(&m.md5.unwrap_or([0; 16]));
+    }
+}
+
+/// `svc_crosshairangle`: two chars, each `* 0.2` degrees.
+pub fn write_svc_crosshairangle(w: &mut MsgWriter, pitch: i8, yaw: i8) {
+    w.write_u8(svc::CROSSHAIRANGLE);
+    w.write_i8(pitch);
+    w.write_i8(yaw);
+}
+
+/// `svc_soundfade`, the layout of [`SoundFadeMsg`].
+pub fn write_svc_soundfade(w: &mut MsgWriter, m: &SoundFadeMsg) {
+    w.write_u8(svc::SOUNDFADE);
+    w.write_u8(m.percent);
+    w.write_u8(m.hold_time);
+    w.write_u8(m.fade_out);
+    w.write_u8(m.fade_in);
+}
+
+/// `svc_timescale`: the new time scale.
+pub fn write_svc_timescale(w: &mut MsgWriter, scale: f32) {
+    w.write_u8(svc::TIMESCALE);
+    w.write_f32(scale);
 }
 
 pub fn write_svc_disconnect(w: &mut MsgWriter, reason: &str) {
@@ -3052,5 +3339,282 @@ mod tests {
             parse_svc_stream(&stream, &mut ctx),
             Err(ProtoError::InvalidPayload(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod client_reader_tests {
+    use super::*;
+
+    fn roundtrip(write: impl FnOnce(&mut MsgWriter)) -> Vec<SvcMessage> {
+        let mut w = MsgWriter::new();
+        write(&mut w);
+        // A sentinel message after it shows the reader took exactly the payload.
+        write_svc_choke(&mut w);
+        let mut msgs = parse_svc_stream(w.as_slice(), &mut SvcParseContext::new()).unwrap();
+        assert_eq!(msgs.pop(), Some(SvcMessage::Choke));
+        msgs
+    }
+
+    #[test]
+    fn particle_roundtrip_and_units() {
+        let m = ParticleMsg {
+            origin: Vec3::new(1.0, -2.5, 100.0),
+            direction: [16, -8, 127],
+            count: 255,
+            color: 7,
+        };
+        let msgs = roundtrip(|w| write_svc_particle(w, &m));
+        assert_eq!(msgs, vec![SvcMessage::Particle(m)]);
+        assert_eq!(m.direction(), Vec3::new(1.0, -0.5, 127.0 / 16.0));
+        assert_eq!(m.effective_count(), 1024);
+        assert_eq!(ParticleMsg { count: 20, ..m }.effective_count(), 20);
+    }
+
+    #[test]
+    fn damage_roundtrip() {
+        let m = DamageMsg {
+            armor: 5,
+            blood: 9,
+            origin: Vec3::new(-1.0, 2.0, 3.125),
+        };
+        assert_eq!(
+            roundtrip(|w| write_svc_damage(w, &m)),
+            vec![SvcMessage::Damage(m)]
+        );
+    }
+
+    #[test]
+    fn spawnstatic_roundtrip_with_and_without_render_fields() {
+        let plain = SpawnStaticMsg {
+            model_index: 300,
+            sequence: 2,
+            frame: 3,
+            colormap: 0x0102,
+            skin: 1,
+            origin: Vec3::new(10.0, -20.5, 30.0),
+            angles: [0, 64, 128],
+            render_mode: 0,
+            render: None,
+        };
+        assert_eq!(
+            roundtrip(|w| write_svc_spawnstatic(w, &plain)),
+            vec![SvcMessage::SpawnStatic(Box::new(plain))]
+        );
+        let lit = SpawnStaticMsg {
+            render_mode: 5,
+            render: Some(SpawnStaticRender {
+                amount: 200,
+                color: [1, 2, 3],
+                effects: 9,
+            }),
+            ..plain
+        };
+        assert_eq!(
+            roundtrip(|w| write_svc_spawnstatic(w, &lit)),
+            vec![SvcMessage::SpawnStatic(Box::new(lit))]
+        );
+    }
+
+    #[test]
+    fn spawnstaticsound_roundtrip() {
+        let m = SpawnStaticSoundMsg {
+            origin: Vec3::new(5.0, 6.0, -7.0),
+            sound_index: 1234,
+            volume: 255,
+            attenuation: 96,
+            entity: 17,
+            pitch: 100,
+            flags: 3,
+        };
+        assert_eq!(
+            roundtrip(|w| write_svc_spawnstaticsound(w, &m)),
+            vec![SvcMessage::SpawnStaticSound(m)]
+        );
+        assert_eq!(m.attenuation(), 1.5);
+    }
+
+    #[test]
+    fn customization_roundtrip_with_and_without_md5() {
+        let custom = CustomizationMsg {
+            player: 3,
+            res_type: 4,
+            filename: "!MD5abcdef".to_string(),
+            index: 9,
+            download_size: 12_345,
+            flags: RES_CUSTOM as u8,
+            md5: Some([7; 16]),
+        };
+        assert_eq!(
+            roundtrip(|w| write_svc_customization(w, &custom)),
+            vec![SvcMessage::Customization(custom.clone())]
+        );
+        let plain = CustomizationMsg {
+            flags: 0,
+            md5: None,
+            ..custom
+        };
+        assert_eq!(
+            roundtrip(|w| write_svc_customization(w, &plain)),
+            vec![SvcMessage::Customization(plain)]
+        );
+    }
+
+    #[test]
+    fn crosshairangle_soundfade_timescale_roundtrip() {
+        let fade = SoundFadeMsg {
+            percent: 50,
+            hold_time: 2,
+            fade_out: 3,
+            fade_in: 4,
+        };
+        let msgs = roundtrip(|w| {
+            write_svc_crosshairangle(w, -5, 7);
+            write_svc_soundfade(w, &fade);
+            write_svc_timescale(w, 0.5);
+        });
+        assert_eq!(
+            msgs,
+            vec![
+                SvcMessage::CrosshairAngle { pitch: -5, yaw: 7 },
+                SvcMessage::SoundFade(fade),
+                SvcMessage::TimeScale(0.5),
+            ]
+        );
+    }
+
+    #[test]
+    fn typed_messages_keep_their_wire_opcode() {
+        let msgs = roundtrip(|w| {
+            write_svc_crosshairangle(w, 1, 2);
+            write_svc_timescale(w, 2.0);
+        });
+        assert_eq!(msgs[0].opcode(), svc::CROSSHAIRANGLE);
+        assert_eq!(msgs[1].opcode(), svc::TIMESCALE);
+    }
+
+    #[test]
+    fn truncated_typed_messages_are_errors() {
+        let mut w = MsgWriter::new();
+        write_svc_spawnstaticsound(
+            &mut w,
+            &SpawnStaticSoundMsg {
+                origin: Vec3::ZERO,
+                sound_index: 1,
+                volume: 1,
+                attenuation: 1,
+                entity: 1,
+                pitch: 1,
+                flags: 1,
+            },
+        );
+        let bytes = w.as_slice();
+        for cut in 1..bytes.len() {
+            assert!(
+                parse_svc_stream(&bytes[..cut], &mut SvcParseContext::new()).is_err(),
+                "cut at {cut}"
+            );
+        }
+    }
+
+    /// The lengths the stream parser skips for the effects without a typed variant, against the
+    /// layouts of Xash3D FWGS `CL_ParseTempEntity` (read 2026-11-23). Each effect is followed by
+    /// a sentinel message, so a wrong length shows up as a wrong sentinel or an error.
+    #[test]
+    fn skipped_temp_entities_have_the_layout_lengths() {
+        // (te_type, payload length). `TE_PLAYERDECAL` and the entity-dependent `TE_BSPDECAL`
+        // are checked below.
+        let table: &[(u8, usize)] = &[
+            (4, 6),
+            (7, 17),
+            (10, 6),
+            (11, 6),
+            (14, 9),
+            (15, 19),
+            (18, 16),
+            (19, 24),
+            (20, 24),
+            (21, 24),
+            (24, 16),
+            (30, 17),
+            (31, 17),
+            (99, 2),
+            (100, 10),
+            (102, 12),
+            (103, 14),
+            (106, 17),
+            (107, 13),
+            (110, 17),
+            (111, 7),
+            (112, 10),
+            (113, 19),
+            (114, 19),
+            (119, 16),
+            (120, 18),
+            (121, 6),
+            (122, 10),
+            (123, 13),
+            (124, 7),
+            (125, 1),
+            (126, 18),
+            (127, 15),
+        ];
+        for &(te_type, len) in table {
+            let payload = vec![0u8; len];
+            let msgs = roundtrip(|w| write_svc_temp_entity(w, te_type, &payload));
+            assert_eq!(
+                msgs,
+                vec![SvcMessage::TempEntity {
+                    te_type,
+                    raw: payload
+                }],
+                "te {te_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn bsp_decal_and_text_message_lengths_follow_their_flags() {
+        // TE_BSPDECAL: the model short is there only for a non-zero entity.
+        for with_model in [false, true] {
+            let te = crate::tempent::bsp_decal(
+                Vec3::new(1.0, 2.0, 3.0),
+                12,
+                if with_model { 5 } else { 0 },
+                Some(77),
+            );
+            let msgs = roundtrip(|w| write_svc_temp_entity(w, te.te_type, &te.payload));
+            assert_eq!(
+                msgs,
+                vec![SvcMessage::TempEntity {
+                    te_type: 13,
+                    raw: te.payload.clone()
+                }]
+            );
+            assert_eq!(te.payload.len(), if with_model { 12 } else { 10 });
+        }
+        // TE_TEXTMESSAGE: effect 2 adds the fx time short (`CL_ParseTextMessage`).
+        for effect in [0u8, 2] {
+            let mut p = MsgWriter::new();
+            p.write_u8(1); // channel
+            p.write_i16(100);
+            p.write_i16(-100);
+            p.write_u8(effect);
+            p.write_bytes(&[1, 2, 3, 4, 5, 6, 7, 8]);
+            p.write_bytes(&[0; 6]);
+            if effect == 2 {
+                p.write_u16(300);
+            }
+            p.write_str("hello");
+            let payload = p.into_bytes();
+            let msgs = roundtrip(|w| write_svc_temp_entity(w, 29, &payload));
+            assert_eq!(
+                msgs,
+                vec![SvcMessage::TempEntity {
+                    te_type: 29,
+                    raw: payload
+                }]
+            );
+        }
     }
 }
