@@ -261,16 +261,6 @@ pub(crate) fn weapons_precache(eng: &mut EngineApi<'_>) {
                 precache_model(eng, "models/w_shotbox.mdl");
                 precache_ammo_sound(eng);
             }
-            // `CC4::Precache` (wpn_c4.cpp 35-41): the C4's weapon itself is a later phase (the
-            // bomb), its resources are not, as the models and sounds after it take their
-            // indices from them.
-            WeaponId::C4 => {
-                precache_model(eng, "models/v_c4.mdl");
-                precache_model(eng, "models/w_backpack.mdl");
-                if let Err(err) = eng.precache_sound("weapons/c4_click.wav") {
-                    tracing::error!(?err, "sound not precached");
-                }
-            }
             _ => {}
         }
     }

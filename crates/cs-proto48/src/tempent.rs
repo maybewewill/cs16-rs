@@ -22,7 +22,9 @@ pub mod te {
     pub const EXPLOSION: u8 = 3;
     pub const SMOKE: u8 = 5;
     pub const SPARKS: u8 = 9;
+    pub const SPRITE: u8 = 17;
     pub const BEAMFOLLOW: u8 = 22;
+    pub const GLOWSPRITE: u8 = 23;
     pub const STREAK_SPLASH: u8 = 25;
     pub const DLIGHT: u8 = 27;
     pub const BLOODSTREAM: u8 = 101;
@@ -247,5 +249,28 @@ pub fn world_decal_high(position: Vec3, decal: u8) -> TempEntity {
     TempEntity::new(te::WORLDDECALHIGH, |w| {
         coords(w, position);
         w.write_u8(decal);
+    })
+}
+
+/// `TE_SPRITE` (`CGrenade::Explode2`): `coord x3`, `short` sprite index, `byte` scale in tenths,
+/// `byte` brightness.
+pub fn sprite(position: Vec3, sprite: u16, scale: u8, brightness: u8) -> TempEntity {
+    TempEntity::new(te::SPRITE, |w| {
+        coords(w, position);
+        w.write_u16(sprite);
+        w.write_u8(scale);
+        w.write_u8(brightness);
+    })
+}
+
+/// `TE_GLOWSPRITE` (`CGrenade::C4Think`): `coord x3`, `short` model index, `byte` life/scale in
+/// tenths, `byte` size, `byte` alpha (`ggrenade.cpp` 1492-1501).
+pub fn glow_sprite(position: Vec3, model: u16, scale: u8, size: u8, alpha: u8) -> TempEntity {
+    TempEntity::new(te::GLOWSPRITE, |w| {
+        coords(w, position);
+        w.write_u16(model);
+        w.write_u8(scale);
+        w.write_u8(size);
+        w.write_u8(alpha);
     })
 }

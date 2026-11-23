@@ -3,8 +3,9 @@
 //! use, the state of a weapon and its behaviour trait ([`weapon`]), the state machine that runs
 //! them ([`core`]: `ItemPostFrame`, `DefaultDeploy`, `DefaultReload`, ...) and the weapons
 //! themselves ([`pistols`], [`smgs`], [`rifles`], [`snipers`], [`shotguns`], [`knife`],
-//! [`grenades`]; only the C4 in [`grenades`] is still a stub).
+//! [`grenades`], [`c4`]).
 
+pub mod c4;
 pub mod core;
 pub mod grenades;
 pub mod info;

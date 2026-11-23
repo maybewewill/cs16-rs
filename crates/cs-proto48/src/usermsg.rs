@@ -260,6 +260,20 @@ pub enum CsUserMsg {
     },
     HostageK(u8),
     BarTime(u16),
+    /// `gmsgBarTime2`: progress bar (`duration` seconds) starting at `start_percent` (0..100).
+    BarTime2 {
+        duration: u16,
+        start_percent: u16,
+    },
+    /// `gmsgScenarioIcon`: objective status icon (bomb ticking, hostages). When `active` is false,
+    /// only the active byte (0) is sent on the wire; when `alpha != 0`, `flash` `(rate, delay)`
+    /// follows (`ggrenade.cpp`, `player.cpp`).
+    Scenario {
+        active: bool,
+        sprite: String,
+        alpha: u8,
+        flash: Option<(i16, i16)>,
+    },
     SendAudio {
         sender_id: u8,
         audio_code: String,
@@ -473,6 +487,35 @@ pub fn decode_cs_usermsg(name: &str, payload: &[u8]) -> Result<CsUserMsg, ProtoE
         },
         "HostageK" => CsUserMsg::HostageK(r.read_u8()?),
         "BarTime" => CsUserMsg::BarTime(r.read_u16()?),
+        "BarTime2" => CsUserMsg::BarTime2 {
+            duration: r.read_u16()?,
+            start_percent: r.read_u16()?,
+        },
+        "Scenario" => {
+            let active = r.read_u8()? != 0;
+            if !active {
+                CsUserMsg::Scenario {
+                    active: false,
+                    sprite: String::new(),
+                    alpha: 0,
+                    flash: None,
+                }
+            } else {
+                let sprite = r.read_str()?;
+                let alpha = r.read_u8()?;
+                let flash = if alpha != 0 {
+                    Some((r.read_i16()?, r.read_i16()?))
+                } else {
+                    None
+                };
+                CsUserMsg::Scenario {
+                    active: true,
+                    sprite,
+                    alpha,
+                    flash,
+                }
+            }
+        }
         "SendAudio" => CsUserMsg::SendAudio {
             sender_id: r.read_u8()?,
             audio_code: r.read_str()?,
@@ -774,6 +817,32 @@ pub fn encode_cs_usermsg(msg: &CsUserMsg) -> (&'static str, Vec<u8>) {
             w.write_u16(*secs);
             "BarTime"
         }
+        CsUserMsg::BarTime2 {
+            duration,
+            start_percent,
+        } => {
+            w.write_u16(*duration);
+            w.write_u16(*start_percent);
+            "BarTime2"
+        }
+        CsUserMsg::Scenario {
+            active,
+            sprite,
+            alpha,
+            flash,
+        } => {
+            w.write_u8(u8::from(*active));
+            if *active {
+                w.write_str(sprite);
+                w.write_u8(*alpha);
+                if *alpha != 0 {
+                    let (rate, delay) = flash.unwrap_or((0, 0));
+                    w.write_i16(rate);
+                    w.write_i16(delay);
+                }
+            }
+            "Scenario"
+        }
         CsUserMsg::SendAudio {
             sender_id,
             audio_code,
@@ -943,6 +1012,29 @@ mod tests {
             CsUserMsg::WeapPickup(16),
             CsUserMsg::ReloadSound { volume: 200, kind: 1 },
             CsUserMsg::Crosshair(0),
+            CsUserMsg::BarTime(3),
+            CsUserMsg::BarTime2 {
+                duration: 10,
+                start_percent: 40,
+            },
+            CsUserMsg::Scenario {
+                active: false,
+                sprite: String::new(),
+                alpha: 0,
+                flash: None,
+            },
+            CsUserMsg::Scenario {
+                active: true,
+                sprite: "hostage4".to_string(),
+                alpha: 0,
+                flash: None,
+            },
+            CsUserMsg::Scenario {
+                active: true,
+                sprite: "bombticking".to_string(),
+                alpha: 255,
+                flash: Some((139, 0)),
+            },
         ];
 
         for m in msgs {

@@ -43,7 +43,7 @@ use cs_sim::pm::math::angle_vectors;
 
 use super::core::{PlayerAnim, WeaponCtx, precache_model, precache_sound, with_weapon};
 use super::info::{WPNSTATE_SHIELD_DRAWN, WeaponId, item_info};
-use super::weapon::{Weapon, WeaponBehavior, stub_weapon};
+use super::weapon::{Weapon, WeaponBehavior};
 
 /// `*_IDLE`, `*_PULLPIN` (`*_PINPULL` of the smoke grenade), `*_THROW` and `*_DRAW`
 /// (`flashbang_e`, `hegrenade_e`, `smokegrenade_e`: the same numbers in all three).
@@ -215,7 +215,7 @@ fn reset_player_shield_anim(w: &mut WeaponCtx<'_, '_>) {
 /// order of what happens is the source's. `m_pLastItem` is the active item after the holster:
 /// nothing when the holster destroyed the grenade (as the source, whose `RemovePlayerItem`
 /// clears the active item).
-fn retire_weapon(me: &mut dyn WeaponBehavior, w: &mut WeaponCtx<'_, '_>) {
+pub(crate) fn retire_weapon(me: &mut dyn WeaponBehavior, w: &mut WeaponCtx<'_, '_>) {
     let edict = w.edict();
     if let Some(v) = w.eng.ent_mut(edict) {
         v.viewmodel = 0;
@@ -437,9 +437,4 @@ grenade_weapon!(
 grenade_weapon!(
     /// The smoke grenade (`CSmokeGrenade`).
     SmokeGrenade, WeaponId::SmokeGrenade, false
-);
-
-stub_weapon!(
-    /// The C4; phase 2E ports it.
-    C4, WeaponId::C4, "2E"
 );

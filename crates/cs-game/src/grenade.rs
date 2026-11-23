@@ -45,23 +45,32 @@
 //!   victim's team (the entity is checked out of its edict while it explodes).
 
 use cs_engine::collision::CONTENTS_WATER;
-use cs_engine::consts::{FL_ONGROUND, MOVETYPE_BOUNCE, SOLID_BBOX, SOLID_NOT};
+use cs_engine::consts::{
+    FL_ONGROUND, MOVETYPE_BOUNCE, MOVETYPE_TOSS, SOLID_BBOX, SOLID_NOT,
+};
 use cs_engine::{EdictId, EngineApi, EntTrace, MoveFilter, MsgDest};
 use cs_proto48::bitbuf::MsgWriter;
+use cs_proto48::messages::SND_FL_STOP;
 use cs_proto48::tempent::{self, explflag};
+use cs_proto48::usermsg::CsUserMsg;
 use cs_sim::pm::math::angle_vectors;
 use glam::Vec3;
 
 use crate::GameState;
 use crate::bullets::{decal_trace, random_float};
-use crate::entity::{GameEntity, attach};
+use crate::chat::{HUD_PRINTCENTER, client_print};
+use crate::entity::{FCAP_CONTINUOUS_USE, GameEntity, UseType, attach, use_entity, util_remove};
 use crate::observer::{FADETOBLACK_STAY, FFADE_IN, screen_fade_color};
 use crate::player::{
-    ATTN_NORM, CHAN_VOICE, DEAD_NO, EF_NODRAW, PITCH_NORM, dmg, player_slot,
+    ATTN_NORM, CHAN_ITEM, CHAN_VOICE, DEAD_NO, EF_NODRAW, PITCH_NORM, Team, dmg, player_slot,
     take_damage_from_grenade,
 };
 use crate::weapons::core::CHAN_WEAPON;
 use crate::weapons::WeaponId;
+
+const ATTN_NONE: f32 = 0.0;
+const SF_DETONATE: u32 = 1 << 0;
+const NEXT_DEFUSE_TIME: f32 = 0.5;
 
 /// `DECAL_SCORCH1` and `DECAL_SCORCH2` (`decals.h`): the numbers in the game's decal table.
 const DECAL_SCORCH1: usize = 11;
@@ -82,19 +91,18 @@ enum Think {
     Tumble,
     SgTumble,
     Detonate,
+    Detonate2,
     Detonate3,
     SgDetonate,
     SgSmoke,
     Smoke,
     Smoke3C,
-    // Set by nothing in the vanilla source of the grenades of this task: `Smoke2` by the C4's
-    // `Explode2` (phase 2E), `Smoke3_B` by no one, `Smoke3_A` by `Smoke3_B`.
-    #[allow(dead_code)]
     Smoke2,
     #[allow(dead_code)]
     Smoke3B,
     #[allow(dead_code)]
     Smoke3A,
+    C4,
 }
 
 /// Which touch of `CGrenade` runs (`SetTouch`).
@@ -102,12 +110,12 @@ enum Think {
 enum Touch {
     None,
     Bounce,
-    // Set by the C4's `ShootSatchelCharge` (phase 2E).
+    // Unused in vanilla C4 (`C4Touch` is empty); kept for `CGrenade::SlideTouch`.
     #[allow(dead_code)]
     Slide,
 }
 
-/// The entity `grenade` (`CGrenade`): the fields of the C++ class the three grenades use.
+/// The entity `grenade` (`CGrenade`): thrown grenades and the planted C4.
 #[derive(Debug, Clone)]
 pub struct Grenade {
     think: Think,
@@ -129,6 +137,36 @@ pub struct Grenade {
     /// `m_iTeam`: the team id of the thrower when it threw (HE only), what
     /// `CBasePlayer::TakeDamage` compares with the victim's team.
     team: i32,
+    /// `m_bIsC4`: this entity is a planted C4.
+    pub(crate) is_c4: bool,
+    /// `m_bJustBlew`.
+    just_blew: bool,
+    /// `m_bStartDefuse`.
+    start_defuse: bool,
+    /// `m_flC4Blow`: server time the bomb detonates.
+    c4_blow: f32,
+    /// `m_flNextFreq`: next beep wave transition time.
+    next_freq: f32,
+    /// `m_flNextFreqInterval`: spacing between beep wave transitions.
+    next_freq_interval: f32,
+    /// `m_iCurWave`: beep wave index (0..=4).
+    cur_wave: i32,
+    /// `m_fAttenu`: attenuation of the current beep sound.
+    attenu: f32,
+    /// `m_sBeepName`: current beep sound sample.
+    beep_name: Option<&'static str>,
+    /// `m_flNextBeep`: server time of the next beep sound.
+    next_beep: f32,
+    /// `m_flNextBlink`: server time of the next `TE_GLOWSPRITE` LED blink.
+    next_blink: f32,
+    /// `m_flDefuseCountDown`: server time defusal completes.
+    defuse_countdown: f32,
+    /// `m_fNextDefuse`: server time defusal aborts if the CT is no longer holding `+use`.
+    next_defuse: f32,
+    /// `m_pBombDefuser`: player slot currently defusing this bomb.
+    bomb_defuser: Option<u8>,
+    /// `m_pentCurBombTarget`: `func_bomb_target` under the bomb when planted.
+    cur_bomb_target: Option<EdictId>,
 }
 
 impl Default for Grenade {
@@ -145,6 +183,21 @@ impl Default for Grenade {
             sg_smoke: 0,
             angle: 0,
             team: 0,
+            is_c4: false,
+            just_blew: false,
+            start_defuse: false,
+            c4_blow: 0.0,
+            next_freq: 0.0,
+            next_freq_interval: 0.0,
+            cur_wave: 0,
+            attenu: 0.0,
+            beep_name: None,
+            next_beep: 0.0,
+            next_blink: 0.0,
+            defuse_countdown: 0.0,
+            next_defuse: 0.0,
+            bomb_defuser: None,
+            cur_bomb_target: None,
         }
     }
 }
@@ -424,6 +477,348 @@ impl Grenade {
         }
     }
 
+    /// `CGrenade::Detonate2`: the planted C4 goes off (`Explode2(&tr, DMG_BLAST)`).
+    fn detonate2(&mut self, g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId) {
+        if let Some(tr) = Self::trace_down(eng, id) {
+            self.explode2(g, eng, id, &tr, dmg::BLAST);
+        }
+    }
+
+    /// `CGrenade::Explode2(pTrace, bitsDamageType)` (`ggrenade.cpp` 99-250, vanilla):
+    /// shakes players on the ground within 3000 units, sets `m_bTargetBombed` / `m_bJustBlew` and
+    /// checks win conditions before pulling out of the wall and firing 4 `TE_SPRITE`s,
+    /// `weapons/c4_explode1.wav`, `CBaseMonster::RadiusDamage(m_flBombRadius)`, scorch decal,
+    /// debris sound, `Smoke2` 0.85 s later and sparks if out of water.
+    fn explode2(
+        &mut self,
+        g: &mut GameState,
+        eng: &mut EngineApi<'_>,
+        id: EdictId,
+        tr: &EntTrace,
+        bits: u32,
+    ) {
+        let Some(v) = eng.ent_mut(id) else {
+            return;
+        };
+        v.model.clear();
+        v.solid = SOLID_NOT;
+
+        screen_shake(g, eng, tr.trace.end_pos, 25.0, 150.0, 1.0, 3000.0);
+
+        self.just_blew = true;
+        crate::rules::on_bomb_exploded(g, eng);
+
+        // Pull out of the wall a bit.
+        if let Some(v) = eng.ent_mut(id)
+            && tr.trace.fraction != 1.0
+        {
+            v.origin = tr.trace.end_pos + (tr.trace.plane_normal * (v.dmg - 24.0) * 0.6);
+        }
+        let Some(v) = eng.ent(id) else {
+            return;
+        };
+        let (origin, owner, dmg_val) = (v.origin, v.owner, v.dmg);
+        let contents = eng.point_contents_ents(origin);
+        let scale = ((dmg_val - 275.0) * 0.6) as i32 as u8;
+
+        for (pos, spr, bright) in [
+            (origin - Vec3::new(0.0, 0.0, 10.0), "sprites/fexplo.spr", 150u8),
+            (
+                Vec3::new(
+                    origin.x + random_float(g, -512.0, 512.0),
+                    origin.y + random_float(g, -512.0, 512.0),
+                    origin.z + random_float(g, -10.0, 10.0),
+                ),
+                "sprites/eexplo.spr",
+                150,
+            ),
+            (
+                Vec3::new(
+                    origin.x + random_float(g, -512.0, 512.0),
+                    origin.y + random_float(g, -512.0, 512.0),
+                    origin.z + random_float(g, -10.0, 10.0),
+                ),
+                "sprites/fexplo.spr",
+                150,
+            ),
+            (
+                Vec3::new(
+                    origin.x + random_float(g, -512.0, 512.0),
+                    origin.y + random_float(g, -512.0, 512.0),
+                    origin.z + random_float(g, -10.0, 10.0),
+                ),
+                "sprites/zerogxplode.spr",
+                17,
+            ),
+        ] {
+            let te = tempent::sprite(pos, sprite(eng, spr), scale, bright);
+            eng.send_temp_entity(MsgDest::Pas(origin), &te);
+        }
+
+        // Sound! for everyone
+        eng.emit_sound(id, CHAN_WEAPON, "weapons/c4_explode1.wav", 1.0, 0.25, PITCH_NORM);
+
+        if let Some(v) = eng.ent_mut(id) {
+            v.owner = None;
+        }
+        let bomb_radius = g.rules.bomb_radius();
+        monster_radius_damage(g, eng, origin, id, owner, bomb_radius, bits);
+
+        Self::scorch(g, eng, tr);
+        // `flRndSound = RANDOM_FLOAT(0, 1)`: unused, but draws a number.
+        let _ = random_float(g, 0.0, 1.0);
+        let sample = match g.random_range(0, 2) {
+            0 => "weapons/debris1.wav",
+            1 => "weapons/debris2.wav",
+            _ => "weapons/debris3.wav",
+        };
+        eng.emit_sound(id, CHAN_VOICE, sample, 0.55, ATTN_NORM, PITCH_NORM);
+
+        if let Some(v) = eng.ent_mut(id) {
+            v.effects |= EF_NODRAW;
+            v.velocity = Vec3::ZERO;
+        }
+        self.set_think(Think::Smoke2);
+        schedule(eng, id, 0.85);
+
+        if contents != CONTENTS_WATER {
+            Self::spark_showers(g, eng, origin, tr.trace.plane_normal);
+        }
+    }
+
+    /// `CGrenade::DefuseBombStart(CBasePlayer *pPlayer)` (`ggrenade.cpp` 1027-1083).
+    fn defuse_bomb_start(&mut self, g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+        crate::player::freeze_max_speed(eng, slot);
+        let has_defuser = g
+            .players
+            .get(usize::from(slot))
+            .and_then(Option::as_ref)
+            .is_some_and(|p| p.has_defuser);
+        let now = now_f32(eng);
+        let (msg, secs) = if has_defuser {
+            ("#Defusing_Bomb_With_Defuse_Kit", 5)
+        } else {
+            ("#Defusing_Bomb_Without_Defuse_Kit", 10)
+        };
+        client_print(eng, slot, HUD_PRINTCENTER, msg, &[]);
+        self.defuse_countdown = now + secs as f32;
+        crate::player::set_progress_bar_time(g, eng, slot, secs);
+
+        if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+            p.is_defusing = true;
+        }
+        self.bomb_defuser = Some(slot);
+        self.start_defuse = true;
+        self.next_defuse = now + NEXT_DEFUSE_TIME;
+
+        // Vanilla (`!REGAMEDLL_FIXES`): emits on the defuser's edict rather than the bomb.
+        let player_edict = eng.client_edict(slot);
+        eng.emit_sound(player_edict, CHAN_ITEM, "weapons/c4_disarm.wav", 1.0, ATTN_NORM, PITCH_NORM);
+    }
+
+    /// `CGrenade::DefuseBombEnd(CBasePlayer *pPlayer, bool bDefused)` (`ggrenade.cpp` 1087-1217).
+    fn defuse_bomb_end(
+        &mut self,
+        g: &mut GameState,
+        eng: &mut EngineApi<'_>,
+        id: EdictId,
+        slot: u8,
+        defused: bool,
+    ) {
+        let player_edict = eng.client_edict(slot);
+        if defused {
+            let alive = eng.ent(player_edict).is_some_and(|v| v.deadflag == DEAD_NO);
+            if alive {
+                crate::rules::broadcast(eng, "BOMBDEF");
+
+                let origin = eng.ent(id).map_or(Vec3::ZERO, |v| v.origin);
+                eng.emit_ambient_sound(
+                    id,
+                    origin,
+                    "weapons/c4_beep5.wav",
+                    0.0,
+                    ATTN_NONE,
+                    SND_FL_STOP as i32,
+                    0,
+                );
+                eng.emit_sound(
+                    player_edict,
+                    CHAN_WEAPON,
+                    "weapons/c4_disarmed.wav",
+                    1.0,
+                    ATTN_NORM,
+                    PITCH_NORM,
+                );
+                util_remove(eng, id);
+
+                self.just_blew = true;
+                crate::player::reset_max_speed(g, eng, slot);
+                if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+                    p.is_defusing = false;
+                }
+
+                eng.send_usermsg(
+                    MsgDest::All,
+                    &CsUserMsg::Scenario {
+                        active: false,
+                        sprite: String::new(),
+                        alpha: 0,
+                        flash: None,
+                    },
+                );
+
+                crate::rules::on_bomb_defused(g, eng);
+
+                if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+                    p.frags += 3;
+                }
+
+                eng.send_usermsg(MsgDest::All, &CsUserMsg::BombPickup);
+                g.rules.bomb_dropped = false;
+                self.bomb_defuser = None;
+                self.start_defuse = false;
+            } else {
+                // Vanilla (`!REGAMEDLL_FIXES`): no `SetProgressBarTime(0)` when defuser died.
+                crate::player::reset_max_speed(g, eng, slot);
+                if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+                    p.is_defusing = false;
+                }
+                self.start_defuse = false;
+                self.bomb_defuser = None;
+            }
+        } else {
+            let on_ground = eng.ent(player_edict).is_some_and(|v| v.flags & FL_ONGROUND != 0);
+            if !on_ground {
+                client_print(eng, slot, HUD_PRINTCENTER, "#C4_Defuse_Must_Be_On_Ground", &[]);
+            }
+            crate::player::reset_max_speed(g, eng, slot);
+            if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+                p.is_defusing = false;
+            }
+            crate::player::set_progress_bar_time(g, eng, slot, 0);
+            self.bomb_defuser = None;
+            self.start_defuse = false;
+            self.defuse_countdown = 0.0;
+        }
+    }
+
+    /// `CGrenade::C4Think()` (`ggrenade.cpp` 1403-1591, vanilla).
+    fn c4_think(&mut self, g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId) {
+        let Some((origin, velocity, owner, waterlevel)) =
+            eng.ent(id).map(|v| (v.origin, v.velocity, v.owner, v.waterlevel))
+        else {
+            return;
+        };
+        if !is_in_world(origin, velocity) {
+            util_remove(eng, id);
+            return;
+        }
+
+        // Vanilla (`!REGAMEDLL_FIXES`): 0.12 s think interval.
+        schedule(eng, id, 0.12);
+        let now = now_f32(eng);
+
+        if now >= self.next_freq {
+            self.next_freq = now + self.next_freq_interval;
+            self.next_freq_interval *= 0.9;
+            match self.cur_wave {
+                0 => {
+                    self.beep_name = Some("weapons/c4_beep1.wav");
+                    self.attenu = 1.5;
+                }
+                1 => {
+                    self.beep_name = Some("weapons/c4_beep2.wav");
+                    self.attenu = 1.0;
+                }
+                2 => {
+                    self.beep_name = Some("weapons/c4_beep3.wav");
+                    self.attenu = 0.8;
+                }
+                3 => {
+                    self.beep_name = Some("weapons/c4_beep4.wav");
+                    self.attenu = 0.5;
+                }
+                4 => {
+                    self.beep_name = Some("weapons/c4_beep5.wav");
+                    self.attenu = 0.2;
+                }
+                _ => {}
+            }
+            self.cur_wave += 1;
+        }
+
+        if now >= self.next_beep {
+            self.next_beep = now + 1.4;
+            if let Some(sample) = self.beep_name {
+                eng.emit_sound(id, CHAN_VOICE, sample, 1.0, self.attenu, PITCH_NORM);
+            }
+        }
+
+        if now >= self.next_blink {
+            self.next_blink = now + 2.0;
+            let glow = sprite(eng, "sprites/ledglow.spr");
+            let te = tempent::glow_sprite(origin + Vec3::new(0.0, 0.0, 5.0), glow, 1, 3, 255);
+            eng.send_temp_entity(MsgDest::Pvs(origin), &te);
+        }
+
+        // Vanilla (`!REGAMEDLL_FIXES`): ignores ongoing defusal; fires target before `Detonate2`,
+        // and silently deletes the bomb if underwater.
+        if now >= self.c4_blow {
+            eng.send_usermsg(
+                MsgDest::All,
+                &CsUserMsg::Scenario {
+                    active: false,
+                    sprite: String::new(),
+                    alpha: 0,
+                    flash: None,
+                },
+            );
+
+            if let Some(target) = self.cur_bomb_target {
+                use_entity(g, eng, target, owner, Some(id), UseType::Toggle, 0.0);
+            }
+
+            if let Some(owner_slot) = owner.and_then(|o| player_slot(g, eng, o))
+                && let Some(owner_player) = g.players[owner_slot].as_mut()
+            {
+                owner_player.frags += 3;
+            }
+
+            eng.send_usermsg(MsgDest::All, &CsUserMsg::BombPickup);
+            g.rules.bomb_dropped = false;
+
+            if waterlevel != 0 {
+                util_remove(eng, id);
+            } else {
+                self.set_think(Think::Detonate2);
+            }
+        }
+
+        if self.start_defuse
+            && let Some(defuser_slot) = self.bomb_defuser
+        {
+            if g.players
+                .get(usize::from(defuser_slot))
+                .is_none_or(Option::is_none)
+            {
+                self.start_defuse = false;
+                self.bomb_defuser = None;
+                self.defuse_countdown = 0.0;
+                return;
+            }
+            let player_edict = eng.client_edict(defuser_slot);
+            if now < self.defuse_countdown {
+                let on_ground =
+                    eng.ent(player_edict).is_some_and(|v| v.flags & FL_ONGROUND != 0);
+                if now > self.next_defuse || !on_ground {
+                    self.defuse_bomb_end(g, eng, id, defuser_slot, false);
+                }
+            } else {
+                self.defuse_bomb_end(g, eng, id, defuser_slot, true);
+            }
+        }
+    }
+
     /// `CGrenade::Detonate3`: the HE grenade goes off (`Explode3(&tr, DMG_EXPLOSION)`).
     fn detonate3(&mut self, g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId) {
         if let Some(tr) = Self::trace_down(eng, id) {
@@ -687,12 +1082,44 @@ impl GameEntity for Grenade {
         "grenade"
     }
 
+    fn object_caps(&self) -> i32 {
+        if self.is_c4 { FCAP_CONTINUOUS_USE } else { 0 }
+    }
+
+    fn use_(
+        &mut self,
+        g: &mut GameState,
+        eng: &mut EngineApi<'_>,
+        _id: EdictId,
+        activator: Option<EdictId>,
+        _caller: Option<EdictId>,
+        _use_type: UseType,
+        _value: f32,
+    ) {
+        if !self.is_c4 {
+            return;
+        }
+        let Some(slot) = activator.and_then(|a| player_slot(g, eng, a)) else {
+            return;
+        };
+        if g.players[slot].as_ref().is_none_or(|p| p.team != Team::Ct) {
+            return;
+        }
+        if self.start_defuse {
+            // Vanilla (`!REGAMEDLL_FIXES`): any CT using the bomb refreshes `next_defuse`.
+            self.next_defuse = now_f32(eng) + NEXT_DEFUSE_TIME;
+            return;
+        }
+        self.defuse_bomb_start(g, eng, slot as u8);
+    }
+
     fn think(&mut self, g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId) {
         match self.think {
             Think::None => {}
             Think::Tumble => self.tumble_think(eng, id),
             Think::SgTumble => self.sg_tumble_think(eng, id),
             Think::Detonate => self.detonate(g, eng, id),
+            Think::Detonate2 => self.detonate2(g, eng, id),
             Think::Detonate3 => self.detonate3(g, eng, id),
             Think::SgDetonate => self.sg_detonate(g, eng, id),
             Think::SgSmoke => self.sg_smoke(g, eng, id),
@@ -701,6 +1128,7 @@ impl GameEntity for Grenade {
             Think::Smoke3C => Self::smoke3_c(g, eng, id),
             Think::Smoke3B => self.smoke3_ab(g, eng, id, true),
             Think::Smoke3A => self.smoke3_ab(g, eng, id, false),
+            Think::C4 => self.c4_think(g, eng, id),
         }
     }
 
@@ -899,6 +1327,128 @@ pub(crate) fn shoot_smoke_grenade(
         }),
     );
     Some(id)
+}
+
+/// `CGrenade::ShootSatchelCharge(pevOwner, vecStart, vecAngles)` (`ggrenade.cpp` 1268-1334):
+/// spawns the planted C4 as a `"grenade"` entity using `models/w_c4.mdl` with a fuse of
+/// `CSGameRules()->m_iC4Timer`.
+pub(crate) fn shoot_satchel_charge(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    owner: EdictId,
+    start: Vec3,
+    angles: Vec3,
+) -> Option<EdictId> {
+    let id = eng.create_entity("grenade")?;
+    let c4_timer = g.rules.c4_timer;
+    let now = now_f32(eng);
+    let cur_bomb_target = player_slot(g, eng, owner)
+        .and_then(|s| g.players[s].as_ref())
+        .and_then(|p| p.cur_bomb_target);
+    if let Some(v) = eng.ent_mut(id) {
+        v.movetype = MOVETYPE_TOSS;
+        v.solid = SOLID_BBOX;
+        v.dmg = 100.0;
+        v.velocity = Vec3::ZERO;
+        v.angles = angles;
+        v.owner = Some(owner);
+        v.spawnflags = SF_DETONATE;
+        v.friction = 0.9;
+    }
+    eng.set_model(id, "models/w_c4.mdl");
+    eng.set_size(id, Vec3::new(-3.0, -6.0, 0.0), Vec3::new(3.0, 6.0, 8.0));
+    eng.set_origin(id, start);
+    schedule(eng, id, 0.1);
+    attach(
+        eng,
+        id,
+        Box::new(Grenade {
+            think: Think::C4,
+            touch: Touch::None,
+            c4_blow: now + c4_timer as f32,
+            next_freq_interval: (c4_timer / 4) as f32,
+            next_freq: now,
+            cur_wave: 0,
+            attenu: 0.0,
+            beep_name: None,
+            next_beep: now + 0.5,
+            is_c4: true,
+            next_defuse: 0.0,
+            start_defuse: false,
+            next_blink: now + 2.0,
+            just_blew: false,
+            cur_bomb_target,
+            ..Grenade::default()
+        }),
+    );
+    Some(id)
+}
+
+/// `UTIL_ScreenShake(center, amplitude, frequency, duration, radius)` (`util.cpp` 497-539):
+/// shakes every player standing on the ground within `radius` (or all grounded players if
+/// `radius <= 0`).
+fn screen_shake(
+    g: &GameState,
+    eng: &mut EngineApi<'_>,
+    center: Vec3,
+    amplitude: f32,
+    frequency: f32,
+    duration: f32,
+    radius: f32,
+) {
+    let fixed =
+        |val: f32, scale: i32| (f64::from(val) * f64::from(scale)).clamp(0.0, 65535.0) as u16;
+    let dur = fixed(duration, 1 << 12);
+    let freq = fixed(frequency, 1 << 8);
+    for (slot, slot_entry) in g.players.iter().enumerate() {
+        if slot_entry.is_none() {
+            continue;
+        }
+        let Some(v) = eng.ent(eng.client_edict(slot as u8)) else {
+            continue;
+        };
+        if v.flags & FL_ONGROUND == 0 {
+            continue;
+        }
+        let local_amp = if radius > 0.0 {
+            if (center - v.origin).length() < radius { amplitude } else { 0.0 }
+        } else {
+            amplitude
+        };
+        if local_amp != 0.0 {
+            eng.send_usermsg(
+                MsgDest::One(slot as u8),
+                &CsUserMsg::ScreenShake {
+                    amplitude: fixed(local_amp, 1 << 12),
+                    duration: dur,
+                    frequency: freq,
+                },
+            );
+        }
+    }
+}
+
+/// `CBaseMonster::RadiusDamage(pevInflictor, pevAttacker, flDamage, iClassIgnore,
+/// bitsDamageType)` (`basemonster.cpp` 553-559): if `damage > 80`, runs [`radius_damage`] with
+/// radius `damage * 3.5`; otherwise runs [`radius_damage2`] with radius `damage * (RANDOM_FLOAT(0.5, 1.5) + 3)`.
+#[allow(clippy::too_many_arguments)]
+fn monster_radius_damage(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    origin: Vec3,
+    inflictor: EdictId,
+    attacker: Option<EdictId>,
+    damage: f32,
+    bits: u32,
+) {
+    if damage > 80.0 {
+        let radius = (f64::from(damage) * 3.5) as f32;
+        radius_damage(g, eng, origin, Some(inflictor), None, attacker, damage, radius, bits);
+    } else {
+        let mult = random_float(g, 0.5, 1.5) + 3.0;
+        let radius = (f64::from(damage) * f64::from(mult)) as f32;
+        radius_damage2(g, eng, origin, Some(inflictor), attacker, damage, radius, bits);
+    }
 }
 
 // ---- combat.cpp ----

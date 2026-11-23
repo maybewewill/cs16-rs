@@ -174,8 +174,16 @@ pub struct Rules {
     /// `m_bTCantBuy`: the terrorists may not buy (`info_map_parameters`).
     t_cant_buy: bool,
     /// `m_flBombRadius`: 500 unless `info_map_parameters` says otherwise. The bomb's explosion
-    /// takes it as its damage and 3.5 times it as its radius (task 4).
+    /// takes it as its damage and 3.5 times it as its radius (`CBaseMonster::RadiusDamage`).
     bomb_radius: f32,
+    /// `m_bBombDropped`: the C4 is lying dropped on the ground.
+    pub bomb_dropped: bool,
+    /// `m_bTargetBombed`: the planted C4 exploded this round.
+    pub target_bombed: bool,
+    /// `m_bBombDefused`: the planted C4 was defused this round.
+    pub bomb_defused: bool,
+    /// `m_iC4Timer`: seconds from plant to detonation (`mp_c4timer`, clamped 10..=90).
+    pub c4_timer: i32,
 }
 
 impl Default for Rules {
@@ -220,6 +228,10 @@ impl Default for Rules {
             ct_cant_buy: false,
             t_cant_buy: false,
             bomb_radius: 500.0,
+            bomb_dropped: false,
+            target_bombed: false,
+            bomb_defused: false,
+            c4_timer: 45,
         }
     }
 }
@@ -302,6 +314,15 @@ impl Rules {
         } else if limit < 0 {
             eng.set_cvar("mp_limitteams", "0");
         }
+        let mut c4_timer = eng.cvar_f32("mp_c4timer") as i32;
+        if c4_timer > 90 {
+            eng.set_cvar("mp_c4timer", "90");
+            c4_timer = 90;
+        } else if c4_timer < 10 {
+            eng.set_cvar("mp_c4timer", "10");
+            c4_timer = 10;
+        }
+        self.c4_timer = c4_timer;
     }
 
     /// The round economy (`m_iAccountCT`, `m_iNumConsecutiveCTLoses`, `m_iLoserBonus`, ...).
@@ -446,7 +467,7 @@ fn update_team_scores(g: &GameState, eng: &mut EngineApi<'_>) {
 }
 
 /// `Broadcast`: the radio sentence `%!MRAD_<sentence>` to everyone (`SendAudio`).
-fn broadcast(eng: &mut EngineApi<'_>, sentence: &str) {
+pub(crate) fn broadcast(eng: &mut EngineApi<'_>, sentence: &str) {
     eng.send_usermsg(
         MsgDest::Broadcast,
         &CsUserMsg::SendAudio {
@@ -1024,7 +1045,27 @@ pub(crate) fn restart_round(g: &mut GameState, eng: &mut EngineApi<'_>) {
     rules.restart_round_time = 0.0;
     rules.economy.clear_accounts();
     rules.round_win_status = WinStatus::None;
+    rules.bomb_dropped = false;
+    rules.target_bombed = false;
+    rules.bomb_defused = false;
     rules.complete_reset = false;
+}
+
+/// Hook called when the C4 is planted (`CGrenade::ShootSatchelCharge` / `CC4::PrimaryAttack`).
+pub(crate) fn on_bomb_planted(g: &mut GameState, _eng: &mut EngineApi<'_>) {
+    g.rules.bomb_dropped = false;
+}
+
+/// Hook called when the planted C4 explodes (`CGrenade::Explode2`).
+pub(crate) fn on_bomb_exploded(g: &mut GameState, eng: &mut EngineApi<'_>) {
+    g.rules.target_bombed = true;
+    check_win_conditions(g, eng);
+}
+
+/// Hook called when the planted C4 is defused (`CGrenade::DefuseBombEnd`).
+pub(crate) fn on_bomb_defused(g: &mut GameState, eng: &mut EngineApi<'_>) {
+    g.rules.bomb_defused = true;
+    check_win_conditions(g, eng);
 }
 
 // ---- the end of the match ----

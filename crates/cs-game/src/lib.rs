@@ -558,6 +558,42 @@ impl CsGame {
         }
     }
 
+    /// Gives `weapon_c4` to `slot` and marks `has_c4 = true` / backpack body = 1. For tests
+    /// only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn test_give_c4(&mut self, eng: &mut EngineApi<'_>, slot: u8) -> bool {
+        let already = self
+            .state
+            .players
+            .get(usize::from(slot))
+            .and_then(Option::as_ref)
+            .is_some_and(|p| p.find_item(weapons::WeaponId::C4).is_some());
+        if !already && !inventory::give_named_item(&mut self.state, eng, slot, "weapon_c4") {
+            return false;
+        }
+        if let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+            p.has_c4 = true;
+            if let Ok(i) = usize::try_from(weapons::ammo_index("C4")) {
+                p.ammo[i] = 1;
+            }
+        }
+        if let Some(v) = eng.ent_mut(eng.client_edict(slot)) {
+            v.body = 1;
+        }
+        buy::set_bomb_icon(&self.state, eng, slot, false);
+        true
+    }
+
+    /// Sets `m_bHasDefuser` of the player of `slot`. For tests only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn test_set_defuser(&mut self, slot: u8, has: bool) {
+        if let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+            p.has_defuser = has;
+        }
+    }
+
     /// Runs `ResetMaxSpeed` of the player of `slot`. For tests only (cargo feature `test-hooks`).
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]

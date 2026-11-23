@@ -333,8 +333,16 @@ pub struct Player {
     pub(crate) next_attack: f32,
     /// `m_bCanShoot`.
     pub(crate) can_shoot: bool,
-    /// `m_bIsDefusing` (the bomb is phase 2E).
-    pub(crate) is_defusing: bool,
+    /// `m_bIsDefusing`.
+    pub is_defusing: bool,
+    /// `m_progressStart`: server time the current progress bar started.
+    pub(crate) progress_start: f32,
+    /// `m_progressEnd`: server time the current progress bar finishes.
+    pub(crate) progress_end: f32,
+    /// `m_bKilledByBomb`: killed by a planted C4 explosion (`DMG_BLAST`).
+    pub(crate) killed_by_bomb: bool,
+    /// `m_bKilledByGrenade`: killed by an HE grenade (`DMG_EXPLOSION`).
+    pub(crate) killed_by_grenade: bool,
     /// `m_bOwnsShield` (the shield is Task 12).
     pub(crate) owns_shield: bool,
     /// `m_bShieldDrawn`.
@@ -417,9 +425,10 @@ pub struct Player {
     pub(crate) signals: crate::buy::Signals,
     /// `m_tmHandleSignals`: server time `HandleSignals` runs next.
     pub(crate) next_handle_signals: f64,
-    /// `m_bHasC4`: the player carries the bomb (the C4 weapon and its handing out are 2E,
-    /// tasks 4 and 5; the zones and the icons already read the flag).
+    /// `m_bHasC4`: the player carries the bomb.
     pub has_c4: bool,
+    /// `m_bHasDefuser`: the player carries a defusal kit (`item_thighpack`).
+    pub has_defuser: bool,
     /// `m_pentCurBombTarget`: the `func_bomb_target` the player's last touch was in (set by
     /// [`crate::zones::BombTarget`]'s touch, cleared by `Spawn`).
     pub cur_bomb_target: Option<EdictId>,
@@ -513,6 +522,10 @@ impl Player {
             next_attack: 0.0,
             can_shoot: false,
             is_defusing: false,
+            progress_start: 0.0,
+            progress_end: 0.0,
+            killed_by_bomb: false,
+            killed_by_grenade: false,
             owns_shield: false,
             shield_drawn: false,
             resume_zoom: false,
@@ -552,6 +565,7 @@ impl Player {
             signals: Default::default(),
             next_handle_signals: 0.0,
             has_c4: false,
+            has_defuser: false,
             cur_bomb_target: None,
             escaped: false,
             is_vip: false,
@@ -726,7 +740,7 @@ fn spawn_on_connect(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     eng.set_view(eng.client_edict(slot), eng.client_edict(slot));
     send_room_type(eng, slot);
     crate::hud_misc::on_spawn(g, eng, slot);
-    eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::BarTime(0));
+    set_progress_bar_time(g, eng, slot, 0);
     messages::set_scoreboard_attributes_alive(g, eng, usize::from(slot));
     let id = eng.client_edict(slot);
     if let Some(p) = g.players[usize::from(slot)].as_ref() {
@@ -1005,6 +1019,7 @@ pub(crate) fn spawn(
         p.armor = 0.0;
         p.kevlar = ArmorType::None;
         p.has_night_vision = false;
+        p.has_defuser = false;
         // `Spawn` (player.cpp:6030-6039) starts the client's cached `m_iClientHideHUD` over
         // only for a player killed before (or under `REGAMEDLL_FIXES`, not vanilla), so a
         // joiner's first update sends no `HideWeapon`.
@@ -1042,6 +1057,11 @@ pub(crate) fn spawn(
     p.cur_bomb_target = None;
     p.has_c4 = false;
     p.escaped = false;
+    p.is_defusing = false;
+    p.progress_start = 0.0;
+    p.progress_end = 0.0;
+    p.killed_by_bomb = false;
+    p.killed_by_grenade = false;
     p.chat.on_spawn();
     // `PlayerSpawn`: `pev->weapons |= (1 << WEAPON_SUIT)`.
     p.weapons |= 1 << WEAPON_SUIT;
@@ -1123,7 +1143,7 @@ pub(crate) fn spawn(
     crate::inventory::on_spawn_equip(g, eng, slot, lost_items);
     // `m_bNotKilled = true; m_bIsDefusing = false;` and "get rid of the progress bar":
     // `SetProgressBarTime(0)` (player.cpp:6085-6092, read 2026-11-22), before `ResetMaxSpeed`.
-    eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::BarTime(0));
+    set_progress_bar_time(g, eng, slot, 0);
     reset_max_speed(g, eng, slot);
     if let Some(p) = g.players[index].as_mut() {
         p.num_spawns += 1;
@@ -1172,6 +1192,75 @@ pub(crate) fn apply_max_speed(g: &GameState, eng: &mut EngineApi<'_>, slot: u8, 
         } else {
             item.unwrap_or(NO_ITEM_MAX_SPEED)
         };
+    }
+}
+
+/// `SET_CLIENT_MAXSPEED(edict, 1.0)`: freezes the player while planting or defusing.
+pub(crate) fn freeze_max_speed(eng: &mut EngineApi<'_>, slot: u8) {
+    let id = eng.client_edict(slot);
+    if let Some(v) = eng.ent_mut(id) {
+        v.max_speed = FROZEN_MAX_SPEED;
+    }
+}
+
+/// `CBasePlayer::SetProgressBarTime(int time)` (`player.cpp` 1958-1995): sets the progress
+/// bar countdown and sends `BarTime` to the player and every first-person observer (`OBS_IN_EYE`).
+pub(crate) fn set_progress_bar_time(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    slot: u8,
+    time: i32,
+) {
+    let now = eng.time() as f32;
+    if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+        if time != 0 {
+            p.progress_start = now;
+            p.progress_end = time as f32 + now;
+        } else {
+            p.progress_start = 0.0;
+            p.progress_end = 0.0;
+        }
+    }
+    let bar = time.clamp(0, i32::from(u16::MAX)) as u16;
+    eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::BarTime(bar));
+    for observer in crate::hud_misc::followers(g, eng, slot) {
+        eng.send_usermsg(MsgDest::One(observer), &CsUserMsg::BarTime(bar));
+    }
+}
+
+/// `CBasePlayer::SetProgressBarTime2(int time, float timeElapsed)` (`player.cpp` 1997-2039).
+#[allow(dead_code)]
+pub(crate) fn set_progress_bar_time2(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    slot: u8,
+    time: i32,
+    elapsed: f32,
+) {
+    let now = eng.time() as f32;
+    let mut time_elapsed = elapsed;
+    let (start, end) = if time != 0 {
+        (now - time_elapsed, time as f32 + now - time_elapsed)
+    } else {
+        time_elapsed = 0.0;
+        (0.0, 0.0)
+    };
+    if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+        p.progress_start = start;
+        p.progress_end = end;
+    }
+    let pct = if end != start {
+        (f64::from(time_elapsed) * 100.0 / f64::from(end - start)) as i16
+    } else {
+        0
+    };
+    let msg = CsUserMsg::BarTime2 {
+        duration: time.clamp(0, i32::from(u16::MAX)) as u16,
+        start_percent: pct as u16,
+    };
+    eng.send_usermsg(MsgDest::One(slot), &msg);
+    for observer in crate::hud_misc::followers(g, eng, slot) {
+        eng.send_usermsg(MsgDest::One(observer), &msg);
     }
 }
 
@@ -2202,6 +2291,12 @@ pub(crate) fn take_damage_with(
         if g.players[index].as_ref().is_some_and(|p| p.health > damage) {
             player_anim::set_animation(g, eng, slot, PlayerAnim::Flinch);
             pain(g, eng, slot, hit_group, false);
+        } else if let Some(p) = g.players[index].as_mut() {
+            if bits & dmg::BLAST != 0 {
+                p.killed_by_bomb = true;
+            } else if bits & dmg::EXPLOSION != 0 {
+                p.killed_by_grenade = true;
+            }
         }
         let took = monster_take_damage(
             g,
@@ -2464,7 +2559,11 @@ fn killed(
         return;
     }
     // `PlayerKilled` with `DeathNotice`: the death notice, deaths, frags, money, scoreboard.
-    score::player_killed(g, eng, slot, attacker, inflictor, attacker_weapon);
+    // Vanilla (`player.cpp:2317`): a player killed by the C4 blast gets no `PlayerKilled`.
+    let killed_by_bomb = g.players[index].as_ref().is_some_and(|p| p.killed_by_bomb);
+    if !killed_by_bomb {
+        score::player_killed(g, eng, slot, attacker, inflictor, attacker_weapon);
+    }
     // `NVGToggle 0` to the player and to the observers that watch it in first person.
     observer::killed_night_vision(g, eng, slot);
     // `SetAnimation(PLAYER_DIE)` (player.cpp:2360): the death sequence, and (vanilla) a first

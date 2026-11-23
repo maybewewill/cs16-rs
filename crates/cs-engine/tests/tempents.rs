@@ -142,9 +142,19 @@ fn te_builders_match_the_wire_layout() {
             te::WORLDDECALHIGH,
             with_pos(&[3]),
         ),
+        (
+            tempent::sprite(POS, 0x0102, 151, 150),
+            te::SPRITE,
+            with_pos(&[0x02, 0x01, 151, 150]),
+        ),
+        (
+            tempent::glow_sprite(POS, 0x0304, 1, 3, 255),
+            te::GLOWSPRITE,
+            with_pos(&[0x04, 0x03, 1, 3, 255]),
+        ),
     ];
     // The numbers of `const.h`.
-    let numbers = [2, 9, 3, 5, 22, 27, 25, 115, 101, 109, 104, 118, 116, 117];
+    let numbers = [2, 9, 3, 5, 22, 27, 25, 115, 101, 109, 104, 118, 116, 117, 17, 23];
     assert_eq!(cases.len(), numbers.len());
     for ((built, want_type, want_payload), number) in cases.iter().zip(numbers) {
         assert_eq!(built.te_type, number);

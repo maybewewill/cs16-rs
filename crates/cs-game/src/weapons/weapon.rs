@@ -311,32 +311,11 @@ impl WeaponBehavior for Vacant {
     }
 }
 
-/// Defines the placeholder behaviour of a weapon a later task fills in: a `Clone` struct whose
-/// `deploy` refuses. `$task` is the task that replaces it.
-macro_rules! stub_weapon {
-    ($(#[$meta:meta])* $name:ident, $id:expr, $task:literal) => {
-        $(#[$meta])*
-        #[doc = concat!("stub: Task ", $task)]
-        #[derive(Debug, Clone, Default)]
-        pub struct $name;
-
-        impl $crate::weapons::weapon::WeaponBehavior for $name {
-            fn id(&self) -> $crate::weapons::info::WeaponId {
-                $id
-            }
-            fn deploy(&mut self, _w: &mut $crate::weapons::core::WeaponCtx<'_, '_>) -> bool {
-                false
-            }
-        }
-    };
-}
-pub(crate) use stub_weapon;
-
 /// The behaviour of weapon `id`: every real weapon of the game (the 25 guns, the knife, the
 /// three grenades, and the C4), the stub of it until its task fills it in. `None` for ids that
 /// are not weapons (`WEAPON_NONE`, the unused `WEAPON_GLOCK`, the shield).
 pub fn new_weapon(id: WeaponId) -> Option<Box<dyn WeaponBehavior>> {
-    use super::{grenades, knife, pistols, rifles, shotguns, smgs, snipers};
+    use super::{c4, grenades, knife, pistols, rifles, shotguns, smgs, snipers};
     use WeaponId::*;
     Some(match id {
         P228 => Box::new(pistols::P228),
@@ -367,7 +346,7 @@ pub fn new_weapon(id: WeaponId) -> Option<Box<dyn WeaponBehavior>> {
         HeGrenade => Box::new(grenades::HeGrenade),
         Flashbang => Box::new(grenades::Flashbang),
         SmokeGrenade => Box::new(grenades::SmokeGrenade),
-        C4 => Box::new(grenades::C4),
+        C4 => Box::new(c4::C4::default()),
         WeaponId::None | Glock | ShieldGun => return Option::None,
     })
 }

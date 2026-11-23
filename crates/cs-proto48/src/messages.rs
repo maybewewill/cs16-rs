@@ -1161,10 +1161,10 @@ fn skip_temp_entity(r: &mut MsgReader<'_>) -> Result<(u8, Vec<u8>), ProtoError> 
         2 | 4 | 9 | 10 | 11 => {
             let _ = r.read_bytes(6)?;
         }
-        3 => {
+        3 | 23 => {
             let _ = r.read_bytes(11)?;
         }
-        5 | 17 | 23 => {
+        5 | 17 => {
             let _ = r.read_bytes(10)?;
         }
         6 | 102 => {
