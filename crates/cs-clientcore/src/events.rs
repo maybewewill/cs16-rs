@@ -17,9 +17,8 @@
 //! read 2026-11-23), whose per-weapon constants - the sounds, the animation numbers, the shell
 //! offsets, the bullet type and the penetration - are the table [`WEAPONS`]. The helpers those
 //! files call live in Valve-licensed files that may not be ported, so the shell's placement and
-//! ejection and the gun position are placeholders marked `clean-room replacement pending
-//! (phase 3 T6b)`. The impacts of the bullets (decals, smoke, penetration) need a trace against
-//! the map and the players, which is the shell's: [`BulletFire`] carries the call's arguments.
+//! ejection and the gun position are our own clean-room design (`gun_position`, `eject_shell`). The impacts of the bullets (decals, smoke,
+//! penetration) need a trace against the map and the players, which is the shell's: [`BulletFire`] carries the call's arguments.
 
 use std::collections::BTreeMap;
 
@@ -491,7 +490,6 @@ enum Spread {
 }
 
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // clean-room placement pending (phase 3 T6b)
 struct Shell {
     model: &'static str,
     /// (forward, up, right) offsets for the local player, left- and right-handed.
@@ -731,6 +729,55 @@ pub fn angle_vectors(angles: Vec3) -> (Vec3, Vec3, Vec3) {
     (forward, right, up)
 }
 
+/// Height of the eye of a ducking player above its origin (ours, from [`DEFAULT_VIEWHEIGHT`]).
+pub const DUCK_VIEWHEIGHT: f32 = 12.0;
+
+/// Where the muzzle side of a player's gun is: the eye. The local player's eye is its predicted
+/// `view_ofs`; any other player's is the origin plus the standard eye height. Our own design.
+pub fn gun_position(origin: Vec3, local: bool, ducking: bool, env: &FxEnv) -> Vec3 {
+    if local {
+        origin + env.local_view_ofs
+    } else {
+        let h = if ducking { DUCK_VIEWHEIGHT } else { DEFAULT_VIEWHEIGHT };
+        origin + Vec3::new(0.0, 0.0, h)
+    }
+}
+
+/// The ejection of a shell, clean-room: it starts at `eye` moved by the weapon's
+/// `[forward, up, right]` offsets (from the GPL-2+ event files) and leaves with the player's
+/// velocity plus a push of our own choosing, to the side of the offset (right for a right-hand
+/// gun), upwards and a little along the aim: side 50..100, up 100..150, forward -20..20 units
+/// per second.
+fn eject_shell(
+    shell: &Shell,
+    offsets: [f32; 3],
+    eye: Vec3,
+    (forward, right, up): (Vec3, Vec3, Vec3),
+    env: &FxEnv,
+    local: bool,
+    rng: &mut FxRandom,
+) -> ShellEject {
+    let [f, u, r] = offsets;
+    let side = if r < 0.0 { -1.0 } else { 1.0 };
+    let origin = eye + forward * f + up * u + right * r;
+    let base = if local { env.local_velocity } else { Vec3::ZERO };
+    let velocity = base
+        + right * (side * rng.float(50.0, 100.0))
+        + up * rng.float(100.0, 150.0)
+        + forward * rng.float(-20.0, 20.0);
+    ShellEject {
+        origin,
+        velocity,
+        yaw: rng.float(0.0, 360.0),
+        model: shell.model,
+        kind: if shell.model == SHOTGUN_SHELL {
+            te_bounce::SHOTSHELL
+        } else {
+            te_bounce::SHELL
+        },
+    }
+}
+
 /// A weapon script (`EV_Fire*`).
 fn fire(w: &Weapon, ev: &QueuedEvent, env: &FxEnv, rng: &mut FxRandom) -> WeaponFireFx {
     let a = &ev.args;
@@ -748,14 +795,7 @@ fn fire(w: &Weapon, ev: &QueuedEvent, env: &FxEnv, rng: &mut FxRandom) -> Weapon
     };
     let (forward, right, up) = angle_vectors(angles);
 
-    // clean-room replacement pending (phase 3 T6b)
-    // PLACEHOLDER: the eye of the local player is `clientdata.view_ofs`; another player's eye
-    // is taken at the origin. The real gun position, standing or ducking, is T6b's.
-    let eye = if local {
-        origin + env.local_view_ofs
-    } else {
-        origin
-    };
+    let eye = gun_position(origin, local, a.ducking != 0, env);
 
     let (view_anim, muzzle_flash) = if local {
         let seq = pick_anim(w, a, env, rng);
@@ -769,15 +809,10 @@ fn fire(w: &Weapon, ev: &QueuedEvent, env: &FxEnv, rng: &mut FxRandom) -> Weapon
         (None, false)
     };
 
-    // clean-room replacement pending (phase 3 T6b)
-    // PLACEHOLDER: the shell appears at the eye with no velocity of its own. The offsets in
-    // `Shell` (from the GPL-2+ event files) and the kinematics of its ejection are T6b's.
-    let shell = w.shell.map(|s| ShellEject {
-        origin: eye,
-        velocity: Vec3::ZERO,
-        yaw: angles.y,
-        model: s.model,
-        kind: te_bounce::SHELL,
+    let shell = w.shell.map(|s| {
+        // Another player's gun is always drawn on the right-hand side.
+        let offsets = if !local || env.right_hand { s.right } else { s.left };
+        eject_shell(&s, offsets, eye, (forward, right, up), env, local, rng)
     });
 
     let sound = Some(event_sound(pick_sound(w, a, env, rng), ev));
@@ -1021,13 +1056,16 @@ mod tests {
         let shell = fx.shell.as_ref().expect("an AK-47 ejects a shell");
         assert_eq!(shell.model, "models/rshell.mdl");
         assert_eq!(shell.kind, te_bounce::SHELL);
-        // The origin and the angles came from the entity; the shell is the placeholder at the
-        // eye (view height 17) with no velocity (T6b).
+        // The origin and the angles came from the entity; the shell leaves from the gun, which
+        // is the eye (view height 17) moved by the weapon's offsets (20 forward, 8 down, 10 to
+        // the left for a left-handed view).
         assert!((fired[0].args.origin - Vec3::new(100.0, 200.0, 50.0)).length() < 1e-3);
         let (forward, _right, _up) = angle_vectors(Vec3::new(1.5, 90.0 - 0.5, 0.0));
-        assert!((shell.origin - Vec3::new(100.0, 200.0, 67.0)).length() < 1e-3);
-        assert!((shell.yaw - 89.5).abs() < 1e-4);
-        assert_eq!(shell.velocity, Vec3::ZERO);
+        let eye = Vec3::new(100.0, 200.0, 67.0);
+        let (f, r, u) = (forward, _right, _up);
+        let expect = eye + f * 20.0 + u * -8.0 + r * -10.0;
+        assert!((shell.origin - expect).length() < 1e-3);
+        assert!(shell.velocity.length() > 50.0);
 
         let sound = fx.sound.as_ref().unwrap();
         assert!(sound.name.as_deref().unwrap().starts_with("weapons/ak47-"));
@@ -1058,9 +1096,10 @@ mod tests {
         assert!(!fx.local);
         assert!(fx.view_anim.is_none());
         assert!(!fx.muzzle_flash);
-        // The placeholder: at the other player's origin, no velocity.
+        // From the standard eye height above the other player's origin, to its right.
         let shell = fx.shell.as_ref().unwrap();
-        assert_eq!(shell.origin, Vec3::new(0.0, 0.0, 10.0));
+        assert!((shell.origin.z - (10.0 + DEFAULT_VIEWHEIGHT - 11.0)).abs() < 1e-3);
+        assert!(shell.velocity.length() > 50.0);
         assert_eq!(fired[0].args.angles, Vec3::ZERO);
     }
 
@@ -1375,5 +1414,38 @@ mod tests {
         let (f, _, u) = angle_vectors(Vec3::new(90.0, 0.0, 0.0));
         assert!((f - Vec3::NEG_Z).length() < 1e-6);
         assert!((u - Vec3::X).length() < 1e-6);
+    }
+
+    #[test]
+    fn shells_leave_to_the_right_of_a_right_handed_view() {
+        let precache = PrecacheTables::default();
+        let entities = BTreeMap::new();
+        let mut env = FxEnv::new(0.0, &precache, &entities, &NoWorld);
+        env.right_hand = true;
+        env.local_player = 1;
+        let w = WEAPONS.iter().find(|w| w.name == "ak47").unwrap();
+        let ev = QueuedEvent {
+            index: 1,
+            flags: 0,
+            fire_time: 0.0,
+            args: EventArgs {
+                entindex: 1,
+                origin: Vec3::ZERO,
+                angles: Vec3::new(0.0, 90.0, 0.0),
+                ..Default::default()
+            },
+            velocity: Vec3::ZERO,
+        };
+        let mut rng = FxRandom::new(5);
+        let fx = fire(w, &ev, &env, &mut rng);
+        let shell = fx.shell.unwrap();
+        let (_, right, _) = angle_vectors(Vec3::new(0.0, 90.0, 0.0));
+        assert!(shell.origin.dot(right) > 5.0);
+        assert!(shell.velocity.dot(right) > 40.0);
+        assert!(shell.velocity.z > 90.0);
+        // A left-handed view mirrors it.
+        env.right_hand = false;
+        let fx = fire(w, &ev, &env, &mut rng);
+        assert!(fx.shell.unwrap().velocity.dot(right) < -40.0);
     }
 }

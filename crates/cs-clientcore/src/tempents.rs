@@ -9,9 +9,12 @@
 //! - the dispatch of `CL_ParseTempEntity`, with the wire layouts read by
 //!   `cs_proto48::tempent::TempEffect`;
 //!
-//! In Xash3D the per-frame update is the game DLL's `HUD_TempEntUpdate` (cs16-client
-//! `cl_dll/entity.cpp`, a Valve-licensed file that may not be ported). [`TempEnts::update`] is
-//! a placeholder until a clean-room version is written (phase 3 T6b).
+//! In Xash3D the per-frame update belongs to the game DLL, which this crate does not port.
+//! [`TempEnts::update`] is a clean-room design, not the original client's code; behaviour
+//! tuned to look like the original: gravity, a swept move against [`FxWorld`], a bounce that
+//! keeps `bounce_factor` of the speed, a settle on near-horizontal floors, a hit sound at most
+//! once per bounce, a fade-out and the sprite animation. The constants of the physics (settle
+//! speed, fade window, sound throttle) are our own.
 //!
 //! Decals, dynamic lights, beams and particle bursts are not entities of the pool: they leave as
 //! [`RenderEffect`]s for the shell. Sprites and models need a frame count and a trace against
@@ -23,7 +26,7 @@ use cs_proto48::tempent::TempEffect;
 use glam::Vec3;
 
 use crate::precache::PrecacheTables;
-use crate::sound::{PITCH_NORM, SoundCommand, SoundQueue, SoundStart, chan};
+use crate::sound::{ATTN_NORM, PITCH_NORM, SoundCommand, SoundQueue, SoundStart, chan};
 
 /// The size of the pool (`GI->max_tents`; 500 is the default of Xash3D's game info,
 /// assumption).
@@ -250,6 +253,10 @@ pub struct TempEnt {
     pub late_fade: Option<(f64, f32)>,
     /// Removed when a new round starts (`events/decal_reset.sc`).
     pub round_scoped: bool,
+    /// Bounces so far (our own bookkeeping, for the hit sound).
+    pub bounces: u32,
+    /// Client time of the last hit sound.
+    pub last_hit_sound: f64,
 }
 
 impl TempEnt {
@@ -284,6 +291,8 @@ impl TempEnt {
             hit_sound: bounce::NONE,
             late_fade: None,
             round_scoped: false,
+            bounces: 0,
+            last_hit_sound: f64::NEG_INFINITY,
         }
     }
 
@@ -523,6 +532,8 @@ impl TempEnts {
             return false;
         };
         t.flags = ftent::COLLIDEWORLD | ftent::GRAVITY;
+        // Ours: a brass shell keeps half its speed in a bounce.
+        t.bounce_factor = SHELL_BOUNCE_FACTOR;
         t.velocity = velocity;
         t.angles = angles;
         match kind {
@@ -1270,29 +1281,31 @@ impl TempEnts {
 
     // ---- the per-frame update ----------------------------------------------------------
 
-    /// One step of every live entry.
-    ///
-    // clean-room replacement pending (phase 3 T6b)
-    /// PLACEHOLDER: this only advances the sprite frame and removes the entries whose time has
-    /// come. Gravity, bounces, fades, rotation and bounce sounds are the game DLL's
-    /// `HUD_TempEntUpdate`, which is Valve-licensed and must be written clean-room; until then
-    /// the entries keep their spawn velocity and angles unchanged.
+    /// One step of every live entry (clean-room design, not the original client's code;
+    /// behaviour tuned to look like the original).
     pub fn update(
         &mut self,
         clock: TempEntClock,
-        _world: &dyn FxWorld,
-        _rng: &mut FxRandom,
-        _sounds: &mut SoundQueue,
+        world: &dyn FxWorld,
+        rng: &mut FxRandom,
+        sounds: &mut SoundQueue,
     ) {
         let TempEntClock {
-            time, frametime, ..
+            time,
+            frametime,
+            gravity,
         } = clock;
+        let dt = if frametime.is_finite() {
+            frametime.max(0.0)
+        } else {
+            0.0
+        };
         self.active.retain_mut(|t| {
             if !t.has(ftent::PERSIST) && t.die < time {
                 return false;
             }
             if t.has(ftent::SPRANIMATE) && t.frame_max > 0 {
-                t.frame += frametime * t.framerate;
+                t.frame += dt * t.framerate;
                 if t.frame >= t.frame_max as f32 {
                     if t.has(ftent::SPRANIMATELOOP) {
                         t.frame -= t.frame.trunc();
@@ -1301,9 +1314,163 @@ impl TempEnts {
                     }
                 }
             }
+            if t.has(ftent::ROTATE) {
+                t.angles += t.angular_velocity * dt;
+            }
+            step_motion(t, time, dt, gravity, world, rng, sounds);
+            step_fade(t, time, dt);
             true
         });
     }
+}
+
+/// Seconds before `die` over which `FTENT_FADEOUT` ramps the opacity to 0 (ours).
+pub const FADE_WINDOW: f64 = 0.5;
+/// The share of speed a shell keeps in a bounce (ours).
+pub const SHELL_BOUNCE_FACTOR: f32 = 0.5;
+/// A floor needs at least this normal.z to hold a resting entry (ours; about 45 degrees).
+const FLOOR_NORMAL_Z: f32 = 0.7;
+/// Below this speed after a bounce on a floor, the entry settles (ours).
+const SETTLE_SPEED: f32 = 40.0;
+/// How far off the plane a bounced entry is put, so the next trace does not start inside it.
+const SURFACE_PUSH: f32 = 0.05;
+/// The least time between two hit sounds of one entry (ours).
+const HIT_SOUND_GAP: f64 = 0.08;
+
+fn step_fade(t: &mut TempEnt, time: f64, dt: f32) {
+    if t.has(ftent::FADEOUT) {
+        let remaining = (t.die - time).max(0.0);
+        if remaining < FADE_WINDOW {
+            let base = if t.base_render_amt > 0.0 {
+                t.base_render_amt
+            } else {
+                255.0
+            };
+            let target = base * (remaining / FADE_WINDOW) as f32;
+            t.render_amt = t.render_amt.min(target).max(0.0);
+        }
+    }
+    if let Some((start, rate)) = t.late_fade
+        && time >= start
+    {
+        t.render_amt = (t.render_amt - rate * dt).max(0.0);
+    }
+}
+
+fn step_motion(
+    t: &mut TempEnt,
+    time: f64,
+    dt: f32,
+    sv_gravity: f32,
+    world: &dyn FxWorld,
+    rng: &mut FxRandom,
+    sounds: &mut SoundQueue,
+) {
+    if dt <= 0.0 {
+        return;
+    }
+    if t.has(ftent::GRAVITY) {
+        t.velocity.z -= sv_gravity * dt;
+    } else if t.has(ftent::SLOWGRAVITY) {
+        t.velocity.z -= sv_gravity * 0.5 * dt;
+    }
+    if t.velocity == Vec3::ZERO {
+        return;
+    }
+    let target = t.origin + t.velocity * dt;
+    if !t.has(ftent::COLLIDEWORLD) {
+        t.origin = target;
+        return;
+    }
+    let Some(hit) = world.trace_line(t.origin, target) else {
+        t.origin = target;
+        return;
+    };
+    let normal = hit.normal.try_normalize().unwrap_or(Vec3::Z);
+    let fraction = hit.fraction.clamp(0.0, 1.0);
+    let impact_speed = t.velocity.length();
+    t.origin = (t.origin + (target - t.origin) * fraction) + normal * SURFACE_PUSH;
+    if t.has(ftent::COLLIDEKILL) {
+        t.die = time;
+        return;
+    }
+    let into = t.velocity.dot(normal);
+    let reflected = t.velocity - normal * (2.0 * into);
+    t.velocity = reflected * t.bounce_factor.max(0.0);
+    t.angular_velocity *= t.bounce_factor.clamp(0.0, 1.0);
+    t.bounces += 1;
+    play_hit_sound(t, impact_speed, time, rng, sounds);
+    if normal.z >= FLOOR_NORMAL_Z && t.velocity.length() < SETTLE_SPEED {
+        t.velocity = Vec3::ZERO;
+        t.angular_velocity = Vec3::ZERO;
+        t.flags &= !(ftent::GRAVITY | ftent::SLOWGRAVITY | ftent::ROTATE);
+    }
+}
+
+/// The files of each hit sound type are the stock game's (assumption).
+fn hit_sound_list(kind: u8) -> Option<&'static [&'static str]> {
+    Some(match kind {
+        bounce::GLASS => &["debris/glass1.wav", "debris/glass2.wav", "debris/glass3.wav"],
+        bounce::METAL => &["debris/metal1.wav", "debris/metal2.wav", "debris/metal3.wav"],
+        bounce::FLESH => &["debris/flesh1.wav", "debris/flesh2.wav", "debris/flesh3.wav"],
+        bounce::WOOD => &["debris/wood1.wav", "debris/wood2.wav", "debris/wood3.wav"],
+        bounce::SHRAP => &RICOCHET_SOUNDS,
+        bounce::CONCRETE => &[
+            "debris/concrete1.wav",
+            "debris/concrete2.wav",
+            "debris/concrete3.wav",
+        ],
+        bounce::SHELL => &[
+            "player/pl_shell1.wav",
+            "player/pl_shell2.wav",
+            "player/pl_shell3.wav",
+        ],
+        bounce::SHOTSHELL => &[
+            "weapons/sshell1.wav",
+            "weapons/sshell2.wav",
+            "weapons/sshell3.wav",
+        ],
+        _ => return None,
+    })
+}
+
+/// A hit sound at most once per bounce, and not more often than [`HIT_SOUND_GAP`]; a shell is
+/// always heard on its first bounce and then one time in three; the volume follows the speed.
+fn play_hit_sound(
+    t: &mut TempEnt,
+    impact_speed: f32,
+    time: f64,
+    rng: &mut FxRandom,
+    sounds: &mut SoundQueue,
+) {
+    let Some(list) = hit_sound_list(t.hit_sound) else {
+        return;
+    };
+    if time - t.last_hit_sound < HIT_SOUND_GAP || impact_speed < 20.0 {
+        return;
+    }
+    let shell = matches!(t.hit_sound, bounce::SHELL | bounce::SHOTSHELL);
+    let thin_out = if shell { t.bounces > 1 } else { true };
+    if thin_out && rng.long(0, 2) != 0 {
+        return;
+    }
+    t.last_hit_sound = time;
+    let base = if t.hit_sound == bounce::SHOTSHELL {
+        0.5
+    } else {
+        0.8
+    };
+    let volume = (base * (impact_speed / 350.0).min(1.0)).max(0.05);
+    let name = list[rng.long(0, list.len() as i32 - 1) as usize];
+    sounds.push(SoundCommand::Start(SoundStart::by_name(
+        name,
+        0,
+        chan::BODY,
+        t.origin,
+        volume,
+        ATTN_NORM,
+        PITCH_NORM,
+    )));
 }
 
 /// `R_RicochetSound`: `S_StartSound( pos, 0, CHAN_AUTO, handle, VOL_NORM, 1.0, 100, 0 )`.
@@ -1447,8 +1614,10 @@ mod tests {
         // Alive until `die`.
         ents.update(clock(100.9), &world, &mut rng, &mut sounds);
         assert_eq!(ents.active().len(), 1);
-        assert_eq!(ents.active()[0].render_amt, 255.0);
-        // Past `die` it is gone (the fade-out is part of the clean-room update, T6b).
+        // The last half second fades the glow.
+        assert!(ents.active()[0].render_amt < 255.0);
+        assert!(ents.active()[0].render_amt > 0.0);
+        // Past `die` it is gone.
         ents.update(clock(101.1), &world, &mut rng, &mut sounds);
         assert!(ents.active().is_empty());
     }
@@ -1628,7 +1797,7 @@ mod tests {
     }
 
     #[test]
-    fn a_shell_is_a_placeholder_that_keeps_its_spawn_state() {
+    fn a_shell_with_no_velocity_only_falls() {
         let world = Floor { frames: 1 };
         let mut ents = TempEnts::default();
         let mut rng = FxRandom::new(3);
@@ -1645,7 +1814,8 @@ mod tests {
             0.0,
         ));
         ents.update(clock(1.0), &world, &mut rng, &mut sounds);
-        assert_eq!(ents.active()[0].origin.z, 100.0);
+        assert!(ents.active()[0].origin.z < 100.0);
+        assert!(ents.active()[0].origin.z > 0.0);
         assert!(sounds.pending().is_empty());
         ents.update(clock(2.6), &world, &mut rng, &mut sounds);
         assert!(ents.active().is_empty());
@@ -1849,5 +2019,129 @@ mod tests {
         }
         assert_eq!(a.long(5, 5), 5);
         assert_eq!(a.long(5, 1), 5);
+    }
+
+    fn shell_ent(ents: &mut TempEnts, world: &dyn FxWorld, pos: Vec3, vel: Vec3) {
+        let mut rng = FxRandom::new(3);
+        assert!(ents.spawn_temp_model(
+            pos,
+            vel,
+            Vec3::ZERO,
+            10.0,
+            ModelRef::Client("models/rshell.mdl"),
+            te_bounce::SHELL,
+            world,
+            &mut rng,
+            0.0,
+        ));
+    }
+
+    fn run(ents: &mut TempEnts, world: &dyn FxWorld, from: f64, steps: usize) -> SoundQueue {
+        let mut rng = FxRandom::new(9);
+        let mut sounds = SoundQueue::default();
+        for i in 0..steps {
+            ents.update(clock(from + 0.05 * i as f64), world, &mut rng, &mut sounds);
+        }
+        sounds
+    }
+
+    #[test]
+    fn a_shell_falls_and_rests_on_the_floor() {
+        let world = Floor { frames: 1 };
+        let mut ents = TempEnts::default();
+        shell_ent(&mut ents, &world, Vec3::new(0.0, 0.0, 20.0), Vec3::new(30.0, 0.0, 50.0));
+        let start_z = ents.active()[0].origin.z;
+        run(&mut ents, &world, 0.0, 120);
+        let t = &ents.active()[0];
+        assert!(t.origin.z < start_z);
+        assert!(t.origin.z >= -0.01 && t.origin.z < 1.0, "z = {}", t.origin.z);
+        assert_eq!(t.velocity, Vec3::ZERO);
+        assert!(!t.has(ftent::GRAVITY));
+        assert!(t.origin.x > 0.0);
+    }
+
+    #[test]
+    fn a_bounce_scales_speed_by_the_bounce_factor() {
+        let world = Floor { frames: 1 };
+        let mut ents = TempEnts::default();
+        let mut rng = FxRandom::new(1);
+        let mut sounds = SoundQueue::default();
+        let t = ents
+            .alloc(Vec3::new(0.0, 0.0, 1.0), ModelRef::None, &world, 0.0)
+            .unwrap();
+        t.flags = ftent::COLLIDEWORLD;
+        t.bounce_factor = 0.4;
+        t.velocity = Vec3::new(0.0, 0.0, -500.0);
+        t.die = 100.0;
+        ents.update(clock(0.0), &world, &mut rng, &mut sounds);
+        let t = &ents.active()[0];
+        assert!((t.velocity.z - 200.0).abs() < 0.01, "{:?}", t.velocity);
+    }
+
+    #[test]
+    fn no_world_means_no_collision() {
+        let mut ents = TempEnts::default();
+        shell_ent(&mut ents, &NoWorld, Vec3::new(0.0, 0.0, 5.0), Vec3::ZERO);
+        run(&mut ents, &NoWorld, 0.0, 20);
+        let t = &ents.active()[0];
+        assert!(t.origin.z < -10.0);
+        assert!(t.velocity.z < 0.0);
+    }
+
+    #[test]
+    fn fade_reaches_zero_at_die() {
+        let world = NoWorld;
+        let mut ents = TempEnts::default();
+        let t = ents.alloc(Vec3::ZERO, ModelRef::None, &world, 0.0).unwrap();
+        t.flags |= ftent::FADEOUT;
+        t.die = 2.0;
+        let mut rng = FxRandom::new(1);
+        let mut sounds = SoundQueue::default();
+        ents.update(clock(1.0), &world, &mut rng, &mut sounds);
+        assert_eq!(ents.active()[0].render_amt, 255.0);
+        ents.update(clock(1.75), &world, &mut rng, &mut sounds);
+        let mid = ents.active()[0].render_amt;
+        assert!(mid > 0.0 && mid < 255.0);
+        ents.update(clock(2.0), &world, &mut rng, &mut sounds);
+        assert_eq!(ents.active()[0].render_amt, 0.0);
+    }
+
+    #[test]
+    fn a_shell_clinks_on_its_first_bounce() {
+        let world = Floor { frames: 1 };
+        let mut ents = TempEnts::default();
+        shell_ent(&mut ents, &world, Vec3::new(0.0, 0.0, 10.0), Vec3::new(0.0, 0.0, -300.0));
+        let sounds = run(&mut ents, &world, 0.0, 4);
+        assert!(!sounds.pending().is_empty());
+    }
+
+    #[test]
+    fn degenerate_inputs_give_no_nan() {
+        struct ZeroNormal;
+        impl FxWorld for ZeroNormal {
+            fn trace_line(&self, from: Vec3, to: Vec3) -> Option<FxTrace> {
+                Some(FxTrace {
+                    fraction: 0.5,
+                    end: (from + to) * 0.5,
+                    normal: Vec3::ZERO,
+                })
+            }
+        }
+        let mut rng = FxRandom::new(1);
+        let mut sounds = SoundQueue::default();
+        for world in [&ZeroNormal as &dyn FxWorld, &NoWorld] {
+            let mut ents = TempEnts::default();
+            shell_ent(&mut ents, world, Vec3::new(0.0, 0.0, 5.0), Vec3::new(10.0, 0.0, -10.0));
+            for ft in [0.0_f32, 0.05, f32::NAN] {
+                let c = TempEntClock {
+                    time: 0.1,
+                    frametime: ft,
+                    gravity: 800.0,
+                };
+                ents.update(c, world, &mut rng, &mut sounds);
+            }
+            let t = &ents.active()[0];
+            assert!(t.origin.is_finite() && t.velocity.is_finite() && t.angles.is_finite());
+        }
     }
 }
