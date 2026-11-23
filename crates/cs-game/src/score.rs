@@ -154,6 +154,7 @@ pub(crate) fn player_killed(
     if let Some(victim) = g.players[index].as_mut() {
         victim.deaths += 1;
         victim.not_killed = false;
+        victim.escaped = false;
     }
     // `SET_VIEW(ENT(pVictim->pev), ENT(pVictim->pev))` (multiplay_gamerules.cpp:3947, read
     // 2026-11-22).

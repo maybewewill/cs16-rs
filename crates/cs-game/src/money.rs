@@ -23,8 +23,8 @@
 //!   escape) and their loser-bonus branches follow vanilla `mp.dll` (`RewardAccount`,
 //!   `CheckWinConditions`, `CheckRoundTimeExpired`, `RestartRound`).
 //! - The hints of `PlayerKilled` (`#Hint_careful_around_teammates`,
-//!   `#Hint_win_round_by_killing_enemy`) go through [`crate::hint`]; `#Hint_reward_for_killing_vip`
-//!   waits for T9 VIP.
+//!   `#Hint_win_round_by_killing_enemy`, `#Hint_reward_for_killing_vip`) go through
+//!   [`crate::hint`].
 //! - The blink of the freeze period (`MONEY_BLINK_AMOUNT`, 30 in `player.h`) belongs to the tutor
 //!   (`TheTutor`), which does not exist, so the constant is not defined; [`blink_account`] is the
 //!   buy menu's.
@@ -337,11 +337,11 @@ pub(crate) fn killed_by(
     if killer == usize::from(victim) {
         return;
     }
-    let victim_team = g
+    let (victim_team, victim_is_vip) = g
         .players
         .get(usize::from(victim))
         .and_then(Option::as_ref)
-        .map(|p| p.team);
+        .map_or((None, false), |p| (Some(p.team), p.is_vip));
     let Some(kp) = g.players[killer].as_mut() else {
         return;
     };
@@ -377,8 +377,19 @@ pub(crate) fn killed_by(
             crate::hint::hint(g, eng, killer_slot, "#Hint_careful_around_teammates");
         }
     } else {
-        // (`#Hint_reward_for_killing_vip`: there is no VIP.)
-        add_account(g, eng, killer_slot, REWARD_KILLED_ENEMY, true);
+        if victim_is_vip {
+            crate::hint::hint_message(
+                g,
+                eng,
+                killer_slot,
+                "#Hint_reward_for_killing_vip",
+                true,
+                false,
+            );
+            add_account(g, eng, killer_slot, REWARD_KILLED_VIP, true);
+        } else {
+            add_account(g, eng, killer_slot, REWARD_KILLED_ENEMY, true);
+        }
         if crate::hint::first_time(g, killer_slot, crate::hint::dhf::ENEMY_KILLED) {
             crate::hint::hint(g, eng, killer_slot, "#Hint_win_round_by_killing_enemy");
         }

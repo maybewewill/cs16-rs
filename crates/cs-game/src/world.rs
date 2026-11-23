@@ -26,6 +26,8 @@ const CONTENTS_LADDER: i16 = -16;
 pub const CT_SPAWN_CLASS: &str = "info_player_start";
 /// The classname of the terrorist spawn points.
 pub const T_SPAWN_CLASS: &str = "info_player_deathmatch";
+/// The classname of the VIP spawn points.
+pub const VIP_SPAWN_CLASS: &str = "info_vip_start";
 
 /// `sPlayerModelFiles` without the two Condition Zero models (ReGameDLL `client.cpp`,
 /// function `ClientPrecache`, read 2026-11-22).
@@ -923,8 +925,7 @@ fn select_spawn_spot(
 /// each team cycling through its points. When the team's class has no point it falls back to
 /// the first `info_player_deathmatch`. Either way the point becomes the team's last one
 /// (`ReturnSpot`). `None` when the map has no spawn point at all ("PutClientInServer: no
-/// info_player_start on level"). The VIP spawn (`info_vip_start`) is not ported. (ReGameDLL
-/// `player.cpp`, read 2026-11-22.)
+/// info_player_start on level"). (ReGameDLL `player.cpp`, read 2026-11-22.)
 pub fn select_spawn_point(
     g: &mut GameState,
     eng: &mut EngineApi<'_>,
@@ -932,6 +933,20 @@ pub fn select_spawn_point(
     team: SpawnTeam,
 ) -> Option<EdictId> {
     select_spawn_point_with(g, eng, player, team, true)
+}
+
+/// `CBasePlayer::EntSelectSpawnPoint` VIP branch (`player.cpp` 5668-5679): selects the first
+/// `info_vip_start`, falling back to CT spawn points (`info_player_start`) if none exists.
+pub fn select_vip_spawn_point(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    player: EdictId,
+) -> Option<EdictId> {
+    if let Some(spot) = eng.find_by_classname(None, VIP_SPAWN_CLASS) {
+        g.last_ct_spawn = Some(spot);
+        return Some(spot);
+    }
+    select_spawn_point(g, eng, player, SpawnTeam::CounterTerrorist)
 }
 
 /// [`select_spawn_point`] for a player that only joins (`ClientPutInServer` looks for the
@@ -973,14 +988,18 @@ pub(crate) fn get_player_spawn_spot(
     slot: u8,
 ) -> (Vec3, Vec3) {
     let id = eng.client_edict(slot);
-    let team = g
+    let (team, is_vip) = g
         .players
         .get(usize::from(slot))
         .and_then(Option::as_ref)
-        .map(|p| p.team);
-    let spot = match team.and_then(|t| t.spawn_team()) {
-        Some(spawn_team) => select_spawn_point(g, eng, id, spawn_team),
-        None => select_no_team_spawn_point(g, eng),
+        .map_or((None, false), |p| (Some(p.team), p.is_vip));
+    let spot = if is_vip {
+        select_vip_spawn_point(g, eng, id)
+    } else {
+        match team.and_then(|t| t.spawn_team()) {
+            Some(spawn_team) => select_spawn_point(g, eng, id, spawn_team),
+            None => select_no_team_spawn_point(g, eng),
+        }
     };
     let (origin, angles) = spot
         .and_then(|s| eng.ent(s))

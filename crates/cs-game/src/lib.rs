@@ -39,6 +39,7 @@ pub mod spray;
 mod suit;
 pub mod targets;
 pub mod teams;
+pub mod vip;
 pub mod weapons;
 pub mod world;
 pub mod zones;

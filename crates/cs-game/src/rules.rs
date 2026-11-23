@@ -47,10 +47,9 @@
 //! The money of a round (`m_iAccountCT`, `m_iAccountTerrorist`, the loser bonus and its streaks)
 //! is [`crate::money`]'s; `RestartRound` settles it here.
 //!
-//! Left for later tasks (T9 VIP/escape): `PickNextVIP` / VIP rotation / team selection (2E).
 //! Objective win conditions (`VIP`, `Prison`, `Bomb`, `TeamExtermination`, `HostageRescue`),
-//! `CheckRoundTimeExpired`, objective rewards, `GiveC4` rotation, and hostage `RePosition` follow
-//! vanilla ReGameDLL_CS (`multiplay_gamerules.cpp`).
+//! `PickNextVIP`, VIP rotation/balancing, `CheckRoundTimeExpired`, objective rewards, `GiveC4`
+//! rotation, and hostage `RePosition` follow vanilla ReGameDLL_CS (`multiplay_gamerules.cpp`).
 
 use cs_engine::consts::SOLID_NOT;
 use cs_engine::{EngineApi, MsgDest};
@@ -193,14 +192,11 @@ pub struct Rules {
     /// `m_pVIP`: player slot currently designated as the VIP on `as_` maps.
     pub(crate) vip_slot: Option<u8>,
     /// `m_pVIPQueue[MAX_VIP_QUEUES]`: player slots queued to become the next VIP.
-    #[allow(dead_code)]
     pub(crate) vip_queue: [Option<u8>; 5],
     /// `m_iConsecutiveVIP`: rounds the current VIP has served consecutively.
-    #[allow(dead_code)]
     pub(crate) consecutive_vip: i32,
-    /// `m_iLastPick`: rotating CT index used by `PickNextVIP` after 3 VIP rounds.
-    #[allow(dead_code)]
-    pub(crate) last_vip_pick: i32,
+    /// `m_iLastPick`: last CT slot selected by `PickNextVIP` rotation after 3 VIP rounds.
+    pub(crate) last_vip_pick: Option<u8>,
     /// `m_flRequiredEscapeRatio`: fraction of terrorists that must escape (`0.5`).
     pub(crate) required_escape_ratio: f32,
     /// `m_iNumEscapers`: total terrorists participating in this escape round.
@@ -265,7 +261,7 @@ impl Default for Rules {
             vip_slot: None,
             vip_queue: [None; 5],
             consecutive_vip: 0,
-            last_vip_pick: 0,
+            last_vip_pick: None,
             required_escape_ratio: 0.5,
             num_escapers: 0,
             have_escaped: 0,
@@ -1023,6 +1019,7 @@ pub(crate) fn on_disconnect(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8
     if let Some(entry) = g.players.get_mut(usize::from(slot)) {
         *entry = None;
     }
+    crate::vip::on_disconnect(g, slot);
     teams::announce_departure(eng, slot);
     observer::on_target_left(g, eng, slot);
     check_win_conditions(g, eng);
@@ -1412,18 +1409,35 @@ fn swap_all_players(g: &mut GameState, eng: &mut EngineApi<'_>) {
     update_team_scores(g, eng);
 }
 
-/// `CBasePlayer::CanSwitchTeam`: a player of the team that must give players away (no VIP
-/// exists yet).
+/// `CBasePlayer::CanSwitchTeam`: a player of the team that must give players away (never the VIP).
 fn can_switch_team(g: &GameState, slot: usize, from: Team) -> bool {
-    g.players[slot].as_ref().is_some_and(|p| p.team == from)
+    g.players[slot]
+        .as_ref()
+        .is_some_and(|p| p.team == from && !p.is_vip)
 }
 
-/// `BalanceTeams`: moves the most recently joined players of the larger team to the other
-/// until they differ by at most one, at most [`MAX_BALANCE_SWAPS`] of them. (The ratio of a
-/// map with a VIP safety zone is 2E.)
+/// `BalanceTeams`: moves the most recently joined players of the larger team to the other until
+/// balanced (equal +/- 1 normally, or 0.55 CT target ratio on VIP maps), at most
+/// [`MAX_BALANCE_SWAPS`] of them (`multiplay_gamerules.cpp` 1551-1595).
 fn balance_teams(g: &mut GameState, eng: &mut EngineApi<'_>) {
     let (cts, ts) = (g.rules.num_ct, g.rules.num_terrorist);
-    let (from, swaps) = if cts > ts {
+    let (from, swaps) = if g.rules.map_has_vip_safety_zone {
+        let total = cts + ts;
+        let desired_ct = if total % 2 != 0 {
+            ((total as f32 * 0.55) as usize) + 1
+        } else {
+            total / 2
+        };
+        let desired_t = total.saturating_sub(desired_ct);
+        if cts < desired_ct {
+            (Team::Terrorist, desired_ct - cts)
+        } else if ts < desired_t {
+            (Team::Ct, desired_t - ts)
+        } else {
+            // Teams are balanced for a VIP map: get out of here.
+            return;
+        }
+    } else if cts > ts {
         (Team::Ct, (cts - ts) / 2)
     } else if ts > cts {
         (Team::Terrorist, (ts - cts) / 2)
@@ -1525,8 +1539,10 @@ pub(crate) fn restart_round(g: &mut GameState, eng: &mut EngineApi<'_>) {
         g.rules.num_escape_rounds += 1;
     }
 
-    // VIP selection (`PickNextVIP` / `m_iConsecutiveVIP++`, `multiplay_gamerules.cpp:1874-1878`)
-    // is wired in T9.
+    if g.rules.map_has_vip_safety_zone {
+        crate::vip::pick_next_vip(g, eng);
+        g.rules.consecutive_vip += 1;
+    }
 
     // Surviving hostage bonus (`mp:1880-1901`) and `CHostage::RePosition` (`UTIL_RestartOther`).
     let mut acct_tmp = 0i32;

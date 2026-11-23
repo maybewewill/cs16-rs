@@ -776,19 +776,19 @@ pub(crate) fn remove_all_items(g: &mut GameState, eng: &mut EngineApi<'_>, slot:
 }
 
 /// `CBasePlayer::GiveDefaultItems` (`player.cpp` 1667, vanilla): everything goes, then a knife,
-/// and a USP with two clips of .45 ACP for a counter-terrorist or a Glock 18 with 40 rounds of
-/// 9 mm for a terrorist. (No VIP, so the ammo is the full amount.)
+/// and a USP with 24 .45 ACP (12 for the VIP) for a counter-terrorist or a Glock 18 with 40 rounds
+/// of 9 mm for a terrorist.
 pub(crate) fn give_default_items(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     remove_all_items(g, eng, slot, false);
     // `m_bHasPrimary = false` is already done by `RemoveAllItems`.
-    let Some(team) = player_ref(g, slot).map(|p| p.team) else {
+    let Some((team, is_vip)) = player_ref(g, slot).map(|p| (p.team, p.is_vip)) else {
         return;
     };
     match team {
         crate::player::Team::Ct => {
             give_named_item(g, eng, slot, "weapon_knife");
             give_named_item(g, eng, slot, "weapon_usp");
-            give_ammo(g, eng, slot, 24, Some("45acp"), -1);
+            give_ammo(g, eng, slot, if is_vip { 12 } else { 24 }, Some("45acp"), -1);
         }
         crate::player::Team::Terrorist => {
             give_named_item(g, eng, slot, "weapon_knife");
@@ -800,11 +800,12 @@ pub(crate) fn give_default_items(g: &mut GameState, eng: &mut EngineApi<'_>, slo
 }
 
 /// `CBasePlayer::OnSpawnEquip(true, true)` (`player.cpp` 10660) as `PlayerSpawn` calls it: a
-/// player that was not killed since it last spawned keeps what it carries; the others get the
-/// default items. (The `game_player_equip` entities that would replace the defaults are not
-/// ported.) `lost_items` is `!m_bNotKilled`.
+/// player that was not killed since it last spawned (unless the VIP) keeps what it carries; the
+/// others get the default items. (The `game_player_equip` entities that would replace the defaults
+/// are not ported.) `lost_items` is `!m_bNotKilled`.
 pub(crate) fn on_spawn_equip(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, lost_items: bool) {
-    if lost_items {
+    let is_vip = player_ref(g, slot).is_some_and(|p| p.is_vip);
+    if lost_items || is_vip {
         give_default_items(g, eng, slot);
     }
 }

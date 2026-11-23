@@ -20,8 +20,8 @@
 //! - The team counts (`m_iNumCT`, `m_iNumTerrorist`) are taken from the players when asked,
 //!   not from the cache `CheckWinConditions` refreshes.
 //!
-//! Left for later tasks: the VIP (`jointeam 3` is refused: no map has a VIP safety zone yet), the items a player
-//! drops or loses on a team change, the `Location` message, the career mode and the bots. `mp_teamlist` is not part of Counter-Strike's game library.
+//! Left for later tasks: the items a player drops or loses on a team change, the `Location`
+//! message, and the career mode. `mp_teamlist` is not part of Counter-Strike's game library.
 
 use cs_engine::consts::{
     FL_CLIENT, FL_FAKECLIENT, FL_PROXY, FL_SPECTATOR, MOVETYPE_NOCLIP, SOLID_NOT,
@@ -454,12 +454,34 @@ pub(crate) fn handle_menu_choose_team(
     let Some(p) = g.players.get(usize::from(slot)).and_then(Option::as_ref) else {
         return false;
     };
-    let current = p.team;
+    let (current, is_vip) = (p.team, p.is_vip);
+    if is_vip {
+        let alive = eng
+            .ent(eng.client_edict(slot))
+            .is_some_and(|v| v.deadflag == crate::player::DEAD_NO);
+        if alive || crate::vip::is_vip_queue_empty(g) {
+            menus::print_center(eng, slot, "#Cannot_Switch_From_VIP");
+            eng.stufftext(slot, "slot10\n");
+            if let Some(p) = g.players[usize::from(slot)].as_mut() {
+                p.menu = Menu::Off;
+            }
+            return true;
+        }
+    }
     let team = match choice {
         MENU_SLOT_TEAM_TERRORIST => Team::Terrorist,
         MENU_SLOT_TEAM_CT => Team::Ct,
-        // Becoming the VIP needs a map with a VIP safety zone.
-        MENU_SLOT_TEAM_VIP => return false,
+        MENU_SLOT_TEAM_VIP => {
+            if g.rules.map_has_vip_safety_zone() && current == Team::Ct {
+                crate::vip::add_to_vip_queue(g, eng, slot);
+                eng.stufftext(slot, "slot10\n");
+                if let Some(p) = g.players[usize::from(slot)].as_mut() {
+                    p.menu = Menu::Off;
+                }
+                return true;
+            }
+            return false;
+        }
         MENU_SLOT_TEAM_RANDOM => match select_default_team(g, eng) {
             Some(team) => team,
             None => return false,
@@ -585,7 +607,15 @@ pub(crate) fn handle_menu_choose_team(
     };
     p.team_changed = true;
     p.team = team;
+    let clear_vip = is_vip && team != Team::Ct;
+    if clear_vip {
+        p.is_vip = false;
+    }
     team_change_update(g, eng, slot);
+    if clear_vip && g.rules.vip_slot == Some(slot) {
+        g.rules.vip_slot = None;
+        g.rules.consecutive_vip = 0;
+    }
     let text = if is_terrorist {
         "#Game_join_terrorist"
     } else {
@@ -629,11 +659,17 @@ fn choose_spectator(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) -> boo
     let Some(p) = g.players[usize::from(slot)].as_mut() else {
         return false;
     };
+    let was_vip = p.is_vip;
+    p.is_vip = false;
     p.team = Team::Spectator;
     p.joining = JoinState::Joined;
     // The account is emptied.
     p.money = 0;
     let (frags, deaths) = (p.frags, p.deaths);
+    if was_vip && g.rules.vip_slot == Some(slot) {
+        g.rules.vip_slot = None;
+        g.rules.consecutive_vip = 0;
+    }
     messages::money(eng, slot, 0);
     // Sent with no team and no class, as the original does: `MSG_BROADCAST`, unreliable
     // (`REGAMEDLL_FIXES` would use `MSG_ALL`; client.cpp:1962, read 2026-11-22).
@@ -703,6 +739,9 @@ pub(crate) fn handle_menu_choose_appearance(
     p.class = class;
     let team = p.team;
     apply_model(eng, slot, team, class);
+    if g.rules.map_has_vip_safety_zone() && g.rules.vip_slot.is_none() && team == Team::Ct {
+        crate::vip::make_vip(g, eng, slot);
+    }
     // A player already in the game changes the count of the players that may spawn.
     if joined {
         rules::check_win_conditions(g, eng);
@@ -721,8 +760,13 @@ pub(crate) fn join_team(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, ar
     }
     let choice = atoi(argv.get(1).map_or("", String::as_str));
     if handle_menu_choose_team(g, eng, slot, choice) {
-        // The spectators have no appearance to choose.
-        let next = if choice == MENU_SLOT_TEAM_VIP || choice == MENU_SLOT_TEAM_SPECT {
+        // The spectators, VIP queue choice, and active VIP close the menu instead of picking skin.
+        let is_vip = g
+            .players
+            .get(usize::from(slot))
+            .and_then(Option::as_ref)
+            .is_some_and(|p| p.is_vip);
+        let next = if choice == MENU_SLOT_TEAM_VIP || choice == MENU_SLOT_TEAM_SPECT || is_vip {
             Menu::Off
         } else {
             Menu::ChooseAppearance
@@ -752,6 +796,7 @@ pub(crate) fn join_class(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, a
 /// offered while the player is dead or in the freeze period.
 pub(crate) fn choose_team(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let freeze = g.rules.is_freeze_period();
+    let vip_map = g.rules.map_has_vip_safety_zone();
     let Some(p) = g
         .players
         .get_mut(usize::from(slot))
@@ -768,14 +813,35 @@ pub(crate) fn choose_team(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) 
     }
     p.menu = Menu::ChooseTeam;
     let vgui = p.vgui_menus;
+    let vip_ct = vip_map && p.team == Team::Ct;
     if freeze || !p.alive {
+        if vip_ct {
+            menus::show_vgui_menu(
+                eng,
+                slot,
+                vgui,
+                VGUI_MENU_TEAM,
+                MENU_KEY_1 | MENU_KEY_2 | MENU_KEY_3 | MENU_KEY_5 | MENU_KEY_6 | MENU_KEY_0,
+                "#IG_VIP_Team_Select_Spect",
+            );
+        } else {
+            menus::show_vgui_menu(
+                eng,
+                slot,
+                vgui,
+                VGUI_MENU_TEAM,
+                MENU_KEY_1 | MENU_KEY_2 | MENU_KEY_5 | MENU_KEY_6 | MENU_KEY_0,
+                "#IG_Team_Select_Spect",
+            );
+        }
+    } else if vip_ct {
         menus::show_vgui_menu(
             eng,
             slot,
             vgui,
             VGUI_MENU_TEAM,
-            MENU_KEY_1 | MENU_KEY_2 | MENU_KEY_5 | MENU_KEY_6 | MENU_KEY_0,
-            "#IG_Team_Select_Spect",
+            MENU_KEY_1 | MENU_KEY_2 | MENU_KEY_3 | MENU_KEY_5 | MENU_KEY_0,
+            "#IG_VIP_Team_Select",
         );
     } else {
         menus::show_vgui_menu(

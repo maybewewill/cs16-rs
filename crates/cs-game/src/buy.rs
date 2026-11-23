@@ -811,20 +811,34 @@ pub(crate) fn buy_item(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, ite
     money::add_account(g, eng, slot, -price, true);
 }
 
-/// `CanBuyWeaponByMaptype` (`weapontype.cpp` 596) for a map with no VIP safety zone (none is
-/// ported): the weapons a team can buy.
-fn can_buy_weapon_by_maptype(team: Team, id: WeaponId) -> bool {
+/// `CanBuyWeaponByMaptype` (`weapontype.cpp` 596-680): the weapons a team can buy, taking
+/// assassination (`as_*`, `m_bMapHasVIPSafetyZone`) restrictions into account.
+fn can_buy_weapon_by_maptype(team: Team, id: WeaponId, assassination: bool) -> bool {
     use WeaponId::*;
+    if assassination {
+        return match team {
+            Team::Ct => matches!(
+                id,
+                P228 | Xm1014 | Aug | FiveSeven | Ump45 | Sg550 | Famas | Usp | Glock18 | Mp5n
+                    | M249 | M3 | M4a1 | Tmp | Deagle | P90 | ShieldGun
+            ),
+            Team::Terrorist => matches!(
+                id,
+                P228 | Mac10 | Elite | Ump45 | Galil | Usp | Glock18 | Awp | Deagle | Ak47
+            ),
+            _ => false,
+        };
+    }
     match team {
         Team::Ct => matches!(
             id,
-            P228 | Scout | Xm1014 | Aug | FiveSeven | Ump45 | Sg550 | Famas | Usp | Glock18 | Awp | Mp5n
-                | M249 | M3 | M4a1 | Tmp | Deagle | P90 | ShieldGun
+            P228 | Scout | Xm1014 | Aug | FiveSeven | Ump45 | Sg550 | Famas | Usp | Glock18 | Awp
+                | Mp5n | M249 | M3 | M4a1 | Tmp | Deagle | P90 | ShieldGun
         ),
         Team::Terrorist => matches!(
             id,
-            P228 | Scout | Xm1014 | Mac10 | Elite | Ump45 | Galil | Usp | Glock18 | Awp | Mp5n | M249
-                | M3 | G3sg1 | Deagle | Sg552 | Ak47 | P90
+            P228 | Scout | Xm1014 | Mac10 | Elite | Ump45 | Galil | Usp | Glock18 | Awp | Mp5n
+                | M249 | M3 | G3sg1 | Deagle | Sg552 | Ak47 | P90
         ),
         _ => false,
     }
@@ -842,7 +856,7 @@ fn can_buy_this(g: &GameState, eng: &mut EngineApi<'_>, slot: u8, id: WeaponId) 
         say(eng, slot, "#Cstrike_Already_Own_Weapon");
         return false;
     }
-    if !can_buy_weapon_by_maptype(p.team, id) {
+    if !can_buy_weapon_by_maptype(p.team, id, g.rules.map_has_vip_safety_zone()) {
         say(eng, slot, "#Cannot_Buy_This");
         return false;
     }
@@ -1055,9 +1069,10 @@ fn show_item_menu(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
 }
 
 /// The `Menu_Buy` choice `choice` (`menuselect` of a text menu client): the menu of a kind of
-/// weapon (no map here has VIP safety zones, so the plain menus), the ammo, or the equipment.
+/// weapon (including `#AS_*` variants on maps with a VIP safety zone), the ammo, or the equipment.
 fn choose_buy_group(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, choice: i32) {
     let ct = team_of(g, slot) == Team::Ct;
+    let as_map = g.rules.map_has_vip_safety_zone();
     let in_zone = |g: &GameState| {
         g.players
             .get(usize::from(slot))
@@ -1079,7 +1094,11 @@ fn choose_buy_group(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, choice
             );
         }
         SLOT_BUY_SHOTGUN => {
-            let keys = MENU_KEY_1 | MENU_KEY_2 | MENU_KEY_0;
+            let (keys, text) = if as_map && !ct {
+                (MENU_KEY_0, "#AS_BuyShotgun")
+            } else {
+                (MENU_KEY_1 | MENU_KEY_2 | MENU_KEY_0, "#BuyShotgun")
+            };
             show(
                 g,
                 eng,
@@ -1087,16 +1106,28 @@ fn choose_buy_group(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, choice
                 Menu::BuyShotgun,
                 VGUI_MENU_BUY_SHOTGUN,
                 keys,
-                "#BuyShotgun",
+                text,
             );
         }
         SLOT_BUY_SUBMACHINEGUN => {
-            let text = if ct {
-                "#CT_BuySubMachineGun"
-            } else {
-                "#T_BuySubMachineGun"
+            let (keys, text) = match (as_map, ct) {
+                (true, true) => (
+                    MENU_KEY_1 | MENU_KEY_2 | MENU_KEY_3 | MENU_KEY_4 | MENU_KEY_0,
+                    "#AS_CT_BuySubMachineGun",
+                ),
+                (true, false) => (
+                    MENU_KEY_1 | MENU_KEY_3 | MENU_KEY_0,
+                    "#AS_T_BuySubMachineGun",
+                ),
+                (false, true) => (
+                    MENU_KEY_1 | MENU_KEY_2 | MENU_KEY_3 | MENU_KEY_4 | MENU_KEY_0,
+                    "#CT_BuySubMachineGun",
+                ),
+                (false, false) => (
+                    MENU_KEY_1 | MENU_KEY_2 | MENU_KEY_3 | MENU_KEY_4 | MENU_KEY_0,
+                    "#T_BuySubMachineGun",
+                ),
             };
-            let keys = MENU_KEY_1 | MENU_KEY_2 | MENU_KEY_3 | MENU_KEY_4 | MENU_KEY_0;
             show(
                 g,
                 eng,
@@ -1108,19 +1139,34 @@ fn choose_buy_group(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, choice
             );
         }
         SLOT_BUY_RIFLE => {
-            let text = if ct { "#CT_BuyRifle" } else { "#T_BuyRifle" };
+            let (keys, text) = match (as_map, ct) {
+                (true, true) => (
+                    MENU_KEY_1 | MENU_KEY_3 | MENU_KEY_4 | MENU_KEY_5 | MENU_KEY_0,
+                    "#AS_CT_BuyRifle",
+                ),
+                (true, false) => (
+                    MENU_KEY_1 | MENU_KEY_2 | MENU_KEY_5 | MENU_KEY_0,
+                    "#AS_T_BuyRifle",
+                ),
+                (false, true) => (KEYS_1_TO_6 | MENU_KEY_0, "#CT_BuyRifle"),
+                (false, false) => (KEYS_1_TO_6 | MENU_KEY_0, "#T_BuyRifle"),
+            };
             show(
                 g,
                 eng,
                 slot,
                 Menu::BuyRifle,
                 VGUI_MENU_BUY_RIFLE,
-                KEYS_1_TO_6 | MENU_KEY_0,
+                keys,
                 text,
             );
         }
         SLOT_BUY_MACHINEGUN => {
-            let keys = MENU_KEY_1 | MENU_KEY_0;
+            let (keys, text) = if as_map && !ct {
+                (MENU_KEY_0, "#AS_T_BuyMachineGun")
+            } else {
+                (MENU_KEY_1 | MENU_KEY_0, "#BuyMachineGun")
+            };
             show(
                 g,
                 eng,
@@ -1128,7 +1174,7 @@ fn choose_buy_group(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, choice
                 Menu::BuyMachineGun,
                 VGUI_MENU_BUY_MACHINEGUN,
                 keys,
-                "#BuyMachineGun",
+                text,
             );
         }
         SLOT_BUY_PRIMARY_AMMO if in_zone(g) => buy_ammo_all(g, eng, slot, PRIMARY_WEAPON_SLOT),
@@ -1330,18 +1376,13 @@ pub(crate) fn client_command(
 /// so a dead player is told nothing, not even `#Alias_Not_Avail` (checked 2026-11-22).
 fn alias_command(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, command: &str) {
     let team = team_of(g, slot);
-    if let Some(&(_, fail_name, teams)) = weapon_alias(command) {
-        let allowed = match teams {
-            'T' => team == Team::Terrorist,
-            'C' => team == Team::Ct,
-            _ => matches!(team, Team::Terrorist | Team::Ct),
-        };
-        if allowed {
-            if let Some(id) = crate::weapons::buy_alias_to_weapon_id(command) {
+    if let Some(&(_, fail_name, _)) = weapon_alias(command) {
+        if let Some(id) = crate::weapons::buy_alias_to_weapon_id(command) {
+            if can_buy_weapon_by_maptype(team, id, g.rules.map_has_vip_safety_zone()) {
                 buy_weapon_by_id(g, eng, slot, id);
+            } else {
+                client_print(eng, slot, HUD_PRINTCENTER, "#Alias_Not_Avail", &[fail_name]);
             }
-        } else {
-            client_print(eng, slot, HUD_PRINTCENTER, "#Alias_Not_Avail", &[fail_name]);
         }
         return;
     }

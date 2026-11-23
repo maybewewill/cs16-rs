@@ -23,8 +23,8 @@
 //!
 //! ## Known gaps
 //!
-//! Not ported yet, each a later task: the flinch animations, the shield, the
-//! bomb and grenade flags of `TakeDamage`, and the VIP. Bullets and the damage they do
+//! Not ported yet, each a later task: the flinch animations, the shield, and the
+//! bomb and grenade flags of `TakeDamage`. Bullets and the damage they do
 //! (`TraceAttack`, `TakeDamage`, `Pain`) are in [`crate::bullets`] and here.
 //!
 //! The flashlight (`impulse 100`, the battery and its `Flashlight`/`FlashBat` messages), the
@@ -905,7 +905,11 @@ pub(crate) fn userinfo_changed(g: &mut GameState, eng: &mut EngineApi<'_>, slot:
     };
     p.vgui_menus = vgui;
     p.show_hints = hints;
-    let model = model_name(p.team, p.class);
+    let model = if p.is_vip {
+        "vip"
+    } else {
+        model_name(p.team, p.class)
+    };
     if eng.client_key(slot, "model") != Some(model) {
         eng.set_client_key(slot, "model", model);
     }
@@ -944,7 +948,7 @@ pub(crate) fn disconnect(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
 }
 
 /// The model name of a team and appearance choice (`CBasePlayer::SetPlayerModel`).
-fn model_name(team: Team, class: u8) -> &'static str {
+pub(crate) fn model_name(team: Team, class: u8) -> &'static str {
     match (team, class) {
         (Team::Ct, 2) => "gsg9",
         (Team::Ct, 3) => "sas",
@@ -994,10 +998,16 @@ pub(crate) fn spawn(
     if g.players.get(index).is_none_or(Option::is_none) {
         return false;
     }
+    let is_vip = g.players[index].as_ref().is_some_and(|p| p.is_vip);
     let id = eng.client_edict(slot);
     set_player_classname(eng, slot);
     // `GetPlayerSpawnSpot`.
-    let (origin, angles) = match select_spawn_point(g, eng, id, spawn_team) {
+    let spot = if is_vip {
+        crate::world::select_vip_spawn_point(g, eng, id)
+    } else {
+        select_spawn_point(g, eng, id, spawn_team)
+    };
+    let (origin, angles) = match spot {
         Some(spot) => {
             let v = eng.ent(spot);
             (
@@ -1080,12 +1090,16 @@ pub(crate) fn spawn(
     // `Spawn` (player.cpp 5841-5843): a player without a shield has `HITGROUP_SHIELD_DISABLED`
     // (1) in `gamestate`, so the engine's studio traces skip the shield's hit box.
     let shield_state = if p.owns_shield { HITGROUP_SHIELD_ENABLED } else { HITGROUP_SHIELD_DISABLED };
-    let body = u8::from(p.has_defuser);
+    let body = if is_vip { 0 } else { u8::from(p.has_defuser) };
 
     if eng.ent(id).is_some_and(|v| v.modelindex == 0) {
         eng.set_model(id, "models/player.mdl");
     }
-    eng.set_client_key(slot, "model", model_name(team, class));
+    eng.set_client_key(
+        slot,
+        "model",
+        if is_vip { "vip" } else { model_name(team, class) },
+    );
     if let Some(v) = eng.ent_mut(id) {
         v.solid = SOLID_SLIDEBOX;
         v.movetype = MOVETYPE_WALK;
@@ -1150,6 +1164,13 @@ pub(crate) fn spawn(
     // `SetProgressBarTime(0)` (player.cpp:6085-6092, read 2026-11-22), before `ResetMaxSpeed`.
     set_progress_bar_time(g, eng, slot, 0);
     reset_max_speed(g, eng, slot);
+    if is_vip {
+        if let Some(p) = g.players[index].as_mut() {
+            p.kevlar = ArmorType::VestHelm;
+            p.armor = crate::vip::VIP_ARMOR;
+        }
+        crate::hint::hint_message(g, eng, slot, "#Hint_you_are_the_vip", true, true);
+    }
     if let Some(p) = g.players[index].as_mut() {
         p.num_spawns += 1;
     }
@@ -1173,8 +1194,8 @@ pub(crate) fn spawn(
 }
 
 /// `CBasePlayer::ResetMaxSpeed`: 900 for an observer, 1 while the round is in its freeze period
-/// (nobody moves), else the active item's `GetMaxSpeed()`, or [`NO_ITEM_MAX_SPEED`] with none.
-/// (The VIP's 227 is not ported.)
+/// (nobody moves), 227 for the VIP, else the active item's `GetMaxSpeed()`, or
+/// [`NO_ITEM_MAX_SPEED`] with none.
 pub(crate) fn reset_max_speed(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let item = g
         .players
@@ -1189,11 +1210,18 @@ pub(crate) fn reset_max_speed(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) 
 pub(crate) fn apply_max_speed(g: &GameState, eng: &mut EngineApi<'_>, slot: u8, item: Option<f32>) {
     let id = eng.client_edict(slot);
     let freeze = g.rules.is_freeze_period();
+    let is_vip = g
+        .players
+        .get(usize::from(slot))
+        .and_then(Option::as_ref)
+        .is_some_and(|p| p.is_vip);
     if let Some(v) = eng.ent_mut(id) {
         v.max_speed = if v.iuser1 != 0 {
             OBSERVER_MAX_SPEED
         } else if freeze {
             FROZEN_MAX_SPEED
+        } else if is_vip {
+            crate::vip::VIP_MAX_SPEED
         } else {
             item.unwrap_or(NO_ITEM_MAX_SPEED)
         };
@@ -2305,6 +2333,9 @@ pub(crate) fn take_damage_with(
         .is_some_and(|v| v.classname == "grenade");
 
     let mut ratio = ARMOR_RATIO;
+    if g.players[index].as_ref().is_some_and(|p| p.is_vip) {
+        ratio *= 0.5;
+    }
     let bonus = ARMOR_BONUS;
     let mut damage = damage;
 
@@ -2569,6 +2600,7 @@ pub(crate) fn disappear(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     }
     let player_model = eng.model_index("models/player.mdl");
     if let Some(p) = g.players[index].as_mut() {
+        p.alive = false;
         // `m_fSequenceFinished = TRUE`.
         p.anim.sequence_finished = true;
         // `m_iClientHealth = 0`, and `SendFOV(0)`: `m_iClientFOV = m_iFOV = 0`.
@@ -3179,6 +3211,7 @@ pub(crate) fn client_command(
         "ignoremsg" => crate::chat::ignore_msg_command(g, eng, slot),
         "timeleft" => rules::timeleft_command(g, eng, slot),
         "listmaps" => rules::listmaps_command(g, eng, slot),
+        "become_vip" => crate::vip::become_vip_command(g, eng, slot),
         _ => {
             // Distinct commands, so the order of `ClientCommand_` (`ignorerad`, the observer
             // commands, then the living player's) does not matter.
