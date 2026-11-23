@@ -466,8 +466,7 @@ impl Cs16App {
                             self.vfs.as_ref(),
                             name,
                             s.volume * master,
-                            Some(s.entity),
-                            Some(s.channel),
+                            Some((s.entity, s.channel)),
                         );
                     } else if s.origin.is_finite() {
                         self.audio.play_3d_tracked(
@@ -475,10 +474,8 @@ impl Cs16App {
                             name,
                             s.origin,
                             listener,
-                            s.volume,
-                            master,
-                            Some(s.entity),
-                            Some(s.channel),
+                            s.volume * master,
+                            Some((s.entity, s.channel)),
                         );
                     }
                 }

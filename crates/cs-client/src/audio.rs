@@ -109,7 +109,7 @@ impl AudioEngine {
 
     /// Play a non-positional sound (e.g. `"UI/buttonclick.wav"` or `"radio/ctwin.wav"`).
     pub fn play_2d(&mut self, vfs: Option<&Vfs>, sound_path: &str, volume: f32) {
-        self.play_2d_tracked(vfs, sound_path, volume, None, None);
+        self.play_2d_tracked(vfs, sound_path, volume, None);
     }
 
     /// Play a tracked non-positional sound on an optional `(entity, channel)`.
@@ -118,11 +118,10 @@ impl AudioEngine {
         vfs: Option<&Vfs>,
         sound_path: &str,
         volume: f32,
-        entity: Option<u16>,
-        channel: Option<u8>,
+        target: Option<(u16, u8)>,
     ) {
         self.prune_finished();
-        if let (Some(e), Some(c)) = (entity, channel)
+        if let Some((e, c)) = target
             && c != 0
         {
             self.stop_channel(e, c);
@@ -141,8 +140,8 @@ impl AudioEngine {
             player.set_volume(volume.clamp(0.0, 1.5));
             player.append(source);
             self.active.push(ActiveSound {
-                entity,
-                channel,
+                entity: target.map(|(e, _)| e),
+                channel: target.map(|(_, c)| c),
                 player,
             });
         }
@@ -155,10 +154,8 @@ impl AudioEngine {
         sound_path: &str,
         pos: Vec3,
         listener_pos: Vec3,
-        base_volume: f32,
-        master_volume: f32,
-        entity: Option<u16>,
-        channel: Option<u8>,
+        volume: f32,
+        target: Option<(u16, u8)>,
     ) {
         let dist = pos.distance(listener_pos);
         let max_dist = 1800.0f32;
@@ -166,8 +163,7 @@ impl AudioEngine {
             return;
         }
         let atten = (1.0 - dist / max_dist).powf(1.35);
-        let vol = base_volume * master_volume * atten;
-        self.play_2d_tracked(vfs, sound_path, vol, entity, channel);
+        self.play_2d_tracked(vfs, sound_path, volume * atten, target);
     }
 
     fn load_cached(&mut self, vfs: Option<&Vfs>, rel: &str) -> Option<Arc<[u8]>> {
