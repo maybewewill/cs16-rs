@@ -246,8 +246,8 @@ evidence = "Not built: physinfo strings (slj and the like), visents and PM_Trace
 
 [[item]]
 id = "movement_our_client_prediction"
-status = "missing"
-evidence = "Phase 3: cs-clientcore client-side prediction using cs_sim::pm instead of legacy cs_sim::pmove"
+status = "verified"
+evidence = "cs-clientcore predicts the local player with cs-pm (the ported pm_shared): 0.416 and 0.126 units worst error against the original HLDS, 0 teleports (A6 to A8 of docs/parity/checklists/phase3-clientcore.md, crates/cs-clientcore/tests/hlds.rs, 2026-11-24)"
 
 [[item]]
 id = "movement_differential_traces_hlds"

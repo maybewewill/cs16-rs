@@ -64,8 +64,8 @@ evidence = "crates/cs-client/src/render/shaders/bsp.wgsl (gamma/brightness unifo
 
 [[item]]
 id = "render_protocol48_entity_driven_pipeline"
-status = "missing"
-evidence = "Phase 3: render arbitrary Protocol 48 server entities by modelindex (brush, studio, sprite) via cs-clientcore"
+status = "tested"
+evidence = "crates/cs-client/src/view.rs (ViewBuilder draws every entity by modelindex) with view::tests::a_golden_replay_builds_scenes_without_a_gpu and session::tests::a_local_game_plays_through_the_session_layer (headless, no GPU); not compared with the original client's picture (Part B of docs/parity/checklists/phase3-clientcore.md not done)"
 
 [[item]]
 id = "render_lightstyles_and_switchable_lights"

@@ -32,8 +32,8 @@ evidence = "crates/cs-proto48/src/messages.rs::tests::sound_pings_and_clc_resour
 
 [[item]]
 id = "svc_time"
-status = "tested"
-evidence = "crates/cs-engine/src/signon.rs::tests::spawn_stage_messages_in_order"
+status = "verified"
+evidence = "crates/cs-engine/src/signon.rs::tests::spawn_stage_messages_in_order; parsed by our client from the original HLDS build 10210 with 0 parse errors, 2026-11-24 (A2, A3 of docs/parity/checklists/phase3-clientcore.md, crates/cs-clientcore/tests/hlds.rs)"
 
 [[item]]
 id = "svc_print"
@@ -52,8 +52,8 @@ evidence = "crates/cs-engine/src/signon.rs::tests::spawn_stage_messages_in_order
 
 [[item]]
 id = "svc_serverinfo"
-status = "tested"
-evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+status = "verified"
+evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip; parsed by our client from the original HLDS build 10210 with 0 parse errors, 2026-11-24 (A2, A3 of docs/parity/checklists/phase3-clientcore.md, crates/cs-clientcore/tests/hlds.rs)"
 
 [[item]]
 id = "svc_lightstyle"
@@ -72,8 +72,8 @@ evidence = "crates/cs-proto48/src/delta_offsets.rs tests (the field offsets of t
 
 [[item]]
 id = "svc_clientdata"
-status = "tested"
-evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+status = "verified"
+evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip; parsed by our client from the original HLDS build 10210 with 0 parse errors, 2026-11-24 (A2, A3 of docs/parity/checklists/phase3-clientcore.md, crates/cs-clientcore/tests/hlds.rs)"
 
 [[item]]
 id = "svc_stopsound"
@@ -186,17 +186,18 @@ status = "implemented"
 
 [[item]]
 id = "svc_newusermsg"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-clientcore/tests/effects.rs::hud_state_after_golden_join (the registered messages land in HudState::user_messages by number and name)"
 
 [[item]]
 id = "svc_packetentities"
-status = "tested"
-evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip"
+status = "verified"
+evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_svc_and_clc_streams_roundtrip; parsed by our client from the original HLDS build 10210 with 0 parse errors, 2026-11-24 (A2, A3 of docs/parity/checklists/phase3-clientcore.md, crates/cs-clientcore/tests/hlds.rs)"
 
 [[item]]
 id = "svc_deltapacketentities"
-status = "tested"
-evidence = "crates/cs-proto48/src/messages.rs::tests::delta_packetentities_roundtrip"
+status = "verified"
+evidence = "crates/cs-proto48/src/messages.rs::tests::delta_packetentities_roundtrip; parsed by our client from the original HLDS build 10210 with 0 parse errors, 2026-11-24 (A2, A3 of docs/parity/checklists/phase3-clientcore.md, crates/cs-clientcore/tests/hlds.rs)"
 
 [[item]]
 id = "svc_choke"

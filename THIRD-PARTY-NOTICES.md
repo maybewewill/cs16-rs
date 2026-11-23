@@ -173,3 +173,40 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## Xash3D FWGS
+
+Upstream: https://github.com/FWGS/xash3d-fwgs (GPL-3.0-or-later, as the module documentation of
+the files below records). Phase 3 (the client core and the renderer) was ported from it; the
+files below were read on 2026-11-23 and the behaviour was ported function by function, each
+module naming its source file and function in its doc comment. Code ported from them is
+distributed in this repository under GPL-3.0-or-later; see `docs/LICENSING.md`. Files not
+listed here were not examined.
+
+| File (Xash3D FWGS) | Where | What was taken |
+|---|---|---|
+| `engine/client/cl_main.c` | `crates/cs-clientcore/src/connection.rs`, `commands.rs`, `cvars.rs`, `resources.rs`, `frames.rs`, `interp.rs`; `crates/cs-client/src/input.rs` | The connect sequence (`getchallenge`, `connect`, `new`, `sendres`, `spawn`, `sendents`), the client commands and cvars the connection reads with their flags and defaults, `CL_ComputeClientInterpolationAmount`, `CL_WritePacket` (command rate bounds, backup commands), the console command flags. |
+| `engine/client/cl_parse.c`, `cl_parse_gs.c` | `crates/cs-clientcore/src/resources.rs`, `precache.rs`, `frames.rs`, `hud.rs`, `sound.rs` | `CL_ParseResourceList`, `CL_ParseServerInfo`, the precache tables, `CL_RegisterUserMessage` and `CL_ParseUserMessage` (registration and framing of the game's messages), the sound message parsing, the `svc_sendcvarvalue` answers. |
+| `engine/client/cl_frame.c` | `crates/cs-clientcore/src/frames.rs`, `interp.rs`, `entities.rs` | `CL_ParsePacketEntities`, `CL_DeltaEntity`, the frame ring and the delta base rule, `CL_LinkPlayers`, `CL_LinkPacketEntities`, the interpolation and extrapolation of entities (`ex_interp`, teleport detection, the studio lerp). |
+| `engine/client/dll_int/cl_pmove.c` | `crates/cs-clientcore/src/predict.rs` | `CL_PredictMovement`, `CL_CheckPredictionError`, `CL_RunUsercmd`, the `playermove_t` setup and the prediction error smoothing. |
+| `engine/client/cl_events.c` | `crates/cs-clientcore/src/events.rs` | `CL_ParseEvent`, `CL_ParseReliableEvent`, `CL_QueueEvent`, `CL_FireEvents`, `CL_FireEvent`, `CL_PlaybackEvent`, `CL_FindEmptyEvent`. |
+| `engine/client/cl_tent.c` | `crates/cs-clientcore/src/tempents.rs` | The temp entity pool and the handlers of the `TE_*` messages. The per-frame update of the temp entities and the shell physics are NOT ported: Xash3D leaves them to the client library, so they are our own clean-room design (documented in `tempents.rs`). |
+| `engine/client/cl_custom.c`, `engine/common/net_chan.c` | `crates/cs-clientcore/src/resources.rs` | The custom resource list handling and the file stream size limit (`MAX_NETCHAN_DECOMPRESSED_SIZE`). |
+| `engine/client/s_main.c` | `crates/cs-clientcore/src/sound.rs` | The arguments and flags of the sound start, ambient and stop commands. |
+| `engine/common/cmd.c`, `engine/common/cvar.c` | `crates/cs-clientcore/src/commands.rs`, `cvars.rs` | `Cbuf_ExecuteCommandsFromBuffer`, the command tokenizer, the cvar flag set and the privileged and filterable command rules. |
+| `public/matrixlib.c`, `public/xash3d_mathlib.c`, `public/xash3d_mathlib.h` | `crates/cs-clientcore/src/interp.rs` | Angle and quaternion helpers. |
+| `ref/gl/gl_rmain.c`, `gl_rsurf.c`, `gl_sprite.c`, `gl_studio.c`, `gl_local.h` | `crates/cs-client/src/render/scene.rs`, `bsp_renderer.rs`, `mdl_renderer.rs`, `sprite_renderer.rs` | The entity draw order and transparency sorting, render modes and render FX (pulse, distort, hologram, glow), the studio frame and looping rules, the sprite drawing (`R_DrawSpriteModel`) and the BSP surface and lightmap rules. |
+
+## cs16-client
+
+Upstream: https://github.com/Velaron/cs16-client (GPL-2.0-or-later; the Counter-Strike 1.6
+client library for Xash3D FWGS). Only the weapon event files `cl_dll/events/event_*.cpp` (read
+2026-11-23) were used: the 30 weapon events of `crates/cs-clientcore/src/events.rs` take their
+per-weapon constants from them (the sounds, the view model animation numbers, the shell
+offsets, the bullet type and the penetration; the table `WEAPONS`), and
+`event_createsmoke.cpp` is the source of the smoke grenade clouds
+(`crates/cs-clientcore/src/tempents.rs`, `spawn_smoke_clouds`). The helper code those files
+call (`EV_GetDefaultShellInfo`, `EV_GetGunPosition`, `HUD_TempEntUpdate` and the rest of the
+`cl_dll` code) is in Valve-licensed files and is NOT ported: the shell and gun placement, the
+shell physics and the temp entity update are our own clean-room design. The HUD code of
+`cl_dll/hud*.cpp` was not read for porting.

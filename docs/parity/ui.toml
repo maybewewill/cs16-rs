@@ -224,8 +224,8 @@ evidence = "Phase 10: StatusText / StatusValue player name/HP status bar"
 
 [[item]]
 id = "ui_hud_text_menus_showmenu"
-status = "missing"
-evidence = "Phase 10: classic ShowMenu yellow text menus (AMX Mod X menus and _vgui_menus 0)"
+status = "tested"
+evidence = "crates/cs-client/src/ui/server_menu.rs draws the server's ShowMenu; session::tests::a_local_game_plays_through_the_session_layer joins through the team and class menus with menuselect; the same menus drive the join on the original HLDS in crates/cs-clientcore/tests/hlds.rs (Part A of docs/parity/checklists/phase3-clientcore.md); the AMX Mod X menus and the picture compared with the original are Phase 10 and Part B"
 
 [[item]]
 id = "ui_hud_hudtext_and_amx_dhud"

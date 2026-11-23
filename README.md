@@ -95,6 +95,12 @@ Ctrl+C (and SIGTERM/SIGHUP on unix) shuts the server down gracefully: connected 
 
 Compatibility with the original client and HLDS is verified in part (connect, MOTD, intro camera, menus, CT spawn, walking, `de_dust2` C4 join+drop, `cs_office` hostages & HUD, `as_oilrig` VIP spawn: Part A of [`docs/parity/checklists/phase2d-weapons.md`](docs/parity/checklists/phase2d-weapons.md) and [`docs/parity/checklists/phase2e-objectives.md`](docs/parity/checklists/phase2e-objectives.md)); earlier manual checklists are [`docs/parity/checklists/phase1-original-client.md`](docs/parity/checklists/phase1-original-client.md), [`docs/parity/checklists/phase2a-console.md`](docs/parity/checklists/phase2a-console.md), [`docs/parity/checklists/phase2b-world.md`](docs/parity/checklists/phase2b-world.md), [`docs/parity/checklists/phase2c-game.md`](docs/parity/checklists/phase2c-game.md), and [`docs/parity/checklists/pm-movement.md`](docs/parity/checklists/pm-movement.md). The headless probe connects the same way: `cargo run -p cs-probe -- --connect 127.0.0.1:27015 --seconds 20 --walk`.
 
+## Phase 3 status: our own client
+
+`cs-client` now runs on `cs-clientcore` for both offline play (a local server over loopback) and `connect <addr>`. Verified headless on 2026-11-24 against the original HLDS (build 10210) on `de_dust2` and `cs_office`: sign-on, delta entity updates (0 parse errors), the join through the text menus, movement prediction (worst error 0.42 and 0.13 units, no teleports), the HUD values (health, money, weapon, ammo) and the events, temp entities and sounds of another player's shots (numbers: Part A of [`docs/parity/checklists/phase3-clientcore.md`](docs/parity/checklists/phase3-clientcore.md); rerun with `CS16_HLDS_ADDR=127.0.0.1:27016 cargo test -p cs-clientcore --test hlds -- --ignored --nocapture`).
+
+**Not verified visually**: how the picture, the HUD, the sound, the menus, buying, the scoreboard and a map change look and feel in our window compared with the original client (Part B of the same checklist, not done yet). Your own shots' events come from the server only (the client does not predict weapons until phase 6).
+
 ## Controls & Shortcuts
 
 | Key | Action |

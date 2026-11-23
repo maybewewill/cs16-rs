@@ -262,43 +262,43 @@ evidence = "crates/cs-engine/tests/fake_clients.rs::a_fake_client_takes_a_slot_w
 
 [[item]]
 id = "clientcore_connect_signon"
-status = "missing"
-evidence = "Phase 3: cs-clientcore connection state machine, signon, resource loading, and precache tables (cs-probe only implements a test subset)"
+status = "verified"
+evidence = "Signon reaches InGame on the original HLDS in 1.0 s with 0 parse errors; crates/cs-clientcore/tests/hlds.rs (headless client against the original HLDS build 10210, de_dust2 and cs_office, 2026-11-24; A1, A2, Part A of docs/parity/checklists/phase3-clientcore.md); also crates/cs-clientcore/tests/connection.rs (resource tables, downloads, consistency, timeouts) and tests/loopback.rs"
 
 [[item]]
 id = "clientcore_entity_table_delta"
-status = "missing"
-evidence = "Phase 3: cs-clientcore entity storage by index, spawn baselines, and packetentities delta application"
+status = "verified"
+evidence = "900+ delta updates of the original HLDS parsed with 0 errors and 20 to 60 entities visible; crates/cs-clientcore/tests/hlds.rs (headless client against the original HLDS build 10210, de_dust2 and cs_office, 2026-11-24; A3, A5, Part A of docs/parity/checklists/phase3-clientcore.md); crates/cs-clientcore/tests/frames.rs::replays_a_golden_capture_into_the_entity_store, delta_from_an_unacked_frame_is_refused, deltas_keep_working_past_sequence_255"
 
 [[item]]
 id = "clientcore_interpolation"
-status = "missing"
-evidence = "Phase 3: cs-clientcore entity interpolation (ex_interp) and extrapolation"
+status = "tested"
+evidence = "crates/cs-clientcore/tests/frames.rs::interpolates_between_two_frames, angles_are_interpolated_along_the_short_way, nointerp_snaps, a_teleport_snaps_and_ef_nointerp_resets_the_latched_state, local_player_is_not_interpolated; ran on the original HLDS stream without errors (Part A of docs/parity/checklists/phase3-clientcore.md), not compared with the original client's picture"
 
 [[item]]
 id = "clientcore_move_prediction"
-status = "missing"
-evidence = "Phase 3: cs-clientcore client-side player movement prediction via shared cs_sim::pm and svc_clientdata reconciliation"
+status = "verified"
+evidence = "Prediction replayed against the original HLDS's clientdata: worst error 0.416 and 0.126 units, 0 teleports over 733 checks each; crates/cs-clientcore/tests/hlds.rs (headless client against the original HLDS build 10210, de_dust2 and cs_office, 2026-11-24; A6 to A8, Part A of docs/parity/checklists/phase3-clientcore.md); crates/cs-clientcore/tests/predict.rs::prediction_matches_the_server_on_loopback, prediction_matches_the_server_on_dust2"
 
 [[item]]
 id = "clientcore_weapon_prediction"
 status = "missing"
-evidence = "Phase 3: cs-clientcore client-side weapon prediction (cl_lw 1) via weapon_data"
+evidence = "Phase 3 kept only the bookkeeping from weapon_data and events (crates/cs-clientcore/src/predict.rs WeaponState: next attack, ammo, weapon id); the client does not run the weapon code (ItemPostFrame) or play the shot's events itself, so the shooter hears and sees its own shots only when the server's events arrive (the original server skips the host: A15 of docs/parity/checklists/phase3-clientcore.md). Phase 6"
 
 [[item]]
 id = "clientcore_usermsg_dispatch"
-status = "missing"
-evidence = "Phase 3: cs-clientcore usermsg dispatcher into HUD state, including dynamic registration of unknown mod/AMXX messages"
+status = "tested"
+evidence = "crates/cs-clientcore/tests/effects.rs::hud_state_after_golden_join (the HUD state of a golden join); live on the original HLDS: health 100, money 800, USP and ammo after the shots (A9, A10 of docs/parity/checklists/phase3-clientcore.md); unknown messages are kept in HudState::unknown_messages"
 
 [[item]]
 id = "clientcore_tempents_events"
-status = "missing"
-evidence = "Phase 3: cs-clientcore tempents and event playback dispatch"
+status = "tested"
+evidence = "crates/cs-clientcore/tests/effects.rs::golden_temp_entities_stay_within_the_pool, golden_sounds_become_commands_with_their_names; crates/cs-clientcore/tests/effects_loopback.rs; live on the original HLDS an observer fired 12 events/usp.sc, made 9 temp entities and 12 shot sounds for 12 shots (A12 to A14 of docs/parity/checklists/phase3-clientcore.md); the shell physics and tempent update are our own clean-room design, so they are not compared with the original"
 
 [[item]]
 id = "clientcore_loopback_local_game"
-status = "missing"
-evidence = "Phase 3: running local single/listen games through cs-engine over loopback transport and removing legacy cs-net"
+status = "tested"
+evidence = "crates/cs-clientcore/tests/loopback.rs::connects_to_our_server_over_loopback, crates/cs-local/tests/local.rs::local_game_starts_and_spawns_the_player, local_game_with_bots_plays_a_round, crates/cs-client/src/session.rs::tests::a_local_game_plays_through_the_session_layer; cs-net is removed"
 
 [[item]]
 id = "demo_record"

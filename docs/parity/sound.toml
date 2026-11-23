@@ -18,8 +18,8 @@ evidence = "crates/cs-client/src/audio.rs (media/gamestartup.mp3 / Half-Life01.m
 
 [[item]]
 id = "sound_protocol48_svc_sound_driver"
-status = "missing"
-evidence = "Phase 3: driving client sound playback from Protocol 48 svc_sound / svc_stopsound / svc_spawnstaticsound / events"
+status = "tested"
+evidence = "crates/cs-clientcore/tests/effects.rs::golden_sounds_become_commands_with_their_names (svc_sound, ambient and event sounds become SoundCommands by name); crates/cs-client/src/audio.rs plays them with rodio; live on the original HLDS 12 shot sounds and the map ambients arrived (A14 of docs/parity/checklists/phase3-clientcore.md); how they sound is Part B, not done"
 
 [[item]]
 id = "sound_channels_and_priorities"

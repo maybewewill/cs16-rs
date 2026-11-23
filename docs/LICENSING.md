@@ -19,6 +19,8 @@ their `LICENSE` files on the GitHub `master` branch:
 |---|---|---|
 | ReHLDS | MIT | Copyright (c) 2014–2025 ReHLDS Contributors |
 | ReGameDLL_CS | MIT | Copyright (c) 2015–2025 ReGameDLL_CS Contributors |
+| Xash3D FWGS | GPL-3.0-or-later (as recorded in the module documentation of the ported files; not rechecked on the upstream `master` for this table) | Xash3D FWGS contributors |
+| cs16-client | GPL-2.0-or-later (the `event_*.cpp` files only) | cs16-client contributors |
 
 `LICENSE` at the repository root holds the GPL v3 text; `THIRD-PARTY-NOTICES.md` holds the
 upstream copyright and permission notices of ReHLDS and ReGameDLL_CS. The protocol crate
@@ -73,6 +75,8 @@ What was found:
   which restricts use, distribution and modification to non-commercial enhancements to products
   from Valve LLC; `rehlds/common/qlimits.h` and `rehlds/public/rehlds/edict.h` carry a plain
   Valve copyright line without terms of use.
+
+- Phase 3 client port (read 2026-11-23): Xash3D FWGS `engine/client/cl_main.c`, `cl_parse.c`, `cl_parse_gs.c`, `cl_frame.c`, `cl_events.c`, `cl_tent.c`, `cl_custom.c`, `s_main.c`, `dll_int/cl_pmove.c`, `engine/common/cmd.c`, `cvar.c`, `net_chan.c`, `public/matrixlib.c`, `xash3d_mathlib.c`, `xash3d_mathlib.h` and `ref/gl/gl_rmain.c`, `gl_rsurf.c`, `gl_sprite.c`, `gl_studio.c`, `gl_local.h` are GPL-3.0-or-later and compatible with this project's licence; the behaviour of `cs-clientcore` and of the `cs-client` renderer was ported from them function by function (`THIRD-PARTY-NOTICES.md` lists each file and what was taken). cs16-client `cl_dll/events/event_*.cpp` are GPL-2.0-or-later ("or later" makes them usable under GPL-3.0-or-later); the per-weapon constants of the 30 weapon events and the smoke grenade clouds come from them. The Valve-licensed helper files those events call (`EV_GetDefaultShellInfo`, `EV_GetGunPosition`, `HUD_TempEntUpdate`, the `cl_dll/hud*.cpp` code) were NOT ported: Xash3D leaves the temp entity update to the client library, so the shell kinematics, the gun position and the temp entity update are our own clean-room design, written by an author who did not read the Valve files (an earlier transliteration of them was removed in phase 3 review).
 
 Decision: the project owner chose GPL-3.0-or-later because it is compatible with both readings
 of the reference projects' licensing.
