@@ -34,6 +34,7 @@ struct Options {
     port: u16,
     max_players: u8,
     hostname: String,
+    bots: Option<u8>,
     /// Run `WalkGame` instead of `CsGame`.
     walk_game: bool,
 }
@@ -45,6 +46,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         port: cs_net::DEFAULT_PORT,
         max_players: 16,
         hostname: ServerConfig::default().hostname,
+        bots: None,
         walk_game: false,
     };
     let mut args = args.iter();
@@ -69,8 +71,13 @@ fn parse(args: &[String]) -> Result<Options, String> {
             }
             "--hostname" => opts.hostname = value()?.clone(),
             "--bots" | "-b" => {
-                value()?;
-                info!("--bots is ignored with --proto48: this mode has no bots");
+                let v = value()?;
+                let count = v
+                    .parse()
+                    .ok()
+                    .filter(|n: &u8| *n <= 32)
+                    .ok_or(format!("{arg}: not a number from 0 to 32: {v}"))?;
+                opts.bots = Some(count);
             }
             other => return Err(format!("unknown argument `{other}`")),
         }
@@ -124,6 +131,7 @@ fn change_level<G: GameDll>(
 fn vanilla_cvars() -> CVarRegistry {
     let mut cvars = CVarRegistry::new_with_defaults();
     cvars.set("mp_roundtime", "5");
+    cvars.set("bot_quota", "0");
     cvars
 }
 
@@ -180,6 +188,7 @@ fn start(args: &[String]) -> Result<(), String> {
         let mut game = CsGame::new();
         game.load_motd(&vfs);
         game.load_map_cycle(&vfs);
+        game.enable_cvar_bot_quota();
         serve(&opts, &vfs, map, game, "CsGame")
     }
 }
@@ -233,6 +242,9 @@ fn serve<G: GameDll>(
         ..ServerConfig::default()
     };
     let mut server = new_server(cfg, map, game, vfs);
+    if let Some(n) = opts.bots {
+        let _ = server.console_command(&format!("bot_quota {n}"));
+    }
     info!(
         addr = %net.local_addr(),
         map = %map_name,
@@ -318,6 +330,7 @@ mod tests {
     fn vanilla_round_time() {
         // The proto48 server starts at the vanilla 5 minutes, the legacy registry at 1.75.
         assert_eq!(vanilla_cvars().get_f32("mp_roundtime"), 5.0);
+        assert_eq!(vanilla_cvars().get_f32("bot_quota"), 0.0);
         assert_eq!(CVarRegistry::new_with_defaults().get_f32("mp_roundtime"), 1.75);
     }
 
@@ -325,8 +338,8 @@ mod tests {
     fn defaults_and_flags() {
         let o = parse(&args(&["--proto48"])).unwrap();
         assert_eq!(
-            (o.map.as_str(), o.port, o.max_players),
-            ("de_dust2", 27015, 16)
+            (o.map.as_str(), o.port, o.max_players, o.bots),
+            ("de_dust2", 27015, 16, None)
         );
         assert_eq!(o.hostname, ServerConfig::default().hostname);
         assert!(!o.walk_game);
@@ -348,8 +361,8 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(
-            (o.map.as_str(), o.port, o.max_players),
-            ("cs_office", 27115, 8)
+            (o.map.as_str(), o.port, o.max_players, o.bots),
+            ("cs_office", 27115, 8, Some(3))
         );
         assert_eq!(o.hostname, "Test");
         assert_eq!(o.gamedir, Some(PathBuf::from("C:/hl")));
@@ -365,6 +378,8 @@ mod tests {
         for bad in [
             &["--maxplayers", "0"][..],
             &["--maxplayers", "33"],
+            &["--bots", "33"],
+            &["--bots", "x"],
             &["--port", "x"],
             &["--map"],
             &["--frobnicate"],

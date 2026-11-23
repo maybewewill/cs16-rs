@@ -11,6 +11,7 @@
 //! and the night vision; [`buy`] has the buy zones and the purchase of the equipment. The dead
 //! and the spectators watch through [`observer`].
 
+pub mod bots;
 pub mod bullets;
 pub mod buy;
 pub mod chat;
@@ -98,6 +99,8 @@ pub struct GameState {
     pub(crate) hostage_nav: hostage_localnav::LocalNavManager,
     /// `g_iHostageNumber`: 1-based counter incremented as each hostage spawns on the map.
     pub(crate) next_hostage_number: u8,
+    /// Server-side engine bots (`BotManager`).
+    pub(crate) bots: bots::BotManager,
     /// Every call the dispatch delivered to a `test_dispatch` entity. For tests only (feature
     /// `test-hooks`).
     #[cfg(feature = "test-hooks")]
@@ -125,6 +128,7 @@ impl GameState {
             delay_keys: std::collections::HashMap::new(),
             hostage_nav: hostage_localnav::LocalNavManager::default(),
             next_hostage_number: 0,
+            bots: bots::BotManager::default(),
             #[cfg(feature = "test-hooks")]
             dispatch_log: Vec::new(),
         }
@@ -146,6 +150,7 @@ impl GameState {
         self.map_info = None;
         self.hostage_nav.reset();
         self.next_hostage_number = 0;
+        self.bots.reset();
     }
 }
 
@@ -180,6 +185,12 @@ impl CsGame {
             state: GameState::new(),
             pvs_history: fullpack::PvsHistory::default(),
         }
+    }
+
+    /// Enables automatic `bot_quota` maintenance (used by `--proto48` dedicated servers; disabled
+    /// by default because `cs-cvar` defaults `bot_quota` to `"9"` for the legacy offline client).
+    pub fn enable_cvar_bot_quota(&mut self) {
+        self.state.bots.quota_enabled = true;
     }
 
     /// Reads the message of the day, `motd.txt` of the game directories (`LOAD_FILE_FOR_ME` of
@@ -761,6 +772,7 @@ impl GameDll for CsGame {
     }
 
     fn client_disconnect(&mut self, eng: &mut EngineApi<'_>, slot: u8) {
+        bots::on_disconnect(&mut self.state, slot);
         player::disconnect(&mut self.state, eng, slot);
     }
 
@@ -791,7 +803,12 @@ impl GameDll for CsGame {
     /// `CHalfLifeMultiplay::Think`: the clock of the round and the match.
     fn start_frame(&mut self, eng: &mut EngineApi<'_>, _frametime: f32) {
         hostage_localnav::think(&mut self.state, eng);
+        bots::start_frame(&mut self.state, eng);
         rules::think(&mut self.state, eng);
+    }
+
+    fn server_command(&mut self, eng: &mut EngineApi<'_>, argv: &[String]) -> Option<String> {
+        bots::server_command(&mut self.state, eng, argv)
     }
 
     fn think(&mut self, eng: &mut EngineApi<'_>, id: EdictId) {

@@ -276,6 +276,9 @@ pub(crate) fn pre_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
 /// The team-menu part of `CHalfLifeMultiplay::PlayerThink`: a player about to pick a team gets
 /// the menu, unless `humans_join_team` says which team humans join: then it joins it.
 fn player_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    if eng.is_fake_client(slot) {
+        return;
+    }
     let Some(p) = g
         .players
         .get_mut(usize::from(slot))
@@ -480,7 +483,7 @@ pub(crate) fn handle_menu_choose_team(
     } else {
         None
     };
-    if human_team.is_some_and(|t| t != team) {
+    if !eng.is_fake_client(slot) && human_team.is_some_and(|t| t != team) {
         let text = if is_terrorist {
             "#Humans_Join_Team_CT"
         } else {
@@ -529,24 +532,26 @@ pub(crate) fn handle_menu_choose_team(
     let vgui = p.vgui_menus;
     let alive = p.alive;
     p.menu = Menu::ChooseAppearance;
-    if is_terrorist {
-        menus::show_vgui_menu(
-            eng,
-            slot,
-            vgui,
-            VGUI_MENU_CLASS_T,
-            MENU_KEY_1 | MENU_KEY_2 | MENU_KEY_3 | MENU_KEY_4 | MENU_KEY_5,
-            "#Terrorist_Select",
-        );
-    } else {
-        menus::show_vgui_menu(
-            eng,
-            slot,
-            vgui,
-            VGUI_MENU_CLASS_CT,
-            MENU_KEY_1 | MENU_KEY_2 | MENU_KEY_3 | MENU_KEY_4 | MENU_KEY_5,
-            "#CT_Select",
-        );
+    if !eng.is_fake_client(slot) {
+        if is_terrorist {
+            menus::show_vgui_menu(
+                eng,
+                slot,
+                vgui,
+                VGUI_MENU_CLASS_T,
+                MENU_KEY_1 | MENU_KEY_2 | MENU_KEY_3 | MENU_KEY_4 | MENU_KEY_5,
+                "#Terrorist_Select",
+            );
+        } else {
+            menus::show_vgui_menu(
+                eng,
+                slot,
+                vgui,
+                VGUI_MENU_CLASS_CT,
+                MENU_KEY_1 | MENU_KEY_2 | MENU_KEY_3 | MENU_KEY_4 | MENU_KEY_5,
+                "#CT_Select",
+            );
+        }
     }
     if alive {
         // A suicide: it costs a frag and counts as a death, and the others see it under the

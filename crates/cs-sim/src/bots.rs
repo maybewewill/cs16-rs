@@ -7,10 +7,36 @@ use glam::Vec3;
 
 use crate::grenades::{SmokeCloud, segment_blocked_by_smoke};
 use crate::pmove::snap_spawn_to_floor;
-use crate::trace::{BspCollision, CONTENTS_SOLID, Hull};
+use crate::trace::{BspCollision, CONTENTS_SOLID, Hull, TraceResult};
 
 const NAV_STEP: f32 = 96.0;
 const MAX_NAV_NODES: usize = 900;
+
+/// Minimal collision/visibility interface needed to build a [`NavGraph`] and run [`think_bot_with`].
+pub trait BotWorld {
+    fn snap_to_floor(&self, seed: Vec3) -> Vec3;
+    fn is_solid_standing(&self, pos: Vec3) -> bool;
+    fn trace_standing(&self, start: Vec3, end: Vec3) -> TraceResult;
+    fn has_line_of_sight(&self, start: Vec3, end: Vec3) -> bool;
+}
+
+impl BotWorld for BspCollision {
+    fn snap_to_floor(&self, seed: Vec3) -> Vec3 {
+        snap_spawn_to_floor(seed, self)
+    }
+
+    fn is_solid_standing(&self, pos: Vec3) -> bool {
+        self.point_contents(pos, Hull::Standing) == CONTENTS_SOLID
+    }
+
+    fn trace_standing(&self, start: Vec3, end: Vec3) -> TraceResult {
+        self.trace_hull(start, end, Hull::Standing)
+    }
+
+    fn has_line_of_sight(&self, start: Vec3, end: Vec3) -> bool {
+        self.has_line_of_sight(start, end)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct NavNode {
@@ -26,6 +52,10 @@ pub struct NavGraph {
 
 impl NavGraph {
     pub fn build(collision: &BspCollision, seeds: &[Vec3]) -> Self {
+        Self::build_with(collision, seeds)
+    }
+
+    pub fn build_with<W: BotWorld + ?Sized>(world: &W, seeds: &[Vec3]) -> Self {
         let mut nodes: Vec<NavNode> = Vec::new();
         let mut grid: HashMap<(i32, i32, i32), usize> = HashMap::new();
         let mut queue: VecDeque<usize> = VecDeque::new();
@@ -39,8 +69,8 @@ impl NavGraph {
         };
 
         for &seed in seeds {
-            let snapped = snap_spawn_to_floor(seed, collision);
-            if collision.point_contents(snapped, Hull::Standing) == CONTENTS_SOLID {
+            let snapped = world.snap_to_floor(seed);
+            if world.is_solid_standing(snapped) {
                 continue;
             }
             let key = quantize(snapped);
@@ -77,14 +107,13 @@ impl NavGraph {
                 // Step up 20 units, slide horizontally, then trace down up to 80 units to find floor
                 let lifted = curr_pos + Vec3::new(0.0, 0.0, 22.0);
                 let horiz_end = target_xy + Vec3::new(0.0, 0.0, 22.0);
-                let tr_h = collision.trace_hull(lifted, horiz_end, Hull::Standing);
+                let tr_h = world.trace_standing(lifted, horiz_end);
                 if tr_h.start_solid || tr_h.fraction < 0.92 {
                     continue;
                 }
-                let tr_d = collision.trace_hull(
+                let tr_d = world.trace_standing(
                     tr_h.end_pos,
                     tr_h.end_pos - Vec3::new(0.0, 0.0, 96.0),
-                    Hull::Standing,
                 );
                 if tr_d.all_solid || tr_d.fraction >= 1.0 || tr_d.plane_normal.z < 0.7 {
                     continue;
@@ -222,6 +251,20 @@ pub fn think_bot(
     rng_seed: u64,
     dt: f32,
 ) -> BotDecision {
+    think_bot_with(brain, obs, enemies, nav, collision, smokes, rng_seed, dt)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn think_bot_with<W: BotWorld + ?Sized>(
+    brain: &mut BotBrain,
+    obs: &BotObservation,
+    enemies: &[(u32, Vec3, Vec3)], // (id, origin, eye)
+    nav: &NavGraph,
+    world: &W,
+    smokes: &[SmokeCloud],
+    rng_seed: u64,
+    dt: f32,
+) -> BotDecision {
     let mut dec = BotDecision {
         yaw_deg: obs.yaw_deg,
         pitch_deg: obs.pitch_deg,
@@ -242,7 +285,7 @@ pub fn think_bot(
             if dist > 2600.0 {
                 continue;
             }
-            if !collision.has_line_of_sight(obs.eye, aim_pt) {
+            if !world.has_line_of_sight(obs.eye, aim_pt) {
                 continue;
             }
             if segment_blocked_by_smoke(obs.eye, aim_pt, smokes) {

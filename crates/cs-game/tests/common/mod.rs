@@ -94,6 +94,9 @@ impl GameDll for Rig {
     fn blocked(&mut self, eng: &mut EngineApi<'_>, pusher: EdictId, other: EdictId) {
         self.game.blocked(eng, pusher, other);
     }
+    fn server_command(&mut self, eng: &mut EngineApi<'_>, argv: &[String]) -> Option<String> {
+        self.game.server_command(eng, argv)
+    }
     fn update_client_data(&mut self, eng: &mut EngineApi<'_>, slot: u8) -> GoldSrcClientData {
         self.game.update_client_data(eng, slot)
     }

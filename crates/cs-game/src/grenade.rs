@@ -1086,6 +1086,10 @@ impl GameEntity for Grenade {
         if self.is_c4 { FCAP_CONTINUOUS_USE } else { 0 }
     }
 
+    fn is_planted_c4(&self) -> bool {
+        self.is_c4
+    }
+
     fn use_(
         &mut self,
         g: &mut GameState,

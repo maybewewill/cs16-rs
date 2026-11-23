@@ -1075,6 +1075,7 @@ pub(crate) fn restart_round(g: &mut GameState, eng: &mut EngineApi<'_>) {
     // `UTIL_RestartOther("hostage_entity")` (`RestartRound`, multiplay_gamerules.cpp:1922) and
     // `CleanUpMap`: the hostages reset, the armoury starts over, and every weapon box goes.
     crate::hostage::restart_round(g, eng);
+    crate::bots::on_round_restart(g);
     crate::inventory::clean_up_map(g, eng);
 
     // Reset game variables.
