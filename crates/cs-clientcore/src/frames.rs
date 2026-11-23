@@ -9,6 +9,10 @@
 //! GoldSrc wire path), `engine/client/cl_parse.c` (`CL_ParseServerTime`, `CL_ParseClientData`'s
 //! frame bookkeeping) and `engine/client/cl_main.c` (`CL_AdjustClock`, `CL_ReadPackets`).
 //!
+//! Instanced baselines (`svc_spawnbaseline`'s second list) are applied by the parser: it keeps
+//! them in `SvcParseContext::instance_baselines` and uses them as the base of an entity that
+//! asks for one, so the entity set that arrives here is already complete.
+//!
 //! The bit-level delta decoding of an entity packet is done by `cs_proto48::messages` when it
 //! parses the message: what arrives here is the complete entity set of the new frame. This
 //! module owns what Xash3D keeps around it: the 64-slot ring of frames, the check that a delta
@@ -109,6 +113,8 @@ pub enum FrameOutcome {
 
 /// `CL_ValidateDeltaPacket` for the ring `frames`: may an update that arrived in packet
 /// `incoming_sequence` be based on packet `old_packet` (the low byte of its sequence)?
+/// The full base sequence is rebuilt from the byte (`incoming - ((incoming - old) & 0xFF)`)
+/// and the ring must hold exactly that packet, valid.
 pub fn validate_delta_packet(
     frames: &FrameRing,
     incoming_sequence: u32,
@@ -118,11 +124,11 @@ pub fn validate_delta_packet(
     if subtracted == 0 || subtracted >= UPDATE_MASK {
         return Err(DeltaRefusal::TooOld);
     }
-    let old = frames.slot(u32::from(old_packet));
-    if !old.valid || (old.sequence & 0xFF) != u32::from(old_packet) {
-        return Err(DeltaRefusal::UnknownFrame);
+    let base = incoming_sequence - subtracted;
+    match frames.get(base) {
+        Some(f) if f.valid => Ok(()),
+        _ => Err(DeltaRefusal::UnknownFrame),
     }
-    Ok(())
 }
 
 /// `cl.frames`.
@@ -290,6 +296,12 @@ impl ClientFrames {
         self.ring.get(self.parsecount).filter(|f| f.valid)
     }
 
+    /// Whether the server is on this machine (loopback): `MOVETYPE_STEP` entities are then
+    /// not lerped from the position history.
+    pub fn set_remote_is_local(&mut self, local: bool) {
+        self.settings.remote_is_local = local;
+    }
+
     /// The client's frame step: advances the clock by `frametime` seconds and eases it
     /// towards the server's (`CL_ReadPackets`, `CL_AdjustClock`).
     pub fn advance(&mut self, frametime: f64) {
@@ -307,27 +319,15 @@ impl ClientFrames {
         incoming_sequence: u32,
         now: f64,
     ) -> FrameOutcome {
-        // Every packet starts a frame (`cl.parsecount = incoming_sequence`).
-        self.parsecount = incoming_sequence;
-        {
-            let frame = self.ring.begin(incoming_sequence);
-            if frame.received_time == 0.0 {
-                frame.received_time = now;
-            }
-            frame.time = self.clock.mtime[0];
-        }
-
         match msg {
             SvcMessage::ServerInfo(info) => {
                 self.reset();
-                self.parsecount = incoming_sequence;
                 self.entities.max_clients = info.max_clients;
                 self.entities.playernum = info.player_slot;
                 FrameOutcome::Ignored
             }
             SvcMessage::Time(t) => {
                 self.clock.on_server_time(*t, self.entities.max_clients);
-                self.ring.begin(incoming_sequence).time = self.clock.mtime[0];
                 FrameOutcome::Ignored
             }
             SvcMessage::SetPause(paused) => {
@@ -362,16 +362,30 @@ impl ClientFrames {
                             .collect()
                     })
                     .unwrap_or_default();
-                let frame = self.ring.begin(incoming_sequence);
+                let frame = self.begin_packet(incoming_sequence, now);
                 frame.clientdata = Some(parsed.clone());
                 frame.weapon_data = weapon_data;
                 FrameOutcome::Ignored
             }
             SvcMessage::PacketEntities(update) => {
-                self.on_packet_entities(update, ctx, models, incoming_sequence)
+                self.on_packet_entities(update, ctx, models, incoming_sequence, now)
             }
             _ => FrameOutcome::Ignored,
         }
+    }
+
+    /// `CL_ParseClientData` / `CL_ParsePacketEntitiesGS` start of frame: `cl.parsecount =
+    /// incoming_sequence`, `frame->time`, `frame->receivedtime` (`cl_parse.c`, in
+    /// `CL_ParseClientData`). Only these two messages do it, not every message of a packet.
+    fn begin_packet(&mut self, incoming_sequence: u32, now: f64) -> &mut Frame {
+        self.parsecount = incoming_sequence;
+        let time = self.clock.mtime[0];
+        let frame = self.ring.begin(incoming_sequence);
+        if frame.received_time == 0.0 {
+            frame.received_time = now;
+        }
+        frame.time = time;
+        frame
     }
 
     /// `CL_ParsePacketEntitiesGS` after the wire decoding.
@@ -381,7 +395,9 @@ impl ClientFrames {
         ctx: &SvcParseContext,
         models: &PrecacheTables,
         incoming_sequence: u32,
+        now: f64,
     ) -> FrameOutcome {
+        self.begin_packet(incoming_sequence, now);
         // `delta` without a base frame number cannot be told from a corrupt message.
         let old_packet = if update.is_delta {
             match update.delta_from_seq {
@@ -399,7 +415,10 @@ impl ClientFrames {
 
         // Which entities were in the frame this update is based on: those that are not are
         // new (the first update has no base, so all of them are).
-        let old = old_packet.and_then(|seq| self.ring.get(u32::from(seq)));
+        let old = old_packet.and_then(|seq| {
+            let base = incoming_sequence - (incoming_sequence.wrapping_sub(u32::from(seq)) & 0xFF);
+            self.ring.get(base)
+        });
         let mut entities = Vec::with_capacity(update.entities.len());
         for (&number, (ent_type, rec)) in &update.entities {
             let name = entity_schema_name(number, *ent_type, ctx.max_clients);

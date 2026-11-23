@@ -681,3 +681,41 @@ pub(crate) fn emit_entities(
     link_packet_entities(store, frame, clock, settings, inputs, &mut out);
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn close(a: Vec3, b: Vec3) -> bool {
+        (a - b).abs().max_element() < 0.05
+    }
+
+    #[test]
+    fn angles_survive_the_quaternion_round_trip() {
+        for a in [
+            Vec3::new(30.0, 45.0, 10.0),
+            Vec3::new(-60.0, 170.0, -20.0),
+            Vec3::new(10.0, -120.0, 80.0),
+        ] {
+            let back = quaternion_angle(angle_quaternion(a));
+            assert!(close(back, a), "{a:?} -> {back:?}");
+        }
+    }
+
+    #[test]
+    fn pitch_and_roll_are_slerped() {
+        let from = Vec3::new(0.0, 0.0, 0.0);
+        let to = Vec3::new(40.0, 0.0, 20.0);
+        let mid = slerp_angles(from, to, 0.5);
+        assert!(close(mid, slerp_angles(to, from, 0.5)));
+        assert!(mid.x > 15.0 && mid.x < 25.0 && mid.z > 5.0 && mid.z < 15.0, "{mid:?}");
+        assert!(close(slerp_angles(from, to, 1.0), to));
+    }
+
+    #[test]
+    fn straight_up_takes_the_gimbal_lock_branch() {
+        let a = quaternion_angle(angle_quaternion(Vec3::new(-90.0, 30.0, 0.0)));
+        assert!((a.x + 90.0).abs() < 0.1, "{a:?}");
+        assert_eq!(a.z, 0.0);
+    }
+}

@@ -417,6 +417,8 @@ impl<T: PacketTransport> Connection<T> {
         if self.cvars.set(name, value).is_none() {
             return;
         }
+        // Task 4 hook: ex_interp / cl_nointerp / cl_updaterate may have changed.
+        self.frames.apply_cvars(&self.cvars);
         let Some(var) = self.cvars.find(name) else {
             return;
         };

@@ -282,6 +282,47 @@ fn delta_from_an_unacked_frame_is_refused() {
 }
 
 #[test]
+fn deltas_keep_working_past_sequence_255() {
+    let mut rig = Rig::new();
+    let first = 254u32;
+    let msg = rig.update(false, None, &[player(2, 0.0, 1.0), prop(20, 0.0, 1.0)]);
+    assert_eq!(rig.packet(first, 1.0, msg), FrameOutcome::Applied);
+    let mut t = 1.0f32;
+    for seq in (first + 1)..=260 {
+        t += 0.1;
+        let x = (seq - first) as f32 * 100.0;
+        let msg = rig.update(
+            true,
+            Some(((seq - 1) & 0xFF) as u8),
+            &[player(2, x, t), prop(20, x, t)],
+        );
+        assert_eq!(rig.packet(seq, t, msg), FrameOutcome::Applied, "seq {seq}");
+        let f = rig.frames.current_frame().unwrap();
+        assert!(f.entities.iter().all(|e| !e.is_new), "seq {seq}: an entity was reset");
+    }
+    // Render time between the last two updates: the middle of 500 and 600.
+    let r = emit_at(&mut rig, f64::from(t) - 0.05 + 0.1);
+    assert!((find(&r, 2).origin.x - 550.0).abs() < 0.1, "{:?}", find(&r, 2).origin);
+    assert!((find(&r, 20).origin.x - 550.0).abs() < 0.1, "{:?}", find(&r, 20).origin);
+}
+
+#[test]
+fn a_packet_without_an_entity_update_changes_nothing() {
+    let mut rig = Rig::new();
+    let msg = rig.update(false, None, &[player(2, 0.0, 1.0), prop(20, 0.0, 1.0)]);
+    rig.packet(1, 1.0, msg);
+    let before = emit_at(&mut rig, 1.1);
+    assert!(!before.entities.is_empty());
+    // Packet 2 carries a time and a print only.
+    rig.frames.handle(&SvcMessage::Time(1.1), &rig.ctx, &rig.models, 2, 0.0);
+    rig.frames
+        .handle(&SvcMessage::Print("hi".into()), &rig.ctx, &rig.models, 2, 0.0);
+    assert_eq!(rig.frames.parsecount, 1);
+    let after = emit_at(&mut rig, 1.1);
+    assert_eq!(before, after);
+}
+
+#[test]
 fn a_delta_from_a_frame_that_was_itself_refused_is_refused() {
     let mut rig = Rig::new();
     let msg = rig.update(false, None, &[player(2, 0.0, 1.0)]);
@@ -380,6 +421,7 @@ fn replays_a_golden_capture_into_the_entity_store() {
         let mut frames = ClientFrames::new();
         let mut models = PrecacheTables::default();
         let (mut applied, mut refused, mut emitted) = (0u32, 0u32, 0usize);
+        let mut seen: BTreeMap<u32, Vec<u16>> = BTreeMap::new();
         let mut max_players_seen = 0usize;
 
         for (received, time, data) in records {
@@ -414,6 +456,27 @@ fn replays_a_golden_capture_into_the_entity_store() {
                                 let wire: Vec<u16> = update.entities.keys().copied().collect();
                                 assert_eq!(numbers, wire, "{file}: frame {}", incoming.sequence);
                             }
+                            // An entity the base frame holds is not new.
+                            if let SvcMessage::PacketEntities(update) = &msg
+                                && let Some(from) = update.delta_from_seq
+                            {
+                                let base = incoming.sequence
+                                    - (incoming.sequence.wrapping_sub(u32::from(from)) & 0xFF);
+                                let held = &seen[&base];
+                                for e in &current.entities {
+                                    assert_eq!(
+                                        e.is_new,
+                                        !held.contains(&e.state.number),
+                                        "{file}: seq {} entity {}",
+                                        incoming.sequence,
+                                        e.state.number
+                                    );
+                                }
+                            }
+                            seen.insert(
+                                incoming.sequence,
+                                current.entities.iter().map(|e| e.state.number).collect(),
+                            );
                             // Render the frame as the client would, a frame step later.
                             frames.advance(0.01);
                             let r = frames.emit(&EmitInputs::default());
