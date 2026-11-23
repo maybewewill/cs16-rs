@@ -1,0 +1,17 @@
+[package]
+name = "cs-pm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Engine-neutral GoldSrc player movement (pm_shared), BSP hull collision and physent traces. Builds for wasm."
+
+[dependencies]
+cs-assets.workspace = true
+glam.workspace = true
+
+[dev-dependencies]
+cs-vfs.workspace = true
+
+[lints]
+workspace = true

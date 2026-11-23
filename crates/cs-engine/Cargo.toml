@@ -16,6 +16,7 @@ test-hooks = []
 [dependencies]
 cs-assets.workspace = true
 cs-cvar.workspace = true
+cs-pm.workspace = true
 cs-proto48.workspace = true
 cs-transport.workspace = true
 glam.workspace = true

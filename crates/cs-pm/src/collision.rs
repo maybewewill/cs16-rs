@@ -16,6 +16,11 @@ pub const CONTENTS_SKY: i32 = -6;
 /// checked against ReHLDS): GoldSrc maps stay well inside it (±4096 per axis by default).
 pub const MAX_WORLD_COORD: f32 = 131_072.0;
 
+/// Whether every coordinate of `v` is finite and within [`MAX_WORLD_COORD`].
+pub fn in_world(v: Vec3) -> bool {
+    v.is_finite() && v.abs().max_element() <= MAX_WORLD_COORD
+}
+
 /// Classic Quake / GoldSrc epsilon preventing surface sinking (`1 / 32`).
 pub const DIST_EPSILON: f32 = 0.03125;
 
@@ -42,7 +47,7 @@ impl Hull {
     }
 
     /// `clip_mins` of the BSP hull: the corner of the box the hull was built for.
-    pub(crate) fn clip_mins(self) -> Vec3 {
+    pub fn clip_mins(self) -> Vec3 {
         -self.half_extents()
     }
 }
@@ -54,14 +59,14 @@ pub const CONTENTS_CURRENT_DOWN: i32 = -14;
 
 /// What a trace walks: a hull of a BSP model, or a box turned into a six-plane hull.
 #[derive(Clone, Copy)]
-pub(crate) enum Geometry<'a> {
+pub enum Geometry<'a> {
     Bsp { model: usize, hull: Hull },
     Box(&'a BoxHull),
 }
 
 impl Geometry<'_> {
     /// The node the walk starts at (`hull->firstclipnode`).
-    pub(crate) fn root(self, world: &WorldCollision) -> i32 {
+    pub fn root(self, world: &WorldCollision) -> i32 {
         match self {
             Self::Bsp { model, hull } => world
                 .models
@@ -82,7 +87,7 @@ impl Geometry<'_> {
 /// `box_hull` of `SV_InitBoxHull`: planes 0..6 are `+x max`, `+x min`, `+y max`, `+y min`,
 /// `+z max`, `+z min`; clipnode `i` has the plane `i`.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct BoxHull {
+pub struct BoxHull {
     planes: [Plane; 6],
 }
 
@@ -107,12 +112,12 @@ const BOX_CHILDREN: [[i32; 2]; 6] = {
 impl BoxHull {
     /// A hull of six given planes, ordered as `SV_HullForBox`'s: the same clipnodes walk them
     /// (`studio_hull` of `SV_InitStudioHull` has the same children).
-    pub(crate) fn from_planes(planes: [Plane; 6]) -> Self {
+    pub fn from_planes(planes: [Plane; 6]) -> Self {
         Self { planes }
     }
 
     /// `SV_HullForBox`: the hull of the box `mins..maxs`.
-    pub(crate) fn new(mins: Vec3, maxs: Vec3) -> Self {
+    pub fn new(mins: Vec3, maxs: Vec3) -> Self {
         let plane = |i: usize, dist: f32| {
             let mut normal = Vec3::ZERO;
             normal[i >> 1] = 1.0;
@@ -177,7 +182,7 @@ pub struct WorldCollision {
 }
 
 /// A map without any model: the stand-in for geometry that does not need the map (box hulls).
-pub(crate) static NO_COLLISION: WorldCollision = WorldCollision {
+pub static NO_COLLISION: WorldCollision = WorldCollision {
     planes: Vec::new(),
     nodes: Vec::new(),
     clipnodes: Vec::new(),
@@ -289,7 +294,7 @@ impl WorldCollision {
     /// them): a trace that never leaves solid reports `all_solid`, fraction 0 and
     /// `end_pos = start` (the source keeps fraction 1 and `end`); the "back up out of solid"
     /// step moves 0.05 of the segment at a time, at most 8 times (the source: 0.1, no cap).
-    pub(crate) fn trace_local(&self, geo: Geometry<'_>, start: Vec3, end: Vec3) -> TraceResult {
+    pub fn trace_local(&self, geo: Geometry<'_>, start: Vec3, end: Vec3) -> TraceResult {
         let mut ctx = TraceCtx {
             fraction: 1.0,
             end_pos: end,
@@ -328,7 +333,7 @@ impl WorldCollision {
     }
 
     /// `SV_HullPointContents` from node `node_idx` of `geo`.
-    pub(crate) fn geo_point_contents(&self, geo: Geometry<'_>, mut node_idx: i32, p: Vec3) -> i32 {
+    pub fn geo_point_contents(&self, geo: Geometry<'_>, mut node_idx: i32, p: Vec3) -> i32 {
         let mut guard = 0usize;
         while node_idx >= 0 && guard < 4096 {
             guard += 1;
@@ -344,7 +349,7 @@ impl WorldCollision {
     /// `(firstclipnode, lastclipnode)` of the `hull_t` of `geo`: the first node of the hull and
     /// the last node of the array it indexes (the nodes for the point hull, the clipnodes for the
     /// others; a box hull is its six nodes). `None` for a model out of range.
-    pub(crate) fn hull_range(&self, geo: Geometry<'_>) -> Option<(i32, i32)> {
+    pub fn hull_range(&self, geo: Geometry<'_>) -> Option<(i32, i32)> {
         match geo {
             Geometry::Bsp { model, hull } => {
                 let first = self.models.get(model)?.head_nodes[hull as usize];
@@ -360,7 +365,7 @@ impl WorldCollision {
     }
 
     /// Plane and children of node `idx` of `geo`; `None` out of range.
-    pub(crate) fn geo_node(&self, geo: Geometry<'_>, idx: i32) -> Option<(Plane, [i32; 2])> {
+    pub fn geo_node(&self, geo: Geometry<'_>, idx: i32) -> Option<(Plane, [i32; 2])> {
         let idx = usize::try_from(idx).ok()?;
         match geo {
             Geometry::Bsp {
@@ -383,7 +388,7 @@ impl WorldCollision {
     }
 
     /// Contents of the leaf `idx` (negative) of `geo`.
-    pub(crate) fn geo_leaf_contents(&self, geo: Geometry<'_>, idx: i32) -> i32 {
+    pub fn geo_leaf_contents(&self, geo: Geometry<'_>, idx: i32) -> i32 {
         match geo {
             Geometry::Bsp {
                 hull: Hull::Point, ..
@@ -536,10 +541,7 @@ fn plane_distance(plane: &Plane, p: Vec3) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
-    use crate::map::ServerMap;
     use cs_vfs::{Vfs, VfsConfig};
 
     /// `WORLD_ONLY_TRACE_HASH` of `cs-sim/tests/collision_characterization.rs`: the 2000
@@ -604,28 +606,6 @@ mod tests {
         assert_eq!(none.model_count(), 0);
         assert_eq!(none.trace_world(start, end, Hull::Point).fraction, 1.0);
         assert_eq!(none.point_contents(start, Hull::Large), CONTENTS_EMPTY);
-    }
-
-    #[test]
-    fn stub_map_has_no_collision() {
-        assert!(ServerMap::stub("de_test").collision().is_none());
-    }
-
-    #[test]
-    fn real_map_has_collision() {
-        let Ok(vfs) = Vfs::discover(None, VfsConfig::default()) else {
-            return;
-        };
-        let raw = vfs.read_bytes("maps/de_dust2.bsp").expect("de_dust2 reads");
-        let bsp = Arc::new(BspMap::load(&vfs, "de_dust2").expect("de_dust2 parses"));
-        let map = ServerMap::from_bsp("de_dust2", &raw, bsp.clone()).expect("valid BSP header");
-        let world = map.collision().expect("a BSP map has collision");
-        assert_eq!(world.model_count(), bsp.models.len());
-        let n = world.model_count();
-        assert!(world.model_bounds(n).is_none());
-        let tr = world.trace_model(n, Vec3::ZERO, Vec3::ZERO, Vec3::X, Hull::Point);
-        assert_eq!(tr.fraction, 1.0);
-        assert!(!world.point_in_model(n, Vec3::ZERO, Vec3::ZERO));
     }
 
     /// `point_in_model` is true inside a real brush: among the first brush models of de_dust2,

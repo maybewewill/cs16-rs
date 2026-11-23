@@ -3,7 +3,7 @@
 mod api_entities;
 mod api_messages;
 pub mod client;
-pub mod collision;
+pub use cs_pm::collision;
 mod connect;
 pub mod console;
 pub mod edict;

@@ -62,7 +62,7 @@ pub const HALF_HUMAN_HEIGHT: i32 = 36;
 pub const MAX_CLIP_PLANES: usize = 5;
 /// `PM_NORMAL` trace flags: the engine's own constant (`pm_defs.h`); the other trace flags and
 /// `MAX_PHYSENTS`, `MAX_MOVEENTS`, `CONTENTS_LADDER` are not used by the movement code here.
-pub use cs_engine::PM_NORMAL;
+pub use crate::physent::PM_NORMAL;
 /// `MAX_CLIENTS` (`const.h`).
 pub const MAX_CLIENTS: usize = 32;
 
@@ -165,4 +165,4 @@ pub const PITCH_NORM: i32 = 100;
 /// The four player hulls the engine copies into `playermove_t::player_mins/maxs`
 /// (ReHLDS `pmove.cpp` `pm_hullmins`/`pm_hullmaxs`, read 2026-11-22): standing, ducked, point, large.
 /// One copy only: the engine's own tables.
-pub use cs_engine::{PM_PLAYER_MAXS as PLAYER_HULL_MAXS, PM_PLAYER_MINS as PLAYER_HULL_MINS};
+pub use crate::physent::{PM_PLAYER_MAXS as PLAYER_HULL_MAXS, PM_PLAYER_MINS as PLAYER_HULL_MINS};

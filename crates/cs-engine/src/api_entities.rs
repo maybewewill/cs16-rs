@@ -6,7 +6,7 @@ use std::any::Any;
 
 use glam::Vec3;
 
-use crate::collision::{CONTENTS_EMPTY, Hull, MAX_WORLD_COORD, NO_COLLISION, TraceResult};
+use crate::collision::{CONTENTS_EMPTY, Hull, NO_COLLISION, TraceResult};
 use crate::edict::{EdictId, EntVars};
 use crate::game::EngineApi;
 use crate::pm::{
@@ -277,7 +277,7 @@ impl EngineApi<'_> {
     /// Traces `hull` from `start` to `end` through the world model only; for a trace that
     /// also hits entities see [`trace_hull_ents`](Self::trace_hull_ents). Without collision data
     /// (stub map) nothing is hit: fraction 1, `end_pos = end`. A `start` or `end` outside the
-    /// world (non-finite, or a coordinate beyond [`MAX_WORLD_COORD`]) is refused: nothing is
+    /// world (non-finite, or a coordinate beyond [`crate::collision::MAX_WORLD_COORD`]) is refused: nothing is
     /// hit, `end_pos = start` if `start` is inside the world, else the origin. Every returned
     /// float is finite.
     pub fn trace_hull(&self, start: Vec3, end: Vec3, hull: Hull) -> TraceResult {
@@ -313,7 +313,7 @@ impl EngineApi<'_> {
 
     /// Contents (`CONTENTS_*`) of the world model at `p` for `hull`; `CONTENTS_EMPTY` without
     /// collision data or for a `p` outside the world (non-finite, or a coordinate beyond
-    /// [`MAX_WORLD_COORD`]).
+    /// [`crate::collision::MAX_WORLD_COORD`]).
     pub fn point_contents(&self, p: Vec3, hull: Hull) -> i32 {
         match self.map.collision() {
             Some(c) if in_world(p) => c.point_contents(p, hull),
@@ -323,7 +323,7 @@ impl EngineApi<'_> {
 
     /// Whether `p` is inside the solid of brush model `model` placed at `origin`; `false` for
     /// a model out of range, without collision data, or for an `origin` or `p` outside the
-    /// world (non-finite, or a coordinate beyond [`MAX_WORLD_COORD`]).
+    /// world (non-finite, or a coordinate beyond [`crate::collision::MAX_WORLD_COORD`]).
     pub fn point_in_model(&self, model: usize, origin: Vec3, p: Vec3) -> bool {
         match self.map.collision() {
             Some(c) if in_world(origin) && in_world(p) => c.point_in_model(model, origin, p),
@@ -449,7 +449,7 @@ impl EngineApi<'_> {
             return out;
         };
         let coll = self.map.collision();
-        out.push_physent(world_physent(self.world(), coll));
+        out.push_physent(world_physent(coll), self.world());
         if !in_world(origin) {
             return out;
         }
@@ -473,7 +473,7 @@ impl EngineApi<'_> {
                 if out.num_physents() >= MAX_PHYSENTS {
                     break;
                 }
-                out.push_physent(pe);
+                out.push_physent(pe, id);
             } else if out.num_moveents() < MAX_MOVEENTS {
                 out.push_moveent(pe);
             }
@@ -632,7 +632,7 @@ impl EngineApi<'_> {
 
     /// Whether a box with absolute corners `mins`/`maxs` is potentially visible (PVS) from
     /// `eye`. A map without visibility data (stub map) sees everything; an `eye`, `mins` or
-    /// `maxs` outside the world (non-finite, or a coordinate beyond [`MAX_WORLD_COORD`]) sees
+    /// `maxs` outside the world (non-finite, or a coordinate beyond [`crate::collision::MAX_WORLD_COORD`]) sees
     /// nothing.
     pub fn can_see(&self, eye: Vec3, mins: Vec3, maxs: Vec3) -> bool {
         in_world(eye) && in_world(mins) && in_world(maxs) && self.map.can_see(eye, mins, maxs)
@@ -653,10 +653,7 @@ fn finish_player_trace(mut t: TraceResult) -> TraceResult {
     t
 }
 
-/// Whether every coordinate of `v` is finite and within [`MAX_WORLD_COORD`].
-pub(crate) fn in_world(v: Vec3) -> bool {
-    v.is_finite() && v.abs().max_element() <= MAX_WORLD_COORD
-}
+pub(crate) use crate::collision::in_world;
 
 /// The answer to a refused trace: nothing hit, ending where it started if `start` is inside the
 /// world, else at the origin.

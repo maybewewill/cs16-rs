@@ -579,6 +579,7 @@ dependencies = [
  "cs-assets",
  "cs-cvar",
  "cs-engine",
+ "cs-pm",
  "cs-probe",
  "cs-proto48",
  "cs-transport",
@@ -621,6 +622,15 @@ dependencies = [
 [[package]]
 name = "cs-platform"
 version = "0.1.0"
+
+[[package]]
+name = "cs-pm"
+version = "0.1.0"
+dependencies = [
+ "cs-assets",
+ "cs-vfs",
+ "glam",
+]
 
 [[package]]
 name = "cs-probe"
@@ -667,6 +677,7 @@ dependencies = [
  "cs-assets",
  "cs-cvar",
  "cs-engine",
+ "cs-pm",
  "cs-probe",
  "cs-proto48",
  "cs-sim",

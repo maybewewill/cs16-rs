@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 cs-assets.workspace = true
 cs-cvar.workspace = true
+cs-pm.workspace = true
 cs-engine.workspace = true
 cs-proto48.workspace = true
 glam.workspace = true

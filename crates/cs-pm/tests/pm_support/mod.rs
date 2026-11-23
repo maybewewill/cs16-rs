@@ -1,4 +1,4 @@
-//! `BoxWorld`: a test world for `cs_sim::pm`. Solid axis-aligned boxes with texture names, water
+//! `BoxWorld`: a test world for `cs_pm::pm`. Solid axis-aligned boxes with texture names, water
 //! volumes, ladder moveents, a sound log, queued `random_long` values, a settable clock, a
 //! `physent_by_info` list and a call log. The trace is a hull-expanded AABB sweep with the
 //! `DIST_EPSILON` back-off of `PM_RecursiveHullCheck`; it is not bit exact, only a faithful test
@@ -11,8 +11,8 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
 
-use cs_sim::pm::consts::{CONTENTS_EMPTY, CONTENTS_SOLID, PLAYER_HULL_MAXS, PLAYER_HULL_MINS};
-use cs_sim::pm::{PlayerMove, PmShared, PmTrace, PmWorld, pm_init, pm_move};
+use cs_pm::pm::consts::{CONTENTS_EMPTY, CONTENTS_SOLID, PLAYER_HULL_MAXS, PLAYER_HULL_MINS};
+use cs_pm::pm::{PlayerMove, PmShared, PmTrace, PmWorld, pm_init, pm_move};
 use glam::Vec3;
 
 /// `DIST_EPSILON` of the engine's hull check.

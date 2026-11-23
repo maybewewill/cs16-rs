@@ -1,11 +1,11 @@
-//! Ladders, water and observers of `cs_sim::pm` (Task 6) through `pm_move`, on `BoxWorld`.
+//! Ladders, water and observers of `cs_pm::pm` (Task 6) through `pm_move`, on `BoxWorld`.
 //! Expected numbers are worked out from the formulas of `pm_shared.cpp` (ReGameDLL_CS, read
 //! 2026-11-22); the formula is in each test's comment. Floats are `f32` throughout, as in the source.
 
 mod pm_support;
 
-use cs_sim::pm::consts::*;
-use cs_sim::pm::{PlayerMove, PmShared};
+use cs_pm::pm::consts::*;
+use cs_pm::pm::{PlayerMove, PmShared};
 use glam::Vec3;
 use pm_support::{BoxWorld, run_cmd, standing_player};
 

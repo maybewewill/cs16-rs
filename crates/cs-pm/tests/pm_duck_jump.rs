@@ -7,8 +7,8 @@
 
 mod pm_support;
 
-use cs_sim::pm::consts::*;
-use cs_sim::pm::{PlayerMove, PmShared};
+use cs_pm::pm::consts::*;
+use cs_pm::pm::{PlayerMove, PmShared};
 use glam::Vec3;
 use pm_support::{BoxWorld, run_cmd, standing_player};
 

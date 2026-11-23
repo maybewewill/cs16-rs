@@ -3,7 +3,7 @@
 
 pub mod bots;
 pub mod grenades;
-pub mod pm;
+pub use cs_pm::pm;
 pub mod pmove;
 pub mod rules;
 pub mod trace;

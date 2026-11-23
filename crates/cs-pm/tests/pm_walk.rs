@@ -1,11 +1,11 @@
-//! Behaviour of the `cs_sim::pm` core (Task 4) through `pm_move`, on `BoxWorld`. Expected numbers
+//! Behaviour of the `cs_pm::pm` core (Task 4) through `pm_move`, on `BoxWorld`. Expected numbers
 //! are worked out by hand from the formulas of `pm_shared.cpp` (ReGameDLL_CS, read 2026-11-22);
 //! the formula is in each test's comment. Floats are `f32` throughout, as in the source.
 
 mod pm_support;
 
-use cs_sim::pm::consts::*;
-use cs_sim::pm::{PlayerMove, PmShared, pm_find_texture_type, pm_init, pm_move};
+use cs_pm::pm::consts::*;
+use cs_pm::pm::{PlayerMove, PmShared, pm_find_texture_type, pm_init, pm_move};
 use glam::Vec3;
 use pm_support::{BoxWorld, run_cmd, standing_player};
 

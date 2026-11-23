@@ -340,6 +340,29 @@ mod tests {
     };
 
     #[test]
+    fn stub_map_has_no_collision() {
+        assert!(ServerMap::stub("de_test").collision().is_none());
+    }
+
+    #[test]
+    fn real_map_has_collision() {
+        use crate::collision::Hull;
+        let Ok(vfs) = Vfs::discover(None, VfsConfig::default()) else {
+            return;
+        };
+        let raw = vfs.read_bytes("maps/de_dust2.bsp").expect("de_dust2 reads");
+        let bsp = Arc::new(BspMap::load(&vfs, "de_dust2").expect("de_dust2 parses"));
+        let map = ServerMap::from_bsp("de_dust2", &raw, bsp.clone()).expect("valid BSP header");
+        let world = map.collision().expect("a BSP map has collision");
+        assert_eq!(world.model_count(), bsp.models.len());
+        let n = world.model_count();
+        assert!(world.model_bounds(n).is_none());
+        let tr = world.trace_model(n, Vec3::ZERO, Vec3::ZERO, Vec3::X, Hull::Point);
+        assert_eq!(tr.fraction, 1.0);
+        assert!(!world.point_in_model(n, Vec3::ZERO, Vec3::ZERO));
+    }
+
+    #[test]
     fn stub_map_sees_everything() {
         let map = ServerMap::stub("de_test");
         assert_eq!(map.name, "de_test");

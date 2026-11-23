@@ -1,11 +1,11 @@
-//! Step sounds and texture materials of `cs_sim::pm` (Task 7) through `pm_move` on `BoxWorld`.
+//! Step sounds and texture materials of `cs_pm::pm` (Task 7) through `pm_move` on `BoxWorld`.
 //! Expected values come from `pm_shared.cpp` (ReGameDLL_CS, read 2026-11-22); the formula is in
 //! each test's comment.
 
 mod pm_support;
 
-use cs_sim::pm::consts::*;
-use cs_sim::pm::{PlayerMove, PmShared, TextureTable, pm_find_texture_type, pm_init};
+use cs_pm::pm::consts::*;
+use cs_pm::pm::{PlayerMove, PmShared, TextureTable, pm_find_texture_type, pm_init};
 use glam::Vec3;
 use pm_support::{BoxWorld, Call, run_cmd};
 

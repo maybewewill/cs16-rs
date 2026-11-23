@@ -95,36 +95,7 @@ pub(crate) struct MoveStats {
     pub(crate) entity_clips: usize,
 }
 
-/// `AngleVectors`.
-pub(crate) fn angle_vectors(angles: Vec3) -> (Vec3, Vec3, Vec3) {
-    let (sy, cy, sp, cp, sr, cr) = sines(angles);
-    let forward = Vec3::new(cp * cy, cp * sy, -sp);
-    let right = Vec3::new(-sr * sp * cy + cr * sy, -sr * sp * sy - cr * cy, -sr * cp);
-    let up = Vec3::new(cr * sp * cy + -sr * -sy, cr * sp * sy + -sr * cy, cr * cp);
-    (forward, right, up)
-}
-
-/// `AngleVectorsTranspose`.
-pub(crate) fn angle_vectors_transpose(angles: Vec3) -> (Vec3, Vec3, Vec3) {
-    let (sy, cy, sp, cp, sr, cr) = sines(angles);
-    let forward = Vec3::new(cp * cy, sr * sp * cy + cr * -sy, cr * sp * cy + -sr * -sy);
-    let right = Vec3::new(cp * sy, sr * sp * sy + cr * cy, cr * sp * sy + -sr * cy);
-    let up = Vec3::new(-sp, sr * cp, cr * cp);
-    (forward, right, up)
-}
-
-/// Sine and cosine of yaw, pitch and roll, computed in double as the original does.
-fn sines(angles: Vec3) -> (f32, f32, f32, f32, f32, f32) {
-    let sc = |degrees: f32| {
-        let angle = (f64::from(degrees) * (std::f64::consts::PI * 2.0 / 360.0)) as f32;
-        let angle = f64::from(angle);
-        (angle.sin() as f32, angle.cos() as f32)
-    };
-    let (sy, cy) = sc(angles.y);
-    let (sp, cp) = sc(angles.x);
-    let (sr, cr) = sc(angles.z);
-    (sy, cy, sp, cp, sr, cr)
-}
+pub(crate) use cs_pm::physent::{angle_vectors, angle_vectors_transpose};
 
 /// The brush model number of a `*N` model name; model index 1 is the world model (0), which
 /// the world edict has (`SV_SpawnServer`).

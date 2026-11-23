@@ -256,7 +256,7 @@ impl PlayerMove {
 }
 
 /// What `pm_shared` needs from the world: the engine's `pmove` callbacks and the physent arrays.
-/// Everything the game or the client has to provide; `cs_sim::pm` never calls `EngineApi`. Every
+/// Everything the game or the client has to provide; `cs_pm::pm` never calls `EngineApi`. Every
 /// method must be implemented: a silent default would show up as a client-side mispredict.
 pub trait PmWorld {
     /// `PM_PlayerTrace(start, end, trace_flags, ignore_pe)` with `pmove->usehull` = `usehull`.
