@@ -683,3 +683,78 @@ fn signon_number_is_tracked_and_userinfo_follows_the_cvars() {
     assert_eq!(conn.userinfo().get("cl_updaterate"), Some("60"));
     assert_eq!(conn.userinfo().get("_vgui_menus"), Some("1"));
 }
+
+/// A client waiting for one download of a file the server lists.
+fn waiting_for_a_download() -> (Server, Connection<LoopbackEndpoint>, f64) {
+    let (mut server, mut conn) = new_pair(config());
+    conn.set_files(Box::new(game_files(&["maps/de_dust2.bsp"]).0));
+    let mut now = handshake(&mut server, &mut conn);
+    up_to_resource_request(&mut server, &mut conn, &mut now);
+    let list = [
+        entry(res_type::MODEL, "maps/de_dust2.bsp", 1, 1024, 1),
+        entry(res_type::MODEL, "models/slow.mdl", 7, 100, 0),
+    ];
+    let reply = exchange(&mut server, &mut conn, &mut now, &resource_list(&list, &[]));
+    assert_eq!(string_cmds(&reply), vec!["dlfile models/slow.mdl"]);
+    (server, conn, now)
+}
+
+#[test]
+fn datagrams_alone_do_not_keep_a_pending_download_alive() {
+    let (mut server, mut conn, mut now) = waiting_for_a_download();
+    for _ in 0..40 {
+        // An empty packet every second: no file bytes.
+        let packet = server.chan.build_packet(&[]);
+        server.send_raw(&packet);
+        now += 1.0;
+        conn.pump(now);
+        server.recv_raw();
+        if conn.state() != &ConnState::Signon {
+            break;
+        }
+    }
+    let ConnState::Disconnected(reason) = conn.state() else {
+        panic!("expected Disconnected, got {:?}", conn.state());
+    };
+    assert!(reason.contains("timed out"), "{reason}");
+}
+
+#[test]
+fn downloads_have_an_absolute_cap_even_with_signon_progress() {
+    let (mut server, mut conn, mut now) = waiting_for_a_download();
+    for _ in 0..40 {
+        // Sign-on steps every 20 s keep the stall timer quiet; the download cap still fires.
+        exchange(&mut server, &mut conn, &mut now, &msg(|w| write_svc_signonnum(w, 0)));
+        now += 20.0;
+        conn.pump(now);
+        if conn.state() != &ConnState::Signon {
+            break;
+        }
+    }
+    let ConnState::Disconnected(reason) = conn.state() else {
+        panic!("expected Disconnected, got {:?}", conn.state());
+    };
+    assert!(reason.contains("downloads did not finish"), "{reason}");
+}
+
+#[test]
+fn a_custom_map_wad_is_downloaded_by_its_exact_name() {
+    let (mut server, mut conn) = new_pair(config());
+    let (files, stored) = game_files(&["maps/custom.bsp"]);
+    conn.set_files(Box::new(files));
+    let mut now = handshake(&mut server, &mut conn);
+    up_to_resource_request(&mut server, &mut conn, &mut now);
+    let list = [
+        entry(res_type::MODEL, "maps/custom.bsp", 1, 1024, 1),
+        entry(res_type::GENERIC, "custom_tex.wad", 1, 10, 0),
+        entry(res_type::GENERIC, "../x.dll", 2, 10, 0),
+    ];
+    let reply = exchange(&mut server, &mut conn, &mut now, &resource_list(&list, &[]));
+    assert_eq!(string_cmds(&reply), vec!["dlfile custom_tex.wad"]);
+    assert!(conn.console_log().iter().any(|l| l.contains("not downloading ../x.dll")));
+    // Another name, even a safe one, is not what was asked for.
+    deliver_file(&mut server, &mut conn, &mut now, "other.wad", "", 3, b"abc");
+    assert!(stored.lock().unwrap().is_empty());
+    deliver_file(&mut server, &mut conn, &mut now, "custom_tex.wad", "", 3, b"abc");
+    assert_eq!(*stored.lock().unwrap(), vec!["custom_tex.wad"]);
+}

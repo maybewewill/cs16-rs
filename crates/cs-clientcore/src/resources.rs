@@ -60,7 +60,11 @@ pub trait ResourceFiles: Send {
     /// own (never the game directory proper) and must not overwrite an existing game file:
     /// the file came from a server. The core calls it only for a file it requested with
     /// `dlfile`, under a name that passed [`is_safe_to_download`]. Returns `false` when the
-    /// file was not kept.
+    /// file was not kept. When the shell checks whether a file exists (here, and before it
+    /// stores) it must resolve Windows 8.3 short names (`PROGRA~1`) and case, so that the
+    /// "no overwrite" rule cannot be dodged by a name that reaches an existing file another way.
+    /// A root-level `.wad` is stored like any other file: into the cache, never over a wad of
+    /// the game.
     fn store(&mut self, _path: &str, _data: &[u8]) -> bool {
         false
     }
@@ -136,6 +140,9 @@ pub struct BatchOutcome {
     pub done: bool,
     /// A resource flagged `RES_FATALIFMISSING` is missing and cannot be fetched.
     pub fatal: Option<String>,
+    /// Resources left unfetched because their path is unsafe or downloads are off, as console
+    /// lines (never silent).
+    pub skipped: Vec<String>,
 }
 
 /// Resource state of the current sign-on.
@@ -298,6 +305,11 @@ impl ResourceManager {
                 continue;
             }
             if !is_safe_to_download(&path) || !allow_download {
+                out.skipped.push(if allow_download {
+                    format!("not downloading {path}: the path is not one the client accepts from a server")
+                } else {
+                    format!("not downloading {path}: downloads are off")
+                });
                 if r.entry.flags & RES_FATALIFMISSING != 0 && out.fatal.is_none() {
                     out.fatal = Some(path);
                 }
@@ -316,16 +328,16 @@ impl ResourceManager {
     }
 
     /// `CL_ProcessFile`: a file arrived. Settles the matching requested resource.
+    ///
+    /// The stream's name must be the very path that was requested (`resource_path`, the
+    /// `dlfile` argument), compared without regard to case: no prefix stripping, so a
+    /// server cannot answer a request for `sound/a.wav` with a file of another name.
     pub fn file_received(&mut self, name: &str) -> bool {
-        let without_dir = name.strip_prefix(SOUND_PATH).unwrap_or(name);
-        let Some(pos) = self.needed.iter().position(|r| {
-            r.requested
-                && if r.entry.res_type == res_type::SOUND {
-                    r.entry.filename.eq_ignore_ascii_case(without_dir)
-                } else {
-                    r.entry.filename.eq_ignore_ascii_case(name)
-                }
-        }) else {
+        let Some(pos) = self
+            .needed
+            .iter()
+            .position(|r| r.requested && resource_path(&r.entry).eq_ignore_ascii_case(name))
+        else {
             return false;
         };
         let r = self.needed.remove(pos);
@@ -409,8 +421,8 @@ pub fn resource_path(entry: &ResourceEntry) -> String {
 /// `models/` studio models, `sound/` wavs, `sprites/` sprites and the HUD `.txt` lists,
 /// `maps/` the map and its `.res`/`.txt` companions, `gfx/` skybox and HUD images, `events/`
 /// event scripts, `resource/` GUI `.res`/`.txt`, `overviews/` radar `.txt`/`.bmp`/`.tga`.
-/// `.wad` is left out on purpose: texture packs live in the game root, not in a directory
-/// (assumption: the server's resource list does not name them).
+/// A root-level `.wad` is accepted separately (custom maps list their texture packs, see
+/// [`is_safe_to_download`]); `.mp3` is accepted under `sound/` only.
 const SAFE_DIRS: [&str; 8] = [
     "models", "sound", "sprites", "maps", "gfx", "events", "resource", "overviews",
 ];
@@ -422,7 +434,13 @@ const SAFE_EXTENSIONS: [&str; 9] = [
 
 /// Windows device names, which open a device whatever the extension.
 fn is_device_name(component: &str) -> bool {
-    let stem = component.split('.').next().unwrap_or("").to_ascii_lowercase();
+    // Windows ignores trailing spaces and dots of the stem: `con .mdl` opens `con`.
+    let stem = component
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end_matches([' ', '.'])
+        .to_ascii_lowercase();
     matches!(stem.as_str(), "con" | "aux" | "nul" | "prn" | "conin$" | "conout$")
         || ["com", "lpt"].iter().any(|p| {
             stem.strip_prefix(p)
@@ -432,8 +450,9 @@ fn is_device_name(component: &str) -> bool {
 
 /// Whether a server may make the client write `path`: a whitelist, standing in for
 /// `COM_IsSafeFileToDownload` (not in the fetched sources). The path is `/` separated, relative,
-/// printable ASCII, at least `dir/file`, in one of [`SAFE_DIRS`] with an extension from
-/// [`SAFE_EXTENSIONS`]. Rejected: `..`, `.`, empty components, backslashes, drive letters (`:`),
+/// printable ASCII, either `dir/.../file` in one of [`SAFE_DIRS`] with an extension from
+/// [`SAFE_EXTENSIONS`] (or `.mp3` under `sound/`), or a bare `name.wad` made of
+/// `[A-Za-z0-9_.-]` in the game root. Rejected: `..`, `.`, empty components, backslashes, drive letters (`:`),
 /// components ending in a dot or space (Windows drops them, so `x.dll.` is `x.dll`), control
 /// characters and device names.
 pub fn is_safe_to_download(path: &str) -> bool {
@@ -445,7 +464,19 @@ pub fn is_safe_to_download(path: &str) -> bool {
         return false;
     }
     let components: Vec<&str> = path.split('/').collect();
-    if components.len() < 2
+    // A map's texture pack sits in the game root: one component, a plain name, `.wad`.
+    if components.len() == 1 {
+        let name = components[0];
+        return name.len() > 4
+            && name.to_ascii_lowercase().ends_with(".wad")
+            && !name.starts_with('.')
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+            && !name.contains("..")
+            && !is_device_name(name);
+    }
+    if components.is_empty()
         || components.iter().any(|c| {
             c.is_empty()
                 || *c == "."
@@ -461,8 +492,12 @@ pub fn is_safe_to_download(path: &str) -> bool {
         return false;
     }
     let file = components[components.len() - 1];
-    file.rsplit_once('.')
-        .is_some_and(|(_, ext)| SAFE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
+    file.rsplit_once('.').is_some_and(|(_, ext)| {
+        let ext = ext.to_ascii_lowercase();
+        SAFE_EXTENSIONS.contains(&ext.as_str())
+            // Music a map plays; under `sound/` only.
+            || (ext == "mp3" && components[0].eq_ignore_ascii_case("sound"))
+    })
 }
 
 /// Parses an assembled GoldSrc file stream (`Netchan_CopyFileFragments`): the file name, the
@@ -574,6 +609,12 @@ mod tests {
         assert!(is_safe_to_download("models/a.mdl"));
         assert!(is_safe_to_download("sound/weapons/x.wav"));
         assert!(is_safe_to_download("Maps/de_dust2.BSP"));
+        // Texture packs of custom maps, and music under sound/.
+        assert!(is_safe_to_download("cs_custom-2.WAD"));
+        assert!(is_safe_to_download("sound/music/a.mp3"));
+        for bad in ["models/a.mp3", "a.mp3", ".wad", "con.wad", "a b.wad", "x..wad", "a.wad.", "sub/a.wad", "a.dll"] {
+            assert!(!is_safe_to_download(bad), "{bad:?} must be refused");
+        }
         for bad in [
             "../x.mdl",
             "models/../../x.mdl",
@@ -587,6 +628,9 @@ mod tests {
             "models/x.mdl.",
             "models/x.dll.mdl.exe",
             "models/con.mdl",
+            "models/con .mdl",
+            "models/con..mdl",
+            "models/nul .txt",
             "models/CON",
             "models/nul.txt",
             "models/aux.mdl",
@@ -715,5 +759,36 @@ mod tests {
         assert!(m.begin(&[model], &[0], spawn_count).is_err());
         // Positions past the 10-bit field are refused.
         assert!(m.begin(&[], &[1024], spawn_count).is_err());
+    }
+
+    #[test]
+    fn a_received_file_must_carry_the_requested_path() {
+        let list = [
+            entry(res_type::SOUND, "extra/boom.wav", 4, 50, 0),
+            entry(res_type::GENERIC, "cs_custom.wad", 1, 50, 0),
+        ];
+        let mut m = ResourceManager::default();
+        m.begin(&list, &[], 3).unwrap();
+        m.estimate_missing(&Files(vec![]));
+        let out = m.batch_request(true);
+        assert_eq!(out.dlfiles, vec!["sound/extra/boom.wav", "cs_custom.wad"]);
+        // The bare name of a sound is not its path.
+        assert!(!m.file_received("extra/boom.wav"));
+        assert!(!m.file_received("other/boom.wav"));
+        assert!(m.file_received("SOUND/extra/boom.wav"));
+        assert!(m.file_received("cs_custom.wad"));
+        assert_eq!(m.pending_downloads(), 0);
+    }
+
+    #[test]
+    fn an_unsafe_resource_is_skipped_with_a_console_line() {
+        let list = [entry(res_type::GENERIC, "../evil.dll", 1, 5, 0)];
+        let mut m = ResourceManager::default();
+        m.begin(&list, &[], 3).unwrap();
+        m.estimate_missing(&Files(vec![]));
+        let out = m.batch_request(true);
+        assert!(out.dlfiles.is_empty());
+        assert_eq!(out.skipped.len(), 1);
+        assert!(out.skipped[0].contains("../evil.dll"));
     }
 }

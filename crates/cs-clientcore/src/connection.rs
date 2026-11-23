@@ -51,6 +51,8 @@ pub const OPCODE_LOG_CAPACITY: usize = 65536;
 /// sign-on number, a file) before the client leaves; any datagram counts while a download
 /// is pending.
 pub const SIGNON_TIMEOUT: f64 = 30.0;
+/// Seconds the downloads of one sign-on may take in all, however many bytes keep coming.
+pub const DOWNLOAD_TIMEOUT: f64 = 300.0;
 /// A connectionless handshake packet is resent when no answer arrived within this time.
 const HANDSHAKE_RESEND: f64 = 1.0;
 /// Previously sent commands repeated in every `clc_move` as backups.
@@ -192,6 +194,10 @@ pub struct Connection<T: PacketTransport> {
     shell_commands: VecDeque<ConsoleCommand>,
     /// When the sign-on last advanced; `None` until the next pump stamps it.
     signon_progress: Option<f64>,
+    /// When the downloads of this sign-on started waiting; `None` when none wait.
+    download_started: Option<f64>,
+    /// Bytes the netchan had buffered of unfinished fragment streams at the last packet.
+    buffered_fragments: usize,
     full_server_info: String,
     tap: Option<Box<dyn DatagramTap>>,
     tap_error: Option<std::io::Error>,
@@ -247,6 +253,8 @@ impl<T: PacketTransport> Connection<T> {
             console: VecDeque::new(),
             shell_commands: VecDeque::new(),
             signon_progress: None,
+            download_started: None,
+            buffered_fragments: 0,
             full_server_info: String::new(),
             tap: None,
             tap_error: None,
@@ -318,6 +326,15 @@ impl<T: PacketTransport> Connection<T> {
             }
             ConnState::Signon | ConnState::InGame => {
                 if self.state == ConnState::Signon {
+                    if self
+                        .download_started
+                        .is_some_and(|t| self.awaiting_resources && now - t > DOWNLOAD_TIMEOUT)
+                    {
+                        self.disconnect_with(format!(
+                            "downloads did not finish within {DOWNLOAD_TIMEOUT} seconds"
+                        ));
+                        return;
+                    }
                     let since = *self.signon_progress.get_or_insert(now);
                     if now - since > SIGNON_TIMEOUT {
                         self.disconnect_with(format!(
@@ -825,9 +842,13 @@ impl<T: PacketTransport> Connection<T> {
         };
         self.ctx.last_incoming_seq = (incoming.sequence & 0xFF) as u8;
 
-        if self.resources.pending_downloads() > 0 {
+        // While a download is pending, progress is fragment bytes arriving (or a finished
+        // file), not just any datagram: a server that sends nothing useful times out.
+        let buffered = self.chan.as_ref().map_or(0, |c| c.incoming_buffered_bytes());
+        if self.resources.pending_downloads() > 0 && buffered > self.buffered_fragments {
             self.signon_progress = Some(now);
         }
+        self.buffered_fragments = buffered;
         // A stream that does not parse to its end still yields the messages before the bad
         // one; the rest of that stream is lost (no message boundary), the connection goes on.
         let mut failed = false;
@@ -894,7 +915,7 @@ impl<T: PacketTransport> Connection<T> {
                 consistency_indices,
             } if signon => {
                 self.signon_progress = Some(now);
-                self.on_resource_list(&resources, &consistency_indices);
+                self.on_resource_list(&resources, &consistency_indices, now);
             }
             SvcMessage::ResourceLocation(text) => {
                 if let Err(reason) = self.resources.add_download_locations(&text) {
@@ -961,7 +982,9 @@ impl<T: PacketTransport> Connection<T> {
         &mut self,
         resources: &[cs_proto48::messages::ResourceEntry],
         consistency_indices: &[u16],
+        now: f64,
     ) {
+        self.download_started = Some(now);
         if self.cfg.consistency == ConsistencyPolicy::Refuse && !consistency_indices.is_empty() {
             self.state = ConnState::Disconnected(CONSISTENCY_REASON.to_string());
             return;
@@ -985,6 +1008,9 @@ impl<T: PacketTransport> Connection<T> {
     fn request_missing(&mut self) {
         let allow = self.cvars.float("cl_allowdownload") > 0.0;
         let outcome = self.resources.batch_request(allow);
+        for line in outcome.skipped {
+            self.print(line);
+        }
         if let Some(path) = outcome.fatal {
             self.state = ConnState::Disconnected(format!(
                 "missing required file {path} (the server does not allow it to be fetched, or downloads are off)"
@@ -1077,6 +1103,7 @@ impl<T: PacketTransport> Connection<T> {
         self.awaiting_resources = false;
         self.signon_num = 0;
         self.signon_progress = None;
+        self.download_started = None;
     }
 
     /// Replaces the entity view with the complete frame the parser rebuilt from this update.
