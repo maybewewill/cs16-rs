@@ -5,6 +5,15 @@
 //! Each `hostage_entity` (or legacy `monster_scientist`) precaches its model and sounds inside
 //! its own [`GameEntity::spawn`] so maps without hostages (such as `de_dust2`) keep their
 //! exact precache table.
+//!
+//! Not ported (read 2026-11-23): the `SVC_DIRECTOR` messages (`MSG_SPEC`: the HLTV events of a
+//! hostage's rescue and death) and the log lines (`Touched_A_Hostage`, `Rescued_A_Hostage`,
+//! `Killed_A_Hostage`): the server has no HLTV client and no log sink. The bots' (`TheBots->OnEvent`), the career tasks' and the Condition
+//! Zero improv's (`m_improv`, `hostage_ai_enable`) hooks are not driven from here either.
+//! Quirk kept from `CHostage::Spawn`: the first think and the first full think are each
+//! `RANDOM_FLOAT(0.1, 0.2)` away and the first radar time `RANDOM_FLOAT(0, 1)`, and bone
+//! controller 0 is set from `v_angle` (the engine's own random sequence is not reproducible;
+//! only the range is kept).
 
 use cs_engine::collision::Hull;
 use cs_engine::consts::{
@@ -24,7 +33,7 @@ use crate::hostage_localnav::{
 };
 use crate::intro::vec_to_angles;
 use crate::menus::print_center;
-use crate::money::add_account;
+use crate::money::{self, add_account};
 use crate::player::{
     ATTN_NORM, CHAN_VOICE, DEAD_DEAD, DEAD_NO, DEAD_RESPAWNABLE, HITGROUP_CHEST, HITGROUP_GENERIC,
     HITGROUP_HEAD, HITGROUP_LEFTARM, HITGROUP_LEFTLEG, HITGROUP_RIGHTARM, HITGROUP_RIGHTLEG,
@@ -50,12 +59,52 @@ const SF_MONSTER_HITMONSTERCLIP: u32 = 128;
 /// Initial/reset hostage health (`pev->max_health` = 100 in `CHostage::Spawn`).
 const HOSTAGE_MAX_HEALTH: f32 = 100.0;
 
-/// `REWARD_TAKEN_HOSTAGE` (`gamerules.h`): rescuer individual bonus when a hostage reaches rescue.
-const REWARD_TAKEN_HOSTAGE: i32 = 1000;
-/// `REWARD_TOOK_HOSTAGE_ACC` (`gamerules.h`): CT team pool bonus on first hostage touch.
-const REWARD_TOOK_HOSTAGE_ACC: i32 = 100;
-/// `REWARD_TOOK_HOSTAGE` (`gamerules.h`): individual CT bonus on first hostage touch.
-const REWARD_TOOK_HOSTAGE: i32 = 150;
+/// `STUDIO_XR`, `STUDIO_YR`, `STUDIO_ZR` (`studio.h`): a rotation controller.
+const STUDIO_ROTATION_CONTROLLERS: i32 = 0x0008 | 0x0010 | 0x0020;
+
+/// `SetController` (`animation.cpp` 326-375, read 2026-11-23) behind
+/// `CBaseAnimating::SetBoneController`: sets `pev->controller[iController]` from `value` and the
+/// model's range for that controller. A model without that controller, or none, leaves it alone.
+/// Quirk kept: controller 4 (the mouth) writes past `controller[4]`, into `blending[0]`.
+fn set_bone_controller(eng: &mut EngineApi<'_>, id: EdictId, controller: usize, mut value: f32) {
+    let Some(modelindex) = eng.ent(id).map(|v| v.modelindex) else {
+        return;
+    };
+    let Some(model) = eng.studio_model(modelindex) else {
+        return;
+    };
+    let Some(bc) = model.controllers.iter().find(|c| c.index == controller as i32) else {
+        return;
+    };
+    if bc.kind & STUDIO_ROTATION_CONTROLLERS != 0 {
+        if bc.end < bc.start {
+            value = -value;
+        }
+        if bc.end > bc.start + 359.0 {
+            if value > 360.0 {
+                value -= (f64::from(value) / 360.0) as i64 as f32 * 360.0;
+            } else if value < 0.0 {
+                value += ((f64::from(value) / -360.0) + 1.0) as i64 as f32 * 360.0;
+            }
+        } else {
+            if value > (bc.start + bc.end) / 2.0 + 180.0 {
+                value -= 360.0;
+            }
+            if value < (bc.start + bc.end) / 2.0 - 180.0 {
+                value += 360.0;
+            }
+        }
+    }
+    let span = bc.end - bc.start;
+    let setting = ((255.0 * (value - bc.start) / span) as i64).clamp(0, 255) as u8;
+    if let Some(v) = eng.ent_mut(id) {
+        match controller {
+            0..=3 => v.controller[controller] = setting,
+            4 => v.blending[0] = setting,
+            _ => {}
+        }
+    }
+}
 
 /// Hostage think cadence (`IdleThink` 30 Hz, full follow/rescue logic 10 Hz).
 const GIVE_UP_TIME: f64 = 1.0 / 30.0;
@@ -278,7 +327,7 @@ impl Hostage {
             v.deadflag = DEAD_RESPAWNABLE;
             v.effects |= EF_NODRAW;
         }
-        add_account(g, eng, leader_slot as u8, REWARD_TAKEN_HOSTAGE, true);
+        add_account(g, eng, leader_slot as u8, money::REWARD_TAKEN_HOSTAGE, true);
         send_hostage_event_msg(g, eng, self.index);
         self.remove_self(eng, id);
         g.rules.hostages_rescued += 1;
@@ -345,7 +394,7 @@ impl Hostage {
                 id,
                 step_size,
                 my_origin,
-                &self.path_nodes,
+                &mut self.path_nodes,
                 self.num_path_nodes,
                 true,
             );
@@ -533,9 +582,8 @@ impl Hostage {
             return;
         }
         self.touched = true;
-        g.rules.add_ct_account(REWARD_TOOK_HOSTAGE_ACC);
-        g.rules.hostages_touched += 1;
-        add_account(g, eng, slot, REWARD_TOOK_HOSTAGE, true);
+        g.rules.add_ct_account(money::REWARD_TOOK_HOSTAGE_ACC);
+        add_account(g, eng, slot, money::REWARD_TOOK_HOSTAGE, true);
     }
 }
 
@@ -637,21 +685,35 @@ impl GameEntity for Hostage {
         self.dead_remove_at = None;
 
         eng.set_model(id, &model);
-        eng.set_size(id, VEC_HOSTAGE_HULL_MIN, VEC_HOSTAGE_HULL_MAX);
-        let _ = eng.drop_to_floor(id);
-
         let now = eng.time();
         let mut spawn_rng = u32::from(id.index) ^ 0x9e37_79b9;
         self.set_activity(eng, id, ACT_IDLE, &mut spawn_rng);
+        eng.set_size(id, VEC_HOSTAGE_HULL_MIN, VEC_HOSTAGE_HULL_MAX);
+        // `UTIL_MakeVectors(pev->v_angle); SetBoneController(0, UTIL_VecToYaw(v_forward));
+        // SetBoneController(1..4, 0)`.
+        let v_angle = eng.ent(id).map_or(Vec3::ZERO, |v| v.v_angle);
+        let (forward, _, _) = cs_sim::pm::math::angle_vectors(v_angle);
+        set_bone_controller(eng, id, 0, vec_to_angles(forward).y);
+        for controller in 1..=4 {
+            set_bone_controller(eng, id, controller, 0.0);
+        }
+        let _ = eng.drop_to_floor(id);
 
+        // `RANDOM_FLOAT(0.1, 0.2)` for the first think and again for the first full think,
+        // `RANDOM_FLOAT(0, 1)` for the first radar time (assumption: the engine's own random
+        // sequence is not reproducible, only the range matters).
+        let mut unit = || random_in(&mut spawn_rng, 0, 65535) as f32 / 65535.0;
+        let first_think = 0.1 + 0.1 * unit();
+        let first_full_think = 0.1 + 0.1 * unit();
+        let first_radar = unit();
         if let Some(v) = eng.ent_mut(id) {
             self.start_origin = v.origin;
             self.start_angles = v.angles;
-            v.nextthink = now + 0.1;
+            v.nextthink = f64::from(now as f32 + first_think);
         }
         self.old_pos = Vec3::splat(9999.0);
-        self.next_full_think = now + 0.1;
-        self.next_radar_time = now + 0.5;
+        self.next_full_think = f64::from(now as f32 + first_full_think);
+        self.next_radar_time = f64::from(now as f32 + first_radar);
         self.last_path_check = -1.0;
         self.path_acquired = -1.0;
         self.path_check_interval = 0.1;
@@ -1059,6 +1121,12 @@ fn modified_damage(damage: f32, hitgroup: i32) -> f32 {
     damage * mult
 }
 
+/// `CHostage::ApplyHostagePenalty` (`hostage.cpp` 858-879, read 2026-11-23, vanilla): a terrorist
+/// that kills hostages. `m_iHostagesKilled++ == iHostagePenalty` compares the old count (the hint
+/// that the next kill removes the player); otherwise the new count `>= iHostagePenalty` removes
+/// it, so with `mp_hostagepenalty 2` the second kill does. Vanilla (`!REGAMEDLL_FIXES`) sends the
+/// player `CLIENT_COMMAND "disconnect"` instead of kicking it. Any non-zero penalty counts (a
+/// negative one removes the player on the first kill).
 fn apply_hostage_penalty(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let Some(team) = g.players.get(usize::from(slot)).and_then(Option::as_ref).map(|p| p.team)
     else {
@@ -1068,7 +1136,7 @@ fn apply_hostage_penalty(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
         return;
     }
     let penalty = eng.cvar_f32("mp_hostagepenalty") as i32;
-    if penalty <= 0 {
+    if penalty == 0 {
         return;
     }
     let Some(p) = g.players[usize::from(slot)].as_mut() else {
@@ -1076,6 +1144,7 @@ fn apply_hostage_penalty(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     };
     let prev = p.hostages_killed;
     p.hostages_killed += 1;
+    let now = p.hostages_killed;
     if prev == penalty {
         hint_message(
             g,
@@ -1085,8 +1154,9 @@ fn apply_hostage_penalty(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
             true,
             false,
         );
-    } else if prev >= penalty {
-        eng.kick(slot, "For killing too many hostages");
+    } else if now >= penalty {
+        eng.stufftext(slot, "disconnect
+");
     }
 }
 
@@ -1161,10 +1231,4 @@ pub(crate) fn send_hostage_pos_to_player(_g: &GameState, eng: &mut EngineApi<'_>
 pub(crate) fn entity_is_hostage(eng: &EngineApi<'_>, id: EdictId) -> bool {
     eng.private::<Box<dyn GameEntity>>(id)
         .is_some_and(|e| e.is_hostage())
-}
-
-/// Test/bot helper using [`random_in`] directly when testing damage/sound distribution.
-#[allow(dead_code)]
-fn _keep_random_in(seed: &mut u32) -> i32 {
-    random_in(seed, 0, 1)
 }

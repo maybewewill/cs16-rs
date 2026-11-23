@@ -288,7 +288,9 @@ fn use_toggles_follow_with_the_one_second_gate() {
         )
     });
     assert_eq!(money_after_use, initial_money + 150);
-    assert_eq!(touched, 1);
+    // `m_iHostagesTouched` is only ever reset in vanilla (`multiplay_gamerules.cpp` 2090); the
+    // first touch does not count it.
+    assert_eq!(touched, 0);
     assert_eq!(acc_ct, 100);
 
     // Move CT far enough (>80 u) to observe follow movement, and press +use within < 1.0 s (gated).
@@ -334,7 +336,7 @@ fn use_toggles_follow_with_the_one_second_gate() {
         "hostage should remain stopped after 1s-gated toggle off: {stopped_pos:?} -> {end_pos:?}"
     );
     assert_eq!(final_money, initial_money + 150);
-    assert_eq!(final_touched, 1);
+    assert_eq!(final_touched, 0);
 
     // Terrorist +use should be refused with #Only_CT_Can_Move_Hostages.
     enter(&mut b, 1);
@@ -735,4 +737,117 @@ fn cs_office_hostages_spawn_as_hlds() {
         })
         .collect();
     assert_eq!(pos_ids, vec![1, 2, 3, 4]);
+}
+
+/// One lethal bullet from `attacker` into `hostage`.
+fn shoot_hostage_dead(b: &mut Bench, hostage: cs_engine::EdictId, attacker_slot: u8) {
+    b.run(move |game, eng| {
+        let attacker = eng.client_edict(attacker_slot);
+        let mut mm = bullets::MultiDamage::new(None);
+        mm.clear();
+        let tr = cs_engine::EntTrace {
+            trace: cs_engine::collision::TraceResult {
+                fraction: 0.5,
+                end_pos: Vec3::new(110.0, 0.0, 50.0),
+                hitgroup: HITGROUP_CHEST,
+                ..cs_engine::collision::TraceResult::clear(Vec3::new(110.0, 0.0, 50.0))
+            },
+            ent: Some(hostage),
+        };
+        let state = game.state_mut();
+        bullets::trace_attack(
+            state,
+            eng,
+            hostage,
+            Some(attacker),
+            &mut mm,
+            500.0,
+            Vec3::X,
+            &tr,
+            cs_game::player::dmg::BULLET,
+        );
+        bullets::apply_multi_damage(state, eng, &mm, Some(attacker), Some(attacker));
+    });
+    b.step(2);
+}
+
+/// `ApplyHostagePenalty` (`hostage.cpp` 858-879): `m_iHostagesKilled++ == penalty` compares the
+/// old count, the removal compares the new one, so with `mp_hostagepenalty 2` the second kill
+/// removes the terrorist (`CLIENT_COMMAND "disconnect"` in vanilla).
+#[test]
+fn the_nth_hostage_kill_removes_the_terrorist() {
+    let entities = vec![
+        entity(&[("classname", "worldspawn")]),
+        entity(&[("classname", "info_player_start"), ("origin", "0 200 36")]),
+        entity(&[("classname", "info_player_deathmatch"), ("origin", "0 0 36")]),
+        entity(&[("classname", "hostage_entity"), ("origin", "120 0 10")]),
+        entity(&[("classname", "hostage_entity"), ("origin", "120 60 10")]),
+    ];
+    let mut b = Bench::on(floor_bsp(entities, &[]));
+    b.run(|_, eng| eng.set_cvar("mp_hostagepenalty", "2"));
+    spawn_and_ready(&mut b, 0, 1, 1); // The probe is the terrorist.
+    b.step(350);
+    let hostages = find_hostage_edicts(&mut b);
+    assert_eq!(hostages.len(), 2);
+    let disconnects = |b: &Bench| {
+        b.probe
+            .messages()
+            .iter()
+            .filter(|m| matches!(m, cs_proto48::messages::SvcMessage::StuffText(t) if t == "disconnect\n"))
+            .count()
+    };
+    b.probe.clear_messages();
+    shoot_hostage_dead(&mut b, hostages[0], 0);
+    assert_eq!(disconnects(&b), 0, "the first kill is forgiven");
+    shoot_hostage_dead(&mut b, hostages[1], 0);
+    assert_eq!(disconnects(&b), 1, "the second kill removes the player");
+}
+
+/// `CItem::Spawn` (`items.cpp` 102-106) removes an item that has no floor within 256 units
+/// below it (`DROP_TO_FLOOR` returns 0); one that lands stays.
+#[test]
+fn a_defuser_kit_over_a_void_is_removed_on_a_loaded_map() {
+    let entities = vec![
+        entity(&[("classname", "worldspawn")]),
+        entity(&[("classname", "info_player_start"), ("origin", "0 200 36")]),
+        entity(&[("classname", "info_player_deathmatch"), ("origin", "0 0 36")]),
+        entity(&[("classname", "item_thighpack"), ("origin", "50 0 10")]),
+        entity(&[("classname", "item_thighpack"), ("origin", "90 0 2000")]),
+    ];
+    let mut b = Bench::on(floor_bsp(entities, &[]));
+    let kits = b.run(|_, eng| {
+        let mut n = 0;
+        let mut cur = None;
+        while let Some(id) = eng.find_by_classname(cur, "item_thighpack") {
+            n += 1;
+            cur = Some(id);
+        }
+        n
+    });
+    assert_eq!(kits, 1, "the kit that cannot land is removed, the other stays");
+}
+
+/// `CLocalNav::GetFurthestTraversableNode` passes each node to `PathTraversable` by reference,
+/// so the node comes back as the point the walk settled on (here: dropped onto the floor).
+#[test]
+fn the_furthest_traversable_node_is_written_back() {
+    let entities = vec![
+        entity(&[("classname", "worldspawn")]),
+        entity(&[("classname", "info_player_start"), ("origin", "0 200 36")]),
+        entity(&[("classname", "info_player_deathmatch"), ("origin", "0 0 36")]),
+        entity(&[("classname", "hostage_entity"), ("origin", "0 0 10")]),
+    ];
+    let mut b = Bench::on(floor_bsp(entities, &[]));
+    let hostage = find_hostage_edicts(&mut b)[0];
+    let (found, node) = b.run(move |_, eng| {
+        let mut nav = cs_game::hostage_localnav::LocalNav::default();
+        let start = eng.ent(hostage).unwrap().origin;
+        let mut nodes = [Vec3::ZERO; cs_game::hostage_localnav::MAX_NODES];
+        // Hanging in the air above the floor: the walk ends on the floor below it.
+        nodes[0] = start + Vec3::new(100.0, 0.0, 150.0);
+        let found = nav.get_furthest_traversable_node(eng, hostage, 18.0, start, &mut nodes, 1, true);
+        (found, (nodes[0], start + Vec3::new(100.0, 0.0, 150.0)))
+    });
+    assert_eq!(found, Some(0));
+    assert_ne!(node.0, node.1, "the settled node must be written back: {node:?}");
 }

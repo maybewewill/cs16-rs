@@ -24,9 +24,10 @@ use crate::buy::{SIGNAL_BOMB, SIGNAL_BUY};
 use crate::entity::GameEntity;
 use crate::inventory::{KNIFE_SLOT, PISTOL_SLOT, PRIMARY_WEAPON_SLOT};
 use crate::player::{self, DEAD_NO, MAX_PLAYERS, Team};
+use crate::teams;
 use crate::teams::{
-    JoinState, MENU_SLOT_TEAM_CT, MENU_SLOT_TEAM_RANDOM, MENU_SLOT_TEAM_TERRORIST,
-    handle_menu_choose_appearance, handle_menu_choose_team,
+    JoinState, MENU_SLOT_TEAM_CT, MENU_SLOT_TEAM_TERRORIST, handle_menu_choose_appearance,
+    handle_menu_choose_team,
 };
 use crate::weapons::{WeaponId, item_info};
 
@@ -106,7 +107,7 @@ impl BotSlot {
 /// Server-wide bot manager held on [`GameState`].
 pub(crate) struct BotManager {
     pub(crate) quota_enabled: bool,
-    nav: Option<NavGraph>,
+    pub(crate) nav: Option<NavGraph>,
     next_quota_check: f64,
     slots: [Option<BotSlot>; MAX_PLAYERS],
 }
@@ -207,6 +208,9 @@ pub(crate) fn add_bot(
     team_pref: Option<Team>,
     name: Option<&str>,
 ) -> Option<u8> {
+    // `AddBot` settles the team (and refuses a full or stacked one) before `CreateBot`, so a team
+    // that cannot take the bot costs no fake client.
+    let team = teams::bot_team_slot(g, eng, team_pref)?;
     let chosen_name = pick_bot_name(eng, name);
     let slot = eng.create_fake_client(&chosen_name)?;
     player::put_in_server(g, eng, slot);
@@ -215,13 +219,10 @@ pub(crate) fn add_bot(
         p.joining = JoinState::PickingTeam;
     }
 
-    let cvar_team = eng.cvar_str("bot_join_team").unwrap_or_default();
-    let choice = match team_pref {
-        Some(Team::Terrorist) => MENU_SLOT_TEAM_TERRORIST,
-        Some(Team::Ct) => MENU_SLOT_TEAM_CT,
-        _ if cvar_team.eq_ignore_ascii_case("T") => MENU_SLOT_TEAM_TERRORIST,
-        _ if cvar_team.eq_ignore_ascii_case("CT") => MENU_SLOT_TEAM_CT,
-        _ => MENU_SLOT_TEAM_RANDOM,
+    let choice = if team == Team::Terrorist {
+        MENU_SLOT_TEAM_TERRORIST
+    } else {
+        MENU_SLOT_TEAM_CT
     };
 
     if !handle_menu_choose_team(g, eng, slot, choice) {
@@ -687,14 +688,19 @@ fn hostage_goal_for_bot(
 /// Drives bot quota maintenance, 30 Hz command generation, and 10 Hz AI updates every server
 /// frame (`CBotManager::StartFrame`).
 pub(crate) fn start_frame(g: &mut GameState, eng: &mut EngineApi<'_>) {
-    ensure_nav(g, eng);
     let now = eng.time();
     if g.bots.quota_enabled && now >= g.bots.next_quota_check {
         g.bots.next_quota_check = now + 0.5;
         maintain_quota(g, eng);
     }
 
+    // A server without bots (every human match) pays nothing here: no navigation graph, no
+    // scan of the objective entities.
     let max_clients = usize::from(eng.max_clients()).min(MAX_PLAYERS);
+    if !(0..max_clients).any(|slot| eng.is_fake_client(slot as u8)) {
+        return;
+    }
+    ensure_nav(g, eng);
     let bomb_targets = find_bomb_targets(eng);
     let planted_pos = find_planted_c4(eng);
     let hostages = find_hostages(eng);

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use common::{Bench, entity};
 use cs_assets::bsp::{BspMap, BspModel, ClipNode, Entity, Leaf, LightmapAtlas, Node, Plane};
-use cs_engine::ServerMap;
+use cs_engine::{GameDll, ServerMap};
 use cs_game::player::{DEAD_NO, Team};
 use glam::Vec3;
 
@@ -305,4 +305,40 @@ fn a_round_with_bots_ends() {
         wins.0 + wins.1 >= 1,
         "a round fought by bots must finish with a winner, got scores={wins:?}"
     );
+}
+
+/// `CBotManager::StartFrame` costs a server without bots nothing: the navigation graph is built
+/// on the first frame that has a bot, not at the map load.
+#[test]
+fn a_map_without_bots_builds_no_nav() {
+    let mut b = bot_bench("200 0 36", "-200 0 36", 8);
+    b.step(40);
+    assert!(!b.run(|game, _| game.bot_nav_built()), "no bot, no navigation graph");
+
+    let _ = b.server.console_command("bot_add_ct");
+    b.step(10);
+    assert!(b.run(|game, _| game.bot_nav_built()), "the first bot builds it");
+}
+
+/// `CCSBotManager::AddBot` (`cs_bot_manager.cpp` 1577-1613) refuses a full team before it
+/// creates the bot: no fake client is made (and so none is kicked again every half second).
+#[test]
+fn a_full_team_costs_no_fake_client() {
+    // The arena has two CT spawn points: the third CT bot has no room.
+    let mut b = bot_bench("200 0 36", "-200 0 36", 8);
+    let _ = b.server.console_command("bot_add_ct");
+    let _ = b.server.console_command("bot_add_ct");
+    b.step(10);
+    let fakes = |b: &mut Bench| -> usize {
+        b.run(|_, eng| (0..eng.max_clients()).filter(|&s| eng.is_fake_client(s)).count())
+    };
+    assert_eq!(fakes(&mut b), 2);
+    // Inside one closure: a fake client that is made and kicked would still be there.
+    let after = b.run(|game, eng| {
+        let reply = game.server_command(eng, &["bot_add_ct".to_string()]);
+        let count = (0..eng.max_clients()).filter(|&s| eng.is_fake_client(s)).count();
+        (reply, count)
+    });
+    assert_eq!(after.1, 2, "a full team must not create a fake client");
+    assert_eq!(after.0.as_deref(), Some("Failed to add CT bot\n"));
 }

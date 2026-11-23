@@ -17,7 +17,7 @@ use crate::entity::with_entity;
 use crate::intro::vec_to_angles;
 
 /// `MAX_NODES` (`hostage.h`).
-pub(crate) const MAX_NODES: usize = 100;
+pub const MAX_NODES: usize = 100;
 /// `MAX_HOSTAGES_NAV` (`hostage.h`).
 pub(crate) const MAX_HOSTAGES_NAV: usize = 20;
 /// `HOSTAGE_STEPSIZE` (`hostage.h`): grid spacing in world units.
@@ -148,6 +148,13 @@ impl LocalNavManager {
     }
 }
 
+/// `m_NodeValue -= flElapsedTime * 250` (`hostage_localnav.cpp` 786-787, read 2026-11-23): an `int`
+/// minus a `float`, so the subtraction is done in `float` and the result truncated toward zero
+/// when it is stored back (not the drain truncated first).
+pub(crate) fn drain_node_value(node_value: i32, elapsed: f32) -> i32 {
+    (node_value as f32 - elapsed * 250.0) as i32
+}
+
 /// `CLocalNav::Think`: called every server frame from `StartFrame`. Updates `sv_stepsize`, runs
 /// `HostagePrethink`, drains the CPU budget at `250/s`, and serves at most one queued nav request.
 pub(crate) fn think(g: &mut GameState, eng: &mut EngineApi<'_>) {
@@ -169,8 +176,8 @@ pub(crate) fn think(g: &mut GameState, eng: &mut EngineApi<'_>) {
         }
     }
 
-    let elapsed = (now - g.hostage_nav.last_think_time) as f32;
-    g.hostage_nav.node_value -= (elapsed * 250.0) as i32;
+    let elapsed = now as f32 - g.hostage_nav.last_think_time as f32;
+    g.hostage_nav.node_value = drain_node_value(g.hostage_nav.node_value, elapsed);
     g.hostage_nav.last_think_time = now;
     if g.hostage_nav.node_value < 0 {
         g.hostage_nav.node_value = 0;
@@ -425,22 +432,23 @@ impl LocalNav {
         count
     }
 
-    /// `CLocalNav::GetFurthestTraversableNode`: returns the first node in `nodes[..total]`
-    /// reachable in a straight traversable step from `starting_loc`.
+    /// `CLocalNav::GetFurthestTraversableNode` (`hostage_localnav.cpp` 283-295, read 2026-11-23):
+    /// returns the first node in `nodes[..total]` reachable in a straight traversable step from
+    /// `starting_loc`. `PathTraversable` takes its destination by reference, so the node it
+    /// settled on (the point where the walk ended) is written back into `nodes`.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn get_furthest_traversable_node(
+    pub fn get_furthest_traversable_node(
         &mut self,
         eng: &EngineApi<'_>,
         hostage: EdictId,
         step_size: f32,
         starting_loc: Vec3,
-        nodes: &[Vec3; MAX_NODES],
+        nodes: &mut [Vec3; MAX_NODES],
         total_nodes: usize,
         no_monsters: bool,
     ) -> Option<usize> {
-        for (i, &node_pos) in nodes.iter().take(total_nodes).enumerate() {
-            let mut dest = node_pos;
-            if self.path_traversable(eng, hostage, step_size, starting_loc, &mut dest, no_monsters)
+        for (i, node) in nodes.iter_mut().take(total_nodes).enumerate() {
+            if self.path_traversable(eng, hostage, step_size, starting_loc, node, no_monsters)
                 != PathTraversable::Empty
             {
                 return Some(i);
@@ -736,5 +744,19 @@ impl LocalNav {
             }
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::drain_node_value;
+
+    #[test]
+    fn the_budget_drain_truncates_the_result_not_the_drain() {
+        // 250 * 0.0123 = 3.075: `10 - 3.075 = 6.925` truncates to 6 (draining 3 first gives 7).
+        assert_eq!(drain_node_value(10, 0.0123), 6);
+        // A negative result truncates toward zero; `Think` clamps it to 0 afterwards.
+        assert_eq!(drain_node_value(0, 0.1), -25);
+        assert_eq!(drain_node_value(100, 0.0), 100);
     }
 }
