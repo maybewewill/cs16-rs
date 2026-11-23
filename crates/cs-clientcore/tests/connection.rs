@@ -1,9 +1,12 @@
 //! The connection against a hand-played server (the state machine's details) and against
 //! `cs-engine` over a loopback (the whole path).
 
+use std::sync::{Arc, Mutex};
+
 use cs_clientcore::resources::{ResourceFiles, res_type};
 use cs_clientcore::{
-    ConnState, Connection, ConnectionConfig, ConsistencyPolicy, MAX_CMDRATE, MIN_CMDRATE,
+    CMD_STUFFTEXT_OK, ConnState, Connection, ConnectionConfig, ConsistencyPolicy, MAX_CMDRATE,
+    MIN_CMDRATE,
 };
 use cs_proto48::bitbuf::{MsgReader, MsgWriter};
 use cs_proto48::crypto::{com_munge2, com_unmunge, md5_hex};
@@ -181,6 +184,7 @@ fn entry(res_type: u8, name: &str, index: u16, size: u32, flags: u8) -> Resource
         download_size: size,
         flags,
         md5: None,
+        reserved: None,
     }
 }
 
@@ -213,11 +217,27 @@ fn resource_list(resources: &[ResourceEntry], consistency: &[u32]) -> Vec<u8> {
 
 struct GameFiles {
     have: Vec<&'static str>,
+    stored: Arc<Mutex<Vec<String>>>,
+}
+
+fn game_files(have: &[&'static str]) -> (GameFiles, Arc<Mutex<Vec<String>>>) {
+    let stored = Arc::new(Mutex::new(Vec::new()));
+    (
+        GameFiles {
+            have: have.to_vec(),
+            stored: stored.clone(),
+        },
+        stored,
+    )
 }
 
 impl ResourceFiles for GameFiles {
     fn exists(&self, path: &str) -> bool {
         self.have.contains(&path)
+    }
+    fn store(&mut self, path: &str, _data: &[u8]) -> bool {
+        self.stored.lock().unwrap().push(path.to_string());
+        true
     }
     fn md5(&self, path: &str) -> Option<[u8; 16]> {
         self.exists(path).then(|| {
@@ -265,9 +285,8 @@ fn fills_the_precache_tables_as_the_server_sent_them() {
 #[test]
 fn missing_files_are_requested_then_the_client_spawns_when_they_arrive() {
     let (mut server, mut conn) = new_pair(config());
-    conn.set_files(Box::new(GameFiles {
-        have: vec!["maps/de_dust2.bsp"],
-    }));
+    let (files, stored) = game_files(&["maps/de_dust2.bsp"]);
+    conn.set_files(Box::new(files));
     let mut now = handshake(&mut server, &mut conn);
     up_to_resource_request(&mut server, &mut conn, &mut now);
 
@@ -296,12 +315,175 @@ fn missing_files_are_requested_then_the_client_spawns_when_they_arrive() {
     let cmds = string_cmds(&server.recv_clc());
     assert_eq!(cmds.len(), 1, "{cmds:?}");
     assert!(cmds[0].starts_with("spawn 3 "), "{cmds:?}");
+    assert_eq!(
+        *stored.lock().unwrap(),
+        vec!["models/extra.mdl", "sound/extra/boom.wav"]
+    );
+}
+
+/// A file stream of the given name and body, delivered to the client.
+fn deliver_file(
+    server: &mut Server,
+    conn: &mut Connection<LoopbackEndpoint>,
+    now: &mut f64,
+    name: &str,
+    compressor: &str,
+    size: u32,
+    data: &[u8],
+) {
+    let mut stream = format!("{name}\0{compressor}\0").into_bytes();
+    stream.extend_from_slice(&size.to_le_bytes());
+    stream.extend_from_slice(data);
+    let packet = file_packet(server, &stream);
+    server.send_raw(&packet);
+    *now += STEP;
+    conn.pump(*now);
+}
+
+#[test]
+fn a_hostile_server_cannot_make_the_client_store_files() {
+    let (mut server, mut conn) = new_pair(config());
+    let (files, stored) = game_files(&["maps/de_dust2.bsp"]);
+    conn.set_files(Box::new(files));
+    let mut now = handshake(&mut server, &mut conn);
+    up_to_resource_request(&mut server, &mut conn, &mut now);
+    let list = [
+        entry(res_type::MODEL, "maps/de_dust2.bsp", 1, 1024, 1),
+        entry(res_type::MODEL, "models/wanted.mdl", 7, 100, 0),
+    ];
+    let reply = exchange(&mut server, &mut conn, &mut now, &resource_list(&list, &[]));
+    assert_eq!(string_cmds(&reply), vec!["dlfile models/wanted.mdl"]);
+
+    // Names never requested, unsafe names, customizations, a wrong declared size, a size of
+    // zero, a compressor nobody offered.
+    for (name, compressor, size, data) in [
+        ("models/unrequested.mdl", "", 3, &b"abc"[..]),
+        ("!MD5abcdef", "", 3, b"abc"),
+        ("models/x.dll", "", 3, b"abc"),
+        ("models/x.dll.", "", 3, b"abc"),
+        ("models/x.dll ", "", 3, b"abc"),
+        ("models/con.mdl", "", 3, b"abc"),
+        ("../models/wanted.mdl", "", 3, b"abc"),
+        ("models/wanted.mdl", "", 99, b"abc"),
+        ("models/wanted.mdl", "", 0, b""),
+        ("models/wanted.mdl", "lzss", 3, b"abc"),
+    ] {
+        deliver_file(&mut server, &mut conn, &mut now, name, compressor, size, data);
+    }
+    assert!(stored.lock().unwrap().is_empty(), "{:?}", stored.lock().unwrap());
+    assert_eq!(conn.resources().pending_downloads(), 1);
+    assert!(conn.console_log().iter().any(|l| l.contains("unrequested file models/unrequested.mdl")));
+    assert_eq!(conn.state(), &ConnState::Signon);
+
+    // The one that was asked for is kept.
+    deliver_file(&mut server, &mut conn, &mut now, "models/wanted.mdl", "", 3, b"abc");
+    assert_eq!(*stored.lock().unwrap(), vec!["models/wanted.mdl"]);
+    let cmds = string_cmds(&server.recv_clc());
+    assert!(cmds.iter().any(|c| c.starts_with("spawn 3 ")), "{cmds:?}");
+}
+
+#[test]
+fn flooding_the_reliable_queue_ends_the_connection() {
+    let (mut server, mut conn) = new_pair(config());
+    handshake(&mut server, &mut conn);
+    // Commands forwarded to a server that does not acknowledge pile up; every forward a
+    // stufftext causes goes through the same queue as a typed one.
+    let line = format!("say {}", "x".repeat(1500));
+    for _ in 0..100 {
+        conn.execute_local(&line);
+        if conn.state() != &ConnState::Signon {
+            break;
+        }
+    }
+    let ConnState::Disconnected(reason) = conn.state() else {
+        panic!("expected Disconnected, got {:?}", conn.state());
+    };
+    assert!(reason.contains("reliable"), "{reason}");
+}
+
+#[test]
+fn a_flood_of_shell_commands_ends_the_connection() {
+    let (mut server, mut conn) = new_pair(config());
+    conn.register_command("spk", CMD_STUFFTEXT_OK);
+    let mut now = handshake(&mut server, &mut conn);
+    let text = format!("{}\n", "spk a;".repeat(300));
+    for _ in 0..10 {
+        exchange(&mut server, &mut conn, &mut now, &msg(|w| write_svc_stufftext(w, &text)));
+        if conn.state() != &ConnState::Signon {
+            break;
+        }
+    }
+    let ConnState::Disconnected(reason) = conn.state() else {
+        panic!("expected Disconnected, got {:?}", conn.state());
+    };
+    assert!(reason.contains("flood"), "{reason}");
+}
+
+#[test]
+fn shell_commands_not_marked_for_stufftext_stay_the_users() {
+    let (mut server, mut conn) = new_pair(config());
+    conn.register_command("exec", 0);
+    conn.register_command("spk", CMD_STUFFTEXT_OK);
+    let mut now = handshake(&mut server, &mut conn);
+    exchange(&mut server, &mut conn, &mut now, &msg(|w| write_svc_stufftext(w, "exec evil.cfg; spk hi\n")));
+    let shell = conn.take_shell_commands();
+    assert_eq!(shell.len(), 1);
+    assert_eq!(shell[0].name, "spk");
+    assert!(conn.console_log().iter().any(|l| l.contains("privileged command exec")));
+    // The user runs it freely.
+    conn.execute_local("exec mine.cfg");
+    assert_eq!(conn.take_shell_commands()[0].name, "exec");
+}
+
+#[test]
+fn a_bad_message_in_a_reliable_packet_does_not_stop_the_signon() {
+    let (mut server, mut conn) = new_pair(config());
+    let mut now = handshake(&mut server, &mut conn);
+    // Print, a temp entity of a type nobody knows, a print that is lost with the rest.
+    let bad = msg(|w| {
+        write_svc_print(w, "before\n");
+        w.write_u8(svc::TEMP_ENTITY);
+        w.write_u8(250);
+        write_svc_print(w, "after\n");
+    });
+    exchange(&mut server, &mut conn, &mut now, &bad);
+    assert!(conn.console_log().iter().any(|l| l == "before"));
+    assert_eq!(conn.stats().parse_errors, 1);
+    assert_eq!(conn.state(), &ConnState::Signon);
+    // The sign-on carries on with the next message.
+    let reply = exchange(
+        &mut server,
+        &mut conn,
+        &mut now,
+        &msg(|w| write_svc_serverinfo(w, &server_info())),
+    );
+    assert_eq!(string_cmds(&reply), vec!["sendres".to_string()]);
+}
+
+#[test]
+fn a_stalled_signon_times_out() {
+    let (mut server, mut conn) = new_pair(config());
+    let mut now = handshake(&mut server, &mut conn);
+    now += 10.0;
+    conn.pump(now);
+    assert_eq!(conn.state(), &ConnState::Signon);
+    // A step by the server restarts the clock.
+    exchange(&mut server, &mut conn, &mut now, &msg(|w| write_svc_serverinfo(w, &server_info())));
+    now += 29.0;
+    conn.pump(now);
+    assert_eq!(conn.state(), &ConnState::Signon);
+    now += 2.0;
+    conn.pump(now);
+    let ConnState::Disconnected(reason) = conn.state() else {
+        panic!("expected Disconnected, got {:?}", conn.state());
+    };
+    assert!(reason.contains("timed out"), "{reason}");
 }
 
 #[test]
 fn a_fatal_missing_file_with_downloads_off_ends_the_connection_with_its_name() {
     let (mut server, mut conn) = new_pair(config());
-    conn.set_files(Box::new(GameFiles { have: vec![] }));
+    conn.set_files(Box::new(game_files(&[]).0));
     conn.set_cvar("cl_allowdownload", "0");
     let mut now = handshake(&mut server, &mut conn);
     up_to_resource_request(&mut server, &mut conn, &mut now);
@@ -317,9 +499,7 @@ fn a_fatal_missing_file_with_downloads_off_ends_the_connection_with_its_name() {
 #[test]
 fn answers_consistency_as_the_original() {
     let (mut server, mut conn) = new_pair(config());
-    conn.set_files(Box::new(GameFiles {
-        have: vec!["maps/de_dust2.bsp", "models/p_ak47.mdl"],
-    }));
+    conn.set_files(Box::new(game_files(&["maps/de_dust2.bsp", "models/p_ak47.mdl"]).0));
     let mut now = handshake(&mut server, &mut conn);
     up_to_resource_request(&mut server, &mut conn, &mut now);
 
@@ -369,7 +549,7 @@ fn the_probe_policy_leaves_a_server_that_demands_consistency() {
 #[test]
 fn stufftext_runs_allowed_commands_only() {
     let (mut server, mut conn) = new_pair(config());
-    conn.register_command("spk", 0);
+    conn.register_command("spk", CMD_STUFFTEXT_OK);
     let mut now = handshake(&mut server, &mut conn);
 
     let text = "echo hello; spk \"vox/ready\"; say_team hi; quit; cl_lw 0; name stolen; \

@@ -284,6 +284,9 @@ pub struct ResourceEntry {
     pub download_size: u32,
     pub flags: u8,
     pub md5: Option<[u8; 16]>,
+    /// The 32 reserved bytes of the entry (`rguc_reserved`): for a model, byte 0 is the
+    /// consistency check type, munged with the server's spawn count.
+    pub reserved: Option<[u8; 32]>,
 }
 
 /// Parsed `svc_sound` payload (`sv_main.cpp:808-821`).
@@ -631,8 +634,30 @@ pub fn parse_svc_stream(
     data: &[u8],
     ctx: &mut SvcParseContext,
 ) -> Result<Vec<SvcMessage>, ProtoError> {
-    let mut r = MsgReader::new(data);
+    match parse_svc_stream_partial(data, ctx) {
+        (out, None) => Ok(out),
+        (_, Some(e)) => Err(e),
+    }
+}
+
+/// Like [`parse_svc_stream`], but keeps the messages that parsed before an error: returns
+/// them and the error that stopped the parse (the rest of the stream is unusable, a message
+/// boundary is lost).
+pub fn parse_svc_stream_partial(
+    data: &[u8],
+    ctx: &mut SvcParseContext,
+) -> (Vec<SvcMessage>, Option<ProtoError>) {
     let mut out = Vec::new();
+    let err = parse_svc_into(data, ctx, &mut out).err();
+    (out, err)
+}
+
+fn parse_svc_into(
+    data: &[u8],
+    ctx: &mut SvcParseContext,
+    out: &mut Vec<SvcMessage>,
+) -> Result<(), ProtoError> {
+    let mut r = MsgReader::new(data);
 
     while r.remaining() > 0 {
         let op = r.read_u8()?;
@@ -663,7 +688,7 @@ pub fn parse_svc_stream(
         out.push(msg);
     }
 
-    Ok(out)
+    Ok(())
 }
 
 fn parse_one_svc(
@@ -1060,9 +1085,11 @@ fn parse_one_svc(
                 } else {
                     None
                 };
-                if r.read_one_bit() {
-                    let _reserved = r.read_bit_data(32);
-                }
+                let reserved = if r.read_one_bit() {
+                    r.read_bit_data(32).try_into().ok()
+                } else {
+                    None
+                };
                 resources.push(ResourceEntry {
                     res_type,
                     filename,
@@ -1070,6 +1097,7 @@ fn parse_one_svc(
                     download_size,
                     flags,
                     md5,
+                    reserved,
                 });
             }
             let mut consistency_indices = Vec::new();
@@ -1776,7 +1804,13 @@ pub fn write_svc_resourcelist(w: &mut MsgWriter, resources: &[ResourceEntry]) {
         {
             w.write_bit_data(&md5);
         }
-        w.write_one_bit(false); // reserved = 0
+        match &r.reserved {
+            Some(reserved) => {
+                w.write_one_bit(true);
+                w.write_bit_data(reserved);
+            }
+            None => w.write_one_bit(false),
+        }
     }
     w.write_one_bit(false); // no force_unmodified consistency list
     w.end_bit_writing();
@@ -2476,6 +2510,7 @@ pub fn parse_clc_stream(
                         download_size,
                         flags,
                         md5,
+                        reserved: None,
                     });
                 }
                 out.push(ClcMessage::ResourceList(list));
@@ -2560,6 +2595,7 @@ mod tests {
                 download_size: 1024,
                 flags: 1,
                 md5: None,
+                reserved: None,
             }],
         );
         write_svc_time(&mut sw, 12.5);
@@ -3249,6 +3285,7 @@ mod tests {
                 download_size: 123_456,
                 flags: 0,
                 md5: None,
+                reserved: None,
             },
             ResourceEntry {
                 res_type: 5,
@@ -3257,6 +3294,7 @@ mod tests {
                 download_size: 4096,
                 flags: RES_CUSTOM as u8,
                 md5: Some([0x5A; 16]),
+                reserved: None,
             },
         ];
         let consistency = [1u8, 2, 3, 0xFF, 0];
@@ -3616,5 +3654,68 @@ mod client_reader_tests {
                 }]
             );
         }
+    }
+
+    #[test]
+    fn resourcelist_keeps_the_reserved_bytes() {
+        let mut ctx = SvcParseContext::new();
+        let mut reserved = [0u8; 32];
+        reserved[0] = 0xAB;
+        reserved[31] = 7;
+        let entries = vec![
+            ResourceEntry {
+                res_type: 2,
+                filename: "models/a.mdl".to_string(),
+                index: 1,
+                download_size: 5,
+                flags: 0,
+                md5: None,
+                reserved: Some(reserved),
+            },
+            ResourceEntry {
+                res_type: 2,
+                filename: "models/b.mdl".to_string(),
+                index: 2,
+                download_size: 5,
+                flags: 0,
+                md5: None,
+                reserved: None,
+            },
+        ];
+        let mut w = MsgWriter::new();
+        write_svc_resourcelist(&mut w, &entries);
+        let msgs = parse_svc_stream(w.as_slice(), &mut ctx).unwrap();
+        assert_eq!(
+            msgs,
+            vec![SvcMessage::ResourceList {
+                resources: entries,
+                consistency_indices: Vec::new()
+            }]
+        );
+    }
+
+    #[test]
+    fn partial_parse_keeps_the_messages_before_the_bad_one() {
+        let mut ctx = SvcParseContext::new();
+        let mut w = MsgWriter::new();
+        write_svc_print(&mut w, "one
+");
+        write_svc_print(&mut w, "two
+");
+        w.write_u8(200); // not an opcode and no registered user message
+        write_svc_print(&mut w, "lost
+");
+        let (msgs, err) = parse_svc_stream_partial(w.as_slice(), &mut ctx);
+        assert_eq!(
+            msgs,
+            vec![
+                SvcMessage::Print("one
+".to_string()),
+                SvcMessage::Print("two
+".to_string())
+            ]
+        );
+        assert!(err.is_some());
+        assert!(parse_svc_stream(w.as_slice(), &mut ctx).is_err());
     }
 }

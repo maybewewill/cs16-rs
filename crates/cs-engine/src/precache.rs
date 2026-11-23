@@ -306,6 +306,7 @@ impl PrecacheTables {
             download_size,
             flags,
             md5: None,
+            reserved: None,
         };
         let mut list: Vec<ResourceEntry> = self
             .generic
@@ -573,6 +574,7 @@ mod tests {
             download_size,
             flags,
             md5: None,
+            reserved: None,
         };
         assert_eq!(
             list,

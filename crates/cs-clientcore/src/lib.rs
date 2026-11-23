@@ -13,10 +13,10 @@ pub mod cvars;
 pub mod precache;
 pub mod resources;
 
-pub use commands::{CMD_FILTERABLE, CMD_PRIVILEGED, CommandRegistry, ConsoleCommand};
+pub use commands::{CMD_FILTERABLE, CMD_PRIVILEGED, CMD_STUFFTEXT_OK, CommandRegistry, ConsoleCommand};
 pub use connection::{
     CONSISTENCY_REASON, ConnState, ConnStats, Connection, ConnectionConfig, ConsistencyPolicy,
-    DatagramTap, MAX_CMDRATE, MESSAGE_LOG_CAPACITY, MIN_CMDRATE, NO_SERVERINFO_REASON, SIGNONS,
+    DatagramTap, MAX_CMDRATE, MESSAGE_LOG_CAPACITY, MIN_CMDRATE, NO_SERVERINFO_REASON,
 };
 pub use cvars::{ClientCvars, Cvar};
 pub use precache::{PrecacheEntry, PrecacheTables};

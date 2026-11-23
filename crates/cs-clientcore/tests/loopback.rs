@@ -17,7 +17,12 @@ impl GameDll for Bare {
     fn usermsgs(&self) -> UserMsgRegistry {
         UserMsgRegistry::cs16_default()
     }
-    fn server_activate(&mut self, _: &mut EngineApi<'_>) {}
+    fn server_activate(&mut self, eng: &mut EngineApi<'_>) {
+        // The tables the client must end up with.
+        let _ = eng.precache_model("models/test.mdl");
+        let _ = eng.precache_sound("weapons/test.wav");
+        let _ = eng.precache_generic("sprites/test.txt");
+    }
     fn server_deactivate(&mut self, _: &mut EngineApi<'_>) {}
     fn spawn_entity(
         &mut self,
@@ -78,8 +83,17 @@ fn connects_to_our_server_over_loopback() {
     assert!(conn.server_info().is_some());
     assert!(conn.stats().full_updates >= 1);
     assert_eq!(conn.stats().parse_errors, 0);
-    // The server's resource list landed in the tables the client keeps.
+    // The server's resource list landed in the tables the client keeps, at the server's indices.
     assert!(conn.resources().needed().is_empty());
+    let tables = conn.precache();
+    let named = |table: &std::collections::BTreeMap<u16, cs_clientcore::PrecacheEntry>, name: &str| {
+        table.iter().find(|(_, e)| e.name == name).map(|(&i, _)| i)
+    };
+    assert!(named(&tables.models, "models/test.mdl").is_some(), "{:?}", tables.models);
+    assert!(named(&tables.sounds, "weapons/test.wav").is_some(), "{:?}", tables.sounds);
+    assert!(named(&tables.generic, "sprites/test.txt").is_some(), "{:?}", tables.generic);
+    // The map is model 1.
+    assert_eq!(tables.world_model(), conn.server_info().map(|i| i.map_path.as_str()));
 
     // A few more frames: the delta stream keeps flowing and no packet goes unparsed.
     for _ in 0..100 {

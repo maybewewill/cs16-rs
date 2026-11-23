@@ -17,6 +17,11 @@ use crate::cvars::has_filtered_prefix;
 pub const CMD_PRIVILEGED: u32 = 1 << 0;
 /// Refused from a stufftext while `cl_filterstuffcmd` is on (`CMD_FILTERABLE`).
 pub const CMD_FILTERABLE: u32 = 1 << 1;
+/// The server may run it with a stufftext. A command registered without this flag is the
+/// user's: a deliberate deviation from Xash (which lets any unrestricted command run), so a
+/// shell that registers `exec`, `bind` or `screenshot` does not hand them to a server by
+/// forgetting a flag. The core's own safe commands (`reconnect`, `echo`, ...) carry it.
+pub const CMD_STUFFTEXT_OK: u32 = 1 << 2;
 
 /// Longest command line the buffer accepts (`MAX_CMD_LINE` is 2048 in Xash).
 pub const MAX_CMD_LINE: usize = 2048;
@@ -82,7 +87,7 @@ impl CommandRegistry {
             "fullserverinfo",
             "cmd",
         ] {
-            r.register(name, 0);
+            r.register(name, CMD_STUFFTEXT_OK);
         }
         // `Cmd_AddRestrictedCommand` in `CL_InitLocal`.
         for name in [
@@ -117,7 +122,7 @@ impl CommandRegistry {
     /// `cl_filterstuffcmd > 0`.
     pub fn stufftext_may_run(&self, name: &str, filter: bool) -> bool {
         let flags = self.flags(name).unwrap_or(0);
-        if flags & CMD_PRIVILEGED != 0 || name.starts_with('@') {
+        if flags & CMD_PRIVILEGED != 0 || flags & CMD_STUFFTEXT_OK == 0 || name.starts_with('@') {
             return false;
         }
         if !filter {
@@ -255,10 +260,16 @@ mod tests {
     fn stufftext_filter_denies_restricted_prefixed_and_at_commands() {
         let r = CommandRegistry::new();
         assert!(r.stufftext_may_run("reconnect", true));
+        // A shell command is the user's until it is marked.
+        let mut r = r;
+        r.register("spk", 0);
+        assert!(!r.stufftext_may_run("spk", false));
+        r.register("spk", CMD_STUFFTEXT_OK);
         assert!(r.stufftext_may_run("spk", true));
         assert!(!r.stufftext_may_run("quit", true));
         assert!(!r.stufftext_may_run("quit", false));
         assert!(!r.stufftext_may_run("setinfo", false));
+        r.register("cl_something", CMD_STUFFTEXT_OK);
         assert!(!r.stufftext_may_run("cl_something", true));
         assert!(r.stufftext_may_run("cl_something", false));
         assert!(!r.stufftext_may_run("@hidden", false));

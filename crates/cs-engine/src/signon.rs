@@ -365,6 +365,7 @@ mod tests {
             download_size: 0,
             flags: 0,
             md5: None,
+            reserved: None,
         }];
         let mut w = MsgWriter::new();
         write_sendres_stage(&mut w, 5, &resources);

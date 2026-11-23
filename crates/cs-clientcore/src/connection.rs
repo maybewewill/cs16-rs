@@ -29,7 +29,7 @@ use cs_proto48::handshake::{
 use cs_proto48::info::InfoString;
 use cs_proto48::messages::{
     MoveVarsMsg, PacketEntitiesMsg, ServerInfoMsg, SvcMessage, SvcParseContext, WeaponRecords, clc,
-    entity_schema_name, parse_svc_stream, write_clc_cvarvalue2, write_clc_delta,
+    entity_schema_name, parse_svc_stream_partial, write_clc_cvarvalue2, write_clc_delta,
     write_clc_fileconsistency, write_clc_move, write_clc_resourcelist, write_clc_stringcmd,
 };
 use cs_proto48::netchan::{FRAGMENT_C2S_SIZE, NetChan, SplitPacketAssembler};
@@ -40,9 +40,17 @@ use crate::cvars::{CVAR_PRIVILEGED, CVAR_PROTECTED, CVAR_USERINFO, ClientCvars};
 use crate::precache::PrecacheTables;
 use crate::resources::{AllFilesPresent, ResourceFiles, ResourceManager, parse_file_stream};
 
-/// Sign-on stages (`SIGNONS` in Xash `client.h`): after `svc_signonnum` 1 and the first
-/// entity frame the client is active.
-pub const SIGNONS: u8 = 2;
+/// Reliable bytes the connection lets pile up unacknowledged before it gives the server up:
+/// stuffed commands forwarded to a server that does not answer, mostly.
+pub const MAX_RELIABLE_BACKLOG: usize = 64 * 1024;
+/// Console commands waiting for the shell before the connection gives up on it.
+pub const MAX_SHELL_COMMANDS: usize = 1024;
+/// Opcodes [`Connection::opcode_log`] keeps at least (it drops the oldest half past twice this).
+pub const OPCODE_LOG_CAPACITY: usize = 65536;
+/// Seconds a sign-on may go without the server taking a step (server info, resource list,
+/// sign-on number, a file) before the client leaves; any datagram counts while a download
+/// is pending.
+pub const SIGNON_TIMEOUT: f64 = 30.0;
 /// A connectionless handshake packet is resent when no answer arrived within this time.
 const HANDSHAKE_RESEND: f64 = 1.0;
 /// Previously sent commands repeated in every `clc_move` as backups.
@@ -182,6 +190,8 @@ pub struct Connection<T: PacketTransport> {
     awaiting_resources: bool,
     console: VecDeque<String>,
     shell_commands: VecDeque<ConsoleCommand>,
+    /// When the sign-on last advanced; `None` until the next pump stamps it.
+    signon_progress: Option<f64>,
     full_server_info: String,
     tap: Option<Box<dyn DatagramTap>>,
     tap_error: Option<std::io::Error>,
@@ -236,6 +246,7 @@ impl<T: PacketTransport> Connection<T> {
             awaiting_resources: false,
             console: VecDeque::new(),
             shell_commands: VecDeque::new(),
+            signon_progress: None,
             full_server_info: String::new(),
             tap: None,
             tap_error: None,
@@ -306,6 +317,15 @@ impl<T: PacketTransport> Connection<T> {
                 }
             }
             ConnState::Signon | ConnState::InGame => {
+                if self.state == ConnState::Signon {
+                    let since = *self.signon_progress.get_or_insert(now);
+                    if now - since > SIGNON_TIMEOUT {
+                        self.disconnect_with(format!(
+                            "signon timed out after {SIGNON_TIMEOUT} seconds without progress"
+                        ));
+                        return;
+                    }
+                }
                 if now >= self.next_send_at {
                     self.send_netchan_packet(now);
                     self.next_send_at = now + self.command_interval();
@@ -346,8 +366,20 @@ impl<T: PacketTransport> Connection<T> {
     }
 
     fn queue_reliable(&mut self, bytes: &[u8]) {
-        if let Some(chan) = self.chan.as_mut() {
-            chan.write_reliable(bytes);
+        let Some(chan) = self.chan.as_mut() else {
+            return;
+        };
+        if chan.pending_reliable_bytes() + bytes.len() > MAX_RELIABLE_BACKLOG {
+            self.disconnect_with("reliable message queue overflow".to_string());
+            return;
+        }
+        chan.write_reliable(bytes);
+    }
+
+    /// Ends the connection with `reason` unless it already ended.
+    fn disconnect_with(&mut self, reason: String) {
+        if !self.state.is_terminal() {
+            self.state = ConnState::Disconnected(reason);
         }
     }
 
@@ -489,7 +521,13 @@ impl<T: PacketTransport> Connection<T> {
                 _ => self.print("Usage: fullserverinfo <complete info string>"),
             },
             "setinfo" | "userinfo" => self.setinfo(&cmd),
-            _ => self.shell_commands.push_back(cmd),
+            _ => {
+                if self.shell_commands.len() >= MAX_SHELL_COMMANDS {
+                    self.disconnect_with("console command flood: the shell does not take them".to_string());
+                } else {
+                    self.shell_commands.push_back(cmd);
+                }
+            }
         }
     }
 
@@ -787,25 +825,30 @@ impl<T: PacketTransport> Connection<T> {
         };
         self.ctx.last_incoming_seq = (incoming.sequence & 0xFF) as u8;
 
+        if self.resources.pending_downloads() > 0 {
+            self.signon_progress = Some(now);
+        }
+        // A stream that does not parse to its end still yields the messages before the bad
+        // one; the rest of that stream is lost (no message boundary), the connection goes on.
         let mut failed = false;
         let streams = std::iter::once(incoming.payload).chain(incoming.completed_normal_stream);
         for stream in streams {
-            match parse_svc_stream(&stream, &mut self.ctx) {
-                Ok(messages) => {
-                    for message in messages {
-                        self.opcode_log.push(message.opcode());
-                        self.log_message(&message);
-                        self.handle_svc(message, now);
-                    }
-                }
-                Err(_) => failed = true,
+            let (messages, error) = parse_svc_stream_partial(&stream, &mut self.ctx);
+            failed |= error.is_some();
+            for message in messages {
+                self.opcode_log.push(message.opcode());
+                self.log_message(&message);
+                self.handle_svc(message, now);
             }
+        }
+        if self.opcode_log.len() > 2 * OPCODE_LOG_CAPACITY {
+            self.opcode_log.drain(..OPCODE_LOG_CAPACITY);
         }
         if failed {
             self.stats.parse_errors += 1;
         }
         if let Some(file) = incoming.completed_file_stream {
-            self.on_file_stream(&file);
+            self.on_file_stream(&file, now);
         }
     }
 
@@ -833,6 +876,7 @@ impl<T: PacketTransport> Connection<T> {
                 self.state = ConnState::Disconnected(reason.trim_end_matches('\n').to_string());
             }
             SvcMessage::ServerInfo(info) => {
+                self.signon_progress = Some(now);
                 self.server_info = Some(*info);
                 if signon {
                     self.send_stringcmd("sendres");
@@ -848,9 +892,17 @@ impl<T: PacketTransport> Connection<T> {
             SvcMessage::ResourceList {
                 resources,
                 consistency_indices,
-            } if signon => self.on_resource_list(&resources, &consistency_indices),
-            SvcMessage::ResourceLocation(text) => self.resources.add_download_locations(&text),
+            } if signon => {
+                self.signon_progress = Some(now);
+                self.on_resource_list(&resources, &consistency_indices);
+            }
+            SvcMessage::ResourceLocation(text) => {
+                if let Err(reason) = self.resources.add_download_locations(&text) {
+                    self.disconnect_with(reason);
+                }
+            }
             SvcMessage::SignonNum(n) => {
+                self.signon_progress = Some(now);
                 self.signon_num = n;
                 if signon && n == 1 {
                     self.send_stringcmd("sendents");
@@ -919,7 +971,8 @@ impl<T: PacketTransport> Connection<T> {
             return;
         }
         self.precache.add(resources);
-        if let Err(reason) = self.resources.begin(resources, consistency_indices) {
+        let spawn_count = self.server_info.as_ref().map_or(0, |i| i.spawn_count);
+        if let Err(reason) = self.resources.begin(resources, consistency_indices, spawn_count) {
             self.state = ConnState::Disconnected(reason);
             return;
         }
@@ -965,17 +1018,23 @@ impl<T: PacketTransport> Connection<T> {
         self.send_spawn();
     }
 
-    /// A file arrived through the file stream (`CL_ProcessFile`).
-    fn on_file_stream(&mut self, stream: &[u8]) {
+    /// A file arrived through the file stream (`CL_ProcessFile`). Only a file this client asked
+    /// for with `dlfile` is kept: the name must match a pending request, which settles it
+    /// before anything is stored. Anything else a server sends is dropped.
+    fn on_file_stream(&mut self, stream: &[u8], now: f64) {
         let Some(file) = parse_file_stream(stream) else {
-            self.print("file fragment received with a bad header or path, ignoring");
+            self.print("file fragment received with a bad header, name or size, ignoring");
             return;
         };
+        if !self.resources.file_received(&file.name) {
+            self.print(format!("unrequested file {} ignored", file.name));
+            return;
+        }
+        self.signon_progress = Some(now);
         if !self.files.store(&file.name, &file.data) && !self.files.exists(&file.name) {
             self.print(format!("could not keep downloaded file {}", file.name));
         }
-        let matched = self.resources.file_received(&file.name);
-        if matched && self.awaiting_resources && self.state == ConnState::Signon {
+        if self.awaiting_resources && self.state == ConnState::Signon {
             self.request_missing();
         }
     }
@@ -1017,6 +1076,7 @@ impl<T: PacketTransport> Connection<T> {
         self.precache.clear();
         self.awaiting_resources = false;
         self.signon_num = 0;
+        self.signon_progress = None;
     }
 
     /// Replaces the entity view with the complete frame the parser rebuilt from this update.
