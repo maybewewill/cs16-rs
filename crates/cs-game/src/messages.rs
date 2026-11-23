@@ -15,10 +15,9 @@
 //! `InitHUD`'s "entered the game" log line (`UTIL_LogPrintf`) is not ported.
 //!
 //! Not sent yet, with the task that sends them: `Fog` (no `env_fog` entity yet), `HLTV` (there
-//! is no HLTV; `SVC_INTERMISSION` is sent by the round rules), `BombDrop` and the defuser icon of
-//! `InitHUD` (bomb), `HostagePos`/`Scenario` (hostages), `Account`/`HealthInfo` (they exist
-//! only in the newest builds, `BUILD_LATEST`: vanilla does not register them), the career
-//! messages (`CZCareer`, Condition Zero only).
+//! is no HLTV; `SVC_INTERMISSION` is sent by the round rules), `HostagePos`/`Scenario`
+//! (hostages), `Account`/`HealthInfo` (they exist only in the newest builds, `BUILD_LATEST`:
+//! vanilla does not register them), the career messages (`CZCareer`, Condition Zero only).
 
 use cs_engine::{EngineApi, MsgDest};
 use cs_proto48::bitbuf::MsgWriter;
@@ -121,11 +120,10 @@ pub(crate) const USER_MESSAGES: &[(&str, i8)] = &[
 const MAX_MOTD_CHUNK: usize = 60;
 const MAX_MOTD_LENGTH: usize = 1536;
 
-/// `STATUSICON_HIDE` and `STATUSICON_SHOW`.
-const STATUSICON_HIDE: u8 = 0;
-
-/// `SCORE_STATUS_DEAD` (ReGameDLL `player.h`; value assumed, the header was not fetched).
+/// `SCORE_STATUS_*` (`cdll_dll.h` 64-66). `SCORE_STATUS_DEFKIT` (`1 << 3`) is `BUILD_LATEST` only.
 pub(crate) const SCORE_STATUS_DEAD: u8 = 1 << 0;
+pub(crate) const SCORE_STATUS_BOMB: u8 = 1 << 1;
+pub(crate) const SCORE_STATUS_VIP: u8 = 1 << 2;
 
 /// The registry the game gives the engine: [`USER_MESSAGES`] with ids from `USERMSG_BASE_ID`.
 pub(crate) fn link_user_messages() -> UserMsgRegistry {
@@ -324,13 +322,18 @@ fn team_info(eng: &mut EngineApi<'_>, dest_slot: u8, index: u8, team: Team) {
     );
 }
 
-/// `gmsgScoreAttrib` to `dest_slot` (`CBasePlayer::SetScoreAttrib`): what the scoreboard marks
-/// the player of edict index `index` with (dead; the bomb and the VIP follow with those
-/// tasks).
+/// `gmsgScoreAttrib` to `dest_slot` (`CBasePlayer::SetScoreAttrib`, vanilla: no team filter,
+/// which is `REGAMEDLL_FIXES` only, and no `SCORE_STATUS_DEFKIT`, which is `BUILD_LATEST` only).
 fn score_attrib(eng: &mut EngineApi<'_>, dest_slot: u8, index: u8, p: &Player) {
     let mut flags = 0;
     if !p.alive {
         flags |= SCORE_STATUS_DEAD;
+    }
+    if p.has_c4 {
+        flags |= SCORE_STATUS_BOMB;
+    }
+    if p.is_vip {
+        flags |= SCORE_STATUS_VIP;
     }
     eng.send_usermsg(
         MsgDest::One(dest_slot),
@@ -361,20 +364,6 @@ pub(crate) fn money(eng: &mut EngineApi<'_>, slot: u8, amount: i32) {
             flash: false,
         },
     );
-}
-
-/// `gmsgStatusIcon` hiding the bomb icon (`CBasePlayer::SetBombIcon(FALSE)` of a player
-/// without the bomb), then `SetScoreboardAttributes()`: the player's marks to every player.
-fn set_bomb_icon(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) {
-    eng.send_usermsg(
-        MsgDest::One(slot),
-        &CsUserMsg::StatusIcon {
-            status: STATUSICON_HIDE,
-            sprite_name: "c4".to_string(),
-            color: None,
-        },
-    );
-    set_scoreboard_attributes(g, eng, usize::from(slot));
 }
 
 /// `CBasePlayer::SetScoreboardAttributes()` for the player of `slot`: `ScoreAttrib` to every
@@ -540,6 +529,19 @@ fn init_hud(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) {
             radar(eng, slot, index, origin);
         }
     }
+    // Vanilla (`!REGAMEDLL_FIXES`): sends `BombDrop(DROPPED)` when the bomb lies dropped on the
+    // ground; the planted-bomb `else` branch is `REGAMEDLL_FIXES` only.
+    if g.rules.bomb_dropped
+        && let Some(origin) = crate::inventory::dropped_bomb_origin(eng)
+    {
+        eng.send_usermsg(
+            MsgDest::One(slot),
+            &CsUserMsg::BombDrop {
+                origin,
+                planted: false,
+            },
+        );
+    }
 }
 
 /// The ammo hint of `UpdateClientData` (player.cpp:7893, read 2026-11-22): the first time the
@@ -606,9 +608,21 @@ pub(crate) fn update_client_data(g: &mut GameState, eng: &mut EngineApi<'_>, slo
                 p.game_hud_initialized = true;
             }
         }
-        let account = g.players[index].as_ref().map_or(0, |p| p.money);
+        let (account, has_defuser) = g.players[index]
+            .as_ref()
+            .map_or((0, false), |p| (p.money, p.has_defuser));
         money(eng, slot, account);
-        set_bomb_icon(g, eng, slot);
+        if has_defuser {
+            eng.send_usermsg(
+                MsgDest::One(slot),
+                &CsUserMsg::StatusIcon {
+                    status: 1,
+                    sprite_name: "defuser".to_string(),
+                    color: Some([0, 160, 0]),
+                },
+            );
+        }
+        crate::buy::set_bomb_icon(g, eng, slot, false);
         sync_round_timer(g, eng, slot);
         send_weather_info(eng, slot);
         team_score(eng, slot, Team::Ct, g.num_ct_wins);

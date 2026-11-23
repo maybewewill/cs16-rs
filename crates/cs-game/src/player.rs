@@ -1077,6 +1077,7 @@ pub(crate) fn spawn(
     // `Spawn` (player.cpp 5841-5843): a player without a shield has `HITGROUP_SHIELD_DISABLED`
     // (1) in `gamestate`, so the engine's studio traces skip the shield's hit box.
     let shield_state = if p.owns_shield { HITGROUP_SHIELD_ENABLED } else { HITGROUP_SHIELD_DISABLED };
+    let body = u8::from(p.has_defuser);
 
     if eng.ent(id).is_some_and(|v| v.modelindex == 0) {
         eng.set_model(id, "models/player.mdl");
@@ -1092,6 +1093,7 @@ pub(crate) fn spawn(
         v.dmg = 2.0;
         v.effects = 0;
         v.deadflag = DEAD_NO;
+        v.body = body;
         // Vanilla `CBasePlayer::Spawn` (ReGameDLL `player.cpp` 5827-5831, read 2026-11-22) resets
         // `watertype`, `waterlevel` and `basevelocity` only under `REGAMEDLL_FIXES`, which the
         // target is not: they keep what the last movement left until the next `pm` run
@@ -1135,7 +1137,7 @@ pub(crate) fn spawn(
     eng.set_view(id, id);
     send_room_type(eng, slot);
     if lost_items {
-        crate::buy::send_item_status(eng, slot, false);
+        crate::buy::send_item_status(eng, slot, false, false);
     }
     crate::hud_misc::on_spawn(g, eng, slot);
     // `PlayerSpawn` -> `OnSpawnEquip`: a player that lost its items gets the default ones; the
@@ -1201,6 +1203,77 @@ pub(crate) fn freeze_max_speed(eng: &mut EngineApi<'_>, slot: u8) {
     if let Some(v) = eng.ent_mut(id) {
         v.max_speed = FROZEN_MAX_SPEED;
     }
+}
+
+/// `CBasePlayer::GiveDefuser` (`player.cpp` 10596-10614, vanilla): sets `m_bHasDefuser`, updates
+/// the player model's backpack bodygroup (`pev->body = 1`), shows the green `defuser` HUD icon,
+/// and sends `ItemStatus`. (Vanilla does not call `SetScoreboardAttributes` here.)
+pub(crate) fn give_defuser(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) else {
+        return;
+    };
+    p.has_defuser = true;
+    let has_nvg = p.has_night_vision;
+    let id = eng.client_edict(slot);
+    if let Some(v) = eng.ent_mut(id) {
+        v.body = 1;
+    }
+    eng.send_usermsg(
+        MsgDest::One(slot),
+        &CsUserMsg::StatusIcon {
+            status: 1,
+            sprite_name: "defuser".to_string(),
+            color: Some([0, 160, 0]),
+        },
+    );
+    crate::buy::send_item_status(eng, slot, has_nvg, true);
+}
+
+/// `CBasePlayer::RemoveDefuser` (`player.cpp` 10616-10637, vanilla): clears `m_bHasDefuser`,
+/// resets `pev->body`, hides the `defuser` icon, updates `ItemStatus`, and unconditionally clears
+/// the progress bar (`SetProgressBarTime(0)`).
+pub(crate) fn remove_defuser(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) else {
+        return;
+    };
+    p.has_defuser = false;
+    let has_nvg = p.has_night_vision;
+    let id = eng.client_edict(slot);
+    if let Some(v) = eng.ent_mut(id) {
+        v.body = 0;
+    }
+    eng.send_usermsg(
+        MsgDest::One(slot),
+        &CsUserMsg::StatusIcon {
+            status: 0,
+            sprite_name: "defuser".to_string(),
+            color: None,
+        },
+    );
+    crate::buy::send_item_status(eng, slot, has_nvg, false);
+    set_progress_bar_time(g, eng, slot, 0);
+}
+
+/// `CBasePlayer::MakeBomber` (`player.cpp` 10718-10739, vanilla): gives `weapon_c4`, marks
+/// `m_bHasC4`, turns on the backpack bodygroup (`pev->body = 1`), shows the bomb HUD icon and
+/// scoreboard attribute, sends `#Hint_you_have_the_bomb` (`bOverride = TRUE`), and clears
+/// `m_bBombDropped`.
+pub(crate) fn make_bomber(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) -> bool {
+    if !crate::inventory::give_named_item(g, eng, slot, "weapon_c4") {
+        return false;
+    }
+    if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+        p.has_c4 = true;
+        p.display_history |= crate::hint::dhf::BOMB_RETRIEVED;
+    }
+    let id = eng.client_edict(slot);
+    if let Some(v) = eng.ent_mut(id) {
+        v.body = 1;
+    }
+    crate::buy::set_bomb_icon(g, eng, slot, false);
+    crate::hint::hint_message(g, eng, slot, "#Hint_you_have_the_bomb", false, true);
+    g.rules.bomb_dropped = false;
+    true
 }
 
 /// `CBasePlayer::SetProgressBarTime(int time)` (`player.cpp` 1958-1995): sets the progress
@@ -2516,12 +2589,19 @@ pub(crate) fn disappear(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     // `SendFOV(0)`.
     messages::set_fov(eng, slot, 0);
     rules::check_win_conditions(g, eng);
-    if let Some(p) = g.players[index].as_mut() {
+    let (has_c4, has_defuser) = g.players[index].as_mut().map_or((false, false), |p| {
         p.not_killed = false;
+        (p.has_c4, p.has_defuser)
+    });
+    if has_c4 {
+        crate::inventory::drop_player_item(g, eng, slot, Some("weapon_c4"));
+        // Vanilla (`!REGAMEDLL_FIXES`): clears progress bar a second time.
+        set_progress_bar_time(g, eng, slot, 0);
+    } else if has_defuser {
+        remove_defuser(g, eng, slot);
+        let origin = eng.ent(id).map_or(Vec3::ZERO, |v| v.origin);
+        crate::inventory::spawn_thighpack(eng, origin);
     }
-    // (`if (m_bHasC4) DropPlayerItem("weapon_c4")` and `else if (m_bHasDefuser)
-    // RemoveDefuser(); GiveNamedItem("item_thighpack")` go here: the bomb and the defuser are
-    // tasks 4 and 5.)
     crate::buy::buy_zone_icon_clear(g, eng, slot);
     // `SetThink(&CBasePlayer::PlayerDeathThink); pev->nextthink = time + 0.1`, and the angles
     // lose their pitch and roll.
@@ -2613,6 +2693,22 @@ fn killed(
     messages::set_fov(eng, slot, 0);
     // A team may be out of players now (`CheckWinConditions` of `Killed`).
     rules::check_win_conditions(g, eng);
+    let (has_c4, has_defuser) = g.players[index].as_mut().map_or((false, false), |p| {
+        p.not_killed = false;
+        (p.has_c4, p.has_defuser)
+    });
+    if has_c4 {
+        crate::inventory::drop_player_item(g, eng, slot, Some("weapon_c4"));
+        // Vanilla (`!REGAMEDLL_FIXES`): clears progress bar a second time.
+        set_progress_bar_time(g, eng, slot, 0);
+    } else if has_defuser {
+        remove_defuser(g, eng, slot);
+        let origin = eng.ent(id).map_or(Vec3::ZERO, |v| v.origin);
+        crate::inventory::spawn_thighpack(eng, origin);
+    }
+    if let Some(p) = g.players[index].as_mut() {
+        p.is_defusing = false;
+    }
     // The buy zone icon goes (and a buy menu that is open closes).
     crate::buy::buy_zone_icon_clear(g, eng, slot);
     // `DeathSound`: one of four, `RANDOM_LONG(1, 4)`.

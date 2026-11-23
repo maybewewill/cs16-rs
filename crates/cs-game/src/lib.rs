@@ -585,6 +585,14 @@ impl CsGame {
         true
     }
 
+    /// Gives `weapon_c4` to `slot` via `CBasePlayer::MakeBomber` (`rules::give_c4`). For tests
+    /// only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn give_c4(&mut self, eng: &mut EngineApi<'_>, slot: u8) -> bool {
+        rules::give_c4(&mut self.state, eng, slot)
+    }
+
     /// Sets `m_bHasDefuser` of the player of `slot`. For tests only (cargo feature `test-hooks`).
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]

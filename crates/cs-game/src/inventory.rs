@@ -32,7 +32,8 @@ use crate::entity::{GameEntity, attach};
 use crate::menus::HUD_PRINTCENTER;
 use crate::messages;
 use crate::player::{
-    ATTN_NORM, CHAN_ITEM, DEAD_NO, EF_NODRAW, PITCH_NORM, Player, player_slot,
+    ATTN_NORM, CHAN_ITEM, CHAN_VOICE, DEAD_NO, EF_NODRAW, MAX_PLAYERS, PITCH_NORM, Player, Team,
+    player_slot,
 };
 use crate::weapons::core::{give_ammo, select_item, with_weapon};
 use crate::weapons::weapon::item_slot;
@@ -722,6 +723,19 @@ fn default_touch(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, item: Wea
 /// `remove_suit`, the client is brought up to date (`UpdateClientData`) and told there is no
 /// weapon: `CurWeapon 0 0 0`.
 pub(crate) fn remove_all_items(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, remove_suit: bool) {
+    if player_ref(g, slot).is_some_and(|p| p.has_defuser) {
+        crate::player::remove_defuser(g, eng, slot);
+    }
+    if player_ref(g, slot).is_some_and(|p| p.has_c4) {
+        if let Some(p) = player_mut(g, slot) {
+            p.has_c4 = false;
+        }
+        if let Some(v) = eng.ent_mut(eng.client_edict(slot)) {
+            v.body = 0;
+        }
+        crate::buy::set_bomb_icon(g, eng, slot, false);
+        crate::player::set_progress_bar_time(g, eng, slot, 0);
+    }
     // `RemoveShield()`: no shield exists.
     if let Some(p) = player_mut(g, slot) {
         p.owns_shield = false;
@@ -907,6 +921,10 @@ pub(crate) fn drop_player_item(
     name: Option<&str>,
 ) -> Option<EdictId> {
     let p = player_ref(g, slot)?;
+    if p.is_vip {
+        client_print(eng, slot, HUD_PRINTCENTER, "#Weapon_Cannot_Be_Dropped", &[]);
+        return None;
+    }
     let id = match name {
         Some(name) => item_id_by_name(p, name)?,
         None => p.active_item?,
@@ -930,6 +948,35 @@ pub(crate) fn drop_player_item(
     {
         // I may have more than just 1 primary weapon :)
         p.has_primary = false;
+    }
+    if id == WeaponId::C4 {
+        if let Some(p) = player_mut(g, slot) {
+            p.has_c4 = false;
+        }
+        if let Some(v) = eng.ent_mut(ent) {
+            v.body = 0;
+        }
+        crate::buy::set_bomb_icon(g, eng, slot, false);
+        crate::player::set_progress_bar_time(g, eng, slot, 0);
+        if g.rules.restart_round_time() == 0.0 {
+            g.rules.bomb_dropped = true;
+            let dropper_name = crate::teams::player_name(eng, slot);
+            for other_slot in 0..MAX_PLAYERS {
+                let s = other_slot as u8;
+                let living_t = player_ref(g, s).is_some_and(|p| p.team == Team::Terrorist)
+                    && is_alive(eng, s);
+                if living_t {
+                    client_print(eng, s, HUD_PRINTCENTER, "#Game_bomb_drop", &[&dropper_name]);
+                    eng.send_usermsg(
+                        MsgDest::One(s),
+                        &CsUserMsg::BombDrop {
+                            origin,
+                            planted: false,
+                        },
+                    );
+                }
+            }
+        }
     }
     let model = cs_model_name(id)?;
     create_weapon_box(
@@ -1002,6 +1049,10 @@ pub(crate) fn create_weapon_box(
     eng.set_size(ent, Vec3::ZERO, Vec3::ZERO);
     eng.set_model(ent, "models/w_weaponbox.mdl");
     let mut weapon_box = WeaponBox::new(now + f64::from(life_time));
+    if id == WeaponId::C4 {
+        weapon_box.is_bomb = true;
+        weapon_box.next_bomb_think = now + 1.0;
+    }
 
     // `PackWeapon`.
     let packed = match owner {
@@ -1114,7 +1165,7 @@ pub(crate) fn clean_up_map(g: &mut GameState, eng: &mut EngineApi<'_>) {
                     entity.restart(g, eng, id);
                 });
             }
-            "grenade" | "weaponbox" => eng.remove_entity(id),
+            "grenade" | "weaponbox" | "item_thighpack" => eng.remove_entity(id),
             _ => {}
         }
     }
@@ -1152,6 +1203,10 @@ pub(crate) struct WeaponBox {
     ammo: [i32; MAX_AMMO_SLOTS],
     /// Server time the box removes itself (`SetThink(Kill)`).
     kill_time: f64,
+    /// `m_bIsBomb`: whether this box holds a dropped C4 (`CWeaponBox::BombThink`).
+    is_bomb: bool,
+    /// Next server time `BombThink` broadcasts `BombDrop` to living terrorists (every 1.0 s).
+    next_bomb_think: f64,
     /// The touch box has been grown (see [`WeaponBox::think`]).
     widened: bool,
 }
@@ -1163,6 +1218,8 @@ impl WeaponBox {
             ammo_names: std::array::from_fn(|_| None),
             ammo: [0; MAX_AMMO_SLOTS],
             kill_time,
+            is_bomb: false,
+            next_bomb_think: 0.0,
             widened: false,
         }
     }
@@ -1205,23 +1262,53 @@ impl GameEntity for WeaponBox {
         "weaponbox"
     }
 
-    /// `CWeaponBox::Kill` at the end of its life; before that, a look every tenth of a second
-    /// until the box has landed. The original's `SetObjectCollisionBox` makes the touch box 32 by
-    /// 32 by 16 whatever the entity's size; this engine has no such hook (the absolute box is
-    /// always `origin + mins/maxs`), so the only way to get that touch box is the entity's own
-    /// size. That would change how the box falls (the hull the movement traces with is chosen by
-    /// the size), so it is set only once the box lies on the ground, where a `MOVETYPE_TOSS`
-    /// body at rest is no longer traced (assumption).
-    fn think(&mut self, _g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId) {
+    fn is_dropped_bomb(&self) -> bool {
+        self.is_bomb
+    }
+
+    /// `CWeaponBox::Kill` at the end of its life (replaced by `CWeaponBox::BombThink` when
+    /// `is_bomb` so a dropped C4 never disappears); before landing, checks every tenth of a
+    /// second until on the ground, then widens the touch box to 32 by 32 by 16.
+    fn think(&mut self, g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId) {
         let now = eng.time();
-        if now >= self.kill_time {
-            eng.remove_entity(id);
-            return;
-        }
         let on_ground = eng.ent(id).is_some_and(|v| v.flags & FL_ONGROUND != 0);
         if on_ground && !self.widened {
             self.widened = true;
             eng.set_size(id, Vec3::new(-16.0, -16.0, 0.0), Vec3::new(16.0, 16.0, 16.0));
+        }
+        if self.is_bomb {
+            if now >= self.next_bomb_think {
+                if let Some(origin) = eng.ent(id).map(|v| v.origin) {
+                    for s in 0..MAX_PLAYERS {
+                        let slot = s as u8;
+                        let living_t = player_ref(g, slot).is_some_and(|p| p.team == Team::Terrorist)
+                            && is_alive(eng, slot);
+                        if living_t {
+                            eng.send_usermsg(
+                                MsgDest::One(slot),
+                                &CsUserMsg::BombDrop {
+                                    origin,
+                                    planted: false,
+                                },
+                            );
+                        }
+                    }
+                }
+                self.next_bomb_think = now + 1.0;
+            }
+            let next = if self.widened {
+                self.next_bomb_think
+            } else {
+                (now + BOX_THINK_INTERVAL).min(self.next_bomb_think)
+            };
+            if let Some(v) = eng.ent_mut(id) {
+                v.nextthink = next;
+            }
+            return;
+        }
+        if now >= self.kill_time {
+            eng.remove_entity(id);
+            return;
         }
         // Looks every tenth of a second until it has landed, then sleeps until its end.
         let next = if self.widened { self.kill_time } else { (now + BOX_THINK_INTERVAL).min(self.kill_time) };
@@ -1232,18 +1319,6 @@ impl GameEntity for WeaponBox {
 
     /// `CWeaponBox::Touch` (`weapons.cpp` 2012, vanilla): a living player touching the box while
     /// it lies on the ground is offered every weapon in it, in slot order.
-    ///
-    /// - A weapon of the primary or pistol slot stays in the box when the player already has one
-    ///   there (and so the box stays).
-    /// - A grenade is given as a new grenade of its kind (`GiveNamedItem`) when the player has
-    ///   fewer than the most it carries (1 high explosive, 1 smoke, 2 flashbangs); QUIRK: the
-    ///   weapon packed in the box is thrown away, as the original leaks it.
-    /// - Any other weapon is added (`AddPlayerItem`) and leaves the box whether or not the player
-    ///   could use it.
-    ///
-    /// A box with nothing left in its weapon lists gives the player its ammo (up to the carry
-    /// limit) and is removed. The pickup sound plays once if any weapon was given. A bomb in the
-    /// box (2E) stops the touch, as it does for a team that cannot carry it.
     fn touch(&mut self, g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId, other: EdictId) {
         if eng.ent(id).is_none_or(|v| v.flags & FL_ONGROUND == 0) {
             return;
@@ -1255,7 +1330,7 @@ impl GameEntity for WeaponBox {
         if !is_alive(eng, slot) {
             return;
         }
-        if player_ref(g, slot).is_some_and(|p| p.shield_drawn) {
+        if player_ref(g, slot).is_some_and(|p| p.is_vip || p.shield_drawn) {
             return;
         }
         let mut remove = true;
@@ -1265,8 +1340,56 @@ impl GameEntity for WeaponBox {
             while at < self.items[i].len() {
                 let item_id = self.items[i][at].weapon.id;
                 if item_id == WeaponId::C4 {
-                    // The bomb is phase 2E.
-                    return;
+                    // Vanilla (`!REGAMEDLL_FIXES`): only living terrorists pick up the bomb.
+                    let is_living_t =
+                        player_ref(g, slot).is_some_and(|p| p.team == Team::Terrorist)
+                            && is_alive(eng, slot);
+                    if !is_living_t {
+                        return;
+                    }
+                    if let Some(p) = player_ref(g, slot)
+                        && p.show_hints
+                        && p.display_history & crate::hint::dhf::BOMB_RETRIEVED == 0
+                    {
+                        crate::hint::first_time(g, slot, crate::hint::dhf::BOMB_RETRIEVED);
+                        crate::hint::hint_message(
+                            g,
+                            eng,
+                            slot,
+                            "#Hint_you_have_the_bomb",
+                            false,
+                            false,
+                        );
+                    } else {
+                        client_print(eng, slot, HUD_PRINTCENTER, "#Got_bomb", &[]);
+                    }
+                    g.rules.bomb_dropped = false;
+                    if let Some(p) = player_mut(g, slot) {
+                        p.has_c4 = true;
+                    }
+                    if let Some(v) = eng.ent_mut(other) {
+                        v.body = 1;
+                    }
+                    crate::buy::set_bomb_icon(g, eng, slot, false);
+                    let picker_name = crate::teams::player_name(eng, slot);
+                    for s in 0..MAX_PLAYERS {
+                        let other_slot = s as u8;
+                        let other_t = player_ref(g, other_slot)
+                            .is_some_and(|p| p.team == Team::Terrorist)
+                            && is_alive(eng, other_slot);
+                        if other_t {
+                            if other_slot != slot {
+                                client_print(
+                                    eng,
+                                    other_slot,
+                                    HUD_PRINTCENTER,
+                                    "#Game_bomb_pickup",
+                                    &[&picker_name],
+                                );
+                            }
+                            eng.send_usermsg(MsgDest::One(other_slot), &CsUserMsg::BombPickup);
+                        }
+                    }
                 }
                 let holds_one = player_ref(g, slot).is_some_and(|p| !p.items[i].is_empty());
                 if (PRIMARY_WEAPON_SLOT..=PISTOL_SLOT).contains(&i) && holds_one {
@@ -1517,6 +1640,79 @@ impl GameEntity for Armoury {
     }
 }
 
+/// `SF_NORESPAWN` (`cbase.h`): dropped items do not respawn.
+const SF_NORESPAWN: u32 = 1 << 30;
+
+/// Origin of the dropped C4 (`CWeaponBox::m_bIsBomb` or world `weapon_c4`), for `InitHUD`.
+pub(crate) fn dropped_bomb_origin(eng: &EngineApi<'_>) -> Option<Vec3> {
+    eng.entity_ids().into_iter().find_map(|id| {
+        let ent = eng.private::<Box<dyn GameEntity>>(id)?;
+        ent.is_dropped_bomb()
+            .then(|| eng.ent(id).map(|v| v.origin))
+            .flatten()
+    })
+}
+
+/// Spawns a dropped defusal kit (`item_thighpack`) at `origin`, matching vanilla `Killed`'s
+/// `GiveNamedItem("item_thighpack")` on a dead CT.
+pub(crate) fn spawn_thighpack(eng: &mut EngineApi<'_>, origin: Vec3) -> Option<EdictId> {
+    let id = eng.create_entity("item_thighpack")?;
+    if let Some(v) = eng.ent_mut(id) {
+        v.origin = origin;
+        v.spawnflags |= SF_NORESPAWN;
+    }
+    let mut item = ItemThighPack;
+    if !item.spawn(eng, id, &[]) {
+        eng.remove_entity(id);
+        return None;
+    }
+    attach(eng, id, Box::new(item));
+    Some(id)
+}
+
+/// `CItemThighPack` (`item_thighpack`, `items.cpp` 462-497): a dropped defusal kit. Living CTs
+/// without a defuser pick it up on touch, getting `has_defuser`, `#Got_defuser`, and
+/// `items/kevlar.wav` on `CHAN_VOICE`.
+pub(crate) struct ItemThighPack;
+
+impl GameEntity for ItemThighPack {
+    fn classname(&self) -> &'static str {
+        "item_thighpack"
+    }
+
+    fn spawn(&mut self, eng: &mut EngineApi<'_>, id: EdictId, _keys: &[(String, String)]) -> bool {
+        precache_model(eng, "models/w_thighpack.mdl");
+        if let Some(v) = eng.ent_mut(id) {
+            v.movetype = MOVETYPE_TOSS;
+            v.solid = SOLID_TRIGGER;
+        }
+        eng.set_model(id, "models/w_thighpack.mdl");
+        let origin = eng.ent(id).map_or(Vec3::ZERO, |v| v.origin);
+        eng.set_origin(id, origin);
+        eng.set_size(id, Vec3::new(-16.0, -16.0, 0.0), Vec3::new(16.0, 16.0, 16.0));
+        // On maps with geometry this lands on the floor; floorless stub maps keep the entity.
+        let _ = eng.drop_to_floor(id);
+        true
+    }
+
+    fn touch(&mut self, g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId, other: EdictId) {
+        let Some(slot) = player_slot(g, eng, other).map(|s| s as u8) else {
+            return;
+        };
+        if !is_alive(eng, slot) {
+            return;
+        }
+        if !player_ref(g, slot).is_some_and(|p| p.team == Team::Ct && !p.has_defuser) {
+            return;
+        }
+        crate::player::give_defuser(g, eng, slot);
+        client_print(eng, slot, HUD_PRINTCENTER, "#Got_defuser", &[]);
+        eng.emit_sound(other, CHAN_VOICE, "items/kevlar.wav", 1.0, ATTN_NORM, PITCH_NORM);
+        crate::targets::use_targets(g, eng, id, Some(other), crate::entity::UseType::Toggle, 0.0);
+        eng.remove_entity(id);
+    }
+}
+
 // ---- a weapon placed by a map ----
 
 /// A `weapon_*` entity of a map (`CBasePlayerItem::FallInit`, `FallThink`, `Materialize` and
@@ -1543,6 +1739,10 @@ impl WorldWeapon {
 impl GameEntity for WorldWeapon {
     fn classname(&self) -> &'static str {
         self.class
+    }
+
+    fn is_dropped_bomb(&self) -> bool {
+        self.id == WeaponId::C4
     }
 
     /// `FallInit`: the weapon is a point that falls (`SOLID_BBOX`, `MOVETYPE_TOSS`) and looks at

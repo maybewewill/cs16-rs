@@ -695,18 +695,26 @@ pub(crate) fn check_win_conditions(g: &mut GameState, eng: &mut EngineApi<'_>) {
 /// counts it: here it is removed from [`GameState::players`] before the check. (The empty
 /// `Location` message and `game_playerleave` are not ported.)
 pub(crate) fn on_disconnect(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
-    if let Some(p) = g
+    let has_c4 = if let Some(p) = g
         .players
         .get_mut(usize::from(slot))
         .and_then(Option::as_mut)
     {
         p.alive = false;
-    }
+        p.has_c4
+    } else {
+        false
+    };
     let id = eng.client_edict(slot);
     if let Some(v) = eng.ent_mut(id) {
         v.deadflag = player::DEAD_DEAD;
     }
     messages::set_scoreboard_attributes(g, eng, usize::from(slot));
+    // Vanilla (`!REGAMEDLL_FIXES`): drops carried C4, then tries `DropPlayerItem("item_thighpack")`
+    // which finds nothing (only `REGAMEDLL_FIXES` spawns a defuser on disconnect).
+    if has_c4 {
+        crate::inventory::drop_player_item(g, eng, slot, Some("weapon_c4"));
+    }
     if let Some(entry) = g.players.get_mut(usize::from(slot)) {
         *entry = None;
     }
@@ -904,6 +912,17 @@ fn switch_team(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     };
     let name = teams::player_name(eng, slot);
     menus::print_all_notify(eng, text, &name);
+    if g.players[usize::from(slot)]
+        .as_ref()
+        .is_some_and(|p| p.has_defuser)
+    {
+        player::remove_defuser(g, eng, slot);
+    }
+}
+
+/// Gives C4 to a specific living player slot (`CBasePlayer::MakeBomber`).
+pub(crate) fn give_c4(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) -> bool {
+    player::make_bomber(g, eng, slot)
 }
 
 /// `CBasePlayer::CanSwitchTeam`: a player of the team that must give players away (no VIP
@@ -1022,7 +1041,7 @@ pub(crate) fn restart_round(g: &mut GameState, eng: &mut EngineApi<'_>) {
         };
         p.num_spawns = 0;
         p.team_changed = false;
-        let (team, paid) = (p.team, !p.receives_no_money_next_round);
+        let (team, paid, has_c4) = (p.team, !p.receives_no_money_next_round, p.has_c4);
         // The players of the teams are paid for the last round.
         if let Some(sum) = g.rules.economy.payout(team)
             && paid
@@ -1030,6 +1049,11 @@ pub(crate) fn restart_round(g: &mut GameState, eng: &mut EngineApi<'_>) {
             money::add_account(g, eng, slot as u8, sum, true);
         }
         if team != Team::Unassigned && team != Team::Spectator {
+            // Vanilla (`!REGAMEDLL_FIXES`, `multiplay_gamerules.cpp:2042`): drop carried C4
+            // before respawning; `clean_up_map` removes the box immediately afterward.
+            if has_c4 {
+                crate::inventory::drop_player_item(g, eng, slot as u8, Some("weapon_c4"));
+            }
             round_respawn(g, eng, slot as u8);
         }
     }

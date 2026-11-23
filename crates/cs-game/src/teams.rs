@@ -351,7 +351,7 @@ fn joining_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
                     color: None,
                 },
             );
-            crate::buy::send_item_status(eng, slot, p.has_night_vision);
+            crate::buy::send_item_status(eng, slot, p.has_night_vision, p.has_defuser);
         }
         // There is no level text to read.
         JoinState::ReadingLText => p.joining = JoinState::ShowTeamSelect,
@@ -521,7 +521,7 @@ pub(crate) fn handle_menu_choose_team(
         }
         // `m_bHasNightVision = false; SendItemStatus()`.
         p.has_night_vision = false;
-        crate::buy::send_item_status(eng, slot, false);
+        crate::buy::send_item_status(eng, slot, false, p.has_defuser);
         apply_model(eng, slot, Team::Unassigned, 0);
     }
 

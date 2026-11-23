@@ -568,11 +568,9 @@ fn shield_and_defuser_are_not_for_sale_yet() {
     spawn(&mut b, Team::Ct);
     settle(&mut b);
     set_money(&mut b, 16000);
-    // The shield does not exist yet: refused, nothing taken.
+    // On a non-bomb map neither shield nor defuser can be bought.
     assert_eq!(buy(&mut b, "shield"), [text("#Cannot_Buy_This", &[])]);
     assert_eq!(money(&b), 16000);
-    // The defuser is for a bomb map (2E); on this one the command is no use, and a terrorist's
-    // is not available.
     assert_eq!(buy(&mut b, "defuser"), Vec::<String>::new());
     assert_eq!(money(&b), 16000);
     // A weapon of the other team is said to be unavailable, as the original does.
@@ -593,6 +591,26 @@ fn shield_and_defuser_are_not_for_sale_yet() {
     with_player(&b, |p| {
         assert_eq!((p.armor, p.test_has_night_vision()), (0.0, false))
     });
+
+    // On a bomb map a CT buys the defuser for $200 (`DEFUSEKIT_PRICE`), while the shield stays
+    // unavailable.
+    let mut bomb_map = zone_map("2", "1");
+    bomb_map.push(entity(&[
+        ("classname", "func_bomb_target"),
+        ("origin", "1000 0 0"),
+    ]));
+    let mut bz = bench_on(ServerMap::stub_with_entities("test", bomb_map), &[]);
+    spawn(&mut bz, Team::Ct);
+    settle(&mut bz);
+    set_money(&mut bz, 1000);
+    assert_eq!(buy(&mut bz, "shield"), [text("#Cannot_Buy_This", &[])]);
+    assert_eq!(buy(&mut bz, "defuser"), ["ItemStatus 2", "Money 800 true"]);
+    assert_eq!(
+        buy(&mut bz, "defuser"),
+        [text("#Already_Have_One", &[])]
+    );
+    assert_eq!(money(&bz), 800);
+    with_player(&bz, |p| assert!(p.has_defuser));
 }
 
 #[test]

@@ -45,9 +45,8 @@
 //! - The ammo clip is given as the `ammo_*` entity of the original does it
 //!   (`CBasePlayerAmmo::AddAmmo`: `GiveAmmo` of `buyClipSize`, then `items/9mmclip1.wav`); the sound
 //!   comes from the player's edict, not from an entity of its own (assumption: the same place).
-//! - The defuser (`MENU_SLOT_ITEM_DEFUSEKIT`) is sold to a counter-terrorist on a map with a
-//!   bomb target only; the defuser itself is task 5's, so the purchase is still refused
-//!   silently. The terrorists' `defuser` alias says `#Alias_Not_Avail` as the original.
+//! - The defuser (`MENU_SLOT_ITEM_DEFUSEKIT`, price 200) is sold to a counter-terrorist on a map
+//!   with a bomb target. The terrorists' `defuser` alias says `#Alias_Not_Avail` as the original.
 //! - `HintMessage("#Hint_use_nightvision")` (first night vision purchase) goes through
 //!   [`crate::hint`].
 //! - `CanPlayerBuy` also refuses the VIP and the team `info_map_parameters` (`buying`) keeps out
@@ -88,6 +87,8 @@ pub const SIGNAL_ESCAPE: u8 = 1 << 3;
 pub const SIGNAL_VIPSAFETY: u8 = 1 << 4;
 /// `MIN_BUY_TIME` (`player.h`, vanilla): the least `mp_buytime` allows, in seconds.
 pub const MIN_BUY_TIME: i32 = 15;
+/// `DEFUSEKIT_PRICE` (`weapontype.h`).
+pub const DEFUSEKIT_PRICE: i32 = 200;
 /// `KEVLAR_PRICE`, `HELMET_PRICE`, `ASSAULTSUIT_PRICE`, `NVG_PRICE` (`weapontype.h`).
 pub const KEVLAR_PRICE: i32 = 650;
 pub const HELMET_PRICE: i32 = 350;
@@ -103,8 +104,9 @@ const HANDLE_SIGNALS_INTERVAL: f64 = 0.5;
 /// The default `numBlinks` of `BlinkAccount` (`client.h:128`), which `BuyItem` calls it with
 /// (`client.cpp:1572`, `1617`). `MONEY_BLINK_AMOUNT` (30) is the tutor's.
 const BUY_BLINK_AMOUNT: u8 = 2;
-/// `ITEM_STATUS_NIGHTVISION` (`cdll_dll.h`).
+/// `ITEM_STATUS_NIGHTVISION` and `ITEM_STATUS_DEFUSER` (`cdll_dll.h`).
 const ITEM_STATUS_NIGHTVISION: u8 = 1 << 0;
+const ITEM_STATUS_DEFUSER: u8 = 1 << 1;
 
 /// `VGUI_Menu_Buy`, `VGUI_Menu_Buy_Pistol`, `VGUI_Menu_Buy_ShotGun`, `VGUI_Menu_Buy_Rifle`,
 /// `VGUI_Menu_Buy_SubMachineGun`, `VGUI_Menu_Buy_MachineGun` (`cdll_dll.h`); the item menu is
@@ -582,12 +584,19 @@ fn not_enough_money(eng: &mut EngineApi<'_>, slot: u8) {
     money::blink_account(eng, slot, BUY_BLINK_AMOUNT);
 }
 
-/// `SendItemStatus`: what the player carries that the HUD shows (the goggles, when
-/// `has_night_vision`; the defuser is 2E).
-pub(crate) fn send_item_status(eng: &mut EngineApi<'_>, slot: u8, has_night_vision: bool) {
+/// `SendItemStatus`: what the player carries that the HUD shows (night vision and defuser).
+pub(crate) fn send_item_status(
+    eng: &mut EngineApi<'_>,
+    slot: u8,
+    has_night_vision: bool,
+    has_defuser: bool,
+) {
     let mut status = 0;
     if has_night_vision {
         status |= ITEM_STATUS_NIGHTVISION;
+    }
+    if has_defuser {
+        status |= ITEM_STATUS_DEFUSER;
     }
     eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::ItemStatus(status));
 }
@@ -757,11 +766,14 @@ pub(crate) fn buy_item(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, ite
                     crate::hint::hint(g, eng, slot, "#Hint_use_nightvision");
                 }
                 item_sound(eng, slot, "items/equip_nvg.wav");
-                if let Some(p) = g.players[usize::from(slot)].as_mut() {
+                let has_defuser = if let Some(p) = g.players[usize::from(slot)].as_mut() {
                     p.has_night_vision = true;
-                }
+                    p.has_defuser
+                } else {
+                    false
+                };
                 money::add_account(g, eng, slot, -NVG_PRICE, true);
-                send_item_status(eng, slot, true);
+                send_item_status(eng, slot, true, has_defuser);
                 return;
             }
         }
@@ -769,9 +781,20 @@ pub(crate) fn buy_item(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, ite
             if team != Team::Ct || !g.rules.map_has_bomb_target() {
                 return;
             }
-            // The defuser is sold on a bomb map; the bomb targets are 2E (see the module
-            // documentation), so there is no such map yet.
-            return;
+            if g.players[usize::from(slot)]
+                .as_ref()
+                .is_some_and(|p| p.has_defuser)
+            {
+                say(eng, slot, "#Already_Have_One");
+                return;
+            }
+            if account >= DEFUSEKIT_PRICE {
+                crate::player::give_defuser(g, eng, slot);
+                money::add_account(g, eng, slot, -DEFUSEKIT_PRICE, true);
+                // Vanilla (`!REGAMEDLL_FIXES`): `CHAN_ITEM` rather than `CHAN_VOICE`.
+                item_sound(eng, slot, "items/kevlar.wav");
+                return;
+            }
         }
         _ => return,
     }

@@ -145,6 +145,11 @@ pub trait GameEntity: Send + 'static {
         eng.ent(id).is_some_and(|v| v.deadflag == DEAD_NO && v.health > 0.0)
     }
 
+    /// Whether this entity is a dropped C4 (`CWeaponBox::m_bIsBomb` or map `weapon_c4`).
+    fn is_dropped_bomb(&self) -> bool {
+        false
+    }
+
     /// `CBaseEntity::BodyTarget(posSrc)`: `Center()`, `(pev->absmax + pev->absmin) * 0.5`.
     fn body_target(&self, eng: &EngineApi<'_>, id: EdictId, _src: Vec3) -> Vec3 {
         eng.ent(id).map_or(Vec3::ZERO, |v| (v.absmax + v.absmin) * 0.5)
@@ -402,6 +407,7 @@ pub fn create_entity(classname: &str) -> Option<Box<dyn GameEntity>> {
         #[cfg(feature = "test-hooks")]
         "test_target" => Box::new(TestTarget::default()),
         "armoury_entity" => Box::new(crate::inventory::Armoury::default()),
+        "item_thighpack" => Box::new(crate::inventory::ItemThighPack),
         "grenade" => Box::new(crate::grenade::Grenade::default()),
         "spark_shower" => Box::new(crate::grenade::SparkShower),
         "spraycan" => Box::new(crate::spray::SprayCan),
@@ -670,6 +676,7 @@ mod tests {
             "func_pushable",
             "func_illusionary",
             "armoury_entity",
+            "item_thighpack",
             "grenade",
             "spark_shower",
             "weapon_ak47",
