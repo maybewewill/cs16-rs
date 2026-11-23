@@ -732,7 +732,12 @@ impl Predictor {
     /// One frame: checks the server's newest frame against the earlier prediction, then replays
     /// the unacknowledged commands on it (`CL_CheckPredictionError`, `CL_PredictMovement`).
     pub fn update(&mut self, inp: &PredictInputs<'_>) {
-        let frametime = (inp.now - self.last_update).clamp(0.0, 0.25) as f32;
+        let raw_dt = inp.now - self.last_update;
+        let frametime = if raw_dt.is_finite() {
+            raw_dt.clamp(0.0, 0.25) as f32
+        } else {
+            0.0
+        };
         self.last_update = inp.now;
         self.now = inp.now;
         let Some(frame) = inp.frame else {
@@ -896,7 +901,7 @@ impl Predictor {
         let f = if to_time != from_time {
             ((inp.now - from_time) / (to_time - from_time)).clamp(0.0, 1.0) as f32
         } else {
-            0.0
+            1.0
         };
         let teleported = player_teleported(from, to, inp.max_velocity);
         self.out.predicted = true;
@@ -940,15 +945,22 @@ impl Predictor {
             self.out.moving = false;
         }
 
-        if self.correction_time > 0.0 && !self.settings.nosmooth && self.settings.smoothtime != 0.0
+        if self.correction_time > 0.0
+            && !self.settings.nosmooth
+            && self.settings.smoothtime.is_finite()
+            && self.settings.smoothtime != 0.0
         {
             // Only decay the timer once per frame.
-            self.correction_time -= frametime;
-            // Make sure smoothtime is positive.
-            let smooth = if self.settings.smoothtime < 0.0 {
+            self.correction_time -= if frametime.is_finite() {
+                frametime.max(0.0)
+            } else {
+                0.0
+            };
+            // Make sure smoothtime is positive and bounded.
+            let smooth = if !self.settings.smoothtime.is_finite() || self.settings.smoothtime <= 0.0 {
                 0.1
             } else {
-                self.settings.smoothtime
+                self.settings.smoothtime.min(10.0)
             };
             self.correction_time = self.correction_time.clamp(0.0, smooth);
             // How far along the correction is, and how much of the error is left to make up.
@@ -1531,5 +1543,40 @@ mod tests {
             let v = random_in(&mut s, 2, 5);
             assert!((2..=5).contains(&v));
         }
+    }
+
+    #[test]
+    fn finish_uses_to_state_when_timestamps_match_and_survives_non_finite_smooth() {
+        let mut p = Predictor::new();
+        p.lastorigin = Vec3::ZERO;
+        p.correction_time = 0.05;
+        p.settings.smoothtime = f32::INFINITY;
+        let from = LocalState {
+            origin: Vec3::new(10.0, 0.0, 0.0),
+            ..LocalState::default()
+        };
+        let to = LocalState {
+            origin: Vec3::new(20.0, 0.0, 0.0),
+            ..LocalState::default()
+        };
+        let precache = PrecacheTables::default();
+        let inp = PredictInputs {
+            now: 5.0,
+            incoming_acknowledged: 1,
+            outgoing_sequence: 2,
+            frame: None,
+            playernum: 0,
+            max_clients: 16,
+            precache: &precache,
+            movevars: MoveVars::default(),
+            max_velocity: 2000.0,
+            poses: &[],
+            entities: None,
+            remote_is_local: false,
+            intermission: false,
+        };
+        p.finish(&inp, &from, &to, 5.0, 5.0, f32::NAN);
+        assert_eq!(p.prediction().simorg, Vec3::new(20.0, 0.0, 0.0));
+        assert!(p.prediction().simorg.is_finite());
     }
 }

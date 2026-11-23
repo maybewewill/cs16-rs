@@ -264,7 +264,6 @@ pub struct HudState {
     pub night_vision: bool,
     /// `ClCorpse`: the bodies the shell draws.
     pub corpses: Vec<CsUserMsg>,
-    /// The last `svc_weaponanim` and `svc_crosshairangle`.
     pub server_weapon_anim: Option<ViewAnim>,
     /// Messages nothing here models, in order of arrival.
     pub unknown_messages: VecDeque<UnknownUserMsg>,
@@ -337,12 +336,18 @@ impl HudState {
                 weapon_id,
                 clip_ammo,
             } => {
-                self.current_weapon = Some(CurrentWeapon {
-                    is_active: *is_active,
-                    weapon_id: *weapon_id,
-                    clip: *clip_ammo,
-                });
-                self.clips.insert(*weapon_id, *clip_ammo);
+                if *weapon_id != 0xFF {
+                    self.clips.insert(*weapon_id, *clip_ammo);
+                }
+                if *is_active {
+                    self.current_weapon = Some(CurrentWeapon {
+                        is_active: *is_active,
+                        weapon_id: *weapon_id,
+                        clip: *clip_ammo,
+                    });
+                } else if *weapon_id == 0 || (*weapon_id == 0xFF && *clip_ammo == -1) {
+                    self.current_weapon = None;
+                }
             }
             CsUserMsg::AmmoX { ammo_id, amount } => {
                 self.ammo.insert(*ammo_id, *amount);
@@ -1348,5 +1353,54 @@ mod tests {
             &env,
         );
         assert_eq!(fx.tempents.active().len(), 1);
+    }
+
+    #[test]
+    fn inactive_cur_weapon_does_not_clobber_active_weapon() {
+        let mut h = HudState::default();
+        h.handle(
+            &um(
+                "CurWeapon",
+                CsUserMsg::CurWeapon {
+                    is_active: true,
+                    weapon_id: 16,
+                    clip_ammo: 12,
+                },
+            ),
+            0.0,
+        );
+        h.handle(
+            &um(
+                "CurWeapon",
+                CsUserMsg::CurWeapon {
+                    is_active: false,
+                    weapon_id: 29,
+                    clip_ammo: -1,
+                },
+            ),
+            0.0,
+        );
+        assert_eq!(
+            h.current_weapon,
+            Some(CurrentWeapon {
+                is_active: true,
+                weapon_id: 16,
+                clip: 12,
+            })
+        );
+        assert_eq!(h.clips.get(&29), Some(&-1));
+
+        h.handle(
+            &um(
+                "CurWeapon",
+                CsUserMsg::CurWeapon {
+                    is_active: false,
+                    weapon_id: 0,
+                    clip_ammo: 0,
+                },
+            ),
+            0.0,
+        );
+        assert!(h.current_weapon.is_none());
     }
 }

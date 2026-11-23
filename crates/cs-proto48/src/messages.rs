@@ -2396,19 +2396,12 @@ pub fn write_clc_fileconsistency(w: &mut MsgWriter, payload: &[u8]) {
     w.write_bytes(&payload[..len]);
 }
 
-/// Encode `clc_move` (opcode 2) with exact GoldSrc `COM_BlockSequenceCRCByte` + `COM_Munge`
-/// (`SV_ParseMove`, `sv_user.cpp:1565-1635`).
-///
-/// `cmds` must be ordered **newest-first** (`cmds[0]` is most recent); on the wire GoldSrc
-/// transmits oldest-first and delta-compresses each command against the previous one.
-pub fn write_clc_move(
-    w: &mut MsgWriter,
+fn encode_clc_move_body(
     usercmd_schema: &DeltaSchema,
-    outgoing_sequence: u32,
     packet_loss: u8,
     num_backup: u8,
     cmds_newest_first: &[GoldSrcUserCmd],
-) {
+) -> Vec<u8> {
     let total = cmds_newest_first.len();
     let num_cmds = total.saturating_sub(num_backup as usize) as u8;
 
@@ -2426,12 +2419,60 @@ pub fn write_clc_move(
         prev = cur;
     }
 
-    let mut body_bytes = body.into_bytes();
+    body.into_bytes()
+}
+
+/// Wire body length (in bytes, excluding the 3-byte `opcode, len, crc` header) that
+/// [`write_clc_move`] would produce before munging for `cmds_newest_first`.
+pub fn clc_move_body_len(
+    usercmd_schema: &DeltaSchema,
+    num_backup: u8,
+    cmds_newest_first: &[GoldSrcUserCmd],
+) -> usize {
+    encode_clc_move_body(usercmd_schema, 0, num_backup, cmds_newest_first).len()
+}
+
+/// Encode `clc_move` (opcode 2) with exact GoldSrc `COM_BlockSequenceCRCByte` + `COM_Munge`
+/// (`SV_ParseMove`, `sv_user.cpp:1565-1635`).
+///
+/// `cmds_newest_first` must be ordered **newest-first** (`cmds[0]` is most recent); on the wire
+/// GoldSrc transmits oldest-first and delta-compresses each command against the previous one.
+/// Because the wire length header is one byte, batches exceeding 255 bytes are trimmed (backup
+/// commands first, then oldest new commands) so the length byte, CRC, and header counts always match.
+pub fn write_clc_move(
+    w: &mut MsgWriter,
+    usercmd_schema: &DeltaSchema,
+    outgoing_sequence: u32,
+    packet_loss: u8,
+    num_backup: u8,
+    cmds_newest_first: &[GoldSrcUserCmd],
+) {
+    let total = cmds_newest_first.len();
+    let mut backups = usize::from(num_backup).min(total);
+    let mut new_count = total - backups;
+    let mut body_bytes = loop {
+        let end = new_count + backups;
+        let bytes = encode_clc_move_body(
+            usercmd_schema,
+            packet_loss,
+            backups as u8,
+            &cmds_newest_first[..end],
+        );
+        if bytes.len() <= 255 || end == 0 {
+            break bytes;
+        }
+        if backups > 0 {
+            backups -= 1;
+        } else {
+            new_count -= 1;
+        }
+    };
+
     let crc = com_block_sequence_crc_byte(&body_bytes, outgoing_sequence);
     com_munge(&mut body_bytes, outgoing_sequence as i32);
 
     w.write_u8(clc::MOVE);
-    w.write_u8(body_bytes.len().min(255) as u8);
+    w.write_u8(body_bytes.len() as u8);
     w.write_u8(crc);
     w.write_bytes(&body_bytes);
 }
@@ -3717,5 +3758,41 @@ mod client_reader_tests {
         );
         assert!(err.is_some());
         assert!(parse_svc_stream(w.as_slice(), &mut ctx).is_err());
+    }
+
+    #[test]
+    fn write_clc_move_caps_body_at_255_bytes_without_corrupting_stream() {
+        let reg = DeltaRegistry::cs16_default();
+        let schema = reg.get("usercmd_t").unwrap();
+        let cmds: Vec<GoldSrcUserCmd> = (0..18)
+            .map(|i| GoldSrcUserCmd {
+                msec: 10 + i,
+                viewangles: Vec3::new(
+                    (i as f32) * 3.1,
+                    (i as f32) * 19.7,
+                    (i as f32) * 1.3,
+                ),
+                forwardmove: 250.0 - (i as f32) * 15.0,
+                sidemove: if i % 2 == 0 { 250.0 } else { -250.0 },
+                upmove: (i as f32) * 12.0,
+                buttons: 1u16 << (i % 12),
+                impulse: 100 + i,
+                weaponselect: i + 1,
+                impact_index: i32::from(i) * 7,
+                impact_position: Vec3::new(i as f32, -(i as f32), (i as f32) * 2.0),
+                ..Default::default()
+            })
+            .collect();
+        assert!(clc_move_body_len(schema, 2, &cmds) > 255);
+        let mut w = MsgWriter::new();
+        write_clc_move(&mut w, schema, 42, 0, 2, &cmds);
+        let bytes = w.into_bytes();
+        assert!(usize::from(bytes[1]) <= 255);
+        assert_eq!(bytes.len(), 3 + usize::from(bytes[1]));
+        let parsed = parse_clc_stream(&bytes, schema, 42).expect("valid clc_move");
+        match &parsed[0] {
+            ClcMessage::Move { cmds: out, .. } => assert!(!out.is_empty() && out.len() < cmds.len()),
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 }

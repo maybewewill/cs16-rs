@@ -29,8 +29,9 @@ use cs_proto48::handshake::{
 use cs_proto48::info::InfoString;
 use cs_proto48::messages::{
     MoveVarsMsg, PacketEntitiesMsg, ServerInfoMsg, SvcMessage, SvcParseContext, WeaponRecords, clc,
-    entity_schema_name, parse_svc_stream_partial, write_clc_cvarvalue2, write_clc_delta,
-    write_clc_fileconsistency, write_clc_move, write_clc_resourcelist, write_clc_stringcmd,
+    clc_move_body_len, entity_schema_name, parse_svc_stream_partial, write_clc_cvarvalue2,
+    write_clc_delta, write_clc_fileconsistency, write_clc_move, write_clc_resourcelist,
+    write_clc_stringcmd,
 };
 use cs_proto48::netchan::{FRAGMENT_C2S_SIZE, NetChan, SplitPacketAssembler};
 use cs_transport::{PacketTransport, PeerAddr};
@@ -296,7 +297,8 @@ impl<T: PacketTransport> Connection<T> {
         userinfo
     }
 
-    /// Starts the handshake; `getchallenge` goes out on the next [`pump`](Self::pump).
+    /// Sets up a connectionless `getchallenge` on the next [`pump`](Self::pump); only resets
+    /// the handshake state, not a previously active session.
     pub fn connect(&mut self) {
         self.state = ConnState::AwaitChallenge;
         self.handshake_sent_at = None;
@@ -435,6 +437,9 @@ impl<T: PacketTransport> Connection<T> {
     pub fn queue_cmd(&mut self, cmd: GoldSrcUserCmd) {
         // The prediction runs the command before it is sent.
         self.predict.push_cmd(cmd.clone());
+        if self.cmd_queue.len() >= crate::predict::MAX_PENDING_CMDS {
+            self.cmd_queue.pop_front();
+        }
         self.cmd_queue.push_back(cmd);
     }
 
@@ -1123,7 +1128,7 @@ impl<T: PacketTransport> Connection<T> {
                 self.stufftext(&text);
             }
             SvcMessage::Print(text) => self.print(text.trim_end_matches('\n').to_string()),
-            SvcMessage::NewMoveVars(vars) => self.movevars = Some(*vars),
+            SvcMessage::NewMoveVars(vars) => self.movevars = Some(sanitize_movevars(*vars)),
             SvcMessage::SendCvarValue(name) => {
                 let mut w = MsgWriter::new();
                 w.write_u8(clc::CVARVALUE);
@@ -1256,6 +1261,7 @@ impl<T: PacketTransport> Connection<T> {
         self.entities.clear();
         self.frames.reset();
         self.predict.reset();
+        self.fx.clear_effects();
         self.ctx.baselines.clear();
         self.ctx.instance_baselines.clear();
         self.ctx.entity_frames.clear();
@@ -1264,6 +1270,9 @@ impl<T: PacketTransport> Connection<T> {
         self.weapon_records.clear();
         self.server_info = None;
         self.client_data = None;
+        self.movevars = None;
+        self.frame_times.clear();
+        self.cmd_queue.clear();
         self.sent_cmds.clear();
         self.last_entity_seq = None;
         self.resources.clear();
@@ -1272,6 +1281,7 @@ impl<T: PacketTransport> Connection<T> {
         self.signon_num = 0;
         self.signon_progress = None;
         self.download_started = None;
+        self.buffered_fragments = 0;
     }
 
     /// Replaces the entity view with the complete frame the parser rebuilt from this update.
@@ -1316,7 +1326,27 @@ impl<T: PacketTransport> Connection<T> {
             .get("usercmd_t")
             .filter(|_| !self.moves_suppressed)
         {
-            let take = self.cmd_queue.len().min(MAX_NEW_CMDS);
+            let max_take = self.cmd_queue.len().min(MAX_NEW_CMDS);
+            let take = if max_take == 0 {
+                0
+            } else {
+                let newest_first_all: Vec<GoldSrcUserCmd> = self
+                    .cmd_queue
+                    .iter()
+                    .take(max_take)
+                    .rev()
+                    .chain(self.sent_cmds.iter())
+                    .cloned()
+                    .collect();
+                let backups = self.sent_cmds.len() as u8;
+                let mut fit = max_take;
+                while fit > 1
+                    && clc_move_body_len(schema, backups, &newest_first_all[max_take - fit..]) > 255
+                {
+                    fit -= 1;
+                }
+                fit
+            };
             let mut new_cmds: Vec<GoldSrcUserCmd> = self.cmd_queue.drain(..take).collect();
             // The prediction learns which packet carries which commands (the
             // server acknowledges packets).
@@ -1409,10 +1439,50 @@ fn fx_env<'a>(
     env.max_clients = u16::from(max_clients);
     env.local_player = player_slot.map_or(0, |slot| u16::from(slot) + 1);
     if let Some(cd) = client_data {
+        env.local_origin = cd.origin;
         env.local_view_ofs = cd.view_ofs;
         env.local_velocity = cd.velocity;
     }
     env
+}
+
+fn sanitize_movevars(mut mv: MoveVarsMsg) -> MoveVarsMsg {
+    let def = MoveVarsMsg::default();
+    for (v, d) in [
+        (&mut mv.gravity, def.gravity),
+        (&mut mv.stopspeed, def.stopspeed),
+        (&mut mv.maxspeed, def.maxspeed),
+        (&mut mv.spectatormaxspeed, def.spectatormaxspeed),
+        (&mut mv.accelerate, def.accelerate),
+        (&mut mv.airaccelerate, def.airaccelerate),
+        (&mut mv.wateraccelerate, def.wateraccelerate),
+        (&mut mv.friction, def.friction),
+        (&mut mv.edgefriction, def.edgefriction),
+        (&mut mv.waterfriction, def.waterfriction),
+        (&mut mv.entgravity, def.entgravity),
+        (&mut mv.bounce, def.bounce),
+        (&mut mv.stepsize, def.stepsize),
+        (&mut mv.maxvelocity, def.maxvelocity),
+        (&mut mv.zmax, def.zmax),
+        (&mut mv.wave_height, def.wave_height),
+        (&mut mv.rollangle, def.rollangle),
+        (&mut mv.rollspeed, def.rollspeed),
+    ] {
+        if !v.is_finite() {
+            *v = d;
+        }
+    }
+    for (c, d) in mv.skycolor.iter_mut().zip(def.skycolor) {
+        if !c.is_finite() {
+            *c = d;
+        }
+    }
+    for (v, d) in mv.skyvec.iter_mut().zip(def.skyvec) {
+        if !v.is_finite() {
+            *v = d;
+        }
+    }
+    mv
 }
 
 #[cfg(test)]
@@ -1492,5 +1562,68 @@ mod fx_tests {
             (env.weapon_state, env.holding_shield, env.right_hand, env.local_player),
             (2, true, true, 1)
         );
+    }
+
+    #[test]
+    fn forget_map_clears_map_state_while_keeping_hud_and_queue_cmd_is_capped() {
+        let mut conn = connection();
+        conn.fx.hud.health = 77;
+        conn.handle_svc(smoke(), 0.0);
+        conn.frame_times.push_back(1.0);
+        conn.buffered_fragments = 42;
+        conn.movevars = Some(sanitize_movevars(MoveVarsMsg {
+            gravity: f32::NAN,
+            stepsize: f32::INFINITY,
+            ..MoveVarsMsg::default()
+        }));
+        assert_eq!(conn.movevars.as_ref().unwrap().gravity, 800.0);
+        assert_eq!(conn.movevars.as_ref().unwrap().stepsize, 18.0);
+
+        for i in 0..(crate::predict::MAX_PENDING_CMDS + 10) {
+            conn.queue_cmd(GoldSrcUserCmd {
+                msec: 10,
+                impulse: (i & 0xFF) as u8,
+                ..Default::default()
+            });
+        }
+        assert_eq!(conn.cmd_queue.len(), crate::predict::MAX_PENDING_CMDS);
+        assert_eq!(conn.fx.tempents.active().len(), 1);
+
+        conn.forget_map();
+        assert!(conn.cmd_queue.is_empty());
+        assert!(conn.frame_times.is_empty());
+        assert_eq!(conn.buffered_fragments, 0);
+        assert!(conn.movevars.is_none());
+        assert!(conn.fx.tempents.active().is_empty());
+        assert_eq!(conn.fx.hud.health, 77);
+    }
+
+    #[test]
+    fn send_netchan_packet_packs_cmds_within_255_byte_limit() {
+        let mut conn = connection();
+        conn.chan = Some(NetChan::new(FRAGMENT_C2S_SIZE));
+        let ucmd_schema = cs_proto48::delta::DeltaRegistry::cs16_default()
+            .get("usercmd_t")
+            .unwrap()
+            .clone();
+        conn.ctx.deltas.insert(ucmd_schema);
+        for i in 0..16u8 {
+            conn.queue_cmd(GoldSrcUserCmd {
+                msec: 10 + i,
+                viewangles: glam::Vec3::new((i as f32) * 3.1, (i as f32) * 19.7, (i as f32) * 1.3),
+                forwardmove: 250.0 - (i as f32) * 15.0,
+                sidemove: if i % 2 == 0 { 250.0 } else { -250.0 },
+                upmove: (i as f32) * 12.0,
+                buttons: 1u16 << (i % 12),
+                impulse: 100 + i,
+                weaponselect: i + 1,
+                impact_index: i32::from(i) * 7,
+                impact_position: glam::Vec3::new(i as f32, -(i as f32), (i as f32) * 2.0),
+                ..Default::default()
+            });
+        }
+        conn.send_netchan_packet(1.0);
+        assert!(!conn.cmd_queue.is_empty(), "overflow cmds kept for next packet");
+        assert!(conn.cmd_queue.len() < 16, "at least some cmds were sent");
     }
 }

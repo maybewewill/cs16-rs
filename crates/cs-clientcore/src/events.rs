@@ -61,6 +61,8 @@ pub struct FxEnv<'a> {
     pub max_clients: u16,
     /// The entity number of the local player (slot + 1); 0 when not known.
     pub local_player: u16,
+    /// `clientdata.origin` of the local player (used when `Player_Encode` omits local origin).
+    pub local_origin: Vec3,
     /// `clientdata.view_ofs` of the local player (the predicted view height).
     pub local_view_ofs: Vec3,
     /// `clientdata.velocity` of the local player.
@@ -89,6 +91,7 @@ impl<'a> FxEnv<'a> {
             entities,
             max_clients: 32,
             local_player: 0,
+            local_origin: Vec3::ZERO,
             local_view_ofs: Vec3::new(0.0, 0.0, DEFAULT_VIEWHEIGHT),
             local_velocity: Vec3::ZERO,
             weapon_state: 0,
@@ -221,7 +224,12 @@ impl EventQueue {
                             let number = i32::from(state.number);
                             args.entindex = number;
                             if args.origin == Vec3::ZERO {
-                                args.origin = state.origin;
+                                args.origin = if state.origin == Vec3::ZERO && env.is_local(number)
+                                {
+                                    env.local_origin
+                                } else {
+                                    state.origin
+                                };
                             }
                             if args.angles == Vec3::ZERO {
                                 args.angles = state.angles;
@@ -800,8 +808,8 @@ fn fire(w: &Weapon, ev: &QueuedEvent, env: &FxEnv, rng: &mut FxRandom) -> Weapon
     let (view_anim, muzzle_flash) = if local {
         let seq = pick_anim(w, a, env, rng);
         let flash = match w.anim {
-            // A silenced USP (`bparam2` clear) or a shield makes no flash.
-            Anim::Usp => a.bparam2 != 0 && !env.holding_shield,
+            // Unsilenced USP (`bparam2` clear) and no shield makes a muzzle flash.
+            Anim::Usp => a.bparam2 == 0 && !env.holding_shield,
             _ => true,
         };
         (seq.map(|sequence| ViewAnim { sequence, body: 2 }), flash)
@@ -872,11 +880,11 @@ fn pick_anim(w: &Weapon, a: &EventArgs, env: &FxEnv, rng: &mut FxRandom) -> Opti
             }
         }
         Anim::Usp => {
-            let silenced = a.bparam2 == 0;
+            let unsilenced = a.bparam2 == 0;
             let empty = a.bparam1 != 0;
             if env.holding_shield {
                 if empty { 3 } else { rng.long(1, 2) }
-            } else if silenced {
+            } else if unsilenced {
                 if empty { 12 } else { rng.long(9, 11) }
             } else if empty {
                 4
@@ -1222,17 +1230,17 @@ mod tests {
             assert!((8..=10).contains(&un.view_anim.unwrap().sequence));
             assert!(un.sound.unwrap().name.unwrap().starts_with("weapons/m4a1_unsil-"));
         }
-        // USP: `bparam2` clear means the silencer is on; it makes no muzzle flash.
+        // USP: `bparam2` clear is unsilenced (makes a muzzle flash); `bparam2` non-zero is silenced (no flash).
         let EventFx::Weapon(on) = resolve("events/usp.sc", &ev(2, 0, 0), &env, &mut rng) else {
             panic!();
         };
-        assert!(!on.muzzle_flash);
+        assert!(on.muzzle_flash);
         assert!((9..=11).contains(&on.view_anim.unwrap().sequence));
         assert_eq!(on.sound.unwrap().name.as_deref(), Some("weapons/usp_unsil-1.wav"));
         let EventFx::Weapon(off) = resolve("events/usp.sc", &ev(2, 1, 1), &env, &mut rng) else {
             panic!();
         };
-        assert!(off.muzzle_flash);
+        assert!(!off.muzzle_flash);
         assert_eq!(off.view_anim.unwrap().sequence, 4);
     }
 
@@ -1447,5 +1455,28 @@ mod tests {
         env.right_hand = false;
         let fx = fire(w, &ev, &env, &mut rng);
         assert!(fx.shell.unwrap().velocity.dot(right) < -40.0);
+    }
+
+    #[test]
+    fn local_event_falls_back_to_local_origin_when_entity_origin_is_zero() {
+        let precache = events_table(&["events/glock18.sc"]);
+        let mut entities = BTreeMap::new();
+        entities.insert(1, state(1, Vec3::ZERO, Vec3::ZERO));
+        let mut env = FxEnv::new(1.0, &precache, &entities, &NoWorld);
+        env.local_player = 1;
+        env.local_origin = Vec3::new(100.0, 200.0, 30.0);
+
+        let mut q = EventQueue::default();
+        let ev = cs_proto48::event::WireEvent {
+            index: 1,
+            packet_index: Some(0),
+            fire_time: None,
+            args: Some(EventArgs::default()),
+        };
+        q.handle(&SvcMessage::Event(vec![ev]), &env);
+        let mut rng = FxRandom::new(1);
+        let fired = q.fire_due(&env, &mut rng);
+        assert_eq!(fired.len(), 1);
+        assert_eq!(fired[0].args.origin, Vec3::new(100.0, 200.0, 30.0));
     }
 }

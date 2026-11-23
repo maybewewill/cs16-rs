@@ -295,6 +295,13 @@ impl WorldCollision {
     /// `end_pos = start` (the source keeps fraction 1 and `end`); the "back up out of solid"
     /// step moves 0.05 of the segment at a time, at most 8 times (the source: 0.1, no cap).
     pub fn trace_local(&self, geo: Geometry<'_>, start: Vec3, end: Vec3) -> TraceResult {
+        let visits_left = match geo {
+            Geometry::Bsp {
+                hull: Hull::Point, ..
+            } => (self.nodes.len() + 1) * 2 + 16,
+            Geometry::Bsp { .. } => (self.clipnodes.len() + 1) * 2 + 16,
+            Geometry::Box(_) => 64,
+        };
         let mut ctx = TraceCtx {
             fraction: 1.0,
             end_pos: end,
@@ -304,6 +311,8 @@ impl WorldCollision {
             in_open: false,
             in_water: false,
             hit_sky: false,
+            depth: 0,
+            visits_left,
         };
 
         self.recursive_hull_check(geo, geo.root(self), 0.0, 1.0, start, end, &mut ctx);
@@ -393,7 +402,7 @@ impl WorldCollision {
             Geometry::Bsp {
                 hull: Hull::Point, ..
             } => {
-                let leaf_idx = (-idx - 1) as usize;
+                let leaf_idx = (-1i32).wrapping_sub(idx) as usize;
                 self.leaf_contents
                     .get(leaf_idx)
                     .copied()
@@ -432,6 +441,11 @@ impl WorldCollision {
             return true;
         }
 
+        if ctx.depth >= 4096 || ctx.visits_left == 0 {
+            return true;
+        }
+        ctx.visits_left -= 1;
+
         let Some((plane, children)) = self.geo_node(geo, node_idx) else {
             return true;
         };
@@ -440,10 +454,16 @@ impl WorldCollision {
         let t2 = plane_distance(&plane, p2);
 
         if t1 >= 0.0 && t2 >= 0.0 {
-            return self.recursive_hull_check(geo, children[0], p1f, p2f, p1, p2, ctx);
+            ctx.depth += 1;
+            let res = self.recursive_hull_check(geo, children[0], p1f, p2f, p1, p2, ctx);
+            ctx.depth -= 1;
+            return res;
         }
         if t1 < 0.0 && t2 < 0.0 {
-            return self.recursive_hull_check(geo, children[1], p1f, p2f, p1, p2, ctx);
+            ctx.depth += 1;
+            let res = self.recursive_hull_check(geo, children[1], p1f, p2f, p1, p2, ctx);
+            ctx.depth -= 1;
+            return res;
         }
 
         // Split the segment across the plane with classic GoldSrc DIST_EPSILON padding
@@ -458,13 +478,17 @@ impl WorldCollision {
         let side = usize::from(t1 < 0.0);
 
         // Near side first
-        if !self.recursive_hull_check(geo, children[side], p1f, midf, p1, mid, ctx) {
+        ctx.depth += 1;
+        let near_ok = self.recursive_hull_check(geo, children[side], p1f, midf, p1, mid, ctx);
+        ctx.depth -= 1;
+        if !near_ok {
             return false;
         }
 
         // If far side is not solid at `mid`, recurse into it
         if self.geo_point_contents(geo, children[side ^ 1], mid) != CONTENTS_SOLID {
-            return self.recursive_hull_check(
+            ctx.depth += 1;
+            let far_ok = self.recursive_hull_check(
                 geo,
                 children[side ^ 1],
                 midf,
@@ -473,6 +497,8 @@ impl WorldCollision {
                 p2,
                 ctx,
             );
+            ctx.depth -= 1;
+            return far_ok;
         }
 
         // Never got out of solid
@@ -527,6 +553,8 @@ struct TraceCtx {
     in_open: bool,
     in_water: bool,
     hit_sky: bool,
+    depth: u32,
+    visits_left: usize,
 }
 
 #[inline]
@@ -695,5 +723,52 @@ mod tests {
             feed(&[flags]);
         }
         assert_eq!(hash, WORLD_ONLY_TRACE_HASH);
+    }
+
+    #[test]
+    fn leaf_contents_i32_min_and_cyclic_clipnodes_do_not_panic_or_hang() {
+        let cyclic = WorldCollision {
+            planes: vec![Plane {
+                normal: Vec3::X,
+                dist: 0.0,
+                plane_type: 0,
+            }],
+            nodes: vec![Node {
+                plane: 0,
+                children: [0, 0],
+                mins: [0; 3],
+                maxs: [0; 3],
+                first_face: 0,
+                num_faces: 0,
+            }],
+            clipnodes: vec![ClipNode {
+                plane: 0,
+                children: [0, 0],
+            }],
+            leaf_contents: vec![CONTENTS_EMPTY],
+            models: vec![BspModel {
+                mins: Vec3::splat(-64.0),
+                maxs: Vec3::splat(64.0),
+                origin: Vec3::ZERO,
+                head_nodes: [0, 0, 0, 0],
+                vis_leafs: 0,
+                first_face: 0,
+                num_faces: 0,
+            }],
+        };
+        assert_eq!(
+            cyclic.geo_leaf_contents(
+                Geometry::Bsp {
+                    model: 0,
+                    hull: Hull::Point
+                },
+                i32::MIN
+            ),
+            CONTENTS_EMPTY
+        );
+        let tr_pt = cyclic.trace_world(Vec3::new(-10.0, 0.0, 0.0), Vec3::new(10.0, 0.0, 0.0), Hull::Point);
+        let tr_st = cyclic.trace_world(Vec3::new(-10.0, 0.0, 0.0), Vec3::new(10.0, 0.0, 0.0), Hull::Standing);
+        assert_eq!(tr_pt.fraction, 0.0);
+        assert_eq!(tr_st.fraction, 0.0);
     }
 }

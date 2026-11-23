@@ -1,11 +1,11 @@
 //! `cs-clientcore`: the platform-free core of a Protocol 48 client.
 //!
-//! This part holds the connection (handshake, netchan, sign-on), the client cvars and console
-//! commands that steer it, the resource list with its precache tables, file consistency and
-//! downloads. Entity storage, interpolation, prediction and the HUD state come in later tasks
-//! of phase 3. Nothing here reads a clock, a file or a socket: time is an argument, packets go
-//! through `cs_transport::PacketTransport` and game files through [`ResourceFiles`], so the
-//! crate builds for `wasm32-unknown-unknown`.
+//! This crate holds the connection (handshake, netchan, sign-on), client cvars and console
+//! commands, the resource list with its precache tables, file consistency and downloads, entity
+//! storage and interpolation, movement prediction, and client-side effects / HUD state. Nothing
+//! here reads a clock, a file or a socket: time is an argument, packets go through
+//! `cs_transport::PacketTransport` and game files through [`ResourceFiles`], so the crate
+//! builds for `wasm32-unknown-unknown`.
 
 pub mod commands;
 pub mod connection;

@@ -1300,6 +1300,7 @@ impl TempEnts {
         } else {
             0.0
         };
+        let gravity = if gravity.is_finite() { gravity } else { 800.0 };
         self.active.retain_mut(|t| {
             if !t.has(ftent::PERSIST) && t.die < time {
                 return false;

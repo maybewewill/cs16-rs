@@ -124,7 +124,9 @@ pub fn validate_delta_packet(
     if subtracted == 0 || subtracted >= UPDATE_MASK {
         return Err(DeltaRefusal::TooOld);
     }
-    let base = incoming_sequence - subtracted;
+    let base = incoming_sequence
+        .checked_sub(subtracted)
+        .ok_or(DeltaRefusal::UnknownFrame)?;
     match frames.get(base) {
         Some(f) if f.valid => Ok(()),
         _ => Err(DeltaRefusal::UnknownFrame),
@@ -197,6 +199,9 @@ impl Default for ClientClock {
 impl ClientClock {
     /// `CL_ParseServerTime`.
     pub fn on_server_time(&mut self, server_time: f32, max_clients: u8) {
+        if !server_time.is_finite() {
+            return;
+        }
         self.mtime[1] = self.mtime[0];
         self.mtime[0] = f64::from(server_time);
         if max_clients == 1 {
@@ -217,7 +222,7 @@ impl ClientClock {
     /// `CL_ReadPackets`: the clock runs by the frame time, unless the game is paused.
     pub fn advance(&mut self, frametime: f64, paused: bool) {
         self.oldtime = self.time;
-        if !paused {
+        if !paused && frametime.is_finite() {
             self.time += frametime;
         }
     }
@@ -416,7 +421,7 @@ impl ClientFrames {
         // Which entities were in the frame this update is based on: those that are not are
         // new (the first update has no base, so all of them are).
         let old = old_packet.and_then(|seq| {
-            let base = incoming_sequence - (incoming_sequence.wrapping_sub(u32::from(seq)) & 0xFF);
+            let base = incoming_sequence.checked_sub(incoming_sequence.wrapping_sub(u32::from(seq)) & 0xFF)?;
             self.ring.get(base)
         });
         let mut entities = Vec::with_capacity(update.entities.len());
@@ -527,5 +532,19 @@ mod tests {
         assert_eq!(c.time, 5.0);
         c.advance(0.01, false);
         assert!((c.time - 5.01).abs() < 1e-12);
+    }
+
+    #[test]
+    fn delta_refusal_and_non_finite_clock_do_not_panic_or_poison() {
+        let ring = FrameRing::default();
+        assert_eq!(
+            validate_delta_packet(&ring, 5, 250),
+            Err(DeltaRefusal::UnknownFrame)
+        );
+        let mut c = ClientClock::default();
+        c.on_server_time(5.0, 8);
+        c.on_server_time(f32::NAN, 8);
+        c.advance(f64::INFINITY, false);
+        assert!(c.time.is_finite() && c.mtime[0].is_finite());
     }
 }
