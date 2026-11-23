@@ -1,22 +1,16 @@
-//! `cs-server --proto48`: the Protocol 48 server engine running the game on a UDP socket, for
-//! the original Counter-Strike 1.6 client. The game is `cs_game::CsGame`; `--walk-game` runs the
+//! The Protocol 48 server engine running the game on a UDP socket, for the original
+//! Counter-Strike 1.6 client and for `cs-client`. The game is `cs_game::CsGame`; `--walk-game` runs the
 //! older `cs_sim::walk_game::WalkGame` instead (players only walk: no weapons, rounds or HUD).
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
-use cs_assets::bsp::BspMap;
-use cs_cvar::CVarRegistry;
-use cs_engine::{
-    ConsoleOutcome, GameDll, Server, ServerConfig, ServerMap, decal_names_from_wads,
-    wad_lump_names,
-};
+use cs_engine::{ConsoleOutcome, GameDll, Server, ServerConfig, ServerMap};
 use cs_game::CsGame;
+use cs_local::{load_server_map, new_server};
 use cs_platform::{Clock, NativeClock};
-use cs_proto48::delta::DeltaRegistry;
 use cs_sim::pmove::MoveParams;
 use cs_sim::walk_game::WalkGame;
 use cs_transport::{PacketTransport, UdpTransport};
@@ -24,6 +18,9 @@ use cs_vfs::{Vfs, VfsConfig};
 use tracing::info;
 
 use crate::console_io;
+
+/// The port a Half-Life server listens on by default.
+const DEFAULT_PORT: u16 = 27015;
 
 /// Seconds between server frames: 100 Hz.
 const FRAME_SECS: f64 = 0.01;
@@ -43,7 +40,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let mut opts = Options {
         gamedir: None,
         map: "de_dust2".to_string(),
-        port: cs_net::DEFAULT_PORT,
+        port: DEFAULT_PORT,
         max_players: 16,
         hostname: ServerConfig::default().hostname,
         bots: None,
@@ -98,16 +95,6 @@ pub fn run(args: &[String]) -> ! {
     }
 }
 
-/// Loads `maps/<name>.bsp` through `vfs`, for start-up and for `changelevel`.
-fn load_server_map(vfs: &Vfs, name: &str) -> Result<ServerMap, String> {
-    let bsp = Arc::new(BspMap::load(vfs, name).map_err(|e| format!("cannot load map {name}: {e}"))?);
-    let path = format!("maps/{name}.bsp");
-    let raw = vfs
-        .read_bytes(&path)
-        .map_err(|e| format!("cannot read {path}: {e}"))?;
-    ServerMap::from_bsp(name, &raw, bsp).ok_or(format!("{path} has no valid BSP header"))
-}
-
 /// Carries out `changelevel <name>`: loads the map with `load_map` and switches the server to
 /// it. A failure is printed and the server keeps running on its current map.
 fn change_level<G: GameDll>(
@@ -122,17 +109,6 @@ fn change_level<G: GameDll>(
         }
         Err(msg) => println!("changelevel failed: {msg}"),
     }
-}
-
-/// The shared cvar defaults with the vanilla game's own where they differ from what the legacy
-/// offline client uses: `mp_roundtime` is 5 minutes in ReGameDLL `game.cpp` (the shared registry
-/// keeps 1.75 for the offline game). Applied before the first `server_activate`, so a value the
-/// operator sets later in the console wins, and the rules read it at the first restart.
-fn vanilla_cvars() -> CVarRegistry {
-    let mut cvars = CVarRegistry::new_with_defaults();
-    cvars.set("mp_roundtime", "5");
-    cvars.set("bot_quota", "0");
-    cvars
 }
 
 /// Runs the console lines that arrived since the last frame and checks Ctrl+C. Returns `true`
@@ -191,37 +167,6 @@ fn start(args: &[String]) -> Result<(), String> {
         game.enable_cvar_bot_quota();
         serve(&opts, &vfs, map, game, "CsGame")
     }
-}
-
-/// The decal names the engine holds (`Decal_Init`, ReHLDS `rehlds/engine/decals.cpp`, read
-/// 2026-11-22): the lump names of `valve/decals.wad` (`DEFAULTGAME`) and then of
-/// `cstrike/decals.wad` (`GAME`), merged as the engine does. A wad that is missing or is not a
-/// WAD3 is left out; with neither, the list is empty and `decal_index` answers -1.
-fn load_decal_names(vfs: &Vfs) -> Vec<String> {
-    let lumps = |dir: &str| {
-        std::fs::read(vfs.root().join(dir).join("decals.wad"))
-            .ok()
-            .and_then(|bytes| wad_lump_names(&bytes))
-    };
-    let wads: Vec<Vec<String>> = ["valve", "cstrike"].into_iter().filter_map(lumps).collect();
-    decal_names_from_wads(&wads)
-}
-
-/// The server as `serve` starts it: the engine on `map` with `game`, the Protocol 48 deltas,
-/// the vanilla cvars, the decal list of the game directory and the game files as the studio
-/// model loader (the players' hitboxes).
-fn new_server<G: GameDll>(cfg: ServerConfig, map: ServerMap, game: G, vfs: &Vfs) -> Server<G> {
-    let mut server = Server::new(
-        cfg,
-        map,
-        game,
-        DeltaRegistry::cs16_default(),
-        vanilla_cvars(),
-    );
-    server.set_decals(load_decal_names(vfs));
-    let model_vfs = vfs.clone();
-    server.set_model_loader(Arc::new(move |name| model_vfs.read_bytes(name).ok()));
-    server
 }
 
 /// Binds the socket and runs `game` on `map` until the operator stops the server.
@@ -295,6 +240,8 @@ fn serve<G: GameDll>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cs_cvar::CVarRegistry;
+    use cs_proto48::delta::DeltaRegistry;
 
     type WalkServer = Server<WalkGame>;
 
@@ -324,14 +271,6 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn vanilla_round_time() {
-        // The proto48 server starts at the vanilla 5 minutes, the legacy registry at 1.75.
-        assert_eq!(vanilla_cvars().get_f32("mp_roundtime"), 5.0);
-        assert_eq!(vanilla_cvars().get_f32("bot_quota"), 0.0);
-        assert_eq!(CVarRegistry::new_with_defaults().get_f32("mp_roundtime"), 1.75);
     }
 
     #[test]

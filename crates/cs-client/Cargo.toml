@@ -9,8 +9,10 @@ rust-version.workspace = true
 bytemuck.workspace = true
 cs-assets.workspace = true
 cs-cvar.workspace = true
-cs-net.workspace = true
-cs-sim.workspace = true
+cs-clientcore.workspace = true
+cs-local.workspace = true
+cs-proto48.workspace = true
+cs-transport.workspace = true
 cs-vfs.workspace = true
 egui.workspace = true
 egui-wgpu.workspace = true
@@ -26,3 +28,6 @@ winit.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+cs-probe.workspace = true

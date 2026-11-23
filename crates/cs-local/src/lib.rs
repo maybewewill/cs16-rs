@@ -12,7 +12,7 @@ use cs_assets::bsp::BspMap;
 use cs_clientcore::{ConnState, Connection, ConnectionConfig};
 use cs_cvar::CVarRegistry;
 use cs_engine::{
-    ConsoleOutcome, Server, ServerConfig, ServerMap, decal_names_from_wads, wad_lump_names,
+    ConsoleOutcome, GameDll, Server, ServerConfig, ServerMap, decal_names_from_wads, wad_lump_names,
 };
 use cs_game::CsGame;
 use cs_proto48::crypto::md5_hex;
@@ -48,8 +48,10 @@ impl Default for LocalOptions {
 }
 
 /// The cvars a Protocol 48 server starts with: the shared defaults with the vanilla
-/// `mp_roundtime` (5 minutes, ReGameDLL `game.cpp`) and no bots until asked.
-fn vanilla_cvars() -> CVarRegistry {
+/// `mp_roundtime` (5 minutes in ReGameDLL `game.cpp`; the shared registry keeps 1.75) and no
+/// bots until asked. Applied before the first `server_activate`, so a value the operator sets
+/// later in the console wins.
+pub fn vanilla_cvars() -> CVarRegistry {
     let mut cvars = CVarRegistry::new_with_defaults();
     cvars.set("mp_roundtime", "5");
     cvars.set("bot_quota", "0");
@@ -66,8 +68,11 @@ pub fn load_server_map(vfs: &Vfs, name: &str) -> Result<ServerMap, String> {
     ServerMap::from_bsp(name, &raw, bsp).ok_or(format!("{path} has no valid BSP header"))
 }
 
-/// The decal names of `valve/decals.wad` and `cstrike/decals.wad`, merged as the engine does.
-fn load_decal_names(vfs: &Vfs) -> Vec<String> {
+/// The decal names the engine holds (`Decal_Init`, ReHLDS `rehlds/engine/decals.cpp`, read
+/// 2026-11-22): the lump names of `valve/decals.wad` (`DEFAULTGAME`) and then of
+/// `cstrike/decals.wad` (`GAME`), merged as the engine does. A wad that is missing or is not a
+/// WAD3 is left out; with neither, the list is empty and `decal_index` answers -1.
+pub fn load_decal_names(vfs: &Vfs) -> Vec<String> {
     let lumps = |dir: &str| {
         std::fs::read(vfs.root().join(dir).join("decals.wad"))
             .ok()
@@ -75,6 +80,28 @@ fn load_decal_names(vfs: &Vfs) -> Vec<String> {
     };
     let wads: Vec<Vec<String>> = ["valve", "cstrike"].into_iter().filter_map(lumps).collect();
     decal_names_from_wads(&wads)
+}
+
+/// The server as every Protocol 48 front end starts it (`cs-server`, local play): the engine
+/// on `map` with `game`, the Protocol 48 deltas, the vanilla cvars, the decal list of the game
+/// directory and the game files as the studio model loader (the players' hitboxes).
+pub fn new_server<G: GameDll>(cfg: ServerConfig, map: ServerMap, game: G, vfs: &Vfs) -> Server<G> {
+    new_server_with(cfg, map, game, Some(vfs))
+}
+
+fn new_server_with<G: GameDll>(
+    cfg: ServerConfig,
+    map: ServerMap,
+    game: G,
+    vfs: Option<&Vfs>,
+) -> Server<G> {
+    let mut server = Server::new(cfg, map, game, DeltaRegistry::cs16_default(), vanilla_cvars());
+    if let Some(vfs) = vfs {
+        server.set_decals(load_decal_names(vfs));
+        let model_vfs = vfs.clone();
+        server.set_model_loader(Arc::new(move |name| model_vfs.read_bytes(name).ok()));
+    }
+    server
 }
 
 /// A server and one client in one process.
@@ -113,12 +140,7 @@ impl LocalGame {
             max_clients: opts.max_clients,
             ..ServerConfig::default()
         };
-        let mut server = Server::new(cfg, map, game, DeltaRegistry::cs16_default(), vanilla_cvars());
-        if let Some(vfs) = &vfs {
-            server.set_decals(load_decal_names(vfs));
-            let model_vfs = vfs.clone();
-            server.set_model_loader(Arc::new(move |name| model_vfs.read_bytes(name).ok()));
-        }
+        let mut server = new_server_with(cfg, map, game, vfs.as_ref());
         if opts.bots > 0 {
             let _ = server.console_command(&format!("bot_quota {}", opts.bots));
         }
@@ -224,5 +246,18 @@ impl LocalGame {
     /// Stops the server, telling the client why.
     pub fn shutdown(&mut self) {
         self.server.shutdown(&mut self.hub, "Server shutting down");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vanilla_round_time() {
+        // A Protocol 48 server starts at the vanilla 5 minutes; the shared registry keeps 1.75.
+        assert_eq!(vanilla_cvars().get_f32("mp_roundtime"), 5.0);
+        assert_eq!(vanilla_cvars().get_f32("bot_quota"), 0.0);
+        assert_eq!(CVarRegistry::new_with_defaults().get_f32("mp_roundtime"), 1.75);
     }
 }
