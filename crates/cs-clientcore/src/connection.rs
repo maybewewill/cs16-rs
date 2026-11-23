@@ -41,7 +41,6 @@ use crate::frames::{ClientFrames, FrameOutcome};
 use crate::events::{FiredEvent, FxEnv};
 use crate::hud::ClientEffects;
 use crate::precache::PrecacheTables;
-// Task 5 hook: movement prediction (`predict.rs`).
 use crate::predict::{self, PredictInputs, Predictor};
 use crate::resources::{AllFilesPresent, ResourceFiles, ResourceManager, parse_file_stream};
 use crate::tempents::{FxWorld, NoWorld};
@@ -175,7 +174,7 @@ pub struct Connection<T: PacketTransport> {
     entities: BTreeMap<u16, GoldSrcEntityState>,
     /// Task 4 hook: frame ring, entity store and interpolation (`frames.rs`).
     frames: ClientFrames,
-    /// Task 5 hook: the movement prediction of the local player (`predict.rs`).
+    /// The movement prediction of the local player (`predict.rs`).
     predict: Predictor,
     client_data: Option<GoldSrcClientData>,
     /// The `weapon_data_t` list of the last `svc_clientdata` received.
@@ -307,7 +306,7 @@ impl<T: PacketTransport> Connection<T> {
     /// packet when one is due, or one netchan packet when `now` is past the `cl_cmdrate`
     /// interval since the previous one.
     pub fn pump(&mut self, now: f64) {
-        // Task 5 hook: the clock commands are stamped with.
+        // The clock the prediction stamps new commands with.
         self.predict.set_now(now);
         while let Some((from, data)) = self.transport.recv() {
             if from != self.server {
@@ -372,12 +371,11 @@ impl<T: PacketTransport> Connection<T> {
             }
             ConnState::Idle | ConnState::Rejected(_) | ConnState::Disconnected(_) => {}
         }
-        // Task 5 hook: replay the commands the server has not answered.
+        // Replay the commands the server has not answered.
         self.run_prediction(now);
     }
 
-    /// Task 5 hook: `CL_PredictMovement` once per pump, after the packets were read and the
-    /// commands sent.
+    /// `CL_PredictMovement`, once per pump, after the packets were read and the commands sent.
     fn run_prediction(&mut self, now: f64) {
         if self.state != ConnState::InGame {
             return;
@@ -435,7 +433,7 @@ impl<T: PacketTransport> Connection<T> {
     }
 
     pub fn queue_cmd(&mut self, cmd: GoldSrcUserCmd) {
-        // Task 5 hook: the prediction runs the command before it is sent.
+        // The prediction runs the command before it is sent.
         self.predict.push_cmd(cmd.clone());
         self.cmd_queue.push_back(cmd);
     }
@@ -746,7 +744,7 @@ impl<T: PacketTransport> Connection<T> {
         &mut self.frames
     }
 
-    /// Task 5 hook: the movement prediction (`cl.simorg`, the error checks, the sounds).
+    /// The movement prediction (`cl.simorg`, the error checks, the sounds).
     pub fn predictor(&self) -> &Predictor {
         &self.predict
     }
@@ -755,8 +753,9 @@ impl<T: PacketTransport> Connection<T> {
         &mut self.predict
     }
 
-    /// Task 5 hook: the map's collision hulls, which the prediction walks in (the shell loads
-    /// the BSP; `WorldCollision::from_bsp`).
+    /// The map's collision hulls, which the prediction walks in (the shell loads the BSP and
+    /// calls this after each map change: `forget_map` clears it, and without it the player is
+    /// not predicted).
     pub fn set_world_collision(
         &mut self,
         world: Option<std::sync::Arc<cs_pm::collision::WorldCollision>>,
@@ -1319,7 +1318,7 @@ impl<T: PacketTransport> Connection<T> {
         {
             let take = self.cmd_queue.len().min(MAX_NEW_CMDS);
             let mut new_cmds: Vec<GoldSrcUserCmd> = self.cmd_queue.drain(..take).collect();
-            // Task 5 hook: the prediction learns which packet carries which commands (the
+            // The prediction learns which packet carries which commands (the
             // server acknowledges packets).
             let mut placeholder = None;
             match new_cmds.last() {

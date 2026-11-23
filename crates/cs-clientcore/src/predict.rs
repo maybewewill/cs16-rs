@@ -16,6 +16,13 @@
 //!   packet, and a packet carries up to 16 commands; Xash3D sends one command per packet). A
 //!   command not sent yet belongs to the next packet. The error check compares the server's
 //!   origin with the predicted origin after the last command of the acknowledged packet.
+//! - Loss: the predictor assumes every command of an acknowledged packet ran. When a client
+//!   packet is lost the server replays only `min(dropped, 2)` backups (and repeats its last
+//!   command beyond that), and the client cannot tell a lost packet from a lost server frame
+//!   (both show as an acknowledgement that skips). The original client has the same blind
+//!   spot: the error check flags it once (bounded by the commands of the lost packet) and the
+//!   next frame, which the prediction restarts from, is exact again. Accepted transient,
+//!   tested by `prediction_recovers_from_loss`.
 //! - `TxferPredictionData`: only the part that is the movement's own state survives a server
 //!   frame (`oldbuttons`, `flFallVelocity`, `iStepLeft`: the server never sends them). The
 //!   client-DLL overrides of `clientdata` (`maxspeed`, `deadflag`, `fuser2`, ...) are not
@@ -61,6 +68,10 @@ pub const MAX_PREDICTION_ERROR: f32 = 64.0;
 pub const MIN_CORRECTION_DISTANCE: f32 = 0.25;
 /// A command longer than this is run as two halves (`CL_RunUsercmd`).
 pub const MAX_USERCMD_MSEC: u8 = 50;
+/// Commands the predictor keeps while the server does not answer; the oldest go first.
+pub const MAX_PENDING_CMDS: usize = 512;
+/// Sounds waiting for the shell; the oldest go first.
+pub const MAX_PENDING_SOUNDS: usize = 256;
 /// Prediction errors [`Predictor::checks`] keeps.
 pub const CHECK_LOG_CAPACITY: usize = 512;
 
@@ -117,12 +128,14 @@ pub fn movevars_from_msg(m: &MoveVarsMsg) -> MoveVars {
     }
 }
 
-/// `cl_nopred`, `cl_nosmooth` and `cl_smoothtime`.
+/// `cl_nopred`, `cl_nosmooth`, `cl_smoothtime` and `cl_solid_players`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PredictSettings {
     pub nopred: bool,
     pub nosmooth: bool,
     pub smoothtime: f32,
+    /// `cl_solid_players`: the other players are solid for the prediction.
+    pub solid_players: bool,
 }
 
 impl Default for PredictSettings {
@@ -131,6 +144,7 @@ impl Default for PredictSettings {
             nopred: false,
             nosmooth: false,
             smoothtime: 0.1,
+            solid_players: true,
         }
     }
 }
@@ -141,6 +155,7 @@ impl PredictSettings {
             nopred: cvars.float("cl_nopred") != 0.0,
             nosmooth: cvars.float("cl_nosmooth") != 0.0,
             smoothtime: cvars.float("cl_smoothtime"),
+            solid_players: cvars.float("cl_solid_players") != 0.0,
         }
     }
 }
@@ -579,24 +594,29 @@ impl Predictor {
         }
     }
 
-    /// Forgets everything that belongs to the map (the settings, the world's collision and the
-    /// materials stay until the shell replaces them).
+    /// Forgets everything that belongs to the map, the world's collision included: the shell
+    /// gives the new map's with [`set_world`](Self::set_world), and until it does the player is
+    /// not predicted (a prediction in empty space would be wrong). The settings and the
+    /// materials stay.
     pub fn reset(&mut self) {
         let settings = self.settings;
-        let world = self.world.take();
         let pm_shared = std::mem::replace(&mut self.pm_shared, pm_init(None));
         let record = self.record_steps;
         *self = Self::new();
         self.settings = settings;
-        self.world = world;
         self.pm_shared = pm_shared;
         self.record_steps = record;
     }
 
     /// The map's collision (the BSP's hulls): the world the prediction walks in. Without it the
-    /// world is empty space.
+    /// player is not predicted (the server's state is shown).
     pub fn set_world(&mut self, world: Option<Arc<WorldCollision>>) {
         self.world = world;
+    }
+
+    /// Whether the map's collision is known, so the player is predicted.
+    pub fn has_world(&self) -> bool {
+        self.world.is_some()
     }
 
     /// `sound/materials.txt`: the texture table the footsteps read (`PM_Init`).
@@ -623,6 +643,9 @@ impl Predictor {
 
     /// A command the input layer made; the prediction runs it at once, before it is sent.
     pub fn push_cmd(&mut self, cmd: GoldSrcUserCmd) {
+        if self.cmds.len() >= MAX_PENDING_CMDS {
+            self.cmds.pop_front();
+        }
         self.cmds.push_back(PendingCmd {
             cmd,
             created_at: self.now,
@@ -649,6 +672,9 @@ impl Predictor {
             c.sequence = Some(sequence);
         }
         if let Some(cmd) = placeholder {
+            if self.cmds.len() >= MAX_PENDING_CMDS {
+                self.cmds.pop_front();
+            }
             self.cmds.push_back(PendingCmd {
                 cmd,
                 created_at: self.now,
@@ -687,12 +713,14 @@ impl Predictor {
     }
 
     /// Test hook: keeps the `(msec, impulse)` of every step the movement runs.
+    #[doc(hidden)]
     pub fn record_steps(&mut self, on: bool) {
         self.record_steps = on;
         self.steps.clear();
     }
 
     /// The steps recorded since [`record_steps`](Self::record_steps) or the last call.
+    #[doc(hidden)]
     pub fn take_steps(&mut self) -> Vec<(u8, u8)> {
         std::mem::take(&mut self.steps)
     }
@@ -786,7 +814,7 @@ impl Predictor {
             return;
         };
 
-        if !self.is_predicted(inp.intermission) {
+        if !self.is_predicted(inp.intermission) || self.world.is_none() {
             // The server's word: `CL_PredictMovement` copies the frame's clientdata.
             self.set_from_server(&base);
             return;
@@ -794,7 +822,7 @@ impl Predictor {
 
         let world = self.world.clone();
         let coll: &WorldCollision = world.as_deref().unwrap_or(&NO_COLLISION);
-        let physents = build_physents(inp, frame, coll, world.is_some());
+        let physents = build_physents(inp, frame, coll, world.is_some(), self.settings.solid_players);
         let ctx = RunCtx {
             coll,
             physents: &physents,
@@ -811,16 +839,11 @@ impl Predictor {
         let mut ran = false;
         let mut lastground = self.out.lastground;
         for i in 0..self.cmds.len() {
-            let (cmd, runfuncs, sequence, created_at) = {
+            let (cmd, runfuncs, created_at) = {
                 let c = &self.cmds[i];
-                (
-                    c.cmd.clone(),
-                    !c.processed,
-                    c.sequence.unwrap_or(inp.outgoing_sequence),
-                    c.created_at,
-                )
+                (c.cmd.clone(), !c.processed, c.created_at)
             };
-            let to = self.run_usercmd(&ctx, &from, &cmd, runfuncs, &mut time, sequence, &mut lastground);
+            let to = self.run_usercmd(&ctx, &from, &cmd, runfuncs, &mut time, &mut lastground);
             if let Some(seq) = self.cmds[i].sequence {
                 let slot = (seq & UPDATE_MASK) as usize;
                 self.predicted_origins[slot] = Some((seq, to.origin));
@@ -945,12 +968,11 @@ impl Predictor {
         cmd: &GoldSrcUserCmd,
         runfuncs: bool,
         time: &mut f64,
-        seed: u32,
         lastground: &mut i32,
     ) -> LocalState {
         let mut state = from.clone();
         for step in split_usercmd(cmd) {
-            state = self.run_step(ctx, &state, &step, runfuncs, time, seed, lastground);
+            state = self.run_step(ctx, &state, &step, runfuncs, time, lastground);
         }
         state
     }
@@ -965,7 +987,6 @@ impl Predictor {
         cmd: &GoldSrcUserCmd,
         runfuncs: bool,
         time: &mut f64,
-        _seed: u32,
         lastground: &mut i32,
     ) -> LocalState {
         if self.record_steps {
@@ -1131,6 +1152,7 @@ fn build_physents(
     frame: &Frame,
     coll: &WorldCollision,
     has_world: bool,
+    solid_players: bool,
 ) -> PmPhysEnts {
     let mut out = PmPhysEnts::default();
     out.push_physent(world_physent(has_world.then_some(coll)));
@@ -1222,7 +1244,7 @@ fn build_physents(
         }
     }
 
-    for pose in inp.poses {
+    for pose in inp.poses.iter().filter(|_| solid_players) {
         let Some(fe) = frame.entity(pose.number) else {
             continue;
         };
@@ -1388,6 +1410,9 @@ impl PmWorld for ClientPmWorld<'_> {
         // `PM_PlaySound` plays through the world even when `runfuncs` is off in places (the
         // water code); a replayed command must not play it again.
         if self.runfuncs {
+            if self.sounds.len() >= MAX_PENDING_SOUNDS {
+                self.sounds.remove(0);
+            }
             self.sounds.push(PredictedSound {
                 channel,
                 sample: sample.to_string(),

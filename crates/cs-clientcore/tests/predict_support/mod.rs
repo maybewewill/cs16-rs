@@ -435,7 +435,6 @@ impl Loop {
             &md5_hex(b"cs-clientcore prediction"),
         );
         let mut conn = Connection::new(endpoint, PeerAddr::Loopback(0), cfg);
-        conn.set_world_collision(Some(world));
         conn.frames_mut().set_remote_is_local(true);
         conn.connect();
         let mut now = 0.0;
@@ -448,6 +447,8 @@ impl Loop {
             }
         }
         assert_eq!(conn.state(), &ConnState::InGame, "signed on");
+        // The shell hands the map's collision over once the map is loaded.
+        conn.set_world_collision(Some(world));
         let mut this = Self {
             server,
             hub,
@@ -473,6 +474,18 @@ impl Loop {
         self.now += FRAME;
         self.conn.pump(self.now);
         self.server.frame(&mut self.hub, self.now);
+    }
+
+    /// Drops the next client packet and the next server frame (one step of total loss).
+    pub fn lose_one_step(&mut self, cmd: Option<GoldSrcUserCmd>) {
+        self.conn.transport_mut().set_faults(cs_transport::Faults {
+            drop_every: 1,
+            ..cs_transport::Faults::default()
+        });
+        self.step(cmd);
+        self.conn
+            .transport_mut()
+            .set_faults(cs_transport::Faults::default());
     }
 
     /// The origin of the player on the server.

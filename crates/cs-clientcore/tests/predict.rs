@@ -352,7 +352,6 @@ fn a_teleport_snaps() {
     bare::run_walk(&mut p, 10, &frame1, &precache, false);
     let predicted_end = p.predicted_origin(10).expect("predicted");
     assert!(predicted_end.x > 5.0, "walked: {predicted_end:?}");
-    let before = p.prediction().simorg;
     // The server's frame 2 acknowledges packet 10 and puts the player 3 units off.
     let off = predicted_end + Vec3::new(3.0, 0.0, 0.0);
     let frame2 = bare::frame(2, off, vec![bare::local_state(1)]);
@@ -362,10 +361,8 @@ fn a_teleport_snaps() {
     assert_eq!(check.ack, 10);
     assert!((check.error - 3.0).abs() < 1e-3 && !check.teleport);
     assert!((p.prediction().prediction_error.x - 3.0).abs() < 1e-3);
-    let smoothed = p.prediction().simorg;
-    // Nothing is in flight: the view is the server's frame, but a correction was started, so a
-    // later prediction on top blends from where the view was.
-    let _ = (before, smoothed);
+    // Nothing is in flight: the view is the server's frame.
+    assert!(!p.prediction().predicted);
 
     // A teleport: the server puts the player 500 units away. No error is kept and the view
     // takes the server's place at once.
@@ -500,4 +497,118 @@ fn prediction_matches_the_server_on_dust2() {
     let worst = checks.iter().map(|c| c.error).fold(0.0f32, f32::max);
     assert!(checks.iter().all(|c| !c.teleport));
     assert!(worst < TOLERANCE, "worst of {} commands: {worst}", checks.len());
+}
+
+#[test]
+fn without_the_world_the_server_is_shown() {
+    let precache = bare::precache();
+    let spawn = Vec3::new(0.0, 0.0, 36.03125);
+    let frame1 = bare::frame(1, spawn, vec![bare::local_state(1)]);
+    let mut p = Predictor::new();
+    assert!(!p.has_world());
+    bare::run_walk(&mut p, 10, &frame1, &precache, true);
+    // No prediction in empty space: the view stays on the server's origin.
+    assert!(!p.prediction().predicted);
+    assert_eq!(p.prediction().simorg, spawn);
+    p.set_world(Some(bare::world()));
+    assert!(p.has_world());
+    bare::run_walk(&mut p, 10, &frame1, &precache, true);
+    assert!(p.prediction().predicted);
+    assert!(p.prediction().simorg.x > spawn.x + 1.0);
+    // A new map forgets the world.
+    p.reset();
+    assert!(!p.has_world());
+}
+
+#[test]
+fn a_new_map_stops_the_prediction_until_the_world_is_given() {
+    let (map, world) = server_map(map_entities(None));
+    let mut l = Loop::new(map, world);
+    l.step(Some(walk(10, IN_FORWARD, 250.0, 0.0, 0.0)));
+    assert!(l.conn.predictor().has_world());
+    assert!(l.conn.predictor().prediction().predicted);
+    l.conn.set_world_collision(None);
+    l.step(Some(walk(10, IN_FORWARD, 250.0, 0.0, 0.0)));
+    assert!(!l.conn.predictor().prediction().predicted);
+}
+
+/// Several commands to a packet (`cl_cmdrate 30`), with no loss.
+#[test]
+fn several_commands_per_packet_match_the_server() {
+    let (map, world) = server_map(map_entities(None));
+    let mut l = Loop::new(map, world);
+    l.conn.set_cvar("cl_cmdrate", "30");
+    let first_check = l.conn.predictor().checks().len();
+    for i in 0..300 {
+        l.step(Some(script(i)));
+    }
+    for _ in 0..10 {
+        l.step(None);
+    }
+    let checks: Vec<_> = l
+        .conn
+        .predictor()
+        .checks()
+        .iter()
+        .skip(first_check)
+        .copied()
+        .collect();
+    assert!(checks.len() >= 60, "{} checks", checks.len());
+    let worst = checks.iter().map(|c| c.error).fold(0.0f32, f32::max);
+    assert!(worst < TOLERANCE, "worst of {} checks: {worst}", checks.len());
+}
+
+/// One client packet and one server frame are lost, with 3 or more commands to a packet. The
+/// predictor assumes the lost packet's commands ran, so the check that follows is off by about
+/// their movement; it stays bounded, nothing is a teleport, and the error is gone within a few
+/// frames.
+#[test]
+fn prediction_recovers_from_loss() {
+    let (map, world) = server_map(map_entities(None));
+    let mut l = Loop::new(map, world);
+    l.conn.set_cvar("cl_cmdrate", "30");
+    // Settle at the new rate.
+    for i in 0..30 {
+        l.step(Some(script(i)));
+    }
+    let first_check = l.conn.predictor().checks().len();
+    let mut lost_at = 0;
+    for i in 30..260 {
+        if i == 100 || i == 180 {
+            lost_at = l.conn.predictor().checks().len();
+            l.lose_one_step(Some(script(i)));
+        } else {
+            l.step(Some(script(i)));
+        }
+    }
+    for _ in 0..10 {
+        l.step(None);
+    }
+    let checks: Vec<_> = l
+        .conn
+        .predictor()
+        .checks()
+        .iter()
+        .skip(first_check)
+        .copied()
+        .collect();
+    assert!(lost_at > first_check);
+    assert!(checks.iter().all(|c| !c.teleport), "no loss is a teleport");
+    // Bounded: a packet holds about 4 commands of 10 ms at 250 u/s (jumps and landings add
+    // some): well under the 64 of a teleport.
+    let worst = checks.iter().map(|c| c.error).fold(0.0f32, f32::max);
+    assert!(worst < 24.0, "worst error {worst}");
+    // And it comes back: the checks of the last part of the walk are exact again.
+    let tail = &checks[checks.len() - 15..];
+    assert!(
+        tail.iter().all(|c| c.error < TOLERANCE),
+        "the error is gone: {:?}",
+        tail.iter().map(|c| c.error).collect::<Vec<_>>()
+    );
+    // Right after the second loss, the error is gone within a few frames.
+    let after: Vec<_> = checks.iter().filter(|c| c.error > TOLERANCE).collect();
+    assert!(after.len() <= 12, "{} bad checks", after.len());
+    let server = l.server_origin();
+    let predicted = l.conn.predictor().prediction().simorg;
+    assert!((server - predicted).length() < TOLERANCE, "{server:?} vs {predicted:?}");
 }
