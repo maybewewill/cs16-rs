@@ -1182,6 +1182,7 @@ impl MatchWorld {
                     flash_alpha: p.flash_alpha,
                     bomb_planted_pos: planted_pos,
                     bomb_targets,
+                    priority_goal: None,
                     difficulty: self.config.bot_difficulty,
                 };
                 let seed = self.next_rand_u64();

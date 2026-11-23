@@ -165,6 +165,16 @@ pub trait GameEntity: Send + 'static {
         false
     }
 
+    /// Whether this hostage has already reached rescue (`m_bRescued`).
+    fn is_hostage_rescued(&self) -> bool {
+        false
+    }
+
+    /// Player edict this hostage is currently following (`State::Follow`), if any.
+    fn hostage_follower(&self) -> Option<EdictId> {
+        None
+    }
+
     /// Sets the 1-based hostage index assigned at spawn (`m_iHostageIndex`).
     fn set_hostage_index(&mut self, _idx: u8) {}
 

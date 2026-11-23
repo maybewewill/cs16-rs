@@ -9,8 +9,8 @@ use crate::grenades::{SmokeCloud, segment_blocked_by_smoke};
 use crate::pmove::snap_spawn_to_floor;
 use crate::trace::{BspCollision, CONTENTS_SOLID, Hull, TraceResult};
 
-const NAV_STEP: f32 = 96.0;
-const MAX_NAV_NODES: usize = 900;
+const NAV_STEP: f32 = 64.0;
+const MAX_NAV_NODES: usize = 6400;
 
 /// Minimal collision/visibility interface needed to build a [`NavGraph`] and run [`think_bot_with`].
 pub trait BotWorld {
@@ -104,22 +104,50 @@ impl NavGraph {
 
             for (dx, dy) in dirs {
                 let target_xy = Vec3::new(curr_pos.x + dx, curr_pos.y + dy, curr_pos.z);
-                // Step up 20 units, slide horizontally, then trace down up to 80 units to find floor
-                let lifted = curr_pos + Vec3::new(0.0, 0.0, 22.0);
-                let horiz_end = target_xy + Vec3::new(0.0, 0.0, 22.0);
-                let tr_h = world.trace_standing(lifted, horiz_end);
-                if tr_h.start_solid || tr_h.fraction < 0.92 {
-                    continue;
-                }
-                let tr_d = world.trace_standing(
-                    tr_h.end_pos,
-                    tr_h.end_pos - Vec3::new(0.0, 0.0, 96.0),
+                // First try a flat doorway-safe trace (+2u) with full drop check; if blocked by
+                // stairs/curbs, simulate 3 GoldSrc micro-steps (+18u up per 1/3 step).
+                let flat_tr = world.trace_standing(
+                    curr_pos + Vec3::new(0.0, 0.0, 2.0),
+                    target_xy + Vec3::new(0.0, 0.0, 2.0),
                 );
-                if tr_d.all_solid || tr_d.fraction >= 1.0 || tr_d.plane_normal.z < 0.7 {
-                    continue;
-                }
-                let next_pos = tr_d.end_pos + Vec3::new(0.0, 0.0, 0.5);
-                if (next_pos.z - curr_pos.z).abs() > 68.0 {
+                let next_pos = if !flat_tr.start_solid && flat_tr.fraction >= 0.92 {
+                    let tr_d = world.trace_standing(
+                        flat_tr.end_pos,
+                        flat_tr.end_pos - Vec3::new(0.0, 0.0, 96.0),
+                    );
+                    if tr_d.all_solid || tr_d.fraction >= 1.0 || tr_d.plane_normal.z < 0.7 {
+                        continue;
+                    }
+                    tr_d.end_pos + Vec3::new(0.0, 0.0, 0.5)
+                } else {
+                    let mut p = curr_pos;
+                    let mut ok = true;
+                    let sx = dx / 4.0;
+                    let sy = dy / 4.0;
+                    for _ in 0..4 {
+                        let up = world.trace_standing(p, p + Vec3::new(0.0, 0.0, 18.0));
+                        let end_h = up.end_pos + Vec3::new(sx, sy, 0.0);
+                        let tr_h = world.trace_standing(up.end_pos, end_h);
+                        if tr_h.start_solid || tr_h.fraction < 0.92 {
+                            ok = false;
+                            break;
+                        }
+                        let tr_d = world.trace_standing(
+                            tr_h.end_pos,
+                            tr_h.end_pos - Vec3::new(0.0, 0.0, 36.0),
+                        );
+                        if tr_d.all_solid || tr_d.fraction >= 1.0 || tr_d.plane_normal.z < 0.7 {
+                            ok = false;
+                            break;
+                        }
+                        p = tr_d.end_pos + Vec3::new(0.0, 0.0, 0.5);
+                    }
+                    if !ok {
+                        continue;
+                    }
+                    p
+                };
+                if next_pos.z - curr_pos.z > 44.0 || curr_pos.z - next_pos.z > 68.0 {
                     continue;
                 }
 
@@ -142,9 +170,6 @@ impl NavGraph {
 
                 if next_idx != curr_idx && !nodes[curr_idx].neighbors.contains(&next_idx) {
                     nodes[curr_idx].neighbors.push(next_idx);
-                    if !nodes[next_idx].neighbors.contains(&curr_idx) {
-                        nodes[next_idx].neighbors.push(curr_idx);
-                    }
                 }
             }
         }
@@ -162,6 +187,32 @@ impl NavGraph {
                     .total_cmp(&b.pos.distance_squared(pos))
             })
             .map(|(i, _)| i)
+    }
+
+    /// Nearest node to `target` reachable from `start` along the nav graph.
+    pub fn nearest_reachable(&self, start: usize, target: Vec3) -> Option<usize> {
+        if start >= self.nodes.len() {
+            return None;
+        }
+        let mut visited = vec![false; self.nodes.len()];
+        let mut q = VecDeque::new();
+        visited[start] = true;
+        q.push_back(start);
+        let mut best = (start, self.nodes[start].pos.distance_squared(target));
+
+        while let Some(u) = q.pop_front() {
+            let d2 = self.nodes[u].pos.distance_squared(target);
+            if d2 < best.1 {
+                best = (u, d2);
+            }
+            for &v in &self.nodes[u].neighbors {
+                if !visited[v] {
+                    visited[v] = true;
+                    q.push_back(v);
+                }
+            }
+        }
+        Some(best.0)
     }
 
     /// Shortest path via BFS from `start_node` to `goal_node` (returns next waypoint node index).
@@ -201,6 +252,7 @@ pub struct BotBrain {
     pub strafe_timer: f32,
     pub reaction_timer: f32,
     pub burst_timer: f32,
+    pub last_objective: Option<Vec3>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -218,6 +270,7 @@ pub struct BotObservation {
     pub flash_alpha: f32,
     pub bomb_planted_pos: Option<Vec3>,
     pub bomb_targets: [Option<Vec3>; 2],
+    pub priority_goal: Option<Vec3>,
     pub difficulty: u8,
 }
 
@@ -366,15 +419,25 @@ pub fn think_bot_with<W: BotWorld + ?Sized>(
 
     if obs.team == SpawnTeam::CounterTerrorist
         && let Some(bomb_pos) = obs.bomb_planted_pos
-        && obs.pos.distance(bomb_pos) < 80.0
     {
-        let d = bomb_pos - obs.eye;
-        let h = (d.x * d.x + d.y * d.y).sqrt().max(0.001);
-        dec.yaw_deg = step_angle(obs.yaw_deg, d.y.atan2(d.x).to_degrees().rem_euclid(360.0), 360.0 * dt);
-        dec.pitch_deg = step_angle(obs.pitch_deg, (-d.z.atan2(h).to_degrees()).clamp(-80.0, 80.0), 360.0 * dt);
-        dec.use_key = true;
-        dec.duck = true;
-        return dec;
+        let dist = obs.pos.distance(bomb_pos);
+        if dist < 52.0 {
+            let d = bomb_pos - obs.eye;
+            let h = (d.x * d.x + d.y * d.y).sqrt().max(0.001);
+            dec.yaw_deg = step_angle(obs.yaw_deg, d.y.atan2(d.x).to_degrees().rem_euclid(360.0), 720.0 * dt);
+            dec.pitch_deg = step_angle(obs.pitch_deg, (-d.z.atan2(h).to_degrees()).clamp(-80.0, 80.0), 720.0 * dt);
+            dec.use_key = true;
+            dec.duck = true;
+            return dec;
+        }
+        if dist < 96.0 && world.has_line_of_sight(obs.eye, bomb_pos) {
+            let d = bomb_pos - obs.eye;
+            let h = (d.x * d.x + d.y * d.y).sqrt().max(0.001);
+            dec.yaw_deg = step_angle(obs.yaw_deg, d.y.atan2(d.x).to_degrees().rem_euclid(360.0), 540.0 * dt);
+            dec.pitch_deg = step_angle(obs.pitch_deg, (-d.z.atan2(h).to_degrees()).clamp(-80.0, 80.0), 540.0 * dt);
+            dec.forward = 0.7;
+            return dec;
+        }
     }
 
     // 4. Waypoint navigation on the BSP NavGraph
@@ -385,27 +448,76 @@ pub fn think_bot_with<W: BotWorld + ?Sized>(
     brain.repath_timer -= dt;
     let curr_node = nav.nearest(obs.pos);
 
-    let need_new_goal = brain.goal_node.is_none()
-        || brain.repath_timer <= 0.0
-        || brain
-            .goal_node
-            .and_then(|g| nav.nodes.get(g))
-            .is_some_and(|n| n.pos.distance(obs.pos) < 88.0);
+    let objective_pos = if let Some(bpos) = obs.bomb_planted_pos {
+        Some(bpos)
+    } else if let Some(pgoal) = obs.priority_goal {
+        Some(pgoal)
+    } else if (obs.team == SpawnTeam::Terrorist && obs.has_c4) || !rng_seed.is_multiple_of(3) {
+        let site_idx = (rng_seed as usize) % 2;
+        obs.bomb_targets[site_idx].or(obs.bomb_targets[0])
+    } else {
+        None
+    };
 
-    if need_new_goal {
-        brain.repath_timer = 4.0 + ((rng_seed % 30) as f32) * 0.1;
-        let objective_pos = if let Some(bpos) = obs.bomb_planted_pos {
-            Some(bpos)
-        } else if (obs.team == SpawnTeam::Terrorist && obs.has_c4) || !rng_seed.is_multiple_of(3) {
-            let site_idx = (rng_seed as usize) % 2;
-            obs.bomb_targets[site_idx].or(obs.bomb_targets[0])
+    let objective_shifted = match (objective_pos, brain.last_objective) {
+        (Some(a), Some(b)) => a.distance_squared(b) > 64.0 * 64.0,
+        (Some(_), None) => true,
+        _ => false,
+    };
+
+    let c4_goal_valid = obs.team == SpawnTeam::Terrorist
+        && obs.has_c4
+        && brain.goal_node.is_some()
+        && obs.bomb_planted_pos.is_none()
+        && !objective_shifted;
+
+    let need_new_goal = objective_shifted
+        || if c4_goal_valid {
+            brain.goal_node.is_some_and(|g| {
+                curr_node.is_some_and(|c| c != g && nav.next_step_towards(c, g).is_none())
+            })
         } else {
-            None
+            brain.goal_node.is_none()
+                || brain.repath_timer <= 0.0
+                || brain
+                    .goal_node
+                    .and_then(|g| nav.nodes.get(g))
+                    .is_some_and(|n| n.pos.distance(obs.pos) < 88.0)
         };
 
+    if need_new_goal {
+        brain.last_objective = objective_pos;
+        brain.repath_timer = 4.0 + ((rng_seed % 30) as f32) * 0.1;
         brain.goal_node = objective_pos
-            .and_then(|p| nav.nearest(p))
+            .and_then(|p| {
+                curr_node
+                    .and_then(|c| nav.nearest_reachable(c, p))
+                    .or_else(|| nav.nearest(p))
+            })
             .or_else(|| Some((rng_seed as usize) % nav.nodes.len()));
+    }
+
+    if let Some(p) = objective_pos
+        && (obs.priority_goal.is_some()
+            || (obs.team == SpawnTeam::Terrorist && obs.has_c4 && !obs.in_bomb_zone))
+        && obs.pos.distance(p) < 220.0
+        && curr_node.is_some_and(|c| {
+            brain.goal_node == Some(c)
+                || brain
+                    .goal_node
+                    .and_then(|g| nav.nodes.get(g))
+                    .is_some_and(|n| n.pos.distance(obs.pos) < 88.0)
+        })
+        && world.has_line_of_sight(obs.eye, p + Vec3::new(0.0, 0.0, 24.0))
+    {
+        let delta = p - obs.pos;
+        if delta.x * delta.x + delta.y * delta.y > 4.0 {
+            let desired_yaw = delta.y.atan2(delta.x).to_degrees().rem_euclid(360.0);
+            dec.yaw_deg = step_angle(obs.yaw_deg, desired_yaw, 360.0 * dt);
+            dec.pitch_deg = step_angle(obs.pitch_deg, 0.0, 180.0 * dt);
+            dec.forward = 1.0;
+        }
+        return dec;
     }
 
     if let (Some(c), Some(g)) = (curr_node, brain.goal_node) {

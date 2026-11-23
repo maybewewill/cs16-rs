@@ -569,6 +569,14 @@ impl GameEntity for Hostage {
         self.takedamage
     }
 
+    fn is_hostage_rescued(&self) -> bool {
+        self.rescued
+    }
+
+    fn hostage_follower(&self) -> Option<EdictId> {
+        (self.state == State::Follow).then_some(self.target_ent).flatten()
+    }
+
     fn blood_color(&self) -> i32 {
         i32::from(BLOOD_COLOR_RED)
     }

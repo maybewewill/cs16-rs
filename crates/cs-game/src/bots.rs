@@ -77,6 +77,11 @@ struct BotSlot {
     decision: BotDecision,
     done_buying: bool,
     buy_retries: u8,
+    last_pos: Vec3,
+    stuck_ticks: u8,
+    hostage_use_cooldown: f64,
+    hostage_use_pulse: bool,
+    committed_site: Option<Vec3>,
 }
 
 impl BotSlot {
@@ -89,6 +94,11 @@ impl BotSlot {
             decision: BotDecision::default(),
             done_buying: false,
             buy_retries: 0,
+            last_pos: Vec3::ZERO,
+            stuck_ticks: 0,
+            hostage_use_cooldown: 0.0,
+            hostage_use_pulse: false,
+            committed_site: None,
         }
     }
 }
@@ -120,6 +130,14 @@ impl BotManager {
     }
 }
 
+fn zone_floor_point(absmin: Vec3, absmax: Vec3) -> Vec3 {
+    Vec3::new(
+        (absmin.x + absmax.x) * 0.5,
+        (absmin.y + absmax.y) * 0.5,
+        absmin.z + ((absmax.z - absmin.z) * 0.5).min(36.0),
+    )
+}
+
 fn ensure_nav(g: &mut GameState, eng: &EngineApi<'_>) {
     if g.bots.nav.is_some() {
         return;
@@ -128,8 +146,10 @@ fn ensure_nav(g: &mut GameState, eng: &EngineApi<'_>) {
     for class in [
         "info_player_start",
         "info_player_deathmatch",
+        "info_vip_start",
         "hostage_entity",
         "info_bomb_target",
+        "info_hostage_rescue",
     ] {
         let mut cursor = None;
         while let Some(id) = eng.find_by_classname(cursor, class) {
@@ -139,12 +159,24 @@ fn ensure_nav(g: &mut GameState, eng: &EngineApi<'_>) {
             cursor = Some(id);
         }
     }
-    let mut cursor = None;
-    while let Some(id) = eng.find_by_classname(cursor, "func_bomb_target") {
-        if let Some(v) = eng.ent(id) {
-            seeds.push((v.absmin + v.absmax) * 0.5);
+    for class in [
+        "func_bomb_target",
+        "func_hostage_rescue",
+        "func_vip_safetyzone",
+        "func_escapezone",
+    ] {
+        let mut cursor = None;
+        while let Some(id) = eng.find_by_classname(cursor, class) {
+            if let Some(v) = eng.ent(id) {
+                let c = zone_floor_point(v.absmin, v.absmax);
+                let hx = ((v.absmax.x - v.absmin.x) * 0.5 - 16.0).clamp(0.0, 64.0);
+                let hy = ((v.absmax.y - v.absmin.y) * 0.5 - 16.0).clamp(0.0, 64.0);
+                for (ox, oy) in [(0.0, 0.0), (hx, 0.0), (-hx, 0.0), (0.0, hy), (0.0, -hy)] {
+                    seeds.push(c + Vec3::new(ox, oy, 0.0));
+                }
+            }
+            cursor = Some(id);
         }
-        cursor = Some(id);
     }
     let world = EngineBotWorld(eng);
     g.bots.nav = Some(NavGraph::build_with(&world, &seeds));
@@ -333,7 +365,7 @@ fn find_bomb_targets(eng: &EngineApi<'_>) -> [Option<Vec3>; 2] {
         && let Some(id) = eng.find_by_classname(cursor, "func_bomb_target")
     {
         if let Some(v) = eng.ent(id) {
-            targets[count] = Some((v.absmin + v.absmax) * 0.5);
+            targets[count] = Some(zone_floor_point(v.absmin, v.absmax));
             count += 1;
         }
         cursor = Some(id);
@@ -356,14 +388,80 @@ fn find_planted_c4(eng: &EngineApi<'_>) -> Option<Vec3> {
     while let Some(id) = eng.find_by_classname(cursor, "grenade") {
         if eng
             .private::<Box<dyn GameEntity>>(id)
-            .is_some_and(|e| e.is_planted_c4())
+            .is_some_and(|e| e.is_planted_live_c4())
             && let Some(v) = eng.ent(id)
         {
-            return Some(v.origin);
+            let center = if v.size.length_squared() > 0.0 {
+                v.absmin + v.size * 0.5
+            } else {
+                v.origin
+            };
+            return Some(center);
         }
         cursor = Some(id);
     }
     None
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HostageTarget {
+    origin: Vec3,
+    center: Vec3,
+    follower: Option<EdictId>,
+}
+
+fn find_rescue_zones(eng: &EngineApi<'_>) -> Vec<Vec3> {
+    let mut zones = Vec::new();
+    let mut cursor = None;
+    while let Some(id) = eng.find_by_classname(cursor, "func_hostage_rescue") {
+        if let Some(v) = eng.ent(id) {
+            zones.push(zone_floor_point(v.absmin, v.absmax));
+        }
+        cursor = Some(id);
+    }
+    let mut cursor = None;
+    while let Some(id) = eng.find_by_classname(cursor, "info_hostage_rescue") {
+        if let Some(v) = eng.ent(id) {
+            zones.push(v.origin);
+        }
+        cursor = Some(id);
+    }
+    if zones.is_empty() && eng.find_by_classname(None, "hostage_entity").is_some() {
+        let mut cursor = None;
+        while let Some(id) = eng.find_by_classname(cursor, "info_player_start") {
+            if let Some(v) = eng.ent(id) {
+                zones.push(v.origin);
+            }
+            cursor = Some(id);
+        }
+    }
+    zones
+}
+
+fn find_hostages(eng: &EngineApi<'_>) -> Vec<HostageTarget> {
+    let mut out = Vec::new();
+    let mut cursor = None;
+    while let Some(id) = eng.find_by_classname(cursor, "hostage_entity") {
+        if let Some(e) = eng.private::<Box<dyn GameEntity>>(id)
+            && e.is_hostage()
+            && e.is_alive(eng, id)
+            && !e.is_hostage_rescued()
+            && let Some(v) = eng.ent(id)
+        {
+            let center = if v.size.length_squared() > 0.0 {
+                v.absmin + v.size * 0.5
+            } else {
+                v.origin + Vec3::new(0.0, 0.0, 31.0)
+            };
+            out.push(HostageTarget {
+                origin: v.origin,
+                center,
+                follower: e.hostage_follower(),
+            });
+        }
+        cursor = Some(id);
+    }
+    out
 }
 
 fn active_ammo(p: &player::Player) -> (u16, u16) {
@@ -468,6 +566,124 @@ fn gather_enemies(
     enemies
 }
 
+fn nearest_reachable_point(
+    nav: Option<&NavGraph>,
+    from: Vec3,
+    candidates: &[Vec3],
+) -> Option<Vec3> {
+    if candidates.is_empty() {
+        return None;
+    }
+    let Some(nav) = nav.filter(|n| !n.nodes.is_empty()) else {
+        return candidates
+            .iter()
+            .copied()
+            .min_by(|a, b| a.distance_squared(from).total_cmp(&b.distance_squared(from)));
+    };
+    let start = nav.nearest(from)?;
+    candidates.iter().copied().min_by(|&a, &b| {
+        let da = nav
+            .nearest_reachable(start, a)
+            .and_then(|i| nav.nodes.get(i))
+            .map_or(f32::INFINITY, |n| n.pos.distance_squared(a));
+        let db = nav
+            .nearest_reachable(start, b)
+            .and_then(|i| nav.nodes.get(i))
+            .map_or(f32::INFINITY, |n| n.pos.distance_squared(b));
+        da.total_cmp(&db)
+    })
+}
+
+fn pick_committed_site(
+    nav: Option<&NavGraph>,
+    from: Vec3,
+    bomb_targets: [Option<Vec3>; 2],
+    pick_seed: usize,
+) -> Option<Vec3> {
+    let sites: Vec<Vec3> = bomb_targets.into_iter().flatten().collect();
+    if sites.is_empty() {
+        return None;
+    }
+    if sites.len() == 1 {
+        return Some(sites[0]);
+    }
+    if let Some(nav) = nav.filter(|n| !n.nodes.is_empty())
+        && let Some(start) = nav.nearest(from)
+    {
+        let reachable: Vec<Vec3> = sites
+            .iter()
+            .copied()
+            .filter(|&s| {
+                nav.nearest_reachable(start, s)
+                    .and_then(|i| nav.nodes.get(i))
+                    .is_some_and(|n| n.pos.distance(s) < 280.0)
+            })
+            .collect();
+        if !reachable.is_empty() {
+            return Some(reachable[pick_seed % reachable.len()]);
+        }
+    }
+    nearest_reachable_point(nav, from, &sites)
+}
+
+fn hostage_goal_for_bot(
+    nav: Option<&NavGraph>,
+    bot_pos: Vec3,
+    bot_edict: EdictId,
+    my_team: Team,
+    hostages: &[HostageTarget],
+    rescue_zones: &[Vec3],
+) -> (Option<Vec3>, Vec<HostageTarget>, Option<HostageTarget>, Option<Vec3>) {
+    if my_team != Team::Ct || hostages.is_empty() {
+        return (None, Vec::new(), None, None);
+    }
+    let following_me: Vec<HostageTarget> = hostages
+        .iter()
+        .copied()
+        .filter(|h| h.follower == Some(bot_edict))
+        .collect();
+    if !following_me.is_empty() {
+        let rescue_zone = nearest_reachable_point(nav, bot_pos, rescue_zones);
+        let lagging = following_me
+            .iter()
+            .max_by(|a, b| {
+                a.origin
+                    .distance_squared(bot_pos)
+                    .total_cmp(&b.origin.distance_squared(bot_pos))
+            })
+            .copied();
+        let goal = if let Some(lag) = lagging
+            && lag.origin.distance(bot_pos) > 340.0
+        {
+            Some(lag.origin)
+        } else {
+            rescue_zone
+        };
+        return (goal, following_me, None, rescue_zone);
+    }
+
+    let pool: Vec<Vec3> = {
+        let free: Vec<Vec3> = hostages
+            .iter()
+            .filter(|h| h.follower.is_none())
+            .map(|h| h.origin)
+            .collect();
+        if free.is_empty() {
+            hostages.iter().map(|h| h.origin).collect()
+        } else {
+            free
+        }
+    };
+    let chosen_pos = nearest_reachable_point(nav, bot_pos, &pool);
+    let target_hostage = chosen_pos.and_then(|p| {
+        hostages
+            .iter()
+            .copied()
+            .min_by(|a, b| a.origin.distance_squared(p).total_cmp(&b.origin.distance_squared(p)))
+    });
+    (target_hostage.map(|h| h.origin), Vec::new(), target_hostage, None)
+}
+
 /// Drives bot quota maintenance, 30 Hz command generation, and 10 Hz AI updates every server
 /// frame (`CBotManager::StartFrame`).
 pub(crate) fn start_frame(g: &mut GameState, eng: &mut EngineApi<'_>) {
@@ -481,6 +697,12 @@ pub(crate) fn start_frame(g: &mut GameState, eng: &mut EngineApi<'_>) {
     let max_clients = usize::from(eng.max_clients()).min(MAX_PLAYERS);
     let bomb_targets = find_bomb_targets(eng);
     let planted_pos = find_planted_c4(eng);
+    let hostages = find_hostages(eng);
+    let rescue_zones = if hostages.is_empty() {
+        Vec::new()
+    } else {
+        find_rescue_zones(eng)
+    };
 
     for slot in 0..max_clients {
         let slot_u8 = slot as u8;
@@ -531,6 +753,41 @@ pub(crate) fn start_frame(g: &mut GameState, eng: &mut EngineApi<'_>) {
                 _ => SpawnTeam::CounterTerrorist,
             };
             let (clip, reserve) = active_ammo(p);
+
+            let mut committed_site = g.bots.slots[slot]
+                .as_ref()
+                .and_then(|b| b.committed_site);
+            if my_team == Team::Terrorist && p.has_c4 && planted_pos.is_none() {
+                if committed_site.is_none() {
+                    let pick_seed = (g.rng as usize).wrapping_add(slot);
+                    committed_site =
+                        pick_committed_site(g.bots.nav.as_ref(), hv.origin, bomb_targets, pick_seed);
+                }
+            } else {
+                committed_site = None;
+            }
+
+            let (hostage_goal, following_me, target_hostage, rescue_zone) = if planted_pos.is_none()
+            {
+                hostage_goal_for_bot(
+                    g.bots.nav.as_ref(),
+                    hv.origin,
+                    id,
+                    my_team,
+                    &hostages,
+                    &rescue_zones,
+                )
+            } else {
+                (None, Vec::new(), None, None)
+            };
+
+            let (eff_bomb_targets, priority_goal) =
+                if my_team == Team::Terrorist && p.has_c4 && committed_site.is_some() {
+                    ([committed_site, None], committed_site)
+                } else {
+                    (bomb_targets, hostage_goal)
+                };
+
             let obs = BotObservation {
                 self_id: slot as u32,
                 team: spawn_team,
@@ -548,13 +805,17 @@ pub(crate) fn start_frame(g: &mut GameState, eng: &mut EngineApi<'_>) {
                     0.0
                 },
                 bomb_planted_pos: planted_pos,
-                bomb_targets,
+                bomb_targets: eff_bomb_targets,
+                priority_goal,
                 difficulty: 2,
             };
             let enemies = gather_enemies(g, eng, slot, my_team, max_clients);
             let seed = u64::from(g.rng) ^ ((now * 100.0) as u64).wrapping_add(slot as u64);
-            let mut brain = g.bots.slots[slot].as_ref().unwrap().brain.clone();
-            let dec = g
+            let (mut brain, hostage_use_cooldown) = {
+                let b = g.bots.slots[slot].as_ref().unwrap();
+                (b.brain.clone(), b.hostage_use_cooldown)
+            };
+            let mut dec = g
                 .bots
                 .nav
                 .as_ref()
@@ -571,10 +832,138 @@ pub(crate) fn start_frame(g: &mut GameState, eng: &mut EngineApi<'_>) {
                     )
                 })
                 .unwrap_or_default();
+
+            let world = EngineBotWorld(eng);
+            let eye = hv.origin + hv.view_ofs;
+            let enemy_visible = enemies.iter().any(|&(_, origin, enemy_eye)| {
+                let aim = origin.lerp(enemy_eye, 0.72);
+                eye.distance(aim) < 2600.0 && world.has_line_of_sight(eye, aim)
+            });
+
+            let mut waiting_for_hostage = false;
+            let mut pulse_hostage_use = false;
+            if !enemy_visible && my_team == Team::Ct && planted_pos.is_none() && !hostages.is_empty()
+            {
+                if !following_me.is_empty() {
+                    let max_dist = following_me
+                        .iter()
+                        .map(|h| h.origin.distance(hv.origin))
+                        .fold(0.0_f32, f32::max);
+                    if (max_dist > 220.0 && max_dist <= 340.0)
+                        || rescue_zone.is_some_and(|rz| hv.origin.distance(rz) < 64.0)
+                    {
+                        dec.forward = 0.0;
+                        dec.right = 0.0;
+                        waiting_for_hostage = true;
+                    }
+                } else if let Some(h) = target_hostage {
+                    let dist = hv.origin.distance(h.origin);
+                    if dist < 56.0 {
+                        let d = h.center - eye;
+                        let horiz = (d.x * d.x + d.y * d.y).sqrt().max(0.001);
+                        dec.yaw_deg = d.y.atan2(d.x).to_degrees().rem_euclid(360.0);
+                        dec.pitch_deg = (-d.z.atan2(horiz).to_degrees()).clamp(-80.0, 80.0);
+                        dec.forward = 0.0;
+                        dec.right = 0.0;
+                        waiting_for_hostage = true;
+                        if now >= hostage_use_cooldown {
+                            dec.use_key = true;
+                            pulse_hostage_use = true;
+                        }
+                    } else if dist < 110.0 && world.has_line_of_sight(eye, h.center) {
+                        let d = h.center - eye;
+                        dec.yaw_deg = d.y.atan2(d.x).to_degrees().rem_euclid(360.0);
+                        dec.pitch_deg = 0.0;
+                        dec.forward = 0.7;
+                    }
+                }
+            }
+
+            let mut detour_target = None;
+            let mut want_stuck_recenter = false;
             if let Some(b) = g.bots.slots[slot].as_mut() {
+                let moving_unblocked = (hv.flags & FL_FROZEN) == 0
+                    && hv.max_speed > 5.0
+                    && !waiting_for_hostage
+                    && !dec.use_key
+                    && !(dec.want_c4 && dec.attack)
+                    && (dec.forward.abs() > 0.2 || dec.right.abs() > 0.2);
+
+                if moving_unblocked {
+                    let moved = hv.origin.truncate().distance(b.last_pos.truncate());
+                    if moved < 4.0 {
+                        b.stuck_ticks = b.stuck_ticks.saturating_add(1);
+                    } else {
+                        b.stuck_ticks = 0;
+                    }
+                    if b.stuck_ticks >= 4 {
+                        dec.jump = b.stuck_ticks.is_multiple_of(4);
+                        dec.right = if ((slot as u8) ^ (b.stuck_ticks / 6)) & 1 == 0 {
+                            1.0
+                        } else {
+                            -1.0
+                        };
+                    }
+                    if b.stuck_ticks >= 8 {
+                        want_stuck_recenter = true;
+                        detour_target = Some(b.stuck_ticks);
+                    }
+                    if b.stuck_ticks >= 14 {
+                        brain.goal_node = None;
+                        brain.repath_timer = 0.0;
+                        if b.stuck_ticks >= 22 {
+                            b.stuck_ticks = 0;
+                        }
+                    }
+                } else {
+                    b.stuck_ticks = 0;
+                }
+
+                b.last_pos = hv.origin;
+                b.committed_site = committed_site;
+                if pulse_hostage_use {
+                    b.hostage_use_cooldown = now + 1.2;
+                    b.hostage_use_pulse = true;
+                }
                 b.brain = brain;
                 b.decision = dec;
                 b.next_full_think = now + 0.1;
+            }
+            if want_stuck_recenter
+                && let Some(nav) = g.bots.nav.as_ref()
+                && let Some(curr) = nav.nearest(hv.origin)
+            {
+                let world = EngineBotWorld(eng);
+                let recenter = nav.nodes[curr].pos;
+                let pick = if hv.origin.truncate().distance(recenter.truncate()) > 20.0 {
+                    Some(recenter)
+                } else {
+                    let clear: Vec<Vec3> = nav.nodes[curr]
+                        .neighbors
+                        .iter()
+                        .filter_map(|&ni| nav.nodes.get(ni))
+                        .map(|n| n.pos)
+                        .filter(|&np| {
+                            world
+                                .trace_standing(
+                                    hv.origin + Vec3::new(0.0, 0.0, 2.0),
+                                    np + Vec3::new(0.0, 0.0, 2.0),
+                                )
+                                .fraction
+                                >= 0.9
+                        })
+                        .collect();
+                    let s_ticks = usize::from(detour_target.unwrap_or(0));
+                    (!clear.is_empty()).then(|| clear[(slot + s_ticks / 4) % clear.len()])
+                };
+                if let Some(target_pt) = pick
+                    && let Some(b) = g.bots.slots[slot].as_mut()
+                {
+                    let delta = target_pt - hv.origin;
+                    b.decision.yaw_deg = delta.y.atan2(delta.x).to_degrees().rem_euclid(360.0);
+                    b.decision.pitch_deg = 0.0;
+                    b.decision.forward = 1.0;
+                }
             }
         }
 
@@ -608,6 +997,12 @@ pub(crate) fn start_frame(g: &mut GameState, eng: &mut EngineApi<'_>) {
             v.angles = Vec3::new(-viewangles.x / 3.0, viewangles.y, 0.0);
         }
         eng.run_player_move(slot_u8, viewangles, forwardmove, sidemove, 0.0, buttons, 0, msec);
+        if let Some(b) = g.bots.slots[slot].as_mut()
+            && b.hostage_use_pulse
+        {
+            b.decision.use_key = false;
+            b.hostage_use_pulse = false;
+        }
     }
 }
 
@@ -618,6 +1013,11 @@ pub(crate) fn on_round_restart(g: &mut GameState) {
         b.done_buying = false;
         b.buy_retries = 0;
         b.decision = BotDecision::default();
+        b.last_pos = Vec3::ZERO;
+        b.stuck_ticks = 0;
+        b.hostage_use_cooldown = 0.0;
+        b.hostage_use_pulse = false;
+        b.committed_site = None;
     }
 }
 
@@ -670,11 +1070,4 @@ pub(crate) fn server_command(
         }
         _ => None,
     }
-}
-
-/// Test-only helper: returns `Some(id)` if entity `id` belongs to a planted C4 (`_keep`).
-#[allow(dead_code)]
-fn _entity_is_c4_check(eng: &EngineApi<'_>, id: EdictId) -> bool {
-    eng.private::<Box<dyn GameEntity>>(id)
-        .is_some_and(|e| e.is_planted_c4())
 }
