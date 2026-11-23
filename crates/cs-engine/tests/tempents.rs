@@ -15,7 +15,7 @@ use cs_engine::{
 use cs_probe::{ProbeClient, ProbeState};
 use cs_proto48::bitbuf::MsgWriter;
 use cs_proto48::messages::{
-    SND_FL_CHANGE_PITCH, SND_FL_CHANGE_VOL, SND_FL_STOP, SoundMsg, SvcMessage, SvcParseContext, svc,
+    SND_FL_CHANGE_PITCH, SND_FL_CHANGE_VOL, SND_FL_STOP, SoundMsg, SvcMessage, SvcParseContext,
     write_svc_centerprint, write_svc_temp_entity, parse_svc_stream,
 };
 use cs_proto48::tempent::{self, TempEntity, explflag, te};
@@ -59,7 +59,7 @@ fn temp_entities(p: &Probe) -> Vec<(u8, Vec<u8>)> {
 fn ambient_count(p: &Probe) -> usize {
     p.messages()
         .iter()
-        .filter(|m| matches!(m, SvcMessage::Ignored(op) if *op == svc::SPAWNSTATICSOUND))
+        .filter(|m| matches!(m, SvcMessage::SpawnStaticSound(_)))
         .count()
 }
 

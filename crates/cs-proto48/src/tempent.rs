@@ -191,13 +191,13 @@ pub fn blood_sprite(position: Vec3, spray: u16, drop: u16, color: u8, scale: u8)
 }
 
 /// `TE_BLOODSTREAM` (`UTIL_BloodStream`): `coord x3` start, `coord x3` spray vector, `byte`
-/// colour, `byte` speed (the amount, capped at 255 by the caller).
-pub fn blood_stream(origin: Vec3, direction: Vec3, color: u8, speed: u8) -> TempEntity {
+/// colour, `byte` count (the amount, capped at 255 by the caller; Xash `cl_tent.c` reads it as `count`).
+pub fn blood_stream(origin: Vec3, direction: Vec3, color: u8, count: u8) -> TempEntity {
     TempEntity::new(te::BLOODSTREAM, |w| {
         coords(w, origin);
         coords(w, direction);
         w.write_u8(color);
-        w.write_u8(speed);
+        w.write_u8(count);
     })
 }
 
@@ -278,15 +278,16 @@ pub fn sprite(position: Vec3, sprite: u16, scale: u8, brightness: u8) -> TempEnt
     })
 }
 
-/// `TE_GLOWSPRITE` (`CGrenade::C4Think`): `coord x3`, `short` model index, `byte` life/scale in
-/// tenths, `byte` size, `byte` alpha (`ggrenade.cpp` 1492-1501).
-pub fn glow_sprite(position: Vec3, model: u16, scale: u8, size: u8, alpha: u8) -> TempEntity {
+/// `TE_GLOWSPRITE` (`CGrenade::C4Think`): `coord x3`, `short` model index, `byte` life in
+/// tenths of a second, `byte` scale in tenths, `byte` brightness (`ggrenade.cpp` 1492-1501;
+/// Xash `cl_tent.c` 2061-2072).
+pub fn glow_sprite(position: Vec3, model: u16, life: u8, scale: u8, brightness: u8) -> TempEntity {
     TempEntity::new(te::GLOWSPRITE, |w| {
         coords(w, position);
         w.write_u16(model);
+        w.write_u8(life);
         w.write_u8(scale);
-        w.write_u8(size);
-        w.write_u8(alpha);
+        w.write_u8(brightness);
     })
 }
 
@@ -520,9 +521,11 @@ pub enum TempEffect {
     GlowSprite {
         position: Vec3,
         model: u16,
+        /// Life in tenths of a second.
+        life: u8,
+        /// Scale in tenths.
         scale: u8,
-        size: u8,
-        alpha: u8,
+        brightness: u8,
     },
     StreakSplash {
         start: Vec3,
@@ -554,7 +557,7 @@ pub enum TempEffect {
         origin: Vec3,
         direction: Vec3,
         color: u8,
-        speed: u8,
+        count: u8,
     },
     Decal {
         position: Vec3,
@@ -601,7 +604,9 @@ pub enum TempEffect {
         decal: u8,
         entity: u16,
     },
-    /// An effect this reader has no typed variant for; the payload is complete.
+    /// An effect this reader has no typed variant for; the payload is complete. Valid only
+    /// for types that passed the stream parser (`parse_svc_stream`), which knows the length of
+    /// every `TE_*` it accepts; `parse` itself does not check the length of an untyped effect.
     Other { te_type: u8, payload: Vec<u8> },
 }
 
@@ -697,9 +702,9 @@ impl TempEffect {
             te::GLOWSPRITE => Self::GlowSprite {
                 position: read_vec(r)?,
                 model: r.read_u16()?,
+                life: r.read_u8()?,
                 scale: r.read_u8()?,
-                size: r.read_u8()?,
-                alpha: r.read_u8()?,
+                brightness: r.read_u8()?,
             },
             te::STREAK_SPLASH => Self::StreakSplash {
                 start: read_vec(r)?,
@@ -731,7 +736,7 @@ impl TempEffect {
                 origin: read_vec(r)?,
                 direction: read_vec(r)?,
                 color: r.read_u8()?,
-                speed: r.read_u8()?,
+                count: r.read_u8()?,
             },
             te::DECAL => Self::Decal {
                 position: read_vec(r)?,
@@ -870,9 +875,9 @@ mod tests {
                 TempEffect::GlowSprite {
                     position: P,
                     model: 70,
-                    scale: 10,
-                    size: 20,
-                    alpha: 30,
+                    life: 10,
+                    scale: 20,
+                    brightness: 30,
                 },
             ),
             (
@@ -902,7 +907,7 @@ mod tests {
                     origin: P,
                     direction: Q,
                     color: 70,
-                    speed: 200,
+                    count: 200,
                 },
             ),
             (
@@ -1086,6 +1091,35 @@ mod tests {
             TempEffect::Other {
                 te_type: 111,
                 payload: vec![1, 2, 3, 4, 5, 6, 7],
+            }
+        );
+    }
+
+    /// The tail bytes mean life, scale, brightness (glow sprite) and count (blood stream), as
+    /// Xash `cl_tent.c` reads them (read 2026-11-23).
+    #[test]
+    fn glow_sprite_and_blood_stream_tail_semantics() {
+        let mut payload = vec![0u8; 6];
+        payload.extend_from_slice(&[9, 0, 4, 5, 6]); // model 9, life 4, scale 5, brightness 6
+        assert_eq!(
+            TempEffect::parse(te::GLOWSPRITE, &payload).unwrap(),
+            TempEffect::GlowSprite {
+                position: Vec3::ZERO,
+                model: 9,
+                life: 4,
+                scale: 5,
+                brightness: 6,
+            }
+        );
+        let mut payload = vec![0u8; 12];
+        payload.extend_from_slice(&[70, 33]); // colour 70, count 33
+        assert_eq!(
+            TempEffect::parse(te::BLOODSTREAM, &payload).unwrap(),
+            TempEffect::BloodStream {
+                origin: Vec3::ZERO,
+                direction: Vec3::ZERO,
+                color: 70,
+                count: 33,
             }
         );
     }
