@@ -293,7 +293,7 @@ evidence = "crates/cs-clientcore/tests/effects.rs::hud_state_after_golden_join (
 [[item]]
 id = "clientcore_tempents_events"
 status = "tested"
-evidence = "crates/cs-clientcore/src/events.rs::tests, crates/cs-clientcore/src/tempents.rs::tests, and crates/cs-clientcore/tests/effects.rs::golden_temp_entities_stay_within_the_pool, golden_sounds_become_commands_with_their_names; live on the original HLDS an observer fired 12 events/usp.sc, made 9 temp entities and 12 shot sounds for 12 shots (A12 to A14 of docs/parity/checklists/phase3-clientcore.md); the shell physics and tempent update are our own clean-room design, so they are not compared with the original"
+evidence = "crates/cs-clientcore/src/events.rs::tests::weapon_fire_event_produces_view_anim_and_shell, a_vehicle_event_starts_and_stops_its_sound; crates/cs-clientcore/src/tempents.rs::tests::tempents_expire, an_explosion_makes_a_sprite_two_lights_and_a_sound, a_full_pool_refuses_low_and_evicts_for_high; crates/cs-clientcore/tests/effects.rs::golden_temp_entities_stay_within_the_pool, golden_sounds_become_commands_with_their_names; live on the original HLDS an observer fired 12 events/usp.sc, made 9 temp entities and 12 shot sounds for 12 shots (A12 to A14 of docs/parity/checklists/phase3-clientcore.md); the shell physics and tempent update are our own clean-room design, so they are not compared with the original"
 
 [[item]]
 id = "clientcore_loopback_local_game"
