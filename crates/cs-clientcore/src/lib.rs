@@ -13,8 +13,12 @@ pub mod cvars;
 pub mod entities;
 pub mod frames;
 pub mod interp;
+pub mod events;
+pub mod hud;
 pub mod precache;
 pub mod resources;
+pub mod sound;
+pub mod tempents;
 
 pub use commands::{CMD_FILTERABLE, CMD_PRIVILEGED, CMD_STUFFTEXT_OK, CommandRegistry, ConsoleCommand};
 pub use connection::{
@@ -27,3 +31,7 @@ pub use frames::{ClientClock, ClientFrames, DeltaRefusal, Frame, FrameOutcome, F
 pub use interp::{EmitInputs, EmitResult, EntityKind, InterpSettings, VisibleEntity};
 pub use precache::{PrecacheEntry, PrecacheTables};
 pub use resources::{AllFilesPresent, ResourceFiles, ResourceManager, res_type};
+pub use events::{EventFx, EventQueue, FiredEvent, FxEnv};
+pub use hud::{ClientEffects, HudState};
+pub use sound::{SoundCommand, SoundQueue, SoundStart};
+pub use tempents::{FxRandom, FxWorld, NoWorld, RenderEffect, TempEnt, TempEnts};

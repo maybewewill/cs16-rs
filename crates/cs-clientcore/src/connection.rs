@@ -38,8 +38,11 @@ use cs_transport::{PacketTransport, PeerAddr};
 use crate::commands::{CommandRegistry, ConsoleCommand, split_lines, tokenize};
 use crate::cvars::{CVAR_PRIVILEGED, CVAR_PROTECTED, CVAR_USERINFO, ClientCvars};
 use crate::frames::{ClientFrames, FrameOutcome};
+use crate::events::{FiredEvent, FxEnv};
+use crate::hud::ClientEffects;
 use crate::precache::PrecacheTables;
 use crate::resources::{AllFilesPresent, ResourceFiles, ResourceManager, parse_file_stream};
+use crate::tempents::NoWorld;
 
 /// Reliable bytes the connection lets pile up unacknowledged before it gives the server up:
 /// stuffed commands forwarded to a server that does not answer, mostly.
@@ -191,6 +194,8 @@ pub struct Connection<T: PacketTransport> {
     files: Box<dyn ResourceFiles>,
     resources: ResourceManager,
     precache: PrecacheTables,
+    /// Events, temp entities, sounds and the HUD state the svc stream builds (task 6).
+    fx: ClientEffects,
     /// The resource list arrived and a download or the `spawn` still waits.
     awaiting_resources: bool,
     console: VecDeque<String>,
@@ -253,6 +258,7 @@ impl<T: PacketTransport> Connection<T> {
             files: Box::new(AllFilesPresent),
             resources: ResourceManager::default(),
             precache: PrecacheTables::default(),
+            fx: ClientEffects::default(),
             awaiting_resources: false,
             console: VecDeque::new(),
             shell_commands: VecDeque::new(),
@@ -729,6 +735,31 @@ impl<T: PacketTransport> Connection<T> {
         &self.full_server_info
     }
 
+    /// The events, temp entities, sounds and HUD state built from the svc stream.
+    pub fn fx(&self) -> &ClientEffects {
+        &self.fx
+    }
+
+    pub fn fx_mut(&mut self) -> &mut ClientEffects {
+        &mut self.fx
+    }
+
+    /// Runs what the engine runs right before a frame is drawn: fires the due events and steps
+    /// the temp entities (`CL_FireEvents`, `CL_TempEntUpdate`), at client time `now`.
+    /// The gravity is the server's (`movevars.gravity`), 800 before the movevars arrive.
+    pub fn update_effects(&mut self, now: f64) -> Vec<FiredEvent> {
+        let gravity = self.movevars.as_ref().map_or(800.0, |v| v.gravity);
+        let env = fx_env(
+            now,
+            &self.precache,
+            &self.entities,
+            self.ctx.max_clients,
+            self.server_info.as_ref().map(|i| i.player_slot),
+            self.client_data.as_ref(),
+        );
+        self.fx.update(&env, gravity)
+    }
+
     pub fn precache(&self) -> &PrecacheTables {
         &self.precache
     }
@@ -907,6 +938,22 @@ impl<T: PacketTransport> Connection<T> {
     }
 
     fn handle_svc(&mut self, message: SvcMessage, now: f64) {
+        // Task 6 hook: every parsed message also goes to the effect modules (events, temp
+        // entities, sound, HUD). They run before the match below, so an event sees the entity
+        // update of the message before it, which `apply_entities` stored.
+        if matches!(message, SvcMessage::ServerInfo(_)) {
+            self.fx.clear_effects();
+        }
+        let env = fx_env(
+            now,
+            &self.precache,
+            &self.entities,
+            self.ctx.max_clients,
+            self.server_info.as_ref().map(|i| i.player_slot),
+            self.client_data.as_ref(),
+        );
+        self.fx.handle(&message, &env);
+
         let signon = self.state == ConnState::Signon;
         // Task 4 hook: every parsed message goes to the frame store first.
         if matches!(message, SvcMessage::PacketEntities(_)) {
@@ -1232,4 +1279,24 @@ impl<T: PacketTransport> Connection<T> {
         };
         self.send(&packet, now);
     }
+}
+
+/// The environment of the effect modules, from the connection's fields (a function, not a
+/// method, so the caller can borrow `fx` mutably beside it).
+fn fx_env<'a>(
+    now: f64,
+    precache: &'a PrecacheTables,
+    entities: &'a BTreeMap<u16, GoldSrcEntityState>,
+    max_clients: u8,
+    player_slot: Option<u8>,
+    client_data: Option<&GoldSrcClientData>,
+) -> FxEnv<'a> {
+    let mut env = FxEnv::new(now, precache, entities, &NoWorld);
+    env.max_clients = u16::from(max_clients);
+    env.local_player = player_slot.map_or(0, |slot| u16::from(slot) + 1);
+    if let Some(cd) = client_data {
+        env.local_view_ofs = cd.view_ofs;
+        env.local_velocity = cd.velocity;
+    }
+    env
 }
