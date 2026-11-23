@@ -271,6 +271,31 @@ impl EngineApi<'_> {
         self.clip_to_entity(id, start, -h, h, end, true)
     }
 
+    /// `PF_TraceMonsterHull_I` (ReHLDS `pr_cmds.cpp`): traces the box (`mins..maxs`, and
+    /// `FL_MONSTERCLIP` if set) of entity `monster` from `start` to `end`. Returns a refused miss
+    /// trace when `monster` is stale or inputs lie outside the world.
+    pub fn trace_monster_hull(
+        &self,
+        monster: EdictId,
+        start: Vec3,
+        end: Vec3,
+        filter: MoveFilter,
+        pass: Option<EdictId>,
+    ) -> EntTrace {
+        let Some((mins, maxs, monster_clip)) = self
+            .edicts
+            .get(monster)
+            .map(|e| (e.vars.mins, e.vars.maxs, e.vars.flags & FL_MONSTERCLIP != 0))
+        else {
+            return EntTrace {
+                trace: refused_trace(start),
+                ent: None,
+            };
+        };
+        self.move_counted(start, mins, maxs, end, filter, pass, monster_clip)
+            .0
+    }
+
     /// `SV_PointContents`: the contents (`CONTENTS_*`) at `p`, the world's overridden by a
     /// non-solid brush entity that holds `p` (`func_water` and the like, whose `skin` is the
     /// contents; `SV_LinkContents`). The current contents of the world count as water.

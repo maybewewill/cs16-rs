@@ -118,6 +118,7 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     // ReGameDLL `game.cpp` (read 2026-11-22): the team-kill rules.
     reg.register("mp_tkpunish", "0", srv, "Kill a player at the start of the next round for killing a teammate (0 or 1)");
     reg.register("mp_autokick", "1", srv, "Kick a player that kills three teammates (0 or 1)");
+    reg.register("mp_hostagepenalty", "13", srv, "Terrorist hostages killed before kick (0 disables)");
     reg.register("allow_spectators", "1.0", srv, "Players may join the spectators (0 or 1)");
     reg.register("humans_join_team", "any", srv, "Team humans must join: any, T or CT");
     // ReGameDLL `game.cpp` (read 2026-11-22): the round and match rules. `mp_roundtime` and

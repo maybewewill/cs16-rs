@@ -150,6 +150,28 @@ pub trait GameEntity: Send + 'static {
         false
     }
 
+    /// Whether this entity is a hostage (`CLASS_HUMAN_PASSIVE`).
+    fn is_hostage(&self) -> bool {
+        false
+    }
+
+    /// Sets the 1-based hostage index assigned at spawn (`m_iHostageIndex`).
+    fn set_hostage_index(&mut self, _idx: u8) {}
+
+    /// The 1-based hostage index (`m_iHostageIndex`), if this entity is a hostage.
+    fn hostage_index(&self) -> Option<u8> {
+        None
+    }
+
+    /// Marks a hostage as standing inside a rescue zone (`m_bRescueMe = TRUE`).
+    fn mark_hostage_rescue(&mut self) {}
+
+    /// Runs `CHostage::NavReady` when `CLocalNav` grants a path request.
+    fn hostage_nav_ready(&mut self, _g: &mut GameState, _eng: &mut EngineApi<'_>, _id: EdictId) {}
+
+    /// Runs `CHostage::PreThink` per-frame stair-step logic.
+    fn hostage_pre_think(&mut self, _g: &mut GameState, _eng: &mut EngineApi<'_>, _id: EdictId) {}
+
     /// `CBaseEntity::BodyTarget(posSrc)`: `Center()`, `(pev->absmax + pev->absmin) * 0.5`.
     fn body_target(&self, eng: &EngineApi<'_>, id: EdictId, _src: Vec3) -> Vec3 {
         eng.ent(id).map_or(Vec3::ZERO, |v| (v.absmax + v.absmin) * 0.5)
@@ -380,6 +402,7 @@ pub fn create_entity(classname: &str) -> Option<Box<dyn GameEntity>> {
         "func_vip_safetyzone" => Box::new(crate::zones::VipSafetyZone),
         "info_vip_start" => Box::new(crate::zones::PointMarker("info_vip_start")),
         "info_map_parameters" => Box::new(crate::zones::InfoMapParameters),
+        "hostage_entity" | "monster_scientist" => Box::new(crate::hostage::Hostage::default()),
         #[cfg(feature = "test-hooks")]
         "test_use_counter" => Box::new(crate::zones::UseCounter),
         "func_wall" => Box::new(StaticBrush::new("func_wall", BrushKind::Solid)),
@@ -679,12 +702,17 @@ mod tests {
             "item_thighpack",
             "grenade",
             "spark_shower",
+            "hostage_entity",
             "weapon_ak47",
             "weapon_knife",
         ] {
             let entity = create_entity(class).unwrap_or_else(|| panic!("{class} missing"));
             assert_eq!(entity.classname(), class);
         }
+        assert_eq!(
+            create_entity("monster_scientist").unwrap().classname(),
+            "hostage_entity"
+        );
         for unknown in ["", "light", "FUNC_WALL", "func_buyzones", "worldspawn "] {
             assert!(create_entity(unknown).is_none(), "{unknown:?}");
         }

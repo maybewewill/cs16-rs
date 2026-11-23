@@ -47,6 +47,7 @@ pub(crate) const ACT_HOP: i32 = 7;
 pub(crate) const ACT_LEAP: i32 = 8;
 pub(crate) const ACT_CROUCH: i32 = 17;
 pub(crate) const ACT_CROUCHIDLE: i32 = 18;
+pub(crate) const ACT_SMALL_FLINCH: i32 = 26;
 pub(crate) const ACT_RANGE_ATTACK1: i32 = 28;
 pub(crate) const ACT_RANGE_ATTACK2: i32 = 29;
 pub(crate) const ACT_RELOAD: i32 = 32;
@@ -72,7 +73,7 @@ const THROW_GRENADE: i32 = 5;
 const THROW_HITVEL_MINUS_AIRVEL: i32 = 6;
 
 /// `STUDIO_LOOPING` (`studio.h`): a sequence flag.
-const STUDIO_LOOPING: i32 = 0x0001;
+pub(crate) const STUDIO_LOOPING: i32 = 0x0001;
 
 /// The animation state of one player: the `CBasePlayer` and `CBaseAnimating` members the code
 /// of this module reads and writes.
@@ -214,7 +215,7 @@ pub(crate) fn lookup_activity(model: Option<&StudioPoseData>, activity: i32, rng
 /// sequence `sequence`. A sequence outside the model gives 0 and 0, a sequence of one frame
 /// 256 and 0; without a model the rates stay as they are (`None`). An `int` index below 0 reads
 /// before the table in C; here it is taken as outside it (assumption).
-fn get_sequence_info(model: Option<&StudioPoseData>, sequence: i32) -> Option<(f32, f32)> {
+pub(crate) fn get_sequence_info(model: Option<&StudioPoseData>, sequence: i32) -> Option<(f32, f32)> {
     let model = model?;
     let Some(seq) = usize::try_from(sequence).ok().and_then(|i| model.sequences.get(i)) else {
         return Some((0.0, 0.0));
@@ -230,7 +231,7 @@ fn get_sequence_info(model: Option<&StudioPoseData>, sequence: i32) -> Option<(f
 }
 
 /// `GetSequenceFlags` (`animation.cpp`, read 2026-11-22).
-fn get_sequence_flags(model: Option<&StudioPoseData>, sequence: i32) -> i32 {
+pub(crate) fn get_sequence_flags(model: Option<&StudioPoseData>, sequence: i32) -> i32 {
     model
         .and_then(|m| usize::try_from(sequence).ok().and_then(|i| m.sequences.get(i)))
         .map_or(0, |s| s.flags)

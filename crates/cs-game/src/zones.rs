@@ -136,13 +136,22 @@ impl GameEntity for HostageRescue {
         init_trigger(eng, id)
     }
 
-    /// `CHostageRescue::HostageRescueTouch`: a player signals the zone. (A `hostage_entity` that
-    /// touches it gets `m_bRescueMe = TRUE`: the hostages are task 6's.)
+    /// `CHostageRescue::HostageRescueTouch`: a player signals the zone; a `hostage_entity`
+    /// gets `m_bRescueMe = TRUE`.
     fn touch(&mut self, g: &mut GameState, eng: &mut EngineApi<'_>, _id: EdictId, other: EdictId) {
         if let Some(slot) = player_slot(g, eng, other)
             && let Some(p) = g.players[slot].as_mut()
         {
             p.signals.signal(SIGNAL_RESCUE);
+            return;
+        }
+        if eng
+            .ent(other)
+            .is_some_and(|v| v.classname == "hostage_entity")
+        {
+            crate::entity::with_entity(g, eng, other, |ent, _, _| {
+                ent.mark_hostage_rescue();
+            });
         }
     }
 }

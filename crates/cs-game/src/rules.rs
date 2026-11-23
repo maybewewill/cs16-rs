@@ -184,6 +184,10 @@ pub struct Rules {
     pub bomb_defused: bool,
     /// `m_iC4Timer`: seconds from plant to detonation (`mp_c4timer`, clamped 10..=90).
     pub c4_timer: i32,
+    /// `m_iHostagesRescued`: hostages rescued in the current round.
+    pub hostages_rescued: i32,
+    /// `m_iHostagesTouched`: hostages first touched by CTs in the current round.
+    pub hostages_touched: i32,
 }
 
 impl Default for Rules {
@@ -232,6 +236,8 @@ impl Default for Rules {
             target_bombed: false,
             bomb_defused: false,
             c4_timer: 45,
+            hostages_rescued: 0,
+            hostages_touched: 0,
         }
     }
 }
@@ -284,6 +290,14 @@ impl Rules {
         self.bomb_radius = bomb_radius;
         self.ct_cant_buy = ct_cant_buy;
         self.t_cant_buy = t_cant_buy;
+    }
+
+    pub(crate) fn is_restarting(&self) -> bool {
+        self.restart_round_time > 0.0
+    }
+
+    pub(crate) fn add_ct_account(&mut self, amount: i32) {
+        self.economy.add_ct_account(amount);
     }
 
     /// `ReadMultiplayCvars` (the vanilla bounds): the round time is 1 to 9 minutes and the freeze
@@ -1058,8 +1072,9 @@ pub(crate) fn restart_round(g: &mut GameState, eng: &mut EngineApi<'_>) {
         }
     }
 
-    // `CleanUpMap` (vanilla runs it after the players are respawned): the armoury starts over,
-    // the grenades and every weapon box on the ground go.
+    // `UTIL_RestartOther("hostage_entity")` (`RestartRound`, multiplay_gamerules.cpp:1922) and
+    // `CleanUpMap`: the hostages reset, the armoury starts over, and every weapon box goes.
+    crate::hostage::restart_round(g, eng);
     crate::inventory::clean_up_map(g, eng);
 
     // Reset game variables.
@@ -1072,7 +1087,19 @@ pub(crate) fn restart_round(g: &mut GameState, eng: &mut EngineApi<'_>) {
     rules.bomb_dropped = false;
     rules.target_bombed = false;
     rules.bomb_defused = false;
+    rules.hostages_rescued = 0;
+    rules.hostages_touched = 0;
     rules.complete_reset = false;
+}
+
+/// Hook called when a hostage is rescued (`CHostage::IdleThink`).
+pub(crate) fn on_hostage_rescued(g: &mut GameState, eng: &mut EngineApi<'_>) {
+    check_win_conditions(g, eng);
+}
+
+/// Hook called when a hostage is killed (`CHostage::TakeDamage`).
+pub(crate) fn on_hostage_killed(g: &mut GameState, eng: &mut EngineApi<'_>) {
+    check_win_conditions(g, eng);
 }
 
 /// Hook called when the C4 is planted (`CGrenade::ShootSatchelCharge` / `CC4::PrimaryAttack`).

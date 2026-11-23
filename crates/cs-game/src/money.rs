@@ -127,6 +127,10 @@ impl Economy {
         }
     }
 
+    pub(crate) fn add_ct_account(&mut self, amount: i32) {
+        self.account_ct += amount;
+    }
+
     /// The part of `RestartRound` that scales the loser bonus and assigns it. The team that won
     /// the round ends its own losing streak (a bonus that a streak had grown falls back to the
     /// minimum) and adds a lost round to the other team's. While a team has lost twice in a row

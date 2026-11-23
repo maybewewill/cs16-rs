@@ -19,6 +19,8 @@ pub mod entity;
 pub mod fullpack;
 pub mod grenade;
 mod hint;
+pub mod hostage;
+pub mod hostage_localnav;
 pub mod hud_misc;
 pub mod intro;
 pub mod inventory;
@@ -92,6 +94,10 @@ pub struct GameState {
     /// (`CBaseDelay::m_flDelay`, `m_iszKillTarget`), by edict: what [`targets::use_targets`]
     /// reads for the entity that is being used up, which is out of its edict at the time.
     pub(crate) delay_keys: std::collections::HashMap<EdictId, targets::DelayKeys>,
+    /// Global `CLocalNav` state (`node_value` CPU budget, FIFO queue, registered hostages).
+    pub(crate) hostage_nav: hostage_localnav::LocalNavManager,
+    /// `g_iHostageNumber`: 1-based counter incremented as each hostage spawns on the map.
+    pub(crate) next_hostage_number: u8,
     /// Every call the dispatch delivered to a `test_dispatch` entity. For tests only (feature
     /// `test-hooks`).
     #[cfg(feature = "test-hooks")]
@@ -117,6 +123,8 @@ impl GameState {
             rng: 0x2545_f491,
             pm_shared: pm_init(None),
             delay_keys: std::collections::HashMap::new(),
+            hostage_nav: hostage_localnav::LocalNavManager::default(),
+            next_hostage_number: 0,
             #[cfg(feature = "test-hooks")]
             dispatch_log: Vec::new(),
         }
@@ -136,6 +144,8 @@ impl GameState {
         self.rules = rules::Rules::default();
         self.delay_keys.clear();
         self.map_info = None;
+        self.hostage_nav.reset();
+        self.next_hostage_number = 0;
     }
 }
 
@@ -724,6 +734,14 @@ impl GameDll for CsGame {
             targets::note_keys(&mut self.state, id, keys);
         }
         attach(eng, id, entity);
+        if classname == "hostage_entity" || classname == "monster_scientist" {
+            self.state.next_hostage_number = self.state.next_hostage_number.saturating_add(1);
+            let hostage_index = self.state.next_hostage_number;
+            with_entity(&mut self.state, eng, id, |ent, _, _| {
+                ent.set_hostage_index(hostage_index);
+            });
+            self.state.hostage_nav.register_hostage(id);
+        }
         if classname == "info_map_parameters" {
             zones::register_map_info(&mut self.state, keys);
         }
@@ -772,6 +790,7 @@ impl GameDll for CsGame {
 
     /// `CHalfLifeMultiplay::Think`: the clock of the round and the match.
     fn start_frame(&mut self, eng: &mut EngineApi<'_>, _frametime: f32) {
+        hostage_localnav::think(&mut self.state, eng);
         rules::think(&mut self.state, eng);
     }
 

@@ -624,6 +624,7 @@ pub(crate) fn update_client_data(g: &mut GameState, eng: &mut EngineApi<'_>, slo
         }
         crate::buy::set_bomb_icon(g, eng, slot, false);
         sync_round_timer(g, eng, slot);
+        crate::hostage::send_hostage_pos_to_player(g, eng, slot);
         send_weather_info(eng, slot);
         team_score(eng, slot, Team::Ct, g.num_ct_wins);
         team_score(eng, slot, Team::Terrorist, g.num_terrorist_wins);

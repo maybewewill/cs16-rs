@@ -26,6 +26,10 @@ use crate::player::DEAD_NO;
 /// flags of code that exists are here; the hostage and zone flags come with 2E.
 pub(crate) mod dhf {
     pub const ROUND_STARTED: u32 = 1 << 1;
+    pub const HOSTAGE_SEEN_FAR: u32 = 1 << 2;
+    pub const HOSTAGE_SEEN_NEAR: u32 = 1 << 3;
+    pub const HOSTAGE_USED: u32 = 1 << 4;
+    pub const HOSTAGE_INJURED: u32 = 1 << 5;
     pub const HOSTAGE_KILLED: u32 = 1 << 6;
     pub const FRIEND_SEEN: u32 = 1 << 7;
     pub const ENEMY_SEEN: u32 = 1 << 8;
@@ -39,6 +43,7 @@ pub(crate) mod dhf {
     pub const IN_ESCAPE_ZONE: u32 = 1 << 18;
     pub const IN_VIPSAFETY_ZONE: u32 = 1 << 19;
     pub const NIGHTVISION: u32 = 1 << 20;
+    pub const HOSTAGE_CTMOVE: u32 = 1 << 21;
     pub const SPEC_DUCK: u32 = 1 << 22;
 
     /// `DHM_ROUND_CLEAR`: what a spawn forgets.

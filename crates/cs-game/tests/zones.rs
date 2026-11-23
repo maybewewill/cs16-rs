@@ -573,21 +573,12 @@ const HLDS_RANGES: [(u16, u16); 11] = [
     (244, 251),
 ];
 
-/// What differs from the HLDS list today, because three classes of `cs_office` are not ported:
-/// `hostage_entity` (4 of them, task 6), `ambient_generic` (3) and `infodecal` (2), both later
-/// phases. A class that is not ported frees its edict, so everything after it moves down. (The
-/// numbers are those the original has and ours does not, and the reverse.) Checked 2026-11-23
-/// by giving the three classes a throwaway stand-in (a hostage with its model, two inert points):
-/// with them the two lists are the same, so the classes of this task (the zones, `info_target`,
-/// the spawn points) number the edicts as HLDS does.
-const ONLY_HLDS: [u16; 25] = [
-    59, 68, 69, 70, 71, 91, 92, 93, 94, 141, 142, 143, 144, 160, 161, 162, 163, 244, 245, 246,
-    247, 248, 249, 250, 251,
-];
-const ONLY_OURS: [u16; 21] = [
-    63, 77, 78, 79, 80, 101, 102, 103, 104, 145, 146, 147, 148, 164, 165, 166, 167, 169, 170, 172,
-    210,
-];
+/// What differs from the HLDS list today, because two classes of `cs_office` are not ported yet:
+/// `ambient_generic` (3 of them) and `infodecal` (2), both later phases (all 4 `hostage_entity`
+/// edicts now match HLDS). A class that is not ported frees its edict, so everything after it
+/// moves down. Checked 2026-11-23.
+const ONLY_HLDS: [u16; 5] = [247, 248, 249, 250, 251];
+const ONLY_OURS: [u16; 5] = [169, 170, 172, 210, 243];
 
 #[test]
 fn cs_office_edict_numbers_as_hlds() {

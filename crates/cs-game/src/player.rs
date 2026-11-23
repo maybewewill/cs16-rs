@@ -116,8 +116,8 @@ pub(crate) const HITGROUP_CHEST: i32 = 2;
 pub(crate) const HITGROUP_STOMACH: i32 = 3;
 pub(crate) const HITGROUP_LEFTARM: i32 = 4;
 pub(crate) const HITGROUP_RIGHTARM: i32 = 5;
-const HITGROUP_LEFTLEG: i32 = 6;
-const HITGROUP_RIGHTLEG: i32 = 7;
+pub(crate) const HITGROUP_LEFTLEG: i32 = 6;
+pub(crate) const HITGROUP_RIGHTLEG: i32 = 7;
 pub(crate) const HITGROUP_SHIELD: i32 = 8;
 
 /// `MAX_PLAYER_FATAL_FALL_SPEED`, `MAX_PLAYER_SAFE_FALL_SPEED`, `DAMAGE_FOR_FALL_SPEED` and
@@ -473,6 +473,8 @@ pub struct Player {
     pub(crate) geiger_range_prev: i32,
     /// `m_flNextDecalTime`: server time the player may spray again ([`crate::spray`]).
     pub(crate) next_decal_time: f32,
+    /// `m_iHostagesKilled`: hostages killed on this map (`mp_hostagepenalty`).
+    pub hostages_killed: i32,
 }
 
 impl Player {
@@ -585,6 +587,7 @@ impl Player {
             geiger_delay: 0.0,
             geiger_range_prev: 1000,
             next_decal_time: 0.0,
+            hostages_killed: 0,
         }
     }
 

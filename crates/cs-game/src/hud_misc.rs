@@ -67,7 +67,7 @@ use crate::menus::{
     MENU_KEY_7, MENU_KEY_8, MENU_KEY_9, Menu,
 };
 use crate::observer::{OBS_CHASE_FREE, OBS_CHASE_LOCKED, OBS_IN_EYE, OBS_NONE};
-use crate::player::{ATTN_NORM, CHAN_ITEM, DEAD_NO, PITCH_NORM, player_slot};
+use crate::player::{ATTN_NORM, CHAN_ITEM, DEAD_NO, PITCH_NORM, Team, player_slot};
 
 /// `HUD_PRINTRADIO` (`util.h`): the `TextMsg` destination of a radio line.
 pub const HUD_PRINTRADIO: u8 = 5;
@@ -95,9 +95,10 @@ const SBAR_ID_TARGETTYPE: usize = 1;
 const SBAR_ID_TARGETNAME: usize = 2;
 const SBAR_ID_TARGETHEALTH: usize = 3;
 const SBAR_END: usize = 4;
-/// `SBAR_TARGETTYPE_TEAMMATE` and `SBAR_TARGETTYPE_ENEMY`.
+/// `SBAR_TARGETTYPE_TEAMMATE`, `SBAR_TARGETTYPE_ENEMY` and `SBAR_TARGETTYPE_HOSTAGE`.
 const SBAR_TARGETTYPE_TEAMMATE: i32 = 1;
 const SBAR_TARGETTYPE_ENEMY: i32 = 2;
+const SBAR_TARGETTYPE_HOSTAGE: i32 = 3;
 /// `PLAYERID_MODE_TEAMONLY` and `PLAYERID_MODE_OFF` (`game.h`); `mp_playerid` defaults to 0
 /// (`PLAYERID_MODE_EVERYONE`).
 const PLAYERID_MODE_TEAMONLY: f32 = 1.0;
@@ -106,6 +107,7 @@ const PLAYERID_MODE_OFF: f32 = 2.0;
 /// its player index), `%p2` the player name, `%h` "health", `%i3` the percentage.
 const SBAR_FORMAT_TEAMMATE: &str = "1 %c1: %p2\n2  %h: %i3%%";
 const SBAR_FORMAT_ENEMY: &str = "1 %c1: %p2";
+const SBAR_FORMAT_HOSTAGE: &str = "1 %c1  %h: %i3%%";
 const SBAR_FORMAT_NONE: &str = " ";
 
 /// How far a player must have moved for the radar to tell the team again, and how often it may.
@@ -699,8 +701,57 @@ pub(crate) fn update_status_bar(g: &mut GameState, eng: &mut EngineApi<'_>, slot
                 }
             }
             disappear = now + SBAR_HOLD;
+        } else if !blind
+            && let Some(hit) = tr.ent.filter(|&hit| hit != eng.world())
+            && crate::hostage::entity_is_hostage(eng, hit)
+            && let Some(hv) = eng.ent(hit)
+        {
+            let playerid = eng.cvar_f32("mp_playerid");
+            text = if playerid != PLAYERID_MODE_OFF || observing {
+                SBAR_FORMAT_HOSTAGE
+            } else {
+                SBAR_FORMAT_NONE
+            }
+            .to_string();
+            state[SBAR_ID_TARGETTYPE] = SBAR_TARGETTYPE_HOSTAGE;
+            state[SBAR_ID_TARGETHEALTH] = health_percent(hv.health);
+            if crate::hint::first_time(g, slot, crate::hint::dhf::HOSTAGE_SEEN_FAR)
+                && tr.trace.fraction > 0.1
+            {
+                match team {
+                    Team::Terrorist => {
+                        crate::hint::hint_message(
+                            g,
+                            eng,
+                            slot,
+                            "#Hint_prevent_hostage_rescue",
+                            true,
+                            true,
+                        );
+                    }
+                    Team::Ct => {
+                        crate::hint::hint_message(
+                            g,
+                            eng,
+                            slot,
+                            "#Hint_rescue_the_hostages",
+                            true,
+                            true,
+                        );
+                    }
+                    _ => {}
+                }
+            } else if team == Team::Ct
+                && tr.trace.fraction <= 0.1
+                && crate::hint::first_time(g, slot, crate::hint::dhf::HOSTAGE_SEEN_NEAR)
+            {
+                if let Some(p) = g.players[usize::from(slot)].as_mut() {
+                    p.display_history |= crate::hint::dhf::HOSTAGE_SEEN_FAR;
+                }
+                crate::hint::hint(g, eng, slot, "#Hint_press_use_so_hostage_will_follow");
+            }
+            disappear = now + SBAR_HOLD;
         }
-        // A hostage (`CLASS_HUMAN_PASSIVE`) would be named here: there are none yet.
     } else if disappear > now {
         // Hold the values for a short while after the target left the crosshair.
         state[SBAR_ID_TARGETTYPE] = old_state[SBAR_ID_TARGETTYPE];
