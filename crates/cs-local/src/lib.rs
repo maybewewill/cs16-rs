@@ -34,6 +34,9 @@ pub struct LocalOptions {
     pub bots: u32,
     pub hostname: String,
     pub player_name: String,
+    /// Ask the game for text menus (`ShowMenu`, answered with `menuselect`) instead of VGUI
+    /// ones: `_vgui_menus 0` in the userinfo, set before the sign-on.
+    pub text_menus: bool,
 }
 
 impl Default for LocalOptions {
@@ -43,6 +46,7 @@ impl Default for LocalOptions {
             bots: 0,
             hostname: "cs16-rs local game".to_string(),
             player_name: "Player".to_string(),
+            text_menus: false,
         }
     }
 }
@@ -152,6 +156,9 @@ impl LocalGame {
             &md5_hex(b"cs16-rs local game"),
         );
         let mut conn = Connection::new(endpoint, PeerAddr::Loopback(0), cfg);
+        if opts.text_menus {
+            conn.set_userinfo("_vgui_menus", "0");
+        }
         conn.connect();
         let mut local = Self {
             server,

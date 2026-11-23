@@ -1,5 +1,5 @@
-//! Renderer-facing scene API: entities keyed by precache model index, independent of the legacy
-//! `WorldSnapshot`. Everything in this file is pure (no GPU), so the scene build is testable
+//! Renderer-facing scene API: entities keyed by precache model index, independent of any game's own
+//! state. Everything in this file is pure (no GPU), so the scene build is testable
 //! headless.
 //!
 //! The client core hands the shell a list of [`RenderEntity`] (one per visible edict or tempent)

@@ -19,18 +19,18 @@ evidence = "crates/cs-client/src/ui/main_menu.rs (hardcoded egui main menu, New 
 
 [[item]]
 id = "ui_screen_buy_menu_vgui"
-status = "implemented"
-evidence = "crates/cs-client/src/ui/buy_menu.rs (hardcoded egui Buy Menu using classes/*.res and gfx/vgui/*.tga for legacy MatchWorld)"
+status = "missing"
+evidence = "The hardcoded egui buy menu died with the legacy MatchWorld client (Phase 3). The client now asks for text menus (_vgui_menus 0) and draws the server's ShowMenu in crates/cs-client/src/ui/server_menu.rs, answered with menuselect; the VGUI buy menu from the server's VGUIMenu and the .res files is Phase 8/10"
 
 [[item]]
 id = "ui_screen_team_and_class_menu"
-status = "implemented"
-evidence = "crates/cs-client/src/ui/team_menu.rs (hardcoded egui TeamMenu and ClassMenu for legacy MatchWorld)"
+status = "missing"
+evidence = "The hardcoded egui team and class menus died with the legacy client (Phase 3). The server's text team and class menus are drawn by crates/cs-client/src/ui/server_menu.rs (session::tests::a_local_game_plays_through_the_session_layer joins through them with menuselect); the VGUI versions are Phase 8/10"
 
 [[item]]
 id = "ui_screen_scoreboard_tab"
 status = "implemented"
-evidence = "crates/cs-client/src/ui/scoreboard.rs (hardcoded egui TAB scoreboard for legacy MatchWorld)"
+evidence = "crates/cs-client/src/ui/scoreboard.rs (hardcoded egui TAB scoreboard; rows from the HUD state: ScoreInfo, TeamInfo, ScoreAttrib and the userinfo names)"
 
 [[item]]
 id = "ui_screen_options_dialog"
@@ -45,12 +45,12 @@ evidence = "crates/cs-client/src/ui/console.rs (hardcoded egui console with hist
 [[item]]
 id = "ui_hud_health_armor_ammo_money_timer"
 status = "implemented"
-evidence = "crates/cs-client/src/ui/hud.rs (hud.txt sprites for health, armor, ammo, money, timer driven by legacy WorldSnapshot)"
+evidence = "crates/cs-client/src/ui/hud.rs (hud.txt sprites for health, armor, ammo, money, timer drawn from cs_clientcore::HudState: Health, Battery, Money, CurWeapon, AmmoX, RoundTime)"
 
 [[item]]
 id = "ui_hud_crosshair_and_awp_scope"
 status = "implemented"
-evidence = "crates/cs-client/src/ui/mod.rs and hud.rs (dynamic crosshair and sniper scope overlay for legacy client)"
+evidence = "crates/cs-client/src/ui/mod.rs and hud.rs (dynamic crosshair from the predicted speed, sniper scope overlay when the server narrows the fov)"
 
 [[item]]
 id = "ui_hud_radar_and_nvg_overlay"
@@ -194,8 +194,8 @@ evidence = "Phase 10: rendering modified .res layouts downloaded from servers or
 
 [[item]]
 id = "ui_hud_protocol48_usermsg_driver"
-status = "missing"
-evidence = "Phase 3 / 10: driving all HUD elements from Protocol 48 usermsgs instead of legacy WorldSnapshot"
+status = "implemented"
+evidence = "crates/cs-client/src/ui/hud.rs HudView over cs_clientcore::HudState (health, armor, money, ammo, timer, status icons, kill feed, chat, centre text, radar, bomb, bar, screen fade); crates/cs-client/src/hudtext.rs; tests view::tests::a_golden_replay_builds_scenes_without_a_gpu and session::tests::a_local_game_plays_through_the_session_layer. Phase 10 replaces the drawing with the .res interpreter"
 
 [[item]]
 id = "ui_hud_overview_map"

@@ -112,12 +112,13 @@ pub enum EngineAction {
     SelectSlot(u8),
     ToggleNightVision,
     OpenRadio(u8),
-    Spray,
+    /// `impulse <n>`: sent with the next usercmd (100 flashlight, 201 spray).
+    Impulse(u8),
     ActionInput { name: String, pressed: bool },
     /// A command the console does not know, handed on while the client is connected
     /// ([`CVarRegistry::set_forward_unknown`]): the shell sends the line to the server
     /// (`jointeam`, `menuselect`, `radio1` and the rest of the game's own commands).
-    Forward(String),
+    Forward(Vec<String>),
 }
 
 const KNOWN_COMMANDS: &[(&str, &str)] = &[
@@ -162,6 +163,35 @@ const KNOWN_COMMANDS: &[(&str, &str)] = &[
     ("toggleconsole", "Open or close the developer console"),
     ("cancelselect", "Toggle pause menu"),
 ];
+
+/// Commands that never go to a server, even when the console does not know them: the rcon and
+/// server passwords (sent in clear text they would leak), the client's own configuration and
+/// connection commands.
+pub const NEVER_FORWARDED: &[&str] = &[
+    "rcon",
+    "rcon_password",
+    "rcon_address",
+    "password",
+    "sv_password",
+    "bind",
+    "unbind",
+    "unbindall",
+    "alias",
+    "exec",
+    "writecfg",
+    "config",
+    "connect",
+    "quit",
+    "exit",
+    "disconnect",
+    "map",
+    "changelevel",
+];
+
+/// Whether a command (lowercase) must stay local.
+pub fn is_never_forwarded(cmd: &str) -> bool {
+    NEVER_FORWARDED.contains(&cmd)
+}
 
 pub struct CVarRegistry {
     vars: BTreeMap<String, CVar>,
@@ -623,8 +653,9 @@ impl CVarRegistry {
             "radio2" => actions.push(EngineAction::OpenRadio(2)),
             "radio3" => actions.push(EngineAction::OpenRadio(3)),
             "impulse" => {
-                if args.first().map(String::as_str) == Some("201") {
-                    actions.push(EngineAction::Spray);
+                match args.first().and_then(|a| a.parse::<u8>().ok()) {
+                    Some(n) => actions.push(EngineAction::Impulse(n)),
+                    None => self.info("Usage: impulse <0-255>"),
                 }
             }
             "chooseteam" => actions.push(EngineAction::ChooseTeam),
@@ -684,8 +715,11 @@ impl CVarRegistry {
                         let new_val = args.join(" ");
                         self.set(&cmd, new_val);
                     }
+                } else if is_never_forwarded(&cmd) {
+                    // The user's own: passwords, config and key commands stay on this machine.
+                    self.warn(format!("\"{cmd}\" is a local command and is not sent to the server"));
                 } else if self.forward_unknown {
-                    actions.push(EngineAction::Forward(tokens.join(" ")));
+                    actions.push(EngineAction::Forward(tokens.to_vec()));
                 } else {
                     // Print classic GoldSrc message so interactive console feedback is clear.
                     self.warn(format!("Unknown command: {}", tokens[0]));
@@ -790,6 +824,53 @@ fn common_prefix(items: &[String]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unknown_commands_are_forwarded_only_while_connected() {
+        let mut reg = CVarRegistry::new_with_defaults();
+        let none = reg.execute_script("jointeam 2");
+        assert!(none.is_empty(), "not connected: nothing is sent");
+        reg.set_forward_unknown(true);
+        let sent = reg.execute_script("jointeam 2; menuselect \"1 2\"");
+        assert_eq!(
+            sent,
+            vec![
+                EngineAction::Forward(vec!["jointeam".into(), "2".into()]),
+                EngineAction::Forward(vec!["menuselect".into(), "1 2".into()]),
+            ]
+        );
+    }
+
+    #[test]
+    fn known_commands_and_cvars_are_not_forwarded() {
+        let mut reg = CVarRegistry::new_with_defaults();
+        reg.set_forward_unknown(true);
+        for line in ["sensitivity 4", "echo hi", "bind x +use", "map de_dust2", "say hello"] {
+            let actions = reg.execute_script(line);
+            assert!(
+                !actions.iter().any(|a| matches!(a, EngineAction::Forward(_))),
+                "{line}: {actions:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn passwords_and_config_never_leave_the_machine() {
+        let mut reg = CVarRegistry::new_with_defaults();
+        reg.set_forward_unknown(true);
+        for line in [
+            "rcon_password hunter2",
+            "rcon status",
+            "password secret",
+            "sv_password x",
+            "RCON_PASSWORD hunter2",
+        ] {
+            let actions = reg.execute_script(line);
+            assert!(actions.is_empty(), "{line}: {actions:?}");
+        }
+        assert!(is_never_forwarded("rcon_password"));
+        assert!(!is_never_forwarded("jointeam"));
+    }
+
     use super::*;
 
     #[test]

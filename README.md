@@ -49,7 +49,7 @@ cargo run --release -p cs-client -- --map cs_office
 Terminal 1 (start headless 100 Hz server):
 
 ```powershell
-cargo run --release -p cs-server -- --map de_dust2 --port 27015 --bots 9
+cargo run --release -p cs-server -- --map de_dust2 --port 27015
 ```
 
 Terminal 2 (connect directly or click **Find Servers → LAN → Refresh LAN**):

@@ -220,6 +220,16 @@ impl Session {
         with_conn_mut!(self, c => c.send_stringcmd(cmd), else ());
     }
 
+    /// A line of the connection's own console (`cmd`, `setinfo`).
+    pub fn execute_local(&mut self, line: &str) {
+        with_conn_mut!(self, c => c.execute_local(line), else ());
+    }
+
+    /// `ex_interp` after the bounds of `CL_ComputeClientInterpolationAmount`, in seconds.
+    pub fn interp(&self) -> f32 {
+        with_conn!(self, c => c.frames().settings.interp, else 0.1)
+    }
+
     pub fn queue_cmd(&mut self, cmd: GoldSrcUserCmd) {
         with_conn_mut!(self, c => c.queue_cmd(cmd), else ());
     }
@@ -333,7 +343,7 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::input::{Held, build_usercmd};
+    use crate::input::{CmdParams, Held, MoveSpeeds, build_usercmd};
     use crate::view::ViewInputs;
     use cs_assets::bsp::BspMap;
     use cs_vfs::VfsConfig;
@@ -350,6 +360,7 @@ mod tests {
         let opts = LocalOptions {
             bots: 3,
             max_clients: 8,
+            text_menus: true,
             ..LocalOptions::default()
         };
         let mut s = Session::start_local(&vfs, "de_dust2", &opts).expect("local game");
@@ -366,10 +377,24 @@ mod tests {
             draw_viewmodel: true,
             default_fov: 90.0,
         };
-        // The menus' answers (the server shows them with `ShowMenu`).
-        s.send_stringcmd("jointeam 2");
-        s.advance(0.05);
-        s.send_stringcmd("joinclass 1");
+        // The server shows the team menu as a text menu (`_vgui_menus 0` was in the userinfo
+        // before the sign-on); the shell answers it with `menuselect`, as a key press does.
+        let mut answered = Vec::new();
+        for choice in ["2", "1"] {
+            let mut text = None;
+            for _ in 0..600 {
+                s.advance(0.01);
+                text = s.with_hud(|h| h.menu.as_ref().map(|m| m.text.clone())).flatten();
+                if text.is_some() {
+                    break;
+                }
+            }
+            let text = text.unwrap_or_else(|| panic!("no menu appeared before choice {choice}"));
+            answered.push(text);
+            s.send_stringcmd(&format!("menuselect {choice}"));
+            s.with_hud_mut(|h| h.menu = None);
+        }
+        assert_eq!(answered.len(), 2, "the team and the class menu");
         let walk: HashSet<String> = ["forward".to_string()].into_iter().collect();
         let mut first_eye = None;
         let mut last_eye = Vec3::ZERO;
@@ -384,7 +409,11 @@ mod tests {
             };
             // Turning while walking keeps the player off the walls.
             let angles = Vec3::new(0.0, (frame as f32 * 0.4) % 360.0, 0.0);
-            s.queue_cmd(build_usercmd(&held, angles, 10, 0));
+            let p = CmdParams {
+                msec: 10,
+                ..CmdParams::default()
+            };
+            s.queue_cmd(build_usercmd(&held, angles, p, &MoveSpeeds::default()));
             s.advance(0.01);
             let (view, _) = s
                 .build_view(angles, &inputs(s.now()))

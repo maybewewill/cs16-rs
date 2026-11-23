@@ -383,7 +383,7 @@ impl ViewBuilder {
         // props, sprites. The local player is not drawn in first person.
         for e in &emitted.entities {
             if e.kind == EntityKind::Beam {
-                self.push_beam_entity(e, time);
+                self.push_beam_entity(e, now);
                 continue;
             }
             if e.local_player || Some(e.number) == local_number {
@@ -528,11 +528,11 @@ impl ViewBuilder {
 
     /// A `ET_BEAM` entity: `origin` is where it starts and `angles` where it ends
     /// (`CBeam::SetEndPos`, assumption: the layout of the original game's `beam.cpp`).
-    fn push_beam_entity(&mut self, e: &VisibleEntity, time: f32) {
+    fn push_beam_entity(&mut self, e: &VisibleEntity, now: f64) {
         let amt = f32::from(e.renderamt) / 255.0;
         let c = e.rendercolor;
         self.beams.push(ActiveBeam {
-            die: f64::from(time) + 0.0001,
+            die: now + 0.0001,
             start: e.origin,
             end: e.state.angles,
             width: (e.state.scale * 0.25).max(1.0),

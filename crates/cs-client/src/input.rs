@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+use cs_clientcore::ConsoleCommand;
 use cs_clientcore::hud::WeaponInfo;
 use cs_proto48::delta::GoldSrcUserCmd;
 use glam::Vec3;
@@ -23,11 +24,6 @@ pub mod button {
     pub const SCORE: u16 = 1 << 15;
 }
 
-/// `cl_forwardspeed`, `cl_sidespeed` and `cl_backspeed` defaults.
-pub const MOVE_SPEED: f32 = 400.0;
-/// `cl_movespeedkey`: the factor while `+speed` (walk) is held.
-pub const WALK_FACTOR: f32 = 0.52;
-
 /// What the player holds down this frame.
 #[derive(Debug, Clone, Default)]
 pub struct Held<'a> {
@@ -42,8 +38,80 @@ impl Held<'_> {
     }
 }
 
-/// One usercmd for a frame of `msec` milliseconds. `impulse` is sent once (the spray).
-pub fn build_usercmd(held: &Held<'_>, view_angles: Vec3, msec: u8, impulse: u8) -> GoldSrcUserCmd {
+/// The move speeds of the client cvars (`cl_forwardspeed`, `cl_backspeed`, `cl_sidespeed`,
+/// `cl_upspeed`) and the factor `+speed` (walk) applies (`cl_movespeedkey`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MoveSpeeds {
+    pub forward: f32,
+    pub back: f32,
+    pub side: f32,
+    pub up: f32,
+    pub walk_key: f32,
+}
+
+impl Default for MoveSpeeds {
+    fn default() -> Self {
+        Self {
+            forward: 400.0,
+            back: 400.0,
+            side: 400.0,
+            up: 320.0,
+            walk_key: 0.52,
+        }
+    }
+}
+
+/// What a frame's usercmd carries besides the held keys.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CmdParams {
+    pub msec: u8,
+    pub lerp_msec: i16,
+    /// Sent once (`impulse 201`, the spray; `impulse 100`, the flashlight).
+    pub impulse: u8,
+}
+
+/// The frame time of the usercmds in whole milliseconds, without drift: the part of a frame
+/// that is not a whole millisecond is carried into the next one. Also the interpolation amount
+/// the commands announce (`lerp_msec`).
+#[derive(Debug, Clone, Default)]
+pub struct CmdClock {
+    carry: f64,
+    interp_amount: f32,
+}
+
+impl CmdClock {
+    /// The milliseconds of a frame of `dt` seconds, 1 to 100 (`CL_CreateCmd` clamps the frame
+    /// to 100 ms; an overlong frame drops its excess).
+    pub fn msec(&mut self, dt: f64) -> u8 {
+        let total = self.carry + dt.max(0.0) * 1000.0;
+        let ms = total.floor().clamp(1.0, 100.0);
+        self.carry = (total - ms).clamp(0.0, 1.0);
+        ms as u8
+    }
+
+    /// `cmd->lerp_msec` of `CL_ComputeClientInterpolationAmount` (Xash3D FWGS
+    /// `engine/client/cl_main.c`, read 2026-11-24): `interp` is `ex_interp` already bounded by
+    /// the update rate and `MAX_EX_INTERP` (`InterpSettings::interp`); the amount drifts to it
+    /// by at most `frametime * 0.05` a frame (`CL_DriftInterpolationAmount`), rounded to
+    /// milliseconds and kept in 0..=100.
+    pub fn lerp_msec(&mut self, interp: f32, frametime: f32) -> i16 {
+        let goal = (interp * 1000.0).round() / 1000.0;
+        if goal != self.interp_amount {
+            let max_move = frametime * 0.05;
+            let diff = (goal - self.interp_amount).clamp(-max_move, max_move);
+            self.interp_amount += diff;
+        }
+        ((self.interp_amount * 1000.0).round() as i32).clamp(0, 100) as i16
+    }
+}
+
+/// One usercmd.
+pub fn build_usercmd(
+    held: &Held<'_>,
+    view_angles: Vec3,
+    p: CmdParams,
+    speeds: &MoveSpeeds,
+) -> GoldSrcUserCmd {
     let mut buttons = 0u16;
     let mut set = |on: bool, bit: u16| {
         if on {
@@ -63,21 +131,56 @@ pub fn build_usercmd(held: &Held<'_>, view_angles: Vec3, msec: u8, impulse: u8) 
     set(held.on("speed"), button::RUN);
     set(held.on("showscores"), button::SCORE);
 
-    let axis = |plus: &str, minus: &str| f32::from(held.on(plus)) - f32::from(held.on(minus));
-    let walk = if held.on("speed") { WALK_FACTOR } else { 1.0 };
+    let walk = if held.on("speed") { speeds.walk_key } else { 1.0 };
+    // `CL_KeyMove`: each key adds its speed (the forward and back keys cancel).
+    let key = |on: &str| f32::from(held.on(on));
     GoldSrcUserCmd {
-        lerp_msec: 0,
-        msec,
+        lerp_msec: p.lerp_msec,
+        msec: p.msec,
         viewangles: view_angles,
-        forwardmove: axis("forward", "back") * MOVE_SPEED * walk,
-        sidemove: axis("moveright", "moveleft") * MOVE_SPEED * walk,
-        upmove: 0.0,
+        forwardmove: (key("forward") * speeds.forward - key("back") * speeds.back) * walk,
+        sidemove: (key("moveright") - key("moveleft")) * speeds.side * walk,
+        // +moveup / +movedown: swimming and ladders (jump and duck are buttons).
+        upmove: (key("moveup") - key("movedown")) * speeds.up,
         lightlevel: 128,
         buttons,
-        impulse,
+        impulse: p.impulse,
         weaponselect: 0,
         impact_index: 0,
         impact_position: Vec3::ZERO,
+    }
+}
+
+/// Where a console line the shell does not know goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConsoleRoute {
+    /// The connection's own console runs it (`cmd <text>` sends the text, `setinfo` changes
+    /// the userinfo and tells the server).
+    Local(String),
+    /// A `clc_stringcmd` for the game, re-quoted as `Cmd_ForwardToServer` does.
+    Server(String),
+    /// Stays on this machine (passwords, config).
+    Denied,
+}
+
+/// Routes the tokens of an unknown command. The deny list is checked again here, so no route
+/// to the server bypasses it.
+pub fn route_unknown(tokens: &[String]) -> ConsoleRoute {
+    let Some(name) = tokens.first() else {
+        return ConsoleRoute::Denied;
+    };
+    let lower = name.to_ascii_lowercase();
+    if cs_cvar::is_never_forwarded(&lower) {
+        return ConsoleRoute::Denied;
+    }
+    let cmd = ConsoleCommand {
+        name: name.clone(),
+        args: tokens[1..].to_vec(),
+    };
+    match lower.as_str() {
+        "cmd" => ConsoleRoute::Local(format!("cmd {}", cmd.forward_text())),
+        "setinfo" | "userinfo" => ConsoleRoute::Local(cmd.forward_text()),
+        _ => ConsoleRoute::Server(cmd.forward_text()),
     }
 }
 
@@ -117,6 +220,13 @@ mod tests {
         names.iter().map(|n| n.to_string()).collect()
     }
 
+    fn params(msec: u8) -> CmdParams {
+        CmdParams {
+            msec,
+            ..CmdParams::default()
+        }
+    }
+
     #[test]
     fn held_actions_become_buttons_and_moves() {
         let a = actions(&["forward", "moveleft", "jump", "attack"]);
@@ -124,7 +234,7 @@ mod tests {
             actions: Some(&a),
             ..Held::default()
         };
-        let cmd = build_usercmd(&held, Vec3::new(10.0, 90.0, 0.0), 10, 0);
+        let cmd = build_usercmd(&held, Vec3::new(10.0, 90.0, 0.0), params(10), &MoveSpeeds::default());
         assert_eq!(
             cmd.buttons,
             button::FORWARD | button::MOVELEFT | button::JUMP | button::ATTACK
@@ -136,18 +246,111 @@ mod tests {
     }
 
     #[test]
-    fn walking_scales_the_move_and_opposite_keys_cancel() {
-        let a = actions(&["forward", "back", "moveright", "speed"]);
+    fn the_speeds_come_from_the_cvars_and_walking_scales_them() {
+        let a = actions(&["forward", "moveright", "speed"]);
         let held = Held {
             actions: Some(&a),
             mouse1: true,
             mouse2: false,
         };
-        let cmd = build_usercmd(&held, Vec3::ZERO, 10, 201);
-        assert_eq!(cmd.forwardmove, 0.0);
-        assert!((cmd.sidemove - 400.0 * WALK_FACTOR).abs() < 1e-3);
+        let speeds = MoveSpeeds {
+            forward: 250.0,
+            side: 200.0,
+            ..MoveSpeeds::default()
+        };
+        let cmd = build_usercmd(
+            &held,
+            Vec3::ZERO,
+            CmdParams {
+                msec: 10,
+                lerp_msec: 100,
+                impulse: 100,
+            },
+            &speeds,
+        );
+        assert!((cmd.forwardmove - 250.0 * 0.52).abs() < 1e-3);
+        assert!((cmd.sidemove - 200.0 * 0.52).abs() < 1e-3);
         assert!(cmd.buttons & button::ATTACK != 0 && cmd.buttons & button::RUN != 0);
-        assert_eq!(cmd.impulse, 201);
+        assert_eq!((cmd.impulse, cmd.lerp_msec), (100, 100));
+    }
+
+    #[test]
+    fn back_uses_its_own_speed_and_swimming_has_up_and_down() {
+        let a = actions(&["back", "moveup"]);
+        let held = Held {
+            actions: Some(&a),
+            ..Held::default()
+        };
+        let speeds = MoveSpeeds {
+            back: 300.0,
+            ..MoveSpeeds::default()
+        };
+        let cmd = build_usercmd(&held, Vec3::ZERO, params(10), &speeds);
+        assert_eq!(cmd.forwardmove, -300.0);
+        assert_eq!(cmd.upmove, 320.0);
+        let b = actions(&["forward", "back"]);
+        let both = Held {
+            actions: Some(&b),
+            ..Held::default()
+        };
+        assert_eq!(build_usercmd(&both, Vec3::ZERO, params(10), &speeds).forwardmove, 100.0);
+    }
+
+    fn toks(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn unknown_commands_are_requoted_for_the_server() {
+        assert_eq!(
+            route_unknown(&toks(&["menuselect", "2"])),
+            ConsoleRoute::Server("menuselect 2".into())
+        );
+        assert_eq!(
+            route_unknown(&toks(&["say_team", "hello there"])),
+            ConsoleRoute::Server("say_team \"hello there\"".into())
+        );
+    }
+
+    #[test]
+    fn cmd_and_setinfo_run_in_the_connection_and_secrets_stay_home() {
+        assert_eq!(
+            route_unknown(&toks(&["cmd", "jointeam 2"])),
+            ConsoleRoute::Local("cmd \"jointeam 2\"".into())
+        );
+        assert_eq!(
+            route_unknown(&toks(&["setinfo", "model", "gign"])),
+            ConsoleRoute::Local("setinfo model gign".into())
+        );
+        for name in ["rcon_password", "RCON", "password", "sv_password", "exec", "bind"] {
+            assert_eq!(route_unknown(&toks(&[name, "x"])), ConsoleRoute::Denied, "{name}");
+        }
+        assert_eq!(route_unknown(&[]), ConsoleRoute::Denied);
+    }
+
+    #[test]
+    fn frame_times_carry_their_remainder() {
+        let mut c = CmdClock::default();
+        // 6.9 ms frames: the sent milliseconds add up to the real time, within one ms.
+        let total: u32 = (0..1000).map(|_| u32::from(c.msec(0.0069))).sum();
+        assert!((6899..=6900).contains(&total), "{total}");
+        // A hitch is clamped to 100 ms and does not bank the excess.
+        assert_eq!(c.msec(1.0), 100);
+        assert!(c.msec(0.0001) >= 1);
+    }
+
+    #[test]
+    fn the_interpolation_amount_drifts_to_ex_interp() {
+        let mut c = CmdClock::default();
+        assert!(c.lerp_msec(0.1, 0.01) <= 1);
+        let mut last = 0;
+        for _ in 0..100_000 {
+            last = c.lerp_msec(0.1, 0.01);
+        }
+        assert_eq!(last, 100);
+        // Going down is bounded as well, and the value stays in 0..=100.
+        assert!(c.lerp_msec(0.0, 0.01) >= 99);
+        assert_eq!(c.lerp_msec(5.0, 0.01), 100);
     }
 
     fn info(name: &str, slot: u8, position: u8, id: u8) -> WeaponInfo {

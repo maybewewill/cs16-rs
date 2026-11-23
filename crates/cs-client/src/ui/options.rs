@@ -248,7 +248,6 @@ impl OptionsUi {
         ui.separator();
         cvar_checkbox(ui, cvars, "cl_righthand", "Right-handed weapon models (cl_righthand)");
         cvar_checkbox(ui, cvars, "hud_fastswitch", "Fast weapon switch (hud_fastswitch)");
-        cvar_checkbox(ui, cvars, "_vgui_menus", "Use VGUI buy/team menus (_vgui_menus)");
     }
 
     fn show_keyboard(&mut self, ui: &mut egui::Ui, cvars: &mut CVarRegistry, palette: VguiPalette) {

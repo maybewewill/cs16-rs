@@ -9,6 +9,8 @@ pub struct Camera {
     pub yaw_deg: f32,
     /// Vertical look angle in degrees (-89 = up, +89 = down, matching GoldSrc pitch).
     pub pitch_deg: f32,
+    /// Roll of the view (the punch angle's roll), degrees.
+    pub roll_deg: f32,
 }
 
 impl Default for Camera {
@@ -17,6 +19,7 @@ impl Default for Camera {
             position: Vec3::new(0.0, 0.0, 64.0),
             yaw_deg: 0.0,
             pitch_deg: 0.0,
+            roll_deg: 0.0,
         }
     }
 }
@@ -33,6 +36,15 @@ impl Camera {
         .normalize()
     }
 
+    /// The up vector of the view: world up turned about the view direction by the roll.
+    fn view_up(&self) -> Vec3 {
+        if self.roll_deg == 0.0 {
+            Vec3::Z
+        } else {
+            glam::Quat::from_axis_angle(self.forward(), (-self.roll_deg).to_radians()) * Vec3::Z
+        }
+    }
+
     pub fn right(&self) -> Vec3 {
         let yaw = self.yaw_deg.to_radians();
         // Right vector in horizontal XY plane for right-handed Z-up
@@ -46,12 +58,12 @@ impl Camera {
     }
 
     pub fn view_matrix(&self) -> Mat4 {
-        look_to_rh(self.position, self.forward(), Vec3::Z)
+        look_to_rh(self.position, self.forward(), self.view_up())
     }
 
     /// Rotation-only view matrix for skybox rendering (centered on camera).
     pub fn sky_view_matrix(&self) -> Mat4 {
-        look_to_rh(Vec3::ZERO, self.forward(), Vec3::Z)
+        look_to_rh(Vec3::ZERO, self.forward(), self.view_up())
     }
 
     /// Compute wgpu-compatible right-handed perspective matrix (`z in [0, 1]`)

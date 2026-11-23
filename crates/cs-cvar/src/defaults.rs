@@ -16,7 +16,12 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     reg.register("cl_righthand", "1", arch, "Hold weapon in right hand (1) or left hand (0)");
     reg.register("cl_hd_models", "0", arch, "Enable cstrike_hd high-definition models (0 or 1)");
     reg.register("hud_fastswitch", "1", arch, "Fast weapon switch on slot press (0 or 1)");
-    reg.register("_vgui_menus", "1", arch, "Use VGUI buy/team menus (1) or old text menus (0)");
+    reg.register("_vgui_menus", "0", arch, "Ask the server for VGUI menus (1) or the text menus this client draws (0)");
+    reg.register("cl_forwardspeed", "400", arch, "Forward move speed (+forward)");
+    reg.register("cl_backspeed", "400", arch, "Backward move speed (+back)");
+    reg.register("cl_sidespeed", "400", arch, "Side move speed (+moveleft, +moveright)");
+    reg.register("cl_upspeed", "320", arch, "Vertical move speed (+moveup, +movedown)");
+    reg.register("cl_movespeedkey", "0.52", arch, "Factor of the move speeds while +speed (walk) is held");
 
     // Mouse / Input
     reg.register("sensitivity", "3.0", arch, "Mouse sensitivity");

@@ -321,7 +321,7 @@ impl MainMenuUi {
                                         .color(palette.bright_control_text),
                                 );
                                 ui.label(
-                                    RichText::new("  cs-server --map de_dust2 --port 27015 --bots 9")
+                                    RichText::new("  cs-server --map de_dust2 --port 27015")
                                         .monospace()
                                         .color(palette.base_text),
                                 );

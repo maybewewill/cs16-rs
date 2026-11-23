@@ -28,7 +28,9 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 use crate::audio::AudioEngine;
 use crate::camera::Camera;
 use crate::hudtext::{format_message, strip_html};
-use crate::input::{Held, build_usercmd, weapon_for_slot};
+use crate::input::{
+    CmdClock, CmdParams, ConsoleRoute, Held, MoveSpeeds, build_usercmd, route_unknown, weapon_for_slot,
+};
 use crate::render::bsp_renderer::BspRenderStats;
 use crate::render::mdl_renderer::{StudioInstance, viewmodel_transform};
 use crate::render::{RenderSettings, Renderer, SceneDynamicData};
@@ -110,6 +112,7 @@ pub struct Cs16App {
     mouse1_held: bool,
     mouse2_held: bool,
     pending_impulse: u8,
+    cmd_clock: CmdClock,
     mouse_sens_scale: f32,
     view_stats: ViewStats,
     last_stats: BspRenderStats,
@@ -194,6 +197,7 @@ impl Cs16App {
             mouse1_held: false,
             mouse2_held: false,
             pending_impulse: 0,
+            cmd_clock: CmdClock::default(),
             mouse_sens_scale: 1.0,
             view_stats: ViewStats::default(),
             last_stats: BspRenderStats {
@@ -282,6 +286,9 @@ impl Cs16App {
             self.session.connection_predictor_materials(&txt);
         }
         self.session.set_map(&map.name, Some(collision));
+        if let Some(rt) = &mut self.runtime {
+            rt.renderer.clear_model_caches();
+        }
         self.cvars.info(format!(
             "Loaded {} in {:.0} ms ({} faces, {} batches, sky: {})",
             map.name,
@@ -303,6 +310,8 @@ impl Cs16App {
         let opts = LocalOptions {
             bots: self.cvars.get_i32("bot_quota").clamp(0, 31) as u32,
             player_name: self.cvars.get_str("name").to_string(),
+            // The shell draws the server's text menus and answers them with `menuselect`.
+            text_menus: true,
             ..LocalOptions::default()
         };
         match Session::start_local(&vfs, map_name, &opts) {
@@ -358,6 +367,7 @@ impl Cs16App {
         if let Some(rt) = &mut self.runtime {
             rt.renderer.unload_map();
             rt.renderer.set_entity_scene(None);
+            rt.renderer.clear_model_caches();
             rt.window.set_title("Counter-Strike 1.6 (Rust)");
         }
         self.view_stats = ViewStats::default();
@@ -610,7 +620,7 @@ impl Cs16App {
                     }
                     EngineAction::Say { team_only, text } => {
                         let cmd = if team_only { "say_team" } else { "say" };
-                        self.forward_to_server(&format!("{cmd} \"{text}\""));
+                        self.forward_to_server(&format!("{cmd} \"{}\"", quote_chat(&text)));
                     }
                     EngineAction::OpenChat { team_only } => {
                         if self.is_in_game() {
@@ -619,8 +629,14 @@ impl Cs16App {
                         }
                     }
                     EngineAction::SelectSlot(slot) => self.select_slot(slot),
-                    EngineAction::Spray => self.pending_impulse = 201,
-                    EngineAction::Forward(line) => self.forward_to_server(&line),
+                    EngineAction::Impulse(n) => self.pending_impulse = n,
+                    EngineAction::Forward(tokens) => match route_unknown(&tokens) {
+                        ConsoleRoute::Server(line) => self.forward_to_server(&line),
+                        ConsoleRoute::Local(line) => self.session.execute_local(&line),
+                        ConsoleRoute::Denied => {
+                            self.cvars.warn("that command stays on this machine");
+                        }
+                    },
                     EngineAction::SetPos(_) => {
                         self.cvars.warn("setpos needs the server's cheats; use noclip");
                     }
@@ -684,9 +700,20 @@ impl Cs16App {
             mouse2: capture && self.mouse2_held,
         };
         let angles = Vec3::new(self.camera.pitch_deg, self.camera.yaw_deg, 0.0);
-        let msec = (dt * 1000.0).round().clamp(1.0, 100.0) as u8;
-        let impulse = std::mem::take(&mut self.pending_impulse);
-        self.session.queue_cmd(build_usercmd(&held, angles, msec, impulse));
+        let params = CmdParams {
+            msec: self.cmd_clock.msec(dt),
+            lerp_msec: self.cmd_clock.lerp_msec(self.session.interp(), dt as f32),
+            impulse: std::mem::take(&mut self.pending_impulse),
+        };
+        let speeds = MoveSpeeds {
+            forward: self.cvars.get_f32("cl_forwardspeed"),
+            back: self.cvars.get_f32("cl_backspeed"),
+            side: self.cvars.get_f32("cl_sidespeed"),
+            up: self.cvars.get_f32("cl_upspeed"),
+            walk_key: self.cvars.get_f32("cl_movespeedkey"),
+        };
+        self.session
+            .queue_cmd(build_usercmd(&held, angles, params, &speeds));
     }
 
     fn handle_key_event(&mut self, event: &KeyEvent, event_loop: &ActiveEventLoop) -> bool {
@@ -823,11 +850,18 @@ impl Cs16App {
         }
 
         // Text the server stuffed that the connection does not run itself.
+        // A server's text never reaches the server again: nothing is forwarded while it runs.
         for cmd in self.session.take_shell_commands() {
             let line = format!("{} {}", cmd.name, cmd.args.join(" "));
+            self.cvars.set_forward_unknown(false);
             let actions = self.cvars.execute_script(line.trim());
+            let actions: Vec<EngineAction> = actions
+                .into_iter()
+                .filter(|a| !matches!(a, EngineAction::Forward(_)))
+                .collect();
             self.process_actions(actions, event_loop);
         }
+        self.cvars.set_forward_unknown(self.session.is_active());
         let lines = self.session.console_lines();
         for line in lines.iter().skip(self.console_seen) {
             self.cvars.info(line.clone());
@@ -1040,6 +1074,7 @@ impl Cs16App {
         if let Some(v) = view {
             render_cam.pitch_deg = (render_cam.pitch_deg + v.punch.x).clamp(-89.0, 89.0);
             render_cam.yaw_deg = (render_cam.yaw_deg + v.punch.y).rem_euclid(360.0);
+            render_cam.roll_deg = v.punch.z;
             fov = v.fov;
             sensitivity_scale = (v.fov / 90.0).clamp(0.2, 1.0);
             if let Some(vm) = &v.viewmodel {
@@ -1128,7 +1163,7 @@ impl Cs16App {
         // 5. Post-frame actions.
         if let Some((team_only, text)) = sent_chat {
             let cmd = if team_only { "say_team" } else { "say" };
-            self.forward_to_server(&format!("{cmd} \"{text}\""));
+            self.forward_to_server(&format!("{cmd} \"{}\"", quote_chat(&text)));
         }
         if motd_close {
             self.feeds.motd_open = false;
@@ -1338,6 +1373,11 @@ impl ApplicationHandler for Cs16App {
                 .apply_mouse_delta(dx as f32, dy as f32, sens, m_yaw, m_pitch);
         }
     }
+}
+
+/// A chat line inside quotes: a `"` would end the quoted argument, so it becomes `'`.
+fn quote_chat(text: &str) -> String {
+    text.replace('"', "'")
 }
 
 /// Keeps the newest [`MAX_FEED`] entries.

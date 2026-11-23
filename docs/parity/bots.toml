@@ -20,7 +20,7 @@ evidence = "crates/cs-game/tests/bots.rs::bot_add_joins_a_team_and_spawns, bot_k
 [[item]]
 id = "bot_quota_maintenance"
 status = "implemented"
-evidence = "crates/cs-game/src/bots.rs::maintain_quota (every 0.5 s adds a bot below bot_quota, kicks one above it), wired in cs-server --proto48 --bots (crates/cs-server/src/proto48.rs::tests::vanilla_round_time only starts the server with it); no test drives maintain_quota itself"
+evidence = "crates/cs-game/src/bots.rs::maintain_quota (every 0.5 s adds a bot below bot_quota, kicks one above it), wired in cs-server --proto48 --bots (crates/cs-local/src/lib.rs::tests::vanilla_round_time only starts the server with it); no test drives maintain_quota itself"
 
 [[item]]
 id = "bot_navmesh_generation"

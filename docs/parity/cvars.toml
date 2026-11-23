@@ -14,7 +14,7 @@ status = "implemented"
 [[item]]
 id = "bot_quota"
 status = "implemented"
-evidence = "crates/cs-game/src/bots.rs (enable_cvar_bot_quota on cs-server --proto48 --bots N; quota maintenance loop); crates/cs-server/src/proto48.rs::tests::vanilla_round_time asserts vanilla default 0"
+evidence = "crates/cs-game/src/bots.rs (enable_cvar_bot_quota on cs-server --proto48 --bots N; quota maintenance loop); crates/cs-local/src/lib.rs::tests::vanilla_round_time asserts vanilla default 0"
 
 [[item]]
 id = "brightness"
@@ -870,8 +870,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cf
 
 [[item]]
 id = "cl_backspeed"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "implemented"
+evidence = "crates/cs-client/src/input.rs::the_speeds_come_from_the_cvars_and_walking_scales_them (read into the usercmd move speeds)"
 
 [[item]]
 id = "cl_bmodelinterp"
@@ -935,8 +935,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cf
 
 [[item]]
 id = "cl_forwardspeed"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "implemented"
+evidence = "crates/cs-client/src/input.rs::the_speeds_come_from_the_cvars_and_walking_scales_them (read into the usercmd move speeds)"
 
 [[item]]
 id = "cl_himodels"
@@ -1050,8 +1050,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cf
 
 [[item]]
 id = "cl_sidespeed"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "implemented"
+evidence = "crates/cs-client/src/input.rs::the_speeds_come_from_the_cvars_and_walking_scales_them (read into the usercmd move speeds)"
 
 [[item]]
 id = "cl_smoothtime"
@@ -3112,3 +3112,13 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (rh_sv_
 id = "zoom_sensitivity_ratio"
 status = "missing"
 evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+
+[[item]]
+id = "cl_upspeed"
+status = "implemented"
+evidence = "crates/cs-client/src/input.rs::the_speeds_come_from_the_cvars_and_walking_scales_them (read into the usercmd move speeds)"
+
+[[item]]
+id = "cl_movespeedkey"
+status = "implemented"
+evidence = "crates/cs-client/src/input.rs::the_speeds_come_from_the_cvars_and_walking_scales_them (read into the usercmd move speeds)"
