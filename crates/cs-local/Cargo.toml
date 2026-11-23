@@ -1,0 +1,19 @@
+[package]
+name = "cs-local"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+cs-assets.workspace = true
+cs-clientcore.workspace = true
+cs-cvar.workspace = true
+cs-engine.workspace = true
+cs-game.workspace = true
+cs-proto48.workspace = true
+cs-transport.workspace = true
+cs-vfs.workspace = true
