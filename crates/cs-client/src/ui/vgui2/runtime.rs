@@ -40,21 +40,21 @@ pub struct VguiLayoutNode {
     pub command: String,
 }
 
+use egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
+
 /// Install Valve's `resource/marlett.ttf` (if available in VFS) into `egui` as `"marlett"` font family.
 pub fn install_marlett_into_egui(ctx: &egui::Context, vfs: &Vfs) -> bool {
     let Some(tt) = load_marlett_font(vfs) else {
         return false;
     };
-    let mut defs = ctx.fonts(|r| r.definitions().clone());
-    defs.font_data.insert(
-        "marlett".to_owned(),
-        std::sync::Arc::new(egui::FontData::from_owned(tt.raw_bytes().to_vec())),
-    );
-    defs.families.insert(
-        FontFamily::Name("marlett".into()),
-        vec!["marlett".to_owned()],
-    );
-    ctx.set_fonts(defs);
+    ctx.add_font(FontInsert::new(
+        "marlett",
+        egui::FontData::from_owned(tt.raw_bytes().to_vec()),
+        vec![InsertFontFamily {
+            family: FontFamily::Name("marlett".into()),
+            priority: FontPriority::Highest,
+        }],
+    ));
     true
 }
 
@@ -65,7 +65,6 @@ pub fn install_scheme_fonts_into_egui(
     scheme_fonts: &SchemeFontSet,
 ) -> usize {
     let mut installed = usize::from(install_marlett_into_egui(ctx, vfs));
-    let mut defs = ctx.fonts(|r| r.definitions().clone());
     for raw_path in &scheme_fonts.custom_font_files {
         let norm = raw_path.replace('\\', "/");
         if norm.to_ascii_lowercase().ends_with("marlett.ttf") {
@@ -81,15 +80,15 @@ pub fn install_scheme_fonts_into_egui(
             continue;
         }
         let font_id = format!("vgui_ttf_{installed}");
-        defs.font_data
-            .insert(font_id.clone(), std::sync::Arc::new(egui::FontData::from_owned(data)));
-        if let Some(prop) = defs.families.get_mut(&FontFamily::Proportional) {
-            prop.insert(0, font_id);
-        }
+        ctx.add_font(FontInsert::new(
+            &font_id,
+            egui::FontData::from_owned(data),
+            vec![InsertFontFamily {
+                family: FontFamily::Proportional,
+                priority: FontPriority::Highest,
+            }],
+        ));
         installed += 1;
-    }
-    if installed > 0 {
-        ctx.set_fonts(defs);
     }
     installed
 }

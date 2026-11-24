@@ -44,18 +44,12 @@ pub struct BuyClassTeamMenuUi {
 }
 
 impl BuyClassTeamMenuUi {
-    pub fn open_kind(&mut self, kind: VguiMenuKind, is_ct: bool) {
+    pub fn open_kind(&mut self, kind: VguiMenuKind, _is_ct: bool) {
         let path = match kind {
             VguiMenuKind::Team => "resource/UI/TeamMenu.res",
             VguiMenuKind::ClassCt => "resource/UI/ClassMenu_CT.res",
             VguiMenuKind::ClassT => "resource/UI/ClassMenu_TER.res",
-            VguiMenuKind::Buy => {
-                if is_ct {
-                    "resource/UI/BuyMenu.res"
-                } else {
-                    "resource/UI/MainBuyMenu.res"
-                }
-            }
+            VguiMenuKind::Buy => "resource/UI/MainBuyMenu.res",
         };
         if self.active_res.as_deref() != Some(path) {
             self.active_res = Some(path.to_string());
@@ -135,7 +129,7 @@ impl BuyClassTeamMenuUi {
             palette,
             steam_icon,
             |ui| {
-                let area = ui.available_rect_before_wrap();
+                let (area, _) = ui.allocate_exact_size(Vec2::new(590.0, 400.0), egui::Sense::hover());
                 let nodes = runtime.compute_layout(
                     &res_path,
                     [area.left(), area.top(), area.width(), area.height()],
@@ -202,9 +196,10 @@ impl BuyClassTeamMenuUi {
                 }
 
                 for (field, label, cmd, rect, enabled) in buttons {
+                    let clean_label = label.replace('&', "");
                     let resp = ui.put(
                         rect,
-                        egui::Button::new(RichText::new(&label).color(palette.base_text))
+                        egui::Button::new(RichText::new(&clean_label).color(palette.base_text))
                             .corner_radius(CornerRadius::ZERO),
                     );
                     if resp.hovered() {
@@ -216,48 +211,51 @@ impl BuyClassTeamMenuUi {
                 }
 
                 // Right-side info pane (`maps/<map>.txt` for TeamMenu or `classes/<hover>.res`).
-                let info_rect = Rect::from_min_size(
-                    Pos2::new(area.left() + area.width() * 0.42, area.top() + 58.0),
-                    Vec2::new(area.width() * 0.55, area.height() - 72.0),
-                );
-                ui.painter().rect_filled(info_rect, CornerRadius::ZERO, palette.window_bg);
-                ui.painter().rect_stroke(
-                    info_rect,
-                    CornerRadius::ZERO,
-                    Stroke::new(1.0, palette.border_dark),
-                    egui::StrokeKind::Inside,
-                );
-                ui.scope_builder(egui::UiBuilder::new().max_rect(info_rect.shrink(8.0)), |ui| {
-                    if let Some(hover) = self.hovered_class.clone()
-                        && let Some(panel) = self.preview_panel(vfs, loc, &hover)
-                    {
-                        if let Some(ref img_path) = panel.image_path
-                            && let Some(tex) = runtime.ensure_texture(ctx, vfs, img_path)
+                // Skip on `MainBuyMenu.res` where Valve puts Autobuy/Rebuy buttons on the right column.
+                if !res_path.to_ascii_lowercase().contains("mainbuymenu") {
+                    let info_rect = Rect::from_min_size(
+                        Pos2::new(area.left() + area.width() * 0.42, area.top() + 58.0),
+                        Vec2::new(area.width() * 0.55, area.height() - 72.0),
+                    );
+                    ui.painter().rect_filled(info_rect, CornerRadius::ZERO, palette.window_bg);
+                    ui.painter().rect_stroke(
+                        info_rect,
+                        CornerRadius::ZERO,
+                        Stroke::new(1.0, palette.border_dark),
+                        egui::StrokeKind::Inside,
+                    );
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(info_rect.shrink(8.0)), |ui| {
+                        if let Some(hover) = self.hovered_class.clone()
+                            && let Some(panel) = self.preview_panel(vfs, loc, &hover)
                         {
-                            ui.image(egui::load::SizedTexture::new(tex.id(), Vec2::new(220.0, 70.0)));
-                            ui.add_space(6.0);
+                            if let Some(ref img_path) = panel.image_path
+                                && let Some(tex) = runtime.ensure_texture(ctx, vfs, img_path)
+                            {
+                                ui.image(egui::load::SizedTexture::new(tex.id(), Vec2::new(220.0, 70.0)));
+                                ui.add_space(6.0);
+                            }
+                            for lbl in &panel.labels {
+                                let col = if lbl.bright {
+                                    palette.bright_control_text
+                                } else {
+                                    palette.base_text
+                                };
+                                ui.label(RichText::new(&lbl.text).color(col).size(if lbl.small_font {
+                                    12.0
+                                } else {
+                                    13.5
+                                }));
+                            }
+                        } else if res_path.to_ascii_lowercase().contains("team")
+                            && let Some(v) = vfs
+                            && let Some(brief) = load_map_briefing(v, map_name)
+                        {
+                            ScrollArea::vertical().show(ui, |ui| {
+                                ui.label(RichText::new(brief).color(palette.base_text));
+                            });
                         }
-                        for lbl in &panel.labels {
-                            let col = if lbl.bright {
-                                palette.bright_control_text
-                            } else {
-                                palette.base_text
-                            };
-                            ui.label(RichText::new(&lbl.text).color(col).size(if lbl.small_font {
-                                12.0
-                            } else {
-                                13.5
-                            }));
-                        }
-                    } else if res_path.to_ascii_lowercase().contains("team")
-                        && let Some(v) = vfs
-                        && let Some(brief) = load_map_briefing(v, map_name)
-                    {
-                        ScrollArea::vertical().show(ui, |ui| {
-                            ui.label(RichText::new(brief).color(palette.base_text));
-                        });
-                    }
-                });
+                    });
+                }
             },
         );
         if !open {

@@ -45,7 +45,8 @@ impl MotdVguiUi {
                 loc.map(|l| l.resolve("#Cstrike_OK").to_string())
                     .filter(|s| !s.starts_with('#'))
             })
-            .unwrap_or_else(|| "OK".to_string());
+            .unwrap_or_else(|| "OK".to_string())
+            .replace('&', "");
         let mut still_open = self.open;
         let mut clicked_ok = false;
 

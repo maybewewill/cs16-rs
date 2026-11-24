@@ -156,6 +156,8 @@ pub struct Cs16App {
     overview_tex: Option<OverviewMapTex>,
     overview_map_name: String,
     scoreboard_toggled: bool,
+    startup_ui_applied: bool,
+    in_game_frames: u64,
 
     start_time: Instant,
     last_frame: Instant,
@@ -281,6 +283,8 @@ impl Cs16App {
             overview_tex: None,
             overview_map_name: String::new(),
             scoreboard_toggled: false,
+            startup_ui_applied: false,
+            in_game_frames: 0,
             start_time: now,
             last_frame: now,
             fps_smooth: 100.0,
@@ -1270,6 +1274,46 @@ impl Cs16App {
         // 2. The frame of the session.
         let mut view: Option<FrameView> = None;
         if in_game {
+            self.in_game_frames += 1;
+            if let Some(ui_mode) = self.launch.startup_ui.clone() {
+                let m = ui_mode.to_ascii_lowercase();
+                if matches!(m.as_str(), "hud" | "buy" | "class" | "scoreboard" | "commandmenu") {
+                    if self.in_game_frames == 2 {
+                        self.session.send_stringcmd("jointeam 2");
+                    } else if self.in_game_frames == 6 {
+                        self.session.send_stringcmd("joinclass 1");
+                    } else if self.in_game_frames == 14 {
+                        self.motd_ui.open = false;
+                        self.feeds.motd_open = false;
+                        match m.as_str() {
+                            "buy" => {
+                                self.cvars.set("_vgui_menus", "1");
+                                self.buy_team_class_ui.open_kind(VguiMenuKind::Buy, true);
+                            }
+                            "class" => {
+                                self.cvars.set("_vgui_menus", "1");
+                                self.buy_team_class_ui.open_kind(VguiMenuKind::ClassCt, true);
+                            }
+                            "scoreboard" => self.scoreboard_toggled = true,
+                            "commandmenu" => self.command_menu_ui.set_open(true),
+                            _ => {}
+                        }
+                        self.startup_ui_applied = true;
+                        self.sync_cursor_capture();
+                    }
+                } else if m == "team" && self.in_game_frames == 10 {
+                    self.motd_ui.open = false;
+                    self.feeds.motd_open = false;
+                    self.buy_team_class_ui.open_kind(VguiMenuKind::Team, true);
+                    self.startup_ui_applied = true;
+                    self.sync_cursor_capture();
+                } else if m == "motd" && self.in_game_frames == 10 {
+                    self.motd_ui.open = true;
+                    self.feeds.motd_open = true;
+                    self.startup_ui_applied = true;
+                    self.sync_cursor_capture();
+                }
+            }
             let inputs = ViewInputs {
                 now: self.session.now(),
                 frametime: f64::from(dt),
@@ -1789,7 +1833,14 @@ impl Cs16App {
         };
 
         self.frame_count += 1;
-        let auto_capture_now = self.frame_count == 6 && self.launch.auto_screenshot.is_some();
+        let auto_capture_now = self.launch.auto_screenshot.is_some()
+            && if self.launch.startup_map.is_some() {
+                (self.in_game_frames >= 24
+                    && (self.startup_ui_applied || self.launch.startup_ui.is_none()))
+                    || self.frame_count >= 140
+            } else {
+                self.frame_count == 6
+            };
         let capture_path = if auto_capture_now {
             self.launch.auto_screenshot.take()
         } else {
@@ -1964,8 +2015,19 @@ impl ApplicationHandler for Cs16App {
             self.process_actions(actions, event_loop);
         }
         if let Some(ui_mode) = self.launch.startup_ui.take() {
-            if ui_mode.eq_ignore_ascii_case("options") {
-                self.options_ui.open = true;
+            match ui_mode.to_ascii_lowercase().as_str() {
+                "options" => self.options_ui.open = true,
+                "newgame" => self.menu_ui.new_game_open = true,
+                "servers" => {
+                    self.menu_ui.find_servers_open = true;
+                    self.menu_ui.server_browser.open = true;
+                }
+                "console" => self.console_ui.open(),
+                "playerlist" => self.player_list_ui.open = true,
+                "demo" => self.demo_player_ui.open = true,
+                _ => {
+                    self.launch.startup_ui = Some(ui_mode);
+                }
             }
             self.sync_cursor_capture();
         }
