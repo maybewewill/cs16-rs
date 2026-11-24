@@ -1302,7 +1302,10 @@ impl WebClientState {
                 let rows: Vec<ScoreRow> = h
                     .players
                     .iter()
-                    .filter(|(_, p)| p.team == "CT" || p.team == "TERRORIST")
+                    .filter(|(slot, p)| {
+                        !p.team.is_empty()
+                            || slot.checked_sub(1).is_some_and(|s0| names.contains_key(&s0))
+                    })
                     .filter_map(|(slot, p)| {
                         let slot0 = slot.checked_sub(1)?;
                         Some(ScoreRow {

@@ -30,7 +30,7 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 use crate::audio::{AudioEngine, ListenerState};
 use crate::session::Session;
 use cs_client::camera::Camera;
-use cs_client::hudtext::format_message_with_titles;
+use cs_client::hudtext::{format_message_with_titles, format_saytext_with_titles};
 use cs_client::input::{
     CmdClock, CmdParams, ConsoleRoute, Held, MoveSpeeds, build_usercmd, route_unknown,
 };
@@ -42,8 +42,8 @@ use cs_client::render::{RenderSettings, Renderer, SceneDynamicData};
 use cs_client::ui::chat::ChatInputUi;
 use cs_client::ui::console::{ConsoleRenderCtx, ConsoleUi};
 use cs_client::ui::hud::{
-    HudAnimState, HudExtrasContext, HudSprites, HudView, compute_hud_visibility,
-    draw_cs16_hud_with_runtime, draw_voice_speakers,
+    HudAnimState, HudChatEntry, HudExtrasContext, HudSprites, HudView, PickupHistoryEntry,
+    PickupKind, compute_hud_visibility, draw_cs16_hud_with_runtime, draw_voice_speakers,
 };
 use cs_client::ui::hud_extras::{OverviewMapTex, WeaponBucketState, draw_overview_map};
 use cs_pm::collision::Hull;
@@ -117,8 +117,9 @@ struct WindowRuntime {
 #[derive(Default)]
 struct HudFeeds {
     deaths: Vec<(DeathNotice, f64)>,
-    chat: Vec<(String, f64)>,
+    chat: Vec<(HudChatEntry, f64)>,
     notify: Vec<(String, f64)>,
+    pickups: Vec<PickupHistoryEntry>,
     center: Option<(String, f64)>,
     menu_since: Option<(f64, String)>,
     motd_shown: bool,
@@ -130,6 +131,7 @@ impl HudFeeds {
         self.deaths.retain(|(_, t)| now - t < feed_life);
         self.chat.retain(|(_, t)| now - t < chat_life);
         self.notify.retain(|(_, t)| now - t < feed_life);
+        self.pickups.retain(|e| now < e.end_time);
         if self.center.as_ref().is_some_and(|(_, t)| now - t > center_life) {
             self.center = None;
         }
@@ -666,6 +668,7 @@ impl Cs16App {
     fn collect_hud_feeds(&mut self, now: f64) {
         let loc = self.loc.as_ref();
         let titles = Some(&self.titles);
+        let names = self.session.player_names();
         let feeds = &mut self.feeds;
         let weapon = self
             .session
@@ -674,15 +677,46 @@ impl Cs16App {
                     feeds.deaths.push((d, now));
                 }
                 for line in hud.chat.drain(..) {
-                    let text = format_message_with_titles(&line.text, &line.params, loc, titles);
+                    let text = format_saytext_with_titles(&line.text, &line.params, loc, titles);
                     if !text.is_empty() {
-                        feeds.chat.push((text, now));
+                        let team = hud.players.get(&line.sender).map(|p| p.team.clone());
+                        feeds.chat.push((HudChatEntry { text, team }, now));
                     }
+                }
+                for wid in hud.weapon_pickups.drain(..) {
+                    let empty = matches!(hud.clips.get(&wid), Some(&0))
+                        && hud.weapons.get(&wid).is_some_and(|w| {
+                            w.ammo1_type != 255 && hud.ammo.get(&w.ammo1_type).copied().unwrap_or(0) == 0
+                        });
+                    feeds.pickups.push(PickupHistoryEntry {
+                        kind: PickupKind::Weapon { weapon_id: wid, empty },
+                        end_time: now + 5.0,
+                    });
+                }
+                for (ammo_id, amount) in hud.ammo_pickups.drain(..) {
+                    feeds.pickups.push(PickupHistoryEntry {
+                        kind: PickupKind::Ammo { ammo_id, amount },
+                        end_time: now + 5.0,
+                    });
+                }
+                for classname in hud.item_pickups.drain(..) {
+                    feeds.pickups.push(PickupHistoryEntry {
+                        kind: PickupKind::Item { classname },
+                        end_time: now + 5.0,
+                    });
+                }
+                if feeds.pickups.len() > 12 {
+                    let excess = feeds.pickups.len() - 12;
+                    feeds.pickups.drain(..excess);
                 }
                 let mut got_dest4 = false;
                 for line in hud.text.drain(..) {
-                    let text =
-                        format_message_with_titles(&line.message, &line.params, loc, titles);
+                    let is_chat = line.dest == 3 || line.dest == 5;
+                    let text = if is_chat {
+                        format_saytext_with_titles(&line.message, &line.params, loc, titles)
+                    } else {
+                        format_message_with_titles(&line.message, &line.params, loc, titles)
+                    };
                     if text.is_empty() {
                         continue;
                     }
@@ -691,7 +725,17 @@ impl Cs16App {
                             feeds.center = Some((text, now));
                             got_dest4 = true;
                         }
-                        3 | 5 => feeds.chat.push((text, now)),
+                        3 | 5 => {
+                            let team = line.params.first().and_then(|sender_name| {
+                                names
+                                    .iter()
+                                    .find(|(_, n)| *n == sender_name)
+                                    .and_then(|(slot0, _)| slot0.checked_add(1))
+                                    .and_then(|slot1| hud.players.get(&slot1))
+                                    .map(|p| p.team.clone())
+                            });
+                            feeds.chat.push((HudChatEntry { text, team }, now));
+                        }
                         1 => feeds.notify.push((text, now)),
                         _ => {}
                     }
@@ -1516,7 +1560,9 @@ impl Cs16App {
 
         let sess_now = self.session.now();
         let deaths: Vec<DeathNotice> = self.feeds.deaths.iter().map(|(d, _)| d.clone()).collect();
-        let chat: Vec<String> = self.feeds.chat.iter().map(|(c, _)| c.clone()).collect();
+        let chat_entries: Vec<HudChatEntry> = self.feeds.chat.iter().map(|(c, _)| c.clone()).collect();
+        let chat: Vec<String> = chat_entries.iter().map(|c| c.text.clone()).collect();
+        let pickups = self.feeds.pickups.clone();
         let notify: Vec<String> = self.feeds.notify.iter().map(|(c, _)| c.clone()).collect();
         let center = self.feeds.center.as_ref().map(|(c, _)| c.clone());
         let styled_menu_now = self
@@ -1691,6 +1737,8 @@ impl Cs16App {
                 overview: self.overview_tex.as_ref(),
                 buckets: Some(&self.weapon_buckets),
                 anim: Some(&self.hud_anim),
+                chat_entries: Some(&chat_entries),
+                pickup_history: &pickups,
                 observer_mode,
                 ..Default::default()
             };
@@ -1830,6 +1878,7 @@ impl Cs16App {
                     t_score,
                     players: &score_rows,
                     local_slot: self.session.local_slot(),
+                    short_headers: self.cvars.get_bool("scoreboard_shortheaders"),
                     fallback_palette: rt.vgui_bank.client_palette,
                 };
                 show_scoreboard_vgui(&rt.egui_ctx, &mut self.vgui_rt, &sb_ctx);
@@ -2628,7 +2677,7 @@ fn build_score_rows(hud: &HudState, names: &BTreeMap<u8, String>) -> (Vec<ScoreR
     let rows = hud
         .players
         .iter()
-        .filter(|(_, p)| p.team == "CT" || p.team == "TERRORIST")
+        .filter(|(_, p)| matches!(p.team.as_str(), "CT" | "TERRORIST" | "SPECTATOR" | "UNASSIGNED"))
         .filter_map(|(slot, p)| {
             let slot0 = slot.checked_sub(1)?;
             Some(ScoreRow {
@@ -2767,6 +2816,28 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].slot, 0);
         assert_eq!(rows[0].name, "Alpha");
+    }
+
+    #[test]
+    fn score_rows_include_spectators_and_unassigned() {
+        let mut hud = HudState::default();
+        for (slot1, team) in [(1u8, "CT"), (2, "TERRORIST"), (3, "SPECTATOR"), (4, "UNASSIGNED")] {
+            hud.players.insert(
+                slot1,
+                PlayerScore {
+                    team: team.to_string(),
+                    frags: i16::from(slot1),
+                    deaths: 0,
+                    attrib: 0,
+                    ..Default::default()
+                },
+            );
+        }
+        let names = BTreeMap::new();
+        let (rows, _, _) = build_score_rows(&hud, &names);
+        assert_eq!(rows.len(), 4);
+        assert!(rows.iter().any(|r| r.slot == 2 && r.team == "SPECTATOR"));
+        assert!(rows.iter().any(|r| r.slot == 3 && r.team == "UNASSIGNED"));
     }
 
     #[test]

@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use cs_assets::scheme::{HudSpriteEntry, load_hud_txt};
+use cs_assets::scheme::{HudSpriteEntry, load_hud_txt, parse_hud_txt};
 use cs_assets::spr::GoldSrcSprite;
 use cs_assets::vgui_font::SchemeFontSet;
 use cs_assets::vgui_res::TextAlignment;
@@ -27,6 +27,89 @@ const HUD_AMBER: Color32 = Color32::from_rgb(255, 160, 0);
 const HUD_RED: Color32 = Color32::from_rgb(255, 24, 16);
 const TEAM_CT_COLOR: Color32 = Color32::from_rgb(153, 204, 255);
 const TEAM_T_COLOR: Color32 = Color32::from_rgb(255, 64, 64);
+const CHAT_SPEC_COLOR: Color32 = Color32::from_rgb(204, 204, 204);
+const CHAT_GREEN_COLOR: Color32 = Color32::from_rgb(0, 204, 0);
+
+/// A formatted chat line with its sender's team for `CHudSayText` `\x02`/`\x03` team color lookup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HudChatEntry {
+    pub text: String,
+    pub team: Option<String>,
+}
+
+/// Team color used for `CHudSayText` (`\x02` / `\x03`) spans: CT blue, T red, Spectator/other gray.
+pub fn chat_team_color(team: Option<&str>) -> Color32 {
+    match team {
+        Some("CT") => TEAM_CT_COLOR,
+        Some("TERRORIST") => TEAM_T_COLOR,
+        _ => CHAT_SPEC_COLOR,
+    }
+}
+
+/// What kind of item appeared in `CHudAmmo::DrawHistory`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PickupKind {
+    Weapon { weapon_id: u8, empty: bool },
+    Ammo { ammo_id: u8, amount: u8 },
+    Item { classname: String },
+}
+
+/// One pickup history card shown on the right edge (`CHudAmmo::DrawHistory`, 5.0 s life).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PickupHistoryEntry {
+    pub kind: PickupKind,
+    pub end_time: f64,
+}
+
+/// Map a CS 1.6 `WeaponId` (`1..=30`) to its `weapon_*` HUD script name.
+pub fn weapon_name_from_id(weapon_id: u8) -> Option<&'static str> {
+    match weapon_id {
+        1 => Some("weapon_p228"),
+        3 => Some("weapon_scout"),
+        4 => Some("weapon_hegrenade"),
+        5 => Some("weapon_xm1014"),
+        6 => Some("weapon_c4"),
+        7 => Some("weapon_mac10"),
+        8 => Some("weapon_aug"),
+        9 => Some("weapon_smokegrenade"),
+        10 => Some("weapon_elite"),
+        11 => Some("weapon_fiveseven"),
+        12 => Some("weapon_ump45"),
+        13 => Some("weapon_sg550"),
+        14 => Some("weapon_galil"),
+        15 => Some("weapon_famas"),
+        16 => Some("weapon_usp"),
+        17 => Some("weapon_glock18"),
+        18 => Some("weapon_awp"),
+        19 => Some("weapon_mp5navy"),
+        20 => Some("weapon_m249"),
+        21 => Some("weapon_m3"),
+        22 => Some("weapon_m4a1"),
+        23 => Some("weapon_tmp"),
+        24 => Some("weapon_g3sg1"),
+        25 => Some("weapon_flashbang"),
+        26 => Some("weapon_deagle"),
+        27 => Some("weapon_sg552"),
+        28 => Some("weapon_ak47"),
+        29 => Some("weapon_knife"),
+        30 => Some("weapon_p90"),
+        _ => None,
+    }
+}
+
+/// Compute stacked vertical Y coordinate for `CHudAmmo::DrawHistory` slot `slot` (`0..12`).
+pub fn pickup_history_slot_y(screen_bottom: f32, max_h: f32, slot: usize, scale: f32) -> f32 {
+    screen_bottom + (-36.0 * scale - max_h) * 2.0 - (max_h + 5.0 * scale) * (slot as f32)
+}
+
+/// Compute fade alpha (`0..=255`) for `CHudAmmo::DrawHistory`: `min(255, (end_time - now) * 80.0)`.
+pub fn pickup_history_alpha(now: f64, end_time: f64) -> Option<u8> {
+    let rem = end_time - now;
+    if rem <= 0.0 {
+        return None;
+    }
+    Some((rem * 80.0).clamp(0.0, 255.0) as u8)
+}
 
 pub const HIDEHUD_WEAPONS: u8 = 1 << 0;
 pub const HIDEHUD_FLASHLIGHT: u8 = 1 << 1;
@@ -79,8 +162,43 @@ pub fn compute_hud_visibility(
 pub struct HudSprites {
     sheets: HashMap<String, (TextureHandle, [f32; 2])>,
     entries: HashMap<String, HudSpriteEntry>,
+    weapon_cards: HashMap<String, HudSpriteEntry>,
     radar_tex: Option<TextureHandle>,
 }
+
+const WEAPON_CARD_FILES: &[&str] = &[
+    "weapon_p228",
+    "weapon_scout",
+    "weapon_hegrenade",
+    "weapon_xm1014",
+    "weapon_c4",
+    "weapon_mac10",
+    "weapon_aug",
+    "weapon_smokegrenade",
+    "weapon_elite",
+    "weapon_fiveseven",
+    "weapon_ump45",
+    "weapon_sg550",
+    "weapon_galil",
+    "weapon_famas",
+    "weapon_usp",
+    "weapon_glock18",
+    "weapon_awp",
+    "weapon_mp5navy",
+    "weapon_m249",
+    "weapon_m3",
+    "weapon_m4a1",
+    "weapon_tmp",
+    "weapon_g3sg1",
+    "weapon_flashbang",
+    "weapon_deagle",
+    "weapon_sg552",
+    "weapon_ak47",
+    "weapon_knife",
+    "weapon_p90",
+    "weapon_shield",
+    "weapon_shieldgun",
+];
 
 impl HudSprites {
     pub fn load(ctx: &egui::Context, vfs: &Vfs) -> Self {
@@ -97,8 +215,39 @@ impl HudSprites {
             }
         }
 
+        let mut weapon_cards: HashMap<String, HudSpriteEntry> = HashMap::new();
+        for wname in WEAPON_CARD_FILES {
+            let txt_path = format!("sprites/{wname}.txt");
+            if let Ok(text) = vfs.read_string_lossy(&txt_path) {
+                let mut picked: Option<HudSpriteEntry> = None;
+                for e in parse_hud_txt(&text) {
+                    if e.name != "weapon" {
+                        continue;
+                    }
+                    let replace = match &picked {
+                        None => true,
+                        Some(prev) => {
+                            (e.resolution == 640 && prev.resolution != 640)
+                                || (prev.resolution != 640 && e.resolution > prev.resolution)
+                        }
+                    };
+                    if replace {
+                        picked = Some(e);
+                    }
+                }
+                if let Some(entry) = picked {
+                    let short = wname.strip_prefix("weapon_").unwrap_or(wname).to_string();
+                    weapon_cards.insert(short, entry);
+                }
+            }
+        }
+
         let mut sheets = HashMap::new();
-        for name in ["640hud7", "640hud1", "640hud2", "640hud16", "640hud3", "320hud2"] {
+        for name in [
+            "640hud1", "640hud2", "640hud3", "640hud4", "640hud5", "640hud6", "640hud7",
+            "640hud8", "640hud9", "640hud10", "640hud11", "640hud12", "640hud13", "640hud14",
+            "640hud15", "640hud16", "640hud17", "640hud18", "320hud1", "320hud2",
+        ] {
             let path = format!("sprites/{name}.spr");
             if let Ok(spr) = GoldSrcSprite::load(vfs, &path)
                 && let Some(frame) = spr.frames.first()
@@ -153,8 +302,44 @@ impl HudSprites {
         Self {
             sheets,
             entries,
+            weapon_cards,
             radar_tex,
         }
+    }
+
+    pub fn weapon_card_size(&self, name: &str, scale: f32) -> Option<Vec2> {
+        let short = name.strip_prefix("weapon_").unwrap_or(name);
+        let e = self.weapon_cards.get(short)?;
+        if !self.sheets.contains_key(&e.sprite_name) {
+            return None;
+        }
+        Some(Vec2::new(e.width as f32 * scale, e.height as f32 * scale))
+    }
+
+    pub fn draw_weapon_card(
+        &self,
+        painter: &egui::Painter,
+        name: &str,
+        pos: Pos2,
+        scale: f32,
+        tint: Color32,
+    ) -> Option<Vec2> {
+        let short = name.strip_prefix("weapon_").unwrap_or(name);
+        let e = self.weapon_cards.get(short)?;
+        let (tex, [tw, th]) = self.sheets.get(&e.sprite_name)?;
+        let u0 = e.x as f32 / *tw;
+        let v0 = e.y as f32 / *th;
+        let u1 = (e.x + e.width) as f32 / *tw;
+        let v1 = (e.y + e.height) as f32 / *th;
+        let size = Vec2::new(e.width as f32 * scale, e.height as f32 * scale);
+        let rect = Rect::from_min_size(pos, size);
+        painter.image(
+            tex.id(),
+            rect,
+            Rect::from_min_max(Pos2::new(u0, v0), Pos2::new(u1, v1)),
+            tint,
+        );
+        Some(size)
     }
 
     pub fn sprite_size(&self, name: &str, scale: f32) -> Option<Vec2> {
@@ -461,6 +646,8 @@ pub struct HudExtrasContext<'a> {
     pub overview: Option<&'a OverviewMapTex>,
     pub buckets: Option<&'a WeaponBucketState>,
     pub anim: Option<&'a HudAnimState>,
+    pub chat_entries: Option<&'a [HudChatEntry]>,
+    pub pickup_history: &'a [PickupHistoryEntry],
     pub hud_draw: bool,
     pub hud_centerid: bool,
     pub hud_saytext_internal: bool,
@@ -479,6 +666,8 @@ impl Default for HudExtrasContext<'_> {
             overview: None,
             buckets: None,
             anim: None,
+            chat_entries: None,
+            pickup_history: &[],
             hud_draw: true,
             hud_centerid: true,
             hud_saytext_internal: true,
@@ -912,6 +1101,100 @@ fn draw_cs16_hud_impl(
         }
     }
 
+    // 6b. Pickup history cards (`CHudAmmo::DrawHistory`, FUN_10046bc0).
+    if vis.ammo && hud.alive && !extras.pickup_history.is_empty() {
+        let max_h = 45.0 * scale;
+        for (slot, entry) in extras.pickup_history.iter().take(12).enumerate() {
+            let Some(alpha) = pickup_history_alpha(hud.now, entry.end_time) else {
+                continue;
+            };
+            let y = pickup_history_slot_y(screen.bottom(), max_h, slot, scale);
+            match &entry.kind {
+                PickupKind::Weapon { weapon_id, empty } => {
+                    let base_col = if *empty { Color32::from_rgb(255, 16, 16) } else { HUD_AMBER };
+                    let tint = hud_tinted_alpha(base_col, alpha);
+                    let wname = state
+                        .weapons
+                        .get(weapon_id)
+                        .map(|w| w.name.as_str())
+                        .or_else(|| weapon_name_from_id(*weapon_id));
+                    if let (Some(sp), Some(name)) = (sprites, wname)
+                        && let Some(sz) = sp.weapon_card_size(name, scale)
+                    {
+                        let x = screen.right() - sz.x - 10.0 * scale;
+                        let _ = sp.draw_weapon_card(&painter, name, Pos2::new(x, y), scale, tint);
+                    } else if let Some(name) = wname {
+                        let short = name.strip_prefix("weapon_").unwrap_or(name);
+                        hud_paint_text(
+                            ctx,
+                            &painter,
+                            &mut font_ctx,
+                            egui::Align2::RIGHT_TOP,
+                            Pos2::new(screen.right() - 10.0 * scale, y),
+                            short,
+                            14.0 * scale,
+                            tint,
+                        );
+                    }
+                }
+                PickupKind::Ammo { ammo_id, amount } => {
+                    let tint = hud_tinted_alpha(HUD_AMBER, alpha);
+                    let wid = state
+                        .weapons
+                        .values()
+                        .find(|w| w.ammo1_type == *ammo_id)
+                        .map(|w| w.weapon_id);
+                    let icon_x = screen.right() - 24.0 * scale;
+                    let has_icon = sprites
+                        .zip(wid)
+                        .and_then(|(sp, w)| sp.draw_ammo_icon(&painter, w, Pos2::new(icon_x, y), scale, tint))
+                        .is_some();
+                    let num_right = if has_icon { icon_x - 6.0 * scale } else { screen.right() - 24.0 * scale };
+                    if let Some(sp) = sprites {
+                        sp.draw_number_right(&painter, i32::from(*amount), num_right, y, scale, tint, 1);
+                    } else {
+                        hud_paint_text(
+                            ctx,
+                            &painter,
+                            &mut font_ctx,
+                            egui::Align2::RIGHT_TOP,
+                            Pos2::new(num_right, y),
+                            &amount.to_string(),
+                            14.0 * scale,
+                            tint,
+                        );
+                    }
+                }
+                PickupKind::Item { classname } => {
+                    let tint = hud_tinted_alpha(HUD_AMBER, alpha);
+                    let sprite_name = match classname.as_str() {
+                        "item_kevlar" => "suit_full",
+                        "item_assaultsuit" => "suithelmet_full",
+                        "item_thighpack" => "defuser",
+                        other => other,
+                    };
+                    if let Some(sp) = sprites
+                        && let Some(sz) = sp.sprite_size(sprite_name, scale)
+                    {
+                        let x = screen.right() - sz.x - 10.0 * scale;
+                        let _ = sp.draw_sprite(&painter, sprite_name, Pos2::new(x, y), scale, tint);
+                    } else {
+                        hud_paint_text(
+                            ctx,
+                            &painter,
+                            &mut font_ctx,
+                            egui::Align2::RIGHT_TOP,
+                            Pos2::new(screen.right() - 10.0 * scale, y),
+                            classname,
+                            14.0 * scale,
+                            tint,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     // 7. Top-left: the radar of the teammates the server reports (`Radar`) and the bomb.
     if vis.radar {
         draw_radar_with_extras(&painter, sprites, hud, extras, scale);
@@ -1260,17 +1543,31 @@ fn draw_cs16_hud_impl(
     }
     if extras.hud_saytext_internal {
         let normal_col = Color32::from_rgb(extras.con_color[0], extras.con_color[1], extras.con_color[2]);
-        let team_col = TEAM_CT_COLOR;
-        let green_col = Color32::from_rgb(64, 255, 64);
+        let green_col = CHAT_GREEN_COLOR;
         let mut cy = if !hud.alive || extras.observer_mode != 0 {
             screen.bottom() - 60.0 * scale
         } else {
             screen.bottom() - (num_h * 2.75)
         };
-        for line in hud.chat.iter().rev().take(5) {
+        let fallback_lines: Vec<HudChatEntry>;
+        let chat_iter: &[HudChatEntry] = if let Some(entries) = extras.chat_entries {
+            entries
+        } else {
+            fallback_lines = hud
+                .chat
+                .iter()
+                .map(|line| HudChatEntry {
+                    text: line.clone(),
+                    team: Some("CT".to_string()),
+                })
+                .collect();
+            &fallback_lines
+        };
+        for entry in chat_iter.iter().rev().take(5) {
+            let team_col = chat_team_color(entry.team.as_deref());
             let mut sx = 10.0 * scale;
             let mut cur_col = normal_col;
-            for seg in parse_saytext_spans(line, normal_col, team_col, green_col) {
+            for seg in parse_saytext_spans(&entry.text, normal_col, team_col, green_col) {
                 if seg.text.is_empty() {
                     cur_col = seg.color;
                     continue;
@@ -1332,13 +1629,42 @@ struct SayTextSpan {
     text: String,
 }
 
-/// Split CS 1.6 `SayText` control codes (`\x01` normal, `\x03` team, `\x04` green) into colored spans.
+/// Split CS 1.6 `SayText` control codes (`\x01` normal, `\x02` author-name team prefix, `\x03` team, `\x04` green).
 fn parse_saytext_spans(
     line: &str,
     normal_col: Color32,
     team_col: Color32,
     green_col: Color32,
 ) -> Vec<SayTextSpan> {
+    if let Some(rest) = line.strip_prefix('\x02') {
+        if let Some(idx) = rest
+            .find(" (RADIO):")
+            .or_else(|| rest.find(" :  "))
+            .or_else(|| rest.find(" : "))
+            .or_else(|| rest.find(':'))
+            && idx > 0
+        {
+            return vec![
+                SayTextSpan {
+                    color: team_col,
+                    text: rest[..idx].to_string(),
+                },
+                SayTextSpan {
+                    color: normal_col,
+                    text: rest[idx..].to_string(),
+                },
+            ];
+        }
+        return if rest.is_empty() {
+            Vec::new()
+        } else {
+            vec![SayTextSpan {
+                color: team_col,
+                text: rest.to_string(),
+            }]
+        };
+    }
+
     let mut spans = Vec::new();
     let mut cur_col = normal_col;
     let mut buf = String::new();
@@ -1347,6 +1673,7 @@ fn parse_saytext_spans(
             '\x01' => Some(normal_col),
             '\x03' => Some(team_col),
             '\x04' => Some(green_col),
+            '\x02' => continue,
             _ => None,
         };
         if let Some(col) = next {
@@ -1783,5 +2110,57 @@ mod tests {
         assert!(!vis.weapon_buckets);
         assert!(!vis.radar);
         assert!(!vis.crosshair);
+    }
+
+    #[test]
+    fn saytext_spans_apply_valve_stx_team_and_inline_controls() {
+        let normal = Color32::from_rgb(255, 180, 30);
+        let ct = chat_team_color(Some("CT"));
+        let t = chat_team_color(Some("TERRORIST"));
+        let spec = chat_team_color(None);
+        assert_eq!(ct, TEAM_CT_COLOR);
+        assert_eq!(t, TEAM_T_COLOR);
+        assert_eq!(spec, CHAT_SPEC_COLOR);
+
+        // Leading \x02 colors only author up to " :  " or " (RADIO):" and resets to normal.
+        let all = parse_saytext_spans("\x02Alice :  hi \x04ignore", normal, ct, CHAT_GREEN_COLOR);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].color, ct);
+        assert_eq!(all[0].text, "Alice");
+        assert_eq!(all[1].color, normal);
+        assert_eq!(all[1].text, " :  hi \x04ignore");
+
+        let radio = parse_saytext_spans("\x02Bob (RADIO): Go go go!", normal, t, CHAT_GREEN_COLOR);
+        assert_eq!(radio.len(), 2);
+        assert_eq!(radio[0].color, t);
+        assert_eq!(radio[0].text, "Bob");
+        assert_eq!(radio[1].color, normal);
+        assert_eq!(radio[1].text, " (RADIO): Go go go!");
+
+        // Inline \x01 / \x03 / \x04 switches cleanly, while stray \x02 does not.
+        let inline = parse_saytext_spans(
+            "\x01(CT) \x03Bob\x01 :  \x04green\x02still_green",
+            normal,
+            ct,
+            CHAT_GREEN_COLOR,
+        );
+        assert_eq!(inline.len(), 4);
+        assert_eq!((inline[0].color, inline[0].text.as_str()), (normal, "(CT) "));
+        assert_eq!((inline[1].color, inline[1].text.as_str()), (ct, "Bob"));
+        assert_eq!((inline[2].color, inline[2].text.as_str()), (normal, " :  "));
+        assert_eq!((inline[3].color, inline[3].text.as_str()), (CHAT_GREEN_COLOR, "greenstill_green"));
+    }
+
+    #[test]
+    fn pickup_history_slot_y_and_alpha_match_client_dll() {
+        assert_eq!(pickup_history_slot_y(800.0, 45.0, 0, 1.0), 638.0);
+        assert_eq!(pickup_history_slot_y(800.0, 45.0, 1, 1.0), 588.0);
+        assert_eq!(pickup_history_slot_y(800.0, 45.0, 2, 1.0), 538.0);
+        assert_eq!(pickup_history_alpha(10.0, 10.0), None);
+        assert_eq!(pickup_history_alpha(11.0, 10.0), None);
+        assert_eq!(pickup_history_alpha(10.0, 15.0), Some(255));
+        assert_eq!(pickup_history_alpha(14.0, 15.0), Some(80));
+        assert_eq!(weapon_name_from_id(16), Some("weapon_usp"));
+        assert_eq!(weapon_name_from_id(28), Some("weapon_ak47"));
     }
 }

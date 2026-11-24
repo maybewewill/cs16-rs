@@ -15,8 +15,8 @@ use cs_assets::vgui_scripts::{
 };
 use cs_client::ui::console::{ConsoleRenderCtx, ConsoleUi, console_default_rect};
 use cs_client::ui::hud::{
-    HudAnimState, HudExtrasContext, HudView, draw_cs16_hud_with_extras,
-    draw_cs16_hud_with_runtime, hud_fade_alpha,
+    HudAnimState, HudChatEntry, HudExtrasContext, HudSprites, HudView, PickupHistoryEntry,
+    PickupKind, draw_cs16_hud_with_extras, draw_cs16_hud_with_runtime, hud_fade_alpha,
 };
 use cs_client::ui::hud_extras::{
     WeaponBucketState, compute_damage_quadrants, damage_hazard_icons, evaluate_dhud_text_fx,
@@ -26,7 +26,10 @@ use cs_client::ui::main_menu::{MainMenuRenderCtx, MainMenuUi};
 use cs_client::ui::options::{
     OptionsRenderCtx, OptionsTab, OptionsUi, parse_kb_act_list, render_scr_options,
 };
-use cs_client::ui::scoreboard::{ScoreRow, scoreboard_rect, scoreboard_to_list_panel, show_scoreboard};
+use cs_client::ui::scoreboard::{
+    ScoreRow, ScoreboardRenderCtx, scoreboard_rect, scoreboard_to_list_panel, show_scoreboard,
+    show_scoreboard_vgui,
+};
 use cs_client::ui::screens::{
     BuyClassTeamMenuUi, CommandMenuUi, DemoPlayerUi, DialogRenderCtx, DisconnectErrorDialog,
     LoadingDialogUi, MotdRenderCtx, MotdVguiUi, ServerBrowserEntry, ServerBrowserTab,
@@ -1771,4 +1774,120 @@ fn screen5_goldsrc_cvars_registered() {
     ] {
         assert_eq!(cvars.get_str(name), expected, "cvar {name}");
     }
+}
+
+#[test]
+fn screen5_scoreboard_short_headers_local_highlight_and_spectators() {
+    let mut rt = VguiRuntime::new();
+    let vfs = discover_retail_vfs();
+    let cp = client_palette();
+    let rows = vec![
+        ScoreRow {
+            slot: 0,
+            name: "LocalCT".into(),
+            frags: 5,
+            deaths: 1,
+            ping: 20,
+            team: "CT".into(),
+            dead: false,
+            bomb: false,
+            vip: false,
+        },
+        ScoreRow {
+            slot: 2,
+            name: "SpecViewer".into(),
+            frags: 0,
+            deaths: 0,
+            ping: 45,
+            team: "SPECTATOR".into(),
+            dead: false,
+            bomb: false,
+            vip: false,
+        },
+    ];
+    let prims = run_egui_frame(|ctx| {
+        let sb = ScoreboardRenderCtx {
+            vfs: vfs.as_ref(),
+            loc: None,
+            hostname: "Test Server",
+            map_name: "de_dust2",
+            ct_score: 3,
+            t_score: 2,
+            players: &rows,
+            local_slot: Some(0),
+            short_headers: true,
+            fallback_palette: cp,
+        };
+        show_scoreboard_vgui(ctx, &mut rt, &sb);
+    });
+    assert!(prims > 0);
+}
+
+#[test]
+fn screen5_hud_saytext_and_pickup_history_with_retail_weapon_cards() {
+    let vfs = discover_retail_vfs();
+    let hud = HudState::default();
+    let names = BTreeMap::new();
+    let owned = HashSet::new();
+    let chat_entries = vec![
+        HudChatEntry {
+            text: "\x02Alice :  hi".into(),
+            team: Some("CT".into()),
+        },
+        HudChatEntry {
+            text: "\x01*DEAD*(Terrorist) \x03Bob\x01 :  \x04A site".into(),
+            team: Some("TERRORIST".into()),
+        },
+    ];
+    let pickups = vec![
+        PickupHistoryEntry {
+            kind: PickupKind::Weapon { weapon_id: 16, empty: false },
+            end_time: 14.0,
+        },
+        PickupHistoryEntry {
+            kind: PickupKind::Weapon { weapon_id: 28, empty: true },
+            end_time: 13.5,
+        },
+        PickupHistoryEntry {
+            kind: PickupKind::Item { classname: "item_kevlar".into() },
+            end_time: 13.0,
+        },
+    ];
+
+    let mut sprites_holder: Option<HudSprites> = None;
+    let prims = run_egui_frame(|ctx| {
+        if sprites_holder.is_none()
+            && let Some(ref v) = vfs
+        {
+            let sp = HudSprites::load(ctx, v);
+            assert_eq!(sp.weapon_card_size("weapon_usp", 1.0), Some(egui::Vec2::new(170.0, 45.0)));
+            assert_eq!(sp.weapon_card_size("weapon_ak47", 1.0), Some(egui::Vec2::new(170.0, 45.0)));
+            assert_eq!(sp.weapon_card_size("weapon_knife", 1.0), Some(egui::Vec2::new(170.0, 45.0)));
+            sprites_holder = Some(sp);
+        }
+        let view = HudView {
+            hud: &hud,
+            now: 10.0,
+            time_sec: 10.0,
+            names: &names,
+            owned: &owned,
+            feed: &[],
+            chat: &[],
+            notify: &[],
+            center: None,
+            weapon_switch_timer: 0.0,
+            alive: true,
+            scoped: false,
+            eye: Vec3::ZERO,
+            yaw_deg: 0.0,
+            underwater_tint: None,
+        };
+        let extras = HudExtrasContext {
+            chat_entries: Some(&chat_entries),
+            pickup_history: &pickups,
+            ..Default::default()
+        };
+        draw_cs16_hud_with_extras(ctx, sprites_holder.as_ref(), &view, &extras);
+    });
+    assert!(prims > 0);
 }

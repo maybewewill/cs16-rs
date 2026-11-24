@@ -11,7 +11,6 @@ use std::collections::BTreeMap;
 
 use cs_proto48::delta::GoldSrcUserCmd;
 use cs_proto48::event::EventArgs;
-use glam::Vec3;
 
 use crate::predict::{LocalState, PredictedSound};
 
@@ -20,8 +19,11 @@ pub const IN_ATTACK: u16 = 1 << 0;
 pub const IN_ATTACK2: u16 = 1 << 11;
 pub const IN_RELOAD: u16 = 1 << 13;
 
-/// `PLAYER_HOLDING_SHIELD` bit in `clientdata.iuser3`.
-pub const PLAYER_HOLDING_SHIELD: i32 = 1 << 2;
+/// `iuser3` bitmasks (`cdll_dll.h` / `cs-pm::pm::consts`).
+pub const PLAYER_CAN_SHOOT: i32 = 1 << 0;
+pub const PLAYER_FREEZE_TIME_OVER: i32 = 1 << 1;
+pub const PLAYER_IN_BOMB_ZONE: i32 = 1 << 2;
+pub const PLAYER_HOLDING_SHIELD: i32 = 1 << 3;
 
 /// `WPNSTATE_*` bits in `weapon_data_t.m_iWeaponState`.
 pub const WPNSTATE_USP_SILENCED: i32 = 1 << 0;
@@ -83,6 +85,13 @@ pub struct PredictWeaponExtras {
     pub shots_fired: i32,
     pub direction: i32,
     pub last_fire: f32,
+    pub has_fired: bool,
+    pub time_since_fire: f32,
+    pub delay_fire: bool,
+    pub decrease_shots_timer: f32,
+    pub burst_shots_fired: i32,
+    pub burst_timer: f32,
+    pub burst_spread: f32,
     pub play_empty_sound: bool,
     pub resume_zoom: bool,
     pub last_zoom: f32,
@@ -95,9 +104,27 @@ impl Default for PredictWeaponExtras {
             shots_fired: 0,
             direction: 0,
             last_fire: 0.0,
+            has_fired: false,
+            time_since_fire: 0.0,
+            delay_fire: false,
+            decrease_shots_timer: 0.0,
+            burst_shots_fired: 0,
+            burst_timer: 0.0,
+            burst_spread: 0.0,
             play_empty_sound: true,
             resume_zoom: false,
             last_zoom: DEFAULT_FOV,
+        }
+    }
+}
+
+impl PredictWeaponExtras {
+    /// Initializes per-weapon deploy accuracy matching `CBasePlayerWeapon::Deploy` in `mp.dll` / `cs-game`.
+    pub fn for_weapon(wid: i32) -> Self {
+        let accuracy = weapon_spec(wid).map_or(0.2, |s| s.initial_accuracy());
+        Self {
+            accuracy,
+            ..Self::default()
         }
     }
 }
@@ -193,11 +220,25 @@ struct KickParams {
     direction_change: i32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AccFormula {
+    CubedInt,
+    SquaredInt,
+    Mp5SquaredF64,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum WeaponKind {
     Pistol {
         range_coeffs: [f64; 4],
+        alt_range_coeffs: Option<[f64; 4]>,
         cycle_time: f32,
+        burst_cycle_time: Option<f32>,
+        deploy_accuracy: f32,
+        acc_decay_base: f32,
+        acc_decay_k: f32,
+        acc_high: f32,
+        acc_low: f32,
         silencer_bit: Option<i32>,
         burst_bit: Option<i32>,
     },
@@ -209,18 +250,23 @@ enum WeaponKind {
         accuracy_divisor: i32,
         acc_base: f32,
         acc_cap: f32,
-        mp5_f64_acc: bool,
+        acc_formula: AccFormula,
+        deploy_accuracy: f32,
+        reload_accuracy: f32,
+        kick_air_first: bool,
         cycle_time: f32,
         zoom_cycle_time: Option<f32>,
         silencer_bit: Option<i32>,
         burst_bit: Option<i32>,
         stand_k: f64,
+        silenced_stand_k: Option<f64>,
         duck_k: f64,
         move_k: f64,
         air_k: f64,
         move_base: f64,
         air_base: f64,
         move_speed_thresh: f32,
+        punch_scale: f32,
         kick_stand: KickParams,
         kick_duck: KickParams,
         kick_move: KickParams,
@@ -230,6 +276,7 @@ enum WeaponKind {
         cycle_time: f32,
         two_step_zoom_second: f32,
         zoom_max_speed: f32,
+        deploy_accuracy: f32,
     },
     Knife,
     Grenade,
@@ -248,6 +295,25 @@ struct WeaponSpec {
     kind: WeaponKind,
 }
 
+impl WeaponSpec {
+    fn initial_accuracy(self) -> f32 {
+        match self.kind {
+            WeaponKind::Pistol { deploy_accuracy, .. } => deploy_accuracy,
+            WeaponKind::Automatic { deploy_accuracy, .. } => deploy_accuracy,
+            WeaponKind::Sniper { deploy_accuracy, .. } => deploy_accuracy,
+            _ => 0.2,
+        }
+    }
+
+    fn reload_accuracy(self) -> f32 {
+        match self.kind {
+            WeaponKind::Pistol { deploy_accuracy, .. } => deploy_accuracy,
+            WeaponKind::Automatic { reload_accuracy, .. } => reload_accuracy,
+            _ => 0.2,
+        }
+    }
+}
+
 fn weapon_spec(id: i32) -> Option<WeaponSpec> {
     use weapon_id::*;
     Some(match id {
@@ -261,7 +327,14 @@ fn weapon_spec(id: i32) -> Option<WeaponSpec> {
             is_pistol: true,
             kind: WeaponKind::Pistol {
                 range_coeffs: [1.5, 0.255, 0.075, 0.15],
+                alt_range_coeffs: None,
                 cycle_time: 0.15,
+                burst_cycle_time: None,
+                deploy_accuracy: 0.9,
+                acc_decay_base: 0.325,
+                acc_decay_k: 0.3,
+                acc_high: 0.9,
+                acc_low: 0.6,
                 silencer_bit: None,
                 burst_bit: None,
             },
@@ -276,7 +349,14 @@ fn weapon_spec(id: i32) -> Option<WeaponSpec> {
             is_pistol: true,
             kind: WeaponKind::Pistol {
                 range_coeffs: [1.0, 0.165, 0.075, 0.1],
+                alt_range_coeffs: Some([1.2, 0.185, 0.095, 0.3]),
                 cycle_time: 0.15,
+                burst_cycle_time: Some(0.5),
+                deploy_accuracy: 0.9,
+                acc_decay_base: 0.325,
+                acc_decay_k: 0.275,
+                acc_high: 0.9,
+                acc_low: 0.6,
                 silencer_bit: None,
                 burst_bit: Some(WPNSTATE_GLOCK18_BURST_MODE),
             },
@@ -291,7 +371,14 @@ fn weapon_spec(id: i32) -> Option<WeaponSpec> {
             is_pistol: true,
             kind: WeaponKind::Pistol {
                 range_coeffs: [1.2, 0.225, 0.08, 0.1],
+                alt_range_coeffs: Some([1.3, 0.25, 0.125, 0.15]),
                 cycle_time: 0.15,
+                burst_cycle_time: None,
+                deploy_accuracy: 0.92,
+                acc_decay_base: 0.3,
+                acc_decay_k: 0.275,
+                acc_high: 0.92,
+                acc_low: 0.6,
                 silencer_bit: Some(WPNSTATE_USP_SILENCED),
                 burst_bit: None,
             },
@@ -306,7 +393,14 @@ fn weapon_spec(id: i32) -> Option<WeaponSpec> {
             is_pistol: true,
             kind: WeaponKind::Pistol {
                 range_coeffs: [1.5, 0.25, 0.115, 0.13],
+                alt_range_coeffs: None,
                 cycle_time: 0.225,
+                burst_cycle_time: None,
+                deploy_accuracy: 0.9,
+                acc_decay_base: 0.4,
+                acc_decay_k: 0.35,
+                acc_high: 0.9,
+                acc_low: 0.55,
                 silencer_bit: None,
                 burst_bit: None,
             },
@@ -321,7 +415,14 @@ fn weapon_spec(id: i32) -> Option<WeaponSpec> {
             is_pistol: true,
             kind: WeaponKind::Pistol {
                 range_coeffs: [1.5, 0.255, 0.075, 0.15],
+                alt_range_coeffs: None,
                 cycle_time: 0.15,
+                burst_cycle_time: None,
+                deploy_accuracy: 0.92,
+                acc_decay_base: 0.275,
+                acc_decay_k: 0.25,
+                acc_high: 0.92,
+                acc_low: 0.725,
                 silencer_bit: None,
                 burst_bit: None,
             },
@@ -336,7 +437,14 @@ fn weapon_spec(id: i32) -> Option<WeaponSpec> {
             is_pistol: true,
             kind: WeaponKind::Pistol {
                 range_coeffs: [1.3, 0.175, 0.08, 0.1],
+                alt_range_coeffs: None,
                 cycle_time: 0.075,
+                burst_cycle_time: None,
+                deploy_accuracy: 0.88,
+                acc_decay_base: 0.325,
+                acc_decay_k: 0.275,
+                acc_high: 0.88,
+                acc_low: 0.55,
                 silencer_bit: None,
                 burst_bit: None,
             },
@@ -379,21 +487,26 @@ fn weapon_spec(id: i32) -> Option<WeaponSpec> {
                 accuracy_divisor: 200,
                 acc_base: 0.6,
                 acc_cap: 1.65,
-                mp5_f64_acc: false,
+                acc_formula: AccFormula::CubedInt,
+                deploy_accuracy: 0.15,
+                reload_accuracy: 0.0,
+                kick_air_first: true,
                 cycle_time: 0.07,
                 zoom_cycle_time: None,
                 silencer_bit: None,
                 burst_bit: None,
                 stand_k: 0.03,
+                silenced_stand_k: None,
                 duck_k: 0.03,
                 move_k: 0.03,
                 air_k: 0.375,
                 move_base: 0.0,
                 air_base: 0.0,
                 move_speed_thresh: 140.0,
-                kick_stand: KickParams { up_base: 0.5, lateral_base: 0.275, up_modifier: 0.15, lateral_modifier: 0.03, up_max: 3.0, lateral_max: 2.0, direction_change: 10 },
-                kick_duck: KickParams { up_base: 0.45, lateral_base: 0.225, up_modifier: 0.125, lateral_modifier: 0.025, up_max: 2.75, lateral_max: 1.75, direction_change: 10 },
-                kick_move: KickParams { up_base: 0.9, lateral_base: 0.45, up_modifier: 0.25, lateral_modifier: 0.055, up_max: 4.5, lateral_max: 3.0, direction_change: 6 },
+                punch_scale: 100.0,
+                kick_stand: KickParams { up_base: 0.775, lateral_base: 0.425, up_modifier: 0.2, lateral_modifier: 0.03, up_max: 3.0, lateral_max: 2.75, direction_change: 9 },
+                kick_duck: KickParams { up_base: 0.75, lateral_base: 0.4, up_modifier: 0.175, lateral_modifier: 0.03, up_max: 2.75, lateral_max: 2.5, direction_change: 10 },
+                kick_move: KickParams { up_base: 0.9, lateral_base: 0.45, up_modifier: 0.25, lateral_modifier: 0.035, up_max: 3.5, lateral_max: 2.75, direction_change: 7 },
                 kick_air: KickParams { up_base: 1.3, lateral_base: 0.55, up_modifier: 0.4, lateral_modifier: 0.05, up_max: 4.75, lateral_max: 3.75, direction_change: 5 },
             },
         },
@@ -409,22 +522,27 @@ fn weapon_spec(id: i32) -> Option<WeaponSpec> {
                 accuracy_divisor: 200,
                 acc_base: 0.55,
                 acc_cap: 1.4,
-                mp5_f64_acc: false,
+                acc_formula: AccFormula::CubedInt,
+                deploy_accuracy: 0.2,
+                reload_accuracy: 0.2,
+                kick_air_first: true,
                 cycle_time: 0.07,
                 zoom_cycle_time: None,
                 silencer_bit: None,
                 burst_bit: None,
                 stand_k: 0.03,
+                silenced_stand_k: None,
                 duck_k: 0.03,
                 move_k: 0.03,
                 air_k: 0.25,
                 move_base: 0.0,
                 air_base: 0.0,
                 move_speed_thresh: 140.0,
-                kick_stand: KickParams { up_base: 0.45, lateral_base: 0.25, up_modifier: 0.15, lateral_modifier: 0.03, up_max: 2.75, lateral_max: 2.0, direction_change: 10 },
-                kick_duck: KickParams { up_base: 0.4, lateral_base: 0.2, up_modifier: 0.125, lateral_modifier: 0.025, up_max: 2.5, lateral_max: 1.75, direction_change: 10 },
-                kick_move: KickParams { up_base: 0.8, lateral_base: 0.4, up_modifier: 0.2, lateral_modifier: 0.03, up_max: 3.75, lateral_max: 2.5, direction_change: 6 },
-                kick_air: KickParams { up_base: 1.1, lateral_base: 0.5, up_modifier: 0.35, lateral_modifier: 0.04, up_max: 4.5, lateral_max: 3.5, direction_change: 5 },
+                punch_scale: 100.0,
+                kick_stand: KickParams { up_base: 0.725, lateral_base: 0.375, up_modifier: 0.15, lateral_modifier: 0.025, up_max: 2.75, lateral_max: 2.25, direction_change: 9 },
+                kick_duck: KickParams { up_base: 0.7, lateral_base: 0.35, up_modifier: 0.125, lateral_modifier: 0.025, up_max: 2.5, lateral_max: 2.0, direction_change: 10 },
+                kick_move: KickParams { up_base: 0.8, lateral_base: 0.4, up_modifier: 0.2, lateral_modifier: 0.03, up_max: 3.0, lateral_max: 2.5, direction_change: 7 },
+                kick_air: KickParams { up_base: 1.1, lateral_base: 0.5, up_modifier: 0.35, lateral_modifier: 0.045, up_max: 4.5, lateral_max: 3.5, direction_change: 6 },
             },
         },
         MP5N => WeaponSpec {
@@ -439,22 +557,27 @@ fn weapon_spec(id: i32) -> Option<WeaponSpec> {
                 accuracy_divisor: 220,
                 acc_base: 0.45,
                 acc_cap: 0.75,
-                mp5_f64_acc: true,
+                acc_formula: AccFormula::Mp5SquaredF64,
+                deploy_accuracy: 0.0,
+                reload_accuracy: 0.0,
+                kick_air_first: true,
                 cycle_time: 0.075,
                 zoom_cycle_time: None,
                 silencer_bit: None,
                 burst_bit: None,
                 stand_k: 0.04,
+                silenced_stand_k: None,
                 duck_k: 0.04,
                 move_k: 0.04,
                 air_k: 0.2,
                 move_base: 0.0,
                 air_base: 0.0,
                 move_speed_thresh: 140.0,
-                kick_stand: KickParams { up_base: 0.45, lateral_base: 0.2, up_modifier: 0.11, lateral_modifier: 0.03, up_max: 2.25, lateral_max: 1.5, direction_change: 10 },
-                kick_duck: KickParams { up_base: 0.4, lateral_base: 0.18, up_modifier: 0.1, lateral_modifier: 0.025, up_max: 2.0, lateral_max: 1.35, direction_change: 10 },
-                kick_move: KickParams { up_base: 0.7, lateral_base: 0.35, up_modifier: 0.2, lateral_modifier: 0.05, up_max: 3.25, lateral_max: 2.0, direction_change: 7 },
-                kick_air: KickParams { up_base: 0.9, lateral_base: 0.45, up_modifier: 0.35, lateral_modifier: 0.04, up_max: 4.25, lateral_max: 3.25, direction_change: 5 },
+                punch_scale: 100.0,
+                kick_stand: KickParams { up_base: 0.25, lateral_base: 0.175, up_modifier: 0.125, lateral_modifier: 0.02, up_max: 2.25, lateral_max: 1.25, direction_change: 10 },
+                kick_duck: KickParams { up_base: 0.225, lateral_base: 0.15, up_modifier: 0.1, lateral_modifier: 0.015, up_max: 2.0, lateral_max: 1.0, direction_change: 10 },
+                kick_move: KickParams { up_base: 0.5, lateral_base: 0.275, up_modifier: 0.2, lateral_modifier: 0.03, up_max: 3.0, lateral_max: 2.0, direction_change: 10 },
+                kick_air: KickParams { up_base: 0.9, lateral_base: 0.475, up_modifier: 0.35, lateral_modifier: 0.0425, up_max: 5.0, lateral_max: 3.0, direction_change: 6 },
             },
         },
         UMP45 => WeaponSpec {
@@ -469,22 +592,27 @@ fn weapon_spec(id: i32) -> Option<WeaponSpec> {
                 accuracy_divisor: 210,
                 acc_base: 0.5,
                 acc_cap: 1.0,
-                mp5_f64_acc: false,
+                acc_formula: AccFormula::SquaredInt,
+                deploy_accuracy: 0.0,
+                reload_accuracy: 0.0,
+                kick_air_first: true,
                 cycle_time: 0.1,
                 zoom_cycle_time: None,
                 silencer_bit: None,
                 burst_bit: None,
                 stand_k: 0.04,
+                silenced_stand_k: None,
                 duck_k: 0.04,
                 move_k: 0.04,
                 air_k: 0.24,
                 move_base: 0.0,
                 air_base: 0.0,
                 move_speed_thresh: 140.0,
-                kick_stand: KickParams { up_base: 0.5, lateral_base: 0.275, up_modifier: 0.15, lateral_modifier: 0.03, up_max: 3.0, lateral_max: 2.0, direction_change: 10 },
-                kick_duck: KickParams { up_base: 0.45, lateral_base: 0.225, up_modifier: 0.125, lateral_modifier: 0.025, up_max: 2.75, lateral_max: 1.75, direction_change: 10 },
-                kick_move: KickParams { up_base: 0.9, lateral_base: 0.45, up_modifier: 0.25, lateral_modifier: 0.055, up_max: 4.5, lateral_max: 3.0, direction_change: 6 },
-                kick_air: KickParams { up_base: 1.3, lateral_base: 0.55, up_modifier: 0.4, lateral_modifier: 0.05, up_max: 4.75, lateral_max: 3.75, direction_change: 5 },
+                punch_scale: 100.0,
+                kick_stand: KickParams { up_base: 0.275, lateral_base: 0.2, up_modifier: 0.15, lateral_modifier: 0.0225, up_max: 2.5, lateral_max: 1.5, direction_change: 10 },
+                kick_duck: KickParams { up_base: 0.25, lateral_base: 0.175, up_modifier: 0.125, lateral_modifier: 0.02, up_max: 2.25, lateral_max: 1.25, direction_change: 10 },
+                kick_move: KickParams { up_base: 0.55, lateral_base: 0.3, up_modifier: 0.225, lateral_modifier: 0.03, up_max: 3.5, lateral_max: 2.5, direction_change: 10 },
+                kick_air: KickParams { up_base: 0.125, lateral_base: 0.65, up_modifier: 0.55, lateral_modifier: 0.0475, up_max: 5.5, lateral_max: 4.0, direction_change: 10 },
             },
         },
         P90 => WeaponSpec {
@@ -499,22 +627,27 @@ fn weapon_spec(id: i32) -> Option<WeaponSpec> {
                 accuracy_divisor: 175,
                 acc_base: 0.45,
                 acc_cap: 1.0,
-                mp5_f64_acc: false,
+                acc_formula: AccFormula::SquaredInt,
+                deploy_accuracy: 0.2,
+                reload_accuracy: 0.2,
+                kick_air_first: true,
                 cycle_time: 0.066,
                 zoom_cycle_time: None,
                 silencer_bit: None,
                 burst_bit: None,
                 stand_k: 0.045,
+                silenced_stand_k: None,
                 duck_k: 0.045,
                 move_k: 0.115,
                 air_k: 0.3,
                 move_base: 0.0,
                 air_base: 0.0,
                 move_speed_thresh: 170.0,
-                kick_stand: KickParams { up_base: 0.4, lateral_base: 0.25, up_modifier: 0.12, lateral_modifier: 0.03, up_max: 2.0, lateral_max: 2.0, direction_change: 9 },
-                kick_duck: KickParams { up_base: 0.35, lateral_base: 0.2, up_modifier: 0.1, lateral_modifier: 0.02, up_max: 1.75, lateral_max: 1.75, direction_change: 10 },
-                kick_move: KickParams { up_base: 0.65, lateral_base: 0.4, up_modifier: 0.2, lateral_modifier: 0.045, up_max: 3.0, lateral_max: 2.5, direction_change: 6 },
-                kick_air: KickParams { up_base: 0.85, lateral_base: 0.5, up_modifier: 0.35, lateral_modifier: 0.045, up_max: 4.0, lateral_max: 3.5, direction_change: 5 },
+                punch_scale: 100.0,
+                kick_stand: KickParams { up_base: 0.3, lateral_base: 0.225, up_modifier: 0.125, lateral_modifier: 0.02, up_max: 3.25, lateral_max: 1.25, direction_change: 8 },
+                kick_duck: KickParams { up_base: 0.275, lateral_base: 0.2, up_modifier: 0.125, lateral_modifier: 0.02, up_max: 3.0, lateral_max: 1.0, direction_change: 9 },
+                kick_move: KickParams { up_base: 0.45, lateral_base: 0.3, up_modifier: 0.2, lateral_modifier: 0.0275, up_max: 4.0, lateral_max: 2.25, direction_change: 7 },
+                kick_air: KickParams { up_base: 0.9, lateral_base: 0.45, up_modifier: 0.35, lateral_modifier: 0.04, up_max: 5.25, lateral_max: 3.5, direction_change: 4 },
             },
         },
         GALIL => WeaponSpec {
@@ -529,22 +662,27 @@ fn weapon_spec(id: i32) -> Option<WeaponSpec> {
                 accuracy_divisor: 200,
                 acc_base: 0.35,
                 acc_cap: 1.25,
-                mp5_f64_acc: false,
+                acc_formula: AccFormula::CubedInt,
+                deploy_accuracy: 0.2,
+                reload_accuracy: 0.2,
+                kick_air_first: false,
                 cycle_time: 0.0875,
                 zoom_cycle_time: None,
                 silencer_bit: None,
                 burst_bit: None,
                 stand_k: 0.0375,
+                silenced_stand_k: None,
                 duck_k: 0.0375,
                 move_k: 0.07,
                 air_k: 0.3,
                 move_base: 0.04,
                 air_base: 0.04,
                 move_speed_thresh: 140.0,
-                kick_stand: KickParams { up_base: 0.7, lateral_base: 0.325, up_modifier: 0.175, lateral_modifier: 0.035, up_max: 5.0, lateral_max: 2.0, direction_change: 8 },
-                kick_duck: KickParams { up_base: 0.6, lateral_base: 0.3, up_modifier: 0.15, lateral_modifier: 0.025, up_max: 4.75, lateral_max: 1.75, direction_change: 9 },
-                kick_move: KickParams { up_base: 1.25, lateral_base: 0.45, up_modifier: 0.22, lateral_modifier: 0.05, up_max: 6.0, lateral_max: 2.75, direction_change: 7 },
-                kick_air: KickParams { up_base: 1.75, lateral_base: 0.8, up_modifier: 0.4, lateral_modifier: 0.3, up_max: 8.5, lateral_max: 5.5, direction_change: 5 },
+                punch_scale: 10_000_000.0,
+                kick_stand: KickParams { up_base: 0.65, lateral_base: 0.35, up_modifier: 0.25, lateral_modifier: 0.015, up_max: 3.5, lateral_max: 2.25, direction_change: 7 },
+                kick_duck: KickParams { up_base: 0.6, lateral_base: 0.3, up_modifier: 0.2, lateral_modifier: 0.0125, up_max: 3.25, lateral_max: 2.0, direction_change: 7 },
+                kick_move: KickParams { up_base: 1.0, lateral_base: 0.45, up_modifier: 0.28, lateral_modifier: 0.045, up_max: 3.75, lateral_max: 3.0, direction_change: 7 },
+                kick_air: KickParams { up_base: 1.2, lateral_base: 0.5, up_modifier: 0.23, lateral_modifier: 0.15, up_max: 5.5, lateral_max: 3.5, direction_change: 6 },
             },
         },
         FAMAS => WeaponSpec {
@@ -559,22 +697,27 @@ fn weapon_spec(id: i32) -> Option<WeaponSpec> {
                 accuracy_divisor: 215,
                 acc_base: 0.3,
                 acc_cap: 1.0,
-                mp5_f64_acc: false,
+                acc_formula: AccFormula::CubedInt,
+                deploy_accuracy: 0.2,
+                reload_accuracy: 0.0,
+                kick_air_first: false,
                 cycle_time: 0.0825,
                 zoom_cycle_time: None,
                 silencer_bit: None,
                 burst_bit: Some(WPNSTATE_FAMAS_BURST_MODE),
                 stand_k: 0.02,
+                silenced_stand_k: None,
                 duck_k: 0.02,
                 move_k: 0.07,
                 air_k: 0.3,
                 move_base: 0.03,
                 air_base: 0.03,
                 move_speed_thresh: 140.0,
-                kick_stand: KickParams { up_base: 0.65, lateral_base: 0.35, up_modifier: 0.25, lateral_modifier: 0.015, up_max: 3.5, lateral_max: 2.25, direction_change: 7 },
-                kick_duck: KickParams { up_base: 0.6, lateral_base: 0.3, up_modifier: 0.2, lateral_modifier: 0.0125, up_max: 3.25, lateral_max: 2.0, direction_change: 7 },
-                kick_move: KickParams { up_base: 1.0, lateral_base: 0.45, up_modifier: 0.28, lateral_modifier: 0.045, up_max: 3.75, lateral_max: 3.0, direction_change: 7 },
-                kick_air: KickParams { up_base: 1.2, lateral_base: 0.5, up_modifier: 0.23, lateral_modifier: 0.15, up_max: 5.5, lateral_max: 3.5, direction_change: 6 },
+                punch_scale: 10_000_000.0,
+                kick_stand: KickParams { up_base: 0.625, lateral_base: 0.375, up_modifier: 0.25, lateral_modifier: 0.0125, up_max: 3.5, lateral_max: 2.25, direction_change: 8 },
+                kick_duck: KickParams { up_base: 0.575, lateral_base: 0.325, up_modifier: 0.2, lateral_modifier: 0.011, up_max: 3.25, lateral_max: 2.0, direction_change: 8 },
+                kick_move: KickParams { up_base: 1.0, lateral_base: 0.45, up_modifier: 0.275, lateral_modifier: 0.05, up_max: 4.0, lateral_max: 2.5, direction_change: 7 },
+                kick_air: KickParams { up_base: 1.25, lateral_base: 0.45, up_modifier: 0.22, lateral_modifier: 0.18, up_max: 5.5, lateral_max: 4.0, direction_change: 5 },
             },
         },
         AK47 => WeaponSpec {
@@ -589,18 +732,23 @@ fn weapon_spec(id: i32) -> Option<WeaponSpec> {
                 accuracy_divisor: 200,
                 acc_base: 0.35,
                 acc_cap: 1.25,
-                mp5_f64_acc: false,
+                acc_formula: AccFormula::CubedInt,
+                deploy_accuracy: 0.2,
+                reload_accuracy: 0.2,
+                kick_air_first: false,
                 cycle_time: 0.0955,
                 zoom_cycle_time: None,
                 silencer_bit: None,
                 burst_bit: None,
                 stand_k: 0.0275,
+                silenced_stand_k: None,
                 duck_k: 0.0275,
                 move_k: 0.07,
                 air_k: 0.4,
                 move_base: 0.04,
                 air_base: 0.04,
                 move_speed_thresh: 140.0,
+                punch_scale: 100.0,
                 kick_stand: KickParams { up_base: 1.0, lateral_base: 0.375, up_modifier: 0.175, lateral_modifier: 0.0375, up_max: 5.75, lateral_max: 1.75, direction_change: 8 },
                 kick_duck: KickParams { up_base: 0.9, lateral_base: 0.35, up_modifier: 0.15, lateral_modifier: 0.025, up_max: 5.5, lateral_max: 1.5, direction_change: 9 },
                 kick_move: KickParams { up_base: 1.5, lateral_base: 0.45, up_modifier: 0.225, lateral_modifier: 0.05, up_max: 6.5, lateral_max: 2.5, direction_change: 7 },
@@ -619,18 +767,23 @@ fn weapon_spec(id: i32) -> Option<WeaponSpec> {
                 accuracy_divisor: 220,
                 acc_base: 0.3,
                 acc_cap: 1.0,
-                mp5_f64_acc: false,
+                acc_formula: AccFormula::CubedInt,
+                deploy_accuracy: 0.2,
+                reload_accuracy: 0.2,
+                kick_air_first: false,
                 cycle_time: 0.0875,
                 zoom_cycle_time: None,
                 silencer_bit: Some(WPNSTATE_M4A1_SILENCED),
                 burst_bit: None,
                 stand_k: 0.02,
+                silenced_stand_k: Some(0.025),
                 duck_k: 0.02,
                 move_k: 0.07,
                 air_k: 0.4,
                 move_base: 0.035,
                 air_base: 0.035,
                 move_speed_thresh: 140.0,
+                punch_scale: 100.0,
                 kick_stand: KickParams { up_base: 0.65, lateral_base: 0.35, up_modifier: 0.25, lateral_modifier: 0.015, up_max: 3.5, lateral_max: 2.25, direction_change: 7 },
                 kick_duck: KickParams { up_base: 0.6, lateral_base: 0.3, up_modifier: 0.2, lateral_modifier: 0.0125, up_max: 3.25, lateral_max: 2.0, direction_change: 7 },
                 kick_move: KickParams { up_base: 1.0, lateral_base: 0.45, up_modifier: 0.28, lateral_modifier: 0.045, up_max: 3.75, lateral_max: 3.0, direction_change: 7 },
@@ -649,18 +802,23 @@ fn weapon_spec(id: i32) -> Option<WeaponSpec> {
                 accuracy_divisor: 215,
                 acc_base: 0.3,
                 acc_cap: 1.0,
-                mp5_f64_acc: false,
+                acc_formula: AccFormula::CubedInt,
+                deploy_accuracy: 0.2,
+                reload_accuracy: 0.0,
+                kick_air_first: false,
                 cycle_time: 0.0825,
                 zoom_cycle_time: Some(0.135),
                 silencer_bit: None,
                 burst_bit: None,
                 stand_k: 0.02,
+                silenced_stand_k: None,
                 duck_k: 0.02,
                 move_k: 0.07,
                 air_k: 0.4,
                 move_base: 0.035,
                 air_base: 0.035,
                 move_speed_thresh: 140.0,
+                punch_scale: 100.0,
                 kick_stand: KickParams { up_base: 0.625, lateral_base: 0.375, up_modifier: 0.25, lateral_modifier: 0.0125, up_max: 3.5, lateral_max: 2.25, direction_change: 8 },
                 kick_duck: KickParams { up_base: 0.575, lateral_base: 0.325, up_modifier: 0.2, lateral_modifier: 0.011, up_max: 3.25, lateral_max: 2.0, direction_change: 8 },
                 kick_move: KickParams { up_base: 1.0, lateral_base: 0.45, up_modifier: 0.275, lateral_modifier: 0.05, up_max: 4.0, lateral_max: 2.5, direction_change: 7 },
@@ -679,18 +837,23 @@ fn weapon_spec(id: i32) -> Option<WeaponSpec> {
                 accuracy_divisor: 220,
                 acc_base: 0.3,
                 acc_cap: 1.0,
-                mp5_f64_acc: false,
+                acc_formula: AccFormula::CubedInt,
+                deploy_accuracy: 0.2,
+                reload_accuracy: 0.2,
+                kick_air_first: false,
                 cycle_time: 0.0825,
                 zoom_cycle_time: Some(0.135),
                 silencer_bit: None,
                 burst_bit: None,
                 stand_k: 0.02,
+                silenced_stand_k: None,
                 duck_k: 0.02,
                 move_k: 0.075,
                 air_k: 0.45,
                 move_base: 0.035,
                 air_base: 0.035,
                 move_speed_thresh: 140.0,
+                punch_scale: 100.0,
                 kick_stand: KickParams { up_base: 0.625, lateral_base: 0.375, up_modifier: 0.25, lateral_modifier: 0.0125, up_max: 4.0, lateral_max: 2.25, direction_change: 9 },
                 kick_duck: KickParams { up_base: 0.6, lateral_base: 0.35, up_modifier: 0.2, lateral_modifier: 0.0125, up_max: 3.7, lateral_max: 2.0, direction_change: 10 },
                 kick_move: KickParams { up_base: 1.0, lateral_base: 0.45, up_modifier: 0.28, lateral_modifier: 0.04, up_max: 4.25, lateral_max: 2.5, direction_change: 7 },
@@ -709,18 +872,23 @@ fn weapon_spec(id: i32) -> Option<WeaponSpec> {
                 accuracy_divisor: 175,
                 acc_base: 0.4,
                 acc_cap: 0.9,
-                mp5_f64_acc: false,
+                acc_formula: AccFormula::CubedInt,
+                deploy_accuracy: 0.2,
+                reload_accuracy: 0.2,
+                kick_air_first: true,
                 cycle_time: 0.1,
                 zoom_cycle_time: None,
                 silencer_bit: None,
                 burst_bit: None,
                 stand_k: 0.03,
+                silenced_stand_k: None,
                 duck_k: 0.03,
                 move_k: 0.095,
                 air_k: 0.5,
                 move_base: 0.045,
                 air_base: 0.045,
                 move_speed_thresh: 140.0,
+                punch_scale: 100.0,
                 kick_stand: KickParams { up_base: 0.8, lateral_base: 0.35, up_modifier: 0.3, lateral_modifier: 0.03, up_max: 3.75, lateral_max: 3.0, direction_change: 9 },
                 kick_duck: KickParams { up_base: 0.75, lateral_base: 0.325, up_modifier: 0.25, lateral_modifier: 0.025, up_max: 3.5, lateral_max: 2.5, direction_change: 9 },
                 kick_move: KickParams { up_base: 1.1, lateral_base: 0.5, up_modifier: 0.3, lateral_modifier: 0.06, up_max: 4.0, lateral_max: 3.0, direction_change: 8 },
@@ -739,6 +907,7 @@ fn weapon_spec(id: i32) -> Option<WeaponSpec> {
                 cycle_time: 1.25,
                 two_step_zoom_second: 15.0,
                 zoom_max_speed: 220.0,
+                deploy_accuracy: 0.2,
             },
         },
         AWP => WeaponSpec {
@@ -753,6 +922,7 @@ fn weapon_spec(id: i32) -> Option<WeaponSpec> {
                 cycle_time: 1.45,
                 two_step_zoom_second: 10.0,
                 zoom_max_speed: 150.0,
+                deploy_accuracy: 0.2,
             },
         },
         G3SG1 => WeaponSpec {
@@ -767,6 +937,7 @@ fn weapon_spec(id: i32) -> Option<WeaponSpec> {
                 cycle_time: 0.25,
                 two_step_zoom_second: 15.0,
                 zoom_max_speed: 150.0,
+                deploy_accuracy: 0.2,
             },
         },
         SG550 => WeaponSpec {
@@ -781,6 +952,7 @@ fn weapon_spec(id: i32) -> Option<WeaponSpec> {
                 cycle_time: 0.25,
                 two_step_zoom_second: 15.0,
                 zoom_max_speed: 150.0,
+                deploy_accuracy: 0.0,
             },
         },
         KNIFE => WeaponSpec {
@@ -844,6 +1016,13 @@ pub fn predict_weapon_step(
     };
 
     let holding_shield = state.iuser[2] & PLAYER_HOLDING_SHIELD != 0;
+    // Valve CS 1.6 quirk (`cs-game/src/player.rs:3179`): PLAYER_FREEZE_TIME_OVER is SET during freeze time.
+    let freeze_locked = (state.iuser[2] & PLAYER_FREEZE_TIME_OVER != 0)
+        || (state.maxspeed > 0.0 && state.maxspeed <= 1.5);
+    let can_shoot = !freeze_locked
+        && (state.iuser[2] & (PLAYER_CAN_SHOOT | PLAYER_FREEZE_TIME_OVER) == 0
+            || state.iuser[2] & PLAYER_CAN_SHOOT != 0);
+    let dt = f32::from(cmd.msec) / 1000.0;
     let emit_fx = runfuncs && cl_lw;
     let pressed_attack = cmd.buttons & IN_ATTACK != 0;
     let pressed_attack2 = cmd.buttons & IN_ATTACK2 != 0;
@@ -851,7 +1030,15 @@ pub fn predict_weapon_step(
     let attack_edge = pressed_attack && (old_buttons & IN_ATTACK == 0);
     let attack2_edge = pressed_attack2 && (old_buttons & IN_ATTACK2 == 0);
 
-    let extra = extras.entry(wid).or_default();
+    let extra = extras
+        .entry(wid)
+        .or_insert_with(|| PredictWeaponExtras::for_weapon(wid));
+    if extra.has_fired {
+        extra.time_since_fire += dt;
+    }
+    if extra.shots_fired > 0 {
+        extra.decrease_shots_timer = (extra.decrease_shots_timer - dt).max(-1.0);
+    }
     let w = state.weapon.weapons.entry(wid_u8).or_default();
     if w.m_i_id == 0 {
         w.m_i_id = wid;
@@ -864,12 +1051,61 @@ pub fn predict_weapon_step(
         extra.resume_zoom = false;
     }
 
+    // FireRemaining (Glock18 / FAMAS 3-round burst shots 2 & 3).
+    if extra.burst_shots_fired > 0 {
+        extra.burst_timer -= dt;
+        while extra.burst_shots_fired > 0 && extra.burst_timer <= 0.0 {
+            if w.m_i_clip <= 0 {
+                extra.burst_shots_fired = 0;
+                extra.burst_timer = 0.0;
+                break;
+            }
+            w.m_i_clip -= 1;
+            let spread = if wid == weapon_id::GLOCK18 {
+                0.05_f32
+            } else {
+                extra.burst_spread
+            };
+            let (dx, dy) = fire_bullets3_spread_offset(spread, random_seed);
+            if emit_fx {
+                let punch_scale = if wid == weapon_id::GLOCK18 {
+                    10_000.0_f32
+                } else {
+                    10_000_000.0_f32
+                };
+                out_events.push(PredictedWeaponEvent {
+                    event_name: spec.event_name,
+                    args: EventArgs {
+                        origin: state.origin,
+                        angles: cmd.viewangles,
+                        ducking: i32::from(ducking),
+                        fparam1: dx,
+                        fparam2: dy,
+                        iparam1: (state.punchangle.x * punch_scale) as i32,
+                        iparam2: (state.punchangle.y * punch_scale) as i32,
+                        bparam1: i32::from(wid == weapon_id::GLOCK18 && w.m_i_clip == 0),
+                        bparam2: 0,
+                        ..Default::default()
+                    },
+                });
+            }
+            extra.burst_shots_fired += 1;
+            if extra.burst_shots_fired >= 3 {
+                extra.burst_shots_fired = 0;
+                extra.burst_timer = 0.0;
+            } else {
+                extra.burst_timer += 0.1;
+            }
+        }
+    }
+
     // Complete pending magazine reload when next_attack reaches <= 0.
     if w.m_f_in_reload != 0 && state.weapon.next_attack <= 0.0 && spec.max_clip > 0 {
         w.m_i_clip = spec.max_clip;
         w.m_f_in_reload = 0;
-        extra.accuracy = 0.2;
+        extra.accuracy = spec.reload_accuracy();
         extra.shots_fired = 0;
+        extra.delay_fire = false;
     }
 
     // Complete pending shotgun special reload shell insertion step when timer expires.
@@ -898,10 +1134,14 @@ pub fn predict_weapon_step(
         if holding_shield && spec.allows_shield {
             if w.m_i_weapon_state & WPNSTATE_SHIELD_DRAWN != 0 {
                 w.m_i_weapon_state &= !WPNSTATE_SHIELD_DRAWN;
-                state.maxspeed = spec.max_speed;
+                if !freeze_locked {
+                    state.maxspeed = spec.max_speed;
+                }
             } else {
                 w.m_i_weapon_state |= WPNSTATE_SHIELD_DRAWN;
-                state.maxspeed = SHIELD_DRAWN_MAX_SPEED;
+                if !freeze_locked {
+                    state.maxspeed = SHIELD_DRAWN_MAX_SPEED;
+                }
             }
             w.m_fl_next_primary_attack = 0.4;
             w.m_fl_next_secondary_attack = 0.4;
@@ -925,11 +1165,13 @@ pub fn predict_weapon_step(
                     };
                     state.weapon.fov = next_fov;
                     w.m_f_in_zoom = i32::from(next_fov < DEFAULT_FOV);
-                    state.maxspeed = if next_fov < DEFAULT_FOV {
-                        zoom_max_speed
-                    } else {
-                        spec.max_speed
-                    };
+                    if !freeze_locked {
+                        state.maxspeed = if next_fov < DEFAULT_FOV {
+                            zoom_max_speed
+                        } else {
+                            spec.max_speed
+                        };
+                    }
                     w.m_fl_next_secondary_attack = 0.3;
                     if emit_fx {
                         out_sounds.push(PredictedSound {
@@ -1012,7 +1254,7 @@ pub fn predict_weapon_step(
     let shield_drawn = w.m_i_weapon_state & WPNSTATE_SHIELD_DRAWN != 0;
 
     // Primary attack.
-    if pressed_attack && !shield_drawn && w.m_fl_next_primary_attack <= 0.0 {
+    if can_shoot && pressed_attack && !shield_drawn && w.m_fl_next_primary_attack <= 0.0 {
         match spec.kind {
             WeaponKind::C4 | WeaponKind::Grenade => {}
             WeaponKind::Knife => {
@@ -1044,8 +1286,21 @@ pub fn predict_weapon_step(
                 w.m_i_clip -= 1;
                 w.m_fl_next_primary_attack = cycle_time;
                 w.m_fl_next_secondary_attack = cycle_time;
-                w.m_fl_time_weapon_idle = 2.5;
-                state.punchangle.x -= if on_ground { 4.0 } else { 8.0 };
+                w.m_fl_time_weapon_idle = if w.m_i_clip != 0 {
+                    if wid == weapon_id::M3 { 2.5 } else { 2.25 }
+                } else if wid == weapon_id::M3 {
+                    0.875
+                } else {
+                    0.75
+                };
+                let (lo, hi) = if wid == weapon_id::M3 {
+                    if on_ground { (4, 6) } else { (8, 11) }
+                } else if on_ground {
+                    (3, 5)
+                } else {
+                    (7, 10)
+                };
+                state.punchangle.x -= shared_random_long(random_seed.wrapping_add(1), lo, hi) as f32;
                 if emit_fx {
                     let spread = if wid == weapon_id::M3 { 0.0675 } else { 0.0725 };
                     let (dx, dy) = fire_bullets3_spread_offset(spread, random_seed);
@@ -1067,13 +1322,36 @@ pub fn predict_weapon_step(
             }
             WeaponKind::Pistol {
                 range_coeffs,
+                alt_range_coeffs,
                 cycle_time,
+                burst_cycle_time,
+                acc_decay_base,
+                acc_decay_k,
+                acc_high,
+                acc_low,
+                silencer_bit,
+                burst_bit,
                 ..
             } => {
-                extra.shots_fired += 1;
-                if extra.shots_fired > 1 && wid != weapon_id::GLOCK18 {
-                    return;
+                let is_burst = burst_bit.is_some_and(|b| w.m_i_weapon_state & b != 0);
+                let is_silenced = silencer_bit.is_some_and(|b| w.m_i_weapon_state & b != 0);
+                if !(wid == weapon_id::GLOCK18 && is_burst) {
+                    extra.shots_fired += 1;
+                    if extra.shots_fired > 1 {
+                        return;
+                    }
                 }
+                let time_diff = extra.time_since_fire;
+                if extra.has_fired {
+                    extra.accuracy -= (acc_decay_base - time_diff) * acc_decay_k;
+                    if extra.accuracy > acc_high {
+                        extra.accuracy = acc_high;
+                    } else if extra.accuracy < acc_low {
+                        extra.accuracy = acc_low;
+                    }
+                }
+                extra.has_fired = true;
+                extra.time_since_fire = 0.0;
                 if w.m_i_clip <= 0 {
                     w.m_fl_next_primary_attack = 0.2;
                     if emit_fx && attack_edge && extra.play_empty_sound {
@@ -1081,20 +1359,29 @@ pub fn predict_weapon_step(
                     }
                     return;
                 }
+                let coeffs = if is_silenced || is_burst {
+                    alt_range_coeffs.unwrap_or(range_coeffs)
+                } else {
+                    range_coeffs
+                };
                 let speed_2d = state.velocity.truncate().length();
                 let k = if !on_ground {
-                    range_coeffs[0]
+                    coeffs[0]
                 } else if speed_2d > 0.0 {
-                    range_coeffs[1]
+                    coeffs[1]
                 } else if ducking {
-                    range_coeffs[2]
+                    coeffs[2]
                 } else {
-                    range_coeffs[3]
+                    coeffs[3]
                 };
                 let spread = (k * f64::from(1.0_f32 - extra.accuracy)) as f32;
-                let adj_cycle = cycle_time - 0.075;
-                w.m_fl_next_primary_attack = adj_cycle.max(0.05);
-                w.m_fl_next_secondary_attack = adj_cycle.max(0.05);
+                let eff_cycle = if is_burst {
+                    burst_cycle_time.unwrap_or(cycle_time)
+                } else {
+                    cycle_time
+                };
+                w.m_fl_next_primary_attack = eff_cycle;
+                w.m_fl_next_secondary_attack = eff_cycle;
                 w.m_i_clip -= 1;
                 w.m_fl_time_weapon_idle = 2.0;
 
@@ -1110,70 +1397,121 @@ pub fn predict_weapon_step(
                     }
                 }
                 let clip_empty = i32::from(w.m_i_clip == 0);
-                let silenced = i32::from(
-                    wid == weapon_id::USP && (w.m_i_weapon_state & WPNSTATE_USP_SILENCED != 0),
-                );
+                let silenced = i32::from(is_silenced);
                 if emit_fx {
-                    out_events.push(PredictedWeaponEvent {
-                        event_name,
-                        args: EventArgs {
+                    let args = if wid == weapon_id::ELITE {
+                        EventArgs {
+                            origin: state.origin,
+                            angles: cmd.viewangles,
+                            ducking: i32::from(ducking),
+                            fparam1: time_diff,
+                            fparam2: dx,
+                            iparam1: (dy * 100.0) as i32,
+                            iparam2: w.m_i_clip,
+                            bparam1: 0,
+                            bparam2: 0,
+                            ..Default::default()
+                        }
+                    } else {
+                        let glock_scale = if wid == weapon_id::GLOCK18 {
+                            10_000.0_f32
+                        } else {
+                            100.0_f32
+                        };
+                        EventArgs {
                             origin: state.origin,
                             angles: cmd.viewangles,
                             ducking: i32::from(ducking),
                             fparam1: dx,
                             fparam2: dy,
-                            iparam1: (state.punchangle.x * 100.0) as i32,
-                            iparam2: (state.punchangle.y * 100.0) as i32,
+                            iparam1: (state.punchangle.x * glock_scale) as i32,
+                            iparam2: (state.punchangle.y * glock_scale) as i32,
                             bparam1: clip_empty,
                             bparam2: silenced,
                             ..Default::default()
-                        },
-                    });
+                        }
+                    };
+                    out_events.push(PredictedWeaponEvent { event_name, args });
                 }
-                state.punchangle.x -= 2.0;
+                if wid != weapon_id::GLOCK18 {
+                    state.punchangle.x -= 2.0;
+                } else if is_burst {
+                    extra.burst_shots_fired = 1;
+                    extra.burst_timer = 0.1;
+                    extra.burst_spread = 0.05;
+                }
                 return;
             }
             WeaponKind::Automatic {
                 accuracy_divisor,
                 acc_base,
                 acc_cap,
-                mp5_f64_acc,
+                acc_formula,
+                kick_air_first,
                 cycle_time,
                 zoom_cycle_time,
                 silencer_bit,
+                burst_bit,
                 stand_k,
+                silenced_stand_k,
                 duck_k,
                 move_k,
                 air_k,
                 move_base,
                 air_base,
                 move_speed_thresh,
+                punch_scale,
                 kick_stand,
                 kick_duck,
                 kick_move,
                 kick_air,
                 ..
             } => {
+                let is_silenced = silencer_bit.is_some_and(|b| w.m_i_weapon_state & b != 0);
+                let is_burst = burst_bit.is_some_and(|b| w.m_i_weapon_state & b != 0);
+                let active_stand_k = if is_silenced {
+                    silenced_stand_k.unwrap_or(stand_k)
+                } else {
+                    stand_k
+                };
+                let active_duck_k = if is_silenced {
+                    silenced_stand_k.unwrap_or(duck_k)
+                } else {
+                    duck_k
+                };
                 let speed_2d = state.velocity.truncate().length();
                 let acc = f64::from(extra.accuracy);
-                let spread = if !on_ground {
+                let mut spread = if !on_ground {
                     (air_base + air_k * acc) as f32
                 } else if speed_2d > move_speed_thresh {
                     (move_base + move_k * acc) as f32
                 } else if ducking {
-                    (duck_k * acc) as f32
+                    (active_duck_k * acc) as f32
                 } else {
-                    (stand_k * acc) as f32
+                    (active_stand_k * acc) as f32
                 };
+                if wid == weapon_id::FAMAS && !is_burst {
+                    spread += 0.01;
+                }
 
+                extra.delay_fire = true;
                 extra.shots_fired += 1;
-                extra.accuracy = if mp5_f64_acc {
-                    let s = f64::from(extra.shots_fired);
-                    ((s * s * s / f64::from(accuracy_divisor)) + f64::from(acc_base)) as f32
-                } else {
-                    let s = extra.shots_fired;
-                    let cubed = s.wrapping_mul(s).wrapping_mul(s);
-                    ((cubed / accuracy_divisor) as f32) + acc_base
+                extra.accuracy = match acc_formula {
+                    AccFormula::CubedInt => {
+                        let s = extra.shots_fired;
+                        let cubed = s.wrapping_mul(s).wrapping_mul(s);
+                        ((cubed / accuracy_divisor) as f32) + acc_base
+                    }
+                    AccFormula::SquaredInt => {
+                        let s = extra.shots_fired;
+                        let squared = s.wrapping_mul(s);
+                        ((squared / accuracy_divisor) as f32) + acc_base
+                    }
+                    AccFormula::Mp5SquaredF64 => {
+                        let s = extra.shots_fired;
+                        let squared = s.wrapping_mul(s);
+                        (f64::from(squared) / 220.1 + f64::from(acc_base)) as f32
+                    }
                 }
                 .min(acc_cap);
 
@@ -1186,18 +1524,20 @@ pub fn predict_weapon_step(
                 }
 
                 w.m_i_clip -= 1;
-                let effective_cycle = match zoom_cycle_time {
-                    Some(zc) if state.weapon.fov < DEFAULT_FOV && state.weapon.fov > 0.0 => zc,
-                    _ => cycle_time,
+                let effective_cycle = if wid == weapon_id::FAMAS && is_burst {
+                    0.55
+                } else {
+                    match zoom_cycle_time {
+                        Some(zc) if state.weapon.fov < DEFAULT_FOV && state.weapon.fov > 0.0 => zc,
+                        _ => cycle_time,
+                    }
                 };
                 w.m_fl_next_primary_attack = effective_cycle;
                 w.m_fl_next_secondary_attack = effective_cycle;
                 w.m_fl_time_weapon_idle = 1.9;
 
                 let (dx, dy) = fire_bullets3_spread_offset(spread, random_seed);
-                let silenced = i32::from(
-                    silencer_bit.is_some_and(|b| w.m_i_weapon_state & b != 0),
-                );
+                let silenced = i32::from(is_silenced);
                 if emit_fx {
                     out_events.push(PredictedWeaponEvent {
                         event_name: spec.event_name,
@@ -1207,8 +1547,8 @@ pub fn predict_weapon_step(
                             ducking: i32::from(ducking),
                             fparam1: dx,
                             fparam2: dy,
-                            iparam1: (state.punchangle.x * 100.0) as i32,
-                            iparam2: (state.punchangle.y * 100.0) as i32,
+                            iparam1: (state.punchangle.x * punch_scale) as i32,
+                            iparam2: (state.punchangle.y * punch_scale) as i32,
                             bparam1: silenced,
                             bparam2: 0,
                             ..Default::default()
@@ -1216,7 +1556,17 @@ pub fn predict_weapon_step(
                     });
                 }
 
-                let params = if speed_2d > 0.0 {
+                let params = if kick_air_first {
+                    if !on_ground {
+                        kick_air
+                    } else if speed_2d > 0.0 {
+                        kick_move
+                    } else if ducking {
+                        kick_duck
+                    } else {
+                        kick_stand
+                    }
+                } else if speed_2d > 0.0 {
                     kick_move
                 } else if !on_ground {
                     kick_air
@@ -1226,6 +1576,11 @@ pub fn predict_weapon_step(
                     kick_stand
                 };
                 apply_kick_back(state, extra, params, random_seed);
+                if wid == weapon_id::FAMAS && is_burst {
+                    extra.burst_shots_fired = 1;
+                    extra.burst_timer = 0.05;
+                    extra.burst_spread = spread;
+                }
                 return;
             }
             WeaponKind::Sniper { cycle_time, .. } => {
@@ -1235,14 +1590,6 @@ pub fn predict_weapon_step(
                     extra.last_zoom = state.weapon.fov;
                     state.weapon.fov = DEFAULT_FOV;
                     w.m_f_in_zoom = 0;
-                    state.maxspeed = spec.max_speed;
-                }
-                if w.m_i_clip <= 0 {
-                    w.m_fl_next_primary_attack = 0.2;
-                    if emit_fx && attack_edge && extra.play_empty_sound {
-                        out_sounds.push(dryfire_sound(false));
-                    }
-                    return;
                 }
                 let speed_2d = state.velocity.truncate().length();
                 let mut spread = match wid {
@@ -1294,12 +1641,39 @@ pub fn predict_weapon_step(
                         }
                     }
                 };
-                if !zoomed && matches!(wid, weapon_id::AWP | weapon_id::SCOUT | weapon_id::G3SG1 | weapon_id::SG550)
-                {
-                    let penalty = if matches!(wid, weapon_id::SCOUT) { 0.025 } else { 0.08 };
-                    if matches!(wid, weapon_id::AWP | weapon_id::SCOUT) {
-                        spread += penalty;
+                if !zoomed {
+                    match wid {
+                        weapon_id::AWP => spread += 0.08,
+                        weapon_id::SCOUT | weapon_id::G3SG1 | weapon_id::SG550 => spread += 0.025,
+                        _ => {}
                     }
+                }
+                match wid {
+                    weapon_id::G3SG1 => {
+                        if extra.has_fired {
+                            extra.accuracy = (extra.time_since_fire * 0.3 + 0.55).min(0.98);
+                        } else {
+                            extra.accuracy = 0.98;
+                        }
+                        extra.has_fired = true;
+                        extra.time_since_fire = 0.0;
+                        spread *= 1.0 - extra.accuracy;
+                    }
+                    weapon_id::SG550 => {
+                        if extra.has_fired {
+                            extra.accuracy = (extra.time_since_fire * 0.35 + 0.65).min(0.98);
+                        }
+                        extra.has_fired = true;
+                        extra.time_since_fire = 0.0;
+                    }
+                    _ => {}
+                }
+                if w.m_i_clip <= 0 {
+                    w.m_fl_next_primary_attack = 0.2;
+                    if emit_fx && attack_edge && extra.play_empty_sound {
+                        out_sounds.push(dryfire_sound(false));
+                    }
+                    return;
                 }
                 w.m_i_clip -= 1;
                 w.m_fl_next_primary_attack = cycle_time;
@@ -1307,17 +1681,23 @@ pub fn predict_weapon_step(
                 w.m_fl_time_weapon_idle = 2.0;
 
                 let (dx, dy) = fire_bullets3_spread_offset(spread, random_seed);
+                let (fp1, fp2) = if wid == weapon_id::SCOUT {
+                    (dx * 1000.0, dy * 1000.0)
+                } else {
+                    (dx, dy)
+                };
                 if emit_fx {
                     out_events.push(PredictedWeaponEvent {
                         event_name: spec.event_name,
                         args: EventArgs {
                             origin: state.origin,
-                            angles: Vec3::ZERO,
+                            angles: cmd.viewangles,
                             ducking: i32::from(ducking),
-                            fparam1: dx,
-                            fparam2: dy,
+                            fparam1: fp1,
+                            fparam2: fp2,
                             iparam1: (state.punchangle.x * 100.0) as i32,
                             iparam2: (state.punchangle.x * 100.0) as i32,
+                            bparam1: i32::from(wid == weapon_id::SG550),
                             ..Default::default()
                         },
                     });
@@ -1343,8 +1723,21 @@ pub fn predict_weapon_step(
             }
         }
     } else if !pressed_attack {
+        if extra.delay_fire {
+            extra.delay_fire = false;
+            if extra.shots_fired > 15 {
+                extra.shots_fired = 15;
+            }
+            extra.decrease_shots_timer = 0.4;
+        }
         if spec.is_pistol {
             extra.shots_fired = 0;
+        } else if extra.shots_fired > 0 && extra.decrease_shots_timer <= 0.0 {
+            extra.decrease_shots_timer = 0.0225;
+            extra.shots_fired -= 1;
+            if extra.shots_fired == 0 {
+                extra.accuracy = 0.2;
+            }
         }
         extra.play_empty_sound = true;
     }
@@ -1364,7 +1757,9 @@ pub fn predict_weapon_step(
                 w.m_i_weapon_state &= !WPNSTATE_SHIELD_DRAWN;
                 state.weapon.fov = DEFAULT_FOV;
                 w.m_f_in_zoom = 0;
-                state.maxspeed = spec.max_speed;
+                if !freeze_locked {
+                    state.maxspeed = spec.max_speed;
+                }
                 state.weapon.next_attack = spec.reload_time;
                 w.m_fl_time_weapon_idle = spec.reload_time + 0.5;
                 state.weapon.weaponanim = spec.reload_anim;

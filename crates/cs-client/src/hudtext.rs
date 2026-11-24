@@ -34,21 +34,51 @@ pub fn format_message(text: &str, params: &[String], loc: Option<&LocalizationTa
     format_message_with_titles(text, params, loc, None)
 }
 
-/// Fills a HUD message using both `LocalizationTable` (`cstrike_<lang>.txt`) and `TitlesTable` (`titles.txt`).
+/// Fills a HUD message using both `LocalizationTable` (`cstrike_<lang>.txt`) and `TitlesTable` (`titles.txt`),
+/// stripping `\x01`..`\x04` chat color control bytes.
 pub fn format_message_with_titles(
     text: &str,
     params: &[String],
     loc: Option<&LocalizationTable>,
     titles: Option<&TitlesTable>,
 ) -> String {
+    format_with_titles_inner(text, params, loc, titles, false)
+}
+
+/// Fills a `SayText` chat message using `LocalizationTable` and `TitlesTable`, preserving `\x01`..`\x04`
+/// color control bytes for `CHudSayText` span coloring.
+pub fn format_saytext_with_titles(
+    text: &str,
+    params: &[String],
+    loc: Option<&LocalizationTable>,
+    titles: Option<&TitlesTable>,
+) -> String {
+    format_with_titles_inner(text, params, loc, titles, true)
+}
+
+fn format_with_titles_inner(
+    text: &str,
+    params: &[String],
+    loc: Option<&LocalizationTable>,
+    titles: Option<&TitlesTable>,
+    keep_color_codes: bool,
+) -> String {
     let stripped = text.trim_start_matches(['\u{1}', '\u{2}', '\u{3}', '\u{4}']);
+    let prefix_len = text.len() - stripped.len();
     let template = resolve_token(stripped, loc, titles);
     let mut out = String::new();
+    if keep_color_codes && prefix_len > 0 && !template.starts_with(['\u{1}', '\u{2}', '\u{3}', '\u{4}']) {
+        out.push_str(&text[..prefix_len]);
+    }
     let mut next = 0usize;
     let mut chars = template.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
-            '\u{1}'..='\u{4}' => {}
+            '\u{1}'..='\u{4}' => {
+                if keep_color_codes {
+                    out.push(c);
+                }
+            }
             '%' if chars.peek() == Some(&'s') => {
                 chars.next();
                 let slot = match chars.peek().and_then(|d| d.to_digit(10)) {
@@ -180,5 +210,29 @@ mod tests {
             Some(&titles),
         );
         assert_eq!(team, "Player is joining the Terrorist force");
+    }
+
+    #[test]
+    fn format_saytext_preserves_leading_and_inline_color_controls() {
+        let mut loc = LocalizationTable::default();
+        loc.insert_text(
+            "\"Tokens\"\n{\n\"Cstrike_Chat_All\" \"\x02%s1 :  %s2\"\n\"Cstrike_Chat_CT\" \"\x01(Counter-Terrorist) \x03%s1\x01 :  %s2\"\n\"Game_radio\" \"\x02%s1 (RADIO): %s2\"\n}",
+        );
+        assert_eq!(
+            format_saytext_with_titles("#Cstrike_Chat_All", &p(&["Alice", "hi"]), Some(&loc), None),
+            "\x02Alice :  hi"
+        );
+        assert_eq!(
+            format_saytext_with_titles("#Cstrike_Chat_CT", &p(&["Bob", "rush a"]), Some(&loc), None),
+            "\x01(Counter-Terrorist) \x03Bob\x01 :  rush a"
+        );
+        assert_eq!(
+            format_saytext_with_titles("\x01* \x03Bob\x01 : \x04bombticking", &[], None, None),
+            "\x01* \x03Bob\x01 : \x04bombticking"
+        );
+        assert_eq!(
+            format_message_with_titles("#Cstrike_Chat_All", &p(&["Alice", "hi"]), Some(&loc), None),
+            "Alice :  hi"
+        );
     }
 }

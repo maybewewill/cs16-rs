@@ -843,8 +843,15 @@ impl ViewBuilder {
                 let seed = base_seed
                     .wrapping_add((ev_idx as u32).wrapping_mul(131))
                     .wrapping_add(shot.wrapping_mul(17));
-                let sx = (((seed & 0xFF) as f32) / 255.0 - 0.5) * 2.0 * fire.spread[0];
-                let sy = ((((seed >> 8) & 0xFF) as f32) / 255.0 - 0.5) * 2.0 * fire.spread[1];
+                // Single-bullet events already carry exact (dx, dy) displacement in `fire.spread`;
+                // shotguns pass a cone radius (`Spread::Fixed`) scaled per pellet.
+                let (sx, sy) = if shots == 1 {
+                    (fire.spread[0], fire.spread[1])
+                } else {
+                    let rx = (((seed & 0xFF) as f32) / 255.0 - 0.5) * 2.0 * fire.spread[0];
+                    let ry = ((((seed >> 8) & 0xFF) as f32) / 255.0 - 0.5) * 2.0 * fire.spread[1];
+                    (rx, ry)
+                };
                 let dir = (fire.forward + fire.right * sx + fire.up * sy).normalize_or_zero();
                 let dist = fire.distance.clamp(64.0, 8192.0);
                 let tr = coll.trace_world(fire.origin, fire.origin + dir * dist, Hull::Point);
@@ -1445,5 +1452,126 @@ mod tests {
             ..Default::default()
         };
         assert!(!is_client_alive(&cd));
+    }
+
+    #[test]
+    fn single_bullet_impact_uses_exact_spread_without_timestamp_jitter() {
+        use cs_assets::bsp::{BspMap, BspModel, Leaf, LightmapAtlas, Node, Plane};
+        use cs_clientcore::events::{BulletFire, BulletType, WeaponFireFx};
+        use cs_clientcore::{EventFx, FiredEvent};
+        use cs_pm::collision::{CONTENTS_EMPTY, CONTENTS_SOLID};
+
+        let bsp = BspMap {
+            name: "wall".into(),
+            skyname: String::new(),
+            entities: Vec::new(),
+            spawns: Vec::new(),
+            hostage_spawns: Vec::new(),
+            brush_entities: Vec::new(),
+            planes: vec![Plane {
+                normal: Vec3::X,
+                dist: 128.0,
+                plane_type: 0,
+            }],
+            vertices_raw: Vec::new(),
+            visibility: Vec::new(),
+            nodes: vec![Node {
+                plane: 0,
+                children: [-1, -2],
+                mins: [-512, -512, -512],
+                maxs: [512, 512, 512],
+                first_face: 0,
+                num_faces: 0,
+            }],
+            texinfos: Vec::new(),
+            faces: Vec::new(),
+            lighting: Vec::new(),
+            clipnodes: Vec::new(),
+            leafs: vec![
+                Leaf {
+                    contents: CONTENTS_SOLID,
+                    vis_offset: -1,
+                    mins: [-512, -512, -512],
+                    maxs: [512, 512, 512],
+                    first_mark_surface: 0,
+                    num_mark_surfaces: 0,
+                    ambient_levels: [0; 4],
+                },
+                Leaf {
+                    contents: CONTENTS_EMPTY,
+                    vis_offset: -1,
+                    mins: [-512, -512, -512],
+                    maxs: [512, 512, 512],
+                    first_mark_surface: 0,
+                    num_mark_surfaces: 0,
+                    ambient_levels: [0; 4],
+                },
+            ],
+            mark_surfaces: Vec::new(),
+            edges: Vec::new(),
+            surf_edges: Vec::new(),
+            models: vec![BspModel {
+                mins: Vec3::splat(-512.0),
+                maxs: Vec3::splat(512.0),
+                origin: Vec3::ZERO,
+                head_nodes: [0, -1, -1, -1],
+                vis_leafs: 2,
+                first_face: 0,
+                num_faces: 0,
+            }],
+            textures: Vec::new(),
+            lightmap_atlas: LightmapAtlas {
+                width: 0,
+                height: 0,
+                rgba: Vec::new(),
+                packed_faces: 0,
+            },
+            render_vertices: Vec::new(),
+            render_indices: Vec::new(),
+            batches: Vec::new(),
+        };
+
+        let mut builder = ViewBuilder::new();
+        builder.set_world_context(Some(Arc::new(WorldCollision::from_bsp(&bsp))), None);
+        let fired = [FiredEvent {
+            index: 1,
+            name: Some("events/ak47.sc".into()),
+            flags: 0,
+            args: cs_proto48::event::EventArgs::default(),
+            velocity: Vec3::ZERO,
+            fx: EventFx::Weapon(WeaponFireFx {
+                weapon: "ak47",
+                entity: 1,
+                local: true,
+                view_anim: None,
+                muzzle_flash: false,
+                shell: None,
+                sound: None,
+                bullets: Some(BulletFire {
+                    entity: 1,
+                    origin: Vec3::ZERO,
+                    forward: Vec3::X,
+                    right: Vec3::Y,
+                    up: Vec3::Z,
+                    shots: 1,
+                    spread: [0.05, -0.025],
+                    distance: 512.0,
+                    bullet: BulletType::Mm762,
+                    penetration: 2,
+                }),
+            }),
+        }];
+
+        let _ = builder.collect_bullet_impacts(&fired, 1.234);
+        assert_eq!(builder.pending_decals.len(), 1);
+        let p1 = builder.pending_decals[0].origin;
+        assert!((p1.x - 128.0).abs() < 0.1, "x={}", p1.x);
+        assert!((p1.y - 6.4).abs() < 0.2, "y={}", p1.y);
+        assert!((p1.z + 3.2).abs() < 0.2, "z={}", p1.z);
+
+        builder.pending_decals.clear();
+        let _ = builder.collect_bullet_impacts(&fired, 99.876);
+        let p2 = builder.pending_decals[0].origin;
+        assert!((p1 - p2).length() < 1e-5, "single shot impact must be deterministic");
     }
 }
