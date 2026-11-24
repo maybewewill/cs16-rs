@@ -2322,6 +2322,29 @@ pub fn write_svc_usermsg(w: &mut MsgWriter, reg: &UserMsgRegistry, msg: &CsUserM
     true
 }
 
+/// Write a raw pre-encoded user message payload under a registered custom `UserMsg` name.
+pub fn write_svc_raw_usermsg(w: &mut MsgWriter, reg: &UserMsgRegistry, name: &str, payload: &[u8]) -> bool {
+    let Some(id) = reg.id_for_name(name) else {
+        return false;
+    };
+    let Some(desc) = reg.get_by_id(id) else {
+        return false;
+    };
+    if desc.size >= 0 {
+        if payload.len() != desc.size as usize {
+            return false;
+        }
+        w.write_u8(id);
+        w.write_bytes(payload);
+    } else {
+        let len = payload.len().min(255);
+        w.write_u8(id);
+        w.write_u8(len as u8);
+        w.write_bytes(&payload[..len]);
+    }
+    true
+}
+
 // ============================================================================
 // Client-to-server `clc_*` codecs (`SV_ExecuteClientMessage`, `sv_user.cpp`)
 // ============================================================================

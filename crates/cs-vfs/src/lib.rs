@@ -152,6 +152,8 @@ pub struct Vfs {
     layers: Vec<PathBuf>,
     /// Normalized lowercase relative path -> file source.
     index: HashMap<String, Source>,
+    /// Mod asset overlay layers above base GoldSrc directories (highest priority last).
+    mod_overlays: Vec<(String, HashMap<String, Source>)>,
     /// Optional backend for lazy lookups outside static `index` enumeration.
     backend: Option<Arc<dyn VfsBackend>>,
     /// True when files were supplied in memory or via backend; never re-walks disk.
@@ -173,6 +175,7 @@ impl Vfs {
             config,
             layers: Vec::new(),
             index: HashMap::new(),
+            mod_overlays: Vec::new(),
             backend: None,
             in_memory: false,
         };
@@ -193,6 +196,7 @@ impl Vfs {
             config: VfsConfig::default(),
             layers: Vec::new(),
             index,
+            mod_overlays: Vec::new(),
             backend: None,
             in_memory: true,
         }
@@ -226,6 +230,7 @@ impl Vfs {
             config,
             layers: Vec::new(),
             index,
+            mod_overlays: Vec::new(),
             backend: None,
             in_memory: true,
         }
@@ -243,6 +248,7 @@ impl Vfs {
             config: VfsConfig::default(),
             layers: Vec::new(),
             index,
+            mod_overlays: Vec::new(),
             backend: Some(backend),
             in_memory: true,
         }
@@ -327,6 +333,28 @@ impl Vfs {
             walk_layer(layer, layer, &mut self.index);
         }
 
+        // Layer any on-disk `<root>/mods/<id>` asset packs above base GoldSrc layers.
+        let mods_root = self.root.join("mods");
+        if mods_root.is_dir()
+            && let Ok(entries) = fs::read_dir(&mods_root)
+        {
+            let mut mod_dirs: Vec<PathBuf> = entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect();
+            mod_dirs.sort();
+            for dir in mod_dirs {
+                let assets_sub = dir.join("assets");
+                let scan_root = if assets_sub.is_dir() {
+                    &assets_sub
+                } else {
+                    &dir
+                };
+                walk_layer(scan_root, scan_root, &mut self.index);
+            }
+        }
+
         debug!(
             root = %self.root.display(),
             layers = self.layers.len(),
@@ -347,9 +375,76 @@ impl Vfs {
         s.to_ascii_lowercase()
     }
 
+    /// Validates a mod identifier (`[a-z0-9_-]`) for VFS overlay mounting.
+    pub fn is_valid_mod_id(mod_id: &str) -> bool {
+        !mod_id.is_empty()
+            && mod_id
+                .bytes()
+                .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-'))
+    }
+
+    fn is_safe_overlay_path(rel_path: &str) -> bool {
+        let norm = Self::normalize(rel_path);
+        !norm.is_empty()
+            && !norm.contains('\0')
+            && !norm.split('/').any(|seg| seg.is_empty() || seg == "." || seg == "..")
+    }
+
+    fn lookup_source(&self, normalized_key: &str) -> Option<&Source> {
+        for (_, overlay) in self.mod_overlays.iter().rev() {
+            if let Some(src) = overlay.get(normalized_key) {
+                return Some(src);
+            }
+        }
+        self.index.get(normalized_key)
+    }
+
+    /// Mounts a disk directory as an asset overlay for `mod_id` above `cstrike` layers.
+    pub fn mount_mod_dir(&mut self, mod_id: &str, dir: &Path) -> Result<usize, VfsError> {
+        if !Self::is_valid_mod_id(mod_id) || !dir.is_dir() {
+            return Err(VfsError::InvalidGameDir(dir.to_path_buf()));
+        }
+        let mut map = HashMap::new();
+        walk_layer(dir, dir, &mut map);
+        let count = map.len();
+        self.unmount_mod_assets(mod_id);
+        self.mod_overlays.push((mod_id.to_string(), map));
+        Ok(count)
+    }
+
+    /// Mounts in-memory asset bytes for `mod_id` above `cstrike` layers (for downloaded mods).
+    pub fn mount_mod_assets(
+        &mut self,
+        mod_id: &str,
+        files: impl IntoIterator<Item = (String, Vec<u8>)>,
+    ) -> Result<usize, VfsError> {
+        if !Self::is_valid_mod_id(mod_id) {
+            return Err(VfsError::InvalidGameDir(PathBuf::from(mod_id)));
+        }
+        let mut map = HashMap::new();
+        for (raw_path, bytes) in files {
+            if !Self::is_safe_overlay_path(&raw_path) {
+                return Err(VfsError::NotFound(raw_path));
+            }
+            let key = Self::normalize(&raw_path);
+            map.insert(key, Source::Memory(bytes));
+        }
+        let count = map.len();
+        self.unmount_mod_assets(mod_id);
+        self.mod_overlays.push((mod_id.to_string(), map));
+        Ok(count)
+    }
+
+    /// Removes any mounted asset overlay for `mod_id`.
+    pub fn unmount_mod_assets(&mut self, mod_id: &str) -> bool {
+        let before = self.mod_overlays.len();
+        self.mod_overlays.retain(|(id, _)| id != mod_id);
+        self.mod_overlays.len() != before
+    }
+
     /// Real filesystem path of a disk-backed file; `None` if absent or held in memory/backend.
     pub fn resolve(&self, rel_path: &str) -> Option<&Path> {
-        match self.index.get(&Self::normalize(rel_path))? {
+        match self.lookup_source(&Self::normalize(rel_path))? {
             Source::Disk(path) => Some(path),
             Source::Memory(_) | Source::Backend(_) => None,
         }
@@ -357,13 +452,13 @@ impl Vfs {
 
     pub fn exists(&self, rel_path: &str) -> bool {
         let key = Self::normalize(rel_path);
-        self.index.contains_key(&key)
+        self.lookup_source(&key).is_some()
             || self.backend.as_ref().is_some_and(|b| b.contains(&key))
     }
 
     pub fn read_bytes(&self, rel_path: &str) -> Result<Vec<u8>, VfsError> {
         let key = Self::normalize(rel_path);
-        match self.index.get(&key) {
+        match self.lookup_source(&key) {
             None => {
                 if let Some(backend) = &self.backend
                     && backend.contains(&key)
@@ -398,7 +493,11 @@ impl Vfs {
         let ext_lower = ext.map(|e| format!(".{}", e.trim_start_matches('.').to_ascii_lowercase()));
 
         let mut results = BTreeSet::new();
-        for key in self.index.keys() {
+        for key in self
+            .index
+            .keys()
+            .chain(self.mod_overlays.iter().flat_map(|(_, m)| m.keys()))
+        {
             let Some(rest) = key.strip_prefix(&prefix_slash) else {
                 continue;
             };
@@ -686,5 +785,33 @@ mod tests {
         assert_eq!(vfs.read_bytes("sound/test.wav").unwrap().len(), 8);
         assert_eq!(arc.cache_len(), 1);
         assert_eq!(arc.cached_bytes(), 8);
+    }
+
+    #[test]
+    fn mod_asset_overlay_overrides_cstrike_and_unmounts_cleanly() {
+        let mut vfs = Vfs::from_layered_memory(
+            [
+                ("Half-Life/cstrike/sprites/hud.txt".to_string(), b"base-hud".to_vec()),
+            ],
+            VfsConfig::default(),
+        );
+        assert_eq!(vfs.read_bytes("sprites/hud.txt").unwrap(), b"base-hud");
+
+        let count = vfs
+            .mount_mod_assets(
+                "custom_hud",
+                [
+                    ("sprites/hud.txt".to_string(), b"mod-hud".to_vec()),
+                    ("sprites/mod_badge.txt".to_string(), b"badge".to_vec()),
+                ],
+            )
+            .unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(vfs.read_bytes("sprites/hud.txt").unwrap(), b"mod-hud");
+        assert!(vfs.exists("sprites/mod_badge.txt"));
+
+        assert!(vfs.unmount_mod_assets("custom_hud"));
+        assert_eq!(vfs.read_bytes("sprites/hud.txt").unwrap(), b"base-hud");
+        assert!(!vfs.exists("sprites/mod_badge.txt"));
     }
 }

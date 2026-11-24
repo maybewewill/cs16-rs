@@ -67,6 +67,11 @@ impl EngineApi<'_> {
         self.map.collision().is_some()
     }
 
+    /// Shared handle to the loaded map's [`WorldCollision`](crate::collision::WorldCollision), if any.
+    pub fn world_collision_arc(&self) -> Option<std::sync::Arc<crate::collision::WorldCollision>> {
+        self.map.collision_arc()
+    }
+
     /// Worldspawn (index 0); always live.
     pub fn world(&self) -> EdictId {
         self.edicts.world()

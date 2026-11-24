@@ -243,6 +243,61 @@ impl EngineApi<'_> {
         true
     }
 
+    /// Sends a pre-encoded custom user message by registered name.
+    pub fn send_raw_usermsg(&mut self, dest: MsgDest, name: &str, payload: &[u8]) -> bool {
+        let mut w = MsgWriter::new();
+        if !cs_proto48::messages::write_svc_raw_usermsg(&mut w, self.usermsgs, name, payload) {
+            return false;
+        }
+        self.send(dest, w.as_slice());
+        true
+    }
+
+    /// Sends a custom mod user message ONLY to slots whose userinfo advertises mod support
+    /// (`_cs16rs_mods = 1`); original CS 1.6 clients never receive extended mod traffic.
+    pub fn send_mod_usermsg(&mut self, dest: MsgDest, name: &str, payload: &[u8]) -> bool {
+        let mut w = MsgWriter::new();
+        if !cs_proto48::messages::write_svc_raw_usermsg(&mut w, self.usermsgs, name, payload) {
+            return false;
+        }
+        let bytes = w.as_slice();
+        match dest {
+            MsgDest::One(slot) => {
+                if self.client_supports_mods(slot) {
+                    self.send(MsgDest::One(slot), bytes);
+                }
+            }
+            MsgDest::OneUnreliable(slot) => {
+                if self.client_supports_mods(slot) {
+                    self.send(MsgDest::OneUnreliable(slot), bytes);
+                }
+            }
+            MsgDest::All => {
+                for slot in 0..self.clients.len() {
+                    if self.clients[slot].state.is_in_game()
+                        && self.client_supports_mods(slot as u8)
+                    {
+                        self.outbox.push_reliable(slot, bytes);
+                    }
+                }
+            }
+            MsgDest::Broadcast | MsgDest::Pvs(_) | MsgDest::Pas(_) => {
+                for slot in 0..self.clients.len() {
+                    if self.clients[slot].state == ClientState::Active
+                        && self.client_supports_mods(slot as u8)
+                    {
+                        self.outbox.push_unreliable(slot, bytes);
+                    }
+                }
+            }
+            MsgDest::Init => {
+                // Never buffer extended mod usermsgs into `Init` because vanilla clients replay it.
+                return false;
+            }
+        }
+        true
+    }
+
     /// `SET_VIEW` (`PF_setview_I`, ReHLDS `pr_cmds.cpp`, read 2026-11-22): the client of the
     /// edict `client` is told to look through `view` (`svc_setview` on its reliable stream; the
     /// original also keeps the entity for `SetupVisibility`, which the game here answers from its
@@ -731,5 +786,51 @@ mod tests {
         // A NUL after the limit does not matter; the limit does.
         let both = format!("{long}\0tail");
         assert_eq!(clip_text(&both).len(), MAX_MESSAGE_TEXT);
+    }
+
+    #[test]
+    fn send_mod_usermsg_reaches_only_mod_capable_clients() {
+        let mut edicts = crate::edict::EdictPool::new(2, 16);
+        let mut precache = crate::precache::PrecacheTables::new("maps/de_dust2.bsp", 1);
+        let mut cvars = cs_cvar::CVarRegistry::new_with_defaults();
+        let mut usermsgs = UserMsgRegistry::cs16_default();
+        let msg_id = usermsgs.register_next(-1, "CsModEvent").unwrap();
+        let map = crate::map::ServerMap::stub("de_dust2");
+        let mut world = crate::world::WorldLinks::new(map.world_bounds());
+        let mut outbox = crate::game::Outbox::new(2);
+        let mut clients = [
+            crate::game::ClientView {
+                in_use: true,
+                active: true,
+                state: ClientState::Active,
+                ..Default::default()
+            },
+            crate::game::ClientView {
+                in_use: true,
+                active: true,
+                state: ClientState::Active,
+                ..Default::default()
+            },
+        ];
+        clients[1]
+            .userinfo
+            .set(crate::game::MOD_CAPABILITY_KEY, "1");
+
+        let mut eng = EngineApi::new(
+            &mut edicts,
+            &mut precache,
+            &mut cvars,
+            &usermsgs,
+            &map,
+            &mut world,
+            1.0,
+            0.01,
+            &mut outbox,
+            &mut clients,
+        );
+        assert!(eng.send_mod_usermsg(MsgDest::All, "CsModEvent", b"ok"));
+        assert!(!eng.send_mod_usermsg(MsgDest::Init, "CsModEvent", b"ok"));
+        assert!(outbox.reliable[0].as_slice().is_empty());
+        assert_eq!(outbox.reliable[1].as_slice(), &[msg_id, 2, b'o', b'k']);
     }
 }

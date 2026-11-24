@@ -17,7 +17,7 @@ pub struct ServerMap {
     pub submodel_count: usize,
     pub entities: Vec<Entity>,
     vis: Option<Arc<BspMap>>,
-    collision: Option<WorldCollision>,
+    collision: Option<Arc<WorldCollision>>,
     /// The potentially audible set of every leaf, built by [`calc_pas`](Self::calc_pas) when
     /// the map is activated, outside any client frame. Unset until then, and `None` inside for
     /// a single-client server, a map without visibility data or one over the caps
@@ -134,7 +134,7 @@ impl ServerMap {
             crc,
             submodel_count: bsp.models.len(),
             entities: bsp.entities.clone(),
-            collision: Some(WorldCollision::from_bsp(&bsp)),
+            collision: Some(Arc::new(WorldCollision::from_bsp(&bsp))),
             pas: OnceLock::new(),
             vis: Some(bsp),
         })
@@ -166,7 +166,12 @@ impl ServerMap {
 
     /// The map's hull collision; `None` for the stub map.
     pub fn collision(&self) -> Option<&WorldCollision> {
-        self.collision.as_ref()
+        self.collision.as_deref()
+    }
+
+    /// Shared handle to the map's hull collision, used by read-only query snapshots.
+    pub fn collision_arc(&self) -> Option<Arc<WorldCollision>> {
+        self.collision.clone()
     }
 
     /// The BSP behind the visibility tests; `None` for the stub map.
@@ -316,7 +321,7 @@ impl ServerMap {
         Self {
             submodel_count: bsp.models.len(),
             entities: Vec::new(),
-            collision: Some(WorldCollision::from_bsp(&bsp)),
+            collision: Some(Arc::new(WorldCollision::from_bsp(&bsp))),
             pas: OnceLock::new(),
             vis: Some(bsp),
             ..Self::stub("test_bsp")

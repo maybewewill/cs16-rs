@@ -41,6 +41,18 @@ impl UserMsgRegistry {
         self.by_id.insert(id, UserMsgDesc { id, size, name });
     }
 
+    /// Registers `name` at the lowest free slot in `USERMSG_BASE_ID..=255`, or returns the
+    /// existing id when `name` is already registered.
+    pub fn register_next(&mut self, size: i8, name: impl Into<String>) -> Option<u8> {
+        let name = name.into();
+        if let Some(id) = self.by_name.get(&name).copied() {
+            return Some(id);
+        }
+        let id = (USERMSG_BASE_ID..=u8::MAX).find(|candidate| !self.by_id.contains_key(candidate))?;
+        self.register(id, size, name);
+        Some(id)
+    }
+
     pub fn get_by_id(&self, id: u8) -> Option<&UserMsgDesc> {
         self.by_id.get(&id)
     }
@@ -1059,5 +1071,16 @@ mod tests {
         let (name, raw) = encode_cs_usermsg(&m);
         assert_eq!(name, "ClCorpse");
         assert_eq!(decode_cs_usermsg(name, &raw).unwrap(), m);
+    }
+
+    #[test]
+    fn register_next_and_raw_usermsg_roundtrip() {
+        let mut reg = UserMsgRegistry::cs16_default();
+        let id = reg.register_next(-1, "CsModEvent").expect("slot available");
+        assert!(id >= USERMSG_BASE_ID);
+        assert_eq!(reg.register_next(-1, "CsModEvent"), Some(id));
+        let mut w = crate::bitbuf::MsgWriter::new();
+        assert!(crate::messages::write_svc_raw_usermsg(&mut w, &reg, "CsModEvent", b"hi!"));
+        assert_eq!(w.as_slice(), &[id, 3, b'h', b'i', b'!']);
     }
 }

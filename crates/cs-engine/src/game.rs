@@ -231,7 +231,15 @@ impl<'a> EngineApi<'a> {
     }
 }
 
+/// Client userinfo key advertising support for extended WASM mod usermsgs and auto-download.
+pub const MOD_CAPABILITY_KEY: &str = "_cs16rs_mods";
+
 impl EngineApi<'_> {
+    /// Returns true if the client in `slot` advertised mod capability (`_cs16rs_mods 1`).
+    pub fn client_supports_mods(&self, slot: u8) -> bool {
+        self.client_key(slot, MOD_CAPABILITY_KEY) == Some("1")
+    }
+
     pub fn client_key(&self, slot: u8, key: &str) -> Option<&str> {
         self.clients.get(usize::from(slot))?.userinfo.get(key)
     }
