@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+ab_glyph.workspace = true
 bytemuck.workspace = true
 crc32fast.workspace = true
 cs-assets.workspace = true

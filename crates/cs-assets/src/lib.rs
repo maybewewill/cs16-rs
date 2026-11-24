@@ -6,6 +6,9 @@ pub mod materials;
 pub mod mdl;
 pub mod scheme;
 pub mod spr;
+pub mod vgui_font;
+pub mod vgui_res;
+pub mod vgui_scripts;
 pub mod wad;
 
 #[cfg(test)]

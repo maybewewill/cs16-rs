@@ -17,6 +17,24 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     reg.register("cl_hd_models", "0", arch, "Enable cstrike_hd high-definition models (0 or 1)");
     reg.register("hud_fastswitch", "1", arch, "Fast weapon switch on slot press (0 or 1)");
     reg.register("_vgui_menus", "0", arch, "Ask the server for VGUI menus (1) or the text menus this client draws (0)");
+    reg.register("hud_centerid", "0", arch, "Center player target ID status bar text (0 or 1)");
+    reg.register("hud_draw", "1", CVarFlags::NONE, "Draw in-game HUD overlay (0 or 1)");
+    reg.register("hud_saytext_internal", "1", arch, "Show in-game chat saytext lines (0 or 1)");
+    reg.register("hud_takesshots", "0", arch, "Automatically take end-of-map scoreboard screenshots (0 or 1)");
+    reg.register("scr_centertime", "2", CVarFlags::NONE, "Duration centerprint messages stay visible (seconds)");
+    reg.register("con_color", "255 180 30", arch, "Console text RGB color");
+    reg.register("cl_radartype", "0", arch, "Radar background style (0=translucent, 1=solid/overview)");
+    reg.register("cl_observercrosshair", "1", arch, "Show crosshair while spectating (0 or 1)");
+    reg.register("spec_autodirector", "1", arch, "Spectator auto-director target selection (0 or 1)");
+    reg.register("spec_drawstatus", "1", arch, "Draw spectator status bar (0 or 1)");
+    reg.register("spec_drawcone", "1", arch, "Draw spectator overview view cones (0 or 1)");
+    reg.register("spec_drawnames", "1", arch, "Draw player names in spectator overview (0 or 1)");
+    reg.register("spec_pip", "0", arch, "Spectator picture-in-picture mode (0..3)");
+    reg.register("cl_language", "english", arch, "Client localization language (english, russian, german, ...)");
+    reg.register("violence_hblood", "1", arch, "Show human blood effects (0 or 1)");
+    reg.register("violence_ablood", "1", arch, "Show alien blood effects (0 or 1)");
+    reg.register("violence_hgibs", "1", arch, "Show human gib effects (0 or 1)");
+    reg.register("violence_agibs", "1", arch, "Show alien gib effects (0 or 1)");
     reg.register("cl_forwardspeed", "400", arch, "Forward move speed (+forward)");
     reg.register("cl_backspeed", "400", arch, "Backward move speed (+back)");
     reg.register("cl_sidespeed", "400", arch, "Side move speed (+moveleft, +moveright)");
@@ -210,6 +228,7 @@ pub fn register_default_binds(reg: &mut CVarRegistry) {
         ("t", "impulse 201"),
         ("f", "impulse 100"),
         ("k", "+voicerecord"),
+        ("h", "+commandmenu"),
         (",", "buyammo1"),
         (".", "buyammo2"),
         ("1", "slot1"),

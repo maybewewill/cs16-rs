@@ -138,6 +138,18 @@ pub enum EngineAction {
     SpeakSentence(String),
     /// `stopsound`.
     StopSound,
+    /// `adjust_crosshair` [color_index].
+    AdjustCrosshair(Option<u8>),
+    /// `togglescores`.
+    ToggleScores,
+    /// `playerlist`: opens VGUI2 PlayerListDialog (mute players).
+    OpenPlayerList,
+    /// `viewdemo` / `playdemo` [path]: opens VGUI2 DemoPlayerDialog.
+    OpenDemoPlayer(Option<String>),
+    /// `spec_mode <mode>`: set spectator camera mode.
+    SpecMode(i32),
+    /// `spec_menu <0|1>`: open or close spectator bottom controls.
+    SpecMenu(i32),
     ActionInput { name: String, pressed: bool },
     /// A command the console does not know, handed on while the client is connected
     /// ([`CVarRegistry::set_forward_unknown`]): the shell sends the line to the server
@@ -193,6 +205,15 @@ const KNOWN_COMMANDS: &[(&str, &str)] = &[
     ("stopsound", "Stop all active sounds"),
     ("+voicerecord", "Transmit microphone voice while held"),
     ("-voicerecord", "Stop transmitting microphone voice"),
+    ("+commandmenu", "Show CS 1.6 VGUI2 command menu while held"),
+    ("-commandmenu", "Hide CS 1.6 VGUI2 command menu"),
+    ("adjust_crosshair", "Cycle or set CS 1.6 crosshair color"),
+    ("togglescores", "Toggle the multiplayer scoreboard"),
+    ("playerlist", "Open the mute player list dialog"),
+    ("viewdemo", "Open the VGUI2 demo playback transport dialog"),
+    ("playdemo", "Play a recorded demo file"),
+    ("spec_mode", "Switch spectator camera mode"),
+    ("spec_menu", "Show or hide spectator menu bar"),
     ("toggleconsole", "Open or close the developer console"),
     ("cancelselect", "Toggle pause menu"),
 ];
@@ -775,6 +796,23 @@ impl CVarRegistry {
                 }
             }
             "stopsound" => actions.push(EngineAction::StopSound),
+            "adjust_crosshair" => {
+                let idx = args.first().and_then(|s| s.parse::<u8>().ok());
+                actions.push(EngineAction::AdjustCrosshair(idx));
+            }
+            "togglescores" => actions.push(EngineAction::ToggleScores),
+            "playerlist" => actions.push(EngineAction::OpenPlayerList),
+            "viewdemo" | "playdemo" => {
+                actions.push(EngineAction::OpenDemoPlayer(args.first().cloned()));
+            }
+            "spec_mode" => {
+                let mode = args.first().and_then(|s| s.parse::<i32>().ok()).unwrap_or(-1);
+                actions.push(EngineAction::SpecMode(mode));
+            }
+            "spec_menu" => {
+                let vis = args.first().and_then(|s| s.parse::<i32>().ok()).unwrap_or(1);
+                actions.push(EngineAction::SpecMenu(vis));
+            }
             "toggleconsole" => actions.push(EngineAction::ToggleConsole),
             "cancelselect" => actions.push(EngineAction::ToggleMenu),
             _ => {

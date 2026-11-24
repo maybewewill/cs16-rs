@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+ab_glyph.workspace = true
 cs-vfs.workspace = true
 glam.workspace = true
 image.workspace = true

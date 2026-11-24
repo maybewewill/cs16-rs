@@ -432,8 +432,28 @@ impl ClientVguiColors {
 
 /// Load any TGA image (weapon previews, class portraits, CS_logo, Steam icons) from VFS.
 pub fn load_tga_image(vfs: &Vfs, path: &str) -> Result<RgbaImageData, SchemeError> {
+    load_image_rgba(vfs, path)
+}
+
+/// Load TGA, BMP, PNG (auto-detected by extension or header) from VFS as RGBA8.
+pub fn load_image_rgba(vfs: &Vfs, path: &str) -> Result<RgbaImageData, SchemeError> {
     let bytes = vfs.read_bytes(path)?;
-    let rgba = image::load_from_memory_with_format(&bytes, ImageFormat::Tga)
+    let lower = path.to_ascii_lowercase();
+    let fmt = if lower.ends_with(".bmp") {
+        Some(ImageFormat::Bmp)
+    } else if lower.ends_with(".png") {
+        Some(ImageFormat::Png)
+    } else if lower.ends_with(".tga") {
+        Some(ImageFormat::Tga)
+    } else {
+        None
+    };
+    let loaded = match fmt {
+        Some(f) => image::load_from_memory_with_format(&bytes, f)
+            .or_else(|_| image::load_from_memory(&bytes)),
+        None => image::load_from_memory(&bytes),
+    };
+    let rgba = loaded
         .map_err(|source| SchemeError::Image {
             path: path.to_string(),
             source,
@@ -446,26 +466,107 @@ pub fn load_tga_image(vfs: &Vfs, path: &str) -> Result<RgbaImageData, SchemeErro
     })
 }
 
-/// Valve VGUI2 `#Token` localization dictionary loaded from `resource/cstrike_english.txt`
-/// and `resource/gameui_english.txt` (supports UTF-16LE BOM and UTF-8).
+/// Load a map overview BMP/TGA and key pure GoldSrc overview green `(0, 255, 0)` to transparent.
+pub fn load_overview_image_rgba(vfs: &Vfs, path: &str) -> Result<RgbaImageData, SchemeError> {
+    let mut img = load_image_rgba(vfs, path)?;
+    for px in img.rgba.as_chunks_mut::<4>().0 {
+        if px[0] <= 12 && px[1] >= 242 && px[2] <= 12 {
+            px[0] = 0;
+            px[1] = 0;
+            px[2] = 0;
+            px[3] = 0;
+        }
+    }
+    Ok(img)
+}
+
+const ALL_LANG_PREFIXES: &[&str] = &[
+    "english",
+    "russian",
+    "german",
+    "french",
+    "spanish",
+    "italian",
+    "portuguese",
+    "polish",
+    "koreana",
+    "korean",
+    "schinese",
+    "tchinese",
+    "japanese",
+    "thai",
+    "turkish",
+];
+
+/// Valve VGUI2 `#Token` localization dictionary loaded from `resource/platform_*.txt`,
+/// `resource/valve_*.txt`, `resource/gameui_*.txt`, `servers/serverbrowser_*.txt`,
+/// and `resource/cstrike_*.txt` (supports UTF-16LE/BE BOM and UTF-8).
 #[derive(Debug, Default, Clone)]
 pub struct LocalizationTable {
     tokens: HashMap<String, String>,
+    language: String,
 }
 
 impl LocalizationTable {
     pub fn load(vfs: &Vfs) -> Self {
-        let mut table = Self::default();
-        for path in [
-            "resource/gameui_english.txt",
-            "resource/cstrike_english.txt",
-        ] {
-            if let Ok(bytes) = vfs.read_bytes(path) {
-                let text = decode_valve_text(&bytes);
-                table.parse_into(&text);
+        Self::load_language(vfs, "english")
+    }
+
+    pub fn load_language(vfs: &Vfs, lang: &str) -> Self {
+        let mut table = Self {
+            tokens: HashMap::new(),
+            language: lang.trim().to_ascii_lowercase(),
+        };
+        let load_set = |tbl: &mut Self, l: &str| {
+            let paths = [
+                format!("resource/platform_{l}.txt"),
+                format!("resource/valve_{l}.txt"),
+                format!("resource/gameui_{l}.txt"),
+                format!("servers/serverbrowser_{l}.txt"),
+                format!("resource/cstrike_{l}.txt"),
+            ];
+            for path in paths {
+                if let Ok(bytes) = vfs.read_bytes(&path) {
+                    let text = decode_valve_text(&bytes);
+                    tbl.parse_into(&text);
+                }
             }
+        };
+        load_set(&mut table, "english");
+        let clean_lang = table.language.clone();
+        if !clean_lang.is_empty() && clean_lang != "english" {
+            load_set(&mut table, &clean_lang);
         }
         table
+    }
+
+    pub fn discover_languages(vfs: &Vfs) -> Vec<String> {
+        let mut out = Vec::new();
+        for &lang in ALL_LANG_PREFIXES {
+            if vfs.exists(&format!("resource/cstrike_{lang}.txt"))
+                || vfs.exists(&format!("resource/gameui_{lang}.txt"))
+                || vfs.exists(&format!("servers/serverbrowser_{lang}.txt"))
+            {
+                out.push(lang.to_string());
+            }
+        }
+        if out.is_empty() {
+            out.push("english".to_string());
+        }
+        out
+    }
+
+    pub fn language(&self) -> &str {
+        if self.language.is_empty() {
+            "english"
+        } else {
+            &self.language
+        }
+    }
+
+    /// Merge raw localization text (for tests or server/mod overrides).
+    pub fn insert_text(&mut self, text: &str) {
+        self.parse_into(text);
     }
 
     fn parse_into(&mut self, text: &str) {
@@ -616,7 +717,7 @@ pub fn load_map_briefing(vfs: &Vfs, map_name: &str) -> Option<String> {
         .map(|s| s.replace("\r\n", "\n"))
 }
 
-fn decode_valve_text(bytes: &[u8]) -> String {
+pub fn decode_valve_text(bytes: &[u8]) -> String {
     if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
         let u16s: Vec<u16> = bytes[2..]
             .as_chunks::<2>()
