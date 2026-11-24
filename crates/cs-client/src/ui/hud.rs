@@ -14,6 +14,10 @@ use cs_vfs::Vfs;
 use egui::{Color32, FontId, Pos2, Rect, Stroke, TextureHandle, Vec2};
 use glam::Vec3;
 
+use crate::ui::hud_extras::{
+    OverviewMapTex, WeaponBucketState, compute_damage_quadrants, damage_hazard_icons,
+    evaluate_dhud_text_fx, format_hud_text_entry, format_status_bar,
+};
 use crate::view_effects::evaluate_screen_fade;
 
 const HUD_AMBER: Color32 = Color32::from_rgb(255, 160, 0);
@@ -246,7 +250,72 @@ fn status_color(icon: &StatusIcon, flash_on: bool) -> Option<Color32> {
     })
 }
 
+/// Optional CS 1.6 CVar, localization, overview, and weapon-bucket context for `draw_cs16_hud_with_extras`.
+pub struct HudExtrasContext<'a> {
+    pub titles: Option<&'a cs_assets::vgui_scripts::TitlesTable>,
+    pub loc: Option<&'a cs_assets::scheme::LocalizationTable>,
+    pub overview: Option<&'a OverviewMapTex>,
+    pub buckets: Option<&'a WeaponBucketState>,
+    pub hud_draw: bool,
+    pub hud_centerid: bool,
+    pub hud_saytext_internal: bool,
+    pub hud_fastswitch: bool,
+    pub cl_radartype: bool,
+    pub con_color: [u8; 3],
+    pub scr_centertime: f32,
+}
+
+impl Default for HudExtrasContext<'_> {
+    fn default() -> Self {
+        Self {
+            titles: None,
+            loc: None,
+            overview: None,
+            buckets: None,
+            hud_draw: true,
+            hud_centerid: true,
+            hud_saytext_internal: true,
+            hud_fastswitch: false,
+            cl_radartype: false,
+            con_color: [255, 180, 30],
+            scr_centertime: 2.0,
+        }
+    }
+}
+
+impl HudExtrasContext<'_> {
+    /// Populate CVar-controlled HUD toggles (`hud_draw`, `hud_centerid`, `con_color`, etc.)
+    /// from `CVarRegistry`. Shared across native `cs-client` and WASM `cs-web`.
+    pub fn apply_cvars(&mut self, cvars: &cs_cvar::CVarRegistry) {
+        self.hud_draw = cvars.get_bool("hud_draw");
+        self.hud_centerid = cvars.get_bool("hud_centerid");
+        self.hud_saytext_internal = cvars.get_bool("hud_saytext_internal");
+        self.hud_fastswitch = cvars.get_bool("hud_fastswitch");
+        self.cl_radartype = cvars.get_bool("cl_radartype");
+        let ct = cvars.get_f32("scr_centertime");
+        if ct.is_finite() && ct > 0.0 {
+            self.scr_centertime = ct;
+        }
+        let mut nums = cvars
+            .get_str("con_color")
+            .split_whitespace()
+            .filter_map(|p| p.parse::<u8>().ok());
+        if let (Some(r), Some(g), Some(b)) = (nums.next(), nums.next(), nums.next()) {
+            self.con_color = [r, g, b];
+        }
+    }
+}
+
 pub fn draw_cs16_hud(ctx: &egui::Context, sprites: Option<&HudSprites>, hud: &HudView<'_>) {
+    draw_cs16_hud_with_extras(ctx, sprites, hud, &HudExtrasContext::default());
+}
+
+pub fn draw_cs16_hud_with_extras(
+    ctx: &egui::Context,
+    sprites: Option<&HudSprites>,
+    hud: &HudView<'_>,
+    extras: &HudExtrasContext<'_>,
+) {
     let screen = ctx.content_rect();
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Background,
@@ -310,6 +379,33 @@ pub fn draw_cs16_hud(ctx: &egui::Context, sprites: Option<&HudSprites>, hud: &Hu
     let bottom_y = screen.bottom() - 40.0 * scale;
     let flash_on = (hud.time_sec * 6.0).sin() > 0.0;
 
+    if hud.alive {
+        let quads = compute_damage_quadrants(&state.damage_history, hud.eye, hud.yaw_deg, hud.now);
+        let cx = screen.center().x;
+        let cy = screen.center().y;
+        let r = 135.0 * scale;
+        let thick = 6.0 * scale;
+        let span = 38.0 * scale;
+        for (i, q) in quads.iter().enumerate() {
+            if *q <= 0.02 {
+                continue;
+            }
+            let a = (*q * 210.0).clamp(0.0, 210.0) as u8;
+            let col = Color32::from_rgba_unmultiplied(235, 32, 24, a);
+            let rect = match i {
+                0 => Rect::from_center_size(Pos2::new(cx, cy - r), Vec2::new(span * 2.0, thick)),
+                1 => Rect::from_center_size(Pos2::new(cx + r, cy), Vec2::new(thick, span * 2.0)),
+                2 => Rect::from_center_size(Pos2::new(cx, cy + r), Vec2::new(span * 2.0, thick)),
+                _ => Rect::from_center_size(Pos2::new(cx - r, cy), Vec2::new(thick, span * 2.0)),
+            };
+            painter.rect_filled(rect, 2.0, col);
+        }
+    }
+
+    if !extras.hud_draw {
+        return;
+    }
+
     // 3. Bottom-left: health and armor (`640hud7` cross, suit, digits).
     if hud.alive || state.health > 0 {
         let hp_color = if state.health <= 25 { HUD_RED } else { HUD_AMBER };
@@ -351,6 +447,19 @@ pub fn draw_cs16_hud(ctx: &egui::Context, sprites: Option<&HudSprites>, hud: &Hu
                     icon_y += 38.0 * scale;
                 }
             }
+            for (dmg, started) in &state.damage_history {
+                if hud.now - *started <= 2.5 {
+                    for haz in damage_hazard_icons(dmg.bits) {
+                        let col = if flash_on { HUD_RED } else { HUD_AMBER };
+                        if sp
+                            .draw_sprite(&painter, haz, Pos2::new(icon_x, icon_y), scale, col)
+                            .is_some()
+                        {
+                            icon_y += 38.0 * scale;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -386,6 +495,35 @@ pub fn draw_cs16_hud(ctx: &egui::Context, sprites: Option<&HudSprites>, hud: &Hu
                 FontId::monospace(24.0 * scale),
                 timer_col,
             );
+        }
+        if let Some(ref sc) = state.scenario
+            && sc.alpha > 0
+            && !sc.sprite.is_empty()
+        {
+            let pulse = match sc.flash {
+                Some((rate, _)) if rate > 0 => {
+                    (hud.time_sec * f32::from(rate).max(2.0)).sin() > 0.0
+                }
+                _ => true,
+            };
+            if pulse {
+                let sx = center_x - 86.0 * scale;
+                let col = HUD_RED.linear_multiply(f32::from(sc.alpha) / 255.0);
+                if let Some(sp) = sprites
+                    && sp
+                        .draw_sprite(&painter, &sc.sprite, Pos2::new(sx, bottom_y + 1.0), scale, col)
+                        .is_some()
+                {
+                } else {
+                    painter.text(
+                        Pos2::new(sx, bottom_y + 12.0 * scale),
+                        egui::Align2::CENTER_CENTER,
+                        "[C4]",
+                        FontId::monospace(14.0 * scale),
+                        col,
+                    );
+                }
+            }
         }
     }
 
@@ -444,40 +582,87 @@ pub fn draw_cs16_hud(ctx: &egui::Context, sprites: Option<&HudSprites>, hud: &Hu
     }
 
     // 7. Top-left: the radar of the teammates the server reports (`Radar`) and the bomb.
-    draw_radar(&painter, sprites, hud, scale);
+    draw_radar_with_extras(&painter, sprites, hud, extras, scale);
 
     // 8. Top-centre: the weapon slot strip (`bucket1..5`) briefly after a switch.
-    if hud.weapon_switch_timer > 0.01
-        && hud.alive
-        && let Some(sp) = sprites
-    {
-        let alpha = ((hud.weapon_switch_timer / 0.4).min(1.0) * 235.0) as u8;
-        let active_slot = state
-            .current_weapon
-            .and_then(|c| state.weapons.get(&c.weapon_id))
-            .map_or(0, |w| w.slot + 1);
+    let bucket_open = extras.buckets.is_some_and(|b| b.active_slot.is_some());
+    if (hud.weapon_switch_timer > 0.01 || bucket_open) && hud.alive {
+        let alpha = if bucket_open {
+            240u8
+        } else {
+            ((hud.weapon_switch_timer / 0.4).min(1.0) * 235.0) as u8
+        };
+        let active_slot = extras
+            .buckets
+            .and_then(|b| b.active_slot)
+            .or_else(|| {
+                state
+                    .current_weapon
+                    .and_then(|c| state.weapons.get(&c.weapon_id))
+                    .map(|w| w.slot + 1)
+            })
+            .unwrap_or(0);
         let start_x = screen.left() + 148.0 * scale;
         let top_y = 14.0 * scale;
-        for slot in 1..=5u8 {
-            let has_slot = state
+        if let Some(sp) = sprites {
+            for slot in 1..=5u8 {
+                let has_slot = state
+                    .weapons
+                    .values()
+                    .any(|w| w.slot + 1 == slot && hud.owned.contains(&w.weapon_id));
+                let col = if slot == active_slot {
+                    Color32::from_rgba_unmultiplied(255, 200, 30, alpha)
+                } else if has_slot {
+                    Color32::from_rgba_unmultiplied(220, 140, 0, (alpha as f32 * 0.65) as u8)
+                } else {
+                    Color32::from_rgba_unmultiplied(120, 75, 0, (alpha as f32 * 0.3) as u8)
+                };
+                let b_name = format!("bucket{slot}");
+                let _ = sp.draw_sprite(
+                    &painter,
+                    &b_name,
+                    Pos2::new(start_x + f32::from(slot - 1) * 28.0 * scale, top_y),
+                    scale,
+                    col,
+                );
+            }
+        }
+        if let Some(b) = extras.buckets
+            && let Some(sel_slot) = b.active_slot
+            && !extras.hud_fastswitch
+        {
+            let mut slot_weapons: Vec<_> = state
                 .weapons
                 .values()
-                .any(|w| w.slot + 1 == slot && hud.owned.contains(&w.weapon_id));
-            let col = if slot == active_slot {
-                Color32::from_rgba_unmultiplied(255, 200, 30, alpha)
-            } else if has_slot {
-                Color32::from_rgba_unmultiplied(220, 140, 0, (alpha as f32 * 0.65) as u8)
-            } else {
-                Color32::from_rgba_unmultiplied(120, 75, 0, (alpha as f32 * 0.3) as u8)
-            };
-            let b_name = format!("bucket{slot}");
-            let _ = sp.draw_sprite(
-                &painter,
-                &b_name,
-                Pos2::new(start_x + f32::from(slot - 1) * 28.0 * scale, top_y),
-                scale,
-                col,
-            );
+                .filter(|w| w.slot + 1 == sel_slot && hud.owned.contains(&w.weapon_id))
+                .collect();
+            slot_weapons.sort_by_key(|w| w.position);
+            let mut wy = top_y + 26.0 * scale;
+            let wx = start_x + f32::from(sel_slot.saturating_sub(1)) * 28.0 * scale;
+            for w in slot_weapons {
+                let is_hi = b.highlighted_weapon_id == Some(w.weapon_id);
+                let box_r = Rect::from_min_size(Pos2::new(wx, wy), Vec2::new(118.0 * scale, 22.0 * scale));
+                painter.rect_filled(
+                    box_r,
+                    2.0,
+                    Color32::from_rgba_unmultiplied(0, 0, 0, if is_hi { 205 } else { 145 }),
+                );
+                painter.rect_stroke(
+                    box_r,
+                    2.0,
+                    Stroke::new(1.0, if is_hi { HUD_AMBER } else { Color32::from_rgb(130, 80, 15) }),
+                    egui::StrokeKind::Inside,
+                );
+                let short = w.name.strip_prefix("weapon_").unwrap_or(&w.name);
+                painter.text(
+                    box_r.center(),
+                    egui::Align2::CENTER_CENTER,
+                    short,
+                    FontId::proportional(11.5 * scale),
+                    if is_hi { Color32::from_rgb(255, 225, 110) } else { HUD_AMBER },
+                );
+                wy += 25.0 * scale;
+            }
         }
     }
 
@@ -600,12 +785,49 @@ pub fn draw_cs16_hud(ctx: &egui::Context, sprites: Option<&HudSprites>, hud: &Hu
         }
     }
 
+    // 10b. Crosshair target status bar (`StatusText` / `StatusValue` + `hud_centerid`).
+    if let Some((team_rel, line)) = format_status_bar(state, hud.names, extras.loc) {
+        let col = match team_rel {
+            1 => TEAM_CT_COLOR,
+            2 => TEAM_T_COLOR,
+            3 => Color32::from_rgb(130, 210, 255),
+            _ => HUD_AMBER,
+        };
+        let s_font = FontId::proportional(14.5 * scale);
+        if extras.hud_centerid {
+            let pos = Pos2::new(center_x, screen.center().y + 34.0 * scale);
+            painter.text(pos + Vec2::new(1.0, 1.0), egui::Align2::CENTER_TOP, &line, s_font.clone(), Color32::from_black_alpha(190));
+            painter.text(pos, egui::Align2::CENTER_TOP, &line, s_font, col);
+        } else {
+            let pos = Pos2::new(22.0 * scale, bottom_y - 34.0 * scale);
+            painter.text(pos + Vec2::new(1.0, 1.0), egui::Align2::LEFT_BOTTOM, &line, s_font.clone(), Color32::from_black_alpha(190));
+            painter.text(pos, egui::Align2::LEFT_BOTTOM, &line, s_font, col);
+        }
+    }
+
     // 11. Centre text (`HUD_PRINTCENTER`, the centre print).
     if let Some(text) = hud.center {
         let b_pos = Pos2::new(center_x, screen.top() + screen.height() * 0.34);
         let b_font = FontId::proportional(16.0 * scale);
         painter.text(b_pos + Vec2::new(1.0, 1.0), egui::Align2::CENTER_CENTER, text, b_font.clone(), Color32::from_black_alpha(200));
         painter.text(b_pos, egui::Align2::CENTER_CENTER, text, b_font, Color32::from_rgb(255, 196, 64));
+    }
+
+    // 11b. Tutor/hint banners (`HudText` / `HudTextArgs` resolved via `titles.txt` + localization).
+    let mut hy = screen.top() + screen.height() * 0.22;
+    let hint_font = FontId::proportional(14.0 * scale);
+    for entry in state.hud_texts.iter().rev() {
+        let age = hud.now - entry.received_at;
+        if !(0.0..=4.2).contains(&age) {
+            continue;
+        }
+        let msg = format_hud_text_entry(&entry.text, &entry.args, extras.titles, extras.loc);
+        if !msg.is_empty() {
+            let pos = Pos2::new(center_x, hy);
+            painter.text(pos + Vec2::new(1.0, 1.0), egui::Align2::CENTER_CENTER, &msg, hint_font.clone(), Color32::from_black_alpha(195));
+            painter.text(pos, egui::Align2::CENTER_CENTER, &msg, hint_font.clone(), Color32::from_rgb(255, 212, 96));
+            hy += 20.0 * scale;
+        }
     }
 
     // 12. Notifications under the radar, chat bottom-left above the health.
@@ -615,28 +837,34 @@ pub fn draw_cs16_hud(ctx: &egui::Context, sprites: Option<&HudSprites>, hud: &Hu
         painter.text(Pos2::new(22.0 * scale, ny), egui::Align2::LEFT_TOP, line, note_font.clone(), Color32::from_rgb(255, 220, 110));
         ny += 16.0 * scale;
     }
-    let mut cy = bottom_y - 46.0 * scale;
-    for line in hud.chat.iter().rev().take(5) {
-        let x = 22.0 * scale;
-        painter.text(Pos2::new(x + 1.0, cy + 1.0), egui::Align2::LEFT_BOTTOM, line, note_font.clone(), Color32::from_black_alpha(180));
-        painter.text(Pos2::new(x, cy), egui::Align2::LEFT_BOTTOM, line, note_font.clone(), Color32::from_rgb(255, 220, 110));
-        cy -= 17.0 * scale;
+    if extras.hud_saytext_internal {
+        let chat_col = Color32::from_rgb(extras.con_color[0], extras.con_color[1], extras.con_color[2]);
+        let mut cy = bottom_y - 46.0 * scale;
+        for line in hud.chat.iter().rev().take(5) {
+            let x = 22.0 * scale;
+            painter.text(Pos2::new(x + 1.0, cy + 1.0), egui::Align2::LEFT_BOTTOM, line, note_font.clone(), Color32::from_black_alpha(180));
+            painter.text(Pos2::new(x, cy), egui::Align2::LEFT_BOTTOM, line, note_font.clone(), chat_col);
+            cy -= 17.0 * scale;
+        }
     }
 
-    // 12b. TE_TEXTMESSAGE on-screen channel messages (`fx.hud.te_text_messages`).
+    // 12b. TE_TEXTMESSAGE on-screen channel messages (`fx.hud.te_text_messages`) with FX 0/1/2.
     for msg in &state.te_text_messages {
-        let fade_in = f64::from(msg.fadein) / 256.0;
-        let hold = f64::from(msg.holdtime) / 256.0;
-        let fade_out = f64::from(msg.fadeout) / 256.0;
-        let elapsed = (hud.now - msg.received_at).max(0.0);
-        let alpha_f = if elapsed < fade_in && fade_in > 0.0 {
-            elapsed / fade_in
-        } else if elapsed < fade_in + hold {
-            1.0
-        } else if fade_out > 0.0 && elapsed < fade_in + hold + fade_out {
-            1.0 - (elapsed - fade_in - hold) / fade_out
-        } else {
-            0.0
+        let fade_in = (f64::from(msg.fadein) / 256.0) as f32;
+        let hold = (f64::from(msg.holdtime) / 256.0) as f32;
+        let fade_out = (f64::from(msg.fadeout) / 256.0) as f32;
+        let fx_time = (f64::from(msg.fxtime.unwrap_or(0)) / 256.0) as f32;
+        let elapsed = (hud.now - msg.received_at).max(0.0) as f32;
+        let Some((shown_text, alpha_f, typing)) = evaluate_dhud_text_fx(
+            &msg.text,
+            msg.effect,
+            fade_in,
+            hold,
+            fade_out,
+            fx_time,
+            elapsed,
+        ) else {
+            continue;
         };
         if alpha_f <= 0.01 {
             continue;
@@ -644,9 +872,10 @@ pub fn draw_cs16_hud(ctx: &egui::Context, sprites: Option<&HudSprites>, hud: &Hu
         let nx = if msg.x < 0 { 0.5 } else { (f32::from(msg.x) / 8192.0).clamp(0.05, 0.95) };
         let ny = if msg.y < 0 { 0.5 } else { (f32::from(msg.y) / 8192.0).clamp(0.05, 0.95) };
         let pos = Pos2::new(screen.left() + screen.width() * nx, screen.top() + screen.height() * ny);
-        let a = (alpha_f.clamp(0.0, 1.0) * f64::from(msg.color1[3].max(180))) as u8;
-        let col = Color32::from_rgba_unmultiplied(msg.color1[0], msg.color1[1], msg.color1[2], a);
-        painter.text(pos, egui::Align2::CENTER_CENTER, &msg.text, FontId::proportional(16.0 * scale), col);
+        let base_c = if typing { msg.color2 } else { msg.color1 };
+        let a = (alpha_f.clamp(0.0, 1.0) * f32::from(base_c[3].max(180))) as u8;
+        let col = Color32::from_rgba_unmultiplied(base_c[0], base_c[1], base_c[2], a);
+        painter.text(pos, egui::Align2::CENTER_CENTER, &shown_text, FontId::proportional(16.0 * scale), col);
     }
 
     // 13. The spectator letterbox bars while dead.
@@ -689,12 +918,30 @@ fn killfeed_sprite_name(weapon: &str) -> String {
     }
 }
 
-fn draw_radar(painter: &egui::Painter, sprites: Option<&HudSprites>, hud: &HudView<'_>, scale: f32) {
+fn draw_radar_with_extras(
+    painter: &egui::Painter,
+    sprites: Option<&HudSprites>,
+    hud: &HudView<'_>,
+    extras: &HudExtrasContext<'_>,
+    scale: f32,
+) {
     let radius = 58.0 * scale;
     let center = Pos2::new(14.0 * scale + radius, 14.0 * scale + radius);
     let rect = Rect::from_center_size(center, Vec2::splat(radius * 2.0));
 
-    if let Some(tex) = sprites.and_then(|s| s.radar_tex.as_ref()) {
+    if extras.cl_radartype {
+        painter.circle_filled(center, radius, Color32::from_rgba_unmultiplied(10, 26, 14, 232));
+        if let Some(ov) = extras.overview {
+            let uv = ov.spec.world_to_overview_uv([hud.eye.x, hud.eye.y]);
+            let span = 0.14f32;
+            let uv_rect = Rect::from_min_max(
+                Pos2::new((uv[0] - span).clamp(0.0, 1.0 - span * 2.0), (uv[1] - span).clamp(0.0, 1.0 - span * 2.0)),
+                Pos2::new((uv[0] + span).clamp(span * 2.0, 1.0), (uv[1] + span).clamp(span * 2.0, 1.0)),
+            );
+            painter.image(ov.texture.id(), rect, uv_rect, Color32::from_rgba_unmultiplied(190, 225, 190, 150));
+        }
+        painter.circle_stroke(center, radius, Stroke::new(1.5, Color32::from_rgb(95, 220, 95)));
+    } else if let Some(tex) = sprites.and_then(|s| s.radar_tex.as_ref()) {
         painter.image(
             tex.id(),
             rect,
@@ -730,6 +977,21 @@ fn draw_radar(painter: &egui::Painter, sprites: Option<&HudSprites>, hud: &HudVi
             0.0,
             Color32::from_rgb(175, 255, 175),
         );
+    }
+    for (flag, pos) in hud.hud.hostages.values() {
+        let p = blip_at(*pos);
+        if *flag == 0 {
+            if (hud.time_sec * 6.0).sin() > 0.0 {
+                let d = 3.0 * scale;
+                painter.line_segment([p - Vec2::splat(d), p + Vec2::splat(d)], Stroke::new(1.5, HUD_RED));
+                painter.line_segment(
+                    [Pos2::new(p.x - d, p.y + d), Pos2::new(p.x + d, p.y - d)],
+                    Stroke::new(1.5, HUD_RED),
+                );
+            }
+        } else {
+            painter.circle_filled(p, 2.5 * scale, Color32::from_rgb(110, 185, 255));
+        }
     }
     if let Some((pos, _planted)) = hud.hud.bomb
         && (hud.time_sec * 4.5).sin() > 0.0

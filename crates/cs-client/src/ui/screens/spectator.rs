@@ -98,8 +98,29 @@ impl SpectatorVguiUi {
 
         let screen = ctx.content_rect();
         let scale = (screen.height() / 480.0).clamp(0.85, 1.8);
-        let top_h = (62.0 * scale).round();
-        let bot_h = (62.0 * scale).round();
+        let top_h = runtime
+            .doc_control_rect(
+                "resource/UI/Spectator.res",
+                "topbar",
+                [screen.left(), screen.top(), screen.width(), screen.height()],
+            )
+            .map(|r| r[3].clamp(44.0, 110.0))
+            .unwrap_or_else(|| (62.0 * scale).round());
+        let bot_h = runtime
+            .doc_control_rect(
+                "resource/UI/BottomSpectator.res",
+                "bottombar",
+                [screen.left(), screen.top(), screen.width(), screen.height()],
+            )
+            .or_else(|| {
+                runtime.doc_control_rect(
+                    "resource/UI/Spectator.res",
+                    "bottombarblank",
+                    [screen.left(), screen.top(), screen.width(), screen.height()],
+                )
+            })
+            .map(|r| r[3].clamp(44.0, 110.0))
+            .unwrap_or_else(|| (62.0 * scale).round());
 
         let top_rect = Rect::from_min_size(screen.min, Vec2::new(screen.width(), top_h));
         let bot_rect = Rect::from_min_size(

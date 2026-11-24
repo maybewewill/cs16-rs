@@ -14,4 +14,4 @@ pub use dialogs::{
 };
 pub use motd::MotdVguiUi;
 pub use server_browser::{ServerBrowserEntry, ServerBrowserTab, ServerBrowserUi, ServerFilter};
-pub use spectator::SpectatorVguiUi;
+pub use spectator::{SpectatorMode, SpectatorVguiUi};

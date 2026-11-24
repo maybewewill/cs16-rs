@@ -217,6 +217,7 @@ impl ServerBrowserUi {
         }
         self.sync_rows();
 
+        let win_sz = runtime.doc_window_size("servers/DialogServerBrowser.res", [620.0, 410.0]);
         let mut still_open = self.open;
         let mut connect_to: Option<String> = None;
 
@@ -226,7 +227,7 @@ impl ServerBrowserUi {
             "Servers",
             &mut still_open,
             Pos2::new(100.0, 70.0),
-            Vec2::new(620.0, 410.0),
+            Vec2::new(win_sz[0].max(540.0), win_sz[1].max(320.0)),
             Vec2::new(540.0, 320.0),
             true,
             palette,

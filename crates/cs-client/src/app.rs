@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use cs_assets::bsp::BspMap;
 use cs_assets::scheme::{LocalizationTable, SkyboxTextures, VguiColors, load_menu_background};
+use cs_assets::vgui_scripts::TitlesTable;
 use cs_clientcore::hud::{DeathNotice, HudState, VguiMenuState};
 use cs_clientcore::{ConnState, ConsoleCommand, SoundCommand, ViewAngleUpdate};
 use cs_cvar::{CVarRegistry, EngineAction};
@@ -29,9 +30,9 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 use crate::audio::{AudioEngine, ListenerState};
 use crate::session::Session;
 use cs_client::camera::Camera;
-use cs_client::hudtext::{format_message, strip_html};
+use cs_client::hudtext::format_message;
 use cs_client::input::{
-    CmdClock, CmdParams, ConsoleRoute, Held, MoveSpeeds, build_usercmd, route_unknown, weapon_for_slot,
+    CmdClock, CmdParams, ConsoleRoute, Held, MoveSpeeds, build_usercmd, route_unknown,
 };
 use cs_client::render::bsp_renderer::BspRenderStats;
 use cs_client::render::lighting::{GpuLightsUniform, TextureFilterMode};
@@ -40,13 +41,22 @@ use cs_client::render::scene::ModelRegistry;
 use cs_client::render::{RenderSettings, Renderer, SceneDynamicData};
 use cs_client::ui::chat::ChatInputUi;
 use cs_client::ui::console::ConsoleUi;
-use cs_client::ui::hud::{HudSprites, HudView, draw_cs16_hud, draw_voice_speakers};
+use cs_client::ui::hud::{HudExtrasContext, HudSprites, HudView, draw_cs16_hud_with_extras, draw_voice_speakers};
+use cs_client::ui::hud_extras::{OverviewMapTex, WeaponBucketState, draw_overview_map};
 use cs_pm::collision::Hull;
 use cs_client::ui::main_menu::MainMenuUi;
 use cs_client::ui::mod_hud::{draw_mod_approval_prompt, draw_mod_hud};
 use cs_client::ui::options::OptionsUi;
 use cs_client::ui::scoreboard::{ScoreRow, show_scoreboard};
-use cs_client::ui::server_menu::{draw_text_menu, menu_key_enabled, menu_lines};
+use cs_client::ui::screens::{
+    BuyClassTeamMenuUi, CommandMenuUi, DemoPlayerUi, DisconnectErrorDialog, LoadingDialogUi,
+    MotdVguiUi, PlayerListDialogUi, ServerPasswordUi, SpectatorMode, SpectatorVguiUi,
+    VguiMenuKind,
+};
+use cs_client::ui::server_menu::{
+    draw_styled_text_menu, draw_text_menu, menu_key_enabled, menu_styled_lines,
+};
+use cs_client::ui::vgui2::{VguiRuntime, install_scheme_fonts_into_egui};
 use cs_client::ui::vgui_assets::VguiAssetBank;
 use cs_client::ui::vgui_theme::{VguiPalette, apply_vgui2_theme};
 use cs_client::ui::{FrameTelemetry, draw_crosshair, draw_net_graph};
@@ -131,6 +141,21 @@ pub struct Cs16App {
     console_ui: ConsoleUi,
     options_ui: OptionsUi,
     chat_ui: ChatInputUi,
+    vgui_rt: VguiRuntime,
+    buy_team_class_ui: BuyClassTeamMenuUi,
+    motd_ui: MotdVguiUi,
+    spectator_ui: SpectatorVguiUi,
+    command_menu_ui: CommandMenuUi,
+    loading_ui: LoadingDialogUi,
+    player_list_ui: PlayerListDialogUi,
+    demo_player_ui: DemoPlayerUi,
+    password_ui: ServerPasswordUi,
+    disconnect_err_ui: DisconnectErrorDialog,
+    weapon_buckets: WeaponBucketState,
+    titles: TitlesTable,
+    overview_tex: Option<OverviewMapTex>,
+    overview_map_name: String,
+    scoreboard_toggled: bool,
 
     start_time: Instant,
     last_frame: Instant,
@@ -171,7 +196,8 @@ impl Cs16App {
                         vfs.file_count(),
                         maps.len()
                     ));
-                    let loc = LocalizationTable::load(&vfs);
+                    let lang = cvars.get_str("cl_language").to_string();
+                    let loc = LocalizationTable::load_language(&vfs, &lang);
                     (Some(vfs), maps, VguiPalette::from(colors), Some(loc))
                 }
                 Err(err) => {
@@ -184,6 +210,22 @@ impl Cs16App {
         let mut console_ui = ConsoleUi::default();
         if launch.open_console {
             console_ui.open();
+        }
+
+        let mut menu_ui = MainMenuUi::default();
+        let mut options_ui = OptionsUi::default();
+        let mut vgui_rt = VguiRuntime::new();
+        let mut spectator_ui = SpectatorVguiUi::default();
+        let mut command_menu_ui = CommandMenuUi::default();
+        let mut titles = TitlesTable::default();
+        if let Some(v) = &vfs {
+            let lang = cvars.get_str("cl_language").to_string();
+            menu_ui.load_resources(v, &lang);
+            options_ui.load_user_script(v);
+            vgui_rt.load_scheme_fonts(v);
+            spectator_ui.load_assets(v);
+            command_menu_ui.load_from_vfs(v);
+            titles = TitlesTable::load(v);
         }
 
         let mut audio = AudioEngine::new();
@@ -220,10 +262,25 @@ impl Cs16App {
             last_weapon: None,
             mod_transfer: ClientModTransfer::default(),
             mod_host: ClientModHost::new(),
-            menu_ui: MainMenuUi::default(),
+            menu_ui,
             console_ui,
-            options_ui: OptionsUi::default(),
+            options_ui,
             chat_ui: ChatInputUi::default(),
+            vgui_rt,
+            buy_team_class_ui: BuyClassTeamMenuUi::default(),
+            motd_ui: MotdVguiUi::default(),
+            spectator_ui,
+            command_menu_ui,
+            loading_ui: LoadingDialogUi::default(),
+            player_list_ui: PlayerListDialogUi::default(),
+            demo_player_ui: DemoPlayerUi::default(),
+            password_ui: ServerPasswordUi::default(),
+            disconnect_err_ui: DisconnectErrorDialog::default(),
+            weapon_buckets: WeaponBucketState::default(),
+            titles,
+            overview_tex: None,
+            overview_map_name: String::new(),
+            scoreboard_toggled: false,
             start_time: now,
             last_frame: now,
             fps_smooth: 100.0,
@@ -244,7 +301,13 @@ impl Cs16App {
             || self.console_ui.open
             || self.options_ui.open
             || self.chat_ui.open
-            || self.feeds.motd_open
+            || self.motd_ui.open
+            || self.buy_team_class_ui.active_res.is_some()
+            || self.command_menu_ui.open
+            || self.player_list_ui.open
+            || self.demo_player_ui.open
+            || self.password_ui.open
+            || self.disconnect_err_ui.open
             || !self.mod_transfer.pending_approvals().is_empty()
     }
 
@@ -330,8 +393,8 @@ impl Cs16App {
             bots: self.cvars.get_i32("bot_quota").clamp(0, 31) as u32,
             player_name: self.cvars.get_str("name").to_string(),
             hostname: self.cvars.get_str("hostname").to_string(),
-            // The shell draws the server's text menus and answers them with `menuselect`.
-            text_menus: true,
+            // `_vgui_menus 1` asks server for VGUIMenu dialogs; `_vgui_menus 0` uses ShowMenu.
+            text_menus: !self.cvars.get_bool("_vgui_menus"),
             ..LocalOptions::default()
         };
         match Session::start_local(&vfs, map_name, &opts) {
@@ -384,8 +447,22 @@ impl Cs16App {
         self.view_stats = ViewStats::default();
         self.last_weapon = None;
         self.weapon_switch_timer = 0.0;
+        self.weapon_buckets = WeaponBucketState::default();
+        self.buy_team_class_ui.close();
+        self.motd_ui.open = false;
+        self.command_menu_ui.set_open(false);
+        self.disconnect_err_ui.open = false;
+        self.overview_tex = None;
+        self.overview_map_name.clear();
+        self.scoreboard_toggled = false;
         self.mod_transfer = ClientModTransfer::default();
         self.mod_host = ClientModHost::new();
+        self.vgui_rt.invalidate_cache();
+        if let Some(v) = &self.vfs {
+            self.vgui_rt.load_scheme_fonts(v);
+        }
+        let vgui_flag = if self.cvars.get_bool("_vgui_menus") { "1" } else { "0" };
+        self.session.set_client_cvar("_vgui_menus", vgui_flag);
         self.menu_ui.visible = false;
         self.console_ui.open = false;
         self.options_ui.open = false;
@@ -411,6 +488,13 @@ impl Cs16App {
         self.view_stats = ViewStats::default();
         self.menu_ui.visible = true;
         self.chat_ui.open = false;
+        self.buy_team_class_ui.close();
+        self.motd_ui.open = false;
+        self.command_menu_ui.set_open(false);
+        self.loading_ui.visible = false;
+        self.overview_tex = None;
+        self.overview_map_name.clear();
+        self.scoreboard_toggled = false;
         self.active_actions.clear();
         self.mouse1_held = false;
         self.mouse2_held = false;
@@ -418,6 +502,7 @@ impl Cs16App {
         self.cmd_clock = CmdClock::default();
         self.last_weapon = None;
         self.weapon_switch_timer = 0.0;
+        self.weapon_buckets = WeaponBucketState::default();
         self.mod_transfer = ClientModTransfer::default();
         self.mod_host = ClientModHost::new();
         self.cvars.set_forward_unknown(false);
@@ -604,6 +689,7 @@ impl Cs16App {
         {
             self.feeds.motd_shown = true;
             self.feeds.motd_open = true;
+            self.motd_ui.open = true;
         }
     }
 
@@ -645,8 +731,22 @@ impl Cs16App {
                     EngineAction::ToggleMenu => {
                         if self.console_ui.open {
                             self.console_ui.open = false;
-                        } else if self.feeds.motd_open {
+                        } else if self.motd_ui.open {
+                            self.motd_ui.open = false;
                             self.feeds.motd_open = false;
+                        } else if self.buy_team_class_ui.active_res.is_some() {
+                            self.buy_team_class_ui.close();
+                            self.session.with_hud_mut(|h| h.vgui_menu = None);
+                        } else if self.command_menu_ui.open {
+                            self.command_menu_ui.set_open(false);
+                        } else if self.player_list_ui.open {
+                            self.player_list_ui.open = false;
+                        } else if self.demo_player_ui.open {
+                            self.demo_player_ui.open = false;
+                        } else if self.password_ui.open {
+                            self.password_ui.open = false;
+                        } else if self.disconnect_err_ui.open {
+                            self.disconnect_err_ui.open = false;
                         } else if self.chat_ui.open {
                             self.chat_ui.open = false;
                         } else if self.options_ui.open {
@@ -671,6 +771,10 @@ impl Cs16App {
                         self.pending_screenshot = Some(path);
                     }
                     EngineAction::ActionInput { name, pressed } => {
+                        if name == "commandmenu" {
+                            self.command_menu_ui.set_open(pressed);
+                            self.sync_cursor_capture();
+                        }
                         if pressed {
                             self.active_actions.insert(name);
                         } else {
@@ -786,6 +890,51 @@ impl Cs16App {
                         self.audio.play_sentence(self.vfs.as_ref(), &spec, suit);
                     }
                     EngineAction::StopSound => self.audio.stop_all(),
+                    EngineAction::AdjustCrosshair(color_idx) => {
+                        const PRESETS: [&str; 5] = [
+                            "50 250 50",
+                            "250 50 50",
+                            "50 50 250",
+                            "250 250 50",
+                            "50 250 250",
+                        ];
+                        let cur = self.cvars.get_str("cl_crosshair_color").to_string();
+                        let next = match color_idx {
+                            Some(i) => PRESETS[usize::from(i) % PRESETS.len()],
+                            None => {
+                                let idx = PRESETS
+                                    .iter()
+                                    .position(|p| *p == cur)
+                                    .map_or(0, |i| (i + 1) % PRESETS.len());
+                                PRESETS[idx]
+                            }
+                        };
+                        self.cvars.set("cl_crosshair_color", next);
+                    }
+                    EngineAction::ToggleScores => {
+                        self.scoreboard_toggled = !self.scoreboard_toggled;
+                    }
+                    EngineAction::OpenPlayerList => {
+                        self.player_list_ui.open = true;
+                        self.sync_cursor_capture();
+                    }
+                    EngineAction::OpenDemoPlayer(path) => {
+                        if let Some(p) = path {
+                            self.demo_player_ui.load_demo(&p);
+                        }
+                        self.demo_player_ui.open = true;
+                        self.sync_cursor_capture();
+                    }
+                    EngineAction::SpecMode(mode) => {
+                        let next = SpectatorMode::from_i32(mode);
+                        self.spectator_ui.mode = next;
+                        if self.is_in_game() {
+                            self.session.send_stringcmd(&format!("specmode {}", next as i32));
+                        }
+                    }
+                    EngineAction::SpecMenu(visible) => {
+                        self.spectator_ui.menu_visible = visible != 0;
+                    }
                 }
             }
         }
@@ -801,9 +950,11 @@ impl Cs16App {
         }
     }
 
-    /// `slot1`..`slot5`: selects the next weapon of the slot the player carries.
+    /// `slot1`..`slot5`: selects or opens the weapon bucket selector (`hud_fastswitch`).
     fn select_slot(&mut self, slot: u8) {
         let owned_bits = self.session.owned_weapons();
+        let fastswitch = self.cvars.get_bool("hud_fastswitch");
+        let buckets = &mut self.weapon_buckets;
         let pick = self
             .session
             .with_hud(|hud| {
@@ -813,13 +964,7 @@ impl Cs16App {
                     .map(|w| w.weapon_id)
                     .filter(|id| *id < 32 && owned_bits & (1 << id) != 0)
                     .collect();
-                weapon_for_slot(
-                    &hud.weapons,
-                    &owned,
-                    hud.current_weapon.map(|c| c.weapon_id),
-                    slot,
-                )
-                .map(str::to_string)
+                buckets.on_slot_press(hud, &owned, slot, fastswitch)
             })
             .flatten();
         if let Some(name) = pick {
@@ -1014,16 +1159,39 @@ impl Cs16App {
         }
 
         // The connection ended (kicked, timed out, rejected, the server shut down).
-        if let Some(state) = self.session.state()
-            && state.is_terminal()
-        {
-            match &state {
-                ConnState::Rejected(why) | ConnState::Disconnected(why) => {
+        if let Some(state) = self.session.state() {
+            if state.is_terminal() {
+                let reason = match &state {
+                    ConnState::Rejected(why) => Some(("Connection Rejected", why.clone())),
+                    ConnState::Disconnected(why) => Some(("Disconnected", why.clone())),
+                    _ => None,
+                };
+                self.end_session();
+                if let Some((title, why)) = reason {
                     self.cvars.error(format!("Disconnected: {why}"));
+                    if why.to_ascii_lowercase().contains("bad password")
+                        || why.to_ascii_lowercase().contains("invalid password")
+                    {
+                        self.password_ui.open = true;
+                    } else {
+                        self.disconnect_err_ui.trigger(title, why);
+                    }
                 }
-                _ => {}
+            } else if !matches!(state, ConnState::InGame) {
+                self.loading_ui.visible = true;
+                let (msg, prog) = match state {
+                    ConnState::AwaitChallenge => ("Establishing network connection to server...", 0.2),
+                    ConnState::AwaitConnection => ("Connecting to server...", 0.45),
+                    ConnState::Signon => ("Downloading resources and precaching...", 0.8),
+                    _ => ("Loading...", 0.1),
+                };
+                self.loading_ui.status_text = msg.to_string();
+                self.loading_ui.progress = prog;
+            } else {
+                self.loading_ui.visible = false;
             }
-            self.end_session();
+        } else {
+            self.loading_ui.visible = false;
         }
 
         // The server named its map: load it before the first frame is predicted.
@@ -1067,8 +1235,9 @@ impl Cs16App {
 
         let time_sec = self.start_time.elapsed().as_secs_f32();
         let in_game = self.is_in_game();
-        let show_scores =
-            self.active_actions.contains("showscores") && in_game && !self.menu_ui.visible;
+        let show_scores = (self.active_actions.contains("showscores") || self.scoreboard_toggled)
+            && in_game
+            && !self.menu_ui.visible;
         let master = finite_or(self.cvars.get_f32("volume"), 1.0).clamp(0.0, 1.0);
         let suit_vol = finite_or(self.cvars.get_f32("suitvolume"), 0.25).clamp(0.0, 1.0);
         let room_off = self.cvars.get_bool("room_off");
@@ -1130,6 +1299,7 @@ impl Cs16App {
             self.collect_hud_feeds(inputs.now);
         }
         self.weapon_switch_timer = (self.weapon_switch_timer - dt).max(0.0);
+        self.weapon_buckets.step(dt);
 
         if let Some(v) = &view {
             self.view_stats = v.stats;
@@ -1180,31 +1350,66 @@ impl Cs16App {
         let chat: Vec<String> = self.feeds.chat.iter().map(|(c, _)| c.clone()).collect();
         let notify: Vec<String> = self.feeds.notify.iter().map(|(c, _)| c.clone()).collect();
         let center = self.feeds.center.as_ref().map(|(c, _)| c.clone());
-        let menu_lines_now: Option<Vec<String>> = self
+        let styled_menu_now = self
             .session
             .with_hud(|h| {
-                if let Some(m) = h
-                    .menu
+                h.menu
                     .as_ref()
                     .filter(|m| !m.multipart && m.keys != 0 && !m.text.is_empty())
-                {
-                    Some(menu_lines(&m.text, self.loc.as_ref()))
-                } else {
-                    h.vgui_menu
-                        .as_ref()
-                        .filter(|v| !v.multipart && v.keys != 0)
-                        .map(vgui_menu_fallback_lines)
-                }
+                    .map(|m| menu_styled_lines(&m.text, self.loc.as_ref()))
             })
             .flatten();
-        let motd_text: Option<String> = self
-            .feeds
-            .motd_open
-            .then(|| self.session.with_hud(|h| strip_html(&h.motd)))
+        let use_vgui_menus = self.cvars.get_bool("_vgui_menus");
+        let active_vgui_menu = self
+            .session
+            .with_hud(|h| h.vgui_menu.as_ref().filter(|v| !v.multipart && v.keys != 0).cloned())
+            .flatten();
+        let fallback_vgui_lines = if !use_vgui_menus && styled_menu_now.is_none() {
+            active_vgui_menu.as_ref().map(vgui_menu_fallback_lines)
+        } else {
+            None
+        };
+        if use_vgui_menus && let Some(ref vm) = active_vgui_menu {
+            if let Some(kind) = VguiMenuKind::from_vgui_menu_id(vm.menu_id, &vm.name) {
+                let local_ct = self
+                    .session
+                    .local_slot()
+                    .and_then(|s| self.session.with_hud(|h| h.players.get(&(s + 1)).is_some_and(|p| p.team == "CT")))
+                    .unwrap_or(false);
+                self.buy_team_class_ui.open_kind(kind, local_ct);
+            }
+        } else if !use_vgui_menus {
+            self.buy_team_class_ui.close();
+        }
+        let motd_raw: Option<String> = self
+            .motd_ui
+            .open
+            .then(|| self.session.with_hud(|h| h.motd.clone()))
             .flatten();
 
         let local_speed = self.session.local_speed();
         let map_name = self.session.loaded_map().unwrap_or("").to_string();
+        if !map_name.is_empty() && self.overview_map_name != map_name {
+            self.overview_map_name = map_name.clone();
+            if let (Some(rt), Some(vfs)) = (&self.runtime, &self.vfs) {
+                self.overview_tex = OverviewMapTex::load(&rt.egui_ctx, vfs, &map_name);
+            }
+        }
+        let local_is_ct = self
+            .session
+            .local_slot()
+            .and_then(|s| self.session.with_hud(|h| h.players.get(&(s + 1)).is_some_and(|p| p.team == "CT")))
+            .unwrap_or(true);
+        let spec_players: Vec<(u8, String)> = names.iter().map(|(&k, v)| (k + 1, v.clone())).collect();
+        let (round_secs_left, spec_hp) = self
+            .session
+            .with_hud(|h| {
+                (
+                    h.round_seconds_left(sess_now).max(0.0) as u32,
+                    h.spec_health,
+                )
+            })
+            .unwrap_or((0, None));
         let hostname = self
             .session
             .with_hud(|h| h.server_name.clone())
@@ -1232,6 +1437,9 @@ impl Cs16App {
         let mut should_resume = false;
         let mut sent_chat: Option<(bool, String)> = None;
         let mut motd_close = false;
+        let mut vgui_cmd_out: Option<String> = None;
+        let mut cmdmenu_exec: Option<String> = None;
+        let mut cancel_loading = false;
 
         let Some(rt) = &mut self.runtime else {
             return;
@@ -1248,6 +1456,14 @@ impl Cs16App {
                 };
                 draw_crosshair(&rt.egui_ctx, &self.cvars, dyn_gap);
             }
+            let mut extras = HudExtrasContext {
+                titles: Some(&self.titles),
+                loc: self.loc.as_ref(),
+                overview: self.overview_tex.as_ref(),
+                buckets: Some(&self.weapon_buckets),
+                ..Default::default()
+            };
+            extras.apply_cvars(&self.cvars);
             let hud_state = self.session.with_hud(|h| {
                 let view = HudView {
                     hud: h,
@@ -1266,7 +1482,32 @@ impl Cs16App {
                     yaw_deg: self.camera.yaw_deg,
                     underwater_tint: v.underwater_tint,
                 };
-                draw_cs16_hud(&rt.egui_ctx, rt.hud_sprites.as_ref(), &view);
+                draw_cs16_hud_with_extras(&rt.egui_ctx, rt.hud_sprites.as_ref(), &view, &extras);
+                if !alive
+                    && matches!(
+                        self.spectator_ui.mode,
+                        SpectatorMode::MapOverviewFree | SpectatorMode::MapOverviewChase
+                    )
+                    && let Some(ov) = &self.overview_tex
+                {
+                    let screen = rt.egui_ctx.content_rect();
+                    let ov_rect = screen.shrink2(egui::vec2(32.0, 72.0));
+                    let ov_painter = rt.egui_ctx.layer_painter(egui::LayerId::new(
+                        egui::Order::Background,
+                        egui::Id::unique("cs16_spectator_overview"),
+                    ));
+                    draw_overview_map(
+                        &ov_painter,
+                        ov_rect,
+                        ov,
+                        h,
+                        v.eye,
+                        self.camera.yaw_deg,
+                        self.cvars.get_bool("spec_drawcone"),
+                        self.cvars.get_bool("spec_drawnames"),
+                        &names,
+                    );
+                }
             });
             let _ = hud_state;
             draw_voice_speakers(
@@ -1276,9 +1517,27 @@ impl Cs16App {
                 voice_local_talking,
             );
             draw_mod_hud(&rt.egui_ctx, &mod_hud_cmds);
-            if let Some(lines) = &menu_lines_now {
+            if let Some(styled) = &styled_menu_now {
+                let scale = (rt.egui_ctx.content_rect().height() / 768.0).clamp(0.85, 1.45);
+                draw_styled_text_menu(&rt.egui_ctx, styled, scale);
+            } else if let Some(lines) = &fallback_vgui_lines {
                 let scale = (rt.egui_ctx.content_rect().height() / 768.0).clamp(0.85, 1.45);
                 draw_text_menu(&rt.egui_ctx, lines, scale);
+            }
+            if !alive && in_game {
+                let spec_actions = self.spectator_ui.show(
+                    &rt.egui_ctx,
+                    &mut self.vgui_rt,
+                    self.vfs.as_ref(),
+                    &mut self.cvars,
+                    ct_score,
+                    t_score,
+                    round_secs_left,
+                    &spec_players,
+                    spec_hp,
+                    self.palette,
+                );
+                pending_actions.extend(spec_actions);
             }
             draw_net_graph(
                 &rt.egui_ctx,
@@ -1311,21 +1570,38 @@ impl Cs16App {
             if self.chat_ui.open {
                 sent_chat = self.chat_ui.show(&rt.egui_ctx, self.palette);
             }
-            if let Some(text) = &motd_text {
-                egui::Window::new("Message of the day")
-                    .collapsible(false)
-                    .resizable(true)
-                    .default_width(520.0)
-                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                    .show(&rt.egui_ctx, |ui| {
-                        egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-                            ui.label(text);
-                        });
-                        if ui.button("Close").clicked() {
-                            motd_close = true;
-                        }
-                    });
+            if let Some(raw_motd) = &motd_raw
+                && self.motd_ui.show(
+                    &rt.egui_ctx,
+                    &mut self.vgui_rt,
+                    self.vfs.as_ref(),
+                    self.loc.as_ref(),
+                    &hostname,
+                    raw_motd,
+                    self.palette,
+                    rt.vgui_bank.steam_icon.as_ref(),
+                )
+            {
+                motd_close = true;
             }
+            if self.buy_team_class_ui.active_res.is_some() {
+                vgui_cmd_out = self.buy_team_class_ui.show(
+                    &rt.egui_ctx,
+                    &mut self.vgui_rt,
+                    self.vfs.as_ref(),
+                    self.loc.as_ref(),
+                    &map_name,
+                    local_is_ct,
+                    self.palette,
+                    rt.vgui_bank.steam_icon.as_ref(),
+                );
+            }
+            cmdmenu_exec = self.command_menu_ui.show(
+                &rt.egui_ctx,
+                self.loc.as_ref(),
+                &map_name,
+                self.palette,
+            );
         }
 
         let steam_icon = rt.vgui_bank.steam_icon.as_ref();
@@ -1342,11 +1618,40 @@ impl Cs16App {
         if menu_cmds.open_options {
             self.options_ui.open = true;
         }
+        if menu_cmds.open_player_list {
+            self.player_list_ui.open = true;
+        }
+        if menu_cmds.open_demo_player {
+            self.demo_player_ui.open = true;
+        }
         if menu_cmds.resume_game {
             should_resume = true;
         }
         self.options_ui
             .show(&rt.egui_ctx, &mut self.cvars, self.palette, steam_icon);
+        if self.loading_ui.show(
+            &rt.egui_ctx,
+            &mut self.vgui_rt,
+            self.vfs.as_ref(),
+            self.loc.as_ref(),
+            self.palette,
+            steam_icon,
+        ) {
+            cancel_loading = true;
+        }
+        let vban_cmd = self.player_list_ui.show(
+            &rt.egui_ctx,
+            &mut self.vgui_rt,
+            self.vfs.as_ref(),
+            &names,
+            self.session.local_slot(),
+            self.palette,
+            steam_icon,
+        );
+        self.demo_player_ui
+            .show(&rt.egui_ctx, &mut self.vgui_rt, self.vfs.as_ref(), self.palette, steam_icon);
+        let pw_submit = self.password_ui.show(&rt.egui_ctx, self.palette, steam_icon);
+        self.disconnect_err_ui.show(&rt.egui_ctx, self.palette, steam_icon);
         let mod_decisions = draw_mod_approval_prompt(&rt.egui_ctx, &pending_mod_approvals);
         pending_actions.extend(self.console_ui.show(
             &rt.egui_ctx,
@@ -1524,6 +1829,24 @@ impl Cs16App {
         }
         if motd_close {
             self.feeds.motd_open = false;
+            self.motd_ui.open = false;
+        }
+        if let Some(cmd) = vgui_cmd_out {
+            self.session.send_stringcmd(&cmd);
+            self.session.with_hud_mut(|h| h.vgui_menu = None);
+        }
+        if let Some(cmd) = cmdmenu_exec {
+            pending_actions.extend(self.cvars.execute_script(&cmd));
+        }
+        if let Some(vban) = vban_cmd {
+            self.forward_to_server(&vban);
+        }
+        if let Some((addr, pw)) = pw_submit {
+            self.cvars.set("password", &pw);
+            self.connect_remote(&addr);
+        }
+        if cancel_loading {
+            self.end_session();
         }
         if should_resume {
             self.menu_ui.visible = false;
@@ -1586,6 +1909,9 @@ impl ApplicationHandler for Cs16App {
         let renderer = Renderer::new(Arc::clone(&window));
         let egui_ctx = egui::Context::default();
         apply_vgui2_theme(&egui_ctx, self.palette);
+        if let Some(vfs) = &self.vfs {
+            install_scheme_fonts_into_egui(&egui_ctx, vfs, &self.vgui_rt.scheme_fonts);
+        }
 
         let egui_state = egui_winit::State::new(
             egui_ctx.clone(),
@@ -1683,6 +2009,21 @@ impl ApplicationHandler for Cs16App {
             WindowEvent::MouseInput { state, button, .. } => {
                 if self.wants_mouse_capture() {
                     let pressed = *state == ElementState::Pressed;
+                    if pressed
+                        && matches!(button, MouseButton::Left)
+                        && self.weapon_buckets.active_slot.is_some()
+                        && !self.cvars.get_bool("hud_fastswitch")
+                    {
+                        let buckets = &mut self.weapon_buckets;
+                        if let Some(w_name) = self
+                            .session
+                            .with_hud(|h| buckets.confirm_selection(h))
+                            .flatten()
+                        {
+                            self.session.send_stringcmd(&w_name);
+                            return;
+                        }
+                    }
                     match button {
                         MouseButton::Left => self.mouse1_held = pressed,
                         MouseButton::Right => self.mouse2_held = pressed,

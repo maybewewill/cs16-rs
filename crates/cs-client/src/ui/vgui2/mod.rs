@@ -11,5 +11,6 @@ pub use controls::{
 };
 pub use html::{HtmlBlock, HtmlDoc, HtmlSpan, parse_html_doc, paint_html_doc};
 pub use runtime::{
-    VguiEvent, VguiLayoutNode, VguiRuntime, install_marlett_into_egui, resolve_vgui_text_color,
+    VguiEvent, VguiLayoutNode, VguiRuntime, install_marlett_into_egui,
+    install_scheme_fonts_into_egui, resolve_vgui_text_color,
 };

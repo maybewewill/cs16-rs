@@ -3,6 +3,7 @@
 pub mod chat;
 pub mod console;
 pub mod hud;
+pub mod hud_extras;
 pub mod main_menu;
 pub mod mod_hud;
 pub mod options;

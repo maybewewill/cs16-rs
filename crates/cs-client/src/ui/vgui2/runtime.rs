@@ -12,9 +12,12 @@ use egui::{Color32, FontFamily, FontId, Pos2, Rect, TextureHandle, Vec2};
 
 use crate::ui::vgui2::controls::{
     VguiComboState, VguiControlState, VguiListPanelState, VguiPropertySheetState,
-    VguiRichTextState, VguiSliderState, draw_vgui_button, draw_vgui_image_panel, draw_vgui_label,
-    draw_vgui_panel, draw_vgui_progress_bar,
+    VguiRichTextState, VguiSliderState, draw_vgui_button, draw_vgui_check_button,
+    draw_vgui_combo_box, draw_vgui_image_panel, draw_vgui_label, draw_vgui_list_panel,
+    draw_vgui_panel, draw_vgui_progress_bar, draw_vgui_property_sheet, draw_vgui_rich_text,
+    draw_vgui_slider, draw_vgui_text_entry,
 };
+use crate::ui::vgui2::html::{paint_html_doc, parse_html_doc};
 use crate::ui::vgui_theme::VguiPalette;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -53,6 +56,42 @@ pub fn install_marlett_into_egui(ctx: &egui::Context, vfs: &Vfs) -> bool {
     );
     ctx.set_fonts(defs);
     true
+}
+
+/// Install `marlett.ttf` plus any custom `.ttf` files declared in `TrackerScheme.res` (`CustomFontFiles`).
+pub fn install_scheme_fonts_into_egui(
+    ctx: &egui::Context,
+    vfs: &Vfs,
+    scheme_fonts: &SchemeFontSet,
+) -> usize {
+    let mut installed = usize::from(install_marlett_into_egui(ctx, vfs));
+    let mut defs = ctx.fonts(|r| r.definitions().clone());
+    for raw_path in &scheme_fonts.custom_font_files {
+        let norm = raw_path.replace('\\', "/");
+        if norm.to_ascii_lowercase().ends_with("marlett.ttf") {
+            continue;
+        }
+        let bytes = vfs
+            .read_bytes(&norm)
+            .or_else(|_| vfs.read_bytes(&format!("resource/{norm}")));
+        let Ok(data) = bytes else {
+            continue;
+        };
+        if ab_glyph::FontArc::try_from_vec(data.clone()).is_err() {
+            continue;
+        }
+        let font_id = format!("vgui_ttf_{installed}");
+        defs.font_data
+            .insert(font_id.clone(), std::sync::Arc::new(egui::FontData::from_owned(data)));
+        if let Some(prop) = defs.families.get_mut(&FontFamily::Proportional) {
+            prop.insert(0, font_id);
+        }
+        installed += 1;
+    }
+    if installed > 0 {
+        ctx.set_fonts(defs);
+    }
+    installed
 }
 
 pub fn resolve_vgui_text_color(spec: &VguiControlSpec, palette: VguiPalette) -> Color32 {
@@ -117,6 +156,77 @@ impl VguiRuntime {
         let key = path.replace('\\', "/").to_ascii_lowercase();
         let doc = VguiResDocument::parse(&key, text);
         self.docs.insert(key, doc);
+    }
+
+    pub fn doc(&self, doc_path: &str) -> Option<&VguiResDocument> {
+        let key = doc_path.replace('\\', "/").to_ascii_lowercase();
+        self.docs.get(&key)
+    }
+
+    /// Infer preferred window dimensions `[width, height]` from the root `Frame`/`Panel` or control extents in `.res`.
+    pub fn doc_window_size(&self, doc_path: &str, fallback: [f32; 2]) -> [f32; 2] {
+        let Some(doc) = self.doc(doc_path) else {
+            return fallback;
+        };
+        if let Some(root) = doc
+            .controls
+            .iter()
+            .find(|c| matches!(c.kind, ControlKind::Frame))
+        {
+            let w = match root.wide {
+                cs_assets::vgui_res::VguiCoord::Abs(v) if v >= 180.0 => v,
+                _ => fallback[0],
+            };
+            let h = match root.tall {
+                cs_assets::vgui_res::VguiCoord::Abs(v) if v >= 96.0 => v,
+                _ => fallback[1],
+            };
+            return [w.clamp(220.0, 960.0), h.clamp(96.0, 720.0)];
+        }
+        let mut max_w = 0.0f32;
+        let mut max_h = 0.0f32;
+        for c in &doc.controls {
+            let r = resolve_control_rect(c, [0.0, 0.0, fallback[0], fallback[1]], 640.0, 480.0);
+            max_w = max_w.max(r[0] + r[2]);
+            max_h = max_h.max(r[1] + r[3]);
+        }
+        if max_w >= 180.0 && max_h >= 96.0 {
+            [
+                max_w.max(fallback[0] * 0.75).clamp(220.0, 960.0),
+                max_h.max(fallback[1] * 0.75).clamp(96.0, 720.0),
+            ]
+        } else {
+            fallback
+        }
+    }
+
+    /// Look up a named control's resolved rectangle inside `viewport` from a loaded `.res` document.
+    pub fn doc_control_rect(
+        &self,
+        doc_path: &str,
+        field: &str,
+        viewport: [f32; 4],
+    ) -> Option<[f32; 4]> {
+        let nodes = self.compute_layout(doc_path, viewport, None);
+        nodes
+            .into_iter()
+            .find(|n| n.field_name.eq_ignore_ascii_case(field))
+            .map(|n| n.rect)
+    }
+
+    /// Resolve a named control's localized label from a loaded `.res` document.
+    pub fn doc_label(
+        &self,
+        doc_path: &str,
+        field: &str,
+        loc: Option<&LocalizationTable>,
+    ) -> Option<String> {
+        let spec = self.doc(doc_path)?.find(field)?;
+        if spec.label_text.is_empty() {
+            return None;
+        }
+        let resolved = loc.map_or(spec.label_text.as_str(), |l| l.resolve(&spec.label_text));
+        (!resolved.starts_with('#') && !resolved.is_empty()).then(|| resolved.to_string())
     }
 
     pub fn set_state(&mut self, field: &str, state: VguiControlState) {
@@ -314,6 +424,9 @@ impl VguiRuntime {
                 ControlKind::Panel => {
                     draw_vgui_panel(ui.painter(), rect, palette.control_bg, palette, false);
                 }
+                ControlKind::Frame => {
+                    draw_vgui_panel(ui.painter(), rect, palette.window_bg, palette, true);
+                }
                 ControlKind::Divider => {
                     ui.painter().rect_filled(rect, 0.0, palette.border_dark);
                 }
@@ -347,7 +460,144 @@ impl VguiRuntime {
                     };
                     draw_vgui_progress_bar(ui.painter(), rect, frac, palette);
                 }
-                _ => {}
+                ControlKind::CheckButton => {
+                    let key = n.field_name.to_ascii_lowercase();
+                    let mut checked = match self.states.get(&key) {
+                        Some(VguiControlState::Check(b)) => *b,
+                        _ => false,
+                    };
+                    let mut toggled = false;
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                        toggled = draw_vgui_check_button(
+                            ui,
+                            egui::Id::unique(("vgui_chk", &key)),
+                            &mut checked,
+                            &n.label,
+                            palette,
+                        );
+                    });
+                    if toggled {
+                        self.states.insert(key, VguiControlState::Check(checked));
+                        out.push(VguiEvent::ValueChanged {
+                            field: n.field_name.clone(),
+                        });
+                    }
+                }
+                ControlKind::Slider => {
+                    let key = n.field_name.to_ascii_lowercase();
+                    let mut st = match self.states.get(&key) {
+                        Some(VguiControlState::Slider(s)) => s.clone(),
+                        _ => VguiSliderState {
+                            value: 0.5,
+                            min: 0.0,
+                            max: 1.0,
+                        },
+                    };
+                    let mut changed = false;
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                        changed = draw_vgui_slider(ui, &mut st, &n.label, palette);
+                    });
+                    if changed {
+                        self.states.insert(key, VguiControlState::Slider(st));
+                        out.push(VguiEvent::ValueChanged {
+                            field: n.field_name.clone(),
+                        });
+                    }
+                }
+                ControlKind::ComboBox => {
+                    let key = n.field_name.to_ascii_lowercase();
+                    let mut st = match self.states.get(&key) {
+                        Some(VguiControlState::Combo(c)) => c.clone(),
+                        _ => VguiComboState::default(),
+                    };
+                    let mut changed = false;
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                        changed = draw_vgui_combo_box(ui, &key, &mut st, rect.width(), palette);
+                    });
+                    if changed {
+                        self.states.insert(key, VguiControlState::Combo(st));
+                        out.push(VguiEvent::ValueChanged {
+                            field: n.field_name.clone(),
+                        });
+                    }
+                }
+                ControlKind::TextEntry => {
+                    let key = n.field_name.to_ascii_lowercase();
+                    let mut txt = match self.states.get(&key) {
+                        Some(VguiControlState::Text(s)) => s.clone(),
+                        _ => String::new(),
+                    };
+                    let mut changed = false;
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                        changed = draw_vgui_text_entry(ui, &mut txt, false, false, rect.width());
+                    });
+                    if changed {
+                        self.states.insert(key, VguiControlState::Text(txt));
+                        out.push(VguiEvent::ValueChanged {
+                            field: n.field_name.clone(),
+                        });
+                    }
+                }
+                ControlKind::ListPanel => {
+                    let key = n.field_name.to_ascii_lowercase();
+                    let mut list = match self.states.get(&key) {
+                        Some(VguiControlState::List(l)) => l.clone(),
+                        _ => default_list_state(&[("Item", 120)]),
+                    };
+                    let mut dbl = None;
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                        dbl = draw_vgui_list_panel(ui, &key, &mut list, rect.height(), palette);
+                    });
+                    self.states.insert(key, VguiControlState::List(list));
+                    if let Some(row) = dbl {
+                        out.push(VguiEvent::ListDoubleClicked {
+                            field: n.field_name.clone(),
+                            row,
+                        });
+                    }
+                }
+                ControlKind::RichText => {
+                    let key = n.field_name.to_ascii_lowercase();
+                    let rt = match self.states.get(&key) {
+                        Some(VguiControlState::RichText(r)) => r.clone(),
+                        _ => VguiRichTextState::default(),
+                    };
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                        draw_vgui_rich_text(ui, &key, &rt, rect.height(), palette);
+                    });
+                }
+                ControlKind::PropertySheet => {
+                    let key = n.field_name.to_ascii_lowercase();
+                    let mut sheet = match self.states.get(&key) {
+                        Some(VguiControlState::PropertySheet(s)) => s.clone(),
+                        _ => default_sheet_state(&["Page 1"]),
+                    };
+                    let prev_tab = sheet.active_tab;
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                        draw_vgui_property_sheet(ui, &mut sheet, palette, |_, _| {});
+                    });
+                    let tab_changed = sheet.active_tab != prev_tab;
+                    let new_tab = sheet.active_tab;
+                    self.states.insert(key, VguiControlState::PropertySheet(sheet));
+                    if tab_changed {
+                        out.push(VguiEvent::TabChanged {
+                            field: n.field_name.clone(),
+                            tab: new_tab,
+                        });
+                    }
+                }
+                ControlKind::Html => {
+                    let key = n.field_name.to_ascii_lowercase();
+                    let raw = match self.states.get(&key) {
+                        Some(VguiControlState::Text(s)) => s.clone(),
+                        _ => n.label.clone(),
+                    };
+                    let doc = parse_html_doc(&raw);
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                        paint_html_doc(ui, &doc);
+                    });
+                }
+                ControlKind::Menu | ControlKind::Unknown => {}
             }
         }
         out

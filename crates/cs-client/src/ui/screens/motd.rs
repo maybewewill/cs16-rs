@@ -38,11 +38,14 @@ impl MotdVguiUi {
             self.parsed = parse_html_doc(raw_motd);
         }
 
-        let ok_label = loc
-            .map(|l| l.resolve("#Cstrike_OK"))
-            .filter(|s| !s.starts_with('#'))
-            .unwrap_or("OK")
-            .to_string();
+        let win_sz = runtime.doc_window_size("resource/UI/MOTD.res", [560.0, 448.0]);
+        let ok_label = runtime
+            .doc_label("resource/UI/MOTD.res", "ok", loc)
+            .or_else(|| {
+                loc.map(|l| l.resolve("#Cstrike_OK").to_string())
+                    .filter(|s| !s.starts_with('#'))
+            })
+            .unwrap_or_else(|| "OK".to_string());
         let mut still_open = self.open;
         let mut clicked_ok = false;
 
@@ -52,17 +55,27 @@ impl MotdVguiUi {
             if hostname.is_empty() { "Message of the Day" } else { hostname },
             &mut still_open,
             Pos2::new(110.0, 50.0),
-            Vec2::new(560.0, 448.0),
+            Vec2::new(win_sz[0].max(420.0), win_sz[1].max(320.0)),
             Vec2::new(420.0, 320.0),
             true,
             palette,
             steam_icon,
             |ui| {
+                let area = ui.available_rect_before_wrap();
+                let nodes = runtime.compute_layout(
+                    "resource/UI/MOTD.res",
+                    [area.left(), area.top(), area.width(), area.height()],
+                    loc,
+                );
+                let res_title = nodes
+                    .iter()
+                    .find(|n| n.field_name.eq_ignore_ascii_case("ServerName") && !n.label.is_empty())
+                    .map(|n| n.label.clone());
                 ui.label(
-                    RichText::new(if hostname.is_empty() {
-                        "Counter-Strike 1.6 Server"
-                    } else {
+                    RichText::new(if !hostname.is_empty() {
                         hostname
+                    } else {
+                        res_title.as_deref().unwrap_or("Counter-Strike 1.6 Server")
                     })
                     .size(17.0)
                     .strong()
@@ -75,7 +88,15 @@ impl MotdVguiUi {
                     .map_or(palette.window_bg, |[r, g, b, a]| {
                         egui::Color32::from_rgba_unmultiplied(r, g, b, a)
                     });
-                let body_h = (ui.available_height() - 42.0).max(160.0);
+                let msg_h = runtime
+                    .doc_control_rect(
+                        "resource/UI/MOTD.res",
+                        "message",
+                        [area.left(), area.top(), area.width(), area.height()],
+                    )
+                    .map(|r| r[3].clamp(160.0, 420.0))
+                    .unwrap_or_else(|| (ui.available_height() - 42.0).max(160.0));
+                let body_h = msg_h.min((ui.available_height() - 42.0).max(160.0));
                 egui::Frame::NONE
                     .fill(fill)
                     .inner_margin(egui::Margin::same(10))

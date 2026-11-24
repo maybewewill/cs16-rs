@@ -45,6 +45,10 @@ impl LoadingDialogUi {
         if let Some(v) = vfs {
             runtime.load_res(v, "resource/LoadingDialog.res");
         }
+        let win_sz = runtime.doc_window_size("resource/LoadingDialog.res", [380.0, 128.0]);
+        let cancel_lbl = runtime
+            .doc_label("resource/LoadingDialog.res", "CancelButton", loc)
+            .unwrap_or_else(|| "Cancel".to_string());
         let mut cancel_clicked = false;
         let mut open = self.visible;
         let title = if self.vac_secure {
@@ -62,7 +66,7 @@ impl LoadingDialogUi {
             title,
             &mut open,
             Pos2::new(260.0, 220.0),
-            Vec2::new(380.0, 128.0),
+            Vec2::new(win_sz[0].max(340.0), win_sz[1].max(112.0)),
             Vec2::new(340.0, 112.0),
             false,
             palette,
@@ -75,7 +79,7 @@ impl LoadingDialogUi {
                     draw_vgui_progress_bar(ui.painter(), bar_rect, self.progress, palette);
                     if ui
                         .add(
-                            egui::Button::new("Cancel")
+                            egui::Button::new(&cancel_lbl)
                                 .min_size(Vec2::new(72.0, 22.0))
                                 .corner_radius(CornerRadius::ZERO),
                         )
@@ -176,6 +180,7 @@ impl PlayerListDialogUi {
         }
         self.sync_players(names, local_slot);
 
+        let win_sz = runtime.doc_window_size("resource/PlayerListDialog.res", [450.0, 360.0]);
         let mut still_open = self.open;
         let mut close_now = false;
         let mut out_vban = None;
@@ -186,7 +191,7 @@ impl PlayerListDialogUi {
             "Player List",
             &mut still_open,
             Pos2::new(168.0, 75.0),
-            Vec2::new(450.0, 360.0),
+            Vec2::new(win_sz[0].max(380.0), win_sz[1].max(280.0)),
             Vec2::new(380.0, 280.0),
             false,
             palette,
@@ -300,6 +305,7 @@ impl DemoPlayerUi {
             runtime.load_res(v, "resource/DemoPlayerDialog.res");
             runtime.load_res(v, "resource/DemoPlayerFileDialog.res");
         }
+        let win_sz = runtime.doc_window_size("resource/DemoPlayerDialog.res", [380.0, 150.0]);
         let mut still_open = self.open;
         show_steam2003_window(
             ctx,
@@ -307,7 +313,7 @@ impl DemoPlayerUi {
             "Demo Player",
             &mut still_open,
             Pos2::new(200.0, 340.0),
-            Vec2::new(380.0, 150.0),
+            Vec2::new(win_sz[0].max(340.0), win_sz[1].max(140.0)),
             Vec2::new(340.0, 140.0),
             false,
             palette,
