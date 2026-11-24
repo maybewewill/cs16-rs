@@ -308,11 +308,38 @@ impl AudioEngine {
     }
 
     pub fn play_sentence(&mut self, vfs: Option<&Vfs>, spec: &str, volume: f32) {
-        let s = SoundStart::by_name(spec, 0, 2, Vec3::ZERO, volume, 0.0, 100);
-        if let Ok(mut m) = self.mixer.lock()
-            && let Some(words) = m.sentences().resolve(spec)
-        {
-            m.start_vox_words(vfs, &words, &s, false, None);
+        self.play_send_audio(vfs, spec, volume, 100);
+    }
+
+    /// Dispatch a GoldSrc `SendAudio` message (`client.dll` `FUN_10064bc0`): `"%!"` plays a
+    /// sentence at `pitch`, otherwise plays a WAV sample directly via `start_sound`.
+    pub fn play_send_audio(&mut self, vfs: Option<&Vfs>, raw_spec: &str, volume: f32, pitch: u8) {
+        let spec = if raw_spec.trim().is_empty() {
+            "misc/talk.wav"
+        } else {
+            raw_spec.trim()
+        };
+        let pitch = pitch.max(2);
+        if let Some(rest) = spec.strip_prefix("%!") {
+            let tok: String = rest
+                .chars()
+                .take_while(|c| (' '..='z').contains(c))
+                .take(31)
+                .collect();
+            if tok.is_empty() {
+                return;
+            }
+            let s = SoundStart::by_name(&tok, 0, 2, Vec3::ZERO, volume, 0.0, pitch);
+            if let Ok(mut m) = self.mixer.lock()
+                && let Some(words) = m.sentences().resolve(&tok)
+            {
+                m.start_vox_words(vfs, &words, &s, false, None);
+            }
+        } else {
+            let s = SoundStart::by_name(spec, 0, 2, Vec3::ZERO, volume, 0.0, pitch);
+            if let Ok(mut m) = self.mixer.lock() {
+                m.start_sound(vfs, &s, false, None);
+            }
         }
     }
 

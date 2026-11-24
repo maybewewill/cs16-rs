@@ -56,6 +56,21 @@ impl Camera {
 
     /// Apply raw mouse delta using exact GoldSrc `sensitivity * m_yaw / m_pitch` degrees per count.
     pub fn apply_mouse_delta(&mut self, dx: f32, dy: f32, sensitivity: f32, m_yaw: f32, m_pitch: f32) {
+        self.apply_mouse_delta_clamped(dx, dy, sensitivity, m_yaw, m_pitch, 89.0, 89.0);
+    }
+
+    /// Apply raw mouse delta with configurable `cl_pitchup` and `cl_pitchdown` limits.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_mouse_delta_clamped(
+        &mut self,
+        dx: f32,
+        dy: f32,
+        sensitivity: f32,
+        m_yaw: f32,
+        m_pitch: f32,
+        pitch_up: f32,
+        pitch_down: f32,
+    ) {
         if !(dx.is_finite()
             && dy.is_finite()
             && sensitivity.is_finite()
@@ -64,10 +79,12 @@ impl Camera {
         {
             return;
         }
+        let max_up = if pitch_up.is_finite() { pitch_up.clamp(1.0, 89.9) } else { 89.0 };
+        let max_dn = if pitch_down.is_finite() { pitch_down.clamp(1.0, 89.9) } else { 89.0 };
         let yaw = if self.yaw_deg.is_finite() { self.yaw_deg } else { 0.0 };
         let pitch = if self.pitch_deg.is_finite() { self.pitch_deg } else { 0.0 };
         self.yaw_deg = (yaw - dx * sensitivity * m_yaw).rem_euclid(360.0);
-        self.pitch_deg = (pitch + dy * sensitivity * m_pitch).clamp(-89.0, 89.0);
+        self.pitch_deg = (pitch + dy * sensitivity * m_pitch).clamp(-max_up, max_dn);
     }
 
     pub fn view_matrix(&self) -> Mat4 {

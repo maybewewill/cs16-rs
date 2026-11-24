@@ -99,6 +99,15 @@ Verified against Ghidra reversing of `GameUI.dll`, `ServerBrowser.dll`, and `cli
 - **Spectator (`CSpectatorGUI` / `FUN_100aff00`, `Spectator.res`, `BottomSpectator.res`).** Top and bottom translucent bars of height `round(64 * H / 480)` (`107 px` at 1280x800) with no orange horizontal edge lines, `menu_visible` defaulting `false`, amber CT/T score labels (`r233`), `DividerBar`, stopwatch icon, and `%d:%02d` timer.
 - **Command menu (`CCommandMenu::Show` / `100b2ed0`, `commandmenu.txt`).** Anchored at `x = 0`, vertically centered, `0xc8000000` fill, `22 * H/480` row height, localized labels without `"1. "` prefixes, and vector right triangles for submenus.
 
+### Screen 5 (HUD, Crosshair, SayText, View/Mouse/Timing, SendAudio): DONE
+
+Verified against Ghidra reversing of `client.dll` and `hw.dll` across `640x480`, `1024x768`, and `1280x800` headless captures vs `orig_chat_1280x800.png` and `orig_spectator_1280x800.png`:
+
+- **30-Weapon Dynamic Crosshair (`CHudAmmo::DrawCrosshair` / `FUN_10043ff0`).** Exact 30-weapon `(start_distance, delta_distance)`, `ACC_CODE[30]`, `SPD_CODE[30]` thresholds (`0/140/170`), shot recoil expansion (`delta_distance`, alpha `-40` floor `120`) and decay (`* 0.013 + 0.1`), `cl_crosshair_size` (`auto`/`small`/`medium`/`large`) scaling, `night_vision` red `(250, 50, 50)`, and 1px filled rects (`[-25..-16, +16..+25]` at `1280x800` USP, matching original `0 px` delta).
+- **HUD Layout, Fades, Radar, StatusIcons & Ammo Icons (`FUN_1004d9e0`, `46f20`, `43690`, `4dd80`, `43a60`, `4e6c0`, `65570`).** Native scale `0.5` (`< 640`) / `1.0` (`>= 640`), `MIN_ALPHA = 100` fade curve + 5s money color flash + 2.5s `+$`/`-$` delta, progressive round timer red blink (`<= 30s`), `640hud7` 24x24 ammo icons, partial clipped `suit_full`/`suithelmet_full`, upward `StatusIcon` stacking from `H / 2`, `128x128` `(0, 0)` radar (`2048` range, `|dz| > 128` chevrons, 0.15s radio flash), and 4-line teamkill-aware death notice.
+- **Measured `1280x800` HUD bboxes vs `orig_chat_1280x800.png` (client-area coords):** radar `(1,1..125,125)` vs `(1,1..126,113)`; buyzone `(19,364..44,384)` vs `(15,369..42,388)`; crosshair `[-19..-10, +10..+19]` / `[-25..-16, +16..+25]` exact integer rect; health `(18,765..102,787)` vs `(18,764..91,787)`; armor `(259,763..335,787)` vs `(259,764..337,787)`; money `(1149,729..1259,752)` vs `(1149,726..1261,750)`; ammo `(1143,758..1263,797)` vs `(1129,761..1262,787)`; `say :` `(9,9..34,16)` vs `(9,5..39,13)`. Spectator mode hides `StatusBar`, hides bottom-right money under the bar, and removes the duplicate letterbox block (`leaked_statusbar_amber = None`, `leaked_blue_pixels = 0`).
+- **Chat (`CHudSayText::Draw`), View, Mouse, Audio & Frame Timing.** Inline `\x01`/`\x03`/`\x04` color spans over max 5 lines anchored at `(10, H - num_h * 2.75)`, `StairSmoothState` (`150 u/s`, capped `18 u`), `cl_bobcycle.max(0.1)` + viewmodel bob/FOV offset, `m_filter` + `m_customaccel` + `zoom_sensitivity_ratio` + `cl_pitchup`/`down`, `SendAudio` (`%!` sentences & WAV pitch + radar flash), and `_Host_Frame` timing (`host_timescale / (fps + 0.5)`).
+
 ## Status of the other screens (measured 2026-11-24 at 1280x800)
 
 | Screen | State | Differences seen |
@@ -112,7 +121,7 @@ Verified against Ghidra reversing of `GameUI.dll`, `ServerBrowser.dll`, and `cli
 | New game (`CreateMultiplayerGame*.res`) | **DONE** | Outer box `0 px` delta across all 4 res; box MAD `1.45-2.73/255`. |
 | Find servers (`ServerBrowser`) | **DONE** | Outer box `0 px` delta across all 4 res; 6 tabs, 8-column `gamelist`, resize grip. |
 | Player list / Spectator / Command menu | **DONE** | All 3 matched to Ghidra + `.res`/`.txt` specs (`467x388`, `64*H/480` bars, `x=0` vector triangles). |
-| HUD | partly | It is drawn from `hud.txt` sprites; compare positions and fades at 640x480, 1024x768 and 1280x800. |
+| HUD (crosshair, radar, bottom bar, chat) | **DONE** | 30-weapon `FUN_10043ff0` crosshair, `640hud7` ammo/armor/health/money/timer coords, `128x128` radar, `\x01`/`\x03`/`\x04` `SayText`, and clean spectator bottom bar (`0` leaked pixels). |
 
 ## Order of work for the next screens
 
@@ -120,5 +129,6 @@ Verified against Ghidra reversing of `GameUI.dll`, `ServerBrowser.dll`, and `cli
 2. MOTD and team/class/buy menus (they appear on every join).
 3. Scoreboard, console, chat, centre print.
 4. New game, Find servers, Player list, Spectator, Command menu.
+5. HUD, 30-weapon crosshair, SayText, View/Mouse/Timing, SendAudio.
 
 For each: capture the original, capture ours, measure, change the code, recapture. Commit with the numbers in the message.

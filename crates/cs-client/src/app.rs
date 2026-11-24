@@ -42,8 +42,8 @@ use cs_client::render::{RenderSettings, Renderer, SceneDynamicData};
 use cs_client::ui::chat::ChatInputUi;
 use cs_client::ui::console::{ConsoleRenderCtx, ConsoleUi};
 use cs_client::ui::hud::{
-    HudExtrasContext, HudSprites, HudView, compute_hud_visibility, draw_cs16_hud_with_runtime,
-    draw_voice_speakers,
+    HudAnimState, HudExtrasContext, HudSprites, HudView, compute_hud_visibility,
+    draw_cs16_hud_with_runtime, draw_voice_speakers,
 };
 use cs_client::ui::hud_extras::{OverviewMapTex, WeaponBucketState, draw_overview_map};
 use cs_pm::collision::Hull;
@@ -63,13 +63,11 @@ use cs_client::ui::server_menu::{
 use cs_client::ui::vgui2::{VguiRuntime, install_scheme_fonts_into_egui};
 use cs_client::ui::vgui_assets::VguiAssetBank;
 use cs_client::ui::vgui_theme::{VguiPalette, apply_vgui2_theme};
-use cs_client::ui::{FrameTelemetry, draw_crosshair, draw_net_graph};
+use cs_client::ui::{
+    CrosshairInputs, CrosshairState, FrameTelemetry, draw_crosshair_vgui, draw_net_graph,
+};
 use cs_client::view::{FrameView, ViewInputs, ViewStats};
 
-/// Seconds a kill, a chat line, a notification and the centre text stay on screen.
-const FEED_LIFE: f64 = 6.0;
-const CHAT_LIFE: f64 = 8.0;
-const CENTER_LIFE: f64 = 3.0;
 const MAX_FEED: usize = 5;
 
 pub struct LaunchConfig {
@@ -128,11 +126,11 @@ struct HudFeeds {
 }
 
 impl HudFeeds {
-    fn expire(&mut self, now: f64) {
-        self.deaths.retain(|(_, t)| now - t < FEED_LIFE);
-        self.chat.retain(|(_, t)| now - t < CHAT_LIFE);
-        self.notify.retain(|(_, t)| now - t < FEED_LIFE);
-        if self.center.as_ref().is_some_and(|(_, t)| now - t > CENTER_LIFE) {
+    fn expire(&mut self, now: f64, feed_life: f64, chat_life: f64, center_life: f64) {
+        self.deaths.retain(|(_, t)| now - t < feed_life);
+        self.chat.retain(|(_, t)| now - t < chat_life);
+        self.notify.retain(|(_, t)| now - t < feed_life);
+        if self.center.as_ref().is_some_and(|(_, t)| now - t > center_life) {
             self.center = None;
         }
     }
@@ -159,6 +157,12 @@ pub struct Cs16App {
     view_stats: ViewStats,
     last_stats: BspRenderStats,
     feeds: HudFeeds,
+    hud_anim: HudAnimState,
+    crosshair_state: CrosshairState,
+    crosshair_shots_fired: i32,
+    crosshair_last_weapon: u8,
+    crosshair_last_clip: i32,
+    prev_mouse_delta: (f32, f32),
     weapon_switch_timer: f32,
     last_weapon: Option<u8>,
     mod_transfer: ClientModTransfer,
@@ -287,6 +291,12 @@ impl Cs16App {
                 triangles: 0,
             },
             feeds: HudFeeds::default(),
+            hud_anim: HudAnimState::default(),
+            crosshair_state: CrosshairState::default(),
+            crosshair_shots_fired: 0,
+            crosshair_last_weapon: 0,
+            crosshair_last_clip: 0,
+            prev_mouse_delta: (0.0, 0.0),
             weapon_switch_timer: 0.0,
             last_weapon: None,
             mod_transfer: ClientModTransfer::default(),
@@ -524,6 +534,11 @@ impl Cs16App {
         }
         self.audio.stop_all();
         self.feeds = HudFeeds::default();
+        self.hud_anim = HudAnimState::default();
+        self.crosshair_state = CrosshairState::default();
+        self.crosshair_shots_fired = 0;
+        self.crosshair_last_weapon = 0;
+        self.crosshair_last_clip = 0;
         self.view_stats = ViewStats::default();
         self.menu_ui.visible = true;
         self.chat_ui.open = false;
@@ -583,7 +598,7 @@ impl Cs16App {
 
     /// Plays what the client core queued: server/event sounds, ambient DSP, material bullet
     /// impacts, radio/VOX sentences, reloads, and predicted footsteps.
-    fn play_sounds(&mut self, view: &FrameView, local_entity: Option<u16>) {
+    fn play_sounds(&mut self, view: &FrameView, local_entity: Option<u16>, sess_now: f64) {
         let master = finite_or(self.cvars.get_f32("volume"), 1.0).clamp(0.0, 1.0);
         let suit_vol = finite_or(self.cvars.get_f32("suitvolume"), 0.25).clamp(0.0, 1.0);
         let listener_eye = view.eye;
@@ -617,8 +632,11 @@ impl Cs16App {
                 occ_ref,
             );
         }
-        for (_sender, code, _pitch) in &view.radio_audio {
-            self.audio.play_sentence(self.vfs.as_ref(), code, master);
+        for (sender, code, pitch) in &view.radio_audio {
+            self.audio.play_send_audio(self.vfs.as_ref(), code, master, *pitch);
+            if *sender > 0 {
+                self.hud_anim.trigger_radio(*sender, sess_now);
+            }
         }
         for (vol, kind) in &view.reload_sounds {
             self.audio.play_reload_sound(self.vfs.as_ref(), *vol, *kind);
@@ -712,7 +730,10 @@ impl Cs16App {
         trim_feed(&mut self.feeds.deaths);
         trim_feed(&mut self.feeds.chat);
         trim_feed(&mut self.feeds.notify);
-        self.feeds.expire(now);
+        let feed_life = f64::from(finite_or(self.cvars.get_f32("hud_deathnotice_time"), 6.0).max(0.5));
+        let chat_life = f64::from(finite_or(self.cvars.get_f32("hud_saytext_time"), 5.0).max(0.5));
+        let center_life = f64::from(finite_or(self.cvars.get_f32("scr_centertime"), 2.0).max(0.5));
+        self.feeds.expire(now, feed_life, chat_life, center_life);
 
         if weapon != self.last_weapon {
             if self.last_weapon.is_some() {
@@ -1185,7 +1206,8 @@ impl Cs16App {
         self.cvars.set_forward_unknown(self.session.is_active());
         self.apply_view_angle_updates();
         self.queue_usercmd(f64::from(dt));
-        self.session.advance(f64::from(dt));
+        let timescale = finite_or(self.cvars.get_f32("host_timescale"), 1.0).clamp(0.05, 10.0);
+        self.session.advance(f64::from(dt * timescale));
         self.apply_view_angle_updates();
 
         for um in self.session.drain_unknown_usermsgs() {
@@ -1441,6 +1463,8 @@ impl Cs16App {
                 view = Some(frame);
             }
             self.collect_hud_feeds(inputs.now);
+            let hud_now = self.session.now();
+            self.session.with_hud(|h| self.hud_anim.step(dt, h, hud_now));
         }
         self.weapon_switch_timer = (self.weapon_switch_timer - dt).max(0.0);
         self.weapon_buckets.step(dt);
@@ -1451,7 +1475,8 @@ impl Cs16App {
                 self.camera.position = v.eye;
             }
             let local_entity = self.session.local_slot().map(|s| u16::from(s) + 1);
-            self.play_sounds(v, local_entity);
+            let sess_now_snd = self.session.now();
+            self.play_sounds(v, local_entity, sess_now_snd);
             let master = finite_or(self.cvars.get_f32("volume"), 1.0).clamp(0.0, 1.0);
             for path in &v.anim_sounds {
                 self.audio.play_2d(self.vfs.as_ref(), path, 0.8 * master);
@@ -1626,25 +1651,46 @@ impl Cs16App {
         };
         rt.egui_ctx.begin_pass(raw_input);
 
-        let (hud_hidden, hud_timer_vis) = self
+        let (hud_hidden, hud_timer_vis, hud_nvg) = self
             .session
-            .with_hud(|h| (h.hidden, h.timer_visible))
-            .unwrap_or((0, false));
+            .with_hud(|h| (h.hidden, h.timer_visible, h.night_vision))
+            .unwrap_or((0, false, false));
         let hud_vis = compute_hud_visibility(alive, 0, hud_hidden, hud_timer_vis);
         if let Some(v) = &view {
             if !paused && hud_vis.crosshair && !scoped {
-                let dyn_gap = if self.cvars.get_bool("cl_dynamiccrosshair") {
-                    local_speed / 45.0
-                } else {
-                    0.0
+                let (wid, wflags, on_ground, ducking, ch_spd, clip) = self.session.local_crosshair_state();
+                if wid != self.crosshair_last_weapon {
+                    self.crosshair_shots_fired = 0;
+                    self.crosshair_last_weapon = wid;
+                    self.crosshair_last_clip = clip;
+                } else if clip >= 0 {
+                    if clip < self.crosshair_last_clip {
+                        self.crosshair_shots_fired += self.crosshair_last_clip - clip;
+                        if self.crosshair_shots_fired > 600 {
+                            self.crosshair_shots_fired = 1;
+                        }
+                    }
+                    self.crosshair_last_clip = clip;
+                }
+                let ch_inputs = CrosshairInputs {
+                    weapon_id: wid,
+                    weapon_flags: wflags,
+                    on_ground,
+                    ducking,
+                    speed_2d: ch_spd,
+                    shots_fired: self.crosshair_shots_fired,
+                    night_vision: hud_nvg,
+                    dynamic: self.cvars.get_bool("cl_dynamiccrosshair"),
+                    hide_hud: hud_hidden,
                 };
-                draw_crosshair(&rt.egui_ctx, &self.cvars, dyn_gap);
+                draw_crosshair_vgui(&rt.egui_ctx, &self.cvars, &mut self.crosshair_state, &ch_inputs);
             }
             let mut extras = HudExtrasContext {
                 titles: Some(&self.titles),
                 loc: self.loc.as_ref(),
                 overview: self.overview_tex.as_ref(),
                 buckets: Some(&self.weapon_buckets),
+                anim: Some(&self.hud_anim),
                 observer_mode,
                 ..Default::default()
             };
@@ -1973,12 +2019,28 @@ impl Cs16App {
                     .clamp(-90.0, 90.0);
             fov = (finite_or(v.fov, default_fov) + finite_or(v.underwater_fov_delta, 0.0))
                 .clamp(10.0, 120.0);
-            sensitivity_scale = (fov / 90.0).clamp(0.2, 1.0);
+            sensitivity_scale = if (fov - default_fov).abs() > 0.5 && default_fov > 1.0 {
+                let zoom_ratio = finite_or(self.cvars.get_f32("zoom_sensitivity_ratio"), 1.2).max(0.0);
+                ((fov / default_fov) * zoom_ratio).clamp(0.05, 2.0)
+            } else {
+                1.0
+            };
             if let Some(vm) = &v.viewmodel {
                 let eye = if v.eye.is_finite() { v.eye } else { Vec3::ZERO };
-                let bob_off = Vec3::new(0.0, 0.0, finite_or(v.bob, 0.0) * 0.4) + v.viewmodel_lag;
+                let b = finite_or(v.bob, 0.0);
+                let fov_z = if (fov - 90.0).abs() < 0.5 || (fov - 110.0).abs() < 0.5 {
+                    1.0
+                } else if (fov - 100.0).abs() < 0.5 {
+                    2.0
+                } else if (fov - 80.0).abs() < 0.5 {
+                    0.5
+                } else {
+                    0.0
+                };
+                let vm_eye = eye + Vec3::new(0.0, 0.0, b - 1.0 + fov_z) + v.viewmodel_lag;
+                let bob_off = Vec3::new(b * 0.4, 0.0, 0.0);
                 let xf = viewmodel_transform(
-                    eye,
+                    vm_eye,
                     render_cam.yaw_deg,
                     render_cam.pitch_deg,
                     bob_off,
@@ -2179,14 +2241,24 @@ impl Cs16App {
         }
         self.sync_cursor_capture();
 
-        let fps_max = self.cvars.get_i32("fps_max");
-        if fps_max > 0 {
-            let target = Duration::from_secs_f64(1.0 / (fps_max as f64));
-            let elapsed = now.elapsed();
-            if let Some(rem) = target.checked_sub(elapsed)
-                && rem > Duration::from_millis(1)
-            {
-                std::thread::sleep(rem - Duration::from_millis(1));
+        if !self.launch.headless {
+            let fps_max = finite_or(self.cvars.get_f32("fps_max"), 100.0);
+            if fps_max > 0.0 {
+                let fps_override = self.cvars.get_bool("fps_override");
+                let timescale = finite_or(self.cvars.get_f32("host_timescale"), 1.0).clamp(0.05, 10.0);
+                let fps = if self.session.is_active() {
+                    let f = fps_max.max(0.5);
+                    if fps_override { f } else { f.min(100.0) }
+                } else {
+                    31.0
+                };
+                let target = Duration::from_secs_f64(f64::from(timescale) / (f64::from(fps) + 0.5));
+                let elapsed = now.elapsed();
+                if let Some(rem) = target.checked_sub(elapsed)
+                    && rem > Duration::from_millis(1)
+                {
+                    std::thread::sleep(rem - Duration::from_millis(1));
+                }
             }
         }
 
@@ -2440,12 +2512,41 @@ impl ApplicationHandler for Cs16App {
         if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event
             && self.wants_mouse_capture()
         {
-            // A zoomed view turns slower, in proportion to the fov.
-            let sens = self.cvars.get_f32("sensitivity").max(0.05) * self.mouse_sens_scale;
+            let raw_dx = dx as f32;
+            let raw_dy = dy as f32;
+            let (fx, fy) = if self.cvars.get_bool("m_filter") {
+                let (px, py) = self.prev_mouse_delta;
+                ((raw_dx + px) * 0.5, (raw_dy + py) * 0.5)
+            } else {
+                (raw_dx, raw_dy)
+            };
+            self.prev_mouse_delta = (raw_dx, raw_dy);
+
+            let mut sens = self.cvars.get_f32("sensitivity").max(0.05) * self.mouse_sens_scale;
+            if self.cvars.get_i32("m_customaccel") != 0 {
+                let scale = finite_or(self.cvars.get_f32("m_customaccel_scale"), 0.04).max(0.0);
+                let max_spd = finite_or(self.cvars.get_f32("m_customaccel_max"), 0.0).max(0.0);
+                let exp = finite_or(self.cvars.get_f32("m_customaccel_exponent"), 1.0).clamp(0.1, 4.0);
+                let mag = (fx * fx + fy * fy).sqrt();
+                let mut accel = mag.powf(exp) * scale;
+                if max_spd > 0.0 {
+                    accel = accel.min(max_spd);
+                }
+                sens += accel;
+            }
             let m_yaw = self.cvars.get_f32("m_yaw");
             let m_pitch = self.cvars.get_f32("m_pitch");
-            self.camera
-                .apply_mouse_delta(dx as f32, dy as f32, sens, m_yaw, m_pitch);
+            let pitch_up = self.cvars.get_f32("cl_pitchup");
+            let pitch_down = self.cvars.get_f32("cl_pitchdown");
+            self.camera.apply_mouse_delta_clamped(
+                fx,
+                fy,
+                sens,
+                m_yaw,
+                m_pitch,
+                pitch_up,
+                pitch_down,
+            );
         }
     }
 }

@@ -20,8 +20,14 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     reg.register("hud_centerid", "0", arch, "Center player target ID status bar text (0 or 1)");
     reg.register("hud_draw", "1", CVarFlags::NONE, "Draw in-game HUD overlay (0 or 1)");
     reg.register("hud_saytext_internal", "1", arch, "Show in-game chat saytext lines (0 or 1)");
+    reg.register("hud_saytext_time", "5", arch, "Duration chat saytext lines stay visible (seconds)");
+    reg.register("hud_deathnotice_time", "6", CVarFlags::NONE, "Duration death notice entries stay visible (seconds)");
     reg.register("hud_takesshots", "0", arch, "Automatically take end-of-map scoreboard screenshots (0 or 1)");
     reg.register("scr_centertime", "2", CVarFlags::NONE, "Duration centerprint messages stay visible (seconds)");
+    reg.register("scoreboard_showhealth", "1", arch, "Show player health column on scoreboard (0 or 1)");
+    reg.register("scoreboard_showmoney", "1", arch, "Show teammate money column on scoreboard (0 or 1)");
+    reg.register("scoreboard_shortheaders", "0", arch, "Use short column headers on scoreboard (0 or 1)");
+    reg.register("scoreboard_showavatars", "1", arch, "Show Steam avatars on scoreboard (0 or 1)");
     reg.register("con_color", "255 180 30", arch, "Console text RGB color");
     reg.register("cl_radartype", "0", arch, "Radar background style (0=translucent, 1=solid/overview)");
     reg.register("cl_observercrosshair", "1", arch, "Show crosshair while spectating (0 or 1)");
@@ -43,13 +49,23 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
 
     // Mouse / Input
     reg.register("sensitivity", "3.0", arch, "Mouse sensitivity");
+    reg.register("zoom_sensitivity_ratio", "1.2", arch, "Zoom sensitivity multiplier relative to hipfire sensitivity");
     reg.register("m_rawinput", "1", arch, "Use raw mouse input (0 or 1)");
     reg.register("m_yaw", "0.022", arch, "Mouse yaw multiplier (degrees per count)");
     reg.register("m_pitch", "0.022", arch, "Mouse pitch multiplier (negative inverts Y)");
     reg.register("m_filter", "0", arch, "Mouse smoothing filter (0 or 1)");
+    reg.register("m_customaccel", "0", arch, "Custom mouse acceleration mode (0=off, 1=linear, 2=separate X/Y, 3=pow)");
+    reg.register("m_customaccel_scale", "0.04", arch, "Custom mouse acceleration scale");
+    reg.register("m_customaccel_max", "0", arch, "Maximum custom mouse acceleration speed (0=unlimited)");
+    reg.register("m_customaccel_exponent", "1", arch, "Custom mouse acceleration exponent");
+    reg.register("cl_pitchup", "89", CVarFlags::NONE, "Maximum upward pitch angle in degrees");
+    reg.register("cl_pitchdown", "89", CVarFlags::NONE, "Maximum downward pitch angle in degrees");
 
     // Video / Renderer (GoldSrc look; Xash3D FWGS `gamma.c` & retail `cstrike/config.cfg`)
     reg.register("fps_max", "100", arch, "Maximum framerate limit (0 = unlimited)");
+    reg.register("fps_override", "0", arch, "Allow fps_max above 100 when set to 1");
+    reg.register("host_timescale", "1", CVarFlags::NONE, "Host simulation time scale multiplier");
+    reg.register("sv_use_steam_networking", "1", arch, "Use Steam networking transport when available (0 or 1)");
     reg.register("gamma", "2.5", arch, "Display gamma (GoldSrc default 2.5)");
     reg.register("texgamma", "2.0", CVarFlags::NONE, "Texture gamma (GoldSrc default 2.0)");
     reg.register("lightgamma", "2.5", CVarFlags::NONE, "Lightmap gamma (GoldSrc default 2.5)");

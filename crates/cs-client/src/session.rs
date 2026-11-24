@@ -359,6 +359,37 @@ impl Session {
         }, else 0.0)
     }
 
+    /// Crosshair inputs from prediction & HUD state:
+    /// `(weapon_id, weapon_flags, on_ground, ducking, speed_2d, clip)`.
+    pub fn local_crosshair_state(&self) -> (u8, u32, bool, bool, f32, i32) {
+        with_conn!(self, c => {
+            let p = c.predictor().prediction();
+            let cur_hud = c.fx().hud.current_weapon;
+            let wid = if p.predicted && p.weapon.weapon_id > 0 {
+                p.weapon.weapon_id as u8
+            } else {
+                cur_hud.map_or(0, |w| w.weapon_id)
+            };
+            let wstate = p
+                .weapon
+                .weapons
+                .get(&wid)
+                .map_or(0, |w| w.m_i_weapon_state as u32);
+            let clip = p
+                .weapon
+                .weapons
+                .get(&wid)
+                .map(|w| w.m_i_clip)
+                .or_else(|| cur_hud.map(|w| i32::from(w.clip)))
+                .unwrap_or(0);
+            let cd = c.client_data();
+            let on_ground = p.onground >= 0 || cd.is_some_and(|d| (d.flags & 0x200) != 0);
+            let ducking = (p.flags & 0x4000) != 0 || cd.is_some_and(|d| (d.flags & 0x4000) != 0);
+            let spd = Vec3::new(p.simvel.x, p.simvel.y, 0.0).length();
+            (wid, wstate, on_ground, ducking, spd, clip)
+        }, else (0, 0, true, false, 0.0, 0))
+    }
+
     /// Drains new console lines (`Con_Printf`) since the last call.
     pub fn take_console_lines(&mut self) -> Vec<String> {
         with_conn_mut!(self, c => c.take_console_lines(), else Vec::new())

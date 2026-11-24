@@ -14,7 +14,10 @@ use cs_assets::vgui_scripts::{
     TitlesTable,
 };
 use cs_client::ui::console::{ConsoleRenderCtx, ConsoleUi, console_default_rect};
-use cs_client::ui::hud::{HudExtrasContext, HudView, draw_cs16_hud_with_extras, draw_cs16_hud_with_runtime};
+use cs_client::ui::hud::{
+    HudAnimState, HudExtrasContext, HudView, draw_cs16_hud_with_extras,
+    draw_cs16_hud_with_runtime, hud_fade_alpha,
+};
 use cs_client::ui::hud_extras::{
     WeaponBucketState, compute_damage_quadrants, damage_hazard_icons, evaluate_dhud_text_fx,
     format_hud_text_entry, format_status_bar,
@@ -42,7 +45,10 @@ use cs_client::ui::vgui2::{
 };
 use cs_client::ui::vgui_assets::ClientPalette;
 use cs_client::ui::vgui_theme::VguiPalette;
-use cs_client::ui::{FrameTelemetry, draw_crosshair, draw_net_graph};
+use cs_client::ui::{
+    CrosshairInputs, CrosshairState, FrameTelemetry, draw_crosshair, draw_crosshair_vgui,
+    draw_net_graph,
+};
 use cs_clientcore::HudState;
 use cs_clientcore::hud::DeathNotice;
 use cs_cvar::{CVarRegistry, EngineAction};
@@ -1635,4 +1641,134 @@ fn ui_scoreboard_and_console_rects_scale_across_resolutions() {
 
     let con1024 = console_default_rect(rect_for(1280.0, 1024.0));
     assert_eq!((con1024.left(), con1024.top(), con1024.width(), con1024.height()), (57.0, 57.0, 796.0, 569.0));
+}
+
+#[test]
+fn screen5_crosshair_30_weapon_table_and_1280x800_usp_parity() {
+    let mut state = CrosshairState::default();
+    let usp_idle = CrosshairInputs {
+        weapon_id: 16, // USP
+        on_ground: true,
+        dynamic: true,
+        ..CrosshairInputs::default()
+    };
+    // Exact 1280x800 auto-size USP match to orig_chat_1280x800.png (gap=16, bar_len=10 -> [-25..-16, +16..+25])
+    let g_1280 = state.compute_geometry(&usp_idle, "auto", 1280);
+    assert_eq!((g_1280.gap, g_1280.bar_len, g_1280.alpha), (16, 10, 255));
+
+    // Airborne doubles distance -> 16 -> scaled 32 at 1280x800
+    let mut air_state = CrosshairState::default();
+    let g_air = air_state.compute_geometry(
+        &CrosshairInputs {
+            on_ground: false,
+            ..usp_idle
+        },
+        "auto",
+        1280,
+    );
+    assert!(g_air.gap > g_1280.gap);
+
+    // Ducking halves distance for USP -> 4 -> scaled 8 at 1280x800
+    let mut duck_state = CrosshairState::default();
+    let g_duck = duck_state.compute_geometry(
+        &CrosshairInputs {
+            ducking: true,
+            ..usp_idle
+        },
+        "auto",
+        1280,
+    );
+    assert!(g_duck.gap < g_1280.gap);
+
+    // Firing expands gap & lowers alpha by 40 (floored at 120)
+    let g_shot = state.compute_geometry(
+        &CrosshairInputs {
+            shots_fired: 1,
+            ..usp_idle
+        },
+        "auto",
+        1280,
+    );
+    assert!(g_shot.gap > g_1280.gap);
+    assert_eq!(g_shot.alpha, 215);
+
+    // Size overrides: small (1024 base) < medium (800 base) < large (640 base)
+    let mut s_small = CrosshairState::default();
+    let mut s_med = CrosshairState::default();
+    let mut s_large = CrosshairState::default();
+    let g_s = s_small.compute_geometry(&usp_idle, "small", 1280);
+    let g_m = s_med.compute_geometry(&usp_idle, "medium", 1280);
+    let g_l = s_large.compute_geometry(&usp_idle, "large", 1280);
+    assert!(g_s.gap < g_m.gap && g_m.gap < g_l.gap);
+}
+
+#[test]
+fn screen5_status_bar_strips_prefix_unescapes_percent_and_falls_back() {
+    let mut hud = HudState::default();
+    hud.status_text.insert(0, "1 %c1: %p2\n2  %h: %i3%%".to_string());
+    hud.status_values.insert(1, 2); // Enemy
+    hud.status_values.insert(2, 1); // player slot 1 -> index 0
+    hud.status_values.insert(3, 100);
+    let mut names = BTreeMap::new();
+    names.insert(0, "Minh2".to_string());
+
+    // Empty LocalizationTable returns unresolved "#Cstrike_Status_Enemy" -> must fall back to "Enemy"
+    let empty_loc = LocalizationTable::default();
+    let (team, line) = format_status_bar(&hud, &names, Some(&empty_loc)).expect("formatted");
+    assert_eq!(team, 2);
+    assert_eq!(line, "Enemy: Minh2  HP: 100%");
+    let _ = draw_crosshair_vgui;
+}
+
+#[test]
+fn screen5_hud_anim_fades_and_radio_flash() {
+    assert_eq!(hud_fade_alpha(0.0), 100);
+    assert_eq!(hud_fade_alpha(100.0), 228);
+
+    let mut anim = HudAnimState::default();
+    let mut hud = HudState {
+        health: 100,
+        armor: 100,
+        money: 800,
+        ..HudState::default()
+    };
+    anim.step(0.016, &hud, 1.0);
+    assert_eq!(anim.health_fade, 0.0);
+
+    hud.health = 75;
+    hud.money = 1600;
+    anim.step(0.016, &hud, 1.1);
+    assert!(anim.health_fade > 190.0);
+    assert_eq!(anim.money_delta, 800);
+    assert!(anim.money_fade > 4.9);
+
+    anim.trigger_radio(3, 2.0);
+    assert!(anim.radio_flashes.contains_key(&3));
+    anim.step(0.016, &hud, 5.4);
+    assert!(!anim.radio_flashes.contains_key(&3));
+}
+
+#[test]
+fn screen5_goldsrc_cvars_registered() {
+    let cvars = CVarRegistry::new_with_defaults();
+    for (name, expected) in [
+        ("zoom_sensitivity_ratio", "1.2"),
+        ("m_customaccel", "0"),
+        ("m_customaccel_scale", "0.04"),
+        ("m_customaccel_max", "0"),
+        ("m_customaccel_exponent", "1"),
+        ("fps_override", "0"),
+        ("host_timescale", "1"),
+        ("cl_pitchup", "89"),
+        ("cl_pitchdown", "89"),
+        ("hud_saytext_time", "5"),
+        ("hud_deathnotice_time", "6"),
+        ("sv_use_steam_networking", "1"),
+        ("scoreboard_showhealth", "1"),
+        ("scoreboard_showmoney", "1"),
+        ("scoreboard_shortheaders", "0"),
+        ("scoreboard_showavatars", "1"),
+    ] {
+        assert_eq!(cvars.get_str(name), expected, "cvar {name}");
+    }
 }

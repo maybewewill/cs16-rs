@@ -62,59 +62,88 @@ pub fn format_status_bar(
     if trimmed.is_empty() {
         return None;
     }
-    let team_id = state.status_values.get(&1).copied().unwrap_or(0);
-    let mut out = String::new();
-    let chars: Vec<char> = trimmed.chars().collect();
-    let mut i = 0usize;
-    while i < chars.len() {
-        if chars[i] == '%' && i + 1 < chars.len() {
-            let kind = chars[i + 1];
-            let idx = chars
-                .get(i + 2)
-                .and_then(|c| c.to_digit(10))
-                .map(|d| d as u8);
-            let val = idx.and_then(|n| state.status_values.get(&n).copied());
-            match kind {
-                'p' => {
-                    if let Some(slot1) = val.filter(|&v| v > 0) {
-                        let slot0 = (slot1 - 1) as u8;
-                        let name = names
-                            .get(&slot0)
-                            .cloned()
-                            .unwrap_or_else(|| format!("Player #{slot1}"));
-                        out.push_str(&name);
-                    }
-                    i += if idx.is_some() { 3 } else { 2 };
-                    continue;
-                }
-                'c' => {
-                    let lbl = match val.unwrap_or(team_id) {
-                        1 => loc.map_or("Friend", |l| l.resolve("#Cstrike_Status_Friend")),
-                        2 => loc.map_or("Enemy", |l| l.resolve("#Cstrike_Status_Enemy")),
-                        3 => loc.map_or("Hostage", |l| l.resolve("#Cstrike_Status_Hostage")),
-                        _ => "",
-                    };
-                    out.push_str(lbl);
-                    i += if idx.is_some() { 3 } else { 2 };
-                    continue;
-                }
-                'i' => {
-                    out.push_str(&val.unwrap_or(0).to_string());
-                    i += if idx.is_some() { 3 } else { 2 };
-                    continue;
-                }
-                'h' => {
-                    out.push_str("HP");
-                    i += if idx.is_some() { 3 } else { 2 };
-                    continue;
-                }
-                _ => {}
-            }
+    let resolve_lbl = |key: &'static str, fallback: &'static str| -> &str {
+        match loc.map(|l| l.resolve(key)) {
+            Some(s) if !s.is_empty() && !s.starts_with('#') => s,
+            _ => fallback,
         }
-        out.push(chars[i]);
-        i += 1;
+    };
+    let team_id = state.status_values.get(&1).copied().unwrap_or(0);
+    let mut lines_out = Vec::new();
+    for raw_line in trimmed.split(['\n', '\r']) {
+        let mut line = raw_line.trim_start();
+        // GoldSrc StatusText prefixes lines with `"1 "` / `"2 "` alignment/line indices.
+        if let Some(first) = line.chars().next()
+            && first.is_ascii_digit()
+            && line.chars().nth(1).is_some_and(|c| c == ' ' || c == '\t')
+        {
+            line = line[2..].trim_start();
+        }
+        if line.is_empty() {
+            continue;
+        }
+        let mut out = String::new();
+        let chars: Vec<char> = line.chars().collect();
+        let mut i = 0usize;
+        while i < chars.len() {
+            if chars[i] == '%' && i + 1 < chars.len() {
+                let kind = chars[i + 1];
+                if kind == '%' {
+                    out.push('%');
+                    i += 2;
+                    continue;
+                }
+                let idx = chars
+                    .get(i + 2)
+                    .and_then(|c| c.to_digit(10))
+                    .map(|d| d as u8);
+                let val = idx.and_then(|n| state.status_values.get(&n).copied());
+                match kind {
+                    'p' => {
+                        if let Some(slot1) = val.filter(|&v| v > 0) {
+                            let slot0 = (slot1 - 1) as u8;
+                            let name = names
+                                .get(&slot0)
+                                .cloned()
+                                .unwrap_or_else(|| format!("Player #{slot1}"));
+                            out.push_str(&name);
+                        }
+                        i += if idx.is_some() { 3 } else { 2 };
+                        continue;
+                    }
+                    'c' => {
+                        let lbl = match val.unwrap_or(team_id) {
+                            1 => resolve_lbl("#Cstrike_Status_Friend", "Friend"),
+                            2 => resolve_lbl("#Cstrike_Status_Enemy", "Enemy"),
+                            3 => resolve_lbl("#Cstrike_Status_Hostage", "Hostage"),
+                            _ => "",
+                        };
+                        out.push_str(lbl);
+                        i += if idx.is_some() { 3 } else { 2 };
+                        continue;
+                    }
+                    'i' => {
+                        out.push_str(&val.unwrap_or(0).to_string());
+                        i += if idx.is_some() { 3 } else { 2 };
+                        continue;
+                    }
+                    'h' => {
+                        out.push_str("HP");
+                        i += if idx.is_some() { 3 } else { 2 };
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            out.push(chars[i]);
+            i += 1;
+        }
+        let clean = out.trim();
+        if !clean.is_empty() {
+            lines_out.push(clean.to_string());
+        }
     }
-    let clean = out.trim().to_string();
+    let clean = lines_out.join("  ");
     (!clean.is_empty()).then_some((team_id.max(0) as u8, clean))
 }
 

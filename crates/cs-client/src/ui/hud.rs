@@ -190,6 +190,76 @@ impl HudSprites {
         Some(size)
     }
 
+    fn draw_sprite_clipped_bottom(
+        &self,
+        painter: &egui::Painter,
+        name: &str,
+        pos: Pos2,
+        scale: f32,
+        tint: Color32,
+        fill_frac: f32,
+    ) -> Option<Vec2> {
+        let e = self.entries.get(name)?;
+        let (tex, [tw, th]) = self.sheets.get(&e.sprite_name)?;
+        let size = Vec2::new(e.width as f32 * scale, e.height as f32 * scale);
+        let f = fill_frac.clamp(0.0, 1.0);
+        if f <= 0.001 {
+            return Some(size);
+        }
+        let u0 = e.x as f32 / *tw;
+        let u1 = (e.x + e.width) as f32 / *tw;
+        let v_bot = (e.y + e.height) as f32 / *th;
+        let v_top = (e.y as f32 + e.height as f32 * (1.0 - f)) / *th;
+        let top_y = pos.y + size.y * (1.0 - f);
+        let rect = Rect::from_min_size(Pos2::new(pos.x, top_y), Vec2::new(size.x, size.y * f));
+        painter.image(
+            tex.id(),
+            rect,
+            Rect::from_min_max(Pos2::new(u0, v_top), Pos2::new(u1, v_bot)),
+            tint,
+        );
+        Some(size)
+    }
+
+    fn draw_ammo_icon(
+        &self,
+        painter: &egui::Painter,
+        weapon_id: u8,
+        pos: Pos2,
+        scale: f32,
+        tint: Color32,
+    ) -> Option<Vec2> {
+        let (sx, sy) = match weapon_id {
+            1 => (120.0, 72.0),                          // p228
+            3 | 24 | 28 => (72.0, 72.0),                 // scout / g3sg1 / ak47
+            4 => (72.0, 96.0),                           // hegrenade
+            5 | 21 | 29 => (0.0, 72.0),                  // xm1014 / m3 / knife
+            6 => (96.0, 96.0),                           // c4
+            7 | 12 | 16 => (96.0, 72.0),                 // mac10 / ump45 / usp
+            8 | 13 | 14 | 15 | 20 | 22 | 27 => (0.0, 96.0), // aug / sg550 / galil / famas / m249 / m4a1 / sg552
+            9 => (144.0, 96.0),                          // smokegrenade
+            10 | 17 | 19 | 23 => (48.0, 72.0),           // elite / glock18 / mp5navy / tmp
+            11 | 30 => (120.0, 96.0),                    // fiveseven / p90
+            18 => (24.0, 96.0),                          // awp
+            25 => (48.0, 96.0),                          // flashbang
+            26 => (24.0, 72.0),                          // deagle
+            _ => return None,
+        };
+        let (tex, [tw, th]) = self.sheets.get("640hud7")?;
+        let u0 = sx / *tw;
+        let v0 = sy / *th;
+        let u1 = (sx + 24.0) / *tw;
+        let v1 = (sy + 24.0) / *th;
+        let size = Vec2::splat(24.0 * scale);
+        painter.image(
+            tex.id(),
+            Rect::from_min_size(pos, size),
+            Rect::from_min_max(Pos2::new(u0, v0), Pos2::new(u1, v1)),
+            tint,
+        );
+        Some(size)
+    }
+
     fn measure_number(&self, value: i32, scale: f32, min_digits: usize) -> f32 {
         let s = format!("{:0width$}", value.max(0), width = min_digits);
         let step = 21.0 * scale;
@@ -302,11 +372,95 @@ fn status_color(icon: &StatusIcon, flash_on: bool) -> Option<Color32> {
 }
 
 /// Optional CS 1.6 CVar, localization, overview, and weapon-bucket context for `draw_cs16_hud_with_extras`.
+/// Persistent HUD animation/fade timers (`CHudHealth`, `CHudBattery`, `CHudAmmo`, `CHudAccountBalance`, `CHudRadar`).
+#[derive(Debug, Clone, Default)]
+pub struct HudAnimState {
+    pub last_health: Option<u8>,
+    pub health_fade: f32,
+    pub last_armor: Option<i16>,
+    pub armor_fade: f32,
+    pub last_ammo: Option<(i8, u8)>,
+    pub ammo_fade: f32,
+    pub last_money: Option<i32>,
+    pub money_delta: i32,
+    pub money_fade: f32,
+    pub money_delta_fade: f32,
+    /// Active radio-sender flash expiry timestamp (`now + 3.3s`, 22 toggles @ 0.15s) per 1-based sender slot.
+    pub radio_flashes: HashMap<u8, f64>,
+}
+
+impl HudAnimState {
+    pub fn step(&mut self, dt: f32, hud: &HudState, now: f64) {
+        let dt = dt.clamp(0.0, 0.25);
+        self.health_fade = (self.health_fade - dt * 20.0).max(0.0);
+        self.armor_fade = (self.armor_fade - dt * 20.0).max(0.0);
+        self.ammo_fade = (self.ammo_fade - dt * 20.0).max(0.0);
+        self.money_fade = (self.money_fade - dt).max(0.0);
+        self.money_delta_fade = (self.money_delta_fade - dt).max(0.0);
+
+        if self.last_health != Some(hud.health) {
+            if self.last_health.is_some() {
+                self.health_fade = 200.0;
+            }
+            self.last_health = Some(hud.health);
+        }
+        if self.last_armor != Some(hud.armor) {
+            if self.last_armor.is_some() {
+                self.armor_fade = 200.0;
+            }
+            self.last_armor = Some(hud.armor);
+        }
+        let cur_ammo = hud.current_weapon.map(|c| {
+            let res = hud
+                .weapons
+                .get(&c.weapon_id)
+                .and_then(|w| hud.ammo.get(&w.ammo1_type))
+                .copied()
+                .unwrap_or(0);
+            (c.clip, res)
+        });
+        if self.last_ammo != cur_ammo {
+            if self.last_ammo.is_some() {
+                self.ammo_fade = 200.0;
+            }
+            self.last_ammo = cur_ammo;
+        }
+        if self.last_money != Some(hud.money) {
+            if let Some(prev) = self.last_money {
+                self.money_delta = hud.money - prev;
+                self.money_fade = 5.0;
+                self.money_delta_fade = 2.5;
+            }
+            self.last_money = Some(hud.money);
+        }
+        self.radio_flashes.retain(|_, exp| *exp > now);
+    }
+
+    pub fn trigger_radio(&mut self, sender: u8, now: f64) {
+        self.radio_flashes.insert(sender, now + 0.15 * 22.0);
+    }
+}
+
+/// GoldSrc `MIN_ALPHA = 100` fade curve used by `CHudHealth`, `CHudBattery`, and `CHudAmmo`.
+pub fn hud_fade_alpha(fade: f32) -> u8 {
+    if fade > 0.0 {
+        ((fade / 100.0) * 128.0 + 100.0).round().clamp(100.0, 255.0) as u8
+    } else {
+        100
+    }
+}
+
+fn hud_tinted_alpha(rgb: Color32, goldsrc_alpha: u8) -> Color32 {
+    let vis_a = ((f32::from(goldsrc_alpha) * 0.60) + 102.0).round().clamp(100.0, 255.0) as u8;
+    Color32::from_rgba_unmultiplied(rgb.r(), rgb.g(), rgb.b(), vis_a)
+}
+
 pub struct HudExtrasContext<'a> {
     pub titles: Option<&'a cs_assets::vgui_scripts::TitlesTable>,
     pub loc: Option<&'a cs_assets::scheme::LocalizationTable>,
     pub overview: Option<&'a OverviewMapTex>,
     pub buckets: Option<&'a WeaponBucketState>,
+    pub anim: Option<&'a HudAnimState>,
     pub hud_draw: bool,
     pub hud_centerid: bool,
     pub hud_saytext_internal: bool,
@@ -324,6 +478,7 @@ impl Default for HudExtrasContext<'_> {
             loc: None,
             overview: None,
             buckets: None,
+            anim: None,
             hud_draw: true,
             hud_centerid: true,
             hud_saytext_internal: true,
@@ -470,9 +625,10 @@ fn draw_cs16_hud_impl(
         painter.rect_filled(screen, 0.0, col);
     }
 
-    let scale = (screen.height() / 768.0).clamp(0.85, 1.45);
-    let bottom_y = screen.bottom() - 40.0 * scale;
-    let flash_on = (hud.time_sec * 6.0).sin() > 0.0;
+    let scale = if screen.width() < 640.0 { 0.5 } else { 1.0 };
+    let num_h = 24.0 * scale;
+    let bottom_y = (screen.bottom() - num_h * 1.5).floor();
+    let flash_on = ((hud.time_sec / 0.1) as i32) % 2 == 0;
 
     if hud.alive {
         let quads = compute_damage_quadrants(&state.damage_history, hud.eye, hud.yaw_deg, hud.now);
@@ -508,19 +664,35 @@ fn draw_cs16_hud_impl(
         state.timer_visible,
     );
 
-    // 3. Bottom-left: health and armor (`640hud7` cross, suit, digits).
+    // 3. Bottom-left: health and armor (`640hud7` cross, suit, digits) matching `FUN_1004d9e0` & `FUN_10046f20`.
     if vis.health_armor {
-        let hp_color = if state.health <= 25 { HUD_RED } else { HUD_AMBER };
-        let hp_x = 18.0 * scale;
+        let hp_alpha = if state.health < 16 {
+            255
+        } else {
+            extras.anim.map_or(100, |a| hud_fade_alpha(a.health_fade))
+        };
+        let hp_base = if state.health < 26 { HUD_RED } else { HUD_AMBER };
+        let hp_color = hud_tinted_alpha(hp_base, hp_alpha);
+        let armor_alpha = extras.anim.map_or(100, |a| hud_fade_alpha(a.armor_fade));
+        let armor_color = hud_tinted_alpha(HUD_AMBER, armor_alpha);
+        let hp_x = 16.0 * scale;
         let health = i32::from(state.health);
         let armor = i32::from(state.armor);
         if let Some(sp) = sprites {
-            let _ = sp.draw_sprite(&painter, "cross", Pos2::new(hp_x, bottom_y + 1.0), scale, hp_color);
-            sp.draw_number(&painter, health, Pos2::new(hp_x + 32.0 * scale, bottom_y), scale, hp_color, 1);
-            let armor_x = hp_x + 150.0 * scale;
-            let shield_name = if state.armor_type == 1 { "suithelmet_full" } else { "suit_full" };
-            let _ = sp.draw_sprite(&painter, shield_name, Pos2::new(armor_x, bottom_y + 1.0), scale, HUD_AMBER);
-            sp.draw_number(&painter, armor, Pos2::new(armor_x + 32.0 * scale, bottom_y), scale, HUD_AMBER, 1);
+            let _ = sp.draw_sprite(&painter, "cross", Pos2::new(hp_x, bottom_y), scale, hp_color);
+            sp.draw_number(&painter, health, Pos2::new(hp_x + 28.0 * scale, bottom_y), scale, hp_color, 1);
+
+            let armor_x = (screen.width() / 5.0).floor();
+            let (empty_spr, full_spr) = if state.armor_type == 1 {
+                ("suithelmet_empty", "suithelmet_full")
+            } else {
+                ("suit_empty", "suit_full")
+            };
+            let icon_y = bottom_y - 4.0 * scale;
+            let _ = sp.draw_sprite(&painter, empty_spr, Pos2::new(armor_x, icon_y), scale, armor_color);
+            let fill = (f32::from(state.armor) / 100.0).clamp(0.0, 1.0);
+            let _ = sp.draw_sprite_clipped_bottom(&painter, full_spr, Pos2::new(armor_x, icon_y), scale, armor_color, fill);
+            sp.draw_number_right(&painter, armor, armor_x + (24.0 + 60.0) * scale, bottom_y, scale, armor_color, 1);
         } else {
             painter.text(
                 Pos2::new(hp_x, bottom_y),
@@ -532,32 +704,29 @@ fn draw_cs16_hud_impl(
         }
     }
 
-    // 4. Left-margin status icons: buy zone, bomb, defuser, rescue zone... as the server shows
-    // them (`StatusIcon`), with the colour and the flashing it asks for.
+    // 4. Left-margin status icons (`FUN_10065570`): stacked upward from `screen_h / 2`.
     if hud.alive {
-        let mut icon_y = screen.center().y - 16.0 * scale;
-        let icon_x = 18.0 * scale;
+        let mut icon_bot = screen.center().y - 10.0 * scale;
+        let icon_x = 16.0 * scale;
         if let Some(sp) = sprites {
-            for (name, icon) in &state.status_icons {
+            for (name, icon) in state.status_icons.iter().take(4) {
                 let Some(col) = status_color(icon, flash_on) else {
                     continue;
                 };
-                if sp
-                    .draw_sprite(&painter, name, Pos2::new(icon_x, icon_y), scale, col)
-                    .is_some()
-                {
-                    icon_y += 38.0 * scale;
+                if let Some(sz) = sp.sprite_size(name, scale) {
+                    let y = icon_bot - sz.y;
+                    let _ = sp.draw_sprite(&painter, name, Pos2::new(icon_x, y), scale, col);
+                    icon_bot = y - 5.0 * scale;
                 }
             }
             for (dmg, started) in &state.damage_history {
                 if hud.now - *started <= 2.5 {
                     for haz in damage_hazard_icons(dmg.bits) {
                         let col = if flash_on { HUD_RED } else { HUD_AMBER };
-                        if sp
-                            .draw_sprite(&painter, haz, Pos2::new(icon_x, icon_y), scale, col)
-                            .is_some()
-                        {
-                            icon_y += 38.0 * scale;
+                        if let Some(sz) = sp.sprite_size(haz, scale) {
+                            let y = icon_bot - sz.y;
+                            let _ = sp.draw_sprite(&painter, haz, Pos2::new(icon_x, y), scale, col);
+                            icon_bot = y - 5.0 * scale;
                         }
                     }
                 }
@@ -565,18 +734,39 @@ fn draw_cs16_hud_impl(
         }
     }
 
-    // 5. Bottom-centre: the round timer (stopwatch and sprite digits).
+    // 5. Bottom-centre: the round timer (`FUN_1004dd80` with progressive red blink <= 30s).
     let center_x = screen.center().x;
     if vis.timer {
-        let secs_total = state.round_seconds_left(hud.now).ceil() as i32;
+        let rem = state.round_seconds_left(hud.now);
+        let secs_total = rem.ceil().max(0.0) as i32;
         let mins = secs_total / 60;
         let secs = secs_total % 60;
-        let timer_col = if secs_total <= 10 { HUD_RED } else { HUD_AMBER };
+        let timer_col = if rem <= 0.0 {
+            Color32::from_rgb(255, 16, 16)
+        } else if rem <= 30.0 {
+            let iv = if rem < 3.0 {
+                0.05
+            } else if rem < 6.0 {
+                0.1
+            } else if rem < 11.0 {
+                0.2
+            } else if rem < 21.0 {
+                0.4
+            } else {
+                0.8
+            };
+            if ((hud.time_sec / iv) as i32) % 2 == 0 {
+                Color32::from_rgb(255, 16, 16)
+            } else {
+                hud_tinted_alpha(HUD_AMBER, 100)
+            }
+        } else {
+            hud_tinted_alpha(HUD_AMBER, 100)
+        };
         if let Some(sp) = sprites {
-            let total_w = 24.0 * scale + 8.0 * scale + 21.0 * scale + 10.0 * scale + 42.0 * scale;
-            let mut tx = center_x - total_w * 0.5;
-            let _ = sp.draw_sprite(&painter, "stopwatch", Pos2::new(tx, bottom_y + 1.0), scale, timer_col);
-            tx += 32.0 * scale;
+            let mut tx = center_x - 60.0 * scale;
+            let _ = sp.draw_sprite(&painter, "stopwatch", Pos2::new(tx, bottom_y), scale, timer_col);
+            tx += 28.0 * scale;
             tx += sp.draw_number(&painter, mins, Pos2::new(tx, bottom_y), scale, timer_col, 1);
             let dot_sz = (3.0 * scale).max(2.0);
             let colon_x = tx + 3.0 * scale;
@@ -609,11 +799,11 @@ fn draw_cs16_hud_impl(
                 _ => true,
             };
             if pulse {
-                let sx = center_x - 86.0 * scale;
+                let sx = center_x - 92.0 * scale;
                 let col = HUD_RED.linear_multiply(f32::from(sc.alpha) / 255.0);
                 if let Some(sp) = sprites
                     && sp
-                        .draw_sprite(&painter, &sc.sprite, Pos2::new(sx, bottom_y + 1.0), scale, col)
+                        .draw_sprite(&painter, &sc.sprite, Pos2::new(sx, bottom_y), scale, col)
                         .is_some()
                 {
                 } else {
@@ -629,28 +819,49 @@ fn draw_cs16_hud_impl(
         }
     }
 
-    // 6. Bottom-right: money and the clip over the reserve of the weapon in hand.
-    let right_x = screen.right() - 22.0 * scale;
-    let money_y = bottom_y - 36.0 * scale;
-    if vis.money {
+    // 6. Bottom-right: money (`FUN_10043690`) and clip / reserve / weapon ammo icon (`FUN_10043a60`).
+    let right_margin = screen.right() - if screen.width() >= 640.0 { 16.0 } else { 12.0 };
+    let money_y = (screen.bottom() - num_h * 3.0).floor();
+    if vis.money && (hud.alive || extras.observer_mode == 0) {
+        let (money_col, delta_info) = if let Some(anim) = extras.anim
+            && anim.money_fade > 0.0
+        {
+            let t = 1.0 - (anim.money_fade / 5.0).clamp(0.0, 1.0);
+            let base_rgb = if anim.money_delta >= 0 { [0u8, 255, 0] } else { [255u8, 0, 0] };
+            let r = (f32::from(base_rgb[0]) + (255.0 - f32::from(base_rgb[0])) * t).round() as u8;
+            let g = (f32::from(base_rgb[1]) + (160.0 - f32::from(base_rgb[1])) * t).round() as u8;
+            let b = (f32::from(base_rgb[2]) * (1.0 - t)).round() as u8;
+            let a = ((anim.money_fade / 5.0) * 128.0 + 100.0).round().clamp(100.0, 255.0) as u8;
+            let col = hud_tinted_alpha(Color32::from_rgb(r, g, b), a);
+            let d = (anim.money_delta_fade > 0.0 && anim.money_delta != 0)
+                .then_some((anim.money_delta, ((anim.money_delta_fade / 2.5) * 255.0).clamp(0.0, 255.0) as u8));
+            (col, d)
+        } else {
+            (hud_tinted_alpha(HUD_AMBER, 100), None)
+        };
+        let dollar_x = right_margin - 20.0 * scale * 5.0 - 18.0 * scale;
         if let Some(sp) = sprites {
-            let num_w = sp.draw_number_right(&painter, state.money, right_x, money_y, scale, HUD_AMBER, 1);
-            let dollar_x = (right_x - num_w - 22.0 * scale).min(right_x - 110.0 * scale);
-            let _ = sp.draw_sprite(&painter, "dollar", Pos2::new(dollar_x, money_y), scale, HUD_AMBER);
+            sp.draw_number_right(&painter, state.money, right_margin, money_y, scale, money_col, 1);
+            let _ = sp.draw_sprite(&painter, "dollar", Pos2::new(dollar_x, money_y), scale, money_col);
         } else {
             painter.text(
-                Pos2::new(right_x, money_y),
+                Pos2::new(right_margin, money_y),
                 egui::Align2::RIGHT_TOP,
                 format!("$ {}", state.money),
                 FontId::monospace(22.0 * scale),
-                HUD_AMBER,
+                money_col,
             );
+        }
+        if let Some((delta, da)) = delta_info {
+            let delta_y = money_y - num_h * 1.5;
+            let d_rgb = if delta > 0 { Color32::from_rgba_unmultiplied(0, 255, 0, da) } else { Color32::from_rgba_unmultiplied(255, 40, 40, da) };
+            let txt = if delta > 0 { format!("+${}", delta) } else { format!("-${}", -delta) };
+            hud_paint_text(ctx, &painter, &mut font_ctx, egui::Align2::RIGHT_TOP, Pos2::new(right_margin, delta_y), &txt, 16.0 * scale, d_rgb);
         }
     }
 
     if vis.ammo
         && let Some(cur) = state.current_weapon
-        && cur.clip >= 0
     {
         let reserve = state
             .weapons
@@ -658,28 +869,46 @@ fn draw_cs16_hud_impl(
             .and_then(|w| state.ammo.get(&w.ammo1_type))
             .copied()
             .unwrap_or(0);
-        let ammo_col = if cur.clip == 0 { HUD_RED } else { HUD_AMBER };
-        if let Some(sp) = sprites {
-            let res_w = sp.draw_number_right(&painter, i32::from(reserve), right_x, bottom_y, scale, HUD_AMBER, 1);
-            let div_x = (right_x - res_w.max(64.0 * scale) - 12.0 * scale).round();
-            if sp
-                .draw_sprite(&painter, "divider", Pos2::new(div_x, bottom_y - 6.0 * scale), scale, HUD_AMBER)
-                .is_none()
-            {
-                painter.line_segment(
-                    [Pos2::new(div_x, bottom_y), Pos2::new(div_x, bottom_y + 26.0 * scale)],
-                    Stroke::new(2.0, HUD_AMBER),
+        let ammo_a = extras.anim.map_or(100, |a| hud_fade_alpha(a.ammo_fade));
+        let ammo_amber = hud_tinted_alpha(HUD_AMBER, ammo_a);
+        let clip_col = if cur.clip == 0 {
+            hud_tinted_alpha(HUD_RED, 255)
+        } else {
+            ammo_amber
+        };
+        let icon_x = right_margin - 24.0 * scale;
+        let has_icon = sprites
+            .and_then(|sp| sp.draw_ammo_icon(&painter, cur.weapon_id, Pos2::new(icon_x, bottom_y), scale, ammo_amber))
+            .is_some();
+        let num_right = if has_icon { icon_x - 6.0 * scale } else { right_margin };
+        if cur.clip >= 0 {
+            if let Some(sp) = sprites {
+                let res_w = sp.draw_number_right(&painter, i32::from(reserve), num_right, bottom_y, scale, ammo_amber, 1);
+                let div_x = (num_right - res_w.max(44.0 * scale) - 10.0 * scale).round();
+                if sp
+                    .draw_sprite(&painter, "divider", Pos2::new(div_x, bottom_y - 6.0 * scale), scale, HUD_AMBER)
+                    .is_none()
+                {
+                    painter.rect_filled(
+                        Rect::from_min_size(Pos2::new(div_x, bottom_y), Vec2::new((2.0 * scale).max(1.0), num_h)),
+                        0.0,
+                        HUD_AMBER,
+                    );
+                }
+                sp.draw_number_right(&painter, i32::from(cur.clip), div_x - 8.0 * scale, bottom_y, scale, clip_col, 1);
+            } else {
+                painter.text(
+                    Pos2::new(num_right, bottom_y),
+                    egui::Align2::RIGHT_TOP,
+                    format!("{} | {}", cur.clip, reserve),
+                    FontId::monospace(24.0 * scale),
+                    clip_col,
                 );
             }
-            sp.draw_number_right(&painter, i32::from(cur.clip), div_x - 10.0 * scale, bottom_y, scale, ammo_col, 1);
-        } else {
-            painter.text(
-                Pos2::new(right_x, bottom_y),
-                egui::Align2::RIGHT_TOP,
-                format!("{} | {}", cur.clip, reserve),
-                FontId::monospace(24.0 * scale),
-                ammo_col,
-            );
+        } else if reserve > 0
+            && let Some(sp) = sprites
+        {
+            sp.draw_number_right(&painter, i32::from(reserve), num_right, bottom_y, scale, ammo_amber, 1);
         }
     }
 
@@ -819,12 +1048,24 @@ fn draw_cs16_hud_impl(
     };
     let team_of = |slot: u8| -> Color32 { killfeed_team_color(state, slot) };
     let kf_fallback_sz = (12.5 * scale).clamp(12.0, 17.0);
-    for entry in hud.feed {
+    let shown_feed: Vec<_> = hud.feed.iter().rev().take(4).collect();
+    for entry in shown_feed.into_iter().rev() {
         let mut cursor_x = screen.right() - 16.0 * scale;
         let victim = name_of(entry.victim);
         let killer = name_of(entry.killer);
         let v_col = team_of(entry.victim);
         let k_col = team_of(entry.killer);
+        let is_tk = entry.killer != 0
+            && entry.killer != entry.victim
+            && matches!(
+                (state.players.get(&entry.killer), state.players.get(&entry.victim)),
+                (Some(kp), Some(vp)) if !kp.team.is_empty() && kp.team == vp.team
+            );
+        let spr_tint = if is_tk {
+            Color32::from_rgb(10, 240, 10)
+        } else {
+            Color32::from_rgb(255, 80, 0)
+        };
 
         let v_sz = hud_measure_text(ctx, &painter, &mut font_ctx, &victim, kf_fallback_sz);
         cursor_x -= v_sz.x;
@@ -846,13 +1087,13 @@ fn draw_cs16_hud_impl(
                 && let Some(hs_sz) = sp.sprite_size("d_headshot", scale)
             {
                 cursor_x -= hs_sz.x;
-                let _ = sp.draw_sprite(&painter, "d_headshot", Pos2::new(cursor_x, kf_y), scale, HUD_AMBER);
+                let _ = sp.draw_sprite(&painter, "d_headshot", Pos2::new(cursor_x, kf_y), scale, spr_tint);
                 cursor_x -= 4.0 * scale;
             }
             let d_spr = killfeed_sprite_name(&entry.weapon);
             if let Some(w_sz) = sp.sprite_size(&d_spr, scale) {
                 cursor_x -= w_sz.x;
-                let _ = sp.draw_sprite(&painter, &d_spr, Pos2::new(cursor_x, kf_y), scale, HUD_AMBER);
+                let _ = sp.draw_sprite(&painter, &d_spr, Pos2::new(cursor_x, kf_y), scale, spr_tint);
                 drew_icon = true;
             }
         }
@@ -872,7 +1113,7 @@ fn draw_cs16_hud_impl(
                 Pos2::new(cursor_x, kf_y),
                 &fallback,
                 kf_fallback_sz,
-                HUD_AMBER,
+                spr_tint,
             );
         }
         cursor_x -= 8.0 * scale;
@@ -917,7 +1158,9 @@ fn draw_cs16_hud_impl(
     }
 
     // 10b. Crosshair target status bar (`StatusText` / `StatusValue` + `hud_centerid`).
-    if let Some((team_rel, line)) = format_status_bar(state, hud.names, extras.loc) {
+    if hud.alive
+        && let Some((team_rel, line)) = format_status_bar(state, hud.names, extras.loc)
+    {
         let col = match team_rel {
             1 => TEAM_CT_COLOR,
             2 => TEAM_T_COLOR,
@@ -928,7 +1171,7 @@ fn draw_cs16_hud_impl(
             let pos = Pos2::new(center_x, screen.center().y + 34.0 * scale);
             hud_paint_text(ctx, &painter, &mut font_ctx, egui::Align2::CENTER_TOP, pos, &line, 14.5 * scale, col);
         } else {
-            let pos = Pos2::new(22.0 * scale, bottom_y - 34.0 * scale);
+            let pos = Pos2::new(16.0 * scale, bottom_y - 34.0 * scale);
             hud_paint_text(ctx, &painter, &mut font_ctx, egui::Align2::LEFT_BOTTOM, pos, &line, 14.5 * scale, col);
         }
     }
@@ -1016,20 +1259,37 @@ fn draw_cs16_hud_impl(
         ny += 16.0 * scale;
     }
     if extras.hud_saytext_internal {
-        let chat_col = Color32::from_rgb(extras.con_color[0], extras.con_color[1], extras.con_color[2]);
-        let mut cy = bottom_y - 46.0 * scale;
+        let normal_col = Color32::from_rgb(extras.con_color[0], extras.con_color[1], extras.con_color[2]);
+        let team_col = TEAM_CT_COLOR;
+        let green_col = Color32::from_rgb(64, 255, 64);
+        let mut cy = if !hud.alive || extras.observer_mode != 0 {
+            screen.bottom() - 60.0 * scale
+        } else {
+            screen.bottom() - (num_h * 2.75)
+        };
         for line in hud.chat.iter().rev().take(5) {
-            let x = 22.0 * scale;
-            hud_paint_text(
-                ctx,
-                &painter,
-                &mut font_ctx,
-                egui::Align2::LEFT_BOTTOM,
-                Pos2::new(x, cy),
-                line,
-                13.0 * scale,
-                chat_col,
-            );
+            let mut sx = 10.0 * scale;
+            let mut cur_col = normal_col;
+            for seg in parse_saytext_spans(line, normal_col, team_col, green_col) {
+                if seg.text.is_empty() {
+                    cur_col = seg.color;
+                    continue;
+                }
+                cur_col = seg.color;
+                hud_paint_text(
+                    ctx,
+                    &painter,
+                    &mut font_ctx,
+                    egui::Align2::LEFT_BOTTOM,
+                    Pos2::new(sx, cy),
+                    &seg.text,
+                    13.0 * scale,
+                    cur_col,
+                );
+                let sz = hud_measure_text(ctx, &painter, &mut font_ctx, &seg.text, 13.0 * scale);
+                sx += sz.x;
+            }
+            let _ = cur_col;
             cy -= 17.0 * scale;
         }
     }
@@ -1064,27 +1324,47 @@ fn draw_cs16_hud_impl(
         hud_paint_text(ctx, &painter, &mut font_ctx, egui::Align2::CENTER_CENTER, pos, &shown_text, 16.0 * scale, col);
     }
 
-    // 13. The spectator letterbox bars while dead and observing.
-    if !hud.alive && extras.observer_mode != 0 {
-        let bar_h = 54.0 * scale;
-        let top_bar = Rect::from_min_size(screen.min, Vec2::new(screen.width(), bar_h));
-        let bot_bar = Rect::from_min_size(
-            Pos2::new(screen.left(), screen.bottom() - bar_h),
-            Vec2::new(screen.width(), bar_h),
-        );
-        painter.rect_filled(top_bar, 0.0, Color32::from_black_alpha(225));
-        painter.rect_filled(bot_bar, 0.0, Color32::from_black_alpha(225));
-        hud_paint_text(
-            ctx,
-            &painter,
-            &mut font_ctx,
-            egui::Align2::CENTER_CENTER,
-            Pos2::new(center_x, bot_bar.top() + 27.0 * scale),
-            "Spectating",
-            15.0 * scale,
-            HUD_AMBER,
-        );
+    // Spectator bars are drawn exclusively by `SpectatorVguiUi` (`Spectator.res`).
+}
+
+struct SayTextSpan {
+    color: Color32,
+    text: String,
+}
+
+/// Split CS 1.6 `SayText` control codes (`\x01` normal, `\x03` team, `\x04` green) into colored spans.
+fn parse_saytext_spans(
+    line: &str,
+    normal_col: Color32,
+    team_col: Color32,
+    green_col: Color32,
+) -> Vec<SayTextSpan> {
+    let mut spans = Vec::new();
+    let mut cur_col = normal_col;
+    let mut buf = String::new();
+    for ch in line.chars() {
+        let next = match ch {
+            '\x01' => Some(normal_col),
+            '\x03' => Some(team_col),
+            '\x04' => Some(green_col),
+            _ => None,
+        };
+        if let Some(col) = next {
+            if !buf.is_empty() {
+                spans.push(SayTextSpan {
+                    color: cur_col,
+                    text: std::mem::take(&mut buf),
+                });
+            }
+            cur_col = col;
+        } else {
+            buf.push(ch);
+        }
     }
+    if !buf.is_empty() {
+        spans.push(SayTextSpan { color: cur_col, text: buf });
+    }
+    spans
 }
 
 fn hud_measure_text(
@@ -1229,12 +1509,13 @@ fn draw_radar_with_extras(
     extras: &HudExtrasContext<'_>,
     scale: f32,
 ) {
-    let radius = 58.0 * scale;
-    let center = Pos2::new(14.0 * scale + radius, 14.0 * scale + radius);
-    let rect = Rect::from_center_size(center, Vec2::splat(radius * 2.0));
+    let box_size = if scale < 0.75 { 64.0 } else { 128.0 };
+    let radius = box_size * 0.5;
+    let center = Pos2::new(radius, radius);
+    let rect = Rect::from_min_size(Pos2::ZERO, Vec2::splat(box_size));
 
     if extras.cl_radartype {
-        painter.circle_filled(center, radius, Color32::from_rgba_unmultiplied(10, 26, 14, 232));
+        painter.circle_filled(center, radius, Color32::from_rgba_unmultiplied(12, 16, 12, 232));
         if let Some(ov) = extras.overview {
             let uv = ov.spec.world_to_overview_uv([hud.eye.x, hud.eye.y]);
             let span = 0.14f32;
@@ -1244,7 +1525,7 @@ fn draw_radar_with_extras(
             );
             painter.image(ov.texture.id(), rect, uv_rect, Color32::from_rgba_unmultiplied(190, 225, 190, 150));
         }
-        painter.circle_stroke(center, radius, Stroke::new(1.5, Color32::from_rgb(95, 220, 95)));
+        painter.circle_stroke(center, radius - 0.5, Stroke::new(1.5, Color32::from_rgb(200, 200, 200)));
     } else if let Some(tex) = sprites.and_then(|s| s.radar_tex.as_ref()) {
         painter.image(
             tex.id(),
@@ -1253,8 +1534,8 @@ fn draw_radar_with_extras(
             Color32::from_rgba_unmultiplied(150, 255, 150, 175),
         );
     } else {
-        painter.circle_filled(center, radius, Color32::from_rgba_unmultiplied(12, 48, 16, 155));
-        painter.circle_stroke(center, radius, Stroke::new(1.2, Color32::from_rgba_unmultiplied(80, 210, 80, 180)));
+        painter.circle_filled(center, radius, Color32::from_rgba_unmultiplied(25, 75, 25, 155));
+        painter.circle_stroke(center, radius - 0.5, Stroke::new(1.2, Color32::from_rgba_unmultiplied(90, 215, 90, 195)));
     }
 
     let cone_col = Color32::from_rgba_unmultiplied(165, 255, 165, 120);
@@ -1265,7 +1546,7 @@ fn draw_radar_with_extras(
     let yaw = hud.yaw_deg.to_radians();
     let fwd = Vec3::new(yaw.cos(), yaw.sin(), 0.0);
     let right = Vec3::new(yaw.sin(), -yaw.cos(), 0.0);
-    let radar_range = 1900.0f32;
+    let radar_range = if box_size <= 64.0 { 1024.0 } else { 2048.0 };
     let blip_at = |pos: Vec3| -> Pos2 {
         let delta = pos - hud.eye;
         let mut v = Vec2::new(delta.dot(right) / radar_range, -delta.dot(fwd) / radar_range);
@@ -1275,17 +1556,43 @@ fn draw_radar_with_extras(
         center + v * radius
     };
 
-    for pos in hud.hud.radar.values() {
-        painter.rect_filled(
-            Rect::from_center_size(blip_at(*pos), Vec2::splat(4.0 * scale)),
-            0.0,
-            Color32::from_rgb(175, 255, 175),
-        );
+    let radio_blink = ((hud.time_sec / 0.15) as i32) % 2 == 0;
+    for (&slot, &pos) in &hud.hud.radar {
+        let p = blip_at(pos);
+        let dz = pos.z - hud.eye.z;
+        let is_radio = extras
+            .anim
+            .and_then(|a| a.radio_flashes.get(&slot))
+            .is_some_and(|exp| *exp > hud.now);
+        if is_radio && radio_blink {
+            let d = 3.0 * scale;
+            let rc = Color32::from_rgb(255, 220, 60);
+            painter.line_segment([p - Vec2::splat(d), p + Vec2::splat(d)], Stroke::new(1.2, rc));
+            painter.line_segment([Pos2::new(p.x - d, p.y + d), Pos2::new(p.x + d, p.y - d)], Stroke::new(1.2, rc));
+        } else if dz.abs() > 128.0 {
+            let c = Color32::from_rgb(175, 255, 175);
+            let s = (2.0 * scale).max(1.5);
+            if dz > 128.0 {
+                // Upward T / chevron
+                painter.rect_filled(Rect::from_center_size(p, Vec2::new(s * 2.0, s * 0.7)), 0.0, c);
+                painter.rect_filled(Rect::from_min_size(Pos2::new(p.x - s * 0.4, p.y), Vec2::new(s * 0.8, s * 1.8)), 0.0, c);
+            } else {
+                // Downward chevron
+                painter.rect_filled(Rect::from_center_size(Pos2::new(p.x, p.y + s), Vec2::new(s * 2.0, s * 0.7)), 0.0, c);
+                painter.rect_filled(Rect::from_min_size(Pos2::new(p.x - s * 0.4, p.y - s), Vec2::new(s * 0.8, s * 1.8)), 0.0, c);
+            }
+        } else {
+            painter.rect_filled(
+                Rect::from_center_size(p, Vec2::splat(3.5 * scale)),
+                0.0,
+                Color32::from_rgb(175, 255, 175),
+            );
+        }
     }
     for (flag, pos) in hud.hud.hostages.values() {
         let p = blip_at(*pos);
         if *flag == 0 {
-            if (hud.time_sec * 6.0).sin() > 0.0 {
+            if ((hud.time_sec / 0.15) as i32) % 2 == 0 {
                 let d = 3.0 * scale;
                 painter.line_segment([p - Vec2::splat(d), p + Vec2::splat(d)], Stroke::new(1.5, HUD_RED));
                 painter.line_segment(
@@ -1298,7 +1605,7 @@ fn draw_radar_with_extras(
         }
     }
     if let Some((pos, _planted)) = hud.hud.bomb
-        && (hud.time_sec * 4.5).sin() > 0.0
+        && ((hud.time_sec / 0.35) as i32) % 2 == 0
     {
         painter.rect_filled(
             Rect::from_center_size(blip_at(pos), Vec2::splat(5.0 * scale)),

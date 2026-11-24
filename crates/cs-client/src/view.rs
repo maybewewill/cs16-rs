@@ -45,7 +45,8 @@ use crate::render::scene::{
     EntRenderMode, ModelHandle, ModelRegistry, RenderEntity, SceneFrame, ViewBasis,
 };
 use crate::view_effects::{
-    BobParams, ViewModelLagState, calc_bob, calc_roll, calc_screen_shake, underwater_tint_and_fov,
+    BobParams, StairSmoothState, ViewModelLagState, calc_bob, calc_roll, calc_screen_shake,
+    underwater_tint_and_fov,
 };
 
 /// The first model index the shell hands to models the client loads by itself (shells, the
@@ -271,6 +272,7 @@ pub struct ViewBuilder {
     beam_sys: BeamSystem,
     pending_decals: Vec<DecalSpawn>,
     lag_state: ViewModelLagState,
+    stair_smooth: StairSmoothState,
     player_gaits: HashMap<u16, (f32, Vec3)>,
     vm_seq_cache: HashMap<String, Vec<CachedSeqMeta>>,
     last_vm_frame: f32,
@@ -318,6 +320,7 @@ impl ViewBuilder {
             beam_sys: BeamSystem::new(),
             pending_decals: Vec::new(),
             lag_state: ViewModelLagState::default(),
+            stair_smooth: StairSmoothState::default(),
             player_gaits: HashMap::new(),
             vm_seq_cache: HashMap::new(),
             last_vm_frame: 0.0,
@@ -362,6 +365,7 @@ impl ViewBuilder {
         self.pending_decals.clear();
         self.bsp = None;
         self.lag_state.reset();
+        self.stair_smooth.reset();
         self.player_gaits.clear();
         self.client_models.clear();
         self.anim = None;
@@ -495,6 +499,12 @@ impl ViewBuilder {
         if !eye.is_finite() {
             eye = Vec3::ZERO;
         }
+        let dt_view = inputs.frametime.clamp(0.0, 0.25) as f32;
+        eye.z += self.stair_smooth.offset(
+            eye.z,
+            prediction.predicted && prediction.onground >= 0 && alive,
+            dt_view,
+        );
         if !punch.is_finite() {
             punch = Vec3::ZERO;
         }

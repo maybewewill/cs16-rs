@@ -15,7 +15,7 @@ pub mod vgui_assets;
 pub mod vgui_theme;
 
 use cs_cvar::CVarRegistry;
-use egui::{Color32, FontId, Pos2, Stroke};
+use egui::{Color32, FontId, Pos2};
 
 use crate::ui::vgui_theme::VguiPalette;
 
@@ -31,39 +31,230 @@ pub struct FrameTelemetry<'a> {
     pub triangles: usize,
 }
 
-/// Draw the classic 4-bar Counter-Strike 1.6 crosshair in the center of the screen.
-pub fn draw_crosshair(ctx: &egui::Context, cvars: &CVarRegistry, dynamic_extra_gap: f32) {
+/// Live player/weapon inputs driving the authentic `FUN_10043ff0` (`CHudAmmo::DrawCrosshair`) dynamic crosshair.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CrosshairInputs {
+    pub weapon_id: u8,
+    pub weapon_flags: u32,
+    pub on_ground: bool,
+    pub ducking: bool,
+    pub speed_2d: f32,
+    pub shots_fired: i32,
+    pub night_vision: bool,
+    pub dynamic: bool,
+    pub hide_hud: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CrosshairGeometry {
+    pub gap: i32,
+    pub bar_len: i32,
+    pub alpha: u8,
+}
+
+/// Persistent per-client crosshair expansion/fade state matching GoldSrc `CHudAmmo::DrawCrosshair` (`FUN_10043ff0`).
+#[derive(Debug, Clone, Copy)]
+pub struct CrosshairState {
+    pub crosshair_dist: f32,
+    pub alpha: i32,
+    pub last_shots_fired: i32,
+}
+
+impl Default for CrosshairState {
+    fn default() -> Self {
+        Self {
+            crosshair_dist: 0.0,
+            alpha: 255,
+            last_shots_fired: 0,
+        }
+    }
+}
+
+impl CrosshairState {
+    /// Per-weapon `(start_distance, delta_distance)` from `client.dll` `FUN_10043ff0` (`param_2` in `1..=30`).
+    pub fn weapon_table(weapon_id: u8) -> (i32, i32) {
+        if !(1..=30).contains(&weapon_id) {
+            return (4, 3);
+        }
+        match weapon_id - 1 {
+            0 | 3 | 8 | 10 | 15 | 16 | 17 | 24 | 25 => (8, 3),
+            2 | 12 | 26 => (5, 3),
+            4 => (9, 4),
+            5 | 11 | 19 => (6, 3),
+            6 => (9, 3),
+            7 => (3, 3),
+            18 => (6, 2),
+            20 => (8, 6),
+            22 | 28 | 29 => (7, 3),
+            23 => (6, 4),
+            27 => (4, 4),
+            _ => (4, 3),
+        }
+    }
+
+    /// Compute gap, bar length, and alpha matching `client.dll` `FUN_10043ff0`.
+    pub fn compute_geometry(
+        &mut self,
+        inputs: &CrosshairInputs,
+        size_cvar: &str,
+        screen_w: i32,
+    ) -> CrosshairGeometry {
+        const ACC_CODE: [u8; 30] = [
+            0, 8, 8, 1, 1, 1, 2, 3,
+            8, 8, 0, 2, 1, 3, 4, 5,
+            6, 8, 2, 3, 1, 7, 2, 8,
+            1, 0, 3, 3, 1, 3,
+        ];
+        const SPD_CODE: [u8; 30] = [
+            0, 3, 3, 3, 3, 3, 3, 1,
+            3, 3, 0, 3, 3, 1, 1, 0,
+            0, 3, 3, 1, 3, 1, 3, 3,
+            3, 0, 1, 1, 3, 2,
+        ];
+        const SPD_THRESH: [i32; 4] = [0, 140, 170, 0];
+
+        let (mut distance, delta_distance) = Self::weapon_table(inputs.weapon_id);
+        let idx = inputs.weapon_id.saturating_sub(1) as usize;
+
+        if inputs.dynamic && (inputs.hide_hud & 1) == 0 && idx < 30 {
+            let code = ACC_CODE[idx];
+            if code != 1 && code != 8 {
+                let wf = inputs.weapon_flags;
+                let flags = match code {
+                    0 => 0x07,
+                    2 => 0x01,
+                    3 => 0x03,
+                    4 => (wf & 0x10) | 0x03,
+                    5 => ((wf & 0x01) << 3) | 0x07,
+                    6 => ((wf & 0x02) << 3) | 0x07,
+                    7 => ((wf & 0x04) << 1) | 0x03,
+                    _ => 0,
+                };
+                let speed_thresh = SPD_THRESH[SPD_CODE[idx] as usize];
+                if !inputs.on_ground && (flags & 0x01) != 0 {
+                    distance = (distance as f32 * 2.0) as i32;
+                } else if inputs.ducking && (flags & 0x04) != 0 {
+                    distance = (distance as f32 * 0.5) as i32;
+                } else if (inputs.speed_2d as i32) > speed_thresh && (flags & 0x02) != 0 {
+                    distance = (distance as f32 * 1.5) as i32;
+                }
+                if (flags & 0x08) != 0 {
+                    distance = (distance as f32 * 1.4) as i32;
+                }
+                if (flags & 0x10) != 0 {
+                    distance = (distance as f32 * 1.4) as i32;
+                }
+            }
+        }
+
+        if self.last_shots_fired < inputs.shots_fired {
+            self.alpha = (self.alpha - 40).max(120);
+            self.crosshair_dist = (self.crosshair_dist + delta_distance as f32).min(15.0);
+            self.last_shots_fired = inputs.shots_fired;
+        } else {
+            if inputs.shots_fired < self.last_shots_fired {
+                self.last_shots_fired = inputs.shots_fired;
+            }
+            self.alpha = (self.alpha + 2).min(255);
+            self.crosshair_dist -= self.crosshair_dist * 0.013 + 0.1;
+        }
+
+        let base_dist = distance as f32;
+        if self.crosshair_dist < base_dist {
+            self.crosshair_dist = base_dist;
+        }
+
+        let mut bar_len = 5 - (((self.crosshair_dist - base_dist) * -0.5) as i32);
+        let sw = screen_w.max(320);
+        let size_base = match size_cvar.trim().to_ascii_lowercase().as_str() {
+            "small" | "1" => 1024,
+            "medium" | "2" => 800,
+            "large" | "3" => 640,
+            _ => {
+                if sw <= 640 {
+                    1024
+                } else if sw < 1024 {
+                    800
+                } else {
+                    640
+                }
+            }
+        };
+
+        let gap_f = if sw != size_base {
+            bar_len = (bar_len * sw) / size_base;
+            (sw as f32 * self.crosshair_dist) / (size_base as f32)
+        } else {
+            self.crosshair_dist
+        };
+
+        CrosshairGeometry {
+            gap: (gap_f as i32).max(1),
+            bar_len: bar_len.max(1),
+            alpha: self.alpha.clamp(0, 255) as u8,
+        }
+    }
+}
+
+/// Draw the 1-to-1 `FUN_10043ff0` (`CHudAmmo::DrawCrosshair`) 4-bar dynamic crosshair.
+pub fn draw_crosshair_vgui(
+    ctx: &egui::Context,
+    cvars: &CVarRegistry,
+    state: &mut CrosshairState,
+    inputs: &CrosshairInputs,
+) {
     let screen = ctx.content_rect();
-    let center = screen.center();
+    let sw = screen.width().round() as i32;
+    let sh = screen.height().round() as i32;
+    let geom = state.compute_geometry(inputs, cvars.get_str("cl_crosshair_size"), sw);
 
-    let (r, g, b) = parse_rgb(cvars.get_str("cl_crosshair_color"));
-    let alpha = if cvars.get_bool("cl_crosshair_translucent") {
-        195
+    let color = if inputs.night_vision {
+        Color32::from_rgba_unmultiplied(250, 50, 50, 255)
     } else {
-        255
+        let (r, g, b) = parse_rgb(cvars.get_str("cl_crosshair_color"));
+        let a = if cvars.get_bool("cl_crosshair_translucent") {
+            ((geom.alpha as f32) * (195.0 / 255.0)).round().clamp(0.0, 255.0) as u8
+        } else {
+            geom.alpha
+        };
+        Color32::from_rgba_unmultiplied(r, g, b, a)
     };
-    let color = Color32::from_rgba_unmultiplied(r, g, b, alpha);
-
-    let (len, base_gap) = match cvars.get_str("cl_crosshair_size").to_ascii_lowercase().as_str() {
-        "small" => (6.0f32, 4.0f32),
-        "large" => (12.0f32, 6.0f32),
-        _ => (9.0f32, 5.0f32), // medium / auto
-    };
-    let gap = base_gap + dynamic_extra_gap.clamp(0.0, 22.0);
 
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Background,
         egui::Id::unique("cs16_crosshair"),
     ));
-    let stroke = Stroke::new(1.5, color);
-    let cx = center.x.round();
-    let cy = center.y.round();
+    let cx = (screen.left() + (sw / 2) as f32).floor();
+    let cy = (screen.top() + (sh / 2) as f32).floor();
+    let g = geom.gap as f32;
+    let l = geom.bar_len as f32;
 
-    // Top, Bottom, Left, Right segments
-    painter.line_segment([Pos2::new(cx, cy - gap - len), Pos2::new(cx, cy - gap)], stroke);
-    painter.line_segment([Pos2::new(cx, cy + gap), Pos2::new(cx, cy + gap + len)], stroke);
-    painter.line_segment([Pos2::new(cx - gap - len, cy), Pos2::new(cx - gap, cy)], stroke);
-    painter.line_segment([Pos2::new(cx + gap, cy), Pos2::new(cx + gap + len, cy)], stroke);
+    // 4 1px-thick filled rectangles matching `FUN_10043ff0`:
+    // Left:   (cx - gap - bar_len + 1, cy, bar_len, 1)
+    // Right:  (cx + gap,               cy, bar_len, 1)
+    // Top:    (cx, cy - gap - bar_len + 1, 1, bar_len)
+    // Bottom: (cx, cy + gap,               1, bar_len)
+    painter.rect_filled(egui::Rect::from_min_size(Pos2::new(cx - g - l + 1.0, cy), egui::vec2(l, 1.0)), 0.0, color);
+    painter.rect_filled(egui::Rect::from_min_size(Pos2::new(cx + g, cy), egui::vec2(l, 1.0)), 0.0, color);
+    painter.rect_filled(egui::Rect::from_min_size(Pos2::new(cx, cy - g - l + 1.0), egui::vec2(1.0, l)), 0.0, color);
+    painter.rect_filled(egui::Rect::from_min_size(Pos2::new(cx, cy + g), egui::vec2(1.0, l)), 0.0, color);
+}
+
+/// Draw the classic 4-bar Counter-Strike 1.6 crosshair in the center of the screen.
+pub fn draw_crosshair(ctx: &egui::Context, cvars: &CVarRegistry, dynamic_extra_gap: f32) {
+    let mut state = CrosshairState {
+        crosshair_dist: 4.0 + dynamic_extra_gap.clamp(0.0, 22.0),
+        alpha: 255,
+        last_shots_fired: 0,
+    };
+    let inputs = CrosshairInputs {
+        weapon_id: 16,
+        dynamic: dynamic_extra_gap > 0.0,
+        speed_2d: dynamic_extra_gap * 45.0,
+        on_ground: true,
+        ..CrosshairInputs::default()
+    };
+    draw_crosshair_vgui(ctx, cvars, &mut state, &inputs);
 }
 
 /// Draw classic CS 1.6 `net_graph 1` / `net_graph 3` telemetry in the bottom-right corner.
