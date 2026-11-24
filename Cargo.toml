@@ -17,6 +17,7 @@ members = [
     "crates/cs-server",
     "crates/cs-client",
     "crates/cs-web",
+    "crates/cs-mod-api",
     "xtask",
 ]
 resolver = "3"
@@ -30,10 +31,12 @@ rust-version = "1.100"
 [workspace.dependencies]
 bytemuck = { version = "1", features = ["derive"] }
 bzip2-rs = "0.1.2"
+crc32fast = "1"
 ctrlc = { version = "3.5.3", features = ["termination"] }
 egui = "0.37"
 egui-wgpu = "0.37"
 egui-winit = "0.37"
+flate2 = "1"
 glam = { version = "0.34", features = ["serde"] }
 image = { version = "0.25", default-features = false, features = ["tga", "png"] }
 pollster = "0.4"
@@ -60,6 +63,7 @@ cs-client = { path = "crates/cs-client" }
 cs-local = { path = "crates/cs-local" }
 cs-sim = { path = "crates/cs-sim" }
 cs-game = { path = "crates/cs-game" }
+cs-mod-api = { path = "crates/cs-mod-api" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

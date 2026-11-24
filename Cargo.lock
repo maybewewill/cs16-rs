@@ -609,6 +609,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cs-mod-api"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "flate2",
+ "serde",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "cs-platform"
 version = "0.1.0"
 dependencies = [
