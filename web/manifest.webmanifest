@@ -1,0 +1,9 @@
+{
+  "name": "Counter-Strike 1.6 (Rust Web)",
+  "short_name": "cs16-rs",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#2f342c",
+  "theme_color": "#4c5844",
+  "description": "Counter-Strike 1.6 Protocol 48 & offline bots running in WebAssembly + WebGPU/WebGL2"
+}

@@ -5,9 +5,11 @@ use xtask::parity;
 
 const USAGE: &str = "usage: cargo xtask parity [--dir <path>] [--min <pct>]\n       \
                      cargo xtask parity import-names <category> <file> [--dir <path>]\n       \
-                     cargo xtask golden <ip:port> <name>";
+                     cargo xtask golden <ip:port> <name>\n       \
+                     cargo xtask web-build [--out <dir>]";
 
 const DEFAULT_DIR: &str = "docs/parity";
+const DEFAULT_WEB_OUT: &str = "dist/web";
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -35,10 +37,91 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
+        Some("web-build") => match run_web_build(args) {
+            Ok(code) => code,
+            Err(msg) => {
+                eprintln!("error: {msg}");
+                ExitCode::from(2)
+            }
+        },
         _ => {
             eprintln!("{USAGE}");
             ExitCode::from(2)
         }
+    }
+}
+
+/// Stages `web/`, builds `cs-web` for `wasm32-unknown-unknown`, and emits JS bindings with `wasm-bindgen`.
+fn run_web_build(mut args: impl Iterator<Item = String>) -> Result<ExitCode, String> {
+    let mut out_dir = PathBuf::from(DEFAULT_WEB_OUT);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--out" => out_dir = args.next().ok_or("--out needs a value")?.into(),
+            other => return Err(format!("unknown argument `{other}`\n{USAGE}")),
+        }
+    }
+
+    let pkg_dir = out_dir.join("pkg");
+    std::fs::create_dir_all(&pkg_dir).map_err(|e| io_error(&pkg_dir, &e))?;
+
+    let static_files = [
+        "index.html",
+        "app.js",
+        "vfs_loader.js",
+        "transport.js",
+        "input.js",
+        "audio.js",
+        "sw.js",
+        "manifest.webmanifest",
+    ];
+    let web_src = Path::new("web");
+    for file in static_files {
+        let src = web_src.join(file);
+        let dst = out_dir.join(file);
+        std::fs::copy(&src, &dst).map_err(|e| io_error(&src, &e))?;
+    }
+
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let status = std::process::Command::new(cargo)
+        .args(["build", "--target", "wasm32-unknown-unknown", "-p", "cs-web"])
+        .status()
+        .map_err(|e| format!("cannot run cargo: {e}"))?;
+    if !status.success() {
+        return Ok(ExitCode::FAILURE);
+    }
+
+    let wasm_path = Path::new("target/wasm32-unknown-unknown/debug/cs-web.wasm");
+    if !wasm_path.exists() {
+        return Err(format!("expected built wasm binary missing: {}", wasm_path.display()));
+    }
+
+    let bindgen = std::process::Command::new("wasm-bindgen")
+        .arg("--target")
+        .arg("web")
+        .arg("--out-dir")
+        .arg(&pkg_dir)
+        .arg("--out-name")
+        .arg("cs_web")
+        .arg(wasm_path)
+        .status();
+
+    match bindgen {
+        Ok(st) if st.success() => {
+            println!("Web bundle written to {}", out_dir.display());
+            Ok(ExitCode::SUCCESS)
+        }
+        Ok(st) => Err(format!("wasm-bindgen exited with {st}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let raw_dst = pkg_dir.join("cs_web_raw.wasm");
+            std::fs::copy(wasm_path, &raw_dst).map_err(|err| io_error(&raw_dst, &err))?;
+            println!(
+                "Staged {} and raw {}; install wasm-bindgen-cli (`cargo install wasm-bindgen-cli`) and re-run `cargo xtask web-build` to emit pkg/cs_web.js",
+                out_dir.display(),
+                raw_dst.display()
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(e) => Err(format!("failed to invoke wasm-bindgen: {e}")),
     }
 }
 

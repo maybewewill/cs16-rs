@@ -16,6 +16,7 @@ members = [
     "crates/cs-game",
     "crates/cs-server",
     "crates/cs-client",
+    "crates/cs-web",
     "xtask",
 ]
 resolver = "3"

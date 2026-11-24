@@ -712,6 +712,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "cs-web"
+version = "0.1.0"
+dependencies = [
+ "cs-assets",
+ "cs-client",
+ "cs-clientcore",
+ "cs-cvar",
+ "cs-engine",
+ "cs-local",
+ "cs-platform",
+ "cs-pm",
+ "cs-proto48",
+ "cs-sim",
+ "cs-transport",
+ "cs-vfs",
+ "egui",
+ "glam",
+ "js-sys",
+ "tracing",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "wgpu",
+]
+
+[[package]]
 name = "ctrlc"
 version = "3.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
