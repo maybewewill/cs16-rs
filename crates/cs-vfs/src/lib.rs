@@ -111,21 +111,20 @@ impl<B: VfsBackend> VfsBackend for CachingBackend<B> {
         let bytes = self.inner.read_bytes(normalized_path)?;
         if bytes.len() <= self.max_bytes
             && let Ok(mut guard) = self.cache.write()
+            && !guard.entries.contains_key(normalized_path)
         {
-            if !guard.entries.contains_key(normalized_path) {
-                while guard.total_bytes + bytes.len() > self.max_bytes
-                    && let Some(evict) = guard.order.pop_front()
-                {
-                    if let Some(old) = guard.entries.remove(&evict) {
-                        guard.total_bytes = guard.total_bytes.saturating_sub(old.len());
-                    }
+            while guard.total_bytes + bytes.len() > self.max_bytes
+                && let Some(evict) = guard.order.pop_front()
+            {
+                if let Some(old) = guard.entries.remove(&evict) {
+                    guard.total_bytes = guard.total_bytes.saturating_sub(old.len());
                 }
-                guard.total_bytes += bytes.len();
-                guard.order.push_back(normalized_path.to_string());
-                guard
-                    .entries
-                    .insert(normalized_path.to_string(), bytes.clone());
             }
+            guard.total_bytes += bytes.len();
+            guard.order.push_back(normalized_path.to_string());
+            guard
+                .entries
+                .insert(normalized_path.to_string(), bytes.clone());
         }
         Ok(bytes)
     }

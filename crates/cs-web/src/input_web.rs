@@ -126,6 +126,7 @@ impl WebInputState {
         self.gamepad_mask = mask;
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn on_touch(
         &mut self,
         camera: &mut Camera,
