@@ -2,6 +2,7 @@
 //! `TrackerScheme.res`, `BackgroundLayout.txt`, `hud.txt`, Skybox TGA).
 
 pub mod bsp;
+pub mod gamma;
 pub mod materials;
 pub mod mdl;
 pub mod scheme;

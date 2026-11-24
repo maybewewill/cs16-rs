@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, warn};
 
+use crate::gamma::{GammaTables, build_lightmap_pixel, lightstyle_f32_to_scale};
 use crate::wad::{DecodedTexture, WadArchive, decode_miptex, fallback_checkerboard, read_cstr};
 
 pub const BSP_VERSION_GOLDSRC: i32 = 30;
@@ -218,10 +219,37 @@ pub struct FaceLightmapInfo {
     pub lightmap_offset: usize,
 }
 
+/// Dynamic point light passed to CPU `R_AddDynamicLights` (`ref/gl/gl_rsurf.c:569-663`,
+/// read 2026-11-24).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BspDlight {
+    pub origin: Vec3,
+    pub radius: f32,
+    pub minlight: f32,
+    pub color: [u8; 3],
+}
+
+/// Face lightmap metadata plus surface plane and lightmap-basis projection needed for CPU
+/// `R_AddDynamicLights` (`ref/gl/gl_rsurf.c:569-663`, read 2026-11-24).
+#[derive(Debug, Clone, Copy)]
+pub struct FaceDlightInfo {
+    pub rect: FaceLightmapInfo,
+    pub model_origin: Vec3,
+    pub plane_normal: Vec3,
+    pub plane_dist: f32,
+    pub s_vec: Vec3,
+    pub s_shift: f32,
+    pub t_vec: Vec3,
+    pub t_shift: f32,
+    pub lm_min_s: f32,
+    pub lm_min_t: f32,
+}
+
 impl LightmapAtlas {
     /// Recomputes atlas pixels for every face whose active lightstyle multipliers changed between
-    /// `prev_values` and `style_values`. Returns dirty `(x, y, width, height)` rectangles
-    /// (including the 1-pixel clamp border) for partial GPU `write_texture` uploads.
+    /// `prev_values` and `style_values`, using GoldSrc `R_BuildLightMap` (`ref/gl/gl_rsurf.c:725-822`,
+    /// read 2026-11-24). Returns dirty `(x, y, width, height)` rectangles (including the 1-pixel
+    /// clamp border) for partial GPU `write_texture` uploads.
     pub fn rebuild_for_styles(
         &mut self,
         lighting: &[u8],
@@ -229,49 +257,232 @@ impl LightmapAtlas {
         style_values: &[f32; 64],
         prev_values: &[f32; 64],
     ) -> Vec<(u32, u32, u32, u32)> {
+        let tables = GammaTables::default();
+        self.rebuild_for_styles_goldsrc(lighting, rects, style_values, prev_values, &tables, false, false)
+    }
+
+    /// Recomputes dirty lightmap atlas faces using GoldSrc `R_BuildLightMap` and caller-supplied
+    /// [`GammaTables`] / `gl_overbright`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rebuild_for_styles_goldsrc(
+        &mut self,
+        lighting: &[u8],
+        rects: &[FaceLightmapInfo],
+        style_values: &[f32; 64],
+        prev_values: &[f32; 64],
+        tables: &GammaTables,
+        gl_overbright: bool,
+        force_all: bool,
+    ) -> Vec<(u32, u32, u32, u32)> {
+        let lightscale = tables.lightscale(gl_overbright);
         let mut dirty = Vec::new();
         for r in rects {
             let ns = usize::from(r.num_styles.min(4));
-            let changed = r.styles[..ns].iter().any(|&s| {
-                let idx = usize::from(s);
-                idx < 64 && (style_values[idx] - prev_values[idx]).abs() > 1e-4
-            });
+            let changed = force_all
+                || r.styles[..ns].iter().any(|&s| {
+                    let idx = usize::from(s);
+                    idx < 64 && (style_values[idx] - prev_values[idx]).abs() > 1e-4
+                });
             if !changed || r.width == 0 || r.height == 0 {
                 continue;
             }
             let page_bytes = (r.width as usize) * (r.height as usize) * 3;
-            let pw = r.width + 2;
-            let ph = r.height + 2;
-            let ox = r.atlas_x.saturating_sub(1);
-            let oy = r.atlas_y.saturating_sub(1);
-            for py in 0..ph {
-                let sy = py.saturating_sub(1).min(r.height - 1);
-                for px in 0..pw {
-                    let sx = px.saturating_sub(1).min(r.width - 1);
-                    let texel_off = ((sy * r.width + sx) * 3) as usize;
-                    let mut sum = [0.0f32; 3];
-                    for page in 0..ns {
-                        let style_id = usize::from(r.styles[page]);
-                        let mul = if style_id < 64 { style_values[style_id] } else { 1.0 };
-                        let src = r.lightmap_offset + page * page_bytes + texel_off;
-                        if src + 2 < lighting.len() {
-                            sum[0] += f32::from(lighting[src]) * mul;
-                            sum[1] += f32::from(lighting[src + 1]) * mul;
-                            sum[2] += f32::from(lighting[src + 2]) * mul;
-                        }
+            let smax = r.width as usize;
+            let tmax = r.height as usize;
+            let size = smax * tmax;
+            let mut blocklights = vec![0u32; size * 3];
+            for page in 0..ns {
+                let style_id = usize::from(r.styles[page]);
+                let scale = lightstyle_f32_to_scale(
+                    style_values.get(style_id).copied().unwrap_or(1.0),
+                );
+                let base = r.lightmap_offset + page * page_bytes;
+                for i in 0..size {
+                    let src = base + i * 3;
+                    if src + 2 >= lighting.len() {
+                        break;
                     }
-                    let dst = (((oy + py) * self.width + (ox + px)) * 4) as usize;
-                    if dst + 3 < self.rgba.len() {
-                        self.rgba[dst] = sum[0].round().clamp(0.0, 255.0) as u8;
-                        self.rgba[dst + 1] = sum[1].round().clamp(0.0, 255.0) as u8;
-                        self.rgba[dst + 2] = sum[2].round().clamp(0.0, 255.0) as u8;
-                        self.rgba[dst + 3] = 255;
+                    blocklights[i * 3] += u32::from(lighting[src]) * scale;
+                    blocklights[i * 3 + 1] += u32::from(lighting[src + 1]) * scale;
+                    blocklights[i * 3 + 2] += u32::from(lighting[src + 2]) * scale;
+                }
+            }
+            if let Some(rect) = self.write_face_blocklights(r, &blocklights, lightscale, tables) {
+                dirty.push(rect);
+            }
+        }
+        dirty
+    }
+
+    /// Recomputes lightmap atlas regions affected by style changes, gamma/overbright changes,
+    /// or CPU dynamic lights (`R_BuildLightMap` + `R_AddDynamicLights`, `ref/gl/gl_rsurf.c:569-822`,
+    /// read 2026-11-24).
+    #[allow(clippy::too_many_arguments)]
+    pub fn rebuild_with_dlights(
+        &mut self,
+        lighting: &[u8],
+        faces: &[FaceDlightInfo],
+        style_values: &[f32; 64],
+        prev_values: &[f32; 64],
+        dlights: &[BspDlight],
+        prev_dlight_faces: &mut Vec<bool>,
+        tables: &GammaTables,
+        gl_overbright: bool,
+        force_all: bool,
+    ) -> Vec<(u32, u32, u32, u32)> {
+        if prev_dlight_faces.len() != faces.len() {
+            prev_dlight_faces.resize(faces.len(), false);
+        }
+        let lightscale = tables.lightscale(gl_overbright);
+        let mut dirty = Vec::new();
+        let mut blocklights = Vec::new();
+
+        for (i, face) in faces.iter().enumerate() {
+            let r = &face.rect;
+            if r.width == 0 || r.height == 0 {
+                continue;
+            }
+            let ns = usize::from(r.num_styles.min(4));
+            let style_changed = force_all
+                || r.styles[..ns].iter().any(|&s| {
+                    let idx = usize::from(s);
+                    idx < 64 && (style_values[idx] - prev_values[idx]).abs() > 1e-4
+                });
+
+            let mut dlight_hits = false;
+            if !dlights.is_empty() {
+                for dl in dlights {
+                    let origin_l = dl.origin - face.model_origin;
+                    let dist = origin_l.dot(face.plane_normal) - face.plane_dist;
+                    let rad = dl.radius - dist.abs();
+                    if rad >= dl.minlight {
+                        dlight_hits = true;
+                        break;
                     }
                 }
             }
-            dirty.push((ox, oy, pw, ph));
+
+            let was_lit = prev_dlight_faces[i];
+            if !style_changed && !dlight_hits && !was_lit {
+                continue;
+            }
+            prev_dlight_faces[i] = dlight_hits;
+
+            let smax = r.width as usize;
+            let tmax = r.height as usize;
+            let size = smax * tmax;
+            blocklights.clear();
+            blocklights.resize(size * 3, 0);
+
+            let page_bytes = size * 3;
+            for page in 0..ns {
+                let style_id = usize::from(r.styles[page]);
+                let scale = lightstyle_f32_to_scale(
+                    style_values.get(style_id).copied().unwrap_or(1.0),
+                );
+                let base = r.lightmap_offset + page * page_bytes;
+                for lx in 0..size {
+                    let src = base + lx * 3;
+                    if src + 2 >= lighting.len() {
+                        break;
+                    }
+                    blocklights[lx * 3] += u32::from(lighting[src]) * scale;
+                    blocklights[lx * 3 + 1] += u32::from(lighting[src + 1]) * scale;
+                    blocklights[lx * 3 + 2] += u32::from(lighting[src + 2]) * scale;
+                }
+            }
+
+            if dlight_hits {
+                add_dynamic_lights_to_blocklights(face, dlights, smax, tmax, &mut blocklights);
+            }
+
+            if let Some(rect) = self.write_face_blocklights(r, &blocklights, lightscale, tables) {
+                dirty.push(rect);
+            }
         }
         dirty
+    }
+
+    fn write_face_blocklights(
+        &mut self,
+        r: &FaceLightmapInfo,
+        blocklights: &[u32],
+        lightscale: u32,
+        tables: &GammaTables,
+    ) -> Option<(u32, u32, u32, u32)> {
+        if r.width == 0 || r.height == 0 {
+            return None;
+        }
+        let pw = r.width + 2;
+        let ph = r.height + 2;
+        let ox = r.atlas_x.saturating_sub(1);
+        let oy = r.atlas_y.saturating_sub(1);
+        for py in 0..ph {
+            let sy = py.saturating_sub(1).min(r.height - 1);
+            for px in 0..pw {
+                let sx = px.saturating_sub(1).min(r.width - 1);
+                let li = ((sy * r.width + sx) * 3) as usize;
+                let bl = [blocklights[li], blocklights[li + 1], blocklights[li + 2]];
+                let rgba = build_lightmap_pixel(bl, lightscale, tables);
+                let dst = (((oy + py) * self.width + (ox + px)) * 4) as usize;
+                if dst + 3 < self.rgba.len() {
+                    self.rgba[dst..dst + 4].copy_from_slice(&rgba);
+                }
+            }
+        }
+        Some((ox, oy, pw, ph))
+    }
+}
+
+fn add_dynamic_lights_to_blocklights(
+    face: &FaceDlightInfo,
+    dlights: &[BspDlight],
+    smax: usize,
+    tmax: usize,
+    blocklights: &mut [u32],
+) {
+    const SAMPLE_SIZE: f32 = 16.0;
+    for dl in dlights {
+        let origin_l = dl.origin - face.model_origin;
+        let dist = origin_l.dot(face.plane_normal) - face.plane_dist;
+        let rad = dl.radius - dist.abs();
+        if rad < dl.minlight {
+            continue;
+        }
+        let minlight = rad - dl.minlight;
+        let impact = origin_l - face.plane_normal * dist;
+        let sl = impact.dot(face.s_vec) + face.s_shift - face.lm_min_s;
+        let tl = impact.dot(face.t_vec) + face.t_shift - face.lm_min_t;
+
+        let half = (minlight + 1.0) / SAMPLE_SIZE;
+        let s0 = ((sl / SAMPLE_SIZE - half) as i32).max(0) as usize;
+        let s1 = ((sl / SAMPLE_SIZE + half) as i32).min(smax as i32 - 1);
+        let t0 = ((tl / SAMPLE_SIZE - half) as i32).max(0) as usize;
+        let t1 = ((tl / SAMPLE_SIZE + half) as i32).min(tmax as i32 - 1);
+        if s1 < s0 as i32 || t1 < t0 as i32 {
+            continue;
+        }
+
+        for t in t0..=(t1 as usize) {
+            let td = ((tl - SAMPLE_SIZE * t as f32) as i32).abs();
+            for s in s0..=(s1 as usize) {
+                let sd = ((sl - SAMPLE_SIZE * s as f32) as i32).abs();
+                let oct_dist = if sd > td {
+                    (sd + (td >> 1)) as f32
+                } else {
+                    (td + (sd >> 1)) as f32
+                };
+                if oct_dist < minlight {
+                    let contrib = ((rad - oct_dist) * 256.0) as i32;
+                    if contrib > 0 {
+                        let base = (s + t * smax) * 3;
+                        blocklights[base] += ((contrib as u32) * u32::from(dl.color[0])) / 256;
+                        blocklights[base + 1] += ((contrib as u32) * u32::from(dl.color[1])) / 256;
+                        blocklights[base + 2] += ((contrib as u32) * u32::from(dl.color[2])) / 256;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -337,6 +548,74 @@ impl TextureAnimTable {
         };
         let step = (time_sec.max(0.0) * 5.0).floor() as usize;
         chain[step % chain.len()]
+    }
+}
+
+const MOD_FRAMES: usize = 20;
+
+/// GoldSrc `-0..-9` static random-tiling texture lookup (`ref/common/ref_context.c:46-57`
+/// `GL_InitRandomTable` and `ref/gl/gl_rsurf.c:532-538` `R_TextureAnimation`, read 2026-11-24).
+struct RandomTileTable {
+    rtable: [[u16; MOD_FRAMES]; MOD_FRAMES],
+    variants: Vec<Vec<usize>>,
+}
+
+impl RandomTileTable {
+    fn from_textures(textures: &[DecodedTexture]) -> Self {
+        // assumption: deterministic LCG matching GoldSrc `GL_InitRandomTable` uniform `[0, 0x7FFF]`
+        // distribution (`ref/common/ref_context.c:46-57`, read 2026-11-24).
+        let mut state = 0x1234_5678u32;
+        let mut rtable = [[0u16; MOD_FRAMES]; MOD_FRAMES];
+        for row in &mut rtable {
+            for slot in row {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *slot = ((state >> 16) & 0x7FFF) as u16;
+            }
+        }
+
+        let mut variants = vec![Vec::new(); textures.len()];
+        let mut groups: HashMap<String, Vec<(u8, usize)>> = HashMap::new();
+        for (idx, tex) in textures.iter().enumerate() {
+            let lower = tex.name.to_ascii_lowercase();
+            let bytes = lower.as_bytes();
+            if bytes.len() >= 3 && bytes[0] == b'-' && bytes[1].is_ascii_digit() {
+                groups
+                    .entry(lower[2..].to_string())
+                    .or_default()
+                    .push((bytes[1], idx));
+            }
+        }
+        for (_, mut list) in groups {
+            list.sort_by_key(|&(digit, _)| digit);
+            let ordered: Vec<usize> = list.into_iter().map(|(_, idx)| idx).collect();
+            for &idx in &ordered {
+                variants[idx] = ordered.clone();
+            }
+        }
+        Self { rtable, variants }
+    }
+
+    fn resolve(
+        &self,
+        tex_idx: usize,
+        textures: &[DecodedTexture],
+        ext_min_s: f32,
+        ext_min_t: f32,
+    ) -> usize {
+        let Some(chain) = self.variants.get(tex_idx) else {
+            return tex_idx;
+        };
+        if chain.len() <= 1 {
+            return tex_idx;
+        }
+        let tex = &textures[tex_idx];
+        let w = i64::from(tex.width.max(1));
+        let h = i64::from(tex.height.max(1));
+        let mins0 = (ext_min_s * 16.0) as i64;
+        let mins1 = (ext_min_t * 16.0) as i64;
+        let tx = ((mins0 + (w << 16)) / w).rem_euclid(MOD_FRAMES as i64) as usize;
+        let ty = ((mins1 + (h << 16)) / h).rem_euclid(MOD_FRAMES as i64) as usize;
+        chain[usize::from(self.rtable[tx][ty]) % chain.len()]
     }
 }
 
@@ -618,12 +897,24 @@ impl BspMap {
         visible
     }
 
-    /// Approximate GoldSrc `R_LightPoint(point)` by sampling the lightmap of the floor face
-    /// below `point`, returning RGB in `[0.0, 2.0]` (matching GoldSrc overbright scale).
+    /// GoldSrc `R_LightPoint(point)` via vertical raycast into BSP faces (`ref/common/ref_light.c:222-440`,
+    /// read 2026-11-24). Returns RGB in `[0.0, 1.0]`.
     pub fn sample_light_point(&self, point: Vec3) -> Vec3 {
+        let styles = [1.0f32; 64];
+        if let Some(world) = self.models.first()
+            && let Some(rgb) = self.recursive_light_point(
+                world.head_nodes[0],
+                point,
+                point - Vec3::new(0.0, 0.0, 2048.0),
+                &styles,
+                0,
+            )
+        {
+            return rgb;
+        }
         let leaf_idx = self.find_leaf(point - Vec3::new(0.0, 0.0, 32.0));
         let Some(leaf) = self.leafs.get(leaf_idx) else {
-            return Vec3::splat(0.85);
+            return Vec3::ONE;
         };
         let first = leaf.first_mark_surface as usize;
         let count = leaf.num_mark_surfaces as usize;
@@ -652,15 +943,16 @@ impl BspMap {
             }
             let off = face.lightmap_offset as usize;
             if off + 2 < self.lighting.len() {
-                let r = (self.lighting[off] as f32 / 255.0) * 2.0;
-                let g = (self.lighting[off + 1] as f32 / 255.0) * 2.0;
-                let b = (self.lighting[off + 2] as f32 / 255.0) * 2.0;
-                best_rgb = Some(Vec3::new(r, g, b).clamp(Vec3::splat(0.18), Vec3::splat(1.6)));
+                let scale = lightstyle_f32_to_scale(1.0);
+                let r = ((u32::from(self.lighting[off]) * scale) >> 8).min(255) as f32 / 255.0;
+                let g = ((u32::from(self.lighting[off + 1]) * scale) >> 8).min(255) as f32 / 255.0;
+                let b = ((u32::from(self.lighting[off + 2]) * scale) >> 8).min(255) as f32 / 255.0;
+                best_rgb = Some(Vec3::new(r, g, b));
                 best_up = normal.z;
             }
         }
 
-        best_rgb.unwrap_or(Vec3::splat(0.85))
+        best_rgb.unwrap_or(Vec3::ONE)
     }
 
     /// Return the texture name of the floor surface in the leaf below `point` (for footstep materials).
@@ -770,6 +1062,92 @@ impl BspMap {
         out
     }
 
+    /// Reconstruct per-face lightmap rectangles alongside plane and LM-basis projection needed for
+    /// CPU `R_AddDynamicLights` (`ref/gl/gl_rsurf.c:569-663`, read 2026-11-24).
+    pub fn build_face_dlight_infos(&self) -> Vec<FaceDlightInfo> {
+        let draw_models = collect_brush_draw_models(&self.entities, &self.models);
+        let mut packer = ShelfPacker::new(LIGHTMAP_ATLAS_SIZE, LIGHTMAP_ATLAS_SIZE);
+        let _ = packer.alloc_rect(2, 2);
+        let mut out = Vec::new();
+        for brush in &draw_models {
+            let model = &self.models[brush.model_index];
+            let model_origin = brush.origin + model.origin;
+            let first = model.first_face.max(0) as usize;
+            let count = model.num_faces.max(0) as usize;
+            let end = first.saturating_add(count).min(self.faces.len());
+            for face_index in first..end {
+                let face = &self.faces[face_index];
+                let Some(texinfo) = self.texinfos.get(face.texinfo as usize) else {
+                    continue;
+                };
+                if texinfo.miptex < 0 || (texinfo.miptex as usize) >= self.textures.len() {
+                    continue;
+                }
+                let tex = &self.textures[texinfo.miptex as usize];
+                if is_sky_texture(&tex.name) || is_tool_texture(&tex.name) {
+                    continue;
+                }
+                let Some((_poly, _st, ext_min_s, ext_min_t, lm_w, lm_h)) = face_extents_and_st(
+                    face,
+                    texinfo,
+                    &self.vertices_raw,
+                    &self.edges,
+                    &self.surf_edges,
+                ) else {
+                    continue;
+                };
+                let Some(plane) = self.planes.get(face.plane as usize) else {
+                    continue;
+                };
+                let is_water = is_water_texture(&tex.name);
+                let has_lightmap = !is_water
+                    && face.lightmap_offset >= 0
+                    && face.styles[0] != 255
+                    && (texinfo.flags & 1) == 0;
+                if !has_lightmap {
+                    continue;
+                }
+                let lm_off = face.lightmap_offset as usize;
+                let page_bytes = (lm_w as usize) * (lm_h as usize) * 3;
+                if lm_off.saturating_add(page_bytes) > self.lighting.len() {
+                    continue;
+                }
+                let Some((ox, oy)) = packer.alloc_rect(lm_w, lm_h) else {
+                    continue;
+                };
+                let mut num_styles = 0u8;
+                for (page, &s) in face.styles.iter().enumerate() {
+                    if s == 255 || lm_off + (page + 1) * page_bytes > self.lighting.len() {
+                        break;
+                    }
+                    num_styles += 1;
+                }
+                out.push(FaceDlightInfo {
+                    rect: FaceLightmapInfo {
+                        face_index,
+                        atlas_x: ox + 1,
+                        atlas_y: oy + 1,
+                        width: lm_w,
+                        height: lm_h,
+                        styles: face.styles,
+                        num_styles: num_styles.max(1),
+                        lightmap_offset: lm_off,
+                    },
+                    model_origin,
+                    plane_normal: plane.normal,
+                    plane_dist: plane.dist,
+                    s_vec: texinfo.s_vec,
+                    s_shift: texinfo.s_shift,
+                    t_vec: texinfo.t_vec,
+                    t_shift: texinfo.t_shift,
+                    lm_min_s: ext_min_s * 16.0,
+                    lm_min_t: ext_min_t * 16.0,
+                });
+            }
+        }
+        out
+    }
+
     pub fn build_texture_anim_table(&self) -> TextureAnimTable {
         TextureAnimTable::from_textures(&self.textures)
     }
@@ -827,6 +1205,7 @@ impl BspMap {
         }
         let atlas_f = LIGHTMAP_ATLAS_SIZE as f32;
         let neutral_uv = [2.0 / atlas_f, 2.0 / atlas_f];
+        let random_tiles = RandomTileTable::from_textures(&self.textures);
         let mut verts = Vec::new();
         let mut indices = Vec::new();
 
@@ -841,9 +1220,10 @@ impl BspMap {
             if texinfo.miptex < 0 || (texinfo.miptex as usize) >= self.textures.len() {
                 continue;
             }
-            let tex_idx = texinfo.miptex as usize;
-            let tex = &self.textures[tex_idx];
-            if is_sky_texture(&tex.name) || is_tool_texture(&tex.name) {
+            let base_tex_idx = texinfo.miptex as usize;
+            if is_sky_texture(&self.textures[base_tex_idx].name)
+                || is_tool_texture(&self.textures[base_tex_idx].name)
+            {
                 continue;
             }
             let Some((poly_verts, st_coords, ext_min_s, ext_min_t, _lm_w, _lm_h)) =
@@ -851,6 +1231,8 @@ impl BspMap {
             else {
                 continue;
             };
+            let tex_idx = random_tiles.resolve(base_tex_idx, &self.textures, ext_min_s, ext_min_t);
+            let tex = &self.textures[tex_idx];
             let Some(plane) = self.planes.get(face.plane as usize) else {
                 continue;
             };
@@ -1032,7 +1414,8 @@ impl BspMap {
             let lm_off = face.lightmap_offset as usize;
             let page_bytes = (lm_w as usize) * (lm_h as usize) * 3;
             let texel = (ty * lm_w as usize + tx) * 3;
-            let mut rgb = Vec3::ZERO;
+            let mut accum = [0u32; 3];
+            let mut has_sample = false;
             for (page, &style) in face.styles.iter().enumerate() {
                 if style == 255 {
                     break;
@@ -1042,13 +1425,20 @@ impl BspMap {
                     break;
                 }
                 let mul = style_values.get(usize::from(style)).copied().unwrap_or(1.0);
-                rgb += Vec3::new(
-                    f32::from(self.lighting[src]) / 255.0 * 2.0,
-                    f32::from(self.lighting[src + 1]) / 255.0 * 2.0,
-                    f32::from(self.lighting[src + 2]) / 255.0 * 2.0,
-                ) * mul;
+                let scale = lightstyle_f32_to_scale(mul);
+                accum[0] += u32::from(self.lighting[src]) * scale;
+                accum[1] += u32::from(self.lighting[src + 1]) * scale;
+                accum[2] += u32::from(self.lighting[src + 2]) * scale;
+                has_sample = true;
             }
-            return Some(rgb.clamp(Vec3::splat(0.12), Vec3::splat(1.8)));
+            if !has_sample {
+                continue;
+            }
+            return Some(Vec3::new(
+                (accum[0] >> 8).min(255) as f32 / 255.0,
+                (accum[1] >> 8).min(255) as f32 / 255.0,
+                (accum[2] >> 8).min(255) as f32 / 255.0,
+            ));
         }
 
         self.recursive_light_point(
@@ -1293,15 +1683,7 @@ fn is_tool_texture(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     matches!(
         lower.as_str(),
-        "sky"
-            | "aaatrigger"
-            | "clip"
-            | "origin"
-            | "hint"
-            | "skip"
-            | "null"
-            | "bevel"
-            | "black"
+        "sky" | "aaatrigger" | "clip" | "origin" | "hint" | "skip" | "null" | "bevel"
     )
 }
 
@@ -1324,8 +1706,7 @@ struct ShelfPacker {
 
 impl ShelfPacker {
     fn new(width: u32, height: u32) -> Self {
-        // Initialize lightmap atlas with neutral mid-bright (128,128,128 -> x2 overbright = 1.0)
-        let mut rgba = vec![128u8; (width * height * 4) as usize];
+        let mut rgba = vec![255u8; (width * height * 4) as usize];
         for px in rgba.as_chunks_mut::<4>().0 {
             px[3] = 255;
         }
@@ -1535,12 +1916,15 @@ fn build_render_geometry(
     textures: &[DecodedTexture],
 ) -> (LightmapAtlas, Vec<BspVertex>, Vec<u32>, Vec<RenderBatch>) {
     let draw_models = collect_brush_draw_models(entities, models);
+    let random_tiles = RandomTileTable::from_textures(textures);
+    let default_tables = GammaTables::default();
+    let default_lightscale = default_tables.lightscale(false);
+    let default_style_scale = lightstyle_f32_to_scale(1.0);
 
     let mut packer = ShelfPacker::new(LIGHTMAP_ATLAS_SIZE, LIGHTMAP_ATLAS_SIZE);
     let mut packed_faces = 0usize;
 
-    // Reserve a tiny 2x2 white-neutral lightmap at (0,0) for unlit faces (water/fullbright)
-    let neutral_rgb = [128u8; 2 * 2 * 3];
+    let neutral_rgb = [255u8; 2 * 2 * 3];
     let neutral_slot = packer.pack_rgb(2, 2, &neutral_rgb).unwrap_or((1, 1));
     let neutral_uv = [
         (neutral_slot.0 as f32 + 1.0) / LIGHTMAP_ATLAS_SIZE as f32,
@@ -1565,9 +1949,10 @@ fn build_render_geometry(
             if texinfo.miptex < 0 || (texinfo.miptex as usize) >= textures.len() {
                 continue;
             }
-            let tex_idx = texinfo.miptex as usize;
-            let tex = &textures[tex_idx];
-            if is_sky_texture(&tex.name) || is_tool_texture(&tex.name) {
+            let base_tex_idx = texinfo.miptex as usize;
+            if is_sky_texture(&textures[base_tex_idx].name)
+                || is_tool_texture(&textures[base_tex_idx].name)
+            {
                 continue;
             }
 
@@ -1576,6 +1961,8 @@ fn build_render_geometry(
             else {
                 continue;
             };
+            let tex_idx = random_tiles.resolve(base_tex_idx, textures, ext_min_s, ext_min_t);
+            let tex = &textures[tex_idx];
 
             let Some(plane) = planes.get(face.plane as usize) else {
                 continue;
@@ -1595,9 +1982,37 @@ fn build_render_geometry(
 
             let packed_slot = if has_lightmap {
                 let lm_off = face.lightmap_offset as usize;
-                let byte_len = (lm_w as usize) * (lm_h as usize) * 3;
+                let luxel_count = (lm_w as usize) * (lm_h as usize);
+                let byte_len = luxel_count * 3;
                 if lm_off.saturating_add(byte_len) <= lighting.len() {
-                    let slot = packer.pack_rgb(lm_w, lm_h, &lighting[lm_off..lm_off + byte_len]);
+                    let mut blocklights = vec![0u32; luxel_count * 3];
+                    for (page, &style) in face.styles.iter().enumerate() {
+                        if style == 255 {
+                            break;
+                        }
+                        let page_off = lm_off + page * byte_len;
+                        if page_off + byte_len > lighting.len() {
+                            break;
+                        }
+                        for i in 0..luxel_count {
+                            let src = page_off + i * 3;
+                            blocklights[i * 3] += u32::from(lighting[src]) * default_style_scale;
+                            blocklights[i * 3 + 1] +=
+                                u32::from(lighting[src + 1]) * default_style_scale;
+                            blocklights[i * 3 + 2] +=
+                                u32::from(lighting[src + 2]) * default_style_scale;
+                        }
+                    }
+                    let mut lm_rgb = Vec::with_capacity(byte_len);
+                    for i in 0..luxel_count {
+                        let px = build_lightmap_pixel(
+                            [blocklights[i * 3], blocklights[i * 3 + 1], blocklights[i * 3 + 2]],
+                            default_lightscale,
+                            &default_tables,
+                        );
+                        lm_rgb.extend_from_slice(&px[..3]);
+                    }
+                    let slot = packer.pack_rgb(lm_w, lm_h, &lm_rgb);
                     if slot.is_some() {
                         packed_faces += 1;
                     }
@@ -2173,12 +2588,49 @@ mod tests {
         assert!(atlas.rebuild_for_styles(&lighting, &rects, &curr_same, &prev).is_empty());
 
         let mut curr = [1.0f32; 64];
-        curr[1] = 2.0; // boost style 1 -> RGB = 100+40=140, 50+80=130, 25+120=145
+        curr[1] = 2.0;
         let dirty = atlas.rebuild_for_styles(&lighting, &rects, &curr, &prev);
         assert_eq!(dirty, vec![(ox, oy, 4, 4)]);
+        let tables = GammaTables::default();
+        let expected = build_lightmap_pixel(
+            [
+                100 * lightstyle_f32_to_scale(1.0) + 20 * lightstyle_f32_to_scale(2.0),
+                50 * lightstyle_f32_to_scale(1.0) + 40 * lightstyle_f32_to_scale(2.0),
+                25 * lightstyle_f32_to_scale(1.0) + 60 * lightstyle_f32_to_scale(2.0),
+            ],
+            tables.lightscale(false),
+            &tables,
+        );
         let px = (((oy + 1) * 64 + (ox + 1)) * 4) as usize;
-        assert_eq!(&atlas.rgba[px..px + 4], &[140, 130, 145, 255]);
+        assert_eq!(&atlas.rgba[px..px + 4], &expected);
         prev[1] = 2.0;
         assert!(atlas.rebuild_for_styles(&lighting, &rects, &curr, &prev).is_empty());
+    }
+
+    #[test]
+    fn de_dust2_rock_faces_and_no_checkerboard() {
+        let Some(gamedir) = std::env::var_os("CS16_GAMEDIR") else {
+            return;
+        };
+        let Ok(vfs) = cs_vfs::Vfs::open(&gamedir, cs_vfs::VfsConfig::default()) else {
+            return;
+        };
+        let Ok(map) = BspMap::load(&vfs, "de_dust2") else {
+            return;
+        };
+        for tex in &map.textures {
+            assert!(
+                !(tex.width == 16 && tex.height == 16 && tex.rgba.starts_with(&[255, 0, 255, 255])),
+                "fallback checkerboard detected on texture {}",
+                tex.name
+            );
+        }
+        let rects = map.build_face_lightmap_rects();
+        for fidx in [1314usize, 1315usize] {
+            assert!(
+                rects.iter().any(|r| r.face_index == fidx),
+                "expected valid lightmap rect for de_dust2 face {fidx}"
+            );
+        }
     }
 }

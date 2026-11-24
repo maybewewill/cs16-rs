@@ -48,11 +48,14 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     reg.register("m_pitch", "0.022", arch, "Mouse pitch multiplier (negative inverts Y)");
     reg.register("m_filter", "0", arch, "Mouse smoothing filter (0 or 1)");
 
-    // Video / Renderer (GoldSrc look)
+    // Video / Renderer (GoldSrc look; Xash3D FWGS `gamma.c` & retail `cstrike/config.cfg`)
     reg.register("fps_max", "100", arch, "Maximum framerate limit (0 = unlimited)");
     reg.register("gamma", "2.5", arch, "Display gamma (GoldSrc default 2.5)");
-    reg.register("texgamma", "2.0", arch, "Texture gamma");
-    reg.register("brightness", "1.0", arch, "Display brightness multiplier");
+    reg.register("texgamma", "2.0", CVarFlags::NONE, "Texture gamma (GoldSrc default 2.0)");
+    reg.register("lightgamma", "2.5", CVarFlags::NONE, "Lightmap gamma (GoldSrc default 2.5)");
+    reg.register("brightness", "0.0", arch, "Display brightness factor (GoldSrc default 0.0)");
+    reg.register("gl_overbright", "0", arch, "Enable GL overbright 2x lighting (0 or 1)");
+    reg.register("direct", "0.9", CVarFlags::NONE, "Direct studio lighting fraction");
     reg.register(
         "gl_texturemode",
         "GL_LINEAR_MIPMAP_LINEAR",
@@ -76,7 +79,10 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     reg.register("r_lightmap_only", "0", CVarFlags::CHEAT, "Render lightmaps only (0 or 1)");
     reg.register("r_fullbright", "0", CVarFlags::CHEAT, "Disable lightmaps (0 or 1)");
     reg.register("r_decals", "300", arch, "Maximum simultaneous world decals");
-    reg.register("gl_ansio", "8", arch, "Anisotropic texture filtering level (1..16)");
+    reg.register("gl_ansio", "1", arch, "Anisotropic texture filtering level (1=OFF..16)");
+    reg.register("gl_picmip", "0", arch, "Texture mipmap downscale bias (0..4)");
+    reg.register("gl_max_size", "512", arch, "Maximum texture dimension (pixels)");
+    reg.register("gl_round_down", "3", arch, "NPOT texture rounding heuristic (0..3)");
     reg.register("gl_msaa", "1", arch, "Multisample anti-aliasing samples (1 or 4)");
     reg.register("r_software_mode", "0", arch, "Emulate classic GoldSrc software renderer look (0 or 1)");
     reg.register("cl_bob", "0.01", arch, "View bobbing amplitude");
