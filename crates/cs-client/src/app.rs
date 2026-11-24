@@ -50,11 +50,11 @@ use cs_pm::collision::Hull;
 use cs_client::ui::main_menu::MainMenuUi;
 use cs_client::ui::mod_hud::{draw_mod_approval_prompt, draw_mod_hud};
 use cs_client::ui::options::OptionsUi;
-use cs_client::ui::scoreboard::{ScoreRow, show_scoreboard};
+use cs_client::ui::scoreboard::{ScoreRow, ScoreboardRenderCtx, show_scoreboard_vgui};
 use cs_client::ui::screens::{
-    BuyClassTeamMenuUi, CommandMenuUi, DemoPlayerUi, DisconnectErrorDialog, LoadingDialogUi,
-    MotdVguiUi, PlayerListDialogUi, ServerPasswordUi, SpectatorMode, SpectatorVguiUi,
-    VguiMenuKind,
+    BuyClassTeamMenuUi, BuyMenuRenderCtx, CommandMenuUi, DemoPlayerUi, DisconnectErrorDialog,
+    LoadingDialogUi, MotdRenderCtx, MotdVguiUi, PlayerListDialogUi, ServerPasswordUi,
+    SpectatorMode, SpectatorRenderCtx, SpectatorVguiUi, VguiMenuKind,
 };
 use cs_client::ui::server_menu::{
     draw_styled_text_menu, draw_text_menu, menu_key_enabled, menu_styled_lines_with_titles,
@@ -466,7 +466,8 @@ impl Cs16App {
     fn connect_remote(&mut self, addr: &str) {
         self.end_session();
         let name = self.cvars.get_str("name").to_string();
-        match Session::connect_remote(self.vfs.as_ref(), addr, &name) {
+        let vgui_menus = self.cvars.get_bool("_vgui_menus");
+        match Session::connect_remote(self.vfs.as_ref(), addr, &name, vgui_menus) {
             Ok(session) => {
                 self.cvars.info(format!("Connecting to {addr}..."));
                 self.session = session;
@@ -1255,6 +1256,7 @@ impl Cs16App {
             let master = finite_or(self.cvars.get_f32("volume"), 1.0).clamp(0.0, 1.0);
             match classify_shell_command(&cmd) {
                 Some(ShellStuffAction::CloseMenu) => {
+                    self.buy_team_class_ui.close();
                     self.session.with_hud_mut(|h| {
                         h.menu = None;
                         h.vgui_menu = None;
@@ -1327,6 +1329,11 @@ impl Cs16App {
                     } else if self.in_game_frames == 14 {
                         self.motd_ui.open = false;
                         self.feeds.motd_open = false;
+                        self.buy_team_class_ui.close();
+                        self.session.with_hud_mut(|h| {
+                            h.vgui_menu = None;
+                            h.menu = None;
+                        });
                         match m.as_str() {
                             "buy" => {
                                 self.cvars.set("_vgui_menus", "1");
@@ -1346,10 +1353,20 @@ impl Cs16App {
                 } else if m == "team" && self.in_game_frames == 10 {
                     self.motd_ui.open = false;
                     self.feeds.motd_open = false;
+                    self.cvars.set("_vgui_menus", "1");
+                    self.session.with_hud_mut(|h| {
+                        h.vgui_menu = None;
+                        h.menu = None;
+                    });
                     self.buy_team_class_ui.open_kind(VguiMenuKind::Team, true);
                     self.startup_ui_applied = true;
                     self.sync_cursor_capture();
                 } else if m == "motd" && self.in_game_frames == 10 {
+                    self.buy_team_class_ui.close();
+                    self.session.with_hud_mut(|h| {
+                        h.vgui_menu = None;
+                        h.menu = None;
+                    });
                     self.motd_ui.open = true;
                     self.feeds.motd_open = true;
                     self.startup_ui_applied = true;
@@ -1358,6 +1375,10 @@ impl Cs16App {
                     self.motd_ui.open = false;
                     self.feeds.motd_open = false;
                     self.buy_team_class_ui.close();
+                    self.session.with_hud_mut(|h| {
+                        h.vgui_menu = None;
+                        h.menu = None;
+                    });
                     self.startup_ui_applied = true;
                     self.sync_cursor_capture();
                 }
@@ -1648,17 +1669,20 @@ impl Cs16App {
                 || styled_menu_now.is_some()
                 || fallback_vgui_lines.is_some();
             if !alive && in_game && !modal_menu_open && observer_mode != 0 {
+                let spec_ctx = SpectatorRenderCtx {
+                    vfs: self.vfs.as_ref(),
+                    loc: self.loc.as_ref(),
+                    ct_score,
+                    t_score,
+                    round_timer_secs: round_secs_left,
+                    players: &spec_players,
+                    spec_health: spec_hp,
+                };
                 let spec_actions = self.spectator_ui.show(
                     &rt.egui_ctx,
                     &mut self.vgui_rt,
-                    self.vfs.as_ref(),
                     &mut self.cvars,
-                    ct_score,
-                    t_score,
-                    round_secs_left,
-                    &spec_players,
-                    spec_hp,
-                    self.palette,
+                    &spec_ctx,
                 );
                 pending_actions.extend(spec_actions);
             }
@@ -1679,52 +1703,56 @@ impl Cs16App {
                 self.palette,
             );
             if show_scores {
-                show_scoreboard(
-                    &rt.egui_ctx,
-                    &hostname,
-                    &map_name,
+                let sb_ctx = ScoreboardRenderCtx {
+                    vfs: self.vfs.as_ref(),
+                    loc: self.loc.as_ref(),
+                    hostname: &hostname,
+                    map_name: &map_name,
                     ct_score,
                     t_score,
-                    &score_rows,
-                    self.session.local_slot(),
-                    rt.vgui_bank.client_palette,
-                );
+                    players: &score_rows,
+                    local_slot: self.session.local_slot(),
+                    fallback_palette: rt.vgui_bank.client_palette,
+                };
+                show_scoreboard_vgui(&rt.egui_ctx, &mut self.vgui_rt, &sb_ctx);
             }
             if self.chat_ui.open {
                 sent_chat = self.chat_ui.show(&rt.egui_ctx, self.palette);
             }
-            if let Some(raw_motd) = &motd_raw
-                && self.motd_ui.show(
-                    &rt.egui_ctx,
-                    &mut self.vgui_rt,
-                    self.vfs.as_ref(),
-                    self.loc.as_ref(),
-                    &hostname,
+            if let Some(raw_motd) = &motd_raw {
+                let motd_ctx = MotdRenderCtx {
+                    vfs: self.vfs.as_ref(),
+                    loc: self.loc.as_ref(),
+                    hostname: &hostname,
                     raw_motd,
-                    self.palette,
-                    rt.vgui_bank.steam_icon.as_ref(),
-                )
-            {
-                motd_close = true;
+                };
+                if self.motd_ui.show(&rt.egui_ctx, &mut self.vgui_rt, &motd_ctx) {
+                    motd_close = true;
+                }
             }
-            if self.buy_team_class_ui.active_res.is_some() {
-                vgui_cmd_out = self.buy_team_class_ui.show(
-                    &rt.egui_ctx,
-                    &mut self.vgui_rt,
-                    self.vfs.as_ref(),
-                    self.loc.as_ref(),
-                    &map_name,
-                    local_is_ct,
-                    self.palette,
-                    rt.vgui_bank.steam_icon.as_ref(),
-                );
+            if !self.motd_ui.open && !motd_close && self.buy_team_class_ui.active_res.is_some() {
+                let buy_ctx = BuyMenuRenderCtx {
+                    vfs: self.vfs.as_ref(),
+                    loc: self.loc.as_ref(),
+                    map_name: &map_name,
+                    is_ct: local_is_ct,
+                    allowed_keys: active_vgui_menu.as_ref().map_or(0, |v| v.keys),
+                };
+                vgui_cmd_out = self
+                    .buy_team_class_ui
+                    .show(&rt.egui_ctx, &mut self.vgui_rt, &buy_ctx);
             }
             cmdmenu_exec = self.command_menu_ui.show(
                 &rt.egui_ctx,
+                &mut self.vgui_rt,
+                self.vfs.as_ref(),
                 self.loc.as_ref(),
                 &map_name,
-                self.palette,
             );
+            if self.command_menu_ui.take_pending_briefing() {
+                self.motd_ui.open = true;
+                self.feeds.motd_open = true;
+            }
         }
 
         let steam_icon = rt.vgui_bank.steam_icon.as_ref();
@@ -1791,6 +1819,10 @@ impl Cs16App {
         let paint_jobs = rt
             .egui_ctx
             .tessellate(full_output.shapes, full_output.pixels_per_point);
+
+        for ui_snd in self.vgui_rt.take_ui_sounds() {
+            self.audio.play_ui_sound(self.vfs.as_ref(), ui_snd.vfs_path());
+        }
 
         // 4. The 3D frame.
         let mut render_cam = self.camera.clone();
@@ -2249,9 +2281,6 @@ impl ApplicationHandler for Cs16App {
                         _ => {}
                     }
                     return;
-                } else if *state == ElementState::Pressed {
-                    let vol = self.cvars.get_f32("volume").clamp(0.0, 1.0);
-                    self.audio.play_ui_click(self.vfs.as_ref(), vol);
                 }
             }
             WindowEvent::KeyboardInput { event: key_ev, .. } => {
@@ -2381,6 +2410,7 @@ fn build_score_rows(hud: &HudState, names: &BTreeMap<u8, String>) -> (Vec<ScoreR
                     .unwrap_or_else(|| format!("player {slot}")),
                 frags: p.frags,
                 deaths: p.deaths,
+                ping: 0,
                 team: p.team.clone(),
                 dead: p.attrib & 1 != 0,
                 bomb: p.attrib & 2 != 0,

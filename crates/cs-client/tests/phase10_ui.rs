@@ -24,9 +24,9 @@ use cs_client::ui::options::{OptionsTab, OptionsUi, render_scr_options};
 use cs_client::ui::scoreboard::{ScoreRow, scoreboard_to_list_panel, show_scoreboard};
 use cs_client::ui::screens::{
     BuyClassTeamMenuUi, CommandMenuUi, DemoPlayerUi, DisconnectErrorDialog, LoadingDialogUi,
-    MotdVguiUi, ServerBrowserEntry, ServerBrowserTab, ServerBrowserUi, ServerPasswordUi,
-    SpectatorMode, SpectatorVguiUi, VguiMenuKind, dialogs::DemoTransportState,
-    dialogs::PlayerListDialogUi,
+    MotdRenderCtx, MotdVguiUi, ServerBrowserEntry, ServerBrowserTab, ServerBrowserUi,
+    ServerPasswordUi, SpectatorMode, SpectatorRenderCtx, SpectatorVguiUi, VguiMenuKind,
+    dialogs::DemoTransportState, dialogs::PlayerListDialogUi,
 };
 use cs_client::ui::server_menu::{
     MenuSpanColor, draw_styled_text_menu, menu_key_enabled, menu_styled_lines,
@@ -168,7 +168,10 @@ fn ui_screen_buy_menu_vgui_navigates_ct_and_t_submenus() {
 #[test]
 fn ui_screen_team_and_class_menu_resolves_team_and_class_res() {
     assert_eq!(VguiMenuKind::from_vgui_menu_id(2, ""), Some(VguiMenuKind::Team));
-    assert_eq!(VguiMenuKind::from_vgui_menu_id(26, ""), Some(VguiMenuKind::ClassCt));
+    // ReGameDLL_CS cdll_dll.h: VGUI_Menu_Class_T = 26, VGUI_Menu_Class_CT = 27, Buy = 28..=34
+    assert_eq!(VguiMenuKind::from_vgui_menu_id(26, ""), Some(VguiMenuKind::ClassT));
+    assert_eq!(VguiMenuKind::from_vgui_menu_id(27, ""), Some(VguiMenuKind::ClassCt));
+    assert_eq!(VguiMenuKind::from_vgui_menu_id(28, ""), Some(VguiMenuKind::Buy));
     assert_eq!(VguiMenuKind::from_vgui_menu_id(3, ""), Some(VguiMenuKind::ClassT));
 
     let mut ui = BuyClassTeamMenuUi::default();
@@ -195,6 +198,7 @@ fn ui_screen_scoreboard_tab_builds_rows_and_list_panel() {
             name: "Alpha".into(),
             frags: 14,
             deaths: 3,
+            ping: 15,
             team: "CT".into(),
             dead: false,
             bomb: false,
@@ -205,6 +209,7 @@ fn ui_screen_scoreboard_tab_builds_rows_and_list_panel() {
             name: "Bravo".into(),
             frags: 6,
             deaths: 5,
+            ping: 22,
             team: "TERRORIST".into(),
             dead: true,
             bomb: true,
@@ -215,6 +220,7 @@ fn ui_screen_scoreboard_tab_builds_rows_and_list_panel() {
             name: "Watcher".into(),
             frags: 0,
             deaths: 0,
+            ping: 10,
             team: "SPECTATOR".into(),
             dead: true,
             bomb: false,
@@ -778,12 +784,12 @@ fn ui_screen_motd_html_parses_tags_colors_and_renders_res() {
         let closed = motd.show(
             ctx,
             &mut rt,
-            None,
-            None,
-            "My Server",
-            "<b>Hello</b>",
-            palette(),
-            None,
+            &MotdRenderCtx {
+                vfs: None,
+                loc: None,
+                hostname: "My Server",
+                raw_motd: "<b>Hello</b>",
+            },
         );
         assert!(!closed);
     });
@@ -830,14 +836,16 @@ fn ui_screen_spectator_and_bottom_bar_cycles_modes_and_paints_res() {
         let acts = spec.show(
             ctx,
             &mut rt,
-            None,
             &mut cvars,
-            3,
-            2,
-            75,
-            &players,
-            Some((82, 1)),
-            palette(),
+            &SpectatorRenderCtx {
+                vfs: None,
+                loc: None,
+                ct_score: 3,
+                t_score: 2,
+                round_timer_secs: 75,
+                players: &players,
+                spec_health: Some((82, 1)),
+            },
         );
         assert!(acts.is_empty());
     });
@@ -863,6 +871,12 @@ fn ui_screen_command_menu_evaluates_map_conditions_and_submenus() {
     let office = ui.visible_items("cs_office");
     assert_eq!(office.len(), 2);
     assert_eq!(office[1].1.label, "Hostages");
+
+    let mut rt = VguiRuntime::new();
+    let out = run_egui_frame(|ctx| {
+        let _ = ui.show(ctx, &mut rt, None, None, "de_dust2");
+    });
+    assert!(out > 0);
 }
 
 #[test]
@@ -1315,4 +1329,17 @@ fn ui_hud_scenario_and_hostage_indicators_tracks_scenario_bomb_hostages() {
     assert!(hud.hostages.contains_key(&1));
     push_usermsg(&mut hud, 98, "HostageK", CsUserMsg::HostageK(1), 2.0);
     assert!(!hud.hostages.contains_key(&1));
+}
+
+#[test]
+fn ui_vgui2_trigger_button_emits_click_sound_and_command_event() {
+    let mut rt = VguiRuntime::new();
+    rt.insert_res(
+        "resource/UI/SampleClick.res",
+        r#""Sample" { "Ok" { "ControlName" "Button" "xpos" "10" "ypos" "10" "wide" "80" "tall" "20" "Command" "okay" "visible" "1" "enabled" "1" } }"#,
+    );
+    let cmd = rt.trigger_button("resource/UI/SampleClick.res", "Ok");
+    assert_eq!(cmd.as_deref(), Some("okay"));
+    let sounds = rt.take_ui_sounds();
+    assert_eq!(sounds, vec![cs_client::ui::vgui2::VguiUiSound::Click]);
 }

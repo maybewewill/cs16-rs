@@ -328,7 +328,8 @@ impl WebClientState {
         if let Some(vfs) = &self.vfs {
             conn.set_files(Box::new(VfsResourceFiles(vfs.clone())));
         }
-        conn.set_userinfo("_vgui_menus", "0");
+        let vgui_flag = if self.cvars.get_bool("_vgui_menus") { "1" } else { "0" };
+        conn.set_userinfo("_vgui_menus", vgui_flag);
         conn.set_userinfo(MOD_CAPABILITY_KEY, "1");
         let names = self.view.names();
         conn.set_fx_world(Box::new(MapFxWorld::new(None, self.vfs.clone(), names)));
@@ -1312,6 +1313,7 @@ impl WebClientState {
                                 .unwrap_or_else(|| format!("player {slot}")),
                             frags: p.frags,
                             deaths: p.deaths,
+                            ping: 0,
                             team: p.team.clone(),
                             dead: p.attrib & 1 != 0,
                             bomb: p.attrib & 2 != 0,

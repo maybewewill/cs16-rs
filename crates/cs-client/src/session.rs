@@ -131,7 +131,12 @@ impl Session {
     }
 
     /// Connects to the server at `addr` (`host`, `host:port`); the answer comes in the frames.
-    pub fn connect_remote(vfs: Option<&Vfs>, addr: &str, name: &str) -> Result<Self, String> {
+    pub fn connect_remote(
+        vfs: Option<&Vfs>,
+        addr: &str,
+        name: &str,
+        vgui_menus: bool,
+    ) -> Result<Self, String> {
         let target = if addr.contains(':') {
             addr.to_string()
         } else {
@@ -149,8 +154,7 @@ impl Session {
         if let Some(v) = vfs {
             conn.set_files(Box::new(VfsResourceFiles(v.clone())));
         }
-        // Text menus answered with `menuselect`: the shell draws the server's `ShowMenu`.
-        conn.set_userinfo("_vgui_menus", "0");
+        conn.set_userinfo("_vgui_menus", if vgui_menus { "1" } else { "0" });
         conn.set_userinfo(cs_mod_api::MOD_CAPABILITY_KEY, "1");
         conn.connect();
         let mut s = Self::none();
