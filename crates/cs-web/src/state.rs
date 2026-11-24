@@ -177,6 +177,16 @@ pub struct WebClientState {
     last_mod_hud: Vec<HudDrawCmd>,
 }
 
+#[derive(Clone, Copy)]
+struct VoxSpatial {
+    pos: [f32; 3],
+    listener: [f32; 3],
+    right: [f32; 3],
+    attenuation: f32,
+    entity: u16,
+    channel: u8,
+}
+
 impl Default for WebClientState {
     fn default() -> Self {
         Self::new(Box::new(MemoryStorage::default()))
@@ -1018,12 +1028,7 @@ impl WebClientState {
         });
     }
 
-    fn queue_vox_sentence(
-        &mut self,
-        spec: &str,
-        volume: f32,
-        spatial: Option<([f32; 3], [f32; 3], [f32; 3], f32, u16, u8)>,
-    ) {
+    fn queue_vox_sentence(&mut self, spec: &str, volume: f32, spatial: Option<VoxSpatial>) {
         if !self.audio_unlocked {
             return;
         }
@@ -1039,20 +1044,20 @@ impl WebClientState {
             let norm = normalize_sound_path(&w.path);
             let dur = self.wav_duration_sec(&norm);
             let vol = (volume * w.volume).clamp(0.0, 2.0);
-            if let Some((pos, listener, right, attenuation, entity, channel)) = spatial {
-                let occluded = self.is_occluded(listener, pos);
+            if let Some(sp) = spatial {
+                let occluded = self.is_occluded(sp.listener, sp.pos);
                 let (loop_start, loop_end) = self.wav_loop_points(&norm);
                 self.queued_audio.push(WebAudioEvent::Play3d {
                     path: norm,
                     volume: vol,
                     pitch: w.pitch,
-                    attenuation,
-                    pos,
-                    listener,
-                    right,
+                    attenuation: sp.attenuation,
+                    pos: sp.pos,
+                    listener: sp.listener,
+                    right: sp.right,
                     occluded,
-                    entity,
-                    channel,
+                    entity: sp.entity,
+                    channel: sp.channel,
                     loop_start,
                     loop_end,
                     delay_sec: cursor_sec,
@@ -1137,14 +1142,14 @@ impl WebClientState {
                     } else {
                         start.volume * master
                     };
-                    let spatial = (!is_2d).then_some((
-                        start.origin.to_array(),
+                    let spatial = (!is_2d).then_some(VoxSpatial {
+                        pos: start.origin.to_array(),
                         listener,
                         right,
-                        start.attenuation,
-                        start.entity,
-                        start.channel,
-                    ));
+                        attenuation: start.attenuation,
+                        entity: start.entity,
+                        channel: start.channel,
+                    });
                     self.queue_vox_sentence(&raw, base_vol, spatial);
                     return;
                 }

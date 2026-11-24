@@ -39,7 +39,9 @@ fn rms(samples: &[f32]) -> f32 {
 
 fn stereo_channel_rms(interleaved: &[f32], channel: usize) -> f32 {
     let vals: Vec<f32> = interleaved
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|lr| lr[channel])
         .collect();
     rms(&vals)
@@ -421,7 +423,7 @@ fn material_impacts_and_predicted_footsteps() {
 
     // Verify all mapped impact & reload WAV paths actually resolve in retail HL1/CS1.6 VFS.
     if let Ok(vfs) = Vfs::discover(None, VfsConfig::default()) {
-        for tex in [b'C', b'M', b'W', b'G', b'F', b'D', b'T', b'V'] {
+        for &tex in b"CMWGFDTVY" {
             for seed in 0..8 {
                 let (p, _, _) = material_impact_sound(tex, seed);
                 assert!(vfs.exists(&format!("sound/{p}")), "missing retail asset sound/{p}");

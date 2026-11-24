@@ -186,6 +186,7 @@ impl AudioEngine {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn set_params(
         &mut self,
         master_volume: f32,

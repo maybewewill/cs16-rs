@@ -166,13 +166,17 @@ pub fn decode_wav(bytes: &[u8]) -> Result<DecodedWav, WavError> {
     let samples: Vec<f32> = match (tag, bits_per_sample) {
         (1, 8) => pcm.iter().map(|&b| (f32::from(b) - 128.0) / 128.0).collect(),
         (1, 16) => pcm
-            .chunks_exact(2)
-            .map(|c| f32::from(i16::from_le_bytes([c[0], c[1]])) / 32768.0)
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| f32::from(i16::from_le_bytes(*c)) / 32768.0)
             .collect(),
         (3, 32) => pcm
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| {
-                let s = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+                let s = f32::from_le_bytes(*c);
                 if s.is_finite() { s.clamp(-1.0, 1.0) } else { 0.0 }
             })
             .collect(),

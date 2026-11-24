@@ -60,7 +60,7 @@ evidence = "crates/cs-game/src/env.rs (volstart/pitch/fadein/fadeout/spinup/spin
 [[item]]
 id = "sound_soundfade_and_stopsound"
 status = "tested"
-evidence = "crates/cs-client/src/audio/mixer.rs::SoundFadeState; crates/cs-proto48/src/messages.rs::tests::voice_roomtype_stopsound_roundtrip; crates/cs-client/tests/phase9_sound.rs::soundfade_cdtrack_mp3_commands_and_real_mp3_decode, channels_priorities_alter_and_stopsound"
+evidence = "crates/cs-client/src/audio/mixer.rs (SoundFadeState, stop_channel, stop_all); crates/cs-proto48/src/messages.rs::tests::voice_roomtype_stopsound_roundtrip; crates/cs-client/tests/phase9_sound.rs::soundfade_cdtrack_mp3_commands_and_real_mp3_decode, channels_priorities_alter_and_stopsound"
 
 [[item]]
 id = "sound_cdtrack_and_mp3_commands"

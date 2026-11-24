@@ -226,10 +226,9 @@ impl RoomDsp {
 
             let mut in_pair = [l, r];
             if preset.room_lp {
-                for ch in 0..2 {
-                    self.input_lp[ch] += (in_pair[ch] - self.input_lp[ch]) * 0.25;
-                    in_pair[ch] = self.input_lp[ch];
-                }
+                self.input_lp[0] += (in_pair[0] - self.input_lp[0]) * 0.25;
+                self.input_lp[1] += (in_pair[1] - self.input_lp[1]) * 0.25;
+                in_pair = self.input_lp;
             }
 
             let left_d = ((preset.room_left * sr + mod_off).round().max(1.0)) as usize;

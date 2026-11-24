@@ -186,8 +186,11 @@ pub fn encode_steam_opus_plc(steam_id: u64, sample_rate: u16, seq: u16, opus_fra
     out
 }
 
+/// Decoded SteamPipe GoldSrc `OPUS_PLC` payload: `(sample_rate, Vec<(seq, opus_chunk)>)`.
+pub type SteamOpusPlcPacket<'a> = (u16, Vec<(u16, &'a [u8])>);
+
 /// Validates CRC32 & framing of a SteamPipe GoldSrc `OPUS_PLC` packet, returning `(sample_rate, Vec<(seq, opus_chunk)>)`.
-pub fn decode_steam_opus_plc(packet: &[u8]) -> Option<(u16, Vec<(u16, &[u8])>)> {
+pub fn decode_steam_opus_plc(packet: &[u8]) -> Option<SteamOpusPlcPacket<'_>> {
     if packet.len() < 16 {
         return None;
     }
@@ -332,10 +335,10 @@ impl VoiceJitterBuffer {
         {
             return;
         }
-        if self.queue.len() >= 32 {
-            if let Some(&first) = self.queue.keys().next() {
-                self.queue.remove(&first);
-            }
+        if self.queue.len() >= 32
+            && let Some(&first) = self.queue.keys().next()
+        {
+            self.queue.remove(&first);
         }
         self.queue.insert(seq, payload);
         if self.next_seq.is_none() {
