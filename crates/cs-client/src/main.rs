@@ -1,8 +1,9 @@
 //! Counter-Strike 1.6 (Rust) desktop client entry point.
 
 mod app;
-mod audio;
 mod session;
+
+use cs_client::audio;
 
 use std::path::PathBuf;
 

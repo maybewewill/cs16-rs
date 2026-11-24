@@ -43,7 +43,7 @@ flate2 = "1"
 glam = { version = "0.34", features = ["serde"] }
 image = { version = "0.25", default-features = false, features = ["tga", "png"] }
 pollster = "0.4"
-rodio = { version = "0.23", default-features = false, features = ["wav", "playback"] }
+rodio = { version = "0.23", default-features = false, features = ["wav", "mp3", "playback"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 tracing = "0.1"
