@@ -2,7 +2,9 @@
 //! Counter-Strike 1.6 client and for `cs-client`. The game is `cs_game::CsGame`; `--walk-game` runs the
 //! older `cs_sim::walk_game::WalkGame` instead (players only walk: no weapons, rounds or HUD).
 
-use std::path::PathBuf;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
@@ -11,9 +13,13 @@ use cs_engine::{ConsoleOutcome, GameDll, Server, ServerConfig, ServerMap};
 use cs_game::CsGame;
 use cs_local::{load_server_map, new_server};
 use cs_platform::{Clock, NativeClock};
+use cs_relay::{RelayHandle, RelayPolicy, TargetAllowlist};
 use cs_sim::pmove::MoveParams;
 use cs_sim::walk_game::WalkGame;
-use cs_transport::{PacketTransport, UdpTransport};
+use cs_transport::{
+    MultiTransport, PacketTransport, PeerAddr, PeerKind, TransportError, UdpTransport,
+    UpgradeHook, WsServerConfig, WsServerTransport,
+};
 use cs_vfs::{Vfs, VfsConfig};
 use tracing::info;
 
@@ -34,6 +40,9 @@ struct Options {
     bots: Option<u8>,
     /// Run `WalkGame` instead of `CsGame`.
     walk_game: bool,
+    web_port: Option<u16>,
+    web_dir: Option<PathBuf>,
+    relay_allow: Vec<SocketAddr>,
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
@@ -45,6 +54,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
         hostname: ServerConfig::default().hostname,
         bots: None,
         walk_game: false,
+        web_port: None,
+        web_dir: None,
+        relay_allow: Vec::new(),
     };
     let mut args = args.iter();
     while let Some(arg) = args.next() {
@@ -76,8 +88,26 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     .ok_or(format!("{arg}: not a number from 0 to 32: {v}"))?;
                 opts.bots = Some(count);
             }
+            "--web-port" => {
+                let v = value()?;
+                let p: u16 = v
+                    .parse()
+                    .map_err(|_| format!("{arg}: not a port: {v}"))?;
+                opts.web_port = Some(p);
+            }
+            "--web-dir" => opts.web_dir = Some(PathBuf::from(value()?)),
+            "--relay-allow" => {
+                let v = value()?;
+                let addr: SocketAddr = v
+                    .parse()
+                    .map_err(|e| format!("{arg}: invalid <ip:port> `{v}`: {e}"))?;
+                opts.relay_allow.push(addr);
+            }
             other => return Err(format!("unknown argument `{other}`")),
         }
+    }
+    if !opts.relay_allow.is_empty() && opts.web_port.is_none() {
+        return Err("--relay-allow requires --web-port".to_string());
     }
     Ok(opts)
 }
@@ -169,7 +199,37 @@ fn start(args: &[String]) -> Result<(), String> {
     }
 }
 
-/// Binds the socket and runs `game` on `map` until the operator stops the server.
+enum ServerTransport {
+    Udp(UdpTransport),
+    Multi(MultiTransport),
+}
+
+impl PacketTransport for ServerTransport {
+    fn recv(&mut self) -> Option<(PeerAddr, Vec<u8>)> {
+        match self {
+            Self::Udp(t) => t.recv(),
+            Self::Multi(m) => m.recv(),
+        }
+    }
+
+    fn send(&mut self, to: PeerAddr, data: &[u8]) -> Result<(), TransportError> {
+        match self {
+            Self::Udp(t) => t.send(to, data),
+            Self::Multi(m) => m.send(to, data),
+        }
+    }
+}
+
+fn default_web_dir() -> Option<PathBuf> {
+    let dist = Path::new("web/dist");
+    if dist.is_dir() {
+        return Some(dist.to_path_buf());
+    }
+    let plain = Path::new("web");
+    plain.is_dir().then(|| plain.to_path_buf())
+}
+
+/// Binds the socket (and optional HTTP/WebSocket host) and runs `game` on `map`.
 fn serve<G: GameDll>(
     opts: &Options,
     vfs: &Vfs,
@@ -180,7 +240,46 @@ fn serve<G: GameDll>(
     let (map_name, map_crc) = (map.name.clone(), map.crc);
 
     let bind = format!("0.0.0.0:{}", opts.port);
-    let mut net = UdpTransport::bind(&bind).map_err(|e| format!("cannot bind UDP {bind}: {e}"))?;
+    let udp = UdpTransport::bind(&bind).map_err(|e| format!("cannot bind UDP {bind}: {e}"))?;
+    let udp_addr = udp.local_addr();
+    let mut net = if let Some(web_port) = opts.web_port {
+        let upgrade_hook: Option<UpgradeHook> = if !opts.relay_allow.is_empty() {
+            let policy = RelayPolicy {
+                allowlist: TargetAllowlist::from_addrs(opts.relay_allow.iter().copied()),
+                ..RelayPolicy::default()
+            };
+            let relay = RelayHandle::new(policy);
+            Some(Arc::new(move |req, stream, peer| {
+                relay.handle_http_upgrade(req, stream, peer);
+            }))
+        } else {
+            None
+        };
+        let static_dir = opts.web_dir.clone().or_else(default_web_dir);
+        let ws_srv = WsServerTransport::bind(WsServerConfig {
+            bind_addr: format!("0.0.0.0:{web_port}"),
+            static_dir: static_dir.clone(),
+            ws_path: "/ws".to_string(),
+            max_clients: usize::from(opts.max_players) + 8,
+            upgrade_hook,
+        })
+        .map_err(|e| format!("cannot bind WebSocket/HTTP on 0.0.0.0:{web_port}: {e}"))?;
+        let ws_addr = ws_srv.local_addr();
+        info!(
+            http = %format!("http://127.0.0.1:{}", ws_addr.port()),
+            ws = %format!("ws://127.0.0.1:{}/ws", ws_addr.port()),
+            static_dir = ?static_dir,
+            relay_targets = opts.relay_allow.len(),
+            "Web client hosting and WebSocket transport enabled"
+        );
+        let mut multi = MultiTransport::new();
+        multi.add(PeerKind::Udp, udp);
+        multi.add(PeerKind::Web, ws_srv);
+        ServerTransport::Multi(multi)
+    } else {
+        ServerTransport::Udp(udp)
+    };
+
     let cfg = ServerConfig {
         hostname: opts.hostname.clone(),
         max_clients: opts.max_players,
@@ -191,7 +290,7 @@ fn serve<G: GameDll>(
         let _ = server.console_command(&format!("bot_quota {n}"));
     }
     info!(
-        addr = %net.local_addr(),
+        addr = %udp_addr,
         map = %map_name,
         crc = format_args!("{map_crc:#010x}"),
         maxplayers = server.config().max_clients,
@@ -444,5 +543,90 @@ mod tests {
         let b = console_once(&mut server, &["changelevel a"], &flag);
         assert!(b.quit);
         assert!(b.loaded.is_empty());
+    }
+
+    #[test]
+    fn parses_web_and_relay_flags() {
+        let o = parse(&args(&[
+            "--web-port",
+            "27120",
+            "--web-dir",
+            "web",
+            "--relay-allow",
+            "127.0.0.1:27016",
+        ]))
+        .unwrap();
+        assert_eq!(o.web_port, Some(27120));
+        assert_eq!(o.web_dir, Some(PathBuf::from("web")));
+        assert_eq!(
+            o.relay_allow,
+            vec!["127.0.0.1:27016".parse::<SocketAddr>().unwrap()]
+        );
+
+        assert!(parse(&args(&["--relay-allow", "127.0.0.1:27016"])).is_err());
+    }
+
+    #[test]
+    fn udp_and_websocket_clients_play_in_the_same_server() {
+        use cs_clientcore::{ConnState, Connection, ConnectionConfig};
+        use cs_proto48::crypto::md5_hex;
+        use cs_transport::WsClientTransport;
+
+        let udp = UdpTransport::bind("127.0.0.1:0").unwrap();
+        let udp_addr = udp.local_addr();
+        let ws_srv = WsServerTransport::bind(WsServerConfig {
+            bind_addr: "127.0.0.1:0".into(),
+            static_dir: None,
+            ws_path: "/ws".into(),
+            max_clients: 8,
+            upgrade_hook: None,
+        })
+        .unwrap();
+        let ws_addr = ws_srv.local_addr();
+
+        let mut multi = MultiTransport::new();
+        multi.add(PeerKind::Udp, udp);
+        multi.add(PeerKind::Web, ws_srv);
+
+        let mut server = Server::new(
+            ServerConfig {
+                max_clients: 8,
+                ..ServerConfig::default()
+            },
+            ServerMap::stub("de_dust2"),
+            WalkGame::new(MoveParams::default()),
+            DeltaRegistry::cs16_default(),
+            CVarRegistry::new_with_defaults(),
+        );
+
+        let mut udp_conn = Connection::new(
+            UdpTransport::bind("127.0.0.1:0").unwrap(),
+            PeerAddr::Udp(udp_addr),
+            ConnectionConfig::new("udp-player", 76_561_197_960_265_740, &md5_hex(b"udp")),
+        );
+        let mut ws_conn = Connection::new(
+            WsClientTransport::connect(&format!("ws://{ws_addr}/ws")).unwrap(),
+            PeerAddr::Web(0),
+            ConnectionConfig::new("ws-player", 76_561_197_960_265_741, &md5_hex(b"ws")),
+        );
+        udp_conn.connect();
+        ws_conn.connect();
+
+        let mut now = 0.0;
+        for _ in 0..800 {
+            now += 0.01;
+            udp_conn.pump(now);
+            ws_conn.pump(now);
+            server.frame(&mut multi, now);
+            if udp_conn.state() == &ConnState::InGame && ws_conn.state() == &ConnState::InGame {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        assert_eq!(udp_conn.state(), &ConnState::InGame);
+        assert_eq!(ws_conn.state(), &ConnState::InGame);
+        assert_eq!(udp_conn.stats().parse_errors, 0);
+        assert_eq!(ws_conn.stats().parse_errors, 0);
     }
 }
