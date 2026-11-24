@@ -37,8 +37,8 @@ use cs_client::ui::vgui2::controls::{
     ListSortDir, VguiControlState, VguiSliderState, align_to_egui,
 };
 use cs_client::ui::vgui2::{
-    VguiEvent, VguiRuntime, install_marlett_into_egui, install_scheme_fonts_into_egui,
-    paint_html_doc, parse_html_doc,
+    HtmlBlock, VguiEvent, VguiRuntime, client_ui_viewport, install_marlett_into_egui,
+    install_scheme_fonts_into_egui, paint_html_doc, parse_html_doc,
 };
 use cs_client::ui::vgui_assets::ClientPalette;
 use cs_client::ui::vgui_theme::VguiPalette;
@@ -1564,4 +1564,36 @@ fn ui_screen_options_loads_all_7_res_pages_and_parses_tab_names() {
     ] {
         assert!(rt.doc(path).is_some(), "missing loaded .res document {path}");
     }
+}
+
+#[test]
+fn ui_client_viewport_centers_4_3_across_aspect_ratios() {
+    let rect_for = |w: f32, h: f32| {
+        client_ui_viewport(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h)))
+    };
+
+    let r800 = rect_for(800.0, 600.0);
+    assert_eq!((r800.left(), r800.top(), r800.width(), r800.height()), (0.0, 0.0, 800.0, 600.0));
+
+    let r720 = rect_for(1280.0, 720.0);
+    assert_eq!((r720.left(), r720.top(), r720.width(), r720.height()), (160.0, 0.0, 960.0, 720.0));
+
+    let r800w = rect_for(1280.0, 800.0);
+    assert_eq!((r800w.left(), r800w.top(), r800w.width(), r800w.height()), (106.0, 0.0, 1067.0, 800.0));
+
+    let r1024 = rect_for(1280.0, 1024.0);
+    assert_eq!((r1024.left(), r1024.top(), r1024.width(), r1024.height()), (0.0, 32.0, 1280.0, 960.0));
+}
+
+#[test]
+fn ui_html_parses_css_font_line_height_and_blank_br() {
+    let html = r#"<html><head><style>
+        body { background: #000; margin: 8px; color: #FFB000; font: normal 16px/20px Verdana, sans-serif; }
+    </style></head><body>Line 1<br><br>Line 3</body></html>"#;
+    let doc = parse_html_doc(html);
+    assert_eq!(doc.body_font_size, 16.0);
+    assert_eq!(doc.line_height, Some(20.0));
+    assert_eq!(doc.margin, 8.0);
+    assert_eq!(doc.blocks.len(), 3);
+    assert!(matches!(&doc.blocks[1], HtmlBlock::Paragraph { spans, .. } if spans.is_empty()));
 }

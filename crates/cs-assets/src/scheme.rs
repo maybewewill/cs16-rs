@@ -1049,7 +1049,12 @@ impl ClassResPanel {
     pub fn load(vfs: &Vfs, name: &str, loc: &LocalizationTable) -> Option<Self> {
         let path = format!("classes/{name}.res");
         let text = vfs.read_string_lossy(&path).ok()?;
-        let blocks = parse_res_blocks(&text);
+        Some(Self::parse(&text, loc))
+    }
+
+    /// Parse and resolve a `classes/<name>.res` body.
+    pub fn parse(text: &str, loc: &LocalizationTable) -> Self {
+        let blocks = parse_res_blocks(text);
         let mut panel = Self {
             image_path: None,
             image_box: [0.0, 0.0, 300.0, 80.0],
@@ -1057,6 +1062,7 @@ impl ClassResPanel {
             labels: Vec::new(),
         };
 
+        let mut label_keys: Vec<String> = Vec::new();
         for (block_name, props) in blocks {
             let ctrl = props
                 .get("controlname")
@@ -1092,7 +1098,7 @@ impl ClassResPanel {
                     .unwrap_or_default();
                 let small_font = font.contains("small");
                 let bright = props.get("brighttext").map(String::as_str) == Some("1");
-                panel.labels.push(ClassResLabel {
+                let lbl = ClassResLabel {
                     x,
                     y,
                     w,
@@ -1100,11 +1106,25 @@ impl ClassResPanel {
                     text: resolved,
                     small_font,
                     bright,
-                });
+                };
+                // Valve EditablePanel::LoadControlSettings keys controls by `fieldName`, so a
+                // later entry sharing `fieldName` (e.g. `classes/urban.res` `className` + `infolabel`)
+                // overwrites the earlier entry.
+                let key = props
+                    .get("fieldname")
+                    .map(String::as_str)
+                    .unwrap_or(block_name.as_str())
+                    .to_ascii_lowercase();
+                if let Some(idx) = label_keys.iter().position(|k| k == &key) {
+                    panel.labels[idx] = lbl;
+                } else {
+                    label_keys.push(key);
+                    panel.labels.push(lbl);
+                }
             }
         }
 
-        Some(panel)
+        panel
     }
 }
 
@@ -1295,5 +1315,41 @@ mod tests {
             loc.resolve_inline("\x01#Game_connected", Some(&titles)),
             "\x01%s connected"
         );
+    }
+
+    #[test]
+    fn class_res_panel_overwrites_duplicate_field_name() {
+        let res = r#"
+        "classes/urban.res"
+        {
+            "className"
+            {
+                "ControlName" "Label"
+                "fieldName" "infolabel"
+                "xpos" "0"
+                "ypos" "204"
+                "wide" "300"
+                "tall" "20"
+                "labelText" "SEAL TEAM 6"
+            }
+            "infolabel"
+            {
+                "ControlName" "Label"
+                "fieldName" "infolabel"
+                "xpos" "0"
+                "ypos" "228"
+                "wide" "300"
+                "tall" "80"
+                "labelText" "ST-6 description"
+                "font" "DefaultSmall"
+            }
+        }
+        "#;
+        let loc = LocalizationTable::default();
+        let panel = ClassResPanel::parse(res, &loc);
+        assert_eq!(panel.labels.len(), 1);
+        assert_eq!(panel.labels[0].y, 228.0);
+        assert_eq!(panel.labels[0].text, "ST-6 description");
+        assert!(panel.labels[0].small_font);
     }
 }

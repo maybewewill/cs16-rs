@@ -4,9 +4,8 @@
 use cs_assets::scheme::LocalizationTable;
 use cs_assets::vgui_res::{ControlKind, TextAlignment, VguiCoordMode};
 use cs_vfs::Vfs;
-use egui::{Color32, Key, Pos2, Rect, ScrollArea, Stroke, StrokeKind, Vec2};
+use egui::{Color32, Key, Pos2, Rect, ScrollArea, Vec2};
 
-use crate::ui::vgui2::font_atlas::VguiTextDrawOpts;
 use crate::ui::vgui2::runtime::{modal_backdrop, scheme_color_or};
 use crate::ui::vgui2::{HtmlDoc, VguiRuntime, VguiSchemeKind, paint_html_doc_vgui, parse_html_doc};
 
@@ -70,19 +69,18 @@ impl MotdVguiUi {
                     m.loc,
                 );
 
-                let sx = (screen.width() / 640.0).max(0.5);
-                let sy = (screen.height() / 480.0).max(0.5);
+                let s = (vp_rect.height() / 480.0).max(0.5);
                 let fallback_title = Rect::from_min_size(
-                    Pos2::new(screen.left() + 76.0 * sx, screen.top() + 22.0 * sy),
-                    Vec2::new(500.0 * sx, 48.0 * sy),
+                    Pos2::new(vp_rect.left() + 76.0 * s, vp_rect.top() + 22.0 * s),
+                    Vec2::new(500.0 * s, 48.0 * s),
                 );
                 let fallback_msg = Rect::from_min_size(
-                    Pos2::new(screen.left() + 76.0 * sx, screen.top() + 116.0 * sy),
-                    Vec2::new(480.0 * sx, 240.0 * sy),
+                    Pos2::new(vp_rect.left() + 76.0 * s, vp_rect.top() + 116.0 * s),
+                    Vec2::new(480.0 * s, 240.0 * s),
                 );
                 let fallback_ok = Rect::from_min_size(
-                    Pos2::new(screen.left() + 76.0 * sx, screen.top() + 364.0 * sy),
-                    Vec2::new(128.0 * sx, 20.0 * sy),
+                    Pos2::new(vp_rect.left() + 76.0 * s, vp_rect.top() + 364.0 * s),
+                    Vec2::new(128.0 * s, 20.0 * s),
                 );
 
                 let mut title_rect = fallback_title;
@@ -126,7 +124,7 @@ impl MotdVguiUi {
                     Color32::from_rgb(255, 174, 0),
                 );
                 let client_fonts = runtime.client_scheme.fonts.clone();
-                runtime.font_atlas.paint_text(
+                runtime.font_atlas.paint_text_with_scale(
                     ui.painter(),
                     ctx,
                     m.vfs,
@@ -137,37 +135,18 @@ impl MotdVguiUi {
                     title_rect,
                     &title_text,
                     title_col,
-                    VguiTextDrawOpts {
-                        align: TextAlignment::West,
-                        process_hotkey: false,
-                        proportional_scale: true,
-                    },
+                    TextAlignment::West,
+                    false,
+                    s,
                 );
 
-                let html_bg = self.parsed.bg_color.map_or_else(
-                    || {
-                        scheme_color_or(
-                            &runtime.client_scheme,
-                            "ControlDarkBG",
-                            Color32::from_rgba_unmultiplied(0, 0, 0, 180),
-                        )
-                    },
-                    |[r, g, b, a]| Color32::from_rgba_unmultiplied(r, g, b, a),
-                );
-                let border_col = scheme_color_or(
-                    &runtime.client_scheme,
-                    "BorderBright",
-                    Color32::from_rgba_unmultiplied(188, 112, 0, 128),
-                );
+                // Original MOTD HTML box is solid black (or HTML bgcolor) with NO orange border.
+                let html_bg = self.parsed.bg_color.map_or(Color32::BLACK, |[r, g, b, a]| {
+                    Color32::from_rgba_unmultiplied(r, g, b, a)
+                });
                 ui.painter().rect_filled(msg_rect, 0.0, html_bg);
-                ui.painter().rect_stroke(
-                    msg_rect,
-                    0.0,
-                    Stroke::new(1.0, border_col),
-                    StrokeKind::Inside,
-                );
 
-                let pad = self.parsed.margin.clamp(4.0, 20.0);
+                let pad = self.parsed.margin.round().clamp(0.0, 24.0);
                 let inner_msg = msg_rect.shrink(pad);
                 let mut clicked_url = None;
                 ui.scope_builder(egui::UiBuilder::new().max_rect(inner_msg), |ui| {

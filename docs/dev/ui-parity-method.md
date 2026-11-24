@@ -73,16 +73,25 @@ Measured at 800x600, 1280x720, 1280x800, and 1280x1024 (plus all 7 tabs at 1280x
 - **Bottom buttons.** `OK` `(277, 411, 72, 24)*s`, `Cancel` `(357, 411, 72, 24)*s`, `Apply` `(437, 411, 72, 24)*s`, west-aligned with `6 * s` left inset.
 - **Font GDI scaling.** `TrackerScheme` GDI `tall` values map to `ab_glyph` em-height by `0.82 * tall * s` (`Options` 11 px / `Player name` 12 px at `s = 1.0`).
 
+### ClientScheme In-Game Menus (`MOTD.res`, `Teammenu.res`, `Classmenu_*.res`, `MainBuyMenu.res`): DONE
+
+Measured on `de_dust2` across `800x600`, `1280x720`, `1280x800`, and `1280x1024`:
+
+- **4:3 Centered Viewport (`BackgroundPanel.res`).** Scale `s = min(W / 640, H / 480)`, centered `640*s x 480*s` canvas at `vp_x = floor((W - 640*s)/2)`, `vp_y = floor((H - 480*s)/2)`. Panel fills `ViewportBG` (`0, 0, 0, 200`) with rounded radius `round(10*s)` and **no** outer orange stroke; `GapPanel` is a `1 px` warm hairline across `(panel_x..panel_right, vp_y + round(72*s))`.
+- **Fonts & Mnemonics.** `Title` (`Title`, `serverName`, `joinTeam`, `joinClass`) scales by `s` (`0.82 * tall * s`), while `Default` / `DefaultSmall` buttons and descriptions stay unscaled (`1.0`). Single `&` hotkey markers (`&OK`, `&1 PISTOLS`, ...) are stripped cleanly from `ClientScheme` buttons without underline.
+- **MOTD (`MOTD.res` / `motd.txt`).** `Message` HTML box is solid black with no orange border; `motd.txt` CSS `margin` (`8 px`) and `font: 16px/20px` render in 1:1 CSS pixels with `<br>` blank lines preserved.
+- **Team / Class / Buy Menus.** Hidden `vipbutton` (`Teammenu.res`) and `spetsnaz` (`Classmenu_CT.res`) keep their original row slots instead of compacting lower buttons up; `CancelButton` (`0 CANCEL`) is shown only when `allowed_keys` bit 9 or joined state permits cancelling (and on `BuyMenu`). `TeamMenu` `MapInfo` renders plain `maps/<map>.txt` (`Default`, `14 px` row stride) beside a VGUI2 right vertical scrollbar (`sb_w = round(21*s)` with `1 px` `BorderBright` borders and light-grey arrow triangles). `ClassResPanel` overwrites earlier labels sharing `fieldName` (`classes/urban.res` `className` -> `infolabel` at `ypos=228`), matching Valve's `LoadControlSettings`. `BuyMenu` `Divider1` renders as a `1 px` vertical `BorderBright` hairline.
+
 ## Status of the other screens (measured 2026-11-24 at 1280x800)
 
 | Screen | State | Differences seen |
 |---|---|---|
 | Options (`OptionsDialog`) | **DONE** | Built from `OptionsSub*.res` + `MultiplayerAdvancedDialog.res` + `ContentControlDialog.res` in original tab order (`Multiplayer, Audio, Video, Aim, Keyboard, Voice, Content`). Full-frame MAD vs original: `2.72/255` (800x600), `3.33/255` (1280x720), `3.99/255` (1280x800), `3.72/255` (1280x1024); 7 tabs at 1280x800: `2.88-3.99/255` full / `3.69-6.97/255` dialog (remaining delta is player name / Russian Steam overlay strings). |
+| MOTD (`MOTD.res`) | **DONE** | Centered 4:3 `BackgroundPanel` + `16px/20px` CSS HTML + `&OK` stripped. Panel MAD vs original: `5.59` (800x600), `4.05` (1280x720), `3.78` (1280x800), `6.47` (1280x1024); remaining delta is 3D camera/sky bleed behind `alpha=200` `BackgroundPanel` (`5:4` aspect FOV at `1280x1024`) and Russian Steam overlay toast. |
+| Team / Class / Buy menus | **DONE** | Panel MAD vs original: `Team` `8.55` (800x600), `6.30` (1280x720), `6.07` (1280x800), `10.83` (1280x1024, 3D scene delta `25.96` outside panel bleeding through `alpha=200`); `Class` `8.55` (`1280x800`, different intro camera angle); `Buy` `5.12` (`1280x800`, 1px `Divider1`). Remaining panel delta is translucent 3D background/chat/font antialiasing. |
 | New game (`CreateMultiplayerGame*.res`) | not compared | |
 | Find servers (`ServerBrowser`) | not compared | |
 | Console | not compared | The original GameUI console is a TrackerScheme frame (seen top-left in captures). |
-| MOTD | differs | The original is the VGUI2 MOTD (black panel, orange text, HTML link, `OK` button, a 1000x750 frame on 1280x800). Ours is a smaller Steam-style frame with one line. |
-| Team / class / buy menus | not compared | The original team menu shows the map briefing on the right (`maps/<map>.txt`). |
 | Scoreboard, spectator, command menu | not compared | |
 | HUD | partly | It is drawn from `hud.txt` sprites; compare positions and fades at 640x480, 1024x768 and 1280x800. |
 

@@ -7,14 +7,13 @@
 use cs_assets::scheme::{ClassResPanel, LocalizationTable, load_map_briefing};
 use cs_assets::vgui_res::{ControlKind, TextAlignment, VguiCoordMode};
 use cs_vfs::Vfs;
-use egui::{Color32, Key, Pos2, Rect, ScrollArea, Stroke, StrokeKind, Vec2};
+use egui::{Color32, Key, Pos2, Rect, ScrollArea, Stroke, Vec2};
 
 use crate::ui::vgui2::controls::draw_vgui_image_panel;
-use crate::ui::vgui2::font_atlas::VguiTextDrawOpts;
 use crate::ui::vgui2::runtime::{
-    VguiLayoutNode, VguiSchemeKind, modal_backdrop, scheme_color_or,
+    VguiLayoutNode, modal_backdrop, scheme_color_or,
 };
-use crate::ui::vgui2::{VguiRuntime, paint_html_doc_vgui, parse_html_doc};
+use crate::ui::vgui2::VguiRuntime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VguiMenuKind {
@@ -50,6 +49,7 @@ pub struct BuyMenuRenderCtx<'a> {
     pub map_name: &'a str,
     pub is_ct: bool,
     pub allowed_keys: u16,
+    pub can_cancel: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -58,6 +58,7 @@ pub struct BuyClassTeamMenuUi {
     pub hovered_class: Option<String>,
     pub focus_index: usize,
     cached_preview: Option<(String, ClassResPanel)>,
+    map_scroll_y: f32,
 }
 
 impl BuyClassTeamMenuUi {
@@ -72,6 +73,7 @@ impl BuyClassTeamMenuUi {
             self.active_res = Some(path.to_string());
             self.hovered_class = None;
             self.focus_index = 0;
+            self.map_scroll_y = 0.0;
         }
     }
 
@@ -79,6 +81,7 @@ impl BuyClassTeamMenuUi {
         self.active_res = None;
         self.hovered_class = None;
         self.focus_index = 0;
+        self.map_scroll_y = 0.0;
     }
 
     /// Resolve `.res` sub-navigation (`Resource/UI/BuyPistols.res` -> `_CT` / `_TER` variant if present)
@@ -171,11 +174,9 @@ impl BuyClassTeamMenuUi {
                     Color32::from_rgb(255, 176, 0),
                 );
 
-                let sy = (screen.height() / 480.0).max(0.5);
-                let row_step = 32.0 * sy;
+                let s = (vp_rect.height() / 480.0).max(0.5);
                 let mut info_rect: Option<Rect> = None;
                 let mut buttons: Vec<VguiLayoutNode> = Vec::new();
-                let mut hidden_rows = 0usize;
                 let mut cancel_cmd: Option<String> = None;
                 let client_fonts = runtime.client_scheme.fonts.clone();
 
@@ -184,7 +185,7 @@ impl BuyClassTeamMenuUi {
                         || n.field_name.eq_ignore_ascii_case("ClassInfo")
                         || n.field_name.eq_ignore_ascii_case("ItemInfo")
                     {
-                        if n.rect[2] > 20.0 && n.rect[3] > 20.0 && n.rect[0] < screen.right() {
+                        if n.rect[2] > 20.0 && n.rect[3] > 20.0 && n.rect[0] < vp_rect.right() {
                             info_rect = Some(Rect::from_min_size(
                                 Pos2::new(n.rect[0], n.rect[1]),
                                 Vec2::new(n.rect[2], n.rect[3]),
@@ -195,25 +196,36 @@ impl BuyClassTeamMenuUi {
                     if !n.visible {
                         continue;
                     }
-                    let rect = Rect::from_min_size(
-                        Pos2::new(n.rect[0], n.rect[1]),
-                        Vec2::new(n.rect[2].max(16.0), n.rect[3].max(1.0)),
-                    );
                     match n.kind {
                         ControlKind::Divider => {
-                            ui.painter().rect_filled(rect, 0.0, border_col);
+                            let div_rect = if n.rect[2] <= n.rect[3] {
+                                Rect::from_min_size(
+                                    Pos2::new(n.rect[0].round(), n.rect[1].round()),
+                                    Vec2::new(1.0, n.rect[3].round().max(1.0)),
+                                )
+                            } else {
+                                Rect::from_min_size(
+                                    Pos2::new(n.rect[0].round(), n.rect[1].round()),
+                                    Vec2::new(n.rect[2].round().max(1.0), 1.0),
+                                )
+                            };
+                            ui.painter().rect_filled(div_rect, 0.0, border_col);
                         }
                         ControlKind::Label => {
                             if n.label.is_empty() || n.label.starts_with('#') {
                                 continue;
                             }
+                            let rect = Rect::from_min_size(
+                                Pos2::new(n.rect[0], n.rect[1]),
+                                Vec2::new(n.rect[2].max(16.0), n.rect[3].max(1.0)),
+                            );
                             let is_title = n.font.eq_ignore_ascii_case("title")
                                 || n.field_name.eq_ignore_ascii_case("title")
                                 || n.field_name.eq_ignore_ascii_case("joinTeam")
                                 || n.field_name.eq_ignore_ascii_case("joinClass");
                             let font_name = if is_title { "Title" } else { "Default" };
                             let col = if is_title { title_col } else { label_col };
-                            runtime.font_atlas.paint_text(
+                            runtime.font_atlas.paint_text_with_scale(
                                 ui.painter(),
                                 ctx,
                                 b.vfs,
@@ -224,30 +236,25 @@ impl BuyClassTeamMenuUi {
                                 rect,
                                 &n.label,
                                 col,
-                                VguiTextDrawOpts {
-                                    align: n.align,
-                                    process_hotkey: false,
-                                    proportional_scale: true,
-                                },
+                                n.align,
+                                false,
+                                if is_title { s } else { 1.0 },
                             );
                         }
                         ControlKind::Button | ControlKind::MouseOverPanelButton => {
                             if is_class_menu && is_hidden_cz_class_button(b.vfs, &n.field_name) {
-                                hidden_rows += 1;
                                 continue;
                             }
                             if is_team_menu && is_hidden_team_button(n, b.allowed_keys, b.map_name) {
-                                hidden_rows += 1;
                                 continue;
                             }
                             if n.command.eq_ignore_ascii_case("vguicancel") {
+                                if (is_team_menu || is_class_menu) && !b.can_cancel {
+                                    continue;
+                                }
                                 cancel_cmd = Some(n.command.clone());
                             }
-                            let mut node = n.clone();
-                            if hidden_rows > 0 {
-                                node.rect[1] -= hidden_rows as f32 * row_step;
-                            }
-                            buttons.push(node);
+                            buttons.push(n.clone());
                         }
                         _ => {}
                     }
@@ -359,47 +366,108 @@ impl BuyClassTeamMenuUi {
                     }
                 }
 
-                // Right-side info pane (`MapInfo` HTML briefing on TeamMenu, or `ClassInfo`/`ItemInfo` preview).
+                // Right-side info pane (`MapInfo` briefing on TeamMenu, or `ClassInfo`/`ItemInfo` preview).
                 if !is_main_buy && let Some(info_box) = info_rect {
                     let clamped_box = Rect::from_min_max(
-                        info_box.min,
+                        Pos2::new(info_box.left().round(), info_box.top().round()),
                         Pos2::new(
-                            info_box.right().min(screen.right() - 48.0),
-                            info_box.bottom().min(screen.bottom() - 40.0),
+                            info_box.right().min(vp_rect.right() - 48.0 * s).round(),
+                            info_box.bottom().min(vp_rect.bottom() - 40.0 * s).round(),
                         ),
                     );
                     if is_team_menu {
-                        ui.painter().rect_filled(clamped_box, 0.0, dark_bg);
-                        ui.painter().rect_stroke(
-                            clamped_box,
-                            0.0,
-                            Stroke::new(1.0, border_col),
-                            StrokeKind::Inside,
+                        ui.painter()
+                            .rect_filled(clamped_box, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 235));
+                        draw_crisp_border(ui.painter(), clamped_box, border_col);
+
+                        let sb_w = (21.0 * s).round().clamp(18.0, 36.0);
+                        let sb_rect = Rect::from_min_max(
+                            Pos2::new(clamped_box.right() - sb_w, clamped_box.top() + 1.0),
+                            Pos2::new(clamped_box.right() - 1.0, clamped_box.bottom() - 1.0),
                         );
+                        ui.painter()
+                            .rect_filled(sb_rect, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 220));
+                        ui.painter().rect_filled(
+                            Rect::from_min_max(
+                                sb_rect.min,
+                                Pos2::new(sb_rect.left() + 1.0, sb_rect.bottom()),
+                            ),
+                            0.0,
+                            border_col,
+                        );
+                        let top_arrow = Rect::from_min_size(sb_rect.min, Vec2::splat(sb_w));
+                        let bot_arrow = Rect::from_min_size(
+                            Pos2::new(sb_rect.left(), sb_rect.bottom() - sb_w),
+                            Vec2::splat(sb_w),
+                        );
+                        draw_scrollbar_arrow(ui, top_arrow, border_col, true, &mut self.map_scroll_y);
+                        draw_scrollbar_arrow(ui, bot_arrow, border_col, false, &mut self.map_scroll_y);
+
                         if let Some(v) = b.vfs
                             && let Some(brief) = load_map_briefing(v, b.map_name)
                         {
-                            let mut html = parse_html_doc(&brief.replace('\n', "<br>"));
-                            html.text_color = runtime
-                                .client_scheme
-                                .resolve_color("MapDescriptionText")
-                                .unwrap_or([255, 176, 0, 255]);
-                            let inner = clamped_box.shrink(8.0);
-                            ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
+                            let map_col = scheme_color_or(
+                                &runtime.client_scheme,
+                                "MapDescriptionText",
+                                Color32::from_rgb(255, 176, 0),
+                            );
+                            let text_rect = Rect::from_min_max(
+                                Pos2::new(clamped_box.left() + 6.0, clamped_box.top() + 4.0),
+                                Pos2::new(sb_rect.left() - 6.0, clamped_box.bottom() - 4.0),
+                            );
+                            let line_h = 14.0;
+                            let lines = wrap_preview_lines(
+                                &mut runtime.font_atlas,
+                                ctx,
+                                b.vfs,
+                                &client_fonts,
+                                "Default",
+                                screen_h,
+                                &brief,
+                                text_rect.width(),
+                            );
+                            let max_scroll = ((lines.len() as f32 * line_h) - text_rect.height()).max(0.0);
+                            self.map_scroll_y = self.map_scroll_y.clamp(0.0, max_scroll);
+                            let scroll_out = ui.scope_builder(egui::UiBuilder::new().max_rect(text_rect), |ui| {
                                 ScrollArea::vertical()
                                     .id_salt("cs16_team_map_briefing")
-                                    .max_height(inner.height())
+                                    .max_height(text_rect.height())
+                                    .vertical_scroll_offset(self.map_scroll_y)
+                                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                                     .show(ui, |ui| {
-                                        paint_html_doc_vgui(
-                                            ui,
-                                            &html,
-                                            runtime,
-                                            b.vfs,
-                                            VguiSchemeKind::Client,
-                                            screen_h,
+                                        let (alloc, _) = ui.allocate_exact_size(
+                                            Vec2::new(text_rect.width(), (lines.len() as f32 * line_h).max(1.0)),
+                                            egui::Sense::hover(),
                                         );
-                                    });
+                                        let clipped = ui.painter().with_clip_rect(text_rect);
+                                        for (idx, line) in lines.iter().enumerate() {
+                                            if line.is_empty() {
+                                                continue;
+                                            }
+                                            let y = (alloc.top() + idx as f32 * line_h).round();
+                                            let line_r = Rect::from_min_size(
+                                                Pos2::new(alloc.left(), y),
+                                                Vec2::new(alloc.width(), line_h + 4.0),
+                                            );
+                                            runtime.font_atlas.paint_text_with_scale(
+                                                &clipped,
+                                                ctx,
+                                                b.vfs,
+                                                &client_fonts,
+                                                "client",
+                                                "Default",
+                                                screen_h,
+                                                line_r,
+                                                line,
+                                                map_col,
+                                                TextAlignment::NorthWest,
+                                                false,
+                                                1.0,
+                                            );
+                                        }
+                                    })
                             });
+                            self.map_scroll_y = scroll_out.inner.state.clamped_offset().y;
                         }
                     } else if let Some(hover) = self
                         .hovered_class
@@ -407,39 +475,43 @@ impl BuyClassTeamMenuUi {
                         .or_else(|| buttons.first().map(|btn| btn.field_name.clone()))
                         && let Some(panel) = self.preview_panel(b.vfs, b.loc, &hover)
                     {
-                        let sx = (screen.width() / 640.0).max(0.5);
-                        let sy = (screen.height() / 480.0).max(0.5);
                         let origin = clamped_box.min;
 
                         let bg_r = Rect::from_min_size(
-                            Pos2::new(origin.x + panel.image_box[0] * sx, origin.y + panel.image_box[1] * sy),
-                            Vec2::new(panel.image_box[2] * sx, panel.image_box[3] * sy),
+                            Pos2::new(
+                                (origin.x + panel.image_box[0] * s).round(),
+                                (origin.y + panel.image_box[1] * s).round(),
+                            ),
+                            Vec2::new(
+                                (panel.image_box[2] * s).round(),
+                                (panel.image_box[3] * s).round(),
+                            ),
                         );
                         if is_class_menu || panel.image_path.is_some() {
-                            ui.painter().rect_filled(bg_r, 0.0, dark_bg);
-                            ui.painter().rect_stroke(
-                                bg_r,
-                                0.0,
-                                Stroke::new(1.0, border_col),
-                                StrokeKind::Inside,
+                            let img_bg = scheme_color_or(
+                                &runtime.client_scheme,
+                                "WindowBG",
+                                dark_bg,
                             );
+                            ui.painter().rect_filled(bg_r, 0.0, img_bg);
+                            draw_crisp_border(ui.painter(), bg_r, border_col);
                         }
                         if let Some(ref img_path) = panel.image_path
                             && let Some(tex) = runtime.ensure_texture(ctx, b.vfs, img_path)
                         {
                             let img_r = Rect::from_min_size(
                                 Pos2::new(
-                                    origin.x + panel.image_rect[0] * sx,
-                                    origin.y + panel.image_rect[1] * sy,
+                                    origin.x + panel.image_rect[0] * s,
+                                    origin.y + panel.image_rect[1] * s,
                                 ),
-                                Vec2::new(panel.image_rect[2] * sx, panel.image_rect[3] * sy),
+                                Vec2::new(panel.image_rect[2] * s, panel.image_rect[3] * s),
                             );
                             draw_vgui_image_panel(ui.painter(), img_r, Some(&tex), Color32::WHITE);
                         }
                         for lbl in &panel.labels {
                             let lr = Rect::from_min_size(
-                                Pos2::new(origin.x + lbl.x * sx, origin.y + lbl.y * sy),
-                                Vec2::new((lbl.w * sx).max(60.0), (lbl.h * sy).max(16.0)),
+                                Pos2::new(origin.x + lbl.x * s, origin.y + lbl.y * s),
+                                Vec2::new((lbl.w * s).max(60.0), (lbl.h * s).max(16.0)),
                             );
                             let col = if lbl.bright {
                                 title_col
@@ -452,11 +524,14 @@ impl BuyClassTeamMenuUi {
                             };
                             let fname = if lbl.small_font { "DefaultSmall" } else { "Default" };
                             let max_w = lr.width().min(clamped_box.right() - lr.left()).max(60.0);
+                            let min_lh = if lbl.small_font { 12.0 } else { 14.0 };
                             let line_h = runtime
                                 .font_atlas
-                                .measure_text(ctx, b.vfs, &client_fonts, "client", fname, screen_h, "Ay")
+                                .measure_text_with_scale(
+                                    ctx, b.vfs, &client_fonts, "client", fname, screen_h, "Ay", 1.0,
+                                )
                                 .y
-                                .max(14.0);
+                                .max(min_lh);
                             let lines = wrap_preview_lines(
                                 &mut runtime.font_atlas,
                                 ctx,
@@ -476,7 +551,7 @@ impl BuyClassTeamMenuUi {
                                     Pos2::new(lr.left(), y),
                                     Vec2::new(max_w, line_h),
                                 );
-                                runtime.font_atlas.paint_text(
+                                runtime.font_atlas.paint_text_with_scale(
                                     ui.painter(),
                                     ctx,
                                     b.vfs,
@@ -487,11 +562,9 @@ impl BuyClassTeamMenuUi {
                                     line_rect,
                                     line,
                                     col,
-                                    VguiTextDrawOpts {
-                                        align: TextAlignment::NorthWest,
-                                        process_hotkey: false,
-                                        proportional_scale: false,
-                                    },
+                                    TextAlignment::NorthWest,
+                                    false,
+                                    1.0,
                                 );
                             }
                         }
@@ -520,6 +593,57 @@ impl BuyClassTeamMenuUi {
         self.cached_preview = Some((name.to_string(), panel.clone()));
         Some(panel)
     }
+}
+
+fn draw_crisp_border(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let r = Rect::from_min_max(
+        Pos2::new(rect.left().round(), rect.top().round()),
+        Pos2::new(rect.right().round(), rect.bottom().round()),
+    );
+    painter.rect_filled(Rect::from_min_max(r.min, Pos2::new(r.right(), r.top() + 1.0)), 0.0, color);
+    painter.rect_filled(Rect::from_min_max(r.min, Pos2::new(r.left() + 1.0, r.bottom())), 0.0, color);
+    painter.rect_filled(Rect::from_min_max(Pos2::new(r.left(), r.bottom() - 1.0), r.max), 0.0, color);
+    painter.rect_filled(Rect::from_min_max(Pos2::new(r.right() - 1.0, r.top()), r.max), 0.0, color);
+}
+
+fn draw_scrollbar_arrow(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    border_col: Color32,
+    up: bool,
+    scroll_y: &mut f32,
+) {
+    let resp = ui.interact(
+        rect,
+        ui.make_persistent_id(if up { "cs16_sb_up" } else { "cs16_sb_dn" }),
+        egui::Sense::click(),
+    );
+    if resp.clicked() {
+        *scroll_y = (*scroll_y + if up { -28.0 } else { 28.0 }).max(0.0);
+    }
+    draw_crisp_border(ui.painter(), rect, border_col);
+    let half_w = (rect.width() * 0.19).round().max(3.0);
+    let half_h = (rect.height() * 0.10).round().max(2.0);
+    let cx = rect.center().x.round();
+    let cy = rect.center().y.round();
+    let pts = if up {
+        vec![
+            Pos2::new(cx, cy - half_h),
+            Pos2::new(cx - half_w, cy + half_h),
+            Pos2::new(cx + half_w, cy + half_h),
+        ]
+    } else {
+        vec![
+            Pos2::new(cx - half_w, cy - half_h),
+            Pos2::new(cx + half_w, cy - half_h),
+            Pos2::new(cx, cy + half_h),
+        ]
+    };
+    ui.painter().add(egui::Shape::convex_polygon(
+        pts,
+        Color32::from_rgb(176, 174, 174),
+        Stroke::NONE,
+    ));
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -596,7 +720,9 @@ fn wrap_preview_lines(
             }
             let candidate = format!("{current} {word}");
             let w = font_atlas
-                .measure_text(ctx, vfs, scheme_fonts, "client", font_name, screen_h, &candidate)
+                .measure_text_with_scale(
+                    ctx, vfs, scheme_fonts, "client", font_name, screen_h, &candidate, 1.0,
+                )
                 .x;
             if w <= max_width {
                 current = candidate;

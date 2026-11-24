@@ -177,6 +177,8 @@ mod tests {
 
         let urban_panel = crate::scheme::ClassResPanel::load(&vfs, "urban", &loc).expect("urban.res");
         assert_eq!(urban_panel.image_path.as_deref(), Some("gfx/vgui/urban.tga"));
+        assert_eq!(urban_panel.labels.len(), 1);
+        assert_eq!(urban_panel.labels[0].y, 228.0);
 
         let cs_logo = crate::scheme::load_tga_image(&vfs, "gfx/vgui/CS_logo.tga").expect("CS_logo.tga");
         assert_eq!((cs_logo.width, cs_logo.height), (64, 64));

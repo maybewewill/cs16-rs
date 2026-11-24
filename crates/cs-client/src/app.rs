@@ -1322,7 +1322,7 @@ impl Cs16App {
             self.in_game_frames += 1;
             if let Some(ui_mode) = self.launch.startup_ui.clone() {
                 let m = ui_mode.to_ascii_lowercase();
-                if matches!(m.as_str(), "hud" | "buy" | "class" | "scoreboard" | "commandmenu") {
+                if matches!(m.as_str(), "hud" | "buy" | "scoreboard" | "commandmenu") {
                     if self.in_game_frames == 2 {
                         self.session.send_stringcmd("jointeam 2");
                     } else if self.in_game_frames == 6 {
@@ -1338,16 +1338,30 @@ impl Cs16App {
                         match m.as_str() {
                             "buy" => {
                                 self.cvars.set("_vgui_menus", "1");
+                                self.feeds.center = None;
+                                self.feeds.notify.clear();
                                 self.buy_team_class_ui.open_kind(VguiMenuKind::Buy, true);
-                            }
-                            "class" => {
-                                self.cvars.set("_vgui_menus", "1");
-                                self.buy_team_class_ui.open_kind(VguiMenuKind::ClassCt, true);
                             }
                             "scoreboard" => self.scoreboard_toggled = true,
                             "commandmenu" => self.command_menu_ui.set_open(true),
                             _ => {}
                         }
+                        self.startup_ui_applied = true;
+                        self.sync_cursor_capture();
+                    }
+                } else if m == "class" {
+                    if self.in_game_frames == 2 {
+                        self.session.send_stringcmd("jointeam 2");
+                    } else if self.in_game_frames == 10 {
+                        self.motd_ui.open = false;
+                        self.feeds.motd_open = false;
+                        self.buy_team_class_ui.close();
+                        self.cvars.set("_vgui_menus", "1");
+                        self.session.with_hud_mut(|h| {
+                            h.vgui_menu = None;
+                            h.menu = None;
+                        });
+                        self.buy_team_class_ui.open_kind(VguiMenuKind::ClassCt, true);
                         self.startup_ui_applied = true;
                         self.sync_cursor_capture();
                     }
@@ -1490,6 +1504,10 @@ impl Cs16App {
                     .local_slot()
                     .and_then(|s| self.session.with_hud(|h| h.players.get(&(s + 1)).is_some_and(|p| p.team == "CT")))
                     .unwrap_or(false);
+                if kind == VguiMenuKind::Buy && self.buy_team_class_ui.active_res.is_none() {
+                    self.feeds.center = None;
+                    self.feeds.notify.retain(|(s, _)| !s.contains("BUY key"));
+                }
                 self.buy_team_class_ui.open_kind(kind, local_ct);
             }
         } else if !use_vgui_menus {
@@ -1509,11 +1527,21 @@ impl Cs16App {
                 self.overview_tex = OverviewMapTex::load(&rt.egui_ctx, vfs, &map_name);
             }
         }
-        let local_is_ct = self
+        let (local_is_ct, local_has_team) = self
             .session
             .local_slot()
-            .and_then(|s| self.session.with_hud(|h| h.players.get(&(s + 1)).is_some_and(|p| p.team == "CT")))
-            .unwrap_or(true);
+            .and_then(|s| {
+                self.session.with_hud(|h| {
+                    h.players.get(&(s + 1)).map(|p| {
+                        (
+                            p.team == "CT",
+                            !p.team.is_empty() && !p.team.eq_ignore_ascii_case("UNASSIGNED"),
+                        )
+                    })
+                })
+                .flatten()
+            })
+            .unwrap_or((true, false));
         let spec_players: Vec<(u8, String)> = names.iter().map(|(&k, v)| (k + 1, v.clone())).collect();
         let (round_secs_left, spec_hp) = self
             .session
@@ -1758,12 +1786,30 @@ impl Cs16App {
                 }
             }
             if !self.motd_ui.open && !motd_close && self.buy_team_class_ui.active_res.is_some() {
+                let can_cancel = if let Some(ref vm) = active_vgui_menu {
+                    (vm.keys & (1u16 << 9)) != 0
+                } else {
+                    let res = self
+                        .buy_team_class_ui
+                        .active_res
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_ascii_lowercase();
+                    if res.contains("teammenu") {
+                        local_has_team
+                    } else if res.contains("classmenu") {
+                        alive
+                    } else {
+                        true
+                    }
+                };
                 let buy_ctx = BuyMenuRenderCtx {
                     vfs: self.vfs.as_ref(),
                     loc: self.loc.as_ref(),
                     map_name: &map_name,
                     is_ct: local_is_ct,
                     allowed_keys: active_vgui_menu.as_ref().map_or(0, |v| v.keys),
+                    can_cancel,
                 };
                 vgui_cmd_out = self
                     .buy_team_class_ui

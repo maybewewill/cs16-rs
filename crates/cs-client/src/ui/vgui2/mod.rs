@@ -17,6 +17,6 @@ pub use font_atlas::{VguiFontAtlas, VguiTextDrawOpts};
 pub use html::{HtmlBlock, HtmlDoc, HtmlSpan, paint_html_doc, paint_html_doc_vgui, parse_html_doc};
 pub use runtime::{
     TrackerButtonCfg, VguiEvent, VguiLayoutNode, VguiRuntime, VguiSchemeKind, VguiUiSound,
-    install_marlett_into_egui, install_scheme_fonts_into_egui, modal_backdrop, paint_vgui_border,
-    resolve_vgui_text_color,
+    client_ui_viewport, install_marlett_into_egui, install_scheme_fonts_into_egui, modal_backdrop,
+    paint_vgui_border, resolve_vgui_text_color,
 };

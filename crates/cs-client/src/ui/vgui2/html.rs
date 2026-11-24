@@ -7,7 +7,6 @@ use cs_assets::vgui_res::TextAlignment;
 use cs_vfs::Vfs;
 use egui::{Color32, CursorIcon, FontId, RichText, Sense, Stroke, Vec2};
 
-use crate::ui::vgui2::font_atlas::VguiTextDrawOpts;
 use crate::ui::vgui2::runtime::{VguiRuntime, VguiSchemeKind};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -37,6 +36,7 @@ pub struct HtmlDoc {
     pub link_underline: bool,
     pub link_hover_underline: bool,
     pub body_font_size: f32,
+    pub line_height: Option<f32>,
     pub margin: f32,
     pub blocks: Vec<HtmlBlock>,
 }
@@ -51,6 +51,7 @@ impl Default for HtmlDoc {
             link_underline: true,
             link_hover_underline: false,
             body_font_size: 14.0,
+            line_height: None,
             margin: 8.0,
             blocks: Vec::new(),
         }
@@ -178,7 +179,20 @@ pub fn parse_html_doc(html: &str) -> HtmlDoc {
                     }
                 }
                 ("br", _) => {
-                    flush(&mut doc.blocks, &mut current_spans, heading_level, in_li, center_depth > 0);
+                    if current_spans.is_empty() {
+                        doc.blocks.push(HtmlBlock::Paragraph {
+                            spans: Vec::new(),
+                            centered: center_depth > 0,
+                        });
+                    } else {
+                        flush(
+                            &mut doc.blocks,
+                            &mut current_spans,
+                            heading_level,
+                            in_li,
+                            center_depth > 0,
+                        );
+                    }
                 }
                 ("hr", false) => {
                     flush(&mut doc.blocks, &mut current_spans, heading_level, in_li, center_depth > 0);
@@ -315,6 +329,8 @@ pub fn paint_html_doc_vgui(
     let ctx = ui.ctx().clone();
     let scheme_fonts = runtime.scheme_fonts(scheme_kind).clone();
     let scheme_tag = scheme_kind.tag();
+    let prev_item_spacing = ui.spacing().item_spacing;
+    ui.spacing_mut().item_spacing = Vec2::ZERO;
 
     for (b_idx, block) in doc.blocks.iter().enumerate() {
         match block {
@@ -322,12 +338,17 @@ pub fn paint_html_doc_vgui(
                 ui.separator();
             }
             HtmlBlock::Heading { spans, centered, .. } | HtmlBlock::Paragraph { spans, centered } => {
+                if spans.is_empty() {
+                    ui.add_space(doc.line_height.unwrap_or(14.0));
+                    continue;
+                }
                 let layout = if *centered {
                     egui::Layout::left_to_right(egui::Align::Center)
                 } else {
                     egui::Layout::left_to_right(egui::Align::Min)
                 };
                 ui.with_layout(layout.with_main_wrap(true), |ui| {
+                    ui.spacing_mut().item_spacing = Vec2::ZERO;
                     for (s_idx, sp) in spans.iter().enumerate() {
                         let font_name = if sp.size >= 18.0 {
                             "Title"
@@ -336,7 +357,12 @@ pub fn paint_html_doc_vgui(
                         } else {
                             "Default"
                         };
-                        let measured = runtime.font_atlas.measure_text(
+                        let base_tall = scheme_fonts
+                            .resolve(font_name, screen_h)
+                            .or_else(|| scheme_fonts.resolve("Default", screen_h))
+                            .map_or(16.0, |v| v.tall.max(8.0));
+                        let tall_scale = (sp.size / (base_tall * 0.82)).clamp(0.6, 3.0);
+                        let measured = runtime.font_atlas.measure_text_with_scale(
                             &ctx,
                             vfs,
                             &scheme_fonts,
@@ -344,8 +370,13 @@ pub fn paint_html_doc_vgui(
                             font_name,
                             screen_h,
                             &sp.text,
+                            tall_scale,
                         );
-                        let sz = Vec2::new(measured.x.max(4.0), measured.y.max(15.0));
+                        let row_h = doc
+                            .line_height
+                            .unwrap_or_else(|| (sp.size * 1.25).round())
+                            .max(measured.y);
+                        let sz = Vec2::new(measured.x.max(4.0), row_h);
                         let (rect, resp) = ui.allocate_exact_size(
                             sz,
                             if sp.link.is_some() { Sense::click() } else { Sense::hover() },
@@ -360,7 +391,7 @@ pub fn paint_html_doc_vgui(
                                 clicked_url = Some(url.clone());
                             }
                             let col = if resp.hovered() { hover_col } else { link_col };
-                            runtime.font_atlas.paint_text(
+                            runtime.font_atlas.paint_text_with_scale(
                                 ui.painter(),
                                 &ctx,
                                 vfs,
@@ -371,15 +402,13 @@ pub fn paint_html_doc_vgui(
                                 rect,
                                 &sp.text,
                                 col,
-                                VguiTextDrawOpts {
-                                    align: TextAlignment::West,
-                                    process_hotkey: false,
-                                    proportional_scale: false,
-                                },
+                                TextAlignment::West,
+                                false,
+                                tall_scale,
                             );
                             let draw_ul = if resp.hovered() { doc.link_hover_underline } else { doc.link_underline };
                             if draw_ul {
-                                let y = rect.bottom() - 1.0;
+                                let y = (rect.center().y + measured.y * 0.42).round().min(rect.bottom() - 1.0);
                                 ui.painter().line_segment(
                                     [egui::Pos2::new(rect.left(), y), egui::Pos2::new(rect.right(), y)],
                                     Stroke::new(1.0, col),
@@ -387,7 +416,7 @@ pub fn paint_html_doc_vgui(
                             }
                         } else {
                             let col = sp.color.map_or(default_col, rgba_to_color32);
-                            runtime.font_atlas.paint_text(
+                            runtime.font_atlas.paint_text_with_scale(
                                 ui.painter(),
                                 &ctx,
                                 vfs,
@@ -398,16 +427,13 @@ pub fn paint_html_doc_vgui(
                                 rect,
                                 &sp.text,
                                 col,
-                                VguiTextDrawOpts {
-                                    align: TextAlignment::West,
-                                    process_hotkey: false,
-                                    proportional_scale: false,
-                                },
+                                TextAlignment::West,
+                                false,
+                                tall_scale,
                             );
                         }
                     }
                 });
-                ui.add_space(2.0);
             }
             HtmlBlock::BulletItem(spans) => {
                 ui.horizontal_wrapped(|ui| {
@@ -417,6 +443,7 @@ pub fn paint_html_doc_vgui(
             }
         }
     }
+    ui.spacing_mut().item_spacing = prev_item_spacing;
     clicked_url
 }
 
@@ -470,11 +497,38 @@ fn apply_css_rules(css: &str, doc: &mut HtmlDoc) {
                         }
                     }
                     "font" | "font-size" => {
-                        for tok in val.split(|ch: char| ch.is_whitespace() || ch == '/') {
-                            if let Some(px) = tok.trim_end_matches("px").parse::<f32>().ok().filter(|_| tok.contains("px")) {
+                        for tok in val.split_whitespace() {
+                            if let Some((sz_tok, lh_tok)) = tok.split_once('/') {
+                                if let Some(px) = sz_tok
+                                    .strip_suffix("px")
+                                    .and_then(|v| v.parse::<f32>().ok())
+                                {
+                                    doc.body_font_size = px.clamp(10.0, 28.0);
+                                }
+                                if let Some(lh) = lh_tok
+                                    .strip_suffix("px")
+                                    .and_then(|v| v.parse::<f32>().ok())
+                                {
+                                    doc.line_height = Some(lh.clamp(10.0, 40.0));
+                                }
+                                break;
+                            }
+                            if let Some(px) = tok
+                                .strip_suffix("px")
+                                .and_then(|v| v.parse::<f32>().ok())
+                            {
                                 doc.body_font_size = px.clamp(10.0, 28.0);
                                 break;
                             }
+                        }
+                    }
+                    "line-height" => {
+                        if let Ok(lh) = val
+                            .trim_end_matches("px")
+                            .trim()
+                            .parse::<f32>()
+                        {
+                            doc.line_height = Some(lh.clamp(10.0, 40.0));
                         }
                     }
                     "margin" => {

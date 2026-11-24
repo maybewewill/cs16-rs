@@ -255,6 +255,21 @@ impl Default for VguiRuntime {
     }
 }
 
+/// Centered 4:3 (`640x480`) proportional canvas used by retail CS 1.6 `ClientScheme` UIs
+/// (`BackgroundPanel.res`, `MOTD.res`, `TeamMenu.res`, `ClassMenu_*.res`, `Buy*.res`).
+/// Measured across 800x600 (`0,0,800x600`), 1280x720 (`160,0,960x720`), 1280x800 (`107,0,1067x800`),
+/// and 1280x1024 (`0,32,1280x960`).
+pub fn client_ui_viewport(screen: Rect) -> Rect {
+    let sx = screen.width() / 640.0;
+    let sy = screen.height() / 480.0;
+    let s = sx.min(sy).max(0.5);
+    let w = (640.0 * s).round();
+    let h = (480.0 * s).round();
+    let x = screen.left() + ((screen.width() - w) * 0.5).floor();
+    let y = screen.top() + ((screen.height() - h) * 0.5).floor();
+    Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, h))
+}
+
 impl VguiRuntime {
     pub fn new() -> Self {
         Self {
@@ -651,9 +666,9 @@ impl VguiRuntime {
         out
     }
 
-    /// Paint the shared black-and-orange CS 1.6 `Resource/UI/BackgroundPanel.res` backdrop,
-    /// returning the proportional screen rect inside which `MOTD.res` / `Teammenu.res` / `Buy*.res`
-    /// resolve their coordinates.
+    /// Paint the shared black-and-amber CS 1.6 `Resource/UI/BackgroundPanel.res` backdrop inside
+    /// the centered 4:3 [`client_ui_viewport`], returning that viewport rect so `MOTD.res`,
+    /// `Teammenu.res`, `Classmenu_*.res`, and `Buy*.res` resolve against it identically to retail.
     pub fn paint_background_panel(
         &mut self,
         ctx: &egui::Context,
@@ -665,12 +680,17 @@ impl VguiRuntime {
         if let Some(v) = vfs {
             self.load_res(v, "resource/UI/BackgroundPanel.res");
         }
-        let vp = [screen.left(), screen.top(), screen.width(), screen.height()];
-        let sx = (screen.width() / 640.0).max(0.5);
-        let sy = (screen.height() / 480.0).max(0.5);
+        let client_vp = client_ui_viewport(screen);
+        let vp = [
+            client_vp.left(),
+            client_vp.top(),
+            client_vp.width(),
+            client_vp.height(),
+        ];
+        let s = (client_vp.height() / 480.0).max(0.5);
         let fallback_panel = Rect::from_min_max(
-            Pos2::new(screen.left() + 20.0 * sx, screen.top() + 20.0 * sy),
-            Pos2::new(screen.left() + 620.0 * sx, screen.top() + 460.0 * sy),
+            Pos2::new(client_vp.left() + 20.0 * s, client_vp.top() + 20.0 * s),
+            Pos2::new(client_vp.left() + 620.0 * s, client_vp.top() + 460.0 * s),
         );
         let panel_rect = if self.doc("resource/UI/BackgroundPanel.res").is_some() {
             let tl = self
@@ -689,11 +709,6 @@ impl VguiRuntime {
             "ViewportBG",
             Color32::from_rgba_unmultiplied(0, 0, 0, 200),
         );
-        let border_col = scheme_color_or(
-            &self.client_scheme,
-            "BorderBright",
-            Color32::from_rgba_unmultiplied(188, 112, 0, 128),
-        );
         let title_col = scheme_color_or(
             &self.client_scheme,
             "TitleText",
@@ -705,37 +720,36 @@ impl VguiRuntime {
             Color32::from_rgb(255, 174, 0),
         );
 
-        let corner = (10.0 * sx.min(sy)).round() as u8;
+        let corner = (10.0 * s).round() as u8;
+        // Original BackgroundPanel has ViewportBG rounded fill with NO outer orange stroke.
         painter.rect_filled(panel_rect, CornerRadius::same(corner), bg_fill);
-        painter.rect_stroke(
-            panel_rect,
-            CornerRadius::same(corner),
-            Stroke::new(1.0, border_col),
-            StrokeKind::Inside,
-        );
 
-        let gap_rect = self
+        // `GapPanel` hairline (`y = 72*s`, 1px warm light-grey/amber hairline measured at 170,153,143).
+        let gap_y = self
             .doc_control_rect("resource/UI/BackgroundPanel.res", "GapPanel", vp)
-            .map_or_else(
-                || Rect::from_min_size(Pos2::new(panel_rect.left(), screen.top() + 72.0 * sy), Vec2::new(panel_rect.width(), (2.0 * sy).max(1.0))),
-                |r| Rect::from_min_size(Pos2::new(r[0], r[1]), Vec2::new(r[2], r[3].max(1.0))),
-            );
-        painter.rect_filled(gap_rect, 0.0, border_col);
+            .map_or(client_vp.top() + 72.0 * s, |r| r[1])
+            .round();
+        let hairline_col = Color32::from_rgba_unmultiplied(210, 195, 185, 160);
+        painter.rect_filled(
+            Rect::from_min_size(Pos2::new(panel_rect.left(), gap_y), Vec2::new(panel_rect.width(), 1.0)),
+            0.0,
+            hairline_col,
+        );
 
         let icon_rect = self
             .doc_control_rect("resource/UI/BackgroundPanel.res", "ExclamationPanel", vp)
             .map_or_else(
-                || Rect::from_min_size(Pos2::new(panel_rect.left() + 6.0 * sx, panel_rect.top() + 6.0 * sy), Vec2::splat(40.0 * sy)),
+                || Rect::from_min_size(Pos2::new(panel_rect.left() + 6.0 * s, panel_rect.top() + 6.0 * s), Vec2::splat(40.0 * s)),
                 |r| {
-                    let s = r[3].max(20.0);
-                    Rect::from_min_size(Pos2::new(r[0], r[1]), Vec2::splat(s))
+                    let sz = r[3].max(20.0);
+                    Rect::from_min_size(Pos2::new(r[0], r[1]), Vec2::splat(sz))
                 },
             );
         let img_path = self
             .doc("resource/UI/BackgroundPanel.res")
             .and_then(|d| d.find("ExclamationPanel"))
             .map(|c| c.image.clone())
-            .filter(|s| !s.is_empty())
+            .filter(|p| !p.is_empty())
             .unwrap_or_else(|| "gfx/vgui/CS_logo".to_string());
         if let Some(tex) = self.ensure_texture(ctx, vfs, &img_path) {
             draw_vgui_image_panel(painter, icon_rect, Some(&tex), icon_col);
@@ -745,11 +759,11 @@ impl VguiRuntime {
             let cap_rect = self
                 .doc_control_rect("resource/UI/BackgroundPanel.res", "CaptionLabel", vp)
                 .map_or_else(
-                    || Rect::from_min_size(Pos2::new(screen.left() + 70.0 * sx, screen.top() + 22.0 * sy), Vec2::new(450.0 * sx, 48.0 * sy)),
+                    || Rect::from_min_size(Pos2::new(client_vp.left() + 70.0 * s, client_vp.top() + 22.0 * s), Vec2::new(450.0 * s, 48.0 * s)),
                     |r| Rect::from_min_size(Pos2::new(r[0], r[1]), Vec2::new(r[2], r[3])),
                 );
             let screen_h = screen.height().round().max(480.0) as u32;
-            self.font_atlas.paint_text(
+            self.font_atlas.paint_text_with_scale(
                 painter,
                 ctx,
                 vfs,
@@ -760,18 +774,16 @@ impl VguiRuntime {
                 cap_rect,
                 caption,
                 title_col,
-                VguiTextDrawOpts {
-                    align: TextAlignment::West,
-                    process_hotkey: false,
-                    proportional_scale: true,
-                },
+                TextAlignment::West,
+                false,
+                s,
             );
         }
 
-        screen
+        client_vp
     }
 
-    /// Render a `ClientScheme.res` flat translucent black & amber button with rollover/click/release sounds.
+    /// Render a `ClientScheme.res` translucent dark & amber button matching original Steam CS 1.6.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_client_button(
         &mut self,
@@ -781,9 +793,9 @@ impl VguiRuntime {
         id_salt: &str,
         rect: Rect,
         label: &str,
-        default_button: bool,
+        _default_button: bool,
         enabled: bool,
-        selected: bool,
+        _selected: bool,
         font_name: &str,
         align: TextAlignment,
         screen_h: u32,
@@ -798,32 +810,40 @@ impl VguiRuntime {
         let scheme = &self.client_scheme;
         let bg = if !enabled {
             scheme_color_or(scheme, "ButtonBG", Color32::from_rgba_unmultiplied(0, 0, 0, 64))
-        } else if resp.is_pointer_button_down_on() || selected {
-            scheme_color_or(scheme, "SelectionBG", Color32::from_rgba_unmultiplied(255, 176, 0, 110))
-        } else if resp.hovered() {
+        } else if resp.is_pointer_button_down_on() || resp.hovered() {
             scheme_color_or(scheme, "SelectionBG", Color32::from_rgba_unmultiplied(255, 176, 0, 100))
         } else {
             scheme_color_or(scheme, "ButtonBG", Color32::from_rgba_unmultiplied(0, 0, 0, 64))
         };
-        let border_col = if resp.hovered() || default_button || selected {
+        let border_col = if !enabled {
+            Color32::from_rgba_unmultiplied(80, 48, 0, 110)
+        } else if resp.hovered() {
             scheme_color_or(scheme, "BorderBuyPreset", Color32::from_rgba_unmultiplied(255, 176, 0, 220))
         } else {
             scheme_color_or(scheme, "BorderBright", Color32::from_rgba_unmultiplied(188, 112, 0, 128))
         };
         let fg = if !enabled {
             scheme_color_or(scheme, "DisabledText1", Color32::from_rgb(80, 48, 0))
-        } else if resp.hovered() || selected {
+        } else if resp.hovered() {
             scheme_color_or(scheme, "BrightControlText", Color32::from_rgb(255, 200, 40))
         } else {
             scheme_color_or(scheme, "ControlText", Color32::from_rgb(255, 176, 0))
         };
 
+        let r = Rect::from_min_max(
+            Pos2::new(rect.left().round(), rect.top().round()),
+            Pos2::new(rect.right().round(), rect.bottom().round()),
+        );
         let painter = ui.painter();
-        painter.rect_filled(rect, 0.0, bg);
-        painter.rect_stroke(rect, 0.0, Stroke::new(1.0, border_col), StrokeKind::Inside);
+        painter.rect_filled(r, 0.0, bg);
+        painter.rect_filled(Rect::from_min_max(r.min, Pos2::new(r.right(), r.top() + 1.0)), 0.0, border_col);
+        painter.rect_filled(Rect::from_min_max(r.min, Pos2::new(r.left() + 1.0, r.bottom())), 0.0, border_col);
+        painter.rect_filled(Rect::from_min_max(Pos2::new(r.left(), r.bottom() - 1.0), r.max), 0.0, border_col);
+        painter.rect_filled(Rect::from_min_max(Pos2::new(r.right() - 1.0, r.top()), r.max), 0.0, border_col);
 
-        let text_rect = rect.shrink2(Vec2::new(8.0, 2.0));
-        self.font_atlas.paint_text(
+        let text_rect = r.shrink2(Vec2::new(6.0, 0.0));
+        let (clean_label, _) = crate::ui::vgui2::font_atlas::strip_vgui_hotkey(label);
+        self.font_atlas.paint_text_with_scale(
             painter,
             ctx,
             vfs,
@@ -832,13 +852,11 @@ impl VguiRuntime {
             font_name,
             screen_h,
             text_rect,
-            label,
+            &clean_label,
             fg,
-            VguiTextDrawOpts {
-                align,
-                process_hotkey: true,
-                proportional_scale: true,
-            },
+            align,
+            false,
+            1.0,
         );
         resp
     }
