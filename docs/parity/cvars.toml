@@ -880,8 +880,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cf
 
 [[item]]
 id = "cl_bob"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs; crates/cs-client/tests/phase8_render.rs::view_effects_camera_fov_and_screen_fade_behave_like_goldsrc"
 
 [[item]]
 id = "cl_charset"
@@ -1175,8 +1175,8 @@ evidence = "crates/cs-cvar/src/lib.rs::executes_cvars_binds_aliases_and_roundtri
 
 [[item]]
 id = "default_fov"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/camera.rs; crates/cs-client/tests/phase8_render.rs::view_effects_camera_fov_and_screen_fade_behave_like_goldsrc"
 
 [[item]]
 id = "delta_clear"
@@ -1300,8 +1300,8 @@ evidence = "dispatched in crates/cs-cvar/src/lib.rs and legacy MatchWorld (not i
 
 [[item]]
 id = "gl_ansio"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/render/bsp_renderer.rs; crates/cs-client/src/app.rs; crates/cs-web/src/wasm_entry.rs"
 
 [[item]]
 id = "gl_clear"
@@ -2015,8 +2015,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_r_
 
 [[item]]
 id = "r_decals"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/render/decal_renderer.rs; crates/cs-client/tests/phase8_render.rs"
 
 [[item]]
 id = "r_detailtextures"
@@ -3122,3 +3122,48 @@ evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/app.rs; crates/
 id = "cl_movespeedkey"
 status = "tested"
 evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/app.rs; crates/cs-client/src/input.rs::tests::the_speeds_come_from_the_cvars_and_walking_scales_them (read into usercmd MoveSpeeds::walk_key)"
+
+[[item]]
+id = "viewmodel_fov"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/camera.rs; crates/cs-client/tests/phase8_render.rs::view_effects_camera_fov_and_screen_fade_behave_like_goldsrc"
+
+[[item]]
+id = "r_lightmap"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/render/bsp_renderer.rs; crates/cs-client/src/app.rs; crates/cs-web/src/wasm_entry.rs"
+
+[[item]]
+id = "gl_msaa"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/render/mod.rs; crates/cs-client/tests/phase8_render.rs::real_assets_and_headless_gpu_offscreen_render_if_installed"
+
+[[item]]
+id = "r_software_mode"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/render/gamma.rs; crates/cs-client/tests/phase8_render.rs::real_assets_and_headless_gpu_offscreen_render_if_installed"
+
+[[item]]
+id = "cl_bobcycle"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs; crates/cs-client/tests/phase8_render.rs::view_effects_camera_fov_and_screen_fade_behave_like_goldsrc"
+
+[[item]]
+id = "cl_bobup"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs; crates/cs-client/tests/phase8_render.rs::view_effects_camera_fov_and_screen_fade_behave_like_goldsrc"
+
+[[item]]
+id = "cl_rollangle"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs; crates/cs-client/tests/phase8_render.rs::view_effects_camera_fov_and_screen_fade_behave_like_goldsrc"
+
+[[item]]
+id = "cl_rollspeed"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs; crates/cs-client/tests/phase8_render.rs::view_effects_camera_fov_and_screen_fade_behave_like_goldsrc"
+
+[[item]]
+id = "cl_viewmodel_lag"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs; crates/cs-client/tests/phase8_render.rs::view_effects_camera_fov_and_screen_fade_behave_like_goldsrc"
