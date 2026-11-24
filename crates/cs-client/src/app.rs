@@ -34,6 +34,7 @@ use cs_client::input::{
     CmdClock, CmdParams, ConsoleRoute, Held, MoveSpeeds, build_usercmd, route_unknown, weapon_for_slot,
 };
 use cs_client::render::bsp_renderer::BspRenderStats;
+use cs_client::render::lighting::{GpuLightsUniform, TextureFilterMode};
 use cs_client::render::mdl_renderer::{StudioInstance, viewmodel_transform};
 use cs_client::render::scene::ModelRegistry;
 use cs_client::render::{RenderSettings, Renderer, SceneDynamicData};
@@ -1036,7 +1037,8 @@ impl Cs16App {
         self.audio
             .sync_menu_music(self.vfs.as_ref(), want_menu_music, mp3_vol);
 
-        let default_fov = finite_or(self.cvars.get_f32("fov_default"), 90.0).clamp(60.0, 120.0);
+        let default_fov = finite_or(self.cvars.get_f32("default_fov"), 90.0)
+            .clamp(60.0, 120.0);
 
         // 2. The frame of the session.
         let mut view: Option<FrameView> = None;
@@ -1047,6 +1049,14 @@ impl Cs16App {
                 right_hand: self.cvars.get_bool("cl_righthand"),
                 draw_viewmodel: self.cvars.get_bool("r_drawviewmodel"),
                 default_fov,
+                viewmodel_fov: finite_or(self.cvars.get_f32("viewmodel_fov"), 90.0)
+                    .clamp(50.0, 120.0),
+                cl_bob: finite_or(self.cvars.get_f32("cl_bob"), 0.01),
+                cl_bobcycle: finite_or(self.cvars.get_f32("cl_bobcycle"), 0.8),
+                cl_bobup: finite_or(self.cvars.get_f32("cl_bobup"), 0.5),
+                cl_rollangle: finite_or(self.cvars.get_f32("cl_rollangle"), 2.0),
+                cl_rollspeed: finite_or(self.cvars.get_f32("cl_rollspeed"), 200.0),
+                cl_viewmodel_lag: finite_or(self.cvars.get_f32("cl_viewmodel_lag"), 1.0),
             };
             let angles = Vec3::new(
                 finite_or(self.camera.pitch_deg, 0.0),
@@ -1070,6 +1080,10 @@ impl Cs16App {
             }
             let local_entity = self.session.local_slot().map(|s| u16::from(s) + 1);
             self.play_sounds(v.eye, local_entity);
+            let master = finite_or(self.cvars.get_f32("volume"), 1.0).clamp(0.0, 1.0);
+            for path in &v.anim_sounds {
+                self.audio.play_2d(self.vfs.as_ref(), path, 0.8 * master);
+            }
         }
         let paused = self.any_modal_open();
         let names = self.session.player_names();
@@ -1168,6 +1182,7 @@ impl Cs16App {
                     scoped,
                     eye: v.eye,
                     yaw_deg: self.camera.yaw_deg,
+                    underwater_tint: v.underwater_tint,
                 };
                 draw_cs16_hud(&rt.egui_ctx, rt.hud_sprites.as_ref(), &view);
             });
@@ -1266,24 +1281,39 @@ impl Cs16App {
         let mut viewmodel_inst: Option<(String, glam::Mat4, i32, i32, f32, bool)> = None;
         let mut beams = Vec::new();
         let mut points = Vec::new();
+        let mut decals = Vec::new();
+        let mut custom_decals = std::collections::HashMap::new();
+        let mut lightstyles = [1.0f32; 64];
+        let mut lights = GpuLightsUniform::default();
+        let mut elights = Vec::new();
+        let mut fog = None;
         let mut scene = None;
         let mut sensitivity_scale = 1.0;
         if let Some(v) = view {
             let punch_x = finite_or(v.punch.x, 0.0);
             let punch_y = finite_or(v.punch.y, 0.0);
             let punch_z = finite_or(v.punch.z, 0.0);
-            render_cam.pitch_deg = (finite_or(render_cam.pitch_deg, 0.0) + punch_x).clamp(-89.0, 89.0);
-            render_cam.yaw_deg = (finite_or(render_cam.yaw_deg, 0.0) + punch_y).rem_euclid(360.0);
-            render_cam.roll_deg = punch_z.clamp(-90.0, 90.0);
-            fov = finite_or(v.fov, default_fov).clamp(10.0, 120.0);
+            render_cam.position.z += finite_or(v.bob, 0.0) + finite_or(v.shake_z, 0.0);
+            render_cam.pitch_deg =
+                (finite_or(render_cam.pitch_deg, 0.0) + punch_x + finite_or(v.shake_angles.x, 0.0))
+                    .clamp(-89.0, 89.0);
+            render_cam.yaw_deg =
+                (finite_or(render_cam.yaw_deg, 0.0) + punch_y + finite_or(v.shake_angles.y, 0.0))
+                    .rem_euclid(360.0);
+            render_cam.roll_deg =
+                (punch_z + finite_or(v.roll_deg, 0.0) + finite_or(v.shake_angles.z, 0.0))
+                    .clamp(-90.0, 90.0);
+            fov = (finite_or(v.fov, default_fov) + finite_or(v.underwater_fov_delta, 0.0))
+                .clamp(10.0, 120.0);
             sensitivity_scale = (fov / 90.0).clamp(0.2, 1.0);
             if let Some(vm) = &v.viewmodel {
                 let eye = if v.eye.is_finite() { v.eye } else { Vec3::ZERO };
+                let bob_off = Vec3::new(0.0, 0.0, finite_or(v.bob, 0.0) * 0.4) + v.viewmodel_lag;
                 let xf = viewmodel_transform(
                     eye,
                     render_cam.yaw_deg,
                     render_cam.pitch_deg,
-                    Vec3::ZERO,
+                    bob_off,
                     vm.right_hand,
                 );
                 viewmodel_inst = Some((
@@ -1297,6 +1327,12 @@ impl Cs16App {
             }
             beams = v.beams;
             points = v.points;
+            decals = v.decals;
+            custom_decals = v.custom_decals;
+            lightstyles = v.lightstyles;
+            lights = v.lights;
+            elights = v.elights;
+            fog = v.fog;
             scene = Some(v.scene);
         }
         rt.renderer.set_entity_scene(scene);
@@ -1304,23 +1340,32 @@ impl Cs16App {
 
         let debug_mode = if self.cvars.get_bool("r_lightmap_only") {
             1.0
-        } else if self.cvars.get_bool("r_fullbright") {
+        } else if self.cvars.get_bool("r_fullbright") || !self.cvars.get_bool("r_lightmap") {
             2.0
         } else {
             0.0
         };
-        let use_nearest = self
-            .cvars
-            .get_str("gl_texturemode")
-            .eq_ignore_ascii_case("GL_NEAREST");
+        let texture_mode = TextureFilterMode::parse(self.cvars.get_str("gl_texturemode"));
+        let anisotropy = self.cvars.get_i32("gl_ansio").clamp(1, 16) as u16;
+        let msaa_samples = if self.cvars.get_i32("gl_msaa") >= 4 { 4 } else { 1 };
+        let viewmodel_fov = finite_or(self.cvars.get_f32("viewmodel_fov"), 90.0).clamp(50.0, 120.0);
         let settings = RenderSettings {
-            gamma: finite_or(self.cvars.get_f32("gamma"), 2.2).clamp(1.0, 4.0),
+            gamma: finite_or(self.cvars.get_f32("gamma"), 2.5).clamp(1.0, 4.0),
+            texgamma: finite_or(self.cvars.get_f32("texgamma"), 2.0).clamp(0.5, 4.0),
             brightness: finite_or(self.cvars.get_f32("brightness"), 1.0).clamp(0.3, 2.5),
             fov_deg: fov,
+            viewmodel_fov,
             aspect_mode: self.cvars.get_str("vid_aspect_mode"),
-            use_nearest_filter: use_nearest,
+            texture_mode,
+            anisotropy,
+            msaa_samples,
+            software_mode: self.cvars.get_bool("r_software_mode"),
+            r_vis: self.cvars.get_bool("r_vis"),
+            r_decals: self.cvars.get_i32("r_decals").max(0) as usize,
+            wave_height: 0.0,
             debug_mode,
             time_sec,
+            fog,
         };
         let vm_ref = viewmodel_inst.as_ref().map(|(path, xf, seq, body, started, right_hand)| {
             StudioInstance {
@@ -1343,6 +1388,11 @@ impl Cs16App {
             viewmodel: vm_ref,
             beams: &beams,
             points: &points,
+            decals: &decals,
+            custom_decals: Some(&custom_decals),
+            lightstyles: &lightstyles,
+            lights,
+            elights: &elights,
         };
 
         self.frame_count += 1;

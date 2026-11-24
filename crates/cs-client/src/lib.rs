@@ -7,3 +7,4 @@ pub mod input;
 pub mod render;
 pub mod ui;
 pub mod view;
+pub mod view_effects;

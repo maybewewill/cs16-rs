@@ -894,11 +894,35 @@ impl MdlRenderer {
     }
 
     pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, prepared: &PreparedMdlPass) {
+        self.draw_filtered(pass, prepared, |_| true);
+    }
+
+    pub fn draw_opaque<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, prepared: &PreparedMdlPass) {
+        self.draw_filtered(pass, prepared, |k| k == MdlPipelineKind::Opaque);
+    }
+
+    pub fn draw_translucent<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        prepared: &PreparedMdlPass,
+    ) {
+        self.draw_filtered(pass, prepared, |k| k != MdlPipelineKind::Opaque);
+    }
+
+    fn draw_filtered<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        prepared: &PreparedMdlPass,
+        pred: fn(MdlPipelineKind) -> bool,
+    ) {
         if prepared.draws.is_empty() {
             return;
         }
         pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
         for d in &prepared.draws {
+            if !pred(d.pipe_kind) {
+                continue;
+            }
             let Some(Some(cached)) = self.cache.get(&d.model_key) else {
                 continue;
             };

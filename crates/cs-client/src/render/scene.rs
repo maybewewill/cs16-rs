@@ -13,6 +13,8 @@
 //! `R_DrawBrushModel`), `ref/gl/gl_sprite.c` (`R_DrawSpriteModel`, `R_SpriteGlowBlend`).
 //! The Valve HLSDK is read-for-behaviour only and nothing is ported from it.
 
+use std::collections::HashMap;
+
 use cs_assets::spr::SpriteType;
 use glam::{Mat4, Vec3, Vec4};
 
@@ -256,6 +258,12 @@ pub struct RenderEntity {
     pub scale: f32,
     /// A studio model merged onto this one's bones (`EF_BONEMERGE`: the weapon a player holds).
     pub attached: Option<ModelHandle>,
+    pub controllers: [u8; 4],
+    pub mouth: u8,
+    pub blending: [u8; 2],
+    pub gait: Option<(i32, f32)>,
+    pub prev_sequence: Option<(i32, f32, f32)>,
+    pub scroll_speed: f32,
 }
 
 impl RenderEntity {
@@ -280,6 +288,12 @@ impl RenderEntity {
             renderfx: 0,
             scale: 0.0,
             attached: None,
+            controllers: [127, 127, 127, 127],
+            mouth: 0,
+            blending: [0, 0],
+            gait: None,
+            prev_sequence: None,
+            scroll_speed: 0.0,
         }
     }
 }
@@ -362,33 +376,75 @@ pub fn studio_matrix(origin: Vec3, angles: Vec3, scale: f32, player: bool) -> Ma
     entity_matrix(origin, Vec3::new(pitch, angles.y, angles.z), s)
 }
 
-/// Port of `CL_FxBlend` (`ref/gl/gl_rmain.c`, read 2026-11-23), returning the 0..=255 blend.
-///
-/// `kRenderFx` ids follow `const.h` (distort 15, hologram 16). Deviations: the fade/solid fx mutate `renderamt` in the engine (state kept per entity); here
-/// they return the current `renderamt` unchanged. Hologram/distort add `COM_RandomLong(-32, 31)`
-/// in the engine; here the jitter is omitted. Both are assumptions to revisit with the shell.
-pub fn fx_blend(e: &RenderEntity, time: f32, view: &ViewBasis) -> i32 {
+/// Tracks stateful fade-in/fade-out `renderfx` ramps (`FadeSlow`, `FadeFast`, `SolidSlow`, `SolidFast`).
+#[derive(Debug, Clone, Default)]
+pub struct FxFadeTracker {
+    entries: HashMap<u16, (u8, f32, f32)>, // entity -> (last_fx, start_time, base_amt)
+}
+
+impl FxFadeTracker {
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    pub fn eval_fade(&mut self, entity: u16, fx: u8, base_amt: i32, time: f32) -> i32 {
+        let is_fade = matches!(
+            fx,
+            RENDERFX_FADE_SLOW | RENDERFX_FADE_FAST | RENDERFX_SOLID_SLOW | RENDERFX_SOLID_FAST
+        );
+        if !is_fade {
+            self.entries.remove(&entity);
+            return base_amt;
+        }
+        let entry = self
+            .entries
+            .entry(entity)
+            .or_insert((fx, time, base_amt as f32));
+        if entry.0 != fx {
+            *entry = (fx, time, base_amt as f32);
+        }
+        let elapsed = (time - entry.1).max(0.0);
+        match fx {
+            RENDERFX_FADE_SLOW => (entry.2 - elapsed * 25.0).clamp(0.0, 255.0) as i32,
+            RENDERFX_FADE_FAST => (entry.2 - elapsed * 100.0).clamp(0.0, 255.0) as i32,
+            RENDERFX_SOLID_SLOW => (entry.2 + elapsed * 25.0).clamp(0.0, 255.0) as i32,
+            RENDERFX_SOLID_FAST => (entry.2 + elapsed * 100.0).clamp(0.0, 255.0) as i32,
+            _ => base_amt,
+        }
+    }
+}
+
+/// Port of `CL_FxBlend` (`ref/gl/gl_rmain.c`), returning 0..=255 blend with optional fade tracking.
+pub fn fx_blend_tracked(
+    e: &RenderEntity,
+    time: f32,
+    view: &ViewBasis,
+    tracker: Option<&mut FxFadeTracker>,
+) -> i32 {
     let amt = i32::from(e.renderamt);
     let offset = f32::from(e.index) * 363.0;
     let t = f64::from(time);
     let off = f64::from(offset);
-    // C: `e->curstate.renderamt + 0x40 * sin(...)` is a double expression truncated to int.
     let pulse = |scale: f64, speed: f64| (f64::from(amt) + scale * (t * speed + off).sin()) as i32;
     let gate = |v: f64| if (v as i32) < 0 { 0 } else { amt };
     match e.renderfx {
-        // gl_rmain.c:1228-1237: Wide pulses swing by 0x40, the others by 0x10.
         RENDERFX_PULSE_SLOW_WIDE => pulse(64.0, 2.0),
         RENDERFX_PULSE_FAST_WIDE => pulse(64.0, 8.0),
         RENDERFX_PULSE_SLOW => pulse(16.0, 2.0),
         RENDERFX_PULSE_FAST => pulse(16.0, 8.0),
-        // 5 FadeSlow, 6 FadeFast, 7 SolidSlow, 8 SolidFast: see the doc comment.
+        RENDERFX_FADE_SLOW | RENDERFX_FADE_FAST | RENDERFX_SOLID_SLOW | RENDERFX_SOLID_FAST => {
+            if let Some(tr) = tracker {
+                tr.eval_fade(e.index, e.renderfx, amt, time)
+            } else {
+                amt
+            }
+        }
         RENDERFX_STROBE_SLOW => gate(20.0 * (t * 4.0 + off).sin()),
         RENDERFX_STROBE_FAST => gate(20.0 * (t * 16.0 + off).sin()),
         RENDERFX_STROBE_FASTER => gate(20.0 * (t * 36.0 + off).sin()),
         RENDERFX_FLICKER_SLOW => gate(20.0 * ((t * 2.0).sin() + (t * 17.0 + off).sin())),
         RENDERFX_FLICKER_FAST => gate(20.0 * ((t * 16.0).sin() + (t * 23.0 + off).sin())),
         RENDERFX_DISTORT | RENDERFX_HOLOGRAM => {
-            // Distort turns the distance fade off (dist = 1).
             let dist = if e.renderfx == RENDERFX_DISTORT {
                 1.0
             } else {
@@ -404,6 +460,11 @@ pub fn fx_blend(e: &RenderEntity, time: f32, view: &ViewBasis) -> i32 {
         }
         _ => amt,
     }
+}
+
+/// Port of `CL_FxBlend` (`ref/gl/gl_rmain.c`), stateless snapshot variant.
+pub fn fx_blend(e: &RenderEntity, time: f32, view: &ViewBasis) -> i32 {
+    fx_blend_tracked(e, time, view, None)
 }
 
 /// Glow-sprite brightness and scale multiplier from the view distance: the distance part of
@@ -543,18 +604,27 @@ pub struct BrushDraw {
 #[derive(Debug, Clone)]
 pub struct StudioDraw {
     pub model: ModelHandle,
+    pub origin: Vec3,
     pub matrix: Mat4,
     pub sequence: i32,
     pub frame: f32,
     pub animtime: f32,
     pub framerate: f32,
     pub body: i32,
-    #[allow(dead_code)]
     pub skin: i32,
-    #[allow(dead_code)]
+    pub controllers: [u8; 4],
+    pub mouth: u8,
+    pub blending: [u8; 2],
+    pub gait: Option<(i32, f32)>,
+    pub prev_sequence: Option<(i32, f32, f32)>,
     pub mode: EntRenderMode,
-    #[allow(dead_code)]
+    pub renderfx: u8,
+    pub rendercolor: [f32; 3],
+    pub renderamt: f32,
     pub blend: f32,
+    pub solid: bool,
+    pub distance_sq: f32,
+    pub rank: u8,
     pub attached: Option<ModelHandle>,
 }
 
@@ -584,6 +654,16 @@ pub struct DrawLists {
     pub sprites: Vec<SpriteDraw>,
 }
 
+impl DrawLists {
+    pub fn solid_studio(&self) -> impl Iterator<Item = &StudioDraw> {
+        self.studio.iter().filter(|s| s.solid)
+    }
+
+    pub fn trans_studio(&self) -> impl Iterator<Item = &StudioDraw> {
+        self.studio.iter().filter(|s| !s.solid)
+    }
+}
+
 /// `rendercolor` as 0..1; the engine ignores an all-zero color ("a stupid Valve Hammer Editor
 /// bug", `R_DrawSpriteModel`) and uses white.
 pub fn render_color(c: [u8; 3]) -> [f32; 3] {
@@ -598,11 +678,13 @@ pub fn render_color(c: [u8; 3]) -> [f32; 3] {
     }
 }
 
-/// Split the frame's entities into draw lists (`R_AddEntity` + `R_DrawEntitiesOnList`,
-/// `ref/gl/gl_rmain.c:236-290, 819-935`, read 2026-11-23): drop `EF_NODRAW` and non-`Normal`
-/// entities whose fx blend is zero, put `R_OpaqueEntity` ones in the solid pass and the rest in
-/// the translucent pass, sorted by `R_TransEntityCompare`.
-pub fn build_draw_lists(scene: &SceneFrame, registry: &ModelRegistry) -> DrawLists {
+/// Split the frame's entities into draw lists (`R_AddEntity` + `R_DrawEntitiesOnList`), updating
+/// stateful per-entity fade ramps when a [`FxFadeTracker`] is provided.
+pub fn build_draw_lists_tracked(
+    scene: &SceneFrame,
+    registry: &ModelRegistry,
+    mut tracker: Option<&mut FxFadeTracker>,
+) -> DrawLists {
     let mut lists = DrawLists::default();
     for e in &scene.entities {
         if e.effects & EF_NODRAW != 0 {
@@ -611,13 +693,10 @@ pub fn build_draw_lists(scene: &SceneFrame, registry: &ModelRegistry) -> DrawLis
         let Some(entry) = registry.get(e.model) else {
             continue;
         };
-        // R_AddEntity: `!R_ModelOpaque(rendermode) && CL_FxBlend(e) <= 0` is invisible. The
-        // translucent pass then uses `CL_FxBlend / 255` for every non-Normal mode and 1 for
-        // Normal ("draw as solid but sorted by distance").
         let (blend, amt) = if e.rendermode.is_opaque() {
             (1.0, 1.0)
         } else {
-            let b = fx_blend(e, scene.time, &scene.view);
+            let b = fx_blend_tracked(e, scene.time, &scene.view, tracker.as_deref_mut());
             if b <= 0 {
                 continue;
             }
@@ -625,8 +704,6 @@ pub fn build_draw_lists(scene: &SceneFrame, registry: &ModelRegistry) -> DrawLis
         };
         let solid = is_opaque_entity(e.rendermode, e.renderfx);
         let rank = render_mode_rank(e.rendermode);
-        // R_TransEntityCompare: distance to origin + model centre; TransAlpha brushes sort at
-        // 1e9 so they draw first among the translucent ones.
         let distance_sq = if matches!(entry.kind, ModelKind::Brush(_))
             && e.rendermode == EntRenderMode::TransAlpha
         {
@@ -647,7 +724,7 @@ pub fn build_draw_lists(scene: &SceneFrame, registry: &ModelRegistry) -> DrawLis
                     distance_sq,
                     rank,
                     frame: e.frame,
-                    scroll_speed: 0.0,
+                    scroll_speed: e.scroll_speed,
                 };
                 if solid {
                     lists.solid_brush.push(draw);
@@ -657,6 +734,7 @@ pub fn build_draw_lists(scene: &SceneFrame, registry: &ModelRegistry) -> DrawLis
             }
             ModelKind::Studio => lists.studio.push(StudioDraw {
                 model: e.model,
+                origin: e.origin,
                 matrix: studio_matrix(e.origin, e.angles, e.scale, e.player),
                 sequence: e.sequence,
                 frame: e.frame,
@@ -664,8 +742,19 @@ pub fn build_draw_lists(scene: &SceneFrame, registry: &ModelRegistry) -> DrawLis
                 framerate: e.framerate,
                 body: e.body,
                 skin: e.skin,
+                controllers: e.controllers,
+                mouth: e.mouth,
+                blending: e.blending,
+                gait: e.gait,
+                prev_sequence: e.prev_sequence,
                 mode: e.rendermode,
+                renderfx: e.renderfx,
+                rendercolor: render_color(e.rendercolor),
+                renderamt: amt,
                 blend,
+                solid,
+                distance_sq,
+                rank,
                 attached: e.attached,
             }),
             ModelKind::Sprite => lists.sprites.push(SpriteDraw {
@@ -684,10 +773,15 @@ pub fn build_draw_lists(scene: &SceneFrame, registry: &ModelRegistry) -> DrawLis
             ModelKind::World | ModelKind::Unknown => {}
         }
     }
-    // Far first, then by render mode rank.
     lists.trans_brush.sort_by(|a, b| {
         b.distance_sq
             .total_cmp(&a.distance_sq)
+            .then(a.rank.cmp(&b.rank))
+    });
+    lists.studio.sort_by(|a, b| {
+        b.solid
+            .cmp(&a.solid)
+            .then_with(|| b.distance_sq.total_cmp(&a.distance_sq))
             .then(a.rank.cmp(&b.rank))
     });
     lists.sprites.sort_by(|a, b| {
@@ -696,6 +790,11 @@ pub fn build_draw_lists(scene: &SceneFrame, registry: &ModelRegistry) -> DrawLis
             .then(a.rank.cmp(&b.rank))
     });
     lists
+}
+
+/// Stateless wrapper around [`build_draw_lists_tracked`].
+pub fn build_draw_lists(scene: &SceneFrame, registry: &ModelRegistry) -> DrawLists {
+    build_draw_lists_tracked(scene, registry, None)
 }
 
 #[cfg(test)]

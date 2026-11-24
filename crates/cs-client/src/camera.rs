@@ -79,9 +79,17 @@ impl Camera {
         look_to_rh(Vec3::ZERO, self.forward(), self.view_up())
     }
 
-    /// Compute wgpu-compatible right-handed perspective matrix (`z in [0, 1]`)
-    /// using GoldSrc Hor+ FOV (horizontal `fov_deg` at 4:3 -> constant vertical FOV).
-    pub fn proj_matrix(&self, viewport_w: f32, viewport_h: f32, fov_deg: f32, aspect_mode: &str) -> Mat4 {
+    /// Hor+ projection matrix anchored to the 4:3 vertical FOV corresponding to `fov_deg`,
+    /// keeping narrow viewports safe without clipping and widescreen viewports expanded horizontally.
+    pub fn proj_matrix_ex(
+        &self,
+        viewport_w: f32,
+        viewport_h: f32,
+        fov_deg: f32,
+        aspect_mode: &str,
+        z_near: f32,
+        z_far: f32,
+    ) -> Mat4 {
         let safe_fov = if fov_deg.is_finite() { fov_deg } else { 90.0 };
         let fov_clamped = safe_fov.clamp(10.0, 120.0);
         // Classic 4:3 vertical FOV corresponding to horizontal fov_default (90 deg -> ~73.74 deg)
@@ -93,20 +101,29 @@ impl Camera {
         } else {
             4.0 / 3.0
         };
-        perspective_rh_zo(vfov, aspect, 4.0, 16384.0)
+        perspective_rh_zo(vfov, aspect, z_near.max(0.5), z_far.max(z_near + 1.0))
+    }
+
+    /// Compute wgpu-compatible right-handed perspective matrix (`z in [0, 1]`)
+    /// using GoldSrc Hor+ FOV (horizontal `fov_deg` at 4:3 -> constant vertical FOV).
+    pub fn proj_matrix(&self, viewport_w: f32, viewport_h: f32, fov_deg: f32, aspect_mode: &str) -> Mat4 {
+        self.proj_matrix_ex(viewport_w, viewport_h, fov_deg, aspect_mode, 4.0, 16384.0)
+    }
+
+    /// Projection matrix with `z_near = 1.0` and configurable `viewmodel_fov` for first-person weapons.
+    pub fn viewmodel_proj_matrix_fov(
+        &self,
+        viewport_w: f32,
+        viewport_h: f32,
+        viewmodel_fov: f32,
+        aspect_mode: &str,
+    ) -> Mat4 {
+        self.proj_matrix_ex(viewport_w, viewport_h, viewmodel_fov, aspect_mode, 1.0, 256.0)
     }
 
     /// Projection matrix with `z_near = 1.0` for first-person weapon viewmodels.
     pub fn viewmodel_proj_matrix(&self, viewport_w: f32, viewport_h: f32, aspect_mode: &str) -> Mat4 {
-        let vfov = 2.0 * ((90.0f32.to_radians() * 0.5).tan() * (3.0 / 4.0)).atan();
-        let aspect = if aspect_mode.eq_ignore_ascii_case("4:3_stretch") {
-            4.0 / 3.0
-        } else if viewport_w.is_finite() && viewport_h.is_finite() {
-            (viewport_w.max(1.0) / viewport_h.max(1.0)).max(0.1)
-        } else {
-            4.0 / 3.0
-        };
-        perspective_rh_zo(vfov, aspect, 1.0, 256.0)
+        self.viewmodel_proj_matrix_fov(viewport_w, viewport_h, 90.0, aspect_mode)
     }
 }
 

@@ -14,6 +14,8 @@ use cs_vfs::Vfs;
 use egui::{Color32, FontId, Pos2, Rect, Stroke, TextureHandle, Vec2};
 use glam::Vec3;
 
+use crate::view_effects::evaluate_screen_fade;
+
 const HUD_AMBER: Color32 = Color32::from_rgb(255, 160, 0);
 const HUD_RED: Color32 = Color32::from_rgb(255, 24, 16);
 const TEAM_CT_COLOR: Color32 = Color32::from_rgb(153, 204, 255);
@@ -207,6 +209,7 @@ pub struct HudView<'a> {
     pub scoped: bool,
     pub eye: Vec3,
     pub yaw_deg: f32,
+    pub underwater_tint: Option<[f32; 4]>,
 }
 
 /// The seconds a `ScreenFade` message is shown for, and its colour alpha now (0..=255).
@@ -267,14 +270,40 @@ pub fn draw_cs16_hud(ctx: &egui::Context, sprites: Option<&HudSprites>, hud: &Hu
     if hud.alive && hud.scoped {
         draw_sniper_scope(&painter, screen);
     }
+    if hud.alive
+        && let Some([r, g, b, a]) = hud.underwater_tint
+    {
+        painter.rect_filled(
+            screen,
+            0.0,
+            Color32::from_rgba_unmultiplied(
+                (r * 255.0) as u8,
+                (g * 255.0) as u8,
+                (b * 255.0) as u8,
+                (a * 255.0) as u8,
+            ),
+        );
+    }
 
-    // 2. The server's screen fade (flashbang whiteout, death fade).
-    if let Some(fade) = &state.screen_fade {
-        let a = screen_fade_alpha(fade, hud.now).clamp(0.0, 255.0) as u8;
-        if a > 0 {
-            let [r, g, b, _] = fade.color;
-            painter.rect_filled(screen, 0.0, Color32::from_rgba_unmultiplied(r, g, b, a));
-        }
+    // 2. The server's screen fade (flashbang whiteout, death fade, FFADE_MODULATE).
+    if let Some(ev) = evaluate_screen_fade(state.screen_fade.as_ref(), hud.now) {
+        let [r, g, b, a] = ev.rgba;
+        let col = if ev.modulate {
+            Color32::from_rgba_unmultiplied(
+                (r * 160.0) as u8,
+                (g * 160.0) as u8,
+                (b * 160.0) as u8,
+                (a * 220.0) as u8,
+            )
+        } else {
+            Color32::from_rgba_unmultiplied(
+                (r * 255.0) as u8,
+                (g * 255.0) as u8,
+                (b * 255.0) as u8,
+                (a * 255.0) as u8,
+            )
+        };
+        painter.rect_filled(screen, 0.0, col);
     }
 
     let scale = (screen.height() / 768.0).clamp(0.85, 1.45);
@@ -452,8 +481,42 @@ pub fn draw_cs16_hud(ctx: &egui::Context, sprites: Option<&HudSprites>, hud: &Hu
         }
     }
 
-    // 9. Top-right: the killfeed with the `d_*` weapon sprites and `d_headshot`.
-    let mut kf_y = 16.0 * scale;
+    // 9. Top-right: flashlight icon + battery bar (`Flashlight` / `FlashBat`), then killfeed.
+    let show_flashlight = hud.alive && (state.flashlight_on || state.flash_battery < 100);
+    if show_flashlight {
+        let fx = screen.right() - 48.0 * scale;
+        let fy = 14.0 * scale;
+        let col = if state.flashlight_on {
+            Color32::from_rgb(255, 220, 90)
+        } else {
+            Color32::from_rgba_unmultiplied(255, 160, 0, 140)
+        };
+        if let Some(sp) = sprites {
+            let spr = if state.flashlight_on { "flash_full" } else { "flash_empty" };
+            let _ = sp.draw_sprite(&painter, spr, Pos2::new(fx, fy), scale, col);
+            if state.flashlight_on {
+                let _ = sp.draw_sprite(
+                    &painter,
+                    "flash_beam",
+                    Pos2::new(fx + 20.0 * scale, fy),
+                    scale,
+                    col,
+                );
+            }
+        }
+        let bar_w = 34.0 * scale;
+        let bar_h = 4.0 * scale;
+        let frac = (f32::from(state.flash_battery) / 100.0).clamp(0.0, 1.0);
+        let bg = Rect::from_min_size(Pos2::new(fx, fy + 24.0 * scale), Vec2::new(bar_w, bar_h));
+        painter.rect_filled(bg, 0.0, Color32::from_black_alpha(170));
+        painter.rect_filled(
+            Rect::from_min_size(bg.min, Vec2::new(bar_w * frac, bar_h)),
+            0.0,
+            col,
+        );
+    }
+
+    let mut kf_y = if show_flashlight { 48.0 * scale } else { 16.0 * scale };
     let kf_font = FontId::proportional((12.5 * scale).clamp(12.0, 17.0));
     let name_of = |slot: u8| -> String {
         if slot == 0 {
@@ -558,6 +621,32 @@ pub fn draw_cs16_hud(ctx: &egui::Context, sprites: Option<&HudSprites>, hud: &Hu
         painter.text(Pos2::new(x + 1.0, cy + 1.0), egui::Align2::LEFT_BOTTOM, line, note_font.clone(), Color32::from_black_alpha(180));
         painter.text(Pos2::new(x, cy), egui::Align2::LEFT_BOTTOM, line, note_font.clone(), Color32::from_rgb(255, 220, 110));
         cy -= 17.0 * scale;
+    }
+
+    // 12b. TE_TEXTMESSAGE on-screen channel messages (`fx.hud.te_text_messages`).
+    for msg in &state.te_text_messages {
+        let fade_in = f64::from(msg.fadein) / 256.0;
+        let hold = f64::from(msg.holdtime) / 256.0;
+        let fade_out = f64::from(msg.fadeout) / 256.0;
+        let elapsed = (hud.now - msg.received_at).max(0.0);
+        let alpha_f = if elapsed < fade_in && fade_in > 0.0 {
+            elapsed / fade_in
+        } else if elapsed < fade_in + hold {
+            1.0
+        } else if fade_out > 0.0 && elapsed < fade_in + hold + fade_out {
+            1.0 - (elapsed - fade_in - hold) / fade_out
+        } else {
+            0.0
+        };
+        if alpha_f <= 0.01 {
+            continue;
+        }
+        let nx = if msg.x < 0 { 0.5 } else { (f32::from(msg.x) / 8192.0).clamp(0.05, 0.95) };
+        let ny = if msg.y < 0 { 0.5 } else { (f32::from(msg.y) / 8192.0).clamp(0.05, 0.95) };
+        let pos = Pos2::new(screen.left() + screen.width() * nx, screen.top() + screen.height() * ny);
+        let a = (alpha_f.clamp(0.0, 1.0) * f64::from(msg.color1[3].max(180))) as u8;
+        let col = Color32::from_rgba_unmultiplied(msg.color1[0], msg.color1[1], msg.color1[2], a);
+        painter.text(pos, egui::Align2::CENTER_CENTER, &msg.text, FontId::proportional(16.0 * scale), col);
     }
 
     // 13. The spectator letterbox bars while dead.

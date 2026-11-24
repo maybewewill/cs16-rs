@@ -217,6 +217,7 @@ impl WebClientState {
         self.loaded_map = None;
         self.view.reset_map();
         self.view.set_map_bounds(coll.as_deref());
+        self.view.set_world_context(coll.clone(), Some(vfs.clone()));
         let conn = game.connection_mut();
         conn.frames_mut().set_remote_is_local(true);
         conn.set_world_collision(coll.clone());
@@ -314,6 +315,7 @@ impl WebClientState {
             let coll = Arc::new(WorldCollision::from_bsp(&bsp));
             self.collision = Some(coll.clone());
             self.view.set_map_bounds(Some(coll.as_ref()));
+            self.view.set_world_context(Some(coll.clone()), Some(vfs.clone()));
             let names = self.view.names();
             let vfs_c = vfs.clone();
             match &mut self.session {
@@ -394,7 +396,6 @@ impl WebClientState {
             SessionMode::Local { game, .. } => game.connection().frames().settings.interp,
             SessionMode::Remote { conn, .. } => conn.frames().settings.interp,
         };
-        let default_fov = self.cvars.get_f32("fov_default").clamp(60.0, 120.0);
         let right_hand = self.cvars.get_bool("cl_righthand");
         let draw_viewmodel = self.cvars.get_bool("r_drawviewmodel");
 
@@ -453,12 +454,20 @@ impl WebClientState {
             SessionMode::Remote { now, .. } => *now,
         };
 
+        let default_fov = self.cvars.get_f32("default_fov").clamp(60.0, 120.0);
         let inputs = ViewInputs {
             now: sess_now,
             frametime: dt,
             right_hand,
             draw_viewmodel,
             default_fov,
+            viewmodel_fov: self.cvars.get_f32("viewmodel_fov").clamp(50.0, 120.0),
+            cl_bob: self.cvars.get_f32("cl_bob"),
+            cl_bobcycle: self.cvars.get_f32("cl_bobcycle"),
+            cl_bobup: self.cvars.get_f32("cl_bobup"),
+            cl_rollangle: self.cvars.get_f32("cl_rollangle"),
+            cl_rollspeed: self.cvars.get_f32("cl_rollspeed"),
+            cl_viewmodel_lag: self.cvars.get_f32("cl_viewmodel_lag"),
         };
         let view_angles = Vec3::new(self.camera.pitch_deg, self.camera.yaw_deg, 0.0);
 
@@ -560,6 +569,18 @@ impl WebClientState {
         let listener = self.camera.position.to_array();
         for sc in drained_sounds {
             self.push_sound_event(sc, listener, local_entity);
+        }
+        if self.audio_unlocked
+            && let Some(fv) = &built_view
+        {
+            for path in &fv.anim_sounds {
+                self.queued_audio.push(WebAudioEvent::Play2d {
+                    path: path.clone(),
+                    volume: 0.8,
+                    entity: local_entity.unwrap_or(1),
+                    channel: 1,
+                });
+            }
         }
 
         StepOutput {
@@ -745,6 +766,7 @@ impl WebClientState {
                 scoped,
                 eye: fv.eye,
                 yaw_deg: self.camera.yaw_deg,
+                underwater_tint: fv.underwater_tint,
             };
             draw_cs16_hud(ctx, hud_sprites, &hv);
             draw_mod_hud(ctx, &self.last_mod_hud);

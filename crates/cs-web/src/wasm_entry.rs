@@ -6,6 +6,7 @@ use std::rc::Rc;
 
 use cs_assets::bsp::BspMap;
 use cs_assets::scheme::{SkyboxTextures, VguiColors};
+use cs_client::render::lighting::{GpuLightsUniform, TextureFilterMode};
 use cs_client::render::mdl_renderer::{StudioInstance, viewmodel_transform};
 use cs_client::render::{RenderSettings, Renderer, SceneDynamicData};
 use cs_client::ui::hud::HudSprites;
@@ -397,43 +398,74 @@ fn step_and_render(rt_cell: &Rc<RefCell<WebRuntime>>, now_ms: f64) {
         .tessellate(full_output.shapes, full_output.pixels_per_point);
 
     let mut cam = g.state.camera.clone();
-    let mut fov = g.state.cvars.get_f32("fov_default").clamp(60.0, 120.0);
+    let mut fov = g.state.cvars.get_f32("default_fov").clamp(60.0, 120.0);
     let mut viewmodel_inst: Option<(String, glam::Mat4, i32, i32, f32, bool)> = None;
     let mut beams = Vec::new();
     let mut points = Vec::new();
+    let mut decals = Vec::new();
+    let mut custom_decals = std::collections::HashMap::new();
+    let mut lightstyles = [1.0f32; 64];
+    let mut lights = GpuLightsUniform::default();
+    let mut elights = Vec::new();
+    let mut fog = None;
     let mut scene = None;
 
     if let Some(v) = out.view {
-        cam.pitch_deg = (cam.pitch_deg + v.punch.x).clamp(-89.0, 89.0);
-        cam.yaw_deg = (cam.yaw_deg + v.punch.y).rem_euclid(360.0);
-        cam.roll_deg = v.punch.z.clamp(-90.0, 90.0);
-        fov = v.fov.clamp(10.0, 120.0);
+        cam.position.z += v.bob + v.shake_z;
+        cam.pitch_deg = (cam.pitch_deg + v.punch.x + v.shake_angles.x).clamp(-89.0, 89.0);
+        cam.yaw_deg = (cam.yaw_deg + v.punch.y + v.shake_angles.y).rem_euclid(360.0);
+        cam.roll_deg = (v.punch.z + v.roll_deg + v.shake_angles.z).clamp(-90.0, 90.0);
+        fov = (v.fov + v.underwater_fov_delta).clamp(10.0, 120.0);
         if let Some(vm) = v.viewmodel {
+            let bob_off = Vec3::new(0.0, 0.0, v.bob * 0.4) + v.viewmodel_lag;
             let xf = viewmodel_transform(
                 v.eye,
                 cam.yaw_deg,
                 cam.pitch_deg,
-                Vec3::ZERO,
+                bob_off,
                 vm.right_hand,
             );
             viewmodel_inst = Some((vm.path, xf, vm.sequence, vm.body, vm.animtime, vm.right_hand));
         }
         beams = v.beams;
         points = v.points;
+        decals = v.decals;
+        custom_decals = v.custom_decals;
+        lightstyles = v.lightstyles;
+        lights = v.lights;
+        elights = v.elights;
+        fog = v.fog;
         scene = Some(v.scene);
     }
 
     let gamma = g.state.cvars.get_f32("gamma").clamp(1.0, 4.0);
+    let texgamma = g.state.cvars.get_f32("texgamma").clamp(0.5, 4.0);
     let brightness = g.state.cvars.get_f32("brightness").clamp(0.3, 2.5);
+    let debug_mode = if g.state.cvars.get_bool("r_lightmap_only") {
+        1.0
+    } else if g.state.cvars.get_bool("r_fullbright") || !g.state.cvars.get_bool("r_lightmap") {
+        2.0
+    } else {
+        0.0
+    };
     let time_sec = (sample_ms / 1000.0) as f32;
     let settings = RenderSettings {
         gamma,
+        texgamma,
         brightness,
         fov_deg: fov,
+        viewmodel_fov: g.state.cvars.get_f32("viewmodel_fov").clamp(50.0, 120.0),
         aspect_mode: "widescreen",
-        use_nearest_filter: false,
-        debug_mode: 0.0,
+        texture_mode: TextureFilterMode::parse(g.state.cvars.get_str("gl_texturemode")),
+        anisotropy: g.state.cvars.get_i32("gl_ansio").clamp(1, 16) as u16,
+        msaa_samples: if g.state.cvars.get_i32("gl_msaa") >= 4 { 4 } else { 1 },
+        software_mode: g.state.cvars.get_bool("r_software_mode"),
+        r_vis: g.state.cvars.get_bool("r_vis"),
+        r_decals: g.state.cvars.get_i32("r_decals").max(0) as usize,
+        wave_height: 0.0,
+        debug_mode,
         time_sec,
+        fog,
     };
 
     let WebRuntime {
@@ -462,6 +494,11 @@ fn step_and_render(rt_cell: &Rc<RefCell<WebRuntime>>, now_ms: f64) {
             viewmodel: vm_ref,
             beams: &beams,
             points: &points,
+            decals: &decals,
+            custom_decals: Some(&custom_decals),
+            lightstyles: &lightstyles,
+            lights,
+            elights: &elights,
         };
         let _ = r.render_frame(
             &cam,

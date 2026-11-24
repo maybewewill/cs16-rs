@@ -10,10 +10,13 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::cell::RefCell;
 
+use cs_assets::mdl::{MdlSeqEvent, StudioModel};
 use cs_assets::spr::GoldSrcSprite;
+use cs_clientcore::entities::ef;
 use cs_clientcore::events::{EventFx, FiredEvent, ViewAnim};
+use cs_clientcore::hud::{CustomDecalInfo, evaluate_lightstyles};
 use cs_clientcore::tempents::{
-    FxTrace, FxWorld, ModelRef, ParticleEffect, RenderEffect, RenderMode, TempEnt, ftent,
+    DynamicLight, FxTrace, FxWorld, ModelRef, RenderEffect, RenderMode, TempEnt, ftent,
 };
 use cs_clientcore::{
     ClientEffects, Connection, EmitInputs, EntityKind, ModelKind as CoreModelKind, VisibleEntity,
@@ -24,9 +27,18 @@ use cs_transport::PacketTransport;
 use cs_vfs::Vfs;
 use glam::Vec3;
 
+use crate::render::decal_renderer::DecalSpawn;
 use crate::render::fx_renderer::{FxBeam, FxPoint};
+use crate::render::lighting::{
+    DLightPool, GpuLightsUniform, SpotLight, compute_flashlight_spot,
+};
+use crate::render::mdl_renderer::{STUDIO_LOOPING, studio_frame};
+use crate::render::particles::{BeamSystem, ParticleSystem};
 use crate::render::scene::{
     EntRenderMode, ModelHandle, ModelRegistry, RenderEntity, SceneFrame, ViewBasis,
+};
+use crate::view_effects::{
+    BobParams, ViewModelLagState, calc_bob, calc_roll, calc_screen_shake, underwater_tint_and_fov,
 };
 
 /// The first model index the shell hands to models the client loads by itself (shells, the
@@ -119,6 +131,32 @@ pub struct ViewInputs {
     pub draw_viewmodel: bool,
     /// The fov when the server does not send one.
     pub default_fov: f32,
+    pub viewmodel_fov: f32,
+    pub cl_bob: f32,
+    pub cl_bobcycle: f32,
+    pub cl_bobup: f32,
+    pub cl_rollangle: f32,
+    pub cl_rollspeed: f32,
+    pub cl_viewmodel_lag: f32,
+}
+
+impl Default for ViewInputs {
+    fn default() -> Self {
+        Self {
+            now: 0.0,
+            frametime: 0.016,
+            right_hand: true,
+            draw_viewmodel: true,
+            default_fov: 90.0,
+            viewmodel_fov: 90.0,
+            cl_bob: 0.01,
+            cl_bobcycle: 0.8,
+            cl_bobup: 0.5,
+            cl_rollangle: 2.0,
+            cl_rollspeed: 200.0,
+            cl_viewmodel_lag: 1.0,
+        }
+    }
 }
 
 /// The first-person weapon.
@@ -149,15 +187,26 @@ pub struct ViewStats {
 #[derive(Debug, Clone)]
 pub struct FrameView {
     pub scene: SceneFrame,
-    /// The eye: the acked origin and the view offset (`prediction: replace with
-    /// predict::PredictedPlayer`).
     pub eye: Vec3,
-    /// `punchangle`: added to the view angles.
     pub punch: Vec3,
     pub fov: f32,
+    pub bob: f32,
+    pub roll_deg: f32,
+    pub shake_angles: Vec3,
+    pub shake_z: f32,
+    pub viewmodel_lag: Vec3,
+    pub underwater_tint: Option<[f32; 4]>,
+    pub underwater_fov_delta: f32,
     pub viewmodel: Option<ViewmodelView>,
     pub beams: Vec<FxBeam>,
     pub points: Vec<FxPoint>,
+    pub lights: GpuLightsUniform,
+    pub elights: Vec<DynamicLight>,
+    pub decals: Vec<DecalSpawn>,
+    pub lightstyles: [f32; 64],
+    pub fog: Option<([f32; 3], f32)>,
+    pub anim_sounds: Vec<String>,
+    pub custom_decals: HashMap<u8, CustomDecalInfo>,
     pub alive: bool,
     pub stats: ViewStats,
 }
@@ -186,8 +235,15 @@ struct ViewAnimState {
     started: f32,
 }
 
-/// Builds frames. Keeps what outlives one: the model registry, the running beams, the view
-/// model's animation.
+struct CachedSeqMeta {
+    fps: f32,
+    num_frames: usize,
+    looping: bool,
+    events: Vec<MdlSeqEvent>,
+}
+
+/// Builds frames. Keeps what outlives one: the model registry, running beams, particles, dlights,
+/// decals, player gait animation state, and the viewmodel animation + lag state.
 pub struct ViewBuilder {
     models: ModelRegistry,
     models_key: u64,
@@ -196,6 +252,16 @@ pub struct ViewBuilder {
     names: Rc<RefCell<BTreeMap<u16, String>>>,
     beams: Vec<ActiveBeam>,
     glows: Vec<ActiveGlow>,
+    dlights: DLightPool,
+    particles: ParticleSystem,
+    beam_sys: BeamSystem,
+    pending_decals: Vec<DecalSpawn>,
+    lag_state: ViewModelLagState,
+    player_gaits: HashMap<u16, (f32, Vec3)>,
+    vm_seq_cache: HashMap<String, Vec<CachedSeqMeta>>,
+    last_vm_frame: f32,
+    vfs: Option<Vfs>,
+    collision: Option<Arc<WorldCollision>>,
     anim: Option<ViewAnimState>,
     last_weaponanim: i32,
     last_viewmodel: i32,
@@ -217,10 +283,28 @@ impl ViewBuilder {
             names: Rc::new(RefCell::new(BTreeMap::new())),
             beams: Vec::new(),
             glows: Vec::new(),
+            dlights: DLightPool::default(),
+            particles: ParticleSystem::new(),
+            beam_sys: BeamSystem::new(),
+            pending_decals: Vec::new(),
+            lag_state: ViewModelLagState::default(),
+            player_gaits: HashMap::new(),
+            vm_seq_cache: HashMap::new(),
+            last_vm_frame: 0.0,
+            vfs: None,
+            collision: None,
             anim: None,
             last_weaponanim: -1,
             last_viewmodel: -1,
         }
+    }
+
+    /// Provide world collision and VFS so client view building can trace flashlights and read
+    /// studio animation events.
+    pub fn set_world_context(&mut self, collision: Option<Arc<WorldCollision>>, vfs: Option<Vfs>) {
+        self.collision = collision;
+        self.vfs = vfs;
+        self.vm_seq_cache.clear();
     }
 
     /// The shared model names a [`MapFxWorld`] reads.
@@ -232,10 +316,17 @@ impl ViewBuilder {
     pub fn reset_map(&mut self) {
         self.beams.clear();
         self.glows.clear();
+        self.dlights.clear();
+        self.particles.clear();
+        self.beam_sys.clear();
+        self.pending_decals.clear();
+        self.lag_state.reset();
+        self.player_gaits.clear();
         self.client_models.clear();
         self.anim = None;
         self.last_weaponanim = -1;
         self.last_viewmodel = -1;
+        self.last_vm_frame = 0.0;
         self.models_key = 0;
     }
 
@@ -403,9 +494,32 @@ impl ViewBuilder {
         };
         let mut stats = ViewStats::default();
 
-        // Every entity by modelindex: the world, brushes with their transform, players and
-        // props, sprites. The local player is not drawn in first person.
+        let dt = inputs.frametime.clamp(0.0, 0.25) as f32;
+        self.dlights.step(now, dt);
+        self.particles.step(now, dt);
+
+        // Local player flashlight spotlight (`impulse 100` -> Flashlight HUD/prediction).
+        let mut spotlights: Vec<SpotLight> = Vec::new();
+        if alive
+            && (conn.fx().hud.flashlight_on || (prediction.effects as u32 & ef::DIMLIGHT) != 0)
+        {
+            let (fwd, _, _) = crate::render::scene::angle_vectors(view_angles + punch);
+            let (spot, bounce) = compute_flashlight_spot(
+                eye,
+                fwd,
+                self.collision.as_deref(),
+                now,
+            );
+            spotlights.push(spot);
+            if let Some(b) = bounce {
+                self.dlights.add_light(b);
+            }
+        }
+
+        // Entity loop: build RenderEntities + collect entity EF_* lights & world positions.
+        let mut entity_positions: HashMap<u16, Vec3> = HashMap::with_capacity(emitted.entities.len());
         for e in &emitted.entities {
+            entity_positions.insert(e.number, e.origin);
             if e.kind == EntityKind::Beam {
                 self.push_beam_entity(e, now);
                 continue;
@@ -413,7 +527,73 @@ impl ViewBuilder {
             if e.local_player || Some(e.number) == local_number {
                 continue;
             }
-            if let Some(r) = self.render_entity(e, &player_models) {
+            let eff = e.state.effects;
+            if (eff & ef::BRIGHTLIGHT) != 0 {
+                self.dlights.add_light(DynamicLight {
+                    key: e.number,
+                    entity_light: false,
+                    origin: e.origin + Vec3::new(0.0, 0.0, 16.0),
+                    radius: 400.0,
+                    color: [250, 250, 200],
+                    die: now + 0.05,
+                    decay: 0.0,
+                });
+            }
+            if (eff & ef::DIMLIGHT) != 0 {
+                if e.kind == EntityKind::Player {
+                    let (fwd, _, _) = crate::render::scene::angle_vectors(e.angles);
+                    let (spot, bounce) = compute_flashlight_spot(
+                        e.origin + Vec3::new(0.0, 0.0, 24.0),
+                        fwd,
+                        self.collision.as_deref(),
+                        now,
+                    );
+                    spotlights.push(spot);
+                    if let Some(b) = bounce {
+                        self.dlights.add_light(b);
+                    }
+                } else {
+                    self.dlights.add_light(DynamicLight {
+                        key: e.number,
+                        entity_light: false,
+                        origin: e.origin,
+                        radius: 200.0,
+                        color: [220, 220, 200],
+                        die: now + 0.05,
+                        decay: 0.0,
+                    });
+                }
+            }
+            if (eff & ef::MUZZLEFLASH) != 0 {
+                let (fwd, _, _) = crate::render::scene::angle_vectors(e.angles);
+                self.dlights.add_light(DynamicLight {
+                    key: e.number.wrapping_add(1024),
+                    entity_light: false,
+                    origin: e.origin + Vec3::new(0.0, 0.0, 20.0) + fwd * 24.0,
+                    radius: 200.0,
+                    color: [255, 190, 90],
+                    die: now + 0.06,
+                    decay: 1500.0,
+                });
+            }
+            if (eff & ef::LIGHT) != 0 {
+                self.dlights.add_light(DynamicLight {
+                    key: e.number.wrapping_add(2048),
+                    entity_light: false,
+                    origin: e.origin,
+                    radius: 200.0,
+                    color: [180, 180, 160],
+                    die: now + 0.05,
+                    decay: 0.0,
+                });
+            }
+            if (eff & ef::BRIGHTFIELD) != 0 {
+                self.particles.spawn_effect(
+                    now,
+                    &cs_clientcore::tempents::ParticleEffect::Flicker { position: e.origin },
+                );
+            }
+            if let Some(r) = self.render_entity(e, &player_models, dt, time) {
                 match e.model {
                     CoreModelKind::Brush => stats.brush += 1,
                     CoreModelKind::Studio => stats.studio += 1,
@@ -434,9 +614,13 @@ impl ViewBuilder {
         }
 
         // Effects that are not entries of the pool.
+        let pos_lookup = |id: u16| entity_positions.get(&id).copied();
         for effect in conn.fx_mut().tempents.take_effects() {
-            self.take_effect(effect, now);
+            self.take_effect(effect, now, &pos_lookup);
         }
+        let weather = conn.fx().hud.weather;
+        self.particles.step_weather(now, dt, weather, eye);
+        self.beam_sys.step(now, &pos_lookup);
         self.beams.retain(|b| b.die > now);
         self.glows.retain(|g| g.die > now);
         let overflow = self.beams.len().saturating_sub(MAX_ACTIVE_FX);
@@ -444,10 +628,33 @@ impl ViewBuilder {
         let overflow = self.glows.len().saturating_sub(MAX_ACTIVE_FX);
         self.glows.drain(..overflow);
 
+        let prev_vm_seq = self.anim.map(|a| a.sequence).unwrap_or(-1);
         self.update_view_anim(conn.fx_mut(), &fired, weaponanim, viewmodel_index, time);
         let viewmodel = self.viewmodel(conn, alive, fov, viewmodel_index, inputs);
+        let mut anim_sounds = Vec::new();
+        if let Some(ref vm) = viewmodel {
+            let events = self.sample_viewmodel_events(vm, prev_vm_seq, time);
+            for (ev_id, opts) in events {
+                match ev_id {
+                    5001 | 5011 | 5021 | 5031 => {
+                        let (fwd, _, _) = crate::render::scene::angle_vectors(view_angles + punch);
+                        self.dlights.add_light(DynamicLight {
+                            key: 9999,
+                            entity_light: false,
+                            origin: eye + fwd * 26.0,
+                            radius: 180.0,
+                            color: [255, 195, 95],
+                            die: now + 0.05,
+                            decay: 1800.0,
+                        });
+                    }
+                    5004 if !opts.is_empty() => anim_sounds.push(opts),
+                    _ => {}
+                }
+            }
+        }
 
-        let beams: Vec<FxBeam> = self
+        let mut beams: Vec<FxBeam> = self
             .beams
             .iter()
             .map(|b| FxBeam {
@@ -458,8 +665,8 @@ impl ViewBuilder {
                 additive: true,
             })
             .collect();
-        stats.beams = beams.len();
-        let points: Vec<FxPoint> = self
+        self.beam_sys.emit_fx(now, &mut beams);
+        let mut points: Vec<FxPoint> = self
             .glows
             .iter()
             .map(|g| {
@@ -472,6 +679,51 @@ impl ViewBuilder {
                 }
             })
             .collect();
+        self.particles.emit_fx(now, &mut beams, &mut points);
+        stats.beams = beams.len();
+
+        let bob = calc_bob(
+            time,
+            prediction.simvel,
+            prediction.onground >= 0,
+            &BobParams {
+                cl_bob: inputs.cl_bob,
+                cl_bobcycle: inputs.cl_bobcycle,
+                cl_bobup: inputs.cl_bobup,
+            },
+        );
+        let roll_deg = calc_roll(
+            view_angles.y,
+            prediction.simvel,
+            inputs.cl_rollangle,
+            inputs.cl_rollspeed,
+        );
+        let (shake_angles, shake_z) =
+            calc_screen_shake(conn.fx().hud.screen_shake.as_ref(), now);
+        let viewmodel_lag =
+            self.lag_state
+                .update(scene.view.forward, dt, inputs.cl_viewmodel_lag);
+        let (underwater_tint, underwater_fov_delta) = underwater_tint_and_fov(
+            prediction.watertype,
+            prediction.waterlevel.max(0) as u8,
+            time,
+        );
+
+        let lightstyles = evaluate_lightstyles(&conn.fx().hud.lightstyles, time);
+        let fog = conn.fx().hud.fog.map(|f| {
+            (
+                [
+                    f32::from(f.color[0]) / 255.0,
+                    f32::from(f.color[1]) / 255.0,
+                    f32::from(f.color[2]) / 255.0,
+                ],
+                f.density,
+            )
+        });
+        let lights = self.dlights.pack_uniform(eye, &spotlights);
+        let elights = self.dlights.elights.clone();
+        let decals = std::mem::take(&mut self.pending_decals);
+        let custom_decals = conn.fx().hud.custom_decals.clone();
 
         (
             FrameView {
@@ -479,9 +731,23 @@ impl ViewBuilder {
                 eye,
                 punch,
                 fov,
+                bob,
+                roll_deg,
+                shake_angles,
+                shake_z,
+                viewmodel_lag,
+                underwater_tint,
+                underwater_fov_delta,
                 viewmodel,
                 beams,
                 points,
+                lights,
+                elights,
+                decals,
+                lightstyles,
+                fog,
+                anim_sounds,
+                custom_decals,
                 alive,
                 stats,
             },
@@ -489,11 +755,74 @@ impl ViewBuilder {
         )
     }
 
+    fn sample_viewmodel_events(
+        &mut self,
+        vm: &ViewmodelView,
+        prev_seq: i32,
+        now_sec: f32,
+    ) -> Vec<(i32, String)> {
+        let mut out = Vec::new();
+        let key = vm.path.to_ascii_lowercase();
+        if !self.vm_seq_cache.contains_key(&key) {
+            let meta = self
+                .vfs
+                .as_ref()
+                .and_then(|vfs| StudioModel::load(vfs, &key).ok())
+                .map(|m| {
+                    m.sequences
+                        .into_iter()
+                        .map(|s| CachedSeqMeta {
+                            fps: s.fps,
+                            num_frames: s.num_frames,
+                            looping: (s.flags & STUDIO_LOOPING) != 0,
+                            events: s.events,
+                        })
+                        .collect()
+                });
+            if let Some(list) = meta {
+                self.vm_seq_cache.insert(key.clone(), list);
+            } else {
+                self.vm_seq_cache.insert(key.clone(), Vec::new());
+            }
+        }
+        let seq_idx = vm.sequence.max(0) as usize;
+        let Some(seq_meta) = self.vm_seq_cache.get(&key).and_then(|v| v.get(seq_idx)) else {
+            return out;
+        };
+        let cur_frame = studio_frame(
+            0.0,
+            vm.animtime,
+            1.0,
+            now_sec,
+            seq_meta.fps,
+            seq_meta.num_frames,
+            seq_meta.looping,
+        );
+        let prev_frame = if prev_seq != vm.sequence {
+            self.last_vm_frame = -0.01;
+            -0.01
+        } else {
+            self.last_vm_frame
+        };
+        self.last_vm_frame = cur_frame;
+        if cur_frame > prev_frame {
+            for ev in &seq_meta.events {
+                let f = ev.frame as f32;
+                if f > prev_frame && f <= cur_frame {
+                    out.push((ev.event, ev.options.clone()));
+                }
+            }
+        }
+        out
+    }
+
     /// `R_AddEntity`'s input for one entity of the frame.
     fn render_entity(
         &mut self,
         e: &VisibleEntity,
         player_models: &BTreeMap<u8, String>,
+        dt: f32,
+        time: f32,
     ) -> Option<RenderEntity> {
         let player_model = (e.kind == EntityKind::Player)
             .then(|| e.number.checked_sub(1))
@@ -520,7 +849,35 @@ impl ViewBuilder {
         r.rendercolor = e.rendercolor;
         r.renderfx = e.renderfx;
         r.scale = s.scale;
-        // A player holds the weapon `weaponmodel` names: its bones follow the player's.
+        r.controllers = s.controller;
+        r.blending = s.blending;
+        r.scroll_speed = 0.0;
+
+        // Sequence crossfade (0.1s ramp from latched.prevsequence).
+        let seq_elapsed = (time - e.latched.sequencetime).max(0.0);
+        if i32::from(e.latched.prevsequence) != r.sequence
+            && e.latched.sequencetime > 0.0
+            && seq_elapsed < 0.1
+        {
+            r.prev_sequence = Some((
+                i32::from(e.latched.prevsequence),
+                e.latched.prevframe,
+                (1.0 - seq_elapsed / 0.1).clamp(0.0, 1.0),
+            ));
+        }
+
+        // Player lower-body gait sequence tracking (`gaitsequence` split at `"Bip01 Spine"`).
+        if r.player && s.gaitsequence > 0 {
+            let (g_frame, prev_org) = self
+                .player_gaits
+                .entry(e.number)
+                .or_insert((e.latched.gaitframe, e.origin));
+            let moved = (*prev_org - e.origin).truncate().length();
+            *prev_org = e.origin;
+            *g_frame = (*g_frame + dt * 24.0 + moved * 0.25) % 64.0;
+            r.gait = Some((i32::from(s.gaitsequence), *g_frame));
+        }
+
         if r.player && s.weaponmodel != 0 {
             r.attached = self.models.resolve(i32::from(s.weaponmodel));
         }
@@ -572,60 +929,106 @@ impl ViewBuilder {
         });
     }
 
-    fn take_effect(&mut self, effect: RenderEffect, now: f64) {
+    fn take_effect(
+        &mut self,
+        effect: RenderEffect,
+        now: f64,
+        entity_pos: &dyn Fn(u16) -> Option<Vec3>,
+    ) {
         match effect {
-            RenderEffect::Beam { time, effect } => match effect {
-                TempEffect::BeamPoints { start, end, beam } => {
-                    let life = if beam.life == 0 {
-                        TRACER_LIFE
-                    } else {
-                        f64::from(beam.life) * 0.1
-                    };
-                    self.beams.push(ActiveBeam {
-                        die: time.max(now - life) + life,
+            RenderEffect::Beam { time, effect } => {
+                self.beam_sys.spawn_from_temp_effect(time.max(now - 0.1), &effect, entity_pos);
+                match effect {
+                    TempEffect::BeamPoints { start, end, beam } => {
+                        let life = if beam.life == 0 {
+                            TRACER_LIFE
+                        } else {
+                            f64::from(beam.life) * 0.1
+                        };
+                        self.beams.push(ActiveBeam {
+                            die: time.max(now - life) + life,
+                            start,
+                            end,
+                            width: (f32::from(beam.width) * 0.1).max(0.5),
+                            color: [
+                                f32::from(beam.color[0]) / 255.0,
+                                f32::from(beam.color[1]) / 255.0,
+                                f32::from(beam.color[2]) / 255.0,
+                                f32::from(beam.brightness) / 255.0,
+                            ],
+                        });
+                    }
+                    TempEffect::Tracer { start, end } => self.beams.push(ActiveBeam {
+                        die: time + TRACER_LIFE,
                         start,
                         end,
-                        width: (f32::from(beam.width) * 0.1).max(0.5),
-                        color: [
-                            f32::from(beam.color[0]) / 255.0,
-                            f32::from(beam.color[1]) / 255.0,
-                            f32::from(beam.color[2]) / 255.0,
-                            f32::from(beam.brightness) / 255.0,
-                        ],
-                    });
+                        width: 0.7,
+                        color: [1.0, 0.88, 0.45, 0.75],
+                    }),
+                    _ => {}
                 }
-                TempEffect::Tracer { start, end } => self.beams.push(ActiveBeam {
-                    die: time + TRACER_LIFE,
-                    start,
-                    end,
-                    width: 0.7,
-                    color: [1.0, 0.88, 0.45, 0.75],
-                }),
-                _ => {}
-            },
-            RenderEffect::Light(l) => self.glows.push(ActiveGlow {
-                die: l.die.max(now),
-                origin: l.origin,
-                size: (l.radius * 0.08).clamp(2.0, 24.0),
-                color: [
-                    f32::from(l.color[0]) / 255.0,
-                    f32::from(l.color[1]) / 255.0,
-                    f32::from(l.color[2]) / 255.0,
-                    0.35,
-                ],
-            }),
-            RenderEffect::Particles(ParticleEffect::Gunshot { position, .. }) => {
+            }
+            RenderEffect::Light(l) => {
+                let origin = l.origin;
+                let radius = l.radius;
+                let color = l.color;
+                let die = l.die.max(now);
+                self.dlights.add_light(l);
                 self.glows.push(ActiveGlow {
-                    die: now + 0.12,
-                    origin: position,
-                    size: 1.5,
-                    color: [1.0, 0.85, 0.4, 0.8],
+                    die,
+                    origin,
+                    size: (radius * 0.08).clamp(2.0, 24.0),
+                    color: [
+                        f32::from(color[0]) / 255.0,
+                        f32::from(color[1]) / 255.0,
+                        f32::from(color[2]) / 255.0,
+                        0.35,
+                    ],
                 });
             }
-            RenderEffect::Decal { .. }
-            | RenderEffect::PlayerDecal { .. }
-            | RenderEffect::TextMessage(_)
-            | RenderEffect::Particles(_) => {}
+            RenderEffect::Decal {
+                position,
+                decal,
+                decal_name,
+                permanent,
+                ..
+            } => {
+                if self.pending_decals.len() < 128 {
+                    self.pending_decals.push(DecalSpawn {
+                        origin: position,
+                        decal_name: decal_name
+                            .unwrap_or_else(|| format!("{{shot{}", (decal % 5) + 1)),
+                        half_size: 16.0,
+                        permanent,
+                        player_spray: None,
+                    });
+                }
+            }
+            RenderEffect::PlayerDecal {
+                player, position, ..
+            } => {
+                if self.pending_decals.len() < 128 {
+                    self.pending_decals.push(DecalSpawn {
+                        origin: position,
+                        decal_name: "spray".to_string(),
+                        half_size: 24.0,
+                        permanent: true,
+                        player_spray: Some(player),
+                    });
+                }
+            }
+            RenderEffect::Particles(pe) => {
+                self.particles.spawn_effect(now, &pe);
+                if let cs_clientcore::tempents::ParticleEffect::Gunshot { position, .. } = pe {
+                    self.glows.push(ActiveGlow {
+                        die: now + 0.12,
+                        origin: position,
+                        size: 1.5,
+                        color: [1.0, 0.85, 0.4, 0.8],
+                    });
+                }
+            }
+            RenderEffect::TextMessage(_) => {}
         }
     }
 
@@ -750,6 +1153,7 @@ mod tests {
             right_hand: true,
             draw_viewmodel: true,
             default_fov: 90.0,
+            ..ViewInputs::default()
         }
     }
 

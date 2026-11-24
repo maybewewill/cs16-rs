@@ -233,6 +233,8 @@ impl Session {
         self.view.reset_map();
         self.view
             .set_map_bounds(collision.as_deref());
+        self.view
+            .set_world_context(collision.clone(), self.vfs.clone());
         let vfs = self.vfs.clone();
         let names = self.view.names();
         with_conn_mut!(self, c => {
@@ -423,6 +425,7 @@ mod tests {
             right_hand: true,
             draw_viewmodel: true,
             default_fov: 90.0,
+            ..ViewInputs::default()
         };
         // The server shows the team menu as a text menu (`_vgui_menus 0` was in the userinfo
         // before the sign-on); the shell answers it with `menuselect`, as a key press does.
