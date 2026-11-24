@@ -131,7 +131,12 @@ impl Session {
     }
 
     /// Connects to the server at `addr` (`host`, `host:port`); the answer comes in the frames.
-    pub fn connect_remote(vfs: Option<&Vfs>, addr: &str, name: &str) -> Result<Self, String> {
+    pub fn connect_remote(
+        vfs: Option<&Vfs>,
+        addr: &str,
+        name: &str,
+        vgui_menus: bool,
+    ) -> Result<Self, String> {
         let target = if addr.contains(':') {
             addr.to_string()
         } else {
@@ -149,8 +154,7 @@ impl Session {
         if let Some(v) = vfs {
             conn.set_files(Box::new(VfsResourceFiles(v.clone())));
         }
-        // Text menus answered with `menuselect`: the shell draws the server's `ShowMenu`.
-        conn.set_userinfo("_vgui_menus", "0");
+        conn.set_userinfo("_vgui_menus", if vgui_menus { "1" } else { "0" });
         conn.set_userinfo(cs_mod_api::MOD_CAPABILITY_KEY, "1");
         conn.connect();
         let mut s = Self::none();
@@ -353,6 +357,37 @@ impl Session {
             let v = c.predictor().prediction().simvel;
             Vec3::new(v.x, v.y, 0.0).length()
         }, else 0.0)
+    }
+
+    /// Crosshair inputs from prediction & HUD state:
+    /// `(weapon_id, weapon_flags, on_ground, ducking, speed_2d, clip)`.
+    pub fn local_crosshair_state(&self) -> (u8, u32, bool, bool, f32, i32) {
+        with_conn!(self, c => {
+            let p = c.predictor().prediction();
+            let cur_hud = c.fx().hud.current_weapon;
+            let wid = if p.predicted && p.weapon.weapon_id > 0 {
+                p.weapon.weapon_id as u8
+            } else {
+                cur_hud.map_or(0, |w| w.weapon_id)
+            };
+            let wstate = p
+                .weapon
+                .weapons
+                .get(&wid)
+                .map_or(0, |w| w.m_i_weapon_state as u32);
+            let clip = p
+                .weapon
+                .weapons
+                .get(&wid)
+                .map(|w| w.m_i_clip)
+                .or_else(|| cur_hud.map(|w| i32::from(w.clip)))
+                .unwrap_or(0);
+            let cd = c.client_data();
+            let on_ground = p.onground >= 0 || cd.is_some_and(|d| (d.flags & 0x200) != 0);
+            let ducking = (p.flags & 0x4000) != 0 || cd.is_some_and(|d| (d.flags & 0x4000) != 0);
+            let spd = Vec3::new(p.simvel.x, p.simvel.y, 0.0).length();
+            (wid, wstate, on_ground, ducking, spd, clip)
+        }, else (0, 0, true, false, 0.0, 0))
     }
 
     /// Drains new console lines (`Con_Printf`) since the last call.

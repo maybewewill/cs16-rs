@@ -6,6 +6,7 @@ use xtask::parity;
 const USAGE: &str = "usage: cargo xtask parity [--dir <path>] [--min <pct>]\n       \
                      cargo xtask parity import-names <category> <file> [--dir <path>]\n       \
                      cargo xtask golden <ip:port> <name>\n       \
+                     cargo xtask visual-diff [--map de_dust2] [--brightness <f32>] [--out target/visual-diff] [--reference-dir <dir>] [--resolution 1280x720] [--port 27099] [--ui none] [--build]\n       \
                      cargo xtask web-build [--out <dir>]\n       \
                      cargo xtask mod-build [--out <dir>]";
 
@@ -47,6 +48,13 @@ fn main() -> ExitCode {
             }
         },
         Some("mod-build") => match run_mod_build(args) {
+            Ok(code) => code,
+            Err(msg) => {
+                eprintln!("error: {msg}");
+                ExitCode::from(2)
+            }
+        },
+        Some("visual-diff") => match xtask::visual_diff::run_visual_diff(args) {
             Ok(code) => code,
             Err(msg) => {
                 eprintln!("error: {msg}");

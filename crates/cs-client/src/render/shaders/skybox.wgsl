@@ -48,12 +48,7 @@ fn bayer4x4(p: vec2<f32>) -> f32 {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let sample_rgb = textureSample(t_face, s_face, in.uv).rgb;
-    let tex_exp = max(u.params.y, 0.5) * 0.5;
-    let sample_lin = pow(clamp(sample_rgb, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(tex_exp));
-    let brightness = max(u.params.z, 0.1);
-    let gamma_val = max(u.params.x, 0.5);
-    let gamma_exp = 2.5 / gamma_val;
-    var rgb = pow(clamp(sample_lin * brightness, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(gamma_exp));
+    var rgb = clamp(sample_rgb, vec3<f32>(0.0), vec3<f32>(1.0));
     if u.params.w > 0.5 {
         let d = bayer4x4(in.clip_pos.xy);
         let steps = vec3<f32>(31.0, 63.0, 31.0);

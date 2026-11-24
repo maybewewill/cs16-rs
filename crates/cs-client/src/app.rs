@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use cs_assets::bsp::BspMap;
 use cs_assets::scheme::{LocalizationTable, SkyboxTextures, VguiColors, load_menu_background};
+use cs_assets::vgui_scripts::TitlesTable;
 use cs_clientcore::hud::{DeathNotice, HudState, VguiMenuState};
 use cs_clientcore::{ConnState, ConsoleCommand, SoundCommand, ViewAngleUpdate};
 use cs_cvar::{CVarRegistry, EngineAction};
@@ -29,9 +30,9 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 use crate::audio::{AudioEngine, ListenerState};
 use crate::session::Session;
 use cs_client::camera::Camera;
-use cs_client::hudtext::{format_message, strip_html};
+use cs_client::hudtext::{format_message_with_titles, format_saytext_with_titles};
 use cs_client::input::{
-    CmdClock, CmdParams, ConsoleRoute, Held, MoveSpeeds, build_usercmd, route_unknown, weapon_for_slot,
+    CmdClock, CmdParams, ConsoleRoute, Held, MoveSpeeds, build_usercmd, route_unknown,
 };
 use cs_client::render::bsp_renderer::BspRenderStats;
 use cs_client::render::lighting::{GpuLightsUniform, TextureFilterMode};
@@ -39,23 +40,34 @@ use cs_client::render::mdl_renderer::{StudioInstance, viewmodel_transform};
 use cs_client::render::scene::ModelRegistry;
 use cs_client::render::{RenderSettings, Renderer, SceneDynamicData};
 use cs_client::ui::chat::ChatInputUi;
-use cs_client::ui::console::ConsoleUi;
-use cs_client::ui::hud::{HudSprites, HudView, draw_cs16_hud, draw_voice_speakers};
+use cs_client::ui::console::{ConsoleRenderCtx, ConsoleUi};
+use cs_client::ui::hud::{
+    HudAnimState, HudChatEntry, HudExtrasContext, HudSprites, HudView, PickupHistoryEntry,
+    PickupKind, compute_hud_visibility, draw_cs16_hud_with_runtime, draw_voice_speakers,
+};
+use cs_client::ui::hud_extras::{OverviewMapTex, WeaponBucketState, draw_overview_map};
 use cs_pm::collision::Hull;
-use cs_client::ui::main_menu::MainMenuUi;
+use cs_client::ui::main_menu::{MainMenuRenderCtx, MainMenuUi};
 use cs_client::ui::mod_hud::{draw_mod_approval_prompt, draw_mod_hud};
-use cs_client::ui::options::OptionsUi;
-use cs_client::ui::scoreboard::{ScoreRow, show_scoreboard};
-use cs_client::ui::server_menu::{draw_text_menu, menu_key_enabled, menu_lines};
+use cs_client::ui::options::{OptionsRenderCtx, OptionsUi};
+use cs_client::ui::scoreboard::{ScoreRow, ScoreboardRenderCtx, show_scoreboard_vgui};
+use cs_client::ui::screens::{
+    BuyClassTeamMenuUi, BuyMenuRenderCtx, CommandMenuUi, DemoPlayerUi, DialogRenderCtx,
+    DisconnectErrorDialog, LoadingDialogUi, MotdRenderCtx, MotdVguiUi, PlayerListDialogUi,
+    ServerPasswordUi, SpectatorMode, SpectatorRenderCtx, SpectatorVguiUi, VguiMenuKind,
+};
+use cs_client::ui::server_menu::{
+    draw_styled_text_menu_vgui, draw_text_menu_vgui, menu_key_enabled,
+    menu_styled_lines_with_titles,
+};
+use cs_client::ui::vgui2::{VguiRuntime, install_scheme_fonts_into_egui};
 use cs_client::ui::vgui_assets::VguiAssetBank;
 use cs_client::ui::vgui_theme::{VguiPalette, apply_vgui2_theme};
-use cs_client::ui::{FrameTelemetry, draw_crosshair, draw_net_graph};
+use cs_client::ui::{
+    CrosshairInputs, CrosshairState, FrameTelemetry, draw_crosshair_vgui, draw_net_graph,
+};
 use cs_client::view::{FrameView, ViewInputs, ViewStats};
 
-/// Seconds a kill, a chat line, a notification and the centre text stay on screen.
-const FEED_LIFE: f64 = 6.0;
-const CHAT_LIFE: f64 = 8.0;
-const CENTER_LIFE: f64 = 3.0;
 const MAX_FEED: usize = 5;
 
 pub struct LaunchConfig {
@@ -65,13 +77,36 @@ pub struct LaunchConfig {
     pub startup_exec: Vec<String>,
     pub auto_screenshot: Option<PathBuf>,
     pub startup_ui: Option<String>,
+    pub headless: bool,
+    pub width: u32,
+    pub height: u32,
+    pub wait_camera: u32,
+    pub wait_seconds: Option<f32>,
+}
+
+impl Default for LaunchConfig {
+    fn default() -> Self {
+        Self {
+            gamedir: None,
+            startup_map: None,
+            open_console: false,
+            startup_exec: Vec::new(),
+            auto_screenshot: None,
+            startup_ui: None,
+            headless: false,
+            width: 1280,
+            height: 720,
+            wait_camera: 1,
+            wait_seconds: None,
+        }
+    }
 }
 
 struct WindowRuntime {
-    window: Arc<Window>,
+    window: Option<Arc<Window>>,
     renderer: Renderer,
     egui_ctx: egui::Context,
-    egui_state: egui_winit::State,
+    egui_state: Option<egui_winit::State>,
     bg_texture: Option<egui::TextureHandle>,
     hud_sprites: Option<HudSprites>,
     vgui_bank: VguiAssetBank,
@@ -82,8 +117,9 @@ struct WindowRuntime {
 #[derive(Default)]
 struct HudFeeds {
     deaths: Vec<(DeathNotice, f64)>,
-    chat: Vec<(String, f64)>,
+    chat: Vec<(HudChatEntry, f64)>,
     notify: Vec<(String, f64)>,
+    pickups: Vec<PickupHistoryEntry>,
     center: Option<(String, f64)>,
     menu_since: Option<(f64, String)>,
     motd_shown: bool,
@@ -91,11 +127,12 @@ struct HudFeeds {
 }
 
 impl HudFeeds {
-    fn expire(&mut self, now: f64) {
-        self.deaths.retain(|(_, t)| now - t < FEED_LIFE);
-        self.chat.retain(|(_, t)| now - t < CHAT_LIFE);
-        self.notify.retain(|(_, t)| now - t < FEED_LIFE);
-        if self.center.as_ref().is_some_and(|(_, t)| now - t > CENTER_LIFE) {
+    fn expire(&mut self, now: f64, feed_life: f64, chat_life: f64, center_life: f64) {
+        self.deaths.retain(|(_, t)| now - t < feed_life);
+        self.chat.retain(|(_, t)| now - t < chat_life);
+        self.notify.retain(|(_, t)| now - t < feed_life);
+        self.pickups.retain(|e| now < e.end_time);
+        if self.center.as_ref().is_some_and(|(_, t)| now - t > center_life) {
             self.center = None;
         }
     }
@@ -122,6 +159,12 @@ pub struct Cs16App {
     view_stats: ViewStats,
     last_stats: BspRenderStats,
     feeds: HudFeeds,
+    hud_anim: HudAnimState,
+    crosshair_state: CrosshairState,
+    crosshair_shots_fired: i32,
+    crosshair_last_weapon: u8,
+    crosshair_last_clip: i32,
+    prev_mouse_delta: (f32, f32),
     weapon_switch_timer: f32,
     last_weapon: Option<u8>,
     mod_transfer: ClientModTransfer,
@@ -131,6 +174,23 @@ pub struct Cs16App {
     console_ui: ConsoleUi,
     options_ui: OptionsUi,
     chat_ui: ChatInputUi,
+    vgui_rt: VguiRuntime,
+    buy_team_class_ui: BuyClassTeamMenuUi,
+    motd_ui: MotdVguiUi,
+    spectator_ui: SpectatorVguiUi,
+    command_menu_ui: CommandMenuUi,
+    loading_ui: LoadingDialogUi,
+    player_list_ui: PlayerListDialogUi,
+    demo_player_ui: DemoPlayerUi,
+    password_ui: ServerPasswordUi,
+    disconnect_err_ui: DisconnectErrorDialog,
+    weapon_buckets: WeaponBucketState,
+    titles: TitlesTable,
+    overview_tex: Option<OverviewMapTex>,
+    overview_map_name: String,
+    scoreboard_toggled: bool,
+    startup_ui_applied: bool,
+    in_game_frames: u64,
 
     start_time: Instant,
     last_frame: Instant,
@@ -171,7 +231,8 @@ impl Cs16App {
                         vfs.file_count(),
                         maps.len()
                     ));
-                    let loc = LocalizationTable::load(&vfs);
+                    let lang = cvars.get_str("cl_language").to_string();
+                    let loc = LocalizationTable::load_language(&vfs, &lang);
                     (Some(vfs), maps, VguiPalette::from(colors), Some(loc))
                 }
                 Err(err) => {
@@ -184,6 +245,22 @@ impl Cs16App {
         let mut console_ui = ConsoleUi::default();
         if launch.open_console {
             console_ui.open();
+        }
+
+        let mut menu_ui = MainMenuUi::default();
+        let mut options_ui = OptionsUi::default();
+        let mut vgui_rt = VguiRuntime::new();
+        let mut spectator_ui = SpectatorVguiUi::default();
+        let mut command_menu_ui = CommandMenuUi::default();
+        let mut titles = TitlesTable::default();
+        if let Some(v) = &vfs {
+            let lang = cvars.get_str("cl_language").to_string();
+            menu_ui.load_resources(v, &lang);
+            options_ui.load_resources(v);
+            vgui_rt.load_scheme_fonts(v);
+            spectator_ui.load_assets(v);
+            command_menu_ui.load_from_vfs(v);
+            titles = TitlesTable::load(v);
         }
 
         let mut audio = AudioEngine::new();
@@ -216,14 +293,37 @@ impl Cs16App {
                 triangles: 0,
             },
             feeds: HudFeeds::default(),
+            hud_anim: HudAnimState::default(),
+            crosshair_state: CrosshairState::default(),
+            crosshair_shots_fired: 0,
+            crosshair_last_weapon: 0,
+            crosshair_last_clip: 0,
+            prev_mouse_delta: (0.0, 0.0),
             weapon_switch_timer: 0.0,
             last_weapon: None,
             mod_transfer: ClientModTransfer::default(),
             mod_host: ClientModHost::new(),
-            menu_ui: MainMenuUi::default(),
+            menu_ui,
             console_ui,
-            options_ui: OptionsUi::default(),
+            options_ui,
             chat_ui: ChatInputUi::default(),
+            vgui_rt,
+            buy_team_class_ui: BuyClassTeamMenuUi::default(),
+            motd_ui: MotdVguiUi::default(),
+            spectator_ui,
+            command_menu_ui,
+            loading_ui: LoadingDialogUi::default(),
+            player_list_ui: PlayerListDialogUi::default(),
+            demo_player_ui: DemoPlayerUi::default(),
+            password_ui: ServerPasswordUi::default(),
+            disconnect_err_ui: DisconnectErrorDialog::default(),
+            weapon_buckets: WeaponBucketState::default(),
+            titles,
+            overview_tex: None,
+            overview_map_name: String::new(),
+            scoreboard_toggled: false,
+            startup_ui_applied: false,
+            in_game_frames: 0,
             start_time: now,
             last_frame: now,
             fps_smooth: 100.0,
@@ -244,7 +344,13 @@ impl Cs16App {
             || self.console_ui.open
             || self.options_ui.open
             || self.chat_ui.open
-            || self.feeds.motd_open
+            || self.motd_ui.open
+            || self.buy_team_class_ui.active_res.is_some()
+            || self.command_menu_ui.open
+            || self.player_list_ui.open
+            || self.demo_player_ui.open
+            || self.password_ui.open
+            || self.disconnect_err_ui.open
             || !self.mod_transfer.pending_approvals().is_empty()
     }
 
@@ -257,22 +363,25 @@ impl Cs16App {
         if let Some(rt) = &mut self.runtime
             && rt.cursor_captured != want
         {
-            if want {
-                let grabbed = rt
-                    .window
-                    .set_cursor_grab(CursorGrabMode::Locked)
-                    .or_else(|_| rt.window.set_cursor_grab(CursorGrabMode::Confined));
-                if grabbed.is_ok() {
-                    rt.window.set_cursor_visible(false);
-                    rt.cursor_captured = true;
+            if let Some(win) = &rt.window {
+                if want {
+                    let grabbed = win
+                        .set_cursor_grab(CursorGrabMode::Locked)
+                        .or_else(|_| win.set_cursor_grab(CursorGrabMode::Confined));
+                    if grabbed.is_ok() {
+                        win.set_cursor_visible(false);
+                        rt.cursor_captured = true;
+                    }
+                } else {
+                    let _ = win.set_cursor_grab(CursorGrabMode::None);
+                    win.set_cursor_visible(true);
+                    rt.cursor_captured = false;
+                    self.active_actions.clear();
+                    self.mouse1_held = false;
+                    self.mouse2_held = false;
                 }
             } else {
-                let _ = rt.window.set_cursor_grab(CursorGrabMode::None);
-                rt.window.set_cursor_visible(true);
-                rt.cursor_captured = false;
-                self.active_actions.clear();
-                self.mouse1_held = false;
-                self.mouse2_held = false;
+                rt.cursor_captured = want;
             }
         }
     }
@@ -288,10 +397,12 @@ impl Cs16App {
         let collision = Arc::new(WorldCollision::from_bsp(&map));
         if let Some(rt) = &mut self.runtime {
             rt.renderer.load_map(&map, &sky);
-            rt.window.set_title(&format!(
-                "Counter-Strike 1.6 (Rust) - {} [{}]",
-                map.name, rt.renderer.adapter_name
-            ));
+            if let Some(win) = &rt.window {
+                win.set_title(&format!(
+                    "Counter-Strike 1.6 (Rust) - {} [{}]",
+                    map.name, rt.renderer.adapter_name
+                ));
+            }
         }
         // The prediction walks the map's hulls and the effects trace against it; the sound
         // surfaces come with the materials file.
@@ -330,8 +441,8 @@ impl Cs16App {
             bots: self.cvars.get_i32("bot_quota").clamp(0, 31) as u32,
             player_name: self.cvars.get_str("name").to_string(),
             hostname: self.cvars.get_str("hostname").to_string(),
-            // The shell draws the server's text menus and answers them with `menuselect`.
-            text_menus: true,
+            // `_vgui_menus 1` asks server for VGUIMenu dialogs; `_vgui_menus 0` uses ShowMenu.
+            text_menus: !self.cvars.get_bool("_vgui_menus"),
             ..LocalOptions::default()
         };
         match Session::start_local(&vfs, map_name, &opts) {
@@ -368,7 +479,8 @@ impl Cs16App {
     fn connect_remote(&mut self, addr: &str) {
         self.end_session();
         let name = self.cvars.get_str("name").to_string();
-        match Session::connect_remote(self.vfs.as_ref(), addr, &name) {
+        let vgui_menus = self.cvars.get_bool("_vgui_menus");
+        match Session::connect_remote(self.vfs.as_ref(), addr, &name, vgui_menus) {
             Ok(session) => {
                 self.cvars.info(format!("Connecting to {addr}..."));
                 self.session = session;
@@ -384,8 +496,22 @@ impl Cs16App {
         self.view_stats = ViewStats::default();
         self.last_weapon = None;
         self.weapon_switch_timer = 0.0;
+        self.weapon_buckets = WeaponBucketState::default();
+        self.buy_team_class_ui.close();
+        self.motd_ui.open = false;
+        self.command_menu_ui.set_open(false);
+        self.disconnect_err_ui.open = false;
+        self.overview_tex = None;
+        self.overview_map_name.clear();
+        self.scoreboard_toggled = false;
         self.mod_transfer = ClientModTransfer::default();
         self.mod_host = ClientModHost::new();
+        self.vgui_rt.invalidate_cache();
+        if let Some(v) = &self.vfs {
+            self.vgui_rt.load_scheme_fonts(v);
+        }
+        let vgui_flag = if self.cvars.get_bool("_vgui_menus") { "1" } else { "0" };
+        self.session.set_client_cvar("_vgui_menus", vgui_flag);
         self.menu_ui.visible = false;
         self.console_ui.open = false;
         self.options_ui.open = false;
@@ -404,13 +530,27 @@ impl Cs16App {
             rt.renderer.set_entity_scene(None);
             rt.renderer.set_model_registry(ModelRegistry::default());
             rt.renderer.clear_model_caches();
-            rt.window.set_title("Counter-Strike 1.6 (Rust)");
+            if let Some(win) = &rt.window {
+                win.set_title("Counter-Strike 1.6 (Rust)");
+            }
         }
         self.audio.stop_all();
         self.feeds = HudFeeds::default();
+        self.hud_anim = HudAnimState::default();
+        self.crosshair_state = CrosshairState::default();
+        self.crosshair_shots_fired = 0;
+        self.crosshair_last_weapon = 0;
+        self.crosshair_last_clip = 0;
         self.view_stats = ViewStats::default();
         self.menu_ui.visible = true;
         self.chat_ui.open = false;
+        self.buy_team_class_ui.close();
+        self.motd_ui.open = false;
+        self.command_menu_ui.set_open(false);
+        self.loading_ui.visible = false;
+        self.overview_tex = None;
+        self.overview_map_name.clear();
+        self.scoreboard_toggled = false;
         self.active_actions.clear();
         self.mouse1_held = false;
         self.mouse2_held = false;
@@ -418,6 +558,7 @@ impl Cs16App {
         self.cmd_clock = CmdClock::default();
         self.last_weapon = None;
         self.weapon_switch_timer = 0.0;
+        self.weapon_buckets = WeaponBucketState::default();
         self.mod_transfer = ClientModTransfer::default();
         self.mod_host = ClientModHost::new();
         self.cvars.set_forward_unknown(false);
@@ -459,7 +600,7 @@ impl Cs16App {
 
     /// Plays what the client core queued: server/event sounds, ambient DSP, material bullet
     /// impacts, radio/VOX sentences, reloads, and predicted footsteps.
-    fn play_sounds(&mut self, view: &FrameView, local_entity: Option<u16>) {
+    fn play_sounds(&mut self, view: &FrameView, local_entity: Option<u16>, sess_now: f64) {
         let master = finite_or(self.cvars.get_f32("volume"), 1.0).clamp(0.0, 1.0);
         let suit_vol = finite_or(self.cvars.get_f32("suitvolume"), 0.25).clamp(0.0, 1.0);
         let listener_eye = view.eye;
@@ -493,8 +634,11 @@ impl Cs16App {
                 occ_ref,
             );
         }
-        for (_sender, code, _pitch) in &view.radio_audio {
-            self.audio.play_sentence(self.vfs.as_ref(), code, master);
+        for (sender, code, pitch) in &view.radio_audio {
+            self.audio.play_send_audio(self.vfs.as_ref(), code, master, *pitch);
+            if *sender > 0 {
+                self.hud_anim.trigger_radio(*sender, sess_now);
+            }
         }
         for (vol, kind) in &view.reload_sounds {
             self.audio.play_reload_sound(self.vfs.as_ref(), *vol, *kind);
@@ -523,6 +667,8 @@ impl Cs16App {
     /// Moves what the HUD state collects into the timed logs the HUD draws.
     fn collect_hud_feeds(&mut self, now: f64) {
         let loc = self.loc.as_ref();
+        let titles = Some(&self.titles);
+        let names = self.session.player_names();
         let feeds = &mut self.feeds;
         let weapon = self
             .session
@@ -531,14 +677,46 @@ impl Cs16App {
                     feeds.deaths.push((d, now));
                 }
                 for line in hud.chat.drain(..) {
-                    let text = format_message(&line.text, &line.params, loc);
+                    let text = format_saytext_with_titles(&line.text, &line.params, loc, titles);
                     if !text.is_empty() {
-                        feeds.chat.push((text, now));
+                        let team = hud.players.get(&line.sender).map(|p| p.team.clone());
+                        feeds.chat.push((HudChatEntry { text, team }, now));
                     }
+                }
+                for wid in hud.weapon_pickups.drain(..) {
+                    let empty = matches!(hud.clips.get(&wid), Some(&0))
+                        && hud.weapons.get(&wid).is_some_and(|w| {
+                            w.ammo1_type != 255 && hud.ammo.get(&w.ammo1_type).copied().unwrap_or(0) == 0
+                        });
+                    feeds.pickups.push(PickupHistoryEntry {
+                        kind: PickupKind::Weapon { weapon_id: wid, empty },
+                        end_time: now + 5.0,
+                    });
+                }
+                for (ammo_id, amount) in hud.ammo_pickups.drain(..) {
+                    feeds.pickups.push(PickupHistoryEntry {
+                        kind: PickupKind::Ammo { ammo_id, amount },
+                        end_time: now + 5.0,
+                    });
+                }
+                for classname in hud.item_pickups.drain(..) {
+                    feeds.pickups.push(PickupHistoryEntry {
+                        kind: PickupKind::Item { classname },
+                        end_time: now + 5.0,
+                    });
+                }
+                if feeds.pickups.len() > 12 {
+                    let excess = feeds.pickups.len() - 12;
+                    feeds.pickups.drain(..excess);
                 }
                 let mut got_dest4 = false;
                 for line in hud.text.drain(..) {
-                    let text = format_message(&line.message, &line.params, loc);
+                    let is_chat = line.dest == 3 || line.dest == 5;
+                    let text = if is_chat {
+                        format_saytext_with_titles(&line.message, &line.params, loc, titles)
+                    } else {
+                        format_message_with_titles(&line.message, &line.params, loc, titles)
+                    };
                     if text.is_empty() {
                         continue;
                     }
@@ -547,7 +725,17 @@ impl Cs16App {
                             feeds.center = Some((text, now));
                             got_dest4 = true;
                         }
-                        3 | 5 => feeds.chat.push((text, now)),
+                        3 | 5 => {
+                            let team = line.params.first().and_then(|sender_name| {
+                                names
+                                    .iter()
+                                    .find(|(_, n)| *n == sender_name)
+                                    .and_then(|(slot0, _)| slot0.checked_add(1))
+                                    .and_then(|slot1| hud.players.get(&slot1))
+                                    .map(|p| p.team.clone())
+                            });
+                            feeds.chat.push((HudChatEntry { text, team }, now));
+                        }
                         1 => feeds.notify.push((text, now)),
                         _ => {}
                     }
@@ -555,7 +743,7 @@ impl Cs16App {
                 if let Some(text) = hud.center_print.take()
                     && !got_dest4
                 {
-                    let text = format_message(&text, &[], loc);
+                    let text = format_message_with_titles(&text, &[], loc, titles);
                     feeds.center = Some((text, now));
                 }
                 if hud
@@ -586,7 +774,10 @@ impl Cs16App {
         trim_feed(&mut self.feeds.deaths);
         trim_feed(&mut self.feeds.chat);
         trim_feed(&mut self.feeds.notify);
-        self.feeds.expire(now);
+        let feed_life = f64::from(finite_or(self.cvars.get_f32("hud_deathnotice_time"), 6.0).max(0.5));
+        let chat_life = f64::from(finite_or(self.cvars.get_f32("hud_saytext_time"), 5.0).max(0.5));
+        let center_life = f64::from(finite_or(self.cvars.get_f32("scr_centertime"), 2.0).max(0.5));
+        self.feeds.expire(now, feed_life, chat_life, center_life);
 
         if weapon != self.last_weapon {
             if self.last_weapon.is_some() {
@@ -604,6 +795,7 @@ impl Cs16App {
         {
             self.feeds.motd_shown = true;
             self.feeds.motd_open = true;
+            self.motd_ui.open = true;
         }
     }
 
@@ -615,7 +807,11 @@ impl Cs16App {
         }
     }
 
-    fn process_actions(&mut self, actions: Vec<EngineAction>, event_loop: &ActiveEventLoop) {
+    fn process_actions(
+        &mut self,
+        actions: Vec<EngineAction>,
+        event_loop: Option<&ActiveEventLoop>,
+    ) -> bool {
         let mut queue = actions;
         let mut guard = 0usize;
         while !queue.is_empty() && guard < 32 {
@@ -633,8 +829,10 @@ impl Cs16App {
                             self.save_config();
                         }
                         self.end_session();
-                        event_loop.exit();
-                        return;
+                        if let Some(el) = event_loop {
+                            el.exit();
+                        }
+                        return true;
                     }
                     EngineAction::ExecFile(file) => queue.extend(self.exec_cfg_file(&file)),
                     EngineAction::WriteConfig => self.save_config(),
@@ -645,8 +843,22 @@ impl Cs16App {
                     EngineAction::ToggleMenu => {
                         if self.console_ui.open {
                             self.console_ui.open = false;
-                        } else if self.feeds.motd_open {
+                        } else if self.motd_ui.open {
+                            self.motd_ui.open = false;
                             self.feeds.motd_open = false;
+                        } else if self.buy_team_class_ui.active_res.is_some() {
+                            self.buy_team_class_ui.close();
+                            self.session.with_hud_mut(|h| h.vgui_menu = None);
+                        } else if self.command_menu_ui.open {
+                            self.command_menu_ui.set_open(false);
+                        } else if self.player_list_ui.open {
+                            self.player_list_ui.open = false;
+                        } else if self.demo_player_ui.open {
+                            self.demo_player_ui.open = false;
+                        } else if self.password_ui.open {
+                            self.password_ui.open = false;
+                        } else if self.disconnect_err_ui.open {
+                            self.disconnect_err_ui.open = false;
                         } else if self.chat_ui.open {
                             self.chat_ui.open = false;
                         } else if self.options_ui.open {
@@ -671,6 +883,10 @@ impl Cs16App {
                         self.pending_screenshot = Some(path);
                     }
                     EngineAction::ActionInput { name, pressed } => {
+                        if name == "commandmenu" {
+                            self.command_menu_ui.set_open(pressed);
+                            self.sync_cursor_capture();
+                        }
                         if pressed {
                             self.active_actions.insert(name);
                         } else {
@@ -786,9 +1002,55 @@ impl Cs16App {
                         self.audio.play_sentence(self.vfs.as_ref(), &spec, suit);
                     }
                     EngineAction::StopSound => self.audio.stop_all(),
+                    EngineAction::AdjustCrosshair(color_idx) => {
+                        const PRESETS: [&str; 5] = [
+                            "50 250 50",
+                            "250 50 50",
+                            "50 50 250",
+                            "250 250 50",
+                            "50 250 250",
+                        ];
+                        let cur = self.cvars.get_str("cl_crosshair_color").to_string();
+                        let next = match color_idx {
+                            Some(i) => PRESETS[usize::from(i) % PRESETS.len()],
+                            None => {
+                                let idx = PRESETS
+                                    .iter()
+                                    .position(|p| *p == cur)
+                                    .map_or(0, |i| (i + 1) % PRESETS.len());
+                                PRESETS[idx]
+                            }
+                        };
+                        self.cvars.set("cl_crosshair_color", next);
+                    }
+                    EngineAction::ToggleScores => {
+                        self.scoreboard_toggled = !self.scoreboard_toggled;
+                    }
+                    EngineAction::OpenPlayerList => {
+                        self.player_list_ui.open = true;
+                        self.sync_cursor_capture();
+                    }
+                    EngineAction::OpenDemoPlayer(path) => {
+                        if let Some(p) = path {
+                            self.demo_player_ui.load_demo(&p);
+                        }
+                        self.demo_player_ui.open = true;
+                        self.sync_cursor_capture();
+                    }
+                    EngineAction::SpecMode(mode) => {
+                        let next = SpectatorMode::from_i32(mode);
+                        self.spectator_ui.mode = next;
+                        if self.is_in_game() {
+                            self.session.send_stringcmd(&format!("specmode {}", next as i32));
+                        }
+                    }
+                    EngineAction::SpecMenu(visible) => {
+                        self.spectator_ui.menu_visible = visible != 0;
+                    }
                 }
             }
         }
+        false
     }
 
     fn server_console(&mut self, line: &str) {
@@ -801,9 +1063,11 @@ impl Cs16App {
         }
     }
 
-    /// `slot1`..`slot5`: selects the next weapon of the slot the player carries.
+    /// `slot1`..`slot5`: selects or opens the weapon bucket selector (`hud_fastswitch`).
     fn select_slot(&mut self, slot: u8) {
         let owned_bits = self.session.owned_weapons();
+        let fastswitch = self.cvars.get_bool("hud_fastswitch");
+        let buckets = &mut self.weapon_buckets;
         let pick = self
             .session
             .with_hud(|hud| {
@@ -813,13 +1077,7 @@ impl Cs16App {
                     .map(|w| w.weapon_id)
                     .filter(|id| *id < 32 && owned_bits & (1 << id) != 0)
                     .collect();
-                weapon_for_slot(
-                    &hud.weapons,
-                    &owned,
-                    hud.current_weapon.map(|c| c.weapon_id),
-                    slot,
-                )
-                .map(str::to_string)
+                buckets.on_slot_press(hud, &owned, slot, fastswitch)
             })
             .flatten();
         if let Some(name) = pick {
@@ -868,7 +1126,7 @@ impl Cs16App {
         }
 
         if code == KeyCode::Escape && pressed && !event.repeat {
-            self.process_actions(vec![EngineAction::ToggleMenu], event_loop);
+            let _ = self.process_actions(vec![EngineAction::ToggleMenu], Some(event_loop));
             return true;
         }
 
@@ -937,7 +1195,7 @@ impl Cs16App {
             }
             let actions = self.cvars.handle_key_bind(key_name, pressed);
             if !actions.is_empty() {
-                self.process_actions(actions, event_loop);
+                let _ = self.process_actions(actions, Some(event_loop));
                 return true;
             }
         }
@@ -971,7 +1229,7 @@ impl Cs16App {
         }
     }
 
-    fn render_and_step(&mut self, event_loop: &ActiveEventLoop) {
+    fn render_and_step(&mut self, event_loop: Option<&ActiveEventLoop>) -> bool {
         let now = Instant::now();
         let raw_dt = (now - self.last_frame).as_secs_f32();
         let dt = raw_dt.clamp(0.0001, 0.1);
@@ -992,7 +1250,8 @@ impl Cs16App {
         self.cvars.set_forward_unknown(self.session.is_active());
         self.apply_view_angle_updates();
         self.queue_usercmd(f64::from(dt));
-        self.session.advance(f64::from(dt));
+        let timescale = finite_or(self.cvars.get_f32("host_timescale"), 1.0).clamp(0.05, 10.0);
+        self.session.advance(f64::from(dt * timescale));
         self.apply_view_angle_updates();
 
         for um in self.session.drain_unknown_usermsgs() {
@@ -1014,16 +1273,39 @@ impl Cs16App {
         }
 
         // The connection ended (kicked, timed out, rejected, the server shut down).
-        if let Some(state) = self.session.state()
-            && state.is_terminal()
-        {
-            match &state {
-                ConnState::Rejected(why) | ConnState::Disconnected(why) => {
+        if let Some(state) = self.session.state() {
+            if state.is_terminal() {
+                let reason = match &state {
+                    ConnState::Rejected(why) => Some(("Connection Rejected", why.clone())),
+                    ConnState::Disconnected(why) => Some(("Disconnected", why.clone())),
+                    _ => None,
+                };
+                self.end_session();
+                if let Some((title, why)) = reason {
                     self.cvars.error(format!("Disconnected: {why}"));
+                    if why.to_ascii_lowercase().contains("bad password")
+                        || why.to_ascii_lowercase().contains("invalid password")
+                    {
+                        self.password_ui.open = true;
+                    } else {
+                        self.disconnect_err_ui.trigger(title, why);
+                    }
                 }
-                _ => {}
+            } else if !matches!(state, ConnState::InGame) {
+                self.loading_ui.visible = true;
+                let (msg, prog) = match state {
+                    ConnState::AwaitChallenge => ("Establishing network connection to server...", 0.2),
+                    ConnState::AwaitConnection => ("Connecting to server...", 0.45),
+                    ConnState::Signon => ("Downloading resources and precaching...", 0.8),
+                    _ => ("Loading...", 0.1),
+                };
+                self.loading_ui.status_text = msg.to_string();
+                self.loading_ui.progress = prog;
+            } else {
+                self.loading_ui.visible = false;
             }
-            self.end_session();
+        } else {
+            self.loading_ui.visible = false;
         }
 
         // The server named its map: load it before the first frame is predicted.
@@ -1041,6 +1323,7 @@ impl Cs16App {
             let master = finite_or(self.cvars.get_f32("volume"), 1.0).clamp(0.0, 1.0);
             match classify_shell_command(&cmd) {
                 Some(ShellStuffAction::CloseMenu) => {
+                    self.buy_team_class_ui.close();
                     self.session.with_hud_mut(|h| {
                         h.menu = None;
                         h.vgui_menu = None;
@@ -1067,8 +1350,9 @@ impl Cs16App {
 
         let time_sec = self.start_time.elapsed().as_secs_f32();
         let in_game = self.is_in_game();
-        let show_scores =
-            self.active_actions.contains("showscores") && in_game && !self.menu_ui.visible;
+        let show_scores = (self.active_actions.contains("showscores") || self.scoreboard_toggled)
+            && in_game
+            && !self.menu_ui.visible;
         let master = finite_or(self.cvars.get_f32("volume"), 1.0).clamp(0.0, 1.0);
         let suit_vol = finite_or(self.cvars.get_f32("suitvolume"), 0.25).clamp(0.0, 1.0);
         let room_off = self.cvars.get_bool("room_off");
@@ -1101,6 +1385,101 @@ impl Cs16App {
         // 2. The frame of the session.
         let mut view: Option<FrameView> = None;
         if in_game {
+            self.in_game_frames += 1;
+            if let Some(ui_mode) = self.launch.startup_ui.clone() {
+                let m = ui_mode.to_ascii_lowercase();
+                if matches!(m.as_str(), "hud" | "buy" | "scoreboard" | "commandmenu" | "chat") {
+                    if self.in_game_frames == 2 {
+                        self.session.send_stringcmd("jointeam 2");
+                    } else if self.in_game_frames == 6 {
+                        self.session.send_stringcmd("joinclass 1");
+                    } else if self.in_game_frames == 14 {
+                        self.motd_ui.open = false;
+                        self.feeds.motd_open = false;
+                        self.buy_team_class_ui.close();
+                        self.session.with_hud_mut(|h| {
+                            h.vgui_menu = None;
+                            h.menu = None;
+                        });
+                        match m.as_str() {
+                            "buy" => {
+                                self.cvars.set("_vgui_menus", "1");
+                                self.feeds.center = None;
+                                self.feeds.notify.clear();
+                                self.buy_team_class_ui.open_kind(VguiMenuKind::Buy, true);
+                            }
+                            "scoreboard" => self.scoreboard_toggled = true,
+                            "commandmenu" => self.command_menu_ui.set_open(true),
+                            "chat" => self.chat_ui.open_chat(false),
+                            _ => {}
+                        }
+                        self.startup_ui_applied = true;
+                        self.sync_cursor_capture();
+                    }
+                } else if m == "class" {
+                    if self.in_game_frames == 2 {
+                        self.session.send_stringcmd("jointeam 2");
+                    } else if self.in_game_frames == 10 {
+                        self.motd_ui.open = false;
+                        self.feeds.motd_open = false;
+                        self.buy_team_class_ui.close();
+                        self.cvars.set("_vgui_menus", "1");
+                        self.session.with_hud_mut(|h| {
+                            h.vgui_menu = None;
+                            h.menu = None;
+                        });
+                        self.buy_team_class_ui.open_kind(VguiMenuKind::ClassCt, true);
+                        self.startup_ui_applied = true;
+                        self.sync_cursor_capture();
+                    }
+                } else if m == "team" && self.in_game_frames == 10 {
+                    self.motd_ui.open = false;
+                    self.feeds.motd_open = false;
+                    self.cvars.set("_vgui_menus", "1");
+                    self.session.with_hud_mut(|h| {
+                        h.vgui_menu = None;
+                        h.menu = None;
+                    });
+                    self.buy_team_class_ui.open_kind(VguiMenuKind::Team, true);
+                    self.startup_ui_applied = true;
+                    self.sync_cursor_capture();
+                } else if m == "motd" && self.in_game_frames == 10 {
+                    self.buy_team_class_ui.close();
+                    self.session.with_hud_mut(|h| {
+                        h.vgui_menu = None;
+                        h.menu = None;
+                    });
+                    self.motd_ui.open = true;
+                    self.feeds.motd_open = true;
+                    self.startup_ui_applied = true;
+                    self.sync_cursor_capture();
+                } else if matches!(m.as_str(), "spectator" | "spectator:menu") {
+                    if self.in_game_frames == 2 {
+                        self.session.send_stringcmd("jointeam 6");
+                    } else if self.in_game_frames == 14 {
+                        self.motd_ui.open = false;
+                        self.feeds.motd_open = false;
+                        self.buy_team_class_ui.close();
+                        self.session.with_hud_mut(|h| {
+                            h.vgui_menu = None;
+                            h.menu = None;
+                        });
+                        self.spectator_ui.menu_visible = m == "spectator:menu";
+                        self.startup_ui_applied = true;
+                        self.sync_cursor_capture();
+                    }
+                } else if m == "none" && self.in_game_frames == 8 {
+                    self.motd_ui.open = false;
+                    self.feeds.motd_open = false;
+                    self.buy_team_class_ui.close();
+                    self.session.with_hud_mut(|h| {
+                        h.vgui_menu = None;
+                        h.menu = None;
+                    });
+                    self.startup_ui_applied = true;
+                    self.sync_cursor_capture();
+                }
+            }
             let inputs = ViewInputs {
                 now: self.session.now(),
                 frametime: f64::from(dt),
@@ -1128,8 +1507,13 @@ impl Cs16App {
                 view = Some(frame);
             }
             self.collect_hud_feeds(inputs.now);
+            let hud_now = self.session.now();
+            let eye = view.as_ref().map_or(self.camera.position, |v| v.eye);
+            let yaw_deg = self.camera.yaw_deg;
+            self.session.with_hud(|h| self.hud_anim.step_with_pose(dt, h, hud_now, eye, yaw_deg));
         }
         self.weapon_switch_timer = (self.weapon_switch_timer - dt).max(0.0);
+        self.weapon_buckets.step(dt);
 
         if let Some(v) = &view {
             self.view_stats = v.stats;
@@ -1137,7 +1521,8 @@ impl Cs16App {
                 self.camera.position = v.eye;
             }
             let local_entity = self.session.local_slot().map(|s| u16::from(s) + 1);
-            self.play_sounds(v, local_entity);
+            let sess_now_snd = self.session.now();
+            self.play_sounds(v, local_entity, sess_now_snd);
             let master = finite_or(self.cvars.get_f32("volume"), 1.0).clamp(0.0, 1.0);
             for path in &v.anim_sounds {
                 self.audio.play_2d(self.vfs.as_ref(), path, 0.8 * master);
@@ -1177,34 +1562,85 @@ impl Cs16App {
 
         let sess_now = self.session.now();
         let deaths: Vec<DeathNotice> = self.feeds.deaths.iter().map(|(d, _)| d.clone()).collect();
-        let chat: Vec<String> = self.feeds.chat.iter().map(|(c, _)| c.clone()).collect();
+        let chat_entries: Vec<HudChatEntry> = self.feeds.chat.iter().map(|(c, _)| c.clone()).collect();
+        let chat: Vec<String> = chat_entries.iter().map(|c| c.text.clone()).collect();
+        let pickups = self.feeds.pickups.clone();
         let notify: Vec<String> = self.feeds.notify.iter().map(|(c, _)| c.clone()).collect();
         let center = self.feeds.center.as_ref().map(|(c, _)| c.clone());
-        let menu_lines_now: Option<Vec<String>> = self
+        let styled_menu_now = self
             .session
             .with_hud(|h| {
-                if let Some(m) = h
-                    .menu
+                h.menu
                     .as_ref()
                     .filter(|m| !m.multipart && m.keys != 0 && !m.text.is_empty())
-                {
-                    Some(menu_lines(&m.text, self.loc.as_ref()))
-                } else {
-                    h.vgui_menu
-                        .as_ref()
-                        .filter(|v| !v.multipart && v.keys != 0)
-                        .map(vgui_menu_fallback_lines)
-                }
+                    .map(|m| menu_styled_lines_with_titles(&m.text, self.loc.as_ref(), Some(&self.titles)))
             })
             .flatten();
-        let motd_text: Option<String> = self
-            .feeds
-            .motd_open
-            .then(|| self.session.with_hud(|h| strip_html(&h.motd)))
+        let use_vgui_menus = self.cvars.get_bool("_vgui_menus");
+        let active_vgui_menu = self
+            .session
+            .with_hud(|h| h.vgui_menu.as_ref().filter(|v| !v.multipart && v.keys != 0).cloned())
+            .flatten();
+        let fallback_vgui_lines = if !use_vgui_menus && styled_menu_now.is_none() {
+            active_vgui_menu.as_ref().map(vgui_menu_fallback_lines)
+        } else {
+            None
+        };
+        if use_vgui_menus && let Some(ref vm) = active_vgui_menu {
+            if let Some(kind) = VguiMenuKind::from_vgui_menu_id(vm.menu_id, &vm.name) {
+                let local_ct = self
+                    .session
+                    .local_slot()
+                    .and_then(|s| self.session.with_hud(|h| h.players.get(&(s + 1)).is_some_and(|p| p.team == "CT")))
+                    .unwrap_or(false);
+                if kind == VguiMenuKind::Buy && self.buy_team_class_ui.active_res.is_none() {
+                    self.feeds.center = None;
+                    self.feeds.notify.retain(|(s, _)| !s.contains("BUY key"));
+                }
+                self.buy_team_class_ui.open_kind(kind, local_ct);
+            }
+        } else if !use_vgui_menus {
+            self.buy_team_class_ui.close();
+        }
+        let motd_raw: Option<String> = self
+            .motd_ui
+            .open
+            .then(|| self.session.with_hud(|h| h.motd.clone()))
             .flatten();
 
         let local_speed = self.session.local_speed();
         let map_name = self.session.loaded_map().unwrap_or("").to_string();
+        if !map_name.is_empty() && self.overview_map_name != map_name {
+            self.overview_map_name = map_name.clone();
+            if let (Some(rt), Some(vfs)) = (&self.runtime, &self.vfs) {
+                self.overview_tex = OverviewMapTex::load(&rt.egui_ctx, vfs, &map_name);
+            }
+        }
+        let (local_is_ct, local_has_team) = self
+            .session
+            .local_slot()
+            .and_then(|s| {
+                self.session.with_hud(|h| {
+                    h.players.get(&(s + 1)).map(|p| {
+                        (
+                            p.team == "CT",
+                            !p.team.is_empty() && !p.team.eq_ignore_ascii_case("UNASSIGNED"),
+                        )
+                    })
+                })
+                .flatten()
+            })
+            .unwrap_or((true, false));
+        let spec_players: Vec<(u8, String)> = names.iter().map(|(&k, v)| (k + 1, v.clone())).collect();
+        let (round_secs_left, spec_hp) = self
+            .session
+            .with_hud(|h| {
+                (
+                    h.round_seconds_left(sess_now).max(0.0) as u32,
+                    h.spec_health,
+                )
+            })
+            .unwrap_or((0, None));
         let hostname = self
             .session
             .with_hud(|h| h.server_name.clone())
@@ -1214,6 +1650,7 @@ impl Cs16App {
             .as_ref()
             .is_some_and(|v| v.fov.is_finite() && v.fov > 0.0 && v.fov <= 40.0);
         let alive = view.as_ref().is_some_and(|v| v.alive);
+        let observer_mode = view.as_ref().map_or(0, |v| v.observer_mode);
 
         let mod_hud_cmds = if in_game {
             let (hp, ap, money) = self
@@ -1232,22 +1669,82 @@ impl Cs16App {
         let mut should_resume = false;
         let mut sent_chat: Option<(bool, String)> = None;
         let mut motd_close = false;
+        let mut vgui_cmd_out: Option<String> = None;
+        let mut cmdmenu_exec: Option<String> = None;
+        let mut cancel_loading = false;
 
         let Some(rt) = &mut self.runtime else {
-            return;
+            return false;
         };
-        let raw_input = rt.egui_state.take_egui_input(&rt.window);
+        let raw_input = if let (Some(state), Some(win)) = (&mut rt.egui_state, &rt.window) {
+            state.take_egui_input(win)
+        } else {
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(self.launch.width as f32, self.launch.height as f32),
+                )),
+                time: Some(self.start_time.elapsed().as_secs_f64()),
+                predicted_dt: dt,
+                viewports: std::iter::once((
+                    egui::ViewportId::ROOT,
+                    egui::ViewportInfo {
+                        native_pixels_per_point: Some(1.0),
+                        ..Default::default()
+                    },
+                ))
+                .collect(),
+                ..Default::default()
+            }
+        };
         rt.egui_ctx.begin_pass(raw_input);
 
+        let (hud_hidden, hud_timer_vis, hud_nvg) = self
+            .session
+            .with_hud(|h| (h.hidden, h.timer_visible, h.night_vision))
+            .unwrap_or((0, false, false));
+        let hud_vis = compute_hud_visibility(alive, 0, hud_hidden, hud_timer_vis);
         if let Some(v) = &view {
-            if !paused && alive && !scoped {
-                let dyn_gap = if self.cvars.get_bool("cl_dynamiccrosshair") {
-                    local_speed / 45.0
-                } else {
-                    0.0
+            if !paused && hud_vis.crosshair && !scoped {
+                let (wid, wflags, on_ground, ducking, ch_spd, clip) = self.session.local_crosshair_state();
+                if wid != self.crosshair_last_weapon {
+                    self.crosshair_shots_fired = 0;
+                    self.crosshair_last_weapon = wid;
+                    self.crosshair_last_clip = clip;
+                } else if clip >= 0 {
+                    if clip < self.crosshair_last_clip {
+                        self.crosshair_shots_fired += self.crosshair_last_clip - clip;
+                        if self.crosshair_shots_fired > 600 {
+                            self.crosshair_shots_fired = 1;
+                        }
+                    }
+                    self.crosshair_last_clip = clip;
+                }
+                let ch_inputs = CrosshairInputs {
+                    weapon_id: wid,
+                    weapon_flags: wflags,
+                    on_ground,
+                    ducking,
+                    speed_2d: ch_spd,
+                    shots_fired: self.crosshair_shots_fired,
+                    night_vision: hud_nvg,
+                    dynamic: self.cvars.get_bool("cl_dynamiccrosshair"),
+                    hide_hud: hud_hidden,
                 };
-                draw_crosshair(&rt.egui_ctx, &self.cvars, dyn_gap);
+                draw_crosshair_vgui(&rt.egui_ctx, &self.cvars, &mut self.crosshair_state, &ch_inputs);
             }
+            let mut extras = HudExtrasContext {
+                titles: Some(&self.titles),
+                loc: self.loc.as_ref(),
+                overview: self.overview_tex.as_ref(),
+                buckets: Some(&self.weapon_buckets),
+                anim: Some(&self.hud_anim),
+                chat_entries: Some(&chat_entries),
+                pickup_history: &pickups,
+                observer_mode,
+                ..Default::default()
+            };
+            extras.apply_cvars(&self.cvars);
             let hud_state = self.session.with_hud(|h| {
                 let view = HudView {
                     hud: h,
@@ -1266,7 +1763,39 @@ impl Cs16App {
                     yaw_deg: self.camera.yaw_deg,
                     underwater_tint: v.underwater_tint,
                 };
-                draw_cs16_hud(&rt.egui_ctx, rt.hud_sprites.as_ref(), &view);
+                draw_cs16_hud_with_runtime(
+                    &rt.egui_ctx,
+                    rt.hud_sprites.as_ref(),
+                    &view,
+                    &extras,
+                    &mut self.vgui_rt,
+                    self.vfs.as_ref(),
+                );
+                if !alive
+                    && matches!(
+                        self.spectator_ui.mode,
+                        SpectatorMode::MapOverviewFree | SpectatorMode::MapOverviewChase
+                    )
+                    && let Some(ov) = &self.overview_tex
+                {
+                    let screen = rt.egui_ctx.content_rect();
+                    let ov_rect = screen.shrink2(egui::vec2(32.0, 72.0));
+                    let ov_painter = rt.egui_ctx.layer_painter(egui::LayerId::new(
+                        egui::Order::Background,
+                        egui::Id::unique("cs16_spectator_overview"),
+                    ));
+                    draw_overview_map(
+                        &ov_painter,
+                        ov_rect,
+                        ov,
+                        h,
+                        v.eye,
+                        self.camera.yaw_deg,
+                        self.cvars.get_bool("spec_drawcone"),
+                        self.cvars.get_bool("spec_drawnames"),
+                        &names,
+                    );
+                }
             });
             let _ = hud_state;
             draw_voice_speakers(
@@ -1276,9 +1805,54 @@ impl Cs16App {
                 voice_local_talking,
             );
             draw_mod_hud(&rt.egui_ctx, &mod_hud_cmds);
-            if let Some(lines) = &menu_lines_now {
+            if let Some(styled) = &styled_menu_now {
                 let scale = (rt.egui_ctx.content_rect().height() / 768.0).clamp(0.85, 1.45);
-                draw_text_menu(&rt.egui_ctx, lines, scale);
+                draw_styled_text_menu_vgui(
+                    &rt.egui_ctx,
+                    &mut self.vgui_rt,
+                    self.vfs.as_ref(),
+                    styled,
+                    scale,
+                );
+            } else if let Some(lines) = &fallback_vgui_lines {
+                let scale = (rt.egui_ctx.content_rect().height() / 768.0).clamp(0.85, 1.45);
+                draw_text_menu_vgui(
+                    &rt.egui_ctx,
+                    &mut self.vgui_rt,
+                    self.vfs.as_ref(),
+                    lines,
+                    scale,
+                );
+            }
+            let modal_menu_open = self.motd_ui.open
+                || self.buy_team_class_ui.active_res.is_some()
+                || styled_menu_now.is_some()
+                || fallback_vgui_lines.is_some();
+            let forced_spectator = self
+                .launch
+                .startup_ui
+                .as_deref()
+                .is_some_and(|s| {
+                    s.eq_ignore_ascii_case("spectator") || s.eq_ignore_ascii_case("spectator:menu")
+                })
+                && self.startup_ui_applied;
+            if in_game && !modal_menu_open && ((!alive && observer_mode != 0) || forced_spectator) {
+                let spec_ctx = SpectatorRenderCtx {
+                    vfs: self.vfs.as_ref(),
+                    loc: self.loc.as_ref(),
+                    ct_score,
+                    t_score,
+                    round_timer_secs: round_secs_left,
+                    players: &spec_players,
+                    spec_health: spec_hp,
+                };
+                let spec_actions = self.spectator_ui.show(
+                    &rt.egui_ctx,
+                    &mut self.vgui_rt,
+                    &mut self.cvars,
+                    &spec_ctx,
+                );
+                pending_actions.extend(spec_actions);
             }
             draw_net_graph(
                 &rt.egui_ctx,
@@ -1297,71 +1871,174 @@ impl Cs16App {
                 self.palette,
             );
             if show_scores {
-                show_scoreboard(
-                    &rt.egui_ctx,
-                    &hostname,
-                    &map_name,
+                let sb_ctx = ScoreboardRenderCtx {
+                    vfs: self.vfs.as_ref(),
+                    loc: self.loc.as_ref(),
+                    hostname: &hostname,
+                    map_name: &map_name,
                     ct_score,
                     t_score,
-                    &score_rows,
-                    self.session.local_slot(),
-                    rt.vgui_bank.client_palette,
-                );
+                    players: &score_rows,
+                    local_slot: self.session.local_slot(),
+                    short_headers: self.cvars.get_bool("scoreboard_shortheaders"),
+                    fallback_palette: rt.vgui_bank.client_palette,
+                };
+                show_scoreboard_vgui(&rt.egui_ctx, &mut self.vgui_rt, &sb_ctx);
             }
             if self.chat_ui.open {
-                sent_chat = self.chat_ui.show(&rt.egui_ctx, self.palette);
+                let mut con_ext = HudExtrasContext::default();
+                con_ext.apply_cvars(&self.cvars);
+                sent_chat = self.chat_ui.show(
+                    &rt.egui_ctx,
+                    &mut self.vgui_rt,
+                    self.vfs.as_ref(),
+                    con_ext.con_color,
+                );
             }
-            if let Some(text) = &motd_text {
-                egui::Window::new("Message of the day")
-                    .collapsible(false)
-                    .resizable(true)
-                    .default_width(520.0)
-                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                    .show(&rt.egui_ctx, |ui| {
-                        egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-                            ui.label(text);
-                        });
-                        if ui.button("Close").clicked() {
-                            motd_close = true;
-                        }
-                    });
+            if let Some(raw_motd) = &motd_raw {
+                let motd_ctx = MotdRenderCtx {
+                    vfs: self.vfs.as_ref(),
+                    loc: self.loc.as_ref(),
+                    hostname: &hostname,
+                    raw_motd,
+                };
+                if self.motd_ui.show(&rt.egui_ctx, &mut self.vgui_rt, &motd_ctx) {
+                    motd_close = true;
+                }
+            }
+            if !self.motd_ui.open && !motd_close && self.buy_team_class_ui.active_res.is_some() {
+                let can_cancel = if let Some(ref vm) = active_vgui_menu {
+                    (vm.keys & (1u16 << 9)) != 0
+                } else {
+                    let res = self
+                        .buy_team_class_ui
+                        .active_res
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_ascii_lowercase();
+                    if res.contains("teammenu") {
+                        local_has_team
+                    } else if res.contains("classmenu") {
+                        alive
+                    } else {
+                        true
+                    }
+                };
+                let buy_ctx = BuyMenuRenderCtx {
+                    vfs: self.vfs.as_ref(),
+                    loc: self.loc.as_ref(),
+                    map_name: &map_name,
+                    is_ct: local_is_ct,
+                    allowed_keys: active_vgui_menu.as_ref().map_or(0, |v| v.keys),
+                    can_cancel,
+                };
+                vgui_cmd_out = self
+                    .buy_team_class_ui
+                    .show(&rt.egui_ctx, &mut self.vgui_rt, &buy_ctx);
+            }
+            cmdmenu_exec = self.command_menu_ui.show(
+                &rt.egui_ctx,
+                &mut self.vgui_rt,
+                self.vfs.as_ref(),
+                self.loc.as_ref(),
+                &map_name,
+            );
+            if self.command_menu_ui.take_pending_briefing() {
+                self.motd_ui.open = true;
+                self.feeds.motd_open = true;
             }
         }
 
         let steam_icon = rt.vgui_bank.steam_icon.as_ref();
         let menu_cmds = self.menu_ui.show(
             &rt.egui_ctx,
+            &mut self.vgui_rt,
             &mut self.cvars,
-            &self.available_maps,
-            self.session.is_active(),
-            rt.bg_texture.as_ref(),
-            steam_icon,
-            self.palette,
+            &MainMenuRenderCtx {
+                vfs: self.vfs.as_ref(),
+                loc: self.loc.as_ref(),
+                available_maps: &self.available_maps,
+                in_game: self.session.is_active(),
+                bg_texture: rt.bg_texture.as_ref(),
+                steam_icon,
+                palette: self.palette,
+            },
         );
         pending_actions.extend(menu_cmds.actions);
         if menu_cmds.open_options {
             self.options_ui.open = true;
         }
+        if menu_cmds.open_player_list {
+            self.player_list_ui.open = true;
+        }
+        if menu_cmds.open_demo_player {
+            self.demo_player_ui.open = true;
+        }
         if menu_cmds.resume_game {
             should_resume = true;
         }
-        self.options_ui
-            .show(&rt.egui_ctx, &mut self.cvars, self.palette, steam_icon);
+        self.options_ui.show(
+            &rt.egui_ctx,
+            &mut self.vgui_rt,
+            &mut self.cvars,
+            &OptionsRenderCtx {
+                vfs: self.vfs.as_ref(),
+                loc: self.loc.as_ref(),
+                palette: self.palette,
+                steam_icon,
+            },
+        );
+        let dlg_ctx = DialogRenderCtx {
+            vfs: self.vfs.as_ref(),
+            loc: self.loc.as_ref(),
+            palette: self.palette,
+            steam_icon,
+        };
+        if self
+            .loading_ui
+            .show(&rt.egui_ctx, &mut self.vgui_rt, &dlg_ctx)
+        {
+            cancel_loading = true;
+        }
+        let vban_cmd = self.player_list_ui.show(
+            &rt.egui_ctx,
+            &mut self.vgui_rt,
+            &names,
+            self.session.local_slot(),
+            &dlg_ctx,
+        );
+        self.demo_player_ui
+            .show(&rt.egui_ctx, &mut self.vgui_rt, &dlg_ctx);
+        let pw_submit = self
+            .password_ui
+            .show(&rt.egui_ctx, &mut self.vgui_rt, &dlg_ctx);
+        self.disconnect_err_ui
+            .show(&rt.egui_ctx, &mut self.vgui_rt, &dlg_ctx);
         let mod_decisions = draw_mod_approval_prompt(&rt.egui_ctx, &pending_mod_approvals);
         pending_actions.extend(self.console_ui.show(
             &rt.egui_ctx,
+            &mut self.vgui_rt,
             &mut self.cvars,
-            &self.available_maps,
-            self.palette,
-            steam_icon,
+            &ConsoleRenderCtx {
+                vfs: self.vfs.as_ref(),
+                loc: self.loc.as_ref(),
+                available_maps: &self.available_maps,
+                palette: self.palette,
+                steam_icon,
+            },
         ));
 
         let full_output = rt.egui_ctx.end_pass();
-        rt.egui_state
-            .handle_platform_output(&rt.window, full_output.platform_output);
+        if let (Some(state), Some(win)) = (&mut rt.egui_state, &rt.window) {
+            state.handle_platform_output(win, full_output.platform_output);
+        }
         let paint_jobs = rt
             .egui_ctx
             .tessellate(full_output.shapes, full_output.pixels_per_point);
+
+        for ui_snd in self.vgui_rt.take_ui_sounds() {
+            self.audio.play_ui_sound(self.vfs.as_ref(), ui_snd.vfs_path());
+        }
 
         // 4. The 3D frame.
         let mut render_cam = self.camera.clone();
@@ -1393,12 +2070,28 @@ impl Cs16App {
                     .clamp(-90.0, 90.0);
             fov = (finite_or(v.fov, default_fov) + finite_or(v.underwater_fov_delta, 0.0))
                 .clamp(10.0, 120.0);
-            sensitivity_scale = (fov / 90.0).clamp(0.2, 1.0);
+            sensitivity_scale = if (fov - default_fov).abs() > 0.5 && default_fov > 1.0 {
+                let zoom_ratio = finite_or(self.cvars.get_f32("zoom_sensitivity_ratio"), 1.2).max(0.0);
+                ((fov / default_fov) * zoom_ratio).clamp(0.05, 2.0)
+            } else {
+                1.0
+            };
             if let Some(vm) = &v.viewmodel {
                 let eye = if v.eye.is_finite() { v.eye } else { Vec3::ZERO };
-                let bob_off = Vec3::new(0.0, 0.0, finite_or(v.bob, 0.0) * 0.4) + v.viewmodel_lag;
+                let b = finite_or(v.bob, 0.0);
+                let fov_z = if (fov - 90.0).abs() < 0.5 || (fov - 110.0).abs() < 0.5 {
+                    1.0
+                } else if (fov - 100.0).abs() < 0.5 {
+                    2.0
+                } else if (fov - 80.0).abs() < 0.5 {
+                    0.5
+                } else {
+                    0.0
+                };
+                let vm_eye = eye + Vec3::new(0.0, 0.0, b - 1.0 + fov_z) + v.viewmodel_lag;
+                let bob_off = Vec3::new(b * 0.4, 0.0, 0.0);
                 let xf = viewmodel_transform(
-                    eye,
+                    vm_eye,
                     render_cam.yaw_deg,
                     render_cam.pitch_deg,
                     bob_off,
@@ -1426,9 +2119,10 @@ impl Cs16App {
         rt.renderer.set_entity_scene(scene);
         self.mouse_sens_scale = sensitivity_scale;
 
-        let debug_mode = if self.cvars.get_bool("r_lightmap_only") {
+        let debug_mode = if self.cvars.get_bool("r_lightmap") || self.cvars.get_bool("r_lightmap_only")
+        {
             1.0
-        } else if self.cvars.get_bool("r_fullbright") || !self.cvars.get_bool("r_lightmap") {
+        } else if self.cvars.get_bool("r_fullbright") {
             2.0
         } else {
             0.0
@@ -1438,9 +2132,15 @@ impl Cs16App {
         let msaa_samples = if self.cvars.get_i32("gl_msaa") >= 4 { 4 } else { 1 };
         let viewmodel_fov = finite_or(self.cvars.get_f32("viewmodel_fov"), 90.0).clamp(50.0, 120.0);
         let settings = RenderSettings {
-            gamma: finite_or(self.cvars.get_f32("gamma"), 2.5).clamp(1.0, 4.0),
-            texgamma: finite_or(self.cvars.get_f32("texgamma"), 2.0).clamp(0.5, 4.0),
-            brightness: finite_or(self.cvars.get_f32("brightness"), 1.0).clamp(0.3, 2.5),
+            gamma: finite_or(self.cvars.get_f32("gamma"), 2.5).clamp(1.8, 3.0),
+            texgamma: finite_or(self.cvars.get_f32("texgamma"), 2.0).clamp(1.8, 3.0),
+            lightgamma: finite_or(self.cvars.get_f32("lightgamma"), 2.5).clamp(1.8, 3.0),
+            brightness: finite_or(self.cvars.get_f32("brightness"), 0.0).clamp(0.0, 3.0),
+            gl_overbright: self.cvars.get_bool("gl_overbright"),
+            direct: finite_or(self.cvars.get_f32("direct"), 0.9).clamp(0.75, 1.0),
+            gl_picmip: self.cvars.get_i32("gl_picmip").clamp(0, 4),
+            gl_max_size: self.cvars.get_i32("gl_max_size").clamp(64, 4096) as u32,
+            gl_round_down: self.cvars.get_i32("gl_round_down").clamp(0, 3),
             fov_deg: fov,
             viewmodel_fov,
             aspect_mode: self.cvars.get_str("vid_aspect_mode"),
@@ -1484,7 +2184,22 @@ impl Cs16App {
         };
 
         self.frame_count += 1;
-        let auto_capture_now = self.frame_count == 6 && self.launch.auto_screenshot.is_some();
+        let min_in_game_frames = self
+            .launch
+            .wait_seconds
+            .map(|s| ((s * 60.0).ceil() as u64).max(24))
+            .unwrap_or(24);
+        let waiting_for_game = self.launch.startup_map.is_some()
+            || !self.launch.startup_exec.is_empty()
+            || self.session.is_active();
+        let auto_capture_now = self.launch.auto_screenshot.is_some()
+            && if waiting_for_game {
+                (self.in_game_frames >= min_in_game_frames
+                    && (self.startup_ui_applied || self.launch.startup_ui.is_none()))
+                    || self.frame_count >= 600
+            } else {
+                self.frame_count == 6
+            };
         let capture_path = if auto_capture_now {
             self.launch.auto_screenshot.take()
         } else {
@@ -1502,8 +2217,10 @@ impl Cs16App {
         ) {
             self.last_stats = stats;
             if auto_capture_now && self.exit_after_screenshot {
-                event_loop.exit();
-                return;
+                if let Some(el) = event_loop {
+                    el.exit();
+                }
+                return true;
             }
         }
 
@@ -1524,6 +2241,24 @@ impl Cs16App {
         }
         if motd_close {
             self.feeds.motd_open = false;
+            self.motd_ui.open = false;
+        }
+        if let Some(cmd) = vgui_cmd_out {
+            self.session.send_stringcmd(&cmd);
+            self.session.with_hud_mut(|h| h.vgui_menu = None);
+        }
+        if let Some(cmd) = cmdmenu_exec {
+            pending_actions.extend(self.cvars.execute_script(&cmd));
+        }
+        if let Some(vban) = vban_cmd {
+            self.forward_to_server(&vban);
+        }
+        if let Some((addr, pw)) = pw_submit {
+            self.cvars.set("password", &pw);
+            self.connect_remote(&addr);
+        }
+        if cancel_loading {
+            self.end_session();
         }
         if should_resume {
             self.menu_ui.visible = false;
@@ -1550,52 +2285,48 @@ impl Cs16App {
             self.options_ui.save_requested = false;
             self.save_config();
         }
-        if !pending_actions.is_empty() {
-            self.process_actions(pending_actions, event_loop);
+        if !pending_actions.is_empty()
+            && self.process_actions(pending_actions, event_loop)
+        {
+            return true;
         }
         self.sync_cursor_capture();
 
-        let fps_max = self.cvars.get_i32("fps_max");
-        if fps_max > 0 {
-            let target = Duration::from_secs_f64(1.0 / (fps_max as f64));
-            let elapsed = now.elapsed();
-            if let Some(rem) = target.checked_sub(elapsed)
-                && rem > Duration::from_millis(1)
-            {
-                std::thread::sleep(rem - Duration::from_millis(1));
+        if !self.launch.headless {
+            let fps_max = finite_or(self.cvars.get_f32("fps_max"), 100.0);
+            if fps_max > 0.0 {
+                let fps_override = self.cvars.get_bool("fps_override");
+                let timescale = finite_or(self.cvars.get_f32("host_timescale"), 1.0).clamp(0.05, 10.0);
+                let fps = if self.session.is_active() {
+                    let f = fps_max.max(0.5);
+                    if fps_override { f } else { f.min(100.0) }
+                } else {
+                    31.0
+                };
+                let target = Duration::from_secs_f64(f64::from(timescale) / (f64::from(fps) + 0.5));
+                let elapsed = now.elapsed();
+                if let Some(rem) = target.checked_sub(elapsed)
+                    && rem > Duration::from_millis(1)
+                {
+                    std::thread::sleep(rem - Duration::from_millis(1));
+                }
             }
         }
 
-        if let Some(rt) = &self.runtime {
-            rt.window.request_redraw();
+        if let Some(rt) = &self.runtime
+            && let Some(win) = &rt.window
+        {
+            win.request_redraw();
         }
+        false
     }
-}
 
-impl ApplicationHandler for Cs16App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.runtime.is_some() {
-            return;
-        }
-
-        let attrs = Window::default_attributes()
-            .with_title("Counter-Strike 1.6 (Rust)")
-            .with_inner_size(LogicalSize::new(1280.0, 800.0));
-        let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
-
-        let renderer = Renderer::new(Arc::clone(&window));
+    fn init_egui_context(&self) -> (egui::Context, Option<egui::TextureHandle>, Option<HudSprites>, VguiAssetBank) {
         let egui_ctx = egui::Context::default();
         apply_vgui2_theme(&egui_ctx, self.palette);
-
-        let egui_state = egui_winit::State::new(
-            egui_ctx.clone(),
-            egui::ViewportId::ROOT,
-            &window,
-            Some(window.scale_factor() as f32),
-            None,
-            None,
-        );
-
+        if let Some(vfs) = &self.vfs {
+            install_scheme_fonts_into_egui(&egui_ctx, vfs, &self.vgui_rt.scheme_fonts);
+        }
         let bg_texture = self.vfs.as_ref().and_then(|vfs| {
             load_menu_background(vfs).ok().map(|img| {
                 let color_image = egui::ColorImage::from_rgba_unmultiplied(
@@ -1609,42 +2340,138 @@ impl ApplicationHandler for Cs16App {
                 )
             })
         });
-
         let hud_sprites = self
             .vfs
             .as_ref()
             .map(|vfs| HudSprites::load(&egui_ctx, vfs));
         let vgui_bank = VguiAssetBank::load(&egui_ctx, self.vfs.as_ref());
+        (egui_ctx, bg_texture, hud_sprites, vgui_bank)
+    }
 
-        info!(gpu = %renderer.adapter_name, "Counter-Strike 1.6 (Rust) window ready");
-
-        self.runtime = Some(WindowRuntime {
-            window,
-            renderer,
-            egui_ctx,
-            egui_state,
-            bg_texture,
-            hud_sprites,
-            vgui_bank,
-            cursor_captured: false,
-        });
-
+    fn apply_startup_commands(&mut self, event_loop: Option<&ActiveEventLoop>) -> bool {
         if let Some(map) = self.launch.startup_map.clone() {
             self.start_local_map(&map);
         }
         let startup_cmds = std::mem::take(&mut self.launch.startup_exec);
         for cmd in startup_cmds {
             let actions = self.cvars.execute_script(&cmd);
-            self.process_actions(actions, event_loop);
+            if self.process_actions(actions, event_loop) {
+                return true;
+            }
         }
         if let Some(ui_mode) = self.launch.startup_ui.take() {
-            if ui_mode.eq_ignore_ascii_case("options") {
+            let lower = ui_mode.to_ascii_lowercase();
+            if lower == "options" {
                 self.options_ui.open = true;
+            } else if let Some(tab_name) = lower.strip_prefix("options:") {
+                if let Some(tab) = cs_client::ui::options::OptionsTab::from_name(tab_name) {
+                    self.options_ui.tab = tab;
+                }
+                self.options_ui.open = true;
+            } else {
+                match lower.as_str() {
+                    "newgame" => self.menu_ui.new_game_open = true,
+                    "servers" => {
+                        self.menu_ui.find_servers_open = true;
+                        self.menu_ui.server_browser.open = true;
+                    }
+                    "console" => self.console_ui.open(),
+                    "playerlist" => self.player_list_ui.open = true,
+                    "demo" => self.demo_player_ui.open = true,
+                    _ => {
+                        self.launch.startup_ui = Some(ui_mode);
+                    }
+                }
             }
             self.sync_cursor_capture();
         }
-        if let Some(rt) = &self.runtime {
-            rt.window.request_redraw();
+        false
+    }
+
+    /// Run headless offscreen without creating any visible OS window (for `cargo xtask visual-diff`).
+    pub fn run_headless(mut self) -> Result<(), String> {
+        let renderer = Renderer::new_headless(self.launch.width, self.launch.height)?;
+        let (egui_ctx, bg_texture, hud_sprites, vgui_bank) = self.init_egui_context();
+        info!(gpu = %renderer.adapter_name, "Counter-Strike 1.6 (Rust) headless runtime ready");
+        self.runtime = Some(WindowRuntime {
+            window: None,
+            renderer,
+            egui_ctx,
+            egui_state: None,
+            bg_texture,
+            hud_sprites,
+            vgui_bank,
+            cursor_captured: false,
+        });
+        if self.apply_startup_commands(None) {
+            self.end_session();
+            return Ok(());
+        }
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            if self.render_and_step(None) {
+                self.end_session();
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(16));
+        }
+        let pending = self.launch.auto_screenshot.take();
+        self.end_session();
+        if let Some(path) = pending {
+            return Err(format!(
+                "headless run timed out after 30s before saving {} (in_game_frames={}, frames={})",
+                path.display(),
+                self.in_game_frames,
+                self.frame_count
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl ApplicationHandler for Cs16App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.runtime.is_some() {
+            return;
+        }
+
+        let attrs = Window::default_attributes()
+            .with_title("Counter-Strike 1.6 (Rust)")
+            .with_inner_size(LogicalSize::new(
+                f64::from(self.launch.width),
+                f64::from(self.launch.height),
+            ));
+        let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
+
+        let renderer = Renderer::new(Arc::clone(&window));
+        let (egui_ctx, bg_texture, hud_sprites, vgui_bank) = self.init_egui_context();
+        let egui_state = egui_winit::State::new(
+            egui_ctx.clone(),
+            egui::ViewportId::ROOT,
+            &window,
+            Some(window.scale_factor() as f32),
+            None,
+            None,
+        );
+
+        info!(gpu = %renderer.adapter_name, "Counter-Strike 1.6 (Rust) window ready");
+
+        self.runtime = Some(WindowRuntime {
+            window: Some(window),
+            renderer,
+            egui_ctx,
+            egui_state: Some(egui_state),
+            bg_texture,
+            hud_sprites,
+            vgui_bank,
+            cursor_captured: false,
+        });
+
+        let _ = self.apply_startup_commands(Some(event_loop));
+        if let Some(rt) = &self.runtime
+            && let Some(win) = &rt.window
+        {
+            win.request_redraw();
         }
     }
 
@@ -1666,9 +2493,10 @@ impl ApplicationHandler for Cs16App {
             WindowEvent::Focused(false) => {
                 if let Some(rt) = &mut self.runtime
                     && rt.cursor_captured
+                    && let Some(win) = &rt.window
                 {
-                    let _ = rt.window.set_cursor_grab(CursorGrabMode::None);
-                    rt.window.set_cursor_visible(true);
+                    let _ = win.set_cursor_grab(CursorGrabMode::None);
+                    win.set_cursor_visible(true);
                     rt.cursor_captured = false;
                 }
                 self.active_actions.clear();
@@ -1683,15 +2511,27 @@ impl ApplicationHandler for Cs16App {
             WindowEvent::MouseInput { state, button, .. } => {
                 if self.wants_mouse_capture() {
                     let pressed = *state == ElementState::Pressed;
+                    if pressed
+                        && matches!(button, MouseButton::Left)
+                        && self.weapon_buckets.active_slot.is_some()
+                        && !self.cvars.get_bool("hud_fastswitch")
+                    {
+                        let buckets = &mut self.weapon_buckets;
+                        if let Some(w_name) = self
+                            .session
+                            .with_hud(|h| buckets.confirm_selection(h))
+                            .flatten()
+                        {
+                            self.session.send_stringcmd(&w_name);
+                            return;
+                        }
+                    }
                     match button {
                         MouseButton::Left => self.mouse1_held = pressed,
                         MouseButton::Right => self.mouse2_held = pressed,
                         _ => {}
                     }
                     return;
-                } else if *state == ElementState::Pressed {
-                    let vol = self.cvars.get_f32("volume").clamp(0.0, 1.0);
-                    self.audio.play_ui_click(self.vfs.as_ref(), vol);
                 }
             }
             WindowEvent::KeyboardInput { event: key_ev, .. } => {
@@ -1700,7 +2540,7 @@ impl ApplicationHandler for Cs16App {
                 }
             }
             WindowEvent::RedrawRequested => {
-                self.render_and_step(event_loop);
+                let _ = self.render_and_step(Some(event_loop));
                 return;
             }
             _ => {}
@@ -1708,8 +2548,9 @@ impl ApplicationHandler for Cs16App {
 
         if !self.wants_mouse_capture()
             && let Some(rt) = &mut self.runtime
+            && let (Some(state), Some(win)) = (&mut rt.egui_state, &rt.window)
         {
-            let _ = rt.egui_state.on_window_event(&rt.window, &event);
+            let _ = state.on_window_event(win, &event);
         }
     }
 
@@ -1722,12 +2563,41 @@ impl ApplicationHandler for Cs16App {
         if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event
             && self.wants_mouse_capture()
         {
-            // A zoomed view turns slower, in proportion to the fov.
-            let sens = self.cvars.get_f32("sensitivity").max(0.05) * self.mouse_sens_scale;
+            let raw_dx = dx as f32;
+            let raw_dy = dy as f32;
+            let (fx, fy) = if self.cvars.get_bool("m_filter") {
+                let (px, py) = self.prev_mouse_delta;
+                ((raw_dx + px) * 0.5, (raw_dy + py) * 0.5)
+            } else {
+                (raw_dx, raw_dy)
+            };
+            self.prev_mouse_delta = (raw_dx, raw_dy);
+
+            let mut sens = self.cvars.get_f32("sensitivity").max(0.05) * self.mouse_sens_scale;
+            if self.cvars.get_i32("m_customaccel") != 0 {
+                let scale = finite_or(self.cvars.get_f32("m_customaccel_scale"), 0.04).max(0.0);
+                let max_spd = finite_or(self.cvars.get_f32("m_customaccel_max"), 0.0).max(0.0);
+                let exp = finite_or(self.cvars.get_f32("m_customaccel_exponent"), 1.0).clamp(0.1, 4.0);
+                let mag = (fx * fx + fy * fy).sqrt();
+                let mut accel = mag.powf(exp) * scale;
+                if max_spd > 0.0 {
+                    accel = accel.min(max_spd);
+                }
+                sens += accel;
+            }
             let m_yaw = self.cvars.get_f32("m_yaw");
             let m_pitch = self.cvars.get_f32("m_pitch");
-            self.camera
-                .apply_mouse_delta(dx as f32, dy as f32, sens, m_yaw, m_pitch);
+            let pitch_up = self.cvars.get_f32("cl_pitchup");
+            let pitch_down = self.cvars.get_f32("cl_pitchdown");
+            self.camera.apply_mouse_delta_clamped(
+                fx,
+                fy,
+                sens,
+                m_yaw,
+                m_pitch,
+                pitch_up,
+                pitch_down,
+            );
         }
     }
 }
@@ -1809,7 +2679,7 @@ fn build_score_rows(hud: &HudState, names: &BTreeMap<u8, String>) -> (Vec<ScoreR
     let rows = hud
         .players
         .iter()
-        .filter(|(_, p)| p.team == "CT" || p.team == "TERRORIST")
+        .filter(|(_, p)| matches!(p.team.as_str(), "CT" | "TERRORIST" | "SPECTATOR" | "UNASSIGNED"))
         .filter_map(|(slot, p)| {
             let slot0 = slot.checked_sub(1)?;
             Some(ScoreRow {
@@ -1820,6 +2690,7 @@ fn build_score_rows(hud: &HudState, names: &BTreeMap<u8, String>) -> (Vec<ScoreR
                     .unwrap_or_else(|| format!("player {slot}")),
                 frags: p.frags,
                 deaths: p.deaths,
+                ping: 0,
                 team: p.team.clone(),
                 dead: p.attrib & 1 != 0,
                 bomb: p.attrib & 2 != 0,
@@ -1947,6 +2818,28 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].slot, 0);
         assert_eq!(rows[0].name, "Alpha");
+    }
+
+    #[test]
+    fn score_rows_include_spectators_and_unassigned() {
+        let mut hud = HudState::default();
+        for (slot1, team) in [(1u8, "CT"), (2, "TERRORIST"), (3, "SPECTATOR"), (4, "UNASSIGNED")] {
+            hud.players.insert(
+                slot1,
+                PlayerScore {
+                    team: team.to_string(),
+                    frags: i16::from(slot1),
+                    deaths: 0,
+                    attrib: 0,
+                    ..Default::default()
+                },
+            );
+        }
+        let names = BTreeMap::new();
+        let (rows, _, _) = build_score_rows(&hud, &names);
+        assert_eq!(rows.len(), 4);
+        assert!(rows.iter().any(|r| r.slot == 2 && r.team == "SPECTATOR"));
+        assert!(rows.iter().any(|r| r.slot == 3 && r.team == "UNASSIGNED"));
     }
 
     #[test]

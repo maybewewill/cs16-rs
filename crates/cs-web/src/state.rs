@@ -14,10 +14,14 @@ use cs_client::audio::{
 use cs_client::camera::Camera;
 use cs_client::input::{MoveSpeeds, weapon_for_slot};
 use cs_client::render::scene::ModelRegistry;
-use cs_client::ui::hud::{HudView, draw_cs16_hud, draw_voice_speakers};
+use cs_client::ui::hud::{
+    HudAnimState, HudExtrasContext, HudView, draw_cs16_hud_with_extras, draw_voice_speakers,
+};
 use cs_client::ui::mod_hud::draw_mod_hud;
 use cs_client::ui::scoreboard::{ScoreRow, show_scoreboard};
-use cs_client::ui::server_menu::{draw_text_menu, menu_key_enabled, menu_lines};
+use cs_client::ui::server_menu::{
+    draw_styled_text_menu, menu_key_enabled, menu_styled_lines,
+};
 use cs_client::ui::{FrameTelemetry, draw_crosshair, draw_net_graph, hud::HudSprites};
 use cs_client::view::{FrameView, MapFxWorld, ViewBuilder, ViewInputs};
 use cs_clientcore::hud::HudState;
@@ -171,6 +175,7 @@ pub struct WebClientState {
     last_underwater: bool,
     last_fade_gain: f32,
     weapon_switch_timer: f32,
+    hud_anim: HudAnimState,
     time_sec: f32,
     pub mod_transfer: ClientModTransfer,
     pub mod_host: ClientModHost,
@@ -220,6 +225,7 @@ impl WebClientState {
             last_underwater: false,
             last_fade_gain: 1.0,
             weapon_switch_timer: 0.0,
+            hud_anim: HudAnimState::default(),
             time_sec: 0.0,
             mod_transfer: ClientModTransfer::default(),
             mod_host: ClientModHost::new(),
@@ -324,7 +330,8 @@ impl WebClientState {
         if let Some(vfs) = &self.vfs {
             conn.set_files(Box::new(VfsResourceFiles(vfs.clone())));
         }
-        conn.set_userinfo("_vgui_menus", "0");
+        let vgui_flag = if self.cvars.get_bool("_vgui_menus") { "1" } else { "0" };
+        conn.set_userinfo("_vgui_menus", vgui_flag);
         conn.set_userinfo(MOD_CAPABILITY_KEY, "1");
         let names = self.view.names();
         conn.set_fx_world(Box::new(MapFxWorld::new(None, self.vfs.clone(), names)));
@@ -356,6 +363,7 @@ impl WebClientState {
         self.mod_transfer = ClientModTransfer::default();
         self.mod_host = ClientModHost::new();
         self.last_mod_hud.clear();
+        self.hud_anim = HudAnimState::default();
         self.queued_audio.push(WebAudioEvent::StopAll);
     }
 
@@ -468,6 +476,29 @@ impl WebClientState {
                     self.queue_vox_sentence(&spec, suit, None);
                 }
                 EngineAction::StopSound => self.queued_audio.push(WebAudioEvent::StopAll),
+                EngineAction::AdjustCrosshair(color_idx) => {
+                    const PRESETS: [&str; 5] = [
+                        "50 250 50",
+                        "250 50 50",
+                        "50 50 250",
+                        "250 250 50",
+                        "50 250 250",
+                    ];
+                    let cur = self.cvars.get_str("cl_crosshair_color").to_string();
+                    let next = match color_idx {
+                        Some(i) => PRESETS[usize::from(i) % PRESETS.len()],
+                        None => {
+                            let idx = PRESETS.iter().position(|p| *p == cur).map_or(0, |i| (i + 1) % PRESETS.len());
+                            PRESETS[idx]
+                        }
+                    };
+                    self.cvars.set("cl_crosshair_color", next);
+                }
+                EngineAction::ToggleScores
+                | EngineAction::OpenPlayerList
+                | EngineAction::OpenDemoPlayer(_)
+                | EngineAction::SpecMode(_)
+                | EngineAction::SpecMenu(_) => {}
                 _ => {}
             }
         }
@@ -712,6 +743,19 @@ impl WebClientState {
             && fv.eye.is_finite()
         {
             self.camera.position = fv.eye;
+        }
+        let anim_eye = built_view.as_ref().map_or(self.camera.position, |fv| fv.eye);
+        let anim_yaw = self.camera.yaw_deg;
+        match &self.session {
+            SessionMode::Idle => {}
+            SessionMode::Local { game, .. } => {
+                self.hud_anim
+                    .step_with_pose(dt as f32, &game.connection().fx().hud, sess_now, anim_eye, anim_yaw);
+            }
+            SessionMode::Remote { conn, .. } => {
+                self.hud_anim
+                    .step_with_pose(dt as f32, &conn.fx().hud, sess_now, anim_eye, anim_yaw);
+            }
         }
 
         let listener = self.camera.position.to_array();
@@ -1256,23 +1300,31 @@ impl WebClientState {
                 yaw_deg: self.camera.yaw_deg,
                 underwater_tint: fv.underwater_tint,
             };
-            draw_cs16_hud(ctx, hud_sprites, &hv);
+            let mut extras = HudExtrasContext {
+                anim: Some(&self.hud_anim),
+                ..Default::default()
+            };
+            extras.apply_cvars(&self.cvars);
+            draw_cs16_hud_with_extras(ctx, hud_sprites, &hv, &extras);
             let speakers = self.voice.active_speakers(sess_now);
             let local_talking = self.voice.is_local_transmitting(sess_now);
             draw_voice_speakers(ctx, &names, &speakers, local_talking);
             draw_mod_hud(ctx, &self.last_mod_hud);
 
             if let Some(m) = h.menu.as_ref().filter(|m| !m.multipart && m.keys != 0 && !m.text.is_empty()) {
-                let lines = menu_lines(&m.text, None);
+                let lines = menu_styled_lines(&m.text, None);
                 let scale = (ctx.content_rect().height() / 768.0).clamp(0.85, 1.45);
-                draw_text_menu(ctx, &lines, scale);
+                draw_styled_text_menu(ctx, &lines, scale);
             }
 
             if self.input.actions.contains("showscores") {
                 let rows: Vec<ScoreRow> = h
                     .players
                     .iter()
-                    .filter(|(_, p)| p.team == "CT" || p.team == "TERRORIST")
+                    .filter(|(slot, p)| {
+                        !p.team.is_empty()
+                            || slot.checked_sub(1).is_some_and(|s0| names.contains_key(&s0))
+                    })
                     .filter_map(|(slot, p)| {
                         let slot0 = slot.checked_sub(1)?;
                         Some(ScoreRow {
@@ -1283,6 +1335,7 @@ impl WebClientState {
                                 .unwrap_or_else(|| format!("player {slot}")),
                             frags: p.frags,
                             deaths: p.deaths,
+                            ping: 0,
                             team: p.team.clone(),
                             dead: p.attrib & 1 != 0,
                             bomb: p.attrib & 2 != 0,

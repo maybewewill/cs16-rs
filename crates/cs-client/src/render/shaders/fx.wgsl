@@ -42,10 +42,7 @@ fn bayer4x4(p: vec2<f32>) -> f32 {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let brightness = max(u.gamma_params.z, 0.1);
-    let gamma_val = max(u.gamma_params.x, 0.5);
-    let gamma_exp = 2.5 / gamma_val;
-    var rgb = pow(clamp(in.color.rgb * brightness, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(gamma_exp));
+    var rgb = clamp(in.color.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
 
     if u.gamma_params.w > 0.5 {
         let d = bayer4x4(in.clip_pos.xy);

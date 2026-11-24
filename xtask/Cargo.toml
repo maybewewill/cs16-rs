@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 cs-mod-api.workspace = true
 cs-mod-host.workspace = true
+image.workspace = true
 serde = { workspace = true, features = ["derive"] }
 toml = "1.2.1"
 

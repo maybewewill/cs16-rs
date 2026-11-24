@@ -454,12 +454,15 @@ fn step_and_render(rt_cell: &Rc<RefCell<WebRuntime>>, now_ms: f64) {
         scene = Some(v.scene);
     }
 
-    let gamma = g.state.cvars.get_f32("gamma").clamp(1.0, 4.0);
-    let texgamma = g.state.cvars.get_f32("texgamma").clamp(0.5, 4.0);
-    let brightness = g.state.cvars.get_f32("brightness").clamp(0.3, 2.5);
-    let debug_mode = if g.state.cvars.get_bool("r_lightmap_only") {
+    let gamma = g.state.cvars.get_f32("gamma").clamp(1.8, 3.0);
+    let texgamma = g.state.cvars.get_f32("texgamma").clamp(1.8, 3.0);
+    let lightgamma = g.state.cvars.get_f32("lightgamma").clamp(1.8, 3.0);
+    let brightness = g.state.cvars.get_f32("brightness").clamp(0.0, 3.0);
+    let debug_mode = if g.state.cvars.get_bool("r_lightmap")
+        || g.state.cvars.get_bool("r_lightmap_only")
+    {
         1.0
-    } else if g.state.cvars.get_bool("r_fullbright") || !g.state.cvars.get_bool("r_lightmap") {
+    } else if g.state.cvars.get_bool("r_fullbright") {
         2.0
     } else {
         0.0
@@ -468,7 +471,13 @@ fn step_and_render(rt_cell: &Rc<RefCell<WebRuntime>>, now_ms: f64) {
     let settings = RenderSettings {
         gamma,
         texgamma,
+        lightgamma,
         brightness,
+        gl_overbright: g.state.cvars.get_bool("gl_overbright"),
+        direct: g.state.cvars.get_f32("direct").clamp(0.75, 1.0),
+        gl_picmip: g.state.cvars.get_i32("gl_picmip").clamp(0, 4),
+        gl_max_size: g.state.cvars.get_i32("gl_max_size").clamp(64, 4096) as u32,
+        gl_round_down: g.state.cvars.get_i32("gl_round_down").clamp(0, 3),
         fov_deg: fov,
         viewmodel_fov: g.state.cvars.get_f32("viewmodel_fov").clamp(50.0, 120.0),
         aspect_mode: "widescreen",

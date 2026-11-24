@@ -124,57 +124,20 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     }
 
     let debug_mode = u.misc_params.y;
+    let overbright_scale = select(1.0, 2.0, u.gamma_params.x > 0.5);
     var lm = textureSample(t_lightmap, s_lightmap, in.lm_uv).rgb;
     if (in.flags & FLAG_NO_LIGHTMAP) != 0u || debug_mode > 1.5 {
-        lm = vec3<f32>(0.5, 0.5, 0.5);
+        lm = vec3<f32>(select(1.0, 0.5, u.gamma_params.x > 0.5));
     }
-
-    if debug_mode < 1.5 {
-        let wn = normalize(in.world_normal);
-        let nd = min(lights.counts.x, 16u);
-        for (var i = 0u; i < nd; i = i + 1u) {
-            let pr = lights.dlight_pos_rad[i];
-            let delta = pr.xyz - in.world_pos;
-            let dist = length(delta);
-            if dist < pr.w && dist > 0.001 {
-                let atten = 1.0 - dist / pr.w;
-                let facing = max(dot(wn, delta / dist), 0.15);
-                lm = lm + lights.dlight_col[i].rgb * (atten * facing * 0.5);
-            }
-        }
-        let ns = min(lights.counts.y, 4u);
-        for (var j = 0u; j < ns; j = j + 1u) {
-            let sr = lights.spot_pos_rad[j];
-            let dc = lights.spot_dir_cos[j];
-            let delta = in.world_pos - sr.xyz;
-            let dist = length(delta);
-            if dist < sr.w && dist > 0.001 {
-                let ldir = delta / dist;
-                let c = dot(ldir, dc.xyz);
-                if c > dc.w {
-                    let cone = clamp((c - dc.w) / max(1.0 - dc.w, 0.01), 0.0, 1.0);
-                    let atten = (1.0 - dist / sr.w) * cone;
-                    let facing = max(dot(wn, -ldir), 0.15);
-                    lm = lm + lights.spot_col[j].rgb * (atten * facing * 0.55);
-                }
-            }
-        }
-    }
-
-    let tex_exp = max(u.gamma_params.y, 0.5) * 0.5;
-    let albedo_lin = pow(clamp(albedo.rgb, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(tex_exp));
 
     var lit: vec3<f32>;
     if debug_mode > 0.5 && debug_mode < 1.5 {
-        lit = lm * 2.0;
+        lit = lm * overbright_scale;
     } else {
-        lit = albedo_lin * lm * 2.0;
+        lit = albedo.rgb * lm * overbright_scale;
     }
 
-    let brightness = max(u.gamma_params.z, 0.1);
-    let gamma_val = max(u.gamma_params.x, 0.5);
-    let gamma_exp = 2.5 / gamma_val;
-    var final_rgb = pow(clamp(lit * brightness, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(gamma_exp));
+    var final_rgb = clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0));
 
     if u.gamma_params.w > 0.5 {
         let d = bayer4x4(in.clip_pos.xy);

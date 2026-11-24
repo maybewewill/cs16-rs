@@ -35,7 +35,7 @@ pub fn calc_bob(time_sec: f32, velocity: Vec3, onground: bool, params: &BobParam
     if params.cl_bob <= 0.0 || params.cl_bobcycle <= 0.0 || !onground {
         return 0.0;
     }
-    let cycle_time = params.cl_bobcycle.max(0.05);
+    let cycle_time = params.cl_bobcycle.max(0.1);
     let bob_up = params.cl_bobup.clamp(0.05, 0.95);
     let cycle = time_sec / cycle_time;
     let frac = (cycle - cycle.floor()) * cycle_time;
@@ -178,6 +178,41 @@ pub fn evaluate_screen_fade(fade: Option<&ScreenFade>, now: f64) -> Option<Evalu
     })
 }
 
+/// Stateful GoldSrc stair smoothing (`V_CalcFirstPersonView` `FUN_1006ab20`).
+#[derive(Debug, Clone, Default)]
+pub struct StairSmoothState {
+    prev_z: Option<f32>,
+}
+
+impl StairSmoothState {
+    pub fn reset(&mut self) {
+        self.prev_z = None;
+    }
+
+    /// Returns a Z offset (`<= 0.0`) added to both eye and viewmodel origin when stepping up stairs.
+    pub fn offset(&mut self, view_z: f32, on_ground: bool, dt: f32) -> f32 {
+        if !view_z.is_finite() {
+            return 0.0;
+        }
+        if let Some(pz) = self.prev_z
+            && on_ground
+            && (view_z - pz) > 0.0
+        {
+            let mut next_z = pz + dt.max(0.0) * 150.0;
+            if next_z > view_z {
+                next_z = view_z;
+            }
+            if (view_z - next_z) > 18.0 {
+                next_z = view_z - 18.0;
+            }
+            self.prev_z = Some(next_z);
+            return next_z - view_z;
+        }
+        self.prev_z = Some(view_z);
+        0.0
+    }
+}
+
 /// Compute underwater screen tint (`rgba`) and FOV warp multiplier based on BSP eye `watertype`
 /// (`CONTENTS_WATER` / `CONTENTS_SLIME` / `CONTENTS_LAVA`).
 pub fn underwater_tint_and_fov(watertype: i32, waterlevel: u8, time_sec: f32) -> (Option<[f32; 4]>, f32) {
@@ -257,5 +292,19 @@ mod tests {
         let (tint, dfov) = underwater_tint_and_fov(CONTENTS_WATER, 3, 0.5);
         assert!(tint.is_some() && dfov.abs() > 0.0);
         assert_eq!(underwater_tint_and_fov(CONTENTS_WATER, 1, 0.5), (None, 0.0));
+    }
+
+    #[test]
+    fn stair_smooth_steps_up_and_caps_at_18() {
+        let mut s = StairSmoothState::default();
+        assert_eq!(s.offset(0.0, true, 0.016), 0.0);
+        // Step up 16 units at 10ms -> advances 1.5 units -> offset -14.5
+        let off = s.offset(16.0, true, 0.01);
+        assert!((off - (-14.5)).abs() < 1e-4, "got {off}");
+        // Jump by +50 units -> clamped to within 18 units -> offset -18.0
+        let big = s.offset(66.0, true, 0.01);
+        assert!((big - (-18.0)).abs() < 1e-4, "got {big}");
+        // Not on ground resets baseline immediately
+        assert_eq!(s.offset(100.0, false, 0.01), 0.0);
     }
 }

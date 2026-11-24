@@ -155,6 +155,15 @@ pub struct DamageState {
     pub origin: Vec3,
 }
 
+/// Localized tutor/hint entry from `HudText`, `HudTextPro`, or `HudTextArgs`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HudTextEntry {
+    pub text: String,
+    pub args: Vec<String>,
+    pub style: u8,
+    pub received_at: f64,
+}
+
 /// A screen fade (`ScreenFade`): the engine's own message, kept for the shell to draw.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScreenFade {
@@ -270,6 +279,8 @@ pub struct HudState {
     pub money_flash: bool,
     /// `BlinkAcct`: how many times the account blinks.
     pub blink_account: u8,
+    /// Monotonic counter incremented each time a `BlinkAcct` message arrives.
+    pub blink_account_seq: u32,
     pub current_weapon: Option<CurrentWeapon>,
     /// The last clip count each weapon was reported with.
     pub clips: BTreeMap<u8, i8>,
@@ -322,9 +333,17 @@ pub struct HudState {
     pub motd_complete: bool,
     pub server_name: String,
     pub damage: Option<DamageState>,
+    pub damage_history: VecDeque<(DamageState, f64)>,
+    /// Monotonic counter incremented on every `Damage` user message.
+    pub damage_seq: u32,
+    pub hud_texts: VecDeque<HudTextEntry>,
+    pub allow_spec: bool,
+    pub spec_health: Option<(u8, u8)>,
     pub screen_fade: Option<ScreenFade>,
     pub screen_shake: Option<ScreenShake>,
     pub scenario: Option<ScenarioIcon>,
+    /// Monotonic counter incremented on every `Scenario` user message.
+    pub scenario_seq: u32,
     pub night_vision: bool,
     pub flashlight_on: bool,
     pub flash_battery: u8,
@@ -356,6 +375,7 @@ impl Default for HudState {
             money: 0,
             money_flash: false,
             blink_account: 0,
+            blink_account_seq: 0,
             current_weapon: None,
             clips: BTreeMap::new(),
             ammo: BTreeMap::new(),
@@ -393,9 +413,15 @@ impl Default for HudState {
             motd_complete: false,
             server_name: String::new(),
             damage: None,
+            damage_history: VecDeque::new(),
+            damage_seq: 0,
+            hud_texts: VecDeque::new(),
+            allow_spec: false,
+            spec_health: None,
             screen_fade: None,
             screen_shake: None,
             scenario: None,
+            scenario_seq: 0,
             night_vision: false,
             flashlight_on: false,
             flash_battery: 100,
@@ -471,7 +497,12 @@ impl HudState {
                 self.money = *amount;
                 self.money_flash = *flash;
             }
-            CsUserMsg::BlinkAcct(n) => self.blink_account = *n,
+            CsUserMsg::BlinkAcct(n) => {
+                self.blink_account = *n;
+                if *n > 0 {
+                    self.blink_account_seq = self.blink_account_seq.wrapping_add(1);
+                }
+            }
             CsUserMsg::CurWeapon {
                 is_active,
                 weapon_id,
@@ -743,12 +774,52 @@ impl HudState {
                 damage_bits,
                 origin,
             } => {
-                self.damage = Some(DamageState {
+                let d = DamageState {
                     armor: *armor_damage,
                     health: *health_damage,
                     bits: *damage_bits,
                     origin: *origin,
+                };
+                self.damage = Some(d);
+                self.damage_seq = self.damage_seq.wrapping_add(1);
+                if d.health > 0 || d.armor > 0 || d.bits != 0 {
+                    if self.damage_history.len() >= 8 {
+                        self.damage_history.pop_front();
+                    }
+                    self.damage_history.push_back((d, now));
+                }
+            }
+            CsUserMsg::HudText { text, style } => {
+                if self.hud_texts.len() >= 16 {
+                    self.hud_texts.pop_front();
+                }
+                self.hud_texts.push_back(HudTextEntry {
+                    text: text.clone(),
+                    args: Vec::new(),
+                    style: *style,
+                    received_at: now,
                 });
+            }
+            CsUserMsg::HudTextArgs { text, style, args } => {
+                if self.hud_texts.len() >= 16 {
+                    self.hud_texts.pop_front();
+                }
+                self.hud_texts.push_back(HudTextEntry {
+                    text: text.clone(),
+                    args: args.clone(),
+                    style: *style,
+                    received_at: now,
+                });
+            }
+            CsUserMsg::AllowSpec(allow) => {
+                self.allow_spec = *allow;
+            }
+            CsUserMsg::SpecHealth(health) => {
+                let prev_target = self.spec_health.map_or(0, |(_, t)| t);
+                self.spec_health = Some((*health, prev_target));
+            }
+            CsUserMsg::SpecHealth2 { health, target } => {
+                self.spec_health = Some((*health, *target));
             }
             CsUserMsg::ScreenFade {
                 duration,
@@ -782,6 +853,7 @@ impl HudState {
                 alpha,
                 flash,
             } => {
+                self.scenario_seq = self.scenario_seq.wrapping_add(1);
                 self.scenario = active.then(|| ScenarioIcon {
                     sprite: sprite.clone(),
                     alpha: *alpha,
@@ -1746,5 +1818,62 @@ mod tests {
         assert_eq!(fx.hud.flash_battery, 70);
         fx.hud.handle(&um("ReceiveW", CsUserMsg::ReceiveW(2)), 1.6);
         assert_eq!(fx.hud.weather, 2);
+    }
+
+    #[test]
+    fn phase10_hud_text_spec_and_damage_history_reduce() {
+        let mut h = HudState::default();
+        h.handle(
+            &um(
+                "HudTextArgs",
+                CsUserMsg::HudTextArgs {
+                    text: "#Cstrike_Tutor_Buy_Time".to_string(),
+                    style: 1,
+                    args: vec!["45".to_string()],
+                },
+            ),
+            2.0,
+        );
+        h.handle(
+            &um(
+                "HudText",
+                CsUserMsg::HudText {
+                    text: "GAMEOVER".to_string(),
+                    style: 0,
+                },
+            ),
+            2.1,
+        );
+        assert_eq!(h.hud_texts.len(), 2);
+        assert_eq!(h.hud_texts[0].args, vec!["45".to_string()]);
+
+        h.handle(&um("AllowSpec", CsUserMsg::AllowSpec(true)), 2.2);
+        assert!(h.allow_spec);
+        h.handle(
+            &um(
+                "SpecHealth2",
+                CsUserMsg::SpecHealth2 {
+                    health: 88,
+                    target: 3,
+                },
+            ),
+            2.3,
+        );
+        assert_eq!(h.spec_health, Some((88, 3)));
+
+        h.handle(
+            &um(
+                "Damage",
+                CsUserMsg::Damage {
+                    armor_damage: 5,
+                    health_damage: 27,
+                    damage_bits: 0x04,
+                    origin: Vec3::new(300.0, 100.0, 0.0),
+                },
+            ),
+            2.4,
+        );
+        assert_eq!(h.damage_history.len(), 1);
+        assert_eq!(h.damage_history[0].0.health, 27);
     }
 }

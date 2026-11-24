@@ -247,6 +247,16 @@ impl CsGame {
     /// Also `PM_Init`: builds the statics of `pm_shared` from `sound/materials.txt` (the footstep
     /// materials of the textures). A missing file gives an empty table, every texture concrete.
     pub fn load_motd(&mut self, vfs: &cs_vfs::Vfs) {
+        self.load_motd_file(vfs, "motd.txt");
+    }
+
+    /// Reads the message of the day from `motdfile` (defaulting to `motd.txt` when empty).
+    pub fn load_motd_file(&mut self, vfs: &cs_vfs::Vfs, motdfile: &str) {
+        let path = if motdfile.trim().is_empty() {
+            "motd.txt"
+        } else {
+            motdfile.trim()
+        };
         self.state.pm_shared = pm_init(vfs.read_bytes("sound/materials.txt").ok().as_deref());
         self.state.briefings = vfs
             .list_dir("maps", Some("txt"))
@@ -254,11 +264,11 @@ impl CsGame {
             // `list_dir` names are lower case (`Vfs::normalize`).
             .map(|name| format!("maps/{name}"))
             .collect();
-        self.state.motd = match vfs.read_bytes("motd.txt") {
+        self.state.motd = match vfs.read_bytes(path) {
             Ok(bytes) => bytes,
             Err(cs_vfs::VfsError::NotFound(_)) => Vec::new(),
             Err(err) => {
-                tracing::warn!(%err, "motd.txt could not be read");
+                tracing::warn!(%err, path, "motdfile could not be read");
                 Vec::new()
             }
         };

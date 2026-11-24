@@ -2,6 +2,7 @@
 //! light pool (`TE_DLIGHT`, `TE_ELIGHT`, muzzleflashes), and flashlight spotlight raycasts.
 
 use bytemuck::{Pod, Zeroable};
+use cs_assets::gamma::GammaTables;
 use cs_clientcore::tempents::DynamicLight;
 use cs_pm::collision::{Hull, WorldCollision};
 use glam::Vec3;
@@ -84,48 +85,238 @@ pub fn create_sampler(
     })
 }
 
-/// Generate a full 2x2 box-filtered mip chain when both dimensions are powers of two. Non-POT
-/// textures return only mip level 0 to maintain strict WebGL2 compatibility.
-pub fn generate_mipmaps_rgba(width: u32, height: u32, rgba: &[u8]) -> Vec<(u32, u32, Vec<u8>)> {
+/// GoldSrc texture upload scaling and gamma configuration matching `gl_round_down`,
+/// `gl_picmip`, `gl_max_size`, and `LUMP_TEXGAMMA`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextureUploadConfig {
+    pub gl_round_down: i32,
+    pub gl_picmip: i32,
+    pub gl_max_size: u32,
+    pub apply_texgamma: bool,
+}
+
+impl Default for TextureUploadConfig {
+    fn default() -> Self {
+        Self {
+            gl_round_down: 3,
+            gl_picmip: 0,
+            gl_max_size: 512,
+            apply_texgamma: true,
+        }
+    }
+}
+
+/// Port of `GL_SetTextureDimensions` (`ref/gl/gl_image.c:431-517`, read 2026-11-24).
+///
+/// Rounds non-POT sizes to power-of-two according to `gl_round_down` (`0..=3`), applies
+/// `gl_picmip`, and halves both axes until `<= gl_max_size`.
+pub fn gl_set_texture_dimensions(
+    width: u32,
+    height: u32,
+    gl_round_down: i32,
+    gl_picmip: i32,
+    gl_max_size: u32,
+) -> (u32, u32) {
+    let w_in = width.max(1);
+    let h_in = height.max(1);
+    let step = gl_round_down.clamp(0, 4);
+
+    let mut scaled_w = 1u32;
+    while scaled_w < w_in {
+        scaled_w <<= 1;
+    }
+    if step > 0
+        && w_in < scaled_w
+        && (step == 1 || (scaled_w - w_in) > (scaled_w >> step as u32))
+    {
+        scaled_w >>= 1;
+    }
+
+    let mut scaled_h = 1u32;
+    while scaled_h < h_in {
+        scaled_h <<= 1;
+    }
+    if step > 0
+        && h_in < scaled_h
+        && (step == 1 || (scaled_h - h_in) > (scaled_h >> step as u32))
+    {
+        scaled_h >>= 1;
+    }
+
+    let picmip = gl_picmip.clamp(0, 4) as u32;
+    if picmip > 0 {
+        scaled_w = (scaled_w >> picmip).max(1);
+        scaled_h = (scaled_h >> picmip).max(1);
+    }
+
+    let max_size = gl_max_size.max(16);
+    while scaled_w > max_size || scaled_h > max_size {
+        scaled_w = (scaled_w >> 1).max(1);
+        scaled_h = (scaled_h >> 1).max(1);
+    }
+
+    (scaled_w.max(1), scaled_h.max(1))
+}
+
+fn resample_rgba32_lerp_line(src: &[u8], dst: &mut [u8], in_w: usize, out_w: usize) {
+    let fstep = ((in_w as f32) * 65536.0 / (out_w as f32)) as i32;
+    let endx = in_w.saturating_sub(1);
+    let mut f = 0i32;
+    for x in 0..out_w {
+        let xi = ((f >> 16) as usize).min(endx);
+        let in_off = xi * 4;
+        let out_off = x * 4;
+        if xi < endx {
+            let lerp = f & 0xFFFF;
+            for c in 0..4 {
+                let a = i32::from(src[in_off + c]);
+                let b = i32::from(src[in_off + 4 + c]);
+                dst[out_off + c] = ((((b - a) * lerp) >> 16) + a) as u8;
+            }
+        } else {
+            dst[out_off..out_off + 4].copy_from_slice(&src[in_off..in_off + 4]);
+        }
+        f += fstep;
+    }
+}
+
+/// Port of `Image_Resample32Lerp` (`engine/common/imagelib/img_utils.c:631-799`, read 2026-11-24).
+pub fn resample_rgba32_lerp(
+    indata: &[u8],
+    in_w: u32,
+    in_h: u32,
+    out_w: u32,
+    out_h: u32,
+) -> Vec<u8> {
+    let iw = in_w.max(1) as usize;
+    let ih = in_h.max(1) as usize;
+    let ow = out_w.max(1) as usize;
+    let oh = out_h.max(1) as usize;
+    if iw == ow && ih == oh && indata.len() >= iw * ih * 4 {
+        return indata[..iw * ih * 4].to_vec();
+    }
+    let in_row_bytes = iw * 4;
+    let out_row_bytes = ow * 4;
+    let mut out = vec![0u8; ow * oh * 4];
+    let fstep = ((ih as f32) * 65536.0 / (oh as f32)) as i32;
+    let endy = ih.saturating_sub(1);
+
+    let mut row1 = vec![0u8; out_row_bytes];
+    let mut row2 = vec![0u8; out_row_bytes];
+    let row_slice = |y: usize| -> &[u8] {
+        let s = y.min(endy) * in_row_bytes;
+        &indata[s..s + in_row_bytes]
+    };
+
+    resample_rgba32_lerp_line(row_slice(0), &mut row1, iw, ow);
+    resample_rgba32_lerp_line(row_slice(1.min(endy)), &mut row2, iw, ow);
+
+    let mut old_y = 0usize;
+    let mut f = 0i32;
+    for y in 0..oh {
+        let yi = ((f >> 16) as usize).min(endy);
+        let dst = &mut out[y * out_row_bytes..(y + 1) * out_row_bytes];
+        if yi < endy {
+            let lerp = f & 0xFFFF;
+            if yi != old_y {
+                if yi == old_y + 1 {
+                    row1.copy_from_slice(&row2);
+                } else {
+                    resample_rgba32_lerp_line(row_slice(yi), &mut row1, iw, ow);
+                }
+                resample_rgba32_lerp_line(row_slice(yi + 1), &mut row2, iw, ow);
+                old_y = yi;
+            }
+            for k in 0..out_row_bytes {
+                let a = i32::from(row1[k]);
+                let b = i32::from(row2[k]);
+                dst[k] = ((((b - a) * lerp) >> 16) + a) as u8;
+            }
+        } else {
+            if yi != old_y {
+                if yi == old_y + 1 {
+                    row1.copy_from_slice(&row2);
+                } else {
+                    resample_rgba32_lerp_line(row_slice(yi), &mut row1, iw, ow);
+                }
+                old_y = yi;
+            }
+            dst.copy_from_slice(&row1);
+        }
+        f += fstep;
+    }
+
+    out
+}
+
+/// Port of `GL_BuildMipMap` 2x2 box filter (`ref/gl/gl_image.c:805-830`, read 2026-11-24).
+pub fn build_mip_level_box(src: &[u8], src_w: u32, src_h: u32) -> (u32, u32, Vec<u8>) {
+    let next_w = (src_w >> 1).max(1);
+    let next_h = (src_h >> 1).max(1);
+    let in_stride = (src_w as usize) * 4;
+    let mut next = Vec::with_capacity((next_w as usize) * (next_h as usize) * 4);
+    for y in 0..next_h {
+        let row0 = ((y as usize) * 2) * in_stride;
+        let has_next_y = ((y << 1) + 1) < src_h;
+        let row1 = if has_next_y { row0 + in_stride } else { row0 };
+        for x in 0..next_w {
+            let x0 = (x as usize) * 8;
+            if ((x << 1) + 1) < src_w {
+                for c in 0..4 {
+                    let s = u32::from(src[row0 + x0 + c])
+                        + u32::from(src[row0 + x0 + 4 + c])
+                        + u32::from(src[row1 + x0 + c])
+                        + u32::from(src[row1 + x0 + 4 + c]);
+                    next.push((s >> 2) as u8);
+                }
+            } else {
+                for c in 0..4 {
+                    let s = u32::from(src[row0 + x0 + c]) + u32::from(src[row1 + x0 + c]);
+                    next.push((s >> 1) as u8);
+                }
+            }
+        }
+    }
+    (next_w, next_h, next)
+}
+
+/// Apply `texgammatable` (`LUMP_TEXGAMMA`), resample NPOT dimensions to GoldSrc POT via
+/// `GL_SetTextureDimensions` + `Image_Resample32Lerp`, and generate the complete `GL_BuildMipMap`
+/// 2x2 box-filter chain.
+pub fn prepare_texture_mips(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    tables: Option<&GammaTables>,
+    cfg: TextureUploadConfig,
+) -> Vec<(u32, u32, Vec<u8>)> {
     let w = width.max(1);
     let h = height.max(1);
     let expected = (w as usize) * (h as usize) * 4;
-    let level0 = if rgba.len() >= expected {
+    let mut src = if rgba.len() >= expected {
         rgba[..expected].to_vec()
     } else {
         vec![255u8; expected]
     };
-    let mut mips = vec![(w, h, level0)];
-    if !w.is_power_of_two() || !h.is_power_of_two() {
-        return mips;
+    if cfg.apply_texgamma
+        && let Some(t) = tables
+    {
+        t.apply_texgamma_rgba(&mut src);
     }
 
-    let mut cur_w = w;
-    let mut cur_h = h;
+    let (target_w, target_h) =
+        gl_set_texture_dimensions(w, h, cfg.gl_round_down, cfg.gl_picmip, cfg.gl_max_size);
+    let level0 = if target_w != w || target_h != h {
+        resample_rgba32_lerp(&src, w, h, target_w, target_h)
+    } else {
+        src
+    };
+
+    let mut mips = vec![(target_w, target_h, level0)];
+    let mut cur_w = target_w;
+    let mut cur_h = target_h;
     while cur_w > 1 || cur_h > 1 {
-        let next_w = (cur_w / 2).max(1);
-        let next_h = (cur_h / 2).max(1);
-        let prev = &mips.last().expect("at least mip 0").2;
-        let mut next = Vec::with_capacity((next_w as usize) * (next_h as usize) * 4);
-        for y in 0..next_h {
-            let y0 = (y * 2).min(cur_h - 1);
-            let y1 = (y0 + 1).min(cur_h - 1);
-            for x in 0..next_w {
-                let x0 = (x * 2).min(cur_w - 1);
-                let x1 = (x0 + 1).min(cur_w - 1);
-                let mut sum = [0u32; 4];
-                for (sx, sy) in [(x0, y0), (x1, y0), (x0, y1), (x1, y1)] {
-                    let off = ((sy * cur_w + sx) * 4) as usize;
-                    for c in 0..4 {
-                        sum[c] += u32::from(prev[off + c]);
-                    }
-                }
-                next.push((sum[0] / 4) as u8);
-                next.push((sum[1] / 4) as u8);
-                next.push((sum[2] / 4) as u8);
-                next.push((sum[3] / 4) as u8);
-            }
-        }
+        let (next_w, next_h, next) = build_mip_level_box(&mips.last().expect("mip 0").2, cur_w, cur_h);
         mips.push((next_w, next_h, next));
         cur_w = next_w;
         cur_h = next_h;
@@ -133,16 +324,26 @@ pub fn generate_mipmaps_rgba(width: u32, height: u32, rgba: &[u8]) -> Vec<(u32, 
     mips
 }
 
-/// Upload an RGBA8 2D texture with automatic POT mipmap chain and return its view.
-pub fn upload_rgba_texture_mipmapped(
+/// Generate a full 2x2 box-filtered mip chain for an already-POT (or NPOT via GoldSrc defaults)
+/// texture (`GL_SetTextureDimensions` + `Image_Resample32Lerp` + `GL_BuildMipMap`).
+pub fn generate_mipmaps_rgba(width: u32, height: u32, rgba: &[u8]) -> Vec<(u32, u32, Vec<u8>)> {
+    prepare_texture_mips(width, height, rgba, None, TextureUploadConfig::default())
+}
+
+/// Upload an RGBA8 2D texture with GoldSrc POT scaling, optional `texgammatable` conversion,
+/// and full mipmap chain.
+#[allow(clippy::too_many_arguments)]
+pub fn upload_rgba_texture_mipmapped_with_config(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     label: &str,
     width: u32,
     height: u32,
     rgba: &[u8],
+    tables: Option<&GammaTables>,
+    cfg: TextureUploadConfig,
 ) -> wgpu::TextureView {
-    let mips = generate_mipmaps_rgba(width, height, rgba);
+    let mips = prepare_texture_mips(width, height, rgba, tables, cfg);
     let w = mips[0].0;
     let h = mips[0].1;
     let tex = device.create_texture(&wgpu::TextureDescriptor {
@@ -181,6 +382,27 @@ pub fn upload_rgba_texture_mipmapped(
         );
     }
     tex.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+/// Upload an RGBA8 2D texture with GoldSrc default POT resampling and full mipmap chain.
+pub fn upload_rgba_texture_mipmapped(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> wgpu::TextureView {
+    upload_rgba_texture_mipmapped_with_config(
+        device,
+        queue,
+        label,
+        width,
+        height,
+        rgba,
+        None,
+        TextureUploadConfig::default(),
+    )
 }
 
 /// Flashlight or directional cone light (`EF_DIMLIGHT` / `impulse 100`).
@@ -356,8 +578,22 @@ mod tests {
         let pot = generate_mipmaps_rgba(8, 8, &[255; 8 * 8 * 4]);
         assert_eq!(pot.len(), 4); // 8, 4, 2, 1
         assert_eq!((pot[3].0, pot[3].1), (1, 1));
-        let npot = generate_mipmaps_rgba(6, 10, &[128; 6 * 10 * 4]);
-        assert_eq!(npot.len(), 1);
+        let dust_npot = generate_mipmaps_rgba(128, 240, &vec![180u8; 128 * 240 * 4]);
+        assert_eq!((dust_npot[0].0, dust_npot[0].1), (128, 256));
+        assert_eq!(dust_npot.len(), 9);
+        assert_eq!(gl_set_texture_dimensions(192, 160, 3, 0, 512), (128, 128));
+
+        // Verify texgammatable is applied BEFORE box-filter mipmap averaging.
+        let tables = GammaTables::default();
+        let src = [
+            100u8, 100, 100, 255, 200, 200, 200, 255, //
+            100, 100, 100, 255, 200, 200, 200, 255,
+        ];
+        let mips = prepare_texture_mips(2, 2, &src, Some(&tables), TextureUploadConfig::default());
+        let g100 = u32::from(tables.texture_to_gamma(100));
+        let g200 = u32::from(tables.texture_to_gamma(200));
+        let expected_mip1 = ((g100 * 2 + g200 * 2) >> 2) as u8;
+        assert_eq!(mips[1].2[0], expected_mip1);
     }
 
     #[test]

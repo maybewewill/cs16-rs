@@ -605,7 +605,7 @@ static WEAPONS: &[Weapon] = &[
     weapon!("m249", &["weapons/m249-1.wav", "weapons/m249-2.wav"], Anim::Random(1, 2), std_shell(RSHELL, 20.0, -10.0, 13.0), BulletType::Mm556, 2),
     Weapon {
         shots: 9,
-        spread: Spread::Fixed(0.0725),
+        spread: Spread::Fixed(0.0675),
         ..weapon!("m3", &["weapons/m3-1.wav"], Anim::Random(1, 2), None, BulletType::Buckshot, 1)
     },
     Weapon {
@@ -1274,7 +1274,7 @@ mod tests {
         };
         let b = m3.bullets.unwrap();
         assert_eq!((b.shots, b.bullet, b.penetration), (9, BulletType::Buckshot, 1));
-        assert_eq!(b.spread, [0.0725, 0.0725]);
+        assert_eq!(b.spread, [0.0675, 0.0675]);
         assert!(m3.shell.is_none());
         let EventFx::Knife { local, view_anim, sound } = resolve("events/knife.sc", &ev(args), &env, &mut rng) else {
             panic!();

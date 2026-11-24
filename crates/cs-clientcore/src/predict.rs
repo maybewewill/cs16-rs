@@ -50,7 +50,7 @@ use cs_pm::physent::{
     self, CONTENTS_LADDER, MAX_MOVEENTS, MAX_PHYSENTS, PM_PLAYER_MAXS, PM_PLAYER_MINS, PhysEnt,
     PhysEntView, PhysModel, PmPhysEnts, PmTraceResult, world_physent,
 };
-use cs_pm::pm::consts::{CONTENTS_EMPTY, FL_DUCKING, FL_ONGROUND, MOVETYPE_WALK};
+use cs_pm::pm::consts::{CONTENTS_EMPTY, FL_BASEVELOCITY, FL_DUCKING, FL_ONGROUND, MOVETYPE_WALK};
 use cs_pm::pm::{MoveVars, PlayerMove, PmCmd, PmShared, PmTrace, PmWorld, pm_init, pm_move};
 use cs_proto48::delta::{GoldSrcEntityState, GoldSrcUserCmd, GoldSrcWeaponData};
 use cs_proto48::messages::MoveVarsMsg;
@@ -273,6 +273,7 @@ pub struct LocalState {
     /// the movement adds.
     pub angles: Vec3,
     pub basevelocity: Vec3,
+    pub movedir: Vec3,
     pub view_ofs: Vec3,
     pub punchangle: Vec3,
     pub flags: i32,
@@ -312,6 +313,7 @@ impl Default for LocalState {
             velocity: Vec3::ZERO,
             angles: Vec3::ZERO,
             basevelocity: Vec3::ZERO,
+            movedir: Vec3::ZERO,
             view_ofs: Vec3::new(0.0, 0.0, 17.0),
             punchangle: Vec3::ZERO,
             flags: 0,
@@ -368,6 +370,7 @@ impl LocalState {
             velocity: cd.velocity,
             angles: ps.map_or(Vec3::ZERO, |p| p.angles),
             basevelocity: ps.map_or(Vec3::ZERO, |p| p.basevelocity),
+            movedir: Vec3::ZERO,
             view_ofs: cd.view_ofs,
             punchangle: cd.punchangle,
             flags,
@@ -1125,6 +1128,12 @@ impl Predictor {
         let old_buttons = from.oldbuttons as u16;
         let mut to = from.clone();
         let mut pm = setup_pmove(ctx, from, cmd, runfuncs, *time);
+        // Mirror `SV_CheckMovingGround`: fold/clear transient `basevelocity` when `FL_BASEVELOCITY` is unset.
+        if pm.flags & FL_BASEVELOCITY == 0 {
+            pm.velocity += pm.basevelocity * (pm.frametime * 0.5 + 1.0);
+            pm.basevelocity = Vec3::ZERO;
+        }
+        pm.flags &= !FL_BASEVELOCITY;
         {
             let mut world = ClientPmWorld {
                 coll: ctx.coll,
@@ -1144,23 +1153,25 @@ impl Predictor {
                 .map_or(pm.onground, |p| p.info),
             _ => pm.onground,
         };
-        let on_ground = to.flags & FL_ONGROUND != 0;
-        let ducking = to.flags & FL_DUCKING != 0;
-        let mut weapon_extras = std::mem::take(&mut to.weapon_extras);
-        predict_weapon_step(
-            &mut to,
-            &mut weapon_extras,
-            cmd,
-            old_buttons,
-            random_seed,
-            on_ground,
-            ducking,
-            runfuncs,
-            self.cl_lw,
-            &mut self.weapon_events,
-            &mut self.sounds,
-        );
-        to.weapon_extras = weapon_extras;
+        if to.deadflag == 0 && to.health > 0.0 && to.iuser[0] == 0 {
+            let on_ground = to.flags & FL_ONGROUND != 0;
+            let ducking = to.flags & FL_DUCKING != 0;
+            let mut weapon_extras = std::mem::take(&mut to.weapon_extras);
+            predict_weapon_step(
+                &mut to,
+                &mut weapon_extras,
+                cmd,
+                old_buttons,
+                random_seed,
+                on_ground,
+                ducking,
+                runfuncs,
+                self.cl_lw,
+                &mut self.weapon_events,
+                &mut self.sounds,
+            );
+            to.weapon_extras = weapon_extras;
+        }
         // `pfnPostRunCmd`: decay timers after `ItemPostFrame`.
         to.weapon.post_run_cmd(cmd.msec);
         *time += f64::from(cmd.msec) / 1000.0;
@@ -1200,14 +1211,14 @@ fn setup_pmove(
         runfuncs,
         // `pmove->time = time * 1000.0f` (a float).
         time: (time * 1000.0) as f32,
-        frametime: f32::from(cmd.msec) / 1000.0,
+        frametime: (f64::from(cmd.msec) * 0.001) as f32,
         origin: from.origin,
         angles: from.angles,
         oldangles: from.angles,
         velocity: from.velocity,
         basevelocity: from.basevelocity,
         view_ofs: from.view_ofs,
-        movedir: Vec3::ZERO,
+        movedir: from.movedir,
         fl_duck_time: from.fl_duck_time as f32,
         b_in_duck: from.b_in_duck,
         usehull: from.usehull,
@@ -1277,6 +1288,7 @@ fn finish_pmove(pm: &PlayerMove, to: &mut LocalState) {
     to.origin = pm.origin;
     to.angles = pm.angles;
     to.basevelocity = pm.basevelocity;
+    to.movedir = pm.movedir;
     to.punchangle = pm.punchangle;
     to.oldbuttons = i32::from(pm.cmd.buttons);
     to.friction = pm.friction;
@@ -1714,5 +1726,62 @@ mod tests {
         p.finish(&inp, &from, &to, 5.0, 5.0, f32::NAN);
         assert_eq!(p.prediction().simorg, Vec3::new(20.0, 0.0, 0.0));
         assert!(p.prediction().simorg.is_finite());
+    }
+
+    #[test]
+    fn movedir_persists_through_setup_and_finish_pmove() {
+        let physents = PmPhysEnts::default();
+        let ctx = RunCtx {
+            coll: &NO_COLLISION,
+            physents: &physents,
+            player_index: 0,
+            multiplayer: true,
+            movevars: MoveVars::default(),
+        };
+        let from = LocalState {
+            movedir: Vec3::new(0.25, -0.5, 0.75),
+            ..LocalState::default()
+        };
+        let cmd = GoldSrcUserCmd::default();
+        let mut pm = setup_pmove(&ctx, &from, &cmd, true, 1.0);
+        assert_eq!(pm.movedir, Vec3::new(0.25, -0.5, 0.75));
+        pm.movedir = Vec3::new(-1.0, 2.0, 3.0);
+        let mut to = LocalState::default();
+        finish_pmove(&pm, &mut to);
+        assert_eq!(to.movedir, Vec3::new(-1.0, 2.0, 3.0));
+    }
+
+    #[test]
+    fn basevelocity_folds_once_and_does_not_accumulate_when_flag_unset() {
+        let mut pred = Predictor::new();
+        let physents = PmPhysEnts::default();
+        let ctx = RunCtx {
+            coll: &NO_COLLISION,
+            physents: &physents,
+            player_index: 0,
+            multiplayer: true,
+            movevars: MoveVars::default(),
+        };
+        let from = LocalState {
+            basevelocity: Vec3::new(100.0, 0.0, 0.0),
+            movetype: MOVETYPE_WALK,
+            gravity: 1.0,
+            friction: 1.0,
+            maxspeed: 250.0,
+            ..LocalState::default()
+        };
+        let cmd = GoldSrcUserCmd {
+            msec: 10,
+            ..GoldSrcUserCmd::default()
+        };
+        let mut time = 1.0;
+        let mut lastground = -1;
+        let to1 = pred.run_step(&ctx, &from, &cmd, true, 1, &mut time, &mut lastground);
+        assert_eq!(to1.basevelocity, Vec3::ZERO);
+        assert_eq!(to1.flags & FL_BASEVELOCITY, 0);
+        assert!(to1.velocity.x >= 95.0, "first step folds basevelocity: {}", to1.velocity.x);
+
+        let to2 = pred.run_step(&ctx, &to1, &cmd, true, 2, &mut time, &mut lastground);
+        assert!(to2.velocity.x < 120.0, "second step must not re-add basevelocity: {}", to2.velocity.x);
     }
 }

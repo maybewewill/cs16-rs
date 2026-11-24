@@ -24,7 +24,8 @@ status = "implemented"
 
 [[item]]
 id = "Damage"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase10_hud_usermsgs_roundtrip; crates/cs-clientcore/src/hud.rs::tests::phase10_hud_text_spec_and_damage_history_reduce; crates/cs-client/tests/phase10_ui.rs::ui_hud_damage_direction_and_type_icons_computes_quadrants_and_dmg_sprites"
 
 [[item]]
 id = "Battery"
@@ -37,12 +38,13 @@ evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::movers_tracktrain_and
 
 [[item]]
 id = "HudTextPro"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase10_hud_usermsgs_roundtrip; crates/cs-clientcore/src/hud.rs::tests::phase10_hud_text_spec_and_damage_history_reduce"
 
 [[item]]
 id = "HudText"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_visual_beam_shake_fade_explosion_render_message_and_spark_shower"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_visual_beam_shake_fade_explosion_render_message_and_spark_shower; crates/cs-proto48/src/usermsg.rs::tests::phase10_hud_usermsgs_roundtrip; crates/cs-clientcore/src/hud.rs::tests::phase10_hud_text_spec_and_damage_history_reduce"
 
 [[item]]
 id = "SayText"
@@ -183,11 +185,13 @@ status = "missing"
 
 [[item]]
 id = "StatusValue"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase10_hud_usermsgs_roundtrip; crates/cs-client/tests/phase10_ui.rs::ui_hud_player_id_status_bar_formats_friend_enemy_hostage_hp"
 
 [[item]]
 id = "StatusText"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase10_hud_usermsgs_roundtrip; crates/cs-client/tests/phase10_ui.rs::ui_hud_player_id_status_bar_formats_friend_enemy_hostage_hp"
 
 [[item]]
 id = "StatusIcon"
@@ -229,7 +233,8 @@ evidence = "VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff 
 
 [[item]]
 id = "AllowSpec"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase10_hud_usermsgs_roundtrip; crates/cs-clientcore/src/hud.rs::tests::phase10_hud_text_spec_and_damage_history_reduce"
 
 [[item]]
 id = "BombDrop"
@@ -262,7 +267,8 @@ status = "missing"
 
 [[item]]
 id = "SpecHealth"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase10_hud_usermsgs_roundtrip; crates/cs-clientcore/src/hud.rs::tests::phase10_hud_text_spec_and_damage_history_reduce"
 
 [[item]]
 id = "ForceCam"
@@ -300,12 +306,13 @@ status = "implemented"
 
 [[item]]
 id = "SpecHealth2"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase10_hud_usermsgs_roundtrip; crates/cs-clientcore/src/hud.rs::tests::phase10_hud_text_spec_and_damage_history_reduce; crates/cs-client/tests/phase10_ui.rs::ui_screen_spectator_and_bottom_bar_cycles_modes_and_paints_res"
 
 [[item]]
 id = "BarTime2"
 status = "tested"
-evidence = "crates/cs-proto48/src/usermsg.rs::tests::cs_usermsgs_roundtrip_cleanly; crates/cs-game/src/player.rs::set_progress_bar_time2 (wire codec tested; observer resume caller not yet wired)"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::cs_usermsgs_roundtrip_cleanly; crates/cs-game/src/player.rs::set_progress_bar_time2; crates/cs-client/tests/phase10_ui.rs::ui_hud_progress_bar_bartime_tracks_bartime_and_bartime2"
 
 [[item]]
 id = "ItemStatus"
@@ -334,4 +341,4 @@ evidence = "crates/cs-game/tests/objective_rounds.rs::give_c4_rotates (sent at r
 [[item]]
 id = "HudTextArgs"
 status = "tested"
-evidence = "crates/cs-game/tests/hud_extras.rs::the_first_buy_hint_of_a_round_is_a_hudtextargs and the other hint tests of that file (the hint messages, the yellow tips; ported from hintmessage.cpp in crates/cs-game/src/hint.rs). The golden join diff of 2026-11-22 shows a byte-identical HudTextArgs, but the item is not marked verified on that alone"
+evidence = "crates/cs-game/tests/hud_extras.rs::the_first_buy_hint_of_a_round_is_a_hudtextargs and the other hint tests of that file (the hint messages, the yellow tips; ported from hintmessage.cpp in crates/cs-game/src/hint.rs); crates/cs-proto48/src/usermsg.rs::tests::phase10_hud_usermsgs_roundtrip; crates/cs-clientcore/src/hud.rs::tests::phase10_hud_text_spec_and_damage_history_reduce; crates/cs-client/tests/phase10_ui.rs::ui_hud_center_and_hint_text_formats_hudtextargs_and_centertime. The golden join diff of 2026-11-22 shows a byte-identical HudTextArgs, but the item is not marked verified on that alone"

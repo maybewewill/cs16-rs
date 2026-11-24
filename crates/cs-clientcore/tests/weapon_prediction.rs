@@ -7,11 +7,11 @@
 use std::collections::BTreeMap;
 
 use cs_clientcore::weapons_predict::{
-    DEFAULT_FOV, IN_ATTACK, IN_ATTACK2, IN_RELOAD, PLAYER_HOLDING_SHIELD, PredictWeaponExtras,
-    SHIELD_DRAWN_MAX_SPEED, WPNSTATE_FAMAS_BURST_MODE, WPNSTATE_GLOCK18_BURST_MODE,
-    WPNSTATE_M4A1_SILENCED, WPNSTATE_SHIELD_DRAWN, WPNSTATE_USP_SILENCED,
-    fire_bullets3_spread_offset, predict_weapon_step, shared_random_float, shared_random_long,
-    weapon_id,
+    DEFAULT_FOV, IN_ATTACK, IN_ATTACK2, IN_RELOAD, PLAYER_CAN_SHOOT, PLAYER_FREEZE_TIME_OVER,
+    PLAYER_HOLDING_SHIELD, PLAYER_IN_BOMB_ZONE, PredictWeaponExtras, SHIELD_DRAWN_MAX_SPEED,
+    WPNSTATE_FAMAS_BURST_MODE, WPNSTATE_GLOCK18_BURST_MODE, WPNSTATE_M4A1_SILENCED,
+    WPNSTATE_SHIELD_DRAWN, WPNSTATE_USP_SILENCED, fire_bullets3_spread_offset, predict_weapon_step,
+    shared_random_float, shared_random_long, weapon_id,
 };
 use cs_clientcore::{
     ClientEffects, EventFx, EventQueue, LocalState, NoWorld, PrecacheEntry, PrecacheTables,
@@ -294,4 +294,160 @@ fn client_prediction_matches_server_spread_and_recoil_with_same_seed() {
         assert_eq!(events[0].args.fparam2.to_bits(), sy.to_bits());
     }
     let _ = EventQueue::default();
+}
+
+#[test]
+fn iuser3_bitmasks_and_freeze_time_quirk_match_client_dll() {
+    assert_eq!(PLAYER_CAN_SHOOT, 1 << 0);
+    assert_eq!(PLAYER_FREEZE_TIME_OVER, 1 << 1);
+    assert_eq!(PLAYER_IN_BOMB_ZONE, 1 << 2);
+    assert_eq!(PLAYER_HOLDING_SHIELD, 1 << 3);
+
+    let (mut state, mut extras) = setup_weapon_state(weapon_id::AK47, 30);
+    state.iuser[2] = PLAYER_FREEZE_TIME_OVER;
+    let (ev, _) = step(&mut state, &mut extras, IN_ATTACK, 0, 7, 10, true, true);
+    assert!(ev.is_empty());
+    assert_eq!(state.weapon.weapons[&(weapon_id::AK47 as u8)].m_i_clip, 30);
+}
+
+#[test]
+fn pistol_cycle_times_usp_silenced_glock_burst_and_elite_args() {
+    // Cycle time uses exact ReGameDLL_CS values (no -0.075 double subtraction).
+    let (mut usp, mut usp_ex) = setup_weapon_state(weapon_id::USP, 12);
+    usp.weapon.weapons.get_mut(&(weapon_id::USP as u8)).unwrap().m_i_weapon_state = WPNSTATE_USP_SILENCED;
+    let (ev_usp, _) = step(&mut usp, &mut usp_ex, IN_ATTACK, 0, 55, 10, true, true);
+    assert_eq!(ev_usp.len(), 1);
+    let usp_next = usp.weapon.weapons[&(weapon_id::USP as u8)].m_fl_next_primary_attack;
+    assert!((usp_next - 0.14).abs() < 1e-4, "usp next attack = {usp_next}");
+    let (mut deagle, mut dg_ex) = setup_weapon_state(weapon_id::DEAGLE, 7);
+    let _ = step(&mut deagle, &mut dg_ex, IN_ATTACK, 0, 56, 10, true, true);
+    let dg_next = deagle.weapon.weapons[&(weapon_id::DEAGLE as u8)].m_fl_next_primary_attack;
+    assert!((dg_next - 0.215).abs() < 1e-4, "deagle next attack = {dg_next}");
+    let usp_spread = (0.15 * f64::from(1.0_f32 - 0.92_f32)) as f32;
+    let (ux, uy) = fire_bullets3_spread_offset(usp_spread, 55);
+    assert_eq!(ev_usp[0].args.fparam1.to_bits(), ux.to_bits());
+    assert_eq!(ev_usp[0].args.fparam2.to_bits(), uy.to_bits());
+    assert_eq!(ev_usp[0].args.bparam2, 1);
+
+    // Glock18 burst: 0.5s cycle, zero recoil, and 3-round FireRemaining burst.
+    let (mut glock, mut gl_ex) = setup_weapon_state(weapon_id::GLOCK18, 20);
+    glock.weapon.weapons.get_mut(&(weapon_id::GLOCK18 as u8)).unwrap().m_i_weapon_state =
+        WPNSTATE_GLOCK18_BURST_MODE;
+    let (mut events, _) = step(&mut glock, &mut gl_ex, IN_ATTACK, 0, 100, 10, true, true);
+    assert_eq!(events.len(), 1);
+    assert_eq!(glock.punchangle, Vec3::ZERO);
+    let gl_next = glock.weapon.weapons[&(weapon_id::GLOCK18 as u8)].m_fl_next_primary_attack;
+    assert!((gl_next - 0.49).abs() < 1e-4, "glock burst cycle = {gl_next}");
+    let gl_spread = (0.3 * f64::from(1.0_f32 - 0.9_f32)) as f32;
+    let (gx, gy) = fire_bullets3_spread_offset(gl_spread, 100);
+    assert_eq!(events[0].args.fparam1.to_bits(), gx.to_bits());
+    assert_eq!(events[0].args.fparam2.to_bits(), gy.to_bits());
+
+    for i in 1..25_u32 {
+        let (more, _) = step(&mut glock, &mut gl_ex, 0, 0, 100 + i, 10, true, true);
+        events.extend(more);
+    }
+    assert_eq!(events.len(), 3, "glock burst must fire 3 rounds");
+    assert_eq!(glock.weapon.weapons[&(weapon_id::GLOCK18 as u8)].m_i_clip, 17);
+
+    // Elite packs time_diff / dx / dy*100 / clip and alternates left/right events.
+    let (mut elite, mut el_ex) = setup_weapon_state(weapon_id::ELITE, 30);
+    let (e1, _) = step(&mut elite, &mut el_ex, IN_ATTACK, 0, 99, 10, true, true);
+    assert_eq!(e1[0].event_name, "events/elite_right.sc");
+    assert_eq!(e1[0].args.iparam2, 29);
+    for _ in 0..10 {
+        step(&mut elite, &mut el_ex, 0, IN_ATTACK, 99, 10, true, true);
+    }
+    let (e2, _) = step(&mut elite, &mut el_ex, IN_ATTACK, 0, 101, 10, true, true);
+    assert_eq!(e2[0].event_name, "events/elite_left.sc");
+    assert_eq!(e2[0].args.iparam2, 28);
+}
+
+#[test]
+fn smg_and_rifle_silenced_m4a1_famas_burst_kick_scale_and_decay() {
+    // M4A1 silenced uses 0.025 standing multiplier vs 0.02 unsilenced.
+    let (mut m4, mut m4_ex) = setup_weapon_state(weapon_id::M4A1, 30);
+    m4.weapon.weapons.get_mut(&(weapon_id::M4A1 as u8)).unwrap().m_i_weapon_state = WPNSTATE_M4A1_SILENCED;
+    let (ev_m4, _) = step(&mut m4, &mut m4_ex, IN_ATTACK, 0, 77, 10, true, true);
+    let (mx, my) = fire_bullets3_spread_offset((0.025 * f64::from(0.2_f32)) as f32, 77);
+    assert_eq!(ev_m4[0].args.fparam1.to_bits(), mx.to_bits());
+    assert_eq!(ev_m4[0].args.fparam2.to_bits(), my.to_bits());
+
+    // FAMAS burst: 0.55s cycle + 3-round FireRemaining + 1e7 punch scale.
+    let (mut famas, mut fam_ex) = setup_weapon_state(weapon_id::FAMAS, 25);
+    famas.weapon.weapons.get_mut(&(weapon_id::FAMAS as u8)).unwrap().m_i_weapon_state =
+        WPNSTATE_FAMAS_BURST_MODE;
+    let (mut ev_fam, _) = step(&mut famas, &mut fam_ex, IN_ATTACK, 0, 88, 10, true, true);
+    assert_eq!(ev_fam.len(), 1);
+    let fam_next = famas.weapon.weapons[&(weapon_id::FAMAS as u8)].m_fl_next_primary_attack;
+    assert!((fam_next - 0.54).abs() < 1e-4, "famas burst cycle = {fam_next}");
+    for i in 1..20_u32 {
+        let (more, _) = step(&mut famas, &mut fam_ex, 0, 0, 88 + i, 10, true, true);
+        ev_fam.extend(more);
+    }
+    assert_eq!(ev_fam.len(), 3, "famas burst must fire 3 rounds");
+    assert_eq!(famas.weapon.weapons[&(weapon_id::FAMAS as u8)].m_i_clip, 22);
+
+    // MP5N (Mp5SquaredF64) and AK47 trigger-release decay (0.4s + 0.0225s/step).
+    let (mut ak, mut ak_ex) = setup_weapon_state(weapon_id::AK47, 30);
+    for s in 0..3 {
+        for _ in 0..10 {
+            step(&mut ak, &mut ak_ex, IN_ATTACK, IN_ATTACK, 10 + s, 10, true, true);
+        }
+    }
+    assert!(ak_ex[&weapon_id::AK47].shots_fired > 0);
+    for _ in 0..50 {
+        step(&mut ak, &mut ak_ex, 0, 0, 0, 10, true, true);
+    }
+    assert_eq!(ak_ex[&weapon_id::AK47].shots_fired, 0);
+}
+
+#[test]
+fn shotgun_random_recoil_m3_cone_and_sniper_zoom_parity() {
+    use cs_clientcore::tempents::FxRandom;
+    let mut precache = PrecacheTables::default();
+    precache.events.insert(
+        1,
+        PrecacheEntry {
+            name: "events/m3.sc".to_string(),
+            download_size: 0,
+            flags: 0,
+        },
+    );
+    let ents = BTreeMap::new();
+    let world = NoWorld;
+    let mut env = cs_clientcore::FxEnv::new(1.0, &precache, &ents, &world);
+    env.local_player = 1;
+    let mut q = EventQueue::default();
+    q.push_local(1, cs_proto48::event::EventArgs::default());
+    let fired = q.fire_due(&env, &mut FxRandom::default());
+    assert_eq!(fired.len(), 1);
+    let cs_clientcore::EventFx::Weapon(w) = &fired[0].fx else {
+        panic!("expected weapon fx");
+    };
+    let bullets = w.bullets.as_ref().expect("bullets");
+    assert!((bullets.spread[0] - 0.0675).abs() < 1e-6);
+    assert!((bullets.spread[1] - 0.0675).abs() < 1e-6);
+
+    // M3 on ground uses shared_random_long(seed + 1, 4, 6).
+    let (mut m3, mut m3_ex) = setup_weapon_state(weapon_id::M3, 8);
+    let seed = 42_u32;
+    let (ev_m3, _) = step(&mut m3, &mut m3_ex, IN_ATTACK, 0, seed, 10, true, true);
+    assert_eq!(ev_m3.len(), 1);
+    let expected_m3_punch = -(shared_random_long(seed.wrapping_add(1), 4, 6) as f32);
+    assert_eq!(m3.punchangle.x, expected_m3_punch);
+
+    // SG550 deploy_accuracy == 0.0 & bparam1 == 1, plus AWP keeps zoomed maxspeed while cycling.
+    let (mut sg550, mut sg_ex) = setup_weapon_state(weapon_id::SG550, 30);
+    let (ev_sg, _) = step(&mut sg550, &mut sg_ex, IN_ATTACK, 0, 12, 10, true, true);
+    assert_eq!(ev_sg[0].args.bparam1, 1);
+
+    let (mut awp, mut awp_ex) = setup_weapon_state(weapon_id::AWP, 10);
+    step(&mut awp, &mut awp_ex, IN_ATTACK2, 0, 1, 10, true, true);
+    assert_eq!(awp.weapon.fov, 40.0);
+    assert_eq!(awp.maxspeed, 150.0);
+    let (ev_awp, _) = step(&mut awp, &mut awp_ex, IN_ATTACK, 0, 1, 10, true, true);
+    assert_eq!(ev_awp.len(), 1);
+    assert_eq!(awp.weapon.fov, 90.0);
+    assert_eq!(awp.maxspeed, 150.0);
 }

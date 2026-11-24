@@ -357,6 +357,23 @@ pub enum CsUserMsg {
     FlashBat(u8),
     ReceiveW(u8),
     Brass(Vec<u8>),
+    /// `gmsgHudText` / `gmsgHudTextPro`: localized `titles.txt` message name or raw text.
+    HudText {
+        text: String,
+        style: u8,
+    },
+    /// `gmsgHudTextArgs`: localized hint/tutor message with format arguments.
+    HudTextArgs {
+        text: String,
+        style: u8,
+        args: Vec<String>,
+    },
+    AllowSpec(bool),
+    SpecHealth(u8),
+    SpecHealth2 {
+        health: u8,
+        target: u8,
+    },
     Unknown {
         name: String,
         payload: Vec<u8>,
@@ -609,6 +626,33 @@ pub fn decode_cs_usermsg(name: &str, payload: &[u8]) -> Result<CsUserMsg, ProtoE
         "FlashBat" => CsUserMsg::FlashBat(r.read_u8()?),
         "ReceiveW" => CsUserMsg::ReceiveW(r.read_u8()?),
         "Brass" => CsUserMsg::Brass(r.remaining_slice().to_vec()),
+        "HudText" | "HudTextPro" => CsUserMsg::HudText {
+            text: r.read_str()?,
+            style: if r.remaining() > 0 { r.read_u8()? } else { 0 },
+        },
+        "HudTextArgs" => {
+            let text = r.read_str()?;
+            let style = if r.remaining() > 0 { r.read_u8()? } else { 0 };
+            let count = if r.remaining() > 0 {
+                usize::from(r.read_u8()?).min(8)
+            } else {
+                0
+            };
+            let mut args = Vec::with_capacity(count);
+            for _ in 0..count {
+                if r.remaining() == 0 {
+                    break;
+                }
+                args.push(r.read_str()?);
+            }
+            CsUserMsg::HudTextArgs { text, style, args }
+        }
+        "AllowSpec" => CsUserMsg::AllowSpec(r.read_u8()? != 0),
+        "SpecHealth" => CsUserMsg::SpecHealth(r.read_u8()?),
+        "SpecHealth2" => CsUserMsg::SpecHealth2 {
+            health: r.read_u8()?,
+            target: r.read_u8()?,
+        },
         _ => CsUserMsg::Unknown {
             name: name.to_string(),
             payload: payload.to_vec(),
@@ -1006,6 +1050,33 @@ pub fn encode_cs_usermsg(msg: &CsUserMsg) -> (&'static str, Vec<u8>) {
             w.write_bytes(raw);
             "Brass"
         }
+        CsUserMsg::HudText { text, style } => {
+            w.write_str(text);
+            w.write_u8(*style);
+            "HudText"
+        }
+        CsUserMsg::HudTextArgs { text, style, args } => {
+            w.write_str(text);
+            w.write_u8(*style);
+            w.write_u8(args.len().min(8) as u8);
+            for a in args.iter().take(8) {
+                w.write_str(a);
+            }
+            "HudTextArgs"
+        }
+        CsUserMsg::AllowSpec(allow) => {
+            w.write_u8(u8::from(*allow));
+            "AllowSpec"
+        }
+        CsUserMsg::SpecHealth(hp) => {
+            w.write_u8(*hp);
+            "SpecHealth"
+        }
+        CsUserMsg::SpecHealth2 { health, target } => {
+            w.write_u8(*health);
+            w.write_u8(*target);
+            "SpecHealth2"
+        }
         CsUserMsg::Unknown { payload, .. } => {
             w.write_bytes(payload);
             "Unknown"
@@ -1159,5 +1230,61 @@ mod tests {
         let mut w = crate::bitbuf::MsgWriter::new();
         assert!(crate::messages::write_svc_raw_usermsg(&mut w, &reg, "CsModEvent", b"hi!"));
         assert_eq!(w.as_slice(), &[id, 3, b'h', b'i', b'!']);
+    }
+
+    #[test]
+    fn phase10_hud_usermsgs_roundtrip() {
+        let msgs = vec![
+            CsUserMsg::HudText {
+                text: "HINT_USE_BOMB".to_string(),
+                style: 1,
+            },
+            CsUserMsg::HudTextArgs {
+                text: "#Cstrike_Tutor_Bomb_Planted_T".to_string(),
+                style: 2,
+                args: vec!["Alpha".to_string(), "45".to_string()],
+            },
+            CsUserMsg::AllowSpec(true),
+            CsUserMsg::SpecHealth(78),
+            CsUserMsg::SpecHealth2 {
+                health: 92,
+                target: 4,
+            },
+            CsUserMsg::Damage {
+                armor_damage: 12,
+                health_damage: 34,
+                damage_bits: 0x02,
+                origin: Vec3::new(128.0, -64.0, 32.0),
+            },
+            CsUserMsg::StatusText {
+                line: 0,
+                text: "1 %c1: %p2  %h: %i3%%".to_string(),
+            },
+            CsUserMsg::StatusValue {
+                index: 2,
+                value: 3,
+            },
+            CsUserMsg::BarTime2 {
+                duration: 10,
+                start_percent: 45,
+            },
+        ];
+        for m in msgs {
+            let (name, raw) = encode_cs_usermsg(&m);
+            let decoded = decode_cs_usermsg(name, &raw).unwrap();
+            assert_eq!(decoded, m);
+        }
+        // `HudTextPro` shares the same wire format as `HudText`.
+        let (_, pro_raw) = encode_cs_usermsg(&CsUserMsg::HudText {
+            text: "BONUS_MSG".to_string(),
+            style: 3,
+        });
+        assert_eq!(
+            decode_cs_usermsg("HudTextPro", &pro_raw).unwrap(),
+            CsUserMsg::HudText {
+                text: "BONUS_MSG".to_string(),
+                style: 3,
+            }
+        );
     }
 }

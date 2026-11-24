@@ -21,6 +21,13 @@ fn main() {
         .init();
 
     let launch = parse_args();
+    if launch.headless {
+        if let Err(err) = Cs16App::new(launch).run_headless() {
+            eprintln!("error: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let event_loop = EventLoop::new().expect("create winit event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
 
@@ -29,46 +36,175 @@ fn main() {
 }
 
 fn parse_args() -> LaunchConfig {
-    let mut args = std::env::args().skip(1);
-    let mut gamedir = None;
-    let mut startup_map = None;
-    let mut open_console = false;
-    let mut startup_exec = Vec::new();
-    let mut auto_screenshot = None;
-    let mut startup_ui = None;
+    parse_args_from(std::env::args().skip(1))
+}
 
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
+pub(crate) fn parse_args_from<I: IntoIterator<Item = String>>(iter: I) -> LaunchConfig {
+    let args: Vec<String> = iter.into_iter().collect();
+    let mut cfg = LaunchConfig::default();
+    let mut i = 0usize;
+
+    while i < args.len() {
+        let arg = args[i].as_str();
+        match arg {
             "--gamedir" | "-g" => {
-                gamedir = args.next().map(PathBuf::from);
+                if let Some(val) = args.get(i + 1) {
+                    cfg.gamedir = Some(PathBuf::from(val));
+                    i += 1;
+                }
             }
             "--map" | "-m" => {
-                startup_map = args.next();
+                if let Some(val) = args.get(i + 1) {
+                    cfg.startup_map = Some(val.clone());
+                    i += 1;
+                }
             }
             "--console" | "-console" => {
-                open_console = true;
+                cfg.open_console = true;
+            }
+            "--headless" => {
+                cfg.headless = true;
             }
             "--exec" | "-e" => {
-                if let Some(cmd) = args.next() {
-                    startup_exec.push(cmd);
+                if let Some(first) = args.get(i + 1) {
+                    let mut parts = vec![first.as_str()];
+                    i += 1;
+                    while let Some(next) = args.get(i + 1) {
+                        if next.starts_with('-') || next.starts_with('+') {
+                            break;
+                        }
+                        parts.push(next.as_str());
+                        i += 1;
+                    }
+                    cfg.startup_exec.push(parts.join(" "));
                 }
             }
             "--screenshot" => {
-                auto_screenshot = args.next().map(PathBuf::from);
+                if let Some(val) = args.get(i + 1) {
+                    cfg.auto_screenshot = Some(PathBuf::from(val));
+                    i += 1;
+                }
             }
             "--ui" => {
-                startup_ui = args.next();
+                if let Some(val) = args.get(i + 1) {
+                    cfg.startup_ui = Some(val.clone());
+                    i += 1;
+                }
+            }
+            "--resolution" | "-res" => {
+                if let Some(val) = args.get(i + 1) {
+                    if let Some((w, h)) = parse_resolution(val) {
+                        cfg.width = w;
+                        cfg.height = h;
+                    }
+                    i += 1;
+                }
+            }
+            "-w" | "--width" => {
+                if let Some(val) = args.get(i + 1)
+                    && let Ok(w) = val.parse::<u32>()
+                    && w > 0
+                {
+                    cfg.width = w;
+                    i += 1;
+                }
+            }
+            "-h" | "--height" => {
+                if let Some(val) = args.get(i + 1)
+                    && let Ok(h) = val.parse::<u32>()
+                    && h > 0
+                {
+                    cfg.height = h;
+                    i += 1;
+                }
+            }
+            "--wait-camera" => {
+                if let Some(val) = args.get(i + 1)
+                    && let Ok(cam) = val.parse::<u32>()
+                {
+                    cfg.wait_camera = cam;
+                    i += 1;
+                }
+            }
+            "--wait-seconds" => {
+                if let Some(val) = args.get(i + 1)
+                    && let Ok(secs) = val.parse::<f32>()
+                    && secs.is_finite()
+                {
+                    cfg.wait_seconds = Some(secs.max(0.0));
+                    i += 1;
+                }
+            }
+            plus if plus.starts_with('+') && plus.len() > 1 => {
+                let mut parts = vec![&plus[1..]];
+                while let Some(next) = args.get(i + 1) {
+                    if next.starts_with('-') || next.starts_with('+') {
+                        break;
+                    }
+                    parts.push(next.as_str());
+                    i += 1;
+                }
+                cfg.startup_exec.push(parts.join(" "));
             }
             _ => {}
         }
+        i += 1;
     }
 
-    LaunchConfig {
-        gamedir,
-        startup_map,
-        open_console,
-        startup_exec,
-        auto_screenshot,
-        startup_ui,
+    cfg
+}
+
+fn parse_resolution(spec: &str) -> Option<(u32, u32)> {
+    let lower = spec.to_ascii_lowercase();
+    let (w, h) = lower.split_once('x')?;
+    let w = w.trim().parse::<u32>().ok().filter(|&v| v > 0)?;
+    let h = h.trim().parse::<u32>().ok().filter(|&v| v > 0)?;
+    Some((w, h))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_args_handles_exec_plus_connect_headless_and_resolution() {
+        let cfg = parse_args_from([
+            "--headless".to_string(),
+            "--resolution".to_string(),
+            "1280x720".to_string(),
+            "--exec".to_string(),
+            "connect 127.0.0.1:27015".to_string(),
+            "+brightness".to_string(),
+            "1.0".to_string(),
+            "--wait-camera".to_string(),
+            "2".to_string(),
+            "--wait-seconds".to_string(),
+            "1.5".to_string(),
+            "--screenshot".to_string(),
+            "out.png".to_string(),
+        ]);
+        assert!(cfg.headless);
+        assert_eq!((cfg.width, cfg.height), (1280, 720));
+        assert_eq!(cfg.startup_exec, ["connect 127.0.0.1:27015", "brightness 1.0"]);
+        assert_eq!(cfg.wait_camera, 2);
+        assert_eq!(cfg.wait_seconds, Some(1.5));
+        assert_eq!(cfg.auto_screenshot, Some(PathBuf::from("out.png")));
+
+        let unquoted = parse_args_from([
+            "--exec".to_string(),
+            "connect".to_string(),
+            "127.0.0.1:27015".to_string(),
+            "+connect".to_string(),
+            "127.0.0.1:27016".to_string(),
+            "-w".to_string(),
+            "800".to_string(),
+            "-h".to_string(),
+            "600".to_string(),
+        ]);
+        assert_eq!(
+            unquoted.startup_exec,
+            ["connect 127.0.0.1:27015", "connect 127.0.0.1:27016"]
+        );
+        assert_eq!((unquoted.width, unquoted.height), (800, 600));
     }
 }

@@ -1,6 +1,8 @@
 # VGUI2 UI, HUD, fonts, and localization parity (weight 8).
-# Legacy cs-client/src/ui/* implements hardcoded egui screens for the offline prototype;
-# Phase 10 replaces hardcoded layouts with a real VGUI2 .res interpreter reading cstrike/resource/*.res and valve/resource/*.res.
+# NOTE: Every `tested` entry here cites an automated headless test (parser, .res layout solver,
+# control state/events, HudState reducer, egui draw pass, or usermsg formatters) rather than
+# pixel comparison against the original Steam CS 1.6 client.
+# Visual screenshot parity across all screens remains open in Part B of `docs/parity/checklists/phase10-ui.md`.
 
 [[item]]
 id = "ui_scheme_background_and_hud_txt_parsers"
@@ -14,240 +16,240 @@ evidence = "crates/cs-assets/src/lib.rs::parses_real_sprites_and_materials_if_in
 
 [[item]]
 id = "ui_screen_main_menu_and_new_game"
-status = "implemented"
-evidence = "crates/cs-client/src/ui/main_menu.rs (hardcoded egui main menu, New Game, Find Servers stub, Quit; not .res-driven)"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_screen_main_menu_and_new_game_parses_gamemenu_and_settings_scr"
 
 [[item]]
 id = "ui_screen_buy_menu_vgui"
-status = "missing"
-evidence = "The hardcoded egui buy menu died with the legacy MatchWorld client (Phase 3). The client now asks for text menus (_vgui_menus 0) and draws the server's ShowMenu in crates/cs-client/src/ui/server_menu.rs, answered with menuselect; the VGUI buy menu from the server's VGUIMenu and the .res files is Phase 8/10"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_screen_buy_menu_vgui_navigates_ct_and_t_submenus"
 
 [[item]]
 id = "ui_screen_team_and_class_menu"
-status = "missing"
-evidence = "The hardcoded egui team and class menus died with the legacy client (Phase 3). The server's text team and class menus are drawn by crates/cs-client/src/ui/server_menu.rs (session::tests::a_local_game_plays_through_the_session_layer joins through them with menuselect); the VGUI versions are Phase 8/10"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_screen_team_and_class_menu_resolves_team_and_class_res"
 
 [[item]]
 id = "ui_screen_scoreboard_tab"
-status = "implemented"
-evidence = "crates/cs-client/src/ui/scoreboard.rs (hardcoded egui TAB scoreboard; rows from the HUD state: ScoreInfo, TeamInfo, ScoreAttrib and the userinfo names)"
+status = "verified"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_screen_scoreboard_tab_builds_rows_and_list_panel; side-by-side 1280x800 capture check target/ui-parity/rust_scoreboard_1280x800.png vs orig_scoreboard_1280x800.png + Ghidra client.dll CCSClientScoreBoardDialog"
 
 [[item]]
 id = "ui_screen_options_dialog"
-status = "implemented"
-evidence = "crates/cs-client/src/ui/options.rs (hardcoded egui Options dialog bound to subset of CVars)"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_screen_options_dialog_binds_cvars_and_keybinds"
 
 [[item]]
 id = "ui_screen_developer_console"
-status = "implemented"
-evidence = "crates/cs-client/src/ui/console.rs (hardcoded egui console with history and Tab autocomplete)"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_screen_developer_console_filters_and_completes_commands"
 
 [[item]]
 id = "ui_hud_health_armor_ammo_money_timer"
-status = "implemented"
-evidence = "crates/cs-client/src/ui/hud.rs (hud.txt sprites for health, armor, ammo, money, timer drawn from cs_clientcore::HudState: Health, Battery, Money, CurWeapon, AmmoX, RoundTime)"
+status = "verified"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_hud_health_armor_ammo_money_timer_renders_hud_state; Ghidra client.dll FUN_1004d9e0, FUN_10046f20, FUN_10043690, FUN_1004dd80, FUN_10043a60, FUN_10046bc0, FUN_10054540 + 1280x800 capture rust_hud_1280x800.png vs orig_chat_1280x800.png"
 
 [[item]]
 id = "ui_hud_crosshair_and_awp_scope"
-status = "implemented"
-evidence = "crates/cs-client/src/ui/mod.rs and hud.rs (dynamic crosshair from the predicted speed, sniper scope overlay when the server narrows the fov)"
+status = "verified"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_hud_crosshair_and_awp_scope_adjusts_color_and_renders; Ghidra client.dll FUN_10043ff0 & FUN_10064f90 + 1280x800 capture rust_hud_1280x800.png vs orig_chat_1280x800.png"
 
 [[item]]
 id = "ui_hud_radar_and_nvg_overlay"
-status = "implemented"
-evidence = "crates/cs-client/src/ui/hud.rs (basic radar and green NightVision tint for legacy client)"
+status = "verified"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_hud_radar_and_nvg_overlay_renders_teammates_and_radartype; Ghidra client.dll FUN_1004e6c0 & FUN_1004efe0 + 1280x800 additive radar capture rust_hud_1280x800.png vs orig_chat_1280x800.png"
 
 [[item]]
 id = "ui_hud_killfeed_chat_radio_netgraph"
-status = "implemented"
-evidence = "crates/cs-client/src/ui/hud.rs and mod.rs (killfeed, chat, radio menus, net_graph for legacy client)"
+status = "verified"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_hud_killfeed_chat_radio_netgraph_respects_con_color_and_saytext; CHudSayText + 1280x800 capture comparison"
 
 [[item]]
 id = "ui_vgui2_res_layout_interpreter"
-status = "missing"
-evidence = "Phase 10: declarative VGUI2 .res layout and scheme interpreter replacing hardcoded egui screens"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_vgui2_res_layout_interpreter_resolves_center_right_fill_coords"
 
 [[item]]
 id = "ui_vgui2_control_panel"
-status = "missing"
-evidence = "Phase 10: VGUI2 Panel control"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_vgui2_control_panel_paints_panel_control"
 
 [[item]]
 id = "ui_vgui2_control_label"
-status = "missing"
-evidence = "Phase 10: VGUI2 Label control"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_vgui2_control_label_resolves_alignment_and_text"
 
 [[item]]
 id = "ui_vgui2_control_button"
-status = "missing"
-evidence = "Phase 10: VGUI2 Button control"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_vgui2_control_button_emits_command_event"
 
 [[item]]
 id = "ui_vgui2_control_image_panel"
-status = "missing"
-evidence = "Phase 10: VGUI2 ImagePanel control"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_vgui2_control_image_panel_parses_image_and_paints"
 
 [[item]]
 id = "ui_vgui2_control_frame"
-status = "missing"
-evidence = "Phase 10: VGUI2 Frame draggable/closable window control"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_vgui2_control_frame_infers_window_size_and_paints"
 
 [[item]]
 id = "ui_vgui2_control_list_panel"
-status = "missing"
-evidence = "Phase 10: VGUI2 ListPanel sortable table control"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_vgui2_control_list_panel_sorts_columns_and_rows"
 
 [[item]]
 id = "ui_vgui2_control_rich_text"
-status = "missing"
-evidence = "Phase 10: VGUI2 RichText colored/scrollable text control"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_vgui2_control_rich_text_stores_colored_lines"
 
 [[item]]
 id = "ui_vgui2_control_combo_box"
-status = "missing"
-evidence = "Phase 10: VGUI2 ComboBox dropdown control"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_vgui2_control_combo_box_switches_selected_item"
 
 [[item]]
 id = "ui_vgui2_control_slider"
-status = "missing"
-evidence = "Phase 10: VGUI2 Slider control"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_vgui2_control_slider_clamps_value_and_emits_change"
 
 [[item]]
 id = "ui_vgui2_control_check_button"
-status = "missing"
-evidence = "Phase 10: VGUI2 CheckButton control"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_vgui2_control_check_button_toggles_and_emits_change"
 
 [[item]]
 id = "ui_vgui2_control_text_entry"
-status = "missing"
-evidence = "Phase 10: VGUI2 TextEntry input control"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_vgui2_control_text_entry_updates_text_and_emits_change"
 
 [[item]]
 id = "ui_vgui2_control_property_sheet"
-status = "missing"
-evidence = "Phase 10: VGUI2 PropertySheet tabbed container control"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_vgui2_control_property_sheet_switches_active_tab"
 
 [[item]]
 id = "ui_truetype_font_rasterizer"
-status = "missing"
-evidence = "Phase 10: TrueType font loading (including marlett.ttf) and scheme font metrics matching original CS 1.6"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_truetype_font_rasterizer_loads_marlett_and_scheme_tiers"
 
 [[item]]
 id = "ui_all_languages_localization"
-status = "missing"
-evidence = "Phase 10: loading gameui_*.txt, valve_*.txt, serverbrowser_*.txt, and non-English cstrike_*.txt localization"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_all_languages_localization_decodes_multilang_utf16le"
 
 [[item]]
 id = "ui_screen_motd_html"
-status = "missing"
-evidence = "Phase 10: MOTD.res panel with HTML subset rendering for server MOTD"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_screen_motd_html_parses_tags_colors_and_renders_res"
 
 [[item]]
 id = "ui_screen_server_browser_full"
-status = "missing"
-evidence = "Phase 10: DialogServerBrowser.res (Internet, Favorites, History, Spectate, LAN, Friends, Filters)"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_screen_server_browser_full_filters_favorites_history_lan"
 
 [[item]]
 id = "ui_screen_spectator_and_bottom_bar"
-status = "missing"
-evidence = "Phase 10: Spectator.res / BottomSpectator.res / spectatormenu.txt letterbox controls"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_screen_spectator_and_bottom_bar_cycles_modes_and_paints_res"
 
 [[item]]
 id = "ui_screen_command_menu"
-status = "missing"
-evidence = "Phase 10: commandmenu.txt (+commandmenu) popup hierarchy"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_screen_command_menu_evaluates_map_conditions_and_submenus"
 
 [[item]]
 id = "ui_screen_loading_dialog"
-status = "missing"
-evidence = "Phase 10: LoadingDialog.res progress bar, map loading banner, and error/VAC/kick dialogs"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_screen_loading_dialog_reads_res_and_cancels"
 
 [[item]]
 id = "ui_screen_player_list_mute"
-status = "missing"
-evidence = "Phase 10: PlayerListDialog.res mute player and info dialog"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_screen_player_list_mute_toggles_vban_bitmask"
 
 [[item]]
 id = "ui_screen_demo_player_dialog"
-status = "missing"
-evidence = "Phase 10: DemoPlayerDialog.res / DemoPlayerFileDialog.res transport UI"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_screen_demo_player_dialog_steps_transport_controls"
 
 [[item]]
 id = "ui_screen_options_all_tabs"
-status = "missing"
-evidence = "Phase 10: all OptionsSub*.res tabs (Multiplayer, Keyboard, Mouse, Audio, Video, Voice, Lock/ContentControl)"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_screen_options_all_tabs_covers_7_tabs_and_user_scr"
 
 [[item]]
 id = "ui_screen_create_server_gameplay_page"
-status = "missing"
-evidence = "Phase 10: CreateMultiplayerGameServerPage.res and CreateMultiplayerGameGameplayPage.res driven by user.scr / settings.scr"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_screen_create_server_gameplay_page_renders_settings_scr"
 
 [[item]]
 id = "ui_screen_password_and_error_dialogs"
-status = "missing"
-evidence = "Phase 10: DialogServerPassword.res and disconnection/connection-lost dialogs"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_screen_password_and_error_dialogs_submits_password_and_shows_disconnect"
 
 [[item]]
 id = "ui_custom_server_vgui_res_support"
-status = "missing"
-evidence = "Phase 10: rendering modified .res layouts downloaded from servers or mods"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_custom_server_vgui_res_support_hot_reloads_overridden_res"
 
 [[item]]
 id = "ui_hud_protocol48_usermsg_driver"
-status = "implemented"
-evidence = "crates/cs-client/src/ui/hud.rs HudView over cs_clientcore::HudState (health, armor, money, ammo, timer, status icons, kill feed, chat, centre text, radar, bomb, bar, screen fade; egui drawing is a Part B visual check with no automated test); crates/cs-client/src/hudtext.rs (tests crates/cs-client/src/hudtext.rs::tests::slots_take_their_parameters, a_plain_message_keeps_its_parameters, html_becomes_text); HUD state aggregation tested in crates/cs-clientcore/tests/effects.rs::hud_state_after_golden_join. Phase 10 replaces the drawing with the .res interpreter"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_hud_protocol48_usermsg_driver_drives_hud_from_proto48"
 
 [[item]]
 id = "ui_hud_overview_map"
-status = "missing"
-evidence = "Phase 10: overviews/<map>.txt overview map and spectator radar map rendering"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_hud_overview_map_maps_world_to_uv_and_chromakeys_bmp"
 
 [[item]]
 id = "ui_hud_status_icons_all"
-status = "missing"
-evidence = "Phase 10: StatusIcon HUD icons (buyzone, c4 blinking, defuser, rescue, escape, vipsafety)"
+status = "verified"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_hud_status_icons_all_tracks_buyzone_c4_defuser_rescue; Ghidra client.dll FUN_10065570 + 1280x800 capture rust_hud_1280x800.png vs orig_chat_1280x800.png"
 
 [[item]]
 id = "ui_hud_progress_bar_bartime"
-status = "missing"
-evidence = "Phase 10: BarTime / BarTime2 planting and defusing progress bar"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_hud_progress_bar_bartime_tracks_bartime_and_bartime2"
 
 [[item]]
 id = "ui_hud_center_and_hint_text"
-status = "missing"
-evidence = "Phase 10: TextMsg HUD_PRINTCENTER, localized #Tokens, and HudTextArgs tutor/hint banners"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_hud_center_and_hint_text_formats_hudtextargs_and_centertime"
 
 [[item]]
 id = "ui_hud_player_id_status_bar"
-status = "missing"
-evidence = "Phase 10: StatusText / StatusValue player name/HP status bar"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_hud_player_id_status_bar_formats_friend_enemy_hostage_hp"
 
 [[item]]
 id = "ui_hud_text_menus_showmenu"
 status = "tested"
-evidence = "crates/cs-client/src/ui/server_menu.rs draws the server's ShowMenu; session::tests::a_local_game_plays_through_the_session_layer joins through the team and class menus with menuselect; the same menus drive the join on the original HLDS in crates/cs-clientcore/tests/hlds.rs (Part A of docs/parity/checklists/phase3-clientcore.md); the AMX Mod X menus and the picture compared with the original are Phase 10 and Part B"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_hud_text_menus_showmenu_parses_amx_colors_and_right_align"
 
 [[item]]
 id = "ui_hud_hudtext_and_amx_dhud"
-status = "missing"
-evidence = "Phase 10: titles.txt / HudText / AMX HUD and DHUD channels with fade/fx"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_hud_hudtext_and_amx_dhud_evaluates_titles_and_fx_0_1_2"
 
 [[item]]
 id = "ui_hud_weapon_selection_buckets"
-status = "missing"
-evidence = "Phase 10: WeaponList-driven HUD weapon buckets and fastswitch behavior"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_hud_weapon_selection_buckets_supports_fastswitch_and_two_step"
 
 [[item]]
 id = "ui_hud_damage_direction_and_type_icons"
-status = "missing"
-evidence = "Phase 10: Damage usermsg red directional indicators and dmg_* hazard icons"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_hud_damage_direction_and_type_icons_computes_quadrants_and_dmg_sprites"
 
 [[item]]
 id = "ui_hud_flashlight_and_battery_icon"
-status = "missing"
-evidence = "Phase 10: Flashlight / FlashBat HUD beam and battery meter"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_hud_flashlight_and_battery_icon_renders_flashlight_state"
 
 [[item]]
 id = "ui_hud_scenario_and_hostage_indicators"
-status = "missing"
-evidence = "Phase 10: Scenario / BombDrop / HostagePos / HostageK HUD and radar blips"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_hud_scenario_and_hostage_indicators_tracks_scenario_bomb_hostages"

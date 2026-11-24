@@ -54,12 +54,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if tex.a < 0.02 {
         discard;
     }
-    let tex_exp = max(u.gamma_params.y, 0.5) * 0.5;
-    let albedo = pow(clamp(tex.rgb * in.color.rgb, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(tex_exp));
-    let brightness = max(u.gamma_params.z, 0.1);
-    let gamma_val = max(u.gamma_params.x, 0.5);
-    let gamma_exp = 2.5 / gamma_val;
-    var rgb = pow(clamp(albedo * brightness, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(gamma_exp));
+    var rgb = clamp(tex.rgb * in.color.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
 
     if u.gamma_params.w > 0.5 {
         let d = bayer4x4(in.clip_pos.xy);

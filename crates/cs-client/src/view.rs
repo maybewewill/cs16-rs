@@ -45,7 +45,8 @@ use crate::render::scene::{
     EntRenderMode, ModelHandle, ModelRegistry, RenderEntity, SceneFrame, ViewBasis,
 };
 use crate::view_effects::{
-    BobParams, ViewModelLagState, calc_bob, calc_roll, calc_screen_shake, underwater_tint_and_fov,
+    BobParams, StairSmoothState, ViewModelLagState, calc_bob, calc_roll, calc_screen_shake,
+    underwater_tint_and_fov,
 };
 
 /// The first model index the shell hands to models the client loads by itself (shells, the
@@ -221,6 +222,7 @@ pub struct FrameView {
     pub reload_sounds: Vec<(u8, u8)>,
     pub custom_decals: HashMap<u8, CustomDecalInfo>,
     pub alive: bool,
+    pub observer_mode: i32,
     pub stats: ViewStats,
 }
 
@@ -270,6 +272,7 @@ pub struct ViewBuilder {
     beam_sys: BeamSystem,
     pending_decals: Vec<DecalSpawn>,
     lag_state: ViewModelLagState,
+    stair_smooth: StairSmoothState,
     player_gaits: HashMap<u16, (f32, Vec3)>,
     vm_seq_cache: HashMap<String, Vec<CachedSeqMeta>>,
     last_vm_frame: f32,
@@ -288,6 +291,20 @@ impl Default for ViewBuilder {
     }
 }
 
+const FL_SPECTATOR: u32 = 1 << 12;
+const WEAPON_SUIT_BIT: u32 = 1 << 31;
+
+/// GoldSrc `UpdateClientData` leaves `cd.deadflag == 0` and `cd.health == 100.0` while a
+/// joining player sits on the intro camera, marking them with `FL_SPECTATOR` (`1 << 12`)
+/// and omitting the HEV suit bit (`1 << WEAPON_SUIT`, bit 31). Observers set `cd.iuser1 != 0`.
+pub(crate) fn is_client_alive(cd: &cs_proto48::delta::GoldSrcClientData) -> bool {
+    cd.deadflag == 0
+        && cd.health > 0.0
+        && (cd.flags & FL_SPECTATOR) == 0
+        && cd.iuser1 == 0
+        && (cd.weapons & WEAPON_SUIT_BIT) != 0
+}
+
 impl ViewBuilder {
     pub fn new() -> Self {
         Self {
@@ -303,6 +320,7 @@ impl ViewBuilder {
             beam_sys: BeamSystem::new(),
             pending_decals: Vec::new(),
             lag_state: ViewModelLagState::default(),
+            stair_smooth: StairSmoothState::default(),
             player_gaits: HashMap::new(),
             vm_seq_cache: HashMap::new(),
             last_vm_frame: 0.0,
@@ -347,6 +365,7 @@ impl ViewBuilder {
         self.pending_decals.clear();
         self.bsp = None;
         self.lag_state.reset();
+        self.stair_smooth.reset();
         self.player_gaits.clear();
         self.client_models.clear();
         self.anim = None;
@@ -457,7 +476,7 @@ impl ViewBuilder {
         let local_number = slot.map(|s| u16::from(s) + 1);
         // The predicted player (the server's origin while the map's collision is not set).
         let prediction = conn.predictor().prediction().clone();
-        let (mut eye, mut punch, mut fov, alive, weaponanim, viewmodel_index) = match &cd {
+        let (mut eye, mut punch, mut fov, alive, observer_mode, weaponanim, viewmodel_index) = match &cd {
             Some(cd) => (
                 if prediction.predicted {
                     prediction.simorg + prediction.viewheight
@@ -470,15 +489,22 @@ impl ViewBuilder {
                     cd.punchangle
                 },
                 cd.fov,
-                cd.deadflag == 0 && cd.health > 0.0,
+                is_client_alive(cd),
+                cd.iuser1,
                 cd.weaponanim,
                 cd.viewmodel,
             ),
-            None => (Vec3::ZERO, Vec3::ZERO, 0.0, false, 0, 0),
+            None => (Vec3::ZERO, Vec3::ZERO, 0.0, false, 0, 0, 0),
         };
         if !eye.is_finite() {
             eye = Vec3::ZERO;
         }
+        let dt_view = inputs.frametime.clamp(0.0, 0.25) as f32;
+        eye.z += self.stair_smooth.offset(
+            eye.z,
+            prediction.predicted && prediction.onground >= 0 && alive,
+            dt_view,
+        );
         if !punch.is_finite() {
             punch = Vec3::ZERO;
         }
@@ -792,6 +818,7 @@ impl ViewBuilder {
                 reload_sounds,
                 custom_decals,
                 alive,
+                observer_mode,
                 stats,
             },
             registry_changed.then(|| self.models.clone()),
@@ -816,8 +843,15 @@ impl ViewBuilder {
                 let seed = base_seed
                     .wrapping_add((ev_idx as u32).wrapping_mul(131))
                     .wrapping_add(shot.wrapping_mul(17));
-                let sx = (((seed & 0xFF) as f32) / 255.0 - 0.5) * 2.0 * fire.spread[0];
-                let sy = ((((seed >> 8) & 0xFF) as f32) / 255.0 - 0.5) * 2.0 * fire.spread[1];
+                // Single-bullet events already carry exact (dx, dy) displacement in `fire.spread`;
+                // shotguns pass a cone radius (`Spread::Fixed`) scaled per pellet.
+                let (sx, sy) = if shots == 1 {
+                    (fire.spread[0], fire.spread[1])
+                } else {
+                    let rx = (((seed & 0xFF) as f32) / 255.0 - 0.5) * 2.0 * fire.spread[0];
+                    let ry = ((((seed >> 8) & 0xFF) as f32) / 255.0 - 0.5) * 2.0 * fire.spread[1];
+                    (rx, ry)
+                };
                 let dir = (fire.forward + fire.right * sx + fire.up * sy).normalize_or_zero();
                 let dist = fire.distance.clamp(64.0, 8192.0);
                 let tr = coll.trace_world(fire.origin, fire.origin + dir * dist, Hull::Point);
@@ -1379,5 +1413,165 @@ mod tests {
         assert_eq!(b.models.get(h).map(|e| e.name.as_str()), Some("models/shell.mdl"));
         // Unchanged: no rebuild.
         assert!(!b.ensure_registry(&precache));
+    }
+
+    #[test]
+    fn intro_camera_client_data_is_not_alive() {
+        let cd = cs_proto48::delta::GoldSrcClientData {
+            deadflag: 0,
+            health: 100.0,
+            flags: (1 << 3) | FL_SPECTATOR,
+            weapons: 0,
+            iuser1: 0,
+            ..Default::default()
+        };
+        assert!(!is_client_alive(&cd));
+    }
+
+    #[test]
+    fn spawned_player_client_data_is_alive() {
+        let cd = cs_proto48::delta::GoldSrcClientData {
+            deadflag: 0,
+            health: 100.0,
+            flags: 1 << 3,
+            weapons: WEAPON_SUIT_BIT,
+            iuser1: 0,
+            ..Default::default()
+        };
+        assert!(is_client_alive(&cd));
+    }
+
+    #[test]
+    fn observer_client_data_is_not_alive() {
+        let cd = cs_proto48::delta::GoldSrcClientData {
+            deadflag: 0,
+            health: 100.0,
+            flags: 1 << 3,
+            weapons: WEAPON_SUIT_BIT,
+            iuser1: 4,
+            ..Default::default()
+        };
+        assert!(!is_client_alive(&cd));
+    }
+
+    #[test]
+    fn single_bullet_impact_uses_exact_spread_without_timestamp_jitter() {
+        use cs_assets::bsp::{BspMap, BspModel, Leaf, LightmapAtlas, Node, Plane};
+        use cs_clientcore::events::{BulletFire, BulletType, WeaponFireFx};
+        use cs_clientcore::{EventFx, FiredEvent};
+        use cs_pm::collision::{CONTENTS_EMPTY, CONTENTS_SOLID};
+
+        let bsp = BspMap {
+            name: "wall".into(),
+            skyname: String::new(),
+            entities: Vec::new(),
+            spawns: Vec::new(),
+            hostage_spawns: Vec::new(),
+            brush_entities: Vec::new(),
+            planes: vec![Plane {
+                normal: Vec3::X,
+                dist: 128.0,
+                plane_type: 0,
+            }],
+            vertices_raw: Vec::new(),
+            visibility: Vec::new(),
+            nodes: vec![Node {
+                plane: 0,
+                children: [-1, -2],
+                mins: [-512, -512, -512],
+                maxs: [512, 512, 512],
+                first_face: 0,
+                num_faces: 0,
+            }],
+            texinfos: Vec::new(),
+            faces: Vec::new(),
+            lighting: Vec::new(),
+            clipnodes: Vec::new(),
+            leafs: vec![
+                Leaf {
+                    contents: CONTENTS_SOLID,
+                    vis_offset: -1,
+                    mins: [-512, -512, -512],
+                    maxs: [512, 512, 512],
+                    first_mark_surface: 0,
+                    num_mark_surfaces: 0,
+                    ambient_levels: [0; 4],
+                },
+                Leaf {
+                    contents: CONTENTS_EMPTY,
+                    vis_offset: -1,
+                    mins: [-512, -512, -512],
+                    maxs: [512, 512, 512],
+                    first_mark_surface: 0,
+                    num_mark_surfaces: 0,
+                    ambient_levels: [0; 4],
+                },
+            ],
+            mark_surfaces: Vec::new(),
+            edges: Vec::new(),
+            surf_edges: Vec::new(),
+            models: vec![BspModel {
+                mins: Vec3::splat(-512.0),
+                maxs: Vec3::splat(512.0),
+                origin: Vec3::ZERO,
+                head_nodes: [0, -1, -1, -1],
+                vis_leafs: 2,
+                first_face: 0,
+                num_faces: 0,
+            }],
+            textures: Vec::new(),
+            lightmap_atlas: LightmapAtlas {
+                width: 0,
+                height: 0,
+                rgba: Vec::new(),
+                packed_faces: 0,
+            },
+            render_vertices: Vec::new(),
+            render_indices: Vec::new(),
+            batches: Vec::new(),
+        };
+
+        let mut builder = ViewBuilder::new();
+        builder.set_world_context(Some(Arc::new(WorldCollision::from_bsp(&bsp))), None);
+        let fired = [FiredEvent {
+            index: 1,
+            name: Some("events/ak47.sc".into()),
+            flags: 0,
+            args: cs_proto48::event::EventArgs::default(),
+            velocity: Vec3::ZERO,
+            fx: EventFx::Weapon(WeaponFireFx {
+                weapon: "ak47",
+                entity: 1,
+                local: true,
+                view_anim: None,
+                muzzle_flash: false,
+                shell: None,
+                sound: None,
+                bullets: Some(BulletFire {
+                    entity: 1,
+                    origin: Vec3::ZERO,
+                    forward: Vec3::X,
+                    right: Vec3::Y,
+                    up: Vec3::Z,
+                    shots: 1,
+                    spread: [0.05, -0.025],
+                    distance: 512.0,
+                    bullet: BulletType::Mm762,
+                    penetration: 2,
+                }),
+            }),
+        }];
+
+        let _ = builder.collect_bullet_impacts(&fired, 1.234);
+        assert_eq!(builder.pending_decals.len(), 1);
+        let p1 = builder.pending_decals[0].origin;
+        assert!((p1.x - 128.0).abs() < 0.1, "x={}", p1.x);
+        assert!((p1.y - 6.4).abs() < 0.2, "y={}", p1.y);
+        assert!((p1.z + 3.2).abs() < 0.2, "z={}", p1.z);
+
+        builder.pending_decals.clear();
+        let _ = builder.collect_bullet_impacts(&fired, 99.876);
+        let p2 = builder.pending_decals[0].origin;
+        assert!((p1 - p2).length() < 1e-5, "single shot impact must be deterministic");
     }
 }
