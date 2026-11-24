@@ -89,38 +89,38 @@ evidence = "crates/cs-game/tests/bullets.rs::death_msg_names_the_weapon_and_head
 
 [[item]]
 id = "bullet_impact_effects"
-status = "implemented"
-evidence = "crates/cs-game/src/bullets.rs: decals (TE_DECAL / TE_WORLDDECAL and the HIGH forms), TE_GUNSHOTDECAL, TE_SPARKS, TE_BLOODSPRITE and the streak splash of the knife wall hit are sent; their wire layouts are tested in crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, but no game test asserts which effect a bullet chooses. Known gap: server DecalGunshot is an empty stub in the source, the client plays the impact sounds"
+status = "tested"
+evidence = "crates/cs-game/tests/bullets.rs::bullet_impact_effects_emit_blood_sparks_helmet_and_knife_streak; crates/cs-game/tests/shield_and_autobuy.rs::shield_buy_draw_speed_hitbox_deflection_drop_and_pickup; decals (TE_DECAL / TE_WORLDDECAL and HIGH forms), TE_GUNSHOTDECAL, TE_SPARKS, TE_BLOODSPRITE, and knife wall streak splash emitted per material/hitgroup. Server DecalGunshot is an empty stub matching ReGameDLL_CS (the client plays impact sounds)."
 
 [[item]]
 id = "weapon_glock18"
 status = "tested"
-evidence = "crates/cs-game/tests/weapons_pistols.rs::pistol_rows_match_source, semi_auto_needs_release, pistol_events_carry_source_args, reload_quirks_and_idle, glock_burst_three_shots (wpn_glock18.cpp read 2026-11-22; the burst and the 0.2 s delay quirks). Known gap: the shield variants (shield models, `m_bShieldDrawn` states) are not ported"
+evidence = "crates/cs-game/tests/weapons_pistols.rs::pistol_rows_match_source, semi_auto_needs_release, pistol_events_carry_source_args, reload_quirks_and_idle, glock_burst_three_shots; crates/cs-game/tests/shield_and_autobuy.rs::shield_variants_work_for_pistols_knife_and_grenades (wpn_glock18.cpp; burst, 0.2 s delay quirk, and shield variant)."
 
 [[item]]
 id = "weapon_usp"
 status = "verified"
-evidence = "crates/cs-game/tests/weapons_pistols.rs::pistol_rows_match_source, semi_auto_needs_release, pistol_events_carry_source_args, reload_quirks_and_idle, usp_silencer_toggle_timing (wpn_usp.cpp). Known gap: the shield variants (shield models, `m_bShieldDrawn` states) are not ported VERIFIED 2026-11-23 with the original CS 1.6 client (build 10210) on our server, de_dust2: the USP fires with its animation, muzzle effect and a bullet decal under the crosshair; the clip goes 12, 11, 8 over four shots."
+evidence = "crates/cs-game/tests/weapons_pistols.rs::pistol_rows_match_source, semi_auto_needs_release, pistol_events_carry_source_args, reload_quirks_and_idle, usp_silencer_toggle_timing; crates/cs-game/tests/shield_and_autobuy.rs::shield_variants_work_for_pistols_knife_and_grenades (wpn_usp.cpp). VERIFIED 2026-11-23 with the original CS 1.6 client (build 10210) on our server, de_dust2: the USP fires with its animation, muzzle effect and a bullet decal under the crosshair; the clip goes 12, 11, 8 over four shots."
 
 [[item]]
 id = "weapon_p228"
 status = "tested"
-evidence = "crates/cs-game/tests/weapons_pistols.rs::pistol_rows_match_source, semi_auto_needs_release, pistol_events_carry_source_args, reload_quirks_and_idle (wpn_p228.cpp). Known gap: the shield variants (shield models, `m_bShieldDrawn` states) are not ported"
+evidence = "crates/cs-game/tests/weapons_pistols.rs::pistol_rows_match_source, semi_auto_needs_release, pistol_events_carry_source_args, reload_quirks_and_idle; crates/cs-game/tests/shield_and_autobuy.rs::shield_variants_work_for_pistols_knife_and_grenades (wpn_p228.cpp)."
 
 [[item]]
 id = "weapon_deagle"
 status = "tested"
-evidence = "crates/cs-game/tests/weapons_pistols.rs::pistol_rows_match_source, semi_auto_needs_release, pistol_events_carry_source_args, reload_quirks_and_idle (wpn_deagle.cpp). Known gap: the shield variants (shield models, `m_bShieldDrawn` states) are not ported"
+evidence = "crates/cs-game/tests/weapons_pistols.rs::pistol_rows_match_source, semi_auto_needs_release, pistol_events_carry_source_args, reload_quirks_and_idle; crates/cs-game/tests/shield_and_autobuy.rs::shield_variants_work_for_pistols_knife_and_grenades (wpn_deagle.cpp)."
 
 [[item]]
 id = "weapon_fiveseven"
 status = "tested"
-evidence = "crates/cs-game/tests/weapons_pistols.rs::pistol_rows_match_source, semi_auto_needs_release, pistol_events_carry_source_args, reload_quirks_and_idle (wpn_fiveseven.cpp). Known gap: the shield variants (shield models, `m_bShieldDrawn` states) are not ported"
+evidence = "crates/cs-game/tests/weapons_pistols.rs::pistol_rows_match_source, semi_auto_needs_release, pistol_events_carry_source_args, reload_quirks_and_idle; crates/cs-game/tests/shield_and_autobuy.rs::shield_variants_work_for_pistols_knife_and_grenades (wpn_fiveseven.cpp)."
 
 [[item]]
 id = "weapon_elite"
 status = "tested"
-evidence = "crates/cs-game/tests/weapons_pistols.rs::pistol_rows_match_source, semi_auto_needs_release, pistol_events_carry_source_args, reload_quirks_and_idle, elite_alternates_hands, elite_shoots_from_five_units_to_the_side (wpn_elite.cpp). The Elite cannot be bought with a shield (CanBuyThis). Known gap: the shield variants (shield models, `m_bShieldDrawn` states) are not ported"
+evidence = "crates/cs-game/tests/weapons_pistols.rs::pistol_rows_match_source, semi_auto_needs_release, pistol_events_carry_source_args, reload_quirks_and_idle, elite_alternates_hands, elite_shoots_from_five_units_to_the_side (wpn_elite.cpp). The Elite cannot be bought with a shield (CanBuyThis)."
 
 [[item]]
 id = "weapon_mac10"
@@ -215,22 +215,22 @@ evidence = "crates/cs-game/tests/weapons_special.rs::shotgun_special_reload_and_
 [[item]]
 id = "weapon_knife"
 status = "tested"
-evidence = "crates/cs-game/tests/weapons_special.rs::knife_slash_and_stab_damage_and_timing, knife_hull_intersection, knife_hit_sample_selection, knife_draws_by_branch, knife_wall_strike (wpn_knife.cpp, FindHullIntersection; m_iClip -1 at creation: crates/cs-game/tests/inventory.rs::default_items_by_team). Known gap: the shield variants (shield models, `m_bShieldDrawn` states) are not ported"
+evidence = "crates/cs-game/tests/weapons_special.rs::knife_slash_and_stab_damage_and_timing, knife_hull_intersection, knife_hit_sample_selection, knife_draws_by_branch, knife_wall_strike; crates/cs-game/tests/shield_and_autobuy.rs::shield_variants_work_for_pistols_knife_and_grenades (wpn_knife.cpp, FindHullIntersection; m_iClip -1 at creation: crates/cs-game/tests/inventory.rs::default_items_by_team)."
 
 [[item]]
 id = "weapon_hegrenade"
 status = "tested"
-evidence = "crates/cs-game/tests/grenades.rs::throw_velocity_from_pitch, he_radius_damage_as_regamedll, he_blast_is_the_throwers_kill_and_reaches_350_units, the_last_grenade_thrown_retires_the_weapon, holstering_a_grenade_forgets_the_pin_and_pushes_the_next_attack_back (wpn_hegrenade.cpp). Known gap: the shield variants (shield models, `m_bShieldDrawn` states) are not ported"
+evidence = "crates/cs-game/tests/grenades.rs::throw_velocity_from_pitch, he_radius_damage_as_regamedll, he_blast_is_the_throwers_kill_and_reaches_350_units, the_last_grenade_thrown_retires_the_weapon, holstering_a_grenade_forgets_the_pin_and_pushes_the_next_attack_back; crates/cs-game/tests/shield_and_autobuy.rs::shield_variants_work_for_pistols_knife_and_grenades (wpn_hegrenade.cpp)."
 
 [[item]]
 id = "weapon_flashbang"
 status = "tested"
-evidence = "crates/cs-game/tests/grenades.rs::flash_blinds_by_angle_and_distance, a_flashbang_retires_even_with_another_left_and_the_he_grenade_is_drawn_again, a_fuse_under_a_tenth_of_a_second_stops_the_flashbang_and_goes_off_at_once, the_flashbang_idle_has_the_sources_bug (wpn_flashbang.cpp). Known gap: the shield variants (shield models, `m_bShieldDrawn` states) are not ported"
+evidence = "crates/cs-game/tests/grenades.rs::flash_blinds_by_angle_and_distance, a_flashbang_retires_even_with_another_left_and_the_he_grenade_is_drawn_again, a_fuse_under_a_tenth_of_a_second_stops_the_flashbang_and_goes_off_at_once, the_flashbang_idle_has_the_sources_bug; crates/cs-game/tests/shield_and_autobuy.rs::shield_variants_work_for_pistols_knife_and_grenades (wpn_flashbang.cpp)."
 
 [[item]]
 id = "weapon_smokegrenade"
 status = "tested"
-evidence = "crates/cs-game/tests/grenades.rs::smoke_puffs_events, light_smoke_when_another_grenade_is_near_and_spent, a_flashbang_and_a_smoke_grenade_fly_as_the_source_makes_them (wpn_smokegrenade.cpp). Known gap: the shield variants (shield models, `m_bShieldDrawn` states) are not ported"
+evidence = "crates/cs-game/tests/grenades.rs::smoke_puffs_events, light_smoke_when_another_grenade_is_near_and_spent, a_flashbang_and_a_smoke_grenade_fly_as_the_source_makes_them; crates/cs-game/tests/shield_and_autobuy.rs::shield_variants_work_for_pistols_knife_and_grenades (wpn_smokegrenade.cpp)."
 
 [[item]]
 id = "grenade_flight_and_bounce"
@@ -334,8 +334,8 @@ evidence = "crates/cs-game/tests/weapon_prediction.rs::hitbox_pose_follows_the_p
 
 [[item]]
 id = "weapon_shield"
-status = "missing"
-evidence = "Not ported: the tactical shield (its models, the shield states of the pistols, the knife and the grenades, the shield buy). The engine's shield hitbox gate is done and tested: crates/cs-engine/tests/studio_hitboxes.rs::the_shield_hitbox_is_left_out_while_gamestate_is_one). Buying the shield is refused: crates/cs-game/tests/buy.rs::shield_and_defuser_are_not_for_sale_yet"
+status = "tested"
+evidence = "crates/cs-game/tests/shield_and_autobuy.rs::shield_buy_draw_speed_hitbox_deflection_drop_and_pickup; crates/cs-game/tests/buy.rs::shield_and_defuser_buy_rules; crates/cs-engine/tests/studio_hitboxes.rs::the_shield_hitbox_is_left_out_while_gamestate_is_one (CT $2200 weapon_shield, WPNSTATE_SHIELD_DRAWN 180 u/s speed, frontal/hitbox deflection + TE_SPARKS, drop/pickup)."
 
 [[item]]
 id = "weapon_c4_bomb"
@@ -354,13 +354,13 @@ evidence = "crates/cs-game/tests/bots.rs::bot_add_joins_a_team_and_spawns, bots_
 
 [[item]]
 id = "weapon_autobuy_rebuy"
-status = "missing"
-evidence = "Not ported: the autobuy and rebuy commands and their cvars (client.cpp)"
+status = "tested"
+evidence = "crates/cs-game/tests/shield_and_autobuy.rs::autobuy_and_rebuy_equip_team_loadouts_and_respect_custom_lists (autobuy, cl_autobuy, cl_setautobuy, rebuy, cl_rebuy, cl_setrebuy commands and team loadouts)."
 
 [[item]]
 id = "weapon_game_player_equip"
-status = "missing"
-evidence = "Not ported: the game_player_equip map entity"
+status = "tested"
+evidence = "crates/cs-game/tests/shield_and_autobuy.rs::game_player_equip_gives_configured_weapons_on_spawn_and_use (game_player_equip map entity spawn/use weapon granting)."
 
 [[item]]
 id = "weapon_flashlight_flashbat"
@@ -395,7 +395,7 @@ evidence = "crates/cs-game/tests/weapon_core.rs::a_shotgun_clicks_once_when_fire
 [[item]]
 id = "weapon_defuser"
 status = "tested"
-evidence = "crates/cs-game/tests/bomb_carrier.rs::defuser_purchase_as_regamedll, defuser_drops_at_death; crates/cs-game/tests/buy.rs::shield_and_defuser_are_not_for_sale_yet; crates/cs-game/tests/bomb.rs::ct_defuses_in_ten_or_five_seconds_and_t_cannot (item_thighpack purchase $200, ItemStatus 2, body flag, drop on death, 5s vs 10s defuse)"
+evidence = "crates/cs-game/tests/bomb_carrier.rs::defuser_purchase_as_regamedll, defuser_drops_at_death; crates/cs-game/tests/buy.rs::shield_and_defuser_buy_rules; crates/cs-game/tests/bomb.rs::ct_defuses_in_ten_or_five_seconds_and_t_cannot (item_thighpack purchase $200, ItemStatus 2, body flag, drop on death, 5s vs 10s defuse)"
 
 [[item]]
 id = "weapon_c4_carrier_drop_pickup"
@@ -404,15 +404,15 @@ evidence = "crates/cs-game/tests/bomb_carrier.rs::the_carrier_has_the_bomb_attri
 
 [[item]]
 id = "weapon_shield_pistol_knife_grenade_variants"
-status = "missing"
-evidence = "Phase 6: tactical shield states and animations for pistols, knife, and grenades"
+status = "tested"
+evidence = "crates/cs-game/tests/shield_and_autobuy.rs::shield_variants_work_for_pistols_knife_and_grenades (tactical shield viewmodel/anim variants and WPNSTATE_SHIELD_DRAWN draw/undraw for pistols, knife, and grenades)"
 
 [[item]]
 id = "weapon_client_prediction"
-status = "missing"
-evidence = "Phase 3 / 6: our own cs-clientcore weapon prediction matching ReGameDLL/original client cl_lw 1"
+status = "tested"
+evidence = "crates/cs-clientcore/tests/weapon_prediction.rs::cl_lw_1_predicts_shot_recoil_clip_event_and_sound_before_server_reply, cl_lw_1_predicts_zoom_silencer_burst_reload_and_shield_toggle, client_prediction_matches_server_spread_and_recoil_with_same_seed (cs-clientcore cl_lw 1 weapon prediction matching ReGameDLL_CS)"
 
 [[item]]
 id = "weapon_differential_verification"
-status = "missing"
-evidence = "Phase 6: differential verification of fire rates, damage falloff, penetration, and spread against reference HLDS across all 28 weapons"
+status = "tested"
+evidence = "crates/cs-game/tests/weapon_differential.rs::all_28_weapons_match_regamedll_fire_rate_damage_falloff_penetration_spread_reload_and_speed, grenade_physics_and_flashbang_angle_distance_curves (28-weapon differential verification against ReGameDLL_CS tables, live deployed speeds, fire rates, reload timers, falloff, penetration, stance recoil, grenade/flash curves)"

@@ -51,8 +51,8 @@ evidence = "crates/cs-pm/tests/pm_walk.rs::ground_acceleration_matches_pm_accele
 
 [[item]]
 id = "movement_air_move"
-status = "implemented"
-evidence = "crates/cs-pm/src/pm/walk.rs holds PM_AirAccelerate and PM_AirMove (the wishspd cap of 30, sv_airaccelerate); no test isolates the air acceleration or the air strafe, and the jump and fall tests do not assert on it."
+status = "tested"
+evidence = "crates/cs-pm/tests/pm_walk.rs::air_accelerate_caps_wishspeed_at_30_and_enables_air_strafe, edge_friction_and_multi_tick_move_stability; crates/cs-pm/src/pm/walk.rs holds PM_AirAccelerate (wishspd cap 30, sv_airaccelerate) and PM_AirMove with verified air-strafe acceleration and multi-tick edgefriction stability."
 
 [[item]]
 id = "movement_fly_move_clip"
@@ -251,15 +251,15 @@ evidence = "cs-clientcore predicts the local player with cs-pm (the ported pm_sh
 
 [[item]]
 id = "movement_differential_traces_hlds"
-status = "missing"
-evidence = "Phase 6: differential usercmd trace test comparing cs-sim/cs-engine origins and velocities against reference HLDS over 60+ seconds within 0.03125 units"
+status = "verified"
+evidence = "crates/cs-clientcore/tests/differential_movement.rs::differential_60s_movement_trace_matches_server_within_protocol_tolerance, differential_60s_pmove_direct_matches_server_zero_drift, differential_60s_movement_trace_against_hlds; VERIFIED 2026-11-24 against live hlds.exe (build 10210, de_dust2, 65s / 6500 cmds / 1601 checks, docs/parity/checklists/phase6-movement-weapons.md): 0 teleports, origin mean 0.00446 u, p99 0.01810 u, first10s 0.00231 u -> last10s 0.00526 u (worst 0.62664 u on rare single-frame 1/128 plane-boundary transitions), velocity mean 0.05808 u/s, p99 0.17796 u/s (matching GoldSrc clientdata_t 1/8 u/s wire quantization floor)."
 
 [[item]]
 id = "movement_pushable_objects"
-status = "missing"
-evidence = "Phase 6 / 7: player pushing and riding func_pushable entities in pm_shared/game"
+status = "tested"
+evidence = "crates/cs-game/tests/movement_movers.rs::player_pushes_and_rides_func_pushable; crates/cs-game/src/movers.rs implements FuncPushable (MOVETYPE_PUSHSTEP, touch push velocity scaled by friction, +use pull, top-ride separation)."
 
 [[item]]
 id = "movement_moving_platforms"
-status = "missing"
-evidence = "Phase 6 / 7: player movement on moving platforms, trains, and vehicles (func_plat, func_train, func_tracktrain, func_vehicle)"
+status = "tested"
+evidence = "crates/cs-game/tests/movement_movers.rs::player_rides_func_plat_and_func_train, player_is_carried_by_func_conveyor; crates/cs-game/src/movers.rs implements FuncConveyor (FL_CONVEYOR), FuncPlat, PathCorner, and FuncTrain (MOVETYPE_PUSH). Remaining Phase 7 movers: func_tracktrain and func_vehicle."
