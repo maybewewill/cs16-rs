@@ -91,12 +91,12 @@ evidence = "crates/cs-game/tests/observer.rs::dead_player_becomes_an_observer_af
 [[item]]
 id = "game_buy_zones"
 status = "tested"
-evidence = "crates/cs-game/tests/buy.rs::buy_zone_icon_on_spawn, a_zone_of_no_team_or_a_bad_team_is_for_everyone, a_map_without_buy_zones_buys_around_the_spawn_points, cannot_buy_outside_the_zone_or_without_money, buy_time_expires, leaving_the_zone_closes_the_buy_menu, the_buy_menus_follow_the_clients_preference, buy_zones_of_a_real_map, shield_and_defuser_are_not_for_sale_yet; crates/cs-game/tests/zones.rs::zones_raise_their_signals_and_icons, map_parameters_refuse_purchases_of_the_team_kept_out, the_vip_cannot_buy; crates/cs-game/tests/vip_escape.rs::the_vip_cannot_buy. Phase 2E adds func_bomb_target (#DCT_BuyItem + defuser), info_map_parameters buying restriction, VIP purchase block, and as_ restricted buy menus. Deviations: the tutor is not ported."
+evidence = "crates/cs-game/tests/buy.rs::buy_zone_icon_on_spawn, a_zone_of_no_team_or_a_bad_team_is_for_everyone, a_map_without_buy_zones_buys_around_the_spawn_points, cannot_buy_outside_the_zone_or_without_money, buy_time_expires, leaving_the_zone_closes_the_buy_menu, the_buy_menus_follow_the_clients_preference, buy_zones_of_a_real_map, shield_and_defuser_buy_rules; crates/cs-game/tests/zones.rs::zones_raise_their_signals_and_icons, map_parameters_refuse_purchases_of_the_team_kept_out, the_vip_cannot_buy; crates/cs-game/tests/vip_escape.rs::the_vip_cannot_buy. Phase 2E adds func_bomb_target (#DCT_BuyItem + defuser), info_map_parameters buying restriction, VIP purchase block, and as_ restricted buy menus. Deviations: the tutor is not ported."
 
 [[item]]
 id = "game_buy_equipment"
 status = "tested"
-evidence = "crates/cs-game/tests/buy.rs::buy_armor_as_regamedll, buy_night_vision_goggles, shield_and_defuser_are_not_for_sale_yet; crates/cs-game/tests/inventory.rs::buy_drop_pickup_as_regamedll; crates/cs-game/tests/bomb_carrier.rs::defuser_purchase_as_regamedll. The vest (650), the vest with helmet (1000, or the 350 or 650 that make up the rest), night vision goggles (1250), defusal kit (200 on bomb maps, ItemStatus 2) and #Not_Enough_Money with BlinkAccount (twice). Deviations: only the shield is refused (#Cannot_Buy_This, nothing taken); cl_autobuy and cl_rebuy are not ported; #Hint_use_nightvision goes through the hint queue (crates/cs-game/tests/hud_extras.rs)."
+evidence = "crates/cs-game/tests/buy.rs::buy_armor_as_regamedll, buy_night_vision_goggles, shield_and_defuser_buy_rules; crates/cs-game/tests/inventory.rs::buy_drop_pickup_as_regamedll; crates/cs-game/tests/bomb_carrier.rs::defuser_purchase_as_regamedll; crates/cs-game/tests/shield_and_autobuy.rs::autobuy_and_rebuy_equip_team_loadouts_and_respect_custom_lists. The vest (650), the vest with helmet (1000, or the 350 or 650 that make up the rest), night vision goggles (1250), tactical shield (2200), defusal kit (200 on bomb maps, ItemStatus 2), autobuy/rebuy, and #Not_Enough_Money with BlinkAccount (twice). Deviations: #Hint_use_nightvision goes through the hint queue (crates/cs-game/tests/hud_extras.rs)."
 
 [[item]]
 id = "game_radio"
@@ -140,8 +140,8 @@ evidence = "crates/cs-game/tests/hud_extras.rs::the_first_buy_hint_of_a_round_is
 
 [[item]]
 id = "game_shield"
-status = "missing"
-evidence = "Not ported: the tactical shield (its models, the shield states, the shield buy); buying it is refused: crates/cs-game/tests/buy.rs::shield_and_defuser_are_not_for_sale_yet. The engine's shield hitbox gate is done (docs/parity/engine.toml studio_hitbox_traces)"
+status = "tested"
+evidence = "crates/cs-game/tests/shield_and_autobuy.rs::shield_buy_draw_speed_hitbox_deflection_drop_and_pickup, shield_variants_work_for_pistols_knife_and_grenades; crates/cs-game/tests/buy.rs::shield_and_defuser_buy_rules (CT $2200 weapon_shield, WPNSTATE_SHIELD_DRAWN 180 u/s speed, frontal deflection, drop/pickup). The engine's shield hitbox gate is also tested (docs/parity/engine.toml studio_hitbox_traces)"
 
 # Phase 2E Wave 1 entity interaction and map/game entity classes (extracted from original mp.dll exports and all 25 stock CS 1.6 BSP maps, excluding weapon_* tracked in weapons.toml and HL1 single-player-only relics).
 
@@ -318,7 +318,7 @@ evidence = "crates/cs-game/tests/hostages.rs::use_toggles_follow_with_the_one_se
 [[item]]
 id = "item_thighpack"
 status = "tested"
-evidence = "crates/cs-game/tests/bomb_carrier.rs::defuser_purchase_as_regamedll, defuser_drops_at_death; crates/cs-game/tests/buy.rs::shield_and_defuser_are_not_for_sale_yet (CT defuser kit purchase $200 on bomb maps, ItemStatus 2, body flag, drop on death and CT-only walkover pickup)"
+evidence = "crates/cs-game/tests/bomb_carrier.rs::defuser_purchase_as_regamedll, defuser_drops_at_death; crates/cs-game/tests/buy.rs::shield_and_defuser_buy_rules (CT defuser kit purchase $200 on bomb maps, ItemStatus 2, body flag, drop on death and CT-only walkover pickup)"
 
 [[item]]
 id = "env_bombglow"

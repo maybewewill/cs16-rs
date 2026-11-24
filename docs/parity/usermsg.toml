@@ -306,7 +306,7 @@ evidence = "crates/cs-proto48/src/usermsg.rs::tests::cs_usermsgs_roundtrip_clean
 [[item]]
 id = "ItemStatus"
 status = "verified"
-evidence = "crates/cs-game/tests/bomb_carrier.rs::defuser_purchase_as_regamedll, defuser_drops_at_death; crates/cs-game/tests/buy.rs::shield_and_defuser_are_not_for_sale_yet (`ItemStatus(2)` defuser bit); VERIFIED 2026-11-23 for the value 0 only, method 2 (live HLDS build 10210 vs cs-server --proto48: `ItemStatus(0)` emitted in InitHUD and spawn on de_dust2, cs_office, and as_oilrig; docs/parity/checklists/phase2e-objectives.md E1-E3). The values 1 (night vision), 2 (defuser) and 3 are tested against the source only (crates/cs-game/tests/bomb_carrier.rs::defuser_purchase_as_regamedll, defuser_drops_at_death), not compared with the original"
+evidence = "crates/cs-game/tests/bomb_carrier.rs::defuser_purchase_as_regamedll, defuser_drops_at_death; crates/cs-game/tests/buy.rs::shield_and_defuser_buy_rules (`ItemStatus(2)` defuser bit); VERIFIED 2026-11-23 for the value 0 only, method 2 (live HLDS build 10210 vs cs-server --proto48: `ItemStatus(0)` emitted in InitHUD and spawn on de_dust2, cs_office, and as_oilrig; docs/parity/checklists/phase2e-objectives.md E1-E3). The values 1 (night vision), 2 (defuser) and 3 are tested against the source only (crates/cs-game/tests/bomb_carrier.rs::defuser_purchase_as_regamedll, defuser_drops_at_death), not compared with the original"
 
 [[item]]
 id = "Location"
