@@ -48,12 +48,25 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
         "Viewport aspect: widescreen, 4:3_bars, 4:3_stretch",
     );
     reg.register("fov_default", "90", arch, "Horizontal field of view (degrees)");
+    reg.register("default_fov", "90", arch, "Default horizontal field of view (degrees)");
+    reg.register("viewmodel_fov", "90", arch, "First-person viewmodel horizontal field of view");
     reg.register("net_graph", "0", arch, "Performance overlay (0=off, 1=stats, 3=compact)");
     reg.register("net_graphpos", "1", arch, "net_graph screen alignment (1=right, 2=center, 3=left)");
     reg.register("r_drawviewmodel", "1", arch, "Draw first-person weapon model (0 or 1)");
     reg.register("r_vis", "1", CVarFlags::NONE, "Enable BSP PVS visibility culling (0 or 1)");
+    reg.register("r_lightmap", "0", CVarFlags::CHEAT, "Render lightmaps only (0 or 1)");
     reg.register("r_lightmap_only", "0", CVarFlags::CHEAT, "Render lightmaps only (0 or 1)");
     reg.register("r_fullbright", "0", CVarFlags::CHEAT, "Disable lightmaps (0 or 1)");
+    reg.register("r_decals", "300", arch, "Maximum simultaneous world decals");
+    reg.register("gl_ansio", "8", arch, "Anisotropic texture filtering level (1..16)");
+    reg.register("gl_msaa", "1", arch, "Multisample anti-aliasing samples (1 or 4)");
+    reg.register("r_software_mode", "0", arch, "Emulate classic GoldSrc software renderer look (0 or 1)");
+    reg.register("cl_bob", "0.01", arch, "View bobbing amplitude");
+    reg.register("cl_bobcycle", "0.8", arch, "View bobbing cycle duration (seconds)");
+    reg.register("cl_bobup", "0.5", arch, "View bobbing upward bias");
+    reg.register("cl_rollangle", "0.0", arch, "Maximum view roll angle when strafing (degrees)");
+    reg.register("cl_rollspeed", "200", arch, "Sideways speed for full view roll");
+    reg.register("cl_viewmodel_lag", "1", arch, "Viewmodel inertia lag (0 or 1)");
     reg.register("r_noclip_speed", "450", CVarFlags::NONE, "Free-camera flight speed (units/sec)");
 
     // Audio
@@ -174,6 +187,7 @@ pub fn register_default_binds(reg: &mut CVarRegistry) {
         ("x", "radio2"),
         ("c", "radio3"),
         ("t", "impulse 201"),
+        ("f", "impulse 100"),
         (",", "buyammo1"),
         (".", "buyammo2"),
         ("1", "slot1"),

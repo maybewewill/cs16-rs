@@ -460,6 +460,10 @@ pub struct Prediction {
     pub moving: bool,
     pub usehull: i32,
     pub waterlevel: i32,
+    pub watertype: i32,
+    pub flags: i32,
+    pub effects: i32,
+    pub angles: Vec3,
     pub viewmodel: i32,
     /// `cl.local.prediction_error`: the server's origin minus the predicted one at the last
     /// check (0 after a teleport).
@@ -486,6 +490,10 @@ impl Default for Prediction {
             moving: false,
             usehull: 0,
             waterlevel: 0,
+            watertype: -1,
+            flags: 0,
+            effects: 0,
+            angles: Vec3::ZERO,
             viewmodel: 0,
             prediction_error: Vec3::ZERO,
             teleported: false,
@@ -969,6 +977,10 @@ impl Predictor {
         self.out.viewheight = s.view_ofs;
         self.out.usehull = s.usehull;
         self.out.waterlevel = s.waterlevel;
+        self.out.watertype = s.watertype;
+        self.out.flags = s.flags;
+        self.out.effects = s.effects;
+        self.out.angles = s.angles;
         self.out.onground = if s.flags & FL_ONGROUND != 0 { s.onground } else { -1 };
         self.out.moving = false;
         self.out.teleported = false;
@@ -1013,6 +1025,10 @@ impl Predictor {
             };
         }
         self.out.waterlevel = to.waterlevel;
+        self.out.watertype = to.watertype;
+        self.out.flags = to.flags;
+        self.out.effects = to.effects;
+        self.out.angles = to.angles;
         self.out.usehull = to.usehull;
         self.out.viewmodel = to.weapon.viewmodel;
         self.out.weapon = to.weapon.clone();

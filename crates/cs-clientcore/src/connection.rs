@@ -1183,6 +1183,16 @@ impl<T: PacketTransport> Connection<T> {
             }
             SvcMessage::Print(text) => self.print(text.trim_end_matches('\n').to_string()),
             SvcMessage::NewMoveVars(vars) => self.movevars = Some(sanitize_movevars(*vars)),
+            SvcMessage::DecalName { index, name } => {
+                self.precache.decals.insert(
+                    u16::from(index),
+                    crate::precache::PrecacheEntry {
+                        name,
+                        download_size: 0,
+                        flags: 0,
+                    },
+                );
+            }
             SvcMessage::SendCvarValue(name) => {
                 let mut w = MsgWriter::new();
                 w.write_u8(clc::CVARVALUE);

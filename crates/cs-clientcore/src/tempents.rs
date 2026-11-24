@@ -258,6 +258,10 @@ pub struct TempEnt {
     pub bounces: u32,
     /// Client time of the last hit sound.
     pub last_hit_sound: f64,
+    /// Attached entity index (`FTENT_PLYRATTACHMENT`).
+    pub client_entity: u16,
+    /// Vertical offset for `FTENT_PLYRATTACHMENT`.
+    pub attachment_offset_z: f32,
 }
 
 impl TempEnt {
@@ -295,6 +299,8 @@ impl TempEnt {
             round_scoped: false,
             bounces: 0,
             last_hit_sound: f64::NEG_INFINITY,
+            client_entity: 0,
+            attachment_offset_z: 0.0,
         }
     }
 
@@ -303,12 +309,29 @@ impl TempEnt {
     }
 }
 
+/// A parsed `TE_TEXTMESSAGE` ready for HUD / channel rendering.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TeTextMessage {
+    pub channel: u8,
+    pub x: i16,
+    pub y: i16,
+    pub effect: u8,
+    pub color1: [u8; 4],
+    pub color2: [u8; 4],
+    pub fadein: u16,
+    pub fadeout: u16,
+    pub holdtime: u16,
+    pub fxtime: Option<u16>,
+    pub text: String,
+    pub received_at: f64,
+}
+
 /// Kinds of particle burst the shell draws.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParticleEffect {
     /// `TE_GUNSHOT`: `R_RunParticleEffect( pos, vec3_origin, 0, 20 )`.
     Gunshot { position: Vec3, count: u16 },
-    /// `R_FlickerParticles`, from an explosion.
+    /// `R_FlickerParticles`, from an explosion or `FTENT_FLICKER`.
     Flicker { position: Vec3 },
     /// `R_ParticleExplosion2`.
     Explosion2 {
@@ -323,6 +346,13 @@ pub enum ParticleEffect {
         color: u8,
         count: u8,
     },
+    /// `TE_BLOOD`.
+    Blood {
+        origin: Vec3,
+        direction: Vec3,
+        color: u8,
+        speed: u8,
+    },
     /// `R_StreakSplash`.
     StreakSplash {
         start: Vec3,
@@ -334,6 +364,73 @@ pub enum ParticleEffect {
     },
     /// `R_BulletImpactParticles`, from `TE_GUNSHOTDECAL`.
     BulletImpact { position: Vec3 },
+    /// `TE_SPARKS` / `FTENT_SPARKSHOWER` micro-sparks.
+    Sparks { position: Vec3 },
+    /// `TE_TAREXPLOSION`.
+    TarExplosion { position: Vec3 },
+    /// `TE_LAVASPLASH`.
+    LavaSplash { position: Vec3 },
+    /// `TE_TELEPORT`.
+    Teleport { position: Vec3 },
+    /// `TE_IMPLOSION`.
+    Implosion {
+        position: Vec3,
+        radius: u8,
+        count: u8,
+        life: f32,
+    },
+    /// `TE_LARGEFUNNEL`.
+    LargeFunnel { position: Vec3, flags: u16 },
+    /// `TE_ARMOR_RICOCHET`.
+    ArmorRicochet { position: Vec3 },
+    /// `TE_PARTICLEBURST`.
+    ParticleBurst {
+        position: Vec3,
+        radius: u16,
+        color: u8,
+        duration: f32,
+    },
+    /// `TE_USERTRACER`.
+    UserTracer {
+        origin: Vec3,
+        velocity: Vec3,
+        life: f32,
+        color: u8,
+        length: u8,
+    },
+    /// `TE_MULTIGUNSHOT`.
+    MultiGunshot {
+        origin: Vec3,
+        direction: Vec3,
+        x_noise: f32,
+        y_noise: f32,
+        count: u8,
+    },
+    /// `TE_LINE`.
+    Line {
+        start: Vec3,
+        end: Vec3,
+        life: f32,
+        color: [u8; 3],
+    },
+    /// `TE_BOX`.
+    Box {
+        min: Vec3,
+        max: Vec3,
+        life: f32,
+        color: [u8; 3],
+    },
+    /// `TE_SHOWLINE`.
+    ShowLine { start: Vec3, end: Vec3 },
+    /// `svc_particle`.
+    SvcParticle {
+        origin: Vec3,
+        direction: Vec3,
+        count: u32,
+        color: u8,
+    },
+    /// `FTENT_SMOKETRAIL` smoke puff particle.
+    SmokeTrail { position: Vec3 },
 }
 
 /// A dynamic light (`dlight_t`): a point light that decays.
@@ -372,6 +469,15 @@ pub enum RenderEffect {
     Light(DynamicLight),
     /// A beam, a killed beam, a tracer or a fizz: the effect as decoded, with the time it came.
     Beam { time: f64, effect: TempEffect },
+    /// `TE_PLAYERDECAL`: spray decal on wall/entity from a player (`tempdecal.wad`).
+    PlayerDecal {
+        player: u8,
+        position: Vec3,
+        entity: u16,
+        decal: u8,
+    },
+    /// `TE_TEXTMESSAGE`: on-screen text message.
+    TextMessage(TeTextMessage),
 }
 
 /// The time of one update of the pool.
@@ -569,6 +675,68 @@ impl TempEnts {
     /// Removes what a new round clears (`events/decal_reset.sc`).
     pub fn clear_round(&mut self) {
         self.active.retain(|t| !t.round_scoped);
+    }
+
+    /// Removes active player attachments for `entity` (`TE_KILLPLAYERATTACHMENTS`).
+    pub fn kill_player_attachments(&mut self, entity: u8) {
+        let target = u16::from(entity);
+        self.active
+            .retain(|t| !(t.has(ftent::PLYRATTACHMENT) && t.client_entity == target));
+    }
+
+    /// Spawns particles from `svc_particle`.
+    pub fn spawn_particle_msg(&mut self, msg: &cs_proto48::messages::ParticleMsg) {
+        self.push_effect(RenderEffect::Particles(ParticleEffect::SvcParticle {
+            origin: msg.origin,
+            direction: msg.direction(),
+            count: msg.effective_count(),
+            color: msg.color,
+        }));
+    }
+
+    /// Spawns a shell casing from a `Brass` usermsg payload.
+    pub fn spawn_brass_usermsg(
+        &mut self,
+        payload: &[u8],
+        now: f64,
+        precache: &PrecacheTables,
+        world: &dyn FxWorld,
+        rng: &mut FxRandom,
+    ) {
+        // ReGameDLL writes `[te_model(106)?, coord x3 origin, coord x3 vel, coord/angle? yaw, short model, byte soundtype, ...]`
+        // Accept both 17-byte `TE_MODEL` layout or 18-byte prefixed `[106, ...]` layout safely.
+        let slice = if payload.len() >= 18 && payload[0] == cs_proto48::tempent::te::MODEL {
+            &payload[1..]
+        } else {
+            payload
+        };
+        if let Ok(TempEffect::Model {
+            position,
+            velocity,
+            angle,
+            model,
+            sound_type,
+            life,
+        }) = TempEffect::parse(cs_proto48::tempent::te::MODEL, slice)
+        {
+            let yaw = f32::from(angle) * (360.0 / 256.0);
+            let mref = if precache.models.contains_key(&model) {
+                ModelRef::Precached(model)
+            } else {
+                ModelRef::Client("models/rshell.mdl")
+            };
+            self.spawn_temp_model(
+                position,
+                velocity,
+                Vec3::new(0.0, yaw, 0.0),
+                f32::from(life.max(1)) * 0.1,
+                mref,
+                sound_type,
+                world,
+                rng,
+                now,
+            );
+        }
     }
 
     /// The clouds of a smoke grenade (`EV_CreateSmoke`, `events/event_createsmoke.cpp`,
@@ -1273,10 +1441,518 @@ impl TempEnts {
             | TempEffect::BeamFollow { .. }
             | TempEffect::KillBeam { .. }
             | TempEffect::Tracer { .. }
-            | TempEffect::Fizz { .. } => self.push_effect(RenderEffect::Beam {
+            | TempEffect::Fizz { .. }
+            | TempEffect::Lightning { .. }
+            | TempEffect::BeamSprite { .. }
+            | TempEffect::BeamTorus { .. }
+            | TempEffect::BeamDisk { .. }
+            | TempEffect::BeamCylinder { .. }
+            | TempEffect::BeamRing { .. } => self.push_effect(RenderEffect::Beam {
                 time: now,
                 effect: effect.clone(),
             }),
+            TempEffect::TarExplosion { position } => {
+                self.push_effect(RenderEffect::Particles(ParticleEffect::TarExplosion {
+                    position: *position,
+                }));
+                s.sounds.push(SoundCommand::Start(SoundStart::by_name(
+                    EXPLODE_SOUNDS[0],
+                    0,
+                    chan::AUTO,
+                    *position,
+                    1.0,
+                    1.0,
+                    PITCH_NORM,
+                )));
+            }
+            TempEffect::LavaSplash { position } => {
+                self.push_effect(RenderEffect::Particles(ParticleEffect::LavaSplash {
+                    position: *position,
+                }));
+            }
+            TempEffect::Teleport { position } => {
+                self.push_effect(RenderEffect::Particles(ParticleEffect::Teleport {
+                    position: *position,
+                }));
+            }
+            TempEffect::Implosion {
+                position,
+                radius,
+                count,
+                life,
+            } => {
+                self.push_effect(RenderEffect::Particles(ParticleEffect::Implosion {
+                    position: *position,
+                    radius: *radius,
+                    count: *count,
+                    life: f32::from(*life) * 0.1,
+                }));
+            }
+            TempEffect::SpriteTrail {
+                start,
+                end,
+                sprite,
+                count,
+                life,
+                scale,
+                noise,
+                speed,
+            } => {
+                if !s.precache.models.contains_key(sprite) {
+                    self.missing_models = self.missing_models.saturating_add(1);
+                } else {
+                    let dir = (*end - *start).normalize_or_zero();
+                    let spd = f32::from(*speed) * 10.0;
+                    let noise_f = f32::from(*noise) * 10.0;
+                    let life_s = f32::from((*life).max(1)) * 0.1;
+                    for _ in 0..(*count).min(64) {
+                        let Some(t) = self.alloc(*start, ModelRef::Precached(*sprite), s.world, now) else {
+                            break;
+                        };
+                        t.velocity = dir * spd
+                            + Vec3::new(
+                                s.rng.float(-noise_f, noise_f),
+                                s.rng.float(-noise_f, noise_f),
+                                s.rng.float(-noise_f, noise_f),
+                            );
+                        t.scale = (f32::from(*scale) * 0.1).max(0.1);
+                        t.render_mode = RenderMode::TransAdd;
+                        t.flags |= ftent::FADEOUT | ftent::SPRANIMATE | ftent::SPRANIMATELOOP;
+                        t.framerate = 10.0;
+                        t.die = now + f64::from(life_s) + f64::from(s.rng.float(0.0, 0.3));
+                    }
+                }
+            }
+            TempEffect::TextMessage {
+                channel,
+                x,
+                y,
+                effect: fx,
+                color1,
+                color2,
+                fadein,
+                fadeout,
+                holdtime,
+                fxtime,
+                text,
+            } => {
+                self.push_effect(RenderEffect::TextMessage(TeTextMessage {
+                    channel: *channel,
+                    x: *x,
+                    y: *y,
+                    effect: *fx,
+                    color1: *color1,
+                    color2: *color2,
+                    fadein: *fadein,
+                    fadeout: *fadeout,
+                    holdtime: *holdtime,
+                    fxtime: *fxtime,
+                    text: text.clone(),
+                    received_at: now,
+                }));
+            }
+            TempEffect::Line {
+                start,
+                end,
+                life,
+                color,
+            } => self.push_effect(RenderEffect::Particles(ParticleEffect::Line {
+                start: *start,
+                end: *end,
+                life: f32::from(*life) * 0.1,
+                color: *color,
+            })),
+            TempEffect::Box {
+                min,
+                max,
+                life,
+                color,
+            } => self.push_effect(RenderEffect::Particles(ParticleEffect::Box {
+                min: *min,
+                max: *max,
+                life: f32::from(*life) * 0.1,
+                color: *color,
+            })),
+            TempEffect::LargeFunnel {
+                position,
+                sprite,
+                flags,
+            } => {
+                if s.precache.models.contains_key(sprite) {
+                    self.temp_sprite(
+                        &mut s,
+                        *position,
+                        Vec3::ZERO,
+                        1.0,
+                        *sprite,
+                        RenderMode::TransAdd,
+                        renderfx::NONE,
+                        1.0,
+                        1.0,
+                        ftent::SPRANIMATE | ftent::FADEOUT,
+                    );
+                }
+                self.push_effect(RenderEffect::Particles(ParticleEffect::LargeFunnel {
+                    position: *position,
+                    flags: *flags,
+                }));
+            }
+            TempEffect::ShowLine { start, end } => {
+                self.push_effect(RenderEffect::Particles(ParticleEffect::ShowLine {
+                    start: *start,
+                    end: *end,
+                }));
+            }
+            TempEffect::Blood {
+                origin,
+                direction,
+                color,
+                speed,
+            } => {
+                self.push_effect(RenderEffect::Particles(ParticleEffect::Blood {
+                    origin: *origin,
+                    direction: *direction,
+                    color: *color,
+                    speed: *speed,
+                }));
+            }
+            TempEffect::Model {
+                position,
+                velocity,
+                angle,
+                model,
+                sound_type,
+                life,
+            } => {
+                if !s.precache.models.contains_key(model) {
+                    self.missing_models = self.missing_models.saturating_add(1);
+                } else {
+                    let yaw = f32::from(*angle) * (360.0 / 256.0);
+                    self.spawn_temp_model(
+                        *position,
+                        *velocity,
+                        Vec3::new(0.0, yaw, 0.0),
+                        f32::from((*life).max(1)) * 0.1,
+                        ModelRef::Precached(*model),
+                        *sound_type,
+                        s.world,
+                        s.rng,
+                        now,
+                    );
+                }
+            }
+            TempEffect::ExplodeModel {
+                position,
+                velocity,
+                model,
+                count,
+                life,
+            } => {
+                if !s.precache.models.contains_key(model) {
+                    self.missing_models = self.missing_models.saturating_add(1);
+                } else {
+                    let n = (*count).min(64);
+                    let life_s = f32::from((*life).max(1)) * 0.1;
+                    for _ in 0..n {
+                        let vel = Vec3::new(
+                            s.rng.float(-*velocity, *velocity),
+                            s.rng.float(-*velocity, *velocity),
+                            s.rng.float(0.0, (*velocity).abs()),
+                        );
+                        self.spawn_temp_model(
+                            *position,
+                            vel,
+                            Vec3::new(0.0, s.rng.float(0.0, 360.0), 0.0),
+                            life_s,
+                            ModelRef::Precached(*model),
+                            te_bounce::NULL,
+                            s.world,
+                            s.rng,
+                            now,
+                        );
+                    }
+                }
+            }
+            TempEffect::SpriteSpray {
+                position,
+                direction,
+                sprite,
+                count,
+                speed,
+                noise,
+            } => {
+                if !s.precache.models.contains_key(sprite) {
+                    self.missing_models = self.missing_models.saturating_add(1);
+                } else {
+                    let dir = direction.normalize_or_zero();
+                    let spd = f32::from(*speed);
+                    let noise_f = f32::from(*noise);
+                    for _ in 0..(*count).min(64) {
+                        let vel = dir * spd
+                            + Vec3::new(
+                                s.rng.float(-noise_f, noise_f),
+                                s.rng.float(-noise_f, noise_f),
+                                s.rng.float(-noise_f, noise_f),
+                            );
+                        if let Some(t) = self.alloc(*position, ModelRef::Precached(*sprite), s.world, now) {
+                            t.velocity = vel;
+                            t.render_mode = RenderMode::TransAdd;
+                            t.flags |= ftent::FADEOUT | ftent::SPRANIMATE;
+                            t.framerate = 10.0;
+                            t.die = now + 0.6;
+                        }
+                    }
+                }
+            }
+            TempEffect::ArmorRicochet { position, scale } => {
+                if let Some(t) = self.alloc(*position, ModelRef::Client("sprites/richo1.spr"), s.world, now) {
+                    t.scale = (f32::from(*scale) * 0.1).max(0.2);
+                    t.render_mode = RenderMode::TransAdd;
+                    t.flags |= ftent::SPRANIMATE | ftent::FADEOUT;
+                    t.framerate = 20.0;
+                    t.die = now + 0.2;
+                }
+                ricochet_sound(&mut s, *position);
+                self.push_effect(RenderEffect::Particles(ParticleEffect::ArmorRicochet {
+                    position: *position,
+                }));
+            }
+            TempEffect::PlayerDecal {
+                player,
+                position,
+                entity,
+                decal,
+            } => {
+                self.push_effect(RenderEffect::PlayerDecal {
+                    player: *player,
+                    position: *position,
+                    entity: *entity,
+                    decal: *decal,
+                });
+            }
+            TempEffect::Bubbles {
+                mins,
+                maxs,
+                height,
+                model,
+                count,
+                speed,
+            } => {
+                if !s.precache.models.contains_key(model) {
+                    self.missing_models = self.missing_models.saturating_add(1);
+                } else {
+                    for _ in 0..(*count).min(64) {
+                        let pos = Vec3::new(
+                            s.rng.float(mins.x, maxs.x),
+                            s.rng.float(mins.y, maxs.y),
+                            s.rng.float(mins.z, maxs.z),
+                        );
+                        if let Some(t) = self.alloc(pos, ModelRef::Precached(*model), s.world, now) {
+                            t.velocity = Vec3::new(0.0, 0.0, speed.max(20.0));
+                            t.render_mode = RenderMode::TransAdd;
+                            t.flags |= ftent::SINEWAVE | ftent::FADEOUT;
+                            t.die = now + f64::from((*height / speed.max(20.0)).clamp(0.2, 4.0));
+                        }
+                    }
+                }
+            }
+            TempEffect::BubbleTrail {
+                mins,
+                maxs,
+                height,
+                model,
+                count,
+                speed,
+            } => {
+                if !s.precache.models.contains_key(model) {
+                    self.missing_models = self.missing_models.saturating_add(1);
+                } else {
+                    let n = (*count).max(1).min(64);
+                    for i in 0..n {
+                        let frac = i as f32 / n as f32;
+                        let pos = mins.lerp(*maxs, frac);
+                        if let Some(t) = self.alloc(pos, ModelRef::Precached(*model), s.world, now) {
+                            t.velocity = Vec3::new(0.0, 0.0, speed.max(20.0));
+                            t.render_mode = RenderMode::TransAdd;
+                            t.flags |= ftent::SINEWAVE | ftent::FADEOUT;
+                            t.die = now + f64::from((*height / speed.max(20.0)).clamp(0.2, 4.0));
+                        }
+                    }
+                }
+            }
+            TempEffect::Projectile {
+                position,
+                velocity,
+                model,
+                life,
+                owner: _,
+            } => {
+                if !s.precache.models.contains_key(model) {
+                    self.missing_models = self.missing_models.saturating_add(1);
+                } else if let Some(t) = self.alloc(*position, ModelRef::Precached(*model), s.world, now) {
+                    t.velocity = *velocity;
+                    t.flags |= ftent::COLLIDEWORLD | ftent::COLLIDEKILL;
+                    t.die = now + f64::from((*life).max(1)) * 0.1;
+                }
+            }
+            TempEffect::Spray {
+                position,
+                direction,
+                model,
+                count,
+                speed,
+                noise,
+                rendermode,
+            } => {
+                if !s.precache.models.contains_key(model) {
+                    self.missing_models = self.missing_models.saturating_add(1);
+                } else {
+                    let mode = match *rendermode {
+                        1 => RenderMode::TransColor,
+                        2 => RenderMode::TransTexture,
+                        3 => RenderMode::Glow,
+                        4 => RenderMode::TransAlpha,
+                        5 => RenderMode::TransAdd,
+                        _ => RenderMode::Normal,
+                    };
+                    let dir = direction.normalize_or_zero();
+                    let spd = f32::from(*speed);
+                    let noise_f = f32::from(*noise);
+                    for _ in 0..(*count).min(64) {
+                        let vel = dir * spd
+                            + Vec3::new(
+                                s.rng.float(-noise_f, noise_f),
+                                s.rng.float(-noise_f, noise_f),
+                                s.rng.float(-noise_f, noise_f),
+                            );
+                        if let Some(t) = self.alloc(*position, ModelRef::Precached(*model), s.world, now) {
+                            t.velocity = vel;
+                            t.render_mode = mode;
+                            t.flags |= ftent::GRAVITY | ftent::FADEOUT;
+                            t.die = now + 0.8;
+                        }
+                    }
+                }
+            }
+            TempEffect::PlayerSprites {
+                entity,
+                model,
+                count,
+                variance,
+            } => {
+                if !s.precache.models.contains_key(model) {
+                    self.missing_models = self.missing_models.saturating_add(1);
+                } else {
+                    let v = f32::from(*variance);
+                    for _ in 0..(*count).min(32) {
+                        if let Some(t) = self.alloc(Vec3::ZERO, ModelRef::Precached(*model), s.world, now) {
+                            t.client_entity = *entity;
+                            t.attachment_offset_z = 36.0;
+                            t.velocity = Vec3::new(
+                                s.rng.float(-v, v),
+                                s.rng.float(-v, v),
+                                s.rng.float(10.0, 10.0 + v),
+                            );
+                            t.render_mode = RenderMode::TransAdd;
+                            t.flags |= ftent::PLYRATTACHMENT | ftent::FADEOUT;
+                            t.die = now + 1.0;
+                        }
+                    }
+                }
+            }
+            TempEffect::ParticleBurst {
+                position,
+                radius,
+                color,
+                duration,
+            } => {
+                self.push_effect(RenderEffect::Particles(ParticleEffect::ParticleBurst {
+                    position: *position,
+                    radius: *radius,
+                    color: *color,
+                    duration: f32::from(*duration) * 0.1,
+                }));
+            }
+            TempEffect::FireField {
+                position,
+                radius,
+                model,
+                count,
+                flags: _,
+                life,
+            } => {
+                if !s.precache.models.contains_key(model) {
+                    self.missing_models = self.missing_models.saturating_add(1);
+                } else {
+                    let r = f32::from(*radius);
+                    let life_s = f32::from((*life).max(1)) * 0.1;
+                    for _ in 0..(*count).min(64) {
+                        let pos = *position
+                            + Vec3::new(
+                                s.rng.float(-r, r),
+                                s.rng.float(-r, r),
+                                s.rng.float(0.0, r * 0.5),
+                            );
+                        if let Some(t) = self.alloc(pos, ModelRef::Precached(*model), s.world, now) {
+                            t.velocity = Vec3::new(0.0, 0.0, s.rng.float(15.0, 45.0));
+                            t.render_mode = RenderMode::TransAdd;
+                            t.flags |= ftent::SPRANIMATE | ftent::SPRANIMATELOOP | ftent::FADEOUT;
+                            t.framerate = 12.0;
+                            t.die = now + f64::from(life_s);
+                        }
+                    }
+                }
+            }
+            TempEffect::PlayerAttachment {
+                entity,
+                offset_z,
+                model,
+                life,
+            } => {
+                if !s.precache.models.contains_key(model) {
+                    self.missing_models = self.missing_models.saturating_add(1);
+                } else if let Some(t) = self.alloc(Vec3::ZERO, ModelRef::Precached(*model), s.world, now) {
+                    t.client_entity = u16::from(*entity);
+                    t.attachment_offset_z = *offset_z;
+                    t.render_mode = RenderMode::TransAdd;
+                    t.flags |= ftent::PLYRATTACHMENT;
+                    t.die = now + f64::from((*life).max(1)) * 0.1;
+                }
+            }
+            TempEffect::KillPlayerAttachments { entity } => {
+                self.kill_player_attachments(*entity);
+            }
+            TempEffect::MultiGunshot {
+                origin,
+                direction,
+                x_noise,
+                y_noise,
+                count,
+                decal: _,
+            } => {
+                self.push_effect(RenderEffect::Particles(ParticleEffect::MultiGunshot {
+                    origin: *origin,
+                    direction: *direction,
+                    x_noise: *x_noise,
+                    y_noise: *y_noise,
+                    count: *count,
+                }));
+            }
+            TempEffect::UserTracer {
+                origin,
+                velocity,
+                life,
+                color,
+                length,
+            } => {
+                self.push_effect(RenderEffect::Particles(ParticleEffect::UserTracer {
+                    origin: *origin,
+                    velocity: *velocity,
+                    life: f32::from(*life) * 0.1,
+                    color: *color,
+                    length: *length,
+                }));
+            }
             TempEffect::Other { .. } => {}
         }
     }
@@ -1303,15 +1979,17 @@ impl TempEnts {
             0.0
         };
         let gravity = if gravity.is_finite() { gravity } else { 800.0 };
+        let mut emitted: Vec<RenderEffect> = Vec::new();
         self.active.retain_mut(|t| {
             if !t.has(ftent::PERSIST) && t.die < time {
                 return false;
             }
-            if t.has(ftent::SPRANIMATE) && t.frame_max > 0 {
-                t.frame += dt * t.framerate;
+            if (t.has(ftent::SPRANIMATE) || t.has(ftent::SPRCYCLE)) && t.frame_max > 0 {
+                let rate = if t.framerate > 0.0 { t.framerate } else { 10.0 };
+                t.frame += dt * rate;
                 if t.frame >= t.frame_max as f32 {
-                    if t.has(ftent::SPRANIMATELOOP) {
-                        t.frame -= t.frame.trunc();
+                    if t.has(ftent::SPRANIMATELOOP) || t.has(ftent::SPRCYCLE) {
+                        t.frame = t.frame.rem_euclid((t.frame_max + 1) as f32);
                     } else {
                         return false;
                     }
@@ -1320,10 +1998,28 @@ impl TempEnts {
             if t.has(ftent::ROTATE) {
                 t.angles += t.angular_velocity * dt;
             }
+            if t.has(ftent::FLICKER) && rng.long(0, 7) == 0 {
+                emitted.push(RenderEffect::Particles(ParticleEffect::Flicker {
+                    position: t.origin,
+                }));
+            }
+            if t.has(ftent::SMOKETRAIL) && rng.long(0, 3) == 0 {
+                emitted.push(RenderEffect::Particles(ParticleEffect::SmokeTrail {
+                    position: t.origin,
+                }));
+            }
+            if t.has(ftent::SPARKSHOWER) && t.velocity != Vec3::ZERO && rng.long(0, 2) == 0 {
+                emitted.push(RenderEffect::Particles(ParticleEffect::Sparks {
+                    position: t.origin,
+                }));
+            }
             step_motion(t, time, dt, gravity, world, rng, sounds);
             step_fade(t, time, dt);
             true
         });
+        for fx in emitted {
+            self.push_effect(fx);
+        }
     }
 }
 
@@ -1371,6 +2067,16 @@ fn step_motion(
 ) {
     if dt <= 0.0 {
         return;
+    }
+    if t.has(ftent::SINEWAVE) {
+        let phase = (time - t.born) as f32 * 6.0;
+        t.origin.x += phase.sin() * 8.0 * dt;
+        t.origin.y += phase.cos() * 8.0 * dt;
+    }
+    if t.has(ftent::SPIRAL) {
+        let phase = (time - t.born) as f32 * 10.0;
+        t.origin.x += phase.cos() * 14.0 * dt;
+        t.origin.y += phase.sin() * 14.0 * dt;
     }
     if t.has(ftent::GRAVITY) {
         t.velocity.z -= sv_gravity * dt;
@@ -2146,5 +2852,124 @@ mod tests {
             let t = &ents.active()[0];
             assert!(t.origin.is_finite() && t.velocity.is_finite() && t.angles.is_finite());
         }
+    }
+
+    #[test]
+    fn all_59_temp_effects_handled_by_clientcore() {
+        let precache = precache_with_models(&[1, 2, 3]);
+        let world = Floor { frames: 8 };
+        let mut ents = TempEnts::default();
+        let mut sounds = SoundQueue::default();
+        let mut rng = FxRandom::new(9);
+        let p = Vec3::new(0.0, 0.0, 16.0);
+        let q = Vec3::new(32.0, 16.0, 24.0);
+        let beam = wire::BeamParams {
+            sprite: 1,
+            start_frame: 0,
+            frame_rate: 10,
+            life: 10,
+            width: 8,
+            noise: 2,
+            color: [255, 128, 64],
+            brightness: 255,
+            speed: 5,
+        };
+        let samples = [
+            wire::beam_points(p, q, &beam),
+            wire::beam_ent_point(1, q, &beam),
+            wire::gunshot(p),
+            wire::explosion(p, 1, 10, 15, 0),
+            wire::tar_explosion(p),
+            wire::smoke(p, 1, 10, 10),
+            wire::tracer(p, q),
+            wire::lightning(p, q, 5, 10, 4, 1),
+            wire::beam_ents(1, 2, &beam),
+            wire::sparks(p),
+            wire::lava_splash(p),
+            wire::teleport(p),
+            wire::explosion2(p, 10, 8),
+            wire::bsp_decal(p, 1, 0, None),
+            wire::implosion(p, 32, 12, 5),
+            wire::sprite_trail(p, q, 1, 3, 5, 4, 2, 10),
+            wire::sprite(p, 1, 10, 255),
+            wire::beam_sprite(p, q, 1, 2),
+            wire::beam_torus(p, q, &beam),
+            wire::beam_disk(p, q, &beam),
+            wire::beam_cylinder(p, q, &beam),
+            wire::beam_follow(1, 1, 5, 4, [255, 0, 0], 200),
+            wire::glow_sprite(p, 1, 5, 5, 255),
+            wire::beam_ring(1, 2, &beam),
+            wire::streak_splash(p, q, 4, 6, 100, 50),
+            wire::dlight(p, 20, [255, 255, 200], 5, 10),
+            wire::elight(1, p, 80.0, [255, 0, 0], 5, 10.0),
+            wire::text_message(1, 0, 0, 0, [255; 4], [255; 4], 10, 10, 50, None, "hi"),
+            wire::line(p, q, 10, [255, 0, 0]),
+            wire::box_fx(p, q, 10, [0, 255, 0]),
+            wire::kill_beam(1),
+            wire::large_funnel(p, 1, 0),
+            wire::blood_stream(p, q, 70, 50),
+            wire::show_line(p, q),
+            wire::blood(p, q, 70, 80),
+            wire::decal(p, 1, 0),
+            wire::fizz(1, 1, 10),
+            wire::model(p, Vec3::Z, 0, 1, 1, 10),
+            wire::explode_model(p, 50.0, 1, 3, 10),
+            wire::break_model(p, Vec3::splat(8.0), Vec3::Z, 10, 1, 2, 10, 0),
+            wire::gunshot_decal(p, 0, 1),
+            wire::sprite_spray(p, q, 1, 3, 20, 5),
+            wire::armor_ricochet(p, 5),
+            wire::player_decal(1, p, 0, 0),
+            wire::bubbles(p, q, 64.0, 1, 3, 8.0),
+            wire::bubble_trail(p, q, 64.0, 1, 3, 8.0),
+            wire::blood_sprite(p, 1, 2, 70, 4),
+            wire::world_decal(p, 1),
+            wire::world_decal_high(p, 1),
+            wire::decal_high(p, 1, 0),
+            wire::projectile(p, Vec3::X * 50.0, 1, 10, 1),
+            wire::spray(p, Vec3::Z, 1, 3, 20, 5, 5),
+            wire::player_sprites(1, 1, 2, 4),
+            wire::particle_burst(p, 40, 70, 5),
+            wire::fire_field(p, 32, 1, 3, 0, 10),
+            wire::player_attachment(1, 35.0, 1, 15),
+            wire::multi_gunshot(p, Vec3::X, 0.1, 0.1, 3, 1),
+            wire::user_tracer(p, Vec3::X * 100.0, 5, 4, 20),
+            wire::kill_player_attachments(1),
+        ];
+        assert_eq!(samples.len(), 59);
+        for item in &samples {
+            let eff = item.decode().unwrap();
+            assert!(!matches!(eff, TempEffect::Other { .. }));
+            ents.spawn_effect(&eff, 1.0, &precache, &world, &mut rng, &mut sounds);
+        }
+        assert!(!ents.take_effects().is_empty());
+
+        // Attachment + Brass usermsg + ParticleMsg
+        ents.spawn_effect(
+            &TempEffect::PlayerAttachment {
+                entity: 2,
+                offset_z: 30.0,
+                model: 1,
+                life: 20,
+            },
+            2.0,
+            &precache,
+            &world,
+            &mut rng,
+            &mut sounds,
+        );
+        assert!(ents.active().iter().any(|t| t.client_entity == 2));
+        ents.kill_player_attachments(2);
+        assert!(!ents.active().iter().any(|t| t.client_entity == 2));
+
+        let brass = wire::model(p, Vec3::Y * 40.0, 10, 1, 1, 10);
+        ents.spawn_brass_usermsg(&brass.payload, 2.0, &precache, &world, &mut rng);
+        ents.spawn_particle_msg(&cs_proto48::messages::ParticleMsg {
+            origin: p,
+            direction: [0, 0, 16],
+            count: 25,
+            color: 70,
+        });
+        ents.update(clock(2.1), &world, &mut rng, &mut sounds);
+        assert!(!ents.take_effects().is_empty());
     }
 }

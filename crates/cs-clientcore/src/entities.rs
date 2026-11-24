@@ -32,11 +32,15 @@ pub const HISTORY_MASK: u32 = HISTORY_MAX as u32 - 1;
 /// `GAME_FPS` (`common.h`): the update rate `CL_EntityTeleported` measures a jump against.
 pub const GAME_FPS: f32 = 20.0;
 
-/// `entity_state_t::effects` bits (`const.h`). Assumption: the values are the Half-Life SDK's;
-/// the header was not fetched.
+/// `entity_state_t::effects` bits (`const.h`).
 pub mod ef {
+    pub const BRIGHTFIELD: u32 = 1;
     pub const MUZZLEFLASH: u32 = 2;
+    pub const BRIGHTLIGHT: u32 = 4;
+    pub const DIMLIGHT: u32 = 8;
+    pub const INVLIGHT: u32 = 16;
     pub const NOINTERP: u32 = 32;
+    pub const LIGHT: u32 = 64;
     pub const NODRAW: u32 = 128;
 }
 
@@ -106,6 +110,10 @@ pub struct Latched {
     pub prevseqblending: [u8; 2],
     pub prevcontroller: [u8; 4],
     pub prevblending: [u8; 2],
+    pub gaitsequence: i32,
+    pub gaitframe: f32,
+    pub gaityaw: f32,
+    pub prevgaitorigin: Vec3,
 }
 
 /// `cl_entity_t`.
@@ -232,6 +240,7 @@ impl ClientEntity {
         self.latched.prevorigin = self.prevstate.origin;
         self.latched.prevangles = self.prevstate.angles;
         self.latched.prevanimtime = self.prevstate.animtime;
+        self.latched.prevframe = self.prevstate.frame;
         if self.curstate.sequence != self.prevstate.sequence {
             self.latched.prevseqblending = self.prevstate.blending;
             self.latched.prevsequence = self.prevstate.sequence;

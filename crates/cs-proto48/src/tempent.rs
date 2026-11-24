@@ -23,34 +23,67 @@ use glam::Vec3;
 
 use crate::bitbuf::{MsgReader, MsgWriter, ProtoError};
 
-/// The `TE_*` effect numbers used here (`common/const.h`).
+/// All `TE_*` effect numbers (`common/const.h`, 59 active IDs `0..=127` skipping 16 and 26).
 pub mod te {
     pub const BEAMPOINTS: u8 = 0;
     pub const BEAMENTPOINT: u8 = 1;
     pub const GUNSHOT: u8 = 2;
     pub const EXPLOSION: u8 = 3;
+    pub const TAREXPLOSION: u8 = 4;
     pub const SMOKE: u8 = 5;
     pub const TRACER: u8 = 6;
+    pub const LIGHTNING: u8 = 7;
     pub const BEAMENTS: u8 = 8;
     pub const SPARKS: u8 = 9;
+    pub const LAVASPLASH: u8 = 10;
+    pub const TELEPORT: u8 = 11;
     pub const EXPLOSION2: u8 = 12;
     pub const BSPDECAL: u8 = 13;
+    pub const IMPLOSION: u8 = 14;
+    pub const SPRITETRAIL: u8 = 15;
     pub const SPRITE: u8 = 17;
+    pub const BEAMSPRITE: u8 = 18;
+    pub const BEAMTORUS: u8 = 19;
+    pub const BEAMDISK: u8 = 20;
+    pub const BEAMCYLINDER: u8 = 21;
     pub const BEAMFOLLOW: u8 = 22;
     pub const GLOWSPRITE: u8 = 23;
+    pub const BEAMRING: u8 = 24;
     pub const STREAK_SPLASH: u8 = 25;
     pub const DLIGHT: u8 = 27;
     pub const ELIGHT: u8 = 28;
+    pub const TEXTMESSAGE: u8 = 29;
+    pub const LINE: u8 = 30;
+    pub const BOX: u8 = 31;
     pub const KILLBEAM: u8 = 99;
+    pub const LARGEFUNNEL: u8 = 100;
     pub const BLOODSTREAM: u8 = 101;
+    pub const SHOWLINE: u8 = 102;
+    pub const BLOOD: u8 = 103;
     pub const DECAL: u8 = 104;
     pub const FIZZ: u8 = 105;
+    pub const MODEL: u8 = 106;
+    pub const EXPLODEMODEL: u8 = 107;
     pub const BREAKMODEL: u8 = 108;
     pub const GUNSHOTDECAL: u8 = 109;
+    pub const SPRITE_SPRAY: u8 = 110;
+    pub const ARMOR_RICOCHET: u8 = 111;
+    pub const PLAYERDECAL: u8 = 112;
+    pub const BUBBLES: u8 = 113;
+    pub const BUBBLETRAIL: u8 = 114;
     pub const BLOODSPRITE: u8 = 115;
     pub const WORLDDECAL: u8 = 116;
     pub const WORLDDECALHIGH: u8 = 117;
     pub const DECALHIGH: u8 = 118;
+    pub const PROJECTILE: u8 = 119;
+    pub const SPRAY: u8 = 120;
+    pub const PLAYERSPRITES: u8 = 121;
+    pub const PARTICLEBURST: u8 = 122;
+    pub const FIREFIELD: u8 = 123;
+    pub const PLAYERATTACHMENT: u8 = 124;
+    pub const KILLPLAYERATTACHMENTS: u8 = 125;
+    pub const MULTIGUNSHOT: u8 = 126;
+    pub const USERTRACER: u8 = 127;
 }
 
 /// `TE_EXPLFLAG_*`: the `flags` byte of `TE_EXPLOSION`.
@@ -61,6 +94,8 @@ pub mod explflag {
     pub const NODLIGHTS: u8 = 2;
     pub const NOSOUND: u8 = 4;
     pub const NOPARTICLES: u8 = 8;
+    pub const DRAWALPHA: u8 = 16;
+    pub const ROTATE: u8 = 32;
 }
 
 /// One temp entity: the `TE_*` byte and the payload that follows it in `svc_temp_entity`.
@@ -450,6 +485,442 @@ pub fn break_model(
     })
 }
 
+/// `TE_TAREXPLOSION`: `coord x3` (position).
+pub fn tar_explosion(position: Vec3) -> TempEntity {
+    TempEntity::new(te::TAREXPLOSION, |w| coords(w, position))
+}
+
+/// `TE_LIGHTNING`: `coord x3` start, `coord x3` end, `byte` life, `byte` width, `byte` amplitude,
+/// `short` sprite model index.
+pub fn lightning(
+    start: Vec3,
+    end: Vec3,
+    life: u8,
+    width: u8,
+    amplitude: u8,
+    sprite: u16,
+) -> TempEntity {
+    TempEntity::new(te::LIGHTNING, |w| {
+        coords(w, start);
+        coords(w, end);
+        w.write_u8(life);
+        w.write_u8(width);
+        w.write_u8(amplitude);
+        w.write_u16(sprite);
+    })
+}
+
+/// `TE_LAVASPLASH`: `coord x3` (position).
+pub fn lava_splash(position: Vec3) -> TempEntity {
+    TempEntity::new(te::LAVASPLASH, |w| coords(w, position))
+}
+
+/// `TE_TELEPORT`: `coord x3` (position).
+pub fn teleport(position: Vec3) -> TempEntity {
+    TempEntity::new(te::TELEPORT, |w| coords(w, position))
+}
+
+/// `TE_IMPLOSION`: `coord x3` position, `byte` radius, `byte` count, `byte` life in tenths.
+pub fn implosion(position: Vec3, radius: u8, count: u8, life: u8) -> TempEntity {
+    TempEntity::new(te::IMPLOSION, |w| {
+        coords(w, position);
+        w.write_u8(radius);
+        w.write_u8(count);
+        w.write_u8(life);
+    })
+}
+
+/// `TE_SPRITETRAIL`: `coord x3` start, `coord x3` end, `short` sprite, `byte` count, `byte` life,
+/// `byte` scale, `byte` noise, `byte` speed in tens.
+#[allow(clippy::too_many_arguments)]
+pub fn sprite_trail(
+    start: Vec3,
+    end: Vec3,
+    sprite: u16,
+    count: u8,
+    life: u8,
+    scale: u8,
+    noise: u8,
+    speed: u8,
+) -> TempEntity {
+    TempEntity::new(te::SPRITETRAIL, |w| {
+        coords(w, start);
+        coords(w, end);
+        w.write_u16(sprite);
+        w.write_u8(count);
+        w.write_u8(life);
+        w.write_u8(scale);
+        w.write_u8(noise);
+        w.write_u8(speed);
+    })
+}
+
+/// `TE_BEAMSPRITE`: `coord x3` start, `coord x3` end, `short` beam sprite, `short` end sprite (16B).
+pub fn beam_sprite(start: Vec3, end: Vec3, beam_sprite: u16, end_sprite: u16) -> TempEntity {
+    TempEntity::new(te::BEAMSPRITE, |w| {
+        coords(w, start);
+        coords(w, end);
+        w.write_u16(beam_sprite);
+        w.write_u16(end_sprite);
+    })
+}
+
+/// `TE_BEAMTORUS`: `coord x3` center, `coord x3` axis+radius, then [`BeamParams`].
+pub fn beam_torus(center: Vec3, axis_radius: Vec3, beam: &BeamParams) -> TempEntity {
+    TempEntity::new(te::BEAMTORUS, |w| {
+        coords(w, center);
+        coords(w, axis_radius);
+        write_beam(w, beam);
+    })
+}
+
+/// `TE_BEAMDISK`: `coord x3` center, `coord x3` axis+radius, then [`BeamParams`].
+pub fn beam_disk(center: Vec3, axis_radius: Vec3, beam: &BeamParams) -> TempEntity {
+    TempEntity::new(te::BEAMDISK, |w| {
+        coords(w, center);
+        coords(w, axis_radius);
+        write_beam(w, beam);
+    })
+}
+
+/// `TE_BEAMCYLINDER`: `coord x3` center, `coord x3` axis+radius, then [`BeamParams`].
+pub fn beam_cylinder(center: Vec3, axis_radius: Vec3, beam: &BeamParams) -> TempEntity {
+    TempEntity::new(te::BEAMCYLINDER, |w| {
+        coords(w, center);
+        coords(w, axis_radius);
+        write_beam(w, beam);
+    })
+}
+
+/// `TE_BEAMRING`: `short` start entity, `short` end entity, then [`BeamParams`].
+pub fn beam_ring(start_entity: u16, end_entity: u16, beam: &BeamParams) -> TempEntity {
+    TempEntity::new(te::BEAMRING, |w| {
+        w.write_u16(start_entity);
+        w.write_u16(end_entity);
+        write_beam(w, beam);
+    })
+}
+
+/// `TE_TEXTMESSAGE`: HUD text channel message.
+#[allow(clippy::too_many_arguments)]
+pub fn text_message(
+    channel: u8,
+    x: i16,
+    y: i16,
+    effect: u8,
+    color1: [u8; 4],
+    color2: [u8; 4],
+    fadein: u16,
+    fadeout: u16,
+    holdtime: u16,
+    fxtime: Option<u16>,
+    text: &str,
+) -> TempEntity {
+    TempEntity::new(te::TEXTMESSAGE, |w| {
+        w.write_u8(channel);
+        w.write_i16(x);
+        w.write_i16(y);
+        w.write_u8(effect);
+        w.write_bytes(&color1);
+        w.write_bytes(&color2);
+        w.write_u16(fadein);
+        w.write_u16(fadeout);
+        w.write_u16(holdtime);
+        if effect == 2 {
+            w.write_u16(fxtime.unwrap_or(0));
+        }
+        w.write_str(text);
+    })
+}
+
+/// `TE_LINE`: `coord x3` start, `coord x3` end, `short` life in tenths, `byte x3` rgb.
+pub fn line(start: Vec3, end: Vec3, life: u16, color: [u8; 3]) -> TempEntity {
+    TempEntity::new(te::LINE, |w| {
+        coords(w, start);
+        coords(w, end);
+        w.write_u16(life);
+        w.write_bytes(&color);
+    })
+}
+
+/// `TE_BOX`: `coord x3` min, `coord x3` max, `short` life in tenths, `byte x3` rgb.
+pub fn box_fx(min: Vec3, max: Vec3, life: u16, color: [u8; 3]) -> TempEntity {
+    TempEntity::new(te::BOX, |w| {
+        coords(w, min);
+        coords(w, max);
+        w.write_u16(life);
+        w.write_bytes(&color);
+    })
+}
+
+/// `TE_LARGEFUNNEL`: `coord x3` origin, `short` sprite, `short` flags.
+pub fn large_funnel(position: Vec3, sprite: u16, flags: u16) -> TempEntity {
+    TempEntity::new(te::LARGEFUNNEL, |w| {
+        coords(w, position);
+        w.write_u16(sprite);
+        w.write_u16(flags);
+    })
+}
+
+/// `TE_SHOWLINE`: `coord x3` start, `coord x3` end.
+pub fn show_line(start: Vec3, end: Vec3) -> TempEntity {
+    TempEntity::new(te::SHOWLINE, |w| {
+        coords(w, start);
+        coords(w, end);
+    })
+}
+
+/// `TE_BLOOD`: `coord x3` origin, `coord x3` direction, `byte` colour, `byte` speed.
+pub fn blood(origin: Vec3, direction: Vec3, color: u8, speed: u8) -> TempEntity {
+    TempEntity::new(te::BLOOD, |w| {
+        coords(w, origin);
+        coords(w, direction);
+        w.write_u8(color);
+        w.write_u8(speed);
+    })
+}
+
+/// `TE_MODEL`: `coord x3` position, `coord x3` velocity, `byte` yaw angle (`degrees * 256 / 360` or scaled),
+/// `short` model index, `byte` sound type, `byte` life in tenths (17B).
+pub fn model(
+    position: Vec3,
+    velocity: Vec3,
+    angle: u8,
+    model: u16,
+    sound_type: u8,
+    life: u8,
+) -> TempEntity {
+    TempEntity::new(te::MODEL, |w| {
+        coords(w, position);
+        coords(w, velocity);
+        w.write_u8(angle);
+        w.write_u16(model);
+        w.write_u8(sound_type);
+        w.write_u8(life);
+    })
+}
+
+/// `TE_EXPLODEMODEL`: `coord x3` origin, `coord` velocity, `short` model, `short` count, `byte` life (13B).
+pub fn explode_model(
+    position: Vec3,
+    velocity: f32,
+    model: u16,
+    count: u16,
+    life: u8,
+) -> TempEntity {
+    TempEntity::new(te::EXPLODEMODEL, |w| {
+        coords(w, position);
+        w.write_coord(velocity);
+        w.write_u16(model);
+        w.write_u16(count);
+        w.write_u8(life);
+    })
+}
+
+/// `TE_SPRITE_SPRAY`: `coord x3` pos, `coord x3` dir, `short` sprite, `byte` count, `byte` speed, `byte` noise.
+pub fn sprite_spray(
+    position: Vec3,
+    direction: Vec3,
+    sprite: u16,
+    count: u8,
+    speed: u8,
+    noise: u8,
+) -> TempEntity {
+    TempEntity::new(te::SPRITE_SPRAY, |w| {
+        coords(w, position);
+        coords(w, direction);
+        w.write_u16(sprite);
+        w.write_u8(count);
+        w.write_u8(speed);
+        w.write_u8(noise);
+    })
+}
+
+/// `TE_ARMOR_RICOCHET`: `coord x3` pos, `byte` scale in tenths.
+pub fn armor_ricochet(position: Vec3, scale: u8) -> TempEntity {
+    TempEntity::new(te::ARMOR_RICOCHET, |w| {
+        coords(w, position);
+        w.write_u8(scale);
+    })
+}
+
+/// `TE_PLAYERDECAL`: `byte` player index, `coord x3` position, `short` entity, `byte` decal index (10B).
+pub fn player_decal(player: u8, position: Vec3, entity: u16, decal: u8) -> TempEntity {
+    TempEntity::new(te::PLAYERDECAL, |w| {
+        w.write_u8(player);
+        coords(w, position);
+        w.write_u16(entity);
+        w.write_u8(decal);
+    })
+}
+
+/// `TE_BUBBLES`: `coord x3` mins, `coord x3` maxs, `coord` height, `short` model, `byte` count, `coord` speed.
+pub fn bubbles(
+    mins: Vec3,
+    maxs: Vec3,
+    height: f32,
+    model: u16,
+    count: u8,
+    speed: f32,
+) -> TempEntity {
+    TempEntity::new(te::BUBBLES, |w| {
+        coords(w, mins);
+        coords(w, maxs);
+        w.write_coord(height);
+        w.write_u16(model);
+        w.write_u8(count);
+        w.write_coord(speed);
+    })
+}
+
+/// `TE_BUBBLETRAIL`: `coord x3` mins, `coord x3` maxs, `coord` height, `short` model, `byte` count, `coord` speed.
+pub fn bubble_trail(
+    mins: Vec3,
+    maxs: Vec3,
+    height: f32,
+    model: u16,
+    count: u8,
+    speed: f32,
+) -> TempEntity {
+    TempEntity::new(te::BUBBLETRAIL, |w| {
+        coords(w, mins);
+        coords(w, maxs);
+        w.write_coord(height);
+        w.write_u16(model);
+        w.write_u8(count);
+        w.write_coord(speed);
+    })
+}
+
+/// `TE_PROJECTILE`: `coord x3` origin, `coord x3` velocity, `short` model, `byte` life, `byte` owner.
+pub fn projectile(
+    position: Vec3,
+    velocity: Vec3,
+    model: u16,
+    life: u8,
+    owner: u8,
+) -> TempEntity {
+    TempEntity::new(te::PROJECTILE, |w| {
+        coords(w, position);
+        coords(w, velocity);
+        w.write_u16(model);
+        w.write_u8(life);
+        w.write_u8(owner);
+    })
+}
+
+/// `TE_SPRAY`: `coord x3` pos, `coord x3` dir, `short` model, `byte` count, `byte` speed, `byte` noise, `byte` rendermode.
+#[allow(clippy::too_many_arguments)]
+pub fn spray(
+    position: Vec3,
+    direction: Vec3,
+    model: u16,
+    count: u8,
+    speed: u8,
+    noise: u8,
+    rendermode: u8,
+) -> TempEntity {
+    TempEntity::new(te::SPRAY, |w| {
+        coords(w, position);
+        coords(w, direction);
+        w.write_u16(model);
+        w.write_u8(count);
+        w.write_u8(speed);
+        w.write_u8(noise);
+        w.write_u8(rendermode);
+    })
+}
+
+/// `TE_PLAYERSPRITES`: `short` player entity, `short` model, `byte` count, `byte` variance.
+pub fn player_sprites(entity: u16, model: u16, count: u8, variance: u8) -> TempEntity {
+    TempEntity::new(te::PLAYERSPRITES, |w| {
+        w.write_u16(entity);
+        w.write_u16(model);
+        w.write_u8(count);
+        w.write_u8(variance);
+    })
+}
+
+/// `TE_PARTICLEBURST`: `coord x3` origin, `short` radius, `byte` color, `byte` duration in tenths.
+pub fn particle_burst(position: Vec3, radius: u16, color: u8, duration: u8) -> TempEntity {
+    TempEntity::new(te::PARTICLEBURST, |w| {
+        coords(w, position);
+        w.write_u16(radius);
+        w.write_u8(color);
+        w.write_u8(duration);
+    })
+}
+
+/// `TE_FIREFIELD`: `coord x3` origin, `short` radius, `short` model, `byte` count, `byte` flags, `byte` life in tenths.
+pub fn fire_field(
+    position: Vec3,
+    radius: u16,
+    model: u16,
+    count: u8,
+    flags: u8,
+    life: u8,
+) -> TempEntity {
+    TempEntity::new(te::FIREFIELD, |w| {
+        coords(w, position);
+        w.write_u16(radius);
+        w.write_u16(model);
+        w.write_u8(count);
+        w.write_u8(flags);
+        w.write_u8(life);
+    })
+}
+
+/// `TE_PLAYERATTACHMENT`: `byte` entity, `coord` vertical offset, `short` model, `short` life in tenths.
+pub fn player_attachment(entity: u8, offset_z: f32, model: u16, life: u16) -> TempEntity {
+    TempEntity::new(te::PLAYERATTACHMENT, |w| {
+        w.write_u8(entity);
+        w.write_coord(offset_z);
+        w.write_u16(model);
+        w.write_u16(life);
+    })
+}
+
+/// `TE_KILLPLAYERATTACHMENTS`: `byte` entity.
+pub fn kill_player_attachments(entity: u8) -> TempEntity {
+    TempEntity::new(te::KILLPLAYERATTACHMENTS, |w| w.write_u8(entity))
+}
+
+/// `TE_MULTIGUNSHOT`: `coord x3` origin, `coord x3` dir, `coord` x_noise, `coord` y_noise, `byte` count, `byte` decal index.
+pub fn multi_gunshot(
+    origin: Vec3,
+    direction: Vec3,
+    x_noise: f32,
+    y_noise: f32,
+    count: u8,
+    decal: u8,
+) -> TempEntity {
+    TempEntity::new(te::MULTIGUNSHOT, |w| {
+        coords(w, origin);
+        coords(w, direction);
+        w.write_coord(x_noise);
+        w.write_coord(y_noise);
+        w.write_u8(count);
+        w.write_u8(decal);
+    })
+}
+
+/// `TE_USERTRACER`: `coord x3` origin, `coord x3` velocity, `byte` life, `byte` color index, `byte` length.
+pub fn user_tracer(
+    origin: Vec3,
+    velocity: Vec3,
+    life: u8,
+    color: u8,
+    length: u8,
+) -> TempEntity {
+    TempEntity::new(te::USERTRACER, |w| {
+        coords(w, origin);
+        coords(w, velocity);
+        w.write_u8(life);
+        w.write_u8(color);
+        w.write_u8(length);
+    })
+}
+
 /// A decoded `svc_temp_entity`. Fields keep the wire units; each variant names the builder
 /// that writes it and carries the same fields in the same order. A `TE_*` without a variant
 /// here is [`TempEffect::Other`].
@@ -603,6 +1074,214 @@ pub enum TempEffect {
         position: Vec3,
         decal: u8,
         entity: u16,
+    },
+    TarExplosion {
+        position: Vec3,
+    },
+    Lightning {
+        start: Vec3,
+        end: Vec3,
+        life: u8,
+        width: u8,
+        amplitude: u8,
+        sprite: u16,
+    },
+    LavaSplash {
+        position: Vec3,
+    },
+    Teleport {
+        position: Vec3,
+    },
+    Implosion {
+        position: Vec3,
+        radius: u8,
+        count: u8,
+        life: u8,
+    },
+    SpriteTrail {
+        start: Vec3,
+        end: Vec3,
+        sprite: u16,
+        count: u8,
+        life: u8,
+        scale: u8,
+        noise: u8,
+        speed: u8,
+    },
+    BeamSprite {
+        start: Vec3,
+        end: Vec3,
+        beam_sprite: u16,
+        end_sprite: u16,
+    },
+    BeamTorus {
+        center: Vec3,
+        axis_radius: Vec3,
+        beam: BeamParams,
+    },
+    BeamDisk {
+        center: Vec3,
+        axis_radius: Vec3,
+        beam: BeamParams,
+    },
+    BeamCylinder {
+        center: Vec3,
+        axis_radius: Vec3,
+        beam: BeamParams,
+    },
+    BeamRing {
+        start_entity: u16,
+        end_entity: u16,
+        beam: BeamParams,
+    },
+    TextMessage {
+        channel: u8,
+        x: i16,
+        y: i16,
+        effect: u8,
+        color1: [u8; 4],
+        color2: [u8; 4],
+        fadein: u16,
+        fadeout: u16,
+        holdtime: u16,
+        fxtime: Option<u16>,
+        text: String,
+    },
+    Line {
+        start: Vec3,
+        end: Vec3,
+        life: u16,
+        color: [u8; 3],
+    },
+    Box {
+        min: Vec3,
+        max: Vec3,
+        life: u16,
+        color: [u8; 3],
+    },
+    LargeFunnel {
+        position: Vec3,
+        sprite: u16,
+        flags: u16,
+    },
+    ShowLine {
+        start: Vec3,
+        end: Vec3,
+    },
+    Blood {
+        origin: Vec3,
+        direction: Vec3,
+        color: u8,
+        speed: u8,
+    },
+    Model {
+        position: Vec3,
+        velocity: Vec3,
+        angle: u8,
+        model: u16,
+        sound_type: u8,
+        life: u8,
+    },
+    ExplodeModel {
+        position: Vec3,
+        velocity: f32,
+        model: u16,
+        count: u16,
+        life: u8,
+    },
+    SpriteSpray {
+        position: Vec3,
+        direction: Vec3,
+        sprite: u16,
+        count: u8,
+        speed: u8,
+        noise: u8,
+    },
+    ArmorRicochet {
+        position: Vec3,
+        scale: u8,
+    },
+    PlayerDecal {
+        player: u8,
+        position: Vec3,
+        entity: u16,
+        decal: u8,
+    },
+    Bubbles {
+        mins: Vec3,
+        maxs: Vec3,
+        height: f32,
+        model: u16,
+        count: u8,
+        speed: f32,
+    },
+    BubbleTrail {
+        mins: Vec3,
+        maxs: Vec3,
+        height: f32,
+        model: u16,
+        count: u8,
+        speed: f32,
+    },
+    Projectile {
+        position: Vec3,
+        velocity: Vec3,
+        model: u16,
+        life: u8,
+        owner: u8,
+    },
+    Spray {
+        position: Vec3,
+        direction: Vec3,
+        model: u16,
+        count: u8,
+        speed: u8,
+        noise: u8,
+        rendermode: u8,
+    },
+    PlayerSprites {
+        entity: u16,
+        model: u16,
+        count: u8,
+        variance: u8,
+    },
+    ParticleBurst {
+        position: Vec3,
+        radius: u16,
+        color: u8,
+        duration: u8,
+    },
+    FireField {
+        position: Vec3,
+        radius: u16,
+        model: u16,
+        count: u8,
+        flags: u8,
+        life: u8,
+    },
+    PlayerAttachment {
+        entity: u8,
+        offset_z: f32,
+        model: u16,
+        life: u16,
+    },
+    KillPlayerAttachments {
+        entity: u8,
+    },
+    MultiGunshot {
+        origin: Vec3,
+        direction: Vec3,
+        x_noise: f32,
+        y_noise: f32,
+        count: u8,
+        decal: u8,
+    },
+    UserTracer {
+        origin: Vec3,
+        velocity: Vec3,
+        life: u8,
+        color: u8,
+        length: u8,
     },
     /// An effect this reader has no typed variant for; the payload is complete. Valid only
     /// for types that passed the stream parser (`parse_svc_stream`), which knows the length of
@@ -782,6 +1461,234 @@ impl TempEffect {
                 position: read_vec(r)?,
                 decal: r.read_u8()?,
                 entity: r.read_u16()?,
+            },
+            te::TAREXPLOSION => Self::TarExplosion {
+                position: read_vec(r)?,
+            },
+            te::LIGHTNING => Self::Lightning {
+                start: read_vec(r)?,
+                end: read_vec(r)?,
+                life: r.read_u8()?,
+                width: r.read_u8()?,
+                amplitude: r.read_u8()?,
+                sprite: r.read_u16()?,
+            },
+            te::LAVASPLASH => Self::LavaSplash {
+                position: read_vec(r)?,
+            },
+            te::TELEPORT => Self::Teleport {
+                position: read_vec(r)?,
+            },
+            te::IMPLOSION => Self::Implosion {
+                position: read_vec(r)?,
+                radius: r.read_u8()?,
+                count: r.read_u8()?,
+                life: r.read_u8()?,
+            },
+            te::SPRITETRAIL => Self::SpriteTrail {
+                start: read_vec(r)?,
+                end: read_vec(r)?,
+                sprite: r.read_u16()?,
+                count: r.read_u8()?,
+                life: r.read_u8()?,
+                scale: r.read_u8()?,
+                noise: r.read_u8()?,
+                speed: r.read_u8()?,
+            },
+            te::BEAMSPRITE => Self::BeamSprite {
+                start: read_vec(r)?,
+                end: read_vec(r)?,
+                beam_sprite: r.read_u16()?,
+                end_sprite: r.read_u16()?,
+            },
+            te::BEAMTORUS => Self::BeamTorus {
+                center: read_vec(r)?,
+                axis_radius: read_vec(r)?,
+                beam: read_beam(r)?,
+            },
+            te::BEAMDISK => Self::BeamDisk {
+                center: read_vec(r)?,
+                axis_radius: read_vec(r)?,
+                beam: read_beam(r)?,
+            },
+            te::BEAMCYLINDER => Self::BeamCylinder {
+                center: read_vec(r)?,
+                axis_radius: read_vec(r)?,
+                beam: read_beam(r)?,
+            },
+            te::BEAMRING => Self::BeamRing {
+                start_entity: r.read_u16()?,
+                end_entity: r.read_u16()?,
+                beam: read_beam(r)?,
+            },
+            te::TEXTMESSAGE => {
+                let channel = r.read_u8()?;
+                let x = r.read_i16()?;
+                let y = r.read_i16()?;
+                let effect = r.read_u8()?;
+                let color1 = [r.read_u8()?, r.read_u8()?, r.read_u8()?, r.read_u8()?];
+                let color2 = [r.read_u8()?, r.read_u8()?, r.read_u8()?, r.read_u8()?];
+                let fadein = r.read_u16()?;
+                let fadeout = r.read_u16()?;
+                let holdtime = r.read_u16()?;
+                let fxtime = if effect == 2 {
+                    Some(r.read_u16()?)
+                } else {
+                    None
+                };
+                if !r.remaining_slice().contains(&0) {
+                    return Err(ProtoError::UnexpectedEof);
+                }
+                let text = r.read_str()?;
+                Self::TextMessage {
+                    channel,
+                    x,
+                    y,
+                    effect,
+                    color1,
+                    color2,
+                    fadein,
+                    fadeout,
+                    holdtime,
+                    fxtime,
+                    text,
+                }
+            }
+            te::LINE => Self::Line {
+                start: read_vec(r)?,
+                end: read_vec(r)?,
+                life: r.read_u16()?,
+                color: read_rgb(r)?,
+            },
+            te::BOX => Self::Box {
+                min: read_vec(r)?,
+                max: read_vec(r)?,
+                life: r.read_u16()?,
+                color: read_rgb(r)?,
+            },
+            te::LARGEFUNNEL => Self::LargeFunnel {
+                position: read_vec(r)?,
+                sprite: r.read_u16()?,
+                flags: r.read_u16()?,
+            },
+            te::SHOWLINE => Self::ShowLine {
+                start: read_vec(r)?,
+                end: read_vec(r)?,
+            },
+            te::BLOOD => Self::Blood {
+                origin: read_vec(r)?,
+                direction: read_vec(r)?,
+                color: r.read_u8()?,
+                speed: r.read_u8()?,
+            },
+            te::MODEL => Self::Model {
+                position: read_vec(r)?,
+                velocity: read_vec(r)?,
+                angle: r.read_u8()?,
+                model: r.read_u16()?,
+                sound_type: r.read_u8()?,
+                life: r.read_u8()?,
+            },
+            te::EXPLODEMODEL => Self::ExplodeModel {
+                position: read_vec(r)?,
+                velocity: r.read_coord()?,
+                model: r.read_u16()?,
+                count: r.read_u16()?,
+                life: r.read_u8()?,
+            },
+            te::SPRITE_SPRAY => Self::SpriteSpray {
+                position: read_vec(r)?,
+                direction: read_vec(r)?,
+                sprite: r.read_u16()?,
+                count: r.read_u8()?,
+                speed: r.read_u8()?,
+                noise: r.read_u8()?,
+            },
+            te::ARMOR_RICOCHET => Self::ArmorRicochet {
+                position: read_vec(r)?,
+                scale: r.read_u8()?,
+            },
+            te::PLAYERDECAL => Self::PlayerDecal {
+                player: r.read_u8()?,
+                position: read_vec(r)?,
+                entity: r.read_u16()?,
+                decal: r.read_u8()?,
+            },
+            te::BUBBLES => Self::Bubbles {
+                mins: read_vec(r)?,
+                maxs: read_vec(r)?,
+                height: r.read_coord()?,
+                model: r.read_u16()?,
+                count: r.read_u8()?,
+                speed: r.read_coord()?,
+            },
+            te::BUBBLETRAIL => Self::BubbleTrail {
+                mins: read_vec(r)?,
+                maxs: read_vec(r)?,
+                height: r.read_coord()?,
+                model: r.read_u16()?,
+                count: r.read_u8()?,
+                speed: r.read_coord()?,
+            },
+            te::PROJECTILE => Self::Projectile {
+                position: read_vec(r)?,
+                velocity: read_vec(r)?,
+                model: r.read_u16()?,
+                life: r.read_u8()?,
+                owner: r.read_u8()?,
+            },
+            te::SPRAY => Self::Spray {
+                position: read_vec(r)?,
+                direction: read_vec(r)?,
+                model: r.read_u16()?,
+                count: r.read_u8()?,
+                speed: r.read_u8()?,
+                noise: r.read_u8()?,
+                rendermode: r.read_u8()?,
+            },
+            te::PLAYERSPRITES => Self::PlayerSprites {
+                entity: r.read_u16()?,
+                model: r.read_u16()?,
+                count: r.read_u8()?,
+                variance: r.read_u8()?,
+            },
+            te::PARTICLEBURST => Self::ParticleBurst {
+                position: read_vec(r)?,
+                radius: r.read_u16()?,
+                color: r.read_u8()?,
+                duration: r.read_u8()?,
+            },
+            te::FIREFIELD => Self::FireField {
+                position: read_vec(r)?,
+                radius: r.read_u16()?,
+                model: r.read_u16()?,
+                count: r.read_u8()?,
+                flags: r.read_u8()?,
+                life: r.read_u8()?,
+            },
+            te::PLAYERATTACHMENT => Self::PlayerAttachment {
+                entity: r.read_u8()?,
+                offset_z: r.read_coord()?,
+                model: r.read_u16()?,
+                life: r.read_u16()?,
+            },
+            te::KILLPLAYERATTACHMENTS => Self::KillPlayerAttachments {
+                entity: r.read_u8()?,
+            },
+            te::MULTIGUNSHOT => Self::MultiGunshot {
+                origin: read_vec(r)?,
+                direction: read_vec(r)?,
+                x_noise: r.read_coord()?,
+                y_noise: r.read_coord()?,
+                count: r.read_u8()?,
+                decal: r.read_u8()?,
+            },
+            te::USERTRACER => Self::UserTracer {
+                origin: read_vec(r)?,
+                velocity: read_vec(r)?,
+                life: r.read_u8()?,
+                color: r.read_u8()?,
+                length: r.read_u8()?,
             },
             other => {
                 return Ok(Self::Other {
@@ -1045,7 +1952,354 @@ mod tests {
                     flags: 9,
                 },
             ),
+            (
+                tar_explosion(P),
+                TempEffect::TarExplosion { position: P },
+            ),
+            (
+                lightning(P, Q, 10, 20, 30, 55),
+                TempEffect::Lightning {
+                    start: P,
+                    end: Q,
+                    life: 10,
+                    width: 20,
+                    amplitude: 30,
+                    sprite: 55,
+                },
+            ),
+            (lava_splash(P), TempEffect::LavaSplash { position: P }),
+            (teleport(P), TempEffect::Teleport { position: P }),
+            (
+                implosion(P, 64, 30, 12),
+                TempEffect::Implosion {
+                    position: P,
+                    radius: 64,
+                    count: 30,
+                    life: 12,
+                },
+            ),
+            (
+                sprite_trail(P, Q, 42, 12, 8, 5, 3, 25),
+                TempEffect::SpriteTrail {
+                    start: P,
+                    end: Q,
+                    sprite: 42,
+                    count: 12,
+                    life: 8,
+                    scale: 5,
+                    noise: 3,
+                    speed: 25,
+                },
+            ),
+            (
+                beam_sprite(P, Q, 11, 22),
+                TempEffect::BeamSprite {
+                    start: P,
+                    end: Q,
+                    beam_sprite: 11,
+                    end_sprite: 22,
+                },
+            ),
+            (
+                beam_torus(P, Q, &BEAM),
+                TempEffect::BeamTorus {
+                    center: P,
+                    axis_radius: Q,
+                    beam: BEAM,
+                },
+            ),
+            (
+                beam_disk(P, Q, &BEAM),
+                TempEffect::BeamDisk {
+                    center: P,
+                    axis_radius: Q,
+                    beam: BEAM,
+                },
+            ),
+            (
+                beam_cylinder(P, Q, &BEAM),
+                TempEffect::BeamCylinder {
+                    center: P,
+                    axis_radius: Q,
+                    beam: BEAM,
+                },
+            ),
+            (
+                beam_ring(1, 2, &BEAM),
+                TempEffect::BeamRing {
+                    start_entity: 1,
+                    end_entity: 2,
+                    beam: BEAM,
+                },
+            ),
+            (
+                text_message(
+                    1,
+                    -4096,
+                    2048,
+                    2,
+                    [255, 200, 100, 255],
+                    [255, 0, 0, 255],
+                    64,
+                    128,
+                    512,
+                    Some(256),
+                    "PHASE 8",
+                ),
+                TempEffect::TextMessage {
+                    channel: 1,
+                    x: -4096,
+                    y: 2048,
+                    effect: 2,
+                    color1: [255, 200, 100, 255],
+                    color2: [255, 0, 0, 255],
+                    fadein: 64,
+                    fadeout: 128,
+                    holdtime: 512,
+                    fxtime: Some(256),
+                    text: "PHASE 8".to_string(),
+                },
+            ),
+            (
+                text_message(
+                    0,
+                    0,
+                    0,
+                    0,
+                    [255, 255, 255, 255],
+                    [0, 0, 0, 0],
+                    10,
+                    20,
+                    30,
+                    None,
+                    "FADE",
+                ),
+                TempEffect::TextMessage {
+                    channel: 0,
+                    x: 0,
+                    y: 0,
+                    effect: 0,
+                    color1: [255, 255, 255, 255],
+                    color2: [0, 0, 0, 0],
+                    fadein: 10,
+                    fadeout: 20,
+                    holdtime: 30,
+                    fxtime: None,
+                    text: "FADE".to_string(),
+                },
+            ),
+            (
+                line(P, Q, 15, [255, 128, 0]),
+                TempEffect::Line {
+                    start: P,
+                    end: Q,
+                    life: 15,
+                    color: [255, 128, 0],
+                },
+            ),
+            (
+                box_fx(P, Q, 20, [0, 255, 64]),
+                TempEffect::Box {
+                    min: P,
+                    max: Q,
+                    life: 20,
+                    color: [0, 255, 64],
+                },
+            ),
+            (
+                large_funnel(P, 77, 1),
+                TempEffect::LargeFunnel {
+                    position: P,
+                    sprite: 77,
+                    flags: 1,
+                },
+            ),
+            (show_line(P, Q), TempEffect::ShowLine { start: P, end: Q }),
+            (
+                blood(P, Q, 247, 120),
+                TempEffect::Blood {
+                    origin: P,
+                    direction: Q,
+                    color: 247,
+                    speed: 120,
+                },
+            ),
+            (
+                model(P, Q, 90, 333, 2, 150),
+                TempEffect::Model {
+                    position: P,
+                    velocity: Q,
+                    angle: 90,
+                    model: 333,
+                    sound_type: 2,
+                    life: 150,
+                },
+            ),
+            (
+                explode_model(P, 200.0, 444, 12, 30),
+                TempEffect::ExplodeModel {
+                    position: P,
+                    velocity: 200.0,
+                    model: 444,
+                    count: 12,
+                    life: 30,
+                },
+            ),
+            (
+                sprite_spray(P, Q, 88, 16, 40, 20),
+                TempEffect::SpriteSpray {
+                    position: P,
+                    direction: Q,
+                    sprite: 88,
+                    count: 16,
+                    speed: 40,
+                    noise: 20,
+                },
+            ),
+            (
+                armor_ricochet(P, 8),
+                TempEffect::ArmorRicochet {
+                    position: P,
+                    scale: 8,
+                },
+            ),
+            (
+                player_decal(3, P, 0, 14),
+                TempEffect::PlayerDecal {
+                    player: 3,
+                    position: P,
+                    entity: 0,
+                    decal: 14,
+                },
+            ),
+            (
+                bubbles(P, Q, 128.0, 19, 25, 8.0),
+                TempEffect::Bubbles {
+                    mins: P,
+                    maxs: Q,
+                    height: 128.0,
+                    model: 19,
+                    count: 25,
+                    speed: 8.0,
+                },
+            ),
+            (
+                bubble_trail(P, Q, 64.0, 19, 10, 6.0),
+                TempEffect::BubbleTrail {
+                    mins: P,
+                    maxs: Q,
+                    height: 64.0,
+                    model: 19,
+                    count: 10,
+                    speed: 6.0,
+                },
+            ),
+            (
+                projectile(P, Q, 95, 30, 1),
+                TempEffect::Projectile {
+                    position: P,
+                    velocity: Q,
+                    model: 95,
+                    life: 30,
+                    owner: 1,
+                },
+            ),
+            (
+                spray(P, Q, 45, 8, 50, 12, 5),
+                TempEffect::Spray {
+                    position: P,
+                    direction: Q,
+                    model: 45,
+                    count: 8,
+                    speed: 50,
+                    noise: 12,
+                    rendermode: 5,
+                },
+            ),
+            (
+                player_sprites(2, 66, 12, 4),
+                TempEffect::PlayerSprites {
+                    entity: 2,
+                    model: 66,
+                    count: 12,
+                    variance: 4,
+                },
+            ),
+            (
+                particle_burst(P, 200, 70, 5),
+                TempEffect::ParticleBurst {
+                    position: P,
+                    radius: 200,
+                    color: 70,
+                    duration: 5,
+                },
+            ),
+            (
+                fire_field(P, 150, 52, 20, 3, 25),
+                TempEffect::FireField {
+                    position: P,
+                    radius: 150,
+                    model: 52,
+                    count: 20,
+                    flags: 3,
+                    life: 25,
+                },
+            ),
+            (
+                player_attachment(1, 35.0, 71, 15),
+                TempEffect::PlayerAttachment {
+                    entity: 1,
+                    offset_z: 35.0,
+                    model: 71,
+                    life: 15,
+                },
+            ),
+            (
+                kill_player_attachments(1),
+                TempEffect::KillPlayerAttachments { entity: 1 },
+            ),
+            (
+                multi_gunshot(P, Q, 0.25, 0.5, 8, 3),
+                TempEffect::MultiGunshot {
+                    origin: P,
+                    direction: Q,
+                    x_noise: 0.25,
+                    y_noise: 0.5,
+                    count: 8,
+                    decal: 3,
+                },
+            ),
+            (
+                user_tracer(P, Q, 10, 4, 30),
+                TempEffect::UserTracer {
+                    origin: P,
+                    velocity: Q,
+                    life: 10,
+                    color: 4,
+                    length: 30,
+                },
+            ),
         ]
+    }
+
+    #[test]
+    fn all_59_temp_entities_roundtrip_and_match_skip() {
+        let mut seen = std::collections::BTreeSet::new();
+        for (te, expected) in cases() {
+            seen.insert(te.te_type);
+            let mut w = MsgWriter::new();
+            write_svc_temp_entity(&mut w, te.te_type, &te.payload);
+            write_svc_choke(&mut w);
+            let msgs = parse_svc_stream(w.as_slice(), &mut SvcParseContext::new()).unwrap();
+            assert_eq!(msgs.len(), 2, "te {}", te.te_type);
+            let SvcMessage::TempEntity { te_type, raw } = &msgs[0] else {
+                panic!("te {}: {:?}", te.te_type, msgs[0]);
+            };
+            assert_eq!(*te_type, te.te_type);
+            assert_eq!(TempEffect::parse(*te_type, raw).unwrap(), expected);
+            assert_eq!(msgs[1], SvcMessage::Choke);
+        }
+        assert_eq!(seen.len(), 59, "expected all 59 active TE_* IDs, got {seen:?}");
     }
 
     #[test]
@@ -1087,9 +2341,9 @@ mod tests {
     #[test]
     fn an_untyped_effect_keeps_its_payload() {
         assert_eq!(
-            TempEffect::parse(111, &[1, 2, 3, 4, 5, 6, 7]).unwrap(),
+            TempEffect::parse(200, &[1, 2, 3, 4, 5, 6, 7]).unwrap(),
             TempEffect::Other {
-                te_type: 111,
+                te_type: 200,
                 payload: vec![1, 2, 3, 4, 5, 6, 7],
             }
         );

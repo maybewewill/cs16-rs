@@ -15,15 +15,22 @@
 //! name this client has never heard of, is kept in [`HudState::unknown_messages`]: a mod's HUD
 //! reads its own messages from there.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
-use cs_proto48::messages::SvcMessage;
+use cs_proto48::messages::{CustomizationMsg, SpawnStaticMsg, SvcMessage};
 use cs_proto48::usermsg::CsUserMsg;
 use glam::Vec3;
 
 use crate::events::{EventFx, FiredEvent, FxEnv, EventQueue, ViewAnim};
 use crate::sound::{SoundCommand, SoundQueue};
-use crate::tempents::{FxRandom, ModelRef, RenderEffect, TempEntClock, TempEnts};
+use crate::tempents::{FxRandom, ModelRef, RenderEffect, TeTextMessage, TempEntClock, TempEnts};
+
+/// `FFADE_*` flags (`screenfade.h`).
+pub const FFADE_IN: u16 = 0x0000;
+pub const FFADE_OUT: u16 = 0x0001;
+pub const FFADE_MODULATE: u16 = 0x0002;
+pub const FFADE_STAYOUT: u16 = 0x0004;
+pub const FFADE_PURGE: u16 = 0x0010;
 
 /// The entries each log of the HUD keeps (oldest dropped).
 pub const LOG_CAPACITY: usize = 64;
@@ -191,8 +198,65 @@ pub struct UserMessageInfo {
     pub size: i8,
 }
 
+/// Distance fog parameters (`Fog` usermsg / `env_fog`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FogState {
+    pub color: [u8; 3],
+    pub density: f32,
+}
+
+/// Player custom spray metadata (`svc_customization`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomDecalInfo {
+    pub player: u8,
+    pub filename: String,
+    pub flags: u8,
+    pub md5: Option<[u8; 16]>,
+}
+
+/// Authentic GoldSrc default lightstyle pattern for style index `idx` (0..64).
+pub fn default_lightstyle(idx: usize) -> String {
+    match idx {
+        0 => "m",
+        1 => "mmnmmommommnonmmonqnmmo",
+        2 => "abcdefghijklmnopqrstuvwxyzyxwvutsrqponmlkjihgfedcba",
+        3 => "mmmmmaaaaammmmmaaaaaabcdefgabcdefg",
+        4 => "mamamamamama",
+        5 => "jklmnopqrstuvwxyzyxwvutsrqponmlkj",
+        6 => "nmonqnmomnmomomno",
+        7 => "mmmaaaabcdefgmmmmaaaammmaamm",
+        8 => "mmmaaammmaaammmabcdefaaaammmmabcdefmmmaaaa",
+        9 => "aaaaaaaazzzzzzzz",
+        10 => "mmamammmmammamamaaamammma",
+        11 => "abcdefghijklmnopqrrqponmlkjihgfedcba",
+        _ => "m",
+    }
+    .to_string()
+}
+
+pub fn default_lightstyles() -> [String; 64] {
+    std::array::from_fn(default_lightstyle)
+}
+
+/// Evaluate GoldSrc 10 Hz lightstyles (`R_AnimateLight`): `'a' -> 0.0`, `'m' -> 1.0`, `'z' -> 25/12`.
+pub fn evaluate_lightstyles(styles: &[String; 64], time: f32) -> [f32; 64] {
+    let mut out = [1.0f32; 64];
+    let frame = (time.max(0.0) * 10.0).floor() as usize;
+    for (slot, pat) in styles.iter().enumerate() {
+        let bytes = pat.as_bytes();
+        if bytes.is_empty() {
+            out[slot] = 1.0;
+            continue;
+        }
+        let b = bytes[frame % bytes.len()];
+        let val = (f32::from(b.saturating_sub(b'a')) / 12.0).clamp(0.0, 2.5);
+        out[slot] = val;
+    }
+    out
+}
+
 /// Everything the HUD shows, as the server's messages left it.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct HudState {
     /// The messages the server registered, by number.
     pub user_messages: BTreeMap<u8, UserMessageInfo>,
@@ -262,6 +326,14 @@ pub struct HudState {
     pub screen_shake: Option<ScreenShake>,
     pub scenario: Option<ScenarioIcon>,
     pub night_vision: bool,
+    pub flashlight_on: bool,
+    pub flash_battery: u8,
+    pub fog: Option<FogState>,
+    pub weather: u8,
+    pub lightstyles: [String; 64],
+    pub custom_decals: HashMap<u8, CustomDecalInfo>,
+    pub static_entities: Vec<SpawnStaticMsg>,
+    pub te_text_messages: Vec<TeTextMessage>,
     /// `ClCorpse`: the bodies the shell draws.
     pub corpses: Vec<CsUserMsg>,
     pub server_weapon_anim: Option<ViewAnim>,
@@ -272,6 +344,75 @@ pub struct HudState {
     /// `InitHUD` arrived (the server's sign-on messages start with it).
     pub initialized: bool,
     pub hud_resets: u32,
+}
+
+impl Default for HudState {
+    fn default() -> Self {
+        Self {
+            user_messages: BTreeMap::new(),
+            health: 0,
+            armor: 0,
+            armor_type: 0,
+            money: 0,
+            money_flash: false,
+            blink_account: 0,
+            current_weapon: None,
+            clips: BTreeMap::new(),
+            ammo: BTreeMap::new(),
+            weapons: BTreeMap::new(),
+            weapon_pickups: VecDeque::new(),
+            ammo_pickups: VecDeque::new(),
+            item_pickups: VecDeque::new(),
+            fov: 0,
+            hidden: 0,
+            crosshair: 0,
+            item_status: 0,
+            round_time: 0,
+            round_time_at: 0.0,
+            timer_visible: false,
+            status_icons: BTreeMap::new(),
+            status_text: BTreeMap::new(),
+            status_values: BTreeMap::new(),
+            players: BTreeMap::new(),
+            team_scores: BTreeMap::new(),
+            deaths: VecDeque::new(),
+            chat: VecDeque::new(),
+            text: VecDeque::new(),
+            center_print: None,
+            audio: VecDeque::new(),
+            reload_sounds: VecDeque::new(),
+            radar: BTreeMap::new(),
+            hostages: BTreeMap::new(),
+            hostages_killed: VecDeque::new(),
+            bomb: None,
+            bar: None,
+            menu: None,
+            vgui_menu: None,
+            buy_closed: false,
+            motd: String::new(),
+            motd_complete: false,
+            server_name: String::new(),
+            damage: None,
+            screen_fade: None,
+            screen_shake: None,
+            scenario: None,
+            night_vision: false,
+            flashlight_on: false,
+            flash_battery: 100,
+            fog: None,
+            weather: 0,
+            lightstyles: default_lightstyles(),
+            custom_decals: HashMap::new(),
+            static_entities: Vec::new(),
+            te_text_messages: Vec::new(),
+            corpses: Vec::new(),
+            server_weapon_anim: None,
+            unknown_messages: VecDeque::new(),
+            unknown_total: 0,
+            initialized: false,
+            hud_resets: 0,
+        }
+    }
 }
 
 /// The longest prefix of `text` of at most `max` bytes that ends on a character boundary.
@@ -648,6 +789,23 @@ impl HudState {
                 });
             }
             CsUserMsg::NvgToggle(on) => self.night_vision = *on,
+            CsUserMsg::Fog { color, density } => {
+                self.fog = (*density > 0.0).then_some(FogState {
+                    color: *color,
+                    density: *density,
+                });
+            }
+            CsUserMsg::Flashlight { on, battery } => {
+                self.flashlight_on = *on;
+                self.flash_battery = *battery;
+            }
+            CsUserMsg::FlashBat(battery) => {
+                self.flash_battery = *battery;
+            }
+            CsUserMsg::ReceiveW(weather) => {
+                self.weather = *weather;
+            }
+            CsUserMsg::Brass(_) => {}
             CsUserMsg::ClCorpse { .. } => {
                 if self.corpses.len() >= LOG_CAPACITY {
                     self.corpses.remove(0);
@@ -744,9 +902,53 @@ impl ClientEffects {
             | SvcMessage::StopSound(_)
             | SvcMessage::SoundFade(_) => self.sounds.handle(msg, env.precache),
             SvcMessage::NewUserMsg(_)
-            | SvcMessage::UserMsg { .. }
             | SvcMessage::CenterPrint(_)
             | SvcMessage::WeaponAnim { .. } => self.hud.handle(msg, env.time),
+            SvcMessage::LightStyle { index, pattern } => {
+                if let Some(slot) = self.hud.lightstyles.get_mut(usize::from(*index)) {
+                    *slot = pattern.clone();
+                }
+            }
+            SvcMessage::Particle(p) => {
+                self.tempents.spawn_particle_msg(p);
+            }
+            SvcMessage::SpawnStatic(ent) => {
+                if self.hud.static_entities.len() < 1024 {
+                    self.hud.static_entities.push(**ent);
+                }
+            }
+            SvcMessage::Customization(CustomizationMsg {
+                player,
+                res_type,
+                filename,
+                flags,
+                md5,
+                ..
+            }) => {
+                if *res_type == crate::resources::res_type::DECAL {
+                    self.hud.custom_decals.insert(
+                        *player,
+                        CustomDecalInfo {
+                            player: *player,
+                            filename: filename.clone(),
+                            flags: *flags,
+                            md5: *md5,
+                        },
+                    );
+                }
+            }
+            SvcMessage::UserMsg { decoded, .. } => {
+                if let CsUserMsg::Brass(payload) = decoded {
+                    self.tempents.spawn_brass_usermsg(
+                        payload,
+                        env.time,
+                        env.precache,
+                        env.world,
+                        &mut self.rng,
+                    );
+                }
+                self.hud.handle(msg, env.time);
+            }
             _ => {}
         }
     }
@@ -1455,5 +1657,78 @@ mod tests {
             0.0,
         );
         assert!(h.menu.as_ref().is_some_and(|m| m.multipart));
+    }
+
+    #[test]
+    fn phase8_hud_and_effect_messages_update_state() {
+        let mut fx = ClientEffects::default();
+        let precache = crate::precache::PrecacheTables::default();
+        let entities = BTreeMap::new();
+        let env = FxEnv::new(1.5, &precache, &entities, &crate::tempents::NoWorld);
+
+        fx.handle(
+            &SvcMessage::LightStyle {
+                index: 12,
+                pattern: "azm".to_string(),
+            },
+            &env,
+        );
+        let vals_t0 = evaluate_lightstyles(&fx.hud.lightstyles, 0.0);
+        let vals_t1 = evaluate_lightstyles(&fx.hud.lightstyles, 0.1);
+        let vals_t2 = evaluate_lightstyles(&fx.hud.lightstyles, 0.2);
+        assert_eq!(vals_t0[12], 0.0);
+        assert!((vals_t1[12] - 25.0 / 12.0).abs() < 1e-4);
+        assert!((vals_t2[12] - 1.0).abs() < 1e-4);
+
+        fx.handle(
+            &SvcMessage::Customization(CustomizationMsg {
+                player: 2,
+                res_type: crate::resources::res_type::DECAL,
+                filename: "!MD5deadbeef".to_string(),
+                index: 0,
+                download_size: 512,
+                flags: 1,
+                md5: Some([0xAB; 16]),
+            }),
+            &env,
+        );
+        assert_eq!(
+            fx.hud.custom_decals.get(&2).map(|c| c.filename.as_str()),
+            Some("!MD5deadbeef")
+        );
+
+        fx.hud.handle(
+            &um(
+                "Fog",
+                CsUserMsg::Fog {
+                    color: [10, 20, 30],
+                    density: 0.004,
+                },
+            ),
+            1.5,
+        );
+        assert_eq!(
+            fx.hud.fog,
+            Some(FogState {
+                color: [10, 20, 30],
+                density: 0.004,
+            })
+        );
+        fx.hud.handle(
+            &um(
+                "Flashlight",
+                CsUserMsg::Flashlight {
+                    on: true,
+                    battery: 85,
+                },
+            ),
+            1.5,
+        );
+        assert!(fx.hud.flashlight_on);
+        assert_eq!(fx.hud.flash_battery, 85);
+        fx.hud.handle(&um("FlashBat", CsUserMsg::FlashBat(70)), 1.6);
+        assert_eq!(fx.hud.flash_battery, 70);
+        fx.hud.handle(&um("ReceiveW", CsUserMsg::ReceiveW(2)), 1.6);
+        assert_eq!(fx.hud.weather, 2);
     }
 }

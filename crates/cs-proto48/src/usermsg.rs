@@ -346,6 +346,17 @@ pub enum CsUserMsg {
         team: u8,
         player_id: u8,
     },
+    Fog {
+        color: [u8; 3],
+        density: f32,
+    },
+    Flashlight {
+        on: bool,
+        battery: u8,
+    },
+    FlashBat(u8),
+    ReceiveW(u8),
+    Brass(Vec<u8>),
     Unknown {
         name: String,
         payload: Vec<u8>,
@@ -576,6 +587,28 @@ pub fn decode_cs_usermsg(name: &str, payload: &[u8]) -> Result<CsUserMsg, ProtoE
             team: r.read_u8()?,
             player_id: r.read_u8()?,
         },
+        "Fog" => {
+            let color = if r.remaining() >= 3 {
+                [r.read_u8()?, r.read_u8()?, r.read_u8()?]
+            } else {
+                [0, 0, 0]
+            };
+            let density = if r.remaining() >= 4 {
+                let bytes = r.read_bytes(4)?;
+                let d = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                if d.is_finite() { d } else { 0.0 }
+            } else {
+                0.0
+            };
+            CsUserMsg::Fog { color, density }
+        }
+        "Flashlight" => CsUserMsg::Flashlight {
+            on: r.read_u8()? != 0,
+            battery: r.read_u8()?,
+        },
+        "FlashBat" => CsUserMsg::FlashBat(r.read_u8()?),
+        "ReceiveW" => CsUserMsg::ReceiveW(r.read_u8()?),
+        "Brass" => CsUserMsg::Brass(r.remaining_slice().to_vec()),
         _ => CsUserMsg::Unknown {
             name: name.to_string(),
             payload: payload.to_vec(),
@@ -951,6 +984,28 @@ pub fn encode_cs_usermsg(msg: &CsUserMsg) -> (&'static str, Vec<u8>) {
             w.write_u8(*player_id);
             "ClCorpse"
         }
+        CsUserMsg::Fog { color, density } => {
+            w.write_bytes(color);
+            w.write_bytes(&density.to_le_bytes());
+            "Fog"
+        }
+        CsUserMsg::Flashlight { on, battery } => {
+            w.write_u8(u8::from(*on));
+            w.write_u8(*battery);
+            "Flashlight"
+        }
+        CsUserMsg::FlashBat(battery) => {
+            w.write_u8(*battery);
+            "FlashBat"
+        }
+        CsUserMsg::ReceiveW(weather) => {
+            w.write_u8(*weather);
+            "ReceiveW"
+        }
+        CsUserMsg::Brass(raw) => {
+            w.write_bytes(raw);
+            "Brass"
+        }
         CsUserMsg::Unknown { payload, .. } => {
             w.write_bytes(payload);
             "Unknown"
@@ -1071,6 +1126,28 @@ mod tests {
         let (name, raw) = encode_cs_usermsg(&m);
         assert_eq!(name, "ClCorpse");
         assert_eq!(decode_cs_usermsg(name, &raw).unwrap(), m);
+    }
+
+    #[test]
+    fn phase8_usermsgs_roundtrip() {
+        let msgs = vec![
+            CsUserMsg::Fog {
+                color: [128, 140, 155],
+                density: 0.0025,
+            },
+            CsUserMsg::Flashlight {
+                on: true,
+                battery: 87,
+            },
+            CsUserMsg::FlashBat(42),
+            CsUserMsg::ReceiveW(1),
+            CsUserMsg::Brass(vec![106, 1, 2, 3, 4]),
+        ];
+        for m in msgs {
+            let (name, raw) = encode_cs_usermsg(&m);
+            let decoded = decode_cs_usermsg(name, &raw).unwrap();
+            assert_eq!(decoded, m);
+        }
     }
 
     #[test]
