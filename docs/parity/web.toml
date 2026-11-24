@@ -4,82 +4,82 @@
 [[item]]
 id = "web_platform_clock_abstraction"
 status = "tested"
-evidence = "crates/cs-platform/src/lib.rs::manual_clock_advances, native_clock_is_monotonic (Clock trait seam for native and wasm32)"
+evidence = "crates/cs-platform/src/lib.rs::manual_clock_advances, native_clock_is_monotonic, memory_and_native_storage_roundtrip_and_reject_traversal"
 
 [[item]]
 id = "web_library_crates_wasm32_check"
 status = "implemented"
-evidence = ".github/workflows/ci.yml verifies cargo check --target wasm32-unknown-unknown across 10 library crates; no wasm32 tests or browser bundle yet"
+evidence = ".github/workflows/ci.yml verifies cargo check --target wasm32-unknown-unknown across all 13 library crates plus cs-relay --lib, cs-client --lib, and cs-web"
 
 [[item]]
 id = "web_cs_web_crate_and_js_glue"
-status = "missing"
-evidence = "Phase 4: cs-web wasm32 entrypoint, canvas lifecycle, and JS/DOM bindings"
+status = "tested"
+evidence = "crates/cs-web/src/state.rs::remote_channel_session_completes_protocol48_signon, local_game_with_bots_runs_headless_on_real_assets; wasm32 JS/DOM glue in crates/cs-web/src/wasm_entry.rs and web/"
 
 [[item]]
 id = "web_wgpu_webgpu_backend"
-status = "missing"
-evidence = "Phase 4: wgpu WebGPU surface and shader compatibility in Chromium/Firefox"
+status = "implemented"
+evidence = "crates/cs-client/src/render/mod.rs::new_from_surface and crates/cs-web/src/wasm_entry.rs create Browser WebGPU/GL canvas surface (Part B browser verification open)"
 
 [[item]]
 id = "web_wgpu_webgl2_fallback"
-status = "missing"
-evidence = "Phase 4: wgpu WebGL2 fallback within 2048x2048 lightmap atlas and uniform limits"
+status = "tested"
+evidence = "crates/cs-client/src/render/mod.rs::webgl2_limits_fit_lightmap_atlas (2048x2048 atlas and WebGL2 downlevel limits)"
 
 [[item]]
 id = "web_vfs_show_directory_picker"
-status = "missing"
-evidence = "Phase 4: VfsBackend over File System Access API (showDirectoryPicker) for local Half-Life assets"
+status = "implemented"
+evidence = "web/vfs_loader.js mountFromDirectoryPicker feeding cs-vfs Vfs::from_layered_memory"
 
 [[item]]
 id = "web_vfs_webkitdirectory_and_drag_drop"
-status = "missing"
-evidence = "Phase 4: fallback asset import via input webkitdirectory and drag-and-drop"
+status = "implemented"
+evidence = "web/vfs_loader.js mountFromFileList and mountFromDropEvent with web/index.html fallback"
 
 [[item]]
 id = "web_vfs_browser_storage_cache"
-status = "missing"
-evidence = "Phase 4: lazy reading and IndexedDB / OPFS caching of mounted game assets"
+status = "tested"
+evidence = "crates/cs-vfs/src/lib.rs::layered_memory_vfs_resolves_goldsrc_layer_priority, custom_backend_and_caching_backend_read_lazily_and_cache; crates/cs-web/src/state.rs::layered_browser_vfs_mount_and_map_discovery; IndexedDB persistence in web/vfs_loader.js"
 
 [[item]]
 id = "web_transport_websocket"
-status = "missing"
-evidence = "Phase 4: PacketTransport WebSocket implementation for browser and server"
+status = "tested"
+evidence = "crates/cs-transport/src/ws_proto.rs::rfc6455_accept_key_matches_standard_test_vector, frame_roundtrip_handles_masked_unmasked_extended_and_caps; crates/cs-transport/src/ws_native.rs::ws_server_serves_static_http_and_exchanges_binary_frames; crates/cs-transport/src/channel.rs::channel_transfers_packets_both_ways_and_enforces_limits"
 
 [[item]]
 id = "web_transport_webtransport_datagrams"
-status = "missing"
-evidence = "Phase 4: PacketTransport WebTransport datagram implementation for low-latency play"
+status = "implemented"
+evidence = "web/transport.js WebGameTransport attempts WebTransport datagrams on https:// URLs with automatic WebSocket fallback"
 
 [[item]]
 id = "web_server_web_port_and_static_hosting"
-status = "missing"
-evidence = "Phase 4: cs-server --web-port serving the wasm web client and accepting WS/WT game connections"
+status = "tested"
+evidence = "crates/cs-server/src/proto48.rs::parses_web_and_relay_flags, udp_and_websocket_clients_play_in_the_same_server; crates/cs-transport/src/ws_proto.rs::parses_http_requests_and_blocks_static_path_traversal; crates/cs-transport/src/ws_native.rs::multi_transport_routes_udp_and_ws_peers"
 
 [[item]]
 id = "web_relay_ws_to_udp_with_limits"
-status = "missing"
-evidence = "Phase 4: cs-relay WS->UDP proxy with allowlist, per-client rate/session caps, and protocol packet validation"
+status = "tested"
+evidence = "crates/cs-relay/src/policy.rs::allowlist_and_query_parser_fail_closed, session_tracker_and_token_bucket_enforce_limits; crates/cs-relay/src/validate.rs::validates_goldsrc_packets_and_rejects_arbitrary_udp_payloads; crates/cs-relay/tests/relay.rs::relay_rejects_disallowed_target_with_403, relay_bridges_ws_client_to_udp_protocol48_server"
 
 [[item]]
 id = "web_input_pointer_lock_raw_fullscreen"
-status = "missing"
-evidence = "Phase 4: browser Pointer Lock API, unadjustedMovement raw mouse, and fullscreen handling"
+status = "implemented"
+evidence = "web/input.js Pointer Lock unadjustedMovement raw mouse and F11 fullscreen with crates/cs-web/src/input_web.rs::keyboard_and_mouse_produce_usercmd"
 
 [[item]]
 id = "web_input_gamepad_and_touch"
-status = "missing"
-evidence = "Phase 4: Web Gamepad API and touch controls"
+status = "tested"
+evidence = "crates/cs-web/src/input_web.rs::gamepad_deadzone_and_buttons_map_to_usercmd, touch_controls_drive_movement_and_buttons"
 
 [[item]]
 id = "web_audio_user_gesture_unlock"
-status = "missing"
-evidence = "Phase 4: starting browser audio cleanly on first user gesture"
+status = "tested"
+evidence = "crates/cs-web/src/state.rs::audio_events_gated_until_user_gesture with web/audio.js WebAudioMixer first-gesture unlock"
 
 [[item]]
 id = "web_pwa_install_and_offline_bots"
-status = "missing"
-evidence = "Phase 4: installable PWA manifest/service worker and offline play with bots in browser"
+status = "implemented"
+evidence = "web/manifest.webmanifest, web/sw.js, and cs-web LocalGame offline bots (Part B PWA install verification open)"
 
 [[item]]
 id = "web_listen_server_webrtc_stretch"
