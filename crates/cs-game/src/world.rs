@@ -622,7 +622,7 @@ const SF_DOOR_ACTUALLY_WATER: u32 = 1 << 31;
 /// `SetMovedir` (ReGameDLL `subs.cpp`, read 2026-11-22): `movedir` is the direction `angles`
 /// point in, with the editor's special cases (0 -1 0) = up and (0 -2 0) = down; then `angles`
 /// is zeroed, so the brush is never rotated by the key.
-fn set_movedir(v: &mut cs_engine::EntVars) {
+pub(crate) fn set_movedir(v: &mut cs_engine::EntVars) {
     v.movedir = if v.angles == Vec3::new(0.0, -1.0, 0.0) {
         Vec3::Z
     } else if v.angles == Vec3::new(0.0, -2.0, 0.0) {

@@ -441,9 +441,11 @@ pub fn create_entity(classname: &str) -> Option<Box<dyn GameEntity>> {
         }
         "func_breakable" => Box::new(StaticBrush::new("func_breakable", BrushKind::Solid)),
         "func_button" => Box::new(StaticBrush::new("func_button", BrushKind::Solid)),
-        "func_plat" => Box::new(StaticBrush::new("func_plat", BrushKind::Solid)),
-        "func_train" => Box::new(StaticBrush::new("func_train", BrushKind::Solid)),
-        "func_pushable" => Box::new(StaticBrush::new("func_pushable", BrushKind::Solid)),
+        "func_plat" => Box::new(crate::movers::FuncPlat::default()),
+        "func_train" => Box::new(crate::movers::FuncTrain::default()),
+        "func_pushable" => Box::new(crate::movers::FuncPushable::default()),
+        "func_conveyor" => Box::new(crate::movers::FuncConveyor::default()),
+        "path_corner" => Box::new(crate::movers::PathCorner::default()),
         "func_illusionary" => Box::new(StaticBrush::new("func_illusionary", BrushKind::Illusionary)),
         #[cfg(feature = "test-hooks")]
         "test_dispatch" => Box::new(DispatchProbe(ProbeMode::Plain)),

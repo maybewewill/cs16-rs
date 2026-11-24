@@ -29,6 +29,7 @@ pub mod mapcycle;
 pub mod menus;
 mod messages;
 pub mod money;
+pub mod movers;
 pub mod observer;
 pub mod player;
 mod player_anim;

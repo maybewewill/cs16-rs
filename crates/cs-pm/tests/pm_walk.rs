@@ -611,3 +611,60 @@ fn fly_move_bounce_branch_uses_entity_friction() {
     assert!(bounced, "never reached the wall");
     assert_close(pm.velocity.x, -100.0, 1e-3, "bounced vx");
 }
+
+#[test]
+fn air_accelerate_caps_wishspeed_at_30_and_enables_air_strafe() {
+    // Stationary airborne player pushing forward (wishspeed = 250):
+    // wishspd is capped to 30 in PM_AirAccelerate, step is sv_airaccelerate * 250 * 0.01 = 25.
+    // Tick 1: vx = 25.0. Tick 2: addspeed = 30 - 25 = 5.0 -> vx = 30.0. Tick 3+: capped at 30.0.
+    let mut w = BoxWorld::with_floor();
+    let (mut pm, mut sh) = standing_player(Vec3::new(0.0, 0.0, 200.0));
+    pm.maxspeed = 250.0;
+    pm.movevars.airaccelerate = 10.0;
+    pm.cmd.forwardmove = 250.0;
+    run_cmd(&mut pm, &mut sh, &mut w, 10);
+    assert_eq!(pm.onground, -1);
+    assert_close(pm.velocity.x, 25.0, 1e-4, "tick 1 straight air accel");
+    assert_close(pm.velocity.z, -8.0, 1e-4, "tick 1 half-step gravity");
+
+    run_cmd(&mut pm, &mut sh, &mut w, 10);
+    assert_close(pm.velocity.x, 30.0, 1e-4, "tick 2 capped at 30");
+    run_cmd(&mut pm, &mut sh, &mut w, 10);
+    assert_close(pm.velocity.x, 30.0, 1e-4, "tick 3 stays capped at 30");
+
+    // Perpendicular air-strafing at 250 u/s (sidemove = 250 -> wishdir = (0, -1, 0)):
+    // dot(vel, wishdir) == 0 so addspeed == 30, adding 25 u/s laterally -> total speed > 250.
+    let (mut pm, mut sh) = standing_player(Vec3::new(0.0, 0.0, 200.0));
+    pm.maxspeed = 250.0;
+    pm.movevars.airaccelerate = 10.0;
+    pm.velocity = Vec3::new(250.0, 0.0, 0.0);
+    pm.cmd.sidemove = 250.0;
+    run_cmd(&mut pm, &mut sh, &mut w, 10);
+    assert_close(pm.velocity.x, 250.0, 1e-4, "no ground friction in air");
+    assert_close(pm.velocity.y, -25.0, 1e-4, "perpendicular air-strafe impulse");
+    let horiz = Vec3::new(pm.velocity.x, pm.velocity.y, 0.0).length();
+    assert!(horiz > 251.2, "air-strafe should increase horizontal speed: {horiz}");
+}
+
+#[test]
+fn edge_friction_and_multi_tick_move_stability() {
+    // Running off a ledge at x = 100 triggers edgefriction (2.0) when the 16u lookahead probe misses.
+    let mut w = BoxWorld::new();
+    w.solid(Vec3::new(-1000.0, -1000.0, -100.0), Vec3::new(100.0, 1000.0, 0.0), "LEDGE_FLOOR");
+    let (mut pm, mut sh) = standing_player(Vec3::new(112.0, 0.0, 36.0));
+    pm.maxspeed = 250.0;
+    pm.movevars.accelerate = 5.0;
+    pm.movevars.edgefriction = 2.0;
+    pm.velocity = Vec3::new(100.0, 0.0, 0.0);
+    run_cmd(&mut pm, &mut sh, &mut w, 10);
+    // Double friction drops speed by 8.0 instead of 4.0 (100 -> 92).
+    assert_close(pm.velocity.x, 92.0, 1e-3, "edgefriction doubles ground drop");
+
+    // Multi-tick movement off the ledge stays finite and transitions cleanly to airborne.
+    pm.cmd.forwardmove = 250.0;
+    for _ in 0..20 {
+        run_cmd(&mut pm, &mut sh, &mut w, 10);
+    }
+    assert_eq!(pm.onground, -1);
+    assert!(pm.velocity.z < 0.0 && pm.origin.is_finite());
+}
