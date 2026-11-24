@@ -77,7 +77,8 @@ evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_s
 
 [[item]]
 id = "svc_stopsound"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::voice_roomtype_stopsound_roundtrip; crates/cs-clientcore/src/sound.rs::tests::stop_sound_splits_entity_and_channel"
 
 [[item]]
 id = "svc_pings"
@@ -179,7 +180,8 @@ evidence = "crates/cs-clientcore/src/hud.rs::tests::phase8_hud_and_effect_messag
 
 [[item]]
 id = "svc_roomtype"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::voice_roomtype_stopsound_roundtrip; crates/cs-game/tests/phase7_env_items.rs::env_sound_sends_svc_roomtype_and_ambient_generic_ramps"
 
 [[item]]
 id = "svc_addangle"
@@ -252,11 +254,13 @@ evidence = "parse_svc_message only skips payload bytes and returns SvcMessage::I
 
 [[item]]
 id = "svc_voiceinit"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::voice_roomtype_stopsound_roundtrip; crates/cs-engine/tests/voice.rs::server_voice_init_relay_vban_and_enable_flag"
 
 [[item]]
 id = "svc_voicedata"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::voice_roomtype_stopsound_roundtrip; crates/cs-engine/tests/voice.rs::server_voice_init_relay_vban_and_enable_flag"
 
 [[item]]
 id = "svc_sendextrainfo"
@@ -326,7 +330,8 @@ evidence = "crates/cs-proto48/src/messages.rs::tests::sound_pings_and_clc_resour
 
 [[item]]
 id = "clc_voicedata"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::voice_roomtype_stopsound_roundtrip; crates/cs-engine/tests/voice.rs::server_voice_init_relay_vban_and_enable_flag"
 
 [[item]]
 id = "clc_hltv"

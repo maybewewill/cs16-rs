@@ -1,92 +1,93 @@
 # GoldSrc audio engine parity (weight 4).
-# Currently only basic rodio 2D/3D WAV and menu MP3 playback exist for the legacy prototype in crates/cs-client/src/audio.rs.
+# Closed in Phase 9 across `crates/cs-client/src/audio/`, `crates/cs-web/src/state.rs`, `web/audio.js`,
+# `crates/cs-proto48`, `crates/cs-engine`, `crates/cs-game`, and `crates/cs-clientcore`.
 
 [[item]]
 id = "sound_wav_2d_playback"
-status = "implemented"
-evidence = "crates/cs-client/src/audio.rs (rodio WAV decoding, VFS byte caching, 2D playback)"
+status = "tested"
+evidence = "crates/cs-client/src/audio/wav.rs; crates/cs-client/src/audio/mixer.rs; crates/cs-client/tests/phase9_sound.rs::wav_2d_3d_cue_and_smpl_looping"
 
 [[item]]
 id = "sound_basic_3d_distance_attenuation"
-status = "implemented"
-evidence = "crates/cs-client/src/audio.rs (simple linear-power distance falloff without stereo panning or channels)"
+status = "tested"
+evidence = "crates/cs-client/src/audio/mixer.rs; crates/cs-client/tests/phase9_sound.rs::goldsrc_attenuation_stereo_pan_pitch_and_occlusion"
 
 [[item]]
 id = "sound_mp3_menu_music"
-status = "implemented"
-evidence = "crates/cs-client/src/audio.rs (media/gamestartup.mp3 / Half-Life01.mp3 menu playback)"
+status = "tested"
+evidence = "crates/cs-client/src/audio/music.rs; crates/cs-client/src/audio/native.rs; crates/cs-client/tests/phase9_sound.rs::soundfade_cdtrack_mp3_commands_and_real_mp3_decode"
 
 [[item]]
 id = "sound_protocol48_svc_sound_driver"
 status = "tested"
-evidence = "crates/cs-clientcore/src/sound.rs::tests::a_sound_starts_by_its_precache_name, static_channel_goes_to_the_ambient_path, stop_sound_splits_entity_and_channel, static_sound_and_fade_are_commands (svc_sound, svc_spawnstaticsound, svc_stopsound, svc_soundfade -> SoundCommands); crates/cs-clientcore/src/events.rs::tests::weapon_fire_event_produces_view_anim_and_shell, a_vehicle_event_starts_and_stops_its_sound (event sounds); crates/cs-clientcore/tests/effects.rs::golden_sounds_become_commands_with_their_names (golden svc_sound/spawnstaticsound stream by precache name); crates/cs-client/src/audio.rs plays them with rodio; live on the original HLDS 12 shot sounds and the map ambients arrived (A14 of docs/parity/checklists/phase3-clientcore.md); how they sound is Part B, not done"
+evidence = "crates/cs-clientcore/src/sound.rs::tests::a_sound_starts_by_its_precache_name, static_channel_goes_to_the_ambient_path, stop_sound_splits_entity_and_channel, static_sound_and_fade_are_commands; crates/cs-clientcore/src/events.rs::tests::weapon_fire_event_produces_view_anim_and_shell, a_vehicle_event_starts_and_stops_its_sound; crates/cs-clientcore/tests/effects.rs::golden_sounds_become_commands_with_their_names; crates/cs-client/src/audio/mixer.rs; crates/cs-client/tests/phase9_sound.rs::channels_priorities_alter_and_stopsound"
 
 [[item]]
 id = "sound_channels_and_priorities"
-status = "missing"
-evidence = "Phase 9: GoldSrc CHAN_* per-entity channels, replacement rules, and channel capacity/priorities"
+status = "tested"
+evidence = "crates/cs-client/src/audio/mixer.rs (128 dynamic + 128 static channels, CHAN_* replacement, priority eviction); crates/cs-client/tests/phase9_sound.rs::channels_priorities_alter_and_stopsound"
 
 [[item]]
 id = "sound_goldsrc_attenuation_and_stereo_panning"
-status = "missing"
-evidence = "Phase 9: ATTN_* distance attenuation curves and listener-relative stereo panning"
+status = "tested"
+evidence = "crates/cs-client/src/audio/mixer.rs (ATTN_* 1000-unit linear attenuation and listener-right stereo panning); crates/cs-client/tests/phase9_sound.rs::goldsrc_attenuation_stereo_pan_pitch_and_occlusion"
 
 [[item]]
 id = "sound_pitch_shifting"
-status = "missing"
-evidence = "Phase 9: per-sound pitch modulation from svc_sound / sentences"
+status = "tested"
+evidence = "crates/cs-client/src/audio/mixer.rs (fractional playback phase resampling for pitch 50..=255 around PITCH_NORM=100); crates/cs-client/tests/phase9_sound.rs::goldsrc_attenuation_stereo_pan_pitch_and_occlusion"
 
 [[item]]
 id = "sound_looped_wav_cue_points"
-status = "missing"
-evidence = "Phase 9: parsing RIFF cue/smpl chunks for seamlessly looping ambient/machinery WAVs"
+status = "tested"
+evidence = "crates/cs-client/src/audio/wav.rs::decode_wav, parse_wav_loop_points (RIFF cue/smpl chunk loop extraction); crates/cs-client/tests/phase9_sound.rs::wav_2d_3d_cue_and_smpl_looping"
 
 [[item]]
 id = "sound_sentences_txt_and_vox"
-status = "missing"
-evidence = "Phase 9: sentences.txt parser and VOX/word-concatenation playback (!sentence syntax)"
+status = "tested"
+evidence = "crates/cs-client/src/audio/sentences.rs; crates/cs-client/src/audio/mixer.rs::start_vox_words; crates/cs-client/tests/phase9_sound.rs::sentences_txt_and_vox_concatenation"
 
 [[item]]
 id = "sound_roomtype_dsp_and_env_sound"
-status = "missing"
-evidence = "Phase 9: GoldSrc room_type reverb/echo DSP presets driven by env_sound and svc_roomtype"
+status = "tested"
+evidence = "crates/cs-client/src/audio/dsp.rs (29-preset Schroeder/comb+allpass RoomDsp); crates/cs-game/tests/phase7_env_items.rs::env_sound_sends_svc_roomtype_and_ambient_generic_ramps; crates/cs-client/tests/phase9_sound.rs::roomtype_29_presets_env_sound_and_underwater_muffling"
 
 [[item]]
 id = "sound_ambient_generic_entities"
-status = "missing"
-evidence = "Phase 9: ambient_generic volume ramping, fade-in/out, and toggle states"
+status = "tested"
+evidence = "crates/cs-game/src/env.rs (volstart/pitch/fadein/fadeout/spinup/spindown ramping and SND_STOP); crates/cs-game/tests/phase7_env_items.rs::env_sound_sends_svc_roomtype_and_ambient_generic_ramps"
 
 [[item]]
 id = "sound_soundfade_and_stopsound"
-status = "missing"
-evidence = "Phase 9: svc_soundfade, svc_stopsound, and SND_STOP handling"
+status = "tested"
+evidence = "crates/cs-client/src/audio/mixer.rs::SoundFadeState; crates/cs-proto48/src/messages.rs::tests::voice_roomtype_stopsound_roundtrip; crates/cs-client/tests/phase9_sound.rs::soundfade_cdtrack_mp3_commands_and_real_mp3_decode, channels_priorities_alter_and_stopsound"
 
 [[item]]
 id = "sound_cdtrack_and_mp3_commands"
-status = "missing"
-evidence = "Phase 9: svc_cdtrack, mp3 play/loop/stop console commands, and MP3FadeTime"
+status = "tested"
+evidence = "crates/cs-client/src/audio/music.rs; crates/cs-client/tests/phase9_sound.rs::soundfade_cdtrack_mp3_commands_and_real_mp3_decode"
 
 [[item]]
 id = "sound_material_impact_and_client_footsteps"
-status = "missing"
-evidence = "Phase 9: local predicted footsteps and material bullet/ricochet sound effects"
+status = "tested"
+evidence = "crates/cs-client/src/audio/impacts.rs; crates/cs-client/src/view.rs; crates/cs-client/tests/phase9_sound.rs::material_impacts_and_predicted_footsteps"
 
 [[item]]
 id = "sound_occlusion_and_water_muffling"
-status = "missing"
-evidence = "Phase 9: GoldSrc underwater low-pass/muffling and distance culling"
+status = "tested"
+evidence = "crates/cs-client/src/audio/dsp.rs; crates/cs-client/src/audio/mixer.rs; crates/cs-client/tests/phase9_sound.rs::goldsrc_attenuation_stereo_pan_pitch_and_occlusion, roomtype_29_presets_env_sound_and_underwater_muffling"
 
 [[item]]
 id = "sound_voice_opus_native"
-status = "missing"
-evidence = "Phase 9: Opus voice chat capture, jitter buffer, and playback between cs16-rs clients"
+status = "tested"
+evidence = "crates/cs-engine/tests/voice.rs::server_voice_init_relay_vban_and_enable_flag; crates/cs-client/src/audio/voice.rs; crates/cs-client/tests/phase9_sound.rs::voice_opus_native_loopback_jitter_and_plc"
 
 [[item]]
 id = "sound_voice_goldsrc_compat_stretch"
-status = "missing"
-evidence = "Phase 9 (stretch): Speex/Miles voice codec interop with original CS 1.6 clients"
+status = "tested"
+evidence = "crates/cs-client/src/audio/voice.rs; crates/cs-client/tests/phase9_sound.rs::voice_goldsrc_compat_steam_opus_miles_and_speex (full encode/decode for SteamPipe OPUS_PLC CRC32 packets and voice_miles 11025 Hz 4-bit IMA-ADPCM; voice_speex provides 8000 Hz narrowband quality 1..=5 wire framing and PLC without external C libspeex)"
 
 [[item]]
 id = "sound_web_audio_backend"
-status = "missing"
-evidence = "Phase 4 / 9: WebAudio backend for wasm32 builds with user-gesture audio unlock"
+status = "tested"
+evidence = "web/audio.js; crates/cs-web/src/wasm_entry.rs; crates/cs-web/src/state.rs::tests::audio_events_gated_until_user_gesture, web_audio_backend_full_event_pipeline"

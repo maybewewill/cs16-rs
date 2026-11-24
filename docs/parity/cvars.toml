@@ -96,7 +96,8 @@ status = "implemented"
 
 [[item]]
 id = "mp3volume"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/tests/phase9_sound.rs::soundfade_cdtrack_mp3_commands_and_real_mp3_decode"
 
 [[item]]
 id = "mp_autoteambalance"
@@ -186,7 +187,8 @@ status = "implemented"
 
 [[item]]
 id = "room_type"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-game/tests/phase7_env_items.rs::env_sound_sends_svc_roomtype_and_ambient_generic_ramps; crates/cs-client/tests/phase9_sound.rs::roomtype_29_presets_env_sound_and_underwater_muffling"
 
 [[item]]
 id = "sensitivity"
@@ -349,7 +351,8 @@ status = "implemented"
 
 [[item]]
 id = "volume"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/tests/phase9_sound.rs::wav_2d_3d_cue_and_smpl_looping"
 
 [[item]]
 id = "mp_forcecamera"
@@ -530,13 +533,13 @@ evidence = "ActionInput dispatch in crates/cs-cvar/src/lib.rs and legacy cs-clie
 
 [[item]]
 id = "+voicerecord"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_binds; crates/cs-web/src/state.rs::tests::web_audio_backend_full_event_pipeline; crates/cs-client/tests/phase9_sound.rs::voice_opus_native_loopback_jitter_and_plc"
 
 [[item]]
 id = "-voicerecord"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_binds; crates/cs-client/tests/phase9_sound.rs::voice_opus_native_loopback_jitter_and_plc"
 
 [[item]]
 id = "_cl_autowepswitch"
@@ -645,8 +648,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv
 
 [[item]]
 id = "bgmvolume"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/tests/phase9_sound.rs::soundfade_cdtrack_mp3_commands_and_real_mp3_decode"
 
 [[item]]
 id = "bind"
@@ -825,8 +828,8 @@ evidence = "dispatched in crates/cs-cvar/src/lib.rs and legacy cs-client"
 
 [[item]]
 id = "cd"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs::execute_script; crates/cs-client/tests/phase9_sound.rs::soundfade_cdtrack_mp3_commands_and_real_mp3_decode"
 
 [[item]]
 id = "changelevel"
@@ -1435,8 +1438,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/video.cfg
 
 [[item]]
 id = "hisound"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
 
 [[item]]
 id = "hostage_ai_enable"
@@ -1830,13 +1833,13 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv
 
 [[item]]
 id = "mp3"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs::execute_script; crates/cs-client/tests/phase9_sound.rs::soundfade_cdtrack_mp3_commands_and_real_mp3_decode"
 
 [[item]]
 id = "mp3fadetime"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-web/src/state.rs::tests::web_audio_backend_full_event_pipeline; crates/cs-client/tests/phase9_sound.rs::soundfade_cdtrack_mp3_commands_and_real_mp3_decode"
 
 [[item]]
 id = "mp_allowmonsters"
@@ -2130,8 +2133,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cf
 
 [[item]]
 id = "room_off"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/tests/phase9_sound.rs::roomtype_29_presets_env_sound_and_underwater_muffling"
 
 [[item]]
 id = "s_combine_sounds"
@@ -2150,8 +2153,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cf
 
 [[item]]
 id = "s_show"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
 
 [[item]]
 id = "s_warn_late_precache"
@@ -2605,8 +2608,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_c
 
 [[item]]
 id = "suitvolume"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-web/src/state.rs::tests::web_audio_backend_full_event_pipeline"
 
 [[item]]
 id = "sv_aim"
@@ -2665,8 +2668,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv
 
 [[item]]
 id = "sv_alltalk"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL voice_gamemgr.cpp)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/tests/voice.rs::server_voice_init_relay_vban_and_enable_flag"
 
 [[item]]
 id = "sv_background_freeze"
@@ -2855,13 +2858,13 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv
 
 [[item]]
 id = "sv_voiceenable"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_user.cpp)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/tests/voice.rs::server_voice_init_relay_vban_and_enable_flag"
 
 [[item]]
 id = "sv_voicequality"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/tests/voice.rs::server_voice_init_relay_vban_and_enable_flag"
 
 [[item]]
 id = "team"
@@ -3045,48 +3048,48 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv
 
 [[item]]
 id = "voice_avggain"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/tests/phase9_sound.rs::voice_opus_native_loopback_jitter_and_plc"
 
 [[item]]
 id = "voice_enable"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/tests/phase9_sound.rs::voice_opus_native_loopback_jitter_and_plc"
 
 [[item]]
 id = "voice_forcemicrecord"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/src/audio/native.rs (controls microphone capture open retries on native)"
 
 [[item]]
 id = "voice_inputfromfile"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL host_cmd.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
 
 [[item]]
 id = "voice_maxgain"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/tests/phase9_sound.rs::voice_opus_native_loopback_jitter_and_plc"
 
 [[item]]
 id = "voice_modenable"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/src/app.rs (gated with voice_enable before step_voice)"
 
 [[item]]
 id = "voice_recordtofile"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL host_cmd.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
 
 [[item]]
 id = "voice_scale"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-web/src/state.rs::tests::web_audio_backend_full_event_pipeline"
 
 [[item]]
 id = "voice_serverdebug"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL voice_gamemgr.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
 
 [[item]]
 id = "width"
@@ -3167,3 +3170,18 @@ evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs
 id = "cl_viewmodel_lag"
 status = "tested"
 evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs; crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps"
+
+[[item]]
+id = "s_occfactor"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/src/audio/mixer.rs; crates/cs-client/tests/phase9_sound.rs::goldsrc_attenuation_stereo_pan_pitch_and_occlusion"
+
+[[item]]
+id = "sv_voicecodec"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/tests/voice.rs::server_voice_init_relay_vban_and_enable_flag"
+
+[[item]]
+id = "voice_loopback"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-web/src/state.rs::tests::web_audio_backend_full_event_pipeline; crates/cs-client/tests/phase9_sound.rs::voice_goldsrc_compat_steam_opus_miles_and_speex"
