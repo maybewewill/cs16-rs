@@ -1,6 +1,8 @@
 # GoldSrc audio engine parity (weight 4).
-# Closed in Phase 9 across `crates/cs-client/src/audio/`, `crates/cs-web/src/state.rs`, `web/audio.js`,
+# Implemented in Phase 9 across `crates/cs-client/src/audio/`, `crates/cs-web/src/state.rs`, `web/audio.js`,
 # `crates/cs-proto48`, `crates/cs-engine`, `crates/cs-game`, and `crates/cs-clientcore`.
+# `tested` means our own tests assert the behaviour. The phase-9 exit check (a blind comparison of
+# recordings with the original on three scenes) has not been done, so no item is `verified`.
 
 [[item]]
 id = "sound_wav_2d_playback"

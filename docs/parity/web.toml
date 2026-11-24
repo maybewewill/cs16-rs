@@ -48,8 +48,8 @@ evidence = "crates/cs-transport/src/ws_proto.rs::rfc6455_accept_key_matches_stan
 
 [[item]]
 id = "web_transport_webtransport_datagrams"
-status = "implemented"
-evidence = "web/transport.js WebGameTransport attempts WebTransport datagrams on https:// URLs with automatic WebSocket fallback"
+status = "missing"
+evidence = "Client side only: web/transport.js WebGameTransport tries WebTransport datagrams on https:// URLs and falls back to WebSocket. No server accepts WebTransport (cs-server/cs-transport have no HTTP/3/QUIC endpoint), so every connection uses WebSocket today"
 
 [[item]]
 id = "web_server_web_port_and_static_hosting"

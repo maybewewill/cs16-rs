@@ -1,6 +1,9 @@
 # GoldSrc rendering parity (cs-assets parsers + cs-client wgpu renderer, weight 10).
-# Closed in Phase 8: full GoldSrc visual/renderer parity across BSP, MDL, SPR, decals, particles,
-# beams, dynamic lights, fog, view effects, MSAA/anisotropy, and software-mode rendering.
+# Phase 8 implemented the renderer features below (BSP, MDL, SPR, decals, particles, beams,
+# dynamic lights, fog, view effects, MSAA/anisotropy, software mode). `tested` means our own tests
+# assert the behaviour; nothing here has been compared with the original client yet. The phase-8
+# exit check (reference screenshots from fixed cameras within tolerance) has not been done, so no
+# item is `verified`. Tests that need the game files or a GPU adapter return early without them.
 
 [[item]]
 id = "render_bsp_v30_parser_and_lightmap_atlas"
@@ -89,8 +92,8 @@ evidence = "crates/cs-client/tests/phase8_render.rs::rendermodes_all_renderfx_fa
 
 [[item]]
 id = "render_water_warp_and_ripples"
-status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps; crates/cs-client/src/view_effects.rs::tests::screen_fade_and_underwater_work"
+status = "implemented"
+evidence = "crates/cs-client/src/render/shaders/bsp.wgsl (FLAG_WATER: a sine UV warp and a vertex wave). Approximation: not the original's turbsin table warp (EmitWaterPolys), so the look differs; no test asserts the surface warp (the cited view_effects test covers the underwater screen tint only, see render_screen_fade_and_shake)"
 
 [[item]]
 id = "render_scrolling_textures"
