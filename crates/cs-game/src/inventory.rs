@@ -323,7 +323,7 @@ fn item_ids(p: &Player) -> Vec<WeaponId> {
 }
 
 /// `CBasePlayer::HasPlayerItem`: the player carries a weapon of the class of `id`.
-pub(crate) fn has_player_item(p: &Player, id: WeaponId) -> bool {
+pub fn has_player_item(p: &Player, id: WeaponId) -> bool {
     let slot = item_slot(id);
     p.items.get(slot).is_some_and(|list| list.iter().any(|i| i.weapon.id == id))
 }
@@ -405,6 +405,9 @@ fn can_have_ammo(p: &Player, name: &str, max_carry: i32) -> bool {
 /// weapon of its class yet (and a weapon with no ammo, only if it has none of its class).
 fn can_have_player_item(eng: &EngineApi<'_>, p: &Player, slot: u8, id: WeaponId) -> bool {
     if !is_alive(eng, slot) {
+        return false;
+    }
+    if p.owns_shield && (item_slot(id) == PRIMARY_WEAPON_SLOT || id == WeaponId::Elite) {
         return false;
     }
     let Some(info) = item_info(id) else {
@@ -805,9 +808,32 @@ pub(crate) fn give_default_items(g: &mut GameState, eng: &mut EngineApi<'_>, slo
 /// are not ported.) `lost_items` is `!m_bNotKilled`.
 pub(crate) fn on_spawn_equip(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, lost_items: bool) {
     let is_vip = player_ref(g, slot).is_some_and(|p| p.is_vip);
-    if lost_items || is_vip {
-        give_default_items(g, eng, slot);
+    if !lost_items && !is_vip {
+        return;
     }
+    if !is_vip && equip_from_map_entities(g, eng, slot) {
+        return;
+    }
+    give_default_items(g, eng, slot);
+}
+
+fn equip_from_map_entities(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) -> bool {
+    let mut equip_ents = Vec::new();
+    let mut cursor = eng.find_by_classname(None, "game_player_equip");
+    while let Some(id) = cursor {
+        if eng.ent(id).is_some_and(|v| v.spawnflags & SF_PLAYEREQUIP_USEONLY == 0) {
+            equip_ents.push(id);
+        }
+        cursor = eng.find_by_classname(Some(id), "game_player_equip");
+    }
+    if equip_ents.is_empty() {
+        return false;
+    }
+    remove_all_items(g, eng, slot, false);
+    for id in equip_ents {
+        crate::entity::use_entity(g, eng, id, Some(eng.client_edict(slot)), Some(id), crate::entity::UseType::Set, 1.0);
+    }
+    true
 }
 
 // ---- selecting ----
@@ -929,6 +955,25 @@ pub(crate) fn drop_player_item(
         client_print(eng, slot, HUD_PRINTCENTER, "#Weapon_Cannot_Be_Dropped", &[]);
         return None;
     }
+    if name == Some("weapon_shield") {
+        return p.owns_shield.then(|| drop_shield(g, eng, slot, true)).flatten();
+    }
+    if name.is_none() && p.owns_shield {
+        let active_droppable = p
+            .active_item
+            .and_then(|id| {
+                // `drop` while holding pistol drops pistol; holding non-droppable item (e.g. knife) drops shield.
+                (!matches!(
+                    id,
+                    WeaponId::Knife | WeaponId::HeGrenade | WeaponId::Flashbang | WeaponId::SmokeGrenade
+                ))
+                .then_some(id)
+            })
+            .is_some();
+        if !active_droppable {
+            return drop_shield(g, eng, slot, true);
+        }
+    }
     let id = match name {
         Some(name) => item_id_by_name(p, name)?,
         None => p.active_item?,
@@ -997,9 +1042,126 @@ pub(crate) fn drop_player_item(
     )
 }
 
-/// `CBasePlayer::DropPrimary` (`player.cpp` 10533, vanilla): drops the head of the primary slot.
+/// `CBasePlayer::DropPrimary` (`player.cpp` 10533, vanilla): drops the head of the primary slot
+/// or the tactical shield when carried.
 pub(crate) fn drop_primary(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    if player_ref(g, slot).is_some_and(|p| p.owns_shield) {
+        drop_shield(g, eng, slot, true);
+        return;
+    }
     drop_slot_head(g, eng, slot, PRIMARY_WEAPON_SLOT);
+}
+
+/// Gives a tactical shield (`CBasePlayer::GiveShield`, `player.cpp`) to `slot`, updating
+/// `has_primary`, `pev->gamestate`, and optionally re-deploying the active weapon so shield
+/// view/world models take effect.
+pub(crate) fn give_shield(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, deploy: bool) {
+    let ent = eng.client_edict(slot);
+    let active = {
+        let Some(p) = player_mut(g, slot) else {
+            return;
+        };
+        p.owns_shield = true;
+        p.has_primary = true;
+        p.shield_drawn = false;
+        p.rebuy_record.shield = true;
+        p.rebuy_record.primary = None;
+        p.active_item
+    };
+    if let Some(v) = eng.ent_mut(ent) {
+        v.gamestate = crate::player::HITGROUP_SHIELD_ENABLED;
+    }
+    eng.emit_sound(ent, CHAN_ITEM, "items/gunpickup2.wav", 1.0, ATTN_NORM, PITCH_NORM);
+    if deploy && let Some(active_id) = active {
+        with_weapon(g, eng, slot, active_id, |b, w| {
+            b.deploy(w);
+        });
+    }
+    crate::player::reset_max_speed(g, eng, slot);
+}
+
+/// Clears tactical shield ownership from `slot`, restores `pev->gamestate`, and clears
+/// `HIDEHUD_CROSSHAIR` / `WPNSTATE_SHIELD_DRAWN`.
+pub(crate) fn remove_shield(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    let ent = eng.client_edict(slot);
+    let active = {
+        let Some(p) = player_mut(g, slot) else {
+            return;
+        };
+        p.owns_shield = false;
+        p.shield_drawn = false;
+        p.has_primary = !p.items[PRIMARY_WEAPON_SLOT].is_empty();
+        p.hide_hud &= !crate::player::HIDEHUD_CROSSHAIR;
+        for list in &mut p.items {
+            for item in list {
+                item.weapon.weapon_state &= !crate::weapons::WPNSTATE_SHIELD_DRAWN;
+            }
+        }
+        p.active_item
+    };
+    if let Some(v) = eng.ent_mut(ent) {
+        v.gamestate = crate::player::HITGROUP_SHIELD_DISABLED;
+    }
+    if let Some(active_id) = active {
+        with_weapon(g, eng, slot, active_id, |b, w| {
+            b.deploy(w);
+        });
+    }
+    crate::player::reset_max_speed(g, eng, slot);
+}
+
+/// Drops the player's tactical shield into the world as a `weapon_shield` entity.
+pub(crate) fn drop_shield(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    slot: u8,
+    deploy: bool,
+) -> Option<EdictId> {
+    if !player_ref(g, slot).is_some_and(|p| p.owns_shield) {
+        return None;
+    }
+    let ent = eng.client_edict(slot);
+    let v = eng.ent(ent)?;
+    let (origin, angles) = (v.origin, v.angles);
+    let (forward, ..) = cs_sim::pm::math::angle_vectors(angles);
+    remove_shield(g, eng, slot);
+    if !deploy
+        && let Some(p) = player_mut(g, slot)
+    {
+        p.rebuy_record.shield = false;
+    }
+
+    let now = eng.time();
+    let shield_ent = eng.create_entity("weapon_shield")?;
+    attach(
+        eng,
+        shield_ent,
+        Box::new(WorldShield {
+            dropper: Some(ent),
+            ignore_dropper_until: now + 0.5,
+        }),
+    );
+    let mut angles_flat = angles;
+    angles_flat.x = 0.0;
+    angles_flat.z = 0.0;
+    let drop_origin = origin + forward * 10.0;
+    let vel = forward * 400.0;
+    if let Some(sv) = eng.ent_mut(shield_ent) {
+        sv.origin = drop_origin;
+        sv.angles = angles_flat;
+        sv.velocity = vel;
+        sv.movetype = MOVETYPE_TOSS;
+        sv.solid = SOLID_TRIGGER;
+        sv.nextthink = now + f64::from(ITEM_KILL_DELAY);
+    }
+    eng.set_model(shield_ent, "models/w_shield.mdl");
+    eng.set_size(
+        shield_ent,
+        Vec3::new(-16.0, -16.0, 0.0),
+        Vec3::new(16.0, 16.0, 16.0),
+    );
+    eng.set_origin(shield_ent, drop_origin);
+    Some(shield_ent)
 }
 
 /// `CBasePlayer::DropSecondary` (`player.cpp` 10507, vanilla): drops the head of the pistol slot.
@@ -1856,5 +2018,125 @@ impl GameEntity for WorldWeapon {
         }
         // `AttachToPlayer`/`Kill`: the entity has served its purpose.
         eng.remove_entity(id);
+    }
+}
+
+/// World tactical shield (`weapon_shield`, `CWShield`).
+#[derive(Default)]
+pub(crate) struct WorldShield {
+    dropper: Option<EdictId>,
+    ignore_dropper_until: f64,
+}
+
+impl GameEntity for WorldShield {
+    fn classname(&self) -> &'static str {
+        "weapon_shield"
+    }
+
+    fn spawn(&mut self, eng: &mut EngineApi<'_>, id: EdictId, _keys: &[(String, String)]) -> bool {
+        precache_model(eng, "models/w_shield.mdl");
+        if let Some(v) = eng.ent_mut(id) {
+            v.movetype = MOVETYPE_TOSS;
+            v.solid = SOLID_TRIGGER;
+        }
+        eng.set_model(id, "models/w_shield.mdl");
+        eng.set_size(id, Vec3::new(-16.0, -16.0, 0.0), Vec3::new(16.0, 16.0, 16.0));
+        let origin = eng.ent(id).map_or(Vec3::ZERO, |v| v.origin);
+        eng.set_origin(id, origin);
+        true
+    }
+
+    fn think(&mut self, _g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId) {
+        eng.remove_entity(id);
+    }
+
+    fn restart(&mut self, _g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId) {
+        eng.remove_entity(id);
+    }
+
+    fn touch(&mut self, g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId, other: EdictId) {
+        if self.dropper == Some(other) && eng.time() < self.ignore_dropper_until {
+            return;
+        }
+        let Some(slot) = player_slot(g, eng, other).map(|s| s as u8) else {
+            return;
+        };
+        if !is_alive(eng, slot) {
+            return;
+        }
+        let can_take = player_ref(g, slot).is_some_and(|p| {
+            !p.is_vip
+                && !p.has_primary
+                && !p.owns_shield
+                && !has_player_item(p, WeaponId::Elite)
+        });
+        if !can_take {
+            return;
+        }
+        give_shield(g, eng, slot, true);
+        eng.remove_entity(id);
+    }
+}
+
+const SF_PLAYEREQUIP_USEONLY: u32 = 1;
+
+/// `game_player_equip` (`CGamePlayerEquip`): grants configured weapons/armor/items on spawn or use.
+#[derive(Default)]
+pub(crate) struct GamePlayerEquip {
+    items: Vec<(String, i32)>,
+}
+
+impl GameEntity for GamePlayerEquip {
+    fn classname(&self) -> &'static str {
+        "game_player_equip"
+    }
+
+    fn spawn(&mut self, _eng: &mut EngineApi<'_>, _id: EdictId, keys: &[(String, String)]) -> bool {
+        self.items.clear();
+        for (k, v) in keys {
+            if matches!(
+                k.as_str(),
+                "classname" | "origin" | "angles" | "targetname" | "target" | "spawnflags" | "model"
+            ) {
+                continue;
+            }
+            let count = crate::menus::atoi(v).clamp(1, 16);
+            self.items.push((k.clone(), count));
+        }
+        true
+    }
+
+    fn use_(
+        &mut self,
+        g: &mut GameState,
+        eng: &mut EngineApi<'_>,
+        _id: EdictId,
+        activator: Option<EdictId>,
+        _caller: Option<EdictId>,
+        _use_type: crate::entity::UseType,
+        _value: f32,
+    ) {
+        let Some(act) = activator else {
+            return;
+        };
+        let Some(slot) = player_slot(g, eng, act).map(|s| s as u8) else {
+            return;
+        };
+        if !is_alive(eng, slot) {
+            return;
+        }
+        for (class, count) in &self.items {
+            for _ in 0..*count {
+                match class.as_str() {
+                    "weapon_shield" => give_shield(g, eng, slot, true),
+                    "item_kevlar" => crate::buy::give_armor_item(g, eng, slot, crate::buy::ArmorItem::Kevlar),
+                    "item_assaultsuit" => crate::buy::give_armor_item(g, eng, slot, crate::buy::ArmorItem::AssaultSuit),
+                    "item_thighpack" => crate::player::give_defuser(g, eng, slot),
+                    other => {
+                        give_named_item(g, eng, slot, other);
+                    }
+                }
+            }
+        }
     }
 }

@@ -176,6 +176,8 @@ fn shield_secondary_fire(me: &dyn WeaponBehavior, w: &mut WeaponCtx<'_, '_>) -> 
         w.weapon.max_speed = MAX_SPEED_SHIELD;
         w.player_mut().shield_drawn = true;
     }
+    let drawn = w.weapon.weapon_state & WPNSTATE_SHIELD_DRAWN != 0;
+    super::core::update_shield_crosshair(w, !drawn);
     w.reset_max_speed(me);
     w.weapon.next_secondary_attack = 0.4;
     w.weapon.next_primary_attack = w.get_next_attack_delay(0.4);

@@ -666,6 +666,23 @@ impl CsGame {
         });
     }
 
+    /// Uses the entity `id` with `activator` (`USE_USE`). For tests only (cargo feature
+    /// `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn test_use_entity_by(&mut self, eng: &mut EngineApi<'_>, id: EdictId, activator: EdictId) {
+        entity::with_entity(&mut self.state, eng, id, |entity, g, eng| {
+            entity.use_(g, eng, id, Some(activator), Some(activator), crate::entity::UseType::Toggle, 0.0);
+        });
+    }
+
+    /// `GiveNamedItem` for `slot`. For tests only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn test_give_named_item(&mut self, eng: &mut EngineApi<'_>, slot: u8, classname: &str) -> bool {
+        inventory::give_named_item(&mut self.state, eng, slot, classname)
+    }
+
     /// Puts the player of `slot` at `origin`, stopped, to place a player
     /// mid-air or elsewhere in tests. `false` when nobody is in that slot. For tests only
     /// (cargo feature `test-hooks`).

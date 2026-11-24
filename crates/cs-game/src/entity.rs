@@ -461,6 +461,8 @@ pub fn create_entity(classname: &str) -> Option<Box<dyn GameEntity>> {
         "test_target" => Box::new(TestTarget::default()),
         "armoury_entity" => Box::new(crate::inventory::Armoury::default()),
         "item_thighpack" => Box::new(crate::inventory::ItemThighPack),
+        "weapon_shield" => Box::new(crate::inventory::WorldShield::default()),
+        "game_player_equip" => Box::new(crate::inventory::GamePlayerEquip::default()),
         "grenade" => Box::new(crate::grenade::Grenade::default()),
         "spark_shower" => Box::new(crate::grenade::SparkShower),
         "spraycan" => Box::new(crate::spray::SprayCan),

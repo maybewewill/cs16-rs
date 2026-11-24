@@ -39,9 +39,10 @@
 //! menu ([`buy_item`]).
 //!
 //! Deviations and what waits for later tasks:
-//! - The shield does not exist yet: buying it, by the menu or the alias, is refused with
-//!   `#Cannot_Buy_This`, nothing taken. `cl_autobuy`, `cl_rebuy` and their setters are not
-//!   ported (they buy weapons from the player's stored list).
+//! - The shield (`SLOT_ITEM_SHIELD`, $2200) is sold to counter-terrorists (unless carrying Elite),
+//!   dropping any primary weapon (`inventory::give_shield`).
+//! - `autobuy`, `cl_autobuy`, `cl_setautobuy`, `rebuy`, `cl_rebuy`, `cl_setrebuy` buy equipment
+//!   from the player's priority/rebuy lists.
 //! - The ammo clip is given as the `ammo_*` entity of the original does it
 //!   (`CBasePlayerAmmo::AddAmmo`: `GiveAmmo` of `buyClipSize`, then `items/9mmclip1.wav`); the sound
 //!   comes from the player's edict, not from an entity of its own (assumption: the same place).
@@ -72,7 +73,7 @@ use crate::money;
 use crate::player::{ATTN_NORM, ArmorType, CHAN_ITEM, DEAD_NO, EF_NODRAW, PITCH_NORM, Team, player_slot};
 use crate::weapons::{
     AmmoType, FLASHBANG_PRICE, HEGRENADE_PRICE, SMOKEGRENADE_PRICE, WeaponId, ammo_info_by_name,
-    is_primary_weapon, max_ammo_carry_for_weapon, weapon_info,
+    is_primary_weapon, is_secondary_weapon, max_ammo_carry_for_weapon, weapon_info,
 };
 
 /// `SIGNAL_BUY` (`unisignals.h`): the player stands in a buy zone.
@@ -89,6 +90,8 @@ pub const SIGNAL_VIPSAFETY: u8 = 1 << 4;
 pub const MIN_BUY_TIME: i32 = 15;
 /// `DEFUSEKIT_PRICE` (`weapontype.h`).
 pub const DEFUSEKIT_PRICE: i32 = 200;
+/// `SHIELDGUN_PRICE` (`weapontype.h`).
+pub const SHIELDGUN_PRICE: i32 = 2200;
 /// `KEVLAR_PRICE`, `HELMET_PRICE`, `ASSAULTSUIT_PRICE`, `NVG_PRICE` (`weapontype.h`).
 pub const KEVLAR_PRICE: i32 = 650;
 pub const HELMET_PRICE: i32 = 350;
@@ -747,8 +750,31 @@ pub(crate) fn buy_item(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, ite
             }
         }
         SLOT_ITEM_SHIELD => {
-            // The shield is not ported: refused with nothing taken.
-            say(eng, slot, "#Cannot_Buy_This");
+            if !can_buy_weapon_by_maptype(team, WeaponId::ShieldGun, g.rules.map_has_vip_safety_zone()) {
+                say(eng, slot, "#Cannot_Buy_This");
+                return;
+            }
+            let (owns_shield, has_elite) = g.players[usize::from(slot)]
+                .as_ref()
+                .map_or((false, false), |p| {
+                    (p.owns_shield, inventory::has_player_item(p, WeaponId::Elite))
+                });
+            if owns_shield {
+                say(eng, slot, "#Already_Have_One");
+                return;
+            }
+            if has_elite {
+                say(eng, slot, "#Cannot_Buy_This");
+                return;
+            }
+            if account < SHIELDGUN_PRICE {
+                not_enough_money(eng, slot);
+                return;
+            }
+            inventory::drop_primary(g, eng, slot);
+            inventory::give_shield(g, eng, slot, true);
+            money::add_account(g, eng, slot, -SHIELDGUN_PRICE, true);
+            snapshot_rebuy(g, slot);
             return;
         }
         SLOT_ITEM_NVG => {
@@ -774,6 +800,7 @@ pub(crate) fn buy_item(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, ite
                 };
                 money::add_account(g, eng, slot, -NVG_PRICE, true);
                 send_item_status(eng, slot, true, has_defuser);
+                snapshot_rebuy(g, slot);
                 return;
             }
         }
@@ -793,6 +820,7 @@ pub(crate) fn buy_item(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, ite
                 money::add_account(g, eng, slot, -DEFUSEKIT_PRICE, true);
                 // Vanilla (`!REGAMEDLL_FIXES`): `CHAN_ITEM` rather than `CHAN_VOICE`.
                 item_sound(eng, slot, "items/kevlar.wav");
+                snapshot_rebuy(g, slot);
                 return;
             }
         }
@@ -809,6 +837,7 @@ pub(crate) fn buy_item(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, ite
         }
     }
     money::add_account(g, eng, slot, -price, true);
+    snapshot_rebuy(g, slot);
 }
 
 /// `CanBuyWeaponByMaptype` (`weapontype.cpp` 596-680): the weapons a team can buy, taking
@@ -850,7 +879,18 @@ fn can_buy_this(g: &GameState, eng: &mut EngineApi<'_>, slot: u8, id: WeaponId) 
     let Some(p) = g.players.get(usize::from(slot)).and_then(Option::as_ref) else {
         return false;
     };
-    // The shield does not exist, so there is none to forbid the Elites or to be forbidden by them.
+    if p.owns_shield && id == WeaponId::ShieldGun {
+        say(eng, slot, "#Already_Have_One");
+        return false;
+    }
+    if p.owns_shield && id == WeaponId::Elite {
+        say(eng, slot, "#Cannot_Buy_This");
+        return false;
+    }
+    if id == WeaponId::ShieldGun && inventory::has_player_item(p, WeaponId::Elite) {
+        say(eng, slot, "#Cannot_Buy_This");
+        return false;
+    }
     let owns = |slot_index: usize| p.items[slot_index].first().is_some_and(|i| i.weapon.id == id);
     if owns(PRIMARY_WEAPON_SLOT) || owns(PISTOL_SLOT) {
         say(eng, slot, "#Cstrike_Already_Own_Weapon");
@@ -864,8 +904,8 @@ fn can_buy_this(g: &GameState, eng: &mut EngineApi<'_>, slot: u8, id: WeaponId) 
 }
 
 /// `BuyWeaponByWeaponID` (`client.cpp` 1595, vanilla): the weapon `id` is bought when the player
-/// may buy at all, may have it and can pay; the weapon held in the slot is dropped first. The
-/// shield is refused (see the module documentation). True when it was bought.
+/// may buy at all, may have it and can pay; the weapon held in the slot is dropped first. True
+/// when it was bought.
 pub(crate) fn buy_weapon_by_id(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, id: WeaponId) -> bool {
     if !can_player_buy(g, eng, slot, true) {
         return false;
@@ -874,8 +914,20 @@ pub(crate) fn buy_weapon_by_id(g: &mut GameState, eng: &mut EngineApi<'_>, slot:
         return false;
     }
     if id == WeaponId::ShieldGun {
-        say(eng, slot, "#Cannot_Buy_This");
-        return false;
+        let account = g
+            .players
+            .get(usize::from(slot))
+            .and_then(Option::as_ref)
+            .map_or(0, |p| p.money);
+        if account < SHIELDGUN_PRICE {
+            not_enough_money(eng, slot);
+            return false;
+        }
+        inventory::drop_primary(g, eng, slot);
+        inventory::give_shield(g, eng, slot, true);
+        money::add_account(g, eng, slot, -SHIELDGUN_PRICE, true);
+        snapshot_rebuy(g, slot);
+        return true;
     }
     let Some(info) = weapon_info(id).filter(|i| !i.entity_name.is_empty()) else {
         return false;
@@ -892,7 +944,27 @@ pub(crate) fn buy_weapon_by_id(g: &mut GameState, eng: &mut EngineApi<'_>, slot:
     }
     inventory::give_named_item(g, eng, slot, info.entity_name);
     money::add_account(g, eng, slot, -info.cost, true);
+    snapshot_rebuy(g, slot);
     true
+}
+
+/// Snapshots the player's currently carried loadout into `m_rebuyStruct` (`rebuy_record`) so
+/// future `rebuy` / `cl_rebuy` commands restore it.
+pub(crate) fn snapshot_rebuy(g: &mut GameState, slot: u8) {
+    let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) else {
+        return;
+    };
+    p.rebuy_record = crate::player::RebuyRecord {
+        primary: p.items[PRIMARY_WEAPON_SLOT].first().map(|i| i.weapon.id),
+        secondary: p.items[PISTOL_SLOT].first().map(|i| i.weapon.id),
+        armor: if p.armor > 0.0 { p.kevlar } else { ArmorType::None },
+        defuser: p.has_defuser,
+        nvg: p.has_night_vision,
+        he_grenade: p.ammo.get(AmmoType::HeGrenade as usize).copied().unwrap_or(0) > 0,
+        flashbangs: p.ammo.get(AmmoType::Flashbang as usize).copied().unwrap_or(0),
+        smoke_grenade: p.ammo.get(AmmoType::SmokeGrenade as usize).copied().unwrap_or(0) > 0,
+        shield: p.owns_shield,
+    };
 }
 
 /// `BuyGunAmmo` (`client.cpp` 2328, vanilla): one clip of the ammo of the weapon `id` the player
@@ -1287,12 +1359,28 @@ const EQUIPMENT_ALIASES: &[&str] = &[
     "shield",
 ];
 
-/// Whether `name` is a command of this module: the buy menus' commands, the buy aliases and the
-/// weapon aliases.
+/// Maximum number of tokens accepted by `cl_setautobuy` / `cl_setrebuy`.
+const MAX_BUY_SCRIPT_TOKENS: usize = 32;
+/// Maximum byte length of a single token in `cl_setautobuy` / `cl_setrebuy`.
+const MAX_BUY_SCRIPT_TOKEN_LEN: usize = 32;
+
+/// Whether `name` is a command of this module: the buy menus' commands, the buy aliases, the
+/// weapon aliases, and `autobuy` / `rebuy` commands.
 pub(crate) fn is_buy_command(name: &str) -> bool {
     matches!(
         name,
-        "buy" | "buyequip" | "buyammo1" | "buyammo2" | "client_buy_open" | "client_buy_close"
+        "buy"
+            | "buyequip"
+            | "buyammo1"
+            | "buyammo2"
+            | "client_buy_open"
+            | "client_buy_close"
+            | "autobuy"
+            | "cl_autobuy"
+            | "cl_setautobuy"
+            | "rebuy"
+            | "cl_rebuy"
+            | "cl_setrebuy"
     ) || EQUIPMENT_ALIASES.contains(&name)
         || weapon_alias(name).is_some()
 }
@@ -1367,7 +1455,172 @@ pub(crate) fn client_command(
                 buy_ammo(g, eng, slot, PISTOL_SLOT, true);
             }
         }
+        "cl_setautobuy" => parse_buy_script_tokens(&argv[1..], g, slot, true),
+        "cl_setrebuy" => parse_buy_script_tokens(&argv[1..], g, slot, false),
+        "autobuy" | "cl_autobuy" => handle_autobuy(g, eng, slot),
+        "rebuy" | "cl_rebuy" => handle_rebuy(g, eng, slot),
         alias => alias_command(g, eng, slot, alias),
+    }
+}
+
+/// Parses bounded, ASCII-safe tokens from `cl_setautobuy` / `cl_setrebuy` into the player's list.
+fn parse_buy_script_tokens(args: &[String], g: &mut GameState, slot: u8, is_autobuy: bool) {
+    let mut tokens = Vec::new();
+    for arg in args {
+        for raw in arg.split_ascii_whitespace() {
+            if tokens.len() >= MAX_BUY_SCRIPT_TOKENS {
+                break;
+            }
+            if !raw.is_ascii() || raw.len() > MAX_BUY_SCRIPT_TOKEN_LEN {
+                continue;
+            }
+            let lower = raw.to_ascii_lowercase();
+            if !lower.is_empty() {
+                tokens.push(lower);
+            }
+        }
+        if tokens.len() >= MAX_BUY_SCRIPT_TOKENS {
+            break;
+        }
+    }
+    if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+        if is_autobuy {
+            p.autobuy_list = tokens;
+        } else {
+            p.rebuy_order = tokens;
+        }
+    }
+}
+
+/// `AutoBuy` (`client.cpp`): iterates `p.autobuy_list`, skipping opposite-team items and duplicate
+/// primary/secondary weapons once filled, buying the first affordable items from the list.
+fn handle_autobuy(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    if !can_player_buy(g, eng, slot, true) {
+        return;
+    }
+    let Some(list) = g
+        .players
+        .get(usize::from(slot))
+        .and_then(Option::as_ref)
+        .map(|p| p.autobuy_list.clone())
+    else {
+        return;
+    };
+    let assassination = g.rules.map_has_vip_safety_zone();
+    for token in &list {
+        let Some(p) = g.players.get(usize::from(slot)).and_then(Option::as_ref) else {
+            return;
+        };
+        let team = p.team;
+        let has_primary = p.has_primary || p.owns_shield;
+        let lower = token.to_ascii_lowercase();
+        if let Some(id) = crate::weapons::buy_alias_to_weapon_id(&lower) {
+            if !can_buy_weapon_by_maptype(team, id, assassination) {
+                continue;
+            }
+            if (is_primary_weapon(id) || id == WeaponId::ShieldGun) && has_primary {
+                continue;
+            }
+            if is_secondary_weapon(id)
+                && p.items[PISTOL_SLOT]
+                    .first()
+                    .is_some_and(|i| i.weapon.id == id)
+            {
+                continue;
+            }
+            buy_weapon_by_id(g, eng, slot, id);
+            continue;
+        }
+        match lower.as_str() {
+            "primammo" | "primaryammo" => {
+                buy_ammo_all(g, eng, slot, PRIMARY_WEAPON_SLOT);
+            }
+            "secammo" | "secondaryammo" => {
+                buy_ammo_all(g, eng, slot, PISTOL_SLOT);
+            }
+            "vest" => buy_item(g, eng, slot, SLOT_ITEM_VEST),
+            "vesthelm" => buy_item(g, eng, slot, SLOT_ITEM_VESTHELM),
+            "flash" | "flashbang" => buy_item(g, eng, slot, SLOT_ITEM_FLASHGREN),
+            "hegren" | "hegrenade" => buy_item(g, eng, slot, SLOT_ITEM_HEGREN),
+            "sgren" | "smokegrenade" => buy_item(g, eng, slot, SLOT_ITEM_SMOKEGREN),
+            "nvgs" | "nightvision" => buy_item(g, eng, slot, SLOT_ITEM_NVG),
+            "defuser" if team == Team::Ct => buy_item(g, eng, slot, SLOT_ITEM_DEFUSEKIT),
+            "shield" if team == Team::Ct && !has_primary => {
+                buy_item(g, eng, slot, SLOT_ITEM_SHIELD);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `Rebuy` (`client.cpp`): restores equipment recorded in `p.rebuy_record` in `p.rebuy_order`.
+fn handle_rebuy(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    if !can_player_buy(g, eng, slot, true) {
+        return;
+    }
+    let Some((order, record, team)) = g
+        .players
+        .get(usize::from(slot))
+        .and_then(Option::as_ref)
+        .map(|p| (p.rebuy_order.clone(), p.rebuy_record.clone(), p.team))
+    else {
+        return;
+    };
+    for token in &order {
+        let key = token.to_ascii_lowercase();
+        match key.as_str() {
+            "primaryweapon" => {
+                if let Some(id) = record.primary {
+                    buy_weapon_by_id(g, eng, slot, id);
+                }
+            }
+            "primaryammo" => buy_ammo_all(g, eng, slot, PRIMARY_WEAPON_SLOT),
+            "secondaryweapon" => {
+                if let Some(id) = record.secondary {
+                    buy_weapon_by_id(g, eng, slot, id);
+                }
+            }
+            "secondaryammo" => buy_ammo_all(g, eng, slot, PISTOL_SLOT),
+            "armor" => match record.armor {
+                ArmorType::VestHelm => buy_item(g, eng, slot, SLOT_ITEM_VESTHELM),
+                ArmorType::Vest => buy_item(g, eng, slot, SLOT_ITEM_VEST),
+                ArmorType::None => {}
+            },
+            "defuser" => {
+                if record.defuser && team == Team::Ct {
+                    buy_item(g, eng, slot, SLOT_ITEM_DEFUSEKIT);
+                }
+            }
+            "hegrenade" | "hegren" => {
+                if record.he_grenade {
+                    buy_item(g, eng, slot, SLOT_ITEM_HEGREN);
+                }
+            }
+            "flashbang" | "flash" => {
+                for _ in 0..record.flashbangs.clamp(0, 2) {
+                    buy_item(g, eng, slot, SLOT_ITEM_FLASHGREN);
+                }
+            }
+            "smokegrenade" | "sgren" => {
+                if record.smoke_grenade {
+                    buy_item(g, eng, slot, SLOT_ITEM_SMOKEGREN);
+                }
+            }
+            "nightvision" | "nvgs" => {
+                if record.nvg {
+                    buy_item(g, eng, slot, SLOT_ITEM_NVG);
+                }
+            }
+            "tacticalshield" | "shield" => {
+                if record.shield && team == Team::Ct {
+                    buy_item(g, eng, slot, SLOT_ITEM_SHIELD);
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+        p.rebuy_record = record;
     }
 }
 

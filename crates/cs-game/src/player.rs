@@ -144,7 +144,7 @@ pub(crate) const HIDEHUD_FLASHLIGHT: i32 = 1 << 1;
 pub(crate) const HIDEHUD_HEALTH: i32 = 1 << 3;
 const HIDEHUD_TIMER: i32 = 1 << 4;
 const HIDEHUD_MONEY: i32 = 1 << 5;
-pub(crate) const HIDEHUD_CROSSHAIR: i32 = 1 << 6;
+pub const HIDEHUD_CROSSHAIR: i32 = 1 << 6;
 /// `CONTENTS_WATER`.
 const CONTENT_WATER: i32 = -3;
 const CONTENT_SLIME: i32 = -4;
@@ -175,9 +175,23 @@ const PLAYER_HOLDING_SHIELD: i32 = cs_sim::pm::consts::PLAYER_HOLDING_SHIELD;
 /// `DEATH_ANIMATION_TIME` (`gamerules.h`): how long a death lasts before the corpse is sent.
 const DEATH_ANIMATION_TIME: f64 = 3.0;
 /// `HITGROUP_SHIELD_ENABLED` and `HITGROUP_SHIELD_DISABLED`: the values of `pev->gamestate` of
-/// a player (`player.h`, read 2026-11-22); the engine's hitbox traces skip the shield box at 1.
-const HITGROUP_SHIELD_ENABLED: i32 = 0;
-const HITGROUP_SHIELD_DISABLED: i32 = 1;
+/// a player (`player.h`, read 2026-11-22); the engine's studio traces skip the shield box at 1.
+pub const HITGROUP_SHIELD_ENABLED: i32 = 0;
+pub const HITGROUP_SHIELD_DISABLED: i32 = 1;
+
+/// Recorded player loadout for `rebuy` (`m_rebuyStruct`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RebuyRecord {
+    pub(crate) primary: Option<WeaponId>,
+    pub(crate) secondary: Option<WeaponId>,
+    pub(crate) armor: ArmorType,
+    pub(crate) defuser: bool,
+    pub(crate) nvg: bool,
+    pub(crate) he_grenade: bool,
+    pub(crate) flashbangs: i32,
+    pub(crate) smoke_grenade: bool,
+    pub(crate) shield: bool,
+}
 /// The speed of a player with no active item (`CBasePlayer::ResetMaxSpeed`, ReGameDLL
 /// `player.cpp`); weapons set it themselves once they exist.
 const NO_ITEM_MAX_SPEED: f32 = 240.0;
@@ -343,10 +357,16 @@ pub struct Player {
     pub(crate) killed_by_bomb: bool,
     /// `m_bKilledByGrenade`: killed by an HE grenade (`DMG_EXPLOSION`).
     pub(crate) killed_by_grenade: bool,
-    /// `m_bOwnsShield` (the shield is Task 12).
-    pub(crate) owns_shield: bool,
+    /// `m_bOwnsShield`.
+    pub owns_shield: bool,
     /// `m_bShieldDrawn`.
-    pub(crate) shield_drawn: bool,
+    pub shield_drawn: bool,
+    /// `autobuy` alias priority list (from `cl_setautobuy` or CS 1.6 defaults).
+    pub(crate) autobuy_list: Vec<String>,
+    /// `rebuy` token order (from `cl_setrebuy` or CS 1.6 defaults).
+    pub(crate) rebuy_order: Vec<String>,
+    /// Last purchased / held equipment snapshot used by `rebuy`.
+    pub(crate) rebuy_record: RebuyRecord,
     /// `m_bResumeZoom`: a shot closed the scope; it opens again when the weapon may shoot.
     pub(crate) resume_zoom: bool,
     /// `m_iLastZoom`: the FOV to go back to.
@@ -530,6 +550,29 @@ impl Player {
             killed_by_grenade: false,
             owns_shield: false,
             shield_drawn: false,
+            autobuy_list: vec![
+                "m4a1".into(),
+                "ak47".into(),
+                "vesthelm".into(),
+                "vest".into(),
+                "defuser".into(),
+                "primammo".into(),
+                "secammo".into(),
+            ],
+            rebuy_order: vec![
+                "PrimaryWeapon".into(),
+                "PrimaryAmmo".into(),
+                "SecondaryWeapon".into(),
+                "SecondaryAmmo".into(),
+                "Armor".into(),
+                "Defuser".into(),
+                "HEGrenade".into(),
+                "Flashbang".into(),
+                "SmokeGrenade".into(),
+                "NightVision".into(),
+                "TacticalShield".into(),
+            ],
+            rebuy_record: RebuyRecord::default(),
             resume_zoom: false,
             last_zoom: 90,
             eject_brass: 0.0,
@@ -648,6 +691,46 @@ impl Player {
     #[doc(hidden)]
     pub fn test_zone_signals(&self) -> u8 {
         self.signals.state()
+    }
+
+    /// `autobuy` alias priority list. For tests only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn test_autobuy_list(&self) -> &[String] {
+        &self.autobuy_list
+    }
+
+    /// `m_iHideHUD`. For tests only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn test_hide_hud(&self) -> i32 {
+        self.hide_hud
+    }
+
+    /// `m_bHasPrimary`. For tests only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn test_has_primary(&self) -> bool {
+        self.has_primary
+    }
+
+    /// Active weapon `weapon_state`. For tests only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn test_active_weapon_state(&self) -> Option<i32> {
+        let active = self.active_item?;
+        self.items
+            .iter()
+            .flatten()
+            .find(|item| item.weapon.id == active)
+            .map(|item| item.weapon.weapon_state)
+    }
+
+    /// Active weapon `WeaponId`. For tests only (cargo feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn test_active_item(&self) -> Option<WeaponId> {
+        self.active_item
     }
 
     /// Whether the player has joined the game with a team that plays: the stand-in for
@@ -2071,6 +2154,40 @@ fn pain(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, hit_group: i32, ha
 /// body in the fetched sources (assumption: it does nothing). The shield branch is ported but
 /// `IsHittingShield` is false until the shield task (`HasShield`).
 #[allow(clippy::too_many_arguments)]
+/// `CBasePlayer::IsHittingShield` (`player.cpp`): true when `slot` owns a shield and the
+/// trace either hit `HITGROUP_SHIELD` directly or came from the front while `shield_drawn`.
+pub(crate) fn is_hitting_shield(
+    g: &GameState,
+    eng: &EngineApi<'_>,
+    slot: usize,
+    dir: Vec3,
+    tr: &EntTrace,
+) -> bool {
+    let Some(p) = g.players.get(slot).and_then(Option::as_ref) else {
+        return false;
+    };
+    if !p.owns_shield || !p.alive {
+        return false;
+    }
+    if tr.trace.hitgroup == HITGROUP_SHIELD {
+        return true;
+    }
+    if !p.shield_drawn {
+        return false;
+    }
+    let angles = eng
+        .ent(eng.client_edict(slot as u8))
+        .map_or(Vec3::ZERO, |v| v.angles);
+    let (fwd, ..) = cs_sim::pm::math::angle_vectors(angles);
+    let f_len = (fwd.x * fwd.x + fwd.y * fwd.y).sqrt();
+    let d_len = (dir.x * dir.x + dir.y * dir.y).sqrt();
+    if f_len <= 1e-4 || d_len <= 1e-4 {
+        return false;
+    }
+    let dot = (fwd.x * dir.x + fwd.y * dir.y) / (f_len * d_len);
+    dot < -0.87
+}
+
 pub(crate) fn trace_attack(
     g: &mut GameState,
     eng: &mut EngineApi<'_>,
@@ -2087,11 +2204,10 @@ pub(crate) fn trace_attack(
     let attacker_slot = attacker.and_then(|a| player_slot(g, eng, a));
     let friendly_fire = eng.cvar_f32("mp_friendlyfire") != 0.0;
     let attacker_team = attacker_slot.and_then(|a| g.players[a].as_ref()).map(|p| p.team);
+    let hit_shield = is_hitting_shield(g, eng, slot, dir, tr);
     let Some(p) = g.players[slot].as_mut() else { return };
     let mut should_bleed = true;
     let mut should_spark = false;
-    // `IsHittingShield`: no shield yet.
-    let hit_shield = false;
     if attacker_team == Some(p.team) && !friendly_fire {
         should_bleed = false;
     }
@@ -2158,6 +2274,9 @@ pub(crate) fn trace_attack(
         if let Some(z) = punch_z {
             v.punchangle.z = z;
         }
+    }
+    if hit_shield {
+        bullets::hit_shield(g, eng, victim, damage, tr.trace.end_pos);
     }
     let end_pos = tr.trace.end_pos;
     if should_bleed {
@@ -2633,10 +2752,14 @@ pub(crate) fn disappear(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     // `SendFOV(0)`.
     messages::set_fov(eng, slot, 0);
     rules::check_win_conditions(g, eng);
-    let (has_c4, has_defuser) = g.players[index].as_mut().map_or((false, false), |p| {
-        p.not_killed = false;
-        (p.has_c4, p.has_defuser)
-    });
+    let (has_c4, has_defuser, owns_shield) =
+        g.players[index].as_mut().map_or((false, false, false), |p| {
+            p.not_killed = false;
+            (p.has_c4, p.has_defuser, p.owns_shield)
+        });
+    if owns_shield {
+        crate::inventory::drop_shield(g, eng, slot, false);
+    }
     if has_c4 {
         crate::inventory::drop_player_item(g, eng, slot, Some("weapon_c4"));
         // Vanilla (`!REGAMEDLL_FIXES`): clears progress bar a second time.
@@ -2737,10 +2860,14 @@ fn killed(
     messages::set_fov(eng, slot, 0);
     // A team may be out of players now (`CheckWinConditions` of `Killed`).
     rules::check_win_conditions(g, eng);
-    let (has_c4, has_defuser) = g.players[index].as_mut().map_or((false, false), |p| {
-        p.not_killed = false;
-        (p.has_c4, p.has_defuser)
-    });
+    let (has_c4, has_defuser, owns_shield) =
+        g.players[index].as_mut().map_or((false, false, false), |p| {
+            p.not_killed = false;
+            (p.has_c4, p.has_defuser, p.owns_shield)
+        });
+    if owns_shield {
+        crate::inventory::drop_shield(g, eng, slot, false);
+    }
     if has_c4 {
         crate::inventory::drop_player_item(g, eng, slot, Some("weapon_c4"));
         // Vanilla (`!REGAMEDLL_FIXES`): clears progress bar a second time.

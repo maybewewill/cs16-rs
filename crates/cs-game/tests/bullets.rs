@@ -493,3 +493,111 @@ fn hostile_bullet_input_is_refused_quietly() {
     // The shot with a huge penetration count went through the clamp and hit once or twice.
     assert!(health(&mut b, 1) < 100.0);
 }
+
+
+#[test]
+fn bullet_impact_effects_emit_blood_sparks_helmet_and_knife_streak() {
+    use cs_engine::MoveFilter;
+    use cs_proto48::messages::SvcMessage;
+    use cs_proto48::tempent::te;
+
+    fn temp_entities(b: &Bench) -> Vec<u8> {
+        b.probe
+            .messages()
+            .iter()
+            .filter_map(|m| match m {
+                SvcMessage::TempEntity { te_type, .. } => Some(*te_type),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // 1. Flesh chest shot on unarmored player -> TE_BLOODSPRITE.
+    let mut b = arena();
+    b.probe.clear_messages();
+    b.run(|game, eng| {
+        put(eng, 0, Vec3::ZERO);
+        put(eng, 1, Vec3::new(150.0, 0.0, 0.0));
+        game.test_trace_attack(eng, 1, 0, Some(WeaponId::Ak47), 36.0, CHEST);
+    });
+    b.step(6);
+    assert!(
+        temp_entities(&b).contains(&te::BLOODSPRITE),
+        "flesh hit must emit TE_BLOODSPRITE, got {:?}",
+        temp_entities(&b)
+    );
+
+    // 2. Helmet headshot on VestHelm target -> TE_STREAK_SPLASH (no blood).
+    let mut b = arena();
+    b.run(|game, eng| {
+        put(eng, 0, Vec3::ZERO);
+        put(eng, 1, Vec3::new(150.0, 0.0, 0.0));
+        if let Some(p) = game.state_mut().players[1].as_mut() {
+            p.kevlar = ArmorType::VestHelm;
+            p.armor = 100.0;
+        }
+    });
+    b.probe.clear_messages();
+    b.run(|game, eng| {
+        game.test_trace_attack(eng, 1, 0, Some(WeaponId::Ak47), 36.0, HEAD);
+    });
+    b.step(6);
+    let helmet_tes = temp_entities(&b);
+    assert!(
+        helmet_tes.contains(&te::STREAK_SPLASH),
+        "helmet hit must emit TE_STREAK_SPLASH, got {helmet_tes:?}"
+    );
+    assert!(
+        !helmet_tes.contains(&te::BLOODSPRITE),
+        "helmet hit should not bleed, got {helmet_tes:?}"
+    );
+
+    // 3. Shield frontal deflection -> TE_SPARKS + zero damage.
+    let mut b = arena();
+    b.run(|game, eng| {
+        put(eng, 0, Vec3::ZERO);
+        put(eng, 1, Vec3::new(150.0, 0.0, 0.0));
+        let v1 = eng.client_edict(1);
+        let ent1 = eng.ent_mut(v1).unwrap();
+        ent1.angles = Vec3::new(0.0, 180.0, 0.0);
+        ent1.v_angle = Vec3::new(0.0, 180.0, 0.0);
+        let p = game.state_mut().players[1].as_mut().unwrap();
+        p.owns_shield = true;
+        p.shield_drawn = true;
+        p.armor = 0.0;
+    });
+    b.probe.clear_messages();
+    b.run(|game, eng| {
+        game.test_trace_attack(eng, 1, 0, Some(WeaponId::Ak47), 36.0, CHEST);
+    });
+    b.step(6);
+    let shield_tes = temp_entities(&b);
+    assert!(
+        shield_tes.contains(&te::SPARKS),
+        "shield hit must emit TE_SPARKS, got {shield_tes:?}"
+    );
+    assert_eq!(health(&mut b, 1), 100.0, "shield must block all frontal damage");
+
+    // 4. Gunshot decal trace on a solid obstacle -> TE_GUNSHOTDECAL.
+    let mut b = arena();
+    b.server.set_decals(vec!["{shot1".into(), "{blood1".into()]);
+    b.probe.clear_messages();
+    b.run(|_, eng| {
+        put(eng, 0, Vec3::ZERO);
+        put(eng, 1, Vec3::new(150.0, 0.0, 0.0));
+        let shooter = eng.client_edict(0);
+        let tr = eng.trace_line(
+            eye(Vec3::ZERO),
+            eye(Vec3::new(200.0, 0.0, 0.0)),
+            MoveFilter::Normal,
+            Some(shooter),
+        );
+        cs_game::bullets::gunshot_decal_trace(eng, &tr, 0, None);
+    });
+    b.step(6);
+    assert!(
+        temp_entities(&b).contains(&te::GUNSHOTDECAL),
+        "gunshot_decal_trace must emit TE_GUNSHOTDECAL, got {:?}",
+        temp_entities(&b)
+    );
+}

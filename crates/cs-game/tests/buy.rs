@@ -563,21 +563,25 @@ fn cannot_buy_outside_the_zone_or_without_money() {
 }
 
 #[test]
-fn shield_and_defuser_are_not_for_sale_yet() {
+fn shield_and_defuser_buy_rules() {
     let mut b = zones();
     spawn(&mut b, Team::Ct);
     settle(&mut b);
     set_money(&mut b, 16000);
-    // On a non-bomb map neither shield nor defuser can be bought.
-    assert_eq!(buy(&mut b, "shield"), [text("#Cannot_Buy_This", &[])]);
-    assert_eq!(money(&b), 16000);
+    // On a non-bomb map a CT can buy a tactical shield for $2200, not a defuser.
     assert_eq!(buy(&mut b, "defuser"), Vec::<String>::new());
     assert_eq!(money(&b), 16000);
+    buy(&mut b, "shield");
+    assert_eq!(money(&b), 16000 - cs_game::buy::SHIELDGUN_PRICE);
+    assert_eq!(buy(&mut b, "shield"), [text("#Already_Have_One", &[])]);
+    with_player(&b, |p| assert!(p.owns_shield));
+
     // A weapon of the other team is said to be unavailable, as the original does.
     assert_eq!(buy(&mut b, "AK47"), [text("#Alias_Not_Avail", &["#AK47"])]);
     spawn(&mut b, Team::Terrorist);
     place(&mut b, Vec3::new(-100.0, 0.0, 0.0));
     settle(&mut b);
+    set_money(&mut b, 16000);
     assert_eq!(
         buy(&mut b, "defuser"),
         [text("#Alias_Not_Avail", &["#Bomb_Defusal_Kit"])]
@@ -592,8 +596,8 @@ fn shield_and_defuser_are_not_for_sale_yet() {
         assert_eq!((p.armor, p.test_has_night_vision()), (0.0, false))
     });
 
-    // On a bomb map a CT buys the defuser for $200 (`DEFUSEKIT_PRICE`), while the shield stays
-    // unavailable.
+    // On a bomb map a CT buys the defuser for $200 (`DEFUSEKIT_PRICE`), while $1000 is not
+    // enough for a $2200 shield.
     let mut bomb_map = zone_map("2", "1");
     bomb_map.push(entity(&[
         ("classname", "func_bomb_target"),
@@ -603,7 +607,10 @@ fn shield_and_defuser_are_not_for_sale_yet() {
     spawn(&mut bz, Team::Ct);
     settle(&mut bz);
     set_money(&mut bz, 1000);
-    assert_eq!(buy(&mut bz, "shield"), [text("#Cannot_Buy_This", &[])]);
+    assert_eq!(
+        buy(&mut bz, "shield"),
+        [text("#Not_Enough_Money", &[]), "BlinkAcct 2".into()]
+    );
     assert_eq!(buy(&mut bz, "defuser"), ["ItemStatus 2", "Money 800 true"]);
     assert_eq!(
         buy(&mut bz, "defuser"),
