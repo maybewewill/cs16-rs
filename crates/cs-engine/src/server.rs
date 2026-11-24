@@ -9,7 +9,7 @@ use cs_proto48::delta::{DeltaRecord, DeltaRegistry, DeltaSchema, GoldSrcEntitySt
 use cs_proto48::handshake::tokenize_goldsrc_line;
 use cs_proto48::messages::{
     ClcMessage, ServerInfoMsg, entity_schema_name, parse_clc_stream, wire_entity_type,
-    write_svc_newmovevars, write_svc_stufftext,
+    write_svc_newmovevars, write_svc_stufftext, write_svc_voicedata,
 };
 use cs_proto48::usermsg::UserMsgRegistry;
 use cs_transport::{PacketTransport, PeerAddr};
@@ -26,7 +26,7 @@ use crate::world::consts::{EF_MUZZLEFLASH, EF_NOINTERP, MOVETYPE_WALK, SOLID_SLI
 use crate::signon::{
     MAX_SIGNON_BUFFER, SPAWN_TAIL_MAX, UserInfoEntry, move_vars, public_userinfo, munged_map_crc, write_new_stage,
     write_sendres_stage,
-    write_spawn_baselines, write_spawn_stage, write_spawn_tail,
+    write_spawn_baselines, write_spawn_stage, write_spawn_tail_with_voice,
 };
 use crate::usercmd::TokenBucket;
 
@@ -497,6 +497,10 @@ impl<G: GameDll> Server<G> {
         &self.edicts
     }
 
+    pub fn set_cvar(&mut self, name: &str, value: &str) {
+        self.cvars.set(name, value);
+    }
+
     /// How entity `id` is linked into the world (its leaves and area node); `None` when it is
     /// not linked. Test aid.
     #[doc(hidden)]
@@ -816,6 +820,7 @@ impl<G: GameDll> Server<G> {
                         self.handle_move(slot, &cmds, num_backup, lost, incoming.sequence);
                     }
                     ClcMessage::Delta(seq) => self.clients[index].delta_seq = Some(seq),
+                    ClcMessage::VoiceData(data) => self.handle_voice_data(slot, &data),
                     _ => {}
                 }
             }
@@ -830,6 +835,35 @@ impl<G: GameDll> Server<G> {
         if client.refused_streams >= MAX_REFUSED_STREAMS {
             self.release_slot(slot, Some("Too many refused streams"));
             self.drain_outbox();
+        }
+    }
+
+    /// Relays an active client's `clc_voicedata` frame into every unbanned recipient's unreliable
+    /// datagram buffer (`SV_ParseVoiceData`), respecting `sv_voiceenable` and per-client rate caps.
+    fn handle_voice_data(&mut self, sender_slot: u8, data: &[u8]) {
+        let index = usize::from(sender_slot);
+        if data.is_empty()
+            || data.len() > 4096
+            || !self.cvars.get_bool("sv_voiceenable")
+            || self.clients[index].state != ClientState::Active
+            || !self.clients[index].voice_packets.try_take()
+        {
+            return;
+        }
+        let sender_bit = 1u32.checked_shl(u32::from(sender_slot)).unwrap_or(0);
+        let mut msg = MsgWriter::with_capacity(data.len() + 4);
+        write_svc_voicedata(&mut msg, sender_slot, data);
+        let packet = msg.into_bytes();
+        for (rec_idx, client) in self.clients.iter_mut().enumerate() {
+            if rec_idx == index
+                || client.is_free()
+                || client.fake
+                || client.state != ClientState::Active
+                || (client.voice_ban_mask & sender_bit) != 0
+            {
+                continue;
+            }
+            client.queue_unreliable(&packet);
         }
     }
 
@@ -874,6 +908,18 @@ impl<G: GameDll> Server<G> {
                 }
             }
             ("disconnect" | "dropclient", _) => self.release_slot(slot, None),
+            ("vban", _) => {
+                if let Some(mask_arg) = argv.get(1) {
+                    let trimmed = mask_arg
+                        .trim()
+                        .strip_prefix("0x")
+                        .or_else(|| mask_arg.trim().strip_prefix("0X"))
+                        .unwrap_or(mask_arg.trim());
+                    if let Ok(mask) = u32::from_str_radix(trimmed, 16) {
+                        self.clients[usize::from(slot)].voice_ban_mask = mask;
+                    }
+                }
+            }
             _ => self.with_game(|game, eng| game.client_command(eng, slot, &argv)),
         }
         *stage_done |= is_stage_cmd;
@@ -1037,7 +1083,9 @@ impl<G: GameDll> Server<G> {
         );
         // `SV_WriteClientdataToMessage`, then `svc_signonnum 1` and `SV_WriteVoiceCodec`.
         self.write_spawn_clientdata(slot, &mut w);
-        write_spawn_tail(&mut w);
+        let voice_codec = self.cvars.get_str("sv_voicecodec").to_string();
+        let voice_quality = self.cvars.get_i32("sv_voicequality").clamp(0, 5) as u8;
+        write_spawn_tail_with_voice(&mut w, &voice_codec, voice_quality);
         let client = &mut self.clients[index];
         client.chan.write_reliable(w.as_slice());
         // `host_client->sendinfo = TRUE` (`SV_WriteSpawn`, sv_main.cpp:1464, read 2026-11-22): the
@@ -1063,6 +1111,7 @@ mod tests {
     use crate::signon::{
         SPAWN_CLIENTDATA_MAX,
         INIT_BUFFER_BUDGET, MAX_LIGHTSTYLES, write_spawn_baselines, write_spawn_stage,
+        write_spawn_tail,
     };
 
     /// `NET_MAX_PAYLOAD` of ReHLDS (`rehlds/engine/net.h`, read 2026-11-21), also the size of

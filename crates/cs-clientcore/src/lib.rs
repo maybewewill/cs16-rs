@@ -40,6 +40,6 @@ pub use predict::{
 pub use resources::{AllFilesPresent, ResourceFiles, ResourceManager, res_type};
 pub use events::{EventFx, EventQueue, FiredEvent, FxEnv};
 pub use hud::{ClientEffects, HudState};
-pub use sound::{SoundCommand, SoundQueue, SoundStart};
+pub use sound::{SoundCommand, SoundQueue, SoundStart, VoiceEvent, VoiceQueue};
 pub use tempents::{FxRandom, FxWorld, NoWorld, RenderEffect, TempEnt, TempEnts};
 pub use weapons_predict::PredictedWeaponEvent;

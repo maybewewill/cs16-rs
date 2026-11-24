@@ -31,7 +31,7 @@ use cs_proto48::messages::{
     MoveVarsMsg, PacketEntitiesMsg, ServerInfoMsg, SvcMessage, SvcParseContext, WeaponRecords, clc,
     clc_move_body_len, entity_schema_name, parse_svc_stream_partial, write_clc_cvarvalue2,
     write_clc_delta, write_clc_fileconsistency, write_clc_move, write_clc_resourcelist,
-    write_clc_stringcmd,
+    write_clc_stringcmd, write_clc_voicedata,
 };
 use cs_proto48::netchan::{FRAGMENT_C2S_SIZE, NetChan, SplitPacketAssembler};
 use cs_transport::{PacketTransport, PeerAddr};
@@ -200,6 +200,8 @@ pub struct Connection<T: PacketTransport> {
     cmd_queue: VecDeque<GoldSrcUserCmd>,
     /// Last sent commands, newest first, repeated as backups.
     sent_cmds: VecDeque<GoldSrcUserCmd>,
+    /// Queued outgoing voice payloads (`clc_voicedata`) written into unreliable datagrams.
+    pending_voice: VecDeque<Vec<u8>>,
     /// Most recent command taken from the queue; repeated with `msec = 0` when the queue is empty.
     last_cmd: GoldSrcUserCmd,
     /// Low byte of the netchan sequence of the last entity update.
@@ -272,6 +274,7 @@ impl<T: PacketTransport> Connection<T> {
             frame_times: VecDeque::new(),
             cmd_queue: VecDeque::new(),
             sent_cmds: VecDeque::new(),
+            pending_voice: VecDeque::new(),
             last_cmd: GoldSrcUserCmd::default(),
             last_entity_seq: None,
             files: Box::new(AllFilesPresent),
@@ -478,6 +481,17 @@ impl<T: PacketTransport> Connection<T> {
         let mut w = MsgWriter::new();
         write_clc_stringcmd(&mut w, cmd);
         self.queue_reliable(&w.into_bytes());
+    }
+
+    /// Queues an encoded `clc_voicedata` frame to be sent in the next unreliable datagram.
+    pub fn send_voice_data(&mut self, data: &[u8]) {
+        if self.chan.is_none() || data.is_empty() || data.len() > 4096 {
+            return;
+        }
+        if self.pending_voice.len() >= 16 {
+            self.pending_voice.pop_front();
+        }
+        self.pending_voice.push_back(data.to_vec());
     }
 
     fn queue_reliable(&mut self, bytes: &[u8]) {
@@ -1338,6 +1352,7 @@ impl<T: PacketTransport> Connection<T> {
         self.frame_times.clear();
         self.cmd_queue.clear();
         self.sent_cmds.clear();
+        self.pending_voice.clear();
         self.view_angle_updates.clear();
         self.last_entity_seq = None;
         self.resources.clear();
@@ -1462,6 +1477,9 @@ impl<T: PacketTransport> Connection<T> {
             && !self.delta_suppressed
         {
             write_clc_delta(&mut unreliable, seq);
+        }
+        while let Some(vdata) = self.pending_voice.pop_front() {
+            write_clc_voicedata(&mut unreliable, &vdata);
         }
         let packet = match self.withheld_reliable_ack {
             Some(ack) => {

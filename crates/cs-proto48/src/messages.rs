@@ -1699,6 +1699,31 @@ pub fn write_svc_voiceinit(w: &mut MsgWriter, codec: &str, quality: u8) {
     w.write_u8(quality);
 }
 
+pub fn write_svc_voicedata(w: &mut MsgWriter, player_slot: u8, data: &[u8]) {
+    let clamped = &data[..data.len().min(usize::from(u16::MAX))];
+    w.write_u8(svc::VOICEDATA);
+    w.write_u8(player_slot);
+    w.write_u16(clamped.len() as u16);
+    w.write_bytes(clamped);
+}
+
+pub fn write_clc_voicedata(w: &mut MsgWriter, data: &[u8]) {
+    let clamped = &data[..data.len().min(usize::from(u16::MAX))];
+    w.write_u8(clc::VOICEDATA);
+    w.write_u16(clamped.len() as u16);
+    w.write_bytes(clamped);
+}
+
+pub fn write_svc_roomtype(w: &mut MsgWriter, room_type: u16) {
+    w.write_u8(svc::ROOMTYPE);
+    w.write_u16(room_type);
+}
+
+pub fn write_svc_stopsound(w: &mut MsgWriter, entity: u16, channel: u8) {
+    w.write_u8(svc::STOPSOUND);
+    w.write_u16((entity << 3) | u16::from(channel & 7));
+}
+
 pub fn write_svc_sendextrainfo(w: &mut MsgWriter, fallback_dir: &str, cheats: bool) {
     w.write_u8(svc::SENDEXTRAINFO);
     w.write_str(fallback_dir);
@@ -3817,5 +3842,58 @@ mod client_reader_tests {
             ClcMessage::Move { cmds: out, .. } => assert!(!out.is_empty() && out.len() < cmds.len()),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn voice_roomtype_stopsound_roundtrip() {
+        let mut sw = MsgWriter::new();
+        write_svc_voiceinit(&mut sw, "voice_opus", 3);
+        write_svc_voicedata(&mut sw, 2, &[0x11, 0x22, 0x33, 0x44]);
+        write_svc_roomtype(&mut sw, 14);
+        write_svc_stopsound(&mut sw, 17, 6);
+        write_svc_cdtrack(&mut sw, 5, 5);
+        write_svc_soundfade(
+            &mut sw,
+            &SoundFadeMsg {
+                percent: 80,
+                hold_time: 2,
+                fade_out: 1,
+                fade_in: 3,
+            },
+        );
+        let mut ctx = SvcParseContext::new();
+        let msgs = parse_svc_stream(sw.as_slice(), &mut ctx).expect("valid svc stream");
+        assert_eq!(
+            msgs,
+            vec![
+                SvcMessage::VoiceInit {
+                    codec: "voice_opus".to_string(),
+                    quality: 3,
+                },
+                SvcMessage::VoiceData {
+                    player_slot: 2,
+                    data: vec![0x11, 0x22, 0x33, 0x44],
+                },
+                SvcMessage::RoomType(14),
+                SvcMessage::StopSound((17 << 3) | 6),
+                SvcMessage::CdTrack {
+                    track: 5,
+                    loop_track: 5,
+                },
+                SvcMessage::SoundFade(SoundFadeMsg {
+                    percent: 80,
+                    hold_time: 2,
+                    fade_out: 1,
+                    fade_in: 3,
+                }),
+            ]
+        );
+
+        let reg = DeltaRegistry::cs16_default();
+        let schema = reg.get("usercmd_t").unwrap();
+        let mut cw = MsgWriter::new();
+        write_clc_voicedata(&mut cw, &[0xAA, 0xBB, 0xCC]);
+        let clc_msgs = parse_clc_stream(cw.as_slice(), schema, 0).expect("valid clc stream");
+        assert_eq!(clc_msgs, vec![ClcMessage::VoiceData(vec![0xAA, 0xBB, 0xCC])]);
     }
 }

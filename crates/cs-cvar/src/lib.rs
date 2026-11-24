@@ -128,6 +128,16 @@ pub enum EngineAction {
     OpenRadio(u8),
     /// `impulse <n>`: sent with the next usercmd (100 flashlight, 201 spray).
     Impulse(u8),
+    /// `mp3 <play|loop|stop> [file]`.
+    Mp3Command(Vec<String>),
+    /// `cd <play|loop|stop|off> [track]`.
+    CdCommand(Vec<String>),
+    /// `play <file>` / `playvol <file> <vol>`.
+    PlaySound { sample: String, volume: f32 },
+    /// `spk <sentence>` / `speak <sentence>`.
+    SpeakSentence(String),
+    /// `stopsound`.
+    StopSound,
     ActionInput { name: String, pressed: bool },
     /// A command the console does not know, handed on while the client is connected
     /// ([`CVarRegistry::set_forward_unknown`]): the shell sends the line to the server
@@ -174,6 +184,15 @@ const KNOWN_COMMANDS: &[(&str, &str)] = &[
     ("say_team", "Send a team chat message"),
     ("drop", "Drop currently held weapon"),
     ("lastinv", "Switch to previously held weapon"),
+    ("mp3", "Control MP3 background music playback (play/loop/stop)"),
+    ("cd", "Control CD/soundtrack track playback (play/loop/stop/off)"),
+    ("play", "Play a sound effect locally"),
+    ("playvol", "Play a sound effect locally at specified volume"),
+    ("spk", "Speak a sentences.txt / VOX phrase locally"),
+    ("speak", "Speak a sentences.txt / VOX phrase locally"),
+    ("stopsound", "Stop all active sounds"),
+    ("+voicerecord", "Transmit microphone voice while held"),
+    ("-voicerecord", "Stop transmitting microphone voice"),
     ("toggleconsole", "Open or close the developer console"),
     ("cancelselect", "Toggle pause menu"),
 ];
@@ -720,6 +739,42 @@ impl CVarRegistry {
             "slot3" => actions.push(EngineAction::SelectSlot(3)),
             "slot4" => actions.push(EngineAction::SelectSlot(4)),
             "slot5" => actions.push(EngineAction::SelectSlot(5)),
+            "mp3" => actions.push(EngineAction::Mp3Command(args.to_vec())),
+            "cd" => actions.push(EngineAction::CdCommand(args.to_vec())),
+            "play" => {
+                if let Some(sample) = args.first() {
+                    actions.push(EngineAction::PlaySound {
+                        sample: sample.clone(),
+                        volume: 1.0,
+                    });
+                } else {
+                    self.info("Usage: play <filename.wav>");
+                }
+            }
+            "playvol" => {
+                if let Some(sample) = args.first() {
+                    let volume = args
+                        .get(1)
+                        .and_then(|v| v.parse::<f32>().ok())
+                        .filter(|v| v.is_finite())
+                        .unwrap_or(1.0)
+                        .clamp(0.0, 2.0);
+                    actions.push(EngineAction::PlaySound {
+                        sample: sample.clone(),
+                        volume,
+                    });
+                } else {
+                    self.info("Usage: playvol <filename.wav> <volume>");
+                }
+            }
+            "spk" | "speak" => {
+                if !args.is_empty() {
+                    actions.push(EngineAction::SpeakSentence(args.join(" ")));
+                } else {
+                    self.info("Usage: spk <sentence or !name>");
+                }
+            }
+            "stopsound" => actions.push(EngineAction::StopSound),
             "toggleconsole" => actions.push(EngineAction::ToggleConsole),
             "cancelselect" => actions.push(EngineAction::ToggleMenu),
             _ => {

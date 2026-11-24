@@ -73,6 +73,10 @@ pub(crate) struct Client {
     pub(crate) stringcmds: TokenBucket,
     /// Rate limit for `setinfo`, on top of `stringcmds`.
     pub(crate) setinfos: TokenBucket,
+    /// Rate limit for incoming `clc_voicedata` packets (50 Hz typical + burst).
+    pub(crate) voice_packets: TokenBucket,
+    /// Bitmask of player slots muted by this client (`vban <mask>`).
+    pub(crate) voice_ban_mask: u32,
     /// Server time of the last accepted name change.
     pub(crate) last_name_change: Option<f64>,
     /// Server time of the last datagram the netchan accepted (of the connect, before any).
@@ -120,6 +124,8 @@ impl Client {
             refused_streams: 0,
             stringcmds: TokenBucket::stringcmds(),
             setinfos: TokenBucket::new(SETINFO_RATE_PER_SEC, SETINFO_BURST),
+            voice_packets: TokenBucket::new(60.0, 20.0),
+            voice_ban_mask: 0,
             last_name_change: None,
             last_heard: 0.0,
             pings: PingTracker::default(),

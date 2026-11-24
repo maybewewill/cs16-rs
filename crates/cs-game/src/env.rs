@@ -5,7 +5,7 @@ use cs_engine::consts::{
     MOVETYPE_NONE, SOLID_BBOX, SOLID_NOT,
 };
 use cs_engine::{EdictId, EngineApi, MoveFilter, MsgDest};
-use cs_proto48::messages::SND_FL_STOP;
+use cs_proto48::messages::{SND_FL_CHANGE_PITCH, SND_FL_CHANGE_VOL, SND_FL_STOP, svc};
 use cs_proto48::tempent::{self, BeamParams, explflag};
 use glam::Vec3;
 
@@ -1365,11 +1365,26 @@ impl GameEntity for LightEnvironment {
 pub(crate) struct AmbientGeneric {
     sample: String,
     volume: f32,
+    vol_start: f32,
+    current_vol: f32,
     pitch: i32,
+    target_pitch: i32,
+    current_pitch: f32,
+    fade_in: f32,
+    fade_out: f32,
+    spin_up: f32,
+    spin_down: f32,
     attenuation: f32,
     start_active: bool,
     looping: bool,
     active: bool,
+    ramping: bool,
+}
+
+impl AmbientGeneric {
+    fn step_ramp(&self) -> bool {
+        self.fade_in > 0.0 || self.fade_out > 0.0 || self.spin_up > 0.0 || self.spin_down > 0.0
+    }
 }
 
 impl GameEntity for AmbientGeneric {
@@ -1381,7 +1396,13 @@ impl GameEntity for AmbientGeneric {
         self.sample = key_str(keys, "message").unwrap_or("").to_string();
         precache_nonempty_sound(eng, &self.sample);
         self.volume = (key_str(keys, "health").map(atof).unwrap_or(10.0) / 10.0).clamp(0.0, 1.0);
+        self.vol_start = (key_str(keys, "volstart").map(atof).unwrap_or(0.0) / 10.0).clamp(0.0, 1.0);
         self.pitch = atoi(key_str(keys, "pitchstart").unwrap_or("100")).clamp(1, 255);
+        self.target_pitch = atoi(key_str(keys, "pitch").unwrap_or(&self.pitch.to_string())).clamp(1, 255);
+        self.fade_in = key_str(keys, "fadein").map(atof).unwrap_or(0.0).max(0.0);
+        self.fade_out = key_str(keys, "fadeout").map(atof).unwrap_or(0.0).max(0.0);
+        self.spin_up = key_str(keys, "spinup").map(atof).unwrap_or(0.0).max(0.0);
+        self.spin_down = key_str(keys, "spindown").map(atof).unwrap_or(0.0).max(0.0);
         let origin = eng.ent(id).map_or(Vec3::ZERO, |v| v.origin);
         let Some(v) = eng.ent_mut(id) else {
             return false;
@@ -1402,6 +1423,9 @@ impl GameEntity for AmbientGeneric {
         self.looping = sf & SF_AMBIENT_NOT_LOOPING == 0;
         self.start_active = sf & SF_AMBIENT_START_SILENT == 0 && self.looping;
         self.active = self.start_active;
+        self.current_vol = if self.active { self.volume } else { self.vol_start };
+        self.current_pitch = if self.active { self.target_pitch as f32 } else { self.pitch as f32 };
+        self.ramping = false;
         if self.active && !self.sample.is_empty() {
             eng.emit_ambient_sound(
                 id,
@@ -1410,7 +1434,7 @@ impl GameEntity for AmbientGeneric {
                 self.volume,
                 self.attenuation,
                 0,
-                self.pitch,
+                self.target_pitch,
             );
         }
         true
@@ -1438,7 +1462,7 @@ impl GameEntity for AmbientGeneric {
                 self.volume,
                 self.attenuation,
                 0,
-                self.pitch,
+                self.target_pitch,
             );
             return;
         }
@@ -1447,20 +1471,128 @@ impl GameEntity for AmbientGeneric {
             UseType::Off => false,
             _ => !self.active,
         };
-        let flags = if self.active { 0 } else { SND_FL_STOP as i32 };
-        eng.emit_ambient_sound(
-            id,
-            origin,
-            &self.sample,
-            self.volume,
-            self.attenuation,
-            flags,
-            self.pitch,
-        );
+        if self.active && self.fade_in > 0.0 {
+            self.current_vol = self.vol_start.max(0.05);
+            self.current_pitch = self.pitch as f32;
+            self.ramping = true;
+            eng.emit_ambient_sound(
+                id,
+                origin,
+                &self.sample,
+                self.current_vol,
+                self.attenuation,
+                0,
+                self.current_pitch.round() as i32,
+            );
+            let due = eng.time() + 0.1;
+            if let Some(v) = eng.ent_mut(id) {
+                v.nextthink = due;
+            }
+        } else if !self.active && (self.fade_out > 0.0 || self.spin_down > 0.0) {
+            if self.current_vol <= 0.0 {
+                self.current_vol = self.volume;
+            }
+            self.ramping = true;
+            let due = eng.time() + 0.1;
+            if let Some(v) = eng.ent_mut(id) {
+                v.nextthink = due;
+            }
+        } else {
+            self.ramping = false;
+            self.current_vol = if self.active { self.volume } else { 0.0 };
+            self.current_pitch = if self.active { self.target_pitch as f32 } else { self.pitch as f32 };
+            let flags = if self.active { 0 } else { SND_FL_STOP as i32 };
+            eng.emit_ambient_sound(
+                id,
+                origin,
+                &self.sample,
+                self.volume,
+                self.attenuation,
+                flags,
+                self.pitch,
+            );
+        }
+    }
+
+    fn think(&mut self, _g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId) {
+        if !self.ramping || !self.step_ramp() || self.sample.is_empty() {
+            self.ramping = false;
+            return;
+        }
+        let origin = eng.ent(id).map_or(Vec3::ZERO, |v| v.origin);
+        let dt = 0.1_f32;
+        if self.active {
+            let vol_rate = if self.fade_in > 0.0 {
+                (self.fade_in / 100.0) * dt
+            } else {
+                self.volume
+            };
+            let pitch_rate = if self.spin_up > 0.0 { self.spin_up * dt } else { 255.0 };
+            self.current_vol = (self.current_vol + vol_rate).min(self.volume);
+            let target_p = self.target_pitch as f32;
+            if self.current_pitch < target_p {
+                self.current_pitch = (self.current_pitch + pitch_rate).min(target_p);
+            } else {
+                self.current_pitch = (self.current_pitch - pitch_rate).max(target_p);
+            }
+            eng.emit_ambient_sound(
+                id,
+                origin,
+                &self.sample,
+                self.current_vol,
+                self.attenuation,
+                (SND_FL_CHANGE_VOL | SND_FL_CHANGE_PITCH) as i32,
+                self.current_pitch.round().clamp(1.0, 255.0) as i32,
+            );
+            if (self.current_vol - self.volume).abs() <= 0.001
+                && (self.current_pitch - target_p).abs() <= 0.5
+            {
+                self.ramping = false;
+                return;
+            }
+        } else {
+            let vol_rate = if self.fade_out > 0.0 {
+                (self.fade_out / 100.0) * dt
+            } else {
+                self.volume
+            };
+            let pitch_rate = if self.spin_down > 0.0 { self.spin_down * dt } else { 0.0 };
+            self.current_vol = (self.current_vol - vol_rate).max(0.0);
+            self.current_pitch = (self.current_pitch - pitch_rate).max(self.pitch as f32);
+            if self.current_vol <= 0.001 {
+                self.ramping = false;
+                eng.emit_ambient_sound(
+                    id,
+                    origin,
+                    &self.sample,
+                    0.0,
+                    self.attenuation,
+                    SND_FL_STOP as i32,
+                    self.pitch,
+                );
+                return;
+            }
+            eng.emit_ambient_sound(
+                id,
+                origin,
+                &self.sample,
+                self.current_vol,
+                self.attenuation,
+                (SND_FL_CHANGE_VOL | SND_FL_CHANGE_PITCH) as i32,
+                self.current_pitch.round().clamp(1.0, 255.0) as i32,
+            );
+        }
+        let due = eng.time() + f64::from(dt);
+        if let Some(v) = eng.ent_mut(id) {
+            v.nextthink = due;
+        }
     }
 
     fn restart(&mut self, _g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId) {
         self.active = self.start_active;
+        self.ramping = false;
+        self.current_vol = if self.active { self.volume } else { self.vol_start };
+        self.current_pitch = if self.active { self.target_pitch as f32 } else { self.pitch as f32 };
         if !self.sample.is_empty() {
             let origin = eng.ent(id).map_or(Vec3::ZERO, |v| v.origin);
             let flags = if self.active { 0 } else { SND_FL_STOP as i32 };
@@ -1478,10 +1610,20 @@ impl GameEntity for AmbientGeneric {
 }
 
 /// DSP room reverb zone marker (`env_sound`, `CEnvSound`).
-#[derive(Default)]
 pub(crate) struct EnvSound {
     radius: f32,
     room_type: i32,
+    player_inside: [bool; 32],
+}
+
+impl Default for EnvSound {
+    fn default() -> Self {
+        Self {
+            radius: 128.0,
+            room_type: 0,
+            player_inside: [false; 32],
+        }
+    }
 }
 
 impl GameEntity for EnvSound {
@@ -1492,6 +1634,7 @@ impl GameEntity for EnvSound {
     fn spawn(&mut self, eng: &mut EngineApi<'_>, id: EdictId, keys: &[(String, String)]) -> bool {
         self.radius = key_str(keys, "radius").map(atof).unwrap_or(128.0);
         self.room_type = atoi(key_str(keys, "roomtype").unwrap_or("0"));
+        self.player_inside = [false; 32];
         let now = eng.time();
         if let Some(v) = eng.ent_mut(id) {
             v.solid = SOLID_NOT;
@@ -1507,14 +1650,25 @@ impl GameEntity for EnvSound {
             return;
         };
         let r_sq = self.radius * self.radius;
+        let mut any_inside = false;
         for (slot, p) in g.players.iter().enumerate() {
+            if slot >= self.player_inside.len() {
+                break;
+            }
             if p.is_none() {
+                self.player_inside[slot] = false;
                 continue;
             }
             let pe = eng.client_edict(slot as u8);
-            if eng.ent(pe).is_some_and(|v| (v.origin - origin).length_squared() <= r_sq) {
+            let inside = eng.ent(pe).is_some_and(|v| (v.origin - origin).length_squared() <= r_sq);
+            if inside && !self.player_inside[slot] {
+                let [lo, hi] = (self.room_type.clamp(0, i32::from(u16::MAX)) as u16).to_le_bytes();
+                eng.send(MsgDest::One(slot as u8), &[svc::ROOMTYPE, lo, hi]);
+            }
+            self.player_inside[slot] = inside;
+            if inside && !any_inside {
                 eng.set_cvar("room_type", &self.room_type.to_string());
-                break;
+                any_inside = true;
             }
         }
         let due = eng.time() + 0.75;

@@ -411,3 +411,64 @@ fn ammo_boxes_world_items_and_player_equip() {
         .count();
     assert!(ammo_pickups >= 10, "expected >= 10 AmmoPickup usermsgs, got {ammo_pickups}");
 }
+
+#[test]
+fn env_sound_sends_svc_roomtype_and_ambient_generic_ramps() {
+    let extra = vec![
+        entity(&[
+            ("classname", "env_sound"),
+            ("origin", "0 0 0"),
+            ("radius", "256"),
+            ("roomtype", "14"),
+        ]),
+        entity(&[
+            ("classname", "ambient_generic"),
+            ("targetname", "ramp_amb"),
+            ("origin", "0 0 0"),
+            ("message", "ambience/wind1.wav"),
+            ("health", "10"),
+            ("volstart", "2"),
+            ("fadein", "100"),
+            ("fadeout", "100"),
+            ("spawnflags", "16"), // START_SILENT
+        ]),
+    ];
+
+    let mut b = setup_bench(extra, 1, false);
+    b.probe.clear_messages();
+    b.run(|game, eng| {
+        let p0 = eng.client_edict(0);
+        eng.set_origin(p0, Vec3::ZERO);
+        fire_targets(game.state_mut(), eng, "ramp_amb", Some(p0), Some(p0), UseType::On, 0.0);
+    });
+    b.step(85);
+
+    let got_room = b
+        .probe
+        .messages()
+        .iter()
+        .any(|m| matches!(m, SvcMessage::RoomType(14)));
+    let got_ramp_up = b.probe.messages().iter().any(|m| {
+        matches!(
+            m,
+            SvcMessage::SpawnStaticSound(s) if s.flags as u32 & cs_proto48::messages::SND_FL_CHANGE_VOL != 0
+        )
+    });
+    assert!(got_room, "env_sound must send SvcMessage::RoomType(14)");
+    assert!(got_ramp_up, "ambient_generic fadein should emit SND_FL_CHANGE_VOL updates");
+
+    b.probe.clear_messages();
+    b.run(|game, eng| {
+        let p0 = eng.client_edict(0);
+        fire_targets(game.state_mut(), eng, "ramp_amb", Some(p0), Some(p0), UseType::Off, 0.0);
+    });
+    b.step(200);
+
+    let got_stop = b.probe.messages().iter().any(|m| {
+        matches!(
+            m,
+            SvcMessage::SpawnStaticSound(s) if s.flags as u32 & cs_proto48::messages::SND_FL_STOP != 0
+        )
+    });
+    assert!(got_stop, "ambient_generic fadeout should finish with SND_FL_STOP");
+}

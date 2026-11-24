@@ -32,6 +32,9 @@ pub(crate) const MAX_LIGHTSTYLES: u8 = 64;
 /// (`g_rehlds_sv.signonData[NET_MAX_PAYLOAD]`, `sv_main.cpp` `SV_SpawnServer`, read 2026-11-21).
 pub const MAX_SIGNON_BUFFER: usize = 65536;
 
+/// Longest voice codec identifier carried by `svc_voiceinit`.
+pub const MAX_VOICE_CODEC_BYTES: usize = 32;
+
 /// Bytes kept back for the `svc_clientdata` of the `spawn` answer (`SV_WriteClientdataToMessage`):
 /// the client data against the zero baseline and, for a client with `cl_lw`, the weapon data of
 /// up to 64 weapons. A bound over what a game can fill (see the test of its size).
@@ -50,7 +53,8 @@ pub const SPAWN_TAIL_MAX: usize = 7
     + 3
     + MAX_CLIENT_SLOTS as usize * (1 + 1 + 4 + MAX_INFO_STRING + 1 + 16)
     + MAX_LIGHTSTYLES as usize * (1 + 1 + MAX_LIGHT_STYLE_BYTES + 1)
-    + 2;
+    + 2
+    + MAX_VOICE_CODEC_BYTES;
 
 /// Bytes of [`MAX_SIGNON_BUFFER`] kept back for the spawn baselines when the game writes
 /// `MsgDest::Init` messages. The game writes them before the engine knows how big the
@@ -248,11 +252,21 @@ pub(crate) fn write_spawn_stage(
     write_svc_setangle(w, Vec3::new(view_angles.x, view_angles.y, 0.0));
 }
 
+/// The end of the answer to `spawn`: `svc_signonnum 1` and `SV_WriteVoiceCodec`.
+pub(crate) fn write_spawn_tail_with_voice(w: &mut MsgWriter, codec: &str, quality: u8) {
+    let mut end = codec.len().min(MAX_VOICE_CODEC_BYTES);
+    while !codec.is_char_boundary(end) {
+        end -= 1;
+    }
+    write_svc_signonnum(w, 1);
+    write_svc_voiceinit(w, &codec[..end], quality);
+}
+
 /// The end of the answer to `spawn`: `svc_signonnum 1` and `SV_WriteVoiceCodec` (an empty codec
 /// of quality 0, `SV_WriteVoiceCodec_internal`).
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn write_spawn_tail(w: &mut MsgWriter) {
-    write_svc_signonnum(w, 1);
-    write_svc_voiceinit(w, "", 0);
+    write_spawn_tail_with_voice(w, "", 0);
 }
 
 #[cfg(test)]

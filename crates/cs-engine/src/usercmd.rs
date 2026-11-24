@@ -236,6 +236,7 @@ impl<G: GameDll> Server<G> {
         for client in self.clients.iter_mut().filter(|c| !c.is_free()) {
             client.stringcmds.refill(real_dt_secs);
             client.setinfos.refill(real_dt_secs);
+            client.voice_packets.refill(real_dt_secs);
             if client.state == ClientState::Active {
                 client.budget.accrue(real_dt_secs);
             }

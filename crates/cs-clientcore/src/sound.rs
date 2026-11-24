@@ -121,6 +121,47 @@ pub enum SoundCommand {
         fade_out: u8,
         fade_in: u8,
     },
+    /// `svc_roomtype`: switch the client DSP room reverb preset (`room_type`).
+    RoomType(u16),
+    /// `svc_cdtrack`: start or loop a background music track (`-1`/`0` stops).
+    CdTrack { track: i8, loop_track: i8 },
+}
+
+/// Incoming voice configuration or payload pushed from `svc_voiceinit` / `svc_voicedata`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VoiceEvent {
+    Init { codec: String, quality: u8 },
+    Data { player_slot: u8, data: Vec<u8> },
+}
+
+/// Maximum queued voice events before oldest are dropped.
+pub const MAX_PENDING_VOICE: usize = 256;
+
+/// Bounded queue of incoming voice events for the shell's voice decoder.
+#[derive(Debug, Clone, Default)]
+pub struct VoiceQueue {
+    pending: Vec<VoiceEvent>,
+}
+
+impl VoiceQueue {
+    pub fn push(&mut self, event: VoiceEvent) {
+        if self.pending.len() >= MAX_PENDING_VOICE {
+            self.pending.remove(0);
+        }
+        self.pending.push(event);
+    }
+
+    pub fn drain(&mut self) -> Vec<VoiceEvent> {
+        std::mem::take(&mut self.pending)
+    }
+
+    pub fn pending(&self) -> &[VoiceEvent] {
+        &self.pending
+    }
+
+    pub fn clear(&mut self) {
+        self.pending.clear();
+    }
 }
 
 /// The sound commands of the connection, in the order they were asked for.
@@ -222,6 +263,11 @@ impl SoundQueue {
                 hold_time: f.hold_time,
                 fade_out: f.fade_out,
                 fade_in: f.fade_in,
+            }),
+            SvcMessage::RoomType(rt) => self.push(SoundCommand::RoomType(*rt)),
+            SvcMessage::CdTrack { track, loop_track } => self.push(SoundCommand::CdTrack {
+                track: *track,
+                loop_track: *loop_track,
             }),
             _ => {}
         }
@@ -432,5 +478,42 @@ mod tests {
                 channel: 0
             }
         );
+    }
+
+    #[test]
+    fn roomtype_cdtrack_and_voice_queue_work() {
+        let mut q = SoundQueue::default();
+        q.handle(&SvcMessage::RoomType(17), &tables());
+        q.handle(
+            &SvcMessage::CdTrack {
+                track: 4,
+                loop_track: 4,
+            },
+            &tables(),
+        );
+        let cmds = q.drain();
+        assert_eq!(
+            cmds,
+            vec![
+                SoundCommand::RoomType(17),
+                SoundCommand::CdTrack {
+                    track: 4,
+                    loop_track: 4,
+                },
+            ]
+        );
+
+        let mut vq = VoiceQueue::default();
+        vq.push(VoiceEvent::Init {
+            codec: "voice_opus".into(),
+            quality: 3,
+        });
+        vq.push(VoiceEvent::Data {
+            player_slot: 1,
+            data: vec![1, 2, 3],
+        });
+        assert_eq!(vq.pending().len(), 2);
+        assert_eq!(vq.drain().len(), 2);
+        assert!(vq.pending().is_empty());
     }
 }

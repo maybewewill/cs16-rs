@@ -22,7 +22,7 @@ use cs_proto48::usermsg::CsUserMsg;
 use glam::Vec3;
 
 use crate::events::{EventFx, FiredEvent, FxEnv, EventQueue, ViewAnim};
-use crate::sound::{SoundCommand, SoundQueue};
+use crate::sound::{SoundCommand, SoundQueue, VoiceEvent, VoiceQueue};
 use crate::tempents::{FxRandom, ModelRef, RenderEffect, TeTextMessage, TempEntClock, TempEnts};
 
 /// `FFADE_*` flags (`screenfade.h`).
@@ -848,6 +848,7 @@ pub struct ClientEffects {
     pub events: EventQueue,
     pub tempents: TempEnts,
     pub sounds: SoundQueue,
+    pub voice: VoiceQueue,
     pub hud: HudState,
     pub rng: FxRandom,
     /// The last time [`ClientEffects::update`] ran, for the frame time of the next.
@@ -868,6 +869,7 @@ impl ClientEffects {
         self.events.clear();
         self.tempents.clear();
         self.sounds.clear();
+        self.voice.clear();
         self.last_update = None;
     }
 
@@ -900,7 +902,21 @@ impl ClientEffects {
             SvcMessage::Sound(_)
             | SvcMessage::SpawnStaticSound(_)
             | SvcMessage::StopSound(_)
-            | SvcMessage::SoundFade(_) => self.sounds.handle(msg, env.precache),
+            | SvcMessage::SoundFade(_)
+            | SvcMessage::RoomType(_)
+            | SvcMessage::CdTrack { .. } => self.sounds.handle(msg, env.precache),
+            SvcMessage::VoiceInit { codec, quality } => {
+                self.voice.push(VoiceEvent::Init {
+                    codec: codec.clone(),
+                    quality: *quality,
+                });
+            }
+            SvcMessage::VoiceData { player_slot, data } => {
+                self.voice.push(VoiceEvent::Data {
+                    player_slot: *player_slot,
+                    data: data.clone(),
+                });
+            }
             SvcMessage::NewUserMsg(_)
             | SvcMessage::CenterPrint(_)
             | SvcMessage::WeaponAnim { .. } => self.hud.handle(msg, env.time),

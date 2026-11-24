@@ -69,9 +69,30 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     reg.register("cl_viewmodel_lag", "1", arch, "Viewmodel inertia lag (0 or 1)");
     reg.register("r_noclip_speed", "450", CVarFlags::NONE, "Free-camera flight speed (units/sec)");
 
-    // Audio
+    // Audio & Voice
     reg.register("volume", "0.8", arch, "Master sound effects volume (0.0..1.0)");
     reg.register("mp3volume", "0.5", arch, "Menu / MP3 music volume (0.0..1.0)");
+    reg.register("bgmvolume", "1", arch, "CD / background music toggle (0 or 1)");
+    reg.register("hisound", "1", arch, "High-quality 22/44 kHz audio mixing (0 or 1)");
+    reg.register("mp3fadetime", "2.0", arch, "MP3 music crossfade/fade-out time (seconds)");
+    reg.register("room_off", "0", arch, "Disable EAX/DSP room reverb presets (0 or 1)");
+    reg.register("s_show", "0", CVarFlags::NONE, "Show active mixer sound channels (0 or 1)");
+    reg.register("s_occfactor", "0.25", arch, "Wall sound occlusion attenuation factor (0..1)");
+    reg.register("suitvolume", "0.25", arch, "HEV suit/VOX speech volume multiplier (0..1)");
+    reg.register("voice_enable", "1", arch, "Enable incoming/outgoing voice chat (0 or 1)");
+    reg.register("voice_scale", "1.0", arch, "Incoming voice receive gain multiplier");
+    reg.register("voice_loopback", "0", CVarFlags::NONE, "Hear own voice transmission locally (0 or 1)");
+    reg.register("voice_modenable", "1", arch, "Enable mod voice support (0 or 1)");
+    reg.register("voice_forcemicrecord", "1", arch, "Force microphone recording device init (0 or 1)");
+    reg.register("voice_avggain", "0.5", arch, "Voice AGC average target gain");
+    reg.register("voice_maxgain", "5", arch, "Voice AGC maximum gain");
+    reg.register("voice_inputfromfile", "0", CVarFlags::NONE, "Read outgoing voice from voice_input.wav (0 or 1)");
+    reg.register("voice_recordtofile", "0", CVarFlags::NONE, "Record mic/decoded voice to WAV file (0 or 1)");
+    reg.register("sv_voiceenable", "1", srv_arch, "Allow voice communication on server (0 or 1)");
+    reg.register("sv_alltalk", "0", srv, "Allow both teams to hear each other over voice (0 or 1)");
+    reg.register("sv_voicecodec", "voice_opus", srv, "Server voice codec name");
+    reg.register("sv_voicequality", "3", srv, "Server voice codec quality level (1..5)");
+    reg.register("voice_serverdebug", "0", srv, "Log server voice relay diagnostics (0 or 1)");
 
     // Server / Physics (exact CS 1.6 defaults)
     reg.register("hostname", "Counter-Strike 1.6 Rust", srv_arch, "Server name");
@@ -188,6 +209,7 @@ pub fn register_default_binds(reg: &mut CVarRegistry) {
         ("c", "radio3"),
         ("t", "impulse 201"),
         ("f", "impulse 100"),
+        ("k", "+voicerecord"),
         (",", "buyammo1"),
         (".", "buyammo2"),
         ("1", "slot1"),
