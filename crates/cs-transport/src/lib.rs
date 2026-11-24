@@ -1,16 +1,25 @@
 //! Packet transport seam: every component exchanges raw datagrams through
-//! [`PacketTransport`], so the same code runs over UDP, an in-process loopback
-//! and, later, WebSocket.
+//! [`PacketTransport`], so the same code runs over UDP, an in-process loopback,
+//! a browser channel, or RFC 6455 WebSocket.
 
 use std::fmt;
 
+mod channel;
 mod loopback;
+mod multi;
 #[cfg(not(target_arch = "wasm32"))]
 mod udp;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod ws_native;
+pub mod ws_proto;
 
+pub use channel::{ChannelHandle, ChannelTransport};
 pub use loopback::{FaultStats, Faults, LoopbackEndpoint, LoopbackHub};
+pub use multi::{MultiTransport, PeerKind};
 #[cfg(not(target_arch = "wasm32"))]
 pub use udp::UdpTransport;
+#[cfg(not(target_arch = "wasm32"))]
+pub use ws_native::{UpgradeHook, WsClientTransport, WsServerConfig, WsServerTransport};
 
 /// Largest datagram a transport accepts for sending.
 /// Working assumption: the value from the reference `net.h`.
@@ -22,6 +31,8 @@ pub enum PeerAddr {
     Udp(std::net::SocketAddr),
     /// Loopback peer; `0` is the hub (server), endpoints are numbered from `1`.
     Loopback(u32),
+    /// Browser / WebSocket / WebTransport peer (`0` for the remote server from a client).
+    Web(u32),
 }
 
 impl fmt::Display for PeerAddr {
@@ -29,6 +40,7 @@ impl fmt::Display for PeerAddr {
         match self {
             PeerAddr::Udp(addr) => write!(f, "{addr}"),
             PeerAddr::Loopback(id) => write!(f, "loopback:{id}"),
+            PeerAddr::Web(id) => write!(f, "web:{id}"),
         }
     }
 }
