@@ -8,75 +8,75 @@ evidence = "crates/cs-engine/tests/lifecycle.rs::start_frame_is_called_once_per_
 
 [[item]]
 id = "mods_api_crate_and_versioned_abi"
-status = "missing"
-evidence = "Phase 5: cs-mod-api crate defining stable versioned ABI types, hook ids, and native signatures"
+status = "tested"
+evidence = "crates/cs-mod-api/src/abi.rs::hook_action_and_wire_codecs_roundtrip, crates/cs-mod-api/src/manifest.rs::manifest_parses_valid_toml_and_rejects_bad_paths_or_abi"
 
 [[item]]
 id = "mods_hookchains_pre_post"
-status = "missing"
-evidence = "Phase 5: ReAPI-style pre/post hookchains around GameDll and EngineApi calls with override/supercede support"
+status = "tested"
+evidence = "crates/cs-mod-host/tests/mod_host.rs::hookchains_run_pre_post_and_support_override_and_supercede"
 
 [[item]]
 id = "mods_server_natives"
-status = "missing"
-evidence = "Phase 5: server natives for entities, messages, cvars, commands, menus, timers, traces, sound, and mod storage"
+status = "tested"
+evidence = "crates/cs-mod-host/tests/mod_host.rs::server_natives_cover_entities_messages_cvars_menus_timers_traces_sound_storage"
 
 [[item]]
 id = "mods_host_wasmi_runtime"
-status = "missing"
-evidence = "Phase 5: cs-mod-host executing server/client WASM mods via wasmi across native and wasm32"
+status = "tested"
+evidence = "crates/cs-mod-host/tests/mod_host.rs::wasmi_runtime_enforces_fuel_and_memory_limits_and_isolates_faults"
 
 [[item]]
 id = "mods_runtime_trait_jit_seam"
-status = "missing"
-evidence = "Phase 5: ModRuntime trait allowing future JIT backend swap"
+status = "tested"
+evidence = "crates/cs-mod-host/tests/mod_host.rs::custom_mod_runtime_trait_seam_plugs_into_host"
 
 [[item]]
 id = "mods_sandbox_manifest_permissions_and_limits"
-status = "missing"
-evidence = "Phase 5: capability permissions from mod.toml, fuel/memory budgets per frame, and fault isolation"
+status = "tested"
+evidence = "crates/cs-mod-host/tests/mod_host.rs::sandbox_denies_undeclared_permissions, crates/cs-mod-host/tests/mod_host.rs::wasmi_runtime_enforces_fuel_and_memory_limits_and_isolates_faults"
 
 [[item]]
 id = "mods_package_csmod_and_mod_toml"
-status = "missing"
-evidence = "Phase 5: loading folder and .csmod archive mods from mods/ with mod.toml metadata and dependencies"
+status = "tested"
+evidence = "crates/cs-mod-api/src/archive.rs::csmod_archive_roundtrips_stored_and_deflate_and_blocks_traversal_and_bombs, crates/cs-mod-host/tests/mod_host.rs::package_loader_resolves_deps_and_hot_reloads_mods, crates/cs-server/src/proto48.rs::parses_mods_dir_flag"
 
 [[item]]
 id = "mods_vfs_asset_pack_layer"
-status = "missing"
-evidence = "Phase 5: VFS mods/<id>/ overlay layer above cstrike"
+status = "tested"
+evidence = "crates/cs-vfs/src/lib.rs::mod_asset_overlay_overrides_cstrike_and_unmounts_cleanly"
 
 [[item]]
 id = "mods_client_wasm_hud_and_panels"
-status = "missing"
-evidence = "Phase 5: client-side WASM mods for custom HUD drawing, panels, usermsgs, and input"
+status = "tested"
+evidence = "crates/cs-mod-host/tests/mod_host.rs::client_wasm_mod_draws_hud_and_handles_custom_usermsg_and_input, crates/cs-client/src/ui/mod_hud.rs::mod_hud_draws_commands_without_panicking"
 
 [[item]]
 id = "mods_auto_download_hash_and_capability_negotiation"
-status = "missing"
-evidence = "Phase 5: automatic server-to-client mod/asset download, hash verification, first-join prompt, and userinfo capability negotiation"
+status = "tested"
+evidence = "crates/cs-mod-api/src/hash.rs::sha256_matches_nist_vectors, crates/cs-engine/src/api_messages.rs::send_mod_usermsg_reaches_only_mod_capable_clients, crates/cs-mod-host/tests/mod_host.rs::auto_download_verifies_sha256_enforces_prompt_and_skips_original_clients, crates/cs-client/src/ui/mod_hud.rs::mod_approval_prompt_renders_pending_entry, crates/cs-server/src/proto48.rs::modded_server_runs_reference_mod_for_clients"
 
 [[item]]
 id = "mods_sdk_crate_macros_and_hot_reload"
-status = "missing"
-evidence = "Phase 5: cs-mod-sdk crate, hook attribute macros, project template, and server hot reload"
+status = "tested"
+evidence = "crates/cs-mod-sdk/src/lib.rs::macros_and_sdk_builders_compile_and_scaffold_valid_manifest, crates/cs-mod-host/tests/mod_host.rs::package_loader_resolves_deps_and_hot_reloads_mods"
 
 [[item]]
 id = "mods_ref_deathmatch"
-status = "missing"
-evidence = "Phase 5: reference Deathmatch mod"
+status = "tested"
+evidence = "crates/cs-mod-host/tests/reference_mods.rs::ref_mod_deathmatch_respawns_and_announces"
 
 [[item]]
 id = "mods_ref_gungame"
-status = "missing"
-evidence = "Phase 5: reference GunGame mod"
+status = "tested"
+evidence = "crates/cs-mod-host/tests/reference_mods.rs::ref_mod_gungame_tracks_levels_and_announces_victory"
 
 [[item]]
 id = "mods_ref_zombie"
-status = "missing"
-evidence = "Phase 5: reference Zombie Plague/Infection mod"
+status = "tested"
+evidence = "crates/cs-mod-host/tests/reference_mods.rs::ref_mod_zombie_infects_and_boosts_health"
 
 [[item]]
 id = "mods_ref_admin_menu_stats_and_hud"
-status = "missing"
-evidence = "Phase 5: reference admin menu, player stats, and custom HUD mods"
+status = "tested"
+evidence = "crates/cs-mod-host/tests/reference_mods.rs::ref_mod_admin_menu_opens_classic_showmenu_and_handles_select, crates/cs-mod-host/tests/reference_mods.rs::ref_mod_player_stats_persists_and_answers_rank, crates/cs-mod-host/tests/reference_mods.rs::ref_mod_custom_hud_auto_downloads_overlays_assets_and_draws_hud"

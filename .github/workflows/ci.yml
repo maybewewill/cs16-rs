@@ -41,13 +41,16 @@ jobs:
         run: cargo test --workspace
 
       - name: wasm32 check (library crates)
-        run: cargo check --target wasm32-unknown-unknown -p cs-proto48 -p cs-cvar -p cs-assets -p cs-vfs -p cs-pm -p cs-sim -p cs-platform -p cs-transport -p cs-engine -p cs-probe -p cs-clientcore -p cs-game -p cs-local
+        run: cargo check --target wasm32-unknown-unknown -p cs-proto48 -p cs-cvar -p cs-assets -p cs-vfs -p cs-pm -p cs-sim -p cs-platform -p cs-transport -p cs-engine -p cs-probe -p cs-clientcore -p cs-game -p cs-local -p cs-mod-api -p cs-mod-host -p cs-mod-sdk
 
       - name: wasm32 check (cs-relay, cs-client, cs-web)
         run: |
           cargo check --target wasm32-unknown-unknown -p cs-relay --lib
           cargo check --target wasm32-unknown-unknown -p cs-client --lib
           cargo check --target wasm32-unknown-unknown -p cs-web
+
+      - name: Build reference mods
+        run: cargo xtask mod-build
 
       - name: Parity report
         run: cargo xtask parity
