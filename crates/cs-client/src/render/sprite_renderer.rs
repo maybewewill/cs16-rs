@@ -1,20 +1,20 @@
-//! GoldSrc sprite (`.spr`) renderer: camera-facing / upright / oriented quads with the engine's
-//! render-mode blending, used for `env_sprite` entities and (later) client tempents.
-//!
-//! Behaviour: Xash3D FWGS `ref/gl/gl_sprite.c` `R_DrawSpriteModel` (GPL-3-or-later, read
-//! 2026-11-23). Not done yet (assumptions to revisit): sprite frame interpolation between frames
-//! (`R_GetSpriteFrameInterpolant`), the "sprite lightmap" pass for lit alpha-test sprites,
-//! occlusion of glow sprites by world geometry, and angled frame groups.
+//! GoldSrc sprite (`.spr`) renderer across all 5 orientation types and all render modes, with
+//! `WorldCollision` line-of-sight occlusion for `kRenderGlow`, `GL_EXP2` fog,
+//! `gamma`/`texgamma`/`r_software_mode`, `TextureFilterMode`, and MSAA (`1 | 4`).
 
 use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
 use cs_assets::spr::{GoldSrcSprite, SpriteType};
+use cs_pm::collision::{Hull, WorldCollision};
 use cs_vfs::Vfs;
 use glam::Mat4;
 use tracing::warn;
 use wgpu::util::DeviceExt;
 
+use crate::render::lighting::{
+    TextureFilterMode, create_sampler, upload_rgba_texture_mipmapped,
+};
 use crate::render::scene::{
     EntRenderMode, SpriteDraw, ViewBasis, glow_blend, sprite_axes, sprite_quad,
 };
@@ -31,21 +31,29 @@ struct SpriteVertex {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct SpriteUniforms {
     view_proj: [[f32; 4]; 4],
-    params: [f32; 4],
+    camera_pos: [f32; 4],
+    fog_color_density: [f32; 4],
+    gamma_params: [f32; 4],
+}
+
+/// Shared camera, fog, and gamma parameters for [`SpriteRenderer::prepare`].
+#[derive(Debug, Clone, Copy)]
+pub struct SpritePassParams {
+    pub view_proj: Mat4,
+    pub gamma: f32,
+    pub texgamma: f32,
+    pub brightness: f32,
+    pub software_mode: bool,
+    pub fog: Option<([f32; 3], f32)>,
 }
 
 /// How a sprite quad is blended (`R_DrawSpriteModel`'s render-mode switch).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpriteBlend {
-    /// `kRenderNormal` and unknown modes: no blending, alpha test only.
     Opaque,
-    /// `kRenderTransColor` / `kRenderTransTexture`: alpha blend, depth write kept.
     Alpha,
-    /// `kRenderTransAlpha`: alpha blend, no depth write.
     AlphaNoDepthWrite,
-    /// `kRenderTransAdd`: `GL_SRC_ALPHA, GL_ONE`, no depth write.
     Add,
-    /// `kRenderGlow`: additive, no depth test and no depth write.
     Glow,
 }
 
@@ -59,19 +67,14 @@ pub fn sprite_blend_for(mode: EntRenderMode) -> SpriteBlend {
     }
 }
 
-/// Frame index of an entity `frame` value: `(int)frame`, clamped into `0..count`
-/// (`R_GetSpriteFrameInterpolant`, `gl_sprite.c`). `None` for a sprite without frames.
 pub fn clamp_frame(frame: f32, count: usize) -> Option<usize> {
     if count == 0 {
         return None;
     }
-    let f = frame as i64; // truncates toward zero, NaN -> 0
+    let f = frame as i64;
     Some(f.clamp(0, count as i64 - 1) as usize)
 }
 
-/// Frame extents `(left, right, up, down)` relative to the sprite origin, as the engine's sprite
-/// loader derives them from the on-disk frame origin and size (`left = origin_x`,
-/// `up = origin_y`, `right = origin_x + width`, `down = origin_y - height`).
 pub fn frame_extents(origin_x: i32, origin_y: i32, width: u32, height: u32) -> (f32, f32, f32, f32) {
     let left = origin_x as f32;
     let up = origin_y as f32;
@@ -83,6 +86,7 @@ struct GpuFrame {
     right: f32,
     up: f32,
     down: f32,
+    view: wgpu::TextureView,
     bind_group: wgpu::BindGroup,
 }
 
@@ -103,9 +107,14 @@ pub struct PreparedSprites {
 }
 
 pub struct SpriteRenderer {
+    color_format: wgpu::TextureFormat,
+    msaa_samples: u32,
+    shader: wgpu::ShaderModule,
+    pipeline_layout: wgpu::PipelineLayout,
     pipelines: [wgpu::RenderPipeline; 5],
     tex_bgl: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    filter_mode: TextureFilterMode,
     uniform_buf: wgpu::Buffer,
     uniform_bg: wgpu::BindGroup,
     vertex_buf: wgpu::Buffer,
@@ -121,6 +130,84 @@ fn pipeline_slot(b: SpriteBlend) -> usize {
         SpriteBlend::Add => 3,
         SpriteBlend::Glow => 4,
     }
+}
+
+fn create_sprite_pipelines(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+    color_format: wgpu::TextureFormat,
+    sample_count: u32,
+) -> [wgpu::RenderPipeline; 5] {
+    let alpha_blend = Some(wgpu::BlendState::ALPHA_BLENDING);
+    let add_blend = Some(wgpu::BlendState {
+        color: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::SrcAlpha,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        },
+        alpha: wgpu::BlendComponent::OVER,
+    });
+    let make = |label: &str,
+                blend: Option<wgpu::BlendState>,
+                depth_write: bool,
+                depth_compare: wgpu::CompareFunction| {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module: shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<SpriteVertex>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x3,
+                        1 => Float32x2,
+                        2 => Float32x4,
+                    ],
+                })],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: color_format,
+                    blend,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(depth_write),
+                depth_compare: Some(depth_compare),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: sample_count.max(1),
+                ..Default::default()
+            },
+            multiview_mask: None,
+            cache: None,
+        })
+    };
+    use wgpu::CompareFunction::{Always, LessEqual};
+    [
+        make("sprite_opaque", None, true, LessEqual),
+        make("sprite_alpha", alpha_blend, true, LessEqual),
+        make("sprite_alpha_nodepth", alpha_blend, false, LessEqual),
+        make("sprite_add", add_blend, false, LessEqual),
+        make("sprite_glow", add_blend, false, Always),
+    ]
 }
 
 impl SpriteRenderer {
@@ -163,85 +250,28 @@ impl SpriteRenderer {
                 },
             ],
         });
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("sprite_pipeline_layout"),
             bind_group_layouts: &[Some(&uniform_bgl), Some(&tex_bgl)],
             immediate_size: 0,
         });
 
-        let alpha_blend = Some(wgpu::BlendState::ALPHA_BLENDING);
-        let add_blend = Some(wgpu::BlendState {
-            color: wgpu::BlendComponent {
-                src_factor: wgpu::BlendFactor::SrcAlpha,
-                dst_factor: wgpu::BlendFactor::One,
-                operation: wgpu::BlendOperation::Add,
-            },
-            alpha: wgpu::BlendComponent::OVER,
-        });
-        let make = |label: &str,
-                    blend: Option<wgpu::BlendState>,
-                    depth_write: bool,
-                    depth_compare: wgpu::CompareFunction| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_main"),
-                    compilation_options: Default::default(),
-                    buffers: &[Some(wgpu::VertexBufferLayout {
-                        array_stride: std::mem::size_of::<SpriteVertex>() as wgpu::BufferAddress,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &wgpu::vertex_attr_array![
-                            0 => Float32x3,
-                            1 => Float32x2,
-                            2 => Float32x4,
-                        ],
-                    })],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: color_format,
-                        blend,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                // Sprites are double sided (`SPR_CULL_NONE` is the common case).
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: None,
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: Some(depth_write),
-                    depth_compare: Some(depth_compare),
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
-            })
-        };
-        use wgpu::CompareFunction::{Always, LessEqual};
-        let pipelines = [
-            make("sprite_opaque", None, true, LessEqual),
-            make("sprite_alpha", alpha_blend, true, LessEqual),
-            make("sprite_alpha_nodepth", alpha_blend, false, LessEqual),
-            make("sprite_add", add_blend, false, LessEqual),
-            make("sprite_glow", add_blend, false, Always),
-        ];
+        let msaa_samples = 1;
+        let pipelines = create_sprite_pipelines(
+            device,
+            &shader,
+            &pipeline_layout,
+            color_format,
+            msaa_samples,
+        );
 
         let uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("sprite_uniform_buf"),
             contents: bytemuck::bytes_of(&SpriteUniforms {
                 view_proj: Mat4::IDENTITY.to_cols_array_2d(),
-                params: [2.5, 1.0, 0.0, 0.0],
+                camera_pos: [0.0, 0.0, 0.0, 1.0],
+                fog_color_density: [0.0, 0.0, 0.0, 0.0],
+                gamma_params: [2.5, 2.0, 1.0, 0.0],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -253,14 +283,8 @@ impl SpriteRenderer {
                 resource: uniform_buf.as_entire_binding(),
             }],
         });
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("sprite_sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
+        let filter_mode = TextureFilterMode::LinearMipmapLinear;
+        let sampler = create_sampler(device, "sprite_sampler", filter_mode, 1, true);
         let vertex_cap = 6 * 256;
         let vertex_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("sprite_dynamic_vbuf"),
@@ -270,14 +294,66 @@ impl SpriteRenderer {
         });
 
         Self {
+            color_format,
+            msaa_samples,
+            shader,
+            pipeline_layout,
             pipelines,
             tex_bgl,
             sampler,
+            filter_mode,
             uniform_buf,
             uniform_bg,
             vertex_buf,
             vertex_cap,
             cache: HashMap::new(),
+        }
+    }
+
+    pub fn rebuild_pipelines(&mut self, device: &wgpu::Device, msaa_samples: u32) {
+        let samples = msaa_samples.max(1);
+        if self.msaa_samples == samples {
+            return;
+        }
+        self.msaa_samples = samples;
+        self.pipelines = create_sprite_pipelines(
+            device,
+            &self.shader,
+            &self.pipeline_layout,
+            self.color_format,
+            samples,
+        );
+    }
+
+    pub fn set_texture_filter(&mut self, device: &wgpu::Device, mode: TextureFilterMode) {
+        let clamped_mode = match mode {
+            TextureFilterMode::Nearest
+            | TextureFilterMode::NearestMipmapNearest
+            | TextureFilterMode::NearestMipmapLinear => TextureFilterMode::Nearest,
+            _ => TextureFilterMode::Linear,
+        };
+        if self.filter_mode == clamped_mode {
+            return;
+        }
+        self.filter_mode = clamped_mode;
+        self.sampler = create_sampler(device, "sprite_sampler", clamped_mode, 1, true);
+        for (idx, spr) in self.cache.values_mut().flatten().enumerate() {
+            for (fi, f) in spr.frames.iter_mut().enumerate() {
+                f.bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(&format!("sprite_bg_{idx}_{fi}")),
+                    layout: &self.tex_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&f.view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                    ],
+                });
+            }
         }
     }
 
@@ -300,38 +376,14 @@ impl SpriteRenderer {
                         .frames
                         .iter()
                         .map(|f| {
-                            let size = wgpu::Extent3d {
-                                width: f.width.max(1),
-                                height: f.height.max(1),
-                                depth_or_array_layers: 1,
-                            };
-                            let tex = device.create_texture(&wgpu::TextureDescriptor {
-                                label: Some(&key),
-                                size,
-                                mip_level_count: 1,
-                                sample_count: 1,
-                                dimension: wgpu::TextureDimension::D2,
-                                format: wgpu::TextureFormat::Rgba8Unorm,
-                                usage: wgpu::TextureUsages::TEXTURE_BINDING
-                                    | wgpu::TextureUsages::COPY_DST,
-                                view_formats: &[],
-                            });
-                            queue.write_texture(
-                                wgpu::TexelCopyTextureInfo {
-                                    texture: &tex,
-                                    mip_level: 0,
-                                    origin: wgpu::Origin3d::ZERO,
-                                    aspect: wgpu::TextureAspect::All,
-                                },
+                            let view = upload_rgba_texture_mipmapped(
+                                device,
+                                queue,
+                                &key,
+                                f.width.max(1),
+                                f.height.max(1),
                                 &f.rgba,
-                                wgpu::TexelCopyBufferLayout {
-                                    offset: 0,
-                                    bytes_per_row: Some(4 * size.width),
-                                    rows_per_image: Some(size.height),
-                                },
-                                size,
                             );
-                            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
                             let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                                 label: Some(&key),
                                 layout: &self.tex_bgl,
@@ -353,6 +405,7 @@ impl SpriteRenderer {
                                 right,
                                 up,
                                 down,
+                                view,
                                 bind_group,
                             }
                         })
@@ -379,8 +432,6 @@ impl SpriteRenderer {
             .map(|_| key)
     }
 
-    /// Build the quads of this frame's sprites. `paths` gives the `.spr` path of each draw's
-    /// model (same length and order as `draws`; `None` skips the draw).
     #[allow(clippy::too_many_arguments)]
     pub fn prepare(
         &mut self,
@@ -390,14 +441,21 @@ impl SpriteRenderer {
         draws: &[SpriteDraw],
         paths: &[Option<&str>],
         view: &ViewBasis,
-        view_proj: Mat4,
-        gamma: f32,
-        brightness: f32,
+        params: &SpritePassParams,
+        collision: Option<&WorldCollision>,
     ) -> PreparedSprites {
         let mut verts: Vec<SpriteVertex> = Vec::new();
         let mut prepared = Vec::new();
         for (d, path) in draws.iter().zip(paths) {
             let Some(path) = path else { continue };
+            if d.mode == EntRenderMode::Glow
+                && let Some(world) = collision
+            {
+                let tr = world.trace_world(view.origin, d.origin, Hull::Point);
+                if tr.start_solid || tr.fraction < 1.0 {
+                    continue;
+                }
+            }
             let Some(key) = self.ensure_loaded(device, queue, vfs, path) else {
                 continue;
             };
@@ -452,12 +510,20 @@ impl SpriteRenderer {
         if !verts.is_empty() {
             queue.write_buffer(&self.vertex_buf, 0, bytemuck::cast_slice(&verts));
         }
+        let (fog_rgb, fog_density) = params.fog.unwrap_or(([0.0, 0.0, 0.0], 0.0));
         queue.write_buffer(
             &self.uniform_buf,
             0,
             bytemuck::bytes_of(&SpriteUniforms {
-                view_proj: view_proj.to_cols_array_2d(),
-                params: [gamma, brightness, 0.0, 0.0],
+                view_proj: params.view_proj.to_cols_array_2d(),
+                camera_pos: [view.origin.x, view.origin.y, view.origin.z, 1.0],
+                fog_color_density: [fog_rgb[0], fog_rgb[1], fog_rgb[2], fog_density],
+                gamma_params: [
+                    params.gamma,
+                    params.texgamma,
+                    params.brightness,
+                    if params.software_mode { 1.0 } else { 0.0 },
+                ],
             }),
         );
         PreparedSprites { draws: prepared }
@@ -508,7 +574,6 @@ mod tests {
 
     #[test]
     fn frame_extents_from_disk_origin() {
-        // Typical centred frame: origin (-8, 4), 16x8.
         assert_eq!(frame_extents(-8, 4, 16, 8), (-8.0, 8.0, 4.0, -4.0));
     }
 }

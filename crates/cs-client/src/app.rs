@@ -1335,6 +1335,7 @@ impl Cs16App {
                 light_rgb: Vec3::splat(0.95),
                 flip_winding: *right_hand,
                 attached_model: None,
+                ..StudioInstance::default()
             }
         });
         let scene_data = SceneDynamicData {

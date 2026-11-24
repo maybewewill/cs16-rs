@@ -3,10 +3,12 @@
 //! view model, and the VGUI2/HUD overlay.
 
 pub mod bsp_renderer;
+pub mod decal_renderer;
 pub mod fx_renderer;
 pub mod gamma;
 pub mod lighting;
 pub mod mdl_renderer;
+pub mod particles;
 pub mod scene;
 pub mod skybox;
 pub mod sprite_renderer;
@@ -26,14 +28,14 @@ use winit::window::Window;
 
 use crate::camera::Camera;
 use crate::render::bsp_renderer::{BspDrawParams, BspRenderStats, BspRenderer};
-use crate::render::fx_renderer::{FxBeam, FxPoint, FxRenderer};
+use crate::render::fx_renderer::{FxBeam, FxDrawParams, FxPoint, FxRenderer};
 use crate::render::lighting::{GpuLightsUniform, TextureFilterMode};
-use crate::render::mdl_renderer::{MdlRenderer, StudioInstance};
+use crate::render::mdl_renderer::{MdlPassParams, MdlRenderer, StudioInstance};
 use crate::render::scene::{
     BrushDraw, DrawLists, ModelKind, ModelRegistry, SceneFrame, build_draw_lists,
 };
 use crate::render::skybox::SkyboxRenderer;
-use crate::render::sprite_renderer::SpriteRenderer;
+use crate::render::sprite_renderer::{SpritePassParams, SpriteRenderer};
 
 pub struct RenderSettings<'a> {
     pub gamma: f32,
@@ -361,6 +363,13 @@ impl Renderer {
         };
         self.bsp.set_texture_filter(&self.device, filter_mode, 1);
         self.skybox.set_texture_filter(&self.device, filter_mode);
+        self.mdl_view.set_texture_filter(&self.device, filter_mode, 1);
+        self.mdl_scene.set_texture_filter(&self.device, filter_mode, 1);
+        self.sprites.set_texture_filter(&self.device, filter_mode);
+
+        let cam_fwd = camera.forward();
+        let cam_right = camera.right();
+        let cam_up = cam_right.cross(cam_fwd).normalize_or_zero();
 
         if self.bsp.has_map() {
             self.bsp
@@ -372,14 +381,21 @@ impl Renderer {
             if let (Some(vfs), Some(vm)) = (scene.vfs, scene.viewmodel.as_ref()) {
                 let vm_proj = camera.viewmodel_proj_matrix(vw, vh, settings.aspect_mode);
                 let vm_vp = vm_proj * view_mat;
+                let vm_params = MdlPassParams {
+                    view_proj: vm_vp,
+                    camera_pos: camera.position,
+                    cam_right,
+                    cam_up,
+                    gamma: settings.gamma,
+                    brightness: settings.brightness,
+                    ..MdlPassParams::default()
+                };
                 prepared_viewmodel = Some(self.mdl_view.prepare_studio(
                     &self.device,
                     &self.queue,
                     vfs,
                     std::slice::from_ref(vm),
-                    vm_vp,
-                    settings.gamma,
-                    settings.brightness,
+                    &vm_params,
                 ));
             }
 
@@ -423,18 +439,26 @@ impl Renderer {
                                 .attached
                                 .and_then(|h| self.models.get(h))
                                 .map(|e| e.name.as_str()),
+                            ..StudioInstance::default()
                         })
                     })
                     .collect();
                 if !studio.is_empty() {
+                    let scene_params = MdlPassParams {
+                        view_proj,
+                        camera_pos: camera.position,
+                        cam_right,
+                        cam_up,
+                        gamma: settings.gamma,
+                        brightness: settings.brightness,
+                        ..MdlPassParams::default()
+                    };
                     prepared_scene_studio = Some(self.mdl_scene.prepare_studio(
                         &self.device,
                         &self.queue,
                         vfs,
                         &studio,
-                        view_proj,
-                        settings.gamma,
-                        settings.brightness,
+                        &scene_params,
                     ));
                 }
 
@@ -444,6 +468,14 @@ impl Renderer {
                         .iter()
                         .map(|d| self.models.get(d.model).map(|e| e.name.as_str()))
                         .collect();
+                    let spr_params = SpritePassParams {
+                        view_proj,
+                        gamma: settings.gamma,
+                        texgamma: 2.0,
+                        brightness: settings.brightness,
+                        software_mode: false,
+                        fog: None,
+                    };
                     prepared_sprites = Some(self.sprites.prepare(
                         &self.device,
                         &self.queue,
@@ -451,23 +483,26 @@ impl Renderer {
                         &lists.sprites,
                         &paths,
                         &frame.view,
-                        view_proj,
-                        settings.gamma,
-                        settings.brightness,
+                        &spr_params,
+                        None,
                     ));
                 }
             }
 
-            let cam_fwd = camera.forward();
-            let cam_right = camera.right();
-            let cam_up = cam_right.cross(cam_fwd).normalize_or_zero();
+            let fx_params = FxDrawParams {
+                view_proj,
+                cam_pos: camera.position,
+                cam_right,
+                cam_up,
+                gamma: settings.gamma,
+                brightness: settings.brightness,
+                software_mode: false,
+                fog: None,
+            };
             self.fx.prepare(
                 &self.device,
                 &self.queue,
-                view_proj,
-                camera.position,
-                cam_right,
-                cam_up,
+                &fx_params,
                 scene.beams,
                 scene.points,
             );

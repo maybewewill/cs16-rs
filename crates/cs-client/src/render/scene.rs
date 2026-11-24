@@ -45,6 +45,8 @@ pub const RENDERFX_DISTORT: u8 = 15;
 pub const RENDERFX_HOLOGRAM: u8 = 16;
 pub const RENDERFX_DEAD_PLAYER: u8 = 17;
 pub const RENDERFX_EXPLODE: u8 = 18;
+pub const RENDERFX_GLOW_SHELL: u8 = 19;
+pub const RENDERFX_CLAMP_MIN_SCALE: u8 = 20;
 pub const RENDERFX_LIGHT_MULTIPLIER: u8 = 21;
 
 /// GoldSrc `kRender*` entity render modes (`entity_state_t::rendermode`).
@@ -415,7 +417,11 @@ pub fn glow_blend(dist: f32, renderfx: u8) -> (f32, f32) {
     }
     const GLARE_FALLOFF: f32 = 19000.0;
     let brightness = (GLARE_FALLOFF / (dist * dist)).clamp(0.05, 1.0);
-    (brightness, dist * (1.0 / 200.0))
+    let mut scale = dist * (1.0 / 200.0);
+    if renderfx == RENDERFX_CLAMP_MIN_SCALE {
+        scale = scale.max(1.0);
+    }
+    (brightness, scale)
 }
 
 /// World-space axes of a sprite quad.

@@ -1,13 +1,30 @@
-//! GoldSrc StudioModel v10 (`.mdl`) renderer for first-person weapon viewmodels,
-//! third-person player characters, dropped weapons, grenades, and planted C4.
+//! GoldSrc StudioModel v10 (`.mdl`) renderer:
+//! - Bone controllers, 1D/9-way/2D multi-blending, `"Bip01 Spine"` lower/upper gait split,
+//!   sequence crossfade interpolation, external `*01.mdl` sequence groups, and attachments
+//! - All 6 `EntRenderMode`s, `RenderFx` (`GlowShell`, `Explode`, `LightMultiplier`),
+//!   `STUDIO_NF_{FLATSHADE, CHROME, ADDITIVE, MASKED}`, `body` bodygroups, and `skin` families
+//! - Floor `R_LightPoint` + `DLightPool`/flashlight spotlights, `GL_EXP2` fog, GoldSrc
+//!   `gamma`/`texgamma`/`brightness`/`r_software_mode`, POT mipmaps + `gl_texturemode`/`gl_ansio`,
+//!   and configurable MSAA (`1 | 4`).
 
 use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
-use cs_assets::mdl::{STUDIO_NF_MASKED, StudioModel};
+use cs_assets::mdl::{
+    BoneEvalParams, MdlSeqEvent, STUDIO_NF_ADDITIVE, STUDIO_NF_CHROME, STUDIO_NF_FLATSHADE,
+    STUDIO_NF_MASKED, StudioModel,
+};
 use cs_vfs::Vfs;
 use glam::{Mat4, Quat, Vec3};
 use tracing::warn;
+use wgpu::util::DeviceExt;
+
+use crate::render::lighting::{
+    GpuLightsUniform, TextureFilterMode, create_sampler, upload_rgba_texture_mipmapped,
+};
+use crate::render::scene::{
+    EntRenderMode, RENDERFX_EXPLODE, RENDERFX_GLOW_SHELL, RENDERFX_LIGHT_MULTIPLIER,
+};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -21,8 +38,46 @@ struct MdlGpuVertex {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct MdlUniforms {
     view_proj: [[f32; 4]; 4],
+    camera_pos: [f32; 4],
+    cam_right: [f32; 4],
+    cam_up: [f32; 4],
+    fog_color_density: [f32; 4],
+    gamma_params: [f32; 4],
     light_color: [f32; 4],
-    params: [f32; 4],
+    render_color: [f32; 4],
+    flags_params: [f32; 4],
+}
+
+/// Shared camera, lighting, fog, and gamma parameters for a [`MdlRenderer::prepare_studio`] pass.
+#[derive(Debug, Clone, Copy)]
+pub struct MdlPassParams {
+    pub view_proj: Mat4,
+    pub camera_pos: Vec3,
+    pub cam_right: Vec3,
+    pub cam_up: Vec3,
+    pub gamma: f32,
+    pub texgamma: f32,
+    pub brightness: f32,
+    pub software_mode: bool,
+    pub fog: Option<([f32; 3], f32)>,
+    pub lights: GpuLightsUniform,
+}
+
+impl Default for MdlPassParams {
+    fn default() -> Self {
+        Self {
+            view_proj: Mat4::IDENTITY,
+            camera_pos: Vec3::ZERO,
+            cam_right: Vec3::Y,
+            cam_up: Vec3::Z,
+            gamma: 2.5,
+            texgamma: 2.0,
+            brightness: 1.0,
+            software_mode: false,
+            fog: None,
+            lights: GpuLightsUniform::default(),
+        }
+    }
 }
 
 /// A studio entity of the scene API.
@@ -37,11 +92,53 @@ pub struct StudioInstance<'a> {
     /// Client time in seconds.
     pub now: f32,
     pub body: i32,
+    pub skin: i32,
+    pub controllers: [u8; 4],
+    pub mouth: u8,
+    pub blending: [u8; 2],
+    /// Lower-body gait sequence and current gait frame `(gait_seq, gait_frame)`.
+    pub gait: Option<(i32, f32)>,
+    /// Previous sequence crossfade `(prev_seq, prev_frame, weight_1_to_0)`.
+    pub prev_sequence: Option<(i32, f32, f32)>,
     pub light_rgb: Vec3,
+    pub rendermode: EntRenderMode,
+    pub renderfx: u8,
+    pub rendercolor: [f32; 3],
+    pub renderamt: f32,
+    pub blend: f32,
     /// Mirror the model (the left-handed view model, `cl_righthand 0`).
     pub flip_winding: bool,
     /// A studio model merged onto this one's bones (`EF_BONEMERGE`).
     pub attached_model: Option<&'a str>,
+}
+
+impl<'a> Default for StudioInstance<'a> {
+    fn default() -> Self {
+        Self {
+            model_path: "",
+            transform: Mat4::IDENTITY,
+            sequence: 0,
+            frame: 0.0,
+            animtime: 0.0,
+            framerate: 1.0,
+            now: 0.0,
+            body: 0,
+            skin: 0,
+            controllers: [127, 127, 127, 127],
+            mouth: 0,
+            blending: [0, 0],
+            gait: None,
+            prev_sequence: None,
+            light_rgb: Vec3::splat(0.8),
+            rendermode: EntRenderMode::Normal,
+            renderfx: 0,
+            rendercolor: [1.0, 1.0, 1.0],
+            renderamt: 1.0,
+            blend: 1.0,
+            flip_winding: false,
+            attached_model: None,
+        }
+    }
 }
 
 /// `STUDIO_LOOPING` sequence flag.
@@ -49,10 +146,6 @@ pub const STUDIO_LOOPING: i32 = 1;
 
 /// Animation frame of a studio entity: port of `R_StudioEstimateFrame` (Xash3D FWGS
 /// `ref/gl/gl_studio.c:565-590`, read 2026-11-23, interpolation on).
-///
-/// `frame` is the 0..255 entity frame byte scaled to `numframes - 1` (0 when the sequence has at
-/// most one frame); the time since `animtime` advances it at `framerate * fps`. Looping
-/// sequences wrap modulo `numframes - 1`, others clamp to `numframes - 1.001`.
 pub fn studio_frame(
     frame: f32,
     animtime: f32,
@@ -62,7 +155,6 @@ pub fn studio_frame(
     numframes: usize,
     looping: bool,
 ) -> f32 {
-    // C computes `dfdt` in double and the frame in float.
     let dfdt = if now < animtime {
         0.0
     } else {
@@ -94,9 +186,7 @@ pub fn studio_frame(
     f as f32
 }
 
-/// Submodel of body part `index` selected by the entity's `body` value:
-/// `(body / base) % submodel_count`, where `base` is the product of the submodel counts of the
-/// earlier body parts (assumption: the studio compiler's layout, first part varies fastest).
+/// Submodel of body part `index` selected by the entity's `body` value.
 pub fn bodypart_submodel(
     parts: &[cs_assets::mdl::MdlBodyPart],
     index: usize,
@@ -114,24 +204,44 @@ pub fn bodypart_submodel(
     part.submodels.get(pick as usize)
 }
 
+struct CachedGpuTexture {
+    view: wgpu::TextureView,
+    bg: wgpu::BindGroup,
+    flags: i32,
+}
+
 struct CachedGpuModel {
     mdl: StudioModel,
-    tex_bgs: Vec<(wgpu::BindGroup, bool)>, // (bind_group, alpha_test)
+    textures: Vec<CachedGpuTexture>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MdlPipelineKind {
+    Opaque,
+    Alpha,
+    Additive,
 }
 
 pub struct MdlRenderer {
-    pipeline: wgpu::RenderPipeline,
-    pipeline_flipped: wgpu::RenderPipeline,
+    color_format: wgpu::TextureFormat,
+    msaa_samples: u32,
+    shader: wgpu::ShaderModule,
+    pipeline_layout: wgpu::PipelineLayout,
+    opaque_pipeline: wgpu::RenderPipeline,
+    alpha_pipeline: wgpu::RenderPipeline,
+    additive_pipeline: wgpu::RenderPipeline,
     uniform_bgl: wgpu::BindGroupLayout,
     tex_bgl: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    filter_mode: TextureFilterMode,
+    anisotropy: u16,
     cache: HashMap<String, Option<CachedGpuModel>>,
-    // Dynamic per-frame buffers (re-allocated if exceeded)
     vertex_buf: wgpu::Buffer,
     vertex_cap: usize,
     uniform_buf: wgpu::Buffer,
     uniform_cap: usize,
     uniform_stride: u64,
+    lights_buf: wgpu::Buffer,
     uniform_bg: wgpu::BindGroup,
 }
 
@@ -141,11 +251,114 @@ struct PreparedDraw {
     first_vertex: u32,
     vertex_count: u32,
     uniform_slot: u32,
-    flipped: bool,
+    pipe_kind: MdlPipelineKind,
 }
 
 pub struct PreparedMdlPass {
     draws: Vec<PreparedDraw>,
+}
+
+fn create_mdl_pipelines(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+    color_format: wgpu::TextureFormat,
+    sample_count: u32,
+) -> (
+    wgpu::RenderPipeline,
+    wgpu::RenderPipeline,
+    wgpu::RenderPipeline,
+) {
+    let add_blend = Some(wgpu::BlendState {
+        color: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::SrcAlpha,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        },
+        alpha: wgpu::BlendComponent::OVER,
+    });
+    let make_pipe = |label: &str, blend: Option<wgpu::BlendState>, depth_write: bool| {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module: shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<MdlGpuVertex>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x3,
+                        1 => Float32x3,
+                        2 => Float32x2,
+                    ],
+                })],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: color_format,
+                    blend,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(depth_write),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: sample_count.max(1),
+                ..Default::default()
+            },
+            multiview_mask: None,
+            cache: None,
+        })
+    };
+
+    (
+        make_pipe("mdl_opaque", None, true),
+        make_pipe("mdl_alpha", Some(wgpu::BlendState::ALPHA_BLENDING), false),
+        make_pipe("mdl_additive", add_blend, false),
+    )
+}
+
+fn create_mdl_uniform_bg(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    uniform_buf: &wgpu::Buffer,
+    raw_size: u64,
+    lights_buf: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("mdl_uniform_bg"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: uniform_buf,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(raw_size),
+                }),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: lights_buf.as_entire_binding(),
+            },
+        ],
+    })
 }
 
 impl MdlRenderer {
@@ -161,16 +374,30 @@ impl MdlRenderer {
 
         let uniform_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("mdl_uniform_bgl"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: true,
-                    min_binding_size: wgpu::BufferSize::new(raw_size),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: true,
+                        min_binding_size: wgpu::BufferSize::new(raw_size),
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(
+                            std::mem::size_of::<GpuLightsUniform>() as u64,
+                        ),
+                    },
+                    count: None,
+                },
+            ],
         });
 
         let tex_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -195,71 +422,19 @@ impl MdlRenderer {
             ],
         });
 
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("mdl_pipeline_layout"),
             bind_group_layouts: &[Some(&uniform_bgl), Some(&tex_bgl)],
             immediate_size: 0,
         });
 
-        let make_pipe = |label: &str, cull: Option<wgpu::Face>| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_main"),
-                    compilation_options: Default::default(),
-                    buffers: &[Some(wgpu::VertexBufferLayout {
-                        array_stride: std::mem::size_of::<MdlGpuVertex>() as wgpu::BufferAddress,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &wgpu::vertex_attr_array![
-                            0 => Float32x3,
-                            1 => Float32x3,
-                            2 => Float32x2,
-                        ],
-                    })],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: color_format,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: cull,
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::Less),
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
-            })
-        };
+        let msaa_samples = 1;
+        let (opaque_pipeline, alpha_pipeline, additive_pipeline) =
+            create_mdl_pipelines(device, &shader, &pipeline_layout, color_format, msaa_samples);
 
-        // Disable backface culling for MDL so both left/right-handed viewmodels and thin sleeves render solid
-        let pipeline = make_pipe("mdl_pipeline", None);
-        let pipeline_flipped = make_pipe("mdl_pipeline_flipped", None);
-
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("mdl_sampler"),
-            address_mode_u: wgpu::AddressMode::Repeat,
-            address_mode_v: wgpu::AddressMode::Repeat,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
+        let filter_mode = TextureFilterMode::LinearMipmapLinear;
+        let anisotropy = 1;
+        let sampler = create_sampler(device, "mdl_sampler", filter_mode, anisotropy, false);
 
         let vertex_cap = 16384;
         let vertex_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -277,32 +452,92 @@ impl MdlRenderer {
             mapped_at_creation: false,
         });
 
-        let uniform_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("mdl_uniform_bg"),
-            layout: &uniform_bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: &uniform_buf,
-                    offset: 0,
-                    size: wgpu::BufferSize::new(raw_size),
-                }),
-            }],
+        let lights_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mdl_lights_buf"),
+            contents: bytemuck::bytes_of(&GpuLightsUniform::default()),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
+        let uniform_bg = create_mdl_uniform_bg(
+            device,
+            &uniform_bgl,
+            &uniform_buf,
+            raw_size,
+            &lights_buf,
+        );
+
         Self {
-            pipeline,
-            pipeline_flipped,
+            color_format,
+            msaa_samples,
+            shader,
+            pipeline_layout,
+            opaque_pipeline,
+            alpha_pipeline,
+            additive_pipeline,
             uniform_bgl,
             tex_bgl,
             sampler,
+            filter_mode,
+            anisotropy,
             cache: HashMap::new(),
             vertex_buf,
             vertex_cap,
             uniform_buf,
             uniform_cap,
             uniform_stride,
+            lights_buf,
             uniform_bg,
+        }
+    }
+
+    pub fn rebuild_pipelines(&mut self, device: &wgpu::Device, msaa_samples: u32) {
+        let samples = msaa_samples.max(1);
+        if self.msaa_samples == samples {
+            return;
+        }
+        self.msaa_samples = samples;
+        let (opaque, alpha, additive) = create_mdl_pipelines(
+            device,
+            &self.shader,
+            &self.pipeline_layout,
+            self.color_format,
+            samples,
+        );
+        self.opaque_pipeline = opaque;
+        self.alpha_pipeline = alpha;
+        self.additive_pipeline = additive;
+    }
+
+    pub fn set_texture_filter(
+        &mut self,
+        device: &wgpu::Device,
+        mode: TextureFilterMode,
+        anisotropy: u16,
+    ) {
+        let clamped_aniso = anisotropy.clamp(1, 16);
+        if self.filter_mode == mode && self.anisotropy == clamped_aniso {
+            return;
+        }
+        self.filter_mode = mode;
+        self.anisotropy = clamped_aniso;
+        self.sampler = create_sampler(device, "mdl_sampler", mode, clamped_aniso, false);
+        for cached in self.cache.values_mut().flatten() {
+            for (idx, tex) in cached.textures.iter_mut().enumerate() {
+                tex.bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(&format!("mdl_tex_bg_{idx}")),
+                    layout: &self.tex_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&tex.view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                    ],
+                });
+            }
         }
     }
 
@@ -321,39 +556,16 @@ impl MdlRenderer {
         if !self.cache.contains_key(&key) {
             let loaded = match StudioModel::load(vfs, &key) {
                 Ok(mdl) => {
-                    let mut tex_bgs = Vec::with_capacity(mdl.textures.len());
+                    let mut textures = Vec::with_capacity(mdl.textures.len());
                     for tex in &mdl.textures {
-                        let size = wgpu::Extent3d {
-                            width: tex.width.max(1),
-                            height: tex.height.max(1),
-                            depth_or_array_layers: 1,
-                        };
-                        let gpu_tex = device.create_texture(&wgpu::TextureDescriptor {
-                            label: Some(&tex.name),
-                            size,
-                            mip_level_count: 1,
-                            sample_count: 1,
-                            dimension: wgpu::TextureDimension::D2,
-                            format: wgpu::TextureFormat::Rgba8Unorm,
-                            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                            view_formats: &[],
-                        });
-                        queue.write_texture(
-                            wgpu::TexelCopyTextureInfo {
-                                texture: &gpu_tex,
-                                mip_level: 0,
-                                origin: wgpu::Origin3d::ZERO,
-                                aspect: wgpu::TextureAspect::All,
-                            },
+                        let view = upload_rgba_texture_mipmapped(
+                            device,
+                            queue,
+                            &tex.name,
+                            tex.width.max(1),
+                            tex.height.max(1),
                             &tex.rgba,
-                            wgpu::TexelCopyBufferLayout {
-                                offset: 0,
-                                bytes_per_row: Some(4 * tex.width.max(1)),
-                                rows_per_image: Some(tex.height.max(1)),
-                            },
-                            size,
                         );
-                        let view = gpu_tex.create_view(&wgpu::TextureViewDescriptor::default());
                         let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                             label: Some(&tex.name),
                             layout: &self.tex_bgl,
@@ -368,10 +580,13 @@ impl MdlRenderer {
                                 },
                             ],
                         });
-                        let alpha_test = (tex.flags & STUDIO_NF_MASKED) != 0;
-                        tex_bgs.push((bg, alpha_test));
+                        textures.push(CachedGpuTexture {
+                            view,
+                            bg,
+                            flags: tex.flags,
+                        });
                     }
-                    Some(CachedGpuModel { mdl, tex_bgs })
+                    Some(CachedGpuModel { mdl, textures })
                 }
                 Err(err) => {
                     warn!(model = %key, %err, "Could not load StudioModel");
@@ -388,23 +603,54 @@ impl MdlRenderer {
         }
     }
 
-    /// Skin and upload studio model entities of the scene API (sequence index, entity frame,
-    /// body group), for one render pass.
-    #[allow(clippy::too_many_arguments)]
+    /// Evaluate the 4 world-space attachment points of a studio model from cached GPU data.
+    pub fn query_attachments(
+        &self,
+        model_path: &str,
+        params: &BoneEvalParams,
+        entity_transform: Mat4,
+    ) -> Option<[Vec3; 4]> {
+        let key = model_path.to_ascii_lowercase();
+        let cached = self.cache.get(&key)?.as_ref()?;
+        let bones = cached.mdl.evaluate_bones_full(params);
+        Some(cached.mdl.evaluate_attachments(entity_transform, &bones))
+    }
+
+    /// Inspect sequence animation events for a cached studio model.
+    pub fn sequence_events(&self, model_path: &str, sequence: usize) -> &[MdlSeqEvent] {
+        let key = model_path.to_ascii_lowercase();
+        self.cache
+            .get(&key)
+            .and_then(|o| o.as_ref())
+            .and_then(|c| c.mdl.sequences.get(sequence))
+            .map(|s| s.events.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Skin and upload studio model entities with full GoldSrc animation, blending, render modes,
+    /// lighting, fog, and gamma.
     pub fn prepare_studio(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         vfs: &Vfs,
         instances: &[StudioInstance<'_>],
-        view_proj: Mat4,
-        gamma: f32,
-        brightness: f32,
+        params: &MdlPassParams,
     ) -> PreparedMdlPass {
+        queue.write_buffer(&self.lights_buf, 0, bytemuck::bytes_of(&params.lights));
+
         let mut all_verts: Vec<MdlGpuVertex> = Vec::new();
         let mut draws: Vec<PreparedDraw> = Vec::new();
         let mut uniform_bytes: Vec<u8> = Vec::new();
         let mut uniform_slot: u32 = 0;
+
+        let (fog_rgb, fog_density) = params.fog.unwrap_or(([0.0, 0.0, 0.0], 0.0));
+        let gamma_vec = [
+            params.gamma,
+            params.texgamma,
+            params.brightness,
+            if params.software_mode { 1.0 } else { 0.0 },
+        ];
 
         for inst in instances {
             let Some(key) = self.ensure_loaded(device, queue, vfs, inst.model_path) else {
@@ -422,19 +668,12 @@ impl MdlRenderer {
             } else {
                 0
             };
-            let fps = cached
+            let (fps, numframes, looping) = cached
                 .mdl
                 .sequences
                 .get(seq_idx)
-                .map(|s| s.fps)
-                .unwrap_or(30.0);
-            let (numframes, looping) = cached
-                .mdl
-                .sequences
-                .get(seq_idx)
-                .map(|s| (s.num_frames, s.flags & STUDIO_LOOPING != 0))
-                .unwrap_or((1, false));
-            // The estimate already wrapped or clamped the frame.
+                .map(|s| (s.fps, s.num_frames, s.flags & STUDIO_LOOPING != 0))
+                .unwrap_or((30.0, 1, false));
             let frame = studio_frame(
                 inst.frame,
                 inst.animtime,
@@ -444,74 +683,176 @@ impl MdlRenderer {
                 numframes,
                 looping,
             );
-            let loop_anim = false;
-            let bones = cached.mdl.evaluate_bones_ex(seq_idx, frame, loop_anim);
+            let prev_sequence = inst.prev_sequence.map(|(ps, pf, w)| {
+                let ps_idx = (ps.max(0) as usize).min(cached.mdl.sequences.len().saturating_sub(1));
+                let p_loop = cached
+                    .mdl
+                    .sequences
+                    .get(ps_idx)
+                    .is_some_and(|s| s.flags & STUDIO_LOOPING != 0);
+                (ps_idx, pf, p_loop, w)
+            });
+            let gait = inst.gait.map(|(gs, gf)| {
+                let gs_idx = (gs.max(0) as usize).min(cached.mdl.sequences.len().saturating_sub(1));
+                (gs_idx, gf)
+            });
+            let eval_params = BoneEvalParams {
+                sequence: seq_idx,
+                frame,
+                loop_anim: false,
+                blending: inst.blending,
+                controller: inst.controllers,
+                mouth: inst.mouth,
+                prev_sequence,
+                gait,
+            };
+            let bones = cached.mdl.evaluate_bones_full(&eval_params);
 
-            let mut push_model = |m_key: &str, cached_m: &CachedGpuModel, m_bones: &[Mat4]| {
-                for bi in 0..cached_m.mdl.bodyparts.len() {
-                    let Some(sub) = bodypart_submodel(&cached_m.mdl.bodyparts, bi, inst.body)
-                    else {
-                        continue;
-                    };
-                    for mesh in &sub.meshes {
-                        if mesh.vertices.is_empty() {
-                            continue;
-                        }
-                        let tex_idx = mesh.texture_index.min(cached_m.tex_bgs.len().saturating_sub(1));
-                        let alpha_test = cached_m
-                            .tex_bgs
-                            .get(tex_idx)
-                            .map(|(_, at)| *at)
-                            .unwrap_or(false);
-
-                        let first_vertex = all_verts.len() as u32;
-                        for v in &mesh.vertices {
-                            let bm = m_bones
-                                .get(v.bone as usize)
-                                .copied()
-                                .unwrap_or(Mat4::IDENTITY);
-                            let m = inst.transform * bm;
-                            let pos = m.transform_point3(v.pos);
-                            let norm = m.transform_vector3(v.normal).normalize_or_zero();
-                            all_verts.push(MdlGpuVertex {
-                                position: pos.to_array(),
-                                normal: norm.to_array(),
-                                uv: v.uv,
-                            });
-                        }
-                        let vertex_count = (all_verts.len() as u32) - first_vertex;
-
-                        let u = MdlUniforms {
-                            view_proj: view_proj.to_cols_array_2d(),
-                            light_color: [inst.light_rgb.x, inst.light_rgb.y, inst.light_rgb.z, gamma],
-                            params: [brightness, if alpha_test { 1.0 } else { 0.0 }, 0.0, 0.0],
-                        };
-                        let start = uniform_bytes.len();
-                        uniform_bytes.resize(start + self.uniform_stride as usize, 0);
-                        let raw = bytemuck::bytes_of(&u);
-                        uniform_bytes[start..start + raw.len()].copy_from_slice(raw);
-
-                        draws.push(PreparedDraw {
-                            model_key: m_key.to_string(),
-                            tex_idx,
-                            first_vertex,
-                            vertex_count,
-                            uniform_slot,
-                            flipped: inst.flip_winding,
-                        });
-                        uniform_slot += 1;
-                    }
-                }
+            let explode_scale = if inst.renderfx == RENDERFX_EXPLODE {
+                Vec3::splat(1.12)
+            } else {
+                Vec3::ONE
+            };
+            let light_mul = if inst.renderfx == RENDERFX_LIGHT_MULTIPLIER {
+                1.5
+            } else {
+                1.0
             };
 
-            push_model(&key, cached, &bones);
+            let mut push_model =
+                |m_key: &str, cached_m: &CachedGpuModel, m_bones: &[Mat4], shell_only: bool| {
+                    for bi in 0..cached_m.mdl.bodyparts.len() {
+                        let Some(sub) = bodypart_submodel(&cached_m.mdl.bodyparts, bi, inst.body)
+                        else {
+                            continue;
+                        };
+                        for mesh in &sub.meshes {
+                            if mesh.vertices.is_empty() {
+                                continue;
+                            }
+                            let tex_idx = cached_m
+                                .mdl
+                                .resolve_skin_texture(inst.skin, mesh.skinref)
+                                .min(cached_m.textures.len().saturating_sub(1));
+                            let tex_flags = cached_m
+                                .textures
+                                .get(tex_idx)
+                                .map(|t| t.flags)
+                                .unwrap_or(0);
+                            let alpha_test = (tex_flags & STUDIO_NF_MASKED) != 0;
 
-            // True GoldSrc `EF_BONEMERGE` attachment (`p_ak47.mdl` merged onto `Bip01 R Hand`)!
+                            let first_vertex = all_verts.len() as u32;
+                            for v in &mesh.vertices {
+                                let bm = m_bones
+                                    .get(v.bone as usize)
+                                    .copied()
+                                    .unwrap_or(Mat4::IDENTITY);
+                                let m = inst.transform * Mat4::from_scale(explode_scale) * bm;
+                                let pos = m.transform_point3(v.pos);
+                                let norm = m.transform_vector3(v.normal).normalize_or_zero();
+                                all_verts.push(MdlGpuVertex {
+                                    position: pos.to_array(),
+                                    normal: norm.to_array(),
+                                    uv: v.uv,
+                                });
+                            }
+                            let vertex_count = (all_verts.len() as u32) - first_vertex;
+
+                            let (shader_mode, shell_offset, pipe_kind, alpha_val) = if shell_only {
+                                let thickness = (inst.renderamt * 255.0 * 0.05).clamp(0.4, 3.0);
+                                (5.0, thickness, MdlPipelineKind::Additive, 0.75)
+                            } else {
+                                let is_add_tex = (tex_flags & STUDIO_NF_ADDITIVE) != 0;
+                                match inst.rendermode {
+                                    EntRenderMode::Normal => {
+                                        if is_add_tex {
+                                            (2.0, 0.0, MdlPipelineKind::Additive, 1.0)
+                                        } else {
+                                            (0.0, 0.0, MdlPipelineKind::Opaque, 1.0)
+                                        }
+                                    }
+                                    EntRenderMode::TransColor => {
+                                        (1.0, 0.0, MdlPipelineKind::Alpha, inst.renderamt)
+                                    }
+                                    EntRenderMode::TransTexture | EntRenderMode::Glow => {
+                                        (4.0, 0.0, MdlPipelineKind::Alpha, inst.blend)
+                                    }
+                                    EntRenderMode::TransAlpha => {
+                                        (3.0, 0.0, MdlPipelineKind::Alpha, inst.blend)
+                                    }
+                                    EntRenderMode::TransAdd => {
+                                        (2.0, 0.0, MdlPipelineKind::Additive, inst.blend)
+                                    }
+                                }
+                            };
+
+                            let u = MdlUniforms {
+                                view_proj: params.view_proj.to_cols_array_2d(),
+                                camera_pos: [
+                                    params.camera_pos.x,
+                                    params.camera_pos.y,
+                                    params.camera_pos.z,
+                                    1.0,
+                                ],
+                                cam_right: [
+                                    params.cam_right.x,
+                                    params.cam_right.y,
+                                    params.cam_right.z,
+                                    0.0,
+                                ],
+                                cam_up: [params.cam_up.x, params.cam_up.y, params.cam_up.z, 0.0],
+                                fog_color_density: [fog_rgb[0], fog_rgb[1], fog_rgb[2], fog_density],
+                                gamma_params: gamma_vec,
+                                light_color: [
+                                    inst.light_rgb.x,
+                                    inst.light_rgb.y,
+                                    inst.light_rgb.z,
+                                    if alpha_test { 1.0 } else { 0.0 },
+                                ],
+                                render_color: [
+                                    inst.rendercolor[0],
+                                    inst.rendercolor[1],
+                                    inst.rendercolor[2],
+                                    alpha_val,
+                                ],
+                                flags_params: [
+                                    shader_mode,
+                                    (tex_flags & (STUDIO_NF_FLATSHADE | STUDIO_NF_CHROME | STUDIO_NF_ADDITIVE)) as f32,
+                                    shell_offset,
+                                    light_mul,
+                                ],
+                            };
+                            let start = uniform_bytes.len();
+                            uniform_bytes.resize(start + self.uniform_stride as usize, 0);
+                            let raw = bytemuck::bytes_of(&u);
+                            uniform_bytes[start..start + raw.len()].copy_from_slice(raw);
+
+                            draws.push(PreparedDraw {
+                                model_key: m_key.to_string(),
+                                tex_idx,
+                                first_vertex,
+                                vertex_count,
+                                uniform_slot,
+                                pipe_kind,
+                            });
+                            uniform_slot += 1;
+                        }
+                    }
+                };
+
+            push_model(&key, cached, &bones, false);
+            if inst.renderfx == RENDERFX_GLOW_SHELL {
+                push_model(&key, cached, &bones, true);
+            }
+
             if let Some(ref att_key) = attached_key
                 && let Some(Some(att_cached)) = self.cache.get(att_key)
             {
                 let merged_bones = att_cached.mdl.evaluate_bones_merged(&cached.mdl, &bones);
-                push_model(att_key, att_cached, &merged_bones);
+                push_model(att_key, att_cached, &merged_bones, false);
+                if inst.renderfx == RENDERFX_GLOW_SHELL {
+                    push_model(att_key, att_cached, &merged_bones, true);
+                }
             }
         }
 
@@ -537,18 +878,13 @@ impl MdlRenderer {
                 mapped_at_creation: false,
             });
             let raw_size = std::mem::size_of::<MdlUniforms>() as u64;
-            self.uniform_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("mdl_uniform_bg"),
-                layout: &self.uniform_bgl,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &self.uniform_buf,
-                        offset: 0,
-                        size: wgpu::BufferSize::new(raw_size),
-                    }),
-                }],
-            });
+            self.uniform_bg = create_mdl_uniform_bg(
+                device,
+                &self.uniform_bgl,
+                &self.uniform_buf,
+                raw_size,
+                &self.lights_buf,
+            );
         }
         if !uniform_bytes.is_empty() {
             queue.write_buffer(&self.uniform_buf, 0, &uniform_bytes);
@@ -566,17 +902,18 @@ impl MdlRenderer {
             let Some(Some(cached)) = self.cache.get(&d.model_key) else {
                 continue;
             };
-            let Some((tex_bg, _)) = cached.tex_bgs.get(d.tex_idx) else {
+            let Some(tex) = cached.textures.get(d.tex_idx) else {
                 continue;
             };
-            pass.set_pipeline(if d.flipped {
-                &self.pipeline_flipped
-            } else {
-                &self.pipeline
-            });
+            let pipe = match d.pipe_kind {
+                MdlPipelineKind::Opaque => &self.opaque_pipeline,
+                MdlPipelineKind::Alpha => &self.alpha_pipeline,
+                MdlPipelineKind::Additive => &self.additive_pipeline,
+            };
+            pass.set_pipeline(pipe);
             let offset = d.uniform_slot * (self.uniform_stride as u32);
             pass.set_bind_group(0, &self.uniform_bg, &[offset]);
-            pass.set_bind_group(1, tex_bg, &[]);
+            pass.set_bind_group(1, &tex.bg, &[]);
             pass.draw(d.first_vertex..d.first_vertex + d.vertex_count, 0..1);
         }
     }
@@ -592,7 +929,6 @@ pub fn viewmodel_transform(
 ) -> Mat4 {
     let rot = Quat::from_rotation_z(yaw_deg.to_radians())
         * Quat::from_rotation_y(pitch_deg.to_radians());
-    // GoldSrc viewmodels are authored facing +X in right-handed Z-up, with left-hand default mirrored by cl_righthand!
     let scale = if right_handed {
         Vec3::new(1.0, -1.0, 1.0)
     } else {
@@ -626,7 +962,6 @@ mod tests {
         assert_eq!(name(0, 0).as_deref(), Some("s0"));
         assert_eq!(name(0, 4).as_deref(), Some("s1"));
         assert_eq!(name(1, 0).as_deref(), Some("s0"));
-        // base of part 1 is 3: body 3..5 -> second submodel.
         assert_eq!(name(1, 3).as_deref(), Some("s1"));
         assert_eq!(name(1, 5).as_deref(), Some("s1"));
         assert_eq!(name(0, -7).as_deref(), Some("s0"));
@@ -636,26 +971,18 @@ mod tests {
 
     #[test]
     fn studio_frame_follows_estimate_frame() {
-        // frame byte 128 of a 41-frame sequence: 128 * 40 / 256 = 20.
         assert_eq!(studio_frame(128.0, 10.0, 1.0, 10.0, 30.0, 41, false), 20.0);
-        // one second at fps 30 advances 30 frames: 20 + 30 = 50 wraps modulo 40 -> 10.
         assert_eq!(studio_frame(128.0, 10.0, 1.0, 11.0, 30.0, 41, true), 10.0);
-        // non-looping clamps to numframes - 1.001 (span - 0.001).
         assert_eq!(
             studio_frame(128.0, 10.0, 1.0, 11.0, 30.0, 41, false),
             (40.0f64 - 0.001) as f32
         );
-        // 2-frame non-looping sequence advances past frame 0 to 1 - 0.001.
         assert_eq!(
             studio_frame(0.0, 10.0, 1.0, 11.0, 30.0, 2, false),
             (1.0f64 - 0.001) as f32
         );
-        // framerate 0 freezes the animation at the scaled frame byte.
         assert_eq!(studio_frame(64.0, 10.0, 0.0, 15.0, 30.0, 41, true), 10.0);
-        // animtime in the future: no negative advance.
         assert_eq!(studio_frame(0.0, 12.0, 1.0, 11.0, 30.0, 41, true), 0.0);
-        // single-frame sequences: the frame term is 0; the engine still adds the time term when
-        // looping (bone evaluation ignores it for one-frame sequences) and clamps otherwise.
         assert_eq!(studio_frame(200.0, 0.0, 1.0, 5.0, 30.0, 1, true), 150.0);
         assert_eq!(studio_frame(200.0, 0.0, 1.0, 5.0, 30.0, 1, false), 0.0);
     }

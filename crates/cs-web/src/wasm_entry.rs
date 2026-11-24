@@ -455,6 +455,7 @@ fn step_and_render(rt_cell: &Rc<RefCell<WebRuntime>>, now_ms: f64) {
                 light_rgb: Vec3::splat(0.95),
                 flip_winding: *right_hand,
                 attached_model: None,
+                ..StudioInstance::default()
             });
         let dynamic = SceneDynamicData {
             vfs: state.vfs.as_ref(),

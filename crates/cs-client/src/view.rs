@@ -455,6 +455,7 @@ impl ViewBuilder {
                 end: b.end,
                 width: b.width,
                 color: b.color,
+                additive: true,
             })
             .collect();
         stats.beams = beams.len();
@@ -467,6 +468,7 @@ impl ViewBuilder {
                     origin: g.origin,
                     size: g.size,
                     color: [g.color[0], g.color[1], g.color[2], g.color[3] * fade],
+                    additive: true,
                 }
             })
             .collect();
@@ -620,7 +622,10 @@ impl ViewBuilder {
                     color: [1.0, 0.85, 0.4, 0.8],
                 });
             }
-            RenderEffect::Decal { .. } | RenderEffect::Particles(_) => {}
+            RenderEffect::Decal { .. }
+            | RenderEffect::PlayerDecal { .. }
+            | RenderEffect::TextMessage(_)
+            | RenderEffect::Particles(_) => {}
         }
     }
 
