@@ -436,6 +436,8 @@ pub struct PredictionCheck {
     pub ack: u32,
     /// The distance between the server's origin and the one predicted for that packet.
     pub error: f32,
+    /// The Euclidean distance between server velocity and predicted velocity at `ack`.
+    pub velocity_error: f32,
     /// The error was larger than [`MAX_PREDICTION_ERROR`]: a teleport, nothing is smoothed.
     pub teleport: bool,
 }
@@ -774,6 +776,14 @@ impl Predictor {
         }
     }
 
+    /// The velocity predicted after the last command of packet `sequence`, while the ring holds it.
+    pub fn predicted_velocity(&self, sequence: u32) -> Option<Vec3> {
+        match &self.predicted[(sequence & UPDATE_MASK) as usize] {
+            Some((s, st)) if *s == sequence => Some(st.velocity),
+            _ => None,
+        }
+    }
+
     /// Test hook: keeps the `(msec, impulse)` of every step the movement runs.
     #[doc(hidden)]
     pub fn record_steps(&mut self, on: bool) {
@@ -823,7 +833,7 @@ impl Predictor {
         };
         if let (Some(cd), true) = (frame.clientdata.as_ref(), self.is_predicted(inp.intermission))
         {
-            self.check_prediction_error(ack, cd.origin, inp.remote_is_local);
+            self.check_prediction_error(ack, cd.origin, cd.velocity, inp.remote_is_local);
         }
         // `HUD_TxferPredictionData`: what the server never sends is kept from the prediction.
         self.carried = predicted_state.as_ref().map(LocalState::carried);
@@ -840,10 +850,19 @@ impl Predictor {
     }
 
     /// `CL_CheckPredictionError`.
-    fn check_prediction_error(&mut self, ack: u32, server_origin: Vec3, remote_is_local: bool) {
+    fn check_prediction_error(
+        &mut self,
+        ack: u32,
+        server_origin: Vec3,
+        server_velocity: Vec3,
+        remote_is_local: bool,
+    ) {
         let Some(predicted) = self.predicted_origin(ack) else {
             return;
         };
+        let velocity_error = self
+            .predicted_velocity(ack)
+            .map_or(0.0, |v| (server_velocity - v).length());
         let delta = server_origin - predicted;
         let dist = delta.length();
         let teleport = dist > MAX_PREDICTION_ERROR;
@@ -864,6 +883,7 @@ impl Predictor {
         self.checks.push_back(PredictionCheck {
             ack,
             error: dist,
+            velocity_error,
             teleport,
         });
     }
