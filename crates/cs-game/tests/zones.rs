@@ -579,13 +579,9 @@ const HLDS_RANGES: [(u16, u16); 11] = [
     (244, 251),
 ];
 
-/// What differs from the HLDS list today, because two classes of `cs_office` are not ported yet:
-/// `ambient_generic` (3 of them) and `infodecal` (2), both later phases (all 4 `hostage_entity`
-/// edicts now match HLDS). A class that is not ported frees its edict, so everything after it
-/// moves down. Checked 2026-11-23.
-const ONLY_HLDS: [u16; 5] = [247, 248, 249, 250, 251];
-const ONLY_OURS: [u16; 5] = [169, 170, 172, 210, 243];
-
+/// Exact match with retail HLDS build 10210: Phase 7 implemented `ambient_generic` (3) and
+/// `infodecal` (2), so every baseline edict index on `cs_office` (all 218 entities) matches
+/// HLDS bit-for-bit.
 #[test]
 fn cs_office_edict_numbers_as_hlds() {
     let Some(vfs) = discover() else {
@@ -612,7 +608,7 @@ fn cs_office_edict_numbers_as_hlds() {
     assert_eq!(hlds.len(), 218);
     let only_hlds: Vec<u16> = hlds.difference(&ours).copied().collect();
     let only_ours: Vec<u16> = ours.difference(&hlds).copied().collect();
-    // Task 6 (hostages) and the phases of `ambient_generic` and `infodecal` empty these two.
-    assert_eq!(only_hlds, ONLY_HLDS);
-    assert_eq!(only_ours, ONLY_OURS);
+    assert!(only_hlds.is_empty(), "missing from ours vs HLDS: {only_hlds:?}");
+    assert!(only_ours.is_empty(), "extra in ours vs HLDS: {only_ours:?}");
+    assert_eq!(ours, hlds);
 }
