@@ -99,16 +99,15 @@ fn env_fog_weather_lights_and_sound_entities() {
     let mut fog_seen = false;
     let mut weather_seen = None;
     for msg in b.probe.messages() {
-        if let SvcMessage::UserMsg {
-            name,
-            decoded: CsUserMsg::Unknown { payload, .. },
-            ..
-        } = msg
-        {
-            if name == "Fog" && payload.len() == 7 {
-                fog_seen = payload[0..3] == [100, 120, 140];
-            } else if name == "ReceiveW" && payload.len() == 1 {
-                weather_seen = Some(payload[0]);
+        if let SvcMessage::UserMsg { decoded, .. } = msg {
+            match decoded {
+                CsUserMsg::Fog { color, .. } => {
+                    fog_seen = *color == [100, 120, 140];
+                }
+                CsUserMsg::ReceiveW(w) => {
+                    weather_seen = Some(*w);
+                }
+                _ => {}
             }
         }
     }
@@ -144,10 +143,9 @@ fn env_fog_weather_lights_and_sound_entities() {
         matches!(
             m,
             SvcMessage::UserMsg {
-                name,
-                decoded: CsUserMsg::Unknown { payload, .. },
+                decoded: CsUserMsg::Fog { density, .. },
                 ..
-            } if name == "Fog" && payload.len() == 7 && payload[3..7] == [0, 0, 0, 0]
+            } if *density == 0.0
         )
     });
     let got_ambient_or_pa = b

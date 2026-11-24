@@ -119,10 +119,9 @@ fn stock_map_spot_checks() {
             matches!(
                 m,
                 SvcMessage::UserMsg {
-                    name,
-                    decoded: CsUserMsg::Unknown { payload, .. },
+                    decoded: CsUserMsg::ReceiveW(1),
                     ..
-                } if name == "ReceiveW" && payload.as_slice() == [1]
+                }
             )
         });
         assert!(rain, "de_aztec should send ReceiveW(1) for env_rain");
