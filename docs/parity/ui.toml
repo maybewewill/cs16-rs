@@ -31,8 +31,8 @@ evidence = "crates/cs-client/tests/phase10_ui.rs::ui_screen_team_and_class_menu_
 
 [[item]]
 id = "ui_screen_scoreboard_tab"
-status = "tested"
-evidence = "crates/cs-client/tests/phase10_ui.rs::ui_screen_scoreboard_tab_builds_rows_and_list_panel"
+status = "verified"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_screen_scoreboard_tab_builds_rows_and_list_panel; side-by-side 1280x800 capture check target/ui-parity/rust_scoreboard_1280x800.png vs orig_scoreboard_1280x800.png + Ghidra client.dll CCSClientScoreBoardDialog"
 
 [[item]]
 id = "ui_screen_options_dialog"
@@ -46,23 +46,23 @@ evidence = "crates/cs-client/tests/phase10_ui.rs::ui_screen_developer_console_fi
 
 [[item]]
 id = "ui_hud_health_armor_ammo_money_timer"
-status = "tested"
-evidence = "crates/cs-client/tests/phase10_ui.rs::ui_hud_health_armor_ammo_money_timer_renders_hud_state"
+status = "verified"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_hud_health_armor_ammo_money_timer_renders_hud_state; Ghidra client.dll FUN_1004d9e0, FUN_10046f20, FUN_10043690, FUN_1004dd80, FUN_10043a60, FUN_10046bc0, FUN_10054540 + 1280x800 capture rust_hud_1280x800.png vs orig_chat_1280x800.png"
 
 [[item]]
 id = "ui_hud_crosshair_and_awp_scope"
-status = "tested"
-evidence = "crates/cs-client/tests/phase10_ui.rs::ui_hud_crosshair_and_awp_scope_adjusts_color_and_renders"
+status = "verified"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_hud_crosshair_and_awp_scope_adjusts_color_and_renders; Ghidra client.dll FUN_10043ff0 & FUN_10064f90 + 1280x800 capture rust_hud_1280x800.png vs orig_chat_1280x800.png"
 
 [[item]]
 id = "ui_hud_radar_and_nvg_overlay"
-status = "tested"
-evidence = "crates/cs-client/tests/phase10_ui.rs::ui_hud_radar_and_nvg_overlay_renders_teammates_and_radartype"
+status = "verified"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_hud_radar_and_nvg_overlay_renders_teammates_and_radartype; Ghidra client.dll FUN_1004e6c0 & FUN_1004efe0 + 1280x800 additive radar capture rust_hud_1280x800.png vs orig_chat_1280x800.png"
 
 [[item]]
 id = "ui_hud_killfeed_chat_radio_netgraph"
-status = "tested"
-evidence = "crates/cs-client/tests/phase10_ui.rs::ui_hud_killfeed_chat_radio_netgraph_respects_con_color_and_saytext"
+status = "verified"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_hud_killfeed_chat_radio_netgraph_respects_con_color_and_saytext; CHudSayText + 1280x800 capture comparison"
 
 [[item]]
 id = "ui_vgui2_res_layout_interpreter"
@@ -206,8 +206,8 @@ evidence = "crates/cs-client/tests/phase10_ui.rs::ui_hud_overview_map_maps_world
 
 [[item]]
 id = "ui_hud_status_icons_all"
-status = "tested"
-evidence = "crates/cs-client/tests/phase10_ui.rs::ui_hud_status_icons_all_tracks_buyzone_c4_defuser_rescue"
+status = "verified"
+evidence = "crates/cs-client/tests/phase10_ui.rs::ui_hud_status_icons_all_tracks_buyzone_c4_defuser_rescue; Ghidra client.dll FUN_10065570 + 1280x800 capture rust_hud_1280x800.png vs orig_chat_1280x800.png"
 
 [[item]]
 id = "ui_hud_progress_bar_bartime"

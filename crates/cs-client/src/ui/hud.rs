@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use cs_assets::scheme::{HudSpriteEntry, load_hud_txt, parse_hud_txt};
-use cs_assets::spr::GoldSrcSprite;
+use cs_assets::spr::{GoldSrcSprite, SpriteTexFormat};
 use cs_assets::vgui_font::SchemeFontSet;
 use cs_assets::vgui_res::TextAlignment;
 use cs_clientcore::HudState;
@@ -24,7 +24,6 @@ use crate::ui::vgui2::{VguiRuntime, VguiTextDrawOpts};
 use crate::view_effects::evaluate_screen_fade;
 
 const HUD_AMBER: Color32 = Color32::from_rgb(255, 160, 0);
-const HUD_RED: Color32 = Color32::from_rgb(255, 24, 16);
 const TEAM_CT_COLOR: Color32 = Color32::from_rgb(153, 204, 255);
 const TEAM_T_COLOR: Color32 = Color32::from_rgb(255, 64, 64);
 const CHAT_SPEC_COLOR: Color32 = Color32::from_rgb(204, 204, 204);
@@ -163,7 +162,10 @@ pub struct HudSprites {
     sheets: HashMap<String, (TextureHandle, [f32; 2])>,
     entries: HashMap<String, HudSpriteEntry>,
     weapon_cards: HashMap<String, HudSpriteEntry>,
+    weapon_cards_selected: HashMap<String, HudSpriteEntry>,
+    pain_frames: Vec<(TextureHandle, [f32; 2])>,
     radar_tex: Option<TextureHandle>,
+    radar_opaque_tex: Option<TextureHandle>,
 }
 
 const WEAPON_CARD_FILES: &[&str] = &[
@@ -216,15 +218,19 @@ impl HudSprites {
         }
 
         let mut weapon_cards: HashMap<String, HudSpriteEntry> = HashMap::new();
+        let mut weapon_cards_selected: HashMap<String, HudSpriteEntry> = HashMap::new();
         for wname in WEAPON_CARD_FILES {
             let txt_path = format!("sprites/{wname}.txt");
             if let Ok(text) = vfs.read_string_lossy(&txt_path) {
                 let mut picked: Option<HudSpriteEntry> = None;
+                let mut picked_sel: Option<HudSpriteEntry> = None;
                 for e in parse_hud_txt(&text) {
-                    if e.name != "weapon" {
-                        continue;
-                    }
-                    let replace = match &picked {
+                    let slot = match e.name.as_str() {
+                        "weapon" => &mut picked,
+                        "weapon_s" => &mut picked_sel,
+                        _ => continue,
+                    };
+                    let replace = match slot {
                         None => true,
                         Some(prev) => {
                             (e.resolution == 640 && prev.resolution != 640)
@@ -232,12 +238,15 @@ impl HudSprites {
                         }
                     };
                     if replace {
-                        picked = Some(e);
+                        *slot = Some(e);
                     }
                 }
+                let short = wname.strip_prefix("weapon_").unwrap_or(wname).to_string();
                 if let Some(entry) = picked {
-                    let short = wname.strip_prefix("weapon_").unwrap_or(wname).to_string();
-                    weapon_cards.insert(short, entry);
+                    weapon_cards.insert(short.clone(), entry);
+                }
+                if let Some(entry) = picked_sel {
+                    weapon_cards_selected.insert(short, entry);
                 }
             }
         }
@@ -252,16 +261,20 @@ impl HudSprites {
             if let Ok(spr) = GoldSrcSprite::load(vfs, &path)
                 && let Some(frame) = spr.frames.first()
             {
-                // GoldSrc HUD sprites are additive luminance maps: map luminance to alpha so
-                // tinting with HUD_AMBER / HUD_RED / HUD_GREEN renders crisp transparent icons.
-                let mut tinted_mask = Vec::with_capacity(frame.rgba.len());
+                // GoldSrc HUD sheets are additive luminance maps: upload `[lum, lum, lum, 255]` and
+                // tint via `Color32::from_rgb_additive(r, g, b)` (`a = 0`) so `egui-wgpu`'s
+                // `(One, OneMinusSrcAlpha)` blend produces hardware `src + dst` additive blending.
+                let mut additive_rgba = Vec::with_capacity(frame.rgba.len());
                 for px in frame.rgba.as_chunks::<4>().0 {
-                    let lum = px[0].max(px[1]).max(px[2]);
-                    tinted_mask.extend_from_slice(&[255, 255, 255, lum]);
+                    let lum = match spr.tex_format {
+                        SpriteTexFormat::IndexAlpha => px[3],
+                        _ => px[0].max(px[1]).max(px[2]),
+                    };
+                    additive_rgba.extend_from_slice(&[lum, lum, lum, 255]);
                 }
-                let img = egui::ColorImage::from_rgba_unmultiplied(
+                let img = egui::ColorImage::from_rgba_premultiplied(
                     [frame.width as usize, frame.height as usize],
-                    &tinted_mask,
+                    &additive_rgba,
                 );
                 let handle = ctx.load_texture(
                     format!("cs16_hud_{name}"),
@@ -275,20 +288,45 @@ impl HudSprites {
             }
         }
 
+        let mut pain_frames = Vec::new();
+        if let Ok(spr) = GoldSrcSprite::load(vfs, "sprites/640_pain.spr")
+            .or_else(|_| GoldSrcSprite::load(vfs, "sprites/320_pain.spr"))
+        {
+            for (idx, frame) in spr.frames.iter().enumerate() {
+                let mut additive_rgba = Vec::with_capacity(frame.rgba.len());
+                for px in frame.rgba.as_chunks::<4>().0 {
+                    let lum = match spr.tex_format {
+                        SpriteTexFormat::IndexAlpha => px[3],
+                        _ => px[0].max(px[1]).max(px[2]),
+                    };
+                    additive_rgba.extend_from_slice(&[lum, lum, lum, 255]);
+                }
+                let img = egui::ColorImage::from_rgba_premultiplied(
+                    [frame.width as usize, frame.height as usize],
+                    &additive_rgba,
+                );
+                let handle = ctx.load_texture(
+                    format!("cs16_hud_pain_{idx}"),
+                    img,
+                    egui::TextureOptions::LINEAR,
+                );
+                pain_frames.push((handle, [frame.width as f32, frame.height as f32]));
+            }
+        }
+
         let radar_tex = GoldSrcSprite::load(vfs, "sprites/radar640.spr")
             .ok()
             .and_then(|spr| {
                 let frame = spr.frames.first()?;
                 let mut rgba = Vec::with_capacity(frame.rgba.len());
                 for px in frame.rgba.as_chunks::<4>().0 {
-                    let lum = px[0].max(px[1]).max(px[2]);
-                    if lum < 12 {
-                        rgba.extend_from_slice(&[0, 0, 0, 0]);
+                    if spr.tex_format == SpriteTexFormat::IndexAlpha {
+                        rgba.extend_from_slice(&[px[3], px[3], px[3], 255]);
                     } else {
-                        rgba.extend_from_slice(&[px[0], px[1], px[2], 175]);
+                        rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
                     }
                 }
-                let img = egui::ColorImage::from_rgba_unmultiplied(
+                let img = egui::ColorImage::from_rgba_premultiplied(
                     [frame.width as usize, frame.height as usize],
                     &rgba,
                 );
@@ -299,12 +337,46 @@ impl HudSprites {
                 ))
             });
 
+        let radar_opaque_tex = GoldSrcSprite::load(vfs, "sprites/radaropaque640.spr")
+            .or_else(|_| GoldSrcSprite::load(vfs, "sprites/radaropaque.spr"))
+            .ok()
+            .and_then(|spr| {
+                let frame = spr.frames.first()?;
+                let img = egui::ColorImage::from_rgba_unmultiplied(
+                    [frame.width as usize, frame.height as usize],
+                    &frame.rgba,
+                );
+                Some(ctx.load_texture(
+                    "cs16_hud_radaropaque640",
+                    img,
+                    egui::TextureOptions::NEAREST,
+                ))
+            });
+
         Self {
             sheets,
             entries,
             weapon_cards,
+            weapon_cards_selected,
+            pain_frames,
             radar_tex,
+            radar_opaque_tex,
         }
+    }
+
+    pub fn has_pain_sprites(&self) -> bool {
+        self.pain_frames.len() >= 4
+    }
+
+    pub fn has_radar_textures(&self) -> (bool, bool) {
+        (self.radar_tex.is_some(), self.radar_opaque_tex.is_some())
+    }
+
+    pub fn has_selected_weapon_card(&self, name: &str) -> bool {
+        let short = name.strip_prefix("weapon_").unwrap_or(name);
+        self.weapon_cards_selected
+            .get(short)
+            .is_some_and(|e| self.sheets.contains_key(&e.sprite_name))
     }
 
     pub fn weapon_card_size(&self, name: &str, scale: f32) -> Option<Vec2> {
@@ -314,6 +386,35 @@ impl HudSprites {
             return None;
         }
         Some(Vec2::new(e.width as f32 * scale, e.height as f32 * scale))
+    }
+
+    fn draw_entry_additive(
+        &self,
+        painter: &egui::Painter,
+        e: &HudSpriteEntry,
+        pos: Pos2,
+        scale: f32,
+        tint: Color32,
+    ) -> Option<Vec2> {
+        let (tex, [tw, th]) = self.sheets.get(&e.sprite_name)?;
+        let size = Vec2::new(e.width as f32 * scale, e.height as f32 * scale);
+        // Normalize alpha=0 so additive sprite sheets (`a=255`) never paint opaque black quads.
+        let tint = Color32::from_rgb_additive(tint.r(), tint.g(), tint.b());
+        if tint == Color32::TRANSPARENT {
+            return Some(size);
+        }
+        let u0 = e.x as f32 / *tw;
+        let v0 = e.y as f32 / *th;
+        let u1 = (e.x + e.width) as f32 / *tw;
+        let v1 = (e.y + e.height) as f32 / *th;
+        let rect = Rect::from_min_size(pos, size);
+        painter.image(
+            tex.id(),
+            rect,
+            Rect::from_min_max(Pos2::new(u0, v0), Pos2::new(u1, v1)),
+            tint,
+        );
+        Some(size)
     }
 
     pub fn draw_weapon_card(
@@ -326,20 +427,23 @@ impl HudSprites {
     ) -> Option<Vec2> {
         let short = name.strip_prefix("weapon_").unwrap_or(name);
         let e = self.weapon_cards.get(short)?;
-        let (tex, [tw, th]) = self.sheets.get(&e.sprite_name)?;
-        let u0 = e.x as f32 / *tw;
-        let v0 = e.y as f32 / *th;
-        let u1 = (e.x + e.width) as f32 / *tw;
-        let v1 = (e.y + e.height) as f32 / *th;
-        let size = Vec2::new(e.width as f32 * scale, e.height as f32 * scale);
-        let rect = Rect::from_min_size(pos, size);
-        painter.image(
-            tex.id(),
-            rect,
-            Rect::from_min_max(Pos2::new(u0, v0), Pos2::new(u1, v1)),
-            tint,
-        );
-        Some(size)
+        self.draw_entry_additive(painter, e, pos, scale, tint)
+    }
+
+    fn draw_weapon_card_selected(
+        &self,
+        painter: &egui::Painter,
+        name: &str,
+        pos: Pos2,
+        scale: f32,
+        tint: Color32,
+    ) -> Option<Vec2> {
+        let short = name.strip_prefix("weapon_").unwrap_or(name);
+        let e = self
+            .weapon_cards_selected
+            .get(short)
+            .or_else(|| self.weapon_cards.get(short))?;
+        self.draw_entry_additive(painter, e, pos, scale, tint)
     }
 
     pub fn sprite_size(&self, name: &str, scale: f32) -> Option<Vec2> {
@@ -359,20 +463,7 @@ impl HudSprites {
         tint: Color32,
     ) -> Option<Vec2> {
         let e = self.entries.get(name)?;
-        let (tex, [tw, th]) = self.sheets.get(&e.sprite_name)?;
-        let u0 = e.x as f32 / *tw;
-        let v0 = e.y as f32 / *th;
-        let u1 = (e.x + e.width) as f32 / *tw;
-        let v1 = (e.y + e.height) as f32 / *th;
-        let size = Vec2::new(e.width as f32 * scale, e.height as f32 * scale);
-        let rect = Rect::from_min_size(pos, size);
-        painter.image(
-            tex.id(),
-            rect,
-            Rect::from_min_max(Pos2::new(u0, v0), Pos2::new(u1, v1)),
-            tint,
-        );
-        Some(size)
+        self.draw_entry_additive(painter, e, pos, scale, tint)
     }
 
     fn draw_sprite_clipped_bottom(
@@ -391,6 +482,10 @@ impl HudSprites {
         if f <= 0.001 {
             return Some(size);
         }
+        let tint = Color32::from_rgb_additive(tint.r(), tint.g(), tint.b());
+        if tint == Color32::TRANSPARENT {
+            return Some(size);
+        }
         let u0 = e.x as f32 / *tw;
         let u1 = (e.x + e.width) as f32 / *tw;
         let v_bot = (e.y + e.height) as f32 / *th;
@@ -401,6 +496,73 @@ impl HudSprites {
             tex.id(),
             rect,
             Rect::from_min_max(Pos2::new(u0, v_top), Pos2::new(u1, v_bot)),
+            tint,
+        );
+        Some(size)
+    }
+
+    /// Clip sprite horizontally from the left (`CHudFlashlight::Draw` `FUN_1004a0a0` `flash_full`).
+    fn draw_sprite_clipped_left(
+        &self,
+        painter: &egui::Painter,
+        name: &str,
+        pos: Pos2,
+        scale: f32,
+        tint: Color32,
+        fill_frac: f32,
+    ) -> Option<Vec2> {
+        let e = self.entries.get(name)?;
+        let (tex, [tw, th]) = self.sheets.get(&e.sprite_name)?;
+        let size = Vec2::new(e.width as f32 * scale, e.height as f32 * scale);
+        let f = fill_frac.clamp(0.0, 1.0);
+        if f <= 0.001 {
+            return Some(size);
+        }
+        let tint = Color32::from_rgb_additive(tint.r(), tint.g(), tint.b());
+        if tint == Color32::TRANSPARENT {
+            return Some(size);
+        }
+        let clip_px = (1.0 - f) * e.width as f32;
+        let u0 = (e.x as f32 + clip_px) / *tw;
+        let u1 = (e.x + e.width) as f32 / *tw;
+        let v0 = e.y as f32 / *th;
+        let v1 = (e.y + e.height) as f32 / *th;
+        let rect = Rect::from_min_size(
+            Pos2::new(pos.x + clip_px * scale, pos.y),
+            Vec2::new(size.x * f, size.y),
+        );
+        painter.image(
+            tex.id(),
+            rect,
+            Rect::from_min_max(Pos2::new(u0, v0), Pos2::new(u1, v1)),
+            tint,
+        );
+        Some(size)
+    }
+
+    fn pain_frame_size(&self, frame_idx: usize, scale: f32) -> Option<Vec2> {
+        let (_, [w, h]) = self.pain_frames.get(frame_idx)?;
+        Some(Vec2::new(*w * scale, *h * scale))
+    }
+
+    fn draw_pain_frame(
+        &self,
+        painter: &egui::Painter,
+        frame_idx: usize,
+        pos: Pos2,
+        scale: f32,
+        tint: Color32,
+    ) -> Option<Vec2> {
+        let (tex, [w, h]) = self.pain_frames.get(frame_idx)?;
+        let size = Vec2::new(*w * scale, *h * scale);
+        let tint = Color32::from_rgb_additive(tint.r(), tint.g(), tint.b());
+        if tint == Color32::TRANSPARENT {
+            return Some(size);
+        }
+        painter.image(
+            tex.id(),
+            Rect::from_min_size(pos, size),
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
             tint,
         );
         Some(size)
@@ -431,11 +593,15 @@ impl HudSprites {
             _ => return None,
         };
         let (tex, [tw, th]) = self.sheets.get("640hud7")?;
+        let size = Vec2::splat(24.0 * scale);
+        let tint = Color32::from_rgb_additive(tint.r(), tint.g(), tint.b());
+        if tint == Color32::TRANSPARENT {
+            return Some(size);
+        }
         let u0 = sx / *tw;
         let v0 = sy / *th;
         let u1 = (sx + 24.0) / *tw;
         let v1 = (sy + 24.0) / *th;
-        let size = Vec2::splat(24.0 * scale);
         painter.image(
             tex.id(),
             Rect::from_min_size(pos, size),
@@ -547,8 +713,11 @@ pub fn screen_fade_alpha(fade: &ScreenFade, now: f64) -> f32 {
 }
 
 fn status_color(icon: &StatusIcon, flash_on: bool) -> Option<Color32> {
-    if icon.status == 0 || (icon.status == 2 && !flash_on) {
+    if icon.status == 0 {
         return None;
+    }
+    if icon.status == 2 && !flash_on {
+        return Some(Color32::from_rgb(250, 0, 0));
     }
     Some(match icon.color {
         Some([r, g, b]) => Color32::from_rgb(r, g, b),
@@ -556,8 +725,8 @@ fn status_color(icon: &StatusIcon, flash_on: bool) -> Option<Color32> {
     })
 }
 
-/// Optional CS 1.6 CVar, localization, overview, and weapon-bucket context for `draw_cs16_hud_with_extras`.
-/// Persistent HUD animation/fade timers (`CHudHealth`, `CHudBattery`, `CHudAmmo`, `CHudAccountBalance`, `CHudRadar`).
+/// Persistent HUD animation/fade/blink timers (`CHudHealth`, `CHudBattery`, `CHudAmmo`,
+/// `CHudAccountBalance`, `CHudRoundTimer`, `CHudStatusIcons`, `CHudScenarioStatus`, `CHudRadar`).
 #[derive(Debug, Clone, Default)]
 pub struct HudAnimState {
     pub last_health: Option<u8>,
@@ -565,36 +734,64 @@ pub struct HudAnimState {
     pub last_armor: Option<i16>,
     pub armor_fade: f32,
     pub last_ammo: Option<(i8, u8)>,
+    pub last_weapon_id: Option<u8>,
     pub ammo_fade: f32,
     pub last_money: Option<i32>,
     pub money_delta: i32,
     pub money_fade: f32,
     pub money_delta_fade: f32,
+    pub money_show_delta: bool,
+    pub last_blink_seq: u32,
+    pub money_blink_amt: i32,
+    pub money_blink_next: f64,
+    pub timer_panic_color: bool,
+    pub timer_panic_next: f64,
+    pub status_flash_on: bool,
+    pub status_flash_next: f64,
+    pub last_scenario_seq: u32,
+    pub scenario_alpha: i32,
+    pub scenario_flash_alpha: i32,
+    pub scenario_flash_interval: f32,
+    pub scenario_next_flash: f64,
+    pub last_damage_seq: u32,
+    pub pain_fades: [f32; 4],
+    pub hazard_expires: BTreeMap<&'static str, f64>,
     /// Active radio-sender flash expiry timestamp (`now + 3.3s`, 22 toggles @ 0.15s) per 1-based sender slot.
     pub radio_flashes: HashMap<u8, f64>,
 }
 
 impl HudAnimState {
     pub fn step(&mut self, dt: f32, hud: &HudState, now: f64) {
+        self.step_with_pose(dt, hud, now, Vec3::ZERO, 0.0);
+    }
+
+    pub fn step_with_pose(&mut self, dt: f32, hud: &HudState, now: f64, eye: Vec3, yaw_deg: f32) {
         let dt = dt.clamp(0.0, 0.25);
         self.health_fade = (self.health_fade - dt * 20.0).max(0.0);
         self.armor_fade = (self.armor_fade - dt * 20.0).max(0.0);
         self.ammo_fade = (self.ammo_fade - dt * 20.0).max(0.0);
         self.money_fade = (self.money_fade - dt).max(0.0);
+        if self.money_fade == 0.0 {
+            self.money_delta = 0;
+        }
         self.money_delta_fade = (self.money_delta_fade - dt).max(0.0);
+        if self.money_delta_fade == 0.0 {
+            self.money_show_delta = false;
+        }
 
         if self.last_health != Some(hud.health) {
             if self.last_health.is_some() {
-                self.health_fade = 200.0;
+                self.health_fade = 100.0;
             }
             self.last_health = Some(hud.health);
         }
         if self.last_armor != Some(hud.armor) {
             if self.last_armor.is_some() {
-                self.armor_fade = 200.0;
+                self.armor_fade = 100.0;
             }
             self.last_armor = Some(hud.armor);
         }
+        let cur_wid = hud.current_weapon.map(|c| c.weapon_id);
         let cur_ammo = hud.current_weapon.map(|c| {
             let res = hud
                 .weapons
@@ -604,20 +801,158 @@ impl HudAnimState {
                 .unwrap_or(0);
             (c.clip, res)
         });
-        if self.last_ammo != cur_ammo {
-            if self.last_ammo.is_some() {
+        if self.last_ammo != cur_ammo || self.last_weapon_id != cur_wid {
+            if self.last_ammo.is_some() || self.last_weapon_id.is_some() {
                 self.ammo_fade = 200.0;
             }
             self.last_ammo = cur_ammo;
+            self.last_weapon_id = cur_wid;
         }
         if self.last_money != Some(hud.money) {
             if let Some(prev) = self.last_money {
-                self.money_delta = hud.money - prev;
-                self.money_fade = 5.0;
-                self.money_delta_fade = 2.5;
+                let delta = hud.money - prev;
+                if delta != 0 {
+                    self.money_delta = delta;
+                    self.money_fade = 5.0;
+                    self.money_delta_fade = 2.5;
+                    self.money_show_delta = hud.money_flash;
+                } else {
+                    self.money_show_delta = false;
+                }
             }
             self.last_money = Some(hud.money);
         }
+
+        if hud.blink_account_seq != self.last_blink_seq {
+            self.last_blink_seq = hud.blink_account_seq;
+            self.money_blink_amt = i32::from(hud.blink_account) * 2;
+            self.money_blink_next = 0.0;
+        }
+        if self.money_blink_amt > 0 && now > self.money_blink_next {
+            self.money_blink_amt -= 1;
+            self.money_blink_next = now + 0.1;
+        }
+
+        let rem = hud.round_seconds_left(now);
+        let secs = rem as i32;
+        if rem <= 0.0 || secs < 1 {
+            self.timer_panic_color = true;
+        } else if secs < 31 {
+            let iv = if secs < 3 {
+                0.05
+            } else if secs < 6 {
+                0.1
+            } else if secs < 11 {
+                0.2
+            } else if secs < 21 {
+                0.4
+            } else {
+                0.8
+            };
+            if now > self.timer_panic_next {
+                self.timer_panic_color = !self.timer_panic_color;
+                self.timer_panic_next = now + iv;
+            }
+        } else {
+            self.timer_panic_color = false;
+            self.timer_panic_next = 0.0;
+        }
+
+        if now > self.status_flash_next {
+            self.status_flash_on = !self.status_flash_on;
+            self.status_flash_next = now + 0.1;
+        }
+
+        if hud.scenario_seq != self.last_scenario_seq {
+            self.last_scenario_seq = hud.scenario_seq;
+            match &hud.scenario {
+                Some(sc) if sc.alpha > 0 => {
+                    let was_hidden = self.scenario_alpha <= 0;
+                    self.scenario_flash_alpha = i32::from(sc.alpha).max(100);
+                    if was_hidden {
+                        self.scenario_alpha = i32::from(sc.alpha);
+                    }
+                    if let Some((rate, delay)) = sc.flash
+                        && self.scenario_alpha != 100
+                    {
+                        self.scenario_flash_interval = f32::from(rate.max(0)) * 0.01;
+                        if self.scenario_next_flash == 0.0 {
+                            self.scenario_next_flash = now;
+                        }
+                        self.scenario_next_flash += f64::from(delay.max(0)) * 0.01;
+                    } else {
+                        self.scenario_flash_interval = 0.0;
+                        self.scenario_next_flash = 0.0;
+                    }
+                }
+                _ => {
+                    self.scenario_alpha = 0;
+                    self.scenario_flash_alpha = 0;
+                    self.scenario_flash_interval = 0.0;
+                    self.scenario_next_flash = 0.0;
+                }
+            }
+        }
+        if hud.scenario.as_ref().is_some_and(|s| s.alpha > 0) {
+            if self.scenario_alpha > 100 {
+                self.scenario_alpha =
+                    ((self.scenario_alpha as f32) * 0.9f32.powf((dt * 60.0).clamp(0.1, 4.0))) as i32;
+            }
+            if self.scenario_flash_interval > 0.0 && now >= self.scenario_next_flash {
+                self.scenario_alpha = self.scenario_flash_alpha;
+                self.scenario_next_flash = now + f64::from(self.scenario_flash_interval);
+            }
+        }
+
+        for p in &mut self.pain_fades {
+            if *p <= 0.4 {
+                *p = 0.0;
+            } else {
+                *p = (*p - dt * 2.0).max(0.0);
+                if *p <= 0.4 {
+                    *p = 0.0;
+                }
+            }
+        }
+        if hud.damage_seq != self.last_damage_seq {
+            self.last_damage_seq = hud.damage_seq;
+            if let Some(d) = hud.damage {
+                if d.origin == Vec3::ZERO {
+                    self.pain_fades = [0.0; 4];
+                } else if d.health > 0 || d.armor > 0 {
+                    let delta = d.origin - eye;
+                    if delta.length() <= 50.0 {
+                        self.pain_fades = [1.0; 4];
+                    } else {
+                        let dir = delta.normalize();
+                        let yaw = yaw_deg.to_radians();
+                        let fwd = Vec3::new(yaw.cos(), yaw.sin(), 0.0);
+                        let right = Vec3::new(yaw.sin(), -yaw.cos(), 0.0);
+                        let f_dot = dir.dot(fwd);
+                        let r_dot = dir.dot(right);
+                        if f_dot > 0.3 {
+                            self.pain_fades[0] = self.pain_fades[0].max(f_dot);
+                        }
+                        if r_dot > 0.3 {
+                            self.pain_fades[1] = self.pain_fades[1].max(r_dot);
+                        }
+                        if f_dot < -0.3 {
+                            self.pain_fades[2] = self.pain_fades[2].max(-f_dot);
+                        }
+                        if r_dot < -0.3 {
+                            self.pain_fades[3] = self.pain_fades[3].max(-r_dot);
+                        }
+                    }
+                }
+                for haz in damage_hazard_icons(d.bits) {
+                    self.hazard_expires.insert(haz, now + 2.0);
+                }
+            }
+        }
+        let pulse_a = (((now * 2.0).sin().abs()) * 256.0) as i32;
+        self.hazard_expires
+            .retain(|_, exp| *exp > now || pulse_a >= 40);
+
         self.radio_flashes.retain(|_, exp| *exp > now);
     }
 
@@ -626,7 +961,7 @@ impl HudAnimState {
     }
 }
 
-/// GoldSrc `MIN_ALPHA = 100` fade curve used by `CHudHealth`, `CHudBattery`, and `CHudAmmo`.
+/// GoldSrc `MIN_ALPHA = 100` fade curve used by `CHudHealth` and `CHudBattery`.
 pub fn hud_fade_alpha(fade: f32) -> u8 {
     if fade > 0.0 {
         ((fade / 100.0) * 128.0 + 100.0).round().clamp(100.0, 255.0) as u8
@@ -635,9 +970,25 @@ pub fn hud_fade_alpha(fade: f32) -> u8 {
     }
 }
 
-fn hud_tinted_alpha(rgb: Color32, goldsrc_alpha: u8) -> Color32 {
-    let vis_a = ((f32::from(goldsrc_alpha) * 0.60) + 102.0).round().clamp(100.0, 255.0) as u8;
-    Color32::from_rgba_unmultiplied(rgb.r(), rgb.g(), rgb.b(), vis_a)
+/// `CHudAmmo::Draw` (`FUN_10043a60`) fade curve: `max(100, fade)` decaying from 200 -> 100 over 5 s.
+pub fn ammo_fade_alpha(fade: f32) -> u8 {
+    fade.clamp(100.0, 255.0) as u8
+}
+
+/// GoldSrc `ScaleColors` (`client.dll` `FUN_10054540`).
+pub fn scale_colors(rgb: Color32, alpha: u8) -> [u8; 3] {
+    let a = f32::from(alpha) / 255.0;
+    [
+        (f32::from(rgb.r()) * a) as u8,
+        (f32::from(rgb.g()) * a) as u8,
+        (f32::from(rgb.b()) * a) as u8,
+    ]
+}
+
+/// Scale `rgb` by GoldSrc `alpha` (`0..=255`) and pack as an `egui` additive color (`a = 0`).
+pub fn hud_additive_color(rgb: Color32, alpha: u8) -> Color32 {
+    let [r, g, b] = scale_colors(rgb, alpha);
+    Color32::from_rgb_additive(r, g, b)
 }
 
 pub struct HudExtrasContext<'a> {
@@ -820,25 +1171,45 @@ fn draw_cs16_hud_impl(
     let flash_on = ((hud.time_sec / 0.1) as i32) % 2 == 0;
 
     if hud.alive {
-        let quads = compute_damage_quadrants(&state.damage_history, hud.eye, hud.yaw_deg, hud.now);
+        let mut pain = extras.anim.map_or([0.0; 4], |a| a.pain_fades);
+        if pain.iter().all(|&p| p <= 0.4) {
+            pain = compute_damage_quadrants(&state.damage_history, hud.eye, hud.yaw_deg, hud.now);
+        }
         let cx = screen.center().x;
         let cy = screen.center().y;
+        let pain_base = if state.health < 26 {
+            Color32::from_rgb(250, 0, 0)
+        } else {
+            HUD_AMBER
+        };
         let r = 135.0 * scale;
         let thick = 6.0 * scale;
         let span = 38.0 * scale;
-        for (i, q) in quads.iter().enumerate() {
-            if *q <= 0.02 {
+        for (i, &q) in pain.iter().enumerate() {
+            if q <= 0.4 {
                 continue;
             }
-            let a = (*q * 210.0).clamp(0.0, 210.0) as u8;
-            let col = Color32::from_rgba_unmultiplied(235, 32, 24, a);
-            let rect = match i {
-                0 => Rect::from_center_size(Pos2::new(cx, cy - r), Vec2::new(span * 2.0, thick)),
-                1 => Rect::from_center_size(Pos2::new(cx + r, cy), Vec2::new(thick, span * 2.0)),
-                2 => Rect::from_center_size(Pos2::new(cx, cy + r), Vec2::new(span * 2.0, thick)),
-                _ => Rect::from_center_size(Pos2::new(cx - r, cy), Vec2::new(thick, span * 2.0)),
-            };
-            painter.rect_filled(rect, 2.0, col);
+            let a = (q.max(0.5) * 255.0).clamp(0.0, 255.0) as u8;
+            let col = hud_additive_color(pain_base, a);
+            if let Some(sp) = sprites
+                && let Some(sz) = sp.pain_frame_size(i, scale)
+            {
+                let pos = match i {
+                    0 => Pos2::new(cx - sz.x * 0.5, cy - sz.y * 3.0),
+                    1 => Pos2::new(cx + sz.x * 2.0, cy - sz.y * 0.5),
+                    2 => Pos2::new(cx - sz.x * 0.5, cy + sz.y * 2.0),
+                    _ => Pos2::new(cx - sz.x * 3.0, cy - sz.y * 0.5),
+                };
+                let _ = sp.draw_pain_frame(&painter, i, pos, scale, col);
+            } else {
+                let rect = match i {
+                    0 => Rect::from_center_size(Pos2::new(cx, cy - r), Vec2::new(span * 2.0, thick)),
+                    1 => Rect::from_center_size(Pos2::new(cx + r, cy), Vec2::new(thick, span * 2.0)),
+                    2 => Rect::from_center_size(Pos2::new(cx, cy + r), Vec2::new(span * 2.0, thick)),
+                    _ => Rect::from_center_size(Pos2::new(cx - r, cy), Vec2::new(thick, span * 2.0)),
+                };
+                painter.rect_filled(rect, 2.0, col);
+            }
         }
     }
 
@@ -860,10 +1231,14 @@ fn draw_cs16_hud_impl(
         } else {
             extras.anim.map_or(100, |a| hud_fade_alpha(a.health_fade))
         };
-        let hp_base = if state.health < 26 { HUD_RED } else { HUD_AMBER };
-        let hp_color = hud_tinted_alpha(hp_base, hp_alpha);
+        let hp_base = if state.health < 26 {
+            Color32::from_rgb(250, 0, 0)
+        } else {
+            HUD_AMBER
+        };
+        let hp_color = hud_additive_color(hp_base, hp_alpha);
         let armor_alpha = extras.anim.map_or(100, |a| hud_fade_alpha(a.armor_fade));
-        let armor_color = hud_tinted_alpha(HUD_AMBER, armor_alpha);
+        let armor_color = hud_additive_color(HUD_AMBER, armor_alpha);
         let hp_x = 16.0 * scale;
         let health = i32::from(state.health);
         let armor = i32::from(state.armor);
@@ -877,45 +1252,70 @@ fn draw_cs16_hud_impl(
             } else {
                 ("suit_empty", "suit_full")
             };
-            let icon_y = bottom_y - 4.0 * scale;
+            let suit_h = sp.sprite_size(empty_spr, scale).map_or(24.0 * scale, |s| s.y);
+            let y_pad = if screen.width() < 640.0 { 1.0 } else { 4.0 };
+            let armor_num_y = bottom_y;
+            let icon_y = bottom_y + y_pad - suit_h / 6.0;
             let _ = sp.draw_sprite(&painter, empty_spr, Pos2::new(armor_x, icon_y), scale, armor_color);
             let fill = (f32::from(state.armor) / 100.0).clamp(0.0, 1.0);
             let _ = sp.draw_sprite_clipped_bottom(&painter, full_spr, Pos2::new(armor_x, icon_y), scale, armor_color, fill);
-            sp.draw_number_right(&painter, armor, armor_x + (24.0 + 60.0) * scale, bottom_y, scale, armor_color, 1);
+            sp.draw_number_right(&painter, armor, armor_x + (24.0 + 60.0) * scale, armor_num_y, scale, armor_color, 1);
         } else {
+            let text_col = Color32::from_rgba_unmultiplied(hp_base.r(), hp_base.g(), hp_base.b(), hp_alpha);
             painter.text(
                 Pos2::new(hp_x, bottom_y),
                 egui::Align2::LEFT_TOP,
                 format!("+ {health:3}    A {armor:3}"),
                 FontId::monospace(24.0 * scale),
-                hp_color,
+                text_col,
             );
         }
     }
 
-    // 4. Left-margin status icons (`FUN_10065570`): stacked upward from `screen_h / 2`.
+    // 4. Left-margin status icons (`FUN_10065570`) & pulsing hazard icons (`FUN_1004e070`).
     if hud.alive {
+        let status_flash = extras.anim.map_or(flash_on, |a| a.status_flash_on);
         let mut icon_bot = screen.center().y - 10.0 * scale;
         let icon_x = 16.0 * scale;
         if let Some(sp) = sprites {
             for (name, icon) in state.status_icons.iter().take(4) {
-                let Some(col) = status_color(icon, flash_on) else {
+                let Some(col) = status_color(icon, status_flash) else {
                     continue;
                 };
                 if let Some(sz) = sp.sprite_size(name, scale) {
                     let y = icon_bot - sz.y;
-                    let _ = sp.draw_sprite(&painter, name, Pos2::new(icon_x, y), scale, col);
+                    let _ = sp.draw_sprite(
+                        &painter,
+                        name,
+                        Pos2::new(icon_x, y),
+                        scale,
+                        hud_additive_color(col, 255),
+                    );
                     icon_bot = y - 5.0 * scale;
                 }
             }
-            for (dmg, started) in &state.damage_history {
-                if hud.now - *started <= 2.5 {
-                    for haz in damage_hazard_icons(dmg.bits) {
-                        let col = if flash_on { HUD_RED } else { HUD_AMBER };
-                        if let Some(sz) = sp.sprite_size(haz, scale) {
-                            let y = icon_bot - sz.y;
-                            let _ = sp.draw_sprite(&painter, haz, Pos2::new(icon_x, y), scale, col);
-                            icon_bot = y - 5.0 * scale;
+            let pulse_a = (((hud.now * 2.0).sin().abs()) * 256.0).clamp(0.0, 255.0) as u8;
+            let haz_col = hud_additive_color(HUD_AMBER, pulse_a);
+            if let Some(anim) = extras.anim {
+                for &haz in anim.hazard_expires.keys() {
+                    if let Some(sz) = sp.sprite_size(haz, scale) {
+                        let y = icon_bot - sz.y;
+                        let _ = sp.draw_sprite(&painter, haz, Pos2::new(icon_x, y), scale, haz_col);
+                        icon_bot = y - 5.0 * scale;
+                    }
+                }
+            } else {
+                let mut seen_haz: HashSet<&'static str> = HashSet::new();
+                for (dmg, started) in &state.damage_history {
+                    if hud.now - *started <= 2.5 {
+                        for haz in damage_hazard_icons(dmg.bits) {
+                            if seen_haz.insert(haz)
+                                && let Some(sz) = sp.sprite_size(haz, scale)
+                            {
+                                let y = icon_bot - sz.y;
+                                let _ = sp.draw_sprite(&painter, haz, Pos2::new(icon_x, y), scale, haz_col);
+                                icon_bot = y - 5.0 * scale;
+                            }
                         }
                     }
                 }
@@ -930,8 +1330,10 @@ fn draw_cs16_hud_impl(
         let secs_total = rem.ceil().max(0.0) as i32;
         let mins = secs_total / 60;
         let secs = secs_total % 60;
-        let timer_col = if rem <= 0.0 {
-            Color32::from_rgb(255, 16, 16)
+        let panic = if let Some(anim) = extras.anim {
+            anim.timer_panic_color
+        } else if rem <= 0.0 {
+            true
         } else if rem <= 30.0 {
             let iv = if rem < 3.0 {
                 0.05
@@ -944,13 +1346,19 @@ fn draw_cs16_hud_impl(
             } else {
                 0.8
             };
-            if ((hud.time_sec / iv) as i32) % 2 == 0 {
-                Color32::from_rgb(255, 16, 16)
-            } else {
-                hud_tinted_alpha(HUD_AMBER, 100)
-            }
+            ((hud.time_sec / iv) as i32) % 2 == 0
         } else {
-            hud_tinted_alpha(HUD_AMBER, 100)
+            false
+        };
+        let timer_col = if panic {
+            Color32::from_rgb_additive(255, 16, 16)
+        } else {
+            hud_additive_color(HUD_AMBER, 100)
+        };
+        let timer_text_col = if panic {
+            Color32::from_rgb(255, 16, 16)
+        } else {
+            Color32::from_rgba_unmultiplied(255, 160, 0, 140)
         };
         if let Some(sp) = sprites {
             let mut tx = center_x - 60.0 * scale;
@@ -974,36 +1382,31 @@ fn draw_cs16_hud_impl(
                 egui::Align2::CENTER_CENTER,
                 format!("{mins}:{secs:02}"),
                 FontId::monospace(24.0 * scale),
-                timer_col,
+                timer_text_col,
             );
         }
         if let Some(ref sc) = state.scenario
             && sc.alpha > 0
             && !sc.sprite.is_empty()
         {
-            let pulse = match sc.flash {
-                Some((rate, _)) if rate > 0 => {
-                    (hud.time_sec * f32::from(rate).max(2.0)).sin() > 0.0
-                }
-                _ => true,
-            };
-            if pulse {
-                let sx = center_x - 92.0 * scale;
-                let col = HUD_RED.linear_multiply(f32::from(sc.alpha) / 255.0);
-                if let Some(sp) = sprites
-                    && sp
-                        .draw_sprite(&painter, &sc.sprite, Pos2::new(sx, bottom_y), scale, col)
-                        .is_some()
-                {
-                } else {
-                    painter.text(
-                        Pos2::new(sx, bottom_y + 12.0 * scale),
-                        egui::Align2::CENTER_CENTER,
-                        "[C4]",
-                        FontId::monospace(14.0 * scale),
-                        col,
-                    );
-                }
+            let sc_alpha = extras
+                .anim
+                .map_or(sc.alpha.max(100), |a| a.scenario_alpha.clamp(0, 255) as u8);
+            let sx = center_x - 92.0 * scale;
+            let spr_col = hud_additive_color(HUD_AMBER, sc_alpha);
+            if let Some(sp) = sprites
+                && let Some(sz) = sp.sprite_size(&sc.sprite, scale)
+            {
+                let sy = bottom_y - (sz.y - num_h) * 0.5;
+                let _ = sp.draw_sprite(&painter, &sc.sprite, Pos2::new(sx, sy), scale, spr_col);
+            } else {
+                painter.text(
+                    Pos2::new(sx, bottom_y + 12.0 * scale),
+                    egui::Align2::CENTER_CENTER,
+                    "[C4]",
+                    FontId::monospace(14.0 * scale),
+                    Color32::from_rgba_unmultiplied(255, 160, 0, sc_alpha),
+                );
             }
         }
     }
@@ -1012,40 +1415,102 @@ fn draw_cs16_hud_impl(
     let right_margin = screen.right() - if screen.width() >= 640.0 { 16.0 } else { 12.0 };
     let money_y = (screen.bottom() - num_h * 3.0).floor();
     if vis.money && (hud.alive || extras.observer_mode == 0) {
-        let (money_col, delta_info) = if let Some(anim) = extras.anim
-            && anim.money_fade > 0.0
-        {
-            let t = 1.0 - (anim.money_fade / 5.0).clamp(0.0, 1.0);
-            let base_rgb = if anim.money_delta >= 0 { [0u8, 255, 0] } else { [255u8, 0, 0] };
-            let r = (f32::from(base_rgb[0]) + (255.0 - f32::from(base_rgb[0])) * t).round() as u8;
-            let g = (f32::from(base_rgb[1]) + (160.0 - f32::from(base_rgb[1])) * t).round() as u8;
-            let b = (f32::from(base_rgb[2]) * (1.0 - t)).round() as u8;
-            let a = ((anim.money_fade / 5.0) * 128.0 + 100.0).round().clamp(100.0, 255.0) as u8;
-            let col = hud_tinted_alpha(Color32::from_rgb(r, g, b), a);
-            let d = (anim.money_delta_fade > 0.0 && anim.money_delta != 0)
-                .then_some((anim.money_delta, ((anim.money_delta_fade / 2.5) * 255.0).clamp(0.0, 255.0) as u8));
-            (col, d)
+        let mut mr = 255u8;
+        let mut mg = 160u8;
+        let mut mb = 0u8;
+        let mut ma = 100u8;
+        let mut delta_info: Option<(i32, [u8; 3])> = None;
+
+        if let Some(anim) = extras.anim {
+            if anim.money_fade > 0.0 && anim.money_delta != 0 {
+                let frac = (anim.money_fade / 5.0).clamp(0.0, 1.0);
+                let inv = (5.0 - anim.money_fade) / 5.0;
+                ma = (frac * 128.0 + 100.0).round().clamp(100.0, 255.0) as u8;
+                if anim.money_delta > 0 {
+                    mr = (inv * 255.0).round().clamp(0.0, 255.0) as u8;
+                    mg = (inv * 160.0 + frac * 255.0).round().clamp(0.0, 255.0) as u8;
+                } else {
+                    mr = 255;
+                    mg = (inv * 160.0).round().clamp(0.0, 255.0) as u8;
+                }
+                mb = 0;
+            }
+            let scaled_main = scale_colors(Color32::from_rgb(mr, mg, mb), ma);
+            if anim.money_show_delta && anim.money_delta_fade > 0.0 && anim.money_delta != 0 {
+                let d_alpha = ((anim.money_delta_fade / 2.5) * 256.0).clamp(0.0, 255.0) as u8;
+                let d_scaled = scale_colors(
+                    Color32::from_rgb(scaled_main[0], scaled_main[1], scaled_main[2]),
+                    d_alpha,
+                );
+                delta_info = Some((anim.money_delta, d_scaled));
+            }
+            let main_col = if anim.money_blink_amt > 0 && (anim.money_blink_amt & 1) != 0 {
+                [255, 160, 0]
+            } else {
+                scaled_main
+            };
+            let money_col = Color32::from_rgb_additive(main_col[0], main_col[1], main_col[2]);
+            let dollar_x = right_margin - 20.0 * scale * 5.0 - 18.0 * scale;
+            if let Some(sp) = sprites {
+                sp.draw_number_right(&painter, state.money, right_margin, money_y, scale, money_col, 1);
+                let _ = sp.draw_sprite(&painter, "dollar", Pos2::new(dollar_x, money_y), scale, money_col);
+            } else {
+                painter.text(
+                    Pos2::new(right_margin, money_y),
+                    egui::Align2::RIGHT_TOP,
+                    format!("$ {}", state.money),
+                    FontId::monospace(22.0 * scale),
+                    Color32::from_rgba_unmultiplied(mr, mg, mb, ma),
+                );
+            }
+            if let Some((delta, d_rgb)) = delta_info {
+                let delta_y = money_y - num_h * 1.5;
+                let d_col = Color32::from_rgb_additive(d_rgb[0], d_rgb[1], d_rgb[2]);
+                if let Some(sp) = sprites {
+                    let sign_spr = if delta < 0 { "minus" } else { "plus" };
+                    let num_w = sp.draw_number_right(
+                        &painter,
+                        delta.abs(),
+                        right_margin,
+                        delta_y,
+                        scale,
+                        d_col,
+                        1,
+                    );
+                    let sign_w = sp.sprite_size(sign_spr, scale).map_or(14.0 * scale, |s| s.x);
+                    let sign_x = (right_margin - num_w - sign_w - 2.0 * scale).min(dollar_x);
+                    let _ = sp.draw_sprite(&painter, sign_spr, Pos2::new(sign_x, delta_y), scale, d_col);
+                } else {
+                    let da = ((anim.money_delta_fade / 2.5) * 255.0).clamp(0.0, 255.0) as u8;
+                    let d_txt_col = Color32::from_rgba_unmultiplied(mr, mg, mb, da);
+                    let txt = if delta > 0 { format!("+${delta}") } else { format!("-${}", -delta) };
+                    hud_paint_text(
+                        ctx,
+                        &painter,
+                        &mut font_ctx,
+                        egui::Align2::RIGHT_TOP,
+                        Pos2::new(right_margin, delta_y),
+                        &txt,
+                        16.0 * scale,
+                        d_txt_col,
+                    );
+                }
+            }
         } else {
-            (hud_tinted_alpha(HUD_AMBER, 100), None)
-        };
-        let dollar_x = right_margin - 20.0 * scale * 5.0 - 18.0 * scale;
-        if let Some(sp) = sprites {
-            sp.draw_number_right(&painter, state.money, right_margin, money_y, scale, money_col, 1);
-            let _ = sp.draw_sprite(&painter, "dollar", Pos2::new(dollar_x, money_y), scale, money_col);
-        } else {
-            painter.text(
-                Pos2::new(right_margin, money_y),
-                egui::Align2::RIGHT_TOP,
-                format!("$ {}", state.money),
-                FontId::monospace(22.0 * scale),
-                money_col,
-            );
-        }
-        if let Some((delta, da)) = delta_info {
-            let delta_y = money_y - num_h * 1.5;
-            let d_rgb = if delta > 0 { Color32::from_rgba_unmultiplied(0, 255, 0, da) } else { Color32::from_rgba_unmultiplied(255, 40, 40, da) };
-            let txt = if delta > 0 { format!("+${}", delta) } else { format!("-${}", -delta) };
-            hud_paint_text(ctx, &painter, &mut font_ctx, egui::Align2::RIGHT_TOP, Pos2::new(right_margin, delta_y), &txt, 16.0 * scale, d_rgb);
+            let money_col = hud_additive_color(HUD_AMBER, 100);
+            let dollar_x = right_margin - 20.0 * scale * 5.0 - 18.0 * scale;
+            if let Some(sp) = sprites {
+                sp.draw_number_right(&painter, state.money, right_margin, money_y, scale, money_col, 1);
+                let _ = sp.draw_sprite(&painter, "dollar", Pos2::new(dollar_x, money_y), scale, money_col);
+            } else {
+                painter.text(
+                    Pos2::new(right_margin, money_y),
+                    egui::Align2::RIGHT_TOP,
+                    format!("$ {}", state.money),
+                    FontId::monospace(22.0 * scale),
+                    Color32::from_rgba_unmultiplied(255, 160, 0, 140),
+                );
+            }
         }
     }
 
@@ -1058,13 +1523,8 @@ fn draw_cs16_hud_impl(
             .and_then(|w| state.ammo.get(&w.ammo1_type))
             .copied()
             .unwrap_or(0);
-        let ammo_a = extras.anim.map_or(100, |a| hud_fade_alpha(a.ammo_fade));
-        let ammo_amber = hud_tinted_alpha(HUD_AMBER, ammo_a);
-        let clip_col = if cur.clip == 0 {
-            hud_tinted_alpha(HUD_RED, 255)
-        } else {
-            ammo_amber
-        };
+        let ammo_a = extras.anim.map_or(100, |a| ammo_fade_alpha(a.ammo_fade));
+        let ammo_amber = hud_additive_color(HUD_AMBER, ammo_a);
         let icon_x = right_margin - 24.0 * scale;
         let has_icon = sprites
             .and_then(|sp| sp.draw_ammo_icon(&painter, cur.weapon_id, Pos2::new(icon_x, bottom_y), scale, ammo_amber))
@@ -1075,23 +1535,23 @@ fn draw_cs16_hud_impl(
                 let res_w = sp.draw_number_right(&painter, i32::from(reserve), num_right, bottom_y, scale, ammo_amber, 1);
                 let div_x = (num_right - res_w.max(44.0 * scale) - 10.0 * scale).round();
                 if sp
-                    .draw_sprite(&painter, "divider", Pos2::new(div_x, bottom_y - 6.0 * scale), scale, HUD_AMBER)
+                    .draw_sprite(&painter, "divider", Pos2::new(div_x, bottom_y - 6.0 * scale), scale, ammo_amber)
                     .is_none()
                 {
                     painter.rect_filled(
                         Rect::from_min_size(Pos2::new(div_x, bottom_y), Vec2::new((2.0 * scale).max(1.0), num_h)),
                         0.0,
-                        HUD_AMBER,
+                        ammo_amber,
                     );
                 }
-                sp.draw_number_right(&painter, i32::from(cur.clip), div_x - 8.0 * scale, bottom_y, scale, clip_col, 1);
+                sp.draw_number_right(&painter, i32::from(cur.clip), div_x - 8.0 * scale, bottom_y, scale, ammo_amber, 1);
             } else {
                 painter.text(
                     Pos2::new(num_right, bottom_y),
                     egui::Align2::RIGHT_TOP,
                     format!("{} | {}", cur.clip, reserve),
                     FontId::monospace(24.0 * scale),
-                    clip_col,
+                    Color32::from_rgba_unmultiplied(255, 160, 0, ammo_a),
                 );
             }
         } else if reserve > 0
@@ -1112,7 +1572,7 @@ fn draw_cs16_hud_impl(
             match &entry.kind {
                 PickupKind::Weapon { weapon_id, empty } => {
                     let base_col = if *empty { Color32::from_rgb(255, 16, 16) } else { HUD_AMBER };
-                    let tint = hud_tinted_alpha(base_col, alpha);
+                    let tint = hud_additive_color(base_col, alpha);
                     let wname = state
                         .weapons
                         .get(weapon_id)
@@ -1121,7 +1581,7 @@ fn draw_cs16_hud_impl(
                     if let (Some(sp), Some(name)) = (sprites, wname)
                         && let Some(sz) = sp.weapon_card_size(name, scale)
                     {
-                        let x = screen.right() - sz.x - 10.0 * scale;
+                        let x = screen.right() - sz.x;
                         let _ = sp.draw_weapon_card(&painter, name, Pos2::new(x, y), scale, tint);
                     } else if let Some(name) = wname {
                         let short = name.strip_prefix("weapon_").unwrap_or(name);
@@ -1133,40 +1593,35 @@ fn draw_cs16_hud_impl(
                             Pos2::new(screen.right() - 10.0 * scale, y),
                             short,
                             14.0 * scale,
-                            tint,
+                            Color32::from_rgba_unmultiplied(base_col.r(), base_col.g(), base_col.b(), alpha),
                         );
                     }
                 }
                 PickupKind::Ammo { ammo_id, amount } => {
-                    let tint = hud_tinted_alpha(HUD_AMBER, alpha);
+                    let tint = hud_additive_color(HUD_AMBER, alpha);
                     let wid = state
                         .weapons
                         .values()
                         .find(|w| w.ammo1_type == *ammo_id)
                         .map(|w| w.weapon_id);
                     let icon_x = screen.right() - 24.0 * scale;
-                    let has_icon = sprites
-                        .zip(wid)
-                        .and_then(|(sp, w)| sp.draw_ammo_icon(&painter, w, Pos2::new(icon_x, y), scale, tint))
-                        .is_some();
-                    let num_right = if has_icon { icon_x - 6.0 * scale } else { screen.right() - 24.0 * scale };
-                    if let Some(sp) = sprites {
-                        sp.draw_number_right(&painter, i32::from(*amount), num_right, y, scale, tint, 1);
-                    } else {
-                        hud_paint_text(
-                            ctx,
-                            &painter,
-                            &mut font_ctx,
-                            egui::Align2::RIGHT_TOP,
-                            Pos2::new(num_right, y),
-                            &amount.to_string(),
-                            14.0 * scale,
-                            tint,
-                        );
+                    if let (Some(sp), Some(w)) = (sprites, wid) {
+                        let _ = sp.draw_ammo_icon(&painter, w, Pos2::new(icon_x, y), scale, tint);
                     }
+                    let txt_col = Color32::from_rgba_unmultiplied(255, 160, 0, alpha);
+                    hud_paint_text(
+                        ctx,
+                        &painter,
+                        &mut font_ctx,
+                        egui::Align2::RIGHT_TOP,
+                        Pos2::new(icon_x - 4.0 * scale, y),
+                        &amount.to_string(),
+                        12.0 * scale,
+                        txt_col,
+                    );
                 }
                 PickupKind::Item { classname } => {
-                    let tint = hud_tinted_alpha(HUD_AMBER, alpha);
+                    let tint = hud_additive_color(HUD_AMBER, alpha);
                     let sprite_name = match classname.as_str() {
                         "item_kevlar" => "suit_full",
                         "item_assaultsuit" => "suithelmet_full",
@@ -1187,7 +1642,7 @@ fn draw_cs16_hud_impl(
                             Pos2::new(screen.right() - 10.0 * scale, y),
                             classname,
                             14.0 * scale,
-                            tint,
+                            Color32::from_rgba_unmultiplied(255, 160, 0, alpha),
                         );
                     }
                 }
@@ -1200,123 +1655,231 @@ fn draw_cs16_hud_impl(
         draw_radar_with_extras(&painter, sprites, hud, extras, scale);
     }
 
-    // 8. Top-centre: the weapon slot strip (`bucket1..5`) briefly after a switch.
+    // 8. Top-centre: weapon buckets & cards (`CHudAmmo::DrawWList`, `FUN_10044840` & `FUN_10043f50`).
     let bucket_open = extras.buckets.is_some_and(|b| b.active_slot.is_some());
     if (hud.weapon_switch_timer > 0.01 || bucket_open) && vis.weapon_buckets {
-        let alpha = if bucket_open {
-            240u8
-        } else {
-            ((hud.weapon_switch_timer / 0.4).min(1.0) * 235.0) as u8
-        };
-        let active_slot = extras
-            .buckets
-            .and_then(|b| b.active_slot)
-            .or_else(|| {
-                state
-                    .current_weapon
-                    .and_then(|c| state.weapons.get(&c.weapon_id))
-                    .map(|w| w.slot + 1)
-            })
-            .unwrap_or(0);
-        let start_x = screen.left() + 148.0 * scale;
-        let top_y = 14.0 * scale;
-        if let Some(sp) = sprites {
+        let start_x = screen.left() + if screen.width() >= 640.0 { 138.0 } else { 70.0 };
+        let top_y = screen.top() + 10.0;
+        if bucket_open && !extras.hud_fastswitch {
+            let b = extras.buckets.expect("checked bucket_open");
+            let sel_slot = b.active_slot.unwrap_or(0);
+            let slot_has_ammo = |w: &cs_clientcore::hud::WeaponInfo| -> bool {
+                w.ammo1_max == 255
+                    || w.ammo1_type == 255
+                    || state.clips.get(&w.weapon_id).copied().unwrap_or(0) > 0
+                    || state.ammo.get(&w.ammo1_type).copied().unwrap_or(0) > 0
+                    || (w.flags & 1) != 0
+            };
+            let mut slot_x = start_x;
             for slot in 1..=5u8 {
-                let has_slot = state
+                let mut slot_weapons: Vec<_> = state
                     .weapons
                     .values()
-                    .any(|w| w.slot + 1 == slot && hud.owned.contains(&w.weapon_id));
-                let col = if slot == active_slot {
-                    Color32::from_rgba_unmultiplied(255, 200, 30, alpha)
-                } else if has_slot {
-                    Color32::from_rgba_unmultiplied(220, 140, 0, (alpha as f32 * 0.65) as u8)
+                    .filter(|w| w.slot + 1 == slot && hud.owned.contains(&w.weapon_id))
+                    .collect();
+                slot_weapons.sort_by_key(|w| w.position);
+
+                let (bw, bh) = sprites
+                    .and_then(|sp| sp.sprite_size(&format!("bucket{slot}"), scale))
+                    .map_or((20.0 * scale, 20.0 * scale), |s| (s.x, s.y));
+                let card_w = slot_weapons
+                    .first()
+                    .and_then(|w| sprites.and_then(|sp| sp.weapon_card_size(&w.name, scale)))
+                    .map_or(170.0 * scale, |s| s.x);
+                let col_w = if slot == sel_slot && !slot_weapons.is_empty() {
+                    card_w
                 } else {
-                    Color32::from_rgba_unmultiplied(120, 75, 0, (alpha as f32 * 0.3) as u8)
+                    bw
                 };
-                let b_name = format!("bucket{slot}");
-                let _ = sp.draw_sprite(
-                    &painter,
-                    &b_name,
-                    Pos2::new(start_x + f32::from(slot - 1) * 28.0 * scale, top_y),
-                    scale,
-                    col,
-                );
+
+                if let Some(sp) = sprites {
+                    let _ = sp.draw_sprite(
+                        &painter,
+                        &format!("bucket{slot}"),
+                        Pos2::new(slot_x, top_y),
+                        scale,
+                        hud_additive_color(HUD_AMBER, 255),
+                    );
+                }
+
+                let mut wy = top_y + bh + 5.0 * scale;
+                if slot == sel_slot && !slot_weapons.is_empty() {
+                    for w in &slot_weapons {
+                        let has_ammo = slot_has_ammo(w);
+                        let base_rgb = if has_ammo {
+                            HUD_AMBER
+                        } else {
+                            Color32::from_rgb(255, 16, 16)
+                        };
+                        let a = if has_ammo { 192 } else { 128 };
+                        let tint = hud_additive_color(base_rgb, a);
+                        let is_hi = b.highlighted_weapon_id == Some(w.weapon_id);
+                        let card_h = sprites
+                            .and_then(|sp| sp.weapon_card_size(&w.name, scale))
+                            .map_or(45.0 * scale, |s| s.y);
+                        if let Some(sp) = sprites {
+                            if is_hi {
+                                let _ = sp.draw_sprite(
+                                    &painter,
+                                    "selection",
+                                    Pos2::new(slot_x, wy),
+                                    scale,
+                                    hud_additive_color(HUD_AMBER, 255),
+                                );
+                                if sp
+                                    .draw_weapon_card_selected(&painter, &w.name, Pos2::new(slot_x, wy), scale, tint)
+                                    .is_none()
+                                {
+                                    let _ = sp.draw_weapon_card(&painter, &w.name, Pos2::new(slot_x, wy), scale, tint);
+                                }
+                            } else {
+                                let _ = sp.draw_weapon_card(&painter, &w.name, Pos2::new(slot_x, wy), scale, tint);
+                            }
+                        } else {
+                            let box_r = Rect::from_min_size(Pos2::new(slot_x, wy), Vec2::new(col_w, 22.0 * scale));
+                            painter.rect_filled(box_r, 0.0, tint);
+                            let short = w.name.strip_prefix("weapon_").unwrap_or(&w.name);
+                            painter.text(
+                                box_r.center(),
+                                egui::Align2::CENTER_CENTER,
+                                short,
+                                FontId::proportional(11.5 * scale),
+                                if is_hi { Color32::WHITE } else { HUD_AMBER },
+                            );
+                        }
+                        if w.ammo1_max > 0 && w.ammo1_type != 255 {
+                            let res = state.ammo.get(&w.ammo1_type).copied().unwrap_or(0);
+                            if res > 0 {
+                                let bar_w = 20.0 * scale;
+                                let bar_h = 4.0 * scale;
+                                let bx = slot_x + bar_w * 0.5;
+                                let end_x = draw_ammo_bar(
+                                    &painter,
+                                    bx,
+                                    wy + 3.0 * scale,
+                                    bar_w,
+                                    bar_h,
+                                    f32::from(res) / f32::from(w.ammo1_max.max(1)),
+                                );
+                                if w.ammo2_max > 0 && w.ammo2_type != 255 {
+                                    let res2 = state.ammo.get(&w.ammo2_type).copied().unwrap_or(0);
+                                    draw_ammo_bar(
+                                        &painter,
+                                        end_x + 5.0 * scale,
+                                        wy + 3.0 * scale,
+                                        bar_w,
+                                        bar_h,
+                                        f32::from(res2) / f32::from(w.ammo2_max.max(1)),
+                                    );
+                                }
+                            }
+                        }
+                        wy += card_h + 5.0 * scale;
+                    }
+                } else {
+                    for w in &slot_weapons {
+                        let has_ammo = slot_has_ammo(w);
+                        let col = if has_ammo {
+                            hud_additive_color(HUD_AMBER, 128)
+                        } else {
+                            hud_additive_color(Color32::from_rgb(255, 16, 16), 96)
+                        };
+                        painter.rect_filled(
+                            Rect::from_min_size(Pos2::new(slot_x, wy), Vec2::new(bw, bh)),
+                            0.0,
+                            col,
+                        );
+                        wy += bh + 5.0 * scale;
+                    }
+                }
+                slot_x += col_w + 5.0 * scale;
             }
-        }
-        if let Some(b) = extras.buckets
-            && let Some(sel_slot) = b.active_slot
-            && !extras.hud_fastswitch
-        {
-            let mut slot_weapons: Vec<_> = state
-                .weapons
-                .values()
-                .filter(|w| w.slot + 1 == sel_slot && hud.owned.contains(&w.weapon_id))
-                .collect();
-            slot_weapons.sort_by_key(|w| w.position);
-            let mut wy = top_y + 26.0 * scale;
-            let wx = start_x + f32::from(sel_slot.saturating_sub(1)) * 28.0 * scale;
-            for w in slot_weapons {
-                let is_hi = b.highlighted_weapon_id == Some(w.weapon_id);
-                let box_r = Rect::from_min_size(Pos2::new(wx, wy), Vec2::new(118.0 * scale, 22.0 * scale));
-                painter.rect_filled(
-                    box_r,
-                    2.0,
-                    Color32::from_rgba_unmultiplied(0, 0, 0, if is_hi { 205 } else { 145 }),
-                );
-                painter.rect_stroke(
-                    box_r,
-                    2.0,
-                    Stroke::new(1.0, if is_hi { HUD_AMBER } else { Color32::from_rgb(130, 80, 15) }),
-                    egui::StrokeKind::Inside,
-                );
-                let short = w.name.strip_prefix("weapon_").unwrap_or(&w.name);
-                painter.text(
-                    box_r.center(),
-                    egui::Align2::CENTER_CENTER,
-                    short,
-                    FontId::proportional(11.5 * scale),
-                    if is_hi { Color32::from_rgb(255, 225, 110) } else { HUD_AMBER },
-                );
-                wy += 25.0 * scale;
+        } else {
+            let alpha = ((hud.weapon_switch_timer / 0.4).min(1.0) * 235.0) as u8;
+            let active_slot = extras
+                .buckets
+                .and_then(|b| b.active_slot)
+                .or_else(|| {
+                    state
+                        .current_weapon
+                        .and_then(|c| state.weapons.get(&c.weapon_id))
+                        .map(|w| w.slot + 1)
+                })
+                .unwrap_or(0);
+            if let Some(sp) = sprites {
+                for slot in 1..=5u8 {
+                    let has_slot = state
+                        .weapons
+                        .values()
+                        .any(|w| w.slot + 1 == slot && hud.owned.contains(&w.weapon_id));
+                    let a = if slot == active_slot {
+                        alpha
+                    } else if has_slot {
+                        ((f32::from(alpha)) * 0.65) as u8
+                    } else {
+                        ((f32::from(alpha)) * 0.30) as u8
+                    };
+                    let col = hud_additive_color(HUD_AMBER, a);
+                    let _ = sp.draw_sprite(
+                        &painter,
+                        &format!("bucket{slot}"),
+                        Pos2::new(start_x + f32::from(slot - 1) * 25.0 * scale, top_y),
+                        scale,
+                        col,
+                    );
+                }
             }
         }
     }
 
-    // 9. Top-right: flashlight icon + battery bar (`Flashlight` / `FlashBat`), then killfeed.
+    // 9. Top-right: flashlight icon + clipped battery sprite (`FUN_1004a0a0`), then killfeed.
     let show_flashlight = hud.alive
         && (state.hidden & (HIDEHUD_FLASHLIGHT | HIDEHUD_ALL)) == 0
         && (state.flashlight_on || state.flash_battery < 100);
     if show_flashlight {
-        let fx = screen.right() - 48.0 * scale;
-        let fy = 14.0 * scale;
-        let col = if state.flashlight_on {
-            Color32::from_rgb(255, 220, 90)
+        let flash_a = if state.flashlight_on { 225 } else { 100 };
+        let flash_base = if state.flash_battery < 20 {
+            Color32::from_rgb(255, 16, 16)
         } else {
-            Color32::from_rgba_unmultiplied(255, 160, 0, 140)
+            HUD_AMBER
         };
-        if let Some(sp) = sprites {
-            let spr = if state.flashlight_on { "flash_full" } else { "flash_empty" };
-            let _ = sp.draw_sprite(&painter, spr, Pos2::new(fx, fy), scale, col);
+        let flash_col = hud_additive_color(flash_base, flash_a);
+        let frac = (f32::from(state.flash_battery) / 100.0).clamp(0.0, 1.0);
+        if let Some(sp) = sprites
+            && let Some(empty_sz) = sp.sprite_size("flash_empty", scale)
+        {
+            let full_h = sp.sprite_size("flash_full", scale).map_or(empty_sz.y, |s| s.y);
+            let fy = screen.top() + (empty_sz.y - full_h * 0.0) * 0.5;
+            let fx = screen.right() - empty_sz.x * 1.5;
+            let _ = sp.draw_sprite(&painter, "flash_empty", Pos2::new(fx, fy), scale, flash_col);
             if state.flashlight_on {
                 let _ = sp.draw_sprite(
                     &painter,
                     "flash_beam",
-                    Pos2::new(fx + 20.0 * scale, fy),
+                    Pos2::new(screen.right() - empty_sz.x * 0.5, fy),
                     scale,
-                    col,
+                    flash_col,
                 );
             }
+            let _ = sp.draw_sprite_clipped_left(
+                &painter,
+                "flash_full",
+                Pos2::new(fx, fy),
+                scale,
+                flash_col,
+                frac,
+            );
+        } else {
+            let fx = screen.right() - 48.0 * scale;
+            let fy = 14.0 * scale;
+            let bar_w = 34.0 * scale;
+            let bar_h = 4.0 * scale;
+            painter.rect_filled(
+                Rect::from_min_size(Pos2::new(fx, fy + 24.0 * scale), Vec2::new(bar_w * frac, bar_h)),
+                0.0,
+                flash_col,
+            );
         }
-        let bar_w = 34.0 * scale;
-        let bar_h = 4.0 * scale;
-        let frac = (f32::from(state.flash_battery) / 100.0).clamp(0.0, 1.0);
-        let bg = Rect::from_min_size(Pos2::new(fx, fy + 24.0 * scale), Vec2::new(bar_w, bar_h));
-        painter.rect_filled(bg, 0.0, Color32::from_black_alpha(170));
-        painter.rect_filled(
-            Rect::from_min_size(bg.min, Vec2::new(bar_w * frac, bar_h)),
-            0.0,
-            col,
-        );
     }
 
     let mut kf_y = if show_flashlight { 48.0 * scale } else { 16.0 * scale };
@@ -1344,11 +1907,12 @@ fn draw_cs16_hud_impl(
                 (state.players.get(&entry.killer), state.players.get(&entry.victim)),
                 (Some(kp), Some(vp)) if !kp.team.is_empty() && kp.team == vp.team
             );
-        let spr_tint = if is_tk {
+        let spr_rgb = if is_tk {
             Color32::from_rgb(10, 240, 10)
         } else {
             Color32::from_rgb(255, 80, 0)
         };
+        let spr_tint = Color32::from_rgb_additive(spr_rgb.r(), spr_rgb.g(), spr_rgb.b());
 
         let v_sz = hud_measure_text(ctx, &painter, &mut font_ctx, &victim, kf_fallback_sz);
         cursor_x -= v_sz.x;
@@ -1396,7 +1960,7 @@ fn draw_cs16_hud_impl(
                 Pos2::new(cursor_x, kf_y),
                 &fallback,
                 kf_fallback_sz,
-                spr_tint,
+                spr_rgb,
             );
         }
         cursor_x -= 8.0 * scale;
@@ -1418,7 +1982,7 @@ fn draw_cs16_hud_impl(
         kf_y += 20.0 * scale;
     }
 
-    // 10. The plant / defuse bar (`BarTime`).
+    // 10. The plant / defuse progress bar (`CHudProgressBar::Draw`, `FUN_1004dc20`).
     if let Some(bar) = &state.bar
         && bar.duration > 0
     {
@@ -1433,10 +1997,26 @@ fn draw_cs16_hud_impl(
                 Pos2::new(center_x, screen.center().y + 92.0 * scale),
                 Vec2::new(bar_w, bar_h),
             );
-            painter.rect_filled(bar_rect, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 180));
-            let fill_rect = Rect::from_min_size(bar_rect.min, Vec2::new(bar_w * progress, bar_h));
-            painter.rect_filled(fill_rect, 0.0, HUD_AMBER);
-            painter.rect_stroke(bar_rect, 0.0, Stroke::new(1.0, HUD_AMBER), egui::StrokeKind::Outside);
+            let border_col = hud_additive_color(HUD_AMBER, 80);
+            let fill_col = hud_additive_color(HUD_AMBER, 160);
+            let t = 1.0 * scale;
+            painter.rect_filled(Rect::from_min_size(bar_rect.min, Vec2::new(t, bar_h)), 0.0, border_col);
+            painter.rect_filled(Rect::from_min_size(Pos2::new(bar_rect.right() - t, bar_rect.top()), Vec2::new(t, bar_h)), 0.0, border_col);
+            painter.rect_filled(Rect::from_min_size(Pos2::new(bar_rect.left() + t, bar_rect.top()), Vec2::new(bar_w - 2.0 * t, t)), 0.0, border_col);
+            painter.rect_filled(Rect::from_min_size(Pos2::new(bar_rect.left() + t, bar_rect.bottom() - t), Vec2::new(bar_w - 2.0 * t, t)), 0.0, border_col);
+            let inner_w = (bar_w - 4.0 * scale).max(1.0);
+            let inner_h = (bar_h - 4.0 * scale).max(1.0);
+            let fill_w = (inner_w * progress).min(inner_w);
+            if fill_w > 0.0 {
+                painter.rect_filled(
+                    Rect::from_min_size(
+                        Pos2::new(bar_rect.left() + 2.0 * scale, bar_rect.top() + 2.0 * scale),
+                        Vec2::new(fill_w, inner_h),
+                    ),
+                    0.0,
+                    fill_col,
+                );
+            }
         }
     }
 
@@ -1829,6 +2409,89 @@ fn killfeed_sprite_name(weapon: &str) -> String {
     }
 }
 
+fn draw_ammo_bar(painter: &egui::Painter, x: f32, y: f32, w: f32, h: f32, frac: f32) -> f32 {
+    let f = frac.clamp(0.0, 1.0);
+    let mut cx = x;
+    let mut rem_w = w;
+    if f > 0.0 {
+        let fw = (w * f).floor().max(1.0);
+        painter.rect_filled(
+            Rect::from_min_size(Pos2::new(cx, y), Vec2::new(fw, h)),
+            0.0,
+            hud_additive_color(Color32::from_rgb(0, 160, 0), 255),
+        );
+        cx += fw;
+        rem_w -= fw;
+    }
+    if rem_w > 0.0 {
+        painter.rect_filled(
+            Rect::from_min_size(Pos2::new(cx, y), Vec2::new(rem_w, h)),
+            0.0,
+            hud_additive_color(HUD_AMBER, 128),
+        );
+    }
+    cx + rem_w
+}
+
+/// GoldSrc `CHudRadar::DrawRadarDot` (`client.dll` `FUN_1004efe0`) using additive filled rects.
+#[allow(clippy::too_many_arguments)]
+fn draw_radar_dot(
+    painter: &egui::Painter,
+    x: i32,
+    y: i32,
+    dz: f32,
+    size: i32,
+    flags: u32,
+    r: u8,
+    g: u8,
+    b: u8,
+    a: u8,
+) {
+    let col = hud_additive_color(Color32::from_rgb(r, g, b), a);
+    if col == Color32::TRANSPARENT {
+        return;
+    }
+    let rect = |rx: i32, ry: i32, rw: i32, rh: i32| {
+        painter.rect_filled(
+            Rect::from_min_size(
+                Pos2::new(rx as f32, ry as f32),
+                Vec2::new(rw.max(1) as f32, rh.max(1) as f32),
+            ),
+            0.0,
+            col,
+        );
+    };
+    if (flags & 4) != 0 {
+        rect(x - 3, y - 3, size + 3, size + 3);
+        return;
+    }
+    if dz < -128.0 {
+        let clamped = (-dz).min(3096.0);
+        let len = size * 2 + (clamped / 400.0) as i32;
+        rect(x, y, 1, len);
+        rect(x - 2, y + len, 5, 1);
+        return;
+    }
+    if dz > 128.0 {
+        let clamped = dz.min(3096.0);
+        let len = size * 2 + (clamped / 400.0) as i32;
+        rect(x - 2, y, 5, 1);
+        rect(x, y + 1, 1, len - 1);
+        return;
+    }
+    if (flags & 9) == 9 {
+        for (ox, oy) in [(0, 0), (-2, -2), (-2, 2), (2, -2), (2, 2)] {
+            rect(x + ox, y + oy, size, size);
+        }
+        return;
+    }
+    if (flags & 3) != 0 {
+        rect(x - 1, y - 1, size + 1, size + 1);
+        return;
+    }
+    rect(x, y, size, size);
+}
+
 fn draw_radar_with_extras(
     painter: &egui::Painter,
     sprites: Option<&HudSprites>,
@@ -1836,111 +2499,119 @@ fn draw_radar_with_extras(
     extras: &HudExtrasContext<'_>,
     scale: f32,
 ) {
-    let box_size = if scale < 0.75 { 64.0 } else { 128.0 };
+    let box_size_i = if scale < 0.75 { 64 } else { 128 };
+    let box_size = box_size_i as f32;
     let radius = box_size * 0.5;
     let center = Pos2::new(radius, radius);
     let rect = Rect::from_min_size(Pos2::ZERO, Vec2::splat(box_size));
 
     if extras.cl_radartype {
-        painter.circle_filled(center, radius, Color32::from_rgba_unmultiplied(12, 16, 12, 232));
-        if let Some(ov) = extras.overview {
-            let uv = ov.spec.world_to_overview_uv([hud.eye.x, hud.eye.y]);
-            let span = 0.14f32;
-            let uv_rect = Rect::from_min_max(
-                Pos2::new((uv[0] - span).clamp(0.0, 1.0 - span * 2.0), (uv[1] - span).clamp(0.0, 1.0 - span * 2.0)),
-                Pos2::new((uv[0] + span).clamp(span * 2.0, 1.0), (uv[1] + span).clamp(span * 2.0, 1.0)),
+        if let Some(tex) = sprites.and_then(|s| s.radar_opaque_tex.as_ref()) {
+            painter.image(
+                tex.id(),
+                rect,
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                Color32::from_rgb(200, 200, 200),
             );
-            painter.image(ov.texture.id(), rect, uv_rect, Color32::from_rgba_unmultiplied(190, 225, 190, 150));
+        } else {
+            painter.circle_filled(center, radius, Color32::from_rgba_unmultiplied(12, 16, 12, 232));
+            if let Some(ov) = extras.overview {
+                let uv = ov.spec.world_to_overview_uv([hud.eye.x, hud.eye.y]);
+                let span = 0.14f32;
+                let uv_rect = Rect::from_min_max(
+                    Pos2::new((uv[0] - span).clamp(0.0, 1.0 - span * 2.0), (uv[1] - span).clamp(0.0, 1.0 - span * 2.0)),
+                    Pos2::new((uv[0] + span).clamp(span * 2.0, 1.0), (uv[1] + span).clamp(span * 2.0, 1.0)),
+                );
+                painter.image(ov.texture.id(), rect, uv_rect, Color32::from_rgba_unmultiplied(190, 225, 190, 150));
+            }
+            painter.circle_stroke(center, radius - 0.5, Stroke::new(1.5, Color32::from_rgb(200, 200, 200)));
         }
-        painter.circle_stroke(center, radius - 0.5, Stroke::new(1.5, Color32::from_rgb(200, 200, 200)));
     } else if let Some(tex) = sprites.and_then(|s| s.radar_tex.as_ref()) {
         painter.image(
             tex.id(),
             rect,
             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-            Color32::from_rgba_unmultiplied(150, 255, 150, 175),
+            Color32::from_rgb_additive(25, 75, 25),
         );
     } else {
         painter.circle_filled(center, radius, Color32::from_rgba_unmultiplied(25, 75, 25, 155));
         painter.circle_stroke(center, radius - 0.5, Stroke::new(1.2, Color32::from_rgba_unmultiplied(90, 215, 90, 195)));
+        let cone_col = Color32::from_rgba_unmultiplied(165, 255, 165, 120);
+        let diag = radius * 0.707;
+        painter.line_segment([center, Pos2::new(center.x - diag, center.y - diag)], Stroke::new(1.0, cone_col));
+        painter.line_segment([center, Pos2::new(center.x + diag, center.y - diag)], Stroke::new(1.0, cone_col));
     }
-
-    let cone_col = Color32::from_rgba_unmultiplied(165, 255, 165, 120);
-    let diag = radius * 0.707;
-    painter.line_segment([center, Pos2::new(center.x - diag, center.y - diag)], Stroke::new(1.0, cone_col));
-    painter.line_segment([center, Pos2::new(center.x + diag, center.y - diag)], Stroke::new(1.0, cone_col));
 
     let yaw = hud.yaw_deg.to_radians();
     let fwd = Vec3::new(yaw.cos(), yaw.sin(), 0.0);
     let right = Vec3::new(yaw.sin(), -yaw.cos(), 0.0);
-    let radar_range = if box_size <= 64.0 { 1024.0 } else { 2048.0 };
-    let blip_at = |pos: Vec3| -> Pos2 {
-        let delta = pos - hud.eye;
-        let mut v = Vec2::new(delta.dot(right) / radar_range, -delta.dot(fwd) / radar_range);
-        if v.length() > 0.88 {
-            v = v.normalized() * 0.88;
+    let radar_range = if box_size_i <= 64 { 1024.0 } else { 2048.0 };
+    let dot_sz = if box_size_i <= 64 { 1 } else { 2 };
+    let half = box_size_i / 2;
+    let blip_xy = |pos: Vec3| -> Option<(i32, i32)> {
+        let dx = pos.x - hud.eye.x;
+        let dy = pos.y - hud.eye.y;
+        let d2 = Vec3::new(dx, dy, 0.0);
+        let mut rx = d2.dot(right);
+        let mut ry = -d2.dot(fwd);
+        let dist = (dx * dx + dy * dy).sqrt();
+        if dist > radar_range {
+            let factor = dist / radar_range;
+            rx /= factor;
+            ry /= factor;
         }
-        center + v * radius
+        let ix = half + (rx * 0.03125) as i32;
+        let iy = half + (ry * 0.03125) as i32;
+        (0..=box_size_i)
+            .contains(&ix)
+            .then_some(())
+            .and((0..=box_size_i).contains(&iy).then_some((ix, iy)))
     };
 
     let radio_blink = ((hud.time_sec / 0.15) as i32) % 2 == 0;
     for (&slot, &pos) in &hud.hud.radar {
-        let p = blip_at(pos);
+        let Some((ix, iy)) = blip_xy(pos) else {
+            continue;
+        };
         let dz = pos.z - hud.eye.z;
+        let attrib = hud.hud.players.get(&slot).map_or(0, |p| p.attrib);
+        let is_vip_or_bomb = (attrib & (2 | 4)) != 0;
+        let (r, g, b) = if is_vip_or_bomb {
+            (250, 0, 0)
+        } else {
+            (150, 75, 250)
+        };
+        draw_radar_dot(painter, ix, iy, dz, dot_sz, 0, r, g, b, 235);
         let is_radio = extras
             .anim
             .and_then(|a| a.radio_flashes.get(&slot))
             .is_some_and(|exp| *exp > hud.now);
         if is_radio && radio_blink {
-            let d = 3.0 * scale;
-            let rc = Color32::from_rgb(255, 220, 60);
-            painter.line_segment([p - Vec2::splat(d), p + Vec2::splat(d)], Stroke::new(1.2, rc));
-            painter.line_segment([Pos2::new(p.x - d, p.y + d), Pos2::new(p.x + d, p.y - d)], Stroke::new(1.2, rc));
-        } else if dz.abs() > 128.0 {
-            let c = Color32::from_rgb(175, 255, 175);
-            let s = (2.0 * scale).max(1.5);
-            if dz > 128.0 {
-                // Upward T / chevron
-                painter.rect_filled(Rect::from_center_size(p, Vec2::new(s * 2.0, s * 0.7)), 0.0, c);
-                painter.rect_filled(Rect::from_min_size(Pos2::new(p.x - s * 0.4, p.y), Vec2::new(s * 0.8, s * 1.8)), 0.0, c);
-            } else {
-                // Downward chevron
-                painter.rect_filled(Rect::from_center_size(Pos2::new(p.x, p.y + s), Vec2::new(s * 2.0, s * 0.7)), 0.0, c);
-                painter.rect_filled(Rect::from_min_size(Pos2::new(p.x - s * 0.4, p.y - s), Vec2::new(s * 0.8, s * 1.8)), 0.0, c);
-            }
-        } else {
-            painter.rect_filled(
-                Rect::from_center_size(p, Vec2::splat(3.5 * scale)),
-                0.0,
-                Color32::from_rgb(175, 255, 175),
-            );
+            draw_radar_dot(painter, ix, iy, dz, dot_sz, 4, 230, 110, 25, 245);
         }
     }
     for (flag, pos) in hud.hud.hostages.values() {
-        let p = blip_at(*pos);
+        let Some((ix, iy)) = blip_xy(*pos) else {
+            continue;
+        };
+        let dz = pos.z - hud.eye.z;
         if *flag == 0 {
             if ((hud.time_sec / 0.15) as i32) % 2 == 0 {
-                let d = 3.0 * scale;
-                painter.line_segment([p - Vec2::splat(d), p + Vec2::splat(d)], Stroke::new(1.5, HUD_RED));
-                painter.line_segment(
-                    [Pos2::new(p.x - d, p.y + d), Pos2::new(p.x + d, p.y - d)],
-                    Stroke::new(1.5, HUD_RED),
-                );
+                draw_radar_dot(painter, ix, iy, dz, dot_sz, 2, 250, 25, 25, 245);
             }
         } else {
-            painter.circle_filled(p, 2.5 * scale, Color32::from_rgb(110, 185, 255));
+            draw_radar_dot(painter, ix, iy, dz, dot_sz, 2, 50, 50, 255, 245);
         }
     }
-    if let Some((pos, _planted)) = hud.hud.bomb
-        && ((hud.time_sec / 0.35) as i32) % 2 == 0
+    if let Some((pos, planted)) = hud.hud.bomb
+        && let Some((ix, iy)) = blip_xy(pos)
     {
-        painter.rect_filled(
-            Rect::from_center_size(blip_at(pos), Vec2::splat(5.0 * scale)),
-            0.0,
-            HUD_RED,
-        );
+        let iv = if planted { 0.15 } else { 0.35 };
+        if ((hud.time_sec / iv) as i32) % 2 == 0 {
+            let flags = if planted { 9 } else { 1 };
+            draw_radar_dot(painter, ix, iy, pos.z - hud.eye.z, dot_sz, flags, 250, 0, 0, 245);
+        }
     }
-    painter.rect_filled(Rect::from_center_size(center, Vec2::splat(3.0 * scale)), 0.0, Color32::WHITE);
 }
 
 fn draw_sniper_scope(painter: &egui::Painter, screen: Rect) {
@@ -2162,5 +2833,140 @@ mod tests {
         assert_eq!(pickup_history_alpha(14.0, 15.0), Some(80));
         assert_eq!(weapon_name_from_id(16), Some("weapon_usp"));
         assert_eq!(weapon_name_from_id(28), Some("weapon_ak47"));
+    }
+
+    #[test]
+    fn scale_colors_and_additive_color_match_client_dll() {
+        assert_eq!(scale_colors(HUD_AMBER, 100), [100, 62, 0]);
+        assert_eq!(scale_colors(HUD_AMBER, 0), [0, 0, 0]);
+        let add = hud_additive_color(HUD_AMBER, 100);
+        assert_eq!(add.a(), 0);
+        assert_eq!((add.r(), add.g(), add.b()), (100, 62, 0));
+        assert_eq!(hud_additive_color(HUD_AMBER, 0), Color32::TRANSPARENT);
+        assert_eq!(ammo_fade_alpha(200.0), 200);
+        assert_eq!(ammo_fade_alpha(40.0), 100);
+    }
+
+    #[test]
+    fn blink_account_and_status_icon_flash_match_client_dll() {
+        let mut hud = HudState {
+            blink_account: 2,
+            blink_account_seq: 1,
+            ..HudState::default()
+        };
+        let mut anim = HudAnimState::default();
+        anim.step(0.016, &hud, 1.0);
+        assert_eq!(anim.money_blink_amt, 3);
+        assert_eq!(anim.money_blink_amt & 1, 1);
+
+        anim.step(0.05, &hud, 1.05);
+        assert_eq!(anim.money_blink_amt, 3);
+        anim.step(0.11, &hud, 1.16);
+        assert_eq!(anim.money_blink_amt, 2);
+
+        hud.blink_account = 1;
+        hud.blink_account_seq = 2;
+        anim.step(0.016, &hud, 1.20);
+        assert_eq!(anim.money_blink_amt, 1);
+
+        let c4 = StatusIcon {
+            status: 2,
+            color: Some([0, 160, 0]),
+        };
+        assert_eq!(status_color(&c4, true), Some(Color32::from_rgb(0, 160, 0)));
+        assert_eq!(status_color(&c4, false), Some(Color32::from_rgb(250, 0, 0)));
+        let hidden = StatusIcon {
+            status: 0,
+            color: Some([0, 160, 0]),
+        };
+        assert_eq!(status_color(&hidden, false), None);
+    }
+
+    #[test]
+    fn pain_fades_and_hazard_pulse_match_client_dll() {
+        let mut hud = HudState {
+            damage_seq: 1,
+            damage: Some(cs_clientcore::hud::DamageState {
+                armor: 0,
+                health: 20,
+                bits: crate::ui::hud_extras::DMG_BURN,
+                origin: Vec3::new(20.0, 0.0, 0.0),
+            }),
+            ..HudState::default()
+        };
+        let mut anim = HudAnimState::default();
+        anim.step_with_pose(0.016, &hud, 1.0, Vec3::ZERO, 0.0);
+        assert_eq!(anim.pain_fades, [1.0, 1.0, 1.0, 1.0]);
+        assert!(anim.hazard_expires.contains_key("dmg_heat"));
+
+        // Decays at dt * 2.0 and snaps to 0.0 when <= 0.4
+        anim.step_with_pose(0.25, &hud, 1.25, Vec3::ZERO, 0.0);
+        assert!((anim.pain_fades[0] - 0.5).abs() < 1e-4);
+        anim.step_with_pose(0.06, &hud, 1.31, Vec3::ZERO, 0.0);
+        assert_eq!(anim.pain_fades, [0.0, 0.0, 0.0, 0.0]);
+
+        // Directional threshold 0.3 at distance > 50 and zero origin clears all
+        hud.damage_seq = 2;
+        hud.damage = Some(cs_clientcore::hud::DamageState {
+            armor: 0,
+            health: 15,
+            bits: 0,
+            origin: Vec3::new(200.0, 0.0, 0.0),
+        });
+        anim.step_with_pose(0.016, &hud, 1.4, Vec3::ZERO, 0.0);
+        assert!(anim.pain_fades[0] > 0.99);
+        assert_eq!(anim.pain_fades[1], 0.0);
+
+        hud.damage_seq = 3;
+        hud.damage = Some(cs_clientcore::hud::DamageState {
+            armor: 0,
+            health: 0,
+            bits: 0,
+            origin: Vec3::ZERO,
+        });
+        anim.step_with_pose(0.016, &hud, 1.5, Vec3::ZERO, 0.0);
+        assert_eq!(anim.pain_fades, [0.0, 0.0, 0.0, 0.0]);
+
+        // Hazard survives past 2.0 s while |sin(2t)|*256 >= 40, and clears in trough.
+        let peak_t = 3.0 * std::f64::consts::FRAC_PI_4 + std::f64::consts::PI; // |sin(2t)| = 1.0
+        anim.step_with_pose(0.016, &hud, peak_t, Vec3::ZERO, 0.0);
+        assert!(anim.hazard_expires.contains_key("dmg_heat"));
+        let trough_t = peak_t + std::f64::consts::FRAC_PI_4; // 2*t = 4*pi -> sin = 0
+        anim.step_with_pose(0.016, &hud, trough_t, Vec3::ZERO, 0.0);
+        assert!(anim.hazard_expires.is_empty());
+    }
+
+    #[test]
+    fn scenario_flash_and_round_timer_panic_toggle() {
+        let mut hud = HudState {
+            scenario_seq: 1,
+            scenario: Some(cs_clientcore::hud::ScenarioIcon {
+                sprite: "c4".to_string(),
+                alpha: 255,
+                flash: Some((50, 0)),
+            }),
+            round_time: 10,
+            round_time_at: 0.0,
+            ..HudState::default()
+        };
+        let mut anim = HudAnimState::default();
+        anim.step(0.016, &hud, 1.0);
+        assert_eq!(anim.scenario_alpha, 255);
+        assert!(anim.timer_panic_color);
+
+        // Decays exponentially when > 100 and toggles panic every 0.2s for 9s remaining.
+        anim.step(0.1, &hud, 1.1);
+        assert!(anim.scenario_alpha < 255);
+        anim.step(0.15, &hud, 1.25);
+        assert!(!anim.timer_panic_color);
+
+        // Flash interval (50 * 0.01 = 0.5s) resets scenario_alpha back to 255.
+        anim.step(0.1, &hud, 1.55);
+        assert_eq!(anim.scenario_alpha, 255);
+
+        hud.scenario = None;
+        hud.scenario_seq = 2;
+        anim.step(0.016, &hud, 1.6);
+        assert_eq!(anim.scenario_alpha, 0);
     }
 }

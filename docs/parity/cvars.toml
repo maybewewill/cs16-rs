@@ -3220,3 +3220,28 @@ evidence = "crates/cs-cvar/src/defaults.rs (registered); crates/cs-client/src/ap
 id = "spec_drawstatus"
 status = "implemented"
 evidence = "crates/cs-cvar/src/defaults.rs (registered); crates/cs-client/src/ui/screens/spectator.rs (toggled in Spectator Settings)"
+
+[[item]]
+id = "cl_pitchdown"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/tests/phase10_ui.rs::screen5_goldsrc_cvars_registered"
+
+[[item]]
+id = "cl_pitchup"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/tests/phase10_ui.rs::screen5_goldsrc_cvars_registered"
+
+[[item]]
+id = "host_timescale"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/tests/phase10_ui.rs::screen5_goldsrc_cvars_registered"
+
+[[item]]
+id = "hud_saytext_time"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/tests/phase10_ui.rs::screen5_goldsrc_cvars_registered"
+
+[[item]]
+id = "sv_use_steam_networking"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/tests/phase10_ui.rs::screen5_goldsrc_cvars_registered"

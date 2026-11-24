@@ -119,10 +119,7 @@ fn hints(b: &Bench) -> Vec<String> {
     b.messages()
         .into_iter()
         .filter_map(|m| match m {
-            CsUserMsg::Unknown { name, payload } if name == "HudTextArgs" => {
-                let end = payload.iter().position(|&b| b == 0).unwrap_or(payload.len());
-                Some(String::from_utf8_lossy(&payload[..end]).into_owned())
-            }
+            CsUserMsg::HudTextArgs { text, .. } => Some(text),
             _ => None,
         })
         .collect()

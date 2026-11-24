@@ -454,21 +454,16 @@ fn a_terrorist_in_a_vip_safety_zone_is_told_once_what_it_is() {
     let mut b = bench(all_zones());
     spawn_at(&mut b, Team::Terrorist, VIP_AT);
     settle(&mut b);
-    let hints = |b: &Bench| -> Vec<Vec<u8>> {
+    let hints = |b: &Bench| -> Vec<String> {
         b.messages()
             .iter()
             .filter_map(|m| match m {
-                CsUserMsg::Unknown { name, payload } if name == "HudTextArgs" => {
-                    Some(payload.clone())
-                }
+                CsUserMsg::HudTextArgs { text, .. } => Some(text.clone()),
                 _ => None,
             })
             .collect()
     };
-    let texts: Vec<String> = hints(&b)
-        .iter()
-        .map(|p| String::from_utf8_lossy(&p[..p.iter().position(|&c| c == 0).unwrap()]).into_owned())
-        .collect();
+    let texts = hints(&b);
     assert!(texts.contains(&"#Hint_terrorist_vip_zone".to_string()), "{texts:?}");
     // Leaving and coming back does not repeat it (`DHF_IN_VIPSAFETY_ZONE`).
     b.probe.clear_messages();

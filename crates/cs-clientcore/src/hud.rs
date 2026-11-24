@@ -279,6 +279,8 @@ pub struct HudState {
     pub money_flash: bool,
     /// `BlinkAcct`: how many times the account blinks.
     pub blink_account: u8,
+    /// Monotonic counter incremented each time a `BlinkAcct` message arrives.
+    pub blink_account_seq: u32,
     pub current_weapon: Option<CurrentWeapon>,
     /// The last clip count each weapon was reported with.
     pub clips: BTreeMap<u8, i8>,
@@ -332,12 +334,16 @@ pub struct HudState {
     pub server_name: String,
     pub damage: Option<DamageState>,
     pub damage_history: VecDeque<(DamageState, f64)>,
+    /// Monotonic counter incremented on every `Damage` user message.
+    pub damage_seq: u32,
     pub hud_texts: VecDeque<HudTextEntry>,
     pub allow_spec: bool,
     pub spec_health: Option<(u8, u8)>,
     pub screen_fade: Option<ScreenFade>,
     pub screen_shake: Option<ScreenShake>,
     pub scenario: Option<ScenarioIcon>,
+    /// Monotonic counter incremented on every `Scenario` user message.
+    pub scenario_seq: u32,
     pub night_vision: bool,
     pub flashlight_on: bool,
     pub flash_battery: u8,
@@ -369,6 +375,7 @@ impl Default for HudState {
             money: 0,
             money_flash: false,
             blink_account: 0,
+            blink_account_seq: 0,
             current_weapon: None,
             clips: BTreeMap::new(),
             ammo: BTreeMap::new(),
@@ -407,12 +414,14 @@ impl Default for HudState {
             server_name: String::new(),
             damage: None,
             damage_history: VecDeque::new(),
+            damage_seq: 0,
             hud_texts: VecDeque::new(),
             allow_spec: false,
             spec_health: None,
             screen_fade: None,
             screen_shake: None,
             scenario: None,
+            scenario_seq: 0,
             night_vision: false,
             flashlight_on: false,
             flash_battery: 100,
@@ -488,7 +497,12 @@ impl HudState {
                 self.money = *amount;
                 self.money_flash = *flash;
             }
-            CsUserMsg::BlinkAcct(n) => self.blink_account = *n,
+            CsUserMsg::BlinkAcct(n) => {
+                self.blink_account = *n;
+                if *n > 0 {
+                    self.blink_account_seq = self.blink_account_seq.wrapping_add(1);
+                }
+            }
             CsUserMsg::CurWeapon {
                 is_active,
                 weapon_id,
@@ -767,6 +781,7 @@ impl HudState {
                     origin: *origin,
                 };
                 self.damage = Some(d);
+                self.damage_seq = self.damage_seq.wrapping_add(1);
                 if d.health > 0 || d.armor > 0 || d.bits != 0 {
                     if self.damage_history.len() >= 8 {
                         self.damage_history.pop_front();
@@ -838,6 +853,7 @@ impl HudState {
                 alpha,
                 flash,
             } => {
+                self.scenario_seq = self.scenario_seq.wrapping_add(1);
                 self.scenario = active.then(|| ScenarioIcon {
                     sprite: sprite.clone(),
                     alpha: *alpha,

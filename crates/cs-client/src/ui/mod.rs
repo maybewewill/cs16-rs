@@ -212,12 +212,11 @@ pub fn draw_crosshair_vgui(
         Color32::from_rgba_unmultiplied(250, 50, 50, 255)
     } else {
         let (r, g, b) = parse_rgb(cvars.get_str("cl_crosshair_color"));
-        let a = if cvars.get_bool("cl_crosshair_translucent") {
-            ((geom.alpha as f32) * (195.0 / 255.0)).round().clamp(0.0, 255.0) as u8
+        if cvars.get_bool("cl_crosshair_translucent") {
+            crate::ui::hud::hud_additive_color(Color32::from_rgb(r, g, b), geom.alpha)
         } else {
-            geom.alpha
-        };
-        Color32::from_rgba_unmultiplied(r, g, b, a)
+            Color32::from_rgba_unmultiplied(r, g, b, geom.alpha)
+        }
     };
 
     let painter = ctx.layer_painter(egui::LayerId::new(

@@ -15,7 +15,7 @@ use cs_client::camera::Camera;
 use cs_client::input::{MoveSpeeds, weapon_for_slot};
 use cs_client::render::scene::ModelRegistry;
 use cs_client::ui::hud::{
-    HudExtrasContext, HudView, draw_cs16_hud_with_extras, draw_voice_speakers,
+    HudAnimState, HudExtrasContext, HudView, draw_cs16_hud_with_extras, draw_voice_speakers,
 };
 use cs_client::ui::mod_hud::draw_mod_hud;
 use cs_client::ui::scoreboard::{ScoreRow, show_scoreboard};
@@ -175,6 +175,7 @@ pub struct WebClientState {
     last_underwater: bool,
     last_fade_gain: f32,
     weapon_switch_timer: f32,
+    hud_anim: HudAnimState,
     time_sec: f32,
     pub mod_transfer: ClientModTransfer,
     pub mod_host: ClientModHost,
@@ -224,6 +225,7 @@ impl WebClientState {
             last_underwater: false,
             last_fade_gain: 1.0,
             weapon_switch_timer: 0.0,
+            hud_anim: HudAnimState::default(),
             time_sec: 0.0,
             mod_transfer: ClientModTransfer::default(),
             mod_host: ClientModHost::new(),
@@ -361,6 +363,7 @@ impl WebClientState {
         self.mod_transfer = ClientModTransfer::default();
         self.mod_host = ClientModHost::new();
         self.last_mod_hud.clear();
+        self.hud_anim = HudAnimState::default();
         self.queued_audio.push(WebAudioEvent::StopAll);
     }
 
@@ -740,6 +743,19 @@ impl WebClientState {
             && fv.eye.is_finite()
         {
             self.camera.position = fv.eye;
+        }
+        let anim_eye = built_view.as_ref().map_or(self.camera.position, |fv| fv.eye);
+        let anim_yaw = self.camera.yaw_deg;
+        match &self.session {
+            SessionMode::Idle => {}
+            SessionMode::Local { game, .. } => {
+                self.hud_anim
+                    .step_with_pose(dt as f32, &game.connection().fx().hud, sess_now, anim_eye, anim_yaw);
+            }
+            SessionMode::Remote { conn, .. } => {
+                self.hud_anim
+                    .step_with_pose(dt as f32, &conn.fx().hud, sess_now, anim_eye, anim_yaw);
+            }
         }
 
         let listener = self.camera.position.to_array();
@@ -1284,7 +1300,10 @@ impl WebClientState {
                 yaw_deg: self.camera.yaw_deg,
                 underwater_tint: fv.underwater_tint,
             };
-            let mut extras = HudExtrasContext::default();
+            let mut extras = HudExtrasContext {
+                anim: Some(&self.hud_anim),
+                ..Default::default()
+            };
             extras.apply_cvars(&self.cvars);
             draw_cs16_hud_with_extras(ctx, hud_sprites, &hv, &extras);
             let speakers = self.voice.active_speakers(sess_now);

@@ -1733,6 +1733,7 @@ fn screen5_hud_anim_fades_and_radio_flash() {
         health: 100,
         armor: 100,
         money: 800,
+        money_flash: true,
         ..HudState::default()
     };
     anim.step(0.016, &hud, 1.0);
@@ -1741,9 +1742,15 @@ fn screen5_hud_anim_fades_and_radio_flash() {
     hud.health = 75;
     hud.money = 1600;
     anim.step(0.016, &hud, 1.1);
-    assert!(anim.health_fade > 190.0);
+    assert!(anim.health_fade > 95.0 && anim.health_fade <= 100.0);
     assert_eq!(anim.money_delta, 800);
     assert!(anim.money_fade > 4.9);
+    assert!(anim.money_show_delta);
+
+    hud.money_flash = false;
+    hud.money = 1200;
+    anim.step(0.016, &hud, 1.2);
+    assert!(!anim.money_show_delta);
 
     anim.trigger_radio(3, 2.0);
     assert!(anim.radio_flashes.contains_key(&3));
@@ -1863,6 +1870,9 @@ fn screen5_hud_saytext_and_pickup_history_with_retail_weapon_cards() {
             assert_eq!(sp.weapon_card_size("weapon_usp", 1.0), Some(egui::Vec2::new(170.0, 45.0)));
             assert_eq!(sp.weapon_card_size("weapon_ak47", 1.0), Some(egui::Vec2::new(170.0, 45.0)));
             assert_eq!(sp.weapon_card_size("weapon_knife", 1.0), Some(egui::Vec2::new(170.0, 45.0)));
+            assert!(sp.has_pain_sprites());
+            assert_eq!(sp.has_radar_textures(), (true, true));
+            assert!(sp.has_selected_weapon_card("weapon_usp"));
             sprites_holder = Some(sp);
         }
         let view = HudView {

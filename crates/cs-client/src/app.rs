@@ -1508,7 +1508,9 @@ impl Cs16App {
             }
             self.collect_hud_feeds(inputs.now);
             let hud_now = self.session.now();
-            self.session.with_hud(|h| self.hud_anim.step(dt, h, hud_now));
+            let eye = view.as_ref().map_or(self.camera.position, |v| v.eye);
+            let yaw_deg = self.camera.yaw_deg;
+            self.session.with_hud(|h| self.hud_anim.step_with_pose(dt, h, hud_now, eye, yaw_deg));
         }
         self.weapon_switch_timer = (self.weapon_switch_timer - dt).max(0.0);
         self.weapon_buckets.step(dt);
