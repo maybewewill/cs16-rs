@@ -1,0 +1,13 @@
+[mod]
+id = "custom_hud"
+name = "Custom Client HUD & Asset Overlay"
+version = "1.0.0"
+api_version = 1
+side = "both"
+entry_server = "server.wat"
+entry_client = "client.wat"
+permissions = ["messages", "timers", "net_custom", "hud"]
+assets = ["sprites/mod_badge.txt"]
+custom_usermsgs = ["CsModHudTick"]
+fuel_per_frame = 500000
+max_memory_bytes = 2097152

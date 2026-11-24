@@ -1,0 +1,10 @@
+[mod]
+id = "gungame"
+name = "GunGame Escalation"
+version = "1.0.0"
+api_version = 1
+side = "server"
+entry_server = "server.wat"
+permissions = ["messages", "commands", "storage"]
+fuel_per_frame = 500000
+max_memory_bytes = 2097152

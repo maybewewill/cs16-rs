@@ -1,0 +1,10 @@
+[mod]
+id = "deathmatch"
+name = "Team Deathmatch Respawn"
+version = "1.0.0"
+api_version = 1
+side = "server"
+entry_server = "server.wat"
+permissions = ["entities", "messages", "timers", "commands"]
+fuel_per_frame = 500000
+max_memory_bytes = 2097152

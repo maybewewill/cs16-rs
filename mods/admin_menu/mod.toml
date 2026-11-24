@@ -1,0 +1,10 @@
+[mod]
+id = "admin_menu"
+name = "Server Admin Menu"
+version = "1.0.0"
+api_version = 1
+side = "server"
+entry_server = "server.wat"
+permissions = ["entities", "messages", "menus", "commands"]
+fuel_per_frame = 500000
+max_memory_bytes = 2097152
