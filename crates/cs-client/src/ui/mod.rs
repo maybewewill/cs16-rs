@@ -8,6 +8,7 @@ pub mod mod_hud;
 pub mod options;
 pub mod scoreboard;
 pub mod server_menu;
+pub mod vgui2;
 pub mod vgui_assets;
 pub mod vgui_theme;
 
