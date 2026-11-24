@@ -4,14 +4,17 @@
 
 use bytemuck::{Pod, Zeroable};
 use cs_assets::bsp::{
-    BspMap, FaceLightmapInfo, Leaf, LightmapAtlas, Node, Plane, RenderBatch, RenderMode,
+    BspDlight, BspMap, FaceDlightInfo, Leaf, LightmapAtlas, Node, Plane, RenderBatch, RenderMode,
     TextureAnimTable, WorldFaceSpan,
 };
+use cs_assets::gamma::{GammaTables, GoldSrcGammaConfig};
+use cs_assets::wad::DecodedTexture;
 use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
 use crate::render::lighting::{
-    GpuLightsUniform, TextureFilterMode, create_sampler, upload_rgba_texture_mipmapped,
+    GpuLightsUniform, TextureFilterMode, TextureUploadConfig, create_sampler,
+    upload_rgba_texture_mipmapped_with_config,
 };
 use crate::render::scene::{BrushDraw, EntRenderMode};
 
@@ -43,7 +46,12 @@ pub struct BspDrawParams {
     pub camera_pos: Vec3,
     pub gamma: f32,
     pub texgamma: f32,
+    pub lightgamma: f32,
     pub brightness: f32,
+    pub gl_overbright: bool,
+    pub gl_picmip: i32,
+    pub gl_max_size: u32,
+    pub gl_round_down: i32,
     pub software_mode: bool,
     pub time_sec: f32,
     pub debug_mode: f32,
@@ -263,9 +271,14 @@ struct UploadedMap {
     global_bg: wgpu::BindGroup,
     lightmap_tex: wgpu::Texture,
     lightmap_atlas: LightmapAtlas,
-    lightmap_rects: Vec<FaceLightmapInfo>,
+    dlight_infos: Vec<FaceDlightInfo>,
+    prev_dlight_faces: Vec<bool>,
     lighting: Vec<u8>,
     last_style_values: [f32; 64],
+    cached_gamma: GoldSrcGammaConfig,
+    cached_tex_cfg: TextureUploadConfig,
+    cached_overbright: bool,
+    textures_raw: Vec<DecodedTexture>,
     tex_anim: TextureAnimTable,
     tex_views: Vec<wgpu::TextureView>,
     tex_bgs: Vec<wgpu::BindGroup>,
@@ -439,7 +452,7 @@ impl BspRenderer {
         });
 
         let filter_mode = TextureFilterMode::LinearMipmapLinear;
-        let anisotropy = 8;
+        let anisotropy = 1;
         let active_sampler = create_sampler(device, "bsp_tex_sampler", filter_mode, anisotropy, false);
 
         Self {
@@ -594,16 +607,22 @@ impl BspRenderer {
             ],
         });
 
+        let default_gamma = GoldSrcGammaConfig::default();
+        let default_tables = GammaTables::build(default_gamma);
+        let default_tex_cfg = TextureUploadConfig::default();
+
         let mut tex_views = Vec::with_capacity(map.textures.len());
         let mut tex_bgs = Vec::with_capacity(map.textures.len());
         for tex in &map.textures {
-            let view = upload_rgba_texture_mipmapped(
+            let view = upload_rgba_texture_mipmapped_with_config(
                 device,
                 queue,
                 &tex.name,
                 tex.width.max(1),
                 tex.height.max(1),
                 &tex.rgba,
+                Some(&default_tables),
+                default_tex_cfg,
             );
             let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some(&tex.name),
@@ -653,6 +672,7 @@ impl BspRenderer {
             mapped_at_creation: false,
         });
 
+        let dlight_infos = map.build_face_dlight_infos();
         self.uploaded = Some(UploadedMap {
             vertex_buf,
             index_buf,
@@ -660,9 +680,14 @@ impl BspRenderer {
             global_bg,
             lightmap_tex,
             lightmap_atlas: lm.clone(),
-            lightmap_rects: map.build_face_lightmap_rects(),
+            dlight_infos,
+            prev_dlight_faces: Vec::new(),
             lighting: map.lighting.clone(),
             last_style_values: [1.0; 64],
+            cached_gamma: default_gamma,
+            cached_tex_cfg: default_tex_cfg,
+            cached_overbright: false,
+            textures_raw: map.textures.clone(),
             tex_anim: map.build_texture_anim_table(),
             tex_views,
             tex_bgs,
@@ -684,42 +709,98 @@ impl BspRenderer {
         let Some(map) = &mut self.uploaded else {
             return;
         };
-        let dirty = map.lightmap_atlas.rebuild_for_styles(
+        let tables = GammaTables::build(map.cached_gamma);
+        let dirty = map.lightmap_atlas.rebuild_with_dlights(
             &map.lighting,
-            &map.lightmap_rects,
+            &map.dlight_infos,
             style_values,
             &map.last_style_values,
+            &[],
+            &mut map.prev_dlight_faces,
+            &tables,
+            map.cached_overbright,
+            false,
         );
         if dirty.is_empty() {
             return;
         }
         map.last_style_values = *style_values;
-        let aw = map.lightmap_atlas.width;
-        let ah = map.lightmap_atlas.height;
-        for (x, y, w, h) in dirty {
-            let start = ((y * aw + x) * 4) as usize;
-            if start >= map.lightmap_atlas.rgba.len() {
-                continue;
+        upload_dirty_lightmap_rects(queue, &map.lightmap_tex, &map.lightmap_atlas, &dirty);
+    }
+
+    /// Synchronize texture `texgammatable` + POT mipmaps, `R_BuildLightMap` gamma LUTs,
+    /// `gl_overbright`, animated lightstyles, and CPU `R_AddDynamicLights`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sync_gamma_and_lighting(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        style_values: &[f32; 64],
+        gamma_cfg: GoldSrcGammaConfig,
+        gl_overbright: bool,
+        tex_cfg: TextureUploadConfig,
+        dlights: &[BspDlight],
+    ) {
+        let Some(map) = &mut self.uploaded else {
+            return;
+        };
+        let gamma_cfg = gamma_cfg.validated();
+        let gamma_changed = map.cached_gamma != gamma_cfg;
+        let tex_changed = gamma_changed || map.cached_tex_cfg != tex_cfg;
+        let overbright_changed = map.cached_overbright != gl_overbright;
+        let tables = GammaTables::build(gamma_cfg);
+
+        if tex_changed {
+            map.tex_views.clear();
+            map.tex_bgs.clear();
+            for tex in &map.textures_raw {
+                let view = upload_rgba_texture_mipmapped_with_config(
+                    device,
+                    queue,
+                    &tex.name,
+                    tex.width.max(1),
+                    tex.height.max(1),
+                    &tex.rgba,
+                    Some(&tables),
+                    tex_cfg,
+                );
+                let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(&tex.name),
+                    layout: &self.tex_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.active_sampler),
+                        },
+                    ],
+                });
+                map.tex_views.push(view);
+                map.tex_bgs.push(bg);
             }
-            queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &map.lightmap_tex,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d { x, y, z: 0 },
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &map.lightmap_atlas.rgba[start..],
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(4 * aw),
-                    rows_per_image: Some(ah),
-                },
-                wgpu::Extent3d {
-                    width: w,
-                    height: h,
-                    depth_or_array_layers: 1,
-                },
-            );
+            map.cached_tex_cfg = tex_cfg;
+        }
+
+        let force_all = gamma_changed || overbright_changed;
+        let dirty = map.lightmap_atlas.rebuild_with_dlights(
+            &map.lighting,
+            &map.dlight_infos,
+            style_values,
+            &map.last_style_values,
+            dlights,
+            &mut map.prev_dlight_faces,
+            &tables,
+            gl_overbright,
+            force_all,
+        );
+        map.last_style_values = *style_values;
+        map.cached_gamma = gamma_cfg;
+        map.cached_overbright = gl_overbright;
+        if !dirty.is_empty() {
+            upload_dirty_lightmap_rects(queue, &map.lightmap_tex, &map.lightmap_atlas, &dirty);
         }
     }
 
@@ -914,7 +995,7 @@ impl BspRenderer {
             camera_pos: [params.camera_pos.x, params.camera_pos.y, params.camera_pos.z, 1.0],
             fog_color_density: [fog_rgb[0], fog_rgb[1], fog_rgb[2], fog_density],
             gamma_params: [
-                params.gamma,
+                if params.gl_overbright { 1.0 } else { 0.0 },
                 params.texgamma,
                 params.brightness,
                 if params.software_mode { 1.0 } else { 0.0 },
@@ -1143,6 +1224,41 @@ fn build_pipeline(
         multiview_mask: None,
         cache: None,
     })
+}
+
+fn upload_dirty_lightmap_rects(
+    queue: &wgpu::Queue,
+    lightmap_tex: &wgpu::Texture,
+    atlas: &LightmapAtlas,
+    dirty: &[(u32, u32, u32, u32)],
+) {
+    let aw = atlas.width;
+    let ah = atlas.height;
+    for &(x, y, w, h) in dirty {
+        let start = ((y * aw + x) * 4) as usize;
+        if start >= atlas.rgba.len() {
+            continue;
+        }
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: lightmap_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x, y, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &atlas.rgba[start..],
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * aw),
+                rows_per_image: Some(ah),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
 }
 
 fn create_rgba_texture(

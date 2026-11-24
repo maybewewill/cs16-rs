@@ -54,7 +54,7 @@ use glam::Vec3;
 fn gamma_texgamma_brightness_overbright_and_software_dither() {
     let base = GammaParams::default();
     let mid = apply_goldsrc_gamma_rgb([0.5; 3], [0.5; 3], 0, 0, &base);
-    assert!((mid[0] - 0.5).abs() < 1e-4);
+    assert!(mid[0] > 0.15 && mid[0] < 0.45, "{mid:?}");
 
     let bright = apply_goldsrc_gamma_rgb(
         [0.5; 3],
@@ -62,7 +62,7 @@ fn gamma_texgamma_brightness_overbright_and_software_dither() {
         0,
         0,
         &GammaParams {
-            brightness: 1.5,
+            brightness: 1.0,
             ..base
         },
     );
@@ -117,8 +117,8 @@ fn texture_filter_modes_mipmaps_dlights_and_flashlight_spot() {
 
     let pot_mips = generate_mipmaps_rgba(8, 8, &vec![200u8; 8 * 8 * 4]);
     assert_eq!(pot_mips.len(), 4);
-    let npot_mips = generate_mipmaps_rgba(6, 10, &vec![200u8; 6 * 10 * 4]);
-    assert_eq!(npot_mips.len(), 1);
+    let npot_mips = generate_mipmaps_rgba(128, 240, &vec![200u8; 128 * 240 * 4]);
+    assert_eq!(npot_mips.len(), 9);
 
     let mut pool = DLightPool::default();
     pool.add_light(DynamicLight {
@@ -600,7 +600,12 @@ fn real_assets_and_headless_gpu_offscreen_render_if_installed() {
         camera_pos: cam.position,
         gamma: 2.5,
         texgamma: 2.0,
-        brightness: 1.0,
+        lightgamma: 2.5,
+        brightness: 0.0,
+        gl_overbright: false,
+        gl_picmip: 0,
+        gl_max_size: 512,
+        gl_round_down: 3,
         software_mode: true,
         time_sec: 1.0,
         debug_mode: 0.0,

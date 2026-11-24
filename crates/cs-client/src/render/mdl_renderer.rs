@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
+use cs_assets::gamma::{GammaTables, GoldSrcGammaConfig};
 use cs_assets::mdl::{
     BoneEvalParams, MdlSeqEvent, STUDIO_NF_ADDITIVE, STUDIO_NF_CHROME, STUDIO_NF_FLATSHADE,
     STUDIO_NF_MASKED, StudioModel,
@@ -20,7 +21,8 @@ use tracing::warn;
 use wgpu::util::DeviceExt;
 
 use crate::render::lighting::{
-    GpuLightsUniform, TextureFilterMode, create_sampler, upload_rgba_texture_mipmapped,
+    GpuLightsUniform, TextureFilterMode, TextureUploadConfig, create_sampler,
+    upload_rgba_texture_mipmapped_with_config,
 };
 use crate::render::scene::{
     EntRenderMode, RENDERFX_EXPLODE, RENDERFX_GLOW_SHELL, RENDERFX_LIGHT_MULTIPLIER,
@@ -32,6 +34,7 @@ struct MdlGpuVertex {
     position: [f32; 3],
     normal: [f32; 3],
     uv: [f32; 2],
+    color: [f32; 3],
 }
 
 #[repr(C)]
@@ -57,7 +60,12 @@ pub struct MdlPassParams {
     pub cam_up: Vec3,
     pub gamma: f32,
     pub texgamma: f32,
+    pub lightgamma: f32,
     pub brightness: f32,
+    pub direct: f32,
+    pub gl_picmip: i32,
+    pub gl_max_size: u32,
+    pub gl_round_down: i32,
     pub software_mode: bool,
     pub fog: Option<([f32; 3], f32)>,
     pub lights: GpuLightsUniform,
@@ -72,7 +80,12 @@ impl Default for MdlPassParams {
             cam_up: Vec3::Z,
             gamma: 2.5,
             texgamma: 2.0,
-            brightness: 1.0,
+            lightgamma: 2.5,
+            brightness: 0.0,
+            direct: 0.9,
+            gl_picmip: 0,
+            gl_max_size: 512,
+            gl_round_down: 3,
             software_mode: false,
             fog: None,
             lights: GpuLightsUniform::default(),
@@ -243,6 +256,8 @@ pub struct MdlRenderer {
     uniform_stride: u64,
     lights_buf: wgpu::Buffer,
     uniform_bg: wgpu::BindGroup,
+    cached_gamma: GoldSrcGammaConfig,
+    cached_tex_cfg: TextureUploadConfig,
 }
 
 struct PreparedDraw {
@@ -292,6 +307,7 @@ fn create_mdl_pipelines(
                         0 => Float32x3,
                         1 => Float32x3,
                         2 => Float32x2,
+                        3 => Float32x3,
                     ],
                 })],
             },
@@ -487,6 +503,8 @@ impl MdlRenderer {
             uniform_stride,
             lights_buf,
             uniform_bg,
+            cached_gamma: GoldSrcGammaConfig::default(),
+            cached_tex_cfg: TextureUploadConfig::default(),
         }
     }
 
@@ -551,6 +569,8 @@ impl MdlRenderer {
         queue: &wgpu::Queue,
         vfs: &Vfs,
         rel_path: &str,
+        tables: &GammaTables,
+        tex_cfg: TextureUploadConfig,
     ) -> Option<String> {
         let key = rel_path.to_ascii_lowercase();
         if !self.cache.contains_key(&key) {
@@ -558,13 +578,19 @@ impl MdlRenderer {
                 Ok(mdl) => {
                     let mut textures = Vec::with_capacity(mdl.textures.len());
                     for tex in &mdl.textures {
-                        let view = upload_rgba_texture_mipmapped(
+                        let cfg = TextureUploadConfig {
+                            apply_texgamma: (tex.flags & STUDIO_NF_MASKED) == 0,
+                            ..tex_cfg
+                        };
+                        let view = upload_rgba_texture_mipmapped_with_config(
                             device,
                             queue,
                             &tex.name,
                             tex.width.max(1),
                             tex.height.max(1),
                             &tex.rgba,
+                            Some(tables),
+                            cfg,
                         );
                         let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                             label: Some(&tex.name),
@@ -652,13 +678,35 @@ impl MdlRenderer {
             if params.software_mode { 1.0 } else { 0.0 },
         ];
 
+        let gamma_cfg = GoldSrcGammaConfig {
+            gamma: params.gamma,
+            brightness: params.brightness,
+            texgamma: params.texgamma,
+            lightgamma: params.lightgamma,
+        }
+        .validated();
+        let tex_cfg = TextureUploadConfig {
+            gl_round_down: params.gl_round_down,
+            gl_picmip: params.gl_picmip,
+            gl_max_size: params.gl_max_size,
+            apply_texgamma: true,
+        };
+        if self.cached_gamma != gamma_cfg || self.cached_tex_cfg != tex_cfg {
+            self.cache.clear();
+            self.cached_gamma = gamma_cfg;
+            self.cached_tex_cfg = tex_cfg;
+        }
+        let tables = GammaTables::build(gamma_cfg);
+
         for inst in instances {
-            let Some(key) = self.ensure_loaded(device, queue, vfs, inst.model_path) else {
+            let Some(key) =
+                self.ensure_loaded(device, queue, vfs, inst.model_path, &tables, tex_cfg)
+            else {
                 continue;
             };
             let attached_key = inst
                 .attached_model
-                .and_then(|p| self.ensure_loaded(device, queue, vfs, p));
+                .and_then(|p| self.ensure_loaded(device, queue, vfs, p, &tables, tex_cfg));
             let Some(Some(cached)) = self.cache.get(&key) else {
                 continue;
             };
@@ -718,6 +766,12 @@ impl MdlRenderer {
             } else {
                 1.0
             };
+            let (ambient_light, shade_light, light_color, plight_vec) = compute_entity_lighting(
+                inst.transform.w_axis.truncate(),
+                inst.light_rgb * light_mul,
+                &params.lights,
+                params.direct,
+            );
 
             let mut push_model =
                 |m_key: &str, cached_m: &CachedGpuModel, m_bones: &[Mat4], shell_only: bool| {
@@ -750,10 +804,20 @@ impl MdlRenderer {
                                 let m = inst.transform * Mat4::from_scale(explode_scale) * bm;
                                 let pos = m.transform_point3(v.pos);
                                 let norm = m.transform_vector3(v.normal).normalize_or_zero();
+                                let lv = r_studio_lighting(
+                                    &tables,
+                                    tex_flags,
+                                    norm,
+                                    ambient_light,
+                                    shade_light,
+                                    plight_vec,
+                                );
+                                let vcol = light_color * lv;
                                 all_verts.push(MdlGpuVertex {
                                     position: pos.to_array(),
                                     normal: norm.to_array(),
                                     uv: v.uv,
+                                    color: vcol.to_array(),
                                 });
                             }
                             let vertex_count = (all_verts.len() as u32) - first_vertex;
@@ -941,6 +1005,87 @@ impl MdlRenderer {
             pass.draw(d.first_vertex..d.first_vertex + d.vertex_count, 0..1);
         }
     }
+}
+
+/// Port of `R_EntityDynamicLight` (`ref/common/ref_light.c:520-685`, read 2026-11-24).
+fn compute_entity_lighting(
+    ent_origin: Vec3,
+    floor_light_rgb: Vec3,
+    lights: &GpuLightsUniform,
+    direct: f32,
+) -> (f32, f32, Vec3, Vec3) {
+    let light = floor_light_rgb * 255.0;
+    let mut final_light = light;
+    let mut total = light.max_element();
+    if total == 0.0 {
+        total = 1.0;
+    }
+    let mut light_dir = Vec3::new(0.0, 0.0, -1.0) * total;
+
+    let nd = (lights.counts[0] as usize).min(lights.dlight_pos_rad.len());
+    for i in 0..nd {
+        let pr = lights.dlight_pos_rad[i];
+        let mut dist_v = ent_origin - Vec3::new(pr[0], pr[1], pr[2]);
+        let radius = dist_v.length();
+        let add = pr[3] - radius;
+        if add > 0.0 {
+            total += add;
+            if radius > 1.0 {
+                dist_v *= add / radius;
+            } else {
+                dist_v *= add;
+            }
+            light_dir += dist_v;
+            let col = lights.dlight_col[i];
+            final_light += Vec3::new(col[0], col[1], col[2]) * (255.0 * (add / 256.0));
+        }
+    }
+
+    let scale = direct.clamp(0.75, 1.0);
+    light_dir *= scale;
+    let mut shadelight = light_dir.length();
+    let ambientlight = (total - shadelight).min(128.0);
+    if ambientlight + shadelight > 255.0 {
+        shadelight = 255.0 - ambientlight;
+    }
+    let col_max = final_light.max_element();
+    let lightcolor = if col_max > 0.0 {
+        final_light / col_max
+    } else {
+        Vec3::ONE
+    };
+    let plightvec = light_dir.normalize_or_zero();
+    (ambientlight, shadelight, lightcolor, plightvec)
+}
+
+/// Port of `R_StudioLighting` (`ref/gl/gl_studio.c:1324-1370`, `SHADE_LAMBERT = 1.4953241`,
+/// read 2026-11-24).
+fn r_studio_lighting(
+    tables: &GammaTables,
+    tex_flags: i32,
+    normal: Vec3,
+    ambientlight: f32,
+    shadelight: f32,
+    plightvec: Vec3,
+) -> f32 {
+    const STUDIO_NF_FULLBRIGHT: i32 = 0x0040;
+    const SHADE_LAMBERT: f32 = 1.4953241;
+    if (tex_flags & STUDIO_NF_FULLBRIGHT) != 0 {
+        return 1.0;
+    }
+    let illum = if (tex_flags & STUDIO_NF_FLATSHADE) != 0 {
+        ambientlight + shadelight * 0.8
+    } else {
+        let mut lum = ambientlight + shadelight;
+        let lightcos = normal.dot(plightvec).min(1.0);
+        let adj = (lightcos + (SHADE_LAMBERT - 1.0)) / SHADE_LAMBERT;
+        if adj > 0.0 {
+            lum -= shadelight * adj;
+        }
+        lum.max(0.0)
+    };
+    let clamped = illum.min(255.0);
+    tables.light_to_tex_gamma_unit((clamped * 4.0) as u32)
 }
 
 /// Build the authentic GoldSrc first-person viewmodel matrix anchored to the camera eye.

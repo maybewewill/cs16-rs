@@ -18,7 +18,8 @@ use std::path::Path;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 
-use cs_assets::bsp::BspMap;
+use cs_assets::bsp::{BspDlight, BspMap};
+use cs_assets::gamma::GoldSrcGammaConfig;
 use cs_assets::scheme::SkyboxTextures;
 use cs_clientcore::hud::CustomDecalInfo;
 use cs_clientcore::tempents::DynamicLight;
@@ -34,7 +35,7 @@ use crate::camera::Camera;
 use crate::render::bsp_renderer::{BspDrawParams, BspRenderStats, BspRenderer};
 use crate::render::decal_renderer::{DecalRenderer, DecalSpawn};
 use crate::render::fx_renderer::{FxBeam, FxDrawParams, FxPoint, FxRenderer};
-use crate::render::lighting::{GpuLightsUniform, TextureFilterMode};
+use crate::render::lighting::{GpuLightsUniform, TextureFilterMode, TextureUploadConfig};
 use crate::render::mdl_renderer::{MdlPassParams, MdlRenderer, StudioInstance};
 use crate::render::scene::{
     BrushDraw, DrawLists, FxFadeTracker, ModelKind, ModelRegistry, SceneFrame, StudioDraw,
@@ -46,7 +47,13 @@ use crate::render::sprite_renderer::{SpritePassParams, SpriteRenderer};
 pub struct RenderSettings<'a> {
     pub gamma: f32,
     pub texgamma: f32,
+    pub lightgamma: f32,
     pub brightness: f32,
+    pub gl_overbright: bool,
+    pub direct: f32,
+    pub gl_picmip: i32,
+    pub gl_max_size: u32,
+    pub gl_round_down: i32,
     pub fov_deg: f32,
     pub viewmodel_fov: f32,
     pub aspect_mode: &'a str,
@@ -67,7 +74,13 @@ impl Default for RenderSettings<'static> {
         Self {
             gamma: 2.5,
             texgamma: 2.0,
-            brightness: 1.0,
+            lightgamma: 2.5,
+            brightness: 0.0,
+            gl_overbright: false,
+            direct: 0.9,
+            gl_picmip: 0,
+            gl_max_size: 512,
+            gl_round_down: 3,
             fov_deg: 90.0,
             viewmodel_fov: 90.0,
             aspect_mode: "widescreen",
@@ -83,6 +96,26 @@ impl Default for RenderSettings<'static> {
             fog: None,
         }
     }
+}
+
+fn lights_to_bsp_dlights(lights: &GpuLightsUniform) -> Vec<BspDlight> {
+    let nd = (lights.counts[0] as usize).min(lights.dlight_pos_rad.len());
+    (0..nd)
+        .map(|i| {
+            let pr = lights.dlight_pos_rad[i];
+            let c = lights.dlight_col[i];
+            BspDlight {
+                origin: Vec3::new(pr[0], pr[1], pr[2]),
+                radius: pr[3],
+                minlight: 0.0,
+                color: [
+                    (c[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+                    (c[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+                    (c[2].clamp(0.0, 1.0) * 255.0).round() as u8,
+                ],
+            }
+        })
+        .collect()
 }
 
 /// What the shell hands the renderer next to the entity scene.
@@ -118,7 +151,8 @@ impl<'a> Default for SceneDynamicData<'a> {
 }
 
 pub struct Renderer {
-    pub surface: wgpu::Surface<'static>,
+    pub surface: Option<wgpu::Surface<'static>>,
+    offscreen_tex: Option<wgpu::Texture>,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub config: wgpu::SurfaceConfiguration,
@@ -242,6 +276,83 @@ impl Renderer {
         };
         surface.configure(&device, &config);
 
+        Self::finish_init(
+            Some(surface),
+            None,
+            device,
+            queue,
+            config,
+            adapter_info.name,
+            backend_name,
+        )
+    }
+
+    /// Initializes a windowless offscreen wgpu renderer for `--headless` captures and tests.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new_headless(width: u32, height: u32) -> Result<Self, String> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        }))
+        .map_err(|e| format!("find headless GPU adapter: {e}"))?;
+
+        let adapter_info = adapter.get_info();
+        let backend_name = format!("{:?}", adapter_info.backend);
+        info!(
+            gpu = %adapter_info.name,
+            backend = %backend_name,
+            "Initialized headless wgpu adapter"
+        );
+
+        let limits = required_limits_for_adapter(&adapter);
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("cs16-headless-device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: limits,
+            ..Default::default()
+        }))
+        .map_err(|e| format!("create headless wgpu device: {e}"))?;
+
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let w = width.max(1);
+        let h = height.max(1);
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            format,
+            color_space: wgpu::SurfaceColorSpace::Auto,
+            width: w,
+            height: h,
+            present_mode: wgpu::PresentMode::Fifo,
+            alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 1,
+        };
+        let offscreen = create_offscreen_color(&device, format, w, h);
+
+        Self::finish_init(
+            None,
+            Some(offscreen),
+            device,
+            queue,
+            config,
+            adapter_info.name,
+            backend_name,
+        )
+    }
+
+    fn finish_init(
+        surface: Option<wgpu::Surface<'static>>,
+        offscreen_tex: Option<wgpu::Texture>,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        config: wgpu::SurfaceConfiguration,
+        adapter_name: String,
+        backend_name: String,
+    ) -> Result<Self, String> {
+        let format = config.format;
         let msaa_samples = 1;
         let depth_view = create_depth_view(&device, config.width, config.height, msaa_samples);
         let bsp = BspRenderer::new(&device, format);
@@ -263,6 +374,7 @@ impl Renderer {
 
         Ok(Self {
             surface,
+            offscreen_tex,
             device,
             queue,
             config,
@@ -282,7 +394,7 @@ impl Renderer {
             world_collision: None,
             fx,
             egui_renderer,
-            adapter_name: adapter_info.name,
+            adapter_name,
             backend_name,
         })
     }
@@ -326,7 +438,16 @@ impl Renderer {
         }
         self.config.width = width;
         self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
+        if let Some(surface) = &self.surface {
+            surface.configure(&self.device, &self.config);
+        } else {
+            self.offscreen_tex = Some(create_offscreen_color(
+                &self.device,
+                self.config.format,
+                width,
+                height,
+            ));
+        }
         self.depth_view = create_depth_view(&self.device, width, height, self.msaa_samples);
         if self.msaa_samples > 1 {
             self.msaa_color_view = Some(create_msaa_color_view(
@@ -394,54 +515,55 @@ impl Renderer {
         }
         let textures_to_free: Vec<_> = egui_textures.free.drain().collect();
 
-        let output = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(tex)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(tex) => tex,
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface.configure(&self.device, &self.config);
-                for id in &textures_to_free {
-                    self.egui_renderer.free_texture(id);
+        let output = if let Some(surface) = &self.surface {
+            match surface.get_current_texture() {
+                wgpu::CurrentSurfaceTexture::Success(tex)
+                | wgpu::CurrentSurfaceTexture::Suboptimal(tex) => Some(tex),
+                wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                    surface.configure(&self.device, &self.config);
+                    for id in &textures_to_free {
+                        self.egui_renderer.free_texture(id);
+                    }
+                    return None;
                 }
-                return None;
-            }
-            wgpu::CurrentSurfaceTexture::Timeout
-            | wgpu::CurrentSurfaceTexture::Occluded
-            | wgpu::CurrentSurfaceTexture::Validation => {
-                for id in &textures_to_free {
-                    self.egui_renderer.free_texture(id);
+                wgpu::CurrentSurfaceTexture::Timeout
+                | wgpu::CurrentSurfaceTexture::Occluded
+                | wgpu::CurrentSurfaceTexture::Validation => {
+                    for id in &textures_to_free {
+                        self.egui_renderer.free_texture(id);
+                    }
+                    return None;
                 }
-                return None;
             }
+        } else {
+            None
         };
 
-        let capture_tex = if cfg!(not(target_arch = "wasm32")) {
+        let capture_tex = if cfg!(not(target_arch = "wasm32")) && output.is_some() {
             screenshot_path.map(|_| {
-                self.device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("cs16_screenshot_target"),
-                    size: wgpu::Extent3d {
-                        width: self.config.width.max(1),
-                        height: self.config.height.max(1),
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: self.config.format,
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-                    view_formats: &[],
-                })
+                create_offscreen_color(
+                    &self.device,
+                    self.config.format,
+                    self.config.width.max(1),
+                    self.config.height.max(1),
+                )
             })
         } else {
-            let _ = screenshot_path;
             None
         };
 
         let view = if let Some(ref tex) = capture_tex {
             tex.create_view(&wgpu::TextureViewDescriptor::default())
-        } else {
-            output
-                .texture
+        } else if let Some(ref out) = output {
+            out.texture
                 .create_view(&wgpu::TextureViewDescriptor::default())
+        } else if let Some(ref off) = self.offscreen_tex {
+            off.create_view(&wgpu::TextureViewDescriptor::default())
+        } else {
+            for id in &textures_to_free {
+                self.egui_renderer.free_texture(id);
+            }
+            return None;
         };
 
         let mut encoder = self
@@ -497,12 +619,27 @@ impl Renderer {
         let default_sprays = HashMap::new();
         let custom_sprays = scene.custom_decals.unwrap_or(&default_sprays);
 
+        let gamma_cfg = GoldSrcGammaConfig {
+            gamma: settings.gamma,
+            brightness: settings.brightness,
+            texgamma: settings.texgamma,
+            lightgamma: settings.lightgamma,
+        }
+        .validated();
+        let tex_cfg = TextureUploadConfig {
+            gl_round_down: settings.gl_round_down,
+            gl_picmip: settings.gl_picmip,
+            gl_max_size: settings.gl_max_size,
+            apply_texgamma: true,
+        };
+        let bsp_dlights = lights_to_bsp_dlights(&scene.lights);
+
         let sample_light_at = |pos: Vec3| -> Vec3 {
             let mut rgb = self
                 .loaded_map
                 .as_ref()
                 .map(|m| m.sample_light_point_styled(pos, scene.lightstyles))
-                .unwrap_or_else(|| Vec3::splat(0.75));
+                .unwrap_or(Vec3::ONE);
             for l in scene.elights {
                 let r = l.radius.max(1.0);
                 let dist = (l.origin - pos).length();
@@ -515,11 +652,19 @@ impl Renderer {
                     ) * atten;
                 }
             }
-            rgb.clamp(Vec3::splat(0.05), Vec3::splat(2.0))
+            rgb.clamp(Vec3::ZERO, Vec3::ONE)
         };
 
         if self.bsp.has_map() {
-            self.bsp.update_lightstyles(&self.queue, scene.lightstyles);
+            self.bsp.sync_gamma_and_lighting(
+                &self.device,
+                &self.queue,
+                scene.lightstyles,
+                gamma_cfg,
+                settings.gl_overbright,
+                tex_cfg,
+                &bsp_dlights,
+            );
             self.bsp.prepare_world_pvs(
                 &self.device,
                 &self.queue,
@@ -530,6 +675,7 @@ impl Renderer {
             let view_mat = camera.view_matrix();
             let view_proj = proj * view_mat;
 
+            self.decals.sync_gamma(gamma_cfg, tex_cfg);
             if let Some(vfs) = scene.vfs
                 && !scene.decals.is_empty()
             {
@@ -594,7 +740,12 @@ impl Renderer {
                     cam_up,
                     gamma: settings.gamma,
                     texgamma: settings.texgamma,
+                    lightgamma: settings.lightgamma,
                     brightness: settings.brightness,
+                    direct: settings.direct,
+                    gl_picmip: settings.gl_picmip,
+                    gl_max_size: settings.gl_max_size,
+                    gl_round_down: settings.gl_round_down,
                     software_mode: settings.software_mode,
                     fog: settings.fog,
                     lights: scene.lights,
@@ -665,7 +816,12 @@ impl Renderer {
                     cam_up,
                     gamma: settings.gamma,
                     texgamma: settings.texgamma,
+                    lightgamma: settings.lightgamma,
                     brightness: settings.brightness,
+                    direct: settings.direct,
+                    gl_picmip: settings.gl_picmip,
+                    gl_max_size: settings.gl_max_size,
+                    gl_round_down: settings.gl_round_down,
                     software_mode: settings.software_mode,
                     fog: settings.fog,
                     lights: scene.lights,
@@ -776,7 +932,12 @@ impl Renderer {
                     camera_pos: camera.position,
                     gamma: settings.gamma,
                     texgamma: settings.texgamma,
+                    lightgamma: settings.lightgamma,
                     brightness: settings.brightness,
+                    gl_overbright: settings.gl_overbright,
+                    gl_picmip: settings.gl_picmip,
+                    gl_max_size: settings.gl_max_size,
+                    gl_round_down: settings.gl_round_down,
                     software_mode: settings.software_mode,
                     time_sec: settings.time_sec,
                     debug_mode: settings.debug_mode,
@@ -879,10 +1040,14 @@ impl Renderer {
 
         // Optional GPU readback for `screenshot` / `--screenshot` (native only)
         #[cfg(not(target_arch = "wasm32"))]
-        let staging = if let (Some(tex), Some(_)) = (&capture_tex, screenshot_path) {
+        let readback_src = capture_tex.as_ref().or(self.offscreen_tex.as_ref());
+        #[cfg(not(target_arch = "wasm32"))]
+        let staging = if let (Some(tex), Some(_)) = (readback_src, screenshot_path) {
             let w = self.config.width.max(1);
             let h = self.config.height.max(1);
-            if self.config.usage.contains(wgpu::TextureUsages::COPY_DST) {
+            if let Some(ref out) = output
+                && self.config.usage.contains(wgpu::TextureUsages::COPY_DST)
+            {
                 encoder.copy_texture_to_texture(
                     wgpu::TexelCopyTextureInfo {
                         texture: tex,
@@ -891,7 +1056,7 @@ impl Renderer {
                         aspect: wgpu::TextureAspect::All,
                     },
                     wgpu::TexelCopyTextureInfo {
-                        texture: &output.texture,
+                        texture: &out.texture,
                         mip_level: 0,
                         origin: wgpu::Origin3d::ZERO,
                         aspect: wgpu::TextureAspect::All,
@@ -972,6 +1137,11 @@ impl Renderer {
                 }
                 drop(mapped);
                 buf.unmap();
+                if let Some(parent) = out_path.parent()
+                    && !parent.as_os_str().is_empty()
+                {
+                    let _ = std::fs::create_dir_all(parent);
+                }
                 if let Err(err) = image::save_buffer(out_path, &rgba, w, h, image::ColorType::Rgba8)
                 {
                     tracing::error!(path = %out_path.display(), %err, "Failed to save screenshot PNG");
@@ -981,7 +1151,9 @@ impl Renderer {
             }
         }
 
-        self.queue.present(output);
+        if let Some(out) = output {
+            self.queue.present(out);
+        }
 
         for id in &textures_to_free {
             self.egui_renderer.free_texture(id);
@@ -989,6 +1161,28 @@ impl Renderer {
 
         Some(stats)
     }
+}
+
+fn create_offscreen_color(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    width: u32,
+    height: u32,
+) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("cs16_offscreen_color"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    })
 }
 
 fn compute_viewport(win_w: f32, win_h: f32, aspect_mode: &str) -> (f32, f32, f32, f32) {
@@ -1085,6 +1279,25 @@ pub fn render_offscreen_rgba(
 
     let mut bsp = BspRenderer::new(device, format);
     bsp.upload_map(device, queue, map);
+    bsp.sync_gamma_and_lighting(
+        device,
+        queue,
+        &[1.0; 64],
+        GoldSrcGammaConfig {
+            gamma: params.gamma,
+            brightness: params.brightness,
+            texgamma: params.texgamma,
+            lightgamma: params.lightgamma,
+        },
+        params.gl_overbright,
+        TextureUploadConfig {
+            gl_round_down: params.gl_round_down,
+            gl_picmip: params.gl_picmip,
+            gl_max_size: params.gl_max_size,
+            apply_texgamma: true,
+        },
+        &lights_to_bsp_dlights(&params.lights),
+    );
     bsp.prepare_world_pvs(device, queue, camera.position, params.r_vis);
     let mut skybox = SkyboxRenderer::new(device, format);
     skybox.upload_skybox(device, queue, sky);

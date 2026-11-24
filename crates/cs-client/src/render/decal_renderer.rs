@@ -6,6 +6,7 @@ use std::collections::{HashMap, VecDeque};
 
 use bytemuck::{Pod, Zeroable};
 use cs_assets::bsp::{BspMap, DecalFacePoly};
+use cs_assets::gamma::{GammaTables, GoldSrcGammaConfig};
 use cs_assets::wad::WadArchive;
 use cs_clientcore::hud::CustomDecalInfo;
 use cs_vfs::Vfs;
@@ -13,7 +14,8 @@ use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
 use crate::render::lighting::{
-    TextureFilterMode, create_sampler, upload_rgba_texture_mipmapped,
+    TextureFilterMode, TextureUploadConfig, create_sampler,
+    upload_rgba_texture_mipmapped_with_config,
 };
 
 #[repr(C)]
@@ -182,6 +184,8 @@ pub struct DecalRenderer {
     placed: VecDeque<PlacedDecal>,
     draw_batches: Vec<(String, u32, u32)>,
     dirty_vbuf: bool,
+    cached_gamma: GoldSrcGammaConfig,
+    cached_tex_cfg: TextureUploadConfig,
 }
 
 fn create_decal_pipeline(
@@ -370,6 +374,21 @@ impl DecalRenderer {
             placed: VecDeque::new(),
             draw_batches: Vec::new(),
             dirty_vbuf: false,
+            cached_gamma: GoldSrcGammaConfig::default(),
+            cached_tex_cfg: TextureUploadConfig::default(),
+        }
+    }
+
+    pub fn sync_gamma(
+        &mut self,
+        gamma_cfg: GoldSrcGammaConfig,
+        tex_cfg: TextureUploadConfig,
+    ) {
+        let gamma_cfg = gamma_cfg.validated();
+        if self.cached_gamma != gamma_cfg || self.cached_tex_cfg != tex_cfg {
+            self.textures.clear();
+            self.cached_gamma = gamma_cfg;
+            self.cached_tex_cfg = tex_cfg;
         }
     }
 
@@ -493,7 +512,17 @@ impl DecalRenderer {
             Some(d) => (d.width.max(1), d.height.max(1), d.rgba),
             None => procedural_decal_rgba(name),
         };
-        let view = upload_rgba_texture_mipmapped(device, queue, &key, w, h, &rgba);
+        let tables = GammaTables::build(self.cached_gamma);
+        let view = upload_rgba_texture_mipmapped_with_config(
+            device,
+            queue,
+            &key,
+            w,
+            h,
+            &rgba,
+            Some(&tables),
+            self.cached_tex_cfg,
+        );
         let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some(&key),
             layout: &self.tex_bgl,

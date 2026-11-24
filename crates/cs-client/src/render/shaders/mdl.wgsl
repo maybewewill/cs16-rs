@@ -33,6 +33,7 @@ struct VsIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
+    @location(3) color: vec3<f32>,
 };
 
 struct VsOut {
@@ -40,6 +41,7 @@ struct VsOut {
     @location(0) normal: vec3<f32>,
     @location(1) uv: vec2<f32>,
     @location(2) world_pos: vec3<f32>,
+    @location(3) color: vec3<f32>,
 };
 
 const TEX_FLAG_FLATSHADE: u32 = 1u;
@@ -53,6 +55,7 @@ fn vs_main(in: VsIn) -> VsOut {
     let wp = in.position + n * u.flags_params.z;
     out.clip_pos = u.view_proj * vec4<f32>(wp, 1.0);
     out.normal = n;
+    out.color = in.color;
     let tex_flags = u32(u.flags_params.y);
     if (tex_flags & TEX_FLAG_CHROME) != 0u {
         let cu = dot(n, u.cam_right.xyz) * 0.5 + 0.5;
@@ -94,57 +97,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         discard;
     }
 
-    let wn = normalize(in.normal);
-    var total_light = u.light_color.rgb * max(u.flags_params.w, 0.0);
-    if (tex_flags & TEX_FLAG_FLATSHADE) == 0u {
-        let light_dir = normalize(vec3<f32>(0.4, 0.25, 0.88));
-        let ndl = dot(wn, light_dir) * 0.35 + 0.72;
-        total_light = total_light * ndl;
-    }
-
-    // Dynamic point lights + flashlight spotlights
-    let nd = min(lights.counts.x, 16u);
-    for (var i = 0u; i < nd; i = i + 1u) {
-        let pr = lights.dlight_pos_rad[i];
-        let delta = pr.xyz - in.world_pos;
-        let dist = length(delta);
-        if dist < pr.w && dist > 0.001 {
-            let atten = 1.0 - dist / pr.w;
-            let facing = max(dot(wn, delta / dist), 0.2);
-            total_light = total_light + lights.dlight_col[i].rgb * (atten * facing * 0.75);
-        }
-    }
-    let ns = min(lights.counts.y, 4u);
-    for (var j = 0u; j < ns; j = j + 1u) {
-        let sr = lights.spot_pos_rad[j];
-        let dc = lights.spot_dir_cos[j];
-        let delta = in.world_pos - sr.xyz;
-        let dist = length(delta);
-        if dist < sr.w && dist > 0.001 {
-            let ldir = delta / dist;
-            let c = dot(ldir, dc.xyz);
-            if c > dc.w {
-                let cone = clamp((c - dc.w) / max(1.0 - dc.w, 0.01), 0.0, 1.0);
-                let atten = (1.0 - dist / sr.w) * cone;
-                let facing = max(dot(wn, -ldir), 0.2);
-                total_light = total_light + lights.spot_col[j].rgb * (atten * facing * 0.85);
-            }
-        }
-    }
-
-    let tex_exp = max(u.gamma_params.y, 0.5) * 0.5;
-    let albedo_lin = pow(clamp(albedo.rgb, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(tex_exp));
-    var lit = albedo_lin * total_light;
+    let total_light = in.color;
+    var lit = albedo.rgb * total_light;
     if (tex_flags & TEX_FLAG_ADDITIVE) != 0u || ent_mode == 2 {
-        lit = albedo_lin * u.render_color.rgb;
+        lit = albedo.rgb * u.render_color.rgb;
     } else if ent_mode == 1 {
         lit = mix(lit, u.render_color.rgb * total_light, 0.75);
     }
 
-    let brightness = max(u.gamma_params.z, 0.1);
-    let gamma_val = max(u.gamma_params.x, 0.5);
-    let gamma_exp = 2.5 / gamma_val;
-    var final_rgb = pow(clamp(lit * brightness, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(gamma_exp));
+    var final_rgb = clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0));
 
     if u.gamma_params.w > 0.5 {
         let d = bayer4x4(in.clip_pos.xy);
