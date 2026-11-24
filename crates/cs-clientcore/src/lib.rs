@@ -20,6 +20,7 @@ pub mod predict;
 pub mod resources;
 pub mod sound;
 pub mod tempents;
+pub mod weapons_predict;
 
 pub use commands::{CMD_FILTERABLE, CMD_PRIVILEGED, CMD_STUFFTEXT_OK, CommandRegistry, ConsoleCommand};
 pub use connection::{
@@ -41,3 +42,4 @@ pub use events::{EventFx, EventQueue, FiredEvent, FxEnv};
 pub use hud::{ClientEffects, HudState};
 pub use sound::{SoundCommand, SoundQueue, SoundStart};
 pub use tempents::{FxRandom, FxWorld, NoWorld, RenderEffect, TempEnt, TempEnts};
+pub use weapons_predict::PredictedWeaponEvent;

@@ -186,6 +186,11 @@ impl EventQueue {
         });
     }
 
+    /// Queues a locally predicted weapon event to fire immediately on the next `update`.
+    pub fn push_local(&mut self, index: u16, args: EventArgs) {
+        self.queue(fev::CLIENT, index, 0.0, 0.0, args, Vec3::ZERO);
+    }
+
     /// `CL_PlaybackEvent`: an event the client itself plays (a predicted weapon). Events the
     /// server owns (`FEV_SERVER`) are ignored, as are indices the server never precached.
     #[allow(clippy::too_many_arguments)]

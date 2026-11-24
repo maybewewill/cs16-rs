@@ -74,6 +74,14 @@ impl PrecacheTables {
         self.events.get(&index).map(|e| e.name.as_str())
     }
 
+    /// Finds the precached event index for `name` (case-insensitive), e.g. `"events/ak47.sc"`.
+    pub fn event_index(&self, name: &str) -> Option<u16> {
+        self.events
+            .iter()
+            .find(|(_, e)| e.name.eq_ignore_ascii_case(name))
+            .map(|(&idx, _)| idx)
+    }
+
     pub fn generic(&self, index: u16) -> Option<&str> {
         self.generic.get(&index).map(|e| e.name.as_str())
     }

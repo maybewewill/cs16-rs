@@ -61,6 +61,9 @@ use crate::entities::{EntityStore, GAME_FPS, ModelKind};
 use crate::frames::{ClientFrames, Frame, UPDATE_BACKUP, UPDATE_MASK};
 use crate::interp::compute_player_origin;
 use crate::precache::PrecacheTables;
+use crate::weapons_predict::{
+    PLAYER_HOLDING_SHIELD, PredictWeaponExtras, PredictedWeaponEvent, predict_weapon_step,
+};
 
 /// `MAX_PREDICTION_ERROR`: a larger error is a teleport (or a pause): nothing is smoothed.
 pub const MAX_PREDICTION_ERROR: f32 = 64.0;
@@ -299,6 +302,7 @@ pub struct LocalState {
     pub fuser: [f32; 4],
     pub vuser: [Vec3; 4],
     pub weapon: WeaponState,
+    pub weapon_extras: BTreeMap<i32, PredictWeaponExtras>,
 }
 
 impl Default for LocalState {
@@ -334,16 +338,18 @@ impl Default for LocalState {
             fuser: [0.0; 4],
             vuser: [Vec3::ZERO; 4],
             weapon: WeaponState::default(),
+            weapon_extras: BTreeMap::new(),
         }
     }
 }
 
 /// What the prediction keeps of its own result across a server frame.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Carried {
     pub oldbuttons: i32,
     pub fl_fall_velocity: f32,
     pub i_step_left: i32,
+    pub weapon_extras: BTreeMap<i32, PredictWeaponExtras>,
 }
 
 impl LocalState {
@@ -352,11 +358,11 @@ impl LocalState {
     /// with what the prediction carries (`TxferPredictionData`). `None` without `clientdata`.
     /// A frame that does not hold the local player's entity state gets sensible defaults, as
     /// Xash3D's workaround for a server that "refuses to send our local player in delta".
-    pub fn from_frame(frame: &Frame, local: u16, carried: Option<Carried>) -> Option<Self> {
+    pub fn from_frame(frame: &Frame, local: u16, carried: Option<&Carried>) -> Option<Self> {
         let cd = frame.clientdata.as_ref()?;
         let ps: Option<&GoldSrcEntityState> = frame.entity(local).map(|e| &e.state);
         let flags = cd.flags as i32;
-        let carried = carried.unwrap_or_default();
+        let carried = carried.cloned().unwrap_or_default();
         Some(Self {
             origin: cd.origin,
             velocity: cd.velocity,
@@ -397,6 +403,7 @@ impl LocalState {
                 fov: cd.fov,
                 weapons: frame.weapon_data.clone(),
             },
+            weapon_extras: carried.weapon_extras,
         })
     }
 
@@ -405,6 +412,7 @@ impl LocalState {
             oldbuttons: self.oldbuttons,
             fl_fall_velocity: self.fl_fall_velocity,
             i_step_left: self.i_step_left,
+            weapon_extras: self.weapon_extras.clone(),
         }
     }
 }
@@ -459,6 +467,8 @@ pub struct Prediction {
     pub teleported: bool,
     /// The weapon bookkeeping after the last predicted command.
     pub weapon: WeaponState,
+    /// Whether the local player holds a tactical shield (`PLAYER_HOLDING_SHIELD` in `iuser3`).
+    pub holding_shield: bool,
 }
 
 impl Default for Prediction {
@@ -478,6 +488,7 @@ impl Default for Prediction {
             prediction_error: Vec3::ZERO,
             teleported: false,
             weapon: WeaponState::default(),
+            holding_shield: false,
         }
     }
 }
@@ -503,7 +514,9 @@ struct PendingCmd {
     created_at: f64,
     /// The netchan sequence of the packet it went out in; `None` until it is sent.
     sequence: Option<u32>,
-    /// `processedfuncs`: the command has run once, so its sounds were played.
+    /// Shared RNG seed (`select_cmds_with_seeds`), initialized on send.
+    random_seed: u32,
+    /// `processedfuncs`: the command has run once, so its sounds and weapon events were played.
     processed: bool,
 }
 
@@ -556,6 +569,9 @@ pub struct Predictor {
     lastorigin: Vec3,
     rng: u32,
     sounds: Vec<PredictedSound>,
+    weapon_events: Vec<PredictedWeaponEvent>,
+    /// Mirrors `cl_lw` (`1` by default): when true, weapon prediction emits local events/sounds.
+    pub cl_lw: bool,
     checks: VecDeque<PredictionCheck>,
     /// Test hook: every command the movement ran, in order (split halves apart), as `(msec,
     /// impulse)`; empty unless [`record_steps`](Self::record_steps) is on.
@@ -588,6 +604,8 @@ impl Predictor {
             lastorigin: Vec3::ZERO,
             rng: 0x2545_f491,
             sounds: Vec::new(),
+            weapon_events: Vec::new(),
+            cl_lw: true,
             checks: VecDeque::new(),
             steps: Vec::new(),
             record_steps: false,
@@ -600,10 +618,12 @@ impl Predictor {
     /// materials stay.
     pub fn reset(&mut self) {
         let settings = self.settings;
+        let cl_lw = self.cl_lw;
         let pm_shared = std::mem::replace(&mut self.pm_shared, pm_init(None));
         let record = self.record_steps;
         *self = Self::new();
         self.settings = settings;
+        self.cl_lw = cl_lw;
         self.pm_shared = pm_shared;
         self.record_steps = record;
     }
@@ -626,6 +646,7 @@ impl Predictor {
 
     pub fn apply_cvars(&mut self, cvars: &ClientCvars) {
         self.settings = PredictSettings::from_cvars(cvars);
+        self.cl_lw = cvars.float("cl_lw") != 0.0;
     }
 
     pub fn settings(&self) -> PredictSettings {
@@ -650,6 +671,7 @@ impl Predictor {
             cmd,
             created_at: self.now,
             sequence: None,
+            random_seed: 0,
             processed: false,
         });
     }
@@ -663,13 +685,21 @@ impl Predictor {
         take: usize,
         placeholder: Option<GoldSrcUserCmd>,
     ) {
-        for c in self
+        let count = self
+            .cmds
+            .iter()
+            .filter(|c| c.sequence.is_none())
+            .take(take)
+            .count();
+        for (idx, c) in self
             .cmds
             .iter_mut()
             .filter(|c| c.sequence.is_none())
             .take(take)
+            .enumerate()
         {
             c.sequence = Some(sequence);
+            c.random_seed = sequence.wrapping_sub((count - 1 - idx) as u32);
         }
         if let Some(cmd) = placeholder {
             if self.cmds.len() >= MAX_PENDING_CMDS {
@@ -679,6 +709,7 @@ impl Predictor {
                 cmd,
                 created_at: self.now,
                 sequence: Some(sequence),
+                random_seed: sequence,
                 processed: false,
             });
         }
@@ -702,6 +733,37 @@ impl Predictor {
     /// The sounds of the commands run for the first time since the last call.
     pub fn take_sounds(&mut self) -> Vec<PredictedSound> {
         std::mem::take(&mut self.sounds)
+    }
+
+    /// Local weapon events emitted for `runfuncs && cl_lw` steps since the last call.
+    pub fn take_weapon_events(&mut self) -> Vec<PredictedWeaponEvent> {
+        std::mem::take(&mut self.weapon_events)
+    }
+
+    /// Predicted `m_iWeaponState` bits of the active weapon (`WPNSTATE_*`).
+    pub fn predicted_weapon_state(&self) -> i32 {
+        u8::try_from(self.out.weapon.weapon_id)
+            .ok()
+            .and_then(|id| self.out.weapon.weapons.get(&id))
+            .map_or(0, |w| w.m_i_weapon_state)
+    }
+
+    /// Whether the predicted local state is carrying a tactical shield (`PLAYER_HOLDING_SHIELD`).
+    pub fn predicted_holding_shield(&self) -> bool {
+        self.out.holding_shield
+    }
+
+    /// Predicted active weapon FOV (`clientdata.fov`).
+    pub fn predicted_fov(&self) -> f32 {
+        self.out.weapon.fov
+    }
+
+    /// Predicted clip count of the active weapon.
+    pub fn predicted_clip(&self) -> i32 {
+        u8::try_from(self.out.weapon.weapon_id)
+            .ok()
+            .and_then(|id| self.out.weapon.weapons.get(&id))
+            .map_or(0, |w| w.m_i_clip)
     }
 
     /// The origin predicted after the last command of packet `sequence`, while the ring holds it.
@@ -814,7 +876,7 @@ impl Predictor {
             return;
         }
         let local = u16::from(inp.playernum) + 1;
-        let Some(base) = LocalState::from_frame(frame, local, self.carried) else {
+        let Some(base) = LocalState::from_frame(frame, local, self.carried.as_ref()) else {
             self.out.predicted = false;
             return;
         };
@@ -844,11 +906,19 @@ impl Predictor {
         let mut ran = false;
         let mut lastground = self.out.lastground;
         for i in 0..self.cmds.len() {
-            let (cmd, runfuncs, created_at) = {
+            let (cmd, runfuncs, random_seed, created_at) = {
                 let c = &self.cmds[i];
-                (c.cmd.clone(), !c.processed, c.created_at)
+                (c.cmd.clone(), !c.processed, c.random_seed, c.created_at)
             };
-            let to = self.run_usercmd(&ctx, &from, &cmd, runfuncs, &mut time, &mut lastground);
+            let to = self.run_usercmd(
+                &ctx,
+                &from,
+                &cmd,
+                runfuncs,
+                random_seed,
+                &mut time,
+                &mut lastground,
+            );
             if let Some(seq) = self.cmds[i].sequence {
                 let slot = (seq & UPDATE_MASK) as usize;
                 self.predicted_origins[slot] = Some((seq, to.origin));
@@ -884,6 +954,7 @@ impl Predictor {
         self.out.teleported = false;
         self.out.viewmodel = s.weapon.viewmodel;
         self.out.weapon = s.weapon.clone();
+        self.out.holding_shield = s.iuser[2] & PLAYER_HOLDING_SHIELD != 0;
         self.lastorigin = s.origin;
     }
 
@@ -925,6 +996,7 @@ impl Predictor {
         self.out.usehull = to.usehull;
         self.out.viewmodel = to.weapon.viewmodel;
         self.out.weapon = to.weapon.clone();
+        self.out.holding_shield = to.iuser[2] & PLAYER_HOLDING_SHIELD != 0;
 
         if to.flags & FL_ONGROUND != 0 {
             self.out.onground = self.out.lastground;
@@ -979,18 +1051,27 @@ impl Predictor {
         from: &LocalState,
         cmd: &GoldSrcUserCmd,
         runfuncs: bool,
+        random_seed: u32,
         time: &mut f64,
         lastground: &mut i32,
     ) -> LocalState {
         let mut state = from.clone();
-        for step in split_usercmd(cmd) {
-            state = self.run_step(ctx, &state, &step, runfuncs, time, lastground);
+        for (idx, step) in split_usercmd(cmd).into_iter().enumerate() {
+            state = self.run_step(
+                ctx,
+                &state,
+                &step,
+                runfuncs && idx == 0,
+                random_seed,
+                time,
+                lastground,
+            );
         }
         state
     }
 
-    /// One command of at most 50 ms: setup, `PM_Move`, finish, the weapon bookkeeping, and the
-    /// time moves on.
+    /// One command of at most 50 ms: setup, `PM_Move`, finish, client weapon prediction (`cl_lw`),
+    /// timer decay, and advancing time.
     #[allow(clippy::too_many_arguments)]
     fn run_step(
         &mut self,
@@ -998,12 +1079,14 @@ impl Predictor {
         from: &LocalState,
         cmd: &GoldSrcUserCmd,
         runfuncs: bool,
+        random_seed: u32,
         time: &mut f64,
         lastground: &mut i32,
     ) -> LocalState {
         if self.record_steps {
             self.steps.push((cmd.msec, cmd.impulse));
         }
+        let old_buttons = from.oldbuttons as u16;
         let mut to = from.clone();
         let mut pm = setup_pmove(ctx, from, cmd, runfuncs, *time);
         {
@@ -1025,7 +1108,24 @@ impl Predictor {
                 .map_or(pm.onground, |p| p.info),
             _ => pm.onground,
         };
-        // `pfnPostRunCmd`: the weapon bookkeeping.
+        let on_ground = to.flags & FL_ONGROUND != 0;
+        let ducking = to.flags & FL_DUCKING != 0;
+        let mut weapon_extras = std::mem::take(&mut to.weapon_extras);
+        predict_weapon_step(
+            &mut to,
+            &mut weapon_extras,
+            cmd,
+            old_buttons,
+            random_seed,
+            on_ground,
+            ducking,
+            runfuncs,
+            self.cl_lw,
+            &mut self.weapon_events,
+            &mut self.sounds,
+        );
+        to.weapon_extras = weapon_extras;
+        // `pfnPostRunCmd`: decay timers after `ItemPostFrame`.
         to.weapon.post_run_cmd(cmd.msec);
         *time += f64::from(cmd.msec) / 1000.0;
         to

@@ -427,6 +427,22 @@ impl<T: PacketTransport> Connection<T> {
             intermission: false,
         };
         self.predict.update(&inputs);
+        if self.predict.cl_lw && self.predict.prediction().predicted {
+            self.fx_local.weapon_state = self.predict.predicted_weapon_state();
+            self.fx_local.holding_shield = self.predict.predicted_holding_shield();
+        }
+        let local_ent = self
+            .server_info
+            .as_ref()
+            .map_or(0, |i| i32::from(i.player_slot) + 1);
+        for mut ev in self.predict.take_weapon_events() {
+            if let Some(idx) = self.precache.event_index(ev.event_name) {
+                if ev.args.entindex == 0 {
+                    ev.args.entindex = local_ent;
+                }
+                self.fx.events.push_local(idx, ev.args);
+            }
+        }
     }
 
     /// Seconds between two netchan packets: `1 / cl_cmdrate`, with the cvar clamped to 10..100
