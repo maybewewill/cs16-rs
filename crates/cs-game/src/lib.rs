@@ -20,6 +20,7 @@ pub mod chat;
 pub mod doors;
 pub mod encoders;
 pub mod entity;
+pub mod env;
 pub mod fullpack;
 pub mod grenade;
 mod hint;
@@ -29,6 +30,7 @@ pub mod hud_misc;
 pub mod intro;
 pub mod inventory;
 pub mod io;
+pub mod items;
 pub mod mapcycle;
 pub mod menus;
 mod messages;
@@ -845,6 +847,25 @@ impl GameDll for CsGame {
         }
         if classname == "worldspawn" {
             world::precache_briefing(eng, &self.state.briefings);
+        }
+        match classname {
+            "env_fog" => {
+                let color = keys
+                    .iter()
+                    .rev()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("rendercolor"))
+                    .map_or([128, 128, 128], |(_, v)| env::parse_rgb(v));
+                let density = keys
+                    .iter()
+                    .rev()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("density"))
+                    .map_or(0.001, |(_, v)| world::atof(v));
+                self.state.map_fog = Some((color, density));
+            }
+            "env_rain" | "func_rain" => self.state.weather = 1,
+            "env_snow" | "func_snow" => self.state.weather = 2,
+            "bodyque" => self.state.bodyque.push(id),
+            _ => {}
         }
         true
     }

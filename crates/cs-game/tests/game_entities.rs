@@ -412,9 +412,9 @@ fn unknown_classes_are_removed() {
         entity(&[("classname", "worldspawn")]),
         spawn_at(CT_SPAWN_CLASS, "100 0 0"),
         spawn_at("light", "1 2 3"),
-        spawn_at("ambient_generic", "4 5 6"),
-        // Not a class the game has (a map decoration of a later phase).
-        entity(&[("classname", "cycler_sprite")]),
+        spawn_at("unknown_test_entity_a", "4 5 6"),
+        // Not a class the game has.
+        entity(&[("classname", "unknown_test_entity_b")]),
         // A brush entity without a brush model has nothing to collide with.
         entity(&[("classname", "func_wall")]),
     ]);

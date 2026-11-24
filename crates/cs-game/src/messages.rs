@@ -284,6 +284,61 @@ pub(crate) fn train(eng: &mut EngineApi<'_>, slot: u8, gear: u8) {
     send_raw(eng, MsgDest::One(slot), "Train", &[gear]);
 }
 
+/// `gmsgFog` (`CHalfLifeMultiplay::InitHUD` / `env_fog`): 3 RGB bytes + 4-byte LE float density.
+pub(crate) fn fog(eng: &mut EngineApi<'_>, dest: MsgDest, color: [u8; 3], density: f32) {
+    let mut payload = [0u8; 7];
+    payload[0..3].copy_from_slice(&color);
+    payload[3..7].copy_from_slice(&density.to_le_bytes());
+    send_raw(eng, dest, "Fog", &payload);
+}
+
+/// `gmsgHudText` (`env_message`): null-terminated localized key / text.
+pub(crate) fn hud_text(eng: &mut EngineApi<'_>, dest: MsgDest, text: &str) {
+    let mut payload = text.as_bytes().to_vec();
+    if !payload.ends_with(&[0]) {
+        payload.push(0);
+    }
+    send_raw(eng, dest, "HudText", &payload);
+}
+
+/// `gmsgScreenShake` (`env_shake`): 3 signed/unsigned fixed-point shorts (`* 4096`).
+pub(crate) fn screen_shake(
+    eng: &mut EngineApi<'_>,
+    dest: MsgDest,
+    amplitude: f32,
+    duration: f32,
+    frequency: f32,
+) {
+    let fixed = |v: f32| -> [u8; 2] {
+        ((v * 4096.0).round().clamp(0.0, 65535.0) as u16).to_le_bytes()
+    };
+    let mut payload = [0u8; 6];
+    payload[0..2].copy_from_slice(&fixed(amplitude));
+    payload[2..4].copy_from_slice(&fixed(duration));
+    payload[4..6].copy_from_slice(&fixed(frequency));
+    send_raw(eng, dest, "ScreenShake", &payload);
+}
+
+/// `gmsgScreenFade` (`env_fade`): duration (`u16`), hold (`u16`), flags (`u16`), RGBA (`[u8; 4]`).
+pub(crate) fn screen_fade(
+    eng: &mut EngineApi<'_>,
+    dest: MsgDest,
+    duration: f32,
+    hold_time: f32,
+    flags: u16,
+    color: [u8; 4],
+) {
+    let fixed = |v: f32| -> [u8; 2] {
+        ((v * 4096.0).round().clamp(0.0, 65535.0) as u16).to_le_bytes()
+    };
+    let mut payload = [0u8; 10];
+    payload[0..2].copy_from_slice(&fixed(duration));
+    payload[2..4].copy_from_slice(&fixed(hold_time));
+    payload[4..6].copy_from_slice(&flags.to_le_bytes());
+    payload[6..10].copy_from_slice(&color);
+    send_raw(eng, dest, "ScreenFade", &payload);
+}
+
 /// `gmsgReloadSound` (`CBasePlayerWeapon::ReloadSound`) to `slot`: the volume byte and the
 /// kind (0 for a shotgun, 1 for any other weapon).
 pub(crate) fn reload_sound(eng: &mut EngineApi<'_>, slot: u8, volume: u8, kind: u8) {
@@ -415,7 +470,7 @@ pub(crate) fn sync_round_timer(g: &GameState, eng: &mut EngineApi<'_>, slot: u8)
 }
 
 /// `gmsgReceiveW` (`CBasePlayer::SendWeatherInfo`): 1 for a map with rain, 2 for snow.
-fn send_weather_info(eng: &mut EngineApi<'_>, slot: u8) {
+fn send_weather_info(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let has = |eng: &EngineApi<'_>, classes: [&str; 2]| {
         classes
             .iter()
@@ -425,6 +480,8 @@ fn send_weather_info(eng: &mut EngineApi<'_>, slot: u8) {
         1
     } else if has(eng, ["env_snow", "func_snow"]) {
         2
+    } else if g.weather != 0 {
+        g.weather
     } else {
         return;
     };
@@ -608,7 +665,9 @@ pub(crate) fn update_client_data(g: &mut GameState, eng: &mut EngineApi<'_>, slo
         eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::ResetHud);
         if first_entry {
             eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::InitHud);
-            // `Fog` follows for a map with an `env_fog`: that entity does not exist yet.
+            if let Some((color, density)) = g.map_fog {
+                fog(eng, MsgDest::One(slot), color, density);
+            }
             init_hud(g, eng, slot);
             if let Some(p) = g.players.get_mut(index).and_then(Option::as_mut) {
                 p.game_hud_initialized = true;
@@ -631,7 +690,7 @@ pub(crate) fn update_client_data(g: &mut GameState, eng: &mut EngineApi<'_>, slo
         crate::buy::set_bomb_icon(g, eng, slot, false);
         sync_round_timer(g, eng, slot);
         crate::hostage::send_hostage_pos_to_player(g, eng, slot);
-        send_weather_info(eng, slot);
+        send_weather_info(g, eng, slot);
         team_score(eng, slot, Team::Ct, g.num_ct_wins);
         team_score(eng, slot, Team::Terrorist, g.num_terrorist_wins);
     }

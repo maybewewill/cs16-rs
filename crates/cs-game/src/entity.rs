@@ -524,7 +524,50 @@ pub fn create_entity(classname: &str) -> Option<Box<dyn GameEntity>> {
         "grenade" => Box::new(crate::grenade::Grenade::default()),
         "spark_shower" => Box::new(crate::grenade::SparkShower),
         "spraycan" => Box::new(crate::spray::SprayCan),
-        other => Box::new(crate::inventory::WorldWeapon::of_class(other)?),
+        "env_sprite" => Box::new(crate::env::EnvSprite::default()),
+        "env_glow" => Box::new(crate::env::EnvGlow),
+        "env_bombglow" => Box::new(crate::env::EnvBombGlow::default()),
+        "cycler" => Box::new(crate::env::Cycler::new("cycler")),
+        "cycler_sprite" => Box::new(crate::env::Cycler::new("cycler_sprite")),
+        "bodyque" => Box::new(crate::env::BodyQue),
+        "beam" => Box::new(crate::env::BeamEntity::new("beam")),
+        "env_beam" => Box::new(crate::env::BeamEntity::new("env_beam")),
+        "env_lightning" => Box::new(crate::env::BeamEntity::new("env_lightning")),
+        "env_laser" => Box::new(crate::env::BeamEntity::new("env_laser")),
+        "env_spark" => Box::new(crate::env::EnvSpark::default()),
+        "env_shake" => Box::new(crate::env::EnvShake::default()),
+        "env_fade" => Box::new(crate::env::EnvFade::default()),
+        "env_explosion" => Box::new(crate::env::EnvExplosion::default()),
+        "env_render" => Box::new(crate::env::EnvRender::default()),
+        "env_message" => Box::new(crate::env::EnvMessage::default()),
+        "env_shooter" => Box::new(crate::env::EnvShooter::new("env_shooter")),
+        "gibshooter" => Box::new(crate::env::EnvShooter::new("gibshooter")),
+        "env_debris" => Box::new(crate::env::EnvShooter::new("env_debris")),
+        "env_blood" => Box::new(crate::env::EnvBlood::default()),
+        "env_bubbles" => Box::new(crate::env::EnvBubbles::default()),
+        "env_funnel" => Box::new(crate::env::EnvFunnel),
+        "env_fog" => Box::new(crate::env::EnvFog::default()),
+        "env_rain" => Box::new(crate::env::EnvWeather::new("env_rain")),
+        "func_rain" => Box::new(crate::env::EnvWeather::new("func_rain")),
+        "env_snow" => Box::new(crate::env::EnvWeather::new("env_snow")),
+        "func_snow" => Box::new(crate::env::EnvWeather::new("func_snow")),
+        "light" => Box::new(crate::env::Light::new("light")),
+        "light_spot" => Box::new(crate::env::Light::new("light_spot")),
+        "light_environment" => Box::new(crate::env::LightEnvironment),
+        "ambient_generic" => Box::new(crate::env::AmbientGeneric::default()),
+        "env_sound" => Box::new(crate::env::EnvSound::default()),
+        "speaker" => Box::new(crate::env::Speaker::default()),
+        "soundent" => Box::new(crate::env::SoundEnt),
+        "item_kevlar" => Box::new(crate::items::ItemArmor::new(false)),
+        "item_assaultsuit" => Box::new(crate::items::ItemArmor::new(true)),
+        "item_generic" => Box::new(crate::items::ItemGeneric),
+        other => {
+            if let Some(ammo) = crate::items::AmmoPickupEntity::for_class(other) {
+                Box::new(ammo)
+            } else {
+                Box::new(crate::inventory::WorldWeapon::of_class(other)?)
+            }
+        }
     };
     Some(entity)
 }
@@ -803,7 +846,7 @@ mod tests {
             create_entity("monster_scientist").unwrap().classname(),
             "hostage_entity"
         );
-        for unknown in ["", "light", "FUNC_WALL", "func_buyzones", "worldspawn "] {
+        for unknown in ["", "nonexistent_class", "FUNC_WALL", "func_buyzones", "worldspawn "] {
             assert!(create_entity(unknown).is_none(), "{unknown:?}");
         }
     }
