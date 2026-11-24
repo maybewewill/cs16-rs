@@ -681,20 +681,11 @@ impl GameEntity for MomentaryRotButton {
 }
 
 /// Shootable/usable target brush (`button_target`, `CButtonTarget`).
+#[derive(Default)]
 pub(crate) struct ButtonTarget {
     use_enabled: bool,
     start_on: bool,
     on: bool,
-}
-
-impl Default for ButtonTarget {
-    fn default() -> Self {
-        Self {
-            use_enabled: false,
-            start_on: false,
-            on: false,
-        }
-    }
 }
 
 impl GameEntity for ButtonTarget {

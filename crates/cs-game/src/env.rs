@@ -690,8 +690,8 @@ impl GameEntity for EnvShake {
             return;
         }
         let max_sq = self.radius * self.radius;
-        for slot in 0..g.players.len() {
-            if g.players[slot].is_none() {
+        for (slot, p) in g.players.iter().enumerate() {
+            if p.is_none() {
                 continue;
             }
             let pe = eng.client_edict(slot as u8);
@@ -1507,8 +1507,8 @@ impl GameEntity for EnvSound {
             return;
         };
         let r_sq = self.radius * self.radius;
-        for slot in 0..g.players.len() {
-            if g.players[slot].is_none() {
+        for (slot, p) in g.players.iter().enumerate() {
+            if p.is_none() {
                 continue;
             }
             let pe = eng.client_edict(slot as u8);

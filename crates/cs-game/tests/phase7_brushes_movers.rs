@@ -48,6 +48,7 @@ fn setup_bench(extra_entities: Vec<cs_assets::bsp::Entity>, slots: u8) -> Bench 
     b
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_box(
     game: &mut CsGame,
     eng: &mut EngineApi<'_>,

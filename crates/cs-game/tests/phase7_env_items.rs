@@ -147,7 +147,7 @@ fn env_fog_weather_lights_and_sound_entities() {
                 name,
                 decoded: CsUserMsg::Unknown { payload, .. },
                 ..
-            } if name == "Fog" && payload.len() == 7 && &payload[3..7] == &[0, 0, 0, 0]
+            } if name == "Fog" && payload.len() == 7 && payload[3..7] == [0, 0, 0, 0]
         )
     });
     let got_ambient_or_pa = b

@@ -403,10 +403,10 @@ impl GameEntity for GameCounter {
             if spawnflags & SF_GAMECOUNT_FIREONCE != 0 {
                 self.disabled = true;
             }
-            if spawnflags & SF_GAMECOUNT_RESET != 0 {
-                if let Some(v) = eng.ent_mut(id) {
-                    v.health = self.initial_count;
-                }
+            if spawnflags & SF_GAMECOUNT_RESET != 0
+                && let Some(v) = eng.ent_mut(id)
+            {
+                v.health = self.initial_count;
             }
             use_targets(g, eng, id, activator, UseType::Toggle, 0.0);
         }
