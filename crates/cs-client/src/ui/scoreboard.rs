@@ -2,12 +2,11 @@
 //! `ClientScheme.res`, localization tokens, and `VguiFontAtlas`.
 
 use cs_assets::scheme::LocalizationTable;
-use cs_assets::vgui_res::{TextAlignment, VguiCoordMode};
+use cs_assets::vgui_res::TextAlignment;
 use cs_vfs::Vfs;
 use egui::{Color32, CornerRadius, FontId, Pos2, Rect, Stroke, StrokeKind, Vec2};
 
 use crate::ui::vgui2::controls::{ListColumn, VguiListPanelState};
-use crate::ui::vgui2::font_atlas::VguiTextDrawOpts;
 use crate::ui::vgui2::runtime::{VguiRuntime, scheme_color_or};
 use crate::ui::vgui_assets::ClientPalette;
 
@@ -66,6 +65,41 @@ fn format_team_count(loc: Option<&LocalizationTable>, title: &str, count: usize)
     format!("{title}    -   {count} {noun}")
 }
 
+fn loc_header_or(loc: Option<&LocalizationTable>, tokens: &[&str], fallback: &str) -> String {
+    for &tok in tokens {
+        let resolved = loc_or(loc, tok, "");
+        if !resolved.is_empty() {
+            if resolved.is_ascii()
+                && resolved.len() > 1
+                && resolved.chars().all(|c| !c.is_ascii_lowercase())
+            {
+                let mut chars = resolved.chars();
+                if let Some(first) = chars.next() {
+                    return format!(
+                        "{}{}",
+                        first.to_ascii_uppercase(),
+                        chars.as_str().to_ascii_lowercase()
+                    );
+                }
+            }
+            return resolved;
+        }
+    }
+    fallback.to_string()
+}
+
+/// Centered `CClientScoreBoardDialog` (`520 x 340` at 640x480 scaled by `H / 480.0`).
+/// Measured across 1280x720 `(250,105) 780x510`, 1280x800 `(207,117) 866x566`,
+/// and 1280x1024 `(85,149) 1109x725`.
+pub fn scoreboard_rect(screen: Rect) -> Rect {
+    let s_h = (screen.height() / 480.0).max(0.5);
+    let w = (520.0 * s_h).round().min((screen.width() - 16.0).max(200.0));
+    let h = (340.0 * s_h).round().min((screen.height() - 16.0).max(160.0));
+    let x = screen.left() + ((screen.width() - w) * 0.5).floor();
+    let y = screen.top() + ((screen.height() - h) * 0.5).floor();
+    Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, h))
+}
+
 /// Draw the `.res`-driven CS 1.6 scoreboard using `Resource/UI/ScoreBoard.res`, `ClientScheme.res`,
 /// `VguiFontAtlas`, and localized column/team/status labels.
 pub fn show_scoreboard_vgui(
@@ -78,33 +112,8 @@ pub fn show_scoreboard_vgui(
     }
     let screen = ctx.content_rect();
     let screen_h = screen.height().round().max(480.0) as u32;
-    let vp = [screen.left(), screen.top(), screen.width(), screen.height()];
-    let nodes = runtime.compute_layout_mode(
-        "resource/UI/ScoreBoard.res",
-        vp,
-        VguiCoordMode::Proportional640,
-        s.loc,
-    );
-
-    let sx = (screen.width() / 640.0).max(0.5);
-    let sy = (screen.height() / 480.0).max(0.5);
-    let scale = sx.min(sy);
-    let rect = nodes
-        .iter()
-        .find(|n| n.field_name.eq_ignore_ascii_case("ClientScoreBoard"))
-        .map_or_else(
-            || {
-                let w = (520.0 * scale).clamp(480.0, 900.0);
-                let h = (340.0 * scale).clamp(320.0, 600.0);
-                Rect::from_center_size(screen.center(), Vec2::new(w, h))
-            },
-            |n| {
-                Rect::from_min_size(
-                    Pos2::new(n.rect[0], n.rect[1]),
-                    Vec2::new(n.rect[2].max(420.0), n.rect[3].max(280.0)),
-                )
-            },
-        );
+    let s_h = (screen.height() / 480.0).max(0.5);
+    let rect = scoreboard_rect(screen);
 
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
@@ -115,12 +124,12 @@ pub fn show_scoreboard_vgui(
     let border_col = scheme_color_or(
         scheme,
         "BorderBright",
-        Color32::from_rgba_unmultiplied(188, 112, 0, 180),
+        Color32::from_rgba_unmultiplied(188, 112, 0, 128),
     );
     let bg_col = scheme_color_or(
         scheme,
         "ListBG",
-        Color32::from_rgba_unmultiplied(0, 0, 0, 178),
+        Color32::from_rgba_unmultiplied(0, 0, 0, 128),
     );
     let title_col = scheme_color_or(scheme, "TitleText", s.fallback_palette.title_text);
     let base_col = scheme_color_or(scheme, "BaseText", s.fallback_palette.base_text);
@@ -129,7 +138,7 @@ pub fn show_scoreboard_vgui(
     let spec_col = scheme_color_or(scheme, "team0", Color32::from_rgb(204, 204, 204));
     let client_fonts = scheme.fonts.clone();
 
-    let corner = (7.0 * scale).round().clamp(4.0, 14.0) as u8;
+    let corner = (8.0 * s_h).round().clamp(4.0, 16.0) as u8;
     painter.rect(
         rect,
         CornerRadius::same(corner),
@@ -138,22 +147,22 @@ pub fn show_scoreboard_vgui(
         StrokeKind::Inside,
     );
 
-    let pad_x = (14.0 * scale).round();
-    let pad_top = (10.0 * scale).round();
-    let row_h = ((13.0 * sy).max(16.0)).round();
-
-    let x_name = rect.left() + pad_x;
-    let x_status = rect.right() - (210.0 * scale).round();
-    let x_score = rect.right() - (120.0 * scale).round();
-    let x_deaths = rect.right() - (68.0 * scale).round();
-    let x_ping = rect.right() - pad_x;
-    let top_y = rect.top() + pad_top;
+    let line_x0 = rect.left() + 6.0;
+    let line_x1 = rect.right() - 6.0;
+    let x_name = rect.left() + (38.0 * s_h).round();
+    let x_score = rect.right() - (107.0 * s_h).round();
+    let x_deaths = rect.right() - (61.0 * s_h).round();
+    let x_ping = rect.right() - (11.5 * s_h).round();
+    let x_status = x_score - (76.0 * s_h).round();
+    let top_y = rect.top() + (2.5 * s_h).round();
+    let hdr_line_y = rect.top() + (13.2 * s_h).round();
+    let row_h = (13.5 * s_h).round().max(14.0);
 
     let srv_rect = Rect::from_min_size(
-        Pos2::new(x_name, top_y),
-        Vec2::new((x_status - x_name - 8.0).max(120.0), row_h + 4.0),
+        Pos2::new(rect.left() + (6.5 * s_h).round(), top_y),
+        Vec2::new((x_score - rect.left() - 64.0).max(120.0), row_h),
     );
-    runtime.font_atlas.paint_text(
+    runtime.font_atlas.paint_text_with_scale(
         &painter,
         ctx,
         s.vfs,
@@ -164,45 +173,44 @@ pub fn show_scoreboard_vgui(
         srv_rect,
         s.hostname,
         title_col,
-        VguiTextDrawOpts {
-            align: TextAlignment::NorthWest,
-            process_hotkey: false,
-            proportional_scale: false,
-        },
+        TextAlignment::NorthWest,
+        false,
+        1.0,
     );
 
-    let score_hdr = loc_or(s.loc, "#Cstrike_TitlesTXT_SCORE", "SCORE");
-    let deaths_hdr = loc_or(s.loc, "#Cstrike_TitlesTXT_DEATHS", "DEATHS");
-    let latency_hdr = loc_or(s.loc, "#Cstrike_TitlesTXT_LATENCY", "LATENCY");
+    let score_hdr = loc_header_or(s.loc, &["#Cstrike_ScoreBoard_Score", "#Cstrike_TitlesTXT_SCORE"], "Score");
+    let deaths_hdr = loc_header_or(s.loc, &["#Cstrike_ScoreBoard_Deaths", "#Cstrike_TitlesTXT_DEATHS"], "Deaths");
+    let latency_hdr = loc_header_or(s.loc, &["#Cstrike_ScoreBoard_Latency", "#Cstrike_TitlesTXT_LATENCY"], "Latency");
 
     for (rx, hdr) in [
         (x_score, &score_hdr),
         (x_deaths, &deaths_hdr),
         (x_ping, &latency_hdr),
     ] {
-        let hr = Rect::from_min_size(Pos2::new(rx - 64.0, top_y), Vec2::new(64.0, row_h + 2.0));
-        runtime.font_atlas.paint_text(
+        let hr = Rect::from_min_size(Pos2::new(rx - 80.0, top_y), Vec2::new(80.0, row_h));
+        runtime.font_atlas.paint_text_with_scale(
             &painter,
             ctx,
             s.vfs,
             &client_fonts,
             "client",
-            "DefaultSmall",
+            "Default",
             screen_h,
             hr,
             hdr,
             base_col,
-            VguiTextDrawOpts {
-                align: TextAlignment::NorthEast,
-                process_hotkey: false,
-                proportional_scale: false,
-            },
+            TextAlignment::NorthEast,
+            false,
+            1.0,
         );
     }
 
-    let mut y = top_y + row_h + (4.0 * scale).round();
-    painter.line_segment([Pos2::new(x_name, y), Pos2::new(x_ping, y)], Stroke::new(1.0, border_col));
-    y += (8.0 * scale).round();
+    painter.rect_filled(
+        Rect::from_min_size(Pos2::new(line_x0, hdr_line_y), Vec2::new(line_x1 - line_x0, 1.0)),
+        0.0,
+        border_col,
+    );
+    let mut y = hdr_line_y + (6.5 * s_h).round();
 
     let ct_name = loc_or(s.loc, "#Cstrike_ScoreBoard_CT", "Counter-Terrorists");
     let t_name = loc_or(s.loc, "#Cstrike_ScoreBoard_Ter", "Terrorists");
@@ -215,12 +223,19 @@ pub fn show_scoreboard_vgui(
         (t_name, "TERRORIST", s.t_score, t_col),
     ];
 
-    for (team_idx, (title, team, team_rounds, col)) in teams.iter().enumerate() {
-        let mut team_players: Vec<&ScoreRow> = s.players.iter().filter(|p| p.team == *team).collect();
+    for (title, team, team_rounds, col) in teams {
+        let mut team_players: Vec<&ScoreRow> = s.players.iter().filter(|p| p.team == team).collect();
+        if team_players.is_empty() {
+            continue;
+        }
         team_players.sort_by(|a, b| b.frags.cmp(&a.frags).then(a.deaths.cmp(&b.deaths)));
 
-        let header = format_team_count(s.loc, title, team_players.len());
-        runtime.font_atlas.paint_text(
+        let header = format_team_count(s.loc, &title, team_players.len());
+        let avg_ping = (team_players.iter().map(|p| u32::from(p.ping)).sum::<u32>()
+            / team_players.len() as u32)
+            .to_string();
+
+        runtime.font_atlas.paint_text_with_scale(
             &painter,
             ctx,
             s.vfs,
@@ -230,14 +245,12 @@ pub fn show_scoreboard_vgui(
             screen_h,
             Rect::from_min_size(Pos2::new(x_name, y), Vec2::new((x_score - x_name - 16.0).max(120.0), row_h)),
             &header,
-            *col,
-            VguiTextDrawOpts {
-                align: TextAlignment::NorthWest,
-                process_hotkey: false,
-                proportional_scale: false,
-            },
+            col,
+            TextAlignment::NorthWest,
+            false,
+            1.0,
         );
-        runtime.font_atlas.paint_text(
+        runtime.font_atlas.paint_text_with_scale(
             &painter,
             ctx,
             s.vfs,
@@ -247,54 +260,59 @@ pub fn show_scoreboard_vgui(
             screen_h,
             Rect::from_min_size(Pos2::new(x_score - 56.0, y), Vec2::new(56.0, row_h)),
             &team_rounds.to_string(),
-            *col,
-            VguiTextDrawOpts {
-                align: TextAlignment::NorthEast,
-                process_hotkey: false,
-                proportional_scale: false,
-            },
+            base_col,
+            TextAlignment::NorthEast,
+            false,
+            1.0,
         );
-        y += row_h + 2.0;
+        runtime.font_atlas.paint_text_with_scale(
+            &painter,
+            ctx,
+            s.vfs,
+            &client_fonts,
+            "client",
+            "Default",
+            screen_h,
+            Rect::from_min_size(Pos2::new(x_ping - 56.0, y), Vec2::new(56.0, row_h)),
+            &avg_ping,
+            base_col,
+            TextAlignment::NorthEast,
+            false,
+            1.0,
+        );
 
-        painter.line_segment(
-            [Pos2::new(x_name, y), Pos2::new(x_ping, y)],
-            Stroke::new(1.0, Color32::from_rgba_unmultiplied(188, 112, 0, 130)),
+        let team_line_y = y + (9.7 * s_h).round();
+        painter.rect_filled(
+            Rect::from_min_size(Pos2::new(line_x0, team_line_y), Vec2::new(line_x1 - line_x0, 1.0)),
+            0.0,
+            col,
         );
-        y += 4.0;
+        y = team_line_y + (7.5 * s_h).round();
 
         for p in team_players {
-            if y + row_h > rect.bottom() - 8.0 * scale {
+            if y + row_h > rect.bottom() - 8.0 * s_h {
                 break;
             }
-            if Some(p.slot) == s.local_slot {
-                let hi_rect = Rect::from_min_size(
-                    Pos2::new(x_name - 4.0, y - 1.0),
-                    Vec2::new((x_ping - x_name) + 8.0, row_h),
-                );
-                painter.rect_filled(hi_rect, 0.0, Color32::from_rgba_unmultiplied(255, 255, 255, 28));
-            }
             let row_col = if !p.dead {
-                *col
+                col
             } else {
                 Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), 155)
             };
 
-            runtime.font_atlas.paint_text(
+            runtime.font_atlas.paint_text_with_scale(
                 &painter,
                 ctx,
                 s.vfs,
                 &client_fonts,
                 "client",
-                "DefaultSmall",
+                "Default",
                 screen_h,
-                Rect::from_min_size(Pos2::new(x_name + 4.0, y), Vec2::new((x_status - x_name - 10.0).max(80.0), row_h)),
+                Rect::from_min_size(Pos2::new(x_name, y), Vec2::new((x_status - x_name - 8.0).max(80.0), row_h)),
                 &p.name,
                 row_col,
-                VguiTextDrawOpts {
-                    align: TextAlignment::NorthWest,
-                    process_hotkey: false,
-                    proportional_scale: false,
-                },
+                TextAlignment::NorthWest,
+                false,
+                1.0,
             );
 
             let status = if p.dead {
@@ -307,22 +325,20 @@ pub fn show_scoreboard_vgui(
                 ""
             };
             if !status.is_empty() {
-                runtime.font_atlas.paint_text(
+                runtime.font_atlas.paint_text_with_scale(
                     &painter,
                     ctx,
                     s.vfs,
                     &client_fonts,
                     "client",
-                    "DefaultSmall",
+                    "Default",
                     screen_h,
                     Rect::from_min_size(Pos2::new(x_status, y), Vec2::new(56.0, row_h)),
                     status,
                     row_col,
-                    VguiTextDrawOpts {
-                        align: TextAlignment::NorthWest,
-                        process_hotkey: false,
-                        proportional_scale: false,
-                    },
+                    TextAlignment::NorthWest,
+                    false,
+                    1.0,
                 );
             }
 
@@ -331,30 +347,25 @@ pub fn show_scoreboard_vgui(
                 (x_deaths, p.deaths.to_string()),
                 (x_ping, p.ping.to_string()),
             ] {
-                runtime.font_atlas.paint_text(
+                runtime.font_atlas.paint_text_with_scale(
                     &painter,
                     ctx,
                     s.vfs,
                     &client_fonts,
                     "client",
-                    "DefaultSmall",
+                    "Default",
                     screen_h,
                     Rect::from_min_size(Pos2::new(rx - 52.0, y), Vec2::new(52.0, row_h)),
                     &val,
                     row_col,
-                    VguiTextDrawOpts {
-                        align: TextAlignment::NorthEast,
-                        process_hotkey: false,
-                        proportional_scale: false,
-                    },
+                    TextAlignment::NorthEast,
+                    false,
+                    1.0,
                 );
             }
             y += row_h;
         }
-
-        if team_idx == 0 {
-            y += (12.0 * scale).round();
-        }
+        y += (10.0 * s_h).round();
     }
 
     let specs: Vec<&ScoreRow> = s
@@ -362,31 +373,51 @@ pub fn show_scoreboard_vgui(
         .iter()
         .filter(|p| p.team != "CT" && p.team != "TERRORIST")
         .collect();
-    if !specs.is_empty() && y + row_h <= rect.bottom() - 4.0 {
-        y += (6.0 * scale).round();
+    if !specs.is_empty() && y + row_h * 2.0 <= rect.bottom() - 4.0 {
         let spec_hdr = loc_or(s.loc, "#Cstrike_TitlesTXT_Spectators", "Spectators");
-        let spec_line = format!(
-            "{spec_hdr} ({}): {}",
-            specs.len(),
-            specs.iter().map(|r| r.name.as_str()).collect::<Vec<_>>().join(", ")
-        );
-        runtime.font_atlas.paint_text(
+        runtime.font_atlas.paint_text_with_scale(
             &painter,
             ctx,
             s.vfs,
             &client_fonts,
             "client",
-            "DefaultSmall",
+            "Default",
             screen_h,
-            Rect::from_min_size(Pos2::new(x_name, y), Vec2::new((x_ping - x_name).max(120.0), row_h)),
-            &spec_line,
-            spec_col,
-            VguiTextDrawOpts {
-                align: TextAlignment::NorthWest,
-                process_hotkey: false,
-                proportional_scale: false,
-            },
+            Rect::from_min_size(Pos2::new(x_name, y), Vec2::new((line_x1 - x_name).max(120.0), row_h)),
+            &spec_hdr,
+            base_col,
+            TextAlignment::NorthWest,
+            false,
+            1.0,
         );
+        let spec_line_y = y + (9.7 * s_h).round();
+        painter.rect_filled(
+            Rect::from_min_size(Pos2::new(line_x0, spec_line_y), Vec2::new(line_x1 - line_x0, 1.0)),
+            0.0,
+            border_col,
+        );
+        y = spec_line_y + (7.5 * s_h).round();
+        for p in specs {
+            if y + row_h > rect.bottom() - 4.0 {
+                break;
+            }
+            runtime.font_atlas.paint_text_with_scale(
+                &painter,
+                ctx,
+                s.vfs,
+                &client_fonts,
+                "client",
+                "Default",
+                screen_h,
+                Rect::from_min_size(Pos2::new(x_name, y), Vec2::new((x_ping - x_name).max(120.0), row_h)),
+                &p.name,
+                spec_col,
+                TextAlignment::NorthWest,
+                false,
+                1.0,
+            );
+            y += row_h;
+        }
     }
 }
 
@@ -403,13 +434,8 @@ pub fn show_scoreboard(
     cp: ClientPalette,
 ) {
     let screen = ctx.content_rect();
-    let scale = (screen.height() / 480.0).min(screen.width() / 640.0) * 0.92;
-    let w = (520.0 * scale).clamp(480.0, 820.0);
-    let h = (340.0 * scale).clamp(320.0, 560.0);
-    let rect = Rect::from_center_size(
-        Pos2::new(screen.center().x, screen.center().y - 12.0 * scale),
-        Vec2::new(w, h),
-    );
+    let s_h = (screen.height() / 480.0).max(0.5);
+    let rect = scoreboard_rect(screen);
 
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
@@ -420,10 +446,10 @@ pub fn show_scoreboard(
         cp.border_bright.r(),
         cp.border_bright.g(),
         cp.border_bright.b(),
-        180,
+        128,
     );
-    let bg_col = Color32::from_rgba_unmultiplied(0, 0, 0, 178);
-    let r = (7.0 * scale).round().clamp(4.0, 14.0) as u8;
+    let bg_col = Color32::from_rgba_unmultiplied(0, 0, 0, 128);
+    let r = (8.0 * s_h).round().clamp(4.0, 16.0) as u8;
 
     painter.rect(
         rect,
@@ -433,72 +459,70 @@ pub fn show_scoreboard(
         StrokeKind::Inside,
     );
 
-    let pad_x = 14.0 * scale;
-    let pad_top = 10.0 * scale;
-    let font_title = FontId::proportional((11.5 * scale).clamp(12.5, 19.0));
-    let font_hdr = FontId::proportional((9.5 * scale).clamp(11.0, 16.0));
-    let font_row = FontId::proportional((9.8 * scale).clamp(11.0, 16.0));
+    let font_row = FontId::proportional((9.5 * s_h).clamp(11.0, 16.0));
+    let line_x0 = rect.left() + 6.0;
+    let line_x1 = rect.right() - 6.0;
+    let x_name = rect.left() + (38.0 * s_h).round();
+    let x_score = rect.right() - (107.0 * s_h).round();
+    let x_deaths = rect.right() - (61.0 * s_h).round();
+    let x_ping = rect.right() - (11.5 * s_h).round();
+    let x_status = x_score - (76.0 * s_h).round();
 
-    let x_name = rect.left() + pad_x;
-    let x_status = rect.right() - 210.0 * scale;
-    let x_score = rect.right() - 120.0 * scale;
-    let x_deaths = rect.right() - 68.0 * scale;
-    let x_ping = rect.right() - pad_x;
+    let top_y = rect.top() + (3.5 * s_h).round();
+    painter.text(Pos2::new(rect.left() + (6.5 * s_h).round(), top_y), egui::Align2::LEFT_TOP, hostname, font_row.clone(), cp.title_text);
+    painter.text(Pos2::new(x_score, top_y), egui::Align2::RIGHT_TOP, "Score", font_row.clone(), cp.base_text);
+    painter.text(Pos2::new(x_deaths, top_y), egui::Align2::RIGHT_TOP, "Deaths", font_row.clone(), cp.base_text);
+    painter.text(Pos2::new(x_ping, top_y), egui::Align2::RIGHT_TOP, "Latency", font_row.clone(), cp.base_text);
 
-    let top_y = rect.top() + pad_top;
-    painter.text(Pos2::new(x_name, top_y), egui::Align2::LEFT_TOP, hostname, font_title, cp.title_text);
-    let col_hdr_y = top_y + 2.0 * scale;
-    painter.text(Pos2::new(x_score, col_hdr_y), egui::Align2::RIGHT_TOP, "Score", font_hdr.clone(), cp.base_text);
-    painter.text(Pos2::new(x_deaths, col_hdr_y), egui::Align2::RIGHT_TOP, "Deaths", font_hdr.clone(), cp.base_text);
-    painter.text(Pos2::new(x_ping, col_hdr_y), egui::Align2::RIGHT_TOP, "Latency", font_hdr.clone(), cp.base_text);
+    let hdr_line_y = rect.top() + (13.2 * s_h).round();
+    painter.rect_filled(
+        Rect::from_min_size(Pos2::new(line_x0, hdr_line_y), Vec2::new(line_x1 - line_x0, 1.0)),
+        0.0,
+        border_col,
+    );
+    let mut y = hdr_line_y + (6.5 * s_h).round();
+    let _ = local_slot;
 
-    let mut y = top_y + 22.0 * scale;
-    painter.line_segment([Pos2::new(x_name, y), Pos2::new(x_ping, y)], Stroke::new(1.0, border_col));
-    y += 10.0 * scale;
-
-    let row_h = (14.5 * scale).clamp(16.0, 24.0);
+    let row_h = (13.5 * s_h).round().max(14.0);
     let teams = [
         ("Counter-Terrorists", "CT", ct_score, cp.team_ct),
         ("Terrorists", "TERRORIST", t_score, cp.team_t),
     ];
 
-    for (team_idx, (title, team, team_rounds, col)) in teams.iter().enumerate() {
-        let mut team_players: Vec<&ScoreRow> = players.iter().filter(|p| p.team == *team).collect();
+    for (title, team, team_rounds, col) in teams {
+        let mut team_players: Vec<&ScoreRow> = players.iter().filter(|p| p.team == team).collect();
+        if team_players.is_empty() {
+            continue;
+        }
         team_players.sort_by(|a, b| b.frags.cmp(&a.frags).then(a.deaths.cmp(&b.deaths)));
 
+        let noun = if team_players.len() == 1 { "player" } else { "players" };
         painter.text(
             Pos2::new(x_name, y),
             egui::Align2::LEFT_TOP,
-            format!("{title}   -   {} players", team_players.len()),
-            font_hdr.clone(),
-            *col,
+            format!("{title}    -   {} {noun}", team_players.len()),
+            font_row.clone(),
+            col,
         );
-        painter.text(Pos2::new(x_score, y), egui::Align2::RIGHT_TOP, team_rounds.to_string(), font_hdr.clone(), *col);
-        y += row_h + 1.0 * scale;
-
-        painter.line_segment(
-            [Pos2::new(x_name, y), Pos2::new(x_ping, y)],
-            Stroke::new(1.0, Color32::from_rgba_unmultiplied(188, 112, 0, 130)),
+        painter.text(Pos2::new(x_score, y), egui::Align2::RIGHT_TOP, team_rounds.to_string(), font_row.clone(), cp.base_text);
+        let team_line_y = y + (9.7 * s_h).round();
+        painter.rect_filled(
+            Rect::from_min_size(Pos2::new(line_x0, team_line_y), Vec2::new(line_x1 - line_x0, 1.0)),
+            0.0,
+            col,
         );
-        y += 4.0 * scale;
+        y = team_line_y + (7.5 * s_h).round();
 
         for p in team_players {
-            if y + row_h > rect.bottom() - 8.0 * scale {
+            if y + row_h > rect.bottom() - 8.0 * s_h {
                 break;
             }
-            if Some(p.slot) == local_slot {
-                let hi_rect = Rect::from_min_size(
-                    Pos2::new(x_name - 4.0, y - 1.0),
-                    Vec2::new((x_ping - x_name) + 8.0, row_h),
-                );
-                painter.rect_filled(hi_rect, 0.0, Color32::from_rgba_unmultiplied(255, 255, 255, 28));
-            }
             let row_col = if !p.dead {
-                *col
+                col
             } else {
                 Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), 155)
             };
-            painter.text(Pos2::new(x_name + 4.0 * scale, y), egui::Align2::LEFT_TOP, &p.name, font_row.clone(), row_col);
+            painter.text(Pos2::new(x_name, y), egui::Align2::LEFT_TOP, &p.name, font_row.clone(), row_col);
             let status = if p.dead { "Dead" } else if p.bomb { "Bomb" } else if p.vip { "VIP" } else { "" };
             if !status.is_empty() {
                 painter.text(Pos2::new(x_status, y), egui::Align2::LEFT_TOP, status, font_row.clone(), row_col);
@@ -508,26 +532,27 @@ pub fn show_scoreboard(
             painter.text(Pos2::new(x_ping, y), egui::Align2::RIGHT_TOP, p.ping.to_string(), font_row.clone(), row_col);
             y += row_h;
         }
-        if team_idx == 0 {
-            y += 14.0 * scale;
-        }
+        y += (10.0 * s_h).round();
     }
 
     let specs: Vec<&ScoreRow> = players.iter().filter(|p| p.team != "CT" && p.team != "TERRORIST").collect();
     if !specs.is_empty() && y + row_h * 2.0 <= rect.bottom() {
-        y += 8.0 * scale;
         let spec_col = Color32::from_rgb(204, 204, 204);
-        painter.text(
-            Pos2::new(x_name, y),
-            egui::Align2::LEFT_TOP,
-            format!(
-                "Spectators ({}): {}",
-                specs.len(),
-                specs.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ")
-            ),
-            font_row,
-            spec_col,
+        painter.text(Pos2::new(x_name, y), egui::Align2::LEFT_TOP, "Spectators", font_row.clone(), cp.base_text);
+        let spec_line_y = y + (9.7 * s_h).round();
+        painter.rect_filled(
+            Rect::from_min_size(Pos2::new(line_x0, spec_line_y), Vec2::new(line_x1 - line_x0, 1.0)),
+            0.0,
+            border_col,
         );
+        y = spec_line_y + (7.5 * s_h).round();
+        for p in specs {
+            if y + row_h > rect.bottom() - 4.0 {
+                break;
+            }
+            painter.text(Pos2::new(x_name, y), egui::Align2::LEFT_TOP, &p.name, font_row.clone(), spec_col);
+            y += row_h;
+        }
     }
 }
 

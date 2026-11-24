@@ -1322,7 +1322,7 @@ impl Cs16App {
             self.in_game_frames += 1;
             if let Some(ui_mode) = self.launch.startup_ui.clone() {
                 let m = ui_mode.to_ascii_lowercase();
-                if matches!(m.as_str(), "hud" | "buy" | "scoreboard" | "commandmenu") {
+                if matches!(m.as_str(), "hud" | "buy" | "scoreboard" | "commandmenu" | "chat") {
                     if self.in_game_frames == 2 {
                         self.session.send_stringcmd("jointeam 2");
                     } else if self.in_game_frames == 6 {
@@ -1344,6 +1344,7 @@ impl Cs16App {
                             }
                             "scoreboard" => self.scoreboard_toggled = true,
                             "commandmenu" => self.command_menu_ui.set_open(true),
+                            "chat" => self.chat_ui.open_chat(false),
                             _ => {}
                         }
                         self.startup_ui_applied = true;

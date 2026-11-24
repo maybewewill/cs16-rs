@@ -936,6 +936,7 @@ fn draw_cs16_hud_impl(
     // 11. Centre text (`HUD_PRINTCENTER`, the centre print).
     if let Some(text) = hud.center {
         let b_pos = Pos2::new(center_x, screen.top() + screen.height() * 0.34);
+        let center_col = Color32::from_rgb(extras.con_color[0], extras.con_color[1], extras.con_color[2]);
         hud_paint_text(
             ctx,
             &painter,
@@ -944,12 +945,12 @@ fn draw_cs16_hud_impl(
             b_pos,
             text,
             16.0 * scale,
-            Color32::from_rgb(255, 196, 64),
+            center_col,
         );
     }
 
     // 11b. Tutor/hint banners (`HudText` / `HudTextArgs` resolved via `titles.txt` + localization).
-    let mut hy = screen.top() + screen.height() * 0.22;
+    let mut hint_y = screen.top() + screen.height() * 0.70;
     for entry in state.hud_texts.iter().rev() {
         let age = hud.now - entry.received_at;
         if !(0.0..=4.2).contains(&age) {
@@ -957,7 +958,35 @@ fn draw_cs16_hud_impl(
         }
         let msg = format_hud_text_entry(&entry.text, &entry.args, extras.titles, extras.loc);
         if !msg.is_empty() {
-            let pos = Pos2::new(center_x, hy);
+            let clean_key = entry.text.trim().trim_start_matches('#');
+            let is_hint = clean_key.starts_with("Hint_");
+            let title_entry = extras.titles.and_then(|t| t.get(&entry.text));
+            let (pos, col) = if is_hint {
+                let p = Pos2::new(center_x, hint_y);
+                hint_y += 18.0 * scale;
+                (p, Color32::from_rgb(40, 200, 40))
+            } else if let Some(te) = title_entry {
+                let px = if te.position[0] < 0.0 {
+                    center_x
+                } else {
+                    screen.left() + screen.width() * te.position[0].clamp(0.05, 0.95)
+                };
+                let py = if te.position[1] < 0.0 {
+                    screen.center().y
+                } else {
+                    screen.top() + screen.height() * te.position[1].clamp(0.05, 0.95)
+                };
+                let c = if te.color[0] == 0 && te.color[1] == 0 && te.color[2] == 0 {
+                    Color32::from_rgb(255, 196, 64)
+                } else {
+                    Color32::from_rgb(te.color[0], te.color[1], te.color[2])
+                };
+                (Pos2::new(px, py), c)
+            } else {
+                let p = Pos2::new(center_x, hint_y);
+                hint_y += 18.0 * scale;
+                (p, Color32::from_rgb(255, 212, 96))
+            };
             hud_paint_text(
                 ctx,
                 &painter,
@@ -966,9 +995,8 @@ fn draw_cs16_hud_impl(
                 pos,
                 &msg,
                 14.0 * scale,
-                Color32::from_rgb(255, 212, 96),
+                col,
             );
-            hy += 20.0 * scale;
         }
     }
 

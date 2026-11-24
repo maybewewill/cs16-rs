@@ -13,7 +13,7 @@ use cs_assets::vgui_scripts::{
     CommandMenuAction, CommandMenuTree, GameMenuEntry, OverviewSpec, ScrOptionKind, SettingsScript,
     TitlesTable,
 };
-use cs_client::ui::console::{ConsoleRenderCtx, ConsoleUi};
+use cs_client::ui::console::{ConsoleRenderCtx, ConsoleUi, console_default_rect};
 use cs_client::ui::hud::{HudExtrasContext, HudView, draw_cs16_hud_with_extras, draw_cs16_hud_with_runtime};
 use cs_client::ui::hud_extras::{
     WeaponBucketState, compute_damage_quadrants, damage_hazard_icons, evaluate_dhud_text_fx,
@@ -23,7 +23,7 @@ use cs_client::ui::main_menu::{MainMenuRenderCtx, MainMenuUi};
 use cs_client::ui::options::{
     OptionsRenderCtx, OptionsTab, OptionsUi, parse_kb_act_list, render_scr_options,
 };
-use cs_client::ui::scoreboard::{ScoreRow, scoreboard_to_list_panel, show_scoreboard};
+use cs_client::ui::scoreboard::{ScoreRow, scoreboard_rect, scoreboard_to_list_panel, show_scoreboard};
 use cs_client::ui::screens::{
     BuyClassTeamMenuUi, CommandMenuUi, DemoPlayerUi, DialogRenderCtx, DisconnectErrorDialog,
     LoadingDialogUi, MotdRenderCtx, MotdVguiUi, ServerBrowserEntry, ServerBrowserTab,
@@ -1596,4 +1596,29 @@ fn ui_html_parses_css_font_line_height_and_blank_br() {
     assert_eq!(doc.margin, 8.0);
     assert_eq!(doc.blocks.len(), 3);
     assert!(matches!(&doc.blocks[1], HtmlBlock::Paragraph { spans, .. } if spans.is_empty()));
+}
+
+#[test]
+fn ui_scoreboard_and_console_rects_scale_across_resolutions() {
+    let rect_for = |w: f32, h: f32| {
+        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h))
+    };
+
+    let sb720 = scoreboard_rect(rect_for(1280.0, 720.0));
+    assert_eq!((sb720.left(), sb720.top(), sb720.width(), sb720.height()), (250.0, 105.0, 780.0, 510.0));
+
+    let sb800 = scoreboard_rect(rect_for(1280.0, 800.0));
+    assert_eq!((sb800.left(), sb800.top(), sb800.width(), sb800.height()), (206.0, 116.0, 867.0, 567.0));
+
+    let sb1024 = scoreboard_rect(rect_for(1280.0, 1024.0));
+    assert_eq!((sb1024.left(), sb1024.top(), sb1024.width(), sb1024.height()), (85.0, 149.0, 1109.0, 725.0));
+
+    let con720 = console_default_rect(rect_for(1280.0, 720.0));
+    assert_eq!((con720.left(), con720.top(), con720.width(), con720.height()), (40.0, 40.0, 560.0, 400.0));
+
+    let con800 = console_default_rect(rect_for(1280.0, 800.0));
+    assert_eq!((con800.left(), con800.top(), con800.width(), con800.height()), (44.0, 44.0, 622.0, 444.0));
+
+    let con1024 = console_default_rect(rect_for(1280.0, 1024.0));
+    assert_eq!((con1024.left(), con1024.top(), con1024.width(), con1024.height()), (57.0, 57.0, 796.0, 569.0));
 }

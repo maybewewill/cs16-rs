@@ -82,6 +82,14 @@ Measured on `de_dust2` across `800x600`, `1280x720`, `1280x800`, and `1280x1024`
 - **MOTD (`MOTD.res` / `motd.txt`).** `Message` HTML box is solid black with no orange border; `motd.txt` CSS `margin` (`8 px`) and `font: 16px/20px` render in 1:1 CSS pixels with `<br>` blank lines preserved.
 - **Team / Class / Buy Menus.** Hidden `vipbutton` (`Teammenu.res`) and `spetsnaz` (`Classmenu_CT.res`) keep their original row slots instead of compacting lower buttons up; `CancelButton` (`0 CANCEL`) is shown only when `allowed_keys` bit 9 or joined state permits cancelling (and on `BuyMenu`). `TeamMenu` `MapInfo` renders plain `maps/<map>.txt` (`Default`, `14 px` row stride) beside a VGUI2 right vertical scrollbar (`sb_w = round(21*s)` with `1 px` `BorderBright` borders and light-grey arrow triangles). `ClassResPanel` overwrites earlier labels sharing `fieldName` (`classes/urban.res` `className` -> `infolabel` at `ypos=228`), matching Valve's `LoadControlSettings`. `BuyMenu` `Divider1` renders as a `1 px` vertical `BorderBright` hairline.
 
+### Scoreboard, Console, Chat, and Centre Print: DONE
+
+Measured on `de_dust2` across `800x600`, `1280x720`, `1280x800`, and `1280x1024`:
+
+- **Scoreboard (`ClientScoreBoard` / `ScoreBoard.res`).** Scale `s_h = H / 480`, centered `round(520 * s_h) x round(340 * s_h)` (`250,105 780x510` at 1280x720; `207,117 866x566` at 1280x800; `85,149 1109x725` at 1280x1024) with `ListBG` (`0, 0, 0, 128`), `1 px` `BorderBright` rounded outline (`round(8 * s_h)`), server name + right-aligned `Score`/`Deaths`/`Latency` (`107*s_h`, `61*s_h`, `11.5*s_h` from right), header hairline at `+13.2*s_h`, non-empty team headers + team-colored 1 px underlines, and unhighlighted player rows in team color.
+- **Console (`CConsoleDialog`, `TrackerScheme`).** Scale `s = max(1, H / 720)`, default rect `(40, 40, 560, 400) * s` (`560x400` at 800x600/1280x720; `622x444` at `(44,44)` at 1280x800; `796x569` at `(57,57)` at 1280x1024). Steam 2003 olive `ControlBG` raised bevel frame, `35*s` titlebar with `icon_steam.tga`, `DefaultBold` title, and `18*s` `[X]` button; recessed `WindowBG` log viewport with `18*s` VGUI2 vertical scrollbar and arrow buttons; `22*s` bottom `TextEntry` + `71*s x 22*s` raised `Submit` button + 3x3 resize grip.
+- **Chat (`messagemode`) & Hints / Centre Print.** `say :` / `say_team :` draws directly at `(8, 4)` in `EngineFont` (`1 px` drop shadow, `con_color` foreground) with no box or border. `Hint_*` HUD prompts render centered at `0.70 * H` in green `(40, 200, 40)`; `HUD_PRINTCENTER` uses `con_color` at `0.34 * H`.
+
 ## Status of the other screens (measured 2026-11-24 at 1280x800)
 
 | Screen | State | Differences seen |
@@ -89,10 +97,11 @@ Measured on `de_dust2` across `800x600`, `1280x720`, `1280x800`, and `1280x1024`
 | Options (`OptionsDialog`) | **DONE** | Built from `OptionsSub*.res` + `MultiplayerAdvancedDialog.res` + `ContentControlDialog.res` in original tab order (`Multiplayer, Audio, Video, Aim, Keyboard, Voice, Content`). Full-frame MAD vs original: `2.72/255` (800x600), `3.33/255` (1280x720), `3.99/255` (1280x800), `3.72/255` (1280x1024); 7 tabs at 1280x800: `2.88-3.99/255` full / `3.69-6.97/255` dialog (remaining delta is player name / Russian Steam overlay strings). |
 | MOTD (`MOTD.res`) | **DONE** | Centered 4:3 `BackgroundPanel` + `16px/20px` CSS HTML + `&OK` stripped. Panel MAD vs original: `5.59` (800x600), `4.05` (1280x720), `3.78` (1280x800), `6.47` (1280x1024); remaining delta is 3D camera/sky bleed behind `alpha=200` `BackgroundPanel` (`5:4` aspect FOV at `1280x1024`) and Russian Steam overlay toast. |
 | Team / Class / Buy menus | **DONE** | Panel MAD vs original: `Team` `8.55` (800x600), `6.30` (1280x720), `6.07` (1280x800), `10.83` (1280x1024, 3D scene delta `25.96` outside panel bleeding through `alpha=200`); `Class` `8.55` (`1280x800`, different intro camera angle); `Buy` `5.12` (`1280x800`, 1px `Divider1`). Remaining panel delta is translucent 3D background/chat/font antialiasing. |
+| Scoreboard (`ScoreBoard.res`) | **DONE** | Centered `520x340 * H/480` `ListBG` (`alpha=128`) box, localized column headers, and CT/T dividers. Box MAD vs original: `9.36` (1280x720), `9.29` (1280x800), `9.41` (1280x1024); remaining delta is 1st-person weapon/world view & headless bot rows behind `alpha=128` panel. |
+| Console (`CConsoleDialog`) | **DONE** | Exact Steam 2003 `TrackerScheme` `(40,40,560,400) * max(1, H/720)` frame. Window box MAD vs original: `6.23` (800x600), `7.26` (1280x720), `5.95` (1280x800), `6.23` (1280x1024); remaining delta is startup log lines only. |
+| Chat / Centre print | **DONE** | `say :` HUD prompt at `(8, 4)` with `EngineFont` shadow and `Hint_press_buy_to_purchase` green banner at `0.70 * H` match original position and colors visually. |
 | New game (`CreateMultiplayerGame*.res`) | not compared | |
 | Find servers (`ServerBrowser`) | not compared | |
-| Console | not compared | The original GameUI console is a TrackerScheme frame (seen top-left in captures). |
-| Scoreboard, spectator, command menu | not compared | |
 | HUD | partly | It is drawn from `hud.txt` sprites; compare positions and fades at 640x480, 1024x768 and 1280x800. |
 
 ## Order of work for the next screens
