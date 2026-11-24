@@ -611,6 +611,9 @@ dependencies = [
 [[package]]
 name = "cs-platform"
 version = "0.1.0"
+dependencies = [
+ "web-sys",
+]
 
 [[package]]
 name = "cs-pm"
@@ -642,15 +645,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "cs-relay"
+version = "0.1.0"
+dependencies = [
+ "cs-clientcore",
+ "cs-cvar",
+ "cs-engine",
+ "cs-proto48",
+ "cs-sim",
+ "cs-transport",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "cs-server"
 version = "0.1.0"
 dependencies = [
+ "cs-clientcore",
  "cs-cvar",
  "cs-engine",
  "cs-game",
  "cs-local",
  "cs-platform",
  "cs-proto48",
+ "cs-relay",
  "cs-sim",
  "cs-transport",
  "cs-vfs",

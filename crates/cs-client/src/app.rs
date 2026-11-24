@@ -26,27 +26,27 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::audio::AudioEngine;
-use crate::camera::Camera;
-use crate::hudtext::{format_message, strip_html};
-use crate::input::{
+use crate::session::Session;
+use cs_client::camera::Camera;
+use cs_client::hudtext::{format_message, strip_html};
+use cs_client::input::{
     CmdClock, CmdParams, ConsoleRoute, Held, MoveSpeeds, build_usercmd, route_unknown, weapon_for_slot,
 };
-use crate::render::bsp_renderer::BspRenderStats;
-use crate::render::mdl_renderer::{StudioInstance, viewmodel_transform};
-use crate::render::scene::ModelRegistry;
-use crate::render::{RenderSettings, Renderer, SceneDynamicData};
-use crate::session::Session;
-use crate::ui::chat::ChatInputUi;
-use crate::ui::console::ConsoleUi;
-use crate::ui::hud::{HudSprites, HudView, draw_cs16_hud};
-use crate::ui::main_menu::MainMenuUi;
-use crate::ui::options::OptionsUi;
-use crate::ui::scoreboard::{ScoreRow, show_scoreboard};
-use crate::ui::server_menu::{draw_text_menu, menu_key_enabled, menu_lines};
-use crate::ui::vgui_assets::VguiAssetBank;
-use crate::ui::vgui_theme::{VguiPalette, apply_vgui2_theme};
-use crate::ui::{FrameTelemetry, draw_crosshair, draw_net_graph};
-use crate::view::{FrameView, ViewInputs, ViewStats};
+use cs_client::render::bsp_renderer::BspRenderStats;
+use cs_client::render::mdl_renderer::{StudioInstance, viewmodel_transform};
+use cs_client::render::scene::ModelRegistry;
+use cs_client::render::{RenderSettings, Renderer, SceneDynamicData};
+use cs_client::ui::chat::ChatInputUi;
+use cs_client::ui::console::ConsoleUi;
+use cs_client::ui::hud::{HudSprites, HudView, draw_cs16_hud};
+use cs_client::ui::main_menu::MainMenuUi;
+use cs_client::ui::options::OptionsUi;
+use cs_client::ui::scoreboard::{ScoreRow, show_scoreboard};
+use cs_client::ui::server_menu::{draw_text_menu, menu_key_enabled, menu_lines};
+use cs_client::ui::vgui_assets::VguiAssetBank;
+use cs_client::ui::vgui_theme::{VguiPalette, apply_vgui2_theme};
+use cs_client::ui::{FrameTelemetry, draw_crosshair, draw_net_graph};
+use cs_client::view::{FrameView, ViewInputs, ViewStats};
 
 /// Seconds a kill, a chat line, a notification and the centre text stay on screen.
 const FEED_LIFE: f64 = 6.0;

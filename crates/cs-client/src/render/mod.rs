@@ -10,6 +10,7 @@ pub mod skybox;
 pub mod sprite_renderer;
 
 use std::path::Path;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 
 use cs_assets::bsp::BspMap;
@@ -17,7 +18,8 @@ use cs_assets::scheme::SkyboxTextures;
 use cs_vfs::Vfs;
 use egui_wgpu::ScreenDescriptor;
 use glam::Vec3;
-use tracing::{error, info};
+use tracing::info;
+#[cfg(not(target_arch = "wasm32"))]
 use winit::window::Window;
 
 use crate::camera::Camera;
@@ -68,38 +70,70 @@ pub struct Renderer {
     pub fx: FxRenderer,
     pub egui_renderer: egui_wgpu::Renderer,
     pub adapter_name: String,
+    pub backend_name: String,
+}
+
+/// Selects WebGL2 downlevel limits on GL backends so browser WebGL2 fallback stays within caps.
+pub fn required_limits_for_adapter(adapter: &wgpu::Adapter) -> wgpu::Limits {
+    if adapter.get_info().backend == wgpu::Backend::Gl {
+        wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits())
+    } else {
+        wgpu::Limits::default().using_resolution(adapter.limits())
+    }
 }
 
 impl Renderer {
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new(window: Arc<Window>) -> Self {
         let size = window.inner_size();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let surface = instance
             .create_surface(window)
             .expect("create wgpu surface");
+        pollster::block_on(Self::new_from_surface(
+            &instance,
+            surface,
+            size.width,
+            size.height,
+        ))
+        .expect("initialize native wgpu renderer")
+    }
 
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-            apply_limit_buckets: false,
-        }))
-        .expect("find compatible GPU adapter");
+    /// Initializes the renderer asynchronously from any pre-created `wgpu::Surface` (desktop or canvas).
+    pub async fn new_from_surface(
+        instance: &wgpu::Instance,
+        surface: wgpu::Surface<'static>,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, String> {
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+                apply_limit_buckets: false,
+            })
+            .await
+            .map_err(|e| format!("find compatible GPU adapter: {e}"))?;
 
         let adapter_info = adapter.get_info();
+        let backend_name = format!("{:?}", adapter_info.backend);
         info!(
             gpu = %adapter_info.name,
-            backend = ?adapter_info.backend,
+            backend = %backend_name,
             "Initialized wgpu adapter"
         );
 
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("cs16-device"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::default(),
-            ..Default::default()
-        }))
-        .expect("create wgpu device");
+        let limits = required_limits_for_adapter(&adapter);
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("cs16-device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: limits,
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| format!("create wgpu device: {e}"))?;
 
         let caps = surface.get_capabilities(&adapter);
         let format = caps
@@ -107,7 +141,7 @@ impl Renderer {
             .iter()
             .copied()
             .find(|f| !f.is_srgb())
-            .unwrap_or(caps.formats[0]);
+            .ok_or_else(|| "surface reported no supported texture formats".to_string())?;
 
         let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
             wgpu::PresentMode::Mailbox
@@ -127,8 +161,8 @@ impl Renderer {
             usage: surface_usage,
             format,
             color_space: wgpu::SurfaceColorSpace::Auto,
-            width: size.width.max(1),
-            height: size.height.max(1),
+            width: width.max(1),
+            height: height.max(1),
             present_mode,
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
@@ -153,7 +187,7 @@ impl Renderer {
             },
         );
 
-        Self {
+        Ok(Self {
             surface,
             device,
             queue,
@@ -169,7 +203,8 @@ impl Renderer {
             fx,
             egui_renderer,
             adapter_name: adapter_info.name,
-        }
+            backend_name,
+        })
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -249,22 +284,27 @@ impl Renderer {
             }
         };
 
-        let capture_tex = screenshot_path.map(|_| {
-            self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("cs16_screenshot_target"),
-                size: wgpu::Extent3d {
-                    width: self.config.width.max(1),
-                    height: self.config.height.max(1),
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: self.config.format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-                view_formats: &[],
+        let capture_tex = if cfg!(not(target_arch = "wasm32")) {
+            screenshot_path.map(|_| {
+                self.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("cs16_screenshot_target"),
+                    size: wgpu::Extent3d {
+                        width: self.config.width.max(1),
+                        height: self.config.height.max(1),
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: self.config.format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                })
             })
-        });
+        } else {
+            let _ = screenshot_path;
+            None
+        };
 
         let view = if let Some(ref tex) = capture_tex {
             tex.create_view(&wgpu::TextureViewDescriptor::default())
@@ -554,7 +594,8 @@ impl Renderer {
                 .render(&mut pass_static, egui_jobs, &screen_desc);
         }
 
-        // Optional GPU readback for `screenshot` / `--screenshot`
+        // Optional GPU readback for `screenshot` / `--screenshot` (native only)
+        #[cfg(not(target_arch = "wasm32"))]
         let staging = if let (Some(tex), Some(_)) = (&capture_tex, screenshot_path) {
             let w = self.config.width.max(1);
             let h = self.config.height.max(1);
@@ -613,10 +654,13 @@ impl Renderer {
         } else {
             None
         };
+        #[cfg(target_arch = "wasm32")]
+        let _ = capture_tex;
 
         self.queue
             .submit(extra_cmds.into_iter().chain(std::iter::once(encoder.finish())));
 
+        #[cfg(not(target_arch = "wasm32"))]
         if let (Some((buf, w, h, padded_bpr)), Some(out_path)) = (staging, screenshot_path) {
             let slice = buf.slice(..);
             let (tx, rx) = std::sync::mpsc::channel();
@@ -647,7 +691,7 @@ impl Renderer {
                 buf.unmap();
                 if let Err(err) = image::save_buffer(out_path, &rgba, w, h, image::ColorType::Rgba8)
                 {
-                    error!(path = %out_path.display(), %err, "Failed to save screenshot PNG");
+                    tracing::error!(path = %out_path.display(), %err, "Failed to save screenshot PNG");
                 } else {
                     info!(path = %out_path.display(), width = w, height = h, "Saved GPU screenshot");
                 }
@@ -698,9 +742,21 @@ fn create_depth_view(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Te
 mod tests {
     use super::*;
 
+    #[test]
+    fn webgl2_limits_fit_lightmap_atlas() {
+        let gl_limits = wgpu::Limits::downlevel_webgl2_defaults();
+        assert!(
+            gl_limits.max_texture_dimension_2d >= cs_assets::bsp::LIGHTMAP_ATLAS_SIZE,
+            "WebGL2 texture dimension {} smaller than lightmap atlas {}",
+            gl_limits.max_texture_dimension_2d,
+            cs_assets::bsp::LIGHTMAP_ATLAS_SIZE
+        );
+    }
+
     /// Headless device for pipeline/shader validation; `None` when the machine has no adapter.
     /// The GPU test below is a no-op in that case (it returns without assertions, like the other
     /// environment-dependent tests), so a green run does not prove the WGSL compiles.
+    #[cfg(not(target_arch = "wasm32"))]
     fn headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -719,6 +775,7 @@ mod tests {
         .ok()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn scene_renderers_build_on_a_headless_device() {
         let Some((device, queue)) = headless_device() else {

@@ -115,49 +115,53 @@ pub fn apply_vgui2_theme(ctx: &egui::Context, palette: VguiPalette) {
 }
 
 fn install_vgui_fonts(ctx: &egui::Context) {
+    #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
     let mut fonts = egui::FontDefinitions::default();
 
-    let proportional_candidates = [
-        r"C:\Windows\Fonts\tahoma.ttf",
-        r"C:\Windows\Fonts\verdana.ttf",
-        r"C:\Windows\Fonts\segoeui.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/System/Library/Fonts/Supplemental/Tahoma.ttf",
-    ];
-    for path in proportional_candidates {
-        if let Ok(bytes) = std::fs::read(path) {
-            fonts.font_data.insert(
-                "vgui_prop".to_owned(),
-                std::sync::Arc::new(egui::FontData::from_owned(bytes)),
-            );
-            fonts
-                .families
-                .entry(FontFamily::Proportional)
-                .or_default()
-                .insert(0, "vgui_prop".to_owned());
-            break;
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let proportional_candidates = [
+            r"C:\Windows\Fonts\tahoma.ttf",
+            r"C:\Windows\Fonts\verdana.ttf",
+            r"C:\Windows\Fonts\segoeui.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/System/Library/Fonts/Supplemental/Tahoma.ttf",
+        ];
+        for path in proportional_candidates {
+            if let Ok(bytes) = std::fs::read(path) {
+                fonts.font_data.insert(
+                    "vgui_prop".to_owned(),
+                    std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+                );
+                fonts
+                    .families
+                    .entry(FontFamily::Proportional)
+                    .or_default()
+                    .insert(0, "vgui_prop".to_owned());
+                break;
+            }
         }
-    }
 
-    let mono_candidates = [
-        r"C:\Windows\Fonts\consola.ttf",
-        r"C:\Windows\Fonts\lucon.ttf",
-        r"C:\Windows\Fonts\cour.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-        "/System/Library/Fonts/Menlo.ttc",
-    ];
-    for path in mono_candidates {
-        if let Ok(bytes) = std::fs::read(path) {
-            fonts.font_data.insert(
-                "vgui_mono".to_owned(),
-                std::sync::Arc::new(egui::FontData::from_owned(bytes)),
-            );
-            fonts
-                .families
-                .entry(FontFamily::Monospace)
-                .or_default()
-                .insert(0, "vgui_mono".to_owned());
-            break;
+        let mono_candidates = [
+            r"C:\Windows\Fonts\consola.ttf",
+            r"C:\Windows\Fonts\lucon.ttf",
+            r"C:\Windows\Fonts\cour.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+            "/System/Library/Fonts/Menlo.ttc",
+        ];
+        for path in mono_candidates {
+            if let Ok(bytes) = std::fs::read(path) {
+                fonts.font_data.insert(
+                    "vgui_mono".to_owned(),
+                    std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+                );
+                fonts
+                    .families
+                    .entry(FontFamily::Monospace)
+                    .or_default()
+                    .insert(0, "vgui_mono".to_owned());
+                break;
+            }
         }
     }
 

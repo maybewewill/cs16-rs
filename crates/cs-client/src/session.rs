@@ -21,7 +21,7 @@ use cs_transport::{PeerAddr, UdpTransport};
 use cs_vfs::Vfs;
 use glam::Vec3;
 
-use crate::view::{FrameView, MapFxWorld, ViewBuilder, ViewInputs};
+use cs_client::view::{FrameView, MapFxWorld, ViewBuilder, ViewInputs};
 
 /// The port a server listens on when the address has none.
 pub const DEFAULT_PORT: u16 = 27015;
@@ -371,7 +371,7 @@ impl Session {
         &mut self,
         view_angles: Vec3,
         inputs: &ViewInputs,
-    ) -> Option<(FrameView, Option<crate::render::scene::ModelRegistry>)> {
+    ) -> Option<(FrameView, Option<cs_client::render::scene::ModelRegistry>)> {
         let Session { kind, view, .. } = self;
         match kind {
             Kind::None => None,
@@ -384,8 +384,8 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::input::{CmdParams, Held, MoveSpeeds, build_usercmd};
-    use crate::view::ViewInputs;
+    use cs_client::input::{CmdParams, Held, MoveSpeeds, build_usercmd};
+    use cs_client::view::ViewInputs;
     use cs_assets::bsp::BspMap;
     use cs_vfs::VfsConfig;
     use std::collections::HashSet;

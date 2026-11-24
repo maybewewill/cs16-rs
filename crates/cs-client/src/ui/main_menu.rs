@@ -1,10 +1,13 @@
 //! Iconic CS 1.6 Main Menu (stitched `800_*_loading.tga` background + bottom-left menu items),
 //! `New Game` VGUI2 dialog, and `Find Servers` VGUI2 dialog.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
 use cs_cvar::{CVarRegistry, EngineAction};
-use cs_proto48::query::{ServerQueryInfo, discover_goldsrc_lan_servers};
+use cs_proto48::query::ServerQueryInfo;
+#[cfg(not(target_arch = "wasm32"))]
+use cs_proto48::query::discover_goldsrc_lan_servers;
 use egui::{Color32, CornerRadius, FontId, Pos2, Rect, RichText, Stroke, TextureHandle};
 
 use crate::ui::vgui_assets::show_steam2003_window;
@@ -370,7 +373,11 @@ impl MainMenuUi {
                             .add(egui::Button::new("Refresh LAN").corner_radius(CornerRadius::ZERO))
                             .clicked()
                         {
-                            self.lan_servers = discover_goldsrc_lan_servers(Duration::from_millis(300));
+                            #[cfg(not(target_arch = "wasm32"))]
+                            {
+                                self.lan_servers =
+                                    discover_goldsrc_lan_servers(Duration::from_millis(300));
+                            }
                         }
                     });
                 },

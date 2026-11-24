@@ -55,6 +55,7 @@ cs-pm = { path = "crates/cs-pm" }
 cs-engine = { path = "crates/cs-engine" }
 cs-probe = { path = "crates/cs-probe" }
 cs-clientcore = { path = "crates/cs-clientcore" }
+cs-client = { path = "crates/cs-client" }
 cs-local = { path = "crates/cs-local" }
 cs-sim = { path = "crates/cs-sim" }
 cs-game = { path = "crates/cs-game" }
