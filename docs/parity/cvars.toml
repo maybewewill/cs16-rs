@@ -881,7 +881,7 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cf
 [[item]]
 id = "cl_bob"
 status = "tested"
-evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs; crates/cs-client/tests/phase8_render.rs::view_effects_camera_fov_and_screen_fade_behave_like_goldsrc"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs; crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps"
 
 [[item]]
 id = "cl_charset"
@@ -1176,7 +1176,7 @@ evidence = "crates/cs-cvar/src/lib.rs::executes_cvars_binds_aliases_and_roundtri
 [[item]]
 id = "default_fov"
 status = "tested"
-evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/camera.rs; crates/cs-client/tests/phase8_render.rs::view_effects_camera_fov_and_screen_fade_behave_like_goldsrc"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/camera.rs; crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps"
 
 [[item]]
 id = "delta_clear"
@@ -3126,7 +3126,7 @@ evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/app.rs; crates/
 [[item]]
 id = "viewmodel_fov"
 status = "tested"
-evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/camera.rs; crates/cs-client/tests/phase8_render.rs::view_effects_camera_fov_and_screen_fade_behave_like_goldsrc"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/camera.rs; crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps"
 
 [[item]]
 id = "r_lightmap"
@@ -3146,24 +3146,24 @@ evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/render/gamma.rs
 [[item]]
 id = "cl_bobcycle"
 status = "tested"
-evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs; crates/cs-client/tests/phase8_render.rs::view_effects_camera_fov_and_screen_fade_behave_like_goldsrc"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs; crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps"
 
 [[item]]
 id = "cl_bobup"
 status = "tested"
-evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs; crates/cs-client/tests/phase8_render.rs::view_effects_camera_fov_and_screen_fade_behave_like_goldsrc"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs; crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps"
 
 [[item]]
 id = "cl_rollangle"
 status = "tested"
-evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs; crates/cs-client/tests/phase8_render.rs::view_effects_camera_fov_and_screen_fade_behave_like_goldsrc"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs; crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps"
 
 [[item]]
 id = "cl_rollspeed"
 status = "tested"
-evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs; crates/cs-client/tests/phase8_render.rs::view_effects_camera_fov_and_screen_fade_behave_like_goldsrc"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs; crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps"
 
 [[item]]
 id = "cl_viewmodel_lag"
 status = "tested"
-evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs; crates/cs-client/tests/phase8_render.rs::view_effects_camera_fov_and_screen_fade_behave_like_goldsrc"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs; crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps"
