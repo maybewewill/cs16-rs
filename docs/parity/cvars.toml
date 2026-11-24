@@ -433,8 +433,8 @@ evidence = "ActionInput dispatch in crates/cs-cvar/src/lib.rs and legacy cs-clie
 
 [[item]]
 id = "+commandmenu"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/gfx/shell/kb_act.lst)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-cvar/src/lib.rs; crates/cs-client/src/ui/screens/command_menu.rs; crates/cs-client/tests/phase10_ui.rs::ui_screen_command_menu_evaluates_map_conditions_and_submenus"
 
 [[item]]
 id = "+duck"
@@ -1013,8 +1013,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cf
 
 [[item]]
 id = "cl_radartype"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/ui/hud.rs; crates/cs-client/tests/phase10_ui.rs::ui_hud_radar_and_nvg_overlay_renders_teammates_and_radartype"
 
 [[item]]
 id = "cl_scoreboard_bg"
@@ -1123,8 +1123,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cf
 
 [[item]]
 id = "con_color"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/ui/console.rs; crates/cs-client/src/ui/hud.rs; crates/cs-client/tests/phase10_ui.rs::ui_hud_killfeed_chat_radio_netgraph_respects_con_color_and_saytext"
 
 [[item]]
 id = "con_fontnum"
@@ -1493,8 +1493,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.
 
 [[item]]
 id = "hud_centerid"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs (registered); crates/cs-client/src/ui/hud.rs (HudExtrasContext::apply_cvars reads hud_centerid to position StatusText bar)"
 
 [[item]]
 id = "hud_classautokill"
@@ -1508,13 +1508,13 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.
 
 [[item]]
 id = "hud_draw"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs (registered); crates/cs-client/src/ui/hud.rs (gates status HUD drawing when 0)"
 
 [[item]]
 id = "hud_saytext_internal"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/ui/hud.rs; crates/cs-client/tests/phase10_ui.rs::ui_hud_killfeed_chat_radio_netgraph_respects_con_color_and_saytext"
 
 [[item]]
 id = "hud_scale"
@@ -1523,8 +1523,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cf
 
 [[item]]
 id = "hud_takesshots"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs (registered for scoreboard auto-shot option)"
 
 [[item]]
 id = "hud_textmode"
@@ -2578,8 +2578,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.
 
 [[item]]
 id = "spec_pip"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs (registered for Options/Spectator PIP cvar)"
 
 [[item]]
 id = "startdemos"
@@ -3038,8 +3038,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv
 
 [[item]]
 id = "violence_hblood"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs (registered for Options Lock / Content Control tab)"
 
 [[item]]
 id = "violence_hgibs"
@@ -3185,3 +3185,38 @@ evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-en
 id = "voice_loopback"
 status = "tested"
 evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-web/src/state.rs::tests::web_audio_backend_full_event_pipeline; crates/cs-client/tests/phase9_sound.rs::voice_goldsrc_compat_steam_opus_miles_and_speex"
+
+[[item]]
+id = "cl_language"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs (registered); crates/cs-client/src/app.rs (selects LocalizationTable::load_language on startup)"
+
+[[item]]
+id = "cl_observercrosshair"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs (registered); crates/cs-client/src/ui/screens/spectator.rs (toggled in Spectator Settings)"
+
+[[item]]
+id = "scr_centertime"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/ui/hud.rs; crates/cs-client/tests/phase10_ui.rs::ui_hud_center_and_hint_text_formats_hudtextargs_and_centertime"
+
+[[item]]
+id = "spec_autodirector"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs (registered); crates/cs-client/src/ui/screens/spectator.rs (toggled in Spectator Settings)"
+
+[[item]]
+id = "spec_drawcone"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs (registered); crates/cs-client/src/app.rs (controls overview map view cones)"
+
+[[item]]
+id = "spec_drawnames"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs (registered); crates/cs-client/src/app.rs (controls player names in overview map)"
+
+[[item]]
+id = "spec_drawstatus"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs (registered); crates/cs-client/src/ui/screens/spectator.rs (toggled in Spectator Settings)"
