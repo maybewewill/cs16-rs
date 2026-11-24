@@ -3,6 +3,7 @@
 use cs_cvar::{CVarRegistry, EngineAction, LogLevel};
 use egui::{Color32, CornerRadius, Key, RichText, ScrollArea, Stroke, TextEdit, TextureHandle};
 
+use crate::ui::parse_rgb;
 use crate::ui::vgui_assets::show_steam2003_window;
 use crate::ui::vgui_theme::{VguiPalette, paint_vgui_bevel};
 
@@ -77,10 +78,12 @@ impl ConsoleUi {
                         .auto_shrink([false, false])
                         .stick_to_bottom(self.scroll_to_bottom)
                         .show(ui, |ui| {
+                            let (cr, cg, cb) = parse_rgb(cvars.get_str("con_color"));
+                            let con_col = Color32::from_rgb(cr, cg, cb);
                             for line in cvars.log_lines() {
                                 let color = match line.level {
-                                    LogLevel::Info => palette.base_text,
-                                    LogLevel::Command => palette.bright_control_text,
+                                    LogLevel::Info => con_col,
+                                    LogLevel::Command => palette.bright_text,
                                     LogLevel::Warning => Color32::from_rgb(235, 190, 95),
                                     LogLevel::Error => Color32::from_rgb(235, 105, 95),
                                 };

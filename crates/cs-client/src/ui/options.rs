@@ -1,6 +1,9 @@
 //! Classic Counter-Strike 1.6 VGUI2 `Options` dialog bound live to `CVarRegistry`.
 
+use cs_assets::scheme::LocalizationTable;
+use cs_assets::vgui_scripts::{ScrOptionKind, SettingsScript};
 use cs_cvar::CVarRegistry;
+use cs_vfs::Vfs;
 use egui::{Color32, CornerRadius, Pos2, RichText, ScrollArea, Stroke, TextureHandle};
 
 use crate::ui::parse_rgb;
@@ -8,20 +11,26 @@ use crate::ui::vgui_assets::show_steam2003_window;
 use crate::ui::vgui_theme::{VguiPalette, paint_vgui_bevel, vgui_tab};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum OptionsTab {
+pub enum OptionsTab {
     #[default]
     Multiplayer,
     Keyboard,
     Mouse,
     Audio,
     Video,
+    Voice,
+    Lock,
 }
 
 #[derive(Default)]
 pub struct OptionsUi {
     pub open: bool,
-    tab: OptionsTab,
+    pub tab: OptionsTab,
     rebinding_cmd: Option<String>,
+    pub advanced_open: bool,
+    pub user_script: Option<SettingsScript>,
+    pub lock_password: String,
+    pub content_locked: bool,
     pub save_requested: bool,
     pub hd_models_changed: bool,
 }
@@ -39,6 +48,8 @@ const STANDARD_BIND_ACTIONS: &[(&str, &str)] = &[
     ("Reload", "+reload"),
     ("Use item", "+use"),
     ("Buy menu", "buy"),
+    ("Command menu", "+commandmenu"),
+    ("Use voice communication", "+voicerecord"),
     ("Drop weapon", "drop"),
     ("Last weapon used", "lastinv"),
     ("Display scores", "+showscores"),
@@ -46,6 +57,10 @@ const STANDARD_BIND_ACTIONS: &[(&str, &str)] = &[
 ];
 
 impl OptionsUi {
+    pub fn load_user_script(&mut self, vfs: &Vfs) {
+        self.user_script = SettingsScript::load(vfs, "user.scr");
+    }
+
     pub fn show(
         &mut self,
         ctx: &egui::Context,
@@ -100,7 +115,7 @@ impl OptionsUi {
             palette,
             steam_icon,
             |ui| {
-                // Classic VGUI2 top tab strip
+                // Classic VGUI2 top tab strip (`OptionsSub*.res` — 7 tabs)
                 ui.horizontal(|ui| {
                     for (t, label) in [
                         (OptionsTab::Multiplayer, "Multiplayer"),
@@ -108,6 +123,8 @@ impl OptionsUi {
                         (OptionsTab::Mouse, "Mouse"),
                         (OptionsTab::Audio, "Audio"),
                         (OptionsTab::Video, "Video"),
+                        (OptionsTab::Voice, "Voice"),
+                        (OptionsTab::Lock, "Lock"),
                     ] {
                         if vgui_tab(ui, label, self.tab == t, palette) {
                             self.tab = t;
@@ -122,13 +139,15 @@ impl OptionsUi {
                     .stroke(Stroke::new(1.0, palette.border_dark));
 
                 let body_resp = body_frame.show(ui, |ui| {
-                    ui.set_min_size(egui::vec2(495.0, 315.0));
+                    ui.set_min_size(egui::vec2(525.0, 320.0));
                     match self.tab {
                         OptionsTab::Multiplayer => self.show_multiplayer(ui, cvars, palette),
                         OptionsTab::Keyboard => self.show_keyboard(ui, cvars, palette),
                         OptionsTab::Mouse => self.show_mouse(ui, cvars),
                         OptionsTab::Audio => self.show_audio(ui, cvars),
                         OptionsTab::Video => self.show_video(ui, cvars),
+                        OptionsTab::Voice => self.show_voice(ui, cvars),
+                        OptionsTab::Lock => self.show_lock(ui, cvars, palette),
                     }
                 });
                 paint_vgui_bevel(ui.painter(), body_resp.response.rect, false, palette);
@@ -160,6 +179,40 @@ impl OptionsUi {
 
         if !is_open || close_now {
             self.open = false;
+            self.advanced_open = false;
+        }
+
+        if self.advanced_open {
+            let mut adv = self.advanced_open;
+            show_steam2003_window(
+                ctx,
+                "cs16_vgui_options_advanced",
+                "Multiplayer Advanced",
+                &mut adv,
+                Pos2::new(210.0, 120.0),
+                egui::vec2(440.0, 340.0),
+                egui::vec2(380.0, 260.0),
+                false,
+                palette,
+                steam_icon,
+                |ui| {
+                    let loc_default = LocalizationTable::default();
+                    let _ = &loc_default;
+                    ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                        if let Some(ref scr) = self.user_script {
+                            render_scr_options(ui, cvars, scr, None);
+                        } else {
+                            cvar_checkbox(ui, cvars, "hud_centerid", "Center player ID names (hud_centerid)");
+                            cvar_checkbox(ui, cvars, "hud_takesshots", "Auto-take scoreboard screenshots");
+                            cvar_checkbox(ui, cvars, "cl_radartype", "Solid radar type (cl_radartype)");
+                            cvar_checkbox(ui, cvars, "cl_observercrosshair", "Show crosshair in observer mode");
+                        }
+                    });
+                },
+            );
+            if !adv {
+                self.advanced_open = false;
+            }
         }
     }
 
@@ -248,6 +301,13 @@ impl OptionsUi {
         ui.separator();
         cvar_checkbox(ui, cvars, "cl_righthand", "Right-handed weapon models (cl_righthand)");
         cvar_checkbox(ui, cvars, "hud_fastswitch", "Fast weapon switch (hud_fastswitch)");
+        ui.add_space(6.0);
+        if ui
+            .add(egui::Button::new("Advanced...").corner_radius(CornerRadius::ZERO))
+            .clicked()
+        {
+            self.advanced_open = true;
+        }
     }
 
     fn show_keyboard(&mut self, ui: &mut egui::Ui, cvars: &mut CVarRegistry, palette: VguiPalette) {
@@ -454,6 +514,108 @@ impl OptionsUi {
         {
             cvars.set("cl_hd_models", if hd { "1" } else { "0" });
             self.hd_models_changed = true;
+        }
+    }
+
+    fn show_voice(&mut self, ui: &mut egui::Ui, cvars: &mut CVarRegistry) {
+        cvar_checkbox(ui, cvars, "voice_enable", "Enable voice in this mod (voice_enable)");
+        cvar_checkbox(ui, cvars, "voice_modenable", "Mod voice support (voice_modenable)");
+        cvar_checkbox(ui, cvars, "voice_forcemicrecord", "Force microphone init (voice_forcemicrecord)");
+        cvar_checkbox(ui, cvars, "voice_loopback", "Test microphone loopback (voice_loopback)");
+        let mut vscale = cvars.get_f32("voice_scale").clamp(0.0, 2.0);
+        ui.horizontal(|ui| {
+            ui.label("Voice receive volume:");
+            if ui.add(egui::Slider::new(&mut vscale, 0.0..=2.0).fixed_decimals(2)).changed() {
+                cvars.set("voice_scale", format!("{vscale:.2}"));
+            }
+        });
+        let mut avg = cvars.get_f32("voice_avggain").clamp(0.0, 2.0);
+        ui.horizontal(|ui| {
+            ui.label("Microphone gain target (voice_avggain):");
+            if ui.add(egui::Slider::new(&mut avg, 0.0..=2.0).fixed_decimals(2)).changed() {
+                cvars.set("voice_avggain", format!("{avg:.2}"));
+            }
+        });
+    }
+
+    fn show_lock(&mut self, ui: &mut egui::Ui, cvars: &mut CVarRegistry, palette: VguiPalette) {
+        ui.label(
+            RichText::new("Content Control (ContentControlDialog.res)")
+                .color(palette.bright_control_text),
+        );
+        ui.add_space(4.0);
+        cvar_checkbox(ui, cvars, "violence_hblood", "Enable human blood (violence_hblood)");
+        cvar_checkbox(ui, cvars, "violence_ablood", "Enable alien blood (violence_ablood)");
+        cvar_checkbox(ui, cvars, "violence_hgibs", "Enable human gibs (violence_hgibs)");
+        cvar_checkbox(ui, cvars, "violence_agibs", "Enable alien gibs (violence_agibs)");
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label("Content lock password:");
+            ui.add(egui::TextEdit::singleline(&mut self.lock_password).password(true));
+        });
+        let btn_lbl = if self.content_locked { "Disable Content Lock" } else { "Enable Content Lock" };
+        if ui.button(btn_lbl).clicked() {
+            self.content_locked = !self.content_locked;
+            if self.content_locked {
+                cvars.set("violence_hblood", "0");
+                cvars.set("violence_ablood", "0");
+                cvars.set("violence_hgibs", "0");
+                cvars.set("violence_agibs", "0");
+            }
+        }
+    }
+}
+
+pub fn render_scr_options(
+    ui: &mut egui::Ui,
+    cvars: &mut CVarRegistry,
+    scr: &SettingsScript,
+    loc: Option<&LocalizationTable>,
+) {
+    for opt in &scr.options {
+        let prompt = loc.map_or(opt.prompt.as_str(), |l| l.resolve(&opt.prompt));
+        match &opt.kind {
+            ScrOptionKind::Bool => cvar_checkbox(ui, cvars, &opt.cvar, prompt),
+            ScrOptionKind::String => {
+                let mut v = cvars.get_str(&opt.cvar).to_string();
+                ui.horizontal(|ui| {
+                    ui.label(prompt);
+                    if ui.text_edit_singleline(&mut v).changed() {
+                        cvars.set(&opt.cvar, v);
+                    }
+                });
+            }
+            ScrOptionKind::Number { min, max } => {
+                let mut val = cvars.get_f32(&opt.cvar);
+                let hi = if *max > *min { *max } else { (*min + 100.0).max(16000.0) };
+                ui.horizontal(|ui| {
+                    ui.label(prompt);
+                    if ui.add(egui::DragValue::new(&mut val).range(*min..=hi)).changed() {
+                        cvars.set(&opt.cvar, format!("{val}"));
+                    }
+                });
+            }
+            ScrOptionKind::List(items) => {
+                let cur = cvars.get_str(&opt.cvar).to_string();
+                let sel_lbl = items
+                    .iter()
+                    .find(|(_, v)| v == &cur)
+                    .map(|(k, _)| loc.map_or(k.as_str(), |l| l.resolve(k)))
+                    .unwrap_or(&cur);
+                ui.horizontal(|ui| {
+                    ui.label(prompt);
+                    egui::ComboBox::from_id_salt(&opt.cvar)
+                        .selected_text(sel_lbl)
+                        .show_ui(ui, |ui| {
+                            for (lbl, val) in items {
+                                let txt = loc.map_or(lbl.as_str(), |l| l.resolve(lbl));
+                                if ui.selectable_label(&cur == val, txt).clicked() {
+                                    cvars.set(&opt.cvar, val.clone());
+                                }
+                            }
+                        });
+                });
+            }
         }
     }
 }

@@ -1,15 +1,15 @@
 //! Iconic CS 1.6 Main Menu (stitched `800_*_loading.tga` background + bottom-left menu items),
 //! `New Game` VGUI2 dialog, and `Find Servers` VGUI2 dialog.
 
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Duration;
-
+use cs_assets::scheme::LocalizationTable;
+use cs_assets::vgui_scripts::{GameMenuEntry, SettingsScript};
 use cs_cvar::{CVarRegistry, EngineAction};
-use cs_proto48::query::ServerQueryInfo;
-#[cfg(not(target_arch = "wasm32"))]
-use cs_proto48::query::discover_goldsrc_lan_servers;
+use cs_vfs::Vfs;
 use egui::{Color32, CornerRadius, FontId, Pos2, Rect, RichText, Stroke, TextureHandle};
 
+use crate::ui::options::render_scr_options;
+use crate::ui::screens::ServerBrowserUi;
+use crate::ui::vgui2::VguiRuntime;
 use crate::ui::vgui_assets::show_steam2003_window;
 use crate::ui::vgui_theme::{VguiPalette, paint_vgui_bevel, vgui_tab};
 
@@ -20,24 +20,16 @@ enum NewGameTab {
     Game,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum ServerBrowserTab {
-    #[default]
-    Internet,
-    Favorites,
-    History,
-    Lan,
-}
-
 pub struct MainMenuUi {
     pub visible: bool,
     pub new_game_open: bool,
     pub find_servers_open: bool,
+    pub server_browser: ServerBrowserUi,
     new_game_tab: NewGameTab,
-    server_tab: ServerBrowserTab,
     pub selected_map: String,
-    connect_addr: String,
-    lan_servers: Vec<ServerQueryInfo>,
+    pub game_menu: Vec<GameMenuEntry>,
+    pub settings_script: Option<SettingsScript>,
+    pub loc: Option<LocalizationTable>,
 }
 
 impl Default for MainMenuUi {
@@ -46,11 +38,12 @@ impl Default for MainMenuUi {
             visible: true,
             new_game_open: false,
             find_servers_open: false,
+            server_browser: ServerBrowserUi::default(),
             new_game_tab: NewGameTab::Server,
-            server_tab: ServerBrowserTab::Lan,
             selected_map: "de_dust2".to_string(),
-            connect_addr: "127.0.0.1:27015".to_string(),
-            lan_servers: Vec::new(),
+            game_menu: Vec::new(),
+            settings_script: None,
+            loc: None,
         }
     }
 }
@@ -58,10 +51,18 @@ impl Default for MainMenuUi {
 pub struct MenuCommands {
     pub actions: Vec<EngineAction>,
     pub open_options: bool,
+    pub open_player_list: bool,
+    pub open_demo_player: bool,
     pub resume_game: bool,
 }
 
 impl MainMenuUi {
+    pub fn load_resources(&mut self, vfs: &Vfs, lang: &str) {
+        self.game_menu = GameMenuEntry::load(vfs);
+        self.settings_script = SettingsScript::load(vfs, "settings.scr");
+        self.loc = Some(LocalizationTable::load_language(vfs, lang));
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn show(
         &mut self,
@@ -76,6 +77,8 @@ impl MainMenuUi {
         let mut out = MenuCommands {
             actions: Vec::new(),
             open_options: false,
+            open_player_list: false,
+            open_demo_player: false,
             resume_game: false,
         };
 
@@ -124,37 +127,81 @@ impl MainMenuUi {
                 }
             });
 
-        // 2. Classic bottom-left transparent CS 1.6 menu column (`GameMenu.res` 1:1)
+        // 2. Classic bottom-left transparent CS 1.6 menu column (`resource/GameMenu.res`)
         let menu_x = (screen.width() * 0.042).clamp(24.0, 56.0);
-        let menu_y = (screen.height() - if in_game { 255.0 } else { 195.0 }).max(100.0);
+        let menu_y = (screen.height() - if in_game { 295.0 } else { 210.0 }).max(90.0);
+        let loc_ref = self.loc.as_ref();
         egui::Area::new(egui::Id::unique("cs16_main_menu_items"))
             .order(egui::Order::Middle)
             .fixed_pos(Pos2::new(menu_x, menu_y))
             .show(ctx, |ui| {
-                ui.spacing_mut().item_spacing.y = 8.0;
+                ui.spacing_mut().item_spacing.y = 7.0;
 
-                if in_game {
-                    if menu_link(ui, "Resume Game", palette) {
-                        out.resume_game = true;
+                if !self.game_menu.is_empty() {
+                    let entries = self.game_menu.clone();
+                    for entry in entries {
+                        if entry.only_in_game && !in_game {
+                            continue;
+                        }
+                        if entry.not_multi && in_game {
+                            continue;
+                        }
+                        let raw_label = loc_ref.map_or(entry.label.as_str(), |l| l.resolve(&entry.label));
+                        let label = raw_label.trim();
+                        if label.is_empty() {
+                            continue;
+                        }
+                        if menu_link(ui, label, palette) {
+                            match entry.command.as_str() {
+                                "ResumeGame" => out.resume_game = true,
+                                "Disconnect" => out.actions.push(EngineAction::Disconnect),
+                                "OpenPlayerListDialog" => out.open_player_list = true,
+                                "OpenCreateMultiplayerGameDialog" => self.new_game_open = true,
+                                "OpenServerBrowser" => {
+                                    self.find_servers_open = true;
+                                    self.server_browser.open = true;
+                                }
+                                "OpenOptionsDialog" => out.open_options = true,
+                                "Quit" => out.actions.push(EngineAction::Quit),
+                                cmd => {
+                                    if let Some(rest) = cmd.strip_prefix("engine ") {
+                                        out.actions.extend(cvars.execute_script(rest));
+                                    }
+                                }
+                            }
+                        }
                     }
-                    if menu_link(ui, "Disconnect", palette) {
-                        out.actions.push(EngineAction::Disconnect);
+                } else {
+                    if in_game {
+                        if menu_link(ui, "Resume Game", palette) {
+                            out.resume_game = true;
+                        }
+                        if menu_link(ui, "Disconnect", palette) {
+                            out.actions.push(EngineAction::Disconnect);
+                        }
+                        if menu_link(ui, "Player List", palette) {
+                            out.open_player_list = true;
+                        }
+                        ui.add_space(6.0);
+                    }
+
+                    if menu_link(ui, "New Game", palette) {
+                        self.new_game_open = true;
+                    }
+                    if menu_link(ui, "Find Servers", palette) {
+                        self.find_servers_open = true;
+                        self.server_browser.open = true;
+                    }
+                    if menu_link(ui, "Options", palette) {
+                        out.open_options = true;
+                    }
+                    if menu_link(ui, "Demo Player", palette) {
+                        out.open_demo_player = true;
                     }
                     ui.add_space(6.0);
-                }
-
-                if menu_link(ui, "New Game", palette) {
-                    self.new_game_open = true;
-                }
-                if menu_link(ui, "Find Servers", palette) {
-                    self.find_servers_open = true;
-                }
-                if menu_link(ui, "Options", palette) {
-                    out.open_options = true;
-                }
-                ui.add_space(6.0);
-                if menu_link(ui, "Quit", palette) {
-                    out.actions.push(EngineAction::Quit);
+                    if menu_link(ui, "Quit", palette) {
+                        out.actions.push(EngineAction::Quit);
+                    }
                 }
             });
 
@@ -241,14 +288,14 @@ impl MainMenuUi {
                                     );
                                 }
                                 NewGameTab::Game => {
-                                    cvar_edit_row(ui, cvars, "hostname", "Server name:");
-                                    cvar_edit_row(ui, cvars, "bot_quota", "Bots count (0..15):");
-                                    cvar_edit_row(ui, cvars, "bot_difficulty", "Bot difficulty (0-3):");
-                                    cvar_edit_row(ui, cvars, "mp_roundtime", "Time per round (min):");
-                                    cvar_edit_row(ui, cvars, "mp_freezetime", "Freeze time (sec):");
-                                    cvar_edit_row(ui, cvars, "mp_startmoney", "Starting money ($):");
-                                    cvar_edit_row(ui, cvars, "sv_gravity", "Gravity (sv_gravity):");
-                                    cvar_edit_row(ui, cvars, "sv_airaccelerate", "Air accelerate:");
+                                    egui::ScrollArea::vertical().max_height(215.0).show(ui, |ui| {
+                                        if let Some(ref scr) = self.settings_script {
+                                            render_scr_options(ui, cvars, scr, self.loc.as_ref());
+                                        }
+                                        ui.separator();
+                                        cvar_edit_row(ui, cvars, "bot_quota", "Bots count (0..15):");
+                                        cvar_edit_row(ui, cvars, "bot_difficulty", "Bot difficulty (0-3):");
+                                    });
                                 }
                             }
                         });
@@ -284,105 +331,17 @@ impl MainMenuUi {
             }
         }
 
-        // 4. `Find Servers` Steam 2003 VGUI2 window
+        // 4. `Find Servers` full 6-tab VGUI2 Server Browser window (`DialogServerBrowser.res`)
         if self.find_servers_open {
-            let mut open = self.find_servers_open;
-            show_steam2003_window(
-                ctx,
-                "cs16_vgui_servers",
-                "Servers",
-                &mut open,
-                Pos2::new(150.0, 110.0),
-                egui::vec2(520.0, 320.0),
-                egui::vec2(460.0, 280.0),
-                true,
-                palette,
-                steam_icon,
-                |ui| {
-                    ui.horizontal(|ui| {
-                        for (t, name) in [
-                            (ServerBrowserTab::Internet, "Internet"),
-                            (ServerBrowserTab::Favorites, "Favorites"),
-                            (ServerBrowserTab::History, "History"),
-                            (ServerBrowserTab::Lan, "LAN"),
-                        ] {
-                            if vgui_tab(ui, name, self.server_tab == t, palette) {
-                                self.server_tab = t;
-                            }
-                        }
-                    });
-
-                    let list_resp = egui::Frame::NONE
-                        .fill(palette.window_bg)
-                        .inner_margin(egui::Margin::same(8))
-                        .stroke(Stroke::new(1.0, palette.border_dark))
-                        .show(ui, |ui| {
-                            ui.set_min_size(egui::vec2(490.0, 200.0));
-                            if self.lan_servers.is_empty() {
-                                ui.label(
-                                    RichText::new("No LAN servers discovered yet. Click \"Refresh LAN\" or start one:")
-                                        .color(palette.bright_control_text),
-                                );
-                                ui.label(
-                                    RichText::new("  cs-server --map de_dust2 --port 27015")
-                                        .monospace()
-                                        .color(palette.base_text),
-                                );
-                            } else {
-                                egui::Grid::new("cs16_lan_grid")
-                                    .num_columns(5)
-                                    .min_col_width(64.0)
-                                    .spacing([12.0, 4.0])
-                                    .show(ui, |ui| {
-                                        ui.label(RichText::new("Server").color(palette.bright_control_text));
-                                        ui.label(RichText::new("Map").color(palette.bright_control_text));
-                                        ui.label(RichText::new("Players").color(palette.bright_control_text));
-                                        ui.label(RichText::new("Latency").color(palette.bright_control_text));
-                                        ui.label("");
-                                        ui.end_row();
-                                        for srv in &self.lan_servers {
-                                            ui.label(&srv.name);
-                                            ui.label(&srv.map);
-                                            ui.label(format!("{}/{}", srv.players, srv.max_players));
-                                            ui.label(format!("{} ms", srv.ping_ms));
-                                            if ui
-                                                .add(egui::Button::new("Join").corner_radius(CornerRadius::ZERO))
-                                                .clicked()
-                                            {
-                                                out.actions.push(EngineAction::Connect(srv.addr.clone()));
-                                            }
-                                            ui.end_row();
-                                        }
-                                    });
-                            }
-                        });
-                    paint_vgui_bevel(ui.painter(), list_resp.response.rect, false, palette);
-
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        ui.label("Direct IP:");
-                        ui.text_edit_singleline(&mut self.connect_addr);
-                        if ui
-                            .add(egui::Button::new("Connect").corner_radius(CornerRadius::ZERO))
-                            .clicked()
-                        {
-                            out.actions
-                                .push(EngineAction::Connect(self.connect_addr.clone()));
-                        }
-                        if ui
-                            .add(egui::Button::new("Refresh LAN").corner_radius(CornerRadius::ZERO))
-                            .clicked()
-                        {
-                            #[cfg(not(target_arch = "wasm32"))]
-                            {
-                                self.lan_servers =
-                                    discover_goldsrc_lan_servers(Duration::from_millis(300));
-                            }
-                        }
-                    });
-                },
-            );
-            if !open {
+            self.server_browser.open = true;
+            let mut tmp_rt = VguiRuntime::new();
+            if let Some(addr) = self
+                .server_browser
+                .show(ctx, &mut tmp_rt, None, palette, steam_icon)
+            {
+                out.actions.push(EngineAction::Connect(addr));
+            }
+            if !self.server_browser.open {
                 self.find_servers_open = false;
             }
         }

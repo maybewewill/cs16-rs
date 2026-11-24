@@ -4,6 +4,7 @@
 
 use egui::{Color32, CornerRadius, FontId, Pos2, Rect, Stroke, Vec2};
 
+use crate::ui::vgui2::controls::{ListColumn, VguiListPanelState};
 use crate::ui::vgui_assets::ClientPalette;
 
 /// One row of the board, from `ScoreInfo`, `TeamInfo`, `ScoreAttrib` and the userinfo name.
@@ -225,4 +226,48 @@ pub fn show_scoreboard(
             y += 14.0 * scale;
         }
     }
+
+    let specs: Vec<&ScoreRow> = players
+        .iter()
+        .filter(|p| p.team != "CT" && p.team != "TERRORIST")
+        .collect();
+    if !specs.is_empty() && y + row_h * 2.0 <= rect.bottom() {
+        y += 8.0 * scale;
+        let spec_col = Color32::from_rgb(204, 204, 204);
+        painter.text(
+            Pos2::new(x_name, y),
+            egui::Align2::LEFT_TOP,
+            format!("Spectators ({}): {}", specs.len(), specs.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ")),
+            font_row,
+            spec_col,
+        );
+    }
+}
+
+/// Build a sortable VGUI2 `ListPanel` model matching `ScoreBoard.res` columns.
+pub fn scoreboard_to_list_panel(players: &[ScoreRow], muted_mask: u32) -> VguiListPanelState {
+    let mut state = VguiListPanelState {
+        columns: vec![
+            ListColumn { name: "Player".into(), width: 180 },
+            ListColumn { name: "Team".into(), width: 90 },
+            ListColumn { name: "Score".into(), width: 56 },
+            ListColumn { name: "Deaths".into(), width: 56 },
+            ListColumn { name: "Voice".into(), width: 64 },
+        ],
+        ..Default::default()
+    };
+    state.rows = players
+        .iter()
+        .map(|p| {
+            let muted = p.slot < 32 && (muted_mask & (1u32 << p.slot)) != 0;
+            vec![
+                p.name.clone(),
+                p.team.clone(),
+                p.frags.to_string(),
+                p.deaths.to_string(),
+                if muted { "Muted".into() } else { "OK".into() },
+            ]
+        })
+        .collect();
+    state
 }

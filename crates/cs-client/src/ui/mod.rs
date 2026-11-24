@@ -7,6 +7,7 @@ pub mod main_menu;
 pub mod mod_hud;
 pub mod options;
 pub mod scoreboard;
+pub mod screens;
 pub mod server_menu;
 pub mod vgui2;
 pub mod vgui_assets;
