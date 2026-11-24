@@ -381,5 +381,5 @@ pub fn format_hud_text_entry(
         .and_then(|t| t.get(raw))
         .map(|e| e.text.as_str())
         .unwrap_or(raw);
-    crate::hudtext::format_message(base, args, loc)
+    crate::hudtext::format_message_with_titles(base, args, loc, titles)
 }

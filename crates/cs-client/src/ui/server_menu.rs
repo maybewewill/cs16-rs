@@ -3,24 +3,43 @@
 //! teams or items is known here.
 
 use cs_assets::scheme::LocalizationTable;
+use cs_assets::vgui_scripts::TitlesTable;
 use egui::{Align2, Color32, FontId, Pos2, Rect, Stroke, Vec2};
 
 const AMBER: Color32 = Color32::from_rgb(255, 176, 0);
 
+fn resolve_inline_with_titles(
+    text: &str,
+    loc: Option<&LocalizationTable>,
+    titles: Option<&TitlesTable>,
+) -> String {
+    if let Some(l) = loc {
+        return l.resolve_inline(text, titles);
+    }
+    if let Some(t) = titles {
+        let dummy = LocalizationTable::default();
+        return dummy.resolve_inline(text, Some(t));
+    }
+    text.to_string()
+}
+
 /// The lines of a menu text: `#Token` lines looked up, the colour escapes (`\w` white, `\y`
 /// yellow, `\r` red, `\d` grey, `\R` right-align) removed.
 pub fn menu_lines(raw: &str, loc: Option<&LocalizationTable>) -> Vec<String> {
-    let resolved = match loc {
-        Some(l) if raw.starts_with('#') => l.resolve(raw).to_string(),
-        _ => raw.to_string(),
-    };
+    menu_lines_with_titles(raw, loc, None)
+}
+
+/// Resolves `#Token` lines via both `LocalizationTable` and `TitlesTable`.
+pub fn menu_lines_with_titles(
+    raw: &str,
+    loc: Option<&LocalizationTable>,
+    titles: Option<&TitlesTable>,
+) -> Vec<String> {
+    let resolved = resolve_inline_with_titles(raw, loc, titles);
     resolved
         .lines()
         .map(|line| {
-            let line = match loc {
-                Some(l) if line.starts_with('#') => l.resolve(line),
-                _ => line,
-            };
+            let line = resolve_inline_with_titles(line, loc, titles);
             let mut out = String::new();
             let mut chars = line.chars().peekable();
             while let Some(c) = chars.next() {
@@ -70,18 +89,22 @@ pub struct StyledMenuLine {
 
 /// Parse `ShowMenu` text preserving `\w` white, `\y` yellow, `\r` red, `\d` grey, and `\R` right-align.
 pub fn menu_styled_lines(raw: &str, loc: Option<&LocalizationTable>) -> Vec<StyledMenuLine> {
-    let resolved = match loc {
-        Some(l) if raw.starts_with('#') => l.resolve(raw).to_string(),
-        _ => raw.to_string(),
-    };
+    menu_styled_lines_with_titles(raw, loc, None)
+}
+
+/// Parse `ShowMenu` text preserving GoldSrc/AMX colour spans while resolving `#Token`s via both
+/// `LocalizationTable` and `TitlesTable`.
+pub fn menu_styled_lines_with_titles(
+    raw: &str,
+    loc: Option<&LocalizationTable>,
+    titles: Option<&TitlesTable>,
+) -> Vec<StyledMenuLine> {
+    let resolved = resolve_inline_with_titles(raw, loc, titles);
     let mut color = MenuSpanColor::Yellow;
     resolved
         .lines()
         .map(|line| {
-            let line = match loc {
-                Some(l) if line.starts_with('#') => l.resolve(line),
-                _ => line,
-            };
+            let line = resolve_inline_with_titles(line, loc, titles);
             let mut spans: Vec<(MenuSpanColor, String)> = Vec::new();
             let mut cur = String::new();
             let mut right: Option<String> = None;
@@ -220,5 +243,19 @@ mod tests {
         assert!(menu_key_enabled(keys, 2));
         assert!(!menu_key_enabled(keys, 3));
         assert!(menu_key_enabled(keys, 0));
+    }
+
+    #[test]
+    fn resolves_team_select_spect_tokens() {
+        let mut loc = LocalizationTable::default();
+        loc.insert_text(
+            "\"Tokens\"\n{\n\"Cstrike_TitlesTXT_Team_Select_Spect\" \"Select a team\\n1. Terrorist Force\\n2. Counter-Terrorist Force\"\n}",
+        );
+        let styled = menu_styled_lines_with_titles("\\y#Team_Select_Spect", Some(&loc), None);
+        assert_eq!(
+            styled[0].spans[0].1,
+            "Select a team"
+        );
+        assert_eq!(styled[1].spans[0].1, "1. Terrorist Force");
     }
 }

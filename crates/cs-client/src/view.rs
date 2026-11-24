@@ -221,6 +221,7 @@ pub struct FrameView {
     pub reload_sounds: Vec<(u8, u8)>,
     pub custom_decals: HashMap<u8, CustomDecalInfo>,
     pub alive: bool,
+    pub observer_mode: i32,
     pub stats: ViewStats,
 }
 
@@ -286,6 +287,20 @@ impl Default for ViewBuilder {
     fn default() -> Self {
         Self::new()
     }
+}
+
+const FL_SPECTATOR: u32 = 1 << 12;
+const WEAPON_SUIT_BIT: u32 = 1 << 31;
+
+/// GoldSrc `UpdateClientData` leaves `cd.deadflag == 0` and `cd.health == 100.0` while a
+/// joining player sits on the intro camera, marking them with `FL_SPECTATOR` (`1 << 12`)
+/// and omitting the HEV suit bit (`1 << WEAPON_SUIT`, bit 31). Observers set `cd.iuser1 != 0`.
+pub(crate) fn is_client_alive(cd: &cs_proto48::delta::GoldSrcClientData) -> bool {
+    cd.deadflag == 0
+        && cd.health > 0.0
+        && (cd.flags & FL_SPECTATOR) == 0
+        && cd.iuser1 == 0
+        && (cd.weapons & WEAPON_SUIT_BIT) != 0
 }
 
 impl ViewBuilder {
@@ -457,7 +472,7 @@ impl ViewBuilder {
         let local_number = slot.map(|s| u16::from(s) + 1);
         // The predicted player (the server's origin while the map's collision is not set).
         let prediction = conn.predictor().prediction().clone();
-        let (mut eye, mut punch, mut fov, alive, weaponanim, viewmodel_index) = match &cd {
+        let (mut eye, mut punch, mut fov, alive, observer_mode, weaponanim, viewmodel_index) = match &cd {
             Some(cd) => (
                 if prediction.predicted {
                     prediction.simorg + prediction.viewheight
@@ -470,11 +485,12 @@ impl ViewBuilder {
                     cd.punchangle
                 },
                 cd.fov,
-                cd.deadflag == 0 && cd.health > 0.0,
+                is_client_alive(cd),
+                cd.iuser1,
                 cd.weaponanim,
                 cd.viewmodel,
             ),
-            None => (Vec3::ZERO, Vec3::ZERO, 0.0, false, 0, 0),
+            None => (Vec3::ZERO, Vec3::ZERO, 0.0, false, 0, 0, 0),
         };
         if !eye.is_finite() {
             eye = Vec3::ZERO;
@@ -792,6 +808,7 @@ impl ViewBuilder {
                 reload_sounds,
                 custom_decals,
                 alive,
+                observer_mode,
                 stats,
             },
             registry_changed.then(|| self.models.clone()),
@@ -1379,5 +1396,44 @@ mod tests {
         assert_eq!(b.models.get(h).map(|e| e.name.as_str()), Some("models/shell.mdl"));
         // Unchanged: no rebuild.
         assert!(!b.ensure_registry(&precache));
+    }
+
+    #[test]
+    fn intro_camera_client_data_is_not_alive() {
+        let cd = cs_proto48::delta::GoldSrcClientData {
+            deadflag: 0,
+            health: 100.0,
+            flags: (1 << 3) | FL_SPECTATOR,
+            weapons: 0,
+            iuser1: 0,
+            ..Default::default()
+        };
+        assert!(!is_client_alive(&cd));
+    }
+
+    #[test]
+    fn spawned_player_client_data_is_alive() {
+        let cd = cs_proto48::delta::GoldSrcClientData {
+            deadflag: 0,
+            health: 100.0,
+            flags: 1 << 3,
+            weapons: WEAPON_SUIT_BIT,
+            iuser1: 0,
+            ..Default::default()
+        };
+        assert!(is_client_alive(&cd));
+    }
+
+    #[test]
+    fn observer_client_data_is_not_alive() {
+        let cd = cs_proto48::delta::GoldSrcClientData {
+            deadflag: 0,
+            health: 100.0,
+            flags: 1 << 3,
+            weapons: WEAPON_SUIT_BIT,
+            iuser1: 4,
+            ..Default::default()
+        };
+        assert!(!is_client_alive(&cd));
     }
 }

@@ -30,7 +30,7 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 use crate::audio::{AudioEngine, ListenerState};
 use crate::session::Session;
 use cs_client::camera::Camera;
-use cs_client::hudtext::format_message;
+use cs_client::hudtext::format_message_with_titles;
 use cs_client::input::{
     CmdClock, CmdParams, ConsoleRoute, Held, MoveSpeeds, build_usercmd, route_unknown,
 };
@@ -41,7 +41,10 @@ use cs_client::render::scene::ModelRegistry;
 use cs_client::render::{RenderSettings, Renderer, SceneDynamicData};
 use cs_client::ui::chat::ChatInputUi;
 use cs_client::ui::console::ConsoleUi;
-use cs_client::ui::hud::{HudExtrasContext, HudSprites, HudView, draw_cs16_hud_with_extras, draw_voice_speakers};
+use cs_client::ui::hud::{
+    HudExtrasContext, HudSprites, HudView, compute_hud_visibility, draw_cs16_hud_with_extras,
+    draw_voice_speakers,
+};
 use cs_client::ui::hud_extras::{OverviewMapTex, WeaponBucketState, draw_overview_map};
 use cs_pm::collision::Hull;
 use cs_client::ui::main_menu::MainMenuUi;
@@ -54,7 +57,7 @@ use cs_client::ui::screens::{
     VguiMenuKind,
 };
 use cs_client::ui::server_menu::{
-    draw_styled_text_menu, draw_text_menu, menu_key_enabled, menu_styled_lines,
+    draw_styled_text_menu, draw_text_menu, menu_key_enabled, menu_styled_lines_with_titles,
 };
 use cs_client::ui::vgui2::{VguiRuntime, install_scheme_fonts_into_egui};
 use cs_client::ui::vgui_assets::VguiAssetBank;
@@ -75,13 +78,36 @@ pub struct LaunchConfig {
     pub startup_exec: Vec<String>,
     pub auto_screenshot: Option<PathBuf>,
     pub startup_ui: Option<String>,
+    pub headless: bool,
+    pub width: u32,
+    pub height: u32,
+    pub wait_camera: u32,
+    pub wait_seconds: Option<f32>,
+}
+
+impl Default for LaunchConfig {
+    fn default() -> Self {
+        Self {
+            gamedir: None,
+            startup_map: None,
+            open_console: false,
+            startup_exec: Vec::new(),
+            auto_screenshot: None,
+            startup_ui: None,
+            headless: false,
+            width: 1280,
+            height: 720,
+            wait_camera: 1,
+            wait_seconds: None,
+        }
+    }
 }
 
 struct WindowRuntime {
-    window: Arc<Window>,
+    window: Option<Arc<Window>>,
     renderer: Renderer,
     egui_ctx: egui::Context,
-    egui_state: egui_winit::State,
+    egui_state: Option<egui_winit::State>,
     bg_texture: Option<egui::TextureHandle>,
     hud_sprites: Option<HudSprites>,
     vgui_bank: VguiAssetBank,
@@ -324,22 +350,25 @@ impl Cs16App {
         if let Some(rt) = &mut self.runtime
             && rt.cursor_captured != want
         {
-            if want {
-                let grabbed = rt
-                    .window
-                    .set_cursor_grab(CursorGrabMode::Locked)
-                    .or_else(|_| rt.window.set_cursor_grab(CursorGrabMode::Confined));
-                if grabbed.is_ok() {
-                    rt.window.set_cursor_visible(false);
-                    rt.cursor_captured = true;
+            if let Some(win) = &rt.window {
+                if want {
+                    let grabbed = win
+                        .set_cursor_grab(CursorGrabMode::Locked)
+                        .or_else(|_| win.set_cursor_grab(CursorGrabMode::Confined));
+                    if grabbed.is_ok() {
+                        win.set_cursor_visible(false);
+                        rt.cursor_captured = true;
+                    }
+                } else {
+                    let _ = win.set_cursor_grab(CursorGrabMode::None);
+                    win.set_cursor_visible(true);
+                    rt.cursor_captured = false;
+                    self.active_actions.clear();
+                    self.mouse1_held = false;
+                    self.mouse2_held = false;
                 }
             } else {
-                let _ = rt.window.set_cursor_grab(CursorGrabMode::None);
-                rt.window.set_cursor_visible(true);
-                rt.cursor_captured = false;
-                self.active_actions.clear();
-                self.mouse1_held = false;
-                self.mouse2_held = false;
+                rt.cursor_captured = want;
             }
         }
     }
@@ -355,10 +384,12 @@ impl Cs16App {
         let collision = Arc::new(WorldCollision::from_bsp(&map));
         if let Some(rt) = &mut self.runtime {
             rt.renderer.load_map(&map, &sky);
-            rt.window.set_title(&format!(
-                "Counter-Strike 1.6 (Rust) - {} [{}]",
-                map.name, rt.renderer.adapter_name
-            ));
+            if let Some(win) = &rt.window {
+                win.set_title(&format!(
+                    "Counter-Strike 1.6 (Rust) - {} [{}]",
+                    map.name, rt.renderer.adapter_name
+                ));
+            }
         }
         // The prediction walks the map's hulls and the effects trace against it; the sound
         // surfaces come with the materials file.
@@ -485,7 +516,9 @@ impl Cs16App {
             rt.renderer.set_entity_scene(None);
             rt.renderer.set_model_registry(ModelRegistry::default());
             rt.renderer.clear_model_caches();
-            rt.window.set_title("Counter-Strike 1.6 (Rust)");
+            if let Some(win) = &rt.window {
+                win.set_title("Counter-Strike 1.6 (Rust)");
+            }
         }
         self.audio.stop_all();
         self.feeds = HudFeeds::default();
@@ -612,6 +645,7 @@ impl Cs16App {
     /// Moves what the HUD state collects into the timed logs the HUD draws.
     fn collect_hud_feeds(&mut self, now: f64) {
         let loc = self.loc.as_ref();
+        let titles = Some(&self.titles);
         let feeds = &mut self.feeds;
         let weapon = self
             .session
@@ -620,14 +654,15 @@ impl Cs16App {
                     feeds.deaths.push((d, now));
                 }
                 for line in hud.chat.drain(..) {
-                    let text = format_message(&line.text, &line.params, loc);
+                    let text = format_message_with_titles(&line.text, &line.params, loc, titles);
                     if !text.is_empty() {
                         feeds.chat.push((text, now));
                     }
                 }
                 let mut got_dest4 = false;
                 for line in hud.text.drain(..) {
-                    let text = format_message(&line.message, &line.params, loc);
+                    let text =
+                        format_message_with_titles(&line.message, &line.params, loc, titles);
                     if text.is_empty() {
                         continue;
                     }
@@ -644,7 +679,7 @@ impl Cs16App {
                 if let Some(text) = hud.center_print.take()
                     && !got_dest4
                 {
-                    let text = format_message(&text, &[], loc);
+                    let text = format_message_with_titles(&text, &[], loc, titles);
                     feeds.center = Some((text, now));
                 }
                 if hud
@@ -705,7 +740,11 @@ impl Cs16App {
         }
     }
 
-    fn process_actions(&mut self, actions: Vec<EngineAction>, event_loop: &ActiveEventLoop) {
+    fn process_actions(
+        &mut self,
+        actions: Vec<EngineAction>,
+        event_loop: Option<&ActiveEventLoop>,
+    ) -> bool {
         let mut queue = actions;
         let mut guard = 0usize;
         while !queue.is_empty() && guard < 32 {
@@ -723,8 +762,10 @@ impl Cs16App {
                             self.save_config();
                         }
                         self.end_session();
-                        event_loop.exit();
-                        return;
+                        if let Some(el) = event_loop {
+                            el.exit();
+                        }
+                        return true;
                     }
                     EngineAction::ExecFile(file) => queue.extend(self.exec_cfg_file(&file)),
                     EngineAction::WriteConfig => self.save_config(),
@@ -942,6 +983,7 @@ impl Cs16App {
                 }
             }
         }
+        false
     }
 
     fn server_console(&mut self, line: &str) {
@@ -1017,7 +1059,7 @@ impl Cs16App {
         }
 
         if code == KeyCode::Escape && pressed && !event.repeat {
-            self.process_actions(vec![EngineAction::ToggleMenu], event_loop);
+            let _ = self.process_actions(vec![EngineAction::ToggleMenu], Some(event_loop));
             return true;
         }
 
@@ -1086,7 +1128,7 @@ impl Cs16App {
             }
             let actions = self.cvars.handle_key_bind(key_name, pressed);
             if !actions.is_empty() {
-                self.process_actions(actions, event_loop);
+                let _ = self.process_actions(actions, Some(event_loop));
                 return true;
             }
         }
@@ -1120,7 +1162,7 @@ impl Cs16App {
         }
     }
 
-    fn render_and_step(&mut self, event_loop: &ActiveEventLoop) {
+    fn render_and_step(&mut self, event_loop: Option<&ActiveEventLoop>) -> bool {
         let now = Instant::now();
         let raw_dt = (now - self.last_frame).as_secs_f32();
         let dt = raw_dt.clamp(0.0001, 0.1);
@@ -1312,6 +1354,12 @@ impl Cs16App {
                     self.feeds.motd_open = true;
                     self.startup_ui_applied = true;
                     self.sync_cursor_capture();
+                } else if m == "none" && self.in_game_frames == 8 {
+                    self.motd_ui.open = false;
+                    self.feeds.motd_open = false;
+                    self.buy_team_class_ui.close();
+                    self.startup_ui_applied = true;
+                    self.sync_cursor_capture();
                 }
             }
             let inputs = ViewInputs {
@@ -1400,7 +1448,7 @@ impl Cs16App {
                 h.menu
                     .as_ref()
                     .filter(|m| !m.multipart && m.keys != 0 && !m.text.is_empty())
-                    .map(|m| menu_styled_lines(&m.text, self.loc.as_ref()))
+                    .map(|m| menu_styled_lines_with_titles(&m.text, self.loc.as_ref(), Some(&self.titles)))
             })
             .flatten();
         let use_vgui_menus = self.cvars.get_bool("_vgui_menus");
@@ -1463,6 +1511,7 @@ impl Cs16App {
             .as_ref()
             .is_some_and(|v| v.fov.is_finite() && v.fov > 0.0 && v.fov <= 40.0);
         let alive = view.as_ref().is_some_and(|v| v.alive);
+        let observer_mode = view.as_ref().map_or(0, |v| v.observer_mode);
 
         let mod_hud_cmds = if in_game {
             let (hp, ap, money) = self
@@ -1486,13 +1535,38 @@ impl Cs16App {
         let mut cancel_loading = false;
 
         let Some(rt) = &mut self.runtime else {
-            return;
+            return false;
         };
-        let raw_input = rt.egui_state.take_egui_input(&rt.window);
+        let raw_input = if let (Some(state), Some(win)) = (&mut rt.egui_state, &rt.window) {
+            state.take_egui_input(win)
+        } else {
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(self.launch.width as f32, self.launch.height as f32),
+                )),
+                time: Some(self.start_time.elapsed().as_secs_f64()),
+                predicted_dt: dt,
+                viewports: std::iter::once((
+                    egui::ViewportId::ROOT,
+                    egui::ViewportInfo {
+                        native_pixels_per_point: Some(1.0),
+                        ..Default::default()
+                    },
+                ))
+                .collect(),
+                ..Default::default()
+            }
+        };
         rt.egui_ctx.begin_pass(raw_input);
 
+        let (hud_hidden, hud_timer_vis) = self
+            .session
+            .with_hud(|h| (h.hidden, h.timer_visible))
+            .unwrap_or((0, false));
+        let hud_vis = compute_hud_visibility(alive, 0, hud_hidden, hud_timer_vis);
         if let Some(v) = &view {
-            if !paused && alive && !scoped {
+            if !paused && hud_vis.crosshair && !scoped {
                 let dyn_gap = if self.cvars.get_bool("cl_dynamiccrosshair") {
                     local_speed / 45.0
                 } else {
@@ -1505,6 +1579,7 @@ impl Cs16App {
                 loc: self.loc.as_ref(),
                 overview: self.overview_tex.as_ref(),
                 buckets: Some(&self.weapon_buckets),
+                observer_mode,
                 ..Default::default()
             };
             extras.apply_cvars(&self.cvars);
@@ -1568,7 +1643,11 @@ impl Cs16App {
                 let scale = (rt.egui_ctx.content_rect().height() / 768.0).clamp(0.85, 1.45);
                 draw_text_menu(&rt.egui_ctx, lines, scale);
             }
-            if !alive && in_game {
+            let modal_menu_open = self.motd_ui.open
+                || self.buy_team_class_ui.active_res.is_some()
+                || styled_menu_now.is_some()
+                || fallback_vgui_lines.is_some();
+            if !alive && in_game && !modal_menu_open && observer_mode != 0 {
                 let spec_actions = self.spectator_ui.show(
                     &rt.egui_ctx,
                     &mut self.vgui_rt,
@@ -1706,8 +1785,9 @@ impl Cs16App {
         ));
 
         let full_output = rt.egui_ctx.end_pass();
-        rt.egui_state
-            .handle_platform_output(&rt.window, full_output.platform_output);
+        if let (Some(state), Some(win)) = (&mut rt.egui_state, &rt.window) {
+            state.handle_platform_output(win, full_output.platform_output);
+        }
         let paint_jobs = rt
             .egui_ctx
             .tessellate(full_output.shapes, full_output.pixels_per_point);
@@ -1775,9 +1855,10 @@ impl Cs16App {
         rt.renderer.set_entity_scene(scene);
         self.mouse_sens_scale = sensitivity_scale;
 
-        let debug_mode = if self.cvars.get_bool("r_lightmap_only") {
+        let debug_mode = if self.cvars.get_bool("r_lightmap") || self.cvars.get_bool("r_lightmap_only")
+        {
             1.0
-        } else if self.cvars.get_bool("r_fullbright") || !self.cvars.get_bool("r_lightmap") {
+        } else if self.cvars.get_bool("r_fullbright") {
             2.0
         } else {
             0.0
@@ -1787,9 +1868,15 @@ impl Cs16App {
         let msaa_samples = if self.cvars.get_i32("gl_msaa") >= 4 { 4 } else { 1 };
         let viewmodel_fov = finite_or(self.cvars.get_f32("viewmodel_fov"), 90.0).clamp(50.0, 120.0);
         let settings = RenderSettings {
-            gamma: finite_or(self.cvars.get_f32("gamma"), 2.5).clamp(1.0, 4.0),
-            texgamma: finite_or(self.cvars.get_f32("texgamma"), 2.0).clamp(0.5, 4.0),
-            brightness: finite_or(self.cvars.get_f32("brightness"), 1.0).clamp(0.3, 2.5),
+            gamma: finite_or(self.cvars.get_f32("gamma"), 2.5).clamp(1.8, 3.0),
+            texgamma: finite_or(self.cvars.get_f32("texgamma"), 2.0).clamp(1.8, 3.0),
+            lightgamma: finite_or(self.cvars.get_f32("lightgamma"), 2.5).clamp(1.8, 3.0),
+            brightness: finite_or(self.cvars.get_f32("brightness"), 0.0).clamp(0.0, 3.0),
+            gl_overbright: self.cvars.get_bool("gl_overbright"),
+            direct: finite_or(self.cvars.get_f32("direct"), 0.9).clamp(0.75, 1.0),
+            gl_picmip: self.cvars.get_i32("gl_picmip").clamp(0, 4),
+            gl_max_size: self.cvars.get_i32("gl_max_size").clamp(64, 4096) as u32,
+            gl_round_down: self.cvars.get_i32("gl_round_down").clamp(0, 3),
             fov_deg: fov,
             viewmodel_fov,
             aspect_mode: self.cvars.get_str("vid_aspect_mode"),
@@ -1833,11 +1920,19 @@ impl Cs16App {
         };
 
         self.frame_count += 1;
+        let min_in_game_frames = self
+            .launch
+            .wait_seconds
+            .map(|s| ((s * 60.0).ceil() as u64).max(24))
+            .unwrap_or(24);
+        let waiting_for_game = self.launch.startup_map.is_some()
+            || !self.launch.startup_exec.is_empty()
+            || self.session.is_active();
         let auto_capture_now = self.launch.auto_screenshot.is_some()
-            && if self.launch.startup_map.is_some() {
-                (self.in_game_frames >= 24
+            && if waiting_for_game {
+                (self.in_game_frames >= min_in_game_frames
                     && (self.startup_ui_applied || self.launch.startup_ui.is_none()))
-                    || self.frame_count >= 140
+                    || self.frame_count >= 600
             } else {
                 self.frame_count == 6
             };
@@ -1858,8 +1953,10 @@ impl Cs16App {
         ) {
             self.last_stats = stats;
             if auto_capture_now && self.exit_after_screenshot {
-                event_loop.exit();
-                return;
+                if let Some(el) = event_loop {
+                    el.exit();
+                }
+                return true;
             }
         }
 
@@ -1924,8 +2021,10 @@ impl Cs16App {
             self.options_ui.save_requested = false;
             self.save_config();
         }
-        if !pending_actions.is_empty() {
-            self.process_actions(pending_actions, event_loop);
+        if !pending_actions.is_empty()
+            && self.process_actions(pending_actions, event_loop)
+        {
+            return true;
         }
         self.sync_cursor_capture();
 
@@ -1940,39 +2039,20 @@ impl Cs16App {
             }
         }
 
-        if let Some(rt) = &self.runtime {
-            rt.window.request_redraw();
+        if let Some(rt) = &self.runtime
+            && let Some(win) = &rt.window
+        {
+            win.request_redraw();
         }
+        false
     }
-}
 
-impl ApplicationHandler for Cs16App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.runtime.is_some() {
-            return;
-        }
-
-        let attrs = Window::default_attributes()
-            .with_title("Counter-Strike 1.6 (Rust)")
-            .with_inner_size(LogicalSize::new(1280.0, 800.0));
-        let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
-
-        let renderer = Renderer::new(Arc::clone(&window));
+    fn init_egui_context(&self) -> (egui::Context, Option<egui::TextureHandle>, Option<HudSprites>, VguiAssetBank) {
         let egui_ctx = egui::Context::default();
         apply_vgui2_theme(&egui_ctx, self.palette);
         if let Some(vfs) = &self.vfs {
             install_scheme_fonts_into_egui(&egui_ctx, vfs, &self.vgui_rt.scheme_fonts);
         }
-
-        let egui_state = egui_winit::State::new(
-            egui_ctx.clone(),
-            egui::ViewportId::ROOT,
-            &window,
-            Some(window.scale_factor() as f32),
-            None,
-            None,
-        );
-
         let bg_texture = self.vfs.as_ref().and_then(|vfs| {
             load_menu_background(vfs).ok().map(|img| {
                 let color_image = egui::ColorImage::from_rgba_unmultiplied(
@@ -1986,33 +2066,24 @@ impl ApplicationHandler for Cs16App {
                 )
             })
         });
-
         let hud_sprites = self
             .vfs
             .as_ref()
             .map(|vfs| HudSprites::load(&egui_ctx, vfs));
         let vgui_bank = VguiAssetBank::load(&egui_ctx, self.vfs.as_ref());
+        (egui_ctx, bg_texture, hud_sprites, vgui_bank)
+    }
 
-        info!(gpu = %renderer.adapter_name, "Counter-Strike 1.6 (Rust) window ready");
-
-        self.runtime = Some(WindowRuntime {
-            window,
-            renderer,
-            egui_ctx,
-            egui_state,
-            bg_texture,
-            hud_sprites,
-            vgui_bank,
-            cursor_captured: false,
-        });
-
+    fn apply_startup_commands(&mut self, event_loop: Option<&ActiveEventLoop>) -> bool {
         if let Some(map) = self.launch.startup_map.clone() {
             self.start_local_map(&map);
         }
         let startup_cmds = std::mem::take(&mut self.launch.startup_exec);
         for cmd in startup_cmds {
             let actions = self.cvars.execute_script(&cmd);
-            self.process_actions(actions, event_loop);
+            if self.process_actions(actions, event_loop) {
+                return true;
+            }
         }
         if let Some(ui_mode) = self.launch.startup_ui.take() {
             match ui_mode.to_ascii_lowercase().as_str() {
@@ -2031,8 +2102,93 @@ impl ApplicationHandler for Cs16App {
             }
             self.sync_cursor_capture();
         }
-        if let Some(rt) = &self.runtime {
-            rt.window.request_redraw();
+        false
+    }
+
+    /// Run headless offscreen without creating any visible OS window (for `cargo xtask visual-diff`).
+    pub fn run_headless(mut self) -> Result<(), String> {
+        let renderer = Renderer::new_headless(self.launch.width, self.launch.height)?;
+        let (egui_ctx, bg_texture, hud_sprites, vgui_bank) = self.init_egui_context();
+        info!(gpu = %renderer.adapter_name, "Counter-Strike 1.6 (Rust) headless runtime ready");
+        self.runtime = Some(WindowRuntime {
+            window: None,
+            renderer,
+            egui_ctx,
+            egui_state: None,
+            bg_texture,
+            hud_sprites,
+            vgui_bank,
+            cursor_captured: false,
+        });
+        if self.apply_startup_commands(None) {
+            self.end_session();
+            return Ok(());
+        }
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            if self.render_and_step(None) {
+                self.end_session();
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(16));
+        }
+        let pending = self.launch.auto_screenshot.take();
+        self.end_session();
+        if let Some(path) = pending {
+            return Err(format!(
+                "headless run timed out after 30s before saving {} (in_game_frames={}, frames={})",
+                path.display(),
+                self.in_game_frames,
+                self.frame_count
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl ApplicationHandler for Cs16App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.runtime.is_some() {
+            return;
+        }
+
+        let attrs = Window::default_attributes()
+            .with_title("Counter-Strike 1.6 (Rust)")
+            .with_inner_size(LogicalSize::new(
+                f64::from(self.launch.width),
+                f64::from(self.launch.height),
+            ));
+        let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
+
+        let renderer = Renderer::new(Arc::clone(&window));
+        let (egui_ctx, bg_texture, hud_sprites, vgui_bank) = self.init_egui_context();
+        let egui_state = egui_winit::State::new(
+            egui_ctx.clone(),
+            egui::ViewportId::ROOT,
+            &window,
+            Some(window.scale_factor() as f32),
+            None,
+            None,
+        );
+
+        info!(gpu = %renderer.adapter_name, "Counter-Strike 1.6 (Rust) window ready");
+
+        self.runtime = Some(WindowRuntime {
+            window: Some(window),
+            renderer,
+            egui_ctx,
+            egui_state: Some(egui_state),
+            bg_texture,
+            hud_sprites,
+            vgui_bank,
+            cursor_captured: false,
+        });
+
+        let _ = self.apply_startup_commands(Some(event_loop));
+        if let Some(rt) = &self.runtime
+            && let Some(win) = &rt.window
+        {
+            win.request_redraw();
         }
     }
 
@@ -2054,9 +2210,10 @@ impl ApplicationHandler for Cs16App {
             WindowEvent::Focused(false) => {
                 if let Some(rt) = &mut self.runtime
                     && rt.cursor_captured
+                    && let Some(win) = &rt.window
                 {
-                    let _ = rt.window.set_cursor_grab(CursorGrabMode::None);
-                    rt.window.set_cursor_visible(true);
+                    let _ = win.set_cursor_grab(CursorGrabMode::None);
+                    win.set_cursor_visible(true);
                     rt.cursor_captured = false;
                 }
                 self.active_actions.clear();
@@ -2103,7 +2260,7 @@ impl ApplicationHandler for Cs16App {
                 }
             }
             WindowEvent::RedrawRequested => {
-                self.render_and_step(event_loop);
+                let _ = self.render_and_step(Some(event_loop));
                 return;
             }
             _ => {}
@@ -2111,8 +2268,9 @@ impl ApplicationHandler for Cs16App {
 
         if !self.wants_mouse_capture()
             && let Some(rt) = &mut self.runtime
+            && let (Some(state), Some(win)) = (&mut rt.egui_state, &rt.window)
         {
-            let _ = rt.egui_state.on_window_event(&rt.window, &event);
+            let _ = state.on_window_event(win, &event);
         }
     }
 

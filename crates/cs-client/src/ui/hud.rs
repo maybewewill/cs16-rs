@@ -25,6 +25,54 @@ const HUD_RED: Color32 = Color32::from_rgb(255, 24, 16);
 const TEAM_CT_COLOR: Color32 = Color32::from_rgb(153, 204, 255);
 const TEAM_T_COLOR: Color32 = Color32::from_rgb(255, 64, 64);
 
+pub const HIDEHUD_WEAPONS: u8 = 1 << 0;
+pub const HIDEHUD_FLASHLIGHT: u8 = 1 << 1;
+pub const HIDEHUD_ALL: u8 = 1 << 2;
+pub const HIDEHUD_HEALTH: u8 = 1 << 3;
+pub const HIDEHUD_TIMER: u8 = 1 << 4;
+pub const HIDEHUD_MONEY: u8 = 1 << 5;
+pub const HIDEHUD_CROSSHAIR: u8 = 1 << 6;
+
+/// GoldSrc `HideWeapon` visibility mask resolved from `state.hidden` (`HIDEHUD_*`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HudVisibility {
+    pub health_armor: bool,
+    pub timer: bool,
+    pub money: bool,
+    pub ammo: bool,
+    pub weapon_buckets: bool,
+    pub radar: bool,
+    pub crosshair: bool,
+}
+
+pub fn compute_hud_visibility(
+    alive: bool,
+    _health: i32,
+    hidden: u8,
+    timer_visible: bool,
+) -> HudVisibility {
+    if (hidden & HIDEHUD_ALL) != 0 {
+        return HudVisibility {
+            health_armor: false,
+            timer: false,
+            money: false,
+            ammo: false,
+            weapon_buckets: false,
+            radar: false,
+            crosshair: false,
+        };
+    }
+    HudVisibility {
+        health_armor: alive && (hidden & HIDEHUD_HEALTH) == 0,
+        timer: alive && timer_visible && (hidden & HIDEHUD_TIMER) == 0,
+        money: (hidden & HIDEHUD_MONEY) == 0,
+        ammo: alive && (hidden & HIDEHUD_WEAPONS) == 0,
+        weapon_buckets: alive && (hidden & HIDEHUD_WEAPONS) == 0,
+        radar: alive && (hidden & (HIDEHUD_HEALTH | HIDEHUD_WEAPONS)) == 0,
+        crosshair: alive && (hidden & (HIDEHUD_WEAPONS | HIDEHUD_CROSSHAIR)) == 0,
+    }
+}
+
 pub struct HudSprites {
     sheets: HashMap<String, (TextureHandle, [f32; 2])>,
     entries: HashMap<String, HudSpriteEntry>,
@@ -261,6 +309,7 @@ pub struct HudExtrasContext<'a> {
     pub hud_saytext_internal: bool,
     pub hud_fastswitch: bool,
     pub cl_radartype: bool,
+    pub observer_mode: i32,
     pub con_color: [u8; 3],
     pub scr_centertime: f32,
 }
@@ -277,6 +326,7 @@ impl Default for HudExtrasContext<'_> {
             hud_saytext_internal: true,
             hud_fastswitch: false,
             cl_radartype: false,
+            observer_mode: 0,
             con_color: [255, 180, 30],
             scr_centertime: 2.0,
         }
@@ -406,8 +456,15 @@ pub fn draw_cs16_hud_with_extras(
         return;
     }
 
+    let vis = compute_hud_visibility(
+        hud.alive,
+        i32::from(state.health),
+        state.hidden,
+        state.timer_visible,
+    );
+
     // 3. Bottom-left: health and armor (`640hud7` cross, suit, digits).
-    if hud.alive || state.health > 0 {
+    if vis.health_armor {
         let hp_color = if state.health <= 25 { HUD_RED } else { HUD_AMBER };
         let hp_x = 18.0 * scale;
         let health = i32::from(state.health);
@@ -465,7 +522,7 @@ pub fn draw_cs16_hud_with_extras(
 
     // 5. Bottom-centre: the round timer (stopwatch and sprite digits).
     let center_x = screen.center().x;
-    if state.timer_visible {
+    if vis.timer {
         let secs_total = state.round_seconds_left(hud.now).ceil() as i32;
         let mins = secs_total / 60;
         let secs = secs_total % 60;
@@ -530,7 +587,7 @@ pub fn draw_cs16_hud_with_extras(
     // 6. Bottom-right: money and the clip over the reserve of the weapon in hand.
     let right_x = screen.right() - 22.0 * scale;
     let money_y = bottom_y - 36.0 * scale;
-    if hud.alive {
+    if vis.money {
         if let Some(sp) = sprites {
             let num_w = sp.draw_number_right(&painter, state.money, right_x, money_y, scale, HUD_AMBER, 1);
             let dollar_x = (right_x - num_w - 22.0 * scale).min(right_x - 110.0 * scale);
@@ -546,7 +603,7 @@ pub fn draw_cs16_hud_with_extras(
         }
     }
 
-    if hud.alive
+    if vis.ammo
         && let Some(cur) = state.current_weapon
         && cur.clip >= 0
     {
@@ -582,11 +639,13 @@ pub fn draw_cs16_hud_with_extras(
     }
 
     // 7. Top-left: the radar of the teammates the server reports (`Radar`) and the bomb.
-    draw_radar_with_extras(&painter, sprites, hud, extras, scale);
+    if vis.radar {
+        draw_radar_with_extras(&painter, sprites, hud, extras, scale);
+    }
 
     // 8. Top-centre: the weapon slot strip (`bucket1..5`) briefly after a switch.
     let bucket_open = extras.buckets.is_some_and(|b| b.active_slot.is_some());
-    if (hud.weapon_switch_timer > 0.01 || bucket_open) && hud.alive {
+    if (hud.weapon_switch_timer > 0.01 || bucket_open) && vis.weapon_buckets {
         let alpha = if bucket_open {
             240u8
         } else {
@@ -667,7 +726,9 @@ pub fn draw_cs16_hud_with_extras(
     }
 
     // 9. Top-right: flashlight icon + battery bar (`Flashlight` / `FlashBat`), then killfeed.
-    let show_flashlight = hud.alive && (state.flashlight_on || state.flash_battery < 100);
+    let show_flashlight = hud.alive
+        && (state.hidden & (HIDEHUD_FLASHLIGHT | HIDEHUD_ALL)) == 0
+        && (state.flashlight_on || state.flash_battery < 100);
     if show_flashlight {
         let fx = screen.right() - 48.0 * scale;
         let fy = 14.0 * scale;
@@ -878,8 +939,8 @@ pub fn draw_cs16_hud_with_extras(
         painter.text(pos, egui::Align2::CENTER_CENTER, &shown_text, FontId::proportional(16.0 * scale), col);
     }
 
-    // 13. The spectator letterbox bars while dead.
-    if !hud.alive {
+    // 13. The spectator letterbox bars while dead and observing.
+    if !hud.alive && extras.observer_mode != 0 {
         let bar_h = 54.0 * scale;
         let top_bar = Rect::from_min_size(screen.min, Vec2::new(screen.width(), bar_h));
         let bot_bar = Rect::from_min_size(
@@ -1143,5 +1204,34 @@ mod tests {
         );
         assert_eq!(killfeed_team_color(&state, 1), team_color("CT"));
         assert_eq!(killfeed_team_color(&state, 0), HUD_AMBER);
+    }
+
+    #[test]
+    fn intro_hidehud_shows_only_money() {
+        let vis = compute_hud_visibility(
+            false,
+            0,
+            HIDEHUD_WEAPONS | HIDEHUD_FLASHLIGHT | HIDEHUD_HEALTH | HIDEHUD_TIMER,
+            true,
+        );
+        assert!(vis.money);
+        assert!(!vis.health_armor);
+        assert!(!vis.timer);
+        assert!(!vis.ammo);
+        assert!(!vis.weapon_buckets);
+        assert!(!vis.radar);
+        assert!(!vis.crosshair);
+    }
+
+    #[test]
+    fn intro_without_hidehud_health_shows_only_money() {
+        let vis = compute_hud_visibility(false, 100, HIDEHUD_FLASHLIGHT, false);
+        assert!(vis.money);
+        assert!(!vis.health_armor);
+        assert!(!vis.timer);
+        assert!(!vis.ammo);
+        assert!(!vis.weapon_buckets);
+        assert!(!vis.radar);
+        assert!(!vis.crosshair);
     }
 }

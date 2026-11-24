@@ -2,15 +2,47 @@
 //! slots and `#Token` names, and the MOTD's HTML.
 
 use cs_assets::scheme::LocalizationTable;
+use cs_assets::vgui_scripts::TitlesTable;
+
+/// Resolve `#Token` (including leading control bytes) via `LocalizationTable` and `TitlesTable`.
+fn resolve_token<'a>(
+    raw: &'a str,
+    loc: Option<&'a LocalizationTable>,
+    titles: Option<&'a TitlesTable>,
+) -> &'a str {
+    if !raw.starts_with('#') {
+        return raw;
+    }
+    if let Some(l) = loc {
+        let resolved = l.resolve_with_titles(raw, titles);
+        if resolved != raw {
+            return resolved;
+        }
+    }
+    if let Some(t) = titles
+        && let Some(entry) = t.get(raw.trim_start_matches('#'))
+    {
+        return entry.text.as_str();
+    }
+    raw
+}
 
 /// Fills a message `text` with its `params`: a `#Token` is looked up first, `%s1`..`%s4` take
 /// the parameters in order, a bare `%s` takes the next one. Control bytes (`\x01` to `\x04`,
 /// the colour codes of chat) are dropped.
 pub fn format_message(text: &str, params: &[String], loc: Option<&LocalizationTable>) -> String {
-    let template = match loc {
-        Some(l) if text.starts_with('#') => l.resolve(text),
-        _ => text,
-    };
+    format_message_with_titles(text, params, loc, None)
+}
+
+/// Fills a HUD message using both `LocalizationTable` (`cstrike_<lang>.txt`) and `TitlesTable` (`titles.txt`).
+pub fn format_message_with_titles(
+    text: &str,
+    params: &[String],
+    loc: Option<&LocalizationTable>,
+    titles: Option<&TitlesTable>,
+) -> String {
+    let stripped = text.trim_start_matches(['\u{1}', '\u{2}', '\u{3}', '\u{4}']);
+    let template = resolve_token(stripped, loc, titles);
     let mut out = String::new();
     let mut next = 0usize;
     let mut chars = template.chars().peekable();
@@ -31,10 +63,7 @@ pub fn format_message(text: &str, params: &[String], loc: Option<&LocalizationTa
                 };
                 let p = params.get(slot).map_or("", String::as_str);
                 // A parameter may itself be a token (`#Cstrike_Name`).
-                match loc {
-                    Some(l) if p.starts_with('#') => out.push_str(l.resolve(p)),
-                    _ => out.push_str(p),
-                }
+                out.push_str(resolve_token(p, loc, titles));
             }
             _ => out.push(c),
         }
@@ -43,7 +72,7 @@ pub fn format_message(text: &str, params: &[String], loc: Option<&LocalizationTa
     if !template.contains('%') && !params.is_empty() && out == template {
         for p in params {
             out.push(' ');
-            out.push_str(p);
+            out.push_str(resolve_token(p, loc, titles));
         }
     }
     out.trim_matches(['\n', '\r']).to_string()
@@ -130,5 +159,26 @@ mod tests {
     fn html_becomes_text() {
         let page = "<html><head><style>p{color:red}</style></head><body><h1>Welcome</h1><p>Play &amp; enjoy</p><br><br><br>Bye</body></html>";
         assert_eq!(strip_html(page), "Welcome\n\nPlay & enjoy\n\nBye");
+    }
+
+    #[test]
+    fn resolves_game_connected_and_inline_tokens_from_loc_and_titles() {
+        let mut loc = LocalizationTable::default();
+        loc.insert_text("\"Tokens\"\n{\n\"Game_join_terrorist\" \"%s1 is joining the Terrorist force\"\n}");
+        let titles = TitlesTable::parse("Game_connected\n{\n%s connected.\n}\n");
+        let joined = format_message_with_titles(
+            "\u{1}#Game_connected",
+            &p(&["Player"]),
+            Some(&loc),
+            Some(&titles),
+        );
+        assert_eq!(joined, "Player connected.");
+        let team = format_message_with_titles(
+            "#Game_join_terrorist",
+            &p(&["Player"]),
+            Some(&loc),
+            Some(&titles),
+        );
+        assert_eq!(team, "Player is joining the Terrorist force");
     }
 }
