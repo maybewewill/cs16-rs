@@ -31,6 +31,8 @@ pub struct SchemeFontVariant {
     pub weight: u32,
     pub yres_min: Option<u32>,
     pub yres_max: Option<u32>,
+    pub range: Option<(u32, u32)>,
+    pub blur: u32,
     pub dropshadow: bool,
     pub outline: bool,
     pub antialias: bool,
@@ -48,9 +50,11 @@ impl Default for SchemeFontVariant {
             weight: 400,
             yres_min: None,
             yres_max: None,
+            range: None,
+            blur: 0,
             dropshadow: false,
             outline: false,
-            antialias: true,
+            antialias: false,
             additive: false,
             symbol: false,
             italic: false,
@@ -129,9 +133,24 @@ impl SchemeFontSet {
                                                 v.yres_min = nums.next();
                                                 v.yres_max = nums.next();
                                             }
+                                            "range" => {
+                                                let mut nums = val
+                                                    .split_whitespace()
+                                                    .filter_map(|n| {
+                                                        if let Some(hex) = n.strip_prefix("0x").or_else(|| n.strip_prefix("0X")) {
+                                                            u32::from_str_radix(hex, 16).ok()
+                                                        } else {
+                                                            n.parse::<u32>().ok()
+                                                        }
+                                                    });
+                                                if let (Some(a), Some(b)) = (nums.next(), nums.next()) {
+                                                    v.range = Some((a, b));
+                                                }
+                                            }
+                                            "blur" => v.blur = val.parse().unwrap_or(0),
                                             "dropshadow" => v.dropshadow = val == "1",
                                             "outline" => v.outline = val == "1",
-                                            "antialias" => v.antialias = val != "0",
+                                            "antialias" => v.antialias = val == "1",
                                             "additive" => v.additive = val == "1",
                                             "symbol" => v.symbol = val == "1",
                                             "italic" => v.italic = val == "1",
@@ -199,6 +218,67 @@ pub struct RasterizedGlyph {
     pub alpha: Vec<u8>,
 }
 
+/// Options mirroring Valve Windows GDI / `vgui_surfaces` font flags.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RasterizeOptions {
+    pub tall: f32,
+    pub antialias: bool,
+    pub outline: bool,
+    pub dropshadow: bool,
+    pub underline: bool,
+    pub additive: bool,
+}
+
+impl From<&SchemeFontVariant> for RasterizeOptions {
+    fn from(v: &SchemeFontVariant) -> Self {
+        Self {
+            tall: v.tall,
+            antialias: v.antialias,
+            outline: v.outline,
+            dropshadow: v.dropshadow,
+            underline: v.underline,
+            additive: v.additive,
+        }
+    }
+}
+
+/// RGBA8 rasterized glyph bitmap with baked outline / dropshadow and integer GDI advance.
+#[derive(Debug, Clone)]
+pub struct RasterizedGlyphRgba {
+    pub ch: char,
+    pub width: u32,
+    pub height: u32,
+    pub offset_x: i32,
+    pub offset_y: i32,
+    pub advance_x: i32,
+    /// White ink RGB (`255,255,255`), black (`0,0,0`) outline/dropshadow pixels, and coverage alpha.
+    pub rgba: Vec<u8>,
+}
+
+/// Loaded font source metadata for diagnostics (zero silent fallbacks).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemeFontLoadEntry {
+    pub scheme_font: String,
+    pub family: String,
+    pub weight: u32,
+    pub source: String,
+}
+
+/// Explicit missing font entry reported when a scheme font file could not be resolved on this host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingSchemeFont {
+    pub scheme_font: String,
+    pub family: String,
+    pub weight: u32,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SchemeFontLoadReport {
+    pub loaded: Vec<SchemeFontLoadEntry>,
+    pub missing: Vec<MissingSchemeFont>,
+}
+
 /// Pure-Rust TrueType/OpenType font rasterizer (`ab_glyph`).
 #[derive(Clone)]
 pub struct VguiTrueTypeFont {
@@ -216,41 +296,67 @@ impl VguiTrueTypeFont {
         &self.raw
     }
 
+    /// Calibrate `PxScale` so `(ascent - descent)` matches Windows GDI `CreateFont(-tall)` cell height.
+    fn gdi_px_scale(&self, tall: f32) -> f32 {
+        let target = tall.max(6.0);
+        let unscaled = self.font.as_scaled(PxScale::from(target));
+        let cell = (unscaled.ascent() - unscaled.descent()).max(1.0);
+        (target * (target / cell)).clamp(target * 0.85, target * 1.35)
+    }
+
     pub fn metrics(&self, px_height: f32) -> FontLineMetrics {
-        let scaled = self.font.as_scaled(PxScale::from(px_height.max(6.0)));
-        let ascent = scaled.ascent();
-        let descent = scaled.descent();
-        let line_gap = scaled.line_gap();
+        let scale = self.gdi_px_scale(px_height);
+        let scaled = self.font.as_scaled(PxScale::from(scale));
+        let ascent = scaled.ascent().round();
+        let descent = scaled.descent().round();
+        let line_gap = scaled.line_gap().round();
         FontLineMetrics {
             ascent,
             descent,
             line_gap,
-            line_height: ascent - descent + line_gap,
+            line_height: (ascent - descent).max(px_height.round()),
         }
     }
 
     pub fn measure_text(&self, text: &str, px_height: f32) -> (f32, f32) {
-        let px = px_height.max(6.0);
+        let px = self.gdi_px_scale(px_height);
         let scaled = self.font.as_scaled(PxScale::from(px));
-        let mut width = 0.0f32;
+        let mut width = 0i32;
         let mut prev = None;
         for ch in text.chars() {
             let gid = self.font.glyph_id(ch);
             if let Some(p) = prev {
-                width += scaled.kern(p, gid);
+                width += scaled.kern(p, gid).round() as i32;
             }
-            width += scaled.h_advance(gid);
+            width += scaled.h_advance(gid).round() as i32;
             prev = Some(gid);
         }
-        (width, scaled.height())
+        (width as f32, (scaled.ascent() - scaled.descent()).round().max(px_height))
+    }
+
+    pub fn kern_i32(&self, prev: char, curr: char, px_height: f32) -> i32 {
+        let px = self.gdi_px_scale(px_height);
+        let scaled = self.font.as_scaled(PxScale::from(px));
+        scaled
+            .kern(self.font.glyph_id(prev), self.font.glyph_id(curr))
+            .round() as i32
+    }
+
+    pub fn advance_i32(&self, ch: char, px_height: f32) -> i32 {
+        let px = self.gdi_px_scale(px_height);
+        let scaled = self.font.as_scaled(PxScale::from(px));
+        scaled.h_advance(self.font.glyph_id(ch)).round() as i32
     }
 
     pub fn rasterize_glyph(&self, ch: char, px_height: f32) -> Option<RasterizedGlyph> {
-        let px = px_height.max(6.0);
+        let px = self.gdi_px_scale(px_height);
         let scaled = self.font.as_scaled(PxScale::from(px));
         let gid = self.font.glyph_id(ch);
-        let advance_x = scaled.h_advance(gid);
-        let glyph = gid.with_scale_and_position(PxScale::from(px), ab_glyph::point(0.0, scaled.ascent()));
+        let advance_x = scaled.h_advance(gid).round();
+        let glyph = gid.with_scale_and_position(
+            PxScale::from(px),
+            ab_glyph::point(0.0, scaled.ascent().round()),
+        );
         let outlined = self.font.outline_glyph(glyph)?;
         let bounds = outlined.px_bounds();
         let width = bounds.width().ceil().max(0.0) as u32;
@@ -272,6 +378,250 @@ impl VguiTrueTypeFont {
             alpha,
         })
     }
+
+    /// Rasterize a glyph using Valve Windows GDI rules:
+    /// - 1-bit hard coverage threshold when `!opts.antialias`
+    /// - 1px black outline when `opts.outline`
+    /// - `(+1, +1)` black drop shadow when `opts.dropshadow`
+    pub fn rasterize_glyph_rgba(&self, ch: char, opts: &RasterizeOptions) -> Option<RasterizedGlyphRgba> {
+        let px = self.gdi_px_scale(opts.tall);
+        let scaled = self.font.as_scaled(PxScale::from(px));
+        let gid = self.font.glyph_id(ch);
+        let advance_x = scaled.h_advance(gid).round() as i32;
+        let baseline = scaled.ascent().round();
+        let glyph = gid.with_scale_and_position(PxScale::from(px), ab_glyph::point(0.0, baseline));
+        let Some(outlined) = self.font.outline_glyph(glyph) else {
+            return Some(RasterizedGlyphRgba {
+                ch,
+                width: 0,
+                height: 0,
+                offset_x: 0,
+                offset_y: 0,
+                advance_x,
+                rgba: Vec::new(),
+            });
+        };
+        let bounds = outlined.px_bounds();
+        let gw = bounds.width().ceil().max(0.0) as i32;
+        let gh = bounds.height().ceil().max(0.0) as i32;
+        if gw == 0 || gh == 0 {
+            return Some(RasterizedGlyphRgba {
+                ch,
+                width: 0,
+                height: 0,
+                offset_x: 0,
+                offset_y: 0,
+                advance_x,
+                rgba: Vec::new(),
+            });
+        }
+        let mut raw_alpha = vec![0u8; (gw * gh) as usize];
+        outlined.draw(|x, y, cov| {
+            let idx = (y as usize) * (gw as usize) + (x as usize);
+            if let Some(dst) = raw_alpha.get_mut(idx) {
+                *dst = if opts.antialias {
+                    (cov.clamp(0.0, 1.0) * 255.0).round() as u8
+                } else if cov >= 0.48 {
+                    255
+                } else {
+                    0
+                };
+            }
+        });
+
+        let pad_l = i32::from(opts.outline);
+        let pad_t = i32::from(opts.outline);
+        let pad_r = i32::from(opts.outline) + i32::from(opts.dropshadow && !opts.outline);
+        let pad_b = i32::from(opts.outline) + i32::from(opts.dropshadow && !opts.outline);
+        let out_w = (gw + pad_l + pad_r) as u32;
+        let out_h = (gh + pad_t + pad_b) as u32;
+        let mut rgba = vec![0u8; (out_w * out_h * 4) as usize];
+
+        let put_shadow = |rgba: &mut [u8], sx: i32, sy: i32, a: u8| {
+            if a == 0 || sx < 0 || sy < 0 || sx >= out_w as i32 || sy >= out_h as i32 {
+                return;
+            }
+            let idx = ((sy as u32 * out_w + sx as u32) * 4) as usize;
+            if a > rgba[idx + 3] {
+                rgba[idx] = 0;
+                rgba[idx + 1] = 0;
+                rgba[idx + 2] = 0;
+                rgba[idx + 3] = a;
+            }
+        };
+
+        if opts.outline {
+            for gy in 0..gh {
+                for gx in 0..gw {
+                    let a = raw_alpha[(gy * gw + gx) as usize];
+                    if a == 0 {
+                        continue;
+                    }
+                    for dy in -1..=1 {
+                        for dx in -1..=1 {
+                            if dx != 0 || dy != 0 {
+                                put_shadow(&mut rgba, gx + pad_l + dx, gy + pad_t + dy, a);
+                            }
+                        }
+                    }
+                }
+            }
+        } else if opts.dropshadow {
+            for gy in 0..gh {
+                for gx in 0..gw {
+                    let a = raw_alpha[(gy * gw + gx) as usize];
+                    if a > 0 {
+                        let sa = ((u16::from(a) * 210) / 255) as u8;
+                        put_shadow(&mut rgba, gx + pad_l + 1, gy + pad_t + 1, sa);
+                    }
+                }
+            }
+        }
+
+        for gy in 0..gh {
+            for gx in 0..gw {
+                let fg_a = raw_alpha[(gy * gw + gx) as usize];
+                if fg_a == 0 {
+                    continue;
+                }
+                let ox = gx + pad_l;
+                let oy = gy + pad_t;
+                let idx = ((oy as u32 * out_w + ox as u32) * 4) as usize;
+                let prev_a = rgba[idx + 3];
+                let out_a = fg_a.max(prev_a);
+                // White foreground composited over black outline/shadow => gray = fg_a over 0, straight = fg_a*255/out_a
+                let rgb = if out_a > 0 {
+                    ((u16::from(fg_a) * 255) / u16::from(out_a)).min(255) as u8
+                } else {
+                    255
+                };
+                rgba[idx] = rgb;
+                rgba[idx + 1] = rgb;
+                rgba[idx + 2] = rgb;
+                rgba[idx + 3] = out_a;
+            }
+        }
+
+        Some(RasterizedGlyphRgba {
+            ch,
+            width: out_w,
+            height: out_h,
+            offset_x: bounds.min.x.round() as i32 - pad_l,
+            offset_y: (bounds.min.y.round() as i32 - baseline as i32) - pad_t,
+            advance_x,
+            rgba,
+        })
+    }
+}
+
+/// Resolve the exact TrueType font bytes named by a `SchemeFontVariant` without silent substitution.
+pub fn resolve_font_bytes(
+    vfs: Option<&Vfs>,
+    variant: &SchemeFontVariant,
+    custom_font_files: &[String],
+) -> Result<(Vec<u8>, String), String> {
+    let lower = variant.name.trim().to_ascii_lowercase();
+    let bold = variant.weight >= 600 || lower.contains("bold");
+    let italic = variant.italic || lower.contains("italic");
+
+    if (lower == "marlett" || variant.symbol)
+        && let Some(v) = vfs
+        && let Ok(bytes) = v.read_bytes("resource/marlett.ttf")
+    {
+        return Ok((bytes, "vfs:resource/marlett.ttf".to_string()));
+    }
+
+    if let Some(v) = vfs {
+        for raw in custom_font_files {
+            let norm = raw.replace('\\', "/");
+            if let Ok(bytes) = v.read_bytes(&norm).or_else(|_| v.read_bytes(&format!("resource/{norm}"))) {
+                let stem = norm.rsplit('/').next().unwrap_or(&norm).to_ascii_lowercase();
+                if stem.contains(&lower.replace(' ', "")) {
+                    return Ok((bytes, format!("vfs:{norm}")));
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let candidates: Vec<&'static str> = match lower.as_str() {
+            "tahoma" => {
+                if bold {
+                    vec!["tahomabd.ttf", "tahoma.ttf"]
+                } else {
+                    vec!["tahoma.ttf"]
+                }
+            }
+            "verdana" | "verdana bold" => {
+                if bold && italic {
+                    vec!["verdanaz.ttf", "verdanab.ttf"]
+                } else if bold {
+                    vec!["verdanab.ttf"]
+                } else if italic {
+                    vec!["verdanai.ttf"]
+                } else {
+                    vec!["verdana.ttf"]
+                }
+            }
+            "trebuchet ms" => {
+                if bold && italic {
+                    vec!["trebucbi.ttf", "trebucbd.ttf"]
+                } else if bold {
+                    vec!["trebucbd.ttf"]
+                } else if italic {
+                    vec!["trebucit.ttf"]
+                } else {
+                    vec!["trebuc.ttf"]
+                }
+            }
+            "courier" | "courier new" => {
+                if bold && italic {
+                    vec!["courbi.ttf", "courbd.ttf"]
+                } else if bold {
+                    vec!["courbd.ttf"]
+                } else if italic {
+                    vec!["couri.ttf"]
+                } else {
+                    vec!["cour.ttf"]
+                }
+            }
+            "arial" => {
+                if bold && italic {
+                    vec!["arialbi.ttf", "arialbd.ttf"]
+                } else if bold {
+                    vec!["arialbd.ttf"]
+                } else if italic {
+                    vec!["ariali.ttf"]
+                } else {
+                    vec!["arial.ttf"]
+                }
+            }
+            "marlett" => vec!["marlett.ttf"],
+            _ => Vec::new(),
+        };
+
+        let dirs = [
+            r"C:\Windows\Fonts",
+            "/usr/share/fonts/truetype",
+            "/usr/share/fonts/truetype/msttcorefonts",
+            "/System/Library/Fonts/Supplemental",
+            "/Library/Fonts",
+        ];
+        for file in candidates {
+            for dir in dirs {
+                let path = std::path::Path::new(dir).join(file);
+                if let Ok(bytes) = std::fs::read(&path) {
+                    return Ok((bytes, path.display().to_string()));
+                }
+            }
+        }
+    }
+
+    Err(format!(
+        "no exact font file found for family '{}' (weight={}, italic={})",
+        variant.name, variant.weight, italic
+    ))
 }
 
 /// Load Valve's `resource/marlett.ttf` symbol font from VFS (`TrackerScheme.res` "Marlett").
@@ -359,5 +709,72 @@ mod tests {
         let def = parsed.resolve("Default", 1080).unwrap();
         assert_eq!(def.name, "Tahoma");
         assert_eq!(def.weight, 500);
+        assert!(!def.antialias, "Valve scheme omits antialias -> false");
+    }
+
+    #[test]
+    fn gdi_rasterizer_enforces_crisp_non_aa_and_outline_shadow() {
+        let Ok(vfs) = cs_vfs::Vfs::discover(None, cs_vfs::VfsConfig::default()) else {
+            eprintln!("SKIPPED gdi_rasterizer test: CS16_GAMEDIR / Half-Life not found");
+            return;
+        };
+        let scheme_font = SchemeFontVariant {
+            name: "Tahoma".to_string(),
+            tall: 16.0,
+            weight: 400,
+            antialias: false,
+            ..Default::default()
+        };
+        let Ok((bytes, _src)) = resolve_font_bytes(Some(&vfs), &scheme_font, &[]) else {
+            eprintln!("SKIPPED gdi_rasterizer test: Tahoma OS font unavailable");
+            return;
+        };
+        let font = VguiTrueTypeFont::from_bytes(bytes).expect("parse Tahoma");
+        let crisp = font
+            .rasterize_glyph_rgba(
+                'A',
+                &RasterizeOptions {
+                    tall: 16.0,
+                    antialias: false,
+                    outline: false,
+                    dropshadow: false,
+                    underline: false,
+                    additive: false,
+                },
+            )
+            .expect("rasterize crisp");
+        assert!(crisp.width > 0 && crisp.height > 0);
+        assert!(
+            crisp.rgba.chunks_exact(4).all(|px| px[3] == 0 || px[3] == 255),
+            "antialias=false must produce binary 0/255 alpha coverage"
+        );
+
+        let outlined = font
+            .rasterize_glyph_rgba(
+                'A',
+                &RasterizeOptions {
+                    tall: 16.0,
+                    antialias: false,
+                    outline: true,
+                    dropshadow: false,
+                    underline: false,
+                    additive: false,
+                },
+            )
+            .expect("rasterize outlined");
+        assert!(outlined.width >= crisp.width + 2);
+        assert!(
+            outlined
+                .rgba
+                .chunks_exact(4)
+                .any(|px| px[3] == 255 && px[0] == 0 && px[1] == 0 && px[2] == 0),
+            "outline must bake opaque black border pixels"
+        );
+
+        let missing = SchemeFontVariant {
+            name: "NonExistentValveTestFont_XYZ".to_string(),
+            ..Default::default()
+        };
+        assert!(resolve_font_bytes(Some(&vfs), &missing, &[]).is_err());
     }
 }

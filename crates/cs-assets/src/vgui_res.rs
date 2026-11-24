@@ -35,18 +35,22 @@ impl ControlKind {
         let lower = name.trim().to_ascii_lowercase();
         match lower.as_str() {
             "panel" | "editablepanel" => Self::Panel,
-            "label" => Self::Label,
-            "button" => Self::Button,
+            "label" | "urllabel" => Self::Label,
+            "button" | "togglebutton" => Self::Button,
             "mouseoverpanelbutton" => Self::MouseOverPanelButton,
-            "imagepanel" | "cimagepanel" | "image" => Self::ImagePanel,
+            "imagepanel" | "cimagepanel" | "bitmapimagepanel" | "image" => Self::ImagePanel,
             "frame"
             | "cplayerlistdialog"
             | "cserverbrowserdialog"
             | "ccontentcontroldialog"
-            | "coptionssubdialog" => Self::Frame,
-            "listpanel" | "sectionedlistpanel" => Self::ListPanel,
+            | "coptionssubdialog"
+            | "cclientscoreboarddialog"
+            | "cinternetgames"
+            | "wizardsubpanel"
+            | "wizardpanel" => Self::Frame,
+            "listpanel" | "sectionedlistpanel" | "cpanellistpanel" => Self::ListPanel,
             "richtext" => Self::RichText,
-            "combobox" => Self::ComboBox,
+            "combobox" | "clabeledcommandcombobox" => Self::ComboBox,
             "slider" | "ccvarslider" => Self::Slider,
             "checkbutton" | "ccvarnegatedcheckbutton" | "ccvartogglecheckbutton" | "radiobutton" => {
                 Self::CheckButton
@@ -195,6 +199,19 @@ pub struct VguiControlSpec {
     pub editable: bool,
     pub numeric_only: bool,
     pub title_bar_visible: bool,
+    pub border: Option<String>,
+    pub image_color: Option<String>,
+    pub paint_background: bool,
+    pub left_text: String,
+    pub right_text: String,
+    pub associate: String,
+    pub cost: Option<u32>,
+    pub line_spacing: Option<f32>,
+    pub is_toggle: bool,
+    pub is_radio: bool,
+    pub sub_tab_position: i32,
+    pub wide_specified: bool,
+    pub tall_specified: bool,
     pub props: HashMap<String, String>,
     pub children: Vec<VguiControlSpec>,
 }
@@ -251,6 +268,37 @@ impl VguiResDocument {
         }
         find_rec(&self.controls, &target)
     }
+
+    /// Return the index of a top-level `Frame` whose resolved rectangle acts as the parent origin
+    /// for subsequent sibling controls in the `.res` document (`MOTD.res`, `Teammenu.res`, `ScoreBoard.res`,
+    /// `DialogServerBrowser.res`, `LoadingDialog.res`, `PlayerListDialog.res`, `ContentControlDialog.res`).
+    /// Excludes full-screen background/spectator shells and `WizardSubPanel` pages.
+    pub fn root_frame_index(&self) -> Option<usize> {
+        let first = self.controls.first()?;
+        if !matches!(first.kind, ControlKind::Frame) {
+            return None;
+        }
+        let ctrl_l = first.control_name.to_ascii_lowercase();
+        let field_l = first.field_name.to_ascii_lowercase();
+        if ctrl_l == "wizardsubpanel"
+            || field_l == "viewportbackground"
+            || field_l == "spectatorgui"
+            || field_l == "internetgames"
+        {
+            return None;
+        }
+        Some(0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VguiCoordMode {
+    /// In-game CS 1.6 `cstrike/resource/UI/*.res`: authored on 640x480 base, scaled proportionally.
+    #[default]
+    Proportional640,
+    /// GameUI `TrackerScheme.res` dialogs (`OptionsSub*.res`, `DialogServerBrowser.res`, etc.):
+    /// 1:1 pixels inside parent container with `PinCorner` + `AutoResize` relative to original parent size.
+    PixelSpace,
 }
 
 /// Compute screen `[x, y, w, h]` for `spec` inside `parent_rect = [px, py, pw, ph]` scaled from `base_w x base_h`.
@@ -266,8 +314,16 @@ pub fn resolve_control_rect(
     let scale = sx.min(sy).max(0.5);
     let x = spec.xpos.resolve_pos(px, pw, scale);
     let y = spec.ypos.resolve_pos(py, ph, scale);
-    let mut w = spec.wide.resolve_size(x - px, pw, scale);
-    let mut h = spec.tall.resolve_size(y - py, ph, scale);
+    let mut w = if spec.wide_specified {
+        spec.wide.resolve_size(x - px, pw, scale)
+    } else {
+        pw
+    };
+    let mut h = if spec.tall_specified {
+        spec.tall.resolve_size(y - py, ph, scale)
+    } else {
+        spec.tall.resolve_size(y - py, ph, scale)
+    };
     match spec.auto_resize {
         AutoResize::Right => w = (px + pw - x - 8.0).max(w),
         AutoResize::Down => h = (py + ph - y - 8.0).max(h),
@@ -278,6 +334,97 @@ pub fn resolve_control_rect(
         AutoResize::None => {}
     }
     [x, y, w.max(0.0), h.max(0.0)]
+}
+
+/// Resolve a `.res` control rectangle using explicit `VguiCoordMode` (`Proportional640` vs `PixelSpace`).
+pub fn resolve_control_rect_mode(
+    spec: &VguiControlSpec,
+    parent_rect: [f32; 4],
+    mode: VguiCoordMode,
+    orig_parent_size: [f32; 2],
+) -> [f32; 4] {
+    let [px, py, pw, ph] = parent_rect;
+    match mode {
+        VguiCoordMode::Proportional640 => {
+            let sx = (pw / 640.0).max(0.5);
+            let sy = (ph / 480.0).max(0.5);
+            let aspect_scale = sx.min(sy);
+            let x = match spec.xpos {
+                VguiCoord::Abs(v) => px + v * sx,
+                VguiCoord::CenterOffset(d) => px + pw * 0.5 + d * aspect_scale,
+                VguiCoord::RightOffset(d) => px + pw - d * aspect_scale,
+                VguiCoord::FillOffset(d) => px + d * aspect_scale,
+            };
+            let y = match spec.ypos {
+                VguiCoord::Abs(v) => py + v * sy,
+                VguiCoord::CenterOffset(d) => py + ph * 0.5 + d * aspect_scale,
+                VguiCoord::RightOffset(d) => py + ph - d * aspect_scale,
+                VguiCoord::FillOffset(d) => py + d * aspect_scale,
+            };
+            let mut w = if !spec.wide_specified {
+                (pw - (x - px)).max(0.0)
+            } else {
+                match spec.wide {
+                    VguiCoord::Abs(v) => v * sx.min(sy),
+                    VguiCoord::CenterOffset(v) => v * aspect_scale,
+                    VguiCoord::RightOffset(m) | VguiCoord::FillOffset(m) => {
+                        (pw - (x - px) - m * aspect_scale).max(0.0)
+                    }
+                }
+            };
+            let mut h = if !spec.tall_specified {
+                24.0 * sy
+            } else {
+                match spec.tall {
+                    VguiCoord::Abs(v) | VguiCoord::CenterOffset(v) => v * sy,
+                    VguiCoord::RightOffset(m) | VguiCoord::FillOffset(m) => {
+                        (ph - (y - py) - m * sy).max(0.0)
+                    }
+                }
+            };
+            match spec.auto_resize {
+                AutoResize::Right => w = (pw - (x - px) - 8.0 * aspect_scale).max(w),
+                AutoResize::Down => h = (ph - (y - py) - 8.0 * sy).max(h),
+                AutoResize::DownAndRight => {
+                    w = (pw - (x - px) - 8.0 * aspect_scale).max(w);
+                    h = (ph - (y - py) - 8.0 * sy).max(h);
+                }
+                AutoResize::None => {}
+            }
+            [x, y, w.max(0.0), h.max(0.0)]
+        }
+        VguiCoordMode::PixelSpace => {
+            let dw = pw - orig_parent_size[0].max(1.0);
+            let dh = ph - orig_parent_size[1].max(1.0);
+            let mut x = spec.xpos.resolve_pos(px, pw, 1.0);
+            let mut y = spec.ypos.resolve_pos(py, ph, 1.0);
+            let mut w = if spec.wide_specified {
+                spec.wide.resolve_size(x - px, pw, 1.0)
+            } else {
+                (pw - (x - px)).max(0.0)
+            };
+            let mut h = spec.tall.resolve_size(y - py, ph, 1.0);
+            match spec.pin_corner {
+                PinCorner::TopLeft => {}
+                PinCorner::TopRight => x += dw,
+                PinCorner::BottomLeft => y += dh,
+                PinCorner::BottomRight => {
+                    x += dw;
+                    y += dh;
+                }
+            }
+            match spec.auto_resize {
+                AutoResize::Right => w = (w + dw).max(0.0),
+                AutoResize::Down => h = (h + dh).max(0.0),
+                AutoResize::DownAndRight => {
+                    w = (w + dw).max(0.0);
+                    h = (h + dh).max(0.0);
+                }
+                AutoResize::None => {}
+            }
+            [x, y, w.max(0.0), h.max(0.0)]
+        }
+    }
 }
 
 fn parse_block_controls(tokens: &[String], cursor: &mut usize) -> Vec<VguiControlSpec> {
@@ -340,17 +487,20 @@ fn parse_one_control(key: String, tokens: &[String], cursor: &mut usize) -> Vgui
         image.push_str(".tga");
     }
 
+    let is_build_dialog = control_name.eq_ignore_ascii_case("buildmodedialog");
+    let wide_specified = props.contains_key("wide");
+    let tall_specified = props.contains_key("tall");
     VguiControlSpec {
         block_key: key,
         field_name,
-        control_name,
+        control_name: control_name.clone(),
         kind,
         xpos: props.get("xpos").map_or(VguiCoord::Abs(0.0), |s| VguiCoord::parse(s)),
         ypos: props.get("ypos").map_or(VguiCoord::Abs(0.0), |s| VguiCoord::parse(s)),
         wide: props.get("wide").map_or(VguiCoord::Abs(64.0), |s| VguiCoord::parse(s)),
         tall: props.get("tall").map_or(VguiCoord::Abs(24.0), |s| VguiCoord::parse(s)),
         zpos: get("zpos").parse().unwrap_or(0),
-        visible: get("visible") != "0",
+        visible: !is_build_dialog && get("visible") != "0",
         enabled: get("enabled") != "0",
         tab_position: get("tabposition").parse().unwrap_or(0),
         pin_corner: match get("pincorner").parse::<u8>().unwrap_or(0) {
@@ -380,6 +530,22 @@ fn parse_one_control(key: String, tokens: &[String], cursor: &mut usize) -> Vgui
         editable: get("editable") != "0",
         numeric_only: get("numericinputonly") == "1",
         title_bar_visible: get("settitlebarvisible") != "0",
+        border: props
+            .get("border")
+            .or_else(|| props.get("borderset"))
+            .cloned(),
+        image_color: props.get("imagecolor").cloned(),
+        paint_background: get("paintbackground") != "0",
+        left_text: get("lefttext").to_string(),
+        right_text: get("righttext").to_string(),
+        associate: get("associate").to_string(),
+        cost: get("cost").parse().ok(),
+        line_spacing: get("linespacing").parse().ok(),
+        is_toggle: control_name.eq_ignore_ascii_case("togglebutton"),
+        is_radio: control_name.eq_ignore_ascii_case("radiobutton"),
+        sub_tab_position: get("subtabposition").parse().unwrap_or(0),
+        wide_specified,
+        tall_specified,
         props,
         children,
     }
@@ -487,5 +653,54 @@ mod tests {
         let child = doc.find("ChildBtn").expect("nested ChildBtn");
         assert_eq!(child.command, "okay");
         assert!(child.default_button);
+    }
+
+    #[test]
+    fn resolves_pixel_space_and_proportional_root_frame_modes() {
+        let motd = r##"
+        "Resource/UI/MOTD.res"
+        {
+            "ClientMOTD" { "ControlName" "Frame" "xpos" "76" "ypos" "0" "wide" "552" "tall" "448" }
+            "ok" { "ControlName" "Button" "xpos" "0" "ypos" "364" "wide" "128" "tall" "20" }
+        }
+        "##;
+        let doc = VguiResDocument::parse("Resource/UI/MOTD.res", motd);
+        assert_eq!(doc.root_frame_index(), Some(0));
+        let frame_r = resolve_control_rect_mode(
+            &doc.controls[0],
+            [0.0, 0.0, 1280.0, 720.0],
+            VguiCoordMode::Proportional640,
+            [640.0, 480.0],
+        );
+        // xpos=76 scaled on 1280px = 152.0
+        assert!((frame_r[0] - 152.0).abs() < 0.1, "frame_r={frame_r:?}");
+
+        let ok_r = resolve_control_rect_mode(
+            &doc.controls[1],
+            frame_r,
+            VguiCoordMode::Proportional640,
+            [640.0, 480.0],
+        );
+        // Nested inside ClientMOTD Frame => starts at frame_r[0]
+        assert!((ok_r[0] - frame_r[0]).abs() < 0.1, "ok_r={ok_r:?}");
+
+        let dlg = r##"
+        "Resource/Test.res"
+        {
+            "Cancel" { "ControlName" "Button" "xpos" "300" "ypos" "260" "wide" "64" "tall" "24" "pinCorner" "3" }
+            "BuildDialog" { "ControlName" "BuildModeDialog" "xpos" "0" "ypos" "0" "wide" "100" "tall" "100" }
+        }
+        "##;
+        let doc2 = VguiResDocument::parse("Resource/Test.res", dlg);
+        assert!(!doc2.controls[1].visible, "BuildModeDialog must be hidden");
+        let btn = resolve_control_rect_mode(
+            &doc2.controls[0],
+            [10.0, 20.0, 500.0, 400.0],
+            VguiCoordMode::PixelSpace,
+            [400.0, 300.0],
+        );
+        // Delta +100x+100 pinned BottomRight -> 10+300+100=410, 20+260+100=380
+        assert!((btn[0] - 410.0).abs() < 0.1);
+        assert!((btn[1] - 380.0).abs() < 0.1);
     }
 }

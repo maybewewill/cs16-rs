@@ -430,6 +430,343 @@ impl ClientVguiColors {
     }
 }
 
+/// One 1-pixel edge stroke in a Valve VGUI2 scheme border (`InsetBorder`, `RaisedBorder`, `ButtonBorder`, ...).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VguiBorderLine {
+    pub color: String,
+    pub offset: [i32; 2],
+}
+
+/// Parsed VGUI2 border definition from `TrackerScheme.res` / `ClientScheme.res` `Borders` block.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VguiBorderSpec {
+    pub inset: [i32; 4],
+    pub left: Vec<VguiBorderLine>,
+    pub right: Vec<VguiBorderLine>,
+    pub top: Vec<VguiBorderLine>,
+    pub bottom: Vec<VguiBorderLine>,
+}
+
+/// Full parsed VGUI2 scheme (`Colors`, `BaseSettings`, `Fonts`, `Borders`).
+#[derive(Debug, Clone, Default)]
+pub struct VguiScheme {
+    pub source_path: String,
+    pub colors: HashMap<String, [u8; 4]>,
+    pub base_settings: HashMap<String, String>,
+    pub fonts: crate::vgui_font::SchemeFontSet,
+    pub borders: HashMap<String, VguiBorderSpec>,
+    pub border_aliases: HashMap<String, String>,
+}
+
+impl VguiScheme {
+    pub fn load(vfs: &Vfs, path: &str) -> Option<Self> {
+        let text = vfs.read_string_lossy(path).ok()?;
+        let mut s = Self::parse(&text);
+        s.source_path = path.to_string();
+        Some(s)
+    }
+
+    pub fn load_tracker(vfs: &Vfs) -> Self {
+        Self::load(vfs, "resource/TrackerScheme.res").unwrap_or_default()
+    }
+
+    pub fn load_client(vfs: &Vfs) -> Self {
+        Self::load(vfs, "resource/ClientScheme.res").unwrap_or_default()
+    }
+
+    pub fn load_source_or_tracker(vfs: &Vfs) -> Self {
+        Self::load(vfs, "resource/SourceScheme.res")
+            .unwrap_or_else(|| Self::load_tracker(vfs))
+    }
+
+    pub fn parse(text: &str) -> Self {
+        let mut scheme = Self {
+            fonts: crate::vgui_font::SchemeFontSet::parse(text),
+            colors: parse_scheme_colors(text),
+            ..Default::default()
+        };
+        let tokens = tokenize_scheme_kv(text);
+        let mut i = 0usize;
+        while i < tokens.len() {
+            if tokens[i].eq_ignore_ascii_case("BaseSettings")
+                && tokens.get(i + 1).map(String::as_str) == Some("{")
+            {
+                i += 2;
+                parse_base_settings(&tokens, &mut i, "", &mut scheme.base_settings);
+                continue;
+            }
+            if tokens[i].eq_ignore_ascii_case("Borders")
+                && tokens.get(i + 1).map(String::as_str) == Some("{")
+            {
+                i += 2;
+                parse_borders_block(
+                    &tokens,
+                    &mut i,
+                    &mut scheme.borders,
+                    &mut scheme.border_aliases,
+                );
+                continue;
+            }
+            i += 1;
+        }
+        scheme
+    }
+
+    pub fn base_setting(&self, key: &str) -> Option<&str> {
+        self.base_settings
+            .get(&key.trim().to_ascii_lowercase())
+            .map(String::as_str)
+    }
+
+    /// Resolve an RGBA value from a literal `"R G B A"`, a `BaseSettings` key, or a `Colors` key.
+    pub fn resolve_color(&self, token_or_rgba: &str) -> Option<[u8; 4]> {
+        let trimmed = token_or_rgba.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if let Some(rgba) = parse_rgba_str(trimmed) {
+            return Some(rgba);
+        }
+        let mut cur = trimmed;
+        for _ in 0..4 {
+            let key = cur.to_ascii_lowercase();
+            if let Some(c) = self.colors.get(&key) {
+                return Some(*c);
+            }
+            if let Some(next) = self.base_settings.get(&key) {
+                if let Some(rgba) = parse_rgba_str(next) {
+                    return Some(rgba);
+                }
+                cur = next.as_str();
+            } else {
+                break;
+            }
+        }
+        None
+    }
+
+    /// Resolve a border definition by name, following `Borders` aliases (`ButtonBorder -> RaisedBorder`).
+    pub fn resolve_border(&self, name: &str) -> Option<&VguiBorderSpec> {
+        let mut cur = name.trim().to_ascii_lowercase();
+        for _ in 0..4 {
+            if let Some(spec) = self.borders.get(&cur) {
+                return Some(spec);
+            }
+            if let Some(next) = self.border_aliases.get(&cur) {
+                cur = next.to_ascii_lowercase();
+            } else {
+                break;
+            }
+        }
+        None
+    }
+}
+
+fn parse_rgba_str(raw: &str) -> Option<[u8; 4]> {
+    let nums: Vec<u8> = raw
+        .split_whitespace()
+        .filter_map(|p| p.parse::<u8>().ok())
+        .collect();
+    if nums.len() >= 3 {
+        Some([nums[0], nums[1], nums[2], nums.get(3).copied().unwrap_or(255)])
+    } else {
+        None
+    }
+}
+
+fn parse_base_settings(
+    tokens: &[String],
+    cursor: &mut usize,
+    prefix: &str,
+    out: &mut HashMap<String, String>,
+) {
+    while *cursor < tokens.len() {
+        let tok = &tokens[*cursor];
+        if tok == "}" {
+            *cursor += 1;
+            break;
+        }
+        let key = tok.clone();
+        *cursor += 1;
+        if *cursor < tokens.len() && tokens[*cursor] == "{" {
+            *cursor += 1;
+            let next_prefix = if prefix.is_empty() {
+                key.to_ascii_lowercase()
+            } else {
+                format!("{}/{}", prefix, key.to_ascii_lowercase())
+            };
+            parse_base_settings(tokens, cursor, &next_prefix, out);
+        } else if *cursor < tokens.len() && tokens[*cursor] != "}" {
+            let val = tokens[*cursor].clone();
+            *cursor += 1;
+            let full_key = if prefix.is_empty() {
+                key.to_ascii_lowercase()
+            } else {
+                format!("{}/{}", prefix, key.to_ascii_lowercase())
+            };
+            out.insert(full_key, val);
+        }
+    }
+}
+
+fn parse_borders_block(
+    tokens: &[String],
+    cursor: &mut usize,
+    borders: &mut HashMap<String, VguiBorderSpec>,
+    aliases: &mut HashMap<String, String>,
+) {
+    while *cursor < tokens.len() {
+        let tok = &tokens[*cursor];
+        if tok == "}" {
+            *cursor += 1;
+            break;
+        }
+        let name = tok.to_ascii_lowercase();
+        *cursor += 1;
+        if *cursor < tokens.len() && tokens[*cursor] == "{" {
+            *cursor += 1;
+            borders.insert(name, parse_one_border(tokens, cursor));
+        } else if *cursor < tokens.len() && tokens[*cursor] != "}" {
+            let target = tokens[*cursor].to_ascii_lowercase();
+            *cursor += 1;
+            aliases.insert(name, target);
+        }
+    }
+}
+
+fn parse_one_border(tokens: &[String], cursor: &mut usize) -> VguiBorderSpec {
+    let mut spec = VguiBorderSpec::default();
+    while *cursor < tokens.len() {
+        let tok = &tokens[*cursor];
+        if tok == "}" {
+            *cursor += 1;
+            break;
+        }
+        let key = tok.to_ascii_lowercase();
+        *cursor += 1;
+        if *cursor < tokens.len() && tokens[*cursor] == "{" {
+            *cursor += 1;
+            let lines = parse_border_side(tokens, cursor);
+            match key.as_str() {
+                "left" => spec.left = lines,
+                "right" => spec.right = lines,
+                "top" => spec.top = lines,
+                "bottom" => spec.bottom = lines,
+                _ => {}
+            }
+        } else if *cursor < tokens.len() && tokens[*cursor] != "}" {
+            let val = &tokens[*cursor];
+            *cursor += 1;
+            if key == "inset" {
+                let nums: Vec<i32> = val
+                    .split_whitespace()
+                    .filter_map(|n| n.parse::<i32>().ok())
+                    .collect();
+                if nums.len() >= 4 {
+                    spec.inset = [nums[0], nums[1], nums[2], nums[3]];
+                }
+            }
+        }
+    }
+    spec
+}
+
+fn parse_border_side(tokens: &[String], cursor: &mut usize) -> Vec<VguiBorderLine> {
+    let mut out = Vec::new();
+    while *cursor < tokens.len() {
+        let tok = &tokens[*cursor];
+        if tok == "}" {
+            *cursor += 1;
+            break;
+        }
+        *cursor += 1;
+        if *cursor < tokens.len() && tokens[*cursor] == "{" {
+            *cursor += 1;
+            let mut color = String::new();
+            let mut offset = [0i32; 2];
+            while *cursor < tokens.len() {
+                let k = &tokens[*cursor];
+                if k == "}" {
+                    *cursor += 1;
+                    break;
+                }
+                let kl = k.to_ascii_lowercase();
+                *cursor += 1;
+                if *cursor < tokens.len() && tokens[*cursor] != "}" && tokens[*cursor] != "{" {
+                    let v = &tokens[*cursor];
+                    *cursor += 1;
+                    match kl.as_str() {
+                        "color" => color = v.clone(),
+                        "offset" => {
+                            let mut nums = v.split_whitespace().filter_map(|p| p.parse::<i32>().ok());
+                            offset[0] = nums.next().unwrap_or(0);
+                            offset[1] = nums.next().unwrap_or(0);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if !color.is_empty() {
+                out.push(VguiBorderLine { color, offset });
+            }
+        }
+    }
+    out
+}
+
+fn tokenize_scheme_kv(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = text.chars().peekable();
+    while let Some(&c) = chars.peek() {
+        if c.is_whitespace() {
+            chars.next();
+            continue;
+        }
+        if c == '/' {
+            chars.next();
+            if chars.peek() == Some(&'/') {
+                for ch in chars.by_ref() {
+                    if ch == '\n' {
+                        break;
+                    }
+                }
+                continue;
+            }
+            out.push("/".to_string());
+            continue;
+        }
+        if c == '{' || c == '}' {
+            out.push(c.to_string());
+            chars.next();
+            continue;
+        }
+        if c == '"' {
+            chars.next();
+            let mut s = String::new();
+            for ch in chars.by_ref() {
+                if ch == '"' {
+                    break;
+                }
+                s.push(ch);
+            }
+            out.push(s);
+            continue;
+        }
+        let mut bare = String::new();
+        while let Some(&nc) = chars.peek() {
+            if nc.is_whitespace() || nc == '{' || nc == '}' || nc == '"' {
+                break;
+            }
+            bare.push(nc);
+            chars.next();
+        }
+        if !bare.is_empty() {
+            out.push(bare);
+        }
+    }
+    out
+}
+
 /// Load any TGA image (weapon previews, class portraits, CS_logo, Steam icons) from VFS.
 pub fn load_tga_image(vfs: &Vfs, path: &str) -> Result<RgbaImageData, SchemeError> {
     load_image_rgba(vfs, path)
@@ -520,6 +857,7 @@ impl LocalizationTable {
         let load_set = |tbl: &mut Self, l: &str| {
             let paths = [
                 format!("resource/platform_{l}.txt"),
+                format!("resource/vgui_{l}.txt"),
                 format!("resource/valve_{l}.txt"),
                 format!("resource/gameui_{l}.txt"),
                 format!("servers/serverbrowser_{l}.txt"),
@@ -606,12 +944,74 @@ impl LocalizationTable {
 
     /// Resolve a `#Token` string (or return the input untouched if not starting with `#` or not found).
     pub fn resolve<'a>(&'a self, raw: &'a str) -> &'a str {
-        if let Some(key) = raw.strip_prefix('#')
-            && let Some(val) = self.tokens.get(&key.to_ascii_lowercase())
-        {
-            return val.as_str();
+        self.resolve_with_titles(raw, None)
+    }
+
+    /// Resolve a `#Token` via `LocalizationTable`, `cstrike_titlestxt_<token>`, or `titles.txt`.
+    pub fn resolve_with_titles<'a>(
+        &'a self,
+        raw: &'a str,
+        titles: Option<&'a crate::vgui_scripts::TitlesTable>,
+    ) -> &'a str {
+        if let Some(key) = raw.strip_prefix('#') {
+            let lower = key.to_ascii_lowercase();
+            if let Some(val) = self.tokens.get(&lower) {
+                return val.as_str();
+            }
+            let titles_key = format!("cstrike_titlestxt_{lower}");
+            if let Some(val) = self.tokens.get(&titles_key) {
+                return val.as_str();
+            }
+            if let Some(t) = titles
+                && let Some(entry) = t.get(key)
+            {
+                return entry.text.as_str();
+            }
         }
         raw
+    }
+
+    /// Resolve `#Token` substrings anywhere inside a line (e.g. `\x01#Game_connected` or `1. #Cstrike_CT_Forces`),
+    /// consulting both `LocalizationTable` and optional `TitlesTable`.
+    pub fn resolve_inline(
+        &self,
+        text: &str,
+        titles: Option<&crate::vgui_scripts::TitlesTable>,
+    ) -> String {
+        if !text.contains('#') {
+            return text.to_string();
+        }
+        let mut out = String::with_capacity(text.len());
+        let bytes = text.as_bytes();
+        let mut i = 0usize;
+        while i < text.len() {
+            if bytes[i] == b'#'
+                && let Some(ch_next) = text[i + 1..].chars().next()
+                && (ch_next.is_ascii_alphanumeric() || ch_next == '_')
+            {
+                let mut end = i + 1;
+                while end < text.len() {
+                    let b = bytes[end];
+                    if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' {
+                        end += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let token = &text[i..end];
+                let resolved = self.resolve_with_titles(token, titles);
+                out.push_str(resolved);
+                i = end;
+                continue;
+            }
+            if let Some(ch) = text[i..].chars().next() {
+                out.push(ch);
+                i += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        out
     }
 
     pub fn len(&self) -> usize {
@@ -828,4 +1228,72 @@ fn parse_f32_prop(props: &HashMap<String, String>, key: &str, default: f32) -> f
         .get(key)
         .and_then(|s| s.parse::<f32>().ok())
         .unwrap_or(default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vgui_scripts::TitlesTable;
+
+    #[test]
+    fn parses_scheme_colors_borders_and_base_settings() {
+        let txt = r##"
+        Scheme
+        {
+            Colors
+            {
+                "BorderBright" "136 145 128 255"
+                "BorderDark"   "40 46 34 255"
+                "ControlBG"    "76 88 68 255"
+            }
+            BaseSettings
+            {
+                "BgColor" "ControlBG"
+                InGameDesktop
+                {
+                    "MenuColor" "238 174 0 255"
+                }
+            }
+            Borders
+            {
+                ButtonBorder "RaisedBorder"
+                RaisedBorder
+                {
+                    "inset" "0 0 1 1"
+                    Left { "1" { "color" "BorderBright" "offset" "0 1" } }
+                    Right { "1" { "color" "BorderDark" "offset" "0 0" } }
+                }
+            }
+        }
+        "##;
+        let scheme = VguiScheme::parse(txt);
+        assert_eq!(scheme.resolve_color("BgColor"), Some([76, 88, 68, 255]));
+        assert_eq!(
+            scheme.resolve_color("InGameDesktop/MenuColor"),
+            Some([238, 174, 0, 255])
+        );
+        let b = scheme.resolve_border("ButtonBorder").expect("ButtonBorder alias");
+        assert_eq!(b.inset, [0, 0, 1, 1]);
+        assert_eq!(b.left[0].color, "BorderBright");
+        assert_eq!(b.left[0].offset, [0, 1]);
+    }
+
+    #[test]
+    fn resolves_tokens_via_cstrike_titlestxt_and_titles_table_inline() {
+        let mut loc = LocalizationTable::default();
+        loc.insert_text("\"Tokens\"\n{\n\"Cstrike_TitlesTXT_CTs_Win\" \"Counter-Terrorists Win!\"\n}");
+        let titles = TitlesTable::parse("Game_connected\n{\n%s connected\n}\n");
+        assert_eq!(
+            loc.resolve_with_titles("#CTs_Win", Some(&titles)),
+            "Counter-Terrorists Win!"
+        );
+        assert_eq!(
+            loc.resolve_with_titles("#Game_connected", Some(&titles)),
+            "%s connected"
+        );
+        assert_eq!(
+            loc.resolve_inline("\x01#Game_connected", Some(&titles)),
+            "\x01%s connected"
+        );
+    }
 }
