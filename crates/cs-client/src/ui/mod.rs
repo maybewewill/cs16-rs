@@ -4,6 +4,7 @@ pub mod chat;
 pub mod console;
 pub mod hud;
 pub mod main_menu;
+pub mod mod_hud;
 pub mod options;
 pub mod scoreboard;
 pub mod server_menu;

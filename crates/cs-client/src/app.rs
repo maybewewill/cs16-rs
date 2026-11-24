@@ -14,6 +14,7 @@ use cs_clientcore::hud::{DeathNotice, HudState, VguiMenuState};
 use cs_clientcore::{ConnState, ConsoleCommand, SoundCommand, ViewAngleUpdate};
 use cs_cvar::{CVarRegistry, EngineAction};
 use cs_local::LocalOptions;
+use cs_mod_host::{ClientModHost, ClientModTransfer};
 use cs_pm::collision::WorldCollision;
 use cs_vfs::{Vfs, VfsConfig};
 use glam::Vec3;
@@ -40,6 +41,7 @@ use cs_client::ui::chat::ChatInputUi;
 use cs_client::ui::console::ConsoleUi;
 use cs_client::ui::hud::{HudSprites, HudView, draw_cs16_hud};
 use cs_client::ui::main_menu::MainMenuUi;
+use cs_client::ui::mod_hud::{draw_mod_approval_prompt, draw_mod_hud};
 use cs_client::ui::options::OptionsUi;
 use cs_client::ui::scoreboard::{ScoreRow, show_scoreboard};
 use cs_client::ui::server_menu::{draw_text_menu, menu_key_enabled, menu_lines};
@@ -120,6 +122,8 @@ pub struct Cs16App {
     feeds: HudFeeds,
     weapon_switch_timer: f32,
     last_weapon: Option<u8>,
+    mod_transfer: ClientModTransfer,
+    mod_host: ClientModHost,
 
     menu_ui: MainMenuUi,
     console_ui: ConsoleUi,
@@ -207,6 +211,8 @@ impl Cs16App {
             feeds: HudFeeds::default(),
             weapon_switch_timer: 0.0,
             last_weapon: None,
+            mod_transfer: ClientModTransfer::default(),
+            mod_host: ClientModHost::new(),
             menu_ui: MainMenuUi::default(),
             console_ui,
             options_ui: OptionsUi::default(),
@@ -232,6 +238,7 @@ impl Cs16App {
             || self.options_ui.open
             || self.chat_ui.open
             || self.feeds.motd_open
+            || !self.mod_transfer.pending_approvals().is_empty()
     }
 
     fn wants_mouse_capture(&self) -> bool {
@@ -369,6 +376,8 @@ impl Cs16App {
         self.view_stats = ViewStats::default();
         self.last_weapon = None;
         self.weapon_switch_timer = 0.0;
+        self.mod_transfer = ClientModTransfer::default();
+        self.mod_host = ClientModHost::new();
         self.menu_ui.visible = false;
         self.console_ui.open = false;
         self.options_ui.open = false;
@@ -401,6 +410,8 @@ impl Cs16App {
         self.cmd_clock = CmdClock::default();
         self.last_weapon = None;
         self.weapon_switch_timer = 0.0;
+        self.mod_transfer = ClientModTransfer::default();
+        self.mod_host = ClientModHost::new();
         self.cvars.set_forward_unknown(false);
         self.sync_cursor_capture();
     }
@@ -696,6 +707,25 @@ impl Cs16App {
                     EngineAction::SelectSlot(slot) => self.select_slot(slot),
                     EngineAction::Impulse(n) => self.pending_impulse = n,
                     EngineAction::Forward(tokens) => {
+                        if let Some(cmd) = tokens.first().map(String::as_str)
+                            && (cmd == "mod_approve" || cmd == "mod_deny")
+                        {
+                            if let Some(id) = tokens.get(1) {
+                                let ok = if cmd == "mod_approve" {
+                                    self.mod_transfer.approve(id)
+                                } else {
+                                    self.mod_transfer.deny(id)
+                                };
+                                if ok {
+                                    self.sync_cursor_capture();
+                                } else {
+                                    self.cvars.warn(format!("unknown pending mod `{id}`"));
+                                }
+                            } else {
+                                self.cvars.warn(format!("usage: {cmd} <mod_id>"));
+                            }
+                            continue;
+                        }
                         if let Some(name) = tokens.first()
                             && self.session.has_client_cvar(name)
                         {
@@ -933,6 +963,24 @@ impl Cs16App {
         self.session.advance(f64::from(dt));
         self.apply_view_angle_updates();
 
+        for um in self.session.drain_unknown_usermsgs() {
+            if !self
+                .mod_transfer
+                .ingest_usermsg(&um.name, &um.payload, &mut self.mod_host, self.vfs.as_mut())
+            {
+                self.mod_host.on_usermsg(&um.name, &um.payload);
+            }
+        }
+        for err in self.mod_transfer.take_errors() {
+            self.cvars.warn(format!("Mod download error: {err}"));
+        }
+        for cmd in self.mod_transfer.take_outgoing_commands() {
+            self.session.send_stringcmd(&cmd);
+        }
+        for cmd in self.mod_host.take_execs() {
+            self.session.send_stringcmd(&cmd);
+        }
+
         // The connection ended (kicked, timed out, rejected, the server shut down).
         if let Some(state) = self.session.state()
             && state.is_terminal()
@@ -1071,6 +1119,18 @@ impl Cs16App {
             .is_some_and(|v| v.fov.is_finite() && v.fov > 0.0 && v.fov <= 40.0);
         let alive = view.as_ref().is_some_and(|v| v.alive);
 
+        let mod_hud_cmds = if in_game {
+            let (hp, ap, money) = self
+                .session
+                .with_hud(|h| (i32::from(h.health), i32::from(h.armor), h.money))
+                .unwrap_or((100, 0, 0));
+            let dt_ms = (dt * 1000.0).round() as i32;
+            self.mod_host.render_hud(dt_ms, hp, ap, money)
+        } else {
+            Vec::new()
+        };
+        let pending_mod_approvals = self.mod_transfer.pending_approvals();
+
         // 3. egui: HUD, menus, console.
         let mut pending_actions = Vec::new();
         let mut should_resume = false;
@@ -1112,6 +1172,7 @@ impl Cs16App {
                 draw_cs16_hud(&rt.egui_ctx, rt.hud_sprites.as_ref(), &view);
             });
             let _ = hud_state;
+            draw_mod_hud(&rt.egui_ctx, &mod_hud_cmds);
             if let Some(lines) = &menu_lines_now {
                 let scale = (rt.egui_ctx.content_rect().height() / 768.0).clamp(0.85, 1.45);
                 draw_text_menu(&rt.egui_ctx, lines, scale);
@@ -1183,6 +1244,7 @@ impl Cs16App {
         }
         self.options_ui
             .show(&rt.egui_ctx, &mut self.cvars, self.palette, steam_icon);
+        let mod_decisions = draw_mod_approval_prompt(&rt.egui_ctx, &pending_mod_approvals);
         pending_actions.extend(self.console_ui.show(
             &rt.egui_ctx,
             &mut self.cvars,
@@ -1307,6 +1369,16 @@ impl Cs16App {
         }
 
         // 5. Post-frame actions.
+        for (mod_id, allow) in mod_decisions {
+            if allow {
+                self.mod_transfer.approve(&mod_id);
+            } else {
+                self.mod_transfer.deny(&mod_id);
+            }
+        }
+        for cmd in self.mod_transfer.take_outgoing_commands() {
+            self.session.send_stringcmd(&cmd);
+        }
         if let Some((team_only, text)) = sent_chat {
             let cmd = if team_only { "say_team" } else { "say" };
             self.forward_to_server(&format!("{cmd} \"{}\"", quote_chat(&text)));

@@ -43,6 +43,7 @@ struct Options {
     web_port: Option<u16>,
     web_dir: Option<PathBuf>,
     relay_allow: Vec<SocketAddr>,
+    mods_dir: Option<PathBuf>,
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
@@ -57,6 +58,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         web_port: None,
         web_dir: None,
         relay_allow: Vec::new(),
+        mods_dir: None,
     };
     let mut args = args.iter();
     while let Some(arg) = args.next() {
@@ -96,6 +98,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 opts.web_port = Some(p);
             }
             "--web-dir" => opts.web_dir = Some(PathBuf::from(value()?)),
+            "--mods-dir" => opts.mods_dir = Some(PathBuf::from(value()?)),
             "--relay-allow" => {
                 let v = value()?;
                 let addr: SocketAddr = v
@@ -182,20 +185,55 @@ fn run_console<G: GameDll>(
     quit
 }
 
+fn load_mods_into_vfs(mods_dir: &Path, vfs: &mut Vfs) -> Result<cs_mod_host::ServerModHost, String> {
+    let packages = cs_mod_host::discover_packages(mods_dir)
+        .map_err(|e| format!("failed to scan mods dir `{}`: {e}", mods_dir.display()))?;
+    let mut host = cs_mod_host::ServerModHost::new();
+    host.set_mods_dir(mods_dir);
+    let mut loaded = 0usize;
+    for pkg in packages {
+        if !pkg.assets.is_empty() {
+            let entries: Vec<(String, Vec<u8>)> = pkg
+                .assets
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            vfs.mount_mod_assets(&pkg.manifest.id, entries)
+                .map_err(|e| format!("failed to mount assets for mod `{}`: {e}", pkg.manifest.id))?;
+        }
+        let id = pkg.manifest.id.clone();
+        host.load_package(pkg)
+            .map_err(|e| format!("failed to load mod `{id}`: {e}"))?;
+        loaded += 1;
+    }
+    info!(dir = %mods_dir.display(), count = loaded, "loaded server mods");
+    Ok(host)
+}
+
 fn start(args: &[String]) -> Result<(), String> {
     let opts = parse(args)?;
-    let vfs = Vfs::discover(opts.gamedir.as_deref(), VfsConfig::default())
+    let mut vfs = Vfs::discover(opts.gamedir.as_deref(), VfsConfig::default())
         .map_err(|e| format!("cannot find the Half-Life / CS 1.6 directory: {e}"))?;
     let map = load_server_map(&vfs, &opts.map)?;
+    let host = match &opts.mods_dir {
+        Some(dir) => Some(load_mods_into_vfs(dir, &mut vfs)?),
+        None => None,
+    };
     if opts.walk_game {
         let game = WalkGame::new(MoveParams::default());
-        serve(&opts, &vfs, map, game, "WalkGame (walking only)")
+        match host {
+            Some(h) => serve(&opts, &vfs, map, cs_mod_host::ModdedGame::new(game, h), "WalkGame + Mods"),
+            None => serve(&opts, &vfs, map, game, "WalkGame (walking only)"),
+        }
     } else {
         let mut game = CsGame::new();
         game.load_motd(&vfs);
         game.load_map_cycle(&vfs);
         game.enable_cvar_bot_quota();
-        serve(&opts, &vfs, map, game, "CsGame")
+        match host {
+            Some(h) => serve(&opts, &vfs, map, cs_mod_host::ModdedGame::new(game, h), "CsGame + Mods"),
+            None => serve(&opts, &vfs, map, game, "CsGame"),
+        }
     }
 }
 
@@ -628,5 +666,65 @@ mod tests {
         assert_eq!(ws_conn.state(), &ConnState::InGame);
         assert_eq!(udp_conn.stats().parse_errors, 0);
         assert_eq!(ws_conn.stats().parse_errors, 0);
+    }
+
+    #[test]
+    fn parses_mods_dir_flag() {
+        let o = parse(&args(&["--mods-dir", "mods"])).unwrap();
+        assert_eq!(o.mods_dir, Some(PathBuf::from("mods")));
+    }
+
+    #[test]
+    fn modded_server_runs_reference_mod_for_clients() {
+        use cs_clientcore::{ConnState, Connection, ConnectionConfig};
+        use cs_mod_api::{MOD_CAPABILITY_KEY, USERMSG_MOD_MANIFEST};
+        use cs_proto48::crypto::md5_hex;
+
+        let mods_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mods");
+        let mut vfs = Vfs::from_layered_memory(Vec::new(), VfsConfig::default());
+        let host = load_mods_into_vfs(&mods_dir, &mut vfs).unwrap();
+        assert!(vfs.read_bytes("sprites/mod_badge.txt").is_ok());
+
+        let modded_game = cs_mod_host::ModdedGame::new(WalkGame::new(MoveParams::default()), host);
+        let mut server = Server::new(
+            ServerConfig {
+                max_clients: 4,
+                ..ServerConfig::default()
+            },
+            ServerMap::stub("de_dust2"),
+            modded_game,
+            DeltaRegistry::cs16_default(),
+            CVarRegistry::new_with_defaults(),
+        );
+
+        let mut srv_udp = UdpTransport::bind("127.0.0.1:0").unwrap();
+        let srv_addr = srv_udp.local_addr();
+        let cli_udp = UdpTransport::bind("127.0.0.1:0").unwrap();
+        let mut conn = Connection::new(
+            cli_udp,
+            PeerAddr::Udp(srv_addr),
+            ConnectionConfig::new("mod-player", 76_561_197_960_265_745, &md5_hex(b"mod")),
+        );
+        conn.set_userinfo(MOD_CAPABILITY_KEY, "1");
+        conn.connect();
+
+        let mut saw_manifest = false;
+        let mut now = 0.0;
+        for _ in 0..400 {
+            now += 0.01;
+            conn.pump(now);
+            server.frame(&mut srv_udp, now);
+            while let Some(um) = conn.fx_mut().hud.unknown_messages.pop_front() {
+                if um.name == USERMSG_MOD_MANIFEST {
+                    saw_manifest = true;
+                }
+            }
+            if conn.state() == &ConnState::InGame && saw_manifest {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(conn.state(), &ConnState::InGame);
+        assert!(saw_manifest, "mod-capable client should receive CsModManifest");
     }
 }

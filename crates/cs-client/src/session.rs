@@ -151,6 +151,7 @@ impl Session {
         }
         // Text menus answered with `menuselect`: the shell draws the server's `ShowMenu`.
         conn.set_userinfo("_vgui_menus", "0");
+        conn.set_userinfo(cs_mod_api::MOD_CAPABILITY_KEY, "1");
         conn.connect();
         let mut s = Self::none();
         s.kind = Kind::Remote {
@@ -342,6 +343,11 @@ impl Session {
     /// Drains server-forced view angle updates (`svc_setangle`, `svc_addangle`) since the last call.
     pub fn take_view_angle_updates(&mut self) -> Vec<ViewAngleUpdate> {
         with_conn_mut!(self, c => c.take_view_angle_updates(), else Vec::new())
+    }
+
+    /// Drains raw custom `UserMsg` packets not handled by built-in GoldSrc HUD reducers.
+    pub fn drain_unknown_usermsgs(&mut self) -> Vec<cs_clientcore::hud::UnknownUserMsg> {
+        with_conn_mut!(self, c => c.fx_mut().hud.unknown_messages.drain(..).collect(), else Vec::new())
     }
 
     pub fn has_client_cvar(&self, name: &str) -> bool {

@@ -9,6 +9,7 @@ rust-version.workspace = true
 cs-engine.workspace = true
 cs-local.workspace = true
 cs-game.workspace = true
+cs-mod-host.workspace = true
 cs-platform.workspace = true
 cs-relay.workspace = true
 cs-sim.workspace = true
@@ -24,4 +25,5 @@ workspace = true
 [dev-dependencies]
 cs-clientcore.workspace = true
 cs-cvar.workspace = true
+cs-mod-api.workspace = true
 cs-proto48.workspace = true

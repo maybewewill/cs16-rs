@@ -10,6 +10,7 @@ use cs_client::camera::Camera;
 use cs_client::input::{MoveSpeeds, weapon_for_slot};
 use cs_client::render::scene::ModelRegistry;
 use cs_client::ui::hud::{HudView, draw_cs16_hud};
+use cs_client::ui::mod_hud::draw_mod_hud;
 use cs_client::ui::scoreboard::{ScoreRow, show_scoreboard};
 use cs_client::ui::server_menu::{draw_text_menu, menu_key_enabled, menu_lines};
 use cs_client::ui::{FrameTelemetry, draw_crosshair, draw_net_graph, hud::HudSprites};
@@ -20,6 +21,8 @@ use cs_clientcore::{
 };
 use cs_cvar::CVarRegistry;
 use cs_local::{FRAME_SECS, LocalGame, LocalOptions};
+use cs_mod_api::{HudDrawCmd, MOD_CAPABILITY_KEY};
+use cs_mod_host::{ClientModHost, ClientModTransfer};
 use cs_platform::{ConfigStorage, MemoryStorage};
 use cs_pm::collision::WorldCollision;
 use cs_proto48::crypto::{md5_digest, md5_hex};
@@ -119,6 +122,9 @@ pub struct WebClientState {
     queued_audio: Vec<WebAudioEvent>,
     weapon_switch_timer: f32,
     time_sec: f32,
+    pub mod_transfer: ClientModTransfer,
+    pub mod_host: ClientModHost,
+    last_mod_hud: Vec<HudDrawCmd>,
 }
 
 impl Default for WebClientState {
@@ -148,6 +154,9 @@ impl WebClientState {
             queued_audio: Vec::new(),
             weapon_switch_timer: 0.0,
             time_sec: 0.0,
+            mod_transfer: ClientModTransfer::default(),
+            mod_host: ClientModHost::new(),
+            last_mod_hud: Vec::new(),
         }
     }
 
@@ -233,6 +242,7 @@ impl WebClientState {
             conn.set_files(Box::new(VfsResourceFiles(vfs.clone())));
         }
         conn.set_userinfo("_vgui_menus", "0");
+        conn.set_userinfo(MOD_CAPABILITY_KEY, "1");
         let names = self.view.names();
         conn.set_fx_world(Box::new(MapFxWorld::new(None, self.vfs.clone(), names)));
         conn.connect();
@@ -260,6 +270,9 @@ impl WebClientState {
         self.loaded_map = None;
         self.collision = None;
         self.view.reset_map();
+        self.mod_transfer = ClientModTransfer::default();
+        self.mod_host = ClientModHost::new();
+        self.last_mod_hud.clear();
         self.queued_audio.push(WebAudioEvent::StopAll);
     }
 
@@ -329,6 +342,22 @@ impl WebClientState {
         }
         if let Some(rest) = trimmed.strip_prefix('-') {
             self.input.actions.remove(rest);
+            return;
+        }
+        if let Some(id) = trimmed
+            .strip_prefix("mod_approve ")
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            self.mod_transfer.approve(id);
+            return;
+        }
+        if let Some(id) = trimmed
+            .strip_prefix("mod_deny ")
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            self.mod_transfer.deny(id);
             return;
         }
         let _ = self.cvars.execute_script(trimmed);
@@ -437,6 +466,8 @@ impl WebClientState {
         let mut new_registry = None;
         let mut drained_sounds = Vec::new();
         let mut angle_updates = Vec::new();
+        let mut unknown_msgs = Vec::new();
+        let mut mod_hud_stats = (100i32, 0i32, 0i32);
         let mut local_entity = None;
 
         match &mut self.session {
@@ -450,6 +481,12 @@ impl WebClientState {
                 }
                 local_entity = conn.player_slot().map(|s| u16::from(s) + 1);
                 drained_sounds = conn.fx_mut().sounds.drain();
+                unknown_msgs = conn.fx_mut().hud.unknown_messages.drain(..).collect();
+                mod_hud_stats = (
+                    i32::from(conn.fx().hud.health),
+                    i32::from(conn.fx().hud.armor),
+                    conn.fx().hud.money,
+                );
                 angle_updates = conn.take_view_angle_updates();
             }
             SessionMode::Remote { conn, .. } => {
@@ -460,9 +497,41 @@ impl WebClientState {
                 }
                 local_entity = conn.player_slot().map(|s| u16::from(s) + 1);
                 drained_sounds = conn.fx_mut().sounds.drain();
+                unknown_msgs = conn.fx_mut().hud.unknown_messages.drain(..).collect();
+                mod_hud_stats = (
+                    i32::from(conn.fx().hud.health),
+                    i32::from(conn.fx().hud.armor),
+                    conn.fx().hud.money,
+                );
                 angle_updates = conn.take_view_angle_updates();
             }
         }
+
+        for um in unknown_msgs {
+            if !self
+                .mod_transfer
+                .ingest_usermsg(&um.name, &um.payload, &mut self.mod_host, self.vfs.as_mut())
+            {
+                self.mod_host.on_usermsg(&um.name, &um.payload);
+            }
+        }
+        let _ = self.mod_transfer.take_errors();
+        for cmd in self.mod_transfer.take_outgoing_commands() {
+            self.send_stringcmd(&cmd);
+        }
+        for cmd in self.mod_host.take_execs() {
+            self.send_stringcmd(&cmd);
+        }
+        self.last_mod_hud = if matches!(self.session, SessionMode::Idle) {
+            Vec::new()
+        } else {
+            self.mod_host.render_hud(
+                (dt * 1000.0).round() as i32,
+                mod_hud_stats.0,
+                mod_hud_stats.1,
+                mod_hud_stats.2,
+            )
+        };
 
         for upd in angle_updates {
             match upd {
@@ -678,6 +747,7 @@ impl WebClientState {
                 yaw_deg: self.camera.yaw_deg,
             };
             draw_cs16_hud(ctx, hud_sprites, &hv);
+            draw_mod_hud(ctx, &self.last_mod_hud);
 
             if let Some(m) = h.menu.as_ref().filter(|m| !m.multipart && m.keys != 0 && !m.text.is_empty()) {
                 let lines = menu_lines(&m.text, None);
