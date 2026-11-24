@@ -1502,3 +1502,66 @@ fn ui_hud_with_runtime_renders_engine_font_lines() {
     });
     assert!(out > 0);
 }
+
+#[test]
+fn ui_screen_options_loads_all_7_res_pages_and_parses_tab_names() {
+    assert_eq!(OptionsTab::from_name("multiplayer"), Some(OptionsTab::Multiplayer));
+    assert_eq!(OptionsTab::from_name("audio"), Some(OptionsTab::Audio));
+    assert_eq!(OptionsTab::from_name("video"), Some(OptionsTab::Video));
+    assert_eq!(OptionsTab::from_name("aim"), Some(OptionsTab::Mouse));
+    assert_eq!(OptionsTab::from_name("mouse"), Some(OptionsTab::Mouse));
+    assert_eq!(OptionsTab::from_name("keyboard"), Some(OptionsTab::Keyboard));
+    assert_eq!(OptionsTab::from_name("voice"), Some(OptionsTab::Voice));
+    assert_eq!(OptionsTab::from_name("content"), Some(OptionsTab::Lock));
+    assert_eq!(OptionsTab::from_name("lock"), Some(OptionsTab::Lock));
+
+    let Some(vfs) = discover_retail_vfs() else {
+        eprintln!("SKIPPED retail OptionsSub*.res check: CS16_GAMEDIR not set");
+        return;
+    };
+    let mut rt = VguiRuntime::new();
+    rt.load_scheme_fonts(&vfs);
+    let mut opts = OptionsUi::default();
+    opts.load_resources(&vfs);
+    opts.open = true;
+    let mut cvars = CVarRegistry::new_with_defaults();
+    let loc = LocalizationTable::load_language(&vfs, "english");
+    for tab in [
+        OptionsTab::Multiplayer,
+        OptionsTab::Audio,
+        OptionsTab::Video,
+        OptionsTab::Mouse,
+        OptionsTab::Keyboard,
+        OptionsTab::Voice,
+        OptionsTab::Lock,
+    ] {
+        opts.tab = tab;
+        let out = run_egui_frame(|ctx| {
+            opts.show(
+                ctx,
+                &mut rt,
+                &mut cvars,
+                &OptionsRenderCtx {
+                    vfs: Some(&vfs),
+                    loc: Some(&loc),
+                    palette: palette(),
+                    steam_icon: None,
+                },
+            );
+        });
+        assert!(out > 0, "tab {tab:?} produced no shapes");
+    }
+    for path in [
+        "resource/OptionsSubMultiplayer.res",
+        "resource/OptionsSubAudio.res",
+        "resource/OptionsSubVideo.res",
+        "resource/OptionsSubMouse.res",
+        "resource/OptionsSubKeyboard.res",
+        "resource/OptionsSubVoice.res",
+        "resource/OptionsSubAdvanced.res",
+        "resource/MultiplayerAdvancedDialog.res",
+        "resource/ContentControlDialog.res",
+    ] {
+        assert!(rt.doc(path).is_some(), "missing loaded .res document {path}");
+    }
+}

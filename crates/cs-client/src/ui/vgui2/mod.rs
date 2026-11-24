@@ -7,8 +7,11 @@ pub mod html;
 pub mod runtime;
 
 pub use controls::{
-    ListColumn, ListSortDir, VguiComboState, VguiControlState, VguiListPanelState,
-    VguiPropertySheetState, VguiRichTextState, VguiSliderState,
+    ListColumn, ListSortDir, TrackerCtx, VguiComboState, VguiControlState, VguiListPanelState,
+    VguiPropertySheetState, VguiRichTextState, VguiSliderState, draw_tracker_button_rect,
+    draw_tracker_check_button_rect, draw_tracker_combo_box_rect, draw_tracker_list_panel_rect,
+    draw_tracker_slider_rect, draw_tracker_text_entry_rect, paint_tracker_bevel_rect,
+    paint_tracker_label_rect,
 };
 pub use font_atlas::{VguiFontAtlas, VguiTextDrawOpts};
 pub use html::{HtmlBlock, HtmlDoc, HtmlSpan, paint_html_doc, paint_html_doc_vgui, parse_html_doc};

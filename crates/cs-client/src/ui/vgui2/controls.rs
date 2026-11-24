@@ -2,13 +2,15 @@
 //! `Panel`, `Label`, `Button`/`MouseOverPanelButton`, `ImagePanel`, `Frame`, `ListPanel`,
 //! `RichText`, `ComboBox`, `Slider`, `CheckButton`, `TextEntry`, `PropertySheet` + `ProgressBar`.
 
-use cs_assets::vgui_font::MarlettGlyph;
+use cs_assets::vgui_font::{MarlettGlyph, SchemeFontSet};
 use cs_assets::vgui_res::TextAlignment;
+use cs_vfs::Vfs;
 use egui::{
     Align, Color32, CornerRadius, FontFamily, FontId, Pos2, Rect, RichText, ScrollArea, Sense,
     Stroke, TextureHandle, Vec2,
 };
 
+use super::runtime::{VguiRuntime, VguiUiSound};
 use crate::ui::vgui_theme::{VguiPalette, paint_vgui_bevel};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -475,4 +477,700 @@ pub fn draw_vgui_property_sheet(
             body(ui, sheet.active_tab);
         });
     paint_vgui_bevel(ui.painter(), frame_resp.response.rect, false, palette);
+}
+
+/// Shared render context for pixel-exact `TrackerScheme.res` `.res`-driven controls.
+#[derive(Clone, Copy)]
+pub struct TrackerCtx<'a> {
+    pub ctx: &'a egui::Context,
+    pub vfs: Option<&'a Vfs>,
+    pub palette: VguiPalette,
+    pub screen_h: u32,
+    pub scale: f32,
+}
+
+impl<'a> TrackerCtx<'a> {
+    pub fn fonts<'r>(&self, rt: &'r VguiRuntime) -> &'r SchemeFontSet {
+        &rt.tracker_scheme.fonts
+    }
+}
+
+/// Paint a crisp 1px pixel-aligned VGUI2 bevel using `rect_filled` (avoids AA blur on edges).
+pub fn paint_tracker_bevel_rect(
+    painter: &egui::Painter,
+    rect: Rect,
+    raised: bool,
+    palette: VguiPalette,
+) {
+    let r = Rect::from_min_max(
+        Pos2::new(rect.left().round(), rect.top().round()),
+        Pos2::new(rect.right().round(), rect.bottom().round()),
+    );
+    if r.width() < 2.0 || r.height() < 2.0 {
+        return;
+    }
+    let (tl, br) = if raised {
+        (palette.border_bright, palette.border_dark)
+    } else {
+        (palette.border_dark, palette.border_bright)
+    };
+    painter.rect_filled(Rect::from_min_max(r.min, Pos2::new(r.right(), r.top() + 1.0)), 0.0, tl);
+    painter.rect_filled(Rect::from_min_max(r.min, Pos2::new(r.left() + 1.0, r.bottom())), 0.0, tl);
+    painter.rect_filled(Rect::from_min_max(Pos2::new(r.left(), r.bottom() - 1.0), r.max), 0.0, br);
+    painter.rect_filled(Rect::from_min_max(Pos2::new(r.right() - 1.0, r.top()), r.max), 0.0, br);
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn paint_tracker_label_rect(
+    painter: &egui::Painter,
+    rt: &mut VguiRuntime,
+    tc: &TrackerCtx<'_>,
+    rect: Rect,
+    text: &str,
+    font_name: &str,
+    align: TextAlignment,
+    color: Color32,
+    wrap: bool,
+    enabled: bool,
+) {
+    if text.is_empty() {
+        return;
+    }
+    let fonts = rt.tracker_scheme.fonts.clone();
+    let fname = if font_name.trim().is_empty() { "Default" } else { font_name };
+    if !enabled {
+        let shadow_col = Color32::from_rgb(40, 46, 34);
+        let dis_col = Color32::from_rgb(117, 128, 111);
+        rt.font_atlas.paint_wrapped_text_with_scale(
+            painter, tc.ctx, tc.vfs, &fonts, "tracker", fname, tc.screen_h,
+            rect.translate(Vec2::new(1.0, 1.0)), text, shadow_col, align, wrap, tc.scale,
+        );
+        rt.font_atlas.paint_wrapped_text_with_scale(
+            painter, tc.ctx, tc.vfs, &fonts, "tracker", fname, tc.screen_h,
+            rect, text, dis_col, align, wrap, tc.scale,
+        );
+        return;
+    }
+    rt.font_atlas.paint_wrapped_text_with_scale(
+        painter, tc.ctx, tc.vfs, &fonts, "tracker", fname, tc.screen_h,
+        rect, text, color, align, wrap, tc.scale,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn draw_tracker_button_rect(
+    ui: &mut egui::Ui,
+    rt: &mut VguiRuntime,
+    tc: &TrackerCtx<'_>,
+    id_salt: &str,
+    rect: Rect,
+    label: &str,
+    align: TextAlignment,
+    default_btn: bool,
+    enabled: bool,
+) -> egui::Response {
+    let r = Rect::from_min_max(
+        Pos2::new(rect.left().round(), rect.top().round()),
+        Pos2::new(rect.right().round(), rect.bottom().round()),
+    );
+    let id = ui.make_persistent_id(id_salt);
+    let resp = ui.interact(r, id, if enabled { Sense::click() } else { Sense::hover() });
+    if enabled {
+        rt.track_interactive(id_salt, &resp);
+    }
+    let down = enabled && resp.is_pointer_button_down_on();
+    let bg = if !enabled {
+        tc.palette.control_bg
+    } else if down {
+        tc.palette.window_bg
+    } else if resp.hovered() {
+        tc.palette.control_dark_bg
+    } else {
+        tc.palette.control_bg
+    };
+    let p = ui.painter();
+    p.rect_filled(r, CornerRadius::ZERO, bg);
+    if default_btn {
+        // Original `BorderSelection` (0,0,0) outer 1px + inner bevel (measured on Advanced...).
+        p.rect_filled(Rect::from_min_max(r.min, Pos2::new(r.right(), r.top() + 1.0)), 0.0, Color32::BLACK);
+        p.rect_filled(Rect::from_min_max(r.min, Pos2::new(r.left() + 1.0, r.bottom())), 0.0, Color32::BLACK);
+        p.rect_filled(Rect::from_min_max(Pos2::new(r.left(), r.bottom() - 1.0), r.max), 0.0, Color32::BLACK);
+        p.rect_filled(Rect::from_min_max(Pos2::new(r.right() - 1.0, r.top()), r.max), 0.0, Color32::BLACK);
+        paint_tracker_bevel_rect(p, r.shrink(1.0), !down, tc.palette);
+    } else {
+        paint_tracker_bevel_rect(p, r, !down, tc.palette);
+    }
+    let fg = if !enabled {
+        Color32::from_rgb(117, 128, 111)
+    } else if resp.hovered() || down {
+        tc.palette.bright_control_text
+    } else {
+        tc.palette.bright_text
+    };
+    let inset = (6.0 * tc.scale).round();
+    let text_rect = r.shrink2(Vec2::new(inset, 0.0));
+    let fonts = rt.tracker_scheme.fonts.clone();
+    rt.font_atlas.paint_text_with_scale(
+        p, tc.ctx, tc.vfs, &fonts, "tracker", "Default", tc.screen_h,
+        text_rect, label, fg, align, true, tc.scale,
+    );
+    resp
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn draw_tracker_check_button_rect(
+    ui: &mut egui::Ui,
+    rt: &mut VguiRuntime,
+    tc: &TrackerCtx<'_>,
+    id_salt: &str,
+    rect: Rect,
+    checked: &mut bool,
+    label: &str,
+    enabled: bool,
+) -> bool {
+    let r = Rect::from_min_max(
+        Pos2::new(rect.left().round(), rect.top().round()),
+        Pos2::new(rect.right().round(), rect.bottom().round()),
+    );
+    let id = ui.make_persistent_id(id_salt);
+    let resp = ui.interact(r, id, if enabled { Sense::click() } else { Sense::hover() });
+    let mut changed = false;
+    if enabled && resp.clicked() {
+        *checked = !*checked;
+        rt.push_ui_sound(VguiUiSound::Click);
+        changed = true;
+    }
+
+    let box_sz = (14.0 * tc.scale).round().max(12.0);
+    let box_x = (r.left() + 3.0 * tc.scale).round();
+    let box_y = (r.center().y - box_sz * 0.5).round();
+    let box_rect = Rect::from_min_size(Pos2::new(box_x, box_y), Vec2::splat(box_sz));
+
+    let p = ui.painter();
+    let box_fill = if *checked {
+        Color32::from_rgb(98, 99, 92)
+    } else {
+        tc.palette.control_bg
+    };
+    p.rect_filled(box_rect, CornerRadius::ZERO, box_fill);
+    let border_col = Color32::from_rgb(112, 104, 95);
+    p.rect_filled(Rect::from_min_max(box_rect.min, Pos2::new(box_rect.right(), box_rect.top() + 1.0)), 0.0, border_col);
+    p.rect_filled(Rect::from_min_max(box_rect.min, Pos2::new(box_rect.left() + 1.0, box_rect.bottom())), 0.0, border_col);
+    p.rect_filled(Rect::from_min_max(Pos2::new(box_rect.left(), box_rect.bottom() - 1.0), box_rect.max), 0.0, border_col);
+    p.rect_filled(Rect::from_min_max(Pos2::new(box_rect.right() - 1.0, box_rect.top()), box_rect.max), 0.0, border_col);
+
+    if *checked {
+        let chk_col = if enabled {
+            tc.palette.bright_text
+        } else {
+            Color32::from_rgb(160, 170, 149)
+        };
+        let has_marlett = tc.ctx.fonts(|f| f.definitions().font_data.contains_key("marlett"));
+        if has_marlett {
+            paint_marlett_glyph(p, box_rect.center(), box_sz * 0.9, MarlettGlyph::CHECK, chk_col);
+        } else {
+            p.line_segment(
+                [
+                    box_rect.left_top() + Vec2::new(box_sz * 0.22, box_sz * 0.52),
+                    box_rect.left_top() + Vec2::new(box_sz * 0.42, box_sz * 0.75),
+                ],
+                Stroke::new(2.0, chk_col),
+            );
+            p.line_segment(
+                [
+                    box_rect.left_top() + Vec2::new(box_sz * 0.42, box_sz * 0.75),
+                    box_rect.left_top() + Vec2::new(box_sz * 0.80, box_sz * 0.24),
+                ],
+                Stroke::new(2.0, chk_col),
+            );
+        }
+    }
+
+    let fg = if !enabled {
+        Color32::from_rgb(117, 128, 111)
+    } else if *checked {
+        tc.palette.bright_control_text
+    } else {
+        tc.palette.base_text
+    };
+    let text_x = (box_rect.right() + 7.0 * tc.scale).round();
+    let text_rect = Rect::from_min_max(Pos2::new(text_x, r.top()), r.max);
+    let fonts = rt.tracker_scheme.fonts.clone();
+    rt.font_atlas.paint_text_with_scale(
+        p, tc.ctx, tc.vfs, &fonts, "tracker", "Default", tc.screen_h,
+        text_rect, label, fg, TextAlignment::West, true, tc.scale,
+    );
+    changed
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn draw_tracker_combo_box_rect(
+    ui: &mut egui::Ui,
+    rt: &mut VguiRuntime,
+    tc: &TrackerCtx<'_>,
+    id_salt: &str,
+    rect: Rect,
+    items: &[String],
+    selected: &mut usize,
+    enabled: bool,
+) -> bool {
+    let r = Rect::from_min_max(
+        Pos2::new(rect.left().round(), rect.top().round()),
+        Pos2::new(rect.right().round(), rect.bottom().round()),
+    );
+    let id = ui.make_persistent_id(id_salt);
+    let open_id = id.with("combo_open");
+    let mut is_open = tc.ctx.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
+    let resp = ui.interact(r, id, if enabled { Sense::click() } else { Sense::hover() });
+    if enabled && resp.clicked() {
+        is_open = !is_open;
+        rt.push_ui_sound(VguiUiSound::Click);
+    }
+
+    let p = ui.painter();
+    p.rect_filled(r, CornerRadius::ZERO, tc.palette.window_bg);
+    paint_tracker_bevel_rect(p, r, false, tc.palette);
+
+    let sel_text = items.get(*selected).map(String::as_str).unwrap_or("");
+    let inset = (6.0 * tc.scale).round();
+    let arrow_space = (18.0 * tc.scale).round();
+    let text_rect = Rect::from_min_max(
+        Pos2::new(r.left() + inset, r.top()),
+        Pos2::new((r.right() - arrow_space).max(r.left() + inset), r.bottom()),
+    );
+    let fg = if enabled {
+        tc.palette.base_text
+    } else {
+        Color32::from_rgb(117, 128, 111)
+    };
+    let fonts = rt.tracker_scheme.fonts.clone();
+    rt.font_atlas.paint_text_with_scale(
+        p, tc.ctx, tc.vfs, &fonts, "tracker", "Default", tc.screen_h,
+        text_rect, sel_text, fg, TextAlignment::West, false, tc.scale,
+    );
+
+    // Small downward triangle near right edge (as measured in original GameUI ComboBox).
+    let ax = (r.right() - 10.0 * tc.scale).round();
+    let ay = r.center().y.round();
+    let ah = (2.5 * tc.scale).round().max(2.0);
+    let aw = (3.5 * tc.scale).round().max(3.0);
+    p.add(egui::Shape::convex_polygon(
+        vec![
+            Pos2::new(ax - aw, ay - ah * 0.5),
+            Pos2::new(ax + aw, ay - ah * 0.5),
+            Pos2::new(ax, ay + ah),
+        ],
+        fg,
+        Stroke::NONE,
+    ));
+
+    let mut changed = false;
+    if is_open && enabled && !items.is_empty() {
+        let row_h = (19.0 * tc.scale).round();
+        let list_h = (items.len().min(8) as f32 * row_h + 4.0).round();
+        let popup_rect = Rect::from_min_size(
+            Pos2::new(r.left(), r.bottom()),
+            Vec2::new(r.width(), list_h),
+        );
+        let area_resp = egui::Area::new(open_id.with("popup"))
+            .order(egui::Order::Tooltip)
+            .fixed_pos(popup_rect.min)
+            .show(tc.ctx, |ui| {
+                egui::Frame::NONE
+                    .fill(tc.palette.control_bg)
+                    .stroke(Stroke::new(1.0, tc.palette.border_dark))
+                    .inner_margin(egui::Margin::same(1))
+                    .show(ui, |ui| {
+                        ui.set_min_size(Vec2::new(r.width() - 2.0, list_h - 2.0));
+                        ScrollArea::vertical()
+                            .id_salt(open_id.with("scroll"))
+                            .max_height(list_h - 4.0)
+                            .show(ui, |ui| {
+                                for (idx, item) in items.iter().enumerate() {
+                                    let (row_r, row_resp) = ui.allocate_exact_size(
+                                        Vec2::new(r.width() - 4.0, row_h),
+                                        Sense::click(),
+                                    );
+                                    let hi = row_resp.hovered() || *selected == idx;
+                                    if hi {
+                                        ui.painter().rect_filled(row_r, 0.0, tc.palette.selection_bg);
+                                    }
+                                    let text_c = if hi {
+                                        tc.palette.bright_text
+                                    } else {
+                                        tc.palette.base_text
+                                    };
+                                    rt.font_atlas.paint_text_with_scale(
+                                        ui.painter(), tc.ctx, tc.vfs, &fonts, "tracker", "Default",
+                                        tc.screen_h, row_r.shrink2(Vec2::new(inset, 0.0)), item,
+                                        text_c, TextAlignment::West, false, tc.scale,
+                                    );
+                                    if row_resp.clicked() {
+                                        *selected = idx;
+                                        changed = true;
+                                        is_open = false;
+                                        rt.push_ui_sound(VguiUiSound::Click);
+                                    }
+                                }
+                            });
+                    });
+            });
+        if tc.ctx.input(|i| i.pointer.any_pressed())
+            && !resp.hovered()
+            && !area_resp.response.contains_pointer()
+        {
+            is_open = false;
+        }
+    }
+    tc.ctx.data_mut(|d| d.insert_temp(open_id, is_open));
+    changed
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn draw_tracker_text_entry_rect(
+    ui: &mut egui::Ui,
+    rt: &mut VguiRuntime,
+    tc: &TrackerCtx<'_>,
+    id_salt: &str,
+    rect: Rect,
+    text: &mut String,
+    password: bool,
+    numeric_only: bool,
+    enabled: bool,
+) -> bool {
+    let r = Rect::from_min_max(
+        Pos2::new(rect.left().round(), rect.top().round()),
+        Pos2::new(rect.right().round(), rect.bottom().round()),
+    );
+    let p = ui.painter();
+    p.rect_filled(r, CornerRadius::ZERO, tc.palette.window_bg);
+    paint_tracker_bevel_rect(p, r, false, tc.palette);
+
+    let edit_id = ui.make_persistent_id(id_salt).with("te");
+    let has_focus = ui.memory(|m| m.has_focus(edit_id));
+    if !enabled {
+        let fonts = rt.tracker_scheme.fonts.clone();
+        let shown = if password {
+            "*".repeat(text.chars().count())
+        } else {
+            text.clone()
+        };
+        rt.font_atlas.paint_text_with_scale(
+            p, tc.ctx, tc.vfs, &fonts, "tracker", "Default", tc.screen_h,
+            r.shrink2(Vec2::new((5.0 * tc.scale).round(), 0.0)),
+            &shown, Color32::from_rgb(117, 128, 111), TextAlignment::West, false, tc.scale,
+        );
+        return false;
+    }
+
+    if !has_focus {
+        let resp = ui.interact(r, edit_id.with("hit"), Sense::click());
+        if resp.clicked() {
+            ui.memory_mut(|m| m.request_focus(edit_id));
+        }
+        let shown = if password {
+            "*".repeat(text.chars().count())
+        } else {
+            text.clone()
+        };
+        let fonts = rt.tracker_scheme.fonts.clone();
+        rt.font_atlas.paint_text_with_scale(
+            ui.painter(), tc.ctx, tc.vfs, &fonts, "tracker", "Default", tc.screen_h,
+            r.shrink2(Vec2::new((5.0 * tc.scale).round(), 0.0)),
+            &shown, tc.palette.base_text, TextAlignment::West, false, tc.scale,
+        );
+        return false;
+    }
+
+    let inner = r.shrink2(Vec2::new((4.0 * tc.scale).round(), (2.0 * tc.scale).round()));
+    let mut changed = false;
+    ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
+        let te = egui::TextEdit::singleline(text)
+            .id(edit_id)
+            .frame(egui::Frame::NONE)
+            .password(password)
+            .text_color(tc.palette.base_text)
+            .font(FontId::proportional((13.0 * tc.scale).round()))
+            .desired_width(inner.width());
+        let resp = ui.add(te);
+        if resp.changed() {
+            if numeric_only {
+                text.retain(|c| c.is_ascii_digit() || c == '.' || c == '-');
+            }
+            changed = true;
+        }
+    });
+    changed
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn draw_tracker_slider_rect(
+    ui: &mut egui::Ui,
+    rt: &mut VguiRuntime,
+    tc: &TrackerCtx<'_>,
+    id_salt: &str,
+    rect: Rect,
+    value: &mut f32,
+    min: f32,
+    max: f32,
+    left_text: &str,
+    right_text: &str,
+) -> bool {
+    let r = Rect::from_min_max(
+        Pos2::new(rect.left().round(), rect.top().round()),
+        Pos2::new(rect.right().round(), rect.bottom().round()),
+    );
+    let s = tc.scale;
+    let thumb_w = (7.0 * s).round().max(6.0);
+    let thumb_h = (15.0 * s).round().max(12.0);
+    let pad_x = (thumb_w * 0.5).ceil();
+    let track_x0 = (r.left() + pad_x).round();
+    let track_x1 = (r.right() - pad_x).max(track_x0 + 8.0).round();
+    let track_y = (r.top() + 8.0 * s).round();
+    let track_h = (3.0 * s).round().max(3.0);
+    let track_rect = Rect::from_min_max(
+        Pos2::new(track_x0, track_y),
+        Pos2::new(track_x1, track_y + track_h),
+    );
+
+    let hit_rect = Rect::from_min_max(
+        Pos2::new(r.left(), r.top()),
+        Pos2::new(r.right(), (track_y + thumb_h).min(r.bottom())),
+    );
+    let id = ui.make_persistent_id(id_salt);
+    let resp = ui.interact(hit_rect, id, Sense::click_and_drag());
+    let mut changed = false;
+    let span = (max - min).max(0.0001);
+    if (resp.clicked() || resp.dragged())
+        && let Some(pos) = resp.interact_pointer_pos()
+    {
+        let frac = ((pos.x - track_x0) / (track_x1 - track_x0).max(1.0)).clamp(0.0, 1.0);
+        let next = min + frac * span;
+        if (next - *value).abs() > 1e-5 {
+            *value = next;
+            changed = true;
+        }
+    }
+
+    let p = ui.painter();
+    // Track: dark outer/inner + SliderTrackColor (31,31,31)
+    p.rect_filled(track_rect, 0.0, Color32::from_rgb(31, 31, 31));
+    paint_tracker_bevel_rect(p, track_rect, false, tc.palette);
+
+    // 9 vertical tick marks (`SliderTickColor` 127,140,127) matching `OptionsSub*.res` captures.
+    let tick_col = Color32::from_rgb(127, 140, 127);
+    let tick_y0 = track_rect.bottom() + (3.0 * s).round();
+    let tick_h = (3.0 * s).round().max(2.0);
+    for i in 0..9 {
+        let frac = i as f32 / 8.0;
+        let tx = (track_x0 + frac * (track_x1 - track_x0)).round();
+        p.rect_filled(
+            Rect::from_min_size(Pos2::new(tx, tick_y0), Vec2::new(1.0, tick_h)),
+            0.0,
+            tick_col,
+        );
+    }
+
+    // Thumb (`ControlBG` + 1px raised bevel).
+    let frac = ((*value - min) / span).clamp(0.0, 1.0);
+    let thumb_cx = (track_x0 + frac * (track_x1 - track_x0)).round();
+    let thumb_rect = Rect::from_center_size(
+        Pos2::new(thumb_cx, track_rect.center().y),
+        Vec2::new(thumb_w, thumb_h),
+    );
+    p.rect_filled(thumb_rect, 0.0, tc.palette.control_bg);
+    paint_tracker_bevel_rect(p, thumb_rect, true, tc.palette);
+
+    if !left_text.is_empty() || !right_text.is_empty() {
+        let lbl_y = tick_y0 + tick_h + (2.0 * s).round();
+        let lbl_rect = Rect::from_min_max(Pos2::new(r.left(), lbl_y), r.max);
+        let fonts = rt.tracker_scheme.fonts.clone();
+        if !left_text.is_empty() {
+            rt.font_atlas.paint_text_with_scale(
+                p, tc.ctx, tc.vfs, &fonts, "tracker", "DefaultSmall", tc.screen_h,
+                lbl_rect, left_text, tc.palette.dim_text, TextAlignment::NorthWest, false, s,
+            );
+        }
+        if !right_text.is_empty() {
+            rt.font_atlas.paint_text_with_scale(
+                p, tc.ctx, tc.vfs, &fonts, "tracker", "DefaultSmall", tc.screen_h,
+                lbl_rect, right_text, tc.palette.dim_text, TextAlignment::NorthEast, false, s,
+            );
+        }
+    }
+    changed
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn draw_tracker_list_panel_rect(
+    ui: &mut egui::Ui,
+    rt: &mut VguiRuntime,
+    tc: &TrackerCtx<'_>,
+    id_salt: &str,
+    rect: Rect,
+    columns: &[(&str, f32)],
+    rows: &[Vec<String>],
+    selected_row: &mut Option<usize>,
+) -> Option<usize> {
+    let r = Rect::from_min_max(
+        Pos2::new(rect.left().round(), rect.top().round()),
+        Pos2::new(rect.right().round(), rect.bottom().round()),
+    );
+    let s = tc.scale;
+    let p = ui.painter();
+    p.rect_filled(r, CornerRadius::ZERO, tc.palette.window_bg);
+    paint_tracker_bevel_rect(p, r, false, tc.palette);
+
+    let inner = r.shrink(1.0);
+    let hdr_h = (22.0 * s).round();
+    let row_h = (18.0 * s).round();
+    let sb_w = (16.0 * s).round();
+
+    let hdr_rect = Rect::from_min_size(inner.min, Vec2::new((inner.width() - sb_w).max(20.0), hdr_h));
+    let fonts = rt.tracker_scheme.fonts.clone();
+    let mut col_x = hdr_rect.left() + (6.0 * s).round();
+    for (title, w_unscaled) in columns {
+        let cw = (*w_unscaled * s).round();
+        let crect = Rect::from_min_size(Pos2::new(col_x, hdr_rect.top() - 1.0), Vec2::new(cw, hdr_h + 2.0));
+        rt.font_atlas.paint_text_with_scale(
+            p, tc.ctx, tc.vfs, &fonts, "tracker", "DefaultSmall", tc.screen_h,
+            crect, title, tc.palette.bright_control_text, TextAlignment::West, false, s,
+        );
+        col_x += cw;
+    }
+
+    let body_rect = Rect::from_min_max(
+        Pos2::new(inner.left(), inner.top() + hdr_h),
+        inner.max,
+    );
+    let mut double_clicked = None;
+    let list_id = ui.make_persistent_id(id_salt);
+    let scroll_id = list_id.with("scroll_off");
+    let visible_rows = ((body_rect.height() / row_h).floor() as usize).max(1);
+    let max_off = rows.len().saturating_sub(visible_rows);
+    let mut scroll_off = tc
+        .ctx
+        .data(|d| d.get_temp::<usize>(scroll_id))
+        .unwrap_or(0)
+        .min(max_off);
+
+    let list_hit = ui.interact(
+        Rect::from_min_max(body_rect.min, Pos2::new(body_rect.right() - sb_w, body_rect.bottom())),
+        list_id.with("body"),
+        Sense::click(),
+    );
+    if list_hit.hovered() {
+        let wheel = tc.ctx.input(|i| i.smooth_scroll_delta.y);
+        if wheel.abs() > 2.0 {
+            if wheel < 0.0 {
+                scroll_off = (scroll_off + 2).min(max_off);
+            } else {
+                scroll_off = scroll_off.saturating_sub(2);
+            }
+        }
+    }
+
+    let clipped = p.with_clip_rect(Rect::from_min_max(
+        body_rect.min,
+        Pos2::new(body_rect.right() - sb_w, body_rect.bottom()),
+    ));
+    for vis_idx in 0..=visible_rows {
+        let r_idx = scroll_off + vis_idx;
+        if r_idx >= rows.len() {
+            break;
+        }
+        let ry = body_rect.top() + vis_idx as f32 * row_h;
+        let row_r = Rect::from_min_size(
+            Pos2::new(body_rect.left(), ry),
+            Vec2::new((body_rect.width() - sb_w).max(10.0), row_h),
+        );
+        if list_hit.clicked()
+            && let Some(pos) = list_hit.interact_pointer_pos()
+            && row_r.contains(pos)
+        {
+            *selected_row = Some(r_idx);
+        }
+        if list_hit.double_clicked()
+            && let Some(pos) = list_hit.interact_pointer_pos()
+            && row_r.contains(pos)
+        {
+            *selected_row = Some(r_idx);
+            double_clicked = Some(r_idx);
+        }
+        let is_sel = *selected_row == Some(r_idx);
+        if is_sel {
+            clipped.rect_filled(row_r, 0.0, tc.palette.selection_bg);
+        }
+        let mut x = row_r.left() + (6.0 * s).round();
+        let fg = if is_sel { tc.palette.bright_text } else { tc.palette.base_text };
+        for (c_idx, (_, w_unscaled)) in columns.iter().enumerate() {
+            let cw = (*w_unscaled * s).round();
+            let val = rows[r_idx].get(c_idx).map(String::as_str).unwrap_or("");
+            if !val.is_empty() {
+                let crect = Rect::from_min_size(Pos2::new(x, ry), Vec2::new(cw, row_h));
+                rt.font_atlas.paint_text_with_scale(
+                    &clipped, tc.ctx, tc.vfs, &fonts, "tracker", "Default", tc.screen_h,
+                    crect, val, fg, TextAlignment::West, false, s,
+                );
+            }
+            x += cw;
+        }
+    }
+
+    // Scrollbar on right (`ControlDarkBG` track + beveled `ControlBG` buttons/thumb).
+    let sb_rect = Rect::from_min_max(
+        Pos2::new(inner.right() - sb_w, inner.top()),
+        inner.max,
+    );
+    p.rect_filled(sb_rect, 0.0, tc.palette.control_dark_bg);
+    let btn_h = sb_w;
+    let up_r = Rect::from_min_size(sb_rect.min, Vec2::new(sb_w, btn_h));
+    let dn_r = Rect::from_min_size(Pos2::new(sb_rect.left(), sb_rect.bottom() - btn_h), Vec2::new(sb_w, btn_h));
+    p.rect_filled(up_r, 0.0, tc.palette.control_bg);
+    paint_tracker_bevel_rect(p, up_r, true, tc.palette);
+    p.rect_filled(dn_r, 0.0, tc.palette.control_bg);
+    paint_tracker_bevel_rect(p, dn_r, true, tc.palette);
+    let tri_col = tc.palette.base_text;
+    let tw = (3.5 * s).round().max(2.5);
+    let th = (2.5 * s).round().max(2.0);
+    let uc = up_r.center();
+    p.add(egui::Shape::convex_polygon(
+        vec![
+            Pos2::new(uc.x, uc.y - th * 0.6),
+            Pos2::new(uc.x + tw, uc.y + th * 0.6),
+            Pos2::new(uc.x - tw, uc.y + th * 0.6),
+        ],
+        tri_col,
+        Stroke::NONE,
+    ));
+    let dc = dn_r.center();
+    p.add(egui::Shape::convex_polygon(
+        vec![
+            Pos2::new(dc.x - tw, dc.y - th * 0.6),
+            Pos2::new(dc.x + tw, dc.y - th * 0.6),
+            Pos2::new(dc.x, dc.y + th * 0.6),
+        ],
+        tri_col,
+        Stroke::NONE,
+    ));
+    let up_hit = ui.interact(up_r, list_id.with("up"), Sense::click());
+    let dn_hit = ui.interact(dn_r, list_id.with("dn"), Sense::click());
+    if up_hit.clicked() {
+        scroll_off = scroll_off.saturating_sub(2);
+    }
+    if dn_hit.clicked() {
+        scroll_off = (scroll_off + 2).min(max_off);
+    }
+    let track_h = (dn_r.top() - up_r.bottom()).max(8.0);
+    if rows.len() > visible_rows {
+        let thumb_h = (track_h * (visible_rows as f32 / rows.len() as f32))
+            .clamp((16.0 * s).round(), track_h);
+        let frac = if max_off > 0 { scroll_off as f32 / max_off as f32 } else { 0.0 };
+        let ty = up_r.bottom() + frac * (track_h - thumb_h);
+        let thumb_r = Rect::from_min_size(Pos2::new(sb_rect.left(), ty.round()), Vec2::new(sb_w, thumb_h.round()));
+        p.rect_filled(thumb_r, 0.0, tc.palette.control_bg);
+        paint_tracker_bevel_rect(p, thumb_r, true, tc.palette);
+    }
+    tc.ctx.data_mut(|d| d.insert_temp(scroll_id, scroll_off));
+    double_clicked
 }

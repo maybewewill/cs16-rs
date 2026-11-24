@@ -317,6 +317,47 @@ impl VguiFontAtlas {
         }
     }
 
+    fn ensure_tier_with_tall<'a>(
+        &'a mut self,
+        vfs: Option<&Vfs>,
+        scheme_fonts: &SchemeFontSet,
+        scheme_tag: &str,
+        font_name: &str,
+        screen_h: u32,
+        tall: f32,
+    ) -> Option<&'a mut FontTierAtlas> {
+        let effective_name = if font_name.trim().is_empty() {
+            "Default"
+        } else {
+            font_name
+        };
+        let variant = scheme_fonts
+            .resolve(effective_name, screen_h)
+            .or_else(|| scheme_fonts.resolve("Default", screen_h))
+            .cloned()
+            .unwrap_or_default();
+        let rounded_tall = tall.round().max(1.0);
+        let key = AtlasTierKey {
+            scheme_tag: scheme_tag.to_string(),
+            font_name: effective_name.to_ascii_lowercase(),
+            screen_h_bucket: screen_h.max(240),
+            tall_px: rounded_tall as u32,
+        };
+        if !self.tiers.contains_key(&key) {
+            let ttf = self.resolve_or_load_ttf(vfs, scheme_fonts, scheme_tag, effective_name, &variant);
+            let tex_id = format!(
+                "vgui_font_{}_{}_{}_{}",
+                scheme_tag,
+                key.font_name,
+                key.screen_h_bucket,
+                key.tall_px
+            );
+            let tier = FontTierAtlas::new(tex_id, ttf, &variant, rounded_tall);
+            self.tiers.insert(key.clone(), tier);
+        }
+        self.tiers.get_mut(&key)
+    }
+
     fn ensure_tier<'a>(
         &'a mut self,
         vfs: Option<&Vfs>,
@@ -337,25 +378,51 @@ impl VguiFontAtlas {
             .cloned()
             .unwrap_or_default();
         let tall = Self::effective_tall(effective_name, &variant, screen_h, proportional_scale);
-        let key = AtlasTierKey {
-            scheme_tag: scheme_tag.to_string(),
-            font_name: effective_name.to_ascii_lowercase(),
-            screen_h_bucket: screen_h.max(240),
-            tall_px: tall.round().max(1.0) as u32,
+        self.ensure_tier_with_tall(vfs, scheme_fonts, scheme_tag, effective_name, screen_h, tall)
+    }
+
+    /// Scale Windows GDI cell height (`TrackerScheme.res` `tall`) to `ab_glyph` em-height (`~0.82`),
+    /// matching GDI Tahoma cap/cell metrics (`Options` 11px / `Player name` 12px at `1280x720`).
+    fn resolved_tall_for_scale(
+        scheme_fonts: &SchemeFontSet,
+        font_name: &str,
+        screen_h: u32,
+        tall_scale: f32,
+    ) -> f32 {
+        const GDI_CELL_TO_EM: f32 = 0.82;
+        let effective_name = if font_name.trim().is_empty() {
+            "Default"
+        } else {
+            font_name
         };
-        if !self.tiers.contains_key(&key) {
-            let ttf = self.resolve_or_load_ttf(vfs, scheme_fonts, scheme_tag, effective_name, &variant);
-            let tex_id = format!(
-                "vgui_font_{}_{}_{}_{}",
-                scheme_tag,
-                key.font_name,
-                key.screen_h_bucket,
-                key.tall_px
-            );
-            let tier = FontTierAtlas::new(tex_id, ttf, &variant, tall);
-            self.tiers.insert(key.clone(), tier);
-        }
-        self.tiers.get_mut(&key)
+        let base = scheme_fonts
+            .resolve(effective_name, screen_h)
+            .or_else(|| scheme_fonts.resolve("Default", screen_h))
+            .map_or(16.0, |v| v.tall);
+        (base * GDI_CELL_TO_EM * tall_scale).round().max(1.0)
+    }
+
+    /// Measure `(width, height)` with an explicit `tall_scale` multiplier on the scheme's base `tall`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn measure_text_with_scale(
+        &mut self,
+        ctx: &egui::Context,
+        vfs: Option<&Vfs>,
+        scheme_fonts: &SchemeFontSet,
+        scheme_tag: &str,
+        font_name: &str,
+        screen_h: u32,
+        text: &str,
+        tall_scale: f32,
+    ) -> Vec2 {
+        let tall = Self::resolved_tall_for_scale(scheme_fonts, font_name, screen_h, tall_scale);
+        let Some(tier) =
+            self.ensure_tier_with_tall(vfs, scheme_fonts, scheme_tag, font_name, screen_h, tall)
+        else {
+            return Vec2::ZERO;
+        };
+        tier.ensure_text_and_upload(ctx, text);
+        Vec2::new(tier.measure_line(text), tier.line_height)
     }
 
     /// Measure `(width, height)` in pixels using GDI-calibrated scheme font metrics.
@@ -413,7 +480,157 @@ impl VguiFontAtlas {
         color: Color32,
         opts: VguiTextDrawOpts,
     ) -> Vec2 {
-        let (clean, hotkey_idx) = if opts.process_hotkey {
+        let effective_name = if font_name.trim().is_empty() {
+            "Default"
+        } else {
+            font_name
+        };
+        let variant = scheme_fonts
+            .resolve(effective_name, screen_h)
+            .or_else(|| scheme_fonts.resolve("Default", screen_h))
+            .cloned()
+            .unwrap_or_default();
+        let tall = Self::effective_tall(effective_name, &variant, screen_h, opts.proportional_scale);
+        self.paint_text_at_tall(
+            painter, ctx, vfs, scheme_fonts, scheme_tag, effective_name, screen_h, rect, text,
+            color, opts.align, opts.process_hotkey, tall,
+        )
+    }
+
+    /// Paint scheme text scaling its base `tall` by `tall_scale` (e.g. `max(1, H/720)` for GameUI).
+    #[allow(clippy::too_many_arguments)]
+    pub fn paint_text_with_scale(
+        &mut self,
+        painter: &egui::Painter,
+        ctx: &egui::Context,
+        vfs: Option<&Vfs>,
+        scheme_fonts: &SchemeFontSet,
+        scheme_tag: &str,
+        font_name: &str,
+        screen_h: u32,
+        rect: Rect,
+        text: &str,
+        color: Color32,
+        align: TextAlignment,
+        process_hotkey: bool,
+        tall_scale: f32,
+    ) -> Vec2 {
+        let tall = Self::resolved_tall_for_scale(scheme_fonts, font_name, screen_h, tall_scale);
+        self.paint_text_at_tall(
+            painter, ctx, vfs, scheme_fonts, scheme_tag, font_name, screen_h, rect, text, color,
+            align, process_hotkey, tall,
+        )
+    }
+
+    /// Paint single- or multi-line wrapped scheme text inside `rect`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn paint_wrapped_text_with_scale(
+        &mut self,
+        painter: &egui::Painter,
+        ctx: &egui::Context,
+        vfs: Option<&Vfs>,
+        scheme_fonts: &SchemeFontSet,
+        scheme_tag: &str,
+        font_name: &str,
+        screen_h: u32,
+        rect: Rect,
+        text: &str,
+        color: Color32,
+        align: TextAlignment,
+        wrap: bool,
+        tall_scale: f32,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        let max_w = rect.width().max(8.0);
+        let mut lines: Vec<String> = Vec::new();
+        for para in text.split('\n') {
+            if !wrap {
+                lines.push(para.to_string());
+                continue;
+            }
+            let mut cur = String::new();
+            for word in para.split_whitespace() {
+                let candidate = if cur.is_empty() {
+                    word.to_string()
+                } else {
+                    format!("{cur} {word}")
+                };
+                let w = self
+                    .measure_text_with_scale(
+                        ctx, vfs, scheme_fonts, scheme_tag, font_name, screen_h, &candidate, tall_scale,
+                    )
+                    .x;
+                if w <= max_w || cur.is_empty() {
+                    cur = candidate;
+                } else {
+                    lines.push(cur);
+                    cur = word.to_string();
+                }
+            }
+            if !cur.is_empty() || para.is_empty() {
+                lines.push(cur);
+            }
+        }
+        let line_h = self
+            .measure_text_with_scale(
+                ctx, vfs, scheme_fonts, scheme_tag, font_name, screen_h, "Ay", tall_scale,
+            )
+            .y
+            .max(12.0 * tall_scale);
+        let total_h = lines.len() as f32 * line_h;
+        let start_y = match align {
+            TextAlignment::NorthWest | TextAlignment::North | TextAlignment::NorthEast => rect.top(),
+            TextAlignment::SouthWest | TextAlignment::South | TextAlignment::SouthEast => {
+                (rect.bottom() - total_h).max(rect.top())
+            }
+            _ => {
+                if lines.len() == 1 {
+                    rect.center().y - line_h * 0.5
+                } else {
+                    rect.top()
+                }
+            }
+        };
+        let row_align = match align {
+            TextAlignment::Center | TextAlignment::North | TextAlignment::South => {
+                TextAlignment::North
+            }
+            TextAlignment::East | TextAlignment::NorthEast | TextAlignment::SouthEast => {
+                TextAlignment::NorthEast
+            }
+            _ => TextAlignment::NorthWest,
+        };
+        let tall = Self::resolved_tall_for_scale(scheme_fonts, font_name, screen_h, tall_scale);
+        for (idx, line) in lines.iter().enumerate() {
+            let y = (start_y + idx as f32 * line_h).round();
+            let row_rect = Rect::from_min_size(Pos2::new(rect.left(), y), Vec2::new(rect.width(), line_h + 2.0));
+            self.paint_text_at_tall(
+                painter, ctx, vfs, scheme_fonts, scheme_tag, font_name, screen_h, row_rect, line,
+                color, row_align, false, tall,
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn paint_text_at_tall(
+        &mut self,
+        painter: &egui::Painter,
+        ctx: &egui::Context,
+        vfs: Option<&Vfs>,
+        scheme_fonts: &SchemeFontSet,
+        scheme_tag: &str,
+        font_name: &str,
+        screen_h: u32,
+        rect: Rect,
+        text: &str,
+        color: Color32,
+        align: TextAlignment,
+        process_hotkey: bool,
+        tall: f32,
+    ) -> Vec2 {
+        let (clean, hotkey_idx) = if process_hotkey {
             strip_vgui_hotkey(text)
         } else {
             (text.to_string(), None)
@@ -421,14 +638,9 @@ impl VguiFontAtlas {
         if clean.is_empty() {
             return Vec2::ZERO;
         }
-        let Some(tier) = self.ensure_tier(
-            vfs,
-            scheme_fonts,
-            scheme_tag,
-            font_name,
-            screen_h,
-            opts.proportional_scale,
-        ) else {
+        let Some(tier) =
+            self.ensure_tier_with_tall(vfs, scheme_fonts, scheme_tag, font_name, screen_h, tall)
+        else {
             return Vec2::ZERO;
         };
         let tex_id = tier.ensure_text_and_upload(ctx, &clean).map(TextureHandle::id);
@@ -439,18 +651,18 @@ impl VguiFontAtlas {
 
         let Some(texture_id) = tex_id else {
             // Honest fallback draw ONLY when resolution failed (already recorded in report.missing).
-            let (anchor, pos) = egui_align_pos(rect, opts.align);
+            let (anchor, pos) = egui_align_pos(rect, align);
             painter.text(pos, anchor, &clean, FontId::proportional(tall), color);
             return Vec2::new(line_w, line_h);
         };
 
-        let start_x = match opts.align {
+        let start_x = match align {
             TextAlignment::West | TextAlignment::NorthWest | TextAlignment::SouthWest => rect.left(),
             TextAlignment::Center | TextAlignment::North | TextAlignment::South => rect.center().x - line_w * 0.5,
             TextAlignment::East | TextAlignment::NorthEast | TextAlignment::SouthEast => rect.right() - line_w,
         }
         .round();
-        let top_y = match opts.align {
+        let top_y = match align {
             TextAlignment::NorthWest | TextAlignment::North | TextAlignment::NorthEast => rect.top(),
             TextAlignment::West | TextAlignment::Center | TextAlignment::East => rect.center().y - line_h * 0.5,
             TextAlignment::SouthWest | TextAlignment::South | TextAlignment::SouthEast => rect.bottom() - line_h,

@@ -2167,18 +2167,27 @@ impl Cs16App {
             }
         }
         if let Some(ui_mode) = self.launch.startup_ui.take() {
-            match ui_mode.to_ascii_lowercase().as_str() {
-                "options" => self.options_ui.open = true,
-                "newgame" => self.menu_ui.new_game_open = true,
-                "servers" => {
-                    self.menu_ui.find_servers_open = true;
-                    self.menu_ui.server_browser.open = true;
+            let lower = ui_mode.to_ascii_lowercase();
+            if lower == "options" {
+                self.options_ui.open = true;
+            } else if let Some(tab_name) = lower.strip_prefix("options:") {
+                if let Some(tab) = cs_client::ui::options::OptionsTab::from_name(tab_name) {
+                    self.options_ui.tab = tab;
                 }
-                "console" => self.console_ui.open(),
-                "playerlist" => self.player_list_ui.open = true,
-                "demo" => self.demo_player_ui.open = true,
-                _ => {
-                    self.launch.startup_ui = Some(ui_mode);
+                self.options_ui.open = true;
+            } else {
+                match lower.as_str() {
+                    "newgame" => self.menu_ui.new_game_open = true,
+                    "servers" => {
+                        self.menu_ui.find_servers_open = true;
+                        self.menu_ui.server_browser.open = true;
+                    }
+                    "console" => self.console_ui.open(),
+                    "playerlist" => self.player_list_ui.open = true,
+                    "demo" => self.demo_player_ui.open = true,
+                    _ => {
+                        self.launch.startup_ui = Some(ui_mode);
+                    }
                 }
             }
             self.sync_cursor_capture();

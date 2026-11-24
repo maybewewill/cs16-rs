@@ -57,11 +57,27 @@ Measured at 800x600, 1024x768, 1280x720, 1280x800, 1280x1024 and 1600x1080:
 - `measure_text_scaled` must use the same scaling as the matching `paint_text`.
 - Synthetic bold like GDI: when the weight is above the bold face (> 800), each glyph is smeared 1 px right and its advance grows by 1.
 
+### Options dialog (`OptionsSub*.res`): DONE
+
+Measured at 800x600, 1280x720, 1280x800, and 1280x1024 (plus all 7 tabs at 1280x800):
+
+- **Scale.** `s = max(1, height / 720)` (`TrackerScheme.res` `ProportionalBaseHeightHD`).
+- **Dialog window.** `(522 * s) x (444 * s)`, centered on screen:
+  - 800x600 (`s = 1.000`): `522x444` at `(139, 78)`
+  - 1280x720 (`s = 1.000`): `522x444` at `(379, 138)`
+  - 1280x800 (`s = 1.111`): `580x493` at `(350, 153)`
+  - 1280x1024 (`s = 1.422`): `742x631` at `(269, 196)`
+- **Titlebar.** `icon_steam.tga` (`16x16 * s`) at `(7, 8) * s`, `#GameUI_Options` (`DefaultBold`) at `x = 28 * s`, close button `[X]` at `(497, 8, 18, 18) * s`.
+- **PropertySheet & tabs.** Body rect `(5, 55, 512, 352) * s`. Tab order: `Multiplayer`, `Audio`, `Video`, `Aim`, `Keyboard`, `Voice`, `Content`. Tab width `max(64 * s, text_w + 16 * s)` with `1 * s` gap; active tab sits at `y = 29..55 * s` and merges with the sheet top border; inactive tabs sit at `y = 31..55 * s`.
+- **Subpages.** Every control in `OptionsSub*.res` scales by `s` relative to `(dlg_x + 5*s, dlg_y + 55*s)` (`Suit Slider` hidden on Audio and `DetailTextures` hidden on Content as in CS 1.6).
+- **Bottom buttons.** `OK` `(277, 411, 72, 24)*s`, `Cancel` `(357, 411, 72, 24)*s`, `Apply` `(437, 411, 72, 24)*s`, west-aligned with `6 * s` left inset.
+- **Font GDI scaling.** `TrackerScheme` GDI `tall` values map to `ab_glyph` em-height by `0.82 * tall * s` (`Options` 11 px / `Player name` 12 px at `s = 1.0`).
+
 ## Status of the other screens (measured 2026-11-24 at 1280x800)
 
 | Screen | State | Differences seen |
 |---|---|---|
-| Options (`OptionsDialog`) | **Not built from `.res`** | Tab order is wrong: the original is Multiplayer, Audio, Video, Aim, Keyboard, Voice, Content; ours is Multiplayer, Keyboard, Aim, Audio, Video, Voice, Lock. The Multiplayer page layout is hand-placed: the original `OptionsSubMultiplayer.res` puts the player-name label above the field and the crosshair preview over a map image, and it has no `cl_righthand`/`hud_fastswitch` checkboxes on that page. The window size and position differ (the original is about 580x490 near the centre-left). |
+| Options (`OptionsDialog`) | **DONE** | Built from `OptionsSub*.res` + `MultiplayerAdvancedDialog.res` + `ContentControlDialog.res` in original tab order (`Multiplayer, Audio, Video, Aim, Keyboard, Voice, Content`). Full-frame MAD vs original: `2.72/255` (800x600), `3.33/255` (1280x720), `3.99/255` (1280x800), `3.72/255` (1280x1024); 7 tabs at 1280x800: `2.88-3.99/255` full / `3.69-6.97/255` dialog (remaining delta is player name / Russian Steam overlay strings). |
 | New game (`CreateMultiplayerGame*.res`) | not compared | |
 | Find servers (`ServerBrowser`) | not compared | |
 | Console | not compared | The original GameUI console is a TrackerScheme frame (seen top-left in captures). |
