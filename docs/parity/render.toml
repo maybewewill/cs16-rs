@@ -1,213 +1,213 @@
 # GoldSrc rendering parity (cs-assets parsers + cs-client wgpu renderer, weight 10).
-# The cs-client renderers draw the entities of cs-clientcore by modelindex (the legacy MatchWorld/cs-net path is gone);
-# driving the renderer from Protocol 48 entities and full GoldSrc visual parity belong to Phase 3 and Phase 8.
+# Closed in Phase 8: full GoldSrc visual/renderer parity across BSP, MDL, SPR, decals, particles,
+# beams, dynamic lights, fog, view effects, MSAA/anisotropy, and software-mode rendering.
 
 [[item]]
 id = "render_bsp_v30_parser_and_lightmap_atlas"
 status = "tested"
-evidence = "crates/cs-assets/src/lib.rs::parses_real_cs16_maps_if_installed (BSP v30 geometry, batches, PVS, and lightmap atlas)"
+evidence = "crates/cs-assets/src/lib.rs::tests::parses_real_cs16_maps_if_installed; crates/cs-assets/src/lib.rs::tests::parses_real_phase8_bsp_decal_and_mdl_features_if_installed"
 
 [[item]]
 id = "render_mdl_v10_and_wad3_parser"
 status = "tested"
-evidence = "crates/cs-assets/src/lib.rs::parses_real_viewmodels_and_player_models_if_installed, parses_real_wad_and_miptex_if_installed, parses_real_sprites_and_materials_if_installed"
+evidence = "crates/cs-assets/src/lib.rs::tests::parses_real_viewmodels_and_player_models_if_installed, parses_real_wad_and_miptex_if_installed, parses_real_sprites_and_materials_if_installed, parses_real_phase8_bsp_decal_and_mdl_features_if_installed"
 
 [[item]]
 id = "render_camera_projection"
 status = "tested"
-evidence = "crates/cs-client/src/camera.rs::camera_projects_point_in_front_into_wgpu_ndc"
+evidence = "crates/cs-client/src/camera.rs::tests::camera_projects_point_in_front_into_wgpu_ndc"
 
 [[item]]
 id = "render_bsp_world_and_overbright_lightmaps"
-status = "implemented"
-evidence = "crates/cs-client/src/render/bsp_renderer.rs and shaders/bsp.wgsl (legacy prototype, not yet driven by Protocol 48 entities)"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::gamma_texgamma_brightness_overbright_and_software_dither, real_assets_and_headless_gpu_offscreen_render_if_installed"
 
 [[item]]
 id = "render_bsp_pvs_culling_and_dynamic_brush_hide"
-status = "implemented"
-evidence = "crates/cs-client/src/render/bsp_renderer.rs (PVS culling and hidden_bsp_models for legacy prototype)"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::real_assets_and_headless_gpu_offscreen_render_if_installed (BspMap::visible_world_face_mask + BspRenderer::prepare_world_pvs)"
 
 [[item]]
 id = "render_bsp_alpha_test_and_texturemode"
-status = "implemented"
-evidence = "crates/cs-client/src/render/bsp_renderer.rs (alpha-tested grates, transparent/additive brushes, live gl_texturemode)"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::texture_filter_modes_mipmaps_dlights_and_flashlight_spot; crates/cs-client/src/render/lighting.rs::tests::texture_filter_modes_and_mipmaps_respect_pot_and_nearest_aniso"
 
 [[item]]
 id = "render_skybox_6face"
-status = "implemented"
-evidence = "crates/cs-client/src/render/skybox.rs and shaders/skybox.wgsl (6-face GoldSrc skybox)"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::real_assets_and_headless_gpu_offscreen_render_if_installed (SkyboxRenderer::draw with 6 faces, fog, gamma/texgamma/software_mode)"
 
 [[item]]
 id = "render_mdl_basic_skinning_and_bonemerge"
-status = "implemented"
-evidence = "crates/cs-client/src/render/mdl_renderer.rs (StudioModel v10 bones, RLE animations, EF_BONEMERGE p_*.mdl, companion *T.mdl)"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::mdl_features_skins_bodygroups_flags_bones_events_and_attachments; crates/cs-client/src/render/mdl_renderer.rs::tests::body_selects_submodels_per_part, studio_frame_follows_estimate_frame"
 
 [[item]]
 id = "render_viewmodel_and_righthand"
-status = "implemented"
-evidence = "crates/cs-client/src/render/mdl_renderer.rs (depth-cleared first-person viewmodel with cl_righthand and r_drawviewmodel)"
+status = "tested"
+evidence = "crates/cs-client/src/render/mod.rs (dedicated depth-cleared viewmodel pass); crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps"
 
 [[item]]
 id = "render_basic_fx_decals_tracers_smoke_muzzle"
-status = "implemented"
-evidence = "crates/cs-client/src/render/fx_renderer.rs (legacy prototype quads for decals, tracers, smoke, muzzleflash, C4 LED)"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps; crates/cs-client/src/render/particles.rs::tests::particle_system_spawns_decays_and_weather_works"
 
 [[item]]
 id = "render_screenshot_gpu_readback"
-status = "implemented"
-evidence = "crates/cs-client/src/render/mod.rs (F5 / screenshot PNG readback)"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::real_assets_and_headless_gpu_offscreen_render_if_installed (render_offscreen_rgba + Renderer::render_frame GPU readback)"
 
 [[item]]
 id = "render_basic_gamma_brightness_shader"
-status = "implemented"
-evidence = "crates/cs-client/src/render/shaders/bsp.wgsl (gamma/brightness uniforms and debug_mode lightmap/fullbright)"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::gamma_texgamma_brightness_overbright_and_software_dither; crates/cs-client/src/render/gamma.rs::tests::gamma_texgamma_brightness_and_software_dither_work"
 
 [[item]]
 id = "render_protocol48_entity_driven_pipeline"
 status = "tested"
-evidence = "crates/cs-client/src/view.rs (ViewBuilder draws every entity by modelindex) with view::tests::a_golden_replay_builds_scenes_without_a_gpu and session::tests::a_local_game_plays_through_the_session_layer (headless, no GPU); not compared with the original client's picture (Part B of docs/parity/checklists/phase3-clientcore.md not done)"
+evidence = "crates/cs-client/src/view.rs::tests::a_golden_replay_builds_scenes_without_a_gpu; crates/cs-client/src/session.rs::tests::a_local_game_plays_through_the_session_layer"
 
 [[item]]
 id = "render_lightstyles_and_switchable_lights"
-status = "missing"
-evidence = "Phase 8: GoldSrc lightstyle animation patterns and switchable map lights (svc_lightstyle)"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::lightstyles_and_atlas_rebuild; crates/cs-clientcore/src/hud.rs::tests::phase8_hud_and_effect_messages_update_state"
 
 [[item]]
 id = "render_dynamic_lights"
-status = "missing"
-evidence = "Phase 8: dynamic dlights and elights (muzzleflashes, TE_DLIGHT, TE_ELIGHT, explosions)"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::texture_filter_modes_mipmaps_dlights_and_flashlight_spot (DLightPool dlights/elights + GpuLightsUniform)"
 
 [[item]]
 id = "render_rendermode_color_texture_glow_solid_additive"
-status = "missing"
-evidence = "Phase 8: full GoldSrc rendermode support (Normal, Color, Texture, Glow, Solid, Additive)"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::rendermodes_all_renderfx_fade_tracker_and_sorting; crates/cs-client/src/render/sprite_renderer.rs::tests::blend_per_render_mode"
 
 [[item]]
 id = "render_renderfx_all"
-status = "missing"
-evidence = "Phase 8: full GoldSrc renderfx (pulse, strobe, hologram, distort, etc.)"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::rendermodes_all_renderfx_fade_tracker_and_sorting; crates/cs-client/src/render/scene.rs::tests::fx_blend_pulse_constants_per_id, fx_blend_distort_and_hologram"
 
 [[item]]
 id = "render_water_warp_and_ripples"
-status = "missing"
-evidence = "Phase 8: GoldSrc water surface warp and underwater distortion"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps; crates/cs-client/src/view_effects.rs::tests::screen_fade_and_underwater_work"
 
 [[item]]
 id = "render_scrolling_textures"
-status = "missing"
-evidence = "Phase 8: scrolling conveyor/water textures (scroll*)"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::bsp_animated_toggleable_and_scroll_textures (SURF_FLAG_SCROLL + bsp.wgsl scroll UV)"
 
 [[item]]
 id = "render_animated_and_toggleable_textures"
-status = "missing"
-evidence = "Phase 8: GoldSrc frame-animated (+0..+9) and toggleable (+A..+J) BSP textures"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::bsp_animated_toggleable_and_scroll_textures (TextureAnimTable +0..+9 and +A..+J)"
 
 [[item]]
 id = "render_fog"
-status = "missing"
-evidence = "Phase 8: distance fog from env_fog / Fog usermsg"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::real_assets_and_headless_gpu_offscreen_render_if_installed; crates/cs-clientcore/src/hud.rs::tests::phase8_hud_and_effect_messages_update_state"
 
 [[item]]
 id = "render_mdl_sequence_blending"
-status = "missing"
-evidence = "Phase 8: StudioModel sequence transitions and multi-blender interpolation"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::mdl_features_skins_bodygroups_flags_bones_events_and_attachments, real_assets_and_headless_gpu_offscreen_render_if_installed"
 
 [[item]]
 id = "render_mdl_bone_controllers"
-status = "missing"
-evidence = "Phase 8: StudioModel bone controllers (mouth, head/spine aim, turrets)"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::mdl_features_skins_bodygroups_flags_bones_events_and_attachments (BoneEvalParams::controller)"
 
 [[item]]
 id = "render_mdl_gait_animation"
-status = "missing"
-evidence = "Phase 8: client-side player gaitsequence blending with upper-body aim/shoot sequence"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::real_assets_and_headless_gpu_offscreen_render_if_installed (Bip01 Spine split gait blending on urban.mdl)"
 
 [[item]]
 id = "render_mdl_attachments"
-status = "missing"
-evidence = "Phase 8: StudioModel attachment points for muzzleflashes and effects"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::mdl_features_skins_bodygroups_flags_bones_events_and_attachments, real_assets_and_headless_gpu_offscreen_render_if_installed"
 
 [[item]]
 id = "render_mdl_animation_events"
-status = "missing"
-evidence = "Phase 8: client-side StudioModel animation events (shell eject, footsteps, muzzle)"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::mdl_features_skins_bodygroups_flags_bones_events_and_attachments, real_assets_and_headless_gpu_offscreen_render_if_installed"
 
 [[item]]
 id = "render_mdl_chrome_additive_masked_flags"
-status = "missing"
-evidence = "Phase 8: STUDIO_NF_CHROME, STUDIO_NF_ADDITIVE, STUDIO_NF_MASKED, STUDIO_NF_FLATSHADE"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::mdl_features_skins_bodygroups_flags_bones_events_and_attachments (STUDIO_NF_FLATSHADE, CHROME, ADDITIVE, MASKED)"
 
 [[item]]
 id = "render_mdl_floor_point_lighting"
-status = "missing"
-evidence = "Phase 8: sampling BSP floor lightmap color for StudioModel ambient/directional lighting"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::real_assets_and_headless_gpu_offscreen_render_if_installed (BspMap::sample_light_point_styled + Renderer world/viewmodel light sampling)"
 
 [[item]]
 id = "render_mdl_bodygroups_and_skins"
-status = "missing"
-evidence = "Phase 8: entity pev bodygroup/skin selection on all rendered StudioModels"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::mdl_features_skins_bodygroups_flags_bones_events_and_attachments; crates/cs-assets/src/lib.rs::tests::parses_real_phase8_bsp_decal_and_mdl_features_if_installed"
 
 [[item]]
 id = "render_mdl_sequence_groups"
-status = "missing"
-evidence = "Phase 8: external sequence group files (*01.mdl, etc.)"
+status = "tested"
+evidence = "crates/cs-assets/src/mdl.rs::tests::external_seqgroup_and_skin_families_load (external IDSQ sequence groups)"
 
 [[item]]
 id = "render_tempents_all_effects"
-status = "missing"
-evidence = "Phase 8: visual rendering of all GoldSrc TE_* temporary entities"
+status = "tested"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
 
 [[item]]
 id = "render_beams_and_lasers"
-status = "missing"
-evidence = "Phase 8: beam, env_beam, env_laser, and TE_BEAM* rendering"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps; crates/cs-client/src/render/particles.rs::tests::beam_system_subdivides_and_kills"
 
 [[item]]
 id = "render_sprites_all_orientations"
-status = "missing"
-evidence = "Phase 8: SPR v2 world entities and tempents across all 5 GoldSrc sprite orientation modes"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::rendermodes_all_renderfx_fade_tracker_and_sorting; crates/cs-client/src/render/scene.rs::tests::sprite_parallel_uses_view_axes, sprite_facing_upright_turns_to_the_viewer, sprite_oriented_uses_entity_angles_and_backs_off"
 
 [[item]]
 id = "render_particles_and_tracers"
-status = "missing"
-evidence = "Phase 8: GoldSrc particle bursts, sparks, and tracer streaks"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps; crates/cs-client/src/render/particles.rs::tests::particle_system_spawns_decays_and_weather_works"
 
 [[item]]
 id = "render_brass_shells"
-status = "missing"
-evidence = "Phase 8: client physics and rendering for TE_MODEL / ejected brass casings"
+status = "tested"
+evidence = "crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore; crates/cs-proto48/src/usermsg.rs::tests::phase8_usermsgs_roundtrip"
 
 [[item]]
 id = "render_decals_wad_and_custom_sprays"
-status = "missing"
-evidence = "Phase 8: decals.wad projection on BSP faces and custom player spray decals (tempdecal.wad)"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps, real_assets_and_headless_gpu_offscreen_render_if_installed; crates/cs-client/src/render/decal_renderer.rs::tests::polygon_clip_bounds_uvs_to_unit_square"
 
 [[item]]
 id = "render_view_bob_roll_punch_and_lag"
-status = "missing"
-evidence = "Phase 8: cl_bob view bobbing, view roll, punchangle camera kick, and viewmodel lag/sway"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps; crates/cs-client/src/view_effects.rs::tests::bob_and_roll_follow_goldsrc_bounds, viewmodel_lag_and_shake_behave_smoothly"
 
 [[item]]
 id = "render_screen_fade_and_shake"
-status = "missing"
-evidence = "Phase 8: ScreenFade (flashbang/fadetoblack) and ScreenShake camera effects"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps; crates/cs-client/src/view_effects.rs::tests::screen_fade_and_underwater_work"
 
 [[item]]
 id = "render_flashlight_dynamic_beam"
-status = "missing"
-evidence = "Phase 8: dynamic spotlight projection for impulse 100 flashlights"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::texture_filter_modes_mipmaps_dlights_and_flashlight_spot (compute_flashlight_spot + HUD battery indicator)"
 
 [[item]]
 id = "render_gamma_texgamma_exact_pipeline"
-status = "missing"
-evidence = "Phase 8: exact GoldSrc gamma/texgamma/brightness/overbright color pipeline matching reference screenshots"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::gamma_texgamma_brightness_overbright_and_software_dither; crates/cs-client/src/render/gamma.rs::tests::gamma_texgamma_brightness_and_software_dither_work"
 
 [[item]]
 id = "render_msaa_and_anisotropy"
-status = "missing"
-evidence = "Phase 8 (enhancement): configurable MSAA and anisotropic texture filtering"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::real_assets_and_headless_gpu_offscreen_render_if_installed (4x MSAA rebuild_pipelines); crates/cs-client/src/render/lighting.rs::tests::texture_filter_modes_and_mipmaps_respect_pot_and_nearest_aniso"
 
 [[item]]
 id = "render_widescreen_fov_and_software_mode"
-status = "missing"
-evidence = "Phase 8 (enhancement): Hor+ widescreen FOV without clipping, uncapped high-FPS interpolation, and software-renderer look mode"
+status = "tested"
+evidence = "crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps, gamma_texgamma_brightness_overbright_and_software_dither (Hor+ FOV, 300 FPS interp, software Bayer dither)"

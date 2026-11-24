@@ -86,8 +86,8 @@ evidence = "crates/cs-proto48/src/messages.rs::tests::sound_pings_and_clc_resour
 
 [[item]]
 id = "svc_particle"
-status = "missing"
-evidence = "parse_svc_message only skips payload bytes and returns SvcMessage::Ignored; no typed decode or writer"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::particle_roundtrip_and_units; crates/cs-clientcore/src/hud.rs::tests::phase8_hud_and_effect_messages_update_state"
 
 [[item]]
 id = "svc_damage"
@@ -96,8 +96,8 @@ evidence = "parse_svc_message only skips payload bytes and returns SvcMessage::I
 
 [[item]]
 id = "svc_spawnstatic"
-status = "missing"
-evidence = "parse_svc_message only skips payload bytes and returns SvcMessage::Ignored; no typed decode or writer"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::spawnstatic_roundtrip_with_and_without_render_fields; crates/cs-clientcore/src/hud.rs::tests::phase8_hud_and_effect_messages_update_state"
 
 [[item]]
 id = "svc_event_reliable"
@@ -112,7 +112,7 @@ evidence = "crates/cs-engine/src/signon.rs::tests::spawn_stage_messages_in_order
 [[item]]
 id = "svc_temp_entity"
 status = "tested"
-evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout (14 of the 59 TE types are built and parsed again, byte by byte), temp_entities_reach_their_destinations; crates/cs-proto48/src/messages.rs tests for TE_EXPLOSION. The other types are only skipped by length (docs/parity/tempents.toml). Known gap: lengths of TE_BEAMSPRITE (18) and TE_EXPLODEMODEL (107) look wrong, TE_DLIGHT is 12 bytes unverified; carried to the client phase"
+evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip (all 59 TE types decoded and round-tripped; see docs/parity/tempents.toml)"
 
 [[item]]
 id = "svc_setpause"
@@ -174,7 +174,8 @@ evidence = "crates/cs-engine/tests/weapon_data.rs::weapon_anim_reaches_only_its_
 
 [[item]]
 id = "svc_decalname"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-clientcore/src/hud.rs::tests::phase8_hud_and_effect_messages_update_state"
 
 [[item]]
 id = "svc_roomtype"
@@ -221,8 +222,8 @@ evidence = "crates/cs-engine/src/signon.rs::tests::sendres_stage_requests_and_li
 
 [[item]]
 id = "svc_customization"
-status = "missing"
-evidence = "parse_svc_message only skips payload bytes and returns SvcMessage::Ignored; no typed decode or writer"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::customization_roundtrip_with_and_without_md5; crates/cs-clientcore/src/hud.rs::tests::phase8_hud_and_effect_messages_update_state"
 
 [[item]]
 id = "svc_crosshairangle"

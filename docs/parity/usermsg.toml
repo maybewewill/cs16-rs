@@ -318,12 +318,13 @@ status = "missing"
 
 [[item]]
 id = "Brass"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase8_usermsgs_roundtrip; crates/cs-clientcore/src/hud.rs::tests::phase8_hud_and_effect_messages_update_state; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
 
 [[item]]
 id = "Fog"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_fog_weather_lights_and_sound_entities"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_fog_weather_lights_and_sound_entities; crates/cs-proto48/src/usermsg.rs::tests::phase8_usermsgs_roundtrip; crates/cs-clientcore/src/hud.rs::tests::phase8_hud_and_effect_messages_update_state"
 
 [[item]]
 id = "ShowTimer"
