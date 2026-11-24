@@ -180,4 +180,80 @@ mod tests {
         let dust2_brief = crate::scheme::load_map_briefing(&vfs, "de_dust2").expect("de_dust2.txt");
         assert!(dust2_brief.contains("Dust"));
     }
+
+    #[test]
+    fn parses_real_phase8_bsp_decal_and_mdl_features_if_installed() {
+        let Some(vfs) = local_vfs() else { return };
+
+        // 1. decals.wad index-alpha decoding
+        if let Ok(bytes) = vfs.read_bytes("decals.wad") {
+            let wad = WadArchive::parse(bytes).expect("parse decals.wad");
+            let shot = wad.decode_decal("{shot1").expect("decode").expect("{shot1");
+            assert_eq!((shot.width, shot.height), (16, 16));
+            let blood = wad.decode_decal("{blood1").expect("decode").expect("{blood1");
+            assert!(blood.alpha_test);
+            assert!(blood.rgba.chunks_exact(4).any(|px| px[3] > 0 && px[0] > 0));
+        }
+
+        // 2. de_dust2 PVS mask, lightmap rects, world face spans, styled lightpoint, decal sphere query
+        if vfs.exists("maps/de_dust2.bsp") {
+            let mut map = BspMap::load(&vfs, "de_dust2").expect("de_dust2");
+            let rects = map.build_face_lightmap_rects();
+            assert_eq!(rects.len(), map.lightmap_atlas.packed_faces);
+            let spawn = map.spawns[0].position + glam::Vec3::new(0.0, 0.0, 32.0);
+            let mask = map.visible_world_face_mask(spawn).expect("PVS mask");
+            let vis_count = mask.iter().filter(|&&v| v).count();
+            assert!(vis_count > 10 && vis_count < map.faces.len());
+            let (wv, wi, spans) = map.build_world_face_meshes();
+            assert!(!wv.is_empty() && !wi.is_empty());
+            assert!(spans.iter().flatten().count() > 100);
+
+            let mut styles = [1.0f32; 64];
+            let lit = map.sample_light_point_styled(spawn, &styles);
+            assert!(lit.is_finite() && lit.min_element() >= 0.12);
+            styles[0] = 0.0;
+            let _ = map.build_texture_anim_table();
+            let near = map.query_faces_in_sphere(map.spawns[0].position, 64.0);
+            assert!(!near.is_empty(), "expected floor/wall faces near spawn");
+            let mut prev = [1.0f32; 64];
+            let dirty = map.lightmap_atlas.rebuild_for_styles(&map.lighting, &rects, &styles, &prev);
+            assert!(!dirty.is_empty());
+            prev = styles;
+            assert!(map.lightmap_atlas.rebuild_for_styles(&map.lighting, &rects, &styles, &prev).is_empty());
+        }
+
+        // 3. urban.mdl 9-way blending, controllers, attachments, spine gait split; v_ak47.mdl events
+        let urban = StudioModel::load(&vfs, "models/player/urban/urban.mdl").expect("urban.mdl");
+        assert!(!urban.controllers.is_empty());
+        assert!(!urban.attachments.is_empty());
+        let aim_seq = urban.find_sequence("crouch_aim_carbine").expect("aim seq");
+        assert!(urban.sequences[aim_seq].num_blends >= 9);
+        let bones_lo = urban.evaluate_bones_full(&crate::mdl::BoneEvalParams {
+            sequence: aim_seq,
+            frame: 0.0,
+            loop_anim: false,
+            blending: [0, 0],
+            controller: [127; 4],
+            mouth: 0,
+            prev_sequence: None,
+            gait: Some((0, 0.0)),
+        });
+        let bones_hi = urban.evaluate_bones_full(&crate::mdl::BoneEvalParams {
+            sequence: aim_seq,
+            frame: 0.0,
+            loop_anim: false,
+            blending: [255, 0],
+            controller: [127; 4],
+            mouth: 0,
+            prev_sequence: None,
+            gait: Some((0, 0.0)),
+        });
+        assert_ne!(
+            urban.evaluate_attachments(glam::Mat4::IDENTITY, &bones_lo)[0],
+            urban.evaluate_attachments(glam::Mat4::IDENTITY, &bones_hi)[0]
+        );
+
+        let ak = StudioModel::load(&vfs, "models/v_ak47.mdl").expect("v_ak47.mdl");
+        assert!(ak.sequences.iter().any(|s| !s.events.is_empty()));
+    }
 }

@@ -7,11 +7,21 @@ use thiserror::Error;
 use crate::wad::read_cstr;
 
 pub const MDL_MAGIC: &[u8; 4] = b"IDST";
+pub const IDSQ_MAGIC: &[u8; 4] = b"IDSQ";
 pub const MDL_VERSION: i32 = 10;
 
+pub const STUDIO_NF_FLATSHADE: i32 = 0x0001;
 pub const STUDIO_NF_CHROME: i32 = 0x0002;
 pub const STUDIO_NF_ADDITIVE: i32 = 0x0020;
 pub const STUDIO_NF_MASKED: i32 = 0x0040;
+
+pub const STUDIO_X: i32 = 0x0001;
+pub const STUDIO_Y: i32 = 0x0002;
+pub const STUDIO_Z: i32 = 0x0004;
+pub const STUDIO_XR: i32 = 0x0008;
+pub const STUDIO_YR: i32 = 0x0010;
+pub const STUDIO_ZR: i32 = 0x0020;
+pub const STUDIO_RLOOP: i32 = 0x8000;
 
 #[derive(Debug, Error)]
 pub enum MdlError {
@@ -27,10 +37,43 @@ pub enum MdlError {
 pub struct MdlBone {
     pub name: String,
     pub parent: i32,
+    pub bonecontroller: [i32; 6],
     pub default_pos: Vec3,
     pub default_rot: Vec3,
     pub pos_scale: Vec3,
     pub rot_scale: Vec3,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct MdlBoneController {
+    pub bone: i32,
+    pub kind: i32,
+    pub start: f32,
+    pub end: f32,
+    pub rest: i32,
+    pub index: i32,
+}
+
+#[derive(Debug, Clone)]
+pub struct MdlAttachment {
+    pub name: String,
+    pub att_type: i32,
+    pub bone: usize,
+    pub org: Vec3,
+}
+
+#[derive(Debug, Clone)]
+pub struct MdlSeqEvent {
+    pub frame: i32,
+    pub event: i32,
+    pub ev_type: i32,
+    pub options: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct MdlSeqGroup {
+    pub label: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -54,8 +97,17 @@ pub struct MdlSequence {
     pub fps: f32,
     pub flags: i32,
     pub num_frames: usize,
-    /// Per-bone animation channels (empty if sequence lives in an external seqgroup).
+    pub num_blends: usize,
+    pub blend_type: [i32; 2],
+    pub blend_start: [f32; 2],
+    pub blend_end: [f32; 2],
+    pub seqgroup: i32,
+    pub anim_index: usize,
+    pub events: Vec<MdlSeqEvent>,
+    /// Per-bone animation channels for blend 0 (empty if sequence lives in an external seqgroup before load).
     pub bone_anims: Vec<MdlBoneAnim>,
+    /// All blends `[blend_idx][bone_idx]` decoded for multi-blend evaluation.
+    pub blends: Vec<Vec<MdlBoneAnim>>,
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +131,7 @@ pub struct MdlVertexRef {
 #[derive(Debug, Clone)]
 pub struct MdlMesh {
     pub texture_index: usize,
+    pub skinref: usize,
     pub vertices: Vec<MdlVertexRef>,
 }
 
@@ -99,14 +152,48 @@ pub struct MdlBodyPart {
 pub struct StudioModel {
     pub name: String,
     pub bones: Vec<MdlBone>,
+    pub controllers: Vec<MdlBoneController>,
+    pub attachments: Vec<MdlAttachment>,
     pub hitboxes: Vec<MdlHitbox>,
     pub sequences: Vec<MdlSequence>,
+    pub seq_groups: Vec<MdlSeqGroup>,
     pub textures: Vec<MdlTexture>,
+    pub skin_families: Vec<Vec<usize>>,
     pub bodyparts: Vec<MdlBodyPart>,
 }
 
+/// Parameters for full GoldSrc studio bone evaluation (blending, controllers, gait split, transitions).
+#[derive(Debug, Clone, Copy)]
+pub struct BoneEvalParams {
+    pub sequence: usize,
+    pub frame: f32,
+    pub loop_anim: bool,
+    pub blending: [u8; 2],
+    pub controller: [u8; 4],
+    pub mouth: u8,
+    /// Optional previous sequence `(seq, frame, loop_anim, weight)` where `weight` decays 1 -> 0.
+    pub prev_sequence: Option<(usize, f32, bool, f32)>,
+    /// Optional lower-body player gait sequence `(gait_seq, gait_frame)`.
+    pub gait: Option<(usize, f32)>,
+}
+
+impl Default for BoneEvalParams {
+    fn default() -> Self {
+        Self {
+            sequence: 0,
+            frame: 0.0,
+            loop_anim: true,
+            blending: [0, 0],
+            controller: [127, 127, 127, 127],
+            mouth: 0,
+            prev_sequence: None,
+            gait: None,
+        }
+    }
+}
+
 impl StudioModel {
-    /// Load a `.mdl` file from VFS (automatically loading companion `*T.mdl` textures if needed).
+    /// Load a `.mdl` file from VFS (automatically loading companion `*T.mdl` textures and external `IDSQ` sequence groups).
     pub fn load(vfs: &Vfs, rel_path: &str) -> Result<Self, MdlError> {
         let data = vfs.read_bytes(rel_path)?;
         let mut model = Self::parse(&data)?;
@@ -117,11 +204,51 @@ impl StudioModel {
         {
             let tex_path = format!("{stem}t.mdl");
             if let Ok(tex_bytes) = vfs.read_bytes(&tex_path)
-                && let Ok(tex_model) = Self::parse_textures_only(&tex_bytes)
+                && let Ok((texs, families)) = Self::parse_textures_only(&tex_bytes)
             {
-                model.textures = tex_model.0;
-                // Remap raw skinref indices in meshes using the companion skin table
-                remap_mesh_textures(&mut model.bodyparts, &tex_model.1, &model.textures);
+                model.textures = texs;
+                model.skin_families = families;
+                let base_skin = model.skin_families.first().map(Vec::as_slice).unwrap_or(&[]);
+                remap_mesh_textures(&mut model.bodyparts, base_skin, &model.textures);
+            }
+        }
+
+        // Load external IDSQ sequence groups (*01.mdl, etc.) if present.
+        if model.seq_groups.len() > 1 {
+            let num_bones = model.bones.len();
+            let stem = rel_path.strip_suffix(".mdl").unwrap_or(rel_path);
+            for g in 1..model.seq_groups.len() {
+                let sg_name = model.seq_groups[g].name.replace('\\', "/");
+                let candidate_a = sg_name.trim_start_matches('/').to_string();
+                let candidate_b = format!("{stem}{g:02}.mdl");
+                let bytes = (!candidate_a.is_empty())
+                    .then(|| vfs.read_bytes(&candidate_a).ok())
+                    .flatten()
+                    .or_else(|| vfs.read_bytes(&candidate_b).ok());
+                let Some(seq_bytes) = bytes else {
+                    continue;
+                };
+                if seq_bytes.len() < 8
+                    || &seq_bytes[0..4] != IDSQ_MAGIC
+                    || read_i32(&seq_bytes, 4).unwrap_or(0) != MDL_VERSION
+                {
+                    continue;
+                }
+                for seq in &mut model.sequences {
+                    if seq.seqgroup == g as i32 && seq.anim_index > 0 {
+                        let blends = decode_sequence_blends(
+                            &seq_bytes,
+                            seq.anim_index,
+                            num_bones,
+                            seq.num_frames,
+                            seq.num_blends,
+                        );
+                        if !blends.is_empty() {
+                            seq.bone_anims = blends[0].clone();
+                            seq.blends = blends;
+                        }
+                    }
+                }
             }
         }
 
@@ -140,27 +267,39 @@ impl StudioModel {
         let name = read_cstr(&data[8..72]);
         let num_bones = read_i32(data, 140)?.max(0) as usize;
         let bone_index = read_i32(data, 144)?.max(0) as usize;
+        let num_controllers = read_i32(data, 148)?.max(0) as usize;
+        let controller_index = read_i32(data, 152)?.max(0) as usize;
         let num_hitboxes = read_i32(data, 156)?.max(0) as usize;
         let hitbox_index = read_i32(data, 160)?.max(0) as usize;
         let num_seq = read_i32(data, 164)?.max(0) as usize;
         let seq_index = read_i32(data, 168)?.max(0) as usize;
+        let num_seqgroups = read_i32(data, 172)?.max(0) as usize;
+        let seqgroup_index = read_i32(data, 176)?.max(0) as usize;
         let num_textures = read_i32(data, 180)?.max(0) as usize;
         let texture_index = read_i32(data, 184)?.max(0) as usize;
         let num_skinref = read_i32(data, 192)?.max(0) as usize;
+        let num_skinfamilies = read_i32(data, 196)?.max(0).max(1) as usize;
         let skin_index = read_i32(data, 200)?.max(0) as usize;
         let num_bodyparts = read_i32(data, 204)?.max(0) as usize;
         let bodypart_index = read_i32(data, 208)?.max(0) as usize;
+        let num_attachments = read_i32(data, 212)?.max(0) as usize;
+        let attachment_index = read_i32(data, 216)?.max(0) as usize;
 
-        // 1. Bones
+        // 1. Bones & Bone Controllers
         let mut bones = Vec::with_capacity(num_bones);
         for i in 0..num_bones {
             let base = bone_index + i * 112;
             if base + 112 > data.len() {
                 return Err(MdlError::Truncated("bones"));
             }
+            let mut bonecontroller = [-1i32; 6];
+            for (c, slot) in bonecontroller.iter_mut().enumerate() {
+                *slot = read_i32(data, base + 40 + c * 4)?;
+            }
             bones.push(MdlBone {
                 name: read_cstr(&data[base..base + 32]),
                 parent: read_i32(data, base + 32)?,
+                bonecontroller,
                 default_pos: Vec3::new(
                     read_f32(data, base + 64)?,
                     read_f32(data, base + 68)?,
@@ -180,6 +319,43 @@ impl StudioModel {
                     read_f32(data, base + 100)?,
                     read_f32(data, base + 104)?,
                     read_f32(data, base + 108)?,
+                ),
+            });
+        }
+
+        let mut controllers = Vec::with_capacity(num_controllers);
+        for i in 0..num_controllers {
+            let base = controller_index + i * 24;
+            if base + 24 > data.len() {
+                return Err(MdlError::Truncated("bonecontrollers"));
+            }
+            controllers.push(MdlBoneController {
+                bone: read_i32(data, base)?,
+                kind: read_i32(data, base + 4)?,
+                start: read_f32(data, base + 8)?,
+                end: read_f32(data, base + 12)?,
+                rest: read_i32(data, base + 16)?,
+                index: read_i32(data, base + 20)?,
+            });
+        }
+
+        // Attachments
+        let mut attachments = Vec::with_capacity(num_attachments);
+        for i in 0..num_attachments {
+            let base = attachment_index + i * 88;
+            if base + 52 > data.len() {
+                return Err(MdlError::Truncated("attachments"));
+            }
+            attachments.push(MdlAttachment {
+                name: read_cstr(&data[base..base + 32]),
+                att_type: read_i32(data, base + 32)?,
+                bone: read_i32(data, base + 36)?
+                    .max(0)
+                    .min(bones.len().saturating_sub(1) as i32) as usize,
+                org: Vec3::new(
+                    read_f32(data, base + 40)?,
+                    read_f32(data, base + 44)?,
+                    read_f32(data, base + 48)?,
                 ),
             });
         }
@@ -211,16 +387,31 @@ impl StudioModel {
             });
         }
 
-        // 3. Textures & skin reference table
-        let (textures, skin_table) = parse_textures_and_skins(
+        // 3. Textures & skin families
+        let (textures, skin_families) = parse_textures_and_skins(
             data,
             num_textures,
             texture_index,
             num_skinref,
+            num_skinfamilies,
             skin_index,
         )?;
+        let skin_table = skin_families.first().map(Vec::as_slice).unwrap_or(&[]);
 
-        // 4. Sequences & RLE animations
+        // Sequence groups
+        let mut seq_groups = Vec::with_capacity(num_seqgroups);
+        for i in 0..num_seqgroups {
+            let base = seqgroup_index + i * 104;
+            if base + 96 > data.len() {
+                break;
+            }
+            seq_groups.push(MdlSeqGroup {
+                label: read_cstr(&data[base..base + 32]),
+                name: read_cstr(&data[base + 32..base + 96]),
+            });
+        }
+
+        // 4. Sequences, Events, & RLE animations (all blends)
         let mut sequences = Vec::with_capacity(num_seq);
         for i in 0..num_seq {
             let base = seq_index + i * 176;
@@ -230,37 +421,51 @@ impl StudioModel {
             let label = read_cstr(&data[base..base + 32]);
             let fps = read_f32(data, base + 32)?.max(1.0);
             let flags = read_i32(data, base + 36)?;
+            let num_events = read_i32(data, base + 48)?.max(0) as usize;
+            let event_index = read_i32(data, base + 52)?.max(0) as usize;
             let num_frames = read_i32(data, base + 56)?.max(1) as usize;
+            let num_blends = read_i32(data, base + 120)?.max(1) as usize;
             let anim_index = read_i32(data, base + 124)?.max(0) as usize;
+            let blend_type = [read_i32(data, base + 128)?, read_i32(data, base + 132)?];
+            let blend_start = [read_f32(data, base + 136)?, read_f32(data, base + 140)?];
+            let blend_end = [read_f32(data, base + 144)?, read_f32(data, base + 148)?];
             let seqgroup = read_i32(data, base + 156)?;
 
-            let mut bone_anims = Vec::new();
-            if seqgroup == 0 && anim_index > 0 && anim_index + num_bones * 12 <= data.len() {
-                bone_anims.reserve(num_bones);
-                for b in 0..num_bones {
-                    let anim_base = anim_index + b * 12;
-                    let mut offsets = [0usize; 6];
-                    for (ch, slot) in offsets.iter_mut().enumerate() {
-                        *slot = read_u16(data, anim_base + ch * 2)? as usize;
-                    }
-                    let mut frames = vec![[0.0f32; 6]; num_frames];
-                    for (f, frame_vals) in frames.iter_mut().enumerate() {
-                        for (ch, &rel_off) in offsets.iter().enumerate() {
-                            if rel_off != 0 {
-                                frame_vals[ch] = decode_anim_value(data, anim_base + rel_off, f);
-                            }
-                        }
-                    }
-                    bone_anims.push(MdlBoneAnim { frames });
+            let mut events = Vec::with_capacity(num_events);
+            for e in 0..num_events {
+                let eb = event_index + e * 76;
+                if eb + 76 > data.len() {
+                    break;
                 }
+                events.push(MdlSeqEvent {
+                    frame: read_i32(data, eb)?,
+                    event: read_i32(data, eb + 4)?,
+                    ev_type: read_i32(data, eb + 8)?,
+                    options: read_cstr(&data[eb + 12..eb + 76]),
+                });
             }
+
+            let blends = if seqgroup == 0 && anim_index > 0 {
+                decode_sequence_blends(data, anim_index, num_bones, num_frames, num_blends)
+            } else {
+                Vec::new()
+            };
+            let bone_anims = blends.first().cloned().unwrap_or_default();
 
             sequences.push(MdlSequence {
                 label,
                 fps,
                 flags,
                 num_frames,
+                num_blends,
+                blend_type,
+                blend_start,
+                blend_end,
+                seqgroup,
+                anim_index,
+                events,
                 bone_anims,
+                blends,
             });
         }
 
@@ -346,6 +551,7 @@ impl StudioModel {
                     );
                     meshes.push(MdlMesh {
                         texture_index: tex_idx,
+                        skinref,
                         vertices: tri_verts,
                     });
                 }
@@ -365,22 +571,48 @@ impl StudioModel {
         Ok(Self {
             name,
             bones,
+            controllers,
+            attachments,
             hitboxes,
             sequences,
+            seq_groups,
             textures,
+            skin_families,
             bodyparts,
         })
     }
 
-    fn parse_textures_only(data: &[u8]) -> Result<(Vec<MdlTexture>, Vec<usize>), MdlError> {
+    fn parse_textures_only(data: &[u8]) -> Result<(Vec<MdlTexture>, Vec<Vec<usize>>), MdlError> {
         if data.len() < 244 || &data[0..4] != MDL_MAGIC {
             return Err(MdlError::InvalidHeader);
         }
         let num_textures = read_i32(data, 180)?.max(0) as usize;
         let texture_index = read_i32(data, 184)?.max(0) as usize;
         let num_skinref = read_i32(data, 192)?.max(0) as usize;
+        let num_skinfamilies = read_i32(data, 196)?.max(0).max(1) as usize;
         let skin_index = read_i32(data, 200)?.max(0) as usize;
-        parse_textures_and_skins(data, num_textures, texture_index, num_skinref, skin_index)
+        parse_textures_and_skins(
+            data,
+            num_textures,
+            texture_index,
+            num_skinref,
+            num_skinfamilies,
+            skin_index,
+        )
+    }
+
+    /// Resolve a mesh texture index for a given entity `skin` family and mesh `skinref`.
+    pub fn resolve_skin_texture(&self, skin: i32, skinref: usize) -> usize {
+        if !self.skin_families.is_empty() && skin > 0 {
+            let fam_idx = (skin as usize).min(self.skin_families.len() - 1);
+            if let Some(&idx) = self.skin_families[fam_idx].get(skinref) {
+                return idx;
+            }
+        }
+        self.skin_families
+            .first()
+            .and_then(|row| row.get(skinref).copied())
+            .unwrap_or(skinref)
     }
 
     /// Find sequence index by case-insensitive substring (e.g. `"idle"`, `"shoot"`, `"reload"`, `"draw"`).
@@ -461,6 +693,220 @@ impl StudioModel {
         world
     }
 
+    /// Evaluate hierarchical bone matrices with full GoldSrc features: controllers, multi-blends
+    /// (1D / 9-way aim / 2D grid), `"Bip01 Spine"` upper/lower gait split, and sequence crossfade.
+    pub fn evaluate_bones_full(&self, params: &BoneEvalParams) -> Vec<Mat4> {
+        let n = self.bones.len();
+        let mut world = vec![Mat4::IDENTITY; n];
+        if n == 0 {
+            return world;
+        }
+        let adj = self.compute_controller_adj(&params.controller, params.mouth);
+        let upper_pose = self.eval_sequence_pose(
+            params.sequence,
+            params.frame,
+            params.loop_anim,
+            params.blending,
+            &adj,
+        );
+        let prev_pose = params.prev_sequence.map(|(p_seq, p_frame, p_loop, weight)| {
+            (
+                self.eval_sequence_pose(p_seq, p_frame, p_loop, params.blending, &adj),
+                weight.clamp(0.0, 1.0),
+            )
+        });
+        let gait_info = params.gait.map(|(g_seq, g_frame)| {
+            let mask = self.upper_body_bone_mask();
+            let g_pose = self.eval_sequence_pose(g_seq, g_frame, true, [0, 0], &adj);
+            (mask, g_pose)
+        });
+
+        for (i, bone) in self.bones.iter().enumerate() {
+            let (mut pos, mut quat) = if let Some((ref mask, ref g_pose)) = gait_info {
+                if mask[i] { upper_pose[i] } else { g_pose[i] }
+            } else {
+                upper_pose[i]
+            };
+            if let Some((ref p_pose, weight)) = prev_pose
+                && weight > 0.0
+            {
+                let (p_pos, p_quat) = p_pose[i];
+                let t = 1.0 - weight;
+                pos = p_pos.lerp(pos, t);
+                quat = p_quat.slerp(quat, t);
+            }
+            let local = Mat4::from_rotation_translation(quat, pos);
+            world[i] = if bone.parent >= 0 && (bone.parent as usize) < i {
+                world[bone.parent as usize] * local
+            } else {
+                local
+            };
+        }
+        world
+    }
+
+    /// Transform the model's up to 4 attachment points into world space given `entity_transform`
+    /// and evaluated bone matrices.
+    pub fn evaluate_attachments(&self, entity_transform: Mat4, bones: &[Mat4]) -> [Vec3; 4] {
+        let origin = entity_transform.transform_point3(Vec3::ZERO);
+        let mut out = [origin; 4];
+        for (i, att) in self.attachments.iter().take(4).enumerate() {
+            let bm = bones.get(att.bone).copied().unwrap_or(Mat4::IDENTITY);
+            out[i] = (entity_transform * bm).transform_point3(att.org);
+        }
+        out
+    }
+
+    fn upper_body_bone_mask(&self) -> Vec<bool> {
+        let mut mask = vec![false; self.bones.len()];
+        let Some(spine_idx) = self
+            .bones
+            .iter()
+            .position(|b| b.name.eq_ignore_ascii_case("Bip01 Spine"))
+        else {
+            mask.fill(true);
+            return mask;
+        };
+        mask[spine_idx] = true;
+        for i in (spine_idx + 1)..self.bones.len() {
+            let p = self.bones[i].parent;
+            if p >= 0 && (p as usize) < i && mask[p as usize] {
+                mask[i] = true;
+            }
+        }
+        mask
+    }
+
+    fn compute_controller_adj(&self, controller: &[u8; 4], mouth: u8) -> [f32; 8] {
+        let mut adj = [0.0f32; 8];
+        for ctrl in &self.controllers {
+            let idx = ctrl.index;
+            if !(0..8).contains(&idx) {
+                continue;
+            }
+            let raw = if idx == 4 {
+                f32::from(mouth) / 64.0
+            } else if let Some(&v) = controller.get(idx as usize) {
+                f32::from(v) / 255.0
+            } else {
+                continue;
+            };
+            let span = ctrl.end - ctrl.start;
+            let value = if ctrl.kind & STUDIO_RLOOP != 0 {
+                ctrl.start + raw * span
+            } else {
+                ctrl.start + raw.clamp(0.0, 1.0) * span
+            };
+            adj[idx as usize] = value;
+        }
+        adj
+    }
+
+    fn eval_sequence_pose(
+        &self,
+        seq_idx: usize,
+        frame_time: f32,
+        loop_anim: bool,
+        blending: [u8; 2],
+        adj: &[f32; 8],
+    ) -> Vec<(Vec3, Quat)> {
+        let n = self.bones.len();
+        let seq = self.sequences.get(seq_idx);
+        let (f0, f1, frac) = if let Some(s) = seq {
+            let nf = s.num_frames.max(1);
+            if nf <= 1 {
+                (0, 0, 0.0)
+            } else if loop_anim {
+                let period = (nf - 1) as f32;
+                let f_wrapped = frame_time.rem_euclid(period);
+                let i0 = (f_wrapped.floor() as usize).min(nf - 2);
+                (i0, i0 + 1, f_wrapped - f_wrapped.floor())
+            } else {
+                let f_clamped = frame_time.clamp(0.0, (nf - 1) as f32);
+                let i0 = (f_clamped.floor() as usize).min(nf - 1);
+                let i1 = (i0 + 1).min(nf - 1);
+                (i0, i1, f_clamped - f_clamped.floor())
+            }
+        } else {
+            (0, 0, 0.0)
+        };
+
+        let sample_blend = |blend: &[MdlBoneAnim], i: usize, bone: &MdlBone| -> (Vec3, Quat) {
+            if let Some(anim) = blend.get(i)
+                && !anim.frames.is_empty()
+            {
+                let v0 = anim.frames[f0.min(anim.frames.len() - 1)];
+                let v1 = anim.frames[f1.min(anim.frames.len() - 1)];
+                let mut ch0 = v0;
+                let mut ch1 = v1;
+                for c in 0..6 {
+                    let ci = bone.bonecontroller[c];
+                    if (0..8).contains(&ci) {
+                        ch0[c] += adj[ci as usize];
+                        ch1[c] += adj[ci as usize];
+                    }
+                }
+                let p0 = bone.default_pos + Vec3::new(ch0[0], ch0[1], ch0[2]) * bone.pos_scale;
+                let p1 = bone.default_pos + Vec3::new(ch1[0], ch1[1], ch1[2]) * bone.pos_scale;
+                let r0 = bone.default_rot + Vec3::new(ch0[3], ch0[4], ch0[5]) * bone.rot_scale;
+                let r1 = bone.default_rot + Vec3::new(ch1[3], ch1[4], ch1[5]) * bone.rot_scale;
+                (
+                    p0.lerp(p1, frac),
+                    goldsrc_angle_quat(r0).slerp(goldsrc_angle_quat(r1), frac),
+                )
+            } else {
+                (bone.default_pos, goldsrc_angle_quat(bone.default_rot))
+            }
+        };
+
+        let mut out = Vec::with_capacity(n);
+        let blends = seq.map(|s| s.blends.as_slice()).unwrap_or(&[]);
+        let nb = blends.len();
+        if nb <= 1 {
+            let b0 = blends.first().map(Vec::as_slice).unwrap_or(&[]);
+            for (i, bone) in self.bones.iter().enumerate() {
+                out.push(sample_blend(b0, i, bone));
+            }
+            return out;
+        }
+        let blend_type1 = seq.map_or(0, |s| s.blend_type[1]);
+        if blend_type1 == 0 || nb < 4 {
+            // 1D multi-blend (including CS 1.6 9-way pitch aim!).
+            let x = (f32::from(blending[0]) / 255.0) * ((nb - 1) as f32);
+            let i0 = (x.floor() as usize).min(nb - 1);
+            let i1 = (i0 + 1).min(nb - 1);
+            let t = (x - i0 as f32).clamp(0.0, 1.0);
+            for (i, bone) in self.bones.iter().enumerate() {
+                let (p0, q0) = sample_blend(&blends[i0], i, bone);
+                let (p1, q1) = sample_blend(&blends[i1], i, bone);
+                out.push((p0.lerp(p1, t), q0.slerp(q1, t)));
+            }
+        } else {
+            let cols = (nb as f32).sqrt().round().max(1.0) as usize;
+            let rows = nb / cols;
+            let fx = (f32::from(blending[0]) / 255.0) * (cols.saturating_sub(1) as f32);
+            let fy = (f32::from(blending[1]) / 255.0) * (rows.saturating_sub(1) as f32);
+            let x0 = (fx.floor() as usize).min(cols - 1);
+            let x1 = (x0 + 1).min(cols - 1);
+            let y0 = (fy.floor() as usize).min(rows.saturating_sub(1));
+            let y1 = (y0 + 1).min(rows.saturating_sub(1));
+            let tx = (fx - x0 as f32).clamp(0.0, 1.0);
+            let ty = (fy - y0 as f32).clamp(0.0, 1.0);
+            for (i, bone) in self.bones.iter().enumerate() {
+                let (p00, q00) = sample_blend(&blends[(y0 * cols + x0).min(nb - 1)], i, bone);
+                let (p10, q10) = sample_blend(&blends[(y0 * cols + x1).min(nb - 1)], i, bone);
+                let (p01, q01) = sample_blend(&blends[(y1 * cols + x0).min(nb - 1)], i, bone);
+                let (p11, q11) = sample_blend(&blends[(y1 * cols + x1).min(nb - 1)], i, bone);
+                let pa = p00.lerp(p10, tx);
+                let pb = p01.lerp(p11, tx);
+                let qa = q00.slerp(q10, tx);
+                let qb = q01.slerp(q11, tx);
+                out.push((pa.lerp(pb, ty), qa.slerp(qb, ty)));
+            }
+        }
+        out
+    }
+
     /// Authentic GoldSrc `EF_BONEMERGE`: attach a `p_*.mdl` weapon directly to matching bone names
     /// (e.g. `Bip01 R Hand`, `Bip01 L Hand`) on the parent player model's already-evaluated skeleton!
     pub fn evaluate_bones_merged(
@@ -523,13 +969,50 @@ pub fn goldsrc_angle_quat(rot: Vec3) -> Quat {
     Quat::from_rotation_z(rot.z) * Quat::from_rotation_y(rot.y) * Quat::from_rotation_x(rot.x)
 }
 
+fn decode_sequence_blends(
+    data: &[u8],
+    anim_index: usize,
+    num_bones: usize,
+    num_frames: usize,
+    num_blends: usize,
+) -> Vec<Vec<MdlBoneAnim>> {
+    let blend_stride = num_bones * 12;
+    let mut blends = Vec::with_capacity(num_blends);
+    for bl in 0..num_blends {
+        let base_off = anim_index + bl * blend_stride;
+        if base_off + blend_stride > data.len() {
+            break;
+        }
+        let mut bone_anims = Vec::with_capacity(num_bones);
+        for b in 0..num_bones {
+            let anim_base = base_off + b * 12;
+            let mut offsets = [0usize; 6];
+            for (ch, slot) in offsets.iter_mut().enumerate() {
+                *slot = read_u16(data, anim_base + ch * 2).unwrap_or(0) as usize;
+            }
+            let mut frames = vec![[0.0f32; 6]; num_frames];
+            for (f, frame_vals) in frames.iter_mut().enumerate() {
+                for (ch, &rel_off) in offsets.iter().enumerate() {
+                    if rel_off != 0 {
+                        frame_vals[ch] = decode_anim_value(data, anim_base + rel_off, f);
+                    }
+                }
+            }
+            bone_anims.push(MdlBoneAnim { frames });
+        }
+        blends.push(bone_anims);
+    }
+    blends
+}
+
 fn parse_textures_and_skins(
     data: &[u8],
     num_textures: usize,
     texture_index: usize,
     num_skinref: usize,
+    num_skinfamilies: usize,
     skin_index: usize,
-) -> Result<(Vec<MdlTexture>, Vec<usize>), MdlError> {
+) -> Result<(Vec<MdlTexture>, Vec<Vec<usize>>), MdlError> {
     let mut textures = Vec::with_capacity(num_textures);
     for i in 0..num_textures {
         let base = texture_index + i * 80;
@@ -570,15 +1053,21 @@ fn parse_textures_and_skins(
         });
     }
 
-    let mut skin_table = Vec::with_capacity(num_skinref);
-    for i in 0..num_skinref {
-        let off = skin_index + i * 2;
-        if off + 2 <= data.len() {
-            skin_table.push(read_u16(data, off)? as usize);
+    let mut skin_families = Vec::with_capacity(num_skinfamilies);
+    for fam in 0..num_skinfamilies {
+        let mut row = Vec::with_capacity(num_skinref);
+        for i in 0..num_skinref {
+            let off = skin_index + (fam * num_skinref + i) * 2;
+            if off + 2 <= data.len() {
+                row.push(read_u16(data, off)? as usize);
+            }
+        }
+        if !row.is_empty() {
+            skin_families.push(row);
         }
     }
 
-    Ok((textures, skin_table))
+    Ok((textures, skin_families))
 }
 
 fn remap_mesh_textures(
@@ -1040,5 +1529,76 @@ mod tests {
 
         write_box(&mut buf, 1, [f32::NAN, 0.0, 0.0], [1.0, 1.0, 1.0]);
         assert!(studio_bounds(&buf).is_none());
+    }
+
+    #[test]
+    fn external_seqgroup_and_skin_families_load() {
+        let mut mdl = vec![0u8; 244];
+        mdl[0..4].copy_from_slice(MDL_MAGIC);
+        mdl[4..8].copy_from_slice(&MDL_VERSION.to_le_bytes());
+
+        let bone_off = mdl.len();
+        mdl.resize(bone_off + 112, 0);
+        mdl[bone_off..bone_off + 4].copy_from_slice(b"root");
+        mdl[bone_off + 32..bone_off + 36].copy_from_slice(&(-1i32).to_le_bytes());
+        for ch in 0..6 {
+            mdl[bone_off + 40 + ch * 4..bone_off + 44 + ch * 4].copy_from_slice(&(-1i32).to_le_bytes());
+            mdl[bone_off + 88 + ch * 4..bone_off + 92 + ch * 4].copy_from_slice(&1.0f32.to_le_bytes());
+        }
+        mdl[140..144].copy_from_slice(&1i32.to_le_bytes());
+        mdl[144..148].copy_from_slice(&(bone_off as i32).to_le_bytes());
+
+        // 2 skin families x 1 skinref
+        let skin_off = mdl.len();
+        mdl.extend_from_slice(&0u16.to_le_bytes());
+        mdl.extend_from_slice(&1u16.to_le_bytes());
+        mdl[192..196].copy_from_slice(&1i32.to_le_bytes());
+        mdl[196..200].copy_from_slice(&2i32.to_le_bytes());
+        mdl[200..204].copy_from_slice(&(skin_off as i32).to_le_bytes());
+
+        // 2 seqgroups (0 + external "models/test01.mdl")
+        let sg_off = mdl.len();
+        mdl.resize(sg_off + 2 * 104, 0);
+        mdl[sg_off + 104 + 32..sg_off + 104 + 32 + 18].copy_from_slice(b"models/test01.mdl\0");
+        mdl[172..176].copy_from_slice(&2i32.to_le_bytes());
+        mdl[176..180].copy_from_slice(&(sg_off as i32).to_le_bytes());
+
+        // 1 seq pointing to seqgroup 1, anim_index 64, 1 frame, 1 blend
+        let seq_off = mdl.len();
+        mdl.resize(seq_off + 176, 0);
+        mdl[seq_off..seq_off + 4].copy_from_slice(b"ext0");
+        mdl[seq_off + 32..seq_off + 36].copy_from_slice(&30.0f32.to_le_bytes());
+        mdl[seq_off + 56..seq_off + 60].copy_from_slice(&1i32.to_le_bytes());
+        mdl[seq_off + 120..seq_off + 124].copy_from_slice(&1i32.to_le_bytes());
+        mdl[seq_off + 124..seq_off + 128].copy_from_slice(&64i32.to_le_bytes());
+        mdl[seq_off + 156..seq_off + 160].copy_from_slice(&1i32.to_le_bytes());
+        mdl[164..168].copy_from_slice(&1i32.to_le_bytes());
+        mdl[168..172].copy_from_slice(&(seq_off as i32).to_le_bytes());
+
+        // External IDSQ file at offset 64: mstudioanim_t (12B) + 1 RLE value for channel 0 (dx = 42)
+        let mut idsq = vec![0u8; 64 + 12 + 4];
+        idsq[0..4].copy_from_slice(IDSQ_MAGIC);
+        idsq[4..8].copy_from_slice(&MDL_VERSION.to_le_bytes());
+        idsq[64..66].copy_from_slice(&12u16.to_le_bytes()); // channel 0 rel offset
+        idsq[76] = 1; // valid = 1
+        idsq[77] = 1; // total = 1
+        idsq[78..80].copy_from_slice(&42i16.to_le_bytes());
+
+        let vfs = Vfs::from_layered_memory(
+            [
+                ("models/test.mdl".to_string(), mdl),
+                ("models/test01.mdl".to_string(), idsq),
+            ],
+            cs_vfs::VfsConfig::default(),
+        );
+        let loaded = StudioModel::load(&vfs, "models/test.mdl").expect("load with IDSQ");
+        assert_eq!(loaded.resolve_skin_texture(0, 0), 0);
+        assert_eq!(loaded.resolve_skin_texture(1, 0), 1);
+        assert!(!loaded.sequences[0].bone_anims.is_empty());
+        let bones = loaded.evaluate_bones_full(&BoneEvalParams {
+            sequence: 0,
+            ..BoneEvalParams::default()
+        });
+        assert!((bones[0].transform_point3(Vec3::ZERO).x - 42.0).abs() < 1e-4);
     }
 }

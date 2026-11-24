@@ -97,6 +97,12 @@ impl WadArchive {
         self.entries.contains_key(&name.to_ascii_lowercase())
     }
 
+    pub fn entry_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.entries.values().map(|e| e.name.as_str()).collect();
+        names.sort_unstable();
+        names
+    }
+
     pub fn decode_texture(&self, name: &str) -> Result<Option<DecodedTexture>, WadError> {
         let Some(entry) = self.entries.get(&name.to_ascii_lowercase()) else {
             return Ok(None);
@@ -111,6 +117,111 @@ impl WadArchive {
         let tex = decode_miptex(&self.data[entry.offset..end])?;
         Ok(Some(tex))
     }
+
+    /// Decode a decal entry (`decals.wad` / `tempdecal.wad` / `pldecal.wad`): handles both
+    /// GoldSrc index-alpha monochrome decals (`palette[255]` tint, `idx` alpha) and blue-keyed
+    /// custom player sprays (`palette[255] == [0, 0, 255]`).
+    pub fn decode_decal(&self, name: &str) -> Result<Option<DecodedTexture>, WadError> {
+        let Some(entry) = self.entries.get(&name.to_ascii_lowercase()) else {
+            return Ok(None);
+        };
+        if entry.entry_type != MIPTEX_TYPE && entry.entry_type != DECAL_MIPTEX_TYPE {
+            return Ok(None);
+        }
+        let end = entry.offset.saturating_add(entry.size);
+        if end > self.data.len() {
+            return Err(WadError::Truncated("decal miptex entry slice"));
+        }
+        let tex = decode_decal_miptex(&self.data[entry.offset..end])?;
+        Ok(Some(tex))
+    }
+}
+
+/// Decode a GoldSrc decal `MipTex` block into RGBA8.
+pub fn decode_decal_miptex(slice: &[u8]) -> Result<DecodedTexture, WadError> {
+    if slice.len() < 40 {
+        return Err(WadError::Truncated("decal miptex header"));
+    }
+    let name = read_cstr(&slice[0..16]);
+    let width = read_u32_le(slice, 16)?;
+    let height = read_u32_le(slice, 20)?;
+    let off0 = read_u32_le(slice, 24)? as usize;
+    let off3 = read_u32_le(slice, 36)? as usize;
+
+    if width == 0 || height == 0 || width > 4096 || height > 4096 {
+        return Err(WadError::InvalidDimensions {
+            name,
+            width,
+            height,
+        });
+    }
+    if off0 == 0 {
+        return Err(WadError::Truncated("external decal miptex has offset 0"));
+    }
+
+    let pixel_count = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or(WadError::Truncated("pixel count overflow"))?;
+    if off0.saturating_add(pixel_count) > slice.len() {
+        return Err(WadError::Truncated("decal mip0 pixel indices"));
+    }
+
+    let mip3_w = (width as usize / 8).max(1);
+    let mip3_h = (height as usize / 8).max(1);
+    let mip3_size = mip3_w * mip3_h;
+    let pal_header_off = off3.saturating_add(mip3_size);
+    if pal_header_off + 2 > slice.len() {
+        return Err(WadError::Truncated("decal palette size"));
+    }
+    let palette_colors =
+        u16::from_le_bytes([slice[pal_header_off], slice[pal_header_off + 1]]) as usize;
+    let pal_off = pal_header_off + 2;
+    let pal_bytes = palette_colors * 3;
+    if pal_off.saturating_add(pal_bytes) > slice.len() {
+        return Err(WadError::Truncated("decal palette rgb table"));
+    }
+    let palette = &slice[pal_off..pal_off + pal_bytes];
+    let last = palette_colors.saturating_sub(1);
+    let key_rgb = if last * 3 + 2 < palette.len() {
+        [palette[last * 3], palette[last * 3 + 1], palette[last * 3 + 2]]
+    } else {
+        [0, 0, 0]
+    };
+
+    let indices = &slice[off0..off0 + pixel_count];
+    let mut rgba = Vec::with_capacity(pixel_count * 4);
+    let is_blue_key_spray = key_rgb == [0, 0, 255];
+    let is_index_alpha = name.starts_with('{') && !is_blue_key_spray;
+
+    for &idx in indices {
+        if is_blue_key_spray {
+            if idx == 255 {
+                rgba.extend_from_slice(&[0, 0, 0, 0]);
+            } else {
+                let ci = (idx as usize).min(last);
+                let b = ci * 3;
+                rgba.extend_from_slice(&[palette[b], palette[b + 1], palette[b + 2], 255]);
+            }
+        } else if is_index_alpha {
+            // GoldSrc `decals.wad` `{`-decals store alpha in pixel index and RGB in palette[255].
+            rgba.extend_from_slice(&[key_rgb[0], key_rgb[1], key_rgb[2], idx]);
+        } else if name.starts_with('{') && idx == 255 {
+            rgba.extend_from_slice(&[0, 0, 0, 0]);
+        } else {
+            let ci = (idx as usize).min(last);
+            let b = ci * 3;
+            rgba.extend_from_slice(&[palette[b], palette[b + 1], palette[b + 2], 255]);
+        }
+    }
+
+    let alpha_test = name.starts_with('{');
+    Ok(DecodedTexture {
+        name,
+        width,
+        height,
+        rgba,
+        alpha_test,
+    })
 }
 
 /// Decode a GoldSrc `MipTex` block (either from a WAD3 entry or embedded inside BSP `LUMP_TEXTURES`).

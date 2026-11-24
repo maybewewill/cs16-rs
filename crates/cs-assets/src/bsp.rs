@@ -175,6 +175,7 @@ pub enum RenderMode {
 pub const SURF_FLAG_ALPHATEST: u32 = 1 << 0;
 pub const SURF_FLAG_WATER: u32 = 1 << 1;
 pub const SURF_FLAG_NO_LIGHTMAP: u32 = 1 << 2;
+pub const SURF_FLAG_SCROLL: u32 = 1 << 3;
 
 #[derive(Debug, Clone, Copy)]
 pub struct BspVertex {
@@ -202,6 +203,160 @@ pub struct LightmapAtlas {
     pub height: u32,
     pub rgba: Vec<u8>,
     pub packed_faces: usize,
+}
+
+/// Packed atlas placement and lightstyle metadata for a single BSP face.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FaceLightmapInfo {
+    pub face_index: usize,
+    pub atlas_x: u32,
+    pub atlas_y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub styles: [u8; 4],
+    pub num_styles: u8,
+    pub lightmap_offset: usize,
+}
+
+impl LightmapAtlas {
+    /// Recomputes atlas pixels for every face whose active lightstyle multipliers changed between
+    /// `prev_values` and `style_values`. Returns dirty `(x, y, width, height)` rectangles
+    /// (including the 1-pixel clamp border) for partial GPU `write_texture` uploads.
+    pub fn rebuild_for_styles(
+        &mut self,
+        lighting: &[u8],
+        rects: &[FaceLightmapInfo],
+        style_values: &[f32; 64],
+        prev_values: &[f32; 64],
+    ) -> Vec<(u32, u32, u32, u32)> {
+        let mut dirty = Vec::new();
+        for r in rects {
+            let ns = usize::from(r.num_styles.min(4));
+            let changed = r.styles[..ns].iter().any(|&s| {
+                let idx = usize::from(s);
+                idx < 64 && (style_values[idx] - prev_values[idx]).abs() > 1e-4
+            });
+            if !changed || r.width == 0 || r.height == 0 {
+                continue;
+            }
+            let page_bytes = (r.width as usize) * (r.height as usize) * 3;
+            let pw = r.width + 2;
+            let ph = r.height + 2;
+            let ox = r.atlas_x.saturating_sub(1);
+            let oy = r.atlas_y.saturating_sub(1);
+            for py in 0..ph {
+                let sy = py.saturating_sub(1).min(r.height - 1);
+                for px in 0..pw {
+                    let sx = px.saturating_sub(1).min(r.width - 1);
+                    let texel_off = ((sy * r.width + sx) * 3) as usize;
+                    let mut sum = [0.0f32; 3];
+                    for page in 0..ns {
+                        let style_id = usize::from(r.styles[page]);
+                        let mul = if style_id < 64 { style_values[style_id] } else { 1.0 };
+                        let src = r.lightmap_offset + page * page_bytes + texel_off;
+                        if src + 2 < lighting.len() {
+                            sum[0] += f32::from(lighting[src]) * mul;
+                            sum[1] += f32::from(lighting[src + 1]) * mul;
+                            sum[2] += f32::from(lighting[src + 2]) * mul;
+                        }
+                    }
+                    let dst = (((oy + py) * self.width + (ox + px)) * 4) as usize;
+                    if dst + 3 < self.rgba.len() {
+                        self.rgba[dst] = sum[0].round().clamp(0.0, 255.0) as u8;
+                        self.rgba[dst + 1] = sum[1].round().clamp(0.0, 255.0) as u8;
+                        self.rgba[dst + 2] = sum[2].round().clamp(0.0, 255.0) as u8;
+                        self.rgba[dst + 3] = 255;
+                    }
+                }
+            }
+            dirty.push((ox, oy, pw, ph));
+        }
+        dirty
+    }
+}
+
+/// Animated (`+0..+9`) and alternate/toggleable (`+A..+J`) BSP texture resolution table.
+#[derive(Debug, Clone, Default)]
+pub struct TextureAnimTable {
+    entries: Vec<TextureAnimEntry>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct TextureAnimEntry {
+    primary: Vec<usize>,
+    alt: Vec<usize>,
+}
+
+impl TextureAnimTable {
+    pub fn from_textures(textures: &[DecodedTexture]) -> Self {
+        let mut entries = vec![TextureAnimEntry::default(); textures.len()];
+        let mut groups: HashMap<String, (Vec<(u8, usize)>, Vec<(u8, usize)>)> = HashMap::new();
+        for (idx, tex) in textures.iter().enumerate() {
+            let lower = tex.name.to_ascii_lowercase();
+            let bytes = lower.as_bytes();
+            if bytes.len() >= 3 && bytes[0] == b'+' {
+                let tag = bytes[1];
+                let base = lower[2..].to_string();
+                let g = groups.entry(base).or_default();
+                if tag.is_ascii_digit() {
+                    g.0.push((tag, idx));
+                } else if (b'a'..=b'j').contains(&tag) {
+                    g.1.push((tag, idx));
+                }
+            }
+        }
+        for (_, (mut primary_pairs, mut alt_pairs)) in groups {
+            primary_pairs.sort_by_key(|&(tag, _)| tag);
+            alt_pairs.sort_by_key(|&(tag, _)| tag);
+            let primary: Vec<usize> = primary_pairs.into_iter().map(|(_, i)| i).collect();
+            let alt: Vec<usize> = alt_pairs.into_iter().map(|(_, i)| i).collect();
+            for &i in primary.iter().chain(alt.iter()) {
+                entries[i] = TextureAnimEntry {
+                    primary: primary.clone(),
+                    alt: alt.clone(),
+                };
+            }
+        }
+        Self { entries }
+    }
+
+    /// Resolve active animated/toggleable texture index at `time_sec` (5 Hz) and `entity_frame`.
+    pub fn resolve(&self, tex_idx: usize, time_sec: f32, entity_frame: f32) -> usize {
+        let Some(entry) = self.entries.get(tex_idx) else {
+            return tex_idx;
+        };
+        let chain = if entity_frame != 0.0 && !entry.alt.is_empty() {
+            &entry.alt
+        } else if !entry.primary.is_empty() {
+            &entry.primary
+        } else if !entry.alt.is_empty() {
+            &entry.alt
+        } else {
+            return tex_idx;
+        };
+        let step = (time_sec.max(0.0) * 5.0).floor() as usize;
+        chain[step % chain.len()]
+    }
+}
+
+/// Per-face render span in the dedicated PVS-cullable world geometry buffer.
+#[derive(Debug, Clone, Copy)]
+pub struct WorldFaceSpan {
+    pub face_index: usize,
+    pub texture_index: usize,
+    pub render_mode: RenderMode,
+    pub first_index: u32,
+    pub index_count: u32,
+}
+
+/// Triangulated / polygonal BSP face geometry returned by [`BspMap::query_faces_in_sphere`].
+#[derive(Debug, Clone)]
+pub struct DecalFacePoly {
+    pub face_index: usize,
+    pub model_index: usize,
+    pub normal: Vec3,
+    pub plane_dist: f32,
+    pub verts: Vec<Vec3>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -540,6 +695,476 @@ impl BspMap {
         }
         best_tex
     }
+
+    /// Reconstruct exact per-face lightmap atlas rectangles matching [`LightmapAtlas`] packing.
+    pub fn build_face_lightmap_rects(&self) -> Vec<FaceLightmapInfo> {
+        let draw_models = collect_brush_draw_models(&self.entities, &self.models);
+        let mut packer = ShelfPacker::new(LIGHTMAP_ATLAS_SIZE, LIGHTMAP_ATLAS_SIZE);
+        let _ = packer.alloc_rect(2, 2);
+        let mut out = Vec::new();
+        for brush in &draw_models {
+            let model = &self.models[brush.model_index];
+            let first = model.first_face.max(0) as usize;
+            let count = model.num_faces.max(0) as usize;
+            let end = first.saturating_add(count).min(self.faces.len());
+            for face_index in first..end {
+                let face = &self.faces[face_index];
+                let Some(texinfo) = self.texinfos.get(face.texinfo as usize) else {
+                    continue;
+                };
+                if texinfo.miptex < 0 || (texinfo.miptex as usize) >= self.textures.len() {
+                    continue;
+                }
+                let tex = &self.textures[texinfo.miptex as usize];
+                if is_sky_texture(&tex.name) || is_tool_texture(&tex.name) {
+                    continue;
+                }
+                let Some((_poly, _st, _ems, _emt, lm_w, lm_h)) = face_extents_and_st(
+                    face,
+                    texinfo,
+                    &self.vertices_raw,
+                    &self.edges,
+                    &self.surf_edges,
+                ) else {
+                    continue;
+                };
+                if self.planes.get(face.plane as usize).is_none() {
+                    continue;
+                }
+                let is_water = is_water_texture(&tex.name);
+                let has_lightmap = !is_water
+                    && face.lightmap_offset >= 0
+                    && face.styles[0] != 255
+                    && (texinfo.flags & 1) == 0;
+                if !has_lightmap {
+                    continue;
+                }
+                let lm_off = face.lightmap_offset as usize;
+                let page_bytes = (lm_w as usize) * (lm_h as usize) * 3;
+                if lm_off.saturating_add(page_bytes) > self.lighting.len() {
+                    continue;
+                }
+                let Some((ox, oy)) = packer.alloc_rect(lm_w, lm_h) else {
+                    continue;
+                };
+                let mut num_styles = 0u8;
+                for (page, &s) in face.styles.iter().enumerate() {
+                    if s == 255 || lm_off + (page + 1) * page_bytes > self.lighting.len() {
+                        break;
+                    }
+                    num_styles += 1;
+                }
+                out.push(FaceLightmapInfo {
+                    face_index,
+                    atlas_x: ox + 1,
+                    atlas_y: oy + 1,
+                    width: lm_w,
+                    height: lm_h,
+                    styles: face.styles,
+                    num_styles: num_styles.max(1),
+                    lightmap_offset: lm_off,
+                });
+            }
+        }
+        out
+    }
+
+    pub fn build_texture_anim_table(&self) -> TextureAnimTable {
+        TextureAnimTable::from_textures(&self.textures)
+    }
+
+    /// Return a mask indexed by `face_index` (`0..self.faces.len()`) of world faces in any leaf
+    /// potentially visible from `camera_pos`. Returns `None` if `visibility` is empty or the
+    /// camera is outside valid PVS leafs.
+    pub fn visible_world_face_mask(&self, camera_pos: Vec3) -> Option<Vec<bool>> {
+        if self.visibility.is_empty() || self.leafs.is_empty() || self.faces.is_empty() {
+            return None;
+        }
+        let cam_leaf = self.find_leaf(camera_pos);
+        let pvs = self.decompress_pvs(cam_leaf);
+        let Some(world) = self.models.first() else {
+            return None;
+        };
+        let num_vis_leafs = world
+            .vis_leafs
+            .max(0)
+            .min(self.leafs.len().saturating_sub(1) as i32) as usize;
+        if cam_leaf == 0 {
+            return None;
+        }
+        let mut mask = vec![false; self.faces.len()];
+        // PVS bit `v` corresponds to BSP leaf `v + 1` (leaf 0 is solid).
+        for (v, &vis) in pvs.iter().take(num_vis_leafs).enumerate() {
+            if !vis {
+                continue;
+            }
+            let Some(leaf) = self.leafs.get(v + 1) else {
+                continue;
+            };
+            let first = leaf.first_mark_surface as usize;
+            let count = leaf.num_mark_surfaces as usize;
+            let end = first.saturating_add(count).min(self.mark_surfaces.len());
+            for &face_idx in &self.mark_surfaces[first..end] {
+                if let Some(slot) = mask.get_mut(face_idx as usize) {
+                    *slot = true;
+                }
+            }
+        }
+        Some(mask)
+    }
+
+    /// Build per-face triangulated geometry for world model `0` so the renderer can cull world
+    /// faces dynamically against PVS visibility while using the same [`LightmapAtlas`] UVs.
+    pub fn build_world_face_meshes(&self) -> (Vec<BspVertex>, Vec<u32>, Vec<Option<WorldFaceSpan>>) {
+        let mut spans = vec![None; self.faces.len()];
+        let Some(world) = self.models.first() else {
+            return (Vec::new(), Vec::new(), spans);
+        };
+        let rects = self.build_face_lightmap_rects();
+        let mut rect_map: HashMap<usize, FaceLightmapInfo> =
+            HashMap::with_capacity(rects.len());
+        for r in rects {
+            rect_map.insert(r.face_index, r);
+        }
+        let atlas_f = LIGHTMAP_ATLAS_SIZE as f32;
+        let neutral_uv = [2.0 / atlas_f, 2.0 / atlas_f];
+        let mut verts = Vec::new();
+        let mut indices = Vec::new();
+
+        let first = world.first_face.max(0) as usize;
+        let count = world.num_faces.max(0) as usize;
+        let end = first.saturating_add(count).min(self.faces.len());
+        for face_index in first..end {
+            let face = &self.faces[face_index];
+            let Some(texinfo) = self.texinfos.get(face.texinfo as usize) else {
+                continue;
+            };
+            if texinfo.miptex < 0 || (texinfo.miptex as usize) >= self.textures.len() {
+                continue;
+            }
+            let tex_idx = texinfo.miptex as usize;
+            let tex = &self.textures[tex_idx];
+            if is_sky_texture(&tex.name) || is_tool_texture(&tex.name) {
+                continue;
+            }
+            let Some((poly_verts, st_coords, ext_min_s, ext_min_t, _lm_w, _lm_h)) =
+                face_extents_and_st(face, texinfo, &self.vertices_raw, &self.edges, &self.surf_edges)
+            else {
+                continue;
+            };
+            let Some(plane) = self.planes.get(face.plane as usize) else {
+                continue;
+            };
+            let normal = if face.plane_side != 0 {
+                -plane.normal
+            } else {
+                plane.normal
+            };
+            let is_water = is_water_texture(&tex.name);
+            let is_scroll = tex.name.to_ascii_lowercase().starts_with("scroll");
+            let rect = rect_map.get(&face_index).copied();
+
+            let mut surf_flags = 0u32;
+            if tex.alpha_test {
+                surf_flags |= SURF_FLAG_ALPHATEST;
+            }
+            if is_water {
+                surf_flags |= SURF_FLAG_WATER;
+            }
+            if is_scroll {
+                surf_flags |= SURF_FLAG_SCROLL;
+            }
+            if rect.is_none() {
+                surf_flags |= SURF_FLAG_NO_LIGHTMAP;
+            }
+            let render_mode = if tex.alpha_test {
+                RenderMode::AlphaTest
+            } else if is_water {
+                RenderMode::Transparent
+            } else {
+                RenderMode::Normal
+            };
+            let alpha = if is_water { 0.78 } else { 1.0 };
+            let tex_w = tex.width.max(1) as f32;
+            let tex_h = tex.height.max(1) as f32;
+            let base_v = verts.len() as u32;
+            let first_index = indices.len() as u32;
+
+            for (&p, &(s, t)) in poly_verts.iter().zip(st_coords.iter()) {
+                let world_pos = p + world.origin;
+                let lm_uv = if let Some(r) = rect {
+                    [
+                        (r.atlas_x as f32 + (s / 16.0 - ext_min_s) + 0.5) / atlas_f,
+                        (r.atlas_y as f32 + (t / 16.0 - ext_min_t) + 0.5) / atlas_f,
+                    ]
+                } else {
+                    neutral_uv
+                };
+                verts.push(BspVertex {
+                    position: world_pos.to_array(),
+                    normal: normal.to_array(),
+                    uv: [s / tex_w, t / tex_h],
+                    lm_uv,
+                    alpha,
+                    flags: surf_flags,
+                });
+            }
+
+            let mut area_vec = Vec3::ZERO;
+            for i in 1..(poly_verts.len() - 1) {
+                area_vec += (poly_verts[i] - poly_verts[0]).cross(poly_verts[i + 1] - poly_verts[0]);
+            }
+            let flip = area_vec.dot(normal) < 0.0;
+            for i in 1..(poly_verts.len() as u32 - 1) {
+                if flip {
+                    indices.extend_from_slice(&[base_v, base_v + i + 1, base_v + i]);
+                } else {
+                    indices.extend_from_slice(&[base_v, base_v + i, base_v + i + 1]);
+                }
+            }
+            spans[face_index] = Some(WorldFaceSpan {
+                face_index,
+                texture_index: tex_idx,
+                render_mode,
+                first_index,
+                index_count: (indices.len() as u32) - first_index,
+            });
+        }
+        (verts, indices, spans)
+    }
+
+    /// GoldSrc `R_LightPoint(point)` with vertical node raycast and 4-style lightstyle summation.
+    pub fn sample_light_point_styled(&self, point: Vec3, style_values: &[f32; 64]) -> Vec3 {
+        let Some(world) = self.models.first() else {
+            return Vec3::splat(0.85);
+        };
+        if let Some(rgb) = self.recursive_light_point(
+            world.head_nodes[0],
+            point,
+            point - Vec3::new(0.0, 0.0, 2048.0),
+            style_values,
+            0,
+        ) {
+            return rgb;
+        }
+        self.sample_light_point(point)
+    }
+
+    fn recursive_light_point(
+        &self,
+        node_idx: i32,
+        start: Vec3,
+        end: Vec3,
+        style_values: &[f32; 64],
+        depth: usize,
+    ) -> Option<Vec3> {
+        if node_idx < 0 || depth > 256 {
+            return None;
+        }
+        let node = self.nodes.get(node_idx as usize)?;
+        let plane = self.planes.get(node.plane as usize)?;
+        let front = plane.normal.dot(start) - plane.dist;
+        let back = plane.normal.dot(end) - plane.dist;
+        let side = usize::from(front < 0.0);
+        if (back < 0.0) == (front < 0.0) {
+            return self.recursive_light_point(
+                i32::from(node.children[side]),
+                start,
+                end,
+                style_values,
+                depth + 1,
+            );
+        }
+        let frac = (front / (front - back)).clamp(0.0, 1.0);
+        let mid = start + (end - start) * frac;
+        if let Some(hit) = self.recursive_light_point(
+            i32::from(node.children[side]),
+            start,
+            mid,
+            style_values,
+            depth + 1,
+        ) {
+            return Some(hit);
+        }
+
+        // Check faces belonging to this split node at intersection `mid`.
+        let first = usize::from(node.first_face);
+        let count = usize::from(node.num_faces);
+        let end_face = first.saturating_add(count).min(self.faces.len());
+        for face in &self.faces[first..end_face] {
+            if face.lightmap_offset < 0 || face.styles[0] == 255 {
+                continue;
+            }
+            let Some(texinfo) = self.texinfos.get(face.texinfo as usize) else {
+                continue;
+            };
+            if texinfo.flags & 1 != 0 {
+                continue;
+            }
+            let Some((poly, _st, ext_min_s, ext_min_t, lm_w, lm_h)) = face_extents_and_st(
+                face,
+                texinfo,
+                &self.vertices_raw,
+                &self.edges,
+                &self.surf_edges,
+            ) else {
+                continue;
+            };
+            let s = mid.dot(texinfo.s_vec) + texinfo.s_shift;
+            let t = mid.dot(texinfo.t_vec) + texinfo.t_shift;
+            let ds = s / 16.0 - ext_min_s;
+            let dt = t / 16.0 - ext_min_t;
+            if ds < -0.5 || dt < -0.5 || ds > lm_w as f32 + 0.5 || dt > lm_h as f32 + 0.5 {
+                continue;
+            }
+            let Some(fplane) = self.planes.get(face.plane as usize) else {
+                continue;
+            };
+            let fnormal = if face.plane_side != 0 {
+                -fplane.normal
+            } else {
+                fplane.normal
+            };
+            if !point_in_bsp_face(mid, &poly, fnormal) {
+                continue;
+            }
+            let tx = (ds.round() as i32).clamp(0, lm_w as i32 - 1) as usize;
+            let ty = (dt.round() as i32).clamp(0, lm_h as i32 - 1) as usize;
+            let lm_off = face.lightmap_offset as usize;
+            let page_bytes = (lm_w as usize) * (lm_h as usize) * 3;
+            let texel = (ty * lm_w as usize + tx) * 3;
+            let mut rgb = Vec3::ZERO;
+            for (page, &style) in face.styles.iter().enumerate() {
+                if style == 255 {
+                    break;
+                }
+                let src = lm_off + page * page_bytes + texel;
+                if src + 2 >= self.lighting.len() {
+                    break;
+                }
+                let mul = style_values.get(usize::from(style)).copied().unwrap_or(1.0);
+                rgb += Vec3::new(
+                    f32::from(self.lighting[src]) / 255.0 * 2.0,
+                    f32::from(self.lighting[src + 1]) / 255.0 * 2.0,
+                    f32::from(self.lighting[src + 2]) / 255.0 * 2.0,
+                ) * mul;
+            }
+            return Some(rgb.clamp(Vec3::splat(0.12), Vec3::splat(1.8)));
+        }
+
+        self.recursive_light_point(
+            i32::from(node.children[side ^ 1]),
+            mid,
+            end,
+            style_values,
+            depth + 1,
+        )
+    }
+
+    /// Return BSP face polygons intersecting a sphere around `center` (for decal projection/clipping).
+    pub fn query_faces_in_sphere(&self, center: Vec3, radius: f32) -> Vec<DecalFacePoly> {
+        let mut out = Vec::new();
+        let draw_models = collect_brush_draw_models(&self.entities, &self.models);
+        for brush in &draw_models {
+            let model = &self.models[brush.model_index];
+            let offset = brush.origin + model.origin;
+            let min = model.mins + offset - Vec3::splat(radius);
+            let max = model.maxs + offset + Vec3::splat(radius);
+            if center.x < min.x
+                || center.x > max.x
+                || center.y < min.y
+                || center.y > max.y
+                || center.z < min.z
+                || center.z > max.z
+            {
+                continue;
+            }
+            let first = model.first_face.max(0) as usize;
+            let count = model.num_faces.max(0) as usize;
+            let end = first.saturating_add(count).min(self.faces.len());
+            for face_index in first..end {
+                let face = &self.faces[face_index];
+                let Some(texinfo) = self.texinfos.get(face.texinfo as usize) else {
+                    continue;
+                };
+                if let Some(tex) = usize::try_from(texinfo.miptex)
+                    .ok()
+                    .and_then(|i| self.textures.get(i))
+                    && (is_sky_texture(&tex.name)
+                        || is_tool_texture(&tex.name)
+                        || is_water_texture(&tex.name))
+                {
+                    continue;
+                }
+                let Some(plane) = self.planes.get(face.plane as usize) else {
+                    continue;
+                };
+                let normal = if face.plane_side != 0 {
+                    -plane.normal
+                } else {
+                    plane.normal
+                };
+                let dist_signed = if face.plane_side != 0 {
+                    -plane.dist
+                } else {
+                    plane.dist
+                } + normal.dot(offset);
+                if (normal.dot(center) - dist_signed).abs() > radius {
+                    continue;
+                }
+                let Some((mut poly, _, _, _, _, _)) = face_extents_and_st(
+                    face,
+                    texinfo,
+                    &self.vertices_raw,
+                    &self.edges,
+                    &self.surf_edges,
+                ) else {
+                    continue;
+                };
+                let mut fmin = Vec3::splat(f32::INFINITY);
+                let mut fmax = Vec3::splat(f32::NEG_INFINITY);
+                for v in &mut poly {
+                    *v += offset;
+                    fmin = fmin.min(*v);
+                    fmax = fmax.max(*v);
+                }
+                if center.x < fmin.x - radius
+                    || center.x > fmax.x + radius
+                    || center.y < fmin.y - radius
+                    || center.y > fmax.y + radius
+                    || center.z < fmin.z - radius
+                    || center.z > fmax.z + radius
+                {
+                    continue;
+                }
+                out.push(DecalFacePoly {
+                    face_index,
+                    model_index: brush.model_index,
+                    normal,
+                    plane_dist: dist_signed,
+                    verts: poly,
+                });
+            }
+        }
+        out
+    }
+}
+
+fn point_in_bsp_face(p: Vec3, poly: &[Vec3], normal: Vec3) -> bool {
+    let mut area_vec = Vec3::ZERO;
+    for i in 1..poly.len().saturating_sub(1) {
+        area_vec += (poly[i] - poly[0]).cross(poly[i + 1] - poly[0]);
+    }
+    let sign = if area_vec.dot(normal) < 0.0 { -1.0 } else { 1.0 };
+    for i in 0..poly.len() {
+        let a = poly[i];
+        let b = poly[(i + 1) % poly.len()];
+        let edge_n = normal.cross(b - a) * sign;
+        if (p - a).dot(edge_n) < -1.0 {
+            return false;
+        }
+    }
+    true
 }
 
 fn parse_wad_list(raw: &str) -> Vec<String> {
@@ -715,9 +1340,7 @@ impl ShelfPacker {
         }
     }
 
-    /// Allocate a `(w + 2) x (h + 2)` padded slot and copy RGB luxels with 1px clamped border.
-    /// Returns top-left `(inner_x, inner_y)` of the `w x h` content inside the atlas.
-    fn pack_rgb(&mut self, w: u32, h: u32, rgb: &[u8]) -> Option<(u32, u32)> {
+    fn alloc_rect(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
         let pw = w + 2;
         let ph = h + 2;
         if pw > self.width || ph > self.height {
@@ -731,11 +1354,19 @@ impl ShelfPacker {
         if self.cursor_y + ph > self.height {
             return None;
         }
-
         let ox = self.cursor_x;
         let oy = self.cursor_y;
         self.cursor_x += pw;
         self.shelf_h = self.shelf_h.max(ph);
+        Some((ox, oy))
+    }
+
+    /// Allocate a `(w + 2) x (h + 2)` padded slot and copy RGB luxels with 1px clamped border.
+    /// Returns top-left `(inner_x, inner_y)` of the `w x h` content inside the atlas.
+    fn pack_rgb(&mut self, w: u32, h: u32, rgb: &[u8]) -> Option<(u32, u32)> {
+        let (ox, oy) = self.alloc_rect(w, h)?;
+        let pw = w + 2;
+        let ph = h + 2;
 
         // Fill padded rectangle by clamping coordinates into [0..w-1, 0..h-1]
         for py in 0..ph {
@@ -757,28 +1388,15 @@ impl ShelfPacker {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn build_render_geometry(
-    entities: &[Entity],
-    planes: &[Plane],
-    vertices_raw: &[Vec3],
-    texinfos: &[TexInfo],
-    faces: &[Face],
-    lighting: &[u8],
-    edges: &[[u16; 2]],
-    surf_edges: &[i32],
-    models: &[BspModel],
-    textures: &[DecodedTexture],
-) -> (LightmapAtlas, Vec<BspVertex>, Vec<u32>, Vec<RenderBatch>) {
-    // Map brush model index -> (origin, render_mode, alpha, visible)
-    struct BrushDrawInfo {
-        model_index: usize,
-        dynamic_tag: usize,
-        origin: Vec3,
-        render_mode: RenderMode,
-        alpha: f32,
-    }
+struct BrushDrawInfo {
+    model_index: usize,
+    dynamic_tag: usize,
+    origin: Vec3,
+    render_mode: RenderMode,
+    alpha: f32,
+}
 
+fn collect_brush_draw_models(entities: &[Entity], models: &[BspModel]) -> Vec<BrushDrawInfo> {
     let mut draw_models = Vec::new();
     if !models.is_empty() {
         draw_models.push(BrushDrawInfo {
@@ -845,6 +1463,77 @@ fn build_render_geometry(
             alpha,
         });
     }
+    draw_models
+}
+
+fn face_extents_and_st(
+    face: &Face,
+    texinfo: &TexInfo,
+    vertices_raw: &[Vec3],
+    edges: &[[u16; 2]],
+    surf_edges: &[i32],
+) -> Option<(Vec<Vec3>, Vec<(f32, f32)>, f32, f32, u32, u32)> {
+    let num_edges = face.num_edges as usize;
+    if num_edges < 3 || face.first_edge < 0 {
+        return None;
+    }
+    let fe = face.first_edge as usize;
+    if fe.saturating_add(num_edges) > surf_edges.len() {
+        return None;
+    }
+
+    let mut poly_verts = Vec::with_capacity(num_edges);
+    for &se in &surf_edges[fe..fe + num_edges] {
+        let v_idx = if se >= 0 {
+            edges.get(se as usize).map(|e| e[0] as usize)
+        } else {
+            edges.get((-se) as usize).map(|e| e[1] as usize)
+        };
+        let pos = v_idx.and_then(|idx| vertices_raw.get(idx).copied())?;
+        poly_verts.push(pos);
+    }
+    if poly_verts.len() < 3 {
+        return None;
+    }
+
+    let mut st_coords = Vec::with_capacity(poly_verts.len());
+    let mut min_s = f32::INFINITY;
+    let mut max_s = f32::NEG_INFINITY;
+    let mut min_t = f32::INFINITY;
+    let mut max_t = f32::NEG_INFINITY;
+    for &p in &poly_verts {
+        let s = p.dot(texinfo.s_vec) + texinfo.s_shift;
+        let t = p.dot(texinfo.t_vec) + texinfo.t_shift;
+        min_s = min_s.min(s);
+        max_s = max_s.max(s);
+        min_t = min_t.min(t);
+        max_t = max_t.max(t);
+        st_coords.push((s, t));
+    }
+
+    let ext_min_s = (min_s / 16.0).floor();
+    let ext_max_s = (max_s / 16.0).ceil();
+    let ext_min_t = (min_t / 16.0).floor();
+    let ext_max_t = (max_t / 16.0).ceil();
+    let lm_w = ((ext_max_s - ext_min_s) as i32 + 1).clamp(1, 256) as u32;
+    let lm_h = ((ext_max_t - ext_min_t) as i32 + 1).clamp(1, 256) as u32;
+    Some((poly_verts, st_coords, ext_min_s, ext_min_t, lm_w, lm_h))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_render_geometry(
+    entities: &[Entity],
+    planes: &[Plane],
+    vertices_raw: &[Vec3],
+    texinfos: &[TexInfo],
+    faces: &[Face],
+    lighting: &[u8],
+    edges: &[[u16; 2]],
+    surf_edges: &[i32],
+    models: &[BspModel],
+    textures: &[DecodedTexture],
+) -> (LightmapAtlas, Vec<BspVertex>, Vec<u32>, Vec<RenderBatch>) {
+    let draw_models = collect_brush_draw_models(entities, models);
 
     let mut packer = ShelfPacker::new(LIGHTMAP_ATLAS_SIZE, LIGHTMAP_ATLAS_SIZE);
     let mut packed_faces = 0usize;
@@ -881,32 +1570,11 @@ fn build_render_geometry(
                 continue;
             }
 
-            let num_edges = face.num_edges as usize;
-            if num_edges < 3 || face.first_edge < 0 {
+            let Some((poly_verts, st_coords, ext_min_s, ext_min_t, lm_w, lm_h)) =
+                face_extents_and_st(face, texinfo, vertices_raw, edges, surf_edges)
+            else {
                 continue;
-            }
-            let fe = face.first_edge as usize;
-            if fe.saturating_add(num_edges) > surf_edges.len() {
-                continue;
-            }
-
-            let mut poly_verts = Vec::with_capacity(num_edges);
-            let mut valid = true;
-            for &se in &surf_edges[fe..fe + num_edges] {
-                let v_idx = if se >= 0 {
-                    edges.get(se as usize).map(|e| e[0] as usize)
-                } else {
-                    edges.get((-se) as usize).map(|e| e[1] as usize)
-                };
-                let Some(pos) = v_idx.and_then(|idx| vertices_raw.get(idx).copied()) else {
-                    valid = false;
-                    break;
-                };
-                poly_verts.push(pos);
-            }
-            if !valid || poly_verts.len() < 3 {
-                continue;
-            }
+            };
 
             let Some(plane) = planes.get(face.plane as usize) else {
                 continue;
@@ -918,30 +1586,8 @@ fn build_render_geometry(
             };
 
             let is_water = is_water_texture(&tex.name);
+            let is_scroll = tex.name.to_ascii_lowercase().starts_with("scroll");
             let alpha_test = tex.alpha_test || brush.render_mode == RenderMode::AlphaTest;
-
-            // Compute raw texture coordinates (s, t) before adding entity origin (lightmaps are in model-local space!)
-            let mut st_coords = Vec::with_capacity(poly_verts.len());
-            let mut min_s = f32::INFINITY;
-            let mut max_s = f32::NEG_INFINITY;
-            let mut min_t = f32::INFINITY;
-            let mut max_t = f32::NEG_INFINITY;
-            for &p in &poly_verts {
-                let s = p.dot(texinfo.s_vec) + texinfo.s_shift;
-                let t = p.dot(texinfo.t_vec) + texinfo.t_shift;
-                min_s = min_s.min(s);
-                max_s = max_s.max(s);
-                min_t = min_t.min(t);
-                max_t = max_t.max(t);
-                st_coords.push((s, t));
-            }
-
-            let ext_min_s = (min_s / 16.0).floor();
-            let ext_max_s = (max_s / 16.0).ceil();
-            let ext_min_t = (min_t / 16.0).floor();
-            let ext_max_t = (max_t / 16.0).ceil();
-            let lm_w = ((ext_max_s - ext_min_s) as i32 + 1).clamp(1, 256) as u32;
-            let lm_h = ((ext_max_t - ext_min_t) as i32 + 1).clamp(1, 256) as u32;
 
             let has_lightmap =
                 !is_water && face.lightmap_offset >= 0 && face.styles[0] != 255 && (texinfo.flags & 1) == 0;
@@ -971,6 +1617,9 @@ fn build_render_geometry(
             }
             if packed_slot.is_none() {
                 surf_flags |= SURF_FLAG_NO_LIGHTMAP;
+            }
+            if is_scroll {
+                surf_flags |= SURF_FLAG_SCROLL;
             }
 
             let effective_mode = match brush.render_mode {
@@ -1462,4 +2111,73 @@ fn read_f32(bytes: &[u8], offset: usize) -> Result<f32, BspError> {
         .try_into()
         .map_err(|_| BspError::Truncated("f32"))?;
     Ok(f32::from_le_bytes(arr))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn texture_anim_table_resolves_primary_and_alt_chains() {
+        let tex = |name: &str| DecodedTexture {
+            name: name.to_string(),
+            width: 16,
+            height: 16,
+            rgba: vec![0; 16 * 16 * 4],
+            alpha_test: false,
+        };
+        let table = TextureAnimTable::from_textures(&[
+            tex("+0button"),
+            tex("+1button"),
+            tex("+abutton"),
+            tex("+bbutton"),
+            tex("wall"),
+        ]);
+        // At 5 Hz, 0.0s -> frame 0 (+0button), 0.2s -> frame 1 (+1button)
+        assert_eq!(table.resolve(0, 0.0, 0.0), 0);
+        assert_eq!(table.resolve(0, 0.25, 0.0), 1);
+        // Non-zero entity frame switches to +A/+B chain
+        assert_eq!(table.resolve(0, 0.0, 1.0), 2);
+        assert_eq!(table.resolve(0, 0.25, 1.0), 3);
+        // Plain texture unchanged
+        assert_eq!(table.resolve(4, 0.5, 1.0), 4);
+    }
+
+    #[test]
+    fn rebuild_for_styles_updates_only_dirty_rects_and_weights_pages() {
+        let mut packer = ShelfPacker::new(64, 64);
+        let (ox, oy) = packer.alloc_rect(2, 2).unwrap();
+        let mut atlas = LightmapAtlas {
+            width: 64,
+            height: 64,
+            rgba: packer.rgba,
+            packed_faces: 1,
+        };
+        let lighting = vec![
+            100, 50, 25, 100, 50, 25, 100, 50, 25, 100, 50, 25, // style 0
+            20, 40, 60, 20, 40, 60, 20, 40, 60, 20, 40, 60,     // style 1
+        ];
+        let rects = vec![FaceLightmapInfo {
+            face_index: 0,
+            atlas_x: ox + 1,
+            atlas_y: oy + 1,
+            width: 2,
+            height: 2,
+            styles: [0, 1, 255, 255],
+            num_styles: 2,
+            lightmap_offset: 0,
+        }];
+        let mut prev = [1.0f32; 64];
+        let curr_same = [1.0f32; 64];
+        assert!(atlas.rebuild_for_styles(&lighting, &rects, &curr_same, &prev).is_empty());
+
+        let mut curr = [1.0f32; 64];
+        curr[1] = 2.0; // boost style 1 -> RGB = 100+40=140, 50+80=130, 25+120=145
+        let dirty = atlas.rebuild_for_styles(&lighting, &rects, &curr, &prev);
+        assert_eq!(dirty, vec![(ox, oy, 4, 4)]);
+        let px = (((oy + 1) * 64 + (ox + 1)) * 4) as usize;
+        assert_eq!(&atlas.rgba[px..px + 4], &[140, 130, 145, 255]);
+        prev[1] = 2.0;
+        assert!(atlas.rebuild_for_styles(&lighting, &rects, &curr, &prev).is_empty());
+    }
 }
