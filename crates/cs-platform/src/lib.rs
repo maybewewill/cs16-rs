@@ -1,5 +1,6 @@
-//! Platform seams: time source abstraction shared by native and wasm32 builds.
+//! Platform seams: time source and configuration storage shared by native and wasm32 builds.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Monotonic time source, in seconds.
@@ -73,6 +74,163 @@ impl Clock for NativeClock {
     }
 }
 
+/// High-resolution browser clock backed by `window.performance.now()`.
+#[cfg(target_arch = "wasm32")]
+#[derive(Debug, Clone)]
+pub struct WebClock {
+    start_ms: f64,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl WebClock {
+    pub fn new() -> Self {
+        Self {
+            start_ms: perf_now_ms(),
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Default for WebClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Clock for WebClock {
+    fn now(&self) -> f64 {
+        ((perf_now_ms() - self.start_ms) / 1000.0).max(0.0)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn perf_now_ms() -> f64 {
+    web_sys::window()
+        .and_then(|w| w.performance())
+        .map_or(0.0, |p| p.now())
+}
+
+/// Key-value persistence for client configuration (`config.cfg`, user settings).
+pub trait ConfigStorage {
+    fn load(&self, key: &str) -> Option<String>;
+    fn save(&mut self, key: &str, value: &str) -> Result<(), String>;
+    fn remove(&mut self, key: &str) -> Result<(), String>;
+}
+
+/// Validates a storage key so native file backends cannot escape their directory.
+fn valid_storage_key(key: &str) -> bool {
+    !key.is_empty() && !key.contains(['/', '\\', '\0']) && !key.contains("..")
+}
+
+/// In-memory config storage for tests and ephemeral sessions.
+#[derive(Debug, Default, Clone)]
+pub struct MemoryStorage {
+    entries: HashMap<String, String>,
+}
+
+impl ConfigStorage for MemoryStorage {
+    fn load(&self, key: &str) -> Option<String> {
+        self.entries.get(key).cloned()
+    }
+
+    fn save(&mut self, key: &str, value: &str) -> Result<(), String> {
+        if !valid_storage_key(key) {
+            return Err(format!("invalid config storage key `{key}`"));
+        }
+        self.entries.insert(key.to_string(), value.to_string());
+        Ok(())
+    }
+
+    fn remove(&mut self, key: &str) -> Result<(), String> {
+        self.entries.remove(key);
+        Ok(())
+    }
+}
+
+/// Native filesystem config storage rooted at a dedicated directory.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone)]
+pub struct NativeFileStorage {
+    root: std::path::PathBuf,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativeFileStorage {
+    pub fn new(root: impl Into<std::path::PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    fn path_for(&self, key: &str) -> Result<std::path::PathBuf, String> {
+        if !valid_storage_key(key) {
+            return Err(format!("invalid config storage key `{key}`"));
+        }
+        Ok(self.root.join(key))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ConfigStorage for NativeFileStorage {
+    fn load(&self, key: &str) -> Option<String> {
+        let path = self.path_for(key).ok()?;
+        std::fs::read_to_string(path).ok()
+    }
+
+    fn save(&mut self, key: &str, value: &str) -> Result<(), String> {
+        let path = self.path_for(key)?;
+        std::fs::create_dir_all(&self.root).map_err(|e| e.to_string())?;
+        std::fs::write(path, value).map_err(|e| e.to_string())
+    }
+
+    fn remove(&mut self, key: &str) -> Result<(), String> {
+        let path = self.path_for(key)?;
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+}
+
+/// Browser `window.localStorage` config persistence prefixed with `cs16rs:`.
+#[cfg(target_arch = "wasm32")]
+#[derive(Debug, Default, Clone)]
+pub struct WebLocalStorage;
+
+#[cfg(target_arch = "wasm32")]
+impl WebLocalStorage {
+    fn storage() -> Option<web_sys::Storage> {
+        web_sys::window().and_then(|w| w.local_storage().ok().flatten())
+    }
+
+    fn prefixed(key: &str) -> Result<String, String> {
+        if !valid_storage_key(key) {
+            return Err(format!("invalid config storage key `{key}`"));
+        }
+        Ok(format!("cs16rs:{key}"))
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl ConfigStorage for WebLocalStorage {
+    fn load(&self, key: &str) -> Option<String> {
+        let full = Self::prefixed(key).ok()?;
+        Self::storage()?.get_item(&full).ok().flatten()
+    }
+
+    fn save(&mut self, key: &str, value: &str) -> Result<(), String> {
+        let full = Self::prefixed(key)?;
+        let st = Self::storage().ok_or_else(|| "localStorage unavailable".to_string())?;
+        st.set_item(&full, value).map_err(|e| format!("{e:?}"))
+    }
+
+    fn remove(&mut self, key: &str) -> Result<(), String> {
+        let full = Self::prefixed(key)?;
+        let st = Self::storage().ok_or_else(|| "localStorage unavailable".to_string())?;
+        st.remove_item(&full).map_err(|e| format!("{e:?}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,5 +250,32 @@ mod tests {
         let first = c.now();
         let second = c.now();
         assert!(second >= first);
+    }
+
+    #[test]
+    fn memory_and_native_storage_roundtrip_and_reject_traversal() {
+        let mut mem = MemoryStorage::default();
+        assert!(mem.load("config.cfg").is_none());
+        mem.save("config.cfg", "sensitivity \"2.5\"\n").unwrap();
+        assert_eq!(mem.load("config.cfg").as_deref(), Some("sensitivity \"2.5\"\n"));
+        assert!(mem.save("../escape.cfg", "bad").is_err());
+        mem.remove("config.cfg").unwrap();
+        assert!(mem.load("config.cfg").is_none());
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let dir = std::env::temp_dir().join(format!("cs16-platform-test-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let mut fs_store = NativeFileStorage::new(&dir);
+            fs_store.save("config.cfg", "name \"WebPlayer\"\n").unwrap();
+            assert_eq!(
+                fs_store.load("config.cfg").as_deref(),
+                Some("name \"WebPlayer\"\n")
+            );
+            assert!(fs_store.save("../bad", "x").is_err());
+            fs_store.remove("config.cfg").unwrap();
+            assert!(fs_store.load("config.cfg").is_none());
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }
