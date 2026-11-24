@@ -26,7 +26,7 @@ use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
-use crate::audio::AudioEngine;
+use crate::audio::{AudioEngine, ListenerState};
 use crate::session::Session;
 use cs_client::camera::Camera;
 use cs_client::hudtext::{format_message, strip_html};
@@ -40,7 +40,8 @@ use cs_client::render::scene::ModelRegistry;
 use cs_client::render::{RenderSettings, Renderer, SceneDynamicData};
 use cs_client::ui::chat::ChatInputUi;
 use cs_client::ui::console::ConsoleUi;
-use cs_client::ui::hud::{HudSprites, HudView, draw_cs16_hud};
+use cs_client::ui::hud::{HudSprites, HudView, draw_cs16_hud, draw_voice_speakers};
+use cs_pm::collision::Hull;
 use cs_client::ui::main_menu::MainMenuUi;
 use cs_client::ui::mod_hud::{draw_mod_approval_prompt, draw_mod_hud};
 use cs_client::ui::options::OptionsUi;
@@ -185,6 +186,11 @@ impl Cs16App {
             console_ui.open();
         }
 
+        let mut audio = AudioEngine::new();
+        if let Some(v) = &vfs {
+            audio.load_sentences(v);
+        }
+
         let now = Instant::now();
         let exit_after_screenshot = launch.auto_screenshot.is_some();
         Self {
@@ -194,7 +200,7 @@ impl Cs16App {
             cvars,
             palette,
             loc,
-            audio: AudioEngine::new(),
+            audio,
             runtime: None,
             session: Session::none(),
             camera: Camera::default(),
@@ -293,6 +299,7 @@ impl Cs16App {
             self.session.connection_predictor_materials(&txt);
         }
         self.session.set_map(&map.name, Some(collision));
+        self.session.set_map_bsp(Some(Arc::new(map.clone())));
         self.feeds = HudFeeds::default();
         self.last_weapon = None;
         self.weapon_switch_timer = 0.0;
@@ -450,55 +457,67 @@ impl Cs16App {
         Vec::new()
     }
 
-    /// Plays what the client core queued: the sounds of the server's messages, of the events
-    /// and temp entities, and of the predicted footsteps.
-    fn play_sounds(&mut self, listener: Vec3, local_entity: Option<u16>) {
+    /// Plays what the client core queued: server/event sounds, ambient DSP, material bullet
+    /// impacts, radio/VOX sentences, reloads, and predicted footsteps.
+    fn play_sounds(&mut self, view: &FrameView, local_entity: Option<u16>) {
         let master = finite_or(self.cvars.get_f32("volume"), 1.0).clamp(0.0, 1.0);
+        let suit_vol = finite_or(self.cvars.get_f32("suitvolume"), 0.25).clamp(0.0, 1.0);
+        let listener_eye = view.eye;
+        let coll = self.session.collision().cloned();
+        let occ = |pos: Vec3| {
+            coll.as_ref()
+                .is_some_and(|c| c.trace_world(listener_eye, pos, Hull::Point).fraction < 0.99)
+        };
+        self.audio.update_listener(
+            ListenerState {
+                origin: view.eye,
+                right: view.listener_right,
+                local_entity,
+                waterlevel: view.waterlevel,
+            },
+            &view.entity_positions,
+            coll.as_ref().map(|_| &occ as &dyn Fn(Vec3) -> bool),
+        );
+
+        let occ_ref = coll.as_ref().map(|_| &occ as &dyn Fn(Vec3) -> bool);
         for cmd in self.session.take_sounds() {
-            match cmd {
-                SoundCommand::Stop { entity, channel } => {
-                    self.audio.stop_channel(entity, channel);
-                }
-                SoundCommand::Start(s) | SoundCommand::Ambient(s) => {
-                    if s.is_stop() {
-                        self.audio.stop_channel(s.entity, s.channel);
-                        continue;
-                    }
-                    if s.is_sentence() {
-                        continue;
-                    }
-                    let Some(name) = s.name.as_deref() else {
-                        continue;
-                    };
-                    if name.starts_with(['!', '#', '*']) || !s.volume.is_finite() {
-                        continue;
-                    }
-                    if Some(s.entity) == local_entity {
-                        self.audio.play_2d_tracked(
-                            self.vfs.as_ref(),
-                            name,
-                            s.volume * master,
-                            Some((s.entity, s.channel)),
-                        );
-                    } else if s.origin.is_finite() {
-                        self.audio.play_3d_tracked(
-                            self.vfs.as_ref(),
-                            name,
-                            s.origin,
-                            listener,
-                            s.volume * master,
-                            Some((s.entity, s.channel)),
-                        );
-                    }
-                }
-                SoundCommand::Fade { .. } => {}
+            if let SoundCommand::RoomType(rt) = &cmd {
+                self.cvars.set("room_type", rt.to_string());
             }
+            self.audio.handle_sound_command(self.vfs.as_ref(), &cmd, occ_ref);
+        }
+        for impact in &view.impact_sounds {
+            self.audio.handle_sound_command(
+                self.vfs.as_ref(),
+                &SoundCommand::Start(impact.clone()),
+                occ_ref,
+            );
+        }
+        for (_sender, code, _pitch) in &view.radio_audio {
+            self.audio.play_sentence(self.vfs.as_ref(), code, master);
+        }
+        for (vol, kind) in &view.reload_sounds {
+            self.audio.play_reload_sound(self.vfs.as_ref(), *vol, *kind);
         }
         for s in self.session.take_predicted_sounds() {
             if s.volume.is_finite() {
-                self.audio.play_2d(self.vfs.as_ref(), &s.sample, s.volume * master);
+                let start = cs_clientcore::SoundStart::by_name(
+                    &s.sample,
+                    local_entity.unwrap_or(1),
+                    s.channel.clamp(0, 7) as u8,
+                    view.eye,
+                    s.volume,
+                    s.attenuation,
+                    s.pitch.clamp(2, 255) as u8,
+                );
+                self.audio.handle_sound_command(
+                    self.vfs.as_ref(),
+                    &SoundCommand::Start(start),
+                    None,
+                );
             }
         }
+        let _ = suit_vol;
     }
 
     /// Moves what the HUD state collects into the timed logs the HUD draws.
@@ -755,6 +774,18 @@ impl Cs16App {
                         self.server_console(&line);
                     }
                     EngineAction::BotKick => self.server_console("bot_kick"),
+                    EngineAction::Mp3Command(args) => self.audio.handle_mp3_command(&args),
+                    EngineAction::CdCommand(args) => self.audio.handle_cd_command(&args),
+                    EngineAction::PlaySound { sample, volume } => {
+                        let master = finite_or(self.cvars.get_f32("volume"), 1.0).clamp(0.0, 1.0);
+                        self.audio
+                            .play_2d(self.vfs.as_ref(), &sample, volume * master);
+                    }
+                    EngineAction::SpeakSentence(spec) => {
+                        let suit = finite_or(self.cvars.get_f32("suitvolume"), 0.25).clamp(0.0, 1.0);
+                        self.audio.play_sentence(self.vfs.as_ref(), &spec, suit);
+                    }
+                    EngineAction::StopSound => self.audio.stop_all(),
                 }
             }
         }
@@ -1018,6 +1049,12 @@ impl Cs16App {
                 Some(ShellStuffAction::PlaySound(sample)) => {
                     self.audio.play_2d(self.vfs.as_ref(), &sample, master);
                 }
+                Some(ShellStuffAction::SpeakSentence(spec)) => {
+                    let suit = finite_or(self.cvars.get_f32("suitvolume"), 0.25).clamp(0.0, 1.0);
+                    self.audio.play_sentence(self.vfs.as_ref(), &spec, suit);
+                }
+                Some(ShellStuffAction::Mp3(args)) => self.audio.handle_mp3_command(&args),
+                Some(ShellStuffAction::Cd(args)) => self.audio.handle_cd_command(&args),
                 Some(ShellStuffAction::StopSound) => self.audio.stop_all(),
                 Some(ShellStuffAction::Echo(text)) => self.cvars.info(text),
                 None => {}
@@ -1032,10 +1069,31 @@ impl Cs16App {
         let in_game = self.is_in_game();
         let show_scores =
             self.active_actions.contains("showscores") && in_game && !self.menu_ui.visible;
+        let master = finite_or(self.cvars.get_f32("volume"), 1.0).clamp(0.0, 1.0);
+        let suit_vol = finite_or(self.cvars.get_f32("suitvolume"), 0.25).clamp(0.0, 1.0);
+        let room_off = self.cvars.get_bool("room_off");
+        let occ_factor = finite_or(self.cvars.get_f32("s_occfactor"), 0.25).clamp(0.0, 0.9);
         let mp3_vol = finite_or(self.cvars.get_f32("mp3volume"), 0.8).clamp(0.0, 1.0);
+        let bgm_enabled = self.cvars.get_bool("bgmvolume");
+        let mp3_fade = finite_or(self.cvars.get_f32("mp3fadetime"), 2.0).clamp(0.0, 30.0);
+        self.audio.set_params(
+            master,
+            suit_vol,
+            room_off,
+            occ_factor,
+            mp3_vol,
+            bgm_enabled,
+            mp3_fade,
+        );
         let want_menu_music = !self.session.is_active() && self.launch.auto_screenshot.is_none();
-        self.audio
-            .sync_menu_music(self.vfs.as_ref(), want_menu_music, mp3_vol);
+        self.audio.sync_menu_music(
+            self.vfs.as_ref(),
+            want_menu_music,
+            mp3_vol,
+            bgm_enabled,
+            mp3_fade,
+            dt,
+        );
 
         let default_fov = finite_or(self.cvars.get_f32("default_fov"), 90.0)
             .clamp(60.0, 120.0);
@@ -1079,12 +1137,36 @@ impl Cs16App {
                 self.camera.position = v.eye;
             }
             let local_entity = self.session.local_slot().map(|s| u16::from(s) + 1);
-            self.play_sounds(v.eye, local_entity);
+            self.play_sounds(v, local_entity);
             let master = finite_or(self.cvars.get_f32("volume"), 1.0).clamp(0.0, 1.0);
             for path in &v.anim_sounds {
                 self.audio.play_2d(self.vfs.as_ref(), path, 0.8 * master);
             }
         }
+        let voice_enable = self.cvars.get_bool("voice_enable") && self.cvars.get_bool("voice_modenable");
+        let voice_scale = finite_or(self.cvars.get_f32("voice_scale"), 1.0).clamp(0.0, 4.0);
+        let voice_loopback = self.cvars.get_bool("voice_loopback");
+        let voice_avg = finite_or(self.cvars.get_f32("voice_avggain"), 0.5);
+        let voice_max = finite_or(self.cvars.get_f32("voice_maxgain"), 5.0);
+        let recording = in_game && !self.menu_ui.visible && self.active_actions.contains("voicerecord");
+        self.audio
+            .set_voice_recording(recording, self.cvars.get_bool("voice_forcemicrecord"));
+        let sess_now_voice = self.session.now();
+        for ve in self.session.take_voice_events() {
+            self.audio.push_voice_event(ve, sess_now_voice);
+        }
+        for outgoing_voice in self.audio.step_voice(
+            sess_now_voice,
+            voice_enable,
+            voice_scale,
+            voice_loopback,
+            voice_avg,
+            voice_max,
+        ) {
+            self.session.send_voice_data(&outgoing_voice);
+        }
+        let voice_speakers = self.audio.active_speakers(sess_now_voice);
+        let voice_local_talking = self.audio.is_local_transmitting(sess_now_voice);
         let paused = self.any_modal_open();
         let names = self.session.player_names();
         let (score_rows, ct_score, t_score) = self.score_rows(&names);
@@ -1187,6 +1269,12 @@ impl Cs16App {
                 draw_cs16_hud(&rt.egui_ctx, rt.hud_sprites.as_ref(), &view);
             });
             let _ = hud_state;
+            draw_voice_speakers(
+                &rt.egui_ctx,
+                &names,
+                &voice_speakers,
+                voice_local_talking,
+            );
             draw_mod_hud(&rt.egui_ctx, &mod_hud_cmds);
             if let Some(lines) = &menu_lines_now {
                 let scale = (rt.egui_ctx.content_rect().height() / 768.0).clamp(0.85, 1.45);
@@ -1750,6 +1838,9 @@ fn build_score_rows(hud: &HudState, names: &BTreeMap<u8, String>) -> (Vec<ScoreR
 enum ShellStuffAction {
     CloseMenu,
     PlaySound(String),
+    SpeakSentence(String),
+    Mp3(Vec<String>),
+    Cd(Vec<String>),
     StopSound,
     Echo(String),
 }
@@ -1760,6 +1851,16 @@ fn classify_shell_command(cmd: &ConsoleCommand) -> Option<ShellStuffAction> {
         "slot10" => Some(ShellStuffAction::CloseMenu),
         "stopsound" => Some(ShellStuffAction::StopSound),
         "echo" => Some(ShellStuffAction::Echo(cmd.args.join(" "))),
+        "mp3" if matches!(cmd.args.first().map(String::as_str), Some("play" | "loop" | "stop")) => {
+            Some(ShellStuffAction::Mp3(cmd.args.clone()))
+        }
+        "cd" if matches!(
+            cmd.args.first().map(String::as_str),
+            Some("play" | "loop" | "stop" | "off")
+        ) =>
+        {
+            Some(ShellStuffAction::Cd(cmd.args.clone()))
+        }
         "spk" | "play" => {
             if cmd.args.len() != 1 {
                 return None;
@@ -1772,7 +1873,13 @@ fn classify_shell_command(cmd: &ConsoleCommand) -> Option<ShellStuffAction> {
             {
                 return None;
             }
-            Some(ShellStuffAction::PlaySound(sample.to_string()))
+            if cmd.name.eq_ignore_ascii_case("spk")
+                && !sample.to_ascii_lowercase().ends_with(".wav")
+            {
+                Some(ShellStuffAction::SpeakSentence(sample.to_string()))
+            } else {
+                Some(ShellStuffAction::PlaySound(sample.to_string()))
+            }
         }
         _ => None,
     }

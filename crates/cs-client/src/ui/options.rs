@@ -346,6 +346,29 @@ impl OptionsUi {
                 cvars.set("mp3volume", format!("{mp3:.2}"));
             }
         });
+
+        let mut fade_t = cvars.get_f32("mp3fadetime").clamp(0.0, 10.0);
+        ui.horizontal(|ui| {
+            ui.label("MP3 fade time (s):");
+            if ui.add(egui::Slider::new(&mut fade_t, 0.0..=10.0).fixed_decimals(1)).changed() {
+                cvars.set("mp3fadetime", format!("{fade_t:.1}"));
+            }
+        });
+
+        cvar_checkbox(ui, cvars, "bgmvolume", "Enable CD / background music (bgmvolume)");
+        cvar_checkbox(ui, cvars, "room_off", "Disable room reverb DSP (room_off)");
+
+        ui.separator();
+        ui.label("Voice Communication");
+        cvar_checkbox(ui, cvars, "voice_enable", "Enable voice chat (voice_enable)");
+        cvar_checkbox(ui, cvars, "voice_loopback", "Voice mic loopback test (voice_loopback)");
+        let mut vscale = cvars.get_f32("voice_scale").clamp(0.0, 2.0);
+        ui.horizontal(|ui| {
+            ui.label("Voice receive volume:");
+            if ui.add(egui::Slider::new(&mut vscale, 0.0..=2.0).fixed_decimals(2)).changed() {
+                cvars.set("voice_scale", format!("{vscale:.2}"));
+            }
+        });
     }
 
     fn show_video(&mut self, ui: &mut egui::Ui, cvars: &mut CVarRegistry) {

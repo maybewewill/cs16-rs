@@ -786,6 +786,48 @@ pub fn team_color(team: &str) -> Color32 {
     }
 }
 
+/// Compact GoldSrc-style bottom-right voice speaker badges for active voice chat participants.
+pub fn draw_voice_speakers(
+    ctx: &egui::Context,
+    names: &BTreeMap<u8, String>,
+    speakers: &[u8],
+    local_talking: bool,
+) {
+    if !local_talking && speakers.is_empty() {
+        return;
+    }
+    let screen = ctx.content_rect();
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::unique("cs16_voice_speakers"),
+    ));
+    let mut labels: Vec<(String, Color32)> = Vec::new();
+    if local_talking {
+        labels.push(("MIC ACTIVE".to_string(), Color32::from_rgb(120, 240, 120)));
+    }
+    for &slot in speakers {
+        let label = names
+            .get(&slot)
+            .cloned()
+            .unwrap_or_else(|| format!("Player #{slot}"));
+        labels.push((format!("[VOICE] {label}"), HUD_AMBER));
+    }
+    let font = FontId::proportional(13.0);
+    let mut y = screen.bottom() - 120.0;
+    for (text, color) in labels.into_iter().rev().take(6) {
+        let rect = Rect::from_min_size(Pos2::new(screen.right() - 190.0, y - 22.0), Vec2::new(176.0, 20.0));
+        painter.rect_filled(rect, 3.0, Color32::from_rgba_unmultiplied(12, 16, 12, 185));
+        painter.text(
+            Pos2::new(rect.left() + 8.0, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            text,
+            font.clone(),
+            color,
+        );
+        y -= 24.0;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

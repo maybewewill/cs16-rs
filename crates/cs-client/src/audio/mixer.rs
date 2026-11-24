@@ -363,12 +363,9 @@ impl GoldSrcMixer {
         }
         let dir = if dist > 1e-3 { delta / dist } else { Vec3::ZERO };
         let rdot = listener.right.dot(dir).clamp(-1.0, 1.0);
-        let r_scale = ((1.0 + rdot) * 0.5 + 0.5) * scale;
-        let l_scale = ((1.0 - rdot) * 0.5 + 0.5) * scale;
         // Exact full stereo separation when orthogonal on X-axis (`|rdot| == 1` -> opposite side 0).
         let right_pan = (1.0 + rdot) * scale;
         let left_pan = (1.0 - rdot) * scale;
-        let _ = (r_scale, l_scale);
         let occluded = if dist > 48.0 {
             occlusion_fn.is_some_and(|f| f(origin))
         } else {
@@ -546,15 +543,15 @@ impl GoldSrcMixer {
             let start_f = (total_frames * usize::from(w.start_pct)) / 100;
             let end_f = ((total_frames * usize::from(w.end_pct)) / 100).max(start_f);
             let mut item_wav = wav;
-            if let Some(ref mut d) = item_wav
-                && start_f > 0
-                && start_f < d.frame_count()
-            {
-                let ch = usize::from(d.channels.max(1));
-                let slice: Vec<f32> = d.samples[start_f * ch..].to_vec();
-                d.samples = Arc::from(slice);
-                d.loop_start = None;
-                d.loop_end = None;
+            if let Some(ref mut d) = item_wav {
+                let clamped_end = end_f.min(total_frames).max(start_f);
+                if start_f > 0 || clamped_end < total_frames {
+                    let ch = usize::from(d.channels.max(1));
+                    let slice: Vec<f32> = d.samples[start_f * ch..clamped_end * ch].to_vec();
+                    d.samples = Arc::from(slice);
+                    d.loop_start = None;
+                    d.loop_end = None;
+                }
             }
             queue.push_back(VoxItem {
                 wav: item_wav,

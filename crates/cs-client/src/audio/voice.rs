@@ -480,8 +480,8 @@ impl VoiceManager {
         if let Some((seq, _tag, _payload)) = parse_csvo_packet(data) {
             jb.push(seq, data.to_vec(), now);
         } else if let Some((_rate, chunks)) = decode_steam_opus_plc(data) {
-            for (seq, _chunk) in chunks {
-                jb.push(seq, data.to_vec(), now);
+            if let Some(&(first_seq, _)) = chunks.first() {
+                jb.push(first_seq, data.to_vec(), now);
             }
         } else if let Some((_q, seq, _payload)) = parse_speex_nb_packet(data) {
             jb.push(seq, data.to_vec(), now);

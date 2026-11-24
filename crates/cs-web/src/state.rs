@@ -6,25 +6,32 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use cs_assets::bsp::BspMap;
+use cs_client::audio::mixer::{SND_FL_CHANGE_PITCH, SND_FL_CHANGE_VOL};
+use cs_client::audio::{
+    MusicCommand, MusicController, SentenceTable, SoundFadeState, VoiceManager,
+    normalize_sound_path, parse_wav_loop_points, reload_sound_path,
+};
 use cs_client::camera::Camera;
 use cs_client::input::{MoveSpeeds, weapon_for_slot};
 use cs_client::render::scene::ModelRegistry;
-use cs_client::ui::hud::{HudView, draw_cs16_hud};
+use cs_client::ui::hud::{HudView, draw_cs16_hud, draw_voice_speakers};
 use cs_client::ui::mod_hud::draw_mod_hud;
 use cs_client::ui::scoreboard::{ScoreRow, show_scoreboard};
 use cs_client::ui::server_menu::{draw_text_menu, menu_key_enabled, menu_lines};
 use cs_client::ui::{FrameTelemetry, draw_crosshair, draw_net_graph, hud::HudSprites};
 use cs_client::view::{FrameView, MapFxWorld, ViewBuilder, ViewInputs};
 use cs_clientcore::hud::HudState;
+use cs_clientcore::sound::{PITCH_NORM, SoundStart};
 use cs_clientcore::{
     ConnState, Connection, ConnectionConfig, ResourceFiles, SoundCommand, ViewAngleUpdate,
+    VoiceEvent,
 };
-use cs_cvar::CVarRegistry;
+use cs_cvar::{CVarRegistry, EngineAction};
 use cs_local::{FRAME_SECS, LocalGame, LocalOptions};
 use cs_mod_api::{HudDrawCmd, MOD_CAPABILITY_KEY};
 use cs_mod_host::{ClientModHost, ClientModTransfer};
 use cs_platform::{ConfigStorage, MemoryStorage};
-use cs_pm::collision::WorldCollision;
+use cs_pm::collision::{Hull, WorldCollision};
 use cs_proto48::crypto::{md5_digest, md5_hex};
 use cs_proto48::info::InfoString;
 use cs_transport::{ChannelHandle, ChannelTransport, PeerAddr};
@@ -41,22 +48,58 @@ pub enum WebAudioEvent {
     Play2d {
         path: String,
         volume: f32,
+        pitch: u8,
         entity: u16,
         channel: u8,
+        loop_start: Option<u32>,
+        loop_end: Option<u32>,
+        delay_sec: f32,
     },
     Play3d {
         path: String,
         volume: f32,
+        pitch: u8,
+        attenuation: f32,
         pos: [f32; 3],
         listener: [f32; 3],
+        right: [f32; 3],
+        occluded: bool,
         entity: u16,
         channel: u8,
+        loop_start: Option<u32>,
+        loop_end: Option<u32>,
+        delay_sec: f32,
+    },
+    UpdateChannel {
+        entity: u16,
+        channel: u8,
+        volume: Option<f32>,
+        pitch: Option<u8>,
+        pos: Option<[f32; 3]>,
     },
     StopChannel {
         entity: u16,
         channel: u8,
     },
     StopAll,
+    SetRoomType(u16),
+    SetUnderwater(bool),
+    SetFade {
+        gain: f32,
+    },
+    PlayMusic {
+        path: String,
+        looping: bool,
+        volume: f32,
+    },
+    SetMusicVolume(f32),
+    StopMusic,
+    VoicePcm {
+        speaker: u8,
+        sample_rate: u32,
+        samples: Vec<f32>,
+        volume: f32,
+    },
 }
 
 struct VfsResourceFiles(Vfs);
@@ -120,6 +163,13 @@ pub struct WebClientState {
     collision: Option<Arc<WorldCollision>>,
     audio_unlocked: bool,
     queued_audio: Vec<WebAudioEvent>,
+    sentences: SentenceTable,
+    sound_fade: SoundFadeState,
+    music: MusicController,
+    voice: VoiceManager,
+    last_room_type: u16,
+    last_underwater: bool,
+    last_fade_gain: f32,
     weapon_switch_timer: f32,
     time_sec: f32,
     pub mod_transfer: ClientModTransfer,
@@ -152,6 +202,13 @@ impl WebClientState {
             collision: None,
             audio_unlocked: false,
             queued_audio: Vec::new(),
+            sentences: SentenceTable::default(),
+            sound_fade: SoundFadeState::default(),
+            music: MusicController::new(),
+            voice: VoiceManager::new(),
+            last_room_type: 0,
+            last_underwater: false,
+            last_fade_gain: 1.0,
             weapon_switch_timer: 0.0,
             time_sec: 0.0,
             mod_transfer: ClientModTransfer::default(),
@@ -167,12 +224,21 @@ impl WebClientState {
     pub fn finish_mount(&mut self) {
         let entries = std::mem::take(&mut self.staged_files);
         if !entries.is_empty() {
-            self.vfs = Some(Vfs::from_layered_memory(entries, VfsConfig::default()));
+            let vfs = Vfs::from_layered_memory(entries, VfsConfig::default());
+            self.load_sentences(&vfs);
+            self.vfs = Some(vfs);
         }
     }
 
     pub fn set_vfs(&mut self, vfs: Vfs) {
+        self.load_sentences(&vfs);
         self.vfs = Some(vfs);
+    }
+
+    fn load_sentences(&mut self, vfs: &Vfs) {
+        if let Ok(text) = vfs.read_string_lossy("sound/sentences.txt") {
+            self.sentences = SentenceTable::parse(&text);
+        }
     }
 
     pub fn list_maps(&self) -> Vec<String> {
@@ -210,17 +276,23 @@ impl WebClientState {
         };
         let mut game = LocalGame::start(&vfs, map, &opts)?;
         let names = self.view.names();
-        let coll = BspMap::load(&vfs, map)
-            .ok()
-            .map(|b| Arc::new(WorldCollision::from_bsp(&b)));
+        let bsp = BspMap::load(&vfs, map).ok().map(Arc::new);
+        let coll = bsp
+            .as_deref()
+            .map(|b| Arc::new(WorldCollision::from_bsp(b)));
         self.collision = coll.clone();
         self.loaded_map = None;
         self.view.reset_map();
         self.view.set_map_bounds(coll.as_deref());
+        self.view.set_map_bsp(bsp);
         self.view.set_world_context(coll.clone(), Some(vfs.clone()));
+        let materials_txt = vfs.read_bytes("sound/materials.txt").ok();
         let conn = game.connection_mut();
         conn.frames_mut().set_remote_is_local(true);
         conn.set_world_collision(coll.clone());
+        if let Some(txt) = materials_txt {
+            conn.predictor_mut().set_materials(&txt);
+        }
         conn.set_fx_world(Box::new(MapFxWorld::new(coll, Some(vfs), names)));
         self.session = SessionMode::Local {
             game: Box::new(game),
@@ -312,10 +384,13 @@ impl WebClientState {
         if let Some(vfs) = &self.vfs
             && let Ok(bsp) = BspMap::load(vfs, map_name)
         {
-            let coll = Arc::new(WorldCollision::from_bsp(&bsp));
+            let bsp_arc = Arc::new(bsp);
+            let coll = Arc::new(WorldCollision::from_bsp(&bsp_arc));
             self.collision = Some(coll.clone());
             self.view.set_map_bounds(Some(coll.as_ref()));
+            self.view.set_map_bsp(Some(bsp_arc));
             self.view.set_world_context(Some(coll.clone()), Some(vfs.clone()));
+            let materials_txt = vfs.read_bytes("sound/materials.txt").ok();
             let names = self.view.names();
             let vfs_c = vfs.clone();
             match &mut self.session {
@@ -323,10 +398,16 @@ impl WebClientState {
                 SessionMode::Local { game, .. } => {
                     let c = game.connection_mut();
                     c.set_world_collision(Some(coll.clone()));
+                    if let Some(txt) = materials_txt {
+                        c.predictor_mut().set_materials(&txt);
+                    }
                     c.set_fx_world(Box::new(MapFxWorld::new(Some(coll), Some(vfs_c), names)));
                 }
                 SessionMode::Remote { conn, .. } => {
                     conn.set_world_collision(Some(coll.clone()));
+                    if let Some(txt) = materials_txt {
+                        conn.predictor_mut().set_materials(&txt);
+                    }
                     conn.set_fx_world(Box::new(MapFxWorld::new(Some(coll), Some(vfs_c), names)));
                 }
             }
@@ -362,7 +443,24 @@ impl WebClientState {
             self.mod_transfer.deny(id);
             return;
         }
-        let _ = self.cvars.execute_script(trimmed);
+        let actions = self.cvars.execute_script(trimmed);
+        for action in actions {
+            match action {
+                EngineAction::Mp3Command(args) => self.music.handle_mp3_command(&args),
+                EngineAction::CdCommand(args) => self.music.handle_cd_command(&args),
+                EngineAction::PlaySound { sample, volume } => {
+                    let norm = normalize_sound_path(&sample);
+                    let master = self.master_volume();
+                    self.push_2d_event(norm, volume * master, 100, 0, 0, 0.0);
+                }
+                EngineAction::SpeakSentence(spec) => {
+                    let suit = self.suit_volume();
+                    self.queue_vox_sentence(&spec, suit, None);
+                }
+                EngineAction::StopSound => self.queued_audio.push(WebAudioEvent::StopAll),
+                _ => {}
+            }
+        }
         match &mut self.session {
             SessionMode::Local { game, .. } => {
                 let _ = game.console(trimmed);
@@ -374,6 +472,40 @@ impl WebClientState {
             SessionMode::Idle => {}
         }
         self.save_config();
+    }
+
+    /// Accepts captured mono microphone PCM from the browser (Web Audio AudioWorklet / ScriptProcessor)
+    /// when `+voicerecord` is active (or during local `voice_loopback` testing).
+    pub fn push_voice_mic_pcm(&mut self, samples: &[f32], sample_rate: u32) {
+        if samples.is_empty() {
+            return;
+        }
+        let voice_enable = self.cvars.get_bool("voice_enable");
+        let voice_loopback = self.cvars.get_bool("voice_loopback");
+        let recording = self.input.actions.contains("voicerecord") || voice_loopback;
+        if !recording {
+            return;
+        }
+        let avg_gain = self.cvar_f32_clamped("voice_avggain", 0.5, 0.0, 5.0);
+        let max_gain = self.cvar_f32_clamped("voice_maxgain", 5.0, 0.0, 20.0);
+        let now = f64::from(self.time_sec);
+        self.voice.push_mic_samples(
+            samples,
+            sample_rate,
+            now,
+            voice_enable,
+            voice_loopback,
+            avg_gain,
+            max_gain,
+        );
+        let outgoing = self.voice.take_outgoing();
+        for pkt in outgoing {
+            match &mut self.session {
+                SessionMode::Idle => {}
+                SessionMode::Local { game, .. } => game.connection_mut().send_voice_data(&pkt),
+                SessionMode::Remote { conn, .. } => conn.send_voice_data(&pkt),
+            }
+        }
     }
 
     pub fn save_config(&mut self) {
@@ -474,6 +606,8 @@ impl WebClientState {
         let mut built_view = None;
         let mut new_registry = None;
         let mut drained_sounds = Vec::new();
+        let mut drained_voice: Vec<VoiceEvent> = Vec::new();
+        let mut drained_predicted = Vec::new();
         let mut angle_updates = Vec::new();
         let mut unknown_msgs = Vec::new();
         let mut mod_hud_stats = (100i32, 0i32, 0i32);
@@ -490,6 +624,8 @@ impl WebClientState {
                 }
                 local_entity = conn.player_slot().map(|s| u16::from(s) + 1);
                 drained_sounds = conn.fx_mut().sounds.drain();
+                drained_voice = conn.fx_mut().voice.drain();
+                drained_predicted = conn.predictor_mut().take_sounds();
                 unknown_msgs = conn.fx_mut().hud.unknown_messages.drain(..).collect();
                 mod_hud_stats = (
                     i32::from(conn.fx().hud.health),
@@ -506,6 +642,8 @@ impl WebClientState {
                 }
                 local_entity = conn.player_slot().map(|s| u16::from(s) + 1);
                 drained_sounds = conn.fx_mut().sounds.drain();
+                drained_voice = conn.fx_mut().voice.drain();
+                drained_predicted = conn.predictor_mut().take_sounds();
                 unknown_msgs = conn.fx_mut().hud.unknown_messages.drain(..).collect();
                 mod_hud_stats = (
                     i32::from(conn.fx().hud.health),
@@ -567,19 +705,93 @@ impl WebClientState {
         }
 
         let listener = self.camera.position.to_array();
-        for sc in drained_sounds {
-            self.push_sound_event(sc, listener, local_entity);
+        let right = if let Some(fv) = &built_view {
+            fv.listener_right.to_array()
+        } else {
+            let yaw = self.camera.yaw_deg.to_radians();
+            [yaw.sin(), -yaw.cos(), 0.0]
+        };
+
+        for ev in drained_voice {
+            self.voice.handle_event(ev, sess_now);
         }
-        if self.audio_unlocked
-            && let Some(fv) = &built_view
-        {
+
+        self.step_music_and_dsp(dt as f32, built_view.as_ref().is_some_and(|v| v.waterlevel >= 3));
+
+        for sc in drained_sounds {
+            self.push_sound_event(sc, listener, right, local_entity);
+        }
+
+        if let Some(fv) = &built_view {
+            for impact in &fv.impact_sounds {
+                self.push_sound_event(
+                    SoundCommand::Start(impact.clone()),
+                    listener,
+                    right,
+                    local_entity,
+                );
+            }
+            let master = self.master_volume();
+            for (_sender, code, _pitch) in &fv.radio_audio {
+                if self.audio_unlocked {
+                    self.queue_vox_sentence(code, master, None);
+                }
+            }
+            for (vol, kind) in &fv.reload_sounds {
+                if self.audio_unlocked {
+                    let v = (f32::from(*vol) / 255.0) * master;
+                    self.push_2d_event(
+                        reload_sound_path(*kind).to_string(),
+                        v,
+                        PITCH_NORM,
+                        local_entity.unwrap_or(1),
+                        0,
+                        0.0,
+                    );
+                }
+            }
             for path in &fv.anim_sounds {
-                self.queued_audio.push(WebAudioEvent::Play2d {
-                    path: path.clone(),
-                    volume: 0.8,
-                    entity: local_entity.unwrap_or(1),
-                    channel: 1,
-                });
+                if self.audio_unlocked {
+                    self.push_2d_event(
+                        normalize_sound_path(path),
+                        0.8 * master,
+                        PITCH_NORM,
+                        local_entity.unwrap_or(1),
+                        1,
+                        0.0,
+                    );
+                }
+            }
+        }
+
+        for ps in drained_predicted {
+            if ps.volume.is_finite() {
+                let start = SoundStart::by_name(
+                    &ps.sample,
+                    local_entity.unwrap_or(1),
+                    ps.channel.clamp(0, 7) as u8,
+                    self.camera.position,
+                    ps.volume,
+                    ps.attenuation,
+                    ps.pitch.clamp(2, 255) as u8,
+                );
+                self.push_sound_event(SoundCommand::Start(start), listener, right, local_entity);
+            }
+        }
+
+        let voice_enable = self.cvars.get_bool("voice_enable");
+        let voice_scale = self.cvar_f32_clamped("voice_scale", 1.0, 0.0, 4.0);
+        let decoded_voice = self.voice.drain_decoded(voice_enable);
+        if self.audio_unlocked {
+            for (speaker, sample_rate, samples) in decoded_voice {
+                if !samples.is_empty() {
+                    self.queued_audio.push(WebAudioEvent::VoicePcm {
+                        speaker,
+                        sample_rate,
+                        samples,
+                        volume: voice_scale,
+                    });
+                }
             }
         }
 
@@ -665,10 +877,227 @@ impl WebClientState {
         }
     }
 
-    fn push_sound_event(&mut self, sc: SoundCommand, listener: [f32; 3], local_entity: Option<u16>) {
+    fn cvar_f32_clamped(&self, name: &str, default: f32, lo: f32, hi: f32) -> f32 {
+        let v = self.cvars.get_f32(name);
+        if v.is_finite() { v.clamp(lo, hi) } else { default }
+    }
+
+    fn master_volume(&self) -> f32 {
+        self.cvar_f32_clamped("volume", 0.8, 0.0, 1.0)
+    }
+
+    fn suit_volume(&self) -> f32 {
+        self.cvar_f32_clamped("suitvolume", 0.25, 0.0, 1.0)
+    }
+
+    fn step_music_and_dsp(&mut self, dt: f32, underwater: bool) {
+        let mp3_vol = self.cvar_f32_clamped("mp3volume", 0.5, 0.0, 1.0);
+        let bgm = self.cvars.get_bool("bgmvolume");
+        let fade_time = self.cvar_f32_clamped("mp3fadetime", 2.0, 0.0, 30.0);
+        self.music.set_params(mp3_vol, bgm, fade_time);
+
+        if matches!(self.session, SessionMode::Idle) {
+            let menu_path = self.vfs.as_ref().and_then(|v| {
+                ["media/gamestartup.mp3", "media/Half-Life01.mp3"]
+                    .into_iter()
+                    .find(|p| v.exists(p))
+            });
+            self.music.sync_menu_music(true, menu_path);
+        }
+
+        self.sound_fade.step(dt);
+
+        if !self.audio_unlocked {
+            let _ = self.music.step(dt);
+            return;
+        }
+
+        let fade_gain = self.sound_fade.gain();
+        if (fade_gain - self.last_fade_gain).abs() > 0.005 {
+            self.last_fade_gain = fade_gain;
+            self.queued_audio.push(WebAudioEvent::SetFade { gain: fade_gain });
+        }
+
+        if underwater != self.last_underwater {
+            self.last_underwater = underwater;
+            self.queued_audio.push(WebAudioEvent::SetUnderwater(underwater));
+        }
+
+        let room_off = self.cvars.get_bool("room_off");
+        let rt = if room_off {
+            0
+        } else {
+            self.cvars.get_f32("room_type").max(0.0).round() as u16
+        };
+        if rt != self.last_room_type {
+            self.last_room_type = rt;
+            self.queued_audio.push(WebAudioEvent::SetRoomType(rt));
+        }
+
+        for mcmd in self.music.step(dt) {
+            match mcmd {
+                MusicCommand::Play {
+                    path,
+                    looping,
+                    volume,
+                } => self.queued_audio.push(WebAudioEvent::PlayMusic {
+                    path,
+                    looping,
+                    volume,
+                }),
+                MusicCommand::SetVolume(vol) => {
+                    self.queued_audio.push(WebAudioEvent::SetMusicVolume(vol));
+                }
+                MusicCommand::Stop => self.queued_audio.push(WebAudioEvent::StopMusic),
+            }
+        }
+    }
+
+    fn wav_loop_points(&self, path: &str) -> (Option<u32>, Option<u32>) {
+        let Some(vfs) = &self.vfs else {
+            return (None, None);
+        };
+        let norm = normalize_sound_path(path);
+        let Ok(bytes) = vfs.read_bytes(&norm) else {
+            return (None, None);
+        };
+        if let Some((start, end, _rate)) = parse_wav_loop_points(&bytes) {
+            (Some(start as u32), Some(end as u32))
+        } else {
+            (None, None)
+        }
+    }
+
+    fn wav_duration_sec(&self, path: &str) -> f32 {
+        let Some(vfs) = &self.vfs else {
+            return 0.35;
+        };
+        let norm = normalize_sound_path(path);
+        let Ok(bytes) = vfs.read_bytes(&norm) else {
+            return 0.35;
+        };
+        if let Ok(w) = cs_client::audio::decode_wav(&bytes) {
+            w.frame_count() as f32 / w.sample_rate.max(1) as f32
+        } else {
+            0.35
+        }
+    }
+
+    fn is_occluded(&self, listener: [f32; 3], pos: [f32; 3]) -> bool {
+        let Some(coll) = &self.collision else {
+            return false;
+        };
+        coll.trace_world(Vec3::from_array(listener), Vec3::from_array(pos), Hull::Point)
+            .fraction
+            < 0.99
+    }
+
+    fn push_2d_event(
+        &mut self,
+        path: String,
+        volume: f32,
+        pitch: u8,
+        entity: u16,
+        channel: u8,
+        delay_sec: f32,
+    ) {
+        if !self.audio_unlocked || path.is_empty() {
+            return;
+        }
+        let norm = normalize_sound_path(&path);
+        let (loop_start, loop_end) = self.wav_loop_points(&norm);
+        self.queued_audio.push(WebAudioEvent::Play2d {
+            path: norm,
+            volume,
+            pitch,
+            entity,
+            channel,
+            loop_start,
+            loop_end,
+            delay_sec,
+        });
+    }
+
+    fn queue_vox_sentence(
+        &mut self,
+        spec: &str,
+        volume: f32,
+        spatial: Option<([f32; 3], [f32; 3], [f32; 3], f32, u16, u8)>,
+    ) {
         if !self.audio_unlocked {
             return;
         }
+        let Some(words) = self.sentences.resolve(spec) else {
+            return;
+        };
+        let mut cursor_sec = 0.0f32;
+        for w in words {
+            if w.pause_sec > 0.0 {
+                cursor_sec += w.pause_sec;
+                continue;
+            }
+            let norm = normalize_sound_path(&w.path);
+            let dur = self.wav_duration_sec(&norm);
+            let vol = (volume * w.volume).clamp(0.0, 2.0);
+            if let Some((pos, listener, right, attenuation, entity, channel)) = spatial {
+                let occluded = self.is_occluded(listener, pos);
+                let (loop_start, loop_end) = self.wav_loop_points(&norm);
+                self.queued_audio.push(WebAudioEvent::Play3d {
+                    path: norm,
+                    volume: vol,
+                    pitch: w.pitch,
+                    attenuation,
+                    pos,
+                    listener,
+                    right,
+                    occluded,
+                    entity,
+                    channel,
+                    loop_start,
+                    loop_end,
+                    delay_sec: cursor_sec,
+                });
+            } else {
+                self.push_2d_event(norm, vol, w.pitch, 0, 2, cursor_sec);
+            }
+            let pitch_rate = f32::from(w.pitch.max(20)) / f32::from(PITCH_NORM);
+            cursor_sec += (dur / pitch_rate).max(0.04);
+        }
+    }
+
+    fn push_sound_event(
+        &mut self,
+        sc: SoundCommand,
+        listener: [f32; 3],
+        right: [f32; 3],
+        local_entity: Option<u16>,
+    ) {
+        match sc {
+            SoundCommand::RoomType(rt) => {
+                self.cvars.set("room_type", rt.to_string());
+                return;
+            }
+            SoundCommand::CdTrack { track, loop_track } => {
+                self.music.handle_svc_cdtrack(track, loop_track);
+                return;
+            }
+            SoundCommand::Fade {
+                percent,
+                hold_time,
+                fade_out,
+                fade_in,
+            } => {
+                self.sound_fade.trigger(percent, hold_time, fade_out, fade_in);
+                return;
+            }
+            _ => {}
+        }
+
+        if !self.audio_unlocked {
+            return;
+        }
+        let master = self.master_volume();
+        let suit = self.suit_volume();
         match sc {
             SoundCommand::Start(start) | SoundCommand::Ambient(start) => {
                 if start.is_stop() {
@@ -678,24 +1107,78 @@ impl WebClientState {
                     });
                     return;
                 }
-                let Some(path) = self.resolve_sound_name(&start) else {
+                if start.flags & (SND_FL_CHANGE_VOL | SND_FL_CHANGE_PITCH) != 0 {
+                    let volume = if start.flags & SND_FL_CHANGE_VOL != 0 {
+                        Some(start.volume * master)
+                    } else {
+                        None
+                    };
+                    let pitch = if start.flags & SND_FL_CHANGE_PITCH != 0 {
+                        Some(start.pitch)
+                    } else {
+                        None
+                    };
+                    self.queued_audio.push(WebAudioEvent::UpdateChannel {
+                        entity: start.entity,
+                        channel: start.channel,
+                        volume,
+                        pitch,
+                        pos: Some(start.origin.to_array()),
+                    });
+                    return;
+                }
+                let Some(raw) = self.resolve_sound_name(&start) else {
                     return;
                 };
+                if raw.starts_with('!') || raw.starts_with("%!") {
+                    let is_2d = local_entity == Some(start.entity) || start.attenuation <= 0.0;
+                    let base_vol = if is_2d {
+                        start.volume * suit.max(0.25) * master
+                    } else {
+                        start.volume * master
+                    };
+                    let spatial = (!is_2d).then_some((
+                        start.origin.to_array(),
+                        listener,
+                        right,
+                        start.attenuation,
+                        start.entity,
+                        start.channel,
+                    ));
+                    self.queue_vox_sentence(&raw, base_vol, spatial);
+                    return;
+                }
+                let path = normalize_sound_path(&raw);
+                let (loop_start, loop_end) = self.wav_loop_points(&path);
+                let vol = start.volume * master;
                 if local_entity == Some(start.entity) || start.attenuation <= 0.0 {
                     self.queued_audio.push(WebAudioEvent::Play2d {
                         path,
-                        volume: start.volume,
+                        volume: vol,
+                        pitch: start.pitch,
                         entity: start.entity,
                         channel: start.channel,
+                        loop_start,
+                        loop_end,
+                        delay_sec: 0.0,
                     });
                 } else {
+                    let pos = start.origin.to_array();
+                    let occluded = self.is_occluded(listener, pos);
                     self.queued_audio.push(WebAudioEvent::Play3d {
                         path,
-                        volume: start.volume,
-                        pos: start.origin.to_array(),
+                        volume: vol,
+                        pitch: start.pitch,
+                        attenuation: start.attenuation,
+                        pos,
                         listener,
+                        right,
+                        occluded,
                         entity: start.entity,
                         channel: start.channel,
+                        loop_start,
+                        loop_end,
+                        delay_sec: 0.0,
                     });
                 }
             }
@@ -703,7 +1186,7 @@ impl WebClientState {
                 self.queued_audio
                     .push(WebAudioEvent::StopChannel { entity, channel });
             }
-            SoundCommand::Fade { .. } => {}
+            SoundCommand::Fade { .. } | SoundCommand::RoomType(_) | SoundCommand::CdTrack { .. } => {}
         }
     }
 
@@ -769,6 +1252,9 @@ impl WebClientState {
                 underwater_tint: fv.underwater_tint,
             };
             draw_cs16_hud(ctx, hud_sprites, &hv);
+            let speakers = self.voice.active_speakers(sess_now);
+            let local_talking = self.voice.is_local_transmitting(sess_now);
+            draw_voice_speakers(ctx, &names, &speakers, local_talking);
             draw_mod_hud(ctx, &self.last_mod_hud);
 
             if let Some(m) = h.menu.as_ref().filter(|m| !m.multipart && m.keys != 0 && !m.text.is_empty()) {
@@ -892,15 +1378,86 @@ mod tests {
         let mut st = WebClientState::default();
         assert!(!st.is_audio_unlocked());
         let start = cs_clientcore::SoundStart::by_name("weapons/ak47-1.wav", 1, 1, Vec3::ZERO, 1.0, 0.8, 100);
-        st.push_sound_event(SoundCommand::Start(start.clone()), [0.0; 3], Some(1));
+        st.push_sound_event(
+            SoundCommand::Start(start.clone()),
+            [0.0; 3],
+            [0.0, 1.0, 0.0],
+            Some(1),
+        );
         assert!(st.take_audio_events().is_empty());
 
         st.unlock_audio();
         assert!(st.is_audio_unlocked());
-        st.push_sound_event(SoundCommand::Start(start), [0.0; 3], Some(1));
+        st.push_sound_event(
+            SoundCommand::Start(start),
+            [0.0; 3],
+            [0.0, 1.0, 0.0],
+            Some(1),
+        );
         let evs = st.take_audio_events();
         assert_eq!(evs.len(), 1);
         assert!(matches!(evs[0], WebAudioEvent::Play2d { .. }));
+    }
+
+    #[test]
+    fn web_audio_backend_full_event_pipeline() {
+        let mut st = WebClientState::default();
+        let looped_wav = cs_client::audio::encode_test_wav_pcm16(
+            22_050,
+            1,
+            &[0i16; 2205],
+            None,
+            Some((100, 2000)),
+        );
+        st.mount_file("Half-Life/valve/sound/ambience/hum.wav", looped_wav);
+        st.mount_file("Half-Life/valve/sound/vox/hello.wav", cs_client::audio::encode_test_wav_pcm16(22_050, 1, &[500i16; 4410], None, None));
+        st.mount_file(
+            "Half-Life/valve/sound/sentences.txt",
+            b"TEST_VOX vox/hello\n".to_vec(),
+        );
+        st.finish_mount();
+        st.unlock_audio();
+
+        // 1. Looped 3D sound + channel pitch/vol alter + room type + soundfade
+        let start = SoundStart::by_name("ambience/hum.wav", 5, 6, Vec3::new(100.0, 0.0, 0.0), 0.9, 0.8, 120);
+        st.push_sound_event(SoundCommand::Start(start), [0.0; 3], [0.0, 1.0, 0.0], Some(1));
+        let mut alter = SoundStart::by_name("ambience/hum.wav", 5, 6, Vec3::new(120.0, 0.0, 0.0), 0.4, 0.8, 90);
+        alter.flags = SND_FL_CHANGE_VOL;
+        st.push_sound_event(SoundCommand::Start(alter), [0.0; 3], [0.0, 1.0, 0.0], Some(1));
+        st.push_sound_event(SoundCommand::RoomType(14), [0.0; 3], [0.0, 1.0, 0.0], Some(1));
+        st.push_sound_event(
+            SoundCommand::Fade {
+                percent: 80,
+                hold_time: 1,
+                fade_out: 1,
+                fade_in: 1,
+            },
+            [0.0; 3],
+            [0.0, 1.0, 0.0],
+            Some(1),
+        );
+
+        // 2. Music command + VOX sentence + voice loopback PCM
+        st.exec_console("mp3fadetime 0");
+        st.exec_console("mp3 play Half-Life02.mp3");
+        st.exec_console("spk TEST_VOX");
+        st.exec_console("voice_loopback 1");
+        let mic = vec![0.25f32; 960];
+        st.push_voice_mic_pcm(&mic, 24_000);
+        let _ = st.step(0.5);
+
+        let evs = st.take_audio_events();
+        assert!(evs.iter().any(|e| matches!(
+            e,
+            WebAudioEvent::Play3d { path, pitch: 120, loop_start: Some(100), loop_end: Some(2000), .. }
+                if path == "sound/ambience/hum.wav"
+        )));
+        assert!(evs.iter().any(|e| matches!(e, WebAudioEvent::UpdateChannel { entity: 5, channel: 6, .. })));
+        assert!(evs.iter().any(|e| matches!(e, WebAudioEvent::SetRoomType(14))));
+        assert!(evs.iter().any(|e| matches!(e, WebAudioEvent::SetFade { gain } if *gain < 0.99)));
+        assert!(evs.iter().any(|e| matches!(e, WebAudioEvent::PlayMusic { path, .. } if path == "media/Half-Life02.mp3")));
+        assert!(evs.iter().any(|e| matches!(e, WebAudioEvent::Play2d { path, .. } if path == "sound/vox/hello.wav")));
+        assert!(evs.iter().any(|e| matches!(e, WebAudioEvent::VoicePcm { speaker: 255, samples, .. } if !samples.is_empty())));
     }
 
     #[test]

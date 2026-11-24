@@ -10,6 +10,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::cell::RefCell;
 
+use cs_assets::bsp::BspMap;
+use cs_assets::materials::{MaterialTable, SurfaceMaterial};
 use cs_assets::mdl::{MdlSeqEvent, StudioModel};
 use cs_assets::spr::GoldSrcSprite;
 use cs_clientcore::entities::ef;
@@ -19,9 +21,14 @@ use cs_clientcore::tempents::{
     DynamicLight, FxTrace, FxWorld, ModelRef, RenderEffect, RenderMode, TempEnt, ftent,
 };
 use cs_clientcore::{
-    ClientEffects, Connection, EmitInputs, EntityKind, ModelKind as CoreModelKind, VisibleEntity,
+    ClientEffects, Connection, EmitInputs, EntityKind, ModelKind as CoreModelKind, SoundStart,
+    VisibleEntity,
 };
 use cs_pm::collision::{CONTENTS_SOLID, Hull, WorldCollision};
+use cs_pm::pm::consts::{
+    CHAR_TEX_COMPUTER, CHAR_TEX_CONCRETE, CHAR_TEX_DIRT, CHAR_TEX_GRATE, CHAR_TEX_METAL,
+    CHAR_TEX_SLOSH, CHAR_TEX_SNOW, CHAR_TEX_TILE, CHAR_TEX_VENT, CHAR_TEX_WOOD,
+};
 use cs_proto48::tempent::TempEffect;
 use cs_transport::PacketTransport;
 use cs_vfs::Vfs;
@@ -206,6 +213,12 @@ pub struct FrameView {
     pub lightstyles: [f32; 64],
     pub fog: Option<([f32; 3], f32)>,
     pub anim_sounds: Vec<String>,
+    pub listener_right: Vec3,
+    pub waterlevel: u8,
+    pub entity_positions: HashMap<u16, Vec3>,
+    pub impact_sounds: Vec<SoundStart>,
+    pub radio_audio: Vec<(u8, String, u8)>,
+    pub reload_sounds: Vec<(u8, u8)>,
     pub custom_decals: HashMap<u8, CustomDecalInfo>,
     pub alive: bool,
     pub stats: ViewStats,
@@ -262,6 +275,8 @@ pub struct ViewBuilder {
     last_vm_frame: f32,
     vfs: Option<Vfs>,
     collision: Option<Arc<WorldCollision>>,
+    bsp: Option<Arc<BspMap>>,
+    materials: MaterialTable,
     anim: Option<ViewAnimState>,
     last_weaponanim: i32,
     last_viewmodel: i32,
@@ -293,6 +308,8 @@ impl ViewBuilder {
             last_vm_frame: 0.0,
             vfs: None,
             collision: None,
+            bsp: None,
+            materials: MaterialTable::default(),
             anim: None,
             last_weaponanim: -1,
             last_viewmodel: -1,
@@ -303,8 +320,16 @@ impl ViewBuilder {
     /// studio animation events.
     pub fn set_world_context(&mut self, collision: Option<Arc<WorldCollision>>, vfs: Option<Vfs>) {
         self.collision = collision;
+        self.materials = vfs
+            .as_ref()
+            .map(MaterialTable::load)
+            .unwrap_or_default();
         self.vfs = vfs;
         self.vm_seq_cache.clear();
+    }
+
+    pub fn set_map_bsp(&mut self, bsp: Option<Arc<BspMap>>) {
+        self.bsp = bsp;
     }
 
     /// The shared model names a [`MapFxWorld`] reads.
@@ -320,6 +345,7 @@ impl ViewBuilder {
         self.particles.clear();
         self.beam_sys.clear();
         self.pending_decals.clear();
+        self.bsp = None;
         self.lag_state.reset();
         self.player_gaits.clear();
         self.client_models.clear();
@@ -629,6 +655,7 @@ impl ViewBuilder {
         self.glows.drain(..overflow);
 
         let prev_vm_seq = self.anim.map(|a| a.sequence).unwrap_or(-1);
+        let impact_sounds = self.collect_bullet_impacts(&fired, now);
         self.update_view_anim(conn.fx_mut(), &fired, weaponanim, viewmodel_index, time);
         let viewmodel = self.viewmodel(conn, alive, fov, viewmodel_index, inputs);
         let mut anim_sounds = Vec::new();
@@ -724,6 +751,16 @@ impl ViewBuilder {
         let elights = self.dlights.elights.clone();
         let decals = std::mem::take(&mut self.pending_decals);
         let custom_decals = conn.fx().hud.custom_decals.clone();
+        let radio_audio: Vec<(u8, String, u8)> = conn
+            .fx_mut()
+            .hud
+            .audio
+            .drain(..)
+            .map(|(sender, code, pitch)| (sender, code, pitch.clamp(0, 255) as u8))
+            .collect();
+        let reload_sounds: Vec<(u8, u8)> = conn.fx_mut().hud.reload_sounds.drain(..).collect();
+        let listener_right = scene.view.right;
+        let waterlevel = prediction.waterlevel.max(0) as u8;
 
         (
             FrameView {
@@ -747,12 +784,89 @@ impl ViewBuilder {
                 lightstyles,
                 fog,
                 anim_sounds,
+                listener_right,
+                waterlevel,
+                entity_positions,
+                impact_sounds,
+                radio_audio,
+                reload_sounds,
                 custom_decals,
                 alive,
                 stats,
             },
             registry_changed.then(|| self.models.clone()),
         )
+    }
+
+    fn collect_bullet_impacts(&mut self, fired: &[FiredEvent], now: f64) -> Vec<SoundStart> {
+        let Some(ref coll) = self.collision else {
+            return Vec::new();
+        };
+        let mut sounds = Vec::new();
+        let base_seed = (now * 1000.0) as u32;
+        for (ev_idx, ev) in fired.iter().enumerate() {
+            let EventFx::Weapon(w) = &ev.fx else {
+                continue;
+            };
+            let Some(ref fire) = w.bullets else {
+                continue;
+            };
+            let shots = fire.shots.min(12);
+            for shot in 0..shots {
+                let seed = base_seed
+                    .wrapping_add((ev_idx as u32).wrapping_mul(131))
+                    .wrapping_add(shot.wrapping_mul(17));
+                let sx = (((seed & 0xFF) as f32) / 255.0 - 0.5) * 2.0 * fire.spread[0];
+                let sy = ((((seed >> 8) & 0xFF) as f32) / 255.0 - 0.5) * 2.0 * fire.spread[1];
+                let dir = (fire.forward + fire.right * sx + fire.up * sy).normalize_or_zero();
+                let dist = fire.distance.clamp(64.0, 8192.0);
+                let tr = coll.trace_world(fire.origin, fire.origin + dir * dist, Hull::Point);
+                if tr.fraction >= 1.0 || tr.fraction <= 0.001 {
+                    continue;
+                }
+                let tex_type = self.surface_char_at(tr.end_pos, tr.plane_normal);
+                sounds.extend(crate::audio::build_impact_sounds(tr.end_pos, tex_type, seed));
+                if self.pending_decals.len() < 128 {
+                    self.pending_decals.push(DecalSpawn {
+                        origin: tr.end_pos,
+                        decal_name: format!("{{shot{}", (seed % 5) + 1),
+                        half_size: 4.0,
+                        permanent: false,
+                        player_spray: None,
+                    });
+                }
+            }
+        }
+        sounds
+    }
+
+    fn surface_char_at(&self, pos: Vec3, normal: Vec3) -> u8 {
+        let Some(ref bsp) = self.bsp else {
+            return CHAR_TEX_CONCRETE;
+        };
+        let faces = bsp.query_faces_in_sphere(pos, 16.0);
+        let best = faces.iter().max_by(|a, b| {
+            a.normal
+                .dot(normal)
+                .partial_cmp(&b.normal.dot(normal))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let Some(poly) = best else {
+            return CHAR_TEX_CONCRETE;
+        };
+        let Some(face) = bsp.faces.get(poly.face_index) else {
+            return CHAR_TEX_CONCRETE;
+        };
+        let Some(ti) = bsp.texinfos.get(usize::from(face.texinfo)) else {
+            return CHAR_TEX_CONCRETE;
+        };
+        let Some(tex) = usize::try_from(ti.miptex)
+            .ok()
+            .and_then(|i| bsp.textures.get(i))
+        else {
+            return CHAR_TEX_CONCRETE;
+        };
+        surface_material_to_char(self.materials.lookup(&tex.name))
     }
 
     fn sample_viewmodel_events(
@@ -1113,6 +1227,22 @@ impl ViewBuilder {
             animtime: anim.started,
             right_hand: inputs.right_hand,
         })
+    }
+}
+
+fn surface_material_to_char(mat: SurfaceMaterial) -> u8 {
+    match mat {
+        SurfaceMaterial::Metal => CHAR_TEX_METAL,
+        SurfaceMaterial::Dirt | SurfaceMaterial::Grass => CHAR_TEX_DIRT,
+        SurfaceMaterial::Vent => CHAR_TEX_VENT,
+        SurfaceMaterial::Grate => CHAR_TEX_GRATE,
+        SurfaceMaterial::Tile => CHAR_TEX_TILE,
+        SurfaceMaterial::Slosh => CHAR_TEX_SLOSH,
+        SurfaceMaterial::Wood => CHAR_TEX_WOOD,
+        SurfaceMaterial::Computer => CHAR_TEX_COMPUTER,
+        SurfaceMaterial::Glass => b'Y',
+        SurfaceMaterial::Snow => CHAR_TEX_SNOW,
+        SurfaceMaterial::Concrete => CHAR_TEX_CONCRETE,
     }
 }
 

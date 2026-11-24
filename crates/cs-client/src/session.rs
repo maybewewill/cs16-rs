@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use cs_clientcore::{
     ConnState, Connection, ConnectionConfig, ConsoleCommand, ResourceFiles, SoundCommand,
-    ViewAngleUpdate,
+    ViewAngleUpdate, VoiceEvent,
 };
 use cs_clientcore::hud::HudState;
 use cs_local::{FRAME_SECS, LocalGame, LocalOptions};
@@ -226,6 +226,14 @@ impl Session {
         self.map_name.as_deref()
     }
 
+    pub fn set_map_bsp(&mut self, bsp: Option<Arc<cs_assets::bsp::BspMap>>) {
+        self.view.set_map_bsp(bsp);
+    }
+
+    pub fn collision(&self) -> Option<&Arc<WorldCollision>> {
+        self.collision.as_ref()
+    }
+
     /// Gives the prediction and the temp entities the map's collision (after each map change).
     pub fn set_map(&mut self, name: &str, collision: Option<Arc<WorldCollision>>) {
         self.map_name = Some(name.to_string());
@@ -286,6 +294,16 @@ impl Session {
     /// The sound commands since the last call.
     pub fn take_sounds(&mut self) -> Vec<SoundCommand> {
         with_conn_mut!(self, c => c.fx_mut().sounds.drain(), else Vec::new())
+    }
+
+    /// Incoming `svc_voiceinit` and `svc_voicedata` events since the last call.
+    pub fn take_voice_events(&mut self) -> Vec<VoiceEvent> {
+        with_conn_mut!(self, c => c.fx_mut().voice.drain(), else Vec::new())
+    }
+
+    /// Queues an encoded outgoing `clc_voicedata` packet for the server.
+    pub fn send_voice_data(&mut self, data: &[u8]) {
+        with_conn_mut!(self, c => c.send_voice_data(data), else ());
     }
 
     pub fn with_hud<R>(&self, f: impl FnOnce(&HudState) -> R) -> Option<R> {

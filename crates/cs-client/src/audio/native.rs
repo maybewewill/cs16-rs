@@ -208,20 +208,23 @@ impl AudioEngine {
         self.play_2d(vfs, "UI/buttonclick.wav", 0.55 * master_volume);
     }
 
-    pub fn sync_menu_music(&mut self, vfs: Option<&Vfs>, should_play: bool, mp3_vol: f32) {
-        self.music
-            .set_params(mp3_vol, true, self.music_fade_time_or_default());
+    pub fn sync_menu_music(
+        &mut self,
+        vfs: Option<&Vfs>,
+        should_play: bool,
+        mp3_vol: f32,
+        bgm_enabled: bool,
+        fade_time: f32,
+        dt: f32,
+    ) {
+        self.music.set_params(mp3_vol, bgm_enabled, fade_time);
         let menu_path = vfs.and_then(|v| {
             ["media/gamestartup.mp3", "media/Half-Life01.mp3"]
                 .into_iter()
                 .find(|p| v.exists(p))
         });
         self.music.sync_menu_music(should_play, menu_path);
-        self.step_music(vfs, 0.016);
-    }
-
-    fn music_fade_time_or_default(&self) -> f32 {
-        2.0
+        self.step_music(vfs, dt);
     }
 
     pub fn handle_mp3_command(&mut self, args: &[String]) {

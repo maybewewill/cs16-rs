@@ -14,7 +14,7 @@ use cs_client::ui::vgui_assets::VguiAssetBank;
 use cs_client::ui::vgui_theme::{VguiPalette, apply_vgui2_theme};
 use cs_platform::{Clock, WebClock, WebLocalStorage};
 use glam::Vec3;
-use js_sys::{Array, Object, Reflect, Uint8Array};
+use js_sys::{Array, Float32Array, Object, Reflect, Uint8Array};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
@@ -230,6 +230,22 @@ pub fn install() {
             rt_c.borrow_mut().state.unlock_audio();
         });
         let _ = Reflect::set(&api, &JsValue::from_str("unlockAudio"), &closure.into_js_value());
+    }
+
+    // pushVoiceMicPcm(samples: Float32Array, sampleRate: number)
+    {
+        let rt_c = Rc::clone(&rt);
+        let closure: Closure<dyn FnMut(Float32Array, f64)> =
+            Closure::new(move |samples: Float32Array, sample_rate: f64| {
+                let pcm = samples.to_vec();
+                let rate = sample_rate.round().clamp(8_000.0, 96_000.0) as u32;
+                rt_c.borrow_mut().state.push_voice_mic_pcm(&pcm, rate);
+            });
+        let _ = Reflect::set(
+            &api,
+            &JsValue::from_str("pushVoiceMicPcm"),
+            &closure.into_js_value(),
+        );
     }
 
     // onKey(code, pressed)
@@ -512,44 +528,140 @@ fn step_and_render(rt_cell: &Rc<RefCell<WebRuntime>>, now_ms: f64) {
     }
 }
 
+fn set_prop(obj: &Object, key: &str, val: JsValue) {
+    let _ = Reflect::set(obj, &JsValue::from_str(key), &val);
+}
+
 fn audio_event_to_js(ev: WebAudioEvent) -> JsValue {
     let obj = Object::new();
     match ev {
         WebAudioEvent::Play2d {
             path,
             volume,
+            pitch,
             entity,
             channel,
+            loop_start,
+            loop_end,
+            delay_sec,
         } => {
-            let _ = Reflect::set(&obj, &JsValue::from_str("kind"), &JsValue::from_str("play_2d"));
-            let _ = Reflect::set(&obj, &JsValue::from_str("path"), &JsValue::from_str(&path));
-            let _ = Reflect::set(&obj, &JsValue::from_str("volume"), &JsValue::from_f64(f64::from(volume)));
-            let _ = Reflect::set(&obj, &JsValue::from_str("entity"), &JsValue::from_f64(f64::from(entity)));
-            let _ = Reflect::set(&obj, &JsValue::from_str("channel"), &JsValue::from_f64(f64::from(channel)));
+            set_prop(&obj, "kind", JsValue::from_str("play_2d"));
+            set_prop(&obj, "path", JsValue::from_str(&path));
+            set_prop(&obj, "volume", JsValue::from_f64(f64::from(volume)));
+            set_prop(&obj, "pitch", JsValue::from_f64(f64::from(pitch)));
+            set_prop(&obj, "entity", JsValue::from_f64(f64::from(entity)));
+            set_prop(&obj, "channel", JsValue::from_f64(f64::from(channel)));
+            set_prop(&obj, "delay_sec", JsValue::from_f64(f64::from(delay_sec)));
+            if let Some(s) = loop_start {
+                set_prop(&obj, "loop_start", JsValue::from_f64(f64::from(s)));
+            }
+            if let Some(e) = loop_end {
+                set_prop(&obj, "loop_end", JsValue::from_f64(f64::from(e)));
+            }
         }
         WebAudioEvent::Play3d {
             path,
             volume,
+            pitch,
+            attenuation,
             pos,
             listener,
+            right,
+            occluded,
             entity,
             channel,
+            loop_start,
+            loop_end,
+            delay_sec,
         } => {
-            let _ = Reflect::set(&obj, &JsValue::from_str("kind"), &JsValue::from_str("play_3d"));
-            let _ = Reflect::set(&obj, &JsValue::from_str("path"), &JsValue::from_str(&path));
-            let _ = Reflect::set(&obj, &JsValue::from_str("volume"), &JsValue::from_f64(f64::from(volume)));
-            let _ = Reflect::set(&obj, &JsValue::from_str("pos"), &vec3_arr(pos));
-            let _ = Reflect::set(&obj, &JsValue::from_str("listener"), &vec3_arr(listener));
-            let _ = Reflect::set(&obj, &JsValue::from_str("entity"), &JsValue::from_f64(f64::from(entity)));
-            let _ = Reflect::set(&obj, &JsValue::from_str("channel"), &JsValue::from_f64(f64::from(channel)));
+            set_prop(&obj, "kind", JsValue::from_str("play_3d"));
+            set_prop(&obj, "path", JsValue::from_str(&path));
+            set_prop(&obj, "volume", JsValue::from_f64(f64::from(volume)));
+            set_prop(&obj, "pitch", JsValue::from_f64(f64::from(pitch)));
+            set_prop(&obj, "attenuation", JsValue::from_f64(f64::from(attenuation)));
+            set_prop(&obj, "pos", vec3_arr(pos).into());
+            set_prop(&obj, "listener", vec3_arr(listener).into());
+            set_prop(&obj, "right", vec3_arr(right).into());
+            set_prop(&obj, "occluded", JsValue::from_bool(occluded));
+            set_prop(&obj, "entity", JsValue::from_f64(f64::from(entity)));
+            set_prop(&obj, "channel", JsValue::from_f64(f64::from(channel)));
+            set_prop(&obj, "delay_sec", JsValue::from_f64(f64::from(delay_sec)));
+            if let Some(s) = loop_start {
+                set_prop(&obj, "loop_start", JsValue::from_f64(f64::from(s)));
+            }
+            if let Some(e) = loop_end {
+                set_prop(&obj, "loop_end", JsValue::from_f64(f64::from(e)));
+            }
+        }
+        WebAudioEvent::UpdateChannel {
+            entity,
+            channel,
+            volume,
+            pitch,
+            pos,
+        } => {
+            set_prop(&obj, "kind", JsValue::from_str("update_channel"));
+            set_prop(&obj, "entity", JsValue::from_f64(f64::from(entity)));
+            set_prop(&obj, "channel", JsValue::from_f64(f64::from(channel)));
+            if let Some(v) = volume {
+                set_prop(&obj, "volume", JsValue::from_f64(f64::from(v)));
+            }
+            if let Some(p) = pitch {
+                set_prop(&obj, "pitch", JsValue::from_f64(f64::from(p)));
+            }
+            if let Some(p) = pos {
+                set_prop(&obj, "pos", vec3_arr(p).into());
+            }
         }
         WebAudioEvent::StopChannel { entity, channel } => {
-            let _ = Reflect::set(&obj, &JsValue::from_str("kind"), &JsValue::from_str("stop_channel"));
-            let _ = Reflect::set(&obj, &JsValue::from_str("entity"), &JsValue::from_f64(f64::from(entity)));
-            let _ = Reflect::set(&obj, &JsValue::from_str("channel"), &JsValue::from_f64(f64::from(channel)));
+            set_prop(&obj, "kind", JsValue::from_str("stop_channel"));
+            set_prop(&obj, "entity", JsValue::from_f64(f64::from(entity)));
+            set_prop(&obj, "channel", JsValue::from_f64(f64::from(channel)));
         }
         WebAudioEvent::StopAll => {
-            let _ = Reflect::set(&obj, &JsValue::from_str("kind"), &JsValue::from_str("stop_all"));
+            set_prop(&obj, "kind", JsValue::from_str("stop_all"));
+        }
+        WebAudioEvent::SetRoomType(rt) => {
+            set_prop(&obj, "kind", JsValue::from_str("set_room_type"));
+            set_prop(&obj, "room_type", JsValue::from_f64(f64::from(rt)));
+        }
+        WebAudioEvent::SetUnderwater(underwater) => {
+            set_prop(&obj, "kind", JsValue::from_str("set_underwater"));
+            set_prop(&obj, "underwater", JsValue::from_bool(underwater));
+        }
+        WebAudioEvent::SetFade { gain } => {
+            set_prop(&obj, "kind", JsValue::from_str("set_fade"));
+            set_prop(&obj, "gain", JsValue::from_f64(f64::from(gain)));
+        }
+        WebAudioEvent::PlayMusic {
+            path,
+            looping,
+            volume,
+        } => {
+            set_prop(&obj, "kind", JsValue::from_str("play_music"));
+            set_prop(&obj, "path", JsValue::from_str(&path));
+            set_prop(&obj, "looping", JsValue::from_bool(looping));
+            set_prop(&obj, "volume", JsValue::from_f64(f64::from(volume)));
+        }
+        WebAudioEvent::SetMusicVolume(vol) => {
+            set_prop(&obj, "kind", JsValue::from_str("set_music_volume"));
+            set_prop(&obj, "volume", JsValue::from_f64(f64::from(vol)));
+        }
+        WebAudioEvent::StopMusic => {
+            set_prop(&obj, "kind", JsValue::from_str("stop_music"));
+        }
+        WebAudioEvent::VoicePcm {
+            speaker,
+            sample_rate,
+            samples,
+            volume,
+        } => {
+            set_prop(&obj, "kind", JsValue::from_str("voice_pcm"));
+            set_prop(&obj, "speaker", JsValue::from_f64(f64::from(speaker)));
+            set_prop(&obj, "sample_rate", JsValue::from_f64(f64::from(sample_rate)));
+            set_prop(&obj, "volume", JsValue::from_f64(f64::from(volume)));
+            let f32arr = Float32Array::from(samples.as_slice());
+            set_prop(&obj, "samples", f32arr.into());
         }
     }
     obj.into()
