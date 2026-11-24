@@ -642,6 +642,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cs-mod-macros"
+version = "0.1.0"
+
+[[package]]
+name = "cs-mod-sdk"
+version = "0.1.0"
+dependencies = [
+ "cs-mod-api",
+ "cs-mod-macros",
+]
+
+[[package]]
 name = "cs-platform"
 version = "0.1.0"
 dependencies = [

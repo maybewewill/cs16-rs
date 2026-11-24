@@ -1,0 +1,13 @@
+[package]
+name = "cs-mod-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+cs-mod-api = { workspace = true }
+cs-mod-macros = { workspace = true }
