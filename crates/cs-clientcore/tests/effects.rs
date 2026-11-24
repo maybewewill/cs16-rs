@@ -141,9 +141,11 @@ fn hud_state_after_golden_join() {
         (0, 1, 2, 90)
     );
     assert_eq!(hud.weapons[&29].name, "weapon_knife");
-    // The spawn kit: a knife (current, not drawn yet) and a USP with 12 rounds, 24 spare.
+    // The spawn kit: a knife and a USP with 12 rounds, 24 spare. The stock server sends
+    // `CurWeapon(active, USP, 12)` and then `CurWeapon(inactive, knife, -1)`; an inactive
+    // `CurWeapon` only updates that weapon's clip, so the USP stays the current weapon.
     let cur = hud.current_weapon.unwrap();
-    assert_eq!((cur.weapon_id, cur.clip), (29, -1));
+    assert_eq!((cur.weapon_id, cur.clip), (16, 12));
     assert_eq!(hud.clips[&16], 12);
     assert_eq!(hud.ammo[&6], 24);
     assert_eq!(hud.weapon_pickups, [29, 16]);
@@ -181,7 +183,15 @@ fn golden_sounds_become_commands_with_their_names() {
             continue;
         };
         let mut r = replay(&bytes);
-        let commands = r.fx.sounds.drain();
+        // Only the sound-start/stop/fade messages are counted in `sounds_seen`; `svc_roomtype`
+        // and `svc_cdtrack` also become commands (room DSP, music) and are left out here.
+        let commands: Vec<_> = r
+            .fx
+            .sounds
+            .drain()
+            .into_iter()
+            .filter(|c| !matches!(c, SoundCommand::RoomType(_) | SoundCommand::CdTrack { .. }))
+            .collect();
         assert_eq!(
             commands.len() + r.fx.sounds.unknown_sounds as usize,
             r.sounds_seen,
@@ -201,7 +211,14 @@ fn golden_sounds_become_commands_with_their_names() {
         return;
     };
     let mut r = replay(&bytes);
-    let commands = r.fx.sounds.drain();
+    // The join also carries `svc_cdtrack 0 0` (stop music); only the entity sounds are read here.
+    let commands: Vec<_> = r
+        .fx
+        .sounds
+        .drain()
+        .into_iter()
+        .filter(|c| matches!(c, SoundCommand::Start(_) | SoundCommand::Ambient(_)))
+        .collect();
     let SoundCommand::Start(first) = &commands[0] else {
         panic!("{:?}", commands[0]);
     };
