@@ -4363,6 +4363,7 @@ dependencies = [
  "cs-mod-api",
  "cs-mod-host",
  "cs-proto48",
+ "image",
  "serde",
  "toml",
 ]
