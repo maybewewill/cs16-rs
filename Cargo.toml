@@ -18,6 +18,7 @@ members = [
     "crates/cs-client",
     "crates/cs-web",
     "crates/cs-mod-api",
+    "crates/cs-mod-host",
     "xtask",
 ]
 resolver = "3"
@@ -45,6 +46,7 @@ serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+wasmi = { version = "2.0", features = ["deterministic"] }
 wgpu = "30"
 winit = "0.30"
 
@@ -64,6 +66,7 @@ cs-local = { path = "crates/cs-local" }
 cs-sim = { path = "crates/cs-sim" }
 cs-game = { path = "crates/cs-game" }
 cs-mod-api = { path = "crates/cs-mod-api" }
+cs-mod-host = { path = "crates/cs-mod-host" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

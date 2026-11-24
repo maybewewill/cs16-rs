@@ -1,0 +1,30 @@
+[package]
+name = "cs-mod-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+cs-engine = { workspace = true }
+cs-mod-api = { workspace = true }
+cs-platform = { workspace = true }
+cs-pm = { workspace = true }
+cs-proto48 = { workspace = true }
+cs-vfs = { workspace = true }
+glam = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+wasmi = { workspace = true }
+wat = "1"
+
+[dev-dependencies]
+cs-assets = { workspace = true }
+cs-clientcore = { workspace = true }
+cs-cvar = { workspace = true }
+cs-game = { workspace = true }
+cs-sim = { workspace = true }
+cs-transport = { workspace = true }
