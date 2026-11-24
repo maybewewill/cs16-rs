@@ -2,7 +2,7 @@
 //! (`Resource/UI/Spectator.res`, `BottomSpectator.res`, `spectatormenu.txt`, `ClientScheme.res`).
 
 use cs_assets::scheme::LocalizationTable;
-use cs_assets::vgui_res::{TextAlignment, VguiCoordMode};
+use cs_assets::vgui_res::TextAlignment;
 use cs_assets::vgui_scripts::{CommandMenuAction, CommandMenuItem, CommandMenuTree};
 use cs_cvar::{CVarRegistry, EngineAction};
 use cs_vfs::Vfs;
@@ -77,7 +77,7 @@ pub struct SpectatorVguiUi {
 impl Default for SpectatorVguiUi {
     fn default() -> Self {
         Self {
-            menu_visible: true,
+            menu_visible: false,
             mode: SpectatorMode::ChaseFree,
             target_index: 0,
             settings_popup: false,
@@ -108,31 +108,15 @@ impl SpectatorVguiUi {
 
         let screen = ctx.content_rect();
         let screen_h = screen.height().round().max(480.0) as u32;
-        let vp = [screen.left(), screen.top(), screen.width(), screen.height()];
-        let top_nodes = runtime.compute_layout_mode(
-            "resource/UI/Spectator.res",
-            vp,
-            VguiCoordMode::Proportional640,
-            s.loc,
-        );
         let sy = (screen.height() / 480.0).max(0.5);
 
-        let rect_of = |field: &str, fb: Rect| -> Rect {
-            top_nodes
-                .iter()
-                .find(|n| n.field_name.eq_ignore_ascii_case(field))
-                .map_or(fb, |n| {
-                    Rect::from_min_size(Pos2::new(n.rect[0], n.rect[1]), Vec2::new(n.rect[2], n.rect[3]))
-                })
-        };
-
-        let top_rect = rect_of("topbar", Rect::from_min_size(screen.min, Vec2::new(screen.width(), (66.0 * sy).round())));
-        let bot_h = rect_of("BottomBar", Rect::from_min_size(Pos2::ZERO, Vec2::new(screen.width(), (66.0 * sy).round())))
-            .height()
-            .clamp(48.0, 120.0);
+        // `CSpectatorGUI` (`FUN_100aff00`): topbar / bottombar height = `GetProportionalScaledValue(64)`
+        // (`107 px` at 1280x800, `80 px` at 800x600), translucent black fill, no orange edge lines.
+        let bar_h = (64.0 * sy).round();
+        let top_rect = Rect::from_min_size(screen.min, Vec2::new(screen.width(), bar_h));
         let bot_rect = Rect::from_min_size(
-            Pos2::new(screen.left(), screen.bottom() - bot_h),
-            Vec2::new(screen.width(), bot_h),
+            Pos2::new(screen.left(), screen.bottom() - bar_h),
+            Vec2::new(screen.width(), bar_h),
         );
 
         let painter = ctx.layer_painter(egui::LayerId::new(
@@ -149,24 +133,9 @@ impl SpectatorVguiUi {
             "ControlText",
             Color32::from_rgb(255, 176, 0),
         );
-        let dim_col = scheme_color_or(
-            &runtime.client_scheme,
-            "LabelDimText",
-            Color32::from_rgba_unmultiplied(255, 176, 0, 180),
-        );
-        let ct_col = scheme_color_or(&runtime.client_scheme, "team2", Color32::from_rgb(153, 204, 255));
-        let t_col = scheme_color_or(&runtime.client_scheme, "team1", Color32::from_rgb(255, 64, 64));
 
-        painter.rect_filled(top_rect, 0.0, Color32::from_black_alpha(228));
-        painter.rect_filled(bot_rect, 0.0, Color32::from_black_alpha(228));
-        painter.line_segment(
-            [Pos2::new(top_rect.left(), top_rect.bottom()), Pos2::new(top_rect.right(), top_rect.bottom())],
-            Stroke::new(1.0, border_col),
-        );
-        painter.line_segment(
-            [Pos2::new(bot_rect.left(), bot_rect.top()), Pos2::new(bot_rect.right(), bot_rect.top())],
-            Stroke::new(1.0, border_col),
-        );
+        painter.rect_filled(top_rect, 0.0, Color32::from_black_alpha(205));
+        painter.rect_filled(bot_rect, 0.0, Color32::from_black_alpha(205));
 
         let client_fonts = runtime.client_scheme.fonts.clone();
         let loc_lbl = |token: &str, fb: &str| -> String {
@@ -179,20 +148,31 @@ impl SpectatorVguiUi {
             fb.to_string()
         };
 
-        let ct_lbl_rect = rect_of("CTScoreLabel", Rect::from_min_size(Pos2::new(screen.right() - 233.0, 12.0), Vec2::new(150.0, 16.0)));
-        let ct_val_rect = rect_of("CTScoreValue", Rect::from_min_size(Pos2::new(screen.right() - 80.0, 12.0), Vec2::new(20.0, 16.0)));
-        let t_lbl_rect = rect_of("TERScoreLabel", Rect::from_min_size(Pos2::new(screen.right() - 233.0, 26.0), Vec2::new(150.0, 16.0)));
-        let t_val_rect = rect_of("TERScoreValue", Rect::from_min_size(Pos2::new(screen.right() - 80.0, 26.0), Vec2::new(20.0, 16.0)));
-        let div_rect = rect_of("DividerBar", Rect::from_min_size(Pos2::new(screen.right() - 64.0, 12.0), Vec2::new(1.0, 30.0)));
-        let timer_img_rect = rect_of("timerimage", Rect::from_min_size(Pos2::new(screen.right() - 56.0, 26.0), Vec2::new(12.0, 12.0)));
-        let timer_lbl_rect = rect_of("timerlabel", Rect::from_min_size(Pos2::new(screen.right() - 42.0, 24.0), Vec2::new(40.0, 16.0)));
+        // `Spectator.res` right-anchored proportional coords (`rN = screen.right - N * sy`).
+        let top_r = |r_off: f32, y: f32, w: f32, h: f32| -> Rect {
+            Rect::from_min_size(
+                Pos2::new(
+                    (screen.right() - r_off * sy).round(),
+                    (screen.top() + y * sy).round(),
+                ),
+                Vec2::new((w * sy).round().max(1.0), (h * sy).round().max(1.0)),
+            )
+        };
+        let ct_lbl_rect = top_r(233.0, 12.0, 150.0, 14.0);
+        let ct_val_rect = top_r(80.0, 12.0, 16.0, 14.0);
+        let t_lbl_rect = top_r(233.0, 24.0, 150.0, 14.0);
+        let t_val_rect = top_r(80.0, 24.0, 16.0, 14.0);
+        let div_rect = top_r(64.0, 12.0, 1.0, 30.0);
+        let timer_img_rect = top_r(56.0, 26.0, 12.0, 12.0);
+        let timer_lbl_rect = top_r(42.0, 24.0, 40.0, 14.0);
 
         let ct_text = loc_lbl("#Cstrike_Spec_CT_Score", "Counter-Terrorists :");
         let t_text = loc_lbl("#Cstrike_Spec_Ter_Score", "Terrorists :");
-        for (rect, txt, col, align) in [
-            (ct_lbl_rect, ct_text.as_str(), ct_col, TextAlignment::East),
-            (t_lbl_rect, t_text.as_str(), t_col, TextAlignment::East),
-            (timer_lbl_rect, &format!("{:02}:{:02}", s.round_timer_secs / 60, s.round_timer_secs % 60), dim_col, TextAlignment::West),
+        let timer_text = format!("{}:{:02}", s.round_timer_secs / 60, s.round_timer_secs % 60);
+        for (rect, txt, align) in [
+            (ct_lbl_rect, ct_text.as_str(), TextAlignment::East),
+            (t_lbl_rect, t_text.as_str(), TextAlignment::East),
+            (timer_lbl_rect, timer_text.as_str(), TextAlignment::West),
         ] {
             runtime.font_atlas.paint_text(
                 &painter,
@@ -204,7 +184,7 @@ impl SpectatorVguiUi {
                 screen_h,
                 rect,
                 txt,
-                col,
+                amber,
                 VguiTextDrawOpts {
                     align,
                     process_hotkey: false,
@@ -212,7 +192,7 @@ impl SpectatorVguiUi {
                 },
             );
         }
-        for (rect, val, col) in [(ct_val_rect, s.ct_score, ct_col), (t_val_rect, s.t_score, t_col)] {
+        for (rect, val) in [(ct_val_rect, s.ct_score), (t_val_rect, s.t_score)] {
             runtime.font_atlas.paint_text(
                 &painter,
                 ctx,
@@ -223,7 +203,7 @@ impl SpectatorVguiUi {
                 screen_h,
                 Rect::from_min_size(rect.min, Vec2::new(rect.width().max(24.0), rect.height())),
                 &val.to_string(),
-                col,
+                amber,
                 VguiTextDrawOpts {
                     align: TextAlignment::West,
                     process_hotkey: false,
@@ -231,12 +211,26 @@ impl SpectatorVguiUi {
                 },
             );
         }
-        painter.rect_filled(Rect::from_min_size(div_rect.min, Vec2::new(div_rect.width().max(1.0), div_rect.height())), 0.0, border_col);
+        painter.rect_filled(Rect::from_min_size(div_rect.min, Vec2::new(1.0, div_rect.height())), 0.0, border_col);
         if let Some(tex) = runtime.ensure_texture(ctx, s.vfs, "gfx/vgui/timer") {
             draw_vgui_image_panel(&painter, timer_img_rect, Some(&tex), amber);
         }
 
         if !self.menu_visible {
+            let toggle_hit = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Middle,
+                egui::Id::unique("cs16_spec_bot_hit"),
+            ));
+            let _ = toggle_hit;
+            egui::Area::new(egui::Id::unique("cs16_spectator_bottom_toggle"))
+                .order(egui::Order::Middle)
+                .fixed_pos(bot_rect.min)
+                .show(ctx, |ui| {
+                    let (_, resp) = ui.allocate_exact_size(bot_rect.size(), egui::Sense::click());
+                    if resp.clicked() {
+                        self.menu_visible = true;
+                    }
+                });
             return actions;
         }
 

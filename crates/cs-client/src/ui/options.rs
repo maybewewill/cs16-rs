@@ -25,8 +25,9 @@ use egui::{Color32, CornerRadius, Pos2, Rect, ScrollArea, Sense, Stroke, Texture
 use crate::ui::parse_rgb;
 use crate::ui::vgui2::{
     TrackerCtx, VguiRuntime, draw_tracker_button_rect, draw_tracker_check_button_rect,
-    draw_tracker_combo_box_rect, draw_tracker_list_panel_rect, draw_tracker_slider_rect,
-    draw_tracker_text_entry_rect, paint_tracker_bevel_rect, paint_tracker_label_rect,
+    draw_tracker_close_button, draw_tracker_combo_box_rect, draw_tracker_list_panel_rect,
+    draw_tracker_slider_rect, draw_tracker_text_entry_rect, paint_tracker_bevel_rect,
+    paint_tracker_label_rect,
 };
 use crate::ui::vgui_theme::VguiPalette;
 
@@ -2015,43 +2016,6 @@ impl OptionsUi {
             self.content_dialog_open = false;
         }
     }
-}
-
-fn draw_tracker_close_button(
-    ui: &mut egui::Ui,
-    rt: &mut VguiRuntime,
-    tc: &TrackerCtx<'_>,
-    id_salt: &str,
-    rect: Rect,
-) -> bool {
-    let r = Rect::from_min_max(
-        Pos2::new(rect.left().round(), rect.top().round()),
-        Pos2::new(rect.right().round(), rect.bottom().round()),
-    );
-    let resp = ui.interact(r, ui.make_persistent_id(id_salt), Sense::click());
-    rt.track_interactive(id_salt, &resp);
-    let down = resp.is_pointer_button_down_on();
-    let bg = if down {
-        tc.palette.window_bg
-    } else if resp.hovered() {
-        tc.palette.control_dark_bg
-    } else {
-        tc.palette.control_bg
-    };
-    let p = ui.painter();
-    p.rect_filled(r, CornerRadius::ZERO, bg);
-    paint_tracker_bevel_rect(p, r, !down, tc.palette);
-    let x_col = if resp.hovered() {
-        tc.palette.bright_text
-    } else {
-        Color32::from_rgb(200, 206, 195)
-    };
-    let c = r.center();
-    let half = (3.5 * tc.scale).round().max(3.0);
-    let s = Stroke::new((1.5 * tc.scale).max(1.2), x_col);
-    p.line_segment([c + Vec2::new(-half, -half), c + Vec2::new(half, half)], s);
-    p.line_segment([c + Vec2::new(half, -half), c + Vec2::new(-half, half)], s);
-    resp.clicked()
 }
 
 fn dlg_subrect(origin: Pos2, s: f32, x: f32, y: f32, w: f32, h: f32) -> Rect {

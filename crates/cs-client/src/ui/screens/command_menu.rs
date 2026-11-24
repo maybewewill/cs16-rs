@@ -4,8 +4,9 @@ use cs_assets::scheme::LocalizationTable;
 use cs_assets::vgui_res::TextAlignment;
 use cs_assets::vgui_scripts::{CommandMenuAction, CommandMenuItem, CommandMenuTree};
 use cs_vfs::Vfs;
-use egui::{Color32, Key, Pos2, Stroke, Vec2};
+use egui::{Color32, Key, Pos2, Rect, Sense, Stroke, Vec2};
 
+use crate::ui::vgui2::VguiTextDrawOpts;
 use crate::ui::vgui2::runtime::{VguiRuntime, scheme_color_or};
 
 #[derive(Default)]
@@ -78,16 +79,22 @@ impl CommandMenuUi {
         }
         let screen = ctx.content_rect();
         let screen_h = screen.height().round().max(480.0) as u32;
+        let sy = (screen.height() / 480.0).max(0.5);
+        // `CCommandMenu::Show` (`100b2ed0`): background `WindowBG` / `0xc8000000`, `x = 0`,
+        // `y = max(0, (sh - mh) / 2)`, row height `22 * sy`.
         let bg_col = scheme_color_or(
             &runtime.client_scheme,
-            "Menu/BgColor",
-            Color32::from_rgba_unmultiplied(0, 0, 0, 227),
+            "WindowBG",
+            Color32::from_rgba_unmultiplied(0, 0, 0, 200),
         );
-        let border_col = scheme_color_or(
+        let bg_col = Color32::from_rgba_unmultiplied(bg_col.r(), bg_col.g(), bg_col.b(), 200);
+        let border_col = Color32::from_rgba_unmultiplied(188, 112, 0, 120);
+        let amber = scheme_color_or(
             &runtime.client_scheme,
-            "BorderBright",
-            Color32::from_rgba_unmultiplied(188, 112, 0, 140),
+            "ControlText",
+            Color32::from_rgb(255, 176, 0),
         );
+        let hover_bg = Color32::from_rgba_unmultiplied(188, 112, 0, 48);
 
         let mut out_cmd: Option<String> = None;
         let mut update_depth: Option<(usize, usize)> = None;
@@ -133,8 +140,13 @@ impl CommandMenuUi {
         }
 
         let depth_count = self.submenu_path.len() + 1;
-        let col_w = 210.0f32;
-        let mut base_y = (screen.center().y - 120.0).max(24.0);
+        let row_h = (22.0 * sy).round();
+        let pad_left = (8.0 * sy).round();
+        let pad_right = (24.0 * sy).round();
+        let min_col_w = (110.0 * sy).round();
+        let client_fonts = runtime.client_scheme.fonts.clone();
+        let mut col_x = screen.left();
+        let mut base_y: Option<f32> = None;
 
         for depth in 0..depth_count {
             let prefix = &self.submenu_path[..depth];
@@ -146,63 +158,130 @@ impl CommandMenuUi {
             if items.is_empty() {
                 break;
             }
-            let pos = Pos2::new(18.0 + depth as f32 * (col_w + 4.0), base_y);
+            let mut max_txt_w = 0.0f32;
+            let labels: Vec<String> = items
+                .iter()
+                .map(|(_, item)| {
+                    let resolved = loc.map_or(item.label.as_str(), |l| l.resolve(&item.label));
+                    let clean = if resolved.starts_with('#') {
+                        item.label.trim_start_matches('#').to_string()
+                    } else {
+                        resolved.to_string()
+                    };
+                    let w = runtime
+                        .font_atlas
+                        .measure_text_scaled(
+                            ctx,
+                            vfs,
+                            &client_fonts,
+                            "client",
+                            "DefaultSmall",
+                            screen_h,
+                            &clean,
+                            false,
+                        )
+                        .x;
+                    max_txt_w = max_txt_w.max(w);
+                    clean
+                })
+                .collect();
+
+            let col_w = (max_txt_w + pad_left + pad_right).round().max(min_col_w);
+            let col_h = (items.len() as f32 * row_h + 2.0).round();
+            let col_y = match base_y {
+                None => screen.top() + ((screen.height() - col_h) * 0.5).max(0.0).round(),
+                Some(y) => y.clamp(screen.top(), (screen.bottom() - col_h).max(screen.top())),
+            };
+            let panel_rect = Rect::from_min_size(Pos2::new(col_x, col_y), Vec2::new(col_w, col_h));
             let selected_sub = self.submenu_path.get(depth).copied();
 
             egui::Area::new(egui::Id::unique(("cs16_command_menu_col", depth)))
                 .order(egui::Order::Foreground)
-                .fixed_pos(pos)
+                .fixed_pos(panel_rect.min)
                 .show(ctx, |ui| {
-                    egui::Frame::NONE
-                        .fill(bg_col)
-                        .stroke(Stroke::new(1.0, border_col))
-                        .inner_margin(egui::Margin::same(4))
-                        .show(ui, |ui| {
-                            for (row_idx, (orig_idx, item)) in items.iter().enumerate() {
-                                let label = loc.map_or(item.label.as_str(), |l| l.resolve(&item.label));
-                                let clean = if label.starts_with('#') { &item.label } else { label };
-                                let suffix = match &item.action {
-                                    CommandMenuAction::Submenu(_) => "  >",
-                                    CommandMenuAction::Command(_) => "",
-                                };
-                                let text = format!("{}. {clean}{suffix}", item.key);
-                                let (rect, _) = ui.allocate_exact_size(Vec2::new(col_w, 22.0), egui::Sense::hover());
-                                let is_sel = selected_sub == Some(*orig_idx);
-                                let resp = runtime.draw_client_button(
-                                    ui,
-                                    ctx,
-                                    vfs,
-                                    &format!("cmdm_{depth}_{row_idx}"),
-                                    rect,
-                                    &text,
-                                    false,
-                                    true,
-                                    is_sel,
-                                    "DefaultSmall",
-                                    TextAlignment::West,
-                                    screen_h,
-                                );
-                                match &item.action {
-                                    CommandMenuAction::Submenu(_) => {
-                                        if resp.hovered() || resp.clicked() {
-                                            update_depth = Some((depth, *orig_idx));
-                                            base_y = rect.top();
-                                        }
-                                    }
-                                    CommandMenuAction::Command(cmd) => {
-                                        if resp.clicked() {
-                                            if cmd == "!MAPBRIEFING" {
-                                                self.pending_briefing = true;
-                                            } else {
-                                                out_cmd = Some(cmd.clone());
-                                            }
-                                            close_now = true;
-                                        }
-                                    }
+                    ui.allocate_exact_size(panel_rect.size(), Sense::hover());
+                    let p = ui.painter();
+                    p.rect_filled(panel_rect, 0.0, bg_col);
+                    p.rect_stroke(panel_rect, 0.0, Stroke::new(1.0, border_col), egui::StrokeKind::Inside);
+
+                    for (row_idx, ((orig_idx, item), label)) in
+                        items.iter().zip(labels.iter()).enumerate()
+                    {
+                        let ry = panel_rect.top() + 1.0 + row_idx as f32 * row_h;
+                        let row_r = Rect::from_min_size(
+                            Pos2::new(panel_rect.left() + 1.0, ry),
+                            Vec2::new((col_w - 2.0).max(8.0), row_h),
+                        );
+                        let resp = ui.interact(
+                            row_r,
+                            ui.make_persistent_id(("cmdm", depth, row_idx)),
+                            Sense::click(),
+                        );
+                        runtime.track_interactive(&format!("cmdm_{depth}_{row_idx}"), &resp);
+                        let is_sel = selected_sub == Some(*orig_idx);
+                        if resp.hovered() || is_sel {
+                            ui.painter().rect_filled(row_r, 0.0, hover_bg);
+                        }
+                        let txt_r = Rect::from_min_max(
+                            Pos2::new(row_r.left() + pad_left, row_r.top()),
+                            Pos2::new(row_r.right() - (16.0 * sy).round(), row_r.bottom()),
+                        );
+                        runtime.font_atlas.paint_text(
+                            ui.painter(),
+                            ctx,
+                            vfs,
+                            &client_fonts,
+                            "client",
+                            "DefaultSmall",
+                            screen_h,
+                            txt_r,
+                            label,
+                            amber,
+                            VguiTextDrawOpts {
+                                align: TextAlignment::West,
+                                process_hotkey: false,
+                                proportional_scale: false,
+                            },
+                        );
+
+                        match &item.action {
+                            CommandMenuAction::Submenu(_) => {
+                                let ax = row_r.right() - (8.0 * sy).round();
+                                let ay = row_r.center().y;
+                                let aw = (3.5 * sy).round().max(3.0);
+                                let ah = (3.5 * sy).round().max(3.0);
+                                ui.painter().add(egui::Shape::convex_polygon(
+                                    vec![
+                                        Pos2::new(ax - aw, ay - ah),
+                                        Pos2::new(ax + aw * 0.4, ay),
+                                        Pos2::new(ax - aw, ay + ah),
+                                    ],
+                                    amber,
+                                    Stroke::NONE,
+                                ));
+                                if resp.hovered() || resp.clicked() {
+                                    update_depth = Some((depth, *orig_idx));
+                                    base_y = Some(row_r.top());
                                 }
                             }
-                        });
+                            CommandMenuAction::Command(cmd) => {
+                                if resp.clicked() {
+                                    if cmd == "!MAPBRIEFING" {
+                                        self.pending_briefing = true;
+                                    } else {
+                                        out_cmd = Some(cmd.clone());
+                                    }
+                                    close_now = true;
+                                }
+                            }
+                        }
+                    }
                 });
+
+            col_x = panel_rect.right();
+            if base_y.is_none() {
+                base_y = Some(panel_rect.top());
+            }
         }
 
         if let Some((depth, idx)) = update_depth {

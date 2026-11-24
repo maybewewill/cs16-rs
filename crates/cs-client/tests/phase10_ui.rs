@@ -127,6 +127,7 @@ fn ui_screen_main_menu_and_new_game_parses_gamemenu_and_settings_scr() {
     assert_eq!(entries[1].command, "OpenCreateMultiplayerGameDialog");
 
     let mut menu = MainMenuUi::default();
+    menu.new_game_open = true;
     let mut rt = VguiRuntime::new();
     let mut cvars = CVarRegistry::new_with_defaults();
     let maps = vec!["de_dust2".to_string(), "cs_office".to_string()];
@@ -154,6 +155,7 @@ fn ui_screen_main_menu_and_new_game_parses_gamemenu_and_settings_scr() {
         real_menu.load_resources(&vfs, "english");
         assert!(!real_menu.game_menu.is_empty());
         assert!(real_menu.settings_script.is_some());
+        assert!(rt.load_res(&vfs, "resource/CreateMultiplayerGameServerPage.res").is_some());
     } else {
         eprintln!("SKIPPED retail GameMenu.res check: CS16_GAMEDIR not set");
     }
@@ -837,11 +839,10 @@ fn ui_screen_motd_html_parses_tags_colors_and_renders_res() {
 
 #[test]
 fn ui_screen_server_browser_full_filters_favorites_history_lan() {
-    let mut sb = ServerBrowserUi {
-        open: true,
-        tab: ServerBrowserTab::Favorites,
-        ..Default::default()
-    };
+    assert_eq!(ServerBrowserTab::default(), ServerBrowserTab::Internet);
+    let mut sb = ServerBrowserUi::default();
+    sb.open = true;
+    sb.tab = ServerBrowserTab::Favorites;
     sb.add_favorite(ServerBrowserEntry {
         addr: "127.0.0.1:27015".into(),
         name: "Local Dust2".into(),
@@ -865,6 +866,7 @@ fn ui_screen_server_browser_full_filters_favorites_history_lan() {
 #[test]
 fn ui_screen_spectator_and_bottom_bar_cycles_modes_and_paints_res() {
     let mut spec = SpectatorVguiUi::default();
+    assert!(!spec.menu_visible);
     spec.menu_visible = true;
     spec.mode = SpectatorMode::from_i32(4);
     assert_eq!(spec.mode, SpectatorMode::FirstPerson);
@@ -954,6 +956,18 @@ fn ui_screen_player_list_mute_toggles_vban_bitmask() {
     assert_eq!(cmd.as_deref(), Some("vban 4"));
     let cmd2 = dlg.toggle_mute_selected();
     assert_eq!(cmd2.as_deref(), Some("vban 0"));
+
+    let mut rt = VguiRuntime::new();
+    let dlg_ctx = DialogRenderCtx {
+        vfs: None,
+        loc: None,
+        palette: palette(),
+        steam_icon: None,
+    };
+    let out = run_egui_frame(|ctx| {
+        let _ = dlg.show(ctx, &mut rt, &names, Some(0), &dlg_ctx);
+    });
+    assert!(out > 0);
 }
 
 #[test]

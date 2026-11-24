@@ -42,8 +42,7 @@ Measured at 800x600, 1024x768, 1280x720, 1280x800, 1280x1024 and 1600x1080:
   - The pitch is `MenuItemHeight` (48) `*s`.
   - A blank `GameMenu.res` entry is a spacer.
 - **Text x.**
-  - `82*s` when the width is below 1280, `115*s` from 1280 up.
-  - Assumption: the threshold between 1024 and 1280 was not measured.
+  - `115*s` when the width is above `1024`, `round(115 * 0.7) * s` (`81*s`) at `1024` and below (verified via `GameUI.dll` `CBasePanel::ApplySchemeSettings`, `FUN_1003e590`).
 - **Font and colours.**
   - `MenuLarge` at `round(28 * 0.775 * s)` px, synthetic bold (weight 1000).
   - `MenuColor`; the armed row is `ArmedMenuColor` over an additive `MenuBlurLarge` glow in `BlurMenuColor`.
@@ -90,6 +89,16 @@ Measured on `de_dust2` across `800x600`, `1280x720`, `1280x800`, and `1280x1024`
 - **Console (`CConsoleDialog`, `TrackerScheme`).** Scale `s = max(1, H / 720)`, default rect `(40, 40, 560, 400) * s` (`560x400` at 800x600/1280x720; `622x444` at `(44,44)` at 1280x800; `796x569` at `(57,57)` at 1280x1024). Steam 2003 olive `ControlBG` raised bevel frame, `35*s` titlebar with `icon_steam.tga`, `DefaultBold` title, and `18*s` `[X]` button; recessed `WindowBG` log viewport with `18*s` VGUI2 vertical scrollbar and arrow buttons; `22*s` bottom `TextEntry` + `71*s x 22*s` raised `Submit` button + 3x3 resize grip.
 - **Chat (`messagemode`) & Hints / Centre Print.** `say :` / `say_team :` draws directly at `(8, 4)` in `EngineFont` (`1 px` drop shadow, `con_color` foreground) with no box or border. `Hint_*` HUD prompts render centered at `0.70 * H` in green `(40, 200, 40)`; `HUD_PRINTCENTER` uses `con_color` at `0.34 * H`.
 
+### Screen 4 (`New game`, `Find servers`, `Player list`, `Spectator`, `Command menu`): DONE
+
+Verified against Ghidra reversing of `GameUI.dll`, `ServerBrowser.dll`, and `client.dll` plus headless captures across `800x600`, `1280x720`, `1280x800`, and `1280x1024`:
+
+- **New game (`CCreateMultiplayerGameDialog` / `FUN_1001e9b0`).** Centered `(448 * s) x (460 * s)` Steam 2003 `TrackerCtx` window matching exact outer box bounds `(176,70,623,529)` (800x600), `(416,130,863,589)` (1280x720), `(391,144,887,654)` (1280x800), `(321,185,957,838)` (1280x1024). Title `#GameUI_CreateServer`, `Server`/`Game` tabs, `Server` page with `< Random Map >` `MapList` (`66, 28, 174, 24`), `Divider1`, and `Enable Steam Networking` (`sv_use_steam_networking`), `Start`/`Cancel` bottom buttons. Box MAD vs original: `1.83` (800x600), `1.45` (1280x720), `2.73` (1280x800), `2.07` (1280x1024).
+- **Find servers (`CServerBrowserDialog` / `FUN_100102d0`, `CBaseGamesPage` / `FUN_10001080`).** Resizable centered `min(W, 960) x min(H, 594)` `TrackerCtx` frame with `Internet` default tab, 6 tabs (`Internet, Favorites, History, Spectate, LAN, Friends`), 8 visible raised-bevel columns (`Password, Bots, VAC, Players, Servers (N), Game, Map, Latency`), VGUI2 scrollbar, `Change filters` + filter summary + `Quick refresh` / `Refresh all` / `Connect` + bottom status bar + 3x3 resize grip. Outer box bounds match original `0 px` delta across all 4 resolutions; MAD `4.88-8.84/255` (difference is 32 populated Internet rows on live Steam).
+- **Player list (`CPlayerListDialog` / `FUN_1003a8d0`, `PlayerListDialog.res`).** Centered `(467 * s) x (388 * s)` `TrackerCtx` dialog with `#GameUI_CurrentPlayers`, `Player Name`/`Properties` `ListPanel`, `#GameUI_NoOtherPlayersInGame` empty label, `#GameUI_MuteIngameVoice` (`vban <hex>`), and `Close`.
+- **Spectator (`CSpectatorGUI` / `FUN_100aff00`, `Spectator.res`, `BottomSpectator.res`).** Top and bottom translucent bars of height `round(64 * H / 480)` (`107 px` at 1280x800) with no orange horizontal edge lines, `menu_visible` defaulting `false`, amber CT/T score labels (`r233`), `DividerBar`, stopwatch icon, and `%d:%02d` timer.
+- **Command menu (`CCommandMenu::Show` / `100b2ed0`, `commandmenu.txt`).** Anchored at `x = 0`, vertically centered, `0xc8000000` fill, `22 * H/480` row height, localized labels without `"1. "` prefixes, and vector right triangles for submenus.
+
 ## Status of the other screens (measured 2026-11-24 at 1280x800)
 
 | Screen | State | Differences seen |
@@ -100,8 +109,9 @@ Measured on `de_dust2` across `800x600`, `1280x720`, `1280x800`, and `1280x1024`
 | Scoreboard (`ScoreBoard.res`) | **DONE** | Centered `520x340 * H/480` `ListBG` (`alpha=128`) box, localized column headers, and CT/T dividers. Box MAD vs original: `9.36` (1280x720), `9.29` (1280x800), `9.41` (1280x1024); remaining delta is 1st-person weapon/world view & headless bot rows behind `alpha=128` panel. |
 | Console (`CConsoleDialog`) | **DONE** | Exact Steam 2003 `TrackerScheme` `(40,40,560,400) * max(1, H/720)` frame. Window box MAD vs original: `6.23` (800x600), `7.26` (1280x720), `5.95` (1280x800), `6.23` (1280x1024); remaining delta is startup log lines only. |
 | Chat / Centre print | **DONE** | `say :` HUD prompt at `(8, 4)` with `EngineFont` shadow and `Hint_press_buy_to_purchase` green banner at `0.70 * H` match original position and colors visually. |
-| New game (`CreateMultiplayerGame*.res`) | not compared | |
-| Find servers (`ServerBrowser`) | not compared | |
+| New game (`CreateMultiplayerGame*.res`) | **DONE** | Outer box `0 px` delta across all 4 res; box MAD `1.45-2.73/255`. |
+| Find servers (`ServerBrowser`) | **DONE** | Outer box `0 px` delta across all 4 res; 6 tabs, 8-column `gamelist`, resize grip. |
+| Player list / Spectator / Command menu | **DONE** | All 3 matched to Ghidra + `.res`/`.txt` specs (`467x388`, `64*H/480` bars, `x=0` vector triangles). |
 | HUD | partly | It is drawn from `hud.txt` sprites; compare positions and fades at 640x480, 1024x768 and 1280x800. |
 
 ## Order of work for the next screens

@@ -6,13 +6,16 @@ use cs_assets::vgui_res::TextAlignment;
 use cs_assets::vgui_scripts::{GameMenuEntry, SettingsScript};
 use cs_cvar::{CVarRegistry, EngineAction};
 use cs_vfs::Vfs;
-use egui::{Color32, CornerRadius, Pos2, Rect, RichText, Sense, Stroke, TextureHandle, Vec2};
+use egui::{Color32, CornerRadius, Pos2, Rect, Sense, TextureHandle, Vec2};
 
 use crate::ui::options::render_scr_options;
 use crate::ui::screens::{ServerBrowserRenderCtx, ServerBrowserUi};
-use crate::ui::vgui2::{TrackerButtonCfg, VguiRuntime, VguiTextDrawOpts};
-use crate::ui::vgui_assets::{TrackerWindowCfg, show_tracker_window};
-use crate::ui::vgui_theme::{VguiPalette, paint_vgui_bevel};
+use crate::ui::vgui2::{
+    TrackerCtx, VguiRuntime, VguiTextDrawOpts, draw_tracker_button_rect,
+    draw_tracker_check_button_rect, draw_tracker_close_button, draw_tracker_combo_box_rect,
+    paint_tracker_bevel_rect, paint_tracker_label_rect,
+};
+use crate::ui::vgui_theme::VguiPalette;
 
 /// Render context for [`MainMenuUi`].
 pub struct MainMenuRenderCtx<'a> {
@@ -38,6 +41,9 @@ pub struct MainMenuUi {
     pub find_servers_open: bool,
     pub server_browser: ServerBrowserUi,
     new_game_tab: NewGameTab,
+    new_game_drag_offset: Vec2,
+    new_game_map_idx: usize,
+    steam_networking: bool,
     pub selected_map: String,
     pub game_menu: Vec<GameMenuEntry>,
     pub settings_script: Option<SettingsScript>,
@@ -57,6 +63,9 @@ impl Default for MainMenuUi {
             find_servers_open: false,
             server_browser: ServerBrowserUi::default(),
             new_game_tab: NewGameTab::Server,
+            new_game_drag_offset: Vec2::ZERO,
+            new_game_map_idx: 0,
+            steam_networking: true,
             selected_map: "de_dust2".to_string(),
             game_menu: Vec::new(),
             settings_script: None,
@@ -155,14 +164,12 @@ impl MainMenuUi {
             });
 
         // 2. The game menu column (`resource/GameMenu.res`, `TrackerScheme` `MenuLarge`).
-        // Layout measured on the original GameUI (Steam build, 2026-11-24) at 800x600, 1024x768,
-        // 1280x720, 1280x800, 1280x1024 and 1600x1080. Everything scales by
-        // `s = max(1, height / 720)`: the item pitch is `MenuItemHeight` (48) * s, the last item's
-        // baseline sits 63 * s above the bottom, the logo's bottom 16 * s above it, and the text
-        // starts at 82 * s on windows narrower than 1280 and 115 * s from 1280 up.
-        // Assumption: the width threshold between 1024 and 1280 was not measured.
+        // Layout reversed from GameUI.dll (`CBasePanel::ApplySchemeSettings`, `FUN_1003e590`)
+        // and measured at 800x600..1600x1080: `s = max(1, height / 720)`, item pitch is
+        // `MenuItemHeight` (48) * s, last baseline is 63 * s above bottom, logo 16 * s above
+        // bottom, and `GameMenuInset` (115 * s) is scaled by 0.7 when `screen_w <= 1024`.
         let s_menu = (screen.height() / 720.0).max(1.0);
-        let base_x = if screen.width() >= 1280.0 { 115.0 } else { 82.0 };
+        let base_x: f32 = if screen.width() > 1024.0 { 115.0 } else { (115.0f32 * 0.7).round() };
         let menu_x = screen.min.x + base_x * s_menu;
         let item_pitch = 48.0 * s_menu;
         let loc_ref = m.loc.or(self.loc.as_ref());
@@ -260,151 +267,295 @@ impl MainMenuUi {
                 self.armed_item = armed;
             });
 
-        // 3. `New Game` Steam 2003 VGUI2 modal window (`CreateMultiplayerGame*.res`)
+        // 3. `New Game` Steam 2003 VGUI2 modal window (`CreateMultiplayerGameDialog`, `FUN_1001e9b0`)
         if self.new_game_open {
-            let mut open = self.new_game_open;
-            let mut close_now = false;
-            let title = loc_or(loc_ref, "#GameUI_NewGame", "New Game");
+            if let Some(v) = cvars.get("sv_use_steam_networking") {
+                self.steam_networking = v.as_bool();
+            }
+            let mut close_now = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+            let s = (screen.height() / 720.0).max(1.0);
+            let screen_h = screen.height().round().max(480.0) as u32;
+            let tc = TrackerCtx {
+                ctx,
+                vfs: m.vfs,
+                palette,
+                screen_h,
+                scale: s,
+            };
+
+            let dlg_w = (448.0 * s).floor();
+            let dlg_h = (460.0 * s).floor();
+            let default_x = screen.left() + ((screen.width() - dlg_w) * 0.5).floor();
+            let default_y = screen.top() + ((screen.height() - dlg_h) * 0.5).floor();
+            let max_x = (screen.right() - dlg_w).max(screen.left());
+            let max_y = (screen.bottom() - dlg_h).max(screen.top());
+            let dlg_min = Pos2::new(
+                (default_x + self.new_game_drag_offset.x)
+                    .clamp(screen.left(), max_x)
+                    .round(),
+                (default_y + self.new_game_drag_offset.y)
+                    .clamp(screen.top(), max_y)
+                    .round(),
+            );
+            let dlg_rect = Rect::from_min_size(dlg_min, Vec2::new(dlg_w, dlg_h));
+
+            let title = loc_or(loc_ref, "#GameUI_CreateServer", "Create Server");
             let server_tab_lbl = loc_or(loc_ref, "#GameUI_Server", "Server");
             let game_tab_lbl = loc_or(loc_ref, "#GameUI_Game", "Game");
             let start_lbl = loc_or(loc_ref, "#GameUI_Start", "Start");
             let cancel_lbl = loc_or(loc_ref, "#GameUI_Cancel", "Cancel");
 
-            show_tracker_window(
-                ctx,
-                runtime,
-                &mut open,
-                &TrackerWindowCfg {
-                    id: "cs16_vgui_new_game",
-                    title: &title,
-                    default_pos: Pos2::new(190.0, 120.0),
-                    default_size: Vec2::new(450.0, 355.0),
-                    min_size: Vec2::new(420.0, 320.0),
-                    resizable: false,
-                    palette,
-                    steam_icon: m.steam_icon,
-                    vfs: m.vfs,
-                },
-                |ui, rt| {
-                    ui.horizontal(|ui| {
-                        if rt.draw_tracker_tab(
-                            ui,
-                            m.vfs,
-                            palette,
-                            "ng_tab_server",
-                            &server_tab_lbl,
-                            self.new_game_tab == NewGameTab::Server,
-                        ) {
-                            self.new_game_tab = NewGameTab::Server;
+            egui::Area::new(egui::Id::unique("cs16_vgui_new_game"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(dlg_rect.min)
+                .show(ctx, |ui| {
+                    ui.allocate_exact_size(dlg_rect.size(), Sense::hover());
+                    let p = ui.painter();
+                    p.rect_filled(dlg_rect, CornerRadius::ZERO, tc.palette.control_bg);
+                    paint_tracker_bevel_rect(p, dlg_rect, true, tc.palette);
+
+                    let title_drag = Rect::from_min_size(
+                        dlg_min,
+                        Vec2::new((dlg_w - 28.0 * s).max(40.0), (29.0 * s).round()),
+                    );
+                    let drag_resp = ui.interact(
+                        title_drag,
+                        ui.make_persistent_id("ng_title_drag"),
+                        Sense::drag(),
+                    );
+                    if drag_resp.dragged() {
+                        self.new_game_drag_offset += drag_resp.drag_delta();
+                    }
+                    if let Some(icon) = m.steam_icon {
+                        let isz = (16.0 * s).round();
+                        let ir = Rect::from_min_size(
+                            dlg_min + Vec2::new((7.0 * s).round(), (8.0 * s).round()),
+                            Vec2::splat(isz),
+                        );
+                        ui.painter().image(
+                            icon.id(),
+                            ir,
+                            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                            Color32::WHITE,
+                        );
+                    }
+                    let title_rect = Rect::from_min_size(
+                        dlg_min + Vec2::new((28.0 * s).round(), (4.0 * s).round()),
+                        Vec2::new((240.0 * s).round(), (22.0 * s).round()),
+                    );
+                    paint_tracker_label_rect(
+                        ui.painter(),
+                        runtime,
+                        &tc,
+                        title_rect,
+                        &title,
+                        "DefaultBold",
+                        TextAlignment::West,
+                        tc.palette.bright_text,
+                        false,
+                        true,
+                    );
+                    let close_rect = Rect::from_min_size(
+                        dlg_min + Vec2::new(((448.0 - 25.0) * s).round(), (8.0 * s).round()),
+                        Vec2::splat((18.0 * s).round()),
+                    );
+                    if draw_tracker_close_button(ui, runtime, &tc, "ng_close", close_rect) {
+                        close_now = true;
+                    }
+
+                    // PropertySheet (`(5, 55, 438, 368) * s`)
+                    let sheet_rect = Rect::from_min_size(
+                        dlg_min + Vec2::new((5.0 * s).round(), (55.0 * s).round()),
+                        Vec2::new((438.0 * s).round(), (368.0 * s).round()),
+                    );
+                    ui.painter()
+                        .rect_filled(sheet_rect, CornerRadius::ZERO, tc.palette.control_bg);
+                    paint_tracker_bevel_rect(ui.painter(), sheet_rect, true, tc.palette);
+
+                    let tabs = [
+                        (NewGameTab::Server, server_tab_lbl),
+                        (NewGameTab::Game, game_tab_lbl),
+                    ];
+                    let mut tx = dlg_min.x + (5.0 * s).round();
+                    let fonts = runtime.tracker_scheme.fonts.clone();
+                    let tab_pad_w = (16.0 * s).round();
+                    let min_tab_w = (64.0 * s).round();
+                    let tab_gap = (1.0 * s).round().max(1.0);
+                    for (tab_val, label) in &tabs {
+                        let tw = runtime
+                            .font_atlas
+                            .measure_text_with_scale(
+                                ctx,
+                                m.vfs,
+                                &fonts,
+                                "tracker",
+                                "Default",
+                                screen_h,
+                                label,
+                                s,
+                            )
+                            .x;
+                        let tab_w = (tw + tab_pad_w).round().max(min_tab_w);
+                        let active = self.new_game_tab == *tab_val;
+                        let top_y =
+                            dlg_min.y + if active { (29.0 * s).round() } else { (31.0 * s).round() };
+                        let tab_rect = Rect::from_min_max(
+                            Pos2::new(tx, top_y),
+                            Pos2::new(tx + tab_w, sheet_rect.top()),
+                        );
+                        let tresp = ui.interact(
+                            tab_rect,
+                            ui.make_persistent_id(("ng_tab", label)),
+                            Sense::click(),
+                        );
+                        runtime.track_interactive(&format!("ng_tab_{label}"), &tresp);
+
+                        let tp = ui.painter();
+                        tp.rect_filled(tab_rect, CornerRadius::ZERO, tc.palette.control_bg);
+                        tp.rect_filled(
+                            Rect::from_min_max(tab_rect.min, Pos2::new(tab_rect.right(), tab_rect.top() + 1.0)),
+                            0.0,
+                            tc.palette.border_bright,
+                        );
+                        tp.rect_filled(
+                            Rect::from_min_max(tab_rect.min, Pos2::new(tab_rect.left() + 1.0, tab_rect.bottom())),
+                            0.0,
+                            tc.palette.border_bright,
+                        );
+                        tp.rect_filled(
+                            Rect::from_min_max(Pos2::new(tab_rect.right() - 1.0, tab_rect.top()), tab_rect.max),
+                            0.0,
+                            tc.palette.border_dark,
+                        );
+                        if active {
+                            tp.rect_filled(
+                                Rect::from_min_max(
+                                    Pos2::new(tab_rect.left() + 1.0, sheet_rect.top()),
+                                    Pos2::new(tab_rect.right() - 1.0, sheet_rect.top() + 1.0),
+                                ),
+                                0.0,
+                                tc.palette.control_bg,
+                            );
                         }
-                        if rt.draw_tracker_tab(
-                            ui,
-                            m.vfs,
-                            palette,
-                            "ng_tab_game",
-                            &game_tab_lbl,
-                            self.new_game_tab == NewGameTab::Game,
-                        ) {
-                            self.new_game_tab = NewGameTab::Game;
+                        let fg = if active {
+                            tc.palette.bright_control_text
+                        } else {
+                            tc.palette.bright_text
+                        };
+                        let inset_x = (8.0 * s).round();
+                        let lbl_rect = Rect::from_min_max(
+                            Pos2::new(tab_rect.left() + inset_x, tab_rect.top() + (1.0 * s).round()),
+                            Pos2::new(tab_rect.right() - (2.0 * s).round(), tab_rect.bottom()),
+                        );
+                        paint_tracker_label_rect(
+                            tp,
+                            runtime,
+                            &tc,
+                            lbl_rect,
+                            label,
+                            "Default",
+                            TextAlignment::West,
+                            fg,
+                            false,
+                            true,
+                        );
+                        if tresp.clicked() {
+                            self.new_game_tab = *tab_val;
                         }
-                    });
+                        tx += tab_w + tab_gap;
+                    }
 
-                    let panel_resp = egui::Frame::NONE
-                        .fill(palette.control_bg)
-                        .inner_margin(egui::Margin::same(10))
-                        .stroke(Stroke::new(1.0, palette.border_dark))
-                        .show(ui, |ui| {
-                            ui.set_min_size(egui::vec2(420.0, 245.0));
-                            match self.new_game_tab {
-                                NewGameTab::Server => {
-                                    ui.horizontal(|ui| {
-                                        let map_lbl = loc_or(loc_ref, "#Cstrike_Listen_MapName", "Map");
-                                        ui.label(format!("{map_lbl}:"));
-                                        egui::ComboBox::from_id_salt("ng_map_combo")
-                                            .width(260.0)
-                                            .selected_text(&self.selected_map)
-                                            .show_ui(ui, |ui| {
-                                                for mp in available_maps {
-                                                    ui.selectable_value(&mut self.selected_map, mp.clone(), mp);
-                                                }
-                                            });
-                                    });
+                    let page_origin = sheet_rect.min;
+                    let page_sub = |x: f32, y: f32, w: f32, h: f32| -> Rect {
+                        Rect::from_min_size(
+                            page_origin + Vec2::new((x * s).round(), (y * s).round()),
+                            Vec2::new((w * s).round(), (h * s).round()),
+                        )
+                    };
 
-                                    ui.add_space(6.0);
-                                    ui.label(RichText::new("Quick pick classic maps:").color(palette.dim_text));
-                                    ui.horizontal_wrapped(|ui| {
-                                        for classic in [
-                                            "de_dust2",
-                                            "de_inferno",
-                                            "de_nuke",
-                                            "de_aztec",
-                                            "de_train",
-                                            "cs_assault",
-                                            "cs_office",
-                                            "cs_italy",
-                                        ] {
-                                            if available_maps.iter().any(|mp| mp == classic) {
-                                                let active = self.selected_map == classic;
-                                                let txt = RichText::new(classic).color(if active {
-                                                    palette.bright_control_text
-                                                } else {
-                                                    palette.base_text
-                                                });
-                                                if ui
-                                                    .add(egui::Button::new(txt).corner_radius(CornerRadius::ZERO))
-                                                    .clicked()
-                                                {
-                                                    self.selected_map = classic.to_string();
-                                                }
-                                            }
-                                        }
-                                    });
+                    match self.new_game_tab {
+                        NewGameTab::Server => {
+                            let map_lbl = loc_or(loc_ref, "#Cstrike_Listen_MapName", "Map");
+                            paint_tracker_label_rect(
+                                ui.painter(),
+                                runtime,
+                                &tc,
+                                page_sub(28.0, 28.0, 38.0, 24.0),
+                                &map_lbl,
+                                "Default",
+                                TextAlignment::West,
+                                tc.palette.base_text,
+                                false,
+                                true,
+                            );
 
-                                    ui.separator();
-                                    let quota = cvars.get_i32("bot_quota").max(0);
-                                    let mut bots_on = quota > 0;
-                                    let inc_lbl = loc_or(
-                                        loc_ref,
-                                        "#Cstrike_Bot_IncludeBots",
-                                        "Include CPU players (Bots) in this game",
-                                    );
-                                    if ui.checkbox(&mut bots_on, inc_lbl).changed() {
-                                        cvars.set("bot_quota", if bots_on { "6" } else { "0" });
-                                    }
-                                    if bots_on {
-                                        let num_lbl = loc_or(
-                                            loc_ref,
-                                            "#Cstrike_Bot_NumberOfBots",
-                                            "Number of CPU players",
-                                        );
-                                        cvar_edit_row(ui, cvars, "bot_quota", &format!("{num_lbl}:"));
-                                        let diff_lbl = loc_or(loc_ref, "#Cstrike_Bot_Difficulty", "Difficulty");
-                                        let cur_diff = cvars.get_i32("bot_difficulty").clamp(0, 3);
-                                        ui.horizontal(|ui| {
-                                            ui.label(format!("{diff_lbl}:"));
-                                            for (lvl, tok, fb) in [
-                                                (0, "#Cstrike_Bot_Difficulty0", "Easy"),
-                                                (1, "#Cstrike_Bot_Difficulty1", "Normal"),
-                                                (2, "#Cstrike_Bot_Difficulty2", "Hard"),
-                                                (3, "#Cstrike_Bot_Difficulty3", "Expert"),
-                                            ] {
-                                                let lbl = loc_or(loc_ref, tok, fb);
-                                                if ui.radio(cur_diff == lvl, lbl).clicked() {
-                                                    cvars.set("bot_difficulty", lvl.to_string());
-                                                }
-                                            }
-                                        });
-                                    }
+                            let mut combo_items = Vec::with_capacity(available_maps.len() + 1);
+                            combo_items.push(loc_or(loc_ref, "#GameUI_RandomMap", "< Random Map >"));
+                            combo_items.extend(available_maps.iter().cloned());
+                            if self.new_game_map_idx >= combo_items.len() {
+                                self.new_game_map_idx = 0;
+                            }
+                            if draw_tracker_combo_box_rect(
+                                ui,
+                                runtime,
+                                &tc,
+                                "ng_map_combo",
+                                page_sub(66.0, 28.0, 174.0, 24.0),
+                                &combo_items,
+                                &mut self.new_game_map_idx,
+                                true,
+                            ) && self.new_game_map_idx > 0
+                                && let Some(mp) = available_maps.get(self.new_game_map_idx - 1)
+                            {
+                                self.selected_map = mp.clone();
+                            }
 
-                                    ui.add_space(4.0);
-                                    ui.label(
-                                        RichText::new(format!("Discovered {} maps in VFS.", available_maps.len()))
-                                            .small()
-                                            .color(palette.dim_text),
-                                    );
-                                }
-                                NewGameTab::Game => {
-                                    egui::ScrollArea::vertical().max_height(245.0).show(ui, |ui| {
+                            let div_r = page_sub(28.0, 70.0, 280.0, 2.0);
+                            ui.painter().rect_filled(
+                                Rect::from_min_size(div_r.min, Vec2::new(div_r.width(), 1.0)),
+                                0.0,
+                                tc.palette.border_dark,
+                            );
+                            ui.painter().rect_filled(
+                                Rect::from_min_size(
+                                    Pos2::new(div_r.left(), div_r.top() + 1.0),
+                                    Vec2::new(div_r.width(), 1.0),
+                                ),
+                                0.0,
+                                tc.palette.border_bright,
+                            );
+
+                            let net_lbl = loc_or(
+                                loc_ref,
+                                "#Valve_Enable_SteamNetworking",
+                                "Enable Steam Networking",
+                            );
+                            if draw_tracker_check_button_rect(
+                                ui,
+                                runtime,
+                                &tc,
+                                "ng_steam_net",
+                                page_sub(21.0, 83.0, 320.0, 24.0),
+                                &mut self.steam_networking,
+                                &net_lbl,
+                                true,
+                            ) {
+                                cvars.set(
+                                    "sv_use_steam_networking",
+                                    if self.steam_networking { "1" } else { "0" },
+                                );
+                            }
+                        }
+                        NewGameTab::Game => {
+                            let list_r = page_sub(10.0, 10.0, 418.0, 346.0);
+                            ui.painter()
+                                .rect_filled(list_r, CornerRadius::ZERO, tc.palette.window_bg);
+                            paint_tracker_bevel_rect(ui.painter(), list_r, false, tc.palette);
+                            let inner = list_r.shrink((6.0 * s).round());
+                            ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
+                                egui::ScrollArea::vertical()
+                                    .max_height(inner.height())
+                                    .show(ui, |ui| {
                                         if let Some(ref scr) = self.settings_script {
                                             render_scr_options(ui, cvars, scr, loc_ref);
                                         }
@@ -412,53 +563,66 @@ impl MainMenuUi {
                                         cvar_edit_row(ui, cvars, "bot_quota", "Bots count (0..15):");
                                         cvar_edit_row(ui, cvars, "bot_difficulty", "Bot difficulty (0-3):");
                                     });
-                                }
-                            }
-                        });
-                    paint_vgui_bevel(ui.painter(), panel_resp.response.rect, false, palette);
+                            });
+                        }
+                    }
 
-                    ui.add_space(8.0);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if rt
-                            .draw_tracker_button(
-                                ui,
-                                m.vfs,
-                                palette,
-                                &TrackerButtonCfg {
-                                    id: "ng_cancel_btn",
-                                    label: &cancel_lbl,
-                                    min_size: Vec2::new(76.0, 24.0),
-                                    default_btn: false,
-                                    enabled: true,
-                                },
-                            )
-                            .clicked()
-                        {
-                            close_now = true;
-                        }
-                        if rt
-                            .draw_tracker_button(
-                                ui,
-                                m.vfs,
-                                palette,
-                                &TrackerButtonCfg {
-                                    id: "ng_start_btn",
-                                    label: &start_lbl,
-                                    min_size: Vec2::new(76.0, 24.0),
-                                    default_btn: true,
-                                    enabled: true,
-                                },
-                            )
-                            .clicked()
-                        {
-                            out.actions
-                                .push(EngineAction::LoadMap(self.selected_map.clone()));
-                            close_now = true;
-                        }
-                    });
-                },
-            );
-            if !open || close_now {
+                    // Bottom buttons: Start (`283, 427, 72, 24 * s`) & Cancel (`363, 427, 72, 24 * s`)
+                    let start_r = Rect::from_min_size(
+                        dlg_min + Vec2::new((283.0 * s).round(), (427.0 * s).round()),
+                        Vec2::new((72.0 * s).round(), (24.0 * s).round()),
+                    );
+                    let cancel_r = Rect::from_min_size(
+                        dlg_min + Vec2::new((363.0 * s).round(), (427.0 * s).round()),
+                        Vec2::new((72.0 * s).round(), (24.0 * s).round()),
+                    );
+                    if draw_tracker_button_rect(
+                        ui,
+                        runtime,
+                        &tc,
+                        "ng_start_btn",
+                        start_r,
+                        &start_lbl,
+                        TextAlignment::West,
+                        true,
+                        true,
+                    )
+                    .clicked()
+                    {
+                        let chosen = if self.new_game_map_idx == 0 {
+                            available_maps
+                                .iter()
+                                .find(|mp| *mp == "de_dust2")
+                                .or_else(|| available_maps.first())
+                                .cloned()
+                                .unwrap_or_else(|| self.selected_map.clone())
+                        } else {
+                            available_maps
+                                .get(self.new_game_map_idx - 1)
+                                .cloned()
+                                .unwrap_or_else(|| self.selected_map.clone())
+                        };
+                        self.selected_map = chosen.clone();
+                        out.actions.push(EngineAction::LoadMap(chosen));
+                        close_now = true;
+                    }
+                    if draw_tracker_button_rect(
+                        ui,
+                        runtime,
+                        &tc,
+                        "ng_cancel_btn",
+                        cancel_r,
+                        &cancel_lbl,
+                        TextAlignment::West,
+                        false,
+                        true,
+                    )
+                    .clicked()
+                    {
+                        close_now = true;
+                    }
+                });
+            if close_now {
                 self.new_game_open = false;
             }
         }

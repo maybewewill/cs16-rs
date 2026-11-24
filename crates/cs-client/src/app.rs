@@ -1387,6 +1387,21 @@ impl Cs16App {
                     self.feeds.motd_open = true;
                     self.startup_ui_applied = true;
                     self.sync_cursor_capture();
+                } else if matches!(m.as_str(), "spectator" | "spectator:menu") {
+                    if self.in_game_frames == 2 {
+                        self.session.send_stringcmd("jointeam 6");
+                    } else if self.in_game_frames == 14 {
+                        self.motd_ui.open = false;
+                        self.feeds.motd_open = false;
+                        self.buy_team_class_ui.close();
+                        self.session.with_hud_mut(|h| {
+                            h.vgui_menu = None;
+                            h.menu = None;
+                        });
+                        self.spectator_ui.menu_visible = m == "spectator:menu";
+                        self.startup_ui_applied = true;
+                        self.sync_cursor_capture();
+                    }
                 } else if m == "none" && self.in_game_frames == 8 {
                     self.motd_ui.open = false;
                     self.feeds.motd_open = false;
@@ -1717,7 +1732,15 @@ impl Cs16App {
                 || self.buy_team_class_ui.active_res.is_some()
                 || styled_menu_now.is_some()
                 || fallback_vgui_lines.is_some();
-            if !alive && in_game && !modal_menu_open && observer_mode != 0 {
+            let forced_spectator = self
+                .launch
+                .startup_ui
+                .as_deref()
+                .is_some_and(|s| {
+                    s.eq_ignore_ascii_case("spectator") || s.eq_ignore_ascii_case("spectator:menu")
+                })
+                && self.startup_ui_applied;
+            if in_game && !modal_menu_open && ((!alive && observer_mode != 0) || forced_spectator) {
                 let spec_ctx = SpectatorRenderCtx {
                     vfs: self.vfs.as_ref(),
                     loc: self.loc.as_ref(),

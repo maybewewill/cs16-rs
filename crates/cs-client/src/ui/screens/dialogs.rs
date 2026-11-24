@@ -8,14 +8,18 @@
 use std::collections::BTreeMap;
 
 use cs_assets::scheme::LocalizationTable;
+use cs_assets::vgui_res::TextAlignment;
 use cs_vfs::Vfs;
 use egui::{Color32, CornerRadius, Key, Pos2, Rect, RichText, Sense, TextureHandle, Vec2};
 
 use crate::ui::vgui2::controls::{
-    ListColumn, VguiListPanelState, draw_vgui_list_panel, draw_vgui_progress_bar,
-    draw_vgui_text_entry,
+    ListColumn, VguiListPanelState, draw_vgui_progress_bar, draw_vgui_text_entry,
 };
-use crate::ui::vgui2::{TrackerButtonCfg, VguiRuntime};
+use crate::ui::vgui2::{
+    TrackerButtonCfg, TrackerCtx, VguiRuntime, draw_tracker_button_rect,
+    draw_tracker_close_button, draw_tracker_list_panel_rect, paint_tracker_bevel_rect,
+    paint_tracker_label_rect,
+};
 use crate::ui::vgui_assets::{TrackerWindowCfg, show_tracker_window};
 use crate::ui::vgui_theme::{VguiPalette, paint_vgui_bevel};
 
@@ -121,13 +125,14 @@ impl LoadingDialogUi {
     }
 }
 
-/// Player list mute dialog (`PlayerListDialog.res`): generates server `vban <hex>` voice mask.
+/// Player list mute dialog (`PlayerListDialog.res` / `CPlayerListDialog`, `FUN_1003a8d0`).
 #[derive(Debug, Clone)]
 pub struct PlayerListDialogUi {
     pub open: bool,
     pub muted_mask: u32,
     pub list: VguiListPanelState,
     slot_order: Vec<u8>,
+    drag_offset: Vec2,
 }
 
 impl Default for PlayerListDialogUi {
@@ -137,12 +142,13 @@ impl Default for PlayerListDialogUi {
             muted_mask: 0,
             list: VguiListPanelState {
                 columns: vec![
-                    ListColumn { name: "Player".into(), width: 220 },
-                    ListColumn { name: "Status".into(), width: 120 },
+                    ListColumn { name: "Player Name".into(), width: 240 },
+                    ListColumn { name: "Properties".into(), width: 150 },
                 ],
                 ..Default::default()
             },
             slot_order: Vec::new(),
+            drag_offset: Vec2::ZERO,
         }
     }
 }
@@ -195,71 +201,180 @@ impl PlayerListDialogUi {
         }
         self.sync_players(names, local_slot);
 
-        let win_sz = runtime.doc_window_size("resource/PlayerListDialog.res", [450.0, 360.0]);
-        let mut still_open = self.open;
-        let mut close_now = false;
-        let mut out_vban = None;
+        let loc_or = |tok: &str, fb: &str| -> String {
+            if let Some(l) = d.loc {
+                let r = l.resolve(tok);
+                if !r.is_empty() && !r.starts_with('#') {
+                    return r.to_string();
+                }
+            }
+            fb.to_string()
+        };
 
-        show_tracker_window(
+        let screen = ctx.content_rect();
+        let s = (screen.height() / 720.0).max(1.0);
+        let screen_h = screen.height().round().max(480.0) as u32;
+        let tc = TrackerCtx {
             ctx,
-            runtime,
-            &mut still_open,
-            &TrackerWindowCfg {
-                id: "cs16_vgui_playerlist",
-                title: "Player List",
-                default_pos: Pos2::new(168.0, 75.0),
-                default_size: Vec2::new(win_sz[0].max(380.0), win_sz[1].max(280.0)),
-                min_size: Vec2::new(380.0, 280.0),
-                resizable: false,
-                palette: d.palette,
-                steam_icon: d.steam_icon,
-                vfs: d.vfs,
-            },
-            |ui, rt| {
-                let _ = draw_vgui_list_panel(ui, "cs16_playerlist", &mut self.list, 250.0, d.palette);
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    if rt
-                        .draw_tracker_button(
-                            ui,
-                            d.vfs,
-                            d.palette,
-                            &TrackerButtonCfg {
-                                id: "dlg_plist_mute",
-                                label: "Mute in-game voice",
-                                min_size: Vec2::new(136.0, 24.0),
-                                default_btn: false,
-                                enabled: self.list.selected_row.is_some(),
-                            },
-                        )
-                        .clicked()
-                    {
-                        out_vban = self.toggle_mute_selected();
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if rt
-                            .draw_tracker_button(
-                                ui,
-                                d.vfs,
-                                d.palette,
-                                &TrackerButtonCfg {
-                                    id: "dlg_plist_close",
-                                    label: "Close",
-                                    min_size: Vec2::new(72.0, 24.0),
-                                    default_btn: false,
-                                    enabled: true,
-                                },
-                            )
-                            .clicked()
-                        {
-                            close_now = true;
-                        }
-                    });
-                });
-            },
-        );
+            vfs: d.vfs,
+            palette: d.palette,
+            screen_h,
+            scale: s,
+        };
 
-        if !still_open || close_now {
+        let dlg_w = (467.0 * s).round();
+        let dlg_h = (388.0 * s).round();
+        let default_x = screen.left() + ((screen.width() - dlg_w) * 0.5).floor();
+        let default_y = screen.top() + ((screen.height() - dlg_h) * 0.5).floor();
+        let max_x = (screen.right() - dlg_w).max(screen.left());
+        let max_y = (screen.bottom() - dlg_h).max(screen.top());
+        let dlg_min = Pos2::new(
+            (default_x + self.drag_offset.x).clamp(screen.left(), max_x).round(),
+            (default_y + self.drag_offset.y).clamp(screen.top(), max_y).round(),
+        );
+        let dlg_rect = Rect::from_min_size(dlg_min, Vec2::new(dlg_w, dlg_h));
+
+        let mut close_now = ctx.input(|i| i.key_pressed(Key::Escape));
+        let mut out_vban = None;
+        let title = loc_or("#GameUI_CurrentPlayers", "Current Players");
+        let col_name = loc_or("#GameUI_PlayerName", "Player Name");
+        let col_props = loc_or("#GameUI_Properties", "Properties");
+        let empty_lbl = loc_or("#GameUI_NoOtherPlayersInGame", "There are no other players in the game.");
+        let mute_lbl = loc_or("#GameUI_MuteIngameVoice", "Mute in-game voice");
+        let close_lbl = loc_or("#GameUI_Close", "Close");
+
+        egui::Area::new(egui::Id::unique("cs16_vgui_playerlist"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(dlg_rect.min)
+            .show(ctx, |ui| {
+                ui.allocate_exact_size(dlg_rect.size(), Sense::hover());
+                let p = ui.painter();
+                p.rect_filled(dlg_rect, CornerRadius::ZERO, tc.palette.control_bg);
+                paint_tracker_bevel_rect(p, dlg_rect, true, tc.palette);
+
+                let title_drag = Rect::from_min_size(
+                    dlg_min,
+                    Vec2::new((dlg_w - 28.0 * s).max(40.0), (29.0 * s).round()),
+                );
+                let drag_resp = ui.interact(
+                    title_drag,
+                    ui.make_persistent_id("plist_title_drag"),
+                    Sense::drag(),
+                );
+                if drag_resp.dragged() {
+                    self.drag_offset += drag_resp.drag_delta();
+                }
+                if let Some(icon) = d.steam_icon {
+                    let isz = (16.0 * s).round();
+                    let ir = Rect::from_min_size(
+                        dlg_min + Vec2::new((7.0 * s).round(), (8.0 * s).round()),
+                        Vec2::splat(isz),
+                    );
+                    ui.painter().image(
+                        icon.id(),
+                        ir,
+                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                }
+                paint_tracker_label_rect(
+                    ui.painter(),
+                    runtime,
+                    &tc,
+                    Rect::from_min_size(
+                        dlg_min + Vec2::new((28.0 * s).round(), (4.0 * s).round()),
+                        Vec2::new((260.0 * s).round(), (22.0 * s).round()),
+                    ),
+                    &title,
+                    "DefaultBold",
+                    TextAlignment::West,
+                    tc.palette.bright_text,
+                    false,
+                    true,
+                );
+                let close_r = Rect::from_min_size(
+                    dlg_min + Vec2::new(((467.0 - 25.0) * s).round(), (8.0 * s).round()),
+                    Vec2::splat((18.0 * s).round()),
+                );
+                if draw_tracker_close_button(ui, runtime, &tc, "plist_close", close_r) {
+                    close_now = true;
+                }
+
+                let list_r = Rect::from_min_size(
+                    dlg_min + Vec2::new((28.0 * s).round(), (38.0 * s).round()),
+                    Vec2::new((410.0 * s).round(), (279.0 * s).round()),
+                );
+                let cols = [(col_name.as_str(), 240.0), (col_props.as_str(), 150.0)];
+                let _ = draw_tracker_list_panel_rect(
+                    ui,
+                    runtime,
+                    &tc,
+                    "cs16_playerlist",
+                    list_r,
+                    &cols,
+                    &self.list.rows,
+                    &mut self.list.selected_row,
+                );
+                if self.list.rows.is_empty() {
+                    let empty_r = Rect::from_min_size(
+                        list_r.min + Vec2::new((10.0 * s).round(), (28.0 * s).round()),
+                        Vec2::new((list_r.width() - 36.0 * s).max(40.0), (22.0 * s).round()),
+                    );
+                    paint_tracker_label_rect(
+                        ui.painter(),
+                        runtime,
+                        &tc,
+                        empty_r,
+                        &empty_lbl,
+                        "Default",
+                        TextAlignment::West,
+                        tc.palette.dim_text,
+                        false,
+                        true,
+                    );
+                }
+
+                let mute_r = Rect::from_min_size(
+                    dlg_min + Vec2::new((173.0 * s).round(), (326.0 * s).round()),
+                    Vec2::new((144.0 * s).round(), (24.0 * s).round()),
+                );
+                if draw_tracker_button_rect(
+                    ui,
+                    runtime,
+                    &tc,
+                    "dlg_plist_mute",
+                    mute_r,
+                    &mute_lbl,
+                    TextAlignment::West,
+                    true,
+                    self.list.selected_row.is_some(),
+                )
+                .clicked()
+                {
+                    out_vban = self.toggle_mute_selected();
+                }
+
+                let close_btn_r = Rect::from_min_size(
+                    dlg_min + Vec2::new((352.0 * s).round(), (352.0 * s).round()),
+                    Vec2::new((86.0 * s).round(), (24.0 * s).round()),
+                );
+                if draw_tracker_button_rect(
+                    ui,
+                    runtime,
+                    &tc,
+                    "dlg_plist_close",
+                    close_btn_r,
+                    &close_lbl,
+                    TextAlignment::West,
+                    false,
+                    true,
+                )
+                .clicked()
+                {
+                    close_now = true;
+                }
+            });
+        if close_now {
             self.open = false;
         }
         out_vban
