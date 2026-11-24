@@ -4,9 +4,10 @@
 //! `cstrike_downloads` -> `cstrike_hd` (optional) -> `cstrike` -> `valve` -> `platform`.
 //! All lookups are normalized to forward slashes and matched case-insensitively.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 
 use thiserror::Error;
 use tracing::{debug, info};
@@ -42,6 +43,94 @@ impl Default for VfsConfig {
     }
 }
 
+/// Lazy asset backend for non-disk environments (e.g. browser DirectoryHandle / IndexedDB / OPFS).
+pub trait VfsBackend: Send + Sync + std::fmt::Debug {
+    /// Returns normalized lowercase relative paths available from this backend.
+    fn list_paths(&self) -> Vec<String>;
+    fn contains(&self, normalized_path: &str) -> bool;
+    fn read_bytes(&self, normalized_path: &str) -> Result<Vec<u8>, VfsError>;
+}
+
+#[derive(Debug, Default)]
+struct CacheInner {
+    entries: HashMap<String, Vec<u8>>,
+    order: VecDeque<String>,
+    total_bytes: usize,
+}
+
+/// Caching wrapper around a [`VfsBackend`] for lazy reads within a byte budget.
+#[derive(Debug)]
+pub struct CachingBackend<B> {
+    inner: B,
+    max_bytes: usize,
+    cache: RwLock<CacheInner>,
+}
+
+impl<B: VfsBackend> CachingBackend<B> {
+    pub fn new(inner: B, max_bytes: usize) -> Self {
+        Self {
+            inner,
+            max_bytes,
+            cache: RwLock::new(CacheInner::default()),
+        }
+    }
+
+    pub fn inner(&self) -> &B {
+        &self.inner
+    }
+
+    pub fn cache_len(&self) -> usize {
+        self.cache.read().map_or(0, |c| c.entries.len())
+    }
+
+    pub fn cached_bytes(&self) -> usize {
+        self.cache.read().map_or(0, |c| c.total_bytes)
+    }
+}
+
+impl<B: VfsBackend> VfsBackend for CachingBackend<B> {
+    fn list_paths(&self) -> Vec<String> {
+        self.inner.list_paths()
+    }
+
+    fn contains(&self, normalized_path: &str) -> bool {
+        if let Ok(guard) = self.cache.read()
+            && guard.entries.contains_key(normalized_path)
+        {
+            return true;
+        }
+        self.inner.contains(normalized_path)
+    }
+
+    fn read_bytes(&self, normalized_path: &str) -> Result<Vec<u8>, VfsError> {
+        if let Ok(guard) = self.cache.read()
+            && let Some(bytes) = guard.entries.get(normalized_path)
+        {
+            return Ok(bytes.clone());
+        }
+        let bytes = self.inner.read_bytes(normalized_path)?;
+        if bytes.len() <= self.max_bytes
+            && let Ok(mut guard) = self.cache.write()
+        {
+            if !guard.entries.contains_key(normalized_path) {
+                while guard.total_bytes + bytes.len() > self.max_bytes
+                    && let Some(evict) = guard.order.pop_front()
+                {
+                    if let Some(old) = guard.entries.remove(&evict) {
+                        guard.total_bytes = guard.total_bytes.saturating_sub(old.len());
+                    }
+                }
+                guard.total_bytes += bytes.len();
+                guard.order.push_back(normalized_path.to_string());
+                guard
+                    .entries
+                    .insert(normalized_path.to_string(), bytes.clone());
+            }
+        }
+        Ok(bytes)
+    }
+}
+
 /// Where the bytes of an indexed file come from.
 #[derive(Debug, Clone)]
 enum Source {
@@ -49,10 +138,13 @@ enum Source {
     Disk(PathBuf),
     /// File contents held in memory.
     Memory(Vec<u8>),
+    /// Deferred read via custom backend.
+    Backend(Arc<dyn VfsBackend>),
 }
 
 /// Case-insensitive multi-layer VFS over an installed Half-Life / CS 1.6 folder,
-/// or over a set of in-memory files (see [`Vfs::from_memory`]).
+/// a backend ([`Vfs::from_backend`]), or in-memory files ([`Vfs::from_memory`],
+/// [`Vfs::from_layered_memory`]).
 #[derive(Debug, Clone)]
 pub struct Vfs {
     root: PathBuf,
@@ -61,7 +153,9 @@ pub struct Vfs {
     layers: Vec<PathBuf>,
     /// Normalized lowercase relative path -> file source.
     index: HashMap<String, Source>,
-    /// True when files were supplied in memory; the index is never rebuilt from disk.
+    /// Optional backend for lazy lookups outside static `index` enumeration.
+    backend: Option<Arc<dyn VfsBackend>>,
+    /// True when files were supplied in memory or via backend; never re-walks disk.
     in_memory: bool,
 }
 
@@ -80,6 +174,7 @@ impl Vfs {
             config,
             layers: Vec::new(),
             index: HashMap::new(),
+            backend: None,
             in_memory: false,
         };
         vfs.rebuild_index();
@@ -99,6 +194,57 @@ impl Vfs {
             config: VfsConfig::default(),
             layers: Vec::new(),
             index,
+            backend: None,
+            in_memory: true,
+        }
+    }
+
+    /// Build a multi-layer VFS from relative paths exported by browser folder pickers or drag-and-drop
+    /// (`Half-Life/cstrike/...`, `valve/...`, `cstrike_hd/...`, `cstrike_downloads/...`, `mods/<id>/...`),
+    /// enforcing GoldSrc layer priority regardless of iteration order.
+    pub fn from_layered_memory(
+        entries: impl IntoIterator<Item = (String, Vec<u8>)>,
+        config: VfsConfig,
+    ) -> Self {
+        let mut best: HashMap<String, (u8, Vec<u8>)> = HashMap::new();
+        for (raw_path, bytes) in entries {
+            let Some((rank, rel)) = split_goldsrc_layer(&raw_path, &config) else {
+                continue;
+            };
+            match best.get(&rel) {
+                Some((cur_rank, _)) if *cur_rank > rank => {}
+                _ => {
+                    best.insert(rel, (rank, bytes));
+                }
+            }
+        }
+        let index = best
+            .into_iter()
+            .map(|(path, (_, bytes))| (path, Source::Memory(bytes)))
+            .collect();
+        Self {
+            root: PathBuf::new(),
+            config,
+            layers: Vec::new(),
+            index,
+            backend: None,
+            in_memory: true,
+        }
+    }
+
+    /// Build a VFS backed by a custom lazy [`VfsBackend`] (for browser/OPFS/IndexedDB storage).
+    pub fn from_backend(backend: Arc<dyn VfsBackend>) -> Self {
+        let index = backend
+            .list_paths()
+            .into_iter()
+            .map(|p| (Self::normalize(&p), Source::Backend(Arc::clone(&backend))))
+            .collect();
+        Self {
+            root: PathBuf::new(),
+            config: VfsConfig::default(),
+            layers: Vec::new(),
+            index,
+            backend: Some(backend),
             in_memory: true,
         }
     }
@@ -202,26 +348,37 @@ impl Vfs {
         s.to_ascii_lowercase()
     }
 
-    /// Real filesystem path of a disk-backed file; `None` if absent or held in memory.
+    /// Real filesystem path of a disk-backed file; `None` if absent or held in memory/backend.
     pub fn resolve(&self, rel_path: &str) -> Option<&Path> {
         match self.index.get(&Self::normalize(rel_path))? {
             Source::Disk(path) => Some(path),
-            Source::Memory(_) => None,
+            Source::Memory(_) | Source::Backend(_) => None,
         }
     }
 
     pub fn exists(&self, rel_path: &str) -> bool {
-        self.index.contains_key(&Self::normalize(rel_path))
+        let key = Self::normalize(rel_path);
+        self.index.contains_key(&key)
+            || self.backend.as_ref().is_some_and(|b| b.contains(&key))
     }
 
     pub fn read_bytes(&self, rel_path: &str) -> Result<Vec<u8>, VfsError> {
-        match self.index.get(&Self::normalize(rel_path)) {
-            None => Err(VfsError::NotFound(rel_path.to_string())),
+        let key = Self::normalize(rel_path);
+        match self.index.get(&key) {
+            None => {
+                if let Some(backend) = &self.backend
+                    && backend.contains(&key)
+                {
+                    return backend.read_bytes(&key);
+                }
+                Err(VfsError::NotFound(rel_path.to_string()))
+            }
             Some(Source::Memory(bytes)) => Ok(bytes.clone()),
             Some(Source::Disk(real_path)) => fs::read(real_path).map_err(|source| VfsError::Io {
                 path: real_path.clone(),
                 source,
             }),
+            Some(Source::Backend(backend)) => backend.read_bytes(&key),
         }
     }
 
@@ -266,6 +423,32 @@ impl Vfs {
             .filter_map(|name| name.strip_suffix(".bsp").map(str::to_string))
             .collect()
     }
+}
+
+fn split_goldsrc_layer(raw_path: &str, config: &VfsConfig) -> Option<(u8, String)> {
+    let norm = Vfs::normalize(raw_path);
+    if norm.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = norm.split('/').filter(|s| !s.is_empty()).collect();
+    for (idx, &seg) in parts.iter().enumerate() {
+        let rank = match seg {
+            "platform" => Some((1u8, idx + 1)),
+            "valve" => Some((2u8, idx + 1)),
+            "cstrike" => Some((3u8, idx + 1)),
+            "cstrike_hd" => config.enable_hd_models.then_some((4u8, idx + 1)),
+            "cstrike_downloads" => config.enable_downloads.then_some((5u8, idx + 1)),
+            "mods" if idx + 2 < parts.len() => Some((6u8, idx + 2)),
+            _ => None,
+        };
+        if let Some((r, rest_start)) = rank {
+            if rest_start >= parts.len() {
+                return None;
+            }
+            return Some((r, parts[rest_start..].join("/")));
+        }
+    }
+    Some((3, parts.join("/")))
 }
 
 fn walk_layer(base: &Path, current: &Path, index: &mut HashMap<String, Source>) {
@@ -418,5 +601,91 @@ mod tests {
         assert!(vfs.exists("maps/de_dust2.bsp"));
         let maps = vfs.list_maps();
         assert!(maps.iter().any(|m| m == "de_dust2"));
+    }
+
+    #[derive(Debug)]
+    struct CountingBackend {
+        files: HashMap<String, Vec<u8>>,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl VfsBackend for CountingBackend {
+        fn list_paths(&self) -> Vec<String> {
+            self.files.keys().cloned().collect()
+        }
+
+        fn contains(&self, normalized_path: &str) -> bool {
+            self.files.contains_key(normalized_path)
+        }
+
+        fn read_bytes(&self, normalized_path: &str) -> Result<Vec<u8>, VfsError> {
+            self.reads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.files
+                .get(normalized_path)
+                .cloned()
+                .ok_or_else(|| VfsError::NotFound(normalized_path.to_string()))
+        }
+    }
+
+    #[test]
+    fn layered_memory_vfs_resolves_goldsrc_layer_priority() {
+        // Deliberately insert higher-priority cstrike before valve to verify priority beats order.
+        let entries = [
+            (
+                "Half-Life/cstrike/sprites/hud.txt".to_string(),
+                b"cs-hud".to_vec(),
+            ),
+            ("Half-Life/valve/sprites/hud.txt".to_string(), b"valve-hud".to_vec()),
+            ("Half-Life/valve/gfx/palette.lmp".to_string(), b"pal".to_vec()),
+            (
+                "Half-Life/cstrike_hd/models/v_ak47.mdl".to_string(),
+                b"hd-ak".to_vec(),
+            ),
+            (
+                "Half-Life/cstrike/models/v_ak47.mdl".to_string(),
+                b"sd-ak".to_vec(),
+            ),
+        ];
+        let vfs_sd = Vfs::from_layered_memory(entries.clone(), VfsConfig::default());
+        assert_eq!(vfs_sd.read_bytes("sprites/hud.txt").unwrap(), b"cs-hud");
+        assert_eq!(vfs_sd.read_bytes("gfx/palette.lmp").unwrap(), b"pal");
+        assert_eq!(vfs_sd.read_bytes("models/v_ak47.mdl").unwrap(), b"sd-ak");
+
+        let vfs_hd = Vfs::from_layered_memory(
+            entries,
+            VfsConfig {
+                enable_hd_models: true,
+                enable_downloads: true,
+            },
+        );
+        assert_eq!(vfs_hd.read_bytes("models/v_ak47.mdl").unwrap(), b"hd-ak");
+    }
+
+    #[test]
+    fn custom_backend_and_caching_backend_read_lazily_and_cache() {
+        let mut files = HashMap::new();
+        files.insert("maps/de_dust2.bsp".to_string(), vec![1u8; 8]);
+        files.insert("sound/test.wav".to_string(), vec![2u8; 8]);
+        let backend = CachingBackend::new(
+            CountingBackend {
+                files,
+                reads: std::sync::atomic::AtomicUsize::new(0),
+            },
+            10,
+        );
+        let arc = Arc::new(backend);
+        let vfs = Vfs::from_backend(arc.clone());
+        assert_eq!(vfs.list_maps(), vec!["de_dust2"]);
+        assert_eq!(vfs.read_bytes("MAPS/DE_DUST2.BSP").unwrap().len(), 8);
+        assert_eq!(vfs.read_bytes("maps/de_dust2.bsp").unwrap().len(), 8);
+        assert_eq!(
+            arc.inner().reads.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        // Second 8-byte entry exceeds the 10-byte cache budget, evicting the first entry.
+        assert_eq!(vfs.read_bytes("sound/test.wav").unwrap().len(), 8);
+        assert_eq!(arc.cache_len(), 1);
+        assert_eq!(arc.cached_bytes(), 8);
     }
 }
