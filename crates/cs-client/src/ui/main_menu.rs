@@ -2,16 +2,28 @@
 //! `New Game` VGUI2 dialog, and `Find Servers` VGUI2 dialog.
 
 use cs_assets::scheme::LocalizationTable;
+use cs_assets::vgui_res::TextAlignment;
 use cs_assets::vgui_scripts::{GameMenuEntry, SettingsScript};
 use cs_cvar::{CVarRegistry, EngineAction};
 use cs_vfs::Vfs;
-use egui::{Color32, CornerRadius, FontId, Pos2, Rect, RichText, Stroke, TextureHandle};
+use egui::{Color32, CornerRadius, Pos2, Rect, RichText, Sense, Stroke, TextureHandle, Vec2};
 
 use crate::ui::options::render_scr_options;
-use crate::ui::screens::ServerBrowserUi;
-use crate::ui::vgui2::VguiRuntime;
-use crate::ui::vgui_assets::show_steam2003_window;
-use crate::ui::vgui_theme::{VguiPalette, paint_vgui_bevel, vgui_tab};
+use crate::ui::screens::{ServerBrowserRenderCtx, ServerBrowserUi};
+use crate::ui::vgui2::{TrackerButtonCfg, VguiRuntime, VguiTextDrawOpts};
+use crate::ui::vgui_assets::{TrackerWindowCfg, show_tracker_window};
+use crate::ui::vgui_theme::{VguiPalette, paint_vgui_bevel};
+
+/// Render context for [`MainMenuUi`].
+pub struct MainMenuRenderCtx<'a> {
+    pub vfs: Option<&'a Vfs>,
+    pub loc: Option<&'a LocalizationTable>,
+    pub available_maps: &'a [String],
+    pub in_game: bool,
+    pub bg_texture: Option<&'a TextureHandle>,
+    pub steam_icon: Option<&'a TextureHandle>,
+    pub palette: VguiPalette,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum NewGameTab {
@@ -63,16 +75,12 @@ impl MainMenuUi {
         self.loc = Some(LocalizationTable::load_language(vfs, lang));
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn show(
         &mut self,
         ctx: &egui::Context,
+        runtime: &mut VguiRuntime,
         cvars: &mut CVarRegistry,
-        available_maps: &[String],
-        in_game: bool,
-        bg_texture: Option<&TextureHandle>,
-        steam_icon: Option<&TextureHandle>,
-        palette: VguiPalette,
+        m: &MainMenuRenderCtx<'_>,
     ) -> MenuCommands {
         let mut out = MenuCommands {
             actions: Vec::new(),
@@ -86,9 +94,18 @@ impl MainMenuUi {
             return out;
         }
 
+        if let Some(v) = m.vfs {
+            runtime.load_res(v, "resource/CreateMultiplayerGameServerPage.res");
+            runtime.load_res(v, "resource/CreateMultiplayerGameGameplayPage.res");
+        }
+
+        let palette = m.palette;
+        let in_game = m.in_game;
+        let available_maps = m.available_maps;
+
         // Ensure selected map exists in the list if possible
-        if !available_maps.is_empty() && !available_maps.iter().any(|m| m == &self.selected_map) {
-            if available_maps.iter().any(|m| m == "de_dust2") {
+        if !available_maps.is_empty() && !available_maps.iter().any(|mp| mp == &self.selected_map) {
+            if available_maps.iter().any(|mp| mp == "de_dust2") {
                 self.selected_map = "de_dust2".to_string();
             } else {
                 self.selected_map = available_maps[0].clone();
@@ -105,7 +122,7 @@ impl MainMenuUi {
             .show(ctx, |ui| {
                 let painter = ui.painter();
                 if !in_game {
-                    if let Some(tex) = bg_texture {
+                    if let Some(tex) = m.bg_texture {
                         // Scale-to-cover while keeping authentic 4:3 composition centered
                         let tex_aspect = 800.0 / 600.0;
                         let win_aspect = screen.width() / screen.height().max(1.0);
@@ -127,19 +144,19 @@ impl MainMenuUi {
                 }
             });
 
-        // 2. Classic bottom-left transparent CS 1.6 menu column (`resource/GameMenu.res`)
+        // 2. Classic bottom-left transparent CS 1.6 menu column (`resource/GameMenu.res` with `MenuLarge`)
         let menu_x = (screen.width() * 0.042).clamp(24.0, 56.0);
         let menu_y = (screen.height() - if in_game { 295.0 } else { 210.0 }).max(90.0);
-        let loc_ref = self.loc.as_ref();
+        let loc_ref = m.loc.or(self.loc.as_ref());
         egui::Area::new(egui::Id::unique("cs16_main_menu_items"))
             .order(egui::Order::Middle)
             .fixed_pos(Pos2::new(menu_x, menu_y))
             .show(ctx, |ui| {
-                ui.spacing_mut().item_spacing.y = 7.0;
+                ui.spacing_mut().item_spacing.y = 4.0;
 
                 if !self.game_menu.is_empty() {
                     let entries = self.game_menu.clone();
-                    for entry in entries {
+                    for (idx, entry) in entries.into_iter().enumerate() {
                         if entry.only_in_game && !in_game {
                             continue;
                         }
@@ -151,7 +168,7 @@ impl MainMenuUi {
                         if label.is_empty() {
                             continue;
                         }
-                        if menu_link(ui, label, palette) {
+                        if menu_link_vgui(ui, runtime, m.vfs, palette, &format!("gm_{idx}_{}", entry.command), label) {
                             match entry.command.as_str() {
                                 "ResumeGame" => out.resume_game = true,
                                 "Disconnect" => out.actions.push(EngineAction::Disconnect),
@@ -173,59 +190,83 @@ impl MainMenuUi {
                     }
                 } else {
                     if in_game {
-                        if menu_link(ui, "Resume Game", palette) {
+                        if menu_link_vgui(ui, runtime, m.vfs, palette, "gm_resume", "Resume Game") {
                             out.resume_game = true;
                         }
-                        if menu_link(ui, "Disconnect", palette) {
+                        if menu_link_vgui(ui, runtime, m.vfs, palette, "gm_disc", "Disconnect") {
                             out.actions.push(EngineAction::Disconnect);
                         }
-                        if menu_link(ui, "Player List", palette) {
+                        if menu_link_vgui(ui, runtime, m.vfs, palette, "gm_plist", "Player List") {
                             out.open_player_list = true;
                         }
                         ui.add_space(6.0);
                     }
 
-                    if menu_link(ui, "New Game", palette) {
+                    if menu_link_vgui(ui, runtime, m.vfs, palette, "gm_newgame", "New Game") {
                         self.new_game_open = true;
                     }
-                    if menu_link(ui, "Find Servers", palette) {
+                    if menu_link_vgui(ui, runtime, m.vfs, palette, "gm_servers", "Find Servers") {
                         self.find_servers_open = true;
                         self.server_browser.open = true;
                     }
-                    if menu_link(ui, "Options", palette) {
+                    if menu_link_vgui(ui, runtime, m.vfs, palette, "gm_options", "Options") {
                         out.open_options = true;
                     }
-                    if menu_link(ui, "Demo Player", palette) {
+                    if menu_link_vgui(ui, runtime, m.vfs, palette, "gm_demo", "Demo Player") {
                         out.open_demo_player = true;
                     }
                     ui.add_space(6.0);
-                    if menu_link(ui, "Quit", palette) {
+                    if menu_link_vgui(ui, runtime, m.vfs, palette, "gm_quit", "Quit") {
                         out.actions.push(EngineAction::Quit);
                     }
                 }
             });
 
-        // 3. `New Game` Steam 2003 VGUI2 modal window
+        // 3. `New Game` Steam 2003 VGUI2 modal window (`CreateMultiplayerGame*.res`)
         if self.new_game_open {
             let mut open = self.new_game_open;
             let mut close_now = false;
-            show_steam2003_window(
+            let title = loc_or(loc_ref, "#GameUI_NewGame", "New Game");
+            let server_tab_lbl = loc_or(loc_ref, "#GameUI_Server", "Server");
+            let game_tab_lbl = loc_or(loc_ref, "#GameUI_Game", "Game");
+            let start_lbl = loc_or(loc_ref, "#GameUI_Start", "Start");
+            let cancel_lbl = loc_or(loc_ref, "#GameUI_Cancel", "Cancel");
+
+            show_tracker_window(
                 ctx,
-                "cs16_vgui_new_game",
-                "New Game",
+                runtime,
                 &mut open,
-                Pos2::new(190.0, 120.0),
-                egui::vec2(440.0, 320.0),
-                egui::vec2(420.0, 300.0),
-                false,
-                palette,
-                steam_icon,
-                |ui| {
+                &TrackerWindowCfg {
+                    id: "cs16_vgui_new_game",
+                    title: &title,
+                    default_pos: Pos2::new(190.0, 120.0),
+                    default_size: Vec2::new(450.0, 355.0),
+                    min_size: Vec2::new(420.0, 320.0),
+                    resizable: false,
+                    palette,
+                    steam_icon: m.steam_icon,
+                    vfs: m.vfs,
+                },
+                |ui, rt| {
                     ui.horizontal(|ui| {
-                        if vgui_tab(ui, "Server", self.new_game_tab == NewGameTab::Server, palette) {
+                        if rt.draw_tracker_tab(
+                            ui,
+                            m.vfs,
+                            palette,
+                            "ng_tab_server",
+                            &server_tab_lbl,
+                            self.new_game_tab == NewGameTab::Server,
+                        ) {
                             self.new_game_tab = NewGameTab::Server;
                         }
-                        if vgui_tab(ui, "Game", self.new_game_tab == NewGameTab::Game, palette) {
+                        if rt.draw_tracker_tab(
+                            ui,
+                            m.vfs,
+                            palette,
+                            "ng_tab_game",
+                            &game_tab_lbl,
+                            self.new_game_tab == NewGameTab::Game,
+                        ) {
                             self.new_game_tab = NewGameTab::Game;
                         }
                     });
@@ -235,22 +276,23 @@ impl MainMenuUi {
                         .inner_margin(egui::Margin::same(10))
                         .stroke(Stroke::new(1.0, palette.border_dark))
                         .show(ui, |ui| {
-                            ui.set_min_size(egui::vec2(410.0, 215.0));
+                            ui.set_min_size(egui::vec2(420.0, 245.0));
                             match self.new_game_tab {
                                 NewGameTab::Server => {
                                     ui.horizontal(|ui| {
-                                        ui.label("Map:");
+                                        let map_lbl = loc_or(loc_ref, "#Cstrike_Listen_MapName", "Map");
+                                        ui.label(format!("{map_lbl}:"));
                                         egui::ComboBox::from_id_salt("ng_map_combo")
                                             .width(260.0)
                                             .selected_text(&self.selected_map)
                                             .show_ui(ui, |ui| {
-                                                for m in available_maps {
-                                                    ui.selectable_value(&mut self.selected_map, m.clone(), m);
+                                                for mp in available_maps {
+                                                    ui.selectable_value(&mut self.selected_map, mp.clone(), mp);
                                                 }
                                             });
                                     });
 
-                                    ui.add_space(10.0);
+                                    ui.add_space(6.0);
                                     ui.label(RichText::new("Quick pick classic maps:").color(palette.dim_text));
                                     ui.horizontal_wrapped(|ui| {
                                         for classic in [
@@ -263,7 +305,7 @@ impl MainMenuUi {
                                             "cs_office",
                                             "cs_italy",
                                         ] {
-                                            if available_maps.iter().any(|m| m == classic) {
+                                            if available_maps.iter().any(|mp| mp == classic) {
                                                 let active = self.selected_map == classic;
                                                 let txt = RichText::new(classic).color(if active {
                                                     palette.bright_control_text
@@ -280,7 +322,43 @@ impl MainMenuUi {
                                         }
                                     });
 
-                                    ui.add_space(10.0);
+                                    ui.separator();
+                                    let quota = cvars.get_i32("bot_quota").max(0);
+                                    let mut bots_on = quota > 0;
+                                    let inc_lbl = loc_or(
+                                        loc_ref,
+                                        "#Cstrike_Bot_IncludeBots",
+                                        "Include CPU players (Bots) in this game",
+                                    );
+                                    if ui.checkbox(&mut bots_on, inc_lbl).changed() {
+                                        cvars.set("bot_quota", if bots_on { "6" } else { "0" });
+                                    }
+                                    if bots_on {
+                                        let num_lbl = loc_or(
+                                            loc_ref,
+                                            "#Cstrike_Bot_NumberOfBots",
+                                            "Number of CPU players",
+                                        );
+                                        cvar_edit_row(ui, cvars, "bot_quota", &format!("{num_lbl}:"));
+                                        let diff_lbl = loc_or(loc_ref, "#Cstrike_Bot_Difficulty", "Difficulty");
+                                        let cur_diff = cvars.get_i32("bot_difficulty").clamp(0, 3);
+                                        ui.horizontal(|ui| {
+                                            ui.label(format!("{diff_lbl}:"));
+                                            for (lvl, tok, fb) in [
+                                                (0, "#Cstrike_Bot_Difficulty0", "Easy"),
+                                                (1, "#Cstrike_Bot_Difficulty1", "Normal"),
+                                                (2, "#Cstrike_Bot_Difficulty2", "Hard"),
+                                                (3, "#Cstrike_Bot_Difficulty3", "Expert"),
+                                            ] {
+                                                let lbl = loc_or(loc_ref, tok, fb);
+                                                if ui.radio(cur_diff == lvl, lbl).clicked() {
+                                                    cvars.set("bot_difficulty", lvl.to_string());
+                                                }
+                                            }
+                                        });
+                                    }
+
+                                    ui.add_space(4.0);
                                     ui.label(
                                         RichText::new(format!("Discovered {} maps in VFS.", available_maps.len()))
                                             .small()
@@ -288,9 +366,9 @@ impl MainMenuUi {
                                     );
                                 }
                                 NewGameTab::Game => {
-                                    egui::ScrollArea::vertical().max_height(215.0).show(ui, |ui| {
+                                    egui::ScrollArea::vertical().max_height(245.0).show(ui, |ui| {
                                         if let Some(ref scr) = self.settings_script {
-                                            render_scr_options(ui, cvars, scr, self.loc.as_ref());
+                                            render_scr_options(ui, cvars, scr, loc_ref);
                                         }
                                         ui.separator();
                                         cvar_edit_row(ui, cvars, "bot_quota", "Bots count (0..15):");
@@ -303,19 +381,35 @@ impl MainMenuUi {
 
                     ui.add_space(8.0);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add(egui::Button::new("Cancel").min_size(egui::vec2(76.0, 24.0)).corner_radius(CornerRadius::ZERO))
+                        if rt
+                            .draw_tracker_button(
+                                ui,
+                                m.vfs,
+                                palette,
+                                &TrackerButtonCfg {
+                                    id: "ng_cancel_btn",
+                                    label: &cancel_lbl,
+                                    min_size: Vec2::new(76.0, 24.0),
+                                    default_btn: false,
+                                    enabled: true,
+                                },
+                            )
                             .clicked()
                         {
                             close_now = true;
                         }
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new("Start").color(palette.bright_control_text),
-                                )
-                                .min_size(egui::vec2(76.0, 24.0))
-                                .corner_radius(CornerRadius::ZERO),
+                        if rt
+                            .draw_tracker_button(
+                                ui,
+                                m.vfs,
+                                palette,
+                                &TrackerButtonCfg {
+                                    id: "ng_start_btn",
+                                    label: &start_lbl,
+                                    min_size: Vec2::new(76.0, 24.0),
+                                    default_btn: true,
+                                    enabled: true,
+                                },
                             )
                             .clicked()
                         {
@@ -334,11 +428,13 @@ impl MainMenuUi {
         // 4. `Find Servers` full 6-tab VGUI2 Server Browser window (`DialogServerBrowser.res`)
         if self.find_servers_open {
             self.server_browser.open = true;
-            let mut tmp_rt = VguiRuntime::new();
-            if let Some(addr) = self
-                .server_browser
-                .show(ctx, &mut tmp_rt, None, palette, steam_icon)
-            {
+            let sb_ctx = ServerBrowserRenderCtx {
+                vfs: m.vfs,
+                loc: m.loc.or(self.loc.as_ref()),
+                palette,
+                steam_icon: m.steam_icon,
+            };
+            if let Some(addr) = self.server_browser.show(ctx, runtime, &sb_ctx) {
                 out.actions.push(EngineAction::Connect(addr));
             }
             if !self.server_browser.open {
@@ -350,34 +446,68 @@ impl MainMenuUi {
     }
 }
 
-/// Classic CS 1.6 borderless menu link in the lower-left corner.
-fn menu_link(ui: &mut egui::Ui, label: &str, palette: VguiPalette) -> bool {
-    let font = FontId::proportional(20.0);
-    let galley = ui
-        .painter()
-        .layout_no_wrap(label.to_string(), font.clone(), palette.base_text);
-    let desired = egui::vec2(galley.size().x + 12.0, galley.size().y + 4.0);
-    let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::click());
+/// Classic CS 1.6 borderless menu link in the lower-left corner (`TrackerScheme` `MenuLarge`).
+fn menu_link_vgui(
+    ui: &mut egui::Ui,
+    runtime: &mut VguiRuntime,
+    vfs: Option<&Vfs>,
+    palette: VguiPalette,
+    id_salt: &str,
+    label: &str,
+) -> bool {
+    let ctx = ui.ctx().clone();
+    let screen_h = ctx.content_rect().height().round().max(480.0) as u32;
+    let tracker_fonts = runtime.tracker_scheme.fonts.clone();
+    let measured = runtime.font_atlas.measure_text(
+        &ctx,
+        vfs,
+        &tracker_fonts,
+        "tracker",
+        "MenuLarge",
+        screen_h,
+        label,
+    );
+    let desired = Vec2::new((measured.x + 12.0).max(90.0), (measured.y + 4.0).max(26.0));
+    let (rect, response) = ui.allocate_exact_size(desired, Sense::click());
+    runtime.track_interactive(id_salt, &response);
 
-    let color = if response.hovered() {
+    let fg = if response.hovered() {
         palette.bright_control_text
     } else {
         palette.bright_text
     };
-
-    // Crisp 1px drop shadow like original GoldSrc bitmap menu text
-    let pos = Pos2::new(rect.min.x + 2.0, rect.min.y + 2.0);
-    ui.painter().text(
-        pos + egui::vec2(1.0, 1.0),
-        egui::Align2::LEFT_TOP,
-        label,
-        font.clone(),
-        Color32::from_black_alpha(200),
+    let text_rect = Rect::from_min_size(
+        Pos2::new(rect.min.x + 2.0, rect.min.y + 1.0),
+        Vec2::new((rect.width() - 2.0).max(40.0), rect.height()),
     );
-    ui.painter()
-        .text(pos, egui::Align2::LEFT_TOP, label, font, color);
-
+    runtime.font_atlas.paint_text(
+        ui.painter(),
+        &ctx,
+        vfs,
+        &tracker_fonts,
+        "tracker",
+        "MenuLarge",
+        screen_h,
+        text_rect,
+        label,
+        fg,
+        VguiTextDrawOpts {
+            align: TextAlignment::West,
+            process_hotkey: false,
+            proportional_scale: false,
+        },
+    );
     response.clicked()
+}
+
+fn loc_or(loc: Option<&LocalizationTable>, token: &str, fallback: &str) -> String {
+    if let Some(l) = loc {
+        let res = l.resolve(token);
+        if !res.is_empty() && !res.starts_with('#') {
+            return res.to_string();
+        }
+    }
+    fallback.to_string()
 }
 
 fn cvar_edit_row(ui: &mut egui::Ui, cvars: &mut CVarRegistry, key: &str, label: &str) {

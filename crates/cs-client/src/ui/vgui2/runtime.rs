@@ -25,7 +25,7 @@ use crate::ui::vgui2::controls::{
 };
 use crate::ui::vgui2::font_atlas::{VguiFontAtlas, VguiTextDrawOpts};
 use crate::ui::vgui2::html::{paint_html_doc, parse_html_doc};
-use crate::ui::vgui_theme::VguiPalette;
+use crate::ui::vgui_theme::{VguiPalette, paint_vgui_bevel};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VguiSchemeKind {
@@ -222,6 +222,15 @@ pub fn modal_backdrop(ctx: &egui::Context, id_salt: &str) {
         .show(ctx, |ui| {
             let _ = ui.allocate_rect(screen, Sense::click_and_drag());
         });
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TrackerButtonCfg<'a> {
+    pub id: &'a str,
+    pub label: &'a str,
+    pub min_size: Vec2,
+    pub default_btn: bool,
+    pub enabled: bool,
 }
 
 /// VGUI2 declarative `.res` layout interpreter + dual-scheme font/asset/sound runtime.
@@ -832,6 +841,150 @@ impl VguiRuntime {
             },
         );
         resp
+    }
+
+    /// Render a `TrackerScheme.res` Steam 2003 beveled button with `Default` scheme font and UI sounds.
+    pub fn draw_tracker_button(
+        &mut self,
+        ui: &mut egui::Ui,
+        vfs: Option<&Vfs>,
+        palette: VguiPalette,
+        cfg: &TrackerButtonCfg<'_>,
+    ) -> egui::Response {
+        let ctx = ui.ctx().clone();
+        let screen_h = ctx.content_rect().height().round().max(480.0) as u32;
+        let tracker_fonts = self.tracker_scheme.fonts.clone();
+        let (clean, _) = crate::ui::vgui2::font_atlas::strip_vgui_hotkey(cfg.label);
+        let text_w = self.font_atlas.measure_text(
+            &ctx,
+            vfs,
+            &tracker_fonts,
+            "tracker",
+            "Default",
+            screen_h,
+            &clean,
+        ).x;
+        let desired = Vec2::new(cfg.min_size.x.max(text_w + 18.0), cfg.min_size.y.max(22.0));
+        let (rect, resp) = ui.allocate_exact_size(
+            desired,
+            if cfg.enabled { Sense::click() } else { Sense::hover() },
+        );
+        if cfg.enabled {
+            self.track_interactive(cfg.id, &resp);
+        }
+        let down = cfg.enabled && resp.is_pointer_button_down_on();
+        let bg = if !cfg.enabled {
+            palette.control_bg
+        } else if down {
+            palette.window_bg
+        } else if resp.hovered() {
+            palette.control_dark_bg
+        } else {
+            palette.control_bg
+        };
+        let p = ui.painter();
+        p.rect_filled(rect, CornerRadius::ZERO, bg);
+        paint_vgui_bevel(p, rect, !down, palette);
+        if cfg.default_btn {
+            p.rect_stroke(
+                rect.shrink(2.0),
+                CornerRadius::ZERO,
+                Stroke::new(1.0, Color32::BLACK),
+                StrokeKind::Inside,
+            );
+        }
+        let fg = if !cfg.enabled {
+            palette.dim_text
+        } else if resp.hovered() || down {
+            palette.bright_control_text
+        } else {
+            palette.base_text
+        };
+        self.font_atlas.paint_text(
+            p,
+            &ctx,
+            vfs,
+            &tracker_fonts,
+            "tracker",
+            "Default",
+            screen_h,
+            rect.shrink2(Vec2::new(6.0, 0.0)),
+            cfg.label,
+            fg,
+            VguiTextDrawOpts {
+                align: TextAlignment::Center,
+                process_hotkey: true,
+                proportional_scale: false,
+            },
+        );
+        resp
+    }
+
+    /// Render a `TrackerScheme.res` tab strip button with golden active text and rollover/click sounds.
+    pub fn draw_tracker_tab(
+        &mut self,
+        ui: &mut egui::Ui,
+        vfs: Option<&Vfs>,
+        palette: VguiPalette,
+        id: &str,
+        label: &str,
+        selected: bool,
+    ) -> bool {
+        let ctx = ui.ctx().clone();
+        let screen_h = ctx.content_rect().height().round().max(480.0) as u32;
+        let tracker_fonts = self.tracker_scheme.fonts.clone();
+        let text_w = self.font_atlas.measure_text(
+            &ctx,
+            vfs,
+            &tracker_fonts,
+            "tracker",
+            "Default",
+            screen_h,
+            label,
+        ).x;
+        let (rect, resp) =
+            ui.allocate_exact_size(Vec2::new((text_w + 18.0).max(58.0), 22.0), Sense::click());
+        self.track_interactive(id, &resp);
+        let fill = if selected {
+            palette.control_bg
+        } else if resp.hovered() {
+            palette.control_dark_bg
+        } else {
+            palette.window_bg
+        };
+        let p = ui.painter();
+        p.rect_filled(rect, CornerRadius::ZERO, fill);
+        let top_col = if selected { palette.border_bright } else { palette.border_dark };
+        let side_col = if selected { palette.border_dark } else { palette.border_bright };
+        p.line_segment([rect.left_top(), rect.right_top()], Stroke::new(1.0, top_col));
+        p.line_segment([rect.left_top(), rect.left_bottom()], Stroke::new(1.0, top_col));
+        p.line_segment([rect.right_top(), rect.right_bottom()], Stroke::new(1.0, side_col));
+        if !selected {
+            p.line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, palette.border_bright));
+        }
+        let fg = if selected || resp.hovered() {
+            palette.bright_control_text
+        } else {
+            palette.base_text
+        };
+        self.font_atlas.paint_text(
+            p,
+            &ctx,
+            vfs,
+            &tracker_fonts,
+            "tracker",
+            "Default",
+            screen_h,
+            rect.shrink2(Vec2::new(6.0, 0.0)),
+            label,
+            fg,
+            VguiTextDrawOpts {
+                align: TextAlignment::Center,
+                process_hotkey: true,
+                proportional_scale: false,
+            },
+        );
+        resp.clicked()
     }
 
     /// Paint a `.res` document's visible controls directly into `ui` and return emitted commands.

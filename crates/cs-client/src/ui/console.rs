@@ -1,11 +1,23 @@
 //! Authentic Counter-Strike 1.6 VGUI2 Developer Console (`~`).
 
+use cs_assets::scheme::LocalizationTable;
 use cs_cvar::{CVarRegistry, EngineAction, LogLevel};
-use egui::{Color32, CornerRadius, Key, RichText, ScrollArea, Stroke, TextEdit, TextureHandle};
+use cs_vfs::Vfs;
+use egui::{Color32, Key, RichText, ScrollArea, Stroke, TextEdit, TextureHandle, Vec2};
 
 use crate::ui::parse_rgb;
-use crate::ui::vgui_assets::show_steam2003_window;
+use crate::ui::vgui2::{TrackerButtonCfg, VguiRuntime, paint_vgui_border};
+use crate::ui::vgui_assets::{TrackerWindowCfg, show_tracker_window};
 use crate::ui::vgui_theme::{VguiPalette, paint_vgui_bevel};
+
+/// Render context for [`ConsoleUi`].
+pub struct ConsoleRenderCtx<'a> {
+    pub vfs: Option<&'a Vfs>,
+    pub loc: Option<&'a LocalizationTable>,
+    pub available_maps: &'a [String],
+    pub palette: VguiPalette,
+    pub steam_icon: Option<&'a TextureHandle>,
+}
 
 #[derive(Default)]
 pub struct ConsoleUi {
@@ -35,10 +47,9 @@ impl ConsoleUi {
     pub fn show(
         &mut self,
         ctx: &egui::Context,
+        runtime: &mut VguiRuntime,
         cvars: &mut CVarRegistry,
-        available_maps: &[String],
-        palette: VguiPalette,
-        steam_icon: Option<&TextureHandle>,
+        c: &ConsoleRenderCtx<'_>,
     ) -> Vec<EngineAction> {
         let mut actions = Vec::new();
         if !self.open {
@@ -50,19 +61,32 @@ impl ConsoleUi {
             self.scroll_to_bottom = true;
         }
 
+        let palette = c.palette;
+        let available_maps = c.available_maps;
+        let title = c
+            .loc
+            .map(|l| l.resolve("#GameUI_Console"))
+            .filter(|s| !s.is_empty() && !s.starts_with('#'))
+            .unwrap_or("Console")
+            .to_string();
         let mut is_open = self.open;
-        show_steam2003_window(
+
+        show_tracker_window(
             ctx,
-            "cs16_vgui_console",
-            "Console",
+            runtime,
             &mut is_open,
-            egui::pos2(60.0, 50.0),
-            egui::vec2(640.0, 400.0),
-            egui::vec2(420.0, 240.0),
-            true,
-            palette,
-            steam_icon,
-            |ui| {
+            &TrackerWindowCfg {
+                id: "cs16_vgui_console",
+                title: &title,
+                default_pos: egui::pos2(60.0, 50.0),
+                default_size: egui::vec2(640.0, 400.0),
+                min_size: egui::vec2(420.0, 240.0),
+                resizable: true,
+                palette,
+                steam_icon: c.steam_icon,
+                vfs: c.vfs,
+            },
+            |ui, rt| {
                 // Recessed log viewport
                 let avail_h = (ui.available_height() - 46.0).max(120.0);
                 let log_frame = egui::Frame::NONE
@@ -97,6 +121,7 @@ impl ConsoleUi {
                         });
                 });
                 paint_vgui_bevel(ui.painter(), frame_resp.response.rect, false, palette);
+                paint_vgui_border(ui.painter(), frame_resp.response.rect, "InsetBorder", &rt.tracker_scheme);
                 self.scroll_to_bottom = false;
 
                 ui.add_space(6.0);
@@ -118,7 +143,7 @@ impl ConsoleUi {
 
                     // Strip accidental ` or ~ typed while opening/closing the console
                     if self.input.contains('`') || self.input.contains('~') || self.input.contains('ё') || self.input.contains('Ё') {
-                        self.input.retain(|c| !matches!(c, '`' | '~' | 'ё' | 'Ё'));
+                        self.input.retain(|ch| !matches!(ch, '`' | '~' | 'ё' | 'Ё'));
                     }
 
                     // Handle Tab autocomplete and Up/Down history when input is focused
@@ -177,11 +202,18 @@ impl ConsoleUi {
 
                     let enter_pressed = edit_resp.lost_focus()
                         && ui.input(|i| i.key_pressed(Key::Enter));
-                    let submit_clicked = ui
-                        .add(
-                            egui::Button::new("Submit")
-                                .min_size(egui::vec2(68.0, 22.0))
-                                .corner_radius(CornerRadius::ZERO),
+                    let submit_clicked = rt
+                        .draw_tracker_button(
+                            ui,
+                            c.vfs,
+                            palette,
+                            &TrackerButtonCfg {
+                                id: "console_submit_btn",
+                                label: "Submit",
+                                min_size: Vec2::new(68.0, 22.0),
+                                default_btn: false,
+                                enabled: true,
+                            },
                         )
                         .clicked();
 

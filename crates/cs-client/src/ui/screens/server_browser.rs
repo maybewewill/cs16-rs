@@ -6,15 +6,24 @@
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
+use cs_assets::scheme::LocalizationTable;
 #[cfg(not(target_arch = "wasm32"))]
 use cs_proto48::query::discover_goldsrc_lan_servers;
 use cs_vfs::Vfs;
-use egui::{CornerRadius, Pos2, RichText, TextureHandle, Vec2};
+use egui::{Key, Pos2, TextureHandle, Vec2};
 
 use crate::ui::vgui2::controls::{ListColumn, VguiListPanelState, draw_vgui_list_panel};
-use crate::ui::vgui2::VguiRuntime;
-use crate::ui::vgui_assets::show_steam2003_window;
-use crate::ui::vgui_theme::{VguiPalette, vgui_tab};
+use crate::ui::vgui2::{TrackerButtonCfg, VguiRuntime};
+use crate::ui::vgui_assets::{TrackerWindowCfg, show_tracker_window};
+use crate::ui::vgui_theme::VguiPalette;
+
+/// Render context for [`ServerBrowserUi`].
+pub struct ServerBrowserRenderCtx<'a> {
+    pub vfs: Option<&'a Vfs>,
+    pub loc: Option<&'a LocalizationTable>,
+    pub palette: VguiPalette,
+    pub steam_icon: Option<&'a TextureHandle>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ServerBrowserTab {
@@ -204,39 +213,59 @@ impl ServerBrowserUi {
         &mut self,
         ctx: &egui::Context,
         runtime: &mut VguiRuntime,
-        vfs: Option<&Vfs>,
-        palette: VguiPalette,
-        steam_icon: Option<&TextureHandle>,
+        s: &ServerBrowserRenderCtx<'_>,
     ) -> Option<String> {
         if !self.open {
             return None;
         }
-        if let Some(v) = vfs {
+        if let Some(v) = s.vfs {
             runtime.load_res(v, "servers/DialogServerBrowser.res");
             runtime.load_res(v, "servers/InternetGamesPage.res");
+            runtime.load_res(v, "servers/InternetGamesPage_Filters.res");
+            runtime.load_res(v, "servers/DialogAddServer.res");
         }
         self.sync_rows();
 
-        let win_sz = runtime.doc_window_size("servers/DialogServerBrowser.res", [620.0, 410.0]);
+        let win_sz = runtime.doc_window_size("servers/DialogServerBrowser.res", [604.0, 384.0]);
         let mut still_open = self.open;
         let mut connect_to: Option<String> = None;
 
-        show_steam2003_window(
+        let tab_labels = [
+            (ServerBrowserTab::Internet, loc_or(s.loc, "#ServerBrowser_InternetTab", "Internet")),
+            (ServerBrowserTab::Favorites, loc_or(s.loc, "#ServerBrowser_FavoritesTab", "Favorites")),
+            (ServerBrowserTab::History, loc_or(s.loc, "#ServerBrowser_HistoryTab", "History")),
+            (ServerBrowserTab::Spectate, loc_or(s.loc, "#ServerBrowser_SpectateTab", "Spectate")),
+            (ServerBrowserTab::Lan, loc_or(s.loc, "#ServerBrowser_LanTab", "Lan")),
+            (ServerBrowserTab::Friends, loc_or(s.loc, "#ServerBrowser_FriendsTab", "Friends")),
+        ];
+
+        show_tracker_window(
             ctx,
-            "cs16_vgui_server_browser",
-            "Servers",
+            runtime,
             &mut still_open,
-            Pos2::new(100.0, 70.0),
-            Vec2::new(win_sz[0].max(540.0), win_sz[1].max(320.0)),
-            Vec2::new(540.0, 320.0),
-            true,
-            palette,
-            steam_icon,
-            |ui| {
+            &TrackerWindowCfg {
+                id: "cs16_vgui_server_browser",
+                title: "Servers",
+                default_pos: Pos2::new(100.0, 70.0),
+                default_size: Vec2::new(win_sz[0].max(560.0), win_sz[1].max(340.0)),
+                min_size: Vec2::new(540.0, 320.0),
+                resizable: true,
+                palette: s.palette,
+                steam_icon: s.steam_icon,
+                vfs: s.vfs,
+            },
+            |ui, rt| {
                 ui.horizontal(|ui| {
-                    for (t, label) in ServerBrowserTab::ALL {
-                        if vgui_tab(ui, label, self.tab == t, palette) {
-                            self.tab = t;
+                    for (t, label) in &tab_labels {
+                        if rt.draw_tracker_tab(
+                            ui,
+                            s.vfs,
+                            s.palette,
+                            &format!("sb_tab_{label}"),
+                            label,
+                            self.tab == *t,
+                        ) {
+                            self.tab = *t;
                             self.list_state.selected_row = None;
                         }
                     }
@@ -249,9 +278,10 @@ impl ServerBrowserUi {
                     "cs16_sb_list",
                     &mut self.list_state,
                     220.0,
-                    palette,
+                    s.palette,
                 ) && let Some(srv) = entries.get(row_idx)
                 {
+                    self.record_history(srv.clone());
                     connect_to = Some(srv.addr.clone());
                 }
 
@@ -268,20 +298,56 @@ impl ServerBrowserUi {
 
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    if ui
-                        .add(egui::Button::new("Change Filters").corner_radius(CornerRadius::ZERO))
+                    let filt_lbl = loc_or(s.loc, "#ServerBrowser_ChangeFilters", "Change filters");
+                    if rt
+                        .draw_tracker_button(
+                            ui,
+                            s.vfs,
+                            s.palette,
+                            &TrackerButtonCfg {
+                                id: "sb_filters_btn",
+                                label: &filt_lbl,
+                                min_size: Vec2::new(108.0, 24.0),
+                                default_btn: false,
+                                enabled: true,
+                            },
+                        )
                         .clicked()
                     {
                         self.show_filters = !self.show_filters;
                     }
-                    if ui
-                        .add(egui::Button::new("Add Server").corner_radius(CornerRadius::ZERO))
+                    let add_lbl = loc_or(s.loc, "#ServerBrowser_AddServer", "Add Server");
+                    if rt
+                        .draw_tracker_button(
+                            ui,
+                            s.vfs,
+                            s.palette,
+                            &TrackerButtonCfg {
+                                id: "sb_add_btn",
+                                label: &add_lbl,
+                                min_size: Vec2::new(96.0, 24.0),
+                                default_btn: false,
+                                enabled: true,
+                            },
+                        )
                         .clicked()
                     {
                         self.add_dialog_open = true;
                     }
-                    if ui
-                        .add(egui::Button::new("Refresh").corner_radius(CornerRadius::ZERO))
+                    let ref_lbl = loc_or(s.loc, "#ServerBrowser_Refresh", "Refresh");
+                    if rt
+                        .draw_tracker_button(
+                            ui,
+                            s.vfs,
+                            s.palette,
+                            &TrackerButtonCfg {
+                                id: "sb_refresh_btn",
+                                label: &ref_lbl,
+                                min_size: Vec2::new(76.0, 24.0),
+                                default_btn: false,
+                                enabled: true,
+                            },
+                        )
                         .clicked()
                     {
                         self.refresh_lan();
@@ -292,56 +358,154 @@ impl ServerBrowserUi {
                             .selected_row
                             .and_then(|i| entries.get(i))
                             .cloned();
-                        if ui
-                            .add_enabled(
-                                sel.is_some(),
-                                egui::Button::new(RichText::new("Connect").color(palette.bright_control_text))
-                                    .corner_radius(CornerRadius::ZERO),
+                        let conn_lbl = loc_or(s.loc, "#ServerBrowser_Connect", "Connect");
+                        if rt
+                            .draw_tracker_button(
+                                ui,
+                                s.vfs,
+                                s.palette,
+                                &TrackerButtonCfg {
+                                    id: "sb_connect_btn",
+                                    label: &conn_lbl,
+                                    min_size: Vec2::new(76.0, 24.0),
+                                    default_btn: true,
+                                    enabled: sel.is_some(),
+                                },
                             )
                             .clicked()
-                            && let Some(s) = sel
+                            && let Some(srv) = sel
                         {
-                            self.record_history(s.clone());
-                            connect_to = Some(s.addr);
+                            self.record_history(srv.clone());
+                            connect_to = Some(srv.addr);
                         }
                     });
                 });
 
-                if self.add_dialog_open {
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.label("IP / Host:");
-                        ui.text_edit_singleline(&mut self.add_addr_input);
-                        if ui.button("Add to Favorites").clicked() {
-                            let addr = self.add_addr_input.trim().to_string();
-                            if !addr.is_empty() {
-                                self.add_favorite(ServerBrowserEntry {
-                                    addr: addr.clone(),
-                                    name: addr,
-                                    game: "Counter-Strike".into(),
-                                    map: "-".into(),
-                                    players: 0,
-                                    max_players: 32,
-                                    ping_ms: 0,
-                                    password: false,
-                                    vac: true,
-                                    spectate_port: false,
-                                });
-                            }
-                            self.add_dialog_open = false;
-                        }
-                        if ui.button("Connect Now").clicked() {
-                            connect_to = Some(self.add_addr_input.trim().to_string());
-                            self.add_dialog_open = false;
-                        }
-                    });
-                }
+                ui.add_space(4.0);
+                let status = if entries.is_empty() {
+                    "No servers responded on local network query.".to_string()
+                } else {
+                    format!("{} server(s) listed.", entries.len())
+                };
+                ui.label(egui::RichText::new(status).small().color(s.palette.dim_text));
             },
         );
+
+        if self.add_dialog_open {
+            let mut add_open = self.add_dialog_open;
+            let mut close_add = false;
+            show_tracker_window(
+                ctx,
+                runtime,
+                &mut add_open,
+                &TrackerWindowCfg {
+                    id: "cs16_vgui_add_server",
+                    title: &loc_or(s.loc, "#ServerBrowser_AddServersTitle", "Add Server"),
+                    default_pos: Pos2::new(220.0, 170.0),
+                    default_size: Vec2::new(410.0, 140.0),
+                    min_size: Vec2::new(360.0, 125.0),
+                    resizable: false,
+                    palette: s.palette,
+                    steam_icon: s.steam_icon,
+                    vfs: s.vfs,
+                },
+                |ui, rt| {
+                    ui.label("Enter the IP address or hostname of the server you wish to add:");
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut self.add_addr_input)
+                            .desired_width(370.0),
+                    );
+                    let enter = resp.has_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                    ui.add_space(8.0);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if rt
+                            .draw_tracker_button(
+                                ui,
+                                s.vfs,
+                                s.palette,
+                                &TrackerButtonCfg {
+                                    id: "sb_add_cancel",
+                                    label: "Cancel",
+                                    min_size: Vec2::new(72.0, 24.0),
+                                    default_btn: false,
+                                    enabled: true,
+                                },
+                            )
+                            .clicked()
+                        {
+                            close_add = true;
+                        }
+                        if rt
+                            .draw_tracker_button(
+                                ui,
+                                s.vfs,
+                                s.palette,
+                                &TrackerButtonCfg {
+                                    id: "sb_add_connect",
+                                    label: "Connect Now",
+                                    min_size: Vec2::new(98.0, 24.0),
+                                    default_btn: false,
+                                    enabled: !self.add_addr_input.trim().is_empty(),
+                                },
+                            )
+                            .clicked()
+                        {
+                            connect_to = Some(self.add_addr_input.trim().to_string());
+                            close_add = true;
+                        }
+                        if (rt
+                            .draw_tracker_button(
+                                ui,
+                                s.vfs,
+                                s.palette,
+                                &TrackerButtonCfg {
+                                    id: "sb_add_fav",
+                                    label: "Add to Favorites",
+                                    min_size: Vec2::new(124.0, 24.0),
+                                    default_btn: true,
+                                    enabled: !self.add_addr_input.trim().is_empty(),
+                                },
+                            )
+                            .clicked()
+                            || enter)
+                            && !self.add_addr_input.trim().is_empty()
+                        {
+                            let addr = self.add_addr_input.trim().to_string();
+                            self.add_favorite(ServerBrowserEntry {
+                                addr: addr.clone(),
+                                name: addr,
+                                game: "Counter-Strike".into(),
+                                map: "-".into(),
+                                players: 0,
+                                max_players: 32,
+                                ping_ms: 0,
+                                password: false,
+                                vac: true,
+                                spectate_port: false,
+                            });
+                            close_add = true;
+                        }
+                    });
+                },
+            );
+            if !add_open || close_add || ctx.input(|i| i.key_pressed(Key::Escape)) {
+                self.add_dialog_open = false;
+            }
+        }
 
         if !still_open {
             self.open = false;
         }
         connect_to
     }
+}
+
+fn loc_or(loc: Option<&LocalizationTable>, token: &str, fallback: &str) -> String {
+    if let Some(l) = loc {
+        let res = l.resolve(token);
+        if !res.is_empty() && !res.starts_with('#') {
+            return res.to_string();
+        }
+    }
+    fallback.to_string()
 }
