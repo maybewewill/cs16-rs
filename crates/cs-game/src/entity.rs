@@ -320,6 +320,18 @@ pub trait GameEntity: Send + 'static {
     fn is_delay(&self) -> bool {
         false
     }
+
+    /// `CBaseEntity::IsTriggered(pActivator)`: whether this entity is currently active for
+    /// master gating (`multisource`, `game_team_master`). Defaults to `true`.
+    fn is_triggered(
+        &self,
+        _g: &GameState,
+        _eng: &EngineApi<'_>,
+        _id: EdictId,
+        _activator: Option<EdictId>,
+    ) -> bool {
+        true
+    }
 }
 
 /// `UTIL_Remove(pEntity)` (`util.cpp:1450`, read 2026-11-22, vanilla): the entity is not freed
@@ -463,6 +475,37 @@ pub fn create_entity(classname: &str) -> Option<Box<dyn GameEntity>> {
         "item_thighpack" => Box::new(crate::inventory::ItemThighPack),
         "weapon_shield" => Box::new(crate::inventory::WorldShield::default()),
         "game_player_equip" => Box::new(crate::inventory::GamePlayerEquip::default()),
+        "multi_manager" => Box::new(crate::io::MultiManager::default()),
+        "multisource" => Box::new(crate::io::MultiSource::default()),
+        "env_global" => Box::new(crate::io::EnvGlobal::default()),
+        "game_counter" => Box::new(crate::io::GameCounter::default()),
+        "game_counter_set" => Box::new(crate::io::GameCounterSet::default()),
+        "game_end" => Box::new(crate::io::GameEnd::default()),
+        "game_player_hurt" => Box::new(crate::io::GamePlayerHurt::default()),
+        "game_player_team" => Box::new(crate::io::GamePlayerTeam::default()),
+        "game_score" => Box::new(crate::io::GameScore::default()),
+        "game_team_master" => Box::new(crate::io::GameTeamMaster::default()),
+        "game_team_set" => Box::new(crate::io::GameTeamSet::default()),
+        "game_text" => Box::new(crate::io::GameText::default()),
+        "game_zone_player" => Box::new(crate::io::GameZonePlayer::default()),
+        "player_weaponstrip" => Box::new(crate::io::PlayerWeaponStrip),
+        "trigger" => Box::new(crate::triggers::TriggerBase::default()),
+        "trigger_multiple" => Box::new(crate::triggers::TriggerMultiple::default()),
+        "trigger_once" => Box::new(crate::triggers::TriggerOnce::default()),
+        "trigger_hurt" => Box::new(crate::triggers::TriggerHurt::default()),
+        "trigger_push" => Box::new(crate::triggers::TriggerPush::default()),
+        "trigger_teleport" => Box::new(crate::triggers::TriggerTeleport::default()),
+        "trigger_gravity" => Box::new(crate::triggers::TriggerGravity::default()),
+        "trigger_relay" => Box::new(crate::triggers::TriggerRelay::default()),
+        "trigger_counter" => Box::new(crate::triggers::TriggerCounter::default()),
+        "trigger_changetarget" => Box::new(crate::triggers::TriggerChangeTarget::default()),
+        "trigger_auto" => Box::new(crate::triggers::TriggerAuto::default()),
+        "trigger_cdaudio" => Box::new(crate::triggers::TriggerCdAudio::new("trigger_cdaudio")),
+        "target_cdaudio" => Box::new(crate::triggers::TriggerCdAudio::new("target_cdaudio")),
+        "info_teleport_destination" => Box::new(crate::triggers::InfoTeleportDestination),
+        "info_intermission" => Box::new(crate::triggers::InfoIntermission),
+        "info_null" => Box::new(crate::triggers::InfoNull),
+        "infodecal" => Box::new(crate::triggers::InfoDecal::default()),
         "grenade" => Box::new(crate::grenade::Grenade::default()),
         "spark_shower" => Box::new(crate::grenade::SparkShower),
         "spraycan" => Box::new(crate::spray::SprayCan),

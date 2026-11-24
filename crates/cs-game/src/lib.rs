@@ -25,6 +25,7 @@ pub mod hostage_localnav;
 pub mod hud_misc;
 pub mod intro;
 pub mod inventory;
+pub mod io;
 pub mod mapcycle;
 pub mod menus;
 mod messages;
@@ -40,6 +41,7 @@ pub mod spray;
 mod suit;
 pub mod targets;
 pub mod teams;
+pub mod triggers;
 pub mod vip;
 pub mod weapons;
 pub mod world;
@@ -103,6 +105,21 @@ pub struct GameState {
     pub(crate) next_hostage_number: u8,
     /// Server-side engine bots (`BotManager`).
     pub(crate) bots: bots::BotManager,
+    /// Named global states controlled by `env_global` (`0=Off, 1=On, 2=Dead`).
+    pub(crate) global_states: std::collections::BTreeMap<String, i32>,
+    /// Active map fog from `env_fog` (`(rgb, density)`).
+    pub(crate) map_fog: Option<([u8; 3], f32)>,
+    /// Active map weather from `env_rain`/`func_rain` (`1`) or `env_snow`/`func_snow` (`2`).
+    pub(crate) weather: u8,
+    /// `bodyque` corpse ring edicts and next slot index.
+    pub(crate) bodyque: Vec<EdictId>,
+    pub(crate) bodyque_head: usize,
+    /// Active world sounds tracked for `soundent`.
+    pub(crate) world_sounds: Vec<(Vec3, i32, f64)>,
+    /// Active `votemap` selections per player slot (1-based index into `map_cycle.items`).
+    pub(crate) map_votes: [Option<usize>; MAX_PLAYERS],
+    /// Active `vote` kick selections per player slot (target slot index).
+    pub(crate) kick_votes: [Option<u8>; MAX_PLAYERS],
     /// Every call the dispatch delivered to a `test_dispatch` entity. For tests only (feature
     /// `test-hooks`).
     #[cfg(feature = "test-hooks")]
@@ -131,6 +148,14 @@ impl GameState {
             hostage_nav: hostage_localnav::LocalNavManager::default(),
             next_hostage_number: 0,
             bots: bots::BotManager::default(),
+            global_states: std::collections::BTreeMap::new(),
+            map_fog: None,
+            weather: 0,
+            bodyque: Vec::new(),
+            bodyque_head: 0,
+            world_sounds: Vec::new(),
+            map_votes: [None; MAX_PLAYERS],
+            kick_votes: [None; MAX_PLAYERS],
             #[cfg(feature = "test-hooks")]
             dispatch_log: Vec::new(),
         }
@@ -153,6 +178,14 @@ impl GameState {
         self.hostage_nav.reset();
         self.next_hostage_number = 0;
         self.bots.reset();
+        self.global_states.clear();
+        self.map_fog = None;
+        self.weather = 0;
+        self.bodyque.clear();
+        self.bodyque_head = 0;
+        self.world_sounds.clear();
+        self.map_votes = [None; MAX_PLAYERS];
+        self.kick_votes = [None; MAX_PLAYERS];
     }
 }
 

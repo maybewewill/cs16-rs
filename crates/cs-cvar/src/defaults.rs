@@ -135,6 +135,8 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     reg.register("mp_windifference", "1", srv, "Rounds a team must lead by to win at the win limit");
     reg.register("mp_timelimit", "0", srv, "Change the map after this many minutes (0 for no limit)");
     reg.register("mp_chattime", "10", srv, "Seconds the scoreboard is shown when the map ends");
+    reg.register("mp_mapvoteratio", "0.66", srv, "Fraction of players needed to pass a votemap");
+    reg.register("mp_kickpercent", "0.66", srv, "Fraction of teammates needed to kick a player via vote");
     // The cvars `InitHUD` sends to a joining client (ReGameDLL `game.cpp`, read 2026-11-22).
     reg.register("mp_forcecamera", "0", srv, "Spectator camera of the dead: 0 anyone, including enemies; 1 teammates only; 2 first person only");
     reg.register("mp_forcechasecam", "0", srv, "Chase camera of the dead: 0 anyone (then mp_forcecamera decides); 1 teammates only; 2 first person only");

@@ -71,6 +71,20 @@ fn info_number(info: &str, key: &str) -> i32 {
 }
 
 impl MapCycle {
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn test_set_maps(&mut self, maps: &[&str]) {
+        self.items = maps
+            .iter()
+            .map(|&m| MapCycleItem {
+                map: m.to_string(),
+                min_players: 0,
+                max_players: 0,
+            })
+            .collect();
+        self.next = 0;
+    }
+
     /// `ReloadMapCycleFile` on `mapcycle.txt` (the `mapcyclefile` cvar is not read): every line
     /// names a map, optionally followed by `\minplayers\N\maxplayers\N`. A map that is not
     /// valid (`IS_MAP_VALID`: it has no `maps/<name>.bsp`) is skipped. The first map of the

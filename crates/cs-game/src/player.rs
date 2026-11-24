@@ -3348,6 +3348,8 @@ pub(crate) fn client_command(
         "ignoremsg" => crate::chat::ignore_msg_command(g, eng, slot),
         "timeleft" => rules::timeleft_command(g, eng, slot),
         "listmaps" => rules::listmaps_command(g, eng, slot),
+        "votemap" => rules::votemap_command(g, eng, slot, argv),
+        "vote" => rules::vote_command(g, eng, slot, argv),
         "become_vip" => crate::vip::become_vip_command(g, eng, slot),
         _ => {
             // Distinct commands, so the order of `ClientCommand_` (`ignorerad`, the observer

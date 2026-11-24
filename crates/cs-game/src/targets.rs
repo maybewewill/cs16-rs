@@ -69,6 +69,32 @@ pub fn find_by_targetname(
         .find(|&id| eng.ent(id).is_some_and(|v| v.targetname == name))
 }
 
+/// `UTIL_IsMasterTriggered(string_t sMaster, CBaseEntity *pActivator)`: returns `true` when
+/// `master` is empty or every named master entity reports `is_triggered == true`.
+pub fn is_master_triggered(
+    g: &GameState,
+    eng: &EngineApi<'_>,
+    master: &str,
+    activator: Option<EdictId>,
+) -> bool {
+    if master.is_empty() {
+        return true;
+    }
+    let mut after = None;
+    let mut found_any = false;
+    while let Some(id) = find_by_targetname(eng, after, master) {
+        after = Some(id);
+        found_any = true;
+        let ok = eng
+            .private::<Box<dyn GameEntity>>(id)
+            .is_some_and(|e| e.is_triggered(g, eng, id, activator));
+        if !ok {
+            return false;
+        }
+    }
+    found_any
+}
+
 /// `FireTargets(targetName, pActivator, pCaller, useType, value)` (`subs.cpp:122`, read
 /// 2026-11-23): every entity named `target_name`, in index order, is used with `activator` and
 /// `caller`, unless it is on its way out (`FL_KILLME`, "Don't use dying ents"). The search

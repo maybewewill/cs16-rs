@@ -1026,6 +1026,15 @@ pub(crate) fn on_disconnect(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8
     if let Some(entry) = g.players.get_mut(usize::from(slot)) {
         *entry = None;
     }
+    if usize::from(slot) < g.map_votes.len() {
+        g.map_votes[usize::from(slot)] = None;
+        g.kick_votes[usize::from(slot)] = None;
+    }
+    for v in &mut g.kick_votes {
+        if *v == Some(slot) {
+            *v = None;
+        }
+    }
     crate::vip::on_disconnect(g, slot);
     teams::announce_departure(eng, slot);
     observer::on_target_left(g, eng, slot);
@@ -1680,7 +1689,7 @@ pub(crate) fn on_bomb_defused(g: &mut GameState, eng: &mut EngineApi<'_>) {
 
 /// `GoToIntermission`: the match is over; the scoreboard is shown for `mp_chattime` seconds and
 /// then the next map is asked for.
-fn go_to_intermission(g: &mut GameState, eng: &mut EngineApi<'_>) {
+pub(crate) fn go_to_intermission(g: &mut GameState, eng: &mut EngineApi<'_>) {
     if g.rules.game_over {
         // Intermission has already been triggered, so ignore.
         return;
@@ -1899,13 +1908,129 @@ pub(crate) fn listmaps_command(g: &mut GameState, eng: &mut EngineApi<'_>, slot:
     }
     p.next_listmaps = now + 0.3;
     for (i, item) in g.map_cycle.items.iter().enumerate() {
+        let idx = i + 1;
+        let votes = g.map_votes.iter().filter(|&&v| v == Some(idx)).count();
         chat::client_print(
             eng,
             slot,
             chat::HUD_PRINTCONSOLE,
             "#Votes",
-            &[&(i + 1).to_string(), &item.map, "0"],
+            &[&idx.to_string(), &item.map, &votes.to_string()],
         );
+    }
+}
+
+/// The `votemap <index|mapname>` command (`CHalfLifeMultiplay::ProcessClientCommand` + `CountMapVotes`).
+pub(crate) fn votemap_command(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    slot: u8,
+    argv: &[String],
+) {
+    let Some(arg) = argv.get(1) else {
+        listmaps_command(g, eng, slot);
+        return;
+    };
+    let ratio = eng.cvar_f32("mp_mapvoteratio");
+    if ratio <= 0.0 {
+        eng.client_print(slot, "Voting is disabled on this server.");
+        return;
+    }
+    let choice = if let Ok(num) = arg.parse::<usize>()
+        && (1..=g.map_cycle.items.len()).contains(&num)
+    {
+        Some(num)
+    } else {
+        g.map_cycle
+            .items
+            .iter()
+            .position(|m| m.map.eq_ignore_ascii_case(arg))
+            .map(|idx| idx + 1)
+    };
+    let Some(map_num) = choice else {
+        eng.client_print(slot, "Map not found in mapcycle.");
+        return;
+    };
+    g.map_votes[usize::from(slot)] = Some(map_num);
+    let voters = g.players.iter().flatten().count();
+    let needed = ((voters as f32 * ratio.clamp(0.0, 1.0)).ceil() as usize).max(1);
+    let tally = g.map_votes.iter().filter(|&&v| v == Some(map_num)).count();
+    let map_name = g.map_cycle.items[map_num - 1].map.clone();
+    eng.client_print(
+        slot,
+        &format!("Voted for {map_name} ({tally}/{needed} needed)."),
+    );
+    if tally >= needed {
+        eng.print_all(&format!("Map vote passed: changing to {map_name}."));
+        g.map_votes = [None; player::MAX_PLAYERS];
+        let _ = eng.change_level(&map_name);
+    }
+}
+
+/// The `vote <slot>` kick vote command (teammate vote against `mp_kickpercent`).
+pub(crate) fn vote_command(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    slot: u8,
+    argv: &[String],
+) {
+    let Some(voter_team) = g
+        .players
+        .get(usize::from(slot))
+        .and_then(Option::as_ref)
+        .map(|p| p.team)
+    else {
+        return;
+    };
+    let Some(arg) = argv.get(1) else {
+        for (i, entry) in g.players.iter().enumerate() {
+            if let Some(p) = entry
+                && p.team == voter_team
+            {
+                let name = eng.client_key(i as u8, "name").unwrap_or("Player");
+                eng.client_print(slot, &format!("{} : {name}", i + 1));
+            }
+        }
+        return;
+    };
+    let Ok(one_based) = arg.parse::<usize>() else {
+        return;
+    };
+    if one_based == 0 || one_based > eng.max_clients() as usize {
+        return;
+    }
+    let target_slot = (one_based - 1) as u8;
+    let Some(target) = g.players[usize::from(target_slot)].as_ref() else {
+        return;
+    };
+    if target.team != voter_team {
+        return;
+    }
+    let ratio = eng.cvar_f32("mp_kickpercent").clamp(0.0, 1.0);
+    if ratio <= 0.0 {
+        eng.client_print(slot, "Kick voting is disabled.");
+        return;
+    }
+    g.kick_votes[usize::from(slot)] = Some(target_slot);
+    let team_count = g
+        .players
+        .iter()
+        .flatten()
+        .filter(|p| p.team == voter_team)
+        .count();
+    let needed = ((team_count as f32 * ratio).ceil() as usize).max(1);
+    let tally = g
+        .kick_votes
+        .iter()
+        .filter(|&&v| v == Some(target_slot))
+        .count();
+    if tally >= needed {
+        for v in &mut g.kick_votes {
+            if *v == Some(target_slot) {
+                *v = None;
+            }
+        }
+        eng.kick(target_slot, "Kicked by team vote");
     }
 }
 

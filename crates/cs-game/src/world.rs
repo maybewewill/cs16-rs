@@ -528,11 +528,54 @@ pub(crate) struct TriggerCamera {
     pub(crate) deceleration: f32,
     /// `m_initialSpeed`: the `speed` the map gave.
     pub(crate) initial_speed: f32,
+    /// Player edict currently viewing through this camera.
+    viewer: Option<EdictId>,
+    /// Server time when camera returns control to the viewer.
+    return_time: f64,
+    /// Current path corner targetname being followed.
+    active_corner: String,
+    /// Initial spawn origin restored on `restart()`.
+    spawn_origin: Vec3,
+}
+
+impl TriggerCamera {
+    fn aim_at_target(&self, eng: &mut EngineApi<'_>, id: EdictId) {
+        let Some((cam_org, target_name)) = eng.ent(id).map(|v| (v.origin, v.target.clone())) else {
+            return;
+        };
+        let Some(target_id) = crate::targets::find_by_targetname(eng, None, &target_name) else {
+            return;
+        };
+        let Some(target_org) = eng.ent(target_id).map(|v| v.origin) else {
+            return;
+        };
+        let dir = target_org - cam_org;
+        let yaw = dir.y.atan2(dir.x).to_degrees();
+        let horiz = (dir.x * dir.x + dir.y * dir.y).sqrt();
+        let pitch = -dir.z.atan2(horiz).to_degrees();
+        if let Some(v) = eng.ent_mut(id) {
+            v.angles = Vec3::new(pitch, yaw, 0.0);
+        }
+    }
+
+    fn release_viewer(&mut self, eng: &mut EngineApi<'_>, id: EdictId) {
+        if let Some(player_id) = self.viewer.take() {
+            eng.set_view(player_id, player_id);
+        }
+        if let Some(v) = eng.ent_mut(id) {
+            v.velocity = Vec3::ZERO;
+            v.nextthink = 0.0;
+        }
+    }
 }
 
 impl GameEntity for TriggerCamera {
     fn classname(&self) -> &'static str {
         "trigger_camera"
+    }
+
+    fn is_delay(&self) -> bool {
+        true
     }
 
     /// `CTriggerCamera::KeyValue` (the four keys it handles; the rest are `CBaseDelay`'s and the
@@ -550,6 +593,10 @@ impl GameEntity for TriggerCamera {
         let Some(v) = eng.ent_mut(id) else {
             return false;
         };
+        self.spawn_origin = v.origin;
+        self.viewer = None;
+        self.return_time = 0.0;
+        self.active_corner = self.moveto.clone();
         v.movetype = MOVETYPE_NOCLIP;
         v.solid = SOLID_NOT;
         v.renderamt = 0;
@@ -562,6 +609,94 @@ impl GameEntity for TriggerCamera {
             self.deceleration = 500.0;
         }
         true
+    }
+
+    fn use_(
+        &mut self,
+        g: &mut GameState,
+        eng: &mut EngineApi<'_>,
+        id: EdictId,
+        activator: Option<EdictId>,
+        _caller: Option<EdictId>,
+        use_type: crate::entity::UseType,
+        _value: f32,
+    ) {
+        if use_type == crate::entity::UseType::Off || (self.viewer.is_some() && use_type == crate::entity::UseType::Toggle) {
+            self.release_viewer(eng, id);
+            return;
+        }
+        let Some(act) = activator.filter(|&a| player_slot(g, eng, a).is_some()) else {
+            return;
+        };
+        let hold = if self.wait > 0.0 { self.wait } else { 10.0 };
+        self.viewer = Some(act);
+        self.return_time = eng.time() + f64::from(hold);
+        self.active_corner = self.moveto.clone();
+        self.aim_at_target(eng, id);
+        if let Some(corner_id) = crate::targets::find_by_targetname(eng, None, &self.active_corner)
+            && let Some(corner_org) = eng.ent(corner_id).map(|v| v.origin)
+        {
+            let speed = self.initial_speed.max(100.0);
+            let cam_org = eng.ent(id).map_or(Vec3::ZERO, |v| v.origin);
+            let delta = corner_org - cam_org;
+            let dist = delta.length();
+            if dist > 0.1
+                && let Some(v) = eng.ent_mut(id)
+            {
+                v.velocity = (delta / dist) * speed;
+            }
+        }
+        eng.set_view(act, id);
+        let due = eng.time() + 0.05;
+        if let Some(v) = eng.ent_mut(id) {
+            v.nextthink = due;
+        }
+    }
+
+    fn think(&mut self, _g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId) {
+        let now = eng.time();
+        if self.viewer.is_some() && now >= self.return_time {
+            self.release_viewer(eng, id);
+            return;
+        }
+        if self.viewer.is_none() {
+            return;
+        }
+        let cam_org = eng.ent(id).map_or(Vec3::ZERO, |v| v.origin);
+        let dt = eng.frametime().max(0.01);
+        let vel = eng.ent(id).map_or(Vec3::ZERO, |v| v.velocity);
+        if vel.length_squared() > 0.01 {
+            eng.set_origin(id, cam_org + vel * dt);
+        }
+        self.aim_at_target(eng, id);
+        if let Some(corner_id) = crate::targets::find_by_targetname(eng, None, &self.active_corner)
+            && let Some((c_org, next)) = eng.ent(corner_id).map(|v| (v.origin, v.target.clone()))
+            && (c_org - cam_org).length() < 16.0
+        {
+            self.active_corner = next;
+            if let Some(next_id) = crate::targets::find_by_targetname(eng, None, &self.active_corner)
+                && let Some(next_org) = eng.ent(next_id).map(|v| v.origin)
+            {
+                let delta = next_org - c_org;
+                let dist = delta.length();
+                if dist > 0.1
+                    && let Some(v) = eng.ent_mut(id)
+                {
+                    v.velocity = (delta / dist) * self.initial_speed.max(100.0);
+                }
+            } else if let Some(v) = eng.ent_mut(id) {
+                v.velocity = Vec3::ZERO;
+            }
+        }
+        if let Some(v) = eng.ent_mut(id) {
+            v.nextthink = now + 0.05;
+        }
+    }
+
+    fn restart(&mut self, _g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId) {
+        self.release_viewer(eng, id);
+        self.active_corner = self.moveto.clone();
+        eng.set_origin(id, self.spawn_origin);
     }
 }
 
