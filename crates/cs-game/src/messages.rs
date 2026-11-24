@@ -278,6 +278,12 @@ pub(crate) fn ammo_x(eng: &mut EngineApi<'_>, slot: u8, index: u8, amount: u8) {
     send_raw(eng, MsgDest::One(slot), "AmmoX", &[index, amount]);
 }
 
+/// `gmsgTrain` (`CBasePlayer::UpdateClientData`): the train/vehicle gear HUD icon (`0` off,
+/// `1..=5` neutral/forward/reverse gear).
+pub(crate) fn train(eng: &mut EngineApi<'_>, slot: u8, gear: u8) {
+    send_raw(eng, MsgDest::One(slot), "Train", &[gear]);
+}
+
 /// `gmsgReloadSound` (`CBasePlayerWeapon::ReloadSound`) to `slot`: the volume byte and the
 /// kind (0 for a shotgun, 1 for any other weapon).
 pub(crate) fn reload_sound(eng: &mut EngineApi<'_>, slot: u8, volume: u8, kind: u8) {

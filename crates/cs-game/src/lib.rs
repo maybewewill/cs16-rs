@@ -12,9 +12,12 @@
 //! and the spectators watch through [`observer`].
 
 pub mod bots;
+pub mod breakables;
 pub mod bullets;
+pub mod buttons;
 pub mod buy;
 pub mod chat;
+pub mod doors;
 pub mod encoders;
 pub mod entity;
 pub mod fullpack;
@@ -699,6 +702,20 @@ impl CsGame {
         });
     }
 
+    /// Damages entity `id` as `TakeDamage` for tests (`test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn test_damage_entity(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        id: EdictId,
+        attacker: Option<EdictId>,
+        damage: f32,
+        bits: u32,
+    ) -> bool {
+        entity::take_damage_of(&mut self.state, eng, id, attacker, attacker, damage, bits)
+    }
+
     /// Uses the entity `id` with `activator` (`USE_USE`). For tests only (cargo feature
     /// `test-hooks`).
     #[cfg(feature = "test-hooks")]
@@ -728,7 +745,9 @@ impl CsGame {
         let id = eng.client_edict(slot);
         if let Some(v) = eng.ent_mut(id) {
             v.velocity = Vec3::ZERO;
-            v.flags &= !cs_engine::consts::FL_ONGROUND;
+            v.basevelocity = Vec3::ZERO;
+            v.friction = 1.0;
+            v.flags &= !(cs_engine::consts::FL_ONGROUND | cs_engine::consts::FL_BASEVELOCITY);
         }
         eng.set_origin(id, origin);
         true

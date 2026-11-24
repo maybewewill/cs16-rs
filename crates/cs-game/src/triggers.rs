@@ -1,7 +1,9 @@
 //! Trigger brushes, relays, counters, autos, teleports, point markers, and `infodecal`
 //! ported from ReGameDLL_CS (`triggers.cpp`, `effects.cpp`, `subs.cpp`).
 
-use cs_engine::consts::{EF_NODRAW, FL_KILLME, MOVETYPE_NONE, SOLID_NOT, SOLID_TRIGGER};
+use cs_engine::consts::{
+    EF_NODRAW, FL_BASEVELOCITY, FL_KILLME, MOVETYPE_NONE, SOLID_NOT, SOLID_TRIGGER,
+};
 use cs_engine::{EdictId, EngineApi};
 use cs_proto48::tempent;
 use glam::Vec3;
@@ -427,7 +429,12 @@ impl GameEntity for TriggerPush {
             }
             eng.link_entity(id, false);
         } else if let Some(ov) = eng.ent_mut(other) {
-            ov.basevelocity += push;
+            if ov.flags & FL_BASEVELOCITY != 0 {
+                ov.basevelocity += push;
+            } else {
+                ov.basevelocity = push;
+            }
+            ov.flags |= FL_BASEVELOCITY;
         }
     }
 

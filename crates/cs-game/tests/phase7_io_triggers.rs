@@ -286,8 +286,10 @@ fn multi_manager_multisource_env_global_and_triggers_work_with_restart() {
         game.touch(eng, tr_once, p0);
         assert_eq!(game.state().dispatch_log.len(), before_restart_touch, "master should be re-locked after restart");
         fire_targets(game.state_mut(), eng, "ms_gate", Some(p0), Some(p0), UseType::On, 0.0);
+        let after_gate = game.state().dispatch_log.len();
+        assert_eq!(after_gate, before_restart_touch + 1, "multisource fires target once unlocked");
         game.touch(eng, tr_once, p0);
-        assert_eq!(game.state().dispatch_log.len(), before_restart_touch + 1);
+        assert_eq!(game.state().dispatch_log.len(), after_gate + 1, "restored trigger_once fires once master unlocks");
     });
 }
 

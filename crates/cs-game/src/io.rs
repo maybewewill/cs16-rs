@@ -273,7 +273,6 @@ impl GameEntity for MultiSource {
     }
 
     fn restart(&mut self, _g: &mut GameState, _eng: &mut EngineApi<'_>, _id: EdictId) {
-        self.entities.clear();
         self.triggered = 0;
     }
 }

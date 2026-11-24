@@ -734,25 +734,11 @@ impl GameEntity for FuncLadder {
 /// How a [`StaticBrush`] behaves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BrushKind {
-    /// Solid and pushing (`MOVETYPE_PUSH`, `SOLID_BSP`), but it never moves: there is no door,
-    /// button or train logic yet.
+    /// Solid and pushing (`MOVETYPE_PUSH`, `SOLID_BSP`), e.g. `func_wall`.
     Solid,
     /// `func_illusionary`: visible, never solid.
     Illusionary,
-    /// `func_door` and `func_water` (`CBaseDoor::Spawn`, doors.cpp 192-215, read 2026-11-22): a
-    /// door with a nonzero `skin` has special contents (water, slime...) and is never solid;
-    /// otherwise `SF_DOOR_PASSABLE` makes it non-solid. Only the spawn part: the movement is
-    /// phase 7.
-    Door,
-    /// `func_door_rotating` (`CRotDoor::Spawn`): solid unless `SF_DOOR_PASSABLE`; no `skin`.
-    RotatingDoor,
 }
-
-/// `SF_DOOR_PASSABLE`.
-const SF_DOOR_PASSABLE: u32 = 1 << 3;
-
-/// `SF_DOOR_ACTUALLY_WATER` (`BIT(31)`, ReGameDLL `doors.h`, read 2026-11-22).
-const SF_DOOR_ACTUALLY_WATER: u32 = 1 << 31;
 
 /// `SetMovedir` (ReGameDLL `subs.cpp`, read 2026-11-22): `movedir` is the direction `angles`
 /// point in, with the editor's special cases (0 -1 0) = up and (0 -2 0) = down; then `angles`
@@ -806,10 +792,6 @@ impl GameEntity for StaticBrush {
     /// An entry without a `*N` brush model is refused: there is nothing to collide with.
     fn spawn(&mut self, eng: &mut EngineApi<'_>, id: EdictId, keys: &[(String, String)]) -> bool {
         let (class, kind) = (self.class, self.kind);
-        if class == "func_breakable" {
-            // `CBreakable::Spawn` precaches before anything else.
-            breakable_precache(eng, keys);
-        }
         let Some(v) = eng.ent_mut(id) else {
             return false;
         };
@@ -826,30 +808,6 @@ impl GameEntity for StaticBrush {
                     v.angles = Vec3::ZERO;
                     v.flags |= FL_WORLDBRUSH;
                 }
-            }
-            BrushKind::Door | BrushKind::RotatingDoor => {
-                // `skin` is a key of the entity; the engine copies only `spawnflags`.
-                if kind == BrushKind::Door
-                    && let Some((_, value)) = keys.iter().find(|(k, _)| k == "skin")
-                {
-                    v.skin = crate::menus::atoi(value).clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
-                }
-                let special = kind == BrushKind::Door && v.skin != 0;
-                if kind == BrushKind::Door {
-                    // `CBaseDoor::Spawn` (rg_doors.cpp, read 2026-11-22): `SetMovedir(pev)`
-                    // before anything else; the rotating door keeps its angles.
-                    set_movedir(v);
-                    if special {
-                        // "water is silent for now": marks a `func_door` as a `func_water`.
-                        v.spawnflags |= SF_DOOR_ACTUALLY_WATER;
-                    }
-                }
-                v.solid = if special || v.spawnflags & SF_DOOR_PASSABLE != 0 {
-                    SOLID_NOT
-                } else {
-                    SOLID_BSP
-                };
-                v.movetype = MOVETYPE_PUSH;
             }
             BrushKind::Illusionary => {
                 // `CFuncIllusionary::KeyValue`: `skin` is the contents of the brush (the maps
@@ -890,7 +848,10 @@ const MAT_LAST: i32 = 10;
 /// `MaterialSoundPrecache` adds, and the model of the gibs the map names (`gibmodel`, which
 /// replaces the material's). A `material` out of range is wood. Not ported: the object a
 /// breakable spawns (`spawnobject`), which is a Half-Life item the game does not have.
-fn breakable_precache(eng: &mut EngineApi<'_>, keys: &[(String, String)]) {
+pub(crate) fn breakable_precache(
+    eng: &mut EngineApi<'_>,
+    keys: &[(String, String)],
+) -> (i32, Option<String>) {
     let mut material = MAT_GLASS;
     let mut gib_model: Option<&str> = None;
     for (key, value) in keys {
@@ -969,9 +930,11 @@ fn breakable_precache(eng: &mut EngineApi<'_>, keys: &[(String, String)]) {
     }
     // `if (m_iszGibModel) pGibName = STRING(m_iszGibModel)`: the map's model wins over the
     // material's. Assumption: the maps give no empty `gibmodel`.
-    if let Some(name) = gib_model.or(default_gib) {
+    let chosen = gib_model.or(default_gib).map(str::to_string);
+    if let Some(name) = &chosen {
         precache_model(eng, name);
     }
+    (material, chosen)
 }
 
 /// The players other than `player` within `radius` of `spot`, alive or dead.

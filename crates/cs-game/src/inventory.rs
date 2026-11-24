@@ -1329,13 +1329,14 @@ pub(crate) fn clean_up_map(g: &mut GameState, eng: &mut EngineApi<'_>) {
             continue;
         };
         match class.as_str() {
-            "armoury_entity" => {
+            "grenade" | "weaponbox" | "item_thighpack" => eng.remove_entity(id),
+            // Hostages already restarted above in `rules::restart_round`.
+            "hostage_entity" | "monster_scientist" => {}
+            _ => {
                 crate::entity::with_entity(g, eng, id, |entity, g, eng| {
                     entity.restart(g, eng, id);
                 });
             }
-            "grenade" | "weaponbox" | "item_thighpack" => eng.remove_entity(id),
-            _ => {}
         }
     }
     // `PLAYBACK_EVENT(flags, ent, idx)` is `PLAYBACK_EVENT_FULL` with a zero delay, origin,

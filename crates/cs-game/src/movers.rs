@@ -9,8 +9,11 @@ use cs_engine::{EdictId, EngineApi};
 use glam::Vec3;
 
 use crate::GameState;
-use crate::entity::{FCAP_ACROSS_TRANSITION, FCAP_CONTINUOUS_USE, GameEntity, UseType};
-use crate::player::player_slot;
+use crate::entity::{
+    FCAP_ACROSS_TRANSITION, FCAP_CONTINUOUS_USE, FCAP_IMPULSE_USE, GameEntity, UseType,
+};
+use crate::messages;
+use crate::player::{self, dmg, player_slot};
 use crate::targets::find_by_targetname;
 use crate::world::{atof, brush_model_number, set_movedir};
 
@@ -628,5 +631,594 @@ impl GameEntity for FuncTrain {
             TrainState::Idle
         };
         eng.set_origin(id, start);
+    }
+}
+
+/// Rotating + vertical elevator platform (`func_platrot`, `CFuncPlatRot`).
+pub(crate) struct FuncPlatRot {
+    plat: FuncPlat,
+    start_angles: Vec3,
+    end_angles: Vec3,
+}
+
+impl Default for FuncPlatRot {
+    fn default() -> Self {
+        Self {
+            plat: FuncPlat::default(),
+            start_angles: Vec3::ZERO,
+            end_angles: Vec3::ZERO,
+        }
+    }
+}
+
+impl FuncPlatRot {
+    fn sync_rotation(&self, eng: &mut EngineApi<'_>, id: EdictId) {
+        let frac = eng.ent(id).map_or(0.0, |v| {
+            let span = self.plat.pos1.z - self.plat.pos2.z;
+            if span.abs() > 0.01 {
+                ((v.origin.z - self.plat.pos2.z) / span).clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        });
+        let angles = self.start_angles.lerp(self.end_angles, frac);
+        if let Some(v) = eng.ent_mut(id) {
+            v.angles = angles;
+        }
+    }
+}
+
+impl GameEntity for FuncPlatRot {
+    fn classname(&self) -> &'static str {
+        "func_platrot"
+    }
+
+    fn spawn(&mut self, eng: &mut EngineApi<'_>, id: EdictId, keys: &[(String, String)]) -> bool {
+        let initial_angles = eng.ent(id).map_or(Vec3::ZERO, |v| v.angles);
+        let rot = key_str(keys, "rotation").map(atof).unwrap_or(90.0);
+        if !self.plat.spawn(eng, id, keys) {
+            return false;
+        }
+        self.start_angles = initial_angles;
+        self.end_angles = initial_angles + Vec3::new(0.0, rot, 0.0);
+        self.sync_rotation(eng, id);
+        true
+    }
+
+    fn touch(&mut self, g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId, other: EdictId) {
+        self.plat.touch(g, eng, id, other);
+    }
+
+    fn use_(
+        &mut self,
+        g: &mut GameState,
+        eng: &mut EngineApi<'_>,
+        id: EdictId,
+        activator: Option<EdictId>,
+        caller: Option<EdictId>,
+        use_type: UseType,
+        value: f32,
+    ) {
+        self.plat.use_(g, eng, id, activator, caller, use_type, value);
+    }
+
+    fn think(&mut self, g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId) {
+        self.plat.think(g, eng, id);
+        self.sync_rotation(eng, id);
+    }
+
+    fn restart(&mut self, g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId) {
+        self.plat.restart(g, eng, id);
+        self.sync_rotation(eng, id);
+    }
+}
+
+const SF_PATH_DISABLED: u32 = 1 << 0;
+const SF_PATH_ALTREVERSE: u32 = 1 << 2;
+
+/// Track node for `func_tracktrain` and `func_vehicle` (`path_track`, `CPathTrack`).
+#[derive(Default)]
+pub(crate) struct PathTrack {
+    next_target: String,
+    alt_path: String,
+    use_alt: bool,
+    disabled: bool,
+    initial_disabled: bool,
+}
+
+impl GameEntity for PathTrack {
+    fn classname(&self) -> &'static str {
+        "path_track"
+    }
+
+    fn spawn(&mut self, eng: &mut EngineApi<'_>, id: EdictId, keys: &[(String, String)]) -> bool {
+        self.next_target = key_str(keys, "target").unwrap_or("").to_string();
+        self.alt_path = key_str(keys, "altpath").unwrap_or("").to_string();
+        self.use_alt = false;
+        let Some(v) = eng.ent_mut(id) else {
+            return false;
+        };
+        v.solid = SOLID_NOT;
+        v.movetype = MOVETYPE_NONE;
+        self.initial_disabled = v.spawnflags & SF_PATH_DISABLED != 0;
+        self.disabled = self.initial_disabled;
+        let _ = SF_PATH_ALTREVERSE;
+        true
+    }
+
+    fn use_(
+        &mut self,
+        _g: &mut GameState,
+        eng: &mut EngineApi<'_>,
+        id: EdictId,
+        _activator: Option<EdictId>,
+        _caller: Option<EdictId>,
+        use_type: UseType,
+        _value: f32,
+    ) {
+        if !self.alt_path.is_empty() {
+            self.use_alt = match use_type {
+                UseType::On => true,
+                UseType::Off => false,
+                UseType::Toggle | UseType::Set => !self.use_alt,
+            };
+            let chosen = if self.use_alt {
+                self.alt_path.clone()
+            } else {
+                self.next_target.clone()
+            };
+            if let Some(v) = eng.ent_mut(id) {
+                v.target = chosen;
+            }
+        } else {
+            self.disabled = !self.disabled;
+            if let Some(v) = eng.ent_mut(id) {
+                if self.disabled {
+                    v.spawnflags |= SF_PATH_DISABLED;
+                } else {
+                    v.spawnflags &= !SF_PATH_DISABLED;
+                }
+            }
+        }
+    }
+
+    fn restart(&mut self, _g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId) {
+        self.disabled = self.initial_disabled;
+        self.use_alt = false;
+        let next = self.next_target.clone();
+        if let Some(v) = eng.ent_mut(id) {
+            v.target = next;
+            if self.disabled {
+                v.spawnflags |= SF_PATH_DISABLED;
+            } else {
+                v.spawnflags &= !SF_PATH_DISABLED;
+            }
+        }
+    }
+}
+
+const SF_TRACK_PASSABLE: u32 = 1 << 3;
+const GEAR_SPEEDS: [f32; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
+
+/// Player-controllable `path_track` train (`func_tracktrain`, `CFuncTrackTrain`).
+pub(crate) struct FuncTrackTrain {
+    initial_target: String,
+    current_target: String,
+    max_speed: f32,
+    speed: f32,
+    damage: f32,
+    gear: u8,
+    driver_slot: Option<u8>,
+    spawn_origin: Vec3,
+    spawn_angles: Vec3,
+}
+
+impl Default for FuncTrackTrain {
+    fn default() -> Self {
+        Self {
+            initial_target: String::new(),
+            current_target: String::new(),
+            max_speed: 200.0,
+            speed: 0.0,
+            damage: 0.0,
+            gear: 0,
+            driver_slot: None,
+            spawn_origin: Vec3::ZERO,
+            spawn_angles: Vec3::ZERO,
+        }
+    }
+}
+
+impl FuncTrackTrain {
+    fn step_along_track(&mut self, eng: &mut EngineApi<'_>, id: EdictId) {
+        if self.speed.abs() < 1.0 || self.current_target.is_empty() {
+            if let Some(v) = eng.ent_mut(id) {
+                v.velocity = Vec3::ZERO;
+            }
+            return;
+        }
+        let Some(node) = find_by_targetname(eng, None, &self.current_target) else {
+            if let Some(v) = eng.ent_mut(id) {
+                v.velocity = Vec3::ZERO;
+            }
+            return;
+        };
+        let Some((node_org, next, disabled)) = eng
+            .ent(node)
+            .map(|v| (v.origin, v.target.clone(), v.spawnflags & SF_PATH_DISABLED != 0))
+        else {
+            return;
+        };
+        if disabled {
+            self.speed = 0.0;
+            self.gear = 1;
+            if let Some(v) = eng.ent_mut(id) {
+                v.velocity = Vec3::ZERO;
+            }
+            return;
+        }
+        let cur_org = eng.ent(id).map_or(Vec3::ZERO, |v| v.origin);
+        let delta = node_org - cur_org;
+        let dist = delta.length();
+        if dist < 12.0 && !next.is_empty() {
+            self.current_target = next;
+        }
+        let dir = if dist > 0.1 { delta / dist } else { Vec3::X };
+        let vel = dir * self.speed;
+        if let Some(v) = eng.ent_mut(id) {
+            v.velocity = vel;
+            v.nextthink = v.ltime + 0.05;
+        }
+    }
+}
+
+impl GameEntity for FuncTrackTrain {
+    fn classname(&self) -> &'static str {
+        "func_tracktrain"
+    }
+
+    fn object_caps(&self) -> i32 {
+        FCAP_ACROSS_TRANSITION | FCAP_IMPULSE_USE
+    }
+
+    fn spawn(&mut self, eng: &mut EngineApi<'_>, id: EdictId, keys: &[(String, String)]) -> bool {
+        let Some(base_solid) = mover_solid_kind(eng, id) else {
+            return false;
+        };
+        let speed = key_str(keys, "speed").map(atof).unwrap_or(200.0);
+        let start_speed = key_str(keys, "startspeed").map(atof).unwrap_or(0.0);
+        self.damage = key_str(keys, "dmg").map(atof).unwrap_or(0.0);
+        self.max_speed = if speed > 0.0 { speed } else { 200.0 };
+        self.speed = start_speed;
+        self.gear = 0;
+        self.initial_target = key_str(keys, "target").unwrap_or("").to_string();
+        self.current_target = self.initial_target.clone();
+        self.driver_slot = None;
+
+        let Some(v) = eng.ent_mut(id) else {
+            return false;
+        };
+        self.spawn_origin = v.origin;
+        self.spawn_angles = v.angles;
+        v.movetype = MOVETYPE_PUSH;
+        v.solid = if v.spawnflags & SF_TRACK_PASSABLE != 0 {
+            SOLID_NOT
+        } else {
+            base_solid
+        };
+        eng.link_entity(id, false);
+        if start_speed.abs() > 0.0 && !self.current_target.is_empty() {
+            self.step_along_track(eng, id);
+        }
+        true
+    }
+
+    fn use_(
+        &mut self,
+        g: &mut GameState,
+        eng: &mut EngineApi<'_>,
+        id: EdictId,
+        activator: Option<EdictId>,
+        _caller: Option<EdictId>,
+        use_type: UseType,
+        value: f32,
+    ) {
+        if let Some(act) = activator
+            && let Some(slot) = player_slot(g, eng, act)
+        {
+            self.driver_slot = Some(slot as u8);
+            let next_gear = if use_type == UseType::Set && (0.0..=5.0).contains(&value) {
+                value as u8
+            } else if self.gear >= 4 {
+                1
+            } else {
+                (self.gear + 1).max(2)
+            };
+            self.gear = next_gear;
+            let idx = usize::from(self.gear.saturating_sub(1)).min(4);
+            self.speed = self.max_speed * GEAR_SPEEDS[idx];
+            messages::train(eng, slot as u8, self.gear);
+            self.step_along_track(eng, id);
+            return;
+        }
+        // Triggered from map logic (e.g. a button): toggle start/stop.
+        if self.speed.abs() > 0.0 {
+            self.speed = 0.0;
+            if let Some(v) = eng.ent_mut(id) {
+                v.velocity = Vec3::ZERO;
+                v.nextthink = 0.0;
+            }
+        } else {
+            self.speed = self.max_speed * 0.5;
+            self.step_along_track(eng, id);
+        }
+    }
+
+    fn think(&mut self, _g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId) {
+        self.step_along_track(eng, id);
+    }
+
+    fn blocked(&mut self, g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId, other: EdictId) {
+        if self.damage > 0.0
+            && let Some(slot) = player_slot(g, eng, other)
+        {
+            player::take_damage(g, eng, slot as u8, Some(id), Some(id), self.damage, dmg::CRUSH);
+        }
+    }
+
+    fn restart(&mut self, _g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId) {
+        if let Some(slot) = self.driver_slot.take() {
+            messages::train(eng, slot, 0);
+        }
+        self.speed = 0.0;
+        self.gear = 0;
+        self.current_target = self.initial_target.clone();
+        let (org, ang) = (self.spawn_origin, self.spawn_angles);
+        if let Some(v) = eng.ent_mut(id) {
+            v.velocity = Vec3::ZERO;
+            v.angles = ang;
+            v.nextthink = 0.0;
+        }
+        eng.set_origin(id, org);
+    }
+}
+
+/// Control console brush linked to a `func_tracktrain` (`func_traincontrols`, `CFuncTrainControls`).
+#[derive(Default)]
+pub(crate) struct FuncTrainControls {
+    target: String,
+}
+
+impl GameEntity for FuncTrainControls {
+    fn classname(&self) -> &'static str {
+        "func_traincontrols"
+    }
+
+    fn object_caps(&self) -> i32 {
+        FCAP_ACROSS_TRANSITION | FCAP_IMPULSE_USE
+    }
+
+    fn spawn(&mut self, eng: &mut EngineApi<'_>, id: EdictId, keys: &[(String, String)]) -> bool {
+        self.target = key_str(keys, "target").unwrap_or("").to_string();
+        let has_coll = eng.has_world_collision();
+        let Some(v) = eng.ent_mut(id) else {
+            return false;
+        };
+        if brush_model_number(&v.model).is_none()
+            && has_coll
+            && (v.maxs - v.mins).length_squared() <= 0.0
+        {
+            return false;
+        }
+        v.solid = SOLID_NOT;
+        v.movetype = MOVETYPE_NONE;
+        eng.link_entity(id, false);
+        true
+    }
+
+    fn use_(
+        &mut self,
+        g: &mut GameState,
+        eng: &mut EngineApi<'_>,
+        id: EdictId,
+        activator: Option<EdictId>,
+        _caller: Option<EdictId>,
+        use_type: UseType,
+        value: f32,
+    ) {
+        if let Some(train) = find_by_targetname(eng, None, &self.target) {
+            crate::entity::use_entity(g, eng, train, activator, Some(id), use_type, value);
+        }
+    }
+}
+
+/// CS 1.6 drivable brush vehicle (`func_vehicle`, `CFuncVehicle`, used on `cs_siege`, `de_jeepathon2k`).
+pub(crate) struct FuncVehicle {
+    initial_target: String,
+    max_speed: f32,
+    speed: f32,
+    damage: f32,
+    gear: u8,
+    driver_slot: Option<u8>,
+    spawn_origin: Vec3,
+    spawn_angles: Vec3,
+}
+
+impl Default for FuncVehicle {
+    fn default() -> Self {
+        Self {
+            initial_target: String::new(),
+            max_speed: 300.0,
+            speed: 0.0,
+            damage: 0.0,
+            gear: 0,
+            driver_slot: None,
+            spawn_origin: Vec3::ZERO,
+            spawn_angles: Vec3::ZERO,
+        }
+    }
+}
+
+impl GameEntity for FuncVehicle {
+    fn classname(&self) -> &'static str {
+        "func_vehicle"
+    }
+
+    fn object_caps(&self) -> i32 {
+        FCAP_ACROSS_TRANSITION | FCAP_IMPULSE_USE
+    }
+
+    fn spawn(&mut self, eng: &mut EngineApi<'_>, id: EdictId, keys: &[(String, String)]) -> bool {
+        let Some(solid) = mover_solid_kind(eng, id) else {
+            return false;
+        };
+        let speed = key_str(keys, "speed").map(atof).unwrap_or(300.0);
+        self.max_speed = if speed > 0.0 { speed } else { 300.0 };
+        self.damage = key_str(keys, "dmg").map(atof).unwrap_or(0.0);
+        self.initial_target = key_str(keys, "target").unwrap_or("").to_string();
+        self.speed = 0.0;
+        self.gear = 0;
+        self.driver_slot = None;
+
+        let Some(v) = eng.ent_mut(id) else {
+            return false;
+        };
+        self.spawn_origin = v.origin;
+        self.spawn_angles = v.angles;
+        v.movetype = MOVETYPE_PUSH;
+        v.solid = solid;
+        eng.link_entity(id, false);
+        true
+    }
+
+    fn use_(
+        &mut self,
+        g: &mut GameState,
+        eng: &mut EngineApi<'_>,
+        id: EdictId,
+        activator: Option<EdictId>,
+        _caller: Option<EdictId>,
+        use_type: UseType,
+        value: f32,
+    ) {
+        let Some(act) = activator else {
+            return;
+        };
+        let Some(slot) = player_slot(g, eng, act) else {
+            return;
+        };
+        self.driver_slot = Some(slot as u8);
+        self.gear = if use_type == UseType::Set && (0.0..=5.0).contains(&value) {
+            value as u8
+        } else if self.gear >= 4 {
+            1
+        } else {
+            (self.gear + 1).max(2)
+        };
+        let idx = usize::from(self.gear.saturating_sub(1)).min(4);
+        self.speed = self.max_speed * GEAR_SPEEDS[idx];
+        messages::train(eng, slot as u8, self.gear);
+
+        let forward = eng
+            .ent(id)
+            .map_or(Vec3::X, |v| cs_sim::pm::math::angle_vectors(v.angles).0);
+        let vel = forward * self.speed;
+        if let Some(v) = eng.ent_mut(id) {
+            v.velocity = vel;
+            v.nextthink = if self.speed.abs() > 0.0 {
+                v.ltime + 0.05
+            } else {
+                0.0
+            };
+        }
+    }
+
+    fn think(&mut self, _g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId) {
+        if self.speed.abs() < 1.0 {
+            if let Some(v) = eng.ent_mut(id) {
+                v.velocity = Vec3::ZERO;
+            }
+            return;
+        }
+        let forward = eng
+            .ent(id)
+            .map_or(Vec3::X, |v| cs_sim::pm::math::angle_vectors(v.angles).0);
+        let vel = forward * self.speed;
+        if let Some(v) = eng.ent_mut(id) {
+            v.velocity = vel;
+            v.nextthink = v.ltime + 0.05;
+        }
+    }
+
+    fn blocked(&mut self, g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId, other: EdictId) {
+        if self.damage > 0.0
+            && let Some(slot) = player_slot(g, eng, other)
+        {
+            player::take_damage(g, eng, slot as u8, Some(id), Some(id), self.damage, dmg::CRUSH);
+        }
+    }
+
+    fn restart(&mut self, _g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId) {
+        if let Some(slot) = self.driver_slot.take() {
+            messages::train(eng, slot, 0);
+        }
+        self.speed = 0.0;
+        self.gear = 0;
+        let (org, ang) = (self.spawn_origin, self.spawn_angles);
+        if let Some(v) = eng.ent_mut(id) {
+            v.velocity = Vec3::ZERO;
+            v.angles = ang;
+            v.nextthink = 0.0;
+        }
+        eng.set_origin(id, org);
+    }
+}
+
+/// Steering/throttle wheel brush for a `func_vehicle` (`func_vehiclecontrols`, `CFuncVehicleControls`).
+#[derive(Default)]
+pub(crate) struct FuncVehicleControls {
+    target: String,
+}
+
+impl GameEntity for FuncVehicleControls {
+    fn classname(&self) -> &'static str {
+        "func_vehiclecontrols"
+    }
+
+    fn object_caps(&self) -> i32 {
+        FCAP_ACROSS_TRANSITION | FCAP_IMPULSE_USE
+    }
+
+    fn spawn(&mut self, eng: &mut EngineApi<'_>, id: EdictId, keys: &[(String, String)]) -> bool {
+        self.target = key_str(keys, "target").unwrap_or("").to_string();
+        let has_coll = eng.has_world_collision();
+        let Some(v) = eng.ent_mut(id) else {
+            return false;
+        };
+        if brush_model_number(&v.model).is_none()
+            && has_coll
+            && (v.maxs - v.mins).length_squared() <= 0.0
+        {
+            return false;
+        }
+        v.solid = SOLID_NOT;
+        v.movetype = MOVETYPE_NONE;
+        eng.link_entity(id, false);
+        true
+    }
+
+    fn use_(
+        &mut self,
+        g: &mut GameState,
+        eng: &mut EngineApi<'_>,
+        id: EdictId,
+        activator: Option<EdictId>,
+        _caller: Option<EdictId>,
+        use_type: UseType,
+        value: f32,
+    ) {
+        if let Some(vehicle) = find_by_targetname(eng, None, &self.target) {
+            crate::entity::use_entity(g, eng, vehicle, activator, Some(id), use_type, value);
+        }
     }
 }
