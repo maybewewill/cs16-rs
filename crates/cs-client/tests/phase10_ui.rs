@@ -13,20 +13,22 @@ use cs_assets::vgui_scripts::{
     CommandMenuAction, CommandMenuTree, GameMenuEntry, OverviewSpec, ScrOptionKind, SettingsScript,
     TitlesTable,
 };
-use cs_client::ui::console::ConsoleUi;
-use cs_client::ui::hud::{HudExtrasContext, HudView, draw_cs16_hud_with_extras};
+use cs_client::ui::console::{ConsoleRenderCtx, ConsoleUi};
+use cs_client::ui::hud::{HudExtrasContext, HudView, draw_cs16_hud_with_extras, draw_cs16_hud_with_runtime};
 use cs_client::ui::hud_extras::{
     WeaponBucketState, compute_damage_quadrants, damage_hazard_icons, evaluate_dhud_text_fx,
     format_hud_text_entry, format_status_bar,
 };
-use cs_client::ui::main_menu::MainMenuUi;
-use cs_client::ui::options::{OptionsTab, OptionsUi, render_scr_options};
+use cs_client::ui::main_menu::{MainMenuRenderCtx, MainMenuUi};
+use cs_client::ui::options::{
+    OptionsRenderCtx, OptionsTab, OptionsUi, parse_kb_act_list, render_scr_options,
+};
 use cs_client::ui::scoreboard::{ScoreRow, scoreboard_to_list_panel, show_scoreboard};
 use cs_client::ui::screens::{
-    BuyClassTeamMenuUi, CommandMenuUi, DemoPlayerUi, DisconnectErrorDialog, LoadingDialogUi,
-    MotdRenderCtx, MotdVguiUi, ServerBrowserEntry, ServerBrowserTab, ServerBrowserUi,
-    ServerPasswordUi, SpectatorMode, SpectatorRenderCtx, SpectatorVguiUi, VguiMenuKind,
-    dialogs::DemoTransportState, dialogs::PlayerListDialogUi,
+    BuyClassTeamMenuUi, CommandMenuUi, DemoPlayerUi, DialogRenderCtx, DisconnectErrorDialog,
+    LoadingDialogUi, MotdRenderCtx, MotdVguiUi, ServerBrowserEntry, ServerBrowserTab,
+    ServerBrowserUi, ServerPasswordUi, SpectatorMode, SpectatorRenderCtx, SpectatorVguiUi,
+    VguiMenuKind, dialogs::DemoTransportState, dialogs::PlayerListDialogUi,
 };
 use cs_client::ui::server_menu::{
     MenuSpanColor, draw_styled_text_menu, menu_key_enabled, menu_styled_lines,
@@ -125,10 +127,24 @@ fn ui_screen_main_menu_and_new_game_parses_gamemenu_and_settings_scr() {
     assert_eq!(entries[1].command, "OpenCreateMultiplayerGameDialog");
 
     let mut menu = MainMenuUi::default();
+    let mut rt = VguiRuntime::new();
     let mut cvars = CVarRegistry::new_with_defaults();
     let maps = vec!["de_dust2".to_string(), "cs_office".to_string()];
     let out = run_egui_frame(|ctx| {
-        let cmds = menu.show(ctx, &mut cvars, &maps, false, None, None, palette());
+        let cmds = menu.show(
+            ctx,
+            &mut rt,
+            &mut cvars,
+            &MainMenuRenderCtx {
+                vfs: None,
+                loc: None,
+                available_maps: &maps,
+                in_game: false,
+                bg_texture: None,
+                steam_icon: None,
+                palette: palette(),
+            },
+        );
         assert!(!cmds.resume_game);
     });
     assert!(out > 0);
@@ -252,9 +268,20 @@ fn ui_screen_options_dialog_binds_cvars_and_keybinds() {
     let mut opts = OptionsUi::default();
     opts.open = true;
     opts.tab = OptionsTab::Multiplayer;
+    let mut rt = VguiRuntime::new();
     let mut cvars = CVarRegistry::new_with_defaults();
     let out = run_egui_frame(|ctx| {
-        opts.show(ctx, &mut cvars, palette(), None);
+        opts.show(
+            ctx,
+            &mut rt,
+            &mut cvars,
+            &OptionsRenderCtx {
+                vfs: None,
+                loc: None,
+                palette: palette(),
+                steam_icon: None,
+            },
+        );
     });
     assert!(out > 0);
     assert!(cvars.key_for_command("+commandmenu").is_some());
@@ -266,11 +293,23 @@ fn ui_screen_developer_console_filters_and_completes_commands() {
     let mut console = ConsoleUi::default();
     console.open();
     assert!(console.open);
+    let mut rt = VguiRuntime::new();
     let mut cvars = CVarRegistry::new_with_defaults();
     cvars.info("Test log line");
     let maps = vec!["de_dust2".into()];
     let out = run_egui_frame(|ctx| {
-        let actions = console.show(ctx, &mut cvars, &maps, palette(), None);
+        let actions = console.show(
+            ctx,
+            &mut rt,
+            &mut cvars,
+            &ConsoleRenderCtx {
+                vfs: None,
+                loc: None,
+                available_maps: &maps,
+                palette: palette(),
+                steam_icon: None,
+            },
+        );
         assert!(actions.is_empty());
     });
     assert!(out > 0);
@@ -889,8 +928,14 @@ fn ui_screen_loading_dialog_reads_res_and_cancels() {
         vac_secure: true,
     };
     let mut rt = VguiRuntime::new();
+    let dlg_ctx = DialogRenderCtx {
+        vfs: None,
+        loc: None,
+        palette: palette(),
+        steam_icon: None,
+    };
     let out = run_egui_frame(|ctx| {
-        assert!(!dlg.show(ctx, &mut rt, None, None, palette(), None));
+        assert!(!dlg.show(ctx, &mut rt, &dlg_ctx));
     });
     assert!(out > 0);
 }
@@ -946,6 +991,7 @@ fn ui_screen_options_all_tabs_covers_7_tabs_and_user_scr() {
     opts.open = true;
     opts.tab = OptionsTab::Lock;
     opts.user_script = Some(script);
+    let mut rt = VguiRuntime::new();
     let mut cvars = CVarRegistry::new_with_defaults();
     for tab in [
         OptionsTab::Multiplayer,
@@ -957,7 +1003,19 @@ fn ui_screen_options_all_tabs_covers_7_tabs_and_user_scr() {
         OptionsTab::Lock,
     ] {
         opts.tab = tab;
-        let out = run_egui_frame(|ctx| opts.show(ctx, &mut cvars, palette(), None));
+        let out = run_egui_frame(|ctx| {
+            opts.show(
+                ctx,
+                &mut rt,
+                &mut cvars,
+                &OptionsRenderCtx {
+                    vfs: None,
+                    loc: None,
+                    palette: palette(),
+                    steam_icon: None,
+                },
+            );
+        });
         assert!(out > 0);
     }
 }
@@ -991,9 +1049,16 @@ fn ui_screen_password_and_error_dialogs_submits_password_and_shows_disconnect() 
     let mut err = DisconnectErrorDialog::default();
     err.trigger("Disconnected", "Server shutting down");
     assert!(err.open);
+    let mut rt = VguiRuntime::new();
+    let dlg_ctx = DialogRenderCtx {
+        vfs: None,
+        loc: None,
+        palette: palette(),
+        steam_icon: None,
+    };
     let out = run_egui_frame(|ctx| {
-        assert!(pw.show(ctx, palette(), None).is_none());
-        err.show(ctx, palette(), None);
+        assert!(pw.show(ctx, &mut rt, &dlg_ctx).is_none());
+        err.show(ctx, &mut rt, &dlg_ctx);
     });
     assert!(out > 0);
 }
@@ -1065,7 +1130,7 @@ fn ui_hud_overview_map_maps_world_to_uv_and_chromakeys_bmp() {
     if let Some(vfs) = discover_retail_vfs() {
         let dust2 = OverviewSpec::load(&vfs, "de_dust2").expect("overviews/de_dust2.txt");
         let img = load_overview_image_rgba(&vfs, &dust2.image).expect("overviews/de_dust2.bmp");
-        assert!(img.rgba.chunks_exact(4).any(|px| px[3] == 0));
+        assert!(img.rgba.as_chunks::<4>().0.iter().any(|px| px[3] == 0));
     } else {
         eprintln!("SKIPPED retail de_dust2 overview chromakey check: CS16_GAMEDIR not set");
     }
@@ -1342,4 +1407,98 @@ fn ui_vgui2_trigger_button_emits_click_sound_and_command_event() {
     assert_eq!(cmd.as_deref(), Some("okay"));
     let sounds = rt.take_ui_sounds();
     assert_eq!(sounds, vec![cs_client::ui::vgui2::VguiUiSound::Click]);
+}
+
+#[test]
+fn ui_kb_act_list_parses_headers_and_commands_from_retail() {
+    let sample = r##"
+"blank" "=========================="
+"blank" "#Valve_Movement_Title"
+"blank" "=========================="
+"+forward" "#Valve_Move_Forward"
+"+attack" "#Cstrike_Fire"
+"##;
+    let parsed = parse_kb_act_list(sample);
+    assert_eq!(parsed.len(), 3);
+    assert!(parsed[0].is_header);
+    assert_eq!(parsed[0].label, "#Valve_Movement_Title");
+    assert!(!parsed[1].is_header);
+    assert_eq!(parsed[1].command, "+forward");
+
+    if let Some(vfs) = discover_retail_vfs() {
+        let mut opts = OptionsUi::default();
+        opts.load_resources(&vfs);
+        assert!(opts.kb_actions.len() > 20);
+        assert!(!opts.spray_logos.is_empty());
+        assert!(!opts.selected_spray.is_empty());
+    }
+}
+
+#[test]
+fn ui_options_advanced_localizes_user_scr_tokens() {
+    let script = SettingsScript::parse(
+        r##"VERSION 1.0
+        DESCRIPTION INFO_OPTIONS
+        {
+            "hud_centerid" { "#Cstrike_Center_ID_Names" { BOOL } { "1" } }
+        }"##,
+    );
+    let mut loc = LocalizationTable::default();
+    loc.insert_text(
+        "\"Tokens\"\n{\n\"Cstrike_Center_ID_Names\" \"Center player ID names\"\n}",
+    );
+    let mut cvars = CVarRegistry::new_with_defaults();
+    let out = run_egui_frame(|ctx| {
+        egui::Area::new(egui::Id::unique("test_adv_loc_scr")).show(ctx, |ui| {
+            render_scr_options(ui, &mut cvars, &script, Some(&loc));
+        });
+    });
+    assert!(out > 0);
+}
+
+#[test]
+fn ui_hud_with_runtime_renders_engine_font_lines() {
+    let hud = HudState {
+        health: 100,
+        money: 800,
+        ..Default::default()
+    };
+    let mut names = BTreeMap::new();
+    names.insert(0u8, "Alpha".to_string());
+    let owned = HashSet::new();
+    let feed = vec![DeathNotice {
+        killer: 1,
+        victim: 1,
+        headshot: true,
+        weapon: "ak47".to_string(),
+    }];
+    let chat = vec!["Alpha : rush b".to_string()];
+    let notify = vec!["Player connected".to_string()];
+    let view = HudView {
+        hud: &hud,
+        now: 1.2,
+        time_sec: 1.2,
+        names: &names,
+        owned: &owned,
+        feed: &feed,
+        chat: &chat,
+        notify: &notify,
+        center: Some("Bomb has been planted!"),
+        weapon_switch_timer: 0.0,
+        alive: true,
+        scoped: false,
+        eye: Vec3::ZERO,
+        yaw_deg: 0.0,
+        underwater_tint: None,
+    };
+    let vfs = discover_retail_vfs();
+    let mut rt = VguiRuntime::new();
+    if let Some(ref v) = vfs {
+        rt.load_scheme_fonts(v);
+    }
+    let extras = HudExtrasContext::default();
+    let out = run_egui_frame(|ctx| {
+        draw_cs16_hud_with_runtime(ctx, None, &view, &extras, &mut rt, vfs.as_ref());
+    });
+    assert!(out > 0);
 }

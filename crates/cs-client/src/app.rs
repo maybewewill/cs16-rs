@@ -40,24 +40,25 @@ use cs_client::render::mdl_renderer::{StudioInstance, viewmodel_transform};
 use cs_client::render::scene::ModelRegistry;
 use cs_client::render::{RenderSettings, Renderer, SceneDynamicData};
 use cs_client::ui::chat::ChatInputUi;
-use cs_client::ui::console::ConsoleUi;
+use cs_client::ui::console::{ConsoleRenderCtx, ConsoleUi};
 use cs_client::ui::hud::{
-    HudExtrasContext, HudSprites, HudView, compute_hud_visibility, draw_cs16_hud_with_extras,
+    HudExtrasContext, HudSprites, HudView, compute_hud_visibility, draw_cs16_hud_with_runtime,
     draw_voice_speakers,
 };
 use cs_client::ui::hud_extras::{OverviewMapTex, WeaponBucketState, draw_overview_map};
 use cs_pm::collision::Hull;
-use cs_client::ui::main_menu::MainMenuUi;
+use cs_client::ui::main_menu::{MainMenuRenderCtx, MainMenuUi};
 use cs_client::ui::mod_hud::{draw_mod_approval_prompt, draw_mod_hud};
-use cs_client::ui::options::OptionsUi;
+use cs_client::ui::options::{OptionsRenderCtx, OptionsUi};
 use cs_client::ui::scoreboard::{ScoreRow, ScoreboardRenderCtx, show_scoreboard_vgui};
 use cs_client::ui::screens::{
-    BuyClassTeamMenuUi, BuyMenuRenderCtx, CommandMenuUi, DemoPlayerUi, DisconnectErrorDialog,
-    LoadingDialogUi, MotdRenderCtx, MotdVguiUi, PlayerListDialogUi, ServerPasswordUi,
-    SpectatorMode, SpectatorRenderCtx, SpectatorVguiUi, VguiMenuKind,
+    BuyClassTeamMenuUi, BuyMenuRenderCtx, CommandMenuUi, DemoPlayerUi, DialogRenderCtx,
+    DisconnectErrorDialog, LoadingDialogUi, MotdRenderCtx, MotdVguiUi, PlayerListDialogUi,
+    ServerPasswordUi, SpectatorMode, SpectatorRenderCtx, SpectatorVguiUi, VguiMenuKind,
 };
 use cs_client::ui::server_menu::{
-    draw_styled_text_menu, draw_text_menu, menu_key_enabled, menu_styled_lines_with_titles,
+    draw_styled_text_menu_vgui, draw_text_menu_vgui, menu_key_enabled,
+    menu_styled_lines_with_titles,
 };
 use cs_client::ui::vgui2::{VguiRuntime, install_scheme_fonts_into_egui};
 use cs_client::ui::vgui_assets::VguiAssetBank;
@@ -249,7 +250,7 @@ impl Cs16App {
         if let Some(v) = &vfs {
             let lang = cvars.get_str("cl_language").to_string();
             menu_ui.load_resources(v, &lang);
-            options_ui.load_user_script(v);
+            options_ui.load_resources(v);
             vgui_rt.load_scheme_fonts(v);
             spectator_ui.load_assets(v);
             command_menu_ui.load_from_vfs(v);
@@ -1622,7 +1623,14 @@ impl Cs16App {
                     yaw_deg: self.camera.yaw_deg,
                     underwater_tint: v.underwater_tint,
                 };
-                draw_cs16_hud_with_extras(&rt.egui_ctx, rt.hud_sprites.as_ref(), &view, &extras);
+                draw_cs16_hud_with_runtime(
+                    &rt.egui_ctx,
+                    rt.hud_sprites.as_ref(),
+                    &view,
+                    &extras,
+                    &mut self.vgui_rt,
+                    self.vfs.as_ref(),
+                );
                 if !alive
                     && matches!(
                         self.spectator_ui.mode,
@@ -1659,10 +1667,22 @@ impl Cs16App {
             draw_mod_hud(&rt.egui_ctx, &mod_hud_cmds);
             if let Some(styled) = &styled_menu_now {
                 let scale = (rt.egui_ctx.content_rect().height() / 768.0).clamp(0.85, 1.45);
-                draw_styled_text_menu(&rt.egui_ctx, styled, scale);
+                draw_styled_text_menu_vgui(
+                    &rt.egui_ctx,
+                    &mut self.vgui_rt,
+                    self.vfs.as_ref(),
+                    styled,
+                    scale,
+                );
             } else if let Some(lines) = &fallback_vgui_lines {
                 let scale = (rt.egui_ctx.content_rect().height() / 768.0).clamp(0.85, 1.45);
-                draw_text_menu(&rt.egui_ctx, lines, scale);
+                draw_text_menu_vgui(
+                    &rt.egui_ctx,
+                    &mut self.vgui_rt,
+                    self.vfs.as_ref(),
+                    lines,
+                    scale,
+                );
             }
             let modal_menu_open = self.motd_ui.open
                 || self.buy_team_class_ui.active_res.is_some()
@@ -1717,7 +1737,14 @@ impl Cs16App {
                 show_scoreboard_vgui(&rt.egui_ctx, &mut self.vgui_rt, &sb_ctx);
             }
             if self.chat_ui.open {
-                sent_chat = self.chat_ui.show(&rt.egui_ctx, self.palette);
+                let mut con_ext = HudExtrasContext::default();
+                con_ext.apply_cvars(&self.cvars);
+                sent_chat = self.chat_ui.show(
+                    &rt.egui_ctx,
+                    &mut self.vgui_rt,
+                    self.vfs.as_ref(),
+                    con_ext.con_color,
+                );
             }
             if let Some(raw_motd) = &motd_raw {
                 let motd_ctx = MotdRenderCtx {
@@ -1758,12 +1785,17 @@ impl Cs16App {
         let steam_icon = rt.vgui_bank.steam_icon.as_ref();
         let menu_cmds = self.menu_ui.show(
             &rt.egui_ctx,
+            &mut self.vgui_rt,
             &mut self.cvars,
-            &self.available_maps,
-            self.session.is_active(),
-            rt.bg_texture.as_ref(),
-            steam_icon,
-            self.palette,
+            &MainMenuRenderCtx {
+                vfs: self.vfs.as_ref(),
+                loc: self.loc.as_ref(),
+                available_maps: &self.available_maps,
+                in_game: self.session.is_active(),
+                bg_texture: rt.bg_texture.as_ref(),
+                steam_icon,
+                palette: self.palette,
+            },
         );
         pending_actions.extend(menu_cmds.actions);
         if menu_cmds.open_options {
@@ -1778,38 +1810,55 @@ impl Cs16App {
         if menu_cmds.resume_game {
             should_resume = true;
         }
-        self.options_ui
-            .show(&rt.egui_ctx, &mut self.cvars, self.palette, steam_icon);
-        if self.loading_ui.show(
+        self.options_ui.show(
             &rt.egui_ctx,
             &mut self.vgui_rt,
-            self.vfs.as_ref(),
-            self.loc.as_ref(),
-            self.palette,
+            &mut self.cvars,
+            &OptionsRenderCtx {
+                vfs: self.vfs.as_ref(),
+                loc: self.loc.as_ref(),
+                palette: self.palette,
+                steam_icon,
+            },
+        );
+        let dlg_ctx = DialogRenderCtx {
+            vfs: self.vfs.as_ref(),
+            loc: self.loc.as_ref(),
+            palette: self.palette,
             steam_icon,
-        ) {
+        };
+        if self
+            .loading_ui
+            .show(&rt.egui_ctx, &mut self.vgui_rt, &dlg_ctx)
+        {
             cancel_loading = true;
         }
         let vban_cmd = self.player_list_ui.show(
             &rt.egui_ctx,
             &mut self.vgui_rt,
-            self.vfs.as_ref(),
             &names,
             self.session.local_slot(),
-            self.palette,
-            steam_icon,
+            &dlg_ctx,
         );
         self.demo_player_ui
-            .show(&rt.egui_ctx, &mut self.vgui_rt, self.vfs.as_ref(), self.palette, steam_icon);
-        let pw_submit = self.password_ui.show(&rt.egui_ctx, self.palette, steam_icon);
-        self.disconnect_err_ui.show(&rt.egui_ctx, self.palette, steam_icon);
+            .show(&rt.egui_ctx, &mut self.vgui_rt, &dlg_ctx);
+        let pw_submit = self
+            .password_ui
+            .show(&rt.egui_ctx, &mut self.vgui_rt, &dlg_ctx);
+        self.disconnect_err_ui
+            .show(&rt.egui_ctx, &mut self.vgui_rt, &dlg_ctx);
         let mod_decisions = draw_mod_approval_prompt(&rt.egui_ctx, &pending_mod_approvals);
         pending_actions.extend(self.console_ui.show(
             &rt.egui_ctx,
+            &mut self.vgui_rt,
             &mut self.cvars,
-            &self.available_maps,
-            self.palette,
-            steam_icon,
+            &ConsoleRenderCtx {
+                vfs: self.vfs.as_ref(),
+                loc: self.loc.as_ref(),
+                available_maps: &self.available_maps,
+                palette: self.palette,
+                steam_icon,
+            },
         ));
 
         let full_output = rt.egui_ctx.end_pass();

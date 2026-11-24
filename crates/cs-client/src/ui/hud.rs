@@ -8,6 +8,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use cs_assets::scheme::{HudSpriteEntry, load_hud_txt};
 use cs_assets::spr::GoldSrcSprite;
+use cs_assets::vgui_font::SchemeFontSet;
+use cs_assets::vgui_res::TextAlignment;
 use cs_clientcore::HudState;
 use cs_clientcore::hud::{DeathNotice, ScreenFade, StatusIcon};
 use cs_vfs::Vfs;
@@ -18,6 +20,7 @@ use crate::ui::hud_extras::{
     OverviewMapTex, WeaponBucketState, compute_damage_quadrants, damage_hazard_icons,
     evaluate_dhud_text_fx, format_hud_text_entry, format_status_bar,
 };
+use crate::ui::vgui2::{VguiRuntime, VguiTextDrawOpts};
 use crate::view_effects::evaluate_screen_fade;
 
 const HUD_AMBER: Color32 = Color32::from_rgb(255, 160, 0);
@@ -356,6 +359,13 @@ impl HudExtrasContext<'_> {
     }
 }
 
+struct HudFontCtx<'a> {
+    runtime: &'a mut VguiRuntime,
+    vfs: Option<&'a Vfs>,
+    tracker_fonts: SchemeFontSet,
+    screen_h: u32,
+}
+
 pub fn draw_cs16_hud(ctx: &egui::Context, sprites: Option<&HudSprites>, hud: &HudView<'_>) {
     draw_cs16_hud_with_extras(ctx, sprites, hud, &HudExtrasContext::default());
 }
@@ -365,6 +375,41 @@ pub fn draw_cs16_hud_with_extras(
     sprites: Option<&HudSprites>,
     hud: &HudView<'_>,
     extras: &HudExtrasContext<'_>,
+) {
+    draw_cs16_hud_impl(ctx, sprites, hud, extras, None);
+}
+
+/// Draw the CS 1.6 HUD using `TrackerScheme.res` `EngineFont` (`VguiFontAtlas`) when `runtime` is provided.
+pub fn draw_cs16_hud_with_runtime(
+    ctx: &egui::Context,
+    sprites: Option<&HudSprites>,
+    hud: &HudView<'_>,
+    extras: &HudExtrasContext<'_>,
+    runtime: &mut VguiRuntime,
+    vfs: Option<&Vfs>,
+) {
+    let screen_h = ctx.content_rect().height().round().max(480.0) as u32;
+    let tracker_fonts = runtime.tracker_scheme.fonts.clone();
+    draw_cs16_hud_impl(
+        ctx,
+        sprites,
+        hud,
+        extras,
+        Some(HudFontCtx {
+            runtime,
+            vfs,
+            tracker_fonts,
+            screen_h,
+        }),
+    );
+}
+
+fn draw_cs16_hud_impl(
+    ctx: &egui::Context,
+    sprites: Option<&HudSprites>,
+    hud: &HudView<'_>,
+    extras: &HudExtrasContext<'_>,
+    mut font_ctx: Option<HudFontCtx<'_>>,
 ) {
     let screen = ctx.content_rect();
     let painter = ctx.layer_painter(egui::LayerId::new(
@@ -763,7 +808,6 @@ pub fn draw_cs16_hud_with_extras(
     }
 
     let mut kf_y = if show_flashlight { 48.0 * scale } else { 16.0 * scale };
-    let kf_font = FontId::proportional((12.5 * scale).clamp(12.0, 17.0));
     let name_of = |slot: u8| -> String {
         if slot == 0 {
             return "world".to_string();
@@ -774,6 +818,7 @@ pub fn draw_cs16_hud_with_extras(
             .unwrap_or_else(|| format!("player {slot}"))
     };
     let team_of = |slot: u8| -> Color32 { killfeed_team_color(state, slot) };
+    let kf_fallback_sz = (12.5 * scale).clamp(12.0, 17.0);
     for entry in hud.feed {
         let mut cursor_x = screen.right() - 16.0 * scale;
         let victim = name_of(entry.victim);
@@ -781,10 +826,18 @@ pub fn draw_cs16_hud_with_extras(
         let v_col = team_of(entry.victim);
         let k_col = team_of(entry.killer);
 
-        let v_galley = painter.layout_no_wrap(victim.clone(), kf_font.clone(), v_col);
-        cursor_x -= v_galley.size().x;
-        painter.text(Pos2::new(cursor_x + 1.0, kf_y + 1.0), egui::Align2::LEFT_TOP, &victim, kf_font.clone(), Color32::from_black_alpha(190));
-        painter.text(Pos2::new(cursor_x, kf_y), egui::Align2::LEFT_TOP, &victim, kf_font.clone(), v_col);
+        let v_sz = hud_measure_text(ctx, &painter, &mut font_ctx, &victim, kf_fallback_sz);
+        cursor_x -= v_sz.x;
+        hud_paint_text(
+            ctx,
+            &painter,
+            &mut font_ctx,
+            egui::Align2::LEFT_TOP,
+            Pos2::new(cursor_x, kf_y),
+            &victim,
+            kf_fallback_sz,
+            v_col,
+        );
         cursor_x -= 8.0 * scale;
 
         let mut drew_icon = false;
@@ -809,17 +862,34 @@ pub fn draw_cs16_hud_with_extras(
             } else {
                 format!("[{}]", entry.weapon)
             };
-            let m_galley = painter.layout_no_wrap(fallback.clone(), kf_font.clone(), HUD_AMBER);
-            cursor_x -= m_galley.size().x;
-            painter.text(Pos2::new(cursor_x, kf_y), egui::Align2::LEFT_TOP, &fallback, kf_font.clone(), HUD_AMBER);
+            let m_sz = hud_measure_text(ctx, &painter, &mut font_ctx, &fallback, kf_fallback_sz);
+            cursor_x -= m_sz.x;
+            hud_paint_text(
+                ctx,
+                &painter,
+                &mut font_ctx,
+                egui::Align2::LEFT_TOP,
+                Pos2::new(cursor_x, kf_y),
+                &fallback,
+                kf_fallback_sz,
+                HUD_AMBER,
+            );
         }
         cursor_x -= 8.0 * scale;
 
         if entry.killer != 0 && entry.killer != entry.victim {
-            let k_galley = painter.layout_no_wrap(killer.clone(), kf_font.clone(), k_col);
-            cursor_x -= k_galley.size().x;
-            painter.text(Pos2::new(cursor_x + 1.0, kf_y + 1.0), egui::Align2::LEFT_TOP, &killer, kf_font.clone(), Color32::from_black_alpha(190));
-            painter.text(Pos2::new(cursor_x, kf_y), egui::Align2::LEFT_TOP, &killer, kf_font.clone(), k_col);
+            let k_sz = hud_measure_text(ctx, &painter, &mut font_ctx, &killer, kf_fallback_sz);
+            cursor_x -= k_sz.x;
+            hud_paint_text(
+                ctx,
+                &painter,
+                &mut font_ctx,
+                egui::Align2::LEFT_TOP,
+                Pos2::new(cursor_x, kf_y),
+                &killer,
+                kf_fallback_sz,
+                k_col,
+            );
         }
         kf_y += 20.0 * scale;
     }
@@ -854,29 +924,32 @@ pub fn draw_cs16_hud_with_extras(
             3 => Color32::from_rgb(130, 210, 255),
             _ => HUD_AMBER,
         };
-        let s_font = FontId::proportional(14.5 * scale);
         if extras.hud_centerid {
             let pos = Pos2::new(center_x, screen.center().y + 34.0 * scale);
-            painter.text(pos + Vec2::new(1.0, 1.0), egui::Align2::CENTER_TOP, &line, s_font.clone(), Color32::from_black_alpha(190));
-            painter.text(pos, egui::Align2::CENTER_TOP, &line, s_font, col);
+            hud_paint_text(ctx, &painter, &mut font_ctx, egui::Align2::CENTER_TOP, pos, &line, 14.5 * scale, col);
         } else {
             let pos = Pos2::new(22.0 * scale, bottom_y - 34.0 * scale);
-            painter.text(pos + Vec2::new(1.0, 1.0), egui::Align2::LEFT_BOTTOM, &line, s_font.clone(), Color32::from_black_alpha(190));
-            painter.text(pos, egui::Align2::LEFT_BOTTOM, &line, s_font, col);
+            hud_paint_text(ctx, &painter, &mut font_ctx, egui::Align2::LEFT_BOTTOM, pos, &line, 14.5 * scale, col);
         }
     }
 
     // 11. Centre text (`HUD_PRINTCENTER`, the centre print).
     if let Some(text) = hud.center {
         let b_pos = Pos2::new(center_x, screen.top() + screen.height() * 0.34);
-        let b_font = FontId::proportional(16.0 * scale);
-        painter.text(b_pos + Vec2::new(1.0, 1.0), egui::Align2::CENTER_CENTER, text, b_font.clone(), Color32::from_black_alpha(200));
-        painter.text(b_pos, egui::Align2::CENTER_CENTER, text, b_font, Color32::from_rgb(255, 196, 64));
+        hud_paint_text(
+            ctx,
+            &painter,
+            &mut font_ctx,
+            egui::Align2::CENTER_CENTER,
+            b_pos,
+            text,
+            16.0 * scale,
+            Color32::from_rgb(255, 196, 64),
+        );
     }
 
     // 11b. Tutor/hint banners (`HudText` / `HudTextArgs` resolved via `titles.txt` + localization).
     let mut hy = screen.top() + screen.height() * 0.22;
-    let hint_font = FontId::proportional(14.0 * scale);
     for entry in state.hud_texts.iter().rev() {
         let age = hud.now - entry.received_at;
         if !(0.0..=4.2).contains(&age) {
@@ -885,17 +958,33 @@ pub fn draw_cs16_hud_with_extras(
         let msg = format_hud_text_entry(&entry.text, &entry.args, extras.titles, extras.loc);
         if !msg.is_empty() {
             let pos = Pos2::new(center_x, hy);
-            painter.text(pos + Vec2::new(1.0, 1.0), egui::Align2::CENTER_CENTER, &msg, hint_font.clone(), Color32::from_black_alpha(195));
-            painter.text(pos, egui::Align2::CENTER_CENTER, &msg, hint_font.clone(), Color32::from_rgb(255, 212, 96));
+            hud_paint_text(
+                ctx,
+                &painter,
+                &mut font_ctx,
+                egui::Align2::CENTER_CENTER,
+                pos,
+                &msg,
+                14.0 * scale,
+                Color32::from_rgb(255, 212, 96),
+            );
             hy += 20.0 * scale;
         }
     }
 
     // 12. Notifications under the radar, chat bottom-left above the health.
-    let note_font = FontId::proportional(13.0 * scale);
     let mut ny = 150.0 * scale;
     for line in hud.notify {
-        painter.text(Pos2::new(22.0 * scale, ny), egui::Align2::LEFT_TOP, line, note_font.clone(), Color32::from_rgb(255, 220, 110));
+        hud_paint_text(
+            ctx,
+            &painter,
+            &mut font_ctx,
+            egui::Align2::LEFT_TOP,
+            Pos2::new(22.0 * scale, ny),
+            line,
+            13.0 * scale,
+            Color32::from_rgb(255, 220, 110),
+        );
         ny += 16.0 * scale;
     }
     if extras.hud_saytext_internal {
@@ -903,8 +992,16 @@ pub fn draw_cs16_hud_with_extras(
         let mut cy = bottom_y - 46.0 * scale;
         for line in hud.chat.iter().rev().take(5) {
             let x = 22.0 * scale;
-            painter.text(Pos2::new(x + 1.0, cy + 1.0), egui::Align2::LEFT_BOTTOM, line, note_font.clone(), Color32::from_black_alpha(180));
-            painter.text(Pos2::new(x, cy), egui::Align2::LEFT_BOTTOM, line, note_font.clone(), chat_col);
+            hud_paint_text(
+                ctx,
+                &painter,
+                &mut font_ctx,
+                egui::Align2::LEFT_BOTTOM,
+                Pos2::new(x, cy),
+                line,
+                13.0 * scale,
+                chat_col,
+            );
             cy -= 17.0 * scale;
         }
     }
@@ -936,7 +1033,7 @@ pub fn draw_cs16_hud_with_extras(
         let base_c = if typing { msg.color2 } else { msg.color1 };
         let a = (alpha_f.clamp(0.0, 1.0) * f32::from(base_c[3].max(180))) as u8;
         let col = Color32::from_rgba_unmultiplied(base_c[0], base_c[1], base_c[2], a);
-        painter.text(pos, egui::Align2::CENTER_CENTER, &shown_text, FontId::proportional(16.0 * scale), col);
+        hud_paint_text(ctx, &painter, &mut font_ctx, egui::Align2::CENTER_CENTER, pos, &shown_text, 16.0 * scale, col);
     }
 
     // 13. The spectator letterbox bars while dead and observing.
@@ -949,14 +1046,132 @@ pub fn draw_cs16_hud_with_extras(
         );
         painter.rect_filled(top_bar, 0.0, Color32::from_black_alpha(225));
         painter.rect_filled(bot_bar, 0.0, Color32::from_black_alpha(225));
-        painter.text(
-            Pos2::new(center_x, bot_bar.top() + 27.0 * scale),
+        hud_paint_text(
+            ctx,
+            &painter,
+            &mut font_ctx,
             egui::Align2::CENTER_CENTER,
+            Pos2::new(center_x, bot_bar.top() + 27.0 * scale),
             "Spectating",
-            FontId::proportional(15.0 * scale),
+            15.0 * scale,
             HUD_AMBER,
         );
     }
+}
+
+fn hud_measure_text(
+    ctx: &egui::Context,
+    painter: &egui::Painter,
+    font_ctx: &mut Option<HudFontCtx<'_>>,
+    text: &str,
+    fallback_size: f32,
+) -> Vec2 {
+    if let Some(fc) = font_ctx.as_mut()
+        && fc.vfs.is_some()
+    {
+        let m = fc.runtime.font_atlas.measure_text(
+            ctx,
+            fc.vfs,
+            &fc.tracker_fonts,
+            "tracker",
+            "EngineFont",
+            fc.screen_h,
+            text,
+        );
+        if m.x > 0.5 && m.y > 0.5 {
+            return m;
+        }
+    }
+    painter
+        .layout_no_wrap(text.to_string(), FontId::proportional(fallback_size), Color32::WHITE)
+        .size()
+}
+
+fn rect_for_anchored_pos(anchor: egui::Align2, pos: Pos2, size: Vec2) -> (TextAlignment, Rect) {
+    let w = size.x.max(4.0);
+    let h = size.y.max(4.0);
+    let x = match anchor.x() {
+        egui::Align::LEFT => pos.x,
+        egui::Align::Center => pos.x - w * 0.5,
+        egui::Align::RIGHT => pos.x - w,
+    };
+    let y = match anchor.y() {
+        egui::Align::TOP => pos.y,
+        egui::Align::Center => pos.y - h * 0.5,
+        egui::Align::BOTTOM => pos.y - h,
+    };
+    let align = match (anchor.x(), anchor.y()) {
+        (egui::Align::LEFT, egui::Align::TOP) => TextAlignment::NorthWest,
+        (egui::Align::Center, egui::Align::TOP) => TextAlignment::North,
+        (egui::Align::RIGHT, egui::Align::TOP) => TextAlignment::NorthEast,
+        (egui::Align::LEFT, egui::Align::Center) => TextAlignment::West,
+        (egui::Align::Center, egui::Align::Center) => TextAlignment::Center,
+        (egui::Align::RIGHT, egui::Align::Center) => TextAlignment::East,
+        (egui::Align::LEFT, egui::Align::BOTTOM) => TextAlignment::SouthWest,
+        (egui::Align::Center, egui::Align::BOTTOM) => TextAlignment::South,
+        (egui::Align::RIGHT, egui::Align::BOTTOM) => TextAlignment::SouthEast,
+    };
+    (align, Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, h)))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hud_paint_text(
+    ctx: &egui::Context,
+    painter: &egui::Painter,
+    font_ctx: &mut Option<HudFontCtx<'_>>,
+    anchor: egui::Align2,
+    pos: Pos2,
+    text: &str,
+    fallback_size: f32,
+    color: Color32,
+) {
+    if text.is_empty() {
+        return;
+    }
+    if let Some(fc) = font_ctx.as_mut()
+        && fc.vfs.is_some()
+    {
+        let m = fc.runtime.font_atlas.measure_text(
+            ctx,
+            fc.vfs,
+            &fc.tracker_fonts,
+            "tracker",
+            "EngineFont",
+            fc.screen_h,
+            text,
+        );
+        if m.y > 0.5 {
+            let (align, rect) = rect_for_anchored_pos(anchor, pos, m);
+            fc.runtime.font_atlas.paint_text(
+                painter,
+                ctx,
+                fc.vfs,
+                &fc.tracker_fonts,
+                "tracker",
+                "EngineFont",
+                fc.screen_h,
+                rect,
+                text,
+                color,
+                VguiTextDrawOpts {
+                    align,
+                    process_hotkey: false,
+                    proportional_scale: false,
+                },
+            );
+            return;
+        }
+    }
+    let font = FontId::proportional(fallback_size);
+    let shadow_a = (u16::from(color.a()) * 190 / 255) as u8;
+    painter.text(
+        pos + Vec2::new(1.0, 1.0),
+        anchor,
+        text,
+        font.clone(),
+        Color32::from_black_alpha(shadow_a),
+    );
+    painter.text(pos, anchor, text, font, color);
 }
 
 /// Team color for a 1-based killfeed player entity index in `HudState::players`.

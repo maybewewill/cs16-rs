@@ -3,8 +3,12 @@
 //! teams or items is known here.
 
 use cs_assets::scheme::LocalizationTable;
+use cs_assets::vgui_res::TextAlignment;
 use cs_assets::vgui_scripts::TitlesTable;
+use cs_vfs::Vfs;
 use egui::{Align2, Color32, FontId, Pos2, Rect, Stroke, Vec2};
+
+use crate::ui::vgui2::{VguiRuntime, VguiTextDrawOpts};
 
 const AMBER: Color32 = Color32::from_rgb(255, 176, 0);
 
@@ -221,6 +225,177 @@ pub fn draw_text_menu(ctx: &egui::Context, lines: &[String], scale: f32) {
             line,
             font.clone(),
             AMBER,
+        );
+        y += line_h;
+    }
+}
+
+/// Draws `ShowMenu` styled text using `TrackerScheme.res` `EngineFont` (`VguiFontAtlas`).
+pub fn draw_styled_text_menu_vgui(
+    ctx: &egui::Context,
+    runtime: &mut VguiRuntime,
+    vfs: Option<&Vfs>,
+    lines: &[StyledMenuLine],
+    scale: f32,
+) {
+    if vfs.is_none() {
+        draw_styled_text_menu(ctx, lines, scale);
+        return;
+    }
+    let screen = ctx.content_rect();
+    let screen_h = screen.height().round().max(480.0) as u32;
+    let tracker_fonts = runtime.tracker_scheme.fonts.clone();
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::unique("cs16_server_menu_styled"),
+    ));
+    let sample_h = runtime
+        .font_atlas
+        .measure_text(ctx, vfs, &tracker_fonts, "tracker", "EngineFont", screen_h, "Ay")
+        .y
+        .max(18.0 * scale);
+    let line_h = sample_h.max(16.0);
+    let width = 348.0 * scale;
+    let height = line_h * lines.len() as f32 + 20.0 * scale;
+    let rect = Rect::from_min_size(
+        Pos2::new(24.0 * scale, screen.center().y - height * 0.5),
+        Vec2::new(width, height),
+    );
+    painter.rect(
+        rect,
+        0.0,
+        Color32::from_rgba_unmultiplied(0, 0, 0, 172),
+        Stroke::new(1.0, Color32::from_rgba_unmultiplied(188, 112, 0, 170)),
+        egui::StrokeKind::Inside,
+    );
+    let mut y = rect.top() + 10.0 * scale;
+    for line in lines {
+        let mut x = rect.left() + 12.0 * scale;
+        for (col, text) in &line.spans {
+            let sz = runtime.font_atlas.measure_text(
+                ctx,
+                vfs,
+                &tracker_fonts,
+                "tracker",
+                "EngineFont",
+                screen_h,
+                text,
+            );
+            let span_r = Rect::from_min_size(Pos2::new(x, y), Vec2::new(sz.x.max(4.0), line_h));
+            runtime.font_atlas.paint_text(
+                &painter,
+                ctx,
+                vfs,
+                &tracker_fonts,
+                "tracker",
+                "EngineFont",
+                screen_h,
+                span_r,
+                text,
+                col.to_color32(),
+                VguiTextDrawOpts {
+                    align: TextAlignment::NorthWest,
+                    process_hotkey: false,
+                    proportional_scale: false,
+                },
+            );
+            x += sz.x;
+        }
+        if let Some(r_text) = &line.right {
+            let r_sz = runtime.font_atlas.measure_text(
+                ctx,
+                vfs,
+                &tracker_fonts,
+                "tracker",
+                "EngineFont",
+                screen_h,
+                r_text,
+            );
+            let r_rect = Rect::from_min_size(
+                Pos2::new(rect.right() - 12.0 * scale - r_sz.x.max(4.0), y),
+                Vec2::new(r_sz.x.max(4.0), line_h),
+            );
+            runtime.font_atlas.paint_text(
+                &painter,
+                ctx,
+                vfs,
+                &tracker_fonts,
+                "tracker",
+                "EngineFont",
+                screen_h,
+                r_rect,
+                r_text,
+                MenuSpanColor::Yellow.to_color32(),
+                VguiTextDrawOpts {
+                    align: TextAlignment::NorthEast,
+                    process_hotkey: false,
+                    proportional_scale: false,
+                },
+            );
+        }
+        y += line_h;
+    }
+}
+
+/// Draws plain text `ShowMenu` fallback lines using `TrackerScheme.res` `EngineFont` (`VguiFontAtlas`).
+pub fn draw_text_menu_vgui(
+    ctx: &egui::Context,
+    runtime: &mut VguiRuntime,
+    vfs: Option<&Vfs>,
+    lines: &[String],
+    scale: f32,
+) {
+    if vfs.is_none() {
+        draw_text_menu(ctx, lines, scale);
+        return;
+    }
+    let screen = ctx.content_rect();
+    let screen_h = screen.height().round().max(480.0) as u32;
+    let tracker_fonts = runtime.tracker_scheme.fonts.clone();
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::unique("cs16_server_menu"),
+    ));
+    let line_h = runtime
+        .font_atlas
+        .measure_text(ctx, vfs, &tracker_fonts, "tracker", "EngineFont", screen_h, "Ay")
+        .y
+        .max(18.0 * scale);
+    let width = 330.0 * scale;
+    let height = line_h * lines.len() as f32 + 20.0 * scale;
+    let rect = Rect::from_min_size(
+        Pos2::new(24.0 * scale, screen.center().y - height * 0.5),
+        Vec2::new(width, height),
+    );
+    painter.rect(
+        rect,
+        0.0,
+        Color32::from_rgba_unmultiplied(0, 0, 0, 160),
+        Stroke::new(1.0, Color32::from_rgba_unmultiplied(188, 112, 0, 160)),
+        egui::StrokeKind::Inside,
+    );
+    let mut y = rect.top() + 10.0 * scale;
+    for line in lines {
+        let lr = Rect::from_min_size(
+            Pos2::new(rect.left() + 12.0 * scale, y),
+            Vec2::new(width - 24.0 * scale, line_h),
+        );
+        runtime.font_atlas.paint_text(
+            &painter,
+            ctx,
+            vfs,
+            &tracker_fonts,
+            "tracker",
+            "EngineFont",
+            screen_h,
+            lr,
+            line,
+            AMBER,
+            VguiTextDrawOpts {
+                align: TextAlignment::NorthWest,
+                process_hotkey: false,
+                proportional_scale: false,
+            },
         );
         y += line_h;
     }
