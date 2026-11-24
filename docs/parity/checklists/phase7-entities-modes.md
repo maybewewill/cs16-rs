@@ -1,0 +1,31 @@
+# Phase 7 — Map Entities & Modes (`phase7-entities-modes`) Checklist
+
+Executed from branch `phase7-entities-modes` on 2026-11-24 against ReGameDLL_CS / ReHLDS sources and all 25 retail Counter-Strike 1.6 `.bsp` maps.
+
+## Part A — Automated Entity, Stock Map, & Parity Checks
+
+### 1. Entity Systems Ported & Tested
+
+| Subsystem | Module / Tests | Coverage |
+|---|---|---|
+| Entity I/O, masters, `game_*` rules, strip & voting | [`crates/cs-game/src/io.rs`](file:///c:/Users/slash/cs16-rs/crates/cs-game/src/io.rs), [`crates/cs-game/tests/phase7_io_triggers.rs`](file:///c:/Users/slash/cs16-rs/crates/cs-game/tests/phase7_io_triggers.rs) | `multi_manager`, `multisource`, `master` gating, `env_global`, `game_counter`, `game_counter_set`, `game_end`, `game_player_hurt`, `game_player_team`, `game_score`, `game_team_master`, `game_team_set`, `game_text` (`TE_TEXTMESSAGE`), `game_zone_player`, `player_weaponstrip`, `votemap` (`mp_mapvoteratio`), `vote` (`mp_kickpercent`) |
+| Triggers, teleports, info markers, decals & active camera | [`crates/cs-game/src/triggers.rs`](file:///c:/Users/slash/cs16-rs/crates/cs-game/src/triggers.rs), [`crates/cs-game/src/world.rs`](file:///c:/Users/slash/cs16-rs/crates/cs-game/src/world.rs), [`crates/cs-game/tests/phase7_io_triggers.rs`](file:///c:/Users/slash/cs16-rs/crates/cs-game/tests/phase7_io_triggers.rs) | `trigger`, `trigger_multiple`, `trigger_once`, `trigger_hurt`, `trigger_push`, `trigger_teleport`, `trigger_gravity`, `trigger_relay`, `trigger_counter`, `trigger_changetarget`, `trigger_auto`, `trigger_cdaudio`, `target_cdaudio`, `info_teleport_destination`, `info_intermission`, `info_null`, `infodecal`, active `trigger_camera` (`use_`/target aim/`path_corner` follow/restore) |
+| Doors & water | [`crates/cs-game/src/doors.rs`](file:///c:/Users/slash/cs16-rs/crates/cs-game/src/doors.rs), [`crates/cs-game/tests/phase7_brushes_movers.rs`](file:///c:/Users/slash/cs16-rs/crates/cs-game/tests/phase7_brushes_movers.rs) | `func_door`, `func_water` (`SF_DOOR_ACTUALLY_WATER`), `func_door_rotating`, `momentary_door` |
+| Buttons | [`crates/cs-game/src/buttons.rs`](file:///c:/Users/slash/cs16-rs/crates/cs-game/src/buttons.rs), [`crates/cs-game/tests/phase7_brushes_movers.rs`](file:///c:/Users/slash/cs16-rs/crates/cs-game/tests/phase7_brushes_movers.rs) | `func_button`, `func_rot_button`, `momentary_rot_button`, `button_target` |
+| Breakables & utility brushes | [`crates/cs-game/src/breakables.rs`](file:///c:/Users/slash/cs16-rs/crates/cs-game/src/breakables.rs), [`crates/cs-game/tests/phase7_brushes_movers.rs`](file:///c:/Users/slash/cs16-rs/crates/cs-game/tests/phase7_brushes_movers.rs) | `func_breakable` (`TE_BREAKMODEL`, explosion, round-restart restore via `CleanUpMap`), `func_wall_toggle`, `func_friction`, `func_rotating`, `func_pendulum`, `func_grencatch`, `func_weaponcheck`, `func_guntarget` |
+| Movers, tracktrain & drivable vehicles | [`crates/cs-game/src/movers.rs`](file:///c:/Users/slash/cs16-rs/crates/cs-game/src/movers.rs), [`crates/cs-game/tests/phase7_brushes_movers.rs`](file:///c:/Users/slash/cs16-rs/crates/cs-game/tests/phase7_brushes_movers.rs) | `func_plat`, `func_platrot`, `func_train`, `path_corner`, `path_track`, `func_tracktrain`, `func_traincontrols`, `func_vehicle`, `func_vehiclecontrols`, `func_pushable`, `func_conveyor`, `Train` gear HUD message |
+| Environment, lights, sound, ammo & world items | [`crates/cs-game/src/env.rs`](file:///c:/Users/slash/cs16-rs/crates/cs-game/src/env.rs), [`crates/cs-game/src/items.rs`](file:///c:/Users/slash/cs16-rs/crates/cs-game/src/items.rs), [`crates/cs-game/tests/phase7_env_items.rs`](file:///c:/Users/slash/cs16-rs/crates/cs-game/tests/phase7_env_items.rs) | `env_sprite`, `env_glow`, `env_bombglow`, `cycler`, `cycler_sprite`, `bodyque`, `beam`, `env_beam`, `env_lightning`, `env_laser`, `env_spark`, `spark_shower`, `env_shake` (`ScreenShake`), `env_fade` (`ScreenFade`), `env_explosion`, `env_render`, `env_message` (`HudText`), `env_shooter`, `gibshooter`, `env_debris`, `env_blood`, `env_bubbles`, `env_funnel`, `env_fog` (`Fog`), `env_rain`, `func_rain`, `env_snow`, `func_snow` (`ReceiveW`), `light`, `light_spot`, `light_environment`, `ambient_generic`, `env_sound`, `speaker`, `soundent`, all 10 `ammo_*`, `item_kevlar`, `item_assaultsuit`, `item_generic`, `game_player_equip` |
+
+### 2. All 25 Stock CS 1.6 `.bsp` Maps & HLDS Baseline Edict Verification
+
+- [`crates/cs-game/tests/phase7_stock_maps.rs`](file:///c:/Users/slash/cs16-rs/crates/cs-game/tests/phase7_stock_maps.rs) (`2 passed; 0 failed` in `13.59 s`):
+  - Loaded every stock CS 1.6 map (`as_oilrig`, `cs_747`, `cs_assault`, `cs_backalley`, `cs_estate`, `cs_havana`, `cs_italy`, `cs_militia`, `cs_office`, `cs_siege`, `de_airstrip`, `de_aztec`, `de_cbble`, `de_chateau`, `de_dust`, `de_dust2`, `de_inferno`, `de_nuke`, `de_piranesi`, `de_prodigy`, `de_storm`, `de_survivor`, `de_torn`, `de_train`, `de_vertigo`), verified 100% entity classname recognition across all 25 lumps, spawned CT + T, stepped 50 ticks, restarted the round, and stepped 20 ticks within `DEFAULT_MAX_EDICTS`.
+  - Spot checks passed for `de_aztec` (`env_rain` -> `ReceiveW(1)`), `de_survivor` (`func_tracktrain`/`path_track`/`env_explosion`), `cs_office` (`func_breakable` break & restore), `cs_assault` (`trigger_camera`/`func_door`/`func_button`/`multisource`), `cs_siege` (`env_sound`/`env_spark`/`func_door`), and `as_oilrig` (VIP + `trigger_hurt` + `func_water`).
+- Retail HLDS baseline edict parity:
+  - [`crates/cs-game/tests/zones.rs`](file:///c:/Users/slash/cs16-rs/crates/cs-game/tests/zones.rs)`::cs_office_edict_numbers_as_hlds` now matches retail HLDS build 10210 bit-for-bit on all **218/218** baseline edict numbers (`only_hlds = []`, `only_ours = []`) following `ambient_generic` and `infodecal` implementation.
+  - [`crates/cs-game/tests/game_entities.rs`](file:///c:/Users/slash/cs16-rs/crates/cs-game/tests/game_entities.rs)`::de_dust2_baselines_are_those_of_rehlds` continues to match HLDS on all **51/51** baseline edicts (`0..=8, 10..=51`).
+
+## Part B — Parity Ledger Closeout
+
+- `docs/parity/entities.toml`: **160/160 (100% implemented & tested/verified)**.
+- `docs/parity/usermsg.toml`: `Train`, `HudText`, `ReceiveW`, `Fog`, and `ScreenShake` upgraded to `tested`; `ScreenFade` keeps `verified` with `env_fade` coverage added.

@@ -32,7 +32,8 @@ status = "implemented"
 
 [[item]]
 id = "Train"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::movers_tracktrain_and_vehicle_move_and_send_train_hud"
 
 [[item]]
 id = "HudTextPro"
@@ -40,7 +41,8 @@ status = "missing"
 
 [[item]]
 id = "HudText"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_visual_beam_shake_fade_explosion_render_message_and_spark_shower"
 
 [[item]]
 id = "SayText"
@@ -143,12 +145,13 @@ status = "implemented"
 
 [[item]]
 id = "ScreenShake"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_visual_beam_shake_fade_explosion_render_message_and_spark_shower"
 
 [[item]]
 id = "ScreenFade"
 status = "verified"
-evidence = "VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; the message is in the join, jointeam and joinclass sequences, which match the original message by message apart from HealthInfo, Account and ReqState (values that depend on the clock or the random spawn point are not compared); docs/parity/checklists/phase2d-weapons.md V8)"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_visual_beam_shake_fade_explosion_render_message_and_spark_shower; VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; the message is in the join, jointeam and joinclass sequences, which match the original message by message apart from HealthInfo, Account and ReqState (values that depend on the clock or the random spawn point are not compared); docs/parity/checklists/phase2d-weapons.md V8)"
 
 [[item]]
 id = "AmmoX"
@@ -271,7 +274,8 @@ status = "missing"
 
 [[item]]
 id = "ReceiveW"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_fog_weather_lights_and_sound_entities; crates/cs-game/tests/phase7_stock_maps.rs::stock_map_spot_checks"
 
 [[item]]
 id = "ShadowIdx"
@@ -318,7 +322,8 @@ status = "missing"
 
 [[item]]
 id = "Fog"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_fog_weather_lights_and_sound_entities"
 
 [[item]]
 id = "ShowTimer"
