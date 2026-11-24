@@ -37,6 +37,7 @@ fn setup_weapon_state(wid: i32, clip: i32) -> (LocalState, BTreeMap<i32, Predict
     (state, BTreeMap::new())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn step(
     state: &mut LocalState,
     extras: &mut BTreeMap<i32, PredictWeaponExtras>,

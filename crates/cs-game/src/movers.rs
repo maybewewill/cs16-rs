@@ -571,14 +571,14 @@ impl GameEntity for FuncTrain {
         _value: f32,
     ) {
         if matches!(self.state, TrainState::Idle | TrainState::Waiting) {
-            if self.current_target == self.initial_target && !self.initial_target.is_empty() {
-                if let Some(first) = find_by_targetname(eng, None, &self.initial_target)
-                    && let Some(pos) = Self::corner_origin(eng, id, first)
-                {
-                    eng.set_origin(id, pos);
-                    if let Some(next) = eng.ent(first).map(|v| v.target.clone()) {
-                        self.current_target = next;
-                    }
+            if self.current_target == self.initial_target
+                && !self.initial_target.is_empty()
+                && let Some(first) = find_by_targetname(eng, None, &self.initial_target)
+                && let Some(pos) = Self::corner_origin(eng, id, first)
+            {
+                eng.set_origin(id, pos);
+                if let Some(next) = eng.ent(first).map(|v| v.target.clone()) {
+                    self.current_target = next;
                 }
             }
             self.advance_to_next(eng, id);

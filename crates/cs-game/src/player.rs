@@ -2188,6 +2188,7 @@ pub(crate) fn is_hitting_shield(
     dot < -0.87
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn trace_attack(
     g: &mut GameState,
     eng: &mut EngineApi<'_>,

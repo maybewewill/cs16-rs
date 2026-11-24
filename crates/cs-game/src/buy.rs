@@ -1611,10 +1611,8 @@ fn handle_rebuy(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
                     buy_item(g, eng, slot, SLOT_ITEM_NVG);
                 }
             }
-            "tacticalshield" | "shield" => {
-                if record.shield && team == Team::Ct {
-                    buy_item(g, eng, slot, SLOT_ITEM_SHIELD);
-                }
+            "tacticalshield" | "shield" if record.shield && team == Team::Ct => {
+                buy_item(g, eng, slot, SLOT_ITEM_SHIELD);
             }
             _ => {}
         }
