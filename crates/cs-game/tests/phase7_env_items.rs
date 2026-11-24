@@ -273,11 +273,10 @@ fn env_visual_beam_shake_fade_explosion_render_message_and_spark_shower() {
                 "ScreenShake" => saw_shake = true,
                 "ScreenFade" => saw_fade = true,
                 "HudText" => {
-                    if let CsUserMsg::Unknown { payload, .. } = decoded {
-                        let s = String::from_utf8_lossy(payload);
-                        if s.contains("#Hint_spot_clear") {
-                            saw_hudtext = true;
-                        }
+                    if let CsUserMsg::HudText { text, .. } = decoded
+                        && text.contains("#Hint_spot_clear")
+                    {
+                        saw_hudtext = true;
                     }
                 }
                 _ => {}

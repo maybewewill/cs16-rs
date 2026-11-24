@@ -118,6 +118,13 @@ impl VguiCoord {
             }
         }
     }
+
+    pub fn raw_or(self, fallback: f32) -> f32 {
+        match self {
+            Self::Abs(v) if v > 0.0 => v,
+            _ => fallback,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -322,7 +329,7 @@ pub fn resolve_control_rect(
     let mut h = if spec.tall_specified {
         spec.tall.resolve_size(y - py, ph, scale)
     } else {
-        spec.tall.resolve_size(y - py, ph, scale)
+        24.0 * scale
     };
     match spec.auto_resize {
         AutoResize::Right => w = (px + pw - x - 8.0).max(w),
@@ -346,9 +353,15 @@ pub fn resolve_control_rect_mode(
     let [px, py, pw, ph] = parent_rect;
     match mode {
         VguiCoordMode::Proportional640 => {
-            let sx = (pw / 640.0).max(0.5);
-            let sy = (ph / 480.0).max(0.5);
+            let base_w = orig_parent_size[0].max(1.0);
+            let base_h = orig_parent_size[1].max(1.0);
+            let sx = (pw / base_w).max(0.5);
+            let sy = (ph / base_h).max(0.5);
             let aspect_scale = sx.min(sy);
+            let w_scale = match spec.xpos {
+                VguiCoord::CenterOffset(_) | VguiCoord::RightOffset(_) => aspect_scale,
+                VguiCoord::Abs(_) | VguiCoord::FillOffset(_) => sx,
+            };
             let x = match spec.xpos {
                 VguiCoord::Abs(v) => px + v * sx,
                 VguiCoord::CenterOffset(d) => px + pw * 0.5 + d * aspect_scale,
@@ -361,18 +374,18 @@ pub fn resolve_control_rect_mode(
                 VguiCoord::RightOffset(d) => py + ph - d * aspect_scale,
                 VguiCoord::FillOffset(d) => py + d * aspect_scale,
             };
-            let mut w = if !spec.wide_specified {
+            let w = if !spec.wide_specified {
                 (pw - (x - px)).max(0.0)
             } else {
                 match spec.wide {
-                    VguiCoord::Abs(v) => v * sx.min(sy),
+                    VguiCoord::Abs(v) => v * w_scale,
                     VguiCoord::CenterOffset(v) => v * aspect_scale,
                     VguiCoord::RightOffset(m) | VguiCoord::FillOffset(m) => {
-                        (pw - (x - px) - m * aspect_scale).max(0.0)
+                        (pw - (x - px) - m * sx).max(0.0)
                     }
                 }
             };
-            let mut h = if !spec.tall_specified {
+            let h = if !spec.tall_specified {
                 24.0 * sy
             } else {
                 match spec.tall {
@@ -382,15 +395,6 @@ pub fn resolve_control_rect_mode(
                     }
                 }
             };
-            match spec.auto_resize {
-                AutoResize::Right => w = (pw - (x - px) - 8.0 * aspect_scale).max(w),
-                AutoResize::Down => h = (ph - (y - py) - 8.0 * sy).max(h),
-                AutoResize::DownAndRight => {
-                    w = (pw - (x - px) - 8.0 * aspect_scale).max(w);
-                    h = (ph - (y - py) - 8.0 * sy).max(h);
-                }
-                AutoResize::None => {}
-            }
             [x, y, w.max(0.0), h.max(0.0)]
         }
         VguiCoordMode::PixelSpace => {
@@ -445,7 +449,14 @@ fn parse_block_controls(tokens: &[String], cursor: &mut usize) -> Vec<VguiContro
             *cursor += 1;
         }
     }
-    controls.sort_by_key(|c| c.zpos);
+    if controls
+        .first()
+        .is_some_and(|c| matches!(c.kind, ControlKind::Frame))
+    {
+        controls[1..].sort_by_key(|c| c.zpos);
+    } else {
+        controls.sort_by_key(|c| c.zpos);
+    }
     controls
 }
 
@@ -661,6 +672,7 @@ mod tests {
         "Resource/UI/MOTD.res"
         {
             "ClientMOTD" { "ControlName" "Frame" "xpos" "76" "ypos" "0" "wide" "552" "tall" "448" }
+            "Message" { "ControlName" "HTML" "xpos" "0" "ypos" "116" "wide" "480" "tall" "240" "autoResize" "3" }
             "ok" { "ControlName" "Button" "xpos" "0" "ypos" "364" "wide" "128" "tall" "20" }
         }
         "##;
@@ -672,17 +684,49 @@ mod tests {
             VguiCoordMode::Proportional640,
             [640.0, 480.0],
         );
-        // xpos=76 scaled on 1280px = 152.0
+        // xpos=76 scaled on 1280px = 152.0; wide=552 -> 1104.0; tall=448 -> 672.0
         assert!((frame_r[0] - 152.0).abs() < 0.1, "frame_r={frame_r:?}");
 
-        let ok_r = resolve_control_rect_mode(
+        let msg_r = resolve_control_rect_mode(
             &doc.controls[1],
             frame_r,
             VguiCoordMode::Proportional640,
+            [552.0, 448.0],
+        );
+        let ok_r = resolve_control_rect_mode(
+            &doc.controls[2],
+            frame_r,
+            VguiCoordMode::Proportional640,
+            [552.0, 448.0],
+        );
+        // Nested inside ClientMOTD Frame => starts at frame_r[0]; Message stays above ok and inside BackgroundPanel.
+        assert!((ok_r[0] - frame_r[0]).abs() < 0.1, "ok_r={ok_r:?}");
+        assert!((ok_r[1] - 546.0).abs() < 0.1, "ok_r={ok_r:?}");
+        assert!((msg_r[0] - 152.0).abs() < 0.1, "msg_r={msg_r:?}");
+        assert!((msg_r[1] - 174.0).abs() < 0.1, "msg_r={msg_r:?}");
+        assert!((msg_r[2] - 960.0).abs() < 0.1, "msg_r={msg_r:?}");
+        assert!((msg_r[3] - 360.0).abs() < 0.1, "msg_r={msg_r:?}");
+        assert!(msg_r[1] + msg_r[3] < ok_r[1]);
+        assert!(msg_r[0] + msg_r[2] < 1240.0);
+
+        let sb = r##"
+        "Resource/UI/ScoreBoard.res"
+        {
+            "ClientScoreBoard" { "ControlName" "CClientScoreBoardDialog" "xpos" "c-260" "ypos" "48" "wide" "520" "tall" "340" }
+        }
+        "##;
+        let sb_doc = VguiResDocument::parse("Resource/UI/ScoreBoard.res", sb);
+        let sb_r = resolve_control_rect_mode(
+            &sb_doc.controls[0],
+            [0.0, 0.0, 1280.0, 720.0],
+            VguiCoordMode::Proportional640,
             [640.0, 480.0],
         );
-        // Nested inside ClientMOTD Frame => starts at frame_r[0]
-        assert!((ok_r[0] - frame_r[0]).abs() < 0.1, "ok_r={ok_r:?}");
+        assert!((sb_r[0] - 250.0).abs() < 0.1, "sb_r={sb_r:?}");
+        assert!((sb_r[1] - 72.0).abs() < 0.1, "sb_r={sb_r:?}");
+        assert!((sb_r[2] - 780.0).abs() < 0.1, "sb_r={sb_r:?}");
+        assert!((sb_r[3] - 510.0).abs() < 0.1, "sb_r={sb_r:?}");
+        assert!((sb_r[0] + sb_r[2] * 0.5 - 640.0).abs() < 0.1);
 
         let dlg = r##"
         "Resource/Test.res"

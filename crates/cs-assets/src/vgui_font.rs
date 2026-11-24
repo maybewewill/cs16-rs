@@ -745,7 +745,12 @@ mod tests {
             .expect("rasterize crisp");
         assert!(crisp.width > 0 && crisp.height > 0);
         assert!(
-            crisp.rgba.chunks_exact(4).all(|px| px[3] == 0 || px[3] == 255),
+            crisp
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|px| px[3] == 0 || px[3] == 255),
             "antialias=false must produce binary 0/255 alpha coverage"
         );
 
@@ -766,7 +771,9 @@ mod tests {
         assert!(
             outlined
                 .rgba
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .any(|px| px[3] == 255 && px[0] == 0 && px[1] == 0 && px[2] == 0),
             "outline must bake opaque black border pixels"
         );

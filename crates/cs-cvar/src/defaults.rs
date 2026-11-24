@@ -16,7 +16,7 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     reg.register("cl_righthand", "1", arch, "Hold weapon in right hand (1) or left hand (0)");
     reg.register("cl_hd_models", "0", arch, "Enable cstrike_hd high-definition models (0 or 1)");
     reg.register("hud_fastswitch", "1", arch, "Fast weapon switch on slot press (0 or 1)");
-    reg.register("_vgui_menus", "0", arch, "Ask the server for VGUI menus (1) or the text menus this client draws (0)");
+    reg.register("_vgui_menus", "1", arch, "Ask the server for VGUI menus (1) or the text menus this client draws (0)");
     reg.register("hud_centerid", "0", arch, "Center player target ID status bar text (0 or 1)");
     reg.register("hud_draw", "1", CVarFlags::NONE, "Draw in-game HUD overlay (0 or 1)");
     reg.register("hud_saytext_internal", "1", arch, "Show in-game chat saytext lines (0 or 1)");
