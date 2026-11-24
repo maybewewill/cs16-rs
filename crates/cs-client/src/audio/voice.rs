@@ -486,7 +486,11 @@ impl VoiceManager {
         } else if let Some((_q, seq, _payload)) = parse_speex_nb_packet(data) {
             jb.push(seq, data.to_vec(), now);
         } else {
-            let seq = jb.next_seq.unwrap_or(0);
+            let seq = jb
+                .queue
+                .keys()
+                .next_back()
+                .map_or_else(|| jb.next_seq.unwrap_or(0), |k| k.wrapping_add(1));
             jb.push(seq, data.to_vec(), now);
         }
     }
