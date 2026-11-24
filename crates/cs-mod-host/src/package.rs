@@ -354,12 +354,12 @@ fn collect_disk_assets(
             && let Ok(rel) = path.strip_prefix(base)
         {
             let norm = rel.to_string_lossy().replace('\\', "/");
-            if !out.contains_key(&norm) {
+            if let std::collections::btree_map::Entry::Vacant(e) = out.entry(norm) {
                 let bytes = fs::read(&path).map_err(|source| PackageError::Io {
                     path: path.clone(),
                     source,
                 })?;
-                out.insert(norm, bytes);
+                e.insert(bytes);
             }
         }
     }

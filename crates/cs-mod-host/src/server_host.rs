@@ -908,7 +908,7 @@ impl<G: GameDll> GameDll for ModdedGame<G> {
             .host
             .dispatch_hook(eng, HookId::SpawnEntity, HookPhase::Pre, &ev);
         let keep = if pre.action == HookAction::Supercede {
-            pre.override_i32.map_or(false, |v| v != 0)
+            pre.override_i32.is_some_and(|v| v != 0)
         } else {
             self.inner.spawn_entity(eng, id, classname, keys)
         };
