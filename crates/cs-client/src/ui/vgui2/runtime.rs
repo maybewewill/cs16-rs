@@ -1,24 +1,63 @@
 //! Declarative VGUI2 `.res` runtime: caches VFS `.res` documents (supporting custom server/mod
-//! overrides and reload), resolves scheme colors & fonts (including `marlett.ttf`),
-//! computes responsive widget rectangles, paints controls, and handles headless events.
+//! overrides and reload), resolves dual schemes (`TrackerScheme.res` + `ClientScheme.res`),
+//! renders crisp GDI-calibrated scheme fonts (`VguiFontAtlas` + `marlett.ttf`), paints
+//! `BackgroundPanel.res`, borders, controls, and emits UI hover/click/release sounds.
 
 use std::collections::HashMap;
 
-use cs_assets::scheme::{LocalizationTable, load_image_rgba};
+use cs_assets::scheme::{LocalizationTable, VguiScheme, load_image_rgba};
 use cs_assets::vgui_font::{SchemeFontSet, load_marlett_font};
-use cs_assets::vgui_res::{ControlKind, VguiControlSpec, VguiResDocument, resolve_control_rect};
+use cs_assets::vgui_res::{
+    ControlKind, TextAlignment, VguiControlSpec, VguiCoordMode, VguiResDocument,
+    resolve_control_rect, resolve_control_rect_mode,
+};
 use cs_vfs::Vfs;
-use egui::{Color32, FontFamily, FontId, Pos2, Rect, TextureHandle, Vec2};
+use egui::{
+    Color32, CornerRadius, FontFamily, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle, Vec2,
+    epaint::text::{FontInsert, FontPriority, InsertFontFamily},
+};
 
 use crate::ui::vgui2::controls::{
     VguiComboState, VguiControlState, VguiListPanelState, VguiPropertySheetState,
-    VguiRichTextState, VguiSliderState, draw_vgui_button, draw_vgui_check_button,
-    draw_vgui_combo_box, draw_vgui_image_panel, draw_vgui_label, draw_vgui_list_panel,
-    draw_vgui_panel, draw_vgui_progress_bar, draw_vgui_property_sheet, draw_vgui_rich_text,
-    draw_vgui_slider, draw_vgui_text_entry,
+    VguiRichTextState, VguiSliderState, draw_vgui_check_button, draw_vgui_combo_box,
+    draw_vgui_image_panel, draw_vgui_list_panel, draw_vgui_panel, draw_vgui_progress_bar,
+    draw_vgui_property_sheet, draw_vgui_rich_text, draw_vgui_slider, draw_vgui_text_entry,
 };
+use crate::ui::vgui2::font_atlas::{VguiFontAtlas, VguiTextDrawOpts};
 use crate::ui::vgui2::html::{paint_html_doc, parse_html_doc};
 use crate::ui::vgui_theme::VguiPalette;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VguiSchemeKind {
+    Tracker,
+    Client,
+}
+
+impl VguiSchemeKind {
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Tracker => "tracker",
+            Self::Client => "client",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VguiUiSound {
+    Rollover,
+    Click,
+    Release,
+}
+
+impl VguiUiSound {
+    pub fn vfs_path(self) -> &'static str {
+        match self {
+            Self::Rollover => "UI/buttonrollover.wav",
+            Self::Click => "UI/buttonclick.wav",
+            Self::Release => "UI/buttonclickrelease.wav",
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum VguiEvent {
@@ -38,9 +77,11 @@ pub struct VguiLayoutNode {
     pub enabled: bool,
     pub label: String,
     pub command: String,
+    pub font: String,
+    pub align: TextAlignment,
+    pub default_button: bool,
+    pub tab_position: i32,
 }
-
-use egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
 
 /// Install Valve's `resource/marlett.ttf` (if available in VFS) into `egui` as `"marlett"` font family.
 pub fn install_marlett_into_egui(ctx: &egui::Context, vfs: &Vfs) -> bool {
@@ -105,13 +146,98 @@ pub fn resolve_vgui_text_color(spec: &VguiControlSpec, palette: VguiPalette) -> 
     }
 }
 
-/// VGUI2 declarative `.res` layout interpreter + stateful widget bank.
+pub fn scheme_color_or(scheme: &VguiScheme, key: &str, fallback: Color32) -> Color32 {
+    scheme
+        .resolve_color(key)
+        .map_or(fallback, |[r, g, b, a]| Color32::from_rgba_unmultiplied(r, g, b, a))
+}
+
+pub fn resolve_client_text_color(spec: &VguiControlSpec, scheme: &VguiScheme) -> Color32 {
+    if !spec.enabled {
+        scheme_color_or(scheme, "DisabledText1", Color32::from_rgb(80, 48, 0))
+    } else if spec.bright_text {
+        scheme_color_or(scheme, "BrightControlText", Color32::from_rgb(255, 176, 0))
+    } else if spec.dull_text {
+        scheme_color_or(scheme, "LabelDimText", Color32::from_rgba_unmultiplied(255, 176, 0, 164))
+    } else {
+        scheme_color_or(scheme, "ControlText", Color32::from_rgb(255, 176, 0))
+    }
+}
+
+/// Paint a named `Borders` spec (`ButtonBorder`, `InsetBorder`, `RaisedBorder`, etc.) from `VguiScheme`.
+pub fn paint_vgui_border(painter: &egui::Painter, rect: Rect, border_name: &str, scheme: &VguiScheme) {
+    let Some(spec) = scheme.resolve_border(border_name) else {
+        return;
+    };
+    let r = rect.shrink2(Vec2::ZERO);
+    for (idx, line) in spec.top.iter().enumerate() {
+        let Some([cr, cg, cb, ca]) = scheme.resolve_color(&line.color) else { continue };
+        let col = Color32::from_rgba_unmultiplied(cr, cg, cb, ca);
+        let y = r.top() + idx as f32;
+        let x0 = r.left() + line.offset[0] as f32;
+        let x1 = r.right() - line.offset[1] as f32;
+        if x1 > x0 {
+            painter.line_segment([Pos2::new(x0, y), Pos2::new(x1, y)], Stroke::new(1.0, col));
+        }
+    }
+    for (idx, line) in spec.bottom.iter().enumerate() {
+        let Some([cr, cg, cb, ca]) = scheme.resolve_color(&line.color) else { continue };
+        let col = Color32::from_rgba_unmultiplied(cr, cg, cb, ca);
+        let y = r.bottom() - idx as f32;
+        let x0 = r.left() + line.offset[0] as f32;
+        let x1 = r.right() - line.offset[1] as f32;
+        if x1 > x0 {
+            painter.line_segment([Pos2::new(x0, y), Pos2::new(x1, y)], Stroke::new(1.0, col));
+        }
+    }
+    for (idx, line) in spec.left.iter().enumerate() {
+        let Some([cr, cg, cb, ca]) = scheme.resolve_color(&line.color) else { continue };
+        let col = Color32::from_rgba_unmultiplied(cr, cg, cb, ca);
+        let x = r.left() + idx as f32;
+        let y0 = r.top() + line.offset[0] as f32;
+        let y1 = r.bottom() - line.offset[1] as f32;
+        if y1 > y0 {
+            painter.line_segment([Pos2::new(x, y0), Pos2::new(x, y1)], Stroke::new(1.0, col));
+        }
+    }
+    for (idx, line) in spec.right.iter().enumerate() {
+        let Some([cr, cg, cb, ca]) = scheme.resolve_color(&line.color) else { continue };
+        let col = Color32::from_rgba_unmultiplied(cr, cg, cb, ca);
+        let x = r.right() - idx as f32;
+        let y0 = r.top() + line.offset[0] as f32;
+        let y1 = r.bottom() - line.offset[1] as f32;
+        if y1 > y0 {
+            painter.line_segment([Pos2::new(x, y0), Pos2::new(x, y1)], Stroke::new(1.0, col));
+        }
+    }
+}
+
+/// Block background pointer/scroll interaction behind modal VGUI2 dialogs.
+pub fn modal_backdrop(ctx: &egui::Context, id_salt: &str) {
+    let screen = ctx.content_rect();
+    egui::Area::new(egui::Id::unique(id_salt))
+        .order(egui::Order::Middle)
+        .fixed_pos(screen.min)
+        .interactable(true)
+        .show(ctx, |ui| {
+            let _ = ui.allocate_rect(screen, Sense::click_and_drag());
+        });
+}
+
+/// VGUI2 declarative `.res` layout interpreter + dual-scheme font/asset/sound runtime.
 pub struct VguiRuntime {
     docs: HashMap<String, VguiResDocument>,
     pub scheme_fonts: SchemeFontSet,
+    pub tracker_scheme: VguiScheme,
+    pub client_scheme: VguiScheme,
+    pub font_atlas: VguiFontAtlas,
     pub states: HashMap<String, VguiControlState>,
     textures: HashMap<String, TextureHandle>,
     events: Vec<VguiEvent>,
+    ui_sounds: Vec<VguiUiSound>,
+    hovered_control: Option<String>,
+    pressed_control: Option<String>,
+    pub focused_control: Option<String>,
 }
 
 impl Default for VguiRuntime {
@@ -125,20 +251,75 @@ impl VguiRuntime {
         Self {
             docs: HashMap::new(),
             scheme_fonts: SchemeFontSet::default(),
+            tracker_scheme: VguiScheme::default(),
+            client_scheme: VguiScheme::default(),
+            font_atlas: VguiFontAtlas::new(),
             states: HashMap::new(),
             textures: HashMap::new(),
             events: Vec::new(),
+            ui_sounds: Vec::new(),
+            hovered_control: None,
+            pressed_control: None,
+            focused_control: None,
         }
     }
 
     pub fn load_scheme_fonts(&mut self, vfs: &Vfs) {
-        self.scheme_fonts = SchemeFontSet::load(vfs, "resource/TrackerScheme.res");
+        self.tracker_scheme = VguiScheme::load_tracker(vfs);
+        self.client_scheme = VguiScheme::load_client(vfs);
+        self.scheme_fonts = self.tracker_scheme.fonts.clone();
+        self.font_atlas.clear();
+    }
+
+    pub fn scheme(&self, kind: VguiSchemeKind) -> &VguiScheme {
+        match kind {
+            VguiSchemeKind::Tracker => &self.tracker_scheme,
+            VguiSchemeKind::Client => &self.client_scheme,
+        }
+    }
+
+    pub fn scheme_fonts(&self, kind: VguiSchemeKind) -> &SchemeFontSet {
+        &self.scheme(kind).fonts
+    }
+
+    pub fn push_ui_sound(&mut self, sound: VguiUiSound) {
+        self.ui_sounds.push(sound);
+    }
+
+    pub fn take_ui_sounds(&mut self) -> Vec<VguiUiSound> {
+        std::mem::take(&mut self.ui_sounds)
+    }
+
+    /// Track hover/press/release edges on an interactive control to emit authentic VGUI2 sounds.
+    pub fn track_interactive(&mut self, control_id: &str, resp: &egui::Response) {
+        if resp.hovered() {
+            if self.hovered_control.as_deref() != Some(control_id) {
+                self.hovered_control = Some(control_id.to_string());
+                self.ui_sounds.push(VguiUiSound::Rollover);
+            }
+        } else if self.hovered_control.as_deref() == Some(control_id) {
+            self.hovered_control = None;
+        }
+        if resp.is_pointer_button_down_on() {
+            if self.pressed_control.as_deref() != Some(control_id) {
+                self.pressed_control = Some(control_id.to_string());
+                self.ui_sounds.push(VguiUiSound::Click);
+            }
+        } else if self.pressed_control.as_deref() == Some(control_id) {
+            self.pressed_control = None;
+            if resp.hovered() || resp.clicked() {
+                self.ui_sounds.push(VguiUiSound::Release);
+            }
+        } else if resp.clicked() {
+            self.ui_sounds.push(VguiUiSound::Click);
+        }
     }
 
     /// Clear cached `.res` layouts (e.g. after mounting server/mod resource packs).
     pub fn invalidate_cache(&mut self) {
         self.docs.clear();
         self.textures.clear();
+        self.font_atlas.clear();
     }
 
     /// Load or fetch cached `.res` document from VFS (automatically picks up custom server `.res` layers).
@@ -206,7 +387,7 @@ impl VguiRuntime {
         field: &str,
         viewport: [f32; 4],
     ) -> Option<[f32; 4]> {
-        let nodes = self.compute_layout(doc_path, viewport, None);
+        let nodes = self.compute_layout_mode(doc_path, viewport, VguiCoordMode::Proportional640, None);
         nodes
             .into_iter()
             .find(|n| n.field_name.eq_ignore_ascii_case(field))
@@ -253,6 +434,7 @@ impl VguiRuntime {
             return None;
         }
         let cmd = spec.command.clone();
+        self.ui_sounds.push(VguiUiSound::Click);
         self.events.push(VguiEvent::Command {
             field: spec.field_name.clone(),
             command: cmd.clone(),
@@ -297,6 +479,7 @@ impl VguiRuntime {
             _ => true,
         };
         self.set_state(field, VguiControlState::Check(next));
+        self.ui_sounds.push(VguiUiSound::Click);
         self.events.push(VguiEvent::ValueChanged {
             field: field.to_string(),
         });
@@ -331,6 +514,7 @@ impl VguiRuntime {
         };
         if idx < cb.items.len() {
             cb.selected = idx;
+            self.ui_sounds.push(VguiUiSound::Click);
             self.events.push(VguiEvent::ValueChanged {
                 field: field.to_string(),
             });
@@ -342,10 +526,18 @@ impl VguiRuntime {
 
     pub fn ensure_texture(&mut self, ctx: &egui::Context, vfs: Option<&Vfs>, rel_path: &str) -> Option<TextureHandle> {
         let norm = rel_path.replace('\\', "/");
+        if norm.is_empty() {
+            return None;
+        }
         if let Some(tex) = self.textures.get(&norm) {
             return Some(tex.clone());
         }
-        let img = load_image_rgba(vfs?, &norm).ok()?;
+        let vfs = vfs?;
+        let img = load_image_rgba(vfs, &norm)
+            .or_else(|_| load_image_rgba(vfs, &format!("{norm}.tga")))
+            .or_else(|_| load_image_rgba(vfs, &format!("{norm}.bmp")))
+            .or_else(|_| load_image_rgba(vfs, &format!("{norm}.png")))
+            .ok()?;
         let col = egui::ColorImage::from_rgba_unmultiplied(
             [img.width as usize, img.height as usize],
             &img.rgba,
@@ -362,35 +554,284 @@ impl VguiRuntime {
         viewport: [f32; 4],
         loc: Option<&LocalizationTable>,
     ) -> Vec<VguiLayoutNode> {
+        self.compute_layout_mode(doc_path, viewport, VguiCoordMode::Proportional640, loc)
+    }
+
+    /// Compute flattened layout nodes using explicit `VguiCoordMode` and `root_frame_index()` nesting.
+    pub fn compute_layout_mode(
+        &self,
+        doc_path: &str,
+        viewport: [f32; 4],
+        mode: VguiCoordMode,
+        loc: Option<&LocalizationTable>,
+    ) -> Vec<VguiLayoutNode> {
         let key = doc_path.replace('\\', "/").to_ascii_lowercase();
         let Some(doc) = self.docs.get(&key) else {
             return Vec::new();
         };
         let mut out = Vec::new();
-        fn walk(
-            controls: &[VguiControlSpec],
-            parent: [f32; 4],
-            loc: Option<&LocalizationTable>,
-            out: &mut Vec<VguiLayoutNode>,
-        ) {
-            for c in controls {
-                let rect = resolve_control_rect(c, parent, 640.0, 480.0);
-                let label = loc.map_or(c.label_text.as_str(), |l| l.resolve(&c.label_text)).to_string();
-                out.push(VguiLayoutNode {
-                    field_name: c.field_name.clone(),
-                    control_name: c.control_name.clone(),
-                    kind: c.kind,
-                    rect,
-                    visible: c.visible,
-                    enabled: c.enabled,
-                    label,
-                    command: c.command.clone(),
-                });
-                walk(&c.children, rect, loc, out);
+        let push_node = |c: &VguiControlSpec, rect: [f32; 4], out: &mut Vec<VguiLayoutNode>| {
+            let label = loc.map_or(c.label_text.as_str(), |l| l.resolve(&c.label_text)).to_string();
+            out.push(VguiLayoutNode {
+                field_name: c.field_name.clone(),
+                control_name: c.control_name.clone(),
+                kind: c.kind,
+                rect,
+                visible: c.visible,
+                enabled: c.enabled,
+                label,
+                command: c.command.clone(),
+                font: c.font.clone(),
+                align: c.text_alignment,
+                default_button: c.default_button,
+                tab_position: c.tab_position,
+            });
+        };
+        let walk_children = |children: &[VguiControlSpec],
+                             parent: [f32; 4],
+                             orig_parent: [f32; 2],
+                             out: &mut Vec<VguiLayoutNode>| {
+            fn walk(
+                controls: &[VguiControlSpec],
+                parent: [f32; 4],
+                mode: VguiCoordMode,
+                orig_parent: [f32; 2],
+                loc: Option<&LocalizationTable>,
+                out: &mut Vec<VguiLayoutNode>,
+            ) {
+                for c in controls {
+                    let rect = resolve_control_rect_mode(c, parent, mode, orig_parent);
+                    let label = loc.map_or(c.label_text.as_str(), |l| l.resolve(&c.label_text)).to_string();
+                    out.push(VguiLayoutNode {
+                        field_name: c.field_name.clone(),
+                        control_name: c.control_name.clone(),
+                        kind: c.kind,
+                        rect,
+                        visible: c.visible,
+                        enabled: c.enabled,
+                        label,
+                        command: c.command.clone(),
+                        font: c.font.clone(),
+                        align: c.text_alignment,
+                        default_button: c.default_button,
+                        tab_position: c.tab_position,
+                    });
+                    walk(&c.children, rect, mode, [c.wide.raw_or(orig_parent[0]), c.tall.raw_or(orig_parent[1])], loc, out);
+                }
             }
+            walk(children, parent, mode, orig_parent, loc, out);
+        };
+
+        if let Some(root_idx) = doc.root_frame_index() {
+            let root = &doc.controls[root_idx];
+            let orig = [root.wide.raw_or(640.0), root.tall.raw_or(480.0)];
+            let root_rect = resolve_control_rect_mode(root, viewport, mode, [640.0, 480.0]);
+            push_node(root, root_rect, &mut out);
+            walk_children(&root.children, root_rect, orig, &mut out);
+            for (idx, c) in doc.controls.iter().enumerate() {
+                if idx == root_idx {
+                    continue;
+                }
+                let rect = resolve_control_rect_mode(c, root_rect, mode, orig);
+                push_node(c, rect, &mut out);
+                walk_children(&c.children, rect, [c.wide.raw_or(orig[0]), c.tall.raw_or(orig[1])], &mut out);
+            }
+        } else {
+            walk_children(&doc.controls, viewport, [640.0, 480.0], &mut out);
         }
-        walk(&doc.controls, viewport, loc, &mut out);
         out
+    }
+
+    /// Paint the shared black-and-orange CS 1.6 `Resource/UI/BackgroundPanel.res` backdrop,
+    /// returning the proportional screen rect inside which `MOTD.res` / `Teammenu.res` / `Buy*.res`
+    /// resolve their coordinates.
+    pub fn paint_background_panel(
+        &mut self,
+        ctx: &egui::Context,
+        painter: &egui::Painter,
+        screen: Rect,
+        vfs: Option<&Vfs>,
+        caption: &str,
+    ) -> Rect {
+        if let Some(v) = vfs {
+            self.load_res(v, "resource/UI/BackgroundPanel.res");
+        }
+        let vp = [screen.left(), screen.top(), screen.width(), screen.height()];
+        let sx = (screen.width() / 640.0).max(0.5);
+        let sy = (screen.height() / 480.0).max(0.5);
+        let fallback_panel = Rect::from_min_max(
+            Pos2::new(screen.left() + 20.0 * sx, screen.top() + 20.0 * sy),
+            Pos2::new(screen.left() + 620.0 * sx, screen.top() + 460.0 * sy),
+        );
+        let panel_rect = if self.doc("resource/UI/BackgroundPanel.res").is_some() {
+            let tl = self
+                .doc_control_rect("resource/UI/BackgroundPanel.res", "TopLeftPanel", vp)
+                .map_or(fallback_panel.min, |r| Pos2::new(r[0], r[1]));
+            let br = self
+                .doc_control_rect("resource/UI/BackgroundPanel.res", "BottomRightPanel", vp)
+                .map_or(fallback_panel.max, |r| Pos2::new(r[0] + r[2], r[1] + r[3]));
+            Rect::from_min_max(tl, br)
+        } else {
+            fallback_panel
+        };
+
+        let bg_fill = scheme_color_or(
+            &self.client_scheme,
+            "ViewportBG",
+            Color32::from_rgba_unmultiplied(0, 0, 0, 200),
+        );
+        let border_col = scheme_color_or(
+            &self.client_scheme,
+            "BorderBright",
+            Color32::from_rgba_unmultiplied(188, 112, 0, 128),
+        );
+        let title_col = scheme_color_or(
+            &self.client_scheme,
+            "TitleText",
+            Color32::from_rgb(255, 174, 0),
+        );
+        let icon_col = scheme_color_or(
+            &self.client_scheme,
+            "TitleIcon",
+            Color32::from_rgb(255, 174, 0),
+        );
+
+        let corner = (10.0 * sx.min(sy)).round() as u8;
+        painter.rect_filled(panel_rect, CornerRadius::same(corner), bg_fill);
+        painter.rect_stroke(
+            panel_rect,
+            CornerRadius::same(corner),
+            Stroke::new(1.0, border_col),
+            StrokeKind::Inside,
+        );
+
+        let gap_rect = self
+            .doc_control_rect("resource/UI/BackgroundPanel.res", "GapPanel", vp)
+            .map_or_else(
+                || Rect::from_min_size(Pos2::new(panel_rect.left(), screen.top() + 72.0 * sy), Vec2::new(panel_rect.width(), (2.0 * sy).max(1.0))),
+                |r| Rect::from_min_size(Pos2::new(r[0], r[1]), Vec2::new(r[2], r[3].max(1.0))),
+            );
+        painter.rect_filled(gap_rect, 0.0, border_col);
+
+        let icon_rect = self
+            .doc_control_rect("resource/UI/BackgroundPanel.res", "ExclamationPanel", vp)
+            .map_or_else(
+                || Rect::from_min_size(Pos2::new(panel_rect.left() + 6.0 * sx, panel_rect.top() + 6.0 * sy), Vec2::splat(40.0 * sy)),
+                |r| {
+                    let s = r[3].max(20.0);
+                    Rect::from_min_size(Pos2::new(r[0], r[1]), Vec2::splat(s))
+                },
+            );
+        let img_path = self
+            .doc("resource/UI/BackgroundPanel.res")
+            .and_then(|d| d.find("ExclamationPanel"))
+            .map(|c| c.image.clone())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "gfx/vgui/CS_logo".to_string());
+        if let Some(tex) = self.ensure_texture(ctx, vfs, &img_path) {
+            draw_vgui_image_panel(painter, icon_rect, Some(&tex), icon_col);
+        }
+
+        if !caption.is_empty() {
+            let cap_rect = self
+                .doc_control_rect("resource/UI/BackgroundPanel.res", "CaptionLabel", vp)
+                .map_or_else(
+                    || Rect::from_min_size(Pos2::new(screen.left() + 70.0 * sx, screen.top() + 22.0 * sy), Vec2::new(450.0 * sx, 48.0 * sy)),
+                    |r| Rect::from_min_size(Pos2::new(r[0], r[1]), Vec2::new(r[2], r[3])),
+                );
+            let screen_h = screen.height().round().max(480.0) as u32;
+            self.font_atlas.paint_text(
+                painter,
+                ctx,
+                vfs,
+                &self.client_scheme.fonts,
+                "client",
+                "Title",
+                screen_h,
+                cap_rect,
+                caption,
+                title_col,
+                VguiTextDrawOpts {
+                    align: TextAlignment::West,
+                    process_hotkey: false,
+                    proportional_scale: true,
+                },
+            );
+        }
+
+        screen
+    }
+
+    /// Render a `ClientScheme.res` flat translucent black & amber button with rollover/click/release sounds.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_client_button(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        vfs: Option<&Vfs>,
+        id_salt: &str,
+        rect: Rect,
+        label: &str,
+        default_button: bool,
+        enabled: bool,
+        selected: bool,
+        font_name: &str,
+        align: TextAlignment,
+        screen_h: u32,
+    ) -> egui::Response {
+        let id = ui.make_persistent_id(id_salt);
+        let sense = if enabled { Sense::click() } else { Sense::hover() };
+        let resp = ui.interact(rect, id, sense);
+        if enabled {
+            self.track_interactive(id_salt, &resp);
+        }
+
+        let scheme = &self.client_scheme;
+        let bg = if !enabled {
+            scheme_color_or(scheme, "ButtonBG", Color32::from_rgba_unmultiplied(0, 0, 0, 64))
+        } else if resp.is_pointer_button_down_on() || selected {
+            scheme_color_or(scheme, "SelectionBG", Color32::from_rgba_unmultiplied(255, 176, 0, 110))
+        } else if resp.hovered() {
+            scheme_color_or(scheme, "SelectionBG", Color32::from_rgba_unmultiplied(255, 176, 0, 100))
+        } else {
+            scheme_color_or(scheme, "ButtonBG", Color32::from_rgba_unmultiplied(0, 0, 0, 64))
+        };
+        let border_col = if resp.hovered() || default_button || selected {
+            scheme_color_or(scheme, "BorderBuyPreset", Color32::from_rgba_unmultiplied(255, 176, 0, 220))
+        } else {
+            scheme_color_or(scheme, "BorderBright", Color32::from_rgba_unmultiplied(188, 112, 0, 128))
+        };
+        let fg = if !enabled {
+            scheme_color_or(scheme, "DisabledText1", Color32::from_rgb(80, 48, 0))
+        } else if resp.hovered() || selected {
+            scheme_color_or(scheme, "BrightControlText", Color32::from_rgb(255, 200, 40))
+        } else {
+            scheme_color_or(scheme, "ControlText", Color32::from_rgb(255, 176, 0))
+        };
+
+        let painter = ui.painter();
+        painter.rect_filled(rect, 0.0, bg);
+        painter.rect_stroke(rect, 0.0, Stroke::new(1.0, border_col), StrokeKind::Inside);
+
+        let text_rect = rect.shrink2(Vec2::new(8.0, 2.0));
+        self.font_atlas.paint_text(
+            painter,
+            ctx,
+            vfs,
+            &self.client_scheme.fonts,
+            "client",
+            font_name,
+            screen_h,
+            text_rect,
+            label,
+            fg,
+            VguiTextDrawOpts {
+                align,
+                process_hotkey: true,
+                proportional_scale: true,
+            },
+        );
+        resp
     }
 
     /// Paint a `.res` document's visible controls directly into `ui` and return emitted commands.
@@ -409,9 +850,11 @@ impl VguiRuntime {
             origin_rect.width(),
             origin_rect.height(),
         ];
-        let nodes = self.compute_layout(doc_path, viewport, loc);
+        let nodes = self.compute_layout_mode(doc_path, viewport, VguiCoordMode::Proportional640, loc);
         let key = doc_path.replace('\\', "/").to_ascii_lowercase();
         let specs = self.docs.get(&key).cloned();
+        let screen_h = ui.ctx().content_rect().height().round().max(480.0) as u32;
+        let ctx = ui.ctx().clone();
         let mut out = Vec::new();
         for n in &nodes {
             if !n.visible {
@@ -431,15 +874,70 @@ impl VguiRuntime {
                 }
                 ControlKind::Label => {
                     let fg = spec.map_or(palette.base_text, |s| resolve_vgui_text_color(s, palette));
-                    let sz = spec
-                        .and_then(|s| self.scheme_fonts.resolve(&s.font, origin_rect.height() as u32))
-                        .map_or(13.5, |f| f.tall.min(24.0));
-                    let align = spec.map_or(Default::default(), |s| s.text_alignment);
-                    draw_vgui_label(ui.painter(), rect, &n.label, align, FontId::proportional(sz), fg);
+                    let font_name = if n.font.is_empty() { "Default" } else { n.font.as_str() };
+                    self.font_atlas.paint_text(
+                        ui.painter(),
+                        &ctx,
+                        vfs,
+                        &self.tracker_scheme.fonts,
+                        "tracker",
+                        font_name,
+                        screen_h,
+                        rect,
+                        &n.label,
+                        fg,
+                        VguiTextDrawOpts {
+                            align: n.align,
+                            process_hotkey: false,
+                            proportional_scale: true,
+                        },
+                    );
                 }
                 ControlKind::Button | ControlKind::MouseOverPanelButton => {
-                    let def = spec.is_some_and(|s| s.default_button);
-                    if draw_vgui_button(ui, rect, &n.label, def, n.enabled, palette).clicked() {
+                    let def = n.default_button;
+                    let font_name = if n.font.is_empty() { "Default" } else { n.font.as_str() };
+                    let id = ui.make_persistent_id(("vgui_res_btn", &n.field_name, rect.left() as i32));
+                    let resp = ui.interact(rect, id, if n.enabled { Sense::click() } else { Sense::hover() });
+                    if n.enabled {
+                        self.track_interactive(&n.field_name, &resp);
+                    }
+                    let bg = if !n.enabled {
+                        palette.control_bg
+                    } else if resp.is_pointer_button_down_on() {
+                        palette.control_dark_bg
+                    } else if resp.hovered() {
+                        palette.selection_bg
+                    } else {
+                        palette.control_bg
+                    };
+                    draw_vgui_panel(ui.painter(), rect, bg, palette, resp.is_pointer_button_down_on());
+                    if def {
+                        ui.painter().rect_stroke(
+                            rect.shrink(1.0),
+                            0.0,
+                            Stroke::new(1.0, Color32::BLACK),
+                            StrokeKind::Inside,
+                        );
+                    }
+                    let fg = if n.enabled { palette.bright_control_text } else { palette.dim_text };
+                    self.font_atlas.paint_text(
+                        ui.painter(),
+                        &ctx,
+                        vfs,
+                        &self.tracker_scheme.fonts,
+                        "tracker",
+                        font_name,
+                        screen_h,
+                        rect.shrink2(Vec2::new(6.0, 2.0)),
+                        &n.label,
+                        fg,
+                        VguiTextDrawOpts {
+                            align: TextAlignment::Center,
+                            process_hotkey: true,
+                            proportional_scale: true,
+                        },
+                    );
+                    if resp.clicked() {
                         out.push(VguiEvent::Command {
                             field: n.field_name.clone(),
                             command: n.command.clone(),
@@ -449,7 +947,7 @@ impl VguiRuntime {
                 ControlKind::ImagePanel => {
                     let tex = spec
                         .filter(|s| !s.image.is_empty())
-                        .and_then(|s| self.ensure_texture(ui.ctx(), vfs, &s.image));
+                        .and_then(|s| self.ensure_texture(&ctx, vfs, &s.image));
                     draw_vgui_image_panel(ui.painter(), rect, tex.as_ref(), Color32::WHITE);
                 }
                 ControlKind::ProgressBar => {
@@ -477,6 +975,7 @@ impl VguiRuntime {
                     });
                     if toggled {
                         self.states.insert(key, VguiControlState::Check(checked));
+                        self.ui_sounds.push(VguiUiSound::Click);
                         out.push(VguiEvent::ValueChanged {
                             field: n.field_name.clone(),
                         });
@@ -515,6 +1014,7 @@ impl VguiRuntime {
                     });
                     if changed {
                         self.states.insert(key, VguiControlState::Combo(st));
+                        self.ui_sounds.push(VguiUiSound::Click);
                         out.push(VguiEvent::ValueChanged {
                             field: n.field_name.clone(),
                         });
@@ -549,6 +1049,7 @@ impl VguiRuntime {
                     });
                     self.states.insert(key, VguiControlState::List(list));
                     if let Some(row) = dbl {
+                        self.ui_sounds.push(VguiUiSound::Click);
                         out.push(VguiEvent::ListDoubleClicked {
                             field: n.field_name.clone(),
                             row,
@@ -579,6 +1080,7 @@ impl VguiRuntime {
                     let new_tab = sheet.active_tab;
                     self.states.insert(key, VguiControlState::PropertySheet(sheet));
                     if tab_changed {
+                        self.ui_sounds.push(VguiUiSound::Click);
                         out.push(VguiEvent::TabChanged {
                             field: n.field_name.clone(),
                             tab: new_tab,

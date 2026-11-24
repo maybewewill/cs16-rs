@@ -209,6 +209,10 @@ impl AudioEngine {
         self.play_2d(vfs, "UI/buttonclick.wav", 0.55 * master_volume);
     }
 
+    pub fn play_ui_sound(&mut self, vfs: Option<&Vfs>, path: &str) {
+        self.play_2d(vfs, path, 0.7);
+    }
+
     pub fn sync_menu_music(
         &mut self,
         vfs: Option<&Vfs>,
