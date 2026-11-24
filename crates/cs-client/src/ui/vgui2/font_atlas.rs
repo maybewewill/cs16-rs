@@ -24,6 +24,9 @@ struct AtlasTierKey {
     scheme_tag: String,
     font_name: String,
     screen_h_bucket: u32,
+    /// The pixel height the tier was built at: proportional and fixed-size requests of the same
+    /// font must not share one tier.
+    tall_px: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -338,14 +341,16 @@ impl VguiFontAtlas {
             scheme_tag: scheme_tag.to_string(),
             font_name: effective_name.to_ascii_lowercase(),
             screen_h_bucket: screen_h.max(240),
+            tall_px: tall.round().max(1.0) as u32,
         };
         if !self.tiers.contains_key(&key) {
             let ttf = self.resolve_or_load_ttf(vfs, scheme_fonts, scheme_tag, effective_name, &variant);
             let tex_id = format!(
-                "vgui_font_{}_{}_{}",
+                "vgui_font_{}_{}_{}_{}",
                 scheme_tag,
                 key.font_name,
-                key.screen_h_bucket
+                key.screen_h_bucket,
+                key.tall_px
             );
             let tier = FontTierAtlas::new(tex_id, ttf, &variant, tall);
             self.tiers.insert(key.clone(), tier);
@@ -365,7 +370,25 @@ impl VguiFontAtlas {
         screen_h: u32,
         text: &str,
     ) -> Vec2 {
-        let Some(tier) = self.ensure_tier(vfs, scheme_fonts, scheme_tag, font_name, screen_h, true)
+        self.measure_text_scaled(ctx, vfs, scheme_fonts, scheme_tag, font_name, screen_h, text, true)
+    }
+
+    /// [`measure_text`](Self::measure_text) with the same `proportional_scale` choice as the
+    /// matching [`paint_text`](Self::paint_text) call, so the measured box fits the drawn text.
+    #[allow(clippy::too_many_arguments)]
+    pub fn measure_text_scaled(
+        &mut self,
+        ctx: &egui::Context,
+        vfs: Option<&Vfs>,
+        scheme_fonts: &SchemeFontSet,
+        scheme_tag: &str,
+        font_name: &str,
+        screen_h: u32,
+        text: &str,
+        proportional_scale: bool,
+    ) -> Vec2 {
+        let Some(tier) =
+            self.ensure_tier(vfs, scheme_fonts, scheme_tag, font_name, screen_h, proportional_scale)
         else {
             return Vec2::ZERO;
         };

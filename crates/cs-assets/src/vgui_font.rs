@@ -227,6 +227,10 @@ pub struct RasterizeOptions {
     pub dropshadow: bool,
     pub underline: bool,
     pub additive: bool,
+    /// Windows GDI emboldens a face synthetically when the requested weight is heavier than the
+    /// heaviest file it has (e.g. `weight 1000` on Trebuchet MS, whose bold file is 700): every
+    /// glyph is smeared one pixel to the right and its advance grows by one.
+    pub synthetic_bold: bool,
 }
 
 impl From<&SchemeFontVariant> for RasterizeOptions {
@@ -238,6 +242,9 @@ impl From<&SchemeFontVariant> for RasterizeOptions {
             dropshadow: v.dropshadow,
             underline: v.underline,
             additive: v.additive,
+            // Assumption: GDI's threshold for synthetic emboldening over a 700 bold face is a
+            // request above 800 (seen: `MenuLarge` weight 1000 renders heavier than the bold file).
+            synthetic_bold: v.weight > 800,
         }
     }
 }
@@ -387,7 +394,7 @@ impl VguiTrueTypeFont {
         let px = self.gdi_px_scale(opts.tall);
         let scaled = self.font.as_scaled(PxScale::from(px));
         let gid = self.font.glyph_id(ch);
-        let advance_x = scaled.h_advance(gid).round() as i32;
+        let advance_x = scaled.h_advance(gid).round() as i32 + i32::from(opts.synthetic_bold);
         let baseline = scaled.ascent().round();
         let glyph = gid.with_scale_and_position(PxScale::from(px), ab_glyph::point(0.0, baseline));
         let Some(outlined) = self.font.outline_glyph(glyph) else {
@@ -402,7 +409,8 @@ impl VguiTrueTypeFont {
             });
         };
         let bounds = outlined.px_bounds();
-        let gw = bounds.width().ceil().max(0.0) as i32;
+        let embolden = i32::from(opts.synthetic_bold);
+        let gw = bounds.width().ceil().max(0.0) as i32 + embolden;
         let gh = bounds.height().ceil().max(0.0) as i32;
         if gw == 0 || gh == 0 {
             return Some(RasterizedGlyphRgba {
@@ -428,6 +436,15 @@ impl VguiTrueTypeFont {
                 };
             }
         });
+        if embolden > 0 {
+            // Smear one pixel to the right, right to left so the source is the unsmeared row.
+            for y in 0..gh as usize {
+                for x in (1..gw as usize).rev() {
+                    let i = y * gw as usize + x;
+                    raw_alpha[i] = raw_alpha[i].max(raw_alpha[i - 1]);
+                }
+            }
+        }
 
         let pad_l = i32::from(opts.outline);
         let pad_t = i32::from(opts.outline);
@@ -740,6 +757,7 @@ mod tests {
                     dropshadow: false,
                     underline: false,
                     additive: false,
+                    synthetic_bold: false,
                 },
             )
             .expect("rasterize crisp");
@@ -764,6 +782,7 @@ mod tests {
                     dropshadow: false,
                     underline: false,
                     additive: false,
+                    synthetic_bold: false,
                 },
             )
             .expect("rasterize outlined");

@@ -42,6 +42,11 @@ pub struct MainMenuUi {
     pub game_menu: Vec<GameMenuEntry>,
     pub settings_script: Option<SettingsScript>,
     pub loc: Option<LocalizationTable>,
+    /// `resource/game_menu.tga` (the COUNTER-STRIKE logo under the menu), loaded on first draw.
+    logo: Option<egui::TextureHandle>,
+    logo_tried: bool,
+    /// The armed (highlighted) menu row: the first row until the mouse arms another one.
+    armed_item: usize,
 }
 
 impl Default for MainMenuUi {
@@ -56,6 +61,9 @@ impl Default for MainMenuUi {
             game_menu: Vec::new(),
             settings_script: None,
             loc: None,
+            logo: None,
+            logo_tried: false,
+            armed_item: 0,
         }
     }
 }
@@ -123,7 +131,9 @@ impl MainMenuUi {
                 let painter = ui.painter();
                 if !in_game {
                     if let Some(tex) = m.bg_texture {
-                        // Scale-to-cover while keeping authentic 4:3 composition centered
+                        // The 800x600 `BackgroundLayout.txt` composite is scaled uniformly by
+                        // max(W/800, H/600) and cropped centred (measured against the original:
+                        // 1280x720 and 1600x1080 crop top and bottom, 1280x1024 crops the sides).
                         let tex_aspect = 800.0 / 600.0;
                         let win_aspect = screen.width() / screen.height().max(1.0);
                         let uv = if win_aspect > tex_aspect {
@@ -144,82 +154,110 @@ impl MainMenuUi {
                 }
             });
 
-        // 2. Classic bottom-left transparent CS 1.6 menu column (`resource/GameMenu.res` with `MenuLarge`)
-        let menu_x = (screen.width() * 0.042).clamp(24.0, 56.0);
-        let menu_y = (screen.height() - if in_game { 295.0 } else { 210.0 }).max(90.0);
+        // 2. The game menu column (`resource/GameMenu.res`, `TrackerScheme` `MenuLarge`).
+        // Layout measured on the original GameUI (Steam build, 2026-11-24) at 800x600, 1024x768,
+        // 1280x720, 1280x800, 1280x1024 and 1600x1080. Everything scales by
+        // `s = max(1, height / 720)`: the item pitch is `MenuItemHeight` (48) * s, the last item's
+        // baseline sits 63 * s above the bottom, the logo's bottom 16 * s above it, and the text
+        // starts at 82 * s on windows narrower than 1280 and 115 * s from 1280 up.
+        // Assumption: the width threshold between 1024 and 1280 was not measured.
+        let s_menu = (screen.height() / 720.0).max(1.0);
+        let base_x = if screen.width() >= 1280.0 { 115.0 } else { 82.0 };
+        let menu_x = screen.min.x + base_x * s_menu;
+        let item_pitch = 48.0 * s_menu;
         let loc_ref = m.loc.or(self.loc.as_ref());
+        let source_entries = if self.game_menu.is_empty() {
+            fallback_game_menu()
+        } else {
+            self.game_menu.clone()
+        };
+        let visible_entries: Vec<GameMenuEntry> = source_entries
+            .iter()
+            .filter(|e| !(e.only_in_game && !in_game) && !(e.not_multi && in_game))
+            .cloned()
+            .collect();
+        let rows = visible_entries.len().max(1) as f32;
+        let last_baseline = screen.max.y - 63.0 * s_menu;
+        let menu_top = last_baseline - (rows - 1.0) * item_pitch - item_pitch * 0.75;
+
+        // The logo (`game_menu.tga`) below the menu, drawn at its own size * s.
+        if !self.logo_tried {
+            self.logo_tried = true;
+            self.logo = m.vfs.and_then(|v| cs_assets::scheme::load_tga_image(v, "resource/game_menu.tga").ok()).map(|img| {
+                ctx.load_texture(
+                    "cs16_menu_logo",
+                    egui::ColorImage::from_rgba_unmultiplied([img.width as usize, img.height as usize], &img.rgba),
+                    egui::TextureOptions::LINEAR,
+                )
+            });
+        }
+        if !in_game && let Some(logo) = &self.logo {
+            let size = logo.size_vec2() * s_menu;
+            // `game_menu.tga` (207x32, content from (1, 1) to (206, 25)): the content's left
+            // edge is 4 px left of the menu text and its last row 16 px above the bottom (* s).
+            let min = Pos2::new(menu_x - 5.0 * s_menu, screen.max.y - (16.0 + 24.0) * s_menu);
+            egui::Area::new(egui::Id::unique("cs16_menu_logo"))
+                .order(egui::Order::Middle)
+                .fixed_pos(min)
+                .interactable(false)
+                .show(ctx, |ui| {
+                    ui.painter().image(
+                        logo.id(),
+                        Rect::from_min_size(min, size),
+                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                });
+        }
+
         egui::Area::new(egui::Id::unique("cs16_main_menu_items"))
             .order(egui::Order::Middle)
-            .fixed_pos(Pos2::new(menu_x, menu_y))
+            .fixed_pos(Pos2::new(menu_x, menu_top))
             .show(ctx, |ui| {
-                ui.spacing_mut().item_spacing.y = 4.0;
-
-                if !self.game_menu.is_empty() {
-                    let entries = self.game_menu.clone();
-                    for (idx, entry) in entries.into_iter().enumerate() {
-                        if entry.only_in_game && !in_game {
-                            continue;
-                        }
-                        if entry.not_multi && in_game {
-                            continue;
-                        }
-                        let raw_label = loc_ref.map_or(entry.label.as_str(), |l| l.resolve(&entry.label));
-                        let label = raw_label.trim();
-                        if label.is_empty() {
-                            continue;
-                        }
-                        if menu_link_vgui(ui, runtime, m.vfs, palette, &format!("gm_{idx}_{}", entry.command), label) {
-                            match entry.command.as_str() {
-                                "ResumeGame" => out.resume_game = true,
-                                "Disconnect" => out.actions.push(EngineAction::Disconnect),
-                                "OpenPlayerListDialog" => out.open_player_list = true,
-                                "OpenCreateMultiplayerGameDialog" => self.new_game_open = true,
-                                "OpenServerBrowser" => {
-                                    self.find_servers_open = true;
-                                    self.server_browser.open = true;
-                                }
-                                "OpenOptionsDialog" => out.open_options = true,
-                                "Quit" => out.actions.push(EngineAction::Quit),
-                                cmd => {
-                                    if let Some(rest) = cmd.strip_prefix("engine ") {
-                                        out.actions.extend(cvars.execute_script(rest));
-                                    }
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let mut armed = self.armed_item;
+                for (row, entry) in visible_entries.iter().enumerate() {
+                    let raw_label = loc_ref.map_or(entry.label.as_str(), |l| l.resolve(&entry.label));
+                    let label = raw_label.trim();
+                    if label.is_empty() {
+                        // A blank `GameMenu.res` entry is a spacer of one item height.
+                        ui.allocate_exact_size(Vec2::new(10.0, item_pitch), Sense::hover());
+                        continue;
+                    }
+                    let (clicked, hovered) = menu_item_vgui(
+                        ui,
+                        runtime,
+                        m.vfs,
+                        &format!("gm_{row}_{}", entry.command),
+                        label,
+                        s_menu,
+                        item_pitch,
+                        armed == row,
+                    );
+                    if hovered {
+                        armed = row;
+                    }
+                    if clicked {
+                        match entry.command.as_str() {
+                            "ResumeGame" => out.resume_game = true,
+                            "Disconnect" => out.actions.push(EngineAction::Disconnect),
+                            "OpenPlayerListDialog" => out.open_player_list = true,
+                            "OpenCreateMultiplayerGameDialog" => self.new_game_open = true,
+                            "OpenServerBrowser" => {
+                                self.find_servers_open = true;
+                                self.server_browser.open = true;
+                            }
+                            "OpenOptionsDialog" => out.open_options = true,
+                            "Quit" => out.actions.push(EngineAction::Quit),
+                            cmd => {
+                                if let Some(rest) = cmd.strip_prefix("engine ") {
+                                    out.actions.extend(cvars.execute_script(rest));
                                 }
                             }
                         }
                     }
-                } else {
-                    if in_game {
-                        if menu_link_vgui(ui, runtime, m.vfs, palette, "gm_resume", "Resume Game") {
-                            out.resume_game = true;
-                        }
-                        if menu_link_vgui(ui, runtime, m.vfs, palette, "gm_disc", "Disconnect") {
-                            out.actions.push(EngineAction::Disconnect);
-                        }
-                        if menu_link_vgui(ui, runtime, m.vfs, palette, "gm_plist", "Player List") {
-                            out.open_player_list = true;
-                        }
-                        ui.add_space(6.0);
-                    }
-
-                    if menu_link_vgui(ui, runtime, m.vfs, palette, "gm_newgame", "New Game") {
-                        self.new_game_open = true;
-                    }
-                    if menu_link_vgui(ui, runtime, m.vfs, palette, "gm_servers", "Find Servers") {
-                        self.find_servers_open = true;
-                        self.server_browser.open = true;
-                    }
-                    if menu_link_vgui(ui, runtime, m.vfs, palette, "gm_options", "Options") {
-                        out.open_options = true;
-                    }
-                    if menu_link_vgui(ui, runtime, m.vfs, palette, "gm_demo", "Demo Player") {
-                        out.open_demo_player = true;
-                    }
-                    ui.add_space(6.0);
-                    if menu_link_vgui(ui, runtime, m.vfs, palette, "gm_quit", "Quit") {
-                        out.actions.push(EngineAction::Quit);
-                    }
                 }
+                self.armed_item = armed;
             });
 
         // 3. `New Game` Steam 2003 VGUI2 modal window (`CreateMultiplayerGame*.res`)
@@ -446,19 +484,44 @@ impl MainMenuUi {
     }
 }
 
-/// Classic CS 1.6 borderless menu link in the lower-left corner (`TrackerScheme` `MenuLarge`).
-fn menu_link_vgui(
+/// One game-menu row (`TrackerScheme`: `MenuLarge` text in `MenuColor`, the armed row in
+/// `ArmedMenuColor` over an additive `MenuBlurLarge` glow in `BlurMenuColor`). The row is
+/// `pitch` tall and the text baseline sits three quarters down it; fonts scale with `s`.
+/// Returns `(clicked, hovered)`.
+#[allow(clippy::too_many_arguments)]
+fn menu_item_vgui(
     ui: &mut egui::Ui,
     runtime: &mut VguiRuntime,
     vfs: Option<&Vfs>,
-    palette: VguiPalette,
     id_salt: &str,
     label: &str,
-) -> bool {
+    s: f32,
+    pitch: f32,
+    armed: bool,
+) -> (bool, bool) {
     let ctx = ui.ctx().clone();
-    let screen_h = ctx.content_rect().height().round().max(480.0) as u32;
-    let tracker_fonts = runtime.tracker_scheme.fonts.clone();
-    let measured = runtime.font_atlas.measure_text(
+    // `MenuLarge`/`MenuBlurLarge` drawn at `tall * MENU_FONT_FACTOR * s` pixels. The factor is
+    // measured: the original's item widths are 0.775 of a `tall`-28 rasterization here
+    // ("Find servers" 117 vs 149 px, "Options" 72 vs 94, "Quit" 40 vs 52 at 1280x800).
+    const MENU_FONT_FACTOR: f32 = 0.775;
+    let screen_h = 480;
+    let scale_fonts = false;
+    let mut tracker_fonts = runtime.tracker_scheme.fonts.clone();
+    for name in ["menularge", "menublurlarge"] {
+        if let Some(variants) = tracker_fonts.fonts.get_mut(name) {
+            for v in variants.iter_mut() {
+                v.tall = (v.tall * MENU_FONT_FACTOR * s).round();
+            }
+        }
+    }
+    let scheme_color = |runtime: &VguiRuntime, name: &str, fallback: [u8; 4]| {
+        let c = runtime.tracker_scheme.resolve_color(name).unwrap_or(fallback);
+        Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3])
+    };
+    let menu_color = scheme_color(runtime, "MenuColor", [238, 174, 0, 255]);
+    let armed_color = scheme_color(runtime, "ArmedMenuColor", [255, 186, 0, 255]);
+    let blur_color = scheme_color(runtime, "BlurMenuColor", [255, 178, 67, 255]);
+    let measured = runtime.font_atlas.measure_text_scaled(
         &ctx,
         vfs,
         &tracker_fonts,
@@ -466,20 +529,66 @@ fn menu_link_vgui(
         "MenuLarge",
         screen_h,
         label,
+        scale_fonts,
     );
-    let desired = Vec2::new((measured.x + 12.0).max(90.0), (measured.y + 4.0).max(26.0));
+    let desired = Vec2::new(measured.x.max(40.0) + 4.0, pitch);
     let (rect, response) = ui.allocate_exact_size(desired, Sense::click());
     runtime.track_interactive(id_salt, &response);
-
-    let fg = if response.hovered() {
-        palette.bright_control_text
-    } else {
-        palette.bright_text
-    };
-    let text_rect = Rect::from_min_size(
-        Pos2::new(rect.min.x + 2.0, rect.min.y + 1.0),
-        Vec2::new((rect.width() - 2.0).max(40.0), rect.height()),
+    let hovered = response.hovered();
+    let lit = armed || hovered;
+    // Text box: its bottom is the baseline (three quarters down the row) plus the descent.
+    let baseline = rect.min.y + pitch * 0.75;
+    let text_rect = Rect::from_min_max(
+        Pos2::new(rect.min.x, baseline - measured.y),
+        Pos2::new(rect.max.x, baseline + measured.y * 0.22),
     );
+    let opts = VguiTextDrawOpts {
+        align: TextAlignment::SouthWest,
+        process_hotkey: false,
+        proportional_scale: scale_fonts,
+    };
+    if lit {
+        // Additive glow (`MenuBlurLarge`: blur 5, additive): a premultiplied colour with zero
+        // alpha adds onto what is under it. Gaussian taps (sigma = radius / 2) whose weights sum
+        // to 1.6, so the glyph cores saturate to the bright yellow the original shows on the
+        // armed row (measured 255 255 28 over `ArmedMenuColor` text).
+        let radius = (5.0 * s).round().max(1.0) as i32;
+        let sigma = radius as f32 * 0.5;
+        let mut taps = Vec::new();
+        let mut total = 0.0f32;
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                let w = (-((dx * dx + dy * dy) as f32) / (2.0 * sigma * sigma)).exp();
+                taps.push((dx, dy, w));
+                total += w;
+            }
+        }
+        for (dx, dy, w) in taps {
+            let k = 1.6 * w / total;
+            if k < 0.004 {
+                continue;
+            }
+            let glow = Color32::from_rgba_premultiplied(
+                (f32::from(blur_color.r()) * k).round() as u8,
+                (f32::from(blur_color.g()) * k).round() as u8,
+                (f32::from(blur_color.b()) * k).round() as u8,
+                0,
+            );
+            runtime.font_atlas.paint_text(
+                ui.painter(),
+                &ctx,
+                vfs,
+                &tracker_fonts,
+                "tracker",
+                "MenuBlurLarge",
+                screen_h,
+                text_rect.translate(Vec2::new(dx as f32, dy as f32)),
+                label,
+                glow,
+                opts,
+            );
+        }
+    }
     runtime.font_atlas.paint_text(
         ui.painter(),
         &ctx,
@@ -490,14 +599,31 @@ fn menu_link_vgui(
         screen_h,
         text_rect,
         label,
-        fg,
-        VguiTextDrawOpts {
-            align: TextAlignment::West,
-            process_hotkey: false,
-            proportional_scale: false,
-        },
+        if lit { armed_color } else { menu_color },
+        opts,
     );
-    response.clicked()
+    (response.clicked(), hovered)
+}
+
+/// The menu when `resource/GameMenu.res` is missing (stock entries, same order).
+fn fallback_game_menu() -> Vec<GameMenuEntry> {
+    let e = |label: &str, command: &str, only_in_game: bool| GameMenuEntry {
+        label: label.to_string(),
+        command: command.to_string(),
+        only_in_game,
+        not_single: false,
+        not_multi: false,
+    };
+    vec![
+        e("#GameUI_GameMenu_ResumeGame", "ResumeGame", true),
+        e("#GameUI_GameMenu_Disconnect", "Disconnect", true),
+        e("#GameUI_GameMenu_PlayerList", "OpenPlayerListDialog", true),
+        e("", "", true),
+        e("#GameUI_GameMenu_NewGame", "OpenCreateMultiplayerGameDialog", false),
+        e("#GameUI_GameMenu_FindServers", "OpenServerBrowser", false),
+        e("#GameUI_GameMenu_Options", "OpenOptionsDialog", false),
+        e("#GameUI_GameMenu_Quit", "Quit", false),
+    ]
 }
 
 fn loc_or(loc: Option<&LocalizationTable>, token: &str, fallback: &str) -> String {
