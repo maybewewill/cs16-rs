@@ -192,7 +192,7 @@ mod tests {
             assert_eq!((shot.width, shot.height), (16, 16));
             let blood = wad.decode_decal("{blood1").expect("decode").expect("{blood1");
             assert!(blood.alpha_test);
-            assert!(blood.rgba.chunks_exact(4).any(|px| px[3] > 0 && px[0] > 0));
+            assert!(blood.rgba.as_chunks::<4>().0.iter().any(|px| px[3] > 0 && px[0] > 0));
         }
 
         // 2. de_dust2 PVS mask, lightmap rects, world face spans, styled lightpoint, decal sphere query

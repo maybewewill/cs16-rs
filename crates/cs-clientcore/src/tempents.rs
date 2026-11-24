@@ -1767,7 +1767,7 @@ impl TempEnts {
                 if !s.precache.models.contains_key(model) {
                     self.missing_models = self.missing_models.saturating_add(1);
                 } else {
-                    let n = (*count).max(1).min(64);
+                    let n = (*count).clamp(1, 64);
                     for i in 0..n {
                         let frac = i as f32 / n as f32;
                         let pos = mins.lerp(*maxs, frac);

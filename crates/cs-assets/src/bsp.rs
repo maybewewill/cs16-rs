@@ -289,8 +289,9 @@ struct TextureAnimEntry {
 
 impl TextureAnimTable {
     pub fn from_textures(textures: &[DecodedTexture]) -> Self {
+        type AnimGroup = (Vec<(u8, usize)>, Vec<(u8, usize)>);
         let mut entries = vec![TextureAnimEntry::default(); textures.len()];
-        let mut groups: HashMap<String, (Vec<(u8, usize)>, Vec<(u8, usize)>)> = HashMap::new();
+        let mut groups: HashMap<String, AnimGroup> = HashMap::new();
         for (idx, tex) in textures.iter().enumerate() {
             let lower = tex.name.to_ascii_lowercase();
             let bytes = lower.as_bytes();
@@ -782,9 +783,7 @@ impl BspMap {
         }
         let cam_leaf = self.find_leaf(camera_pos);
         let pvs = self.decompress_pvs(cam_leaf);
-        let Some(world) = self.models.first() else {
-            return None;
-        };
+        let world = self.models.first()?;
         let num_vis_leafs = world
             .vis_leafs
             .max(0)
@@ -1466,13 +1465,15 @@ fn collect_brush_draw_models(entities: &[Entity], models: &[BspModel]) -> Vec<Br
     draw_models
 }
 
+type FaceExtents = (Vec<Vec3>, Vec<(f32, f32)>, f32, f32, u32, u32);
+
 fn face_extents_and_st(
     face: &Face,
     texinfo: &TexInfo,
     vertices_raw: &[Vec3],
     edges: &[[u16; 2]],
     surf_edges: &[i32],
-) -> Option<(Vec<Vec3>, Vec<(f32, f32)>, f32, f32, u32, u32)> {
+) -> Option<FaceExtents> {
     let num_edges = face.num_edges as usize;
     if num_edges < 3 || face.first_edge < 0 {
         return None;

@@ -1052,6 +1052,7 @@ fn create_msaa_color_view(
 
 /// Offscreen headless render of a [`BspMap`] + optional decals/FX for automated visual tests.
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
 pub fn render_offscreen_rgba(
     device: &wgpu::Device,
     queue: &wgpu::Queue,

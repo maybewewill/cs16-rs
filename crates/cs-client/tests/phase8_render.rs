@@ -544,9 +544,11 @@ fn real_assets_and_headless_gpu_offscreen_render_if_installed() {
     let _ = coll;
 
     if let Ok(urban) = StudioModel::load(&vfs, "models/player/urban/urban.mdl") {
-        let mut p = BoneEvalParams::default();
-        p.blending = [128, 0];
-        p.gait = Some((1.min(urban.sequences.len().saturating_sub(1)), 5.0));
+        let p = BoneEvalParams {
+            blending: [128, 0],
+            gait: Some((1.min(urban.sequences.len().saturating_sub(1)), 5.0)),
+            ..BoneEvalParams::default()
+        };
         let bones = urban.evaluate_bones_full(&p);
         assert_eq!(bones.len(), urban.bones.len());
     }
