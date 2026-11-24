@@ -529,6 +529,8 @@ pub struct BrushDraw {
     /// Translucent sort key (`R_TransEntityCompare`).
     pub distance_sq: f32,
     pub rank: u8,
+    pub frame: f32,
+    pub scroll_speed: f32,
 }
 
 /// A studio model entity ready to draw.
@@ -638,6 +640,8 @@ pub fn build_draw_lists(scene: &SceneFrame, registry: &ModelRegistry) -> DrawLis
                     solid,
                     distance_sq,
                     rank,
+                    frame: e.frame,
+                    scroll_speed: 0.0,
                 };
                 if solid {
                     lists.solid_brush.push(draw);

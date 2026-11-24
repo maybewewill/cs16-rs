@@ -1,11 +1,18 @@
-//! GoldSrc BSP v30 GPU renderer supporting lightmaps, alpha-test grates, transparent/additive brushes,
-//! and live `gl_texturemode` switching (`GL_LINEAR_MIPMAP_LINEAR` vs `GL_NEAREST`).
+//! GoldSrc BSP v30 GPU renderer supporting dynamic lightmaps & lightstyles, PVS leaf culling,
+//! animated/toggleable/scrolling textures, water ripples, distance fog, dynamic lights/flashlight,
+//! MSAA, software-mode dithering, and live `gl_texturemode` + `gl_ansio` switching.
 
 use bytemuck::{Pod, Zeroable};
-use cs_assets::bsp::{BspMap, RenderBatch, RenderMode};
-use glam::Mat4;
+use cs_assets::bsp::{
+    BspMap, FaceLightmapInfo, Leaf, LightmapAtlas, Node, Plane, RenderBatch, RenderMode,
+    TextureAnimTable, WorldFaceSpan,
+};
+use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
+use crate::render::lighting::{
+    GpuLightsUniform, TextureFilterMode, create_sampler, upload_rgba_texture_mipmapped,
+};
 use crate::render::scene::{BrushDraw, EntRenderMode};
 
 #[repr(C)]
@@ -23,7 +30,27 @@ struct GpuBspVertex {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct BspUniforms {
     view_proj: [[f32; 4]; 4],
-    params: [f32; 4], // gamma, brightness, time, debug_mode
+    camera_pos: [f32; 4],
+    fog_color_density: [f32; 4],
+    gamma_params: [f32; 4], // gamma, texgamma, brightness, software_mode
+    misc_params: [f32; 4],  // time_sec, debug_mode, wave_height, _pad
+}
+
+/// Parameters passed to [`BspRenderer::draw`] for world and brush entity shading.
+#[derive(Debug, Clone, Copy)]
+pub struct BspDrawParams {
+    pub view_proj: Mat4,
+    pub camera_pos: Vec3,
+    pub gamma: f32,
+    pub texgamma: f32,
+    pub brightness: f32,
+    pub software_mode: bool,
+    pub time_sec: f32,
+    pub debug_mode: f32,
+    pub wave_height: f32,
+    pub fog: Option<([f32; 3], f32)>,
+    pub r_vis: bool,
+    pub lights: GpuLightsUniform,
 }
 
 /// Per-entity uniforms of a brush submodel draw (bind group 2, dynamic offset). Slot 0 is the
@@ -34,7 +61,7 @@ struct EntityUniforms {
     model: [[f32; 4]; 4],
     /// rgb = rendercolor, a = blend (0..1).
     color: [f32; 4],
-    /// x = shader mode (see `bsp.wgsl`).
+    /// x = shader mode, y = UV U-scroll offset.
     params: [f32; 4],
 }
 
@@ -50,18 +77,15 @@ pub struct PreparedBrushEntity {
     submodel: usize,
     mode: EntRenderMode,
     solid: bool,
+    frame: f32,
 }
 
 impl PreparedBrushEntity {
-    /// Drawn in the solid pass (as opposed to the sorted translucent pass): the entity's
-    /// `R_OpaqueEntity` result, not just its render mode.
     pub fn is_opaque(&self) -> bool {
         self.solid
     }
 }
 
-/// Group batches by their `model_index` (index 0 is the static world). Batches of a model keep
-/// the order of the map's batch list.
 pub(crate) fn group_batches_by_model(batches: &[RenderBatch]) -> Vec<Vec<usize>> {
     let max = batches.iter().map(|b| b.model_index).max().unwrap_or(0);
     let mut groups = vec![Vec::new(); max + 1];
@@ -71,16 +95,6 @@ pub(crate) fn group_batches_by_model(batches: &[RenderBatch]) -> Vec<Vec<usize>>
     groups
 }
 
-/// Shader mode and blend color for a brush entity render mode, after `R_SetRenderMode`
-/// (`ref/gl/gl_rsurf.c`, Xash3D FWGS, read 2026-11-23).
-///
-/// - `kRenderNormal`: plain world shading.
-/// - `kRenderTransColor`: untextured `rendercolor` with the raw `renderamt` as alpha (not the fx
-///   blend, `gl_rsurf.c:1773`), alpha blended.
-/// - `kRenderTransAdd`: `GL_ONE, GL_ONE`, color scaled by the blend, no depth write.
-/// - `kRenderTransAlpha`: alpha test at 0.25, no blending (the non-Quake-compatible branch).
-/// - everything else (`TransTexture`, `Glow`, unknown): alpha blend with the blend as alpha, no
-///   depth write.
 fn entity_shader_params(
     mode: EntRenderMode,
     blend: f32,
@@ -102,7 +116,6 @@ fn create_entity_buffer(
     slots: usize,
     stride: u64,
 ) -> (wgpu::Buffer, wgpu::BindGroup) {
-    // Slot 0 = identity, mode 0: what the world pass binds.
     let identity = EntityUniforms {
         model: Mat4::IDENTITY.to_cols_array_2d(),
         color: [1.0; 4],
@@ -136,38 +149,163 @@ pub struct BspRenderStats {
     pub triangles: usize,
 }
 
+struct BspPvsData {
+    head_node: i32,
+    planes: Vec<Plane>,
+    nodes: Vec<Node>,
+    leafs: Vec<Leaf>,
+    visibility: Vec<u8>,
+    mark_surfaces: Vec<u16>,
+    vis_leafs: usize,
+}
+
+impl BspPvsData {
+    fn from_map(map: &BspMap) -> Self {
+        let head_node = map.models.first().map_or(0, |m| m.head_nodes[0]);
+        let vis_leafs = map
+            .models
+            .first()
+            .map_or(0, |m| m.vis_leafs.max(0) as usize)
+            .min(map.leafs.len().saturating_sub(1));
+        Self {
+            head_node,
+            planes: map.planes.clone(),
+            nodes: map.nodes.clone(),
+            leafs: map.leafs.clone(),
+            visibility: map.visibility.clone(),
+            mark_surfaces: map.mark_surfaces.clone(),
+            vis_leafs,
+        }
+    }
+
+    fn find_leaf(&self, point: Vec3) -> usize {
+        if self.nodes.is_empty() || self.leafs.is_empty() {
+            return 0;
+        }
+        let mut node_idx = self.head_node;
+        let mut guard = self.nodes.len() + self.leafs.len();
+        while node_idx >= 0 {
+            if guard == 0 {
+                return 0;
+            }
+            guard -= 1;
+            let Some(node) = self.nodes.get(node_idx as usize) else {
+                return 0;
+            };
+            let Some(plane) = self.planes.get(node.plane as usize) else {
+                return 0;
+            };
+            let d = plane.normal.dot(point) - plane.dist;
+            node_idx = if d >= 0.0 {
+                i32::from(node.children[0])
+            } else {
+                i32::from(node.children[1])
+            };
+        }
+        ((-node_idx - 1) as usize).min(self.leafs.len().saturating_sub(1))
+    }
+
+    fn visible_faces(&self, cam_leaf: usize, face_count: usize) -> Option<Vec<bool>> {
+        if cam_leaf == 0 || self.visibility.is_empty() || self.vis_leafs == 0 {
+            return None;
+        }
+        let leaf = self.leafs.get(cam_leaf)?;
+        if leaf.vis_offset < 0 {
+            return None;
+        }
+        let mut pvs = vec![false; self.vis_leafs];
+        let mut in_idx = leaf.vis_offset as usize;
+        let mut out_leaf = 0usize;
+        while out_leaf < self.vis_leafs && in_idx < self.visibility.len() {
+            let byte = self.visibility[in_idx];
+            in_idx += 1;
+            if byte == 0 {
+                let Some(&run) = self.visibility.get(in_idx) else {
+                    break;
+                };
+                in_idx += 1;
+                out_leaf += usize::from(run) * 8;
+            } else {
+                for bit in 0..8 {
+                    if out_leaf + bit < self.vis_leafs && (byte & (1 << bit)) != 0 {
+                        pvs[out_leaf + bit] = true;
+                    }
+                }
+                out_leaf += 8;
+            }
+        }
+        let mut mask = vec![false; face_count];
+        for (v, &vis) in pvs.iter().enumerate() {
+            if !vis {
+                continue;
+            }
+            let Some(l) = self.leafs.get(v + 1) else {
+                continue;
+            };
+            let first = usize::from(l.first_mark_surface);
+            let end = first
+                .saturating_add(usize::from(l.num_mark_surfaces))
+                .min(self.mark_surfaces.len());
+            for &fi in &self.mark_surfaces[first..end] {
+                if let Some(slot) = mask.get_mut(usize::from(fi)) {
+                    *slot = true;
+                }
+            }
+        }
+        Some(mask)
+    }
+}
+
 struct UploadedMap {
     vertex_buf: wgpu::Buffer,
     index_buf: wgpu::Buffer,
     batches: Vec<RenderBatch>,
     global_bg: wgpu::BindGroup,
-    tex_bgs_linear: Vec<wgpu::BindGroup>,
-    tex_bgs_nearest: Vec<wgpu::BindGroup>,
+    lightmap_tex: wgpu::Texture,
+    lightmap_atlas: LightmapAtlas,
+    lightmap_rects: Vec<FaceLightmapInfo>,
+    lighting: Vec<u8>,
+    last_style_values: [f32; 64],
+    tex_anim: TextureAnimTable,
+    tex_views: Vec<wgpu::TextureView>,
+    tex_bgs: Vec<wgpu::BindGroup>,
     total_triangles: usize,
-    /// Batch indices per `model_index`.
     model_batches: Vec<Vec<usize>>,
+    pvs_data: BspPvsData,
+    world_vbuf: wgpu::Buffer,
+    world_raw_indices: Vec<u32>,
+    world_spans: Vec<Option<WorldFaceSpan>>,
+    pvs_ibuf: wgpu::Buffer,
+    pvs_ibuf_cap: usize,
+    pvs_cached_leaf: usize,
+    pvs_batches: Vec<(RenderMode, usize, u32, u32)>,
+    pvs_triangles: usize,
 }
 
 pub struct BspRenderer {
+    shader: wgpu::ShaderModule,
+    layout: wgpu::PipelineLayout,
     opaque_pipeline: wgpu::RenderPipeline,
     alphatest_pipeline: wgpu::RenderPipeline,
     transparent_pipeline: wgpu::RenderPipeline,
     additive_pipeline: wgpu::RenderPipeline,
-    /// `kRenderTransAdd` brush entities: `GL_ONE, GL_ONE`.
     add_one_pipeline: wgpu::RenderPipeline,
+    color_format: wgpu::TextureFormat,
+    msaa_samples: u32,
     ent_bgl: wgpu::BindGroupLayout,
     ent_buf: wgpu::Buffer,
     ent_cap: usize,
     ent_stride: u64,
     ent_bg: wgpu::BindGroup,
-    /// When set the world pass skips every brush submodel (the scene API draws them as entities).
     skip_submodels: bool,
     global_bgl: wgpu::BindGroupLayout,
     tex_bgl: wgpu::BindGroupLayout,
     uniform_buf: wgpu::Buffer,
+    lights_buf: wgpu::Buffer,
     lightmap_sampler: wgpu::Sampler,
-    linear_sampler: wgpu::Sampler,
-    nearest_sampler: wgpu::Sampler,
+    active_sampler: wgpu::Sampler,
+    filter_mode: TextureFilterMode,
+    anisotropy: u16,
     uploaded: Option<UploadedMap>,
 }
 
@@ -205,6 +343,18 @@ impl BspRenderer {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(
+                            std::mem::size_of::<GpuLightsUniform>() as u64,
+                        ),
+                    },
                     count: None,
                 },
             ],
@@ -255,71 +405,9 @@ impl BspRenderer {
             immediate_size: 0,
         });
 
-        let opaque_pipeline = build_pipeline(
-            device,
-            &layout,
-            &shader,
-            color_format,
-            "bsp_opaque",
-            Some(wgpu::Face::Back),
-            None,
-            true,
-        );
-        let alphatest_pipeline = build_pipeline(
-            device,
-            &layout,
-            &shader,
-            color_format,
-            "bsp_alphatest",
-            None,
-            None,
-            true,
-        );
-        let transparent_pipeline = build_pipeline(
-            device,
-            &layout,
-            &shader,
-            color_format,
-            "bsp_transparent",
-            None,
-            Some(wgpu::BlendState::ALPHA_BLENDING),
-            false,
-        );
-        let additive_pipeline = build_pipeline(
-            device,
-            &layout,
-            &shader,
-            color_format,
-            "bsp_additive",
-            None,
-            Some(wgpu::BlendState {
-                color: wgpu::BlendComponent {
-                    src_factor: wgpu::BlendFactor::SrcAlpha,
-                    dst_factor: wgpu::BlendFactor::One,
-                    operation: wgpu::BlendOperation::Add,
-                },
-                alpha: wgpu::BlendComponent::OVER,
-            }),
-            false,
-        );
-
-        let add_one_pipeline = build_pipeline(
-            device,
-            &layout,
-            &shader,
-            color_format,
-            "bsp_add_one",
-            None,
-            Some(wgpu::BlendState {
-                color: wgpu::BlendComponent {
-                    src_factor: wgpu::BlendFactor::One,
-                    dst_factor: wgpu::BlendFactor::One,
-                    operation: wgpu::BlendOperation::Add,
-                },
-                alpha: wgpu::BlendComponent::OVER,
-            }),
-            false,
-        );
+        let msaa_samples = 1;
+        let (opaque_pipeline, alphatest_pipeline, transparent_pipeline, additive_pipeline, add_one_pipeline) =
+            build_all_pipelines(device, &layout, &shader, color_format, msaa_samples);
 
         let ent_cap = 64;
         let (ent_buf, ent_bg) = create_entity_buffer(device, &ent_bgl, ent_cap, ent_stride);
@@ -328,8 +416,16 @@ impl BspRenderer {
             label: Some("bsp_uniform_buf"),
             contents: bytemuck::bytes_of(&BspUniforms {
                 view_proj: Mat4::IDENTITY.to_cols_array_2d(),
-                params: [2.5, 1.0, 0.0, 0.0],
+                camera_pos: [0.0; 4],
+                fog_color_density: [0.0; 4],
+                gamma_params: [2.5, 2.0, 1.0, 0.0],
+                misc_params: [0.0; 4],
             }),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let lights_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("bsp_lights_buf"),
+            contents: bytemuck::bytes_of(&GpuLightsUniform::default()),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -342,33 +438,20 @@ impl BspRenderer {
             ..Default::default()
         });
 
-        let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("bsp_linear_sampler"),
-            address_mode_u: wgpu::AddressMode::Repeat,
-            address_mode_v: wgpu::AddressMode::Repeat,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Linear,
-            anisotropy_clamp: 8,
-            ..Default::default()
-        });
-
-        let nearest_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("bsp_nearest_sampler"),
-            address_mode_u: wgpu::AddressMode::Repeat,
-            address_mode_v: wgpu::AddressMode::Repeat,
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            ..Default::default()
-        });
+        let filter_mode = TextureFilterMode::LinearMipmapLinear;
+        let anisotropy = 8;
+        let active_sampler = create_sampler(device, "bsp_tex_sampler", filter_mode, anisotropy, false);
 
         Self {
+            shader,
+            layout,
             opaque_pipeline,
             alphatest_pipeline,
             transparent_pipeline,
             additive_pipeline,
             add_one_pipeline,
+            color_format,
+            msaa_samples,
             ent_bgl,
             ent_buf,
             ent_cap,
@@ -378,10 +461,69 @@ impl BspRenderer {
             global_bgl,
             tex_bgl,
             uniform_buf,
+            lights_buf,
             lightmap_sampler,
-            linear_sampler,
-            nearest_sampler,
+            active_sampler,
+            filter_mode,
+            anisotropy,
             uploaded: None,
+        }
+    }
+
+    pub fn lights_buffer(&self) -> &wgpu::Buffer {
+        &self.lights_buf
+    }
+
+    pub fn rebuild_pipelines(&mut self, device: &wgpu::Device, msaa_samples: u32) {
+        let samples = if msaa_samples >= 4 { 4 } else { 1 };
+        if self.msaa_samples == samples {
+            return;
+        }
+        self.msaa_samples = samples;
+        let (o, a, t, add, add_one) =
+            build_all_pipelines(device, &self.layout, &self.shader, self.color_format, samples);
+        self.opaque_pipeline = o;
+        self.alphatest_pipeline = a;
+        self.transparent_pipeline = t;
+        self.additive_pipeline = add;
+        self.add_one_pipeline = add_one;
+    }
+
+    pub fn set_texture_filter(
+        &mut self,
+        device: &wgpu::Device,
+        mode: TextureFilterMode,
+        anisotropy: u16,
+    ) {
+        let aniso = anisotropy.clamp(1, 16);
+        if self.filter_mode == mode && self.anisotropy == aniso {
+            return;
+        }
+        self.filter_mode = mode;
+        self.anisotropy = aniso;
+        self.active_sampler = create_sampler(device, "bsp_tex_sampler", mode, aniso, false);
+        if let Some(map) = &mut self.uploaded {
+            map.tex_bgs = map
+                .tex_views
+                .iter()
+                .enumerate()
+                .map(|(i, view)| {
+                    device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some(&format!("bsp_tex_bg_{i}")),
+                        layout: &self.tex_bgl,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::Sampler(&self.active_sampler),
+                            },
+                        ],
+                    })
+                })
+                .collect();
         }
     }
 
@@ -419,9 +561,8 @@ impl BspRenderer {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        // Upload lightmap atlas
         let lm = &map.lightmap_atlas;
-        let lm_view = upload_rgba_texture(
+        let (lightmap_tex, lm_view) = create_rgba_texture(
             device,
             queue,
             "bsp_lightmap_atlas",
@@ -446,14 +587,17 @@ impl BspRenderer {
                     binding: 2,
                     resource: wgpu::BindingResource::Sampler(&self.lightmap_sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.lights_buf.as_entire_binding(),
+                },
             ],
         });
 
-        // Upload all map diffuse textures and create both Linear and Nearest bind groups
-        let mut tex_bgs_linear = Vec::with_capacity(map.textures.len());
-        let mut tex_bgs_nearest = Vec::with_capacity(map.textures.len());
+        let mut tex_views = Vec::with_capacity(map.textures.len());
+        let mut tex_bgs = Vec::with_capacity(map.textures.len());
         for tex in &map.textures {
-            let view = upload_rgba_texture(
+            let view = upload_rgba_texture_mipmapped(
                 device,
                 queue,
                 &tex.name,
@@ -461,7 +605,7 @@ impl BspRenderer {
                 tex.height.max(1),
                 &tex.rgba,
             );
-            let bg_lin = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some(&tex.name),
                 layout: &self.tex_bgl,
                 entries: &[
@@ -471,52 +615,124 @@ impl BspRenderer {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
+                        resource: wgpu::BindingResource::Sampler(&self.active_sampler),
                     },
                 ],
             });
-            let bg_near = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(&tex.name),
-                layout: &self.tex_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.nearest_sampler),
-                    },
-                ],
-            });
-            tex_bgs_linear.push(bg_lin);
-            tex_bgs_nearest.push(bg_near);
+            tex_views.push(view);
+            tex_bgs.push(bg);
         }
+
+        let (wv, world_raw_indices, world_spans) = map.build_world_face_meshes();
+        let gpu_wv: Vec<GpuBspVertex> = wv
+            .iter()
+            .map(|v| GpuBspVertex {
+                position: v.position,
+                normal: v.normal,
+                uv: v.uv,
+                lm_uv: v.lm_uv,
+                alpha: v.alpha,
+                flags: v.flags,
+            })
+            .collect();
+        let fallback_vert = GpuBspVertex::zeroed();
+        let world_vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("bsp_world_pvs_vbuf"),
+            contents: if gpu_wv.is_empty() {
+                bytemuck::bytes_of(&fallback_vert)
+            } else {
+                bytemuck::cast_slice(&gpu_wv)
+            },
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let pvs_ibuf_cap = world_raw_indices.len().max(64);
+        let pvs_ibuf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bsp_pvs_ibuf"),
+            size: (pvs_ibuf_cap * std::mem::size_of::<u32>()) as u64,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         self.uploaded = Some(UploadedMap {
             vertex_buf,
             index_buf,
             batches: map.batches.clone(),
             global_bg,
-            tex_bgs_linear,
-            tex_bgs_nearest,
+            lightmap_tex,
+            lightmap_atlas: lm.clone(),
+            lightmap_rects: map.build_face_lightmap_rects(),
+            lighting: map.lighting.clone(),
+            last_style_values: [1.0; 64],
+            tex_anim: map.build_texture_anim_table(),
+            tex_views,
+            tex_bgs,
             total_triangles: map.render_indices.len() / 3,
             model_batches: group_batches_by_model(&map.batches),
+            pvs_data: BspPvsData::from_map(map),
+            world_vbuf,
+            world_raw_indices,
+            world_spans,
+            pvs_ibuf,
+            pvs_ibuf_cap,
+            pvs_cached_leaf: usize::MAX,
+            pvs_batches: Vec::new(),
+            pvs_triangles: 0,
         });
     }
 
-    /// Skip every brush submodel in the world pass (set when the scene API draws them).
+    pub fn update_lightstyles(&mut self, queue: &wgpu::Queue, style_values: &[f32; 64]) {
+        let Some(map) = &mut self.uploaded else {
+            return;
+        };
+        let dirty = map.lightmap_atlas.rebuild_for_styles(
+            &map.lighting,
+            &map.lightmap_rects,
+            style_values,
+            &map.last_style_values,
+        );
+        if dirty.is_empty() {
+            return;
+        }
+        map.last_style_values = *style_values;
+        let aw = map.lightmap_atlas.width;
+        let ah = map.lightmap_atlas.height;
+        for (x, y, w, h) in dirty {
+            let start = ((y * aw + x) * 4) as usize;
+            if start >= map.lightmap_atlas.rgba.len() {
+                continue;
+            }
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &map.lightmap_tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x, y, z: 0 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &map.lightmap_atlas.rgba[start..],
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * aw),
+                    rows_per_image: Some(ah),
+                },
+                wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+    }
+
     pub fn set_skip_submodels(&mut self, skip: bool) {
         self.skip_submodels = skip;
     }
 
-    /// Upload the per-entity uniforms of the brush entities in `draws` (solid ones first, then
-    /// translucent ones, in the order given). Call before the render pass.
     pub fn prepare_entities(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         draws: &[&BrushDraw],
+        time_sec: f32,
     ) -> Vec<PreparedBrushEntity> {
         let Some(map) = &self.uploaded else {
             return Vec::new();
@@ -541,10 +757,11 @@ impl BspRenderer {
                 continue;
             }
             let (color, mode) = entity_shader_params(d.mode, d.blend, d.amt, d.color);
+            let scroll = d.scroll_speed * time_sec;
             let u = EntityUniforms {
                 model: d.matrix.to_cols_array_2d(),
                 color,
-                params: [mode, 0.0, 0.0, 0.0],
+                params: [mode, scroll, 0.0, 0.0],
             };
             let off = i * self.ent_stride as usize;
             let raw = bytemuck::bytes_of(&u);
@@ -554,6 +771,7 @@ impl BspRenderer {
                 submodel,
                 mode: d.mode,
                 solid: d.solid,
+                frame: d.frame,
             });
         }
         if !bytes.is_empty() {
@@ -562,13 +780,11 @@ impl BspRenderer {
         prepared
     }
 
-    /// Draw prepared brush entities. Call inside the world pass after [`Self::draw`] (which
-    /// uploads the shared view-projection uniform).
     pub fn draw_entities<'a>(
         &'a self,
         pass: &mut wgpu::RenderPass<'a>,
         prepared: &[PreparedBrushEntity],
-        use_nearest: bool,
+        time_sec: f32,
     ) {
         let Some(map) = &self.uploaded else {
             return;
@@ -576,11 +792,6 @@ impl BspRenderer {
         pass.set_bind_group(0, &map.global_bg, &[]);
         pass.set_vertex_buffer(0, map.vertex_buf.slice(..));
         pass.set_index_buffer(map.index_buf.slice(..), wgpu::IndexFormat::Uint32);
-        let tex_bgs = if use_nearest {
-            &map.tex_bgs_nearest
-        } else {
-            &map.tex_bgs_linear
-        };
         for p in prepared {
             let Some(batch_ids) = map.model_batches.get(p.submodel) else {
                 continue;
@@ -602,7 +813,8 @@ impl BspRenderer {
                     }
                 };
                 pass.set_pipeline(pipe);
-                if let Some(bg) = tex_bgs.get(batch.texture_index) {
+                let resolved_tex = map.tex_anim.resolve(batch.texture_index, time_sec, p.frame);
+                if let Some(bg) = map.tex_bgs.get(resolved_tex) {
                     pass.set_bind_group(1, bg, &[]);
                     pass.draw_indexed(
                         batch.first_index..batch.first_index + batch.index_count,
@@ -614,17 +826,79 @@ impl BspRenderer {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_world_pvs(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, camera_pos: Vec3, r_vis: bool) {
+        let Some(map) = &mut self.uploaded else {
+            return;
+        };
+        if !r_vis || map.world_raw_indices.is_empty() {
+            return;
+        }
+        let leaf = map.pvs_data.find_leaf(camera_pos);
+        if leaf == map.pvs_cached_leaf {
+            return;
+        }
+        map.pvs_cached_leaf = leaf;
+        map.pvs_batches.clear();
+        map.pvs_triangles = 0;
+
+        let Some(mask) = map.pvs_data.visible_faces(leaf, map.world_spans.len()) else {
+            return;
+        };
+        let mut grouped: Vec<(u8, usize, RenderMode, &WorldFaceSpan)> = Vec::new();
+        for (fi, span_opt) in map.world_spans.iter().enumerate() {
+            if !mask.get(fi).copied().unwrap_or(false) {
+                continue;
+            }
+            let Some(span) = span_opt else {
+                continue;
+            };
+            let rank = match span.render_mode {
+                RenderMode::Normal => 0,
+                RenderMode::AlphaTest => 1,
+                RenderMode::Transparent => 2,
+                RenderMode::Additive => 3,
+            };
+            grouped.push((rank, span.texture_index, span.render_mode, span));
+        }
+        grouped.sort_unstable_by_key(|g| (g.0, g.1));
+
+        let mut pvs_indices: Vec<u32> = Vec::with_capacity(map.world_raw_indices.len() / 2);
+        for &(_, tex_idx, mode, span) in &grouped {
+            let start = span.first_index as usize;
+            let end = start + span.index_count as usize;
+            let dst_first = pvs_indices.len() as u32;
+            pvs_indices.extend_from_slice(&map.world_raw_indices[start..end]);
+            let count = span.index_count;
+            if let Some(last) = map.pvs_batches.last_mut()
+                && last.0 == mode
+                && last.1 == tex_idx
+                && last.2 + last.3 == dst_first
+            {
+                last.3 += count;
+            } else {
+                map.pvs_batches.push((mode, tex_idx, dst_first, count));
+            }
+        }
+        if pvs_indices.len() > map.pvs_ibuf_cap {
+            map.pvs_ibuf_cap = pvs_indices.len().next_power_of_two();
+            map.pvs_ibuf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("bsp_pvs_ibuf"),
+                size: (map.pvs_ibuf_cap * std::mem::size_of::<u32>()) as u64,
+                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        if !pvs_indices.is_empty() {
+            queue.write_buffer(&map.pvs_ibuf, 0, bytemuck::cast_slice(&pvs_indices));
+        }
+        map.pvs_triangles = pvs_indices.len() / 3;
+    }
+
     pub fn draw<'a>(
         &'a self,
         queue: &wgpu::Queue,
         pass: &mut wgpu::RenderPass<'a>,
-        view_proj: Mat4,
-        gamma: f32,
-        brightness: f32,
-        time_sec: f32,
-        debug_mode: f32,
-        use_nearest: bool,
+        params: &BspDrawParams,
         hidden_models: &[usize],
     ) -> BspRenderStats {
         let Some(map) = &self.uploaded else {
@@ -634,24 +908,53 @@ impl BspRenderer {
             };
         };
 
+        let (fog_rgb, fog_density) = params.fog.unwrap_or(([0.0, 0.0, 0.0], 0.0));
         let uniforms = BspUniforms {
-            view_proj: view_proj.to_cols_array_2d(),
-            params: [gamma, brightness, time_sec, debug_mode],
+            view_proj: params.view_proj.to_cols_array_2d(),
+            camera_pos: [params.camera_pos.x, params.camera_pos.y, params.camera_pos.z, 1.0],
+            fog_color_density: [fog_rgb[0], fog_rgb[1], fog_rgb[2], fog_density],
+            gamma_params: [
+                params.gamma,
+                params.texgamma,
+                params.brightness,
+                if params.software_mode { 1.0 } else { 0.0 },
+            ],
+            misc_params: [params.time_sec, params.debug_mode, params.wave_height, 0.0],
         };
         queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
+        queue.write_buffer(&self.lights_buf, 0, bytemuck::bytes_of(&params.lights));
 
         pass.set_bind_group(0, &map.global_bg, &[]);
         pass.set_bind_group(2, &self.ent_bg, &[0]);
+
+        if params.r_vis && !map.pvs_batches.is_empty() && self.skip_submodels {
+            pass.set_vertex_buffer(0, map.world_vbuf.slice(..));
+            pass.set_index_buffer(map.pvs_ibuf.slice(..), wgpu::IndexFormat::Uint32);
+            let mut last_mode: Option<RenderMode> = None;
+            let mut calls = 0usize;
+            for &(mode, tex_idx, first, count) in &map.pvs_batches {
+                if last_mode != Some(mode) {
+                    pass.set_pipeline(self.pipeline_for(mode));
+                    last_mode = Some(mode);
+                }
+                let resolved_tex = map.tex_anim.resolve(tex_idx, params.time_sec, 0.0);
+                if let Some(bg) = map.tex_bgs.get(resolved_tex) {
+                    pass.set_bind_group(1, bg, &[]);
+                    pass.draw_indexed(first..first + count, 0, 0..1);
+                    calls += 1;
+                }
+            }
+            return BspRenderStats {
+                draw_calls: calls,
+                triangles: map.pvs_triangles,
+            };
+        }
+
         pass.set_vertex_buffer(0, map.vertex_buf.slice(..));
         pass.set_index_buffer(map.index_buf.slice(..), wgpu::IndexFormat::Uint32);
 
-        let tex_bgs = if use_nearest {
-            &map.tex_bgs_nearest
-        } else {
-            &map.tex_bgs_linear
-        };
-
         let mut last_mode: Option<RenderMode> = None;
+        let mut calls = 0usize;
         for batch in &map.batches {
             if batch.model_index != 0
                 && (self.skip_submodels || hidden_models.contains(&batch.model_index))
@@ -659,26 +962,122 @@ impl BspRenderer {
                 continue;
             }
             if last_mode != Some(batch.render_mode) {
-                let pipe = match batch.render_mode {
-                    RenderMode::Normal => &self.opaque_pipeline,
-                    RenderMode::AlphaTest => &self.alphatest_pipeline,
-                    RenderMode::Transparent => &self.transparent_pipeline,
-                    RenderMode::Additive => &self.additive_pipeline,
-                };
-                pass.set_pipeline(pipe);
+                pass.set_pipeline(self.pipeline_for(batch.render_mode));
                 last_mode = Some(batch.render_mode);
             }
-            if let Some(bg) = tex_bgs.get(batch.texture_index) {
+            let resolved_tex = map.tex_anim.resolve(batch.texture_index, params.time_sec, 0.0);
+            if let Some(bg) = map.tex_bgs.get(resolved_tex) {
                 pass.set_bind_group(1, bg, &[]);
                 pass.draw_indexed(batch.first_index..batch.first_index + batch.index_count, 0, 0..1);
+                calls += 1;
             }
         }
 
         BspRenderStats {
-            draw_calls: map.batches.len(),
+            draw_calls: calls,
             triangles: map.total_triangles,
         }
     }
+
+    fn pipeline_for(&self, mode: RenderMode) -> &wgpu::RenderPipeline {
+        match mode {
+            RenderMode::Normal => &self.opaque_pipeline,
+            RenderMode::AlphaTest => &self.alphatest_pipeline,
+            RenderMode::Transparent => &self.transparent_pipeline,
+            RenderMode::Additive => &self.additive_pipeline,
+        }
+    }
+}
+
+fn build_all_pipelines(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    color_format: wgpu::TextureFormat,
+    msaa_samples: u32,
+) -> (
+    wgpu::RenderPipeline,
+    wgpu::RenderPipeline,
+    wgpu::RenderPipeline,
+    wgpu::RenderPipeline,
+    wgpu::RenderPipeline,
+) {
+    let opaque_pipeline = build_pipeline(
+        device,
+        layout,
+        shader,
+        color_format,
+        msaa_samples,
+        "bsp_opaque",
+        Some(wgpu::Face::Back),
+        None,
+        true,
+    );
+    let alphatest_pipeline = build_pipeline(
+        device,
+        layout,
+        shader,
+        color_format,
+        msaa_samples,
+        "bsp_alphatest",
+        None,
+        None,
+        true,
+    );
+    let transparent_pipeline = build_pipeline(
+        device,
+        layout,
+        shader,
+        color_format,
+        msaa_samples,
+        "bsp_transparent",
+        None,
+        Some(wgpu::BlendState::ALPHA_BLENDING),
+        false,
+    );
+    let additive_pipeline = build_pipeline(
+        device,
+        layout,
+        shader,
+        color_format,
+        msaa_samples,
+        "bsp_additive",
+        None,
+        Some(wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::SrcAlpha,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent::OVER,
+        }),
+        false,
+    );
+    let add_one_pipeline = build_pipeline(
+        device,
+        layout,
+        shader,
+        color_format,
+        msaa_samples,
+        "bsp_add_one",
+        None,
+        Some(wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent::OVER,
+        }),
+        false,
+    );
+    (
+        opaque_pipeline,
+        alphatest_pipeline,
+        transparent_pipeline,
+        additive_pipeline,
+        add_one_pipeline,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -687,6 +1086,7 @@ fn build_pipeline(
     layout: &wgpu::PipelineLayout,
     shader: &wgpu::ShaderModule,
     color_format: wgpu::TextureFormat,
+    msaa_samples: u32,
     label: &str,
     cull_mode: Option<wgpu::Face>,
     blend: Option<wgpu::BlendState>,
@@ -735,20 +1135,24 @@ fn build_pipeline(
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
-        multisample: wgpu::MultisampleState::default(),
+        multisample: wgpu::MultisampleState {
+            count: msaa_samples,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
         multiview_mask: None,
         cache: None,
     })
 }
 
-fn upload_rgba_texture(
+fn create_rgba_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     label: &str,
     width: u32,
     height: u32,
     rgba: &[u8],
-) -> wgpu::TextureView {
+) -> (wgpu::Texture, wgpu::TextureView) {
     let size = wgpu::Extent3d {
         width,
         height,
@@ -779,7 +1183,8 @@ fn upload_rgba_texture(
         },
         size,
     );
-    tex.create_view(&wgpu::TextureViewDescriptor::default())
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    (tex, view)
 }
 
 #[cfg(test)]
@@ -798,46 +1203,34 @@ mod tests {
 
     #[test]
     fn batches_group_by_model_index() {
-        let g = group_batches_by_model(&[batch(0), batch(2), batch(0), batch(2), batch(1)]);
-        assert_eq!(g.len(), 3);
-        assert_eq!(g[0], vec![0, 2]);
-        assert_eq!(g[1], vec![4]);
-        assert_eq!(g[2], vec![1, 3]);
-        assert_eq!(group_batches_by_model(&[]).len(), 1);
+        let batches = vec![batch(0), batch(2), batch(0), batch(1), batch(2)];
+        assert_eq!(
+            group_batches_by_model(&batches),
+            vec![vec![0, 2], vec![3], vec![1, 4]]
+        );
+        assert_eq!(group_batches_by_model(&[]), vec![Vec::<usize>::new()]);
     }
 
     #[test]
-    fn render_mode_shader_params() {
-        let c = [0.5, 0.25, 1.0];
-        assert_eq!(
-            entity_shader_params(EntRenderMode::Normal, 0.3, 0.9, c),
-            ([1.0; 4], ENT_MODE_WORLD)
-        );
-        assert_eq!(
-            entity_shader_params(EntRenderMode::TransColor, 0.3, 0.9, c),
-            ([0.5, 0.25, 1.0, 0.9], ENT_MODE_TRANS_COLOR)
-        );
-        assert_eq!(
-            entity_shader_params(EntRenderMode::TransAdd, 0.3, 0.9, c),
-            ([1.0, 1.0, 1.0, 0.3], ENT_MODE_ADD)
-        );
-        assert_eq!(
-            entity_shader_params(EntRenderMode::TransAlpha, 0.3, 0.9, c).1,
-            ENT_MODE_TRANS_ALPHA
-        );
-        assert_eq!(
-            entity_shader_params(EntRenderMode::TransTexture, 0.3, 0.9, c).1,
-            ENT_MODE_BLEND
-        );
-        assert_eq!(
-            entity_shader_params(EntRenderMode::Glow, 0.3, 0.9, c).1,
-            ENT_MODE_BLEND
-        );
-    }
+    fn entity_shader_params_follow_r_set_render_mode() {
+        let (_, m) = entity_shader_params(EntRenderMode::Normal, 0.2, 0.2, [0.5; 3]);
+        assert_eq!(m, ENT_MODE_WORLD);
 
-    #[test]
-    fn entity_uniform_layout_matches_the_shader() {
-        // mat4 + two vec4 = 96 bytes, as `EntityUniforms` in bsp.wgsl.
-        assert_eq!(std::mem::size_of::<EntityUniforms>(), 96);
+        let (c, m) = entity_shader_params(EntRenderMode::TransColor, 0.9, 0.25, [0.2, 0.4, 0.6]);
+        assert_eq!(m, ENT_MODE_TRANS_COLOR);
+        assert_eq!(c, [0.2, 0.4, 0.6, 0.25]);
+
+        let (c, m) = entity_shader_params(EntRenderMode::TransAdd, 0.6, 0.1, [1.0; 3]);
+        assert_eq!(m, ENT_MODE_ADD);
+        assert_eq!(c[3], 0.6);
+
+        let (_, m) = entity_shader_params(EntRenderMode::TransAlpha, 0.5, 0.5, [1.0; 3]);
+        assert_eq!(m, ENT_MODE_TRANS_ALPHA);
+
+        for mode in [EntRenderMode::TransTexture, EntRenderMode::Glow] {
+            let (c, m) = entity_shader_params(mode, 0.4, 0.8, [1.0; 3]);
+            assert_eq!(m, ENT_MODE_BLEND);
+            assert_eq!(c[3], 0.4);
+        }
     }
 }

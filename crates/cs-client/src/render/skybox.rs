@@ -5,6 +5,8 @@ use cs_assets::scheme::SkyboxTextures;
 use glam::Mat4;
 use wgpu::util::DeviceExt;
 
+use crate::render::lighting::{TextureFilterMode, create_sampler};
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct SkyVertex {
@@ -16,16 +18,23 @@ struct SkyVertex {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct SkyUniforms {
     view_proj: [[f32; 4]; 4],
-    params: [f32; 4],
+    params: [f32; 4],            // gamma, texgamma, brightness, software_mode
+    fog_color_density: [f32; 4], // rgb, density
 }
 
 pub struct SkyboxRenderer {
+    shader: wgpu::ShaderModule,
+    pipeline_layout: wgpu::PipelineLayout,
     pipeline: wgpu::RenderPipeline,
+    color_format: wgpu::TextureFormat,
+    msaa_samples: u32,
     uniform_buf: wgpu::Buffer,
     uniform_bg: wgpu::BindGroup,
     face_bgl: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    filter_mode: TextureFilterMode,
     vertex_buf: wgpu::Buffer,
+    face_views: Vec<wgpu::TextureView>,
     face_bgs: Vec<wgpu::BindGroup>,
 }
 
@@ -78,51 +87,15 @@ impl SkyboxRenderer {
             immediate_size: 0,
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("skybox_pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<SkyVertex>() as wgpu::BufferAddress,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2],
-                })],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: color_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let msaa_samples = 1;
+        let pipeline = build_sky_pipeline(device, &pipeline_layout, &shader, color_format, msaa_samples);
 
         let uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("sky_uniform_buf"),
             contents: bytemuck::bytes_of(&SkyUniforms {
                 view_proj: Mat4::IDENTITY.to_cols_array_2d(),
-                params: [2.5, 1.0, 0.0, 0.0],
+                params: [2.5, 2.0, 1.0, 0.0],
+                fog_color_density: [0.0; 4],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -136,15 +109,8 @@ impl SkyboxRenderer {
             }],
         });
 
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("sky_sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
+        let filter_mode = TextureFilterMode::Linear;
+        let sampler = create_sampler(device, "sky_sampler", filter_mode, 1, true);
 
         let verts = build_goldsrc_sky_cube();
         let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -154,17 +120,74 @@ impl SkyboxRenderer {
         });
 
         Self {
+            shader,
+            pipeline_layout,
             pipeline,
+            color_format,
+            msaa_samples,
             uniform_buf,
             uniform_bg,
             face_bgl,
             sampler,
+            filter_mode,
             vertex_buf,
+            face_views: Vec::new(),
             face_bgs: Vec::new(),
         }
     }
 
+    pub fn rebuild_pipelines(&mut self, device: &wgpu::Device, msaa_samples: u32) {
+        let samples = if msaa_samples >= 4 { 4 } else { 1 };
+        if self.msaa_samples == samples {
+            return;
+        }
+        self.msaa_samples = samples;
+        self.pipeline = build_sky_pipeline(
+            device,
+            &self.pipeline_layout,
+            &self.shader,
+            self.color_format,
+            samples,
+        );
+    }
+
+    pub fn set_texture_filter(&mut self, device: &wgpu::Device, mode: TextureFilterMode) {
+        let mapped = match mode {
+            TextureFilterMode::Nearest
+            | TextureFilterMode::NearestMipmapNearest
+            | TextureFilterMode::NearestMipmapLinear => TextureFilterMode::Nearest,
+            _ => TextureFilterMode::Linear,
+        };
+        if self.filter_mode == mapped {
+            return;
+        }
+        self.filter_mode = mapped;
+        self.sampler = create_sampler(device, "sky_sampler", mapped, 1, true);
+        self.face_bgs = self
+            .face_views
+            .iter()
+            .enumerate()
+            .map(|(idx, view)| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(&format!("sky_face_bg_{idx}")),
+                    layout: &self.face_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                    ],
+                })
+            })
+            .collect();
+    }
+
     pub fn upload_skybox(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, sky: &SkyboxTextures) {
+        self.face_views.clear();
         self.face_bgs.clear();
         for (idx, face) in sky.faces.iter().enumerate() {
             let size = wgpu::Extent3d {
@@ -212,24 +235,36 @@ impl SkyboxRenderer {
                     },
                 ],
             });
+            self.face_views.push(view);
             self.face_bgs.push(bg);
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn draw<'a>(
         &'a self,
         queue: &wgpu::Queue,
         pass: &mut wgpu::RenderPass<'a>,
         sky_view_proj: Mat4,
         gamma: f32,
+        texgamma: f32,
         brightness: f32,
+        software_mode: bool,
+        fog: Option<([f32; 3], f32)>,
     ) {
         if self.face_bgs.len() != 6 {
             return;
         }
+        let (fog_rgb, fog_density) = fog.unwrap_or(([0.0, 0.0, 0.0], 0.0));
         let uniforms = SkyUniforms {
             view_proj: sky_view_proj.to_cols_array_2d(),
-            params: [gamma, brightness, 0.0, 0.0],
+            params: [
+                gamma,
+                texgamma,
+                brightness,
+                if software_mode { 1.0 } else { 0.0 },
+            ],
+            fog_color_density: [fog_rgb[0], fog_rgb[1], fog_rgb[2], fog_density],
         };
         queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
 
@@ -244,7 +279,58 @@ impl SkyboxRenderer {
     }
 }
 
-/// 6 faces of a GoldSrc Z-up sky cube ordered as `[rt, bk, lf, ft, up, dn]`.
+fn build_sky_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    color_format: wgpu::TextureFormat,
+    msaa_samples: u32,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("skybox_pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<SkyVertex>() as wgpu::BufferAddress,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2],
+            })],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: color_format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::LessEqual),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState {
+            count: msaa_samples,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
 fn build_goldsrc_sky_cube() -> Vec<SkyVertex> {
     let s = 100.0f32;
     let quad = |tl: [f32; 3], tr: [f32; 3], br: [f32; 3], bl: [f32; 3]| -> [SkyVertex; 6] {
@@ -259,17 +345,11 @@ fn build_goldsrc_sky_cube() -> Vec<SkyVertex> {
     };
 
     let mut verts = Vec::with_capacity(36);
-    // 0: rt (+X face)
     verts.extend_from_slice(&quad([s, s, s], [s, -s, s], [s, -s, -s], [s, s, -s]));
-    // 1: bk (+Y face)
     verts.extend_from_slice(&quad([-s, s, s], [s, s, s], [s, s, -s], [-s, s, -s]));
-    // 2: lf (-X face)
     verts.extend_from_slice(&quad([-s, -s, s], [-s, s, s], [-s, s, -s], [-s, -s, -s]));
-    // 3: ft (-Y face)
     verts.extend_from_slice(&quad([s, -s, s], [-s, -s, s], [-s, -s, -s], [s, -s, -s]));
-    // 4: up (+Z face)
     verts.extend_from_slice(&quad([-s, -s, s], [s, -s, s], [s, s, s], [-s, s, s]));
-    // 5: dn (-Z face)
     verts.extend_from_slice(&quad([-s, s, -s], [s, s, -s], [s, -s, -s], [-s, -s, -s]));
     verts
 }

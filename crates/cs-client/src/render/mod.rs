@@ -4,6 +4,8 @@
 
 pub mod bsp_renderer;
 pub mod fx_renderer;
+pub mod gamma;
+pub mod lighting;
 pub mod mdl_renderer;
 pub mod scene;
 pub mod skybox;
@@ -23,8 +25,9 @@ use tracing::info;
 use winit::window::Window;
 
 use crate::camera::Camera;
-use crate::render::bsp_renderer::{BspRenderStats, BspRenderer};
+use crate::render::bsp_renderer::{BspDrawParams, BspRenderStats, BspRenderer};
 use crate::render::fx_renderer::{FxBeam, FxPoint, FxRenderer};
+use crate::render::lighting::{GpuLightsUniform, TextureFilterMode};
 use crate::render::mdl_renderer::{MdlRenderer, StudioInstance};
 use crate::render::scene::{
     BrushDraw, DrawLists, ModelKind, ModelRegistry, SceneFrame, build_draw_lists,
@@ -351,7 +354,17 @@ impl Renderer {
             .map(|scene| build_draw_lists(scene, &self.models));
         self.bsp.set_skip_submodels(draw_lists.is_some());
 
+        let filter_mode = if settings.use_nearest_filter {
+            TextureFilterMode::Nearest
+        } else {
+            TextureFilterMode::LinearMipmapLinear
+        };
+        self.bsp.set_texture_filter(&self.device, filter_mode, 1);
+        self.skybox.set_texture_filter(&self.device, filter_mode);
+
         if self.bsp.has_map() {
+            self.bsp
+                .prepare_world_pvs(&self.device, &self.queue, camera.position, true);
             let proj = camera.proj_matrix(vw, vh, settings.fov_deg, settings.aspect_mode);
             let view_mat = camera.view_matrix();
             let view_proj = proj * view_mat;
@@ -379,7 +392,7 @@ impl Renderer {
                     .collect();
                 let (solid, trans) = self
                     .bsp
-                    .prepare_entities(&self.device, &self.queue, &brushes)
+                    .prepare_entities(&self.device, &self.queue, &brushes, settings.time_sec)
                     .into_iter()
                     .partition(|p| p.is_opaque());
                 prepared_solid_brushes = solid;
@@ -501,22 +514,26 @@ impl Renderer {
                 let view_proj = proj * camera.view_matrix();
                 let sky_view_proj = proj * camera.sky_view_matrix();
 
-                stats = self.bsp.draw(
-                    &self.queue,
-                    &mut pass,
+                let bsp_params = BspDrawParams {
                     view_proj,
-                    settings.gamma,
-                    settings.brightness,
-                    settings.time_sec,
-                    settings.debug_mode,
-                    settings.use_nearest_filter,
-                    &[],
-                );
+                    camera_pos: camera.position,
+                    gamma: settings.gamma,
+                    texgamma: 2.0,
+                    brightness: settings.brightness,
+                    software_mode: false,
+                    time_sec: settings.time_sec,
+                    debug_mode: settings.debug_mode,
+                    wave_height: 0.0,
+                    fog: None,
+                    r_vis: true,
+                    lights: GpuLightsUniform::default(),
+                };
+                stats = self.bsp.draw(&self.queue, &mut pass, &bsp_params, &[]);
 
                 self.bsp.draw_entities(
                     &mut pass,
                     &prepared_solid_brushes,
-                    settings.use_nearest_filter,
+                    settings.time_sec,
                 );
                 if let Some(ref studio) = prepared_scene_studio {
                     self.mdl_scene.draw(&mut pass, studio);
@@ -527,7 +544,10 @@ impl Renderer {
                     &mut pass,
                     sky_view_proj,
                     settings.gamma,
+                    2.0,
                     settings.brightness,
+                    false,
+                    None,
                 );
 
                 self.fx.draw(&mut pass);
@@ -537,7 +557,7 @@ impl Renderer {
                 self.bsp.draw_entities(
                     &mut pass,
                     &prepared_trans_brushes,
-                    settings.use_nearest_filter,
+                    settings.time_sec,
                 );
                 if let Some(ref spr) = prepared_sprites {
                     self.sprites.draw(&mut pass, spr);
@@ -787,6 +807,6 @@ mod tests {
         let _mdl = MdlRenderer::new(&device, format);
         // No map uploaded: entity preparation is a no-op, not a panic.
         let draws: Vec<&BrushDraw> = Vec::new();
-        assert!(bsp.prepare_entities(&device, &queue, &draws).is_empty());
+        assert!(bsp.prepare_entities(&device, &queue, &draws, 0.0).is_empty());
     }
 }
