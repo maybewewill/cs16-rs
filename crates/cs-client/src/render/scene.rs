@@ -325,6 +325,20 @@ impl ViewBasis {
     }
 }
 
+/// A classic ground blob shadow projected beneath a live player or hostage (`cl_shadows 1`,
+/// `GL_StudioDrawShadow` / `R_StudioRenderShadow` from Xash3D `ref/gl/gl_studio.c`, read 2026-11-25).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StudioShadow {
+    /// World position on the floor plane, offset `+0.15 u` along `normal`.
+    pub origin: Vec3,
+    /// World-space surface normal of the receiving floor plane.
+    pub normal: Vec3,
+    /// Outer radius of the feathered octagonal disc in world units.
+    pub radius: f32,
+    /// Center opacity (`0.5 * height_attenuation`).
+    pub alpha: f32,
+}
+
 /// Entities of one frame plus the data the render-mode math needs.
 #[derive(Debug, Clone)]
 pub struct SceneFrame {
@@ -332,6 +346,8 @@ pub struct SceneFrame {
     pub time: f32,
     pub view: ViewBasis,
     pub entities: Vec<RenderEntity>,
+    /// Ground blob shadows for visible live players and hostages (`cl_shadows 1`).
+    pub shadows: Vec<StudioShadow>,
 }
 
 /// `AngleVectors` with GoldSrc conventions: angles are (pitch, yaw, roll) in degrees, positive
@@ -506,12 +522,29 @@ pub fn collect_opaque_brush_colliders(
     entities: &[RenderEntity],
     registry: &ModelRegistry,
 ) -> Vec<BrushCollider> {
+    collect_brush_colliders_filtered(entities, registry, true)
+}
+
+/// Collect all active `SOLID_BSP` brush entities (including translucent `func_breakable` glass)
+/// for shadow and bullet impact traces.
+pub fn collect_solid_brush_colliders(
+    entities: &[RenderEntity],
+    registry: &ModelRegistry,
+) -> Vec<BrushCollider> {
+    collect_brush_colliders_filtered(entities, registry, false)
+}
+
+fn collect_brush_colliders_filtered(
+    entities: &[RenderEntity],
+    registry: &ModelRegistry,
+    opaque_only: bool,
+) -> Vec<BrushCollider> {
     entities
         .iter()
         .filter(|e| {
             (e.effects & EF_NODRAW) == 0
                 && e.solid == SOLID_BSP
-                && is_opaque_entity(e.rendermode, e.renderfx)
+                && (!opaque_only || is_opaque_entity(e.rendermode, e.renderfx))
         })
         .filter_map(|e| {
             let entry = registry.get(e.model)?;
@@ -525,6 +558,47 @@ pub fn collect_opaque_brush_colliders(
             }
         })
         .collect()
+}
+
+/// Transform a world-space point into a brush submodel entity's local space
+/// (exact inverse of [`brush_matrix`]).
+pub fn world_to_brush_local(point: Vec3, ent_origin: Vec3, ent_angles: Vec3) -> Vec3 {
+    let p = point - ent_origin;
+    if ent_angles == Vec3::ZERO {
+        p
+    } else {
+        let (forward, right, up) = angle_vectors(ent_angles);
+        Vec3::new(forward.dot(p), -right.dot(p), up.dot(p))
+    }
+}
+
+/// Transform an entity-local surface normal back into world space.
+pub fn local_normal_to_world(local_normal: Vec3, ent_angles: Vec3) -> Vec3 {
+    if ent_angles == Vec3::ZERO {
+        local_normal
+    } else {
+        let (forward, right, up) = angle_vectors(ent_angles);
+        (forward * local_normal.x - right * local_normal.y + up * local_normal.z)
+            .normalize_or_zero()
+    }
+}
+
+/// Trace `start -> end` against one [`BrushCollider`] using `Hull::Point`, returning the
+/// hit result with `plane_normal` rotated back into world space.
+pub fn trace_brush_collider(
+    world: &WorldCollision,
+    c: &BrushCollider,
+    start: Vec3,
+    end: Vec3,
+) -> cs_pm::collision::TraceResult {
+    let start_l = world_to_brush_local(start, c.origin, c.angles);
+    let end_l = world_to_brush_local(end, c.origin, c.angles);
+    let mut tr = world.trace_model(c.submodel as usize, Vec3::ZERO, start_l, end_l, Hull::Point);
+    if tr.fraction < 1.0 {
+        tr.plane_normal = local_normal_to_world(tr.plane_normal, c.angles);
+        tr.end_pos = start.lerp(end, tr.fraction);
+    }
+    tr
 }
 
 /// Port of `R_SpriteGlowBlend` visibility trace (`ref/gl/gl_sprite.c:228-231`, read 2026-11-25):
@@ -544,15 +618,7 @@ pub fn trace_glow_occlusion(
     }
     let mut min_fraction = world_tr.fraction;
     for c in colliders {
-        let mut start_l = eye - c.origin;
-        let mut end_l = origin - c.origin;
-        if c.angles != Vec3::ZERO {
-            let (forward, right, up) = angle_vectors(c.angles);
-            let to_local = |p: Vec3| Vec3::new(forward.dot(p), -right.dot(p), up.dot(p));
-            start_l = to_local(start_l);
-            end_l = to_local(end_l);
-        }
-        let tr = world.trace_model(c.submodel as usize, Vec3::ZERO, start_l, end_l, Hull::Point);
+        let tr = trace_brush_collider(world, c, eye, origin);
         if tr.all_solid || tr.start_solid {
             return true;
         }
@@ -562,6 +628,54 @@ pub fn trace_glow_occlusion(
     }
     let dist = (origin - eye).length();
     (1.0 - min_fraction) * dist > 8.0
+}
+
+/// Trace downward (`origin + (0,0,2)` -> `origin - (0,0,256)`) against world BSP and solid
+/// `SOLID_BSP` brush submodels to project a classic GoldSrc studio blob shadow onto the floor
+/// (`GL_StudioDrawShadow` / `R_StudioRenderShadow` in Xash3D `ref/gl/gl_studio.c`, read 2026-11-25).
+pub fn trace_studio_shadow(
+    world: &WorldCollision,
+    colliders: &[BrushCollider],
+    origin: Vec3,
+    radius: f32,
+) -> Option<StudioShadow> {
+    const SHADOW_TRACE_DIST: f32 = 256.0;
+    const SHADOW_NORMAL_OFFSET: f32 = 0.15;
+    let start = origin + Vec3::new(0.0, 0.0, 2.0);
+    let end = origin - Vec3::new(0.0, 0.0, SHADOW_TRACE_DIST);
+
+    let mut best_fraction = 1.0f32;
+    let mut best_normal = Vec3::Z;
+
+    let world_tr = world.trace_world(start, end, Hull::Point);
+    if !world_tr.start_solid && !world_tr.all_solid && world_tr.fraction < best_fraction {
+        best_fraction = world_tr.fraction;
+        best_normal = world_tr.plane_normal;
+    }
+    for c in colliders {
+        let tr = trace_brush_collider(world, c, start, end);
+        if !tr.start_solid && !tr.all_solid && tr.fraction < best_fraction {
+            best_fraction = tr.fraction;
+            best_normal = tr.plane_normal;
+        }
+    }
+    if best_fraction >= 1.0 || best_normal.z <= 0.1 {
+        return None;
+    }
+    let hit_pos = start.lerp(end, best_fraction);
+    let height = (origin.z - hit_pos.z).max(0.0);
+    let height_attenuation = (1.0 - height / SHADOW_TRACE_DIST).clamp(0.0, 1.0);
+    let alpha = 0.5 * height_attenuation;
+    if alpha <= 0.01 {
+        return None;
+    }
+    let normal = best_normal.normalize_or_zero();
+    Some(StudioShadow {
+        origin: hit_pos + normal * SHADOW_NORMAL_OFFSET,
+        normal,
+        radius: radius.max(1.0),
+        alpha,
+    })
 }
 
 /// Full `R_SpriteGlowBlend` evaluation (`ref/gl/gl_sprite.c:220-242`, read 2026-11-25):
@@ -1181,6 +1295,7 @@ mod tests {
                 glass_far, door, glass_near, hidden, nodraw, gun, puff_far, puff_near, world,
                 unknown, missing, alpha_grate, pulsing,
             ],
+            shadows: Vec::new(),
         };
         let l = build_draw_lists(&scene, &r);
         assert_eq!(l.solid_brush.len(), 1);
@@ -1227,6 +1342,7 @@ mod tests {
             time: 0.0,
             view: view(),
             entities: vec![b, a],
+            shadows: Vec::new(),
         };
         let l = build_draw_lists(&scene, &r);
         assert_eq!(l.trans_brush[0].submodel, 1, "far centre first");

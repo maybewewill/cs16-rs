@@ -649,8 +649,10 @@ fn resolve(name: &str, ev: &QueuedEvent, env: &FxEnv, rng: &mut FxRandom) -> Eve
         "decal_reset" => return EventFx::DecalReset,
         "createexplo" => return EventFx::CreateExplo,
         "createsmoke" => {
+            // `SG_Detonate` sets `iparam2 = 1, bparam2 = 0` for the burst; `SG_Smoke` sets
+            // `iparam2 = 4` (with `bparam2 = 6` truncated to `0` by the 1-bit wire delta).
             return EventFx::CreateSmoke {
-                first: ev.args.bparam2 == 0,
+                first: ev.args.bparam2 == 0 && ev.args.iparam2 != 4,
                 args: ev.args,
             };
         }
@@ -1483,5 +1485,47 @@ mod tests {
         let fired = q.fire_due(&env, &mut rng);
         assert_eq!(fired.len(), 1);
         assert_eq!(fired[0].args.origin, Vec3::new(100.0, 200.0, 30.0));
+    }
+
+    #[test]
+    fn createsmoke_distinguishes_detonate_burst_from_subsequent_smoke_ticks() {
+        let precache = events_table(&["events/createsmoke.sc"]);
+        let entities = BTreeMap::new();
+        let env = FxEnv::new(0.0, &precache, &entities, &NoWorld);
+        let mut rng = FxRandom::default();
+
+        let burst = QueuedEvent {
+            index: 1,
+            flags: fev::SERVER,
+            fire_time: 0.0,
+            args: EventArgs {
+                iparam2: 1,
+                bparam2: 0,
+                ..Default::default()
+            },
+            velocity: Vec3::ZERO,
+        };
+        assert!(matches!(
+            resolve("events/createsmoke.sc", &burst, &env, &mut rng),
+            EventFx::CreateSmoke { first: true, .. }
+        ));
+
+        // Subsequent 1Hz `SG_Smoke` ticks send `iparam2 = 4` (with `bparam2` delta-truncated to 0).
+        let follow_up = QueuedEvent {
+            index: 1,
+            flags: fev::SERVER,
+            fire_time: 0.0,
+            args: EventArgs {
+                iparam1: 250,
+                iparam2: 4,
+                bparam2: 0,
+                ..Default::default()
+            },
+            velocity: Vec3::ZERO,
+        };
+        assert!(matches!(
+            resolve("events/createsmoke.sc", &follow_up, &env, &mut rng),
+            EventFx::CreateSmoke { first: false, .. }
+        ));
     }
 }

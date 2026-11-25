@@ -23,7 +23,9 @@ use glam::Vec3;
 
 use crate::events::{EventFx, FiredEvent, FxEnv, EventQueue, ViewAnim};
 use crate::sound::{SoundCommand, SoundQueue, VoiceEvent, VoiceQueue};
-use crate::tempents::{FxRandom, ModelRef, RenderEffect, TeTextMessage, TempEntClock, TempEnts};
+use crate::tempents::{
+    FxRandom, ModelRef, RenderEffect, SmokeCloudConfig, TeTextMessage, TempEntClock, TempEnts,
+};
 
 /// `FFADE_*` flags (`screenfade.h`).
 pub const FFADE_IN: u16 = 0x0000;
@@ -943,7 +945,7 @@ impl HudState {
 }
 
 /// The state the effect modules build up from the svc stream.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct ClientEffects {
     pub events: EventQueue,
     pub tempents: TempEnts,
@@ -951,8 +953,28 @@ pub struct ClientEffects {
     pub voice: VoiceQueue,
     pub hud: HudState,
     pub rng: FxRandom,
+    /// `max_smokepuffs` CVar value (default `120`).
+    pub max_smokepuffs: usize,
+    /// `fastsprites` CVar value (default `0`).
+    pub fastsprites: u8,
     /// The last time [`ClientEffects::update`] ran, for the frame time of the next.
     last_update: Option<f64>,
+}
+
+impl Default for ClientEffects {
+    fn default() -> Self {
+        Self {
+            events: EventQueue::default(),
+            tempents: TempEnts::default(),
+            sounds: SoundQueue::default(),
+            voice: VoiceQueue::default(),
+            hud: HudState::default(),
+            rng: FxRandom::default(),
+            max_smokepuffs: 120,
+            fastsprites: 0,
+            last_update: None,
+        }
+    }
 }
 
 impl ClientEffects {
@@ -962,6 +984,12 @@ impl ClientEffects {
             rng: FxRandom::new(seed),
             ..Self::default()
         }
+    }
+
+    /// Update smoke cloud CVars (`max_smokepuffs`, `fastsprites`) from client settings.
+    pub fn set_smoke_cvars(&mut self, max_smokepuffs: usize, fastsprites: u8) {
+        self.max_smokepuffs = max_smokepuffs;
+        self.fastsprites = fastsprites;
     }
 
     /// Forgets the effects of the map that ended (`CL_ClearEffects`); the HUD state stays.
@@ -1105,8 +1133,17 @@ impl ClientEffects {
                     self.hud.corpses.clear();
                 }
                 EventFx::CreateSmoke { first: true, args } => {
-                    self.tempents
-                        .spawn_smoke_clouds(args.origin, env.world, &mut self.rng, env.time);
+                    self.tempents.spawn_smoke_clouds_ex(
+                        args.origin,
+                        SmokeCloudConfig {
+                            light_smoke: args.bparam1 != 0,
+                            max_smokepuffs: self.max_smokepuffs,
+                            fastsprites: self.fastsprites,
+                        },
+                        env.world,
+                        &mut self.rng,
+                        env.time,
+                    );
                 }
                 EventFx::CreateSmoke { .. } | EventFx::CreateExplo | EventFx::Unhandled => {}
             }

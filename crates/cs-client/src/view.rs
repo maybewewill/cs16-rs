@@ -14,6 +14,7 @@ use cs_assets::bsp::BspMap;
 use cs_assets::materials::{MaterialTable, SurfaceMaterial};
 use cs_assets::mdl::{MdlSeqEvent, StudioModel};
 use cs_assets::spr::GoldSrcSprite;
+use cs_clientcore::cvars::ClientCvars;
 use cs_clientcore::entities::ef;
 use cs_clientcore::events::{EventFx, FiredEvent, ViewAnim};
 use cs_clientcore::hud::{CustomDecalInfo, evaluate_lightstyles};
@@ -34,7 +35,7 @@ use cs_transport::PacketTransport;
 use cs_vfs::Vfs;
 use glam::Vec3;
 
-use crate::render::decal_renderer::DecalSpawn;
+use crate::render::decal_renderer::{DecalSpawn, query_submodel_faces_in_sphere};
 use crate::render::fx_renderer::{FxBeam, FxPoint};
 use crate::render::lighting::{
     DLightPool, GpuLightsUniform, SpotLight, compute_flashlight_spot,
@@ -42,8 +43,10 @@ use crate::render::lighting::{
 use crate::render::mdl_renderer::{STUDIO_LOOPING, studio_frame};
 use crate::render::particles::{BeamSystem, ParticleSystem};
 use crate::render::scene::{
-    EF_NODRAW, EntRenderMode, ModelHandle, ModelRegistry, RenderEntity, SceneFrame, ViewBasis,
-    collect_opaque_brush_colliders, trace_glow_occlusion,
+    BrushCollider, EF_NODRAW, EntRenderMode, ModelHandle, ModelKind, ModelRegistry,
+    RENDERFX_DEAD_PLAYER, RenderEntity, SOLID_BSP, SceneFrame, ViewBasis,
+    collect_opaque_brush_colliders, collect_solid_brush_colliders, trace_brush_collider,
+    trace_glow_occlusion, trace_studio_shadow, world_to_brush_local,
 };
 use crate::view_effects::{
     BobParams, BobState, StairSmoothState, ViewModelLagState, calc_roll, calc_screen_shake,
@@ -298,6 +301,43 @@ impl Default for ViewBuilder {
 const FL_SPECTATOR: u32 = 1 << 12;
 const WEAPON_SUIT_BIT: u32 = 1 << 31;
 
+/// Resolve the forced player studio model path when `cl_minmodels != 0` from `TeamInfo` /
+/// `ScoreAttrib` VIP bit and `cl_min_ct` / `cl_min_t` indices (`client.dll` `0x10105f08` table).
+pub fn resolve_minmodel_path(
+    team: &str,
+    team_id: i16,
+    attrib: u8,
+    cl_min_ct: i32,
+    cl_min_t: i32,
+) -> Option<&'static str> {
+    const SCORE_STATUS_VIP: u8 = 4;
+    let is_t = team.eq_ignore_ascii_case("TERRORIST") || (team.is_empty() && team_id == 1);
+    let is_ct = team.eq_ignore_ascii_case("CT") || (team.is_empty() && team_id == 2);
+    if is_t {
+        Some(match cl_min_t {
+            5 => "models/player/guerilla/guerilla.mdl",
+            6 => "models/player/arctic/arctic.mdl",
+            8 => "models/player/terror/terror.mdl",
+            11 => "models/player/militia/militia.mdl",
+            _ => "models/player/leet/leet.mdl",
+        })
+    } else if is_ct {
+        if (attrib & SCORE_STATUS_VIP) != 0 {
+            return Some("models/player/vip/vip.mdl");
+        }
+        Some(match cl_min_ct {
+            3 => "models/player/vip/vip.mdl",
+            4 => "models/player/gsg9/gsg9.mdl",
+            7 => "models/player/sas/sas.mdl",
+            9 => "models/player/urban/urban.mdl",
+            10 => "models/player/spetsnaz/spetsnaz.mdl",
+            _ => "models/player/gign/gign.mdl",
+        })
+    } else {
+        None
+    }
+}
+
 /// GoldSrc `UpdateClientData` leaves `cd.deadflag == 0` and `cd.health == 100.0` while a
 /// joining player sits on the intro camera, marking them with `FL_SPECTATOR` (`1 << 12`)
 /// and omitting the HEV suit bit (`1 << WEAPON_SUIT`, bit 31). Observers set `cd.iuser1 != 0`.
@@ -358,6 +398,11 @@ impl ViewBuilder {
     /// The shared model names a [`MapFxWorld`] reads.
     pub fn names(&self) -> Rc<RefCell<BTreeMap<u16, String>>> {
         Rc::clone(&self.names)
+    }
+
+    /// Current resolved model registry.
+    pub fn models(&self) -> &ModelRegistry {
+        &self.models
     }
 
     /// Drops per-map scene state on map change (`changelevel`).
@@ -470,6 +515,11 @@ impl ViewBuilder {
                 .get(&(p.weapon.weapon_id.clamp(0, 255) as u8))
                 .map_or(0, |w| w.m_i_weapon_state)
         };
+        let cvars = conn.cvars().clone();
+        conn.fx_mut().set_smoke_cvars(
+            cvars.float("max_smokepuffs").max(0.0) as usize,
+            cvars.float("fastsprites").clamp(0.0, 2.0) as u8,
+        );
         conn.set_fx_local(weapon_state, false, inputs.right_hand);
         let fired = conn.update_effects(now);
         let cd = conn.client_data().cloned();
@@ -485,7 +535,7 @@ impl ViewBuilder {
             standing_on: prediction.standing_on(),
         });
         let fx = conn.fx_mut();
-        self.build_parts(
+        self.build_parts_with_cvars(
             &precache,
             fx,
             &userinfos,
@@ -496,6 +546,7 @@ impl ViewBuilder {
             fired,
             view_angles,
             inputs,
+            Some(&cvars),
         )
     }
 
@@ -516,7 +567,7 @@ impl ViewBuilder {
             standing_on: None,
         });
         let fx = player.fx_mut();
-        self.build_parts(
+        self.build_parts_with_cvars(
             &precache,
             fx,
             &userinfos,
@@ -527,11 +578,12 @@ impl ViewBuilder {
             fired,
             view_angles,
             inputs,
+            None,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn build_parts(
+    pub fn build_parts(
         &mut self,
         precache: &PrecacheTables,
         fx: &mut ClientEffects,
@@ -544,8 +596,38 @@ impl ViewBuilder {
         view_angles: Vec3,
         inputs: &ViewInputs,
     ) -> (FrameView, Option<ModelRegistry>) {
+        self.build_parts_with_cvars(
+            precache,
+            fx,
+            userinfos,
+            cd,
+            slot,
+            prediction,
+            emitted,
+            fired,
+            view_angles,
+            inputs,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_parts_with_cvars(
+        &mut self,
+        precache: &PrecacheTables,
+        fx: &mut ClientEffects,
+        userinfos: &BTreeMap<u8, String>,
+        cd: Option<cs_proto48::delta::GoldSrcClientData>,
+        slot: Option<u8>,
+        prediction: Option<&Prediction>,
+        emitted: cs_clientcore::interp::EmitResult,
+        fired: Vec<FiredEvent>,
+        view_angles: Vec3,
+        inputs: &ViewInputs,
+        cvars: Option<&ClientCvars>,
+    ) -> (FrameView, Option<ModelRegistry>) {
         let now = inputs.now;
-        let registry_changed = self.ensure_registry(precache);
+        let mut registry_changed = self.ensure_registry(precache);
         let local_number = slot.map(|s| u16::from(s) + 1);
         let (mut eye, mut punch, mut fov, alive, observer_mode, weaponanim, viewmodel_index) =
             match &cd {
@@ -587,8 +669,9 @@ impl ViewBuilder {
         }
 
         // A player is drawn with the model its userinfo names (`model`): `models/player.mdl` is
-        // only the entity's placeholder.
-        let player_models: BTreeMap<u8, String> = userinfos
+        // only the entity's placeholder. When `cl_minmodels` is non-zero, override remote player
+        // models by `TeamInfo` / VIP `ScoreAttrib` and `cl_min_ct` / `cl_min_t`.
+        let mut player_models: BTreeMap<u8, String> = userinfos
             .iter()
             .filter_map(|(slot, raw)| {
                 let info = cs_proto48::info::InfoString::parse(raw);
@@ -597,12 +680,39 @@ impl ViewBuilder {
                     .then(|| (*slot, format!("models/player/{m}/{m}.mdl")))
             })
             .collect();
+        let cl_minmodels = cvars.is_some_and(|c| c.float("cl_minmodels") != 0.0);
+        if cl_minmodels {
+            let min_ct = cvars.map_or(2, |c| c.float("cl_min_ct") as i32);
+            let min_t = cvars.map_or(1, |c| c.float("cl_min_t") as i32);
+            for (&player_id, score) in &fx.hud.players {
+                if let Some(slot0) = player_id.checked_sub(1)
+                    && let Some(path) = resolve_minmodel_path(
+                        &score.team,
+                        score.team_id,
+                        score.attrib,
+                        min_ct,
+                        min_t,
+                    )
+                {
+                    player_models.insert(slot0, path.to_string());
+                }
+            }
+        }
+        // Register player/minmodel overrides and rebuild the registry before `render_entity`
+        // so changes to `cl_minmodels` or userinfo `model` take effect on the current frame.
+        for path in player_models.values() {
+            let _ = self.client_handle(path);
+        }
+        if self.ensure_registry(precache) {
+            registry_changed = true;
+        }
 
         let time = now as f32;
         let mut scene = SceneFrame {
             time,
             view: ViewBasis::from_angles(eye, view_angles + punch),
             entities: Vec::new(),
+            shadows: Vec::new(),
         };
         let mut stats = ViewStats::default();
 
@@ -627,6 +737,7 @@ impl ViewBuilder {
             }
         }
 
+        let mut shadow_origins: Vec<Vec3> = Vec::new();
         // Entity loop: build RenderEntities + collect entity EF_* lights & world positions.
         let mut entity_positions: HashMap<u16, Vec3> = HashMap::with_capacity(emitted.entities.len());
         for e in &emitted.entities {
@@ -707,7 +818,12 @@ impl ViewBuilder {
             if let Some(r) = self.render_entity(e, &player_models, dt, time) {
                 match e.model {
                     CoreModelKind::Brush => stats.brush += 1,
-                    CoreModelKind::Studio => stats.studio += 1,
+                    CoreModelKind::Studio => {
+                        stats.studio += 1;
+                        if is_shadow_eligible(e, &r, &self.models, &fx.hud.players) {
+                            shadow_origins.push(e.origin);
+                        }
+                    }
                     CoreModelKind::Sprite => stats.sprites += 1,
                 }
                 scene.entities.push(r);
@@ -721,6 +837,21 @@ impl ViewBuilder {
             if let Some(r) = self.render_tempent(t, scene.entities.len() as u16) {
                 stats.tempents += 1;
                 scene.entities.push(r);
+            }
+        }
+        if self.ensure_registry(precache) {
+            registry_changed = true;
+        }
+        let cl_shadows = cvars.is_none_or(|c| c.float("cl_shadows") != 0.0);
+        if cl_shadows
+            && !shadow_origins.is_empty()
+            && let Some(world) = self.collision.as_deref()
+        {
+            let solid_colliders = collect_solid_brush_colliders(&scene.entities, &self.models);
+            for origin in shadow_origins {
+                if let Some(sh) = trace_studio_shadow(world, &solid_colliders, origin, 18.0) {
+                    scene.shadows.push(sh);
+                }
             }
         }
         self.apply_glow_occlusion(&mut scene);
@@ -741,7 +872,7 @@ impl ViewBuilder {
         self.glows.drain(..overflow);
 
         let prev_vm_seq = self.anim.map(|a| a.sequence).unwrap_or(-1);
-        let impact_sounds = self.collect_bullet_impacts(&fired, now);
+        let impact_sounds = self.collect_bullet_impacts(&fired, &scene.entities, now);
         self.update_view_anim(fx, &fired, weaponanim, viewmodel_index, time);
         let viewmodel = self.viewmodel(precache, alive, fov, viewmodel_index, inputs);
         let mut anim_sounds = Vec::new();
@@ -891,10 +1022,34 @@ impl ViewBuilder {
         )
     }
 
-    fn collect_bullet_impacts(&mut self, fired: &[FiredEvent], now: f64) -> Vec<SoundStart> {
+    fn collect_bullet_impacts(
+        &mut self,
+        fired: &[FiredEvent],
+        scene_entities: &[RenderEntity],
+        now: f64,
+    ) -> Vec<SoundStart> {
         let Some(ref coll) = self.collision else {
             return Vec::new();
         };
+        let brush_targets: Vec<(u16, u16, BrushCollider)> = scene_entities
+            .iter()
+            .filter(|e| (e.effects & EF_NODRAW) == 0 && e.solid == SOLID_BSP)
+            .filter_map(|e| {
+                let entry = self.models.get(e.model)?;
+                match entry.kind {
+                    ModelKind::Brush(submodel) => Some((
+                        e.index,
+                        e.model.0,
+                        BrushCollider {
+                            submodel,
+                            origin: e.origin,
+                            angles: e.angles,
+                        },
+                    )),
+                    _ => None,
+                }
+            })
+            .collect();
         let mut sounds = Vec::new();
         let base_seed = (now * 1000.0) as u32;
         for (ev_idx, ev) in fired.iter().enumerate() {
@@ -920,19 +1075,41 @@ impl ViewBuilder {
                 };
                 let dir = (fire.forward + fire.right * sx + fire.up * sy).normalize_or_zero();
                 let dist = fire.distance.clamp(64.0, 8192.0);
-                let tr = coll.trace_world(fire.origin, fire.origin + dir * dist, Hull::Point);
-                if tr.fraction >= 1.0 || tr.fraction <= 0.001 {
+                let end = fire.origin + dir * dist;
+                let world_tr = coll.trace_world(fire.origin, end, Hull::Point);
+
+                let mut best_fraction = world_tr.fraction;
+                let mut best_pos = world_tr.end_pos;
+                let mut best_normal = world_tr.plane_normal;
+                let mut hit_entity: u16 = 0;
+                let mut hit_model: u16 = 0;
+                let mut hit_brush: Option<&BrushCollider> = None;
+
+                for (ent_idx, model_idx, collider) in &brush_targets {
+                    let tr = trace_brush_collider(coll, collider, fire.origin, end);
+                    if !tr.start_solid && !tr.all_solid && tr.fraction < best_fraction {
+                        best_fraction = tr.fraction;
+                        best_pos = tr.end_pos;
+                        best_normal = tr.plane_normal;
+                        hit_entity = *ent_idx;
+                        hit_model = *model_idx;
+                        hit_brush = Some(collider);
+                    }
+                }
+                if best_fraction >= 1.0 || best_fraction <= 0.001 {
                     continue;
                 }
-                let tex_type = self.surface_char_at(tr.end_pos, tr.plane_normal);
-                sounds.extend(crate::audio::build_impact_sounds(tr.end_pos, tex_type, seed));
+                let tex_type = self.surface_char_at(best_pos, best_normal, hit_brush);
+                sounds.extend(crate::audio::build_impact_sounds(best_pos, tex_type, seed));
                 if self.pending_decals.len() < 128 {
                     self.pending_decals.push(DecalSpawn {
-                        origin: tr.end_pos,
+                        origin: best_pos,
                         decal_name: format!("{{shot{}", (seed % 5) + 1),
                         half_size: 4.0,
                         permanent: false,
                         player_spray: None,
+                        entity_index: hit_entity,
+                        model_index: hit_model,
                     });
                 }
             }
@@ -940,15 +1117,29 @@ impl ViewBuilder {
         sounds
     }
 
-    fn surface_char_at(&self, pos: Vec3, normal: Vec3) -> u8 {
+    fn surface_char_at(
+        &self,
+        pos: Vec3,
+        normal: Vec3,
+        brush: Option<&BrushCollider>,
+    ) -> u8 {
         let Some(ref bsp) = self.bsp else {
             return CHAR_TEX_CONCRETE;
         };
-        let faces = bsp.query_faces_in_sphere(pos, 16.0);
+        let (faces, cmp_normal) = if let Some(b) = brush {
+            let local_pos = world_to_brush_local(pos, b.origin, b.angles);
+            let local_norm = world_to_brush_local(normal, Vec3::ZERO, b.angles);
+            (
+                query_submodel_faces_in_sphere(bsp, b.submodel as usize, local_pos, 16.0),
+                local_norm,
+            )
+        } else {
+            (bsp.query_faces_in_sphere(pos, 16.0), normal)
+        };
         let best = faces.iter().max_by(|a, b| {
             a.normal
-                .dot(normal)
-                .partial_cmp(&b.normal.dot(normal))
+                .dot(cmp_normal)
+                .partial_cmp(&b.normal.dot(cmp_normal))
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         let Some(poly) = best else {
@@ -1225,8 +1416,9 @@ impl ViewBuilder {
                 position,
                 decal,
                 decal_name,
+                entity,
+                model,
                 permanent,
-                ..
             } => {
                 if self.pending_decals.len() < 128 {
                     self.pending_decals.push(DecalSpawn {
@@ -1236,11 +1428,16 @@ impl ViewBuilder {
                         half_size: 16.0,
                         permanent,
                         player_spray: None,
+                        entity_index: entity,
+                        model_index: model,
                     });
                 }
             }
             RenderEffect::PlayerDecal {
-                player, position, ..
+                player,
+                position,
+                entity,
+                ..
             } => {
                 if self.pending_decals.len() < 128 {
                     self.pending_decals.push(DecalSpawn {
@@ -1249,6 +1446,8 @@ impl ViewBuilder {
                         half_size: 24.0,
                         permanent: true,
                         player_spray: Some(player),
+                        entity_index: entity,
+                        model_index: 0,
                     });
                 }
             }
@@ -1349,6 +1548,37 @@ impl ViewBuilder {
             right_hand: inputs.right_hand,
         })
     }
+}
+
+fn is_shadow_eligible(
+    e: &VisibleEntity,
+    r: &RenderEntity,
+    models: &ModelRegistry,
+    players: &BTreeMap<u8, cs_clientcore::hud::PlayerScore>,
+) -> bool {
+    if (r.effects & EF_NODRAW) != 0 || r.rendermode == EntRenderMode::TransAdd {
+        return false;
+    }
+    if r.player {
+        if r.renderfx == RENDERFX_DEAD_PLAYER {
+            return false;
+        }
+        let dead = u8::try_from(e.number)
+            .ok()
+            .and_then(|id| players.get(&id))
+            .is_some_and(|p| (p.attrib & 1) != 0);
+        return !dead;
+    }
+    let Some(entry) = models.get(r.model) else {
+        return false;
+    };
+    if entry.kind != ModelKind::Studio {
+        return false;
+    }
+    let lower = entry.name.to_ascii_lowercase();
+    let is_hostage = lower.contains("scientist") || lower.contains("hostage");
+    // Dead hostages switch to MOVETYPE_TOSS (6) + SOLID_NOT (0); live ones stay SOLID_SLIDEBOX (3).
+    is_hostage && !(e.state.solid == 0 && e.state.movetype != 0)
 }
 
 fn surface_material_to_char(mat: SurfaceMaterial) -> u8 {
@@ -1649,7 +1879,7 @@ mod tests {
             }),
         }];
 
-        let _ = builder.collect_bullet_impacts(&fired, 1.234);
+        let _ = builder.collect_bullet_impacts(&fired, &[], 1.234);
         assert_eq!(builder.pending_decals.len(), 1);
         let p1 = builder.pending_decals[0].origin;
         assert!((p1.x - 128.0).abs() < 0.1, "x={}", p1.x);
@@ -1657,7 +1887,7 @@ mod tests {
         assert!((p1.z + 3.2).abs() < 0.2, "z={}", p1.z);
 
         builder.pending_decals.clear();
-        let _ = builder.collect_bullet_impacts(&fired, 99.876);
+        let _ = builder.collect_bullet_impacts(&fired, &[], 99.876);
         let p2 = builder.pending_decals[0].origin;
         assert!((p1 - p2).length() < 1e-5, "single shot impact must be deterministic");
     }

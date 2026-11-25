@@ -26,7 +26,110 @@ use crate::render::lighting::{
 };
 use crate::render::scene::{
     EntRenderMode, RENDERFX_EXPLODE, RENDERFX_GLOW_SHELL, RENDERFX_LIGHT_MULTIPLIER,
+    StudioShadow,
 };
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct MdlShadowVertex {
+    pub position: [f32; 3],
+    pub color: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct ShadowUniforms {
+    view_proj: [[f32; 4]; 4],
+    camera_pos: [f32; 4],
+    fog_color_density: [f32; 4],
+    gamma_params: [f32; 4],
+}
+
+const SHADOW_SHADER_WGSL: &str = r#"
+struct ShadowUniforms {
+    view_proj: mat4x4<f32>,
+    camera_pos: vec4<f32>,
+    fog_color_density: vec4<f32>,
+    gamma_params: vec4<f32>,
+};
+
+@group(0) @binding(0)
+var<uniform> u: ShadowUniforms;
+
+struct VsIn {
+    @location(0) position: vec3<f32>,
+    @location(1) color: vec4<f32>,
+};
+
+struct VsOut {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) color: vec4<f32>,
+    @location(1) world_pos: vec3<f32>,
+};
+
+@vertex
+fn vs_main(in: VsIn) -> VsOut {
+    var out: VsOut;
+    out.clip_pos = u.view_proj * vec4<f32>(in.position, 1.0);
+    out.color = in.color;
+    out.world_pos = in.position;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    var rgb = in.color.rgb;
+    if u.fog_color_density.w > 0.0 {
+        let cam_dist = length(in.world_pos - u.camera_pos.xyz);
+        let fd = cam_dist * u.fog_color_density.w;
+        let f = exp(-(fd * fd));
+        rgb = mix(u.fog_color_density.rgb, rgb, clamp(f, 0.0, 1.0));
+    }
+    return vec4<f32>(rgb, in.color.a);
+}
+"#;
+
+/// Build a feathered octagonal translucent disc (`8` triangles = `24` vertices) on the floor
+/// plane orthogonal to `shadow.normal`, centered at `shadow.origin` (`alpha = shadow.alpha` at
+/// center fading to `0.0` at `shadow.radius`).
+pub fn build_shadow_disc_vertices(shadow: &StudioShadow) -> Vec<MdlShadowVertex> {
+    const SIDES: usize = 8;
+    let normal = shadow.normal.normalize_or_zero();
+    if normal.length_squared() < 1e-4 || shadow.alpha <= 0.0 || shadow.radius <= 0.0 {
+        return Vec::new();
+    }
+    let ref_up = if normal.z.abs() < 0.99 { Vec3::Z } else { Vec3::Y };
+    let u = normal.cross(ref_up).normalize_or_zero();
+    let v = normal.cross(u).normalize_or_zero();
+    let center = shadow.origin;
+    let center_col = [0.0, 0.0, 0.0, shadow.alpha];
+    let rim_col = [0.0, 0.0, 0.0, 0.0];
+
+    let mut ring = [Vec3::ZERO; SIDES];
+    for (i, slot) in ring.iter_mut().enumerate() {
+        let ang = (i as f32) * (std::f32::consts::TAU / SIDES as f32);
+        let (s, c) = ang.sin_cos();
+        *slot = center + (u * c + v * s) * shadow.radius;
+    }
+
+    let mut verts = Vec::with_capacity(SIDES * 3);
+    for i in 0..SIDES {
+        let next = (i + 1) % SIDES;
+        verts.push(MdlShadowVertex {
+            position: center.to_array(),
+            color: center_col,
+        });
+        verts.push(MdlShadowVertex {
+            position: ring[i].to_array(),
+            color: rim_col,
+        });
+        verts.push(MdlShadowVertex {
+            position: ring[next].to_array(),
+            color: rim_col,
+        });
+    }
+    verts
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -256,8 +359,68 @@ pub struct MdlRenderer {
     uniform_stride: u64,
     lights_buf: wgpu::Buffer,
     uniform_bg: wgpu::BindGroup,
+    shadow_shader: wgpu::ShaderModule,
+    shadow_pipeline_layout: wgpu::PipelineLayout,
+    shadow_pipeline: wgpu::RenderPipeline,
+    shadow_uniform_buf: wgpu::Buffer,
+    shadow_uniform_bg: wgpu::BindGroup,
+    shadow_vbuf: wgpu::Buffer,
+    shadow_vbuf_cap: usize,
+    shadow_vertex_count: u32,
     cached_gamma: GoldSrcGammaConfig,
     cached_tex_cfg: TextureUploadConfig,
+}
+
+fn create_shadow_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+    color_format: wgpu::TextureFormat,
+    sample_count: u32,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("mdl_shadow_pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<MdlShadowVertex>() as wgpu::BufferAddress,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4],
+            })],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: color_format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::LessEqual),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState {
+            count: sample_count.max(1),
+            ..Default::default()
+        },
+        multiview_mask: None,
+        cache: None,
+    })
 }
 
 struct PreparedDraw {
@@ -482,6 +645,62 @@ impl MdlRenderer {
             &lights_buf,
         );
 
+        let shadow_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("mdl_shadow.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(SHADOW_SHADER_WGSL.into()),
+        });
+        let shadow_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("mdl_shadow_bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let shadow_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("mdl_shadow_pipeline_layout"),
+                bind_group_layouts: &[Some(&shadow_bgl)],
+                immediate_size: 0,
+            });
+        let shadow_pipeline = create_shadow_pipeline(
+            device,
+            &shadow_shader,
+            &shadow_pipeline_layout,
+            color_format,
+            msaa_samples,
+        );
+        let shadow_uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mdl_shadow_ubuf"),
+            contents: bytemuck::bytes_of(&ShadowUniforms {
+                view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+                camera_pos: [0.0, 0.0, 0.0, 1.0],
+                fog_color_density: [0.0, 0.0, 0.0, 0.0],
+                gamma_params: [2.5, 2.0, 0.0, 0.0],
+            }),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let shadow_uniform_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mdl_shadow_ubg"),
+            layout: &shadow_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: shadow_uniform_buf.as_entire_binding(),
+            }],
+        });
+        let shadow_vbuf_cap = 1024;
+        let shadow_vbuf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mdl_shadow_vbuf"),
+            size: (shadow_vbuf_cap * std::mem::size_of::<MdlShadowVertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             color_format,
             msaa_samples,
@@ -503,6 +722,14 @@ impl MdlRenderer {
             uniform_stride,
             lights_buf,
             uniform_bg,
+            shadow_shader,
+            shadow_pipeline_layout,
+            shadow_pipeline,
+            shadow_uniform_buf,
+            shadow_uniform_bg,
+            shadow_vbuf,
+            shadow_vbuf_cap,
+            shadow_vertex_count: 0,
             cached_gamma: GoldSrcGammaConfig::default(),
             cached_tex_cfg: TextureUploadConfig::default(),
         }
@@ -524,6 +751,13 @@ impl MdlRenderer {
         self.opaque_pipeline = opaque;
         self.alpha_pipeline = alpha;
         self.additive_pipeline = additive;
+        self.shadow_pipeline = create_shadow_pipeline(
+            device,
+            &self.shadow_shader,
+            &self.shadow_pipeline_layout,
+            self.color_format,
+            samples,
+        );
     }
 
     pub fn set_texture_filter(
@@ -961,6 +1195,64 @@ impl MdlRenderer {
         self.draw_filtered(pass, prepared, |_| true);
     }
 
+    /// Upload feathered octagonal studio blob shadows (`cl_shadows 1`) for the current frame.
+    pub fn prepare_shadows(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        shadows: &[StudioShadow],
+        params: &MdlPassParams,
+    ) {
+        let (fog_rgb, fog_density) = params.fog.unwrap_or(([0.0, 0.0, 0.0], 0.0));
+        queue.write_buffer(
+            &self.shadow_uniform_buf,
+            0,
+            bytemuck::bytes_of(&ShadowUniforms {
+                view_proj: params.view_proj.to_cols_array_2d(),
+                camera_pos: [params.camera_pos.x, params.camera_pos.y, params.camera_pos.z, 1.0],
+                fog_color_density: [fog_rgb[0], fog_rgb[1], fog_rgb[2], fog_density],
+                gamma_params: [
+                    params.gamma,
+                    params.texgamma,
+                    params.brightness,
+                    if params.software_mode { 1.0 } else { 0.0 },
+                ],
+            }),
+        );
+        if shadows.is_empty() {
+            self.shadow_vertex_count = 0;
+            return;
+        }
+        let mut verts = Vec::with_capacity(shadows.len() * 24);
+        for s in shadows {
+            verts.extend(build_shadow_disc_vertices(s));
+        }
+        self.shadow_vertex_count = verts.len() as u32;
+        if verts.len() > self.shadow_vbuf_cap {
+            self.shadow_vbuf_cap = verts.len().next_power_of_two();
+            self.shadow_vbuf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("mdl_shadow_vbuf"),
+                size: (self.shadow_vbuf_cap * std::mem::size_of::<MdlShadowVertex>()) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        if !verts.is_empty() {
+            queue.write_buffer(&self.shadow_vbuf, 0, bytemuck::cast_slice(&verts));
+        }
+    }
+
+    /// Draw prepared studio blob shadows (depth-read `LessEqual`, no depth-write, alpha-blended).
+    pub fn draw_shadows<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
+        if self.shadow_vertex_count == 0 {
+            return;
+        }
+        pass.set_pipeline(&self.shadow_pipeline);
+        pass.set_bind_group(0, &self.shadow_uniform_bg, &[]);
+        pass.set_vertex_buffer(0, self.shadow_vbuf.slice(..));
+        pass.draw(0..self.shadow_vertex_count, 0..1);
+    }
+
     pub fn draw_opaque<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, prepared: &PreparedMdlPass) {
         self.draw_filtered(pass, prepared, |k| k == MdlPipelineKind::Opaque);
     }
@@ -1180,5 +1472,25 @@ mod tests {
 
         let xf_l = viewmodel_transform_with_angles(Vec3::new(1.0, 2.0, 3.0), 0.0, 0.0, 90.0, Vec3::ZERO, false);
         assert!(xf_l.determinant() > 0.0);
+    }
+
+    #[test]
+    fn build_shadow_disc_emits_feathered_octagon() {
+        let shadow = StudioShadow {
+            origin: Vec3::new(10.0, 20.0, 0.15),
+            normal: Vec3::Z,
+            radius: 18.0,
+            alpha: 0.45,
+        };
+        let verts = build_shadow_disc_vertices(&shadow);
+        assert_eq!(verts.len(), 24);
+        for tri in verts.as_chunks::<3>().0 {
+            assert_eq!(tri[0].position, shadow.origin.to_array());
+            assert!((tri[0].color[3] - 0.45).abs() < 1e-6);
+            assert_eq!(tri[1].color[3], 0.0);
+            assert_eq!(tri[2].color[3], 0.0);
+            let d1 = (Vec3::from_array(tri[1].position) - shadow.origin).length();
+            assert!((d1 - 18.0).abs() < 1e-4);
+        }
     }
 }

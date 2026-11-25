@@ -366,6 +366,7 @@ fn rendermodes_blend_and_alpha_sorting() {
         time: 0.0,
         view,
         entities: vec![solid_ent, trans_near, color_ent, add_far],
+        shadows: Vec::new(),
     };
     let lists = build_draw_lists_tracked(&frame, &reg, None);
     assert_eq!(lists.studio.len(), 4);
@@ -419,6 +420,7 @@ fn renderfx_all_modes_and_fade_tracker() {
         time: 0.25,
         view,
         entities: all_entities,
+        shadows: Vec::new(),
     };
     let lists0 = build_draw_lists_tracked(&frame0, &reg, Some(&mut tracker));
     assert!(lists0.studio.len() >= 8, "expected >= 8 visible renderfx draws, got {}", lists0.studio.len());
@@ -443,6 +445,7 @@ fn renderfx_all_modes_and_fade_tracker() {
         time: 1.25,
         view,
         entities: vec![fade_ent, solid_ent],
+        shadows: Vec::new(),
     };
     let lists1 = build_draw_lists_tracked(&frame1, &reg, Some(&mut tracker));
     let fade_1 = lists1.studio.iter().find(|s| s.renderfx == RENDERFX_FADE_FAST).unwrap().blend;
@@ -466,6 +469,7 @@ fn sprites_all_orientations_and_glow_occlusion() {
         time: 0.0,
         view,
         entities: vec![spr_glow],
+        shadows: Vec::new(),
     };
     let lists = build_draw_lists_tracked(&frame, &reg, None);
     assert_eq!(lists.studio.len(), 0);

@@ -491,6 +491,30 @@ pub struct TempEntClock {
     pub gravity: f32,
 }
 
+/// Sprite path used by CS 1.6 32-bit layered smoke clouds (`events/createsmoke.sc`).
+pub const GAS_PUFF_SPRITE: &str = "sprites/gas_puff_01.spr";
+
+/// Client CVar/event options controlling 32-bit CS 1.6 smoke cloud spawning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SmokeCloudConfig {
+    /// `bparam1 != 0`: another smoke exploded within 250u, producing slightly lighter grey puffs.
+    pub light_smoke: bool,
+    /// `max_smokepuffs` (default `120`): hard cap on total active `gas_puff_01.spr` tempents.
+    pub max_smokepuffs: usize,
+    /// `fastsprites` (`0` = 20 layered puffs, `1` = 10 simpler puffs, `2` = 5 coarse puffs).
+    pub fastsprites: u8,
+}
+
+impl Default for SmokeCloudConfig {
+    fn default() -> Self {
+        Self {
+            light_smoke: false,
+            max_smokepuffs: 120,
+            fastsprites: 0,
+        }
+    }
+}
+
 /// The bounded queue of effects waiting for the shell.
 const MAX_PENDING_EFFECTS: usize = 256;
 
@@ -739,9 +763,18 @@ impl TempEnts {
         }
     }
 
+    /// Count active smoke puff tempents (`sprites/gas_puff_01.spr`).
+    pub fn active_smoke_puff_count(&self) -> usize {
+        self.active
+            .iter()
+            .filter(|t| t.model == ModelRef::Client(GAS_PUFF_SPRITE))
+            .count()
+    }
+
     /// The clouds of a smoke grenade (`EV_CreateSmoke`, `events/event_createsmoke.cpp`,
-    /// GPL-2.0-or-later, read 2026-11-23): 20 slow puffs of grey that live 30 seconds and start
-    /// to fade after 15, the first at the burst and the others scattered around it.
+    /// GPL-2.0-or-later, read 2026-11-23): layered 32-bit grey puffs using `sprites/gas_puff_01.spr`
+    /// that hold ~25s and fade over the final 5s (`~115-130 u` effective cloud radius), honoring
+    /// `max_smokepuffs` and `fastsprites`.
     pub fn spawn_smoke_clouds(
         &mut self,
         origin: Vec3,
@@ -749,37 +782,76 @@ impl TempEnts {
         rng: &mut FxRandom,
         now: f64,
     ) {
-        /// `SMOKE_CLOUDS`.
-        const SMOKE_CLOUDS: usize = 20;
-        /// `m_hGasPuff` (assumption: the file name is the one of the stock game).
-        const GAS_PUFF: &str = "sprites/gas_puff_01.spr";
-        for i in 0..SMOKE_CLOUDS {
+        self.spawn_smoke_clouds_ex(origin, SmokeCloudConfig::default(), world, rng, now);
+    }
+
+    /// Extended smoke cloud spawner honoring `max_smokepuffs`, `fastsprites`, and `light_smoke`.
+    pub fn spawn_smoke_clouds_ex(
+        &mut self,
+        origin: Vec3,
+        cfg: SmokeCloudConfig,
+        world: &dyn FxWorld,
+        rng: &mut FxRandom,
+        now: f64,
+    ) {
+        let target_count = match cfg.fastsprites {
+            0 => 20usize,
+            1 => 10usize,
+            _ => 5usize,
+        };
+        let active_puffs = self.active_smoke_puff_count();
+        let budget = cfg.max_smokepuffs.saturating_sub(active_puffs);
+        let spawn_count = target_count.min(budget);
+        if spawn_count == 0 {
+            return;
+        }
+        let base_scale = match cfg.fastsprites {
+            0 => 2.9,
+            1 => 3.6,
+            _ => 4.4,
+        };
+        let (grey_lo, grey_hi) = if cfg.light_smoke {
+            (160, 195)
+        } else {
+            (100, 145)
+        };
+        for i in 0..spawn_count {
             let mut org = origin;
             if i != 0 {
-                org.x += rng.float(-100.0, 100.0);
-                org.y += rng.float(-100.0, 100.0);
+                // Polar scatter within ~72 u horizontal radius so puffs of scale ~2.9 (64x64)
+                // layer densely across a ~115-130 u smoke cloud radius.
+                let angle = rng.float(0.0, std::f32::consts::TAU);
+                let dist = rng.float(15.0, 72.0);
+                org.x += angle.cos() * dist;
+                org.y += angle.sin() * dist;
+                org.z += rng.float(18.0, 54.0);
+            } else {
+                org.z += 30.0;
             }
-            org.z += 30.0;
-            let grey = [
-                rng.long(210, 230) as u8,
-                rng.long(210, 230) as u8,
-                rng.long(210, 230) as u8,
-            ];
-            let velocity = Vec3::new(rng.long(-5, 5) as f32, rng.long(-5, 5) as f32, 0.0);
-            let Some(t) = self.alloc(org, ModelRef::Client(GAS_PUFF), world, now) else {
+            let c = rng.long(grey_lo, grey_hi) as u8;
+            let grey = [c, c, c];
+            let velocity = Vec3::new(rng.float(-5.0, 5.0), rng.float(-5.0, 5.0), 0.0);
+            let Some(t) = self.alloc(org, ModelRef::Client(GAS_PUFF_SPRITE), world, now) else {
                 return;
             };
-            // The original lets it live past the end of its animation and collide with the
-            // world.
-            t.flags |= ftent::SPRANIMATELOOP | ftent::COLLIDEWORLD | ftent::CLIENTCUSTOM;
+            if cfg.fastsprites >= 2 {
+                t.flags |= ftent::COLLIDEWORLD | ftent::CLIENTCUSTOM;
+                t.frame = 0.0;
+                t.framerate = 0.0;
+            } else {
+                t.flags |= ftent::SPRANIMATELOOP | ftent::COLLIDEWORLD | ftent::CLIENTCUSTOM;
+                t.frame = rng.long(0, t.frame_max as i32) as f32;
+                t.framerate = if cfg.fastsprites == 0 { 2.0 } else { 0.0 };
+            }
             t.flags &= !ftent::NOMODEL;
             t.die = now + 30.0;
-            t.late_fade = Some((now + 15.0, 18.0));
+            // 25s hold at full opacity + 5s linear fadeout (255 / 5 = 51.0 per second).
+            t.late_fade = Some((now + 25.0, 51.0));
             t.render_amt = 255.0;
-            t.base_render_amt = 18.0;
+            t.base_render_amt = 255.0;
             t.render_mode = RenderMode::TransAlpha;
             t.render_color = grey;
-            t.scale = 5.0;
+            t.scale = base_scale + if cfg.fastsprites == 0 { rng.float(-0.25, 0.3) } else { 0.0 };
             t.velocity = velocity;
             t.round_scoped = true;
         }
@@ -2706,12 +2778,69 @@ mod tests {
         assert_eq!(ents.active().len(), 20);
         assert_eq!(ents.active()[0].origin, Vec3::new(10.0, 20.0, 30.0));
         assert!(ents.active().iter().all(|t| t.die == 130.0 && t.round_scoped));
-        assert!(ents.active().iter().all(|t| t.late_fade == Some((115.0, 18.0))));
+        assert!(ents.active().iter().all(|t| t.late_fade == Some((125.0, 51.0))));
+        assert!(ents.active().iter().all(|t| {
+            t.render_mode == RenderMode::TransAlpha
+                && t.render_color[0] <= 150
+                && t.model == ModelRef::Client(GAS_PUFF_SPRITE)
+        }));
         let mut sounds = SoundQueue::default();
-        ents.update(clock(114.0), &world, &mut rng, &mut sounds);
+        ents.update(clock(124.0), &world, &mut rng, &mut sounds);
         assert_eq!(ents.active().len(), 20);
+        assert!(ents.active().iter().all(|t| (t.render_amt - 255.0).abs() < 1e-4));
+        // Fade window: 25s..30s -> at 127.5s (~2.5s into fade), alpha is roughly half.
+        ents.update(TempEntClock { time: 127.5, frametime: 2.5, gravity: 800.0 }, &world, &mut rng, &mut sounds);
+        assert!(ents.active().iter().all(|t| t.render_amt > 100.0 && t.render_amt < 150.0));
         ents.clear_round();
         assert!(ents.active().is_empty());
+    }
+
+    #[test]
+    fn smoke_clouds_honor_max_smokepuffs_and_fastsprites() {
+        let world = NoWorld;
+        let mut rng = FxRandom::new(9);
+        let mut ents = TempEnts::default();
+        ents.spawn_smoke_clouds_ex(
+            Vec3::ZERO,
+            SmokeCloudConfig {
+                light_smoke: false,
+                max_smokepuffs: 7,
+                fastsprites: 0,
+            },
+            &world,
+            &mut rng,
+            10.0,
+        );
+        assert_eq!(ents.active_smoke_puff_count(), 7);
+
+        let mut fast1 = TempEnts::default();
+        fast1.spawn_smoke_clouds_ex(
+            Vec3::ZERO,
+            SmokeCloudConfig {
+                light_smoke: false,
+                max_smokepuffs: 120,
+                fastsprites: 1,
+            },
+            &world,
+            &mut rng,
+            10.0,
+        );
+        assert_eq!(fast1.active_smoke_puff_count(), 10);
+
+        let mut fast2 = TempEnts::default();
+        fast2.spawn_smoke_clouds_ex(
+            Vec3::ZERO,
+            SmokeCloudConfig {
+                light_smoke: true,
+                max_smokepuffs: 120,
+                fastsprites: 2,
+            },
+            &world,
+            &mut rng,
+            10.0,
+        );
+        assert_eq!(fast2.active_smoke_puff_count(), 5);
+        assert!(fast2.active().iter().all(|t| t.render_color[0] >= 160));
     }
 
     #[test]
