@@ -252,8 +252,32 @@ impl SkyboxRenderer {
         software_mode: bool,
         fog: Option<([f32; 3], f32)>,
     ) {
+        let _ = self.draw_counted(
+            queue,
+            pass,
+            sky_view_proj,
+            gamma,
+            texgamma,
+            brightness,
+            software_mode,
+            fog,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn draw_counted<'a>(
+        &'a self,
+        queue: &wgpu::Queue,
+        pass: &mut wgpu::RenderPass<'a>,
+        sky_view_proj: Mat4,
+        gamma: f32,
+        texgamma: f32,
+        brightness: f32,
+        software_mode: bool,
+        fog: Option<([f32; 3], f32)>,
+    ) -> (usize, u64) {
         if self.face_bgs.len() != 6 {
-            return;
+            return (0, 0);
         }
         let (fog_rgb, fog_density) = fog.unwrap_or(([0.0, 0.0, 0.0], 0.0));
         let uniforms = SkyUniforms {
@@ -276,6 +300,7 @@ impl SkyboxRenderer {
             let start = (i * 6) as u32;
             pass.draw(start..start + 6, 0..1);
         }
+        (self.face_bgs.len(), std::mem::size_of::<SkyUniforms>() as u64)
     }
 }
 

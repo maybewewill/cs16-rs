@@ -374,6 +374,7 @@ pub struct MdlRenderer {
     shadow_vertex_count: u32,
     cached_gamma: GoldSrcGammaConfig,
     cached_tex_cfg: TextureUploadConfig,
+    frame_upload_bytes: u64,
 }
 
 fn create_shadow_pipeline(
@@ -768,7 +769,12 @@ impl MdlRenderer {
             shadow_vertex_count: 0,
             cached_gamma: GoldSrcGammaConfig::default(),
             cached_tex_cfg: TextureUploadConfig::default(),
+            frame_upload_bytes: 0,
         }
+    }
+
+    pub(crate) fn take_upload_bytes(&mut self) -> u64 {
+        std::mem::take(&mut self.frame_upload_bytes)
     }
 
     pub fn rebuild_pipelines(&mut self, device: &wgpu::Device, msaa_samples: u32) {
@@ -935,6 +941,7 @@ impl MdlRenderer {
         params: &MdlPassParams,
     ) -> PreparedMdlPass {
         queue.write_buffer(&self.lights_buf, 0, bytemuck::bytes_of(&params.lights));
+        self.frame_upload_bytes += std::mem::size_of::<GpuLightsUniform>() as u64;
 
         let mut all_verts: Vec<MdlGpuVertex> = Vec::new();
         let mut draws: Vec<PreparedDraw> = Vec::new();
@@ -1227,6 +1234,8 @@ impl MdlRenderer {
         }
         if !all_verts.is_empty() {
             queue.write_buffer(&self.vertex_buf, 0, bytemuck::cast_slice(&all_verts));
+            self.frame_upload_bytes +=
+                (all_verts.len() * std::mem::size_of::<MdlGpuVertex>()) as u64;
         }
 
         if (uniform_slot as usize) > self.uniform_cap {
@@ -1248,13 +1257,22 @@ impl MdlRenderer {
         }
         if !uniform_bytes.is_empty() {
             queue.write_buffer(&self.uniform_buf, 0, &uniform_bytes);
+            self.frame_upload_bytes += uniform_bytes.len() as u64;
         }
 
         PreparedMdlPass { draws }
     }
 
     pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, prepared: &PreparedMdlPass) {
-        self.draw_filtered(pass, prepared, |_| true);
+        let _ = self.draw_counted(pass, prepared);
+    }
+
+    pub(crate) fn draw_counted<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        prepared: &PreparedMdlPass,
+    ) -> usize {
+        self.draw_filtered(pass, prepared, |_| true)
     }
 
     /// Upload feathered octagonal studio blob shadows (`cl_shadows 1`) for the current frame.
@@ -1281,6 +1299,7 @@ impl MdlRenderer {
                 ],
             }),
         );
+        self.frame_upload_bytes += std::mem::size_of::<ShadowUniforms>() as u64;
         if shadows.is_empty() {
             self.shadow_vertex_count = 0;
             return;
@@ -1301,22 +1320,37 @@ impl MdlRenderer {
         }
         if !verts.is_empty() {
             queue.write_buffer(&self.shadow_vbuf, 0, bytemuck::cast_slice(&verts));
+            self.frame_upload_bytes +=
+                (verts.len() * std::mem::size_of::<MdlShadowVertex>()) as u64;
         }
     }
 
     /// Draw prepared studio blob shadows (depth-read `LessEqual`, no depth-write, alpha-blended).
     pub fn draw_shadows<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
+        let _ = self.draw_shadows_counted(pass);
+    }
+
+    pub(crate) fn draw_shadows_counted<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) -> usize {
         if self.shadow_vertex_count == 0 {
-            return;
+            return 0;
         }
         pass.set_pipeline(&self.shadow_pipeline);
         pass.set_bind_group(0, &self.shadow_uniform_bg, &[]);
         pass.set_vertex_buffer(0, self.shadow_vbuf.slice(..));
         pass.draw(0..self.shadow_vertex_count, 0..1);
+        1
     }
 
     pub fn draw_opaque<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, prepared: &PreparedMdlPass) {
-        self.draw_filtered(pass, prepared, |k| k == MdlPipelineKind::Opaque);
+        let _ = self.draw_opaque_counted(pass, prepared);
+    }
+
+    pub(crate) fn draw_opaque_counted<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        prepared: &PreparedMdlPass,
+    ) -> usize {
+        self.draw_filtered(pass, prepared, |k| k == MdlPipelineKind::Opaque)
     }
 
     pub fn draw_translucent<'a>(
@@ -1324,16 +1358,32 @@ impl MdlRenderer {
         pass: &mut wgpu::RenderPass<'a>,
         prepared: &PreparedMdlPass,
     ) {
+        let _ = self.draw_translucent_counted(pass, prepared);
+    }
+
+    pub(crate) fn draw_translucent_counted<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        prepared: &PreparedMdlPass,
+    ) -> usize {
         self.draw_filtered(
             pass,
             prepared,
             |k| matches!(k, MdlPipelineKind::Alpha | MdlPipelineKind::Additive),
-        );
+        )
     }
 
     /// Draw wall-occluded X-Ray player silhouettes (`CompareFunction::Greater`, no depth write).
     pub fn draw_xray<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, prepared: &PreparedMdlPass) {
-        self.draw_filtered(pass, prepared, |k| k == MdlPipelineKind::XRay);
+        let _ = self.draw_xray_counted(pass, prepared);
+    }
+
+    pub(crate) fn draw_xray_counted<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        prepared: &PreparedMdlPass,
+    ) -> usize {
+        self.draw_filtered(pass, prepared, |k| k == MdlPipelineKind::XRay)
     }
 
     fn draw_filtered<'a>(
@@ -1341,10 +1391,11 @@ impl MdlRenderer {
         pass: &mut wgpu::RenderPass<'a>,
         prepared: &PreparedMdlPass,
         pred: fn(MdlPipelineKind) -> bool,
-    ) {
+    ) -> usize {
         if prepared.draws.is_empty() {
-            return;
+            return 0;
         }
+        let mut draw_calls = 0usize;
         pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
         for d in &prepared.draws {
             if !pred(d.pipe_kind) {
@@ -1367,7 +1418,9 @@ impl MdlRenderer {
             pass.set_bind_group(0, &self.uniform_bg, &[offset]);
             pass.set_bind_group(1, &tex.bg, &[]);
             pass.draw(d.first_vertex..d.first_vertex + d.vertex_count, 0..1);
+            draw_calls += 1;
         }
+        draw_calls
     }
 }
 

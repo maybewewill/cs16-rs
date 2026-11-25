@@ -121,6 +121,7 @@ pub struct SpriteRenderer {
     vertex_buf: wgpu::Buffer,
     vertex_cap: usize,
     cache: HashMap<String, Option<GpuSprite>>,
+    frame_upload_bytes: u64,
 }
 
 fn pipeline_slot(b: SpriteBlend) -> usize {
@@ -308,7 +309,12 @@ impl SpriteRenderer {
             vertex_buf,
             vertex_cap,
             cache: HashMap::new(),
+            frame_upload_bytes: 0,
         }
+    }
+
+    pub(crate) fn take_upload_bytes(&mut self) -> u64 {
+        std::mem::take(&mut self.frame_upload_bytes)
     }
 
     pub fn rebuild_pipelines(&mut self, device: &wgpu::Device, msaa_samples: u32) {
@@ -509,6 +515,7 @@ impl SpriteRenderer {
         }
         if !verts.is_empty() {
             queue.write_buffer(&self.vertex_buf, 0, bytemuck::cast_slice(&verts));
+            self.frame_upload_bytes += (verts.len() * std::mem::size_of::<SpriteVertex>()) as u64;
         }
         let (fog_rgb, fog_density) = params.fog.unwrap_or(([0.0, 0.0, 0.0], 0.0));
         queue.write_buffer(
@@ -526,13 +533,23 @@ impl SpriteRenderer {
                 ],
             }),
         );
+        self.frame_upload_bytes += std::mem::size_of::<SpriteUniforms>() as u64;
         PreparedSprites { draws: prepared }
     }
 
     pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, prepared: &PreparedSprites) {
+        let _ = self.draw_counted(pass, prepared);
+    }
+
+    pub(crate) fn draw_counted<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        prepared: &PreparedSprites,
+    ) -> usize {
         if prepared.draws.is_empty() {
-            return;
+            return 0;
         }
+        let mut draw_calls = 0usize;
         pass.set_bind_group(0, &self.uniform_bg, &[]);
         pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
         for d in &prepared.draws {
@@ -545,7 +562,9 @@ impl SpriteRenderer {
             pass.set_pipeline(&self.pipelines[pipeline_slot(d.blend)]);
             pass.set_bind_group(1, &frame.bind_group, &[]);
             pass.draw(d.first_vertex..d.first_vertex + 6, 0..1);
+            draw_calls += 1;
         }
+        draw_calls
     }
 }
 

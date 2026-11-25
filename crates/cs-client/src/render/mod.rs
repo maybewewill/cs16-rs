@@ -150,6 +150,21 @@ impl<'a> Default for SceneDynamicData<'a> {
     }
 }
 
+/// Lightweight per-frame GPU draw-call and CPU->GPU upload counters captured by
+/// [`Renderer::render_frame`] (used by telemetry and `cargo xtask bench --gpu`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RenderFrameStats {
+    pub draw_calls: usize,
+    pub triangles: usize,
+    pub bytes_uploaded: u64,
+    pub bsp_draw_calls: usize,
+    pub mdl_draw_calls: usize,
+    pub sprite_draw_calls: usize,
+    pub decal_draw_calls: usize,
+    pub fx_draw_calls: usize,
+    pub sky_draw_calls: usize,
+}
+
 pub struct Renderer {
     pub surface: Option<wgpu::Surface<'static>>,
     offscreen_tex: Option<wgpu::Texture>,
@@ -177,6 +192,7 @@ pub struct Renderer {
     pub egui_renderer: egui_wgpu::Renderer,
     pub adapter_name: String,
     pub backend_name: String,
+    last_frame_stats: RenderFrameStats,
 }
 
 /// Selects WebGL2 downlevel limits on GL backends so browser WebGL2 fallback stays within caps.
@@ -396,7 +412,14 @@ impl Renderer {
             egui_renderer,
             adapter_name,
             backend_name,
+            last_frame_stats: RenderFrameStats::default(),
         })
+    }
+
+    /// Returns the draw-call and CPU->GPU upload counters captured during the most recent
+    /// completed [`Renderer::render_frame`] call.
+    pub fn last_frame_stats(&self) -> RenderFrameStats {
+        self.last_frame_stats
     }
 
     fn ensure_msaa_targets(&mut self, samples: u32) {
@@ -592,6 +615,14 @@ impl Renderer {
 
         // Prepare dynamic 3D world models, FX, decals, lighting, MSAA and viewmodel
         self.ensure_msaa_targets(settings.msaa_samples);
+
+        // Reset per-frame upload counters before preparing this frame.
+        let _ = self.bsp.take_upload_bytes();
+        let _ = self.decals.take_upload_bytes();
+        let _ = self.mdl_view.take_upload_bytes();
+        let _ = self.mdl_scene.take_upload_bytes();
+        let _ = self.sprites.take_upload_bytes();
+        let _ = self.fx.take_upload_bytes();
 
         let mut prepared_viewmodel = None;
         let mut prepared_solid_brushes = Vec::new();
@@ -903,6 +934,8 @@ impl Renderer {
             draw_calls: 0,
             triangles: 0,
         };
+        let mut frame_stats = RenderFrameStats::default();
+        let mut sky_upload_bytes = 0u64;
         let (world_color_view, world_resolve) = match &self.msaa_color_view {
             Some(msaa) => (msaa, Some(&view)),
             None => (&view, None),
@@ -963,20 +996,23 @@ impl Renderer {
                     lights: scene.lights,
                 };
                 stats = self.bsp.draw(&self.queue, &mut pass, &bsp_params, &[]);
-                self.decals.draw_world(&mut pass);
+                frame_stats.bsp_draw_calls += stats.draw_calls;
+                frame_stats.triangles += stats.triangles;
+                frame_stats.decal_draw_calls += self.decals.draw_world_counted(&mut pass);
 
-                self.bsp.draw_entities(
+                frame_stats.bsp_draw_calls += self.bsp.draw_entities_counted(
                     &mut pass,
                     &prepared_solid_brushes,
                     settings.time_sec,
                 );
-                self.decals.draw_solid_entities(&mut pass);
-                self.mdl_scene.draw_shadows(&mut pass);
+                frame_stats.decal_draw_calls += self.decals.draw_solid_entities_counted(&mut pass);
+                frame_stats.mdl_draw_calls += self.mdl_scene.draw_shadows_counted(&mut pass);
                 if let Some(ref studio) = prepared_scene_studio {
-                    self.mdl_scene.draw_opaque(&mut pass, studio);
+                    frame_stats.mdl_draw_calls +=
+                        self.mdl_scene.draw_opaque_counted(&mut pass, studio);
                 }
 
-                self.skybox.draw(
+                let (sky_calls, sky_bytes) = self.skybox.draw_counted(
                     &self.queue,
                     &mut pass,
                     sky_view_proj,
@@ -986,23 +1022,27 @@ impl Renderer {
                     settings.software_mode,
                     settings.fog,
                 );
+                frame_stats.sky_draw_calls += sky_calls;
+                sky_upload_bytes += sky_bytes;
 
-                self.fx.draw(&mut pass);
+                frame_stats.fx_draw_calls += self.fx.draw_counted(&mut pass);
 
-                self.bsp.draw_entities(
+                frame_stats.bsp_draw_calls += self.bsp.draw_entities_counted(
                     &mut pass,
                     &prepared_trans_brushes,
                     settings.time_sec,
                 );
-                self.decals.draw_trans_entities(&mut pass);
+                frame_stats.decal_draw_calls += self.decals.draw_trans_entities_counted(&mut pass);
                 if let Some(ref studio) = prepared_scene_studio {
-                    self.mdl_scene.draw_translucent(&mut pass, studio);
+                    frame_stats.mdl_draw_calls +=
+                        self.mdl_scene.draw_translucent_counted(&mut pass, studio);
                 }
                 if let Some(ref spr) = prepared_sprites {
-                    self.sprites.draw(&mut pass, spr);
+                    frame_stats.sprite_draw_calls += self.sprites.draw_counted(&mut pass, spr);
                 }
                 if let Some(ref studio) = prepared_scene_studio {
-                    self.mdl_scene.draw_xray(&mut pass, studio);
+                    frame_stats.mdl_draw_calls +=
+                        self.mdl_scene.draw_xray_counted(&mut pass, studio);
                 }
             }
         }
@@ -1036,8 +1076,24 @@ impl Renderer {
             });
             pass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
             pass.set_scissor_rect(vx as u32, vy as u32, vw as u32, vh as u32);
-            self.mdl_view.draw(&mut pass, vm_pass_data);
+            frame_stats.mdl_draw_calls += self.mdl_view.draw_counted(&mut pass, vm_pass_data);
         }
+
+        frame_stats.draw_calls = frame_stats.bsp_draw_calls
+            + frame_stats.mdl_draw_calls
+            + frame_stats.sprite_draw_calls
+            + frame_stats.decal_draw_calls
+            + frame_stats.fx_draw_calls
+            + frame_stats.sky_draw_calls;
+        frame_stats.bytes_uploaded = self.bsp.take_upload_bytes()
+            + self.bsp.draw_upload_bytes()
+            + self.decals.take_upload_bytes()
+            + self.mdl_view.take_upload_bytes()
+            + self.mdl_scene.take_upload_bytes()
+            + self.sprites.take_upload_bytes()
+            + self.fx.take_upload_bytes()
+            + sky_upload_bytes;
+        self.last_frame_stats = frame_stats;
 
         // 4. VGUI2 / HUD / Console pass (egui)
         {

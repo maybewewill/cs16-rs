@@ -92,6 +92,7 @@ pub struct FxRenderer {
     vertex_cap: usize,
     alpha_count: u32,
     additive_count: u32,
+    frame_upload_bytes: u64,
 }
 
 fn create_fx_pipelines(
@@ -231,7 +232,12 @@ impl FxRenderer {
             vertex_cap,
             alpha_count: 0,
             additive_count: 0,
+            frame_upload_bytes: 0,
         }
+    }
+
+    pub(crate) fn take_upload_bytes(&mut self) -> u64 {
+        std::mem::take(&mut self.frame_upload_bytes)
     }
 
     pub fn rebuild_pipelines(&mut self, device: &wgpu::Device, msaa_samples: u32) {
@@ -304,6 +310,7 @@ impl FxRenderer {
                 ],
             }),
         );
+        self.frame_upload_bytes += std::mem::size_of::<FxUniforms>() as u64;
 
         self.alpha_count = alpha_verts.len() as u32;
         self.additive_count = add_verts.len() as u32;
@@ -320,23 +327,33 @@ impl FxRenderer {
         }
         if !alpha_verts.is_empty() {
             queue.write_buffer(&self.vertex_buf, 0, bytemuck::cast_slice(&alpha_verts));
+            self.frame_upload_bytes +=
+                (alpha_verts.len() * std::mem::size_of::<FxVertex>()) as u64;
         }
     }
 
     pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
+        let _ = self.draw_counted(pass);
+    }
+
+    pub(crate) fn draw_counted<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) -> usize {
         if self.alpha_count == 0 && self.additive_count == 0 {
-            return;
+            return 0;
         }
+        let mut draw_calls = 0usize;
         pass.set_bind_group(0, &self.uniform_bg, &[]);
         pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
         if self.alpha_count > 0 {
             pass.set_pipeline(&self.alpha_pipeline);
             pass.draw(0..self.alpha_count, 0..1);
+            draw_calls += 1;
         }
         if self.additive_count > 0 {
             pass.set_pipeline(&self.additive_pipeline);
             pass.draw(self.alpha_count..self.alpha_count + self.additive_count, 0..1);
+            draw_calls += 1;
         }
+        draw_calls
     }
 }
 

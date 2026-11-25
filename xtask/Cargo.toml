@@ -7,6 +7,8 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+cs-assets.workspace = true
+cs-client.workspace = true
 cs-clientcore.workspace = true
 cs-cvar.workspace = true
 cs-engine.workspace = true
@@ -15,12 +17,16 @@ cs-local.workspace = true
 cs-mod-api.workspace = true
 cs-mod-host.workspace = true
 cs-mod-py.workspace = true
+cs-pm.workspace = true
 cs-proto48.workspace = true
 cs-transport.workspace = true
 cs-vfs.workspace = true
+egui.workspace = true
+glam.workspace = true
 image.workspace = true
 serde = { workspace = true, features = ["derive"] }
 toml = "1.2.1"
+wgpu.workspace = true
 
 [dev-dependencies]
 

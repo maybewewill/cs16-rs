@@ -394,6 +394,7 @@ pub struct BspRenderer {
     filter_mode: TextureFilterMode,
     anisotropy: u16,
     uploaded: Option<UploadedMap>,
+    frame_upload_bytes: u64,
 }
 
 impl BspRenderer {
@@ -554,6 +555,19 @@ impl BspRenderer {
             filter_mode,
             anisotropy,
             uploaded: None,
+            frame_upload_bytes: 0,
+        }
+    }
+
+    pub(crate) fn take_upload_bytes(&mut self) -> u64 {
+        std::mem::take(&mut self.frame_upload_bytes)
+    }
+
+    pub(crate) fn draw_upload_bytes(&self) -> u64 {
+        if self.uploaded.is_some() {
+            (std::mem::size_of::<BspUniforms>() + std::mem::size_of::<GpuLightsUniform>()) as u64
+        } else {
+            0
         }
     }
 
@@ -875,6 +889,10 @@ impl BspRenderer {
         map.cached_overbright = gl_overbright;
         if !dirty.is_empty() {
             upload_dirty_lightmap_rects(queue, &map.lightmap_tex, &map.lightmap_atlas, &dirty);
+            self.frame_upload_bytes += dirty
+                .iter()
+                .map(|&(_, _, w, h)| u64::from(w) * u64::from(h) * 4)
+                .sum::<u64>();
         }
     }
 
@@ -931,6 +949,7 @@ impl BspRenderer {
         }
         if !bytes.is_empty() {
             queue.write_buffer(&self.ent_buf, self.ent_stride, &bytes);
+            self.frame_upload_bytes += bytes.len() as u64;
         }
         prepared
     }
@@ -941,9 +960,19 @@ impl BspRenderer {
         prepared: &[PreparedBrushEntity],
         time_sec: f32,
     ) {
+        let _ = self.draw_entities_counted(pass, prepared, time_sec);
+    }
+
+    pub(crate) fn draw_entities_counted<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        prepared: &[PreparedBrushEntity],
+        time_sec: f32,
+    ) -> usize {
         let Some(map) = &self.uploaded else {
-            return;
+            return 0;
         };
+        let mut draw_calls = 0usize;
         pass.set_bind_group(0, &map.global_bg, &[]);
         pass.set_vertex_buffer(0, map.vertex_buf.slice(..));
         pass.set_index_buffer(map.index_buf.slice(..), wgpu::IndexFormat::Uint32);
@@ -976,9 +1005,11 @@ impl BspRenderer {
                         0,
                         0..1,
                     );
+                    draw_calls += 1;
                 }
             }
         }
+        draw_calls
     }
 
     pub fn prepare_world_pvs(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, camera_pos: Vec3, r_vis: bool) {
@@ -1045,6 +1076,7 @@ impl BspRenderer {
         }
         if !pvs_indices.is_empty() {
             queue.write_buffer(&map.pvs_ibuf, 0, bytemuck::cast_slice(&pvs_indices));
+            self.frame_upload_bytes += (pvs_indices.len() * std::mem::size_of::<u32>()) as u64;
         }
         map.pvs_triangles = pvs_indices.len() / 3;
     }

@@ -372,6 +372,7 @@ pub struct DecalRenderer {
     dirty_vbuf: bool,
     cached_gamma: GoldSrcGammaConfig,
     cached_tex_cfg: TextureUploadConfig,
+    frame_upload_bytes: u64,
 }
 
 fn create_decal_pipeline(
@@ -564,7 +565,12 @@ impl DecalRenderer {
             dirty_vbuf: false,
             cached_gamma: GoldSrcGammaConfig::default(),
             cached_tex_cfg: TextureUploadConfig::default(),
+            frame_upload_bytes: 0,
         }
+    }
+
+    pub(crate) fn take_upload_bytes(&mut self) -> u64 {
+        std::mem::take(&mut self.frame_upload_bytes)
     }
 
     pub fn sync_gamma(
@@ -904,6 +910,7 @@ impl DecalRenderer {
                 ],
             }),
         );
+        self.frame_upload_bytes += std::mem::size_of::<DecalUniforms>() as u64;
 
         if let (Some(ents), Some(reg)) = (scene_entities, registry) {
             let lookup = build_brush_entity_lookup(ents, reg);
@@ -970,35 +977,56 @@ impl DecalRenderer {
         }
         if !all_verts.is_empty() {
             queue.write_buffer(&self.vertex_buf, 0, bytemuck::cast_slice(&all_verts));
+            self.frame_upload_bytes +=
+                (all_verts.len() * std::mem::size_of::<DecalGpuVertex>()) as u64;
         }
     }
 
     pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
-        self.draw_batch_list(pass, &self.world_batches);
-        self.draw_batch_list(pass, &self.solid_entity_batches);
-        self.draw_batch_list(pass, &self.trans_entity_batches);
+        let _ = self.draw_batch_list(pass, &self.world_batches);
+        let _ = self.draw_batch_list(pass, &self.solid_entity_batches);
+        let _ = self.draw_batch_list(pass, &self.trans_entity_batches);
     }
 
     pub fn draw_world<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
-        self.draw_batch_list(pass, &self.world_batches);
+        let _ = self.draw_world_counted(pass);
     }
 
     pub fn draw_solid_entities<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
-        self.draw_batch_list(pass, &self.solid_entity_batches);
+        let _ = self.draw_solid_entities_counted(pass);
     }
 
     pub fn draw_trans_entities<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
-        self.draw_batch_list(pass, &self.trans_entity_batches);
+        let _ = self.draw_trans_entities_counted(pass);
+    }
+
+    pub(crate) fn draw_world_counted<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) -> usize {
+        self.draw_batch_list(pass, &self.world_batches)
+    }
+
+    pub(crate) fn draw_solid_entities_counted<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+    ) -> usize {
+        self.draw_batch_list(pass, &self.solid_entity_batches)
+    }
+
+    pub(crate) fn draw_trans_entities_counted<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+    ) -> usize {
+        self.draw_batch_list(pass, &self.trans_entity_batches)
     }
 
     fn draw_batch_list<'a>(
         &'a self,
         pass: &mut wgpu::RenderPass<'a>,
         batches: &[(String, u32, u32)],
-    ) {
+    ) -> usize {
         if batches.is_empty() {
-            return;
+            return 0;
         }
+        let mut draw_calls = 0usize;
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.uniform_bg, &[]);
         pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
@@ -1006,8 +1034,10 @@ impl DecalRenderer {
             if let Some(tex) = self.textures.get(tex_key) {
                 pass.set_bind_group(1, &tex.bg, &[]);
                 pass.draw(*first..(*first + *count), 0..1);
+                draw_calls += 1;
             }
         }
+        draw_calls
     }
 }
 
