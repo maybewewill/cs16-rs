@@ -90,6 +90,8 @@ of all five upstream reference projects (ReHLDS, ReGameDLL_CS, Xash3D FWGS, cs16
   - Xash3D FWGS (GPL-3.0-or-later): `engine/client/cl_demo.c` (`demoheader_t`/frame specs in `cs-proto48` and `cs-clientcore`), `engine/common/hpak.c` (`crates/cs-assets/src/hpak.rs`), `engine/client/cl_custom.c` & `engine/common/net_chan.c` (custom resource list and dual-stream file fragmentation), and `engine/common/{cvar.c, cmd.c}` / `engine/client/cl_main.c` (`cl_filterstuffcmd` slowhack filtering).
 - Phase 12 ZBot AI & navigation mesh (read 2026-11-25):
   - ReGameDLL_CS (`game_shared/bot/nav*`, `game_shared/bot/bot_profile*`, `dlls/bot/cs_bot*.cpp`, `dlls/bot/states/*.cpp`): `crates/cs-assets/src/nav.rs`, `crates/cs-bot/`, `crates/cs-cvar/src/defaults.rs`, and `crates/cs-game/src/bots.rs` port `.nav` v1–v5 binary load/save, automatic BSP navmesh generation, `BotProfile.db` parsing, weighted A* pathfinding, economy buy/weapon restrictions, combat/aim/recoil, audio/visual perception, radio chatter, and bomb/hostage/VIP tactical states cleanly under GPL-3.0-or-later (`#![forbid(unsafe_code)]`).
+- Phase 14 classic feel & vanilla CVar/command parity (read 2026-11-25):
+  - Xash3D FWGS (GPL-3.0-or-later): `engine/common/cmd.c` (`Cmd_Wait_f`, `Cbuf_ExecuteCommandsFromBuffer` in `crates/cs-cvar/src/lib.rs`) and `engine/client/sound/s_mix.c` (`s_lerping` / `hisound` sample resampling in `crates/cs-client/src/audio/mixer.rs`).
 
 Porting code from ReHLDS, ReGameDLL_CS, Xash3D FWGS, AMX Mod X, and the `cs16-client` event files listed in
 `THIRD-PARTY-NOTICES.md` is allowed, with each ported file's source named in `THIRD-PARTY-NOTICES.md`.

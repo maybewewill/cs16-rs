@@ -643,6 +643,7 @@ impl WebClientState {
             cl_rollangle: self.cvars.get_f32("cl_rollangle"),
             cl_rollspeed: self.cvars.get_f32("cl_rollspeed"),
             cl_viewmodel_lag: self.cvars.get_f32("cl_viewmodel_lag"),
+            cl_weather: self.cvars.get_bool("cl_weather"),
         };
         let view_angles = Vec3::new(self.camera.pitch_deg, self.camera.yaw_deg, 0.0);
 

@@ -838,6 +838,16 @@ impl GameDll for CsGame {
     fn server_activate(&mut self, eng: &mut EngineApi<'_>) {
         // `ServerActivate`: `g_pMapInfo->CheckMapInfo()`, `ReadMultiplayCvars()` and
         // `CheckMapConditions()` (the last two are the constructor's of the rules here).
+        if let Some(vfs) = self.state.vfs.clone() {
+            if let Some(motdfile) = eng.cvar_str("motdfile") {
+                self.load_motd_file(&vfs, &motdfile);
+            }
+            if let Some(cycle) = eng.cvar_str("mapcyclefile")
+                && !cycle.trim().is_empty()
+            {
+                self.state.map_cycle = mapcycle::MapCycle::load_from(&vfs, cycle.trim());
+            }
+        }
         self.state.rules = rules::Rules::new(eng);
         zones::check_map_info(&mut self.state);
         // `WriteSigonMessages`, after `LinkUserMessages`: the HUD's weapon table.
@@ -953,6 +963,22 @@ impl GameDll for CsGame {
     }
 
     fn server_command(&mut self, eng: &mut EngineApi<'_>, argv: &[String]) -> Option<String> {
+        let cmd = argv.first()?.to_ascii_lowercase();
+        match cmd.as_str() {
+            "motd" => {
+                let text = String::from_utf8_lossy(&self.state.motd);
+                if text.is_empty() {
+                    return Some("(motd is empty)\n".to_string());
+                }
+                return Some(format!("{text}\n"));
+            }
+            "motd_write" => {
+                let body = argv[1..].join(" ");
+                self.state.motd = body.as_bytes().to_vec();
+                return Some("MOTD updated\n".to_string());
+            }
+            _ => {}
+        }
         bots::server_command(&mut self.state, eng, argv)
     }
 

@@ -146,6 +146,7 @@ pub struct ViewInputs {
     pub cl_rollangle: f32,
     pub cl_rollspeed: f32,
     pub cl_viewmodel_lag: f32,
+    pub cl_weather: bool,
 }
 
 impl Default for ViewInputs {
@@ -163,6 +164,7 @@ impl Default for ViewInputs {
             cl_rollangle: 2.0,
             cl_rollspeed: 200.0,
             cl_viewmodel_lag: 1.0,
+            cl_weather: true,
         }
     }
 }
@@ -726,7 +728,7 @@ impl ViewBuilder {
         for effect in fx.tempents.take_effects() {
             self.take_effect(effect, now, &pos_lookup);
         }
-        let weather = fx.hud.weather;
+        let weather = if inputs.cl_weather { fx.hud.weather } else { 0 };
         self.particles.step_weather(now, dt, weather, eye);
         self.beam_sys.step(now, &pos_lookup);
         self.beams.retain(|b| b.die > now);

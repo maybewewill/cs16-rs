@@ -1901,3 +1901,24 @@ fn screen5_hud_saytext_and_pickup_history_with_retail_weapon_cards() {
     });
     assert!(prims > 0);
 }
+
+#[test]
+fn cl_showfps_and_con_notifytime_overlay_and_crosshair_toggle() {
+    let mut cvars = CVarRegistry::new_with_defaults();
+    cvars.set("cl_showfps", "1");
+    cvars.set("con_notifytime", "4");
+    cvars.set("crosshair", "0");
+    let notify = vec![("hello notify".to_string(), 1.0)];
+
+    let prims = run_egui_frame(|ctx| {
+        cs_client::ui::draw_top_left_console_overlays(ctx, &cvars, 99.7, &notify, 2.0, false);
+    });
+    assert!(prims > 0, "cl_showfps 1 + notify lines should draw primitives");
+
+    let mut ch = CrosshairState::default();
+    let ch_inputs = CrosshairInputs::default();
+    let ch_prims = run_egui_frame(|ctx| {
+        draw_crosshair_vgui(ctx, &cvars, &mut ch, &ch_inputs);
+    });
+    assert_eq!(ch_prims, 0, "crosshair 0 must suppress crosshair drawing");
+}

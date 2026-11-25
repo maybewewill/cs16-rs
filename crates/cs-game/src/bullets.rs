@@ -179,10 +179,25 @@ pub fn add_multi_damage(
     mm.amount += damage;
 }
 
-/// `UTIL_ShouldShowBlood(BLOOD_COLOR_RED)`: the `violence_hblood` cvar. A server that has not
-/// registered it shows blood (assumption: the engine registers it with the default 1).
+/// `UTIL_ShouldShowBlood(BLOOD_COLOR_RED)`: `violence_hblood` (or `violence_ablood` for alien blood).
+fn show_blood_color(eng: &EngineApi<'_>, color: u8) -> bool {
+    let cvar = if color == BLOOD_COLOR_RED {
+        "violence_hblood"
+    } else {
+        "violence_ablood"
+    };
+    eng.cvar_str(cvar)
+        .is_none_or(|v| v.trim().parse::<f32>() != Ok(0.0))
+}
+
 fn show_blood(eng: &EngineApi<'_>) -> bool {
-    eng.cvar_str("violence_hblood")
+    show_blood_color(eng, BLOOD_COLOR_RED)
+}
+
+/// Whether human (`violence_hgibs`) or alien (`violence_agibs`) gibs are enabled.
+pub fn show_gibs(eng: &EngineApi<'_>, human: bool) -> bool {
+    let cvar = if human { "violence_hgibs" } else { "violence_agibs" };
+    eng.cvar_str(cvar)
         .is_none_or(|v| v.trim().parse::<f32>() != Ok(0.0))
 }
 
@@ -190,7 +205,7 @@ fn show_blood(eng: &EngineApi<'_>) -> bool {
 /// multiplied by two in multiplayer and capped at 255. The sprite indices are those of
 /// `sprites/bloodspray.spr` and `sprites/blood.spr` (0 when the game has not precached them).
 pub fn blood_drips(eng: &mut EngineApi<'_>, origin: Vec3, color: u8, amount: i32) {
-    if !show_blood(eng) || amount == 0 {
+    if !show_blood_color(eng, color) || amount == 0 {
         return;
     }
     let amount = (amount.wrapping_mul(2)).min(255);

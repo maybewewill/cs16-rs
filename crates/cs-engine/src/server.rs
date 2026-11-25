@@ -152,6 +152,8 @@ pub struct Server<G: GameDll> {
     pub(crate) replay_capture: bool,
     pub(crate) replay_svc_packets: Vec<Vec<u8>>,
     pub(crate) next_replay_snapshot_at: f64,
+    pub(crate) localinfo: BTreeMap<String, String>,
+    pub(crate) available_maps: Vec<String>,
 }
 
 /// Snapshot of a connected client or bot slot for server admin / status APIs.
@@ -300,9 +302,16 @@ impl<G: GameDll> Server<G> {
             replay_capture: false,
             replay_svc_packets: Vec::new(),
             next_replay_snapshot_at: 0.0,
+            localinfo: BTreeMap::new(),
+            available_maps: Vec::new(),
         };
         server.activate_map();
         server
+    }
+
+    /// Sets the list of available map names returned by the `maps` console command.
+    pub fn set_available_maps(&mut self, maps: Vec<String>) {
+        self.available_maps = maps;
     }
 
     /// Sets the decal list `EngineApi::decal_index` answers from (`Decal_Init` in the original,
@@ -1293,6 +1302,25 @@ impl<G: GameDll> Server<G> {
                 if self.clients[usize::from(slot)].setinfos.try_take() {
                     self.client_setinfo(slot, &argv);
                 }
+            }
+            ("fullinfo", _) => {
+                if self.clients[usize::from(slot)].setinfos.try_take()
+                    && let Some(raw) = argv.get(1)
+                {
+                    let parsed = cs_proto48::info::InfoString::parse(raw);
+                    for (k, v) in parsed.iter() {
+                        self.client_setinfo(
+                            slot,
+                            &["setinfo".to_string(), k.to_string(), v.to_string()],
+                        );
+                    }
+                }
+            }
+            ("fullupdate", _) => {
+                let idx = usize::from(slot);
+                self.clients[idx].delta_seq = None;
+                self.clients[idx].frames = crate::frame::FrameRing::new();
+                self.with_game(|game, eng| game.client_command(eng, slot, &argv));
             }
             ("dlfile", _) => self.handle_dlfile(slot, &argv),
             ("disconnect" | "dropclient", _) => self.release_slot(slot, None),

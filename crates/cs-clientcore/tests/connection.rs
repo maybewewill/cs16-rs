@@ -778,3 +778,32 @@ fn slowhack_defense_blocks_exec_director_and_restricted_cmds() {
     assert!(conn.console_log().iter().any(|l| l.contains("privileged command unbindall")));
     assert!(conn.console_log().iter().any(|l| l.contains("rate is a privileged") || l.contains("filter")));
 }
+
+#[test]
+fn autowepswitch_and_userinfo_live_sync_and_fullupdate() {
+    let (mut server, mut conn) = new_pair(config());
+    let mut now = handshake(&mut server, &mut conn);
+    up_to_resource_request(&mut server, &mut conn, &mut now);
+
+    // Live userinfo changes emit setinfo reliably on the active connection.
+    conn.set_cvar("_cl_autowepswitch", "0");
+    conn.set_cvar("team", "ct");
+    let reply = exchange(&mut server, &mut conn, &mut now, &msg(|_| {}));
+    let cmds = string_cmds(&reply);
+    assert!(
+        cmds.iter().any(|c| c.contains("setinfo \"_cl_autowepswitch\" \"0\"")),
+        "expected _cl_autowepswitch setinfo, got {cmds:?}"
+    );
+    assert!(
+        cmds.iter().any(|c| c.contains("setinfo \"team\" \"ct\"")),
+        "expected team setinfo, got {cmds:?}"
+    );
+
+    conn.request_full_update();
+    let reply2 = exchange(&mut server, &mut conn, &mut now, &msg(|_| {}));
+    let cmds2 = string_cmds(&reply2);
+    assert!(
+        cmds2.iter().any(|c| c == "fullupdate"),
+        "expected fullupdate stringcmd, got {cmds2:?}"
+    );
+}

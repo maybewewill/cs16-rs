@@ -1201,6 +1201,7 @@ pub fn item_post_frame(b: &mut dyn WeaponBehavior, w: &mut WeaponCtx<'_, '_>) {
         w.tabulate_ammo();
         w.weapon.in_reload = false;
     }
+    apply_infinite_ammo(w);
 
     let use_decrement = b.use_decrement();
     if usable & IN_ATTACK2 != 0
@@ -1289,6 +1290,31 @@ pub fn item_post_frame(b: &mut dyn WeaponBehavior, w: &mut WeaponCtx<'_, '_>) {
     // Catch all.
     if b.should_weapon_idle() {
         b.weapon_idle(w);
+    }
+    apply_infinite_ammo(w);
+}
+
+fn apply_infinite_ammo(w: &mut WeaponCtx<'_, '_>) {
+    let mode = w.eng.cvar_f32("mp_infinite_ammo") as i32;
+    if mode == 1 {
+        let max_clip = w.max_clip();
+        if max_clip > 0 && w.weapon.clip < max_clip {
+            w.weapon.clip = max_clip;
+            w.weapon.in_reload = false;
+        }
+    } else if mode == 2 {
+        let ammo_type = w.weapon.primary_ammo_type;
+        if ammo_type > 0
+            && let Some(info) = w.info()
+            && info.ammo1.is_some()
+            && info.max_ammo1 > 0
+        {
+            let have = w.ammo(ammo_type);
+            if have < info.max_ammo1 {
+                w.add_ammo(ammo_type, info.max_ammo1 - have);
+                w.tabulate_ammo();
+            }
+        }
     }
 }
 

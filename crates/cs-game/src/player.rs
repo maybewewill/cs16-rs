@@ -47,9 +47,9 @@
 
 use cs_assets::bsp::SpawnTeam;
 use cs_engine::consts::{
-    FL_CLIENT, FL_DORMANT, FL_DUCKING, FL_INWATER, FL_ONGROUND, FL_PROXY, FL_SPECTATOR,
-    MOVETYPE_NOCLIP, MOVETYPE_NONE, MOVETYPE_TOSS, MOVETYPE_WALK, SOLID_NOT,
-    SOLID_SLIDEBOX,
+    FL_CLIENT, FL_DORMANT, FL_DUCKING, FL_INWATER, FL_NOTARGET, FL_ONGROUND, FL_PROXY,
+    FL_SPECTATOR, MOVETYPE_FLY, MOVETYPE_NOCLIP, MOVETYPE_NONE, MOVETYPE_TOSS, MOVETYPE_WALK,
+    SOLID_NOT, SOLID_SLIDEBOX,
 };
 use cs_engine::{EdictId, EngineApi, EntTrace, MsgDest};
 use cs_proto48::delta::{GoldSrcClientData, GoldSrcUserCmd};
@@ -2651,6 +2651,24 @@ pub(crate) fn take_damage_with(
         true,
     );
     reset_time_based_damage(g, index, bits);
+    if took
+        && friendly_fire
+        && teammate
+        && let Some(att_slot) = attacker_slot.filter(|&a| a != index)
+        && eng.cvar_f32("mp_mirrordamage") > 0.0
+    {
+        let _ = monster_take_damage(
+            g,
+            eng,
+            att_slot as u8,
+            inflictor,
+            None,
+            None,
+            damage.trunc(),
+            bits,
+            false,
+        );
+    }
     took
 }
 
@@ -3348,6 +3366,34 @@ pub(crate) fn client_command(
     // `kill` is the engine's command, which the engine matches without regard to case.
     if command.eq_ignore_ascii_case("kill") {
         client_kill(g, eng, slot);
+        return;
+    }
+    if command.eq_ignore_ascii_case("notarget") {
+        if eng.cvar_f32("sv_cheats") != 0.0
+            && let Some(v) = eng.ent_mut(eng.client_edict(slot))
+        {
+            if (v.flags & FL_NOTARGET) != 0 {
+                v.flags &= !FL_NOTARGET;
+                eng.client_print(slot, "notarget OFF\n");
+            } else {
+                v.flags |= FL_NOTARGET;
+                eng.client_print(slot, "notarget ON\n");
+            }
+        }
+        return;
+    }
+    if command.eq_ignore_ascii_case("fly") {
+        if eng.cvar_f32("sv_cheats") != 0.0
+            && let Some(v) = eng.ent_mut(eng.client_edict(slot))
+        {
+            if v.movetype == MOVETYPE_FLY {
+                v.movetype = MOVETYPE_WALK;
+                eng.client_print(slot, "fly OFF\n");
+            } else {
+                v.movetype = MOVETYPE_FLY;
+                eng.client_print(slot, "fly ON\n");
+            }
+        }
         return;
     }
     // The game compares the rest exactly (`FStrEq`).

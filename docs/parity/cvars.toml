@@ -1,6 +1,7 @@
 [[item]]
 id = "_vgui_menus"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "allow_spectators"
@@ -24,11 +25,13 @@ evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-as
 
 [[item]]
 id = "cl_crosshair_color"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_crosshair_size"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_crosshair_translucent"
@@ -37,15 +40,18 @@ evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-cl
 
 [[item]]
 id = "cl_dynamiccrosshair"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_hd_models"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_righthand"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "edgefriction"
@@ -54,7 +60,8 @@ evidence = "crates/cs-engine/tests/movevars.rs::new_movement_cvars_have_rehlds_d
 
 [[item]]
 id = "fov_default"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "fps_max"
@@ -68,11 +75,13 @@ evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-as
 
 [[item]]
 id = "gl_texturemode"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "hostname"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "humans_join_team"
@@ -81,23 +90,28 @@ evidence = "crates/cs-game/tests/teams.rs::humans_join_team_sends_players_to_tha
 
 [[item]]
 id = "hud_fastswitch"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "m_filter"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "m_pitch"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "m_rawinput"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "m_yaw"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "mp3volume"
@@ -131,7 +145,8 @@ evidence = "crates/cs-game/tests/rounds.rs::freeze_time_holds_players_then_round
 
 [[item]]
 id = "mp_friendlyfire"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "mp_limitteams"
@@ -160,35 +175,43 @@ evidence = "crates/cs-game/tests/money.rs::the_third_team_kill_is_kicked"
 
 [[item]]
 id = "name"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "net_graph"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "net_graphpos"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "r_drawviewmodel"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "r_fullbright"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "r_lightmap_only"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "r_noclip_speed"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "r_vis"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "room_type"
@@ -197,11 +220,13 @@ evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-ga
 
 [[item]]
 id = "sensitivity"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "showtriggers"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_accelerate"
@@ -235,7 +260,8 @@ evidence = "crates/cs-engine/tests/movevars.rs::move_vars_follow_every_cvar; the
 
 [[item]]
 id = "sv_language"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_maxspeed"
@@ -244,7 +270,8 @@ evidence = "crates/cs-engine/tests/movevars.rs::move_vars_follow_every_cvar; the
 
 [[item]]
 id = "sv_maxunlag"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_maxvelocity"
@@ -253,8 +280,8 @@ evidence = "crates/cs-engine/tests/movevars.rs::move_vars_follow_every_cvar; the
 
 [[item]]
 id = "sv_clienttrace"
-status = "implemented"
-evidence = "crates/cs-engine/tests/studio_hitboxes.rs; default 1, FCVAR_SERVER from rehlds/engine/sv_main.cpp:204 (read 2026-11-22); 0 makes a point trace use the box instead of the hitboxes (SV_HullForStudioModel)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_rollangle"
@@ -283,7 +310,8 @@ evidence = "crates/cs-engine/tests/movevars.rs::new_movement_cvars_have_rehlds_d
 
 [[item]]
 id = "sv_skyname"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_skyvec_x"
@@ -317,15 +345,18 @@ evidence = "crates/cs-engine/tests/movevars.rs::move_vars_follow_every_cvar; the
 
 [[item]]
 id = "sv_unlag"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_unlagpush"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_unlagsamples"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_wateraccelerate"
@@ -349,11 +380,13 @@ evidence = "crates/cs-engine/tests/movevars.rs::move_vars_follow_every_cvar; the
 
 [[item]]
 id = "texgamma"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "vid_aspect_mode"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "volume"
@@ -362,11 +395,13 @@ evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-cl
 
 [[item]]
 id = "mp_forcecamera"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "mp_forcechasecam"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "mp_flashlight"
@@ -380,11 +415,13 @@ evidence = "crates/cs-game/tests/hud_extras.rs::spray_paints_a_decal_where_the_p
 
 [[item]]
 id = "mp_playerid"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "mp_fadetoblack"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_restart"
@@ -408,7 +445,8 @@ evidence = "crates/cs-game/tests/rounds.rs::win_limit_changes_the_map"
 
 [[item]]
 id = "mp_windifference"
-status = "implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "mp_timelimit"
@@ -420,22 +458,20 @@ id = "mp_chattime"
 status = "tested"
 evidence = "crates/cs-game/tests/rounds.rs::win_limit_changes_the_map"
 
-# Vanilla CS 1.6 cvars and console commands (from ReHLDS/ReGameDLL vanilla sources, default/stock .cfg files, and kb_act.lst).
-
 [[item]]
 id = "+attack"
-status = "implemented"
-evidence = "ActionInput dispatch in crates/cs-cvar/src/lib.rs and legacy cs-client"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "+attack2"
-status = "implemented"
-evidence = "ActionInput dispatch in crates/cs-cvar/src/lib.rs and legacy cs-client"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "+back"
-status = "implemented"
-evidence = "ActionInput dispatch in crates/cs-cvar/src/lib.rs and legacy cs-client"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "+commandmenu"
@@ -444,98 +480,98 @@ evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-cvar/src/lib.rs; crates/cs
 
 [[item]]
 id = "+duck"
-status = "implemented"
-evidence = "ActionInput dispatch in crates/cs-cvar/src/lib.rs and legacy cs-client"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "+forward"
-status = "implemented"
-evidence = "ActionInput dispatch in crates/cs-cvar/src/lib.rs and legacy cs-client"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "+jlook"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs; crates/cs-client/src/app.rs"
 
 [[item]]
 id = "+jump"
-status = "implemented"
-evidence = "ActionInput dispatch in crates/cs-cvar/src/lib.rs and legacy cs-client"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "+klook"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/gfx/shell/kb_act.lst)"
+status = "tested"
+evidence = "crates/cs-client/src/input.rs::tests::keyboard_turn_lookup_strafe_and_klook_angles; crates/cs-cvar/src/lib.rs"
 
 [[item]]
 id = "+left"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/gfx/shell/kb_act.lst)"
+status = "tested"
+evidence = "crates/cs-client/src/input.rs::tests::keyboard_turn_lookup_strafe_and_klook_angles; crates/cs-cvar/src/lib.rs"
 
 [[item]]
 id = "+lookdown"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/gfx/shell/kb_act.lst)"
+status = "tested"
+evidence = "crates/cs-client/src/input.rs::tests::keyboard_turn_lookup_strafe_and_klook_angles; crates/cs-cvar/src/lib.rs"
 
 [[item]]
 id = "+lookup"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/gfx/shell/kb_act.lst)"
+status = "tested"
+evidence = "crates/cs-client/src/input.rs::tests::keyboard_turn_lookup_strafe_and_klook_angles; crates/cs-cvar/src/lib.rs"
 
 [[item]]
 id = "+mlook"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs; crates/cs-client/src/app.rs"
 
 [[item]]
 id = "+movedown"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/gfx/shell/kb_act.lst)"
+status = "tested"
+evidence = "crates/cs-client/src/input.rs::tests::keyboard_turn_lookup_strafe_and_klook_angles; crates/cs-cvar/src/lib.rs"
 
 [[item]]
 id = "+moveleft"
-status = "implemented"
-evidence = "ActionInput dispatch in crates/cs-cvar/src/lib.rs and legacy cs-client"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "+moveright"
-status = "implemented"
-evidence = "ActionInput dispatch in crates/cs-cvar/src/lib.rs and legacy cs-client"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "+moveup"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/gfx/shell/kb_act.lst)"
+status = "tested"
+evidence = "crates/cs-client/src/input.rs::tests::keyboard_turn_lookup_strafe_and_klook_angles; crates/cs-cvar/src/lib.rs"
 
 [[item]]
 id = "+reload"
-status = "implemented"
-evidence = "ActionInput dispatch in crates/cs-cvar/src/lib.rs and legacy cs-client"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "+right"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/gfx/shell/kb_act.lst)"
+status = "tested"
+evidence = "crates/cs-client/src/input.rs::tests::keyboard_turn_lookup_strafe_and_klook_angles; crates/cs-cvar/src/lib.rs"
 
 [[item]]
 id = "+showscores"
-status = "implemented"
-evidence = "ActionInput dispatch in crates/cs-cvar/src/lib.rs and legacy cs-client"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "+speed"
-status = "implemented"
-evidence = "ActionInput dispatch in crates/cs-cvar/src/lib.rs and legacy cs-client"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "+strafe"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/gfx/shell/kb_act.lst)"
+status = "tested"
+evidence = "crates/cs-client/src/input.rs::tests::keyboard_turn_lookup_strafe_and_klook_angles; crates/cs-client/src/app.rs; crates/cs-cvar/src/lib.rs"
 
 [[item]]
 id = "+use"
-status = "implemented"
-evidence = "ActionInput dispatch in crates/cs-cvar/src/lib.rs and legacy cs-client"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "+voicerecord"
@@ -549,63 +585,63 @@ evidence = "crates/cs-cvar/src/defaults.rs::register_default_binds; crates/cs-cl
 
 [[item]]
 id = "_cl_autowepswitch"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "crates/cs-clientcore/tests/connection.rs::autowepswitch_and_userinfo_live_sync_and_fullupdate; crates/cs-cvar/src/lib.rs::tests::bindtoggle_incrementvar_multvar_condump_userinfo_and_classic_defaults"
 
 [[item]]
 id = "_restart"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "_set_vid_level"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "_setaddons_folder"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "_setgamedir"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "_sethdmodels"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "_setrenderer"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "_setvideomode"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "_snd_mixahead"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "_window_xpos"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/video.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "_window_ypos"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/video.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "_windowed_mouse"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/default.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "addip"
@@ -619,28 +655,28 @@ evidence = "crates/cs-cvar/src/lib.rs::executes_cvars_binds_aliases_and_roundtri
 
 [[item]]
 id = "allow_levelshots"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "ambient_fade"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "ambient_level"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "ati_npatch"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "autobuy"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/gfx/shell/kb_act.lst)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "banid"
@@ -649,8 +685,8 @@ evidence = "crates/cs-engine/src/console.rs (dispatched to BanList::add_id); cra
 
 [[item]]
 id = "bannedcfgfile"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "bgmvolume"
@@ -684,8 +720,8 @@ evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs, crates/c
 
 [[item]]
 id = "bot_allow_rogues"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-bot/src/tactics.rs (BotSettings::allow_rogues), crates/cs-game/src/bots.rs"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "bot_allow_shield"
@@ -709,8 +745,8 @@ evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs, crates/c
 
 [[item]]
 id = "bot_auto_vacate"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs::maintain_quota"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "bot_chatter"
@@ -719,18 +755,18 @@ evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs, crates/c
 
 [[item]]
 id = "bot_debug"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "bot_defer_to_human"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-bot/src/tactics.rs (BotSettings::defer_to_human), crates/cs-game/src/bots.rs"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "bot_enable"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "bot_join_after_player"
@@ -739,48 +775,48 @@ evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs::maintain
 
 [[item]]
 id = "bot_join_team"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-bot/src/tactics.rs (BotJoinTeam), crates/cs-game/src/bots.rs"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "bot_nav_edit"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "bot_nav_zdraw"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "bot_prefix"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "bot_profile_db"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs (BotProfile.db VFS load and builtin fallback)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "bot_quicksave"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "bot_quota_match"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs::maintain_quota"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "bot_show_danger"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "bot_show_nav"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "bot_stop"
@@ -789,23 +825,23 @@ evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs, crates/c
 
 [[item]]
 id = "bot_traceview"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "bot_walk"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "bot_zombie"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "bottomcolor"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "buy"
@@ -829,8 +865,8 @@ evidence = "crates/cs-game/tests/buy.rs::the_buy_menus_follow_the_clients_prefer
 
 [[item]]
 id = "cancelselect"
-status = "implemented"
-evidence = "dispatched in crates/cs-cvar/src/lib.rs and legacy cs-client"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cd"
@@ -844,8 +880,8 @@ evidence = "crates/cs-engine/tests/console.rs::changelevel_validates_the_name"
 
 [[item]]
 id = "changelevel2"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "crates/cs-engine/tests/console.rs::server_admin_commands_maps_version_ping_stats_user_serverinfo_localinfo_dropclient_pause_resetrcon_tell"
 
 [[item]]
 id = "chooseteam"
@@ -854,13 +890,13 @@ evidence = "crates/cs-game/tests/teams.rs::chooseteam_shows_the_in_game_menu"
 
 [[item]]
 id = "cl_allow_download"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_allow_upload"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_allowdownload"
@@ -869,13 +905,13 @@ evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-cl
 
 [[item]]
 id = "cl_allowupload"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-clientcore/src/cvars.rs; crates/cs-clientcore/src/connection.rs"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_autowepswitch"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs::tests::bindtoggle_incrementvar_multvar_condump_userinfo_and_classic_defaults"
 
 [[item]]
 id = "cl_backspeed"
@@ -884,8 +920,8 @@ evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/app.rs; crates/
 
 [[item]]
 id = "cl_bmodelinterp"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_bob"
@@ -894,43 +930,43 @@ evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs
 
 [[item]]
 id = "cl_charset"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_clockreset"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_cmdbackup"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_cmdrate"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_corpsestay"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_dlmax"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_download_ingame"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-clientcore/src/cvars.rs; crates/cs-clientcore/src/connection.rs"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_envshot_size"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_filterstuffcmd"
@@ -939,8 +975,8 @@ evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-cl
 
 [[item]]
 id = "cl_fixtimerate"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_forwardspeed"
@@ -949,73 +985,73 @@ evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/app.rs; crates/
 
 [[item]]
 id = "cl_himodels"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_idealpitchscale"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_laddermode"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_lc"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_lightstyle_lerping"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_logocolor"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_logofile"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_lw"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_min_ct"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_min_t"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_minmodels"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_mousegrab"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_nopred"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_nosmooth"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_radartype"
@@ -1024,38 +1060,38 @@ evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/ui/hud.rs; crat
 
 [[item]]
 id = "cl_scoreboard_bg"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_shadows"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_showerror"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_showevents"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_showfps"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::cl_showfps_and_con_notifytime_overlay_and_crosshair_toggle"
 
 [[item]]
 id = "cl_showpacketloss"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_showpos"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_sidespeed"
@@ -1064,23 +1100,23 @@ evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/app.rs; crates/
 
 [[item]]
 id = "cl_smoothtime"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_test_bandwidth"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_timeout"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_trace_messages"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_updaterate"
@@ -1089,33 +1125,33 @@ evidence = "crates/cs-clientcore/src/cvars.rs::tests::userinfo_cvars_are_the_pro
 
 [[item]]
 id = "cl_upmax"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_viewbob"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_vsmoothing"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_weather"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "clear"
-status = "implemented"
-evidence = "dispatched in crates/cs-cvar/src/lib.rs (no dedicated test)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cmd_scripting"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cmdlist"
@@ -1124,8 +1160,8 @@ evidence = "crates/cs-cvar/src/lib.rs::executes_cvars_binds_aliases_and_roundtri
 
 [[item]]
 id = "con_charset"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "con_color"
@@ -1134,48 +1170,48 @@ evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/ui/console.rs; 
 
 [[item]]
 id = "con_fontnum"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "con_fontscale"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "con_fontsize"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "con_mapfilter"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "con_mono"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "con_notifytime"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::cl_showfps_and_con_notifytime_overlay_and_crosshair_toggle"
 
 [[item]]
 id = "connect"
-status = "implemented"
-evidence = "dispatched in crates/cs-cvar/src/lib.rs and legacy cs-client (not yet wired to Protocol 48 cs-clientcore)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "console"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "crosshair"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "crates/cs-client/tests/phase10_ui.rs::cl_showfps_and_con_notifytime_overlay_and_crosshair_toggle"
 
 [[item]]
 id = "cvarlist"
@@ -1189,38 +1225,38 @@ evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/camera.rs; crat
 
 [[item]]
 id = "delta_clear"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (delta.cpp))"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "delta_stats"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (delta.cpp))"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "demos"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "direct"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "disconnect"
-status = "implemented"
-evidence = "dispatched in crates/cs-cvar/src/lib.rs and legacy cs-client"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "displaysoundlist"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "crates/cs-client/tests/phase9_sound.rs::classic_audio_defaults_and_resampling_and_sound_list; crates/cs-client/src/app.rs"
 
 [[item]]
 id = "dlfile"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (rh_sv_main.cpp))"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "drop"
@@ -1229,23 +1265,23 @@ evidence = "crates/cs-game/tests/inventory.rs::buy_drop_pickup_as_regamedll"
 
 [[item]]
 id = "dropclient"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (rh_sv_main.cpp))"
+status = "tested"
+evidence = "crates/cs-engine/tests/console.rs::server_admin_commands_maps_version_ping_stats_user_serverinfo_localinfo_dropclient_pause_resetrcon_tell"
 
 [[item]]
 id = "dsp_coeff_table"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "dsp_off"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "echo"
-status = "implemented"
-evidence = "dispatched in crates/cs-cvar/src/lib.rs (no dedicated test)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "ex_interp"
@@ -1264,48 +1300,48 @@ evidence = "crates/cs-engine/tests/console.rs::quit_and_exit_are_quit"
 
 [[item]]
 id = "fastsprites"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "find"
-status = "implemented"
-evidence = "dispatched in crates/cs-cvar/src/lib.rs (no dedicated test)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "fly"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "crates/cs-game/tests/player.rs::cheats_notarget_and_fly_and_mirrordamage_and_motd"
 
 [[item]]
 id = "force_centerview"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/gfx/shell/kb_act.lst)"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs; crates/cs-client/src/app.rs"
 
 [[item]]
 id = "fps_override"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "fullinfo"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "fullscreen"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/video.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "fullupdate"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (rh_sv_main.cpp))"
+status = "tested"
+evidence = "crates/cs-clientcore/tests/connection.rs::autowepswitch_and_userinfo_live_sync_and_fullupdate; crates/cs-engine/src/server.rs"
 
 [[item]]
 id = "give"
-status = "implemented"
-evidence = "dispatched in crates/cs-cvar/src/lib.rs and legacy MatchWorld (not in cs-game)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "gl_ansio"
@@ -1314,33 +1350,33 @@ evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/render/bsp_rend
 
 [[item]]
 id = "gl_clear"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "gl_dither"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "gl_flipmatrix"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "gl_fog"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "gl_keeptjunctions"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "gl_lightholes"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "gl_lowlatency"
@@ -1349,163 +1385,163 @@ evidence = "crates/cs-client/src/ui/options.rs::tests::mouse_tab_low_latency_bin
 
 [[item]]
 id = "gl_lowlatency_debugoutput"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "gl_lowlatency_maxslop_ms"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "gl_lowlatency_minslop_ms"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "gl_max_size"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "gl_monolights"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "gl_overbright"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "gl_picmip"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "gl_polyoffset"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "gl_round_down"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "gl_spriteblend"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "gl_use_shaders"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "gl_vbo_dlightmode"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "gl_vsync"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "gl_wateramp"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "gl_widescreen_yfov"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "god"
-status = "implemented"
-evidence = "dispatched in crates/cs-cvar/src/lib.rs and legacy MatchWorld (not in cs-game)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "graphheight"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "heartbeat"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "height"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/video.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "hisound"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs::tests::bindtoggle_incrementvar_multvar_condump_userinfo_and_classic_defaults; crates/cs-client/tests/phase9_sound.rs::classic_audio_defaults_and_resampling_and_sound_list"
 
 [[item]]
 id = "hostage_ai_enable"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL hostage.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "hostage_debug"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL hostage.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "hostage_stop"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL hostage.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "hostmap"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL host_cmd.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "hpk_maxsize"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "http_autoremove"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "http_maxconnections"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "http_timeout"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "http_useragent"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "hud_capturemouse"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "hud_centerid"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs (registered); crates/cs-client/src/ui/hud.rs (HudExtrasContext::apply_cvars reads hud_centerid to position StatusText bar)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "hud_classautokill"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "hud_deathnotice_time"
@@ -1514,8 +1550,8 @@ evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-cl
 
 [[item]]
 id = "hud_draw"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs (registered); crates/cs-client/src/ui/hud.rs (gates status HUD drawing when 0)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "hud_saytext_internal"
@@ -1524,123 +1560,123 @@ evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/ui/hud.rs; crat
 
 [[item]]
 id = "hud_scale"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "hud_takesshots"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs (registered for scoreboard auto-shot option)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "hud_textmode"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "hud_utf8"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "impulse"
-status = "implemented"
-evidence = "dispatched in crates/cs-cvar/src/lib.rs (201 spray) and cs-game (100 flashlight, 201 spray)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "interp"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "invnext"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/gfx/shell/kb_act.lst)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "invprev"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/gfx/shell/kb_act.lst)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "joy_axis_binding"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "joy_enable"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "joy_forward"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "joy_forward_deadzone"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "joy_forward_key_threshold"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "joy_lt_threshold"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "joy_pitch"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "joy_pitch_deadzone"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "joy_rt_threshold"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "joy_side"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "joy_side_deadzone"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "joy_side_key_threshold"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "joy_yaw"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "joy_yaw_deadzone"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "joystick"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "key_rotate"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "kick"
@@ -1654,8 +1690,8 @@ evidence = "crates/cs-game/tests/player.rs::kill_command_kills_and_costs_a_frag"
 
 [[item]]
 id = "lastdemo"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "lastinv"
@@ -1664,23 +1700,23 @@ evidence = "crates/cs-game/tests/inventory.rs::lastinv_without_a_last_item_takes
 
 [[item]]
 id = "lightgamma"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "listid"
-status = "implemented"
-evidence = "crates/cs-engine/src/console.rs (dispatched to BanList::list_id)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "listip"
-status = "implemented"
-evidence = "crates/cs-engine/src/console.rs (dispatched to BanList::list_ip)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "localinfo"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (rh_sv_main.cpp))"
+status = "tested"
+evidence = "crates/cs-engine/tests/console.rs::server_admin_commands_maps_version_ping_stats_user_serverinfo_localinfo_dropclient_pause_resetrcon_tell"
 
 [[item]]
 id = "log"
@@ -1704,28 +1740,28 @@ evidence = "crates/cs-engine/src/console.rs (dispatched to ServerLogger::remove_
 
 [[item]]
 id = "logsdir"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "look_filter"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "lookspring"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "lookstrafe"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "lservercfgfile"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "m_customaccel"
@@ -1749,23 +1785,23 @@ evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-cl
 
 [[item]]
 id = "m_forward"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "m_ignore"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "m_mousethread_sleep"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "m_side"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "map"
@@ -1774,68 +1810,68 @@ evidence = "crates/cs-engine/tests/console.rs::changelevel_validates_the_name"
 
 [[item]]
 id = "mapchangecfgfile"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "mapcyclefile"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "maps"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "crates/cs-engine/tests/console.rs::server_admin_commands_maps_version_ping_stats_user_serverinfo_localinfo_dropclient_pause_resetrcon_tell"
 
 [[item]]
 id = "max_shells"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "max_smokepuffs"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "mcache"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "menu_mp_firsttime"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "messagemode"
-status = "implemented"
-evidence = "dispatched in crates/cs-cvar/src/lib.rs and legacy cs-client"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "messagemode2"
-status = "implemented"
-evidence = "dispatched in crates/cs-cvar/src/lib.rs and legacy cs-client"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "model"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "motd"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "crates/cs-game/tests/player.rs::cheats_notarget_and_fly_and_mirrordamage_and_motd"
 
 [[item]]
 id = "motd_write"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "crates/cs-game/tests/player.rs::cheats_notarget_and_fly_and_mirrordamage_and_motd"
 
 [[item]]
 id = "motdfile"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "mp3"
@@ -1849,13 +1885,13 @@ evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-we
 
 [[item]]
 id = "mp_allowmonsters"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "mp_autokick_timeout"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "mp_consistency"
@@ -1864,103 +1900,103 @@ evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-en
 
 [[item]]
 id = "mp_decals"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "mp_fragsleft"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "crates/cs-game/tests/weapon_core.rs::mp_infinite_ammo_1_and_2_and_timeleft_fragsleft"
 
 [[item]]
 id = "mp_ghostfrequency"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "mp_hostagepenalty"
-status = "implemented"
-evidence = "registered in crates/cs-cvar/src/defaults.rs; enforced in crates/cs-game/src/hostage.rs::apply_hostage_penalty (#Hint_removed_for_next_hostage_killed warning and eng.kick after exceeding penalty; not yet covered by a dedicated penalty-threshold test)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "mp_infinite_ammo"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "crates/cs-game/tests/weapon_core.rs::mp_infinite_ammo_1_and_2_and_timeleft_fragsleft"
 
 [[item]]
 id = "mp_infinite_grenades"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "crates/cs-game/tests/grenades.rs::mp_infinite_grenades_keeps_grenade_after_throw"
 
 [[item]]
 id = "mp_kickpercent"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "mp_logdetail"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "mp_logmessages"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "mp_mapvoteratio"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "mp_mirrordamage"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "crates/cs-game/tests/player.rs::cheats_notarget_and_fly_and_mirrordamage_and_motd"
 
 [[item]]
 id = "mp_scoreboard_showdefkit"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "mp_scoreboard_showhealth"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "mp_scoreboard_showmoney"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "mp_timeleft"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "crates/cs-game/tests/weapon_core.rs::mp_infinite_ammo_1_and_2_and_timeleft_fragsleft"
 
 [[item]]
 id = "net_graphheight"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "net_graphsolid"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "net_graphwidth"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "net_scale"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "net_speeds"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "new"
@@ -1974,18 +2010,18 @@ evidence = "crates/cs-game/tests/hud_misc.rs::night_vision_toggles_for_a_player_
 
 [[item]]
 id = "noclip"
-status = "implemented"
-evidence = "dispatched in crates/cs-cvar/src/lib.rs and legacy cs-client"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "notarget"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "crates/cs-game/tests/player.rs::cheats_notarget_and_fly_and_mirrordamage_and_motd; crates/cs-game/tests/phase12_bots.rs::bots_ignore_players_with_notarget"
 
 [[item]]
 id = "osk_enable"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "pausable"
@@ -1999,13 +2035,13 @@ evidence = "crates/cs-engine/tests/phase11_admin.rs::pause_freezes_sv_time_and_s
 
 [[item]]
 id = "ping"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "crates/cs-engine/tests/console.rs::server_admin_commands_maps_version_ping_stats_user_serverinfo_localinfo_dropclient_pause_resetrcon_tell"
 
 [[item]]
 id = "pm_showclip"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_pmove.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "quit"
@@ -2014,13 +2050,13 @@ evidence = "crates/cs-engine/tests/console.rs::quit_and_exit_are_quit"
 
 [[item]]
 id = "r_adjust_fov"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "r_cachestudio"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_r_studio.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "r_decals"
@@ -2029,48 +2065,48 @@ evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/render/decal_re
 
 [[item]]
 id = "r_detailtextures"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "r_lighting_modulate"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "r_prefertexturefiltering"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "r_refdll"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/video.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "r_showtree"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "r_speeds"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "r_sprite_lerping"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "r_sprite_lighting"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "r_studiocache"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "radio1"
@@ -2089,8 +2125,8 @@ evidence = "crates/cs-game/tests/hud_misc.rs::radio_menus_and_aliases_pick_the_s
 
 [[item]]
 id = "rate"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "rcon_password"
@@ -2099,18 +2135,18 @@ evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-en
 
 [[item]]
 id = "rebuy"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/gfx/shell/kb_act.lst)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "reconnect"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "reload"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "removeid"
@@ -2124,18 +2160,18 @@ evidence = "crates/cs-engine/src/console.rs (dispatched to BanList::remove_ip); 
 
 [[item]]
 id = "resetrcon"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (rh_sv_main.cpp))"
+status = "tested"
+evidence = "crates/cs-engine/tests/console.rs::server_admin_commands_maps_version_ping_stats_user_serverinfo_localinfo_dropclient_pause_resetrcon_tell"
 
 [[item]]
 id = "restart"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "room_hires"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "room_off"
@@ -2144,28 +2180,28 @@ evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-cl
 
 [[item]]
 id = "s_combine_sounds"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "s_lerping"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs::tests::bindtoggle_incrementvar_multvar_condump_userinfo_and_classic_defaults; crates/cs-client/tests/phase9_sound.rs::classic_audio_defaults_and_resampling_and_sound_list"
 
 [[item]]
 id = "s_samplecount"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "s_show"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "s_warn_late_precache"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "say"
@@ -2179,38 +2215,38 @@ evidence = "crates/cs-game/tests/chat.rs::say_team_reaches_the_team_only"
 
 [[item]]
 id = "scoreboard_shortheaders"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "scoreboard_showavatars"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "scoreboard_showhealth"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "scoreboard_showmoney"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "scr_conspeed"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "scr_downloading"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "screenshot"
-status = "implemented"
-evidence = "dispatched in crates/cs-cvar/src/lib.rs and crates/cs-client/src/app.rs"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sendents"
@@ -2224,13 +2260,13 @@ evidence = "crates/cs-engine/tests/signon.rs::probe_reaches_in_game_within_200_f
 
 [[item]]
 id = "servercfgfile"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "serverinfo"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (rh_sv_main.cpp))"
+status = "tested"
+evidence = "crates/cs-engine/tests/console.rs::server_admin_commands_maps_version_ping_stats_user_serverinfo_localinfo_dropclient_pause_resetrcon_tell"
 
 [[item]]
 id = "setinfo"
@@ -2249,308 +2285,308 @@ evidence = "crates/cs-proto48/src/messages.rs::tests::phase11_remaining_svc_clc_
 
 [[item]]
 id = "showbriefing"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/gfx/shell/kb_act.lst)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "showinfo"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (rh_sv_main.cpp))"
+status = "tested"
+evidence = "crates/cs-engine/tests/console.rs::server_admin_commands_maps_version_ping_stats_user_serverinfo_localinfo_dropclient_pause_resetrcon_tell"
 
 [[item]]
 id = "shutdownserver"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_12mm_bullet1"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_12mm_bullet2"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_12mm_bullet3"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_9mm_bullet1"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_9mm_bullet2"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_9mm_bullet3"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_9mmar_bullet1"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_9mmar_bullet2"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_9mmar_bullet3"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_battery1"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_battery2"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_battery3"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_healthcharger1"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_healthcharger2"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_healthcharger3"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_healthkit1"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_healthkit2"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_healthkit3"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_plr_357_bullet1"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_plr_357_bullet2"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_plr_357_bullet3"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_plr_9mm_bullet1"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_plr_9mm_bullet2"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_plr_9mm_bullet3"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_plr_9mmar_bullet1"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_plr_9mmar_bullet2"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_plr_9mmar_bullet3"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_plr_9mmar_grenade1"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_plr_9mmar_grenade2"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_plr_9mmar_grenade3"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_plr_buckshot1"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_plr_buckshot2"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_plr_buckshot3"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_plr_rpg1"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_plr_rpg2"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_plr_rpg3"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_scientist_heal1"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_scientist_heal2"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_scientist_heal3"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_suitcharger1"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_suitcharger2"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sk_suitcharger3"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "skin"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sleeptime"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "slot1"
-status = "implemented"
-evidence = "dispatched in crates/cs-cvar/src/lib.rs for legacy client (SelectSlot 1)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "slot10"
-status = "missing"
-evidence = "server emits stufftext slot10 to close menus, client slot6..10 dispatch not implemented"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "slot2"
-status = "implemented"
-evidence = "dispatched in crates/cs-cvar/src/lib.rs for legacy client (SelectSlot 2)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "slot3"
-status = "implemented"
-evidence = "dispatched in crates/cs-cvar/src/lib.rs for legacy client (SelectSlot 3)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "slot4"
-status = "implemented"
-evidence = "dispatched in crates/cs-cvar/src/lib.rs for legacy client (SelectSlot 4)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "slot5"
-status = "implemented"
-evidence = "dispatched in crates/cs-cvar/src/lib.rs for legacy client (SelectSlot 5)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "slot6"
-status = "missing"
-evidence = "client slot6..10 dispatch not implemented in cs-cvar or cs-client"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "slot7"
-status = "missing"
-evidence = "client slot6..10 dispatch not implemented in cs-cvar or cs-client"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "slot8"
-status = "missing"
-evidence = "client slot6..10 dispatch not implemented in cs-cvar or cs-client"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "slot9"
-status = "missing"
-evidence = "client slot6..10 dispatch not implemented in cs-cvar or cs-client"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "snapshot"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/gfx/shell/kb_act.lst)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "snd_mute_losefocus"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "soundfade"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sp_decals"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "spawn"
@@ -2559,48 +2595,48 @@ evidence = "crates/cs-engine/tests/signon.rs::probe_reaches_in_game_within_200_f
 
 [[item]]
 id = "spec_autodirector_internal"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "spec_drawcone_internal"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "spec_drawnames_internal"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "spec_drawstatus_internal"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "spec_mode_internal"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "spec_pip"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs (registered for Options/Spectator PIP cvar)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "startdemos"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "stat"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "crates/cs-engine/tests/console.rs::server_admin_commands_maps_version_ping_stats_user_serverinfo_localinfo_dropclient_pause_resetrcon_tell"
 
 [[item]]
 id = "stats"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "crates/cs-engine/tests/console.rs::server_admin_commands_maps_version_ping_stats_user_serverinfo_localinfo_dropclient_pause_resetrcon_tell"
 
 [[item]]
 id = "status"
@@ -2619,58 +2655,58 @@ evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-we
 
 [[item]]
 id = "sv_aim"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_allow_autoaim"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_allow_dlfile"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/src/downloads.rs"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_allow_joystick"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_allow_mouse"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_allow_noinputdevices"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_allow_physx"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_allow_touch"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_allow_vr"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_allowdownload"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/src/downloads.rs"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_allowupload"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/src/downloads.rs"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_alltalk"
@@ -2679,13 +2715,13 @@ evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-en
 
 [[item]]
 id = "sv_background_freeze"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_check_errors"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_contact"
@@ -2694,33 +2730,33 @@ evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-en
 
 [[item]]
 id = "sv_downloadurl"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/src/downloads.rs"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_enableoldqueries"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_failuretime"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_filterban"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_force_ent_intersection"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_world.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_instancedbaseline"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_lan"
@@ -2734,28 +2770,28 @@ evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-en
 
 [[item]]
 id = "sv_log_onefile"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_log_singleplayer"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_logbans"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_logrelay"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_logsecret"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_maxrate"
@@ -2779,13 +2815,13 @@ evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-en
 
 [[item]]
 id = "sv_newunit"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_outofdatetime"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_password"
@@ -2794,13 +2830,13 @@ evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-en
 
 [[item]]
 id = "sv_precache_meshes"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_proxies"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_rcon_banpenalty"
@@ -2824,43 +2860,43 @@ evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-en
 
 [[item]]
 id = "sv_reconnect_limit"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_send_logos"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_send_resources"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_tags"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_timeout"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_uploadmax"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_version"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_visiblemaxplayers"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "sv_voiceenable"
@@ -2874,68 +2910,68 @@ evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-en
 
 [[item]]
 id = "team"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "crates/cs-clientcore/tests/connection.rs::autowepswitch_and_userinfo_live_sync_and_fullupdate"
 
 [[item]]
 id = "tell"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "crates/cs-engine/tests/console.rs::server_admin_commands_maps_version_ping_stats_user_serverinfo_localinfo_dropclient_pause_resetrcon_tell"
 
 [[item]]
 id = "toggle"
-status = "implemented"
-evidence = "dispatched in crates/cs-cvar/src/lib.rs (no dedicated test)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "toggleconsole"
-status = "implemented"
-evidence = "dispatched in crates/cs-cvar/src/lib.rs and legacy cs-client"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "topcolor"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "touch_config_file"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "touch_emulate"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "touch_enable"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "ui_borderclip"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "ui_language"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "ui_renderworld"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "ui_show_window_stack"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "ui_showmodels"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "unbind"
@@ -2944,18 +2980,18 @@ evidence = "crates/cs-cvar/src/lib.rs::executes_cvars_binds_aliases_and_roundtri
 
 [[item]]
 id = "unbindall"
-status = "implemented"
-evidence = "dispatched in crates/cs-cvar/src/lib.rs (no dedicated test)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "unpause"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "crates/cs-engine/tests/console.rs::server_admin_commands_maps_version_ping_stats_user_serverinfo_localinfo_dropclient_pause_resetrcon_tell"
 
 [[item]]
 id = "user"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (rh_sv_main.cpp))"
+status = "tested"
+evidence = "crates/cs-engine/tests/console.rs::server_admin_commands_maps_version_ping_stats_user_serverinfo_localinfo_dropclient_pause_resetrcon_tell"
 
 [[item]]
 id = "users"
@@ -2964,93 +3000,93 @@ evidence = "crates/cs-engine/tests/phase11_admin.rs::pause_freezes_sv_time_and_s
 
 [[item]]
 id = "version"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "crates/cs-engine/tests/console.rs::server_admin_commands_maps_version_ping_stats_user_serverinfo_localinfo_dropclient_pause_resetrcon_tell"
 
 [[item]]
 id = "vgui_utf8"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "vibration_enable"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "vibration_length"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "vid_displayfrequency"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/video.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "vid_highdpi"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/video.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "vid_mode"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/video.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "vid_rotate"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/video.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "vid_scale"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/video.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "viewframe"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "viewmodel"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "viewnext"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "viewprev"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "viewsize"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "violence_ablood"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "violence_agibs"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "violence_hblood"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs (registered for Options Lock / Content Control tab)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "violence_hgibs"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "voice_avggain"
@@ -3064,13 +3100,13 @@ evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-cl
 
 [[item]]
 id = "voice_forcemicrecord"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/src/audio/native.rs (controls microphone capture open retries on native)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "voice_inputfromfile"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "voice_maxgain"
@@ -3079,13 +3115,13 @@ evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-cl
 
 [[item]]
 id = "voice_modenable"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/src/app.rs (gated with voice_enable before step_voice)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "voice_recordtofile"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "voice_scale"
@@ -3094,13 +3130,13 @@ evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-we
 
 [[item]]
 id = "voice_serverdebug"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "width"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/video.cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "writecfg"
@@ -3114,8 +3150,8 @@ evidence = "crates/cs-engine/src/console.rs (dispatched to BanList::write_id_cfg
 
 [[item]]
 id = "writeip"
-status = "implemented"
-evidence = "crates/cs-engine/src/console.rs (dispatched to BanList::write_ip_cfg)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "zoom_sensitivity_ratio"
@@ -3179,8 +3215,8 @@ evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs
 
 [[item]]
 id = "s_occfactor"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars (registered for config compatibility; retail hw.dll:FUN_101fd050 does not apply 48-unit wall occlusion multiplier)"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs::tests::bindtoggle_incrementvar_multvar_condump_userinfo_and_classic_defaults; crates/cs-client/tests/phase9_sound.rs::classic_audio_defaults_and_resampling_and_sound_list"
 
 [[item]]
 id = "sv_voicecodec"
@@ -3194,13 +3230,13 @@ evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-we
 
 [[item]]
 id = "cl_language"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs (registered); crates/cs-client/src/app.rs (selects LocalizationTable::load_language on startup)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_observercrosshair"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs (registered); crates/cs-client/src/ui/screens/spectator.rs (toggled in Spectator Settings)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "scr_centertime"
@@ -3209,23 +3245,23 @@ evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/ui/hud.rs; crat
 
 [[item]]
 id = "spec_autodirector"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs (registered); crates/cs-client/src/ui/screens/spectator.rs (toggled in Spectator Settings)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "spec_drawcone"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs (registered); crates/cs-client/src/app.rs (controls overview map view cones)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "spec_drawnames"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs (registered); crates/cs-client/src/app.rs (controls player names in overview map)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "spec_drawstatus"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs (registered); crates/cs-client/src/ui/screens/spectator.rs (toggled in Spectator Settings)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "cl_pitchdown"
@@ -3274,38 +3310,38 @@ evidence = "crates/cs-client/src/app.rs; crates/cs-clientcore/src/rcon.rs::tests
 
 [[item]]
 id = "rcon_address"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/src/app.rs"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "rcon_port"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/src/app.rs"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "password"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/src/app.rs"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "listipcfgfile"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "mp_logecho"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "mp_logfile"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "master_server"
-status = "implemented"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "tv_delay"
@@ -3314,8 +3350,8 @@ evidence = "crates/cs-hltv/src/proxy.rs::tests::upstream_hltv_handshake_a2s_info
 
 [[item]]
 id = "tv_name"
-status = "implemented"
-evidence = "crates/cs-hltv/src/proxy.rs (registered in HltvProxy::new / set_cvar)"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "tv_maxclients"
@@ -3346,3 +3382,18 @@ evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-en
 id = "sys_ticrate"
 status = "tested"
 evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/src/server.rs::tests::sys_ticrate_gates_early_frames_and_rate_cvars_apply_dynamically; crates/cs-server/src/proto48.rs::tests::parses_phase13_admin_replay_and_embed_flags"
+
+[[item]]
+id = "cl_yawspeed"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs::tests::bindtoggle_incrementvar_multvar_condump_userinfo_and_classic_defaults; crates/cs-client/src/input.rs::tests::keyboard_turn_lookup_strafe_and_klook_angles"
+
+[[item]]
+id = "cl_pitchspeed"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs::tests::bindtoggle_incrementvar_multvar_condump_userinfo_and_classic_defaults; crates/cs-client/src/input.rs::tests::keyboard_turn_lookup_strafe_and_klook_angles"
+
+[[item]]
+id = "cl_anglespeedkey"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs::tests::bindtoggle_incrementvar_multvar_condump_userinfo_and_classic_defaults; crates/cs-client/src/input.rs::tests::keyboard_turn_lookup_strafe_and_klook_angles"

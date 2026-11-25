@@ -239,6 +239,10 @@ impl Session {
         !matches!(self.kind, Kind::None)
     }
 
+    pub fn is_local(&self) -> bool {
+        matches!(self.kind, Kind::Local { .. })
+    }
+
     pub fn state(&self) -> Option<ConnState> {
         match &self.kind {
             Kind::Demo { .. } => Some(ConnState::InGame),
@@ -556,6 +560,37 @@ impl Session {
 
     pub fn set_client_cvar(&mut self, name: &str, value: &str) {
         with_conn_mut!(self, c => c.set_cvar(name, value), else ());
+    }
+
+    pub fn request_full_update(&mut self) {
+        with_conn_mut!(self, c => c.request_full_update(), else ());
+    }
+
+    pub fn delta_clear(&mut self) {
+        with_conn_mut!(self, c => c.delta_clear(), else ());
+    }
+
+    pub fn delta_stats_summary(&self) -> String {
+        with_conn!(self, c => c.delta_stats_summary(), else "No active session.".to_string())
+    }
+
+    pub fn precache_models_summary(&self) -> String {
+        match &self.kind {
+            Kind::Demo { player, .. } => {
+                let mut out = format!("Cached models ({}):\n", player.precache().models.len());
+                for (idx, e) in &player.precache().models {
+                    out.push_str(&format!("  {idx:>3}: {}\n", e.name));
+                }
+                out
+            }
+            _ => with_conn!(self, c => {
+                let mut out = format!("Cached models ({}):\n", c.precache().models.len());
+                for (idx, e) in &c.precache().models {
+                    out.push_str(&format!("  {idx:>3}: {}\n", e.name));
+                }
+                out
+            }, else "No active session.".to_string()),
+        }
     }
 
     #[cfg(test)]

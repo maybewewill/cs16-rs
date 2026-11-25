@@ -99,17 +99,21 @@ impl FuncBreakable {
             .ent(id)
             .map_or((Vec3::ZERO, Vec3::ZERO), |v| ((v.absmin + v.absmax) * 0.5, v.size));
         let gib_idx = eng.model_index(&self.gib_model).unwrap_or(0);
-        let te = tempent::break_model(
-            center,
-            size,
-            Vec3::new(0.0, 0.0, 80.0),
-            10,
-            gib_idx,
-            10,
-            25,
-            0,
-        );
-        eng.send_temp_entity(MsgDest::Pvs(center), &te);
+        let allow_gibs = !self.gib_model.to_ascii_lowercase().contains("flesh")
+            || crate::bullets::show_gibs(eng, true);
+        if allow_gibs {
+            let te = tempent::break_model(
+                center,
+                size,
+                Vec3::new(0.0, 0.0, 80.0),
+                10,
+                gib_idx,
+                10,
+                25,
+                0,
+            );
+            eng.send_temp_entity(MsgDest::Pvs(center), &te);
+        }
 
         if let Some(v) = eng.ent_mut(id) {
             v.solid = SOLID_NOT;

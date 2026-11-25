@@ -351,6 +351,17 @@ impl<G: GameDll> Server<G> {
     /// `signon_timeout_secs` of connecting or of the last map change, and clients from which
     /// no datagram was accepted for `timeout_secs`.
     pub(crate) fn drop_timed_out_clients(&mut self) {
+        let timeout_secs = match self.cvars.get("sv_timeout") {
+            Some(c) if c.value != c.default_value => {
+                let v = f64::from(c.as_f32());
+                if v.is_finite() && v > 0.0 {
+                    v
+                } else {
+                    self.cfg.timeout_secs
+                }
+            }
+            _ => self.cfg.timeout_secs,
+        };
         for slot in 0..self.cfg.max_clients {
             let client = &self.clients[usize::from(slot)];
             // `SV_CheckTimeouts` skips `fakeclient` (`sv_main.cpp` 4041).
@@ -359,7 +370,7 @@ impl<G: GameDll> Server<G> {
             }
             let stalled = matches!(client.state, ClientState::Signon(_))
                 && self.real_time - client.signon_since > self.cfg.signon_timeout_secs;
-            let silent = self.real_time - client.last_heard > self.cfg.timeout_secs;
+            let silent = self.real_time - client.last_heard > timeout_secs;
             if stalled || silent {
                 self.free_slot(slot);
             }

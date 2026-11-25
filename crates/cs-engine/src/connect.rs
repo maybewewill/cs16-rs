@@ -177,11 +177,17 @@ impl<G: GameDll> Server<G> {
                 duration_secs: (self.real_time - c.connected_at) as f32,
             })
             .collect();
+        let visible_max = self.cvars.get_i32("sv_visiblemaxplayers");
+        let max_players = if visible_max > 0 {
+            visible_max.min(255) as usize
+        } else {
+            usize::from(self.cfg.max_clients)
+        };
         let mut query = cs16_server_query_info(
             &self.hostname(),
             &self.map.name,
             players.len(),
-            usize::from(self.cfg.max_clients),
+            max_players,
             self.fake_client_count(),
         );
         let sv_pw = self.cvars.get_str("sv_password").trim();
@@ -210,6 +216,20 @@ impl<G: GameDll> Server<G> {
         );
         if self.bans.is_id_banned(&auth_id, self.real_time) {
             return encode_s2c_reject("STEAM UserID is banned.\n");
+        }
+        if request.userinfo.get("*hltv").is_some() {
+            let max_proxies = self.cvars.get_i32("sv_proxies").max(0) as usize;
+            let active_proxies = self
+                .clients
+                .iter()
+                .enumerate()
+                .filter(|(idx, c)| {
+                    !c.is_free() && self.views[*idx].userinfo.get("*hltv").is_some()
+                })
+                .count();
+            if active_proxies >= max_proxies {
+                return encode_s2c_reject("HLTV proxy slots are full (sv_proxies).\n");
+            }
         }
         let slot = match self.slot_of(&from) {
             Some(slot) => {

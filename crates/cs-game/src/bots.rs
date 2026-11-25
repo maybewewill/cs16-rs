@@ -1025,6 +1025,7 @@ fn gather_enemy_candidates(
         let oid = eng.client_edict(other as u8);
         if let Some(ov) = eng.ent(oid)
             && ov.deadflag == DEAD_NO
+            && (ov.flags & cs_engine::consts::FL_NOTARGET) == 0
         {
             let enemy_eye = ov.origin + ov.view_ofs;
             let aim = ov.origin.lerp(enemy_eye, 0.72);

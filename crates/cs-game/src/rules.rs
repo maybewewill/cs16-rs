@@ -1860,6 +1860,28 @@ pub(crate) fn think(g: &mut GameState, eng: &mut EngineApi<'_>) {
         }
         g.rules.max_rounds = non_negative_cvar(eng, "mp_maxrounds");
         g.rules.max_rounds_won = non_negative_cvar(eng, "mp_winlimit");
+        let timelimit = eng.cvar_f32("mp_timelimit");
+        let time_left = if timelimit.is_finite() && timelimit > 0.0 {
+            let total = f64::from(timelimit) * 60.0;
+            (total - (now - g.rules.game_start_time)).max(0.0).trunc() as i32
+        } else {
+            0
+        };
+        eng.set_cvar("mp_timeleft", &time_left.to_string());
+        let fraglimit = eng.cvar_f32("mp_fraglimit");
+        let frags_left = if fraglimit.is_finite() && fraglimit > 0.0 {
+            let max_frags = g
+                .players
+                .iter()
+                .flatten()
+                .map(|p| p.frags)
+                .max()
+                .unwrap_or(0);
+            ((fraglimit as i32) - max_frags).max(0)
+        } else {
+            0
+        };
+        eng.set_cvar("mp_fragsleft", &frags_left.to_string());
     }
 }
 

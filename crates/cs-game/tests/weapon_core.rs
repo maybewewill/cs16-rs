@@ -943,3 +943,50 @@ fn a_shotgun_clicks_once_when_fired_under_water() {
     assert_eq!(underwater_clicks(WeaponId::Xm1014, 3), 1);
     assert_eq!(underwater_clicks(WeaponId::Galil, 3), 3);
 }
+
+#[test]
+fn mp_infinite_ammo_1_and_2_and_timeleft_fragsleft() {
+    // Mode 1: infinite clip.
+    let mut b = armed_real(WeaponId::Usp);
+    let _ = b.server.console_command("mp_infinite_ammo 1");
+    b.run(|game, eng| {
+        weapon(game, WeaponId::Usp).next_primary_attack = 0.0;
+        let player = eng.client_edict(0);
+        eng.ent_mut(player).unwrap().waterlevel = 0;
+        eng.ent_mut(player).unwrap().button = i32::from(IN_ATTACK);
+        let attack = GoldSrcUserCmd { buttons: IN_ATTACK, ..Default::default() };
+        game.run_usercmd(eng, 0, &attack, 0);
+        game.post_usercmd(eng, 0, &attack);
+        assert_eq!(weapon(game, WeaponId::Usp).clip, 12, "mode 1 keeps clip at max_clip");
+    });
+
+    // Mode 2: infinite reserve ammo (clip still drops on fire, reload doesn't shrink reserve).
+    let _ = b.server.console_command("mp_infinite_ammo 2");
+    b.run(|game, eng| {
+        let ammo_ix = ammo_index("45acp") as usize;
+        press(game, eng, 0);
+        let before = game.player_ammo(0, ammo_ix).unwrap();
+        weapon(game, WeaponId::Usp).next_primary_attack = 0.0;
+        eng.ent_mut(eng.client_edict(0)).unwrap().button = i32::from(IN_ATTACK);
+        let attack = GoldSrcUserCmd { buttons: IN_ATTACK, ..Default::default() };
+        game.run_usercmd(eng, 0, &attack, 0);
+        game.post_usercmd(eng, 0, &attack);
+        assert!(weapon(game, WeaponId::Usp).clip < 12, "mode 2 consumes clip");
+        weapon(game, WeaponId::Usp).in_reload = true;
+        weapon(game, WeaponId::Usp).next_reload = 0.0;
+        press(game, eng, 0);
+        assert!(
+            game.player_ammo(0, ammo_ix).unwrap() >= before,
+            "mode 2 keeps reserve full"
+        );
+    });
+
+    // Rules think keeps mp_timeleft & mp_fragsleft updated once per second.
+    let _ = b.server.console_command("mp_timelimit 20");
+    b.run(|_, eng| eng.set_cvar("mp_fragsleft", "99"));
+    b.step(110);
+    let tl = b.run(|_, eng| eng.cvar_f32("mp_timeleft"));
+    let fl = b.run(|_, eng| eng.cvar_f32("mp_fragsleft"));
+    assert!(tl > 0.0, "expected positive mp_timeleft, got {tl}");
+    assert_eq!(fl, 0.0, "rules periodic think recomputes mp_fragsleft");
+}

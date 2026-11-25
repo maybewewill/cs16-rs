@@ -352,3 +352,67 @@ fn the_game_can_ask_for_a_map_change() {
     // Taken once.
     assert_eq!(h.server.take_pending_change_level(), None);
 }
+
+#[test]
+fn server_admin_commands_maps_version_ping_stats_user_serverinfo_localinfo_dropclient_pause_resetrcon_tell() {
+    let mut h = Harness::new(4);
+    h.server.set_available_maps(vec!["de_dust2".into(), "cs_office".into(), "de_inferno".into()]);
+    let mut a = joined(&mut h, "Alice", &mut []);
+    let mut b = joined(&mut h, "Bob", &mut [&mut a]);
+    h.step(&mut [&mut a, &mut b], 5);
+
+    let maps_all = out(&mut h, "maps *");
+    assert!(
+        maps_all.contains("de_dust2.bsp")
+            && maps_all.contains("cs_office.bsp")
+            && maps_all.contains("de_inferno.bsp"),
+        "{maps_all}"
+    );
+    let maps_de = out(&mut h, "maps de_");
+    assert!(maps_de.contains("de_dust2.bsp") && !maps_de.contains("cs_office"), "{maps_de}");
+
+    let ver = out(&mut h, "version");
+    assert!(ver.contains("Protocol version 48"), "{ver}");
+
+    let ping_out = out(&mut h, "ping");
+    assert!(ping_out.contains("Alice") && ping_out.contains("Bob"), "{ping_out}");
+
+    let stats_out = out(&mut h, "stats");
+    assert!(stats_out.contains("CPU") && stats_out.contains("FPS"), "{stats_out}");
+    assert_eq!(out(&mut h, "stat"), stats_out);
+
+    let user_out = out(&mut h, "user 1");
+    assert!(user_out.contains("Alice"), "{user_out}");
+
+    let sinfo = out(&mut h, "serverinfo");
+    assert!(sinfo.contains("sv_cheats") && sinfo.contains("sv_gravity"), "{sinfo}");
+
+    assert_eq!(out(&mut h, "localinfo nextmap de_nuke"), "");
+    let linfo = out(&mut h, "localinfo");
+    assert!(linfo.contains("nextmap") && linfo.contains("de_nuke"), "{linfo}");
+
+    let showinfo = out(&mut h, "showinfo nextmap");
+    assert!(showinfo.contains("de_nuke"), "{showinfo}");
+
+    out(&mut h, "setpause");
+    assert!(h.server.is_paused());
+    out(&mut h, "unpause");
+    assert!(!h.server.is_paused());
+
+    assert!(out(&mut h, "resetrcon").contains("RCON"), "resetrcon output");
+
+    a.clear_messages();
+    let _ = out(&mut h, "tell 1 \"secret ping\"");
+    h.step(&mut [&mut a, &mut b], 8);
+    assert!(prints(&a).iter().any(|t| t.contains("secret ping")));
+
+    match h.server.console_command("changelevel2 de_dust2") {
+        ConsoleOutcome::ChangeLevel(m) => assert_eq!(m, "de_dust2"),
+        other => panic!("expected ChangeLevel, got {other:?}"),
+    }
+
+    let drop_out = out(&mut h, "dropclient 2");
+    assert!(drop_out.contains("Dropped client in slot 2"), "{drop_out}");
+    h.step(&mut [&mut a, &mut b], 3);
+    assert_eq!(h.server.client_count(), 1);
+}

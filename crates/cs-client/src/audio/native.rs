@@ -193,6 +193,8 @@ impl AudioEngine {
         suit_volume: f32,
         room_off: bool,
         occlusion_factor: f32,
+        lerping: bool,
+        hisound: bool,
         mp3_volume: f32,
         bgm_enabled: bool,
         mp3_fade_time: f32,
@@ -201,8 +203,16 @@ impl AudioEngine {
             m.set_volumes(master_volume, suit_volume);
             m.set_room_off(room_off);
             m.set_occlusion_factor(occlusion_factor);
+            m.set_resampling(lerping, hisound);
         }
         self.music.set_params(mp3_volume, bgm_enabled, mp3_fade_time);
+    }
+
+    pub fn format_sound_list(&self) -> String {
+        self.mixer
+            .lock()
+            .map(|m| m.format_sound_list())
+            .unwrap_or_else(|_| "Audio mixer busy\n".to_string())
     }
 
     pub fn play_ui_click(&mut self, vfs: Option<&Vfs>, master_volume: f32) {

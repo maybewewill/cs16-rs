@@ -154,9 +154,26 @@ impl<G: GameDll> Server<G> {
                 return output("Cleared all log addresses\n");
             }
             "pause" => return self.console_pause(),
+            "setpause" => return self.console_set_pause(true),
+            "unpause" => return self.console_set_pause(false),
+            "resetrcon" => {
+                self.rcon.reset();
+                return output("RCON failure counters and IP bans reset.\n");
+            }
+            "version" => return self.console_version(),
+            "maps" => return self.console_maps(&argv[1..]),
+            "ping" => return self.console_ping(),
+            "stats" | "stat" => return self.console_stats(),
+            "user" => return self.console_user(&argv[1..]),
+            "serverinfo" => return self.console_serverinfo(&argv[1..]),
+            "localinfo" => return self.console_localinfo(&argv[1..]),
+            "showinfo" => return self.console_showinfo(&argv[1..]),
+            "fullinfo" => return output("fullinfo requires an active client connection\n"),
+            "dropclient" => return self.console_dropclient(&argv[1..]),
+            "tell" => return self.console_tell(&argv[1..]),
             "setmaster" => return self.console_setmaster(&argv[1..]),
             "say" => return self.console_say(&argv[1..]),
-            "changelevel" | "map" => return console_changelevel(&argv[1..]),
+            "changelevel" | "changelevel2" | "map" => return console_changelevel(&argv[1..]),
             "quit" | "exit" => return ConsoleOutcome::Quit,
             _ => {}
         }
@@ -495,10 +512,21 @@ impl<G: GameDll> Server<G> {
     }
 
     fn console_pause(&mut self) -> ConsoleOutcome {
+        self.console_set_pause(!self.paused)
+    }
+
+    fn console_set_pause(&mut self, paused: bool) -> ConsoleOutcome {
         if self.cvars.get_f32("pausable") <= 0.0 {
             return output("Cannot pause\n");
         }
-        self.paused = !self.paused;
+        if self.paused == paused {
+            return output(if paused {
+                "Server is already paused\n"
+            } else {
+                "Server is not paused\n"
+            });
+        }
+        self.paused = paused;
         let mut w = cs_proto48::bitbuf::MsgWriter::new();
         cs_proto48::messages::write_svc_setpause(&mut w, self.paused);
         let bytes = w.into_bytes();
@@ -512,6 +540,191 @@ impl<G: GameDll> Server<G> {
         } else {
             output("Server unpaused\n")
         }
+    }
+
+    fn console_version(&self) -> ConsoleOutcome {
+        output(format!(
+            "Protocol version 48\nExe version 1.1.2.7/Stdio (cstrike)\nExe build: 19:53:27 Aug 30 2023 ({}) [cs16-rs]\n",
+            self.cfg.build
+        ))
+    }
+
+    fn console_maps(&self, args: &[String]) -> ConsoleOutcome {
+        let needle = args
+            .first()
+            .map(|s| s.trim_matches('*').to_ascii_lowercase())
+            .unwrap_or_default();
+        let mut list: Vec<String> = if self.available_maps.is_empty() {
+            vec![self.map.name.clone()]
+        } else {
+            self.available_maps.clone()
+        };
+        list.sort();
+        list.dedup();
+        let mut out = String::from("-------------\n");
+        let mut shown = 0usize;
+        for m in &list {
+            if needle.is_empty() || m.to_ascii_lowercase().contains(&needle) {
+                out.push_str(&format!("{m}.bsp\n"));
+                shown += 1;
+            }
+        }
+        if shown == 0 {
+            out.push_str(&format!("No maps matching \"{}\"\n", clean(&needle)));
+        }
+        output(out)
+    }
+
+    fn console_ping(&self) -> ConsoleOutcome {
+        let mut out = String::from("Client ping times:\n");
+        let mut count = 0usize;
+        for (index, client) in self.clients.iter().enumerate() {
+            if client.is_free() {
+                continue;
+            }
+            count += 1;
+            let name = clean(self.views[index].userinfo.get("name").unwrap_or(""));
+            let ping = if client.fake { 0 } else { client.pings.ping_ms() };
+            out.push_str(&format!("{ping:>4} {name}\n"));
+        }
+        if count == 0 {
+            out.push_str("  (no connected clients)\n");
+        }
+        output(out)
+    }
+
+    fn console_stats(&self) -> ConsoleOutcome {
+        let active = self.clients.iter().filter(|c| !c.is_free()).count();
+        let users = self.clients.iter().filter(|c| !c.is_free() && !c.fake).count();
+        let uptime_mins = (self.real_time / 60.0).max(0.0);
+        let fps = self.cvars.get_f32("sys_ticrate").max(0.0);
+        output(format!(
+            "CPU   In    Out   Uptime  Users   FPS    Players\n 0.00  0.00  0.00 {uptime_mins:>6.1}  {users:>5}  {fps:>6.2}  {active:>7}\n"
+        ))
+    }
+
+    fn console_user(&self, args: &[String]) -> ConsoleOutcome {
+        let Some(target) = args.first() else {
+            return output("Usage: user <#userid | slot | name>\n");
+        };
+        let slot = match self.find_kick_target(target) {
+            Ok(s) => s,
+            Err(e) => return output(e),
+        };
+        let mut out = format!("Userinfo for slot {}:\n", slot + 1);
+        for (k, v) in self.views[usize::from(slot)].userinfo.iter() {
+            let val = if k.eq_ignore_ascii_case("password") || k.starts_with('*') {
+                "<hidden>"
+            } else {
+                v
+            };
+            out.push_str(&format!("  {:<20} {}\n", clean(k), clean(val)));
+        }
+        output(out)
+    }
+
+    fn console_serverinfo(&self, args: &[String]) -> ConsoleOutcome {
+        if let (Some(k), Some(v)) = (args.first(), args.get(1)) {
+            return output(format!(
+                "Use cvar command directly: \"{}\" = \"{}\"\n",
+                clean(k),
+                clean(v)
+            ));
+        }
+        let mut out = String::from("Server info settings:\n");
+        for c in self.cvars.vars().values() {
+            if c.flags.contains(cs_cvar::CVarFlags::SERVER) {
+                out.push_str(&format!(
+                    "  {:<26} {}\n",
+                    clean(&c.name),
+                    clean(&c.public_rules_value())
+                ));
+            }
+        }
+        output(out)
+    }
+
+    fn console_localinfo(&mut self, args: &[String]) -> ConsoleOutcome {
+        match args {
+            [] => {
+                if self.localinfo.is_empty() {
+                    return output("Local info settings: (empty)\n");
+                }
+                let mut out = String::from("Local info settings:\n");
+                for (k, v) in &self.localinfo {
+                    out.push_str(&format!("  {:<24} {}\n", clean(k), clean(v)));
+                }
+                output(out)
+            }
+            [key] => {
+                let k = key.to_ascii_lowercase();
+                match self.localinfo.get(&k) {
+                    Some(v) => output(format!("\"{}\" is \"{}\"\n", clean(&k), clean(v))),
+                    None => output(format!("\"{}\" is \"\"\n", clean(&k))),
+                }
+            }
+            [key, val, ..] => {
+                let k = key.to_ascii_lowercase();
+                if val.is_empty() {
+                    self.localinfo.remove(&k);
+                } else {
+                    self.localinfo.insert(k, val.clone());
+                }
+                output("")
+            }
+        }
+    }
+
+    fn console_showinfo(&self, args: &[String]) -> ConsoleOutcome {
+        let Some(key) = args.first() else {
+            return output("Usage: showinfo <key>\n");
+        };
+        if let Some(c) = self.cvars.get(key) {
+            return output(format!(
+                "\"{}\" is \"{}\"\n",
+                clean(&c.name),
+                clean(&c.public_rules_value())
+            ));
+        }
+        if let Some(v) = self.localinfo.get(&key.to_ascii_lowercase()) {
+            return output(format!("\"{}\" is \"{}\"\n", clean(key), clean(v)));
+        }
+        output(format!("\"{}\" is not set\n", clean(key)))
+    }
+
+    fn console_dropclient(&mut self, args: &[String]) -> ConsoleOutcome {
+        let Some(target) = args.first() else {
+            return output("Usage: dropclient <#userid | slot | name>\n");
+        };
+        let slot = match self.find_kick_target(target) {
+            Ok(s) => s,
+            Err(e) => return output(e),
+        };
+        self.kick(slot, "Dropped by server");
+        output(format!("Dropped client in slot {}\n", slot + 1))
+    }
+
+    fn console_tell(&mut self, args: &[String]) -> ConsoleOutcome {
+        let Some(target) = args.first() else {
+            return output("Usage: tell <#userid | slot | name> <message>\n");
+        };
+        if args.len() < 2 {
+            return output("Usage: tell <#userid | slot | name> <message>\n");
+        }
+        let slot = match self.find_kick_target(target) {
+            Ok(s) => s,
+            Err(e) => return output(e),
+        };
+        let msg = format!("(Console -> you): {}\n", clean(&args[1..].join(" ")));
+        let is_fake = self.clients[usize::from(slot)].fake;
+        if !is_fake {
+            let mut w = cs_proto48::bitbuf::MsgWriter::new();
+            cs_proto48::messages::write_svc_print(&mut w, &msg);
+            self.clients[usize::from(slot)]
+                .chan
+                .write_reliable(w.as_slice());
+        }
+        output("")
     }
 
     fn console_setmaster(&mut self, args: &[String]) -> ConsoleOutcome {

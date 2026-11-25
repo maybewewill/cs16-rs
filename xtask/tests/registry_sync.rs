@@ -72,3 +72,20 @@ fn every_registered_cvar_is_in_registry() {
         "cvars absent from cvars.toml: {missing:?}"
     );
 }
+
+#[test]
+fn every_cvars_toml_entry_is_registered_as_cvar_or_command() {
+    let registry = ids(&load("cvars"));
+    let cvars = CVarRegistry::new_with_defaults();
+    let commands: BTreeSet<String> = CVarRegistry::known_command_names()
+        .map(|s| s.to_ascii_lowercase())
+        .collect();
+    let unresolved: Vec<&String> = registry
+        .iter()
+        .filter(|id| !cvars.vars().contains_key(*id) && !commands.contains(*id))
+        .collect();
+    assert!(
+        unresolved.is_empty(),
+        "cvars.toml entries missing from CVarRegistry and KNOWN_COMMANDS: {unresolved:?}"
+    );
+}

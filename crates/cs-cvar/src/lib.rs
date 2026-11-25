@@ -3,11 +3,12 @@
 pub mod defaults;
 pub mod parser;
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::ops::{BitAnd, BitOr};
 
 pub const MAX_LOG_LINES: usize = 2000;
 pub const MAX_HISTORY: usize = 200;
+pub const MAX_WAIT_QUEUE: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CVarFlags(u32);
@@ -203,6 +204,36 @@ pub enum EngineAction {
     RconCommand(String),
     /// `setmaster <add|remove|enable|disable|list> [ip:port]`.
     SetMaster(Vec<String>),
+    /// `force_centerview` / `centerview`: reset view pitch to 0.
+    ForceCenterView,
+    /// `condump [filename]`: dump console log to file.
+    ConDump(Option<String>),
+    /// `retry`: reconnect to the last server address.
+    Retry,
+    /// `reconnect`: reconnect to the current or last server.
+    Reconnect,
+    /// `restart` / `_restart`: reload current local map cleanly.
+    RestartMap,
+    /// `shutdownserver`: stop local server and return to menu.
+    ShutdownServer,
+    /// `fullupdate`: reset client delta sequence and request uncompressed snapshot.
+    FullUpdate,
+    /// `dlfile <resource>`: request a file from the active server.
+    DlFile(String),
+    /// `showbriefing`: open map briefing / MOTD.
+    ShowBriefing,
+    /// `demos` / `startdemos` / `lastdemo`: demo playlist control.
+    Demos { kind: String, args: Vec<String> },
+    /// `displaysoundlist`: print active mixer sound channels.
+    DisplaySoundList,
+    /// `mcache`: print cached studio/BSP models.
+    MCache,
+    /// `delta_stats`: print delta encoder statistics.
+    DeltaStats,
+    /// `delta_clear`: clear delta frame history.
+    DeltaClear,
+    /// Server/admin console command (`maps`, `version`, `ping`, `stats`, `user`, etc.).
+    ServerCmd(Vec<String>),
     ActionInput { name: String, pressed: bool },
     /// A command the console does not know, handed on while the client is connected
     /// ([`CVarRegistry::set_forward_unknown`]): the shell sends the line to the server
@@ -214,10 +245,15 @@ const KNOWN_COMMANDS: &[(&str, &str)] = &[
     ("echo", "Print text to the console"),
     ("exec", "Execute a .cfg script file"),
     ("bind", "Bind a key to a command"),
+    ("bindtoggle", "Bind a key to toggle a CVar between 0 and 1"),
     ("unbind", "Remove a key binding"),
     ("unbindall", "Remove all key bindings"),
     ("alias", "Define a command alias"),
+    ("wait", "Defer remaining commands in buffer to next frame"),
     ("toggle", "Toggle a CVar between 0 and 1 (or cycle values)"),
+    ("incrementvar", "Add a delta to a CVar within [min, max]"),
+    ("multvar", "Multiply a CVar by a factor within [min, max]"),
+    ("condump", "Save console text buffer to condump000.txt"),
     ("cvarlist", "List registered CVars (optional prefix filter)"),
     ("cmdlist", "List available console commands"),
     ("find", "Search commands and CVars by substring"),
@@ -225,17 +261,74 @@ const KNOWN_COMMANDS: &[(&str, &str)] = &[
     ("help", "Show brief console usage help"),
     ("map", "Load a BSP map (e.g. map de_dust2)"),
     ("changelevel", "Change current map (alias for map)"),
+    ("changelevel2", "Change current map in multiplayer"),
     ("disconnect", "Disconnect from current map/server to main menu"),
+    ("retry", "Reconnect to the last server address"),
+    ("reconnect", "Reconnect to the current/last server"),
+    ("restart", "Restart current local map"),
+    ("_restart", "Restart current local map"),
+    ("shutdownserver", "Stop local server and disconnect to menu"),
+    ("fullupdate", "Force full uncompressed entity snapshot"),
+    ("dlfile", "Download a resource file from the connected server"),
+    ("showbriefing", "Display map briefing / MOTD window"),
+    ("demos", "Cycle/play queued demo playlist"),
+    ("startdemos", "Start playing a list of demos"),
+    ("lastdemo", "Replay the most recently played demo"),
+    ("displaysoundlist", "Print active audio mixer channels"),
+    ("mcache", "Print precached/loaded models"),
+    ("delta_stats", "Print delta compression statistics"),
+    ("delta_clear", "Reset delta compression baseline cache"),
     ("quit", "Exit the game"),
     ("exit", "Exit the game"),
     ("status", "Show current engine / map status"),
+    ("version", "Show engine build and Protocol 48 version"),
+    ("maps", "List available BSP maps (optional substring filter)"),
+    ("ping", "Show connected clients and ping"),
+    ("stats", "Show server/engine CPU and tick stats"),
+    ("stat", "Show server/engine CPU and tick stats"),
+    ("users", "List connected users"),
+    ("user", "Show sanitized userinfo for a player"),
+    ("serverinfo", "Show server info string"),
+    ("localinfo", "Show or set server localinfo key-value store"),
+    ("showinfo", "Show serverinfo / localinfo entry"),
+    ("fullinfo", "Send complete userinfo string to server"),
+    ("setinfo", "Show or update a userinfo key"),
+    ("dropclient", "Disconnect a client slot from server"),
+    ("kick", "Kick a client from server"),
+    ("banid", "Ban a Steam/Auth ID"),
+    ("removeid", "Remove a Steam/Auth ID ban"),
+    ("listid", "List banned Steam/Auth IDs"),
+    ("writeid", "Write banned IDs to bannedcfgfile"),
+    ("addip", "Ban an IP address"),
+    ("removeip", "Remove an IP ban"),
+    ("listip", "List banned IP addresses"),
+    ("writeip", "Write banned IPs to listipcfgfile"),
+    ("log", "Toggle server logging (on/off)"),
+    ("logaddress", "Set remote UDP log target"),
+    ("logaddress_add", "Add remote UDP log target"),
+    ("logaddress_del", "Remove remote UDP log target"),
+    ("pause", "Toggle server pause"),
+    ("setpause", "Pause the server"),
+    ("unpause", "Unpause the server"),
+    ("resetrcon", "Reset RCON failure counters and IP bans"),
+    ("motd", "Print message of the day"),
+    ("motd_write", "Write message of the day to motdfile"),
+    ("tell", "Send a private message to a player"),
     ("noclip", "Toggle free-camera flight mode"),
+    ("notarget", "Toggle FL_NOTARGET (bots ignore player, requires sv_cheats 1)"),
+    ("fly", "Toggle MOVETYPE_FLY flight mode (requires sv_cheats 1)"),
     ("setpos", "Teleport camera/player to X Y Z"),
     ("getpos", "Print current position and view angles"),
     ("writecfg", "Save archived CVars and binds to config.cfg"),
     ("connect", "Connect to a server ip:port"),
     ("screenshot", "Save a PNG screenshot of the current frame"),
+    ("snapshot", "Save a PNG screenshot of the current frame"),
     ("buy", "Open the weapon buy menu (or buy <item>)"),
+    ("buyequip", "Open the equipment buy menu"),
+    ("buyammo1", "Buy one primary ammo clip"),
+    ("buyammo2", "Buy one secondary ammo clip"),
+    ("autobuy", "Execute autobuy equipment purchase"),
+    ("rebuy", "Rebuy previous round equipment"),
     ("chooseteam", "Open team selection menu"),
     ("give", "Give a weapon directly (e.g. give ak47)"),
     ("god", "Toggle invulnerability"),
@@ -247,10 +340,27 @@ const KNOWN_COMMANDS: &[(&str, &str)] = &[
     ("bot_kick", "Kick all bots from the server"),
     ("say", "Send a chat message"),
     ("say_team", "Send a team chat message"),
+    ("messagemode", "Open global chat input"),
+    ("messagemode2", "Open team chat input"),
     ("drop", "Drop currently held weapon"),
     ("lastinv", "Switch to previously held weapon"),
     ("invnext", "Select next weapon in inventory"),
     ("invprev", "Select previous weapon in inventory"),
+    ("slot1", "Select weapon slot 1"),
+    ("slot2", "Select weapon slot 2"),
+    ("slot3", "Select weapon slot 3"),
+    ("slot4", "Select weapon slot 4"),
+    ("slot5", "Select weapon slot 5"),
+    ("slot6", "Select menu item 6"),
+    ("slot7", "Select menu item 7"),
+    ("slot8", "Select menu item 8"),
+    ("slot9", "Select menu item 9"),
+    ("slot10", "Select menu item 10 / close menu"),
+    ("nightvision", "Toggle night vision goggles"),
+    ("radio1", "Open standard radio menu"),
+    ("radio2", "Open group radio menu"),
+    ("radio3", "Open report radio menu"),
+    ("impulse", "Send impulse command (100=flashlight, 201=spray)"),
     ("mp3", "Control MP3 background music playback (play/loop/stop)"),
     ("cd", "Control CD/soundtrack track playback (play/loop/stop/off)"),
     ("play", "Play a sound effect locally"),
@@ -258,10 +368,57 @@ const KNOWN_COMMANDS: &[(&str, &str)] = &[
     ("spk", "Speak a sentences.txt / VOX phrase locally"),
     ("speak", "Speak a sentences.txt / VOX phrase locally"),
     ("stopsound", "Stop all active sounds"),
+    ("soundfade", "Fade audio volume over time"),
+    ("+attack", "Primary attack while held"),
+    ("-attack", "Release primary attack"),
+    ("+attack2", "Secondary attack while held"),
+    ("-attack2", "Release secondary attack"),
+    ("+forward", "Move forward while held"),
+    ("-forward", "Stop moving forward"),
+    ("+back", "Move backward while held"),
+    ("-back", "Stop moving backward"),
+    ("+moveleft", "Strafe left while held"),
+    ("-moveleft", "Stop strafing left"),
+    ("+moveright", "Strafe right while held"),
+    ("-moveright", "Stop strafing right"),
+    ("+moveup", "Swim/move upward while held"),
+    ("-moveup", "Stop moving upward"),
+    ("+movedown", "Swim/move downward while held"),
+    ("-movedown", "Stop moving downward"),
+    ("+left", "Turn view left while held"),
+    ("-left", "Stop turning left"),
+    ("+right", "Turn view right while held"),
+    ("-right", "Stop turning right"),
+    ("+lookup", "Pitch view up while held"),
+    ("-lookup", "Stop pitching up"),
+    ("+lookdown", "Pitch view down while held"),
+    ("-lookdown", "Stop pitching down"),
+    ("+strafe", "Mouse X strafes instead of turning while held"),
+    ("-strafe", "Stop mouse strafe mode"),
+    ("+klook", "Forward/back keys look up/down while held"),
+    ("-klook", "Stop keyboard look mode"),
+    ("+mlook", "Enable mouse look while held"),
+    ("-mlook", "Disable mouse look"),
+    ("+jlook", "Enable joystick look while held"),
+    ("-jlook", "Disable joystick look"),
+    ("+jump", "Jump while held"),
+    ("-jump", "Release jump"),
+    ("+duck", "Crouch while held"),
+    ("-duck", "Release crouch"),
+    ("+speed", "Walk slowly while held"),
+    ("-speed", "Release walk"),
+    ("+reload", "Reload weapon while held"),
+    ("-reload", "Release reload"),
+    ("+use", "Use entity/bomb/hostage while held"),
+    ("-use", "Release use"),
+    ("+showscores", "Show scoreboard while held"),
+    ("-showscores", "Hide scoreboard"),
     ("+voicerecord", "Transmit microphone voice while held"),
     ("-voicerecord", "Stop transmitting microphone voice"),
     ("+commandmenu", "Show CS 1.6 VGUI2 command menu while held"),
     ("-commandmenu", "Hide CS 1.6 VGUI2 command menu"),
+    ("force_centerview", "Center view pitch to horizon"),
+    ("centerview", "Center view pitch to horizon"),
     ("adjust_crosshair", "Cycle or set CS 1.6 crosshair color"),
     ("togglescores", "Toggle the multiplayer scoreboard"),
     ("playerlist", "Open the mute player list dialog"),
@@ -277,6 +434,24 @@ const KNOWN_COMMANDS: &[(&str, &str)] = &[
     ("spec_menu", "Show or hide spectator menu bar"),
     ("toggleconsole", "Open or close the developer console"),
     ("cancelselect", "Toggle pause menu"),
+    ("new", "Protocol 48 signon stage 1 command"),
+    ("sendres", "Protocol 48 signon resource request command"),
+    ("spawn", "Protocol 48 signon spawn command"),
+    ("sendents", "Protocol 48 signon entity request command"),
+    ("heartbeat", "Send master server heartbeat"),
+    ("reload", "Reload current map / save"),
+    ("hostage_stop", "Toggle hostage movement freeze"),
+    ("key_rotate", "[compat] Legacy key rotation toggle"),
+    ("viewframe", "[compat] Debug viewmodel frame"),
+    ("viewmodel", "[compat] Debug viewmodel"),
+    ("viewnext", "[compat] Cycle debug viewmodel"),
+    ("viewprev", "[compat] Cycle debug viewmodel"),
+    ("_set_vid_level", "[compat] Video level helper"),
+    ("_setaddons_folder", "[compat] Addons folder helper"),
+    ("_setgamedir", "[compat] Game directory helper"),
+    ("_sethdmodels", "[compat] HD models helper"),
+    ("_setrenderer", "[compat] Renderer helper"),
+    ("_setvideomode", "[compat] Video mode helper"),
 ];
 
 /// Commands that never go to a server, even when the console does not know them: the rcon and
@@ -316,6 +491,9 @@ pub struct CVarRegistry {
     history: VecDeque<String>,
     dirty: bool,
     forward_unknown: bool,
+    userinfo_dirty: BTreeSet<String>,
+    wait_frames: u32,
+    wait_queue: VecDeque<(Vec<String>, usize)>,
 }
 
 impl Default for CVarRegistry {
@@ -334,6 +512,9 @@ impl CVarRegistry {
             history: VecDeque::with_capacity(MAX_HISTORY),
             dirty: false,
             forward_unknown: false,
+            userinfo_dirty: BTreeSet::new(),
+            wait_frames: 0,
+            wait_queue: VecDeque::new(),
         }
     }
 
@@ -394,17 +575,61 @@ impl CVarRegistry {
     pub fn set(&mut self, name: &str, value: impl Into<String>) -> bool {
         let key = name.to_ascii_lowercase();
         let value = value.into();
-        if let Some(cvar) = self.vars.get_mut(&key) {
+        let changed = if let Some(cvar) = self.vars.get_mut(&key) {
             if cvar.value != value {
-                cvar.value = value;
+                cvar.value = value.clone();
                 if cvar.flags.contains(CVarFlags::ARCHIVE) {
                     self.dirty = true;
+                }
+                if cvar.flags.contains(CVarFlags::USERINFO) {
+                    self.userinfo_dirty.insert(key.clone());
                 }
             }
             true
         } else {
             false
+        };
+        if changed {
+            const MIRRORS: &[(&str, &str)] = &[
+                ("cl_autowepswitch", "_cl_autowepswitch"),
+                ("_cl_autowepswitch", "cl_autowepswitch"),
+                ("cl_allow_download", "cl_allowdownload"),
+                ("cl_allowdownload", "cl_allow_download"),
+                ("cl_allow_upload", "cl_allowupload"),
+                ("cl_allowupload", "cl_allow_upload"),
+            ];
+            for &(src, dst) in MIRRORS {
+                if key == src
+                    && let Some(peer) = self.vars.get_mut(dst)
+                    && peer.value != value
+                {
+                    peer.value = value.clone();
+                    if peer.flags.contains(CVarFlags::ARCHIVE) {
+                        self.dirty = true;
+                    }
+                    if peer.flags.contains(CVarFlags::USERINFO) {
+                        self.userinfo_dirty.insert(dst.to_string());
+                    }
+                }
+            }
         }
+        changed
+    }
+
+    /// Drains `FCVAR_USERINFO` CVars modified since the last call as `(name, value)` pairs.
+    pub fn take_dirty_userinfo(&mut self) -> Vec<(String, String)> {
+        let keys: Vec<String> = std::mem::take(&mut self.userinfo_dirty).into_iter().collect();
+        keys.into_iter()
+            .filter_map(|k| self.vars.get(&k).map(|c| (k, c.value.clone())))
+            .collect()
+    }
+
+    /// Returns all registered `FCVAR_USERINFO` CVars as `(name, value)` pairs.
+    pub fn userinfo_vars(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.vars
+            .values()
+            .filter(|c| c.flags.contains(CVarFlags::USERINFO))
+            .map(|c| (c.name.as_str(), c.value.as_str()))
     }
 
     /// Sets a CVar while enforcing GoldSrc `SPONLY`, `CHEAT`, `PRINTABLEONLY`, and
@@ -443,6 +668,10 @@ impl CVarRegistry {
 
     pub fn vars(&self) -> &BTreeMap<String, CVar> {
         &self.vars
+    }
+
+    pub fn known_command_names() -> impl Iterator<Item = &'static str> {
+        KNOWN_COMMANDS.iter().map(|(name, _)| *name)
     }
 
     pub fn binds(&self) -> &BTreeMap<String, String> {
@@ -532,12 +761,86 @@ impl CVarRegistry {
     }
 
     /// Execute a script (multi-line or semicolon-separated), returning actions for the engine.
+    ///
+    /// `wait` (`Cmd_Wait_f` / `Cbuf_ExecuteCommandsFromBuffer` in Xash3D FWGS
+    /// `engine/common/cmd.c`, read 2026-11-25) defers remaining commands in the buffer to
+    /// subsequent frames via [`Self::tick_wait_queue`].
     pub fn execute_script(&mut self, script: &str) -> Vec<EngineAction> {
         let mut actions = Vec::new();
-        for tokens in parser::parse_commands(script) {
-            self.execute_tokens(&tokens, 0, &mut actions);
+        let parsed: VecDeque<(Vec<String>, usize)> = parser::parse_commands(script)
+            .into_iter()
+            .map(|t| (t, 0))
+            .collect();
+        if self.wait_frames > 0 || !self.wait_queue.is_empty() {
+            for item in parsed {
+                if self.wait_queue.len() >= MAX_WAIT_QUEUE {
+                    self.warn("Command wait queue overflow; dropping trailing commands");
+                    break;
+                }
+                self.wait_queue.push_back(item);
+            }
+            return actions;
         }
+        self.drain_command_deque(parsed, &mut actions);
         actions
+    }
+
+    /// Runs one frame of commands deferred by `wait`.
+    pub fn tick_wait_queue(&mut self) -> Vec<EngineAction> {
+        let mut actions = Vec::new();
+        if self.wait_frames > 0 {
+            self.wait_frames -= 1;
+            return actions;
+        }
+        if self.wait_queue.is_empty() {
+            return actions;
+        }
+        let queued = std::mem::take(&mut self.wait_queue);
+        self.drain_command_deque(queued, &mut actions);
+        actions
+    }
+
+    /// Number of commands currently deferred in the `wait` queue.
+    pub fn pending_wait_count(&self) -> usize {
+        self.wait_queue.len()
+    }
+
+    fn drain_command_deque(
+        &mut self,
+        mut pending: VecDeque<(Vec<String>, usize)>,
+        actions: &mut Vec<EngineAction>,
+    ) {
+        while let Some((tokens, depth)) = pending.pop_front() {
+            let mut deferred = VecDeque::new();
+            let wait_count = self.execute_tokens_deferrable(&tokens, depth, actions, &mut deferred);
+            if let Some(frames) = wait_count {
+                // Prepend any remaining alias commands followed by the rest of `pending`.
+                let space = MAX_WAIT_QUEUE.saturating_sub(self.wait_queue.len());
+                let mut combined = VecDeque::new();
+                for item in deferred.into_iter().chain(pending).take(space) {
+                    combined.push_back(item);
+                }
+                while let Some(item) = combined.pop_back() {
+                    self.wait_queue.push_front(item);
+                }
+                self.wait_frames = frames.saturating_sub(1);
+                break;
+            }
+            // Prepend any un-deferred alias sub-commands (should already be executed unless wait happened).
+            while let Some(item) = deferred.pop_back() {
+                pending.push_front(item);
+            }
+        }
+    }
+
+    /// Format console log lines for `condump`.
+    pub fn format_console_dump(&self) -> String {
+        let mut out = String::new();
+        for line in &self.log {
+            out.push_str(&line.text);
+            out.push('\n');
+        }
+        out
     }
 
     /// Trigger a key press or release via the bind table.
@@ -550,19 +853,26 @@ impl CVarRegistry {
         } else {
             let mut actions = Vec::new();
             for tokens in parser::key_up_commands(&cmd) {
-                self.execute_tokens(&tokens, 0, &mut actions);
+                let mut deferred = VecDeque::new();
+                let _ = self.execute_tokens_deferrable(&tokens, 0, &mut actions, &mut deferred);
             }
             actions
         }
     }
 
-    fn execute_tokens(&mut self, tokens: &[String], depth: usize, actions: &mut Vec<EngineAction>) {
+    fn execute_tokens_deferrable(
+        &mut self,
+        tokens: &[String],
+        depth: usize,
+        actions: &mut Vec<EngineAction>,
+        deferred: &mut VecDeque<(Vec<String>, usize)>,
+    ) -> Option<u32> {
         if tokens.is_empty() {
-            return;
+            return None;
         }
         if depth > 16 {
             self.warn("Alias recursion limit reached");
-            return;
+            return None;
         }
 
         let cmd = tokens[0].to_ascii_lowercase();
@@ -570,10 +880,22 @@ impl CVarRegistry {
 
         // Check aliases first
         if let Some(body) = self.aliases.get(&cmd).cloned() {
-            for sub in parser::parse_commands(&body) {
-                self.execute_tokens(&sub, depth + 1, actions);
+            let subs = parser::parse_commands(&body);
+            for (idx, sub) in subs.iter().enumerate() {
+                let mut sub_deferred = VecDeque::new();
+                if let Some(wait_n) =
+                    self.execute_tokens_deferrable(sub, depth + 1, actions, &mut sub_deferred)
+                {
+                    for item in sub_deferred {
+                        deferred.push_back(item);
+                    }
+                    for rem in &subs[idx + 1..] {
+                        deferred.push_back((rem.clone(), depth + 1));
+                    }
+                    return Some(wait_n);
+                }
             }
-            return;
+            return None;
         }
 
         // `+action` / `-action` input commands
@@ -582,15 +904,35 @@ impl CVarRegistry {
                 name: rest.to_string(),
                 pressed: true,
             });
-            return;
+            return None;
         }
         if let Some(rest) = cmd.strip_prefix('-') {
             actions.push(EngineAction::ActionInput {
                 name: rest.to_string(),
                 pressed: false,
             });
+            return None;
+        }
+
+        if cmd == "wait" {
+            let frames = args
+                .first()
+                .and_then(|s| s.parse::<i32>().ok())
+                .unwrap_or(1)
+                .clamp(1, 600) as u32;
+            return Some(frames);
+        }
+
+        self.execute_tokens(tokens, depth, actions);
+        None
+    }
+
+    fn execute_tokens(&mut self, tokens: &[String], _depth: usize, actions: &mut Vec<EngineAction>) {
+        if tokens.is_empty() {
             return;
         }
+        let cmd = tokens[0].to_ascii_lowercase();
+        let args = &tokens[1..];
 
         match cmd.as_str() {
             "echo" => {
@@ -625,6 +967,69 @@ impl CVarRegistry {
                     self.bind(key, &body);
                 }
             },
+            "bindtoggle" => {
+                if args.len() >= 2 {
+                    let key = &args[0];
+                    let var = args[1].to_ascii_lowercase();
+                    self.bind(key, &format!("toggle {var}"));
+                } else {
+                    self.info("Usage: bindtoggle <key> <cvar>");
+                }
+            }
+            "incrementvar" => {
+                if args.len() < 4 {
+                    self.info("Usage: incrementvar <cvar> <minValue> <maxValue> <delta>");
+                    return;
+                }
+                let key = args[0].to_ascii_lowercase();
+                let (Ok(min_v), Ok(max_v), Ok(delta)) = (
+                    args[1].parse::<f64>(),
+                    args[2].parse::<f64>(),
+                    args[3].parse::<f64>(),
+                ) else {
+                    self.warn("incrementvar: invalid numeric arguments");
+                    return;
+                };
+                if !self.vars.contains_key(&key) {
+                    self.warn(format!("Unknown cvar \"{key}\""));
+                    return;
+                }
+                let cur = f64::from(self.get_f32(&key));
+                let mut next = cur + delta;
+                if next > max_v {
+                    next = min_v;
+                } else if next < min_v {
+                    next = max_v;
+                }
+                let formatted = format_cvar_number(next);
+                self.set(&key, formatted);
+            }
+            "multvar" => {
+                if args.len() < 4 {
+                    self.info("Usage: multvar <cvar> <minValue> <maxValue> <factor>");
+                    return;
+                }
+                let key = args[0].to_ascii_lowercase();
+                let (Ok(min_v), Ok(max_v), Ok(factor)) = (
+                    args[1].parse::<f64>(),
+                    args[2].parse::<f64>(),
+                    args[3].parse::<f64>(),
+                ) else {
+                    self.warn("multvar: invalid numeric arguments");
+                    return;
+                };
+                if !self.vars.contains_key(&key) {
+                    self.warn(format!("Unknown cvar \"{key}\""));
+                    return;
+                }
+                let cur = f64::from(self.get_f32(&key));
+                let next = (cur * factor).clamp(min_v.min(max_v), min_v.max(max_v));
+                let formatted = format_cvar_number(next);
+                self.set(&key, formatted);
+            }
+            "condump" => {
+                actions.push(EngineAction::ConDump(args.first().cloned()));
+            }
             "unbind" => {
                 if let Some(key) = args.first() {
                     self.unbind(key);
@@ -755,9 +1160,49 @@ impl CVarRegistry {
                 }
             }
             "disconnect" => actions.push(EngineAction::Disconnect),
+            "retry" => actions.push(EngineAction::Retry),
+            "reconnect" => actions.push(EngineAction::Reconnect),
+            "restart" | "_restart" => actions.push(EngineAction::RestartMap),
+            "shutdownserver" => actions.push(EngineAction::ShutdownServer),
+            "fullupdate" => actions.push(EngineAction::FullUpdate),
+            "dlfile" => {
+                if let Some(res) = args.first() {
+                    actions.push(EngineAction::DlFile(res.clone()));
+                } else {
+                    self.info("Usage: dlfile <resource>");
+                }
+            }
+            "showbriefing" => actions.push(EngineAction::ShowBriefing),
+            "demos" | "startdemos" | "lastdemo" => {
+                actions.push(EngineAction::Demos {
+                    kind: cmd,
+                    args: args.to_vec(),
+                });
+            }
+            "displaysoundlist" => actions.push(EngineAction::DisplaySoundList),
+            "mcache" => actions.push(EngineAction::MCache),
+            "delta_stats" => actions.push(EngineAction::DeltaStats),
+            "delta_clear" => actions.push(EngineAction::DeltaClear),
             "quit" | "exit" => actions.push(EngineAction::Quit),
             "status" => actions.push(EngineAction::Status),
+            "force_centerview" | "centerview" => actions.push(EngineAction::ForceCenterView),
             "noclip" => actions.push(EngineAction::ToggleNoclip),
+            "notarget" | "fly" | "autobuy" | "rebuy" | "setinfo" | "fullinfo" | "new"
+            | "sendres" | "spawn" | "sendents" => {
+                if self.forward_unknown {
+                    actions.push(EngineAction::Forward(tokens.to_vec()));
+                } else if cmd == "notarget" || cmd == "fly" {
+                    self.warn(format!("\"{cmd}\" requires an active game session"));
+                }
+            }
+            "maps" | "version" | "ping" | "stats" | "stat" | "users" | "user" | "serverinfo"
+            | "localinfo" | "showinfo" | "dropclient" | "kick" | "banid" | "removeid"
+            | "listid" | "writeid" | "addip" | "removeip" | "listip" | "writeip" | "log"
+            | "logaddress" | "logaddress_add" | "logaddress_del" | "pause" | "setpause"
+            | "unpause" | "resetrcon" | "changelevel2" | "motd" | "motd_write" | "tell"
+            | "hostage_stop" => {
+                actions.push(EngineAction::ServerCmd(tokens.to_vec()));
+            }
             "getpos" => actions.push(EngineAction::GetPos),
             "setpos" => {
                 if args.len() >= 3
@@ -780,7 +1225,7 @@ impl CVarRegistry {
                     self.info("Usage: connect <ip:port>");
                 }
             }
-            "screenshot" => {
+            "screenshot" | "snapshot" => {
                 actions.push(EngineAction::Screenshot(args.first().cloned()));
             }
             "buy" => {
@@ -857,6 +1302,11 @@ impl CVarRegistry {
             "slot3" => actions.push(EngineAction::SelectSlot(3)),
             "slot4" => actions.push(EngineAction::SelectSlot(4)),
             "slot5" => actions.push(EngineAction::SelectSlot(5)),
+            "slot6" => actions.push(EngineAction::SelectSlot(6)),
+            "slot7" => actions.push(EngineAction::SelectSlot(7)),
+            "slot8" => actions.push(EngineAction::SelectSlot(8)),
+            "slot9" => actions.push(EngineAction::SelectSlot(9)),
+            "slot10" => actions.push(EngineAction::SelectSlot(10)),
             "mp3" => actions.push(EngineAction::Mp3Command(args.to_vec())),
             "cd" => actions.push(EngineAction::CdCommand(args.to_vec())),
             "play" => {
@@ -935,6 +1385,11 @@ impl CVarRegistry {
             }
             "toggleconsole" => actions.push(EngineAction::ToggleConsole),
             "cancelselect" => actions.push(EngineAction::ToggleMenu),
+            "heartbeat" | "reload" | "soundfade" | "key_rotate" | "viewframe" | "viewmodel"
+            | "viewnext" | "viewprev" | "_set_vid_level" | "_setaddons_folder"
+            | "_setgamedir" | "_sethdmodels" | "_setrenderer" | "_setvideomode" => {
+                // Handled/accepted legacy and compatibility commands (no unknown-command warning).
+            }
             _ => {
                 // Check if it is a registered CVar
                 if let Some(existing) = self.vars.get(&cmd).cloned() {
@@ -1037,6 +1492,18 @@ pub fn normalize_key_name(key: &str) -> String {
         "lalt" | "ralt" => "alt".to_string(),
         "return" => "enter".to_string(),
         other => other.to_string(),
+    }
+}
+
+fn format_cvar_number(v: f64) -> String {
+    if !v.is_finite() {
+        return "0".to_string();
+    }
+    if (v - v.round()).abs() < 1e-6 {
+        format!("{}", v.round() as i64)
+    } else {
+        let s = format!("{v:.6}");
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
     }
 }
 
@@ -1287,5 +1754,79 @@ mod tests {
             vec![EngineAction::InvNext]
         );
         assert!(reg.handle_key_bind("mwheeldown", false).is_empty());
+    }
+
+    #[test]
+    fn wait_defers_remaining_script_commands_and_guards_overflow() {
+        let mut reg = CVarRegistry::new_with_defaults();
+        let out = reg.execute_script("echo a; wait; echo b; wait 2; echo c");
+        assert!(out.is_empty());
+        assert_eq!(reg.pending_wait_count(), 3);
+        assert!(reg.log_lines().iter().any(|l| l.text == "a"));
+        assert!(!reg.log_lines().iter().any(|l| l.text == "b"));
+
+        // Frame 1: `echo b` runs and stops at `wait 2`.
+        assert!(reg.tick_wait_queue().is_empty());
+        assert!(reg.log_lines().iter().any(|l| l.text == "b"));
+        assert!(!reg.log_lines().iter().any(|l| l.text == "c"));
+
+        // Frame 2: second wait decrements (still 1 frame left).
+        assert!(reg.tick_wait_queue().is_empty());
+        assert!(!reg.log_lines().iter().any(|l| l.text == "c"));
+
+        // Frame 3: `echo c` executes.
+        assert!(reg.tick_wait_queue().is_empty());
+        assert!(reg.log_lines().iter().any(|l| l.text == "c"));
+        assert_eq!(reg.pending_wait_count(), 0);
+
+        // Alias containing `wait` defers remaining alias commands as well.
+        reg.execute_script("alias step_test \"echo s1; wait; echo s2\"; step_test");
+        assert!(reg.log_lines().iter().any(|l| l.text == "s1"));
+        assert!(!reg.log_lines().iter().any(|l| l.text == "s2"));
+        let _ = reg.tick_wait_queue();
+        assert!(reg.log_lines().iter().any(|l| l.text == "s2"));
+
+        // Bounded queue guard prevents runaway scripts from hanging or OOM.
+        let flood = "wait; ".repeat(MAX_WAIT_QUEUE + 50);
+        let _ = reg.execute_script(&flood);
+        assert!(reg.pending_wait_count() <= MAX_WAIT_QUEUE);
+    }
+
+    #[test]
+    fn bindtoggle_incrementvar_multvar_condump_userinfo_and_classic_defaults() {
+        let mut reg = CVarRegistry::new_with_defaults();
+        assert_eq!(reg.get_str("s_occfactor"), "0");
+        assert_eq!(reg.get_str("s_lerping"), "1");
+        assert_eq!(reg.get_str("hisound"), "1");
+        assert_eq!(reg.get_str("cl_yawspeed"), "210");
+        assert_eq!(reg.get_str("cl_pitchspeed"), "225");
+        assert_eq!(reg.get_str("cl_anglespeedkey"), "0.67");
+
+        reg.set("crosshair", "1");
+        let _ = reg.execute_script("bindtoggle x crosshair");
+        assert_eq!(reg.bind_for_key("x"), Some("toggle crosshair"));
+        let _ = reg.execute_script("incrementvar crosshair 0 1 1");
+        assert_eq!(reg.get_str("crosshair"), "0");
+        let _ = reg.execute_script("incrementvar crosshair 0 1 1");
+        assert_eq!(reg.get_str("crosshair"), "1");
+
+        reg.set("sensitivity", "2");
+        let _ = reg.execute_script("multvar sensitivity 1 5 1.5");
+        assert_eq!(reg.get_str("sensitivity"), "3");
+        let _ = reg.execute_script("multvar sensitivity 1 5 3");
+        assert_eq!(reg.get_str("sensitivity"), "5");
+
+        assert_eq!(
+            reg.execute_script("condump mylog.txt"),
+            vec![EngineAction::ConDump(Some("mylog.txt".into()))]
+        );
+        let _ = reg.execute_console_line("echo dump_probe");
+        assert!(reg.format_console_dump().contains("dump_probe"));
+
+        let _ = reg.take_dirty_userinfo();
+        reg.set("cl_autowepswitch", "0");
+        let dirty = reg.take_dirty_userinfo();
+        assert!(dirty.iter().any(|(k, v)| k == "_cl_autowepswitch" && v == "0"));
+        assert_eq!(reg.get_str("_cl_autowepswitch"), "0");
     }
 }

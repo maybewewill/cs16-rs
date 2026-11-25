@@ -115,6 +115,44 @@ impl InputActionState {
         self.wheel_pixel_accum = 0.0;
     }
 
+    /// Applies keyboard turn/pitch binds (`+left`, `+right`, `+lookup`, `+lookdown`, and
+    /// `+klook` forward/back) using `cl_yawspeed`, `cl_pitchspeed`, and `cl_anglespeedkey`.
+    pub fn apply_keyboard_angles(
+        &self,
+        camera: &mut crate::camera::Camera,
+        p: &KeyboardLookParams,
+    ) {
+        if !p.dt.is_finite() || p.dt <= 0.0 {
+            return;
+        }
+        let speed_mul = if self.active_actions.contains("speed") {
+            finite_or_zero(p.anglespeedkey)
+        } else {
+            1.0
+        };
+        let yaw_dir = f32::from(self.active_actions.contains("left"))
+            - f32::from(self.active_actions.contains("right"));
+        if yaw_dir != 0.0 {
+            let yaw = if camera.yaw_deg.is_finite() { camera.yaw_deg } else { 0.0 };
+            camera.yaw_deg =
+                (yaw + yaw_dir * finite_or_zero(p.yawspeed) * speed_mul * p.dt).rem_euclid(360.0);
+        }
+        let mut pitch_dir = f32::from(self.active_actions.contains("lookdown"))
+            - f32::from(self.active_actions.contains("lookup"));
+        if self.active_actions.contains("klook") {
+            pitch_dir += f32::from(self.active_actions.contains("back"))
+                - f32::from(self.active_actions.contains("forward"));
+        }
+        if pitch_dir != 0.0 {
+            let max_up = if p.pitch_up.is_finite() { p.pitch_up.clamp(1.0, 89.9) } else { 89.0 };
+            let max_dn = if p.pitch_down.is_finite() { p.pitch_down.clamp(1.0, 89.9) } else { 89.0 };
+            let pitch = if camera.pitch_deg.is_finite() { camera.pitch_deg } else { 0.0 };
+            camera.pitch_deg =
+                (pitch + pitch_dir * finite_or_zero(p.pitchspeed) * speed_mul * p.dt)
+                    .clamp(-max_up, max_dn);
+        }
+    }
+
     /// Accumulates a wheel delta (`LineDelta` when `is_line_delta`, else `PixelDelta` at
     /// `120.0` px/notch) and returns the signed notch count (`> 0` up, `< 0` down).
     pub fn accumulate_wheel(&mut self, delta_y: f32, is_line_delta: bool) -> i32 {
@@ -124,6 +162,30 @@ impl InputActionState {
             &mut self.wheel_pixel_accum
         };
         accumulate_wheel_notches(accum, delta_y, is_line_delta)
+    }
+}
+
+/// Keyboard turn and look rates (`cl_yawspeed`, `cl_pitchspeed`, `cl_anglespeedkey`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KeyboardLookParams {
+    pub dt: f32,
+    pub yawspeed: f32,
+    pub pitchspeed: f32,
+    pub anglespeedkey: f32,
+    pub pitch_up: f32,
+    pub pitch_down: f32,
+}
+
+impl Default for KeyboardLookParams {
+    fn default() -> Self {
+        Self {
+            dt: 0.01,
+            yawspeed: 210.0,
+            pitchspeed: 225.0,
+            anglespeedkey: 0.67,
+            pitch_up: 89.0,
+            pitch_down: 89.0,
+        }
     }
 }
 
@@ -251,11 +313,16 @@ pub fn build_usercmd(
         finite_or_zero(view_angles.y),
         finite_or_zero(view_angles.z),
     );
+    let forward_move = if held.on("klook") {
+        0.0
+    } else {
+        (key("forward") * forward_speed - key("back") * back_speed) * walk
+    };
     GoldSrcUserCmd {
         lerp_msec: p.lerp_msec,
         msec: p.msec,
         viewangles: safe_angles,
-        forwardmove: (key("forward") * forward_speed - key("back") * back_speed) * walk,
+        forwardmove: forward_move,
         sidemove: (key("moveright") - key("moveleft")) * side_speed * walk,
         // +moveup / +movedown: swimming and ladders (jump and duck are buttons).
         upmove: (key("moveup") - key("movedown")) * up_speed,
@@ -747,5 +814,54 @@ mod tests {
             Some("weapon_hegrenade")
         );
         assert_eq!(buckets.active_slot, None);
+    }
+
+    #[test]
+    fn keyboard_turn_lookup_strafe_and_klook_angles() {
+        let mut cam = crate::camera::Camera {
+            yaw_deg: 90.0,
+            pitch_deg: 0.0,
+            ..Default::default()
+        };
+
+        let mut st = InputActionState::default();
+        st.apply_action_input("left", true);
+        let p = KeyboardLookParams {
+            dt: 0.5,
+            yawspeed: 210.0,
+            pitchspeed: 225.0,
+            anglespeedkey: 0.67,
+            pitch_up: 89.0,
+            pitch_down: 89.0,
+        };
+        st.apply_keyboard_angles(&mut cam, &p);
+        assert!((cam.yaw_deg - 195.0).abs() < 1e-4);
+
+        st.apply_action_input("speed", true);
+        st.apply_keyboard_angles(&mut cam, &p);
+        assert!((cam.yaw_deg - (195.0 + 210.0 * 0.67 * 0.5)).abs() < 1e-3);
+        st.apply_action_input("left", false);
+        st.apply_action_input("speed", false);
+
+        st.apply_action_input("lookup", true);
+        st.apply_keyboard_angles(&mut cam, &p);
+        assert!((cam.pitch_deg - (-112.5_f32).clamp(-89.0, 89.0)).abs() < 1e-4);
+        st.apply_action_input("lookup", false);
+
+        // +klook converts +forward/+back into pitch and zeros usercmd forwardmove.
+        cam.pitch_deg = 0.0;
+        st.apply_action_input("klook", true);
+        st.apply_action_input("forward", true);
+        st.apply_action_input("moveup", true);
+        st.apply_keyboard_angles(&mut cam, &p);
+        assert!(cam.pitch_deg < -80.0);
+        let cmd = build_usercmd(
+            &st.held(true),
+            Vec3::new(cam.pitch_deg, cam.yaw_deg, 0.0),
+            CmdParams::default(),
+            &MoveSpeeds::default(),
+        );
+        assert_eq!(cmd.forwardmove, 0.0);
+        assert_eq!(cmd.upmove, 320.0);
     }
 }

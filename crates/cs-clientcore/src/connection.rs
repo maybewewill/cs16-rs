@@ -539,6 +539,16 @@ impl<T: PacketTransport> Connection<T> {
         if self.cvars.set(name, value).is_none() {
             return;
         }
+        // Keep `cl_allow_download`/`cl_allowdownload` and `cl_allow_upload`/`cl_allowupload` mirrored.
+        if name.eq_ignore_ascii_case("cl_allow_download") {
+            let _ = self.cvars.set("cl_allowdownload", value);
+        } else if name.eq_ignore_ascii_case("cl_allowdownload") {
+            let _ = self.cvars.set("cl_allow_download", value);
+        } else if name.eq_ignore_ascii_case("cl_allow_upload") {
+            let _ = self.cvars.set("cl_allowupload", value);
+        } else if name.eq_ignore_ascii_case("cl_allowupload") {
+            let _ = self.cvars.set("cl_allow_upload", value);
+        }
         // Task 4 hook: ex_interp / cl_nointerp / cl_updaterate may have changed.
         self.frames.apply_cvars(&self.cvars);
         let Some(var) = self.cvars.find(name) else {
@@ -551,6 +561,35 @@ impl<T: PacketTransport> Connection<T> {
                 self.send_stringcmd(&format!("setinfo \"{key}\" \"{value}\"\n"));
             }
         }
+    }
+
+    /// `CL_FullUpdate_f`: resets delta sequence so the next outgoing packet requests an
+    /// uncompressed snapshot, and notifies the server with `fullupdate`.
+    pub fn request_full_update(&mut self) {
+        self.last_entity_seq = None;
+        self.forced_delta_seq = None;
+        self.frames.reset();
+        if self.chan.is_some() {
+            self.send_stringcmd("fullupdate");
+        }
+    }
+
+    /// Clears the delta frame cache (`delta_clear`).
+    pub fn delta_clear(&mut self) {
+        self.last_entity_seq = None;
+        self.forced_delta_seq = None;
+        self.frames.reset();
+    }
+
+    /// Formats delta compression statistics (`delta_stats`).
+    pub fn delta_stats_summary(&self) -> String {
+        format!(
+            "delta_stats: full_updates={} delta_updates={} last_dgram={}B valid_seq={}",
+            self.stats.full_updates,
+            self.stats.delta_updates,
+            self.stats.last_datagram,
+            self.frames.valid_sequence,
+        )
     }
 
     pub fn userinfo(&self) -> &InfoString {

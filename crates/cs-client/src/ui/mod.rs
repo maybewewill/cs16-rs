@@ -224,6 +224,9 @@ pub fn draw_crosshair_vgui(
     state: &mut CrosshairState,
     inputs: &CrosshairInputs,
 ) {
+    if !cvars.get_bool("crosshair") {
+        return;
+    }
     let screen = ctx.content_rect();
     let sw = screen.width().round() as i32;
     let sh = screen.height().round() as i32;
@@ -317,6 +320,63 @@ pub fn draw_net_graph(ctx: &egui::Context, cvars: &CVarRegistry, t: &FrameTeleme
         painter.text(pos, align, line, font.clone(), gold);
     }
     let _ = palette;
+}
+
+/// Draw classic top-left `cl_showfps 1` framerate readout and `con_notifytime` recent lines.
+pub fn draw_top_left_console_overlays(
+    ctx: &egui::Context,
+    cvars: &CVarRegistry,
+    fps: f32,
+    notify_lines: &[(String, f64)],
+    now_sec: f64,
+    console_open: bool,
+) {
+    let show_fps = cvars.get_i32("cl_showfps") != 0;
+    let notify_time = f64::from(cvars.get_f32("con_notifytime").max(0.0));
+    let show_notify = !console_open && notify_time > 0.0;
+    if !show_fps && !show_notify {
+        return;
+    }
+    let screen = ctx.content_rect();
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::unique("cs16_top_left_overlays"),
+    ));
+    let font = FontId::monospace(13.0);
+    let mut y = screen.top() + 8.0;
+    if show_fps {
+        let fps_val = if fps.is_finite() { fps.round().max(0.0) } else { 0.0 };
+        let col = if fps_val >= 60.0 {
+            Color32::from_rgb(80, 255, 80)
+        } else if fps_val >= 30.0 {
+            Color32::from_rgb(255, 220, 60)
+        } else {
+            Color32::from_rgb(255, 80, 80)
+        };
+        let label = format!("{fps_val:.0} fps");
+        let pos = Pos2::new(screen.left() + 8.0, y);
+        painter.text(pos + egui::vec2(1.0, 1.0), egui::Align2::LEFT_TOP, &label, font.clone(), Color32::BLACK);
+        painter.text(pos, egui::Align2::LEFT_TOP, &label, font.clone(), col);
+        y += 18.0;
+    }
+    if show_notify {
+        let con_col = crate::ui::hud::HudExtrasContext::default().con_color;
+        let _ = con_col;
+        for (line, _ts) in notify_lines
+            .iter()
+            .filter(|(_, ts)| now_sec - *ts <= notify_time)
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
+            let pos = Pos2::new(screen.left() + 8.0, y);
+            painter.text(pos + egui::vec2(1.0, 1.0), egui::Align2::LEFT_TOP, line, font.clone(), Color32::BLACK);
+            painter.text(pos, egui::Align2::LEFT_TOP, line, font.clone(), Color32::from_rgb(255, 195, 65));
+            y += 15.0;
+        }
+    }
 }
 
 pub fn parse_rgb(s: &str) -> (u8, u8, u8) {

@@ -145,6 +145,9 @@ impl LocalGame {
             ..ServerConfig::default()
         };
         let mut server = new_server_with(cfg, map, game, vfs.as_ref());
+        if let Some(vfs) = &vfs {
+            server.set_available_maps(vfs.list_maps());
+        }
         if opts.bots > 0 {
             let _ = server.console_command(&format!("bot_quota {}", opts.bots));
         }
