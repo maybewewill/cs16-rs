@@ -105,6 +105,19 @@ impl WeaponBehavior for C4 {
                 w.weapon.next_primary_attack = w.get_next_attack_delay(1.0);
                 return;
             }
+            let origin = w.eng.ent(id).map_or(Vec3::ZERO, |v| v.origin);
+            let mut plant_ctx = cs_mod_api::BombEventCtx {
+                slot: Some(w.slot),
+                origin: origin.to_array(),
+                has_kit: false,
+            };
+            if crate::mod_hooks::fire_hook(w.g, w.eng, |sink, g, eng| {
+                sink.on_bomb_planting(g, eng, cs_mod_api::HookPhase::Pre, &mut plant_ctx)
+            }) == cs_mod_api::HookAction::Supercede
+            {
+                w.weapon.next_primary_attack = w.get_next_attack_delay(0.5);
+                return;
+            }
             self.started_arming = true;
             self.bomb_placed_animation = false;
             self.armed_time = w.now() + C4_ARMING_ON_TIME;
@@ -112,8 +125,27 @@ impl WeaponBehavior for C4 {
             crate::player::freeze_max_speed(w.eng, w.slot);
             w.set_animation(PlayerAnim::Attack1);
             crate::player::set_progress_bar_time(w.g, w.eng, w.slot, C4_ARMING_ON_TIME as i32);
+            let _ = crate::mod_hooks::fire_hook(w.g, w.eng, |sink, g, eng| {
+                sink.on_bomb_planting(g, eng, cs_mod_api::HookPhase::Post, &mut plant_ctx)
+            });
         } else if place_bomb {
             if self.armed_time <= w.now() {
+                let origin = w.eng.ent(id).map_or(Vec3::ZERO, |v| v.origin);
+                let mut planted_ctx = cs_mod_api::BombEventCtx {
+                    slot: Some(w.slot),
+                    origin: origin.to_array(),
+                    has_kit: false,
+                };
+                if crate::mod_hooks::fire_hook(w.g, w.eng, |sink, g, eng| {
+                    sink.on_bomb_planted(g, eng, cs_mod_api::HookPhase::Pre, &mut planted_ctx)
+                }) == cs_mod_api::HookAction::Supercede
+                {
+                    self.started_arming = false;
+                    self.armed_time = 0.0;
+                    w.reset_max_speed(self);
+                    crate::player::set_progress_bar_time(w.g, w.eng, w.slot, 0);
+                    return;
+                }
                 self.started_arming = false;
                 self.armed_time = 0.0;
 
@@ -121,11 +153,11 @@ impl WeaponBehavior for C4 {
                 w.player_mut().has_c4 = false;
 
                 // Vanilla (`!REGAMEDLL_FIXES`): planted bomb angles are zero.
-                let origin = w.eng.ent(id).map_or(Vec3::ZERO, |v| v.origin);
                 let bomb_id =
                     crate::grenade::shoot_satchel_charge(w.g, w.eng, id, origin, Vec3::ZERO);
                 let bomb_origin =
                     bomb_id.and_then(|b| w.eng.ent(b)).map_or(origin, |v| v.origin);
+                planted_ctx.origin = bomb_origin.to_array();
 
                 w.eng.send_usermsg(
                     cs_engine::MsgDest::All,
@@ -137,6 +169,9 @@ impl WeaponBehavior for C4 {
                 crate::menus::print_center_all(w.eng, "#Bomb_Planted");
                 crate::rules::on_bomb_planted(w.g, w.eng);
                 w.eng.emit_stat_event(cs_engine::GameStatEvent::BombPlant { slot: w.slot });
+                let _ = crate::mod_hooks::fire_hook(w.g, w.eng, |sink, g, eng| {
+                    sink.on_bomb_planted(g, eng, cs_mod_api::HookPhase::Post, &mut planted_ctx)
+                });
 
                 w.eng.emit_sound(
                     id,

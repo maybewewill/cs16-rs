@@ -271,3 +271,30 @@ native/forward host in `crates/cs-amxx/` were ported from the following AMX Mod 
 | `amx.h`, `amx.cpp` | `crates/cs-amxx/src/amxxfile.rs`, `crates/cs-amxx/src/vm.rs` | `AMX_HEADER` (`AMX_MAGIC` `0xF1E0`, `AMX_FLAG_*`), `expand()` compact bytecode decompression, `amx_Init`, symbol lookup (`amx_GetPublic`, `amx_GetNative`, `amx_GetPubVar`), Pawn 3.2 opcodes `0..=144` (`OP_NONE..=OP_FLOAT_CMP`), `STKMARGIN`, and packed/unpacked string helpers. |
 | `CPlugin.cpp`, `amxmodx.cpp`, `string.cpp`, `float.cpp` | `crates/cs-amxx/src/runtime.rs`, `crates/cs-amxx/src/natives.rs` | Plugin lifecycle/forwards (`plugin_precache`, `plugin_init`, `plugin_cfg`, `plugin_end`, `client_connect`, `client_putinserver`, `client_disconnect`), task scheduler (`set_task`/`remove_task`), command/event/message hooks, and core string/float/cvar/menu/log natives. |
 | Modules: `cstrike`, `fun`, `engine`, `fakemeta`, `hamsandwich` | `crates/cs-amxx/src/natives.rs`, `crates/cs-amxx/src/runtime.rs` | Counter-Strike (`cs_get/set_user_money`, `cs_get/set_user_team`, `cs_get/set_user_armor`, `cs_get/set_user_deaths`), fun (`get/set_user_health`, `set_user_godmode`, `give_item`, `strip_user_weapons`, `set_user_rendering`), engine (`entity_get/set_*`), fakemeta (`pev`/`set_pev` `PEV_*` field IDs, `register_forward`), and hamsandwich (`RegisterHam` `Spawn`/`TakeDamage`/`Killed` with `HAM_IGNORED..HAM_SUPERCEDE`). |
+| Phase 15 modules & platform services (read 2026-11-26): `newmenus.cpp`, `newmenus.inc`, `CLang.cpp`, `lang.inc`, `plugins/admin.sma`, `users.ini`, `modules/nvault/amxxapi.cpp`, `modules/csx/`, `plugins/include/ham_const.inc`, `amxmodx.inc`, `dhudmessage.inc` | `crates/cs-mod-api/src/services.rs`, `crates/cs-mod-host/src/{menu.rs,lang.rs,admins.rs,rpc.rs,storage.rs,server_host.rs}`, `crates/cs-amxx/src/{vm.rs,natives.rs,runtime.rs}`, `crates/cs-game/src/{mod_hooks.rs,amxx_hooks.rs}` | Classic paginated `ShowMenu` (`1..7`, `8. Back`, `9. More`, `0. Exit`, `\y`/`\w`/`\r`/`\d`/`\R` tags, `menu_create`..`player_menu_info`), multilingual dictionary parsing (`[en]`/`[ru]` `.txt`, `%L` with `LANG_PLAYER`/`LANG_SERVER`, `register_dictionary`, `LookupLangKey`), `users.ini` RBAC admin flags (`a..z`, SteamID/IP/Name+`_pw`), `nvault` key/value/timestamp/prune API, `csx` forwards (`client_damage`/`client_death`/`bomb_*`/`grenade_throw`) and `get_stats`/`get_user_stats`/`get_statsnum`, expanded `hamsandwich` (`SetHamParamFloat`/`Integer`, `ExecuteHam`/`ExecuteHamB`, `Touch`/`ItemDeploy`/`WeaponPrimaryAttack`/`PlayerJump`), dynamic inter-plugin natives (`register_native`/`get_param`/`get_string`/`set_string`) and multi-forwards (`CreateMultiForward`/`ExecuteForward`/`DestroyForward`), and `HUD`/`DHUD` (`SVC_DIRECTOR` `DRC_CMD_MESSAGE`) channel parameters. |
+
+## ReAPI
+
+Upstream: https://github.com/rehlds/ReAPI (GPL-3.0-or-later, read 2026-11-26).
+
+```text
+Copyright (C) ReAPI Contributors
+
+This program is free software: you can redistribute it and/or modify it under the terms of the
+GNU General Public License as published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+```
+
+Clean-room Rust hook-chain semantics (`HookChain` `Pre`/`Post` with `Continue`/`Handled`/`Override`/`Supercede`) and ReAPI-compatible GameDLL natives in `crates/cs-mod-api/`, `crates/cs-mod-host/`, `crates/cs-game/src/{mod_hooks.rs,amxx_hooks.rs}`, and `crates/cs-amxx/src/natives.rs` reference:
+
+| File (ReAPI) | Where | What was taken (phase 15, read 2026-11-26) |
+|---|---|---|
+| `reapi_gamedll.inc`, `reapi_gamedll_const.inc` | `crates/cs-mod-api/src/abi.rs`, `crates/cs-game/src/{mod_hooks.rs,amxx_hooks.rs}`, `crates/cs-amxx/src/natives.rs` | Hook lifecycle names/phases (`PlayerSpawn`, `PlayerTakeDamage`, `PlayerKilled`, `PlayerPreThink`, `PlayerPostThink`, `PlayerJump`, `PlayersShouldCollide`, `CanBuyItem`, `CanHavePlayerItem`, `WeaponDeploy`, `WeaponPrimaryAttack`, `WeaponReload`, `FreezeTimeEnd`, `RoundStart`, `RoundEnd`, bomb & hostage events), `rg_give_item` (`GT_*`), `rg_remove_all_items`, `rg_set_user_armor`, `rg_add_account` (`AS_*`), `rg_round_respawn`, and `get_member`/`set_member` player/weapon member semantics. |
+
+## Clean-Room Phase 15 Platform Components (Zero Upstream Code Copied)
+
+The following Phase 15 components were implemented cleanly from scratch in this repository under GPL-3.0-or-later (`#![forbid(unsafe_code)]`) without copying upstream third-party source code:
+
+- **Minimal WASI Preview 1 Shims (`crates/cs-mod-host/src/runtime.rs`):** Implements only the public `wasi_snapshot_preview1` ABI function signatures and numeric errno codes (`ESUCCESS = 0`, `EBADF = 8`, `EINVAL = 28`, `ENOSYS = 52`) needed to run Go (`GOOS=wasip1 GOARCH=wasm`) and C++ WASM plugins (`fd_write`, `fd_close`, `fd_fdstat_get`, `fd_fdstat_set_flags`, `clock_time_get`, `random_get`, `environ_sizes_get`, `environ_get`, `args_sizes_get`, `args_get`, `proc_exit`, `sched_yield`).
+- **Pure-Rust Python 3 Scripting Runtime (`crates/cs-mod-py/` & `sdk/python/cs16.pyi`):** Clean-room lexer, parser, bytecode/AST evaluator, fuel meter, and `cs16` binding layer written entirely in safe Rust (no CPython or third-party interpreter code copied).
+- **Polyglot SDKs, Showcase Suite, AMXX Migrator, Black-Box Crash Replay & Plugin Studio (`crates/cs-mod-sdk/`, `crates/cs-mod-macros/`, `sdk/cpp/cs16_mod.hpp`, `sdk/go/cs16mod/`, `mods/`, `configs/`, `crates/cs-mod-host/src/{amxx_import.rs,crash_dump.rs}`, `crates/cs-server/src/admin_http.rs`, `web/admin.{html,js}`):** Original clean-room implementations referencing only the public AMX Mod X / ReAPI / GoldSrc behavioral specifications listed above.

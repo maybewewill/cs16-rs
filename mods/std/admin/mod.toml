@@ -1,0 +1,10 @@
+[mod]
+id = "std_admin"
+name = "Standard Admin Suite (AMXX+)"
+version = "1.0.0"
+api_version = 2
+side = "server"
+entry_server = "server.wasm"
+permissions = ["entities", "messages", "cvars", "commands", "menus", "timers", "storage", "admins", "rpc"]
+fuel_per_frame = 500000
+max_memory_bytes = 4194304

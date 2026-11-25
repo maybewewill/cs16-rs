@@ -509,6 +509,14 @@ pub struct Player {
     pub hostages_killed: i32,
     /// Last grenade throw parameters recorded for `rethrow` / `sv_rethrow_last_grenade`.
     pub last_grenade: Option<LastGrenadeThrow>,
+    /// Maximum player health (`pev->max_health`, default `100.0`).
+    pub max_health: f32,
+    /// Suppresses footstep sounds in `pmove` (`set_user_footsteps`).
+    pub silent_footsteps: bool,
+    /// Custom model override from `cs_set_user_model` (persisted until `cs_reset_user_model`).
+    pub custom_model: Option<String>,
+    /// Optional explicit maxspeed override (`set_user_maxspeed`).
+    pub maxspeed_override: Option<f32>,
 }
 
 impl Player {
@@ -646,7 +654,21 @@ impl Player {
             next_decal_time: 0.0,
             hostages_killed: 0,
             last_grenade: None,
+            max_health: 100.0,
+            silent_footsteps: false,
+            custom_model: None,
+            maxspeed_override: None,
         }
+    }
+
+    /// Active weapon `WeaponId`, if any.
+    pub fn active_item(&self) -> Option<WeaponId> {
+        self.active_item
+    }
+
+    /// Whether the player currently carries night vision goggles.
+    pub fn has_night_vision(&self) -> bool {
+        self.has_night_vision
     }
 
     /// What `CBasePlayer::Spawn` and `Precache` reset of the hints, the flashlight and the Geiger
@@ -1003,7 +1025,9 @@ pub(crate) fn userinfo_changed(g: &mut GameState, eng: &mut EngineApi<'_>, slot:
     };
     p.vgui_menus = vgui;
     p.show_hints = hints;
-    let model = if p.is_vip {
+    let model = if let Some(custom) = p.custom_model.as_deref() {
+        custom
+    } else if p.is_vip {
         "vip"
     } else {
         model_name(p.team, p.class)
@@ -1094,6 +1118,13 @@ pub(crate) fn spawn(
         return false;
     };
     if g.players.get(index).is_none_or(Option::is_none) {
+        return false;
+    }
+    let mut spawn_ctx = cs_mod_api::PlayerSpawnCtx { slot };
+    if crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+        sink.on_player_spawn(g, eng, cs_mod_api::HookPhase::Pre, &mut spawn_ctx)
+    }) == cs_mod_api::HookAction::Supercede
+    {
         return false;
     }
     let is_vip = g.players[index].as_ref().is_some_and(|p| p.is_vip);
@@ -1194,10 +1225,19 @@ pub(crate) fn spawn(
     if eng.ent(id).is_some_and(|v| v.modelindex == 0) {
         eng.set_model(id, "models/player.mdl");
     }
+    let custom_model = g.players[index]
+        .as_ref()
+        .and_then(|p| p.custom_model.clone());
     eng.set_client_key(
         slot,
         "model",
-        if is_vip { "vip" } else { model_name(team, class) },
+        if let Some(ref custom) = custom_model {
+            custom.as_str()
+        } else if is_vip {
+            "vip"
+        } else {
+            model_name(team, class)
+        },
     );
     if let Some(v) = eng.ent_mut(id) {
         v.solid = SOLID_SLIDEBOX;
@@ -1304,6 +1344,9 @@ pub(crate) fn spawn(
     // `UTIL_ScreenFade(this, Vector(0, 0, 0), 0.001)`: fade in, alpha 0, no hold.
     observer::screen_fade(eng, slot, 0.001, 0.0, 0, observer::FFADE_IN);
     messages::sync_round_timer(g, eng, slot);
+    let _ = crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+        sink.on_player_spawn(g, eng, cs_mod_api::HookPhase::Post, &mut spawn_ctx)
+    });
     true
 }
 
@@ -1358,16 +1401,18 @@ pub(crate) fn reset_max_speed(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) 
 pub(crate) fn apply_max_speed(g: &GameState, eng: &mut EngineApi<'_>, slot: u8, item: Option<f32>) {
     let id = eng.client_edict(slot);
     let freeze = g.rules.is_freeze_period();
-    let is_vip = g
+    let (is_vip, speed_override) = g
         .players
         .get(usize::from(slot))
         .and_then(Option::as_ref)
-        .is_some_and(|p| p.is_vip);
+        .map_or((false, None), |p| (p.is_vip, p.maxspeed_override));
     if let Some(v) = eng.ent_mut(id) {
         v.max_speed = if v.iuser1 != 0 {
             OBSERVER_MAX_SPEED
         } else if freeze {
             FROZEN_MAX_SPEED
+        } else if let Some(custom) = speed_override {
+            custom
         } else if is_vip {
             crate::vip::VIP_MAX_SPEED
         } else {
@@ -1607,6 +1652,27 @@ pub(crate) fn post_usercmd(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8)
 
 /// What `SV_RunCmd` runs between `CmdStart` and `CmdEnd`.
 fn run_cmd_body(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, cmd: &GoldSrcUserCmd) {
+    let mut cmd_copy = cmd.clone();
+    let oldbuttons = eng
+        .ent(eng.client_edict(slot))
+        .map_or(0, |v| v.oldbuttons as u16);
+    let mut pre_ctx = cs_mod_api::PlayerPreThinkCtx {
+        slot,
+        buttons: cmd_copy.buttons,
+        oldbuttons,
+    };
+    if crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+        sink.on_player_pre_think(g, eng, cs_mod_api::HookPhase::Pre, &mut pre_ctx)
+    }) == cs_mod_api::HookAction::Supercede
+    {
+        return;
+    }
+    if pre_ctx.buttons != cmd_copy.buttons {
+        cmd_copy.buttons = pre_ctx.buttons;
+        if let Some(v) = eng.ent_mut(eng.client_edict(slot)) {
+            v.button = i32::from(cmd_copy.buttons);
+        }
+    }
     // `PlayerPreThink`: the way into the game advances with the player's commands (not once the
     // match is over: `PreThink` returns after `PlayerThink` while `IsGameOver()`, so there is no
     // `JoiningThink`, and `PostThink` skips the fall damage).
@@ -1693,7 +1759,21 @@ fn run_cmd_body(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, cmd: &Gold
         // `PreThink` (player.cpp:4984-4994): "if (pev->button & IN_JUMP) Jump();" and, trying to
         // duck, already ducked or ducking, `Duck()`. (`Duck` does something only for IN_DUCK.)
         if eng.ent(id).is_some_and(|v| v.button & IN_JUMP != 0) {
-            player_anim::jump(g, eng, slot);
+            let mut jump_ctx = cs_mod_api::PlayerJumpCtx { slot };
+            if crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+                sink.on_player_jump(g, eng, cs_mod_api::HookPhase::Pre, &mut jump_ctx)
+            }) == cs_mod_api::HookAction::Supercede
+            {
+                cmd_copy.buttons &= !(IN_JUMP as u16);
+                if let Some(v) = eng.ent_mut(id) {
+                    v.button &= !IN_JUMP;
+                }
+            } else {
+                player_anim::jump(g, eng, slot);
+                let _ = crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+                    sink.on_player_jump(g, eng, cs_mod_api::HookPhase::Post, &mut jump_ctx)
+                });
+            }
         }
         player_anim::duck(g, eng, slot);
     }
@@ -1722,7 +1802,10 @@ fn run_cmd_body(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, cmd: &Gold
         crate::hint::hint(g, eng, slot, "#Hint_press_buy_to_purchase");
         crate::hint::first_time(g, slot, crate::hint::dhf::ROUND_STARTED);
     }
-    pmove::run_pmove(g, eng, slot, cmd);
+    let _ = crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+        sink.on_player_pre_think(g, eng, cs_mod_api::HookPhase::Post, &mut pre_ctx)
+    });
+    pmove::run_pmove(g, eng, slot, &cmd_copy);
 }
 
 /// `CBasePlayer::WaterMove` (ReGameDLL `player.cpp`, read 2026-11-22, vanilla): breath, drowning
@@ -1842,10 +1925,11 @@ fn take_health(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, health: f32
     }
     // Clear out any damage types we healed.
     p.damage_bits &= !(bits & !dmg::TIMEBASED);
-    if p.health >= 100.0 {
+    let max_hp = p.max_health.max(1.0);
+    if p.health >= max_hp {
         return false;
     }
-    p.health = (p.health + health).min(100.0);
+    p.health = (p.health + health).min(max_hp);
     let value = p.health;
     let id = eng.client_edict(slot);
     if let Some(v) = eng.ent_mut(id) {
@@ -2049,6 +2133,13 @@ pub(crate) fn impulse_commands(g: &mut GameState, eng: &mut EngineApi<'_>, slot:
 /// `UpdatePlayerSound` (useless in CS 1.6). The end of `PostThink` (`pt_end`) is
 /// [`post_usercmd`].
 fn post_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    let mut post_ctx = cs_mod_api::PlayerPostThinkCtx { slot };
+    if crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+        sink.on_player_post_think(g, eng, cs_mod_api::HookPhase::Pre, &mut post_ctx)
+    }) == cs_mod_api::HookAction::Supercede
+    {
+        return;
+    }
     let id = eng.client_edict(slot);
     // `PostThink` does the weapon stuff before the fall check (`ItemPostFrame`).
     weapon_core::player_item_post_frame(g, eng, slot);
@@ -2118,6 +2209,9 @@ fn post_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
         }
     }
     player_anim::studio_frame_advance(g, eng, slot);
+    let _ = crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+        sink.on_player_post_think(g, eng, cs_mod_api::HookPhase::Post, &mut post_ctx)
+    });
 }
 
 /// The id of the weapon the player of `slot` holds out (`m_pActiveItem->m_iId`), `None` when it
@@ -2542,12 +2636,56 @@ pub(crate) fn take_damage_with(
         .and_then(|i| eng.ent(i))
         .is_some_and(|v| v.classname == "grenade");
 
+    let mut damage = damage;
+    let mut bits = bits;
+    let custom_weapon_spec = attacker_slot
+        .zip(attacker_weapon)
+        .and_then(|(a, w)| g.custom_weapons.active_for(a as u8, w).cloned());
+    if let Some(ref spec) = custom_weapon_spec
+        && spec.damage_mult.is_finite()
+        && spec.damage_mult >= 0.0
+    {
+        damage *= spec.damage_mult;
+    }
+
+    let initial_hitgroup = g.players[index]
+        .as_ref()
+        .map_or(HITGROUP_GENERIC, |p| p.last_hit_group);
+    let mut dmg_ctx = cs_mod_api::PlayerTakeDamageCtx {
+        victim: slot,
+        inflictor: inflictor.map_or(0, |e| e.index),
+        attacker: attacker_slot.map(|a| a as u8),
+        damage,
+        damage_bits: bits,
+        hitgroup: initial_hitgroup.clamp(0, 255) as u8,
+        weapon_id: attacker_weapon.map_or(0, |w| w as i32 as u8),
+        team_attack: attacker_slot.is_some() && teammate && attacker_slot != Some(index),
+    };
+    if crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+        sink.on_player_take_damage(g, eng, cs_mod_api::HookPhase::Pre, &mut dmg_ctx)
+    }) == cs_mod_api::HookAction::Supercede
+    {
+        return false;
+    }
+    if dmg_ctx.damage.is_finite() {
+        damage = dmg_ctx.damage;
+    }
+    bits = dmg_ctx.damage_bits;
+    if let Some(p) = g.players[index].as_mut() {
+        p.last_hit_group = i32::from(dmg_ctx.hitgroup);
+    }
+    if eng
+        .ent(id)
+        .is_some_and(|v| v.flags & cs_engine::consts::FL_GODMODE != 0)
+    {
+        return false;
+    }
+
     let mut ratio = ARMOR_RATIO;
     if g.players[index].as_ref().is_some_and(|p| p.is_vip) {
         ratio *= 0.5;
     }
     let bonus = ARMOR_BONUS;
-    let mut damage = damage;
 
     let Some(p) = g.players[index].as_mut() else {
         return false;
@@ -2627,6 +2765,10 @@ pub(crate) fn take_damage_with(
             false,
         );
         reset_time_based_damage(g, index, bits);
+        dmg_ctx.damage = damage.trunc();
+        let _ = crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+            sink.on_player_take_damage(g, eng, cs_mod_api::HookPhase::Post, &mut dmg_ctx)
+        });
         return took;
     }
 
@@ -2716,6 +2858,21 @@ pub(crate) fn take_damage_with(
     }
     pain(g, eng, slot, hit_group, armored);
 
+    // Apply custom weapon knockback if configured (`knockback != 1.0`).
+    if let (Some(spec), Some(a)) = (&custom_weapon_spec, attacker_slot)
+        && (spec.knockback - 1.0).abs() > f32::EPSILON
+        && spec.knockback.is_finite()
+        && let (Some(vo), Some(ao)) = (
+            eng.ent(id).map(|v| v.origin),
+            eng.ent(eng.client_edict(a as u8)).map(|v| v.origin),
+        )
+    {
+        let push = bullets::normalize_hl(vo - ao) * (damage * 4.0 * spec.knockback);
+        if let Some(v) = eng.ent_mut(id) {
+            v.velocity += push;
+        }
+    }
+
     // This cast to INT is critical: a player with 0.5 health would look dead to the engine.
     let took = monster_take_damage(
         g,
@@ -2747,6 +2904,10 @@ pub(crate) fn take_damage_with(
             false,
         );
     }
+    dmg_ctx.damage = damage.trunc();
+    let _ = crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+        sink.on_player_take_damage(g, eng, cs_mod_api::HookPhase::Post, &mut dmg_ctx)
+    });
     took
 }
 
@@ -2915,6 +3076,35 @@ fn killed(
     if g.players[index].is_none() {
         return;
     }
+    let killer_slot = attacker.and_then(|a| player_slot(g, eng, a));
+    let weapon_name = score::killer_weapon_name(eng, inflictor, attacker, attacker_weapon);
+    let (hitgroup, victim_team) = g.players[index]
+        .as_ref()
+        .map_or((HITGROUP_GENERIC, Team::Unassigned), |p| (p.last_hit_group, p.team));
+    let team_kill = killer_slot.is_some_and(|k| {
+        k != index && g.players[k].as_ref().map(|p| p.team) == Some(victim_team)
+    });
+    let mut kill_ctx = cs_mod_api::PlayerKilledCtx {
+        victim: slot,
+        killer: killer_slot.map(|k| k as u8),
+        weapon_name,
+        weapon_id: attacker_weapon.map_or(0, |w| w as i32 as u8),
+        hitgroup: hitgroup.clamp(0, 255) as u8,
+        headshot: hitgroup == HITGROUP_HEAD,
+        team_kill,
+    };
+    if crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+        sink.on_player_killed(g, eng, cs_mod_api::HookPhase::Pre, &mut kill_ctx)
+    }) == cs_mod_api::HookAction::Supercede
+    {
+        if let Some(p) = g.players[index].as_mut() {
+            p.health = p.health.max(1.0);
+        }
+        if let Some(v) = eng.ent_mut(id) {
+            v.health = v.health.max(1.0);
+        }
+        return;
+    }
     // `PlayerKilled` with `DeathNotice`: the death notice, deaths, frags, money, scoreboard.
     // Vanilla (`player.cpp:2317`): a player killed by the C4 blast gets no `PlayerKilled`.
     let killed_by_bomb = g.players[index].as_ref().is_some_and(|p| p.killed_by_bomb);
@@ -3016,6 +3206,9 @@ fn killed(
     if eng.cvar_f32("sv_damage_print") != 0.0 {
         print_round_damage_summary(g, eng, slot);
     }
+    let _ = crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+        sink.on_player_killed(g, eng, cs_mod_api::HookPhase::Post, &mut kill_ctx)
+    });
 }
 
 /// Prints `[cs16-rs] Damage Given / Taken` summary to `slot`'s console (`svc_print`).

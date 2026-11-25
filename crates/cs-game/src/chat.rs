@@ -354,6 +354,22 @@ pub(crate) fn host_say(
         return;
     }
 
+    let mut say_ctx = cs_mod_api::PlayerSayCtx {
+        slot,
+        team_only,
+        message: text,
+    };
+    if crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+        sink.on_player_say(g, eng, cs_mod_api::HookPhase::Pre, &mut say_ctx)
+    }) == cs_mod_api::HookAction::Supercede
+    {
+        return;
+    }
+    let text = say_ctx.message.clone();
+    if text.is_empty() {
+        return;
+    }
+
     let Some(p) = g
         .players
         .get_mut(usize::from(slot))
@@ -384,6 +400,9 @@ pub(crate) fn host_say(
     let text: String = chars.into_iter().collect();
 
     send_say_message(g, eng, slot, team_only, &text, format, console, sender_dead);
+    let _ = crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+        sink.on_player_say(g, eng, cs_mod_api::HookPhase::Post, &mut say_ctx)
+    });
 }
 
 /// `SendSayMessage`: cuts the line to what fits the message, sends it to the speaker and to

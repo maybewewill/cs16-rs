@@ -3,8 +3,8 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::ABI_VERSION;
 use crate::abi::ModSide;
+use crate::{ABI_VERSION, MIN_ABI_VERSION};
 
 pub const DEFAULT_FUEL_PER_FRAME: u64 = 500_000;
 pub const MAX_FUEL_PER_FRAME: u64 = 10_000_000;
@@ -27,10 +27,15 @@ pub enum Permission {
     Hud = 1 << 9,
     Input = 1 << 10,
     NetCustom = 1 << 11,
+    Vfx = 1 << 12,
+    Weapons = 1 << 13,
+    Admins = 1 << 14,
+    Rpc = 1 << 15,
+    Http = 1 << 16,
 }
 
 impl Permission {
-    pub const ALL_VARIANTS: [Self; 12] = [
+    pub const ALL_VARIANTS: [Self; 17] = [
         Self::Entities,
         Self::Messages,
         Self::Cvars,
@@ -43,6 +48,11 @@ impl Permission {
         Self::Hud,
         Self::Input,
         Self::NetCustom,
+        Self::Vfx,
+        Self::Weapons,
+        Self::Admins,
+        Self::Rpc,
+        Self::Http,
     ];
 
     pub fn parse(raw: &str) -> Option<Self> {
@@ -59,6 +69,11 @@ impl Permission {
             "hud" => Some(Self::Hud),
             "input" => Some(Self::Input),
             "net_custom" | "netcustom" => Some(Self::NetCustom),
+            "vfx" => Some(Self::Vfx),
+            "weapons" => Some(Self::Weapons),
+            "admins" => Some(Self::Admins),
+            "rpc" => Some(Self::Rpc),
+            "http" => Some(Self::Http),
             _ => None,
         }
     }
@@ -77,6 +92,11 @@ impl Permission {
             Self::Hud => "hud",
             Self::Input => "input",
             Self::NetCustom => "net_custom",
+            Self::Vfx => "vfx",
+            Self::Weapons => "weapons",
+            Self::Admins => "admins",
+            Self::Rpc => "rpc",
+            Self::Http => "http",
         }
     }
 }
@@ -123,7 +143,7 @@ pub enum ManifestError {
     MissingField(&'static str),
     #[error("invalid mod id `{0}` (expected [a-z0-9_-])")]
     InvalidId(String),
-    #[error("unsupported mod api_version {0} (host supports {ABI_VERSION})")]
+    #[error("unsupported mod api_version {0} (host supports {MIN_ABI_VERSION}..={ABI_VERSION})")]
     UnsupportedApiVersion(u32),
     #[error("invalid side `{0}` (expected server, client, or both)")]
     InvalidSide(String),
@@ -147,6 +167,9 @@ pub struct ModManifest {
     pub entry_client: Option<String>,
     pub dependencies: Vec<String>,
     pub permissions: Permissions,
+    /// Hostnames allowlisted via `permissions = ["http:<host>"]` for non-blocking webhooks.
+    #[serde(default)]
+    pub http_hosts: Vec<String>,
     pub assets: Vec<String>,
     pub custom_usermsgs: Vec<String>,
     pub fuel_per_frame: u64,
@@ -165,6 +188,7 @@ impl ModManifest {
         let mut entry_client = None;
         let mut dependencies = Vec::new();
         let mut permissions = Permissions::NONE;
+        let mut http_hosts = Vec::new();
         let mut assets = Vec::new();
         let mut custom_usermsgs = Vec::new();
         let mut fuel_per_frame = DEFAULT_FUEL_PER_FRAME;
@@ -197,6 +221,7 @@ impl ModManifest {
                         &mut entry_client,
                         &mut dependencies,
                         &mut permissions,
+                        &mut http_hosts,
                         &mut assets,
                         &mut custom_usermsgs,
                         &mut fuel_per_frame,
@@ -230,6 +255,7 @@ impl ModManifest {
                 &mut entry_client,
                 &mut dependencies,
                 &mut permissions,
+                &mut http_hosts,
                 &mut assets,
                 &mut custom_usermsgs,
                 &mut fuel_per_frame,
@@ -245,7 +271,7 @@ impl ModManifest {
         if version.is_empty() {
             return Err(ManifestError::MissingField("version"));
         }
-        if api_version != ABI_VERSION {
+        if !(MIN_ABI_VERSION..=ABI_VERSION).contains(&api_version) {
             return Err(ManifestError::UnsupportedApiVersion(api_version));
         }
 
@@ -271,6 +297,7 @@ impl ModManifest {
             entry_client,
             dependencies,
             permissions,
+            http_hosts,
             assets,
             custom_usermsgs,
             fuel_per_frame: fuel_per_frame.clamp(1_000, MAX_FUEL_PER_FRAME),
@@ -296,12 +323,16 @@ impl ModManifest {
         if !self.dependencies.is_empty() {
             s.push_str(&format!("dependencies = {}\n", fmt_str_array(&self.dependencies)));
         }
-        let perm_names: Vec<String> = self
+        let mut perm_names: Vec<String> = self
             .permissions
             .names()
             .into_iter()
+            .filter(|&n| !(n == "http" && !self.http_hosts.is_empty()))
             .map(str::to_string)
             .collect();
+        for host in &self.http_hosts {
+            perm_names.push(format!("http:{host}"));
+        }
         s.push_str(&format!("permissions = {}\n", fmt_str_array(&perm_names)));
         if !self.assets.is_empty() {
             s.push_str(&format!("assets = {}\n", fmt_str_array(&self.assets)));
@@ -331,6 +362,7 @@ fn apply_kv(
     entry_client: &mut Option<String>,
     dependencies: &mut Vec<String>,
     permissions: &mut Permissions,
+    http_hosts: &mut Vec<String>,
     assets: &mut Vec<String>,
     custom_usermsgs: &mut Vec<String>,
     fuel_per_frame: &mut u64,
@@ -354,9 +386,22 @@ fn apply_kv(
         "dependencies" => *dependencies = parse_str_array(v)?,
         "permissions" => {
             *permissions = Permissions::NONE;
+            http_hosts.clear();
             for item in parse_str_array(v)? {
-                let perm = Permission::parse(&item).ok_or(ManifestError::UnknownPermission(item))?;
-                permissions.insert(perm);
+                let lower = item.trim().to_ascii_lowercase();
+                if let Some(host) = lower.strip_prefix("http:") {
+                    if !is_valid_http_host(host) {
+                        return Err(ManifestError::UnknownPermission(item));
+                    }
+                    permissions.insert(Permission::Http);
+                    if !http_hosts.iter().any(|h| h == host) {
+                        http_hosts.push(host.to_string());
+                    }
+                } else {
+                    let perm =
+                        Permission::parse(&item).ok_or(ManifestError::UnknownPermission(item))?;
+                    permissions.insert(perm);
+                }
             }
         }
         "assets" => *assets = parse_str_array(v)?,
@@ -376,6 +421,35 @@ fn apply_kv(
         _ => {}
     }
     Ok(())
+}
+
+pub fn is_valid_http_host(host: &str) -> bool {
+    if host.is_empty() || host.len() > 253 {
+        return false;
+    }
+    let (hostname, port_opt) = match host.split_once(':') {
+        Some((h, p)) => (h, Some(p)),
+        None => (host, None),
+    };
+    if hostname.is_empty()
+        || hostname.starts_with('.')
+        || hostname.ends_with('.')
+        || hostname.contains("..")
+    {
+        return false;
+    }
+    if !hostname
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+    {
+        return false;
+    }
+    if let Some(port) = port_opt
+        && port.parse::<u16>().is_err()
+    {
+        return false;
+    }
+    true
 }
 
 fn strip_comment(line: &str) -> &str {
@@ -461,7 +535,7 @@ mod tests {
             entry_server = "server.wasm"
             entry_client = "client.wasm"
             dependencies = ["deathmatch"]
-            permissions = ["entities", "messages", "storage", "hud"]
+            permissions = ["entities", "messages", "storage", "hud", "vfx", "http:discord.com"]
             assets = ["sprites/gg.txt"]
             custom_usermsgs = ["CsModGg"]
             fuel_per_frame = 250_000
@@ -469,14 +543,22 @@ mod tests {
         "#;
         let m = ModManifest::parse_toml(raw).unwrap();
         assert_eq!(m.id, "gungame");
+        assert_eq!(m.api_version, 1);
         assert_eq!(m.side, ModSide::Both);
         assert!(m.permissions.contains(Permission::Entities));
         assert!(m.permissions.contains(Permission::Hud));
+        assert!(m.permissions.contains(Permission::Vfx));
+        assert!(m.permissions.contains(Permission::Http));
+        assert_eq!(m.http_hosts, vec!["discord.com".to_string()]);
         assert!(!m.permissions.contains(Permission::Traces));
         assert_eq!(m.fuel_per_frame, 250_000);
         assert_eq!(m.max_memory_bytes, 2_097_152);
         let round = ModManifest::parse_toml(&m.to_toml()).unwrap();
         assert_eq!(round, m);
+
+        let v2 = ModManifest::parse_toml("id = \"vip\"\nversion = \"2.0\"\napi_version = 2\n")
+            .unwrap();
+        assert_eq!(v2.api_version, 2);
 
         let bad_abi = "id = \"x\"\nversion = \"1.0\"\napi_version = 99\n";
         assert_eq!(
@@ -488,6 +570,12 @@ mod tests {
         assert!(matches!(
             ModManifest::parse_toml(bad_path),
             Err(ManifestError::UnsafePath(_))
+        ));
+
+        let bad_http = "id = \"x\"\nversion = \"1.0\"\npermissions = [\"http:bad/path\"]\n";
+        assert!(matches!(
+            ModManifest::parse_toml(bad_http),
+            Err(ManifestError::UnknownPermission(_))
         ));
     }
 }

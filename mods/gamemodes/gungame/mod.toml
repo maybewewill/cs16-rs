@@ -1,0 +1,10 @@
+[mod]
+id = "gungame"
+name = "GunGame 26-Level Arena"
+version = "1.0.0"
+api_version = 2
+side = "server"
+entry_server = "server.wasm"
+permissions = ["entities", "messages", "commands", "timers", "storage", "weapons", "vfx", "sound"]
+fuel_per_frame = 500000
+max_memory_bytes = 4194304

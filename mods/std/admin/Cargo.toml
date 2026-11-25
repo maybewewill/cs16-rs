@@ -1,0 +1,18 @@
+[workspace]
+
+[package]
+name = "std_admin"
+version = "1.0.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+cs-mod-sdk = { path = "../../../crates/cs-mod-sdk" }
+
+[profile.dev]
+opt-level = "s"
+debug = false
+strip = "symbols"

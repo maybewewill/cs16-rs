@@ -3627,3 +3627,48 @@ evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/audio/voice.rs:
 id = "sv_voice_transcode"
 status = "tested"
 evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-server/src/voice_bridge.rs::udp_and_websocket_server_bridges_voice_two_ways"
+
+[[item]]
+id = "amx_language"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry; crates/cs-mod-api/src/services.rs::tests::lang_catalog_simultaneous_ru_and_en_and_amxx_txt"
+
+[[item]]
+id = "sv_mod_autoreload"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry"
+
+[[item]]
+id = "mod_list"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs; crates/cs-server/src/proto48.rs::tests::phase15_five_language_polyglot_resmon_and_studio_e2e"
+
+[[item]]
+id = "amx_plugins"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs; crates/cs-server/src/proto48.rs::tests::phase15_five_language_polyglot_resmon_and_studio_e2e"
+
+[[item]]
+id = "mod_pause"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs; crates/cs-server/src/proto48.rs::tests::phase15_five_language_polyglot_resmon_and_studio_e2e"
+
+[[item]]
+id = "mod_unpause"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs; crates/cs-server/src/proto48.rs::tests::phase15_five_language_polyglot_resmon_and_studio_e2e"
+
+[[item]]
+id = "mod_reload"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs; crates/cs-mod-host/tests/mod_host.rs::package_loader_resolves_deps_and_hot_reloads_mods"
+
+[[item]]
+id = "mod_unload"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs; crates/cs-mod-host/tests/mod_host.rs::package_loader_resolves_deps_and_hot_reloads_mods"
+
+[[item]]
+id = "mod_stats"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs; crates/cs-server/src/proto48.rs::tests::phase15_five_language_polyglot_resmon_and_studio_e2e"

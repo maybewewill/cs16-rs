@@ -61,6 +61,27 @@ impl PmPhysEnts {
         self.edicts.get(index).copied()
     }
 
+    /// Retains only physents where `pred(view, edict)` returns `true` (e.g. `PlayersShouldCollide` semiclip).
+    pub fn retain_physents(&mut self, mut pred: impl FnMut(PhysEntView, EdictId) -> bool) {
+        let mut idx = 0usize;
+        let mut keep = Vec::with_capacity(self.edicts.len());
+        let slice = self.ents.physents_slice();
+        for (pe, &edict) in slice.iter().zip(self.edicts.iter()) {
+            keep.push(pred(pe.view, edict));
+        }
+        self.ents.retain_physents(|_| {
+            let k = keep[idx];
+            idx += 1;
+            k
+        });
+        let mut eidx = 0usize;
+        self.edicts.retain(|_| {
+            let k = keep[eidx];
+            eidx += 1;
+            k
+        });
+    }
+
     pub(crate) fn push_physent(&mut self, pe: PhysEnt, edict: EdictId) {
         self.ents.push_physent(pe);
         self.edicts.push(edict);

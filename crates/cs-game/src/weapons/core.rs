@@ -306,8 +306,16 @@ impl<'a, 'e> WeaponCtx<'a, 'e> {
         item_info(self.weapon.id)
     }
 
-    /// `iMaxClip()`.
+    /// `iMaxClip()` (honoring any active [`CustomWeaponSpec`](cs_mod_api::CustomWeaponSpec) clip override).
     pub fn max_clip(&self) -> i32 {
+        if let Some(clip) = self
+            .g
+            .custom_weapons
+            .active_for(self.slot, self.weapon.id)
+            .and_then(|spec| spec.clip_size)
+        {
+            return clip;
+        }
         self.info().map_or(0, |i| i.max_clip)
     }
 
@@ -392,21 +400,57 @@ impl<'a, 'e> WeaponCtx<'a, 'e> {
         if !me.can_deploy(self) {
             return false;
         }
+        let mut deploy_ctx = cs_mod_api::WeaponEventCtx {
+            slot: self.slot,
+            weapon_id: self.weapon.id as i32 as u8,
+        };
+        if crate::mod_hooks::fire_hook(self.g, self.eng, |sink, g, eng| {
+            sink.on_weapon_deploy(g, eng, cs_mod_api::HookPhase::Pre, &mut deploy_ctx)
+        }) == cs_mod_api::HookAction::Supercede
+        {
+            return false;
+        }
+        let custom = self
+            .g
+            .custom_weapons
+            .active_for(self.slot, self.weapon.id)
+            .cloned();
+        let effective_view = custom
+            .as_ref()
+            .and_then(|s| s.v_model.as_deref())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(view_model);
+        let effective_weapon = custom
+            .as_ref()
+            .and_then(|s| s.p_model.as_deref())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(weapon_model);
+        let deploy_delay = custom
+            .as_ref()
+            .map(|s| {
+                if s.deploy_speed_mult.is_finite() && s.deploy_speed_mult > 0.05 {
+                    0.75 / s.deploy_speed_mult
+                } else {
+                    0.75
+                }
+            })
+            .unwrap_or(0.75);
+
         self.tabulate_ammo();
-        let view = self.eng.model_index(view_model).unwrap_or(0);
-        let weapon = self.eng.model_index(weapon_model).unwrap_or(0);
+        let view = self.eng.model_index(effective_view).unwrap_or(0);
+        let weapon = self.eng.model_index(effective_weapon).unwrap_or(0);
         let id = self.edict();
         if let Some(v) = self.eng.ent_mut(id) {
             v.viewmodel = view;
             v.weaponmodel = weapon;
         }
-        self.weapon.model_name = view_model.to_string();
+        self.weapon.model_name = effective_view.to_string();
         self.player_mut().anim_extension = anim_ext.to_string();
         self.send_weapon_anim(anim, skiplocal);
 
         let now = self.now();
         let p = self.player_mut();
-        p.next_attack = 0.75;
+        p.next_attack = deploy_delay;
         p.fov = DEFAULT_FOV;
         p.last_zoom = i32::from(DEFAULT_FOV);
         p.resume_zoom = false;
@@ -416,6 +460,9 @@ impl<'a, 'e> WeaponCtx<'a, 'e> {
         if let Some(v) = self.eng.ent_mut(id) {
             v.fov = f32::from(DEFAULT_FOV);
         }
+        let _ = crate::mod_hooks::fire_hook(self.g, self.eng, |sink, g, eng| {
+            sink.on_weapon_deploy(g, eng, cs_mod_api::HookPhase::Post, &mut deploy_ctx)
+        });
         true
     }
 
@@ -462,6 +509,12 @@ impl<'a, 'e> WeaponCtx<'a, 'e> {
     /// ammo to load or the clip is full. QUIRK: `m_flNextAttack` is set to the delay itself
     /// (a countdown), not to a time.
     pub fn default_reload(&mut self, clip_size: i32, anim: i32, delay: f32) -> bool {
+        let clip_size = self
+            .g
+            .custom_weapons
+            .active_for(self.slot, self.weapon.id)
+            .and_then(|s| s.clip_size)
+            .unwrap_or(clip_size);
         let reserve = self.ammo(self.weapon.primary_ammo_type);
         if reserve <= 0 {
             return false;
@@ -1234,7 +1287,44 @@ pub fn item_post_frame(b: &mut dyn WeaponBehavior, w: &mut WeaponCtx<'_, '_>) {
                 b.play_empty_sound(w);
                 w.weapon.next_primary_attack = w.get_next_attack_delay(0.15);
             } else {
-                b.primary_attack(w);
+                let mut atk_ctx = cs_mod_api::WeaponEventCtx {
+                    slot: w.slot,
+                    weapon_id: w.weapon.id as i32 as u8,
+                };
+                if crate::mod_hooks::fire_hook(w.g, w.eng, |sink, g, eng| {
+                    sink.on_weapon_primary_attack(g, eng, cs_mod_api::HookPhase::Pre, &mut atk_ctx)
+                }) != cs_mod_api::HookAction::Supercede
+                {
+                    let prev_punch = w.eng.ent(id).map_or(Vec3::ZERO, |v| v.punchangle);
+                    let custom = w
+                        .g
+                        .custom_weapons
+                        .active_for(w.slot, w.weapon.id)
+                        .cloned();
+                    b.primary_attack(w);
+                    if let Some(spec) = custom {
+                        if let Some(ref snd) = spec.fire_sound
+                            && !snd.is_empty()
+                        {
+                            w.eng.emit_sound(id, CHAN_WEAPON, snd, 1.0, ATTN_NORM, PITCH_NORM);
+                        }
+                        if (spec.recoil_mult - 1.0).abs() > f32::EPSILON
+                            && spec.recoil_mult.is_finite()
+                            && let Some(v) = w.eng.ent_mut(id)
+                        {
+                            let delta = v.punchangle - prev_punch;
+                            v.punchangle = prev_punch + delta * spec.recoil_mult.max(0.0);
+                        }
+                    }
+                    let _ = crate::mod_hooks::fire_hook(w.g, w.eng, |sink, g, eng| {
+                        sink.on_weapon_primary_attack(
+                            g,
+                            eng,
+                            cs_mod_api::HookPhase::Post,
+                            &mut atk_ctx,
+                        )
+                    });
+                }
             }
         }
     } else if w.button() & IN_RELOAD != 0
@@ -1247,7 +1337,19 @@ pub fn item_post_frame(b: &mut dyn WeaponBehavior, w: &mut WeaponCtx<'_, '_>) {
             && w.weapon.glock18_shoot == 0.0
             && w.weapon.weapon_state & WPNSTATE_SHIELD_DRAWN == 0
         {
-            b.reload(w);
+            let mut rel_ctx = cs_mod_api::WeaponEventCtx {
+                slot: w.slot,
+                weapon_id: w.weapon.id as i32 as u8,
+            };
+            if crate::mod_hooks::fire_hook(w.g, w.eng, |sink, g, eng| {
+                sink.on_weapon_reload(g, eng, cs_mod_api::HookPhase::Pre, &mut rel_ctx)
+            }) != cs_mod_api::HookAction::Supercede
+            {
+                b.reload(w);
+                let _ = crate::mod_hooks::fire_hook(w.g, w.eng, |sink, g, eng| {
+                    sink.on_weapon_reload(g, eng, cs_mod_api::HookPhase::Post, &mut rel_ctx)
+                });
+            }
         }
     } else if usable & (IN_ATTACK | IN_ATTACK2) == 0 {
         // No fire buttons down. The code that follows keeps the player from tapping the fire

@@ -600,6 +600,10 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     reg.register("sv_ljstats", "0", srv, "Enable server-side Kreedz JumpStats console reports (0 or 1)");
     reg.register("cl_ljstats", "0", arch, "Enable client-side Kreedz JumpStats HUD and console reports (0 or 1)");
     reg.register("cl_ljstats_min", "215", arch, "Minimum jump distance in units to report in JumpStats");
+
+    // Phase 15: Polyglot Modding Platform & AMXX+ Ecosystem CVars
+    reg.register("amx_language", "en", srv_arch, "Default server localization language code for plugins (en, ru, de, ...)");
+    reg.register("sv_mod_autoreload", "1", srv_arch, "Automatically hot-reload modified script mods on disk (0 or 1)");
 }
 
 pub fn register_default_binds(reg: &mut CVarRegistry) {

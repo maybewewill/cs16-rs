@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 cs-cvar.workspace = true
 cs-engine.workspace = true
+cs-mod-api = { workspace = true, features = ["services"] }
 cs-proto48.workspace = true
 flate2.workspace = true
 glam.workspace = true

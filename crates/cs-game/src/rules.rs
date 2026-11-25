@@ -677,12 +677,47 @@ pub(crate) fn can_respawn(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) -> b
 // ---- the end of a round ----
 
 /// `TerminateRound`: the round is over with `status`; the next one starts after `delay`.
-fn terminate_round(g: &mut GameState, eng: &mut EngineApi<'_>, delay: f64, status: WinStatus) {
+fn terminate_round_with(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    delay: f64,
+    status: WinStatus,
+    sentence: &str,
+    bonus: i32,
+) {
+    let winner = match status {
+        WinStatus::Terrorists => 1,
+        WinStatus::Cts => 2,
+        WinStatus::None | WinStatus::Draw => 0,
+    };
+    let mut end_ctx = cs_mod_api::RoundEndCtx {
+        winner,
+        reason: crate::mod_hooks::round_end_reason_code(sentence),
+        bonus,
+    };
+    if crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+        sink.on_round_end(g, eng, cs_mod_api::HookPhase::Pre, &mut end_ctx)
+    }) == cs_mod_api::HookAction::Supercede
+    {
+        return;
+    }
     g.rules.round_win_status = status;
     g.rules.restart_round_time = eng.time() + delay;
     if eng.cvar_f32("sv_damage_print") != 0.0 {
         player::print_all_remaining_round_damage(g, eng);
     }
+    let _ = crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+        sink.on_round_end(g, eng, cs_mod_api::HookPhase::Post, &mut end_ctx)
+    });
+}
+
+fn terminate_round(g: &mut GameState, eng: &mut EngineApi<'_>, delay: f64, status: WinStatus) {
+    let sentence = match status {
+        WinStatus::Cts => "#CTs_Win",
+        WinStatus::Terrorists => "#Terrorists_Win",
+        WinStatus::Draw | WinStatus::None => "#Round_Draw",
+    };
+    terminate_round_with(g, eng, delay, status, sentence, 0);
 }
 
 fn on_knife_round_winner(g: &mut GameState, eng: &mut EngineApi<'_>, winner: Team) -> bool {
@@ -738,13 +773,13 @@ fn win_round(
             update_team_scores(g, eng);
         }
         end_round_message(eng, sentence);
-        terminate_round(g, eng, delay, status);
+        terminate_round_with(g, eng, delay, status, sentence, reward);
     } else {
         // Vanilla time-expiry outcomes update wins unconditionally and call `UpdateTeamScores`
         // after `TerminateRound` (`multiplay_gamerules.cpp` 2905-3014).
         inc_win(g);
         end_round_message(eng, sentence);
-        terminate_round(g, eng, delay, status);
+        terminate_round_with(g, eng, delay, status, sentence, reward);
         update_team_scores(g, eng);
     }
     let winner_code = match status {
@@ -1128,6 +1163,7 @@ pub(crate) fn on_disconnect(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8
     }
     crate::vip::on_disconnect(g, slot);
     g.kz.reset_player(slot);
+    g.custom_weapons.clear_player(slot);
     teams::announce_departure(eng, slot);
     observer::on_target_left(g, eng, slot);
     check_win_conditions(g, eng);
@@ -1147,6 +1183,12 @@ fn check_freeze_period_expired(g: &mut GameState, eng: &mut EngineApi<'_>) {
 /// Nobody is frozen any more, the round clock starts counting down the round time, and the first
 /// joined CT and first joined T call out their scenario start sentence over the radio.
 pub(crate) fn on_round_freeze_end(g: &mut GameState, eng: &mut EngineApi<'_>) {
+    if crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+        sink.on_freeze_time_end(g, eng, cs_mod_api::HookPhase::Pre)
+    }) == cs_mod_api::HookAction::Supercede
+    {
+        return;
+    }
     // Freeze period expired: kill the flag.
     g.rules.freeze_period = false;
     let default_sentence = match g.random_range(0, 3) {
@@ -1192,6 +1234,9 @@ pub(crate) fn on_round_freeze_end(g: &mut GameState, eng: &mut EngineApi<'_>) {
         }
         messages::sync_round_timer(g, eng, slot);
     }
+    let _ = crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+        sink.on_freeze_time_end(g, eng, cs_mod_api::HookPhase::Post)
+    });
 }
 
 /// `CHalfLifeMultiplay::IsBombPlanted` (`multiplay_gamerules.cpp` 3196-3212): true when the map
@@ -1569,6 +1614,15 @@ fn balance_teams(g: &mut GameState, eng: &mut EngineApi<'_>) {
 /// a new match resets the scores, and every player on a team spawns again, frozen for
 /// `mp_freezetime`.
 pub(crate) fn restart_round(g: &mut GameState, eng: &mut EngineApi<'_>) {
+    let mut round_ctx = cs_mod_api::RoundStartCtx {
+        round_num: g.rules.total_rounds_played.max(0) as u32 + 1,
+    };
+    if crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+        sink.on_round_start(g, eng, cs_mod_api::HookPhase::Pre, &mut round_ctx)
+    }) == cs_mod_api::HookAction::Supercede
+    {
+        return;
+    }
     let now = eng.time();
     tracing::info!(complete_reset = g.rules.complete_reset, "restarting the round");
     g.rules.total_rounds_played += 1;
@@ -1756,6 +1810,10 @@ pub(crate) fn restart_round(g: &mut GameState, eng: &mut EngineApi<'_>) {
         crate::player::MAX_PLAYERS];
     g.damage_printed = [false; crate::player::MAX_PLAYERS];
     advance_lo3_on_restart(g, eng);
+    round_ctx.round_num = g.rules.total_rounds_played.max(0) as u32;
+    let _ = crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+        sink.on_round_start(g, eng, cs_mod_api::HookPhase::Post, &mut round_ctx)
+    });
 }
 
 /// Starts the competitive `lo3` / `mp_live_on_three` 3-restart scrim sequence.

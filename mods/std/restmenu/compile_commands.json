@@ -1,0 +1,7 @@
+[
+  {
+    "directory": ".",
+    "command": "clang++ --target=wasm32 -std=c++20 -O2 -nostdlib -fno-exceptions -I../../../sdk/cpp -c main.cpp -o server.wasm",
+    "file": "main.cpp"
+  }
+]

@@ -1,0 +1,15 @@
+[en]
+REST_MENU_TITLE = "Restrict Weapons"
+REST_BLOCKED = "\x04[RESTRICT]\x01 {weapon} is currently restricted on this server."
+REST_AWP_LIMIT = "\x04[RESTRICT]\x01 AWP limit reached (max 1 per team when under 10 players)."
+REST_TOGGLED_ON = "\x04[RESTRICT]\x01 Restricted {weapon}."
+REST_TOGGLED_OFF = "\x04[RESTRICT]\x01 Unrestricted {weapon}."
+REST_NO_ACCESS = "\x04[RESTRICT]\x01 Admin flag 'g' required to change weapon restrictions."
+
+[ru]
+REST_MENU_TITLE = "Ограничение оружия"
+REST_BLOCKED = "\x04[ОГРАНИЧЕНИЕ]\x01 Оружие {weapon} запрещено на этом сервере."
+REST_AWP_LIMIT = "\x04[ОГРАНИЧЕНИЕ]\x01 Лимит AWP достигнут (макс. 1 на команду при < 10 игроках)."
+REST_TOGGLED_ON = "\x04[ОГРАНИЧЕНИЕ]\x01 Оружие {weapon} запрещено."
+REST_TOGGLED_OFF = "\x04[ОГРАНИЧЕНИЕ]\x01 Запрет с {weapon} снят."
+REST_NO_ACCESS = "\x04[ОГРАНИЧЕНИЕ]\x01 Требуется флаг админа 'g'."

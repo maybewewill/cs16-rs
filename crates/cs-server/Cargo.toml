@@ -15,6 +15,7 @@ cs-local.workspace = true
 cs-master.workspace = true
 cs-game.workspace = true
 cs-mod-host.workspace = true
+cs-mod-py.workspace = true
 cs-platform.workspace = true
 cs-proto48.workspace = true
 cs-relay.workspace = true

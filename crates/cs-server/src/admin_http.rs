@@ -12,24 +12,42 @@
 //! - `GET  /api/map-overview/<map>.png` — overview BMP converted to RGBA PNG (token-protected)
 //! - `POST /api/rcon` — execute server console/RCON command (token-protected)
 //! - `GET  /api/invite` — generate `?join=<host:port>&room=<code>` lobby link (token-protected)
+//! - `GET  /api/mods` — loaded & available polyglot plugins with live ResMon metrics (token-protected)
+//! - `POST /api/mods/<id>/toggle` — pause / unpause / reload plugin (token-protected)
+//! - `GET  /api/mods/faults` — list retained black-box fault dumps (token-protected)
+//! - `GET  /api/mods/faults/<id>.json` — download black-box fault dump JSON (token-protected)
+//! - `GET  /api/mods/source/<file>` — read sandboxed `.py` / `configs/*.toml` source (token-protected)
+//! - `PUT  /api/mods/source/<file>` — save & hot-reload sandboxed source/config (token-protected)
 //!
 //! Zero `unsafe` code; constant-time token comparison against `rcon_password`; strict JSON
 //! escaping and bounded request sizes.
 
 use std::fmt::Write as _;
 use std::io::{self, Read, Write};
+use std::path::{Component, Path, PathBuf};
 
 use cs_master::lobbies::{LobbyError, LobbyRegistry};
 use cs_transport::ws_proto::{HttpRequest, MAX_HTTP_HEAD, parse_http_request};
 
 use crate::replays::{escape_json_str, valid_map_overview_name, valid_replay_id};
 
-/// Maximum HTTP request body accepted by `/api/*` endpoints (8 KiB).
+/// Maximum HTTP request body accepted by standard `/api/*` endpoints (8 KiB).
 pub const MAX_API_BODY_BYTES: usize = 8192;
+/// Maximum HTTP request body accepted by `PUT /api/mods/source/<file>` (128 KiB).
+pub const MAX_SOURCE_BODY_BYTES: usize = 128 * 1024;
 /// Maximum RCON command length accepted via `POST /api/rcon`.
 pub const MAX_RCON_CMD_BYTES: usize = 1024;
 /// Maximum accepted admin bearer/header token length.
 pub const MAX_AUTH_TOKEN_BYTES: usize = 256;
+
+/// Returns the bounded request body limit applicable to `path`.
+pub fn max_body_bytes_for_path(path: &str) -> usize {
+    if path.starts_with("/api/mods/source/") {
+        MAX_SOURCE_BODY_BYTES
+    } else {
+        MAX_API_BODY_BYTES
+    }
+}
 
 /// Constant-time byte slice equality (no early return on content mismatch).
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -122,6 +140,245 @@ pub trait AdminBackend {
     fn invite_config(&self) -> InviteConfig {
         InviteConfig::default()
     }
+    fn mods_json(&self) -> String {
+        "{\"count\":0,\"mods\":[],\"editable_files\":[]}".to_string()
+    }
+    fn toggle_mod(&mut self, _id: &str, _action: &str) -> Result<String, String> {
+        Err("mod host not enabled on server".to_string())
+    }
+    fn mod_faults_json(&self) -> String {
+        "{\"count\":0,\"faults\":[]}".to_string()
+    }
+    fn mod_fault_detail_json(&self, _id: &str) -> Option<String> {
+        None
+    }
+    fn read_mod_source(&self, _rel_path: &str) -> Result<String, String> {
+        Err("plugin studio not enabled on server".to_string())
+    }
+    fn write_mod_source(&mut self, _rel_path: &str, _content: &str) -> Result<String, String> {
+        Err("plugin studio not enabled on server".to_string())
+    }
+}
+
+/// Strict path-traversal sandbox guarding `GET/PUT /api/mods/source/<file>` and disk fault reads.
+#[derive(Debug, Clone)]
+pub struct ModStudioSandbox {
+    root: PathBuf,
+}
+
+impl ModStudioSandbox {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    /// Validates a POSIX relative path inside `mods/` or `configs/`.
+    pub fn validate_editable_rel_path(rel_path: &str) -> Result<Vec<String>, &'static str> {
+        if rel_path.is_empty() || rel_path.len() > 256 {
+            return Err("invalid source path length");
+        }
+        if rel_path.contains('\0')
+            || rel_path.contains('\\')
+            || rel_path.contains(':')
+            || rel_path.starts_with('/')
+            || rel_path.chars().any(|c| c.is_control())
+        {
+            return Err("disallowed character in source path");
+        }
+        let segments: Vec<String> = rel_path.split('/').map(ToString::to_string).collect();
+        if segments.len() < 2 {
+            return Err("source path must be inside mods/ or configs/");
+        }
+        for seg in &segments {
+            if seg.is_empty() || seg == "." || seg == ".." {
+                return Err("path traversal is forbidden");
+            }
+            if !seg
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+            {
+                return Err("disallowed path segment character");
+            }
+        }
+        let top = segments[0].as_str();
+        let file = segments.last().map(String::as_str).unwrap_or("");
+        let lower_file = file.to_ascii_lowercase();
+        match top {
+            "mods" => {
+                if !lower_file.ends_with(".py") {
+                    return Err("only .py scripts under mods/ are editable in Plugin Studio");
+                }
+            }
+            "configs" => {
+                if !(lower_file.ends_with(".toml")
+                    || lower_file.ends_with(".cfg")
+                    || lower_file.ends_with(".txt"))
+                {
+                    return Err("only .toml/.cfg/.txt files under configs/ are editable");
+                }
+            }
+            _ => return Err("source path must be inside mods/ or configs/"),
+        }
+        Ok(segments)
+    }
+
+    fn resolve_editable_path(&self, rel_path: &str, must_exist: bool) -> Result<PathBuf, String> {
+        let segments = Self::validate_editable_rel_path(rel_path).map_err(str::to_string)?;
+        let allowed_dir = self.root.join(&segments[0]);
+        let canon_allowed = std::fs::canonicalize(&allowed_dir)
+            .map_err(|_| format!("sandbox directory `{}` not found", segments[0]))?;
+
+        let mut candidate = allowed_dir;
+        for seg in &segments[1..] {
+            candidate.push(seg);
+        }
+        // Reject any symlink along the path to prevent symlink escape.
+        let mut cursor = self.root.join(&segments[0]);
+        for seg in &segments[1..] {
+            cursor.push(seg);
+            if let Ok(meta) = std::fs::symlink_metadata(&cursor)
+                && meta.file_type().is_symlink()
+            {
+                return Err("symlinks are forbidden inside Plugin Studio sandbox".to_string());
+            }
+        }
+
+        if must_exist {
+            let canon = std::fs::canonicalize(&candidate)
+                .map_err(|_| format!("source file `{rel_path}` not found"))?;
+            if !canon.starts_with(&canon_allowed) || !canon.is_file() {
+                return Err("source path escapes Plugin Studio sandbox".to_string());
+            }
+            Ok(canon)
+        } else {
+            let parent = candidate
+                .parent()
+                .ok_or_else(|| "invalid parent directory".to_string())?;
+            let canon_parent = std::fs::canonicalize(parent)
+                .map_err(|_| format!("parent directory for `{rel_path}` not found"))?;
+            if !canon_parent.starts_with(&canon_allowed) {
+                return Err("source path escapes Plugin Studio sandbox".to_string());
+            }
+            let file_name = candidate
+                .file_name()
+                .ok_or_else(|| "invalid filename".to_string())?;
+            Ok(canon_parent.join(file_name))
+        }
+    }
+
+    /// Lists all editable `.py` and `configs/*.{toml,cfg,txt}` files relative to sandbox root.
+    pub fn list_editable_files(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for top in ["mods", "configs"] {
+            let dir = self.root.join(top);
+            if dir.is_dir() {
+                collect_editable_files(&dir, top, &mut out, 0);
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// Reads one sandboxed source/config file (bounded to `MAX_SOURCE_BODY_BYTES`).
+    pub fn read_source(&self, rel_path: &str) -> Result<String, String> {
+        let abs = self.resolve_editable_path(rel_path, true)?;
+        let meta = std::fs::metadata(&abs).map_err(|e| format!("failed to stat file: {e}"))?;
+        if meta.len() as usize > MAX_SOURCE_BODY_BYTES {
+            return Err("source file exceeds 128 KiB Plugin Studio limit".to_string());
+        }
+        std::fs::read_to_string(&abs).map_err(|e| format!("failed to read `{rel_path}`: {e}"))
+    }
+
+    /// Validates and writes one sandboxed source/config file, returning its canonical disk path.
+    pub fn write_source(&self, rel_path: &str, content: &str) -> Result<PathBuf, String> {
+        if content.len() > MAX_SOURCE_BODY_BYTES {
+            return Err("source content exceeds 128 KiB Plugin Studio limit".to_string());
+        }
+        if rel_path.to_ascii_lowercase().ends_with(".py") {
+            cs_mod_py::PySourceSyntaxCheck::check(rel_path, content)
+                .map_err(|e| format!("Python syntax error: {e}"))?;
+        }
+        let abs = self.resolve_editable_path(rel_path, false)?;
+        std::fs::write(&abs, content.as_bytes())
+            .map_err(|e| format!("failed to write `{rel_path}`: {e}"))?;
+        Ok(abs)
+    }
+
+    /// Reads a sandboxed black-box fault dump from `logs/mod_faults/<id>.json`.
+    pub fn read_fault_file(&self, id: &str) -> Option<String> {
+        if !valid_fault_dump_id(id) {
+            return None;
+        }
+        let dir = self.root.join("logs").join("mod_faults");
+        let canon_dir = std::fs::canonicalize(&dir).ok()?;
+        let filename = if id.ends_with(".json") {
+            id.to_string()
+        } else {
+            format!("{id}.json")
+        };
+        let target = canon_dir.join(&filename);
+        let canon = std::fs::canonicalize(&target).ok()?;
+        if !canon.starts_with(&canon_dir) || !canon.is_file() {
+            return None;
+        }
+        let meta = std::fs::metadata(&canon).ok()?;
+        if meta.len() > 300 * 1024 {
+            return None;
+        }
+        std::fs::read_to_string(&canon).ok()
+    }
+}
+
+fn collect_editable_files(dir: &Path, prefix: &str, out: &mut Vec<String>, depth: usize) {
+    if depth > 4 || out.len() >= 256 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    paths.sort();
+    for p in paths {
+        if let Ok(meta) = std::fs::symlink_metadata(&p)
+            && meta.file_type().is_symlink()
+        {
+            continue;
+        }
+        let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name.starts_with('.') || name == "target" {
+            continue;
+        }
+        let rel = format!("{prefix}/{name}");
+        if p.is_dir() {
+            collect_editable_files(&p, &rel, out, depth + 1);
+        } else if p.is_file() && ModStudioSandbox::validate_editable_rel_path(&rel).is_ok() {
+            out.push(rel);
+        }
+    }
+}
+
+pub fn valid_mod_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && !id.contains("..")
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+}
+
+pub fn valid_fault_dump_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && !id.contains("..")
+        && !id.contains('/')
+        && !id.contains('\\')
+        && Path::new(id)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_)))
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
 }
 
 /// Incoming HTTP/1.1 request view passed to [`AdminRouter::handle`].
@@ -604,6 +861,84 @@ impl AdminRouter {
             (_, "/api/rcon") => {
                 AdminHttpResponse::json_error(405, "Method Not Allowed", "expected POST")
             }
+            ("GET" | "HEAD", "/api/mods") => {
+                AdminHttpResponse::json(200, "OK", backend.mods_json())
+            }
+            ("GET" | "HEAD", "/api/mods/faults") => {
+                AdminHttpResponse::json(200, "OK", backend.mod_faults_json())
+            }
+            ("GET" | "HEAD", path) if path.starts_with("/api/mods/faults/") => {
+                let Some(rest) = path.strip_prefix("/api/mods/faults/") else {
+                    return AdminHttpResponse::json_error(404, "Not Found", "not found");
+                };
+                let (id, as_download) = match rest.strip_suffix(".json") {
+                    Some(stem) => (stem, true),
+                    None => (rest, false),
+                };
+                if !valid_fault_dump_id(id) {
+                    return AdminHttpResponse::json_error(
+                        400,
+                        "Bad Request",
+                        "invalid fault dump id",
+                    );
+                }
+                match backend.mod_fault_detail_json(id) {
+                    Some(json) => {
+                        let mut resp = AdminHttpResponse::json(200, "OK", json);
+                        if as_download {
+                            resp.content_disposition =
+                                Some(format!("attachment; filename=\"{id}.json\""));
+                        }
+                        resp
+                    }
+                    None => {
+                        AdminHttpResponse::json_error(404, "Not Found", "fault dump not found")
+                    }
+                }
+            }
+            ("GET" | "HEAD", path) if path.starts_with("/api/mods/source/") => {
+                let Some(raw_rel) = path.strip_prefix("/api/mods/source/") else {
+                    return AdminHttpResponse::json_error(404, "Not Found", "not found");
+                };
+                let Some(rel) = url_decode(raw_rel) else {
+                    return AdminHttpResponse::json_error(
+                        400,
+                        "Bad Request",
+                        "invalid percent-encoding in source path",
+                    );
+                };
+                if let Err(msg) = ModStudioSandbox::validate_editable_rel_path(&rel) {
+                    return AdminHttpResponse::json_error(400, "Bad Request", msg);
+                }
+                match backend.read_mod_source(&rel) {
+                    Ok(content) => AdminHttpResponse::json(
+                        200,
+                        "OK",
+                        format!(
+                            "{{\"path\":{},\"content\":{}}}",
+                            escape_json_str(&rel),
+                            escape_json_str(&content),
+                        ),
+                    ),
+                    Err(err) => {
+                        let code = if err.contains("not found") { 404 } else { 400 };
+                        let text = if code == 404 {
+                            "Not Found"
+                        } else {
+                            "Bad Request"
+                        };
+                        AdminHttpResponse::json_error(code, text, &err)
+                    }
+                }
+            }
+            ("PUT", path) if path.starts_with("/api/mods/source/") => {
+                handle_mod_source_put(path, req.body, backend)
+            }
+            ("POST", path)
+                if path.starts_with("/api/mods/") && path.ends_with("/toggle") =>
+            {
+                handle_mod_toggle_post(path, req.body, backend)
+            }
             ("GET" | "HEAD", _) => {
                 AdminHttpResponse::json_error(404, "Not Found", "unknown API endpoint")
             }
@@ -688,6 +1023,158 @@ fn handle_rcon_post(body: &[u8], backend: &mut dyn AdminBackend) -> AdminHttpRes
         ),
         Err(err) => AdminHttpResponse::json_error(400, "Bad Request", &err),
     }
+}
+
+fn handle_mod_toggle_post(
+    path: &str,
+    body: &[u8],
+    backend: &mut dyn AdminBackend,
+) -> AdminHttpResponse {
+    if body.len() > MAX_API_BODY_BYTES {
+        return AdminHttpResponse::json_error(413, "Payload Too Large", "request body too large");
+    }
+    let Some(id_raw) = path
+        .strip_prefix("/api/mods/")
+        .and_then(|s| s.strip_suffix("/toggle"))
+    else {
+        return AdminHttpResponse::json_error(404, "Not Found", "unknown route");
+    };
+    let Some(id) = url_decode(id_raw) else {
+        return AdminHttpResponse::json_error(400, "Bad Request", "invalid mod id encoding");
+    };
+    if !valid_mod_id(&id) {
+        return AdminHttpResponse::json_error(400, "Bad Request", "invalid mod id");
+    }
+    let action = match extract_json_string_field(body, "action") {
+        Ok(a) => a.trim().to_ascii_lowercase(),
+        Err(msg) => return AdminHttpResponse::json_error(400, "Bad Request", msg),
+    };
+    if !matches!(action.as_str(), "pause" | "unpause" | "reload") {
+        return AdminHttpResponse::json_error(
+            400,
+            "Bad Request",
+            "action must be pause, unpause, or reload",
+        );
+    }
+    match backend.toggle_mod(&id, &action) {
+        Ok(message) => AdminHttpResponse::json(
+            200,
+            "OK",
+            format!(
+                "{{\"ok\":true,\"id\":{},\"action\":{},\"message\":{}}}",
+                escape_json_str(&id),
+                escape_json_str(&action),
+                escape_json_str(&message),
+            ),
+        ),
+        Err(err) => AdminHttpResponse::json_error(400, "Bad Request", &err),
+    }
+}
+
+fn handle_mod_source_put(
+    path: &str,
+    body: &[u8],
+    backend: &mut dyn AdminBackend,
+) -> AdminHttpResponse {
+    if body.len() > MAX_SOURCE_BODY_BYTES {
+        return AdminHttpResponse::json_error(
+            413,
+            "Payload Too Large",
+            "source payload exceeds 128 KiB",
+        );
+    }
+    let Some(raw_rel) = path.strip_prefix("/api/mods/source/") else {
+        return AdminHttpResponse::json_error(404, "Not Found", "not found");
+    };
+    let Some(rel) = url_decode(raw_rel) else {
+        return AdminHttpResponse::json_error(
+            400,
+            "Bad Request",
+            "invalid percent-encoding in source path",
+        );
+    };
+    if let Err(msg) = ModStudioSandbox::validate_editable_rel_path(&rel) {
+        return AdminHttpResponse::json_error(400, "Bad Request", msg);
+    }
+    let content = match extract_json_string_field(body, "content") {
+        Ok(s) => s,
+        Err(_) => match std::str::from_utf8(body) {
+            Ok(raw) if !raw.trim_start().starts_with('{') => raw.to_string(),
+            Ok(_) => {
+                return AdminHttpResponse::json_error(
+                    400,
+                    "Bad Request",
+                    "expected JSON {\"content\":\"...\"} or raw UTF-8 source",
+                );
+            }
+            Err(_) => {
+                return AdminHttpResponse::json_error(
+                    400,
+                    "Bad Request",
+                    "source body must be valid UTF-8",
+                );
+            }
+        },
+    };
+    match backend.write_mod_source(&rel, &content) {
+        Ok(msg) => AdminHttpResponse::json(
+            200,
+            "OK",
+            format!(
+                "{{\"ok\":true,\"path\":{},\"message\":{}}}",
+                escape_json_str(&rel),
+                escape_json_str(&msg),
+            ),
+        ),
+        Err(err) => AdminHttpResponse::json_error(400, "Bad Request", &err),
+    }
+}
+
+/// Encodes unified ResMon plugin rows and editable Plugin Studio files into `/api/mods` JSON.
+pub fn encode_mods_json(
+    mods: &[cs_mod_host::PluginResmon],
+    editable_files: &[String],
+) -> String {
+    let mut out = String::with_capacity(128 + mods.len() * 220 + editable_files.len() * 32);
+    let _ = write!(out, "{{\"count\":{},\"mods\":[", mods.len());
+    for (idx, m) in mods.iter().enumerate() {
+        if idx > 0 {
+            out.push(',');
+        }
+        let avg = if m.avg_us_per_tick.is_finite() && m.avg_us_per_tick >= 0.0 {
+            m.avg_us_per_tick
+        } else {
+            0.0
+        };
+        let src_json = match m.source_path.as_deref() {
+            Some(s) => escape_json_str(s),
+            None => "null".to_string(),
+        };
+        let _ = write!(
+            out,
+            "{{\"id\":{},\"version\":{},\"language\":{},\"status\":{},\"enabled\":{},\"avg_us_per_tick\":{avg:.2},\"p99_us_per_tick\":{},\"max_us\":{},\"fuel_used\":{},\"memory_bytes\":{},\"hook_calls\":{},\"fault_count\":{},\"source_path\":{src_json}}}",
+            escape_json_str(&m.id),
+            escape_json_str(&m.version),
+            escape_json_str(&m.language),
+            escape_json_str(&m.status),
+            m.enabled,
+            m.p99_us_per_tick,
+            m.max_us,
+            m.fuel_used,
+            m.memory_bytes,
+            m.hook_calls,
+            m.fault_count,
+        );
+    }
+    out.push_str("],\"editable_files\":[");
+    for (idx, f) in editable_files.iter().enumerate() {
+        if idx > 0 {
+            out.push(',');
+        }
+        out.push_str(&escape_json_str(f));
+    }
+    out.push_str("]}");
+    out
 }
 
 fn encode_status_json(s: &ServerStatusSnapshot) -> String {
@@ -1306,6 +1793,232 @@ mod tests {
             &mut backend,
         );
         assert_eq!(bad_ov.status_code, 400);
+    }
+
+    #[test]
+    fn mod_studio_sandbox_blocks_traversal_and_symlinks_and_validates_python() {
+        let tmp = std::env::temp_dir().join(format!(
+            "cs16_studio_sandbox_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("mods/community")).unwrap();
+        std::fs::create_dir_all(tmp.join("configs/lang")).unwrap();
+        std::fs::write(
+            tmp.join("mods/community/demo.py"),
+            "import cs16\n@cs16.mod.info(id=\"demo\", version=\"1.0.0\")\ndef init(): pass\n",
+        )
+        .unwrap();
+        std::fs::write(tmp.join("configs/admins.toml"), "[[admin]]\n").unwrap();
+        std::fs::write(tmp.join("secret.txt"), "top-secret").unwrap();
+
+        let sb = ModStudioSandbox::new(&tmp);
+        let files = sb.list_editable_files();
+        assert!(files.contains(&"mods/community/demo.py".to_string()));
+        assert!(files.contains(&"configs/admins.toml".to_string()));
+        assert!(!files.iter().any(|f| f.contains("secret.txt")));
+
+        // Traversal attempts rejected.
+        for bad in [
+            "../secret.txt",
+            "mods/../../secret.txt",
+            "mods/../secret.txt",
+            "mods/community/demo.wasm",
+            "configs/evil.exe",
+            "mods\\community\\demo.py",
+            "/etc/passwd",
+            "C:/Windows/win.ini",
+        ] {
+            assert!(sb.read_source(bad).is_err(), "should reject read `{bad}`");
+            assert!(
+                sb.write_source(bad, "x = 1\n").is_err(),
+                "should reject write `{bad}`"
+            );
+        }
+
+        // Valid Python syntax passes; broken syntax rejected before touching disk.
+        let orig = sb.read_source("mods/community/demo.py").unwrap();
+        assert!(orig.contains("demo"));
+        assert!(
+            sb.write_source("mods/community/demo.py", "def broken(:\n")
+                .is_err()
+        );
+        assert_eq!(sb.read_source("mods/community/demo.py").unwrap(), orig);
+
+        let updated = "import cs16\n@cs16.mod.info(id=\"demo\", version=\"1.1.0\")\ndef init(): pass\n";
+        sb.write_source("mods/community/demo.py", updated).unwrap();
+        assert_eq!(sb.read_source("mods/community/demo.py").unwrap(), updated);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn routes_mods_resmon_toggle_faults_and_studio_source_endpoints() {
+        struct ModStubBackend {
+            base: StubBackend,
+            sandbox: ModStudioSandbox,
+            last_toggle: Option<(String, String)>,
+            reloads: usize,
+        }
+
+        impl AdminBackend for ModStubBackend {
+            fn rcon_password(&self) -> &str {
+                self.base.rcon_password()
+            }
+            fn status(&self) -> ServerStatusSnapshot {
+                self.base.status()
+            }
+            fn players(&self) -> Vec<PlayerSnapshot> {
+                self.base.players()
+            }
+            fn stats_json(&self) -> String {
+                self.base.stats_json()
+            }
+            fn replays_index_json(&self) -> String {
+                self.base.replays_index_json()
+            }
+            fn replay_dem(&self, id: &str) -> Option<Vec<u8>> {
+                self.base.replay_dem(id)
+            }
+            fn execute_rcon(&mut self, command: &str) -> Result<String, String> {
+                self.base.execute_rcon(command)
+            }
+            fn mods_json(&self) -> String {
+                encode_mods_json(
+                    &[cs_mod_host::PluginResmon {
+                        id: "resetscore".to_string(),
+                        version: "1.0.0".to_string(),
+                        language: "Python".to_string(),
+                        status: "Active".to_string(),
+                        enabled: true,
+                        avg_us_per_tick: 12.5,
+                        p99_us_per_tick: 24,
+                        max_us: 30,
+                        fuel_used: 420,
+                        memory_bytes: 8192,
+                        hook_calls: 9,
+                        fault_count: 0,
+                        source_path: Some("mods/community/resetscore.py".to_string()),
+                    }],
+                    &self.sandbox.list_editable_files(),
+                )
+            }
+            fn toggle_mod(&mut self, id: &str, action: &str) -> Result<String, String> {
+                self.last_toggle = Some((id.to_string(), action.to_string()));
+                Ok(format!("{action}d {id}"))
+            }
+            fn mod_faults_json(&self) -> String {
+                "{\"count\":1,\"faults\":[{\"dump_id\":\"1000_bad_hook\",\"mod_id\":\"bad\"}]}".to_string()
+            }
+            fn mod_fault_detail_json(&self, id: &str) -> Option<String> {
+                (id == "1000_bad_hook").then(|| "{\"dump_id\":\"1000_bad_hook\"}".to_string())
+            }
+            fn read_mod_source(&self, rel_path: &str) -> Result<String, String> {
+                self.sandbox.read_source(rel_path)
+            }
+            fn write_mod_source(&mut self, rel_path: &str, content: &str) -> Result<String, String> {
+                let _ = self.sandbox.write_source(rel_path, content)?;
+                self.reloads += 1;
+                Ok("hot-reloaded".to_string())
+            }
+        }
+
+        let tmp = std::env::temp_dir().join(format!(
+            "cs16_studio_routes_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("mods/community")).unwrap();
+        std::fs::write(
+            tmp.join("mods/community/resetscore.py"),
+            "def on_init():\n    return 0\n",
+        )
+        .unwrap();
+
+        let mut backend = ModStubBackend {
+            base: StubBackend {
+                rcon_password: "pw".to_string(),
+                last_cmd: None,
+                replay: Vec::new(),
+            },
+            sandbox: ModStudioSandbox::new(&tmp),
+            last_toggle: None,
+            reloads: 0,
+        };
+
+        let auth_get = |path: &'static str| AdminHttpRequest {
+            method: "GET",
+            path,
+            query: None,
+            authorization: Some("Bearer pw"),
+            x_admin_token: None,
+            host: None,
+            body: b"",
+        };
+
+        // GET /api/mods
+        let mods_resp = AdminRouter::handle(&auth_get("/api/mods"), &mut backend);
+        assert_eq!(mods_resp.status_code, 200);
+        let mods_body = String::from_utf8(mods_resp.body).unwrap();
+        assert!(mods_body.contains("\"id\":\"resetscore\""));
+        assert!(mods_body.contains("\"avg_us_per_tick\":12.50"));
+        assert!(mods_body.contains("mods/community/resetscore.py"));
+
+        // POST /api/mods/resetscore/toggle
+        let tog_resp = AdminRouter::handle(
+            &AdminHttpRequest {
+                method: "POST",
+                path: "/api/mods/resetscore/toggle",
+                body: br#"{"action":"pause"}"#,
+                ..auth_get("/api/mods/resetscore/toggle")
+            },
+            &mut backend,
+        );
+        assert_eq!(tog_resp.status_code, 200);
+        assert_eq!(
+            backend.last_toggle,
+            Some(("resetscore".to_string(), "pause".to_string()))
+        );
+
+        // GET /api/mods/faults & download .json
+        let fl_resp = AdminRouter::handle(&auth_get("/api/mods/faults"), &mut backend);
+        assert_eq!(fl_resp.status_code, 200);
+        let fd_resp =
+            AdminRouter::handle(&auth_get("/api/mods/faults/1000_bad_hook.json"), &mut backend);
+        assert_eq!(fd_resp.status_code, 200);
+        assert_eq!(
+            fd_resp.content_disposition.as_deref(),
+            Some("attachment; filename=\"1000_bad_hook.json\"")
+        );
+
+        // GET & PUT /api/mods/source/<file>
+        let src_get = AdminRouter::handle(
+            &auth_get("/api/mods/source/mods/community/resetscore.py"),
+            &mut backend,
+        );
+        assert_eq!(src_get.status_code, 200);
+        assert!(String::from_utf8(src_get.body).unwrap().contains("on_init"));
+
+        let src_put = AdminRouter::handle(
+            &AdminHttpRequest {
+                method: "PUT",
+                path: "/api/mods/source/mods/community/resetscore.py",
+                body: br#"{"content":"def on_init():\n    return 1\n"}"#,
+                ..auth_get("/api/mods/source/mods/community/resetscore.py")
+            },
+            &mut backend,
+        );
+        assert_eq!(src_put.status_code, 200);
+        assert_eq!(backend.reloads, 1);
+
+        // Path traversal rejected at router level.
+        let trav = AdminRouter::handle(
+            &auth_get("/api/mods/source/..%2F..%2FCargo.toml"),
+            &mut backend,
+        );
+        assert_eq!(trav.status_code, 400);
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

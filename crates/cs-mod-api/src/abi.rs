@@ -1,5 +1,10 @@
-//! Stable ABI enums (`HookId`, `HookPhase`, `HookAction`), client HUD draw commands,
-//! and compact auto-download wire packets carried over custom user messages.
+//! Stable ABI v2 enums (`HookId`, `HookPhase`, `HookAction`), mutable ReAPI-style hook context
+//! structs, client HUD draw commands, and compact auto-download wire packets carried over custom
+//! user messages.
+//!
+//! Clean-room design referencing ReAPI / ReGameDLL_CS hook semantics (`reapi_gamedll_const.inc`,
+//! `regamedll/dlls/player.cpp`, `client.cpp`, `multiplay_gamerules.cpp`, read 2026-11-26) under
+//! GPL-3.0-or-later.
 
 use serde::{Deserialize, Serialize};
 
@@ -93,11 +98,14 @@ impl HookAction {
     }
 }
 
-/// Every hook point across `GameDll`, gameplay lifecycle, and `EngineApi`.
+/// Every hook point across `GameDll`, ReAPI CS 1.6 gameplay lifecycle, and `EngineApi`.
+///
+/// All ABI v1 discriminants (`1..=18`, `30..=31`, `100..=107`) are preserved verbatim for
+/// backwards compatibility with v1 `.wasm` mods.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[repr(u32)]
 pub enum HookId {
-    // GameDll hooks
+    // GameDll hooks (v1)
     ServerActivate = 1,
     ServerDeactivate = 2,
     SpawnEntity = 3,
@@ -116,10 +124,34 @@ pub enum HookId {
     GetWeaponData = 16,
     ServerCommand = 17,
     AddToFullPack = 18,
-    // Synthetic gameplay hooks derived from game events
+    // Gameplay hooks (v1 + v2 ReAPI)
     PlayerDeath = 30,
     RoundStart = 31,
-    // EngineApi hooks
+    PlayerSpawn = 32,
+    PlayerTakeDamage = 33,
+    PlayerKilled = 34,
+    PlayerPreThink = 35,
+    PlayerPostThink = 36,
+    PlayerJump = 37,
+    PlayersShouldCollide = 38,
+    CanBuyItem = 39,
+    CanHavePlayerItem = 40,
+    WeaponDeploy = 41,
+    WeaponPrimaryAttack = 42,
+    WeaponReload = 43,
+    PlayerSay = 44,
+    MenuSelect = 45,
+    FreezeTimeEnd = 46,
+    RoundEnd = 47,
+    BombPlanting = 48,
+    BombPlanted = 49,
+    BombDefusing = 50,
+    BombDefused = 51,
+    BombExploded = 52,
+    HostageTouched = 53,
+    HostageRescued = 54,
+    GrenadeThrow = 55,
+    // EngineApi hooks (v1)
     EngEmitSound = 100,
     EngSendUserMsg = 101,
     EngClientPrint = 102,
@@ -158,6 +190,30 @@ impl HookId {
             18 => Some(Self::AddToFullPack),
             30 => Some(Self::PlayerDeath),
             31 => Some(Self::RoundStart),
+            32 => Some(Self::PlayerSpawn),
+            33 => Some(Self::PlayerTakeDamage),
+            34 => Some(Self::PlayerKilled),
+            35 => Some(Self::PlayerPreThink),
+            36 => Some(Self::PlayerPostThink),
+            37 => Some(Self::PlayerJump),
+            38 => Some(Self::PlayersShouldCollide),
+            39 => Some(Self::CanBuyItem),
+            40 => Some(Self::CanHavePlayerItem),
+            41 => Some(Self::WeaponDeploy),
+            42 => Some(Self::WeaponPrimaryAttack),
+            43 => Some(Self::WeaponReload),
+            44 => Some(Self::PlayerSay),
+            45 => Some(Self::MenuSelect),
+            46 => Some(Self::FreezeTimeEnd),
+            47 => Some(Self::RoundEnd),
+            48 => Some(Self::BombPlanting),
+            49 => Some(Self::BombPlanted),
+            50 => Some(Self::BombDefusing),
+            51 => Some(Self::BombDefused),
+            52 => Some(Self::BombExploded),
+            53 => Some(Self::HostageTouched),
+            54 => Some(Self::HostageRescued),
+            55 => Some(Self::GrenadeThrow),
             100 => Some(Self::EngEmitSound),
             101 => Some(Self::EngSendUserMsg),
             102 => Some(Self::EngClientPrint),
@@ -192,6 +248,34 @@ impl HookId {
             "add_to_full_pack" => Some(Self::AddToFullPack),
             "player_death" => Some(Self::PlayerDeath),
             "round_start" => Some(Self::RoundStart),
+            "player_spawn" | "playerspawn" => Some(Self::PlayerSpawn),
+            "player_take_damage" | "playertakedamage" | "take_damage" => {
+                Some(Self::PlayerTakeDamage)
+            }
+            "player_killed" | "playerkilled" => Some(Self::PlayerKilled),
+            "player_pre_think" | "playerprethink" => Some(Self::PlayerPreThink),
+            "player_post_think" | "playerpostthink" => Some(Self::PlayerPostThink),
+            "player_jump" | "playerjump" => Some(Self::PlayerJump),
+            "players_should_collide" | "playersshouldcollide" | "should_collide" => {
+                Some(Self::PlayersShouldCollide)
+            }
+            "can_buy_item" | "canbuyitem" => Some(Self::CanBuyItem),
+            "can_have_player_item" | "canhaveplayeritem" => Some(Self::CanHavePlayerItem),
+            "weapon_deploy" | "weapondeploy" => Some(Self::WeaponDeploy),
+            "weapon_primary_attack" | "weaponprimaryattack" => Some(Self::WeaponPrimaryAttack),
+            "weapon_reload" | "weaponreload" => Some(Self::WeaponReload),
+            "player_say" | "playersay" => Some(Self::PlayerSay),
+            "menu_select" | "menuselect" => Some(Self::MenuSelect),
+            "freeze_time_end" | "freezetimeend" => Some(Self::FreezeTimeEnd),
+            "round_end" | "roundend" => Some(Self::RoundEnd),
+            "bomb_planting" | "bombplanting" => Some(Self::BombPlanting),
+            "bomb_planted" | "bombplanted" => Some(Self::BombPlanted),
+            "bomb_defusing" | "bombdefusing" => Some(Self::BombDefusing),
+            "bomb_defused" | "bombdefused" => Some(Self::BombDefused),
+            "bomb_exploded" | "bombexploded" => Some(Self::BombExploded),
+            "hostage_touched" | "hostagetouched" => Some(Self::HostageTouched),
+            "hostage_rescued" | "hostagerescued" => Some(Self::HostageRescued),
+            "grenade_throw" | "grenadethrow" => Some(Self::GrenadeThrow),
             "eng_emit_sound" => Some(Self::EngEmitSound),
             "eng_send_usermsg" => Some(Self::EngSendUserMsg),
             "eng_client_print" => Some(Self::EngClientPrint),
@@ -203,6 +287,191 @@ impl HookId {
             _ => None,
         }
     }
+
+    pub fn as_name(self) -> &'static str {
+        match self {
+            Self::ServerActivate => "server_activate",
+            Self::ServerDeactivate => "server_deactivate",
+            Self::SpawnEntity => "spawn_entity",
+            Self::ClientConnect => "client_connect",
+            Self::ClientPutInServer => "client_put_in_server",
+            Self::ClientDisconnect => "client_disconnect",
+            Self::ClientCommand => "client_command",
+            Self::ClientUserinfoChanged => "client_userinfo_changed",
+            Self::RunUsercmd => "run_usercmd",
+            Self::PostUsercmd => "post_usercmd",
+            Self::StartFrame => "start_frame",
+            Self::Think => "think",
+            Self::Touch => "touch",
+            Self::Blocked => "blocked",
+            Self::UpdateClientData => "update_client_data",
+            Self::GetWeaponData => "get_weapon_data",
+            Self::ServerCommand => "server_command",
+            Self::AddToFullPack => "add_to_full_pack",
+            Self::PlayerDeath => "player_death",
+            Self::RoundStart => "round_start",
+            Self::PlayerSpawn => "player_spawn",
+            Self::PlayerTakeDamage => "player_take_damage",
+            Self::PlayerKilled => "player_killed",
+            Self::PlayerPreThink => "player_pre_think",
+            Self::PlayerPostThink => "player_post_think",
+            Self::PlayerJump => "player_jump",
+            Self::PlayersShouldCollide => "players_should_collide",
+            Self::CanBuyItem => "can_buy_item",
+            Self::CanHavePlayerItem => "can_have_player_item",
+            Self::WeaponDeploy => "weapon_deploy",
+            Self::WeaponPrimaryAttack => "weapon_primary_attack",
+            Self::WeaponReload => "weapon_reload",
+            Self::PlayerSay => "player_say",
+            Self::MenuSelect => "menu_select",
+            Self::FreezeTimeEnd => "freeze_time_end",
+            Self::RoundEnd => "round_end",
+            Self::BombPlanting => "bomb_planting",
+            Self::BombPlanted => "bomb_planted",
+            Self::BombDefusing => "bomb_defusing",
+            Self::BombDefused => "bomb_defused",
+            Self::BombExploded => "bomb_exploded",
+            Self::HostageTouched => "hostage_touched",
+            Self::HostageRescued => "hostage_rescued",
+            Self::GrenadeThrow => "grenade_throw",
+            Self::EngEmitSound => "eng_emit_sound",
+            Self::EngSendUserMsg => "eng_send_usermsg",
+            Self::EngClientPrint => "eng_client_print",
+            Self::EngCenterPrint => "eng_center_print",
+            Self::EngCreateEntity => "eng_create_entity",
+            Self::EngRemoveEntity => "eng_remove_entity",
+            Self::EngKick => "eng_kick",
+            Self::EngChangeLevel => "eng_change_level",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ABI v2 Mutable Hook Context Structs
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerSpawnCtx {
+    pub slot: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlayerTakeDamageCtx {
+    pub victim: u8,
+    pub inflictor: u16,
+    pub attacker: Option<u8>,
+    pub damage: f32,
+    pub damage_bits: u32,
+    pub hitgroup: u8,
+    pub weapon_id: u8,
+    pub team_attack: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerKilledCtx {
+    pub victim: u8,
+    pub killer: Option<u8>,
+    pub weapon_name: String,
+    pub weapon_id: u8,
+    pub hitgroup: u8,
+    pub headshot: bool,
+    pub team_kill: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerPreThinkCtx {
+    pub slot: u8,
+    pub buttons: u16,
+    pub oldbuttons: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerPostThinkCtx {
+    pub slot: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerJumpCtx {
+    pub slot: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayersShouldCollideCtx {
+    pub slot_a: u8,
+    pub slot_b: u8,
+    pub should_collide: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CanBuyItemCtx {
+    pub slot: u8,
+    /// `WeaponId` (`1..=30`, `99` shield) or equipment code (`101`=Kevlar, `102`=VestHelm, `106`=NVG, `107`=Defuser).
+    pub item_id: u8,
+    pub price: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CanHavePlayerItemCtx {
+    pub slot: u8,
+    pub weapon_id: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WeaponEventCtx {
+    pub slot: u8,
+    pub weapon_id: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerSayCtx {
+    pub slot: u8,
+    pub team_only: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MenuSelectCtx {
+    pub slot: u8,
+    pub menu_id: u32,
+    pub item_index: usize,
+    pub info: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoundStartCtx {
+    pub round_num: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoundEndCtx {
+    /// `0` = Draw, `1` = Terrorists, `2` = Counter-Terrorists.
+    pub winner: u8,
+    /// Reason code (1 = TargetBombed, 2 = VipEscaped, 3 = VipAssassinated, 4 = TerroristsEscaped,
+    /// 5 = CtsPreventEscape, 6 = EscapingTerroristsNeutralized, 7 = BombDefused, 8 = CtsWin,
+    /// 9 = TerroristsWin, 10 = RoundDraw, 11 = AllHostagesRescued, 12 = TargetSaved,
+    /// 13 = HostagesNotRescued, 14 = TerroristsNotEscaped, 15 = VipNotEscaped, 16 = GameCommencing).
+    pub reason: u8,
+    pub bonus: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct BombEventCtx {
+    pub slot: Option<u8>,
+    pub origin: [f32; 3],
+    pub has_kit: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostageEventCtx {
+    pub slot: u8,
+    pub ent_index: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrenadeThrowCtx {
+    pub slot: u8,
+    pub weapon_id: u8,
+    pub ent_index: u16,
 }
 
 /// Immediate-mode HUD draw command emitted by a sandboxed client WASM mod (`0..=1` normalized
@@ -365,6 +634,19 @@ mod tests {
         assert_eq!(HookAction::from_i32(3), HookAction::Supercede);
         assert_eq!(HookId::from_name("start_frame"), Some(HookId::StartFrame));
         assert_eq!(HookId::from_name("eng_emit_sound"), Some(HookId::EngEmitSound));
+        assert_eq!(
+            HookId::from_name("player_take_damage"),
+            Some(HookId::PlayerTakeDamage)
+        );
+        assert_eq!(
+            HookId::from_name("players_should_collide"),
+            Some(HookId::PlayersShouldCollide)
+        );
+        assert_eq!(
+            HookId::from_u32(HookId::BombDefused as u32),
+            Some(HookId::BombDefused)
+        );
+        assert_eq!(HookId::HostageRescued.as_name(), "hostage_rescued");
 
         let manifest = ModManifestPacket {
             mod_index: 0,

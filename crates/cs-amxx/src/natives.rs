@@ -1,17 +1,27 @@
-//! AMX Mod X natives, Counter-Strike hook trait, and host state.
+//! AMX Mod X natives, Counter-Strike hook trait, and shared host state.
 //!
-//! Ported from AMX Mod X GPL-3 (`amxmodx.cpp`, `string.cpp`, `float.cpp`, `cstrike`, `fun`,
-//! `engine`, `fakemeta`, `hamsandwich` modules).
+//! Clean-room GPL-3.0-or-later implementation citing AMX Mod X (`amxmodx.cpp`, `string.cpp`,
+//! `float.cpp`, `newmenus.cpp`, `CLang.cpp`, `modules/nvault/amxxapi.cpp`, `modules/csx/`,
+//! `cstrike`, `fun`, `engine`, `fakemeta`, `hamsandwich` `ham_const.inc`, read 2026-11-26)
+//! and ReAPI (`reapi_gamedll.inc`, `reapi_gamedll_const.inc`, read 2026-11-26).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use cs_engine::consts::{FL_FAKECLIENT, FL_GODMODE, FL_PROXY};
 use cs_engine::{EdictId, EngineApi, MsgDest};
+use cs_mod_api::services::{
+    LANG_PLAYER, LANG_SERVER, MenuManager, PluginRuntimeKind, RenderedMenu, RpcExportEntry,
+    SharedPlatformServices, mprop,
+};
+use cs_mod_api::{AdminFlags, MenuCreateSpec, MenuItemSpec, RpcValue};
 use cs_proto48::usermsg::CsUserMsg;
 use glam::Vec3;
 use tracing::{info, warn};
 
-use crate::vm::{AmxError, NativeDispatch, PawnVm};
+use crate::runtime::{AmxxPlugin, invoke_plugin_in_slots, invoke_plugin_pure_in_slots};
+use crate::vm::{AmxError, ExecEntry, NativeDispatch, PawnVm};
 
 /// AMX Mod X forward return codes (`amxconst.inc`).
 pub const PLUGIN_CONTINUE: i32 = 0;
@@ -24,6 +34,23 @@ pub const HAM_HANDLED: i32 = 2;
 pub const HAM_OVERRIDE: i32 = 3;
 pub const HAM_SUPERCEDE: i32 = 4;
 
+/// `CreateMultiForward` execution modes (`amxconst.inc`).
+pub const ET_IGNORE: i32 = 0;
+pub const ET_STOP: i32 = 1;
+pub const ET_STOP2: i32 = 2;
+pub const ET_CONTINUE: i32 = 3;
+
+/// `CreateMultiForward` parameter types (`amxconst.inc`).
+pub const FP_CELL: i32 = 0;
+pub const FP_FLOAT: i32 = 1;
+pub const FP_STRING: i32 = 2;
+pub const FP_ARRAY: i32 = 3;
+
+/// `newmenus.inc` special item callback codes.
+pub const MENU_MORE: i32 = -1;
+pub const MENU_BACK: i32 = -2;
+pub const MENU_EXIT: i32 = -3;
+
 /// `client_print` destination constants (`amxconst.inc`).
 pub const PRINT_NOTIFY: i32 = 1;
 pub const PRINT_CONSOLE: i32 = 2;
@@ -35,13 +62,40 @@ pub const CS_ARMOR_NONE: i32 = 0;
 pub const CS_ARMOR_KEVLAR: i32 = 1;
 pub const CS_ARMOR_VESTHELM: i32 = 2;
 
-/// Hamsandwich virtual hook identifiers (`ham_const.inc`).
+/// ReAPI `rg_give_item` give types (`reapi_gamedll_const.inc`).
+pub const GT_APPEND: i32 = 0;
+pub const GT_REPLACE: i32 = 1;
+pub const GT_DROP_AND_REPLACE: i32 = 2;
+
+/// ReAPI `rg_add_account` account modes (`reapi_gamedll_const.inc`).
+pub const AS_ADD: i32 = 0;
+pub const AS_SET: i32 = 1;
+
+/// ReAPI `get_member` / `set_member` field identifiers (`reapi_gamedll_const.inc`, read 2026-11-26).
+pub mod reapi_member {
+    pub const M_I_ACCOUNT: i32 = 1;
+    pub const M_I_KEVLAR: i32 = 2;
+    pub const M_B_HAS_DEFUSER: i32 = 3;
+    pub const M_B_HAS_NIGHTVISION: i32 = 4;
+    pub const M_I_TEAM: i32 = 5;
+    pub const M_I_DEATHS: i32 = 6;
+    pub const M_I_CLIP: i32 = 7;
+    pub const M_I_FRAGS: i32 = 8;
+    pub const M_FL_MAXSPEED: i32 = 9;
+    pub const M_B_HAS_C4: i32 = 10;
+}
+
+/// Hamsandwich virtual hook identifiers (`plugins/include/ham_const.inc`, read 2026-11-26).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(i32)]
 pub enum HamFunction {
     Spawn = 0,
     TakeDamage = 9,
     Killed = 11,
+    Touch = 44,
+    ItemDeploy = 65,
+    WeaponPrimaryAttack = 87,
+    PlayerJump = 91,
 }
 
 impl TryFrom<i32> for HamFunction {
@@ -52,6 +106,10 @@ impl TryFrom<i32> for HamFunction {
             0 => Ok(Self::Spawn),
             9 => Ok(Self::TakeDamage),
             11 => Ok(Self::Killed),
+            44 => Ok(Self::Touch),
+            65 => Ok(Self::ItemDeploy),
+            87 => Ok(Self::WeaponPrimaryAttack),
+            91 => Ok(Self::PlayerJump),
             _ => Err(()),
         }
     }
@@ -256,6 +314,64 @@ pub trait AmxxCsHooks {
     fn strip_user_weapons(&mut self, slot: u8, eng: &mut EngineApi<'_>);
     fn get_user_armor(&self, slot: u8, eng: &EngineApi<'_>) -> i32;
     fn set_user_armor(&mut self, slot: u8, eng: &mut EngineApi<'_>, armor: i32, armor_type: i32);
+
+    // --- Phase 15 ReAPI / Hamsandwich / Weapon Extensions ---
+    fn round_respawn(&mut self, _slot: u8, _eng: &mut EngineApi<'_>) -> bool {
+        false
+    }
+    fn add_account(&mut self, slot: u8, eng: &mut EngineApi<'_>, delta: i32, flash: bool) {
+        let next = self.get_user_money(slot).saturating_add(delta).clamp(0, 16_000);
+        self.set_user_money(slot, next);
+        let _ = eng.send_usermsg(
+            MsgDest::One(slot),
+            &CsUserMsg::Money {
+                amount: next,
+                flash,
+            },
+        );
+    }
+    fn remove_all_items(&mut self, slot: u8, eng: &mut EngineApi<'_>, _remove_suit: bool) {
+        self.strip_user_weapons(slot, eng);
+    }
+    fn get_active_weapon(&self, _slot: u8) -> (i32, i32, i32) {
+        (0, 0, 0)
+    }
+    fn get_weapon_clip(&self, _slot: u8, _weapon_id: u8) -> i32 {
+        0
+    }
+    fn set_weapon_clip(&mut self, _slot: u8, _weapon_id: u8, _clip: i32) {}
+    fn get_user_bpammo(&self, _slot: u8, _weapon_id: u8) -> i32 {
+        0
+    }
+    fn set_user_bpammo(
+        &mut self,
+        _slot: u8,
+        _eng: &mut EngineApi<'_>,
+        _weapon_id: u8,
+        _amount: i32,
+    ) {
+    }
+    fn get_member(&self, _ent_index: u16, _eng: &EngineApi<'_>, _member: i32) -> i32 {
+        0
+    }
+    fn set_member(
+        &mut self,
+        _ent_index: u16,
+        _eng: &mut EngineApi<'_>,
+        _member: i32,
+        _val: i32,
+    ) -> bool {
+        false
+    }
+    fn execute_ham(
+        &mut self,
+        _func: HamFunction,
+        _ent_index: u16,
+        _eng: &mut EngineApi<'_>,
+        _args: &[i32],
+    ) -> i32 {
+        0
+    }
 }
 
 /// Default no-op implementation of [`AmxxCsHooks`] for non-CS games or standalone VM hosts.
@@ -290,6 +406,30 @@ impl AmxxCsHooks for NoCsHooks {
         _armor_type: i32,
     ) {
     }
+}
+
+/// Bridge allowing `.amxx` dynamic natives and `ExecuteForward` to invoke non-AMXX plugins
+/// (e.g. `.wasm` / `.py` mods hosted by `cs-mod-host`) synchronously over the shared bus.
+pub trait AmxxExternalRpc: Send + Sync {
+    fn call_external_rpc(&self, fn_name: &str, args: &[RpcValue]) -> Option<RpcValue>;
+    fn emit_external_event(&self, event_name: &str, args: &[RpcValue]);
+}
+
+/// Per-player statistics stored for `csx.inc` (`get_stats` / `get_user_stats` / `get_statsnum`)
+/// and synchronized into the shared [`LeaderboardStore`](cs_mod_api::services::LeaderboardStore)
+/// under table `"csx"`.
+#[derive(Debug, Clone, Default)]
+pub struct CsxPlayerStats {
+    pub kills: i32,
+    pub deaths: i32,
+    pub headshots: i32,
+    pub teamkills: i32,
+    pub shots: i32,
+    pub hits: i32,
+    pub damage: i32,
+    pub bodyhits: [i32; 8],
+    pub name: String,
+    pub authid: String,
 }
 
 /// Metadata registered via `register_plugin`.
@@ -357,11 +497,21 @@ pub(crate) struct RegisteredHam {
     pub post: bool,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct AmxxNativeCallFrame {
+    pub raw_cells: Vec<i32>,
+    pub str_snapshots: Vec<Option<String>>,
+    pub str_writes: Vec<Option<(String, usize)>>,
+}
+
 /// Shared AMX Mod X host state kept separately from the plugin VMs to allow disjoint mutable
 /// borrowing during native execution.
-#[derive(Debug, Default)]
 pub struct AmxxHostState {
     pub plugin_metas: Vec<PluginMeta>,
+    pub services: SharedPlatformServices,
+    pub lang_search_dirs: Vec<PathBuf>,
+    pub external_rpc: Option<Arc<dyn AmxxExternalRpc>>,
+    pub(crate) amxx_native_frames: Vec<AmxxNativeCallFrame>,
     pub(crate) cvars: Vec<AmxxCvar>,
     pub(crate) cvar_by_name: HashMap<String, usize>,
     pub(crate) clcmds: Vec<RegisteredCommand>,
@@ -372,6 +522,9 @@ pub struct AmxxHostState {
     pub(crate) events: Vec<RegisteredEvent>,
     pub(crate) messages: Vec<RegisteredMessage>,
     pub(crate) ham_hooks: Vec<RegisteredHam>,
+    pub(crate) ham_param_overrides: HashMap<i32, i32>,
+    pub(crate) csx_stats: BTreeMap<String, CsxPlayerStats>,
+    pub(crate) slot_csx_keys: [Option<String>; 32],
     pub(crate) pending_server_cmds: Vec<String>,
     pub(crate) server_prints: Vec<String>,
     pub(crate) amx_logs: Vec<String>,
@@ -381,11 +534,55 @@ pub struct AmxxHostState {
     pub(crate) armor_types: [i32; 32],
 }
 
+impl std::fmt::Debug for AmxxHostState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AmxxHostState")
+            .field("plugin_metas", &self.plugin_metas)
+            .field("cvars", &self.cvars)
+            .field("tasks_len", &self.tasks.len())
+            .field("ham_hooks_len", &self.ham_hooks.len())
+            .finish()
+    }
+}
+
+impl Default for AmxxHostState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AmxxHostState {
     pub fn new() -> Self {
+        Self::with_services(SharedPlatformServices::new())
+    }
+
+    pub fn with_services(services: SharedPlatformServices) -> Self {
         Self {
+            plugin_metas: Vec::new(),
+            services,
+            lang_search_dirs: Vec::new(),
+            external_rpc: None,
+            amxx_native_frames: Vec::new(),
+            cvars: Vec::new(),
+            cvar_by_name: HashMap::new(),
+            clcmds: Vec::new(),
+            concmds: Vec::new(),
+            srvcmds: Vec::new(),
+            tasks: Vec::new(),
             next_task_handle: 1,
-            ..Self::default()
+            events: Vec::new(),
+            messages: Vec::new(),
+            ham_hooks: Vec::new(),
+            ham_param_overrides: HashMap::new(),
+            csx_stats: BTreeMap::new(),
+            slot_csx_keys: std::array::from_fn(|_| None),
+            pending_server_cmds: Vec::new(),
+            server_prints: Vec::new(),
+            amx_logs: Vec::new(),
+            current_argv: Vec::new(),
+            connected_slots: [false; 32],
+            admin_flags: [0; 32],
+            armor_types: [0; 32],
         }
     }
 
@@ -399,11 +596,224 @@ impl AmxxHostState {
         &self.amx_logs
     }
 
-    /// Sets admin flags bitmask (`get_user_flags`) for 0-based `slot`.
+    /// Sets admin flags bitmask (`get_user_flags`) for 0-based `slot`, synchronized with shared
+    /// [`AdminRegistry`](cs_mod_api::services::AdminRegistry).
     pub fn set_user_flags(&mut self, slot: u8, flags: i32) {
         if let Some(f) = self.admin_flags.get_mut(usize::from(slot)) {
             *f = flags;
         }
+        let mut svc = self.services.lock();
+        svc.admins
+            .set_slot_flags(slot, AdminFlags::from_bits(flags as u32));
+    }
+
+    /// Reads effective admin flags for `slot` from shared `AdminRegistry` (falling back to local).
+    pub fn effective_user_flags(&self, slot: u8) -> i32 {
+        let local = self.admin_flags.get(usize::from(slot)).copied().unwrap_or(0);
+        let shared = self.services.lock().admins.player_flags(slot).bits() as i32;
+        if shared != 0 && shared != AdminFlags::USER.bits() as i32 {
+            shared
+        } else if local != 0 {
+            local
+        } else {
+            shared
+        }
+    }
+
+    pub(crate) fn read_rpc_param(&self, idx: i32) -> i32 {
+        let Ok(i) = usize::try_from(idx - 1) else {
+            return 0;
+        };
+        if let Some(frame) = self.amxx_native_frames.last() {
+            return frame.raw_cells.get(i).copied().unwrap_or(0);
+        }
+        let svc = self.services.lock();
+        svc.rpc
+            .current_call_frame()
+            .and_then(|f| f.get(i))
+            .map_or(0, |v| match v {
+                RpcValue::Int(n) => *n,
+                RpcValue::Float(f) => f.to_bits() as i32,
+                _ => 0,
+            })
+    }
+
+    pub(crate) fn read_rpc_param_f(&self, idx: i32) -> i32 {
+        let Ok(i) = usize::try_from(idx - 1) else {
+            return 0;
+        };
+        if let Some(frame) = self.amxx_native_frames.last() {
+            return frame.raw_cells.get(i).copied().unwrap_or(0);
+        }
+        let svc = self.services.lock();
+        svc.rpc
+            .current_call_frame()
+            .and_then(|f| f.get(i))
+            .map_or(0, |v| match v {
+                RpcValue::Float(f) => f.to_bits() as i32,
+                RpcValue::Int(n) => *n,
+                _ => 0,
+            })
+    }
+
+    pub(crate) fn read_rpc_string(&self, idx: i32) -> String {
+        let Ok(i) = usize::try_from(idx - 1) else {
+            return String::new();
+        };
+        if let Some(frame) = self.amxx_native_frames.last() {
+            if let Some(Some((written, _))) = frame.str_writes.get(i) {
+                return written.clone();
+            }
+            if let Some(Some(snap)) = frame.str_snapshots.get(i) {
+                return snap.clone();
+            }
+            return String::new();
+        }
+        let svc = self.services.lock();
+        svc.rpc
+            .current_call_frame()
+            .and_then(|f| f.get(i))
+            .and_then(|v| match v {
+                RpcValue::Str(s) => Some(s.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn write_rpc_string(&mut self, idx: i32, src: &str, max_len: usize) -> i32 {
+        let clipped: String = src.chars().take(max_len).collect();
+        let len = clipped.len() as i32;
+        let Ok(i) = usize::try_from(idx - 1) else {
+            return 0;
+        };
+        if let Some(frame) = self.amxx_native_frames.last_mut() {
+            if i < frame.str_writes.len() {
+                frame.str_writes[i] = Some((clipped, max_len));
+            }
+            return len;
+        }
+        let mut svc = self.services.lock();
+        if let Some(frame) = svc.rpc.current_call_frame_mut() {
+            if i >= frame.len() {
+                frame.resize(i + 1, RpcValue::Int(0));
+            }
+            frame[i] = RpcValue::Str(clipped);
+        }
+        len
+    }
+
+    /// Derives a stable key for `csx.inc` leaderboard storage (`*sid` -> `name` -> `slot:N`).
+    pub fn csx_key_for_slot(&mut self, eng: &EngineApi<'_>, slot: u8) -> String {
+        let name = eng.client_key(slot, "name").unwrap_or("").to_string();
+        let authid = if eng.is_fake_client(slot) {
+            format!("BOT_{slot}")
+        } else if let Some(sid) = eng.client_key(slot, "*sid").filter(|s| !s.is_empty()) {
+            sid.to_string()
+        } else if !name.is_empty() {
+            name.clone()
+        } else {
+            format!("slot:{slot}")
+        };
+        if let Some(entry) = self.slot_csx_keys.get_mut(usize::from(slot)) {
+            *entry = Some(authid.clone());
+        }
+        let stats = self.csx_stats.entry(authid.clone()).or_default();
+        if !name.is_empty() {
+            stats.name = name;
+        }
+        stats.authid = authid.clone();
+        authid
+    }
+
+    /// Updates `csx` damage counters and upserts into shared `LeaderboardStore` (`"csx"`).
+    pub fn record_csx_damage(
+        &mut self,
+        eng: &EngineApi<'_>,
+        attacker_slot: Option<u8>,
+        damage: i32,
+        hitplace: i32,
+    ) {
+        let Some(att) = attacker_slot else {
+            return;
+        };
+        let key = self.csx_key_for_slot(eng, att);
+        let (score, payload) = {
+            let st = self.csx_stats.entry(key.clone()).or_default();
+            st.hits = st.hits.saturating_add(1);
+            st.damage = st.damage.saturating_add(damage.max(0));
+            if let Ok(hb) = usize::try_from(hitplace)
+                && hb < st.bodyhits.len()
+            {
+                st.bodyhits[hb] = st.bodyhits[hb].saturating_add(1);
+            }
+            let score = f64::from(st.kills - st.deaths) + f64::from(st.damage) * 0.0001;
+            let payload = format!(
+                "{{\"name\":\"{}\",\"k\":{},\"d\":{},\"hs\":{},\"dmg\":{}}}",
+                st.name.replace('"', "'"),
+                st.kills,
+                st.deaths,
+                st.headshots,
+                st.damage
+            );
+            (score, payload)
+        };
+        let mut svc = self.services.lock();
+        svc.leaderboards.upsert("csx", key, score, payload);
+    }
+
+    /// Updates `csx` kill/death counters and upserts both players into shared `LeaderboardStore` (`"csx"`).
+    pub fn record_csx_death(
+        &mut self,
+        eng: &EngineApi<'_>,
+        killer_slot: Option<u8>,
+        victim_slot: u8,
+        hitplace: i32,
+        team_kill: bool,
+    ) {
+        if let Some(k) = killer_slot {
+            let key = self.csx_key_for_slot(eng, k);
+            let (score, payload) = {
+                let st = self.csx_stats.entry(key.clone()).or_default();
+                if team_kill {
+                    st.teamkills = st.teamkills.saturating_add(1);
+                } else {
+                    st.kills = st.kills.saturating_add(1);
+                    if hitplace == 1 {
+                        st.headshots = st.headshots.saturating_add(1);
+                    }
+                }
+                let score = f64::from(st.kills - st.deaths) + f64::from(st.damage) * 0.0001;
+                let payload = format!(
+                    "{{\"name\":\"{}\",\"k\":{},\"d\":{},\"hs\":{},\"dmg\":{}}}",
+                    st.name.replace('"', "'"),
+                    st.kills,
+                    st.deaths,
+                    st.headshots,
+                    st.damage
+                );
+                (score, payload)
+            };
+            let mut svc = self.services.lock();
+            svc.leaderboards.upsert("csx", key, score, payload);
+        }
+
+        let vkey = self.csx_key_for_slot(eng, victim_slot);
+        let (vscore, vpayload) = {
+            let st = self.csx_stats.entry(vkey.clone()).or_default();
+            st.deaths = st.deaths.saturating_add(1);
+            let score = f64::from(st.kills - st.deaths) + f64::from(st.damage) * 0.0001;
+            let payload = format!(
+                "{{\"name\":\"{}\",\"k\":{},\"d\":{},\"hs\":{},\"dmg\":{}}}",
+                st.name.replace('"', "'"),
+                st.kills,
+                st.deaths,
+                st.headshots,
+                st.damage
+            );
+            (score, payload)
+        };
+        let mut svc = self.services.lock();
+        svc.leaderboards.upsert("csx", vkey, vscore, vpayload);
     }
 
     /// Gets a cvar string from either `EngineApi` or plugin-registered AMXX cvars.
@@ -503,12 +913,13 @@ impl AmxxHostState {
 }
 
 /// Native call context connecting one running [`PawnVm`] to [`AmxxHostState`], [`EngineApi`],
-/// and [`AmxxCsHooks`].
+/// [`AmxxCsHooks`], and sibling plugins for synchronous cross-plugin natives/forwards.
 pub struct AmxxNativeDispatch<'a, 'e> {
     pub plugin_idx: usize,
     pub state: &'a mut AmxxHostState,
     pub eng: &'a mut EngineApi<'e>,
     pub hooks: &'a mut dyn AmxxCsHooks,
+    pub peers: &'a mut [Option<AmxxPlugin>],
 }
 
 impl NativeDispatch for AmxxNativeDispatch<'_, '_> {
@@ -638,22 +1049,31 @@ impl NativeDispatch for AmxxNativeDispatch<'_, '_> {
             "remove_task" => self.native_remove_task(vm, params_addr),
             "task_exists" => self.native_task_exists(vm, params_addr),
 
-            // --- Printing / Server Commands / Logging ---
+            // --- Printing / Server Commands / Logging (`%L` LangCatalog aware!) ---
             "client_print" => self.native_client_print(vm, params_addr),
             "console_print" => self.native_console_print(vm, params_addr),
             "server_print" => {
-                let text = vm.format_amx_string(params_addr, 1, 2)?;
+                let text = {
+                    let svc = self.state.services.lock();
+                    vm.format_amx_string_with_lang(params_addr, 1, 2, None, Some(&svc.lang))?
+                };
                 info!(target: "amxx", "{text}");
                 self.state.server_prints.push(text);
                 Ok(1)
             }
             "server_cmd" => {
-                let cmd = vm.format_amx_string(params_addr, 1, 2)?;
+                let cmd = {
+                    let svc = self.state.services.lock();
+                    vm.format_amx_string_with_lang(params_addr, 1, 2, None, Some(&svc.lang))?
+                };
                 self.state.pending_server_cmds.push(cmd);
                 Ok(1)
             }
             "log_amx" => {
-                let text = vm.format_amx_string(params_addr, 1, 2)?;
+                let text = {
+                    let svc = self.state.services.lock();
+                    vm.format_amx_string_with_lang(params_addr, 1, 2, None, Some(&svc.lang))?
+                };
                 info!(target: "amxx_log", "{text}");
                 self.state.amx_logs.push(text);
                 Ok(1)
@@ -683,7 +1103,7 @@ impl NativeDispatch for AmxxNativeDispatch<'_, '_> {
                 let id = vm.param(params_addr, 1)?;
                 Ok(self
                     .valid_slot(id)
-                    .map_or(0, |slot| self.state.admin_flags[usize::from(slot)]))
+                    .map_or(0, |slot| self.state.effective_user_flags(slot)))
             }
             "is_user_alive" => {
                 let id = vm.param(params_addr, 1)?;
@@ -747,11 +1167,14 @@ impl NativeDispatch for AmxxNativeDispatch<'_, '_> {
                 Ok(joined.len().min(max_len) as i32)
             }
 
-            // --- String / Conversion ---
+            // --- String / Conversion (`%L` LangCatalog aware!) ---
             "format" | "formatex" => {
                 let out_addr = vm.param(params_addr, 1)?;
                 let max_len = vm.param(params_addr, 2)?.max(0) as usize;
-                let text = vm.format_amx_string(params_addr, 3, 4)?;
+                let text = {
+                    let svc = self.state.services.lock();
+                    vm.format_amx_string_with_lang(params_addr, 3, 4, None, Some(&svc.lang))?
+                };
                 let written = vm.set_amx_string(out_addr, &text, max_len)?;
                 Ok(written as i32)
             }
@@ -834,6 +1257,71 @@ impl NativeDispatch for AmxxNativeDispatch<'_, '_> {
                 } else {
                     -1
                 })
+            }
+
+            // --- Module: newmenus.inc (backed by shared MenuManager) ---
+            "menu_create" => self.native_menu_create(vm, params_addr),
+            "menu_additem" => self.native_menu_additem(vm, params_addr),
+            "menu_addblank" | "menu_addblank2" => self.native_menu_addblank(vm, params_addr),
+            "menu_addtext" | "menu_addtext2" => self.native_menu_addtext(vm, params_addr),
+            "menu_setprop" => self.native_menu_setprop(vm, params_addr),
+            "menu_display" => self.native_menu_display(vm, params_addr),
+            "menu_item_getinfo" => self.native_menu_item_getinfo(vm, params_addr),
+            "menu_destroy" => self.native_menu_destroy(vm, params_addr),
+            "player_menu_info" => self.native_player_menu_info(vm, params_addr),
+
+            // --- Module: lang.inc (backed by shared LangCatalog) ---
+            "register_dictionary" => self.native_register_dictionary(vm, params_addr),
+            "LookupLangKey" => self.native_lookup_lang_key(vm, params_addr),
+
+            // --- Module: csx.inc (backed by shared LeaderboardStore) ---
+            "get_stats" => self.native_get_stats(vm, params_addr),
+            "get_user_stats" => self.native_get_user_stats(vm, params_addr),
+            "get_statsnum" => {
+                let svc = self.state.services.lock();
+                Ok(svc.leaderboards.count("csx") as i32)
+            }
+
+            // --- Module: nvault.inc (backed by shared NVaultStore) ---
+            "nvault_open" => {
+                let name = vm.param_string(params_addr, 1)?;
+                let mut svc = self.state.services.lock();
+                Ok(svc.nvault.open(&name))
+            }
+            "nvault_get" => self.native_nvault_get(vm, params_addr),
+            "nvault_lookup" => self.native_nvault_lookup(vm, params_addr),
+            "nvault_set" => {
+                let handle = vm.param(params_addr, 1)?;
+                let key = vm.param_string(params_addr, 2)?;
+                let val = vm.param_string(params_addr, 3)?;
+                let now_ts = (self.eng.time().round() as i64).max(1);
+                let mut svc = self.state.services.lock();
+                Ok(i32::from(svc.nvault.set(handle, key, val, now_ts)))
+            }
+            "nvault_pset" => {
+                let handle = vm.param(params_addr, 1)?;
+                let key = vm.param_string(params_addr, 2)?;
+                let val = vm.param_string(params_addr, 3)?;
+                let mut svc = self.state.services.lock();
+                Ok(i32::from(svc.nvault.pset(handle, key, val)))
+            }
+            "nvault_remove" => {
+                let handle = vm.param(params_addr, 1)?;
+                let key = vm.param_string(params_addr, 2)?;
+                let mut svc = self.state.services.lock();
+                Ok(i32::from(svc.nvault.remove(handle, &key)))
+            }
+            "nvault_prune" => {
+                let handle = vm.param(params_addr, 1)?;
+                let start = i64::from(vm.param(params_addr, 2)?);
+                let end = i64::from(vm.param(params_addr, 3)?);
+                let mut svc = self.state.services.lock();
+                Ok(svc.nvault.prune(handle, start, end) as i32)
+            }
+            "nvault_close" => {
+                let handle = vm.param(params_addr, 1)?;
+                let mut svc = self.state.services.lock();
+                Ok(i32::from(svc.nvault.close(handle)))
             }
 
             // --- Module: cstrike ---
@@ -1130,8 +1618,119 @@ impl NativeDispatch for AmxxNativeDispatch<'_, '_> {
 
             // --- Module: hamsandwich ---
             "RegisterHam" => self.native_register_ham(vm, params_addr),
+            "SetHamParamFloat" => {
+                let which = vm.param(params_addr, 1)?;
+                let val_bits = vm.param(params_addr, 2)?;
+                self.state.ham_param_overrides.insert(which, val_bits);
+                Ok(1)
+            }
+            "SetHamParamInteger" | "SetHamParamEntity" => {
+                let which = vm.param(params_addr, 1)?;
+                let val = vm.param(params_addr, 2)?;
+                self.state.ham_param_overrides.insert(which, val);
+                Ok(1)
+            }
+            "ExecuteHam" => self.native_execute_ham(vm, params_addr, false),
+            "ExecuteHamB" => self.native_execute_ham(vm, params_addr, true),
 
+            // --- Module: reapi subset ---
+            "rg_give_item" => self.native_rg_give_item(vm, params_addr),
+            "rg_remove_all_items" => {
+                let id = vm.param(params_addr, 1)?;
+                let argc = vm.param_count(params_addr)?;
+                let remove_suit = argc >= 2 && vm.param(params_addr, 2)? != 0;
+                if let Some(slot) = self.valid_slot(id) {
+                    self.hooks.remove_all_items(slot, self.eng, remove_suit);
+                    Ok(1)
+                } else {
+                    Ok(0)
+                }
+            }
+            "rg_set_user_armor" => {
+                let id = vm.param(params_addr, 1)?;
+                let armor = vm.param(params_addr, 2)?;
+                let armor_type = vm.param(params_addr, 3)?;
+                if let Some(slot) = self.valid_slot(id) {
+                    self.state.armor_types[usize::from(slot)] = armor_type;
+                    self.hooks.set_user_armor(slot, self.eng, armor, armor_type);
+                    Ok(1)
+                } else {
+                    Ok(0)
+                }
+            }
+            "rg_add_account" => self.native_rg_add_account(vm, params_addr),
+            "rg_round_respawn" => {
+                let id = vm.param(params_addr, 1)?;
+                if let Some(slot) = self.valid_slot(id) {
+                    Ok(i32::from(self.hooks.round_respawn(slot, self.eng)))
+                } else {
+                    Ok(0)
+                }
+            }
+            "get_member" => {
+                let ent_idx = vm.param(params_addr, 1)?;
+                let member = vm.param(params_addr, 2)?;
+                let Ok(eid) = u16::try_from(ent_idx) else {
+                    return Ok(0);
+                };
+                Ok(self.hooks.get_member(eid, self.eng, member))
+            }
+            "set_member" => {
+                let ent_idx = vm.param(params_addr, 1)?;
+                let member = vm.param(params_addr, 2)?;
+                let val = vm.param(params_addr, 3)?;
+                let Ok(eid) = u16::try_from(ent_idx) else {
+                    return Ok(0);
+                };
+                Ok(i32::from(self.hooks.set_member(eid, self.eng, member, val)))
+            }
+
+            // --- Dynamic Inter-Plugin Natives & Multi-Forwards (bridged into shared RpcBus!) ---
+            "register_native" => self.native_register_native(vm, params_addr),
+            "get_param" => {
+                let idx = vm.param(params_addr, 1)?;
+                Ok(self.state.read_rpc_param(idx))
+            }
+            "get_param_f" => {
+                let idx = vm.param(params_addr, 1)?;
+                Ok(self.state.read_rpc_param_f(idx))
+            }
+            "get_string" => {
+                let idx = vm.param(params_addr, 1)?;
+                let out_addr = vm.param(params_addr, 2)?;
+                let max_len = vm.param(params_addr, 3)?.max(0) as usize;
+                let s = self.state.read_rpc_string(idx);
+                let written = vm.set_amx_string(out_addr, &s, max_len)?;
+                Ok(written as i32)
+            }
+            "set_string" => {
+                let idx = vm.param(params_addr, 1)?;
+                let src = vm.param_string(params_addr, 2)?;
+                let argc = vm.param_count(params_addr)?;
+                let max_len = if argc >= 3 {
+                    vm.param(params_addr, 3)?.max(0) as usize
+                } else {
+                    src.len()
+                };
+                Ok(self.state.write_rpc_string(idx, &src, max_len))
+            }
+            "CreateMultiForward" => self.native_create_multi_forward(vm, params_addr),
+            "ExecuteForward" => self.native_execute_forward(vm, params_addr),
+            "DestroyForward" => {
+                let handle = vm.param(params_addr, 1)?;
+                let mut svc = self.state.services.lock();
+                Ok(i32::from(svc.rpc.destroy_forward(handle)))
+            }
+
+            // --- Dynamic Cross-Plugin Native Fallback (AMXX <-> AMXX and AMXX <-> WASM!) ---
             other => {
+                let resolved = {
+                    let svc = self.state.services.lock();
+                    svc.rpc.resolve_fn(other).cloned()
+                };
+                if let Some(entry) = resolved {
+                    return self.invoke_dynamic_native(vm, params_addr, entry);
+                }
                 warn!(native = other, "unimplemented AMXX native called");
                 Err(AmxError::InvalidNative(other.to_string()))
             }
@@ -1180,6 +1779,49 @@ impl AmxxNativeDispatch<'_, '_> {
             return Some(self.eng.client_edict((idx - 1) as u8));
         }
         self.eng.entity_ids().into_iter().find(|id| id.index == idx)
+    }
+
+    fn plugin_owner_id(&self) -> String {
+        self.state
+            .plugin_metas
+            .get(self.plugin_idx)
+            .map(|m| m.file_name.clone())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("amxx:{}", self.plugin_idx))
+    }
+
+    fn invoke_target_plugin(
+        &mut self,
+        current_vm: &mut PawnVm,
+        target_idx: usize,
+        func_name: &str,
+        args: &[i32],
+    ) -> Result<Option<i32>, AmxError> {
+        if target_idx == self.plugin_idx {
+            let Some(pub_idx) = current_vm.find_public(func_name) else {
+                return Ok(None);
+            };
+            let mut nested = AmxxNativeDispatch {
+                plugin_idx: self.plugin_idx,
+                state: self.state,
+                eng: self.eng,
+                hooks: self.hooks,
+                peers: self.peers,
+            };
+            current_vm
+                .exec(ExecEntry::Public(pub_idx), args, &mut nested)
+                .map(Some)
+        } else {
+            invoke_plugin_in_slots(
+                self.peers,
+                self.state,
+                target_idx,
+                self.eng,
+                self.hooks,
+                func_name,
+                args,
+            )
+        }
     }
 
     fn native_register_plugin(&mut self, vm: &mut PawnVm, params_addr: i32) -> Result<i32, AmxError> {
@@ -1275,6 +1917,739 @@ impl AmxxNativeDispatch<'_, '_> {
         Ok(reg.id_for_name(&name).map_or(0, i32::from))
     }
 
+    // --- newmenus.inc ---
+    fn native_menu_create(&mut self, vm: &mut PawnVm, params_addr: i32) -> Result<i32, AmxError> {
+        let title = vm.param_string(params_addr, 1)?;
+        let handler = vm.param_string(params_addr, 2)?;
+        let owner_id = self.plugin_owner_id();
+        let spec = MenuCreateSpec {
+            title,
+            callback_name: handler,
+            ..Default::default()
+        };
+        let mut svc = self.state.services.lock();
+        Ok(svc.menus.create_menu(
+            owner_id,
+            PluginRuntimeKind::Amxx,
+            self.plugin_idx,
+            spec,
+        ) as i32)
+    }
+
+    fn native_menu_additem(&mut self, vm: &mut PawnVm, params_addr: i32) -> Result<i32, AmxError> {
+        let argc = vm.param_count(params_addr)?;
+        let menu_id = u32::try_from(vm.param(params_addr, 1)?).unwrap_or(0);
+        let name = vm.param_string(params_addr, 2)?;
+        let info = if argc >= 3 {
+            vm.param_string(params_addr, 3)?
+        } else {
+            String::new()
+        };
+        let mut svc = self.state.services.lock();
+        Ok(i32::from(
+            svc.menus
+                .add_item(menu_id, MenuItemSpec::selectable(name, info, true)),
+        ))
+    }
+
+    fn native_menu_addblank(&mut self, vm: &mut PawnVm, params_addr: i32) -> Result<i32, AmxError> {
+        let menu_id = u32::try_from(vm.param(params_addr, 1)?).unwrap_or(0);
+        let mut svc = self.state.services.lock();
+        Ok(i32::from(svc.menus.add_item(menu_id, MenuItemSpec::blank())))
+    }
+
+    fn native_menu_addtext(&mut self, vm: &mut PawnVm, params_addr: i32) -> Result<i32, AmxError> {
+        let menu_id = u32::try_from(vm.param(params_addr, 1)?).unwrap_or(0);
+        let text = vm.param_string(params_addr, 2)?;
+        let mut svc = self.state.services.lock();
+        Ok(i32::from(
+            svc.menus.add_item(menu_id, MenuItemSpec::text(text)),
+        ))
+    }
+
+    fn native_menu_setprop(&mut self, vm: &mut PawnVm, params_addr: i32) -> Result<i32, AmxError> {
+        let menu_id = u32::try_from(vm.param(params_addr, 1)?).unwrap_or(0);
+        let prop = vm.param(params_addr, 2)?;
+        let is_str = matches!(
+            prop,
+            mprop::BACKNAME | mprop::NEXTNAME | mprop::EXITNAME | mprop::TITLE | mprop::NUMBER_COLOR
+        );
+        let ok = if is_str {
+            let val = vm.param_string(params_addr, 3)?;
+            let mut svc = self.state.services.lock();
+            svc.menus.set_prop_str(menu_id, prop, val)
+        } else {
+            let val = vm.param(params_addr, 3)?;
+            let mut svc = self.state.services.lock();
+            svc.menus.set_prop_int(menu_id, prop, val)
+        };
+        Ok(i32::from(ok))
+    }
+
+    fn native_menu_display(&mut self, vm: &mut PawnVm, params_addr: i32) -> Result<i32, AmxError> {
+        let argc = vm.param_count(params_addr)?;
+        let id = vm.param(params_addr, 1)?;
+        let menu_id = u32::try_from(vm.param(params_addr, 2)?).unwrap_or(0);
+        let page = if argc >= 3 {
+            vm.param(params_addr, 3)?.max(0).min(i32::from(u16::MAX)) as u16
+        } else {
+            0
+        };
+        let time_sec = if argc >= 4 {
+            vm.param(params_addr, 4)?.clamp(-1, 127) as i8
+        } else {
+            -1
+        };
+        let Some(slot) = self.valid_slot(id) else {
+            return Ok(0);
+        };
+        let rendered = {
+            let mut svc = self.state.services.lock();
+            svc.menus.display(slot, menu_id, page, time_sec)
+        };
+        if let Some(r) = rendered {
+            send_amxx_rendered_menu(self.eng, &r);
+            Ok(1)
+        } else {
+            Ok(0)
+        }
+    }
+
+    fn native_menu_item_getinfo(
+        &mut self,
+        vm: &mut PawnVm,
+        params_addr: i32,
+    ) -> Result<i32, AmxError> {
+        let argc = vm.param_count(params_addr)?;
+        let menu_id = u32::try_from(vm.param(params_addr, 1)?).unwrap_or(0);
+        let item_idx = vm.param(params_addr, 2)?;
+        let Ok(idx) = usize::try_from(item_idx) else {
+            return Ok(0);
+        };
+        let item = {
+            let svc = self.state.services.lock();
+            svc.menus.selectable_item(menu_id, idx).cloned()
+        };
+        let Some(item) = item else {
+            return Ok(0);
+        };
+        if argc >= 3 {
+            let access_addr = vm.param(params_addr, 3)?;
+            let _ = vm.write_cell(access_addr, 0);
+        }
+        if argc >= 5 {
+            let info_addr = vm.param(params_addr, 4)?;
+            let info_len = vm.param(params_addr, 5)?.max(0) as usize;
+            if info_len > 0 {
+                vm.set_amx_string(info_addr, &item.info, info_len)?;
+            }
+        }
+        if argc >= 7 {
+            let name_addr = vm.param(params_addr, 6)?;
+            let name_len = vm.param(params_addr, 7)?.max(0) as usize;
+            if name_len > 0 {
+                vm.set_amx_string(name_addr, &item.label, name_len)?;
+            }
+        }
+        if argc >= 8 {
+            let cb_addr = vm.param(params_addr, 8)?;
+            let _ = vm.write_cell(cb_addr, -1);
+        }
+        Ok(1)
+    }
+
+    fn native_menu_destroy(&mut self, vm: &mut PawnVm, params_addr: i32) -> Result<i32, AmxError> {
+        let menu_id = u32::try_from(vm.param(params_addr, 1)?).unwrap_or(0);
+        let mut svc = self.state.services.lock();
+        Ok(i32::from(MenuManager::destroy_menu(&mut svc.menus, menu_id)))
+    }
+
+    fn native_player_menu_info(
+        &mut self,
+        vm: &mut PawnVm,
+        params_addr: i32,
+    ) -> Result<i32, AmxError> {
+        let argc = vm.param_count(params_addr)?;
+        let id = vm.param(params_addr, 1)?;
+        let Some(slot) = self.valid_slot(id) else {
+            return Ok(0);
+        };
+        let active = {
+            let svc = self.state.services.lock();
+            svc.menus.player_menu_info(slot)
+        };
+        let Some((menu_id, page)) = active else {
+            if argc >= 2 {
+                let _ = vm.write_cell(vm.param(params_addr, 2)?, 0);
+            }
+            if argc >= 3 {
+                let _ = vm.write_cell(vm.param(params_addr, 3)?, -1);
+            }
+            return Ok(0);
+        };
+        if argc >= 2 {
+            let _ = vm.write_cell(vm.param(params_addr, 2)?, 0);
+        }
+        if argc >= 3 {
+            let _ = vm.write_cell(vm.param(params_addr, 3)?, menu_id as i32);
+        }
+        if argc >= 4 {
+            let _ = vm.write_cell(vm.param(params_addr, 4)?, i32::from(page));
+        }
+        Ok(1)
+    }
+
+    // --- lang.inc ---
+    fn native_register_dictionary(
+        &mut self,
+        vm: &mut PawnVm,
+        params_addr: i32,
+    ) -> Result<i32, AmxError> {
+        let filename = vm.param_string(params_addr, 1)?;
+        let mut loaded_content = None;
+        for dir in &self.state.lang_search_dirs {
+            let candidate = dir.join(&filename);
+            if let Ok(text) = std::fs::read_to_string(&candidate) {
+                loaded_content = Some((filename.ends_with(".toml"), text));
+                break;
+            }
+        }
+        let mut svc = self.state.services.lock();
+        if let Some((is_toml, text)) = loaded_content {
+            if is_toml {
+                svc.lang.load_toml_str(&text);
+            } else {
+                svc.lang.load_amxx_txt_str(&text);
+            }
+        }
+        svc.lang.mark_dictionary_loaded(&filename);
+        Ok(1)
+    }
+
+    fn native_lookup_lang_key(
+        &mut self,
+        vm: &mut PawnVm,
+        params_addr: i32,
+    ) -> Result<i32, AmxError> {
+        let out_addr = vm.param(params_addr, 1)?;
+        let out_size = vm.param(params_addr, 2)?.max(0) as usize;
+        let key = vm.param_string(params_addr, 3)?;
+        let id = vm.param(params_addr, 4)?;
+        let slot = if id == LANG_SERVER || id == LANG_PLAYER {
+            None
+        } else {
+            self.valid_slot(id)
+        };
+        let found = {
+            let svc = self.state.services.lock();
+            let lang = svc.lang.player_lang(slot);
+            svc.lang.lookup_key(lang, &key).map(str::to_string)
+        };
+        if let Some(val) = found {
+            vm.set_amx_string(out_addr, &val, out_size)?;
+            Ok(1)
+        } else {
+            Ok(0)
+        }
+    }
+
+    // --- csx.inc ---
+    fn native_get_stats(&mut self, vm: &mut PawnVm, params_addr: i32) -> Result<i32, AmxError> {
+        let argc = vm.param_count(params_addr)?;
+        let index = vm.param(params_addr, 1)?;
+        let stats_addr = vm.param(params_addr, 2)?;
+        let bodyhits_addr = vm.param(params_addr, 3)?;
+        let Ok(idx0) = usize::try_from(index) else {
+            return Ok(0);
+        };
+        let (entry_opt, total) = {
+            let svc = self.state.services.lock();
+            (
+                svc.leaderboards.get_by_rank("csx", idx0 + 1),
+                svc.leaderboards.count("csx"),
+            )
+        };
+        let Some(entry) = entry_opt else {
+            return Ok(0);
+        };
+        let csx = self.state.csx_stats.get(&entry.key).cloned().unwrap_or_else(|| {
+            CsxPlayerStats {
+                kills: entry.score.round() as i32,
+                name: entry.key.clone(),
+                authid: entry.key.clone(),
+                ..Default::default()
+            }
+        });
+        write_csx_arrays(vm, stats_addr, bodyhits_addr, &csx)?;
+        if argc >= 5 {
+            let name_addr = vm.param(params_addr, 4)?;
+            let name_len = vm.param(params_addr, 5)?.max(0) as usize;
+            if name_len > 0 {
+                vm.set_amx_string(name_addr, &csx.name, name_len)?;
+            }
+        }
+        if argc >= 7 {
+            let auth_addr = vm.param(params_addr, 6)?;
+            let auth_len = vm.param(params_addr, 7)?.max(0) as usize;
+            if auth_len > 0 {
+                vm.set_amx_string(auth_addr, &csx.authid, auth_len)?;
+            }
+        }
+        let next = idx0 + 1;
+        Ok(if next < total { next as i32 } else { 0 })
+    }
+
+    fn native_get_user_stats(&mut self, vm: &mut PawnVm, params_addr: i32) -> Result<i32, AmxError> {
+        let id = vm.param(params_addr, 1)?;
+        let stats_addr = vm.param(params_addr, 2)?;
+        let bodyhits_addr = vm.param(params_addr, 3)?;
+        let Some(slot) = self.valid_slot(id) else {
+            return Ok(0);
+        };
+        let key = self.state.csx_key_for_slot(self.eng, slot);
+        let rank_opt = {
+            let svc = self.state.services.lock();
+            svc.leaderboards.rank("csx", &key)
+        };
+        let Some((entry, _)) = rank_opt else {
+            return Ok(0);
+        };
+        let csx = self.state.csx_stats.get(&key).cloned().unwrap_or_default();
+        write_csx_arrays(vm, stats_addr, bodyhits_addr, &csx)?;
+        Ok(entry.rank as i32)
+    }
+
+    // --- nvault.inc ---
+    fn native_nvault_get(&mut self, vm: &mut PawnVm, params_addr: i32) -> Result<i32, AmxError> {
+        let argc = vm.param_count(params_addr)?;
+        let handle = vm.param(params_addr, 1)?;
+        let key = vm.param_string(params_addr, 2)?;
+        let val = {
+            let svc = self.state.services.lock();
+            svc.nvault.get(handle, &key).map(str::to_string)
+        };
+        let val_str = val.as_deref().unwrap_or("");
+        if argc >= 4 {
+            let out_addr = vm.param(params_addr, 3)?;
+            let max_len = vm.param(params_addr, 4)?.max(0) as usize;
+            let written = vm.set_amx_string(out_addr, val_str, max_len)?;
+            Ok(written as i32)
+        } else if argc == 3 {
+            let out_addr = vm.param(params_addr, 3)?;
+            let f = parse_cvar_f32(val_str);
+            vm.write_cell(out_addr, f.to_bits() as i32)?;
+            Ok(1)
+        } else {
+            Ok(parse_cvar_i32(val_str))
+        }
+    }
+
+    fn native_nvault_lookup(&mut self, vm: &mut PawnVm, params_addr: i32) -> Result<i32, AmxError> {
+        let handle = vm.param(params_addr, 1)?;
+        let key = vm.param_string(params_addr, 2)?;
+        let out_addr = vm.param(params_addr, 3)?;
+        let max_len = vm.param(params_addr, 4)?.max(0) as usize;
+        let ts_addr = vm.param(params_addr, 5)?;
+        let found = {
+            let svc = self.state.services.lock();
+            svc.nvault.lookup(handle, &key).map(|(v, ts)| (v.to_string(), ts))
+        };
+        if let Some((val, ts)) = found {
+            vm.set_amx_string(out_addr, &val, max_len)?;
+            vm.write_cell(ts_addr, ts as i32)?;
+            Ok(1)
+        } else {
+            Ok(0)
+        }
+    }
+
+    // --- hamsandwich ExecuteHam / ExecuteHamB ---
+    fn native_execute_ham(
+        &mut self,
+        vm: &mut PawnVm,
+        params_addr: i32,
+        broadcast_hooks: bool,
+    ) -> Result<i32, AmxError> {
+        let argc = vm.param_count(params_addr)?;
+        let func_id = vm.param(params_addr, 1)?;
+        let ent_idx = vm.param(params_addr, 2)?;
+        let Ok(func) = HamFunction::try_from(func_id) else {
+            return Ok(0);
+        };
+        let Ok(eid) = u16::try_from(ent_idx) else {
+            return Ok(0);
+        };
+        let mut extra = Vec::new();
+        for i in 3..=argc {
+            extra.push(vm.param(params_addr, i)?);
+        }
+
+        if broadcast_hooks {
+            let classname = self
+                .resolve_edict(ent_idx)
+                .and_then(|e| self.eng.ent(e))
+                .map(|v| v.classname.clone())
+                .unwrap_or_else(|| "player".to_string());
+            let mut hook_args = Vec::with_capacity(1 + extra.len());
+            hook_args.push(ent_idx);
+            hook_args.extend_from_slice(&extra);
+
+            let matching_pre: Vec<(usize, String)> = self
+                .state
+                .ham_hooks
+                .iter()
+                .filter(|h| h.function == func && !h.post && h.classname == classname)
+                .map(|h| (h.plugin_idx, h.callback.clone()))
+                .collect();
+            self.state.ham_param_overrides.clear();
+            let mut superceded = false;
+            for (pidx, cb) in matching_pre {
+                if let Ok(Some(ret)) = self.invoke_target_plugin(vm, pidx, &cb, &hook_args)
+                    && ret >= HAM_SUPERCEDE
+                {
+                    superceded = true;
+                    break;
+                }
+            }
+            if superceded {
+                return Ok(0);
+            }
+            for (param_idx, val) in std::mem::take(&mut self.state.ham_param_overrides) {
+                if param_idx >= 2 {
+                    let eidx = (param_idx - 2) as usize;
+                    if let Some(slot) = extra.get_mut(eidx) {
+                        *slot = val;
+                    }
+                }
+            }
+            let res = self.hooks.execute_ham(func, eid, self.eng, &extra);
+            let matching_post: Vec<(usize, String)> = self
+                .state
+                .ham_hooks
+                .iter()
+                .filter(|h| h.function == func && h.post && h.classname == classname)
+                .map(|h| (h.plugin_idx, h.callback.clone()))
+                .collect();
+            for (pidx, cb) in matching_post {
+                let _ = self.invoke_target_plugin(vm, pidx, &cb, &hook_args);
+            }
+            return Ok(res);
+        }
+
+        Ok(self.hooks.execute_ham(func, eid, self.eng, &extra))
+    }
+
+    // --- reapi subset ---
+    fn native_rg_give_item(&mut self, vm: &mut PawnVm, params_addr: i32) -> Result<i32, AmxError> {
+        let argc = vm.param_count(params_addr)?;
+        let id = vm.param(params_addr, 1)?;
+        let item = vm.param_string(params_addr, 2)?;
+        let give_type = if argc >= 3 {
+            vm.param(params_addr, 3)?
+        } else {
+            GT_APPEND
+        };
+        let Some(slot) = self.valid_slot(id) else {
+            return Ok(0);
+        };
+        if give_type == GT_REPLACE || give_type == GT_DROP_AND_REPLACE {
+            self.hooks.remove_all_items(slot, self.eng, false);
+        }
+        Ok(i32::from(self.hooks.give_item(slot, self.eng, &item)))
+    }
+
+    fn native_rg_add_account(&mut self, vm: &mut PawnVm, params_addr: i32) -> Result<i32, AmxError> {
+        let argc = vm.param_count(params_addr)?;
+        let id = vm.param(params_addr, 1)?;
+        let amount = vm.param(params_addr, 2)?;
+        let mode = if argc >= 3 {
+            vm.param(params_addr, 3)?
+        } else {
+            AS_ADD
+        };
+        let track = if argc >= 4 {
+            vm.param(params_addr, 4)? != 0
+        } else {
+            true
+        };
+        let Some(slot) = self.valid_slot(id) else {
+            return Ok(0);
+        };
+        if mode == AS_SET {
+            self.hooks.set_user_money(slot, amount);
+            let _ = self.eng.send_usermsg(
+                MsgDest::One(slot),
+                &CsUserMsg::Money {
+                    amount: amount.clamp(0, 16_000),
+                    flash: track,
+                },
+            );
+        } else {
+            self.hooks.add_account(slot, self.eng, amount, track);
+        }
+        Ok(1)
+    }
+
+    // --- Dynamic Inter-Plugin Natives & Multi-Forwards ---
+    fn native_register_native(
+        &mut self,
+        vm: &mut PawnVm,
+        params_addr: i32,
+    ) -> Result<i32, AmxError> {
+        let argc = vm.param_count(params_addr)?;
+        let fn_name = vm.param_string(params_addr, 1)?;
+        let handler = vm.param_string(params_addr, 2)?;
+        let style = if argc >= 3 {
+            vm.param(params_addr, 3)?
+        } else {
+            0
+        };
+        let owner_id = self.plugin_owner_id();
+        let mut svc = self.state.services.lock();
+        svc.rpc.export_fn(RpcExportEntry {
+            fn_name,
+            owner_id,
+            runtime: PluginRuntimeKind::Amxx,
+            owner_index: self.plugin_idx,
+            callback_id: style,
+            callback_name: handler,
+        });
+        Ok(1)
+    }
+
+    fn native_create_multi_forward(
+        &mut self,
+        vm: &mut PawnVm,
+        params_addr: i32,
+    ) -> Result<i32, AmxError> {
+        let argc = vm.param_count(params_addr)?;
+        let name = vm.param_string(params_addr, 1)?;
+        let exec_type = vm.param(params_addr, 2)?;
+        let mut param_types = Vec::new();
+        for i in 3..=argc {
+            param_types.push(vm.param(params_addr, i)?);
+        }
+        let mut svc = self.state.services.lock();
+        Ok(svc.rpc.create_multi_forward(name, exec_type, param_types))
+    }
+
+    fn native_execute_forward(
+        &mut self,
+        vm: &mut PawnVm,
+        params_addr: i32,
+    ) -> Result<i32, AmxError> {
+        let argc = vm.param_count(params_addr)?;
+        let handle = vm.param(params_addr, 1)?;
+        let ret_addr = if argc >= 2 {
+            Some(vm.param(params_addr, 2)?)
+        } else {
+            None
+        };
+        let desc = {
+            let svc = self.state.services.lock();
+            svc.rpc.multi_forward(handle).cloned()
+        };
+        let Some(desc) = desc else {
+            return Ok(0);
+        };
+
+        let mut rpc_args = Vec::new();
+        let mut scalar_args = Vec::new();
+        let mut string_args: Vec<(usize, String)> = Vec::new();
+        for (pidx, &ptype) in desc.param_types.iter().enumerate() {
+            let arg_pos = pidx + 3;
+            if arg_pos > argc {
+                rpc_args.push(RpcValue::Int(0));
+                scalar_args.push(0);
+                continue;
+            }
+            let raw = vm.param(params_addr, arg_pos)?;
+            match ptype {
+                FP_STRING => {
+                    let s = vm.get_amx_string(raw).unwrap_or_default();
+                    rpc_args.push(RpcValue::Str(s.clone()));
+                    string_args.push((pidx, s));
+                    scalar_args.push(0);
+                }
+                FP_FLOAT => {
+                    let val = if raw >= 0 {
+                        vm.read_cell(raw).unwrap_or(raw)
+                    } else {
+                        raw
+                    };
+                    rpc_args.push(RpcValue::Float(f32::from_bits(val as u32)));
+                    scalar_args.push(val);
+                }
+                _ => {
+                    let val = if raw >= 0 && raw % 4 == 0 {
+                        vm.read_cell(raw).unwrap_or(raw)
+                    } else {
+                        raw
+                    };
+                    rpc_args.push(RpcValue::Int(val));
+                    scalar_args.push(val);
+                }
+            }
+        }
+
+        // Dispatch to all AMXX plugins implementing `desc.name`.
+        let mut final_ret = PLUGIN_CONTINUE;
+        let peer_count = self.peers.len();
+        for idx in 0..peer_count {
+            let mut call_args = scalar_args.clone();
+            if !string_args.is_empty() {
+                if idx == self.plugin_idx {
+                    for (pos, s) in &string_args {
+                        if let Ok(addr) = vm.allot_string(s) {
+                            call_args[*pos] = addr;
+                        }
+                    }
+                } else if let Some(Some(p)) = self.peers.get_mut(idx) {
+                    for (pos, s) in &string_args {
+                        if let Ok(addr) = p.vm.allot_string(s) {
+                            call_args[*pos] = addr;
+                        }
+                    }
+                }
+            }
+            if let Ok(Some(ret)) = self.invoke_target_plugin(vm, idx, &desc.name, &call_args) {
+                match desc.exec_type {
+                    ET_STOP => {
+                        if ret > PLUGIN_CONTINUE {
+                            final_ret = ret;
+                            break;
+                        }
+                    }
+                    ET_STOP2 => {
+                        final_ret = final_ret.max(ret);
+                        if ret == PLUGIN_HANDLED {
+                            break;
+                        }
+                    }
+                    ET_CONTINUE => {
+                        final_ret = final_ret.max(ret);
+                    }
+                    _ => {} // ET_IGNORE
+                }
+            }
+        }
+
+        // Record & fan out to WASM / polyglot event subscribers over the shared RpcBus!
+        {
+            let mut svc = self.state.services.lock();
+            svc.rpc
+                .record_event(desc.name.clone(), String::new(), rpc_args.clone());
+        }
+        if let Some(ext) = self.state.external_rpc.clone() {
+            ext.emit_external_event(&desc.name, &rpc_args);
+        }
+
+        if let Some(addr) = ret_addr {
+            let _ = vm.write_cell(addr, final_ret);
+        }
+        Ok(1)
+    }
+
+    fn invoke_dynamic_native(
+        &mut self,
+        vm: &mut PawnVm,
+        params_addr: i32,
+        entry: RpcExportEntry,
+    ) -> Result<i32, AmxError> {
+        let argc = vm.param_count(params_addr)?;
+        let mut raw_params = Vec::with_capacity(argc);
+        for i in 1..=argc {
+            raw_params.push(vm.param(params_addr, i)?);
+        }
+
+        match entry.runtime {
+            PluginRuntimeKind::Amxx => {
+                let str_snapshots: Vec<Option<String>> = raw_params
+                    .iter()
+                    .map(|&raw| {
+                        if raw >= 0 && raw % 4 == 0 {
+                            vm.get_amx_string(raw).ok()
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                self.state.amxx_native_frames.push(AmxxNativeCallFrame {
+                    raw_cells: raw_params.clone(),
+                    str_snapshots,
+                    str_writes: vec![None; argc],
+                });
+                let rc = invoke_plugin_in_slots(
+                    self.peers,
+                    self.state,
+                    entry.owner_index,
+                    self.eng,
+                    self.hooks,
+                    &entry.callback_name,
+                    &[self.plugin_idx as i32, argc as i32],
+                )
+                .unwrap_or(None)
+                .unwrap_or(0);
+                if let Some(frame) = self.state.amxx_native_frames.pop() {
+                    for (idx, write) in frame.str_writes.into_iter().enumerate() {
+                        if let Some((s, max_len)) = write
+                            && let Some(&dest_addr) = raw_params.get(idx)
+                            && dest_addr >= 0
+                        {
+                            let _ = vm.set_amx_string(dest_addr, &s, max_len);
+                        }
+                    }
+                }
+                Ok(rc)
+            }
+            PluginRuntimeKind::Host | PluginRuntimeKind::Wasm | PluginRuntimeKind::Python => {
+                let mut rpc_args = Vec::with_capacity(argc * 2);
+                for &raw in &raw_params {
+                    rpc_args.push(RpcValue::Int(raw));
+                }
+                for &raw in &raw_params {
+                    if raw >= 0
+                        && raw % 4 == 0
+                        && let Ok(s) = vm.get_amx_string(raw)
+                        && !s.is_empty()
+                        && is_plausible_amx_string(&s)
+                    {
+                        rpc_args.push(RpcValue::Str(s));
+                    }
+                }
+                let host_res = {
+                    let svc = self.state.services.lock();
+                    svc.rpc.call_host_fn(&entry.fn_name, &rpc_args)
+                };
+                let res = host_res.or_else(|| {
+                    self.state
+                        .external_rpc
+                        .clone()
+                        .and_then(|ext| ext.call_external_rpc(&entry.fn_name, &rpc_args))
+                });
+                match res {
+                    Some(RpcValue::Int(n)) => Ok(n),
+                    Some(RpcValue::Float(f)) => Ok(f.to_bits() as i32),
+                    Some(RpcValue::Str(s)) => {
+                        if argc >= 2
+                            && let Some(&out_addr) = raw_params.get(argc - 2)
+                            && let Some(&cap) = raw_params.last()
+                            && out_addr >= 0
+                            && cap > 0
+                        {
+                            let written = vm.set_amx_string(out_addr, &s, cap as usize)?;
+                            Ok(written as i32)
+                        } else {
+                            Ok(s.len() as i32)
+                        }
+                    }
+                    Some(RpcValue::Bytes(b)) => Ok(b.len() as i32),
+                    None => Ok(0),
+                }
+            }
+        }
+    }
+
     fn native_set_task(&mut self, vm: &mut PawnVm, params_addr: i32) -> Result<i32, AmxError> {
         let argc = vm.param_count(params_addr)?;
         let delay = f64::from(vm.param_f32(params_addr, 1)?).max(0.0);
@@ -1315,7 +2690,7 @@ impl AmxxNativeDispatch<'_, '_> {
         }
 
         let remaining_repeats = if flags.contains('b') {
-            None // infinite until remove_task
+            None
         } else if flags.contains('a') {
             Some(repeat.max(1))
         } else {
@@ -1380,17 +2755,36 @@ impl AmxxNativeDispatch<'_, '_> {
     fn native_client_print(&mut self, vm: &mut PawnVm, params_addr: i32) -> Result<i32, AmxError> {
         let target = vm.param(params_addr, 1)?;
         let print_type = vm.param(params_addr, 2)?;
-        let text = vm.format_amx_string(params_addr, 3, 4)?;
         if target == 0 {
-            for slot in 0..self.eng.max_clients() {
-                if self.eng.is_client_active(slot) || self.state.connected_slots[usize::from(slot)]
-                {
-                    send_client_print(self.eng, slot, print_type, &text);
+            let max_clients = self.eng.max_clients();
+            let mut per_slot: Vec<(u8, String)> = Vec::new();
+            {
+                let svc = self.state.services.lock();
+                for slot in 0..max_clients {
+                    if self.eng.is_client_active(slot)
+                        || self.state.connected_slots[usize::from(slot)]
+                    {
+                        let text = vm.format_amx_string_with_lang(
+                            params_addr,
+                            3,
+                            4,
+                            Some(slot),
+                            Some(&svc.lang),
+                        )?;
+                        per_slot.push((slot, text));
+                    }
                 }
+            }
+            for (slot, text) in per_slot {
+                send_client_print(self.eng, slot, print_type, &text);
             }
             return Ok(1);
         }
         if let Some(slot) = self.connected_slot(target) {
+            let text = {
+                let svc = self.state.services.lock();
+                vm.format_amx_string_with_lang(params_addr, 3, 4, Some(slot), Some(&svc.lang))?
+            };
             send_client_print(self.eng, slot, print_type, &text);
             Ok(1)
         } else {
@@ -1400,7 +2794,15 @@ impl AmxxNativeDispatch<'_, '_> {
 
     fn native_console_print(&mut self, vm: &mut PawnVm, params_addr: i32) -> Result<i32, AmxError> {
         let target = vm.param(params_addr, 1)?;
-        let text = vm.format_amx_string(params_addr, 2, 3)?;
+        let fallback_slot = if target == 0 {
+            None
+        } else {
+            self.valid_slot(target)
+        };
+        let text = {
+            let svc = self.state.services.lock();
+            vm.format_amx_string_with_lang(params_addr, 2, 3, fallback_slot, Some(&svc.lang))?
+        };
         if target == 0 {
             info!(target: "amxx_console", "{text}");
             self.state.server_prints.push(text);
@@ -1537,17 +2939,20 @@ impl AmxxNativeDispatch<'_, '_> {
         vm: &mut PawnVm,
         params_addr: i32,
     ) -> Result<i32, AmxError> {
-        let _id = vm.param(params_addr, 1)?;
+        let id = vm.param(params_addr, 1)?;
         let argc = vm.param_count(params_addr)?;
+        let (wid, clip, ammo) = self
+            .valid_slot(id)
+            .map_or((0, 0, 0), |slot| self.hooks.get_active_weapon(slot));
         if argc >= 2 {
             let clip_addr = vm.param(params_addr, 2)?;
-            let _ = vm.write_cell(clip_addr, 0);
+            let _ = vm.write_cell(clip_addr, clip);
         }
         if argc >= 3 {
             let ammo_addr = vm.param(params_addr, 3)?;
-            let _ = vm.write_cell(ammo_addr, 0);
+            let _ = vm.write_cell(ammo_addr, ammo);
         }
-        Ok(0)
+        Ok(wid)
     }
 
     fn native_get_players(&mut self, vm: &mut PawnVm, params_addr: i32) -> Result<i32, AmxError> {
@@ -1738,7 +3143,6 @@ impl AmxxNativeDispatch<'_, '_> {
         };
         let arg3 = vm.param(params_addr, 3)?;
 
-        // Pre-read vector or string before borrowing `eng.ent_mut(eid)`.
         if is_pev_vec(field) {
             let v = read_amx_vec3(vm, arg3)?;
             let Some(vars) = self.eng.ent_mut(eid) else {
@@ -1790,6 +3194,74 @@ impl AmxxNativeDispatch<'_, '_> {
         });
         Ok(self.state.ham_hooks.len() as i32)
     }
+}
+
+pub(crate) fn send_amxx_rendered_menu(eng: &mut EngineApi<'_>, rendered: &RenderedMenu) {
+    const MAX_CHUNK: usize = 175;
+    let text = rendered.text.as_str();
+    if text.len() <= MAX_CHUNK {
+        let _ = eng.send_usermsg(
+            MsgDest::One(rendered.slot),
+            &CsUserMsg::ShowMenu {
+                keys_bitmask: rendered.keys_bitmask,
+                display_time: rendered.time_sec,
+                multipart: false,
+                text: text.to_string(),
+            },
+        );
+        return;
+    }
+    let mut start = 0usize;
+    while start < text.len() {
+        let mut end = (start + MAX_CHUNK).min(text.len());
+        while end > start && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == start {
+            break;
+        }
+        let multipart = end < text.len();
+        let _ = eng.send_usermsg(
+            MsgDest::One(rendered.slot),
+            &CsUserMsg::ShowMenu {
+                keys_bitmask: rendered.keys_bitmask,
+                display_time: rendered.time_sec,
+                multipart,
+                text: text[start..end].to_string(),
+            },
+        );
+        start = end;
+    }
+}
+
+fn write_csx_arrays(
+    vm: &mut PawnVm,
+    stats_addr: i32,
+    bodyhits_addr: i32,
+    csx: &CsxPlayerStats,
+) -> Result<(), AmxError> {
+    let vals = [
+        csx.kills,
+        csx.deaths,
+        csx.headshots,
+        csx.teamkills,
+        csx.shots,
+        csx.hits,
+        csx.damage,
+        csx.kills - csx.deaths,
+    ];
+    for (i, &v) in vals.iter().enumerate() {
+        vm.write_cell(stats_addr + (i as i32) * 4, v)?;
+    }
+    for (i, &v) in csx.bodyhits.iter().enumerate() {
+        vm.write_cell(bodyhits_addr + (i as i32) * 4, v)?;
+    }
+    Ok(())
+}
+
+fn is_plausible_amx_string(s: &str) -> bool {
+    s.bytes()
+        .all(|b| b >= 0x20 || matches!(b, b'\n' | b'\r' | b'\t' | 0x01 | 0x03 | 0x04))
 }
 
 fn send_client_print(eng: &mut EngineApi<'_>, slot: u8, print_type: i32, text: &str) {
@@ -2107,7 +3579,10 @@ fn write_pev_vec(v: &mut cs_engine::EntVars, field: i32, val: Vec3) -> bool {
 
 fn is_pev_string(field: i32) -> bool {
     use pev_const::*;
-    matches!(field, PEV_CLASSNAME | PEV_MODEL | PEV_TARGET | PEV_TARGETNAME)
+    matches!(
+        field,
+        PEV_CLASSNAME | PEV_MODEL | PEV_TARGET | PEV_TARGETNAME
+    )
 }
 
 fn read_pev_string(v: &cs_engine::EntVars, field: i32) -> Option<&str> {
@@ -2281,4 +3756,328 @@ fn read_ev_string(v: &cs_engine::EntVars, key: i32) -> Option<&str> {
 
 fn write_ev_string(v: &mut cs_engine::EntVars, key: i32, val: &str) -> bool {
     ev_sz_to_pev(key).is_some_and(|p| write_pev_string(v, p, val))
+}
+
+/// Lightweight [`NativeDispatch`] used when an external polyglot caller (e.g. a `.wasm` mod inside
+/// a `wasmi` host import) synchronously invokes an AMXX `register_native` handler without a live
+/// `&mut EngineApi<'_>` borrow. Supports param/string/float/services (`nvault`, `LangCatalog`,
+/// `AdminRegistry`, `LeaderboardStore`, `MenuManager`, `RpcBus`) and nested cross-plugin calls.
+pub(crate) struct PureRpcDispatch<'a> {
+    pub plugin_idx: usize,
+    pub state: &'a mut AmxxHostState,
+    pub peers: &'a mut [Option<AmxxPlugin>],
+}
+
+impl NativeDispatch for PureRpcDispatch<'_> {
+    fn call_native(
+        &mut self,
+        vm: &mut PawnVm,
+        _native_idx: usize,
+        name: &str,
+        params_addr: i32,
+    ) -> Result<i32, AmxError> {
+        match name {
+            "get_param" => Ok(self.state.read_rpc_param(vm.param(params_addr, 1)?)),
+            "get_param_f" => Ok(self.state.read_rpc_param_f(vm.param(params_addr, 1)?)),
+            "get_string" => {
+                let idx = vm.param(params_addr, 1)?;
+                let out_addr = vm.param(params_addr, 2)?;
+                let max_len = vm.param(params_addr, 3)?.max(0) as usize;
+                let s = self.state.read_rpc_string(idx);
+                let written = vm.set_amx_string(out_addr, &s, max_len)?;
+                Ok(written as i32)
+            }
+            "set_string" => {
+                let idx = vm.param(params_addr, 1)?;
+                let src = vm.param_string(params_addr, 2)?;
+                let argc = vm.param_count(params_addr)?;
+                let max_len = if argc >= 3 {
+                    vm.param(params_addr, 3)?.max(0) as usize
+                } else {
+                    src.len()
+                };
+                Ok(self.state.write_rpc_string(idx, &src, max_len))
+            }
+            "format" | "formatex" => {
+                let out_addr = vm.param(params_addr, 1)?;
+                let max_len = vm.param(params_addr, 2)?.max(0) as usize;
+                let text = {
+                    let svc = self.state.services.lock();
+                    vm.format_amx_string_with_lang(params_addr, 3, 4, None, Some(&svc.lang))?
+                };
+                let written = vm.set_amx_string(out_addr, &text, max_len)?;
+                Ok(written as i32)
+            }
+            "copy" => {
+                let dest_addr = vm.param(params_addr, 1)?;
+                let max_len = vm.param(params_addr, 2)?.max(0) as usize;
+                let src = vm.param_string(params_addr, 3)?;
+                let written = vm.set_amx_string(dest_addr, &src, max_len)?;
+                Ok(written as i32)
+            }
+            "equal" | "equali" => {
+                let argc = vm.param_count(params_addr)?;
+                let a = vm.param_string(params_addr, 1)?;
+                let b = vm.param_string(params_addr, 2)?;
+                let limit = if argc >= 3 {
+                    vm.param(params_addr, 3)?.max(0) as usize
+                } else {
+                    0
+                };
+                let (sa, sb) = if limit > 0 {
+                    (
+                        a.chars().take(limit).collect::<String>(),
+                        b.chars().take(limit).collect::<String>(),
+                    )
+                } else {
+                    (a, b)
+                };
+                let eq = if name == "equali" {
+                    sa.eq_ignore_ascii_case(&sb)
+                } else {
+                    sa == sb
+                };
+                Ok(i32::from(eq))
+            }
+            "contain" | "containi" => {
+                let hay = vm.param_string(params_addr, 1)?;
+                let needle = vm.param_string(params_addr, 2)?;
+                let pos = if name == "containi" {
+                    hay.to_ascii_lowercase()
+                        .find(&needle.to_ascii_lowercase())
+                } else {
+                    hay.find(&needle)
+                };
+                Ok(pos.map_or(-1, |i| i as i32))
+            }
+            "strlen" => Ok(vm.param_string(params_addr, 1)?.len() as i32),
+            "str_to_num" => Ok(parse_cvar_i32(&vm.param_string(params_addr, 1)?)),
+            "num_to_str" => {
+                let num = vm.param(params_addr, 1)?;
+                let out_addr = vm.param(params_addr, 2)?;
+                let max_len = vm.param(params_addr, 3)?.max(0) as usize;
+                let written = vm.set_amx_string(out_addr, &num.to_string(), max_len)?;
+                Ok(written as i32)
+            }
+            "float" => Ok((vm.param(params_addr, 1)? as f32).to_bits() as i32),
+            "floatround" => {
+                let f = vm.param_f32(params_addr, 1)?;
+                let argc = vm.param_count(params_addr)?;
+                let method = if argc >= 2 {
+                    vm.param(params_addr, 2)?
+                } else {
+                    0
+                };
+                let rounded = match method {
+                    1 => f.floor(),
+                    2 => f.ceil(),
+                    3 => f.trunc(),
+                    _ => f.round(),
+                };
+                Ok(rounded as i32)
+            }
+            "floatadd" => Ok((vm.param_f32(params_addr, 1)? + vm.param_f32(params_addr, 2)?).to_bits() as i32),
+            "floatsub" => Ok((vm.param_f32(params_addr, 1)? - vm.param_f32(params_addr, 2)?).to_bits() as i32),
+            "floatmul" => Ok((vm.param_f32(params_addr, 1)? * vm.param_f32(params_addr, 2)?).to_bits() as i32),
+            "floatdiv" => Ok((vm.param_f32(params_addr, 1)? / vm.param_f32(params_addr, 2)?).to_bits() as i32),
+            "floatcmp" => {
+                let a = vm.param_f32(params_addr, 1)?;
+                let b = vm.param_f32(params_addr, 2)?;
+                Ok(if a == b { 0 } else if a > b { 1 } else { -1 })
+            }
+            "server_print" => {
+                let text = {
+                    let svc = self.state.services.lock();
+                    vm.format_amx_string_with_lang(params_addr, 1, 2, None, Some(&svc.lang))?
+                };
+                self.state.server_prints.push(text);
+                Ok(1)
+            }
+            "log_amx" => {
+                let text = {
+                    let svc = self.state.services.lock();
+                    vm.format_amx_string_with_lang(params_addr, 1, 2, None, Some(&svc.lang))?
+                };
+                self.state.amx_logs.push(text);
+                Ok(1)
+            }
+            "server_cmd" => {
+                let text = vm.format_amx_string(params_addr, 1, 2)?;
+                self.state.pending_server_cmds.push(text);
+                Ok(1)
+            }
+            "get_user_flags" => {
+                let id = vm.param(params_addr, 1)?;
+                if (1..=32).contains(&id) {
+                    Ok(self.state.effective_user_flags((id - 1) as u8))
+                } else {
+                    Ok(0)
+                }
+            }
+            "set_user_flags" => {
+                let id = vm.param(params_addr, 1)?;
+                let flags = vm.param(params_addr, 2)?;
+                if (1..=32).contains(&id) {
+                    self.state.set_user_flags((id - 1) as u8, flags);
+                    Ok(1)
+                } else {
+                    Ok(0)
+                }
+            }
+            "LookupLangKey" => {
+                let out_addr = vm.param(params_addr, 1)?;
+                let out_size = vm.param(params_addr, 2)?.max(0) as usize;
+                let key = vm.param_string(params_addr, 3)?;
+                let id = vm.param(params_addr, 4)?;
+                let slot = if (1..=32).contains(&id) {
+                    Some((id - 1) as u8)
+                } else {
+                    None
+                };
+                let found = {
+                    let svc = self.state.services.lock();
+                    let lang = svc.lang.player_lang(slot);
+                    svc.lang.lookup_key(lang, &key).map(str::to_string)
+                };
+                if let Some(val) = found {
+                    vm.set_amx_string(out_addr, &val, out_size)?;
+                    Ok(1)
+                } else {
+                    Ok(0)
+                }
+            }
+            "nvault_open" => {
+                let vname = vm.param_string(params_addr, 1)?;
+                let mut svc = self.state.services.lock();
+                Ok(svc.nvault.open(&vname))
+            }
+            "nvault_get" => {
+                let argc = vm.param_count(params_addr)?;
+                let handle = vm.param(params_addr, 1)?;
+                let key = vm.param_string(params_addr, 2)?;
+                let val = {
+                    let svc = self.state.services.lock();
+                    svc.nvault.get(handle, &key).map(str::to_string)
+                };
+                let val_str = val.as_deref().unwrap_or("");
+                if argc >= 4 {
+                    let out_addr = vm.param(params_addr, 3)?;
+                    let max_len = vm.param(params_addr, 4)?.max(0) as usize;
+                    let written = vm.set_amx_string(out_addr, val_str, max_len)?;
+                    Ok(written as i32)
+                } else if argc == 3 {
+                    let out_addr = vm.param(params_addr, 3)?;
+                    vm.write_cell(out_addr, parse_cvar_f32(val_str).to_bits() as i32)?;
+                    Ok(1)
+                } else {
+                    Ok(parse_cvar_i32(val_str))
+                }
+            }
+            "nvault_lookup" => {
+                let handle = vm.param(params_addr, 1)?;
+                let key = vm.param_string(params_addr, 2)?;
+                let out_addr = vm.param(params_addr, 3)?;
+                let max_len = vm.param(params_addr, 4)?.max(0) as usize;
+                let ts_addr = vm.param(params_addr, 5)?;
+                let found = {
+                    let svc = self.state.services.lock();
+                    svc.nvault.lookup(handle, &key).map(|(v, ts)| (v.to_string(), ts))
+                };
+                if let Some((val, ts)) = found {
+                    vm.set_amx_string(out_addr, &val, max_len)?;
+                    vm.write_cell(ts_addr, ts as i32)?;
+                    Ok(1)
+                } else {
+                    Ok(0)
+                }
+            }
+            "nvault_set" => {
+                let handle = vm.param(params_addr, 1)?;
+                let key = vm.param_string(params_addr, 2)?;
+                let val = vm.param_string(params_addr, 3)?;
+                let mut svc = self.state.services.lock();
+                Ok(i32::from(svc.nvault.set(handle, key, val, 1)))
+            }
+            "nvault_pset" => {
+                let handle = vm.param(params_addr, 1)?;
+                let key = vm.param_string(params_addr, 2)?;
+                let val = vm.param_string(params_addr, 3)?;
+                let mut svc = self.state.services.lock();
+                Ok(i32::from(svc.nvault.pset(handle, key, val)))
+            }
+            "nvault_remove" => {
+                let handle = vm.param(params_addr, 1)?;
+                let key = vm.param_string(params_addr, 2)?;
+                let mut svc = self.state.services.lock();
+                Ok(i32::from(svc.nvault.remove(handle, &key)))
+            }
+            "nvault_prune" => {
+                let handle = vm.param(params_addr, 1)?;
+                let start = i64::from(vm.param(params_addr, 2)?);
+                let end = i64::from(vm.param(params_addr, 3)?);
+                let mut svc = self.state.services.lock();
+                Ok(svc.nvault.prune(handle, start, end) as i32)
+            }
+            "nvault_close" => {
+                let handle = vm.param(params_addr, 1)?;
+                let mut svc = self.state.services.lock();
+                Ok(i32::from(svc.nvault.close(handle)))
+            }
+            "get_statsnum" => {
+                let svc = self.state.services.lock();
+                Ok(svc.leaderboards.count("csx") as i32)
+            }
+            other => {
+                let resolved = {
+                    let svc = self.state.services.lock();
+                    svc.rpc.resolve_fn(other).cloned()
+                };
+                if let Some(entry) = resolved
+                    && entry.runtime == PluginRuntimeKind::Amxx
+                {
+                    let argc = vm.param_count(params_addr)?;
+                    let mut raw_params = Vec::with_capacity(argc);
+                    for i in 1..=argc {
+                        raw_params.push(vm.param(params_addr, i)?);
+                    }
+                    let str_snapshots: Vec<Option<String>> = raw_params
+                        .iter()
+                        .map(|&raw| {
+                            if raw >= 0 && raw % 4 == 0 {
+                                vm.get_amx_string(raw).ok()
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    self.state.amxx_native_frames.push(AmxxNativeCallFrame {
+                        raw_cells: raw_params.clone(),
+                        str_snapshots,
+                        str_writes: vec![None; argc],
+                    });
+                    let rc = invoke_plugin_pure_in_slots(
+                        self.peers,
+                        self.state,
+                        entry.owner_index,
+                        &entry.callback_name,
+                        &[self.plugin_idx as i32, argc as i32],
+                    )
+                    .unwrap_or(None)
+                    .unwrap_or(0);
+                    if let Some(frame) = self.state.amxx_native_frames.pop() {
+                        for (idx, write) in frame.str_writes.into_iter().enumerate() {
+                            if let Some((s, max_len)) = write
+                                && let Some(&dest_addr) = raw_params.get(idx)
+                                && dest_addr >= 0
+                            {
+                                let _ = vm.set_amx_string(dest_addr, &s, max_len);
+                            }
+                        }
+                    }
+                    return Ok(rc);
+                }
+                Err(AmxError::InvalidNative(other.to_string()))
+            }
+        }
+    }
 }

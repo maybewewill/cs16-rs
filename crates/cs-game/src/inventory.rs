@@ -707,6 +707,16 @@ pub(crate) fn give_named_item(g: &mut GameState, eng: &mut EngineApi<'_>, slot: 
 /// the weapon was added.
 fn default_touch(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, item: WeaponSlotItem) -> bool {
     let id = item.weapon.id;
+    let mut have_ctx = cs_mod_api::CanHavePlayerItemCtx {
+        slot,
+        weapon_id: id as i32 as u8,
+    };
+    if crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+        sink.on_can_have_player_item(g, eng, cs_mod_api::HookPhase::Pre, &mut have_ctx)
+    }) == cs_mod_api::HookAction::Supercede
+    {
+        return false;
+    }
     let Some(p) = player_ref(g, slot) else {
         return false;
     };
@@ -716,6 +726,9 @@ fn default_touch(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, item: Wea
     if add_player_item(g, eng, slot, item) {
         let ent = eng.client_edict(slot);
         eng.emit_sound(ent, CHAN_ITEM, "items/gunpickup2.wav", 1.0, ATTN_NORM, PITCH_NORM);
+        let _ = crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+            sink.on_can_have_player_item(g, eng, cs_mod_api::HookPhase::Post, &mut have_ctx)
+        });
         return true;
     }
     false
@@ -2000,6 +2013,17 @@ impl GameEntity for WorldWeapon {
             return;
         };
         let weapon = item.weapon.id;
+        let mut have_ctx = cs_mod_api::CanHavePlayerItemCtx {
+            slot,
+            weapon_id: weapon as i32 as u8,
+        };
+        if crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+            sink.on_can_have_player_item(g, eng, cs_mod_api::HookPhase::Pre, &mut have_ctx)
+        }) == cs_mod_api::HookAction::Supercede
+        {
+            self.item = Some(item);
+            return;
+        }
         let allowed = player_ref(g, slot).is_some_and(|p| can_have_player_item(eng, p, slot, weapon));
         if !allowed {
             self.item = Some(item);

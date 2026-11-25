@@ -64,12 +64,34 @@ const els = {
 
   statsSummary: document.getElementById('stats-summary'),
   statsBody: document.getElementById('stats-body'),
+
+  tabBtnDashboard: document.getElementById('tab-btn-dashboard'),
+  tabBtnMods: document.getElementById('tab-btn-mods'),
+  tabPaneDashboard: document.getElementById('tab-pane-dashboard'),
+  tabPaneMods: document.getElementById('tab-pane-mods'),
+
+  modsSummary: document.getElementById('mods-summary'),
+  modsBody: document.getElementById('mods-body'),
+  btnModsReloadAll: document.getElementById('btn-mods-reload-all'),
+  btnModsRefresh: document.getElementById('btn-mods-refresh'),
+
+  faultsSummary: document.getElementById('faults-summary'),
+  faultsBody: document.getElementById('faults-body'),
+
+  studioFileSelect: document.getElementById('studio-file-select'),
+  studioActiveFile: document.getElementById('studio-active-file'),
+  studioEditor: document.getElementById('studio-editor'),
+  studioStatus: document.getElementById('studio-status'),
+  btnStudioLoad: document.getElementById('btn-studio-load'),
+  btnStudioSave: document.getElementById('btn-studio-save'),
 };
 
 let adminToken = '';
 let refreshTimer = null;
 const rconHistory = [];
 let historyCursor = -1;
+let studioCurrentFile = '';
+let studioFilesCache = [];
 
 function setAuthState(ok, label) {
   if (!els.authBadge) return;
@@ -374,21 +396,293 @@ function renderReplays(data) {
   els.replaysBody.replaceChildren(frag);
 }
 
+function setStudioStatus(text, kind = '') {
+  if (!els.studioStatus) return;
+  els.studioStatus.textContent = text;
+  els.studioStatus.className = kind ? `studio-status ${kind}` : 'studio-status';
+}
+
+function switchAdminTab(tab) {
+  const isMods = tab === 'mods';
+  els.tabBtnDashboard?.classList.toggle('active', !isMods);
+  els.tabBtnMods?.classList.toggle('active', isMods);
+  els.tabBtnDashboard?.setAttribute('aria-selected', String(!isMods));
+  els.tabBtnMods?.setAttribute('aria-selected', String(isMods));
+  els.tabPaneDashboard?.classList.toggle('hidden', isMods);
+  els.tabPaneMods?.classList.toggle('hidden', !isMods);
+  if (isMods && adminToken) {
+    refreshModsStudio().catch((err) => setStudioStatus(`Sync error: ${err.message}`, 'err'));
+  }
+}
+
+async function toggleModAction(id, action) {
+  try {
+    const data = await apiJson(`/api/mods/${encodeURIComponent(id)}/toggle`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action }),
+    });
+    setStudioStatus(`${id}: ${data.message || action}`, 'ok');
+    await refreshModsStudio();
+  } catch (err) {
+    setStudioStatus(`Failed to ${action} ${id}: ${err.message}`, 'err');
+  }
+}
+
+async function downloadFaultDump(id) {
+  const resp = await apiFetch(`/api/mods/faults/${encodeURIComponent(id)}.json`);
+  const blob = await resp.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${id}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function renderModsResmon(data) {
+  const mods = Array.isArray(data?.mods) ? data.mods : [];
+  const editableFiles = Array.isArray(data?.editable_files) ? data.editable_files : [];
+  const activeCount = mods.filter((m) => m.status === 'Active').length;
+  const faultedCount = mods.filter((m) => String(m.status || '').startsWith('Faulted')).length;
+  if (els.modsSummary) {
+    els.modsSummary.textContent = `${mods.length} plugins (${activeCount} active, ${faultedCount} faulted)`;
+  }
+
+  if (els.studioFileSelect) {
+    const key = editableFiles.join('\n');
+    if (key !== studioFilesCache.join('\n')) {
+      studioFilesCache = editableFiles;
+      const prev = els.studioFileSelect.value || studioCurrentFile;
+      els.studioFileSelect.replaceChildren();
+      const placeholder = document.createElement('option');
+      placeholder.value = '';
+      placeholder.textContent = editableFiles.length > 0
+        ? `Select a file (${editableFiles.length} editable)...`
+        : 'No editable .py / configs/*.toml files found';
+      els.studioFileSelect.appendChild(placeholder);
+      for (const file of editableFiles) {
+        const opt = document.createElement('option');
+        opt.value = file;
+        opt.textContent = file;
+        els.studioFileSelect.appendChild(opt);
+      }
+      if (prev && editableFiles.includes(prev)) {
+        els.studioFileSelect.value = prev;
+      }
+    }
+  }
+
+  if (!els.modsBody) return;
+  if (mods.length === 0) {
+    setEmptyRow(els.modsBody, 10, 'No plugins loaded on this server.');
+    return;
+  }
+
+  const sorted = [...mods].sort((a, b) => (Number(b.avg_us_per_tick) || 0) - (Number(a.avg_us_per_tick) || 0));
+  const frag = document.createDocumentFragment();
+  for (const m of sorted) {
+    const tr = document.createElement('tr');
+    const avgUs = Number(m.avg_us_per_tick || 0);
+    const p99Us = Number(m.p99_us_per_tick || 0);
+    const maxUs = Number(m.max_us || 0);
+    const faults = Number(m.fault_count || 0);
+    const isFaulted = String(m.status || '').startsWith('Faulted');
+    const isPaused = m.status === 'Paused';
+
+    tr.appendChild(makeCell(m.id, 'mono'));
+
+    const langTd = document.createElement('td');
+    const langSpan = document.createElement('span');
+    langSpan.className = 'lang-tag';
+    langSpan.textContent = m.language || 'WASM';
+    langTd.appendChild(langSpan);
+    tr.appendChild(langTd);
+
+    tr.appendChild(makeCell(m.version || '-', 'mono'));
+
+    const stTd = document.createElement('td');
+    const stBadge = document.createElement('span');
+    stBadge.className = isFaulted ? 'badge err' : isPaused ? 'badge' : 'badge ok';
+    stBadge.textContent = isFaulted ? 'Faulted' : (m.status || 'Active');
+    if (isFaulted) stBadge.title = m.status;
+    stTd.appendChild(stBadge);
+    tr.appendChild(stTd);
+
+    const cpuTd = document.createElement('td');
+    const barWrap = document.createElement('div');
+    barWrap.className = 'cpu-bar-wrap';
+    const track = document.createElement('div');
+    track.className = 'cpu-bar-track';
+    const fill = document.createElement('div');
+    const colorCls = avgUs < 50 ? 'cpu-green' : avgUs < 250 ? 'cpu-yellow' : 'cpu-red';
+    fill.className = `cpu-bar-fill ${colorCls}`;
+    fill.style.width = `${Math.max(4, Math.min(100, (avgUs / 300) * 100)).toFixed(0)}%`;
+    track.appendChild(fill);
+    const cpuLabel = document.createElement('span');
+    cpuLabel.className = 'mono';
+    cpuLabel.textContent = `${avgUs.toFixed(1)}us`;
+    barWrap.append(track, cpuLabel);
+    cpuTd.appendChild(barWrap);
+    tr.appendChild(cpuTd);
+
+    tr.appendChild(makeCell(`${p99Us} / ${maxUs}`, 'mono'));
+    tr.appendChild(makeCell(formatBytes(m.memory_bytes || 0), 'mono'));
+    tr.appendChild(makeCell(String(m.hook_calls || 0), 'mono'));
+
+    const fTd = document.createElement('td');
+    if (faults > 0) {
+      const fb = document.createElement('span');
+      fb.className = 'badge err';
+      fb.textContent = String(faults);
+      fTd.appendChild(fb);
+    } else {
+      fTd.textContent = '0';
+      fTd.className = 'mono';
+    }
+    tr.appendChild(fTd);
+
+    const actTd = document.createElement('td');
+    const toggleBtn = document.createElement('button');
+    toggleBtn.textContent = isPaused ? 'Resume' : 'Pause';
+    toggleBtn.disabled = isFaulted;
+    toggleBtn.addEventListener('click', () => {
+      toggleModAction(m.id, isPaused ? 'unpause' : 'pause');
+    });
+    const reloadBtn = document.createElement('button');
+    reloadBtn.textContent = 'Reload';
+    reloadBtn.style.marginLeft = '4px';
+    reloadBtn.disabled = m.language === 'AMXX';
+    reloadBtn.addEventListener('click', () => {
+      toggleModAction(m.id, 'reload');
+    });
+    actTd.append(toggleBtn, reloadBtn);
+
+    if (m.source_path && editableFiles.includes(m.source_path)) {
+      const editBtn = document.createElement('button');
+      editBtn.textContent = 'Edit';
+      editBtn.className = 'primary';
+      editBtn.style.marginLeft = '4px';
+      editBtn.addEventListener('click', () => {
+        if (els.studioFileSelect) els.studioFileSelect.value = m.source_path;
+        loadStudioFile(m.source_path);
+      });
+      actTd.appendChild(editBtn);
+    }
+
+    tr.appendChild(actTd);
+    frag.appendChild(tr);
+  }
+  els.modsBody.replaceChildren(frag);
+}
+
+function renderModFaults(data) {
+  const faults = Array.isArray(data?.faults) ? data.faults : [];
+  if (els.faultsSummary) {
+    els.faultsSummary.textContent = `${faults.length} dumps`;
+  }
+  if (!els.faultsBody) return;
+  if (faults.length === 0) {
+    setEmptyRow(els.faultsBody, 6, 'No plugin faults recorded.');
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  for (const f of faults) {
+    const dumpId = f.id || f.dump_id || '-';
+    const tr = document.createElement('tr');
+    tr.append(
+      makeCell(dumpId, 'mono'),
+      makeCell(f.mod_id || '-', 'mono'),
+      makeCell(f.language || '-', 'mono'),
+      makeCell(f.trigger || '-', 'mono'),
+      makeCell(f.error || '-', 'mono')
+    );
+    const actTd = document.createElement('td');
+    const dlBtn = document.createElement('button');
+    dlBtn.textContent = 'Download .json';
+    dlBtn.className = 'primary';
+    dlBtn.addEventListener('click', () => {
+      downloadFaultDump(dumpId).catch((err) => setStudioStatus(`Fault download failed: ${err.message}`, 'err'));
+    });
+    actTd.appendChild(dlBtn);
+    tr.appendChild(actTd);
+    frag.appendChild(tr);
+  }
+  els.faultsBody.replaceChildren(frag);
+}
+
+async function loadStudioFile(relPath) {
+  const target = (relPath || els.studioFileSelect?.value || '').trim();
+  if (!target) {
+    setStudioStatus('Select a file first.', 'err');
+    return;
+  }
+  try {
+    const encodedPath = target.split('/').map(encodeURIComponent).join('/');
+    const data = await apiJson(`/api/mods/source/${encodedPath}`);
+    studioCurrentFile = data.path || target;
+    if (els.studioActiveFile) els.studioActiveFile.textContent = studioCurrentFile;
+    if (els.studioEditor) els.studioEditor.value = data.content || '';
+    setStudioStatus(`Loaded ${studioCurrentFile} (${(data.content || '').length} bytes).`, 'ok');
+  } catch (err) {
+    setStudioStatus(`Failed to load ${target}: ${err.message}`, 'err');
+  }
+}
+
+async function saveStudioFile() {
+  const target = (studioCurrentFile || els.studioFileSelect?.value || '').trim();
+  if (!target) {
+    setStudioStatus('No file selected to save.', 'err');
+    return;
+  }
+  const content = els.studioEditor?.value ?? '';
+  const t0 = performance.now();
+  try {
+    const encodedPath = target.split('/').map(encodeURIComponent).join('/');
+    const data = await apiJson(`/api/mods/source/${encodedPath}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    });
+    const elapsedMs = (performance.now() - t0).toFixed(1);
+    setStudioStatus(`Saved & hot-reloaded ${target} in ${elapsedMs} ms — ${data.message || 'OK'}`, 'ok');
+    await refreshModsStudio();
+  } catch (err) {
+    setStudioStatus(`Save/reload failed: ${err.message}`, 'err');
+  }
+}
+
+async function refreshModsStudio() {
+  if (!adminToken) return;
+  const [mods, faults] = await Promise.all([
+    apiJson('/api/mods'),
+    apiJson('/api/mods/faults'),
+  ]);
+  renderModsResmon(mods);
+  renderModFaults(faults);
+}
+
 async function refreshAll() {
   if (!adminToken) return;
   setRefreshBadge('Syncing...');
   try {
-    const [status, players, stats, replays] = await Promise.all([
+    const [status, players, stats, replays, mods, faults] = await Promise.all([
       apiJson('/api/status'),
       apiJson('/api/players'),
       apiJson('/api/stats'),
       apiJson('/api/replays'),
+      apiJson('/api/mods'),
+      apiJson('/api/mods/faults'),
     ]);
     setAuthState(true, 'Authenticated');
     renderStatus(status);
     renderPlayers(players);
     renderStats(stats);
     renderReplays(replays);
+    renderModsResmon(mods);
+    renderModFaults(faults);
     setRefreshBadge(`Synced ${new Date().toLocaleTimeString()}`);
   } catch (err) {
     setRefreshBadge(`Error: ${err.message}`, true);
@@ -558,6 +852,36 @@ function init() {
   els.btnBuildInvite?.addEventListener('click', () => buildInvite());
   els.btnCopyInvite?.addEventListener('click', () => copyText(els.invUrl, 'invite URL'));
   els.btnCopyConnect?.addEventListener('click', () => copyText(els.invConnect, 'console command'));
+
+  els.tabBtnDashboard?.addEventListener('click', () => switchAdminTab('dashboard'));
+  els.tabBtnMods?.addEventListener('click', () => switchAdminTab('mods'));
+
+  els.btnModsRefresh?.addEventListener('click', () => {
+    refreshModsStudio().catch((err) => setStudioStatus(`Refresh failed: ${err.message}`, 'err'));
+  });
+  els.btnModsReloadAll?.addEventListener('click', async () => {
+    await runRcon('mod_reload all');
+    await refreshModsStudio();
+    setStudioStatus('Reloaded all mods from disk.', 'ok');
+  });
+  els.btnStudioLoad?.addEventListener('click', () => loadStudioFile());
+  els.studioFileSelect?.addEventListener('change', () => {
+    if (els.studioFileSelect?.value) loadStudioFile(els.studioFileSelect.value);
+  });
+  els.btnStudioSave?.addEventListener('click', () => saveStudioFile());
+  els.studioEditor?.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+      e.preventDefault();
+      saveStudioFile();
+    } else if (e.key === 'Tab') {
+      e.preventDefault();
+      const el = els.studioEditor;
+      const start = el.selectionStart;
+      const end = el.selectionEnd;
+      el.value = `${el.value.slice(0, start)}    ${el.value.slice(end)}`;
+      el.selectionStart = el.selectionEnd = start + 4;
+    }
+  });
 
   init2dReplayControls();
 }

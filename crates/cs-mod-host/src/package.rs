@@ -172,15 +172,25 @@ pub fn load_package_csmod(
     Ok(pkg)
 }
 
-/// Scans `mods_dir` for unpacked subdirectories (`<id>/mod.toml`) and `*.csmod` archives,
-/// returning packages sorted deterministically in dependency order.
+/// Scans `mods_dir` (including nested category folders such as `mods/std/` and `mods/gamemodes/`)
+/// for unpacked subdirectories (`<id>/mod.toml`) and `*.csmod` archives, returning packages sorted
+/// deterministically in dependency order.
 pub fn discover_packages(mods_dir: &Path) -> Result<Vec<LoadedPackage>, PackageError> {
     if !mods_dir.is_dir() {
         return Ok(Vec::new());
     }
-    let mut paths: Vec<PathBuf> = fs::read_dir(mods_dir)
+    let mut raw_pkgs = Vec::new();
+    collect_packages_recursive(mods_dir, &mut raw_pkgs)?;
+    topo_sort_packages(raw_pkgs)
+}
+
+fn collect_packages_recursive(
+    dir: &Path,
+    out: &mut Vec<LoadedPackage>,
+) -> Result<(), PackageError> {
+    let mut paths: Vec<PathBuf> = fs::read_dir(dir)
         .map_err(|source| PackageError::Io {
-            path: mods_dir.to_path_buf(),
+            path: dir.to_path_buf(),
             source,
         })?
         .flatten()
@@ -188,10 +198,17 @@ pub fn discover_packages(mods_dir: &Path) -> Result<Vec<LoadedPackage>, PackageE
         .collect();
     paths.sort();
 
-    let mut raw_pkgs = Vec::new();
     for path in paths {
-        if path.is_dir() && path.join("mod.toml").is_file() {
-            raw_pkgs.push(load_package_dir(&path)?);
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name.starts_with('.') || matches!(name, "target" | "assets" | "src" | "client") {
+            continue;
+        }
+        if path.is_dir() {
+            if path.join("mod.toml").is_file() {
+                out.push(load_package_dir(&path)?);
+            } else {
+                collect_packages_recursive(&path, out)?;
+            }
         } else if path.is_file()
             && path.extension().and_then(|e| e.to_str()) == Some("csmod")
         {
@@ -199,11 +216,10 @@ pub fn discover_packages(mods_dir: &Path) -> Result<Vec<LoadedPackage>, PackageE
                 path: path.clone(),
                 source,
             })?;
-            raw_pkgs.push(load_package_csmod(&bytes, Some(path))?);
+            out.push(load_package_csmod(&bytes, Some(path))?);
         }
     }
-
-    topo_sort_packages(raw_pkgs)
+    Ok(())
 }
 
 /// Topologically orders packages so dependencies always initialize before dependents.
@@ -328,6 +344,9 @@ fn read_or_compile_entry_map(
 }
 
 fn maybe_compile_wat(rel: &str, bytes: Vec<u8>) -> Result<Vec<u8>, PackageError> {
+    if rel.to_ascii_lowercase().ends_with(".py") {
+        return Ok(bytes);
+    }
     if rel.ends_with(".wat") || (!bytes.starts_with(b"\0asm") && bytes.trim_ascii_start().starts_with(b"(")) {
         let text = std::str::from_utf8(&bytes)
             .map_err(|e| PackageError::EntryCompile(rel.to_string(), e.to_string()))?;

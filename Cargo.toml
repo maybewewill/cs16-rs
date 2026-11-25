@@ -20,6 +20,7 @@ members = [
     "crates/cs-web",
     "crates/cs-mod-api",
     "crates/cs-mod-host",
+    "crates/cs-mod-py",
     "crates/cs-mod-macros",
     "crates/cs-mod-sdk",
     "crates/cs-master",
@@ -77,6 +78,7 @@ cs-amxx = { path = "crates/cs-amxx" }
 cs-master = { path = "crates/cs-master" }
 cs-mod-api = { path = "crates/cs-mod-api" }
 cs-mod-host = { path = "crates/cs-mod-host" }
+cs-mod-py = { path = "crates/cs-mod-py" }
 cs-mod-macros = { path = "crates/cs-mod-macros" }
 
 [workspace.lints.rust]

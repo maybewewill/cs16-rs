@@ -319,6 +319,17 @@ impl Hostage {
             return false;
         }
 
+        let mut rescue_ctx = cs_mod_api::HostageEventCtx {
+            slot: leader_slot as u8,
+            ent_index: id.index,
+        };
+        if crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+            sink.on_hostage_rescued(g, eng, cs_mod_api::HookPhase::Pre, &mut rescue_ctx)
+        }) == cs_mod_api::HookAction::Supercede
+        {
+            return false;
+        }
+
         self.rescued = true;
         self.state = State::Stand;
         self.target_ent = None;
@@ -336,6 +347,9 @@ impl Hostage {
             slot: leader_slot as u8,
         });
         crate::rules::broadcast(eng, "rescued");
+        let _ = crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+            sink.on_hostage_rescued(g, eng, cs_mod_api::HookPhase::Post, &mut rescue_ctx)
+        });
         true
     }
 
@@ -879,6 +893,16 @@ impl GameEntity for Hostage {
         if now < self.next_change {
             return;
         }
+        let mut touch_ctx = cs_mod_api::HostageEventCtx {
+            slot: slot_u8,
+            ent_index: id.index,
+        };
+        if crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+            sink.on_hostage_touched(g, eng, cs_mod_api::HookPhase::Pre, &mut touch_ctx)
+        }) == cs_mod_api::HookAction::Supercede
+        {
+            return;
+        }
         self.next_change = now + 1.0;
         self.path_acquired = now;
 
@@ -902,6 +926,9 @@ impl GameEntity for Hostage {
         if first_time(g, slot_u8, dhf::HOSTAGE_USED) {
             hint(g, eng, slot_u8, "#Hint_lead_hostage_to_rescue_point");
         }
+        let _ = crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+            sink.on_hostage_touched(g, eng, cs_mod_api::HookPhase::Post, &mut touch_ctx)
+        });
     }
 
     fn touch(&mut self, g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId, other: EdictId) {

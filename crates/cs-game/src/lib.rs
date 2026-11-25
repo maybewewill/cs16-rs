@@ -11,8 +11,8 @@
 //! and the night vision; [`buy`] has the buy zones and the purchase of the equipment. The dead
 //! and the spectators watch through [`observer`].
 
+pub mod amxx_hooks;
 pub mod bots;
-mod amxx_hooks;
 pub mod breakables;
 pub mod bullets;
 pub mod buttons;
@@ -36,6 +36,7 @@ pub mod kz;
 pub mod mapcycle;
 pub mod menus;
 mod messages;
+pub mod mod_hooks;
 pub mod money;
 pub mod movers;
 pub mod observer;
@@ -153,6 +154,10 @@ pub struct GameState {
     pub damage_printed: [bool; MAX_PLAYERS],
     /// Built-in KZ checkpoints, map timer leaderboard, and server-side JumpStats.
     pub kz: kz::KzState,
+    /// Optional ABI v2 ReAPI hook receiver installed by a mod host (`None` in vanilla).
+    pub(crate) hook_sink: Option<Box<dyn mod_hooks::CsHookSink>>,
+    /// Declarative custom weapons registered by mods and per-player active weapon bindings.
+    pub custom_weapons: mod_hooks::CustomWeaponRegistry,
     /// Every call the dispatch delivered to a `test_dispatch` entity. For tests only (feature
     /// `test-hooks`).
     #[cfg(feature = "test-hooks")]
@@ -194,6 +199,8 @@ impl GameState {
             round_damage: [[RoundDamageEntry::default(); MAX_PLAYERS]; MAX_PLAYERS],
             damage_printed: [false; MAX_PLAYERS],
             kz: kz::KzState::default(),
+            hook_sink: None,
+            custom_weapons: mod_hooks::CustomWeaponRegistry::default(),
             #[cfg(feature = "test-hooks")]
             dispatch_log: Vec::new(),
         }
@@ -228,6 +235,7 @@ impl GameState {
         self.round_damage = [[RoundDamageEntry::default(); MAX_PLAYERS]; MAX_PLAYERS];
         self.damage_printed = [false; MAX_PLAYERS];
         self.kz.reset_map();
+        self.custom_weapons.clear_all_players();
     }
 }
 
@@ -346,6 +354,28 @@ impl CsGame {
 
     pub fn state_mut(&mut self) -> &mut GameState {
         &mut self.state
+    }
+
+    /// Installs an ABI v2 ReAPI gameplay hook sink on this game instance, returning any previous sink.
+    pub fn set_hook_sink(
+        &mut self,
+        sink: Box<dyn mod_hooks::CsHookSink>,
+    ) -> Option<Box<dyn mod_hooks::CsHookSink>> {
+        self.state.hook_sink.replace(sink)
+    }
+
+    /// Removes and returns the currently installed hook sink, if any.
+    pub fn take_hook_sink(&mut self) -> Option<Box<dyn mod_hooks::CsHookSink>> {
+        self.state.hook_sink.take()
+    }
+
+    /// Precaches stock mod VFX sprites and all registered custom weapon models/sounds.
+    ///
+    /// Called only by mod hosts right after `CsGame::server_activate` (before the engine locks
+    /// precaches) so vanilla servers without mods preserve exact stock precache indices.
+    pub fn precache_mod_resources(&mut self, eng: &mut EngineApi<'_>) {
+        mod_hooks::precache_vfx_sprites(eng);
+        self.state.custom_weapons.precache_all(eng);
     }
 
     /// Spawns the player of `slot` on `team` with appearance `class` (1 to 4, 0 the team's
@@ -1033,8 +1063,17 @@ impl GameDll for CsGame {
     /// `toucher`'s entity is touched by `other`; a toucher with no entity (a player, for now) is
     /// not told.
     fn touch(&mut self, eng: &mut EngineApi<'_>, toucher: EdictId, other: EdictId) {
+        if mod_hooks::fire_hook(&mut self.state, eng, |sink, g, eng| {
+            sink.on_entity_touch(g, eng, cs_mod_api::HookPhase::Pre, toucher, other)
+        }) == cs_mod_api::HookAction::Supercede
+        {
+            return;
+        }
         with_entity(&mut self.state, eng, toucher, |entity, g, eng| {
             entity.touch(g, eng, toucher, other);
+        });
+        let _ = mod_hooks::fire_hook(&mut self.state, eng, |sink, g, eng| {
+            sink.on_entity_touch(g, eng, cs_mod_api::HookPhase::Post, toucher, other)
         });
     }
 
