@@ -2,6 +2,7 @@
 //! Counter-Strike 1.6 client and for `cs-client`. The game is `cs_game::CsGame`; `--walk-game` runs the
 //! older `cs_sim::walk_game::WalkGame` instead (players only walk: no weapons, rounds or HUD).
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::io::Write;
 use std::net::SocketAddr;
@@ -34,8 +35,8 @@ use tracing::info;
 
 use crate::admin_http::{
     AdminBackend, AdminHttpRequest, AdminHttpResponse, AdminRouter, InviteConfig,
-    MAX_API_BODY_BYTES, PlayerSnapshot, ServerStatusSnapshot, handle_lobby_request, is_lobby_path,
-    read_http_body,
+    MAX_API_BODY_BYTES, ModStudioSandbox, PlayerSnapshot, ServerStatusSnapshot, encode_mods_json,
+    handle_lobby_request, is_lobby_path, max_body_bytes_for_path, read_http_body,
 };
 use cs_master::lobbies::LobbyRegistry;
 use crate::console_io;
@@ -280,6 +281,8 @@ fn build_unified_mod_host(
     }
     let mut host = cs_mod_host::ServerModHost::new();
     cs_mod_py::attach_python_runtime(&mut host);
+    host.set_fault_dump_dir("logs/mod_faults");
+    let _ = host.load_fault_dumps_from_dir(Path::new("logs/mod_faults"));
     let _ = host.load_configs_dir(vfs.root().join("cstrike"));
     let _ = host.load_configs_dir(".");
 
@@ -1196,15 +1199,50 @@ enum PendingHttpRequest {
     },
 }
 
-struct ServerAdminBridge<'a, G: GameDll> {
+struct ServerAdminBridge<'a, G: GameDll + 'static> {
     server: &'a mut Server<G>,
     runtime: &'a mut Phase13Runtime,
     now: f64,
     load_map: &'a mut dyn FnMut(&str) -> Result<ServerMap, String>,
     quit_requested: &'a mut bool,
+    studio_root: PathBuf,
 }
 
-impl<G: GameDll> AdminBackend for ServerAdminBridge<'_, G> {
+impl<G: GameDll + 'static> ServerAdminBridge<'_, G> {
+    fn mod_host(&self) -> Option<&cs_mod_host::ServerModHost> {
+        let g: &dyn Any = self.server.game();
+        if let Some(m) = g.downcast_ref::<cs_mod_host::ModdedGame<CsGame>>() {
+            return Some(&m.host);
+        }
+        if let Some(m) = g.downcast_ref::<cs_mod_host::ModdedGame<WalkGame>>() {
+            return Some(&m.host);
+        }
+        None
+    }
+
+    fn mod_host_mut(&mut self) -> Option<&mut cs_mod_host::ServerModHost> {
+        let is_cs = (self.server.game() as &dyn Any).is::<cs_mod_host::ModdedGame<CsGame>>();
+        let is_walk = (self.server.game() as &dyn Any).is::<cs_mod_host::ModdedGame<WalkGame>>();
+        let g: &mut dyn Any = self.server.game_mut();
+        if is_cs {
+            return g
+                .downcast_mut::<cs_mod_host::ModdedGame<CsGame>>()
+                .map(|m| &mut m.host);
+        }
+        if is_walk {
+            return g
+                .downcast_mut::<cs_mod_host::ModdedGame<WalkGame>>()
+                .map(|m| &mut m.host);
+        }
+        None
+    }
+
+    fn sandbox(&self) -> ModStudioSandbox {
+        ModStudioSandbox::new(&self.studio_root)
+    }
+}
+
+impl<G: GameDll + 'static> AdminBackend for ServerAdminBridge<'_, G> {
     fn rcon_password(&self) -> &str {
         self.server.rcon_password()
     }
@@ -1334,6 +1372,99 @@ impl<G: GameDll> AdminBackend for ServerAdminBridge<'_, G> {
             default_room: "alpha".to_string(),
         }
     }
+
+    fn mods_json(&self) -> String {
+        let mut rows = self
+            .mod_host()
+            .map(cs_mod_host::ServerModHost::resmon_snapshot)
+            .unwrap_or_default();
+        let root_str = self
+            .studio_root
+            .to_string_lossy()
+            .replace('\\', "/");
+        let prefix = format!("{}/", root_str.trim_end_matches('/'));
+        for row in &mut rows {
+            if let Some(ref mut sp) = row.source_path {
+                let norm = sp.replace('\\', "/");
+                if let Some(stripped) = norm.strip_prefix(&prefix) {
+                    *sp = stripped.to_string();
+                } else if let Some(stripped) = norm.strip_prefix("./") {
+                    *sp = stripped.to_string();
+                } else {
+                    *sp = norm;
+                }
+            }
+        }
+        let editable = self.sandbox().list_editable_files();
+        encode_mods_json(&rows, &editable)
+    }
+
+    fn toggle_mod(&mut self, id: &str, action: &str) -> Result<String, String> {
+        let Some(host) = self.mod_host_mut() else {
+            return Err("mod host not enabled on server".to_string());
+        };
+        match action {
+            "pause" => {
+                if host.pause_mod(id) {
+                    Ok(format!("paused `{id}`"))
+                } else {
+                    Err(format!("mod `{id}` is not active or not found"))
+                }
+            }
+            "unpause" => {
+                if host.unpause_mod(id) {
+                    Ok(format!("unpaused `{id}`"))
+                } else {
+                    Err(format!("mod `{id}` is not paused or not found"))
+                }
+            }
+            "reload" => {
+                host.reload_mod(id)?;
+                Ok(format!("reloaded `{id}`"))
+            }
+            _ => Err(format!("unsupported action `{action}`")),
+        }
+    }
+
+    fn mod_faults_json(&self) -> String {
+        if let Some(host) = self.mod_host() {
+            return host.list_faults_json();
+        }
+        "{\"count\":0,\"faults\":[]}".to_string()
+    }
+
+    fn mod_fault_detail_json(&self, id: &str) -> Option<String> {
+        if let Some(host) = self.mod_host()
+            && let Some(json) = host.get_fault_json(id)
+        {
+            return Some(json);
+        }
+        self.sandbox().read_fault_file(id)
+    }
+
+    fn read_mod_source(&self, rel_path: &str) -> Result<String, String> {
+        self.sandbox().read_source(rel_path)
+    }
+
+    fn write_mod_source(&mut self, rel_path: &str, content: &str) -> Result<String, String> {
+        let abs = self.sandbox().write_source(rel_path, content)?;
+        let Some(host) = self.mod_host_mut() else {
+            return Ok(format!("saved `{rel_path}`"));
+        };
+        if rel_path.to_ascii_lowercase().ends_with(".py") {
+            match host.reload_by_source_path(&abs)? {
+                Some(id) => Ok(format!("saved and hot-reloaded Python mod `{id}`")),
+                None => Ok(format!("saved `{rel_path}`")),
+            }
+        } else if rel_path.starts_with("configs/") {
+            let (langs, admins) = host.reload_configs();
+            Ok(format!(
+                "saved `{rel_path}` and reloaded configs ({langs} lang entries, {admins} admin accounts)"
+            ))
+        } else {
+            Ok(format!("saved `{rel_path}`"))
+        }
+    }
 }
 
 fn write_cors_json_response(
@@ -1460,7 +1591,8 @@ fn make_http_hook(
         }
 
         if AdminRouter::handles_path(&req.path) {
-            let body = match read_http_body(req, leftover, stream, MAX_API_BODY_BYTES) {
+            let body_limit = max_body_bytes_for_path(&req.path);
+            let body = match read_http_body(req, leftover, stream, body_limit) {
                 Ok(b) => b,
                 Err(crate::admin_http::HttpReadError::PayloadTooLarge) => {
                     let _ = AdminHttpResponse::json_error(
@@ -1533,7 +1665,7 @@ fn make_http_hook(
     })
 }
 
-fn process_pending_http<G: GameDll>(
+fn process_pending_http<G: GameDll + 'static>(
     rx: &Receiver<PendingHttpRequest>,
     server: &mut Server<G>,
     runtime: &mut Phase13Runtime,
@@ -1541,6 +1673,7 @@ fn process_pending_http<G: GameDll>(
     load_map: &mut dyn FnMut(&str) -> Result<ServerMap, String>,
 ) -> bool {
     let mut quit_requested = false;
+    let studio_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     while let Ok(req) = rx.try_recv() {
         match req {
             PendingHttpRequest::ServersJson { host, reply } => {
@@ -1559,6 +1692,7 @@ fn process_pending_http<G: GameDll>(
                     now,
                     load_map,
                     quit_requested: &mut quit_requested,
+                    studio_root: studio_root.clone(),
                 };
                 let resp = AdminRouter::handle(&view, &mut bridge);
                 let _ = reply.send(resp);
@@ -1574,7 +1708,7 @@ fn process_pending_http<G: GameDll>(
 }
 
 /// Binds the socket (and optional HTTP/WebSocket host) and runs `game` on `map`.
-fn serve<G: GameDll>(
+fn serve<G: GameDll + 'static>(
     opts: &Options,
     vfs: &Vfs,
     map: ServerMap,
@@ -2418,5 +2552,478 @@ mod tests {
 
         running.store(false, Ordering::Relaxed);
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn phase15_five_language_polyglot_resmon_and_studio_e2e() {
+        use cs_amxx::amxxfile::build_test_amxx_plugin;
+        use cs_amxx::vm::op::*;
+        use cs_assets::bsp::Entity;
+        use cs_clientcore::{ConnState, Connection, ConnectionConfig};
+        use cs_mod_host::{ModStatus, ModdedGame, ServerModHost};
+        use cs_proto48::crypto::md5_hex;
+        use cs_transport::{LoopbackHub, PeerAddr};
+
+        // 1. Locate repo root so we can load the real compiled showcase mods.
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .unwrap()
+            .to_path_buf();
+
+        // Prepare a temporary sandbox root for live Plugin Studio editing & fault dumps.
+        let tmp = std::env::temp_dir().join(format!(
+            "cs16_phase15_e2e_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("mods/community")).unwrap();
+        std::fs::create_dir_all(tmp.join("configs/lang")).unwrap();
+        std::fs::create_dir_all(tmp.join("logs/mod_faults")).unwrap();
+
+        let live_py_path = tmp.join("mods/community/live_probe.py");
+        let live_py_v1 = r#"from cs16 import mod, HookAction
+
+@mod.info(id="live_probe", version="1.0.0", permissions=["messages", "commands", "rpc"])
+def _meta():
+    pass
+
+@mod.export_fn("probe_ver")
+def probe_ver():
+    return 1
+
+@mod.chat_command("/probe")
+def on_probe(player, args):
+    player.chat("PROBE_V1")
+    return HookAction.SUPERCEDE
+"#;
+        std::fs::write(&live_py_path, live_py_v1).unwrap();
+
+        // Grant admin flags to Alice's deterministic SteamID in configs/admins.toml.
+        std::fs::write(
+            tmp.join("configs/admins.toml"),
+            "[[admins]]\nauth = \"STEAM_0:0:500001\"\nflags = \"abcdefghijklmnopqrstu\"\naccount_flags = \"ce\"\n",
+        )
+        .unwrap();
+
+        // 2. Build unified ServerModHost with ALL 5 languages simultaneously!
+        let mut host = ServerModHost::new();
+        cs_mod_py::attach_python_runtime(&mut host);
+        host.set_fault_dump_dir(tmp.join("logs/mod_faults"));
+        let _ = host.load_configs_dir(&repo_root);
+        let _ = host.load_configs_dir(&tmp);
+
+        // (a) Rust -> WASM showcase mods
+        for rel in ["mods/std/admin", "mods/std/statsx", "mods/gamemodes/zombie_plague"] {
+            let pkg = cs_mod_host::load_package_dir(&repo_root.join(rel))
+                .unwrap_or_else(|e| panic!("failed to load Rust mod `{rel}`: {e}"));
+            host.load_package(pkg)
+                .unwrap_or_else(|e| panic!("failed to init Rust mod `{rel}`: {e}"));
+        }
+
+        // (b) C++20 -> WASM showcase mods
+        for rel in ["mods/std/restmenu", "mods/gamemodes/semiclip"] {
+            let pkg = cs_mod_host::load_package_dir(&repo_root.join(rel))
+                .unwrap_or_else(|e| panic!("failed to load C++ mod `{rel}`: {e}"));
+            host.load_package(pkg)
+                .unwrap_or_else(|e| panic!("failed to init C++ mod `{rel}`: {e}"));
+        }
+
+        // (c) Go/WASI -> WASM showcase mod
+        let go_pkg = cs_mod_host::load_package_dir(&repo_root.join("mods/std/mapmanager"))
+            .expect("load Go std_mapmanager");
+        host.load_package(go_pkg).expect("init Go std_mapmanager");
+
+        // (d) Python 3 zero-compile showcase mods + live Studio probe + infinite-loop fault tester
+        host.load_python_file(&repo_root.join("mods/community/resetscore.py"))
+            .expect("load resetscore.py");
+        host.load_python_file(&repo_root.join("mods/community/vip_system.py"))
+            .expect("load vip_system.py");
+        host.load_python_file(&live_py_path)
+            .expect("load live_probe.py");
+
+        let looper_src = r#"from cs16 import mod, HookAction
+
+@mod.info(id="py_looper", version="1.0.0", permissions=["messages", "commands"])
+def _meta():
+    pass
+
+@mod.chat_command("/hangme")
+def on_hang(player, args):
+    x = 0
+    while True:
+        x = x + 1
+    return HookAction.SUPERCEDE
+"#;
+        host.load_python_source("py_looper", "py_looper.py", looper_src, None)
+            .expect("load py_looper");
+
+        // (e) Legacy `.amxx` Pawn 3.2 plugin running simultaneously
+        let mut amx_data = Vec::new();
+        let add_str = |buf: &mut Vec<u8>, s: &str| -> u32 {
+            let addr = buf.len() as u32;
+            for &b in s.as_bytes() {
+                buf.extend_from_slice(&i32::from(b).to_le_bytes());
+            }
+            buf.extend_from_slice(&0i32.to_le_bytes());
+            addr
+        };
+        let title_addr = add_str(&mut amx_data, "LegacyCompat");
+        let ver_addr = add_str(&mut amx_data, "1.0.0");
+        let auth_addr = add_str(&mut amx_data, "cs16-rs");
+        let amx_code: Vec<u32> = vec![
+            OP_HALT, 0,
+            OP_PROC,
+            OP_PUSH_C, auth_addr,
+            OP_PUSH_C, ver_addr,
+            OP_PUSH_C, title_addr,
+            OP_PUSH_C, 12,
+            OP_SYSREQ_C, 0,
+            OP_STACK, 16,
+            OP_ZERO_PRI,
+            OP_RETN,
+        ];
+        let amxx_bytes = build_test_amxx_plugin(
+            &[("plugin_init", 8)],
+            &["register_plugin"],
+            &[],
+            &amx_code,
+            &amx_data,
+            4096,
+            -1,
+        );
+        host.load_amxx_plugin("legacy_compat.amxx", &amxx_bytes)
+            .expect("load legacy_compat.amxx");
+
+        // 3. Boot Server<ModdedGame<CsGame>> with 2 players (EN + RU) and admin RCON password.
+        let ents = vec![
+            Entity {
+                properties: HashMap::from([
+                    ("classname".into(), "info_player_start".into()),
+                    ("origin".into(), "0 0 64".into()),
+                ]),
+            },
+            Entity {
+                properties: HashMap::from([
+                    ("classname".into(), "info_player_deathmatch".into()),
+                    ("origin".into(), "128 0 64".into()),
+                ]),
+            },
+            Entity {
+                properties: HashMap::from([
+                    ("classname".into(), "func_buyzone".into()),
+                    ("team".into(), "0".into()),
+                    ("origin".into(), "0 0 64".into()),
+                ]),
+            },
+        ];
+        let map = ServerMap::stub_with_entities("de_dust2", ents);
+        let mut cvars = CVarRegistry::new_with_defaults();
+        cvars.set("rcon_password", "studio-secret");
+        cvars.set("mp_freezetime", "0");
+        cvars.set("mp_buy_anywhere", "1");
+        cvars.set("bot_quota", "0");
+
+        let mut server = Server::new(
+            ServerConfig {
+                max_clients: 8,
+                ..ServerConfig::default()
+            },
+            map,
+            ModdedGame::new(CsGame::new(), host),
+            DeltaRegistry::cs16_default(),
+            cvars,
+        );
+
+        let mut hub = LoopbackHub::new();
+        let ep0 = hub.connect();
+        let mut c0 = Connection::new(
+            ep0,
+            PeerAddr::Loopback(0),
+            ConnectionConfig::new("Alice", 76_561_197_960_265_810, &md5_hex(b"alice")),
+        );
+        c0.set_userinfo("_vgui_menus", "0");
+        c0.set_userinfo("*sid", "STEAM_0:0:500001");
+        c0.connect();
+
+        let ep1 = hub.connect();
+        let mut c1 = Connection::new(
+            ep1,
+            PeerAddr::Loopback(0),
+            ConnectionConfig::new("Boris", 76_561_197_960_265_811, &md5_hex(b"boris")),
+        );
+        c1.set_userinfo("_vgui_menus", "0");
+        c1.connect();
+
+        let mut now = 0.0;
+        let step = |server: &mut Server<ModdedGame<CsGame>>,
+                    hub: &mut LoopbackHub,
+                    c0: &mut Connection<cs_transport::LoopbackEndpoint>,
+                    c1: &mut Connection<cs_transport::LoopbackEndpoint>,
+                    now: &mut f64,
+                    ticks: usize| {
+            for _ in 0..ticks {
+                *now += 0.01;
+                c0.pump(*now);
+                c1.pump(*now);
+                server.frame(hub, *now);
+            }
+        };
+
+        for _ in 0..300 {
+            step(&mut server, &mut hub, &mut c0, &mut c1, &mut now, 1);
+            if c0.state() == &ConnState::InGame && c1.state() == &ConnState::InGame {
+                break;
+            }
+        }
+        assert_eq!(c0.state(), &ConnState::InGame);
+        assert_eq!(c1.state(), &ConnState::InGame);
+
+        // Join teams & spawn both players.
+        c0.send_stringcmd("jointeam 2");
+        c0.send_stringcmd("joinclass 1");
+        c1.send_stringcmd("jointeam 1");
+        c1.send_stringcmd("joinclass 1");
+        step(&mut server, &mut hub, &mut c0, &mut c1, &mut now, 60);
+
+        // Verify zombie_plague registered its CustomWeapon on CsGame.
+        assert!(
+            server
+                .game()
+                .inner
+                .state()
+                .custom_weapons
+                .get("golden_ak47")
+                .is_some(),
+            "zombie_plague should register CustomWeaponSpec `golden_ak47`"
+        );
+
+        // Verify C++20 `std_restmenu` blocks SG550 purchase via `CanBuyItem`.
+        server.game_mut().inner.state_mut().players[0]
+            .as_mut()
+            .unwrap()
+            .money = 16000;
+        c0.send_stringcmd("buy sg550");
+        step(&mut server, &mut hub, &mut c0, &mut c1, &mut now, 15);
+        assert_eq!(
+            server.game().inner.state().players[0].as_ref().unwrap().money,
+            16000,
+            "C++20 std_restmenu must supercede restricted sg550 purchase"
+        );
+
+        // Verify simultaneous Russian + English i18n via Python `resetscore.py`, Go `std_mapmanager`,
+        // and Rust `std_statsx` `/rank` + `/top15` (spaced >= 0.80 s to respect GoldSrc Host_Say flood limit).
+        c1.send_stringcmd("say /lang ru");
+        step(&mut server, &mut hub, &mut c0, &mut c1, &mut now, 10);
+        c0.send_stringcmd("say /rs");
+        c1.send_stringcmd("say /rs");
+        step(&mut server, &mut hub, &mut c0, &mut c1, &mut now, 85);
+        c0.send_stringcmd("say nominate de_inferno");
+        step(&mut server, &mut hub, &mut c0, &mut c1, &mut now, 85);
+        c0.send_stringcmd("say rtv");
+        step(&mut server, &mut hub, &mut c0, &mut c1, &mut now, 85);
+        c0.send_stringcmd("say /top15");
+        step(&mut server, &mut hub, &mut c0, &mut c1, &mut now, 85);
+        c0.send_stringcmd("say /probe");
+        step(&mut server, &mut hub, &mut c0, &mut c1, &mut now, 85);
+
+        let chat0: Vec<String> = c0
+            .fx()
+            .hud
+            .chat
+            .iter()
+            .map(|m| m.text.clone())
+            .collect();
+        let chat1: Vec<String> = c1
+            .fx()
+            .hud
+            .chat
+            .iter()
+            .map(|m| m.text.clone())
+            .collect();
+        assert!(
+            chat0.iter().any(|t| t.contains("PROBE_V1")),
+            "live_probe.py v1 should reply: {chat0:?}"
+        );
+        assert!(
+            chat0.iter().any(|t| t.contains("[RS]")),
+            "English player should receive [RS] confirmation: {chat0:?}"
+        );
+        assert!(
+            chat1.iter().any(|t| t.contains("[RS]") && t.chars().any(|c| ('\u{0400}'..='\u{04FF}').contains(&c))),
+            "Russian player should receive localized Cyrillic [RS] confirmation: {chat1:?}"
+        );
+        assert!(
+            c0.fx().hud.motd.contains("#000000")
+                || c0.fx().hud.motd.contains("#ffb000")
+                || c0.fx().hud.motd.contains("TOP"),
+            "Rust std_statsx /top15 should send black-and-orange MOTD HTML: {:?}",
+            c0.fx().hud.motd
+        );
+
+        // Verify unified console commands: `mod_list`, `amx_plugins`, `mod_stats`, `mod_pause`, `mod_unpause`.
+        let list_out = match server.console_command("mod_list") {
+            ConsoleOutcome::Output(s) => s,
+            other => panic!("unexpected mod_list outcome: {other:?}"),
+        };
+        let amx_out = match server.console_command("amx_plugins") {
+            ConsoleOutcome::Output(s) => s,
+            other => panic!("unexpected amx_plugins outcome: {other:?}"),
+        };
+        assert_eq!(list_out, amx_out);
+        for expected in ["Rust/WASM", "C++/WASM", "Go/WASM", "Python", "AMXX", "std_mapmanager", "legacy_compat.amxx"] {
+            assert!(
+                list_out.contains(expected),
+                "mod_list missing `{expected}`:\n{list_out}"
+            );
+        }
+        let stats_out = match server.console_command("mod_stats") {
+            ConsoleOutcome::Output(s) => s,
+            other => panic!("unexpected mod_stats outcome: {other:?}"),
+        };
+        assert!(stats_out.contains("AVG us") && stats_out.contains("P99 us"));
+
+        assert!(matches!(
+            server.console_command("mod_pause legacy_compat.amxx"),
+            ConsoleOutcome::Output(s) if s.contains("paused")
+        ));
+        assert!(matches!(
+            server.console_command("mod_unpause legacy_compat.amxx"),
+            ConsoleOutcome::Output(s) if s.contains("unpaused")
+        ));
+
+        // Trigger Python infinite-loop OutOfFuel fault -> server stays alive + emits ModFaultDump.
+        c0.send_stringcmd("say /hangme");
+        step(&mut server, &mut hub, &mut c0, &mut c1, &mut now, 85);
+        assert!(
+            server
+                .game()
+                .host
+                .list_mods()
+                .iter()
+                .any(|m| m.id == "py_looper" && matches!(m.status, ModStatus::Faulted(_))),
+            "py_looper must fault cleanly on OutOfFuel"
+        );
+        let faults = server.game().host.list_faults();
+        let py_dump_summary = faults
+            .iter()
+            .find(|f| f.mod_id == "py_looper")
+            .expect("ModFaultDump recorded for py_looper");
+        let dump_id = py_dump_summary.id.clone();
+
+        // Verify HTTP Admin API via real ServerAdminBridge: /api/mods, /toggle, /faults, PUT /source hot-reload!
+        let mut runtime = Phase13Runtime::new(
+            "de_dust2",
+            4,
+            now,
+            27015,
+            Some(27016),
+            vec!["de_dust2".into()],
+            None,
+        );
+        let mut quit_flag = false;
+        let mut load_map_stub = |_name: &str| Err::<ServerMap, String>("no map".into());
+        {
+            let mut bridge = ServerAdminBridge {
+                server: &mut server,
+                runtime: &mut runtime,
+                now,
+                load_map: &mut load_map_stub,
+                quit_requested: &mut quit_flag,
+                studio_root: tmp.clone(),
+            };
+            let auth_req = |method: &'static str, path: &'static str, body: &'static [u8]| {
+                AdminHttpRequest {
+                    method,
+                    path,
+                    query: None,
+                    authorization: Some("Bearer studio-secret"),
+                    x_admin_token: None,
+                    host: Some("127.0.0.1:27016"),
+                    body,
+                }
+            };
+
+            let mods_resp = AdminRouter::handle(&auth_req("GET", "/api/mods", b""), &mut bridge);
+            assert_eq!(mods_resp.status_code, 200);
+            let mods_json = String::from_utf8(mods_resp.body).unwrap();
+            assert!(mods_json.contains("\"language\":\"Rust/WASM\""));
+            assert!(mods_json.contains("\"language\":\"C++/WASM\""));
+            assert!(mods_json.contains("\"language\":\"Go/WASM\""));
+            assert!(mods_json.contains("\"language\":\"Python\""));
+            assert!(mods_json.contains("\"language\":\"AMXX\""));
+            assert!(mods_json.contains("mods/community/live_probe.py"));
+
+            let pause_resp = AdminRouter::handle(
+                &auth_req("POST", "/api/mods/resetscore/toggle", br#"{"action":"pause"}"#),
+                &mut bridge,
+            );
+            assert_eq!(pause_resp.status_code, 200);
+            let resume_resp = AdminRouter::handle(
+                &auth_req("POST", "/api/mods/resetscore/toggle", br#"{"action":"unpause"}"#),
+                &mut bridge,
+            );
+            assert_eq!(resume_resp.status_code, 200);
+
+            let faults_resp =
+                AdminRouter::handle(&auth_req("GET", "/api/mods/faults", b""), &mut bridge);
+            assert_eq!(faults_resp.status_code, 200);
+            assert!(String::from_utf8(faults_resp.body).unwrap().contains(&dump_id));
+
+            let dl_path = format!("/api/mods/faults/{dump_id}.json");
+            let dl_resp = AdminRouter::handle(
+                &AdminHttpRequest {
+                    method: "GET",
+                    path: &dl_path,
+                    query: None,
+                    authorization: Some("Bearer studio-secret"),
+                    x_admin_token: None,
+                    host: None,
+                    body: b"",
+                },
+                &mut bridge,
+            );
+            assert_eq!(dl_resp.status_code, 200);
+            assert!(String::from_utf8(dl_resp.body).unwrap().contains("py_looper"));
+
+            // Live edit & instant hot-reload of Python script via PUT /api/mods/source/...
+            let v2_src = "from cs16 import mod, HookAction\n\n@mod.info(id=\"live_probe\", version=\"2.0.0\", permissions=[\"messages\", \"commands\", \"rpc\"])\ndef _meta():\n    pass\n\n@mod.chat_command(\"/probe\")\ndef on_probe(player, args):\n    player.chat(\"PROBE_V2_RELOADED\")\n    return HookAction.SUPERCEDE\n";
+            let v2_body = format!("{{\"content\":{}}}", escape_json_str(v2_src));
+            let put_resp = AdminRouter::handle(
+                &AdminHttpRequest {
+                    method: "PUT",
+                    path: "/api/mods/source/mods/community/live_probe.py",
+                    query: None,
+                    authorization: Some("Bearer studio-secret"),
+                    x_admin_token: None,
+                    host: None,
+                    body: v2_body.as_bytes(),
+                },
+                &mut bridge,
+            );
+            assert_eq!(
+                put_resp.status_code,
+                200,
+                "PUT hot-reload failed: {}",
+                String::from_utf8_lossy(&put_resp.body)
+            );
+        }
+
+        // Verify hot-reloaded Python v2 executes immediately without restarting server!
+        c0.send_stringcmd("say /probe");
+        step(&mut server, &mut hub, &mut c0, &mut c1, &mut now, 15);
+        let chat_after: Vec<String> = c0
+            .fx()
+            .hud
+            .chat
+            .iter()
+            .map(|m| m.text.clone())
+            .collect();
+        assert!(
+            chat_after.iter().any(|t| t.contains("PROBE_V2_RELOADED")),
+            "PUT /api/mods/source hot-reload must take effect live: {chat_after:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

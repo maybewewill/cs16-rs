@@ -16,5 +16,5 @@ pub use natives::{
     HAM_SUPERCEDE, HamFunction, MENU_EXIT, NoCsHooks, PLUGIN_CONTINUE, PLUGIN_HANDLED,
     reapi_member,
 };
-pub use runtime::{AmxxGame, AmxxPlugin, AmxxRuntime};
+pub use runtime::{AmxxGame, AmxxPlugin, AmxxPluginResmon, AmxxRuntime, PluginStatus};
 pub use vm::PawnVm;

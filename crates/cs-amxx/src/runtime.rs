@@ -23,6 +23,130 @@ use crate::natives::{
 };
 use crate::vm::{AmxError, ExecEntry, PawnVm};
 
+/// Rolling per-plugin execution profiler (128-sample ring buffer for avg/p99 microseconds).
+#[derive(Debug, Clone)]
+pub struct AmxxPluginProfiler {
+    samples_us: [u64; 128],
+    sample_len: usize,
+    sample_cursor: usize,
+    max_us: u64,
+    total_steps: u64,
+    hook_calls: u64,
+    fault_count: u64,
+}
+
+impl Default for AmxxPluginProfiler {
+    fn default() -> Self {
+        Self {
+            samples_us: [0; 128],
+            sample_len: 0,
+            sample_cursor: 0,
+            max_us: 0,
+            total_steps: 0,
+            hook_calls: 0,
+            fault_count: 0,
+        }
+    }
+}
+
+impl AmxxPluginProfiler {
+    pub fn record_call(&mut self, duration_us: u64, steps: u64) {
+        self.samples_us[self.sample_cursor] = duration_us;
+        self.sample_cursor = (self.sample_cursor + 1) % self.samples_us.len();
+        if self.sample_len < self.samples_us.len() {
+            self.sample_len += 1;
+        }
+        if duration_us > self.max_us {
+            self.max_us = duration_us;
+        }
+        self.total_steps = self.total_steps.saturating_add(steps);
+        self.hook_calls = self.hook_calls.saturating_add(1);
+    }
+
+    pub fn record_fault(&mut self) {
+        self.fault_count = self.fault_count.saturating_add(1);
+    }
+
+    pub fn avg_us(&self) -> f64 {
+        if self.sample_len == 0 {
+            return 0.0;
+        }
+        let sum: u64 = self.samples_us[..self.sample_len].iter().copied().sum();
+        sum as f64 / self.sample_len as f64
+    }
+
+    pub fn p99_us(&self) -> u64 {
+        if self.sample_len == 0 {
+            return 0;
+        }
+        let mut sorted: Vec<u64> = self.samples_us[..self.sample_len].to_vec();
+        sorted.sort_unstable();
+        let idx = ((self.sample_len * 99).div_ceil(100)).saturating_sub(1);
+        sorted[idx.min(sorted.len() - 1)]
+    }
+
+    pub fn max_us(&self) -> u64 {
+        self.max_us
+    }
+
+    pub fn total_steps(&self) -> u64 {
+        self.total_steps
+    }
+
+    pub fn hook_calls(&self) -> u64 {
+        self.hook_calls
+    }
+
+    pub fn fault_count(&self) -> u64 {
+        self.fault_count
+    }
+}
+
+/// Live per-plugin ResMon snapshot for `.amxx` plugins.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AmxxPluginResmon {
+    pub index: usize,
+    pub name: String,
+    pub title: String,
+    pub version: String,
+    pub status: PluginStatus,
+    pub avg_us_per_tick: f64,
+    pub p99_us_per_tick: u64,
+    pub max_us: u64,
+    pub fuel_used: u64,
+    pub memory_bytes: usize,
+    pub hook_calls: u64,
+    pub fault_count: u64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct PerfTimer(std::time::Instant);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl PerfTimer {
+    fn start() -> Self {
+        Self(std::time::Instant::now())
+    }
+
+    fn elapsed_us(&self) -> u64 {
+        self.0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+struct PerfTimer;
+
+#[cfg(target_arch = "wasm32")]
+impl PerfTimer {
+    fn start() -> Self {
+        Self
+    }
+
+    fn elapsed_us(&self) -> u64 {
+        0
+    }
+}
+
 /// Runtime status of a loaded AMX Mod X plugin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PluginStatus {
@@ -32,12 +156,13 @@ pub enum PluginStatus {
     BadLoad(String),
 }
 
-/// One loaded `.amxx` plugin instance with its [`PawnVm`] and lifecycle status.
+/// One loaded `.amxx` plugin instance with its [`PawnVm`], lifecycle status, and profiler.
 #[derive(Debug, Clone)]
 pub struct AmxxPlugin {
     pub name: String,
     pub status: PluginStatus,
     pub vm: PawnVm,
+    pub profiler: AmxxPluginProfiler,
 }
 
 impl AmxxPlugin {
@@ -50,6 +175,7 @@ impl AmxxPlugin {
             name,
             status: PluginStatus::Running,
             vm,
+            profiler: AmxxPluginProfiler::default(),
         })
     }
 
@@ -75,6 +201,7 @@ pub(crate) fn invoke_plugin_in_slots(
     let result = if !plugin.is_running() {
         Ok(None)
     } else if let Some(pub_idx) = plugin.vm.find_public(func_name) {
+        let timer = PerfTimer::start();
         let mut dispatch = AmxxNativeDispatch {
             plugin_idx,
             state,
@@ -82,10 +209,17 @@ pub(crate) fn invoke_plugin_in_slots(
             hooks,
             peers: slots,
         };
-        plugin
+        let exec_res = plugin
             .vm
             .exec(ExecEntry::Public(pub_idx), args, &mut dispatch)
-            .map(Some)
+            .map(Some);
+        plugin
+            .profiler
+            .record_call(timer.elapsed_us(), plugin.vm.last_steps());
+        if exec_res.is_err() {
+            plugin.profiler.record_fault();
+        }
+        exec_res
     } else {
         Ok(None)
     };
@@ -108,15 +242,23 @@ pub(crate) fn invoke_plugin_pure_in_slots(
     let result = if !plugin.is_running() {
         Ok(None)
     } else if let Some(pub_idx) = plugin.vm.find_public(func_name) {
+        let timer = PerfTimer::start();
         let mut dispatch = PureRpcDispatch {
             plugin_idx,
             state,
             peers: slots,
         };
-        plugin
+        let exec_res = plugin
             .vm
             .exec(ExecEntry::Public(pub_idx), args, &mut dispatch)
-            .map(Some)
+            .map(Some);
+        plugin
+            .profiler
+            .record_call(timer.elapsed_us(), plugin.vm.last_steps());
+        if exec_res.is_err() {
+            plugin.profiler.record_fault();
+        }
+        exec_res
     } else {
         Ok(None)
     };
@@ -184,6 +326,88 @@ impl AmxxRuntime {
 
     pub fn plugin_count(&self) -> usize {
         self.plugins.len()
+    }
+
+    fn matches_plugin_query(&self, idx: usize, query: &str) -> bool {
+        let Some(p) = self.plugins.get(idx) else {
+            return false;
+        };
+        if p.name.eq_ignore_ascii_case(query) {
+            return true;
+        }
+        let stem = p
+            .name
+            .strip_suffix(".amxx")
+            .or_else(|| p.name.strip_suffix(".amx"))
+            .unwrap_or(&p.name);
+        if stem.eq_ignore_ascii_case(query) {
+            return true;
+        }
+        self.state
+            .plugin_metas
+            .get(idx)
+            .is_some_and(|m| !m.title.is_empty() && m.title.eq_ignore_ascii_case(query))
+    }
+
+    /// Pauses a running `.amxx` plugin matched by filename, stem, or registered title.
+    pub fn pause_plugin(&mut self, query: &str) -> bool {
+        let Some(idx) = (0..self.plugins.len()).find(|&i| self.matches_plugin_query(i, query))
+        else {
+            return false;
+        };
+        if self.plugins[idx].status == PluginStatus::Running {
+            self.plugins[idx].status = PluginStatus::Paused;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Resumes a paused `.amxx` plugin matched by filename, stem, or registered title.
+    pub fn unpause_plugin(&mut self, query: &str) -> bool {
+        let Some(idx) = (0..self.plugins.len()).find(|&i| self.matches_plugin_query(i, query))
+        else {
+            return false;
+        };
+        if self.plugins[idx].status == PluginStatus::Paused {
+            self.plugins[idx].status = PluginStatus::Running;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns live per-plugin ResMon metrics for every loaded `.amxx` plugin.
+    pub fn plugin_resmon(&self) -> Vec<AmxxPluginResmon> {
+        self.plugins
+            .iter()
+            .enumerate()
+            .map(|(index, plugin)| {
+                let meta = self.state.plugin_metas.get(index);
+                let title = meta
+                    .map(|m| m.title.clone())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| plugin.name.clone());
+                let version = meta
+                    .map(|m| m.version.clone())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "amxx".to_string());
+                AmxxPluginResmon {
+                    index,
+                    name: plugin.name.clone(),
+                    title,
+                    version,
+                    status: plugin.status.clone(),
+                    avg_us_per_tick: plugin.profiler.avg_us(),
+                    p99_us_per_tick: plugin.profiler.p99_us(),
+                    max_us: plugin.profiler.max_us(),
+                    fuel_used: plugin.profiler.total_steps(),
+                    memory_bytes: plugin.vm.memory_bytes(),
+                    hook_calls: plugin.profiler.hook_calls(),
+                    fault_count: plugin.profiler.fault_count(),
+                }
+            })
+            .collect()
     }
 
     /// Populates standard AMXX public variables (`MaxClients`, `MapName`) and dispatches

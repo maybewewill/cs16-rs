@@ -2799,6 +2799,18 @@ fn call_player_method(
             });
             Ok(PyVal::None)
         }
+        "reset_score" => {
+            let Some(h) = host else {
+                return Err(vm.runtime_err("RuntimeError", "no active host context"));
+            };
+            require_perm(vm, h, Permission::Entities)?;
+            h.ops.push(EngineOp::SetPlayerScore {
+                slot,
+                frags: 0,
+                deaths: 0,
+            });
+            Ok(PyVal::None)
+        }
         "set_score" => {
             let frags = args
                 .first()

@@ -33,7 +33,7 @@ pub use rpc::RpcBus;
 pub use runtime::{
     ModCallOutcome, ModInstance, ModRuntime, PythonModRuntime, RuntimeError, WasmiRuntime,
 };
-pub use server_host::{ModInfo, ModStatus, ModdedGame, ServerModHost};
+pub use server_host::{ModInfo, ModStatus, ModdedGame, PluginResmon, ServerModHost};
 pub use storage::{LeaderboardEntry, LeaderboardStore, NVaultStore};
 pub use transfer::{ApprovalPolicy, ClientModTransfer, PendingModApproval, TransferError};
 pub use webhook::WebhookClient;

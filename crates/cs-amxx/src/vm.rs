@@ -309,6 +309,11 @@ impl PawnVm {
         self.last_steps
     }
 
+    /// Returns total VM memory footprint (code + data/heap/stack buffers) in bytes.
+    pub fn memory_bytes(&self) -> usize {
+        self.code.len().saturating_add(self.data.len())
+    }
+
     /// Public functions table.
     pub fn publics(&self) -> &[SymbolEntry] {
         &self.publics

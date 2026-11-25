@@ -484,6 +484,13 @@ const KNOWN_COMMANDS: &[(&str, &str)] = &[
     ("stuck", "Step back to previous KZ checkpoint (requires sv_kz_mode 1)"),
     ("start", "Teleport to KZ run start and reset timer (requires sv_kz_mode 1)"),
     ("reset", "Reset KZ timer and checkpoints (requires sv_kz_mode 1)"),
+    ("mod_list", "List loaded polyglot server plugins (WASM, Python, AMXX)"),
+    ("amx_plugins", "List loaded polyglot server plugins (AMX Mod X alias)"),
+    ("mod_pause", "Pause a loaded server plugin by ID"),
+    ("mod_unpause", "Resume a paused server plugin by ID"),
+    ("mod_reload", "Hot-reload one server plugin or 'all' from disk"),
+    ("mod_unload", "Unload a server plugin by ID"),
+    ("mod_stats", "Show live per-plugin CPU/memory resource monitor (resmon)"),
 ];
 
 /// Commands that never go to a server, even when the console does not know them: the rcon and

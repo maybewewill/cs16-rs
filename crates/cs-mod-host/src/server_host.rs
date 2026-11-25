@@ -59,8 +59,126 @@ const MAX_HOOK_DEPTH: u8 = 4;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModStatus {
     Active,
+    Paused,
     Faulted(String),
     Unloaded,
+}
+
+impl ModStatus {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Active => "Active".to_string(),
+            Self::Paused => "Paused".to_string(),
+            Self::Faulted(reason) => format!("Faulted({reason})"),
+            Self::Unloaded => "Unloaded".to_string(),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct PerfTimer(std::time::Instant);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl PerfTimer {
+    fn start() -> Self {
+        Self(std::time::Instant::now())
+    }
+
+    fn elapsed_us(&self) -> u64 {
+        self.0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+struct PerfTimer;
+
+#[cfg(target_arch = "wasm32")]
+impl PerfTimer {
+    fn start() -> Self {
+        Self
+    }
+
+    fn elapsed_us(&self) -> u64 {
+        0
+    }
+}
+
+/// Rolling per-plugin execution microsecond & call profiler (`128`-sample ring buffer).
+#[derive(Debug, Clone)]
+struct PluginProfiler {
+    samples_us: [u64; 128],
+    sample_len: usize,
+    sample_cursor: usize,
+    max_us: u64,
+    hook_calls: u64,
+    fault_count: u64,
+}
+
+impl Default for PluginProfiler {
+    fn default() -> Self {
+        Self {
+            samples_us: [0; 128],
+            sample_len: 0,
+            sample_cursor: 0,
+            max_us: 0,
+            hook_calls: 0,
+            fault_count: 0,
+        }
+    }
+}
+
+impl PluginProfiler {
+    fn record_call(&mut self, duration_us: u64) {
+        self.samples_us[self.sample_cursor] = duration_us;
+        self.sample_cursor = (self.sample_cursor + 1) % self.samples_us.len();
+        if self.sample_len < self.samples_us.len() {
+            self.sample_len += 1;
+        }
+        if duration_us > self.max_us {
+            self.max_us = duration_us;
+        }
+        self.hook_calls = self.hook_calls.saturating_add(1);
+    }
+
+    fn record_fault(&mut self) {
+        self.fault_count = self.fault_count.saturating_add(1);
+    }
+
+    fn avg_us(&self) -> f64 {
+        if self.sample_len == 0 {
+            return 0.0;
+        }
+        let sum: u64 = self.samples_us[..self.sample_len].iter().copied().sum();
+        sum as f64 / self.sample_len as f64
+    }
+
+    fn p99_us(&self) -> u64 {
+        if self.sample_len == 0 {
+            return 0;
+        }
+        let mut sorted: Vec<u64> = self.samples_us[..self.sample_len].to_vec();
+        sorted.sort_unstable();
+        let idx = ((self.sample_len * 99).div_ceil(100)).saturating_sub(1);
+        sorted[idx.min(sorted.len() - 1)]
+    }
+}
+
+/// Unified live ResMon snapshot row covering `.wasm`, `.py`, and `.amxx` plugins.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginResmon {
+    pub id: String,
+    pub version: String,
+    pub language: String,
+    pub status: String,
+    pub enabled: bool,
+    pub avg_us_per_tick: f64,
+    pub p99_us_per_tick: u64,
+    pub max_us: u64,
+    pub fuel_used: u64,
+    pub memory_bytes: usize,
+    pub hook_calls: u64,
+    pub fault_count: u64,
+    pub source_path: Option<String>,
 }
 
 struct ServerTimer {
@@ -75,11 +193,14 @@ struct ServerTimer {
 struct HostedMod {
     package: LoadedPackage,
     binary_sha256: String,
+    display_language: String,
     instance: Option<Arc<Mutex<Box<dyn ModInstance>>>>,
     status: ModStatus,
     storage_cache: BTreeMap<String, String>,
     registered_commands: BTreeSet<String>,
     total_fuel_used: u64,
+    last_memory_bytes: usize,
+    profiler: PluginProfiler,
 }
 
 /// Summary row for `mod_list`.
@@ -208,7 +329,10 @@ impl RpcDispatcher for HostRpcDispatcher {
             storage: &storage,
             fuel_budget,
         };
+        let timer = PerfTimer::start();
         let call_res = catch_mod_call(|| inst.call_rpc(entry.callback_id, &ctx));
+        let elapsed_us = timer.elapsed_us();
+        let mem_bytes = inst.memory_bytes();
         drop(inst);
         let (rc, outcome) = match call_res {
             Ok(v) => v,
@@ -230,6 +354,13 @@ impl RpcDispatcher for HostRpcDispatcher {
                 return None;
             }
         };
+        {
+            let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(m) = core.mods.get_mut(&entry.owner_id) {
+                m.profiler.record_call(elapsed_us);
+                m.last_memory_bytes = mem_bytes;
+            }
+        }
         let ret = match outcome.rpc_return_str.clone() {
             Some(s) => RpcValue::Str(s),
             None => RpcValue::Int(rc),
@@ -979,7 +1110,10 @@ impl ServerModHost {
         };
 
         let binary_sha256 = plugin_sha256_hex(pkg.server_wasm.as_deref());
+        let display_language = detect_display_language(&pkg);
         let mut init_outcome = ModCallOutcome::default();
+        let mut init_profiler = PluginProfiler::default();
+        let mut init_mem_bytes = instance.as_ref().map_or(0, |i| i.memory_bytes());
 
         if let Some(ref mut inst) = instance {
             let snap = EngineSnapshot::default();
@@ -991,24 +1125,31 @@ impl ServerModHost {
                 storage: &storage_cache,
                 fuel_budget,
             };
+            let timer = PerfTimer::start();
             match catch_mod_call(|| inst.call_init(&ctx)) {
                 Ok(out) => {
+                    init_profiler.record_call(timer.elapsed_us());
+                    init_mem_bytes = inst.memory_bytes();
                     init_outcome = out;
                 }
                 Err(err) => {
                     let msg = err.to_string();
                     let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
                     let storage_snap = storage_cache.clone();
+                    init_profiler.record_call(timer.elapsed_us());
                     core.mods.insert(
                         id.clone(),
                         HostedMod {
                             package: pkg,
                             binary_sha256,
+                            display_language,
                             instance: None,
                             status: ModStatus::Faulted(msg.clone()),
                             storage_cache,
                             registered_commands: BTreeSet::new(),
                             total_fuel_used: 0,
+                            last_memory_bytes: init_mem_bytes,
+                            profiler: init_profiler,
                         },
                     );
                     core.load_order.push(id.clone());
@@ -1061,17 +1202,60 @@ impl ServerModHost {
             HostedMod {
                 package: pkg,
                 binary_sha256,
+                display_language,
                 instance: instance.map(|i| Arc::new(Mutex::new(i))),
                 status: ModStatus::Active,
                 storage_cache,
                 registered_commands,
                 total_fuel_used: init_outcome.fuel_used,
+                last_memory_bytes: init_mem_bytes,
+                profiler: init_profiler,
             },
         );
         core.load_order.push(id.clone());
         schedule_timers_core(&mut core, &id, 0.0, &init_outcome);
         persist_storage_writes_core(&mut core, &id, &init_outcome.storage_writes);
         Ok(())
+    }
+
+    /// Pauses an active mod (WASM, Python, or AMXX) without losing its loaded state.
+    pub fn pause_mod(&mut self, mod_id: &str) -> bool {
+        let amxx_opt = {
+            let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(m) = core.mods.get_mut(mod_id) {
+                if m.status == ModStatus::Active {
+                    m.status = ModStatus::Paused;
+                    return true;
+                }
+                return false;
+            }
+            core.amxx.clone()
+        };
+        amxx_opt.is_some_and(|a| {
+            a.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .pause_plugin(mod_id)
+        })
+    }
+
+    /// Resumes a paused mod (WASM, Python, or AMXX).
+    pub fn unpause_mod(&mut self, mod_id: &str) -> bool {
+        let amxx_opt = {
+            let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(m) = core.mods.get_mut(mod_id) {
+                if m.status == ModStatus::Paused {
+                    m.status = ModStatus::Active;
+                    return true;
+                }
+                return false;
+            }
+            core.amxx.clone()
+        };
+        amxx_opt.is_some_and(|a| {
+            a.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .unpause_plugin(mod_id)
+        })
     }
 
     pub fn unload_mod(&mut self, mod_id: &str) -> bool {
@@ -1125,6 +1309,54 @@ impl ServerModHost {
             crate::package::load_package_csmod(&bytes, Some(src)).map_err(|e| e.to_string())?
         };
         self.load_package(pkg)
+    }
+
+    /// Hot-reloads every currently loaded mod that has a known disk source path.
+    pub fn reload_all_mods(&mut self) -> Vec<(String, Result<(), String>)> {
+        let ids: Vec<String> = {
+            let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+            core.load_order.clone()
+        };
+        let mut results = Vec::with_capacity(ids.len());
+        for id in ids {
+            let res = self.reload_mod(&id);
+            results.push((id, res));
+        }
+        results
+    }
+
+    /// Hot-reloads any Python script mod backed by `path` (or loads it if newly created).
+    pub fn reload_by_source_path(&mut self, path: &Path) -> Result<Option<String>, String> {
+        let is_py = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("py"));
+        if !is_py {
+            return Ok(None);
+        }
+        let id = self.load_python_file(path)?;
+        Ok(Some(id))
+    }
+
+    /// Re-reads `configs/lang/*.toml` and `configs/admins.toml` from the configured base dir.
+    pub fn reload_configs(&mut self) -> (usize, usize) {
+        let dir = {
+            let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+            core.configs_dir
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("."))
+        };
+        self.load_configs_dir(dir)
+    }
+
+    pub fn mods_dir(&self) -> Option<PathBuf> {
+        let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+        core.mods_dir.clone()
+    }
+
+    pub fn configs_dir(&self) -> Option<PathBuf> {
+        let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+        core.configs_dir.clone()
     }
 
     /// Polls watched `.py` plugin files for `mtime`/size changes (at most once per `1.0 s` unless
@@ -1182,6 +1414,145 @@ impl ServerModHost {
                 total_fuel_used: m.total_fuel_used,
             })
             .collect()
+    }
+
+    /// Unified ResMon metrics across all loaded `.wasm`, `.py`, and `.amxx` plugins.
+    pub fn resmon_snapshot(&self) -> Vec<PluginResmon> {
+        let (mut rows, amxx_opt) = {
+            let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+            let mut rows = Vec::with_capacity(core.load_order.len());
+            for id in &core.load_order {
+                let Some(m) = core.mods.get(id) else {
+                    continue;
+                };
+                let mem = m
+                    .instance
+                    .as_ref()
+                    .and_then(|arc| arc.try_lock().ok().map(|i| i.memory_bytes()))
+                    .unwrap_or(m.last_memory_bytes);
+                rows.push(PluginResmon {
+                    id: m.package.manifest.id.clone(),
+                    version: m.package.manifest.version.clone(),
+                    language: m.display_language.clone(),
+                    status: m.status.label(),
+                    enabled: m.status == ModStatus::Active,
+                    avg_us_per_tick: m.profiler.avg_us(),
+                    p99_us_per_tick: m.profiler.p99_us(),
+                    max_us: m.profiler.max_us,
+                    fuel_used: m.total_fuel_used,
+                    memory_bytes: mem,
+                    hook_calls: m.profiler.hook_calls,
+                    fault_count: m.profiler.fault_count,
+                    source_path: m
+                        .package
+                        .source_path
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().replace('\\', "/")),
+                });
+            }
+            (rows, core.amxx.clone())
+        };
+        if let Some(amxx_arc) = amxx_opt {
+            let amxx = amxx_arc.lock().unwrap_or_else(|e| e.into_inner());
+            for p in amxx.plugin_resmon() {
+                let (status_str, enabled) = match p.status {
+                    cs_amxx::PluginStatus::Running => ("Active".to_string(), true),
+                    cs_amxx::PluginStatus::Paused => ("Paused".to_string(), false),
+                    cs_amxx::PluginStatus::Stopped => ("Unloaded".to_string(), false),
+                    cs_amxx::PluginStatus::BadLoad(ref err) => {
+                        (format!("Faulted({err})"), false)
+                    }
+                };
+                rows.push(PluginResmon {
+                    id: p.name,
+                    version: p.version,
+                    language: "AMXX".to_string(),
+                    status: status_str,
+                    enabled,
+                    avg_us_per_tick: p.avg_us_per_tick,
+                    p99_us_per_tick: p.p99_us_per_tick,
+                    max_us: p.max_us,
+                    fuel_used: p.fuel_used,
+                    memory_bytes: p.memory_bytes,
+                    hook_calls: p.hook_calls,
+                    fault_count: p.fault_count,
+                    source_path: None,
+                });
+            }
+        }
+        rows
+    }
+
+    /// Formats the unified `mod_list` / `amx_plugins` console table.
+    pub fn list_plugins_table(&self) -> String {
+        let rows = self.resmon_snapshot();
+        if rows.is_empty() {
+            return "no mods loaded\n".to_string();
+        }
+        let mut out = String::new();
+        out.push_str(&format!(
+            "{:<22} {:<10} {:<9} {:<10} {:>11} {:>8}\n",
+            "ID", "LANGUAGE", "VERSION", "STATUS", "AVG us/tick", "MEM KB"
+        ));
+        for r in &rows {
+            let status_short = if r.status.starts_with("Faulted(") {
+                "Faulted"
+            } else {
+                r.status.as_str()
+            };
+            let mem_kb = r.memory_bytes as f64 / 1024.0;
+            out.push_str(&format!(
+                "{:<22} {:<10} {:<9} {:<10} {:>11.1} {:>8.1}\n",
+                r.id, r.language, r.version, status_short, r.avg_us_per_tick, mem_kb
+            ));
+        }
+        let amxx_n = rows.iter().filter(|r| r.language == "AMXX").count();
+        if amxx_n > 0 {
+            out.push_str(&format!(
+                "{} plugins loaded (amxx plugins loaded: {amxx_n})\n",
+                rows.len()
+            ));
+        } else {
+            out.push_str(&format!("{} plugins loaded\n", rows.len()));
+        }
+        out
+    }
+
+    /// Formats the live `mod_stats` (`resmon`) console table sorted descending by CPU time.
+    pub fn format_resmon_table(&self) -> String {
+        let mut rows = self.resmon_snapshot();
+        if rows.is_empty() {
+            return "no mods loaded\n".to_string();
+        }
+        rows.sort_by(|a, b| {
+            b.avg_us_per_tick
+                .total_cmp(&a.avg_us_per_tick)
+                .then_with(|| b.max_us.cmp(&a.max_us))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        let mut out = String::new();
+        out.push_str(&format!(
+            "{:<22} {:<10} {:>8} {:>8} {:>8} {:>10} {:>8} {:>7} {:>6} {}\n",
+            "PLUGIN", "LANG", "AVG us", "P99 us", "MAX us", "FUEL", "MEM KB", "CALLS", "FAULTS",
+            "STATUS"
+        ));
+        for r in &rows {
+            let mem_kb = r.memory_bytes as f64 / 1024.0;
+            out.push_str(&format!(
+                "{:<22} {:<10} {:>8.1} {:>8} {:>8} {:>10} {:>8.1} {:>7} {:>6} {}\n",
+                r.id,
+                r.language,
+                r.avg_us_per_tick,
+                r.p99_us_per_tick,
+                r.max_us,
+                r.fuel_used,
+                mem_kb,
+                r.hook_calls,
+                r.fault_count,
+                r.status
+            ));
+        }
+        out
     }
 
     pub fn declared_custom_usermsgs(&self) -> Vec<String> {
@@ -1339,6 +1710,7 @@ fn fault_mod_core(core: &mut ServerModHostCore, mod_id: &str, reason: String) {
         svc.rpc.unregister_owner(mod_id);
     }
     if let Some(m) = core.mods.get_mut(mod_id) {
+        m.profiler.record_fault();
         m.instance = None;
         m.status = ModStatus::Faulted(reason);
     }
@@ -1503,12 +1875,16 @@ fn finalize_outcome_core(
     core_arc: &Arc<Mutex<ServerModHostCore>>,
     mod_id: &str,
     now_secs: f64,
+    elapsed_us: u64,
+    mem_bytes: usize,
     outcome: &ModCallOutcome,
 ) -> Vec<(String, Vec<EngineOp>)> {
     let mut queued = Vec::new();
     let mut core = core_arc.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(m) = core.mods.get_mut(mod_id) {
         m.total_fuel_used = m.total_fuel_used.saturating_add(outcome.fuel_used);
+        m.profiler.record_call(elapsed_us);
+        m.last_memory_bytes = mem_bytes;
     }
     for line in &outcome.wasi_logs {
         if core.wasi_logs.len() < 256 {
@@ -1574,6 +1950,9 @@ fn dispatch_hook_core(
         let target = {
             let core = core_arc.lock().unwrap_or_else(|e| e.into_inner());
             core.mods.get(&mod_id).and_then(|m| {
+                if m.status != ModStatus::Active {
+                    return None;
+                }
                 m.instance.clone().map(|inst| {
                     (
                         inst,
@@ -1587,7 +1966,7 @@ fn dispatch_hook_core(
             continue;
         };
 
-        let call_res = {
+        let (call_res, elapsed_us, mem_bytes) = {
             let Ok(mut inst) = inst_arc.try_lock() else {
                 continue;
             };
@@ -1597,7 +1976,9 @@ fn dispatch_hook_core(
                 storage: &storage_cache,
                 fuel_budget,
             };
-            catch_mod_call(|| inst.call_hook(hook, phase, &ctx))
+            let timer = PerfTimer::start();
+            let res = catch_mod_call(|| inst.call_hook(hook, phase, &ctx));
+            (res, timer.elapsed_us(), inst.memory_bytes())
         };
 
         let outcome = match call_res {
@@ -1618,7 +1999,8 @@ fn dispatch_hook_core(
             }
         };
 
-        let side_ops = finalize_outcome_core(core_arc, &mod_id, now_secs, &outcome);
+        let side_ops =
+            finalize_outcome_core(core_arc, &mod_id, now_secs, elapsed_us, mem_bytes, &outcome);
         for (callee_id, ops) in side_ops {
             apply_ops_core(core_arc, game.as_deref_mut(), eng, &callee_id, ops);
         }
@@ -1671,9 +2053,14 @@ fn tick_timers_core(
     let (due, services) = {
         let mut core = core_arc.lock().unwrap_or_else(|e| e.into_inner());
         let mut due = Vec::new();
-        let mut keep = Vec::with_capacity(core.timers.len());
-        for mut t in core.timers.drain(..) {
-            if t.due_secs <= now {
+        let timers = std::mem::take(&mut core.timers);
+        let mut keep = Vec::with_capacity(timers.len());
+        for mut t in timers {
+            let active = core
+                .mods
+                .get(&t.mod_id)
+                .is_some_and(|m| m.status == ModStatus::Active);
+            if t.due_secs <= now && active {
                 due.push((t.mod_id.clone(), t.cb_id, t.arg));
                 if let Some(interval) = t.interval_secs {
                     t.due_secs = now + interval;
@@ -1696,6 +2083,9 @@ fn tick_timers_core(
         let target = {
             let core = core_arc.lock().unwrap_or_else(|e| e.into_inner());
             core.mods.get(&mod_id).and_then(|m| {
+                if m.status != ModStatus::Active {
+                    return None;
+                }
                 m.instance.clone().map(|inst| {
                     (
                         inst,
@@ -1708,7 +2098,7 @@ fn tick_timers_core(
         let Some((inst_arc, storage_cache, fuel_budget)) = target else {
             continue;
         };
-        let res = {
+        let (res, elapsed_us, mem_bytes) = {
             let Ok(mut inst) = inst_arc.try_lock() else {
                 continue;
             };
@@ -1718,7 +2108,9 @@ fn tick_timers_core(
                 storage: &storage_cache,
                 fuel_budget,
             };
-            catch_mod_call(|| inst.call_timer(cb_id, arg, &ctx))
+            let timer = PerfTimer::start();
+            let r = catch_mod_call(|| inst.call_timer(cb_id, arg, &ctx));
+            (r, timer.elapsed_us(), inst.memory_bytes())
         };
         let outcome = match res {
             Ok(o) => o,
@@ -1737,7 +2129,8 @@ fn tick_timers_core(
                 continue;
             }
         };
-        let side_ops = finalize_outcome_core(core_arc, &mod_id, now, &outcome);
+        let side_ops =
+            finalize_outcome_core(core_arc, &mod_id, now, elapsed_us, mem_bytes, &outcome);
         for (callee_id, ops) in side_ops {
             apply_ops_core(core_arc, game.as_deref_mut(), eng, &callee_id, ops);
         }
@@ -1765,6 +2158,9 @@ fn poll_webhooks_core(
         let target = {
             let core = core_arc.lock().unwrap_or_else(|e| e.into_inner());
             core.mods.get(&result.mod_id).and_then(|m| {
+                if m.status != ModStatus::Active {
+                    return None;
+                }
                 m.instance.clone().map(|inst| {
                     (
                         inst,
@@ -1787,7 +2183,7 @@ fn poll_webhooks_core(
             payload: result.body.as_bytes().to_vec(),
             ..Default::default()
         };
-        let res = {
+        let (res, elapsed_us, mem_bytes) = {
             let Ok(mut inst) = inst_arc.try_lock() else {
                 continue;
             };
@@ -1797,9 +2193,11 @@ fn poll_webhooks_core(
                 storage: &storage_cache,
                 fuel_budget,
             };
-            catch_mod_call(|| {
+            let timer = PerfTimer::start();
+            let r = catch_mod_call(|| {
                 inst.call_webhook(result.callback_id, i32::from(result.status_code), &ctx)
-            })
+            });
+            (r, timer.elapsed_us(), inst.memory_bytes())
         };
         let outcome = match res {
             Ok(o) => o,
@@ -1821,7 +2219,14 @@ fn poll_webhooks_core(
                 continue;
             }
         };
-        let side_ops = finalize_outcome_core(core_arc, &result.mod_id, now, &outcome);
+        let side_ops = finalize_outcome_core(
+            core_arc,
+            &result.mod_id,
+            now,
+            elapsed_us,
+            mem_bytes,
+            &outcome,
+        );
         for (callee_id, ops) in side_ops {
             apply_ops_core(core_arc, game.as_deref_mut(), eng, &callee_id, ops);
         }
@@ -1844,6 +2249,9 @@ fn dispatch_menu_callback_core(
     let (target, services) = {
         let core = core_arc.lock().unwrap_or_else(|e| e.into_inner());
         let t = core.mods.get(owner_id).and_then(|m| {
+            if m.status != ModStatus::Active {
+                return None;
+            }
             m.instance.clone().map(|inst| {
                 (
                     inst,
@@ -1864,7 +2272,7 @@ fn dispatch_menu_callback_core(
         str_args: [info.to_string(), String::new(), String::new()],
         ..Default::default()
     };
-    let res = {
+    let (res, elapsed_us, mem_bytes) = {
         let Ok(mut inst) = inst_arc.try_lock() else {
             return;
         };
@@ -1874,7 +2282,9 @@ fn dispatch_menu_callback_core(
             storage: &storage_cache,
             fuel_budget,
         };
-        catch_mod_call(|| inst.call_menu(cb_id, slot, menu_id, item_index, &ctx))
+        let timer = PerfTimer::start();
+        let r = catch_mod_call(|| inst.call_menu(cb_id, slot, menu_id, item_index, &ctx));
+        (r, timer.elapsed_us(), inst.memory_bytes())
     };
     let outcome = match res {
         Ok(o) => o,
@@ -1899,7 +2309,7 @@ fn dispatch_menu_callback_core(
             return;
         }
     };
-    let side_ops = finalize_outcome_core(core_arc, owner_id, now, &outcome);
+    let side_ops = finalize_outcome_core(core_arc, owner_id, now, elapsed_us, mem_bytes, &outcome);
     for (callee_id, ops) in side_ops {
         apply_ops_core(core_arc, game.as_deref_mut(), eng, &callee_id, ops);
     }
@@ -1950,6 +2360,9 @@ fn dispatch_rpc_event_core(
             let target = {
                 let core = core_arc.lock().unwrap_or_else(|e| e.into_inner());
                 core.mods.get(&sub.owner_id).and_then(|m| {
+                    if m.status != ModStatus::Active {
+                        return None;
+                    }
                     m.instance.clone().map(|inst| {
                         (
                             inst,
@@ -1962,7 +2375,7 @@ fn dispatch_rpc_event_core(
             let Some((inst_arc, storage_cache, fuel_budget)) = target else {
                 continue;
             };
-            let res = {
+            let (res, elapsed_us, mem_bytes) = {
                 let Ok(mut inst) = inst_arc.try_lock() else {
                     continue;
                 };
@@ -1972,7 +2385,9 @@ fn dispatch_rpc_event_core(
                     storage: &storage_cache,
                     fuel_budget,
                 };
-                catch_mod_call(|| inst.call_event(sub.callback_id, &ctx))
+                let timer = PerfTimer::start();
+                let r = catch_mod_call(|| inst.call_event(sub.callback_id, &ctx));
+                (r, timer.elapsed_us(), inst.memory_bytes())
             };
             let outcome = match res {
                 Ok(o) => o,
@@ -1994,7 +2409,14 @@ fn dispatch_rpc_event_core(
                     continue;
                 }
             };
-            let side_ops = finalize_outcome_core(core_arc, &sub.owner_id, now, &outcome);
+            let side_ops = finalize_outcome_core(
+                core_arc,
+                &sub.owner_id,
+                now,
+                elapsed_us,
+                mem_bytes,
+                &outcome,
+            );
             for (callee_id, ops) in side_ops {
                 apply_ops_core(core_arc, game.as_deref_mut(), eng, &callee_id, ops);
             }
@@ -4092,22 +4514,27 @@ impl<G: GameDll + 'static> GameDll for ModdedGame<G> {
     fn server_command(&mut self, eng: &mut EngineApi<'_>, argv: &[String]) -> Option<String> {
         let cmd = argv.first()?.as_str();
         match cmd {
-            "mod_list" => {
-                let mut out = String::new();
-                for info in self.host.list_mods() {
-                    out.push_str(&format!(
-                        "{} v{} status={:?} fuel={}\n",
-                        info.id, info.version, info.status, info.total_fuel_used
-                    ));
-                }
-                let amxx_n = self.host.amxx_plugin_count();
-                if amxx_n > 0 {
-                    out.push_str(&format!("amxx plugins loaded: {amxx_n}\n"));
-                }
-                if out.is_empty() {
-                    out.push_str("no mods loaded\n");
-                }
-                return Some(out);
+            "mod_list" | "amx_plugins" => {
+                return Some(self.host.list_plugins_table());
+            }
+            "mod_stats" => {
+                return Some(self.host.format_resmon_table());
+            }
+            "mod_pause" => {
+                let target = argv.get(1)?;
+                return Some(if self.host.pause_mod(target) {
+                    format!("paused `{target}`\n")
+                } else {
+                    format!("mod `{target}` is not active or not found\n")
+                });
+            }
+            "mod_unpause" => {
+                let target = argv.get(1)?;
+                return Some(if self.host.unpause_mod(target) {
+                    format!("unpaused `{target}`\n")
+                } else {
+                    format!("mod `{target}` is not paused or not found\n")
+                });
             }
             "mod_unload" => {
                 let target = argv.get(1)?;
@@ -4119,6 +4546,20 @@ impl<G: GameDll + 'static> GameDll for ModdedGame<G> {
             }
             "mod_reload" => {
                 let target = argv.get(1)?;
+                if target.eq_ignore_ascii_case("all") {
+                    let results = self.host.reload_all_mods();
+                    if results.is_empty() {
+                        return Some("no mods loaded to reload\n".to_string());
+                    }
+                    let mut out = String::new();
+                    for (id, res) in results {
+                        match res {
+                            Ok(()) => out.push_str(&format!("reloaded `{id}`\n")),
+                            Err(e) => out.push_str(&format!("failed to reload `{id}`: {e}\n")),
+                        }
+                    }
+                    return Some(out);
+                }
                 return Some(match self.host.reload_mod(target) {
                     Ok(()) => format!("reloaded `{target}`\n"),
                     Err(e) => format!("failed to reload `{target}`: {e}\n"),
@@ -4195,6 +4636,38 @@ impl<G: GameDll + 'static> GameDll for ModdedGame<G> {
     fn has_delta_encoder(&self) -> bool {
         self.inner.has_delta_encoder()
     }
+}
+
+fn detect_display_language(pkg: &LoadedPackage) -> String {
+    if is_python_manifest(&pkg.manifest) {
+        return "Python".to_string();
+    }
+    if let Some(ref src) = pkg.source_path {
+        let dir = if src.is_dir() {
+            Some(src.as_path())
+        } else {
+            src.parent()
+        };
+        if let Some(d) = dir {
+            if d.join("go.mod").is_file() || d.join("main.go").is_file() {
+                return "Go/WASM".to_string();
+            }
+            if d.join("main.cpp").is_file() || d.join("CMakeLists.txt").is_file() {
+                return "C++/WASM".to_string();
+            }
+            if d.join("Cargo.toml").is_file() {
+                return "Rust/WASM".to_string();
+            }
+        }
+    }
+    if let Some(bytes) = pkg.server_wasm.as_deref()
+        && bytes
+            .windows(b"wasi_snapshot_preview1".len())
+            .any(|w| w == b"wasi_snapshot_preview1")
+    {
+        return "Go/WASM".to_string();
+    }
+    "Rust/WASM".to_string()
 }
 
 fn capture_snapshot(

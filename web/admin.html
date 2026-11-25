@@ -316,6 +316,90 @@
       border: 1px solid var(--border-dark);
       cursor: pointer;
     }
+    .tab-bar {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 12px;
+      border-bottom: 1px solid var(--border-dark);
+      padding-bottom: 6px;
+    }
+    .tab-btn {
+      background: var(--panel);
+      color: var(--text-dim);
+      border: 1px solid var(--border-dark);
+      padding: 6px 14px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      cursor: pointer;
+    }
+    .tab-btn.active {
+      background: var(--panel-alt);
+      color: var(--gold);
+      border-color: var(--gold);
+    }
+    .tab-pane.hidden {
+      display: none;
+    }
+    .cpu-bar-wrap {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 145px;
+    }
+    .cpu-bar-track {
+      flex: 1;
+      height: 10px;
+      background: var(--inset);
+      border: 1px solid var(--border-dark);
+      overflow: hidden;
+    }
+    .cpu-bar-fill {
+      height: 100%;
+    }
+    .cpu-bar-fill.cpu-green { background: #96d178; }
+    .cpu-bar-fill.cpu-yellow { background: #c4b550; }
+    .cpu-bar-fill.cpu-red { background: #d96b5b; }
+    .lang-tag {
+      display: inline-block;
+      padding: 1px 5px;
+      font-size: 11px;
+      font-weight: 700;
+      border: 1px solid var(--border-dark);
+      background: var(--inset);
+      color: var(--gold);
+    }
+    .studio-editor {
+      width: 100%;
+      min-height: 360px;
+      resize: vertical;
+      background: #1a1f16;
+      color: #d8ded3;
+      border: 1px solid var(--border-dark);
+      padding: 10px;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 12px;
+      line-height: 1.45;
+      tab-size: 4;
+      white-space: pre;
+      overflow: auto;
+    }
+    .studio-status {
+      padding: 6px 8px;
+      background: var(--inset);
+      border: 1px solid var(--border-dark);
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 12px;
+      color: var(--text-dim);
+    }
+    .studio-status.ok {
+      border-color: var(--ok);
+      color: var(--ok);
+    }
+    .studio-status.err {
+      border-color: var(--err);
+      color: var(--err);
+    }
   </style>
 </head>
 <body>
@@ -348,6 +432,13 @@
     </select>
     <button id="btn-refresh-now">Refresh Now</button>
   </section>
+
+  <nav class="tab-bar" role="tablist">
+    <button id="tab-btn-dashboard" class="tab-btn active" data-tab="dashboard" role="tab" aria-selected="true">Server Dashboard</button>
+    <button id="tab-btn-mods" class="tab-btn" data-tab="mods" role="tab" aria-selected="false">Mods &amp; ResMon Studio</button>
+  </nav>
+
+  <div id="tab-pane-dashboard" class="tab-pane">
 
   <div class="grid">
     <section class="card">
@@ -464,6 +555,8 @@
       <div class="chip-row">
         <button class="chip rcon-preset" data-cmd="status">status</button>
         <button class="chip rcon-preset" data-cmd="users">users</button>
+        <button class="chip rcon-preset" data-cmd="mod_list">mod_list</button>
+        <button class="chip rcon-preset" data-cmd="mod_stats">mod_stats</button>
         <button class="chip rcon-preset" data-cmd="listid">listid</button>
         <button class="chip rcon-preset" data-cmd="listip">listip</button>
         <button class="chip rcon-preset" data-cmd="mp_freezetime">mp_freezetime</button>
@@ -534,6 +627,84 @@
       </table>
     </div>
   </section>
+  </div>
+
+  <div id="tab-pane-mods" class="tab-pane hidden">
+    <section class="card wide" style="margin-bottom:12px;">
+      <div class="card-title">
+        <span>Live Plugin Resource Monitor (ResMon — Rust / C++ / Go / Python / AMXX)</span>
+        <div class="row">
+          <span id="mods-summary" class="hint">0 plugins</span>
+          <button id="btn-mods-reload-all">Reload All</button>
+          <button id="btn-mods-refresh" class="primary">Refresh ResMon</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Plugin ID</th>
+              <th>Language</th>
+              <th>Version</th>
+              <th>Status</th>
+              <th>CPU Avg us/tick</th>
+              <th>p99 / max us</th>
+              <th>Memory</th>
+              <th>Calls</th>
+              <th>Faults</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="mods-body">
+            <tr><td colspan="10" class="empty-cell">Authenticate to load ResMon plugin telemetry.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <div class="grid">
+      <section class="card">
+        <div class="card-title">
+          <span>Plugin Studio — Live Editor &amp; Instant Hot-Reload</span>
+          <span id="studio-active-file" class="hint">No file loaded</span>
+        </div>
+        <div class="row">
+          <label for="studio-file-select">File</label>
+          <select id="studio-file-select" class="grow">
+            <option value="">Select a .py plugin or configs/*.toml...</option>
+          </select>
+          <button id="btn-studio-load">Load</button>
+          <button id="btn-studio-save" class="primary">Save &amp; Hot-Reload</button>
+        </div>
+        <textarea id="studio-editor" class="studio-editor" spellcheck="false" placeholder="Select a Python plugin (mods/community/*.py) or config file (configs/*.toml) to edit live..."></textarea>
+        <div id="studio-status" class="studio-status">Ready. Ctrl+S saves and hot-reloads in &lt; 5 ms.</div>
+      </section>
+
+      <section class="card">
+        <div class="card-title">
+          <span>Black-Box Crash Dumps (<code>logs/mod_faults/</code>)</span>
+          <span id="faults-summary" class="hint">0 dumps</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Dump ID</th>
+                <th>Plugin</th>
+                <th>Lang</th>
+                <th>Trigger</th>
+                <th>Error</th>
+                <th>Replay</th>
+              </tr>
+            </thead>
+            <tbody id="faults-body">
+              <tr><td colspan="6" class="empty-cell">No plugin faults recorded.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </div>
 
   <div id="replay2d-modal" class="replay2d-modal" role="dialog" aria-modal="true" aria-labelledby="replay2d-title">
     <div class="replay2d-shell">
