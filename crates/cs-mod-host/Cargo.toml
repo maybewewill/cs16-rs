@@ -9,6 +9,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+cs-amxx = { workspace = true }
 cs-engine = { workspace = true }
 cs-game = { workspace = true }
 cs-mod-api = { workspace = true, features = ["services"] }

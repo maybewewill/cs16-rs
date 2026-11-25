@@ -23,11 +23,12 @@ reading their source file headers on 2026-11-23:
 | Xash3D FWGS | GPL-3.0-or-later (per ported module headers) | Copyright (C) 2007–2018 Uncle Mike; Xash3D FWGS contributors |
 | cs16-client | GPL-2.0-or-later (per event/header files used) | cs16-client contributors |
 | AMX Mod X | GPL-3.0-or-later | Copyright (C) AMX Mod X Development Team |
+| ReAPI | GPL-3.0-or-later | Copyright (C) ReAPI Contributors |
 
 `LICENSE` at the repository root holds the GPL v3 text; `THIRD-PARTY-NOTICES.md` holds the
-upstream copyright and permission notices of all five reference projects (ReHLDS, ReGameDLL_CS,
-Xash3D FWGS, cs16-client, and AMX Mod X). The protocol crate `crates/cs-proto48` is ported from
-ReHLDS, ReGameDLL_CS, and Xash3D FWGS.
+upstream copyright and permission notices of all six reference projects (ReHLDS, ReGameDLL_CS,
+Xash3D FWGS, cs16-client, AMX Mod X, and ReAPI). The protocol crate `crates/cs-proto48` is ported
+from ReHLDS, ReGameDLL_CS, and Xash3D FWGS.
 
 ## Resolved — file headers in the reference projects
 
@@ -94,8 +95,12 @@ of all five upstream reference projects (ReHLDS, ReGameDLL_CS, Xash3D FWGS, cs16
   - Xash3D FWGS (GPL-3.0-or-later): `engine/common/cmd.c` (`Cmd_Wait_f`, `Cbuf_ExecuteCommandsFromBuffer` in `crates/cs-cvar/src/lib.rs`), `engine/client/input/{input.c, in_keys.c}` (`kbutton_t` impulse latching & wheel/mouse binds in `crates/cs-client/src/input.rs`), `engine/client/sound/s_mix.c` (`s_lerping` / `hisound` sample resampling in `crates/cs-client/src/audio/mixer.rs`), `engine/client/cl_netgraph.c` and `engine/client/cl_scrn.c` (`net_graph 1/2/3`, `cl_showpos`, `r_speeds` in `crates/cs-clientcore/src/net_graph.rs` and `crates/cs-client/src/ui/mod.rs`), `engine/client/dll_int/cl_pmove.c` (`PM_TraceLine` / `visents` & `PM_CL_TraceTexture` in `crates/cs-pm/src/physent.rs` and `crates/cs-clientcore/src/predict.rs`), `engine/common/mod_studio.c` (`Mod_StudioComputeBounds` in `crates/cs-assets/src/mdl.rs`), `engine/warpsin.h` & `ref/gl/gl_rsurf.c` (`TURBSCALE` / `EmitWaterPolys` water warp in `crates/cs-client/src/render/bsp_renderer.rs`), `ref/gl/gl_sprite.c` (`R_SpriteGlowBlend` occlusion in `crates/cs-client/src/render/scene.rs`), and `ref/gl/gl_studio.c` (`GL_StudioDrawShadow` / `R_StudioRenderShadow` in `crates/cs-client/src/render/{scene.rs, mdl_renderer.rs}`).
   - ReHLDS (GPL-2.0-or-later + linking exception): `sv_main.cpp` (`SV_ShouldUpdatePing` / `IN_SCORE`, live `sv_*rate` / `sv_*updaterate` pacing, `sendinfo_time`, `SV_FullClientUpdate` in `crates/cs-engine/src/{frame.rs,lifecycle.rs,server.rs}`) and `net_chan.cpp` (`Netchan_IsFileTransferActive` in `crates/cs-proto48/src/netchan.rs`).
   - ReGameDLL_CS (`wpn_shared/wpn_*.cpp`, `regamedll/dlls/player.cpp`, `regamedll/dlls/cbase.h` `USE_TYPE`): `DefaultDeploy` quick-switch timings in `crates/cs-clientcore/src/weapons_predict.rs` and `UseType` enum constants (`0..=3`) in `crates/cs-game/src/entity.rs`.
+- Phase 15 mod platform ABI v2 & unified AMXX runtime (read 2026-11-26):
+  - AMX Mod X (`https://github.com/alliedmodders/amxmodx`, GPL-3.0-or-later): `newmenus.cpp`/`newmenus.inc` (paginated `ShowMenu` builder), `CLang.cpp`/`lang.inc` (`%L`, `register_dictionary`, `LookupLangKey`, `.txt` catalogs), `plugins/admin.sma`/`users.ini` (RBAC flags `a..z`), `modules/nvault/amxxapi.cpp`, `modules/csx/` (stats & combat/bomb/grenade forwards), `plugins/include/ham_const.inc` (`SetHamParamFloat`/`Integer`, `ExecuteHam`/`ExecuteHamB`, expanded `Ham_*` hooks), `amxmodx.inc` (`register_native`, `get_param`, `get_string`, `set_string`, `CreateMultiForward`/`ExecuteForward`/`DestroyForward`), and `dhudmessage.inc` (`SVC_DIRECTOR` `DRC_CMD_MESSAGE`) implemented clean-room across `crates/cs-mod-api`, `crates/cs-mod-host`, `crates/cs-amxx`, and `crates/cs-game`.
+  - ReAPI (`https://github.com/rehlds/ReAPI`, GPL-3.0-or-later): `reapi_gamedll.inc` and `reapi_gamedll_const.inc` hook-chain semantics (`Pre`/`Post`, `Continue`/`Handled`/`Override`/`Supercede`), `rg_give_item`, `rg_remove_all_items`, `rg_set_user_armor`, `rg_add_account`, `rg_round_respawn`, and `get_member`/`set_member`.
+  - ReGameDLL_CS (`regamedll/dlls/{player.cpp, client.cpp, weapons.cpp, multiplay_gamerules.cpp}`): clean-room hook dispatch points for `PlayerSpawn`, `PlayerTakeDamage`, `PlayerKilled`, `PlayerPreThink`, `PlayerPostThink`, `PlayerJump`, `PlayersShouldCollide`, `CanBuyItem`, `CanHavePlayerItem`, `WeaponDeploy`, `WeaponPrimaryAttack`, `WeaponReload`, `PlayerSay`, `FreezeTimeEnd`, `RoundStart`, `RoundEnd`, bomb and hostage events, and custom weapon stat overrides in `crates/cs-game`.
 
-Porting code from ReHLDS, ReGameDLL_CS, Xash3D FWGS, AMX Mod X, and the `cs16-client` event files listed in
+Porting code from ReHLDS, ReGameDLL_CS, Xash3D FWGS, AMX Mod X, ReAPI, and the `cs16-client` event files listed in
 `THIRD-PARTY-NOTICES.md` is allowed, with each ported file's source named in `THIRD-PARTY-NOTICES.md`.
 Code copied from the Valve Half-Life SDK headers stays excluded; see
 [Valve Half-Life SDK caveat](#valve-half-life-sdk-caveat) for what was taken.

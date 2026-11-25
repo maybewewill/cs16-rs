@@ -65,6 +65,7 @@ struct Options {
     relay_allow: Vec<SocketAddr>,
     mods_dir: Option<PathBuf>,
     amxx_dir: Option<PathBuf>,
+    plugins_toml: Option<PathBuf>,
     masters: Vec<SocketAddr>,
     sys_ticrate: Option<f64>,
 }
@@ -86,6 +87,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         relay_allow: Vec::new(),
         mods_dir: None,
         amxx_dir: None,
+        plugins_toml: None,
         masters: Vec::new(),
         sys_ticrate: None,
     };
@@ -137,6 +139,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--web-dir" => opts.web_dir = Some(PathBuf::from(value()?)),
             "--mods-dir" => opts.mods_dir = Some(PathBuf::from(value()?)),
             "--amxx-dir" => opts.amxx_dir = Some(PathBuf::from(value()?)),
+            "--plugins-toml" => opts.plugins_toml = Some(PathBuf::from(value()?)),
             "--master" => {
                 let v = value()?;
                 let addr: SocketAddr = v
@@ -242,60 +245,81 @@ fn run_console<G: GameDll>(
     quit
 }
 
-fn load_mods_into_vfs(mods_dir: &Path, vfs: &mut Vfs) -> Result<cs_mod_host::ServerModHost, String> {
-    let packages = cs_mod_host::discover_packages(mods_dir)
-        .map_err(|e| format!("failed to scan mods dir `{}`: {e}", mods_dir.display()))?;
-    let mut host = cs_mod_host::ServerModHost::new();
-    host.set_mods_dir(mods_dir);
-    let mut loaded = 0usize;
-    for pkg in packages {
-        if !pkg.assets.is_empty() {
-            let entries: Vec<(String, Vec<u8>)> = pkg
-                .assets
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            vfs.mount_mod_assets(&pkg.manifest.id, entries)
-                .map_err(|e| format!("failed to mount assets for mod `{}`: {e}", pkg.manifest.id))?;
-        }
-        let id = pkg.manifest.id.clone();
-        host.load_package(pkg)
-            .map_err(|e| format!("failed to load mod `{id}`: {e}"))?;
-        loaded += 1;
+fn discover_plugins_toml(explicit: Option<&Path>, vfs: &Vfs) -> Option<PathBuf> {
+    if let Some(p) = explicit {
+        return Some(p.to_path_buf());
     }
-    info!(dir = %mods_dir.display(), count = loaded, "loaded server mods");
-    Ok(host)
+    let cstrike = vfs.root().join("cstrike").join("configs").join("plugins.toml");
+    if cstrike.is_file() {
+        return Some(cstrike);
+    }
+    let cwd = Path::new("configs").join("plugins.toml");
+    cwd.is_file().then_some(cwd)
 }
 
-fn load_amxx_plugins(dir: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
-    let entries = std::fs::read_dir(dir)
-        .map_err(|e| format!("failed to scan amxx dir `{}`: {e}", dir.display()))?;
-    let mut paths = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("failed to read amxx dir `{}`: {e}", dir.display()))?;
-        let path = entry.path();
-        let is_amxx = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("amxx") || e.eq_ignore_ascii_case("amx"));
-        if path.is_file() && is_amxx {
-            paths.push(path);
+#[cfg(test)]
+fn load_mods_into_vfs(mods_dir: &Path, vfs: &mut Vfs) -> Result<cs_mod_host::ServerModHost, String> {
+    build_unified_mod_host(Some(mods_dir), None, None, vfs)?
+        .ok_or_else(|| "expected unified mod host".to_string())
+}
+
+fn build_unified_mod_host(
+    mods_dir: Option<&Path>,
+    amxx_dir: Option<&Path>,
+    plugins_toml: Option<&Path>,
+    vfs: &mut Vfs,
+) -> Result<Option<cs_mod_host::ServerModHost>, String> {
+    if mods_dir.is_none() && amxx_dir.is_none() && plugins_toml.is_none() {
+        return Ok(None);
+    }
+    let mut host = cs_mod_host::ServerModHost::new();
+    let _ = host.load_configs_dir(vfs.root().join("cstrike"));
+    let _ = host.load_configs_dir(".");
+
+    if let Some(toml_path) = plugins_toml {
+        let (w_cnt, a_cnt) = host.load_plugins_toml(toml_path)?;
+        for (mod_id, entries) in host.loaded_mod_assets() {
+            vfs.mount_mod_assets(&mod_id, entries)
+                .map_err(|e| format!("failed to mount assets for mod `{mod_id}`: {e}"))?;
         }
+        info!(
+            path = %toml_path.display(),
+            wasm_mods = w_cnt,
+            amxx_plugins = a_cnt,
+            "loaded unified plugins.toml"
+        );
     }
-    paths.sort();
-    let mut plugins = Vec::with_capacity(paths.len());
-    for path in paths {
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("plugin.amxx")
-            .to_string();
-        let bytes = std::fs::read(&path)
-            .map_err(|e| format!("failed to read AMXX plugin `{}`: {e}", path.display()))?;
-        plugins.push((name, bytes));
+
+    if let Some(dir) = mods_dir {
+        let packages = cs_mod_host::discover_packages(dir)
+            .map_err(|e| format!("failed to scan mods dir `{}`: {e}", dir.display()))?;
+        host.set_mods_dir(dir);
+        let mut loaded = 0usize;
+        for pkg in packages {
+            if !pkg.assets.is_empty() {
+                let entries: Vec<(String, Vec<u8>)> = pkg
+                    .assets
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                vfs.mount_mod_assets(&pkg.manifest.id, entries).map_err(|e| {
+                    format!("failed to mount assets for mod `{}`: {e}", pkg.manifest.id)
+                })?;
+            }
+            let id = pkg.manifest.id.clone();
+            host.load_package(pkg)
+                .map_err(|e| format!("failed to load mod `{id}`: {e}"))?;
+            loaded += 1;
+        }
+        info!(dir = %dir.display(), count = loaded, "loaded server mods");
     }
-    info!(dir = %dir.display(), count = plugins.len(), "loaded AMXX plugins");
-    Ok(plugins)
+
+    if let Some(dir) = amxx_dir {
+        let count = host.load_amxx_dir(dir)?;
+        info!(dir = %dir.display(), count, "loaded AMXX plugins into unified mod host");
+    }
+
+    Ok(Some(host))
 }
 
 fn start(args: &[String]) -> Result<(), String> {
@@ -303,14 +327,23 @@ fn start(args: &[String]) -> Result<(), String> {
     let mut vfs = Vfs::discover(opts.gamedir.as_deref(), VfsConfig::default())
         .map_err(|e| format!("cannot find the Half-Life / CS 1.6 directory: {e}"))?;
     let map = load_server_map(&vfs, &opts.map)?;
-    let host = match &opts.mods_dir {
-        Some(dir) => Some(load_mods_into_vfs(dir, &mut vfs)?),
-        None => None,
-    };
+    let plugins_toml = discover_plugins_toml(opts.plugins_toml.as_deref(), &vfs);
+    let host = build_unified_mod_host(
+        opts.mods_dir.as_deref(),
+        opts.amxx_dir.as_deref(),
+        plugins_toml.as_deref(),
+        &mut vfs,
+    )?;
     if opts.walk_game {
         let game = WalkGame::new(MoveParams::default());
         match host {
-            Some(h) => serve(&opts, &vfs, map, cs_mod_host::ModdedGame::new(game, h), "WalkGame + Mods"),
+            Some(h) => serve(
+                &opts,
+                &vfs,
+                map,
+                cs_mod_host::ModdedGame::new(game, h),
+                "WalkGame + Mods",
+            ),
             None => serve(&opts, &vfs, map, game, "WalkGame (walking only)"),
         }
     } else {
@@ -318,25 +351,16 @@ fn start(args: &[String]) -> Result<(), String> {
         game.load_motd(&vfs);
         game.load_map_cycle(&vfs);
         game.enable_cvar_bot_quota();
-        match (&opts.amxx_dir, host) {
-            (Some(dir), Some(h)) => {
-                let amxx = cs_amxx::AmxxGame::new(game, load_amxx_plugins(dir)?);
-                serve(
-                    &opts,
-                    &vfs,
-                    map,
-                    cs_mod_host::ModdedGame::new(amxx, h),
-                    "CsGame + AMXX + Mods",
-                )
+        match host {
+            Some(h) => {
+                let label = match (h.list_mods().is_empty(), h.has_amxx()) {
+                    (false, true) => "CsGame + Unified (Mods + AMXX)",
+                    (true, true) => "CsGame + Unified (AMXX)",
+                    _ => "CsGame + Unified (Mods)",
+                };
+                serve(&opts, &vfs, map, cs_mod_host::ModdedGame::new(game, h), label)
             }
-            (Some(dir), None) => {
-                let amxx = cs_amxx::AmxxGame::new(game, load_amxx_plugins(dir)?);
-                serve(&opts, &vfs, map, amxx, "CsGame + AMXX")
-            }
-            (None, Some(h)) => {
-                serve(&opts, &vfs, map, cs_mod_host::ModdedGame::new(game, h), "CsGame + Mods")
-            }
-            (None, None) => serve(&opts, &vfs, map, game, "CsGame"),
+            None => serve(&opts, &vfs, map, game, "CsGame"),
         }
     }
 }

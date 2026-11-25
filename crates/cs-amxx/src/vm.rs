@@ -499,9 +499,36 @@ impl PawnVm {
         fmt_param_idx: usize,
         first_arg_idx: usize,
     ) -> Result<String, AmxError> {
+        self.format_amx_string_with_lang(params_addr, fmt_param_idx, first_arg_idx, None, None)
+    }
+
+    /// Formats an AMX vararg string with optional [`cs_mod_api::services::LangCatalog`] support
+    /// for `%L` (`LANG_PLAYER` / `LANG_SERVER` / 1-based player index).
+    pub fn format_amx_string_with_lang(
+        &self,
+        params_addr: i32,
+        fmt_param_idx: usize,
+        first_arg_idx: usize,
+        fallback_slot: Option<u8>,
+        lang: Option<&cs_mod_api::services::LangCatalog>,
+    ) -> Result<String, AmxError> {
         let fmt = self.param_string(params_addr, fmt_param_idx)?;
         let argc = self.param_count(params_addr)?;
         let mut arg_idx = first_arg_idx;
+        self.format_template_with_lang(&fmt, params_addr, argc, &mut arg_idx, fallback_slot, lang, 0)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn format_template_with_lang(
+        &self,
+        fmt: &str,
+        params_addr: i32,
+        argc: usize,
+        arg_idx: &mut usize,
+        fallback_slot: Option<u8>,
+        lang: Option<&cs_mod_api::services::LangCatalog>,
+        depth: u8,
+    ) -> Result<String, AmxError> {
         let mut out = String::with_capacity(fmt.len());
         let bytes = fmt.as_bytes();
         let mut i = 0;
@@ -560,11 +587,11 @@ impl PawnVm {
             let spec = bytes[i];
             i += 1;
 
-            if arg_idx > argc {
+            if *arg_idx > argc {
                 return Err(AmxError::Params("format string has too few arguments".into()));
             }
-            let cell = self.param(params_addr, arg_idx)?;
-            arg_idx += 1;
+            let cell = self.param(params_addr, *arg_idx)?;
+            *arg_idx += 1;
 
             let formatted = match spec {
                 b's' => {
@@ -576,37 +603,70 @@ impl PawnVm {
                     }
                 }
                 b'd' | b'i' => {
-                    let v = self.read_cell_or_val(cell, params_addr, arg_idx - 1)?;
+                    let v = self.read_cell_or_val(cell, params_addr, *arg_idx - 1)?;
                     format!("{v}")
                 }
                 b'u' => {
-                    let v = self.read_cell_or_val(cell, params_addr, arg_idx - 1)? as u32;
+                    let v = self.read_cell_or_val(cell, params_addr, *arg_idx - 1)? as u32;
                     format!("{v}")
                 }
                 b'x' => {
-                    let v = self.read_cell_or_val(cell, params_addr, arg_idx - 1)? as u32;
+                    let v = self.read_cell_or_val(cell, params_addr, *arg_idx - 1)? as u32;
                     format!("{v:x}")
                 }
                 b'X' => {
-                    let v = self.read_cell_or_val(cell, params_addr, arg_idx - 1)? as u32;
+                    let v = self.read_cell_or_val(cell, params_addr, *arg_idx - 1)? as u32;
                     format!("{v:X}")
                 }
                 b'f' => {
-                    let raw = self.read_cell_or_val(cell, params_addr, arg_idx - 1)? as u32;
+                    let raw = self.read_cell_or_val(cell, params_addr, *arg_idx - 1)? as u32;
                     let f = f32::from_bits(raw);
                     let prec = precision.unwrap_or(6).min(16);
                     format!("{f:.prec$}")
                 }
                 b'c' => {
-                    let v = self.read_cell_or_val(cell, params_addr, arg_idx - 1)? as u8;
+                    let v = self.read_cell_or_val(cell, params_addr, *arg_idx - 1)? as u8;
                     String::from(v as char)
                 }
                 b'L' => {
-                    // Lang key: `%L` consumes target player id + lang key string.
-                    if arg_idx <= argc {
-                        let key_addr = self.param(params_addr, arg_idx)?;
-                        arg_idx += 1;
-                        self.get_amx_string(key_addr).unwrap_or_default()
+                    // Lang key: `%L` consumes target player id (`LANG_PLAYER`/`LANG_SERVER`/`1..=32`) + lang key.
+                    let target_id = if cell < 0 || cell % 4 != 0 {
+                        cell
+                    } else {
+                        self.read_cell(cell).unwrap_or(cell)
+                    };
+                    if *arg_idx <= argc {
+                        let key_addr = self.param(params_addr, *arg_idx)?;
+                        *arg_idx += 1;
+                        let key = self.get_amx_string(key_addr).unwrap_or_default();
+                        if let Some(catalog) = lang {
+                            let target_slot = if target_id == cs_mod_api::services::LANG_SERVER {
+                                None
+                            } else if target_id == cs_mod_api::services::LANG_PLAYER {
+                                fallback_slot
+                            } else if (1..=32).contains(&target_id) {
+                                Some((target_id - 1) as u8)
+                            } else {
+                                None
+                            };
+                            let lang_code = catalog.player_lang(target_slot);
+                            let tmpl = catalog.lookup_key(lang_code, &key).unwrap_or(&key).to_string();
+                            if depth < 2 && tmpl.contains('%') {
+                                self.format_template_with_lang(
+                                    &tmpl,
+                                    params_addr,
+                                    argc,
+                                    arg_idx,
+                                    target_slot.or(fallback_slot),
+                                    lang,
+                                    depth + 1,
+                                )?
+                            } else {
+                                tmpl
+                            }
+                        } else {
+                            key
+                        }
                     } else {
                         String::new()
                     }

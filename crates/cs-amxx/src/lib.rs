@@ -11,6 +11,10 @@ pub mod runtime;
 pub mod vm;
 
 pub use amxxfile::AmxError;
-pub use natives::{AmxxCsHooks, NoCsHooks};
+pub use natives::{
+    AmxxCsHooks, AmxxExternalRpc, CsxPlayerStats, HAM_HANDLED, HAM_IGNORED, HAM_OVERRIDE,
+    HAM_SUPERCEDE, HamFunction, MENU_EXIT, NoCsHooks, PLUGIN_CONTINUE, PLUGIN_HANDLED,
+    reapi_member,
+};
 pub use runtime::{AmxxGame, AmxxPlugin, AmxxRuntime};
 pub use vm::PawnVm;

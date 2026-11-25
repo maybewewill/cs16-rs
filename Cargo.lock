@@ -519,6 +519,7 @@ dependencies = [
  "cs-assets",
  "cs-cvar",
  "cs-engine",
+ "cs-mod-api",
  "cs-proto48",
  "cs-transport",
  "flate2",
@@ -665,6 +666,7 @@ dependencies = [
  "cs-cvar",
  "cs-engine",
  "cs-game",
+ "cs-mod-host",
  "cs-proto48",
  "cs-transport",
  "cs-vfs",
@@ -693,6 +695,7 @@ dependencies = [
 name = "cs-mod-host"
 version = "0.1.0"
 dependencies = [
+ "cs-amxx",
  "cs-assets",
  "cs-clientcore",
  "cs-cvar",

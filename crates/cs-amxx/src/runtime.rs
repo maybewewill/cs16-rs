@@ -1,17 +1,25 @@
-//! AMX Mod X plugin runtime, task scheduler, forward dispatcher, and [`AmxxGame`] `GameDll`
-//! decorator.
+//! AMX Mod X plugin runtime, task scheduler, forward/Ham/CSX/menu dispatcher, shared platform
+//! services integration, and [`AmxxGame`] `GameDll` decorator.
+
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use cs_cvar::parser::parse_commands;
 use cs_engine::{EdictId, EngineApi, FullPackCtx, GameDll};
-use cs_proto48::delta::{DeltaMarks, GoldSrcClientData, GoldSrcEntityState, GoldSrcUserCmd, GoldSrcWeaponData};
+use cs_mod_api::RpcValue;
+use cs_mod_api::services::{MenuSelectOutcome, PluginRuntimeKind, SharedPlatformServices};
+use cs_proto48::delta::{
+    DeltaMarks, GoldSrcClientData, GoldSrcEntityState, GoldSrcUserCmd, GoldSrcWeaponData,
+};
 use cs_proto48::usermsg::UserMsgRegistry;
 use glam::Vec3;
 use tracing::warn;
 
 use crate::amxxfile::ParsedAmx;
 use crate::natives::{
-    AmxxCsHooks, AmxxHostState, AmxxNativeDispatch, HAM_IGNORED, HAM_SUPERCEDE, HamFunction,
-    PLUGIN_CONTINUE, PLUGIN_HANDLED, PluginMeta, ScheduledTask,
+    AmxxCsHooks, AmxxExternalRpc, AmxxHostState, AmxxNativeDispatch, HAM_IGNORED, HAM_SUPERCEDE,
+    HamFunction, MENU_EXIT, PLUGIN_CONTINUE, PLUGIN_HANDLED, PluginMeta, PureRpcDispatch,
+    ScheduledTask, send_amxx_rendered_menu,
 };
 use crate::vm::{AmxError, ExecEntry, PawnVm};
 
@@ -50,7 +58,74 @@ impl AmxxPlugin {
     }
 }
 
-/// Coordinates all loaded `.amxx` plugins, timers, commands, forwards, and hooks.
+/// Safely executes `func_name` on `slots[plugin_idx]` while passing the remaining `slots` as
+/// peers so synchronous cross-plugin dynamic natives & multi-forwards work without deadlocks.
+pub(crate) fn invoke_plugin_in_slots(
+    slots: &mut [Option<AmxxPlugin>],
+    state: &mut AmxxHostState,
+    plugin_idx: usize,
+    eng: &mut EngineApi<'_>,
+    hooks: &mut dyn AmxxCsHooks,
+    func_name: &str,
+    args: &[i32],
+) -> Result<Option<i32>, AmxError> {
+    let Some(mut plugin) = slots.get_mut(plugin_idx).and_then(Option::take) else {
+        return Ok(None);
+    };
+    let result = if !plugin.is_running() {
+        Ok(None)
+    } else if let Some(pub_idx) = plugin.vm.find_public(func_name) {
+        let mut dispatch = AmxxNativeDispatch {
+            plugin_idx,
+            state,
+            eng,
+            hooks,
+            peers: slots,
+        };
+        plugin
+            .vm
+            .exec(ExecEntry::Public(pub_idx), args, &mut dispatch)
+            .map(Some)
+    } else {
+        Ok(None)
+    };
+    slots[plugin_idx] = Some(plugin);
+    result
+}
+
+/// Executes `func_name` on `slots[plugin_idx]` with [`PureRpcDispatch`] (no live `EngineApi`
+/// borrow required), enabling synchronous WASM -> AMXX `rpc_call` inside `wasmi` imports.
+pub(crate) fn invoke_plugin_pure_in_slots(
+    slots: &mut [Option<AmxxPlugin>],
+    state: &mut AmxxHostState,
+    plugin_idx: usize,
+    func_name: &str,
+    args: &[i32],
+) -> Result<Option<i32>, AmxError> {
+    let Some(mut plugin) = slots.get_mut(plugin_idx).and_then(Option::take) else {
+        return Ok(None);
+    };
+    let result = if !plugin.is_running() {
+        Ok(None)
+    } else if let Some(pub_idx) = plugin.vm.find_public(func_name) {
+        let mut dispatch = PureRpcDispatch {
+            plugin_idx,
+            state,
+            peers: slots,
+        };
+        plugin
+            .vm
+            .exec(ExecEntry::Public(pub_idx), args, &mut dispatch)
+            .map(Some)
+    } else {
+        Ok(None)
+    };
+    slots[plugin_idx] = Some(plugin);
+    result
+}
+
+/// Coordinates all loaded `.amxx` plugins, timers, commands, forwards, Ham hooks, CSX stats,
+/// paginated menus, localization, nvault, and cross-plugin RPC.
 #[derive(Debug, Default)]
 pub struct AmxxRuntime {
     pub plugins: Vec<AmxxPlugin>,
@@ -59,10 +134,26 @@ pub struct AmxxRuntime {
 
 impl AmxxRuntime {
     pub fn new() -> Self {
+        Self::with_services(SharedPlatformServices::new())
+    }
+
+    pub fn with_services(services: SharedPlatformServices) -> Self {
         Self {
             plugins: Vec::new(),
-            state: AmxxHostState::new(),
+            state: AmxxHostState::with_services(services),
         }
+    }
+
+    pub fn services(&self) -> SharedPlatformServices {
+        self.state.services.clone()
+    }
+
+    pub fn set_external_rpc(&mut self, rpc: Arc<dyn AmxxExternalRpc>) {
+        self.state.external_rpc = Some(rpc);
+    }
+
+    pub fn add_lang_search_dir(&mut self, dir: impl Into<PathBuf>) {
+        self.state.lang_search_dirs.push(dir.into());
     }
 
     /// Loads one `.amxx` plugin from raw file bytes and returns its plugin index.
@@ -142,6 +233,7 @@ impl AmxxRuntime {
         self.state.events.clear();
         self.state.messages.clear();
         self.state.ham_hooks.clear();
+        self.state.ham_param_overrides.clear();
         self.state.pending_server_cmds.clear();
         self.state.connected_slots.fill(false);
     }
@@ -155,25 +247,229 @@ impl AmxxRuntime {
         func_name: &str,
         args: &[i32],
     ) -> Result<Option<i32>, AmxError> {
-        let Some(plugin) = self.plugins.get_mut(plugin_idx) else {
-            return Ok(None);
-        };
-        if !plugin.is_running() {
+        if plugin_idx >= self.plugins.len() {
             return Ok(None);
         }
-        let Some(pub_idx) = plugin.vm.find_public(func_name) else {
-            return Ok(None);
-        };
-        let mut dispatch = AmxxNativeDispatch {
+        let mut slots: Vec<Option<AmxxPlugin>> = self.plugins.drain(..).map(Some).collect();
+        let res = invoke_plugin_in_slots(
+            &mut slots,
+            &mut self.state,
             plugin_idx,
-            state: &mut self.state,
             eng,
             hooks,
+            func_name,
+            args,
+        );
+        self.plugins = slots.into_iter().flatten().collect();
+        res
+    }
+
+    /// Synchronously invokes an AMXX `register_native` handler on `plugin_idx` from an external
+    /// polyglot caller (e.g. a `.wasm` or `.py` plugin via `RpcBus`).
+    pub fn invoke_registered_native_from_rpc(
+        &mut self,
+        plugin_idx: usize,
+        callback: &str,
+        eng: &mut EngineApi<'_>,
+        hooks: &mut dyn AmxxCsHooks,
+        args: &[RpcValue],
+    ) -> Option<RpcValue> {
+        let original_args = args.to_vec();
+        {
+            let mut svc = self.state.services.lock();
+            svc.rpc.push_call_frame(args.to_vec());
+        }
+        let rc = self
+            .call_public(plugin_idx, eng, hooks, callback, &[-1, args.len() as i32])
+            .ok()
+            .flatten()?;
+        let popped = {
+            let mut svc = self.state.services.lock();
+            svc.rpc.pop_call_frame()
         };
-        let ret = plugin
-            .vm
-            .exec(ExecEntry::Public(pub_idx), args, &mut dispatch)?;
-        Ok(Some(ret))
+        // If the handler mutated a string param via `set_string`, return that string if changed!
+        if let Some(frame) = popped {
+            for (i, val) in frame.into_iter().enumerate() {
+                if let RpcValue::Str(s) = val
+                    && original_args.get(i) != Some(&RpcValue::Str(s.clone()))
+                {
+                    return Some(RpcValue::Str(s));
+                }
+            }
+        }
+        Some(RpcValue::Int(rc))
+    }
+
+    /// Synchronously invokes an AMXX `register_native` handler without requiring `&mut EngineApi`
+    /// (used by `cs-mod-host` when a `.wasm` plugin calls `rpc_call` into an `.amxx` plugin).
+    pub fn invoke_registered_native_pure(
+        &mut self,
+        plugin_idx: usize,
+        callback: &str,
+        args: &[RpcValue],
+    ) -> Option<RpcValue> {
+        if plugin_idx >= self.plugins.len() {
+            return None;
+        }
+        let original_args = args.to_vec();
+        {
+            let mut svc = self.state.services.lock();
+            svc.rpc.push_call_frame(args.to_vec());
+        }
+        let mut slots: Vec<Option<AmxxPlugin>> = self.plugins.drain(..).map(Some).collect();
+        let rc = invoke_plugin_pure_in_slots(
+            &mut slots,
+            &mut self.state,
+            plugin_idx,
+            callback,
+            &[-1, args.len() as i32],
+        )
+        .ok()
+        .flatten();
+        self.plugins = slots.into_iter().flatten().collect();
+        let popped = {
+            let mut svc = self.state.services.lock();
+            svc.rpc.pop_call_frame()
+        };
+        let rc = rc?;
+        if let Some(frame) = popped {
+            for (i, val) in frame.into_iter().enumerate() {
+                if let RpcValue::Str(s) = val
+                    && original_args.get(i) != Some(&RpcValue::Str(s.clone()))
+                {
+                    return Some(RpcValue::Str(s));
+                }
+            }
+        }
+        Some(RpcValue::Int(rc))
+    }
+
+    /// Delivers a polyglot RPC event (e.g. emitted by a `.wasm` mod via `rpc_emit_event`) to all
+    /// running `.amxx` plugins exposing `public <event_name>(...)`.
+    pub fn dispatch_rpc_event(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        hooks: &mut dyn AmxxCsHooks,
+        event_name: &str,
+        args: &[RpcValue],
+    ) {
+        let count = self.plugins.len();
+        for idx in 0..count {
+            let Some(plugin) = self.plugins.get_mut(idx) else {
+                continue;
+            };
+            if !plugin.is_running() || plugin.vm.find_public(event_name).is_none() {
+                continue;
+            }
+            let mut pawn_args = Vec::with_capacity(args.len());
+            for v in args {
+                match v {
+                    RpcValue::Int(n) => pawn_args.push(*n),
+                    RpcValue::Float(f) => pawn_args.push(f.to_bits() as i32),
+                    RpcValue::Str(s) => {
+                        if let Ok(addr) = plugin.vm.allot_string(s) {
+                            pawn_args.push(addr);
+                        } else {
+                            pawn_args.push(0);
+                        }
+                    }
+                    RpcValue::Bytes(b) => {
+                        let s = String::from_utf8_lossy(b);
+                        if let Ok(addr) = plugin.vm.allot_string(&s) {
+                            pawn_args.push(addr);
+                        } else {
+                            pawn_args.push(0);
+                        }
+                    }
+                }
+            }
+            if let Err(err) = self.call_public(idx, eng, hooks, event_name, &pawn_args) {
+                warn!(
+                    plugin = %self.plugins[idx].name,
+                    event = event_name,
+                    error = %err,
+                    "AMXX RPC event callback error"
+                );
+            }
+        }
+    }
+
+    /// Dispatches `client_connect(id)`; returns `Err(...)` if a plugin returns `>= PLUGIN_HANDLED`.
+    pub fn on_client_connect(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        hooks: &mut dyn AmxxCsHooks,
+        slot: u8,
+    ) -> Result<(), String> {
+        let player_id = i32::from(slot) + 1;
+        let ret = self.dispatch_forward_stop(eng, hooks, "client_connect", &[player_id]);
+        if ret >= PLUGIN_HANDLED {
+            Err("Rejected by AMX Mod X plugin".to_string())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Marks `slot` connected and dispatches `client_putinserver(id)`.
+    pub fn on_client_put_in_server(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        hooks: &mut dyn AmxxCsHooks,
+        slot: u8,
+    ) {
+        if let Some(flag) = self.state.connected_slots.get_mut(usize::from(slot)) {
+            *flag = true;
+        }
+        let player_id = i32::from(slot) + 1;
+        self.dispatch_forward_all(eng, hooks, "client_putinserver", &[player_id]);
+    }
+
+    /// Dispatches `client_disconnect(id)` and marks `slot` disconnected.
+    pub fn on_client_disconnect(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        hooks: &mut dyn AmxxCsHooks,
+        slot: u8,
+    ) {
+        let player_id = i32::from(slot) + 1;
+        self.dispatch_forward_all(eng, hooks, "client_disconnect", &[player_id]);
+        if let Some(flag) = self.state.connected_slots.get_mut(usize::from(slot)) {
+            *flag = false;
+        }
+    }
+
+    /// Dispatches `client_infochanged(id)`.
+    pub fn on_client_userinfo_changed(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        hooks: &mut dyn AmxxCsHooks,
+        slot: u8,
+    ) {
+        let player_id = i32::from(slot) + 1;
+        self.dispatch_forward_all(eng, hooks, "client_infochanged", &[player_id]);
+    }
+
+    /// Invokes an AMXX `newmenus.inc` handler `public handler(id, menu, item)` directly (used by
+    /// unified `ModdedGame` after resolving `MenuManager::handle_menuselect`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn dispatch_amxx_menu_callback(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        hooks: &mut dyn AmxxCsHooks,
+        plugin_idx: usize,
+        callback_name: &str,
+        slot: u8,
+        menu_id: u32,
+        item_index: i32,
+    ) {
+        let player_id = i32::from(slot) + 1;
+        let _ = self.call_public(
+            plugin_idx,
+            eng,
+            hooks,
+            callback_name,
+            &[player_id, menu_id as i32, item_index],
+        );
     }
 
     /// Calls `func_name` across all running plugins (`ET_IGNORE`: runs all plugins).
@@ -231,7 +527,10 @@ impl AmxxRuntime {
         result
     }
 
-    /// Dispatches `client_damage(attacker, victim, damage, wpnindex, hitplace, TA)`.
+    // --- CSX Forwards (`csx.inc`) ---
+
+    /// Dispatches `client_damage(attacker, victim, damage, wpnindex, hitplace, TA)` and updates
+    /// shared `"csx"` leaderboard stats.
     #[allow(clippy::too_many_arguments)]
     pub fn dispatch_client_damage(
         &mut self,
@@ -244,6 +543,8 @@ impl AmxxRuntime {
         hitplace: i32,
         team_attack: bool,
     ) {
+        self.state
+            .record_csx_damage(eng, attacker_slot, damage, hitplace);
         let attacker = attacker_slot.map_or(0, |s| i32::from(s) + 1);
         let victim = i32::from(victim_slot) + 1;
         let args = [
@@ -257,7 +558,8 @@ impl AmxxRuntime {
         self.dispatch_forward_all(eng, hooks, "client_damage", &args);
     }
 
-    /// Dispatches `client_death(killer, victim, wpnindex, hitplace, TK)`.
+    /// Dispatches `client_death(killer, victim, wpnindex, hitplace, TK)` and updates shared `"csx"`
+    /// leaderboard stats.
     #[allow(clippy::too_many_arguments)]
     pub fn dispatch_client_death(
         &mut self,
@@ -269,11 +571,79 @@ impl AmxxRuntime {
         hitplace: i32,
         team_kill: bool,
     ) {
+        self.state
+            .record_csx_death(eng, killer_slot, victim_slot, hitplace, team_kill);
         let killer = killer_slot.map_or(0, |s| i32::from(s) + 1);
         let victim = i32::from(victim_slot) + 1;
         let args = [killer, victim, weapon, hitplace, i32::from(team_kill)];
         self.dispatch_forward_all(eng, hooks, "client_death", &args);
     }
+
+    pub fn dispatch_bomb_planting(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        hooks: &mut dyn AmxxCsHooks,
+        planter: u8,
+    ) {
+        self.dispatch_forward_all(eng, hooks, "bomb_planting", &[i32::from(planter) + 1]);
+    }
+
+    pub fn dispatch_bomb_planted(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        hooks: &mut dyn AmxxCsHooks,
+        planter: u8,
+    ) {
+        self.dispatch_forward_all(eng, hooks, "bomb_planted", &[i32::from(planter) + 1]);
+    }
+
+    pub fn dispatch_bomb_explode(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        hooks: &mut dyn AmxxCsHooks,
+        planter: Option<u8>,
+        defuser: Option<u8>,
+    ) {
+        let p = planter.map_or(0, |s| i32::from(s) + 1);
+        let d = defuser.map_or(0, |s| i32::from(s) + 1);
+        self.dispatch_forward_all(eng, hooks, "bomb_explode", &[p, d]);
+    }
+
+    pub fn dispatch_bomb_defusing(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        hooks: &mut dyn AmxxCsHooks,
+        defuser: u8,
+    ) {
+        self.dispatch_forward_all(eng, hooks, "bomb_defusing", &[i32::from(defuser) + 1]);
+    }
+
+    pub fn dispatch_bomb_defused(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        hooks: &mut dyn AmxxCsHooks,
+        defuser: u8,
+    ) {
+        self.dispatch_forward_all(eng, hooks, "bomb_defused", &[i32::from(defuser) + 1]);
+    }
+
+    pub fn dispatch_grenade_throw(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        hooks: &mut dyn AmxxCsHooks,
+        slot: u8,
+        grenade_ent: u16,
+        weapon_id: u8,
+    ) {
+        self.dispatch_forward_all(
+            eng,
+            hooks,
+            "grenade_throw",
+            &[i32::from(slot) + 1, i32::from(grenade_ent), i32::from(weapon_id)],
+        );
+    }
+
+    // --- Hamsandwich Forwards ---
 
     /// Dispatches registered `Ham_Spawn` pre/post hooks for `classname`.
     pub fn dispatch_ham_spawn(
@@ -330,7 +700,37 @@ impl AmxxRuntime {
         damage_bits: i32,
         post: bool,
     ) -> i32 {
-        self.dispatch_ham(
+        self.dispatch_ham_take_damage_mut(
+            eng,
+            hooks,
+            victim,
+            classname,
+            inflictor,
+            attacker,
+            damage,
+            damage_bits,
+            post,
+        )
+        .0
+    }
+
+    /// Dispatches `Ham_TakeDamage` and returns `(ham_result, overridden_damage, overridden_bits)`
+    /// populated by `SetHamParamFloat(4, ...)` / `SetHamParamInteger(5, ...)`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dispatch_ham_take_damage_mut(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        hooks: &mut dyn AmxxCsHooks,
+        victim: u16,
+        classname: &str,
+        inflictor: u16,
+        attacker: u16,
+        damage: f32,
+        damage_bits: i32,
+        post: bool,
+    ) -> (i32, Option<f32>, Option<i32>) {
+        self.state.ham_param_overrides.clear();
+        let ret = self.dispatch_ham(
             eng,
             hooks,
             HamFunction::TakeDamage,
@@ -343,6 +743,82 @@ impl AmxxRuntime {
                 damage.to_bits() as i32,
                 damage_bits,
             ],
+        );
+        let overrides = std::mem::take(&mut self.state.ham_param_overrides);
+        let new_dmg = overrides.get(&4).map(|&bits| f32::from_bits(bits as u32));
+        let new_bits = overrides.get(&5).copied();
+        (ret, new_dmg, new_bits)
+    }
+
+    pub fn dispatch_ham_touch(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        hooks: &mut dyn AmxxCsHooks,
+        toucher: u16,
+        classname: &str,
+        other: u16,
+        post: bool,
+    ) -> i32 {
+        self.dispatch_ham(
+            eng,
+            hooks,
+            HamFunction::Touch,
+            classname,
+            post,
+            &[i32::from(toucher), i32::from(other)],
+        )
+    }
+
+    pub fn dispatch_ham_item_deploy(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        hooks: &mut dyn AmxxCsHooks,
+        ent_index: u16,
+        classname: &str,
+        post: bool,
+    ) -> i32 {
+        self.dispatch_ham(
+            eng,
+            hooks,
+            HamFunction::ItemDeploy,
+            classname,
+            post,
+            &[i32::from(ent_index)],
+        )
+    }
+
+    pub fn dispatch_ham_weapon_primary_attack(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        hooks: &mut dyn AmxxCsHooks,
+        ent_index: u16,
+        classname: &str,
+        post: bool,
+    ) -> i32 {
+        self.dispatch_ham(
+            eng,
+            hooks,
+            HamFunction::WeaponPrimaryAttack,
+            classname,
+            post,
+            &[i32::from(ent_index)],
+        )
+    }
+
+    pub fn dispatch_ham_player_jump(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        hooks: &mut dyn AmxxCsHooks,
+        ent_index: u16,
+        post: bool,
+    ) -> i32 {
+        self.dispatch_ham(
+            eng,
+            hooks,
+            HamFunction::PlayerJump,
+            "player",
+            post,
+            &[i32::from(ent_index)],
         )
     }
 
@@ -463,7 +939,6 @@ impl AmxxRuntime {
             };
             let task: ScheduledTask = self.state.tasks[pos].clone();
 
-            // Reschedule or remove before executing so `remove_task` inside the callback works.
             match task.remaining_repeats {
                 None => {
                     self.state.tasks[pos].next_run = now + task.interval;
@@ -479,7 +954,7 @@ impl AmxxRuntime {
 
             if let Some(plugin) = self.plugins.get_mut(task.plugin_idx)
                 && plugin.is_running()
-                && let Some(pub_idx) = plugin.vm.find_public(&task.callback)
+                && plugin.vm.find_public(&task.callback).is_some()
             {
                 let args: Vec<i32> = if task.param_data.is_empty() {
                     vec![task.task_id]
@@ -492,18 +967,11 @@ impl AmxxRuntime {
                         }
                     }
                 };
-                let mut dispatch = AmxxNativeDispatch {
-                    plugin_idx: task.plugin_idx,
-                    state: &mut self.state,
-                    eng,
-                    hooks,
-                };
-                if let Err(err) = plugin
-                    .vm
-                    .exec(ExecEntry::Public(pub_idx), &args, &mut dispatch)
+                if let Err(err) =
+                    self.call_public(task.plugin_idx, eng, hooks, &task.callback, &args)
                 {
                     warn!(
-                        plugin = %plugin.name,
+                        plugin_idx = task.plugin_idx,
                         callback = %task.callback,
                         error = %err,
                         "AMXX task callback error"
@@ -513,8 +981,68 @@ impl AmxxRuntime {
         }
     }
 
-    /// Handles a client command (`register_clcmd`, `register_concmd`, then `client_command`
-    /// forward). Returns `true` if a plugin handled the command (`>= PLUGIN_HANDLED`).
+    /// Routes `menuselect <choice>` for standalone `AmxxGame` via the shared `MenuManager`.
+    pub fn dispatch_menuselect(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        hooks: &mut dyn AmxxCsHooks,
+        slot: u8,
+        choice: i32,
+    ) -> bool {
+        let outcome = {
+            let mut svc = self.state.services.lock();
+            svc.menus.handle_menuselect(slot, choice)
+        };
+        let player_id = i32::from(slot) + 1;
+        match outcome {
+            MenuSelectOutcome::NotOwned => false,
+            MenuSelectOutcome::PageTurned(rendered) => {
+                send_amxx_rendered_menu(eng, &rendered);
+                true
+            }
+            MenuSelectOutcome::Ignored => true,
+            MenuSelectOutcome::Selected {
+                owner_runtime,
+                owner_index,
+                menu_id,
+                callback_name,
+                item_index,
+                ..
+            } => {
+                if owner_runtime == PluginRuntimeKind::Amxx {
+                    let _ = self.call_public(
+                        owner_index,
+                        eng,
+                        hooks,
+                        &callback_name,
+                        &[player_id, menu_id as i32, item_index as i32],
+                    );
+                }
+                true
+            }
+            MenuSelectOutcome::Exited {
+                owner_runtime,
+                owner_index,
+                menu_id,
+                callback_name,
+                ..
+            } => {
+                if owner_runtime == PluginRuntimeKind::Amxx {
+                    let _ = self.call_public(
+                        owner_index,
+                        eng,
+                        hooks,
+                        &callback_name,
+                        &[player_id, menu_id as i32, MENU_EXIT],
+                    );
+                }
+                true
+            }
+        }
+    }
+
+    /// Handles a client command (`menuselect`, `register_clcmd`, `register_concmd`, then
+    /// `client_command` forward). Returns `true` if a plugin handled the command.
     pub fn dispatch_client_command(
         &mut self,
         eng: &mut EngineApi<'_>,
@@ -525,10 +1053,31 @@ impl AmxxRuntime {
         let Some(cmd_name) = argv.first().map(|s| s.to_ascii_lowercase()) else {
             return false;
         };
-        self.state.current_argv = argv.to_vec();
+        if cmd_name == "menuselect"
+            && let Some(Ok(choice)) = argv.get(1).map(|s| s.parse::<i32>())
+            && self.dispatch_menuselect(eng, hooks, slot, choice)
+        {
+            return true;
+        }
+        self.dispatch_client_command_after_menu(eng, hooks, slot, argv)
+    }
 
+    /// Handles a client command after `MenuManager` has already been consulted (`register_clcmd`,
+    /// `register_concmd`, then `client_command` forward).
+    pub fn dispatch_client_command_after_menu(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        hooks: &mut dyn AmxxCsHooks,
+        slot: u8,
+        argv: &[String],
+    ) -> bool {
+        let Some(cmd_name) = argv.first().map(|s| s.to_ascii_lowercase()) else {
+            return false;
+        };
+
+        self.state.current_argv = argv.to_vec();
         let player_id = i32::from(slot) + 1;
-        let user_flags = self.state.admin_flags[usize::from(slot)];
+        let user_flags = self.state.effective_user_flags(slot);
 
         let matching: Vec<(usize, String, i32)> = self
             .state
@@ -623,7 +1172,6 @@ impl AmxxRuntime {
             });
         }
 
-        // Check plugin-registered AMXX cvars not in engine's CVarRegistry.
         if let Some(&idx) = self.state.cvar_by_name.get(&cmd)
             && self.state.cvars[idx].local_value.is_some()
         {
@@ -723,7 +1271,9 @@ impl AmxxRuntime {
                 }
                 out
             }
-            _ => String::from("AMX Mod X (cs-amxx pure-Rust Pawn 3.2 host)\nUsage: amxx <plugins|cvars>\n"),
+            _ => String::from(
+                "AMX Mod X (cs-amxx pure-Rust Pawn 3.2 host)\nUsage: amxx <plugins|cvars>\n",
+            ),
         }
     }
 }
@@ -873,10 +1423,13 @@ impl<G: GameDll + AmxxCsHooks> GameDll for AmxxGame<G> {
     }
 
     fn server_activate(&mut self, eng: &mut EngineApi<'_>) {
-        self.runtime.on_server_activate_precache(eng, &mut self.inner);
+        self.runtime
+            .on_server_activate_precache(eng, &mut self.inner);
         self.inner.server_activate(eng);
         self.runtime.on_server_activate_init(eng, &mut self.inner);
-        let unhandled = self.runtime.drain_pending_server_cmds(eng, &mut self.inner);
+        let unhandled = self
+            .runtime
+            .drain_pending_server_cmds(eng, &mut self.inner);
         for argv in unhandled {
             let _ = self.inner.server_command(eng, &argv);
         }
@@ -911,9 +1464,9 @@ impl<G: GameDll + AmxxCsHooks> GameDll for AmxxGame<G> {
 
     fn client_connect(&mut self, eng: &mut EngineApi<'_>, slot: u8) -> Result<(), String> {
         let player_id = i32::from(slot) + 1;
-        let ret = self
-            .runtime
-            .dispatch_forward_stop(eng, &mut self.inner, "client_connect", &[player_id]);
+        let ret =
+            self.runtime
+                .dispatch_forward_stop(eng, &mut self.inner, "client_connect", &[player_id]);
         if ret >= PLUGIN_HANDLED {
             return Err("Rejected by AMX Mod X plugin".to_string());
         }
@@ -940,6 +1493,10 @@ impl<G: GameDll + AmxxCsHooks> GameDll for AmxxGame<G> {
             .dispatch_forward_all(eng, &mut self.inner, "client_disconnect", &[player_id]);
         if let Some(flag) = self.runtime.state.connected_slots.get_mut(usize::from(slot)) {
             *flag = false;
+        }
+        {
+            let mut svc = self.runtime.state.services.lock();
+            svc.menus.clear_slot(slot);
         }
         self.inner.client_disconnect(eng, slot);
     }
@@ -980,7 +1537,9 @@ impl<G: GameDll + AmxxCsHooks> GameDll for AmxxGame<G> {
 
     fn start_frame(&mut self, eng: &mut EngineApi<'_>, frametime: f32) {
         self.runtime.tick_tasks(eng, &mut self.inner);
-        let unhandled = self.runtime.drain_pending_server_cmds(eng, &mut self.inner);
+        let unhandled = self
+            .runtime
+            .drain_pending_server_cmds(eng, &mut self.inner);
         for argv in unhandled {
             let _ = self.inner.server_command(eng, &argv);
         }
@@ -992,7 +1551,30 @@ impl<G: GameDll + AmxxCsHooks> GameDll for AmxxGame<G> {
     }
 
     fn touch(&mut self, eng: &mut EngineApi<'_>, toucher: EdictId, other: EdictId) {
+        let classname = eng
+            .ent(toucher)
+            .map(|v| v.classname.clone())
+            .unwrap_or_default();
+        let pre = self.runtime.dispatch_ham_touch(
+            eng,
+            &mut self.inner,
+            toucher.index,
+            &classname,
+            other.index,
+            false,
+        );
+        if pre >= HAM_SUPERCEDE {
+            return;
+        }
         self.inner.touch(eng, toucher, other);
+        let _ = self.runtime.dispatch_ham_touch(
+            eng,
+            &mut self.inner,
+            toucher.index,
+            &classname,
+            other.index,
+            true,
+        );
     }
 
     fn blocked(&mut self, eng: &mut EngineApi<'_>, pusher: EdictId, other: EdictId) {

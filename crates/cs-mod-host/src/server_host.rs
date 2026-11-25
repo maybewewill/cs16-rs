@@ -6,11 +6,13 @@
 
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
+use cs_amxx::{AmxxCsHooks, AmxxExternalRpc, AmxxRuntime, HAM_SUPERCEDE, MENU_EXIT, NoCsHooks};
 use cs_engine::{EdictId, EngineApi, FullPackCtx, GameDll, MsgDest};
+use cs_game::amxx_hooks::GameStateAmxxHooks;
 use cs_game::mod_hooks::{self as cs_hooks, CsHookSink};
 use cs_game::player::{ArmorType, Team};
 use cs_game::{CsGame, GameState};
@@ -99,6 +101,7 @@ struct ServerModHostCore {
     rpc_side_effects: Arc<Mutex<Vec<(String, ModCallOutcome)>>>,
     wasi_logs: Vec<(String, String)>,
     hook_depth: Arc<AtomicU8>,
+    amxx: Option<Arc<Mutex<AmxxRuntime>>>,
 }
 
 struct HostRpcDispatcher {
@@ -116,6 +119,20 @@ impl RpcDispatcher for HostRpcDispatcher {
         if entry.runtime == PluginRuntimeKind::Host {
             let svc = self.services.lock();
             return svc.rpc.call_host_fn(fn_name, args);
+        }
+        if entry.runtime == PluginRuntimeKind::Amxx {
+            let amxx_arc = {
+                let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+                core.amxx.clone()
+            }?;
+            let Ok(mut amxx) = amxx_arc.try_lock() else {
+                return None;
+            };
+            return amxx.invoke_registered_native_pure(
+                entry.owner_index,
+                &entry.callback_name,
+                args,
+            );
         }
         if entry.runtime != PluginRuntimeKind::Wasm {
             return None;
@@ -187,6 +204,105 @@ impl RpcDispatcher for HostRpcDispatcher {
     }
 }
 
+/// Bridge handed to [`AmxxRuntime`] so `.amxx` dynamic natives and `ExecuteForward` invoke
+/// `.wasm` / `.py` mods hosted by [`ServerModHost`] synchronously without deadlocking.
+struct HostAmxxExternalRpc {
+    core: Arc<Mutex<ServerModHostCore>>,
+    services: SharedPlatformServices,
+    side_effects: Arc<Mutex<Vec<(String, ModCallOutcome)>>>,
+}
+
+impl AmxxExternalRpc for HostAmxxExternalRpc {
+    fn call_external_rpc(&self, fn_name: &str, args: &[RpcValue]) -> Option<RpcValue> {
+        let dispatcher = HostRpcDispatcher {
+            core: Arc::clone(&self.core),
+            services: self.services.clone(),
+            side_effects: Arc::clone(&self.side_effects),
+        };
+        dispatcher.call_rpc(fn_name, args)
+    }
+
+    fn emit_external_event(&self, event_name: &str, args: &[RpcValue]) {
+        let subs = {
+            let svc = self.services.lock();
+            svc.rpc.subscribers(event_name)
+        };
+        if subs.is_empty() {
+            return;
+        }
+        let mut ev = ActiveEvent::default();
+        ev.str_args[0] = event_name.to_string();
+        let mut i32_cursor = 0usize;
+        let mut f32_cursor = 0usize;
+        let mut first_str: Option<String> = None;
+        for v in args {
+            match v {
+                RpcValue::Int(n) => {
+                    if i32_cursor < ev.i32_args.len() {
+                        ev.i32_args[i32_cursor] = *n;
+                        i32_cursor += 1;
+                    }
+                }
+                RpcValue::Float(f) => {
+                    if f32_cursor < ev.f32_args.len() {
+                        ev.f32_args[f32_cursor] = *f;
+                        f32_cursor += 1;
+                    }
+                }
+                RpcValue::Str(s) => {
+                    if first_str.is_none() {
+                        first_str = Some(s.clone());
+                    }
+                }
+                RpcValue::Bytes(b) => {
+                    ev.payload = b.clone();
+                }
+            }
+        }
+        if let Some(s) = first_str {
+            ev.payload = s.as_bytes().to_vec();
+            ev.str_args[1] = s;
+        }
+        let snap = EngineSnapshot::default();
+        for sub in subs {
+            if sub.runtime != PluginRuntimeKind::Wasm {
+                continue;
+            }
+            let target = {
+                let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+                core.mods.get(&sub.owner_id).and_then(|m| {
+                    if m.status != ModStatus::Active {
+                        return None;
+                    }
+                    m.instance.clone().map(|inst| {
+                        (
+                            inst,
+                            m.storage_cache.clone(),
+                            m.package.manifest.fuel_per_frame,
+                        )
+                    })
+                })
+            };
+            let Some((inst_arc, storage, fuel_budget)) = target else {
+                continue;
+            };
+            let Ok(mut inst) = inst_arc.try_lock() else {
+                continue;
+            };
+            let ctx = ModExecContext {
+                snapshot: &snap,
+                event: &ev,
+                storage: &storage,
+                fuel_budget,
+            };
+            if let Ok(outcome) = inst.call_event(sub.callback_id, &ctx) {
+                let mut se = self.side_effects.lock().unwrap_or_else(|e| e.into_inner());
+                se.push((sub.owner_id, outcome));
+            }
+        }
+    }
+}
+
 /// Coordinates sandboxed server WASM mods, hook chains, timers, storage, shared platform
 /// services (`MenuManager`, `LangCatalog`, `AdminRegistry`, `NVaultStore`, `LeaderboardStore`,
 /// `RpcBus`), non-blocking webhooks, and client catalogs.
@@ -238,6 +354,7 @@ impl ServerModHost {
             rpc_side_effects: Arc::new(Mutex::new(Vec::new())),
             wasi_logs: Vec::new(),
             hook_depth: Arc::new(AtomicU8::new(0)),
+            amxx: None,
         };
         Self {
             core: Arc::new(Mutex::new(core)),
@@ -258,21 +375,239 @@ impl ServerModHost {
     /// rooted at `base_dir`.
     pub fn load_configs_dir(&mut self, base_dir: impl Into<PathBuf>) -> (usize, usize) {
         let dir = base_dir.into();
-        let services = {
+        let (services, amxx_opt) = {
             let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
             core.configs_dir = Some(dir.clone());
-            core.services.clone()
+            (core.services.clone(), core.amxx.clone())
         };
+        let lang_dirs = [
+            dir.join("configs").join("lang"),
+            dir.join("lang"),
+            dir.join("data").join("lang"),
+            dir.join("addons").join("amxmodx").join("data").join("lang"),
+        ];
+        if let Some(amxx_arc) = amxx_opt {
+            let mut amxx = amxx_arc.lock().unwrap_or_else(|e| e.into_inner());
+            for ld in &lang_dirs {
+                amxx.add_lang_search_dir(ld);
+            }
+        }
         let mut svc = services.lock();
-        let mut lang_entries = load_lang_dir(&mut svc.lang, &dir.join("configs").join("lang"));
-        lang_entries += load_lang_dir(&mut svc.lang, &dir.join("lang"));
-        lang_entries += load_lang_dir(&mut svc.lang, &dir.join("data").join("lang"));
-        lang_entries += load_lang_dir(
-            &mut svc.lang,
-            &dir.join("addons").join("amxmodx").join("data").join("lang"),
-        );
+        let mut lang_entries = 0usize;
+        for ld in &lang_dirs {
+            lang_entries += load_lang_dir(&mut svc.lang, ld);
+        }
         let admin_entries = load_admins_from_dir(&mut svc.admins, &dir);
         (lang_entries, admin_entries)
+    }
+
+    fn ensure_amxx(&self) -> Arc<Mutex<AmxxRuntime>> {
+        let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(ref existing) = core.amxx {
+            return Arc::clone(existing);
+        }
+        let mut rt = AmxxRuntime::with_services(core.services.clone());
+        rt.set_external_rpc(Arc::new(HostAmxxExternalRpc {
+            core: Arc::clone(&self.core),
+            services: core.services.clone(),
+            side_effects: Arc::clone(&core.rpc_side_effects),
+        }));
+        if let Some(ref cfg_dir) = core.configs_dir {
+            rt.add_lang_search_dir(cfg_dir.join("configs").join("lang"));
+            rt.add_lang_search_dir(cfg_dir.join("lang"));
+            rt.add_lang_search_dir(cfg_dir.join("data").join("lang"));
+            rt.add_lang_search_dir(
+                cfg_dir
+                    .join("addons")
+                    .join("amxmodx")
+                    .join("data")
+                    .join("lang"),
+            );
+        }
+        let arc = Arc::new(Mutex::new(rt));
+        core.amxx = Some(Arc::clone(&arc));
+        arc
+    }
+
+    /// Loads one `.amxx` plugin into the unified runtime sharing `SharedPlatformServices`,
+    /// `MenuManager`, `LangCatalog`, `AdminRegistry`, `NVaultStore`, `LeaderboardStore`, and `RpcBus`.
+    pub fn load_amxx_plugin(
+        &mut self,
+        name: impl Into<String>,
+        bytes: &[u8],
+    ) -> Result<usize, cs_amxx::AmxError> {
+        let amxx_arc = self.ensure_amxx();
+        let mut amxx = amxx_arc.lock().unwrap_or_else(|e| e.into_inner());
+        amxx.load_plugin(name, bytes)
+    }
+
+    /// Loads a batch of `(name, bytes)` `.amxx` plugins into the unified runtime.
+    pub fn load_amxx_plugins(&mut self, plugins: Vec<(String, Vec<u8>)>) {
+        if plugins.is_empty() {
+            return;
+        }
+        let amxx_arc = self.ensure_amxx();
+        let mut amxx = amxx_arc.lock().unwrap_or_else(|e| e.into_inner());
+        amxx.load_plugins(plugins);
+    }
+
+    /// Scans `dir` for `.amxx` / `.amx` plugins in lexicographical order and loads them into the
+    /// unified runtime.
+    pub fn load_amxx_dir(&mut self, dir: &Path) -> Result<usize, String> {
+        let entries = std::fs::read_dir(dir)
+            .map_err(|e| format!("failed to scan amxx dir `{}`: {e}", dir.display()))?;
+        let mut paths = Vec::new();
+        for entry in entries {
+            let entry =
+                entry.map_err(|e| format!("failed to read amxx dir `{}`: {e}", dir.display()))?;
+            let path = entry.path();
+            let is_amxx = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("amxx") || e.eq_ignore_ascii_case("amx"));
+            if path.is_file() && is_amxx {
+                paths.push(path);
+            }
+        }
+        paths.sort();
+        let mut batch = Vec::with_capacity(paths.len());
+        for path in paths {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("plugin.amxx")
+                .to_string();
+            let bytes = std::fs::read(&path)
+                .map_err(|e| format!("failed to read AMXX plugin `{}`: {e}", path.display()))?;
+            batch.push((name, bytes));
+        }
+        let count = batch.len();
+        self.load_amxx_plugins(batch);
+        Ok(count)
+    }
+
+    /// Parses a `configs/plugins.toml` manifest and loads declared WASM/package mods, `.amxx`
+    /// plugins, localization catalogs, and admin registries into this unified [`ServerModHost`].
+    /// Returns `(wasm_mods_loaded, amxx_plugins_loaded)`.
+    pub fn load_plugins_toml(&mut self, path: &Path) -> Result<(usize, usize), String> {
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| format!("failed to read `{}`: {e}", path.display()))?;
+        let toml_dir = path.parent().unwrap_or_else(|| Path::new("."));
+        let _ = self.load_configs_dir(toml_dir);
+        if toml_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.eq_ignore_ascii_case("configs"))
+            && let Some(parent) = toml_dir.parent()
+        {
+            let _ = self.load_configs_dir(parent);
+        }
+
+        let cfg = parse_plugins_toml(&raw);
+        if let Some(ref extra_cfg) = cfg.configs_dir {
+            let _ = self.load_configs_dir(resolve_rel(toml_dir, extra_cfg));
+        }
+
+        let mut wasm_count = 0usize;
+        let mut amxx_count = 0usize;
+
+        if let Some(ref mods_dir) = cfg.mods_dir {
+            let resolved = resolve_rel(toml_dir, mods_dir);
+            if resolved.is_dir() {
+                wasm_count += self
+                    .load_dir(&resolved)
+                    .map_err(|e| format!("plugins.toml mods_dir `{}`: {e}", resolved.display()))?;
+            }
+        }
+        if let Some(ref amxx_dir) = cfg.amxx_dir {
+            let resolved = resolve_rel(toml_dir, amxx_dir);
+            if resolved.is_dir() {
+                amxx_count += self.load_amxx_dir(&resolved)?;
+            }
+        }
+
+        for entry_path in cfg.mod_entries {
+            let p = resolve_rel(toml_dir, &entry_path);
+            let pkg = if p.is_dir() {
+                crate::package::load_package_dir(&p).map_err(|e| e.to_string())?
+            } else {
+                let bytes = std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+                crate::package::load_package_csmod(&bytes, Some(p)).map_err(|e| e.to_string())?
+            };
+            self.load_package(pkg)?;
+            wasm_count += 1;
+        }
+
+        for entry_path in cfg.amxx_entries {
+            let p = resolve_rel(toml_dir, &entry_path);
+            let bytes = std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+            let name = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("plugin.amxx")
+                .to_string();
+            self.load_amxx_plugin(name, &bytes)
+                .map_err(|e| format!("failed to load AMXX plugin `{}`: {e}", p.display()))?;
+            amxx_count += 1;
+        }
+
+        Ok((wasm_count, amxx_count))
+    }
+
+    pub fn has_amxx(&self) -> bool {
+        let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+        core.amxx.is_some()
+    }
+
+    pub fn amxx_plugin_count(&self) -> usize {
+        let amxx_opt = {
+            let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+            core.amxx.clone()
+        };
+        amxx_opt.map_or(0, |a| {
+            a.lock().unwrap_or_else(|e| e.into_inner()).plugin_count()
+        })
+    }
+
+    pub fn amxx_server_prints(&self) -> Vec<String> {
+        let amxx_opt = {
+            let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+            core.amxx.clone()
+        };
+        amxx_opt.map_or_else(Vec::new, |a| {
+            a.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .state
+                .server_prints()
+                .to_vec()
+        })
+    }
+
+    pub fn amxx_runtime(&self) -> Option<Arc<Mutex<AmxxRuntime>>> {
+        let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+        core.amxx.clone()
+    }
+
+    /// Returns all bundled VFS assets across currently active mod packages so servers can mount
+    /// them into [`cs_vfs::Vfs`].
+    #[allow(clippy::type_complexity)]
+    pub fn loaded_mod_assets(&self) -> Vec<(String, Vec<(String, Vec<u8>)>)> {
+        let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out = Vec::new();
+        for id in &core.load_order {
+            if let Some(m) = core.mods.get(id)
+                && !m.package.assets.is_empty()
+            {
+                let entries = m
+                    .package
+                    .assets
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                out.push((m.package.manifest.id.clone(), entries));
+            }
+        }
+        out
     }
 
     /// Drains captured WASI `stdout`/`stderr` log lines `(mod_id, line)`.
@@ -647,6 +982,73 @@ fn fault_mod_core(core: &mut ServerModHostCore, mod_id: &str, reason: String) {
     }
 }
 
+fn flush_rpc_side_effects_core(
+    core_arc: &Arc<Mutex<ServerModHostCore>>,
+    mut game: Option<&mut GameState>,
+    eng: &mut EngineApi<'_>,
+) {
+    let now_secs = eng.time();
+    let queued = {
+        let mut core = core_arc.lock().unwrap_or_else(|e| e.into_inner());
+        let side_effects = {
+            let mut se = core
+                .rpc_side_effects
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            std::mem::take(&mut *se)
+        };
+        if side_effects.is_empty() {
+            return;
+        }
+        let mut ops_out = Vec::new();
+        for (callee_id, callee_out) in side_effects {
+            if let Some(m) = core.mods.get_mut(&callee_id) {
+                m.total_fuel_used = m.total_fuel_used.saturating_add(callee_out.fuel_used);
+            }
+            for line in &callee_out.wasi_logs {
+                if core.wasi_logs.len() < 256 {
+                    core.wasi_logs.push((callee_id.clone(), line.clone()));
+                }
+            }
+            persist_storage_writes_core(&mut core, &callee_id, &callee_out.storage_writes);
+            schedule_timers_core(&mut core, &callee_id, now_secs, &callee_out);
+            if !callee_out.ops.is_empty() {
+                ops_out.push((callee_id, callee_out.ops));
+            }
+        }
+        ops_out
+    };
+    for (callee_id, ops) in queued {
+        apply_ops_core(core_arc, game.as_deref_mut(), eng, &callee_id, ops);
+    }
+}
+
+fn with_amxx_core<R>(
+    core_arc: &Arc<Mutex<ServerModHostCore>>,
+    mut game: Option<&mut GameState>,
+    eng: &mut EngineApi<'_>,
+    f: impl FnOnce(&mut AmxxRuntime, &mut EngineApi<'_>, &mut dyn AmxxCsHooks) -> R,
+) -> Option<R> {
+    let amxx_arc = {
+        let core = core_arc.lock().unwrap_or_else(|e| e.into_inner());
+        core.amxx.clone()
+    }?;
+    let res = {
+        let Ok(mut amxx) = amxx_arc.try_lock() else {
+            return None;
+        };
+        if let Some(g) = game.as_deref_mut() {
+            let mut hooks = GameStateAmxxHooks(g);
+            f(&mut amxx, eng, &mut hooks)
+        } else {
+            let mut hooks = NoCsHooks;
+            f(&mut amxx, eng, &mut hooks)
+        }
+    };
+    flush_rpc_side_effects_core(core_arc, game, eng);
+    Some(res)
+}
+
 fn finalize_outcome_core(
     core_arc: &Arc<Mutex<ServerModHostCore>>,
     mod_id: &str,
@@ -1018,73 +1420,79 @@ fn dispatch_rpc_event_core(
     let (subs, services) = {
         let core = core_arc.lock().unwrap_or_else(|e| e.into_inner());
         let mut svc = core.services.lock();
-        svc.rpc
-            .record_event(event_name.to_string(), payload_json.to_string(), args);
+        svc.rpc.record_event(
+            event_name.to_string(),
+            payload_json.to_string(),
+            args.clone(),
+        );
         let subs = svc.rpc.subscribers(event_name);
         drop(svc);
         (subs, core.services.clone())
     };
-    if subs.is_empty() {
-        return;
-    }
 
-    let now = eng.time();
-    let snapshot = capture_snapshot(game.as_deref(), eng, &services);
-    let ev = ActiveEvent {
-        str_args: [
-            event_name.to_string(),
-            payload_json.to_string(),
-            String::new(),
-        ],
-        payload: payload_json.as_bytes().to_vec(),
-        ..Default::default()
-    };
+    if !subs.is_empty() {
+        let now = eng.time();
+        let snapshot = capture_snapshot(game.as_deref(), eng, &services);
+        let ev = ActiveEvent {
+            str_args: [
+                event_name.to_string(),
+                payload_json.to_string(),
+                String::new(),
+            ],
+            payload: payload_json.as_bytes().to_vec(),
+            ..Default::default()
+        };
 
-    for sub in subs {
-        if sub.runtime != PluginRuntimeKind::Wasm {
-            continue;
-        }
-        let target = {
-            let core = core_arc.lock().unwrap_or_else(|e| e.into_inner());
-            core.mods.get(&sub.owner_id).and_then(|m| {
-                m.instance.clone().map(|inst| {
-                    (
-                        inst,
-                        m.storage_cache.clone(),
-                        m.package.manifest.fuel_per_frame,
-                    )
-                })
-            })
-        };
-        let Some((inst_arc, storage_cache, fuel_budget)) = target else {
-            continue;
-        };
-        let res = {
-            let Ok(mut inst) = inst_arc.try_lock() else {
-                continue;
-            };
-            let ctx = ModExecContext {
-                snapshot: &snapshot,
-                event: &ev,
-                storage: &storage_cache,
-                fuel_budget,
-            };
-            inst.call_event(sub.callback_id, &ctx)
-        };
-        let outcome = match res {
-            Ok(o) => o,
-            Err(err) => {
-                let mut core = core_arc.lock().unwrap_or_else(|e| e.into_inner());
-                fault_mod_core(&mut core, &sub.owner_id, err.to_string());
+        for sub in subs {
+            if sub.runtime != PluginRuntimeKind::Wasm {
                 continue;
             }
-        };
-        let side_ops = finalize_outcome_core(core_arc, &sub.owner_id, now, &outcome);
-        for (callee_id, ops) in side_ops {
-            apply_ops_core(core_arc, game.as_deref_mut(), eng, &callee_id, ops);
+            let target = {
+                let core = core_arc.lock().unwrap_or_else(|e| e.into_inner());
+                core.mods.get(&sub.owner_id).and_then(|m| {
+                    m.instance.clone().map(|inst| {
+                        (
+                            inst,
+                            m.storage_cache.clone(),
+                            m.package.manifest.fuel_per_frame,
+                        )
+                    })
+                })
+            };
+            let Some((inst_arc, storage_cache, fuel_budget)) = target else {
+                continue;
+            };
+            let res = {
+                let Ok(mut inst) = inst_arc.try_lock() else {
+                    continue;
+                };
+                let ctx = ModExecContext {
+                    snapshot: &snapshot,
+                    event: &ev,
+                    storage: &storage_cache,
+                    fuel_budget,
+                };
+                inst.call_event(sub.callback_id, &ctx)
+            };
+            let outcome = match res {
+                Ok(o) => o,
+                Err(err) => {
+                    let mut core = core_arc.lock().unwrap_or_else(|e| e.into_inner());
+                    fault_mod_core(&mut core, &sub.owner_id, err.to_string());
+                    continue;
+                }
+            };
+            let side_ops = finalize_outcome_core(core_arc, &sub.owner_id, now, &outcome);
+            for (callee_id, ops) in side_ops {
+                apply_ops_core(core_arc, game.as_deref_mut(), eng, &callee_id, ops);
+            }
+            apply_ops_core(core_arc, game.as_deref_mut(), eng, &sub.owner_id, outcome.ops);
         }
-        apply_ops_core(core_arc, game.as_deref_mut(), eng, &sub.owner_id, outcome.ops);
     }
+
+    let _ = with_amxx_core(core_arc, game, eng, |amxx, eng, hooks| {
+        amxx.dispatch_rpc_event(eng, hooks, event_name, &args);
+    });
 }
 
 fn apply_ops_core(
@@ -1641,7 +2049,20 @@ impl CsHookSink for ServerModHostSink {
             i32_args: [i32::from(ctx.slot), 0, 0, 0, 0, 0],
             ..Default::default()
         };
-        dispatch_hook_core(&self.core, Some(g), eng, HookId::PlayerSpawn, phase, &ev).action
+        let wasm_act =
+            dispatch_hook_core(&self.core, Some(g), eng, HookId::PlayerSpawn, phase, &ev).action;
+        if phase == HookPhase::Pre && wasm_act == HookAction::Supercede {
+            return HookAction::Supercede;
+        }
+        let post = phase == HookPhase::Post;
+        let amxx_ret = with_amxx_core(&self.core, Some(g), eng, |amxx, eng, hooks| {
+            amxx.dispatch_ham_spawn(eng, hooks, u16::from(ctx.slot) + 1, "player", post)
+        })
+        .unwrap_or(0);
+        if !post && amxx_ret >= HAM_SUPERCEDE {
+            return HookAction::Supercede;
+        }
+        wasm_act
     }
 
     fn on_player_take_damage(
@@ -1671,15 +2092,70 @@ impl CsHookSink for ServerModHostSink {
             phase,
             &ev,
         );
-        if phase == HookPhase::Pre && res.action == HookAction::Override {
-            if let Some(dmg) = res.override_f32 {
-                ctx.damage = dmg.max(0.0);
+        let mut overridden = false;
+        if phase == HookPhase::Pre {
+            if res.action == HookAction::Supercede {
+                return HookAction::Supercede;
             }
-            if let Some(hg) = res.override_i32 {
-                ctx.hitgroup = hg.clamp(0, 15) as u8;
+            if res.action == HookAction::Override {
+                overridden = true;
+                if let Some(dmg) = res.override_f32 {
+                    ctx.damage = dmg.max(0.0);
+                }
+                if let Some(hg) = res.override_i32 {
+                    ctx.hitgroup = hg.clamp(0, 15) as u8;
+                }
             }
         }
-        res.action
+        let post = phase == HookPhase::Post;
+        let victim_ent = u16::from(ctx.victim) + 1;
+        let attacker_ent = ctx.attacker.map_or(0, |a| u16::from(a) + 1);
+        let amxx_res = with_amxx_core(&self.core, Some(g), eng, |amxx, eng, hooks| {
+            let r = amxx.dispatch_ham_take_damage_mut(
+                eng,
+                hooks,
+                victim_ent,
+                "player",
+                attacker_ent,
+                attacker_ent,
+                ctx.damage,
+                ctx.damage_bits as i32,
+                post,
+            );
+            if post {
+                amxx.dispatch_client_damage(
+                    eng,
+                    hooks,
+                    ctx.attacker,
+                    ctx.victim,
+                    ctx.damage.round() as i32,
+                    i32::from(ctx.weapon_id),
+                    i32::from(ctx.hitgroup),
+                    ctx.team_attack,
+                );
+            }
+            r
+        });
+        if !post
+            && let Some((ham_ret, new_dmg, new_bits)) = amxx_res
+        {
+            if ham_ret >= HAM_SUPERCEDE {
+                return HookAction::Supercede;
+            }
+            if let Some(d) = new_dmg {
+                ctx.damage = d.max(0.0);
+                overridden = true;
+            }
+            if let Some(b) = new_bits {
+                ctx.damage_bits = b as u32;
+                overridden = true;
+            }
+        }
+        if overridden {
+            HookAction::Override
+        } else {
+            res.action
+        }
     }
 
     fn on_player_killed(
@@ -1702,8 +2178,41 @@ impl CsHookSink for ServerModHostSink {
             ..Default::default()
         };
         let res = dispatch_hook_core(&self.core, Some(g), eng, HookId::PlayerKilled, phase, &ev);
+        if phase == HookPhase::Pre && res.action == HookAction::Supercede {
+            return HookAction::Supercede;
+        }
         if phase == HookPhase::Post {
             let _ = dispatch_hook_core(&self.core, Some(g), eng, HookId::PlayerDeath, phase, &ev);
+        }
+        let post = phase == HookPhase::Post;
+        let victim_ent = u16::from(ctx.victim) + 1;
+        let killer_ent = ctx.killer.map_or(0, |k| u16::from(k) + 1);
+        let amxx_ret = with_amxx_core(&self.core, Some(g), eng, |amxx, eng, hooks| {
+            let r = amxx.dispatch_ham_killed(
+                eng,
+                hooks,
+                victim_ent,
+                "player",
+                killer_ent,
+                0,
+                post,
+            );
+            if post {
+                amxx.dispatch_client_death(
+                    eng,
+                    hooks,
+                    ctx.killer,
+                    ctx.victim,
+                    i32::from(ctx.weapon_id),
+                    i32::from(ctx.hitgroup),
+                    ctx.team_kill,
+                );
+            }
+            r
+        })
+        .unwrap_or(0);
+        if !post && amxx_ret >= HAM_SUPERCEDE {
+            return HookAction::Supercede;
         }
         res.action
     }
@@ -1762,7 +2271,20 @@ impl CsHookSink for ServerModHostSink {
             i32_args: [i32::from(ctx.slot), 0, 0, 0, 0, 0],
             ..Default::default()
         };
-        dispatch_hook_core(&self.core, Some(g), eng, HookId::PlayerJump, phase, &ev).action
+        let wasm_act =
+            dispatch_hook_core(&self.core, Some(g), eng, HookId::PlayerJump, phase, &ev).action;
+        if phase == HookPhase::Pre && wasm_act == HookAction::Supercede {
+            return HookAction::Supercede;
+        }
+        let post = phase == HookPhase::Post;
+        let amxx_ret = with_amxx_core(&self.core, Some(g), eng, |amxx, eng, hooks| {
+            amxx.dispatch_ham_player_jump(eng, hooks, u16::from(ctx.slot) + 1, post)
+        })
+        .unwrap_or(0);
+        if !post && amxx_ret >= HAM_SUPERCEDE {
+            return HookAction::Supercede;
+        }
+        wasm_act
     }
 
     fn on_players_should_collide(
@@ -1854,7 +2376,21 @@ impl CsHookSink for ServerModHostSink {
             i32_args: [i32::from(ctx.slot), i32::from(ctx.weapon_id), 0, 0, 0, 0],
             ..Default::default()
         };
-        dispatch_hook_core(&self.core, Some(g), eng, HookId::WeaponDeploy, phase, &ev).action
+        let wasm_act =
+            dispatch_hook_core(&self.core, Some(g), eng, HookId::WeaponDeploy, phase, &ev).action;
+        if phase == HookPhase::Pre && wasm_act == HookAction::Supercede {
+            return HookAction::Supercede;
+        }
+        let post = phase == HookPhase::Post;
+        let cls = weapon_id_to_classname(ctx.weapon_id);
+        let amxx_ret = with_amxx_core(&self.core, Some(g), eng, |amxx, eng, hooks| {
+            amxx.dispatch_ham_item_deploy(eng, hooks, u16::from(ctx.slot) + 1, cls, post)
+        })
+        .unwrap_or(0);
+        if !post && amxx_ret >= HAM_SUPERCEDE {
+            return HookAction::Supercede;
+        }
+        wasm_act
     }
 
     fn on_weapon_primary_attack(
@@ -1868,7 +2404,7 @@ impl CsHookSink for ServerModHostSink {
             i32_args: [i32::from(ctx.slot), i32::from(ctx.weapon_id), 0, 0, 0, 0],
             ..Default::default()
         };
-        dispatch_hook_core(
+        let wasm_act = dispatch_hook_core(
             &self.core,
             Some(g),
             eng,
@@ -1876,7 +2412,20 @@ impl CsHookSink for ServerModHostSink {
             phase,
             &ev,
         )
-        .action
+        .action;
+        if phase == HookPhase::Pre && wasm_act == HookAction::Supercede {
+            return HookAction::Supercede;
+        }
+        let post = phase == HookPhase::Post;
+        let cls = weapon_id_to_classname(ctx.weapon_id);
+        let amxx_ret = with_amxx_core(&self.core, Some(g), eng, |amxx, eng, hooks| {
+            amxx.dispatch_ham_weapon_primary_attack(eng, hooks, u16::from(ctx.slot) + 1, cls, post)
+        })
+        .unwrap_or(0);
+        if !post && amxx_ret >= HAM_SUPERCEDE {
+            return HookAction::Supercede;
+        }
+        wasm_act
     }
 
     fn on_weapon_reload(
@@ -2096,7 +2645,14 @@ impl CsHookSink for ServerModHostSink {
             ],
             ..Default::default()
         };
-        dispatch_hook_core(&self.core, Some(g), eng, HookId::GrenadeThrow, phase, &ev).action
+        let act =
+            dispatch_hook_core(&self.core, Some(g), eng, HookId::GrenadeThrow, phase, &ev).action;
+        if phase == HookPhase::Post {
+            let _ = with_amxx_core(&self.core, Some(g), eng, |amxx, eng, hooks| {
+                amxx.dispatch_grenade_throw(eng, hooks, ctx.slot, ctx.ent_index, ctx.weapon_id);
+            });
+        }
+        act
     }
 
     fn on_entity_touch(
@@ -2135,7 +2691,36 @@ fn dispatch_bomb_hook(
         f32_args: [ctx.origin[0], ctx.origin[1], ctx.origin[2], 0.0],
         ..Default::default()
     };
-    dispatch_hook_core(core, Some(g), eng, hook, phase, &ev).action
+    let act = dispatch_hook_core(core, Some(g), eng, hook, phase, &ev).action;
+    if phase == HookPhase::Post {
+        let _ = with_amxx_core(core, Some(g), eng, |amxx, eng, hooks| match hook {
+            HookId::BombPlanting => {
+                if let Some(s) = ctx.slot {
+                    amxx.dispatch_bomb_planting(eng, hooks, s);
+                }
+            }
+            HookId::BombPlanted => {
+                if let Some(s) = ctx.slot {
+                    amxx.dispatch_bomb_planted(eng, hooks, s);
+                }
+            }
+            HookId::BombDefusing => {
+                if let Some(s) = ctx.slot {
+                    amxx.dispatch_bomb_defusing(eng, hooks, s);
+                }
+            }
+            HookId::BombDefused => {
+                if let Some(s) = ctx.slot {
+                    amxx.dispatch_bomb_defused(eng, hooks, s);
+                }
+            }
+            HookId::BombExploded => {
+                amxx.dispatch_bomb_explode(eng, hooks, ctx.slot, None);
+            }
+            _ => {}
+        });
+    }
+    act
 }
 
 /// [`GameDll`] wrapper weaving [`ServerModHost`] pre/post hookchains (and automatic
@@ -2236,22 +2821,24 @@ impl<G: GameDll + 'static> GameDll for ModdedGame<G> {
     }
 
     fn server_activate(&mut self, eng: &mut EngineApi<'_>) {
+        let core_arc = self.host.core_arc();
+        let _ = with_amxx_core(&core_arc, self.cs_state_mut(), eng, |amxx, eng, hooks| {
+            amxx.on_server_activate_precache(eng, hooks);
+        });
+
         let ev = ActiveEvent {
             i32_args: [i32::from(eng.max_clients()), 0, 0, 0, 0, 0],
             str_args: [eng.map_name().to_string(), String::new(), String::new()],
             ..Default::default()
         };
-        let pre = {
-            let core_arc = self.host.core_arc();
-            dispatch_hook_core(
-                &core_arc,
-                self.cs_state_mut(),
-                eng,
-                HookId::ServerActivate,
-                HookPhase::Pre,
-                &ev,
-            )
-        };
+        let pre = dispatch_hook_core(
+            &core_arc,
+            self.cs_state_mut(),
+            eng,
+            HookId::ServerActivate,
+            HookPhase::Pre,
+            &ev,
+        );
         if pre.action != HookAction::Supercede {
             self.inner.server_activate(eng);
         }
@@ -2269,7 +2856,17 @@ impl<G: GameDll + 'static> GameDll for ModdedGame<G> {
             cs_game.precache_mod_resources(eng);
         }
 
-        let core_arc = self.host.core_arc();
+        if let Some(unhandled) =
+            with_amxx_core(&core_arc, self.cs_state_mut(), eng, |amxx, eng, hooks| {
+                amxx.on_server_activate_init(eng, hooks);
+                amxx.drain_pending_server_cmds(eng, hooks)
+            })
+        {
+            for argv in unhandled {
+                let _ = self.inner.server_command(eng, &argv);
+            }
+        }
+
         let _ = dispatch_hook_core(
             &core_arc,
             self.cs_state_mut(),
@@ -2293,6 +2890,9 @@ impl<G: GameDll + 'static> GameDll for ModdedGame<G> {
     fn server_deactivate(&mut self, eng: &mut EngineApi<'_>) {
         let ev = ActiveEvent::default();
         let core_arc = self.host.core_arc();
+        let _ = with_amxx_core(&core_arc, self.cs_state_mut(), eng, |amxx, eng, hooks| {
+            amxx.on_server_deactivate(eng, hooks);
+        });
         let pre = dispatch_hook_core(
             &core_arc,
             self.cs_state_mut(),
@@ -2321,12 +2921,19 @@ impl<G: GameDll + 'static> GameDll for ModdedGame<G> {
         classname: &str,
         keys: &[(String, String)],
     ) -> bool {
+        let core_arc = self.host.core_arc();
+        let amxx_pre = with_amxx_core(&core_arc, self.cs_state_mut(), eng, |amxx, eng, hooks| {
+            amxx.dispatch_ham_spawn(eng, hooks, id.index, classname, false)
+        })
+        .unwrap_or(0);
+        if amxx_pre >= HAM_SUPERCEDE {
+            return false;
+        }
         let ev = ActiveEvent {
             i32_args: [i32::from(id.index), 0, 0, 0, 0, 0],
             str_args: [classname.to_string(), String::new(), String::new()],
             ..Default::default()
         };
-        let core_arc = self.host.core_arc();
         let pre = dispatch_hook_core(
             &core_arc,
             self.cs_state_mut(),
@@ -2340,6 +2947,11 @@ impl<G: GameDll + 'static> GameDll for ModdedGame<G> {
         } else {
             self.inner.spawn_entity(eng, id, classname, keys)
         };
+        if keep {
+            let _ = with_amxx_core(&core_arc, self.cs_state_mut(), eng, |amxx, eng, hooks| {
+                amxx.dispatch_ham_spawn(eng, hooks, id.index, classname, true)
+            });
+        }
         let _ = dispatch_hook_core(
             &core_arc,
             self.cs_state_mut(),
@@ -2363,6 +2975,14 @@ impl<G: GameDll + 'static> GameDll for ModdedGame<G> {
             let mut svc = services.lock();
             sync_player_admin(&mut svc.admins, eng, slot)?;
         }
+        let core_arc = self.host.core_arc();
+        if let Some(Err(reason)) =
+            with_amxx_core(&core_arc, self.cs_state_mut(), eng, |amxx, eng, hooks| {
+                amxx.on_client_connect(eng, hooks, slot)
+            })
+        {
+            return Err(reason);
+        }
         let ev = ActiveEvent {
             i32_args: [i32::from(slot), 0, 0, 0, 0, 0],
             str_args: [
@@ -2372,7 +2992,6 @@ impl<G: GameDll + 'static> GameDll for ModdedGame<G> {
             ],
             ..Default::default()
         };
-        let core_arc = self.host.core_arc();
         let pre = dispatch_hook_core(
             &core_arc,
             self.cs_state_mut(),
@@ -2420,6 +3039,9 @@ impl<G: GameDll + 'static> GameDll for ModdedGame<G> {
         if pre.action != HookAction::Supercede {
             self.inner.client_put_in_server(eng, slot);
         }
+        let _ = with_amxx_core(&core_arc, self.cs_state_mut(), eng, |amxx, eng, hooks| {
+            amxx.on_client_put_in_server(eng, hooks, slot);
+        });
         let _ = dispatch_hook_core(
             &core_arc,
             self.cs_state_mut(),
@@ -2435,6 +3057,10 @@ impl<G: GameDll + 'static> GameDll for ModdedGame<G> {
 
     fn client_disconnect(&mut self, eng: &mut EngineApi<'_>, slot: u8) {
         self.pending_catalog_slots.remove(&slot);
+        let core_arc = self.host.core_arc();
+        let _ = with_amxx_core(&core_arc, self.cs_state_mut(), eng, |amxx, eng, hooks| {
+            amxx.on_client_disconnect(eng, hooks, slot);
+        });
         {
             let services = self.host.services();
             let mut svc = services.lock();
@@ -2446,7 +3072,6 @@ impl<G: GameDll + 'static> GameDll for ModdedGame<G> {
             i32_args: [i32::from(slot), 0, 0, 0, 0, 0],
             ..Default::default()
         };
-        let core_arc = self.host.core_arc();
         let pre = dispatch_hook_core(
             &core_arc,
             self.cs_state_mut(),
@@ -2485,8 +3110,8 @@ impl<G: GameDll + 'static> GameDll for ModdedGame<G> {
         let cmd = argv.first().cloned().unwrap_or_default();
         let arg1 = argv.get(1).cloned().unwrap_or_default();
 
-        // Route `menuselect` through host `MenuManager` first so plugins never steal each other's
-        // presses or leak into vanilla CS 1.6 team/buy/radio menus.
+        // Route `menuselect` through host `MenuManager` first so WASM & AMXX plugins share menu
+        // ownership cleanly without stealing presses or leaking into vanilla CS 1.6 menus.
         if cmd.eq_ignore_ascii_case("menuselect")
             && let Ok(choice) = arg1.parse::<i32>()
         {
@@ -2505,11 +3130,12 @@ impl<G: GameDll + 'static> GameDll for ModdedGame<G> {
                 MenuSelectOutcome::Selected {
                     owner_id,
                     owner_runtime,
+                    owner_index,
                     menu_id,
                     callback_id,
+                    callback_name,
                     item_index,
                     info,
-                    ..
                 } => {
                     let core_arc = self.host.core_arc();
                     let ev = ActiveEvent {
@@ -2532,20 +3158,41 @@ impl<G: GameDll + 'static> GameDll for ModdedGame<G> {
                         HookPhase::Pre,
                         &ev,
                     );
-                    if pre.action != HookAction::Supercede
-                        && owner_runtime == PluginRuntimeKind::Wasm
-                    {
-                        dispatch_menu_callback_core(
-                            &core_arc,
-                            self.cs_state_mut(),
-                            eng,
-                            &owner_id,
-                            callback_id,
-                            slot,
-                            menu_id,
-                            item_index as i32,
-                            &info,
-                        );
+                    if pre.action != HookAction::Supercede {
+                        match owner_runtime {
+                            PluginRuntimeKind::Wasm => {
+                                dispatch_menu_callback_core(
+                                    &core_arc,
+                                    self.cs_state_mut(),
+                                    eng,
+                                    &owner_id,
+                                    callback_id,
+                                    slot,
+                                    menu_id,
+                                    item_index as i32,
+                                    &info,
+                                );
+                            }
+                            PluginRuntimeKind::Amxx => {
+                                let _ = with_amxx_core(
+                                    &core_arc,
+                                    self.cs_state_mut(),
+                                    eng,
+                                    |amxx, eng, hooks| {
+                                        amxx.dispatch_amxx_menu_callback(
+                                            eng,
+                                            hooks,
+                                            owner_index,
+                                            &callback_name,
+                                            slot,
+                                            menu_id,
+                                            item_index as i32,
+                                        );
+                                    },
+                                );
+                            }
+                            _ => {}
+                        }
                     }
                     let _ = dispatch_hook_core(
                         &core_arc,
@@ -2560,23 +3207,45 @@ impl<G: GameDll + 'static> GameDll for ModdedGame<G> {
                 MenuSelectOutcome::Exited {
                     owner_id,
                     owner_runtime,
+                    owner_index,
                     menu_id,
                     callback_id,
-                    ..
+                    callback_name,
                 } => {
-                    if owner_runtime == PluginRuntimeKind::Wasm {
-                        let core_arc = self.host.core_arc();
-                        dispatch_menu_callback_core(
-                            &core_arc,
-                            self.cs_state_mut(),
-                            eng,
-                            &owner_id,
-                            callback_id,
-                            slot,
-                            menu_id,
-                            -3, // MENU_EXIT
-                            "",
-                        );
+                    let core_arc = self.host.core_arc();
+                    match owner_runtime {
+                        PluginRuntimeKind::Wasm => {
+                            dispatch_menu_callback_core(
+                                &core_arc,
+                                self.cs_state_mut(),
+                                eng,
+                                &owner_id,
+                                callback_id,
+                                slot,
+                                menu_id,
+                                MENU_EXIT,
+                                "",
+                            );
+                        }
+                        PluginRuntimeKind::Amxx => {
+                            let _ = with_amxx_core(
+                                &core_arc,
+                                self.cs_state_mut(),
+                                eng,
+                                |amxx, eng, hooks| {
+                                    amxx.dispatch_amxx_menu_callback(
+                                        eng,
+                                        hooks,
+                                        owner_index,
+                                        &callback_name,
+                                        slot,
+                                        menu_id,
+                                        MENU_EXIT,
+                                    );
+                                },
+                            );
+                        }
+                        _ => {}
                     }
                     return;
                 }
@@ -2621,7 +3290,14 @@ impl<G: GameDll + 'static> GameDll for ModdedGame<G> {
                 .any(|m| m.status == ModStatus::Active && m.registered_commands.contains(&cmd))
         };
         if pre.action != HookAction::Supercede && pre.action != HookAction::Handled {
-            self.inner.client_command(eng, slot, argv);
+            let amxx_handled =
+                with_amxx_core(&core_arc, self.cs_state_mut(), eng, |amxx, eng, hooks| {
+                    amxx.dispatch_client_command_after_menu(eng, hooks, slot, argv)
+                })
+                .unwrap_or(false);
+            if !amxx_handled {
+                self.inner.client_command(eng, slot, argv);
+            }
         }
         let _ = dispatch_hook_core(
             &core_arc,
@@ -2640,11 +3316,14 @@ impl<G: GameDll + 'static> GameDll for ModdedGame<G> {
             sync_player_lang_from_userinfo(&mut svc.lang, eng, slot, &*core.storage);
             let _ = sync_player_admin(&mut svc.admins, eng, slot);
         }
+        let core_arc = self.host.core_arc();
+        let _ = with_amxx_core(&core_arc, self.cs_state_mut(), eng, |amxx, eng, hooks| {
+            amxx.on_client_userinfo_changed(eng, hooks, slot);
+        });
         let ev = ActiveEvent {
             i32_args: [i32::from(slot), 0, 0, 0, 0, 0],
             ..Default::default()
         };
-        let core_arc = self.host.core_arc();
         let pre = dispatch_hook_core(
             &core_arc,
             self.cs_state_mut(),
@@ -2746,6 +3425,16 @@ impl<G: GameDll + 'static> GameDll for ModdedGame<G> {
         let core_arc = self.host.core_arc();
         poll_webhooks_core(&core_arc, self.cs_state_mut(), eng);
         tick_timers_core(&core_arc, self.cs_state_mut(), eng);
+        if let Some(unhandled) =
+            with_amxx_core(&core_arc, self.cs_state_mut(), eng, |amxx, eng, hooks| {
+                amxx.tick_tasks(eng, hooks);
+                amxx.drain_pending_server_cmds(eng, hooks)
+            })
+        {
+            for argv in unhandled {
+                let _ = self.inner.server_command(eng, &argv);
+            }
+        }
         self.flush_client_chunk_requests(eng);
 
         let ev = ActiveEvent {
@@ -2801,11 +3490,22 @@ impl<G: GameDll + 'static> GameDll for ModdedGame<G> {
     }
 
     fn touch(&mut self, eng: &mut EngineApi<'_>, toucher: EdictId, other: EdictId) {
+        let core_arc = self.host.core_arc();
+        let classname = eng
+            .ent(toucher)
+            .map(|v| v.classname.clone())
+            .unwrap_or_default();
+        let amxx_pre = with_amxx_core(&core_arc, self.cs_state_mut(), eng, |amxx, eng, hooks| {
+            amxx.dispatch_ham_touch(eng, hooks, toucher.index, &classname, other.index, false)
+        })
+        .unwrap_or(0);
+        if amxx_pre >= HAM_SUPERCEDE {
+            return;
+        }
         let ev = ActiveEvent {
             i32_args: [i32::from(toucher.index), i32::from(other.index), 0, 0, 0, 0],
             ..Default::default()
         };
-        let core_arc = self.host.core_arc();
         let pre = dispatch_hook_core(
             &core_arc,
             self.cs_state_mut(),
@@ -2816,6 +3516,9 @@ impl<G: GameDll + 'static> GameDll for ModdedGame<G> {
         );
         if pre.action != HookAction::Supercede {
             self.inner.touch(eng, toucher, other);
+            let _ = with_amxx_core(&core_arc, self.cs_state_mut(), eng, |amxx, eng, hooks| {
+                amxx.dispatch_ham_touch(eng, hooks, toucher.index, &classname, other.index, true)
+            });
         }
         let _ = dispatch_hook_core(
             &core_arc,
@@ -2878,6 +3581,10 @@ impl<G: GameDll + 'static> GameDll for ModdedGame<G> {
                         info.id, info.version, info.status, info.total_fuel_used
                     ));
                 }
+                let amxx_n = self.host.amxx_plugin_count();
+                if amxx_n > 0 {
+                    out.push_str(&format!("amxx plugins loaded: {amxx_n}\n"));
+                }
                 if out.is_empty() {
                     out.push_str("no mods loaded\n");
                 }
@@ -2901,6 +3608,15 @@ impl<G: GameDll + 'static> GameDll for ModdedGame<G> {
             _ => {}
         }
 
+        let core_arc = self.host.core_arc();
+        if let Some(Some(reply)) =
+            with_amxx_core(&core_arc, self.cs_state_mut(), eng, |amxx, eng, hooks| {
+                amxx.dispatch_server_command(eng, hooks, argv)
+            })
+        {
+            return Some(reply);
+        }
+
         let ev = ActiveEvent {
             str_args: [
                 cmd.to_string(),
@@ -2909,7 +3625,6 @@ impl<G: GameDll + 'static> GameDll for ModdedGame<G> {
             ],
             ..Default::default()
         };
-        let core_arc = self.host.core_arc();
         let pre = dispatch_hook_core(
             &core_arc,
             self.cs_state_mut(),
@@ -3094,4 +3809,148 @@ fn is_safe_storage_subkey(key: &str) -> bool {
         && key
             .bytes()
             .all(|b| matches!(b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-' | b'.'))
+}
+
+fn weapon_id_to_classname(weapon_id: u8) -> &'static str {
+    match weapon_id {
+        1 => "weapon_p228",
+        3 => "weapon_scout",
+        4 => "weapon_hegrenade",
+        5 => "weapon_xm1014",
+        6 => "weapon_c4",
+        7 => "weapon_mac10",
+        8 => "weapon_aug",
+        9 => "weapon_smokegrenade",
+        10 => "weapon_elite",
+        11 => "weapon_fiveseven",
+        12 => "weapon_ump45",
+        13 => "weapon_sg550",
+        14 => "weapon_galil",
+        15 => "weapon_famas",
+        16 => "weapon_usp",
+        17 => "weapon_glock18",
+        18 => "weapon_awp",
+        19 => "weapon_mp5navy",
+        20 => "weapon_m249",
+        21 => "weapon_m3",
+        22 => "weapon_m4a1",
+        23 => "weapon_tmp",
+        24 => "weapon_g3sg1",
+        25 => "weapon_flashbang",
+        26 => "weapon_deagle",
+        27 => "weapon_sg552",
+        28 => "weapon_ak47",
+        29 => "weapon_knife",
+        30 => "weapon_p90",
+        _ => "weapon_knife",
+    }
+}
+
+#[derive(Default)]
+struct PluginsTomlConfig {
+    mods_dir: Option<String>,
+    amxx_dir: Option<String>,
+    configs_dir: Option<String>,
+    mod_entries: Vec<String>,
+    amxx_entries: Vec<String>,
+}
+
+fn resolve_rel(base: &Path, raw: &str) -> PathBuf {
+    let p = Path::new(raw);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        base.join(p)
+    }
+}
+
+fn parse_plugins_toml(src: &str) -> PluginsTomlConfig {
+    let mut cfg = PluginsTomlConfig::default();
+    let mut in_plugin_table = false;
+    let mut cur_path: Option<String> = None;
+    let mut cur_enabled = true;
+    let mut cur_kind: Option<String> = None;
+
+    let flush = |cfg: &mut PluginsTomlConfig,
+                 path: &mut Option<String>,
+                 enabled: &mut bool,
+                 kind: &mut Option<String>| {
+        if let Some(p) = path.take()
+            && *enabled
+        {
+            let lower = p.to_ascii_lowercase();
+            let is_amxx = kind
+                .as_deref()
+                .is_some_and(|k| k.eq_ignore_ascii_case("amxx"))
+                || lower.ends_with(".amxx")
+                || lower.ends_with(".amx");
+            if is_amxx {
+                cfg.amxx_entries.push(p);
+            } else {
+                cfg.mod_entries.push(p);
+            }
+        }
+        *enabled = true;
+        *kind = None;
+    };
+
+    for raw_line in src.lines() {
+        let line = raw_line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line == "[[plugins]]" {
+            flush(&mut cfg, &mut cur_path, &mut cur_enabled, &mut cur_kind);
+            in_plugin_table = true;
+            continue;
+        }
+        if line.starts_with('[') {
+            flush(&mut cfg, &mut cur_path, &mut cur_enabled, &mut cur_kind);
+            in_plugin_table = false;
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let key = k.trim();
+        let val = v.trim();
+        let unquoted = val.trim_matches('"').trim_matches('\'').to_string();
+        if in_plugin_table {
+            match key {
+                "path" => cur_path = Some(unquoted),
+                "enabled" => cur_enabled = !val.eq_ignore_ascii_case("false"),
+                "type" | "runtime" => cur_kind = Some(unquoted),
+                _ => {}
+            }
+        } else {
+            match key {
+                "mods_dir" => cfg.mods_dir = Some(unquoted),
+                "amxx_dir" => cfg.amxx_dir = Some(unquoted),
+                "configs_dir" => cfg.configs_dir = Some(unquoted),
+                "mods" => {
+                    for item in parse_toml_string_array(val) {
+                        cfg.mod_entries.push(item);
+                    }
+                }
+                "amxx" => {
+                    for item in parse_toml_string_array(val) {
+                        cfg.amxx_entries.push(item);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    flush(&mut cfg, &mut cur_path, &mut cur_enabled, &mut cur_kind);
+    cfg
+}
+
+fn parse_toml_string_array(val: &str) -> Vec<String> {
+    let trimmed = val.trim().trim_start_matches('[').trim_end_matches(']');
+    trimmed
+        .split(',')
+        .map(|s| s.trim().trim_matches('"').trim_matches('\'').trim())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
 }
