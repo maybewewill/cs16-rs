@@ -254,6 +254,16 @@ impl Session {
         with_conn!(self, c => Some(c.download_progress()), else None)
     }
 
+    pub fn remote_udp_addr(&self) -> Option<std::net::SocketAddr> {
+        match &self.kind {
+            Kind::Remote { conn, .. } => match conn.server_addr() {
+                PeerAddr::Udp(sa) => Some(sa),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// The session clock: what the connection is pumped with and the effects run on.
     pub fn now(&self) -> f64 {
         match &self.kind {

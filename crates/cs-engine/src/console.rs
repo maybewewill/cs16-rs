@@ -129,8 +129,31 @@ impl<G: GameDll> Server<G> {
             return output("");
         }
         match name.to_ascii_lowercase().as_str() {
-            "status" => return self.console_status(),
+            "status" => {
+                if argv.get(1).is_some_and(|a| a.eq_ignore_ascii_case("full")) {
+                    return self.console_status_full();
+                }
+                return self.console_status();
+            }
+            "users" => return self.console_users(),
             "kick" => return self.console_kick(&argv[1..]),
+            "banid" => return self.console_banid(&argv[1..]),
+            "removeid" => return self.console_removeid(&argv[1..]),
+            "listid" => return output(self.bans.list_id(self.real_time)),
+            "writeid" => return output(format!("Writing listid...\n{}", self.bans.write_id_cfg(self.real_time))),
+            "addip" => return self.console_addip(&argv[1..]),
+            "removeip" => return self.console_removeip(&argv[1..]),
+            "listip" => return output(self.bans.list_ip(self.real_time)),
+            "writeip" => return output(format!("Writing listip...\n{}", self.bans.write_ip_cfg(self.real_time))),
+            "log" => return self.console_log(&argv[1..]),
+            "logaddress" => return self.console_logaddress(&argv[1..], false),
+            "logaddress_add" => return self.console_logaddress(&argv[1..], true),
+            "logaddress_del" => return self.console_logaddress_del(&argv[1..]),
+            "logaddress_delall" => {
+                self.logger.clear_addresses();
+                return output("Cleared all log addresses\n");
+            }
+            "pause" => return self.console_pause(),
             "say" => return self.console_say(&argv[1..]),
             "changelevel" | "map" => return console_changelevel(&argv[1..]),
             "quit" | "exit" => return ConsoleOutcome::Quit,
@@ -269,8 +292,224 @@ impl<G: GameDll> Server<G> {
         if args.is_empty() {
             return output("Usage: say <text>\n");
         }
-        let text = format!("Console: {}\n", clean(&args.join(" ")));
+        let clean_msg = clean(&args.join(" "));
+        self.logger.log(
+            self.real_time,
+            &format!("\"Console<0><Console><Console>\" say \"{clean_msg}\""),
+        );
+        let text = format!("Console: {clean_msg}\n");
         self.with_game(|_, eng| eng.print_all(&text));
         output("")
+    }
+
+    fn console_status_full(&self) -> ConsoleOutcome {
+        let active_count = self.clients.iter().filter(|c| !c.is_free()).count();
+        let bots = self.fake_client_count();
+        let mut text = format!(
+            "hostname:  {}\nversion :  48/1.1.2.7/Stdio {} secure\ntcp/ip  :  0.0.0.0:27015\nmap     :  {}\nplayers :  {} active ({} max, {} bots)\n\n#      name userid uniqueid frag time ping loss adr\n",
+            clean(&self.hostname()),
+            self.cfg.build,
+            clean(&self.map.name),
+            active_count,
+            self.cfg.max_clients,
+            bots,
+        );
+        for (index, client) in self.clients.iter().enumerate() {
+            if client.is_free() {
+                continue;
+            }
+            let name = clean(self.views[index].userinfo.get("name").unwrap_or(""));
+            let uid = if client.fake {
+                "BOT".to_string()
+            } else {
+                clean(&client.auth_id)
+            };
+            let adr = if client.fake {
+                "BOT".to_string()
+            } else {
+                client.addr.map_or_else(String::new, |a| a.to_string())
+            };
+            let elapsed = (self.real_time - client.connected_at).max(0.0) as u64;
+            let hh = elapsed / 3600;
+            let mm = (elapsed / 60) % 60;
+            let ss = elapsed % 60;
+            text.push_str(&format!(
+                "# {:>2} \"{}\" {} {} 0 {hh:02}:{mm:02}:{ss:02} {} 0 {}\n",
+                index + 1,
+                name,
+                client.userid,
+                uid,
+                client.pings.ping_ms(),
+                clean(&adr),
+            ));
+        }
+        text.push_str(&format!("{active_count} users\n"));
+        output(text)
+    }
+
+    fn console_users(&self) -> ConsoleOutcome {
+        let mut text = String::from("<slot:userid:\"name\">\n");
+        let mut count = 0usize;
+        for (index, client) in self.clients.iter().enumerate() {
+            if client.is_free() {
+                continue;
+            }
+            count += 1;
+            let name = clean(self.views[index].userinfo.get("name").unwrap_or(""));
+            text.push_str(&format!("{}:{}: \"{}\"\n", index + 1, client.userid, name));
+        }
+        text.push_str(&format!("{count} users\n"));
+        output(text)
+    }
+
+    fn console_banid(&mut self, args: &[String]) -> ConsoleOutcome {
+        let Some(mins_str) = args.first() else {
+            return output("Usage: banid <minutes> <#userid | uniqueid> [kick]\n");
+        };
+        let Ok(mins) = mins_str.parse::<f64>() else {
+            return output("Usage: banid <minutes> <#userid | uniqueid> [kick]\n");
+        };
+        let Some(target) = args.get(1) else {
+            return output("Usage: banid <minutes> <#userid | uniqueid> [kick]\n");
+        };
+        let kick = args.get(2).is_some_and(|a| a.eq_ignore_ascii_case("kick"));
+        let mut kick_slot = None;
+        let auth_id = if target.starts_with('#') || target.bytes().all(|b| b.is_ascii_digit()) {
+            match self.find_kick_target(target) {
+                Ok(slot) => {
+                    kick_slot = Some(slot);
+                    self.clients[usize::from(slot)].auth_id.clone()
+                }
+                Err(msg) => return output(msg),
+            }
+        } else {
+            target.clone()
+        };
+        if auth_id.is_empty() {
+            return output("Cannot ban empty uniqueid\n");
+        }
+        if let Err(e) = self.bans.add_id(mins, &auth_id, self.real_time) {
+            return output(format!("{e}\n"));
+        }
+        self.logger.log(
+            self.real_time,
+            &format!("Banid: \"<{auth_id}>\" banned ({mins} min)"),
+        );
+        if kick && let Some(slot) = kick_slot {
+            self.kick(slot, "Kicked and banned");
+        }
+        output(format!("banid: \"{}\" banned ({mins} min)\n", clean(&auth_id)))
+    }
+
+    fn console_removeid(&mut self, args: &[String]) -> ConsoleOutcome {
+        let Some(id) = args.first() else {
+            return output("Usage: removeid <uniqueid>\n");
+        };
+        if self.bans.remove_id(id) {
+            output(format!("removeid: removed \"{}\"\n", clean(id)))
+        } else {
+            output(format!("removeid: couldn't find \"{}\"\n", clean(id)))
+        }
+    }
+
+    fn console_addip(&mut self, args: &[String]) -> ConsoleOutcome {
+        let Some(mins_str) = args.first() else {
+            return output("Usage: addip <minutes> <ipaddress>\n");
+        };
+        let Ok(mins) = mins_str.parse::<f64>() else {
+            return output("Usage: addip <minutes> <ipaddress>\n");
+        };
+        let Some(ip) = args.get(1) else {
+            return output("Usage: addip <minutes> <ipaddress>\n");
+        };
+        match self.bans.add_ip(mins, ip, self.real_time) {
+            Ok(()) => output(format!("addip: \"{}\" banned ({mins} min)\n", clean(ip))),
+            Err(e) => output(format!("{e}\n")),
+        }
+    }
+
+    fn console_removeip(&mut self, args: &[String]) -> ConsoleOutcome {
+        let Some(ip) = args.first() else {
+            return output("Usage: removeip <ipaddress>\n");
+        };
+        if self.bans.remove_ip(ip) {
+            output(format!("removeip: removed \"{}\"\n", clean(ip)))
+        } else {
+            output(format!("removeip: couldn't find \"{}\"\n", clean(ip)))
+        }
+    }
+
+    fn console_log(&mut self, args: &[String]) -> ConsoleOutcome {
+        match args.first().map(|s| s.to_ascii_lowercase()).as_deref() {
+            Some("on") => {
+                self.logger.enabled = true;
+                self.logger.log(self.real_time, "Log file started");
+                output("Server logging enabled.\n")
+            }
+            Some("off") => {
+                self.logger.log(self.real_time, "Log file closed");
+                self.logger.enabled = false;
+                output("Server logging disabled.\n")
+            }
+            _ => output(format!(
+                "Server logging is currently {}\n",
+                if self.logger.enabled { "enabled" } else { "disabled" }
+            )),
+        }
+    }
+
+    fn parse_log_peer(args: &[String]) -> Option<cs_transport::PeerAddr> {
+        let addr_str = match args {
+            [ip, port] => format!("{ip}:{port}"),
+            [ip_port] => ip_port.clone(),
+            _ => return None,
+        };
+        addr_str
+            .parse::<std::net::SocketAddr>()
+            .ok()
+            .map(cs_transport::PeerAddr::Udp)
+    }
+
+    fn console_logaddress(&mut self, args: &[String], append: bool) -> ConsoleOutcome {
+        let Some(peer) = Self::parse_log_peer(args) else {
+            return output("Usage: logaddress <ip> <port>\n");
+        };
+        if append {
+            let _ = self.logger.add_address(peer);
+        } else {
+            self.logger.set_single_address(peer);
+        }
+        output(format!("logaddress: {peer}\n"))
+    }
+
+    fn console_logaddress_del(&mut self, args: &[String]) -> ConsoleOutcome {
+        let Some(peer) = Self::parse_log_peer(args) else {
+            return output("Usage: logaddress_del <ip> <port>\n");
+        };
+        if self.logger.remove_address(&peer) {
+            output(format!("Removed logaddress {peer}\n"))
+        } else {
+            output(format!("logaddress {peer} not found\n"))
+        }
+    }
+
+    fn console_pause(&mut self) -> ConsoleOutcome {
+        if self.cvars.get_f32("pausable") <= 0.0 {
+            return output("Cannot pause\n");
+        }
+        self.paused = !self.paused;
+        let mut w = cs_proto48::bitbuf::MsgWriter::new();
+        cs_proto48::messages::write_svc_setpause(&mut w, self.paused);
+        let bytes = w.into_bytes();
+        for client in &mut self.clients {
+            if client.state == ClientState::Active && !client.fake {
+                client.chan.write_reliable(&bytes);
+            }
+        }
+        if self.paused {
+            output("Server paused\n")
+        } else {
+            output("Server unpaused\n")
+        }
     }
 }

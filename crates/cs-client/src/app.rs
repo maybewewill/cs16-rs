@@ -202,6 +202,14 @@ pub struct Cs16App {
     exit_after_screenshot: bool,
     config_path: PathBuf,
     recording_demo: Option<String>,
+    pending_rcon: Option<PendingRcon>,
+}
+
+struct PendingRcon {
+    socket: std::net::UdpSocket,
+    target: std::net::SocketAddr,
+    client: cs_clientcore::RconClient,
+    deadline: std::time::Instant,
 }
 
 impl Cs16App {
@@ -335,11 +343,89 @@ impl Cs16App {
             exit_after_screenshot,
             config_path,
             recording_demo: None,
+            pending_rcon: None,
         }
     }
 
     fn is_in_game(&self) -> bool {
         self.session.in_game()
+    }
+
+    fn issue_rcon_command(&mut self, args: &[String]) {
+        use std::net::ToSocketAddrs;
+        if args.is_empty() {
+            self.cvars.warn("Usage: rcon <command>");
+            return;
+        }
+        let password = self.cvars.get_str("rcon_password").to_string();
+        if password.is_empty() {
+            self.cvars.warn("rcon_password is empty");
+            return;
+        }
+        let raw_addr = self.cvars.get_str("rcon_address").trim().to_string();
+        let target = if !raw_addr.is_empty() {
+            let with_port = if raw_addr.contains(':') {
+                raw_addr
+            } else {
+                let port = self.cvars.get_str("rcon_port").trim();
+                let port = if port.is_empty() { "27015" } else { port };
+                format!("{raw_addr}:{port}")
+            };
+            match with_port
+                .to_socket_addrs()
+                .ok()
+                .and_then(|mut it| it.find(std::net::SocketAddr::is_ipv4))
+            {
+                Some(sa) => sa,
+                None => {
+                    self.cvars.warn(format!("rcon: cannot resolve {with_port}"));
+                    return;
+                }
+            }
+        } else if let Some(sa) = self.session.remote_udp_addr() {
+            sa
+        } else {
+            self.cvars
+                .warn("rcon: connect to a remote server or set rcon_address");
+            return;
+        };
+        let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") else {
+            self.cvars.warn("rcon: failed to bind UDP socket");
+            return;
+        };
+        let _ = socket.set_nonblocking(true);
+        let mut client = cs_clientcore::RconClient::new();
+        let pkt = client.start_command(&password, &args.join(" "));
+        let _ = socket.send_to(&pkt, target);
+        self.pending_rcon = Some(PendingRcon {
+            socket,
+            target,
+            client,
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(3),
+        });
+    }
+
+    fn poll_rcon(&mut self) {
+        let Some(mut pending) = self.pending_rcon.take() else {
+            return;
+        };
+        let mut buf = [0u8; 4096];
+        while let Ok((len, from)) = pending.socket.recv_from(&mut buf) {
+            if from != pending.target {
+                continue;
+            }
+            if let Some(reply_pkt) = pending.client.on_datagram(&buf[..len]) {
+                let _ = pending.socket.send_to(&reply_pkt, pending.target);
+            }
+        }
+        for line in pending.client.take_replies() {
+            for part in line.lines() {
+                self.cvars.info(part);
+            }
+        }
+        if std::time::Instant::now() < pending.deadline {
+            self.pending_rcon = Some(pending);
+        }
     }
 
     fn any_modal_open(&self) -> bool {
@@ -524,6 +610,7 @@ impl Cs16App {
 
     /// Drops the session and the map; the menu comes back.
     fn end_session(&mut self) {
+        self.pending_rcon = None;
         if !self.session.is_active() {
             return;
         }
@@ -946,6 +1033,12 @@ impl Cs16App {
                     EngineAction::SelectSlot(slot) => self.select_slot(slot),
                     EngineAction::Impulse(n) => self.pending_impulse = n,
                     EngineAction::Forward(tokens) => {
+                        if let Some(cmd) = tokens.first().map(String::as_str)
+                            && cmd.eq_ignore_ascii_case("rcon")
+                        {
+                            self.issue_rcon_command(&tokens[1..]);
+                            continue;
+                        }
                         if let Some(cmd) = tokens.first().map(String::as_str)
                             && (cmd == "mod_approve" || cmd == "mod_deny")
                         {
@@ -1396,6 +1489,7 @@ impl Cs16App {
         let inst_fps = 1.0 / raw_dt.max(0.0001);
         self.fps_smooth = self.fps_smooth * 0.9 + inst_fps * 0.1;
         self.frame_ms_smooth = self.frame_ms_smooth * 0.9 + (raw_dt * 1000.0) * 0.1;
+        self.poll_rcon();
 
         if self.session.is_active() {
             let desired_name = self.cvars.get_str("name").to_string();

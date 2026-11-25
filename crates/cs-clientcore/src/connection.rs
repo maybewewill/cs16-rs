@@ -996,6 +996,10 @@ impl<T: PacketTransport> Connection<T> {
         self.stats
     }
 
+    pub fn server_addr(&self) -> PeerAddr {
+        self.server
+    }
+
     /// The transport the connection talks through.
     pub fn transport(&self) -> &T {
         &self.transport
@@ -1339,6 +1343,21 @@ impl<T: PacketTransport> Connection<T> {
                 if matches!(self.state, ConnState::Signon | ConnState::InGame) =>
             {
                 self.stufftext(&text);
+            }
+            SvcMessage::Exec(text)
+                if matches!(self.state, ConnState::Signon | ConnState::InGame) =>
+            {
+                self.stufftext(&text);
+            }
+            SvcMessage::Director(bytes)
+                if matches!(self.state, ConnState::Signon | ConnState::InGame)
+                    && bytes.first() == Some(&cs_proto48::messages::drc::CMD_STUFFTEXT)
+                    && bytes.len() > 1 =>
+            {
+                let body = &bytes[1..];
+                let end = body.iter().position(|&b| b == 0).unwrap_or(body.len());
+                let cmd = String::from_utf8_lossy(&body[..end]);
+                self.stufftext(&cmd);
             }
             SvcMessage::Print(text) => self.print(text.trim_end_matches('\n').to_string()),
             SvcMessage::NewMoveVars(vars) => self.movevars = Some(sanitize_movevars(*vars)),

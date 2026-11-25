@@ -758,3 +758,23 @@ fn a_custom_map_wad_is_downloaded_by_its_exact_name() {
     deliver_file(&mut server, &mut conn, &mut now, "custom_tex.wad", "", 3, b"abc");
     assert_eq!(*stored.lock().unwrap(), vec!["custom_tex.wad"]);
 }
+
+#[test]
+fn slowhack_defense_blocks_exec_director_and_restricted_cmds() {
+    let (mut server, mut conn) = new_pair(config());
+    let mut now = handshake(&mut server, &mut conn);
+
+    let mut drc = vec![cs_proto48::messages::drc::CMD_STUFFTEXT];
+    drc.extend_from_slice(b"bind k kill; motd_write pwn; alias x y; exec evil.cfg\0");
+    let pkt = msg(|w| {
+        cs_proto48::messages::write_svc_exec(w, "unbindall; rate 1000; echo safe_ok");
+        cs_proto48::messages::write_svc_director(w, &drc);
+    });
+    let reply = exchange(&mut server, &mut conn, &mut now, &pkt);
+    assert!(string_cmds(&reply).is_empty());
+    assert_eq!(conn.cvars().string("rate"), "30000");
+    assert!(conn.console_log().iter().any(|l| l == "safe_ok"));
+    assert!(conn.console_log().iter().any(|l| l.contains("privileged command bind")));
+    assert!(conn.console_log().iter().any(|l| l.contains("privileged command unbindall")));
+    assert!(conn.console_log().iter().any(|l| l.contains("rate is a privileged") || l.contains("filter")));
+}

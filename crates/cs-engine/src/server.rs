@@ -136,6 +136,11 @@ pub struct Server<G: GameDll> {
     pub(crate) consistency_rules: BTreeMap<String, crate::downloads::ConsistencyRule>,
     pub(crate) customizations: crate::downloads::CustomizationStore,
     pub(crate) resource_cache: Vec<cs_proto48::messages::ResourceEntry>,
+    pub(crate) rcon: crate::rcon::RconState,
+    pub(crate) bans: crate::bans::BanList,
+    pub(crate) logger: crate::logging::ServerLogger,
+    pub(crate) paused: bool,
+    pub(crate) last_userinfo_hash: Vec<(String, f64)>,
 }
 
 /// Monotonic counts of what the server refused, dropped or failed to send.
@@ -256,6 +261,11 @@ impl<G: GameDll> Server<G> {
             consistency_rules: BTreeMap::new(),
             customizations: crate::downloads::CustomizationStore::default(),
             resource_cache: Vec::new(),
+            rcon: crate::rcon::RconState::new(),
+            bans: crate::bans::BanList::default(),
+            logger: crate::logging::ServerLogger::default(),
+            paused: false,
+            last_userinfo_hash: vec![(String::new(), -100.0); slots],
         };
         server.activate_map();
         server
@@ -298,6 +308,8 @@ impl<G: GameDll> Server<G> {
     /// Spawns the map's entities, lets the game activate the current map, then locks the
     /// precache tables and computes the spawn baselines.
     pub(crate) fn activate_map(&mut self) {
+        self.logger
+            .log(self.real_time, &format!("Loading map \"{}\"", self.map.name));
         // ReHLDS builds the PAS at SV_SpawnServer, before the map entities exist.
         self.map.calc_pas(self.cfg.max_clients);
         // While the game spawns entities and activates the map, messages sent to
@@ -341,18 +353,21 @@ impl<G: GameDll> Server<G> {
             };
             self.handle_datagram(net, from, &data);
         }
-        self.run_physics();
-        // The physics pass is the frame's game work: deliver what is still queued, and start a
-        // fresh touch budget, before the updates are built.
-        self.finish_frame_touches();
+        if !self.paused {
+            self.run_physics();
+            // The physics pass is the frame's game work: deliver what is still queued, and start a
+            // fresh touch budget, before the updates are built.
+            self.finish_frame_touches();
+            self.sv_time += self.frametime;
+        }
         self.flush_reliable_datagram();
-        self.sv_time += self.frametime;
         self.drop_timed_out_clients();
         self.queue_pings_if_due();
         self.broadcast_userinfo();
         self.send_client_frames(net);
         self.cleanup_ents();
         self.send_farewells(net);
+        self.logger.flush(net);
         self.frametime = 0.0;
     }
 
@@ -506,6 +521,107 @@ impl<G: GameDll> Server<G> {
 
     pub fn set_cvar(&mut self, name: &str, value: &str) {
         self.cvars.set(name, value);
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused
+    }
+
+    pub fn logger(&self) -> &crate::logging::ServerLogger {
+        &self.logger
+    }
+
+    pub fn logger_mut(&mut self) -> &mut crate::logging::ServerLogger {
+        &mut self.logger
+    }
+
+    pub fn bans(&self) -> &crate::bans::BanList {
+        &self.bans
+    }
+
+    pub fn bans_mut(&mut self) -> &mut crate::bans::BanList {
+        &mut self.bans
+    }
+
+    /// Queries a client cvar via `svc_sendcvarvalue` (unnumbered).
+    pub fn query_client_cvar(&mut self, slot: u8, cvar_name: &str) -> bool {
+        let Some(client) = self.clients.get_mut(usize::from(slot)) else {
+            return false;
+        };
+        if client.is_free() || client.fake {
+            return false;
+        }
+        let mut w = MsgWriter::new();
+        cs_proto48::messages::write_svc_sendcvarvalue(&mut w, cvar_name);
+        client.chan.write_reliable(w.as_slice());
+        if client.pending_cvar_queries.len() >= 64 {
+            client.pending_cvar_queries.pop_front();
+        }
+        client
+            .pending_cvar_queries
+            .push_back((None, cvar_name.to_string()));
+        true
+    }
+
+    /// Queries a client cvar via `svc_sendcvarvalue2` with a caller-chosen `request_id`.
+    pub fn query_client_cvar2(&mut self, slot: u8, request_id: i32, cvar_name: &str) -> bool {
+        let Some(client) = self.clients.get_mut(usize::from(slot)) else {
+            return false;
+        };
+        if client.is_free() || client.fake {
+            return false;
+        }
+        let mut w = MsgWriter::new();
+        cs_proto48::messages::write_svc_sendcvarvalue2(&mut w, request_id, cvar_name);
+        client.chan.write_reliable(w.as_slice());
+        if client.pending_cvar_queries.len() >= 64 {
+            client.pending_cvar_queries.pop_front();
+        }
+        client
+            .pending_cvar_queries
+            .push_back((Some(request_id), cvar_name.to_string()));
+        true
+    }
+
+    /// Drains received `(request_id, cvar_name, value)` replies for `slot`.
+    pub fn take_cvar_responses(&mut self, slot: u8) -> Vec<(Option<i32>, String, String)> {
+        self.clients
+            .get_mut(usize::from(slot))
+            .map(|c| std::mem::take(&mut c.cvar_responses))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn handle_cvar_value(
+        &mut self,
+        slot: u8,
+        numbered: Option<(i32, String)>,
+        value: &str,
+    ) {
+        let Some(client) = self.clients.get_mut(usize::from(slot)) else {
+            return;
+        };
+        let (request_id, cvar_name) = match numbered {
+            Some((id, name)) => {
+                if let Some(pos) = client
+                    .pending_cvar_queries
+                    .iter()
+                    .position(|(req, _)| *req == Some(id))
+                {
+                    client.pending_cvar_queries.remove(pos);
+                }
+                (Some(id), name)
+            }
+            None => match client.pending_cvar_queries.pop_front() {
+                Some((_, name)) => (None, name),
+                None => (None, String::new()),
+            },
+        };
+        if client.cvar_responses.len() >= 64 {
+            client.cvar_responses.remove(0);
+        }
+        client
+            .cvar_responses
+            .push((request_id, cvar_name, value.to_string()));
     }
 
     /// How entity `id` is linked into the world (its leaves and area node); `None` when it is
@@ -833,6 +949,12 @@ impl<G: GameDll> Server<G> {
                     ClcMessage::FileConsistency(bytes) => {
                         self.handle_file_consistency(slot, &bytes);
                     }
+                    ClcMessage::CvarValue(value) => self.handle_cvar_value(slot, None, &value),
+                    ClcMessage::CvarValue2 {
+                        request_id,
+                        cvar_name,
+                        value,
+                    } => self.handle_cvar_value(slot, Some((request_id, cvar_name)), &value),
                     ClcMessage::VoiceData(data) => self.handle_voice_data(slot, &data),
                     _ => {}
                 }

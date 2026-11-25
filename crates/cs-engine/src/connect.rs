@@ -38,6 +38,41 @@ impl<G: GameDll> Server<G> {
             self.net_stats.oob_denied += 1;
             return;
         }
+        if let Some(dgram) = crate::rcon::parse_rcon_datagram(data) {
+            let policy = crate::rcon::RconPolicy {
+                max_failures: self.cvars.get_i32("sv_rcon_maxfailures").max(0) as u32,
+                min_failures: self.cvars.get_i32("sv_rcon_minfailures").max(0) as u32,
+                min_failure_time: f64::from(self.cvars.get_f32("sv_rcon_minfailuretime")),
+                ban_penalty_mins: f64::from(self.cvars.get_f32("sv_rcon_banpenalty")),
+            };
+            let pw = self.cvars.get_str("rcon_password").to_string();
+            match self.rcon.evaluate(from, self.real_time, dgram, &pw, policy) {
+                crate::rcon::RconDecision::Reply(pkts) => {
+                    for pkt in pkts {
+                        self.net_stats.send(net, from, &pkt);
+                    }
+                }
+                crate::rcon::RconDecision::Execute(cmd) => {
+                    self.logger
+                        .log(self.real_time, &format!("Rcon: \"{cmd}\" from \"{from}\""));
+                    let reply_text = match self.console_command(&cmd) {
+                        crate::console::ConsoleOutcome::Output(text) => text,
+                        crate::console::ConsoleOutcome::ChangeLevel(map) => {
+                            self.outbox.change_level = Some(map.clone());
+                            format!("changing level to {map}\n")
+                        }
+                        crate::console::ConsoleOutcome::Quit => {
+                            self.shutdown(net, "Server shutting down");
+                            "Server shutting down\n".to_string()
+                        }
+                    };
+                    for pkt in crate::rcon::encode_rcon_reply(&reply_text) {
+                        self.net_stats.send(net, from, &pkt);
+                    }
+                }
+            }
+            return;
+        }
         // The player list and query info are only built for the queries that send them.
         let is_query = matches!(data.get(4), Some(&(A2S_INFO | A2S_PLAYER | A2S_RULES)));
         let (players, query) = if is_query {
@@ -45,11 +80,25 @@ impl<G: GameDll> Server<G> {
         } else {
             (Vec::new(), cs16_server_query_info("", "", 0, 0, 0))
         };
+        let rules_owned: Vec<(&str, String)> = if data.get(4) == Some(&A2S_RULES) {
+            self.cvars
+                .vars()
+                .values()
+                .filter(|c| c.flags.contains(cs_cvar::CVarFlags::SERVER))
+                .map(|c| (c.name.as_str(), c.public_rules_value()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let rule_refs: Vec<(&str, &str)> = rules_owned
+            .iter()
+            .map(|(k, v)| (*k, v.as_str()))
+            .collect();
         let ctx = OobContext {
             challenges: &self.challenges,
             query: &query,
             players: &players,
-            rules: &[],
+            rules: &rule_refs,
             is_full: self.free_slot_index().is_none() && self.slot_of(&from).is_none(),
         };
         let (outcome, challenged) = handle_oob(data, &from, self.real_time, &ctx);
@@ -87,18 +136,40 @@ impl<G: GameDll> Server<G> {
                 duration_secs: (self.real_time - c.connected_at) as f32,
             })
             .collect();
-        let query = cs16_server_query_info(
+        let mut query = cs16_server_query_info(
             &self.hostname(),
             &self.map.name,
             players.len(),
             usize::from(self.cfg.max_clients),
             self.fake_client_count(),
         );
+        let sv_pw = self.cvars.get_str("sv_password").trim();
+        query.password_protected = !sv_pw.is_empty() && !sv_pw.eq_ignore_ascii_case("none");
         (players, query)
     }
 
     /// Accepts a checked connect request and returns the reply for it.
     fn connect(&mut self, from: PeerAddr, request: ConnectRequest) -> Vec<u8> {
+        if self.bans.is_ip_banned(&from, self.real_time)
+            || self.rcon.is_ip_banned(&from, self.real_time)
+        {
+            return encode_s2c_reject("You have been banned from this server.\n");
+        }
+        let sv_pw = self.cvars.get_str("sv_password").trim().to_string();
+        if !sv_pw.is_empty()
+            && !sv_pw.eq_ignore_ascii_case("none")
+            && request.userinfo.get("password").unwrap_or("") != sv_pw
+        {
+            return encode_s2c_reject("Invalid server password.\n");
+        }
+        let auth_id = crate::bans::derive_auth_id(
+            &request.protinfo.to_wire_string(),
+            request.userinfo.get("*sid"),
+            &from,
+        );
+        if self.bans.is_id_banned(&auth_id, self.real_time) {
+            return encode_s2c_reject("STEAM UserID is banned.\n");
+        }
         let slot = match self.slot_of(&from) {
             Some(slot) => {
                 self.free_slot(slot);
@@ -120,6 +191,20 @@ impl<G: GameDll> Server<G> {
             ..ClientView::default()
         };
         self.clients[index] = Client::connected(from, self.next_userid, self.real_time);
+        self.clients[index].auth_id = auth_id;
+        if let Some(entry) = self.last_userinfo_hash.get_mut(index) {
+            entry.0.clear();
+            entry.1 = -100.0;
+        }
+        self.logger.log(
+            self.real_time,
+            &format!(
+                "\"{}<{}>\" connected, address \"{}\"",
+                self.views[index].userinfo.get("name").unwrap_or(""),
+                self.next_userid,
+                from
+            ),
+        );
 
         let result = self.call_game(|game, eng| game.client_connect(eng, slot));
         // A kick of the connecting client is answered with the reject, not `svc_disconnect`.

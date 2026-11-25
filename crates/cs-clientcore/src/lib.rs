@@ -18,6 +18,7 @@ pub mod events;
 pub mod hud;
 pub mod precache;
 pub mod predict;
+pub mod rcon;
 pub mod resources;
 pub mod sound;
 pub mod tempents;
@@ -39,6 +40,7 @@ pub use predict::{
     LocalState, PlayerPose, PredictInputs, PredictSettings, PredictedSound, Prediction,
     PredictionCheck, Predictor, WeaponState, split_usercmd,
 };
+pub use rcon::{RconClient, RconClientState};
 pub use resources::{
     AllFilesPresent, HttpFetchResult, HttpFetcher, ResourceFiles, ResourceManager, res_type,
 };

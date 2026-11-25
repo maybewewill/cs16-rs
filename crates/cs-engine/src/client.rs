@@ -1,6 +1,6 @@
 //! State of one client slot: where it is in the sign-on, its address and its netchan.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use cs_proto48::delta::GoldSrcUserCmd;
 use cs_proto48::messages::MoveVarsMsg;
@@ -110,6 +110,12 @@ pub(crate) struct Client {
     pub(crate) consistency_verified: bool,
     /// Expected MD5 of a pending `!MD5<hex>` spray upload requested via `"upload\n"`.
     pub(crate) expected_spray_md5: Option<[u8; 16]>,
+    /// GoldSrc auth ID / SteamID derived at connect time (`banid` / HL logs).
+    pub(crate) auth_id: String,
+    /// FIFO queue of pending `svc_sendcvarvalue` / `svc_sendcvarvalue2` queries.
+    pub(crate) pending_cvar_queries: VecDeque<(Option<i32>, String)>,
+    /// Received `(request_id, cvar_name, value)` replies from `clc_cvarvalue` / `2`.
+    pub(crate) cvar_responses: Vec<(Option<i32>, String, String)>,
 }
 
 impl Client {
@@ -146,6 +152,9 @@ impl Client {
             expected_consistency: Vec::new(),
             consistency_verified: false,
             expected_spray_md5: None,
+            auth_id: String::new(),
+            pending_cvar_queries: VecDeque::new(),
+            cvar_responses: Vec::new(),
         }
     }
 
@@ -205,6 +214,8 @@ impl Client {
         self.expected_consistency.clear();
         self.consistency_verified = false;
         self.expected_spray_md5 = None;
+        self.pending_cvar_queries.clear();
+        self.cvar_responses.clear();
         self.reset_frames();
         self.chan.clear();
     }

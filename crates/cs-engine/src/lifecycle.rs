@@ -255,11 +255,27 @@ impl<G: GameDll> Server<G> {
             self.queue_farewell(index, reason);
         }
         if self.clients[index].put_in_server {
+            let name = self.views[index]
+                .userinfo
+                .get("name")
+                .unwrap_or("")
+                .to_string();
+            let userid = self.clients[index].userid;
+            let auth_id = self.clients[index].auth_id.clone();
+            let why = farewell.unwrap_or("disconnected");
+            self.logger.log(
+                self.real_time,
+                &format!("\"{name}<{userid}><{auth_id}><>\" disconnected (reason \"{why}\")"),
+            );
             self.call_game(|game, eng| game.client_disconnect(eng, slot));
         }
         self.edicts.reset_client(slot);
         self.world.forget(u16::from(slot) + 1);
         self.customizations.remove_slot(slot);
+        if let Some(entry) = self.last_userinfo_hash.get_mut(index) {
+            entry.0.clear();
+            entry.1 = -100.0;
+        }
         // The userid stays for the removal broadcast.
         let userid = self.clients[index].userid;
         self.clients[index] = Client {
@@ -385,6 +401,7 @@ impl<G: GameDll> Server<G> {
     /// goes out with an empty userinfo.
     pub(crate) fn broadcast_userinfo(&mut self) {
         let mut w = MsgWriter::new();
+        let now = self.real_time;
         for (slot, view) in self.views.iter_mut().enumerate() {
             if !std::mem::take(&mut view.userinfo_dirty) {
                 continue;
@@ -395,6 +412,15 @@ impl<G: GameDll> Server<G> {
             } else {
                 crate::signon::public_userinfo(&view.userinfo)
             };
+            if !info.is_empty()
+                && let Some((prev, last_at)) = self.last_userinfo_hash.get_mut(slot)
+            {
+                if *prev == info && now - *last_at < 0.5 {
+                    continue;
+                }
+                *prev = info.clone();
+                *last_at = now;
+            }
             write_svc_updateuserinfo(&mut w, slot as u8, client.userid, &info, &[0; 16]);
         }
         if w.is_empty() {
