@@ -574,6 +574,10 @@ impl Session {
         with_conn!(self, c => c.delta_stats_summary(), else "No active session.".to_string())
     }
 
+    pub fn with_net_graph<R>(&self, f: impl FnOnce(&cs_clientcore::NetGraphTelemetry) -> R) -> Option<R> {
+        with_conn!(self, c => Some(f(c.net_graph())), else None)
+    }
+
     pub fn precache_models_summary(&self) -> String {
         match &self.kind {
             Kind::Demo { player, .. } => {

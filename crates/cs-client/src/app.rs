@@ -68,8 +68,9 @@ use cs_client::ui::vgui2::{VguiRuntime, install_scheme_fonts_into_egui};
 use cs_client::ui::vgui_assets::VguiAssetBank;
 use cs_client::ui::vgui_theme::{VguiPalette, apply_vgui2_theme};
 use cs_client::ui::{
-    CrosshairInputs, CrosshairState, FrameTelemetry, draw_crosshair_vgui, draw_net_graph,
-    draw_top_left_console_overlays, should_draw_dynamic_crosshair,
+    CrosshairInputs, CrosshairState, FrameTelemetry, draw_crosshair_vgui,
+    draw_net_graph_with_telemetry, draw_r_speeds, draw_showpos, draw_top_left_console_overlays,
+    should_draw_dynamic_crosshair,
 };
 use cs_client::view::{FrameView, ViewInputs, ViewStats};
 use cs_client::view_effects::{calc_view_idle, calc_viewmodel_angles};
@@ -2494,22 +2495,40 @@ impl Cs16App {
                 f64::from(time_sec),
                 self.console_ui.open,
             );
-            draw_net_graph(
-                &rt.egui_ctx,
-                &self.cvars,
-                &FrameTelemetry {
-                    fps: self.fps_smooth,
-                    frame_ms: self.frame_ms_smooth,
-                    map_name: &map_name,
-                    pos: self.camera.position.to_array(),
-                    yaw_deg: self.camera.yaw_deg,
-                    pitch_deg: self.camera.pitch_deg,
-                    speed: local_speed,
-                    draw_calls: self.last_stats.draw_calls,
-                    triangles: self.last_stats.triangles,
-                },
-                self.palette,
-            );
+            let telemetry = FrameTelemetry {
+                fps: self.fps_smooth,
+                frame_ms: self.frame_ms_smooth,
+                map_name: &map_name,
+                pos: self.camera.position.to_array(),
+                yaw_deg: self.camera.yaw_deg,
+                pitch_deg: self.camera.pitch_deg,
+                speed: local_speed,
+                draw_calls: self.last_stats.draw_calls,
+                triangles: self.last_stats.triangles,
+            };
+            draw_showpos(&rt.egui_ctx, &self.cvars, &telemetry);
+            draw_r_speeds(&rt.egui_ctx, &self.cvars, &telemetry);
+            if self
+                .session
+                .with_net_graph(|ng| {
+                    draw_net_graph_with_telemetry(
+                        &rt.egui_ctx,
+                        &self.cvars,
+                        &telemetry,
+                        Some(ng),
+                        self.palette,
+                    );
+                })
+                .is_none()
+            {
+                draw_net_graph_with_telemetry(
+                    &rt.egui_ctx,
+                    &self.cvars,
+                    &telemetry,
+                    None,
+                    self.palette,
+                );
+            }
             if show_scores {
                 let sb_ctx = ScoreboardRenderCtx {
                     vfs: self.vfs.as_ref(),

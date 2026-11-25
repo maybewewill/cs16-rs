@@ -42,6 +42,7 @@ use crate::demo::DemoRecorder;
 use crate::frames::{ClientFrames, FrameOutcome};
 use crate::events::{FiredEvent, FxEnv};
 use crate::hud::ClientEffects;
+use crate::net_graph::NetGraphTelemetry;
 use crate::precache::PrecacheTables;
 use crate::predict::{self, PredictInputs, Predictor};
 use cs_proto48::demo::{DemoMoveVars, DemoNetMsgInfo, DemoUserCmd};
@@ -248,6 +249,7 @@ pub struct Connection<T: PacketTransport> {
     http_fetcher: Option<Box<dyn HttpFetcher>>,
     custom_spray: Option<(Vec<u8>, [u8; 16])>,
     requested_sprays: BTreeSet<[u8; 16]>,
+    net_graph: NetGraphTelemetry,
 }
 
 impl<T: PacketTransport> Connection<T> {
@@ -312,6 +314,7 @@ impl<T: PacketTransport> Connection<T> {
             http_fetcher: None,
             custom_spray: None,
             requested_sprays: BTreeSet::new(),
+            net_graph: NetGraphTelemetry::new(),
         };
         conn.userinfo = conn.base_userinfo();
         conn
@@ -355,6 +358,7 @@ impl<T: PacketTransport> Connection<T> {
             self.frame_times.pop_front();
         }
         self.stats.frames_in_last_second = self.frame_times.len() as u32;
+        self.net_graph.prune_windows(now);
         self.poll_http_downloads(now);
 
         match self.state {
@@ -1035,6 +1039,10 @@ impl<T: PacketTransport> Connection<T> {
         self.stats
     }
 
+    pub fn net_graph(&self) -> &NetGraphTelemetry {
+        &self.net_graph
+    }
+
     pub fn server_addr(&self) -> PeerAddr {
         self.server
     }
@@ -1167,6 +1175,7 @@ impl<T: PacketTransport> Connection<T> {
                 self.state = ConnState::Signon;
                 self.signon_num = 0;
                 self.chan = Some(NetChan::new(FRAGMENT_C2S_SIZE));
+                self.net_graph.reset();
                 self.next_send_at = f64::NEG_INFINITY;
                 self.send_stringcmd("new");
             }
@@ -1188,6 +1197,7 @@ impl<T: PacketTransport> Connection<T> {
             self.stats.parse_errors += 1;
             return;
         };
+        let prev_in_seq = chan.incoming_sequence;
         let incoming = match chan.process_packet(datagram) {
             Ok(Some(incoming)) => incoming,
             // Duplicate or out-of-order packet.
@@ -1198,6 +1208,15 @@ impl<T: PacketTransport> Connection<T> {
             }
         };
         self.ctx.last_incoming_seq = (incoming.sequence & 0xFF) as u8;
+        let updaterate = self.cvars.float("cl_updaterate").clamp(10.0, 102.0);
+        self.net_graph.record_incoming(
+            incoming.sequence,
+            prev_in_seq,
+            incoming.sequence_ack,
+            datagram.len(),
+            now,
+            updaterate,
+        );
 
         // While a download is pending, progress is fragment bytes arriving (or a finished
         // file), not just any datagram: a server that sends nothing useful times out.
@@ -1348,6 +1367,10 @@ impl<T: PacketTransport> Connection<T> {
             // then sends a full one).
             SvcMessage::PacketEntities(_) if matches!(frame_outcome, FrameOutcome::Refused(_)) => {
                 self.last_entity_seq = None;
+                self.net_graph.mark_invalid_delta(sequence);
+            }
+            SvcMessage::Choke => {
+                self.net_graph.mark_choked(sequence);
             }
             SvcMessage::PacketEntities(update) => self.apply_entities(&update, now),
             SvcMessage::ClientData { parsed, .. } => {
@@ -1735,6 +1758,7 @@ impl<T: PacketTransport> Connection<T> {
         while let Some(vdata) = self.pending_voice.pop_front() {
             write_clc_voicedata(&mut unreliable, &vdata);
         }
+        let outgoing_seq = chan.outgoing_sequence;
         let packet = match self.withheld_reliable_ack {
             Some(ack) => {
                 let own = std::mem::replace(&mut chan.incoming_reliable_sequence, ack);
@@ -1744,7 +1768,24 @@ impl<T: PacketTransport> Connection<T> {
             }
             None => chan.build_packet(&unreliable.into_bytes()),
         };
+        let lerp_msec = self.last_cmd.lerp_msec;
+        let interp = self.frames.settings.interp;
+        let cmd_lerp = if interp > 0.001 && self.frames.clock.time > 0.0 {
+            ((self.frames.clock.time - self.frames.clock.mtime[0]) / f64::from(interp)).clamp(0.0, 3.0) as f32
+        } else {
+            (f32::from(lerp_msec) / 100.0).clamp(0.0, 3.0)
+        };
+        let cmdrate = self.cvars.float("cl_cmdrate");
         self.send(&packet, now);
+        self.net_graph.record_outgoing(
+            outgoing_seq,
+            packet.len(),
+            now,
+            true,
+            cmd_lerp,
+            lerp_msec,
+            cmdrate,
+        );
     }
 }
 
@@ -1989,5 +2030,65 @@ mod fx_tests {
         assert_eq!(drained.last().map(String::as_str), Some("line 275"));
         conn.handle_svc(SvcMessage::Print("after full\n".to_string()), 0.0);
         assert_eq!(conn.take_console_lines(), vec!["after full".to_string()]);
+    }
+
+    #[test]
+    fn connection_net_graph_tracks_drops_choke_invalid_delta_rtt_and_lerp() {
+        use cs_proto48::messages::{
+            write_svc_choke, write_svc_packetentities_delta, write_svc_time,
+        };
+        use cs_proto48::netchan::FRAGMENT_S2C_MAX_SIZE;
+
+        let mut conn = connection();
+        conn.chan = Some(NetChan::new(FRAGMENT_C2S_SIZE));
+        let reg = cs_proto48::delta::DeltaRegistry::cs16_default();
+        conn.ctx.deltas = reg.clone();
+        conn.queue_cmd(GoldSrcUserCmd {
+            msec: 10,
+            lerp_msec: 33,
+            ..Default::default()
+        });
+        conn.send_netchan_packet(1.000);
+        assert_eq!(conn.net_graph().lerp_msec(), 33);
+        assert!(conn.net_graph().last_out_bytes() > 0);
+        assert_eq!(conn.net_graph().out_packets_per_sec(), 1.0);
+
+        // Simulate server NetChan sending seq 1 (acking client seq 1 at t=1.040 -> 40 ms RTT).
+        let mut srv = NetChan::new(FRAGMENT_S2C_MAX_SIZE);
+        srv.incoming_sequence = 1;
+        let mut payload1 = MsgWriter::new();
+        write_svc_time(&mut payload1, 1.04);
+        let pkt1 = srv.build_packet(&payload1.into_bytes());
+        conn.handle_datagram(&pkt1, 1.040);
+
+        assert_eq!(conn.net_graph().last_in_bytes(), pkt1.len() as u32);
+        assert!((conn.net_graph().ping_ms() - 40.0).abs() < 0.1);
+        assert_eq!(conn.net_graph().total_dropped(), 0);
+
+        // Drop server seq 2 by advancing server outgoing_sequence once without delivering it.
+        let _dropped = srv.build_packet(&[]);
+        // Seq 3 carries `svc_choke` and a delta referencing unknown frame 99 (refused -> InvalidDelta).
+        let empty_base: BTreeMap<u16, (u8, cs_proto48::delta::DeltaRecord)> = BTreeMap::new();
+        let mut payload3 = MsgWriter::new();
+        write_svc_choke(&mut payload3);
+        write_svc_packetentities_delta(&mut payload3, &reg, 32, 99, &empty_base, &empty_base, &[], 1.06);
+        let pkt3 = srv.build_packet(&payload3.into_bytes());
+        conn.handle_datagram(&pkt3, 1.060);
+
+        assert_eq!(conn.net_graph().total_dropped(), 1);
+        assert_eq!(
+            conn.net_graph().incoming_sample(2).status,
+            crate::net_graph::PacketSampleStatus::Dropped
+        );
+        assert_eq!(conn.net_graph().total_choked(), 1);
+        assert!(conn.net_graph().incoming_sample(3).choked);
+        assert_eq!(conn.net_graph().total_invalid_delta(), 1);
+        assert_eq!(
+            conn.net_graph().incoming_sample(3).status,
+            crate::net_graph::PacketSampleStatus::InvalidDelta
+        );
+        assert_eq!(conn.net_graph().in_packets_per_sec(), 2.0);
+        assert!(conn.net_graph().loss_percent() > 0.0);
+        assert!(conn.net_graph().choke_percent() > 0.0);
     }
 }

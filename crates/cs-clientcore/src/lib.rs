@@ -16,6 +16,7 @@ pub mod frames;
 pub mod interp;
 pub mod events;
 pub mod hud;
+pub mod net_graph;
 pub mod precache;
 pub mod predict;
 pub mod rcon;
@@ -46,6 +47,10 @@ pub use resources::{
 };
 pub use events::{EventFx, EventQueue, FiredEvent, FxEnv};
 pub use hud::{ClientEffects, HudState};
+pub use net_graph::{
+    IncomingTimingSample, NET_TIMINGS, NET_TIMINGS_MASK, NetGraphTelemetry, OutgoingTimingSample,
+    PacketSampleStatus,
+};
 pub use sound::{SoundCommand, SoundQueue, SoundStart, VoiceEvent, VoiceQueue};
 pub use tempents::{FxRandom, FxWorld, NoWorld, RenderEffect, TempEnt, TempEnts};
 pub use weapons_predict::PredictedWeaponEvent;
