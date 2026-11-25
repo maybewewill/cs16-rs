@@ -824,6 +824,7 @@ dependencies = [
 name = "cs-vfs"
 version = "0.1.0"
 dependencies = [
+ "cs-platform",
  "thiserror 2.0.21",
  "tracing",
 ]
@@ -4413,10 +4414,16 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "cs-clientcore",
  "cs-cvar",
+ "cs-engine",
+ "cs-game",
+ "cs-local",
  "cs-mod-api",
  "cs-mod-host",
  "cs-proto48",
+ "cs-transport",
+ "cs-vfs",
  "image",
  "serde",
  "toml",

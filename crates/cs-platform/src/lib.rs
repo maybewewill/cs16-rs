@@ -1,5 +1,7 @@
 //! Platform seams: time source and configuration storage shared by native and wasm32 builds.
 
+pub mod xdg;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 

@@ -332,6 +332,9 @@ impl Hostage {
         self.remove_self(eng, id);
         g.rules.hostages_rescued += 1;
         crate::rules::on_hostage_rescued(g, eng);
+        eng.emit_stat_event(cs_engine::GameStatEvent::HostageRescue {
+            slot: leader_slot as u8,
+        });
         crate::rules::broadcast(eng, "rescued");
         true
     }

@@ -571,77 +571,70 @@ fn walk_layer(base: &Path, current: &Path, index: &mut HashMap<String, Source>) 
 }
 
 fn candidate_game_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
+    candidate_game_dirs_with(&cs_platform::xdg::PlatformEnv::from_host(), &|p| {
+        fs::read_to_string(p).ok()
+    })
+}
 
-    // 1. Parse Steam libraryfolders.vdf on Windows/Linux/macOS.
-    #[cfg_attr(
-        not(any(target_os = "windows", target_os = "linux", target_os = "macos")),
-        allow(unused_mut)
-    )]
-    let mut vdf_paths: Vec<PathBuf> = Vec::new();
-    #[cfg(target_os = "windows")]
-    {
-        vdf_paths.push(PathBuf::from(
-            r"C:\Program Files (x86)\Steam\steamapps\libraryfolders.vdf",
-        ));
-        vdf_paths.push(PathBuf::from(
-            r"C:\Program Files\Steam\steamapps\libraryfolders.vdf",
-        ));
-    }
-    #[cfg(target_os = "linux")]
-    if let Ok(home) = std::env::var("HOME") {
-        let h = PathBuf::from(home);
-        vdf_paths.push(h.join(".local/share/Steam/steamapps/libraryfolders.vdf"));
-        vdf_paths.push(h.join(".steam/steam/steamapps/libraryfolders.vdf"));
-    }
-    #[cfg(target_os = "macos")]
-    if let Ok(home) = std::env::var("HOME") {
-        vdf_paths.push(
-            PathBuf::from(home)
-                .join("Library/Application Support/Steam/steamapps/libraryfolders.vdf"),
-        );
-    }
-
-    for vdf in vdf_paths {
-        if let Ok(content) = fs::read_to_string(&vdf) {
-            for lib in parse_steam_library_paths(&content) {
-                dirs.push(lib.join("steamapps").join("common").join("Half-Life"));
-            }
+/// Returns candidate Half-Life / CS 1.6 install directories using XDG, Flatpak Steam, SteamOS/Deck
+/// microSD, macOS Application Support, and Windows Steam library discovery.
+pub fn candidate_game_dirs_with(
+    env: &cs_platform::xdg::PlatformEnv,
+    read_vdf: &dyn Fn(&Path) -> Option<String>,
+) -> Vec<PathBuf> {
+    let mut dirs = cs_platform::xdg::candidate_steam_half_life_dirs_with(env, read_vdf);
+    if let Some(data_dir) = cs_platform::xdg::data_dir_with(env, "cs16-rs") {
+        let candidate = data_dir.join("Half-Life");
+        if !dirs.contains(&candidate) {
+            dirs.push(candidate);
         }
     }
-
-    // 2. Common fallback locations.
-    #[cfg(target_os = "windows")]
-    {
-        for drive in ["C:", "D:", "E:", "F:"] {
-            dirs.push(PathBuf::from(format!(
-                r"{drive}\SteamLibrary\steamapps\common\Half-Life"
-            )));
-            dirs.push(PathBuf::from(format!(
-                r"{drive}\Program Files (x86)\Steam\steamapps\common\Half-Life"
-            )));
-            dirs.push(PathBuf::from(format!(r"{drive}\Games\Counter-Strike 1.6")));
-        }
-    }
-
     dirs
+}
+
+/// Returns the user configuration directory (`$XDG_CONFIG_HOME/cs16-rs` on Linux).
+pub fn xdg_config_dir() -> Option<PathBuf> {
+    cs_platform::xdg::config_dir("cs16-rs")
+}
+
+/// Returns the user data directory (`$XDG_DATA_HOME/cs16-rs` on Linux).
+pub fn xdg_data_dir() -> Option<PathBuf> {
+    cs_platform::xdg::data_dir("cs16-rs")
+}
+
+/// Resolves candidate paths for a user config file (such as `config.cfg`), checking the XDG/OS
+/// config directory first and then the user data directory.
+pub fn candidate_user_config_paths(filename: &str) -> Vec<PathBuf> {
+    candidate_user_config_paths_with(&cs_platform::xdg::PlatformEnv::from_host(), filename)
+}
+
+/// Deterministic [`candidate_user_config_paths`] using an explicit [`cs_platform::xdg::PlatformEnv`].
+pub fn candidate_user_config_paths_with(
+    env: &cs_platform::xdg::PlatformEnv,
+    filename: &str,
+) -> Vec<PathBuf> {
+    if filename.is_empty()
+        || filename.contains(['/', '\\', '\0'])
+        || filename.contains("..")
+    {
+        return Vec::new();
+    }
+    let mut paths = Vec::new();
+    if let Some(cfg) = cs_platform::xdg::config_dir_with(env, "cs16-rs") {
+        paths.push(cfg.join(filename));
+    }
+    if let Some(data) = cs_platform::xdg::data_dir_with(env, "cs16-rs") {
+        let p = data.join(filename);
+        if !paths.contains(&p) {
+            paths.push(p);
+        }
+    }
+    paths
 }
 
 /// Extract quoted `"path"` values from Steam's `libraryfolders.vdf`.
 pub fn parse_steam_library_paths(vdf: &str) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    for line in vdf.lines() {
-        let trimmed = line.trim();
-        let Some(rest) = trimmed.strip_prefix("\"path\"") else {
-            continue;
-        };
-        let rest = rest.trim();
-        if let Some(inner) = rest.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
-            let unescaped = inner.replace("\\\\", "\\");
-            paths.push(PathBuf::from(unescaped));
-        }
-    }
-    paths
+    cs_platform::xdg::parse_library_folders_vdf(vdf)
 }
 
 #[cfg(test)]
@@ -813,5 +806,31 @@ mod tests {
         assert!(vfs.unmount_mod_assets("custom_hud"));
         assert_eq!(vfs.read_bytes("sprites/hud.txt").unwrap(), b"base-hud");
         assert!(!vfs.exists("sprites/mod_badge.txt"));
+    }
+
+    #[test]
+    fn xdg_discovery_preserves_cs16_gamedir_priority_and_resolves_configs() {
+        let env = cs_platform::xdg::PlatformEnv {
+            platform: Some(cs_platform::xdg::PlatformKind::Linux),
+            home: Some(PathBuf::from("/home/player")),
+            xdg_config_home: Some(PathBuf::from("/etc/xdg-custom")),
+            xdg_data_home: Some(PathBuf::from("/srv/xdg-data")),
+            cs16_gamedir: Some(PathBuf::from("/override/Half-Life")),
+            ..Default::default()
+        };
+        let dirs = candidate_game_dirs_with(&env, &|_| None);
+        assert_eq!(dirs.first(), Some(&PathBuf::from("/override/Half-Life")));
+        assert!(dirs.contains(&PathBuf::from("/srv/xdg-data/Steam/steamapps/common/Half-Life")));
+        assert!(dirs.contains(&PathBuf::from("/srv/xdg-data/cs16-rs/Half-Life")));
+
+        let cfg_paths = candidate_user_config_paths_with(&env, "config.cfg");
+        assert_eq!(
+            cfg_paths,
+            vec![
+                PathBuf::from("/etc/xdg-custom/cs16-rs/config.cfg"),
+                PathBuf::from("/srv/xdg-data/cs16-rs/config.cfg"),
+            ]
+        );
+        assert!(candidate_user_config_paths_with(&env, "../escape.cfg").is_empty());
     }
 }

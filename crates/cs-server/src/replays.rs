@@ -99,6 +99,7 @@ impl RoundWinner {
 }
 
 /// Team side used by `MatchStatsTracker`.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TeamSide {
     Terrorist,
@@ -232,6 +233,7 @@ impl RoundReplayStore {
     }
 
     /// Records a `DemoClientData` frame into the active round `.dem`.
+    #[allow(dead_code)]
     pub fn record_client_data(&mut self, host_time: f64, client_data: DemoClientData) {
         if let Some(active) = &mut self.active {
             active.recorder.record_client_data(host_time, client_data);
@@ -324,6 +326,7 @@ impl RoundReplayStore {
     }
 
     /// Returns stored replay metadata ordered newest-first.
+    #[allow(dead_code)]
     pub fn list(&self) -> Vec<&RoundReplayMeta> {
         self.rounds.iter().rev().map(|r| &r.meta).collect()
     }
@@ -340,6 +343,7 @@ impl RoundReplayStore {
     }
 
     /// Looks up replay metadata by ID.
+    #[allow(dead_code)]
     pub fn get_meta(&self, id: &str) -> Option<&RoundReplayMeta> {
         if !valid_replay_id(id) {
             return None;
@@ -347,14 +351,17 @@ impl RoundReplayStore {
         self.rounds.iter().find(|r| r.meta.id == id).map(|r| &r.meta)
     }
 
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.rounds.len()
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.rounds.is_empty()
     }
 
+    #[allow(dead_code)]
     pub fn total_bytes(&self) -> usize {
         self.total_bytes
     }
@@ -363,6 +370,7 @@ impl RoundReplayStore {
         self.active.is_some()
     }
 
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.rounds.clear();
         self.total_bytes = 0;
@@ -769,6 +777,7 @@ impl MatchStatsTracker {
         best.map(|(_, k)| k.to_string())
     }
 
+    #[allow(dead_code)]
     pub fn player(&self, key: &str) -> Option<&PlayerMatchStats> {
         self.players.get(key)
     }
@@ -781,10 +790,12 @@ impl MatchStatsTracker {
         self.current_round
     }
 
+    #[allow(dead_code)]
     pub fn map_name(&self) -> &str {
         &self.map_name
     }
 
+    #[allow(dead_code)]
     pub fn round_history(&self) -> &VecDeque<RoundSummaryRecord> {
         &self.round_history
     }

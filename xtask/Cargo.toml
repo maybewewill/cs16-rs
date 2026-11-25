@@ -7,15 +7,21 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+cs-clientcore.workspace = true
+cs-cvar.workspace = true
+cs-engine.workspace = true
+cs-game.workspace = true
+cs-local.workspace = true
 cs-mod-api.workspace = true
 cs-mod-host.workspace = true
+cs-proto48.workspace = true
+cs-transport.workspace = true
+cs-vfs.workspace = true
 image.workspace = true
 serde = { workspace = true, features = ["derive"] }
 toml = "1.2.1"
 
 [dev-dependencies]
-cs-cvar.workspace = true
-cs-proto48.workspace = true
 
 [lints]
 workspace = true

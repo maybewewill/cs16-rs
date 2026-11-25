@@ -680,6 +680,7 @@ impl Grenade {
                 );
 
                 crate::rules::on_bomb_defused(g, eng);
+                eng.emit_stat_event(cs_engine::GameStatEvent::BombDefuse { slot });
 
                 if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
                     p.frags += 3;

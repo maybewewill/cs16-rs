@@ -136,6 +136,7 @@ impl WeaponBehavior for C4 {
                 );
                 crate::menus::print_center_all(w.eng, "#Bomb_Planted");
                 crate::rules::on_bomb_planted(w.g, w.eng);
+                w.eng.emit_stat_event(cs_engine::GameStatEvent::BombPlant { slot: w.slot });
 
                 w.eng.emit_sound(
                     id,

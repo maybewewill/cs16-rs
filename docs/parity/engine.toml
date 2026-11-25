@@ -384,3 +384,25 @@ evidence = "crates/cs-amxx/src/amxxfile.rs::tests::parse_compressed_amxx_contain
 id = "hltv_proxy"
 status = "tested"
 evidence = "crates/cs-hltv/src/delay.rs::tests::withholds_frames_until_delay_expires_and_releases_in_order, late_join_signon_replays_headers_and_time_aligned_userinfo, bounded_capacity_evicts_oldest_and_preserves_state, negative_or_nan_delay_clamps_to_zero; crates/cs-hltv/src/proxy.rs::tests::upstream_hltv_handshake_a2s_info_director_delay_and_demo_recording, password_and_capacity_limits_reject_unauthorized_spectators; crates/cs-hltv/src/main.rs::tests::parses_cli_flags_and_defaults, rejects_invalid_cli_flags"
+
+# Phase 13 ("Beyond Original") engine & operations items
+
+[[item]]
+id = "beyond_web_admin_and_rcon_http"
+status = "tested"
+evidence = "crates/cs-server/src/admin_http.rs::tests::constant_time_compare_and_auth_guards, routes_status_players_replays_rcon_and_invite, reads_http_post_with_content_length_and_caps_oversized; crates/cs-server/src/proto48.rs::tests::parses_phase13_admin_replay_and_embed_flags, admin_http_endpoints_replays_stats_rcon_and_servers_work_over_ws_transport"
+
+[[item]]
+id = "beyond_round_replays_and_match_stats"
+status = "tested"
+evidence = "crates/cs-server/src/replays.rs::tests::records_valid_hldemo_v5_per_round_and_enforces_ring_buffer, match_stats_tracker_computes_adr_hs_assists_objectives_mvp_and_json; crates/cs-server/src/proto48.rs::tests::admin_http_endpoints_replays_stats_rcon_and_servers_work_over_ws_transport"
+
+[[item]]
+id = "beyond_xdg_macos_steamdeck_discovery"
+status = "tested"
+evidence = "crates/cs-platform/src/xdg.rs::tests::resolves_xdg_and_platform_config_and_data_dirs, detects_steam_deck_from_env_gamescope_and_steamos_release, discovers_linux_flatpak_deck_sd_and_macos_steam_half_life_dirs; crates/cs-vfs/src/lib.rs::tests::xdg_discovery_preserves_cs16_gamedir_priority_and_resolves_configs"
+
+[[item]]
+id = "beyond_perf_bench_harness"
+status = "tested"
+evidence = "xtask/src/bench.rs::tests::parses_bench_flags_and_rejects_invalid, bench_smoke_measures_32_player_ticks_and_delta_packets"

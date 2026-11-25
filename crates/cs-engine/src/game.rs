@@ -24,6 +24,43 @@ const FL_DUCKING: u32 = 1 << 14;
 const EFLAG_SLERP: u8 = 1;
 use crate::world::consts::{MOVETYPE_WALK, SOLID_SLIDEBOX};
 
+/// Gameplay telemetry/statistics event emitted by game rules through [`EngineApi::emit_stat_event`]
+/// for optional server-side match tracking and replay lifecycle hooks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GameStatEvent {
+    RoundStart {
+        round_number: u32,
+    },
+    RoundEnd {
+        /// `0` = Draw, `1` = Terrorist, `2` = Counter-Terrorist.
+        winner: u8,
+        reason: String,
+    },
+    Damage {
+        attacker_slot: Option<u8>,
+        victim_slot: u8,
+        damage: u32,
+    },
+    Kill {
+        killer_slot: Option<u8>,
+        victim_slot: u8,
+        headshot: bool,
+        friendly_fire: bool,
+    },
+    BombPlant {
+        slot: u8,
+    },
+    BombDefuse {
+        slot: u8,
+    },
+    HostageRescue {
+        slot: u8,
+    },
+}
+
+/// Maximum stat events buffered in [`Outbox`] before dropping additional ones.
+const MAX_STAT_EVENTS: usize = 512;
+
 /// Messages and kicks the game queued during one call, which the server drains afterwards,
 /// and the message state that outlives a call: the init buffer and the light styles. Per-client
 /// buffers are indexed by slot; a destination is resolved to slots when the game sends, so each
@@ -69,6 +106,8 @@ pub(crate) struct Outbox {
     /// Moves `EngineApi::run_player_move` refused (not finite, not a fake client's slot, queue
     /// full); the server adds them to `NetStats::fake_moves_dropped`.
     pub(crate) fake_moves_dropped: u64,
+    /// Match stats / round lifecycle events emitted by the game for server tracking.
+    pub(crate) stat_events: Vec<GameStatEvent>,
 }
 
 /// One `PF_RunPlayerMove_I` waiting to run.
@@ -101,6 +140,7 @@ impl Outbox {
             fake_created: Vec::new(),
             fake_moves: Vec::new(),
             fake_moves_dropped: 0,
+            stat_events: Vec::new(),
         }
     }
 
@@ -238,6 +278,13 @@ impl EngineApi<'_> {
     /// Returns true if the client in `slot` advertised mod capability (`_cs16rs_mods 1`).
     pub fn client_supports_mods(&self, slot: u8) -> bool {
         self.client_key(slot, MOD_CAPABILITY_KEY) == Some("1")
+    }
+
+    /// Queues a match statistics / round lifecycle event for the host server.
+    pub fn emit_stat_event(&mut self, event: GameStatEvent) {
+        if self.outbox.stat_events.len() < MAX_STAT_EVENTS {
+            self.outbox.stat_events.push(event);
+        }
     }
 
     pub fn client_key(&self, slot: u8, key: &str) -> Option<&str> {

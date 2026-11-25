@@ -11,6 +11,7 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY xtask ./xtask
+COPY web ./web
 
 RUN cargo build --locked --release -p cs-server --bin cs-server \
     && strip /src/target/release/cs-server

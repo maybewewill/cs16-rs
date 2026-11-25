@@ -53,7 +53,10 @@ pub use frame::{
     ClientFrame, FramePlayer, FrameRing, MAX_DATAGRAM, MAX_PACKET_ENTITIES, UPDATE_BACKUP, clamp_rate,
     update_interval,
 };
-pub use game::{EngineApi, FullPackCtx, GameDll, baseline_state_from_vars, entity_state_from_vars};
+pub use game::{
+    EngineApi, FullPackCtx, GameDll, GameStatEvent, baseline_state_from_vars,
+    entity_state_from_vars,
+};
 pub use lifecycle::{
     NAME_CHANGE_MIN_INTERVAL_SECS, PINGS_INTERVAL_SECS, SETINFO_BURST, SETINFO_RATE_PER_SEC,
 };
@@ -76,7 +79,7 @@ pub use precache::{
 };
 pub use server::{
     MAX_DATAGRAMS_PER_FRAME, MAX_FRAMETIME, MAX_RELIABLE_BACKLOG, NetStats, SV_TIME_AT_MAP_START,
-    Server, ServerConfig,
+    Server, ServerClientInfo, ServerConfig,
 };
 pub use signon::{
     INIT_BUFFER_BUDGET, MAX_SIGNON_BUFFER, SIGNON_BASELINE_RESERVE, SPAWN_TAIL_MAX,

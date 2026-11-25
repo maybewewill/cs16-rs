@@ -138,6 +138,7 @@ impl<'a> AdminHttpRequest<'a> {
 }
 
 /// Owned HTTP/1.1 request head + body parsed from a stream.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct OwnedHttpRequest {
     pub head: HttpRequest,
@@ -145,6 +146,7 @@ pub struct OwnedHttpRequest {
 }
 
 /// Errors returned by [`read_http_request_with_body`].
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum HttpReadError {
     Io(io::Error),
@@ -155,6 +157,7 @@ pub enum HttpReadError {
 
 /// Reads an HTTP/1.1 request head (max `MAX_HTTP_HEAD`) and optional `Content-Length` body
 /// (max `max_body` bytes) from `stream`.
+#[allow(dead_code)]
 pub fn read_http_request_with_body(
     stream: &mut impl Read,
     max_body: usize,
@@ -178,6 +181,18 @@ pub fn read_http_request_with_body(
         buf.extend_from_slice(&tmp[..n]);
     };
 
+    let body = read_http_body(&head, &buf[head_len..], stream, max_body)?;
+    Ok(OwnedHttpRequest { head, body })
+}
+
+/// Reads the `Content-Length` body (max `max_body` bytes) given an already-parsed head and any
+/// trailing bytes read alongside the head.
+pub fn read_http_body(
+    head: &HttpRequest,
+    leftover: &[u8],
+    stream: &mut impl Read,
+    max_body: usize,
+) -> Result<Vec<u8>, HttpReadError> {
     if head.header("transfer-encoding").is_some() {
         return Err(HttpReadError::UnsupportedTransferEncoding);
     }
@@ -194,7 +209,6 @@ pub fn read_http_request_with_body(
     }
 
     let mut body = Vec::with_capacity(content_len);
-    let leftover = &buf[head_len..];
     if leftover.len() >= content_len {
         body.extend_from_slice(&leftover[..content_len]);
     } else {
@@ -205,7 +219,7 @@ pub fn read_http_request_with_body(
         body.extend_from_slice(&tail);
     }
 
-    Ok(OwnedHttpRequest { head, body })
+    Ok(body)
 }
 
 /// Serialized HTTP/1.1 response produced by [`AdminRouter`].

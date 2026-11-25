@@ -150,6 +150,16 @@ pub(crate) fn player_killed(
     let killer_index = killer.map_or(0, |k| k as u16 + 1);
     messages::death_msg(eng, killer_index, victim_edict.index, headshot, &weapon);
 
+    let friendly_fire = killer.is_some_and(|k| {
+        k != index && g.players[k].as_ref().map(|p| p.team) == Some(victim_team)
+    });
+    eng.emit_stat_event(cs_engine::GameStatEvent::Kill {
+        killer_slot: killer.map(|k| k as u8),
+        victim_slot: slot,
+        headshot,
+        friendly_fire,
+    });
+
     // PlayerKilled.
     if let Some(victim) = g.players[index].as_mut() {
         victim.deaths += 1;
