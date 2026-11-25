@@ -181,6 +181,16 @@ const DEATH_ANIMATION_TIME: f64 = 3.0;
 pub const HITGROUP_SHIELD_ENABLED: i32 = 0;
 pub const HITGROUP_SHIELD_DISABLED: i32 = 1;
 
+/// Recorded grenade release parameters for `rethrow` / `sv_rethrow_last_grenade`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LastGrenadeThrow {
+    pub weapon: WeaponId,
+    pub origin: Vec3,
+    pub angles: Vec3,
+    pub velocity: Vec3,
+    pub fuse: f32,
+}
+
 /// Recorded player loadout for `rebuy` (`m_rebuyStruct`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct RebuyRecord {
@@ -497,6 +507,8 @@ pub struct Player {
     pub(crate) next_decal_time: f32,
     /// `m_iHostagesKilled`: hostages killed on this map (`mp_hostagepenalty`).
     pub hostages_killed: i32,
+    /// Last grenade throw parameters recorded for `rethrow` / `sv_rethrow_last_grenade`.
+    pub last_grenade: Option<LastGrenadeThrow>,
 }
 
 impl Player {
@@ -633,6 +645,7 @@ impl Player {
             geiger_range_prev: 1000,
             next_decal_time: 0.0,
             hostages_killed: 0,
+            last_grenade: None,
         }
     }
 
@@ -1246,6 +1259,15 @@ pub(crate) fn spawn(
     // `PlayerSpawn` -> `OnSpawnEquip`: a player that lost its items gets the default ones; the
     // `RemoveAllItems` in it sends the HUD update and the empty `CurWeapon`.
     crate::inventory::on_spawn_equip(g, eng, slot, lost_items);
+    if eng.cvar_f32("mp_warmup_mode") != 0.0 {
+        if let Some(p) = g.players[index].as_mut() {
+            p.money = 16_000;
+        }
+        messages::money(eng, slot, 16_000);
+    }
+    if g.rules.knife_round == crate::rules::KnifeRoundState::Active {
+        apply_knife_round_loadout(g, eng, slot);
+    }
     // `m_bNotKilled = true; m_bIsDefusing = false;` and "get rid of the progress bar":
     // `SetProgressBarTime(0)` (player.cpp:6085-6092, read 2026-11-22), before `ResetMaxSpeed`.
     set_progress_bar_time(g, eng, slot, 0);
@@ -1277,6 +1299,39 @@ pub(crate) fn spawn(
     observer::screen_fade(eng, slot, 0.001, 0.0, 0, observer::FFADE_IN);
     messages::sync_round_timer(g, eng, slot);
     true
+}
+
+/// Strips non-knife weapons, zeroes money, and equips Kevlar vest for `mp_knife_round`.
+pub(crate) fn apply_knife_round_loadout(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    crate::inventory::remove_all_items(g, eng, slot, false);
+    let _ = crate::inventory::give_named_item(g, eng, slot, "weapon_knife");
+    if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+        p.money = 0;
+    }
+    messages::money(eng, slot, 0);
+    crate::buy::give_armor_item(g, eng, slot, crate::buy::ArmorItem::Kevlar);
+}
+
+/// Refills reserve ammo (up to `max_ammo_carry`) for all carried primary/secondary weapons (`ammo_full` / `give_all`).
+fn refill_player_ammo(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    let items_to_refill: Vec<(String, i32)> = {
+        let Some(p) = g.players.get(usize::from(slot)).and_then(Option::as_ref) else {
+            return;
+        };
+        p.items
+            .iter()
+            .flatten()
+            .filter_map(|item| {
+                let info = crate::weapons::item_info(item.weapon.id)?;
+                let ammo_name = info.ammo1?;
+                let max = crate::weapons::max_ammo_carry(ammo_name);
+                (max > 0).then(|| (ammo_name.to_string(), max))
+            })
+            .collect()
+    };
+    for (ammo_name, max) in items_to_refill {
+        crate::weapons::core::give_ammo(g, eng, slot, max, Some(&ammo_name), max);
+    }
 }
 
 /// `CBasePlayer::ResetMaxSpeed`: 900 for an observer, 1 while the round is in its freeze period
@@ -2328,8 +2383,21 @@ fn monster_take_damage(
         .and_then(|a| player_slot(g, eng, a))
         .map(|s| s as u8);
     let Some(p) = g.players[index].as_mut() else { return false };
+    let before_hp = p.health.max(0.0);
     p.health -= damage;
+    let _ = before_hp;
     if damage > 0.0 {
+        if let Some(att) = attacker_slot
+            && usize::from(att) < MAX_PLAYERS
+            && usize::from(att) != index
+        {
+            let entry = &mut g.round_damage[usize::from(att)][index];
+            entry.damage += damage.round() as i32;
+            entry.hits = entry.hits.saturating_add(1);
+            if p.last_hit_group == HITGROUP_HEAD {
+                entry.headshots = entry.headshots.saturating_add(1);
+            }
+        }
         eng.emit_stat_event(cs_engine::GameStatEvent::Damage {
             attacker_slot,
             victim_slot: slot,
@@ -2933,6 +3001,50 @@ fn killed(
     if crate::hint::first_time(g, slot, crate::hint::dhf::SPEC_DUCK) {
         crate::hint::hint_message(g, eng, slot, "#Spec_Duck", true, true);
     }
+    if eng.cvar_f32("sv_damage_print") != 0.0 {
+        print_round_damage_summary(g, eng, slot);
+    }
+}
+
+/// Prints `[cs16-rs] Damage Given / Taken` summary to `slot`'s console (`svc_print`).
+pub(crate) fn print_round_damage_summary(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    let idx = usize::from(slot);
+    if idx >= MAX_PLAYERS || g.damage_printed[idx] {
+        return;
+    }
+    g.damage_printed[idx] = true;
+    for other in 0..MAX_PLAYERS {
+        if other == idx {
+            continue;
+        }
+        let given = g.round_damage[idx][other];
+        let taken = g.round_damage[other][idx];
+        if given.hits == 0 && taken.hits == 0 {
+            continue;
+        }
+        let name = g.players[other]
+            .as_ref()
+            .map(|p| p.chat.netname.as_str())
+            .filter(|n| !n.is_empty())
+            .unwrap_or("Player");
+        let g_word = if given.hits == 1 { "hit" } else { "hits" };
+        let t_word = if taken.hits == 1 { "hit" } else { "hits" };
+        let hs = if taken.headshots > 0 { " (headshot)" } else { "" };
+        let line = format!(
+            "* [cs16-rs] Damage Given to \"{name}\" - {} in {} {g_word} | Damage Taken - {} in {} {t_word}{hs}\n",
+            given.damage, given.hits, taken.damage, taken.hits
+        );
+        eng.client_print(slot, &line);
+    }
+}
+
+/// Flushes remaining `sv_damage_print` summaries to surviving players at round end.
+pub(crate) fn print_all_remaining_round_damage(g: &mut GameState, eng: &mut EngineApi<'_>) {
+    for slot in 0..MAX_PLAYERS {
+        if g.players[slot].is_some() && !g.damage_printed[slot] {
+            print_round_damage_summary(g, eng, slot as u8);
+        }
+    }
 }
 
 /// The corpse throw of `CBasePlayer::Killed` (`player.cpp` 2493-2547, read 2026-11-22, vanilla):
@@ -3163,11 +3275,20 @@ fn death_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     }
     // "wait for all buttons released": a dead player on a team that holds no button thinks again
     // in a tenth of a second (`pev->nextthink = gpGlobals->time + 0.1f`).
+    let warmup = eng.cvar_f32("mp_warmup_mode") != 0.0;
     let team = g.players[usize::from(slot)].as_ref().map(|p| p.team);
+    let dead_time = g.players[usize::from(slot)].as_ref().map_or(0.0, |p| p.dead_time);
+    if warmup
+        && team.is_some_and(|t| !matches!(t, Team::Unassigned | Team::Spectator))
+        && now >= dead_time + 0.5
+    {
+        let _ = respawn_player(g, eng, slot);
+        return;
+    }
     if let (Some(team), Some(v)) = (team, eng.ent_mut(id))
         && v.deadflag == DEAD_DEAD
         && !matches!(team, Team::Unassigned | Team::Spectator)
-        && v.button & !IN_SCORE == 0
+        && (warmup || v.button & !IN_SCORE == 0)
     {
         v.nextthink = f64::from(now as f32 + 0.1);
     }
@@ -3394,6 +3515,65 @@ pub(crate) fn client_command(
                 eng.client_print(slot, "fly ON\n");
             }
         }
+        return;
+    }
+    if command.eq_ignore_ascii_case("rethrow")
+        || command.eq_ignore_ascii_case("sv_rethrow_last_grenade")
+    {
+        if eng.cvar_f32("sv_cheats") == 0.0 {
+            eng.client_print(slot, "Can't use rethrow unless sv_cheats is 1\n");
+            return;
+        }
+        let Some(saved) = g.players[usize::from(slot)]
+            .as_ref()
+            .and_then(|p| p.last_grenade)
+        else {
+            eng.client_print(slot, "No grenade thrown yet to rethrow\n");
+            return;
+        };
+        let _ = crate::grenade::throw_grenade_with_angles(
+            g,
+            eng,
+            slot,
+            saved.weapon,
+            saved.origin,
+            Some(saved.angles),
+            saved.velocity,
+            saved.fuse,
+        );
+        return;
+    }
+    if command.eq_ignore_ascii_case("give_all") {
+        if eng.cvar_f32("sv_cheats") == 0.0 {
+            eng.client_print(slot, "Can't use give_all unless sv_cheats is 1\n");
+            return;
+        }
+        if eng.ent(eng.client_edict(slot)).is_none_or(|v| v.deadflag != DEAD_NO) {
+            return;
+        }
+        crate::buy::give_armor_item(g, eng, slot, crate::buy::ArmorItem::AssaultSuit);
+        if g.players[usize::from(slot)]
+            .as_ref()
+            .is_some_and(|p| p.team == Team::Ct)
+        {
+            give_defuser(g, eng, slot);
+        }
+        let _ = crate::inventory::give_named_item(g, eng, slot, "weapon_hegrenade");
+        let _ = crate::inventory::give_named_item(g, eng, slot, "weapon_flashbang");
+        let _ = crate::inventory::give_named_item(g, eng, slot, "weapon_flashbang");
+        let _ = crate::inventory::give_named_item(g, eng, slot, "weapon_smokegrenade");
+        refill_player_ammo(g, eng, slot);
+        return;
+    }
+    if command.eq_ignore_ascii_case("ammo_full") {
+        if eng.cvar_f32("sv_cheats") == 0.0 {
+            eng.client_print(slot, "Can't use ammo_full unless sv_cheats is 1\n");
+            return;
+        }
+        if eng.ent(eng.client_edict(slot)).is_none_or(|v| v.deadflag != DEAD_NO) {
+            return;
+        }
+        refill_player_ammo(g, eng, slot);
         return;
     }
     // The game compares the rest exactly (`FStrEq`).

@@ -169,6 +169,10 @@ pub struct Grenade {
     bomb_defuser: Option<u8>,
     /// `m_pentCurBombTarget`: `func_bomb_target` under the bomb when planted.
     cur_bomb_target: Option<EdictId>,
+    /// Which grenade weapon spawned this entity (`HeGrenade`, `Flashbang`, `SmokeGrenade`).
+    weapon_kind: Option<WeaponId>,
+    /// Previous recorded position for `sv_grenade_trajectory` 3D trail lines.
+    prev_trail_pos: Option<Vec3>,
 }
 
 impl Default for Grenade {
@@ -200,6 +204,8 @@ impl Default for Grenade {
             next_defuse: 0.0,
             bomb_defuser: None,
             cur_bomb_target: None,
+            weapon_kind: None,
+            prev_trail_pos: None,
         }
     }
 }
@@ -297,6 +303,51 @@ impl Grenade {
         self.think = think;
     }
 
+    fn trail_color(&self, dmg: f32) -> [u8; 3] {
+        match self.weapon_kind {
+            Some(WeaponId::HeGrenade) => [60, 255, 80],
+            Some(WeaponId::Flashbang) => [255, 255, 160],
+            Some(WeaponId::SmokeGrenade) => [120, 220, 240],
+            _ => {
+                if dmg > 40.0 { [60, 255, 80] } else { [255, 255, 160] }
+            }
+        }
+    }
+
+    fn record_trail(&mut self, eng: &mut EngineApi<'_>, id: EdictId, bounce_marker: bool) {
+        if self.is_c4
+            || eng.cvar_f32("sv_cheats") == 0.0
+            || eng.cvar_f32("sv_grenade_trajectory") == 0.0
+        {
+            return;
+        }
+        let Some((origin, dmg)) = eng.ent(id).map(|v| (v.origin, v.dmg)) else {
+            return;
+        };
+        let life_sec = eng.cvar_f32("sv_grenade_trajectory_time");
+        let life = (if life_sec.is_finite() && life_sec > 0.0 {
+            life_sec
+        } else {
+            8.0
+        }
+        .clamp(0.5, 60.0)
+            * 10.0)
+            .round() as u16;
+        let color = self.trail_color(dmg);
+        if let Some(prev) = self.prev_trail_pos
+            && (origin - prev).length_squared() > 0.25
+        {
+            let te = tempent::line(prev, origin, life, color);
+            eng.send_temp_entity(MsgDest::Broadcast, &te);
+        }
+        if bounce_marker {
+            let half = Vec3::splat(1.5);
+            let marker = tempent::box_fx(origin - half, origin + half, life, color);
+            eng.send_temp_entity(MsgDest::Broadcast, &marker);
+        }
+        self.prev_trail_pos = Some(origin);
+    }
+
     /// The trace every `Detonate*` makes: from 8 above the origin 40 down, `ignore_monsters`,
     /// the grenade itself passed.
     fn trace_down(eng: &EngineApi<'_>, id: EdictId) -> Option<EntTrace> {
@@ -341,6 +392,7 @@ impl Grenade {
     /// grenade no longer ignores the thrower); `flRndSound` is drawn and never used; the sparks
     /// are made only out of the water.
     fn explode_flashbang(&mut self, g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId, tr: &EntTrace, bits: u32) {
+        self.record_trail(eng, id, false);
         Self::begin_explosion(eng, id, tr);
         let Some(v) = eng.ent(id) else {
             return;
@@ -374,6 +426,7 @@ impl Grenade {
 
     /// `CGrenade::Explode3(pTrace, bitsDamageType)` (`ggrenade.cpp` 254-329, the HE grenade's).
     fn explode3(&mut self, g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId, tr: &EntTrace, bits: u32) {
+        self.record_trail(eng, id, false);
         Self::begin_explosion(eng, id, tr);
         let Some(v) = eng.ent(id) else {
             return;
@@ -854,6 +907,7 @@ impl Grenade {
     /// for the smoke to rise from; the puffs follow from [`Grenade::sg_smoke`] every tenth of a
     /// second. QUIRK: the trace the source makes first is never used.
     fn sg_detonate(&mut self, g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId) {
+        self.record_trail(eng, id, false);
         let Some(origin) = eng.ent(id).map(|v| v.origin) else {
             return;
         };
@@ -956,6 +1010,7 @@ impl Grenade {
     /// fuse is spent the next think is the explosion (damage 40 or less: the flashbang's,
     /// else the HE grenade's); in the water it slows by half and its model animates slowly.
     fn tumble_think(&mut self, eng: &mut EngineApi<'_>, id: EdictId) {
+        self.record_trail(eng, id, false);
         let Some(v) = eng.ent(id) else {
             return;
         };
@@ -982,6 +1037,7 @@ impl Grenade {
     /// it slows by 5% a tenth of a second; once its fuse is spent it goes off, but only when it
     /// lies on the ground.
     fn sg_tumble_think(&mut self, eng: &mut EngineApi<'_>, id: EdictId) {
+        self.record_trail(eng, id, false);
         let Some(v) = eng.ent_mut(id) else {
             return;
         };
@@ -1048,6 +1104,7 @@ impl Grenade {
         if v.owner == Some(other) {
             return;
         }
+        self.record_trail(eng, id, true);
         if let Some(o) = eng.ent(other)
             && o.classname == "func_breakable"
             && o.rendermode != RENDER_NORMAL
@@ -1200,8 +1257,22 @@ pub(crate) fn throw_grenade(
     velocity: Vec3,
     time: f32,
 ) -> Option<EdictId> {
+    throw_grenade_with_angles(g, eng, slot, id, src, None, velocity, time)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn throw_grenade_with_angles(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    slot: u8,
+    id: WeaponId,
+    src: Vec3,
+    angles: Option<Vec3>,
+    velocity: Vec3,
+    time: f32,
+) -> Option<EdictId> {
     let owner = eng.client_edict(slot);
-    match id {
+    let spawned = match id {
         WeaponId::HeGrenade => {
             let team = g.players.get(usize::from(slot))?.as_ref().map_or(0, |p| i32::from(p.team.id()));
             let event = eng.precache_event("events/createexplo.sc");
@@ -1213,7 +1284,13 @@ pub(crate) fn throw_grenade(
             shoot_smoke_grenade(g, eng, owner, src, velocity, time, event)
         }
         _ => None,
+    };
+    if let (Some(ent), Some(ang)) = (spawned, angles)
+        && let Some(v) = eng.ent_mut(ent)
+    {
+        v.angles = ang;
     }
+    spawned
 }
 
 /// `CGrenade::Spawn` and the lines `ShootTimed2`, `ShootTimed` and `ShootSmokeGrenade` have in
@@ -1303,6 +1380,8 @@ pub(crate) fn shoot_timed2(
             touch: Touch::Bounce,
             event,
             team,
+            weapon_kind: Some(WeaponId::HeGrenade),
+            prev_trail_pos: Some(src),
             ..Grenade::default()
         }),
     );
@@ -1332,7 +1411,13 @@ pub(crate) fn shoot_timed(
     attach(
         eng,
         id,
-        Box::new(Grenade { think: Think::Tumble, touch: Touch::Bounce, ..Grenade::default() }),
+        Box::new(Grenade {
+            think: Think::Tumble,
+            touch: Touch::Bounce,
+            weapon_kind: Some(WeaponId::Flashbang),
+            prev_trail_pos: Some(src),
+            ..Grenade::default()
+        }),
     );
     Some(id)
 }
@@ -1368,6 +1453,8 @@ pub(crate) fn shoot_smoke_grenade(
             light_smoke: false,
             detonated: false,
             sg_smoke: 0,
+            weapon_kind: Some(WeaponId::SmokeGrenade),
+            prev_trail_pos: Some(src),
             ..Grenade::default()
         }),
     );

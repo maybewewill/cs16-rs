@@ -351,6 +351,10 @@ pub(crate) fn host_say(
         return;
     }
 
+    if crate::rules::handle_knife_round_chat(g, eng, slot, &text) {
+        return;
+    }
+
     let format = chat_format(team, sender_dead, team_only);
     let console = console_prefix(team, sender_dead, team_only);
 

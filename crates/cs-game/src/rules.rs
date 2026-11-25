@@ -55,9 +55,10 @@ use cs_engine::consts::SOLID_NOT;
 use cs_engine::{EngineApi, GameStatEvent, MsgDest};
 use cs_proto48::messages::svc;
 use cs_proto48::usermsg::CsUserMsg;
+use glam::Vec3;
 
 use crate::GameState;
-use crate::chat;
+use crate::chat::{self, HUD_PRINTTALK};
 use crate::entity::GameEntity;
 use crate::hud_misc;
 use crate::menus::{self, Menu};
@@ -91,6 +92,25 @@ pub enum WinStatus {
     Cts,
     Terrorists,
     Draw,
+}
+
+/// Competitive `lo3` / `mp_live_on_three` 3-restart state machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Lo3State {
+    #[default]
+    Idle,
+    Restart1,
+    Restart2,
+    Restart3,
+}
+
+/// Competitive `mp_knife_round` state machine (`.stay` / `.switch` -> `lo3`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KnifeRoundState {
+    #[default]
+    Inactive,
+    Active,
+    AwaitingChoice { winner: Team },
 }
 
 /// The state of the rules (the data members of `CHalfLifeMultiplay`).
@@ -207,6 +227,12 @@ pub struct Rules {
     pub(crate) escape_ratio: f32,
     /// `m_iNumEscapeRounds`: escape rounds played since the last team swap.
     pub(crate) num_escape_rounds: i32,
+    /// `lo3` / `mp_live_on_three` 3-restart state machine.
+    pub(crate) lo3_state: Lo3State,
+    /// `mp_knife_round` state machine.
+    pub(crate) knife_round: KnifeRoundState,
+    /// Next server time `sv_showhitboxes` emits debug hitbox boxes.
+    pub(crate) next_hitbox_draw: f64,
 }
 
 impl Default for Rules {
@@ -267,6 +293,9 @@ impl Default for Rules {
             have_escaped: 0,
             escape_ratio: 0.0,
             num_escape_rounds: 0,
+            lo3_state: Lo3State::Idle,
+            knife_round: KnifeRoundState::Inactive,
+            next_hitbox_draw: 0.0,
         }
     }
 }
@@ -451,6 +480,14 @@ impl Rules {
         self.game_started
     }
 
+    pub fn lo3_state(&self) -> Lo3State {
+        self.lo3_state
+    }
+
+    pub fn knife_round(&self) -> KnifeRoundState {
+        self.knife_round
+    }
+
     /// `m_bGameOver`: the match is over and the next map is awaited.
     pub fn game_over(&self) -> bool {
         self.game_over
@@ -605,6 +642,9 @@ pub(crate) fn can_respawn(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) -> b
     let Some(p) = g.players.get(usize::from(slot)).and_then(Option::as_ref) else {
         return false;
     };
+    if eng.cvar_f32("mp_warmup_mode") != 0.0 {
+        return p.menu != Menu::ChooseAppearance;
+    }
     // A player cannot respawn twice in a round.
     if p.num_spawns > 0 {
         return false;
@@ -637,9 +677,29 @@ pub(crate) fn can_respawn(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) -> b
 // ---- the end of a round ----
 
 /// `TerminateRound`: the round is over with `status`; the next one starts after `delay`.
-fn terminate_round(g: &mut GameState, eng: &EngineApi<'_>, delay: f64, status: WinStatus) {
+fn terminate_round(g: &mut GameState, eng: &mut EngineApi<'_>, delay: f64, status: WinStatus) {
     g.rules.round_win_status = status;
     g.rules.restart_round_time = eng.time() + delay;
+    if eng.cvar_f32("sv_damage_print") != 0.0 {
+        player::print_all_remaining_round_damage(g, eng);
+    }
+}
+
+fn on_knife_round_winner(g: &mut GameState, eng: &mut EngineApi<'_>, winner: Team) -> bool {
+    if g.rules.knife_round != KnifeRoundState::Active {
+        return false;
+    }
+    g.rules.knife_round = KnifeRoundState::AwaitingChoice { winner };
+    g.rules.restart_round_time = 0.0;
+    let label = match winner {
+        Team::Ct => "CT",
+        Team::Terrorist => "Terrorists",
+        _ => "Winners",
+    };
+    let msg = format!("[KNIFE] {label} won the knife round! Type .stay or .switch in chat.\n");
+    menus::print_all(eng, HUD_PRINTTALK, &msg, &[]);
+    menus::print_all(eng, menus::HUD_PRINTCENTER, &msg, &[]);
+    true
 }
 
 /// Shared helper for winning round outcomes (`Target_Bombed`, `Target_Defused`, `Round_Cts`,
@@ -696,6 +756,7 @@ fn win_round(
         winner: winner_code,
         reason: sentence.to_string(),
     });
+    let _ = on_knife_round_winner(g, eng, winner);
 }
 
 /// `Round_Cts`: the counter-terrorists win the round (and are paid for it when the next one
@@ -714,6 +775,7 @@ fn round_cts(g: &mut GameState, eng: &mut EngineApi<'_>, delay: f64) {
         winner: 2,
         reason: "#CTs_Win".to_string(),
     });
+    let _ = on_knife_round_winner(g, eng, Team::Ct);
 }
 
 /// `Round_Ts`: the terrorists win the round.
@@ -731,6 +793,7 @@ fn round_ts(g: &mut GameState, eng: &mut EngineApi<'_>, delay: f64) {
         winner: 1,
         reason: "#Terrorists_Win".to_string(),
     });
+    let _ = on_knife_round_winner(g, eng, Team::Terrorist);
 }
 
 /// `Round_Draw`: nobody wins the round.
@@ -915,6 +978,9 @@ fn bomb_round_end_check(g: &mut GameState, eng: &mut EngineApi<'_>) -> bool {
 /// on either side the round is a draw. While a planted live C4 ticks (`!m_bJustBlew`), CTs do not
 /// win by eliminating all terrorists.
 fn team_extermination_check(g: &mut GameState, eng: &mut EngineApi<'_>, c: &Counts) -> bool {
+    if eng.cvar_f32("mp_warmup_mode") != 0.0 {
+        return false;
+    }
     let r = &g.rules;
     let both_play = r.num_ct > 0
         && r.num_spawnable_ct > 0
@@ -1685,6 +1751,86 @@ pub(crate) fn restart_round(g: &mut GameState, eng: &mut EngineApi<'_>) {
     rules.hostages_rescued = 0;
     rules.hostages_touched = 0;
     rules.complete_reset = false;
+    g.round_damage = [[crate::RoundDamageEntry::default(); crate::player::MAX_PLAYERS];
+        crate::player::MAX_PLAYERS];
+    g.damage_printed = [false; crate::player::MAX_PLAYERS];
+    advance_lo3_on_restart(g, eng);
+}
+
+/// Starts the competitive `lo3` / `mp_live_on_three` 3-restart scrim sequence.
+pub(crate) fn start_lo3(g: &mut GameState, eng: &mut EngineApi<'_>) {
+    g.rules.lo3_state = Lo3State::Restart1;
+    let banner = "[LIVE] --- LIVE ON THREE RESTARTS ---\n";
+    menus::print_all(eng, HUD_PRINTTALK, banner, &[]);
+    menus::print_all(eng, menus::HUD_PRINTCENTER, banner, &[]);
+    menus::print_all(eng, menus::HUD_PRINTCONSOLE, banner, &[]);
+    restart_round_check(g, eng, 1.0);
+}
+
+fn advance_lo3_on_restart(g: &mut GameState, eng: &mut EngineApi<'_>) {
+    match g.rules.lo3_state {
+        Lo3State::Idle => {}
+        Lo3State::Restart1 => {
+            g.rules.lo3_state = Lo3State::Restart2;
+            menus::print_all(eng, HUD_PRINTTALK, "[LIVE] Restart #1\n", &[]);
+            restart_round_check(g, eng, 1.0);
+        }
+        Lo3State::Restart2 => {
+            g.rules.lo3_state = Lo3State::Restart3;
+            menus::print_all(eng, HUD_PRINTTALK, "[LIVE] Restart #2\n", &[]);
+            restart_round_check(g, eng, 3.0);
+        }
+        Lo3State::Restart3 => {
+            g.rules.lo3_state = Lo3State::Idle;
+            let live = "[LIVE] GL & HF! MATCH IS LIVE!\n";
+            menus::print_all(eng, HUD_PRINTTALK, live, &[]);
+            menus::print_all(eng, menus::HUD_PRINTCENTER, live, &[]);
+            menus::print_all(eng, menus::HUD_PRINTCONSOLE, live, &[]);
+        }
+    }
+}
+
+/// Handles `.stay` / `.switch` chat commands from the winning team after `mp_knife_round`.
+pub(crate) fn handle_knife_round_chat(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    slot: u8,
+    text: &str,
+) -> bool {
+    let KnifeRoundState::AwaitingChoice { winner } = g.rules.knife_round else {
+        return false;
+    };
+    let Some(team) = g.players.get(usize::from(slot)).and_then(Option::as_ref).map(|p| p.team) else {
+        return false;
+    };
+    if team != winner {
+        return false;
+    }
+    let cmd = text.trim();
+    if cmd.eq_ignore_ascii_case(".stay") {
+        menus::print_all(
+            eng,
+            HUD_PRINTTALK,
+            "[KNIFE] Winners chose .stay! Starting LO3...\n",
+            &[],
+        );
+    } else if cmd.eq_ignore_ascii_case(".switch") {
+        for s in 0..crate::player::MAX_PLAYERS {
+            switch_team(g, eng, s as u8);
+        }
+        menus::print_all(
+            eng,
+            HUD_PRINTTALK,
+            "[KNIFE] Winners chose .switch! Switching sides & starting LO3...\n",
+            &[],
+        );
+    } else {
+        return false;
+    }
+    g.rules.knife_round = KnifeRoundState::Inactive;
+    eng.set_cvar("mp_knife_round", "0");
+    start_lo3(g, eng);
+    true
 }
 
 /// Hook called when a hostage is rescued (`CHostage::IdleThink`).
@@ -1831,6 +1977,19 @@ pub(crate) fn think(g: &mut GameState, eng: &mut EngineApi<'_>) {
         // Initialize the timer time stamps; this happens once only.
         g.rules.round_start_time = now;
     }
+    if eng.cvar_f32("mp_knife_round") != 0.0 && g.rules.knife_round == KnifeRoundState::Inactive {
+        g.rules.knife_round = KnifeRoundState::Active;
+        g.rules.complete_reset = true;
+        let _ = initialize_player_counts(g);
+        if g.rules.num_spawnable_ct > 0 && g.rules.num_spawnable_terrorist > 0 {
+            g.rules.game_started = true;
+            g.rules.needed_players = false;
+        }
+        let msg = "[KNIFE] Knife round started! Winner chooses .stay or .switch\n";
+        menus::print_all(eng, HUD_PRINTTALK, msg, &[]);
+        menus::print_all(eng, menus::HUD_PRINTCENTER, msg, &[]);
+        restart_round(g, eng);
+    }
     // Check game rules.
     if check_game_over(g, eng)
         || check_time_limit(g, eng)
@@ -1839,14 +1998,46 @@ pub(crate) fn think(g: &mut GameState, eng: &mut EngineApi<'_>) {
     {
         return;
     }
+    if eng.cvar_f32("mp_warmup_mode") != 0.0 {
+        let to_respawn: Vec<u8> = g
+            .players
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, p)| {
+                let p = p.as_ref()?;
+                (!p.alive
+                    && !matches!(p.team, Team::Unassigned | Team::Spectator)
+                    && p.menu != Menu::ChooseAppearance
+                    && now >= p.dead_time + 0.5)
+                    .then_some(slot as u8)
+            })
+            .collect();
+        for slot in to_respawn {
+            let _ = player::respawn_player(g, eng, slot);
+        }
+    }
     // Check for the end of the round.
     if g.rules.freeze_period {
-        check_freeze_period_expired(g, eng);
+        if eng.cvar_f32("mp_warmup_mode") != 0.0 {
+            on_round_freeze_end(g, eng);
+        } else {
+            check_freeze_period_expired(g, eng);
+        }
     } else {
         check_round_time_expired(g, eng);
     }
-    if g.rules.restart_round_time > 0.0 && g.rules.restart_round_time <= now {
+    if g.rules.restart_round_time > 0.0
+        && g.rules.restart_round_time <= now
+        && !matches!(g.rules.knife_round, KnifeRoundState::AwaitingChoice { .. })
+    {
         restart_round(g, eng);
+    }
+    if eng.cvar_f32("sv_cheats") != 0.0
+        && eng.cvar_f32("sv_showhitboxes") != 0.0
+        && now >= g.rules.next_hitbox_draw
+    {
+        g.rules.next_hitbox_draw = now + 0.1;
+        emit_hitbox_debug(g, eng);
     }
     if now > g.rules.next_periodic_think {
         check_restart_round(g, eng);
@@ -1882,6 +2073,45 @@ pub(crate) fn think(g: &mut GameState, eng: &mut EngineApi<'_>) {
             0
         };
         eng.set_cvar("mp_fragsleft", &frags_left.to_string());
+    }
+}
+
+fn emit_hitbox_debug(g: &GameState, eng: &mut EngineApi<'_>) {
+    let mut players_drawn = 0usize;
+    for (slot, slot_player) in g.players.iter().enumerate().take(crate::player::MAX_PLAYERS) {
+        if players_drawn >= 4 {
+            break;
+        }
+        let Some(p) = slot_player.as_ref() else {
+            continue;
+        };
+        if !p.alive {
+            continue;
+        }
+        let id = eng.client_edict(slot as u8);
+        if eng.ent(id).is_none_or(|v| v.deadflag != DEAD_NO) {
+            continue;
+        }
+        if let Some(boxes) = eng.studio_hitbox_boxes(id) {
+            players_drawn += 1;
+            for (group, corners) in boxes {
+                let mut min = Vec3::splat(f32::INFINITY);
+                let mut max = Vec3::splat(f32::NEG_INFINITY);
+                for c in corners {
+                    min = min.min(c);
+                    max = max.max(c);
+                }
+                let color = match group {
+                    1 => [255, 40, 40],
+                    2 | 3 => [255, 140, 30],
+                    4 | 5 => [255, 240, 50],
+                    6 | 7 => [60, 230, 80],
+                    _ => [200, 200, 200],
+                };
+                let te = cs_proto48::tempent::box_fx(min, max, 1, color);
+                eng.send_temp_entity(MsgDest::Broadcast, &te);
+            }
+        }
     }
 }
 

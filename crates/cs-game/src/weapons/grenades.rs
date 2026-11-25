@@ -285,6 +285,15 @@ fn throw_it(w: &mut WeaponCtx<'_, '_>) {
     let src = origin + view_ofs + forward * 16.0;
     let throw = forward * vel + velocity;
     let id = w.weapon.id;
+    if let Some(p) = w.g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+        p.last_grenade = Some(crate::player::LastGrenadeThrow {
+            weapon: id,
+            origin: src,
+            angles: ang_throw,
+            velocity: throw,
+            fuse: FUSE,
+        });
+    }
     crate::grenade::throw_grenade(w.g, w.eng, slot, id, src, throw, FUSE);
 }
 

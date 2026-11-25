@@ -570,6 +570,24 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     ] {
         reg.register(name, val, CVarFlags::NONE, "[compat] Half-Life 1 skill table value");
     }
+
+    // Task 9: Opt-in "Beyond Original" practice, QoL, and scrim CVars (all disabled/"0" by default
+    // except `sv_grenade_trajectory_time = "8"`).
+    reg.register("sv_showimpacts", "0", srv, "Show bullet impact boxes (0=off, 1=both, 2=client, 3=server; requires sv_cheats 1)");
+    reg.register("sv_grenade_trajectory", "0", srv, "Draw 3D grenade flight trails and bounce markers (0 or 1; requires sv_cheats 1)");
+    reg.register("sv_grenade_trajectory_time", "8", srv, "Duration in seconds grenade trajectories remain visible");
+    reg.register("sv_showhitboxes", "0", srv, "Draw live player/bot StudioModel hitbox 3D boxes (0 or 1; requires sv_cheats 1)");
+    reg.register("mp_buy_anywhere", "0", srv, "Allow buying anywhere on the map regardless of buyzone or buytime (0 or 1)");
+    reg.register("mp_warmup_mode", "0", srv, "Warmup mode: instant respawn, $16000 refill, and buy anywhere (0 or 1)");
+    reg.register("cl_showspeed", "0", arch, "Show horizontal XY movement speed above HUD (0 or 1)");
+    reg.register("cl_showkeys", "0", arch, "Show live movement/jump/duck key indicator on HUD (0 or 1)");
+    reg.register("cl_crosshair_dot", "0", arch, "Draw a 1px center dot inside the crosshair (0 or 1)");
+    reg.register("cl_crosshair_outline", "0", arch, "Draw a 1px dark outline around crosshair bars (0 or 1)");
+    reg.register("cl_crosshair_t", "0", arch, "Use T-shaped crosshair without top bar (0 or 1)");
+    reg.register("cl_crosshair_gap", "0", arch, "Additional crosshair gap offset in pixels (0 = vanilla)");
+    reg.register("cl_mute_enemy_team", "0", arch, "Mute opposing team chat and voice (0 or 1)");
+    reg.register("sv_damage_print", "0", srv, "Print round Damage Given/Taken summary to player console on death/round end (0 or 1)");
+    reg.register("mp_knife_round", "0", srv, "Start a knife-only round with .stay/.switch before lo3 (0 or 1)");
 }
 
 pub fn register_default_binds(reg: &mut CVarRegistry) {

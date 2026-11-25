@@ -151,6 +151,9 @@ pub struct ViewInputs {
     pub cl_rollspeed: f32,
     pub cl_viewmodel_lag: f32,
     pub cl_weather: bool,
+    pub sv_cheats: bool,
+    pub sv_showimpacts: i32,
+    pub sv_showhitboxes: bool,
 }
 
 impl Default for ViewInputs {
@@ -169,6 +172,9 @@ impl Default for ViewInputs {
             cl_rollspeed: 200.0,
             cl_viewmodel_lag: 1.0,
             cl_weather: true,
+            sv_cheats: false,
+            sv_showimpacts: 0,
+            sv_showhitboxes: false,
         }
     }
 }
@@ -282,6 +288,7 @@ pub struct ViewBuilder {
     bob_state: BobState,
     player_gaits: HashMap<u16, (f32, Vec3)>,
     vm_seq_cache: HashMap<String, Vec<CachedSeqMeta>>,
+    hitbox_models: HashMap<String, Option<Arc<StudioModel>>>,
     last_vm_frame: f32,
     last_vm_path: String,
     last_vm_animtime: f32,
@@ -370,6 +377,7 @@ impl ViewBuilder {
             bob_state: BobState::default(),
             player_gaits: HashMap::new(),
             vm_seq_cache: HashMap::new(),
+            hitbox_models: HashMap::new(),
             last_vm_frame: 0.0,
             last_vm_path: String::new(),
             last_vm_animtime: -1.0,
@@ -393,6 +401,7 @@ impl ViewBuilder {
             .unwrap_or_default();
         self.vfs = vfs;
         self.vm_seq_cache.clear();
+        self.hitbox_models.clear();
     }
 
     pub fn set_map_bsp(&mut self, bsp: Option<Arc<BspMap>>) {
@@ -422,6 +431,7 @@ impl ViewBuilder {
         self.stair_smooth.reset();
         self.bob_state.reset();
         self.player_gaits.clear();
+        self.hitbox_models.clear();
         self.client_models.clear();
         self.anim = None;
         self.last_weaponanim = -1;
@@ -907,7 +917,8 @@ impl ViewBuilder {
         self.glows.drain(..overflow);
 
         let prev_vm_anim = self.anim;
-        let impact_sounds = self.collect_bullet_impacts(&fired, &scene.entities, now);
+        let show_client_impacts = inputs.sv_cheats && matches!(inputs.sv_showimpacts, 1 | 2);
+        let impact_sounds = self.collect_bullet_impacts(&fired, &scene.entities, now, show_client_impacts);
         self.update_view_anim(fx, &fired, weaponanim, viewmodel_index, time);
         let viewmodel = self.viewmodel(precache, alive, fov, viewmodel_index, inputs);
         let mut anim_sounds = Vec::new();
@@ -959,6 +970,9 @@ impl ViewBuilder {
             })
             .collect();
         self.particles.emit_fx(now, &mut beams, &mut points);
+        if inputs.sv_cheats && inputs.sv_showhitboxes {
+            self.emit_client_hitboxes(&scene.entities, &mut beams, time);
+        }
         stats.beams = beams.len();
 
         let simvel = prediction
@@ -1062,6 +1076,7 @@ impl ViewBuilder {
         fired: &[FiredEvent],
         scene_entities: &[RenderEntity],
         now: f64,
+        show_client_impacts: bool,
     ) -> Vec<SoundStart> {
         let Some(ref coll) = self.collision else {
             return Vec::new();
@@ -1136,6 +1151,18 @@ impl ViewBuilder {
                 }
                 let tex_type = self.surface_char_at(best_pos, best_normal, hit_brush);
                 sounds.extend(crate::audio::build_impact_sounds(best_pos, tex_type, seed));
+                if show_client_impacts {
+                    let half = Vec3::splat(2.0);
+                    self.particles.spawn_effect(
+                        now,
+                        &cs_clientcore::tempents::ParticleEffect::Box {
+                            min: best_pos - half,
+                            max: best_pos + half,
+                            life: 4.0,
+                            color: [60, 140, 255],
+                        },
+                    );
+                }
                 if self.pending_decals.len() < 128 {
                     self.pending_decals.push(DecalSpawn {
                         origin: best_pos,
@@ -1150,6 +1177,106 @@ impl ViewBuilder {
             }
         }
         sounds
+    }
+
+    fn emit_client_hitboxes(
+        &mut self,
+        entities: &[RenderEntity],
+        beams: &mut Vec<FxBeam>,
+        now_sec: f32,
+    ) {
+        let Some(ref vfs) = self.vfs else {
+            return;
+        };
+        for ent in entities {
+            if (ent.effects & EF_NODRAW) != 0 || !ent.player {
+                continue;
+            }
+            let Some(entry) = self.models.get(ent.model) else {
+                continue;
+            };
+            if entry.kind != ModelKind::Studio {
+                continue;
+            }
+            let key = entry.name.to_ascii_lowercase();
+            let mdl = self
+                .hitbox_models
+                .entry(key)
+                .or_insert_with(|| StudioModel::load(vfs, &entry.name).ok().map(Arc::new))
+                .clone();
+            let Some(mdl) = mdl else {
+                continue;
+            };
+            if mdl.hitboxes.is_empty() || mdl.sequences.is_empty() {
+                continue;
+            }
+            let seq_idx = (ent.sequence.max(0) as usize).min(mdl.sequences.len() - 1);
+            let seq = &mdl.sequences[seq_idx];
+            let frame = studio_frame(
+                ent.frame,
+                ent.animtime,
+                ent.framerate,
+                now_sec,
+                seq.fps,
+                seq.num_frames,
+                seq.flags & STUDIO_LOOPING != 0,
+            );
+            let bones = mdl.evaluate_bones_full(&cs_assets::mdl::BoneEvalParams {
+                sequence: seq_idx,
+                frame,
+                loop_anim: false,
+                blending: ent.blending,
+                controller: ent.controllers,
+                mouth: ent.mouth,
+                prev_sequence: None,
+                gait: ent.gait.map(|(gs, gf)| ((gs.max(0) as usize).min(mdl.sequences.len() - 1), gf)),
+            });
+            let ent_mat = crate::render::scene::studio_matrix(
+                ent.origin,
+                ent.angles,
+                ent.scale,
+                ent.player,
+            );
+            const EDGES: [(usize, usize); 12] = [
+                (0, 1), (1, 2), (2, 3), (3, 0),
+                (4, 5), (5, 6), (6, 7), (7, 4),
+                (0, 4), (1, 5), (2, 6), (3, 7),
+            ];
+            for hb in &mdl.hitboxes {
+                let Some(bm) = bones.get(hb.bone) else {
+                    continue;
+                };
+                let m = ent_mat * *bm;
+                let lo = hb.bbmin;
+                let hi = hb.bbmax;
+                let corners = [
+                    m.transform_point3(Vec3::new(lo[0], lo[1], lo[2])),
+                    m.transform_point3(Vec3::new(hi[0], lo[1], lo[2])),
+                    m.transform_point3(Vec3::new(hi[0], hi[1], lo[2])),
+                    m.transform_point3(Vec3::new(lo[0], hi[1], lo[2])),
+                    m.transform_point3(Vec3::new(lo[0], lo[1], hi[2])),
+                    m.transform_point3(Vec3::new(hi[0], lo[1], hi[2])),
+                    m.transform_point3(Vec3::new(hi[0], hi[1], hi[2])),
+                    m.transform_point3(Vec3::new(lo[0], hi[1], hi[2])),
+                ];
+                let color = match hb.group {
+                    1 => [1.0, 0.2, 0.2, 0.95],
+                    2 | 3 => [1.0, 0.55, 0.15, 0.95],
+                    4 | 5 => [1.0, 0.95, 0.2, 0.95],
+                    6 | 7 => [0.25, 0.9, 0.35, 0.95],
+                    _ => [0.85, 0.85, 0.85, 0.9],
+                };
+                for (a, b) in EDGES {
+                    beams.push(FxBeam {
+                        start: corners[a],
+                        end: corners[b],
+                        width: 0.9,
+                        color,
+                        additive: true,
+                    });
+                }
+            }
+        }
     }
 
     fn surface_char_at(
@@ -1926,7 +2053,7 @@ mod tests {
             }),
         }];
 
-        let _ = builder.collect_bullet_impacts(&fired, &[], 1.234);
+        let _ = builder.collect_bullet_impacts(&fired, &[], 1.234, false);
         assert_eq!(builder.pending_decals.len(), 1);
         let p1 = builder.pending_decals[0].origin;
         assert!((p1.x - 128.0).abs() < 0.1, "x={}", p1.x);
@@ -1934,7 +2061,7 @@ mod tests {
         assert!((p1.z + 3.2).abs() < 0.2, "z={}", p1.z);
 
         builder.pending_decals.clear();
-        let _ = builder.collect_bullet_impacts(&fired, &[], 99.876);
+        let _ = builder.collect_bullet_impacts(&fired, &[], 99.876, false);
         let p2 = builder.pending_decals[0].origin;
         assert!((p1 - p2).length() < 1e-5, "single shot impact must be deterministic");
     }

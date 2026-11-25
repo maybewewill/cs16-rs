@@ -232,6 +232,18 @@ pub enum EngineAction {
     DeltaStats,
     /// `delta_clear`: clear delta frame history.
     DeltaClear,
+    /// `demo_timescale <0.1..4.0>`: set demo playback speed.
+    DemoTimescale(f32),
+    /// `demo_pause`: pause active demo playback.
+    DemoPause,
+    /// `demo_resume`: resume active demo playback.
+    DemoResume,
+    /// `demo_togglepause`: toggle demo playback pause.
+    DemoTogglePause,
+    /// `demo_goto <seconds>`: seek active demo playback to timestamp.
+    DemoGoto(f64),
+    /// `voice_scale_player <slot> <0.0..2.0>`: set per-player voice gain multiplier.
+    VoiceScalePlayer { slot: u8, scale: f32 },
     /// Server/admin console command (`maps`, `version`, `ping`, `stats`, `user`, etc.).
     ServerCmd(Vec<String>),
     ActionInput { name: String, pressed: bool },
@@ -452,6 +464,19 @@ const KNOWN_COMMANDS: &[(&str, &str)] = &[
     ("_sethdmodels", "[compat] HD models helper"),
     ("_setrenderer", "[compat] Renderer helper"),
     ("_setvideomode", "[compat] Video mode helper"),
+    ("rethrow", "Re-throw last thrown grenade (requires sv_cheats 1)"),
+    ("sv_rethrow_last_grenade", "Re-throw last thrown grenade (requires sv_cheats 1)"),
+    ("give_all", "Give full armor, defuser, grenades, and full ammo (requires sv_cheats 1)"),
+    ("ammo_full", "Refill primary and secondary reserve ammo (requires sv_cheats 1)"),
+    ("demo_timescale", "Set demo playback speed multiplier (0.1..4.0)"),
+    ("demo_pause", "Pause active demo playback"),
+    ("demo_resume", "Resume active demo playback"),
+    ("demo_togglepause", "Toggle active demo playback pause"),
+    ("demo_goto", "Seek active demo playback to timestamp in seconds"),
+    ("voice_scale_player", "Set per-player incoming voice gain multiplier (<slot> <0.0..2.0>)"),
+    ("cfg_diff", "Print only CVars whose value differs from the vanilla CS 1.6 default"),
+    ("lo3", "Run competitive Live on Three (3-restart) scrim sequence"),
+    ("mp_live_on_three", "Run competitive Live on Three (3-restart) scrim sequence"),
 ];
 
 /// Commands that never go to a server, even when the console does not know them: the rcon and
@@ -492,6 +517,7 @@ pub struct CVarRegistry {
     dirty: bool,
     forward_unknown: bool,
     userinfo_dirty: BTreeSet<String>,
+    server_dirty: BTreeSet<String>,
     wait_frames: u32,
     wait_queue: VecDeque<(Vec<String>, usize)>,
 }
@@ -513,6 +539,7 @@ impl CVarRegistry {
             dirty: false,
             forward_unknown: false,
             userinfo_dirty: BTreeSet::new(),
+            server_dirty: BTreeSet::new(),
             wait_frames: 0,
             wait_queue: VecDeque::new(),
         }
@@ -584,6 +611,9 @@ impl CVarRegistry {
                 if cvar.flags.contains(CVarFlags::USERINFO) {
                     self.userinfo_dirty.insert(key.clone());
                 }
+                if cvar.flags.contains(CVarFlags::SERVER) {
+                    self.server_dirty.insert(key.clone());
+                }
             }
             true
         } else {
@@ -610,6 +640,9 @@ impl CVarRegistry {
                     if peer.flags.contains(CVarFlags::USERINFO) {
                         self.userinfo_dirty.insert(dst.to_string());
                     }
+                    if peer.flags.contains(CVarFlags::SERVER) {
+                        self.server_dirty.insert(dst.to_string());
+                    }
                 }
             }
         }
@@ -621,6 +654,24 @@ impl CVarRegistry {
         let keys: Vec<String> = std::mem::take(&mut self.userinfo_dirty).into_iter().collect();
         keys.into_iter()
             .filter_map(|k| self.vars.get(&k).map(|c| (k, c.value.clone())))
+            .collect()
+    }
+
+    /// Drains `FCVAR_SERVER` CVars modified since the last call as `(name, value)` pairs.
+    pub fn take_dirty_server(&mut self) -> Vec<(String, String)> {
+        let keys: Vec<String> = std::mem::take(&mut self.server_dirty).into_iter().collect();
+        keys.into_iter()
+            .filter_map(|k| self.vars.get(&k).map(|c| (k, c.value.clone())))
+            .collect()
+    }
+
+    /// Returns `(name, current_value, default_value)` for every CVar whose value differs from its
+    /// registered vanilla default (`cfg_diff`).
+    pub fn diff_default_cvars(&self) -> Vec<(&str, &str, &str)> {
+        self.vars
+            .values()
+            .filter(|c| c.value != c.default_value)
+            .map(|c| (c.name.as_str(), c.value.as_str(), c.default_value.as_str()))
             .collect()
     }
 
@@ -1187,11 +1238,16 @@ impl CVarRegistry {
             "status" => actions.push(EngineAction::Status),
             "force_centerview" | "centerview" => actions.push(EngineAction::ForceCenterView),
             "noclip" => actions.push(EngineAction::ToggleNoclip),
-            "notarget" | "fly" | "autobuy" | "rebuy" | "setinfo" | "fullinfo" | "new"
-            | "sendres" | "spawn" | "sendents" => {
+            "notarget" | "fly" | "rethrow" | "sv_rethrow_last_grenade" | "give_all"
+            | "ammo_full" | "autobuy" | "rebuy" | "setinfo" | "fullinfo" | "new" | "sendres"
+            | "spawn" | "sendents" => {
                 if self.forward_unknown {
                     actions.push(EngineAction::Forward(tokens.to_vec()));
-                } else if cmd == "notarget" || cmd == "fly" {
+                } else if matches!(
+                    cmd.as_str(),
+                    "notarget" | "fly" | "rethrow" | "sv_rethrow_last_grenade" | "give_all"
+                        | "ammo_full"
+                ) {
                     self.warn(format!("\"{cmd}\" requires an active game session"));
                 }
             }
@@ -1200,8 +1256,62 @@ impl CVarRegistry {
             | "listid" | "writeid" | "addip" | "removeip" | "listip" | "writeip" | "log"
             | "logaddress" | "logaddress_add" | "logaddress_del" | "pause" | "setpause"
             | "unpause" | "resetrcon" | "changelevel2" | "motd" | "motd_write" | "tell"
-            | "hostage_stop" => {
+            | "hostage_stop" | "lo3" | "mp_live_on_three" => {
                 actions.push(EngineAction::ServerCmd(tokens.to_vec()));
+            }
+            "demo_timescale" => {
+                if let Some(raw) = args.first()
+                    && let Ok(val) = raw.parse::<f32>()
+                    && val.is_finite()
+                {
+                    actions.push(EngineAction::DemoTimescale(val.clamp(0.1, 4.0)));
+                } else {
+                    self.info("Usage: demo_timescale <0.1..4.0>");
+                }
+            }
+            "demo_pause" => actions.push(EngineAction::DemoPause),
+            "demo_resume" => actions.push(EngineAction::DemoResume),
+            "demo_togglepause" => actions.push(EngineAction::DemoTogglePause),
+            "demo_goto" => {
+                if let Some(raw) = args.first()
+                    && let Ok(secs) = raw.parse::<f64>()
+                    && secs.is_finite()
+                {
+                    actions.push(EngineAction::DemoGoto(secs.max(0.0)));
+                } else {
+                    self.info("Usage: demo_goto <seconds>");
+                }
+            }
+            "voice_scale_player" => {
+                if args.len() >= 2
+                    && let (Ok(slot), Ok(scale)) =
+                        (args[0].parse::<u8>(), args[1].parse::<f32>())
+                    && slot < 32
+                    && scale.is_finite()
+                {
+                    actions.push(EngineAction::VoiceScalePlayer {
+                        slot,
+                        scale: scale.clamp(0.0, 2.0),
+                    });
+                } else {
+                    self.info("Usage: voice_scale_player <slot 0..31> <0.0..2.0>");
+                }
+            }
+            "cfg_diff" => {
+                let diffs: Vec<(String, String, String)> = self
+                    .diff_default_cvars()
+                    .into_iter()
+                    .map(|(n, v, d)| (n.to_string(), v.to_string(), d.to_string()))
+                    .collect();
+                if diffs.is_empty() {
+                    self.info("All CVars match vanilla CS 1.6 defaults.");
+                } else {
+                    let count = diffs.len();
+                    for (name, value, def) in diffs {
+                        self.info(format!("  {name} = \"{value}\" (default: \"{def}\")"));
+                    }
+                    self.info(format!("{count} modified CVars"));
+                }
             }
             "getpos" => actions.push(EngineAction::GetPos),
             "setpos" => {
@@ -1828,5 +1938,55 @@ mod tests {
         let dirty = reg.take_dirty_userinfo();
         assert!(dirty.iter().any(|(k, v)| k == "_cl_autowepswitch" && v == "0"));
         assert_eq!(reg.get_str("_cl_autowepswitch"), "0");
+    }
+
+    #[test]
+    fn task9_cfg_diff_and_demo_voice_commands() {
+        let mut reg = CVarRegistry::new_with_defaults();
+        assert!(reg.diff_default_cvars().is_empty());
+
+        for name in [
+            "sv_showimpacts",
+            "sv_grenade_trajectory",
+            "sv_showhitboxes",
+            "mp_buy_anywhere",
+            "mp_warmup_mode",
+            "cl_showspeed",
+            "cl_showkeys",
+            "cl_crosshair_dot",
+            "cl_crosshair_outline",
+            "cl_crosshair_t",
+            "cl_crosshair_gap",
+            "cl_mute_enemy_team",
+            "sv_damage_print",
+            "mp_knife_round",
+        ] {
+            assert_eq!(reg.get_str(name), "0", "{name} must default to 0");
+        }
+        assert_eq!(reg.get_str("sv_grenade_trajectory_time"), "8");
+
+        reg.set("cl_showspeed", "1");
+        reg.set("sensitivity", "2.5");
+        let diffs = reg.diff_default_cvars();
+        assert_eq!(diffs.len(), 2);
+        assert!(diffs.iter().any(|(n, v, d)| *n == "cl_showspeed" && *v == "1" && *d == "0"));
+        assert!(diffs.iter().any(|(n, v, d)| *n == "sensitivity" && *v == "2.5" && *d == "3.0"));
+        let _ = reg.execute_script("cfg_diff");
+        assert!(reg.log_lines().iter().any(|l| l.text.contains("2 modified CVars")));
+
+        assert_eq!(
+            reg.execute_script("demo_timescale 0.5; demo_pause; demo_resume; demo_togglepause; demo_goto 12.5"),
+            vec![
+                EngineAction::DemoTimescale(0.5),
+                EngineAction::DemoPause,
+                EngineAction::DemoResume,
+                EngineAction::DemoTogglePause,
+                EngineAction::DemoGoto(12.5),
+            ]
+        );
+        assert_eq!(
+            reg.execute_script("voice_scale_player 3 0.75"),
+            vec![EngineAction::VoiceScalePlayer { slot: 3, scale: 0.75 }]
+        );
     }
 }

@@ -3402,3 +3402,143 @@ evidence = "crates/cs-cvar/src/lib.rs::tests::bindtoggle_incrementvar_multvar_co
 id = "cl_anglespeedkey"
 status = "tested"
 evidence = "crates/cs-cvar/src/lib.rs::tests::bindtoggle_incrementvar_multvar_condump_userinfo_and_classic_defaults; crates/cs-client/src/input.rs::tests::keyboard_turn_lookup_strafe_and_klook_angles"
+
+[[item]]
+id = "sv_showimpacts"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-game/tests/phase14_task9.rs::cheats_gating_and_practice_aids"
+
+[[item]]
+id = "sv_grenade_trajectory"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-game/tests/phase14_task9.rs::cheats_gating_and_practice_aids"
+
+[[item]]
+id = "sv_grenade_trajectory_time"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-game/tests/phase14_task9.rs::task9_cvars_default_to_vanilla_disabled"
+
+[[item]]
+id = "sv_showhitboxes"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-game/tests/phase14_task9.rs::cheats_gating_and_practice_aids"
+
+[[item]]
+id = "rethrow"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs; crates/cs-game/tests/phase14_task9.rs::rethrow_spawns_identical_grenade_trajectory"
+
+[[item]]
+id = "sv_rethrow_last_grenade"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs; crates/cs-game/tests/phase14_task9.rs::rethrow_spawns_identical_grenade_trajectory"
+
+[[item]]
+id = "mp_buy_anywhere"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-game/tests/phase14_task9.rs::warmup_and_buy_anywhere_behavior"
+
+[[item]]
+id = "mp_warmup_mode"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-game/tests/phase14_task9.rs::warmup_and_buy_anywhere_behavior"
+
+[[item]]
+id = "give_all"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs; crates/cs-game/tests/phase14_task9.rs::cheats_gating_and_practice_aids"
+
+[[item]]
+id = "ammo_full"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs; crates/cs-game/tests/phase14_task9.rs::cheats_gating_and_practice_aids"
+
+[[item]]
+id = "cl_showspeed"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/tests/phase10_ui.rs"
+
+[[item]]
+id = "cl_showkeys"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/tests/phase10_ui.rs"
+
+[[item]]
+id = "cl_crosshair_dot"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/tests/phase10_ui.rs"
+
+[[item]]
+id = "cl_crosshair_outline"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/tests/phase10_ui.rs"
+
+[[item]]
+id = "cl_crosshair_t"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/tests/phase10_ui.rs"
+
+[[item]]
+id = "cl_crosshair_gap"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/tests/phase10_ui.rs"
+
+[[item]]
+id = "demo_timescale"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs; crates/cs-client/tests/phase10_ui.rs"
+
+[[item]]
+id = "demo_pause"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs; crates/cs-client/tests/phase10_ui.rs"
+
+[[item]]
+id = "demo_resume"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs; crates/cs-client/tests/phase10_ui.rs"
+
+[[item]]
+id = "demo_togglepause"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs; crates/cs-client/tests/phase10_ui.rs"
+
+[[item]]
+id = "demo_goto"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs; crates/cs-client/tests/phase10_ui.rs"
+
+[[item]]
+id = "cl_mute_enemy_team"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-cvar/src/lib.rs"
+
+[[item]]
+id = "voice_scale_player"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs"
+
+[[item]]
+id = "cfg_diff"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs::tests::task9_cfg_diff_and_demo_voice_commands"
+
+[[item]]
+id = "sv_damage_print"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-game/tests/phase14_task9.rs::sv_damage_print_reports_damage_on_death_and_round_end"
+
+[[item]]
+id = "lo3"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs; crates/cs-game/tests/phase14_task9.rs::lo3_runs_three_restarts_and_announces_live"
+
+[[item]]
+id = "mp_live_on_three"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs; crates/cs-game/tests/phase14_task9.rs::lo3_runs_three_restarts_and_announces_live"
+
+[[item]]
+id = "mp_knife_round"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-game/tests/phase14_task9.rs::mp_knife_round_stay_and_switch_trigger_lo3"

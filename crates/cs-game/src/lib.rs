@@ -64,6 +64,22 @@ pub use entity::{GameEntity, create_entity};
 use entity::{attach, with_entity};
 use player::{MAX_PLAYERS, Player};
 
+/// Recorded practice impact / wallbang entry (`sv_showimpacts`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PracticeImpact {
+    pub origin: Vec3,
+    pub exit: Option<Vec3>,
+    pub wallbang_line: Option<String>,
+}
+
+/// Per-attacker-to-victim damage accumulator within a single round (`sv_damage_print`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RoundDamageEntry {
+    pub damage: i32,
+    pub hits: u16,
+    pub headshots: u16,
+}
+
 /// What the game keeps outside its entities: handed to every entity call.
 pub struct GameState {
     /// The spawn point the last counter-terrorist spawned at (`g_pLastCTSpawn`).
@@ -128,6 +144,12 @@ pub struct GameState {
     pub(crate) map_votes: [Option<usize>; MAX_PLAYERS],
     /// Active `vote` kick selections per player slot (target slot index).
     pub(crate) kick_votes: [Option<u8>; MAX_PLAYERS],
+    /// Recorded practice bullet impacts and wallbang exits (`sv_showimpacts`).
+    pub practice_impacts: std::collections::VecDeque<PracticeImpact>,
+    /// Per-round `[attacker_slot][victim_slot]` damage ledger for `sv_damage_print`.
+    pub round_damage: [[RoundDamageEntry; MAX_PLAYERS]; MAX_PLAYERS],
+    /// Whether `sv_damage_print` already sent this round's summary to `slot` (e.g. on death).
+    pub damage_printed: [bool; MAX_PLAYERS],
     /// Every call the dispatch delivered to a `test_dispatch` entity. For tests only (feature
     /// `test-hooks`).
     #[cfg(feature = "test-hooks")]
@@ -165,6 +187,9 @@ impl GameState {
             world_sounds: Vec::new(),
             map_votes: [None; MAX_PLAYERS],
             kick_votes: [None; MAX_PLAYERS],
+            practice_impacts: std::collections::VecDeque::new(),
+            round_damage: [[RoundDamageEntry::default(); MAX_PLAYERS]; MAX_PLAYERS],
+            damage_printed: [false; MAX_PLAYERS],
             #[cfg(feature = "test-hooks")]
             dispatch_log: Vec::new(),
         }
@@ -195,6 +220,9 @@ impl GameState {
         self.world_sounds.clear();
         self.map_votes = [None; MAX_PLAYERS];
         self.kick_votes = [None; MAX_PLAYERS];
+        self.practice_impacts.clear();
+        self.round_damage = [[RoundDamageEntry::default(); MAX_PLAYERS]; MAX_PLAYERS];
+        self.damage_printed = [false; MAX_PLAYERS];
     }
 }
 
@@ -976,6 +1004,10 @@ impl GameDll for CsGame {
                 let body = argv[1..].join(" ");
                 self.state.motd = body.as_bytes().to_vec();
                 return Some("MOTD updated\n".to_string());
+            }
+            "lo3" | "mp_live_on_three" => {
+                rules::start_lo3(&mut self.state, eng);
+                return Some("[LIVE] --- LIVE ON THREE RESTARTS ---\n".to_string());
             }
             _ => {}
         }

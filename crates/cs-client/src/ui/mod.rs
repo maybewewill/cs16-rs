@@ -218,7 +218,9 @@ pub fn should_draw_dynamic_crosshair(fov: f32, weapon_id: u8) -> bool {
     fov.is_finite() && fov > 54.0 && !matches!(weapon_id, 3 | 13 | 18 | 24)
 }
 
-/// Draw the 1-to-1 `FUN_10043ff0` (`CHudAmmo::DrawCrosshair`) 4-bar dynamic crosshair.
+/// Draw the 1-to-1 `FUN_10043ff0` (`CHudAmmo::DrawCrosshair`) 4-bar dynamic crosshair,
+/// plus optional Task 9 QoL extensions (`cl_crosshair_dot`, `cl_crosshair_outline`,
+/// `cl_crosshair_t`, `cl_crosshair_gap`, all `"0"` by default).
 pub fn draw_crosshair_vgui(
     ctx: &egui::Context,
     cvars: &CVarRegistry,
@@ -233,6 +235,13 @@ pub fn draw_crosshair_vgui(
     let sh = screen.height().round() as i32;
     let geom = state.compute_geometry(inputs, cvars.get_str("cl_crosshair_size"), sw);
     let color = crosshair_color(cvars, inputs.night_vision, geom.alpha);
+    let dot = cvars.get_bool("cl_crosshair_dot");
+    let outline = cvars.get_bool("cl_crosshair_outline");
+    let t_shape = cvars.get_bool("cl_crosshair_t");
+    let extra_gap = {
+        let v = cvars.get_f32("cl_crosshair_gap");
+        if v.is_finite() { v } else { 0.0 }
+    };
 
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Background,
@@ -240,18 +249,113 @@ pub fn draw_crosshair_vgui(
     ));
     let cx = (screen.left() + (sw / 2) as f32).floor();
     let cy = (screen.top() + (sh / 2) as f32).floor();
-    let g = geom.gap as f32;
+    let g = ((geom.gap as f32) + extra_gap).max(0.0);
     let l = geom.bar_len as f32;
+    let outline_color = Color32::from_rgba_unmultiplied(0, 0, 0, geom.alpha);
 
-    // 4 1px-thick filled rectangles matching `FUN_10043ff0`:
-    // Left:   (cx - gap - bar_len + 1, cy, bar_len, 1)
-    // Right:  (cx + gap,               cy, bar_len, 1)
-    // Top:    (cx, cy - gap - bar_len + 1, 1, bar_len)
-    // Bottom: (cx, cy + gap,               1, bar_len)
-    painter.rect_filled(egui::Rect::from_min_size(Pos2::new(cx - g - l + 1.0, cy), egui::vec2(l, 1.0)), 0.0, color);
-    painter.rect_filled(egui::Rect::from_min_size(Pos2::new(cx + g, cy), egui::vec2(l, 1.0)), 0.0, color);
-    painter.rect_filled(egui::Rect::from_min_size(Pos2::new(cx, cy - g - l + 1.0), egui::vec2(1.0, l)), 0.0, color);
-    painter.rect_filled(egui::Rect::from_min_size(Pos2::new(cx, cy + g), egui::vec2(1.0, l)), 0.0, color);
+    let mut rects = vec![
+        egui::Rect::from_min_size(Pos2::new(cx - g - l + 1.0, cy), egui::vec2(l, 1.0)),
+        egui::Rect::from_min_size(Pos2::new(cx + g, cy), egui::vec2(l, 1.0)),
+        egui::Rect::from_min_size(Pos2::new(cx, cy + g), egui::vec2(1.0, l)),
+    ];
+    if !t_shape {
+        rects.push(egui::Rect::from_min_size(
+            Pos2::new(cx, cy - g - l + 1.0),
+            egui::vec2(1.0, l),
+        ));
+    }
+    if dot {
+        rects.push(egui::Rect::from_min_size(Pos2::new(cx, cy), egui::vec2(1.0, 1.0)));
+    }
+    if outline {
+        for r in &rects {
+            painter.rect_filled(r.expand(1.0), 0.0, outline_color);
+        }
+    }
+    for r in rects {
+        painter.rect_filled(r, 0.0, color);
+    }
+}
+
+/// Live movement/jump/duck key states for `cl_showkeys 1`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct KeyDisplayState {
+    pub forward: bool,
+    pub back: bool,
+    pub left: bool,
+    pub right: bool,
+    pub jump: bool,
+    pub duck: bool,
+}
+
+/// Draw `cl_showspeed 1` horizontal XY speed (`u/s`) centered above the bottom HUD bar.
+pub fn draw_showspeed(ctx: &egui::Context, cvars: &CVarRegistry, speed_xy: f32) {
+    if cvars.get_f32("cl_showspeed") == 0.0 {
+        return;
+    }
+    let screen = ctx.content_rect();
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::unique("cs16_cl_showspeed"),
+    ));
+    let font = FontId::monospace(14.0);
+    let label = format!("{:.0} u/s", speed_xy.max(0.0));
+    let pos = Pos2::new(screen.center().x, screen.bottom() - 82.0);
+    painter.text(
+        pos + egui::vec2(1.0, 1.0),
+        egui::Align2::CENTER_BOTTOM,
+        &label,
+        font.clone(),
+        Color32::from_black_alpha(220),
+    );
+    painter.text(
+        pos,
+        egui::Align2::CENTER_BOTTOM,
+        &label,
+        font,
+        Color32::from_rgb(255, 200, 80),
+    );
+}
+
+/// Draw `cl_showkeys 1` live `W A S D  JUMP  DUCK` indicator above the bottom HUD bar.
+pub fn draw_showkeys(ctx: &egui::Context, cvars: &CVarRegistry, keys: &KeyDisplayState) {
+    if cvars.get_f32("cl_showkeys") == 0.0 {
+        return;
+    }
+    let screen = ctx.content_rect();
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::unique("cs16_cl_showkeys"),
+    ));
+    let font = FontId::monospace(12.0);
+    let items = [
+        ("W", keys.forward),
+        ("A", keys.left),
+        ("S", keys.back),
+        ("D", keys.right),
+        ("JUMP", keys.jump),
+        ("DUCK", keys.duck),
+    ];
+    let text = items
+        .iter()
+        .map(|(lbl, on)| if *on { format!("[{lbl}]") } else { format!(" {lbl} ") })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let pos = Pos2::new(screen.center().x, screen.bottom() - 102.0);
+    painter.text(
+        pos + egui::vec2(1.0, 1.0),
+        egui::Align2::CENTER_BOTTOM,
+        &text,
+        font.clone(),
+        Color32::from_black_alpha(220),
+    );
+    painter.text(
+        pos,
+        egui::Align2::CENTER_BOTTOM,
+        &text,
+        font,
+        Color32::WHITE,
+    );
 }
 
 /// Draw the classic 4-bar Counter-Strike 1.6 crosshair in the center of the screen.

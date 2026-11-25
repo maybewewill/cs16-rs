@@ -68,9 +68,9 @@ use cs_client::ui::vgui2::{VguiRuntime, install_scheme_fonts_into_egui};
 use cs_client::ui::vgui_assets::VguiAssetBank;
 use cs_client::ui::vgui_theme::{VguiPalette, apply_vgui2_theme};
 use cs_client::ui::{
-    CrosshairInputs, CrosshairState, FrameTelemetry, draw_crosshair_vgui,
-    draw_net_graph_with_telemetry, draw_r_speeds, draw_showpos, draw_top_left_console_overlays,
-    should_draw_dynamic_crosshair,
+    CrosshairInputs, CrosshairState, FrameTelemetry, KeyDisplayState, draw_crosshair_vgui,
+    draw_net_graph_with_telemetry, draw_r_speeds, draw_showkeys, draw_showpos, draw_showspeed,
+    draw_top_left_console_overlays, should_draw_dynamic_crosshair,
 };
 use cs_client::view::{FrameView, ViewInputs, ViewStats};
 use cs_client::view_effects::{calc_view_idle, calc_viewmodel_angles};
@@ -223,6 +223,7 @@ pub struct Cs16App {
     console_notify_lines: Vec<(String, f64)>,
     last_log_seen: usize,
     strafe_sidemove: f32,
+    voice_player_scales: [f32; 32],
 }
 
 struct PendingRcon {
@@ -370,6 +371,7 @@ impl Cs16App {
             console_notify_lines: Vec::new(),
             last_log_seen,
             strafe_sidemove: 0.0,
+            voice_player_scales: [1.0; 32],
         }
     }
 
@@ -576,6 +578,14 @@ impl Cs16App {
                     "violence_ablood",
                     "violence_hgibs",
                     "violence_agibs",
+                    "sv_showimpacts",
+                    "sv_grenade_trajectory",
+                    "sv_grenade_trajectory_time",
+                    "sv_showhitboxes",
+                    "mp_buy_anywhere",
+                    "mp_warmup_mode",
+                    "sv_damage_print",
+                    "mp_knife_round",
                 ] {
                     let val = self.cvars.get_str(name);
                     if !val.is_empty() {
@@ -671,6 +681,13 @@ impl Cs16App {
             for (k, v) in self.cvars.take_dirty_userinfo() {
                 self.session.set_client_cvar(&k, &v);
             }
+        }
+        if self.session.is_local() {
+            for (k, v) in self.cvars.take_dirty_server() {
+                let _ = self.session.server_console(&format!("{k} {v}"));
+            }
+        } else {
+            let _ = self.cvars.take_dirty_server();
         }
         for name in [
             "cl_cmdrate",
@@ -849,17 +866,31 @@ impl Cs16App {
         let loc = self.loc.as_ref();
         let titles = Some(&self.titles);
         let names = self.session.player_names();
+        let mute_enemy = self.cvars.get_bool("cl_mute_enemy_team");
+        let local_slot1 = self.session.local_slot().map(|s| s + 1);
         let feeds = &mut self.feeds;
         let weapon = self
             .session
             .with_hud_mut(|hud| {
+                let local_team = local_slot1
+                    .and_then(|s| hud.players.get(&s))
+                    .map(|p| p.team.as_str())
+                    .filter(|t| *t == "CT" || *t == "TERRORIST")
+                    .map(str::to_string);
                 for d in hud.deaths.drain(..) {
                     feeds.deaths.push((d, now));
                 }
                 for line in hud.chat.drain(..) {
+                    let team = hud.players.get(&line.sender).map(|p| p.team.clone());
+                    if mute_enemy
+                        && let (Some(lt), Some(st)) = (&local_team, &team)
+                        && (st == "CT" || st == "TERRORIST")
+                        && st != lt
+                    {
+                        continue;
+                    }
                     let text = format_saytext_with_titles(&line.text, &line.params, loc, titles);
                     if !text.is_empty() {
-                        let team = hud.players.get(&line.sender).map(|p| p.team.clone());
                         feeds.chat.push((HudChatEntry { text, team }, now));
                     }
                 }
@@ -1394,6 +1425,64 @@ impl Cs16App {
                     EngineAction::DeltaClear => {
                         self.session.delta_clear();
                         self.cvars.info("Delta frame history cleared.");
+                    }
+                    EngineAction::DemoTimescale(scale) => {
+                        if let Some(p) = self.session.demo_player_mut() {
+                            let s = scale.clamp(0.1, 4.0);
+                            p.set_speed(s);
+                            self.demo_player_ui.speed = s;
+                            self.cvars.info(format!("demo_timescale: {s:.2}x"));
+                        } else {
+                            self.cvars.warn("demo_timescale: no demo playing");
+                        }
+                    }
+                    EngineAction::DemoPause => {
+                        if let Some(p) = self.session.demo_player_mut() {
+                            p.set_paused(true);
+                            self.demo_player_ui.state =
+                                cs_client::ui::screens::DemoTransportState::Paused;
+                        } else {
+                            self.cvars.warn("demo_pause: no demo playing");
+                        }
+                    }
+                    EngineAction::DemoResume => {
+                        if let Some(p) = self.session.demo_player_mut() {
+                            p.set_paused(false);
+                            self.demo_player_ui.state =
+                                cs_client::ui::screens::DemoTransportState::Playing;
+                        } else {
+                            self.cvars.warn("demo_resume: no demo playing");
+                        }
+                    }
+                    EngineAction::DemoTogglePause => {
+                        if let Some(p) = self.session.demo_player_mut() {
+                            let next = !p.is_paused();
+                            p.set_paused(next);
+                            self.demo_player_ui.state = if next {
+                                cs_client::ui::screens::DemoTransportState::Paused
+                            } else {
+                                cs_client::ui::screens::DemoTransportState::Playing
+                            };
+                        } else {
+                            self.cvars.warn("demo_togglepause: no demo playing");
+                        }
+                    }
+                    EngineAction::DemoGoto(secs) => {
+                        if let Some(p) = self.session.demo_player_mut() {
+                            let target = secs.clamp(0.0, p.total_duration());
+                            p.seek(target);
+                            self.demo_player_ui.current_secs = p.current_time();
+                        } else {
+                            self.cvars.warn("demo_goto: no demo playing");
+                        }
+                    }
+                    EngineAction::VoiceScalePlayer { slot, scale } => {
+                        if usize::from(slot) < self.voice_player_scales.len() {
+                            let s = scale.clamp(0.0, 2.0);
+                            self.voice_player_scales[usize::from(slot)] = s;
+                            self.cvars
+                                .info(format!("voice_scale_player[{slot}] = {s:.2}"));
+                        }
                     }
                     EngineAction::ServerCmd(tokens) => {
                         let line = tokens.join(" ");
@@ -2156,6 +2245,9 @@ impl Cs16App {
                 cl_rollspeed: finite_or(self.cvars.get_f32("cl_rollspeed"), 200.0),
                 cl_viewmodel_lag: finite_or(self.cvars.get_f32("cl_viewmodel_lag"), 1.0),
                 cl_weather: self.cvars.get_bool("cl_weather"),
+                sv_cheats: self.cvars.get_bool("sv_cheats"),
+                sv_showimpacts: self.cvars.get_i32("sv_showimpacts"),
+                sv_showhitboxes: self.cvars.get_bool("sv_showhitboxes"),
             };
             let angles = Vec3::new(
                 finite_or(self.camera.pitch_deg, 0.0),
@@ -2204,13 +2296,37 @@ impl Cs16App {
         for ve in self.session.take_voice_events() {
             self.audio.push_voice_event(ve, sess_now_voice);
         }
-        for outgoing_voice in self.audio.step_voice(
+        let mut muted_mask = 0u32;
+        if self.cvars.get_bool("cl_mute_enemy_team")
+            && let Some(local_slot1) = self.session.local_slot().map(|s| s + 1)
+        {
+            self.session.with_hud(|h| {
+                let local_team = h
+                    .players
+                    .get(&local_slot1)
+                    .map(|p| p.team.as_str())
+                    .filter(|t| *t == "CT" || *t == "TERRORIST");
+                if let Some(lt) = local_team {
+                    for (&slot1, pinfo) in &h.players {
+                        if (1..=32).contains(&slot1)
+                            && (pinfo.team == "CT" || pinfo.team == "TERRORIST")
+                            && pinfo.team != lt
+                        {
+                            muted_mask |= 1u32 << (slot1 - 1);
+                        }
+                    }
+                }
+            });
+        }
+        for outgoing_voice in self.audio.step_voice_with_filters(
             sess_now_voice,
             voice_enable,
             voice_scale,
             voice_loopback,
             voice_avg,
             voice_max,
+            muted_mask,
+            &self.voice_player_scales,
         ) {
             self.session.send_voice_data(&outgoing_voice);
         }
@@ -2544,6 +2660,21 @@ impl Cs16App {
             };
             draw_showpos(&rt.egui_ctx, &self.cvars, &telemetry);
             draw_r_speeds(&rt.egui_ctx, &self.cvars, &telemetry);
+            if in_game {
+                draw_showspeed(&rt.egui_ctx, &self.cvars, local_speed);
+                let held = self.input_state.held(!paused);
+                let keys_disp = KeyDisplayState {
+                    forward: held.actions.is_some_and(|a| a.contains("forward")),
+                    back: held.actions.is_some_and(|a| a.contains("back")),
+                    left: held.actions.is_some_and(|a| a.contains("moveleft")),
+                    right: held.actions.is_some_and(|a| a.contains("moveright")),
+                    jump: held.actions.is_some_and(|a| a.contains("jump"))
+                        || held.impulse_actions.is_some_and(|a| a.contains("jump")),
+                    duck: held.actions.is_some_and(|a| a.contains("duck"))
+                        || held.impulse_actions.is_some_and(|a| a.contains("duck")),
+                };
+                draw_showkeys(&rt.egui_ctx, &self.cvars, &keys_disp);
+            }
             if self
                 .session
                 .with_net_graph(|ng| {

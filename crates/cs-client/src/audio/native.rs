@@ -446,6 +446,30 @@ impl AudioEngine {
         avg_gain: f32,
         max_gain: f32,
     ) -> Vec<Vec<u8>> {
+        self.step_voice_with_filters(
+            now,
+            voice_enable,
+            voice_scale,
+            voice_loopback,
+            avg_gain,
+            max_gain,
+            0,
+            &[1.0; 32],
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_voice_with_filters(
+        &mut self,
+        now: f64,
+        voice_enable: bool,
+        voice_scale: f32,
+        voice_loopback: bool,
+        avg_gain: f32,
+        max_gain: f32,
+        muted_mask: u32,
+        player_scales: &[f32; 32],
+    ) -> Vec<Vec<u8>> {
         if let Some(ref mic) = self.mic {
             let pcm = mic.drain();
             if self.recording && !pcm.is_empty() {
@@ -465,7 +489,15 @@ impl AudioEngine {
             && let Ok(mut m) = self.mixer.lock()
         {
             for (slot, rate, samples) in decoded {
-                m.push_voice_pcm(slot, rate, &samples, voice_scale);
+                let idx = usize::from(slot);
+                if idx < 32 && (muted_mask & (1u32 << idx)) != 0 {
+                    continue;
+                }
+                let p_scale = player_scales.get(idx).copied().unwrap_or(1.0).clamp(0.0, 2.0);
+                let gain = voice_scale * p_scale;
+                if gain > 0.0 {
+                    m.push_voice_pcm(slot, rate, &samples, gain);
+                }
             }
         }
         self.voice.take_outgoing()
