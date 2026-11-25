@@ -47,6 +47,23 @@ pub struct KbActEntry {
     pub is_header: bool,
 }
 
+const VOLUME_SLIDER_MIN: f32 = 0.0;
+const VOLUME_SLIDER_MAX: f32 = 2.0;
+const GAMMA_SLIDER_MIN: f32 = 1.0;
+const GAMMA_SLIDER_MAX: f32 = 3.0;
+const LOW_LATENCY_CVAR: &str = "gl_lowlatency";
+
+fn ensure_lowlatency_cvar(cvars: &mut CVarRegistry) {
+    if cvars.get(LOW_LATENCY_CVAR).is_none() {
+        cvars.register(
+            LOW_LATENCY_CVAR,
+            "0",
+            cs_cvar::CVarFlags::ARCHIVE,
+            "Lower input latency (0 or 1)",
+        );
+    }
+}
+
 const SPRAY_COLOR_PRESETS: &[(&str, Color32)] = &[
     ("Orange", Color32::from_rgb(255, 120, 24)),
     ("Yellow", Color32::from_rgb(245, 225, 48)),
@@ -840,7 +857,7 @@ impl OptionsUi {
             wrap,
             true,
         );
-        let mut vol = cvars.get_f32("volume").clamp(0.0, 1.0);
+        let mut vol = cvars.get_f32("volume").clamp(VOLUME_SLIDER_MIN, VOLUME_SLIDER_MAX);
         if draw_tracker_slider_rect(
             ui,
             rt,
@@ -848,8 +865,8 @@ impl OptionsUi {
             "opt_audio_sfx",
             rect_or("SFX Slider", 40.0, 37.0, 420.0, 36.0),
             &mut vol,
-            0.0,
-            1.0,
+            VOLUME_SLIDER_MIN,
+            VOLUME_SLIDER_MAX,
             "",
             "",
         ) {
@@ -1149,7 +1166,7 @@ impl OptionsUi {
             wrap,
             true,
         );
-        let mut gamma = cvars.get_f32("gamma").clamp(1.8, 3.0);
+        let mut gamma = cvars.get_f32("gamma").clamp(GAMMA_SLIDER_MIN, GAMMA_SLIDER_MAX);
         let (low_s, high_s) = slider_edge_labels(doc.as_ref(), o.loc, "Gamma", "Low", "High");
         if draw_tracker_slider_rect(
             ui,
@@ -1158,8 +1175,8 @@ impl OptionsUi {
             "opt_vid_gamma",
             rect_or("Gamma", 140.0, 283.0, 300.0, 36.0),
             &mut gamma,
-            1.8,
-            3.0,
+            GAMMA_SLIDER_MIN,
+            GAMMA_SLIDER_MAX,
             &low_s,
             &high_s,
         ) {
@@ -1308,7 +1325,9 @@ impl OptionsUi {
             true,
         );
 
-        let mut custom_accel = cvars.get_bool("m_customaccel");
+        // `GameUI.dll:FUN_10034f90`: LowLatency checkbox binds to `gl_lowlatency`.
+        ensure_lowlatency_cvar(cvars);
+        let mut low_latency = cvars.get_bool(LOW_LATENCY_CVAR);
         let (ll_lbl, _, _, _) = label_or("LowLatency", "#GameUI_LowLatency");
         if draw_tracker_check_button_rect(
             ui,
@@ -1316,11 +1335,11 @@ impl OptionsUi {
             tc,
             "opt_m_lowlat",
             rect_or("LowLatency", 30.0, 128.0, 280.0, 24.0),
-            &mut custom_accel,
+            &mut low_latency,
             &ll_lbl,
             true,
         ) {
-            cvars.set("m_customaccel", if custom_accel { "1" } else { "0" });
+            cvars.set(LOW_LATENCY_CVAR, if low_latency { "1" } else { "0" });
         }
         let (ll_desc, _, _, align) = label_or("LowLatencyLabel", "#GameUI_LowLatencyLabel");
         paint_tracker_label_rect(
@@ -2226,5 +2245,87 @@ fn egui_key_to_goldsrc(key: egui::Key) -> String {
         egui::Key::Backspace => "backspace".into(),
         egui::Key::Backtick => "`".into(),
         other => format!("{other:?}").to_ascii_lowercase(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run_options_frame(
+        opts: &mut OptionsUi,
+        cvars: &mut CVarRegistry,
+        rt: &mut VguiRuntime,
+    ) -> usize {
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0))),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(raw, |ui| {
+            opts.show(
+                ui.ctx(),
+                rt,
+                cvars,
+                &OptionsRenderCtx {
+                    vfs: None,
+                    loc: None,
+                    palette: VguiPalette::from(cs_assets::scheme::VguiColors::default()),
+                    steam_icon: None,
+                },
+            );
+        });
+        out.textures_delta.clear();
+        out.shapes.len()
+    }
+
+    #[test]
+    fn audio_volume_slider_allows_up_to_2_0_and_video_gamma_down_to_1_0() {
+        let mut opts = OptionsUi {
+            open: true,
+            ..Default::default()
+        };
+        let mut rt = VguiRuntime::new();
+        let mut cvars = CVarRegistry::new_with_defaults();
+        cvars.set("volume", "1.75");
+        cvars.set("gamma", "1.25");
+
+        opts.tab = OptionsTab::Audio;
+        assert!(run_options_frame(&mut opts, &mut cvars, &mut rt) > 0);
+        assert!(
+            (cvars.get_f32("volume") - 1.75).abs() < 1e-4,
+            "volume slider range 0.0..=2.0 must not clamp 1.75"
+        );
+        assert!((VOLUME_SLIDER_MIN - 0.0).abs() < 1e-6);
+        assert!((VOLUME_SLIDER_MAX - 2.0).abs() < 1e-6);
+
+        opts.tab = OptionsTab::Video;
+        assert!(run_options_frame(&mut opts, &mut cvars, &mut rt) > 0);
+        assert!(
+            (cvars.get_f32("gamma") - 1.25).abs() < 1e-4,
+            "gamma slider range 1.0..=3.0 must not clamp 1.25"
+        );
+        assert!((GAMMA_SLIDER_MIN - 1.0).abs() < 1e-6);
+        assert!((GAMMA_SLIDER_MAX - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn mouse_tab_low_latency_binds_to_gl_lowlatency_not_m_customaccel() {
+        let mut opts = OptionsUi {
+            open: true,
+            tab: OptionsTab::Mouse,
+            ..Default::default()
+        };
+        let mut rt = VguiRuntime::new();
+        let mut cvars = CVarRegistry::new_with_defaults();
+        cvars.set("m_customaccel", "1");
+
+        assert!(run_options_frame(&mut opts, &mut cvars, &mut rt) > 0);
+        assert!(cvars.get("gl_lowlatency").is_some());
+        assert!(!cvars.get_bool("gl_lowlatency"));
+        assert!(cvars.get_bool("m_customaccel"));
+
+        assert!(cvars.set("gl_lowlatency", "1"));
+        assert!(cvars.get_bool("gl_lowlatency"));
     }
 }

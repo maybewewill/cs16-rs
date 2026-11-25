@@ -40,6 +40,8 @@ pub struct SchemeFontVariant {
     pub symbol: bool,
     pub italic: bool,
     pub underline: bool,
+    pub strikeout: bool,
+    pub scanlines: u32,
 }
 
 impl Default for SchemeFontVariant {
@@ -59,6 +61,8 @@ impl Default for SchemeFontVariant {
             symbol: false,
             italic: false,
             underline: false,
+            strikeout: false,
+            scanlines: 0,
         }
     }
 }
@@ -148,6 +152,7 @@ impl SchemeFontSet {
                                                 }
                                             }
                                             "blur" => v.blur = val.parse().unwrap_or(0),
+                                            "scanlines" => v.scanlines = val.parse().unwrap_or(0),
                                             "dropshadow" => v.dropshadow = val == "1",
                                             "outline" => v.outline = val == "1",
                                             "antialias" => v.antialias = val == "1",
@@ -155,6 +160,7 @@ impl SchemeFontSet {
                                             "symbol" => v.symbol = val == "1",
                                             "italic" => v.italic = val == "1",
                                             "underline" => v.underline = val == "1",
+                                            "strikeout" => v.strikeout = val == "1",
                                             _ => {}
                                         }
                                         i += 1;
@@ -218,7 +224,7 @@ pub struct RasterizedGlyph {
     pub alpha: Vec<u8>,
 }
 
-/// Options mirroring Valve Windows GDI / `vgui_surfaces` font flags.
+/// Options mirroring Valve Windows GDI / `vgui2.dll` (`FUN_1001a9b0`, `FUN_1001aea0`, `FUN_1000daf0`) font flags.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RasterizeOptions {
     pub tall: f32,
@@ -226,11 +232,30 @@ pub struct RasterizeOptions {
     pub outline: bool,
     pub dropshadow: bool,
     pub underline: bool,
+    pub strikeout: bool,
+    pub blur: u32,
+    pub scanlines: u32,
     pub additive: bool,
-    /// Windows GDI emboldens a face synthetically when the requested weight is heavier than the
-    /// heaviest file it has (e.g. `weight 1000` on Trebuchet MS, whose bold file is 700): every
-    /// glyph is smeared one pixel to the right and its advance grows by one.
+    /// Windows GDI `FW_BOLD` (`>= 700`) emboldens synthetically when no separate bold weight is used
+    /// (`vgui2.dll:FUN_1000daf0` / GDI `CreateFont`).
     pub synthetic_bold: bool,
+}
+
+impl Default for RasterizeOptions {
+    fn default() -> Self {
+        Self {
+            tall: 14.0,
+            antialias: false,
+            outline: false,
+            dropshadow: false,
+            underline: false,
+            strikeout: false,
+            blur: 0,
+            scanlines: 0,
+            additive: false,
+            synthetic_bold: false,
+        }
+    }
 }
 
 impl From<&SchemeFontVariant> for RasterizeOptions {
@@ -241,10 +266,12 @@ impl From<&SchemeFontVariant> for RasterizeOptions {
             outline: v.outline,
             dropshadow: v.dropshadow,
             underline: v.underline,
+            strikeout: v.strikeout,
+            blur: v.blur,
+            scanlines: v.scanlines,
             additive: v.additive,
-            // Assumption: GDI's threshold for synthetic emboldening over a 700 bold face is a
-            // request above 800 (seen: `MenuLarge` weight 1000 renders heavier than the bold file).
-            synthetic_bold: v.weight > 800,
+            // Aligned with `vgui2.dll` / Windows GDI `FW_BOLD` threshold (`>= 700`).
+            synthetic_bold: v.weight >= 700,
         }
     }
 }
@@ -386,33 +413,37 @@ impl VguiTrueTypeFont {
         })
     }
 
-    /// Rasterize a glyph using Valve Windows GDI rules:
+    /// Rasterize a glyph using Valve Windows GDI & `vgui2.dll` rules:
     /// - 1-bit hard coverage threshold when `!opts.antialias`
     /// - 1px black outline when `opts.outline`
     /// - `(+1, +1)` black drop shadow when `opts.dropshadow`
+    /// - `underline` & `strikeout` horizontal strokes (`vgui2.dll:FUN_1000daf0`)
+    /// - Gaussian `blur` pass when `opts.blur > 1` (`vgui2.dll:FUN_1001a9b0`, `sigma = blur * 0.683`)
+    /// - `scanlines` darkening when `opts.scanlines > 1` (`vgui2.dll:FUN_1001aea0`)
     pub fn rasterize_glyph_rgba(&self, ch: char, opts: &RasterizeOptions) -> Option<RasterizedGlyphRgba> {
         let px = self.gdi_px_scale(opts.tall);
         let scaled = self.font.as_scaled(PxScale::from(px));
         let gid = self.font.glyph_id(ch);
         let advance_x = scaled.h_advance(gid).round() as i32 + i32::from(opts.synthetic_bold);
         let baseline = scaled.ascent().round();
+        let baseline_i = baseline as i32;
+        let ascent_i = scaled.ascent().round() as i32;
+        let descent_i = scaled.descent().round() as i32;
         let glyph = gid.with_scale_and_position(PxScale::from(px), ab_glyph::point(0.0, baseline));
-        let Some(outlined) = self.font.outline_glyph(glyph) else {
-            return Some(RasterizedGlyphRgba {
-                ch,
-                width: 0,
-                height: 0,
-                offset_x: 0,
-                offset_y: 0,
-                advance_x,
-                rgba: Vec::new(),
-            });
-        };
-        let bounds = outlined.px_bounds();
+        let outlined = self.font.outline_glyph(glyph);
+
         let embolden = i32::from(opts.synthetic_bold);
-        let gw = bounds.width().ceil().max(0.0) as i32 + embolden;
-        let gh = bounds.height().ceil().max(0.0) as i32;
-        if gw == 0 || gh == 0 {
+        let (bx0, by0, orig_gw, orig_gh) = match &outlined {
+            Some(o) => {
+                let bounds = o.px_bounds();
+                let w = bounds.width().ceil().max(0.0) as i32 + embolden;
+                let h = bounds.height().ceil().max(0.0) as i32;
+                (bounds.min.x.round() as i32, bounds.min.y.round() as i32, w, h)
+            }
+            None => (0, baseline_i, 0, 0),
+        };
+        let has_strokes = (opts.underline || opts.strikeout) && advance_x > 0;
+        if (orig_gw == 0 || orig_gh == 0) && !has_strokes {
             return Some(RasterizedGlyphRgba {
                 ch,
                 width: 0,
@@ -423,35 +454,77 @@ impl VguiTrueTypeFont {
                 rgba: Vec::new(),
             });
         }
+
+        let stroke_h = ((opts.tall / 14.0).floor() as i32).max(1);
+        let ul_y = baseline_i + ((-descent_i) / 2).max(1);
+        let so_y = baseline_i - (ascent_i / 3).max(1);
+        let stroke_x1 = advance_x.max(bx0 + orig_gw);
+
+        let mut gx0 = if orig_gw > 0 && orig_gh > 0 { bx0 } else { 0 };
+        let mut gy0 = if orig_gw > 0 && orig_gh > 0 { by0 } else { ul_y.min(so_y) };
+        let mut gx1 = if orig_gw > 0 && orig_gh > 0 { bx0 + orig_gw } else { stroke_x1 };
+        let mut gy1 = if orig_gw > 0 && orig_gh > 0 { by0 + orig_gh } else { gy0 };
+
+        if opts.underline && stroke_x1 > 0 {
+            gx0 = gx0.min(0);
+            gx1 = gx1.max(stroke_x1);
+            gy0 = gy0.min(ul_y);
+            gy1 = gy1.max(ul_y + stroke_h);
+        }
+        if opts.strikeout && stroke_x1 > 0 {
+            gx0 = gx0.min(0);
+            gx1 = gx1.max(stroke_x1);
+            gy0 = gy0.min(so_y);
+            gy1 = gy1.max(so_y + stroke_h);
+        }
+
+        let gw = (gx1 - gx0).max(0);
+        let gh = (gy1 - gy0).max(0);
         let mut raw_alpha = vec![0u8; (gw * gh) as usize];
-        outlined.draw(|x, y, cov| {
-            let idx = (y as usize) * (gw as usize) + (x as usize);
-            if let Some(dst) = raw_alpha.get_mut(idx) {
-                *dst = if opts.antialias {
-                    (cov.clamp(0.0, 1.0) * 255.0).round() as u8
-                } else if cov >= 0.48 {
-                    255
-                } else {
-                    0
-                };
-            }
-        });
-        if embolden > 0 {
-            // Smear one pixel to the right, right to left so the source is the unsmeared row.
-            for y in 0..gh as usize {
-                for x in (1..gw as usize).rev() {
-                    let i = y * gw as usize + x;
-                    raw_alpha[i] = raw_alpha[i].max(raw_alpha[i - 1]);
+        if let Some(o) = outlined
+            && orig_gw > 0
+            && orig_gh > 0
+        {
+            let ox_off = (bx0 - gx0) as usize;
+            let oy_off = (by0 - gy0) as usize;
+            o.draw(|x, y, cov| {
+                let dx = ox_off + x as usize;
+                let dy = oy_off + y as usize;
+                let idx = dy * (gw as usize) + dx;
+                if let Some(dst) = raw_alpha.get_mut(idx) {
+                    *dst = if opts.antialias {
+                        (cov.clamp(0.0, 1.0) * 255.0).round() as u8
+                    } else if cov >= 0.48 {
+                        255
+                    } else {
+                        0
+                    };
+                }
+            });
+            if embolden > 0 {
+                // Smear one pixel to the right, right to left so the source is the unsmeared row.
+                for y in 0..gh as usize {
+                    for x in (1..gw as usize).rev() {
+                        let i = y * gw as usize + x;
+                        raw_alpha[i] = raw_alpha[i].max(raw_alpha[i - 1]);
+                    }
                 }
             }
+        }
+
+        if opts.underline {
+            paint_horizontal_stroke(&mut raw_alpha, gw, gh, gx0, gy0, 0, stroke_x1, ul_y, stroke_h);
+        }
+        if opts.strikeout {
+            paint_horizontal_stroke(&mut raw_alpha, gw, gh, gx0, gy0, 0, stroke_x1, so_y, stroke_h);
         }
 
         let pad_l = i32::from(opts.outline);
         let pad_t = i32::from(opts.outline);
         let pad_r = i32::from(opts.outline) + i32::from(opts.dropshadow && !opts.outline);
         let pad_b = i32::from(opts.outline) + i32::from(opts.dropshadow && !opts.outline);
-        let out_w = (gw + pad_l + pad_r) as u32;
-        let out_h = (gh + pad_t + pad_b) as u32;
+        let mut out_w = (gw + pad_l + pad_r) as u32;
+        let mut out_h = (gh + pad_t + pad_b) as u32;
         let mut rgba = vec![0u8; (out_w * out_h * 4) as usize];
 
         let put_shadow = |rgba: &mut [u8], sx: i32, sy: i32, a: u8| {
@@ -519,15 +592,157 @@ impl VguiTrueTypeFont {
             }
         }
 
+        let mut offset_x = gx0 - pad_l;
+        let mut offset_y = (gy0 - baseline_i) - pad_t;
+        if opts.blur > 1 {
+            (rgba, out_w, out_h) = apply_gaussian_blur(&rgba, out_w, out_h, opts.blur);
+            offset_x -= opts.blur as i32;
+            offset_y -= opts.blur as i32;
+        }
+        if opts.scanlines > 1 {
+            apply_scanlines(&mut rgba, out_w, out_h, offset_y, opts.scanlines);
+        }
+
         Some(RasterizedGlyphRgba {
             ch,
             width: out_w,
             height: out_h,
-            offset_x: bounds.min.x.round() as i32 - pad_l,
-            offset_y: (bounds.min.y.round() as i32 - baseline as i32) - pad_t,
+            offset_x,
+            offset_y,
             advance_x,
             rgba,
         })
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_horizontal_stroke(
+    alpha: &mut [u8],
+    gw: i32,
+    gh: i32,
+    gx0: i32,
+    gy0: i32,
+    x0: i32,
+    x1: i32,
+    y0: i32,
+    h: i32,
+) {
+    for sy in y0..(y0 + h) {
+        let by = sy - gy0;
+        if by < 0 || by >= gh {
+            continue;
+        }
+        for sx in x0..x1 {
+            let bx = sx - gx0;
+            if bx < 0 || bx >= gw {
+                continue;
+            }
+            alpha[(by * gw + bx) as usize] = 255;
+        }
+    }
+}
+
+/// Post-rasterization Gaussian blur (`vgui2.dll:FUN_1001a9b0`, `blur > 1`, `sigma = blur * 0.683`).
+pub fn apply_gaussian_blur(rgba: &[u8], width: u32, height: u32, blur: u32) -> (Vec<u8>, u32, u32) {
+    if blur <= 1 || width == 0 || height == 0 {
+        return (rgba.to_vec(), width, height);
+    }
+    let r = blur as i32;
+    let sigma = blur as f32 * 0.683;
+    let two_sigma_sq = 2.0 * sigma * sigma;
+    let mut kernel = Vec::with_capacity((2 * r + 1) as usize);
+    let mut sum = 0.0f32;
+    for d in -r..=r {
+        let w = (-((d * d) as f32) / two_sigma_sq).exp();
+        kernel.push(w);
+        sum += w;
+    }
+    for w in &mut kernel {
+        *w /= sum;
+    }
+
+    let out_w = width + blur * 2;
+    let out_h = height + blur * 2;
+    let len = (out_w * out_h) as usize;
+    let mut premul = vec![[0.0f32; 4]; len];
+    for y in 0..height {
+        for x in 0..width {
+            let sidx = ((y * width + x) * 4) as usize;
+            let a = f32::from(rgba[sidx + 3]) / 255.0;
+            let didx = ((y + blur) * out_w + (x + blur)) as usize;
+            premul[didx] = [
+                f32::from(rgba[sidx]) * a,
+                f32::from(rgba[sidx + 1]) * a,
+                f32::from(rgba[sidx + 2]) * a,
+                f32::from(rgba[sidx + 3]),
+            ];
+        }
+    }
+
+    let mut horiz = vec![[0.0f32; 4]; len];
+    for y in 0..out_h as i32 {
+        for x in 0..out_w as i32 {
+            let mut acc = [0.0f32; 4];
+            for (k_idx, &w) in kernel.iter().enumerate() {
+                let sx = x + (k_idx as i32 - r);
+                if sx >= 0 && sx < out_w as i32 {
+                    let px = premul[(y as u32 * out_w + sx as u32) as usize];
+                    acc[0] += px[0] * w;
+                    acc[1] += px[1] * w;
+                    acc[2] += px[2] * w;
+                    acc[3] += px[3] * w;
+                }
+            }
+            horiz[(y as u32 * out_w + x as u32) as usize] = acc;
+        }
+    }
+
+    let mut out = vec![0u8; len * 4];
+    for y in 0..out_h as i32 {
+        for x in 0..out_w as i32 {
+            let mut acc = [0.0f32; 4];
+            for (k_idx, &w) in kernel.iter().enumerate() {
+                let sy = y + (k_idx as i32 - r);
+                if sy >= 0 && sy < out_h as i32 {
+                    let px = horiz[(sy as u32 * out_w + x as u32) as usize];
+                    acc[0] += px[0] * w;
+                    acc[1] += px[1] * w;
+                    acc[2] += px[2] * w;
+                    acc[3] += px[3] * w;
+                }
+            }
+            let didx = ((y as u32 * out_w + x as u32) * 4) as usize;
+            let a = acc[3].round().clamp(0.0, 255.0) as u8;
+            if acc[3] > 0.001 && a > 0 {
+                let inv_a = 255.0 / acc[3];
+                out[didx] = (acc[0] * inv_a).round().clamp(0.0, 255.0) as u8;
+                out[didx + 1] = (acc[1] * inv_a).round().clamp(0.0, 255.0) as u8;
+                out[didx + 2] = (acc[2] * inv_a).round().clamp(0.0, 255.0) as u8;
+                out[didx + 3] = a;
+            }
+        }
+    }
+    (out, out_w, out_h)
+}
+
+/// Post-rasterization scanline darkening (`vgui2.dll:FUN_1001aea0`, `scanlines > 1`).
+pub fn apply_scanlines(rgba: &mut [u8], width: u32, height: u32, offset_y: i32, scanlines: u32) {
+    if scanlines <= 1 || width == 0 || height == 0 {
+        return;
+    }
+    let period = scanlines as i32;
+    for y in 0..height {
+        if (offset_y + y as i32).rem_euclid(period) != 0 {
+            let row_start = (y * width * 4) as usize;
+            for x in 0..width as usize {
+                let idx = row_start + x * 4;
+                if rgba[idx + 3] > 0 {
+                    rgba[idx] = ((u16::from(rgba[idx]) * 179 + 127) / 255) as u8;
+                    rgba[idx + 1] = ((u16::from(rgba[idx + 1]) * 179 + 127) / 255) as u8;
+                    rgba[idx + 2] = ((u16::from(rgba[idx + 2]) * 179 + 127) / 255) as u8;
+                }
+            }
+        }
     }
 }
 
@@ -753,11 +968,7 @@ mod tests {
                 &RasterizeOptions {
                     tall: 16.0,
                     antialias: false,
-                    outline: false,
-                    dropshadow: false,
-                    underline: false,
-                    additive: false,
-                    synthetic_bold: false,
+                    ..Default::default()
                 },
             )
             .expect("rasterize crisp");
@@ -779,10 +990,7 @@ mod tests {
                     tall: 16.0,
                     antialias: false,
                     outline: true,
-                    dropshadow: false,
-                    underline: false,
-                    additive: false,
-                    synthetic_bold: false,
+                    ..Default::default()
                 },
             )
             .expect("rasterize outlined");
@@ -802,5 +1010,119 @@ mod tests {
             ..Default::default()
         };
         assert!(resolve_font_bytes(Some(&vfs), &missing, &[]).is_err());
+    }
+
+    #[test]
+    fn scheme_parses_blur_scanlines_underline_strikeout_and_bold_threshold() {
+        let scheme = r#"
+        Scheme {
+            Fonts {
+                "EffectFont" {
+                    "1" {
+                        "name" "Tahoma"
+                        "tall" "16"
+                        "weight" "700"
+                        "blur" "4"
+                        "scanlines" "2"
+                        "underline" "1"
+                        "strikeout" "1"
+                    }
+                }
+                "MediumFont" {
+                    "1" { "name" "Tahoma" "tall" "16" "weight" "600" "blur" "1" }
+                }
+            }
+        }"#;
+        let parsed = SchemeFontSet::parse(scheme);
+        let eff = parsed.resolve("EffectFont", 720).unwrap();
+        assert_eq!(eff.blur, 4);
+        assert_eq!(eff.scanlines, 2);
+        assert!(eff.underline);
+        assert!(eff.strikeout);
+        let eff_opts = RasterizeOptions::from(eff);
+        assert!(eff_opts.synthetic_bold, "weight >= 700 must set synthetic_bold");
+        assert_eq!(eff_opts.blur, 4);
+        assert_eq!(eff_opts.scanlines, 2);
+        assert!(eff_opts.underline);
+        assert!(eff_opts.strikeout);
+
+        let med = parsed.resolve("MediumFont", 720).unwrap();
+        assert!(!RasterizeOptions::from(med).synthetic_bold, "weight < 700 must not embolden");
+    }
+
+    #[test]
+    fn gaussian_blur_expands_and_softens_only_when_blur_gt_1() {
+        let px = vec![255, 255, 255, 255];
+        let (noop, nw, nh) = apply_gaussian_blur(&px, 1, 1, 1);
+        assert_eq!((nw, nh), (1, 1));
+        assert_eq!(noop, px, "blur <= 1 must be a no-op");
+
+        let (blurred, bw, bh) = apply_gaussian_blur(&px, 1, 1, 3);
+        assert_eq!((bw, bh), (7, 7));
+        let center = ((3 * bw + 3) * 4) as usize;
+        let edge = ((3 * bw + 1) * 4) as usize;
+        assert!(blurred[center + 3] > blurred[edge + 3]);
+        assert!(blurred[edge + 3] > 0 && blurred[edge + 3] < 255);
+        assert_eq!(blurred[edge], 255, "white ink RGB must remain white after blur");
+    }
+
+    #[test]
+    fn scanlines_darken_non_zero_modulus_rows() {
+        let mut rgba = vec![255u8; 2 * 4 * 4];
+        apply_scanlines(&mut rgba, 2, 4, 0, 2);
+        assert_eq!(&rgba[0..4], &[255, 255, 255, 255]);
+        assert!(rgba[8] < 200 && rgba[11] == 255, "odd row RGB darkened, alpha preserved");
+        assert_eq!(&rgba[16..20], &[255, 255, 255, 255]);
+        assert!(rgba[24] < 200);
+    }
+
+    #[test]
+    fn rasterize_underline_strikeout_and_blur_on_font() {
+        let Ok(vfs) = cs_vfs::Vfs::discover(None, cs_vfs::VfsConfig::default()) else {
+            eprintln!("SKIPPED font stroke/blur test: CS16_GAMEDIR / Half-Life not found");
+            return;
+        };
+        let bytes = vfs.read_bytes("resource/marlett.ttf").expect("marlett.ttf");
+        let font = VguiTrueTypeFont::from_bytes(bytes).expect("parse marlett");
+        let space_ul = font
+            .rasterize_glyph_rgba(
+                ' ',
+                &RasterizeOptions {
+                    tall: 16.0,
+                    underline: true,
+                    strikeout: true,
+                    ..Default::default()
+                },
+            )
+            .expect("space with underline+strikeout");
+        assert!(space_ul.width > 0 && space_ul.height > 1);
+        let non_empty_rows = (0..space_ul.height)
+            .filter(|&y| {
+                (0..space_ul.width).any(|x| space_ul.rgba[((y * space_ul.width + x) * 4 + 3) as usize] == 255)
+            })
+            .count();
+        assert!(non_empty_rows >= 2, "expected both underline and strikeout rows");
+
+        let plain = font
+            .rasterize_glyph_rgba(
+                'a',
+                &RasterizeOptions {
+                    tall: 16.0,
+                    ..Default::default()
+                },
+            )
+            .expect("plain glyph");
+        let blurred = font
+            .rasterize_glyph_rgba(
+                'a',
+                &RasterizeOptions {
+                    tall: 16.0,
+                    blur: 3,
+                    ..Default::default()
+                },
+            )
+            .expect("blurred glyph");
+        assert_eq!(blurred.width, plain.width + 6);
+        assert_eq!(blurred.height, plain.height + 6);
     }
 }
