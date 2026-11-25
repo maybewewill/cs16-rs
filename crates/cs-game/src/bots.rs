@@ -8,7 +8,9 @@
 //! `--proto48` servers and `LocalGame` call [`crate::CsGame::enable_cvar_bot_quota`], and
 //! `bot_add*` / `bot_kick` / `bot_nav_*` console commands work everywhere.
 
-use cs_assets::nav::{HidingSpotFlags, NavArea, NavAttribute, NavCorner, NavDir, NavFile, UNDEFINED_PLACE};
+use cs_assets::nav::{
+    HidingSpotFlags, NAV_VERSION, NavArea, NavAttribute, NavCorner, NavDir, NavFile, UNDEFINED_PLACE,
+};
 use cs_bot::buy::{BuyContext, BuyPlan, decide_bot_buy};
 use cs_bot::combat::CombatInventory;
 use cs_bot::nav_gen::{NavGenConfig, NavLadderHint, NavWorld, NavZoneHint, NavZoneKind, generate_nav_mesh};
@@ -16,13 +18,14 @@ use cs_bot::nav_mesh::NavMesh;
 use cs_bot::path::{NavPath, PathAction, PathCostParams, PathObstacles, find_path};
 use cs_bot::profile::{BotDifficulty, BotProfile, BotProfileDb, BotTeam, BotWeapon};
 use cs_bot::tactics::{
-    BotJoinTeam, BotSettings, BotTacticalBrain, BotTacticalState, IncomingRadio,
-    PerceivedEnemyCandidate, RadioMessage, SmokeCloud, SoundEvent, SoundKind, TacticalContext,
-    TacticalDecision, TacticalHostage, TacticalSpot,
+    BotJoinTeam, BotSettings, BotTacticalBrain, BotTacticalState, GroundPickup, GroundPickupKind,
+    IncomingRadio, PerceivedEnemyCandidate, RadioMessage, SmokeCloud, SoundEvent, SoundKind,
+    TacticalContext, TacticalDecision, TacticalHostage, TacticalSpot,
 };
 use cs_engine::collision::{Hull, TraceResult};
-use cs_engine::consts::{FL_DUCKING, FL_FROZEN, FL_ONGROUND};
+use cs_engine::consts::{EF_NODRAW, FL_DUCKING, FL_FROZEN, FL_ONGROUND};
 use cs_engine::{EngineApi, MoveFilter};
+use cs_platform::ConfigStorage;
 use cs_sim::pm::consts::{
     IN_ATTACK, IN_ATTACK2, IN_BACK, IN_DUCK, IN_FORWARD, IN_JUMP, IN_MOVELEFT, IN_MOVERIGHT,
     IN_RELOAD, IN_USE, PITCH_NORM,
@@ -72,6 +75,8 @@ impl NavWorld for EngineNavWorld<'_, '_> {
             "hostage_entity",
             "info_bomb_target",
             "info_hostage_rescue",
+            "armoury_entity",
+            "game_player_equip",
         ] {
             let mut cursor = None;
             while let Some(id) = self.0.find_by_classname(cursor, class) {
@@ -234,6 +239,10 @@ pub(crate) struct BotManager {
     pub(crate) nav_mesh: Option<NavMesh>,
     nav_map_name: String,
     pub(crate) nav_loaded_from_file: bool,
+    pub(crate) nav_loaded_from_cache: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    nav_cache_dir_override: Option<std::path::PathBuf>,
+    nav_cache_storage: Option<Box<dyn ConfigStorage + Send>>,
     nav_edit_marked_area: Option<usize>,
     nav_edit_begin_pos: Option<Vec3>,
     nav_edit_selected_corner: NavCorner,
@@ -256,6 +265,10 @@ impl Default for BotManager {
             nav_mesh: None,
             nav_map_name: String::new(),
             nav_loaded_from_file: false,
+            nav_loaded_from_cache: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            nav_cache_dir_override: None,
+            nav_cache_storage: None,
             nav_edit_marked_area: None,
             nav_edit_begin_pos: None,
             nav_edit_selected_corner: NavCorner::NorthWest,
@@ -276,11 +289,19 @@ impl BotManager {
         let settings = self.settings.clone();
         let profile_db = self.profile_db.clone();
         let loaded_profile_db_name = self.loaded_profile_db_name.clone();
+        #[cfg(not(target_arch = "wasm32"))]
+        let nav_cache_dir_override = self.nav_cache_dir_override.take();
+        let nav_cache_storage = self.nav_cache_storage.take();
         *self = Self::default();
         self.quota_enabled = quota_enabled;
         self.settings = settings;
         self.profile_db = profile_db;
         self.loaded_profile_db_name = loaded_profile_db_name;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.nav_cache_dir_override = nav_cache_dir_override;
+        }
+        self.nav_cache_storage = nav_cache_storage;
     }
 
     pub(crate) fn load_profile_db(&mut self, vfs: &cs_vfs::Vfs, path: &str) {
@@ -357,6 +378,12 @@ fn sync_settings_from_cvars(g: &mut GameState, eng: &EngineApi<'_>) {
     if let Some(val) = eng.cvar_str("bot_allow_rogues") {
         g.bots.settings.apply_cvar("bot_allow_rogues", &val);
     }
+    g.bots.settings.bot_nav_autogen = eng
+        .cvar_str("bot_nav_autogen")
+        .is_none_or(|val| {
+            let s = val.trim();
+            matches!(s, "1" | "true" | "TRUE" | "yes" | "on") || s.eq_ignore_ascii_case("true")
+        });
     if let Some(vfs) = g.vfs.clone()
         && g.bots.settings.bot_profile_db != g.bots.loaded_profile_db_name
     {
@@ -427,6 +454,124 @@ fn build_nav_config(eng: &EngineApi<'_>, quicksave: bool, full_manual: bool) -> 
     }
 }
 
+/// Overrides the native `nav_cache` directory used for auto-generated `.nav` meshes (for tests).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn set_nav_cache_dir(g: &mut GameState, dir: Option<std::path::PathBuf>) {
+    g.bots.nav_cache_dir_override = dir;
+}
+
+/// Injects an explicit [`ConfigStorage`] backend for `nav_cache` persistence (wasm32 / tests).
+pub fn set_nav_cache_storage(g: &mut GameState, storage: Option<Box<dyn ConfigStorage + Send>>) {
+    g.bots.nav_cache_storage = storage;
+}
+
+/// Returns `true` if the active navmesh was mounted from the `nav_cache` rather than VFS or
+/// fresh generation.
+pub fn nav_loaded_from_cache(g: &GameState) -> bool {
+    g.bots.nav_loaded_from_cache
+}
+
+/// Clears the mounted navmesh so the next frame reloads it from VFS / `nav_cache` (for tests).
+pub fn clear_nav_cache_mesh(g: &mut GameState) {
+    g.bots.nav_mesh = None;
+    g.bots.nav_map_name.clear();
+    g.bots.nav_loaded_from_file = false;
+    g.bots.nav_loaded_from_cache = false;
+}
+
+fn read_map_bsp_crc_and_len(vfs: &cs_vfs::Vfs, map_name: &str) -> Option<(u32, u32)> {
+    let candidates = [
+        format!("maps/{map_name}.bsp"),
+        format!("cstrike/maps/{map_name}.bsp"),
+    ];
+    for path in candidates {
+        if let Ok(raw) = vfs.read_bytes(&path)
+            && let Some(crc) = cs_proto48::crypto::crc_map_bsp(&raw)
+        {
+            return Some((crc, u32::try_from(raw.len()).unwrap_or(u32::MAX)));
+        }
+    }
+    None
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve_native_nav_cache_path(
+    override_dir: Option<&std::path::Path>,
+    map_name: &str,
+    bsp_crc32: u32,
+) -> Option<std::path::PathBuf> {
+    let filename = cs_platform::xdg::nav_cache_filename(map_name, bsp_crc32)?;
+    if let Some(dir) = override_dir {
+        return Some(dir.join(filename));
+    }
+    cs_platform::xdg::nav_cache_path("cs16-rs", map_name, bsp_crc32)
+}
+
+fn try_load_nav_from_cache(g: &GameState, map_name: &str, bsp_crc32: u32) -> Option<NavMesh> {
+    if let Some(storage) = g.bots.nav_cache_storage.as_deref()
+        && let Some(bytes) = cs_platform::load_nav_cache_storage(storage, map_name, bsp_crc32)
+    {
+        match NavFile::parse(&bytes) {
+            Ok(file) => return Some(NavMesh::from_nav_file(file)),
+            Err(err) => {
+                tracing::warn!(%err, map_name, "invalid cached .nav in ConfigStorage, regenerating");
+            }
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(path) =
+        resolve_native_nav_cache_path(g.bots.nav_cache_dir_override.as_deref(), map_name, bsp_crc32)
+        && let Ok(bytes) = std::fs::read(&path)
+    {
+        match NavFile::parse(&bytes) {
+            Ok(file) => return Some(NavMesh::from_nav_file(file)),
+            Err(err) => {
+                tracing::warn!(%err, path = %path.display(), "invalid cached .nav file, regenerating");
+            }
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    if g.bots.nav_cache_storage.is_none()
+        && let Some(bytes) =
+            cs_platform::load_nav_cache_storage(&cs_platform::WebLocalStorage, map_name, bsp_crc32)
+        && let Ok(file) = NavFile::parse(&bytes)
+    {
+        return Some(NavMesh::from_nav_file(file));
+    }
+    None
+}
+
+fn save_nav_to_cache(g: &mut GameState, map_name: &str, bsp_crc32: u32, bytes: &[u8]) {
+    if let Some(storage) = g.bots.nav_cache_storage.as_deref_mut() {
+        if let Err(err) = cs_platform::save_nav_cache_storage(storage, map_name, bsp_crc32, bytes) {
+            tracing::warn!(%err, map_name, "failed to save .nav into ConfigStorage nav_cache");
+        }
+        return;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(path) =
+        resolve_native_nav_cache_path(g.bots.nav_cache_dir_override.as_deref(), map_name, bsp_crc32)
+    {
+        if let Some(parent) = path.parent()
+            && let Err(err) = std::fs::create_dir_all(parent)
+        {
+            tracing::warn!(%err, path = %parent.display(), "failed to create nav_cache directory");
+            return;
+        }
+        if let Err(err) = std::fs::write(&path, bytes) {
+            tracing::warn!(%err, path = %path.display(), "failed to write cached .nav file");
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let mut store = cs_platform::WebLocalStorage;
+        if let Err(err) = cs_platform::save_nav_cache_storage(&mut store, map_name, bsp_crc32, bytes)
+        {
+            tracing::warn!(%err, map_name, "failed to save .nav into WebLocalStorage nav_cache");
+        }
+    }
+}
+
 fn ensure_nav(g: &mut GameState, eng: &EngineApi<'_>) {
     let map_name = eng.map_name().to_string();
     if g.bots.nav_mesh.is_some() && g.bots.nav_map_name == map_name {
@@ -438,13 +583,40 @@ fn ensure_nav(g: &mut GameState, eng: &EngineApi<'_>) {
         g.bots.nav_mesh = Some(mesh);
         g.bots.nav_map_name = map_name;
         g.bots.nav_loaded_from_file = true;
+        g.bots.nav_loaded_from_cache = false;
+        return;
+    }
+    let bsp_info = g
+        .vfs
+        .as_ref()
+        .and_then(|vfs| read_map_bsp_crc_and_len(vfs, &map_name));
+    if let Some((crc32, _)) = bsp_info
+        && let Some(mesh) = try_load_nav_from_cache(g, &map_name, crc32)
+    {
+        g.bots.nav_mesh = Some(mesh);
+        g.bots.nav_map_name = map_name;
+        g.bots.nav_loaded_from_file = true;
+        g.bots.nav_loaded_from_cache = true;
+        return;
+    }
+    if !g.bots.settings.bot_nav_autogen {
         return;
     }
     let cfg = build_nav_config(eng, g.bots.settings.bot_quicksave, false);
-    let mesh = generate_nav_mesh(&EngineNavWorld(eng), &cfg);
+    let mut mesh = generate_nav_mesh(&EngineNavWorld(eng), &cfg);
+    if let Some((crc32, bsp_len)) = bsp_info {
+        mesh.set_bsp_size(bsp_len);
+        let mut file = mesh.to_nav_file();
+        file.version = NAV_VERSION;
+        file.bsp_size = bsp_len;
+        if let Ok(bytes) = file.to_bytes() {
+            save_nav_to_cache(g, &map_name, crc32, &bytes);
+        }
+    }
     g.bots.nav_mesh = Some(mesh);
     g.bots.nav_map_name = map_name;
     g.bots.nav_loaded_from_file = false;
+    g.bots.nav_loaded_from_cache = false;
 }
 
 fn to_bot_team(team: Team) -> Option<BotTeam> {
@@ -797,7 +969,7 @@ fn team_average_money(g: &GameState, team: Team) -> i32 {
     if count > 0 { sum / count } else { 800 }
 }
 
-fn maybe_buy(g: &mut GameState, eng: &mut EngineApi<'_>, slot: usize) {
+fn maybe_buy(g: &mut GameState, eng: &mut EngineApi<'_>, slot: usize, knife_only_arena: bool) {
     let Some(bot) = g.bots.slots[slot].as_ref() else {
         return;
     };
@@ -807,6 +979,21 @@ fn maybe_buy(g: &mut GameState, eng: &mut EngineApi<'_>, slot: usize) {
     let Some(p) = g.players[slot].as_ref() else {
         return;
     };
+    let team_cant_buy = match p.team {
+        Team::Ct => g.rules.ct_cant_buy(),
+        Team::Terrorist => g.rules.t_cant_buy(),
+        _ => true,
+    };
+    if team_cant_buy
+        || knife_only_arena
+        || g.bots.settings.weapon_restrictions.is_knives_only()
+        || has_spawn_game_player_equip(eng)
+    {
+        if let Some(bot) = g.bots.slots[slot].as_mut() {
+            bot.done_buying = true;
+        }
+        return;
+    }
     if !p.alive || p.joining != JoinState::Joined || p.signals.state() & SIGNAL_BUY == 0 {
         return;
     }
@@ -1071,6 +1258,111 @@ fn find_cover_spots_near(
             is_cover: s.flags.contains(HidingSpotFlags::IN_COVER),
         })
         .collect()
+}
+
+fn pickup_kind_from_model(model: &str) -> Option<GroundPickupKind> {
+    let lower = model.trim().to_ascii_lowercase();
+    let kind = match lower.as_str() {
+        "models/w_p228.mdl" => GroundPickupKind::Weapon(BotWeapon::P228),
+        "models/w_scout.mdl" => GroundPickupKind::Weapon(BotWeapon::Scout),
+        "models/w_hegrenade.mdl" => GroundPickupKind::Weapon(BotWeapon::HeGrenade),
+        "models/w_xm1014.mdl" => GroundPickupKind::Weapon(BotWeapon::Xm1014),
+        "models/w_mac10.mdl" => GroundPickupKind::Weapon(BotWeapon::Mac10),
+        "models/w_aug.mdl" => GroundPickupKind::Weapon(BotWeapon::Aug),
+        "models/w_smokegrenade.mdl" => GroundPickupKind::Weapon(BotWeapon::SmokeGrenade),
+        "models/w_elite.mdl" => GroundPickupKind::Weapon(BotWeapon::Elite),
+        "models/w_fiveseven.mdl" => GroundPickupKind::Weapon(BotWeapon::FiveSeven),
+        "models/w_ump45.mdl" => GroundPickupKind::Weapon(BotWeapon::Ump45),
+        "models/w_sg550.mdl" => GroundPickupKind::Weapon(BotWeapon::Sg550),
+        "models/w_galil.mdl" => GroundPickupKind::Weapon(BotWeapon::Galil),
+        "models/w_famas.mdl" => GroundPickupKind::Weapon(BotWeapon::Famas),
+        "models/w_usp.mdl" => GroundPickupKind::Weapon(BotWeapon::Usp),
+        "models/w_glock18.mdl" => GroundPickupKind::Weapon(BotWeapon::Glock18),
+        "models/w_awp.mdl" => GroundPickupKind::Weapon(BotWeapon::Awp),
+        "models/w_mp5.mdl" => GroundPickupKind::Weapon(BotWeapon::Mp5n),
+        "models/w_m249.mdl" => GroundPickupKind::Weapon(BotWeapon::M249),
+        "models/w_m3.mdl" => GroundPickupKind::Weapon(BotWeapon::M3),
+        "models/w_m4a1.mdl" => GroundPickupKind::Weapon(BotWeapon::M4a1),
+        "models/w_tmp.mdl" => GroundPickupKind::Weapon(BotWeapon::Tmp),
+        "models/w_g3sg1.mdl" => GroundPickupKind::Weapon(BotWeapon::G3sg1),
+        "models/w_flashbang.mdl" => GroundPickupKind::Weapon(BotWeapon::Flashbang),
+        "models/w_deagle.mdl" => GroundPickupKind::Weapon(BotWeapon::Deagle),
+        "models/w_sg552.mdl" => GroundPickupKind::Weapon(BotWeapon::Sg552),
+        "models/w_ak47.mdl" => GroundPickupKind::Weapon(BotWeapon::Ak47),
+        "models/w_p90.mdl" => GroundPickupKind::Weapon(BotWeapon::P90),
+        "models/w_kevlar.mdl" => GroundPickupKind::Kevlar,
+        "models/w_assault.mdl" => GroundPickupKind::AssaultSuit,
+        _ => return None,
+    };
+    Some(kind)
+}
+
+fn has_spawn_game_player_equip(eng: &EngineApi<'_>) -> bool {
+    let mut cursor = None;
+    while let Some(id) = eng.find_by_classname(cursor, "game_player_equip") {
+        if eng.ent(id).is_some_and(|v| (v.spawnflags & 1) == 0) {
+            return true;
+        }
+        cursor = Some(id);
+    }
+    false
+}
+
+fn collect_ground_pickups(eng: &EngineApi<'_>) -> Vec<GroundPickup> {
+    let mut out = Vec::new();
+    let mut cursor = None;
+    while let Some(id) = eng.find_by_classname(cursor, "armoury_entity") {
+        if let Some(v) = eng.ent(id)
+            && (v.effects & EF_NODRAW) == 0
+            && let Some(kind) = pickup_kind_from_model(&v.model)
+        {
+            out.push(GroundPickup { pos: v.origin, kind });
+        }
+        cursor = Some(id);
+    }
+    let mut cursor = None;
+    while let Some(id) = eng.find_by_classname(cursor, "weaponbox") {
+        if let Some(ent) = eng.private::<Box<dyn GameEntity>>(id)
+            && !ent.is_dropped_bomb()
+            && let Some(v) = eng.ent(id)
+            && (v.effects & EF_NODRAW) == 0
+            && let Some(kind) = pickup_kind_from_model(&v.model)
+        {
+            out.push(GroundPickup { pos: v.origin, kind });
+        }
+        cursor = Some(id);
+    }
+    out
+}
+
+fn reachable_pickups_for_bot(
+    pickups: &[GroundPickup],
+    mesh: Option<&NavMesh>,
+    obstacles: &PathObstacles,
+    origin: Vec3,
+    profile: &BotProfile,
+) -> Vec<GroundPickup> {
+    let Some(mesh) = mesh.filter(|m| !m.areas().is_empty()) else {
+        return pickups.to_vec();
+    };
+    let mut ranked: Vec<(f32, GroundPickup)> = pickups
+        .iter()
+        .copied()
+        .map(|p| {
+            let score = f32::from(p.kind.base_priority(profile)) * 20.0 - origin.distance(p.pos);
+            (score, p)
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+
+    let params = PathCostParams::default();
+    let mut reachable = Vec::new();
+    for (_, pickup) in ranked.into_iter().take(12) {
+        if find_path(mesh, origin, pickup.pos, &params, obstacles).is_some() {
+            reachable.push(pickup);
+        }
+    }
+    reachable
 }
 
 fn select_desired_weapon(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, cmd: &BotCmd) {
@@ -1456,11 +1748,22 @@ pub(crate) fn start_frame(g: &mut GameState, eng: &mut EngineApi<'_>) {
     // A server without bots (every human match) pays nothing here: no navmesh generation, no
     // scan of the objective entities.
     let max_clients = usize::from(eng.max_clients()).min(MAX_PLAYERS);
-    if !(0..max_clients).any(|slot| eng.is_fake_client(slot as u8)) {
+    let has_bots = (0..max_clients).any(|slot| eng.is_fake_client(slot as u8));
+    let has_humans = (0..max_clients)
+        .any(|slot| g.players[slot].is_some() && !eng.is_fake_client(slot as u8));
+    let quota_pending = g.bots.quota_enabled
+        && g.bots.settings.bot_enable
+        && g.bots.settings.bot_nav_autogen
+        && eng.cvar_f32("bot_quota") > 0.0
+        && (!g.bots.settings.bot_join_after_player || has_humans);
+    if !has_bots && !quota_pending {
         return;
     }
 
     ensure_nav(g, eng);
+    if !has_bots {
+        return;
+    }
 
     let now_f32 = now as f32;
     g.bots.sound_events.retain(|s| now_f32 - s.time <= 2.5);
@@ -1509,6 +1812,26 @@ pub(crate) fn start_frame(g: &mut GameState, eng: &mut EngineApi<'_>) {
     };
     let smokes = find_smoke_clouds(eng);
     let obstacles = collect_obstacles(eng);
+    let has_buyzones = g.rules.map_has_buy_zone();
+    let has_spawn_equip = has_spawn_game_player_equip(eng);
+    let ground_pickups = collect_ground_pickups(eng);
+    let map_lower = eng.map_name().to_ascii_lowercase();
+    let any_player_has_firearm = (0..max_clients)
+        .filter_map(|s| g.players[s].as_ref())
+        .any(|p| p.alive && (p.has_primary || !p.items[PISTOL_SLOT].is_empty()));
+    let has_gun_pickup = ground_pickups.iter().any(|gp| {
+        matches!(
+            gp.kind,
+            GroundPickupKind::Weapon(w) if w.is_primary() || w.is_pistol()
+        )
+    });
+    let knife_only_arena = g.bots.settings.weapon_restrictions.is_knives_only()
+        || ((map_lower.starts_with("35hp") || map_lower.starts_with("ka_"))
+            && !has_gun_pickup
+            && !any_player_has_firearm)
+        || (has_spawn_equip && !has_buyzones && !has_gun_pickup && !any_player_has_firearm);
+    let buy_secs = (eng.cvar_f32("mp_buytime") * 60.0).max(15.0);
+    let within_buytime = now - g.rules.round_start_time() <= f64::from(buy_secs);
 
     let mut patrol_waypoints = Vec::new();
     patrol_waypoints.extend_from_slice(&bomb_sites);
@@ -1552,7 +1875,7 @@ pub(crate) fn start_frame(g: &mut GameState, eng: &mut EngineApi<'_>) {
             continue;
         }
 
-        maybe_buy(g, eng, slot);
+        maybe_buy(g, eng, slot, knife_only_arena);
 
         let full_due = g.bots.slots[slot]
             .as_ref()
@@ -1606,6 +1929,29 @@ pub(crate) fn start_frame(g: &mut GameState, eng: &mut EngineApi<'_>) {
                 (b.brain.clone(), b.profile.clone(), b.hostage_use_cooldown)
             };
 
+            let bot_pickups = if p.has_primary || knife_only_arena {
+                Vec::new()
+            } else {
+                reachable_pickups_for_bot(
+                    &ground_pickups,
+                    g.bots.nav_mesh.as_ref(),
+                    &obstacles,
+                    hv.origin,
+                    &profile,
+                )
+            };
+            let team_cant_buy = match my_team {
+                Team::Ct => g.rules.ct_cant_buy(),
+                Team::Terrorist => g.rules.t_cant_buy(),
+                _ => true,
+            };
+            let can_buy = !team_cant_buy
+                && !has_spawn_equip
+                && !knife_only_arena
+                && within_buytime
+                && (p.signals.state() & SIGNAL_BUY != 0)
+                && p.money >= 1250;
+
             let decision: TacticalDecision = {
                 let ctx = TacticalContext {
                     self_id: slot as u32,
@@ -1646,6 +1992,12 @@ pub(crate) fn start_frame(g: &mut GameState, eng: &mut EngineApi<'_>) {
                     vip_safety_zones: &vip_safety_zones,
                     cover_spots: &cover_spots,
                     patrol_waypoints: &patrol_waypoints,
+                    ground_pickups: &bot_pickups,
+                    has_buyzones,
+                    can_buy,
+                    knife_only_arena,
+                    has_armor: p.armor > 0.0,
+                    has_helmet: p.kevlar == player::ArmorType::VestHelm,
                     rng_seed: seed,
                 };
                 brain.step(&ctx)
@@ -1972,6 +2324,7 @@ fn handle_nav_command(
             g.bots.nav_mesh = Some(mesh);
             g.bots.nav_map_name = eng.map_name().to_string();
             g.bots.nav_loaded_from_file = false;
+            g.bots.nav_loaded_from_cache = false;
             Some(format!(
                 "Generated navmesh for '{}': {area_count} areas, {ladder_count} ladders, {place_count} places\n",
                 eng.map_name()

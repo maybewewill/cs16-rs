@@ -275,6 +275,7 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     reg.register("bot_zombie", "0", srv, "Put bots into idle zombie mode (0 or 1)");
     reg.register("bot_debug", "0", srv, "Bot debug overlay verbosity (0..4)");
     reg.register("bot_nav_edit", "0", srv, "Enable navigation mesh editing overlay (0 or 1)");
+    reg.register("bot_nav_autogen", "1", srv_arch, "Automatically generate and cache a .nav mesh when missing or stale (0 or 1)");
     reg.register("bot_nav_zdraw", "4", srv, "Height offset for navmesh debug rendering");
     reg.register("bot_quicksave", "0", srv, "Skip sniper/encounter analysis when generating navmesh (0 or 1)");
     reg.register("bot_show_danger", "0", srv, "Show navmesh danger overlay (0 or 1)");

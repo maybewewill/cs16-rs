@@ -53,6 +53,7 @@ pub struct BotSettings {
     pub bot_debug: i32,
     pub bot_nav_edit: bool,
     pub bot_nav_zdraw: f32,
+    pub bot_nav_autogen: bool,
     pub bot_quicksave: bool,
     pub bot_show_danger: bool,
     pub bot_show_nav: bool,
@@ -80,6 +81,7 @@ impl Default for BotSettings {
             bot_debug: 0,
             bot_nav_edit: false,
             bot_nav_zdraw: 4.0,
+            bot_nav_autogen: true,
             bot_quicksave: false,
             bot_show_danger: false,
             bot_show_nav: false,
@@ -155,6 +157,7 @@ impl BotSettings {
                     self.bot_nav_zdraw = v;
                 }
             }
+            "bot_nav_autogen" => self.bot_nav_autogen = parse_bool(value),
             "bot_quicksave" => self.bot_quicksave = parse_bool(value),
             "bot_show_danger" => self.bot_show_danger = parse_bool(value),
             "bot_show_nav" => self.bot_show_nav = parse_bool(value),
@@ -186,7 +189,7 @@ impl BotSettings {
     }
 }
 
-/// Full 17-state ZBot tactical FSM (`BotState` in ReGameDLL_CS).
+/// Full 18-state ZBot tactical FSM (`BotState` in ReGameDLL_CS + floor weapon scavenging).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum BotTacticalState {
     #[default]
@@ -196,6 +199,7 @@ pub enum BotTacticalState {
     InvestigateNoise,
     MoveTo,
     FetchBomb,
+    FetchGroundWeapon,
     PlantBomb,
     DefuseBomb,
     GuardBomb,
@@ -409,6 +413,68 @@ pub struct TacticalSpot {
     pub is_cover: bool,
 }
 
+/// Kind of floor pickup (`armoury_entity` or dropped `weaponbox`) available on the map.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GroundPickupKind {
+    Weapon(BotWeapon),
+    Kevlar,
+    AssaultSuit,
+}
+
+impl GroundPickupKind {
+    /// Relative tactical priority for floor weapon/equipment scavenging.
+    pub fn base_priority(self, profile: &BotProfile) -> u8 {
+        match self {
+            Self::Weapon(w) => {
+                let base: u8 = match w {
+                    BotWeapon::Ak47
+                    | BotWeapon::M4a1
+                    | BotWeapon::Aug
+                    | BotWeapon::Sg552
+                    | BotWeapon::Awp => 100,
+                    BotWeapon::Famas
+                    | BotWeapon::Galil
+                    | BotWeapon::Scout
+                    | BotWeapon::Sg550
+                    | BotWeapon::G3sg1
+                    | BotWeapon::M249 => 90,
+                    BotWeapon::Mp5n
+                    | BotWeapon::P90
+                    | BotWeapon::Ump45
+                    | BotWeapon::Mac10
+                    | BotWeapon::Tmp
+                    | BotWeapon::Xm1014
+                    | BotWeapon::M3 => 75,
+                    BotWeapon::Deagle
+                    | BotWeapon::Elite
+                    | BotWeapon::FiveSeven
+                    | BotWeapon::P228
+                    | BotWeapon::Usp
+                    | BotWeapon::Glock18 => 45,
+                    BotWeapon::HeGrenade => 25,
+                    BotWeapon::Flashbang => 20,
+                    BotWeapon::SmokeGrenade => 18,
+                    BotWeapon::ShieldGun | BotWeapon::Knife | BotWeapon::C4 => 0,
+                };
+                if base >= 75 && profile.weapon_preferences.contains(&w) {
+                    base.saturating_add(15)
+                } else {
+                    base
+                }
+            }
+            Self::AssaultSuit => 35,
+            Self::Kevlar => 30,
+        }
+    }
+}
+
+/// Reachable floor weapon or equipment pickup visible to tactical planning.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GroundPickup {
+    pub pos: Vec3,
+    pub kind: GroundPickupKind,
+}
+
 /// World & self snapshot passed into [`BotTacticalBrain::step`].
 #[derive(Debug, Clone)]
 pub struct TacticalContext<'a> {
@@ -452,6 +518,13 @@ pub struct TacticalContext<'a> {
     // Navigation / cover hints
     pub cover_spots: &'a [TacticalSpot],
     pub patrol_waypoints: &'a [Vec3],
+    // Arena / floor scavenging & mode traits
+    pub ground_pickups: &'a [GroundPickup],
+    pub has_buyzones: bool,
+    pub can_buy: bool,
+    pub knife_only_arena: bool,
+    pub has_armor: bool,
+    pub has_helmet: bool,
     pub rng_seed: u64,
 }
 
@@ -788,9 +861,16 @@ impl BotTacticalBrain {
 
         self.update_tactical_state(ctx, &visible, heard, &combat_out, &mut duck, &mut use_key, &mut want_c4);
 
-        let walk = ctx.settings.bot_walk
-            || ctx.profile.walk && visible.is_empty() && !matches!(self.state, BotTacticalState::EscapeFromBomb)
-            || (self.state == BotTacticalState::InvestigateNoise && ctx.profile.skill >= 0.5);
+        let walk = !ctx.knife_only_arena
+            && (ctx.settings.bot_walk
+                || ctx.profile.walk
+                    && visible.is_empty()
+                    && !matches!(
+                        self.state,
+                        BotTacticalState::EscapeFromBomb | BotTacticalState::FetchGroundWeapon
+                    )
+                || (self.state == BotTacticalState::InvestigateNoise && ctx.profile.skill >= 0.5))
+            || ctx.settings.bot_walk;
 
         let outgoing_radio = self.pending_radio_reply.take();
 
@@ -830,14 +910,35 @@ impl BotTacticalBrain {
         }
 
         // Priority 2: Reload in cover or retreat when heavily flashed/critical health under threat.
-        let low_hp_cover = ctx.health < 25.0 && !visible.is_empty() && ctx.profile.aggression < 0.7;
+        let low_hp_cover = !ctx.knife_only_arena
+            && ctx.health < 25.0
+            && !visible.is_empty()
+            && ctx.profile.aggression < 0.7;
         if (combat.needs_reload_in_cover || low_hp_cover || ctx.flash_alpha >= 0.75)
+            && !ctx.knife_only_arena
             && let Some(spot) = nearest_cover_spot(ctx.pos, ctx.cover_spots)
         {
             self.state = BotTacticalState::Hide;
             self.move_goal = Some(spot.pos);
             *duck = spot.is_cover;
             return;
+        }
+
+        // Priority 2.5: Scavenge a floor weapon on buyzone-less / arena maps or when broke/post-buy.
+        let needs_ground_weapon = !ctx.knife_only_arena
+            && ctx.inventory.primary.is_none()
+            && (!ctx.has_buyzones || !ctx.can_buy);
+        if needs_ground_weapon && let Some(pickup) = select_best_ground_pickup(ctx) {
+            let best_is_primary =
+                matches!(pickup.kind, GroundPickupKind::Weapon(w) if w.is_primary());
+            let closest_vis_dist = visible
+                .first()
+                .map_or(f32::INFINITY, |e| ctx.pos.distance(e.pos));
+            if visible.is_empty() || (best_is_primary && closest_vis_dist > 150.0) {
+                self.state = BotTacticalState::FetchGroundWeapon;
+                self.move_goal = Some(pickup.pos);
+                return;
+            }
         }
 
         // Priority 3: Active Attack when enemy is visible (unless defusing/planting under smoke cover or VIP fleeing).
@@ -1047,9 +1148,14 @@ impl BotTacticalBrain {
         }
 
         // Priority 10: Defensive ambush/sniper camp or active Hunt across bomb sites / waypoints.
-        let prefers_camp = ctx.team == BotTeam::CounterTerrorist
-            && !ctx.bomb_sites.is_empty()
-            && (ctx.inventory.primary.is_some_and(|w| w.is_sniper()) || ctx.profile.aggression < 0.45);
+        let prefers_camp = !ctx.knife_only_arena
+            && ((!ctx.bomb_sites.is_empty()
+                && ctx.team == BotTeam::CounterTerrorist
+                && (ctx.inventory.primary.is_some_and(|w| w.is_sniper())
+                    || ctx.profile.aggression < 0.45))
+                || (!ctx.has_buyzones
+                    && ctx.inventory.primary.is_some_and(|w| w.is_sniper())
+                    && ctx.profile.aggression < 0.4));
         if prefers_camp
             && let Some(spot) = ctx.cover_spots.iter().find(|s| s.is_sniper_spot || s.is_cover)
         {
@@ -1314,6 +1420,43 @@ fn pick_tactical_grenade(
     None
 }
 
+fn is_pickup_eligible(ctx: &TacticalContext<'_>, kind: GroundPickupKind) -> bool {
+    match kind {
+        GroundPickupKind::Weapon(w) => {
+            if !ctx.settings.weapon_restrictions.allows_weapon(w) {
+                return false;
+            }
+            if w.is_primary() {
+                ctx.inventory.primary.is_none()
+            } else if w.is_pistol() {
+                ctx.inventory.secondary.is_none()
+            } else {
+                match w {
+                    BotWeapon::HeGrenade => ctx.inventory.he_count < 1,
+                    BotWeapon::Flashbang => ctx.inventory.flash_count < 2,
+                    BotWeapon::SmokeGrenade => ctx.inventory.smoke_count < 1,
+                    _ => false,
+                }
+            }
+        }
+        GroundPickupKind::Kevlar => !ctx.has_armor,
+        GroundPickupKind::AssaultSuit => !ctx.has_armor || !ctx.has_helmet,
+    }
+}
+
+/// Selects the highest-priority eligible floor pickup adjusted for travel distance.
+pub fn select_best_ground_pickup(ctx: &TacticalContext<'_>) -> Option<GroundPickup> {
+    ctx.ground_pickups
+        .iter()
+        .copied()
+        .filter(|p| is_pickup_eligible(ctx, p.kind))
+        .max_by(|a, b| {
+            let score_a = f32::from(a.kind.base_priority(ctx.profile)) * 20.0 - ctx.pos.distance(a.pos);
+            let score_b = f32::from(b.kind.base_priority(ctx.profile)) * 20.0 - ctx.pos.distance(b.pos);
+            score_a.total_cmp(&score_b)
+        })
+}
+
 fn choose_bomb_site(pos: Vec3, sites: &[Vec3], seed: u64) -> Option<Vec3> {
     if sites.is_empty() {
         return None;
@@ -1435,6 +1578,12 @@ mod tests {
             vip_safety_zones: &[],
             cover_spots: &[],
             patrol_waypoints: &[],
+            ground_pickups: &[],
+            has_buyzones: true,
+            can_buy: true,
+            knife_only_arena: false,
+            has_armor: false,
+            has_helmet: false,
             rng_seed: 42,
         }
     }
@@ -1696,5 +1845,81 @@ mod tests {
         let d_hide = brain.step(&ctx);
         assert_eq!(d_hide.state, BotTacticalState::Hide);
         assert_eq!(d_hide.move_goal, Some(spots[0].pos));
+    }
+
+    #[test]
+    fn floor_weapon_scavenging_and_knife_arena_tactics() {
+        let mut prof = BotProfile::fallback("PoolRunner", BotDifficulty::Hard);
+        prof.walk = true;
+        prof.aggression = 0.2;
+        let settings = BotSettings::default();
+        let pickups = [
+            GroundPickup {
+                pos: Vec3::new(80.0, 0.0, 0.0),
+                kind: GroundPickupKind::Weapon(BotWeapon::HeGrenade),
+            },
+            GroundPickup {
+                pos: Vec3::new(220.0, 40.0, 0.0),
+                kind: GroundPickupKind::Weapon(BotWeapon::Ak47),
+            },
+            GroundPickup {
+                pos: Vec3::new(140.0, -40.0, 0.0),
+                kind: GroundPickupKind::Weapon(BotWeapon::Mp5n),
+            },
+        ];
+
+        // fy_pool_day: lacks primary & no buyzones -> FetchGroundWeapon prioritizes AK47 over HE/MP5.
+        let mut brain = BotTacticalBrain::default();
+        let mut ctx = base_ctx(&prof, &settings, BotTeam::Terrorist);
+        ctx.inventory.primary = None;
+        ctx.inventory.primary_clip = 0;
+        ctx.inventory.primary_reserve = 0;
+        ctx.inventory.active_weapon = Some(BotWeapon::Glock18);
+        ctx.has_buyzones = false;
+        ctx.can_buy = false;
+        ctx.ground_pickups = &pickups;
+        let d_fetch = brain.step(&ctx);
+        assert_eq!(d_fetch.state, BotTacticalState::FetchGroundWeapon);
+        assert_eq!(d_fetch.move_goal, Some(Vec3::new(220.0, 40.0, 0.0)));
+        assert!(!d_fetch.walk);
+
+        // 35hp knife-only arena: even at 15 HP with cover nearby, bot charges aggressively (no Hide, no walk).
+        let spots = [TacticalSpot {
+            pos: Vec3::new(-100.0, 0.0, 0.0),
+            look_at: Vec3::new(100.0, 0.0, 0.0),
+            is_sniper_spot: false,
+            is_cover: true,
+        }];
+        let enemy = [PerceivedEnemyCandidate {
+            id: 7,
+            pos: Vec3::new(250.0, 0.0, 0.0),
+            eye: Vec3::new(250.0, 0.0, 64.0),
+            vel: Vec3::ZERO,
+            has_los: true,
+            has_primary: false,
+            is_vip: false,
+        }];
+        let mut knife_ctx = base_ctx(&prof, &settings, BotTeam::CounterTerrorist);
+        knife_ctx.inventory = CombatInventory {
+            primary: None,
+            primary_clip: 0,
+            primary_reserve: 0,
+            secondary: None,
+            secondary_clip: 0,
+            secondary_reserve: 0,
+            active_weapon: Some(BotWeapon::Knife),
+            has_knife: true,
+            ..Default::default()
+        };
+        knife_ctx.health = 15.0;
+        knife_ctx.knife_only_arena = true;
+        knife_ctx.has_buyzones = false;
+        knife_ctx.can_buy = false;
+        knife_ctx.cover_spots = &spots;
+        knife_ctx.enemy_candidates = &enemy;
+        let d_knife = brain.step(&knife_ctx);
+        assert_eq!(d_knife.state, BotTacticalState::Attack);
+        assert_eq!(d_knife.move_goal, Some(Vec3::new(250.0, 0.0, 0.0)));
+        assert!(!d_knife.walk);
     }
 }

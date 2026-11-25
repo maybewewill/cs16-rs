@@ -3612,3 +3612,8 @@ evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/tests/phase14_task1
 id = "spec_hud_bars"
 status = "tested"
 evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/tests/phase14_task11.rs::spec_hud_bars_renders_ct_and_t_cards_from_hud_state"
+
+[[item]]
+id = "bot_nav_autogen"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-game/tests/phase14_zbot_arena.rs::nav_cache_roundtrip_keyed_by_bsp_crc32"
