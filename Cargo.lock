@@ -785,6 +785,7 @@ dependencies = [
  "cs-engine",
  "cs-game",
  "cs-local",
+ "cs-master",
  "cs-mod-api",
  "cs-mod-host",
  "cs-platform",
