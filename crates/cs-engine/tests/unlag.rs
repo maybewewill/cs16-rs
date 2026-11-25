@@ -162,6 +162,7 @@ fn harness(scn: &Scenario) -> (Harness, Vec3) {
     let cfg = ServerConfig {
         max_clients: 2,
         max_edicts: 64,
+        max_update_rate: 102,
         ..ServerConfig::default()
     };
     if !scn.dust2 {

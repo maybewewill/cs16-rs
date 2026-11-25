@@ -992,6 +992,7 @@ fn a_lag_rewound_player_is_a_physent_at_its_true_origin() {
     let cfg = ServerConfig {
         max_clients: 2,
         max_edicts: 64,
+        max_update_rate: 102,
         ..ServerConfig::default()
     };
     let mut h = Harness::with_config(cfg, game);

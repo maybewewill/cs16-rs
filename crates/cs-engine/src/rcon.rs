@@ -12,6 +12,10 @@ use cs_transport::PeerAddr;
 
 const CHALLENGE_TTL_SECS: f64 = 60.0;
 const MAX_CHALLENGE_ENTRIES: usize = 2048;
+/// Maximum RCON packet body after the 4-byte `0xFFFF_FFFF` header (`swds.dll:FUN_10204010`).
+pub const MAX_RCON_BODY_BYTES: usize = 512;
+/// Maximum RCON command length in characters (`swds.dll:FUN_10204010`).
+pub const MAX_RCON_COMMAND_CHARS: usize = 1023;
 /// Maximum text bytes carried per `0xFFFF_FFFF 'l'` UDP response datagram.
 pub const MAX_RCON_REPLY_CHUNK: usize = 1200;
 
@@ -49,6 +53,32 @@ impl Default for RconPolicy {
     }
 }
 
+impl RconPolicy {
+    /// Clamp RCON brute-force policy to retail `swds.dll:FUN_1020aed0` bounds:
+    /// `sv_rcon_minfailures` and `sv_rcon_maxfailures` in `[1, 20]` with `max >= min`,
+    /// and `sv_rcon_minfailuretime >= 1`.
+    pub fn clamped(self) -> Self {
+        let min_failures = self.min_failures.clamp(1, 20);
+        let max_failures = self.max_failures.clamp(1, 20).max(min_failures);
+        let min_failure_time = if self.min_failure_time.is_finite() {
+            self.min_failure_time.max(1.0)
+        } else {
+            1.0
+        };
+        let ban_penalty_mins = if self.ban_penalty_mins.is_finite() {
+            self.ban_penalty_mins.max(0.0)
+        } else {
+            0.0
+        };
+        Self {
+            max_failures,
+            min_failures,
+            min_failure_time,
+            ban_penalty_mins,
+        }
+    }
+}
+
 /// Parsed RCON datagram after `0xFFFF_FFFF`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RconDatagram {
@@ -66,6 +96,9 @@ pub fn parse_rcon_datagram(raw: &[u8]) -> Option<RconDatagram> {
         return None;
     }
     let body = &raw[4..];
+    if body.len() > MAX_RCON_BODY_BYTES {
+        return None;
+    }
     let end = body.iter().position(|&b| b == 0).unwrap_or(body.len());
     let text = std::str::from_utf8(&body[..end]).ok()?.trim();
     if text.eq_ignore_ascii_case("challenge rcon")
@@ -190,14 +223,15 @@ impl RconState {
     }
 
     fn record_failure(&mut self, addr: PeerAddr, now: f64, policy: RconPolicy) -> bool {
+        let policy = policy.clamped();
         let entry = self.failures.entry(addr).or_default();
         entry.total_failures = entry.total_failures.saturating_add(1);
-        let window = policy.min_failure_time.max(0.0);
+        let window = policy.min_failure_time;
         entry.timestamps.push(now);
         entry.timestamps.retain(|&t| now - t <= window);
 
-        let min_exceeded = policy.min_failures > 0 && entry.timestamps.len() >= policy.min_failures as usize;
-        let max_exceeded = policy.max_failures > 0 && entry.total_failures >= policy.max_failures;
+        let min_exceeded = entry.timestamps.len() >= policy.min_failures as usize;
+        let max_exceeded = entry.total_failures >= policy.max_failures;
         if min_exceeded || max_exceeded {
             entry.banned_until = if policy.ban_penalty_mins <= 0.0 {
                 Some(f64::INFINITY)
@@ -211,7 +245,8 @@ impl RconState {
     }
 
     /// Validates an incoming parsed RCON packet. Returns either direct reply datagrams or the
-    /// command string to execute on the server console.
+    /// command string to execute on the server console (`swds.dll:FUN_10204010`,
+    /// `FUN_1020aed0`, `FUN_10208a50`).
     pub fn evaluate(
         &mut self,
         from: PeerAddr,
@@ -220,6 +255,7 @@ impl RconState {
         rcon_password: &str,
         policy: RconPolicy,
     ) -> RconDecision {
+        let policy = policy.clamped();
         match dgram {
             RconDatagram::ChallengeRequest => {
                 if self.is_ip_banned(&from, now) {
@@ -240,14 +276,13 @@ impl RconState {
                         "You have been banned from this server.\n",
                     )]);
                 }
+                if !self.validate_challenge(&from, challenge, now) {
+                    return RconDecision::Reply(vec![encode_a2a_print("Bad challenge.\n")]);
+                }
                 if rcon_password.is_empty() {
                     return RconDecision::Reply(vec![encode_a2a_print(
-                        "Bad rcon_password.\n",
+                        "Bad rcon_password.\nNo password set for this server.\n",
                     )]);
-                }
-                if !self.validate_challenge(&from, challenge, now) {
-                    self.record_failure(from, now, policy);
-                    return RconDecision::Reply(vec![encode_a2a_print("Bad challenge.\n")]);
                 }
                 if password != rcon_password {
                     let banned = self.record_failure(from, now, policy);
@@ -258,7 +293,8 @@ impl RconState {
                     };
                     return RconDecision::Reply(vec![encode_a2a_print(msg)]);
                 }
-                RconDecision::Execute(command)
+                let capped: String = command.chars().take(MAX_RCON_COMMAND_CHARS).collect();
+                RconDecision::Execute(capped)
             }
         }
     }
@@ -345,14 +381,26 @@ mod tests {
         else {
             panic!("empty rcon_password must fail");
         };
-        assert!(String::from_utf8_lossy(&r[0]).contains("Bad rcon_password"));
+        assert!(String::from_utf8_lossy(&r[0]).contains("No password set for this server.\n"));
 
+        // Bad challenge must NOT count toward record_failure (`swds.dll:FUN_10204010`).
         let policy = RconPolicy {
             max_failures: 3,
             min_failures: 3,
             min_failure_time: 10.0,
             ban_penalty_mins: 5.0,
         };
+        for attempt in 0..5 {
+            let p = parse_rcon_datagram(&encode_rcon(ch.wrapping_add(1), "wrong", "status")).unwrap();
+            let RconDecision::Reply(rep) =
+                rcon.evaluate(peer(2), 1.5 + f64::from(attempt) * 0.01, p, "secret", policy)
+            else {
+                panic!("bad challenge must reply");
+            };
+            assert!(String::from_utf8_lossy(&rep[0]).contains("Bad challenge."));
+        }
+        assert!(!rcon.is_ip_banned(&peer(2), 1.8));
+
         for attempt in 0..3 {
             let p = parse_rcon_datagram(&encode_rcon(ch, "wrong", "status")).unwrap();
             let _ = rcon.evaluate(peer(2), 2.0 + f64::from(attempt), p, "secret", policy);
@@ -366,5 +414,24 @@ mod tests {
         ));
         // Expires after 5 minutes.
         assert!(!rcon.is_ip_banned(&peer(2), 400.0));
+
+        // 512-byte body cap and RconPolicy clamping.
+        let oversized = vec![0xFF, 0xFF, 0xFF, 0xFF]
+            .into_iter()
+            .chain(std::iter::repeat_n(b'a', MAX_RCON_BODY_BYTES + 1))
+            .collect::<Vec<_>>();
+        assert!(parse_rcon_datagram(&oversized).is_none());
+
+        let clamped = RconPolicy {
+            max_failures: 1,
+            min_failures: 25,
+            min_failure_time: 0.0,
+            ban_penalty_mins: -1.0,
+        }
+        .clamped();
+        assert_eq!(clamped.min_failures, 20);
+        assert_eq!(clamped.max_failures, 20);
+        assert_eq!(clamped.min_failure_time, 1.0);
+        assert_eq!(clamped.ban_penalty_mins, 0.0);
     }
 }

@@ -527,7 +527,7 @@ mod tests {
         assert_eq!((defaults.min_rate, defaults.max_rate), (1000, 100_000));
         assert_eq!(
             (defaults.min_update_rate, defaults.max_update_rate),
-            (10, 102)
+            (10, 30)
         );
     }
 }

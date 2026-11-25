@@ -705,10 +705,15 @@ mod tests {
         let cfg = ServerConfig::default();
         let close = |a: f64, b: f64| (a - b).abs() < 1e-12;
         assert!(close(update_interval(Some("20"), &cfg), 0.05));
-        assert!(close(update_interval(Some("1000"), &cfg), 1.0 / 102.0));
+        assert!(close(update_interval(Some("1000"), &cfg), 1.0 / 30.0));
         assert!(close(update_interval(None, &cfg), 0.05));
         assert!(close(update_interval(Some("abc"), &cfg), 0.05));
         assert!(close(update_interval(Some("1"), &cfg), 0.1));
+        let high_cap = ServerConfig {
+            max_update_rate: 102,
+            ..cfg
+        };
+        assert!(close(update_interval(Some("1000"), &high_cap), 1.0 / 102.0));
     }
 
     #[test]

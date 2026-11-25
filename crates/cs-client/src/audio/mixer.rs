@@ -109,6 +109,13 @@ struct VoxItem {
     pause_samples: usize,
 }
 
+/// Brush-model sound origin (`hw.dll:FUN_101fd050` / `S_StartDynamicSound`):
+/// GoldSrc uses the entity's bounding-box center `origin + (mins + maxs) * 0.5`.
+#[inline]
+pub fn brush_model_sound_origin(origin: Vec3, mins: Vec3, maxs: Vec3) -> Vec3 {
+    origin + (mins + maxs) * 0.5
+}
+
 #[derive(Debug, Clone)]
 struct ChannelSlot {
     active: bool,
@@ -120,6 +127,8 @@ struct ChannelSlot {
     master_vol: f32,
     attenuation: f32,
     pitch: u8,
+    sample_name: String,
+    rate_jitter: f64,
     wav: Option<DecodedWav>,
     phase: f64,
     left_gain: f32,
@@ -143,6 +152,8 @@ impl Default for ChannelSlot {
             master_vol: 1.0,
             attenuation: 0.8,
             pitch: PITCH_NORM,
+            sample_name: String::new(),
+            rate_jitter: 1.0,
             wav: None,
             phase: 0.0,
             left_gain: 0.0,
@@ -176,6 +187,8 @@ pub struct GoldSrcMixer {
     master_volume: f32,
     suit_volume: f32,
     occlusion_factor: f32,
+    timescale: f32,
+    rng_state: u64,
     next_age: u64,
     fade_sample_acc: usize,
 }
@@ -200,6 +213,8 @@ impl GoldSrcMixer {
             master_volume: 0.8,
             suit_volume: 0.25,
             occlusion_factor: 0.25,
+            timescale: 1.0,
+            rng_state: 0x9E37_79B9_7F4A_7C15,
             next_age: 1,
             fade_sample_acc: 0,
         }
@@ -256,6 +271,32 @@ impl GoldSrcMixer {
         if factor.is_finite() {
             self.occlusion_factor = factor.clamp(0.0, 0.9);
         }
+    }
+
+    /// Set `host_timescale` for `(timescale + 1.0) * 0.5` sound pitch scaling (`hw.dll:FUN_10202bf0`).
+    pub fn set_timescale(&mut self, timescale: f32) {
+        self.timescale = if timescale.is_finite() && timescale > 0.0 {
+            timescale
+        } else {
+            1.0
+        };
+    }
+
+    pub fn channel_rate_jitter(&self, entity: u16, channel: u8) -> Option<f64> {
+        self.dynamic
+            .iter()
+            .chain(self.static_ch.iter())
+            .find(|c| c.active && c.entity == entity && c.channel == channel)
+            .map(|c| c.rate_jitter)
+    }
+
+    fn next_duplicate_jitter(&mut self) -> f64 {
+        self.rng_state = self
+            .rng_state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let pct_tenths = ((self.rng_state >> 32) % 1000) as f64;
+        1.0 + pct_tenths / 10_000.0
     }
 
     pub fn room_type(&self) -> usize {
@@ -366,19 +407,11 @@ impl GoldSrcMixer {
         // Exact full stereo separation when orthogonal on X-axis (`|rdot| == 1` -> opposite side 0).
         let right_pan = (1.0 + rdot) * scale;
         let left_pan = (1.0 - rdot) * scale;
-        let occluded = if dist > 48.0 {
-            occlusion_fn.is_some_and(|f| f(origin))
-        } else {
-            false
-        };
-        let occ_mul = if occluded {
-            (1.0 - occ_factor.clamp(0.0, 0.9)).max(0.1)
-        } else {
-            1.0
-        };
-        let left = (left_pan * vol * occ_mul).clamp(0.0, 2.0);
-        let right = (right_pan * vol * occ_mul).clamp(0.0, 2.0);
-        (left, right, occluded, true)
+        // Retail `hw.dll:FUN_101fd050` (`SND_Spatialize`): no 48-unit wall occlusion multiplier.
+        let _ = (occ_factor, occlusion_fn);
+        let left = (left_pan * vol).clamp(0.0, 2.0);
+        let right = (right_pan * vol).clamp(0.0, 2.0);
+        (left, right, false, true)
     }
 
     pub fn handle_sound_command(
@@ -500,6 +533,24 @@ impl GoldSrcMixer {
         let age = self.next_age;
         self.next_age = self.next_age.wrapping_add(1);
         let idx = self.pick_slot(is_static, s.entity, s.channel);
+        let raw_name = s.name.as_deref().unwrap_or("");
+        let sample_name = if raw_name.is_empty() {
+            String::new()
+        } else {
+            normalize_sound_path(raw_name)
+        };
+        let rate_jitter = if !is_static
+            && !sample_name.is_empty()
+            && self
+                .dynamic
+                .iter()
+                .enumerate()
+                .any(|(i, c)| i != idx && c.active && c.sample_name == sample_name)
+        {
+            self.next_duplicate_jitter()
+        } else {
+            1.0
+        };
         let slot = if is_static {
             &mut self.static_ch[idx]
         } else {
@@ -515,6 +566,8 @@ impl GoldSrcMixer {
             master_vol: s.volume.clamp(0.0, 2.0),
             attenuation: s.attenuation,
             pitch: s.pitch.max(2),
+            sample_name,
+            rate_jitter,
             wav: Some(wav),
             phase: 0.0,
             left_gain: l,
@@ -598,6 +651,8 @@ impl GoldSrcMixer {
             master_vol: first.volume,
             attenuation: s.attenuation,
             pitch: first.pitch,
+            sample_name: String::new(),
+            rate_jitter: 1.0,
             wav: first.wav,
             phase: 0.0,
             left_gain: l,
@@ -676,7 +731,7 @@ impl GoldSrcMixer {
                 if !ch.active {
                     continue;
                 }
-                let (sl, sr) = sample_channel(ch);
+                let (sl, sr) = sample_channel(ch, self.timescale);
                 sum_l += sl * ch.left_gain;
                 sum_r += sr * ch.right_gain;
             }
@@ -722,7 +777,7 @@ fn soft_clip(x: f32) -> f32 {
     }
 }
 
-fn sample_channel(ch: &mut ChannelSlot) -> (f32, f32) {
+fn sample_channel(ch: &mut ChannelSlot, timescale: f32) -> (f32, f32) {
     let Some(wav) = ch.wav.as_ref() else {
         advance_vox_or_stop(ch);
         return (0.0, 0.0);
@@ -777,7 +832,12 @@ fn sample_channel(ch: &mut ChannelSlot) -> (f32, f32) {
     }
 
     let pitch_ratio = f64::from(ch.pitch.max(2)) / f64::from(PITCH_NORM);
-    let step = (f64::from(wav.sample_rate) / f64::from(MIX_SAMPLE_RATE)) * pitch_ratio;
+    // Retail `hw.dll:FUN_10202bf0`: `(timescale + 1.0) * 0.5` pitch scaling + duplicate jitter.
+    let timescale_pitch = (f64::from(timescale) + 1.0) * 0.5;
+    let step = (f64::from(wav.sample_rate) / f64::from(MIX_SAMPLE_RATE))
+        * pitch_ratio
+        * timescale_pitch
+        * ch.rate_jitter;
     ch.phase += step;
 
     if let (Some(ls), Some(le)) = (wav.loop_start, wav.loop_end)

@@ -71,17 +71,16 @@ impl Default for ClientCvars {
 impl ClientCvars {
     /// The cvars the connection needs, with their defaults.
     ///
-    /// Deviations from Xash's defaults, kept so a client built on this core sends the userinfo
-    /// `cs-probe` has always sent (`default_cs16_userinfo`): `cl_updaterate` 60 (Xash 20),
-    /// `rate` 30000 (Xash 25000), `cl_cmdrate` 100 (Xash 30; 100 is the engine's upper bound and
-    /// the probe's fixed rate), `topcolor`/`bottomcolor` 30/6, `model` `gordon`, `cl_dlmax` 512.
+    /// `cl_updaterate` defaults to `"20"` (`hw.dll:0x101a3c79` / `DAT_102b6df8`).
+    /// Deviations kept for `cs-probe` userinfo compatibility: `rate` 30000, `cl_cmdrate` 100,
+    /// `topcolor`/`bottomcolor` 30/6, `model` `gordon`, `cl_dlmax` 512.
     pub fn new() -> Self {
         let mut cvars = Self {
             vars: BTreeMap::new(),
         };
         let userinfo = CVAR_USERINFO | CVAR_ARCHIVE;
         let table: &[(&str, &str, u32)] = &[
-            ("cl_updaterate", "60", userinfo),
+            ("cl_updaterate", "20", userinfo),
             ("cl_cmdrate", "100", CVAR_ARCHIVE),
             ("rate", "30000", userinfo | CVAR_FILTERABLE),
             ("ex_interp", "0.1", CVAR_ARCHIVE | CVAR_FILTERABLE),
@@ -203,7 +202,7 @@ mod tests {
     fn userinfo_cvars_are_the_probe_defaults() {
         let c = ClientCvars::new();
         let pairs: BTreeMap<_, _> = c.userinfo_pairs().collect();
-        assert_eq!(pairs["cl_updaterate"], "60");
+        assert_eq!(pairs["cl_updaterate"], "20");
         assert_eq!(pairs["rate"], "30000");
         assert_eq!(pairs["cl_lw"], "1");
         assert_eq!(pairs["model"], "gordon");

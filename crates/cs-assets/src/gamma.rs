@@ -18,7 +18,8 @@ pub struct GoldSrcGammaConfig {
 impl Default for GoldSrcGammaConfig {
     fn default() -> Self {
         Self {
-            gamma: 2.5,
+            // Retail `hw.dll:0x1031e138` default gamma is 2.2.
+            gamma: 2.2,
             brightness: 0.0,
             texgamma: 2.0,
             lightgamma: 2.5,
@@ -27,16 +28,22 @@ impl Default for GoldSrcGammaConfig {
 }
 
 impl GoldSrcGammaConfig {
-    /// Clamp CVars according to `V_ValidateGammaCvars` (`engine/client/gamma.c:82-103`, read 2026-11-24).
-    pub fn validated(self) -> Self {
+    /// Clamp CVars according to `hw.dll:0x10230fa7`, `0x10231470` (`BuildGammaTable` /
+    /// `V_ValidateGammaCvars`): `gamma` falls back to `2.5` only when `0.0` (otherwise `2.2`
+    /// if non-finite), and `brightness` is `[0.0, 2.0]` in multiplayer (`maxclients > 1`) or
+    /// `[0.0, 100.0]` in singleplayer.
+    pub fn validated_for_mode(self, multiplayer: bool) -> Self {
+        let max_brightness = if multiplayer { 2.0 } else { 100.0 };
         Self {
-            gamma: if self.gamma.is_finite() {
-                self.gamma.clamp(1.8, 3.0)
-            } else {
+            gamma: if !self.gamma.is_finite() {
+                2.2
+            } else if self.gamma == 0.0 {
                 2.5
+            } else {
+                self.gamma.clamp(1.8, 3.0)
             },
             brightness: if self.brightness.is_finite() {
-                self.brightness.clamp(0.0, 3.0)
+                self.brightness.clamp(0.0, max_brightness)
             } else {
                 0.0
             },
@@ -51,6 +58,11 @@ impl GoldSrcGammaConfig {
                 2.5
             },
         }
+    }
+
+    /// Multiplayer-clamped view of the gamma CVars (`brightness` in `[0.0, 2.0]`).
+    pub fn validated(self) -> Self {
+        self.validated_for_mode(true)
     }
 }
 
@@ -77,7 +89,13 @@ impl GammaTables {
     /// Keeps the exact C `float`/`double` casts so every entry of all four LUTs matches
     /// Xash3D's `Test_PrecomputedGammaTables` bit-for-bit.
     pub fn build(raw: GoldSrcGammaConfig) -> Self {
-        let cfg = raw.validated();
+        Self::build_for_mode(raw, true)
+    }
+
+    /// Build GoldSrc gamma LUTs with retail `hw.dll:0x10231470` brightness clamp:
+    /// `[0.0, 2.0]` when `multiplayer` (`maxclients > 1`) and `[0.0, 100.0]` in singleplayer.
+    pub fn build_for_mode(raw: GoldSrcGammaConfig, multiplayer: bool) -> Self {
+        let cfg = raw.validated_for_mode(multiplayer);
         let gamma = cfg.gamma;
         let brightness = cfg.brightness;
         let texgamma = cfg.texgamma;
@@ -375,7 +393,12 @@ mod tests {
 
     #[test]
     fn build_gamma_table_matches_xash3d_precomputed_tables_bit_for_bit() {
-        let def = GammaTables::build(GoldSrcGammaConfig::default());
+        let def = GammaTables::build(GoldSrcGammaConfig {
+            gamma: 2.5,
+            brightness: 0.0,
+            texgamma: 2.0,
+            lightgamma: 2.5,
+        });
         assert_eq!(def.texgammatable, REF_DEFAULT_TEXGAMMA);
         assert_eq!(def.lightgammatable, REF_DEFAULT_LIGHTGAMMA);
         assert_eq!(def.lineargammatable[0], 0);
@@ -400,8 +423,29 @@ mod tests {
     }
 
     #[test]
+    fn retail_gamma_default_zero_fallback_and_brightness_clamps() {
+        assert_eq!(GoldSrcGammaConfig::default().gamma, 2.2);
+        let zero = GoldSrcGammaConfig {
+            gamma: 0.0,
+            brightness: 50.0,
+            ..Default::default()
+        };
+        assert_eq!(zero.validated_for_mode(true).gamma, 2.5);
+        assert_eq!(zero.validated_for_mode(true).brightness, 2.0);
+        assert_eq!(zero.validated_for_mode(false).brightness, 50.0);
+        let over = GoldSrcGammaConfig {
+            brightness: 250.0,
+            ..Default::default()
+        };
+        assert_eq!(over.validated_for_mode(false).brightness, 100.0);
+    }
+
+    #[test]
     fn r_build_lightmap_and_texgamma_produce_exact_goldsrc_final_bytes() {
-        let tables = GammaTables::default();
+        let tables = GammaTables::build(GoldSrcGammaConfig {
+            gamma: 2.5,
+            ..GoldSrcGammaConfig::default()
+        });
         assert_eq!(tables.lightscale(false), 338);
         assert_eq!(tables.lightscale(true), 256);
 

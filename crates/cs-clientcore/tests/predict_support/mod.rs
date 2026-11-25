@@ -420,6 +420,7 @@ impl Loop {
             ServerConfig {
                 max_clients: 4,
                 max_edicts: 256,
+                max_update_rate: 102,
                 ..ServerConfig::default()
             },
             map,
@@ -435,6 +436,7 @@ impl Loop {
             &md5_hex(b"cs-clientcore prediction"),
         );
         let mut conn = Connection::new(endpoint, PeerAddr::Loopback(0), cfg);
+        conn.set_cvar("cl_updaterate", "60");
         conn.frames_mut().set_remote_is_local(true);
         conn.connect();
         let mut now = 0.0;

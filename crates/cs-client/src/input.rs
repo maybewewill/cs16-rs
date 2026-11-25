@@ -80,16 +80,16 @@ pub struct CmdClock {
 }
 
 impl CmdClock {
-    /// The milliseconds of a frame of `dt` seconds, 0 to 100 (`CL_CreateCmd` clamps the frame
-    /// to 100 ms, allows 0 ms on sub-millisecond frames while banking the remainder, and drops
-    /// excess after hitches).
+    /// The milliseconds of a frame of `dt` seconds, 0 to 255 (`hw.dll:FUN_101a3a40`,
+    /// `0x101a3f65`: clamps `cmd.msec` at `255` instead of `100`, allows 0 ms on
+    /// sub-millisecond frames while banking the remainder, and drops excess after hitches).
     pub fn msec(&mut self, dt: f64) -> u8 {
         if !dt.is_finite() || dt <= 0.0 {
             return 0;
         }
         let total = self.carry + dt * 1000.0;
-        let ms = total.floor().clamp(0.0, 100.0);
-        self.carry = if total > 100.0 {
+        let ms = total.floor().clamp(0.0, 255.0);
+        self.carry = if total > 255.0 {
             0.0
         } else {
             (total - ms).clamp(0.0, 1.0)
@@ -366,10 +366,12 @@ mod tests {
         // 6.9 ms frames: the sent milliseconds add up to the real time, within one ms.
         let total: u32 = (0..1000).map(|_| u32::from(c2.msec(0.0069))).sum();
         assert!((6899..=6900).contains(&total), "{total}");
-        // A hitch is clamped to 100 ms and drops excess without banking remainder.
+        // Frames up to 255 ms preserve sub-ms carry; hitches > 255 ms clamp to 255 and drop excess.
         let mut c3 = CmdClock::default();
         assert_eq!(c3.msec(0.0008), 0);
-        assert_eq!(c3.msec(0.25), 100);
+        assert_eq!(c3.msec(0.25), 250);
+        assert_eq!(c3.msec(0.0005), 1);
+        assert_eq!(c3.msec(0.5), 255);
         assert_eq!(c3.msec(0.0005), 0);
         assert_eq!(c3.msec(-0.1), 0);
         assert_eq!(c3.msec(f64::NAN), 0);

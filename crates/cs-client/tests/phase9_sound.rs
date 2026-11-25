@@ -204,7 +204,9 @@ fn goldsrc_distance_attenuation_and_stereo_pan() {
 }
 
 #[test]
-fn goldsrc_wall_occlusion_attenuates_sound() {
+fn goldsrc_spatialize_no_wall_occlusion_plus_timescale_and_duplicate_jitter() {
+    use cs_client::audio::mixer::brush_model_sound_origin;
+
     let mut mixer = GoldSrcMixer::new();
     mixer.set_volumes(1.0, 0.25);
     mixer.set_room_off(true);
@@ -225,10 +227,27 @@ fn goldsrc_wall_occlusion_attenuates_sound() {
     mixer.start_sound(None, &clear, false, Some(&|_| false));
     let (c_l, _) = mixer.channel_gains(11, 1).unwrap();
 
+    // Retail `hw.dll:FUN_101fd050` does not apply a 48-unit wall occlusion gain multiplier.
     let blocked = SoundStart::by_name("player/step.wav", 12, 1, occ_pos, 1.0, 0.8, 100);
     mixer.start_sound(None, &blocked, false, Some(&|p| p.x > 250.0));
     let (b_l, _) = mixer.channel_gains(12, 1).unwrap();
-    assert!(b_l < c_l * 0.75, "occluded gain {b_l} should be lower than clear {c_l}");
+    assert!((b_l - c_l).abs() < 1e-6, "clear {c_l} vs blocked {b_l}");
+
+    // Duplicate dynamic sound receives 0..10% sample-rate jitter (`hw.dll:FUN_101fe3e0`).
+    let first_jitter = mixer.channel_rate_jitter(11, 1).unwrap();
+    let dup_jitter = mixer.channel_rate_jitter(12, 1).unwrap();
+    assert_eq!(first_jitter, 1.0);
+    assert!((1.0..=1.10).contains(&dup_jitter) && dup_jitter > 1.0, "{dup_jitter}");
+
+    // Brush-model sound origin uses bbox center `origin + (mins + maxs) * 0.5`.
+    assert_eq!(
+        brush_model_sound_origin(
+            Vec3::new(10.0, 20.0, 30.0),
+            Vec3::new(-4.0, -6.0, -8.0),
+            Vec3::new(8.0, 10.0, 12.0),
+        ),
+        Vec3::new(12.0, 22.0, 32.0)
+    );
 }
 
 #[test]
@@ -257,6 +276,18 @@ fn goldsrc_fractional_pitch_shifting() {
     );
     mixer.mix_frames(&mut tmp); // 100 ms at 0.5x speed -> takes ~200 ms, still active
     assert_eq!(mixer.active_channel_counts().0, 1, "pitch=50 should still be playing at 100ms");
+
+    // Retail `hw.dll:FUN_10202bf0`: `(timescale + 1.0) * 0.5` pitch scaling.
+    mixer.stop_all();
+    mixer.set_timescale(3.0); // (3.0 + 1.0) * 0.5 = 2.0x speed
+    mixer.start_sound(
+        None,
+        &SoundStart::by_name("misc/short.wav", 22, 1, Vec3::ZERO, 1.0, 0.0, 100),
+        false,
+        None,
+    );
+    mixer.mix_frames(&mut tmp); // 100 ms WAV at 2.0x speed completes in ~50 ms
+    assert_eq!(mixer.active_channel_counts().0, 0, "timescale=3.0 should play at 2x pitch");
 }
 
 #[test]
@@ -326,9 +357,9 @@ fn roomtype_29_presets_modulate_wet_reverb() {
         assert!(l.is_finite() && r.is_finite());
     }
 
-    // Feed an impulse followed by silence in bright cavern preset (14) -> measurable wet tail.
+    // Feed an impulse followed by silence in Cavern 2 preset (24) -> measurable wet tail.
     let mut rev = RoomDsp::new(MIX_SAMPLE_RATE);
-    rev.set_room_type(14);
+    rev.set_room_type(24);
     let mut energy_after = 0.0f32;
     for i in 0..4_000 {
         let inp = if i < 200 { 0.8 } else { 0.0 };
@@ -337,7 +368,7 @@ fn roomtype_29_presets_modulate_wet_reverb() {
             energy_after += l * l + r * r;
         }
     }
-    assert!(energy_after > 0.01, "preset 14 should generate reverb tail");
+    assert!(energy_after > 0.01, "preset 24 should generate reverb tail");
 
     // `room_off = true` disables wet reverb tail.
     let mut off_dsp = RoomDsp::new(MIX_SAMPLE_RATE);

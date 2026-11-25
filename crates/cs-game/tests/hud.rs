@@ -105,6 +105,7 @@ impl Bench {
         let cfg = ServerConfig {
             max_clients: slots,
             max_edicts: 256,
+            max_update_rate: 102,
             ..ServerConfig::default()
         };
         let mut game = CsGame::new();
@@ -156,6 +157,7 @@ impl Bench {
             cdkey_md5_hex: md5_hex(format!("probe{}", self.probes.len()).as_bytes()),
         };
         let mut probe = ProbeClient::new(endpoint, PeerAddr::Loopback(0), cfg);
+        probe.set_userinfo("cl_updaterate", "60");
         probe.connect();
         self.probes.push(probe);
         let n = self.probes.len() - 1;

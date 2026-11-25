@@ -154,7 +154,7 @@ fn svc_sendcvarvalue2_and_rcon_client_roundtrip_over_loopback() {
         server.take_cvar_responses(0),
         vec![
             (None, "cl_lw".to_string(), "1".to_string()),
-            (Some(77), "cl_updaterate".to_string(), "60".to_string()),
+            (Some(77), "cl_updaterate".to_string(), "20".to_string()),
         ]
     );
 

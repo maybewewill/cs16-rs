@@ -624,7 +624,7 @@ fn server_prints_and_cvar_queries_are_answered() {
         cvar_name: name.to_string(),
         value: value.to_string(),
     };
-    assert_eq!(answers[0], &cvar2(77, "cl_updaterate", "60"));
+    assert_eq!(answers[0], &cvar2(77, "cl_updaterate", "20"));
     assert_eq!(answers[1], &cvar2(78, "cl_filterstuffcmd", "CVAR is privileged"));
     assert_eq!(answers[2], &cvar2(79, "no_such_cvar", "Bad CVAR request"));
     assert_eq!(answers[3], &ClcMessage::CvarValue("1.1.2.2/Stdio,48,10211".to_string()));
@@ -680,7 +680,7 @@ fn signon_number_is_tracked_and_userinfo_follows_the_cvars() {
     exchange(&mut server, &mut conn, &mut now, &msg(|w| write_svc_signonnum(w, 1)));
     assert_eq!(conn.signon_num(), 1);
     assert_eq!(conn.userinfo().get("name"), Some("core"));
-    assert_eq!(conn.userinfo().get("cl_updaterate"), Some("60"));
+    assert_eq!(conn.userinfo().get("cl_updaterate"), Some("20"));
     assert_eq!(conn.userinfo().get("_vgui_menus"), Some("1"));
 }
 
