@@ -152,7 +152,9 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     reg.register("voice_maxgain", "5", arch, "Voice AGC maximum gain");
     reg.register("voice_inputfromfile", "0", CVarFlags::NONE, "Read outgoing voice from voice_input.wav (0 or 1)");
     reg.register("voice_recordtofile", "0", CVarFlags::NONE, "Record mic/decoded voice to WAV file (0 or 1)");
+    reg.register("voice_steam_compat", "1", arch, "Wrap Steam Voice OPUS_PLC frames for vanilla HLDS/CS 1.6 compatibility (0 or 1)");
     reg.register("sv_voiceenable", "1", srv_arch, "Allow voice communication on server (0 or 1)");
+    reg.register("sv_voice_transcode", "1", srv_arch, "Transcode voice between Steam Voice (native) and Web/CSVO formats on server (0 or 1)");
     reg.register("sv_alltalk", "0", srv, "Allow both teams to hear each other over voice (0 or 1)");
     reg.register("sv_voicecodec", "voice_opus", srv, "Server voice codec name");
     reg.register("sv_voicequality", "3", srv, "Server voice codec quality level (1..5)");

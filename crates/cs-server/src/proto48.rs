@@ -1520,6 +1520,7 @@ fn serve<G: GameDll>(
         ..ServerConfig::default()
     };
     let mut server = new_server(cfg, map, game, vfs);
+    server.set_voice_bridge(Box::new(crate::voice_bridge::ServerVoiceBridge::new()));
     if let Some(ticrate) = opts.sys_ticrate {
         server.set_cvar("sys_ticrate", &ticrate.to_string());
     }

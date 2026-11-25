@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+crc32fast.workspace = true
 cs-amxx.workspace = true
 cs-assets.workspace = true
 cs-clientcore.workspace = true
@@ -22,6 +23,7 @@ cs-vfs.workspace = true
 ctrlc.workspace = true
 glam.workspace = true
 image.workspace = true
+opus = "0.4"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

@@ -424,8 +424,13 @@ impl AudioEngine {
         }
     }
 
+    pub fn set_voice_steam_compat(&mut self, enabled: bool) {
+        self.voice.set_steam_compat(enabled);
+    }
+
     pub fn set_voice_recording(&mut self, recording: bool, force_mic_record: bool) {
         self.recording = recording;
+        self.voice.set_recording(recording);
         if recording && self.mic.is_none() && (!self.mic_attempted || force_mic_record) {
             self.mic_attempted = true;
             self.mic = MicCapture::try_open();

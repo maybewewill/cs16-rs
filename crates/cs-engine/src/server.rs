@@ -158,6 +158,7 @@ pub struct Server<G: GameDll> {
     pub(crate) next_replay_snapshot_at: f64,
     pub(crate) localinfo: BTreeMap<String, String>,
     pub(crate) available_maps: Vec<String>,
+    pub(crate) voice_bridge: Option<Box<dyn crate::voice_bridge::VoiceBridge>>,
 }
 
 /// Snapshot of a connected client or bot slot for server admin / status APIs.
@@ -309,9 +310,20 @@ impl<G: GameDll> Server<G> {
             next_replay_snapshot_at: 0.0,
             localinfo: BTreeMap::new(),
             available_maps: Vec::new(),
+            voice_bridge: None,
         };
         server.activate_map();
         server
+    }
+
+    /// Installs a server-side voice transcode bridge (for `SteamOpusPlc <-> CSVO ADPCM`).
+    pub fn set_voice_bridge(&mut self, bridge: Box<dyn crate::voice_bridge::VoiceBridge>) {
+        self.voice_bridge = Some(bridge);
+    }
+
+    /// Removes any installed server-side voice transcode bridge.
+    pub fn clear_voice_bridge(&mut self) {
+        self.voice_bridge = None;
     }
 
     /// Sets the list of available map names returned by the `maps` console command.
@@ -1216,8 +1228,11 @@ impl<G: GameDll> Server<G> {
     }
 
     /// Relays an active client's `clc_voicedata` frame into every unbanned recipient's unreliable
-    /// datagram buffer (`SV_ParseVoiceData`), respecting `sv_voiceenable` and per-client rate caps.
-    fn handle_voice_data(&mut self, sender_slot: u8, data: &[u8]) {
+    /// datagram buffer (`SV_ParseVoiceData`), respecting `sv_voiceenable`, `sv_voice_transcode`,
+    /// and per-client rate caps.
+    pub(crate) fn handle_voice_data(&mut self, sender_slot: u8, data: &[u8]) {
+        use crate::voice_bridge::{VoiceBridgeAction, VoiceSlotKind, sv_voice_transcode_enabled};
+
         let index = usize::from(sender_slot);
         if data.is_empty()
             || data.len() > 4096
@@ -1228,19 +1243,83 @@ impl<G: GameDll> Server<G> {
             return;
         }
         let sender_bit = 1u32.checked_shl(u32::from(sender_slot)).unwrap_or(0);
-        let mut msg = MsgWriter::with_capacity(data.len() + 4);
-        write_svc_voicedata(&mut msg, sender_slot, data);
-        let packet = msg.into_bytes();
-        for (rec_idx, client) in self.clients.iter_mut().enumerate() {
-            if rec_idx == index
-                || client.is_free()
-                || client.fake
-                || client.state != ClientState::Active
-                || (client.voice_ban_mask & sender_bit) != 0
-            {
+        let transcode_active =
+            sv_voice_transcode_enabled(&self.cvars) && self.voice_bridge.is_some();
+
+        if !transcode_active {
+            let mut msg = MsgWriter::with_capacity(data.len() + 4);
+            write_svc_voicedata(&mut msg, sender_slot, data);
+            let packet = msg.into_bytes();
+            for (rec_idx, client) in self.clients.iter_mut().enumerate() {
+                if rec_idx == index
+                    || client.is_free()
+                    || client.fake
+                    || client.state != ClientState::Active
+                    || (client.voice_ban_mask & sender_bit) != 0
+                {
+                    continue;
+                }
+                client.queue_unreliable(&packet);
+            }
+            return;
+        }
+
+        let sender_kind = VoiceSlotKind::from_peer_addr(self.clients[index].addr.as_ref());
+        let mut passthrough_pkt: Option<Vec<u8>> = None;
+        let mut native_cached: Option<Option<Vec<u8>>> = None;
+        let mut web_cached: Option<Option<Vec<u8>>> = None;
+
+        for rec_idx in 0..self.clients.len() {
+            if rec_idx == index {
                 continue;
             }
-            client.queue_unreliable(&packet);
+            let (eligible, target_kind) = {
+                let client = &self.clients[rec_idx];
+                let ok = !client.is_free()
+                    && !client.fake
+                    && client.state == ClientState::Active
+                    && (client.voice_ban_mask & sender_bit) == 0;
+                (ok, VoiceSlotKind::from_peer_addr(client.addr.as_ref()))
+            };
+            if !eligible {
+                continue;
+            }
+
+            let cache_slot = match target_kind {
+                VoiceSlotKind::NativeOrRetail => &mut native_cached,
+                VoiceSlotKind::WebBrowser => &mut web_cached,
+            };
+            if cache_slot.is_none() {
+                let action = self
+                    .voice_bridge
+                    .as_mut()
+                    .expect("voice_bridge checked Some")
+                    .bridge_packet(sender_slot, sender_kind, target_kind, data);
+                let built = match action {
+                    VoiceBridgeAction::Passthrough => {
+                        let pkt = passthrough_pkt.get_or_insert_with(|| {
+                            let mut msg = MsgWriter::with_capacity(data.len() + 4);
+                            write_svc_voicedata(&mut msg, sender_slot, data);
+                            msg.into_bytes()
+                        });
+                        Some(pkt.clone())
+                    }
+                    VoiceBridgeAction::Transcoded(bytes) => {
+                        if bytes.is_empty() || bytes.len() > 4096 {
+                            None
+                        } else {
+                            let mut msg = MsgWriter::with_capacity(bytes.len() + 4);
+                            write_svc_voicedata(&mut msg, sender_slot, &bytes);
+                            Some(msg.into_bytes())
+                        }
+                    }
+                    VoiceBridgeAction::Suppress => None,
+                };
+                *cache_slot = Some(built);
+            }
+            if let Some(pkt) = cache_slot.as_ref().and_then(|o| o.as_deref()) {
+                self.clients[rec_idx].queue_unreliable(pkt);
+            }
         }
     }
 

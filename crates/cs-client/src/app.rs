@@ -2296,6 +2296,8 @@ impl Cs16App {
             && !self.menu_ui.visible
             && self.input_state.active_actions.contains("voicerecord");
         self.audio
+            .set_voice_steam_compat(self.cvars.get_bool("voice_steam_compat"));
+        self.audio
             .set_voice_recording(recording, self.cvars.get_bool("voice_forcemicrecord"));
         let sess_now_voice = self.session.now();
         for ve in self.session.take_voice_events() {

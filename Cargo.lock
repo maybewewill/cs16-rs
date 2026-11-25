@@ -777,6 +777,7 @@ dependencies = [
 name = "cs-server"
 version = "0.1.0"
 dependencies = [
+ "crc32fast",
  "cs-amxx",
  "cs-assets",
  "cs-clientcore",
@@ -795,6 +796,7 @@ dependencies = [
  "ctrlc",
  "glam",
  "image",
+ "opus",
  "tracing",
  "tracing-subscriber",
 ]

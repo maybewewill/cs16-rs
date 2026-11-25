@@ -3617,3 +3617,13 @@ evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/tests/phase14_task1
 id = "bot_nav_autogen"
 status = "tested"
 evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-game/tests/phase14_zbot_arena.rs::nav_cache_roundtrip_keyed_by_bsp_crc32"
+
+[[item]]
+id = "voice_steam_compat"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/audio/voice.rs::outbound_steam_compat_emits_steam_opus_plc_and_reset_on_release"
+
+[[item]]
+id = "sv_voice_transcode"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-server/src/voice_bridge.rs::udp_and_websocket_server_bridges_voice_two_ways"

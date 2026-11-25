@@ -667,6 +667,7 @@ fn voice_goldsrc_compat_steam_opus_miles_and_speex() {
     assert_eq!(back.len(), 512);
 
     let mut miles = VoiceManager::new();
+    miles.set_steam_compat(false);
     miles.handle_event(
         VoiceEvent::Init {
             codec: "voice_miles".to_string(),

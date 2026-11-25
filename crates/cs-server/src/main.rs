@@ -9,6 +9,7 @@ mod admin_http;
 mod console_io;
 mod proto48;
 mod replays;
+mod voice_bridge;
 
 use tracing_subscriber::EnvFilter;
 
