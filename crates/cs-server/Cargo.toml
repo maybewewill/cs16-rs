@@ -12,6 +12,7 @@ cs-assets.workspace = true
 cs-clientcore.workspace = true
 cs-engine.workspace = true
 cs-local.workspace = true
+cs-master.workspace = true
 cs-game.workspace = true
 cs-mod-host.workspace = true
 cs-platform.workspace = true

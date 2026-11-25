@@ -34,8 +34,10 @@ use tracing::info;
 
 use crate::admin_http::{
     AdminBackend, AdminHttpRequest, AdminHttpResponse, AdminRouter, InviteConfig,
-    MAX_API_BODY_BYTES, PlayerSnapshot, ServerStatusSnapshot, read_http_body,
+    MAX_API_BODY_BYTES, PlayerSnapshot, ServerStatusSnapshot, handle_lobby_request, is_lobby_path,
+    read_http_body,
 };
+use cs_master::lobbies::LobbyRegistry;
 use crate::console_io;
 use crate::replays::{
     DEFAULT_MAX_REPLAY_ROUNDS, MapOverviewBundle, MatchStatsTracker, RoundReplayStore,
@@ -485,6 +487,7 @@ struct Phase13Runtime {
     flashed_until: [f64; 32],
     flashed_alpha: [u8; 32],
     last_bomb_pos: [f32; 3],
+    lobbies: LobbyRegistry,
 }
 
 impl Phase13Runtime {
@@ -524,6 +527,7 @@ impl Phase13Runtime {
             flashed_until: [0.0; 32],
             flashed_alpha: [0; 32],
             last_bomb_pos: [0.0; 3],
+            lobbies: LobbyRegistry::default(),
         }
     }
 
@@ -699,6 +703,7 @@ impl Phase13Runtime {
     }
 
     fn step_from_server<G: GameDll>(&mut self, server: &mut Server<G>, now: f64) {
+        self.lobbies.expire_stale(now);
         self.sync_players_from_server(server);
         let max_clients = server.config().max_clients;
         let mut deathmsgs_seen: Vec<(u8, u8)> = Vec::new();
@@ -1131,6 +1136,11 @@ enum PendingHttpRequest {
         body: Vec<u8>,
         reply: Sender<AdminHttpResponse>,
     },
+    Lobby {
+        head: HttpRequest,
+        body: Vec<u8>,
+        reply: Sender<AdminHttpResponse>,
+    },
     ServersJson {
         host: Option<String>,
         reply: Sender<String>,
@@ -1347,6 +1357,59 @@ fn make_http_hook(
             return true;
         }
 
+        if is_lobby_path(&req.path) {
+            let body = match read_http_body(req, leftover, stream, MAX_API_BODY_BYTES) {
+                Ok(b) => b,
+                Err(crate::admin_http::HttpReadError::PayloadTooLarge) => {
+                    let _ = AdminHttpResponse::cors_json_error(
+                        413,
+                        "Payload Too Large",
+                        "request body too large",
+                    )
+                    .write_to(stream, false);
+                    return true;
+                }
+                Err(_) => {
+                    let _ = AdminHttpResponse::cors_json_error(
+                        400,
+                        "Bad Request",
+                        "invalid HTTP request",
+                    )
+                    .write_to(stream, false);
+                    return true;
+                }
+            };
+            let (reply_tx, reply_rx) = mpsc::channel();
+            let pending = PendingHttpRequest::Lobby {
+                head: req.clone(),
+                body,
+                reply: reply_tx,
+            };
+            if tx.send(pending).is_err() {
+                let _ = AdminHttpResponse::cors_json_error(
+                    503,
+                    "Service Unavailable",
+                    "server unavailable",
+                )
+                .write_to(stream, false);
+                return true;
+            }
+            match reply_rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(resp) => {
+                    let _ = resp.write_to(stream, req.method == "HEAD");
+                }
+                Err(_) => {
+                    let _ = AdminHttpResponse::cors_json_error(
+                        503,
+                        "Service Unavailable",
+                        "server timeout",
+                    )
+                    .write_to(stream, false);
+                }
+            }
+            return true;
+        }
+
         if AdminRouter::handles_path(&req.path) {
             let body = match read_http_body(req, leftover, stream, MAX_API_BODY_BYTES) {
                 Ok(b) => b,
@@ -1449,6 +1512,11 @@ fn process_pending_http<G: GameDll>(
                     quit_requested: &mut quit_requested,
                 };
                 let resp = AdminRouter::handle(&view, &mut bridge);
+                let _ = reply.send(resp);
+            }
+            PendingHttpRequest::Lobby { head, body, reply } => {
+                let view = AdminHttpRequest::from_http_request(&head, &body);
+                let resp = handle_lobby_request(&view, &mut runtime.lobbies, now);
                 let _ = reply.send(resp);
             }
         }
@@ -2254,6 +2322,42 @@ mod tests {
         .unwrap();
         assert!(overview_ok.starts_with("HTTP/1.1 200 OK\r\n"));
         assert!(overview_ok.contains("\"map\":\"de_dust2\""));
+
+        // Public CORS WebRTC lobby signaling routes (/lobbies, /lobbies/<room>, /lobbies/<room>/signal).
+        let lobby_body = r#"{"room":"p2p-1","host":"browser-p2p","port":443,"map":"de_dust2","players":1,"max_players":10,"mode":"webrtc"}"#;
+        let lobby_req = format!(
+            "POST /lobbies HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            lobby_body.len(),
+            lobby_body
+        );
+        let lobby_resp = String::from_utf8(tcp_http_request(http_addr, &lobby_req)).unwrap();
+        assert!(lobby_resp.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(lobby_resp.contains("Access-Control-Allow-Origin: *\r\n"));
+        assert!(lobby_resp.contains("\"room\":\"p2p-1\""));
+
+        let sig_body = r#"{"from":"host","to":"guest1","kind":"offer","payload":"v=0"}"#;
+        let sig_req = format!(
+            "POST /lobbies/p2p-1/signal HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            sig_body.len(),
+            sig_body
+        );
+        let sig_resp = String::from_utf8(tcp_http_request(http_addr, &sig_req)).unwrap();
+        assert!(sig_resp.starts_with("HTTP/1.1 200 OK\r\n"));
+
+        let poll_resp = String::from_utf8(tcp_http_request(
+            http_addr,
+            "GET /lobbies/p2p-1/signal?since=0&to=guest1 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        ))
+        .unwrap();
+        assert!(poll_resp.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(poll_resp.contains("\"kind\":\"offer\""));
+
+        let del_resp = String::from_utf8(tcp_http_request(
+            http_addr,
+            "DELETE /lobbies/p2p-1 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        ))
+        .unwrap();
+        assert!(del_resp.starts_with("HTTP/1.1 200 OK\r\n"));
 
         running.store(false, Ordering::Relaxed);
         handle.join().unwrap();

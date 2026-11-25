@@ -19,6 +19,7 @@
 use std::fmt::Write as _;
 use std::io::{self, Read, Write};
 
+use cs_master::lobbies::{LobbyError, LobbyRegistry};
 use cs_transport::ws_proto::{HttpRequest, MAX_HTTP_HEAD, parse_http_request};
 
 use crate::replays::{escape_json_str, valid_map_overview_name, valid_replay_id};
@@ -241,6 +242,8 @@ pub struct AdminHttpResponse {
     pub status_text: &'static str,
     pub content_type: &'static str,
     pub content_disposition: Option<String>,
+    pub cors_allow_origin: bool,
+    pub allow_header: Option<&'static str>,
     pub body: Vec<u8>,
 }
 
@@ -251,12 +254,40 @@ impl AdminHttpResponse {
             status_text,
             content_type: "application/json; charset=utf-8",
             content_disposition: None,
+            cors_allow_origin: false,
+            allow_header: None,
             body: body.into_bytes(),
+        }
+    }
+
+    pub fn cors_json(status_code: u16, status_text: &'static str, body: String) -> Self {
+        let mut resp = Self::json(status_code, status_text, body);
+        resp.cors_allow_origin = true;
+        resp
+    }
+
+    pub fn cors_no_content() -> Self {
+        Self {
+            status_code: 204,
+            status_text: "No Content",
+            content_type: "text/plain; charset=utf-8",
+            content_disposition: None,
+            cors_allow_origin: true,
+            allow_header: None,
+            body: Vec::new(),
         }
     }
 
     pub fn json_error(status_code: u16, status_text: &'static str, message: &str) -> Self {
         Self::json(
+            status_code,
+            status_text,
+            format!("{{\"error\":{}}}", escape_json_str(message)),
+        )
+    }
+
+    pub fn cors_json_error(status_code: u16, status_text: &'static str, message: &str) -> Self {
+        Self::cors_json(
             status_code,
             status_text,
             format!("{{\"error\":{}}}", escape_json_str(message)),
@@ -269,6 +300,8 @@ impl AdminHttpResponse {
             status_text: "OK",
             content_type: "text/html; charset=utf-8",
             content_disposition: None,
+            cors_allow_origin: false,
+            allow_header: None,
             body,
         }
     }
@@ -279,6 +312,8 @@ impl AdminHttpResponse {
             status_text: "OK",
             content_type: "application/octet-stream",
             content_disposition: Some(format!("attachment; filename=\"{filename}\"")),
+            cors_allow_origin: false,
+            allow_header: None,
             body,
         }
     }
@@ -289,6 +324,8 @@ impl AdminHttpResponse {
             status_text: "OK",
             content_type: "image/png",
             content_disposition: None,
+            cors_allow_origin: false,
+            allow_header: None,
             body,
         }
     }
@@ -306,6 +343,16 @@ impl AdminHttpResponse {
             self.content_type,
             self.body.len(),
         );
+        if self.cors_allow_origin {
+            head.push_str(
+                "Access-Control-Allow-Origin: *\r\n\
+                 Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\n\
+                 Access-Control-Allow-Headers: Content-Type\r\n",
+            );
+        }
+        if let Some(allow) = self.allow_header {
+            let _ = write!(head, "Allow: {allow}\r\n");
+        }
         if let Some(disp) = &self.content_disposition {
             let _ = write!(head, "Content-Disposition: {disp}\r\n");
         }
@@ -315,6 +362,117 @@ impl AdminHttpResponse {
             writer.write_all(&self.body)?;
         }
         writer.flush()
+    }
+}
+
+/// Returns `true` if `path` belongs to the public WebRTC/lobby signaling API.
+pub fn is_lobby_path(path: &str) -> bool {
+    path == "/lobbies" || path.starts_with("/lobbies/")
+}
+
+/// Handles public CORS lobby signaling routes (`/lobbies`, `/lobbies/<room>`, `/lobbies/<room>/signal`)
+/// backed by `LobbyRegistry` when `--web-port` is enabled on `cs-server`.
+pub fn handle_lobby_request(
+    req: &AdminHttpRequest<'_>,
+    lobbies: &mut LobbyRegistry,
+    now_secs: f64,
+) -> AdminHttpResponse {
+    if req.method == "OPTIONS" {
+        return AdminHttpResponse::cors_no_content();
+    }
+    if req.body.len() > MAX_API_BODY_BYTES {
+        return AdminHttpResponse::cors_json_error(
+            413,
+            "Payload Too Large",
+            "request body too large",
+        );
+    }
+
+    if req.path == "/lobbies" {
+        return match req.method {
+            "GET" | "HEAD" => {
+                AdminHttpResponse::cors_json(200, "OK", lobbies.list_json(now_secs))
+            }
+            "POST" => match lobbies.upsert_from_json(req.body, now_secs) {
+                Ok(info) => AdminHttpResponse::cors_json(200, "OK", info.to_json()),
+                Err(err) => {
+                    AdminHttpResponse::cors_json_error(400, "Bad Request", &err.to_string())
+                }
+            },
+            _ => {
+                let mut resp = AdminHttpResponse::cors_json_error(
+                    405,
+                    "Method Not Allowed",
+                    "method not allowed",
+                );
+                resp.allow_header = Some("GET, POST, OPTIONS");
+                resp
+            }
+        };
+    }
+
+    let rest = req.path.strip_prefix("/lobbies/").unwrap_or("");
+    if let Some(room) = rest.strip_suffix("/signal") {
+        return match req.method {
+            "POST" => match lobbies.push_signal_from_json(room, req.body, now_secs) {
+                Ok(sig) => AdminHttpResponse::cors_json(200, "OK", sig.to_json()),
+                Err(LobbyError::NotFound) => {
+                    AdminHttpResponse::cors_json_error(404, "Not Found", "lobby room not found")
+                }
+                Err(err) => {
+                    AdminHttpResponse::cors_json_error(400, "Bad Request", &err.to_string())
+                }
+            },
+            "GET" | "HEAD" => {
+                let params = parse_query_params(req.query.unwrap_or(""));
+                let since_id = param_value(&params, "since")
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(0);
+                let target = param_value(&params, "to").filter(|v| !v.is_empty());
+                match lobbies.poll_signals(room, since_id, target, now_secs) {
+                    Ok(sigs) => AdminHttpResponse::cors_json(
+                        200,
+                        "OK",
+                        LobbyRegistry::signals_to_json(&sigs),
+                    ),
+                    Err(LobbyError::NotFound) => {
+                        AdminHttpResponse::cors_json_error(404, "Not Found", "lobby room not found")
+                    }
+                    Err(err) => {
+                        AdminHttpResponse::cors_json_error(400, "Bad Request", &err.to_string())
+                    }
+                }
+            }
+            _ => {
+                let mut resp = AdminHttpResponse::cors_json_error(
+                    405,
+                    "Method Not Allowed",
+                    "method not allowed",
+                );
+                resp.allow_header = Some("GET, POST, OPTIONS");
+                resp
+            }
+        };
+    }
+
+    match req.method {
+        "GET" | "HEAD" => match lobbies.get(rest, now_secs) {
+            Some(info) => AdminHttpResponse::cors_json(200, "OK", info.to_json()),
+            None => AdminHttpResponse::cors_json_error(404, "Not Found", "lobby room not found"),
+        },
+        "DELETE" => {
+            if lobbies.remove(rest) {
+                AdminHttpResponse::cors_json(200, "OK", "{\"deleted\":true}".to_string())
+            } else {
+                AdminHttpResponse::cors_json_error(404, "Not Found", "lobby room not found")
+            }
+        }
+        _ => {
+            let mut resp =
+                AdminHttpResponse::cors_json_error(405, "Method Not Allowed", "method not allowed");
+            resp.allow_header = Some("GET, DELETE, OPTIONS");
+            resp
+        }
     }
 }
 
@@ -1165,5 +1323,87 @@ mod tests {
             read_http_request_with_body(&mut cursor2, MAX_API_BODY_BYTES),
             Err(HttpReadError::PayloadTooLarge)
         ));
+    }
+
+    #[test]
+    fn lobby_signaling_routes_handle_cors_crud_and_signals() {
+        let mut lobbies = LobbyRegistry::default();
+        let opt_resp = handle_lobby_request(
+            &AdminHttpRequest {
+                method: "OPTIONS",
+                path: "/lobbies/p2p-alpha/signal",
+                query: None,
+                authorization: None,
+                x_admin_token: None,
+                host: None,
+                body: b"",
+            },
+            &mut lobbies,
+            10.0,
+        );
+        assert_eq!(opt_resp.status_code, 204);
+        assert!(opt_resp.cors_allow_origin);
+
+        let post_room = handle_lobby_request(
+            &AdminHttpRequest {
+                method: "POST",
+                path: "/lobbies",
+                query: None,
+                authorization: None,
+                x_admin_token: None,
+                host: None,
+                body: br#"{"room":"p2p-alpha","host":"browser-p2p","port":443,"map":"de_dust2","players":1,"max_players":10,"mode":"webrtc"}"#,
+            },
+            &mut lobbies,
+            10.0,
+        );
+        assert_eq!(post_room.status_code, 200);
+        assert!(String::from_utf8(post_room.body).unwrap().contains("\"mode\":\"webrtc\""));
+
+        let push_sig = handle_lobby_request(
+            &AdminHttpRequest {
+                method: "POST",
+                path: "/lobbies/p2p-alpha/signal",
+                query: None,
+                authorization: None,
+                x_admin_token: None,
+                host: None,
+                body: br#"{"from":"guest1","to":"host","kind":"join","payload":""}"#,
+            },
+            &mut lobbies,
+            11.0,
+        );
+        assert_eq!(push_sig.status_code, 200);
+
+        let poll_sig = handle_lobby_request(
+            &AdminHttpRequest {
+                method: "GET",
+                path: "/lobbies/p2p-alpha/signal",
+                query: Some("since=0&to=host"),
+                authorization: None,
+                x_admin_token: None,
+                host: None,
+                body: b"",
+            },
+            &mut lobbies,
+            11.5,
+        );
+        assert_eq!(poll_sig.status_code, 200);
+        assert!(String::from_utf8(poll_sig.body).unwrap().contains("\"kind\":\"join\""));
+
+        let del_room = handle_lobby_request(
+            &AdminHttpRequest {
+                method: "DELETE",
+                path: "/lobbies/p2p-alpha",
+                query: None,
+                authorization: None,
+                x_admin_token: None,
+                host: None,
+                body: b"",
+            },
+            &mut lobbies,
+            12.0,
+        );
+        assert_eq!(del_room.status_code, 200);
     }
 }

@@ -57,6 +57,14 @@
       <button id="btn-start-local">Offline</button>
     </div>
     <div class="row">
+      <select id="p2p-max-players" style="flex:0 0 88px">
+        <option value="2">1v1 (2p)</option>
+        <option value="10" selected>5v5 (10p)</option>
+        <option value="16">16p</option>
+      </select>
+      <button id="btn-host-p2p" style="flex:1">Host P2P Room (1v1 / 5v5 in Browser)</button>
+    </div>
+    <div class="row">
       <input id="ws-url" type="text" value="ws://127.0.0.1:27016/ws" placeholder="ws://host:27016/ws or /relay?target=...">
       <button id="btn-connect">Connect</button>
       <button id="btn-disconnect">Stop</button>

@@ -17,7 +17,10 @@ use cs_engine::{
 use cs_game::CsGame;
 use cs_proto48::crypto::md5_hex;
 use cs_proto48::delta::DeltaRegistry;
-use cs_transport::{LoopbackEndpoint, LoopbackHub, PeerAddr};
+use cs_transport::{
+    LoopbackEndpoint, LoopbackHub, MultiPeerChannel, MultiPeerHandle, MultiTransport, PeerAddr,
+    PeerKind,
+};
 use cs_vfs::Vfs;
 
 /// One server frame, in seconds (the engine's 100 Hz).
@@ -108,10 +111,11 @@ fn new_server_with<G: GameDll>(
     server
 }
 
-/// A server and one client in one process.
+/// A server and one local client in one process, optionally accepting external P2P WebRTC peers.
 pub struct LocalGame {
     server: Server<CsGame>,
-    hub: LoopbackHub,
+    net: MultiTransport,
+    p2p: MultiPeerHandle,
     conn: Connection<LoopbackEndpoint>,
     vfs: Option<Vfs>,
     now: f64,
@@ -153,6 +157,10 @@ impl LocalGame {
         }
         let hub = LoopbackHub::new();
         let endpoint = hub.connect();
+        let (p2p_chan, p2p) = MultiPeerChannel::new_pair();
+        let mut net = MultiTransport::new();
+        net.add(PeerKind::Loopback, hub);
+        net.add(PeerKind::Web, p2p_chan);
         let cfg = ConnectionConfig::new(
             &opts.player_name,
             76_561_197_960_265_728 + u64::from(endpoint.id()),
@@ -165,7 +173,8 @@ impl LocalGame {
         conn.connect();
         let mut local = Self {
             server,
-            hub,
+            net,
+            p2p,
             conn,
             vfs,
             now: 0.0,
@@ -190,11 +199,26 @@ impl LocalGame {
     pub fn step(&mut self) {
         self.conn.pump(self.now);
         self.now = ((self.now / FRAME_SECS).round() + 1.0) * FRAME_SECS;
-        self.server.frame(&mut self.hub, self.now);
+        self.server.frame(&mut self.net, self.now);
         // A map change the game asked for (`CHANGE_LEVEL`), done as the console's `changelevel`.
         if let Some(name) = self.server.take_pending_change_level() {
             self.change_level(&name);
         }
+    }
+
+    /// Queues an inbound Protocol 48 packet from an external P2P peer (`PeerAddr::Web(peer_id)`).
+    pub fn push_p2p_packet(&self, peer_id: u32, bytes: Vec<u8>) -> bool {
+        self.p2p.push_inbound(peer_id, bytes).is_ok()
+    }
+
+    /// Drains outbound `(peer_id, bytes)` packets addressed to external P2P peers.
+    pub fn drain_p2p_packets(&self) -> Vec<(u32, Vec<u8>)> {
+        self.p2p.drain_outbound()
+    }
+
+    /// External P2P multi-peer handle (`PeerAddr::Web(1..=16)`).
+    pub fn p2p_handle(&self) -> &MultiPeerHandle {
+        &self.p2p
     }
 
     /// Runs `frames` frames.
@@ -214,7 +238,8 @@ impl LocalGame {
                 String::new()
             }
             ConsoleOutcome::Quit => {
-                self.server.shutdown(&mut self.hub, "Server shutting down");
+                self.server.shutdown(&mut self.net, "Server shutting down");
+                self.p2p.close();
                 String::new()
             }
         }
@@ -255,7 +280,8 @@ impl LocalGame {
 
     /// Stops the server, telling the client why.
     pub fn shutdown(&mut self) {
-        self.server.shutdown(&mut self.hub, "Server shutting down");
+        self.server.shutdown(&mut self.net, "Server shutting down");
+        self.p2p.close();
     }
 }
 
@@ -269,5 +295,45 @@ mod tests {
         assert_eq!(vanilla_cvars().get_f32("mp_roundtime"), 5.0);
         assert_eq!(vanilla_cvars().get_f32("bot_quota"), 0.0);
         assert_eq!(CVarRegistry::new_with_defaults().get_f32("mp_roundtime"), 1.75);
+    }
+
+    #[test]
+    fn local_game_accepts_external_web_peer_alongside_loopback_host() {
+        let opts = LocalOptions {
+            max_clients: 4,
+            bots: 0,
+            text_menus: true,
+            ..LocalOptions::default()
+        };
+        let mut local = LocalGame::start_with_map(ServerMap::stub("de_dust2"), None, &opts)
+            .expect("host signs on");
+        assert_eq!(local.connection().state(), &ConnState::InGame);
+
+        let (guest_tr, guest_handle) = cs_transport::ChannelTransport::new_pair(PeerAddr::Web(0));
+        let mut guest = Connection::new(
+            guest_tr,
+            PeerAddr::Web(0),
+            ConnectionConfig::new("P2PGuest", 76_561_197_960_265_900, &md5_hex(b"p2p-guest")),
+        );
+        guest.connect();
+
+        let mut guest_in_game = false;
+        for _ in 0..400 {
+            guest.pump(local.time());
+            for pkt in guest_handle.drain_outbound() {
+                assert!(local.push_p2p_packet(1, pkt));
+            }
+            local.step();
+            for (peer_id, pkt) in local.drain_p2p_packets() {
+                assert_eq!(peer_id, 1);
+                let _ = guest_handle.push_inbound(pkt);
+            }
+            if guest.state() == &ConnState::InGame {
+                guest_in_game = true;
+                break;
+            }
+        }
+        assert!(guest_in_game, "external PeerAddr::Web(1) should complete signon");
+        assert_eq!(local.server().client_infos().len(), 2);
     }
 }

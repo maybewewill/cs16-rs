@@ -180,6 +180,7 @@ pub struct WebClientState {
     pub mod_transfer: ClientModTransfer,
     pub mod_host: ClientModHost,
     last_mod_hud: Vec<HudDrawCmd>,
+    p2p_host: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -230,6 +231,7 @@ impl WebClientState {
             mod_transfer: ClientModTransfer::default(),
             mod_host: ClientModHost::new(),
             last_mod_hud: Vec::new(),
+            p2p_host: false,
         }
     }
 
@@ -274,13 +276,44 @@ impl WebClientState {
     }
 
     pub fn start_local(&mut self, map: &str, bots: u32) -> Result<(), String> {
+        self.start_local_mode(map, bots, 16, false)
+    }
+
+    /// Starts an in-browser listen server supporting the local host player plus external
+    /// WebRTC DataChannel peers (`1..max_players`, clamped to `2..=16`).
+    pub fn start_p2p_host(
+        &mut self,
+        map: &str,
+        bots: u32,
+        max_players: u8,
+    ) -> Result<(), String> {
+        self.start_local_mode(map, bots, max_players.clamp(2, 16), true)
+    }
+
+    fn start_local_mode(
+        &mut self,
+        map: &str,
+        bots: u32,
+        max_clients: u8,
+        p2p_host: bool,
+    ) -> Result<(), String> {
+        self.disconnect();
         let vfs = self
             .vfs
             .as_ref()
             .ok_or_else(|| "no Half-Life / cstrike folder mounted".to_string())?
             .clone();
+        let opts = self.local_options(bots, max_clients);
+        let game = LocalGame::start(&vfs, map, &opts)?;
+        let bsp = BspMap::load(&vfs, map).ok().map(Arc::new);
+        self.configure_local_game(game, bsp, Some(vfs), p2p_host);
+        Ok(())
+    }
+
+    fn local_options(&self, bots: u32, max_clients: u8) -> LocalOptions {
         let name = self.cvars.get_str("name").to_string();
-        let opts = LocalOptions {
+        LocalOptions {
+            max_clients,
             bots,
             player_name: if name.is_empty() {
                 "Player".to_string()
@@ -289,10 +322,17 @@ impl WebClientState {
             },
             text_menus: true,
             ..LocalOptions::default()
-        };
-        let mut game = LocalGame::start(&vfs, map, &opts)?;
+        }
+    }
+
+    fn configure_local_game(
+        &mut self,
+        mut game: LocalGame,
+        bsp: Option<Arc<BspMap>>,
+        vfs: Option<Vfs>,
+        p2p_host: bool,
+    ) {
         let names = self.view.names();
-        let bsp = BspMap::load(&vfs, map).ok().map(Arc::new);
         let coll = bsp
             .as_deref()
             .map(|b| Arc::new(WorldCollision::from_bsp(b)));
@@ -301,19 +341,36 @@ impl WebClientState {
         self.view.reset_map();
         self.view.set_map_bounds(coll.as_deref());
         self.view.set_map_bsp(bsp);
-        self.view.set_world_context(coll.clone(), Some(vfs.clone()));
-        let materials_txt = vfs.read_bytes("sound/materials.txt").ok();
+        self.view.set_world_context(coll.clone(), vfs.clone());
+        let materials_txt = vfs
+            .as_ref()
+            .and_then(|v| v.read_bytes("sound/materials.txt").ok());
         let conn = game.connection_mut();
         conn.frames_mut().set_remote_is_local(true);
         conn.set_world_collision(coll.clone());
         if let Some(txt) = materials_txt {
             conn.predictor_mut().set_materials(&txt);
         }
-        conn.set_fx_world(Box::new(MapFxWorld::new(coll, Some(vfs), names)));
+        conn.set_fx_world(Box::new(MapFxWorld::new(coll, vfs, names)));
+        self.p2p_host = p2p_host;
         self.session = SessionMode::Local {
             game: Box::new(game),
             pending: 0.0,
         };
+    }
+
+    #[cfg(test)]
+    fn start_p2p_host_with_map(
+        &mut self,
+        map: cs_engine::ServerMap,
+        bsp: Arc<BspMap>,
+        bots: u32,
+        max_players: u8,
+    ) -> Result<(), String> {
+        self.disconnect();
+        let opts = self.local_options(bots, max_players.clamp(2, 16));
+        let game = LocalGame::start_with_map(map, self.vfs.clone(), &opts)?;
+        self.configure_local_game(game, Some(bsp), self.vfs.clone(), true);
         Ok(())
     }
 
@@ -357,6 +414,7 @@ impl WebClientState {
             }
         }
         self.session = SessionMode::Idle;
+        self.p2p_host = false;
         self.loaded_map = None;
         self.collision = None;
         self.view.reset_map();
@@ -379,6 +437,35 @@ impl WebClientState {
         } else {
             Vec::new()
         }
+    }
+
+    /// Pushes an inbound Protocol 48 packet from WebRTC peer `peer_id` (`1..=16`) into the
+    /// active P2P listen server.
+    pub fn push_p2p_packet(&mut self, peer_id: u32, bytes: Vec<u8>) -> bool {
+        if !self.p2p_host {
+            return false;
+        }
+        if let SessionMode::Local { game, .. } = &self.session {
+            game.push_p2p_packet(peer_id, bytes)
+        } else {
+            false
+        }
+    }
+
+    /// Drains outbound `(peer_id, bytes)` packets from the P2P listen server for WebRTC DataChannels.
+    pub fn drain_p2p_packets(&mut self) -> Vec<(u32, Vec<u8>)> {
+        if !self.p2p_host {
+            return Vec::new();
+        }
+        if let SessionMode::Local { game, .. } = &self.session {
+            game.drain_p2p_packets()
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn is_p2p_host(&self) -> bool {
+        self.p2p_host && matches!(self.session, SessionMode::Local { .. })
     }
 
     pub fn take_audio_events(&mut self) -> Vec<WebAudioEvent> {
@@ -1597,5 +1684,210 @@ mod tests {
         st.mark_map_loaded("de_dust2");
         let out2 = st.step(0.01);
         assert!(out2.view.is_some());
+    }
+
+    fn p2p_test_floor_map() -> (ServerMap, Arc<BspMap>) {
+        use cs_assets::bsp::{BspMap, BspModel, ClipNode, Entity, Leaf, LightmapAtlas, Node, Plane};
+        use glam::Vec3;
+
+        const CONTENTS_EMPTY: i32 = -1;
+        const CONTENTS_SOLID: i32 = -2;
+
+        let leaf = |contents: i32| Leaf {
+            contents,
+            vis_offset: -1,
+            mins: [0; 3],
+            maxs: [0; 3],
+            first_mark_surface: 0,
+            num_mark_surfaces: 0,
+            ambient_levels: [0; 4],
+        };
+        let planes = vec![
+            Plane { normal: Vec3::Z, dist: 0.0, plane_type: 2 },
+            Plane { normal: Vec3::Z, dist: 36.0, plane_type: 2 },
+            Plane { normal: Vec3::Z, dist: 32.0, plane_type: 2 },
+            Plane { normal: Vec3::Z, dist: 18.0, plane_type: 2 },
+        ];
+        let clipnodes = vec![
+            ClipNode { plane: 1, children: [CONTENTS_EMPTY as i16, CONTENTS_SOLID as i16] },
+            ClipNode { plane: 2, children: [CONTENTS_EMPTY as i16, CONTENTS_SOLID as i16] },
+            ClipNode { plane: 3, children: [CONTENTS_EMPTY as i16, CONTENTS_SOLID as i16] },
+            ClipNode { plane: 3, children: [CONTENTS_EMPTY as i16, CONTENTS_SOLID as i16] },
+        ];
+        let nodes = vec![
+            Node {
+                plane: 0,
+                children: [-2, -1],
+                mins: [0; 3],
+                maxs: [0; 3],
+                first_face: 0,
+                num_faces: 0,
+            },
+            Node {
+                plane: 0,
+                children: [-2, -1],
+                mins: [0; 3],
+                maxs: [0; 3],
+                first_face: 0,
+                num_faces: 0,
+            },
+        ];
+        let model = BspModel {
+            mins: Vec3::new(-4096.0, -4096.0, -64.0),
+            maxs: Vec3::new(4096.0, 4096.0, 4096.0),
+            origin: Vec3::ZERO,
+            head_nodes: [0, 0, 1, 2],
+            vis_leafs: 1,
+            first_face: 0,
+            num_faces: 0,
+        };
+        let spawn = |classname: &str, x: f32, y: f32| -> Entity {
+            let mut properties = std::collections::HashMap::new();
+            properties.insert("classname".to_string(), classname.to_string());
+            properties.insert("origin".to_string(), format!("{x} {y} 48"));
+            Entity { properties }
+        };
+        let entities = vec![
+            spawn("info_player_start", 0.0, 0.0),
+            spawn("info_player_start", 0.0, 128.0),
+            spawn("info_player_deathmatch", 256.0, 0.0),
+            spawn("info_player_deathmatch", 256.0, 128.0),
+        ];
+        let bsp = Arc::new(BspMap {
+            name: "de_p2p_test".to_string(),
+            skyname: String::new(),
+            entities,
+            spawns: Vec::new(),
+            hostage_spawns: Vec::new(),
+            brush_entities: Vec::new(),
+            planes,
+            vertices_raw: Vec::new(),
+            visibility: Vec::new(),
+            nodes,
+            texinfos: Vec::new(),
+            faces: Vec::new(),
+            lighting: Vec::new(),
+            clipnodes,
+            leafs: vec![leaf(CONTENTS_SOLID), leaf(CONTENTS_EMPTY)],
+            mark_surfaces: Vec::new(),
+            edges: Vec::new(),
+            surf_edges: Vec::new(),
+            models: vec![model],
+            textures: Vec::new(),
+            lightmap_atlas: LightmapAtlas {
+                width: 0,
+                height: 0,
+                rgba: Vec::new(),
+                packed_faces: 0,
+            },
+            render_vertices: Vec::new(),
+            render_indices: Vec::new(),
+            batches: Vec::new(),
+        });
+        let mut raw = vec![0u8; 4 + 15 * 8];
+        raw[..4].copy_from_slice(&30i32.to_le_bytes());
+        let map = ServerMap::from_bsp("de_p2p_test", &raw, Arc::clone(&bsp)).expect("valid test BSP");
+        (map, bsp)
+    }
+
+    #[test]
+    fn p2p_host_exchanges_signon_movement_and_shots_with_web_peer() {
+        let mut host = WebClientState::default();
+        assert!(host.start_p2p_host("de_dust2", 0, 4).is_err());
+
+        let (map, bsp) = p2p_test_floor_map();
+        host.start_p2p_host_with_map(map, bsp, 0, 4)
+            .expect("host signs on");
+        assert!(host.is_p2p_host());
+        assert_eq!(host.conn_state(), Some(ConnState::InGame));
+
+        let mut guest = WebClientState::default();
+        guest.connect_remote().expect("guest remote transport");
+
+        let mut guest_in_game = false;
+        for _ in 0..400 {
+            for pkt in guest.take_net_packets() {
+                assert!(host.push_p2p_packet(1, pkt));
+            }
+            let _ = host.step(0.01);
+            for (peer_id, pkt) in host.drain_p2p_packets() {
+                assert_eq!(peer_id, 1);
+                guest.push_net_packet(pkt);
+            }
+            let _ = guest.step(0.01);
+            if guest.conn_state() == Some(ConnState::InGame) {
+                guest_in_game = true;
+                break;
+            }
+        }
+        assert!(guest_in_game, "WebRTC/Channel guest should reach InGame");
+
+        // Join CT on host and T on guest, then advance past round freeze.
+        host.exec_console("jointeam 2");
+        host.exec_console("joinclass 1");
+        guest.exec_console("jointeam 1");
+        guest.exec_console("joinclass 1");
+
+        let pump_both = |host: &mut WebClientState, guest: &mut WebClientState, frames: usize| {
+            for _ in 0..frames {
+                for pkt in guest.take_net_packets() {
+                    let _ = host.push_p2p_packet(1, pkt);
+                }
+                let _ = host.step(0.01);
+                for (_, pkt) in host.drain_p2p_packets() {
+                    guest.push_net_packet(pkt);
+                }
+                let _ = guest.step(0.01);
+            }
+        };
+
+        pump_both(&mut host, &mut guest, 120);
+        if let SessionMode::Local { game, .. } = &mut host.session {
+            let _ = game.console("mp_freezetime 0");
+            let _ = game.console("sv_restart 1");
+        }
+        pump_both(&mut host, &mut guest, 220);
+
+        let (start_pos, start_clip) = match &guest.session {
+            SessionMode::Remote { conn, .. } => (
+                conn.client_data().map_or(Vec3::ZERO, |d| d.origin),
+                conn.fx().hud.current_weapon.map_or(0, |w| w.clip),
+            ),
+            _ => panic!("guest not in Remote session"),
+        };
+
+        // Guest moves forward and fires semi-auto Glock shots; verify position & clip change.
+        guest.exec_console("+forward");
+        for _ in 0..3 {
+            guest.exec_console("+attack");
+            pump_both(&mut host, &mut guest, 15);
+            guest.exec_console("-attack");
+            pump_both(&mut host, &mut guest, 15);
+        }
+        guest.exec_console("-forward");
+        pump_both(&mut host, &mut guest, 20);
+
+        let (end_pos, end_clip) = match &guest.session {
+            SessionMode::Remote { conn, .. } => {
+                assert_eq!(conn.stats().parse_errors, 0);
+                (
+                    conn.client_data().map_or(Vec3::ZERO, |d| d.origin),
+                    conn.fx().hud.current_weapon.map_or(0, |w| w.clip),
+                )
+            }
+            _ => panic!("guest not in Remote session"),
+        };
+        let moved_xy = (end_pos - start_pos).truncate().length();
+        assert!(
+            moved_xy > 10.0,
+            "guest should move across P2P link (moved {moved_xy:.2} u)"
+        );
+        assert!(
+            end_clip < start_clip,
+            "guest shots should consume clip across P2P link ({start_clip} -> {end_clip})"
+        );
+
+        host.disconnect();
+        assert!(!host.is_p2p_host());
     }
 }

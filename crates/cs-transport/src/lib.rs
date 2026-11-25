@@ -13,7 +13,9 @@ mod udp;
 pub mod ws_native;
 pub mod ws_proto;
 
-pub use channel::{ChannelHandle, ChannelTransport};
+pub use channel::{
+    ChannelHandle, ChannelTransport, MAX_MULTI_PEER_SLOTS, MultiPeerChannel, MultiPeerHandle,
+};
 pub use loopback::{FaultStats, Faults, LoopbackEndpoint, LoopbackHub};
 pub use multi::{MultiTransport, PeerKind};
 #[cfg(not(target_arch = "wasm32"))]
