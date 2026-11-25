@@ -347,6 +347,14 @@ pub struct HudState {
     pub hud_texts: VecDeque<HudTextEntry>,
     pub allow_spec: bool,
     pub spec_health: Option<(u8, u8)>,
+    /// `HealthInfo` (build 10210): per-player health keyed by 1-based `player_id`.
+    pub player_health: BTreeMap<u8, i32>,
+    /// `Account` (build 10210): per-player money keyed by 1-based `player_id`.
+    pub player_money: BTreeMap<u8, i32>,
+    /// `ForceCam` (`mp_forcecamera`, `mp_forcechasecam`, `mp_fadetoblack`).
+    pub force_cam: Option<(u8, u8, u8)>,
+    /// Count of `ReqState` messages received.
+    pub req_state_count: u32,
     pub screen_fade: Option<ScreenFade>,
     pub screen_shake: Option<ScreenShake>,
     pub scenario: Option<ScenarioIcon>,
@@ -429,6 +437,10 @@ impl Default for HudState {
             hud_texts: VecDeque::new(),
             allow_spec: false,
             spec_health: None,
+            player_health: BTreeMap::new(),
+            player_money: BTreeMap::new(),
+            force_cam: None,
+            req_state_count: 0,
             screen_fade: None,
             screen_shake: None,
             scenario: None,
@@ -839,6 +851,22 @@ impl HudState {
             CsUserMsg::SpecHealth2 { health, target } => {
                 self.spec_health = Some((*health, *target));
             }
+            CsUserMsg::HealthInfo { player_id, health } => {
+                self.player_health.insert(*player_id, *health);
+            }
+            CsUserMsg::Account { player_id, amount } => {
+                self.player_money.insert(*player_id, *amount);
+            }
+            CsUserMsg::ReqState => {
+                self.req_state_count = self.req_state_count.wrapping_add(1);
+            }
+            CsUserMsg::ForceCam {
+                forcecam,
+                forcechasecam,
+                fadetoblack,
+            } => {
+                self.force_cam = Some((*forcecam, *forcechasecam, *fadetoblack));
+            }
             CsUserMsg::ScreenFade {
                 duration,
                 hold_time,
@@ -923,7 +951,6 @@ impl HudState {
             | CsUserMsg::GameMode(_)
             | CsUserMsg::Spectator { .. }
             | CsUserMsg::Hltv { .. }
-            | CsUserMsg::ForceCam { .. }
             | CsUserMsg::ADStop
             | CsUserMsg::ShadowIdx(_)
             | CsUserMsg::TaskTime { .. }
@@ -1973,5 +2000,46 @@ mod tests {
 
         h.handle(&um("ResetHUD", CsUserMsg::ResetHud), 12.0);
         assert!(h.radio_flashes.is_empty());
+    }
+
+    #[test]
+    fn health_info_account_req_state_and_force_cam_reduce() {
+        let mut h = HudState::default();
+        h.handle(
+            &um(
+                "HealthInfo",
+                CsUserMsg::HealthInfo {
+                    player_id: 2,
+                    health: 73,
+                },
+            ),
+            1.0,
+        );
+        h.handle(
+            &um(
+                "Account",
+                CsUserMsg::Account {
+                    player_id: 2,
+                    amount: 4250,
+                },
+            ),
+            1.0,
+        );
+        h.handle(&um("ReqState", CsUserMsg::ReqState), 1.0);
+        h.handle(
+            &um(
+                "ForceCam",
+                CsUserMsg::ForceCam {
+                    forcecam: 1,
+                    forcechasecam: 0,
+                    fadetoblack: 0,
+                },
+            ),
+            1.0,
+        );
+        assert_eq!(h.player_health.get(&2).copied(), Some(73));
+        assert_eq!(h.player_money.get(&2).copied(), Some(4250));
+        assert_eq!(h.req_state_count, 1);
+        assert_eq!(h.force_cam, Some((1, 0, 0)));
     }
 }

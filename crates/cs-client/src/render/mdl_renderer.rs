@@ -226,6 +226,8 @@ pub struct StudioInstance<'a> {
     pub flip_winding: bool,
     /// A studio model merged onto this one's bones (`EF_BONEMERGE`).
     pub attached_model: Option<&'a str>,
+    /// Team-colored X-Ray silhouette (`spec_xray 1`) rendered through walls in a second pass.
+    pub xray_color: Option<[f32; 3]>,
 }
 
 impl<'a> Default for StudioInstance<'a> {
@@ -253,6 +255,7 @@ impl<'a> Default for StudioInstance<'a> {
             blend: 1.0,
             flip_winding: false,
             attached_model: None,
+            xray_color: None,
         }
     }
 }
@@ -336,6 +339,7 @@ enum MdlPipelineKind {
     Opaque,
     Alpha,
     Additive,
+    XRay,
 }
 
 pub struct MdlRenderer {
@@ -346,6 +350,7 @@ pub struct MdlRenderer {
     opaque_pipeline: wgpu::RenderPipeline,
     alpha_pipeline: wgpu::RenderPipeline,
     additive_pipeline: wgpu::RenderPipeline,
+    xray_pipeline: wgpu::RenderPipeline,
     uniform_bgl: wgpu::BindGroupLayout,
     tex_bgl: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -436,6 +441,21 @@ pub struct PreparedMdlPass {
     draws: Vec<PreparedDraw>,
 }
 
+impl PreparedMdlPass {
+    /// Total prepared draw calls across all studio pipelines.
+    pub fn total_draws(&self) -> usize {
+        self.draws.len()
+    }
+
+    /// Number of wall-occluded X-Ray silhouette draw calls (`MdlPipelineKind::XRay`).
+    pub fn xray_draw_count(&self) -> usize {
+        self.draws
+            .iter()
+            .filter(|d| d.pipe_kind == MdlPipelineKind::XRay)
+            .count()
+    }
+}
+
 fn create_mdl_pipelines(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
@@ -443,6 +463,7 @@ fn create_mdl_pipelines(
     color_format: wgpu::TextureFormat,
     sample_count: u32,
 ) -> (
+    wgpu::RenderPipeline,
     wgpu::RenderPipeline,
     wgpu::RenderPipeline,
     wgpu::RenderPipeline,
@@ -455,7 +476,10 @@ fn create_mdl_pipelines(
         },
         alpha: wgpu::BlendComponent::OVER,
     });
-    let make_pipe = |label: &str, blend: Option<wgpu::BlendState>, depth_write: bool| {
+    let make_pipe = |label: &str,
+                     blend: Option<wgpu::BlendState>,
+                     depth_write: bool,
+                     depth_compare: wgpu::CompareFunction| {
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(label),
             layout: Some(layout),
@@ -493,7 +517,7 @@ fn create_mdl_pipelines(
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: Some(depth_write),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                depth_compare: Some(depth_compare),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -507,9 +531,20 @@ fn create_mdl_pipelines(
     };
 
     (
-        make_pipe("mdl_opaque", None, true),
-        make_pipe("mdl_alpha", Some(wgpu::BlendState::ALPHA_BLENDING), false),
-        make_pipe("mdl_additive", add_blend, false),
+        make_pipe("mdl_opaque", None, true, wgpu::CompareFunction::LessEqual),
+        make_pipe(
+            "mdl_alpha",
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+            false,
+            wgpu::CompareFunction::LessEqual,
+        ),
+        make_pipe("mdl_additive", add_blend, false, wgpu::CompareFunction::LessEqual),
+        make_pipe(
+            "mdl_xray",
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+            false,
+            wgpu::CompareFunction::Greater,
+        ),
     )
 }
 
@@ -608,7 +643,7 @@ impl MdlRenderer {
         });
 
         let msaa_samples = 1;
-        let (opaque_pipeline, alpha_pipeline, additive_pipeline) =
+        let (opaque_pipeline, alpha_pipeline, additive_pipeline, xray_pipeline) =
             create_mdl_pipelines(device, &shader, &pipeline_layout, color_format, msaa_samples);
 
         let filter_mode = TextureFilterMode::LinearMipmapLinear;
@@ -709,6 +744,7 @@ impl MdlRenderer {
             opaque_pipeline,
             alpha_pipeline,
             additive_pipeline,
+            xray_pipeline,
             uniform_bgl,
             tex_bgl,
             sampler,
@@ -741,7 +777,7 @@ impl MdlRenderer {
             return;
         }
         self.msaa_samples = samples;
-        let (opaque, alpha, additive) = create_mdl_pipelines(
+        let (opaque, alpha, additive, xray) = create_mdl_pipelines(
             device,
             &self.shader,
             &self.pipeline_layout,
@@ -751,6 +787,7 @@ impl MdlRenderer {
         self.opaque_pipeline = opaque;
         self.alpha_pipeline = alpha;
         self.additive_pipeline = additive;
+        self.xray_pipeline = xray;
         self.shadow_pipeline = create_shadow_pipeline(
             device,
             &self.shadow_shader,
@@ -1134,6 +1171,31 @@ impl MdlRenderer {
                                 pipe_kind,
                             });
                             uniform_slot += 1;
+
+                            if !shell_only
+                                && let Some(xray_rgb) = inst.xray_color
+                            {
+                                let xray_u = MdlUniforms {
+                                    render_color: [xray_rgb[0], xray_rgb[1], xray_rgb[2], 0.65],
+                                    flags_params: [6.0, 0.0, 0.0, 1.0],
+                                    ..u
+                                };
+                                let x_start = uniform_bytes.len();
+                                uniform_bytes.resize(x_start + self.uniform_stride as usize, 0);
+                                let x_raw = bytemuck::bytes_of(&xray_u);
+                                uniform_bytes[x_start..x_start + x_raw.len()]
+                                    .copy_from_slice(x_raw);
+
+                                draws.push(PreparedDraw {
+                                    model_key: m_key.to_string(),
+                                    tex_idx,
+                                    first_vertex,
+                                    vertex_count,
+                                    uniform_slot,
+                                    pipe_kind: MdlPipelineKind::XRay,
+                                });
+                                uniform_slot += 1;
+                            }
                         }
                     }
                 };
@@ -1262,7 +1324,16 @@ impl MdlRenderer {
         pass: &mut wgpu::RenderPass<'a>,
         prepared: &PreparedMdlPass,
     ) {
-        self.draw_filtered(pass, prepared, |k| k != MdlPipelineKind::Opaque);
+        self.draw_filtered(
+            pass,
+            prepared,
+            |k| matches!(k, MdlPipelineKind::Alpha | MdlPipelineKind::Additive),
+        );
+    }
+
+    /// Draw wall-occluded X-Ray player silhouettes (`CompareFunction::Greater`, no depth write).
+    pub fn draw_xray<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, prepared: &PreparedMdlPass) {
+        self.draw_filtered(pass, prepared, |k| k == MdlPipelineKind::XRay);
     }
 
     fn draw_filtered<'a>(
@@ -1289,6 +1360,7 @@ impl MdlRenderer {
                 MdlPipelineKind::Opaque => &self.opaque_pipeline,
                 MdlPipelineKind::Alpha => &self.alpha_pipeline,
                 MdlPipelineKind::Additive => &self.additive_pipeline,
+                MdlPipelineKind::XRay => &self.xray_pipeline,
             };
             pass.set_pipeline(pipe);
             let offset = d.uniform_slot * (self.uniform_stride as u32);

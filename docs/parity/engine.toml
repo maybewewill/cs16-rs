@@ -235,8 +235,8 @@ evidence = "crates/cs-engine/tests/frames.rs::update_rate_follows_userinfo, no_u
 
 [[item]]
 id = "newer_build_messages"
-status = "missing"
-evidence = "Known gap: HealthInfo, Account and ReqState, which the newer mp.dll of the original HLDS (build 10210) sends and ours does not (golden join diff 2026-11-22); our build number is 8684"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase11_all_remaining_usermsgs_roundtrip; crates/cs-clientcore/src/hud.rs::tests::health_info_account_req_state_and_force_cam_reduce; crates/cs-clientcore/tests/effects.rs::hud_state_after_golden_join; crates/cs-game/tests/phase14_task11.rs::health_info_and_account_never_leak_to_live_enemies_and_reach_observers_and_demo_replay; crates/cs-game/tests/hud.rs::usermsgs_registered_in_regamedll_order (HealthInfo, Account, ReqState decoded/encoded and reduced into HudState; cs-game emits HealthInfo/Account strictly to eligible observers and round .dem replays)"
 
 [[item]]
 id = "entities_in_sphere"

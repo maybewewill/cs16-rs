@@ -737,6 +737,7 @@ impl Renderer {
                     blend: vm.blend,
                     flip_winding: vm.flip_winding,
                     attached_model: vm.attached_model,
+                    xray_color: None,
                 };
                 let vm_params = MdlPassParams {
                     view_proj: vm_vp,
@@ -810,6 +811,7 @@ impl Renderer {
                             .attached
                             .and_then(|h| self.models.get(h))
                             .map(|e| e.name.as_str()),
+                        xray_color: d.xray_color,
                     })
                 };
                 let studio: Vec<StudioInstance<'_>> =
@@ -998,6 +1000,9 @@ impl Renderer {
                 }
                 if let Some(ref spr) = prepared_sprites {
                     self.sprites.draw(&mut pass, spr);
+                }
+                if let Some(ref studio) = prepared_scene_studio {
+                    self.mdl_scene.draw_xray(&mut pass, studio);
                 }
             }
         }

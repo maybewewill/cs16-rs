@@ -154,6 +154,8 @@ pub struct ViewInputs {
     pub sv_cheats: bool,
     pub sv_showimpacts: i32,
     pub sv_showhitboxes: bool,
+    /// Spectator / demo X-Ray (`spec_xray`), strictly gated in `ViewBuilder`.
+    pub spec_xray: bool,
 }
 
 impl Default for ViewInputs {
@@ -175,6 +177,7 @@ impl Default for ViewInputs {
             sv_cheats: false,
             sv_showimpacts: 0,
             sv_showhitboxes: false,
+            spec_xray: false,
         }
     }
 }
@@ -235,6 +238,12 @@ pub struct FrameView {
     pub custom_decals: HashMap<u8, CustomDecalInfo>,
     pub alive: bool,
     pub observer_mode: i32,
+    /// Observed target entity index (`cd.iuser2`), 0 when roaming or alive.
+    pub observed_target: u8,
+    /// Whether this frame was built from `DemoPlayer` (`.dem` playback).
+    pub is_demo: bool,
+    /// Active weapon short names per 1-based player entity index (`p_*.mdl` -> e.g. `"ak47"`).
+    pub player_weapons: BTreeMap<u8, String>,
     pub stats: ViewStats,
 }
 
@@ -309,6 +318,96 @@ impl Default for ViewBuilder {
 
 const FL_SPECTATOR: u32 = 1 << 12;
 const WEAPON_SUIT_BIT: u32 = 1 << 31;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SpecXrayPolicy {
+    Disabled,
+    AllTeams,
+    TeamOnly(String),
+}
+
+impl SpecXrayPolicy {
+    fn allows(&self, team: &str, team_id: i16) -> bool {
+        let norm = normalize_player_team(team, team_id);
+        match self {
+            Self::Disabled => false,
+            Self::AllTeams => matches!(norm, Some("CT" | "TERRORIST")),
+            Self::TeamOnly(own) => norm.is_some_and(|t| t == own),
+        }
+    }
+}
+
+fn normalize_player_team(team: &str, team_id: i16) -> Option<&'static str> {
+    if team.eq_ignore_ascii_case("CT") {
+        Some("CT")
+    } else if team.eq_ignore_ascii_case("TERRORIST") {
+        Some("TERRORIST")
+    } else if team.eq_ignore_ascii_case("SPECTATOR") {
+        Some("SPECTATOR")
+    } else if !team.is_empty() {
+        None
+    } else {
+        match team_id {
+            1 => Some("TERRORIST"),
+            2 => Some("CT"),
+            3 => Some("SPECTATOR"),
+            _ => None,
+        }
+    }
+}
+
+fn evaluate_spec_xray_policy(
+    enabled: bool,
+    is_demo: bool,
+    alive: bool,
+    observer_mode: i32,
+    local_number: Option<u16>,
+    fx: &ClientEffects,
+) -> SpecXrayPolicy {
+    if !enabled {
+        return SpecXrayPolicy::Disabled;
+    }
+    if is_demo {
+        return SpecXrayPolicy::AllTeams;
+    }
+    // Strict anti-cheat gate: NEVER render X-Ray while local player is alive or not observing.
+    if alive || observer_mode == 0 {
+        return SpecXrayPolicy::Disabled;
+    }
+    let Some(local_id) = local_number.and_then(|n| u8::try_from(n).ok()) else {
+        return SpecXrayPolicy::Disabled;
+    };
+    let local_team = fx
+        .hud
+        .players
+        .get(&local_id)
+        .and_then(|s| normalize_player_team(&s.team, s.team_id));
+    match local_team {
+        Some("SPECTATOR") => SpecXrayPolicy::AllTeams,
+        Some(team @ ("CT" | "TERRORIST")) => {
+            let (forcecam, forcechasecam, fadetoblack) = fx.hud.force_cam.unwrap_or((0, 0, 0));
+            if fadetoblack != 0 {
+                SpecXrayPolicy::Disabled
+            } else if forcecam != 0 || forcechasecam != 0 {
+                SpecXrayPolicy::TeamOnly(team.to_string())
+            } else {
+                SpecXrayPolicy::AllTeams
+            }
+        }
+        _ => SpecXrayPolicy::Disabled,
+    }
+}
+
+fn weapon_short_from_pmodel(path: &str) -> Option<String> {
+    let lower = path.to_ascii_lowercase();
+    let file = lower.rsplit('/').next()?;
+    let stem = file.strip_prefix("p_")?.strip_suffix(".mdl")?;
+    let mapped = match stem {
+        "mp5" => "mp5navy",
+        other => other,
+    };
+    Some(mapped.to_string())
+}
 
 /// Resolve the forced player studio model path when `cl_minmodels != 0` from `TeamInfo` /
 /// `ScoreAttrib` VIP bit and `cl_min_ct` / `cl_min_t` indices (`client.dll` `0x10105f08` table).
@@ -551,7 +650,7 @@ impl ViewBuilder {
             standing_on: prediction.standing_on(),
         });
         let fx = conn.fx_mut();
-        self.build_parts_with_cvars(
+        self.build_parts_with_is_demo(
             &precache,
             fx,
             &userinfos,
@@ -563,6 +662,7 @@ impl ViewBuilder {
             view_angles,
             inputs,
             Some(&cvars),
+            false,
         )
     }
 
@@ -583,7 +683,7 @@ impl ViewBuilder {
             standing_on: None,
         });
         let fx = player.fx_mut();
-        self.build_parts_with_cvars(
+        self.build_parts_with_is_demo(
             &precache,
             fx,
             &userinfos,
@@ -595,6 +695,7 @@ impl ViewBuilder {
             view_angles,
             inputs,
             None,
+            true,
         )
     }
 
@@ -612,7 +713,7 @@ impl ViewBuilder {
         view_angles: Vec3,
         inputs: &ViewInputs,
     ) -> (FrameView, Option<ModelRegistry>) {
-        self.build_parts_with_cvars(
+        self.build_parts_with_is_demo(
             precache,
             fx,
             userinfos,
@@ -624,6 +725,7 @@ impl ViewBuilder {
             view_angles,
             inputs,
             None,
+            false,
         )
     }
 
@@ -641,6 +743,38 @@ impl ViewBuilder {
         view_angles: Vec3,
         inputs: &ViewInputs,
         cvars: Option<&ClientCvars>,
+    ) -> (FrameView, Option<ModelRegistry>) {
+        self.build_parts_with_is_demo(
+            precache,
+            fx,
+            userinfos,
+            cd,
+            slot,
+            prediction,
+            emitted,
+            fired,
+            view_angles,
+            inputs,
+            cvars,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_parts_with_is_demo(
+        &mut self,
+        precache: &PrecacheTables,
+        fx: &mut ClientEffects,
+        userinfos: &BTreeMap<u8, String>,
+        cd: Option<cs_proto48::delta::GoldSrcClientData>,
+        slot: Option<u8>,
+        prediction: Option<&Prediction>,
+        emitted: cs_clientcore::interp::EmitResult,
+        fired: Vec<FiredEvent>,
+        view_angles: Vec3,
+        inputs: &ViewInputs,
+        cvars: Option<&ClientCvars>,
+        is_demo: bool,
     ) -> (FrameView, Option<ModelRegistry>) {
         let now = inputs.now;
         let mut registry_changed = self.ensure_registry(precache);
@@ -783,10 +917,34 @@ impl ViewBuilder {
         }
 
         let mut shadow_origins: Vec<Vec3> = Vec::new();
+        let mut player_weapons: BTreeMap<u8, String> = BTreeMap::new();
+        let observed_target = cd
+            .as_ref()
+            .map_or(0, |c| u8::try_from(c.iuser2.max(0)).unwrap_or(0));
+        let xray_enabled = inputs.spec_xray || cvars.is_some_and(|c| c.float("spec_xray") != 0.0);
+        let xray_policy = evaluate_spec_xray_policy(
+            xray_enabled,
+            is_demo,
+            alive,
+            observer_mode,
+            local_number,
+            fx,
+        );
         // Entity loop: build RenderEntities + collect entity EF_* lights & world positions.
         let mut entity_positions: HashMap<u16, Vec3> = HashMap::with_capacity(emitted.entities.len());
         for e in &emitted.entities {
             entity_positions.insert(e.number, e.origin);
+            if e.kind == EntityKind::Player
+                && let Some(pid) = u8::try_from(e.number).ok().filter(|&n| (1..=32).contains(&n))
+                && e.state.weaponmodel != 0
+                && let Some(wname) = self
+                    .models
+                    .resolve(i32::from(e.state.weaponmodel))
+                    .and_then(|h| self.models.get(h))
+                    .and_then(|m| weapon_short_from_pmodel(&m.name))
+            {
+                player_weapons.insert(pid, wname);
+            }
             if e.kind == EntityKind::Beam {
                 self.push_beam_entity(e, now);
                 continue;
@@ -860,13 +1018,27 @@ impl ViewBuilder {
                     &cs_clientcore::tempents::ParticleEffect::Flicker { position: e.origin },
                 );
             }
-            if let Some(r) = self.render_entity(e, &player_models, dt, time) {
+            if let Some(mut r) = self.render_entity(e, &player_models, dt, time) {
                 match e.model {
                     CoreModelKind::Brush => stats.brush += 1,
                     CoreModelKind::Studio => {
                         stats.studio += 1;
                         if is_shadow_eligible(e, &r, &self.models, &fx.hud.players) {
                             shadow_origins.push(e.origin);
+                        }
+                        if r.player
+                            && r.renderfx != RENDERFX_DEAD_PLAYER
+                            && (r.effects & EF_NODRAW) == 0
+                            && let Some(pid) = u8::try_from(e.number).ok()
+                            && let Some(score) = fx.hud.players.get(&pid)
+                            && (score.attrib & 1) == 0
+                            && xray_policy.allows(&score.team, score.team_id)
+                        {
+                            r.xray_color = match normalize_player_team(&score.team, score.team_id) {
+                                Some("CT") => Some([0.25, 0.55, 1.0]),
+                                Some("TERRORIST") => Some([1.0, 0.35, 0.20]),
+                                _ => None,
+                            };
                         }
                     }
                     CoreModelKind::Sprite => stats.sprites += 1,
@@ -1065,6 +1237,9 @@ impl ViewBuilder {
                 custom_decals,
                 alive,
                 observer_mode,
+                observed_target,
+                is_demo,
+                player_weapons,
                 stats,
             },
             registry_changed.then(|| self.models.clone()),

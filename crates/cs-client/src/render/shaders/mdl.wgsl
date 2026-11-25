@@ -92,6 +92,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         return vec4<f32>(shell_rgb, u.render_color.a);
     }
 
+    if ent_mode == 6 {
+        let view_dir = normalize(u.camera_pos.xyz - in.world_pos);
+        let rim = pow(clamp(1.0 - abs(dot(normalize(in.normal), view_dir)), 0.0, 1.0), 1.35);
+        let xray_rgb = u.render_color.rgb * (0.45 + 0.85 * rim);
+        let xray_alpha = clamp(u.render_color.a * (0.40 + 0.60 * rim), 0.0, 1.0);
+        return vec4<f32>(xray_rgb, xray_alpha);
+    }
+
     let albedo = textureSample(t_diffuse, s_diffuse, in.uv);
     if (u.light_color.a > 0.5 || ent_mode == 3) && albedo.a < 0.5 {
         discard;

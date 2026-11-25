@@ -269,6 +269,9 @@ pub struct RenderEntity {
     pub gait: Option<(i32, f32)>,
     pub prev_sequence: Option<(i32, f32, f32)>,
     pub scroll_speed: f32,
+    /// Team-colored X-Ray silhouette RGB (`spec_xray 1`, strict spectator/demo gate enforced by
+    /// `ViewBuilder`). `None` suppresses the second occluded pass.
+    pub xray_color: Option<[f32; 3]>,
 }
 
 impl RenderEntity {
@@ -300,6 +303,7 @@ impl RenderEntity {
             gait: None,
             prev_sequence: None,
             scroll_speed: 0.0,
+            xray_color: None,
         }
     }
 }
@@ -828,6 +832,7 @@ pub struct StudioDraw {
     pub distance_sq: f32,
     pub rank: u8,
     pub attached: Option<ModelHandle>,
+    pub xray_color: Option<[f32; 3]>,
 }
 
 /// A sprite entity ready to draw.
@@ -958,6 +963,7 @@ pub fn build_draw_lists_tracked(
                 distance_sq,
                 rank,
                 attached: e.attached,
+                xray_color: e.xray_color,
             }),
             ModelKind::Sprite => lists.sprites.push(SpriteDraw {
                 model: e.model,

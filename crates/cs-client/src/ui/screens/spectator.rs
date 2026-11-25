@@ -1,13 +1,17 @@
 //! `.res`-driven CS 1.6 Spectator letterbox & bottom control bar
 //! (`Resource/UI/Spectator.res`, `BottomSpectator.res`, `spectatormenu.txt`, `ClientScheme.res`).
 
+use std::collections::BTreeMap;
+
 use cs_assets::scheme::LocalizationTable;
 use cs_assets::vgui_res::TextAlignment;
 use cs_assets::vgui_scripts::{CommandMenuAction, CommandMenuItem, CommandMenuTree};
+use cs_clientcore::hud::HudState;
 use cs_cvar::{CVarRegistry, EngineAction};
 use cs_vfs::Vfs;
 use egui::{Color32, Pos2, Rect, Stroke, Vec2};
 
+use crate::ui::hud::HudSprites;
 use crate::ui::vgui2::controls::draw_vgui_image_panel;
 use crate::ui::vgui2::font_atlas::VguiTextDrawOpts;
 use crate::ui::vgui2::runtime::{VguiRuntime, scheme_color_or};
@@ -54,6 +58,118 @@ impl SpectatorMode {
     }
 }
 
+/// One player card in the HLTV-style CT/T spectator sidebar (`spec_hud_bars 1`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpecSidebarPlayer {
+    pub player_id: u8,
+    pub slot_key: u8,
+    pub name: String,
+    pub team: String,
+    pub alive: bool,
+    pub health: i32,
+    pub money: Option<i32>,
+    pub armor: Option<i16>,
+    pub has_helmet: bool,
+    pub has_defuser: bool,
+    pub has_c4: bool,
+    pub is_vip: bool,
+    pub weapon: Option<String>,
+    pub frags: i16,
+    pub deaths: i16,
+    pub observed: bool,
+}
+
+/// Build CT and Terrorist sidebar player entries from `HudState` and entity weapon models.
+pub fn collect_spec_sidebar_players(
+    hud: &HudState,
+    names: &BTreeMap<u8, String>,
+    player_weapons: &BTreeMap<u8, String>,
+    observed_target: u8,
+) -> Vec<SpecSidebarPlayer> {
+    let mut ct = Vec::new();
+    let mut t = Vec::new();
+    for (&player_id, score) in &hud.players {
+        let team = if score.team.eq_ignore_ascii_case("CT") {
+            "CT"
+        } else if score.team.eq_ignore_ascii_case("TERRORIST") {
+            "TERRORIST"
+        } else if !score.team.is_empty() {
+            continue;
+        } else if score.team_id == 2 {
+            "CT"
+        } else if score.team_id == 1 {
+            "TERRORIST"
+        } else {
+            continue;
+        };
+        let slot0 = player_id.saturating_sub(1);
+        let name = names
+            .get(&slot0)
+            .cloned()
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| format!("Player {player_id}"));
+        let alive = (score.attrib & 1) == 0;
+        let has_c4 = (score.attrib & 2) != 0;
+        let is_vip = (score.attrib & 4) != 0;
+        let observed = observed_target != 0 && observed_target == player_id;
+        let health = if !alive {
+            0
+        } else if let Some(&hp) = hud.player_health.get(&player_id) {
+            hp.max(0)
+        } else if observed && let Some((hp, _)) = hud.spec_health {
+            i32::from(hp)
+        } else {
+            100
+        };
+        let money = hud.player_money.get(&player_id).copied();
+        let (armor, has_helmet, has_defuser) = if observed {
+            (
+                (hud.armor > 0).then_some(hud.armor),
+                hud.armor > 0 && hud.armor_type >= 1,
+                (hud.item_status & 2) != 0,
+            )
+        } else {
+            (None, false, false)
+        };
+        let weapon = player_weapons.get(&player_id).cloned();
+        let entry = SpecSidebarPlayer {
+            player_id,
+            slot_key: 0,
+            name,
+            team: team.to_string(),
+            alive,
+            health,
+            money,
+            armor,
+            has_helmet,
+            has_defuser,
+            has_c4,
+            is_vip,
+            weapon,
+            frags: score.frags,
+            deaths: score.deaths,
+            observed,
+        };
+        if team == "CT" {
+            ct.push(entry);
+        } else {
+            t.push(entry);
+        }
+    }
+    let assign_keys = |list: &mut [SpecSidebarPlayer], start: usize| {
+        for (idx, item) in list.iter_mut().enumerate() {
+            let num = start + idx + 1;
+            item.slot_key = if num == 10 { 0 } else { (num % 10) as u8 };
+        }
+    };
+    let ct_len = ct.len();
+    assign_keys(&mut ct, 0);
+    assign_keys(&mut t, ct_len);
+    ct.extend(t);
+    ct
+}
+
+#[derive(Default)]
 pub struct SpectatorRenderCtx<'a> {
     pub vfs: Option<&'a Vfs>,
     pub loc: Option<&'a LocalizationTable>,
@@ -62,6 +178,10 @@ pub struct SpectatorRenderCtx<'a> {
     pub round_timer_secs: u32,
     pub players: &'a [(u8, String)],
     pub spec_health: Option<(u8, u8)>,
+    pub sidebar_players: &'a [SpecSidebarPlayer],
+    pub hud_sprites: Option<&'a HudSprites>,
+    /// Skip the top/bottom letterbox bars (e.g. POV `.dem` playback with `spec_hud_bars 1`).
+    pub suppress_letterbox: bool,
 }
 
 pub struct SpectatorVguiUi {
@@ -118,6 +238,33 @@ impl SpectatorVguiUi {
             Pos2::new(screen.left(), screen.bottom() - bar_h),
             Vec2::new(screen.width(), bar_h),
         );
+
+        if cvars.get_bool("spec_hud_bars") && !s.sidebar_players.is_empty() {
+            let side_top = if s.suppress_letterbox {
+                screen.top() + (72.0 * sy).round()
+            } else {
+                top_rect.bottom() + (10.0 * sy).round()
+            };
+            let side_bottom = if s.suppress_letterbox {
+                screen.bottom() - (72.0 * sy).round()
+            } else {
+                bot_rect.top() - (10.0 * sy).round()
+            };
+            draw_spec_hud_bars(
+                ctx,
+                screen,
+                side_top,
+                side_bottom,
+                sy,
+                s.sidebar_players,
+                s.hud_sprites,
+                &mut actions,
+            );
+        }
+
+        if s.suppress_letterbox {
+            return actions;
+        }
 
         let painter = ctx.layer_painter(egui::LayerId::new(
             egui::Order::Middle,
@@ -548,6 +695,187 @@ impl SpectatorVguiUi {
 
         actions
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_spec_hud_bars(
+    ctx: &egui::Context,
+    screen: Rect,
+    top_y: f32,
+    bottom_y: f32,
+    sy: f32,
+    players: &[SpecSidebarPlayer],
+    sprites: Option<&HudSprites>,
+    actions: &mut Vec<EngineAction>,
+) {
+    let ct: Vec<&SpecSidebarPlayer> = players.iter().filter(|p| p.team == "CT").collect();
+    let t: Vec<&SpecSidebarPlayer> = players.iter().filter(|p| p.team == "TERRORIST").collect();
+    let max_cards = ((bottom_y - top_y) / (38.0 * sy)).floor().max(1.0) as usize;
+    let card_w = (192.0 * sy).round().clamp(150.0, 260.0);
+    let card_h = (34.0 * sy).round().clamp(28.0, 46.0);
+    let gap = (4.0 * sy).round().max(2.0);
+    let margin_x = (8.0 * sy).round().max(4.0);
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Middle,
+        egui::Id::unique("cs16_spec_hud_bars"),
+    ));
+    let font_sm = egui::FontId::proportional((11.0 * sy).clamp(10.0, 15.0));
+    let font_xs = egui::FontId::monospace((10.0 * sy).clamp(9.0, 13.0));
+
+    let mut draw_team_column = |list: &[&SpecSidebarPlayer], left_x: f32, is_ct: bool| {
+        let accent = if is_ct {
+            Color32::from_rgb(64, 144, 248)
+        } else {
+            Color32::from_rgb(235, 92, 52)
+        };
+        let fill_alive = if is_ct {
+            Color32::from_rgba_unmultiplied(18, 28, 44, 210)
+        } else {
+            Color32::from_rgba_unmultiplied(44, 22, 18, 210)
+        };
+        let fill_dead = Color32::from_rgba_unmultiplied(16, 16, 18, 150);
+
+        for (i, p) in list.iter().take(max_cards).enumerate() {
+            let y = top_y + (i as f32) * (card_h + gap);
+            let rect = Rect::from_min_size(Pos2::new(left_x, y), Vec2::new(card_w, card_h));
+            let bg = if p.alive { fill_alive } else { fill_dead };
+            painter.rect_filled(rect, 2.0, bg);
+
+            // Proportional HP fill bar across bottom half of alive card.
+            if p.alive {
+                let hp_frac = (p.health as f32 / 100.0).clamp(0.0, 1.0);
+                let hp_w = rect.width() * hp_frac;
+                let hp_rect = Rect::from_min_size(
+                    Pos2::new(rect.left(), rect.bottom() - (4.0 * sy).max(3.0)),
+                    Vec2::new(hp_w, (4.0 * sy).max(3.0)),
+                );
+                let hp_col = if p.health > 50 {
+                    accent
+                } else if p.health > 20 {
+                    Color32::from_rgb(235, 185, 50)
+                } else {
+                    Color32::from_rgb(225, 55, 45)
+                };
+                painter.rect_filled(hp_rect, 0.0, hp_col);
+            }
+
+            let border = if p.observed {
+                Stroke::new(2.0, Color32::from_rgb(255, 200, 60))
+            } else if p.alive {
+                Stroke::new(1.0, Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 140))
+            } else {
+                Stroke::new(1.0, Color32::from_rgba_unmultiplied(90, 90, 90, 100))
+            };
+            painter.rect_stroke(rect, 2.0, border, egui::StrokeKind::Inside);
+
+            let text_col = if p.alive {
+                Color32::from_rgb(240, 240, 240)
+            } else {
+                Color32::from_rgb(140, 140, 140)
+            };
+            let hdr_name: String = p.name.chars().take(15).collect();
+            let top_txt = format!("[{}] {}", p.slot_key, hdr_name);
+            painter.text(
+                Pos2::new(rect.left() + 5.0, rect.top() + 3.0),
+                egui::Align2::LEFT_TOP,
+                top_txt,
+                font_sm.clone(),
+                text_col,
+            );
+            let kd_txt = format!("{} / {}", p.frags, p.deaths);
+            painter.text(
+                Pos2::new(rect.right() - 5.0, rect.top() + 3.0),
+                egui::Align2::RIGHT_TOP,
+                kd_txt,
+                font_xs.clone(),
+                Color32::from_rgb(200, 200, 200),
+            );
+
+            // Row 2: HP, $money, armor/helmet/defuser/C4 badges, primary weapon silhouette.
+            let row2_y = rect.top() + (16.0 * sy).round();
+            let hp_txt = if p.alive {
+                format!("{} HP", p.health)
+            } else {
+                "DEAD".to_string()
+            };
+            painter.text(
+                Pos2::new(rect.left() + 5.0, row2_y),
+                egui::Align2::LEFT_TOP,
+                hp_txt,
+                font_xs.clone(),
+                if p.alive { accent } else { Color32::from_rgb(130, 130, 130) },
+            );
+
+            let mut badge_x = rect.left() + (52.0 * sy).round();
+            if let Some(money) = p.money {
+                painter.text(
+                    Pos2::new(badge_x, row2_y),
+                    egui::Align2::LEFT_TOP,
+                    format!("${money}"),
+                    font_xs.clone(),
+                    Color32::from_rgb(125, 220, 115),
+                );
+                badge_x += (44.0 * sy).round();
+            }
+
+            let mut badges = Vec::new();
+            if p.armor.is_some_and(|a| a > 0) {
+                badges.push(if p.has_helmet { "A+H" } else { "A" });
+            }
+            if p.has_defuser {
+                badges.push("DEF");
+            }
+            if p.has_c4 {
+                badges.push("C4");
+            }
+            if p.is_vip {
+                badges.push("VIP");
+            }
+            if !badges.is_empty() {
+                let bstr = badges.join(" ");
+                painter.text(
+                    Pos2::new(badge_x, row2_y),
+                    egui::Align2::LEFT_TOP,
+                    bstr,
+                    font_xs.clone(),
+                    Color32::from_rgb(255, 196, 64),
+                );
+            }
+
+            if let Some(wpn) = &p.weapon {
+                let mut drew_spr = false;
+                if let Some(sp) = sprites {
+                    let icon_scale = (0.28 * sy).clamp(0.22, 0.42);
+                    let pos = Pos2::new(rect.right() - (46.0 * sy).round(), row2_y - 2.0);
+                    if sp.draw_weapon_card(&painter, wpn, pos, icon_scale, text_col).is_some() {
+                        drew_spr = true;
+                    }
+                }
+                if !drew_spr {
+                    painter.text(
+                        Pos2::new(rect.right() - 5.0, row2_y),
+                        egui::Align2::RIGHT_TOP,
+                        wpn.to_ascii_uppercase(),
+                        font_xs.clone(),
+                        text_col,
+                    );
+                }
+            }
+
+            egui::Area::new(egui::Id::unique(("cs16_spec_card", p.player_id)))
+                .order(egui::Order::Middle)
+                .fixed_pos(rect.min)
+                .show(ctx, |ui| {
+                    let (_, resp) = ui.allocate_exact_size(rect.size(), egui::Sense::click());
+                    if resp.clicked() {
+                        actions.push(EngineAction::Forward(vec!["follow".into(), p.name.clone()]));
+                    }
+                });
+        }
+    };
+
+    draw_team_column(&ct, screen.left() + margin_x, true);
+    draw_team_column(&t, screen.right() - card_w - margin_x, false);
 }
 
 struct FlatSpecItem {

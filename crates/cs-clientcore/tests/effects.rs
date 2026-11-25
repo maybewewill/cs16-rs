@@ -168,10 +168,11 @@ fn hud_state_after_golden_join() {
     // The registered messages arrive by number, the first being the engine's own `VoiceMask`.
     assert_eq!(hud.user_messages[&64].name, "VoiceMask");
     assert!(hud.user_messages.values().any(|m| m.name == "Health"));
-    // Messages with no model of their own are kept raw for mods: `Account` carries the
-    // money as the stock game sends it.
-    assert!(hud.unknown_messages.iter().any(|m| m.name == "Account"));
-    assert!(hud.unknown_total >= hud.unknown_messages.len() as u64);
+    // Build 10210 newer messages (`Account`, `HealthInfo`, `ReqState`) now reduce directly into
+    // `HudState` instead of falling through to `unknown_messages`.
+    assert_eq!(hud.player_health.get(&1).copied(), Some(100));
+    assert_eq!(hud.player_money.get(&1).copied(), Some(800));
+    assert!(hud.req_state_count > 0);
     // The damage message every spawn sends, with the spawn origin.
     assert_eq!(hud.damage.unwrap().origin.x, 448.0);
 }

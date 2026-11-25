@@ -57,8 +57,8 @@ use cs_client::ui::scoreboard::{ScoreRow, ScoreboardRenderCtx, show_scoreboard_v
 use cs_client::ui::screens::{
     BuyClassTeamMenuUi, BuyMenuRenderCtx, CommandMenuUi, DemoPlayerUi, DemoUiAction,
     DialogRenderCtx, DisconnectErrorDialog, LoadingDialogUi, MotdRenderCtx, MotdVguiUi,
-    PlayerListDialogUi, ServerPasswordUi, SpectatorMode, SpectatorRenderCtx, SpectatorVguiUi,
-    VguiMenuKind,
+    PlayerListDialogUi, ServerPasswordUi, SpecSidebarPlayer, SpectatorMode, SpectatorRenderCtx,
+    SpectatorVguiUi, VguiMenuKind, collect_spec_sidebar_players,
 };
 use cs_client::ui::server_menu::{
     draw_styled_text_menu_vgui, draw_text_menu_vgui, menu_key_enabled,
@@ -2252,6 +2252,7 @@ impl Cs16App {
                 sv_cheats: self.cvars.get_bool("sv_cheats"),
                 sv_showimpacts: self.cvars.get_i32("sv_showimpacts"),
                 sv_showhitboxes: self.cvars.get_bool("sv_showhitboxes"),
+                spec_xray: self.cvars.get_bool("spec_xray"),
             };
             let angles = Vec3::new(
                 finite_or(self.camera.pitch_deg, 0.0),
@@ -2625,7 +2626,27 @@ impl Cs16App {
                     s.eq_ignore_ascii_case("spectator") || s.eq_ignore_ascii_case("spectator:menu")
                 })
                 && self.startup_ui_applied;
-            if in_game && !modal_menu_open && ((!alive && observer_mode != 0) || forced_spectator) {
+            let show_spec_gui = (!alive && observer_mode != 0) || forced_spectator;
+            let show_spec_bars = self.cvars.get_bool("spec_hud_bars")
+                && (self.session.is_demo() || show_spec_gui);
+            if in_game && !modal_menu_open && (show_spec_gui || show_spec_bars) {
+                let empty_weapons = std::collections::BTreeMap::new();
+                let player_weapons = view.as_ref().map_or(&empty_weapons, |v| &v.player_weapons);
+                let observed_target = view.as_ref().map_or(0, |v| v.observed_target);
+                let sidebar_players: Vec<SpecSidebarPlayer> = if show_spec_bars {
+                    self.session
+                        .with_hud(|h| {
+                            collect_spec_sidebar_players(
+                                h,
+                                &names,
+                                player_weapons,
+                                observed_target,
+                            )
+                        })
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
                 let spec_ctx = SpectatorRenderCtx {
                     vfs: self.vfs.as_ref(),
                     loc: self.loc.as_ref(),
@@ -2634,6 +2655,9 @@ impl Cs16App {
                     round_timer_secs: round_secs_left,
                     players: &spec_players,
                     spec_health: spec_hp,
+                    sidebar_players: &sidebar_players,
+                    hud_sprites: rt.hud_sprites.as_ref(),
+                    suppress_letterbox: !show_spec_gui,
                 };
                 let spec_actions = self.spectator_ui.show(
                     &rt.egui_ctx,

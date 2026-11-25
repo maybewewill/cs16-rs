@@ -51,6 +51,8 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     reg.register("spec_drawcone", "1", arch, "Draw spectator overview view cones (0 or 1)");
     reg.register("spec_drawnames", "1", arch, "Draw player names in spectator overview (0 or 1)");
     reg.register("spec_pip", "0", arch, "Spectator picture-in-picture mode (0..3)");
+    reg.register("spec_xray", "0", arch, "Show team-colored X-Ray player silhouettes through walls in spectator or demo playback (0 or 1)");
+    reg.register("spec_hud_bars", "0", arch, "Show HLTV-style CT/T team sidebar cards in spectator or demo playback (0 or 1)");
     reg.register("cl_language", "english", arch, "Client localization language (english, russian, german, ...)");
     reg.register("violence_hblood", "1", arch, "Show human blood effects (0 or 1)");
     reg.register("violence_ablood", "1", arch, "Show alien blood effects (0 or 1)");

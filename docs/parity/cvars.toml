@@ -3602,3 +3602,13 @@ evidence = "crates/cs-cvar/src/lib.rs; crates/cs-game/tests/phase14_task10.rs::k
 id = "reset"
 status = "tested"
 evidence = "crates/cs-cvar/src/lib.rs; crates/cs-game/tests/phase14_task10.rs::kz_checkpoints_and_map_timer_workflow"
+
+[[item]]
+id = "spec_xray"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/tests/phase14_task11.rs::spec_xray_blocked_when_alive_and_emits_team_colors_in_spec_and_demo"
+
+[[item]]
+id = "spec_hud_bars"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/tests/phase14_task11.rs::spec_hud_bars_renders_ct_and_t_cards_from_hud_state"

@@ -978,6 +978,15 @@ impl<G: GameDll> Server<G> {
     /// past the `spawn` answer), and the buffer is emptied. The `REHLDS_FIXES` build also reaches
     /// a client that has been in the game before; not reproduced.
     pub(crate) fn flush_reliable_datagram(&mut self) {
+        if !self.outbox.replay_reliable.is_empty() {
+            let replay_bytes = std::mem::replace(&mut self.outbox.replay_reliable, MsgWriter::new());
+            if self.replay_capture && self.replay_svc_packets.len() < 1024 {
+                let mut pkt = MsgWriter::with_capacity(replay_bytes.len() + 8);
+                cs_proto48::messages::write_svc_time(&mut pkt, self.sv_time as f32);
+                pkt.write_bytes(replay_bytes.as_slice());
+                self.replay_svc_packets.push(pkt.into_bytes());
+            }
+        }
         if self.outbox.reliable_all.is_empty() {
             return;
         }

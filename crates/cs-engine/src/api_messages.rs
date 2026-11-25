@@ -245,6 +245,20 @@ impl EngineApi<'_> {
         true
     }
 
+    /// Encodes `msg` with the id the game registered for its name and records it solely into
+    /// the server's round `.dem` replay stream (never sent to live client connections).
+    pub fn send_replay_usermsg(&mut self, msg: &CsUserMsg) -> bool {
+        let mut w = MsgWriter::new();
+        if !write_svc_usermsg(&mut w, self.usermsgs, msg) {
+            return false;
+        }
+        let bytes = w.as_slice();
+        if !bytes.is_empty() && bytes.len() <= MAX_SEND_BYTES {
+            self.outbox.push_replay_reliable(bytes);
+        }
+        true
+    }
+
     /// Sends a pre-encoded custom user message by registered name.
     pub fn send_raw_usermsg(&mut self, dest: MsgDest, name: &str, payload: &[u8]) -> bool {
         let mut w = MsgWriter::new();

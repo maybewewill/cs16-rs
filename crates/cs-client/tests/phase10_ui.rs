@@ -895,6 +895,7 @@ fn ui_screen_spectator_and_bottom_bar_cycles_modes_and_paints_res() {
                 round_timer_secs: 75,
                 players: &players,
                 spec_health: Some((82, 1)),
+                ..Default::default()
             },
         );
         assert!(acts.is_empty());

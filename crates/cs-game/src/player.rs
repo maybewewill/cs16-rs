@@ -1264,6 +1264,7 @@ pub(crate) fn spawn(
             p.money = 16_000;
         }
         messages::money(eng, slot, 16_000);
+        messages::broadcast_account(g, eng, slot, 16_000);
     }
     if g.rules.knife_round == crate::rules::KnifeRoundState::Active {
         apply_knife_round_loadout(g, eng, slot);
@@ -1293,6 +1294,10 @@ pub(crate) fn spawn(
             },
         );
         messages::score_info(eng, id.index, p);
+        let money_now = p.money;
+        let hp_now = eng.ent(id).map_or(100, |v| (v.health as i32).max(0));
+        messages::broadcast_health_info(g, eng, slot, hp_now);
+        messages::broadcast_account(g, eng, slot, money_now);
     }
     // A name asked for while dead is taken at the spawn.
     crate::chat::apply_pending_name(g, eng, slot);
@@ -1310,6 +1315,7 @@ pub(crate) fn apply_knife_round_loadout(g: &mut GameState, eng: &mut EngineApi<'
         p.money = 0;
     }
     messages::money(eng, slot, 0);
+    messages::broadcast_account(g, eng, slot, 0);
     crate::buy::give_armor_item(g, eng, slot, crate::buy::ArmorItem::Kevlar);
 }
 
@@ -2851,6 +2857,7 @@ pub(crate) fn disappear(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
         v.flags &= !FL_ONGROUND;
     }
     messages::health(eng, slot, 0);
+    messages::broadcast_health_info(g, eng, slot, 0);
     messages::cur_weapon_dead(eng, slot);
     // `SendFOV(0)`.
     messages::set_fov(eng, slot, 0);
@@ -2959,6 +2966,7 @@ fn killed(
     // The corpse's throw (`m_iThrowDirection`, which `SetAnimation(PLAYER_DIE)` chose).
     throw_corpse(g, eng, slot, attacker);
     messages::health(eng, slot, 0);
+    messages::broadcast_health_info(g, eng, slot, 0);
     messages::cur_weapon_dead(eng, slot);
     // `SendFOV(0)`.
     messages::set_fov(eng, slot, 0);

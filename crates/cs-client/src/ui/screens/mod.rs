@@ -17,4 +17,7 @@ pub use motd::{MotdRenderCtx, MotdVguiUi};
 pub use server_browser::{
     ServerBrowserEntry, ServerBrowserRenderCtx, ServerBrowserTab, ServerBrowserUi, ServerFilter,
 };
-pub use spectator::{SpectatorMode, SpectatorRenderCtx, SpectatorVguiUi};
+pub use spectator::{
+    SpecSidebarPlayer, SpectatorMode, SpectatorRenderCtx, SpectatorVguiUi,
+    collect_spec_sidebar_players,
+};
