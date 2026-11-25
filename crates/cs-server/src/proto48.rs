@@ -66,6 +66,8 @@ struct Options {
     mods_dir: Option<PathBuf>,
     amxx_dir: Option<PathBuf>,
     plugins_toml: Option<PathBuf>,
+    import_amxx: Option<PathBuf>,
+    out_dir: Option<PathBuf>,
     masters: Vec<SocketAddr>,
     sys_ticrate: Option<f64>,
 }
@@ -88,6 +90,8 @@ fn parse(args: &[String]) -> Result<Options, String> {
         mods_dir: None,
         amxx_dir: None,
         plugins_toml: None,
+        import_amxx: None,
+        out_dir: None,
         masters: Vec::new(),
         sys_ticrate: None,
     };
@@ -140,6 +144,8 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--mods-dir" => opts.mods_dir = Some(PathBuf::from(value()?)),
             "--amxx-dir" => opts.amxx_dir = Some(PathBuf::from(value()?)),
             "--plugins-toml" => opts.plugins_toml = Some(PathBuf::from(value()?)),
+            "--import-amxx" => opts.import_amxx = Some(PathBuf::from(value()?)),
+            "--out-dir" => opts.out_dir = Some(PathBuf::from(value()?)),
             "--master" => {
                 let v = value()?;
                 let addr: SocketAddr = v
@@ -333,6 +339,16 @@ fn build_unified_mod_host(
 
 fn start(args: &[String]) -> Result<(), String> {
     let opts = parse(args)?;
+    if let Some(ref src) = opts.import_amxx {
+        let out_dir = opts
+            .out_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("."));
+        let report = cs_mod_host::amxx_import::import_amxx_dir(src, &out_dir)
+            .map_err(|e| format!("AMXX migration failed: {e}"))?;
+        print!("{}", report.summary());
+        return Ok(());
+    }
     let mut vfs = Vfs::discover(opts.gamedir.as_deref(), VfsConfig::default())
         .map_err(|e| format!("cannot find the Half-Life / CS 1.6 directory: {e}"))?;
     let map = load_server_map(&vfs, &opts.map)?;
@@ -2015,6 +2031,13 @@ mod tests {
     fn parses_mods_dir_flag() {
         let o = parse(&args(&["--mods-dir", "mods"])).unwrap();
         assert_eq!(o.mods_dir, Some(PathBuf::from("mods")));
+    }
+
+    #[test]
+    fn parses_import_amxx_flags() {
+        let o = parse(&args(&["--import-amxx", "legacy/cstrike", "--out-dir", "migrated"])).unwrap();
+        assert_eq!(o.import_amxx, Some(PathBuf::from("legacy/cstrike")));
+        assert_eq!(o.out_dir, Some(PathBuf::from("migrated")));
     }
 
     #[test]

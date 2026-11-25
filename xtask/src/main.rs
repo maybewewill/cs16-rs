@@ -13,7 +13,8 @@ const USAGE: &str = "usage: cargo xtask parity [--dir <path>] [--min <pct>]\n   
                      cargo xtask web-build [--out <dir>]\n       \
                      cargo xtask mod new <id> --lang rust|cpp|go|py [--dir <parent>] [--name <title>] [--side server|client|both]\n       \
                      cargo xtask mod build [dir] [--out <dir>]\n       \
-                     cargo xtask mod-build [--out <dir>]";
+                     cargo xtask mod-build [--out <dir>]\n       \
+                     cargo xtask import-amxx <cstrike_or_amxmodx_dir> [--out-dir <dir>]";
 
 const DEFAULT_DIR: &str = "docs/parity";
 const DEFAULT_WEB_OUT: &str = "dist/web";
@@ -59,6 +60,13 @@ fn main() -> ExitCode {
             }
         },
         Some("mod-build") => match mod_cli::run_mod_build_alias(args) {
+            Ok(code) => code,
+            Err(msg) => {
+                eprintln!("error: {msg}");
+                ExitCode::from(2)
+            }
+        },
+        Some("import-amxx") => match run_import_amxx(args) {
             Ok(code) => code,
             Err(msg) => {
                 eprintln!("error: {msg}");
@@ -282,6 +290,32 @@ fn run_import_names(mut args: impl Iterator<Item = String>) -> Result<ExitCode, 
         updated.items.len(),
         updated.items.len() - before
     );
+    Ok(ExitCode::SUCCESS)
+}
+
+fn run_import_amxx(mut args: impl Iterator<Item = String>) -> Result<ExitCode, String> {
+    let mut src: Option<PathBuf> = None;
+    let mut out_dir = PathBuf::from(".");
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--out-dir" | "--out" => {
+                out_dir = PathBuf::from(args.next().ok_or("--out-dir needs a value")?);
+            }
+            other if other.starts_with('-') => {
+                return Err(format!("unknown argument `{other}`\n{USAGE}"));
+            }
+            pos => {
+                if src.is_some() {
+                    return Err(format!("unexpected positional argument `{pos}`\n{USAGE}"));
+                }
+                src = Some(PathBuf::from(pos));
+            }
+        }
+    }
+    let src = src.ok_or_else(|| format!("import-amxx requires <cstrike_or_amxmodx_dir>\n{USAGE}"))?;
+    let report = cs_mod_host::amxx_import::import_amxx_dir(&src, &out_dir)
+        .map_err(|e| format!("AMXX migration failed: {e}"))?;
+    print!("{}", report.summary());
     Ok(ExitCode::SUCCESS)
 }
 

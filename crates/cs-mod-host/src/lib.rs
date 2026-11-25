@@ -7,6 +7,7 @@
 //! Zero `unsafe`: works identically on native server/client builds and `wasm32-unknown-unknown`.
 
 pub mod admins;
+pub mod amxx_import;
 pub mod client_host;
 pub mod hookchain;
 pub mod lang;
