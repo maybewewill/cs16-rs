@@ -218,24 +218,26 @@ fn bots_buy_at_round_start() {
     b.step(80);
 
     let bought: Vec<(Team, i32, f32, bool)> = b.run(|game, eng| {
-        let vm_m4 = eng.model_index("models/v_m4a1.mdl");
-        let vm_ak = eng.model_index("models/v_ak47.mdl");
+        let vm_usp = eng.model_index("models/v_usp.mdl");
+        let vm_glock = eng.model_index("models/v_glock18.mdl");
+        let vm_knife = eng.model_index("models/v_knife.mdl");
         (0..eng.max_clients())
             .filter(|&s| eng.is_fake_client(s))
             .map(|s| {
                 let p = game.state().players[usize::from(s)].as_ref().unwrap();
                 let v = eng.ent(eng.client_edict(s)).unwrap();
-                let expected = match p.team {
-                    Team::Ct => vm_m4,
-                    _ => vm_ak,
-                };
-                (p.team, p.money, p.armor, Some(v.viewmodel) == expected)
+                let bought_gear = p.owns_shield
+                    || (v.viewmodel != 0
+                        && Some(v.viewmodel) != vm_usp
+                        && Some(v.viewmodel) != vm_glock
+                        && Some(v.viewmodel) != vm_knife);
+                (p.team, p.money, p.armor, bought_gear)
             })
             .collect()
     });
     assert_eq!(bought.len(), 2);
-    for (team, money, armor, has_bought_rifle) in bought {
-        assert!(has_bought_rifle, "{team:?} bot should buy & equip its primary rifle");
+    for (team, money, armor, has_bought_primary) in bought {
+        assert!(has_bought_primary, "{team:?} bot should buy & equip a primary weapon or shield");
         assert!(armor > 0.0, "{team:?} bot should buy armor");
         assert!(money < 5000, "{team:?} bot should spend money buying gear, remaining={money}");
     }

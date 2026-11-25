@@ -6,6 +6,7 @@ pub mod gamma;
 pub mod hpak;
 pub mod materials;
 pub mod mdl;
+pub mod nav;
 pub mod scheme;
 pub mod spr;
 pub mod vgui_font;

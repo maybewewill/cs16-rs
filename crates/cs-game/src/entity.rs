@@ -169,6 +169,16 @@ pub trait GameEntity: Send + 'static {
         false
     }
 
+    /// Server time at which a live planted C4 will detonate, if applicable.
+    fn c4_blow_time(&self) -> Option<f32> {
+        None
+    }
+
+    /// Center of an active smoke grenade cloud, if applicable.
+    fn smoke_cloud_center(&self) -> Option<glam::Vec3> {
+        None
+    }
+
     /// Whether this entity is a hostage (`CLASS_HUMAN_PASSIVE`).
     fn is_hostage(&self) -> bool {
         false

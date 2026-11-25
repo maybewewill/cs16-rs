@@ -1,0 +1,17 @@
+[package]
+name = "cs-bot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Pure-Rust Condition Zero / ZBot navigation mesh, generator, and A* pathfinder. Builds for wasm."
+
+[dependencies]
+cs-assets.workspace = true
+cs-pm.workspace = true
+glam.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

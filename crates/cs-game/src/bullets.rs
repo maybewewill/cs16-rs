@@ -467,6 +467,17 @@ pub fn fire_bullets3(
     v_up: Vec3,
     bullet: &Bullet,
 ) -> Vec3 {
+    if let Some(slot) = player_slot(g, eng, shooter) {
+        let team = g.players[slot].as_ref().map(|p| p.team);
+        crate::bots::emit_sound_event(
+            g,
+            Some(slot as u8),
+            team,
+            bullet.src,
+            cs_bot::tactics::SoundKind::Gunfire,
+            eng.time(),
+        );
+    }
     let attacker = attacker.unwrap_or(shooter);
     let (mut power, pen_distance) = bullet_penetration(bullet.kind);
     let mut current_damage = bullet.damage;

@@ -402,7 +402,25 @@ fn radio_choice(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, group: u8,
     } else {
         (sentence, text)
     };
+    let alias = RADIO_ALIASES
+        .iter()
+        .find(|&&(gr, k, _)| gr == group && k == key)
+        .map(|&(_, _, a)| a);
     radio(g, eng, slot, sentence, text);
+    if let Some(alias) = alias {
+        crate::bots::on_player_radio(g, eng, slot, alias);
+    }
+}
+
+/// Maps a CS 1.6 radio console alias (`"coverme"`, `"followme"`, etc.) to its `(sentence, text)`.
+pub(crate) fn radio_payload(alias: &str) -> Option<(&'static str, &'static str)> {
+    let &(group, key, _) = RADIO_ALIASES
+        .iter()
+        .find(|&&(_, _, a)| a.eq_ignore_ascii_case(alias))?;
+    let &(_, _, sentence, text) = RADIO_MESSAGES
+        .iter()
+        .find(|&&(gr, k, _, _)| gr == group && k == key)?;
+    Some((sentence, text))
 }
 
 /// `CBasePlayer::Radio(msg_id, msg_verbose, pitch = 100, showIcon = true)`: the sentence, its
@@ -414,6 +432,19 @@ pub(crate) fn radio(
     slot: u8,
     msg_id: &str,
     msg_verbose: &str,
+) {
+    radio_with_place(g, eng, slot, msg_id, msg_verbose, None, i16::from(PITCH_NORM));
+}
+
+/// Location-aware `CBasePlayer::Radio` used by Condition Zero / ZBot (`#Game_radio_location`).
+pub(crate) fn radio_with_place(
+    g: &GameState,
+    eng: &mut EngineApi<'_>,
+    slot: u8,
+    msg_id: &str,
+    msg_verbose: &str,
+    place: Option<&str>,
+    pitch: i16,
 ) {
     let id = eng.client_edict(slot);
     let Some(me) = g.players.get(usize::from(slot)).and_then(Option::as_ref) else {
@@ -474,18 +505,27 @@ pub(crate) fn radio(
             &CsUserMsg::SendAudio {
                 sender_id: sender,
                 audio_code: msg_id.to_string(),
-                pitch: i16::from(PITCH_NORM),
+                pitch,
             },
         );
         if !msg_verbose.is_empty() {
-            // No place name: the vanilla build has no nav areas outside Condition Zero.
-            crate::chat::client_print(
-                eng,
-                i as u8,
-                HUD_PRINTRADIO,
-                &sender_text,
-                &["#Game_radio", &name, msg_verbose],
-            );
+            if let Some(place_name) = place.filter(|p| !p.is_empty()) {
+                crate::chat::client_print(
+                    eng,
+                    i as u8,
+                    HUD_PRINTRADIO,
+                    &sender_text,
+                    &["#Game_radio_location", &name, place_name, msg_verbose],
+                );
+            } else {
+                crate::chat::client_print(
+                    eng,
+                    i as u8,
+                    HUD_PRINTRADIO,
+                    &sender_text,
+                    &["#Game_radio", &name, msg_verbose],
+                );
+            }
         }
         eng.temp_entity(dest, TE_PLAYERATTACHMENT, icon.as_slice());
     }
