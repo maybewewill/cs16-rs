@@ -20,7 +20,8 @@ pub struct GammaParams {
 impl Default for GammaParams {
     fn default() -> Self {
         Self {
-            gamma: 2.5,
+            // Retail `hw.dll:0x1031e138` default gamma is 2.2.
+            gamma: 2.2,
             texgamma: 2.0,
             brightness: 0.0,
             lightgamma: 2.5,
@@ -37,7 +38,8 @@ const BAYER_4X4: [[f32; 4]; 4] = [
     [15.0 / 16.0, 7.0 / 16.0, 13.0 / 16.0, 5.0 / 16.0],
 ];
 
-/// Reference CPU evaluation of the GoldSrc LUT texture + lightmap + software-dither pipeline.
+/// Reference CPU evaluation of the GoldSrc LUT texture + lightmap + software-dither pipeline
+/// (multiplayer `brightness` range `[0.0, 2.0]`).
 pub fn apply_goldsrc_gamma_rgb(
     albedo: [f32; 3],
     light: [f32; 3],
@@ -45,12 +47,28 @@ pub fn apply_goldsrc_gamma_rgb(
     px_y: u32,
     params: &GammaParams,
 ) -> [f32; 3] {
-    let tables = GammaTables::build(GoldSrcGammaConfig {
-        gamma: params.gamma,
-        brightness: params.brightness,
-        texgamma: params.texgamma,
-        lightgamma: params.lightgamma,
-    });
+    apply_goldsrc_gamma_rgb_for_mode(albedo, light, px_x, px_y, params, true)
+}
+
+/// Reference CPU evaluation with explicit `multiplayer` mode (`maxclients > 1` clamps
+/// `brightness` to `[0.0, 2.0]`; singleplayer clamps to `[0.0, 100.0]`, `hw.dll:0x10231470`).
+pub fn apply_goldsrc_gamma_rgb_for_mode(
+    albedo: [f32; 3],
+    light: [f32; 3],
+    px_x: u32,
+    px_y: u32,
+    params: &GammaParams,
+    multiplayer: bool,
+) -> [f32; 3] {
+    let tables = GammaTables::build_for_mode(
+        GoldSrcGammaConfig {
+            gamma: params.gamma,
+            brightness: params.brightness,
+            texgamma: params.texgamma,
+            lightgamma: params.lightgamma,
+        },
+        multiplayer,
+    );
     let lightscale = tables.lightscale(params.gl_overbright);
     let style_scale = lightstyle_f32_to_scale(1.0);
     let bl = [

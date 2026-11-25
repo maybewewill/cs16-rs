@@ -132,7 +132,12 @@ struct Arena {
 impl Arena {
     fn new() -> Self {
         let map = ServerMap::stub_with_entities("test", spawns(4, 4));
-        let cfg = ServerConfig { max_clients: 2, max_edicts: 256, ..ServerConfig::default() };
+        let cfg = ServerConfig {
+            max_clients: 2,
+            max_edicts: 256,
+            max_update_rate: 102,
+            ..ServerConfig::default()
+        };
         let rig = EventRig { rig: Rig { game: CsGame::new(), actions: Vec::new(), precache_events: Vec::new() } };
         let server = Server::new(
             cfg,
@@ -150,6 +155,7 @@ impl Arena {
                 cdkey_md5_hex: md5_hex(name.as_bytes()),
             };
             let mut p = ProbeClient::new(endpoint, PeerAddr::Loopback(0), cfg);
+            p.set_userinfo("cl_updaterate", "60");
             p.suppress_moves(true);
             p.connect();
             p

@@ -58,11 +58,12 @@ impl<G: GameDll> Server<G> {
         }
         if let Some(dgram) = crate::rcon::parse_rcon_datagram(data) {
             let policy = crate::rcon::RconPolicy {
-                max_failures: self.cvars.get_i32("sv_rcon_maxfailures").max(0) as u32,
-                min_failures: self.cvars.get_i32("sv_rcon_minfailures").max(0) as u32,
+                max_failures: self.cvars.get_i32("sv_rcon_maxfailures").max(1) as u32,
+                min_failures: self.cvars.get_i32("sv_rcon_minfailures").max(1) as u32,
                 min_failure_time: f64::from(self.cvars.get_f32("sv_rcon_minfailuretime")),
                 ban_penalty_mins: f64::from(self.cvars.get_f32("sv_rcon_banpenalty")),
-            };
+            }
+            .clamped();
             let pw = self.cvars.get_str("rcon_password").to_string();
             match self.rcon.evaluate(from, self.real_time, dgram, &pw, policy) {
                 crate::rcon::RconDecision::Reply(pkts) => {
@@ -93,6 +94,27 @@ impl<G: GameDll> Server<G> {
         }
         // The player list and query info are only built for the queries that send them.
         let is_query = matches!(data.get(4), Some(&(A2S_INFO | A2S_PLAYER | A2S_RULES)));
+        if is_query {
+            let max_q_sec = self
+                .cvars
+                .get("max_queries_sec")
+                .map_or(3.0, |c| f64::from(c.as_f32()));
+            let max_q_global = self
+                .cvars
+                .get("max_queries_sec_global")
+                .map_or(30.0, |c| f64::from(c.as_f32()));
+            let max_q_win = self
+                .cvars
+                .get("max_queries_window")
+                .map_or(60.0, |c| f64::from(c.as_f32()));
+            if !self
+                .query_limiter
+                .allow(&from, self.real_time, max_q_sec, max_q_global, max_q_win)
+            {
+                self.net_stats.oob_denied += 1;
+                return;
+            }
+        }
         let (players, query) = if is_query {
             self.query_answers()
         } else {
@@ -118,6 +140,7 @@ impl<G: GameDll> Server<G> {
             players: &players,
             rules: &rule_refs,
             is_full: self.free_slot_index().is_none() && self.slot_of(&from).is_none(),
+            sv_contact: self.cvars.get_str("sv_contact"),
         };
         let (outcome, challenged) = handle_oob(data, &from, self.real_time, &ctx);
         let reply = match outcome {
@@ -194,10 +217,26 @@ impl<G: GameDll> Server<G> {
                 slot
             }
             // `handle_oob` already rejected a full server.
-            None => match self.free_slot_index() {
-                Some(slot) => slot,
-                None => return encode_s2c_reject("Server is full.\n"),
-            },
+            None => {
+                // Retail `swds.dll:FUN_10205640`, `FUN_10206040`: reject `> 5` simultaneous
+                // pending connections from the same IP.
+                let pending_same_ip = self
+                    .clients
+                    .iter()
+                    .filter(|c| {
+                        !c.is_free()
+                            && c.state != crate::client::ClientState::Active
+                            && c.addr.as_ref().is_some_and(|a| same_ip(a, &from))
+                    })
+                    .count();
+                if pending_same_ip >= 5 {
+                    return encode_s2c_reject("Invalid connection.\n");
+                }
+                match self.free_slot_index() {
+                    Some(slot) => slot,
+                    None => return encode_s2c_reject("Server is full.\n"),
+                }
+            }
         };
         let index = usize::from(slot);
         let mut userinfo = request.userinfo;
@@ -249,11 +288,35 @@ impl<G: GameDll> Server<G> {
         encode_s2c_connection(userid, &from.to_string(), false, self.cfg.build)
     }
 
+    #[cfg(test)]
+    pub(crate) fn handle_oob_connect_for_test(&mut self, from: PeerAddr, data: &[u8]) -> Vec<u8> {
+        let ctx = OobContext {
+            challenges: &self.challenges,
+            query: &cs16_server_query_info("", "", 0, 0, 0),
+            players: &[],
+            rules: &[],
+            is_full: self.free_slot_index().is_none() && self.slot_of(&from).is_none(),
+            sv_contact: self.cvars.get_str("sv_contact"),
+        };
+        match handle_oob(data, &from, self.real_time, &ctx).0 {
+            OobOutcome::Connect(req) => self.connect(from, req),
+            OobOutcome::Reply(rep) => rep,
+            OobOutcome::Ignore => Vec::new(),
+        }
+    }
+
     /// `name`, or `(1)name`, `(2)name`… when a connected client other than `except` already
     /// uses it; a prefixed name is cut on a character boundary to stay within
     /// [`MAX_NAME_BYTES`].
     pub(crate) fn unique_name(&self, name: &str, except: Option<u8>) -> String {
         unique_name_among(&self.views, name, except)
+    }
+}
+
+fn same_ip(a: &PeerAddr, b: &PeerAddr) -> bool {
+    match (a, b) {
+        (PeerAddr::Udp(sa), PeerAddr::Udp(sb)) => sa.ip() == sb.ip(),
+        _ => a == b,
     }
 }
 

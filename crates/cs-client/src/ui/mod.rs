@@ -196,6 +196,27 @@ impl CrosshairState {
     }
 }
 
+/// Resolve crosshair RGBA color matching `client.dll` `FUN_10043ff0` (`0x10044530..10044560`):
+/// NVG overrides RGB to `(250, 50, 50)` while still honoring `cl_crosshair_translucent` and `alpha` (`120..=255`).
+pub fn crosshair_color(cvars: &CVarRegistry, night_vision: bool, alpha: u8) -> Color32 {
+    let (r, g, b) = if night_vision {
+        (250, 50, 50)
+    } else {
+        parse_rgb(cvars.get_str("cl_crosshair_color"))
+    };
+    if cvars.get_bool("cl_crosshair_translucent") {
+        crate::ui::hud::hud_additive_color(Color32::from_rgb(r, g, b), alpha)
+    } else {
+        Color32::from_rgba_unmultiplied(r, g, b, alpha)
+    }
+}
+
+/// Returns `true` when `CHudAmmo::Draw` (`client.dll` `FUN_10043a60`) enables the dynamic
+/// 4-bar crosshair (`m_iFOV > 54` and weapon is not Scout `3`, SG550 `13`, AWP `18`, or G3SG1 `24`).
+pub fn should_draw_dynamic_crosshair(fov: f32, weapon_id: u8) -> bool {
+    fov.is_finite() && fov > 54.0 && !matches!(weapon_id, 3 | 13 | 18 | 24)
+}
+
 /// Draw the 1-to-1 `FUN_10043ff0` (`CHudAmmo::DrawCrosshair`) 4-bar dynamic crosshair.
 pub fn draw_crosshair_vgui(
     ctx: &egui::Context,
@@ -207,17 +228,7 @@ pub fn draw_crosshair_vgui(
     let sw = screen.width().round() as i32;
     let sh = screen.height().round() as i32;
     let geom = state.compute_geometry(inputs, cvars.get_str("cl_crosshair_size"), sw);
-
-    let color = if inputs.night_vision {
-        Color32::from_rgba_unmultiplied(250, 50, 50, 255)
-    } else {
-        let (r, g, b) = parse_rgb(cvars.get_str("cl_crosshair_color"));
-        if cvars.get_bool("cl_crosshair_translucent") {
-            crate::ui::hud::hud_additive_color(Color32::from_rgb(r, g, b), geom.alpha)
-        } else {
-            Color32::from_rgba_unmultiplied(r, g, b, geom.alpha)
-        }
-    };
+    let color = crosshair_color(cvars, inputs.night_vision, geom.alpha);
 
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Background,
@@ -314,4 +325,35 @@ pub fn parse_rgb(s: &str) -> (u8, u8, u8) {
     let g = parts.next().unwrap_or(250);
     let b = parts.next().unwrap_or(50);
     (r, g, b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nvg_crosshair_honors_cl_crosshair_translucent_and_alpha() {
+        let mut cvars = CVarRegistry::new_with_defaults();
+        cvars.set("cl_crosshair_translucent", "0");
+        assert_eq!(
+            crosshair_color(&cvars, true, 160),
+            Color32::from_rgba_unmultiplied(250, 50, 50, 160)
+        );
+        cvars.set("cl_crosshair_translucent", "1");
+        assert_eq!(
+            crosshair_color(&cvars, true, 120),
+            crate::ui::hud::hud_additive_color(Color32::from_rgb(250, 50, 50), 120)
+        );
+    }
+
+    #[test]
+    fn sniper_weapons_and_zoomed_fov_suppress_dynamic_crosshair() {
+        assert!(!should_draw_dynamic_crosshair(90.0, 3));  // Scout
+        assert!(!should_draw_dynamic_crosshair(90.0, 13)); // SG550
+        assert!(!should_draw_dynamic_crosshair(90.0, 18)); // AWP
+        assert!(!should_draw_dynamic_crosshair(90.0, 24)); // G3SG1
+        assert!(!should_draw_dynamic_crosshair(54.0, 28)); // FOV <= 54
+        assert!(should_draw_dynamic_crosshair(55.0, 8));   // AUG zoomed (55 deg)
+        assert!(should_draw_dynamic_crosshair(90.0, 28));  // AK47 unzoomed
+    }
 }

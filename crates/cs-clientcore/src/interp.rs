@@ -37,10 +37,12 @@ use crate::frames::{ClientClock, Frame};
 
 /// `EQUAL_EPSILON`.
 const EQUAL_EPSILON: f64 = 0.001;
-/// `MIN_UPDATERATE`, `MAX_UPDATERATE`, `MAX_EX_INTERP` of `client.h`.
+/// `MIN_UPDATERATE`, `MAX_UPDATERATE`, `DEFAULT_UPDATERATE`, `MAX_EX_INTERP*` (`hw.dll:0x101a3c79`).
 const MIN_UPDATERATE: f32 = 10.0;
 const MAX_UPDATERATE: f32 = 102.0;
+const DEFAULT_UPDATERATE: f32 = 20.0;
 const MAX_EX_INTERP: f32 = 0.1;
+const MAX_EX_INTERP_SPECTATOR: f32 = 0.2;
 
 /// The switches the interpolation reads.
 #[derive(Debug, Clone, PartialEq)]
@@ -61,6 +63,8 @@ pub struct InterpSettings {
     /// The server is on this machine (`NET_IsLocalAddress`): `MOVETYPE_STEP` entities are
     /// then not lerped from the position history.
     pub remote_is_local: bool,
+    /// Spectator or HLTV playback: raises upper `ex_interp` limit to 200 ms (`hw.dll:0x101a3c79`).
+    pub spectator_or_hltv: bool,
 }
 
 impl Default for InterpSettings {
@@ -73,31 +77,45 @@ impl Default for InterpSettings {
             compute_studio_lerp: true,
             step_poshistory_lerp: true,
             remote_is_local: false,
+            spectator_or_hltv: false,
         }
     }
 }
 
 impl InterpSettings {
     /// Reads `ex_interp`, `cl_nointerp` and `cl_updaterate` and bounds the interpolation time
-    /// as `CL_ComputeClientInterpolationAmount` does: not below one update interval, not above
-    /// 0.1 s (a spectator would get 0.2 s: not modelled).
+    /// matching `hw.dll:FUN_101a3a40` (`0x101a3c79`, `DAT_102b6df8`):
+    /// resets `cl_updaterate < 10.0` to `20.0`, quantizes `min_ms = floor(1000.0 / updaterate).max(1.0)`,
+    /// and clamps `ex_interp` to `[min_ms, max_ms]` (`200 ms` spectator/HLTV, `100 ms` otherwise)
+    /// with `1 ms` tolerance.
     pub fn apply_cvars(&mut self, cvars: &ClientCvars) {
         let mut updaterate = cvars.float("cl_updaterate");
-        if updaterate < MIN_UPDATERATE {
-            // `Cvar_Reset`: back to the default.
+        if !updaterate.is_finite() || updaterate < MIN_UPDATERATE {
+            // `Cvar_Reset`: back to retail `"20"`.
             updaterate = cvars
                 .find("cl_updaterate")
-                .map_or(MIN_UPDATERATE, |c| crate::cvars::parse_float(&c.default));
+                .map_or(DEFAULT_UPDATERATE, |c| crate::cvars::parse_float(&c.default));
+            if !updaterate.is_finite() || updaterate < MIN_UPDATERATE {
+                updaterate = DEFAULT_UPDATERATE;
+            }
         }
         updaterate = updaterate.min(MAX_UPDATERATE);
-        let min_interp = 1.0 / updaterate;
-        let max_interp = MAX_EX_INTERP;
-        let interp = cvars.float("ex_interp");
-        // `bound( min, x, max )` is `x >= min ? (x < max ? x : max) : min`.
-        self.interp = if interp >= min_interp {
-            if interp < max_interp { interp } else { max_interp }
+        let min_ms = (1000.0 / updaterate).floor().max(1.0);
+        let max_ms = if self.spectator_or_hltv {
+            MAX_EX_INTERP_SPECTATOR * 1000.0
         } else {
-            min_interp
+            MAX_EX_INTERP * 1000.0
+        };
+        let interp = cvars.float("ex_interp");
+        let interp_ms = interp * 1000.0;
+        self.interp = if !interp.is_finite() {
+            max_ms / 1000.0
+        } else if interp_ms < min_ms - 1.0 {
+            min_ms / 1000.0
+        } else if interp_ms > max_ms + 1.0 {
+            max_ms / 1000.0
+        } else {
+            interp
         };
         self.nointerp = cvars.float("cl_nointerp") > 0.0;
     }
@@ -718,5 +736,36 @@ mod tests {
         let a = quaternion_angle(angle_quaternion(Vec3::new(-90.0, 30.0, 0.0)));
         assert!((a.x + 90.0).abs() < 0.1, "{a:?}");
         assert_eq!(a.z, 0.0);
+    }
+
+    #[test]
+    fn apply_cvars_quantizes_min_ms_resets_low_updaterate_and_caps_spectator() {
+        let mut cvars = ClientCvars::new();
+        let mut s = InterpSettings::default();
+
+        // cl_updaterate < 10.0 resets to 20.0 -> min_ms = floor(1000/20) = 50 ms.
+        cvars.set("cl_updaterate", "5");
+        cvars.set("ex_interp", "0.01");
+        s.apply_cvars(&cvars);
+        assert!((s.interp - 0.05).abs() < 1e-6, "{}", s.interp);
+
+        // 1 ms tolerance below min_ms keeps 49.5 ms when min_ms is 50 ms.
+        cvars.set("ex_interp", "0.0495");
+        s.apply_cvars(&cvars);
+        assert!((s.interp - 0.0495).abs() < 1e-6, "{}", s.interp);
+
+        // Player caps at 100 ms; spectator/HLTV caps at 200 ms.
+        cvars.set("cl_updaterate", "101");
+        cvars.set("ex_interp", "0.15");
+        s.apply_cvars(&cvars);
+        assert!((s.interp - 0.1).abs() < 1e-6, "{}", s.interp);
+
+        s.spectator_or_hltv = true;
+        s.apply_cvars(&cvars);
+        assert!((s.interp - 0.15).abs() < 1e-6, "{}", s.interp);
+
+        cvars.set("ex_interp", "0.25");
+        s.apply_cvars(&cvars);
+        assert!((s.interp - 0.2).abs() < 1e-6, "{}", s.interp);
     }
 }

@@ -1088,6 +1088,28 @@ fn r_studio_lighting(
     tables.light_to_tex_gamma_unit((clamped * 4.0) as u32)
 }
 
+/// Build the authentic GoldSrc first-person viewmodel matrix anchored to the camera eye
+/// with yaw, pitch, and roll (`client.dll` `0x1006b52f..1006b7a0`).
+pub fn viewmodel_transform_with_angles(
+    eye: Vec3,
+    yaw_deg: f32,
+    pitch_deg: f32,
+    roll_deg: f32,
+    bob_offset: Vec3,
+    right_handed: bool,
+) -> Mat4 {
+    let rot = Quat::from_rotation_z(yaw_deg.to_radians())
+        * Quat::from_rotation_y(pitch_deg.to_radians())
+        * Quat::from_rotation_x(roll_deg.to_radians());
+    let scale = if right_handed {
+        Vec3::new(1.0, -1.0, 1.0)
+    } else {
+        Vec3::ONE
+    };
+    let pos = eye + rot * bob_offset;
+    Mat4::from_scale_rotation_translation(scale, rot, pos)
+}
+
 /// Build the authentic GoldSrc first-person viewmodel matrix anchored to the camera eye.
 pub fn viewmodel_transform(
     eye: Vec3,
@@ -1096,15 +1118,7 @@ pub fn viewmodel_transform(
     bob_offset: Vec3,
     right_handed: bool,
 ) -> Mat4 {
-    let rot = Quat::from_rotation_z(yaw_deg.to_radians())
-        * Quat::from_rotation_y(pitch_deg.to_radians());
-    let scale = if right_handed {
-        Vec3::new(1.0, -1.0, 1.0)
-    } else {
-        Vec3::ONE
-    };
-    let pos = eye + rot * bob_offset;
-    Mat4::from_scale_rotation_translation(scale, rot, pos)
+    viewmodel_transform_with_angles(eye, yaw_deg, pitch_deg, 0.0, bob_offset, right_handed)
 }
 
 #[cfg(test)]
@@ -1154,5 +1168,17 @@ mod tests {
         assert_eq!(studio_frame(0.0, 12.0, 1.0, 11.0, 30.0, 41, true), 0.0);
         assert_eq!(studio_frame(200.0, 0.0, 1.0, 5.0, 30.0, 1, true), 150.0);
         assert_eq!(studio_frame(200.0, 0.0, 1.0, 5.0, 30.0, 1, false), 0.0);
+    }
+
+    #[test]
+    fn viewmodel_transform_with_angles_applies_roll_and_righthand_mirror() {
+        let xf_r = viewmodel_transform_with_angles(Vec3::new(1.0, 2.0, 3.0), 0.0, 0.0, 90.0, Vec3::ZERO, true);
+        let up_col = xf_r.z_axis.truncate();
+        assert!((up_col - Vec3::new(0.0, -1.0, 0.0)).length() < 1e-4, "got {up_col:?}");
+        assert!((xf_r.y_axis.truncate().length() - 1.0).abs() < 1e-4);
+        assert!(xf_r.determinant() < 0.0);
+
+        let xf_l = viewmodel_transform_with_angles(Vec3::new(1.0, 2.0, 3.0), 0.0, 0.0, 90.0, Vec3::ZERO, false);
+        assert!(xf_l.determinant() > 0.0);
     }
 }

@@ -185,6 +185,7 @@ impl Bench {
         let cfg = ServerConfig {
             max_clients,
             max_edicts: 256,
+            max_update_rate: 102,
             ..ServerConfig::default()
         };
         Self::with_config_and_events(map, cfg, userinfo, send_moves, events)
@@ -242,6 +243,7 @@ impl Bench {
             cdkey_md5_hex: md5_hex(b"probe"),
         };
         let mut probe = ProbeClient::new(endpoint, PeerAddr::Loopback(0), cfg);
+        probe.set_userinfo("cl_updaterate", "60");
         for (key, value) in userinfo {
             probe.set_userinfo(key, value);
         }

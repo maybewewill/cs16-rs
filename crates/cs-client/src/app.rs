@@ -36,7 +36,7 @@ use cs_client::input::{
 };
 use cs_client::render::bsp_renderer::BspRenderStats;
 use cs_client::render::lighting::{GpuLightsUniform, TextureFilterMode};
-use cs_client::render::mdl_renderer::{StudioInstance, viewmodel_transform};
+use cs_client::render::mdl_renderer::{StudioInstance, viewmodel_transform_with_angles};
 use cs_client::render::scene::ModelRegistry;
 use cs_client::render::{RenderSettings, Renderer, SceneDynamicData};
 use cs_client::ui::chat::ChatInputUi;
@@ -66,8 +66,10 @@ use cs_client::ui::vgui_assets::VguiAssetBank;
 use cs_client::ui::vgui_theme::{VguiPalette, apply_vgui2_theme};
 use cs_client::ui::{
     CrosshairInputs, CrosshairState, FrameTelemetry, draw_crosshair_vgui, draw_net_graph,
+    should_draw_dynamic_crosshair,
 };
 use cs_client::view::{FrameView, ViewInputs, ViewStats};
+use cs_client::view_effects::{calc_view_idle, calc_viewmodel_angles};
 
 const MAX_FEED: usize = 5;
 
@@ -129,9 +131,18 @@ struct HudFeeds {
 
 impl HudFeeds {
     fn expire(&mut self, now: f64, feed_life: f64, chat_life: f64, center_life: f64) {
-        self.deaths.retain(|(_, t)| now - t < feed_life);
-        self.chat.retain(|(_, t)| now - t < chat_life);
-        self.notify.retain(|(_, t)| now - t < feed_life);
+        if feed_life <= 0.0 {
+            self.deaths.clear();
+        } else {
+            self.deaths.retain(|(_, t)| now - t <= feed_life);
+        }
+        if chat_life <= 0.0 {
+            self.chat.clear();
+        } else {
+            self.chat.retain(|(_, t)| now - t <= chat_life);
+        }
+        let notify_life = feed_life.max(0.5);
+        self.notify.retain(|(_, t)| now - t < notify_life);
         self.pickups.retain(|e| now < e.end_time);
         if self.center.as_ref().is_some_and(|(_, t)| now - t > center_life) {
             self.center = None;
@@ -725,10 +736,15 @@ impl Cs16App {
             );
         }
         for (sender, code, pitch) in &view.radio_audio {
-            self.audio.play_send_audio(self.vfs.as_ref(), code, master, *pitch);
-            if *sender > 0 {
-                self.hud_anim.trigger_radio(*sender, sess_now);
-            }
+            self.audio.play_send_audio_with_radar(
+                self.vfs.as_ref(),
+                code,
+                master,
+                *pitch,
+                *sender,
+                sess_now,
+                &mut self.hud_anim.radio_flashes,
+            );
         }
         for (vol, kind) in &view.reload_sounds {
             self.audio.play_reload_sound(self.vfs.as_ref(), *vol, *kind);
@@ -864,8 +880,8 @@ impl Cs16App {
         trim_feed(&mut self.feeds.deaths);
         trim_feed(&mut self.feeds.chat);
         trim_feed(&mut self.feeds.notify);
-        let feed_life = f64::from(finite_or(self.cvars.get_f32("hud_deathnotice_time"), 6.0).max(0.5));
-        let chat_life = f64::from(finite_or(self.cvars.get_f32("hud_saytext_time"), 5.0).max(0.5));
+        let feed_life = f64::from(finite_or(self.cvars.get_f32("hud_deathnotice_time"), 6.0));
+        let chat_life = f64::from(finite_or(self.cvars.get_f32("hud_saytext_time"), 5.0));
         let center_life = f64::from(finite_or(self.cvars.get_f32("scr_centertime"), 2.0).max(0.5));
         self.feeds.expire(now, feed_life, chat_life, center_life);
 
@@ -1826,7 +1842,9 @@ impl Cs16App {
 
         let sess_now = self.session.now();
         let deaths: Vec<DeathNotice> = self.feeds.deaths.iter().map(|(d, _)| d.clone()).collect();
+        let death_times: Vec<f64> = self.feeds.deaths.iter().map(|(_, t)| *t).collect();
         let chat_entries: Vec<HudChatEntry> = self.feeds.chat.iter().map(|(c, _)| c.clone()).collect();
+        let chat_times: Vec<f64> = self.feeds.chat.iter().map(|(_, t)| *t).collect();
         let chat: Vec<String> = chat_entries.iter().map(|c| c.text.clone()).collect();
         let pickups = self.feeds.pickups.clone();
         let notify: Vec<String> = self.feeds.notify.iter().map(|(c, _)| c.clone()).collect();
@@ -1963,14 +1981,14 @@ impl Cs16App {
         };
         rt.egui_ctx.begin_pass(raw_input);
 
-        let (hud_hidden, hud_timer_vis, hud_nvg) = self
+        let (hud_health, hud_hidden, hud_timer_vis, hud_nvg) = self
             .session
-            .with_hud(|h| (h.hidden, h.timer_visible, h.night_vision))
-            .unwrap_or((0, false, false));
-        let hud_vis = compute_hud_visibility(alive, 0, hud_hidden, hud_timer_vis);
+            .with_hud(|h| (i32::from(h.health), h.hidden, h.timer_visible, h.night_vision))
+            .unwrap_or((0, 0, false, false));
+        let hud_vis = compute_hud_visibility(alive, hud_health, hud_hidden, hud_timer_vis);
         if let Some(v) = &view {
-            if !paused && hud_vis.crosshair && !scoped {
-                let (wid, wflags, on_ground, ducking, ch_spd, clip) = self.session.local_crosshair_state();
+            let (wid, wflags, on_ground, ducking, ch_spd, clip) = self.session.local_crosshair_state();
+            if !paused && hud_vis.crosshair && !scoped && should_draw_dynamic_crosshair(v.fov, wid) {
                 if wid != self.crosshair_last_weapon {
                     self.crosshair_shots_fired = 0;
                     self.crosshair_last_weapon = wid;
@@ -2004,6 +2022,9 @@ impl Cs16App {
                 buckets: Some(&self.weapon_buckets),
                 anim: Some(&self.hud_anim),
                 chat_entries: Some(&chat_entries),
+                death_times: Some(&death_times),
+                chat_times: Some(&chat_times),
+                chat_input_open: self.chat_ui.open,
                 pickup_history: &pickups,
                 observer_mode,
                 ..Default::default()
@@ -2321,24 +2342,22 @@ impl Cs16App {
             let punch_x = finite_or(v.punch.x, 0.0);
             let punch_y = finite_or(v.punch.y, 0.0);
             let punch_z = finite_or(v.punch.z, 0.0);
+            let v_idlescale = finite_or(self.cvars.get_f32("v_idlescale"), 0.0);
+            let idle = calc_view_idle(time_sec, v_idlescale);
             render_cam.position.z += finite_or(v.bob, 0.0) + finite_or(v.shake_z, 0.0);
             render_cam.pitch_deg =
-                (finite_or(render_cam.pitch_deg, 0.0) + punch_x + finite_or(v.shake_angles.x, 0.0))
+                (finite_or(render_cam.pitch_deg, 0.0) + punch_x + finite_or(v.shake_angles.x, 0.0) + idle.pitch)
                     .clamp(-89.0, 89.0);
             render_cam.yaw_deg =
-                (finite_or(render_cam.yaw_deg, 0.0) + punch_y + finite_or(v.shake_angles.y, 0.0))
+                (finite_or(render_cam.yaw_deg, 0.0) + punch_y + finite_or(v.shake_angles.y, 0.0) + idle.yaw)
                     .rem_euclid(360.0);
             render_cam.roll_deg =
-                (punch_z + finite_or(v.roll_deg, 0.0) + finite_or(v.shake_angles.z, 0.0))
+                (punch_z + finite_or(v.roll_deg, 0.0) + finite_or(v.shake_angles.z, 0.0) + idle.roll)
                     .clamp(-90.0, 90.0);
-            fov = (finite_or(v.fov, default_fov) + finite_or(v.underwater_fov_delta, 0.0))
-                .clamp(10.0, 120.0);
-            sensitivity_scale = if (fov - default_fov).abs() > 0.5 && default_fov > 1.0 {
-                let zoom_ratio = finite_or(self.cvars.get_f32("zoom_sensitivity_ratio"), 1.2).max(0.0);
-                ((fov / default_fov) * zoom_ratio).clamp(0.05, 2.0)
-            } else {
-                1.0
-            };
+            let base_fov = finite_or(v.fov, default_fov).clamp(10.0, 120.0);
+            fov = (base_fov + finite_or(v.underwater_fov_delta, 0.0)).clamp(10.0, 120.0);
+            let zoom_ratio = finite_or(self.cvars.get_f32("zoom_sensitivity_ratio"), 1.2).max(0.0);
+            sensitivity_scale = compute_zoom_sens_scale(base_fov, default_fov, zoom_ratio);
             if let Some(vm) = &v.viewmodel {
                 let eye = if v.eye.is_finite() { v.eye } else { Vec3::ZERO };
                 let b = finite_or(v.bob, 0.0);
@@ -2351,13 +2370,29 @@ impl Cs16App {
                 } else {
                     0.0
                 };
-                let vm_eye = eye + Vec3::new(0.0, 0.0, b - 1.0 + fov_z) + v.viewmodel_lag;
-                let bob_off = Vec3::new(b * 0.4, 0.0, 0.0);
-                let xf = viewmodel_transform(
-                    vm_eye,
+                // `client.dll` `0x1006b52f..1006b7a0`: project `bob * 0.4` along full 3D view forward.
+                let (view_fwd, _, _) = cs_client::render::scene::angle_vectors(Vec3::new(
+                    render_cam.pitch_deg,
+                    render_cam.yaw_deg,
+                    render_cam.roll_deg,
+                ));
+                let vm_eye = eye
+                    + Vec3::new(0.0, 0.0, b - 1.0 + fov_z)
+                    + view_fwd * (b * 0.4)
+                    + v.viewmodel_lag;
+                let (vm_yaw, vm_pitch, vm_roll) = calc_viewmodel_angles(
                     render_cam.yaw_deg,
                     render_cam.pitch_deg,
-                    bob_off,
+                    render_cam.roll_deg,
+                    b,
+                    idle,
+                );
+                let xf = viewmodel_transform_with_angles(
+                    vm_eye,
+                    vm_yaw,
+                    vm_pitch,
+                    vm_roll,
+                    Vec3::ZERO,
                     vm.right_hand,
                 );
                 viewmodel_inst = Some((
@@ -2558,15 +2593,14 @@ impl Cs16App {
 
         if !self.launch.headless {
             let fps_max = finite_or(self.cvars.get_f32("fps_max"), 100.0);
-            if fps_max > 0.0 {
-                let fps_override = self.cvars.get_bool("fps_override");
+            let fps_override = self.cvars.get_bool("fps_override");
+            if let Some(fps) = effective_fps_limit(
+                fps_max,
+                fps_override,
+                self.session.is_active(),
+                self.session.max_clients(),
+            ) {
                 let timescale = finite_or(self.cvars.get_f32("host_timescale"), 1.0).clamp(0.05, 10.0);
-                let fps = if self.session.is_active() {
-                    let f = fps_max.max(0.5);
-                    if fps_override { f } else { f.min(100.0) }
-                } else {
-                    31.0
-                };
                 let target = Duration::from_secs_f64(f64::from(timescale) / (f64::from(fps) + 0.5));
                 let elapsed = now.elapsed();
                 if let Some(rem) = target.checked_sub(elapsed)
@@ -2837,25 +2871,25 @@ impl ApplicationHandler for Cs16App {
             };
             self.prev_mouse_delta = (raw_dx, raw_dy);
 
-            let mut sens = self.cvars.get_f32("sensitivity").max(0.05) * self.mouse_sens_scale;
-            if self.cvars.get_i32("m_customaccel") != 0 {
-                let scale = finite_or(self.cvars.get_f32("m_customaccel_scale"), 0.04).max(0.0);
-                let max_spd = finite_or(self.cvars.get_f32("m_customaccel_max"), 0.0).max(0.0);
-                let exp = finite_or(self.cvars.get_f32("m_customaccel_exponent"), 1.0).clamp(0.1, 4.0);
-                let mag = (fx * fx + fy * fy).sqrt();
-                let mut accel = mag.powf(exp) * scale;
-                if max_spd > 0.0 {
-                    accel = accel.min(max_spd);
-                }
-                sens += accel;
-            }
             let m_yaw = self.cvars.get_f32("m_yaw");
             let m_pitch = self.cvars.get_f32("m_pitch");
+            let (adj_x, adj_y, sens) = compute_mouse_move_params(
+                fx,
+                fy,
+                finite_or(self.cvars.get_f32("sensitivity"), 3.0).max(0.0),
+                self.mouse_sens_scale,
+                self.cvars.get_i32("m_customaccel"),
+                finite_or(self.cvars.get_f32("m_customaccel_scale"), 0.04).max(0.0),
+                finite_or(self.cvars.get_f32("m_customaccel_max"), 0.0).max(0.0),
+                finite_or(self.cvars.get_f32("m_customaccel_exponent"), 1.0),
+                m_yaw,
+                m_pitch,
+            );
             let pitch_up = self.cvars.get_f32("cl_pitchup");
             let pitch_down = self.cvars.get_f32("cl_pitchdown");
             self.camera.apply_mouse_delta_clamped(
-                fx,
-                fy,
+                adj_x,
+                adj_y,
                 sens,
                 m_yaw,
                 m_pitch,
@@ -2936,6 +2970,65 @@ fn physical_key_to_goldsrc(code: KeyCode) -> Option<&'static str> {
 
 fn finite_or(v: f32, fallback: f32) -> f32 {
     if v.is_finite() { v } else { fallback }
+}
+
+/// GoldSrc `IN_MouseMove` zoom sensitivity multiplier (`client.dll` `0x10036130..10036270`):
+/// returns `(fov / default_fov) * zoom_ratio` whenever zoomed (`fov != default_fov`), unclamped.
+fn compute_zoom_sens_scale(fov: f32, default_fov: f32, zoom_ratio: f32) -> f32 {
+    if default_fov > 1.0 && (fov - default_fov).abs() > 1e-4 {
+        (fov / default_fov) * zoom_ratio.max(0.0)
+    } else {
+        1.0
+    }
+}
+
+/// GoldSrc `IN_MouseMove` custom acceleration & zoom sensitivity (`client.dll` `0x10036130..10036270`).
+#[allow(clippy::too_many_arguments)]
+fn compute_mouse_move_params(
+    fx: f32,
+    fy: f32,
+    base_sens: f32,
+    zoom_sens_scale: f32,
+    m_customaccel: i32,
+    accel_scale: f32,
+    accel_max: f32,
+    accel_exp: f32,
+    m_yaw: f32,
+    m_pitch: f32,
+) -> (f32, f32, f32) {
+    let (mut adj_x, mut adj_y) = (fx, fy);
+    let mut sens = base_sens.max(0.0);
+    if m_customaccel != 0 {
+        if m_customaccel == 2 {
+            adj_x *= m_yaw;
+            adj_y *= m_pitch;
+        }
+        let mag = (adj_x * adj_x + adj_y * adj_y).sqrt();
+        let accel = if mag > 0.0 {
+            finite_or(mag.powf(accel_exp) * accel_scale, 0.0)
+        } else {
+            0.0
+        };
+        sens += accel;
+        if accel_max > 1e-4 {
+            sens = sens.min(accel_max);
+        }
+    }
+    (adj_x, adj_y, sens * zoom_sens_scale)
+}
+
+/// GoldSrc frame rate cap (`hw.dll` `FUN_101d43d0`, `1 < maxclients`): enforces `fps_max >= 20.0`
+/// in multiplayer (`max_clients > 1`).
+fn effective_fps_limit(fps_max: f32, fps_override: bool, active: bool, max_clients: u8) -> Option<f32> {
+    if fps_max <= 0.0 {
+        return None;
+    }
+    if !active {
+        return Some(31.0);
+    }
+    let min_fps = if max_clients > 1 { 20.0 } else { 0.5 };
+    let f = fps_max.max(min_fps);
+    Some(if fps_override { f } else { f.min(100.0) })
 }
 
 /// Converts 1-based `HudState.players` entity keys to 0-based `ScoreRow.slot` and `names` keys.
@@ -3150,5 +3243,52 @@ mod tests {
         assert_eq!(vgui_menu_select_command(2, 2), "jointeam 2");
         assert_eq!(vgui_menu_select_command(26, 1), "joinclass 1");
         assert_eq!(vgui_menu_select_command(4, 3), "menuselect 3");
+    }
+
+    #[test]
+    fn mouse_accel_zoom_sens_and_multiplayer_fps_floor_match_build_10210() {
+        // Zoom scale has no 0.5 deadzone and no [0.05, 2.0] clamp.
+        let low_zoom = compute_zoom_sens_scale(10.0, 90.0, 0.1);
+        assert!((low_zoom - (10.0 / 90.0) * 0.1).abs() < 1e-5);
+        let high_zoom = compute_zoom_sens_scale(45.0, 90.0, 5.0);
+        assert!((high_zoom - 2.5).abs() < 1e-5);
+
+        // Total (sensitivity + accel) is capped by m_customaccel_max (> 1e-4) BEFORE zoom scaling.
+        let (dx, dy, sens) = compute_mouse_move_params(
+            10.0, 0.0, 2.0, 0.5, 1, 1.0, 5.0, 5.0, 0.022, 0.022,
+        );
+        assert_eq!((dx, dy), (10.0, 0.0));
+        assert!((sens - 2.5).abs() < 1e-5);
+
+        // m_customaccel == 2 applies extra m_yaw / m_pitch scaling.
+        let (dx2, dy2, sens2) = compute_mouse_move_params(
+            100.0, -50.0, 2.0, 1.0, 2, 0.5, 0.0, 1.0, 0.022, 0.03,
+        );
+        assert!((dx2 - 2.2).abs() < 1e-5);
+        assert!((dy2 - (-1.5)).abs() < 1e-5);
+        let expected_mag = (dx2 * dx2 + dy2 * dy2).sqrt();
+        assert!((sens2 - (2.0 + expected_mag * 0.5)).abs() < 1e-5);
+
+        // Multiplayer enforces fps_max >= 20.0.
+        assert_eq!(effective_fps_limit(10.0, false, true, 16), Some(20.0));
+        assert_eq!(effective_fps_limit(10.0, false, true, 1), Some(10.0));
+        assert_eq!(effective_fps_limit(150.0, false, true, 16), Some(100.0));
+        assert_eq!(effective_fps_limit(150.0, true, true, 16), Some(150.0));
+    }
+
+    #[test]
+    fn hud_feeds_expire_respects_zero_deathnotice_and_saytext() {
+        let mut feeds = HudFeeds::default();
+        feeds.deaths.push((
+            DeathNotice { killer: 1, victim: 2, headshot: false, weapon: "ak47".into() },
+            1.0,
+        ));
+        feeds.chat.push((
+            HudChatEntry { text: "hi".into(), team: None },
+            1.0,
+        ));
+        feeds.expire(1.1, 0.0, 0.0, 2.0);
+        assert!(feeds.deaths.is_empty());
+        assert!(feeds.chat.is_empty());
     }
 }

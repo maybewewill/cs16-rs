@@ -90,6 +90,7 @@ fn stationary_world_frames_are_small_deltas() {
 #[test]
 fn stale_delta_request_falls_back_to_full_update() {
     let mut h = Harness::new(4);
+    h.server.console_command("sv_maxupdaterate 102");
     let mut probe = joined(&mut h, "A", &mut []);
     h.step(&mut [&mut probe], 20);
     let deltas = probe.stats().delta_updates;
@@ -144,6 +145,7 @@ fn moved_entity_is_updated_and_removed_entity_disappears() {
 #[test]
 fn update_rate_follows_userinfo() {
     let mut h = Harness::new(4);
+    h.server.console_command("sv_maxupdaterate 102");
     let mut probe = joined(&mut h, "A", &mut []);
     probe.send_stringcmd("setinfo cl_updaterate 20");
     h.step(&mut [&mut probe], 100);
@@ -155,6 +157,7 @@ fn update_rate_follows_userinfo() {
 #[test]
 fn no_update_is_sent_before_it_is_due() {
     let mut h = Harness::new(4);
+    h.server.console_command("sv_maxupdaterate 102");
     let mut probe = joined(&mut h, "A", &mut []);
     probe.send_stringcmd("setinfo cl_updaterate 10");
     h.step(&mut [&mut probe], 200);
@@ -181,6 +184,9 @@ fn oversized_frame_drops_the_whole_unreliable_part_as_hlds() {
         }
     }
     assert_eq!(h.server.client_state(0), ClientState::Active);
+    h.server.console_command("sv_maxupdaterate 102");
+    probe.send_stringcmd("setinfo cl_updaterate 60");
+    h.step(&mut [&mut probe], 20);
     let dropped = h.server.net_stats().entity_blocks_dropped;
     for _ in 0..30 {
         probe.queue_cmd(forward());
@@ -292,6 +298,7 @@ fn the_game_chooses_the_viewpoint_of_each_update() {
 #[test]
 fn omitting_clc_delta_requests_a_full_update() {
     let mut h = Harness::new(4);
+    h.server.console_command("sv_maxupdaterate 102");
     let mut probe = joined(&mut h, "A", &mut []);
     h.step(&mut [&mut probe], 20);
     assert!(probe.stats().delta_updates > 0);
@@ -375,6 +382,7 @@ fn low_rate_client_still_receives_updates() {
 #[test]
 fn choked_updates_are_announced_in_the_next_update() {
     let mut h = Harness::new(4);
+    h.server.console_command("sv_maxupdaterate 102");
     let mut probe = joined(&mut h, "A", &mut []);
     probe.send_stringcmd("setinfo rate 1000");
     probe.send_stringcmd("setinfo cl_updaterate 102");
@@ -479,6 +487,7 @@ fn reliable_message_and_large_frame_share_the_datagram_budget() {
 #[test]
 fn reliable_flood_does_not_exceed_the_rate() {
     let mut h = Harness::new(4);
+    h.server.console_command("sv_maxupdaterate 102");
     let mut probe = joined(&mut h, "A", &mut []);
     let rate = 30_000; // the probe's userinfo
     let bytes_before = probe.stats().bytes_in;
@@ -535,6 +544,7 @@ fn withheld_reliable_ack_is_not_amplified() {
 #[test]
 fn rejected_datagram_keeps_the_delta_request() {
     let mut h = Harness::new(4);
+    h.server.console_command("sv_maxupdaterate 102");
     let mut probe = joined(&mut h, "A", &mut []);
     h.step(&mut [&mut probe], 20);
     let (fulls, deltas) = (probe.stats().full_updates, probe.stats().delta_updates);

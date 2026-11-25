@@ -22,7 +22,7 @@ use crate::game::{
     entity_state_from_vars,
 };
 use crate::map::ServerMap;
-use crate::oob::{ChallengeIssuer, OOB_GLOBAL_REPLIES_PER_SEC, OobLimiter};
+use crate::oob::{ChallengeIssuer, OOB_GLOBAL_REPLIES_PER_SEC, OobLimiter, QueryRateLimiter};
 use crate::precache::PrecacheTables;
 use crate::world::WorldLinks;
 use crate::world::consts::{EF_MUZZLEFLASH, EF_NOINTERP, MOVETYPE_WALK, SOLID_SLIDEBOX};
@@ -73,7 +73,8 @@ impl Default for ServerConfig {
             timeout_secs: 60.0,
             signon_timeout_secs: 120.0,
             min_update_rate: 10,
-            max_update_rate: 102,
+            // Retail `swds.dll:0x10312b7c` default `sv_maxupdaterate` is 30.
+            max_update_rate: 30,
             min_rate: 1000,
             max_rate: 100_000,
             max_edicts: DEFAULT_MAX_EDICTS,
@@ -83,6 +84,8 @@ impl Default for ServerConfig {
 
 pub struct Server<G: GameDll> {
     pub(crate) cfg: ServerConfig,
+    pub(crate) base_min_rate: u32,
+    pub(crate) base_max_rate: u32,
     pub(crate) map: ServerMap,
     pub(crate) game: G,
     pub(crate) deltas: DeltaRegistry,
@@ -103,6 +106,7 @@ pub struct Server<G: GameDll> {
     pub(crate) usercmd_schema: Option<DeltaSchema>,
     pub(crate) challenges: ChallengeIssuer,
     pub(crate) limiter: OobLimiter,
+    pub(crate) query_limiter: QueryRateLimiter,
     /// Replies to connectionless datagrams without a valid challenge, all addresses together.
     pub(crate) oob_budget: TokenBucket,
     /// The movevars as the cvars had them when the first command of this frame was checked
@@ -230,10 +234,14 @@ impl<G: GameDll> Server<G> {
         mut cvars: CVarRegistry,
     ) -> Self {
         let cfg = cfg.sanitized();
+        let base_min_rate = cfg.min_rate;
+        let base_max_rate = cfg.max_rate;
         // The name the operator configured (`--hostname`) is the `hostname` cvar the game reads for
         // `gmsgServerName` (the title of the MOTD window), as in the original, where the one
         // cvar is both. A registry with no such cvar is left alone.
         cvars.set("hostname", cfg.hostname.clone());
+        cvars.set("sv_minupdaterate", cfg.min_update_rate.to_string());
+        cvars.set("sv_maxupdaterate", cfg.max_update_rate.to_string());
         let usermsgs = game.usermsgs();
         let edicts = EdictPool::new(cfg.max_clients, cfg.max_edicts);
         let precache = Self::map_precache(&map);
@@ -248,6 +256,8 @@ impl<G: GameDll> Server<G> {
             views: (0..slots).map(|_| ClientView::default()).collect(),
             clients: (0..slots).map(|_| Client::free()).collect(),
             cfg,
+            base_min_rate,
+            base_max_rate,
             map,
             game,
             deltas,
@@ -261,6 +271,7 @@ impl<G: GameDll> Server<G> {
             usercmd_schema,
             challenges: ChallengeIssuer::new(),
             limiter: OobLimiter::new(),
+            query_limiter: QueryRateLimiter::new(),
             oob_budget: TokenBucket::new(OOB_GLOBAL_REPLIES_PER_SEC, OOB_GLOBAL_REPLIES_PER_SEC),
             frame_movevars: None,
             spawn_count: 1,
@@ -348,6 +359,48 @@ impl<G: GameDll> Server<G> {
         self.compute_baselines();
     }
 
+    /// Syncs dynamic server rate & updaterate cvars (`sv_minupdaterate`, `sv_maxupdaterate`,
+    /// `sv_minrate`, `sv_maxrate`, `sv_lan`, `sv_lan_rate`) per `swds.dll:FUN_102081e0`.
+    fn sync_rate_cvars(&mut self) {
+        if let Some(c) = self.cvars.get("sv_minupdaterate") {
+            let v = c.as_f32();
+            if v.is_finite() {
+                self.cfg.min_update_rate = if v > 0.0 { v as u32 } else { 1 }.max(1);
+            }
+        }
+        if let Some(c) = self.cvars.get("sv_maxupdaterate") {
+            let v = c.as_f32();
+            if v.is_finite() {
+                let raw = if v > 0.0 { v as u32 } else { 30 };
+                self.cfg.max_update_rate = raw.max(self.cfg.min_update_rate);
+            }
+        }
+        if let Some(c) = self.cvars.get("sv_minrate") {
+            let v = c.as_f32();
+            self.cfg.min_rate = if v.is_finite() && v > 0.0 {
+                (v as u32).max(1000)
+            } else {
+                self.base_min_rate
+            };
+        }
+        if let Some(c) = self.cvars.get("sv_maxrate") {
+            let v = c.as_f32();
+            self.cfg.max_rate = if v.is_finite() && v > 0.0 {
+                (v as u32).max(self.cfg.min_rate)
+            } else {
+                self.base_max_rate.max(self.cfg.min_rate)
+            };
+        }
+        if self.cvars.get_f32("sv_lan") > 0.0 {
+            let lan_rate = self.cvars.get_f32("sv_lan_rate");
+            if lan_rate.is_finite() && lan_rate > 0.0 {
+                let r = (lan_rate as u32).max(1000);
+                self.cfg.min_rate = r;
+                self.cfg.max_rate = r;
+            }
+        }
+    }
+
     /// One server frame, in the order of HLDS `SV_Frame_Internal` (ReHLDS
     /// `rehlds/engine/sv_main.cpp`, read 2026-11-21): the frame time is `now` minus the previous
     /// frame's, at most [`MAX_FRAMETIME`] (`Host_FilterTime`); then up to
@@ -365,8 +418,14 @@ impl<G: GameDll> Server<G> {
             return;
         }
         let real_dt = now - self.real_time;
+        // Retail `swds.dll:FUN_101d2040` (`0x101d221e`): skip early frames when `dt < 1.0 / (ticrate + 1.0)`.
+        let ticrate = f64::from(self.cvars.get_f32("sys_ticrate"));
+        if ticrate.is_finite() && ticrate > 0.0 && real_dt < 1.0 / (ticrate + 1.0) {
+            return;
+        }
         self.real_time = now;
         self.frametime = real_dt.min(MAX_FRAMETIME);
+        self.sync_rate_cvars();
         self.accrue_client_time(real_dt);
         self.oob_budget.refill(real_dt);
         self.frame_movevars = None;
@@ -1680,7 +1739,93 @@ mod tests {
         assert_eq!(cfg.game_dir, "cstrike");
         assert_eq!(cfg.build, 8684);
         assert_eq!((cfg.timeout_secs, cfg.signon_timeout_secs), (60.0, 120.0));
-        assert_eq!((cfg.min_update_rate, cfg.max_update_rate), (10, 102));
+        assert_eq!((cfg.min_update_rate, cfg.max_update_rate), (10, 30));
         assert_eq!((cfg.min_rate, cfg.max_rate), (1000, 100_000));
+    }
+
+    #[test]
+    fn sys_ticrate_gates_early_frames_and_rate_cvars_apply_dynamically() {
+        let mut server = Server::new(
+            ServerConfig::default(),
+            ServerMap::stub("test"),
+            WorstCaseGame {
+                entities: 0,
+                all_fields: false,
+            },
+            DeltaRegistry::cs16_default(),
+            CVarRegistry::new_with_defaults(),
+        );
+        let mut hub = cs_transport::LoopbackHub::new();
+
+        // Default sys_ticrate is 100 -> 1/(100+1) ~= 0.0099s.
+        server.frame(&mut hub, 0.01);
+        assert_eq!(server.real_time, 0.01);
+        // Too early (dt = 0.005 < 0.0099): skipped.
+        server.frame(&mut hub, 0.015);
+        assert_eq!(server.real_time, 0.01);
+        // At dt = 0.01: accepted.
+        server.frame(&mut hub, 0.02);
+        assert_eq!(server.real_time, 0.02);
+
+        // Dynamic cvar updates on next frame.
+        server.set_cvar("sv_maxupdaterate", "66");
+        server.set_cvar("sv_minupdaterate", "20");
+        server.set_cvar("sv_minrate", "5000");
+        server.set_cvar("sv_maxrate", "25000");
+        server.frame(&mut hub, 0.03);
+        assert_eq!((server.config().min_update_rate, server.config().max_update_rate), (20, 66));
+        assert_eq!((server.config().min_rate, server.config().max_rate), (5000, 25000));
+
+        server.set_cvar("sv_lan", "1");
+        server.frame(&mut hub, 0.04);
+        assert_eq!((server.config().min_rate, server.config().max_rate), (20000, 20000));
+    }
+
+    #[test]
+    fn rejects_more_than_five_pending_connections_from_same_ip() {
+        use std::net::SocketAddr;
+        use cs_proto48::crypto::md5_hex;
+        use cs_proto48::handshake::{
+            OobPacket, default_cs16_protinfo, default_cs16_userinfo, encode_connect_48,
+            encode_getchallenge, lan_steam_auth_ticket, parse_oob_packet,
+        };
+
+        let mut server = Server::new(
+            ServerConfig::default(),
+            ServerMap::stub("test"),
+            WorstCaseGame {
+                entities: 0,
+                all_fields: false,
+            },
+            DeltaRegistry::cs16_default(),
+            CVarRegistry::new_with_defaults(),
+        );
+        let mut hub = cs_transport::LoopbackHub::new();
+        server.frame(&mut hub, 0.02);
+
+        let prot = default_cs16_protinfo(&md5_hex(b"key"));
+        for port in 27010..27016u16 {
+            let from = PeerAddr::Udp(SocketAddr::from(([192, 168, 1, 50], port)));
+            server.handle_connectionless(&mut hub, from, &encode_getchallenge(true));
+            let ch = server.challenges.issue(&from, server.real_time);
+            let req = encode_connect_48(
+                ch,
+                &prot,
+                &default_cs16_userinfo(&format!("P{port}")),
+                &lan_steam_auth_ticket(1000 + u64::from(port)),
+            );
+            let out = server.handle_oob_connect_for_test(from, &req);
+            if port < 27015 {
+                assert!(
+                    matches!(parse_oob_packet(&out).unwrap(), OobPacket::S2cConnection { .. }),
+                    "port {port} should be accepted: {out:?}"
+                );
+            } else {
+                assert!(
+                    matches!(parse_oob_packet(&out).unwrap(), OobPacket::S2cReject(_)),
+                    "6th pending connection from same IP should be rejected"
+                );
+            }
+        }
     }
 }

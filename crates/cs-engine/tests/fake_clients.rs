@@ -295,7 +295,7 @@ fn fake_clients_skip_unlag_and_events() {
         play(eng, FEV_GLOBAL);
         play(eng, FEV_GLOBAL | cs_engine::event_flags::FEV_RELIABLE);
     });
-    h.step(&mut [&mut a], 2);
+    h.step(&mut [&mut a], 8);
     assert_eq!(h.server.queued_event_count(bot), 0);
     assert_eq!(h.server.client_reliable_backlog(bot), 0);
     let seen = a
@@ -374,7 +374,7 @@ fn real_clients_unchanged() {
     query.push(A2S_INFO);
     query.extend_from_slice(A2S_INFO_PAYLOAD);
     asker.send(server, &query).expect("loopback send");
-    h.step(&mut [&mut a], 2);
+    h.step(&mut [&mut a], 8);
     let (_, reply) = asker.recv().expect("a challenge");
     let A2sInfoReply::Challenge(challenge) = decode_a2s_info_reply(&reply, "", 0).unwrap() else {
         panic!("expected a challenge");
@@ -382,7 +382,7 @@ fn real_clients_unchanged() {
     asker
         .send(server, &encode_a2s_info_request(Some(challenge)))
         .expect("loopback send");
-    h.step(&mut [&mut a], 2);
+    h.step(&mut [&mut a], 8);
     let (_, reply) = asker.recv().expect("the server info");
     let A2sInfoReply::Info(info) = decode_a2s_info_reply(&reply, "", 0).unwrap() else {
         panic!("expected the info");

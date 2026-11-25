@@ -66,7 +66,7 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     reg.register("fps_override", "0", arch, "Allow fps_max above 100 when set to 1");
     reg.register("host_timescale", "1", CVarFlags::NONE, "Host simulation time scale multiplier");
     reg.register("sv_use_steam_networking", "1", arch, "Use Steam networking transport when available (0 or 1)");
-    reg.register("gamma", "2.5", arch, "Display gamma (GoldSrc default 2.5)");
+    reg.register("gamma", "2.2", arch, "Display gamma (GoldSrc hw.dll:0x1031e138 default 2.2)");
     reg.register("texgamma", "2.0", CVarFlags::NONE, "Texture gamma (GoldSrc default 2.0)");
     reg.register("lightgamma", "2.5", CVarFlags::NONE, "Lightmap gamma (GoldSrc default 2.5)");
     reg.register("brightness", "0.0", arch, "Display brightness factor (GoldSrc default 0.0)");
@@ -134,11 +134,23 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     reg.register("sv_voicequality", "3", srv, "Server voice codec quality level (1..5)");
     reg.register("voice_serverdebug", "0", srv, "Log server voice relay diagnostics (0 or 1)");
 
-    // Server / Physics (exact CS 1.6 defaults)
+    // Server / Physics (exact CS 1.6 defaults; engine `swds.dll:0x103133a4` `sv_accelerate` is "10",
+    // overridden to "5" by `cs-game` `RestartRound`/`Think`)
     reg.register("hostname", "Counter-Strike 1.6 Rust", srv_arch, "Server name");
+    reg.register("sv_contact", "", srv, "Server administrator contact email/URL");
+    reg.register("sys_ticrate", "100.0", CVarFlags::NONE, "Target server frame rate (Hz, swds.dll:0x1031154c)");
+    reg.register("sv_maxupdaterate", "30.0", CVarFlags::NONE, "Maximum client update rate (swds.dll:0x10312b7c)");
+    reg.register("sv_minupdaterate", "10.0", CVarFlags::NONE, "Minimum client update rate (swds.dll:0x10312b90)");
+    reg.register("sv_minrate", "0", CVarFlags::NONE, "Minimum client bandwidth rate in bytes/sec (swds.dll:0x10312bcc)");
+    reg.register("sv_maxrate", "0", CVarFlags::NONE, "Maximum client bandwidth rate in bytes/sec (swds.dll:0x10312bb8)");
+    reg.register("sv_lan", "0", CVarFlags::NONE, "LAN server mode (0 or 1)");
+    reg.register("sv_lan_rate", "20000.0", CVarFlags::NONE, "LAN client rate in bytes/sec");
+    reg.register("max_queries_sec", "3.0", CVarFlags::NONE, "Max A2S queries per second per IP (swds.dll:FUN_1020b250)");
+    reg.register("max_queries_sec_global", "30", CVarFlags::NONE, "Max A2S queries per second globally (swds.dll:FUN_1020b250)");
+    reg.register("max_queries_window", "60", CVarFlags::NONE, "Window in seconds for A2S query rate limits (swds.dll:FUN_1020b250)");
     reg.register("sv_gravity", "800", srv, "World gravity (units/sec^2)");
     reg.register("sv_maxspeed", "320", srv, "Maximum player movement speed");
-    reg.register("sv_accelerate", "5", srv, "Ground acceleration");
+    reg.register("sv_accelerate", "10", srv, "Ground acceleration");
     reg.register("sv_airaccelerate", "10", srv, "Air acceleration");
     reg.register("sv_friction", "4", srv, "Ground friction");
     reg.register("sv_stopspeed", "100", srv, "Minimum stopping speed");

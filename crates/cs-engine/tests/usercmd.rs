@@ -210,8 +210,10 @@ impl Lcg {
 #[test]
 fn garbage_from_connected_address_never_panics() {
     let mut h = Harness::new(4);
+    h.server.console_command("sv_maxupdaterate 102");
     let mut target = h.add_probe("Target");
     let mut other = h.add_probe("Other");
+    other.set_userinfo("cl_updaterate", "60");
     h.step(&mut [&mut target, &mut other], 200);
     assert_eq!(h.server.client_state(0), ClientState::Active);
     assert_eq!(h.server.client_state(1), ClientState::Active);
@@ -423,8 +425,10 @@ fn bz2_stream(body: &[u8]) -> Vec<u8> {
 #[test]
 fn compressed_stream_bombs_are_refused() {
     let mut h = Harness::new(4);
+    h.server.console_command("sv_maxupdaterate 102");
     let mut target = h.add_probe("Target");
     let mut other = h.add_probe("Other");
+    other.set_userinfo("cl_updaterate", "60");
     h.step(&mut [&mut target, &mut other], 200);
     assert_eq!(h.server.client_state(0), ClientState::Active);
     let updates_before = entity_updates(&other);
@@ -465,8 +469,10 @@ fn compressed_stream_bombs_are_refused() {
 #[test]
 fn fragment_flood_stays_bounded() {
     let mut h = Harness::new(4);
+    h.server.console_command("sv_maxupdaterate 102");
     let mut target = h.add_probe("Target");
     let mut other = h.add_probe("Other");
+    other.set_userinfo("cl_updaterate", "60");
     h.step(&mut [&mut target, &mut other], 200);
     assert_eq!(h.server.client_state(0), ClientState::Active);
     let updates_before = entity_updates(&other);
@@ -521,8 +527,10 @@ fn send_bombs(h: &mut Harness, target: &mut Probe, other: &mut Probe, seq: &mut 
 #[test]
 fn repeated_refused_streams_drop_the_sender() {
     let mut h = Harness::new(4);
+    h.server.console_command("sv_maxupdaterate 102");
     let mut target = h.add_probe("Target");
     let mut other = h.add_probe("Other");
+    other.set_userinfo("cl_updaterate", "60");
     h.step(&mut [&mut target, &mut other], 200);
     assert_eq!(h.server.client_state(0), ClientState::Active);
     let updates_before = entity_updates(&other);
@@ -548,6 +556,7 @@ fn an_accepted_stream_resets_the_refused_count() {
     let mut h = Harness::new(4);
     let mut target = h.add_probe("Target");
     let mut other = h.add_probe("Other");
+    other.set_userinfo("cl_updaterate", "60");
     h.step(&mut [&mut target, &mut other], 200);
     assert_eq!(h.server.client_state(0), ClientState::Active);
 
@@ -572,6 +581,7 @@ fn spoofed_fragment_headers_do_not_drop_the_client() {
     let mut h = Harness::new(4);
     let mut target = h.add_probe("Target");
     let mut other = h.add_probe("Other");
+    other.set_userinfo("cl_updaterate", "60");
     h.step(&mut [&mut target, &mut other], 200);
     assert_eq!(h.server.client_state(0), ClientState::Active);
 

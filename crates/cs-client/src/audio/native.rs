@@ -343,6 +343,25 @@ impl AudioEngine {
         }
     }
 
+    /// Dispatch `SendAudio` (`client.dll` `FUN_10064bc0`) and arm `radio_flashes[sender]`
+    /// for 22 half-cycles of `0.15s` (`3.3s`) when `sender > 0`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn play_send_audio_with_radar(
+        &mut self,
+        vfs: Option<&Vfs>,
+        raw_spec: &str,
+        volume: f32,
+        pitch: u8,
+        sender: u8,
+        now: f64,
+        radio_flashes: &mut HashMap<u8, f64>,
+    ) {
+        self.play_send_audio(vfs, raw_spec, volume, pitch);
+        if sender > 0 {
+            radio_flashes.insert(sender, now + cs_clientcore::hud::RADIO_FLASH_DURATION_SECS);
+        }
+    }
+
     pub fn play_reload_sound(&mut self, vfs: Option<&Vfs>, volume: u8, kind: u8) {
         let vol = f32::from(volume) / 255.0;
         let path = impacts::reload_sound_path(kind);
@@ -456,5 +475,21 @@ struct SharedBytes(Arc<[u8]>);
 impl AsRef<[u8]> for SharedBytes {
     fn as_ref(&self) -> &[u8] {
         &self.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn send_audio_with_radar_arms_3_3s_flash_for_positive_sender() {
+        let mut engine = AudioEngine::new();
+        let mut flashes = HashMap::new();
+        engine.play_send_audio_with_radar(None, "%!MRAD_GO", 1.0, 100, 4, 5.0, &mut flashes);
+        assert_eq!(flashes.get(&4), Some(&(5.0 + 3.3)));
+
+        engine.play_send_audio_with_radar(None, "%!MRAD_ctwin", 1.0, 100, 0, 6.0, &mut flashes);
+        assert!(!flashes.contains_key(&0));
     }
 }

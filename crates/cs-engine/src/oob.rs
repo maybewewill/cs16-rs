@@ -9,8 +9,10 @@
 //! up to 32 bytes), which is why the caller charges replies to unchallenged datagrams to the
 //! per-address [`OobLimiter`] and to a global budget of [`OOB_GLOBAL_REPLIES_PER_SEC`].
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::hash::{BuildHasher, RandomState};
+use std::net::IpAddr;
+use std::sync::Mutex;
 
 use cs_proto48::PROTOCOL_VERSION;
 use cs_proto48::handshake::{
@@ -38,11 +40,35 @@ const LIMITER_TOKENS_PER_SEC: f64 = 10.0;
 const LIMITER_CAPACITY: f64 = 20.0;
 const LIMITER_MAX_ADDRS: usize = 4096;
 
-/// Issues and checks challenges without keeping a table: a challenge is a keyed
-/// hash of the address and the number of the current 30-second window.
+/// Result of validating a client connect challenge (`swds.dll:FUN_10205640`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChallengeStatus {
+    Ok,
+    Missing,
+    Bad,
+}
+
+#[derive(Debug)]
+struct IssuedChallenge {
+    challenge: u32,
+    issued_at: f64,
+    touch: u64,
+}
+
+#[derive(Debug, Default)]
+struct ChallengeTable {
+    by_addr: HashMap<PeerAddr, IssuedChallenge>,
+    by_touch: BTreeMap<u64, PeerAddr>,
+    next_touch: u64,
+}
+
+/// Issues and checks challenges for sender addresses (`swds.dll:FUN_10205640`), keeping a
+/// bounded table so missing challenges (`"No challenge for your address.\n"`) are
+/// distinguished from mismatched challenges (`"Bad challenge.\n"`).
 #[derive(Debug)]
 pub struct ChallengeIssuer {
     key: RandomState,
+    table: Mutex<ChallengeTable>,
 }
 
 impl Default for ChallengeIssuer {
@@ -55,18 +81,63 @@ impl ChallengeIssuer {
     pub fn new() -> Self {
         Self {
             key: RandomState::new(),
+            table: Mutex::new(ChallengeTable::default()),
         }
     }
 
     pub fn issue(&self, addr: &PeerAddr, now: f64) -> u32 {
-        self.challenge_for(addr, window(now))
+        let challenge = self.challenge_for(addr, window(now));
+        let mut table = self.table.lock().unwrap_or_else(|e| e.into_inner());
+        let touch = table.next_touch;
+        table.next_touch += 1;
+        if !table.by_addr.contains_key(addr)
+            && table.by_addr.len() >= LIMITER_MAX_ADDRS
+            && let Some((_, oldest)) = table.by_touch.pop_first()
+        {
+            table.by_addr.remove(&oldest);
+        }
+        if let Some(prev) = table.by_addr.get(addr) {
+            let old_touch = prev.touch;
+            table.by_touch.remove(&old_touch);
+        }
+        table.by_touch.insert(touch, *addr);
+        table.by_addr.insert(
+            *addr,
+            IssuedChallenge {
+                challenge,
+                issued_at: now,
+                touch,
+            },
+        );
+        challenge
     }
 
-    /// Accepts the challenge of the current window and of the previous one.
+    /// Distinguishes an accepted challenge, a missing/expired challenge for `addr`, and a
+    /// mismatched challenge (`swds.dll:FUN_10205640`).
+    pub fn verify(&self, addr: &PeerAddr, challenge: u32, now: f64) -> ChallengeStatus {
+        if !now.is_finite() {
+            return ChallengeStatus::Missing;
+        }
+        let table = self.table.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(entry) = table.by_addr.get(addr) else {
+            return ChallengeStatus::Missing;
+        };
+        if !entry.issued_at.is_finite()
+            || now < entry.issued_at
+            || now - entry.issued_at > 2.0 * CHALLENGE_BUCKET_SECS
+        {
+            return ChallengeStatus::Missing;
+        }
+        if entry.challenge == challenge {
+            ChallengeStatus::Ok
+        } else {
+            ChallengeStatus::Bad
+        }
+    }
+
+    /// Accepts the challenge if it was issued for `addr` and has not expired.
     pub fn check(&self, addr: &PeerAddr, challenge: u32, now: f64) -> bool {
-        let current = window(now);
-        challenge == self.challenge_for(addr, current)
-            || challenge == self.challenge_for(addr, current.wrapping_sub(1))
+        self.verify(addr, challenge, now) == ChallengeStatus::Ok
     }
 
     /// Never 0, so that "no challenge" and "challenge 0" cannot be confused, and never above
@@ -140,6 +211,101 @@ impl OobLimiter {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum QueryIpKey {
+    Ip(IpAddr),
+    Loopback(u32),
+    Web(u32),
+}
+
+impl QueryIpKey {
+    fn from_peer(addr: &PeerAddr) -> Self {
+        match addr {
+            PeerAddr::Udp(sa) => Self::Ip(sa.ip()),
+            PeerAddr::Loopback(id) => Self::Loopback(*id),
+            PeerAddr::Web(id) => Self::Web(*id),
+        }
+    }
+}
+
+/// Retail A2S query rate limiter (`swds.dll:FUN_1020b250`): enforces `max_queries_sec`,
+/// `max_queries_sec_global`, and `max_queries_window` over a sliding time window.
+#[derive(Debug, Default)]
+pub struct QueryRateLimiter {
+    per_ip: HashMap<QueryIpKey, (VecDeque<f64>, u64)>,
+    by_touch: BTreeMap<u64, QueryIpKey>,
+    global: VecDeque<f64>,
+    next_touch: u64,
+}
+
+impl QueryRateLimiter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn allow(
+        &mut self,
+        addr: &PeerAddr,
+        now: f64,
+        max_queries_sec: f64,
+        max_queries_sec_global: f64,
+        window_secs: f64,
+    ) -> bool {
+        if !now.is_finite() {
+            return false;
+        }
+        let window = if window_secs.is_finite() && window_secs > 0.0 {
+            window_secs.max(1.0)
+        } else {
+            60.0
+        };
+        let cutoff = now - window;
+        while let Some(&front) = self.global.front() {
+            if front <= cutoff || front > now {
+                self.global.pop_front();
+            } else {
+                break;
+            }
+        }
+        if max_queries_sec_global.is_finite() && max_queries_sec_global > 0.0 {
+            let global_limit = (max_queries_sec_global * window).floor().max(1.0) as usize;
+            if self.global.len() >= global_limit {
+                return false;
+            }
+        }
+
+        let key = QueryIpKey::from_peer(addr);
+        let touch = self.next_touch;
+        self.next_touch += 1;
+        if !self.per_ip.contains_key(&key)
+            && self.per_ip.len() >= LIMITER_MAX_ADDRS
+            && let Some((_, oldest)) = self.by_touch.pop_first()
+        {
+            self.per_ip.remove(&oldest);
+        }
+        let (times, old_touch) = self.per_ip.entry(key).or_insert_with(|| (VecDeque::new(), touch));
+        self.by_touch.remove(old_touch);
+        *old_touch = touch;
+        self.by_touch.insert(touch, key);
+        while let Some(&front) = times.front() {
+            if front <= cutoff || front > now {
+                times.pop_front();
+            } else {
+                break;
+            }
+        }
+        if max_queries_sec.is_finite() && max_queries_sec > 0.0 {
+            let per_ip_limit = (max_queries_sec * window).floor().max(1.0) as usize;
+            if times.len() >= per_ip_limit {
+                return false;
+            }
+        }
+        times.push_back(now);
+        self.global.push_back(now);
+        true
+    }
+}
+
 /// A connect request that passed every check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectRequest {
@@ -162,6 +328,7 @@ pub struct OobContext<'a> {
     pub players: &'a [PlayerQueryEntry],
     pub rules: &'a [(&'a str, &'a str)],
     pub is_full: bool,
+    pub sv_contact: &'a str,
 }
 
 /// Answers one connectionless datagram from `from`. The caller applies [`OobLimiter`] first.
@@ -194,14 +361,29 @@ pub fn handle_oob(
             userinfo_raw,
             ..
         } => {
-            // The challenge goes first: longer reject texts only reach a confirmed address.
-            if !ctx.challenges.check(from, challenge, now) {
-                return (reject("Bad challenge.\n"), false);
+            // The challenge goes first (`swds.dll:FUN_10205640`): missing vs mismatched.
+            match ctx.challenges.verify(from, challenge, now) {
+                ChallengeStatus::Ok => {}
+                ChallengeStatus::Missing => {
+                    return (reject("No challenge for your address.\n"), false);
+                }
+                ChallengeStatus::Bad => {
+                    return (reject("Bad challenge.\n"), false);
+                }
             }
-            if protocol != PROTOCOL_VERSION {
+            if protocol < PROTOCOL_VERSION {
                 return (
                     reject(&format!(
-                        "This server is using a different protocol ( {PROTOCOL_VERSION} ) than your client ( {protocol} ).\n"
+                        "This server is using a newer protocol ( {PROTOCOL_VERSION} ) than your client ( {protocol} ).  You should check for updates to your client.\n"
+                    )),
+                    true,
+                );
+            }
+            if protocol > PROTOCOL_VERSION {
+                return (
+                    reject(&format!(
+                        "This server is using an older protocol ( {PROTOCOL_VERSION} ) than your client ( {protocol} ).  If you believe this server is outdated, you can contact the server administrator at {}.\n",
+                        ctx.sv_contact
                     )),
                     true,
                 );
@@ -342,6 +524,7 @@ mod tests {
             players,
             rules: RULES,
             is_full,
+            sv_contact: "admin@example.com",
         }
     }
 
@@ -439,14 +622,28 @@ mod tests {
     }
 
     #[test]
-    fn connect_with_bad_challenge_is_rejected() {
+    fn connect_with_bad_or_missing_challenge_is_rejected() {
         let issuer = ChallengeIssuer::new();
         let q = query();
         let ctx = context(&issuer, &q, &[], false);
-        let bad = (1..).find(|c| !issuer.check(&addr(1), *c, NOW)).unwrap();
-        // Even with a wrong protocol the challenge is checked first.
+        let bad = 12345u32;
+        // Without a prior getchallenge for this address -> "No challenge for your address.\n".
         for protocol in [48, 47] {
             let raw = connect_datagram(protocol, bad, &default_cs16_userinfo("P").to_wire_string());
+            assert_eq!(
+                outcome(&raw, &addr(1), NOW, &ctx),
+                reject("No challenge for your address.\n")
+            );
+        }
+        // With an issued challenge for this address and a mismatched number -> "Bad challenge.\n".
+        let issued = issuer.issue(&addr(1), NOW);
+        let mismatched = if issued == 1 { 2 } else { 1 };
+        for protocol in [48, 47] {
+            let raw = connect_datagram(
+                protocol,
+                mismatched,
+                &default_cs16_userinfo("P").to_wire_string(),
+            );
             assert_eq!(
                 outcome(&raw, &addr(1), NOW, &ctx),
                 reject("Bad challenge.\n")
@@ -467,11 +664,39 @@ mod tests {
         let OobPacket::S2cReject(text) = parse_oob_packet(&reply).unwrap() else {
             panic!("expected a reject");
         };
-        assert!(text.contains("( 47 )"), "{text}");
         assert_eq!(
             text,
-            "This server is using a different protocol ( 48 ) than your client ( 47 ).\n"
+            "This server is using a newer protocol ( 48 ) than your client ( 47 ).  You should check for updates to your client.\n"
         );
+
+        let raw_newer = connect_datagram(49, challenge, &default_cs16_userinfo("P").to_wire_string());
+        let OobOutcome::Reply(reply_newer) = outcome(&raw_newer, &addr(1), NOW, &ctx) else {
+            panic!("newer client protocol must be rejected");
+        };
+        let OobPacket::S2cReject(text_newer) = parse_oob_packet(&reply_newer).unwrap() else {
+            panic!("expected a reject");
+        };
+        assert_eq!(
+            text_newer,
+            "This server is using an older protocol ( 48 ) than your client ( 49 ).  If you believe this server is outdated, you can contact the server administrator at admin@example.com.\n"
+        );
+    }
+
+    #[test]
+    fn query_rate_limiter_enforces_per_ip_and_global_windows() {
+        let mut q = QueryRateLimiter::new();
+        let a1 = PeerAddr::Udp(SocketAddr::from(([10, 0, 0, 1], 27005)));
+        let a1_alt = PeerAddr::Udp(SocketAddr::from(([10, 0, 0, 1], 27006)));
+        let a2 = PeerAddr::Udp(SocketAddr::from(([10, 0, 0, 2], 27005)));
+        // 3.0 * 60 = 180 per IP in 60s window (shared across ports on same IP).
+        for i in 0..180 {
+            let p = if i % 2 == 0 { &a1 } else { &a1_alt };
+            assert!(q.allow(p, NOW, 3.0, 30.0, 60.0));
+        }
+        assert!(!q.allow(&a1, NOW, 3.0, 30.0, 60.0));
+        assert!(q.allow(&a2, NOW, 3.0, 30.0, 60.0));
+        // After window elapses, allowed again.
+        assert!(q.allow(&a1, NOW + 61.0, 3.0, 30.0, 60.0));
     }
 
     #[test]

@@ -132,7 +132,7 @@ pub struct HudVisibility {
 
 pub fn compute_hud_visibility(
     alive: bool,
-    _health: i32,
+    health: i32,
     hidden: u8,
     timer_visible: bool,
 ) -> HudVisibility {
@@ -148,7 +148,7 @@ pub fn compute_hud_visibility(
         };
     }
     HudVisibility {
-        health_armor: alive && (hidden & HIDEHUD_HEALTH) == 0,
+        health_armor: alive && health > 0 && (hidden & HIDEHUD_HEALTH) == 0,
         timer: alive && timer_visible && (hidden & HIDEHUD_TIMER) == 0,
         money: (hidden & HIDEHUD_MONEY) == 0,
         ammo: alive && (hidden & HIDEHUD_WEAPONS) == 0,
@@ -156,6 +156,88 @@ pub fn compute_hud_visibility(
         radar: alive && (hidden & (HIDEHUD_HEALTH | HIDEHUD_WEAPONS)) == 0,
         crosshair: alive && (hidden & (HIDEHUD_WEAPONS | HIDEHUD_CROSSHAIR)) == 0,
     }
+}
+
+/// GoldSrc `CHudHealth::Draw` (`client.dll` `FUN_1004d9e0`) horizontal layout:
+/// cross at `cross_w / 2`, digits at `cross_w + digit_w / 2`.
+pub fn health_layout_x(cross_w: f32, digit_w: f32) -> (f32, f32) {
+    (cross_w * 0.5, cross_w + digit_w * 0.5)
+}
+
+/// GoldSrc `CHudStatusIcons::Draw` (`client.dll` `FUN_10065570`) initial bottom anchor Y.
+pub fn status_icon_anchor_y(screen_center_y: f32, scale: f32) -> f32 {
+    screen_center_y - 5.0 * scale
+}
+
+/// GoldSrc `TextMsg` case 4 (`HUD_PRINTCENTER`, `client.dll` `FUN_10069560`) position and fixed RGB `(255, 180, 30)`.
+pub fn center_print_layout(screen: Rect) -> (Pos2, Color32) {
+    (
+        Pos2::new(screen.center().x, screen.top() + screen.height() * 0.35),
+        Color32::from_rgb(255, 180, 30),
+    )
+}
+
+/// GoldSrc `CHudRadar::Draw` (`client.dll` `FUN_1004e6c0`) player dot size and RGBA.
+pub fn radar_player_dot_style(is_vip_or_bomb: bool, dot_sz: i32) -> (i32, [u8; 4]) {
+    if is_vip_or_bomb {
+        (dot_sz * 2, [185, 20, 20, 235])
+    } else {
+        (dot_sz, [150, 75, 250, 235])
+    }
+}
+
+/// Filter active killfeed notices by `hud_deathnotice_time` (`client.dll` `FUN_10047d70`, `FUN_10048270`),
+/// returning at most 4 newest entries in chronological order (empty when `max_age <= 0.0`).
+pub fn filter_active_death_notices<'a>(
+    feed: &'a [DeathNotice],
+    times: Option<&[f64]>,
+    now: f64,
+    max_age: f32,
+) -> Vec<&'a DeathNotice> {
+    if !max_age.is_finite() || max_age <= 0.0 {
+        return Vec::new();
+    }
+    let limit = f64::from(max_age);
+    let mut kept: Vec<&'a DeathNotice> = feed
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(idx, _)| match times.and_then(|ts| ts.get(*idx).copied()) {
+            Some(t) => now >= t && (now - t) <= limit,
+            None => true,
+        })
+        .take(4)
+        .map(|(_, entry)| entry)
+        .collect();
+    kept.reverse();
+    kept
+}
+
+/// Filter active chat lines by `hud_saytext_time` (`client.dll` `FUN_10064340`),
+/// returning at most 5 newest entries in chronological order (empty when `max_age <= 0.0`).
+pub fn filter_active_chat_entries<'a>(
+    entries: &'a [HudChatEntry],
+    times: Option<&[f64]>,
+    now: f64,
+    max_age: f32,
+) -> Vec<&'a HudChatEntry> {
+    if !max_age.is_finite() || max_age <= 0.0 {
+        return Vec::new();
+    }
+    let limit = f64::from(max_age);
+    let mut kept: Vec<&'a HudChatEntry> = entries
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(idx, _)| match times.and_then(|ts| ts.get(*idx).copied()) {
+            Some(t) => now >= t && (now - t) <= limit,
+            None => true,
+        })
+        .take(5)
+        .map(|(_, entry)| entry)
+        .collect();
+    kept.reverse();
+    kept
 }
 
 pub struct HudSprites {
@@ -957,7 +1039,8 @@ impl HudAnimState {
     }
 
     pub fn trigger_radio(&mut self, sender: u8, now: f64) {
-        self.radio_flashes.insert(sender, now + 0.15 * 22.0);
+        self.radio_flashes
+            .insert(sender, now + cs_clientcore::hud::RADIO_FLASH_DURATION_SECS);
     }
 }
 
@@ -998,10 +1081,15 @@ pub struct HudExtrasContext<'a> {
     pub buckets: Option<&'a WeaponBucketState>,
     pub anim: Option<&'a HudAnimState>,
     pub chat_entries: Option<&'a [HudChatEntry]>,
+    pub death_times: Option<&'a [f64]>,
+    pub chat_times: Option<&'a [f64]>,
+    pub chat_input_open: bool,
     pub pickup_history: &'a [PickupHistoryEntry],
     pub hud_draw: bool,
     pub hud_centerid: bool,
     pub hud_saytext_internal: bool,
+    pub hud_saytext_time: f32,
+    pub hud_deathnotice_time: f32,
     pub hud_fastswitch: bool,
     pub cl_radartype: bool,
     pub observer_mode: i32,
@@ -1018,10 +1106,15 @@ impl Default for HudExtrasContext<'_> {
             buckets: None,
             anim: None,
             chat_entries: None,
+            death_times: None,
+            chat_times: None,
+            chat_input_open: false,
             pickup_history: &[],
             hud_draw: true,
             hud_centerid: true,
             hud_saytext_internal: true,
+            hud_saytext_time: 5.0,
+            hud_deathnotice_time: 6.0,
             hud_fastswitch: false,
             cl_radartype: false,
             observer_mode: 0,
@@ -1038,6 +1131,14 @@ impl HudExtrasContext<'_> {
         self.hud_draw = cvars.get_bool("hud_draw");
         self.hud_centerid = cvars.get_bool("hud_centerid");
         self.hud_saytext_internal = cvars.get_bool("hud_saytext_internal");
+        let stt = cvars.get_f32("hud_saytext_time");
+        if stt.is_finite() {
+            self.hud_saytext_time = stt;
+        }
+        let dnt = cvars.get_f32("hud_deathnotice_time");
+        if dnt.is_finite() {
+            self.hud_deathnotice_time = dnt;
+        }
         self.hud_fastswitch = cvars.get_bool("hud_fastswitch");
         self.cl_radartype = cvars.get_bool("cl_radartype");
         let ct = cvars.get_f32("scr_centertime");
@@ -1239,12 +1340,14 @@ fn draw_cs16_hud_impl(
         let hp_color = hud_additive_color(hp_base, hp_alpha);
         let armor_alpha = extras.anim.map_or(100, |a| hud_fade_alpha(a.armor_fade));
         let armor_color = hud_additive_color(HUD_AMBER, armor_alpha);
-        let hp_x = 16.0 * scale;
         let health = i32::from(state.health);
         let armor = i32::from(state.armor);
         if let Some(sp) = sprites {
-            let _ = sp.draw_sprite(&painter, "cross", Pos2::new(hp_x, bottom_y), scale, hp_color);
-            sp.draw_number(&painter, health, Pos2::new(hp_x + 28.0 * scale, bottom_y), scale, hp_color, 1);
+            let cross_w = sp.sprite_size("cross", scale).map_or(24.0 * scale, |s| s.x);
+            let digit_w = sp.sprite_size("number_0", scale).map_or(20.0 * scale, |s| s.x);
+            let (cross_x, digits_x) = health_layout_x(cross_w, digit_w);
+            let _ = sp.draw_sprite(&painter, "cross", Pos2::new(screen.left() + cross_x, bottom_y), scale, hp_color);
+            sp.draw_number(&painter, health, Pos2::new(screen.left() + digits_x, bottom_y), scale, hp_color, 1);
 
             let armor_x = (screen.width() / 5.0).floor();
             let (empty_spr, full_spr) = if state.armor_type == 1 {
@@ -1261,9 +1364,10 @@ fn draw_cs16_hud_impl(
             let _ = sp.draw_sprite_clipped_bottom(&painter, full_spr, Pos2::new(armor_x, icon_y), scale, armor_color, fill);
             sp.draw_number_right(&painter, armor, armor_x + (24.0 + 60.0) * scale, armor_num_y, scale, armor_color, 1);
         } else {
+            let (cross_x, _) = health_layout_x(24.0 * scale, 20.0 * scale);
             let text_col = Color32::from_rgba_unmultiplied(hp_base.r(), hp_base.g(), hp_base.b(), hp_alpha);
             painter.text(
-                Pos2::new(hp_x, bottom_y),
+                Pos2::new(screen.left() + cross_x, bottom_y),
                 egui::Align2::LEFT_TOP,
                 format!("+ {health:3}    A {armor:3}"),
                 FontId::monospace(24.0 * scale),
@@ -1275,7 +1379,7 @@ fn draw_cs16_hud_impl(
     // 4. Left-margin status icons (`FUN_10065570`) & pulsing hazard icons (`FUN_1004e070`).
     if hud.alive {
         let status_flash = extras.anim.map_or(flash_on, |a| a.status_flash_on);
-        let mut icon_bot = screen.center().y - 10.0 * scale;
+        let mut icon_bot = status_icon_anchor_y(screen.center().y, scale);
         let icon_x = 16.0 * scale;
         if let Some(sp) = sprites {
             for (name, icon) in state.status_icons.iter().take(4) {
@@ -1894,8 +1998,13 @@ fn draw_cs16_hud_impl(
     };
     let team_of = |slot: u8| -> Color32 { killfeed_team_color(state, slot) };
     let kf_fallback_sz = (12.5 * scale).clamp(12.0, 17.0);
-    let shown_feed: Vec<_> = hud.feed.iter().rev().take(4).collect();
-    for entry in shown_feed.into_iter().rev() {
+    let shown_feed = filter_active_death_notices(
+        hud.feed,
+        extras.death_times,
+        hud.now,
+        extras.hud_deathnotice_time,
+    );
+    for entry in shown_feed {
         let mut cursor_x = screen.right() - 16.0 * scale;
         let victim = name_of(entry.victim);
         let killer = name_of(entry.killer);
@@ -2041,8 +2150,7 @@ fn draw_cs16_hud_impl(
 
     // 11. Centre text (`HUD_PRINTCENTER`, the centre print).
     if let Some(text) = hud.center {
-        let b_pos = Pos2::new(center_x, screen.top() + screen.height() * 0.34);
-        let center_col = Color32::from_rgb(extras.con_color[0], extras.con_color[1], extras.con_color[2]);
+        let (b_pos, center_col) = center_print_layout(screen);
         hud_paint_text(
             ctx,
             &painter,
@@ -2143,7 +2251,13 @@ fn draw_cs16_hud_impl(
                 .collect();
             &fallback_lines
         };
-        for entry in chat_iter.iter().rev().take(5) {
+        let shown_chat = filter_active_chat_entries(
+            chat_iter,
+            extras.chat_times,
+            hud.now,
+            extras.hud_saytext_time,
+        );
+        for entry in shown_chat.into_iter().rev() {
             let team_col = chat_team_color(entry.team.as_deref());
             let mut sx = 10.0 * scale;
             let mut cur_col = normal_col;
@@ -2576,15 +2690,12 @@ fn draw_radar_with_extras(
         let dz = pos.z - hud.eye.z;
         let attrib = hud.hud.players.get(&slot).map_or(0, |p| p.attrib);
         let is_vip_or_bomb = (attrib & (2 | 4)) != 0;
-        let (r, g, b) = if is_vip_or_bomb {
-            (250, 0, 0)
-        } else {
-            (150, 75, 250)
-        };
-        draw_radar_dot(painter, ix, iy, dz, dot_sz, 0, r, g, b, 235);
+        let (player_dot_sz, [r, g, b, a]) = radar_player_dot_style(is_vip_or_bomb, dot_sz);
+        draw_radar_dot(painter, ix, iy, dz, player_dot_sz, 0, r, g, b, a);
         let is_radio = extras
             .anim
             .and_then(|a| a.radio_flashes.get(&slot))
+            .or_else(|| hud.hud.radio_flashes.get(&slot))
             .is_some_and(|exp| *exp > hud.now);
         if is_radio && radio_blink {
             draw_radar_dot(painter, ix, iy, dz, dot_sz, 4, 230, 110, 25, 245);
@@ -2968,5 +3079,54 @@ mod tests {
         hud.scenario_seq = 2;
         anim.step(0.016, &hud, 1.6);
         assert_eq!(anim.scenario_alpha, 0);
+    }
+
+    #[test]
+    fn health_visibility_layout_and_status_anchor_match_build_10210() {
+        let alive_zero = compute_hud_visibility(true, 0, 0, true);
+        assert!(!alive_zero.health_armor);
+        let alive_pos = compute_hud_visibility(true, 100, 0, true);
+        assert!(alive_pos.health_armor);
+
+        let (cross_x, digits_x) = health_layout_x(24.0, 20.0);
+        assert_eq!(cross_x, 12.0);
+        assert_eq!(digits_x, 34.0);
+
+        assert_eq!(status_icon_anchor_y(400.0, 1.0), 395.0);
+        assert_eq!(status_icon_anchor_y(400.0, 0.5), 397.5);
+    }
+
+    #[test]
+    fn deathnotice_and_saytext_expire_and_respect_zero_cvar() {
+        let feed = vec![
+            DeathNotice { killer: 1, victim: 2, headshot: false, weapon: "ak47".into() },
+            DeathNotice { killer: 2, victim: 3, headshot: true, weapon: "usp".into() },
+        ];
+        let times = [1.0, 6.0];
+        let active = filter_active_death_notices(&feed, Some(&times), 10.0, 6.0);
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].weapon, "usp");
+        assert!(filter_active_death_notices(&feed, Some(&times), 10.0, 0.0).is_empty());
+
+        let chat = vec![
+            HudChatEntry { text: "old".into(), team: None },
+            HudChatEntry { text: "fresh".into(), team: None },
+        ];
+        let chat_times = [2.0, 7.0];
+        let active_chat = filter_active_chat_entries(&chat, Some(&chat_times), 10.0, 5.0);
+        assert_eq!(active_chat.len(), 1);
+        assert_eq!(active_chat[0].text, "fresh");
+        assert!(filter_active_chat_entries(&chat, Some(&chat_times), 10.0, -1.0).is_empty());
+    }
+
+    #[test]
+    fn centerprint_and_radar_vip_dot_match_build_10210() {
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0));
+        let (pos, col) = center_print_layout(screen);
+        assert_eq!(pos, Pos2::new(640.0, 280.0));
+        assert_eq!(col, Color32::from_rgb(255, 180, 30));
+
+        assert_eq!(radar_player_dot_style(true, 2), (4, [185, 20, 20, 235]));
+        assert_eq!(radar_player_dot_style(false, 2), (2, [150, 75, 250, 235]));
     }
 }

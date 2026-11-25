@@ -39,9 +39,6 @@ use crate::replays::{
 /// The port a Half-Life server listens on by default.
 const DEFAULT_PORT: u16 = 27015;
 
-/// Seconds between server frames: 100 Hz.
-const FRAME_SECS: f64 = 0.01;
-
 struct Options {
     gamedir: Option<PathBuf>,
     map: String,
@@ -60,6 +57,7 @@ struct Options {
     mods_dir: Option<PathBuf>,
     amxx_dir: Option<PathBuf>,
     masters: Vec<SocketAddr>,
+    sys_ticrate: Option<f64>,
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
@@ -80,6 +78,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         mods_dir: None,
         amxx_dir: None,
         masters: Vec::new(),
+        sys_ticrate: None,
     };
     let mut args = args.iter();
     while let Some(arg) = args.next() {
@@ -142,6 +141,15 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     .parse()
                     .map_err(|e| format!("{arg}: invalid <ip:port> `{v}`: {e}"))?;
                 opts.relay_allow.push(addr);
+            }
+            "-sys_ticrate" | "--sys-ticrate" => {
+                let v = value()?;
+                let rate: f64 = v
+                    .parse()
+                    .ok()
+                    .filter(|r: &f64| r.is_finite() && *r > 0.0)
+                    .ok_or_else(|| format!("{arg}: not a positive number: {v}"))?;
+                opts.sys_ticrate = Some(rate);
             }
             other => return Err(format!("unknown argument `{other}`")),
         }
@@ -622,7 +630,14 @@ impl<G: GameDll> AdminBackend for ServerAdminBridge<'_, G> {
             bots,
             max_players: self.server.config().max_clients,
             uptime_secs: (self.now - self.runtime.started_at).max(0.0),
-            tick_rate: 100,
+            tick_rate: self
+                .server
+                .cvar_str("sys_ticrate")
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|v| v.is_finite() && *v > 0.0)
+                .map_or(100, |v| v.round().max(1.0) as u32),
             round_number: self.runtime.stats.current_round(),
             score_ct,
             score_t,
@@ -952,6 +967,9 @@ fn serve<G: GameDll>(
         ..ServerConfig::default()
     };
     let mut server = new_server(cfg, map, game, vfs);
+    if let Some(ticrate) = opts.sys_ticrate {
+        server.set_cvar("sys_ticrate", &ticrate.to_string());
+    }
     if let Some(n) = opts.bots {
         let _ = server.console_command(&format!("bot_quota {n}"));
     }
@@ -987,11 +1005,19 @@ fn serve<G: GameDll>(
     let mut next_frame = start_now;
     let mut load_map = |name: &str| load_server_map(vfs, name);
     loop {
+        let ticrate = server
+            .cvar_str("sys_ticrate")
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(100.0);
+        let frame_secs = 1.0 / ticrate;
         let now = clock.now();
         // Server time starts at 0 with the server, so `clock.now()` (seconds since the clock
         // was created, just before this loop) plus one frame makes the first `frametime` one
         // frame long instead of about 0, and later frames get their real elapsed time.
-        server.frame(&mut net, now + FRAME_SECS);
+        server.frame(&mut net, now + frame_secs);
         runtime.step_from_server(&mut server, now);
         if process_pending_http(&http_rx, &mut server, &mut runtime, now, &mut load_map) {
             info!("shutting down via admin RCON");
@@ -1016,7 +1042,7 @@ fn serve<G: GameDll>(
         {
             return Ok(());
         }
-        next_frame += FRAME_SECS;
+        next_frame += frame_secs;
         let now = clock.now();
         if next_frame > now {
             std::thread::sleep(Duration::from_secs_f64(next_frame - now));
@@ -1410,10 +1436,23 @@ mod tests {
 
     #[test]
     fn parses_phase13_admin_replay_and_embed_flags() {
-        let o = parse(&args(&["--admin", "--replay-rounds", "12", "--embed-web"])).unwrap();
+        let o = parse(&args(&[
+            "--admin",
+            "--replay-rounds",
+            "12",
+            "--embed-web",
+            "-sys_ticrate",
+            "66",
+        ]))
+        .unwrap();
         assert!(o.admin);
         assert_eq!(o.replay_rounds, 12);
         assert!(o.embed_web);
+        assert_eq!(o.sys_ticrate, Some(66.0));
+
+        assert!(parse(&args(&["-sys_ticrate", "0"])).is_err());
+        assert!(parse(&args(&["-sys_ticrate", "abc"])).is_err());
+        assert!(parse(&args(&["-sys_ticrate"])).is_err());
 
         let zero = parse(&args(&["--replay-rounds", "0"])).unwrap();
         assert_eq!(zero.replay_rounds, 0);

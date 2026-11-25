@@ -56,6 +56,9 @@ impl Lcg {
 fn random_connectionless_datagrams_from_many_addresses() {
     let mut h = Harness::new(4);
     let mut probe = joined(&mut h);
+    h.server.console_command("sv_maxupdaterate 102");
+    probe.send_stringcmd("setinfo cl_updaterate 60");
+    h.step(&mut [&mut probe], 20);
     let updates_before = entity_updates(&probe);
 
     // 10,000 datagrams: the connectionless prefix and 0 to 64 random bytes, from 3,000

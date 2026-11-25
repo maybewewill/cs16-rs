@@ -164,7 +164,7 @@ fn say_reaches_everyone() {
     let mut a = joined(&mut h, "A", &mut []);
     let mut b = joined(&mut h, "B", &mut [&mut a]);
     assert_eq!(out(&mut h, "say hello   \"big world\""), "");
-    h.step(&mut [&mut a, &mut b], 5);
+    h.step(&mut [&mut a, &mut b], 8);
     for p in [&a, &b] {
         assert!(
             prints(p).contains(&"Console: hello big world\n".to_string()),
@@ -175,7 +175,7 @@ fn say_reaches_everyone() {
     assert!(out(&mut h, "say").starts_with("Usage"));
     // An empty quoted argument is still text: an empty line is said.
     assert_eq!(out(&mut h, "say \"\""), "");
-    h.step(&mut [&mut a, &mut b], 5);
+    h.step(&mut [&mut a, &mut b], 8);
     assert!(prints(&a).contains(&"Console: \n".to_string()));
 }
 

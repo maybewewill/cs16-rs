@@ -30,13 +30,13 @@ impl Default for BobParams {
     }
 }
 
-/// Port of GoldSrc `V_CalcBob`: returns vertical/forward view bob scalar in HL units.
+/// Port of GoldSrc `V_CalcBob` (`client.dll` `FUN_1006ab20`): returns vertical/forward view bob scalar in HL units.
 pub fn calc_bob(time_sec: f32, velocity: Vec3, onground: bool, params: &BobParams) -> f32 {
     if params.cl_bob <= 0.0 || params.cl_bobcycle <= 0.0 || !onground {
         return 0.0;
     }
     let cycle_time = params.cl_bobcycle.max(0.1);
-    let bob_up = params.cl_bobup.clamp(0.05, 0.95);
+    let bob_up = params.cl_bobup;
     let cycle = time_sec / cycle_time;
     let frac = (cycle - cycle.floor()) * cycle_time;
     let mut cycle_phase = if frac < bob_up * cycle_time {
@@ -50,6 +50,64 @@ pub fn calc_bob(time_sec: f32, velocity: Vec3, onground: bool, params: &BobParam
     }
     let speed = Vec3::new(velocity.x, velocity.y, 0.0).length();
     (speed * params.cl_bob * (0.3 + 0.7 * cycle_phase.sin())).clamp(-7.0, 4.0)
+}
+
+/// Stateful GoldSrc `V_CalcBob` (`client.dll` `FUN_1006ab20`): freezes and returns the last
+/// grounded bob scalar while airborne (`!onground`).
+#[derive(Debug, Clone, Default)]
+pub struct BobState {
+    last_bob: f32,
+}
+
+impl BobState {
+    pub fn reset(&mut self) {
+        self.last_bob = 0.0;
+    }
+
+    pub fn calc(&mut self, time_sec: f32, velocity: Vec3, onground: bool, params: &BobParams) -> f32 {
+        if !onground {
+            return self.last_bob;
+        }
+        let bob = calc_bob(time_sec, velocity, true, params);
+        self.last_bob = bob;
+        bob
+    }
+}
+
+/// GoldSrc `V_AddIdle` (`client.dll` `0x101065b4..1010662c`) angular drift offsets in degrees.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ViewIdleAngles {
+    pub pitch: f32,
+    pub yaw: f32,
+    pub roll: f32,
+}
+
+/// Compute `V_AddIdle` offsets (`v_iyaw_cycle=2.0, v_iyaw_level=0.3`,
+/// `v_iroll_cycle=0.5, v_iroll_level=0.1`, `v_ipitch_cycle=1.0, v_ipitch_level=0.3`).
+pub fn calc_view_idle(time_sec: f32, idle_scale: f32) -> ViewIdleAngles {
+    if !idle_scale.is_finite() || idle_scale == 0.0 {
+        return ViewIdleAngles::default();
+    }
+    ViewIdleAngles {
+        pitch: idle_scale * (time_sec * 1.0).sin() * 0.3,
+        yaw: idle_scale * (time_sec * 2.0).sin() * 0.3,
+        roll: idle_scale * (time_sec * 0.5).sin() * 0.1,
+    }
+}
+
+/// Compute GoldSrc viewmodel `(yaw_deg, pitch_deg, roll_deg)` from camera angles (`client.dll`
+/// `0x1006b52f..1006b7a0`, `0x101065b4..1010662c`) with `bob` and `V_AddIdle` counter-offsets.
+pub fn calc_viewmodel_angles(
+    view_yaw: f32,
+    view_pitch: f32,
+    view_roll: f32,
+    bob: f32,
+    idle: ViewIdleAngles,
+) -> (f32, f32, f32) {
+    let vm_yaw = view_yaw - (idle.yaw + bob * 0.5);
+    let vm_pitch = view_pitch - bob * 0.3 - idle.pitch * 0.5;
+    let vm_roll = view_roll - (idle.roll + bob * 1.0);
+    (vm_yaw, vm_pitch, vm_roll)
 }
 
 /// Port of GoldSrc `V_CalcRoll`: strafe roll angle in degrees based on sideways speed.
@@ -306,5 +364,45 @@ mod tests {
         assert!((big - (-18.0)).abs() < 1e-4, "got {big}");
         // Not on ground resets baseline immediately
         assert_eq!(s.offset(100.0, false, 0.01), 0.0);
+    }
+
+    #[test]
+    fn bob_state_freezes_airborne_and_allows_unclamped_bobup() {
+        let params = BobParams {
+            cl_bob: 0.01,
+            cl_bobcycle: 0.8,
+            cl_bobup: 0.02,
+        };
+        let mut bob_state = BobState::default();
+        let grounded = bob_state.calc(0.008, Vec3::new(250.0, 0.0, 0.0), true, &params);
+        assert!(grounded > 0.0);
+        // Airborne preserves last grounded bob instead of snapping to 0.0.
+        assert_eq!(bob_state.calc(0.4, Vec3::new(250.0, 0.0, 0.0), false, &params), grounded);
+        // Unclamped cl_bobup = 0.02 differs from 0.05 clamped behavior.
+        let b_low = calc_bob(0.03, Vec3::new(250.0, 0.0, 0.0), true, &params);
+        let b_mid = calc_bob(
+            0.03,
+            Vec3::new(250.0, 0.0, 0.0),
+            true,
+            &BobParams { cl_bobup: 0.05, ..params },
+        );
+        assert!((b_low - b_mid).abs() > 0.01);
+        // Edge values 0.0 / 1.0 remain finite.
+        assert!(calc_bob(0.1, Vec3::new(250.0, 0.0, 0.0), true, &BobParams { cl_bobup: 0.0, ..params }).is_finite());
+        assert!(calc_bob(0.1, Vec3::new(250.0, 0.0, 0.0), true, &BobParams { cl_bobup: 1.0, ..params }).is_finite());
+    }
+
+    #[test]
+    fn view_idle_and_viewmodel_angles_match_goldsrc_cycles() {
+        let t = 1.0f32;
+        let idle = calc_view_idle(t, 2.0);
+        assert!((idle.roll - 2.0 * (0.5f32).sin() * 0.1).abs() < 1e-5);
+        assert!((idle.pitch - 2.0 * (1.0f32).sin() * 0.3).abs() < 1e-5);
+        assert!((idle.yaw - 2.0 * (2.0f32).sin() * 0.3).abs() < 1e-5);
+
+        let (vm_yaw, vm_pitch, vm_roll) = calc_viewmodel_angles(90.0, 10.0, 1.0, 2.0, idle);
+        assert!((vm_yaw - (90.0 - (idle.yaw + 1.0))).abs() < 1e-5);
+        assert!((vm_pitch - (10.0 - 0.6 - idle.pitch * 0.5)).abs() < 1e-5);
+        assert!((vm_roll - (1.0 - (idle.roll + 2.0))).abs() < 1e-5);
     }
 }
