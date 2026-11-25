@@ -23,12 +23,11 @@
 //!   spot: the error check flags it once (bounded by the commands of the lost packet) and the
 //!   next frame, which the prediction restarts from, is exact again. Accepted transient,
 //!   tested by `prediction_recovers_from_loss`.
-//! - `TxferPredictionData`: only the part that is the movement's own state survives a server
-//!   frame (`oldbuttons`, `flFallVelocity`, `iStepLeft`: the server never sends them). The
-//!   client-DLL overrides of `clientdata` (`maxspeed`, `deadflag`, `fuser2`, ...) are not
-//!   applied, the server's values win; they belong with the client weapon code (phase 6) and
-//!   keeping the server's copy is what makes the CS velocity modifier and the weapon speed
-//!   reach the prediction.
+//! - `TxferPredictionData`: what the prediction carries across a server frame (`oldbuttons`,
+//!   `flFallVelocity`, `iStepLeft`, `fuser2`, `flDuckTime`, `bInDuck`, and `weapon_extras`).
+//!   `fuser2` keeps exact float stamina across `DT_FLOAT(14, 1.0)` wire truncation while
+//!   respecting genuine server resets (`|cd - carried| > 1.5`).
+//!   `maxspeed`, `deadflag`, and weapon state follow the server's `clientdata`.
 //! - Weapon prediction is bookkeeping (plan, Global Constraints): the clip, animation and
 //!   timers come from `weapon_data`/`clientdata`, time passes through the timers by each
 //!   command's `msec` ([`WeaponState::post_run_cmd`]); no `ItemPostFrame` runs on the client.
@@ -300,6 +299,7 @@ pub struct LocalState {
     pub iuser: [i32; 4],
     pub fuser: [f32; 4],
     pub vuser: [Vec3; 4],
+    pub prev_weapon_id: i32,
     pub weapon: WeaponState,
     pub weapon_extras: BTreeMap<i32, PredictWeaponExtras>,
 }
@@ -337,18 +337,23 @@ impl Default for LocalState {
             iuser: [0; 4],
             fuser: [0.0; 4],
             vuser: [Vec3::ZERO; 4],
+            prev_weapon_id: 0,
             weapon: WeaponState::default(),
             weapon_extras: BTreeMap::new(),
         }
     }
 }
 
-/// What the prediction keeps of its own result across a server frame.
+/// What the prediction keeps of its own result across a server frame (`HUD_TxferPredictionData`).
 #[derive(Debug, Clone, Default)]
 pub struct Carried {
     pub oldbuttons: i32,
     pub fl_fall_velocity: f32,
     pub i_step_left: i32,
+    pub fuser2: f32,
+    pub fl_duck_time: i32,
+    pub b_in_duck: bool,
+    pub prev_weapon_id: i32,
     pub weapon_extras: BTreeMap<i32, PredictWeaponExtras>,
 }
 
@@ -362,6 +367,31 @@ impl LocalState {
         let cd = frame.clientdata.as_ref()?;
         let ps: Option<&GoldSrcEntityState> = frame.entity(local).map(|e| &e.state);
         let flags = cd.flags as i32;
+        let (fuser2, fl_duck_time, b_in_duck, prev_weapon_id) = match carried {
+            Some(c) => {
+                // `clientdata.fuser2` is wire-quantized to integer steps (`DT_FLOAT(14, 1.0)`).
+                // Keep our predicted float stamina when the server agrees within wire rounding.
+                let fuser2 = if (cd.fuser2 - c.fuser2).abs() <= 1.5 {
+                    c.fuser2
+                } else {
+                    cd.fuser2
+                };
+                let (fl_duck_time, b_in_duck) = if (cd.fl_duck_time - c.fl_duck_time).abs() <= 1
+                    && (cd.b_in_duck != 0) == c.b_in_duck
+                {
+                    (c.fl_duck_time, c.b_in_duck)
+                } else {
+                    (cd.fl_duck_time, cd.b_in_duck != 0)
+                };
+                let prev_weapon_id = if c.prev_weapon_id != 0 {
+                    c.prev_weapon_id
+                } else {
+                    cd.m_i_id
+                };
+                (fuser2, fl_duck_time, b_in_duck, prev_weapon_id)
+            }
+            None => (cd.fuser2, cd.fl_duck_time, cd.b_in_duck != 0, cd.m_i_id),
+        };
         let carried = carried.cloned().unwrap_or_default();
         Some(Self {
             origin: cd.origin,
@@ -385,17 +415,18 @@ impl LocalState {
             oldbuttons: carried.oldbuttons,
             fl_fall_velocity: carried.fl_fall_velocity,
             i_step_left: carried.i_step_left,
-            fl_duck_time: cd.fl_duck_time,
+            fl_duck_time,
             fl_swim_time: cd.fl_swim_time,
             waterjumptime: cd.waterjumptime,
-            b_in_duck: cd.b_in_duck != 0,
+            b_in_duck,
             fl_time_step_sound: cd.fl_time_step_sound,
             maxspeed: cd.maxspeed,
             deadflag: cd.deadflag,
             health: cd.health,
             iuser: [cd.iuser1, cd.iuser2, cd.iuser3, cd.iuser4],
-            fuser: [cd.fuser1, cd.fuser2, cd.fuser3, 0.0],
+            fuser: [cd.fuser1, fuser2, cd.fuser3, 0.0],
             vuser: [Vec3::ZERO, cd.vuser2, cd.vuser3, cd.vuser4],
+            prev_weapon_id,
             weapon: WeaponState {
                 next_attack: cd.m_fl_next_attack,
                 weapon_id: cd.m_i_id,
@@ -413,6 +444,10 @@ impl LocalState {
             oldbuttons: self.oldbuttons,
             fl_fall_velocity: self.fl_fall_velocity,
             i_step_left: self.i_step_left,
+            fuser2: self.fuser[1],
+            fl_duck_time: self.fl_duck_time,
+            b_in_duck: self.b_in_duck,
+            prev_weapon_id: self.prev_weapon_id,
             weapon_extras: self.weapon_extras.clone(),
         }
     }
@@ -918,7 +953,15 @@ impl Predictor {
 
         let world = self.world.clone();
         let coll: &WorldCollision = world.as_deref().unwrap_or(&NO_COLLISION);
-        let physents = build_physents(inp, frame, coll, world.is_some(), self.settings.solid_players);
+        let physents = build_physents(
+            inp,
+            frame,
+            coll,
+            world.is_some(),
+            self.settings.solid_players,
+            base.origin,
+            self.out.lastground,
+        );
         let ctx = RunCtx {
             coll,
             physents: &physents,
@@ -1042,11 +1085,14 @@ impl Predictor {
                 .ok()
                 .and_then(|n| inp.entities.and_then(|e| e.get(n)));
             if let Some(ent) = ground {
-                let dx = ent.curstate.origin.x - ent.prevstate.origin.x;
-                let dy = ent.curstate.origin.y - ent.prevstate.origin.y;
+                let delta = ent.curstate.origin - ent.prevstate.origin;
+                let dx = delta.x;
+                let dy = delta.y;
                 if (dx * dx + dy * dy).sqrt() > 0.0 {
                     self.correction_time = 0.0;
                     self.out.moving = true;
+                } else if delta.z != 0.0 && self.out.lastground <= i32::from(inp.max_clients) {
+                    self.correction_time = 0.0;
                 }
             }
         } else {
@@ -1302,25 +1348,29 @@ fn finish_pmove(pm: &PlayerMove, to: &mut LocalState) {
 }
 
 /// `CL_SetSolidEntities`, `CL_AddLinksToPmove` and `CL_SetSolidPlayers`: the world, then the
-/// solid entities of the frame, then the other players where they are drawn. The kinds an
-/// entity may be follow `SV_AddLinksToPM` of the server (`cs-engine`), so both sides collide with
-/// the same things.
-fn build_physents(
+/// solid entities of the frame (`physents`), then the other players where they are drawn (or at
+/// their authoritative frame origin while stacked on top for boost/runboost stability), and
+/// `visents` for `PM_TraceLine`.
+pub fn build_physents(
     inp: &PredictInputs<'_>,
     frame: &Frame,
     coll: &WorldCollision,
     has_world: bool,
     solid_players: bool,
+    base_origin: Vec3,
+    lastground: i32,
 ) -> PmPhysEnts {
+    const EF_NODRAW: i32 = 1 << 7;
     let mut out = PmPhysEnts::default();
     out.push_physent(world_physent(has_world.then_some(coll)));
+    out.push_visent(world_physent(has_world.then_some(coll)));
     let local = u16::from(inp.playernum) + 1;
     let max_clients = u16::from(inp.max_clients);
 
     for fe in &frame.entities {
         let state = &fe.state;
         let number = state.number;
-        // Players are added below, at their drawn positions.
+        // Players are added below, at their drawn/boost positions.
         if (1..=max_clients).contains(&number) {
             continue;
         }
@@ -1338,20 +1388,6 @@ fn build_physents(
             continue;
         }
         let skin = i32::from(state.skin);
-        if state.solid == SOLID_TRIGGER || (state.solid == SOLID_NOT && skin >= CONTENTS_EMPTY) {
-            continue;
-        }
-        if !matches!(state.solid, SOLID_BSP | SOLID_BBOX | SOLID_SLIDEBOX | SOLID_NOT) {
-            continue;
-        }
-        // A dead body.
-        if state.mins.z == 0.0 && state.maxs.z == 1.0 {
-            continue;
-        }
-        // Can't collide with a zeroed hull.
-        if state.mins == Vec3::ZERO && state.maxs == Vec3::ZERO {
-            continue;
-        }
         let brush = match (kind, name.strip_prefix('*').and_then(|n| n.parse::<usize>().ok())) {
             (ModelKind::Brush, Some(m)) => Some(m),
             (ModelKind::Brush, None) if state.modelindex == 1 => Some(0),
@@ -1362,10 +1398,6 @@ fn build_physents(
             Some(_) | None if matches!(state.solid, SOLID_BSP | SOLID_NOT) => PhysModel::Other,
             _ => PhysModel::None,
         };
-        // A brush model the map does not have has no hull: nothing to collide with.
-        if kind == ModelKind::Brush && model == PhysModel::Other {
-            continue;
-        }
         let (mins, maxs) = match state.solid {
             SOLID_BSP | SOLID_NOT => (Vec3::ZERO, Vec3::ZERO),
             _ => (state.mins, state.maxs),
@@ -1392,6 +1424,33 @@ fn build_physents(
             },
             model,
         };
+
+        // Visible entities (including non-solid props/models) populate `visents` for `PM_TraceLine`.
+        if (state.effects & (EF_NODRAW as u32)) == 0
+            && out.num_visents() + usize::from(inp.max_clients) < MAX_PHYSENTS
+            && !(state.mins.z == 0.0 && state.maxs.z == 1.0)
+        {
+            out.push_visent(pe.clone());
+        }
+
+        if state.solid == SOLID_TRIGGER || (state.solid == SOLID_NOT && skin >= CONTENTS_EMPTY) {
+            continue;
+        }
+        if !matches!(state.solid, SOLID_BSP | SOLID_BBOX | SOLID_SLIDEBOX | SOLID_NOT) {
+            continue;
+        }
+        // A dead body.
+        if state.mins.z == 0.0 && state.maxs.z == 1.0 {
+            continue;
+        }
+        // Can't collide with a zeroed hull.
+        if state.mins == Vec3::ZERO && state.maxs == Vec3::ZERO {
+            continue;
+        }
+        // A brush model the map does not have has no hull: nothing to collide with.
+        if kind == ModelKind::Brush && model == PhysModel::Other {
+            continue;
+        }
         if state.solid == SOLID_NOT && skin == CONTENTS_LADDER {
             if out.num_moveents() < MAX_MOVEENTS {
                 out.push_moveent(pe);
@@ -1402,7 +1461,7 @@ fn build_physents(
         }
     }
 
-    for pose in inp.poses.iter().filter(|_| solid_players) {
+    for pose in inp.poses {
         let Some(fe) = frame.entity(pose.number) else {
             continue;
         };
@@ -1411,18 +1470,35 @@ fn build_physents(
             // Not present, or a dead body.
             continue;
         }
-        if out.num_physents() >= MAX_PHYSENTS {
-            break;
-        }
         let hull = usize::from(state.usehull).min(PM_PLAYER_MINS.len() - 1);
-        out.push_physent(PhysEnt {
+        let (mins, maxs) = if state.solid == SOLID_BBOX
+            && state.mins != Vec3::ZERO
+            && state.maxs != Vec3::ZERO
+        {
+            (state.mins, state.maxs)
+        } else {
+            (PM_PLAYER_MINS[hull], PM_PLAYER_MAXS[hull])
+        };
+        // When standing on or jumping onto a live player's head (boost/runboost), collide
+        // against the server's latest `state.origin` so `ex_interp` lag does not drop the
+        // boosted player off a moving teammate.
+        let stacked_on_player = lastground == i32::from(pose.number)
+            || (base_origin.z >= state.origin.z + 36.0
+                && (base_origin.x - state.origin.x).abs() <= 34.0
+                && (base_origin.y - state.origin.y).abs() <= 34.0);
+        let player_origin = if stacked_on_player {
+            state.origin
+        } else {
+            pose.origin
+        };
+        let pe = PhysEnt {
             view: PhysEntView {
                 info: i32::from(pose.number),
                 player: i32::from(pose.number),
-                origin: pose.origin,
+                origin: player_origin,
                 angles: pose.angles,
-                mins: PM_PLAYER_MINS[hull],
-                maxs: PM_PLAYER_MAXS[hull],
+                mins,
+                maxs,
                 solid: i32::from(state.solid),
                 skin: i32::from(state.skin),
                 rendermode: i32::from(state.rendermode),
@@ -1432,7 +1508,13 @@ fn build_physents(
                 model_maxs: Vec3::ZERO,
             },
             model: PhysModel::None,
-        });
+        };
+        if (state.effects & (EF_NODRAW as u32)) == 0 && out.num_visents() < MAX_PHYSENTS {
+            out.push_visent(pe.clone());
+        }
+        if solid_players && out.num_physents() < MAX_PHYSENTS {
+            out.push_physent(pe);
+        }
     }
     out
 }

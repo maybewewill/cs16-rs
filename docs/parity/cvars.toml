@@ -939,6 +939,11 @@ status = "tested"
 evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
+id = "cl_cmd_100hz"
+status = "tested"
+evidence = "crates/cs-client/src/input.rs::tests::cmd_clock_100hz_grid_emits_10ms_cadence_above_105fps; crates/cs-client/src/app.rs::tests::high_hz_cmd_grid_gating_respects_fps_override_and_cvar; xtask/tests/registry_sync.rs"
+
+[[item]]
 id = "cl_cmdbackup"
 status = "tested"
 evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"

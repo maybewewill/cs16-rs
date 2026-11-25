@@ -79,6 +79,12 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     // Video / Renderer (GoldSrc look; Xash3D FWGS `gamma.c` & retail `cstrike/config.cfg`)
     reg.register("fps_max", "100", arch, "Maximum framerate limit (0 = unlimited)");
     reg.register("fps_override", "0", arch, "Allow fps_max above 100 when set to 1");
+    reg.register(
+        "cl_cmd_100hz",
+        "1",
+        arch,
+        "Emit usercmds on a 100 Hz (10 ms) cadence when fps_override 1 runs above 105 FPS (0 or 1)",
+    );
     reg.register("host_timescale", "1", CVarFlags::NONE, "Host simulation time scale multiplier");
     reg.register("sv_use_steam_networking", "1", arch, "Use Steam networking transport when available (0 or 1)");
     reg.register("gamma", "2.2", arch, "Display gamma (GoldSrc hw.dll:0x1031e138 default 2.2)");

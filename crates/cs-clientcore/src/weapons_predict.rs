@@ -989,6 +989,101 @@ fn weapon_spec(id: i32) -> Option<WeaponSpec> {
     })
 }
 
+/// Returns the GoldSrc viewmodel deploy sequence index (`*_DRAW`) for `wid`,
+/// matching ReGameDLL_CS `wpn_shared/wpn_*.cpp` (read 2026-11-25).
+pub fn deploy_anim_for_weapon(wid: i32, weapon_state: i32) -> i32 {
+    use weapon_id::*;
+    match wid {
+        C4 => 1,
+        MAC10 | TMP | MP5N | UMP45 | P90 | GALIL | FAMAS | AK47 | AUG | SG552 => 2,
+        KNIFE | HEGRENADE | FLASHBANG | SMOKEGRENADE => 3,
+        M249 | SCOUT | G3SG1 | SG550 => 4,
+        DEAGLE | FIVESEVEN | AWP => 5,
+        M4A1 => {
+            if weapon_state & WPNSTATE_M4A1_SILENCED != 0 {
+                5
+            } else {
+                12
+            }
+        }
+        P228 | M3 | XM1014 => 6,
+        USP => {
+            if weapon_state & WPNSTATE_USP_SILENCED != 0 {
+                6
+            } else {
+                14
+            }
+        }
+        GLOCK18 => 8,
+        ELITE => 15,
+        _ => 0,
+    }
+}
+
+/// Returns the ReGameDLL_CS deploy lock duration (`m_flNextAttack`): `1.45` for AWP,
+/// `1.25` for Scout, and `0.75` for `CBasePlayerWeapon::DefaultDeploy`.
+pub fn deploy_delay_for_weapon(wid: i32) -> f32 {
+    match wid {
+        weapon_id::AWP => 1.45,
+        weapon_id::SCOUT => 1.25,
+        _ => 0.75,
+    }
+}
+
+/// Applies ReGameDLL_CS `DefaultDeploy` + weapon-specific `Deploy` state on weapon switch:
+/// immediately cancels zoom FOV, clears `resume_zoom` and pending reloads/bursts, updates
+/// `weaponanim` to the new weapon's deploy sequence, and enforces `m_flNextAttack`
+/// (`0.75` default, `1.25` Scout, `1.45` AWP).
+pub fn apply_weapon_deploy(
+    state: &mut LocalState,
+    extras: &mut BTreeMap<i32, PredictWeaponExtras>,
+    new_wid: i32,
+    reset_timers: bool,
+) {
+    let Some(spec) = weapon_spec(new_wid) else {
+        return;
+    };
+    state.weapon.weapon_id = new_wid;
+    state.weapon.fov = DEFAULT_FOV;
+    for ex in extras.values_mut() {
+        ex.resume_zoom = false;
+        ex.last_zoom = DEFAULT_FOV;
+        ex.burst_shots_fired = 0;
+        ex.burst_timer = 0.0;
+    }
+    extras.insert(new_wid, PredictWeaponExtras::for_weapon(new_wid));
+    for w in state.weapon.weapons.values_mut() {
+        w.m_f_in_zoom = 0;
+        w.m_f_in_reload = 0;
+        w.m_f_in_special_reload = 0;
+        w.m_i_weapon_state &= !WPNSTATE_SHIELD_DRAWN;
+    }
+    let Ok(wid_u8) = u8::try_from(new_wid) else {
+        return;
+    };
+    let w = state.weapon.weapons.entry(wid_u8).or_default();
+    if w.m_i_id == 0 {
+        w.m_i_id = new_wid;
+    }
+    let weapon_state = w.m_i_weapon_state;
+    state.weapon.weaponanim = deploy_anim_for_weapon(new_wid, weapon_state);
+    let deploy_delay = deploy_delay_for_weapon(new_wid);
+    if reset_timers || state.weapon.next_attack <= 0.0 {
+        state.weapon.next_attack = deploy_delay;
+    }
+    if matches!(new_wid, weapon_id::AWP | weapon_id::SCOUT)
+        && (reset_timers || w.m_fl_next_primary_attack <= 0.0)
+    {
+        w.m_fl_next_primary_attack = deploy_delay;
+        w.m_fl_next_secondary_attack = 1.0;
+    }
+    let freeze_locked = (state.iuser[2] & PLAYER_FREEZE_TIME_OVER != 0)
+        || (state.maxspeed > 0.0 && state.maxspeed <= 1.5);
+    if !freeze_locked {
+        state.maxspeed = spec.max_speed;
+    }
+}
+
 /// Runs one client-predicted weapon step (`cl_lw`) on `state` for `cmd` at `random_seed`.
 /// Must run after `pm_move` and before `WeaponState::post_run_cmd(cmd.msec)` so timer checks
 /// match ReGameDLL_CS `PlayerPostThink -> ItemPostFrame -> decay_timers`.
@@ -1006,7 +1101,18 @@ pub fn predict_weapon_step(
     out_events: &mut Vec<PredictedWeaponEvent>,
     out_sounds: &mut Vec<PredictedSound>,
 ) {
+    if cmd.weaponselect > 0 {
+        let sel = i32::from(cmd.weaponselect);
+        if sel != state.weapon.weapon_id && weapon_spec(sel).is_some() {
+            apply_weapon_deploy(state, extras, sel, true);
+        }
+    } else if state.prev_weapon_id != 0 && state.prev_weapon_id != state.weapon.weapon_id {
+        let cur = state.weapon.weapon_id;
+        apply_weapon_deploy(state, extras, cur, false);
+    }
+
     let wid = state.weapon.weapon_id;
+    state.prev_weapon_id = wid;
     let Some(spec) = weapon_spec(wid) else {
         return;
     };

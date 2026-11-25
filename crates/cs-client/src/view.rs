@@ -283,6 +283,8 @@ pub struct ViewBuilder {
     player_gaits: HashMap<u16, (f32, Vec3)>,
     vm_seq_cache: HashMap<String, Vec<CachedSeqMeta>>,
     last_vm_frame: f32,
+    last_vm_path: String,
+    last_vm_animtime: f32,
     vfs: Option<Vfs>,
     collision: Option<Arc<WorldCollision>>,
     bsp: Option<Arc<BspMap>>,
@@ -369,6 +371,8 @@ impl ViewBuilder {
             player_gaits: HashMap::new(),
             vm_seq_cache: HashMap::new(),
             last_vm_frame: 0.0,
+            last_vm_path: String::new(),
+            last_vm_animtime: -1.0,
             vfs: None,
             collision: None,
             bsp: None,
@@ -423,6 +427,8 @@ impl ViewBuilder {
         self.last_weaponanim = -1;
         self.last_viewmodel = -1;
         self.last_vm_frame = 0.0;
+        self.last_vm_path.clear();
+        self.last_vm_animtime = -1.0;
         self.models_key = 0;
     }
 
@@ -632,18 +638,47 @@ impl ViewBuilder {
         let (mut eye, mut punch, mut fov, alive, observer_mode, weaponanim, viewmodel_index) =
             match &cd {
                 Some(cd) => {
-                    let (pred_eye, pred_punch) = match prediction {
-                        Some(p) if p.predicted => (p.simorg + p.viewheight, p.punchangle),
-                        _ => (cd.origin + cd.view_ofs, cd.punchangle),
+                    let alive = is_client_alive(cd);
+                    let observer_mode = cd.iuser1;
+                    let (pred_eye, pred_punch, pred_fov, pred_anim, pred_vm) = match prediction {
+                        Some(p) if p.predicted && alive && observer_mode == 0 => (
+                            p.simorg + p.viewheight,
+                            p.punchangle,
+                            if p.weapon.fov > 0.0 {
+                                p.weapon.fov
+                            } else {
+                                cd.fov
+                            },
+                            p.weapon.weaponanim,
+                            if p.weapon.viewmodel > 0 {
+                                p.weapon.viewmodel
+                            } else {
+                                cd.viewmodel
+                            },
+                        ),
+                        Some(p) if p.predicted => (
+                            p.simorg + p.viewheight,
+                            p.punchangle,
+                            cd.fov,
+                            cd.weaponanim,
+                            cd.viewmodel,
+                        ),
+                        _ => (
+                            cd.origin + cd.view_ofs,
+                            cd.punchangle,
+                            cd.fov,
+                            cd.weaponanim,
+                            cd.viewmodel,
+                        ),
                     };
                     (
                         pred_eye,
                         pred_punch,
-                        cd.fov,
-                        is_client_alive(cd),
-                        cd.iuser1,
-                        cd.weaponanim,
-                        cd.viewmodel,
+                        pred_fov,
+                        alive,
+                        observer_mode,
+                        pred_anim,
+                        pred_vm,
                     )
                 }
                 None => (Vec3::ZERO, Vec3::ZERO, 0.0, false, 0, 0, 0),
@@ -871,13 +906,13 @@ impl ViewBuilder {
         let overflow = self.glows.len().saturating_sub(MAX_ACTIVE_FX);
         self.glows.drain(..overflow);
 
-        let prev_vm_seq = self.anim.map(|a| a.sequence).unwrap_or(-1);
+        let prev_vm_anim = self.anim;
         let impact_sounds = self.collect_bullet_impacts(&fired, &scene.entities, now);
         self.update_view_anim(fx, &fired, weaponanim, viewmodel_index, time);
         let viewmodel = self.viewmodel(precache, alive, fov, viewmodel_index, inputs);
         let mut anim_sounds = Vec::new();
         if let Some(ref vm) = viewmodel {
-            let events = self.sample_viewmodel_events(vm, prev_vm_seq, time);
+            let events = self.sample_viewmodel_events(vm, prev_vm_anim, time);
             for (ev_id, opts) in events {
                 match ev_id {
                     5001 | 5011 | 5021 | 5031 => {
@@ -1163,7 +1198,7 @@ impl ViewBuilder {
     fn sample_viewmodel_events(
         &mut self,
         vm: &ViewmodelView,
-        prev_seq: i32,
+        prev_anim: Option<ViewAnimState>,
         now_sec: f32,
     ) -> Vec<(i32, String)> {
         let mut out = Vec::new();
@@ -1203,12 +1238,14 @@ impl ViewBuilder {
             seq_meta.num_frames,
             seq_meta.looping,
         );
-        let prev_frame = if prev_seq != vm.sequence {
-            self.last_vm_frame = -0.01;
-            -0.01
-        } else {
-            self.last_vm_frame
-        };
+        let switched_anim = self.last_vm_path != key
+            || prev_anim.is_none_or(|a| {
+                a.sequence != vm.sequence || (a.started - vm.animtime).abs() > 1e-4
+            })
+            || (self.last_vm_animtime - vm.animtime).abs() > 1e-4;
+        let prev_frame = if switched_anim { -0.01 } else { self.last_vm_frame };
+        self.last_vm_path = key;
+        self.last_vm_animtime = vm.animtime;
         self.last_vm_frame = cur_frame;
         if cur_frame > prev_frame {
             for ev in &seq_meta.events {
@@ -1493,11 +1530,21 @@ impl ViewBuilder {
             });
         }
         if let Some(ViewAnim { sequence, body }) = fx.hud.server_weapon_anim.take() {
-            self.anim = Some(ViewAnimState {
-                sequence,
-                body,
-                started: time,
+            // Avoid restarting a deploy/weapon animation when the server ack arrives for the
+            // same sequence that viewmodel switching or prediction already started.
+            let already_started = self.anim.is_some_and(|a| {
+                a.sequence == sequence
+                    && a.body == body
+                    && (time - a.started) >= 0.0
+                    && (time - a.started) < 0.5
             });
+            if !already_started {
+                self.anim = Some(ViewAnimState {
+                    sequence,
+                    body,
+                    started: time,
+                });
+            }
         }
         for ev in fired {
             let anim = match &ev.fx {
@@ -2099,5 +2146,188 @@ mod tests {
         let origins: Vec<Vec3> = draw_lists.sprites.iter().map(|s| s.origin).collect();
         assert!(origins.contains(&Vec3::new(40.0, -40.0, 0.0)));
         assert!(origins.contains(&Vec3::new(50.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn quick_switch_resets_view_anim_and_plays_5004_once_without_ack_double_play() {
+        use cs_clientcore::events::ViewAnim;
+        use cs_clientcore::interp::EmitResult;
+        use cs_clientcore::{PrecacheEntry, Prediction, WeaponState};
+        use cs_proto48::delta::GoldSrcClientData;
+
+        let mut builder = ViewBuilder::new();
+        if let Ok(vfs) = cs_vfs::Vfs::discover(None, cs_vfs::VfsConfig::default()) {
+            builder.set_world_context(None, Some(vfs));
+        }
+        let mut precache = PrecacheTables::default();
+        for (idx, name) in [
+            (10u16, "models/v_awp.mdl"),
+            (11u16, "models/v_knife.mdl"),
+            (12u16, "models/v_deagle.mdl"),
+        ] {
+            precache.models.insert(
+                idx,
+                PrecacheEntry {
+                    name: name.to_string(),
+                    download_size: 0,
+                    flags: 0,
+                },
+            );
+        }
+
+        let mut fx = ClientEffects::default();
+        let make_cd = |fov: f32, vm: i32, anim: i32| GoldSrcClientData {
+            health: 100.0,
+            weapons: 1 << 31,
+            fov,
+            viewmodel: vm,
+            weaponanim: anim,
+            ..Default::default()
+        };
+        let make_pred = |fov: f32, vm: i32, anim: i32| Prediction {
+            predicted: true,
+            viewmodel: vm,
+            weapon: WeaponState {
+                fov,
+                viewmodel: vm,
+                weaponanim: anim,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        // Frame 1: AWP zoomed (fov = 40) -> viewmodel is hidden while scoped, server cd still stale at 40.
+        let cd_zoomed = make_cd(40.0, 10, 0);
+        let pred_zoomed = make_pred(40.0, 10, 0);
+        let (fv1, _) = builder.build_parts(
+            &precache,
+            &mut fx,
+            &BTreeMap::new(),
+            Some(cd_zoomed.clone()),
+            Some(0),
+            Some(&pred_zoomed),
+            EmitResult::default(),
+            Vec::new(),
+            Vec3::ZERO,
+            &inputs(1.0),
+        );
+        assert!(fv1.viewmodel.is_none());
+
+        // Frame 2: Predicted quick-switch AWP -> Knife while cd is still stale (fov=40, vm=10):
+        // Prediction immediately cancels FOV to 90 and switches ViewAnim to Knife deploy (seq=3, animtime=1.02).
+        let pred_knife = make_pred(90.0, 11, 3);
+        let (fv2, _) = builder.build_parts(
+            &precache,
+            &mut fx,
+            &BTreeMap::new(),
+            Some(cd_zoomed),
+            Some(0),
+            Some(&pred_knife),
+            EmitResult::default(),
+            Vec::new(),
+            Vec3::ZERO,
+            &inputs(1.02),
+        );
+        assert_eq!(fv2.fov, 90.0);
+        let vm2 = fv2.viewmodel.expect("knife viewmodel visible immediately on unzoom");
+        assert_eq!(vm2.path, "models/v_knife.mdl");
+        assert_eq!(vm2.sequence, 3);
+        assert!((vm2.animtime - 1.02).abs() < 1e-4);
+
+        // Frame 3: Server ack arrives 30ms later with svc_weaponanim(3, 0) & updated cd:
+        // Must NOT restart animtime!
+        fx.hud.server_weapon_anim = Some(ViewAnim { sequence: 3, body: 0 });
+        let cd_knife = make_cd(90.0, 11, 3);
+        let (fv3, _) = builder.build_parts(
+            &precache,
+            &mut fx,
+            &BTreeMap::new(),
+            Some(cd_knife),
+            Some(0),
+            Some(&pred_knife),
+            EmitResult::default(),
+            Vec::new(),
+            Vec3::ZERO,
+            &inputs(1.05),
+        );
+        let vm3 = fv3.viewmodel.expect("knife viewmodel");
+        assert!(
+            (vm3.animtime - 1.02).abs() < 1e-4,
+            "server ack must not reset deploy animtime: {}",
+            vm3.animtime
+        );
+
+        // Frame 4: Quick-switch Knife -> AWP: resets ViewAnim to AWP deploy (seq=5, animtime=1.10).
+        let pred_awp = make_pred(90.0, 10, 5);
+        let (fv4, _) = builder.build_parts(
+            &precache,
+            &mut fx,
+            &BTreeMap::new(),
+            Some(make_cd(90.0, 10, 5)),
+            Some(0),
+            Some(&pred_awp),
+            EmitResult::default(),
+            Vec::new(),
+            Vec3::ZERO,
+            &inputs(1.10),
+        );
+        let vm4 = fv4.viewmodel.expect("awp viewmodel");
+        assert_eq!(vm4.path, "models/v_awp.mdl");
+        assert_eq!(vm4.sequence, 5);
+        assert!((vm4.animtime - 1.10).abs() < 1e-4);
+
+        // Frame 5-7: Switch to Deagle (seq 5 draw has MDL 5004 event "weapons/de_deploy.wav" at frame 1):
+        // plays 5004 once as the deploy sequence passes frame 1, and server svc_weaponanim ack must NOT replay it.
+        let pred_deagle = make_pred(90.0, 12, 5);
+        let cd_deagle = make_cd(90.0, 12, 5);
+        let _ = builder.build_parts(
+            &precache,
+            &mut fx,
+            &BTreeMap::new(),
+            Some(cd_deagle.clone()),
+            Some(0),
+            Some(&pred_deagle),
+            EmitResult::default(),
+            Vec::new(),
+            Vec3::ZERO,
+            &inputs(1.20),
+        );
+        let (fv6, _) = builder.build_parts(
+            &precache,
+            &mut fx,
+            &BTreeMap::new(),
+            Some(cd_deagle.clone()),
+            Some(0),
+            Some(&pred_deagle),
+            EmitResult::default(),
+            Vec::new(),
+            Vec3::ZERO,
+            &inputs(1.25),
+        );
+        if builder.vfs.is_some() {
+            assert_eq!(fv6.anim_sounds, vec!["weapons/de_deploy.wav".to_string()]);
+        }
+        fx.hud.server_weapon_anim = Some(ViewAnim { sequence: 5, body: 0 });
+        let (fv7, _) = builder.build_parts(
+            &precache,
+            &mut fx,
+            &BTreeMap::new(),
+            Some(cd_deagle),
+            Some(0),
+            Some(&pred_deagle),
+            EmitResult::default(),
+            Vec::new(),
+            Vec3::ZERO,
+            &inputs(1.28),
+        );
+        let vm7 = fv7.viewmodel.expect("deagle viewmodel");
+        assert!(
+            (vm7.animtime - 1.20).abs() < 1e-4,
+            "server ack must not reset deagle deploy animtime: {}",
+            vm7.animtime
+        );
+        if builder.vfs.is_some() {
+            assert!(fv7.anim_sounds.is_empty(), "5004 must not double-play on server ack");
+        }
     }
 }

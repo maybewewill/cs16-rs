@@ -228,6 +228,7 @@ pub struct CmdParams {
 pub struct CmdClock {
     carry: f64,
     interp_amount: f32,
+    grid_accum_ms: f64,
 }
 
 impl CmdClock {
@@ -246,6 +247,30 @@ impl CmdClock {
             (total - ms).clamp(0.0, 1.0)
         };
         ms as u8
+    }
+
+    /// Returns the `usercmd.msec` ticks to emit for this frame:
+    /// - When `grid_enabled` is `false` (default `fps_max 100` / `fps_override 0`), preserves
+    ///   exact GoldSrc 1-command-per-frame behavior via [`CmdClock::msec`].
+    /// - When `grid_enabled` is `true` (`fps_override 1` running above `105 FPS` with
+    ///   `cl_cmd_100hz 1`), accumulates `dt` and emits ticks strictly on a `10 ms` (`100 Hz`)
+    ///   cadence so high-refresh rendering never produces `0 ms` command spam or micro-friction
+    ///   drift.
+    pub fn grid_ticks_100hz(&mut self, dt: f64, grid_enabled: bool) -> Vec<u8> {
+        if !grid_enabled {
+            self.grid_accum_ms = 0.0;
+            return vec![self.msec(dt)];
+        }
+        if !dt.is_finite() || dt <= 0.0 {
+            return Vec::new();
+        }
+        self.grid_accum_ms = (self.grid_accum_ms + dt * 1000.0).min(100.0);
+        let mut ticks = Vec::new();
+        while self.grid_accum_ms >= 10.0 && ticks.len() < 10 {
+            self.grid_accum_ms -= 10.0;
+            ticks.push(10);
+        }
+        ticks
     }
 
     /// `cmd->lerp_msec` of `CL_ComputeClientInterpolationAmount` (Xash3D FWGS
@@ -863,5 +888,36 @@ mod tests {
         );
         assert_eq!(cmd.forwardmove, 0.0);
         assert_eq!(cmd.upmove, 320.0);
+    }
+
+    #[test]
+    fn cmd_clock_100hz_grid_emits_10ms_cadence_above_105fps() {
+        // Default 1-command-per-frame mode preserves GoldSrc msec behavior.
+        let mut off = CmdClock::default();
+        for _ in 0..10 {
+            assert_eq!(off.grid_ticks_100hz(1.0 / 240.0, false).len(), 1);
+        }
+
+        // High-Hz 100 Hz grid mode at 240 FPS emits clean 10 ms ticks (~100 cmds/sec), never 0 ms.
+        let mut clock_240 = CmdClock::default();
+        let mut ticks_240 = Vec::new();
+        for _ in 0..240 {
+            ticks_240.extend(clock_240.grid_ticks_100hz(1.0 / 240.0, true));
+        }
+        assert_eq!(ticks_240.len(), 100);
+        assert!(ticks_240.iter().all(|&ms| ms == 10));
+
+        // 144 FPS also emits ~100 clean 10 ms ticks per second with zero sub-10ms drift.
+        let mut clock_144 = CmdClock::default();
+        let mut ticks_144 = Vec::new();
+        for _ in 0..144 {
+            ticks_144.extend(clock_144.grid_ticks_100hz(1.0 / 144.0, true));
+        }
+        assert!(
+            (99..=100).contains(&ticks_144.len()),
+            "expected 99..=100 ticks at 144 Hz, got {}",
+            ticks_144.len()
+        );
+        assert!(ticks_144.iter().all(|&ms| ms == 10));
     }
 }

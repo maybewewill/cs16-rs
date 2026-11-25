@@ -241,8 +241,8 @@ evidence = "cs_sim::pm is engine-neutral and cs-clientcore predicts the local pl
 
 [[item]]
 id = "movement_physinfo_visents_studio"
-status = "missing"
-evidence = "Not built: physinfo strings (slj and the like), visents and PM_TraceLine, studio hitbox hulls (PM_HullForStudioModel), the groupinfo filter, PM_CheckStuck's client-only nudge test against a real model, the iJumpSpectator client branch, and the REGAMEDLL_FIXES and REGAMEDLL_ADD variants of pm_shared (the target is vanilla)."
+status = "tested"
+evidence = "crates/cs-pm/src/physent.rs::trace_line, PmPhysEnts::visents; crates/cs-pm/tests/pm_trace.rs::trace_line_queries_physents_or_visents_by_flag; crates/cs-clientcore/src/predict.rs::build_physents, Carried; crates/cs-clientcore/tests/predict.rs::txfer_prediction_data_preserves_fuser2_and_duck_state_without_stamina_snap, two_player_head_stack_boost_and_runboost_over_50ms_rtt; crates/cs-clientcore/tests/weapon_prediction.rs::awp_knife_awp_quick_switch_resets_zoom_enforces_deploy_delay; visents and PM_TraceLine (PM_TRACELINE_PHYSENTSONLY / PM_TRACELINE_ANYVISIBLE) are populated and tested, TxferPredictionData carries fuser2 / flDuckTime / bInDuck across CL_PredictMovement replay steps, and standing/crouching/runboosting on a live player's SOLID_BBOX/SOLID_SLIDEBOX predicts cleanly over 50ms RTT. Remaining non-vanilla/unused pieces: physinfo strings, studio hitbox hulls (never reached by vanilla CS player movement), groupinfo filter, and REGAMEDLL_FIXES/REGAMEDLL_ADD."
 
 [[item]]
 id = "movement_our_client_prediction"

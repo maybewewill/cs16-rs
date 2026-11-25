@@ -3,8 +3,10 @@
 
 mod predict_support;
 
+use std::sync::Arc;
+
 use cs_assets::bsp::Entity;
-use cs_clientcore::{PredictInputs, Predictor, split_usercmd};
+use cs_clientcore::{LocalState, PredictInputs, Predictor, split_usercmd};
 use cs_proto48::delta::GoldSrcUserCmd;
 use glam::Vec3;
 use predict_support::*;
@@ -1158,4 +1160,315 @@ fn predicted_movement_on_stock_maps_emits_non_concrete_footsteps() {
     find_spot_and_walk("de_nuke", b'M', "player/pl_metal");
     find_spot_and_walk("de_nuke", b'V', "player/pl_duct");
     find_spot_and_walk("as_oilrig", b'G', "player/pl_grate");
+}
+
+#[test]
+fn txfer_prediction_data_preserves_fuser2_and_duck_state_without_stamina_snap() {
+    let precache = bare::precache();
+    let spawn = Vec3::new(0.0, 0.0, 36.03125);
+    let mut p = Predictor::new();
+    p.set_world(Some(bare::world()));
+
+    // Jump on packet 1 -> fuser2 becomes 1315.7894 in prediction.
+    let frame1 = bare::frame(1, spawn, vec![bare::local_state(1)]);
+    p.set_now(0.01);
+    p.push_cmd(walk(10, IN_JUMP | IN_FORWARD, 250.0, 0.0, 0.0));
+    p.packet_sent(1, 1, None);
+    // Double-duck start on packet 2..4 -> flDuckTime counts down from 1000 while bInDuck = true.
+    for seq in 2..=4u32 {
+        p.set_now(f64::from(seq) * 0.01);
+        p.push_cmd(walk(10, IN_DUCK | IN_FORWARD, 250.0, 0.0, 0.0));
+        p.packet_sent(seq, 1, None);
+    }
+    p.update(&bare::inputs(0.04, 0, 5, Some(&frame1), &precache, &[], false));
+    let pred_at_1_vel = p.predicted_velocity(1).expect("predicted vel at 1");
+    let pred_at_1_org = p.predicted_origin(1).expect("predicted org at 1");
+
+    // Server acks packet 1 after 50 ms RTT: wire DT_FLOAT(14, 1.0) truncates fuser2 1315.7894 -> 1315.0.
+    // TxferPredictionData must preserve exact float fuser2 and flDuckTime/bInDuck across replay.
+    let mut frame2 = bare::frame(2, pred_at_1_org, vec![bare::local_state(1)]);
+    let cd2 = frame2.clientdata.as_mut().unwrap();
+    cd2.velocity = pred_at_1_vel;
+    cd2.flags &= !(1 << 9); // airborne after jump
+    cd2.fuser2 = 1315.0; // truncated on wire
+    cd2.fl_duck_time = 0;
+    cd2.b_in_duck = 0;
+
+    let before_simvel = p.prediction().simvel;
+    p.set_now(0.05);
+    p.push_cmd(walk(10, IN_DUCK | IN_FORWARD, 250.0, 0.0, 0.0));
+    p.packet_sent(5, 1, None);
+    p.update(&bare::inputs(0.05, 1, 6, Some(&frame2), &precache, &[], false));
+
+    let check = *p.checks().back().unwrap();
+    assert!(!check.teleport);
+    assert!(check.error < 0.05, "unexpected snap error: {}", check.error);
+
+    // Next jump after landing uses preserved fuser2 without a 1-frame stamina snap.
+    let state_at_4 = LocalState::from_frame(&frame2, 1, None).unwrap();
+    assert_eq!(state_at_4.fuser[1], 1315.0);
+    assert!(
+        (p.prediction().simvel.truncate() - before_simvel.truncate()).length() < 5.0,
+        "stamina/duck carry caused velocity snap: {:?} -> {:?}",
+        before_simvel,
+        p.prediction().simvel
+    );
+}
+
+#[test]
+fn two_player_head_stack_boost_and_runboost_over_50ms_rtt() {
+    use cs_clientcore::{ConnState, Connection, ConnectionConfig};
+    use cs_cvar::CVarRegistry;
+    use cs_engine::{Server, ServerConfig};
+    use cs_game::CsGame;
+    use cs_game::player::Team;
+    use cs_proto48::crypto::md5_hex;
+    use cs_proto48::delta::DeltaRegistry;
+    use cs_transport::{LoopbackEndpoint, LoopbackHub, PacketTransport, PeerAddr, TransportError};
+    use std::cell::Cell;
+    use std::collections::VecDeque;
+    use std::rc::Rc;
+
+    struct DelayedEndpoint {
+        inner: LoopbackEndpoint,
+        now: Rc<Cell<f64>>,
+        one_way_delay: f64,
+        outbound: VecDeque<(f64, PeerAddr, Vec<u8>)>,
+        inbound: VecDeque<(f64, PeerAddr, Vec<u8>)>,
+    }
+
+    impl DelayedEndpoint {
+        fn new(inner: LoopbackEndpoint, now: Rc<Cell<f64>>, one_way_delay: f64) -> Self {
+            Self {
+                inner,
+                now,
+                one_way_delay,
+                outbound: VecDeque::new(),
+                inbound: VecDeque::new(),
+            }
+        }
+
+        fn flush_due(&mut self) {
+            let t = self.now.get();
+            while let Some((deliver_at, _, _)) = self.outbound.front() {
+                if *deliver_at <= t + 1e-9 {
+                    let (_, to, bytes) = self.outbound.pop_front().unwrap();
+                    let _ = self.inner.send(to, &bytes);
+                } else {
+                    break;
+                }
+            }
+            while let Some((from, data)) = self.inner.recv() {
+                self.inbound.push_back((t + self.one_way_delay, from, data));
+            }
+        }
+    }
+
+    impl PacketTransport for DelayedEndpoint {
+        fn recv(&mut self) -> Option<(PeerAddr, Vec<u8>)> {
+            self.flush_due();
+            let t = self.now.get();
+            if self
+                .inbound
+                .front()
+                .is_some_and(|(deliver_at, _, _)| *deliver_at <= t + 1e-9)
+            {
+                self.inbound.pop_front().map(|(_, from, data)| (from, data))
+            } else {
+                None
+            }
+        }
+
+        fn send(&mut self, to: PeerAddr, data: &[u8]) -> Result<(), TransportError> {
+            self.outbound
+                .push_back((self.now.get() + self.one_way_delay, to, data.to_vec()));
+            self.flush_due();
+            Ok(())
+        }
+    }
+
+    let (map, world) = server_map(map_entities(None));
+    let rig = Rig {
+        game: CsGame::new(),
+        actions: Vec::new(),
+    };
+    let mut cvars = CVarRegistry::new_with_defaults();
+    let _ = cvars.set("mp_freezetime", "0");
+    let mut server = Server::new(
+        ServerConfig {
+            max_clients: 4,
+            max_edicts: 256,
+            max_update_rate: 102,
+            ..ServerConfig::default()
+        },
+        map,
+        rig,
+        DeltaRegistry::cs16_default(),
+        cvars,
+    );
+    let mut hub = LoopbackHub::new();
+    let clock = Rc::new(Cell::new(0.0_f64));
+
+    let ep_top = DelayedEndpoint::new(hub.connect(), Rc::clone(&clock), 0.025);
+    let ep_bot = DelayedEndpoint::new(hub.connect(), Rc::clone(&clock), 0.025);
+
+    let mut conn_top = Connection::new(
+        ep_top,
+        PeerAddr::Loopback(0),
+        ConnectionConfig::new("booster_top", 76_561_197_960_265_731, &md5_hex(b"top")),
+    );
+    let mut conn_bot = Connection::new(
+        ep_bot,
+        PeerAddr::Loopback(0),
+        ConnectionConfig::new("booster_bot", 76_561_197_960_265_732, &md5_hex(b"bot")),
+    );
+    for c in [&mut conn_top, &mut conn_bot] {
+        c.set_cvar("cl_updaterate", "100");
+        c.set_cvar("cl_cmdrate", "100");
+        c.frames_mut().set_remote_is_local(false);
+        c.connect();
+    }
+
+    for _ in 0..800 {
+        clock.set(clock.get() + FRAME);
+        let t = clock.get();
+        conn_top.pump(t);
+        conn_bot.pump(t);
+        server.frame(&mut hub, t);
+        if conn_top.state() == &ConnState::InGame && conn_bot.state() == &ConnState::InGame {
+            break;
+        }
+    }
+    assert_eq!(conn_top.state(), &ConnState::InGame);
+    assert_eq!(conn_bot.state(), &ConnState::InGame);
+    conn_top.set_world_collision(Some(Arc::clone(&world)));
+    conn_bot.set_world_collision(Some(world));
+
+    // Spawn both players: move slot 0 outside the 128 u spawn radius before spawning slot 1 so
+    // slot 1 does not telefrag slot 0, then stack top on bottom's head (z = 108.0625 vs 36.03125).
+    server.game_mut().actions.push(Box::new(|game, eng| {
+        eng.set_cvar("mp_freezetime", "0");
+        assert!(game.spawn_player(eng, 0, Team::Ct, 0));
+        eng.set_origin(eng.client_edict(0), Vec3::new(-200.0, 0.0, 36.03125));
+        assert!(game.spawn_player(eng, 1, Team::Ct, 0));
+        game.end_freeze_period(eng);
+        for slot in [0u8, 1u8] {
+            let id = eng.client_edict(slot);
+            let origin = if slot == 0 {
+                Vec3::new(0.0, 0.0, 108.0625)
+            } else {
+                Vec3::new(0.0, 0.0, 36.03125)
+            };
+            eng.ent_mut(id).unwrap().max_speed = 250.0;
+            eng.set_origin(id, origin);
+        }
+    }));
+
+    for _ in 0..25 {
+        clock.set(clock.get() + FRAME);
+        let t = clock.get();
+        conn_top.queue_cmd(idle(10));
+        conn_bot.queue_cmd(idle(10));
+        conn_top.frames_mut().advance(FRAME);
+        conn_bot.frames_mut().advance(FRAME);
+        conn_top.pump(t);
+        conn_bot.pump(t);
+        server.frame(&mut hub, t);
+    }
+
+    // 1. Static vertical head-stack boost + crouch on top of teammate's SOLID_SLIDEBOX/SOLID_BBOX.
+    let first_check = conn_top.predictor().checks().len();
+    let mut prev_eye_z = conn_top.predictor().prediction().simorg.z
+        + conn_top.predictor().prediction().viewheight.z;
+    for i in 0..80 {
+        let top_cmd = if i >= 30 {
+            walk(10, IN_DUCK, 0.0, 0.0, 0.0)
+        } else {
+            idle(10)
+        };
+        clock.set(clock.get() + FRAME);
+        let t = clock.get();
+        conn_top.queue_cmd(top_cmd);
+        conn_bot.queue_cmd(idle(10));
+        conn_top.frames_mut().advance(FRAME);
+        conn_bot.frames_mut().advance(FRAME);
+        conn_top.pump(t);
+        conn_bot.pump(t);
+        server.frame(&mut hub, t);
+
+        let pred = conn_top.predictor().prediction();
+        assert!(pred.predicted);
+        assert!(pred.onground > 0, "top must remain grounded on teammate at step {i}");
+        let eye_z = pred.simorg.z + pred.viewheight.z;
+        if i < 30 {
+            assert!(
+                (eye_z - prev_eye_z).abs() < 0.05,
+                "vertical camera jitter while standing on teammate: {prev_eye_z} -> {eye_z}"
+            );
+        }
+        prev_eye_z = eye_z;
+    }
+
+    // 2. Runboost: stand up and run forward together on top of moving teammate over 50 ms RTT.
+    for _ in 0..50 {
+        clock.set(clock.get() + FRAME);
+        let t = clock.get();
+        conn_top.queue_cmd(idle(10));
+        conn_bot.queue_cmd(idle(10));
+        conn_top.frames_mut().advance(FRAME);
+        conn_bot.frames_mut().advance(FRAME);
+        conn_top.pump(t);
+        conn_bot.pump(t);
+        server.frame(&mut hub, t);
+    }
+    let runboost_start_z = conn_top.predictor().prediction().simorg.z;
+    for i in 0..80 {
+        clock.set(clock.get() + FRAME);
+        let t = clock.get();
+        conn_top.queue_cmd(walk(10, IN_FORWARD, 250.0, 0.0, 0.0));
+        conn_bot.queue_cmd(walk(10, IN_FORWARD, 250.0, 0.0, 0.0));
+        conn_top.frames_mut().advance(FRAME);
+        conn_bot.frames_mut().advance(FRAME);
+        conn_top.pump(t);
+        conn_bot.pump(t);
+        server.frame(&mut hub, t);
+
+        let pred = conn_top.predictor().prediction();
+        assert!(
+            (pred.simorg.z - runboost_start_z).abs() < 0.25,
+            "runboost vertical jitter at step {i}: {} vs {runboost_start_z}",
+            pred.simorg.z
+        );
+    }
+    // Flush acks.
+    for _ in 0..10 {
+        clock.set(clock.get() + FRAME);
+        let t = clock.get();
+        conn_top.frames_mut().advance(FRAME);
+        conn_bot.frames_mut().advance(FRAME);
+        conn_top.pump(t);
+        conn_bot.pump(t);
+        server.frame(&mut hub, t);
+    }
+
+    let checks: Vec<_> = conn_top
+        .predictor()
+        .checks()
+        .iter()
+        .skip(first_check)
+        .copied()
+        .collect();
+    assert!(!checks.is_empty(), "expected prediction checks over 50 ms RTT");
+    let worst = checks.iter().map(|c| c.error).fold(0.0f32, f32::max);
+    let teleports = checks.iter().filter(|c| c.teleport).count();
+    assert_eq!(teleports, 0, "expected 0 teleports during boost/runboost");
+    assert!(
+        worst < 0.25,
+        "expected < 0.25 u prediction error over 50 ms RTT boost/runboost, got {worst}"
+    );
+    assert!(
+        conn_top.predictor().prediction().simorg.x > 100.0,
+        "runboost moved forward: {:?}",
+        conn_top.predictor().prediction().simorg
+    );
 }

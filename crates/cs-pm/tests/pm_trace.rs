@@ -5,8 +5,9 @@
 use cs_assets::bsp::{BspMap, BspModel, ClipNode, LightmapAtlas, Leaf, Node, Plane};
 use cs_pm::collision::{CONTENTS_EMPTY, CONTENTS_SOLID, Hull, WorldCollision};
 use cs_pm::physent::{
-    PM_NORMAL, PM_WORLD_ONLY, PhysEnt, PhysEntView, PhysModel, player_trace, point_contents,
-    test_player_position, world_physent,
+    PM_NORMAL, PM_TRACELINE_ANYVISIBLE, PM_TRACELINE_PHYSENTSONLY, PM_WORLD_ONLY, PhysEnt,
+    PhysEntView, PhysModel, PmPhysEnts, player_trace, point_contents, test_player_position,
+    trace_line, world_physent,
 };
 use glam::Vec3;
 
@@ -182,4 +183,45 @@ fn pm_trace_on_a_bsp_without_the_engine() {
     assert_eq!(test_player_position(&coll, &ents, origin, buried, 0).0, 0);
     let in_box = Vec3::new(200.0, 0.0, 100.0);
     assert_eq!(test_player_position(&coll, &ents, origin, in_box, 0).0, 1);
+}
+
+#[test]
+fn trace_line_queries_physents_or_visents_by_flag() {
+    let coll = WorldCollision::from_bsp(&floor_bsp());
+    let mut all = PmPhysEnts::default();
+    all.push_physent(world_physent(Some(&coll)));
+    all.push_visent(world_physent(Some(&coll)));
+    // Visent-only non-solid player/prop box at x = 200.
+    all.push_visent(box_ent(2, Vec3::new(200.0, 0.0, 100.0)));
+
+    let start = Vec3::new(100.0, 0.0, 100.0);
+    let end = Vec3::new(300.0, 0.0, 100.0);
+
+    // PM_TRACELINE_PHYSENTSONLY misses visent-only entity.
+    let phys_only = trace_line(
+        &coll,
+        all.physents_slice(),
+        all.visents_slice(),
+        start,
+        end,
+        PM_TRACELINE_PHYSENTSONLY,
+        2,
+        -1,
+    );
+    assert_eq!(phys_only.fraction, 1.0);
+    assert_eq!(phys_only.ent, -1);
+
+    // PM_TRACELINE_ANYVISIBLE hits the visent box at 200 - 16 = 184.
+    let any_vis = trace_line(
+        &coll,
+        all.physents_slice(),
+        all.visents_slice(),
+        start,
+        end,
+        PM_TRACELINE_ANYVISIBLE,
+        2,
+        -1,
+    );
+    assert_eq!(any_vis.ent, 1);
+    assert!((any_vis.endpos.x - 184.0).abs() < 0.1, "{}", any_vis.endpos.x);
 }

@@ -681,6 +681,12 @@ impl Cs16App {
             "ex_interp",
             "cl_allowdownload",
             "cl_allowupload",
+            "cl_shadows",
+            "cl_minmodels",
+            "cl_min_ct",
+            "cl_min_t",
+            "fastsprites",
+            "max_smokepuffs",
         ] {
             let desired = self.cvars.get_str(name).to_string();
             if full || self.session.client_cvar(name).as_deref() != Some(desired.as_str()) {
@@ -1621,20 +1627,30 @@ impl Cs16App {
         }
     }
 
-    /// Queues this frame's usercmd. A cmd is `msec` of the frame, view angles from the mouse.
+    /// Queues this frame's usercmd(s). At default `fps_max 100` (`fps_override 0`), emits 1
+    /// command per frame; when `fps_override 1` runs above `105 FPS` with `cl_cmd_100hz 1`,
+    /// emits commands on a clean `10 ms` (`100 Hz`) cadence.
     fn queue_usercmd(&mut self, dt: f64) {
         if !self.session.in_game() {
             self.input_state.consume_impulses();
             return;
         }
+        let fps_max = finite_or(self.cvars.get_f32("fps_max"), 100.0);
+        let fps_override = self.cvars.get_bool("fps_override");
+        let cl_cmd_100hz = self.cvars.get_bool("cl_cmd_100hz");
+        let use_grid = should_use_100hz_cmd_grid(
+            fps_max,
+            fps_override,
+            cl_cmd_100hz,
+            self.session.is_active(),
+            self.session.max_clients(),
+        );
+        let ticks = self.cmd_clock.grid_ticks_100hz(dt, use_grid);
+        if ticks.is_empty() {
+            return;
+        }
         let capture = self.wants_mouse_capture();
-        let held = self.input_state.held(capture);
         let angles = Vec3::new(self.camera.pitch_deg, self.camera.yaw_deg, 0.0);
-        let params = CmdParams {
-            msec: self.cmd_clock.msec(dt),
-            lerp_msec: self.cmd_clock.lerp_msec(self.session.interp(), dt as f32),
-            impulse: std::mem::take(&mut self.pending_impulse),
-        };
         let speeds = MoveSpeeds {
             forward: self.cvars.get_f32("cl_forwardspeed"),
             back: self.cvars.get_f32("cl_backspeed"),
@@ -1642,10 +1658,30 @@ impl Cs16App {
             up: self.cvars.get_f32("cl_upspeed"),
             walk_key: self.cvars.get_f32("cl_movespeedkey"),
         };
-        let mut cmd = build_usercmd(&held, angles, params, &speeds);
-        cmd.sidemove += std::mem::take(&mut self.strafe_sidemove);
-        self.session.queue_cmd(cmd);
-        self.input_state.consume_impulses();
+        let interp = self.session.interp();
+        for (idx, msec) in ticks.into_iter().enumerate() {
+            let held = self.input_state.held(capture);
+            let lerp_dt = if use_grid { 0.01 } else { dt as f32 };
+            let params = CmdParams {
+                msec,
+                lerp_msec: self.cmd_clock.lerp_msec(interp, lerp_dt),
+                impulse: if idx == 0 {
+                    std::mem::take(&mut self.pending_impulse)
+                } else {
+                    0
+                },
+            };
+            let mut cmd = build_usercmd(&held, angles, params, &speeds);
+            cmd.sidemove += if idx == 0 {
+                std::mem::take(&mut self.strafe_sidemove)
+            } else {
+                0.0
+            };
+            self.session.queue_cmd(cmd);
+            if idx == 0 {
+                self.input_state.consume_impulses();
+            }
+        }
     }
 
     fn handle_bound_key(
@@ -3425,6 +3461,21 @@ fn effective_fps_limit(fps_max: f32, fps_override: bool, active: bool, max_clien
     Some(if fps_override { f } else { f.min(100.0) })
 }
 
+/// Returns `true` when `cl_cmd_100hz` should decouple `usercmd` emission onto a clean `10 ms`
+/// (`100 Hz`) cadence: requires `fps_override 1` running above `105 FPS` (or unlimited).
+fn should_use_100hz_cmd_grid(
+    fps_max: f32,
+    fps_override: bool,
+    cl_cmd_100hz: bool,
+    active: bool,
+    max_clients: u8,
+) -> bool {
+    if !fps_override || !cl_cmd_100hz {
+        return false;
+    }
+    effective_fps_limit(fps_max, fps_override, active, max_clients).is_none_or(|f| f > 105.0)
+}
+
 /// Converts 1-based `HudState.players` entity keys to 0-based `ScoreRow.slot` and `names` keys.
 fn build_score_rows(hud: &HudState, names: &BTreeMap<u8, String>) -> (Vec<ScoreRow>, i16, i16) {
     let rows = hud
@@ -3694,5 +3745,16 @@ mod tests {
         assert_eq!(mouse_button_to_goldsrc(MouseButton::Back), Some("mouse4"));
         assert_eq!(mouse_button_to_goldsrc(MouseButton::Forward), Some("mouse5"));
         assert_eq!(mouse_button_to_goldsrc(MouseButton::Other(9)), None);
+    }
+
+    #[test]
+    fn high_hz_cmd_grid_gating_respects_fps_override_and_cvar() {
+        assert!(!should_use_100hz_cmd_grid(100.0, false, true, true, 16));
+        assert!(!should_use_100hz_cmd_grid(240.0, false, true, true, 16));
+        assert!(!should_use_100hz_cmd_grid(100.0, true, true, true, 16));
+        assert!(!should_use_100hz_cmd_grid(240.0, true, false, true, 16));
+        assert!(should_use_100hz_cmd_grid(144.0, true, true, true, 16));
+        assert!(should_use_100hz_cmd_grid(240.0, true, true, true, 16));
+        assert!(should_use_100hz_cmd_grid(0.0, true, true, true, 16));
     }
 }

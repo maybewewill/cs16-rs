@@ -24,7 +24,8 @@
 //!   `physent_t::studiomodel`); a player (`SOLID_SLIDEBOX`) never does, and the engine reads no
 //!   model flags. Such an entity is traced as its box, which is what the original does for a
 //!   model without the flag. `PM_STUDIO_IGNORE` and `PM_STUDIO_BOX` therefore change nothing.
-//! - `visents` and `PM_TraceLine` are not built (`pm_shared` never calls them).
+//! - `visents` and `PM_TraceLine` (`PM_TRACELINE_PHYSENTSONLY` / `PM_TRACELINE_ANYVISIBLE`)
+//!   trace against solid physents or visible entities (`cl_pmove.c` / `pmovetst.cpp`).
 //! - The `groupinfo` filter and the `SV_AllowPhysent` hook do not exist in this engine.
 //! - Where the original fills a physent field it does not set for the entity's solid kind, the
 //!   array element keeps what an earlier command left there (stale); here such a field is zero.
@@ -64,6 +65,11 @@ pub const PM_STUDIO_BOX: i32 = 2;
 pub const PM_GLASS_IGNORE: i32 = 4;
 /// `PM_WORLD_ONLY`: trace the world only.
 pub const PM_WORLD_ONLY: i32 = 8;
+
+/// `PM_TRACELINE_PHYSENTSONLY` (`pm_defs.h`): `PM_TraceLine` traces against `physents`.
+pub const PM_TRACELINE_PHYSENTSONLY: i32 = 0;
+/// `PM_TRACELINE_ANYVISIBLE` (`pm_defs.h`): `PM_TraceLine` traces against `visents`.
+pub const PM_TRACELINE_ANYVISIBLE: i32 = 1;
 
 /// `CONTENTS_LADDER`: the `skin` of a `func_ladder`.
 pub const CONTENTS_LADDER: i32 = -16;
@@ -108,11 +114,13 @@ pub struct PhysEnt {
     pub model: PhysModel,
 }
 
-/// `SV_AddLinksToPM` snapshot for one player's command: physents (world first) and moveents.
+/// `SV_AddLinksToPM` / `CL_AddLinksToPmove` snapshot for one player's command:
+/// physents (world first), moveents (ladders), and visents (visible entities for `PM_TraceLine`).
 #[derive(Clone, Debug, Default)]
 pub struct PmPhysEnts {
     physents: Vec<PhysEnt>,
     moveents: Vec<PhysEnt>,
+    visents: Vec<PhysEnt>,
 }
 
 impl PmPhysEnts {
@@ -126,6 +134,11 @@ impl PmPhysEnts {
         self.moveents.len()
     }
 
+    /// `numvisent`.
+    pub fn num_visents(&self) -> usize {
+        self.visents.len()
+    }
+
     /// Physent `index` (`physents[index]`), `None` when out of range.
     pub fn physent(&self, index: i32) -> Option<PhysEntView> {
         let index = usize::try_from(index).ok()?;
@@ -135,6 +148,12 @@ impl PmPhysEnts {
     /// Moveent `index` (`moveents[index]`), `None` when out of range.
     pub fn moveent(&self, index: usize) -> Option<PhysEntView> {
         self.moveents.get(index).map(|p| p.view)
+    }
+
+    /// Visent `index` (`visents[index]`), `None` when out of range.
+    pub fn visent(&self, index: i32) -> Option<PhysEntView> {
+        let index = usize::try_from(index).ok()?;
+        self.visents.get(index).map(|p| p.view)
     }
 
     /// Appends to `physents`.
@@ -147,9 +166,19 @@ impl PmPhysEnts {
         self.moveents.push(pe);
     }
 
+    /// Appends to `visents`.
+    pub fn push_visent(&mut self, pe: PhysEnt) {
+        self.visents.push(pe);
+    }
+
     /// The `physents` array.
     pub fn physents_slice(&self) -> &[PhysEnt] {
         &self.physents
+    }
+
+    /// The `visents` array.
+    pub fn visents_slice(&self) -> &[PhysEnt] {
+        &self.visents
     }
 
     /// `moveents[index]`, `None` when out of range.
@@ -535,6 +564,28 @@ pub fn player_trace(
         }
     }
     trace
+}
+
+/// `PM_TraceLine` (Xash3D FWGS `engine/client/dll_int/cl_pmove.c` / ReHLDS `pmovetst.cpp`,
+/// read 2026-11-25): traces against `visents` when `flags & PM_TRACELINE_ANYVISIBLE != 0`,
+/// otherwise against `physents`, using `usehull` (`0..=3`, typically `2` for point traces).
+#[allow(clippy::too_many_arguments)]
+pub fn trace_line(
+    coll: &WorldCollision,
+    physents: &[PhysEnt],
+    visents: &[PhysEnt],
+    start: Vec3,
+    end: Vec3,
+    flags: i32,
+    usehull: i32,
+    ignore_pe: i32,
+) -> PmTraceResult {
+    let target = if (flags & PM_TRACELINE_ANYVISIBLE) != 0 && !visents.is_empty() {
+        visents
+    } else {
+        physents
+    };
+    player_trace(coll, target, start, end, usehull, PM_NORMAL, ignore_pe)
 }
 
 /// The body of `_PM_PlayerTrace`'s loop after the hull is chosen: one physent's `total`.
