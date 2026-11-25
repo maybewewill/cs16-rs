@@ -1,0 +1,22 @@
+[package]
+name = "cs-amxx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+cs-cvar.workspace = true
+cs-engine.workspace = true
+cs-proto48.workspace = true
+flate2.workspace = true
+glam.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+cs-assets.workspace = true
+cs-transport.workspace = true

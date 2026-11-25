@@ -86,17 +86,33 @@ impl CommandRegistry {
             "echo",
             "fullserverinfo",
             "cmd",
+            "upload",
         ] {
             r.register(name, CMD_STUFFTEXT_OK);
         }
-        // `Cmd_AddRestrictedCommand` in `CL_InitLocal`.
+        // `Cmd_AddRestrictedCommand` in `CL_InitLocal` (slowhack defense).
         for name in [
             "setinfo",
             "userinfo",
             "connect",
+            "retry",
             "quit",
             "exit",
             "rcon",
+            "rcon_password",
+            "rcon_address",
+            "bind",
+            "unbind",
+            "unbindall",
+            "exec",
+            "alias",
+            "motd_write",
+            "writecfg",
+            "writeid",
+            "writeip",
+            "_restart",
+            "condump",
+            "screenshot",
             "record",
             "killdemo",
             "localservers",

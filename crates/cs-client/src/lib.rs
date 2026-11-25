@@ -3,6 +3,8 @@
 
 pub mod audio;
 pub mod camera;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod http_dl;
 pub mod hudtext;
 pub mod input;
 pub mod render;

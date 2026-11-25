@@ -241,6 +241,9 @@ pub fn handle_oob(
         | OobPacket::S2cConnection { .. }
         | OobPacket::S2cReject(_)
         | OobPacket::A2aPrint(_)
+        | OobPacket::ChallengeRcon
+        | OobPacket::S2cChallengeRcon(_)
+        | OobPacket::Rcon { .. }
         | OobPacket::Unknown(_) => (OobOutcome::Ignore, false),
     }
 }

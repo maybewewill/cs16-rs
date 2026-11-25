@@ -353,6 +353,8 @@ pub struct HudState {
     pub weather: u8,
     pub lightstyles: [String; 64],
     pub custom_decals: HashMap<u8, CustomDecalInfo>,
+    /// Validated `!MD5<hex>` player spray WADs cached in memory by MD5 digest.
+    pub custom_sprays: BTreeMap<[u8; 16], Vec<u8>>,
     pub static_entities: Vec<SpawnStaticMsg>,
     pub te_text_messages: Vec<TeTextMessage>,
     /// `ClCorpse`: the bodies the shell draws.
@@ -431,6 +433,7 @@ impl Default for HudState {
             weather: 0,
             lightstyles: default_lightstyles(),
             custom_decals: HashMap::new(),
+            custom_sprays: BTreeMap::new(),
             static_entities: Vec::new(),
             te_text_messages: Vec::new(),
             corpses: Vec::new(),
@@ -901,6 +904,17 @@ impl HudState {
                 self.status_icons.clear();
             }
             CsUserMsg::InitHud => self.initialized = true,
+            CsUserMsg::ViewMode
+            | CsUserMsg::GameTitle(_)
+            | CsUserMsg::GameMode(_)
+            | CsUserMsg::Spectator { .. }
+            | CsUserMsg::Hltv { .. }
+            | CsUserMsg::ForceCam { .. }
+            | CsUserMsg::ADStop
+            | CsUserMsg::ShadowIdx(_)
+            | CsUserMsg::TaskTime { .. }
+            | CsUserMsg::BotVoice { .. }
+            | CsUserMsg::Location { .. } => {}
             CsUserMsg::Unknown { name, payload } => {
                 self.unknown_total = self.unknown_total.saturating_add(1);
                 if self.unknown_messages.len() >= UNKNOWN_CAPACITY {
@@ -917,7 +931,7 @@ impl HudState {
 }
 
 /// The state the effect modules build up from the svc stream.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ClientEffects {
     pub events: EventQueue,
     pub tempents: TempEnts,

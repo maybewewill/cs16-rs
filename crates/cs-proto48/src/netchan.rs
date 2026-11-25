@@ -95,6 +95,8 @@ pub struct NetChan {
     fragbufcount: [u16; MAX_STREAMS],
     /// Waiting batches of outgoing fragments (`chan->waitlist`).
     waitlist: [VecDeque<(u16, VecDeque<OutFrag>)>; MAX_STREAMS],
+    /// Filenames queued or actively sending on `FRAG_FILE_STREAM`, to reject duplicate requests.
+    active_file_names: VecDeque<String>,
 
     /// Incoming fragment reassembly buffers per stream (`chan->incomingbufs`).
     incoming_frags: [BTreeMap<u16, Vec<u8>>; MAX_STREAMS],
@@ -128,6 +130,7 @@ impl NetChan {
             fragbufs: [VecDeque::new(), VecDeque::new()],
             fragbufcount: [0; MAX_STREAMS],
             waitlist: [VecDeque::new(), VecDeque::new()],
+            active_file_names: VecDeque::new(),
             incoming_frags: [BTreeMap::new(), BTreeMap::new()],
             incoming_expected: [0; MAX_STREAMS],
             incoming_bytes: [0; MAX_STREAMS],
@@ -153,6 +156,7 @@ impl NetChan {
             self.waitlist[s].clear();
             self.discard_incoming(s);
         }
+        self.active_file_names.clear();
     }
 
     /// Limits the bytes buffered for reassembly in each incoming stream; a fragment that would
@@ -242,6 +246,61 @@ impl NetChan {
         }
         let total = frags.len() as u16;
         self.waitlist[FRAG_NORMAL_STREAM].push_back((total, frags));
+    }
+
+    /// Whether a file with `filename` is currently queued or transferring on `FRAG_FILE_STREAM`
+    /// (`Netchan_IsFileTransferActive`, ReHLDS `net_chan.cpp:1145`, read 2026-11-25).
+    pub fn is_file_transfer_active(&self, filename: &str) -> bool {
+        self.active_file_names
+            .iter()
+            .any(|f| f.eq_ignore_ascii_case(filename))
+    }
+
+    /// Queues a file stream transfer on `FRAG_FILE_STREAM` using GoldSrc's `Netchan_CreateFileFragmentsFromBuffer`
+    /// framing: `filename\0` + compressor (`""`) + `u32` uncompressed byte size + payload.
+    /// Rejects empty payloads or duplicate active transfers for the same filename.
+    pub fn create_file_fragments(&mut self, filename: &str, data: &[u8], _try_bz2: bool) -> bool {
+        if filename.is_empty() || filename.contains('\0') || data.is_empty() {
+            return false;
+        }
+        if self.is_file_transfer_active(filename) {
+            return true;
+        }
+        let Ok(uncompressed_len) = u32::try_from(data.len()) else {
+            return false;
+        };
+        let mut framed = Vec::with_capacity(filename.len() + 6 + data.len());
+        framed.extend_from_slice(filename.as_bytes());
+        framed.push(0);
+        // Workspace `bzip2-rs` only decodes BZ2 streams cleanly without unsafe code, so send
+        // uncompressed with `compressor = ""` (ReHLDS `net_chan.cpp:1156` fallback).
+        framed.push(0);
+        framed.extend_from_slice(&uncompressed_len.to_le_bytes());
+        framed.extend_from_slice(data);
+
+        let chunk_size = self.fragment_size.max(16);
+        let mut frags = VecDeque::new();
+        for (idx, chunk) in framed.chunks(chunk_size).enumerate() {
+            let Ok(id) = u16::try_from(idx + 1) else {
+                return false;
+            };
+            frags.push_back(OutFrag {
+                buffer_id: id,
+                data: chunk.to_vec(),
+            });
+        }
+        let Ok(total) = u16::try_from(frags.len()) else {
+            return false;
+        };
+        self.active_file_names.push_back(filename.to_string());
+        self.waitlist[FRAG_FILE_STREAM].push_back((total, frags));
+        true
+    }
+
+    /// `(received_chunks, expected_total_chunks)` for an in-progress `FRAG_FILE_STREAM` download.
+    pub fn incoming_file_progress(&self) -> Option<(usize, usize)> {
+        let total = usize::from(self.incoming_expected[FRAG_FILE_STREAM]);
+        (total > 0).then(|| (self.incoming_frags[FRAG_FILE_STREAM].len(), total))
     }
 
     /// Whether there are still reliable bytes or fragments waiting to be transmitted or acked.
@@ -488,6 +547,10 @@ impl NetChan {
 
         if reliable_ack == self.reliable_sequence && sequence_ack >= self.last_reliable_sequence {
             self.reliable_buf.clear();
+            if self.reliable_fragment[FRAG_FILE_STREAM] && self.fragbufs[FRAG_FILE_STREAM].is_empty()
+            {
+                let _ = self.active_file_names.pop_front();
+            }
         }
 
         self.incoming_sequence = sequence;
@@ -860,5 +923,53 @@ mod tests {
                 .is_err()
         );
         assert_eq!(chan.incoming_buffered_bytes(), 0);
+    }
+
+    #[test]
+    fn file_stream_fragments_deduplicate_and_report_progress() {
+        let mut server = NetChan::new(FRAGMENT_S2C_MAX_SIZE);
+        let mut client = NetChan::new(FRAGMENT_C2S_SIZE);
+        let payload = vec![0xABu8; 2500];
+        assert!(server.create_file_fragments("maps/de_test.bsp", &payload, false));
+        assert!(server.is_file_transfer_active("MAPS/DE_TEST.BSP"));
+        assert!(!server.create_file_fragments("", &payload, false));
+        assert!(!server.create_file_fragments("bad\0name", &payload, false));
+        assert!(!server.create_file_fragments("empty.txt", &[], false));
+        // Duplicate active transfer returns true without queuing a second copy.
+        assert!(server.create_file_fragments("maps/de_test.bsp", &payload, false));
+        assert_eq!(server.waitlist[FRAG_FILE_STREAM].len(), 1);
+
+        let mut completed_file: Option<Vec<u8>> = None;
+        let mut saw_progress = false;
+        for _ in 0..32 {
+            let pkt = server.build_packet(&[]);
+            let ev = client.process_packet(&pkt).unwrap();
+            if let Some(inc) = ev
+                && let Some(f) = inc.completed_file_stream
+            {
+                completed_file = Some(f);
+            }
+            if let Some((got, total)) = client.incoming_file_progress() {
+                assert!(total >= 2);
+                assert!(got <= total);
+                saw_progress = true;
+            }
+            let ack = client.build_packet(&[]);
+            server.process_packet(&ack).unwrap();
+            if completed_file.is_some() && !server.is_file_transfer_active("maps/de_test.bsp") {
+                break;
+            }
+        }
+        assert!(saw_progress);
+        assert!(!server.is_file_transfer_active("maps/de_test.bsp"));
+        let raw = completed_file.expect("client must reassemble FRAG_FILE_STREAM");
+        let name_end = raw.iter().position(|&b| b == 0).unwrap();
+        assert_eq!(&raw[..name_end], b"maps/de_test.bsp");
+        let comp_end = name_end + 1 + raw[name_end + 1..].iter().position(|&b| b == 0).unwrap();
+        assert_eq!(&raw[name_end + 1..comp_end], b"");
+        let size_start = comp_end + 1;
+        let declared_len = u32::from_le_bytes(raw[size_start..size_start + 4].try_into().unwrap());
+        assert_eq!(declared_len as usize, payload.len());
+        assert_eq!(&raw[size_start + 4..], payload.as_slice());
     }
 }

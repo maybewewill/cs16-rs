@@ -246,15 +246,19 @@ pub fn md5_digest(input: &[u8]) -> [u8; 16] {
     out
 }
 
-/// Format an MD5 digest as lowercase 32-character hex string.
-pub fn md5_hex(input: &[u8]) -> String {
-    let digest = md5_digest(input);
+/// Format an already-computed 16-byte MD5 digest as a lowercase 32-character hex string.
+pub fn md5_digest_hex(digest: &[u8; 16]) -> String {
     let mut s = String::with_capacity(32);
     for b in digest {
         use std::fmt::Write as _;
         let _ = write!(&mut s, "{b:02x}");
     }
     s
+}
+
+/// Compute MD5 of `input` and format it as a lowercase 32-character hex string.
+pub fn md5_hex(input: &[u8]) -> String {
+    md5_digest_hex(&md5_digest(input))
 }
 
 #[cfg(test)]

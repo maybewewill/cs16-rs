@@ -105,3 +105,73 @@ fn connects_to_our_server_over_loopback() {
     assert_eq!(conn.stats().parse_errors, 0);
     assert!(conn.stats().delta_updates > 0);
 }
+
+#[test]
+fn svc_sendcvarvalue2_and_rcon_client_roundtrip_over_loopback() {
+    use cs_clientcore::RconClient;
+    use cs_transport::PacketTransport;
+
+    let mut hub = LoopbackHub::new();
+    let mut server = Server::new(
+        ServerConfig {
+            max_clients: 4,
+            ..ServerConfig::default()
+        },
+        ServerMap::stub("test"),
+        Bare,
+        DeltaRegistry::cs16_default(),
+        CVarRegistry::new_with_defaults(),
+    );
+    server.console_command("rcon_password topsecret");
+
+    let cfg = ConnectionConfig::new(
+        "cvarbot",
+        76_561_197_960_265_731,
+        &md5_hex(b"cvar loopback"),
+    );
+    let mut conn = Connection::new(hub.connect(), PeerAddr::Loopback(0), cfg);
+    conn.connect();
+
+    let mut now = 0.0;
+    for _ in 0..200 {
+        now += FRAME;
+        conn.pump(now);
+        server.frame(&mut hub, now);
+        if conn.state() == &ConnState::InGame {
+            break;
+        }
+    }
+    assert_eq!(conn.state(), &ConnState::InGame);
+
+    assert!(server.query_client_cvar(0, "cl_lw"));
+    assert!(server.query_client_cvar2(0, 77, "cl_updaterate"));
+    for _ in 0..20 {
+        now += FRAME;
+        server.frame(&mut hub, now);
+        conn.pump(now);
+    }
+    assert_eq!(
+        server.take_cvar_responses(0),
+        vec![
+            (None, "cl_lw".to_string(), "1".to_string()),
+            (Some(77), "cl_updaterate".to_string(), "60".to_string()),
+        ]
+    );
+
+    let mut rcon_ep = hub.connect();
+    let mut rcon = RconClient::new();
+    rcon_ep
+        .send(PeerAddr::Loopback(0), &rcon.start_command("topsecret", "users"))
+        .unwrap();
+    for _ in 0..10 {
+        now += FRAME;
+        server.frame(&mut hub, now);
+        while let Some((_, pkt)) = rcon_ep.recv() {
+            if let Some(reply_cmd) = rcon.on_datagram(&pkt) {
+                rcon_ep.send(PeerAddr::Loopback(0), &reply_cmd).unwrap();
+            }
+        }
+    }
+    let out = rcon.take_replies().join("");
+    assert!(out.contains("cvarbot"), "{out:?}");
+}

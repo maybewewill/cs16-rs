@@ -3,6 +3,7 @@
 
 pub mod bsp;
 pub mod gamma;
+pub mod hpak;
 pub mod materials;
 pub mod mdl;
 pub mod scheme;

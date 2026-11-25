@@ -44,6 +44,8 @@ struct Options {
     web_dir: Option<PathBuf>,
     relay_allow: Vec<SocketAddr>,
     mods_dir: Option<PathBuf>,
+    amxx_dir: Option<PathBuf>,
+    masters: Vec<SocketAddr>,
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
@@ -59,6 +61,8 @@ fn parse(args: &[String]) -> Result<Options, String> {
         web_dir: None,
         relay_allow: Vec::new(),
         mods_dir: None,
+        amxx_dir: None,
+        masters: Vec::new(),
     };
     let mut args = args.iter();
     while let Some(arg) = args.next() {
@@ -99,6 +103,14 @@ fn parse(args: &[String]) -> Result<Options, String> {
             }
             "--web-dir" => opts.web_dir = Some(PathBuf::from(value()?)),
             "--mods-dir" => opts.mods_dir = Some(PathBuf::from(value()?)),
+            "--amxx-dir" => opts.amxx_dir = Some(PathBuf::from(value()?)),
+            "--master" => {
+                let v = value()?;
+                let addr: SocketAddr = v
+                    .parse()
+                    .map_err(|e| format!("{arg}: invalid <ip:port> `{v}`: {e}"))?;
+                opts.masters.push(addr);
+            }
             "--relay-allow" => {
                 let v = value()?;
                 let addr: SocketAddr = v
@@ -111,6 +123,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
     }
     if !opts.relay_allow.is_empty() && opts.web_port.is_none() {
         return Err("--relay-allow requires --web-port".to_string());
+    }
+    if opts.amxx_dir.is_some() && opts.walk_game {
+        return Err("--amxx-dir cannot be combined with --walk-game".to_string());
     }
     Ok(opts)
 }
@@ -210,6 +225,37 @@ fn load_mods_into_vfs(mods_dir: &Path, vfs: &mut Vfs) -> Result<cs_mod_host::Ser
     Ok(host)
 }
 
+fn load_amxx_plugins(dir: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| format!("failed to scan amxx dir `{}`: {e}", dir.display()))?;
+    let mut paths = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("failed to read amxx dir `{}`: {e}", dir.display()))?;
+        let path = entry.path();
+        let is_amxx = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("amxx") || e.eq_ignore_ascii_case("amx"));
+        if path.is_file() && is_amxx {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    let mut plugins = Vec::with_capacity(paths.len());
+    for path in paths {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("plugin.amxx")
+            .to_string();
+        let bytes = std::fs::read(&path)
+            .map_err(|e| format!("failed to read AMXX plugin `{}`: {e}", path.display()))?;
+        plugins.push((name, bytes));
+    }
+    info!(dir = %dir.display(), count = plugins.len(), "loaded AMXX plugins");
+    Ok(plugins)
+}
+
 fn start(args: &[String]) -> Result<(), String> {
     let opts = parse(args)?;
     let mut vfs = Vfs::discover(opts.gamedir.as_deref(), VfsConfig::default())
@@ -230,9 +276,25 @@ fn start(args: &[String]) -> Result<(), String> {
         game.load_motd(&vfs);
         game.load_map_cycle(&vfs);
         game.enable_cvar_bot_quota();
-        match host {
-            Some(h) => serve(&opts, &vfs, map, cs_mod_host::ModdedGame::new(game, h), "CsGame + Mods"),
-            None => serve(&opts, &vfs, map, game, "CsGame"),
+        match (&opts.amxx_dir, host) {
+            (Some(dir), Some(h)) => {
+                let amxx = cs_amxx::AmxxGame::new(game, load_amxx_plugins(dir)?);
+                serve(
+                    &opts,
+                    &vfs,
+                    map,
+                    cs_mod_host::ModdedGame::new(amxx, h),
+                    "CsGame + AMXX + Mods",
+                )
+            }
+            (Some(dir), None) => {
+                let amxx = cs_amxx::AmxxGame::new(game, load_amxx_plugins(dir)?);
+                serve(&opts, &vfs, map, amxx, "CsGame + AMXX")
+            }
+            (None, Some(h)) => {
+                serve(&opts, &vfs, map, cs_mod_host::ModdedGame::new(game, h), "CsGame + Mods")
+            }
+            (None, None) => serve(&opts, &vfs, map, game, "CsGame"),
         }
     }
 }
@@ -326,6 +388,9 @@ fn serve<G: GameDll>(
     let mut server = new_server(cfg, map, game, vfs);
     if let Some(n) = opts.bots {
         let _ = server.console_command(&format!("bot_quota {n}"));
+    }
+    for addr in &opts.masters {
+        let _ = server.console_command(&format!("setmaster add {addr}"));
     }
     info!(
         addr = %udp_addr,
@@ -672,6 +737,32 @@ mod tests {
     fn parses_mods_dir_flag() {
         let o = parse(&args(&["--mods-dir", "mods"])).unwrap();
         assert_eq!(o.mods_dir, Some(PathBuf::from("mods")));
+    }
+
+    #[test]
+    fn parses_repeatable_master_flag() {
+        let o = parse(&args(&[
+            "--master",
+            "127.0.0.1:27010",
+            "--master",
+            "127.0.0.1:27011",
+        ]))
+        .unwrap();
+        assert_eq!(
+            o.masters,
+            vec![
+                "127.0.0.1:27010".parse::<SocketAddr>().unwrap(),
+                "127.0.0.1:27011".parse::<SocketAddr>().unwrap(),
+            ]
+        );
+        assert!(parse(&args(&["--master", "not-an-addr"])).is_err());
+    }
+
+    #[test]
+    fn parses_amxx_dir_flag_and_rejects_walk_game() {
+        let o = parse(&args(&["--amxx-dir", "addons/amxmodx/plugins"])).unwrap();
+        assert_eq!(o.amxx_dir, Some(PathBuf::from("addons/amxmodx/plugins")));
+        assert!(parse(&args(&["--walk-game", "--amxx-dir", "plugins"])).is_err());
     }
 
     #[test]

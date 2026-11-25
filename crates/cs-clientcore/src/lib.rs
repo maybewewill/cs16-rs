@@ -10,6 +10,7 @@
 pub mod commands;
 pub mod connection;
 pub mod cvars;
+pub mod demo;
 pub mod entities;
 pub mod frames;
 pub mod interp;
@@ -17,6 +18,7 @@ pub mod events;
 pub mod hud;
 pub mod precache;
 pub mod predict;
+pub mod rcon;
 pub mod resources;
 pub mod sound;
 pub mod tempents;
@@ -29,6 +31,7 @@ pub use connection::{
     ViewAngleUpdate,
 };
 pub use cvars::{ClientCvars, Cvar};
+pub use demo::{DemoPlayer, DemoPlaylist, DemoRecorder, TimeDemoReport};
 pub use entities::{ClientEntity, EntityStore, ModelKind};
 pub use frames::{ClientClock, ClientFrames, DeltaRefusal, Frame, FrameOutcome, FrameRing};
 pub use interp::{EmitInputs, EmitResult, EntityKind, InterpSettings, VisibleEntity};
@@ -37,7 +40,10 @@ pub use predict::{
     LocalState, PlayerPose, PredictInputs, PredictSettings, PredictedSound, Prediction,
     PredictionCheck, Predictor, WeaponState, split_usercmd,
 };
-pub use resources::{AllFilesPresent, ResourceFiles, ResourceManager, res_type};
+pub use rcon::{RconClient, RconClientState};
+pub use resources::{
+    AllFilesPresent, HttpFetchResult, HttpFetcher, ResourceFiles, ResourceManager, res_type,
+};
 pub use events::{EventFx, EventQueue, FiredEvent, FxEnv};
 pub use hud::{ClientEffects, HudState};
 pub use sound::{SoundCommand, SoundQueue, SoundStart, VoiceEvent, VoiceQueue};

@@ -22,11 +22,12 @@ reading their source file headers on 2026-11-23:
 | ReGameDLL_CS | MIT (`LICENSE`) | Copyright (c) 2015–2025 ReGameDLL_CS Contributors |
 | Xash3D FWGS | GPL-3.0-or-later (per ported module headers) | Copyright (C) 2007–2018 Uncle Mike; Xash3D FWGS contributors |
 | cs16-client | GPL-2.0-or-later (per event/header files used) | cs16-client contributors |
+| AMX Mod X | GPL-3.0-or-later | Copyright (C) AMX Mod X Development Team |
 
 `LICENSE` at the repository root holds the GPL v3 text; `THIRD-PARTY-NOTICES.md` holds the
-upstream copyright and permission notices of all four reference projects (ReHLDS, ReGameDLL_CS,
-Xash3D FWGS, and cs16-client). The protocol crate `crates/cs-proto48` is ported from ReHLDS,
-ReGameDLL_CS, and Xash3D FWGS.
+upstream copyright and permission notices of all five reference projects (ReHLDS, ReGameDLL_CS,
+Xash3D FWGS, cs16-client, and AMX Mod X). The protocol crate `crates/cs-proto48` is ported from
+ReHLDS, ReGameDLL_CS, and Xash3D FWGS.
 
 ## Resolved — file headers in the reference projects
 
@@ -81,9 +82,14 @@ What was found:
 - Phase 3 & visual parity renderer port (read 2026-11-23 and 2026-11-24; `cl_main.c` `CL_ComputeClientInterpolationAmount` also consulted 2026-11-24): Xash3D FWGS `engine/client/cl_main.c`, `gamma.c`, `engine/client/parse/cl_parse.c`, `engine/client/parse/cl_parse_gs.c`, `cl_frame.c`, `cl_events.c`, `cl_tent.c`, `cl_custom.c`, `engine/client/sound/s_main.c`, `dll_int/cl_pmove.c`, `engine/common/cmd.c`, `cvar.c`, `net_chan.c`, `engine/common/imagelib/{img_utils.c, img_wad.c}`, `engine/client/client.h`, `engine/common/netchan.h`, `protocol.h`, `public/matrixlib.c`, `xash3d_mathlib.c`, `xash3d_mathlib.h`, `ref/common/{ref_light.c, ref_context.c}`, and `ref/gl/gl_rmain.c`, `gl_rsurf.c`, `gl_image.c`, `gl_sprite.c`, `gl_studio.c`, `gl_local.h` are GPL-3.0-or-later and compatible with this project's licence; the behaviour of `cs-clientcore`, the Phase 3 protocol/asset additions, and the `cs-client` renderer was ported from them function by function (`THIRD-PARTY-NOTICES.md` lists each file and what was taken; `common/const.h` lines 698–720 `kRenderFx*` numeric values carry Valve LLC's notice and fall under the caveat below). cs16-client `cl_dll/events/event_*.cpp` and `dlls/wpn_shared.h` are GPL-2.0-or-later ("or later" makes them usable under GPL-3.0-or-later); the per-weapon constants, `*_SHOOT*` view-model enums, vehicle/reset/explosion events, and smoke grenade clouds come from them. The Valve-licensed helper files those events call (`EV_GetDefaultShellInfo`, `EV_GetGunPosition`, `HUD_TempEntUpdate`, the `cl_dll/hud*.cpp` code) were NOT ported: Xash3D leaves the temp entity update to the client library, so the shell kinematics, the gun position and the temp entity update are our own clean-room design, written by an author who did not read the Valve files (an earlier transliteration of them was removed in phase 3 review).
 
 Decision: the project owner chose GPL-3.0-or-later because it is compatible with the licensing
-of all four upstream reference projects (ReHLDS, ReGameDLL_CS, Xash3D FWGS, and cs16-client).
+of all five upstream reference projects (ReHLDS, ReGameDLL_CS, Xash3D FWGS, cs16-client, and AMX Mod X).
 
-Porting code from ReHLDS, ReGameDLL_CS, Xash3D FWGS, and the `cs16-client` event files listed in
+- Phase 11 engine completeness & AMX Mod X host (read 2026-11-25):
+  - AMX Mod X (`https://github.com/alliedmodders/amxmodx`, GPL-3.0-or-later): `crates/cs-amxx` ports `amxxfile.h`, `amxx_loader.cpp`, `amx.h`, `amx.cpp`, `CPlugin.cpp`, `amxmodx.cpp`, `string.cpp`, `float.cpp`, and the `cstrike`, `fun`, `engine`, `fakemeta`, and `hamsandwich` module interfaces.
+  - ReHLDS (GPL-2.0-or-later + linking exception): `sv_log.cpp` and `sv_main.cpp` (HL standard logs, `logaddress`, RCON `SV_Rcon`/`SV_GetChallenge`/`SV_FlushRedirect`, signon/netchan framing in `cs-hltv`), `sv_user.cpp` and `sv_upld.cpp` (`dlfile`, `mp_consistency`, custom sprays/`svc_customization`, bans), `host_cmd.cpp` (`status full`, `users`), `common/hltv.h` (`DRC_CMD_*`, `HLTV_*` proxy architecture), `common/cvardef.h` (`FCVAR_PROTECTED`/`FCVAR_SPONLY` rules).
+  - Xash3D FWGS (GPL-3.0-or-later): `engine/client/cl_demo.c` (`demoheader_t`/frame specs in `cs-proto48` and `cs-clientcore`), `engine/common/hpak.c` (`crates/cs-assets/src/hpak.rs`), `engine/client/cl_custom.c` & `engine/common/net_chan.c` (custom resource list and dual-stream file fragmentation), and `engine/common/{cvar.c, cmd.c}` / `engine/client/cl_main.c` (`cl_filterstuffcmd` slowhack filtering).
+
+Porting code from ReHLDS, ReGameDLL_CS, Xash3D FWGS, AMX Mod X, and the `cs16-client` event files listed in
 `THIRD-PARTY-NOTICES.md` is allowed, with each ported file's source named in `THIRD-PARTY-NOTICES.md`.
 Code copied from the Valve Half-Life SDK headers stays excluded; see
 [Valve Half-Life SDK caveat](#valve-half-life-sdk-caveat) for what was taken.

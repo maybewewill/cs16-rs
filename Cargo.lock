@@ -513,6 +513,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
+name = "cs-amxx"
+version = "0.1.0"
+dependencies = [
+ "cs-assets",
+ "cs-cvar",
+ "cs-engine",
+ "cs-proto48",
+ "cs-transport",
+ "flate2",
+ "glam",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
 name = "cs-assets"
 version = "0.1.0"
 dependencies = [
@@ -537,6 +552,7 @@ dependencies = [
  "cs-clientcore",
  "cs-cvar",
  "cs-local",
+ "cs-master",
  "cs-mod-api",
  "cs-mod-host",
  "cs-pm",
@@ -562,6 +578,7 @@ dependencies = [
 name = "cs-clientcore"
 version = "0.1.0"
 dependencies = [
+ "bzip2-rs",
  "cs-assets",
  "cs-cvar",
  "cs-engine",
@@ -597,6 +614,7 @@ dependencies = [
 name = "cs-game"
 version = "0.1.0"
 dependencies = [
+ "cs-amxx",
  "cs-assets",
  "cs-cvar",
  "cs-engine",
@@ -611,6 +629,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "cs-hltv"
+version = "0.1.0"
+dependencies = [
+ "cs-clientcore",
+ "cs-cvar",
+ "cs-proto48",
+ "cs-transport",
+ "glam",
+ "thiserror 2.0.21",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "cs-local"
 version = "0.1.0"
 dependencies = [
@@ -622,6 +654,15 @@ dependencies = [
  "cs-proto48",
  "cs-transport",
  "cs-vfs",
+]
+
+[[package]]
+name = "cs-master"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.21",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -723,6 +764,7 @@ dependencies = [
 name = "cs-server"
 version = "0.1.0"
 dependencies = [
+ "cs-amxx",
  "cs-clientcore",
  "cs-cvar",
  "cs-engine",

@@ -100,6 +100,7 @@ impl ClientCvars {
             ("cl_smoothtime", "0.1", CVAR_ARCHIVE),
             ("cl_solid_players", "1", 0),
             ("cl_allowdownload", "1", CVAR_ARCHIVE),
+            ("cl_allowupload", "1", CVAR_ARCHIVE),
             ("cl_download_ingame", "1", CVAR_ARCHIVE),
             // Default `"1"` in Xash3D FWGS `engine/common/cvar.c:51` (`cl_filterstuffcmd`).
             ("cl_filterstuffcmd", "1", CVAR_ARCHIVE | CVAR_PRIVILEGED),

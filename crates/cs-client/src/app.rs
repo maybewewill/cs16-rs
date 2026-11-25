@@ -52,9 +52,10 @@ use cs_client::ui::mod_hud::{draw_mod_approval_prompt, draw_mod_hud};
 use cs_client::ui::options::{OptionsRenderCtx, OptionsUi};
 use cs_client::ui::scoreboard::{ScoreRow, ScoreboardRenderCtx, show_scoreboard_vgui};
 use cs_client::ui::screens::{
-    BuyClassTeamMenuUi, BuyMenuRenderCtx, CommandMenuUi, DemoPlayerUi, DialogRenderCtx,
-    DisconnectErrorDialog, LoadingDialogUi, MotdRenderCtx, MotdVguiUi, PlayerListDialogUi,
-    ServerPasswordUi, SpectatorMode, SpectatorRenderCtx, SpectatorVguiUi, VguiMenuKind,
+    BuyClassTeamMenuUi, BuyMenuRenderCtx, CommandMenuUi, DemoPlayerUi, DemoUiAction,
+    DialogRenderCtx, DisconnectErrorDialog, LoadingDialogUi, MotdRenderCtx, MotdVguiUi,
+    PlayerListDialogUi, ServerPasswordUi, SpectatorMode, SpectatorRenderCtx, SpectatorVguiUi,
+    VguiMenuKind,
 };
 use cs_client::ui::server_menu::{
     draw_styled_text_menu_vgui, draw_text_menu_vgui, menu_key_enabled,
@@ -200,6 +201,15 @@ pub struct Cs16App {
     pending_screenshot: Option<PathBuf>,
     exit_after_screenshot: bool,
     config_path: PathBuf,
+    recording_demo: Option<String>,
+    pending_rcon: Option<PendingRcon>,
+}
+
+struct PendingRcon {
+    socket: std::net::UdpSocket,
+    target: std::net::SocketAddr,
+    client: cs_clientcore::RconClient,
+    deadline: std::time::Instant,
 }
 
 impl Cs16App {
@@ -332,11 +342,90 @@ impl Cs16App {
             pending_screenshot: None,
             exit_after_screenshot,
             config_path,
+            recording_demo: None,
+            pending_rcon: None,
         }
     }
 
     fn is_in_game(&self) -> bool {
         self.session.in_game()
+    }
+
+    fn issue_rcon_command(&mut self, args: &[String]) {
+        use std::net::ToSocketAddrs;
+        if args.is_empty() {
+            self.cvars.warn("Usage: rcon <command>");
+            return;
+        }
+        let password = self.cvars.get_str("rcon_password").to_string();
+        if password.is_empty() {
+            self.cvars.warn("rcon_password is empty");
+            return;
+        }
+        let raw_addr = self.cvars.get_str("rcon_address").trim().to_string();
+        let target = if !raw_addr.is_empty() {
+            let with_port = if raw_addr.contains(':') {
+                raw_addr
+            } else {
+                let port = self.cvars.get_str("rcon_port").trim();
+                let port = if port.is_empty() { "27015" } else { port };
+                format!("{raw_addr}:{port}")
+            };
+            match with_port
+                .to_socket_addrs()
+                .ok()
+                .and_then(|mut it| it.find(std::net::SocketAddr::is_ipv4))
+            {
+                Some(sa) => sa,
+                None => {
+                    self.cvars.warn(format!("rcon: cannot resolve {with_port}"));
+                    return;
+                }
+            }
+        } else if let Some(sa) = self.session.remote_udp_addr() {
+            sa
+        } else {
+            self.cvars
+                .warn("rcon: connect to a remote server or set rcon_address");
+            return;
+        };
+        let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") else {
+            self.cvars.warn("rcon: failed to bind UDP socket");
+            return;
+        };
+        let _ = socket.set_nonblocking(true);
+        let mut client = cs_clientcore::RconClient::new();
+        let pkt = client.start_command(&password, &args.join(" "));
+        let _ = socket.send_to(&pkt, target);
+        self.pending_rcon = Some(PendingRcon {
+            socket,
+            target,
+            client,
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(3),
+        });
+    }
+
+    fn poll_rcon(&mut self) {
+        let Some(mut pending) = self.pending_rcon.take() else {
+            return;
+        };
+        let mut buf = [0u8; 4096];
+        while let Ok((len, from)) = pending.socket.recv_from(&mut buf) {
+            if from != pending.target {
+                continue;
+            }
+            if let Some(reply_pkt) = pending.client.on_datagram(&buf[..len]) {
+                let _ = pending.socket.send_to(&reply_pkt, pending.target);
+            }
+        }
+        for line in pending.client.take_replies() {
+            for part in line.lines() {
+                self.cvars.info(part);
+            }
+        }
+        if std::time::Instant::now() < pending.deadline {
+            self.pending_rcon = Some(pending);
+        }
     }
 
     fn any_modal_open(&self) -> bool {
@@ -521,6 +610,7 @@ impl Cs16App {
 
     /// Drops the session and the map; the menu comes back.
     fn end_session(&mut self) {
+        self.pending_rcon = None;
         if !self.session.is_active() {
             return;
         }
@@ -944,6 +1034,12 @@ impl Cs16App {
                     EngineAction::Impulse(n) => self.pending_impulse = n,
                     EngineAction::Forward(tokens) => {
                         if let Some(cmd) = tokens.first().map(String::as_str)
+                            && cmd.eq_ignore_ascii_case("rcon")
+                        {
+                            self.issue_rcon_command(&tokens[1..]);
+                            continue;
+                        }
+                        if let Some(cmd) = tokens.first().map(String::as_str)
                             && (cmd == "mod_approve" || cmd == "mod_deny")
                         {
                             if let Some(id) = tokens.get(1) {
@@ -1047,10 +1143,165 @@ impl Cs16App {
                     EngineAction::SpecMenu(visible) => {
                         self.spectator_ui.menu_visible = visible != 0;
                     }
+                    EngineAction::RecordDemo(name) => {
+                        if name.trim().is_empty() {
+                            self.cvars.warn("usage: record <demoname>");
+                        } else if !self.session.is_active() || self.session.is_demo() {
+                            self.cvars.warn("must be connected to a server to record a demo");
+                        } else {
+                            let clean = name.trim().trim_end_matches(".dem").to_string();
+                            self.session.start_recording("cstrike");
+                            self.recording_demo = Some(clean.clone());
+                            self.cvars.info(format!("recording to {clean}.dem."));
+                        }
+                    }
+                    EngineAction::StopDemo => {
+                        if let Some(name) = self.recording_demo.take() {
+                            match self.session.stop_recording() {
+                                Ok(Some(bytes)) => {
+                                    let file_name = format!("{name}.dem");
+                                    let out_path = self
+                                        .config_path
+                                        .parent()
+                                        .filter(|p| !p.as_os_str().is_empty())
+                                        .unwrap_or_else(|| std::path::Path::new("."))
+                                        .join(&file_name);
+                                    match std::fs::write(&out_path, &bytes) {
+                                        Ok(()) => self.cvars.info(format!(
+                                            "Completed demo {file_name} ({} bytes)",
+                                            bytes.len()
+                                        )),
+                                        Err(e) => self.cvars.warn(format!(
+                                            "failed to write {}: {e}",
+                                            out_path.display()
+                                        )),
+                                    }
+                                }
+                                Ok(None) => self.cvars.info("Not recording a demo."),
+                                Err(e) => self.cvars.warn(format!("demo stop error: {e}")),
+                            }
+                        } else if self.session.is_demo() {
+                            self.session.close();
+                            self.demo_player_ui.state =
+                                cs_client::ui::screens::DemoTransportState::Stopped;
+                        } else {
+                            self.cvars.info("Not recording a demo.");
+                        }
+                    }
+                    EngineAction::PlayDemo(name) => {
+                        self.start_demo_file(&name, false);
+                    }
+                    EngineAction::TimeDemo(name) => {
+                        self.start_demo_file(&name, true);
+                    }
+                    EngineAction::RconCommand(_) | EngineAction::SetMaster(_) => {}
                 }
             }
         }
         false
+    }
+
+    fn start_demo_file(&mut self, raw_name: &str, timedemo: bool) {
+        let trimmed = raw_name.trim();
+        if trimmed.is_empty() {
+            self.cvars.warn("usage: playdemo <filename>");
+            return;
+        }
+        let fname = if trimmed.to_ascii_lowercase().ends_with(".dem") {
+            trimmed.to_string()
+        } else {
+            format!("{trimmed}.dem")
+        };
+        let bytes = std::fs::read(&fname).or_else(|_| {
+            self.vfs
+                .as_ref()
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no vfs"))
+                .and_then(|v| {
+                    v.read_bytes(&fname)
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e.to_string()))
+                })
+        });
+        match bytes {
+            Ok(data) => match Session::start_demo(self.vfs.as_ref(), &data) {
+                Ok(mut sess) => {
+                    if timedemo {
+                        if let Some(report) = sess.demo_player_mut().map(|p| p.run_timedemo_all(1.0 / 60.0)) {
+                            self.cvars.info(format!(
+                                "timedemo {}: {} frames, {:.3}s, {:.1} fps",
+                                fname, report.frames, report.elapsed_secs, report.avg_fps
+                            ));
+                        }
+                    } else if let Some(p) = sess.demo_player() {
+                        self.demo_player_ui.load_demo(&fname);
+                        self.demo_player_ui.duration_secs = p.total_duration();
+                        self.demo_player_ui.total_ticks =
+                            (p.total_duration() * 100.0).ceil().max(1.0) as u32;
+                    }
+                    self.session.close();
+                    self.session = sess;
+                    self.menu_ui.visible = false;
+                    self.sync_cursor_capture();
+                }
+                Err(e) => self.cvars.warn(format!("Failed to start demo {fname}: {e}")),
+            },
+            Err(e) => self.cvars.warn(format!("Couldn't open {fname}: {e}")),
+        }
+    }
+
+    fn apply_demo_ui_actions(&mut self, actions: Vec<DemoUiAction>) {
+        if let Some(player) = self.session.demo_player() {
+            self.demo_player_ui.current_secs = player.current_time();
+            self.demo_player_ui.duration_secs = player.total_duration();
+            self.demo_player_ui.tick = (player.current_time() * 100.0).round().max(0.0) as u32;
+        }
+        for act in actions {
+            match act {
+                DemoUiAction::Load(name) => self.start_demo_file(&name, false),
+                DemoUiAction::Stop => {
+                    if self.session.is_demo() {
+                        self.session.close();
+                    }
+                }
+                DemoUiAction::TogglePause => {
+                    if let Some(p) = self.session.demo_player_mut() {
+                        let next = !p.is_paused();
+                        p.set_paused(next);
+                    }
+                }
+                DemoUiAction::StepBack => {
+                    if let Some(p) = self.session.demo_player_mut() {
+                        let target = (p.current_time() - 0.5).max(0.0);
+                        p.seek(target);
+                    }
+                }
+                DemoUiAction::StepForward => {
+                    if let Some(p) = self.session.demo_player_mut() {
+                        let _ = p.step_frame();
+                    }
+                }
+                DemoUiAction::SetSpeed(spd) => {
+                    if let Some(p) = self.session.demo_player_mut() {
+                        p.set_speed(spd);
+                    }
+                }
+                DemoUiAction::Seek(secs) => {
+                    if let Some(p) = self.session.demo_player_mut() {
+                        p.seek(secs);
+                    }
+                }
+                DemoUiAction::JumpStart => {
+                    if let Some(p) = self.session.demo_player_mut() {
+                        p.seek(0.0);
+                    }
+                }
+                DemoUiAction::JumpEnd => {
+                    if let Some(p) = self.session.demo_player_mut() {
+                        let end = p.total_duration();
+                        p.seek(end);
+                    }
+                }
+            }
+        }
     }
 
     fn server_console(&mut self, line: &str) {
@@ -1238,6 +1489,7 @@ impl Cs16App {
         let inst_fps = 1.0 / raw_dt.max(0.0001);
         self.fps_smooth = self.fps_smooth * 0.9 + inst_fps * 0.1;
         self.frame_ms_smooth = self.frame_ms_smooth * 0.9 + (raw_dt * 1000.0) * 0.1;
+        self.poll_rcon();
 
         if self.session.is_active() {
             let desired_name = self.cvars.get_str("name").to_string();
@@ -1294,12 +1546,24 @@ impl Cs16App {
             } else if !matches!(state, ConnState::InGame) {
                 self.loading_ui.visible = true;
                 let (msg, prog) = match state {
-                    ConnState::AwaitChallenge => ("Establishing network connection to server...", 0.2),
-                    ConnState::AwaitConnection => ("Connecting to server...", 0.45),
-                    ConnState::Signon => ("Downloading resources and precaching...", 0.8),
-                    _ => ("Loading...", 0.1),
+                    ConnState::AwaitChallenge => (
+                        "Establishing network connection to server...".to_string(),
+                        0.2,
+                    ),
+                    ConnState::AwaitConnection => ("Connecting to server...".to_string(), 0.45),
+                    ConnState::Signon => {
+                        if let Some((pending, cur)) = self.session.download_progress()
+                            && pending > 0
+                        {
+                            let file = cur.unwrap_or_else(|| "resources".to_string());
+                            (format!("Downloading {file} ({pending} left)..."), 0.6)
+                        } else {
+                            ("Downloading resources and precaching...".to_string(), 0.8)
+                        }
+                    }
+                    _ => ("Loading...".to_string(), 0.1),
                 };
-                self.loading_ui.status_text = msg.to_string();
+                self.loading_ui.status_text = msg;
                 self.loading_ui.progress = prog;
             } else {
                 self.loading_ui.visible = false;
@@ -2007,8 +2271,7 @@ impl Cs16App {
             self.session.local_slot(),
             &dlg_ctx,
         );
-        self.demo_player_ui
-            .show(&rt.egui_ctx, &mut self.vgui_rt, &dlg_ctx);
+        let demo_actions = self.demo_player_ui.show(&rt.egui_ctx, &mut self.vgui_rt, &dlg_ctx);
         let pw_submit = self
             .password_ui
             .show(&rt.egui_ctx, &mut self.vgui_rt, &dlg_ctx);
@@ -2225,6 +2488,7 @@ impl Cs16App {
         }
 
         // 5. Post-frame actions.
+        self.apply_demo_ui_actions(demo_actions);
         for (mod_id, allow) in mod_decisions {
             if allow {
                 self.mod_transfer.approve(&mod_id);

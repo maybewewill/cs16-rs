@@ -389,6 +389,20 @@ pub enum DemoTransportState {
     Paused,
 }
 
+/// Actions emitted by [`DemoPlayerUi`] when the user operates the demo transport panel.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DemoUiAction {
+    Load(String),
+    TogglePause,
+    Stop,
+    StepBack,
+    StepForward,
+    SetSpeed(f32),
+    Seek(f64),
+    JumpStart,
+    JumpEnd,
+}
+
 /// VGUI2 Demo Player dialog (`DemoPlayerDialog.res` / `DemoPlayerFileDialog.res`).
 #[derive(Debug, Clone)]
 pub struct DemoPlayerUi {
@@ -399,6 +413,8 @@ pub struct DemoPlayerUi {
     pub tick: u32,
     pub total_ticks: u32,
     pub available_demos: Vec<String>,
+    pub current_secs: f64,
+    pub duration_secs: f64,
 }
 
 impl Default for DemoPlayerUi {
@@ -411,6 +427,8 @@ impl Default for DemoPlayerUi {
             tick: 0,
             total_ticks: 1000,
             available_demos: Vec::new(),
+            current_secs: 0.0,
+            duration_secs: 0.0,
         }
     }
 }
@@ -448,9 +466,10 @@ impl DemoPlayerUi {
         ctx: &egui::Context,
         runtime: &mut VguiRuntime,
         d: &DialogRenderCtx<'_>,
-    ) {
+    ) -> Vec<DemoUiAction> {
+        let mut actions = Vec::new();
         if !self.open {
-            return;
+            return actions;
         }
         if let Some(v) = d.vfs {
             runtime.load_res(v, "resource/DemoPlayerDialog.res");
@@ -477,8 +496,22 @@ impl DemoPlayerUi {
                 ui.horizontal(|ui| {
                     ui.label("Demo:");
                     ui.text_edit_singleline(&mut self.selected_demo);
+                    if ui.button("Load").clicked() && !self.selected_demo.trim().is_empty() {
+                        let name = self.selected_demo.trim().to_string();
+                        self.load_demo(&name);
+                        actions.push(DemoUiAction::Load(name));
+                    }
                 });
-                ui.add(egui::Slider::new(&mut self.tick, 0..=self.total_ticks.max(1)).text("Tick"));
+                let prev_tick = self.tick;
+                if ui
+                    .add(egui::Slider::new(&mut self.tick, 0..=self.total_ticks.max(1)).text("Tick"))
+                    .changed()
+                    && self.tick != prev_tick
+                    && self.duration_secs > 0.0
+                {
+                    let ratio = f64::from(self.tick) / f64::from(self.total_ticks.max(1));
+                    actions.push(DemoUiAction::Seek(ratio * self.duration_secs));
+                }
                 ui.horizontal(|ui| {
                     for (lbl, act, icon_path) in [
                         ("|<", "start", "resource/icon_start.tga"),
@@ -523,6 +556,18 @@ impl DemoPlayerUi {
                         }
                         if resp.clicked() {
                             self.step_command(act);
+                            match act {
+                                "start" => actions.push(DemoUiAction::JumpStart),
+                                "end" => actions.push(DemoUiAction::JumpEnd),
+                                "slower" | "faster" => {
+                                    actions.push(DemoUiAction::SetSpeed(self.speed));
+                                }
+                                "stepb" => actions.push(DemoUiAction::StepBack),
+                                "stepf" => actions.push(DemoUiAction::StepForward),
+                                "pause" | "play" => actions.push(DemoUiAction::TogglePause),
+                                "stop" => actions.push(DemoUiAction::Stop),
+                                _ => {}
+                            }
                         }
                     }
                     ui.label(format!("{:.2}x", self.speed));
@@ -532,6 +577,7 @@ impl DemoPlayerUi {
         if !still_open {
             self.open = false;
         }
+        actions
     }
 }
 

@@ -16,6 +16,8 @@ const assetStatusEl = document.getElementById('asset-status');
 const mapSelect = document.getElementById('map-select');
 const botsInput = document.getElementById('bots-count');
 const wsUrlInput = document.getElementById('ws-url');
+const masterUrlInput = document.getElementById('master-url');
+const serverListSelect = document.getElementById('server-list');
 const panelEl = document.getElementById('control-panel');
 
 let cs16Web = null;
@@ -188,6 +190,44 @@ async function main() {
     cs16Web.disconnect?.();
     panelEl?.classList.remove('collapsed');
     setStatus('Disconnected');
+  });
+
+  document.getElementById('btn-refresh-servers')?.addEventListener('click', async () => {
+    const endpoint = masterUrlInput?.value?.trim();
+    if (!endpoint || !serverListSelect) return;
+    setStatus('Querying master server...');
+    try {
+      const resp = await fetch(endpoint);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const list = await resp.json();
+      serverListSelect.innerHTML = '';
+      if (!Array.isArray(list) || list.length === 0) {
+        const opt = document.createElement('option');
+        opt.value = '';
+        opt.textContent = '(no servers registered)';
+        serverListSelect.appendChild(opt);
+      } else {
+        for (const s of list) {
+          const opt = document.createElement('option');
+          const host = String(s.addr || '').split(':')[0] || '127.0.0.1';
+          opt.value = `ws://${host}:27016/ws`;
+          opt.textContent = `${s.addr} — ${s.map || '?'} (${s.players ?? 0}/${s.max ?? 0})`;
+          serverListSelect.appendChild(opt);
+        }
+        if (wsUrlInput && serverListSelect.options[0]?.value) {
+          wsUrlInput.value = serverListSelect.options[0].value;
+        }
+      }
+      setStatus(`Master: ${Array.isArray(list) ? list.length : 0} server(s)`);
+    } catch (err) {
+      setStatus(`Master error: ${err.message}`);
+    }
+  });
+
+  serverListSelect?.addEventListener('change', () => {
+    if (wsUrlInput && serverListSelect.value) {
+      wsUrlInput.value = serverListSelect.value;
+    }
   });
 
   document.getElementById('btn-fullscreen')?.addEventListener('click', () => input.toggleFullscreen());

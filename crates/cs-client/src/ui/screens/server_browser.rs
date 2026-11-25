@@ -9,7 +9,7 @@ use std::time::Duration;
 use cs_assets::scheme::LocalizationTable;
 use cs_assets::vgui_res::TextAlignment;
 #[cfg(not(target_arch = "wasm32"))]
-use cs_proto48::query::discover_goldsrc_lan_servers;
+use cs_proto48::query::{discover_goldsrc_lan_servers, query_server_info};
 use cs_vfs::Vfs;
 use egui::{Color32, CornerRadius, Key, Pos2, Rect, Sense, Stroke, TextureHandle, Vec2};
 
@@ -117,6 +117,7 @@ pub struct ServerBrowserUi {
     pub spectate: Vec<ServerBrowserEntry>,
     pub lan: Vec<ServerBrowserEntry>,
     pub friends: Vec<ServerBrowserEntry>,
+    pub master_addr: String,
     pub list_state: VguiListPanelState,
     drag_offset: Vec2,
     add_drag_offset: Vec2,
@@ -141,6 +142,7 @@ impl Default for ServerBrowserUi {
             spectate: Vec::new(),
             lan: Vec::new(),
             friends: Vec::new(),
+            master_addr: "127.0.0.1:27010".to_string(),
             list_state: VguiListPanelState {
                 columns: vec![
                     ListColumn { name: "Servers".into(), width: 210 },
@@ -223,6 +225,87 @@ impl ServerBrowserUi {
                 .collect();
         }
         self.sync_rows();
+    }
+
+    pub fn refresh_from_master(&mut self, spectate_only: bool) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Ok(master) = self.master_addr.parse::<std::net::SocketAddr>() else {
+                if spectate_only {
+                    self.spectate.clear();
+                } else {
+                    self.internet.clear();
+                }
+                self.sync_rows();
+                return;
+            };
+            let filter = if spectate_only {
+                "\\gamedir\\cstrike\\proxy\\1"
+            } else {
+                "\\gamedir\\cstrike"
+            };
+            let mut entries = Vec::new();
+            if let Ok(addrs) = cs_master::client::query_master_servers(
+                master,
+                0xFF,
+                filter,
+                Duration::from_millis(500),
+            ) {
+                for v4 in addrs.into_iter().take(64) {
+                    let entry = match query_server_info(
+                        std::net::SocketAddr::V4(v4),
+                        Duration::from_millis(200),
+                    ) {
+                        Ok(q) => ServerBrowserEntry {
+                            addr: q.addr,
+                            name: q.name,
+                            game: if q.game.is_empty() {
+                                "Counter-Strike".to_string()
+                            } else {
+                                q.game
+                            },
+                            map: q.map,
+                            players: q.players,
+                            max_players: q.max_players,
+                            ping_ms: q.ping_ms,
+                            password: q.password_protected,
+                            vac: q.vac_secure,
+                            spectate_port: spectate_only || q.server_type == b'p',
+                        },
+                        Err(_) => ServerBrowserEntry {
+                            addr: v4.to_string(),
+                            name: v4.to_string(),
+                            game: "Counter-Strike".to_string(),
+                            map: String::new(),
+                            players: 0,
+                            max_players: 0,
+                            ping_ms: 0,
+                            password: false,
+                            vac: false,
+                            spectate_port: spectate_only,
+                        },
+                    };
+                    entries.push(entry);
+                }
+            }
+            if spectate_only {
+                self.spectate = entries;
+            } else {
+                self.internet = entries;
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = spectate_only;
+        self.sync_rows();
+    }
+
+    pub fn refresh_active_tab(&mut self) {
+        match self.tab {
+            ServerBrowserTab::Lan => self.refresh_lan(),
+            ServerBrowserTab::Internet => self.refresh_from_master(false),
+            ServerBrowserTab::Spectate => self.refresh_from_master(true),
+            _ => self.sync_rows(),
+        }
     }
 
     pub fn show(
@@ -679,7 +762,7 @@ impl ServerBrowserUi {
                 )
                 .clicked()
                 {
-                    self.refresh_lan();
+                    self.refresh_active_tab();
                 }
 
                 let qref_w = (105.0 * s_chrome).round();
@@ -698,7 +781,7 @@ impl ServerBrowserUi {
                 )
                 .clicked()
                 {
-                    self.refresh_lan();
+                    self.refresh_active_tab();
                 }
 
                 if self.tab == ServerBrowserTab::Favorites {

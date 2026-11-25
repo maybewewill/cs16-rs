@@ -2,17 +2,27 @@
 
 mod api_entities;
 mod api_messages;
+pub mod bans;
+pub use bans::BanList;
 pub mod client;
 pub use cs_pm::collision;
 mod connect;
 pub mod console;
+pub mod downloads;
+pub use downloads::{ConsistencyRule, CustomizationStore, ServerFileProvider};
 pub mod edict;
+pub mod logging;
+pub use logging::ServerLogger;
+pub mod rcon;
+pub use rcon::{RconPolicy, RconState};
 pub mod events;
 pub mod frame;
 pub mod game;
 mod lifecycle;
 pub mod map;
 pub mod mapents;
+pub mod master;
+pub use master::{HeartbeatSnapshot, MasterRegistration};
 mod movestep;
 pub mod oob;
 pub mod pm;

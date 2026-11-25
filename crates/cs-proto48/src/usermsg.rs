@@ -374,6 +374,37 @@ pub enum CsUserMsg {
         health: u8,
         target: u8,
     },
+    ViewMode,
+    GameTitle(u8),
+    GameMode(u8),
+    Spectator {
+        client: u8,
+        is_spectator: bool,
+    },
+    Hltv {
+        client: u8,
+        flags: u8,
+    },
+    ForceCam {
+        forcecam: u8,
+        forcechasecam: u8,
+        fadetoblack: u8,
+    },
+    ADStop,
+    ShadowIdx(i32),
+    TaskTime {
+        time: i16,
+        active: u8,
+        fade_time: u8,
+    },
+    BotVoice {
+        active: bool,
+        player: u8,
+    },
+    Location {
+        player: u8,
+        location: String,
+    },
     Unknown {
         name: String,
         payload: Vec<u8>,
@@ -652,6 +683,37 @@ pub fn decode_cs_usermsg(name: &str, payload: &[u8]) -> Result<CsUserMsg, ProtoE
         "SpecHealth2" => CsUserMsg::SpecHealth2 {
             health: r.read_u8()?,
             target: r.read_u8()?,
+        },
+        "ViewMode" => CsUserMsg::ViewMode,
+        "GameTitle" => CsUserMsg::GameTitle(r.read_u8()?),
+        "GameMode" => CsUserMsg::GameMode(r.read_u8()?),
+        "Spectator" => CsUserMsg::Spectator {
+            client: r.read_u8()?,
+            is_spectator: r.read_u8()? != 0,
+        },
+        "HLTV" => CsUserMsg::Hltv {
+            client: r.read_u8()?,
+            flags: r.read_u8()?,
+        },
+        "ForceCam" => CsUserMsg::ForceCam {
+            forcecam: r.read_u8()?,
+            forcechasecam: r.read_u8()?,
+            fadetoblack: r.read_u8()?,
+        },
+        "ADStop" => CsUserMsg::ADStop,
+        "ShadowIdx" => CsUserMsg::ShadowIdx(r.read_i32()?),
+        "TaskTime" => CsUserMsg::TaskTime {
+            time: r.read_i16()?,
+            active: r.read_u8()?,
+            fade_time: r.read_u8()?,
+        },
+        "BotVoice" => CsUserMsg::BotVoice {
+            active: r.read_u8()? != 0,
+            player: r.read_u8()?,
+        },
+        "Location" => CsUserMsg::Location {
+            player: r.read_u8()?,
+            location: r.read_str()?,
         },
         _ => CsUserMsg::Unknown {
             name: name.to_string(),
@@ -1077,6 +1139,63 @@ pub fn encode_cs_usermsg(msg: &CsUserMsg) -> (&'static str, Vec<u8>) {
             w.write_u8(*target);
             "SpecHealth2"
         }
+        CsUserMsg::ViewMode => "ViewMode",
+        CsUserMsg::GameTitle(v) => {
+            w.write_u8(*v);
+            "GameTitle"
+        }
+        CsUserMsg::GameMode(v) => {
+            w.write_u8(*v);
+            "GameMode"
+        }
+        CsUserMsg::Spectator {
+            client,
+            is_spectator,
+        } => {
+            w.write_u8(*client);
+            w.write_u8(u8::from(*is_spectator));
+            "Spectator"
+        }
+        CsUserMsg::Hltv { client, flags } => {
+            w.write_u8(*client);
+            w.write_u8(*flags);
+            "HLTV"
+        }
+        CsUserMsg::ForceCam {
+            forcecam,
+            forcechasecam,
+            fadetoblack,
+        } => {
+            w.write_u8(*forcecam);
+            w.write_u8(*forcechasecam);
+            w.write_u8(*fadetoblack);
+            "ForceCam"
+        }
+        CsUserMsg::ADStop => "ADStop",
+        CsUserMsg::ShadowIdx(idx) => {
+            w.write_i32(*idx);
+            "ShadowIdx"
+        }
+        CsUserMsg::TaskTime {
+            time,
+            active,
+            fade_time,
+        } => {
+            w.write_i16(*time);
+            w.write_u8(*active);
+            w.write_u8(*fade_time);
+            "TaskTime"
+        }
+        CsUserMsg::BotVoice { active, player } => {
+            w.write_u8(u8::from(*active));
+            w.write_u8(*player);
+            "BotVoice"
+        }
+        CsUserMsg::Location { player, location } => {
+            w.write_u8(*player);
+            w.write_str(location);
+            "Location"
+        }
         CsUserMsg::Unknown { payload, .. } => {
             w.write_bytes(payload);
             "Unknown"
@@ -1286,5 +1405,67 @@ mod tests {
                 style: 3,
             }
         );
+    }
+
+    #[test]
+    fn phase11_all_remaining_usermsgs_roundtrip() {
+        let msgs = vec![
+            CsUserMsg::Health(87),
+            CsUserMsg::Battery(100),
+            CsUserMsg::ArmorType(1),
+            CsUserMsg::SayText {
+                sender_id: 2,
+                text: "#Cstrike_Chat_All".to_string(),
+                params: vec!["Player".to_string(), "glhf".to_string()],
+            },
+            CsUserMsg::TeamScore {
+                team_name: "CT".to_string(),
+                score: 9,
+            },
+            CsUserMsg::ShowMenu {
+                keys_bitmask: 0x03FF,
+                display_time: -1,
+                multipart: false,
+                text: "\\ySelect Team\\w\n1. T".to_string(),
+            },
+            CsUserMsg::BuyClose,
+            CsUserMsg::ViewMode,
+            CsUserMsg::GameTitle(1),
+            CsUserMsg::GameMode(0),
+            CsUserMsg::BlinkAcct(2),
+            CsUserMsg::Spectator {
+                client: 3,
+                is_spectator: true,
+            },
+            CsUserMsg::Hltv {
+                client: 4,
+                flags: 128,
+            },
+            CsUserMsg::ForceCam {
+                forcecam: 1,
+                forcechasecam: 2,
+                fadetoblack: 0,
+            },
+            CsUserMsg::ADStop,
+            CsUserMsg::ShadowIdx(14),
+            CsUserMsg::TaskTime {
+                time: 45,
+                active: 1,
+                fade_time: 3,
+            },
+            CsUserMsg::BotVoice {
+                active: true,
+                player: 6,
+            },
+            CsUserMsg::Location {
+                player: 2,
+                location: "#BombsiteA".to_string(),
+            },
+        ];
+        for m in msgs {
+            let (name, raw) = encode_cs_usermsg(&m);
+            let decoded = decode_cs_usermsg(name, &raw).unwrap();
+            assert_eq!(decoded, m, "roundtrip mismatch for {name}");
+        }
     }
 }

@@ -13,6 +13,9 @@
 //! `COM_IsSafeFileToDownload` is not in the fetched sources; [`is_safe_to_download`] is a
 //! whitelist of our own (see there).
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
+
 use cs_proto48::bitbuf::MsgWriter;
 use cs_proto48::compress::decompress_stream;
 use cs_proto48::crypto::{com_munge, com_unmunge};
@@ -36,8 +39,10 @@ pub const RES_CUSTOM: u8 = 1 << 2;
 
 /// Directory sounds live in (`DEFAULT_SOUNDPATH`).
 pub const SOUND_PATH: &str = "sound/";
-/// Bits of a resource index in a consistency answer (`MAX_GOLDSRC_MODEL_BITS`).
-const CONSISTENCY_INDEX_BITS: u32 = 10;
+/// Bits of a resource index in `svc_resourcelist` (`SV_SendConsistencyList`, 10 bits).
+const CONSISTENCY_LIST_INDEX_BITS: u32 = 10;
+/// Bits of a resource index in `clc_fileconsistency` (`SV_ParseConsistencyResponse`, 12 bits).
+pub const CONSISTENCY_RESPONSE_INDEX_BITS: u32 = 12;
 /// A resource the server could not find reports this size (the 24-bit field read as -1).
 /// Download locations kept from `svc_resourcelocation`.
 pub const MAX_DOWNLOAD_LOCATIONS: usize = 16;
@@ -145,6 +150,21 @@ pub struct BatchOutcome {
     pub skipped: Vec<String>,
 }
 
+/// Completed HTTP FastDL transfer returned by [`HttpFetcher::poll_completed`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpFetchResult {
+    pub path: String,
+    pub is_bz2: bool,
+    pub data: Result<Vec<u8>, String>,
+}
+
+/// Platform-neutral asynchronous HTTP client hook for `sv_downloadurl` FastDL.
+pub trait HttpFetcher: Send {
+    fn start_fetch(&mut self, base_url: &str, rel_path: &str, is_bz2: bool) -> bool;
+    fn poll_completed(&mut self) -> Vec<HttpFetchResult>;
+    fn has_pending(&self) -> bool;
+}
+
 /// Resource state of the current sign-on.
 #[derive(Debug, Clone, Default)]
 pub struct ResourceManager {
@@ -154,6 +174,11 @@ pub struct ResourceManager {
     need_consistency_response: bool,
     download_locations: Vec<String>,
     total_to_transfer: u64,
+    fatal_failure: Option<String>,
+    /// `key_lower -> (rel_path, location_index, is_bz2)`.
+    http_inflight: BTreeMap<String, (String, usize, bool)>,
+    http_exhausted: BTreeSet<String>,
+    http_needs_fallback: bool,
 }
 
 impl ResourceManager {
@@ -182,7 +207,7 @@ impl ResourceManager {
         self.consistency.clear();
         self.need_consistency_response = !consistency_indices.is_empty();
         for &index in consistency_indices {
-            if index >= 1 << CONSISTENCY_INDEX_BITS {
+            if index >= 1 << CONSISTENCY_LIST_INDEX_BITS {
                 return Err(format!("malformed consistency info packet (index {index})"));
             }
             let entry = resources.get(usize::from(index)).ok_or_else(|| {
@@ -373,7 +398,7 @@ impl ResourceManager {
         let mut md5 = [0u8; 16];
         for item in &self.consistency {
             w.write_one_bit(true);
-            w.write_bits(u32::from(item.orig_index), CONSISTENCY_INDEX_BITS);
+            w.write_bits(u32::from(item.orig_index), CONSISTENCY_RESPONSE_INDEX_BITS);
             let path = if item.is_sound {
                 format!("{SOUND_PATH}{}", item.filename)
             } else {
@@ -406,6 +431,190 @@ impl ResourceManager {
         com_munge(&mut bytes, spawn_count as i32);
         Some(bytes)
     }
+
+    /// Requests missing files via HTTP FastDL first (when `http` is installed and
+    /// `sv_downloadurl` locations were received), falling back to `dlfile` once all HTTP URLs
+    /// for a resource have failed.
+    pub fn batch_request_with_http(
+        &mut self,
+        allow_download: bool,
+        allow_dlfile_fallback: bool,
+        http: Option<&mut (dyn HttpFetcher + '_)>,
+    ) -> BatchOutcome {
+        if let Some(fatal) = self.fatal_failure.take() {
+            return BatchOutcome {
+                fatal: Some(fatal),
+                done: true,
+                ..BatchOutcome::default()
+            };
+        }
+        if let Some(fetcher) = http
+            && allow_download
+            && !self.download_locations.is_empty()
+        {
+            let first_url = self.download_locations[0].clone();
+            for item in &mut self.needed {
+                if !item.was_missing || item.requested {
+                    continue;
+                }
+                let rel_path = res_rel_path(&item.entry);
+                let key = rel_path.to_ascii_lowercase();
+                if self.http_exhausted.contains(&key)
+                    || self.http_inflight.contains_key(&key)
+                    || !is_safe_to_download(&rel_path)
+                {
+                    continue;
+                }
+                let try_bz2 = !key.ends_with(".bz2");
+                if fetcher.start_fetch(&first_url, &rel_path, try_bz2) {
+                    item.requested = true;
+                    self.http_inflight
+                        .insert(key, (rel_path, 0usize, try_bz2));
+                }
+            }
+        }
+        self.batch_request(allow_download && allow_dlfile_fallback)
+    }
+
+    /// Polls completed HTTP FastDL jobs, stores verified/decompressed files, retries raw on `.bz2`
+    /// failure or advances to the next mirror URL, and marks exhausted entries for `dlfile` fallback.
+    pub fn poll_http(
+        &mut self,
+        fetcher: &mut dyn HttpFetcher,
+        files: &mut dyn ResourceFiles,
+    ) -> (Vec<String>, bool) {
+        let mut downloaded = Vec::new();
+        let mut activity = false;
+        for res in fetcher.poll_completed() {
+            activity = true;
+            let key = res.path.to_ascii_lowercase();
+            let Some((rel_path, loc_idx, _)) = self.http_inflight.remove(&key) else {
+                continue;
+            };
+            let decoded = match res.data {
+                Ok(bytes) if !bytes.is_empty() && is_safe_to_download(&rel_path) => {
+                    if res.is_bz2 {
+                        decompress_bz2(&bytes, MAX_FILE_SIZE as usize)
+                    } else if bytes.len() <= MAX_FILE_SIZE as usize {
+                        Some(bytes)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            if let Some(raw) = decoded.filter(|b| !b.is_empty()) {
+                let _ = files.store(&rel_path, &raw);
+                if self.file_received(&rel_path) {
+                    downloaded.push(rel_path);
+                }
+                continue;
+            }
+            if res.is_bz2 {
+                let url = &self.download_locations[loc_idx];
+                if fetcher.start_fetch(url, &rel_path, false) {
+                    self.http_inflight.insert(key, (rel_path, loc_idx, false));
+                    continue;
+                }
+            } else if loc_idx + 1 < self.download_locations.len() {
+                let next_idx = loc_idx + 1;
+                let url = &self.download_locations[next_idx];
+                let try_bz2 = !key.ends_with(".bz2");
+                if fetcher.start_fetch(url, &rel_path, try_bz2) {
+                    self.http_inflight
+                        .insert(key, (rel_path, next_idx, try_bz2));
+                    continue;
+                }
+            }
+            self.http_exhausted.insert(key);
+            self.http_needs_fallback = true;
+            for item in &mut self.needed {
+                if item.was_missing && res_rel_path(&item.entry).eq_ignore_ascii_case(&rel_path) {
+                    item.requested = false;
+                }
+            }
+        }
+        (downloaded, activity)
+    }
+
+    pub fn take_http_needs_fallback(&mut self) -> bool {
+        std::mem::take(&mut self.http_needs_fallback)
+    }
+
+    /// Handles `svc_filetxferfailed` for a pending resource download. Returns `true` if it matched.
+    pub fn file_failed(&mut self, filename: &str) -> bool {
+        let mut matched = false;
+        for item in &mut self.needed {
+            if !item.was_missing {
+                continue;
+            }
+            let rel_path = res_rel_path(&item.entry);
+            if rel_path.eq_ignore_ascii_case(filename)
+                || item.entry.filename.eq_ignore_ascii_case(filename)
+            {
+                item.was_missing = false;
+                item.requested = false;
+                matched = true;
+                if (item.entry.flags & RES_FATALIFMISSING) != 0 {
+                    self.fatal_failure = Some(rel_path);
+                }
+            }
+        }
+        let key = filename.to_ascii_lowercase();
+        self.http_inflight.remove(&key);
+        matched
+    }
+
+    /// Remaining downloads count and the next active resource path for loading overlays.
+    pub fn download_summary(&self) -> (usize, Option<String>) {
+        let pending = self.needed.iter().filter(|r| r.was_missing).count();
+        let current = self
+            .needed
+            .iter()
+            .find(|r| r.was_missing && r.requested)
+            .or_else(|| self.needed.iter().find(|r| r.was_missing))
+            .map(|r| res_rel_path(&r.entry));
+        (pending, current)
+    }
+}
+
+fn res_rel_path(entry: &ResourceEntry) -> String {
+    if entry.res_type == res_type::SOUND {
+        format!("sound/{}", entry.filename)
+    } else {
+        entry.filename.clone()
+    }
+}
+
+/// Parses a GoldSrc custom spray name `!MD5<32 hex chars>` into its 16-byte digest.
+pub fn parse_md5_filename(name: &str) -> Option<[u8; 16]> {
+    let hex_str = name.strip_prefix("!MD5")?.trim();
+    if hex_str.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex_str[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
+/// Decompresses raw `.bz2` bytes (FastDL HTTP payload), bounded strictly to `max_bytes`.
+pub fn decompress_bz2(data: &[u8], max_bytes: usize) -> Option<Vec<u8>> {
+    let mut decoder = bzip2_rs::DecoderReader::new(data);
+    let mut out = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = decoder.read(&mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        if out.len() + n > max_bytes {
+            return None;
+        }
+        out.extend_from_slice(&buf[..n]);
+    }
+    Some(out)
 }
 
 /// `CL_ResourcePath`: sounds live under `sound/`.
@@ -519,7 +728,8 @@ pub fn parse_file_stream(stream: &[u8]) -> Option<ReceivedFile> {
     let size_bytes = stream.get(pos..pos + 4)?;
     let declared = u32::from_le_bytes([size_bytes[0], size_bytes[1], size_bytes[2], size_bytes[3]]);
     pos += 4;
-    if !is_safe_to_download(&name) || declared == 0 || declared > MAX_FILE_SIZE {
+    let is_spray = parse_md5_filename(&name).is_some() && declared <= 65536;
+    if (!is_safe_to_download(&name) && !is_spray) || declared == 0 || declared > MAX_FILE_SIZE {
         return None;
     }
     let body = &stream[pos..];
@@ -670,7 +880,7 @@ mod tests {
         r.start_bit_reading();
         let mut seen = Vec::new();
         while r.read_one_bit() {
-            seen.push((r.read_bits(10), r.read_bits(32)));
+            seen.push((r.read_bits(CONSISTENCY_RESPONSE_INDEX_BITS), r.read_bits(32)));
         }
         let first = u32::from(b"models/a.mdl".len() as u8);
         // The missing file repeats the previous md5.
@@ -790,5 +1000,130 @@ mod tests {
         assert!(out.dlfiles.is_empty());
         assert_eq!(out.skipped.len(), 1);
         assert!(out.skipped[0].contains("../evil.dll"));
+    }
+
+    #[derive(Default)]
+    struct MockHttp {
+        started: Vec<(String, String, bool)>,
+        responses: Vec<HttpFetchResult>,
+    }
+
+    impl HttpFetcher for MockHttp {
+        fn start_fetch(&mut self, base_url: &str, rel_path: &str, is_bz2: bool) -> bool {
+            self.started
+                .push((base_url.to_string(), rel_path.to_string(), is_bz2));
+            true
+        }
+
+        fn poll_completed(&mut self) -> Vec<HttpFetchResult> {
+            std::mem::take(&mut self.responses)
+        }
+
+        fn has_pending(&self) -> bool {
+            !self.responses.is_empty()
+        }
+    }
+
+    #[derive(Default)]
+    struct WritableFiles(BTreeMap<String, Vec<u8>>);
+
+    impl ResourceFiles for WritableFiles {
+        fn exists(&self, path: &str) -> bool {
+            self.0.contains_key(&path.to_ascii_lowercase())
+        }
+
+        fn md5(&self, path: &str) -> Option<[u8; 16]> {
+            self.0
+                .get(&path.to_ascii_lowercase())
+                .map(|b| cs_proto48::crypto::md5_digest(b))
+        }
+
+        fn store(&mut self, path: &str, data: &[u8]) -> bool {
+            self.0.insert(path.to_ascii_lowercase(), data.to_vec());
+            true
+        }
+    }
+
+    #[test]
+    fn http_fastdl_tries_bz2_then_raw_then_falls_back_to_dlfile() {
+        let list = [
+            entry(res_type::MODEL, "models/a.mdl", 2, 10, RES_FATALIFMISSING),
+            entry(res_type::MODEL, "models/b.mdl", 3, 10, 0),
+        ];
+        let mut m = ResourceManager::default();
+        m.add_download_locations("http://cdn.example/cstrike").unwrap();
+        m.begin(&list, &[], 1).unwrap();
+        let mut files = WritableFiles::default();
+        m.estimate_missing(&files);
+
+        let mut http = MockHttp::default();
+        let out = m.batch_request_with_http(true, true, Some(&mut http));
+        assert!(out.dlfiles.is_empty());
+        assert!(!out.done);
+        assert_eq!(http.started.len(), 2);
+        assert!(http.started[0].2 && http.started[1].2);
+
+        // `models/a.mdl.bz2` returns 404 -> retries raw `models/a.mdl` -> succeeds.
+        // `models/b.mdl.bz2` and raw `models/b.mdl` both fail -> falls back to `dlfile`.
+        http.responses = vec![
+            HttpFetchResult {
+                path: "models/a.mdl".into(),
+                is_bz2: true,
+                data: Err("404".into()),
+            },
+            HttpFetchResult {
+                path: "models/b.mdl".into(),
+                is_bz2: true,
+                data: Err("404".into()),
+            },
+        ];
+        let (done, act) = m.poll_http(&mut http, &mut files);
+        assert!(act && done.is_empty());
+        assert!(!m.take_http_needs_fallback());
+        assert_eq!(http.started.len(), 4);
+        assert!(!http.started[2].2 && !http.started[3].2);
+
+        http.responses = vec![
+            HttpFetchResult {
+                path: "models/a.mdl".into(),
+                is_bz2: false,
+                data: Ok(b"IDST".to_vec()),
+            },
+            HttpFetchResult {
+                path: "models/b.mdl".into(),
+                is_bz2: false,
+                data: Err("404".into()),
+            },
+        ];
+        let (done, _) = m.poll_http(&mut http, &mut files);
+        assert_eq!(done, vec!["models/a.mdl"]);
+        assert!(files.exists("models/a.mdl"));
+        assert!(m.take_http_needs_fallback());
+
+        let fallback = m.batch_request_with_http(true, true, Some(&mut http));
+        assert_eq!(fallback.dlfiles, vec!["models/b.mdl"]);
+    }
+
+    #[test]
+    fn file_failed_settles_optional_and_marks_fatal_required() {
+        let list = [
+            entry(res_type::MODEL, "models/req.mdl", 2, 10, RES_FATALIFMISSING),
+            entry(res_type::MODEL, "models/opt.mdl", 3, 10, 0),
+        ];
+        let mut m = ResourceManager::default();
+        m.begin(&list, &[], 1).unwrap();
+        m.estimate_missing(&WritableFiles::default());
+        let out = m.batch_request(true);
+        assert_eq!(out.dlfiles.len(), 2);
+
+        assert!(m.file_failed("models/opt.mdl"));
+        assert_eq!(m.pending_downloads(), 1);
+        assert!(m.batch_request_with_http(true, true, None).fatal.is_none());
+
+        assert!(m.file_failed("models/req.mdl"));
+        assert_eq!(
+            m.batch_request_with_http(true, true, None).fatal.as_deref(),
+            Some("models/req.mdl")
+        );
     }
 }

@@ -50,6 +50,7 @@ function names its source file, function and the date read in its doc comment):
 | `common/mathlib.h` | Read for the value of `M_PI` (a double literal) in comments only; no constant or code was taken (the engine uses `std::f64::consts::PI`). The file carries the GPL v2-or-later header with the linking exception, like the engine sources; it is not a Valve-noticed header. |
 | `common/const.h`, `common/usercmd.h`, `common/entity_state.h` | Numeric values and names only: from `const.h` the `SOLID_*`, `MOVETYPE_*`, `FL_*`, `CONTENTS_*` and `EF_*` constants (the engine's `world.rs`, `collision.rs`, `unlag.rs`, `physics_water.rs`); from `usercmd.h` and `entity_state.h` the field names and types of `usercmd_t`, `clientdata_t` and `entity_state_t` that the delta tables and the protocol need (`cs-proto48/src/delta.rs`). These three files carry Valve LLC's copyright notice (with Id Software's) and restrict use, distribution and modification of the source and of the resulting object code to non-commercial enhancements to products from Valve LLC, and prohibit all other use without Valve's written permission. They do not carry the GPL header of the engine sources. |
 | `common/qlimits.h`, `public/rehlds/edict.h` | Numeric values and names only: `MAX_PACKET_ENTITIES` and `MAX_LIGHTSTYLE_SIZE` from `qlimits.h`, `MAX_ENT_LEAFS` from `edict.h` (`world.rs`). Both carry a plain copyright line of Valve LLC (1996-2002, all rights reserved) and no terms of use. |
+| `sv_log.cpp`, `sv_main.cpp`, `sv_user.cpp`, `sv_upld.cpp`, `host_cmd.cpp`, `net_chan.cpp`, `common/hltv.h`, `common/cvardef.h` (phase 11, read 2026-11-25) | Phase 11 engine completeness: HL standard logging & `logaddress` UDP streaming (`crates/cs-engine/src/logging.rs`: `sv_log.cpp`, `sv_main.cpp`), RCON challenge/auth/rate limiting/chunked `l` replies and connectionless packets (`crates/cs-engine/src/rcon.rs`, `crates/cs-proto48/src/handshake.rs`: `sv_main.cpp`), `dlfile` path checks, `mp_consistency` 12-bit response index (`SV_ParseConsistencyResponse`), and custom spray upload/`svc_customization` (`crates/cs-engine/src/downloads.rs`: `sv_user.cpp`, `sv_upld.cpp`), IP/AuthID bans & `status full`/`users` (`crates/cs-engine/src/bans.rs`, `console.rs`: `sv_user.cpp`, `host_cmd.cpp`), HLTV/director `DRC_CMD_*`/`HLTV_*` constants and proxy signon/netchan framing (`crates/cs-proto48/src/messages.rs`, `crates/cs-hltv/src/{lib.rs,delay.rs,proxy.rs}`: `common/hltv.h`, `sv_main.cpp`), and `FCVAR_PROTECTED`/`FCVAR_SPONLY` rules (`crates/cs-cvar/src/lib.rs`: `common/cvardef.h`). |
 
 The constants and names taken from the headers with Valve's notice are the numbers the original
 client and game libraries and the wire protocol require to match, so that the code interoperates
@@ -204,9 +205,10 @@ License, or (at your option) any later version.
 | `engine/client/dll_int/cl_pmove.c` | `crates/cs-clientcore/src/predict.rs` | `CL_PredictMovement`, `CL_CheckPredictionError`, `CL_RunUsercmd`, the `playermove_t` setup and the prediction error smoothing. |
 | `engine/client/cl_events.c` | `crates/cs-clientcore/src/events.rs` | `CL_ParseEvent`, `CL_ParseReliableEvent`, `CL_QueueEvent`, `CL_FireEvents`, `CL_FireEvent`, `CL_PlaybackEvent`, `CL_FindEmptyEvent`. |
 | `engine/client/cl_tent.c` | `crates/cs-proto48/src/messages.rs`, `tempent.rs`; `crates/cs-clientcore/src/tempents.rs` | `CL_ParseTempEntity` wire decoding, the temp entity pool and the handlers of the `TE_*` messages. The per-frame update of the temp entities and the shell physics are NOT ported: Xash3D leaves them to the client library, so they are our own clean-room design (documented in `tempents.rs`). |
-| `engine/client/cl_custom.c`, `engine/common/net_chan.c` | `crates/cs-clientcore/src/resources.rs` | The custom resource list handling and the file stream size limit (`MAX_NETCHAN_DECOMPRESSED_SIZE`). |
-| `engine/client/sound/s_main.c` | `crates/cs-clientcore/src/sound.rs` | The arguments and flags of the sound start, ambient and stop commands. |
-| `engine/common/cmd.c`, `engine/common/cvar.c` | `crates/cs-clientcore/src/commands.rs`, `cvars.rs` | `Cbuf_ExecuteCommandsFromBuffer`, the command tokenizer, the cvar flag set and the privileged and filterable command rules. |
+| `engine/client/cl_custom.c`, `engine/common/net_chan.c` | `crates/cs-clientcore/src/resources.rs`, `crates/cs-proto48/src/netchan.rs` | The custom resource list handling (`CL_ResourcePath`, `CL_CheckFile`), `Netchan_CopyFileFragments` file stream header, dual-stream fragmentation, and the file stream size limit (`MAX_NETCHAN_DECOMPRESSED_SIZE`). |
+| `engine/client/cl_demo.c` | `crates/cs-proto48/src/demo.rs`, `crates/cs-clientcore/src/demo.rs` | GoldSrc HLDEMO Protocol 5 (`.dem`) structures (`demoheader_t` 544 B, `directory_entry` 92 B, `demo_info_t` 436 B, `usercmd_t` 52 B) and frame codecs (read 2026-11-25). |
+| `engine/common/hpak.c` | `crates/cs-assets/src/hpak.rs` | GoldSrc `HPAK` (`.hpk`) custom spray archive parser/writer and WAD3 decal validation (read 2026-11-25). |
+| `engine/common/cmd.c`, `engine/common/cvar.c`, `engine/client/cl_main.c` (`cl_filterstuffcmd`) | `crates/cs-clientcore/src/commands.rs`, `cvars.rs`, `connection.rs` | `Cbuf_ExecuteCommandsFromBuffer`, the command tokenizer, the cvar flag set (`FCVAR_PRIVILEGED`, `FCVAR_FILTERABLE`), `Cvar_ShouldSetCvar`, `Cmd_ShouldAllowCommand`, `Cmd_AddRestrictedCommand`, and `cl_filterstuffcmd` slowhack protection. |
 | `engine/client/client.h`, `engine/common/netchan.h`, `engine/common/protocol.h` | `crates/cs-clientcore/src/frames.rs`, `interp.rs` | Protocol/client header constants (`MAX_EX_INTERP`, `CL_UPDATE_MASK`, protocol opcode/rate bounds). |
 | `public/matrixlib.c`, `public/xash3d_mathlib.c`, `public/xash3d_mathlib.h` | `crates/cs-clientcore/src/interp.rs` | Angle and quaternion helpers. |
 | `ref/gl/gl_rmain.c`, `gl_rsurf.c`, `gl_sprite.c`, `gl_studio.c`, `gl_image.c`, `gl_local.h` | `crates/cs-assets/src/{bsp.rs, mdl.rs, spr.rs}`; `crates/cs-client/src/render/{scene.rs, bsp_renderer.rs, mdl_renderer.rs, sprite_renderer.rs, decal_renderer.rs, lighting.rs}` | The entity draw order and transparency sorting, render modes and render FX (pulse, distort, hologram, glow), `R_StudioEstimateFrame` / studio frame and looping rules, `R_StudioLighting` (`SHADE_LAMBERT`), `R_DrawSpriteModel` / sprite drawing, `R_BuildLightMap`, `R_AddDynamicLights`, `R_TextureAnimation` (`-0..-9`), `GL_SetTextureDimensions`, and `GL_BuildMipMap` (read 2026-11-23 and 2026-11-24). |
@@ -237,3 +239,25 @@ handling (`events.rs`), and `event_createsmoke.cpp` supplies the smoke grenade c
 code) is in Valve-licensed files and is NOT ported: the shell and gun placement, the shell
 physics and the temp entity update are our own clean-room design. The HUD code of `cl_dll/hud*.cpp`
 was not read for porting.
+
+## AMX Mod X
+
+Upstream: https://github.com/alliedmodders/amxmodx (GPL-3.0-or-later, read 2026-11-25).
+
+```text
+Copyright (C) AMX Mod X Development Team
+
+This program is free software: you can redistribute it and/or modify it under the terms of the
+GNU General Public License as published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+```
+
+Pure-Rust Pawn 3.2 bytecode VM, `.amxx` container loader, plugin runtime, and Counter-Strike 1.6
+native/forward host in `crates/cs-amxx/` were ported from the following AMX Mod X sources:
+
+| File (AMX Mod X) | Where | What was taken |
+|---|---|---|
+| `amxxfile.h`, `amxx_loader.cpp` (`CAmxxReader`) | `crates/cs-amxx/src/amxxfile.rs` | `.amxx` v1/v2/v3 container headers (`MAGIC_HEADER` `'AMXB'`, `MAGIC_HEADER2` `'AMXX'`, `MAGIC_VERSION` `0x0300`, `PluginEntry`) and zlib section selection (`cellsize=4`). |
+| `amx.h`, `amx.cpp` | `crates/cs-amxx/src/amxxfile.rs`, `crates/cs-amxx/src/vm.rs` | `AMX_HEADER` (`AMX_MAGIC` `0xF1E0`, `AMX_FLAG_*`), `expand()` compact bytecode decompression, `amx_Init`, symbol lookup (`amx_GetPublic`, `amx_GetNative`, `amx_GetPubVar`), Pawn 3.2 opcodes `0..=144` (`OP_NONE..=OP_FLOAT_CMP`), `STKMARGIN`, and packed/unpacked string helpers. |
+| `CPlugin.cpp`, `amxmodx.cpp`, `string.cpp`, `float.cpp` | `crates/cs-amxx/src/runtime.rs`, `crates/cs-amxx/src/natives.rs` | Plugin lifecycle/forwards (`plugin_precache`, `plugin_init`, `plugin_cfg`, `plugin_end`, `client_connect`, `client_putinserver`, `client_disconnect`), task scheduler (`set_task`/`remove_task`), command/event/message hooks, and core string/float/cvar/menu/log natives. |
+| Modules: `cstrike`, `fun`, `engine`, `fakemeta`, `hamsandwich` | `crates/cs-amxx/src/natives.rs`, `crates/cs-amxx/src/runtime.rs` | Counter-Strike (`cs_get/set_user_money`, `cs_get/set_user_team`, `cs_get/set_user_armor`, `cs_get/set_user_deaths`), fun (`get/set_user_health`, `set_user_godmode`, `give_item`, `strip_user_weapons`, `set_user_rendering`), engine (`entity_get/set_*`), fakemeta (`pev`/`set_pev` `PEV_*` field IDs, `register_forward`), and hamsandwich (`RegisterHam` `Spawn`/`TakeDamage`/`Killed` with `HAM_IGNORED..HAM_SUPERCEDE`). |

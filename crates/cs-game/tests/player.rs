@@ -735,7 +735,7 @@ fn a_death_sends_its_messages_in_the_order_of_killed() {
     // capture of HLDS has the `TeamInfo` and `ScoreInfo` of a spawn after the messages of the
     // `PreThink` that follows it in the same way.
     let killed_order = [
-        "NVGToggle", "Unknown", "ScoreAttrib", "Health", "CurWeapon", "SetFOV", "StatusIcon",
+        "NVGToggle", "ADStop", "ScoreAttrib", "Health", "CurWeapon", "SetFOV", "StatusIcon",
         "DeathMsg", "ScoreInfo", "TextMsg",
     ];
     assert_eq!(names_of(&msgs)[..killed_order.len()], killed_order);

@@ -21,8 +21,8 @@ use cs_clientcore::tempents::{
     DynamicLight, FxTrace, FxWorld, ModelRef, RenderEffect, RenderMode, TempEnt, ftent,
 };
 use cs_clientcore::{
-    ClientEffects, Connection, EmitInputs, EntityKind, ModelKind as CoreModelKind, SoundStart,
-    VisibleEntity,
+    ClientEffects, Connection, DemoPlayer, EmitInputs, EntityKind,
+    ModelKind as CoreModelKind, PrecacheTables, Prediction, SoundStart, VisibleEntity,
 };
 use cs_pm::collision::{CONTENTS_SOLID, Hull, WorldCollision};
 use cs_pm::pm::consts::{
@@ -456,10 +456,7 @@ impl ViewBuilder {
         inputs: &ViewInputs,
     ) -> (FrameView, Option<ModelRegistry>) {
         let now = inputs.now;
-        let registry_changed = self.ensure_registry(conn.precache());
-
         conn.frames_mut().advance(inputs.frametime.clamp(0.0, 0.25));
-        // What the weapon events consult: the state bits of the weapon in hand.
         let weapon_state = {
             let p = conn.predictor().prediction();
             p.weapon
@@ -469,42 +466,106 @@ impl ViewBuilder {
         };
         conn.set_fx_local(weapon_state, false, inputs.right_hand);
         let fired = conn.update_effects(now);
-
-        // The client data of the newest update: the acked origin until the prediction is in.
         let cd = conn.client_data().cloned();
         let slot = conn.player_slot();
-        let local_number = slot.map(|s| u16::from(s) + 1);
-        // The predicted player (the server's origin while the map's collision is not set).
         let prediction = conn.predictor().prediction().clone();
-        let (mut eye, mut punch, mut fov, alive, observer_mode, weaponanim, viewmodel_index) = match &cd {
-            Some(cd) => (
-                if prediction.predicted {
-                    prediction.simorg + prediction.viewheight
-                } else {
-                    cd.origin + cd.view_ofs
-                },
-                if prediction.predicted {
-                    prediction.punchangle
-                } else {
-                    cd.punchangle
-                },
-                cd.fov,
-                is_client_alive(cd),
-                cd.iuser1,
-                cd.weaponanim,
-                cd.viewmodel,
-            ),
-            None => (Vec3::ZERO, Vec3::ZERO, 0.0, false, 0, 0, 0),
-        };
+        let userinfos = conn.userinfos().clone();
+        let precache = conn.precache().clone();
+        let emitted = conn.frames_mut().emit(&EmitInputs {
+            simorg: prediction
+                .predicted
+                .then_some(prediction.simorg)
+                .or_else(|| cd.as_ref().map(|c| c.origin)),
+            standing_on: prediction.standing_on(),
+        });
+        let fx = conn.fx_mut();
+        self.build_parts(
+            &precache,
+            fx,
+            &userinfos,
+            cd,
+            slot,
+            Some(&prediction),
+            emitted,
+            fired,
+            view_angles,
+            inputs,
+        )
+    }
+
+    /// Builds a [`FrameView`] from a [`DemoPlayer`] session frame.
+    pub fn build_demo(
+        &mut self,
+        player: &mut DemoPlayer,
+        fired: Vec<FiredEvent>,
+        view_angles: Vec3,
+        inputs: &ViewInputs,
+    ) -> (FrameView, Option<ModelRegistry>) {
+        let cd = player.client_data().cloned();
+        let slot = player.server_info().map(|i| i.player_slot);
+        let userinfos = player.userinfos().clone();
+        let precache = player.precache().clone();
+        let emitted = player.frames_mut().emit(&EmitInputs {
+            simorg: cd.as_ref().map(|c| c.origin),
+            standing_on: None,
+        });
+        let fx = player.fx_mut();
+        self.build_parts(
+            &precache,
+            fx,
+            &userinfos,
+            cd,
+            slot,
+            None,
+            emitted,
+            fired,
+            view_angles,
+            inputs,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_parts(
+        &mut self,
+        precache: &PrecacheTables,
+        fx: &mut ClientEffects,
+        userinfos: &BTreeMap<u8, String>,
+        cd: Option<cs_proto48::delta::GoldSrcClientData>,
+        slot: Option<u8>,
+        prediction: Option<&Prediction>,
+        emitted: cs_clientcore::interp::EmitResult,
+        fired: Vec<FiredEvent>,
+        view_angles: Vec3,
+        inputs: &ViewInputs,
+    ) -> (FrameView, Option<ModelRegistry>) {
+        let now = inputs.now;
+        let registry_changed = self.ensure_registry(precache);
+        let local_number = slot.map(|s| u16::from(s) + 1);
+        let (mut eye, mut punch, mut fov, alive, observer_mode, weaponanim, viewmodel_index) =
+            match &cd {
+                Some(cd) => {
+                    let (pred_eye, pred_punch) = match prediction {
+                        Some(p) if p.predicted => (p.simorg + p.viewheight, p.punchangle),
+                        _ => (cd.origin + cd.view_ofs, cd.punchangle),
+                    };
+                    (
+                        pred_eye,
+                        pred_punch,
+                        cd.fov,
+                        is_client_alive(cd),
+                        cd.iuser1,
+                        cd.weaponanim,
+                        cd.viewmodel,
+                    )
+                }
+                None => (Vec3::ZERO, Vec3::ZERO, 0.0, false, 0, 0, 0),
+            };
         if !eye.is_finite() {
             eye = Vec3::ZERO;
         }
         let dt_view = inputs.frametime.clamp(0.0, 0.25) as f32;
-        eye.z += self.stair_smooth.offset(
-            eye.z,
-            prediction.predicted && prediction.onground >= 0 && alive,
-            dt_view,
-        );
+        let on_ground_pred = prediction.is_some_and(|p| p.predicted && p.onground >= 0 && alive);
+        eye.z += self.stair_smooth.offset(eye.z, on_ground_pred, dt_view);
         if !punch.is_finite() {
             punch = Vec3::ZERO;
         }
@@ -517,18 +578,9 @@ impl ViewBuilder {
             fov = fallback_fov;
         }
 
-        let emitted = conn.frames_mut().emit(&EmitInputs {
-            simorg: prediction
-                .predicted
-                .then_some(prediction.simorg)
-                .or_else(|| cd.as_ref().map(|c| c.origin)),
-            standing_on: prediction.standing_on(),
-        });
-
         // A player is drawn with the model its userinfo names (`model`): `models/player.mdl` is
         // only the entity's placeholder.
-        let player_models: BTreeMap<u8, String> = conn
-            .userinfos()
+        let player_models: BTreeMap<u8, String> = userinfos
             .iter()
             .filter_map(|(slot, raw)| {
                 let info = cs_proto48::info::InfoString::parse(raw);
@@ -552,9 +604,8 @@ impl ViewBuilder {
 
         // Local player flashlight spotlight (`impulse 100` -> Flashlight HUD/prediction).
         let mut spotlights: Vec<SpotLight> = Vec::new();
-        if alive
-            && (conn.fx().hud.flashlight_on || (prediction.effects as u32 & ef::DIMLIGHT) != 0)
-        {
+        let pred_effects = prediction.map_or(0, |p| p.effects);
+        if alive && (fx.hud.flashlight_on || (pred_effects as u32 & ef::DIMLIGHT) != 0) {
             let (fwd, _, _) = crate::render::scene::angle_vectors(view_angles + punch);
             let (spot, bounce) = compute_flashlight_spot(
                 eye,
@@ -657,7 +708,7 @@ impl ViewBuilder {
         stats.entities = scene.entities.len();
 
         // Temp entities: shells, sprites, gibs.
-        let temps: Vec<TempEnt> = conn.fx().tempents.render_list().cloned().collect();
+        let temps: Vec<TempEnt> = fx.tempents.render_list().cloned().collect();
         for t in &temps {
             if let Some(r) = self.render_tempent(t, scene.entities.len() as u16) {
                 stats.tempents += 1;
@@ -667,10 +718,10 @@ impl ViewBuilder {
 
         // Effects that are not entries of the pool.
         let pos_lookup = |id: u16| entity_positions.get(&id).copied();
-        for effect in conn.fx_mut().tempents.take_effects() {
+        for effect in fx.tempents.take_effects() {
             self.take_effect(effect, now, &pos_lookup);
         }
-        let weather = conn.fx().hud.weather;
+        let weather = fx.hud.weather;
         self.particles.step_weather(now, dt, weather, eye);
         self.beam_sys.step(now, &pos_lookup);
         self.beams.retain(|b| b.die > now);
@@ -682,8 +733,8 @@ impl ViewBuilder {
 
         let prev_vm_seq = self.anim.map(|a| a.sequence).unwrap_or(-1);
         let impact_sounds = self.collect_bullet_impacts(&fired, now);
-        self.update_view_anim(conn.fx_mut(), &fired, weaponanim, viewmodel_index, time);
-        let viewmodel = self.viewmodel(conn, alive, fov, viewmodel_index, inputs);
+        self.update_view_anim(fx, &fired, weaponanim, viewmodel_index, time);
+        let viewmodel = self.viewmodel(precache, alive, fov, viewmodel_index, inputs);
         let mut anim_sounds = Vec::new();
         if let Some(ref vm) = viewmodel {
             let events = self.sample_viewmodel_events(vm, prev_vm_seq, time);
@@ -735,10 +786,18 @@ impl ViewBuilder {
         self.particles.emit_fx(now, &mut beams, &mut points);
         stats.beams = beams.len();
 
+        let simvel = prediction
+            .map(|p| p.simvel)
+            .or_else(|| cd.as_ref().map(|c| c.velocity))
+            .unwrap_or(Vec3::ZERO);
+        let onground = prediction.is_none_or(|p| p.onground >= 0);
+        let watertype = prediction.map_or(0, |p| p.watertype);
+        let waterlevel = prediction.map_or(0, |p| p.waterlevel.max(0) as u8);
+
         let bob = calc_bob(
             time,
-            prediction.simvel,
-            prediction.onground >= 0,
+            simvel,
+            onground,
             &BobParams {
                 cl_bob: inputs.cl_bob,
                 cl_bobcycle: inputs.cl_bobcycle,
@@ -747,23 +806,23 @@ impl ViewBuilder {
         );
         let roll_deg = calc_roll(
             view_angles.y,
-            prediction.simvel,
+            simvel,
             inputs.cl_rollangle,
             inputs.cl_rollspeed,
         );
         let (shake_angles, shake_z) =
-            calc_screen_shake(conn.fx().hud.screen_shake.as_ref(), now);
+            calc_screen_shake(fx.hud.screen_shake.as_ref(), now);
         let viewmodel_lag =
             self.lag_state
                 .update(scene.view.forward, dt, inputs.cl_viewmodel_lag);
         let (underwater_tint, underwater_fov_delta) = underwater_tint_and_fov(
-            prediction.watertype,
-            prediction.waterlevel.max(0) as u8,
+            watertype,
+            waterlevel,
             time,
         );
 
-        let lightstyles = evaluate_lightstyles(&conn.fx().hud.lightstyles, time);
-        let fog = conn.fx().hud.fog.map(|f| {
+        let lightstyles = evaluate_lightstyles(&fx.hud.lightstyles, time);
+        let fog = fx.hud.fog.map(|f| {
             (
                 [
                     f32::from(f.color[0]) / 255.0,
@@ -776,17 +835,15 @@ impl ViewBuilder {
         let lights = self.dlights.pack_uniform(eye, &spotlights);
         let elights = self.dlights.elights.clone();
         let decals = std::mem::take(&mut self.pending_decals);
-        let custom_decals = conn.fx().hud.custom_decals.clone();
-        let radio_audio: Vec<(u8, String, u8)> = conn
-            .fx_mut()
+        let custom_decals = fx.hud.custom_decals.clone();
+        let radio_audio: Vec<(u8, String, u8)> = fx
             .hud
             .audio
             .drain(..)
             .map(|(sender, code, pitch)| (sender, code, pitch.clamp(0, 255) as u8))
             .collect();
-        let reload_sounds: Vec<(u8, u8)> = conn.fx_mut().hud.reload_sounds.drain(..).collect();
+        let reload_sounds: Vec<(u8, u8)> = fx.hud.reload_sounds.drain(..).collect();
         let listener_right = scene.view.right;
-        let waterlevel = prediction.waterlevel.max(0) as u8;
 
         (
             FrameView {
@@ -1233,9 +1290,9 @@ impl ViewBuilder {
         }
     }
 
-    fn viewmodel<T: PacketTransport>(
+    fn viewmodel(
         &self,
-        conn: &Connection<T>,
+        precache: &PrecacheTables,
         alive: bool,
         fov: f32,
         viewmodel_index: i32,
@@ -1245,7 +1302,7 @@ impl ViewBuilder {
         if !alive || !inputs.draw_viewmodel || viewmodel_index <= 0 || fov <= 40.0 {
             return None;
         }
-        let path = conn.precache().model(u16::try_from(viewmodel_index).ok()?)?;
+        let path = precache.model(u16::try_from(viewmodel_index).ok()?)?;
         if path.is_empty() {
             return None;
         }

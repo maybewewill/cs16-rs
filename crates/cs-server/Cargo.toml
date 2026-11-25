@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+cs-amxx.workspace = true
 cs-engine.workspace = true
 cs-local.workspace = true
 cs-game.workspace = true

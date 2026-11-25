@@ -20,7 +20,8 @@ evidence = "crates/cs-game/tests/hud_extras.rs::the_battery_is_charged_to_100_in
 
 [[item]]
 id = "Health"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase11_all_remaining_usermsgs_roundtrip"
 
 [[item]]
 id = "Damage"
@@ -29,7 +30,8 @@ evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase10_hud_usermsgs_roundt
 
 [[item]]
 id = "Battery"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase11_all_remaining_usermsgs_roundtrip"
 
 [[item]]
 id = "Train"
@@ -48,7 +50,8 @@ evidence = "crates/cs-game/tests/phase7_env_items.rs::env_shake_fade_and_message
 
 [[item]]
 id = "SayText"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase11_all_remaining_usermsgs_roundtrip"
 
 [[item]]
 id = "TextMsg"
@@ -72,11 +75,13 @@ evidence = "VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff 
 
 [[item]]
 id = "ViewMode"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase11_all_remaining_usermsgs_roundtrip"
 
 [[item]]
 id = "GameTitle"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase11_all_remaining_usermsgs_roundtrip"
 
 [[item]]
 id = "DeathMsg"
@@ -100,11 +105,13 @@ evidence = "VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff 
 
 [[item]]
 id = "TeamScore"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase11_all_remaining_usermsgs_roundtrip"
 
 [[item]]
 id = "GameMode"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase11_all_remaining_usermsgs_roundtrip"
 
 [[item]]
 id = "MOTD"
@@ -143,7 +150,8 @@ evidence = "VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff 
 
 [[item]]
 id = "ShowMenu"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase11_all_remaining_usermsgs_roundtrip"
 
 [[item]]
 id = "ScreenShake"
@@ -177,11 +185,13 @@ evidence = "crates/cs-proto48/src/usermsg.rs::tests::cs_usermsgs_roundtrip_clean
 
 [[item]]
 id = "ArmorType"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase11_all_remaining_usermsgs_roundtrip"
 
 [[item]]
 id = "BlinkAcct"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase11_all_remaining_usermsgs_roundtrip; crates/cs-proto48/src/usermsg.rs::tests::cs_usermsgs_roundtrip_cleanly"
 
 [[item]]
 id = "StatusValue"
@@ -220,11 +230,13 @@ evidence = "VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff 
 
 [[item]]
 id = "Radar"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::cs_usermsgs_roundtrip_cleanly; crates/cs-clientcore/src/hud.rs::tests::reset_hud_clears_what_a_life_drew; crates/cs-client/tests/phase10_ui.rs::ui_hud_radar_and_nvg_overlay_renders_teammates_and_radartype"
 
 [[item]]
 id = "Spectator"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase11_all_remaining_usermsgs_roundtrip"
 
 [[item]]
 id = "VGUIMenu"
@@ -263,7 +275,8 @@ evidence = "crates/cs-game/tests/hostages.rs::killing_a_hostage_costs_money_and_
 
 [[item]]
 id = "HLTV"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase11_all_remaining_usermsgs_roundtrip"
 
 [[item]]
 id = "SpecHealth"
@@ -272,11 +285,13 @@ evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase10_hud_usermsgs_roundt
 
 [[item]]
 id = "ForceCam"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase11_all_remaining_usermsgs_roundtrip"
 
 [[item]]
 id = "ADStop"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase11_all_remaining_usermsgs_roundtrip"
 
 [[item]]
 id = "ReceiveW"
@@ -285,11 +300,13 @@ evidence = "crates/cs-game/tests/phase7_env_items.rs::env_fog_and_weather_entiti
 
 [[item]]
 id = "ShadowIdx"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase11_all_remaining_usermsgs_roundtrip"
 
 [[item]]
 id = "TaskTime"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase11_all_remaining_usermsgs_roundtrip"
 
 [[item]]
 id = "Scenario"
@@ -298,11 +315,13 @@ evidence = "crates/cs-proto48/src/usermsg.rs::tests::cs_usermsgs_roundtrip_clean
 
 [[item]]
 id = "BotVoice"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase11_all_remaining_usermsgs_roundtrip"
 
 [[item]]
 id = "BuyClose"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase11_all_remaining_usermsgs_roundtrip"
 
 [[item]]
 id = "SpecHealth2"
@@ -321,7 +340,8 @@ evidence = "crates/cs-game/tests/bomb_carrier.rs::defuser_purchase_as_regamedll,
 
 [[item]]
 id = "Location"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase11_all_remaining_usermsgs_roundtrip"
 
 [[item]]
 id = "Brass"

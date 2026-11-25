@@ -313,6 +313,8 @@ fn clc_line(msg: &ClcMessage, time: f64, record: usize) -> DumpLine {
             .field("id", request_id.to_string())
             .field("cvar", cvar_name.clone())
             .field("value", format!("{value:?}")),
+        ClcMessage::TMove(v) => new("clc_tmove").field("origin", format!("{v:?}")),
+        ClcMessage::Hltv(sub) => new("clc_hltv").field("subcmd", sub.to_string()),
     }
 }
 
