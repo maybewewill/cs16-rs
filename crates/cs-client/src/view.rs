@@ -45,7 +45,7 @@ use crate::render::scene::{
     EntRenderMode, ModelHandle, ModelRegistry, RenderEntity, SceneFrame, ViewBasis,
 };
 use crate::view_effects::{
-    BobParams, StairSmoothState, ViewModelLagState, calc_bob, calc_roll, calc_screen_shake,
+    BobParams, BobState, StairSmoothState, ViewModelLagState, calc_roll, calc_screen_shake,
     underwater_tint_and_fov,
 };
 
@@ -273,6 +273,7 @@ pub struct ViewBuilder {
     pending_decals: Vec<DecalSpawn>,
     lag_state: ViewModelLagState,
     stair_smooth: StairSmoothState,
+    bob_state: BobState,
     player_gaits: HashMap<u16, (f32, Vec3)>,
     vm_seq_cache: HashMap<String, Vec<CachedSeqMeta>>,
     last_vm_frame: f32,
@@ -321,6 +322,7 @@ impl ViewBuilder {
             pending_decals: Vec::new(),
             lag_state: ViewModelLagState::default(),
             stair_smooth: StairSmoothState::default(),
+            bob_state: BobState::default(),
             player_gaits: HashMap::new(),
             vm_seq_cache: HashMap::new(),
             last_vm_frame: 0.0,
@@ -366,6 +368,7 @@ impl ViewBuilder {
         self.bsp = None;
         self.lag_state.reset();
         self.stair_smooth.reset();
+        self.bob_state.reset();
         self.player_gaits.clear();
         self.client_models.clear();
         self.anim = None;
@@ -566,6 +569,8 @@ impl ViewBuilder {
         let dt_view = inputs.frametime.clamp(0.0, 0.25) as f32;
         let on_ground_pred = prediction.is_some_and(|p| p.predicted && p.onground >= 0 && alive);
         eye.z += self.stair_smooth.offset(eye.z, on_ground_pred, dt_view);
+        // `client.dll` `0x1006b21b` (`V_CalcRefdef`): +1/32 unit vieworg nudge prevents BSP plane flicker.
+        eye += Vec3::splat(0.03125);
         if !punch.is_finite() {
             punch = Vec3::ZERO;
         }
@@ -794,7 +799,7 @@ impl ViewBuilder {
         let watertype = prediction.map_or(0, |p| p.watertype);
         let waterlevel = prediction.map_or(0, |p| p.waterlevel.max(0) as u8);
 
-        let bob = calc_bob(
+        let bob = self.bob_state.calc(
             time,
             simvel,
             onground,
@@ -1630,5 +1635,58 @@ mod tests {
         let _ = builder.collect_bullet_impacts(&fired, 99.876);
         let p2 = builder.pending_decals[0].origin;
         assert!((p1 - p2).length() < 1e-5, "single shot impact must be deterministic");
+    }
+
+    #[test]
+    fn build_parts_nudges_vieworg_by_one_32nd_and_freezes_airborne_bob() {
+        let mut builder = ViewBuilder::new();
+        let precache = cs_clientcore::PrecacheTables::default();
+        let mut fx = ClientEffects::default();
+        let userinfos = BTreeMap::new();
+        let mut pred = Prediction {
+            predicted: true,
+            simorg: Vec3::new(10.0, 20.0, 30.0),
+            viewheight: Vec3::new(0.0, 0.0, 17.0),
+            simvel: Vec3::new(250.0, 0.0, 0.0),
+            onground: 0,
+            ..Default::default()
+        };
+
+        let cd = cs_proto48::delta::GoldSrcClientData {
+            origin: Vec3::new(10.0, 20.0, 30.0),
+            view_ofs: Vec3::new(0.0, 0.0, 17.0),
+            ..Default::default()
+        };
+        let emitted = cs_clientcore::interp::EmitResult::default();
+        let (v_ground, _) = builder.build_parts(
+            &precache,
+            &mut fx,
+            &userinfos,
+            Some(cd.clone()),
+            Some(0),
+            Some(&pred),
+            emitted,
+            Vec::new(),
+            Vec3::ZERO,
+            &inputs(0.2),
+        );
+        assert_eq!(v_ground.eye, Vec3::new(10.03125, 20.03125, 47.03125));
+        assert!(v_ground.bob > 0.0);
+
+        pred.onground = -1;
+        let emitted_air = cs_clientcore::interp::EmitResult::default();
+        let (v_air, _) = builder.build_parts(
+            &precache,
+            &mut fx,
+            &userinfos,
+            Some(cd),
+            Some(0),
+            Some(&pred),
+            emitted_air,
+            Vec::new(),
+            Vec3::ZERO,
+            &inputs(0.4),
+        );
+        assert_eq!(v_air.bob, v_ground.bob);
     }
 }

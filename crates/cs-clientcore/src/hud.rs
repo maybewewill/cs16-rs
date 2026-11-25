@@ -44,6 +44,8 @@ pub const MAX_MENU_BYTES: usize = 8 * 1024;
 pub const MAX_STATUS_ICONS: usize = 64;
 /// Teams with a score.
 pub const MAX_TEAM_SCORES: usize = 16;
+/// `SendAudio` radar flash lifetime (`client.dll` `FUN_10064bc0`: 22 half-cycles @ 0.15s = 3.3s).
+pub const RADIO_FLASH_DURATION_SECS: f64 = 22.0 * 0.15;
 
 /// One weapon of the HUD's weapon table (`WeaponList`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -319,6 +321,8 @@ pub struct HudState {
     /// `svc_centerprint`.
     pub center_print: Option<String>,
     pub audio: VecDeque<(u8, String, i16)>,
+    /// Active radio-sender flash expiry timestamp (`now + 3.3s`, `client.dll:FUN_10064bc0`).
+    pub radio_flashes: HashMap<u8, f64>,
     pub reload_sounds: VecDeque<(u8, u8)>,
     pub radar: BTreeMap<u8, Vec3>,
     /// `HostagePos`: the flag and origin of each hostage.
@@ -404,6 +408,7 @@ impl Default for HudState {
             text: VecDeque::new(),
             center_print: None,
             audio: VecDeque::new(),
+            radio_flashes: HashMap::new(),
             reload_sounds: VecDeque::new(),
             radar: BTreeMap::new(),
             hostages: BTreeMap::new(),
@@ -671,7 +676,13 @@ impl HudState {
                 sender_id,
                 audio_code,
                 pitch,
-            } => push_bounded(&mut self.audio, (*sender_id, audio_code.clone(), *pitch)),
+            } => {
+                if *sender_id > 0 {
+                    self.radio_flashes
+                        .insert(*sender_id, now + RADIO_FLASH_DURATION_SECS);
+                }
+                push_bounded(&mut self.audio, (*sender_id, audio_code.clone(), *pitch));
+            }
             CsUserMsg::ReloadSound { volume, kind } => {
                 push_bounded(&mut self.reload_sounds, (*volume, *kind));
             }
@@ -898,6 +909,7 @@ impl HudState {
                 self.vgui_menu = None;
                 self.buy_closed = false;
                 self.radar.clear();
+                self.radio_flashes.clear();
                 self.center_print = None;
                 self.screen_fade = None;
                 self.screen_shake = None;
@@ -1891,5 +1903,38 @@ mod tests {
         );
         assert_eq!(h.damage_history.len(), 1);
         assert_eq!(h.damage_history[0].0.health, 27);
+    }
+
+    #[test]
+    fn send_audio_sets_radio_flash_for_positive_sender() {
+        let mut h = HudState::default();
+        h.handle(
+            &um(
+                "SendAudio",
+                CsUserMsg::SendAudio {
+                    sender_id: 3,
+                    audio_code: "%!MRAD_GO".to_string(),
+                    pitch: 100,
+                },
+            ),
+            10.0,
+        );
+        assert_eq!(h.radio_flashes.get(&3), Some(&(10.0 + 3.3)));
+
+        h.handle(
+            &um(
+                "SendAudio",
+                CsUserMsg::SendAudio {
+                    sender_id: 0,
+                    audio_code: "%!MRAD_ctwin".to_string(),
+                    pitch: 100,
+                },
+            ),
+            11.0,
+        );
+        assert!(!h.radio_flashes.contains_key(&0));
+
+        h.handle(&um("ResetHUD", CsUserMsg::ResetHud), 12.0);
+        assert!(h.radio_flashes.is_empty());
     }
 }
