@@ -217,10 +217,10 @@ impl ModRuntime for WasmiRuntime {
 
         let limits = StoreLimitsBuilder::new()
             .memory_size(max_memory_bytes)
-            .table_elements(4096)
+            .table_elements(32_768)
             .instances(1)
             .memories(1)
-            .tables(2)
+            .tables(4)
             .trap_on_grow_failure(true)
             .build();
 
@@ -270,9 +270,14 @@ impl ModRuntime for WasmiRuntime {
         // WASI reactor entrypoint used by Go (`GOOS=wasip1`) / C++ WASI modules.
         if let Ok(init_fn) = instance.get_typed_func::<(), ()>(&store, "_initialize") {
             let _ = store.set_fuel(STARTUP_FUEL);
-            init_fn
-                .call(&mut store, ())
-                .map_err(|e| RuntimeError::Instantiate(mod_id.to_string(), e.to_string()))?;
+            init_fn.call(&mut store, ()).map_err(|e| {
+                let logs = store.data().wasi_logs.join(" | ");
+                if logs.is_empty() {
+                    RuntimeError::Instantiate(mod_id.to_string(), e.to_string())
+                } else {
+                    RuntimeError::Instantiate(mod_id.to_string(), format!("{e} (wasi: {logs})"))
+                }
+            })?;
         }
 
         Ok(Box::new(WasmiInstance { store, instance }))
@@ -3701,7 +3706,9 @@ fn register_wasi_preview1(linker: &mut Linker<HostCallState>) -> Result<(), wasm
          _precision: i64,
          out_ptr: i32|
          -> i32 {
-            let ns = (caller.data().snapshot.time_secs.max(0.0) * 1_000_000_000.0) as u64;
+            // Go wasip1 runtime requires monotonic clock_time_get > 0 during `_initialize`.
+            let ns = ((caller.data().snapshot.time_secs.max(0.0) * 1_000_000_000.0) as u64)
+                .max(1_000_000);
             if write_guest_u64(&mut caller, out_ptr, ns) {
                 WASI_ESUCCESS
             } else {

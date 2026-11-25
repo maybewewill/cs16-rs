@@ -1,0 +1,11 @@
+[en]
+CSDM_RESPAWN = "DEATHMATCH RESPAWN"
+CSDM_GUNS_TITLE = "CSDM Weapons"
+CSDM_REMEMBER = "Remember selection"
+CSDM_EQUIPPED = "\x04[CSDM]\x01 Equipped {weapon} + Deagle. Type /guns to re-enable menu."
+
+[ru]
+CSDM_RESPAWN = "ВОЗРОЖДЕНИЕ DEATHMATCH"
+CSDM_GUNS_TITLE = "Оружие CSDM"
+CSDM_REMEMBER = "Запомнить выбор"
+CSDM_EQUIPPED = "\x04[CSDM]\x01 Выдано {weapon} + Deagle. Введите /guns для смены."

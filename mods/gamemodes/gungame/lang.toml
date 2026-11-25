@@ -1,0 +1,9 @@
+[en]
+GG_LEVEL_UP = "\x04[GunGame]\x01 {player} reached Level {level}/26 ({weapon})!"
+GG_STEAL = "\x04[GunGame]\x01 {killer} stole a level from {victim} with a KNIFE!"
+GG_VICTORY = "\x04[GunGame]\x01 {player} WON GunGame!"
+
+[ru]
+GG_LEVEL_UP = "\x04[GunGame]\x01 {player} перешёл на уровень {level}/26 ({weapon})!"
+GG_STEAL = "\x04[GunGame]\x01 {killer} украл уровень у {victim} НОЖОМ!"
+GG_VICTORY = "\x04[GunGame]\x01 {player} ПОБЕДИЛ в GunGame!"

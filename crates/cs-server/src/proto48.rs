@@ -2052,7 +2052,8 @@ mod tests {
         let mods_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mods");
         let mut vfs = Vfs::from_layered_memory(Vec::new(), VfsConfig::default());
         let host = load_mods_into_vfs(&mods_dir, &mut vfs).unwrap();
-        assert!(vfs.read_bytes("sprites/mod_badge.txt").is_ok());
+        assert!(vfs.read_bytes("sprites/csdm_badge.txt").is_ok());
+        assert!(vfs.read_bytes("sprites/zp_biohazard.txt").is_ok());
 
         let modded_game = cs_mod_host::ModdedGame::new(WalkGame::new(MoveParams::default()), host);
         let mut server = Server::new(

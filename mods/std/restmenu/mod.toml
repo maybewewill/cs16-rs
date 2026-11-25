@@ -1,0 +1,10 @@
+[mod]
+id = "std_restmenu"
+name = "Standard Weapon Restrict Menu (C++20)"
+version = "1.0.0"
+api_version = 2
+side = "server"
+entry_server = "server.wasm"
+permissions = ["entities", "messages", "commands", "menus", "storage", "admins", "weapons"]
+fuel_per_frame = 500000
+max_memory_bytes = 4194304

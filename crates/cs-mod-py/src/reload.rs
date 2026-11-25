@@ -26,15 +26,27 @@ pub fn discover_python_mods(mods_dir: &Path) -> Result<Vec<PyDiscoveredMod>, Str
     if !mods_dir.is_dir() {
         return Ok(Vec::new());
     }
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(mods_dir)
-        .map_err(|e| format!("failed to scan `{}`: {e}", mods_dir.display()))?
+    let mut found = Vec::new();
+    collect_python_mods_recursive(mods_dir, &mut found)?;
+    Ok(found)
+}
+
+fn collect_python_mods_recursive(
+    dir: &Path,
+    found: &mut Vec<PyDiscoveredMod>,
+) -> Result<(), String> {
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map_err(|e| format!("failed to scan `{}`: {e}", dir.display()))?
         .flatten()
         .map(|e| e.path())
         .collect();
     entries.sort();
 
-    let mut found = Vec::new();
     for path in entries {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name.starts_with('.') || matches!(name, "target" | "assets" | "src" | "client") {
+            continue;
+        }
         if path.is_file()
             && path
                 .extension()
@@ -84,10 +96,12 @@ pub fn discover_python_mods(mods_dir: &Path) -> Result<Vec<PyDiscoveredMod>, Str
                     source,
                     manifest,
                 });
+            } else if !path.join("mod.toml").is_file() {
+                collect_python_mods_recursive(&path, found)?;
             }
         }
     }
-    Ok(found)
+    Ok(())
 }
 
 /// Loads one `.py` file from disk, synthesizing a manifest from `@mod.info(...)` (or adjacent

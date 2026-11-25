@@ -1,0 +1,23 @@
+[en]
+ZP_COUNTDOWN = "Biohazard outbreak in {secs}s..."
+ZP_OUTBREAK = "ZOMBIE OUTBREAK! {player} is Patient Zero!"
+ZP_INFECTED = "\x04[ZP]\x01 {victim} was infected by {attacker}!"
+ZP_SHOP_TITLE = "Zombie Plague Extra Items"
+ZP_BOUGHT_GOLD_AK = "\x04[ZP]\x01 Bought Golden AK-47 (-{cost} AP)!"
+ZP_FROST_CAST = "\x04[ZP]\x01 Frost Nova unleashed — nearby zombies frozen!"
+ZP_LASER_PLACED = "\x04[ZP]\x01 LaserMine tripwire deployed!"
+ZP_CLASS_TITLE = "Select Zombie Class"
+ZP_CLASS_PICKED = "\x04[ZP]\x01 Zombie class set to {class}."
+ZP_NO_AP = "\x04[ZP]\x01 Not enough Ammo Packs (need {cost} AP, have {have} AP)."
+
+[ru]
+ZP_COUNTDOWN = "Заражение через {secs} сек..."
+ZP_OUTBREAK = "ВСПЫШКА ЗОМБИ! {player} — Нулевой пациент!"
+ZP_INFECTED = "\x04[ZP]\x01 {victim} заражён игроком {attacker}!"
+ZP_SHOP_TITLE = "Магазин Zombie Plague"
+ZP_BOUGHT_GOLD_AK = "\x04[ZP]\x01 Куплен Золотой AK-47 (-{cost} AP)!"
+ZP_FROST_CAST = "\x04[ZP]\x01 Ледяная граната активирована — зомби заморожены!"
+ZP_LASER_PLACED = "\x04[ZP]\x01 Лазерная мина установлена!"
+ZP_CLASS_TITLE = "Выберите класс зомби"
+ZP_CLASS_PICKED = "\x04[ZP]\x01 Класс зомби: {class}."
+ZP_NO_AP = "\x04[ZP]\x01 Недостаточно Ammo Packs (нужно {cost} AP, у вас {have} AP)."

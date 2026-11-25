@@ -1,8 +1,8 @@
-//! Integration tests verifying all 6 reference WASM mods shipped in `mods/`
-//! (`deathmatch`, `gungame`, `zombie`, `admin_menu`, `player_stats`, `custom_hud`) both as
-//! unpacked directories and `.csmod` archives.
+//! Integration tests verifying the complete localized polyglot AMXX+ showcase mod suite shipped
+//! in `mods/` (`std_admin`, `std_mapmanager` Go/WASI, `std_statsx`, `std_restmenu` C++20,
+//! `csdm`, `gungame`, `zombie_plague`, `semiclip` C++20) with ZERO `.wat` files remaining in `mods/`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use cs_clientcore::{ConnState, Connection, ConnectionConfig};
 use cs_cvar::CVarRegistry;
@@ -26,17 +26,46 @@ fn mods_dir() -> PathBuf {
         .join("mods")
 }
 
+fn count_wat_files(dir: &Path) -> usize {
+    let mut n = 0usize;
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                n += count_wat_files(&p);
+            } else if p
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("wat"))
+            {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
 fn connect_player(
-    mod_id: &str,
+    mod_rel_path: &str,
     supports_mods: bool,
+    with_admin: bool,
 ) -> (
     Server<ModdedGame<WalkGame>>,
     LoopbackHub,
     Connection<cs_transport::LoopbackEndpoint>,
     f64,
 ) {
-    let pkg = load_package_dir(&mods_dir().join(mod_id)).unwrap();
+    let pkg = load_package_dir(&mods_dir().join(mod_rel_path)).unwrap();
     let mut host = ServerModHost::new();
+    if with_admin {
+        host.services().lock().admins.load_admins_toml_str(
+            r#"
+[[admins]]
+auth = "player"
+access = "abcdefghijklmnopqrstu"
+"#,
+        );
+    }
     host.load_package(pkg).unwrap();
 
     let mut server = Server::new(
@@ -91,10 +120,21 @@ fn pump_pair(
 
 #[test]
 fn all_six_reference_mods_discover_and_repack_cleanly_as_csmod() {
+    assert_eq!(count_wat_files(&mods_dir()), 0, "zero raw .wat files may remain in mods/");
+
     let pkgs = discover_packages(&mods_dir()).unwrap();
     let ids: Vec<&str> = pkgs.iter().map(|p| p.manifest.id.as_str()).collect();
-    for expected in ["deathmatch", "gungame", "zombie", "admin_menu", "player_stats", "custom_hud"] {
-        assert!(ids.contains(&expected), "missing ref mod {expected} in {ids:?}");
+    for expected in [
+        "std_admin",
+        "std_mapmanager",
+        "std_statsx",
+        "std_restmenu",
+        "csdm",
+        "gungame",
+        "zombie_plague",
+        "semiclip",
+    ] {
+        assert!(ids.contains(&expected), "missing showcase mod {expected} in {ids:?}");
     }
     for pkg in pkgs {
         let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
@@ -124,7 +164,7 @@ fn all_six_reference_mods_discover_and_repack_cleanly_as_csmod() {
 
 #[test]
 fn ref_mod_deathmatch_respawns_and_announces() {
-    let (mut server, mut hub, mut conn, mut now) = connect_player("deathmatch", false);
+    let (mut server, mut hub, mut conn, mut now) = connect_player("gamemodes/csdm", false, false);
     pump_pair(&mut server, &mut hub, &mut conn, &mut now, 15);
     assert_eq!(
         conn.fx().hud.center_print.as_deref(),
@@ -137,7 +177,7 @@ fn ref_mod_deathmatch_respawns_and_announces() {
 
 #[test]
 fn ref_mod_gungame_tracks_levels_and_announces_victory() {
-    let (mut server, mut hub, mut conn, mut now) = connect_player("gungame", false);
+    let (mut server, mut hub, mut conn, mut now) = connect_player("gamemodes/gungame", false, false);
     for _ in 0..3 {
         conn.send_stringcmd("gg_kill");
         pump_pair(&mut server, &mut hub, &mut conn, &mut now, 10);
@@ -147,44 +187,52 @@ fn ref_mod_gungame_tracks_levels_and_announces_victory() {
             .hud
             .chat
             .iter()
-            .any(|c| c.text.contains("GunGame Level Up!"))
+            .any(|c| c.text.contains("[GunGame]") && c.text.contains("Level"))
     );
     assert_eq!(server.game_mut().host.list_mods()[0].status, ModStatus::Active);
 }
 
 #[test]
 fn ref_mod_zombie_infects_and_boosts_health() {
-    let (mut server, mut hub, mut conn, mut now) = connect_player("zombie", false);
+    let (mut server, mut hub, mut conn, mut now) =
+        connect_player("gamemodes/zombie_plague", false, false);
     pump_pair(&mut server, &mut hub, &mut conn, &mut now, 15);
     assert_eq!(
         conn.fx().hud.center_print.as_deref(),
         Some("ZOMBIE OUTBREAK!")
     );
+    conn.send_stringcmd("zp_shop");
+    pump_pair(&mut server, &mut hub, &mut conn, &mut now, 10);
+    let menu = conn.fx().hud.menu.as_ref().expect("ZP shop menu opened");
+    assert!(menu.text.contains("Golden AK-47"), "{}", menu.text);
     assert_eq!(server.game_mut().host.list_mods()[0].status, ModStatus::Active);
 }
 
 #[test]
 fn ref_mod_admin_menu_opens_classic_showmenu_and_handles_select() {
-    let (mut server, mut hub, mut conn, mut now) = connect_player("admin_menu", false);
-    conn.send_stringcmd("csmod_admin");
+    let (mut server, mut hub, mut conn, mut now) = connect_player("std/admin", false, true);
+    conn.send_stringcmd("amxmodmenu");
     pump_pair(&mut server, &mut hub, &mut conn, &mut now, 10);
     let menu = conn.fx().hud.menu.as_ref().expect("ShowMenu opened");
-    assert!(menu.text.contains("Admin Menu"), "{}", menu.text);
+    assert!(menu.text.contains("AMX Mod Menu"), "{}", menu.text);
 
-    conn.send_stringcmd("menuselect 3");
+    // Page 2 (`9. More`) -> item 1 (`Restart Round`)
+    conn.send_stringcmd("menuselect 9");
+    pump_pair(&mut server, &mut hub, &mut conn, &mut now, 10);
+    conn.send_stringcmd("menuselect 1");
     pump_pair(&mut server, &mut hub, &mut conn, &mut now, 10);
     assert!(
         conn.fx()
             .hud
             .chat
             .iter()
-            .any(|c| c.text.contains("Admin: Round restart"))
+            .any(|c| c.text.contains("restarted the round"))
     );
 }
 
 #[test]
 fn ref_mod_player_stats_persists_and_answers_rank() {
-    let (mut server, mut hub, mut conn, mut now) = connect_player("player_stats", false);
+    let (mut server, mut hub, mut conn, mut now) = connect_player("std/statsx", false, false);
     conn.send_stringcmd("rank");
     pump_pair(&mut server, &mut hub, &mut conn, &mut now, 10);
     assert!(
@@ -192,18 +240,22 @@ fn ref_mod_player_stats_persists_and_answers_rank() {
             .hud
             .chat
             .iter()
-            .any(|c| c.text.contains("Stats Rank #1"))
+            .any(|c| c.text.contains("[STATS]") && c.text.contains("#1"))
     );
+    conn.send_stringcmd("top15");
+    pump_pair(&mut server, &mut hub, &mut conn, &mut now, 10);
+    assert_eq!(server.game_mut().host.list_mods()[0].status, ModStatus::Active);
 }
 
 #[test]
 fn ref_mod_custom_hud_auto_downloads_overlays_assets_and_draws_hud() {
-    let (mut server, mut hub, mut conn, mut now) = connect_player("custom_hud", true);
+    let (mut server, mut hub, mut conn, mut now) =
+        connect_player("gamemodes/zombie_plague", true, false);
     let mut transfer = ClientModTransfer::new(ApprovalPolicy::AutoApproveTrusted);
     let mut client_host = ClientModHost::new();
     let mut vfs = Vfs::from_memory(Vec::new());
 
-    for step in 0..350 {
+    for step in 0..450 {
         now += 0.01;
         conn.pump(now);
         server.frame(&mut hub, now);
@@ -215,14 +267,26 @@ fn ref_mod_custom_hud_auto_downloads_overlays_assets_and_draws_hud() {
         for cmd in transfer.take_outgoing_commands() {
             conn.send_stringcmd(&cmd);
         }
-        if step > 100 && client_host.status("custom_hud") == Some(&ClientModStatus::Active) {
+        if step > 100 && client_host.status("zombie_plague") == Some(&ClientModStatus::Active) {
             break;
         }
     }
 
-    assert_eq!(client_host.status("custom_hud"), Some(&ClientModStatus::Active));
-    assert!(vfs.exists("sprites/mod_badge.txt"));
+    assert_eq!(client_host.status("zombie_plague"), Some(&ClientModStatus::Active));
+    assert!(vfs.exists("sprites/zp_biohazard.txt"));
     let cmds = client_host.render_hud(16, 100, 100, 800);
-    assert_eq!(cmds.len(), 3);
-    assert!(matches!(&cmds[0], HudDrawCmd::Panel { title, .. } if title == "CS16-RS MOD"));
+    assert!(
+        cmds.iter().any(|c| matches!(c, HudDrawCmd::Panel { title, .. } if title == "BIOHAZARD ZP")),
+        "expected VGUI2 BIOHAZARD ZP panel in {cmds:?}"
+    );
+}
+
+#[test]
+fn ref_mod_go_mapmanager_instantiates_and_runs_rtv_and_nominate() {
+    let (mut server, mut hub, mut conn, mut now) = connect_player("std/mapmanager", false, false);
+    assert_eq!(server.game_mut().host.list_mods()[0].status, ModStatus::Active);
+
+    conn.send_stringcmd("say \"/maps\"");
+    pump_pair(&mut server, &mut hub, &mut conn, &mut now, 10);
+    assert_eq!(server.game_mut().host.list_mods()[0].status, ModStatus::Active);
 }

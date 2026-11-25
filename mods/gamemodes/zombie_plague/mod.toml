@@ -1,0 +1,13 @@
+[mod]
+id = "zombie_plague"
+name = "Zombie Plague Biohazard"
+version = "1.0.0"
+api_version = 2
+side = "both"
+entry_server = "server.wasm"
+entry_client = "client.wasm"
+assets = ["sprites/zp_biohazard.txt"]
+custom_usermsgs = ["zp_hud"]
+permissions = ["entities", "messages", "commands", "menus", "timers", "storage", "weapons", "vfx", "hud", "net_custom", "sound"]
+fuel_per_frame = 500000
+max_memory_bytes = 4194304

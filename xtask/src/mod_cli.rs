@@ -270,7 +270,8 @@ fn generate_template_files(
             files.insert(
                 "Cargo.toml".to_string(),
                 format!(
-                    "[package]\n\
+                    "[workspace]\n\n\
+                     [package]\n\
                      name = \"{id}\"\n\
                      version = \"0.1.0\"\n\
                      edition = \"2024\"\n\

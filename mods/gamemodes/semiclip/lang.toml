@@ -1,0 +1,5 @@
+[en]
+SEMICLIP_INFO = "\x04[SEMICLIP]\x01 Teammate pass-through active."
+
+[ru]
+SEMICLIP_INFO = "\x04[SEMICLIP]\x01 Прохождение сквозь союзников активно."

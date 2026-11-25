@@ -1,0 +1,13 @@
+[mod]
+id = "csdm"
+name = "Counter-Strike Deathmatch (CSDM)"
+version = "1.0.0"
+api_version = 2
+side = "both"
+entry_server = "server.wasm"
+entry_client = "client.wasm"
+assets = ["sprites/csdm_badge.txt"]
+custom_usermsgs = ["csdm_hud"]
+permissions = ["entities", "messages", "commands", "menus", "timers", "storage", "weapons", "hud", "net_custom"]
+fuel_per_frame = 500000
+max_memory_bytes = 4194304

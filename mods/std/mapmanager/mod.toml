@@ -1,0 +1,10 @@
+[mod]
+id = "std_mapmanager"
+name = "Standard Map Manager (Go/WASI)"
+version = "1.0.0"
+api_version = 2
+side = "server"
+entry_server = "server.wasm"
+permissions = ["entities", "messages", "cvars", "commands", "menus", "timers", "storage", "admins", "rpc"]
+fuel_per_frame = 2000000
+max_memory_bytes = 16777216

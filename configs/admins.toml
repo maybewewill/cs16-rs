@@ -1,0 +1,34 @@
+# cs16-rs Unified Admin & VIP RBAC Registry (`configs/admins.toml`)
+# Shared automatically across Rust/C++/Go WASM mods, Python (.py) plugins, and legacy .amxx plugins.
+#
+# Access Flags (AMX Mod X standard `a..z`):
+#   a = immunity       b = reservation     c = amx_kick        d = amx_ban
+#   e = amx_slay/slap  f = amx_map         g = amx_cvar        h = amx_cfg
+#   i = amx_chat/@HUD  j = amx_vote        k = sv_password     l = rcon
+#   m..s = custom A..G t = VIP (LEVEL_H)   u = amxmodmenu      z = user
+#
+# Account Flags:
+#   a = disconnect on invalid password     b = clan tag
+#   c = SteamID match                      d = IP / CIDR match
+#   e = no password check                  k = case-sensitive name
+
+[[admins]]
+auth = "STEAM_0:0:1"
+password = ""
+access = "abcdefghijklmnopqrstu"
+account = "ce"
+comment = "Head Server Administrator (SteamID)"
+
+[[admins]]
+auth = "127.0.0.1/32"
+password = ""
+access = "bcdefijmtu"
+account = "de"
+comment = "Localhost Operator & VIP"
+
+[[admins]]
+auth = "VIP_Player"
+password = ""
+access = "bt"
+account = "e"
+comment = "Example VIP Member (reserved slot + VIP perks)"

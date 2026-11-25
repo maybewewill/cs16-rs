@@ -1,0 +1,83 @@
+# cs16-rs Unified Polyglot Plugin Configuration (`configs/plugins.toml`)
+# Supports Rust/C++/Go WASM packages, zero-compile Python (.py) scripts, and legacy .amxx plugins
+# running side-by-side on one deterministic server sharing MenuManager, LangCatalog, AdminRegistry,
+# NVault/Leaderboard stores, and cross-plugin RPC.
+
+configs_dir = "."
+
+# --- Part A: Standard AMXX+ Base Pack (enabled by default) ---
+[[plugins]]
+path = "../mods/std/admin"
+enabled = true
+runtime = "wasm"
+
+[[plugins]]
+path = "../mods/std/mapmanager"
+enabled = true
+runtime = "wasm"
+
+[[plugins]]
+path = "../mods/std/statsx"
+enabled = true
+runtime = "wasm"
+
+[[plugins]]
+path = "../mods/std/restmenu"
+enabled = true
+runtime = "wasm"
+
+# --- Part B: Community Pub Plugins (Zero-Compile Python — Edit & Hot-Reload Live!) ---
+[[plugins]]
+path = "../mods/community/resetscore.py"
+enabled = true
+runtime = "python"
+
+[[plugins]]
+path = "../mods/community/vip_system.py"
+enabled = true
+runtime = "python"
+
+[[plugins]]
+path = "../mods/community/afk_control.py"
+enabled = true
+runtime = "python"
+
+[[plugins]]
+path = "../mods/community/damager_and_parachute.py"
+enabled = true
+runtime = "python"
+
+[[plugins]]
+path = "../mods/community/antiflood_admanager.py"
+enabled = true
+runtime = "python"
+
+# --- Part C: Major Overhaul Gamemodes (Enable one or more on demand) ---
+[[plugins]]
+path = "../mods/gamemodes/semiclip"
+enabled = false
+runtime = "wasm"
+
+[[plugins]]
+path = "../mods/gamemodes/csdm"
+enabled = false
+runtime = "wasm"
+
+[[plugins]]
+path = "../mods/gamemodes/gungame"
+enabled = false
+runtime = "wasm"
+
+[[plugins]]
+path = "../mods/gamemodes/zombie_plague"
+enabled = false
+runtime = "wasm"
+
+# --- Legacy AMX Mod X (.amxx) Plugins ---
+# Drop compiled third-party .amxx plugins into `plugins/` or migrate with:
+#   cs-server --import-amxx <path/to/cstrike>
+#   cargo xtask import-amxx <path/to/cstrike>
+# [[plugins]]
+# path = "../plugins/custom_plugin.amxx"
+# enabled = true
+# runtime = "amxx"
