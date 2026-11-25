@@ -458,7 +458,10 @@ pub(crate) fn observer_eligible_for(
     if (obs_ent.flags & FL_PROXY) != 0 {
         return true;
     }
-    if obs.alive || obs_ent.iuser1 == crate::observer::OBS_NONE {
+    if obs.alive
+        || obs_ent.iuser1 == crate::observer::OBS_NONE
+        || obs_ent.deadflag == crate::player::DEAD_DYING
+    {
         return false;
     }
     match obs.team {
