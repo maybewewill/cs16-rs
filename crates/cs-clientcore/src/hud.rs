@@ -74,8 +74,9 @@ pub struct PlayerScore {
     pub deaths: i16,
     pub class_id: i16,
     pub team_id: i16,
-    /// `ScoreAttrib`: bit 0 dead, bit 1 carries the bomb, bit 2 is the VIP (assumption: the
-    /// numbering of `ReGameDLL_CS` `SCORE_STATUS_*`).
+    /// `ScoreAttrib`: bit 0 dead (`SCORE_STATUS_DEAD`), bit 1 carries the bomb
+    /// (`SCORE_STATUS_BOMB`), bit 2 is the VIP (`SCORE_STATUS_VIP`), ReGameDLL_CS
+    /// `regamedll/dlls/cdll_dll.h:63-67`.
     pub attrib: u8,
     /// `TeamInfo`: `TERRORIST`, `CT`, `SPECTATOR`, `UNASSIGNED`.
     pub team: String,
@@ -272,7 +273,8 @@ pub struct HudState {
     pub health: u8,
     /// `Battery`: the armor points.
     pub armor: i16,
-    /// `ArmorType`: 0 none, 1 vest, 2 vest and helmet (assumption).
+    /// `ArmorType`: `0` vest only, `1` vest and helmet (verified via Ghidra retail `client.dll`
+    /// `FUN_10046f20`; matches `cs-game` `send_armor_type` and HUD sprite selection).
     pub armor_type: u8,
     pub money: i32,
     /// The last `Money` asked for the change to flash.

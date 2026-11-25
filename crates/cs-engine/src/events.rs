@@ -20,8 +20,9 @@
 //!   dropped (ReHLDS fragments it); a server without the `event_t` schema sends none.
 //! - A negative `delay` is refused (the source's `(int)` and `unsigned` conversions of it are
 //!   undefined or wrap).
-//! - `MAX_EVENT_QUEUE` (64) is from memory of the SDK's `event_state_t` (assumption); the
-//!   message carries at most 31 events anyway.
+//! - `MAX_EVENT_QUEUE` (64) is the event queue bound looped by ReHLDS
+//!   `rehlds/engine/sv_main.cpp:4214,4234,4286,4831` (`event_state_t`, `event_state.h` not
+//!   fetched); the wire `svc_event` message carries at most 31 events per frame anyway.
 
 use cs_proto48::event::{EventArgs, FEVENT_ANGLES, FEVENT_ORIGIN, WireEvent, write_svc_event_reliable};
 use glam::Vec3;

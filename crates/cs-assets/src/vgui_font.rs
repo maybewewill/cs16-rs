@@ -538,7 +538,6 @@ pub fn resolve_font_bytes(
     custom_font_files: &[String],
 ) -> Result<(Vec<u8>, String), String> {
     let lower = variant.name.trim().to_ascii_lowercase();
-    let bold = variant.weight >= 600 || lower.contains("bold");
     let italic = variant.italic || lower.contains("italic");
 
     if (lower == "marlett" || variant.symbol)
@@ -562,6 +561,7 @@ pub fn resolve_font_bytes(
 
     #[cfg(not(target_arch = "wasm32"))]
     {
+        let bold = variant.weight >= 600 || lower.contains("bold");
         let candidates: Vec<&'static str> = match lower.as_str() {
             "tahoma" => {
                 if bold {

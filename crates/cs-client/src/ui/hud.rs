@@ -688,10 +688,10 @@ pub struct HudView<'a> {
     pub underwater_tint: Option<[f32; 4]>,
 }
 
-/// The seconds a `ScreenFade` message is shown for, and its colour alpha now (0..=255).
-/// Assumption: `duration` and `hold_time` are in 1/4096 s, `FFADE_IN` (flag bit 0 clear) holds
-/// the colour for `hold_time` and then fades out over `duration`; `FFADE_OUT` fades in over
-/// `duration`; `FFADE_STAYOUT` (bit 2) keeps it.
+/// The seconds a `ScreenFade` message is shown for, and its colour alpha now (`0..=255`).
+/// `duration` and `holdTime` use `FIXED 4.12` (`1/4096 s`) and `FFADE_IN`/`FFADE_OUT`/
+/// `FFADE_MODULATE`/`FFADE_STAYOUT` follow `ReGameDLL_CS regamedll/engine/shake.h:44-57`;
+/// `fadeTotalEnd` semantics match Xash3D FWGS `screenfade.h:23`.
 pub fn screen_fade_alpha(fade: &ScreenFade, now: f64) -> f32 {
     let dur = f64::from(fade.duration) / 4096.0;
     let hold = f64::from(fade.hold_time) / 4096.0;

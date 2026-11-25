@@ -7,22 +7,22 @@
 [[item]]
 id = "sound_wav_2d_playback"
 status = "tested"
-evidence = "crates/cs-client/src/audio/wav.rs; crates/cs-client/src/audio/mixer.rs; crates/cs-client/tests/phase9_sound.rs::wav_2d_3d_cue_and_smpl_looping"
+evidence = "crates/cs-client/src/audio/wav.rs; crates/cs-client/src/audio/mixer.rs; crates/cs-client/tests/phase9_sound.rs::wav_2d_playback_renders_pcm"
 
 [[item]]
 id = "sound_basic_3d_distance_attenuation"
 status = "tested"
-evidence = "crates/cs-client/src/audio/mixer.rs; crates/cs-client/tests/phase9_sound.rs::goldsrc_attenuation_stereo_pan_pitch_and_occlusion"
+evidence = "crates/cs-client/src/audio/mixer.rs; crates/cs-client/tests/phase9_sound.rs::goldsrc_distance_attenuation_and_stereo_pan"
 
 [[item]]
 id = "sound_mp3_menu_music"
 status = "tested"
-evidence = "crates/cs-client/src/audio/music.rs; crates/cs-client/src/audio/native.rs; crates/cs-client/tests/phase9_sound.rs::soundfade_cdtrack_mp3_commands_and_real_mp3_decode"
+evidence = "crates/cs-client/src/audio/music.rs; crates/cs-client/src/audio/native.rs; crates/cs-client/tests/phase9_sound.rs::real_mp3_menu_music_decode_if_installed, cdtrack_and_mp3_console_commands"
 
 [[item]]
 id = "sound_protocol48_svc_sound_driver"
 status = "tested"
-evidence = "crates/cs-clientcore/src/sound.rs::tests::a_sound_starts_by_its_precache_name, static_channel_goes_to_the_ambient_path, stop_sound_splits_entity_and_channel, static_sound_and_fade_are_commands; crates/cs-clientcore/src/events.rs::tests::weapon_fire_event_produces_view_anim_and_shell, a_vehicle_event_starts_and_stops_its_sound; crates/cs-clientcore/tests/effects.rs::golden_sounds_become_commands_with_their_names; crates/cs-client/src/audio/mixer.rs; crates/cs-client/tests/phase9_sound.rs::channels_priorities_alter_and_stopsound"
+evidence = "crates/cs-clientcore/src/sound.rs::tests::a_sound_starts_by_its_precache_name, static_channel_goes_to_the_ambient_path, stop_sound_splits_entity_and_channel, static_sound_and_fade_are_commands; crates/cs-clientcore/src/events.rs::tests::weapon_fire_event_produces_view_anim_and_shell, a_vehicle_event_starts_and_stops_its_sound; crates/cs-clientcore/tests/effects.rs::golden_sounds_become_commands_with_their_names; crates/cs-client/src/audio/mixer.rs; crates/cs-client/tests/phase9_sound.rs::channels_priorities_alter_and_stopsound, gameplay_sound_events_radio_c4_footsteps_and_roomtype_drive_mixer"
 
 [[item]]
 id = "sound_channels_and_priorities"
@@ -32,27 +32,27 @@ evidence = "crates/cs-client/src/audio/mixer.rs (128 dynamic + 128 static channe
 [[item]]
 id = "sound_goldsrc_attenuation_and_stereo_panning"
 status = "tested"
-evidence = "crates/cs-client/src/audio/mixer.rs (ATTN_* 1000-unit linear attenuation and listener-right stereo panning); crates/cs-client/tests/phase9_sound.rs::goldsrc_attenuation_stereo_pan_pitch_and_occlusion"
+evidence = "crates/cs-client/src/audio/mixer.rs (ATTN_* 1000-unit linear attenuation and listener-right stereo panning); crates/cs-client/tests/phase9_sound.rs::goldsrc_distance_attenuation_and_stereo_pan"
 
 [[item]]
 id = "sound_pitch_shifting"
 status = "tested"
-evidence = "crates/cs-client/src/audio/mixer.rs (fractional playback phase resampling for pitch 50..=255 around PITCH_NORM=100); crates/cs-client/tests/phase9_sound.rs::goldsrc_attenuation_stereo_pan_pitch_and_occlusion"
+evidence = "crates/cs-client/src/audio/mixer.rs (fractional playback phase resampling for pitch 50..=255 around PITCH_NORM=100); crates/cs-client/tests/phase9_sound.rs::goldsrc_fractional_pitch_shifting"
 
 [[item]]
 id = "sound_looped_wav_cue_points"
 status = "tested"
-evidence = "crates/cs-client/src/audio/wav.rs::decode_wav, parse_wav_loop_points (RIFF cue/smpl chunk loop extraction); crates/cs-client/tests/phase9_sound.rs::wav_2d_3d_cue_and_smpl_looping"
+evidence = "crates/cs-client/src/audio/wav.rs::decode_wav, parse_wav_loop_points (RIFF cue/smpl chunk loop extraction); crates/cs-client/tests/phase9_sound.rs::wav_cue_and_smpl_loop_points_wrap"
 
 [[item]]
 id = "sound_sentences_txt_and_vox"
 status = "tested"
-evidence = "crates/cs-client/src/audio/sentences.rs; crates/cs-client/src/audio/mixer.rs::start_vox_words; crates/cs-client/tests/phase9_sound.rs::sentences_txt_and_vox_concatenation"
+evidence = "crates/cs-client/src/audio/sentences.rs; crates/cs-client/src/audio/mixer.rs::start_vox_words; crates/cs-client/tests/phase9_sound.rs::sentences_txt_and_vox_concatenation, gameplay_sound_events_radio_c4_footsteps_and_roomtype_drive_mixer"
 
 [[item]]
 id = "sound_roomtype_dsp_and_env_sound"
 status = "tested"
-evidence = "crates/cs-client/src/audio/dsp.rs (29-preset Schroeder/comb+allpass RoomDsp); crates/cs-game/tests/phase7_env_items.rs::env_sound_sends_svc_roomtype_and_ambient_generic_ramps; crates/cs-client/tests/phase9_sound.rs::roomtype_29_presets_env_sound_and_underwater_muffling"
+evidence = "crates/cs-client/src/audio/dsp.rs (29-preset Schroeder/comb+allpass RoomDsp); crates/cs-game/tests/phase7_env_items.rs::env_sound_sends_svc_roomtype_and_ambient_generic_ramps; crates/cs-client/tests/phase9_sound.rs::roomtype_29_presets_modulate_wet_reverb"
 
 [[item]]
 id = "sound_ambient_generic_entities"
@@ -62,22 +62,22 @@ evidence = "crates/cs-game/src/env.rs (volstart/pitch/fadein/fadeout/spinup/spin
 [[item]]
 id = "sound_soundfade_and_stopsound"
 status = "tested"
-evidence = "crates/cs-client/src/audio/mixer.rs (SoundFadeState, stop_channel, stop_all); crates/cs-proto48/src/messages.rs::tests::voice_roomtype_stopsound_roundtrip; crates/cs-client/tests/phase9_sound.rs::soundfade_cdtrack_mp3_commands_and_real_mp3_decode, channels_priorities_alter_and_stopsound"
+evidence = "crates/cs-client/src/audio/mixer.rs (SoundFadeState, stop_channel, stop_all); crates/cs-proto48/src/messages.rs::tests::voice_roomtype_stopsound_roundtrip; crates/cs-client/tests/phase9_sound.rs::soundfade_attenuates_and_recovers_master_gain, channels_priorities_alter_and_stopsound"
 
 [[item]]
 id = "sound_cdtrack_and_mp3_commands"
 status = "tested"
-evidence = "crates/cs-client/src/audio/music.rs; crates/cs-client/tests/phase9_sound.rs::soundfade_cdtrack_mp3_commands_and_real_mp3_decode"
+evidence = "crates/cs-client/src/audio/music.rs; crates/cs-client/tests/phase9_sound.rs::cdtrack_and_mp3_console_commands"
 
 [[item]]
 id = "sound_material_impact_and_client_footsteps"
 status = "tested"
-evidence = "crates/cs-client/src/audio/impacts.rs; crates/cs-client/src/view.rs; crates/cs-client/tests/phase9_sound.rs::material_impacts_and_predicted_footsteps"
+evidence = "crates/cs-client/src/audio/impacts.rs; crates/cs-client/src/view.rs; crates/cs-client/tests/phase9_sound.rs::material_impacts_and_predicted_footsteps, gameplay_sound_events_radio_c4_footsteps_and_roomtype_drive_mixer"
 
 [[item]]
 id = "sound_occlusion_and_water_muffling"
 status = "tested"
-evidence = "crates/cs-client/src/audio/dsp.rs; crates/cs-client/src/audio/mixer.rs; crates/cs-client/tests/phase9_sound.rs::goldsrc_attenuation_stereo_pan_pitch_and_occlusion, roomtype_29_presets_env_sound_and_underwater_muffling"
+evidence = "crates/cs-client/src/audio/dsp.rs; crates/cs-client/src/audio/mixer.rs; crates/cs-client/tests/phase9_sound.rs::goldsrc_wall_occlusion_attenuates_sound, underwater_muffling_lowpass_filters_audio"
 
 [[item]]
 id = "sound_voice_opus_native"

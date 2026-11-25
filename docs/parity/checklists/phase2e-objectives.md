@@ -29,6 +29,7 @@ What Part A does **not** verify against the original client or live HLDS: planti
 - `crates/cs-game/tests/vip_escape.rs` (6 tests): VIP selection/queue/rotation/`become_vip`/`vip` model/200 armor/227 speed/half armor ratio, `as_` buy restrictions, VIP escape/assassination rewards, escape ratio + 3-round `SwapAllPlayers`, `as_oilrig` real-BSP VIP spawn.
 - `crates/cs-game/tests/bots.rs` (5 tests): `bot_add`/`bot_add_t`/`bot_add_ct`/`bot_kick`, LOS movement + shooting, round-start alias buying, full combat round completion.
 - `crates/cs-game/tests/full_round.rs` (3 tests): end-to-end bot C4 plant + explosion on `de_dust2`, CT bot defusal on planted C4, CT bot hostage escort + rescue on `cs_office`.
+- Re-verified `2026-11-25` on `gaps-before-11`: `cargo test -p cs-game --test full_round --test vip_escape --test zones` -> `full_round` `3 passed; 0 failed`, `vip_escape` `10 passed; 0 failed`, `zones` `14 passed; 0 failed`.
 
 ## Part B: the owner's checks
 

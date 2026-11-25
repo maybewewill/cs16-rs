@@ -6,17 +6,17 @@
 [[item]]
 id = "TE_BEAMPOINTS"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore; crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_beams_and_lines_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_beams_and_lines_produce_effects_and_kill_beam; crates/cs-client/tests/phase8_render.rs::beams_and_lasers_subdivision_and_kill"
 
 [[item]]
 id = "TE_BEAMENTPOINT"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_beams_and_lines_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_beams_and_lines_produce_effects_and_kill_beam"
 
 [[item]]
 id = "TE_GUNSHOT"
 status = "tested"
-evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; crates/cs-proto48/src/tempent.rs::tests::te_gunshots_blood_and_tracers_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_gunshots_blood_tracers_and_brass_drive_tempents"
 
 [[item]]
 id = "TE_EXPLOSION"
@@ -26,7 +26,7 @@ evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layou
 [[item]]
 id = "TE_TAREXPLOSION"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore; crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_explosions_sparks_and_lights_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_explosions_sparks_and_lights_produce_effects_and_dlights; crates/cs-client/tests/phase8_render.rs::particles_and_weather_system"
 
 [[item]]
 id = "TE_SMOKE"
@@ -36,52 +36,52 @@ evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layou
 [[item]]
 id = "TE_TRACER"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_gunshots_blood_and_tracers_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_gunshots_blood_tracers_and_brass_drive_tempents"
 
 [[item]]
 id = "TE_LIGHTNING"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-client/src/render/particles.rs::tests::beam_system_subdivides_and_kills"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_beams_and_lines_roundtrip_and_match_skip; crates/cs-client/src/render/particles.rs::tests::beam_system_subdivides_and_kills"
 
 [[item]]
 id = "TE_BEAMENTS"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_beams_and_lines_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_beams_and_lines_produce_effects_and_kill_beam"
 
 [[item]]
 id = "TE_SPARKS"
 status = "tested"
-evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip"
+evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; crates/cs-proto48/src/tempent.rs::tests::te_explosions_sparks_and_lights_roundtrip_and_match_skip"
 
 [[item]]
 id = "TE_LAVASPLASH"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_explosions_sparks_and_lights_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_explosions_sparks_and_lights_produce_effects_and_dlights"
 
 [[item]]
 id = "TE_TELEPORT"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_explosions_sparks_and_lights_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_explosions_sparks_and_lights_produce_effects_and_dlights"
 
 [[item]]
 id = "TE_EXPLOSION2"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_explosions_sparks_and_lights_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_explosions_sparks_and_lights_produce_effects_and_dlights"
 
 [[item]]
 id = "TE_BSPDECAL"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_decals_sprites_hud_and_players_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_decals_sprites_hud_and_player_attachments_drive_tempents"
 
 [[item]]
 id = "TE_IMPLOSION"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-client/src/render/particles.rs::tests::particle_system_spawns_decays_and_weather_works"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_explosions_sparks_and_lights_roundtrip_and_match_skip; crates/cs-client/src/render/particles.rs::tests::particle_system_spawns_decays_and_weather_works"
 
 [[item]]
 id = "TE_SPRITETRAIL"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_decals_sprites_hud_and_players_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_decals_sprites_hud_and_player_attachments_drive_tempents"
 
 [[item]]
 id = "TE_SPRITE"
@@ -91,22 +91,22 @@ evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layou
 [[item]]
 id = "TE_BEAMSPRITE"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip (16-byte wire format verified); crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_beams_and_lines_roundtrip_and_match_skip (16-byte wire format verified); crates/cs-clientcore/src/tempents.rs::tests::te_beams_and_lines_produce_effects_and_kill_beam"
 
 [[item]]
 id = "TE_BEAMTORUS"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_beams_and_lines_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_beams_and_lines_produce_effects_and_kill_beam"
 
 [[item]]
 id = "TE_BEAMDISK"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_beams_and_lines_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_beams_and_lines_produce_effects_and_kill_beam"
 
 [[item]]
 id = "TE_BEAMCYLINDER"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_beams_and_lines_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_beams_and_lines_produce_effects_and_kill_beam"
 
 [[item]]
 id = "TE_BEAMFOLLOW"
@@ -121,62 +121,62 @@ evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layou
 [[item]]
 id = "TE_BEAMRING"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_beams_and_lines_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_beams_and_lines_produce_effects_and_kill_beam"
 
 [[item]]
 id = "TE_STREAK_SPLASH"
 status = "tested"
-evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip"
+evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; crates/cs-proto48/src/tempent.rs::tests::te_gunshots_blood_and_tracers_roundtrip_and_match_skip"
 
 [[item]]
 id = "TE_DLIGHT"
 status = "tested"
-evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; crates/cs-client/tests/phase8_render.rs::texture_filter_modes_mipmaps_dlights_and_flashlight_spot"
+evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; crates/cs-client/tests/phase8_render.rs::dynamic_lights_dlights_and_elights"
 
 [[item]]
 id = "TE_ELIGHT"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore; crates/cs-client/tests/phase8_render.rs::texture_filter_modes_mipmaps_dlights_and_flashlight_spot"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_explosions_sparks_and_lights_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_explosions_sparks_and_lights_produce_effects_and_dlights; crates/cs-client/tests/phase8_render.rs::dynamic_lights_dlights_and_elights"
 
 [[item]]
 id = "TE_TEXTMESSAGE"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore; crates/cs-clientcore/src/hud.rs::tests::phase8_hud_and_effect_messages_update_state"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_decals_sprites_hud_and_players_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_decals_sprites_hud_and_player_attachments_drive_tempents; crates/cs-clientcore/src/hud.rs::tests::phase8_hud_and_effect_messages_update_state"
 
 [[item]]
 id = "TE_LINE"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_beams_and_lines_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_beams_and_lines_produce_effects_and_kill_beam"
 
 [[item]]
 id = "TE_BOX"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_beams_and_lines_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_beams_and_lines_produce_effects_and_kill_beam"
 
 [[item]]
 id = "TE_KILLBEAM"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-client/src/render/particles.rs::tests::beam_system_subdivides_and_kills"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_beams_and_lines_roundtrip_and_match_skip; crates/cs-client/src/render/particles.rs::tests::beam_system_subdivides_and_kills"
 
 [[item]]
 id = "TE_LARGEFUNNEL"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_explosions_sparks_and_lights_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_explosions_sparks_and_lights_produce_effects_and_dlights"
 
 [[item]]
 id = "TE_BLOODSTREAM"
 status = "tested"
-evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps"
+evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; crates/cs-client/tests/phase8_render.rs::particles_and_weather_system"
 
 [[item]]
 id = "TE_SHOWLINE"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_beams_and_lines_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_beams_and_lines_produce_effects_and_kill_beam"
 
 [[item]]
 id = "TE_BLOOD"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_gunshots_blood_and_tracers_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_gunshots_blood_tracers_and_brass_drive_tempents"
 
 [[item]]
 id = "TE_DECAL"
@@ -186,22 +186,22 @@ evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layou
 [[item]]
 id = "TE_FIZZ"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_explosions_sparks_and_lights_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_explosions_sparks_and_lights_produce_effects_and_dlights"
 
 [[item]]
 id = "TE_MODEL"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_gunshots_blood_and_tracers_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_gunshots_blood_tracers_and_brass_drive_tempents"
 
 [[item]]
 id = "TE_EXPLODEMODEL"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip (13-byte GoldSrc layout verified); crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_explosions_sparks_and_lights_roundtrip_and_match_skip (13-byte GoldSrc layout verified); crates/cs-clientcore/src/tempents.rs::tests::te_explosions_sparks_and_lights_produce_effects_and_dlights"
 
 [[item]]
 id = "TE_BREAKMODEL"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_gunshots_blood_and_tracers_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_gunshots_blood_tracers_and_brass_drive_tempents"
 
 [[item]]
 id = "TE_GUNSHOTDECAL"
@@ -211,27 +211,27 @@ evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layou
 [[item]]
 id = "TE_SPRITE_SPRAY"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_decals_sprites_hud_and_players_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_decals_sprites_hud_and_player_attachments_drive_tempents"
 
 [[item]]
 id = "TE_ARMOR_RICOCHET"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_gunshots_blood_and_tracers_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_gunshots_blood_tracers_and_brass_drive_tempents"
 
 [[item]]
 id = "TE_PLAYERDECAL"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_decals_sprites_hud_and_players_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_decals_sprites_hud_and_player_attachments_drive_tempents"
 
 [[item]]
 id = "TE_BUBBLES"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_decals_sprites_hud_and_players_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_decals_sprites_hud_and_player_attachments_drive_tempents"
 
 [[item]]
 id = "TE_BUBBLETRAIL"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_decals_sprites_hud_and_players_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_decals_sprites_hud_and_player_attachments_drive_tempents"
 
 [[item]]
 id = "TE_BLOODSPRITE"
@@ -256,44 +256,44 @@ evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layou
 [[item]]
 id = "TE_PROJECTILE"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_gunshots_blood_and_tracers_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_gunshots_blood_tracers_and_brass_drive_tempents"
 
 [[item]]
 id = "TE_SPRAY"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_gunshots_blood_and_tracers_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_gunshots_blood_tracers_and_brass_drive_tempents"
 
 [[item]]
 id = "TE_PLAYERSPRITES"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_decals_sprites_hud_and_players_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_decals_sprites_hud_and_player_attachments_drive_tempents"
 
 [[item]]
 id = "TE_PARTICLEBURST"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_gunshots_blood_and_tracers_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_gunshots_blood_tracers_and_brass_drive_tempents"
 
 [[item]]
 id = "TE_FIREFIELD"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_explosions_sparks_and_lights_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_explosions_sparks_and_lights_produce_effects_and_dlights"
 
 [[item]]
 id = "TE_PLAYERATTACHMENT"
 status = "tested"
-evidence = "crates/cs-game/tests/hud_misc.rs::radio_reaches_the_team_with_sound; crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip"
+evidence = "crates/cs-game/tests/hud_misc.rs::radio_reaches_the_team_with_sound; crates/cs-proto48/src/tempent.rs::tests::te_decals_sprites_hud_and_players_roundtrip_and_match_skip"
 
 [[item]]
 id = "TE_KILLPLAYERATTACHMENTS"
 status = "tested"
-evidence = "crates/cs-game/tests/observer.rs::dead_player_becomes_an_observer_after_the_death_cam; crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip"
+evidence = "crates/cs-game/tests/observer.rs::dead_player_becomes_an_observer_after_the_death_cam; crates/cs-proto48/src/tempent.rs::tests::te_decals_sprites_hud_and_players_roundtrip_and_match_skip"
 
 [[item]]
 id = "TE_MULTIGUNSHOT"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_gunshots_blood_and_tracers_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_gunshots_blood_tracers_and_brass_drive_tempents"
 
 [[item]]
 id = "TE_USERTRACER"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::te_gunshots_blood_and_tracers_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::te_gunshots_blood_tracers_and_brass_drive_tempents"

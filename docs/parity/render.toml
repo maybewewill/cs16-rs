@@ -23,47 +23,47 @@ evidence = "crates/cs-client/src/camera.rs::tests::camera_projects_point_in_fron
 [[item]]
 id = "render_bsp_world_and_overbright_lightmaps"
 status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::gamma_texgamma_brightness_overbright_and_software_dither, real_assets_and_headless_gpu_offscreen_render_if_installed"
+evidence = "crates/cs-client/tests/phase8_render.rs::gamma_texgamma_brightness_overbright_curve, screenshot_gpu_offscreen_readback_if_installed"
 
 [[item]]
 id = "render_bsp_pvs_culling_and_dynamic_brush_hide"
 status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::real_assets_and_headless_gpu_offscreen_render_if_installed (BspMap::visible_world_face_mask + BspRenderer::prepare_world_pvs)"
+evidence = "crates/cs-client/tests/phase8_render.rs::bsp_pvs_culling_and_dynamic_brush_hide_if_installed (BspMap::visible_world_face_mask + BspRenderer::prepare_world_pvs)"
 
 [[item]]
 id = "render_bsp_alpha_test_and_texturemode"
 status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::texture_filter_modes_mipmaps_dlights_and_flashlight_spot; crates/cs-client/src/render/lighting.rs::tests::texture_filter_modes_and_mipmaps_respect_pot_and_nearest_aniso"
+evidence = "crates/cs-client/tests/phase8_render.rs::texture_filter_modes_and_pot_mipmaps; crates/cs-client/src/render/lighting.rs::tests::texture_filter_modes_and_mipmaps_respect_pot_and_nearest_aniso"
 
 [[item]]
 id = "render_skybox_6face"
 status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::real_assets_and_headless_gpu_offscreen_render_if_installed (SkyboxRenderer::draw with 6 faces, fog, gamma/texgamma/software_mode)"
+evidence = "crates/cs-client/tests/phase8_render.rs::skybox_6face_and_fog_uniforms_if_installed, screenshot_gpu_offscreen_readback_if_installed (SkyboxRenderer::draw with 6 faces, fog, gamma/texgamma/software_mode)"
 
 [[item]]
 id = "render_mdl_basic_skinning_and_bonemerge"
 status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::mdl_features_skins_bodygroups_flags_bones_events_and_attachments; crates/cs-client/src/render/mdl_renderer.rs::tests::body_selects_submodels_per_part, studio_frame_follows_estimate_frame"
+evidence = "crates/cs-client/tests/phase8_render.rs::mdl_skins_and_bodygroups, mdl_bone_controllers_and_attachments; crates/cs-client/src/render/mdl_renderer.rs::tests::body_selects_submodels_per_part, studio_frame_follows_estimate_frame"
 
 [[item]]
 id = "render_viewmodel_and_righthand"
 status = "tested"
-evidence = "crates/cs-client/src/render/mod.rs (dedicated depth-cleared viewmodel pass); crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps"
+evidence = "crates/cs-client/src/render/mod.rs (dedicated depth-cleared viewmodel pass); crates/cs-client/tests/phase8_render.rs::viewmodel_pass_and_righthand_mirror"
 
 [[item]]
 id = "render_basic_fx_decals_tracers_smoke_muzzle"
 status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps; crates/cs-client/src/render/particles.rs::tests::particle_system_spawns_decays_and_weather_works"
+evidence = "crates/cs-client/tests/phase8_render.rs::decals_wad_clipping_and_custom_sprays, particles_and_weather_system; crates/cs-client/src/render/particles.rs::tests::particle_system_spawns_decays_and_weather_works"
 
 [[item]]
 id = "render_screenshot_gpu_readback"
 status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::real_assets_and_headless_gpu_offscreen_render_if_installed (render_offscreen_rgba + Renderer::render_frame GPU readback)"
+evidence = "crates/cs-client/tests/phase8_render.rs::screenshot_gpu_offscreen_readback_if_installed (render_offscreen_rgba + Renderer::render_frame GPU readback)"
 
 [[item]]
 id = "render_basic_gamma_brightness_shader"
 status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::gamma_texgamma_brightness_overbright_and_software_dither; crates/cs-client/src/render/gamma.rs::tests::gamma_texgamma_brightness_and_software_dither_work"
+evidence = "crates/cs-client/tests/phase8_render.rs::gamma_texgamma_brightness_overbright_curve; crates/cs-client/src/render/gamma.rs::tests::gamma_texgamma_brightness_and_software_dither_work"
 
 [[item]]
 id = "render_protocol48_entity_driven_pipeline"
@@ -78,22 +78,22 @@ evidence = "crates/cs-client/tests/phase8_render.rs::lightstyles_and_atlas_rebui
 [[item]]
 id = "render_dynamic_lights"
 status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::texture_filter_modes_mipmaps_dlights_and_flashlight_spot (DLightPool dlights/elights + GpuLightsUniform)"
+evidence = "crates/cs-client/tests/phase8_render.rs::dynamic_lights_dlights_and_elights (DLightPool dlights/elights + GpuLightsUniform)"
 
 [[item]]
 id = "render_rendermode_color_texture_glow_solid_additive"
 status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::rendermodes_all_renderfx_fade_tracker_and_sorting; crates/cs-client/src/render/sprite_renderer.rs::tests::blend_per_render_mode"
+evidence = "crates/cs-client/tests/phase8_render.rs::rendermodes_blend_and_alpha_sorting; crates/cs-client/src/render/sprite_renderer.rs::tests::blend_per_render_mode"
 
 [[item]]
 id = "render_renderfx_all"
 status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::rendermodes_all_renderfx_fade_tracker_and_sorting; crates/cs-client/src/render/scene.rs::tests::fx_blend_pulse_constants_per_id, fx_blend_distort_and_hologram"
+evidence = "crates/cs-client/tests/phase8_render.rs::renderfx_all_modes_and_fade_tracker; crates/cs-client/src/render/scene.rs::tests::fx_blend_pulse_constants_per_id, fx_blend_distort_and_hologram"
 
 [[item]]
 id = "render_water_warp_and_ripples"
-status = "implemented"
-evidence = "crates/cs-client/src/render/shaders/bsp.wgsl (FLAG_WATER: a sine UV warp and a vertex wave). Approximation: not the original's turbsin table warp (EmitWaterPolys), so the look differs; no test asserts the surface warp (the cited view_effects test covers the underwater screen tint only, see render_screen_fade_and_shake)"
+status = "tested"
+evidence = "crates/cs-client/src/render/shaders/bsp.wgsl (EmitWaterPolys r_turbsin UV warp + two-term vertex Z wave); crates/cs-client/src/render/bsp_renderer.rs::tests::r_turbsin_water_warp_matches_xash_warpsin (ported from Xash3D FWGS engine/warpsin.h & ref/gl/gl_rsurf.c, read 2026-11-25)"
 
 [[item]]
 id = "render_scrolling_textures"
@@ -108,47 +108,47 @@ evidence = "crates/cs-client/tests/phase8_render.rs::bsp_animated_toggleable_and
 [[item]]
 id = "render_fog"
 status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::real_assets_and_headless_gpu_offscreen_render_if_installed; crates/cs-clientcore/src/hud.rs::tests::phase8_hud_and_effect_messages_update_state"
+evidence = "crates/cs-client/tests/phase8_render.rs::skybox_6face_and_fog_uniforms_if_installed; crates/cs-clientcore/src/hud.rs::tests::phase8_hud_and_effect_messages_update_state"
 
 [[item]]
 id = "render_mdl_sequence_blending"
 status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::mdl_features_skins_bodygroups_flags_bones_events_and_attachments, real_assets_and_headless_gpu_offscreen_render_if_installed"
+evidence = "crates/cs-client/tests/phase8_render.rs::mdl_sequence_blending_and_animation_events, mdl_gait_animation_spine_split_if_installed"
 
 [[item]]
 id = "render_mdl_bone_controllers"
 status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::mdl_features_skins_bodygroups_flags_bones_events_and_attachments (BoneEvalParams::controller)"
+evidence = "crates/cs-client/tests/phase8_render.rs::mdl_bone_controllers_and_attachments (BoneEvalParams::controller)"
 
 [[item]]
 id = "render_mdl_gait_animation"
 status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::real_assets_and_headless_gpu_offscreen_render_if_installed (Bip01 Spine split gait blending on urban.mdl)"
+evidence = "crates/cs-client/tests/phase8_render.rs::mdl_gait_animation_spine_split_if_installed (Bip01 Spine split gait blending on urban.mdl)"
 
 [[item]]
 id = "render_mdl_attachments"
 status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::mdl_features_skins_bodygroups_flags_bones_events_and_attachments, real_assets_and_headless_gpu_offscreen_render_if_installed"
+evidence = "crates/cs-client/tests/phase8_render.rs::mdl_bone_controllers_and_attachments, mdl_sequence_blending_and_animation_events"
 
 [[item]]
 id = "render_mdl_animation_events"
 status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::mdl_features_skins_bodygroups_flags_bones_events_and_attachments, real_assets_and_headless_gpu_offscreen_render_if_installed"
+evidence = "crates/cs-client/tests/phase8_render.rs::mdl_sequence_blending_and_animation_events"
 
 [[item]]
 id = "render_mdl_chrome_additive_masked_flags"
 status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::mdl_features_skins_bodygroups_flags_bones_events_and_attachments (STUDIO_NF_FLATSHADE, CHROME, ADDITIVE, MASKED)"
+evidence = "crates/cs-client/tests/phase8_render.rs::mdl_chrome_additive_masked_and_flatshade_flags (STUDIO_NF_FLATSHADE, CHROME, ADDITIVE, MASKED)"
 
 [[item]]
 id = "render_mdl_floor_point_lighting"
 status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::real_assets_and_headless_gpu_offscreen_render_if_installed (BspMap::sample_light_point_styled + Renderer world/viewmodel light sampling)"
+evidence = "crates/cs-client/tests/phase8_render.rs::mdl_floor_point_lighting_if_installed (BspMap::sample_light_point_styled + Renderer world/viewmodel light sampling)"
 
 [[item]]
 id = "render_mdl_bodygroups_and_skins"
 status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::mdl_features_skins_bodygroups_flags_bones_events_and_attachments; crates/cs-assets/src/lib.rs::tests::parses_real_phase8_bsp_decal_and_mdl_features_if_installed"
+evidence = "crates/cs-client/tests/phase8_render.rs::mdl_skins_and_bodygroups; crates/cs-assets/src/lib.rs::tests::parses_real_phase8_bsp_decal_and_mdl_features_if_installed"
 
 [[item]]
 id = "render_mdl_sequence_groups"
@@ -158,59 +158,59 @@ evidence = "crates/cs-assets/src/mdl.rs::tests::external_seqgroup_and_skin_famil
 [[item]]
 id = "render_tempents_all_effects"
 status = "tested"
-evidence = "crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/tempent.rs::tests::temp_entities_cover_all_59_active_ids; crates/cs-clientcore/src/tempents.rs::tests::temp_effects_cover_all_59_active_ids"
 
 [[item]]
 id = "render_beams_and_lasers"
 status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps; crates/cs-client/src/render/particles.rs::tests::beam_system_subdivides_and_kills"
+evidence = "crates/cs-client/tests/phase8_render.rs::beams_and_lasers_subdivision_and_kill; crates/cs-client/src/render/particles.rs::tests::beam_system_subdivides_and_kills"
 
 [[item]]
 id = "render_sprites_all_orientations"
 status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::rendermodes_all_renderfx_fade_tracker_and_sorting; crates/cs-client/src/render/scene.rs::tests::sprite_parallel_uses_view_axes, sprite_facing_upright_turns_to_the_viewer, sprite_oriented_uses_entity_angles_and_backs_off"
+evidence = "crates/cs-client/tests/phase8_render.rs::sprites_all_orientations_and_glow_occlusion; crates/cs-client/src/render/scene.rs::tests::sprite_parallel_uses_view_axes, sprite_facing_upright_turns_to_the_viewer, sprite_oriented_uses_entity_angles_and_backs_off"
 
 [[item]]
 id = "render_particles_and_tracers"
 status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps; crates/cs-client/src/render/particles.rs::tests::particle_system_spawns_decays_and_weather_works"
+evidence = "crates/cs-client/tests/phase8_render.rs::particles_and_weather_system; crates/cs-client/src/render/particles.rs::tests::particle_system_spawns_decays_and_weather_works"
 
 [[item]]
 id = "render_brass_shells"
 status = "tested"
-evidence = "crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore; crates/cs-proto48/src/usermsg.rs::tests::phase8_usermsgs_roundtrip"
+evidence = "crates/cs-clientcore/src/tempents.rs::tests::te_gunshots_blood_tracers_and_brass_drive_tempents; crates/cs-proto48/src/usermsg.rs::tests::phase8_usermsgs_roundtrip"
 
 [[item]]
 id = "render_decals_wad_and_custom_sprays"
 status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps, real_assets_and_headless_gpu_offscreen_render_if_installed; crates/cs-client/src/render/decal_renderer.rs::tests::polygon_clip_bounds_uvs_to_unit_square"
+evidence = "crates/cs-client/tests/phase8_render.rs::decals_wad_clipping_and_custom_sprays; crates/cs-client/src/render/decal_renderer.rs::tests::polygon_clip_bounds_uvs_to_unit_square"
 
 [[item]]
 id = "render_view_bob_roll_punch_and_lag"
 status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps; crates/cs-client/src/view_effects.rs::tests::bob_and_roll_follow_goldsrc_bounds, viewmodel_lag_and_shake_behave_smoothly"
+evidence = "crates/cs-client/tests/phase8_render.rs::view_bob_roll_punch_and_viewmodel_lag; crates/cs-client/src/view_effects.rs::tests::bob_and_roll_follow_goldsrc_bounds, viewmodel_lag_and_shake_behave_smoothly"
 
 [[item]]
 id = "render_screen_fade_and_shake"
 status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps; crates/cs-client/src/view_effects.rs::tests::screen_fade_and_underwater_work"
+evidence = "crates/cs-client/tests/phase8_render.rs::screen_fade_and_screen_shake; crates/cs-client/src/view_effects.rs::tests::screen_fade_and_underwater_work"
 
 [[item]]
 id = "render_flashlight_dynamic_beam"
 status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::texture_filter_modes_mipmaps_dlights_and_flashlight_spot (compute_flashlight_spot + HUD battery indicator)"
+evidence = "crates/cs-client/tests/phase8_render.rs::flashlight_spotlight_trace_and_hud_battery (compute_flashlight_spot + HUD battery indicator)"
 
 [[item]]
 id = "render_gamma_texgamma_exact_pipeline"
 status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::gamma_texgamma_brightness_overbright_and_software_dither; crates/cs-client/src/render/gamma.rs::tests::gamma_texgamma_brightness_and_software_dither_work"
+evidence = "crates/cs-client/tests/phase8_render.rs::gamma_texgamma_brightness_overbright_curve; crates/cs-client/src/render/gamma.rs::tests::gamma_texgamma_brightness_and_software_dither_work"
 
 [[item]]
 id = "render_msaa_and_anisotropy"
 status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::real_assets_and_headless_gpu_offscreen_render_if_installed (4x MSAA rebuild_pipelines); crates/cs-client/src/render/lighting.rs::tests::texture_filter_modes_and_mipmaps_respect_pot_and_nearest_aniso"
+evidence = "crates/cs-client/tests/phase8_render.rs::msaa_and_anisotropy_pipeline_if_installed (4x MSAA rebuild_pipelines); crates/cs-client/src/render/lighting.rs::tests::texture_filter_modes_and_mipmaps_respect_pot_and_nearest_aniso"
 
 [[item]]
 id = "render_widescreen_fov_and_software_mode"
 status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps, gamma_texgamma_brightness_overbright_and_software_dither (Hor+ FOV, 300 FPS interp, software Bayer dither)"
+evidence = "crates/cs-client/tests/phase8_render.rs::widescreen_hor_plus_fov_and_300fps_interp, software_mode_4x4_bayer_rgb565_dither (Hor+ FOV, 300 FPS interp, software Bayer dither)"

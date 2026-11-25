@@ -100,12 +100,14 @@ pub mod dmg {
     /// Counter-Strike's `DMG_EXPLOSION` (`dlls/util.h`).
     pub const EXPLOSION: u32 = 1 << 24;
     /// The kinds of damage the HUD has art for (`DMG_SHOWNHUD`: poison, acid, freeze, slow
-    /// freeze, drown, burn, slow burn, nerve gas, radiation, shock). Values of the Half-Life
-    /// SDK's `damage.h` (assumption: not fetched for this task).
+    /// freeze, drown, burn, slow burn, nerve gas, radiation, shock). Verified in
+    /// `FWGS/hlsdk-portable dlls/cbase.h:629` and `ReGameDLL_CS regamedll/dlls/player.cpp:7808`
+    /// (read 2026-11-25).
     pub const SHOWNHUD: u32 =
         (1 << 17) | (1 << 20) | (1 << 4) | (1 << 22) | (1 << 14) | (1 << 3) | (1 << 21) | (1 << 16)
             | (1 << 18) | (1 << 8);
-    /// `DMG_TIMEBASED`: the kinds that last (Half-Life SDK, assumption as above).
+    /// `DMG_TIMEBASED`: the kinds that last (`FWGS/hlsdk-portable dlls/cbase.h:613` and
+    /// `ReGameDLL_CS regamedll/dlls/player.cpp:5045,7824`, read 2026-11-25).
     pub const TIMEBASED: u32 = !0x3fff & 0x7fff_ffff;
 }
 

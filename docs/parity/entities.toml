@@ -31,7 +31,7 @@ evidence = "crates/cs-game/tests/player.rs::fall_damage_as_regamedll, kill_comma
 [[item]]
 id = "game_hud_init"
 status = "verified"
-evidence = "crates/cs-game/tests/hud.rs::init_hud_sequence_as_regamedll, a_spawn_starts_the_hud_over_without_the_welcome, motd_is_sent_in_chunks, health_and_armor_follow_the_player, full_server_init_hud_fits; crates/cs-game/tests/bomb_carrier.rs::init_hud_shows_a_dropped_bomb; crates/cs-game/tests/hostages.rs::cs_office_hostages_spawn_as_hlds (HostagePos on InitHUD); crates/cs-game/tests/objective_rounds.rs::give_c4_rotates (ShowTimer); crates/cs-game/tests/phase7_env_items.rs::env_fog_weather_lights_and_sound_entities (Fog and ReceiveW weather messages wired). Deviations: HLTV is not ported (intermission is sent by round rules); SCORE_STATUS_DEAD is an SDK value from memory (assumption).; VERIFIED 2026-11-22, method 1 (the original Steam CS 1.6 client build 10210 on our server, de_dust2; docs/parity/checklists/phase2d-weapons.md V2, V5) and VERIFIED 2026-11-22/2026-11-23, method 2 (live HLDS build 10210 vs cs-server --proto48: join HUD messages, HostagePos on cs_office InitHUD/spawn, StatusIcon buyzone/rescue/c4/defuser, ItemStatus(0), BombDrop on de_dust2; docs/parity/checklists/phase2d-weapons.md V8 and docs/parity/checklists/phase2e-objectives.md E1-E3)"
+evidence = "crates/cs-game/tests/hud.rs::init_hud_sequence_as_regamedll, a_spawn_starts_the_hud_over_without_the_welcome, motd_is_sent_in_chunks, health_and_armor_follow_the_player, full_server_init_hud_fits; crates/cs-game/tests/bomb_carrier.rs::init_hud_shows_a_dropped_bomb; crates/cs-game/tests/hostages.rs::cs_office_hostages_spawn_as_hlds (HostagePos on InitHUD); crates/cs-game/tests/objective_rounds.rs::give_c4_rotates (ShowTimer); crates/cs-game/tests/phase7_env_items.rs::env_fog_and_weather_entities (Fog and ReceiveW weather messages wired). Deviations: HLTV is not ported (intermission is sent by round rules); SCORE_STATUS_DEAD is an SDK value from memory (assumption).; VERIFIED 2026-11-22, method 1 (the original Steam CS 1.6 client build 10210 on our server, de_dust2; docs/parity/checklists/phase2d-weapons.md V2, V5) and VERIFIED 2026-11-22/2026-11-23, method 2 (live HLDS build 10210 vs cs-server --proto48: join HUD messages, HostagePos on cs_office InitHUD/spawn, StatusIcon buyzone/rescue/c4/defuser, ItemStatus(0), BombDrop on de_dust2; docs/parity/checklists/phase2d-weapons.md V8 and docs/parity/checklists/phase2e-objectives.md E1-E3)"
 
 [[item]]
 id = "game_usermsgs_sent"
@@ -56,7 +56,7 @@ evidence = "crates/cs-game/tests/rounds.rs::elimination_ends_the_round_for_the_o
 [[item]]
 id = "game_round_restart"
 status = "tested"
-evidence = "crates/cs-game/tests/rounds.rs::game_commencing_on_first_players, restart_round_cvar, a_late_joiner_waits_for_the_next_round; crates/cs-game/tests/match_flow.rs::two_teams_play_a_round; crates/cs-game/tests/hostages.rs::hostages_restart_to_their_spawn; crates/cs-game/tests/objective_rounds.rs::give_c4_rotates; crates/cs-game/tests/vip_escape.rs::a_vip_is_picked_and_equipped, escape_ratio_ends_the_round; crates/cs-game/tests/phase7_brushes_movers.rs::breakables_and_utility_brushes_work_and_reset_on_round_restart; crates/cs-game/tests/phase7_stock_maps.rs::all_25_stock_maps_load_spawn_tick_and_restart_cleanly (CleanUpMap restarts doors, breakables, buttons, triggers, bodyque, pickups, and armoury entities). sv_restartround and sv_restart, Game Commencing, respawn, hostage restart, GiveC4 rotation, VIP rotation, ShowTimer/BombPickup."
+evidence = "crates/cs-game/tests/rounds.rs::game_commencing_on_first_players, restart_round_cvar, a_late_joiner_waits_for_the_next_round; crates/cs-game/tests/match_flow.rs::two_teams_play_a_round; crates/cs-game/tests/hostages.rs::hostages_restart_to_their_spawn; crates/cs-game/tests/objective_rounds.rs::give_c4_rotates; crates/cs-game/tests/vip_escape.rs::a_vip_is_picked_and_equipped, escape_ratio_ends_the_round; crates/cs-game/tests/phase7_brushes_movers.rs::func_breakable_and_func_wall_toggle_break_toggle_and_restart, func_door_and_func_water_open_return_and_restart; crates/cs-game/tests/phase7_stock_maps.rs::all_25_stock_maps_load_spawn_tick_and_restart_cleanly (CleanUpMap restarts doors, breakables, buttons, triggers, bodyque, pickups, and armoury entities). sv_restartround and sv_restart, Game Commencing, respawn, hostage restart, GiveC4 rotation, VIP rotation, ShowTimer/BombPickup."
 
 [[item]]
 id = "game_match_end_mapcycle"
@@ -263,47 +263,47 @@ evidence = "crates/cs-game/tests/entity_use_damage.rs::delay_uses_the_targets_la
 [[item]]
 id = "trigger_camera"
 status = "tested"
-evidence = "crates/cs-game/tests/join_screen.rs::intro_camera_at_join, dust2_joiner_looks_through_the_first_camera; crates/cs-game/tests/phase7_io_triggers.rs::game_io_entities_camera_and_strip_function_properly (intro view + Use view takeover, target aim, path_corner tracking, restore on timeout/restart); crates/cs-game/tests/phase7_stock_maps.rs::stock_map_spot_checks"
+evidence = "crates/cs-game/tests/join_screen.rs::intro_camera_at_join, dust2_joiner_looks_through_the_first_camera; crates/cs-game/tests/phase7_io_triggers.rs::game_text_trigger_camera_and_game_end (intro view + Use view takeover, target aim, path_corner tracking, restore on timeout/restart); crates/cs-game/tests/phase7_stock_maps.rs::stock_map_spot_checks"
 
 [[item]]
 id = "spark_shower"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_visual_beam_shake_fade_explosion_render_message_and_spark_shower (create_spark_shower spawn, TE_SPARKS emissions, timeout cleanup)"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_explosion_and_spark_shower (create_spark_shower spawn, TE_SPARKS emissions, timeout cleanup)"
 
 [[item]]
 id = "func_door"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::doors_and_buttons_open_close_rotate_and_restart; crates/cs-game/tests/movement_world.rs::a_door_spawns_with_movedir_from_its_angles_and_none_left; crates/cs-game/tests/phase7_stock_maps.rs::stock_map_spot_checks"
+evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::func_door_and_func_water_open_return_and_restart; crates/cs-game/tests/movement_world.rs::a_door_spawns_with_movedir_from_its_angles_and_none_left; crates/cs-game/tests/phase7_stock_maps.rs::stock_map_spot_checks"
 
 [[item]]
 id = "func_door_rotating"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::doors_and_buttons_open_close_rotate_and_restart; crates/cs-game/tests/phase7_stock_maps.rs::stock_map_spot_checks"
+evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::func_door_rotating_and_momentary_door_rotate_and_slide; crates/cs-game/tests/phase7_stock_maps.rs::stock_map_spot_checks"
 
 [[item]]
 id = "func_breakable"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::breakables_and_utility_brushes_work_and_reset_on_round_restart; crates/cs-game/tests/precache.rs::a_metal_breakable_precaches_its_sounds_and_the_models_of_the_map; crates/cs-game/tests/phase7_stock_maps.rs::stock_map_spot_checks"
+evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::func_breakable_and_func_wall_toggle_break_toggle_and_restart; crates/cs-game/tests/precache.rs::a_metal_breakable_precaches_its_sounds_and_the_models_of_the_map; crates/cs-game/tests/phase7_stock_maps.rs::stock_map_spot_checks"
 
 [[item]]
 id = "func_button"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::doors_and_buttons_open_close_rotate_and_restart; crates/cs-game/tests/phase7_stock_maps.rs::stock_map_spot_checks"
+evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::func_button_rot_button_momentary_rot_button_and_button_target; crates/cs-game/tests/phase7_stock_maps.rs::stock_map_spot_checks"
 
 [[item]]
 id = "func_plat"
 status = "tested"
-evidence = "crates/cs-game/tests/movement_movers.rs::player_rides_func_plat_and_func_train; crates/cs-game/tests/phase7_brushes_movers.rs::movers_tracktrain_and_vehicle_move_and_send_train_hud"
+evidence = "crates/cs-game/tests/movement_movers.rs::player_rides_func_plat_and_func_train; crates/cs-game/tests/phase7_brushes_movers.rs::func_plat_platrot_and_func_train_move_along_paths"
 
 [[item]]
 id = "func_train"
 status = "tested"
-evidence = "crates/cs-game/tests/movement_movers.rs::player_rides_func_plat_and_func_train; crates/cs-game/tests/phase7_brushes_movers.rs::movers_tracktrain_and_vehicle_move_and_send_train_hud"
+evidence = "crates/cs-game/tests/movement_movers.rs::player_rides_func_plat_and_func_train; crates/cs-game/tests/phase7_brushes_movers.rs::func_plat_platrot_and_func_train_move_along_paths"
 
 [[item]]
 id = "func_pushable"
 status = "tested"
-evidence = "crates/cs-game/tests/movement_movers.rs::player_pushes_and_rides_func_pushable; crates/cs-game/tests/phase7_brushes_movers.rs::movers_tracktrain_and_vehicle_move_and_send_train_hud"
+evidence = "crates/cs-game/tests/movement_movers.rs::player_pushes_and_rides_func_pushable; crates/cs-game/tests/phase7_brushes_movers.rs::func_plat_platrot_and_func_train_move_along_paths"
 
 [[item]]
 id = "hostage_entity_spawn"
@@ -323,489 +323,489 @@ evidence = "crates/cs-game/tests/bomb_carrier.rs::defuser_purchase_as_regamedll,
 [[item]]
 id = "env_bombglow"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_visual_beam_shake_fade_explosion_render_message_and_spark_shower"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_sprite_glow_bombglow_and_cyclers"
 
 [[item]]
 id = "ambient_generic"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_fog_weather_lights_and_sound_entities; crates/cs-game/tests/zones.rs::cs_office_edict_numbers_as_hlds; crates/cs-game/tests/phase7_stock_maps.rs::all_25_stock_maps_load_spawn_tick_and_restart_cleanly"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::sound_entities_ambient_speaker_and_soundent, env_sound_sends_svc_roomtype_and_ambient_generic_ramps; crates/cs-game/tests/zones.rs::cs_office_edict_numbers_as_hlds; crates/cs-game/tests/phase7_stock_maps.rs::all_25_stock_maps_load_spawn_tick_and_restart_cleanly"
 
 [[item]]
 id = "ammo_338magnum"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::ammo_boxes_world_items_and_player_equip"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::ammo_boxes_grant_rounds_and_respawn_on_round_restart"
 
 [[item]]
 id = "ammo_357sig"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::ammo_boxes_world_items_and_player_equip"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::ammo_boxes_grant_rounds_and_respawn_on_round_restart"
 
 [[item]]
 id = "ammo_45acp"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::ammo_boxes_world_items_and_player_equip"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::ammo_boxes_grant_rounds_and_respawn_on_round_restart"
 
 [[item]]
 id = "ammo_50ae"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::ammo_boxes_world_items_and_player_equip"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::ammo_boxes_grant_rounds_and_respawn_on_round_restart"
 
 [[item]]
 id = "ammo_556nato"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::ammo_boxes_world_items_and_player_equip"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::ammo_boxes_grant_rounds_and_respawn_on_round_restart"
 
 [[item]]
 id = "ammo_556natobox"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::ammo_boxes_world_items_and_player_equip"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::ammo_boxes_grant_rounds_and_respawn_on_round_restart"
 
 [[item]]
 id = "ammo_57mm"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::ammo_boxes_world_items_and_player_equip"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::ammo_boxes_grant_rounds_and_respawn_on_round_restart"
 
 [[item]]
 id = "ammo_762nato"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::ammo_boxes_world_items_and_player_equip"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::ammo_boxes_grant_rounds_and_respawn_on_round_restart"
 
 [[item]]
 id = "ammo_9mm"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::ammo_boxes_world_items_and_player_equip"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::ammo_boxes_grant_rounds_and_respawn_on_round_restart"
 
 [[item]]
 id = "ammo_buckshot"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::ammo_boxes_world_items_and_player_equip"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::ammo_boxes_grant_rounds_and_respawn_on_round_restart"
 
 [[item]]
 id = "beam"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_visual_beam_shake_fade_explosion_render_message_and_spark_shower"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_beam_lightning_and_laser"
 
 [[item]]
 id = "bodyque"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_visual_beam_shake_fade_explosion_render_message_and_spark_shower"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_sprite_glow_bombglow_and_cyclers"
 
 [[item]]
 id = "button_target"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::doors_and_buttons_open_close_rotate_and_restart"
+evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::func_button_rot_button_momentary_rot_button_and_button_target"
 
 [[item]]
 id = "cycler"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_visual_beam_shake_fade_explosion_render_message_and_spark_shower"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_sprite_glow_bombglow_and_cyclers"
 
 [[item]]
 id = "cycler_sprite"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_visual_beam_shake_fade_explosion_render_message_and_spark_shower"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_sprite_glow_bombglow_and_cyclers"
 
 [[item]]
 id = "env_beam"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_visual_beam_shake_fade_explosion_render_message_and_spark_shower"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_beam_lightning_and_laser"
 
 [[item]]
 id = "env_blood"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_visual_beam_shake_fade_explosion_render_message_and_spark_shower"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_render_shooter_blood_bubbles_and_funnel"
 
 [[item]]
 id = "env_bubbles"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_visual_beam_shake_fade_explosion_render_message_and_spark_shower"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_render_shooter_blood_bubbles_and_funnel"
 
 [[item]]
 id = "env_debris"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_visual_beam_shake_fade_explosion_render_message_and_spark_shower"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_render_shooter_blood_bubbles_and_funnel"
 
 [[item]]
 id = "env_explosion"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_visual_beam_shake_fade_explosion_render_message_and_spark_shower; crates/cs-game/tests/phase7_stock_maps.rs::stock_map_spot_checks"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_explosion_and_spark_shower; crates/cs-game/tests/phase7_stock_maps.rs::stock_map_spot_checks"
 
 [[item]]
 id = "env_fade"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_visual_beam_shake_fade_explosion_render_message_and_spark_shower"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_shake_fade_and_message"
 
 [[item]]
 id = "env_fog"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_fog_weather_lights_and_sound_entities"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_fog_and_weather_entities"
 
 [[item]]
 id = "env_funnel"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_visual_beam_shake_fade_explosion_render_message_and_spark_shower"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_render_shooter_blood_bubbles_and_funnel"
 
 [[item]]
 id = "env_global"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_io_triggers.rs::multi_manager_multisource_env_global_and_triggers_work_with_restart"
+evidence = "crates/cs-game/tests/phase7_io_triggers.rs::multisource_and_env_global_gate_and_reset_on_restart"
 
 [[item]]
 id = "env_glow"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_visual_beam_shake_fade_explosion_render_message_and_spark_shower"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_sprite_glow_bombglow_and_cyclers"
 
 [[item]]
 id = "env_laser"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_visual_beam_shake_fade_explosion_render_message_and_spark_shower"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_beam_lightning_and_laser"
 
 [[item]]
 id = "env_lightning"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_visual_beam_shake_fade_explosion_render_message_and_spark_shower"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_beam_lightning_and_laser"
 
 [[item]]
 id = "env_message"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_visual_beam_shake_fade_explosion_render_message_and_spark_shower"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_shake_fade_and_message"
 
 [[item]]
 id = "env_rain"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_fog_weather_lights_and_sound_entities; crates/cs-game/tests/phase7_stock_maps.rs::stock_map_spot_checks"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_fog_and_weather_entities; crates/cs-game/tests/phase7_stock_maps.rs::stock_map_spot_checks"
 
 [[item]]
 id = "env_render"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_visual_beam_shake_fade_explosion_render_message_and_spark_shower"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_render_shooter_blood_bubbles_and_funnel"
 
 [[item]]
 id = "env_shake"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_visual_beam_shake_fade_explosion_render_message_and_spark_shower"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_shake_fade_and_message"
 
 [[item]]
 id = "env_shooter"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_visual_beam_shake_fade_explosion_render_message_and_spark_shower"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_render_shooter_blood_bubbles_and_funnel"
 
 [[item]]
 id = "env_snow"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_fog_weather_lights_and_sound_entities"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_fog_and_weather_entities"
 
 [[item]]
 id = "env_sound"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_fog_weather_lights_and_sound_entities; crates/cs-game/tests/phase7_stock_maps.rs::stock_map_spot_checks"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::sound_entities_ambient_speaker_and_soundent; crates/cs-game/tests/phase7_stock_maps.rs::stock_map_spot_checks"
 
 [[item]]
 id = "env_spark"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_visual_beam_shake_fade_explosion_render_message_and_spark_shower; crates/cs-game/tests/phase7_stock_maps.rs::stock_map_spot_checks"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_explosion_and_spark_shower; crates/cs-game/tests/phase7_stock_maps.rs::stock_map_spot_checks"
 
 [[item]]
 id = "env_sprite"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_visual_beam_shake_fade_explosion_render_message_and_spark_shower"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_sprite_glow_bombglow_and_cyclers"
 
 [[item]]
 id = "func_conveyor"
 status = "tested"
-evidence = "crates/cs-game/tests/movement_movers.rs::player_is_carried_by_func_conveyor; crates/cs-game/tests/phase7_brushes_movers.rs::movers_tracktrain_and_vehicle_move_and_send_train_hud"
+evidence = "crates/cs-game/tests/movement_movers.rs::player_is_carried_by_func_conveyor; crates/cs-game/tests/phase7_brushes_movers.rs::func_plat_platrot_and_func_train_move_along_paths"
 
 [[item]]
 id = "func_friction"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::breakables_and_utility_brushes_work_and_reset_on_round_restart"
+evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::func_friction_rotating_and_pendulum_motion"
 
 [[item]]
 id = "func_grencatch"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::breakables_and_utility_brushes_work_and_reset_on_round_restart"
+evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::func_grencatch_weaponcheck_and_guntarget_triggers"
 
 [[item]]
 id = "func_guntarget"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::breakables_and_utility_brushes_work_and_reset_on_round_restart"
+evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::func_grencatch_weaponcheck_and_guntarget_triggers"
 
 [[item]]
 id = "func_pendulum"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::breakables_and_utility_brushes_work_and_reset_on_round_restart"
+evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::func_friction_rotating_and_pendulum_motion"
 
 [[item]]
 id = "func_platrot"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::movers_tracktrain_and_vehicle_move_and_send_train_hud"
+evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::func_plat_platrot_and_func_train_move_along_paths"
 
 [[item]]
 id = "func_rain"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_fog_weather_lights_and_sound_entities"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_fog_and_weather_entities"
 
 [[item]]
 id = "func_rot_button"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::doors_and_buttons_open_close_rotate_and_restart"
+evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::func_button_rot_button_momentary_rot_button_and_button_target"
 
 [[item]]
 id = "func_rotating"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::breakables_and_utility_brushes_work_and_reset_on_round_restart"
+evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::func_friction_rotating_and_pendulum_motion"
 
 [[item]]
 id = "func_snow"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_fog_weather_lights_and_sound_entities"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_fog_and_weather_entities"
 
 [[item]]
 id = "func_tracktrain"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::movers_tracktrain_and_vehicle_move_and_send_train_hud; crates/cs-game/tests/phase7_stock_maps.rs::stock_map_spot_checks"
+evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::func_tracktrain_and_vehicle_controls_drive_and_send_train_hud; crates/cs-game/tests/phase7_stock_maps.rs::stock_map_spot_checks"
 
 [[item]]
 id = "func_traincontrols"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::movers_tracktrain_and_vehicle_move_and_send_train_hud"
+evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::func_tracktrain_and_vehicle_controls_drive_and_send_train_hud"
 
 [[item]]
 id = "func_vehicle"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::movers_tracktrain_and_vehicle_move_and_send_train_hud"
+evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::func_tracktrain_and_vehicle_controls_drive_and_send_train_hud"
 
 [[item]]
 id = "func_vehiclecontrols"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::movers_tracktrain_and_vehicle_move_and_send_train_hud"
+evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::func_tracktrain_and_vehicle_controls_drive_and_send_train_hud"
 
 [[item]]
 id = "func_wall_toggle"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::breakables_and_utility_brushes_work_and_reset_on_round_restart"
+evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::func_breakable_and_func_wall_toggle_break_toggle_and_restart"
 
 [[item]]
 id = "func_weaponcheck"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::breakables_and_utility_brushes_work_and_reset_on_round_restart"
+evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::func_grencatch_weaponcheck_and_guntarget_triggers"
 
 [[item]]
 id = "game_counter"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_io_triggers.rs::game_io_entities_camera_and_strip_function_properly"
+evidence = "crates/cs-game/tests/phase7_io_triggers.rs::game_counter_and_game_counter_set"
 
 [[item]]
 id = "game_counter_set"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_io_triggers.rs::game_io_entities_camera_and_strip_function_properly"
+evidence = "crates/cs-game/tests/phase7_io_triggers.rs::game_counter_and_game_counter_set"
 
 [[item]]
 id = "game_end"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_io_triggers.rs::game_io_entities_camera_and_strip_function_properly"
+evidence = "crates/cs-game/tests/phase7_io_triggers.rs::game_text_trigger_camera_and_game_end"
 
 [[item]]
 id = "game_player_equip"
 status = "tested"
-evidence = "crates/cs-game/tests/shield_and_autobuy.rs::game_player_equip_gives_configured_weapons_on_spawn_and_use; crates/cs-game/tests/phase7_env_items.rs::ammo_boxes_world_items_and_player_equip"
+evidence = "crates/cs-game/tests/shield_and_autobuy.rs::game_player_equip_gives_configured_weapons_on_spawn_and_use; crates/cs-game/tests/phase7_env_items.rs::game_player_equip_gives_weapons_on_use"
 
 [[item]]
 id = "game_player_hurt"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_io_triggers.rs::game_io_entities_camera_and_strip_function_properly"
+evidence = "crates/cs-game/tests/phase7_io_triggers.rs::game_player_hurt_score_team_and_weaponstrip"
 
 [[item]]
 id = "game_player_team"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_io_triggers.rs::game_io_entities_camera_and_strip_function_properly"
+evidence = "crates/cs-game/tests/phase7_io_triggers.rs::game_player_hurt_score_team_and_weaponstrip"
 
 [[item]]
 id = "game_score"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_io_triggers.rs::game_io_entities_camera_and_strip_function_properly"
+evidence = "crates/cs-game/tests/phase7_io_triggers.rs::game_player_hurt_score_team_and_weaponstrip"
 
 [[item]]
 id = "game_team_master"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_io_triggers.rs::game_io_entities_camera_and_strip_function_properly"
+evidence = "crates/cs-game/tests/phase7_io_triggers.rs::game_team_master_set_and_zone_player"
 
 [[item]]
 id = "game_team_set"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_io_triggers.rs::game_io_entities_camera_and_strip_function_properly"
+evidence = "crates/cs-game/tests/phase7_io_triggers.rs::game_team_master_set_and_zone_player"
 
 [[item]]
 id = "game_text"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_io_triggers.rs::game_io_entities_camera_and_strip_function_properly"
+evidence = "crates/cs-game/tests/phase7_io_triggers.rs::game_text_trigger_camera_and_game_end"
 
 [[item]]
 id = "game_zone_player"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_io_triggers.rs::game_io_entities_camera_and_strip_function_properly"
+evidence = "crates/cs-game/tests/phase7_io_triggers.rs::game_team_master_set_and_zone_player"
 
 [[item]]
 id = "gibshooter"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_visual_beam_shake_fade_explosion_render_message_and_spark_shower"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_render_shooter_blood_bubbles_and_funnel"
 
 [[item]]
 id = "info_intermission"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_io_triggers.rs::game_io_entities_camera_and_strip_function_properly"
+evidence = "crates/cs-game/tests/phase7_io_triggers.rs::trigger_teleport_and_info_destinations"
 
 [[item]]
 id = "info_null"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_io_triggers.rs::game_io_entities_camera_and_strip_function_properly"
+evidence = "crates/cs-game/tests/phase7_io_triggers.rs::trigger_teleport_and_info_destinations"
 
 [[item]]
 id = "info_teleport_destination"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_io_triggers.rs::multi_manager_multisource_env_global_and_triggers_work_with_restart"
+evidence = "crates/cs-game/tests/phase7_io_triggers.rs::trigger_teleport_and_info_destinations"
 
 [[item]]
 id = "infodecal"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_io_triggers.rs::game_io_entities_camera_and_strip_function_properly; crates/cs-game/tests/zones.rs::cs_office_edict_numbers_as_hlds; crates/cs-game/tests/phase7_stock_maps.rs::all_25_stock_maps_load_spawn_tick_and_restart_cleanly"
+evidence = "crates/cs-game/tests/phase7_io_triggers.rs::trigger_teleport_and_info_destinations; crates/cs-game/tests/zones.rs::cs_office_edict_numbers_as_hlds; crates/cs-game/tests/phase7_stock_maps.rs::all_25_stock_maps_load_spawn_tick_and_restart_cleanly"
 
 [[item]]
 id = "item_assaultsuit"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::ammo_boxes_world_items_and_player_equip"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::item_kevlar_assaultsuit_and_generic"
 
 [[item]]
 id = "item_generic"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::ammo_boxes_world_items_and_player_equip"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::item_kevlar_assaultsuit_and_generic"
 
 [[item]]
 id = "item_kevlar"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::ammo_boxes_world_items_and_player_equip"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::item_kevlar_assaultsuit_and_generic"
 
 [[item]]
 id = "light"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_fog_weather_lights_and_sound_entities; crates/cs-game/tests/phase7_stock_maps.rs::all_25_stock_maps_load_spawn_tick_and_restart_cleanly"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::light_entities_unnamed_despawn_and_switchable_pattern; crates/cs-game/tests/phase7_stock_maps.rs::all_25_stock_maps_load_spawn_tick_and_restart_cleanly"
 
 [[item]]
 id = "light_environment"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_fog_weather_lights_and_sound_entities; crates/cs-game/tests/game_entities.rs::de_dust2_baselines_are_those_of_rehlds"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::light_entities_unnamed_despawn_and_switchable_pattern; crates/cs-game/tests/game_entities.rs::de_dust2_baselines_are_those_of_rehlds"
 
 [[item]]
 id = "light_spot"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_fog_weather_lights_and_sound_entities"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::light_entities_unnamed_despawn_and_switchable_pattern"
 
 [[item]]
 id = "momentary_door"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::doors_and_buttons_open_close_rotate_and_restart"
+evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::func_door_rotating_and_momentary_door_rotate_and_slide"
 
 [[item]]
 id = "momentary_rot_button"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::doors_and_buttons_open_close_rotate_and_restart"
+evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::func_button_rot_button_momentary_rot_button_and_button_target"
 
 [[item]]
 id = "multi_manager"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_io_triggers.rs::multi_manager_multisource_env_global_and_triggers_work_with_restart"
+evidence = "crates/cs-game/tests/phase7_io_triggers.rs::multi_manager_fires_timed_targets"
 
 [[item]]
 id = "multisource"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_io_triggers.rs::multi_manager_multisource_env_global_and_triggers_work_with_restart; crates/cs-game/tests/phase7_stock_maps.rs::stock_map_spot_checks"
+evidence = "crates/cs-game/tests/phase7_io_triggers.rs::multisource_and_env_global_gate_and_reset_on_restart; crates/cs-game/tests/phase7_stock_maps.rs::stock_map_spot_checks"
 
 [[item]]
 id = "path_corner"
 status = "tested"
-evidence = "crates/cs-game/tests/movement_movers.rs::player_rides_func_plat_and_func_train; crates/cs-game/tests/phase7_brushes_movers.rs::movers_tracktrain_and_vehicle_move_and_send_train_hud"
+evidence = "crates/cs-game/tests/movement_movers.rs::player_rides_func_plat_and_func_train; crates/cs-game/tests/phase7_brushes_movers.rs::func_plat_platrot_and_func_train_move_along_paths"
 
 [[item]]
 id = "path_track"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::movers_tracktrain_and_vehicle_move_and_send_train_hud; crates/cs-game/tests/phase7_stock_maps.rs::stock_map_spot_checks"
+evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::func_tracktrain_and_vehicle_controls_drive_and_send_train_hud; crates/cs-game/tests/phase7_stock_maps.rs::stock_map_spot_checks"
 
 [[item]]
 id = "player_weaponstrip"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_io_triggers.rs::game_io_entities_camera_and_strip_function_properly"
+evidence = "crates/cs-game/tests/phase7_io_triggers.rs::game_player_hurt_score_team_and_weaponstrip"
 
 [[item]]
 id = "soundent"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_fog_weather_lights_and_sound_entities; crates/cs-game/tests/game_entities.rs::unknown_classes_are_removed"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::sound_entities_ambient_speaker_and_soundent; crates/cs-game/tests/game_entities.rs::unknown_classes_are_removed"
 
 [[item]]
 id = "speaker"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_fog_weather_lights_and_sound_entities"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::sound_entities_ambient_speaker_and_soundent"
 
 [[item]]
 id = "target_cdaudio"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_io_triggers.rs::multi_manager_multisource_env_global_and_triggers_work_with_restart"
+evidence = "crates/cs-game/tests/phase7_io_triggers.rs::trigger_hurt_push_gravity_and_cdaudio"
 
 [[item]]
 id = "trigger"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_io_triggers.rs::multi_manager_multisource_env_global_and_triggers_work_with_restart"
+evidence = "crates/cs-game/tests/phase7_io_triggers.rs::trigger_counter_relay_changetarget_and_auto"
 
 [[item]]
 id = "trigger_auto"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_io_triggers.rs::multi_manager_multisource_env_global_and_triggers_work_with_restart"
+evidence = "crates/cs-game/tests/phase7_io_triggers.rs::trigger_counter_relay_changetarget_and_auto"
 
 [[item]]
 id = "trigger_cdaudio"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_io_triggers.rs::multi_manager_multisource_env_global_and_triggers_work_with_restart"
+evidence = "crates/cs-game/tests/phase7_io_triggers.rs::trigger_hurt_push_gravity_and_cdaudio"
 
 [[item]]
 id = "trigger_changetarget"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_io_triggers.rs::multi_manager_multisource_env_global_and_triggers_work_with_restart"
+evidence = "crates/cs-game/tests/phase7_io_triggers.rs::trigger_counter_relay_changetarget_and_auto"
 
 [[item]]
 id = "trigger_counter"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_io_triggers.rs::multi_manager_multisource_env_global_and_triggers_work_with_restart"
+evidence = "crates/cs-game/tests/phase7_io_triggers.rs::trigger_counter_relay_changetarget_and_auto"
 
 [[item]]
 id = "trigger_gravity"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_io_triggers.rs::multi_manager_multisource_env_global_and_triggers_work_with_restart"
+evidence = "crates/cs-game/tests/phase7_io_triggers.rs::trigger_hurt_push_gravity_and_cdaudio"
 
 [[item]]
 id = "trigger_hurt"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_io_triggers.rs::multi_manager_multisource_env_global_and_triggers_work_with_restart; crates/cs-game/tests/phase7_stock_maps.rs::stock_map_spot_checks"
+evidence = "crates/cs-game/tests/phase7_io_triggers.rs::trigger_hurt_push_gravity_and_cdaudio; crates/cs-game/tests/phase7_stock_maps.rs::stock_map_spot_checks"
 
 [[item]]
 id = "trigger_multiple"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_io_triggers.rs::multi_manager_multisource_env_global_and_triggers_work_with_restart"
+evidence = "crates/cs-game/tests/phase7_io_triggers.rs::trigger_once_and_trigger_multiple_retrigger"
 
 [[item]]
 id = "trigger_once"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_io_triggers.rs::multi_manager_multisource_env_global_and_triggers_work_with_restart"
+evidence = "crates/cs-game/tests/phase7_io_triggers.rs::trigger_once_and_trigger_multiple_retrigger"
 
 [[item]]
 id = "trigger_push"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_io_triggers.rs::multi_manager_multisource_env_global_and_triggers_work_with_restart"
+evidence = "crates/cs-game/tests/phase7_io_triggers.rs::trigger_hurt_push_gravity_and_cdaudio"
 
 [[item]]
 id = "trigger_relay"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_io_triggers.rs::multi_manager_multisource_env_global_and_triggers_work_with_restart"
+evidence = "crates/cs-game/tests/phase7_io_triggers.rs::trigger_counter_relay_changetarget_and_auto"
 
 [[item]]
 id = "trigger_teleport"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_io_triggers.rs::multi_manager_multisource_env_global_and_triggers_work_with_restart"
+evidence = "crates/cs-game/tests/phase7_io_triggers.rs::trigger_teleport_and_info_destinations"

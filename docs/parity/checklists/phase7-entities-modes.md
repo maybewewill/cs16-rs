@@ -22,8 +22,39 @@ Executed from branch `phase7-entities-modes` on 2026-11-24 against ReGameDLL_CS 
   - Loaded every stock CS 1.6 map (`as_oilrig`, `cs_747`, `cs_assault`, `cs_backalley`, `cs_estate`, `cs_havana`, `cs_italy`, `cs_militia`, `cs_office`, `cs_siege`, `de_airstrip`, `de_aztec`, `de_cbble`, `de_chateau`, `de_dust`, `de_dust2`, `de_inferno`, `de_nuke`, `de_piranesi`, `de_prodigy`, `de_storm`, `de_survivor`, `de_torn`, `de_train`, `de_vertigo`), verified 100% entity classname recognition across all 25 lumps, spawned CT + T, stepped 50 ticks, restarted the round, and stepped 20 ticks within `DEFAULT_MAX_EDICTS`.
   - Spot checks passed for `de_aztec` (`env_rain` -> `ReceiveW(1)`), `de_survivor` (`func_tracktrain`/`path_track`/`env_explosion`), `cs_office` (`func_breakable` break & restore), `cs_assault` (`trigger_camera`/`func_door`/`func_button`/`multisource`), `cs_siege` (`env_sound`/`env_spark`/`func_door`), and `as_oilrig` (VIP + `trigger_hurt` + `func_water`).
 - Retail HLDS baseline edict parity:
-  - [`crates/cs-game/tests/zones.rs`](file:///c:/Users/slash/cs16-rs/crates/cs-game/tests/zones.rs)`::cs_office_edict_numbers_as_hlds` now matches retail HLDS build 10210 bit-for-bit on all **218/218** baseline edict numbers (`only_hlds = []`, `only_ours = []`) following `ambient_generic` and `infodecal` implementation.
-  - [`crates/cs-game/tests/game_entities.rs`](file:///c:/Users/slash/cs16-rs/crates/cs-game/tests/game_entities.rs)`::de_dust2_baselines_are_those_of_rehlds` continues to match HLDS on all **51/51** baseline edicts (`0..=8, 10..=51`).
+  - [`crates/cs-game/tests/zones.rs`](file:///c:/Users/slash/cs16-rs/crates/cs-game/tests/zones.rs)`::cs_office_edict_numbers_as_hlds` matches retail HLDS build 10210 bit-for-bit on all **218/218** baseline edict numbers (`only_hlds = []`, `only_ours = []`).
+  - [`crates/cs-game/tests/game_entities.rs`](file:///c:/Users/slash/cs16-rs/crates/cs-game/tests/game_entities.rs)`::de_dust2_baselines_are_those_of_rehlds` matches HLDS on all **51/51** baseline edicts (`0..=8, 10..=51`).
+- **All-25 Stock Maps Live `hlds.exe` (build 10210) Baseline Audit (`2026-11-25`, `cs-probe --diff`):**
+  - **24 / 25 maps** match retail `hlds.exe` on the **exact baseline edict set** (`diff = 0`, `only_hlds = []`, `only_ours = []`), including `de_cbble` (`167/167`) after fixing `BeamEntity::spawn` (`FL_CUSTOMENTITY` + `modelindex` for continuous server-side beams).
+  - Remaining 1 map (`de_airstrip`, `359` vs `363`, `+4`): retail CS 1.6 `mp.dll` does not export Condition Zero's `item_generic`, whereas `de_airstrip.bsp` contains 4 `item_generic` (`models/pred_plant.mdl`) entities that `cs-game` intentionally implements per `docs/parity/entities.toml`. Minor non-player baseline field diffs on multi-entity maps reflect sprite/glow `mins`, hostage idle `frame`, and `func_pushable` `skin`.
+
+  | Map | HLDS Baselines | `cs-server` Baselines | Edict Set Diff | Notes |
+  |---|---|---|---|---|
+  | `as_oilrig` | 60 | 60 | `0` (`EXACT_EDICT_SET`) | 5 minor field diffs |
+  | `cs_747` | 171 | 171 | `0` (`EXACT_EDICT_SET`) | 8 minor field diffs |
+  | `cs_assault` | 105 | 105 | `0` (`EXACT_EDICT_SET`) | 4 minor field diffs |
+  | `cs_backalley` | 207 | 207 | `0` (`EXACT_EDICT_SET`) | 6 minor field diffs |
+  | `cs_estate` | 180 | 180 | `0` (`EXACT_EDICT_SET`) | 6 minor field diffs |
+  | `cs_havana` | 331 | 331 | `0` (`EXACT_EDICT_SET`) | sprite/glow/pushable field diffs |
+  | `cs_italy` | 125 | 125 | `0` (`EXACT_EDICT_SET`) | 15 minor field diffs |
+  | `cs_militia` | 54 | 54 | `0` (`EXACT_EDICT_SET`) | 6 minor field diffs |
+  | `cs_office` | 218 | 218 | `0` (`EXACT_EDICT_SET`) | hostage `frame`/minor field diffs |
+  | `cs_siege` | 168 | 168 | `0` (`EXACT_EDICT_SET`) | 24 minor field diffs |
+  | `de_airstrip` | 359 | 363 | `+4` (`#404..#407` ours) | 4 CZ `item_generic` (`models/pred_plant.mdl`) absent in vanilla `mp.dll` |
+  | `de_aztec` | 207 | 207 | `0` (`EXACT_EDICT_SET`) | sprite/glow field diffs |
+  | `de_cbble` | 167 | 167 | `0` (`EXACT_EDICT_SET`) | Matched after `BeamEntity` `FL_CUSTOMENTITY` fix (`#19,#24,#45`) |
+  | `de_chateau` | 248 | 248 | `0` (`EXACT_EDICT_SET`) | sprite/pushable field diffs |
+  | `de_dust` | 56 | 56 | `0` (`EXACT_EDICT_SET`) | `0` non-player field diffs |
+  | `de_dust2` | 51 | 51 | `0` (`EXACT_EDICT_SET`) | `0` non-player field diffs |
+  | `de_inferno` | 163 | 163 | `0` (`EXACT_EDICT_SET`) | `0` non-player field diffs |
+  | `de_nuke` | 134 | 134 | `0` (`EXACT_EDICT_SET`) | 31 minor field diffs |
+  | `de_piranesi` | 292 | 292 | `0` (`EXACT_EDICT_SET`) | 48 minor field diffs |
+  | `de_prodigy` | 70 | 70 | `0` (`EXACT_EDICT_SET`) | `0` non-player field diffs |
+  | `de_storm` | 202 | 202 | `0` (`EXACT_EDICT_SET`) | 31 minor field diffs |
+  | `de_survivor` | 181 | 181 | `0` (`EXACT_EDICT_SET`) | 46 minor field diffs |
+  | `de_torn` | 388 | 388 | `0` (`EXACT_EDICT_SET`) | sprite/glow/pushable field diffs |
+  | `de_train` | 73 | 73 | `0` (`EXACT_EDICT_SET`) | 7 minor field diffs |
+  | `de_vertigo` | 229 | 229 | `0` (`EXACT_EDICT_SET`) | 48 minor field diffs |
 
 ## Part B — Parity Ledger Closeout
 

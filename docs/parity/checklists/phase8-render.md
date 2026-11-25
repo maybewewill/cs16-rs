@@ -27,7 +27,15 @@ Completed: 2026-11-24
 - `docs/parity/usermsg.toml`: `Fog`, `Flashlight`, `FlashBat`, `ReceiveW`, `Brass` `tested`.
 - `docs/parity/wire.toml`: `svc_lightstyle`, `svc_decalname`, `svc_particle`, `svc_spawnstatic`, `svc_customization` `tested`.
 
-## Manual Verification Checkpoints (Optional Visual QA)
+## Part A — Automated & Headless GPU Captures (2026-11-25)
+- `cargo test -p cs-client --test phase8_render`: automated coverage for all 42 `render.toml` items (focused per-feature tests).
+- `cargo test -p cs-client --lib r_turbsin`: verifies 256-entry GoldSrc `r_turbsin` water surface warp ported from Xash3D FWGS `engine/warpsin.h` (`gl_rsurf.c` `EmitWaterPolys`).
+- `cargo run -p cs-client -- --headless` (`1280x800` Vulkan on NVIDIA RTX 5070):
+  - `target/render-parity/de_dust2.png` (`972,008` B)
+  - `target/render-parity/de_aztec.png` (`993,483` B — textured stone/moss geometry, skybox, rain streaks, HUD, MOTD)
+  - `target/render-parity/cs_office.png` (`730,343` B — snowy skybox/bricks, VGUI2 MOTD, HUD)
+
+## Part B — Manual Visual QA vs Retail CS 1.6 (Owner)
 - [ ] Inspect `de_dust2` dynamic lighting, flashlight beam, and weapon glow shell in desktop `cs-client` and browser `cs-web`.
 - [ ] Toggle `r_software_mode 1`, `gl_msaa 4`, `gl_ansio 8`, and `gl_texturemode GL_NEAREST` live via console.
 - [ ] Submerge in `de_aztec` / `cs_siege` water to verify wave surface warp and underwater blue tint + FOV ripple.

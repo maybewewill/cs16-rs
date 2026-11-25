@@ -86,7 +86,7 @@ impl ClientCvars {
             ("rate", "30000", userinfo | CVAR_FILTERABLE),
             ("ex_interp", "0.1", CVAR_ARCHIVE | CVAR_FILTERABLE),
             ("cl_lw", "1", userinfo),
-            // Lag compensation switch; ReHLDS reads it from the userinfo (assumption: default 1).
+            // Lag compensation switch; default `"1"` in Xash3D FWGS `engine/client/cl_main.c:3731`.
             ("cl_lc", "1", userinfo),
             ("cl_dlmax", "512", userinfo),
             ("name", "player", userinfo | CVAR_FILTERABLE),
@@ -101,8 +101,7 @@ impl ClientCvars {
             ("cl_solid_players", "1", 0),
             ("cl_allowdownload", "1", CVAR_ARCHIVE),
             ("cl_download_ingame", "1", CVAR_ARCHIVE),
-            // Assumption: Xash defaults the stufftext filter on; its definition is in a file
-            // that was not fetched.
+            // Default `"1"` in Xash3D FWGS `engine/common/cvar.c:51` (`cl_filterstuffcmd`).
             ("cl_filterstuffcmd", "1", CVAR_ARCHIVE | CVAR_PRIVILEGED),
             ("cl_trace_stufftext", "0", 0),
             ("cl_trace_consistency", "0", 0),

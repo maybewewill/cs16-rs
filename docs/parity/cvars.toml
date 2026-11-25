@@ -97,7 +97,7 @@ status = "implemented"
 [[item]]
 id = "mp3volume"
 status = "tested"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/tests/phase9_sound.rs::soundfade_cdtrack_mp3_commands_and_real_mp3_decode"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/tests/phase9_sound.rs::cdtrack_and_mp3_console_commands"
 
 [[item]]
 id = "mp_autoteambalance"
@@ -188,7 +188,7 @@ status = "implemented"
 [[item]]
 id = "room_type"
 status = "tested"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-game/tests/phase7_env_items.rs::env_sound_sends_svc_roomtype_and_ambient_generic_ramps; crates/cs-client/tests/phase9_sound.rs::roomtype_29_presets_env_sound_and_underwater_muffling"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-game/tests/phase7_env_items.rs::env_sound_sends_svc_roomtype_and_ambient_generic_ramps; crates/cs-client/tests/phase9_sound.rs::roomtype_29_presets_modulate_wet_reverb"
 
 [[item]]
 id = "sensitivity"
@@ -352,7 +352,7 @@ status = "implemented"
 [[item]]
 id = "volume"
 status = "tested"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/tests/phase9_sound.rs::wav_2d_3d_cue_and_smpl_looping"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/tests/phase9_sound.rs::wav_2d_playback_renders_pcm, wav_cue_and_smpl_loop_points_wrap"
 
 [[item]]
 id = "mp_forcecamera"
@@ -649,7 +649,7 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv
 [[item]]
 id = "bgmvolume"
 status = "tested"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/tests/phase9_sound.rs::soundfade_cdtrack_mp3_commands_and_real_mp3_decode"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/tests/phase9_sound.rs::cdtrack_and_mp3_console_commands"
 
 [[item]]
 id = "bind"
@@ -829,7 +829,7 @@ evidence = "dispatched in crates/cs-cvar/src/lib.rs and legacy cs-client"
 [[item]]
 id = "cd"
 status = "tested"
-evidence = "crates/cs-cvar/src/lib.rs::execute_script; crates/cs-client/tests/phase9_sound.rs::soundfade_cdtrack_mp3_commands_and_real_mp3_decode"
+evidence = "crates/cs-cvar/src/lib.rs::execute_script; crates/cs-client/tests/phase9_sound.rs::cdtrack_and_mp3_console_commands"
 
 [[item]]
 id = "changelevel"
@@ -884,7 +884,7 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cf
 [[item]]
 id = "cl_bob"
 status = "tested"
-evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs; crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs; crates/cs-client/tests/phase8_render.rs::view_bob_roll_punch_and_viewmodel_lag"
 
 [[item]]
 id = "cl_charset"
@@ -1179,7 +1179,7 @@ evidence = "crates/cs-cvar/src/lib.rs::executes_cvars_binds_aliases_and_roundtri
 [[item]]
 id = "default_fov"
 status = "tested"
-evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/camera.rs; crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/camera.rs; crates/cs-client/tests/phase8_render.rs::widescreen_hor_plus_fov_and_300fps_interp"
 
 [[item]]
 id = "delta_clear"
@@ -1834,12 +1834,12 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv
 [[item]]
 id = "mp3"
 status = "tested"
-evidence = "crates/cs-cvar/src/lib.rs::execute_script; crates/cs-client/tests/phase9_sound.rs::soundfade_cdtrack_mp3_commands_and_real_mp3_decode"
+evidence = "crates/cs-cvar/src/lib.rs::execute_script; crates/cs-client/tests/phase9_sound.rs::cdtrack_and_mp3_console_commands"
 
 [[item]]
 id = "mp3fadetime"
 status = "tested"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-web/src/state.rs::tests::web_audio_backend_full_event_pipeline; crates/cs-client/tests/phase9_sound.rs::soundfade_cdtrack_mp3_commands_and_real_mp3_decode"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-web/src/state.rs::tests::web_audio_backend_full_event_pipeline; crates/cs-client/tests/phase9_sound.rs::cdtrack_and_mp3_console_commands"
 
 [[item]]
 id = "mp_allowmonsters"
@@ -2134,7 +2134,7 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cf
 [[item]]
 id = "room_off"
 status = "tested"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/tests/phase9_sound.rs::roomtype_29_presets_env_sound_and_underwater_muffling"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/tests/phase9_sound.rs::roomtype_29_presets_modulate_wet_reverb"
 
 [[item]]
 id = "s_combine_sounds"
@@ -3129,7 +3129,7 @@ evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/app.rs; crates/
 [[item]]
 id = "viewmodel_fov"
 status = "tested"
-evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/camera.rs; crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/camera.rs; crates/cs-client/tests/phase8_render.rs::viewmodel_pass_and_righthand_mirror"
 
 [[item]]
 id = "r_lightmap"
@@ -3139,42 +3139,42 @@ evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/render/bsp_rend
 [[item]]
 id = "gl_msaa"
 status = "tested"
-evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/render/mod.rs; crates/cs-client/tests/phase8_render.rs::real_assets_and_headless_gpu_offscreen_render_if_installed"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/render/mod.rs; crates/cs-client/tests/phase8_render.rs::msaa_and_anisotropy_pipeline_if_installed"
 
 [[item]]
 id = "r_software_mode"
 status = "tested"
-evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/render/gamma.rs; crates/cs-client/tests/phase8_render.rs::real_assets_and_headless_gpu_offscreen_render_if_installed"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/render/gamma.rs; crates/cs-client/tests/phase8_render.rs::software_mode_4x4_bayer_rgb565_dither"
 
 [[item]]
 id = "cl_bobcycle"
 status = "tested"
-evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs; crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs; crates/cs-client/tests/phase8_render.rs::view_bob_roll_punch_and_viewmodel_lag"
 
 [[item]]
 id = "cl_bobup"
 status = "tested"
-evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs; crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs; crates/cs-client/tests/phase8_render.rs::view_bob_roll_punch_and_viewmodel_lag"
 
 [[item]]
 id = "cl_rollangle"
 status = "tested"
-evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs; crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs; crates/cs-client/tests/phase8_render.rs::view_bob_roll_punch_and_viewmodel_lag"
 
 [[item]]
 id = "cl_rollspeed"
 status = "tested"
-evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs; crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs; crates/cs-client/tests/phase8_render.rs::view_bob_roll_punch_and_viewmodel_lag"
 
 [[item]]
 id = "cl_viewmodel_lag"
 status = "tested"
-evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs; crates/cs-client/tests/phase8_render.rs::decals_particles_beams_view_effects_hor_plus_and_300fps"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs; crates/cs-client/tests/phase8_render.rs::view_bob_roll_punch_and_viewmodel_lag"
 
 [[item]]
 id = "s_occfactor"
 status = "tested"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/src/audio/mixer.rs; crates/cs-client/tests/phase9_sound.rs::goldsrc_attenuation_stereo_pan_pitch_and_occlusion"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/src/audio/mixer.rs; crates/cs-client/tests/phase9_sound.rs::goldsrc_wall_occlusion_attenuates_sound"
 
 [[item]]
 id = "sv_voicecodec"
