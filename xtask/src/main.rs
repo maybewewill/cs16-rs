@@ -1,3 +1,5 @@
+mod mod_cli;
+
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -9,11 +11,12 @@ const USAGE: &str = "usage: cargo xtask parity [--dir <path>] [--min <pct>]\n   
                      cargo xtask visual-diff [--map de_dust2] [--brightness <f32>] [--out target/visual-diff] [--reference-dir <dir>] [--resolution 1280x720] [--port 27099] [--ui none] [--build]\n       \
                      cargo xtask bench [--ticks <n>] [--players <1..=32>] [--map <name>] [--gamedir <path>] [--stub] [--json]\n       \
                      cargo xtask web-build [--out <dir>]\n       \
+                     cargo xtask mod new <id> --lang rust|cpp|go|py [--dir <parent>] [--name <title>] [--side server|client|both]\n       \
+                     cargo xtask mod build [dir] [--out <dir>]\n       \
                      cargo xtask mod-build [--out <dir>]";
 
 const DEFAULT_DIR: &str = "docs/parity";
 const DEFAULT_WEB_OUT: &str = "dist/web";
-const DEFAULT_MOD_OUT: &str = "dist/mods";
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -48,7 +51,14 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
-        Some("mod-build") => match run_mod_build(args) {
+        Some("mod") => match mod_cli::run_mod_cli(args) {
+            Ok(code) => code,
+            Err(msg) => {
+                eprintln!("error: {msg}");
+                ExitCode::from(2)
+            }
+        },
+        Some("mod-build") => match mod_cli::run_mod_build_alias(args) {
             Ok(code) => code,
             Err(msg) => {
                 eprintln!("error: {msg}");
@@ -148,53 +158,6 @@ fn run_web_build(mut args: impl Iterator<Item = String>) -> Result<ExitCode, Str
         }
         Err(e) => Err(format!("failed to invoke wasm-bindgen: {e}")),
     }
-}
-
-/// Discovers mods in `mods/`, compiles any `.wat` entries to binary `.wasm`, and packages
-/// each mod as `<out>/<id>.csmod`.
-fn run_mod_build(mut args: impl Iterator<Item = String>) -> Result<ExitCode, String> {
-    let mut out_dir = PathBuf::from(DEFAULT_MOD_OUT);
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--out" => out_dir = args.next().ok_or("--out needs a value")?.into(),
-            other => return Err(format!("unknown argument `{other}`\n{USAGE}")),
-        }
-    }
-    std::fs::create_dir_all(&out_dir).map_err(|e| io_error(&out_dir, &e))?;
-
-    let packages = cs_mod_host::discover_packages(Path::new("mods"))
-        .map_err(|e| format!("discover mods/: {e}"))?;
-    for pkg in &packages {
-        let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
-        let mut manifest = pkg.manifest.clone();
-        if pkg.server_wasm.is_some() {
-            manifest.entry_server = Some("server.wasm".to_string());
-        }
-        if pkg.client_wasm.is_some() {
-            manifest.entry_client = Some("client.wasm".to_string());
-        }
-        entries.push(("mod.toml".to_string(), manifest.to_toml().into_bytes()));
-        if let Some(ref srv) = pkg.server_wasm {
-            entries.push(("server.wasm".to_string(), srv.clone()));
-        }
-        if let Some(ref cli) = pkg.client_wasm {
-            entries.push(("client.wasm".to_string(), cli.clone()));
-        }
-        for (rel, data) in &pkg.assets {
-            entries.push((format!("assets/{rel}"), data.clone()));
-        }
-        let refs: Vec<(&str, &[u8])> = entries
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_slice()))
-            .collect();
-        let zip = cs_mod_api::CsModArchive::write_zip(refs)
-            .map_err(|e| format!("package {}: {e}", pkg.manifest.id))?;
-        let sha = cs_mod_api::sha256_hex(&zip);
-        let dst = out_dir.join(format!("{}.csmod", pkg.manifest.id));
-        std::fs::write(&dst, &zip).map_err(|e| io_error(&dst, &e))?;
-        println!("{} ({} bytes, sha256={sha})", dst.display(), zip.len());
-    }
-    Ok(ExitCode::SUCCESS)
 }
 
 /// Records a golden capture: runs `cs-probe` against `<ip:port>` for 30 s, walking, and writes

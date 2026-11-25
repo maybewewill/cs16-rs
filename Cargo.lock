@@ -4447,6 +4447,7 @@ dependencies = [
  "cs-local",
  "cs-mod-api",
  "cs-mod-host",
+ "cs-mod-py",
  "cs-proto48",
  "cs-transport",
  "cs-vfs",

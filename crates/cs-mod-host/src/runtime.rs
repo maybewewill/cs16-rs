@@ -252,8 +252,10 @@ impl ModRuntime for WasmiRuntime {
 
         let mut store = Store::new(&self.engine, state);
         store.limiter(|s| &mut s.limits);
-        // Supply startup fuel so WASM start sections / WASI _initialize cannot loop infinitely.
-        let _ = store.set_fuel(500_000);
+        // Supply startup fuel so WASM start sections / WASI _initialize (including Go wasip1
+        // reactor runtime initialization) succeed cleanly while still halting infinite loops.
+        const STARTUP_FUEL: u64 = 25_000_000;
+        let _ = store.set_fuel(STARTUP_FUEL);
 
         let mut linker = <Linker<HostCallState>>::new(&self.engine);
         register_host_natives(&mut linker)
@@ -267,7 +269,7 @@ impl ModRuntime for WasmiRuntime {
 
         // WASI reactor entrypoint used by Go (`GOOS=wasip1`) / C++ WASI modules.
         if let Ok(init_fn) = instance.get_typed_func::<(), ()>(&store, "_initialize") {
-            let _ = store.set_fuel(500_000);
+            let _ = store.set_fuel(STARTUP_FUEL);
             init_fn
                 .call(&mut store, ())
                 .map_err(|e| RuntimeError::Instantiate(mod_id.to_string(), e.to_string()))?;
@@ -3804,6 +3806,12 @@ fn register_wasi_preview1(linker: &mut Linker<HostCallState>) -> Result<(), wasm
                 WASI_EFAULT
             }
         },
+    )?;
+
+    linker.func_wrap(
+        WASI_PREVIEW1_MODULE,
+        "fd_fdstat_set_flags",
+        |_caller: Caller<'_, HostCallState>, _fd: i32, _flags: i32| -> i32 { WASI_ESUCCESS },
     )?;
 
     linker.func_wrap(
