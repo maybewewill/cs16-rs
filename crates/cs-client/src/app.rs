@@ -22,7 +22,9 @@ use glam::Vec3;
 use tracing::{error, info, warn};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{DeviceEvent, DeviceId, ElementState, KeyEvent, MouseButton, WindowEvent};
+use winit::event::{
+    DeviceEvent, DeviceId, ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent,
+};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
@@ -32,7 +34,8 @@ use crate::session::Session;
 use cs_client::camera::Camera;
 use cs_client::hudtext::{format_message_with_titles, format_saytext_with_titles};
 use cs_client::input::{
-    CmdClock, CmdParams, ConsoleRoute, Held, MoveSpeeds, build_usercmd, route_unknown,
+    CmdClock, CmdParams, ConsoleRoute, InputActionState, MoveSpeeds, build_usercmd, route_unknown,
+    step_inventory_cycle,
 };
 use cs_client::render::bsp_renderer::BspRenderStats;
 use cs_client::render::lighting::{GpuLightsUniform, TextureFilterMode};
@@ -162,9 +165,7 @@ pub struct Cs16App {
 
     session: Session,
     camera: Camera,
-    active_actions: HashSet<String>,
-    mouse1_held: bool,
-    mouse2_held: bool,
+    input_state: InputActionState,
     pending_impulse: u8,
     cmd_clock: CmdClock,
     mouse_sens_scale: f32,
@@ -302,9 +303,7 @@ impl Cs16App {
             runtime: None,
             session: Session::none(),
             camera: Camera::default(),
-            active_actions: HashSet::new(),
-            mouse1_held: false,
-            mouse2_held: false,
+            input_state: InputActionState::default(),
             pending_impulse: 0,
             cmd_clock: CmdClock::default(),
             mouse_sens_scale: 1.0,
@@ -476,9 +475,7 @@ impl Cs16App {
                     let _ = win.set_cursor_grab(CursorGrabMode::None);
                     win.set_cursor_visible(true);
                     rt.cursor_captured = false;
-                    self.active_actions.clear();
-                    self.mouse1_held = false;
-                    self.mouse2_held = false;
+                    self.input_state.clear();
                 }
             } else {
                 rt.cursor_captured = want;
@@ -652,9 +649,7 @@ impl Cs16App {
         self.overview_tex = None;
         self.overview_map_name.clear();
         self.scoreboard_toggled = false;
-        self.active_actions.clear();
-        self.mouse1_held = false;
-        self.mouse2_held = false;
+        self.input_state.clear();
         self.pending_impulse = 0;
         self.cmd_clock = CmdClock::default();
         self.last_weapon = None;
@@ -993,11 +988,7 @@ impl Cs16App {
                             self.command_menu_ui.set_open(pressed);
                             self.sync_cursor_capture();
                         }
-                        if pressed {
-                            self.active_actions.insert(name);
-                        } else {
-                            self.active_actions.remove(&name);
-                        }
+                        self.input_state.apply_action_input(name, pressed);
                     }
                     EngineAction::GetPos => {
                         let p = self.camera.position;
@@ -1032,6 +1023,8 @@ impl Cs16App {
                     EngineAction::Suicide => self.forward_to_server("kill"),
                     EngineAction::DropWeapon => self.forward_to_server("drop"),
                     EngineAction::LastInv => self.forward_to_server("lastinv"),
+                    EngineAction::InvNext => self.cycle_inventory(true),
+                    EngineAction::InvPrev => self.cycle_inventory(false),
                     EngineAction::ToggleNightVision => self.forward_to_server("nightvision"),
                     EngineAction::OpenRadio(group) => {
                         self.forward_to_server(&format!("radio{group}"));
@@ -1330,6 +1323,14 @@ impl Cs16App {
         }
     }
 
+    fn owned_weapon_ids(hud: &HudState, owned_bits: u32) -> HashSet<u8> {
+        hud.weapons
+            .values()
+            .map(|w| w.weapon_id)
+            .filter(|id| *id < 32 && owned_bits & (1 << id) != 0)
+            .collect()
+    }
+
     /// `slot1`..`slot5`: selects or opens the weapon bucket selector (`hud_fastswitch`).
     fn select_slot(&mut self, slot: u8) {
         let owned_bits = self.session.owned_weapons();
@@ -1338,13 +1339,25 @@ impl Cs16App {
         let pick = self
             .session
             .with_hud(|hud| {
-                let owned: HashSet<u8> = hud
-                    .weapons
-                    .values()
-                    .map(|w| w.weapon_id)
-                    .filter(|id| *id < 32 && owned_bits & (1 << id) != 0)
-                    .collect();
+                let owned = Self::owned_weapon_ids(hud, owned_bits);
                 buckets.on_slot_press(hud, &owned, slot, fastswitch)
+            })
+            .flatten();
+        if let Some(name) = pick {
+            self.session.send_stringcmd(&name);
+        }
+    }
+
+    /// `invnext` / `invprev`: cycles owned weapons across buckets/positions (`hud_fastswitch`).
+    fn cycle_inventory(&mut self, forward: bool) {
+        let owned_bits = self.session.owned_weapons();
+        let fastswitch = self.cvars.get_bool("hud_fastswitch");
+        let buckets = &mut self.weapon_buckets;
+        let pick = self
+            .session
+            .with_hud(|hud| {
+                let owned = Self::owned_weapon_ids(hud, owned_bits);
+                step_inventory_cycle(buckets, hud, &owned, forward, fastswitch)
             })
             .flatten();
         if let Some(name) = pick {
@@ -1355,14 +1368,11 @@ impl Cs16App {
     /// Queues this frame's usercmd. A cmd is `msec` of the frame, view angles from the mouse.
     fn queue_usercmd(&mut self, dt: f64) {
         if !self.session.in_game() {
+            self.input_state.consume_impulses();
             return;
         }
         let capture = self.wants_mouse_capture();
-        let held = Held {
-            actions: capture.then_some(&self.active_actions),
-            mouse1: capture && self.mouse1_held,
-            mouse2: capture && self.mouse2_held,
-        };
+        let held = self.input_state.held(capture);
         let angles = Vec3::new(self.camera.pitch_deg, self.camera.yaw_deg, 0.0);
         let params = CmdParams {
             msec: self.cmd_clock.msec(dt),
@@ -1378,6 +1388,54 @@ impl Cs16App {
         };
         self.session
             .queue_cmd(build_usercmd(&held, angles, params, &speeds));
+        self.input_state.consume_impulses();
+    }
+
+    fn handle_bound_key(
+        &mut self,
+        key_name: &str,
+        pressed: bool,
+        event_loop: Option<&ActiveEventLoop>,
+    ) -> bool {
+        let actions = self.cvars.handle_key_bind(key_name, pressed);
+        if actions.is_empty() {
+            return false;
+        }
+        if pressed
+            && key_name == "mouse1"
+            && self.weapon_buckets.active_slot.is_some()
+            && !self.cvars.get_bool("hud_fastswitch")
+            && actions.iter().any(|a| {
+                matches!(
+                    a,
+                    EngineAction::ActionInput { name, pressed: true } if name == "attack"
+                )
+            })
+        {
+            let buckets = &mut self.weapon_buckets;
+            if let Some(w_name) = self
+                .session
+                .with_hud(|h| buckets.confirm_selection(h))
+                .flatten()
+            {
+                self.session.send_stringcmd(&w_name);
+                let filtered: Vec<EngineAction> = actions
+                    .into_iter()
+                    .filter(|a| {
+                        !matches!(
+                            a,
+                            EngineAction::ActionInput { name, pressed: true } if name == "attack"
+                        )
+                    })
+                    .collect();
+                if !filtered.is_empty() {
+                    let _ = self.process_actions(filtered, event_loop);
+                }
+                return true;
+            }
+        }
+        let _ = self.process_actions(actions, event_loop);
+        true
     }
 
     fn handle_key_event(&mut self, event: &KeyEvent, event_loop: &ActiveEventLoop) -> bool {
@@ -1404,11 +1462,7 @@ impl Cs16App {
             && !self.menu_ui.visible
             && self.is_in_game()
         {
-            if pressed {
-                self.active_actions.insert("showscores".into());
-            } else {
-                self.active_actions.remove("showscores");
-            }
+            self.input_state.apply_action_input("showscores", pressed);
             return true;
         }
 
@@ -1460,9 +1514,7 @@ impl Cs16App {
             if event.repeat {
                 return true;
             }
-            let actions = self.cvars.handle_key_bind(key_name, pressed);
-            if !actions.is_empty() {
-                let _ = self.process_actions(actions, Some(event_loop));
+            if self.handle_bound_key(key_name, pressed, Some(event_loop)) {
                 return true;
             }
         }
@@ -1630,7 +1682,8 @@ impl Cs16App {
 
         let time_sec = self.start_time.elapsed().as_secs_f32();
         let in_game = self.is_in_game();
-        let show_scores = (self.active_actions.contains("showscores") || self.scoreboard_toggled)
+        let show_scores = (self.input_state.active_actions.contains("showscores")
+            || self.scoreboard_toggled)
             && in_game
             && !self.menu_ui.visible;
         let master = finite_or(self.cvars.get_f32("volume"), 1.0).clamp(0.0, 1.0);
@@ -1813,7 +1866,9 @@ impl Cs16App {
         let voice_loopback = self.cvars.get_bool("voice_loopback");
         let voice_avg = finite_or(self.cvars.get_f32("voice_avggain"), 0.5);
         let voice_max = finite_or(self.cvars.get_f32("voice_maxgain"), 5.0);
-        let recording = in_game && !self.menu_ui.visible && self.active_actions.contains("voicerecord");
+        let recording = in_game
+            && !self.menu_ui.visible
+            && self.input_state.active_actions.contains("voicerecord");
         self.audio
             .set_voice_recording(recording, self.cvars.get_bool("voice_forcemicrecord"));
         let sess_now_voice = self.session.now();
@@ -2797,9 +2852,7 @@ impl ApplicationHandler for Cs16App {
                     win.set_cursor_visible(true);
                     rt.cursor_captured = false;
                 }
-                self.active_actions.clear();
-                self.mouse1_held = false;
-                self.mouse2_held = false;
+                self.input_state.clear();
             }
             WindowEvent::Resized(new_size) => {
                 if let Some(rt) = &mut self.runtime {
@@ -2809,25 +2862,27 @@ impl ApplicationHandler for Cs16App {
             WindowEvent::MouseInput { state, button, .. } => {
                 if self.wants_mouse_capture() {
                     let pressed = *state == ElementState::Pressed;
-                    if pressed
-                        && matches!(button, MouseButton::Left)
-                        && self.weapon_buckets.active_slot.is_some()
-                        && !self.cvars.get_bool("hud_fastswitch")
-                    {
-                        let buckets = &mut self.weapon_buckets;
-                        if let Some(w_name) = self
-                            .session
-                            .with_hud(|h| buckets.confirm_selection(h))
-                            .flatten()
-                        {
-                            self.session.send_stringcmd(&w_name);
-                            return;
-                        }
+                    if let Some(key_name) = mouse_button_to_goldsrc(*button) {
+                        let _ = self.handle_bound_key(key_name, pressed, Some(event_loop));
                     }
-                    match button {
-                        MouseButton::Left => self.mouse1_held = pressed,
-                        MouseButton::Right => self.mouse2_held = pressed,
-                        _ => {}
+                    return;
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                if self.wants_mouse_capture() {
+                    let notches = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => {
+                            self.input_state.accumulate_wheel(*y, true)
+                        }
+                        MouseScrollDelta::PixelDelta(pos) => {
+                            self.input_state.accumulate_wheel(pos.y as f32, false)
+                        }
+                    };
+                    let count = notches.unsigned_abs().min(16);
+                    let key_name = if notches >= 0 { "mwheelup" } else { "mwheeldown" };
+                    for _ in 0..count {
+                        let _ = self.handle_bound_key(key_name, true, Some(event_loop));
+                        let _ = self.handle_bound_key(key_name, false, Some(event_loop));
                     }
                     return;
                 }
@@ -2925,6 +2980,17 @@ fn digit_of(code: KeyCode) -> Option<u8> {
         KeyCode::Digit9 => 9,
         _ => return None,
     })
+}
+
+fn mouse_button_to_goldsrc(button: MouseButton) -> Option<&'static str> {
+    match button {
+        MouseButton::Left => Some("mouse1"),
+        MouseButton::Right => Some("mouse2"),
+        MouseButton::Middle => Some("mouse3"),
+        MouseButton::Back => Some("mouse4"),
+        MouseButton::Forward => Some("mouse5"),
+        MouseButton::Other(_) => None,
+    }
 }
 
 fn physical_key_to_goldsrc(code: KeyCode) -> Option<&'static str> {
@@ -3290,5 +3356,15 @@ mod tests {
         feeds.expire(1.1, 0.0, 0.0, 2.0);
         assert!(feeds.deaths.is_empty());
         assert!(feeds.chat.is_empty());
+    }
+
+    #[test]
+    fn mouse_buttons_map_to_goldsrc_mouse1_through_mouse5() {
+        assert_eq!(mouse_button_to_goldsrc(MouseButton::Left), Some("mouse1"));
+        assert_eq!(mouse_button_to_goldsrc(MouseButton::Right), Some("mouse2"));
+        assert_eq!(mouse_button_to_goldsrc(MouseButton::Middle), Some("mouse3"));
+        assert_eq!(mouse_button_to_goldsrc(MouseButton::Back), Some("mouse4"));
+        assert_eq!(mouse_button_to_goldsrc(MouseButton::Forward), Some("mouse5"));
+        assert_eq!(mouse_button_to_goldsrc(MouseButton::Other(9)), None);
     }
 }

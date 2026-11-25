@@ -274,9 +274,25 @@ pub fn install() {
     {
         let rt_c = Rc::clone(&rt);
         let closure: Closure<dyn FnMut(u32, bool)> = Closure::new(move |button: u32, pressed: bool| {
-            rt_c.borrow_mut().state.input.on_mouse_button(button, pressed);
+            let mut g = rt_c.borrow_mut();
+            let state = &mut g.state;
+            state.input.on_mouse_button_bound(button, pressed, &mut state.cvars);
         });
         let _ = Reflect::set(&api, &JsValue::from_str("onMouseButton"), &closure.into_js_value());
+    }
+
+    // onMouseWheel(delta_y, delta_mode)
+    {
+        let rt_c = Rc::clone(&rt);
+        let closure: Closure<dyn FnMut(f64, u32)> =
+            Closure::new(move |delta_y: f64, delta_mode: u32| {
+                let mut g = rt_c.borrow_mut();
+                let state = &mut g.state;
+                state
+                    .input
+                    .on_mouse_wheel(delta_y as f32, delta_mode, &mut state.cvars);
+            });
+        let _ = Reflect::set(&api, &JsValue::from_str("onMouseWheel"), &closure.into_js_value());
     }
 
     // onGamepad(lx, ly, rx, ry, mask)

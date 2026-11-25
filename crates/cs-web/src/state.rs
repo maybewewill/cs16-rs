@@ -12,7 +12,7 @@ use cs_client::audio::{
     normalize_sound_path, parse_wav_loop_points, reload_sound_path,
 };
 use cs_client::camera::Camera;
-use cs_client::input::{MoveSpeeds, weapon_for_slot};
+use cs_client::input::{MoveSpeeds, cycle_inventory_weapon, weapon_for_slot};
 use cs_client::render::scene::ModelRegistry;
 use cs_client::ui::hud::{
     HudAnimState, HudExtrasContext, HudView, draw_cs16_hud_with_extras, draw_voice_speakers,
@@ -494,6 +494,8 @@ impl WebClientState {
                     };
                     self.cvars.set("cl_crosshair_color", next);
                 }
+                EngineAction::InvNext => self.dispatch_command("invnext"),
+                EngineAction::InvPrev => self.dispatch_command("invprev"),
                 EngineAction::ToggleScores
                 | EngineAction::OpenPlayerList
                 | EngineAction::OpenDemoPlayer(_)
@@ -857,6 +859,26 @@ impl WebClientState {
     }
 
     fn dispatch_command(&mut self, cmd: &str) {
+        if cmd == "invnext" || cmd == "invprev" {
+            let forward = cmd == "invnext";
+            let owned = owned_set(self.owned_weapons());
+            let picked = self
+                .with_hud(|hud| {
+                    cycle_inventory_weapon(
+                        &hud.weapons,
+                        &owned,
+                        hud.current_weapon.map(|c| c.weapon_id),
+                        forward,
+                    )
+                    .map(|w| w.name.clone())
+                })
+                .flatten();
+            if let Some(wname) = picked {
+                self.send_stringcmd(&wname);
+                self.weapon_switch_timer = 0.6;
+            }
+            return;
+        }
         if let Some(digit) = parse_slot_cmd(cmd) {
             let menu_open = self
                 .with_hud(|h| h.menu.as_ref().is_some_and(|m| m.keys != 0))

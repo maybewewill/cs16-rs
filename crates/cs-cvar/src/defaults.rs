@@ -346,6 +346,8 @@ pub fn register_default_binds(reg: &mut CVarRegistry) {
         ("5", "slot5"),
         ("mouse1", "+attack"),
         ("mouse2", "+attack2"),
+        ("mwheelup", "invprev"),
+        ("mwheeldown", "invnext"),
         ("f5", "screenshot"),
         ("`", "toggleconsole"),
         ("escape", "cancelselect"),

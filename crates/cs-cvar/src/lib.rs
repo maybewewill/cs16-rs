@@ -162,6 +162,8 @@ pub enum EngineAction {
     OpenChat { team_only: bool },
     DropWeapon,
     LastInv,
+    InvNext,
+    InvPrev,
     SelectSlot(u8),
     ToggleNightVision,
     OpenRadio(u8),
@@ -247,6 +249,8 @@ const KNOWN_COMMANDS: &[(&str, &str)] = &[
     ("say_team", "Send a team chat message"),
     ("drop", "Drop currently held weapon"),
     ("lastinv", "Switch to previously held weapon"),
+    ("invnext", "Select next weapon in inventory"),
+    ("invprev", "Select previous weapon in inventory"),
     ("mp3", "Control MP3 background music playback (play/loop/stop)"),
     ("cd", "Control CD/soundtrack track playback (play/loop/stop/off)"),
     ("play", "Play a sound effect locally"),
@@ -846,6 +850,8 @@ impl CVarRegistry {
             "messagemode2" => actions.push(EngineAction::OpenChat { team_only: true }),
             "drop" => actions.push(EngineAction::DropWeapon),
             "lastinv" => actions.push(EngineAction::LastInv),
+            "invnext" => actions.push(EngineAction::InvNext),
+            "invprev" => actions.push(EngineAction::InvPrev),
             "slot1" => actions.push(EngineAction::SelectSlot(1)),
             "slot2" => actions.push(EngineAction::SelectSlot(2)),
             "slot3" => actions.push(EngineAction::SelectSlot(3)),
@@ -1260,5 +1266,26 @@ mod tests {
                 "127.0.0.1:27010".into(),
             ])]
         );
+    }
+
+    #[test]
+    fn default_wheel_binds_and_inventory_commands_are_registered() {
+        let mut reg = CVarRegistry::new_with_defaults();
+        assert_eq!(reg.bind_for_key("mwheelup"), Some("invprev"));
+        assert_eq!(reg.bind_for_key("mwheeldown"), Some("invnext"));
+        assert_eq!(reg.bind_for_key("mouse1"), Some("+attack"));
+        assert_eq!(reg.bind_for_key("mouse2"), Some("+attack2"));
+
+        reg.set_forward_unknown(true);
+        assert_eq!(
+            reg.handle_key_bind("mwheelup", true),
+            vec![EngineAction::InvPrev]
+        );
+        assert!(reg.handle_key_bind("mwheelup", false).is_empty());
+        assert_eq!(
+            reg.handle_key_bind("mwheeldown", true),
+            vec![EngineAction::InvNext]
+        );
+        assert!(reg.handle_key_bind("mwheeldown", false).is_empty());
     }
 }

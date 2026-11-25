@@ -28,6 +28,10 @@ pub mod button {
 #[derive(Debug, Clone, Default)]
 pub struct Held<'a> {
     pub actions: Option<&'a HashSet<String>>,
+    /// Same-frame `+action` impulse latch (`kbutton_t` down-impulse bit): contributes its
+    /// `button::*` bit to the next `build_usercmd` even if `-action` already arrived in the
+    /// same frame (e.g. scroll-wheel `+jump` / `-jump`).
+    pub impulse_actions: Option<&'a HashSet<String>>,
     pub mouse1: bool,
     pub mouse2: bool,
 }
@@ -35,6 +39,91 @@ pub struct Held<'a> {
 impl Held<'_> {
     fn on(&self, name: &str) -> bool {
         self.actions.is_some_and(|a| a.contains(name))
+            || self.impulse_actions.is_some_and(|a| a.contains(name))
+    }
+}
+
+/// Windows `WHEEL_DELTA` equivalent in `MouseScrollDelta::PixelDelta` pixels per wheel notch.
+pub const WHEEL_PIXELS_PER_NOTCH: f32 = 120.0;
+
+/// Accumulates a wheel delta (`LineDelta` when `is_line_delta = true`, or `PixelDelta` at
+/// `120.0` px/notch when `false`) and returns the signed notch count
+/// (`> 0` = `"mwheelup"`, `< 0` = `"mwheeldown"`).
+pub fn accumulate_wheel_notches(accum: &mut f32, delta_y: f32, is_line_delta: bool) -> i32 {
+    if !delta_y.is_finite() || delta_y == 0.0 {
+        return 0;
+    }
+    let step = if is_line_delta {
+        1.0
+    } else {
+        WHEEL_PIXELS_PER_NOTCH
+    };
+    *accum += delta_y;
+    let mut notches = 0i32;
+    while *accum >= step {
+        *accum -= step;
+        notches += 1;
+    }
+    while *accum <= -step {
+        *accum += step;
+        notches -= 1;
+    }
+    notches
+}
+
+/// Quake/GoldSrc `kbutton_t` held + same-frame down-impulse state (`state & 1` and `state & 2`)
+/// and wheel accumulators (`IN_MWheelEvent` / `Key_Event` in Xash3D FWGS
+/// `engine/client/input/input.c` & `in_keys.c`, read 2026-11-25).
+#[derive(Debug, Clone, Default)]
+pub struct InputActionState {
+    pub active_actions: HashSet<String>,
+    pub impulse_actions: HashSet<String>,
+    pub wheel_line_accum: f32,
+    pub wheel_pixel_accum: f32,
+}
+
+impl InputActionState {
+    /// Records a `+action` press (setting both held and down-impulse) or `-action` release
+    /// (clearing held while leaving any same-frame down-impulse latched until consumed).
+    pub fn apply_action_input(&mut self, name: impl Into<String>, pressed: bool) {
+        let name = name.into();
+        if pressed {
+            self.impulse_actions.insert(name.clone());
+            self.active_actions.insert(name);
+        } else {
+            self.active_actions.remove(&name);
+        }
+    }
+
+    pub fn held(&self, capture: bool) -> Held<'_> {
+        Held {
+            actions: capture.then_some(&self.active_actions),
+            impulse_actions: capture.then_some(&self.impulse_actions),
+            mouse1: false,
+            mouse2: false,
+        }
+    }
+
+    pub fn consume_impulses(&mut self) {
+        self.impulse_actions.clear();
+    }
+
+    pub fn clear(&mut self) {
+        self.active_actions.clear();
+        self.impulse_actions.clear();
+        self.wheel_line_accum = 0.0;
+        self.wheel_pixel_accum = 0.0;
+    }
+
+    /// Accumulates a wheel delta (`LineDelta` when `is_line_delta`, else `PixelDelta` at
+    /// `120.0` px/notch) and returns the signed notch count (`> 0` up, `< 0` down).
+    pub fn accumulate_wheel(&mut self, delta_y: f32, is_line_delta: bool) -> i32 {
+        let accum = if is_line_delta {
+            &mut self.wheel_line_accum
+        } else {
+            &mut self.wheel_pixel_accum
+        };
+        accumulate_wheel_notches(accum, delta_y, is_line_delta)
     }
 }
 
@@ -240,6 +329,86 @@ pub fn weapon_for_slot<'a>(
     pick.map(|w| w.name.as_str())
 }
 
+/// Returns all owned weapons sorted in GoldSrc `WeaponInfo` bucket/position order
+/// `(slot, position, weapon_id)`.
+pub fn sorted_owned_weapons<'a>(
+    table: &'a BTreeMap<u8, WeaponInfo>,
+    owned: &HashSet<u8>,
+) -> Vec<&'a WeaponInfo> {
+    let mut list: Vec<&WeaponInfo> = table
+        .values()
+        .filter(|w| owned.contains(&w.weapon_id))
+        .collect();
+    list.sort_by_key(|w| (w.slot, w.position, w.weapon_id));
+    list
+}
+
+/// Selects the next (`forward = true`, `invnext`) or previous (`forward = false`, `invprev`)
+/// owned weapon relative to `current` in `(slot, position, weapon_id)` order, wrapping around.
+pub fn cycle_inventory_weapon<'a>(
+    table: &'a BTreeMap<u8, WeaponInfo>,
+    owned: &HashSet<u8>,
+    current: Option<u8>,
+    forward: bool,
+) -> Option<&'a WeaponInfo> {
+    let list = sorted_owned_weapons(table, owned);
+    if list.is_empty() {
+        return None;
+    }
+    let idx = current.and_then(|id| list.iter().position(|w| w.weapon_id == id));
+    let pick = match idx {
+        Some(i) => {
+            if forward {
+                (i + 1) % list.len()
+            } else {
+                (i + list.len() - 1) % list.len()
+            }
+        }
+        None => {
+            if forward {
+                0
+            } else {
+                list.len() - 1
+            }
+        }
+    };
+    Some(list[pick])
+}
+
+/// Advances `buckets` for `invnext` (`forward = true`) or `invprev` (`forward = false`)
+/// across owned weapons in `WeaponInfo` `(slot, position)` order, respecting `hud_fastswitch`.
+///
+/// With `fastswitch = true`, returns `Some(weapon_name)` immediately and closes the bucket
+/// selector. With `fastswitch = false`, opens/advances the bucket highlight to the target
+/// weapon's slot and returns `None` until `+attack` (`mouse1`) confirms it.
+pub fn step_inventory_cycle(
+    buckets: &mut crate::ui::hud_extras::WeaponBucketState,
+    hud: &cs_clientcore::hud::HudState,
+    owned: &HashSet<u8>,
+    forward: bool,
+    fastswitch: bool,
+) -> Option<String> {
+    let reference = if !fastswitch && buckets.active_slot.is_some() {
+        buckets
+            .highlighted_weapon_id
+            .or_else(|| hud.current_weapon.map(|c| c.weapon_id))
+    } else {
+        hud.current_weapon.map(|c| c.weapon_id)
+    };
+    let next_w = cycle_inventory_weapon(&hud.weapons, owned, reference, forward)?;
+    if fastswitch {
+        buckets.active_slot = None;
+        buckets.highlighted_weapon_id = Some(next_w.weapon_id);
+        buckets.timer_sec = 0.0;
+        Some(next_w.name.clone())
+    } else {
+        buckets.active_slot = Some(next_w.slot + 1);
+        buckets.highlighted_weapon_id = Some(next_w.weapon_id);
+        buckets.timer_sec = 2.5;
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,6 +449,7 @@ mod tests {
             actions: Some(&a),
             mouse1: true,
             mouse2: false,
+            ..Held::default()
         };
         let speeds = MoveSpeeds {
             forward: 250.0,
@@ -450,5 +620,132 @@ mod tests {
         assert_eq!(weapon_for_slot(&table, &owned, Some(26), 2), Some("weapon_usp"));
         assert_eq!(weapon_for_slot(&table, &owned, None, 3), Some("weapon_knife"));
         assert_eq!(weapon_for_slot(&table, &owned, None, 4), None);
+    }
+
+    #[test]
+    fn mwheelup_plus_jump_latches_frame_n_and_clears_frame_n_plus_1() {
+        let mut reg = cs_cvar::CVarRegistry::new_with_defaults();
+        reg.bind("mwheelup", "+jump");
+
+        let mut state = InputActionState::default();
+        let dispatch_notch = |reg: &mut cs_cvar::CVarRegistry, state: &mut InputActionState| {
+            for pressed in [true, false] {
+                for act in reg.handle_key_bind("mwheelup", pressed) {
+                    if let cs_cvar::EngineAction::ActionInput { name, pressed } = act {
+                        state.apply_action_input(name, pressed);
+                    }
+                }
+            }
+        };
+
+        // Single wheel-up notch within frame N (press + release before build_usercmd).
+        assert_eq!(state.accumulate_wheel(1.0, true), 1);
+        dispatch_notch(&mut reg, &mut state);
+        assert!(
+            !state.active_actions.contains("jump"),
+            "release already cleared held state"
+        );
+
+        let cmd_n = build_usercmd(&state.held(true), Vec3::ZERO, params(10), &MoveSpeeds::default());
+        state.consume_impulses();
+        assert_ne!(cmd_n.buttons & button::JUMP, 0, "frame N must emit JUMP");
+
+        // Frame N+1 with no wheel input must clear JUMP.
+        let cmd_n1 = build_usercmd(&state.held(true), Vec3::ZERO, params(10), &MoveSpeeds::default());
+        state.consume_impulses();
+        assert_eq!(cmd_n1.buttons & button::JUMP, 0, "frame N+1 must clear JUMP");
+
+        // Accumulated 120px PixelDelta produces a fresh JUMP edge on frame N+2 (1 -> 0 -> 1).
+        assert_eq!(state.accumulate_wheel(60.0, false), 0);
+        assert_eq!(state.accumulate_wheel(60.0, false), 1);
+        dispatch_notch(&mut reg, &mut state);
+        let cmd_n2 = build_usercmd(&state.held(true), Vec3::ZERO, params(10), &MoveSpeeds::default());
+        state.consume_impulses();
+        assert_ne!(cmd_n2.buttons & button::JUMP, 0, "frame N+2 must re-trigger JUMP");
+    }
+
+    #[test]
+    fn mouse4_bound_to_voicerecord_toggles_action() {
+        let mut reg = cs_cvar::CVarRegistry::new_with_defaults();
+        reg.bind("mouse4", "+voicerecord");
+        let mut state = InputActionState::default();
+
+        for act in reg.handle_key_bind("mouse4", true) {
+            if let cs_cvar::EngineAction::ActionInput { name, pressed } = act {
+                state.apply_action_input(name, pressed);
+            }
+        }
+        assert!(state.active_actions.contains("voicerecord"));
+
+        for act in reg.handle_key_bind("mouse4", false) {
+            if let cs_cvar::EngineAction::ActionInput { name, pressed } = act {
+                state.apply_action_input(name, pressed);
+            }
+        }
+        assert!(!state.active_actions.contains("voicerecord"));
+    }
+
+    #[test]
+    fn default_wheel_binds_and_invnext_invprev_cycle_respecting_fastswitch() {
+        let mut reg = cs_cvar::CVarRegistry::new_with_defaults();
+        assert_eq!(
+            reg.handle_key_bind("mwheelup", true),
+            vec![cs_cvar::EngineAction::InvPrev]
+        );
+        assert_eq!(
+            reg.handle_key_bind("mwheeldown", true),
+            vec![cs_cvar::EngineAction::InvNext]
+        );
+
+        let mut hud = cs_clientcore::hud::HudState::default();
+        hud.weapons.insert(28, info("weapon_ak47", 0, 1, 28));
+        hud.weapons.insert(16, info("weapon_usp", 1, 4, 16));
+        hud.weapons.insert(29, info("weapon_knife", 2, 1, 29));
+        hud.weapons.insert(4, info("weapon_hegrenade", 3, 1, 4));
+        hud.current_weapon = Some(cs_clientcore::hud::CurrentWeapon {
+            is_active: true,
+            weapon_id: 16,
+            clip: 12,
+        });
+        let owned: HashSet<u8> = [28, 16, 29, 4].into_iter().collect();
+
+        // hud_fastswitch 1: immediate weapon select across slots and wrap-around.
+        let mut buckets = crate::ui::hud_extras::WeaponBucketState::default();
+        assert_eq!(
+            step_inventory_cycle(&mut buckets, &hud, &owned, true, true).as_deref(),
+            Some("weapon_knife")
+        );
+        assert_eq!(buckets.active_slot, None);
+        assert_eq!(
+            step_inventory_cycle(&mut buckets, &hud, &owned, false, true).as_deref(),
+            Some("weapon_ak47")
+        );
+        hud.current_weapon = Some(cs_clientcore::hud::CurrentWeapon {
+            is_active: true,
+            weapon_id: 4,
+            clip: -1,
+        });
+        assert_eq!(
+            step_inventory_cycle(&mut buckets, &hud, &owned, true, true).as_deref(),
+            Some("weapon_ak47")
+        );
+
+        // hud_fastswitch 0: opens/steps bucket highlight without immediate switch until confirm.
+        hud.current_weapon = Some(cs_clientcore::hud::CurrentWeapon {
+            is_active: true,
+            weapon_id: 16,
+            clip: 12,
+        });
+        assert_eq!(step_inventory_cycle(&mut buckets, &hud, &owned, true, false), None);
+        assert_eq!(buckets.active_slot, Some(3));
+        assert_eq!(buckets.highlighted_weapon_id, Some(29));
+        assert_eq!(step_inventory_cycle(&mut buckets, &hud, &owned, true, false), None);
+        assert_eq!(buckets.active_slot, Some(4));
+        assert_eq!(buckets.highlighted_weapon_id, Some(4));
+        assert_eq!(
+            buckets.confirm_selection(&hud).as_deref(),
+            Some("weapon_hegrenade")
+        );
+        assert_eq!(buckets.active_slot, None);
     }
 }
