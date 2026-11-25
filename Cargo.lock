@@ -537,6 +537,7 @@ dependencies = [
  "cs-clientcore",
  "cs-cvar",
  "cs-local",
+ "cs-master",
  "cs-mod-api",
  "cs-mod-host",
  "cs-pm",
@@ -562,6 +563,7 @@ dependencies = [
 name = "cs-clientcore"
 version = "0.1.0"
 dependencies = [
+ "bzip2-rs",
  "cs-assets",
  "cs-cvar",
  "cs-engine",
@@ -622,6 +624,15 @@ dependencies = [
  "cs-proto48",
  "cs-transport",
  "cs-vfs",
+]
+
+[[package]]
+name = "cs-master"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.21",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

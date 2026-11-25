@@ -230,6 +230,7 @@ impl<G: GameDll> Server<G> {
         if first {
             self.with_game(|game, eng| game.server_deactivate(eng));
         }
+        self.masters.shutdown_all(net);
         self.send_farewells(net);
     }
 

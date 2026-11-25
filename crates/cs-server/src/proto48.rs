@@ -44,6 +44,7 @@ struct Options {
     web_dir: Option<PathBuf>,
     relay_allow: Vec<SocketAddr>,
     mods_dir: Option<PathBuf>,
+    masters: Vec<SocketAddr>,
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
@@ -59,6 +60,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         web_dir: None,
         relay_allow: Vec::new(),
         mods_dir: None,
+        masters: Vec::new(),
     };
     let mut args = args.iter();
     while let Some(arg) = args.next() {
@@ -99,6 +101,13 @@ fn parse(args: &[String]) -> Result<Options, String> {
             }
             "--web-dir" => opts.web_dir = Some(PathBuf::from(value()?)),
             "--mods-dir" => opts.mods_dir = Some(PathBuf::from(value()?)),
+            "--master" => {
+                let v = value()?;
+                let addr: SocketAddr = v
+                    .parse()
+                    .map_err(|e| format!("{arg}: invalid <ip:port> `{v}`: {e}"))?;
+                opts.masters.push(addr);
+            }
             "--relay-allow" => {
                 let v = value()?;
                 let addr: SocketAddr = v
@@ -326,6 +335,9 @@ fn serve<G: GameDll>(
     let mut server = new_server(cfg, map, game, vfs);
     if let Some(n) = opts.bots {
         let _ = server.console_command(&format!("bot_quota {n}"));
+    }
+    for addr in &opts.masters {
+        let _ = server.console_command(&format!("setmaster add {addr}"));
     }
     info!(
         addr = %udp_addr,
@@ -672,6 +684,25 @@ mod tests {
     fn parses_mods_dir_flag() {
         let o = parse(&args(&["--mods-dir", "mods"])).unwrap();
         assert_eq!(o.mods_dir, Some(PathBuf::from("mods")));
+    }
+
+    #[test]
+    fn parses_repeatable_master_flag() {
+        let o = parse(&args(&[
+            "--master",
+            "127.0.0.1:27010",
+            "--master",
+            "127.0.0.1:27011",
+        ]))
+        .unwrap();
+        assert_eq!(
+            o.masters,
+            vec![
+                "127.0.0.1:27010".parse::<SocketAddr>().unwrap(),
+                "127.0.0.1:27011".parse::<SocketAddr>().unwrap(),
+            ]
+        );
+        assert!(parse(&args(&["--master", "not-an-addr"])).is_err());
     }
 
     #[test]

@@ -21,6 +21,8 @@ pub mod game;
 mod lifecycle;
 pub mod map;
 pub mod mapents;
+pub mod master;
+pub use master::{HeartbeatSnapshot, MasterRegistration};
 mod movestep;
 pub mod oob;
 pub mod pm;

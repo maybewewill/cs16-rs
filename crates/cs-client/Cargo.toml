@@ -13,6 +13,7 @@ cs-assets.workspace = true
 cs-cvar.workspace = true
 cs-clientcore.workspace = true
 cs-local.workspace = true
+cs-master.workspace = true
 cs-mod-api.workspace = true
 cs-mod-host.workspace = true
 cs-pm.workspace = true

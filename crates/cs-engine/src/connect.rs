@@ -38,6 +38,24 @@ impl<G: GameDll> Server<G> {
             self.net_stats.oob_denied += 1;
             return;
         }
+        if let Some(challenge) = crate::master::MasterRegistration::parse_challenge_reply(data)
+            && self.masters.is_registered(&from)
+        {
+            let sv_pw = self.cvars.get_str("sv_password").trim();
+            let password = !sv_pw.is_empty() && !sv_pw.eq_ignore_ascii_case("none");
+            let snap = crate::master::HeartbeatSnapshot {
+                players: self.client_count().min(255) as u8,
+                max_players: self.cfg.max_clients,
+                bots: self.fake_client_count().min(255) as u8,
+                gamedir: self.cfg.game_dir.clone(),
+                map: self.map.name.clone(),
+                password,
+                build: self.cfg.build.max(0) as u32,
+            };
+            let pkt = crate::master::MasterRegistration::encode_heartbeat_update(challenge, &snap);
+            self.net_stats.send(net, from, &pkt);
+            return;
+        }
         if let Some(dgram) = crate::rcon::parse_rcon_datagram(data) {
             let policy = crate::rcon::RconPolicy {
                 max_failures: self.cvars.get_i32("sv_rcon_maxfailures").max(0) as u32,

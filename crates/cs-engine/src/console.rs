@@ -154,6 +154,7 @@ impl<G: GameDll> Server<G> {
                 return output("Cleared all log addresses\n");
             }
             "pause" => return self.console_pause(),
+            "setmaster" => return self.console_setmaster(&argv[1..]),
             "say" => return self.console_say(&argv[1..]),
             "changelevel" | "map" => return console_changelevel(&argv[1..]),
             "quit" | "exit" => return ConsoleOutcome::Quit,
@@ -510,6 +511,46 @@ impl<G: GameDll> Server<G> {
             output("Server paused\n")
         } else {
             output("Server unpaused\n")
+        }
+    }
+
+    fn console_setmaster(&mut self, args: &[String]) -> ConsoleOutcome {
+        let usage = "Usage: setmaster <add|remove|clear|enable|disable|list> [ip:port]\n";
+        match args.first().map(|s| s.to_ascii_lowercase()).as_deref() {
+            None | Some("list") => output(self.masters.list()),
+            Some("enable") => {
+                self.masters.enabled = true;
+                output("Master server registration enabled.\n")
+            }
+            Some("disable") => {
+                self.masters.enabled = false;
+                output("Master server registration disabled.\n")
+            }
+            Some("clear") => {
+                self.masters.clear();
+                output("Master server list cleared.\n")
+            }
+            Some("add") => {
+                let Some(peer) = Self::parse_log_peer(&args[1..]) else {
+                    return output(usage);
+                };
+                if self.masters.add(peer, self.real_time) {
+                    output(format!("Adding master server {peer}\n"))
+                } else {
+                    output(format!("Master server {peer} already registered or list full\n"))
+                }
+            }
+            Some("remove") => {
+                let Some(peer) = Self::parse_log_peer(&args[1..]) else {
+                    return output(usage);
+                };
+                if self.masters.remove(&peer) {
+                    output(format!("Removed master server {peer}\n"))
+                } else {
+                    output(format!("Master server {peer} not found\n"))
+                }
+            }
+            Some(_) => output(usage),
         }
     }
 }

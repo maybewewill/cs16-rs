@@ -141,6 +141,7 @@ pub struct Server<G: GameDll> {
     pub(crate) logger: crate::logging::ServerLogger,
     pub(crate) paused: bool,
     pub(crate) last_userinfo_hash: Vec<(String, f64)>,
+    pub(crate) masters: crate::master::MasterRegistration,
 }
 
 /// Monotonic counts of what the server refused, dropped or failed to send.
@@ -266,6 +267,7 @@ impl<G: GameDll> Server<G> {
             logger: crate::logging::ServerLogger::default(),
             paused: false,
             last_userinfo_hash: vec![(String::new(), -100.0); slots],
+            masters: crate::master::MasterRegistration::default(),
         };
         server.activate_map();
         server
@@ -368,6 +370,7 @@ impl<G: GameDll> Server<G> {
         self.cleanup_ents();
         self.send_farewells(net);
         self.logger.flush(net);
+        self.masters.tick(net, now);
         self.frametime = 0.0;
     }
 
@@ -541,6 +544,14 @@ impl<G: GameDll> Server<G> {
 
     pub fn bans_mut(&mut self) -> &mut crate::bans::BanList {
         &mut self.bans
+    }
+
+    pub fn masters(&self) -> &crate::master::MasterRegistration {
+        &self.masters
+    }
+
+    pub fn masters_mut(&mut self) -> &mut crate::master::MasterRegistration {
+        &mut self.masters
     }
 
     /// Queries a client cvar via `svc_sendcvarvalue` (unnumbered).
