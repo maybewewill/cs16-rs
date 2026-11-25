@@ -53,6 +53,14 @@ pub enum OobPacket {
     },
     S2cReject(String),
     A2aPrint(String),
+    ChallengeRcon,
+    S2cChallengeRcon(u32),
+    Rcon {
+        challenge: u32,
+        password: String,
+        command: String,
+        raw_tail: String,
+    },
     Unknown(String),
 }
 
@@ -184,6 +192,40 @@ pub fn encode_a2a_ack() -> Vec<u8> {
     w.into_bytes()
 }
 
+/// Server → Client: `\xFF\xFF\xFF\xFFl<text>\0\0` (`SV_FlushRedirect`, `sv_main.cpp:3277`).
+pub fn encode_a2a_print(text: &str) -> Vec<u8> {
+    let mut w = MsgWriter::with_capacity(text.len() + 8);
+    w.write_i32(CONNECTIONLESS_HEADER);
+    w.write_u8(A2A_PRINT);
+    w.write_str(text);
+    w.write_u8(0);
+    w.into_bytes()
+}
+
+/// RCON client → server: `\xFF\xFF\xFF\xFFchallenge rcon\n`.
+pub fn encode_challenge_rcon() -> Vec<u8> {
+    let mut w = MsgWriter::with_capacity(24);
+    w.write_i32(CONNECTIONLESS_HEADER);
+    w.write_bytes(b"challenge rcon\n");
+    w.into_bytes()
+}
+
+/// Server → RCON client: `\xFF\xFF\xFF\xFFchallenge rcon <challenge>\n\0` (`sv_main.cpp:2703`).
+pub fn encode_s2c_challenge_rcon(challenge: u32) -> Vec<u8> {
+    let mut w = MsgWriter::with_capacity(36);
+    w.write_i32(CONNECTIONLESS_HEADER);
+    w.write_str(&format!("challenge rcon {challenge}\n"));
+    w.into_bytes()
+}
+
+/// RCON client → server: `\xFF\xFF\xFF\xFFrcon <challenge> "<password>" <command>\n`.
+pub fn encode_rcon(challenge: u32, password: &str, command: &str) -> Vec<u8> {
+    let mut w = MsgWriter::with_capacity(password.len() + command.len() + 32);
+    w.write_i32(CONNECTIONLESS_HEADER);
+    w.write_bytes(format!("rcon {challenge} \"{password}\" {command}\n").as_bytes());
+    w.into_bytes()
+}
+
 /// Parse a connectionless (`0xFFFF_FFFF`) UDP packet.
 pub fn parse_oob_packet(raw: &[u8]) -> Result<OobPacket, ProtoError> {
     if raw.len() < 5 {
@@ -262,6 +304,36 @@ pub fn parse_oob_packet(raw: &[u8]) -> Result<OobPacket, ProtoError> {
         return Ok(OobPacket::GetChallenge { steam });
     }
 
+    if cmd.eq_ignore_ascii_case("challenge")
+        && tokens.get(1).is_some_and(|t| t.eq_ignore_ascii_case("rcon"))
+    {
+        if let Some(ch) = tokens.get(2).and_then(|s| s.parse::<u32>().ok()) {
+            return Ok(OobPacket::S2cChallengeRcon(ch));
+        }
+        return Ok(OobPacket::ChallengeRcon);
+    }
+
+    if cmd == "rcon" {
+        let challenge = tokens
+            .get(1)
+            .and_then(|s| s.parse::<i64>().ok())
+            .and_then(|v| i32::try_from(v).ok().map(|v| v as u32).or_else(|| u32::try_from(v).ok()))
+            .unwrap_or(0);
+        let password = tokens.get(2).cloned().unwrap_or_default();
+        let command = extract_rcon_command(&line);
+        let raw_tail = line
+            .strip_prefix("rcon")
+            .unwrap_or("")
+            .trim_end_matches(&['\n', '\r'][..])
+            .to_string();
+        return Ok(OobPacket::Rcon {
+            challenge,
+            password,
+            command,
+            raw_tail,
+        });
+    }
+
     if cmd.starts_with('A') && tokens.len() >= 3 {
         let challenge = tokens[1].parse::<u32>().unwrap_or(0);
         let auth_protocol = tokens[2].parse::<u32>().unwrap_or(2);
@@ -325,6 +397,32 @@ pub fn parse_oob_packet(raw: &[u8]) -> Result<OobPacket, ProtoError> {
     }
 
     Ok(OobPacket::Unknown(line))
+}
+
+/// Extracts the raw command tail after `rcon <challenge> <password> ` so spaces and quotes in the
+/// executed console command are preserved verbatim.
+fn extract_rcon_command(line: &str) -> String {
+    let trimmed = line.trim_end_matches(&['\n', '\r'][..]);
+    let mut rest = trimmed.trim_start();
+    // Skip 3 tokens (`rcon`, challenge, password).
+    for _ in 0..3 {
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            return String::new();
+        }
+        if let Some(after_open) = rest.strip_prefix('"') {
+            match after_open.find('"') {
+                Some(end) => rest = &after_open[end + 1..],
+                None => return String::new(),
+            }
+        } else {
+            match rest.find(|c: char| c.is_ascii_whitespace()) {
+                Some(end) => rest = &rest[end..],
+                None => return String::new(),
+            }
+        }
+    }
+    rest.trim_start().to_string()
 }
 
 /// GoldSrc `Cmd_TokenizeString`-compatible splitter handling quoted arguments.
@@ -430,6 +528,35 @@ mod tests {
                 vac_secure: false,
                 build: 6153,
             }
+        );
+    }
+
+    #[test]
+    fn rcon_and_a2a_print_packets_roundtrip() {
+        let cr = encode_challenge_rcon();
+        assert_eq!(parse_oob_packet(&cr).unwrap(), OobPacket::ChallengeRcon);
+
+        let scr = encode_s2c_challenge_rcon(987654321);
+        assert_eq!(
+            parse_oob_packet(&scr).unwrap(),
+            OobPacket::S2cChallengeRcon(987654321)
+        );
+
+        let rc = encode_rcon(987654321, "s3cr3t pw", "changelevel \"de_dust2\"; status");
+        assert_eq!(
+            parse_oob_packet(&rc).unwrap(),
+            OobPacket::Rcon {
+                challenge: 987654321,
+                password: "s3cr3t pw".to_string(),
+                command: "changelevel \"de_dust2\"; status".to_string(),
+                raw_tail: " 987654321 \"s3cr3t pw\" changelevel \"de_dust2\"; status".to_string(),
+            }
+        );
+
+        let ap = encode_a2a_print("hostname: test\n");
+        assert_eq!(
+            parse_oob_packet(&ap).unwrap(),
+            OobPacket::A2aPrint("hostname: test\n".to_string())
         );
     }
 }

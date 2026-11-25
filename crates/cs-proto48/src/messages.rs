@@ -176,6 +176,30 @@ pub mod clc {
     ];
 }
 
+/// Director and HLTV constants (`rehlds/common/hltv.h`, read 2026-11-25).
+pub mod drc {
+    pub const HLTV_ACTIVE: u8 = 0;
+    pub const HLTV_STATUS: u8 = 1;
+    pub const HLTV_LISTEN: u8 = 2;
+
+    pub const CMD_NONE: u8 = 0;
+    pub const CMD_START: u8 = 1;
+    pub const CMD_EVENT: u8 = 2;
+    pub const CMD_MODE: u8 = 3;
+    pub const CMD_CAMERA: u8 = 4;
+    pub const CMD_TIMESCALE: u8 = 5;
+    pub const CMD_MESSAGE: u8 = 6;
+    pub const CMD_SOUND: u8 = 7;
+    pub const CMD_STATUS: u8 = 8;
+    pub const CMD_BANNER: u8 = 9;
+    pub const CMD_STUFFTEXT: u8 = 10;
+    pub const CMD_CHASE: u8 = 11;
+    pub const CMD_INEYE: u8 = 12;
+    pub const CMD_MAP: u8 = 13;
+    pub const CMD_CAMPATH: u8 = 14;
+    pub const CMD_WAYPOINTS: u8 = 15;
+}
+
 pub const ENTITY_NORMAL: u8 = 1;
 pub const ENTITY_BEAM: u8 = 2;
 
@@ -539,6 +563,29 @@ pub enum SvcMessage {
     SoundFade(SoundFadeMsg),
     /// `svc_timescale`: the new time scale.
     TimeScale(f32),
+    /// `svc_killedmonster`: 0 bytes.
+    KilledMonster,
+    /// `svc_foundsecret`: 0 bytes.
+    FoundSecret,
+    /// `svc_intermission`: 0 bytes.
+    Intermission,
+    /// `svc_finale`: C-string text.
+    Finale(String),
+    /// `svc_restore`: save name + map names.
+    Restore {
+        save_name: String,
+        maps: Vec<String>,
+    },
+    /// `svc_cutscene`: C-string text.
+    Cutscene(String),
+    /// `svc_filetxferfailed`: C-string filename.
+    FileTxferFailed(String),
+    /// `svc_hltv`: `u8` subcommand (`drc::HLTV_*`).
+    Hltv(u8),
+    /// `svc_director`: director command payload (first byte is `drc::CMD_*`).
+    Director(Vec<u8>),
+    /// `svc_exec`: C-string command.
+    Exec(String),
     Ignored(u8),
 }
 
@@ -596,6 +643,16 @@ impl SvcMessage {
             SvcMessage::CrosshairAngle { .. } => svc::CROSSHAIRANGLE,
             SvcMessage::SoundFade(_) => svc::SOUNDFADE,
             SvcMessage::TimeScale(_) => svc::TIMESCALE,
+            SvcMessage::KilledMonster => svc::KILLEDMONSTER,
+            SvcMessage::FoundSecret => svc::FOUNDSECRET,
+            SvcMessage::Intermission => svc::INTERMISSION,
+            SvcMessage::Finale(_) => svc::FINALE,
+            SvcMessage::Restore { .. } => svc::RESTORE,
+            SvcMessage::Cutscene(_) => svc::CUTSCENE,
+            SvcMessage::FileTxferFailed(_) => svc::FILETXFERFAILED,
+            SvcMessage::Hltv(_) => svc::HLTV,
+            SvcMessage::Director(_) => svc::DIRECTOR,
+            SvcMessage::Exec(_) => svc::EXEC,
             SvcMessage::Ignored(op) => *op,
         }
     }
@@ -697,6 +754,7 @@ fn parse_one_svc(
     ctx: &mut SvcParseContext,
 ) -> Result<SvcMessage, ProtoError> {
     match op {
+        svc::BAD => Err(ProtoError::InvalidPayload("svc_bad".to_string())),
         svc::NOP => Ok(SvcMessage::Nop),
         svc::DISCONNECT => Ok(SvcMessage::Disconnect(r.read_str()?)),
         svc::EVENT => {
@@ -1015,7 +1073,9 @@ fn parse_one_svc(
         svc::SETPAUSE => Ok(SvcMessage::SetPause(r.read_u8()? != 0)),
         svc::SIGNONNUM => Ok(SvcMessage::SignonNum(r.read_u8()?)),
         svc::CENTERPRINT => Ok(SvcMessage::CenterPrint(r.read_str()?)),
-        svc::KILLEDMONSTER | svc::FOUNDSECRET | svc::INTERMISSION => Ok(SvcMessage::Ignored(op)),
+        svc::KILLEDMONSTER => Ok(SvcMessage::KilledMonster),
+        svc::FOUNDSECRET => Ok(SvcMessage::FoundSecret),
+        svc::INTERMISSION => Ok(SvcMessage::Intermission),
         svc::SPAWNSTATICSOUND => {
             Ok(SvcMessage::SpawnStaticSound(SpawnStaticSoundMsg {
                 origin: Vec3::new(r.read_coord()?, r.read_coord()?, r.read_coord()?),
@@ -1027,21 +1087,21 @@ fn parse_one_svc(
                 flags: r.read_u8()?,
             }))
         }
-        svc::FINALE | svc::CUTSCENE | svc::EXEC => {
-            let _ = r.read_str()?;
-            Ok(SvcMessage::Ignored(op))
-        }
+        svc::FINALE => Ok(SvcMessage::Finale(r.read_str()?)),
+        svc::CUTSCENE => Ok(SvcMessage::Cutscene(r.read_str()?)),
+        svc::EXEC => Ok(SvcMessage::Exec(r.read_str()?)),
         svc::CDTRACK => Ok(SvcMessage::CdTrack {
             track: r.read_i8()?,
             loop_track: r.read_i8()?,
         }),
         svc::RESTORE => {
-            let _ = r.read_str()?;
-            let count = r.read_u8()?;
+            let save_name = r.read_str()?;
+            let count = r.read_u8()? as usize;
+            let mut maps = Vec::with_capacity(count.min(64));
             for _ in 0..count {
-                let _ = r.read_str()?;
+                maps.push(r.read_str()?);
             }
-            Ok(SvcMessage::Ignored(op))
+            Ok(SvcMessage::Restore { save_name, maps })
         }
         svc::WEAPONANIM => Ok(SvcMessage::WeaponAnim {
             anim: r.read_u8()?,
@@ -1185,18 +1245,12 @@ fn parse_one_svc(
             fade_out: r.read_u8()?,
             fade_in: r.read_u8()?,
         })),
-        svc::FILETXFERFAILED => {
-            let _ = r.read_str()?;
-            Ok(SvcMessage::Ignored(op))
-        }
-        svc::HLTV => {
-            let _ = r.read_u8()?;
-            Ok(SvcMessage::Ignored(op))
-        }
+        svc::FILETXFERFAILED => Ok(SvcMessage::FileTxferFailed(r.read_str()?)),
+        svc::HLTV => Ok(SvcMessage::Hltv(r.read_u8()?)),
         svc::DIRECTOR => {
             let len = r.read_u8()? as usize;
-            let _ = r.read_bytes(len)?;
-            Ok(SvcMessage::Ignored(op))
+            let bytes = r.read_bytes(len)?.to_vec();
+            Ok(SvcMessage::Director(bytes))
         }
         svc::VOICEINIT => Ok(SvcMessage::VoiceInit {
             codec: r.read_str()?,
@@ -1815,6 +1869,17 @@ pub fn write_svc_resourcerequest(w: &mut MsgWriter, spawn_count: i32) {
 }
 
 pub fn write_svc_resourcelist(w: &mut MsgWriter, resources: &[ResourceEntry]) {
+    write_svc_resourcelist_with_consistency(w, resources, &[]);
+}
+
+/// `svc_resourcelist` with `SV_SendConsistencyList` (`rehlds/engine/sv_user.cpp:359-400`,
+/// read 2026-11-25): 1 bit enables the list, followed by delta-compressed 5-bit offsets (`<= 31`)
+/// or 10-bit resource indices (`0..1024`), ending with a `0` bit.
+pub fn write_svc_resourcelist_with_consistency(
+    w: &mut MsgWriter,
+    resources: &[ResourceEntry],
+    consistency_indices: &[u16],
+) {
     w.write_u8(svc::RESOURCELIST);
     w.start_bit_writing();
     w.write_bits(resources.len() as u32, RESOURCE_INDEX_BITS);
@@ -1837,8 +1902,112 @@ pub fn write_svc_resourcelist(w: &mut MsgWriter, resources: &[ResourceEntry]) {
             None => w.write_one_bit(false),
         }
     }
-    w.write_one_bit(false); // no force_unmodified consistency list
+    if consistency_indices.is_empty() {
+        w.write_one_bit(false);
+    } else {
+        w.write_one_bit(true);
+        let mut last = 0u16;
+        for &idx in consistency_indices {
+            if idx >= (1 << 10) {
+                continue;
+            }
+            w.write_one_bit(true);
+            if idx >= last && idx - last <= 31 {
+                w.write_one_bit(true);
+                w.write_bits(u32::from(idx - last), 5);
+            } else {
+                w.write_one_bit(false);
+                w.write_bits(u32::from(idx), 10);
+            }
+            last = idx;
+        }
+        w.write_one_bit(false);
+    }
     w.end_bit_writing();
+}
+
+pub fn write_svc_nop(w: &mut MsgWriter) {
+    w.write_u8(svc::NOP);
+}
+
+pub fn write_svc_version(w: &mut MsgWriter, protocol: u32) {
+    w.write_u8(svc::VERSION);
+    w.write_u32(protocol);
+}
+
+pub fn write_svc_setpause(w: &mut MsgWriter, paused: bool) {
+    w.write_u8(svc::SETPAUSE);
+    w.write_u8(u8::from(paused));
+}
+
+pub fn write_svc_killedmonster(w: &mut MsgWriter) {
+    w.write_u8(svc::KILLEDMONSTER);
+}
+
+pub fn write_svc_foundsecret(w: &mut MsgWriter) {
+    w.write_u8(svc::FOUNDSECRET);
+}
+
+pub fn write_svc_intermission(w: &mut MsgWriter) {
+    w.write_u8(svc::INTERMISSION);
+}
+
+pub fn write_svc_finale(w: &mut MsgWriter, text: &str) {
+    w.write_u8(svc::FINALE);
+    w.write_str(text);
+}
+
+pub fn write_svc_restore(w: &mut MsgWriter, save_name: &str, maps: &[String]) {
+    w.write_u8(svc::RESTORE);
+    w.write_str(save_name);
+    let count = maps.len().min(64);
+    w.write_u8(count as u8);
+    for m in &maps[..count] {
+        w.write_str(m);
+    }
+}
+
+pub fn write_svc_cutscene(w: &mut MsgWriter, text: &str) {
+    w.write_u8(svc::CUTSCENE);
+    w.write_str(text);
+}
+
+pub fn write_svc_resourcelocation(w: &mut MsgWriter, url: &str) {
+    w.write_u8(svc::RESOURCELOCATION);
+    w.write_str(url);
+}
+
+pub fn write_svc_filetxferfailed(w: &mut MsgWriter, filename: &str) {
+    w.write_u8(svc::FILETXFERFAILED);
+    w.write_str(filename);
+}
+
+pub fn write_svc_hltv(w: &mut MsgWriter, subcmd: u8) {
+    w.write_u8(svc::HLTV);
+    w.write_u8(subcmd);
+}
+
+pub fn write_svc_director(w: &mut MsgWriter, payload: &[u8]) {
+    let clamped = &payload[..payload.len().min(u8::MAX as usize)];
+    w.write_u8(svc::DIRECTOR);
+    w.write_u8(clamped.len() as u8);
+    w.write_bytes(clamped);
+}
+
+pub fn write_svc_sendcvarvalue(w: &mut MsgWriter, cvar_name: &str) {
+    w.write_u8(svc::SENDCVARVALUE);
+    w.write_str(cvar_name);
+}
+
+pub fn write_svc_sendcvarvalue2(w: &mut MsgWriter, request_id: i32, cvar_name: &str) {
+    w.write_u8(svc::SENDCVARVALUE2);
+    w.write_i32(request_id);
+    w.write_str(cvar_name);
+}
+
+pub fn write_svc_exec(w: &mut MsgWriter, command: &str) {
+    w.write_u8(svc::EXEC);
+    w.write_str(command);
 }
 
 pub fn write_svc_spawnbaseline(
@@ -2395,6 +2564,29 @@ pub enum ClcMessage {
         cvar_name: String,
         value: String,
     },
+    TMove(Vec3),
+    Hltv(u8),
+}
+
+pub fn write_clc_nop(w: &mut MsgWriter) {
+    w.write_u8(clc::NOP);
+}
+
+pub fn write_clc_tmove(w: &mut MsgWriter, origin: Vec3) {
+    w.write_u8(clc::TMOVE);
+    w.write_f32(origin.x);
+    w.write_f32(origin.y);
+    w.write_f32(origin.z);
+}
+
+pub fn write_clc_hltv(w: &mut MsgWriter, subcmd: u8) {
+    w.write_u8(clc::HLTV);
+    w.write_u8(subcmd);
+}
+
+pub fn write_clc_cvarvalue(w: &mut MsgWriter, value: &str) {
+    w.write_u8(clc::CVARVALUE);
+    w.write_str(value);
 }
 
 /// Encode `clc_stringcmd` (opcode 3).
@@ -2542,6 +2734,7 @@ pub fn parse_clc_stream(
     while r.remaining() > 0 {
         let op = r.read_u8()?;
         match op {
+            clc::BAD => return Err(ProtoError::InvalidPayload("clc_bad".to_string())),
             clc::NOP => {}
             clc::MOVE => {
                 let mlen = r.read_u8()? as usize;
@@ -2605,7 +2798,10 @@ pub fn parse_clc_stream(
                 out.push(ClcMessage::ResourceList(list));
             }
             clc::TMOVE => {
-                let _ = r.read_bytes(12)?;
+                let x = r.read_f32()?;
+                let y = r.read_f32()?;
+                let z = r.read_f32()?;
+                out.push(ClcMessage::TMove(Vec3::new(x, y, z)));
             }
             clc::FILECONSISTENCY => {
                 let len = r.read_u16()? as usize;
@@ -2617,7 +2813,7 @@ pub fn parse_clc_stream(
                 let bytes = r.read_bytes(len)?.to_vec();
                 out.push(ClcMessage::VoiceData(bytes));
             }
-            clc::HLTV => {}
+            clc::HLTV => out.push(ClcMessage::Hltv(r.read_u8()?)),
             clc::CVARVALUE => out.push(ClcMessage::CvarValue(r.read_str()?)),
             clc::CVARVALUE2 => out.push(ClcMessage::CvarValue2 {
                 request_id: r.read_i32()?,
@@ -3895,5 +4091,105 @@ mod client_reader_tests {
         write_clc_voicedata(&mut cw, &[0xAA, 0xBB, 0xCC]);
         let clc_msgs = parse_clc_stream(cw.as_slice(), schema, 0).expect("valid clc stream");
         assert_eq!(clc_msgs, vec![ClcMessage::VoiceData(vec![0xAA, 0xBB, 0xCC])]);
+    }
+
+    #[test]
+    fn phase11_remaining_svc_clc_and_bad_opcodes() {
+        let mut ctx = SvcParseContext::default();
+        assert!(parse_svc_stream(&[svc::BAD], &mut ctx).is_err());
+
+        let reg = DeltaRegistry::cs16_default();
+        let schema = reg.get("usercmd_t").unwrap();
+        assert!(parse_clc_stream(&[clc::BAD], schema, 0).is_err());
+
+        let mut sw = MsgWriter::new();
+        write_svc_nop(&mut sw);
+        write_svc_version(&mut sw, 48);
+        write_svc_setpause(&mut sw, true);
+        write_svc_killedmonster(&mut sw);
+        write_svc_foundsecret(&mut sw);
+        write_svc_intermission(&mut sw);
+        write_svc_finale(&mut sw, "fin");
+        write_svc_restore(&mut sw, "save01.sav", &["de_dust2".into(), "de_nuke".into()]);
+        write_svc_cutscene(&mut sw, "cut");
+        write_svc_resourcelocation(&mut sw, "https://dl.example/cstrike/");
+        write_svc_filetxferfailed(&mut sw, "models/missing.mdl");
+        write_svc_hltv(&mut sw, drc::HLTV_ACTIVE);
+        write_svc_director(&mut sw, &[drc::CMD_MESSAGE, 1, 2]);
+        write_svc_sendcvarvalue(&mut sw, "rate");
+        write_svc_sendcvarvalue2(&mut sw, 77, "cl_updaterate");
+        write_svc_exec(&mut sw, "echo hello");
+
+        let parsed_svc = parse_svc_stream(sw.as_slice(), &mut ctx).expect("valid svc stream");
+        assert_eq!(
+            parsed_svc,
+            vec![
+                SvcMessage::Nop,
+                SvcMessage::Version(48),
+                SvcMessage::SetPause(true),
+                SvcMessage::KilledMonster,
+                SvcMessage::FoundSecret,
+                SvcMessage::Intermission,
+                SvcMessage::Finale("fin".into()),
+                SvcMessage::Restore {
+                    save_name: "save01.sav".into(),
+                    maps: vec!["de_dust2".into(), "de_nuke".into()],
+                },
+                SvcMessage::Cutscene("cut".into()),
+                SvcMessage::ResourceLocation("https://dl.example/cstrike/".into()),
+                SvcMessage::FileTxferFailed("models/missing.mdl".into()),
+                SvcMessage::Hltv(drc::HLTV_ACTIVE),
+                SvcMessage::Director(vec![drc::CMD_MESSAGE, 1, 2]),
+                SvcMessage::SendCvarValue("rate".into()),
+                SvcMessage::SendCvarValue2 {
+                    request_id: 77,
+                    cvar_name: "cl_updaterate".into(),
+                },
+                SvcMessage::Exec("echo hello".into()),
+            ]
+        );
+
+        let mut rw = MsgWriter::new();
+        let res = vec![ResourceEntry {
+            res_type: 2,
+            filename: "models/player.mdl".into(),
+            index: 1,
+            download_size: 4096,
+            flags: 0,
+            md5: None,
+            reserved: None,
+        }];
+        // Exercises both 5-bit delta (1 - 0 = 1, 10 - 1 = 9) and 10-bit full index (64 - 10 = 54 > 31).
+        write_svc_resourcelist_with_consistency(&mut rw, &res, &[1, 10, 64]);
+        let res_msgs = parse_svc_stream(rw.as_slice(), &mut ctx).expect("valid resourcelist");
+        assert_eq!(
+            res_msgs,
+            vec![SvcMessage::ResourceList {
+                resources: res,
+                consistency_indices: vec![1, 10, 64],
+            }]
+        );
+
+        let mut cw = MsgWriter::new();
+        write_clc_nop(&mut cw);
+        write_clc_tmove(&mut cw, glam::Vec3::new(10.0, -20.5, 64.0));
+        write_clc_hltv(&mut cw, drc::HLTV_STATUS);
+        write_clc_cvarvalue(&mut cw, "25000");
+        write_clc_cvarvalue2(&mut cw, 77, "cl_updaterate", "101");
+
+        let parsed_clc = parse_clc_stream(cw.as_slice(), schema, 0).expect("valid clc stream");
+        assert_eq!(
+            parsed_clc,
+            vec![
+                ClcMessage::TMove(glam::Vec3::new(10.0, -20.5, 64.0)),
+                ClcMessage::Hltv(drc::HLTV_STATUS),
+                ClcMessage::CvarValue("25000".into()),
+                ClcMessage::CvarValue2 {
+                    request_id: 77,
+                    cvar_name: "cl_updaterate".into(),
+                    value: "101".into(),
+                },
+            ]
+        );
     }
 }

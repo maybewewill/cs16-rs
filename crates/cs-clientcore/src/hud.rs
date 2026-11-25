@@ -901,6 +901,17 @@ impl HudState {
                 self.status_icons.clear();
             }
             CsUserMsg::InitHud => self.initialized = true,
+            CsUserMsg::ViewMode
+            | CsUserMsg::GameTitle(_)
+            | CsUserMsg::GameMode(_)
+            | CsUserMsg::Spectator { .. }
+            | CsUserMsg::Hltv { .. }
+            | CsUserMsg::ForceCam { .. }
+            | CsUserMsg::ADStop
+            | CsUserMsg::ShadowIdx(_)
+            | CsUserMsg::TaskTime { .. }
+            | CsUserMsg::BotVoice { .. }
+            | CsUserMsg::Location { .. } => {}
             CsUserMsg::Unknown { name, payload } => {
                 self.unknown_total = self.unknown_total.saturating_add(1);
                 if self.unknown_messages.len() >= UNKNOWN_CAPACITY {

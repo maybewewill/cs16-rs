@@ -1047,6 +1047,12 @@ impl Cs16App {
                     EngineAction::SpecMenu(visible) => {
                         self.spectator_ui.menu_visible = visible != 0;
                     }
+                    EngineAction::RecordDemo(_)
+                    | EngineAction::StopDemo
+                    | EngineAction::PlayDemo(_)
+                    | EngineAction::TimeDemo(_)
+                    | EngineAction::RconCommand(_)
+                    | EngineAction::SetMaster(_) => {}
                 }
             }
         }

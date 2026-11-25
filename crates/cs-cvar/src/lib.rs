@@ -15,9 +15,24 @@ pub struct CVarFlags(u32);
 impl CVarFlags {
     pub const NONE: Self = Self(0);
     pub const ARCHIVE: Self = Self(1 << 0);
-    pub const SERVER: Self = Self(1 << 1);
-    pub const CHEAT: Self = Self(1 << 2);
-    pub const REPLICATED: Self = Self(1 << 3);
+    pub const USERINFO: Self = Self(1 << 1);
+    pub const SERVER: Self = Self(1 << 2);
+    pub const EXTDLL: Self = Self(1 << 3);
+    pub const CLIENTDLL: Self = Self(1 << 4);
+    /// Password/secret server cvar: A2S_RULES reports "1" when non-empty/non-zero, else "0" (`FCVAR_PROTECTED`).
+    pub const PROTECTED: Self = Self(1 << 5);
+    /// Multiplayer-locked cvar (`FCVAR_SPONLY`).
+    pub const SPONLY: Self = Self(1 << 6);
+    /// Printable ASCII only (`FCVAR_PRINTABLEONLY`).
+    pub const PRINTABLEONLY: Self = Self(1 << 7);
+    /// Changes not written to server log (`FCVAR_UNLOGGED`).
+    pub const UNLOGGED: Self = Self(1 << 8);
+    /// Strip leading and trailing whitespace (`FCVAR_NOEXTRAWHITESPACE`).
+    pub const NOEXTRAWHITESPACE: Self = Self(1 << 9);
+    /// Require `sv_cheats 1` unless changed locally (`FCVAR_CHEAT` parity).
+    pub const CHEAT: Self = Self(1 << 10);
+    /// Replicated to clients.
+    pub const REPLICATED: Self = Self(1 << 11);
 
     pub const fn contains(self, other: Self) -> bool {
         (self.0 & other.0) == other.0
@@ -77,6 +92,30 @@ impl CVar {
         let v = self.value.trim();
         v == "1" || v.eq_ignore_ascii_case("true") || self.as_f32() != 0.0
     }
+
+    /// Value reported in public `A2S_RULES` replies (`FCVAR_PROTECTED` returns `"1"` if set
+    /// and non-zero, `"0"` otherwise, `rehlds/common/cvardef.h:27`).
+    pub fn public_rules_value(&self) -> String {
+        if self.flags.contains(CVarFlags::PROTECTED) {
+            let v = self.value.trim();
+            if v.is_empty() || v == "0" {
+                "0".to_string()
+            } else {
+                "1".to_string()
+            }
+        } else {
+            self.value.clone()
+        }
+    }
+}
+
+/// Context for enforcing GoldSrc `FCVAR_SPONLY`, `FCVAR_CHEAT`, `FCVAR_PRINTABLEONLY`, and
+/// `FCVAR_NOEXTRAWHITESPACE` rules when changing a CVar.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CvarSetContext {
+    pub multiplayer: bool,
+    pub cheats_enabled: bool,
+    pub trusted: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +189,18 @@ pub enum EngineAction {
     SpecMode(i32),
     /// `spec_menu <0|1>`: open or close spectator bottom controls.
     SpecMenu(i32),
+    /// `record <name>`: start recording a GoldSrc `.dem` demo file.
+    RecordDemo(String),
+    /// `stop` / `stopdemo`: finish recording/playing the current demo.
+    StopDemo,
+    /// `playdemo <name>`: start headless/client playback of a `.dem` demo.
+    PlayDemo(String),
+    /// `timedemo <name>`: benchmark playback of a `.dem` file.
+    TimeDemo(String),
+    /// `rcon <cmd>`: execute an RCON command against `rcon_address` / active server.
+    RconCommand(String),
+    /// `setmaster <add|remove|enable|disable|list> [ip:port]`.
+    SetMaster(Vec<String>),
     ActionInput { name: String, pressed: bool },
     /// A command the console does not know, handed on while the client is connected
     /// ([`CVarRegistry::set_forward_unknown`]): the shell sends the line to the server
@@ -212,6 +263,12 @@ const KNOWN_COMMANDS: &[(&str, &str)] = &[
     ("playerlist", "Open the mute player list dialog"),
     ("viewdemo", "Open the VGUI2 demo playback transport dialog"),
     ("playdemo", "Play a recorded demo file"),
+    ("record", "Start recording a GoldSrc .dem demo file"),
+    ("stop", "Stop recording the active demo file"),
+    ("stopdemo", "Stop recording or playing the active demo file"),
+    ("timedemo", "Benchmark playback of a .dem demo file"),
+    ("rcon", "Send an RCON command to a remote server"),
+    ("setmaster", "Configure master server endpoints"),
     ("spec_mode", "Switch spectator camera mode"),
     ("spec_menu", "Show or hide spectator menu bar"),
     ("toggleconsole", "Open or close the developer console"),
@@ -344,6 +401,40 @@ impl CVarRegistry {
         } else {
             false
         }
+    }
+
+    /// Sets a CVar while enforcing GoldSrc `SPONLY`, `CHEAT`, `PRINTABLEONLY`, and
+    /// `NOEXTRAWHITESPACE` flags (`Cvar_Set2` / ReHLDS `cvar.cpp`).
+    pub fn set_with_context(
+        &mut self,
+        name: &str,
+        value: &str,
+        ctx: CvarSetContext,
+    ) -> Result<bool, String> {
+        let key = name.to_ascii_lowercase();
+        let Some(flags) = self.vars.get(&key).map(|c| c.flags) else {
+            return Ok(false);
+        };
+        if !ctx.trusted {
+            if flags.contains(CVarFlags::SPONLY) && ctx.multiplayer {
+                return Err(format!("Can't set {key} in multiplayer"));
+            }
+            if flags.contains(CVarFlags::CHEAT) && !ctx.cheats_enabled {
+                return Err(format!("Can't set {key} unless sv_cheats is 1"));
+            }
+        }
+        let mut sanitized = if flags.contains(CVarFlags::PRINTABLEONLY) {
+            value
+                .chars()
+                .filter(|&c| c >= ' ' && c != '\u{7F}')
+                .collect::<String>()
+        } else {
+            value.to_string()
+        };
+        if flags.contains(CVarFlags::NOEXTRAWHITESPACE) {
+            sanitized = sanitized.trim().to_string();
+        }
+        Ok(self.set(&key, sanitized))
     }
 
     pub fn vars(&self) -> &BTreeMap<String, CVar> {
@@ -804,6 +895,29 @@ impl CVarRegistry {
             "playerlist" => actions.push(EngineAction::OpenPlayerList),
             "viewdemo" | "playdemo" => {
                 actions.push(EngineAction::OpenDemoPlayer(args.first().cloned()));
+                if cmd == "playdemo"
+                    && let Some(path) = args.first()
+                {
+                    actions.push(EngineAction::PlayDemo(path.clone()));
+                }
+            }
+            "record" => {
+                if let Some(name) = args.first() {
+                    actions.push(EngineAction::RecordDemo(name.clone()));
+                } else {
+                    self.info("Usage: record <demoname>");
+                }
+            }
+            "stop" | "stopdemo" => actions.push(EngineAction::StopDemo),
+            "timedemo" => {
+                if let Some(name) = args.first() {
+                    actions.push(EngineAction::TimeDemo(name.clone()));
+                } else {
+                    self.info("Usage: timedemo <demoname>");
+                }
+            }
+            "setmaster" => {
+                actions.push(EngineAction::SetMaster(args.to_vec()));
             }
             "spec_mode" => {
                 let mode = args.first().and_then(|s| s.parse::<i32>().ok()).unwrap_or(-1);
@@ -1080,6 +1194,71 @@ mod tests {
         assert_eq!(
             reg.execute_script("secammo"),
             vec![EngineAction::BuyItem("secammo".into())]
+        );
+    }
+
+    #[test]
+    fn phase11_cvar_flags_protection_and_actions() {
+        let mut reg = CVarRegistry::new_with_defaults();
+        reg.register("sv_test_sp", "0", CVarFlags::SPONLY, "");
+        reg.register("sv_test_cheat", "0", CVarFlags::CHEAT, "");
+        reg.register("sv_test_print", "a", CVarFlags::PRINTABLEONLY, "");
+        reg.register("sv_test_trim", "a", CVarFlags::NOEXTRAWHITESPACE, "");
+        reg.register("sv_test_secret", "hunter2", CVarFlags::PROTECTED, "");
+
+        let mp_no_cheats = CvarSetContext {
+            trusted: false,
+            multiplayer: true,
+            cheats_enabled: false,
+        };
+        assert!(reg.set_with_context("sv_test_sp", "1", mp_no_cheats).is_err());
+        assert!(reg.set_with_context("sv_test_cheat", "1", mp_no_cheats).is_err());
+        assert!(reg
+            .set_with_context(
+                "sv_test_cheat",
+                "1",
+                CvarSetContext {
+                    trusted: false,
+                    multiplayer: true,
+                    cheats_enabled: true,
+                },
+            )
+            .unwrap());
+        assert_eq!(reg.get_str("sv_test_cheat"), "1");
+
+        reg.set_with_context("sv_test_print", "hi\x07\x7F!", mp_no_cheats)
+            .unwrap();
+        assert_eq!(reg.get_str("sv_test_print"), "hi!");
+        reg.set_with_context("sv_test_trim", "  padded  ", mp_no_cheats)
+            .unwrap();
+        assert_eq!(reg.get_str("sv_test_trim"), "padded");
+
+        assert_eq!(
+            reg.vars().get("sv_test_secret").unwrap().public_rules_value(),
+            "1"
+        );
+        reg.set("sv_test_secret", "");
+        assert_eq!(
+            reg.vars().get("sv_test_secret").unwrap().public_rules_value(),
+            "0"
+        );
+
+        assert_eq!(
+            reg.execute_script("record mydemo"),
+            vec![EngineAction::RecordDemo("mydemo".into())]
+        );
+        assert_eq!(reg.execute_script("stop"), vec![EngineAction::StopDemo]);
+        assert_eq!(reg.execute_script("stopdemo"), vec![EngineAction::StopDemo]);
+        assert_eq!(
+            reg.execute_script("timedemo bench"),
+            vec![EngineAction::TimeDemo("bench".into())]
+        );
+        assert_eq!(
+            reg.execute_script("setmaster add 127.0.0.1:27010"),
+            vec![EngineAction::SetMaster(vec![
+                "add".into(),
+                "127.0.0.1:27010".into(),
+            ])]
         );
     }
 }

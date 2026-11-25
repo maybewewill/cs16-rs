@@ -223,6 +223,50 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     reg.register("mp_playerid", "0", srv, "Who the status bar names (0 all, 1 teammates, 2 nobody)");
     reg.register("bot_quota", "9", srv_arch, "Target number of bots in local match (0..15)");
     reg.register("bot_difficulty", "1", srv_arch, "Bot skill level (0=Easy, 1=Normal, 2=Hard, 3=Expert)");
+
+    // Phase 11: RCON, passwords, bans, logs, downloads, consistency, slowhack filter, master
+    let prot = CVarFlags::PROTECTED;
+    let sponly = CVarFlags::SPONLY;
+    let srv_prot = srv | prot;
+    reg.register("rcon_password", "", prot, "Remote console password");
+    reg.register("rcon_address", "", CVarFlags::NONE, "Target IP:port for client RCON");
+    reg.register("rcon_port", "27015", CVarFlags::NONE, "Target port for client RCON");
+    reg.register("sv_rcon_banpenalty", "0", srv, "Minutes to ban attackers on failed RCON (0=permanent)");
+    reg.register("sv_rcon_maxfailures", "10", srv, "Max RCON failures before ban");
+    reg.register("sv_rcon_minfailures", "5", srv, "Min RCON failures within window before ban");
+    reg.register("sv_rcon_minfailuretime", "30", srv, "Window in seconds for RCON minfailure tracking");
+    reg.register("sv_password", "", srv_prot, "Password required to join the server");
+    reg.register("password", "", CVarFlags::USERINFO | prot, "Client password for sv_password servers");
+    reg.register("sv_filterban", "1", CVarFlags::NONE, "Enable addip IP packet filtering (0 or 1)");
+    reg.register("bannedcfgfile", "banned.cfg", CVarFlags::NONE, "Filename used by writeid");
+    reg.register("listipcfgfile", "listip.cfg", CVarFlags::NONE, "Filename used by writeip");
+    reg.register("mp_logecho", "1", CVarFlags::NONE, "Echo server log lines to console (0 or 1)");
+    reg.register("mp_logfile", "1", srv, "Write server log lines to log file (0 or 1)");
+    reg.register("mp_logdetail", "0", srv, "Log hit/damage detail level (0..3)");
+    reg.register("mp_logmessages", "1", srv, "Log player chat messages (0 or 1)");
+    reg.register("sv_logbans", "0", srv, "Log server ban events (0 or 1)");
+    reg.register("sv_log_onefile", "0", CVarFlags::NONE, "Write all maps to a single log file (0 or 1)");
+    reg.register("sv_log_singleplayer", "0", CVarFlags::NONE, "Enable logging when maxplayers == 1");
+    reg.register("sv_logrelay", "0", CVarFlags::NONE, "Accept remote OOB log lines (0 or 1)");
+    reg.register("sv_logsecret", "0", prot, "Secret prefix for remote logaddress packets");
+    reg.register("logsdir", "logs", CVarFlags::NONE, "Directory where server log files are stored");
+    reg.register("sv_allowdownload", "1", srv, "Allow clients to download missing files (0 or 1)");
+    reg.register("sv_allowupload", "1", srv, "Allow clients to upload custom decals (0 or 1)");
+    reg.register("sv_allow_dlfile", "1", CVarFlags::NONE, "Allow netchan dlfile fallback when sv_downloadurl is set");
+    reg.register("sv_downloadurl", "", sponly, "Fast HTTP download base URL");
+    reg.register("sv_send_logos", "1", CVarFlags::NONE, "Broadcast custom spray logos to clients (0 or 1)");
+    reg.register("sv_send_resources", "1", CVarFlags::NONE, "Send resource list to connecting clients (0 or 1)");
+    reg.register("sv_uploadmax", "0.5", CVarFlags::NONE, "Maximum custom upload size in megabytes");
+    reg.register("mp_consistency", "1", srv, "Enforce model and file consistency on connect (0 or 1)");
+    reg.register("cl_allowdownload", "1", arch, "Allow client to download missing files from server");
+    reg.register("cl_allowupload", "1", arch, "Allow client to upload custom decals");
+    reg.register("cl_download_ingame", "1", arch, "Allow downloading custom decals while in game");
+    reg.register("cl_filterstuffcmd", "1", arch, "Filter dangerous svc_stufftext commands from servers");
+    reg.register("cl_logofile", "lambda", arch, "Custom spray logo name");
+    reg.register("cl_logocolor", "orange", arch, "Custom spray logo color");
+    reg.register("scr_downloading", "0", CVarFlags::NONE, "Non-zero while client download screen is active");
+    reg.register("pausable", "1", srv, "Allow players to pause the server (0 or 1)");
+    reg.register("master_server", "127.0.0.1:27010", arch, "Master server host:port for server browser");
 }
 
 pub fn register_default_binds(reg: &mut CVarRegistry) {
