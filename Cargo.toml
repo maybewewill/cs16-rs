@@ -22,6 +22,8 @@ members = [
     "crates/cs-mod-macros",
     "crates/cs-mod-sdk",
     "crates/cs-master",
+    "crates/cs-hltv",
+    "crates/cs-amxx",
     "xtask",
 ]
 resolver = "3"
@@ -69,6 +71,7 @@ cs-client = { path = "crates/cs-client" }
 cs-local = { path = "crates/cs-local" }
 cs-sim = { path = "crates/cs-sim" }
 cs-game = { path = "crates/cs-game" }
+cs-amxx = { path = "crates/cs-amxx" }
 cs-master = { path = "crates/cs-master" }
 cs-mod-api = { path = "crates/cs-mod-api" }
 cs-mod-host = { path = "crates/cs-mod-host" }

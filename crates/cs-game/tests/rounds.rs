@@ -438,7 +438,7 @@ fn win_limit_changes_the_map() {
         b.probe
             .messages()
             .iter()
-            .any(|m| matches!(m, cs_proto48::messages::SvcMessage::Ignored(30)))
+            .any(|m| matches!(m, cs_proto48::messages::SvcMessage::Intermission))
     );
     let started = rules(&b).intermission_start_time();
     assert!(started > 0.0);

@@ -12,6 +12,7 @@
 //! and the spectators watch through [`observer`].
 
 pub mod bots;
+mod amxx_hooks;
 pub mod breakables;
 pub mod bullets;
 pub mod buttons;
