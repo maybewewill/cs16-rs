@@ -39,6 +39,7 @@ mod touch;
 mod trace_ents;
 mod unlag;
 pub mod usercmd;
+pub mod voice_bridge;
 mod world;
 
 pub use client::{ClientState, MAX_CLIENT_INCOMING_STREAM, MAX_REFUSED_STREAMS, SignonStage};

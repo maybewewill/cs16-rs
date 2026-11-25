@@ -683,6 +683,7 @@ pub(crate) fn start_observer(
     crate::player::reset_max_speed(g, eng, slot);
     // Tell all clients this player is now a spectator.
     send_raw(eng, MsgDest::All, "Spectator", &[index_of(slot) as u8, 1]);
+    crate::messages::sync_observer_hud_info(g, eng, slot);
 }
 
 /// The part of `CBasePlayer::Killed` that concerns the camera: a dying player cannot switch

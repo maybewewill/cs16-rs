@@ -594,3 +594,38 @@ fn unchanged_entities_share_their_records_across_the_ring() {
         "{distinct} distinct records of {total}"
     );
 }
+
+#[test]
+fn live_rate_and_updaterate_cvars_apply_immediately_in_frame() {
+    let mut h = Harness::new(4);
+    assert_eq!(h.server.cvar_str("sv_maxupdaterate"), "30");
+    let mut probe = joined(&mut h, "A", &mut []);
+
+    // Client asks for 100 Hz; default retail `sv_maxupdaterate 30` caps updates to ~30 Hz.
+    probe.send_stringcmd("setinfo cl_updaterate 100");
+    h.step(&mut [&mut probe], 150);
+    let capped = probe.stats().frames_in_last_second;
+    assert!(
+        (26..=32).contains(&capped),
+        "default sv_maxupdaterate 30 should cap 100 Hz client to ~30 Hz, got {capped}"
+    );
+
+    // Raising `sv_maxupdaterate` live via console takes effect immediately without restart.
+    h.server.console_command("sv_maxupdaterate 60");
+    h.step(&mut [&mut probe], 150);
+    let raised = probe.stats().frames_in_last_second;
+    assert!(
+        (55..=63).contains(&raised),
+        "live sv_maxupdaterate 60 should allow ~60 Hz updates, got {raised}"
+    );
+
+    // Raising `sv_minupdaterate` live floors a low `cl_updaterate` client.
+    probe.send_stringcmd("setinfo cl_updaterate 10");
+    h.server.console_command("sv_minupdaterate 25");
+    h.step(&mut [&mut probe], 150);
+    let floored = probe.stats().frames_in_last_second;
+    assert!(
+        (23..=27).contains(&floored),
+        "live sv_minupdaterate 25 should floor 10 Hz client to ~25 Hz, got {floored}"
+    );
+}

@@ -3,8 +3,10 @@
 
 mod predict_support;
 
+use std::sync::Arc;
+
 use cs_assets::bsp::Entity;
-use cs_clientcore::{PredictInputs, Predictor, split_usercmd};
+use cs_clientcore::{LocalState, PredictInputs, Predictor, split_usercmd};
 use cs_proto48::delta::GoldSrcUserCmd;
 use glam::Vec3;
 use predict_support::*;
@@ -611,4 +613,862 @@ fn prediction_recovers_from_loss() {
     let server = l.server_origin();
     let predicted = l.conn.predictor().prediction().simorg;
     assert!((server - predicted).length() < TOLERANCE, "{server:?} vs {predicted:?}");
+}
+
+#[test]
+fn predicted_movement_emits_material_footsteps_and_handles_rotated_submodels() {
+    use cs_assets::bsp::{BspMap, BspModel, ClipNode, Face, Leaf, LightmapAtlas, Node, Plane, TexInfo};
+    use cs_assets::wad::DecodedTexture;
+    use cs_clientcore::{Frame, PlayerPose, PrecacheTables};
+    use cs_clientcore::frames::FrameEntity;
+    use cs_pm::collision::{CONTENTS_EMPTY, CONTENTS_SOLID, Hull, WorldCollision};
+    use cs_pm::pm::MoveVars;
+    use cs_proto48::delta::{GoldSrcClientData, GoldSrcEntityState};
+    use cs_proto48::messages::ResourceEntry;
+    use std::sync::Arc;
+
+    // Build a multi-zone BSP floor at z = 0:
+    //   x in [0, 200]:    "-0metal_zone" -> M -> player/pl_metal*.wav
+    //   x in [200, 400]:  "duct_zone"    -> V -> player/pl_duct*.wav
+    //   x in [400, 600]:  "snow_zone"    -> O -> player/pl_snow*.wav
+    //   x in [600, 800]:  "wood_zone"    -> W -> player/pl_step*.wav (wood maps to STEP_CONCRETE in pm_shared)
+    // Plus submodel *1 (a platform/door box [-64..64] x [-32..32] x [-16..0]) whose top face at z = 0
+    // is "grate_zone" -> G -> player/pl_grate*.wav, placed at origin (1000, 1000, 0) rotated 90 deg yaw.
+    let mut planes = Vec::new();
+    let mut nodes = Vec::new();
+    let mut clipnodes = Vec::new();
+    let mut vertices_raw = Vec::new();
+    let mut edges = Vec::new();
+    let mut surf_edges = Vec::new();
+    let mut faces = Vec::new();
+    let mut texinfos = Vec::new();
+    let mut textures = Vec::new();
+
+    let zone_specs = [
+        ("-0metal_zone", 0.0f32, 200.0f32),
+        ("duct_zone", 200.0f32, 400.0f32),
+        ("snow_zone", 400.0f32, 600.0f32),
+        ("wood_zone", 600.0f32, 800.0f32),
+    ];
+    for (i, (name, x0, x1)) in zone_specs.iter().enumerate() {
+        textures.push(DecodedTexture {
+            name: (*name).to_string(),
+            width: 16,
+            height: 16,
+            rgba: Vec::new(),
+            alpha_test: false,
+        });
+        texinfos.push(TexInfo {
+            s_vec: Vec3::X,
+            s_shift: 0.0,
+            t_vec: Vec3::Y,
+            t_shift: 0.0,
+            miptex: i as i32,
+            flags: 0,
+        });
+        let base_v = vertices_raw.len() as u16;
+        vertices_raw.push(Vec3::new(*x0, -128.0, 0.0));
+        vertices_raw.push(Vec3::new(*x1, -128.0, 0.0));
+        vertices_raw.push(Vec3::new(*x1, 128.0, 0.0));
+        vertices_raw.push(Vec3::new(*x0, 128.0, 0.0));
+        let base_e = edges.len() as i32;
+        edges.push([base_v, base_v + 1]);
+        edges.push([base_v + 1, base_v + 2]);
+        edges.push([base_v + 2, base_v + 3]);
+        edges.push([base_v + 3, base_v]);
+        surf_edges.extend_from_slice(&[base_e, base_e + 1, base_e + 2, base_e + 3]);
+        faces.push(Face {
+            plane: 0,
+            plane_side: 0,
+            first_edge: base_e,
+            num_edges: 4,
+            texinfo: i as u16,
+            styles: [0; 4],
+            lightmap_offset: -1,
+        });
+    }
+
+    // World point hull: node 0 is plane z = 0 carrying all 4 zone faces (each checked by its extents!).
+    planes.push(Plane {
+        normal: Vec3::Z,
+        dist: 0.0,
+        plane_type: 2,
+    });
+    nodes.push(Node {
+        plane: 0,
+        children: [-1, -2],
+        mins: [-4096; 3],
+        maxs: [4096; 3],
+        first_face: 0,
+        num_faces: 4,
+    });
+    // World standing hull: clipnode 0 is z = 36 (player standing half-height).
+    planes.push(Plane {
+        normal: Vec3::Z,
+        dist: Hull::Standing.half_extents().z,
+        plane_type: 2,
+    });
+    clipnodes.push(ClipNode {
+        plane: 1,
+        children: [CONTENTS_EMPTY as i16, CONTENTS_SOLID as i16],
+    });
+
+    // Submodel *1: local box [-64..64] x [-32..32] x [-16..0], top face at z = 0 textured "grate_zone".
+    textures.push(DecodedTexture {
+        name: "grate_zone".to_string(),
+        width: 16,
+        height: 16,
+        rgba: Vec::new(),
+        alpha_test: false,
+    });
+    texinfos.push(TexInfo {
+        s_vec: Vec3::X,
+        s_shift: 0.0,
+        t_vec: Vec3::Y,
+        t_shift: 0.0,
+        miptex: 4,
+        flags: 0,
+    });
+    let base_v = vertices_raw.len() as u16;
+    vertices_raw.push(Vec3::new(-64.0, -32.0, 0.0));
+    vertices_raw.push(Vec3::new(64.0, -32.0, 0.0));
+    vertices_raw.push(Vec3::new(64.0, 32.0, 0.0));
+    vertices_raw.push(Vec3::new(-64.0, 32.0, 0.0));
+    let base_e = edges.len() as i32;
+    edges.push([base_v, base_v + 1]);
+    edges.push([base_v + 1, base_v + 2]);
+    edges.push([base_v + 2, base_v + 3]);
+    edges.push([base_v + 3, base_v]);
+    surf_edges.extend_from_slice(&[base_e, base_e + 1, base_e + 2, base_e + 3]);
+    faces.push(Face {
+        plane: 0,
+        plane_side: 0,
+        first_edge: base_e,
+        num_edges: 4,
+        texinfo: 4,
+        styles: [0; 4],
+        lightmap_offset: -1,
+    });
+    nodes.push(Node {
+        plane: 0,
+        children: [-1, -2],
+        mins: [-64, -32, -16],
+        maxs: [64, 32, 0],
+        first_face: 4,
+        num_faces: 1,
+    });
+    // Submodel *1 standing hull: full grown box [-80..80] x [-48..48] x [-52..36].
+    let half = Hull::Standing.half_extents();
+    let sub_mins = Vec3::new(-64.0, -32.0, -16.0) - half;
+    let sub_maxs = Vec3::new(64.0, 32.0, 0.0) + half;
+    let box_planes = [
+        (0usize, sub_maxs.x),
+        (0usize, sub_mins.x),
+        (1usize, sub_maxs.y),
+        (1usize, sub_mins.y),
+        (2usize, sub_maxs.z),
+        (2usize, sub_mins.z),
+    ];
+    let first_sub_clip = clipnodes.len() as i32;
+    for (idx, &(axis, dist)) in box_planes.iter().enumerate() {
+        let mut normal = Vec3::ZERO;
+        normal[axis] = 1.0;
+        let plane_idx = planes.len() as i32;
+        planes.push(Plane {
+            normal,
+            dist,
+            plane_type: axis as i32,
+        });
+        let side = idx & 1;
+        let next = if idx < 5 {
+            first_sub_clip as i16 + idx as i16 + 1
+        } else {
+            CONTENTS_SOLID as i16
+        };
+        let mut children = [0i16; 2];
+        children[side] = CONTENTS_EMPTY as i16;
+        children[side ^ 1] = next;
+        clipnodes.push(ClipNode {
+            plane: plane_idx,
+            children,
+        });
+    }
+
+    let leaf = |contents: i32| Leaf {
+        contents,
+        vis_offset: -1,
+        mins: [0; 3],
+        maxs: [0; 3],
+        first_mark_surface: 0,
+        num_mark_surfaces: 0,
+        ambient_levels: [0; 4],
+    };
+    let bsp = BspMap {
+        name: "mat_zones".into(),
+        skyname: String::new(),
+        entities: Vec::new(),
+        spawns: Vec::new(),
+        hostage_spawns: Vec::new(),
+        brush_entities: Vec::new(),
+        planes,
+        vertices_raw,
+        visibility: Vec::new(),
+        nodes,
+        texinfos,
+        faces,
+        lighting: Vec::new(),
+        clipnodes,
+        leafs: vec![leaf(CONTENTS_EMPTY), leaf(CONTENTS_SOLID)],
+        mark_surfaces: Vec::new(),
+        edges,
+        surf_edges,
+        models: vec![
+            BspModel {
+                mins: Vec3::splat(-4096.0),
+                maxs: Vec3::splat(4096.0),
+                origin: Vec3::ZERO,
+                head_nodes: [0, 0, 0, 0],
+                vis_leafs: 1,
+                first_face: 0,
+                num_faces: 4,
+            },
+            BspModel {
+                mins: Vec3::new(-64.0, -32.0, -16.0),
+                maxs: Vec3::new(64.0, 32.0, 0.0),
+                origin: Vec3::ZERO,
+                head_nodes: [1, first_sub_clip, first_sub_clip, first_sub_clip],
+                vis_leafs: 1,
+                first_face: 4,
+                num_faces: 1,
+            },
+        ],
+        textures,
+        lightmap_atlas: LightmapAtlas {
+            width: 0,
+            height: 0,
+            rgba: Vec::new(),
+            packed_faces: 0,
+        },
+        render_vertices: Vec::new(),
+        render_indices: Vec::new(),
+        batches: Vec::new(),
+    };
+
+    let materials_txt = b"\
+M metal_zone
+V duct_zone
+N snow_zone
+W wood_zone
+G grate_zone
+";
+
+    let world = Arc::new(WorldCollision::from_bsp(&bsp));
+    let mut precache = PrecacheTables::default();
+    precache.add(&[ResourceEntry {
+        res_type: 2,
+        filename: "*1".to_string(),
+        index: 2,
+        download_size: 0,
+        flags: 0,
+        md5: None,
+        reserved: None,
+    }]);
+
+    let run_walk_at = |start_origin: Vec3, yaw: f32, submodel_origin: Option<Vec3>| -> Vec<String> {
+        let mut p = Predictor::new();
+        p.set_world(Some(Arc::clone(&world)));
+        p.set_materials(materials_txt);
+
+        let mut entities = vec![GoldSrcEntityState {
+            number: 1,
+            modelindex: 3,
+            movetype: 3,
+            solid: 3,
+            friction: 1.0,
+            gravity: 1.0,
+            mins: Vec3::new(-16.0, -16.0, -36.0),
+            maxs: Vec3::new(16.0, 16.0, 36.0),
+            ..GoldSrcEntityState::default()
+        }];
+        if let Some(org) = submodel_origin {
+            entities.push(GoldSrcEntityState {
+                number: 7,
+                modelindex: 2,
+                movetype: 7,
+                solid: 4,
+                origin: org,
+                angles: Vec3::new(0.0, 90.0, 0.0),
+                mins: Vec3::new(-64.0, -32.0, -16.0),
+                maxs: Vec3::new(64.0, 32.0, 0.0),
+                ..GoldSrcEntityState::default()
+            });
+        }
+        let frame = Frame {
+            sequence: 1,
+            valid: true,
+            time: 10.0,
+            received_time: 10.0,
+            entities: entities
+                .into_iter()
+                .map(|state| FrameEntity {
+                    state,
+                    is_new: false,
+                })
+                .collect(),
+            clientdata: Some(GoldSrcClientData {
+                origin: start_origin,
+                view_ofs: Vec3::new(0.0, 0.0, 17.0),
+                maxspeed: 250.0,
+                health: 100.0,
+                flags: 1 << 9,
+                ..GoldSrcClientData::default()
+            }),
+            weapon_data: Default::default(),
+        };
+        let mut all_sounds = Vec::new();
+        let poses: [PlayerPose; 0] = [];
+        let mv = MoveVars {
+            footsteps: true,
+            ..MoveVars::default()
+        };
+        for seq in 1..=45u32 {
+            let now = 10.0 + f64::from(seq) * 0.01;
+            p.set_now(now);
+            p.push_cmd(walk(10, IN_FORWARD, 250.0, 0.0, yaw));
+            p.packet_sent(seq, 1, None);
+            p.update(&PredictInputs {
+                now,
+                incoming_acknowledged: 0,
+                outgoing_sequence: seq + 1,
+                frame: Some(&frame),
+                playernum: 0,
+                max_clients: 4,
+                precache: &precache,
+                movevars: mv,
+                max_velocity: 2000.0,
+                poses: &poses,
+                entities: None,
+                remote_is_local: true,
+                intermission: false,
+            });
+            for s in p.take_sounds() {
+                all_sounds.push(s.sample);
+            }
+        }
+        all_sounds
+    };
+
+    // World zones: metal, duct, snow, wood.
+    let metal_sounds = run_walk_at(Vec3::new(32.0, 0.0, 36.03125), 0.0, None);
+    assert!(
+        !metal_sounds.is_empty() && metal_sounds.iter().all(|s| s.starts_with("player/pl_metal")),
+        "expected pl_metal*, got {metal_sounds:?}"
+    );
+    let duct_sounds = run_walk_at(Vec3::new(232.0, 0.0, 36.03125), 0.0, None);
+    assert!(
+        !duct_sounds.is_empty() && duct_sounds.iter().all(|s| s.starts_with("player/pl_duct")),
+        "expected pl_duct*, got {duct_sounds:?}"
+    );
+    let snow_sounds = run_walk_at(Vec3::new(432.0, 0.0, 36.03125), 0.0, None);
+    assert!(
+        !snow_sounds.is_empty() && snow_sounds.iter().all(|s| s.starts_with("player/pl_snow")),
+        "expected pl_snow*, got {snow_sounds:?}"
+    );
+    let wood_sounds = run_walk_at(Vec3::new(632.0, 0.0, 36.03125), 0.0, None);
+    assert!(
+        !wood_sounds.is_empty() && wood_sounds.iter().all(|s| s.starts_with("player/pl_step")),
+        "wood maps to STEP_CONCRETE (pl_step*) in GoldSrc pm_shared, got {wood_sounds:?}"
+    );
+
+    // Rotated submodel *1 at (1000, 1000, 100) with 90 deg yaw: long axis is along world Y.
+    // Walking along +Y (yaw 90) stays on top of the rotated platform and emits pl_grate*.
+    let grate_sounds = run_walk_at(
+        Vec3::new(1000.0, 960.0, 136.03125),
+        90.0,
+        Some(Vec3::new(1000.0, 1000.0, 100.0)),
+    );
+    assert!(
+        !grate_sounds.is_empty() && grate_sounds.iter().all(|s| s.starts_with("player/pl_grate")),
+        "expected pl_grate* on rotated brush submodel, got {grate_sounds:?}"
+    );
+}
+
+#[test]
+fn predicted_movement_on_stock_maps_emits_non_concrete_footsteps() {
+    use cs_assets::bsp::BspMap;
+    use cs_clientcore::frames::FrameEntity;
+    use cs_clientcore::{Frame, PlayerPose, PrecacheTables};
+    use cs_pm::collision::{CONTENTS_EMPTY, Hull, WorldCollision};
+    use cs_pm::pm::{MoveVars, TextureTable};
+    use cs_proto48::delta::{GoldSrcClientData, GoldSrcEntityState};
+    use cs_vfs::{Vfs, VfsConfig};
+    use std::sync::Arc;
+
+    let Ok(vfs) = Vfs::discover(None, VfsConfig::default()) else {
+        eprintln!("skipped: the installed game is not found (set CS16_GAMEDIR)");
+        return;
+    };
+    let materials_txt = vfs
+        .read_bytes("sound/materials.txt")
+        .expect("sound/materials.txt in retail VFS");
+    let tex_table = TextureTable::parse(&materials_txt);
+
+    let find_spot_and_walk = |map_name: &str, expected_type: u8, expected_prefix: &str| {
+        let bsp = BspMap::load(&vfs, map_name).expect("stock map parses");
+        let world = Arc::new(WorldCollision::from_bsp(&bsp));
+        let world_model = &bsp.models[0];
+        let first = world_model.first_face as usize;
+        let end = first + world_model.num_faces as usize;
+
+        let mut spot = None;
+        for face in &bsp.faces[first..end] {
+            let Some(plane) = bsp.planes.get(usize::from(face.plane)) else {
+                continue;
+            };
+            if plane.normal.z < 0.95 || face.num_edges < 3 {
+                continue;
+            }
+            let Some(ti) = bsp.texinfos.get(usize::from(face.texinfo)) else {
+                continue;
+            };
+            let Some(tex) = usize::try_from(ti.miptex).ok().and_then(|i| bsp.textures.get(i)) else {
+                continue;
+            };
+            let stripped = tex
+                .name
+                .trim_start_matches(['-', '+'])
+                .trim_start_matches(|c: char| c.is_ascii_digit())
+                .trim_start_matches(['{', '!', '~', ' ']);
+            if tex_table.find(stripped) != expected_type {
+                continue;
+            }
+            let mut sum = Vec3::ZERO;
+            let mut count = 0usize;
+            for i in 0..usize::from(face.num_edges) {
+                let se = bsp.surf_edges[face.first_edge as usize + i];
+                let v_idx = if se >= 0 {
+                    bsp.edges[se as usize][0]
+                } else {
+                    bsp.edges[se.unsigned_abs() as usize][1]
+                };
+                sum += bsp.vertices_raw[usize::from(v_idx)];
+                count += 1;
+            }
+            let center = sum / count as f32;
+            let tr = world.trace_world(
+                center + Vec3::Z * 48.0,
+                center - Vec3::Z * 16.0,
+                Hull::Standing,
+            );
+            if tr.start_solid || tr.all_solid || !tr.hit_solid || tr.plane_normal.z < 0.7 {
+                continue;
+            }
+            let stand_org = tr.end_pos;
+            if world.point_contents(stand_org, Hull::Standing) != CONTENTS_EMPTY {
+                continue;
+            }
+            if world
+                .trace_world(stand_org, stand_org + Vec3::X * 128.0, Hull::Standing)
+                .fraction
+                < 1.0
+            {
+                continue;
+            }
+            if world
+                .trace_texture(0, stand_org, stand_org - Vec3::Z * 64.0)
+                .is_some_and(|n| n == tex.name)
+            {
+                spot = Some((stand_org, tex.name.clone()));
+                break;
+            }
+        }
+
+        let (origin, tex_name) = spot.unwrap_or_else(|| {
+            panic!("expected a walkable face of type {} in {map_name}", char::from(expected_type))
+        });
+
+        let mut p = Predictor::new();
+        p.set_world(Some(world));
+        p.set_materials(&materials_txt);
+        let precache = PrecacheTables::default();
+        let frame = Frame {
+            sequence: 1,
+            valid: true,
+            time: 10.0,
+            received_time: 10.0,
+            entities: vec![FrameEntity {
+                state: GoldSrcEntityState {
+                    number: 1,
+                    modelindex: 3,
+                    movetype: 3,
+                    solid: 3,
+                    friction: 1.0,
+                    gravity: 1.0,
+                    mins: Vec3::new(-16.0, -16.0, -36.0),
+                    maxs: Vec3::new(16.0, 16.0, 36.0),
+                    ..GoldSrcEntityState::default()
+                },
+                is_new: false,
+            }],
+            clientdata: Some(GoldSrcClientData {
+                origin,
+                view_ofs: Vec3::new(0.0, 0.0, 17.0),
+                maxspeed: 250.0,
+                health: 100.0,
+                flags: 1 << 9,
+                ..GoldSrcClientData::default()
+            }),
+            weapon_data: Default::default(),
+        };
+        let mv = MoveVars {
+            footsteps: true,
+            ..MoveVars::default()
+        };
+        let poses: [PlayerPose; 0] = [];
+        let mut sounds = Vec::new();
+        for seq in 1..=60u32 {
+            let now = 10.0 + f64::from(seq) * 0.01;
+            p.set_now(now);
+            p.push_cmd(walk(10, IN_FORWARD, 250.0, 0.0, 0.0));
+            p.packet_sent(seq, 1, None);
+            p.update(&PredictInputs {
+                now,
+                incoming_acknowledged: 0,
+                outgoing_sequence: seq + 1,
+                frame: Some(&frame),
+                playernum: 0,
+                max_clients: 4,
+                precache: &precache,
+                movevars: mv,
+                max_velocity: 2000.0,
+                poses: &poses,
+                entities: None,
+                remote_is_local: true,
+                intermission: false,
+            });
+            for s in p.take_sounds() {
+                sounds.push(s.sample);
+            }
+        }
+        assert!(
+            sounds.iter().any(|s| s.starts_with(expected_prefix)),
+            "{map_name} face {tex_name}: expected {expected_prefix}*, got {sounds:?}"
+        );
+    };
+
+    find_spot_and_walk("de_survivor", b'N', "player/pl_snow");
+    find_spot_and_walk("de_nuke", b'M', "player/pl_metal");
+    find_spot_and_walk("de_nuke", b'V', "player/pl_duct");
+    find_spot_and_walk("as_oilrig", b'G', "player/pl_grate");
+}
+
+#[test]
+fn txfer_prediction_data_preserves_fuser2_and_duck_state_without_stamina_snap() {
+    let precache = bare::precache();
+    let spawn = Vec3::new(0.0, 0.0, 36.03125);
+    let mut p = Predictor::new();
+    p.set_world(Some(bare::world()));
+
+    // Jump on packet 1 -> fuser2 becomes 1315.7894 in prediction.
+    let frame1 = bare::frame(1, spawn, vec![bare::local_state(1)]);
+    p.set_now(0.01);
+    p.push_cmd(walk(10, IN_JUMP | IN_FORWARD, 250.0, 0.0, 0.0));
+    p.packet_sent(1, 1, None);
+    // Double-duck start on packet 2..4 -> flDuckTime counts down from 1000 while bInDuck = true.
+    for seq in 2..=4u32 {
+        p.set_now(f64::from(seq) * 0.01);
+        p.push_cmd(walk(10, IN_DUCK | IN_FORWARD, 250.0, 0.0, 0.0));
+        p.packet_sent(seq, 1, None);
+    }
+    p.update(&bare::inputs(0.04, 0, 5, Some(&frame1), &precache, &[], false));
+    let pred_at_1_vel = p.predicted_velocity(1).expect("predicted vel at 1");
+    let pred_at_1_org = p.predicted_origin(1).expect("predicted org at 1");
+
+    // Server acks packet 1 after 50 ms RTT: wire DT_FLOAT(14, 1.0) truncates fuser2 1315.7894 -> 1315.0.
+    // TxferPredictionData must preserve exact float fuser2 and flDuckTime/bInDuck across replay.
+    let mut frame2 = bare::frame(2, pred_at_1_org, vec![bare::local_state(1)]);
+    let cd2 = frame2.clientdata.as_mut().unwrap();
+    cd2.velocity = pred_at_1_vel;
+    cd2.flags &= !(1 << 9); // airborne after jump
+    cd2.fuser2 = 1315.0; // truncated on wire
+    cd2.fl_duck_time = 0;
+    cd2.b_in_duck = 0;
+
+    let before_simvel = p.prediction().simvel;
+    p.set_now(0.05);
+    p.push_cmd(walk(10, IN_DUCK | IN_FORWARD, 250.0, 0.0, 0.0));
+    p.packet_sent(5, 1, None);
+    p.update(&bare::inputs(0.05, 1, 6, Some(&frame2), &precache, &[], false));
+
+    let check = *p.checks().back().unwrap();
+    assert!(!check.teleport);
+    assert!(check.error < 0.05, "unexpected snap error: {}", check.error);
+
+    // Next jump after landing uses preserved fuser2 without a 1-frame stamina snap.
+    let state_at_4 = LocalState::from_frame(&frame2, 1, None).unwrap();
+    assert_eq!(state_at_4.fuser[1], 1315.0);
+    assert!(
+        (p.prediction().simvel.truncate() - before_simvel.truncate()).length() < 5.0,
+        "stamina/duck carry caused velocity snap: {:?} -> {:?}",
+        before_simvel,
+        p.prediction().simvel
+    );
+}
+
+#[test]
+fn two_player_head_stack_boost_and_runboost_over_50ms_rtt() {
+    use cs_clientcore::{ConnState, Connection, ConnectionConfig};
+    use cs_cvar::CVarRegistry;
+    use cs_engine::{Server, ServerConfig};
+    use cs_game::CsGame;
+    use cs_game::player::Team;
+    use cs_proto48::crypto::md5_hex;
+    use cs_proto48::delta::DeltaRegistry;
+    use cs_transport::{LoopbackEndpoint, LoopbackHub, PacketTransport, PeerAddr, TransportError};
+    use std::cell::Cell;
+    use std::collections::VecDeque;
+    use std::rc::Rc;
+
+    struct DelayedEndpoint {
+        inner: LoopbackEndpoint,
+        now: Rc<Cell<f64>>,
+        one_way_delay: f64,
+        outbound: VecDeque<(f64, PeerAddr, Vec<u8>)>,
+        inbound: VecDeque<(f64, PeerAddr, Vec<u8>)>,
+    }
+
+    impl DelayedEndpoint {
+        fn new(inner: LoopbackEndpoint, now: Rc<Cell<f64>>, one_way_delay: f64) -> Self {
+            Self {
+                inner,
+                now,
+                one_way_delay,
+                outbound: VecDeque::new(),
+                inbound: VecDeque::new(),
+            }
+        }
+
+        fn flush_due(&mut self) {
+            let t = self.now.get();
+            while let Some((deliver_at, _, _)) = self.outbound.front() {
+                if *deliver_at <= t + 1e-9 {
+                    let (_, to, bytes) = self.outbound.pop_front().unwrap();
+                    let _ = self.inner.send(to, &bytes);
+                } else {
+                    break;
+                }
+            }
+            while let Some((from, data)) = self.inner.recv() {
+                self.inbound.push_back((t + self.one_way_delay, from, data));
+            }
+        }
+    }
+
+    impl PacketTransport for DelayedEndpoint {
+        fn recv(&mut self) -> Option<(PeerAddr, Vec<u8>)> {
+            self.flush_due();
+            let t = self.now.get();
+            if self
+                .inbound
+                .front()
+                .is_some_and(|(deliver_at, _, _)| *deliver_at <= t + 1e-9)
+            {
+                self.inbound.pop_front().map(|(_, from, data)| (from, data))
+            } else {
+                None
+            }
+        }
+
+        fn send(&mut self, to: PeerAddr, data: &[u8]) -> Result<(), TransportError> {
+            self.outbound
+                .push_back((self.now.get() + self.one_way_delay, to, data.to_vec()));
+            self.flush_due();
+            Ok(())
+        }
+    }
+
+    let (map, world) = server_map(map_entities(None));
+    let rig = Rig {
+        game: CsGame::new(),
+        actions: Vec::new(),
+    };
+    let mut cvars = CVarRegistry::new_with_defaults();
+    let _ = cvars.set("mp_freezetime", "0");
+    let mut server = Server::new(
+        ServerConfig {
+            max_clients: 4,
+            max_edicts: 256,
+            max_update_rate: 102,
+            ..ServerConfig::default()
+        },
+        map,
+        rig,
+        DeltaRegistry::cs16_default(),
+        cvars,
+    );
+    let mut hub = LoopbackHub::new();
+    let clock = Rc::new(Cell::new(0.0_f64));
+
+    let ep_top = DelayedEndpoint::new(hub.connect(), Rc::clone(&clock), 0.025);
+    let ep_bot = DelayedEndpoint::new(hub.connect(), Rc::clone(&clock), 0.025);
+
+    let mut conn_top = Connection::new(
+        ep_top,
+        PeerAddr::Loopback(0),
+        ConnectionConfig::new("booster_top", 76_561_197_960_265_731, &md5_hex(b"top")),
+    );
+    let mut conn_bot = Connection::new(
+        ep_bot,
+        PeerAddr::Loopback(0),
+        ConnectionConfig::new("booster_bot", 76_561_197_960_265_732, &md5_hex(b"bot")),
+    );
+    for c in [&mut conn_top, &mut conn_bot] {
+        c.set_cvar("cl_updaterate", "100");
+        c.set_cvar("cl_cmdrate", "100");
+        c.frames_mut().set_remote_is_local(false);
+        c.connect();
+    }
+
+    for _ in 0..800 {
+        clock.set(clock.get() + FRAME);
+        let t = clock.get();
+        conn_top.pump(t);
+        conn_bot.pump(t);
+        server.frame(&mut hub, t);
+        if conn_top.state() == &ConnState::InGame && conn_bot.state() == &ConnState::InGame {
+            break;
+        }
+    }
+    assert_eq!(conn_top.state(), &ConnState::InGame);
+    assert_eq!(conn_bot.state(), &ConnState::InGame);
+    conn_top.set_world_collision(Some(Arc::clone(&world)));
+    conn_bot.set_world_collision(Some(world));
+
+    // Spawn both players: move slot 0 outside the 128 u spawn radius before spawning slot 1 so
+    // slot 1 does not telefrag slot 0, then stack top on bottom's head (z = 108.0625 vs 36.03125).
+    server.game_mut().actions.push(Box::new(|game, eng| {
+        eng.set_cvar("mp_freezetime", "0");
+        assert!(game.spawn_player(eng, 0, Team::Ct, 0));
+        eng.set_origin(eng.client_edict(0), Vec3::new(-200.0, 0.0, 36.03125));
+        assert!(game.spawn_player(eng, 1, Team::Ct, 0));
+        game.end_freeze_period(eng);
+        for slot in [0u8, 1u8] {
+            let id = eng.client_edict(slot);
+            let origin = if slot == 0 {
+                Vec3::new(0.0, 0.0, 108.0625)
+            } else {
+                Vec3::new(0.0, 0.0, 36.03125)
+            };
+            eng.ent_mut(id).unwrap().max_speed = 250.0;
+            eng.set_origin(id, origin);
+        }
+    }));
+
+    for _ in 0..25 {
+        clock.set(clock.get() + FRAME);
+        let t = clock.get();
+        conn_top.queue_cmd(idle(10));
+        conn_bot.queue_cmd(idle(10));
+        conn_top.frames_mut().advance(FRAME);
+        conn_bot.frames_mut().advance(FRAME);
+        conn_top.pump(t);
+        conn_bot.pump(t);
+        server.frame(&mut hub, t);
+    }
+
+    // 1. Static vertical head-stack boost + crouch on top of teammate's SOLID_SLIDEBOX/SOLID_BBOX.
+    let first_check = conn_top.predictor().checks().len();
+    let mut prev_eye_z = conn_top.predictor().prediction().simorg.z
+        + conn_top.predictor().prediction().viewheight.z;
+    for i in 0..80 {
+        let top_cmd = if i >= 30 {
+            walk(10, IN_DUCK, 0.0, 0.0, 0.0)
+        } else {
+            idle(10)
+        };
+        clock.set(clock.get() + FRAME);
+        let t = clock.get();
+        conn_top.queue_cmd(top_cmd);
+        conn_bot.queue_cmd(idle(10));
+        conn_top.frames_mut().advance(FRAME);
+        conn_bot.frames_mut().advance(FRAME);
+        conn_top.pump(t);
+        conn_bot.pump(t);
+        server.frame(&mut hub, t);
+
+        let pred = conn_top.predictor().prediction();
+        assert!(pred.predicted);
+        assert!(pred.onground > 0, "top must remain grounded on teammate at step {i}");
+        let eye_z = pred.simorg.z + pred.viewheight.z;
+        if i < 30 {
+            assert!(
+                (eye_z - prev_eye_z).abs() < 0.05,
+                "vertical camera jitter while standing on teammate: {prev_eye_z} -> {eye_z}"
+            );
+        }
+        prev_eye_z = eye_z;
+    }
+
+    // 2. Runboost: stand up and run forward together on top of moving teammate over 50 ms RTT.
+    for _ in 0..50 {
+        clock.set(clock.get() + FRAME);
+        let t = clock.get();
+        conn_top.queue_cmd(idle(10));
+        conn_bot.queue_cmd(idle(10));
+        conn_top.frames_mut().advance(FRAME);
+        conn_bot.frames_mut().advance(FRAME);
+        conn_top.pump(t);
+        conn_bot.pump(t);
+        server.frame(&mut hub, t);
+    }
+    let runboost_start_z = conn_top.predictor().prediction().simorg.z;
+    for i in 0..80 {
+        clock.set(clock.get() + FRAME);
+        let t = clock.get();
+        conn_top.queue_cmd(walk(10, IN_FORWARD, 250.0, 0.0, 0.0));
+        conn_bot.queue_cmd(walk(10, IN_FORWARD, 250.0, 0.0, 0.0));
+        conn_top.frames_mut().advance(FRAME);
+        conn_bot.frames_mut().advance(FRAME);
+        conn_top.pump(t);
+        conn_bot.pump(t);
+        server.frame(&mut hub, t);
+
+        let pred = conn_top.predictor().prediction();
+        assert!(
+            (pred.simorg.z - runboost_start_z).abs() < 0.25,
+            "runboost vertical jitter at step {i}: {} vs {runboost_start_z}",
+            pred.simorg.z
+        );
+    }
+    // Flush acks.
+    for _ in 0..10 {
+        clock.set(clock.get() + FRAME);
+        let t = clock.get();
+        conn_top.frames_mut().advance(FRAME);
+        conn_bot.frames_mut().advance(FRAME);
+        conn_top.pump(t);
+        conn_bot.pump(t);
+        server.frame(&mut hub, t);
+    }
+
+    let checks: Vec<_> = conn_top
+        .predictor()
+        .checks()
+        .iter()
+        .skip(first_check)
+        .copied()
+        .collect();
+    assert!(!checks.is_empty(), "expected prediction checks over 50 ms RTT");
+    let worst = checks.iter().map(|c| c.error).fold(0.0f32, f32::max);
+    let teleports = checks.iter().filter(|c| c.teleport).count();
+    assert_eq!(teleports, 0, "expected 0 teleports during boost/runboost");
+    assert!(
+        worst < 0.25,
+        "expected < 0.25 u prediction error over 50 ms RTT boost/runboost, got {worst}"
+    );
+    assert!(
+        conn_top.predictor().prediction().simorg.x > 100.0,
+        "runboost moved forward: {:?}",
+        conn_top.predictor().prediction().simorg
+    );
 }

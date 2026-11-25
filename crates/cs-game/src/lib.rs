@@ -32,6 +32,7 @@ pub mod intro;
 pub mod inventory;
 pub mod io;
 pub mod items;
+pub mod kz;
 pub mod mapcycle;
 pub mod menus;
 mod messages;
@@ -63,6 +64,22 @@ pub use entity::{GameEntity, create_entity};
 
 use entity::{attach, with_entity};
 use player::{MAX_PLAYERS, Player};
+
+/// Recorded practice impact / wallbang entry (`sv_showimpacts`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PracticeImpact {
+    pub origin: Vec3,
+    pub exit: Option<Vec3>,
+    pub wallbang_line: Option<String>,
+}
+
+/// Per-attacker-to-victim damage accumulator within a single round (`sv_damage_print`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RoundDamageEntry {
+    pub damage: i32,
+    pub hits: u16,
+    pub headshots: u16,
+}
 
 /// What the game keeps outside its entities: handed to every entity call.
 pub struct GameState {
@@ -128,6 +145,14 @@ pub struct GameState {
     pub(crate) map_votes: [Option<usize>; MAX_PLAYERS],
     /// Active `vote` kick selections per player slot (target slot index).
     pub(crate) kick_votes: [Option<u8>; MAX_PLAYERS],
+    /// Recorded practice bullet impacts and wallbang exits (`sv_showimpacts`).
+    pub practice_impacts: std::collections::VecDeque<PracticeImpact>,
+    /// Per-round `[attacker_slot][victim_slot]` damage ledger for `sv_damage_print`.
+    pub round_damage: [[RoundDamageEntry; MAX_PLAYERS]; MAX_PLAYERS],
+    /// Whether `sv_damage_print` already sent this round's summary to `slot` (e.g. on death).
+    pub damage_printed: [bool; MAX_PLAYERS],
+    /// Built-in KZ checkpoints, map timer leaderboard, and server-side JumpStats.
+    pub kz: kz::KzState,
     /// Every call the dispatch delivered to a `test_dispatch` entity. For tests only (feature
     /// `test-hooks`).
     #[cfg(feature = "test-hooks")]
@@ -165,6 +190,10 @@ impl GameState {
             world_sounds: Vec::new(),
             map_votes: [None; MAX_PLAYERS],
             kick_votes: [None; MAX_PLAYERS],
+            practice_impacts: std::collections::VecDeque::new(),
+            round_damage: [[RoundDamageEntry::default(); MAX_PLAYERS]; MAX_PLAYERS],
+            damage_printed: [false; MAX_PLAYERS],
+            kz: kz::KzState::default(),
             #[cfg(feature = "test-hooks")]
             dispatch_log: Vec::new(),
         }
@@ -195,6 +224,10 @@ impl GameState {
         self.world_sounds.clear();
         self.map_votes = [None; MAX_PLAYERS];
         self.kick_votes = [None; MAX_PLAYERS];
+        self.practice_impacts.clear();
+        self.round_damage = [[RoundDamageEntry::default(); MAX_PLAYERS]; MAX_PLAYERS];
+        self.damage_printed = [false; MAX_PLAYERS];
+        self.kz.reset_map();
     }
 }
 
@@ -838,6 +871,16 @@ impl GameDll for CsGame {
     fn server_activate(&mut self, eng: &mut EngineApi<'_>) {
         // `ServerActivate`: `g_pMapInfo->CheckMapInfo()`, `ReadMultiplayCvars()` and
         // `CheckMapConditions()` (the last two are the constructor's of the rules here).
+        if let Some(vfs) = self.state.vfs.clone() {
+            if let Some(motdfile) = eng.cvar_str("motdfile") {
+                self.load_motd_file(&vfs, &motdfile);
+            }
+            if let Some(cycle) = eng.cvar_str("mapcyclefile")
+                && !cycle.trim().is_empty()
+            {
+                self.state.map_cycle = mapcycle::MapCycle::load_from(&vfs, cycle.trim());
+            }
+        }
         self.state.rules = rules::Rules::new(eng);
         zones::check_map_info(&mut self.state);
         // `WriteSigonMessages`, after `LinkUserMessages`: the HUD's weapon table.
@@ -953,6 +996,26 @@ impl GameDll for CsGame {
     }
 
     fn server_command(&mut self, eng: &mut EngineApi<'_>, argv: &[String]) -> Option<String> {
+        let cmd = argv.first()?.to_ascii_lowercase();
+        match cmd.as_str() {
+            "motd" => {
+                let text = String::from_utf8_lossy(&self.state.motd);
+                if text.is_empty() {
+                    return Some("(motd is empty)\n".to_string());
+                }
+                return Some(format!("{text}\n"));
+            }
+            "motd_write" => {
+                let body = argv[1..].join(" ");
+                self.state.motd = body.as_bytes().to_vec();
+                return Some("MOTD updated\n".to_string());
+            }
+            "lo3" | "mp_live_on_three" => {
+                rules::start_lo3(&mut self.state, eng);
+                return Some("[LIVE] --- LIVE ON THREE RESTARTS ---\n".to_string());
+            }
+            _ => {}
+        }
         bots::server_command(&mut self.state, eng, argv)
     }
 

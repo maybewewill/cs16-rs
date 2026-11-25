@@ -250,6 +250,7 @@ const REGAMEDLL_ORDER: &[(&str, i8)] = &[
     ("CZCareerHUD", -1), ("ShadowIdx", 4), ("TaskTime", 4), ("Scenario", -1), ("BotVoice", 2),
     ("BuyClose", 0), ("SpecHealth2", 2), ("BarTime2", 4), ("ItemStatus", 1), ("Location", -1),
     ("BotProgress", -1), ("Brass", -1), ("Fog", 7), ("ShowTimer", 0), ("HudTextArgs", -1),
+    ("Account", 5), ("HealthInfo", 5),
 ];
 
 #[test]
@@ -277,6 +278,8 @@ fn usermsgs_registered_in_regamedll_order() {
         CsUserMsg::RoundTime(1),
         CsUserMsg::SetFov(90),
         CsUserMsg::Radar { player_id: 1, origin: glam::Vec3::ZERO },
+        CsUserMsg::Account { player_id: 1, amount: 800 },
+        CsUserMsg::HealthInfo { player_id: 1, health: 100 },
     ];
     for msg in samples {
         let (name, payload) = encode_cs_usermsg(&msg);

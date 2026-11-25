@@ -14,6 +14,7 @@ use cs_assets::bsp::BspMap;
 use cs_assets::materials::{MaterialTable, SurfaceMaterial};
 use cs_assets::mdl::{MdlSeqEvent, StudioModel};
 use cs_assets::spr::GoldSrcSprite;
+use cs_clientcore::cvars::ClientCvars;
 use cs_clientcore::entities::ef;
 use cs_clientcore::events::{EventFx, FiredEvent, ViewAnim};
 use cs_clientcore::hud::{CustomDecalInfo, evaluate_lightstyles};
@@ -34,7 +35,7 @@ use cs_transport::PacketTransport;
 use cs_vfs::Vfs;
 use glam::Vec3;
 
-use crate::render::decal_renderer::DecalSpawn;
+use crate::render::decal_renderer::{DecalSpawn, query_submodel_faces_in_sphere};
 use crate::render::fx_renderer::{FxBeam, FxPoint};
 use crate::render::lighting::{
     DLightPool, GpuLightsUniform, SpotLight, compute_flashlight_spot,
@@ -42,7 +43,10 @@ use crate::render::lighting::{
 use crate::render::mdl_renderer::{STUDIO_LOOPING, studio_frame};
 use crate::render::particles::{BeamSystem, ParticleSystem};
 use crate::render::scene::{
-    EntRenderMode, ModelHandle, ModelRegistry, RenderEntity, SceneFrame, ViewBasis,
+    BrushCollider, EF_NODRAW, EntRenderMode, ModelHandle, ModelKind, ModelRegistry,
+    RENDERFX_DEAD_PLAYER, RenderEntity, SOLID_BSP, SceneFrame, ViewBasis,
+    collect_opaque_brush_colliders, collect_solid_brush_colliders, trace_brush_collider,
+    trace_glow_occlusion, trace_studio_shadow, world_to_brush_local,
 };
 use crate::view_effects::{
     BobParams, BobState, StairSmoothState, ViewModelLagState, calc_roll, calc_screen_shake,
@@ -146,6 +150,12 @@ pub struct ViewInputs {
     pub cl_rollangle: f32,
     pub cl_rollspeed: f32,
     pub cl_viewmodel_lag: f32,
+    pub cl_weather: bool,
+    pub sv_cheats: bool,
+    pub sv_showimpacts: i32,
+    pub sv_showhitboxes: bool,
+    /// Spectator / demo X-Ray (`spec_xray`), strictly gated in `ViewBuilder`.
+    pub spec_xray: bool,
 }
 
 impl Default for ViewInputs {
@@ -163,6 +173,11 @@ impl Default for ViewInputs {
             cl_rollangle: 2.0,
             cl_rollspeed: 200.0,
             cl_viewmodel_lag: 1.0,
+            cl_weather: true,
+            sv_cheats: false,
+            sv_showimpacts: 0,
+            sv_showhitboxes: false,
+            spec_xray: false,
         }
     }
 }
@@ -223,6 +238,12 @@ pub struct FrameView {
     pub custom_decals: HashMap<u8, CustomDecalInfo>,
     pub alive: bool,
     pub observer_mode: i32,
+    /// Observed target entity index (`cd.iuser2`), 0 when roaming or alive.
+    pub observed_target: u8,
+    /// Whether this frame was built from `DemoPlayer` (`.dem` playback).
+    pub is_demo: bool,
+    /// Active weapon short names per 1-based player entity index (`p_*.mdl` -> e.g. `"ak47"`).
+    pub player_weapons: BTreeMap<u8, String>,
     pub stats: ViewStats,
 }
 
@@ -276,7 +297,10 @@ pub struct ViewBuilder {
     bob_state: BobState,
     player_gaits: HashMap<u16, (f32, Vec3)>,
     vm_seq_cache: HashMap<String, Vec<CachedSeqMeta>>,
+    hitbox_models: HashMap<String, Option<Arc<StudioModel>>>,
     last_vm_frame: f32,
+    last_vm_path: String,
+    last_vm_animtime: f32,
     vfs: Option<Vfs>,
     collision: Option<Arc<WorldCollision>>,
     bsp: Option<Arc<BspMap>>,
@@ -294,6 +318,133 @@ impl Default for ViewBuilder {
 
 const FL_SPECTATOR: u32 = 1 << 12;
 const WEAPON_SUIT_BIT: u32 = 1 << 31;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SpecXrayPolicy {
+    Disabled,
+    AllTeams,
+    TeamOnly(String),
+}
+
+impl SpecXrayPolicy {
+    fn allows(&self, team: &str, team_id: i16) -> bool {
+        let norm = normalize_player_team(team, team_id);
+        match self {
+            Self::Disabled => false,
+            Self::AllTeams => matches!(norm, Some("CT" | "TERRORIST")),
+            Self::TeamOnly(own) => norm.is_some_and(|t| t == own),
+        }
+    }
+}
+
+fn normalize_player_team(team: &str, team_id: i16) -> Option<&'static str> {
+    if team.eq_ignore_ascii_case("CT") {
+        Some("CT")
+    } else if team.eq_ignore_ascii_case("TERRORIST") {
+        Some("TERRORIST")
+    } else if team.eq_ignore_ascii_case("SPECTATOR") {
+        Some("SPECTATOR")
+    } else if !team.is_empty() {
+        None
+    } else {
+        match team_id {
+            1 => Some("TERRORIST"),
+            2 => Some("CT"),
+            3 => Some("SPECTATOR"),
+            _ => None,
+        }
+    }
+}
+
+fn evaluate_spec_xray_policy(
+    enabled: bool,
+    is_demo: bool,
+    alive: bool,
+    observer_mode: i32,
+    local_number: Option<u16>,
+    fx: &ClientEffects,
+) -> SpecXrayPolicy {
+    if !enabled {
+        return SpecXrayPolicy::Disabled;
+    }
+    if is_demo {
+        return SpecXrayPolicy::AllTeams;
+    }
+    // Strict anti-cheat gate: NEVER render X-Ray while local player is alive or not observing.
+    if alive || observer_mode == 0 {
+        return SpecXrayPolicy::Disabled;
+    }
+    let Some(local_id) = local_number.and_then(|n| u8::try_from(n).ok()) else {
+        return SpecXrayPolicy::Disabled;
+    };
+    let local_team = fx
+        .hud
+        .players
+        .get(&local_id)
+        .and_then(|s| normalize_player_team(&s.team, s.team_id));
+    match local_team {
+        Some("SPECTATOR") => SpecXrayPolicy::AllTeams,
+        Some(team @ ("CT" | "TERRORIST")) => {
+            let (forcecam, forcechasecam, fadetoblack) = fx.hud.force_cam.unwrap_or((0, 0, 0));
+            if fadetoblack != 0 {
+                SpecXrayPolicy::Disabled
+            } else if forcecam != 0 || forcechasecam != 0 {
+                SpecXrayPolicy::TeamOnly(team.to_string())
+            } else {
+                SpecXrayPolicy::AllTeams
+            }
+        }
+        _ => SpecXrayPolicy::Disabled,
+    }
+}
+
+fn weapon_short_from_pmodel(path: &str) -> Option<String> {
+    let lower = path.to_ascii_lowercase();
+    let file = lower.rsplit('/').next()?;
+    let stem = file.strip_prefix("p_")?.strip_suffix(".mdl")?;
+    let mapped = match stem {
+        "mp5" => "mp5navy",
+        other => other,
+    };
+    Some(mapped.to_string())
+}
+
+/// Resolve the forced player studio model path when `cl_minmodels != 0` from `TeamInfo` /
+/// `ScoreAttrib` VIP bit and `cl_min_ct` / `cl_min_t` indices (`client.dll` `0x10105f08` table).
+pub fn resolve_minmodel_path(
+    team: &str,
+    team_id: i16,
+    attrib: u8,
+    cl_min_ct: i32,
+    cl_min_t: i32,
+) -> Option<&'static str> {
+    const SCORE_STATUS_VIP: u8 = 4;
+    let is_t = team.eq_ignore_ascii_case("TERRORIST") || (team.is_empty() && team_id == 1);
+    let is_ct = team.eq_ignore_ascii_case("CT") || (team.is_empty() && team_id == 2);
+    if is_t {
+        Some(match cl_min_t {
+            5 => "models/player/guerilla/guerilla.mdl",
+            6 => "models/player/arctic/arctic.mdl",
+            8 => "models/player/terror/terror.mdl",
+            11 => "models/player/militia/militia.mdl",
+            _ => "models/player/leet/leet.mdl",
+        })
+    } else if is_ct {
+        if (attrib & SCORE_STATUS_VIP) != 0 {
+            return Some("models/player/vip/vip.mdl");
+        }
+        Some(match cl_min_ct {
+            3 => "models/player/vip/vip.mdl",
+            4 => "models/player/gsg9/gsg9.mdl",
+            7 => "models/player/sas/sas.mdl",
+            9 => "models/player/urban/urban.mdl",
+            10 => "models/player/spetsnaz/spetsnaz.mdl",
+            _ => "models/player/gign/gign.mdl",
+        })
+    } else {
+        None
+    }
+}
 
 /// GoldSrc `UpdateClientData` leaves `cd.deadflag == 0` and `cd.health == 100.0` while a
 /// joining player sits on the intro camera, marking them with `FL_SPECTATOR` (`1 << 12`)
@@ -325,7 +476,10 @@ impl ViewBuilder {
             bob_state: BobState::default(),
             player_gaits: HashMap::new(),
             vm_seq_cache: HashMap::new(),
+            hitbox_models: HashMap::new(),
             last_vm_frame: 0.0,
+            last_vm_path: String::new(),
+            last_vm_animtime: -1.0,
             vfs: None,
             collision: None,
             bsp: None,
@@ -346,6 +500,7 @@ impl ViewBuilder {
             .unwrap_or_default();
         self.vfs = vfs;
         self.vm_seq_cache.clear();
+        self.hitbox_models.clear();
     }
 
     pub fn set_map_bsp(&mut self, bsp: Option<Arc<BspMap>>) {
@@ -355,6 +510,11 @@ impl ViewBuilder {
     /// The shared model names a [`MapFxWorld`] reads.
     pub fn names(&self) -> Rc<RefCell<BTreeMap<u16, String>>> {
         Rc::clone(&self.names)
+    }
+
+    /// Current resolved model registry.
+    pub fn models(&self) -> &ModelRegistry {
+        &self.models
     }
 
     /// Drops per-map scene state on map change (`changelevel`).
@@ -370,11 +530,14 @@ impl ViewBuilder {
         self.stair_smooth.reset();
         self.bob_state.reset();
         self.player_gaits.clear();
+        self.hitbox_models.clear();
         self.client_models.clear();
         self.anim = None;
         self.last_weaponanim = -1;
         self.last_viewmodel = -1;
         self.last_vm_frame = 0.0;
+        self.last_vm_path.clear();
+        self.last_vm_animtime = -1.0;
         self.models_key = 0;
     }
 
@@ -467,6 +630,11 @@ impl ViewBuilder {
                 .get(&(p.weapon.weapon_id.clamp(0, 255) as u8))
                 .map_or(0, |w| w.m_i_weapon_state)
         };
+        let cvars = conn.cvars().clone();
+        conn.fx_mut().set_smoke_cvars(
+            cvars.float("max_smokepuffs").max(0.0) as usize,
+            cvars.float("fastsprites").clamp(0.0, 2.0) as u8,
+        );
         conn.set_fx_local(weapon_state, false, inputs.right_hand);
         let fired = conn.update_effects(now);
         let cd = conn.client_data().cloned();
@@ -482,7 +650,7 @@ impl ViewBuilder {
             standing_on: prediction.standing_on(),
         });
         let fx = conn.fx_mut();
-        self.build_parts(
+        self.build_parts_with_is_demo(
             &precache,
             fx,
             &userinfos,
@@ -493,6 +661,8 @@ impl ViewBuilder {
             fired,
             view_angles,
             inputs,
+            Some(&cvars),
+            false,
         )
     }
 
@@ -513,7 +683,7 @@ impl ViewBuilder {
             standing_on: None,
         });
         let fx = player.fx_mut();
-        self.build_parts(
+        self.build_parts_with_is_demo(
             &precache,
             fx,
             &userinfos,
@@ -524,11 +694,13 @@ impl ViewBuilder {
             fired,
             view_angles,
             inputs,
+            None,
+            true,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn build_parts(
+    pub fn build_parts(
         &mut self,
         precache: &PrecacheTables,
         fx: &mut ClientEffects,
@@ -541,24 +713,116 @@ impl ViewBuilder {
         view_angles: Vec3,
         inputs: &ViewInputs,
     ) -> (FrameView, Option<ModelRegistry>) {
+        self.build_parts_with_is_demo(
+            precache,
+            fx,
+            userinfos,
+            cd,
+            slot,
+            prediction,
+            emitted,
+            fired,
+            view_angles,
+            inputs,
+            None,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_parts_with_cvars(
+        &mut self,
+        precache: &PrecacheTables,
+        fx: &mut ClientEffects,
+        userinfos: &BTreeMap<u8, String>,
+        cd: Option<cs_proto48::delta::GoldSrcClientData>,
+        slot: Option<u8>,
+        prediction: Option<&Prediction>,
+        emitted: cs_clientcore::interp::EmitResult,
+        fired: Vec<FiredEvent>,
+        view_angles: Vec3,
+        inputs: &ViewInputs,
+        cvars: Option<&ClientCvars>,
+    ) -> (FrameView, Option<ModelRegistry>) {
+        self.build_parts_with_is_demo(
+            precache,
+            fx,
+            userinfos,
+            cd,
+            slot,
+            prediction,
+            emitted,
+            fired,
+            view_angles,
+            inputs,
+            cvars,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_parts_with_is_demo(
+        &mut self,
+        precache: &PrecacheTables,
+        fx: &mut ClientEffects,
+        userinfos: &BTreeMap<u8, String>,
+        cd: Option<cs_proto48::delta::GoldSrcClientData>,
+        slot: Option<u8>,
+        prediction: Option<&Prediction>,
+        emitted: cs_clientcore::interp::EmitResult,
+        fired: Vec<FiredEvent>,
+        view_angles: Vec3,
+        inputs: &ViewInputs,
+        cvars: Option<&ClientCvars>,
+        is_demo: bool,
+    ) -> (FrameView, Option<ModelRegistry>) {
         let now = inputs.now;
-        let registry_changed = self.ensure_registry(precache);
+        let mut registry_changed = self.ensure_registry(precache);
         let local_number = slot.map(|s| u16::from(s) + 1);
         let (mut eye, mut punch, mut fov, alive, observer_mode, weaponanim, viewmodel_index) =
             match &cd {
                 Some(cd) => {
-                    let (pred_eye, pred_punch) = match prediction {
-                        Some(p) if p.predicted => (p.simorg + p.viewheight, p.punchangle),
-                        _ => (cd.origin + cd.view_ofs, cd.punchangle),
+                    let alive = is_client_alive(cd);
+                    let observer_mode = cd.iuser1;
+                    let (pred_eye, pred_punch, pred_fov, pred_anim, pred_vm) = match prediction {
+                        Some(p) if p.predicted && alive && observer_mode == 0 => (
+                            p.simorg + p.viewheight,
+                            p.punchangle,
+                            if p.weapon.fov > 0.0 {
+                                p.weapon.fov
+                            } else {
+                                cd.fov
+                            },
+                            p.weapon.weaponanim,
+                            if p.weapon.viewmodel > 0 {
+                                p.weapon.viewmodel
+                            } else {
+                                cd.viewmodel
+                            },
+                        ),
+                        Some(p) if p.predicted => (
+                            p.simorg + p.viewheight,
+                            p.punchangle,
+                            cd.fov,
+                            cd.weaponanim,
+                            cd.viewmodel,
+                        ),
+                        _ => (
+                            cd.origin + cd.view_ofs,
+                            cd.punchangle,
+                            cd.fov,
+                            cd.weaponanim,
+                            cd.viewmodel,
+                        ),
                     };
                     (
                         pred_eye,
                         pred_punch,
-                        cd.fov,
-                        is_client_alive(cd),
-                        cd.iuser1,
-                        cd.weaponanim,
-                        cd.viewmodel,
+                        pred_fov,
+                        alive,
+                        observer_mode,
+                        pred_anim,
+                        pred_vm,
                     )
                 }
                 None => (Vec3::ZERO, Vec3::ZERO, 0.0, false, 0, 0, 0),
@@ -584,8 +848,9 @@ impl ViewBuilder {
         }
 
         // A player is drawn with the model its userinfo names (`model`): `models/player.mdl` is
-        // only the entity's placeholder.
-        let player_models: BTreeMap<u8, String> = userinfos
+        // only the entity's placeholder. When `cl_minmodels` is non-zero, override remote player
+        // models by `TeamInfo` / VIP `ScoreAttrib` and `cl_min_ct` / `cl_min_t`.
+        let mut player_models: BTreeMap<u8, String> = userinfos
             .iter()
             .filter_map(|(slot, raw)| {
                 let info = cs_proto48::info::InfoString::parse(raw);
@@ -594,12 +859,39 @@ impl ViewBuilder {
                     .then(|| (*slot, format!("models/player/{m}/{m}.mdl")))
             })
             .collect();
+        let cl_minmodels = cvars.is_some_and(|c| c.float("cl_minmodels") != 0.0);
+        if cl_minmodels {
+            let min_ct = cvars.map_or(2, |c| c.float("cl_min_ct") as i32);
+            let min_t = cvars.map_or(1, |c| c.float("cl_min_t") as i32);
+            for (&player_id, score) in &fx.hud.players {
+                if let Some(slot0) = player_id.checked_sub(1)
+                    && let Some(path) = resolve_minmodel_path(
+                        &score.team,
+                        score.team_id,
+                        score.attrib,
+                        min_ct,
+                        min_t,
+                    )
+                {
+                    player_models.insert(slot0, path.to_string());
+                }
+            }
+        }
+        // Register player/minmodel overrides and rebuild the registry before `render_entity`
+        // so changes to `cl_minmodels` or userinfo `model` take effect on the current frame.
+        for path in player_models.values() {
+            let _ = self.client_handle(path);
+        }
+        if self.ensure_registry(precache) {
+            registry_changed = true;
+        }
 
         let time = now as f32;
         let mut scene = SceneFrame {
             time,
             view: ViewBasis::from_angles(eye, view_angles + punch),
             entities: Vec::new(),
+            shadows: Vec::new(),
         };
         let mut stats = ViewStats::default();
 
@@ -624,10 +916,35 @@ impl ViewBuilder {
             }
         }
 
+        let mut shadow_origins: Vec<Vec3> = Vec::new();
+        let mut player_weapons: BTreeMap<u8, String> = BTreeMap::new();
+        let observed_target = cd
+            .as_ref()
+            .map_or(0, |c| u8::try_from(c.iuser2.max(0)).unwrap_or(0));
+        let xray_enabled = inputs.spec_xray || cvars.is_some_and(|c| c.float("spec_xray") != 0.0);
+        let xray_policy = evaluate_spec_xray_policy(
+            xray_enabled,
+            is_demo,
+            alive,
+            observer_mode,
+            local_number,
+            fx,
+        );
         // Entity loop: build RenderEntities + collect entity EF_* lights & world positions.
         let mut entity_positions: HashMap<u16, Vec3> = HashMap::with_capacity(emitted.entities.len());
         for e in &emitted.entities {
             entity_positions.insert(e.number, e.origin);
+            if e.kind == EntityKind::Player
+                && let Some(pid) = u8::try_from(e.number).ok().filter(|&n| (1..=32).contains(&n))
+                && e.state.weaponmodel != 0
+                && let Some(wname) = self
+                    .models
+                    .resolve(i32::from(e.state.weaponmodel))
+                    .and_then(|h| self.models.get(h))
+                    .and_then(|m| weapon_short_from_pmodel(&m.name))
+            {
+                player_weapons.insert(pid, wname);
+            }
             if e.kind == EntityKind::Beam {
                 self.push_beam_entity(e, now);
                 continue;
@@ -701,10 +1018,29 @@ impl ViewBuilder {
                     &cs_clientcore::tempents::ParticleEffect::Flicker { position: e.origin },
                 );
             }
-            if let Some(r) = self.render_entity(e, &player_models, dt, time) {
+            if let Some(mut r) = self.render_entity(e, &player_models, dt, time) {
                 match e.model {
                     CoreModelKind::Brush => stats.brush += 1,
-                    CoreModelKind::Studio => stats.studio += 1,
+                    CoreModelKind::Studio => {
+                        stats.studio += 1;
+                        if is_shadow_eligible(e, &r, &self.models, &fx.hud.players) {
+                            shadow_origins.push(e.origin);
+                        }
+                        if r.player
+                            && r.renderfx != RENDERFX_DEAD_PLAYER
+                            && (r.effects & EF_NODRAW) == 0
+                            && let Some(pid) = u8::try_from(e.number).ok()
+                            && let Some(score) = fx.hud.players.get(&pid)
+                            && (score.attrib & 1) == 0
+                            && xray_policy.allows(&score.team, score.team_id)
+                        {
+                            r.xray_color = match normalize_player_team(&score.team, score.team_id) {
+                                Some("CT") => Some([0.25, 0.55, 1.0]),
+                                Some("TERRORIST") => Some([1.0, 0.35, 0.20]),
+                                _ => None,
+                            };
+                        }
+                    }
                     CoreModelKind::Sprite => stats.sprites += 1,
                 }
                 scene.entities.push(r);
@@ -720,13 +1056,29 @@ impl ViewBuilder {
                 scene.entities.push(r);
             }
         }
+        if self.ensure_registry(precache) {
+            registry_changed = true;
+        }
+        let cl_shadows = cvars.is_none_or(|c| c.float("cl_shadows") != 0.0);
+        if cl_shadows
+            && !shadow_origins.is_empty()
+            && let Some(world) = self.collision.as_deref()
+        {
+            let solid_colliders = collect_solid_brush_colliders(&scene.entities, &self.models);
+            for origin in shadow_origins {
+                if let Some(sh) = trace_studio_shadow(world, &solid_colliders, origin, 18.0) {
+                    scene.shadows.push(sh);
+                }
+            }
+        }
+        self.apply_glow_occlusion(&mut scene);
 
         // Effects that are not entries of the pool.
         let pos_lookup = |id: u16| entity_positions.get(&id).copied();
         for effect in fx.tempents.take_effects() {
             self.take_effect(effect, now, &pos_lookup);
         }
-        let weather = fx.hud.weather;
+        let weather = if inputs.cl_weather { fx.hud.weather } else { 0 };
         self.particles.step_weather(now, dt, weather, eye);
         self.beam_sys.step(now, &pos_lookup);
         self.beams.retain(|b| b.die > now);
@@ -736,13 +1088,14 @@ impl ViewBuilder {
         let overflow = self.glows.len().saturating_sub(MAX_ACTIVE_FX);
         self.glows.drain(..overflow);
 
-        let prev_vm_seq = self.anim.map(|a| a.sequence).unwrap_or(-1);
-        let impact_sounds = self.collect_bullet_impacts(&fired, now);
+        let prev_vm_anim = self.anim;
+        let show_client_impacts = inputs.sv_cheats && matches!(inputs.sv_showimpacts, 1 | 2);
+        let impact_sounds = self.collect_bullet_impacts(&fired, &scene.entities, now, show_client_impacts);
         self.update_view_anim(fx, &fired, weaponanim, viewmodel_index, time);
         let viewmodel = self.viewmodel(precache, alive, fov, viewmodel_index, inputs);
         let mut anim_sounds = Vec::new();
         if let Some(ref vm) = viewmodel {
-            let events = self.sample_viewmodel_events(vm, prev_vm_seq, time);
+            let events = self.sample_viewmodel_events(vm, prev_vm_anim, time);
             for (ev_id, opts) in events {
                 match ev_id {
                     5001 | 5011 | 5021 | 5031 => {
@@ -789,6 +1142,9 @@ impl ViewBuilder {
             })
             .collect();
         self.particles.emit_fx(now, &mut beams, &mut points);
+        if inputs.sv_cheats && inputs.sv_showhitboxes {
+            self.emit_client_hitboxes(&scene.entities, &mut beams, time);
+        }
         stats.beams = beams.len();
 
         let simvel = prediction
@@ -881,16 +1237,44 @@ impl ViewBuilder {
                 custom_decals,
                 alive,
                 observer_mode,
+                observed_target,
+                is_demo,
+                player_weapons,
                 stats,
             },
             registry_changed.then(|| self.models.clone()),
         )
     }
 
-    fn collect_bullet_impacts(&mut self, fired: &[FiredEvent], now: f64) -> Vec<SoundStart> {
+    fn collect_bullet_impacts(
+        &mut self,
+        fired: &[FiredEvent],
+        scene_entities: &[RenderEntity],
+        now: f64,
+        show_client_impacts: bool,
+    ) -> Vec<SoundStart> {
         let Some(ref coll) = self.collision else {
             return Vec::new();
         };
+        let brush_targets: Vec<(u16, u16, BrushCollider)> = scene_entities
+            .iter()
+            .filter(|e| (e.effects & EF_NODRAW) == 0 && e.solid == SOLID_BSP)
+            .filter_map(|e| {
+                let entry = self.models.get(e.model)?;
+                match entry.kind {
+                    ModelKind::Brush(submodel) => Some((
+                        e.index,
+                        e.model.0,
+                        BrushCollider {
+                            submodel,
+                            origin: e.origin,
+                            angles: e.angles,
+                        },
+                    )),
+                    _ => None,
+                }
+            })
+            .collect();
         let mut sounds = Vec::new();
         let base_seed = (now * 1000.0) as u32;
         for (ev_idx, ev) in fired.iter().enumerate() {
@@ -916,19 +1300,53 @@ impl ViewBuilder {
                 };
                 let dir = (fire.forward + fire.right * sx + fire.up * sy).normalize_or_zero();
                 let dist = fire.distance.clamp(64.0, 8192.0);
-                let tr = coll.trace_world(fire.origin, fire.origin + dir * dist, Hull::Point);
-                if tr.fraction >= 1.0 || tr.fraction <= 0.001 {
+                let end = fire.origin + dir * dist;
+                let world_tr = coll.trace_world(fire.origin, end, Hull::Point);
+
+                let mut best_fraction = world_tr.fraction;
+                let mut best_pos = world_tr.end_pos;
+                let mut best_normal = world_tr.plane_normal;
+                let mut hit_entity: u16 = 0;
+                let mut hit_model: u16 = 0;
+                let mut hit_brush: Option<&BrushCollider> = None;
+
+                for (ent_idx, model_idx, collider) in &brush_targets {
+                    let tr = trace_brush_collider(coll, collider, fire.origin, end);
+                    if !tr.start_solid && !tr.all_solid && tr.fraction < best_fraction {
+                        best_fraction = tr.fraction;
+                        best_pos = tr.end_pos;
+                        best_normal = tr.plane_normal;
+                        hit_entity = *ent_idx;
+                        hit_model = *model_idx;
+                        hit_brush = Some(collider);
+                    }
+                }
+                if best_fraction >= 1.0 || best_fraction <= 0.001 {
                     continue;
                 }
-                let tex_type = self.surface_char_at(tr.end_pos, tr.plane_normal);
-                sounds.extend(crate::audio::build_impact_sounds(tr.end_pos, tex_type, seed));
+                let tex_type = self.surface_char_at(best_pos, best_normal, hit_brush);
+                sounds.extend(crate::audio::build_impact_sounds(best_pos, tex_type, seed));
+                if show_client_impacts {
+                    let half = Vec3::splat(2.0);
+                    self.particles.spawn_effect(
+                        now,
+                        &cs_clientcore::tempents::ParticleEffect::Box {
+                            min: best_pos - half,
+                            max: best_pos + half,
+                            life: 4.0,
+                            color: [60, 140, 255],
+                        },
+                    );
+                }
                 if self.pending_decals.len() < 128 {
                     self.pending_decals.push(DecalSpawn {
-                        origin: tr.end_pos,
+                        origin: best_pos,
                         decal_name: format!("{{shot{}", (seed % 5) + 1),
                         half_size: 4.0,
                         permanent: false,
                         player_spray: None,
+                        entity_index: hit_entity,
+                        model_index: hit_model,
                     });
                 }
             }
@@ -936,15 +1354,129 @@ impl ViewBuilder {
         sounds
     }
 
-    fn surface_char_at(&self, pos: Vec3, normal: Vec3) -> u8 {
+    fn emit_client_hitboxes(
+        &mut self,
+        entities: &[RenderEntity],
+        beams: &mut Vec<FxBeam>,
+        now_sec: f32,
+    ) {
+        let Some(ref vfs) = self.vfs else {
+            return;
+        };
+        for ent in entities {
+            if (ent.effects & EF_NODRAW) != 0 || !ent.player {
+                continue;
+            }
+            let Some(entry) = self.models.get(ent.model) else {
+                continue;
+            };
+            if entry.kind != ModelKind::Studio {
+                continue;
+            }
+            let key = entry.name.to_ascii_lowercase();
+            let mdl = self
+                .hitbox_models
+                .entry(key)
+                .or_insert_with(|| StudioModel::load(vfs, &entry.name).ok().map(Arc::new))
+                .clone();
+            let Some(mdl) = mdl else {
+                continue;
+            };
+            if mdl.hitboxes.is_empty() || mdl.sequences.is_empty() {
+                continue;
+            }
+            let seq_idx = (ent.sequence.max(0) as usize).min(mdl.sequences.len() - 1);
+            let seq = &mdl.sequences[seq_idx];
+            let frame = studio_frame(
+                ent.frame,
+                ent.animtime,
+                ent.framerate,
+                now_sec,
+                seq.fps,
+                seq.num_frames,
+                seq.flags & STUDIO_LOOPING != 0,
+            );
+            let bones = mdl.evaluate_bones_full(&cs_assets::mdl::BoneEvalParams {
+                sequence: seq_idx,
+                frame,
+                loop_anim: false,
+                blending: ent.blending,
+                controller: ent.controllers,
+                mouth: ent.mouth,
+                prev_sequence: None,
+                gait: ent.gait.map(|(gs, gf)| ((gs.max(0) as usize).min(mdl.sequences.len() - 1), gf)),
+            });
+            let ent_mat = crate::render::scene::studio_matrix(
+                ent.origin,
+                ent.angles,
+                ent.scale,
+                ent.player,
+            );
+            const EDGES: [(usize, usize); 12] = [
+                (0, 1), (1, 2), (2, 3), (3, 0),
+                (4, 5), (5, 6), (6, 7), (7, 4),
+                (0, 4), (1, 5), (2, 6), (3, 7),
+            ];
+            for hb in &mdl.hitboxes {
+                let Some(bm) = bones.get(hb.bone) else {
+                    continue;
+                };
+                let m = ent_mat * *bm;
+                let lo = hb.bbmin;
+                let hi = hb.bbmax;
+                let corners = [
+                    m.transform_point3(Vec3::new(lo[0], lo[1], lo[2])),
+                    m.transform_point3(Vec3::new(hi[0], lo[1], lo[2])),
+                    m.transform_point3(Vec3::new(hi[0], hi[1], lo[2])),
+                    m.transform_point3(Vec3::new(lo[0], hi[1], lo[2])),
+                    m.transform_point3(Vec3::new(lo[0], lo[1], hi[2])),
+                    m.transform_point3(Vec3::new(hi[0], lo[1], hi[2])),
+                    m.transform_point3(Vec3::new(hi[0], hi[1], hi[2])),
+                    m.transform_point3(Vec3::new(lo[0], hi[1], hi[2])),
+                ];
+                let color = match hb.group {
+                    1 => [1.0, 0.2, 0.2, 0.95],
+                    2 | 3 => [1.0, 0.55, 0.15, 0.95],
+                    4 | 5 => [1.0, 0.95, 0.2, 0.95],
+                    6 | 7 => [0.25, 0.9, 0.35, 0.95],
+                    _ => [0.85, 0.85, 0.85, 0.9],
+                };
+                for (a, b) in EDGES {
+                    beams.push(FxBeam {
+                        start: corners[a],
+                        end: corners[b],
+                        width: 0.9,
+                        color,
+                        additive: true,
+                    });
+                }
+            }
+        }
+    }
+
+    fn surface_char_at(
+        &self,
+        pos: Vec3,
+        normal: Vec3,
+        brush: Option<&BrushCollider>,
+    ) -> u8 {
         let Some(ref bsp) = self.bsp else {
             return CHAR_TEX_CONCRETE;
         };
-        let faces = bsp.query_faces_in_sphere(pos, 16.0);
+        let (faces, cmp_normal) = if let Some(b) = brush {
+            let local_pos = world_to_brush_local(pos, b.origin, b.angles);
+            let local_norm = world_to_brush_local(normal, Vec3::ZERO, b.angles);
+            (
+                query_submodel_faces_in_sphere(bsp, b.submodel as usize, local_pos, 16.0),
+                local_norm,
+            )
+        } else {
+            (bsp.query_faces_in_sphere(pos, 16.0), normal)
+        };
         let best = faces.iter().max_by(|a, b| {
             a.normal
-                .dot(normal)
-                .partial_cmp(&b.normal.dot(normal))
+                .dot(cmp_normal)
+                .partial_cmp(&b.normal.dot(cmp_normal))
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         let Some(poly) = best else {
@@ -968,7 +1500,7 @@ impl ViewBuilder {
     fn sample_viewmodel_events(
         &mut self,
         vm: &ViewmodelView,
-        prev_seq: i32,
+        prev_anim: Option<ViewAnimState>,
         now_sec: f32,
     ) -> Vec<(i32, String)> {
         let mut out = Vec::new();
@@ -1008,12 +1540,14 @@ impl ViewBuilder {
             seq_meta.num_frames,
             seq_meta.looping,
         );
-        let prev_frame = if prev_seq != vm.sequence {
-            self.last_vm_frame = -0.01;
-            -0.01
-        } else {
-            self.last_vm_frame
-        };
+        let switched_anim = self.last_vm_path != key
+            || prev_anim.is_none_or(|a| {
+                a.sequence != vm.sequence || (a.started - vm.animtime).abs() > 1e-4
+            })
+            || (self.last_vm_animtime - vm.animtime).abs() > 1e-4;
+        let prev_frame = if switched_anim { -0.01 } else { self.last_vm_frame };
+        self.last_vm_path = key;
+        self.last_vm_animtime = vm.animtime;
         self.last_vm_frame = cur_frame;
         if cur_frame > prev_frame {
             for ev in &seq_meta.events {
@@ -1059,6 +1593,7 @@ impl ViewBuilder {
         r.rendercolor = e.rendercolor;
         r.renderfx = e.renderfx;
         r.scale = s.scale;
+        r.solid = s.solid as i32;
         r.controllers = s.controller;
         r.blending = s.blending;
         r.scroll_speed = 0.0;
@@ -1118,6 +1653,26 @@ impl ViewBuilder {
         r.renderfx = t.render_fx;
         r.scale = t.scale;
         Some(r)
+    }
+
+    /// Suppress `EntRenderMode::Glow` entities and `TE_GLOWSPRITE` tempents occluded by world BSP
+    /// or opaque `SOLID_BSP` brush entities (`R_SpriteGlowBlend`, `ref/gl/gl_sprite.c:220-242`,
+    /// read 2026-11-25).
+    fn apply_glow_occlusion(&self, scene: &mut SceneFrame) {
+        let Some(world) = self.collision.as_deref() else {
+            return;
+        };
+        let colliders = collect_opaque_brush_colliders(&scene.entities, &self.models);
+        let eye = scene.view.origin;
+        for e in &mut scene.entities {
+            if e.rendermode == EntRenderMode::Glow
+                && (e.effects & EF_NODRAW) == 0
+                && trace_glow_occlusion(world, &colliders, eye, e.origin)
+            {
+                e.renderamt = 0;
+                e.effects |= EF_NODRAW;
+            }
+        }
     }
 
     /// A `ET_BEAM` entity: `origin` is where it starts and `angles` where it ends
@@ -1200,8 +1755,9 @@ impl ViewBuilder {
                 position,
                 decal,
                 decal_name,
+                entity,
+                model,
                 permanent,
-                ..
             } => {
                 if self.pending_decals.len() < 128 {
                     self.pending_decals.push(DecalSpawn {
@@ -1211,11 +1767,16 @@ impl ViewBuilder {
                         half_size: 16.0,
                         permanent,
                         player_spray: None,
+                        entity_index: entity,
+                        model_index: model,
                     });
                 }
             }
             RenderEffect::PlayerDecal {
-                player, position, ..
+                player,
+                position,
+                entity,
+                ..
             } => {
                 if self.pending_decals.len() < 128 {
                     self.pending_decals.push(DecalSpawn {
@@ -1224,6 +1785,8 @@ impl ViewBuilder {
                         half_size: 24.0,
                         permanent: true,
                         player_spray: Some(player),
+                        entity_index: entity,
+                        model_index: 0,
                     });
                 }
             }
@@ -1269,11 +1832,21 @@ impl ViewBuilder {
             });
         }
         if let Some(ViewAnim { sequence, body }) = fx.hud.server_weapon_anim.take() {
-            self.anim = Some(ViewAnimState {
-                sequence,
-                body,
-                started: time,
+            // Avoid restarting a deploy/weapon animation when the server ack arrives for the
+            // same sequence that viewmodel switching or prediction already started.
+            let already_started = self.anim.is_some_and(|a| {
+                a.sequence == sequence
+                    && a.body == body
+                    && (time - a.started) >= 0.0
+                    && (time - a.started) < 0.5
             });
+            if !already_started {
+                self.anim = Some(ViewAnimState {
+                    sequence,
+                    body,
+                    started: time,
+                });
+            }
         }
         for ev in fired {
             let anim = match &ev.fx {
@@ -1324,6 +1897,37 @@ impl ViewBuilder {
             right_hand: inputs.right_hand,
         })
     }
+}
+
+fn is_shadow_eligible(
+    e: &VisibleEntity,
+    r: &RenderEntity,
+    models: &ModelRegistry,
+    players: &BTreeMap<u8, cs_clientcore::hud::PlayerScore>,
+) -> bool {
+    if (r.effects & EF_NODRAW) != 0 || r.rendermode == EntRenderMode::TransAdd {
+        return false;
+    }
+    if r.player {
+        if r.renderfx == RENDERFX_DEAD_PLAYER {
+            return false;
+        }
+        let dead = u8::try_from(e.number)
+            .ok()
+            .and_then(|id| players.get(&id))
+            .is_some_and(|p| (p.attrib & 1) != 0);
+        return !dead;
+    }
+    let Some(entry) = models.get(r.model) else {
+        return false;
+    };
+    if entry.kind != ModelKind::Studio {
+        return false;
+    }
+    let lower = entry.name.to_ascii_lowercase();
+    let is_hostage = lower.contains("scientist") || lower.contains("hostage");
+    // Dead hostages switch to MOVETYPE_TOSS (6) + SOLID_NOT (0); live ones stay SOLID_SLIDEBOX (3).
+    is_hostage && !(e.state.solid == 0 && e.state.movetype != 0)
 }
 
 fn surface_material_to_char(mat: SurfaceMaterial) -> u8 {
@@ -1624,7 +2228,7 @@ mod tests {
             }),
         }];
 
-        let _ = builder.collect_bullet_impacts(&fired, 1.234);
+        let _ = builder.collect_bullet_impacts(&fired, &[], 1.234, false);
         assert_eq!(builder.pending_decals.len(), 1);
         let p1 = builder.pending_decals[0].origin;
         assert!((p1.x - 128.0).abs() < 0.1, "x={}", p1.x);
@@ -1632,7 +2236,7 @@ mod tests {
         assert!((p1.z + 3.2).abs() < 0.2, "z={}", p1.z);
 
         builder.pending_decals.clear();
-        let _ = builder.collect_bullet_impacts(&fired, 99.876);
+        let _ = builder.collect_bullet_impacts(&fired, &[], 99.876, false);
         let p2 = builder.pending_decals[0].origin;
         assert!((p1 - p2).length() < 1e-5, "single shot impact must be deterministic");
     }
@@ -1688,5 +2292,344 @@ mod tests {
             &inputs(0.4),
         );
         assert_eq!(v_air.bob, v_ground.bob);
+    }
+
+    #[test]
+    fn occluded_glow_entity_and_te_glowsprite_are_suppressed_while_unoccluded_remains() {
+        use cs_assets::bsp::{BspMap, BspModel, Leaf, LightmapAtlas, Node, Plane};
+        use cs_clientcore::PrecacheEntry;
+        use cs_clientcore::interp::{EmitResult, VisibleEntity};
+        use cs_clientcore::sound::SoundQueue;
+        use cs_clientcore::tempents::FxRandom;
+        use cs_pm::collision::{CONTENTS_EMPTY, CONTENTS_SOLID};
+        use cs_proto48::delta::GoldSrcEntityState;
+
+        let bsp = BspMap {
+            name: "glow_view".into(),
+            skyname: String::new(),
+            entities: Vec::new(),
+            spawns: Vec::new(),
+            hostage_spawns: Vec::new(),
+            brush_entities: Vec::new(),
+            planes: vec![
+                Plane { normal: Vec3::X, dist: 128.0, plane_type: 0 },
+                Plane { normal: Vec3::X, dist: 0.0, plane_type: 0 },
+            ],
+            vertices_raw: Vec::new(),
+            visibility: Vec::new(),
+            nodes: vec![
+                Node { plane: 0, children: [-1, -2], mins: [-512; 3], maxs: [512; 3], first_face: 0, num_faces: 0 },
+                Node { plane: 1, children: [-1, -2], mins: [-64; 3], maxs: [64; 3], first_face: 0, num_faces: 0 },
+            ],
+            texinfos: Vec::new(),
+            faces: Vec::new(),
+            lighting: Vec::new(),
+            clipnodes: Vec::new(),
+            leafs: vec![
+                Leaf { contents: CONTENTS_SOLID, vis_offset: -1, mins: [-512; 3], maxs: [512; 3], first_mark_surface: 0, num_mark_surfaces: 0, ambient_levels: [0; 4] },
+                Leaf { contents: CONTENTS_EMPTY, vis_offset: -1, mins: [-512; 3], maxs: [512; 3], first_mark_surface: 0, num_mark_surfaces: 0, ambient_levels: [0; 4] },
+            ],
+            mark_surfaces: Vec::new(),
+            edges: Vec::new(),
+            surf_edges: Vec::new(),
+            models: vec![
+                BspModel { mins: Vec3::splat(-512.0), maxs: Vec3::splat(512.0), origin: Vec3::ZERO, head_nodes: [0, -1, -1, -1], vis_leafs: 2, first_face: 0, num_faces: 0 },
+                BspModel { mins: Vec3::splat(-64.0), maxs: Vec3::splat(64.0), origin: Vec3::ZERO, head_nodes: [1, -1, -1, -1], vis_leafs: 2, first_face: 0, num_faces: 0 },
+            ],
+            textures: Vec::new(),
+            lightmap_atlas: LightmapAtlas { width: 0, height: 0, rgba: Vec::new(), packed_faces: 0 },
+            render_vertices: Vec::new(),
+            render_indices: Vec::new(),
+            batches: Vec::new(),
+        };
+
+        let mut builder = ViewBuilder::new();
+        let coll = Arc::new(WorldCollision::from_bsp(&bsp));
+        builder.set_world_context(Some(coll.clone()), None);
+        let mut precache = PrecacheTables::default();
+        for (idx, name) in [
+            (1u16, "maps/glow_view.bsp"),
+            (2, "*1"),
+            (3, "sprites/glow01.spr"),
+            (4, "sprites/ledglow.spr"),
+        ] {
+            precache.models.insert(
+                idx,
+                PrecacheEntry {
+                    name: name.to_string(),
+                    download_size: 0,
+                    flags: 0,
+                },
+            );
+        }
+        let fx_world = MapFxWorld::new(
+            Some(coll),
+            None,
+            Rc::new(RefCell::new(BTreeMap::new())),
+        );
+        let mut rng = FxRandom::new(1);
+        let mut sounds = SoundQueue::default();
+        let mut fx = ClientEffects::default();
+        // TE_GLOWSPRITE #1 unoccluded in open air (x=50), #2 occluded behind world wall (x=200),
+        // #3 occluded behind SOLID_BSP func_wall at y=60 (x=80 is in front of world wall x=128).
+        for pos in [
+            Vec3::new(50.0, 0.0, 0.0),
+            Vec3::new(200.0, 0.0, 0.0),
+            Vec3::new(80.0, 60.0, 0.0),
+        ] {
+            fx.tempents.spawn_effect(
+                &TempEffect::GlowSprite {
+                    position: pos,
+                    model: 4,
+                    life: 10,
+                    scale: 10,
+                    brightness: 255,
+                },
+                1.0,
+                &precache,
+                &fx_world,
+                &mut rng,
+                &mut sounds,
+            );
+        }
+
+        let make_vis = |number, model, modelindex, origin, rendermode, solid| VisibleEntity {
+            number,
+            kind: EntityKind::Normal,
+            model,
+            modelindex,
+            origin,
+            angles: Vec3::ZERO,
+            frame: 0.0,
+            sequence: 0,
+            rendermode,
+            renderamt: 255,
+            renderfx: 0,
+            rendercolor: [255, 255, 255],
+            local_player: false,
+            studio_lerp: false,
+            latched: Default::default(),
+            state: GoldSrcEntityState {
+                solid,
+                ..Default::default()
+            },
+        };
+        let emitted = EmitResult {
+            entities: vec![
+                // Opaque SOLID_BSP crate (*1) placed at (60, 60, 0) blocking (80, 60, 0) from (0, 0, 0).
+                make_vis(10, CoreModelKind::Brush, 2, Vec3::new(60.0, 60.0, 0.0), 0, 4),
+                // Unoccluded env_glow at (40, -40, 0).
+                make_vis(11, CoreModelKind::Sprite, 3, Vec3::new(40.0, -40.0, 0.0), 3, 0),
+                // Occluded env_glow behind world BSP at (180, -40, 0).
+                make_vis(12, CoreModelKind::Sprite, 3, Vec3::new(180.0, -40.0, 0.0), 3, 0),
+            ],
+            ..Default::default()
+        };
+
+        let (frame_view, _) = builder.build_parts(
+            &precache,
+            &mut fx,
+            &BTreeMap::new(),
+            None,
+            None,
+            None,
+            emitted,
+            Vec::new(),
+            Vec3::ZERO,
+            &inputs(1.05),
+        );
+        let draw_lists = crate::render::scene::build_draw_lists(&frame_view.scene, &builder.models);
+        assert_eq!(
+            draw_lists.sprites.len(),
+            2,
+            "expected only the unoccluded env_glow and unoccluded TE_GLOWSPRITE, got {:?}",
+            draw_lists.sprites.iter().map(|s| s.origin).collect::<Vec<_>>()
+        );
+        let origins: Vec<Vec3> = draw_lists.sprites.iter().map(|s| s.origin).collect();
+        assert!(origins.contains(&Vec3::new(40.0, -40.0, 0.0)));
+        assert!(origins.contains(&Vec3::new(50.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn quick_switch_resets_view_anim_and_plays_5004_once_without_ack_double_play() {
+        use cs_clientcore::events::ViewAnim;
+        use cs_clientcore::interp::EmitResult;
+        use cs_clientcore::{PrecacheEntry, Prediction, WeaponState};
+        use cs_proto48::delta::GoldSrcClientData;
+
+        let mut builder = ViewBuilder::new();
+        if let Ok(vfs) = cs_vfs::Vfs::discover(None, cs_vfs::VfsConfig::default()) {
+            builder.set_world_context(None, Some(vfs));
+        }
+        let mut precache = PrecacheTables::default();
+        for (idx, name) in [
+            (10u16, "models/v_awp.mdl"),
+            (11u16, "models/v_knife.mdl"),
+            (12u16, "models/v_deagle.mdl"),
+        ] {
+            precache.models.insert(
+                idx,
+                PrecacheEntry {
+                    name: name.to_string(),
+                    download_size: 0,
+                    flags: 0,
+                },
+            );
+        }
+
+        let mut fx = ClientEffects::default();
+        let make_cd = |fov: f32, vm: i32, anim: i32| GoldSrcClientData {
+            health: 100.0,
+            weapons: 1 << 31,
+            fov,
+            viewmodel: vm,
+            weaponanim: anim,
+            ..Default::default()
+        };
+        let make_pred = |fov: f32, vm: i32, anim: i32| Prediction {
+            predicted: true,
+            viewmodel: vm,
+            weapon: WeaponState {
+                fov,
+                viewmodel: vm,
+                weaponanim: anim,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        // Frame 1: AWP zoomed (fov = 40) -> viewmodel is hidden while scoped, server cd still stale at 40.
+        let cd_zoomed = make_cd(40.0, 10, 0);
+        let pred_zoomed = make_pred(40.0, 10, 0);
+        let (fv1, _) = builder.build_parts(
+            &precache,
+            &mut fx,
+            &BTreeMap::new(),
+            Some(cd_zoomed.clone()),
+            Some(0),
+            Some(&pred_zoomed),
+            EmitResult::default(),
+            Vec::new(),
+            Vec3::ZERO,
+            &inputs(1.0),
+        );
+        assert!(fv1.viewmodel.is_none());
+
+        // Frame 2: Predicted quick-switch AWP -> Knife while cd is still stale (fov=40, vm=10):
+        // Prediction immediately cancels FOV to 90 and switches ViewAnim to Knife deploy (seq=3, animtime=1.02).
+        let pred_knife = make_pred(90.0, 11, 3);
+        let (fv2, _) = builder.build_parts(
+            &precache,
+            &mut fx,
+            &BTreeMap::new(),
+            Some(cd_zoomed),
+            Some(0),
+            Some(&pred_knife),
+            EmitResult::default(),
+            Vec::new(),
+            Vec3::ZERO,
+            &inputs(1.02),
+        );
+        assert_eq!(fv2.fov, 90.0);
+        let vm2 = fv2.viewmodel.expect("knife viewmodel visible immediately on unzoom");
+        assert_eq!(vm2.path, "models/v_knife.mdl");
+        assert_eq!(vm2.sequence, 3);
+        assert!((vm2.animtime - 1.02).abs() < 1e-4);
+
+        // Frame 3: Server ack arrives 30ms later with svc_weaponanim(3, 0) & updated cd:
+        // Must NOT restart animtime!
+        fx.hud.server_weapon_anim = Some(ViewAnim { sequence: 3, body: 0 });
+        let cd_knife = make_cd(90.0, 11, 3);
+        let (fv3, _) = builder.build_parts(
+            &precache,
+            &mut fx,
+            &BTreeMap::new(),
+            Some(cd_knife),
+            Some(0),
+            Some(&pred_knife),
+            EmitResult::default(),
+            Vec::new(),
+            Vec3::ZERO,
+            &inputs(1.05),
+        );
+        let vm3 = fv3.viewmodel.expect("knife viewmodel");
+        assert!(
+            (vm3.animtime - 1.02).abs() < 1e-4,
+            "server ack must not reset deploy animtime: {}",
+            vm3.animtime
+        );
+
+        // Frame 4: Quick-switch Knife -> AWP: resets ViewAnim to AWP deploy (seq=5, animtime=1.10).
+        let pred_awp = make_pred(90.0, 10, 5);
+        let (fv4, _) = builder.build_parts(
+            &precache,
+            &mut fx,
+            &BTreeMap::new(),
+            Some(make_cd(90.0, 10, 5)),
+            Some(0),
+            Some(&pred_awp),
+            EmitResult::default(),
+            Vec::new(),
+            Vec3::ZERO,
+            &inputs(1.10),
+        );
+        let vm4 = fv4.viewmodel.expect("awp viewmodel");
+        assert_eq!(vm4.path, "models/v_awp.mdl");
+        assert_eq!(vm4.sequence, 5);
+        assert!((vm4.animtime - 1.10).abs() < 1e-4);
+
+        // Frame 5-7: Switch to Deagle (seq 5 draw has MDL 5004 event "weapons/de_deploy.wav" at frame 1):
+        // plays 5004 once as the deploy sequence passes frame 1, and server svc_weaponanim ack must NOT replay it.
+        let pred_deagle = make_pred(90.0, 12, 5);
+        let cd_deagle = make_cd(90.0, 12, 5);
+        let _ = builder.build_parts(
+            &precache,
+            &mut fx,
+            &BTreeMap::new(),
+            Some(cd_deagle.clone()),
+            Some(0),
+            Some(&pred_deagle),
+            EmitResult::default(),
+            Vec::new(),
+            Vec3::ZERO,
+            &inputs(1.20),
+        );
+        let (fv6, _) = builder.build_parts(
+            &precache,
+            &mut fx,
+            &BTreeMap::new(),
+            Some(cd_deagle.clone()),
+            Some(0),
+            Some(&pred_deagle),
+            EmitResult::default(),
+            Vec::new(),
+            Vec3::ZERO,
+            &inputs(1.25),
+        );
+        if builder.vfs.is_some() {
+            assert_eq!(fv6.anim_sounds, vec!["weapons/de_deploy.wav".to_string()]);
+        }
+        fx.hud.server_weapon_anim = Some(ViewAnim { sequence: 5, body: 0 });
+        let (fv7, _) = builder.build_parts(
+            &precache,
+            &mut fx,
+            &BTreeMap::new(),
+            Some(cd_deagle),
+            Some(0),
+            Some(&pred_deagle),
+            EmitResult::default(),
+            Vec::new(),
+            Vec3::ZERO,
+            &inputs(1.28),
+        );
+        let vm7 = fv7.viewmodel.expect("deagle viewmodel");
+        assert!(
+            (vm7.animtime - 1.20).abs() < 1e-4,
+            "server ack must not reset deagle deploy animtime: {}",
+            vm7.animtime
+        );
+        if builder.vfs.is_some() {
+            assert!(fv7.anim_sounds.is_empty(), "5004 must not double-play on server ack");
+        }
     }
 }

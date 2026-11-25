@@ -14,6 +14,7 @@ pub mod vgui2;
 pub mod vgui_assets;
 pub mod vgui_theme;
 
+use cs_clientcore::{NET_TIMINGS, NetGraphTelemetry, PacketSampleStatus};
 use cs_cvar::CVarRegistry;
 use egui::{Color32, FontId, Pos2};
 
@@ -217,18 +218,30 @@ pub fn should_draw_dynamic_crosshair(fov: f32, weapon_id: u8) -> bool {
     fov.is_finite() && fov > 54.0 && !matches!(weapon_id, 3 | 13 | 18 | 24)
 }
 
-/// Draw the 1-to-1 `FUN_10043ff0` (`CHudAmmo::DrawCrosshair`) 4-bar dynamic crosshair.
+/// Draw the 1-to-1 `FUN_10043ff0` (`CHudAmmo::DrawCrosshair`) 4-bar dynamic crosshair,
+/// plus optional Task 9 QoL extensions (`cl_crosshair_dot`, `cl_crosshair_outline`,
+/// `cl_crosshair_t`, `cl_crosshair_gap`, all `"0"` by default).
 pub fn draw_crosshair_vgui(
     ctx: &egui::Context,
     cvars: &CVarRegistry,
     state: &mut CrosshairState,
     inputs: &CrosshairInputs,
 ) {
+    if !cvars.get_bool("crosshair") {
+        return;
+    }
     let screen = ctx.content_rect();
     let sw = screen.width().round() as i32;
     let sh = screen.height().round() as i32;
     let geom = state.compute_geometry(inputs, cvars.get_str("cl_crosshair_size"), sw);
     let color = crosshair_color(cvars, inputs.night_vision, geom.alpha);
+    let dot = cvars.get_bool("cl_crosshair_dot");
+    let outline = cvars.get_bool("cl_crosshair_outline");
+    let t_shape = cvars.get_bool("cl_crosshair_t");
+    let extra_gap = {
+        let v = cvars.get_f32("cl_crosshair_gap");
+        if v.is_finite() { v } else { 0.0 }
+    };
 
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Background,
@@ -236,18 +249,154 @@ pub fn draw_crosshair_vgui(
     ));
     let cx = (screen.left() + (sw / 2) as f32).floor();
     let cy = (screen.top() + (sh / 2) as f32).floor();
-    let g = geom.gap as f32;
+    let g = ((geom.gap as f32) + extra_gap).max(0.0);
     let l = geom.bar_len as f32;
+    let outline_color = Color32::from_rgba_unmultiplied(0, 0, 0, geom.alpha);
 
-    // 4 1px-thick filled rectangles matching `FUN_10043ff0`:
-    // Left:   (cx - gap - bar_len + 1, cy, bar_len, 1)
-    // Right:  (cx + gap,               cy, bar_len, 1)
-    // Top:    (cx, cy - gap - bar_len + 1, 1, bar_len)
-    // Bottom: (cx, cy + gap,               1, bar_len)
-    painter.rect_filled(egui::Rect::from_min_size(Pos2::new(cx - g - l + 1.0, cy), egui::vec2(l, 1.0)), 0.0, color);
-    painter.rect_filled(egui::Rect::from_min_size(Pos2::new(cx + g, cy), egui::vec2(l, 1.0)), 0.0, color);
-    painter.rect_filled(egui::Rect::from_min_size(Pos2::new(cx, cy - g - l + 1.0), egui::vec2(1.0, l)), 0.0, color);
-    painter.rect_filled(egui::Rect::from_min_size(Pos2::new(cx, cy + g), egui::vec2(1.0, l)), 0.0, color);
+    let mut rects = vec![
+        egui::Rect::from_min_size(Pos2::new(cx - g - l + 1.0, cy), egui::vec2(l, 1.0)),
+        egui::Rect::from_min_size(Pos2::new(cx + g, cy), egui::vec2(l, 1.0)),
+        egui::Rect::from_min_size(Pos2::new(cx, cy + g), egui::vec2(1.0, l)),
+    ];
+    if !t_shape {
+        rects.push(egui::Rect::from_min_size(
+            Pos2::new(cx, cy - g - l + 1.0),
+            egui::vec2(1.0, l),
+        ));
+    }
+    if dot {
+        rects.push(egui::Rect::from_min_size(Pos2::new(cx, cy), egui::vec2(1.0, 1.0)));
+    }
+    if outline {
+        for r in &rects {
+            painter.rect_filled(r.expand(1.0), 0.0, outline_color);
+        }
+    }
+    for r in rects {
+        painter.rect_filled(r, 0.0, color);
+    }
+}
+
+/// Live movement/jump/duck key states for `cl_showkeys 1`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct KeyDisplayState {
+    pub forward: bool,
+    pub back: bool,
+    pub left: bool,
+    pub right: bool,
+    pub jump: bool,
+    pub duck: bool,
+}
+
+/// Draw `cl_showspeed 1` horizontal XY speed (`u/s`) centered above the bottom HUD bar.
+pub fn draw_showspeed(ctx: &egui::Context, cvars: &CVarRegistry, speed_xy: f32) {
+    if cvars.get_f32("cl_showspeed") == 0.0 {
+        return;
+    }
+    let screen = ctx.content_rect();
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::unique("cs16_cl_showspeed"),
+    ));
+    let font = FontId::monospace(14.0);
+    let label = format!("{:.0} u/s", speed_xy.max(0.0));
+    let pos = Pos2::new(screen.center().x, screen.bottom() - 82.0);
+    painter.text(
+        pos + egui::vec2(1.0, 1.0),
+        egui::Align2::CENTER_BOTTOM,
+        &label,
+        font.clone(),
+        Color32::from_black_alpha(220),
+    );
+    painter.text(
+        pos,
+        egui::Align2::CENTER_BOTTOM,
+        &label,
+        font,
+        Color32::from_rgb(255, 200, 80),
+    );
+}
+
+/// Draw `cl_showkeys 1` live `W A S D  JUMP  DUCK` indicator above the bottom HUD bar.
+pub fn draw_showkeys(ctx: &egui::Context, cvars: &CVarRegistry, keys: &KeyDisplayState) {
+    if cvars.get_f32("cl_showkeys") == 0.0 {
+        return;
+    }
+    let screen = ctx.content_rect();
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::unique("cs16_cl_showkeys"),
+    ));
+    let font = FontId::monospace(12.0);
+    let items = [
+        ("W", keys.forward),
+        ("A", keys.left),
+        ("S", keys.back),
+        ("D", keys.right),
+        ("JUMP", keys.jump),
+        ("DUCK", keys.duck),
+    ];
+    let text = items
+        .iter()
+        .map(|(lbl, on)| if *on { format!("[{lbl}]") } else { format!(" {lbl} ") })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let pos = Pos2::new(screen.center().x, screen.bottom() - 102.0);
+    painter.text(
+        pos + egui::vec2(1.0, 1.0),
+        egui::Align2::CENTER_BOTTOM,
+        &text,
+        font.clone(),
+        Color32::from_black_alpha(220),
+    );
+    painter.text(
+        pos,
+        egui::Align2::CENTER_BOTTOM,
+        &text,
+        font,
+        Color32::WHITE,
+    );
+}
+
+/// Draw `cl_ljstats 1` latest completed Kreedz jump summary above the speed/keys HUD.
+pub fn draw_ljstats(
+    ctx: &egui::Context,
+    cvars: &CVarRegistry,
+    stats: Option<&cs_pm::ljstats::JumpStats>,
+) {
+    if cvars.get_f32("cl_ljstats") == 0.0 {
+        return;
+    }
+    let Some(stats) = stats else {
+        return;
+    };
+    let min_dist = cvars.get_f32("cl_ljstats_min");
+    let min_threshold = if min_dist > 0.0 { min_dist } else { 215.0 };
+    if stats.distance < min_threshold {
+        return;
+    }
+    let screen = ctx.content_rect();
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::unique("cs16_cl_ljstats"),
+    ));
+    let font = FontId::monospace(13.0);
+    let label = stats.format_summary();
+    let pos = Pos2::new(screen.center().x, screen.bottom() - 122.0);
+    painter.text(
+        pos + egui::vec2(1.0, 1.0),
+        egui::Align2::CENTER_BOTTOM,
+        &label,
+        font.clone(),
+        Color32::from_black_alpha(220),
+    );
+    painter.text(
+        pos,
+        egui::Align2::CENTER_BOTTOM,
+        &label,
+        font,
+        Color32::from_rgb(110, 235, 160),
+    );
 }
 
 /// Draw the classic 4-bar Counter-Strike 1.6 crosshair in the center of the screen.
@@ -267,12 +416,79 @@ pub fn draw_crosshair(ctx: &egui::Context, cvars: &CVarRegistry, dynamic_extra_g
     draw_crosshair_vgui(ctx, cvars, &mut state, &inputs);
 }
 
-/// Draw classic CS 1.6 `net_graph 1` / `net_graph 3` telemetry in the bottom-right corner.
+/// Draw `cl_showpos 1` local player position, view angles, and velocity (`SCR_DrawPos`,
+/// Xash3D FWGS `engine/client/cl_scrn.c`, read 2026-11-25).
+pub fn draw_showpos(ctx: &egui::Context, cvars: &CVarRegistry, t: &FrameTelemetry<'_>) {
+    if cvars.get_f32("cl_showpos") == 0.0 {
+        return;
+    }
+    let screen = ctx.content_rect();
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::unique("cs16_cl_showpos"),
+    ));
+    let font = FontId::monospace(12.0);
+    let white = Color32::WHITE;
+    let shadow = Color32::from_black_alpha(220);
+    let lines = [
+        format!("pos: {:.2} {:.2} {:.2}", t.pos[0], t.pos[1], t.pos[2]),
+        format!("ang: {:.2} {:.2} 0.00", t.pitch_deg, t.yaw_deg),
+        format!("vel: {:.2}", t.speed),
+    ];
+    let x = screen.right() - 12.0;
+    for (idx, line) in lines.iter().enumerate() {
+        let pos = Pos2::new(x, screen.top() + 8.0 + (idx as f32) * 15.0);
+        painter.text(pos + egui::vec2(1.0, 1.0), egui::Align2::RIGHT_TOP, line, font.clone(), shadow);
+        painter.text(pos, egui::Align2::RIGHT_TOP, line, font.clone(), white);
+    }
+}
+
+/// Draw `r_speeds 1` renderer batch/triangle statistics (`SCR_RSpeeds`,
+/// Xash3D FWGS `engine/client/cl_scrn.c`, read 2026-11-25).
+pub fn draw_r_speeds(ctx: &egui::Context, cvars: &CVarRegistry, t: &FrameTelemetry<'_>) {
+    if cvars.get_f32("r_speeds") == 0.0 {
+        return;
+    }
+    let screen = ctx.content_rect();
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::unique("cs16_r_speeds"),
+    ));
+    let font = FontId::monospace(12.0);
+    let white = Color32::WHITE;
+    let shadow = Color32::from_black_alpha(220);
+    let line = format!(
+        "map: {}  batches: {}  tris: {}  ({:.2} ms)",
+        t.map_name, t.draw_calls, t.triangles, t.frame_ms
+    );
+    let pos = Pos2::new(screen.right() - 12.0, screen.top() + 64.0);
+    painter.text(pos + egui::vec2(1.0, 1.0), egui::Align2::RIGHT_TOP, &line, font.clone(), shadow);
+    painter.text(pos, egui::Align2::RIGHT_TOP, &line, font, white);
+}
+
+/// Draw classic CS 1.6 `net_graph 1/2/3` without live NetChan ring data.
 pub fn draw_net_graph(ctx: &egui::Context, cvars: &CVarRegistry, t: &FrameTelemetry<'_>, palette: VguiPalette) {
+    draw_net_graph_with_telemetry(ctx, cvars, t, None, palette);
+}
+
+/// Draw authentic GoldSrc `net_graph 1/2/3` ported from Xash3D FWGS
+/// `engine/client/cl_netgraph.c` (`SCR_DrawNetGraph`, `NetGraph_DrawTimes`,
+/// `NetGraph_DrawDataUsage`, `NetGraph_DrawHatches`, `NetGraph_DrawTextFields`, read 2026-11-25).
+pub fn draw_net_graph_with_telemetry(
+    ctx: &egui::Context,
+    cvars: &CVarRegistry,
+    t: &FrameTelemetry<'_>,
+    net: Option<&NetGraphTelemetry>,
+    palette: VguiPalette,
+) {
+    let _ = palette;
     let mode = cvars.get_i32("net_graph");
     if mode <= 0 {
         return;
     }
+
+    const LERP_HEIGHT: i32 = 24;
+    const EXTRAP_POINT: i32 = LERP_HEIGHT / 3; // 8
 
     let screen = ctx.content_rect();
     let painter = ctx.layer_painter(egui::LayerId::new(
@@ -280,43 +496,348 @@ pub fn draw_net_graph(ctx: &egui::Context, cvars: &CVarRegistry, t: &FrameTeleme
         egui::Id::unique("cs16_net_graph"),
     ));
 
-    let gold = Color32::from_rgb(235, 210, 120);
-    let font = FontId::monospace(12.0);
+    let screen_w = screen.width().round().max(32.0) as i32;
+    let req_w = cvars.get_i32("net_graphwidth").max(16);
+    let w = req_w.min(NET_TIMINGS as i32).min((screen_w - 10).max(16));
+    let h = cvars.get_i32("net_graphheight").clamp(32, 512);
+    let solid = cvars.get_f32("net_graphsolid") != 0.0;
+    let net_scale = cvars.get_f32("net_scale").max(0.1);
     let pos_mode = cvars.get_i32("net_graphpos");
-    // Position cleanly above the bottom HUD bar so ammo/money/HP/timer are never overlapped.
-    let (x, y, align) = match pos_mode {
-        2 => (screen.center().x, screen.bottom() - 62.0, egui::Align2::CENTER_BOTTOM),
-        3 => (16.0, screen.bottom() - 78.0, egui::Align2::LEFT_BOTTOM),
-        _ => (screen.right() - 16.0, screen.bottom() - 122.0, egui::Align2::RIGHT_BOTTOM),
+
+    // `NetGraph_GetScreenPos`: 1 = right, 2 = center, 3 = left.
+    let x = match pos_mode {
+        2 => screen.left() + (screen.width() - w as f32) * 0.5,
+        3 => screen.left() + 5.0,
+        _ => screen.right() - 5.0 - w as f32,
     };
 
-    let lines = if mode == 3 {
-        vec![format!(
-            "{:.0} fps  {:.2} ms   map: {}   spd: {:.0} u/s",
-            t.fps, t.frame_ms, t.map_name, t.speed
-        )]
-    } else {
-        vec![
-            format!("{:.1} fps  ({:.2} ms)  batches: {}  tris: {}", t.fps, t.frame_ms, t.draw_calls, t.triangles),
-            format!(
-                "map: {}  pos: {:.0} {:.0} {:.0}  ang: {:.0}/{:.0}  spd: {:.0} u/s",
-                t.map_name, t.pos[0], t.pos[1], t.pos[2], t.yaw_deg, t.pitch_deg, t.speed
-            ),
-        ]
-    };
+    let text_color = Color32::from_rgb(230, 230, 179); // `cl_netgraph.c:366` (0.9, 0.9, 0.7)
+    let shadow = Color32::from_black_alpha(220);
+    let font = FontId::monospace(12.0);
+    let line_h = 14.0;
+    let text_top = screen.bottom() - 8.0 - 4.0 * line_h;
 
-    for (idx, line) in lines.iter().rev().enumerate() {
-        let pos = Pos2::new(x, y - (idx as f32) * 15.0);
-        painter.text(
-            pos + egui::vec2(1.0, 1.0),
-            align,
-            line,
-            font.clone(),
-            Color32::from_black_alpha(220),
-        );
-        painter.text(pos, align, line, font.clone(), gold);
+    let fps_val = if t.fps.is_finite() { t.fps.max(0.0) } else { 0.0 };
+    let ping_ms = net.map_or(0.0, NetGraphTelemetry::ping_ms).max(0.0);
+    let last_in = net.map_or(0, NetGraphTelemetry::last_in_bytes);
+    let in_kbs = net.map_or(0.0, NetGraphTelemetry::in_kbs);
+    let in_pps = net.map_or(0.0, NetGraphTelemetry::in_packets_per_sec);
+    let last_out = net.map_or(0, NetGraphTelemetry::last_out_bytes);
+    let out_kbs = net.map_or(0.0, NetGraphTelemetry::out_kbs);
+    let out_pps = net.map_or(0.0, NetGraphTelemetry::out_packets_per_sec);
+    let loss = ((net.map_or(0.0, NetGraphTelemetry::loss_percent) + 0.5) - 0.01).max(0.0) as i32;
+    let choke = ((net.map_or(0.0, NetGraphTelemetry::choke_percent) + 0.5) - 0.01).max(0.0) as i32;
+
+    let rows = [
+        format!("{fps_val:.1} fps  {} ms", ping_ms.round() as i32),
+        format!("in :  {last_in}  {in_kbs:.2} k/s  {in_pps:.0}/s"),
+        format!("out:  {last_out}  {out_kbs:.2} k/s  {out_pps:.0}/s"),
+        format!("loss: {loss}  choke: {choke}"),
+    ];
+    for (idx, line) in rows.iter().enumerate() {
+        let pos = Pos2::new(x, text_top + (idx as f32) * line_h);
+        painter.text(pos + egui::vec2(1.0, 1.0), egui::Align2::LEFT_TOP, line, font.clone(), shadow);
+        painter.text(pos, egui::Align2::LEFT_TOP, line, font.clone(), text_color);
     }
-    let _ = palette;
+
+    if mode >= 3 {
+        return;
+    }
+
+    // Graph timelane directly above the 4 text rows (`net_graph 1` and `2`).
+    let graph_bottom = text_top - 4.0;
+    let ping_bottom = graph_bottom - (LERP_HEIGHT as f32) - 2.0;
+    let ping_height = (h - LERP_HEIGHT - 2).max(16);
+
+    let at_edge = |a: i32| a <= 3 || a >= w - 4;
+
+    // 1. `NetGraph_DrawTimes`: pale-blue/orange `ex_interp` strip + blue `cl_cmdrate` tick dots.
+    let latest_out = net.map_or(0, NetGraphTelemetry::latest_outgoing_seq);
+    for a in 0..w {
+        let col_x = x + (w - a - 1) as f32;
+        if let Some(ng) = net {
+            let seq = latest_out.wrapping_sub(a as u32);
+            let sample = ng.outgoing_sample(seq);
+            if sample.sequence == seq && seq != 0 {
+                let lerp_h = ((sample.cmd_lerp / 3.0) * LERP_HEIGHT as f32)
+                    .min((h as f32) * 0.7)
+                    .round() as i32;
+                let base_y = graph_bottom - 4.0;
+                if lerp_h >= EXTRAP_POINT {
+                    let span = (lerp_h - EXTRAP_POINT).max(1);
+                    let start = if solid { 0 } else { span - 1 };
+                    for j in start..span {
+                        let frac = (j as f32) / ((LERP_HEIGHT - EXTRAP_POINT).max(1) as f32);
+                        let col = Color32::from_rgb(
+                            (255.0 - 5.0 * frac).round() as u8,
+                            (127.0 * (1.0 - frac)).round() as u8,
+                            0,
+                        );
+                        painter.rect_filled(
+                            egui::Rect::from_min_size(
+                                Pos2::new(col_x, base_y - (EXTRAP_POINT + j) as f32),
+                                egui::vec2(1.0, 1.0),
+                            ),
+                            0.0,
+                            col,
+                        );
+                    }
+                } else {
+                    let old_h = lerp_h.max(0);
+                    let span = (EXTRAP_POINT - old_h).max(1);
+                    let len = if solid { span } else { 1 };
+                    for j in 0..len {
+                        let frac = ((old_h + j) as f32) / (EXTRAP_POINT as f32);
+                        let col = Color32::from_rgb(
+                            (63.0 * (1.0 - frac)).round() as u8,
+                            (96.0 + 90.0 * frac).round() as u8,
+                            255,
+                        );
+                        painter.rect_filled(
+                            egui::Rect::from_min_size(
+                                Pos2::new(col_x, base_y - (old_h + j) as f32),
+                                egui::vec2(1.0, 1.0),
+                            ),
+                            0.0,
+                            col,
+                        );
+                    }
+                }
+
+                let dot_col = if sample.sent {
+                    Color32::from_rgb(70, 150, 255) // blue `cl_cmdrate` tick dot
+                } else {
+                    Color32::from_rgba_unmultiplied(255, 0, 0, 200)
+                };
+                painter.rect_filled(
+                    egui::Rect::from_min_size(Pos2::new(col_x, graph_bottom - 3.0), egui::vec2(1.0, 2.0)),
+                    0.0,
+                    dot_col,
+                );
+            }
+        }
+        if at_edge(a) {
+            painter.rect_filled(
+                egui::Rect::from_min_size(
+                    Pos2::new(col_x, graph_bottom - 4.0 - EXTRAP_POINT as f32),
+                    egui::vec2(1.0, 1.0),
+                ),
+                0.0,
+                Color32::WHITE,
+            );
+        }
+    }
+
+    // 2. `NetGraph_DrawDataUsage`: latency/packet height bars, red drops, yellow chokes, blue invalid deltas.
+    let latest_in = net.map_or(0, NetGraphTelemetry::latest_incoming_seq);
+    let mut last_valid_h = 4.0f32;
+    for a in 0..w {
+        let col_x = x + (w - a - 1) as f32;
+        if let Some(ng) = net {
+            let seq = latest_in.wrapping_sub(a as u32);
+            let sample = ng.incoming_sample(seq);
+            if sample.sequence == seq && seq != 0 {
+                let (bar_h, col, is_ping) = match sample.status {
+                    PacketSampleStatus::Dropped => (
+                        last_valid_h.max(8.0).min(ping_height as f32),
+                        Color32::from_rgb(255, 0, 0),
+                        false,
+                    ),
+                    PacketSampleStatus::InvalidDelta => (
+                        last_valid_h.max(6.0).min(ping_height as f32),
+                        Color32::from_rgb(0, 0, 255),
+                        false,
+                    ),
+                    PacketSampleStatus::Skipped => (
+                        last_valid_h.max(6.0).min(ping_height as f32),
+                        Color32::from_rgb(240, 127, 63),
+                        false,
+                    ),
+                    PacketSampleStatus::Valid => {
+                        let lat = sample.latency_sec.clamp(0.0, 1.0);
+                        let h_px = (((lat + 0.1) / 1.1) * (ping_height as f32))
+                            .round()
+                            .clamp(1.0, ping_height as f32);
+                        last_valid_h = h_px;
+                        let c = if sample.choked {
+                            Color32::from_rgb(255, 255, 0)
+                        } else if lat >= 0.25 {
+                            Color32::from_rgb(255, 80, 60)
+                        } else if lat >= 0.12 {
+                            Color32::from_rgb(255, 220, 60)
+                        } else {
+                            Color32::from_rgba_unmultiplied(63, 255, 63, 180)
+                        };
+                        (h_px, c, true)
+                    }
+                    PacketSampleStatus::Empty => (0.0, Color32::TRANSPARENT, false),
+                };
+
+                if bar_h > 0.0 {
+                    let top_y = ping_bottom - bar_h;
+                    if is_ping && !solid {
+                        painter.rect_filled(
+                            egui::Rect::from_min_size(Pos2::new(col_x, top_y), egui::vec2(1.0, 1.0)),
+                            0.0,
+                            col,
+                        );
+                    } else if is_ping {
+                        painter.rect_filled(
+                            egui::Rect::from_min_size(Pos2::new(col_x, top_y), egui::vec2(1.0, bar_h)),
+                            0.0,
+                            col,
+                        );
+                    } else {
+                        // Drop / invalid / skipped spike (`cl_netgraph.c:520-533`).
+                        painter.rect_filled(
+                            egui::Rect::from_min_size(Pos2::new(col_x, top_y), egui::vec2(1.0, bar_h.min(2.0))),
+                            0.0,
+                            col,
+                        );
+                        if bar_h > 3.0 {
+                            painter.rect_filled(
+                                egui::Rect::from_min_size(
+                                    Pos2::new(col_x, ping_bottom - 2.0),
+                                    egui::vec2(1.0, 2.0),
+                                ),
+                                0.0,
+                                col,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        if at_edge(a) {
+            painter.rect_filled(
+                egui::Rect::from_min_size(Pos2::new(col_x, ping_bottom), egui::vec2(1.0, 1.0)),
+                0.0,
+                Color32::from_rgba_unmultiplied(0, 255, 0, 160),
+            );
+        }
+
+        // 3. `net_graph 2`: per-packet byte height & scale hatches above latency lane.
+        if mode >= 2 {
+            let data_base_y = ping_bottom - (ping_height as f32) - 2.0;
+            if at_edge(a) {
+                painter.rect_filled(
+                    egui::Rect::from_min_size(Pos2::new(col_x, data_base_y), egui::vec2(1.0, 1.0)),
+                    0.0,
+                    Color32::WHITE,
+                );
+            }
+            if let Some(ng) = net {
+                let seq = latest_in.wrapping_sub(a as u32);
+                let sample = ng.incoming_sample(seq);
+                if sample.sequence == seq && sample.status == PacketSampleStatus::Valid && sample.bytes > 0 {
+                    let seg_h = ((sample.bytes as f32) / net_scale).clamp(1.0, 48.0);
+                    let top_y = (data_base_y - seg_h).max(1.0);
+                    let draw_h = if solid { (data_base_y - top_y).max(1.0) } else { 1.0 };
+                    painter.rect_filled(
+                        egui::Rect::from_min_size(Pos2::new(col_x, top_y), egui::vec2(1.0, draw_h)),
+                        0.0,
+                        Color32::from_rgba_unmultiplied(240, 240, 240, 160),
+                    );
+                }
+            }
+        }
+    }
+
+    if mode >= 2 {
+        // `NetGraph_DrawHatches` (`cl_netgraph.c:333-354`).
+        let data_base_y = ping_bottom - (ping_height as f32) - 2.0;
+        let ystep = ((10.0 / net_scale) as i32).max(1);
+        let max_bytes = net.map_or(200, NetGraphTelemetry::max_msg_bytes) + 50;
+        let mut hy = data_base_y;
+        while hy > 1.0 && ((data_base_y - hy) * net_scale) < max_bytes as f32 {
+            let val = ((data_base_y - hy) * net_scale).round() as i32;
+            if val % 50 == 0 {
+                painter.rect_filled(
+                    egui::Rect::from_min_size(Pos2::new(x, hy), egui::vec2(4.0, 1.0)),
+                    0.0,
+                    Color32::from_rgb(0, 200, 0),
+                );
+            } else if ystep > 5 {
+                painter.rect_filled(
+                    egui::Rect::from_min_size(Pos2::new(x, hy), egui::vec2(4.0, 1.0)),
+                    0.0,
+                    Color32::from_rgba_unmultiplied(0, 63, 63, 200),
+                );
+            }
+            hy -= ystep as f32;
+        }
+    }
+
+    // Right-side rate labels matching `NetGraph_DrawTextFields` (`cl_netgraph.c:422-425`).
+    let cmdrate = cvars.get_f32("cl_cmdrate").clamp(10.0, 100.0);
+    let updaterate = cvars.get_f32("cl_updaterate").clamp(10.0, 102.0);
+    let rate_x = x + (w as f32) - 26.0;
+    let upd_label = format!("{updaterate:.0}/s");
+    let cmd_label = format!("{cmdrate:.0}/s");
+    let upd_pos = Pos2::new(rate_x, ping_bottom - (ping_height as f32));
+    let cmd_pos = Pos2::new(rate_x, graph_bottom - (LERP_HEIGHT as f32));
+    painter.text(upd_pos + egui::vec2(1.0, 1.0), egui::Align2::LEFT_TOP, &upd_label, font.clone(), shadow);
+    painter.text(upd_pos, egui::Align2::LEFT_TOP, &upd_label, font.clone(), text_color);
+    painter.text(cmd_pos + egui::vec2(1.0, 1.0), egui::Align2::LEFT_TOP, &cmd_label, font.clone(), shadow);
+    painter.text(cmd_pos, egui::Align2::LEFT_TOP, &cmd_label, font, text_color);
+}
+
+/// Draw classic top-left `cl_showfps 1` framerate readout and `con_notifytime` recent lines.
+pub fn draw_top_left_console_overlays(
+    ctx: &egui::Context,
+    cvars: &CVarRegistry,
+    fps: f32,
+    notify_lines: &[(String, f64)],
+    now_sec: f64,
+    console_open: bool,
+) {
+    let show_fps = cvars.get_i32("cl_showfps") != 0;
+    let notify_time = f64::from(cvars.get_f32("con_notifytime").max(0.0));
+    let show_notify = !console_open && notify_time > 0.0;
+    if !show_fps && !show_notify {
+        return;
+    }
+    let screen = ctx.content_rect();
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::unique("cs16_top_left_overlays"),
+    ));
+    let font = FontId::monospace(13.0);
+    let mut y = screen.top() + 8.0;
+    if show_fps {
+        let fps_val = if fps.is_finite() { fps.round().max(0.0) } else { 0.0 };
+        let col = if fps_val >= 60.0 {
+            Color32::from_rgb(80, 255, 80)
+        } else if fps_val >= 30.0 {
+            Color32::from_rgb(255, 220, 60)
+        } else {
+            Color32::from_rgb(255, 80, 80)
+        };
+        let label = format!("{fps_val:.0} fps");
+        let pos = Pos2::new(screen.left() + 8.0, y);
+        painter.text(pos + egui::vec2(1.0, 1.0), egui::Align2::LEFT_TOP, &label, font.clone(), Color32::BLACK);
+        painter.text(pos, egui::Align2::LEFT_TOP, &label, font.clone(), col);
+        y += 18.0;
+    }
+    if show_notify {
+        let con_col = crate::ui::hud::HudExtrasContext::default().con_color;
+        let _ = con_col;
+        for (line, _ts) in notify_lines
+            .iter()
+            .filter(|(_, ts)| now_sec - *ts <= notify_time)
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
+            let pos = Pos2::new(screen.left() + 8.0, y);
+            painter.text(pos + egui::vec2(1.0, 1.0), egui::Align2::LEFT_TOP, line, font.clone(), Color32::BLACK);
+            painter.text(pos, egui::Align2::LEFT_TOP, line, font.clone(), Color32::from_rgb(255, 195, 65));
+            y += 15.0;
+        }
+    }
 }
 
 pub fn parse_rgb(s: &str) -> (u8, u8, u8) {
@@ -355,5 +876,49 @@ mod tests {
         assert!(!should_draw_dynamic_crosshair(54.0, 28)); // FOV <= 54
         assert!(should_draw_dynamic_crosshair(55.0, 8));   // AUG zoomed (55 deg)
         assert!(should_draw_dynamic_crosshair(90.0, 28));  // AK47 unzoomed
+    }
+
+    #[test]
+    fn net_graph_cl_showpos_and_r_speeds_gate_on_cvars() {
+        let mut cvars = CVarRegistry::new_with_defaults();
+        let t = FrameTelemetry {
+            fps: 100.0,
+            frame_ms: 10.0,
+            map_name: "de_dust2",
+            pos: [10.0, 20.0, 30.0],
+            yaw_deg: 90.0,
+            pitch_deg: -5.0,
+            speed: 250.0,
+            draw_calls: 12,
+            triangles: 3456,
+        };
+        let ctx = egui::Context::default();
+        let run = |cv: &CVarRegistry| -> usize {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    Pos2::ZERO,
+                    egui::vec2(1024.0, 768.0),
+                )),
+                ..Default::default()
+            };
+            ctx.begin_pass(input);
+            draw_showpos(&ctx, cv, &t);
+            draw_r_speeds(&ctx, cv, &t);
+            draw_net_graph(
+                &ctx,
+                cv,
+                &t,
+                VguiPalette::from(cs_assets::scheme::VguiColors::default()),
+            );
+            let mut out = ctx.end_pass();
+            out.textures_delta.clear();
+            out.shapes.len()
+        };
+        assert_eq!(run(&cvars), 0);
+        cvars.set("cl_showpos", "1");
+        assert!(run(&cvars) > 0);
+        cvars.set("cl_showpos", "0");
+        cvars.set("r_speeds", "1");
+        assert!(run(&cvars) > 0);
     }
 }

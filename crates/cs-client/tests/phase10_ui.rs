@@ -895,6 +895,7 @@ fn ui_screen_spectator_and_bottom_bar_cycles_modes_and_paints_res() {
                 round_timer_secs: 75,
                 players: &players,
                 spec_health: Some((82, 1)),
+                ..Default::default()
             },
         );
         assert!(acts.is_empty());
@@ -1900,4 +1901,90 @@ fn screen5_hud_saytext_and_pickup_history_with_retail_weapon_cards() {
         draw_cs16_hud_with_extras(ctx, sprites_holder.as_ref(), &view, &extras);
     });
     assert!(prims > 0);
+}
+
+#[test]
+fn cl_showfps_and_con_notifytime_overlay_and_crosshair_toggle() {
+    let mut cvars = CVarRegistry::new_with_defaults();
+    cvars.set("cl_showfps", "1");
+    cvars.set("con_notifytime", "4");
+    cvars.set("crosshair", "0");
+    let notify = vec![("hello notify".to_string(), 1.0)];
+
+    let prims = run_egui_frame(|ctx| {
+        cs_client::ui::draw_top_left_console_overlays(ctx, &cvars, 99.7, &notify, 2.0, false);
+    });
+    assert!(prims > 0, "cl_showfps 1 + notify lines should draw primitives");
+
+    let mut ch = CrosshairState::default();
+    let ch_inputs = CrosshairInputs::default();
+    let ch_prims = run_egui_frame(|ctx| {
+        draw_crosshair_vgui(ctx, &cvars, &mut ch, &ch_inputs);
+    });
+    assert_eq!(ch_prims, 0, "crosshair 0 must suppress crosshair drawing");
+}
+
+#[test]
+fn ui_main_buy_menu_ammo_captions_fit_single_line_without_clipping() {
+    let Some(vfs) = discover_retail_vfs() else {
+        eprintln!("SKIPPED MainBuyMenu ammo caption fit test: CS16_GAMEDIR not set");
+        return;
+    };
+    let mut rt = VguiRuntime::new();
+    assert!(rt.load_res(&vfs, "resource/UI/MainBuyMenu.res").is_some());
+    let loc = LocalizationTable::load(&vfs);
+    let client_fonts = rt.client_scheme.fonts.clone();
+    let ctx = egui::Context::default();
+
+    for (w, h) in [(640u32, 480u32), (800, 600), (1280, 800), (1280, 1024)] {
+        let screen = egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::new(w as f32, h as f32),
+        );
+        let vp = cs_client::ui::vgui2::client_ui_viewport(screen);
+        let nodes = rt.compute_layout_mode(
+            "resource/UI/MainBuyMenu.res",
+            [vp.left(), vp.top(), vp.width(), vp.height()],
+            cs_assets::vgui_res::VguiCoordMode::Proportional640,
+            Some(&loc),
+        );
+        for field in ["primaryammo", "secammo"] {
+            let btn = nodes
+                .iter()
+                .find(|n| n.field_name.eq_ignore_ascii_case(field))
+                .expect("ammo button present");
+            let (clean, _) = cs_client::ui::vgui2::font_atlas::strip_vgui_hotkey(&btn.label);
+            assert!(
+                clean == "6 PRIMARY AMMO" || clean == "7 SECONDARY AMMO",
+                "unexpected label {clean:?}"
+            );
+            let rect = egui::Rect::from_min_size(
+                egui::Pos2::new(btn.rect[0], btn.rect[1]),
+                egui::Vec2::new(btn.rect[2], btn.rect[3]),
+            );
+            let text_rect = cs_client::ui::vgui2::runtime::client_button_text_rect(rect, btn.align);
+            let measured = rt.font_atlas.measure_text_with_scale(
+                &ctx,
+                Some(&vfs),
+                &client_fonts,
+                "client",
+                "Default",
+                h,
+                &clean,
+                1.0,
+            );
+            assert!(
+                measured.x <= text_rect.width(),
+                "{w}x{h} {clean}: width {:.1} exceeds text_rect width {:.1}",
+                measured.x,
+                text_rect.width()
+            );
+            assert!(
+                measured.y <= text_rect.height(),
+                "{w}x{h} {clean}: height {:.1} exceeds text_rect height {:.1}",
+                measured.y,
+                text_rect.height()
+            );
+        }
+    }
 }

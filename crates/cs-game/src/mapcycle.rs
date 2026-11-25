@@ -85,16 +85,22 @@ impl MapCycle {
         self.next = 0;
     }
 
-    /// `ReloadMapCycleFile` on `mapcycle.txt` (the `mapcyclefile` cvar is not read): every line
+    /// `ReloadMapCycleFile` on `mapcycle.txt`: every line
     /// names a map, optionally followed by `\minplayers\N\maxplayers\N`. A map that is not
     /// valid (`IS_MAP_VALID`: it has no `maps/<name>.bsp`) is skipped. The first map of the
     /// file is where the cycle starts. Nothing is listed for a file that is missing or empty.
     pub fn load(vfs: &cs_vfs::Vfs) -> Self {
-        let text = match vfs.read_string_lossy("mapcycle.txt") {
+        Self::load_from(vfs, "mapcycle.txt")
+    }
+
+    /// Loads a map cycle list from the specified VFS path (`mapcyclefile` cvar).
+    pub fn load_from(vfs: &cs_vfs::Vfs, path: &str) -> Self {
+        let path = if path.trim().is_empty() { "mapcycle.txt" } else { path.trim() };
+        let text = match vfs.read_string_lossy(path) {
             Ok(text) => text,
             Err(cs_vfs::VfsError::NotFound(_)) => String::new(),
             Err(err) => {
-                tracing::warn!(%err, "mapcycle.txt could not be read");
+                tracing::warn!(%err, path, "mapcyclefile could not be read");
                 String::new()
             }
         };

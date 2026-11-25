@@ -738,3 +738,27 @@ fn bomb_plant_guard_and_defuse_synthetic_arena() {
         "expected T bots to guard or evade planted C4:\n{summary}"
     );
 }
+
+#[test]
+fn bots_ignore_players_with_notarget() {
+    let map = floor_bsp(spawns(2, 2));
+    let mut b = Bench::with_slots(map, 6);
+    let _ = b.server.console_command("sv_cheats 1");
+    let _ = b.server.console_command("mp_freezetime 0");
+    b.run(|game, eng| {
+        assert!(game.spawn_player(eng, 0, Team::Terrorist, 0));
+        eng.ent_mut(eng.client_edict(0)).unwrap().origin = Vec3::new(128.0, 0.0, 36.0);
+        game.client_command(eng, 0, &["notarget".to_string()]);
+        assert_ne!(
+            eng.ent(eng.client_edict(0)).unwrap().flags & cs_engine::consts::FL_NOTARGET,
+            0
+        );
+    });
+    let _ = b.server.console_command("bot_add_ct");
+    b.step(40);
+    let summary = b.run(|g, eng| g.debug_bot_summary(eng));
+    assert!(
+        !summary.contains("enemy=Some(0)"),
+        "bot must not acquire a player with FL_NOTARGET:\n{summary}"
+    );
+}

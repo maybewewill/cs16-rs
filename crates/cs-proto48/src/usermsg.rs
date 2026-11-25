@@ -405,6 +405,18 @@ pub enum CsUserMsg {
         player: u8,
         location: String,
     },
+    /// `gmsgHealthInfo` (`BUILD_LATEST`, 5 bytes): observer/replay HP update for `player_id` (1-based).
+    HealthInfo {
+        player_id: u8,
+        health: i32,
+    },
+    /// `gmsgAccount` (`BUILD_LATEST`, 5 bytes): observer/replay money update for `player_id` (1-based).
+    Account {
+        player_id: u8,
+        amount: i32,
+    },
+    /// `gmsgReqState` (engine voice mask request, 0 bytes).
+    ReqState,
     Unknown {
         name: String,
         payload: Vec<u8>,
@@ -715,6 +727,15 @@ pub fn decode_cs_usermsg(name: &str, payload: &[u8]) -> Result<CsUserMsg, ProtoE
             player: r.read_u8()?,
             location: r.read_str()?,
         },
+        "HealthInfo" => CsUserMsg::HealthInfo {
+            player_id: r.read_u8()?,
+            health: r.read_i32()?,
+        },
+        "Account" => CsUserMsg::Account {
+            player_id: r.read_u8()?,
+            amount: r.read_i32()?,
+        },
+        "ReqState" => CsUserMsg::ReqState,
         _ => CsUserMsg::Unknown {
             name: name.to_string(),
             payload: payload.to_vec(),
@@ -1196,6 +1217,17 @@ pub fn encode_cs_usermsg(msg: &CsUserMsg) -> (&'static str, Vec<u8>) {
             w.write_str(location);
             "Location"
         }
+        CsUserMsg::HealthInfo { player_id, health } => {
+            w.write_u8(*player_id);
+            w.write_i32(*health);
+            "HealthInfo"
+        }
+        CsUserMsg::Account { player_id, amount } => {
+            w.write_u8(*player_id);
+            w.write_i32(*amount);
+            "Account"
+        }
+        CsUserMsg::ReqState => "ReqState",
         CsUserMsg::Unknown { payload, .. } => {
             w.write_bytes(payload);
             "Unknown"
@@ -1461,6 +1493,15 @@ mod tests {
                 player: 2,
                 location: "#BombsiteA".to_string(),
             },
+            CsUserMsg::HealthInfo {
+                player_id: 1,
+                health: 100,
+            },
+            CsUserMsg::Account {
+                player_id: 1,
+                amount: 800,
+            },
+            CsUserMsg::ReqState,
         ];
         for m in msgs {
             let (name, raw) = encode_cs_usermsg(&m);

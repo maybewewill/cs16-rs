@@ -631,6 +631,7 @@ dependencies = [
  "cs-cvar",
  "cs-engine",
  "cs-game",
+ "cs-platform",
  "cs-probe",
  "cs-proto48",
  "cs-sim",
@@ -776,12 +777,15 @@ dependencies = [
 name = "cs-server"
 version = "0.1.0"
 dependencies = [
+ "crc32fast",
  "cs-amxx",
+ "cs-assets",
  "cs-clientcore",
  "cs-cvar",
  "cs-engine",
  "cs-game",
  "cs-local",
+ "cs-master",
  "cs-mod-api",
  "cs-mod-host",
  "cs-platform",
@@ -791,6 +795,9 @@ dependencies = [
  "cs-transport",
  "cs-vfs",
  "ctrlc",
+ "glam",
+ "image",
+ "opus",
  "tracing",
  "tracing-subscriber",
 ]

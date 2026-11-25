@@ -19,6 +19,7 @@
 //! (hostages), `Account`/`HealthInfo` (they exist only in the newest builds, `BUILD_LATEST`:
 //! vanilla does not register them), the career messages (`CZCareer`, Condition Zero only).
 
+use cs_engine::consts::FL_PROXY;
 use cs_engine::{EngineApi, MsgDest};
 use cs_proto48::bitbuf::MsgWriter;
 use cs_proto48::usermsg::{CsUserMsg, USERMSG_BASE_ID, UserMsgRegistry};
@@ -114,6 +115,8 @@ pub(crate) const USER_MESSAGES: &[(&str, i8)] = &[
     ("Fog", 7),
     ("ShowTimer", 0),
     ("HudTextArgs", -1),
+    ("Account", 5),
+    ("HealthInfo", 5),
 ];
 
 /// `MAX_MOTD_CHUNK` and `MAX_MOTD_LENGTH` (`gamerules.h`).
@@ -427,6 +430,133 @@ pub(crate) fn money(eng: &mut EngineApi<'_>, slot: u8, amount: i32) {
     );
 }
 
+/// Whether `obs_slot` is an eligible observer to receive `HealthInfo` / `Account` updates for
+/// `subject_slot` (`ReGameDLL_CS` `BUILD_LATEST` observer anti-leak rules):
+/// - Never leaks enemy HP/money to live opposing players (`obs.alive` or `OBS_NONE`).
+/// - HLTV proxy slots (`FL_PROXY`) and `Team::Spectator` observers see both teams.
+/// - Dead team observers (`!obs.alive`, `Team::Ct | Team::Terrorist`, `iuser1 != OBS_NONE`)
+///   see teammates always, and enemies ONLY when `force_camera == CAMERA_MODE_SPEC_ANYONE`
+///   (`mp_forcecamera == 0 && mp_forcechasecam == 0 && mp_fadetoblack == 0`).
+pub(crate) fn observer_eligible_for(
+    g: &GameState,
+    eng: &EngineApi<'_>,
+    obs_slot: u8,
+    subject_slot: u8,
+) -> bool {
+    let Some(subject) = g.players.get(usize::from(subject_slot)).and_then(Option::as_ref) else {
+        return false;
+    };
+    if !matches!(subject.team, Team::Ct | Team::Terrorist) {
+        return false;
+    }
+    let Some(obs) = g.players.get(usize::from(obs_slot)).and_then(Option::as_ref) else {
+        return false;
+    };
+    let Some(obs_ent) = eng.ent(eng.client_edict(obs_slot)) else {
+        return false;
+    };
+    if (obs_ent.flags & FL_PROXY) != 0 {
+        return true;
+    }
+    if obs.alive
+        || obs_ent.iuser1 == crate::observer::OBS_NONE
+        || obs_ent.deadflag == crate::player::DEAD_DYING
+    {
+        return false;
+    }
+    match obs.team {
+        Team::Spectator => true,
+        Team::Ct | Team::Terrorist => {
+            if obs.team == subject.team {
+                eng.cvar_f32("mp_fadetoblack") as i32 != crate::observer::FADETOBLACK_STAY
+            } else {
+                crate::observer::force_camera(eng) == crate::observer::CAMERA_MODE_SPEC_ANYONE
+            }
+        }
+        Team::Unassigned => false,
+    }
+}
+
+fn broadcast_observer_usermsg(
+    g: &GameState,
+    eng: &mut EngineApi<'_>,
+    subject_slot: u8,
+    msg: &CsUserMsg,
+) {
+    let Some(subject) = g.players.get(usize::from(subject_slot)).and_then(Option::as_ref) else {
+        return;
+    };
+    if !matches!(subject.team, Team::Ct | Team::Terrorist) {
+        return;
+    }
+    for obs_slot in 0..g.players.len() as u8 {
+        if observer_eligible_for(g, eng, obs_slot, subject_slot) {
+            eng.send_usermsg(MsgDest::One(obs_slot), msg);
+        }
+    }
+    eng.send_replay_usermsg(msg);
+}
+
+/// Emits `HealthInfo` for `subject_slot` strictly to eligible observers and the `.dem` replay stream.
+pub(crate) fn broadcast_health_info(
+    g: &GameState,
+    eng: &mut EngineApi<'_>,
+    subject_slot: u8,
+    health: i32,
+) {
+    let msg = CsUserMsg::HealthInfo {
+        player_id: entity_index(usize::from(subject_slot)),
+        health: health.max(0),
+    };
+    broadcast_observer_usermsg(g, eng, subject_slot, &msg);
+}
+
+/// Emits `Account` for `subject_slot` strictly to eligible observers and the `.dem` replay stream.
+pub(crate) fn broadcast_account(
+    g: &GameState,
+    eng: &mut EngineApi<'_>,
+    subject_slot: u8,
+    amount: i32,
+) {
+    let msg = CsUserMsg::Account {
+        player_id: entity_index(usize::from(subject_slot)),
+        amount,
+    };
+    broadcast_observer_usermsg(g, eng, subject_slot, &msg);
+}
+
+/// Syncs `HealthInfo` and `Account` for all eligible players when `obs_slot` becomes an observer.
+pub(crate) fn sync_observer_hud_info(g: &GameState, eng: &mut EngineApi<'_>, obs_slot: u8) {
+    for (i, subject) in g.players.iter().enumerate() {
+        let Some(p) = subject else { continue };
+        let subject_slot = i as u8;
+        if !observer_eligible_for(g, eng, obs_slot, subject_slot) {
+            continue;
+        }
+        let player_id = entity_index(i);
+        let hp = if p.alive {
+            eng.ent(eng.client_edict(subject_slot))
+                .map_or(0, |v| (v.health as i32).max(0))
+        } else {
+            0
+        };
+        eng.send_usermsg(
+            MsgDest::One(obs_slot),
+            &CsUserMsg::HealthInfo {
+                player_id,
+                health: hp,
+            },
+        );
+        eng.send_usermsg(
+            MsgDest::One(obs_slot),
+            &CsUserMsg::Account {
+                player_id,
+                amount: p.money,
+            },
+        );
+    }
+}
+
 /// `CBasePlayer::SetScoreboardAttributes()` for the player of `slot`: `ScoreAttrib` to every
 /// player in the game.
 pub(crate) fn set_scoreboard_attributes(g: &GameState, eng: &mut EngineApi<'_>, slot: usize) {
@@ -677,6 +807,7 @@ pub(crate) fn update_client_data(g: &mut GameState, eng: &mut EngineApi<'_>, slo
             .as_ref()
             .map_or((0, false), |p| (p.money, p.has_defuser));
         money(eng, slot, account);
+        broadcast_account(g, eng, slot, account);
         if has_defuser {
             eng.send_usermsg(
                 MsgDest::One(slot),
@@ -718,14 +849,21 @@ pub(crate) fn update_client_data(g: &mut GameState, eng: &mut EngineApi<'_>, slo
         eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::SetFov(p.fov));
         // `MSG_SPEC` `HLTV` follows: there is no HLTV.
     }
-    if health_now as i32 != p.client_health {
+    let obs_hp_update = if health_now as i32 != p.client_health {
         let mut shown = (health_now as i32).clamp(0, 255) as u8;
         if health_now > 0.0 && health_now <= 1.0 {
             shown = 1;
         }
         p.client_health = health_now as i32;
         health(eng, slot, shown);
-    }
+        Some(if p.alive {
+            (health_now as i32).max(0)
+        } else {
+            0
+        })
+    } else {
+        None
+    };
     if p.armor as i32 != p.client_battery {
         p.client_battery = p.armor as i32;
         eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::Battery(clamp_i16(p.client_battery)));
@@ -754,6 +892,9 @@ pub(crate) fn update_client_data(g: &mut GameState, eng: &mut EngineApi<'_>, slo
         p.hud_damage = p.damage_bits as i32;
         // Non-time-based kinds are not shown again.
         p.damage_bits &= dmg::TIMEBASED;
+    }
+    if let Some(obs_hp) = obs_hp_update {
+        broadcast_health_info(g, eng, slot, obs_hp);
     }
     // "Update Flashlight": the battery drains or charges, `FlashBat`.
     crate::suit::update_flashlight(g, eng, slot);

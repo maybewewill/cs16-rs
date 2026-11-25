@@ -4,27 +4,51 @@
 use cs_assets::scheme::LocalizationTable;
 use cs_assets::vgui_scripts::TitlesTable;
 
-/// Resolve `#Token` (including leading control bytes) via `LocalizationTable` and `TitlesTable`.
+/// Resolve `#Token` (including trailing whitespace/newlines) via `LocalizationTable` and `TitlesTable`.
 fn resolve_token<'a>(
     raw: &'a str,
     loc: Option<&'a LocalizationTable>,
     titles: Option<&'a TitlesTable>,
 ) -> &'a str {
-    if !raw.starts_with('#') {
+    let trimmed = raw.trim_end_matches(['\r', '\n', ' ', '\t']);
+    if !trimmed.starts_with('#') {
         return raw;
     }
     if let Some(l) = loc {
-        let resolved = l.resolve_with_titles(raw, titles);
-        if resolved != raw {
+        let resolved = l.resolve_with_titles(trimmed, titles);
+        if resolved != trimmed {
             return resolved;
         }
     }
     if let Some(t) = titles
-        && let Some(entry) = t.get(raw.trim_start_matches('#'))
+        && let Some(entry) = t.get(trimmed.trim_start_matches('#'))
     {
-        return entry.text.as_str();
+        let text = entry.text.as_str();
+        if text.starts_with('#')
+            && let Some(l) = loc
+        {
+            return l.resolve_with_titles(text, titles);
+        }
+        return text;
     }
     raw
+}
+
+fn resolve_inline_tokens(
+    text: &str,
+    loc: Option<&LocalizationTable>,
+    titles: Option<&TitlesTable>,
+) -> String {
+    if !text.contains('#') {
+        return text.to_string();
+    }
+    if let Some(l) = loc {
+        return l.resolve_inline(text, titles);
+    }
+    if let Some(t) = titles {
+        return LocalizationTable::default().resolve_inline(text, Some(t));
+    }
+    text.to_string()
 }
 
 /// Fills a message `text` with its `params`: a `#Token` is looked up first, `%s1`..`%s4` take
@@ -65,7 +89,16 @@ fn format_with_titles_inner(
 ) -> String {
     let stripped = text.trim_start_matches(['\u{1}', '\u{2}', '\u{3}', '\u{4}']);
     let prefix_len = text.len() - stripped.len();
-    let template = resolve_token(stripped, loc, titles);
+    let trimmed = stripped.trim_end_matches(['\r', '\n', ' ', '\t']);
+    let direct = resolve_token(trimmed, loc, titles);
+    let template_owned = if direct != trimmed {
+        resolve_inline_tokens(direct, loc, titles)
+    } else if stripped.contains('#') {
+        resolve_inline_tokens(stripped, loc, titles)
+    } else {
+        stripped.to_string()
+    };
+    let template = template_owned.as_str();
     let mut out = String::new();
     if keep_color_codes && prefix_len > 0 && !template.starts_with(['\u{1}', '\u{2}', '\u{3}', '\u{4}']) {
         out.push_str(&text[..prefix_len]);
@@ -92,8 +125,13 @@ fn format_with_titles_inner(
                     }
                 };
                 let p = params.get(slot).map_or("", String::as_str);
-                // A parameter may itself be a token (`#Cstrike_Name`).
-                out.push_str(resolve_token(p, loc, titles));
+                // A parameter may itself be a token (`#Cstrike_Name`) or contain one inline.
+                let resolved_p = resolve_token(p, loc, titles);
+                if resolved_p.contains('#') {
+                    out.push_str(&resolve_inline_tokens(resolved_p, loc, titles));
+                } else {
+                    out.push_str(resolved_p);
+                }
             }
             _ => out.push(c),
         }
@@ -102,7 +140,12 @@ fn format_with_titles_inner(
     if !template.contains('%') && !params.is_empty() && out == template {
         for p in params {
             out.push(' ');
-            out.push_str(resolve_token(p, loc, titles));
+            let resolved_p = resolve_token(p, loc, titles);
+            if resolved_p.contains('#') {
+                out.push_str(&resolve_inline_tokens(resolved_p, loc, titles));
+            } else {
+                out.push_str(resolved_p);
+            }
         }
     }
     out.trim_matches(['\n', '\r']).to_string()
@@ -210,6 +253,22 @@ mod tests {
             Some(&titles),
         );
         assert_eq!(team, "Player is joining the Terrorist force");
+
+        let trailing = format_message_with_titles(
+            "\u{1}#Game_connected\n",
+            &p(&["Bob"]),
+            Some(&loc),
+            Some(&titles),
+        );
+        assert_eq!(trailing, "Bob connected.");
+
+        let inline = format_message_with_titles(
+            "* #Game_connected",
+            &p(&["Bob"]),
+            Some(&loc),
+            Some(&titles),
+        );
+        assert_eq!(inline, "* Bob connected.");
     }
 
     #[test]

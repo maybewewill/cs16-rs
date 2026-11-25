@@ -29,6 +29,20 @@ pub const DEFAULT_PORT: u16 = 27015;
 /// The longest stretch of real time one frame steps the local server (a hitch is not caught up).
 const MAX_STEP: f64 = 0.1;
 
+/// Predicted local player kinematics sample used by client-side `cl_ljstats`.
+#[derive(Debug, Clone, Copy)]
+pub struct LocalLjSample {
+    pub origin: Vec3,
+    pub velocity: Vec3,
+    pub on_ground: bool,
+    pub ducking: bool,
+    pub waterlevel: i32,
+    pub teleported: bool,
+    pub maxspeed: f32,
+    pub gravity: f32,
+    pub airaccelerate: f32,
+}
+
 enum Kind {
     None,
     Local {
@@ -237,6 +251,10 @@ impl Session {
 
     pub fn is_active(&self) -> bool {
         !matches!(self.kind, Kind::None)
+    }
+
+    pub fn is_local(&self) -> bool {
+        matches!(self.kind, Kind::Local { .. })
     }
 
     pub fn state(&self) -> Option<ConnState> {
@@ -514,6 +532,34 @@ impl Session {
         }, else (0, 0, true, false, 0.0, 0))
     }
 
+    /// Snapshot of predicted local player kinematics for client-side `cl_ljstats`.
+    pub fn local_lj_sample(&self) -> Option<LocalLjSample> {
+        with_conn!(self, c => {
+            let p = c.predictor().prediction();
+            if !p.predicted {
+                return None;
+            }
+            let cd = c.client_data();
+            let (gravity, airaccelerate) = c
+                .movevars()
+                .map_or((800.0, 10.0), |m| (m.gravity, m.airaccelerate));
+            let on_ground = p.onground >= 0 || cd.is_some_and(|d| (d.flags & 0x200) != 0);
+            let ducking = (p.flags & 0x4000) != 0 || cd.is_some_and(|d| (d.flags & 0x4000) != 0);
+            let maxspeed = cd.map_or(250.0, |d| d.maxspeed);
+            Some(LocalLjSample {
+                origin: p.simorg,
+                velocity: p.simvel,
+                on_ground,
+                ducking,
+                waterlevel: p.waterlevel,
+                teleported: p.teleported,
+                maxspeed,
+                gravity,
+                airaccelerate,
+            })
+        }, else None)
+    }
+
     /// Drains new console lines (`Con_Printf`) since the last call.
     pub fn take_console_lines(&mut self) -> Vec<String> {
         match &mut self.kind {
@@ -556,6 +602,41 @@ impl Session {
 
     pub fn set_client_cvar(&mut self, name: &str, value: &str) {
         with_conn_mut!(self, c => c.set_cvar(name, value), else ());
+    }
+
+    pub fn request_full_update(&mut self) {
+        with_conn_mut!(self, c => c.request_full_update(), else ());
+    }
+
+    pub fn delta_clear(&mut self) {
+        with_conn_mut!(self, c => c.delta_clear(), else ());
+    }
+
+    pub fn delta_stats_summary(&self) -> String {
+        with_conn!(self, c => c.delta_stats_summary(), else "No active session.".to_string())
+    }
+
+    pub fn with_net_graph<R>(&self, f: impl FnOnce(&cs_clientcore::NetGraphTelemetry) -> R) -> Option<R> {
+        with_conn!(self, c => Some(f(c.net_graph())), else None)
+    }
+
+    pub fn precache_models_summary(&self) -> String {
+        match &self.kind {
+            Kind::Demo { player, .. } => {
+                let mut out = format!("Cached models ({}):\n", player.precache().models.len());
+                for (idx, e) in &player.precache().models {
+                    out.push_str(&format!("  {idx:>3}: {}\n", e.name));
+                }
+                out
+            }
+            _ => with_conn!(self, c => {
+                let mut out = format!("Cached models ({}):\n", c.precache().models.len());
+                for (idx, e) in &c.precache().models {
+                    out.push_str(&format!("  {idx:>3}: {}\n", e.name));
+                }
+                out
+            }, else "No active session.".to_string()),
+        }
     }
 
     #[cfg(test)]

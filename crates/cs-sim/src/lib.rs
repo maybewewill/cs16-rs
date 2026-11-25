@@ -3,6 +3,7 @@
 
 pub mod bots;
 pub mod grenades;
+pub use cs_pm::ljstats;
 pub use cs_pm::pm;
 pub mod pmove;
 pub mod rules;

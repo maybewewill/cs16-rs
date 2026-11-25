@@ -17,6 +17,10 @@ use crate::render::lighting::{
     TextureFilterMode, TextureUploadConfig, create_sampler,
     upload_rgba_texture_mipmapped_with_config,
 };
+use crate::render::scene::{
+    EF_NODRAW, ModelKind, ModelRegistry, RenderEntity, brush_matrix, is_opaque_entity,
+    world_to_brush_local,
+};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -42,6 +46,183 @@ pub struct DecalSpawn {
     pub half_size: f32,
     pub permanent: bool,
     pub player_spray: Option<u8>,
+    /// Target entity index (`0` = static world BSP, `> 0` = brush submodel entity).
+    pub entity_index: u16,
+    /// Optional precache model index (from `TE_BSPDECAL` or predicted brush hit); `0` falls back
+    /// to the active entity's `model` in `ModelRegistry`.
+    pub model_index: u16,
+}
+
+/// Active brush submodel transform & visibility extracted from the current frame's scene entities.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BrushEntityTransform {
+    pub submodel: usize,
+    pub origin: Vec3,
+    pub angles: Vec3,
+    pub matrix: Mat4,
+    pub translucent: bool,
+}
+
+/// Build an entity-index lookup of active, solid, visible `*N` brush entities (`EF_NODRAW` and
+/// `SOLID_NOT` entities are excluded so decals on broken `func_breakable`s or hidden brushes are
+/// skipped/evicted).
+pub fn build_brush_entity_lookup(
+    entities: &[RenderEntity],
+    registry: &ModelRegistry,
+) -> HashMap<u16, BrushEntityTransform> {
+    let mut out = HashMap::new();
+    for e in entities {
+        if (e.effects & EF_NODRAW) != 0 || e.solid == 0 {
+            continue;
+        }
+        let Some(entry) = registry.get(e.model) else {
+            continue;
+        };
+        if let ModelKind::Brush(sub) = entry.kind {
+            out.insert(
+                e.index,
+                BrushEntityTransform {
+                    submodel: sub as usize,
+                    origin: e.origin,
+                    angles: e.angles,
+                    matrix: brush_matrix(e.origin, e.angles),
+                    translucent: !is_opaque_entity(e.rendermode, e.renderfx),
+                },
+            );
+        }
+    }
+    out
+}
+
+/// Extract BSP face polygons for a single `*N` submodel in **entity-local space** (no world/entity
+/// offset added) intersecting a local-space sphere.
+pub fn query_submodel_faces_in_sphere(
+    map: &BspMap,
+    submodel: usize,
+    local_center: Vec3,
+    radius: f32,
+) -> Vec<DecalFacePoly> {
+    let mut out = Vec::new();
+    let Some(model) = map.models.get(submodel) else {
+        return out;
+    };
+    let min = model.mins - Vec3::splat(radius);
+    let max = model.maxs + Vec3::splat(radius);
+    if local_center.x < min.x
+        || local_center.x > max.x
+        || local_center.y < min.y
+        || local_center.y > max.y
+        || local_center.z < min.z
+        || local_center.z > max.z
+    {
+        return out;
+    }
+    let first = model.first_face.max(0) as usize;
+    let count = model.num_faces.max(0) as usize;
+    let end = first.saturating_add(count).min(map.faces.len());
+    for face_index in first..end {
+        let face = &map.faces[face_index];
+        let Some(texinfo) = map.texinfos.get(face.texinfo as usize) else {
+            continue;
+        };
+        if let Some(tex) = usize::try_from(texinfo.miptex)
+            .ok()
+            .and_then(|i| map.textures.get(i))
+        {
+            let lower = tex.name.to_ascii_lowercase();
+            if lower == "sky"
+                || lower.starts_with("aaatrigger")
+                || lower.starts_with("clip")
+                || lower.starts_with("hint")
+                || lower.starts_with("skip")
+                || lower.starts_with("origin")
+                || lower.starts_with('!')
+                || lower.starts_with("water")
+            {
+                continue;
+            }
+        }
+        let Some(plane) = map.planes.get(face.plane as usize) else {
+            continue;
+        };
+        let normal = if face.plane_side != 0 {
+            -plane.normal
+        } else {
+            plane.normal
+        };
+        let plane_dist = if face.plane_side != 0 {
+            -plane.dist
+        } else {
+            plane.dist
+        };
+        if (normal.dot(local_center) - plane_dist).abs() > radius {
+            continue;
+        }
+        let num_edges = face.num_edges as usize;
+        if num_edges < 3 || face.first_edge < 0 {
+            continue;
+        }
+        let fe = face.first_edge as usize;
+        if fe.saturating_add(num_edges) > map.surf_edges.len() {
+            continue;
+        }
+        let mut poly = Vec::with_capacity(num_edges);
+        let mut valid = true;
+        for &se in &map.surf_edges[fe..fe + num_edges] {
+            let v_idx = if se >= 0 {
+                map.edges.get(se as usize).map(|e| e[0] as usize)
+            } else {
+                map.edges.get((-se) as usize).map(|e| e[1] as usize)
+            };
+            if let Some(pos) = v_idx.and_then(|idx| map.vertices_raw.get(idx).copied()) {
+                poly.push(pos);
+            } else {
+                valid = false;
+                break;
+            }
+        }
+        if !valid || poly.len() < 3 {
+            continue;
+        }
+        let mut fmin = Vec3::splat(f32::INFINITY);
+        let mut fmax = Vec3::splat(f32::NEG_INFINITY);
+        for &v in &poly {
+            fmin = fmin.min(v);
+            fmax = fmax.max(v);
+        }
+        if local_center.x < fmin.x - radius
+            || local_center.x > fmax.x + radius
+            || local_center.y < fmin.y - radius
+            || local_center.y > fmax.y + radius
+            || local_center.z < fmin.z - radius
+            || local_center.z > fmax.z + radius
+        {
+            continue;
+        }
+        out.push(DecalFacePoly {
+            face_index,
+            model_index: submodel,
+            normal,
+            plane_dist,
+            verts: poly,
+        });
+    }
+    out
+}
+
+/// Transform entity-local decal vertices into world space using `matrix` (`brush_matrix`).
+pub fn transform_decal_vertices(local_verts: &[DecalGpuVertex], matrix: Mat4) -> Vec<DecalGpuVertex> {
+    if matrix == Mat4::IDENTITY {
+        return local_verts.to_vec();
+    }
+    local_verts
+        .iter()
+        .map(|v| DecalGpuVertex {
+            position: matrix.transform_point3(Vec3::from_array(v.position)).to_array(),
+            uv: v.uv,
+            color: v.color,
+        })
+        .collect()
 }
 
 /// Clip a `(pos, uv)` polygon to the half-space `(p - plane_origin).dot(plane_normal) >= 0`.
@@ -161,7 +342,10 @@ struct CachedDecalTex {
 struct PlacedDecal {
     tex_key: String,
     permanent: bool,
-    verts: Vec<DecalGpuVertex>,
+    entity_index: u16,
+    local_verts: Vec<DecalGpuVertex>,
+    last_matrix: Mat4,
+    translucent: bool,
 }
 
 pub struct DecalRenderer {
@@ -182,7 +366,9 @@ pub struct DecalRenderer {
     pldecal_wad: Option<Option<WadArchive>>,
     textures: HashMap<String, CachedDecalTex>,
     placed: VecDeque<PlacedDecal>,
-    draw_batches: Vec<(String, u32, u32)>,
+    world_batches: Vec<(String, u32, u32)>,
+    solid_entity_batches: Vec<(String, u32, u32)>,
+    trans_entity_batches: Vec<(String, u32, u32)>,
     dirty_vbuf: bool,
     cached_gamma: GoldSrcGammaConfig,
     cached_tex_cfg: TextureUploadConfig,
@@ -372,7 +558,9 @@ impl DecalRenderer {
             pldecal_wad: None,
             textures: HashMap::new(),
             placed: VecDeque::new(),
-            draw_batches: Vec::new(),
+            world_batches: Vec::new(),
+            solid_entity_batches: Vec::new(),
+            trans_entity_batches: Vec::new(),
             dirty_vbuf: false,
             cached_gamma: GoldSrcGammaConfig::default(),
             cached_tex_cfg: TextureUploadConfig::default(),
@@ -394,7 +582,9 @@ impl DecalRenderer {
 
     pub fn clear(&mut self) {
         self.placed.clear();
-        self.draw_batches.clear();
+        self.world_batches.clear();
+        self.solid_entity_batches.clear();
+        self.trans_entity_batches.clear();
         self.dirty_vbuf = true;
     }
 
@@ -553,8 +743,38 @@ impl DecalRenderer {
         r_decals: usize,
         custom_sprays: &HashMap<u8, CustomDecalInfo>,
     ) {
+        self.spawn_decals_with_scene(
+            device,
+            queue,
+            vfs,
+            map,
+            spawns,
+            r_decals,
+            custom_sprays,
+            None,
+            None,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_decals_with_scene(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        vfs: &Vfs,
+        map: Option<&BspMap>,
+        spawns: &[DecalSpawn],
+        r_decals: usize,
+        custom_sprays: &HashMap<u8, CustomDecalInfo>,
+        scene_entities: Option<&[RenderEntity]>,
+        registry: Option<&ModelRegistry>,
+    ) {
         let Some(map) = map else {
             return;
+        };
+        let brush_lookup = match (scene_entities, registry) {
+            (Some(ents), Some(reg)) => Some(build_brush_entity_lookup(ents, reg)),
+            _ => None,
         };
         let max_transient = r_decals.min(4096);
         for s in spawns {
@@ -567,15 +787,47 @@ impl DecalRenderer {
                 custom_sprays,
             );
             let half_size = s.half_size.max(2.0);
-            let faces = map.query_faces_in_sphere(s.origin, half_size * 1.5);
-            let verts = project_decal_onto_faces(&faces, s.origin, half_size, 0.35, tint);
-            if verts.is_empty() {
+            let (local_verts, last_matrix, translucent) = if s.entity_index > 0 {
+                let Some(ref lookup) = brush_lookup else {
+                    continue;
+                };
+                let Some(ent_tf) = lookup.get(&s.entity_index) else {
+                    continue;
+                };
+                let submodel = if s.model_index > 0 {
+                    registry
+                        .and_then(|r| r.resolve(i32::from(s.model_index)))
+                        .and_then(|h| registry.and_then(|r| r.get(h)))
+                        .and_then(|e| match e.kind {
+                            ModelKind::Brush(sub) => Some(sub as usize),
+                            _ => None,
+                        })
+                        .unwrap_or(ent_tf.submodel)
+                } else {
+                    ent_tf.submodel
+                };
+                let local_origin = world_to_brush_local(s.origin, ent_tf.origin, ent_tf.angles);
+                let faces =
+                    query_submodel_faces_in_sphere(map, submodel, local_origin, half_size * 1.5);
+                let verts =
+                    project_decal_onto_faces(&faces, local_origin, half_size, 0.35, tint);
+                (verts, ent_tf.matrix, ent_tf.translucent)
+            } else {
+                let mut faces = map.query_faces_in_sphere(s.origin, half_size * 1.5);
+                faces.retain(|f| f.model_index == 0);
+                let verts = project_decal_onto_faces(&faces, s.origin, half_size, 0.35, tint);
+                (verts, Mat4::IDENTITY, false)
+            };
+            if local_verts.is_empty() {
                 continue;
             }
             self.placed.push_back(PlacedDecal {
                 tex_key,
                 permanent: s.permanent,
-                verts,
+                entity_index: s.entity_index,
+                local_verts,
+                last_matrix,
+                translucent,
             });
             self.dirty_vbuf = true;
         }
@@ -606,6 +858,36 @@ impl DecalRenderer {
         software_mode: bool,
         fog: Option<([f32; 3], f32)>,
     ) {
+        self.prepare_with_scene(
+            device,
+            queue,
+            view_proj,
+            camera_pos,
+            gamma,
+            texgamma,
+            brightness,
+            software_mode,
+            fog,
+            None,
+            None,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_with_scene(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view_proj: Mat4,
+        camera_pos: Vec3,
+        gamma: f32,
+        texgamma: f32,
+        brightness: f32,
+        software_mode: bool,
+        fog: Option<([f32; 3], f32)>,
+        scene_entities: Option<&[RenderEntity]>,
+        registry: Option<&ModelRegistry>,
+    ) {
         let (fog_rgb, fog_density) = fog.unwrap_or(([0.0, 0.0, 0.0], 0.0));
         queue.write_buffer(
             &self.uniform_buf,
@@ -623,23 +905,58 @@ impl DecalRenderer {
             }),
         );
 
+        if let (Some(ents), Some(reg)) = (scene_entities, registry) {
+            let lookup = build_brush_entity_lookup(ents, reg);
+            let before = self.placed.len();
+            self.placed
+                .retain(|d| d.entity_index == 0 || lookup.contains_key(&d.entity_index));
+            if self.placed.len() != before {
+                self.dirty_vbuf = true;
+            }
+            for d in &mut self.placed {
+                if d.entity_index > 0
+                    && let Some(tf) = lookup.get(&d.entity_index)
+                    && (d.last_matrix != tf.matrix || d.translucent != tf.translucent)
+                {
+                    d.last_matrix = tf.matrix;
+                    d.translucent = tf.translucent;
+                    self.dirty_vbuf = true;
+                }
+            }
+        }
+
         if !self.dirty_vbuf {
             return;
         }
         self.dirty_vbuf = false;
-        self.draw_batches.clear();
+        self.world_batches.clear();
+        self.solid_entity_batches.clear();
+        self.trans_entity_batches.clear();
         let mut all_verts: Vec<DecalGpuVertex> = Vec::new();
-        for d in &self.placed {
-            let first = all_verts.len() as u32;
-            all_verts.extend_from_slice(&d.verts);
-            let count = d.verts.len() as u32;
-            if let Some(last) = self.draw_batches.last_mut()
-                && last.0 == d.tex_key
+        let push_batch = |batches: &mut Vec<(String, u32, u32)>, tex_key: &str, first: u32, count: u32| {
+            if let Some(last) = batches.last_mut()
+                && last.0 == tex_key
                 && last.1 + last.2 == first
             {
                 last.2 += count;
             } else {
-                self.draw_batches.push((d.tex_key.clone(), first, count));
+                batches.push((tex_key.to_string(), first, count));
+            }
+        };
+        for d in &self.placed {
+            let first = all_verts.len() as u32;
+            if d.entity_index == 0 {
+                all_verts.extend_from_slice(&d.local_verts);
+                push_batch(&mut self.world_batches, &d.tex_key, first, d.local_verts.len() as u32);
+            } else {
+                let xformed = transform_decal_vertices(&d.local_verts, d.last_matrix);
+                let count = xformed.len() as u32;
+                all_verts.extend(xformed);
+                if d.translucent {
+                    push_batch(&mut self.trans_entity_batches, &d.tex_key, first, count);
+                } else {
+                    push_batch(&mut self.solid_entity_batches, &d.tex_key, first, count);
+                }
             }
         }
         if all_verts.len() > self.vertex_cap {
@@ -657,13 +974,35 @@ impl DecalRenderer {
     }
 
     pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
-        if self.draw_batches.is_empty() {
+        self.draw_batch_list(pass, &self.world_batches);
+        self.draw_batch_list(pass, &self.solid_entity_batches);
+        self.draw_batch_list(pass, &self.trans_entity_batches);
+    }
+
+    pub fn draw_world<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
+        self.draw_batch_list(pass, &self.world_batches);
+    }
+
+    pub fn draw_solid_entities<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
+        self.draw_batch_list(pass, &self.solid_entity_batches);
+    }
+
+    pub fn draw_trans_entities<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
+        self.draw_batch_list(pass, &self.trans_entity_batches);
+    }
+
+    fn draw_batch_list<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        batches: &[(String, u32, u32)],
+    ) {
+        if batches.is_empty() {
             return;
         }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.uniform_bg, &[]);
         pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
-        for (tex_key, first, count) in &self.draw_batches {
+        for (tex_key, first, count) in batches {
             if let Some(tex) = self.textures.get(tex_key) {
                 pass.set_bind_group(1, &tex.bg, &[]);
                 pass.draw(*first..(*first + *count), 0..1);

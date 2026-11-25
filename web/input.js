@@ -66,6 +66,7 @@ export class WebInputController {
     this.canvas.addEventListener('mousedown', (e) => {
       this.onGesture();
       if (document.pointerLockElement === this.canvas) {
+        e.preventDefault();
         this.cs16Web.onMouseButton?.(e.button, true);
       }
     });
@@ -73,6 +74,13 @@ export class WebInputController {
     window.addEventListener('mouseup', (e) => {
       this.cs16Web.onMouseButton?.(e.button, false);
     });
+
+    this.canvas.addEventListener('wheel', (e) => {
+      if (document.pointerLockElement === this.canvas) {
+        e.preventDefault();
+        this.cs16Web.onMouseWheel?.(e.deltaY, e.deltaMode);
+      }
+    }, { passive: false });
   }
 
   pollGamepadAndTouch() {

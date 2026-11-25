@@ -285,6 +285,15 @@ pub(crate) fn say_command(
     argv: &[String],
     team_only: bool,
 ) {
+    if eng.cvar_f32("sv_kz_mode") != 0.0
+        && argv.len() >= 2
+    {
+        let joined = argv[1..].join(" ");
+        let trimmed = joined.trim().trim_matches('"');
+        if trimmed.starts_with('/') && crate::kz::handle_command(g, eng, slot, trimmed, true) {
+            return;
+        }
+    }
     let now = eng.time();
     let Some(p) = g
         .players
@@ -317,19 +326,6 @@ pub(crate) fn host_say(
 ) {
     let now = eng.time();
     let sender_dead = is_dead(eng, slot);
-    let Some(p) = g
-        .players
-        .get_mut(usize::from(slot))
-        .and_then(Option::as_mut)
-    else {
-        return;
-    };
-    if p.chat.last_talk != 0.0 && now - p.chat.last_talk < TALK_INTERVAL {
-        return;
-    }
-    p.chat.last_talk = now;
-    let team = p.team;
-
     // `say` with a blank message: nothing to do.
     if argv.len() < 2 {
         return;
@@ -350,6 +346,26 @@ pub(crate) fn host_say(
     if text.is_empty() {
         return;
     }
+
+    if crate::rules::handle_knife_round_chat(g, eng, slot, &text) {
+        return;
+    }
+    if crate::kz::handle_command(g, eng, slot, &text, true) {
+        return;
+    }
+
+    let Some(p) = g
+        .players
+        .get_mut(usize::from(slot))
+        .and_then(Option::as_mut)
+    else {
+        return;
+    };
+    if p.chat.last_talk != 0.0 && now - p.chat.last_talk < TALK_INTERVAL {
+        return;
+    }
+    p.chat.last_talk = now;
+    let team = p.team;
 
     let format = chat_format(team, sender_dead, team_only);
     let console = console_prefix(team, sender_dead, team_only);

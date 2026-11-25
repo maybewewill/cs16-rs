@@ -307,6 +307,7 @@ pub(crate) fn add_account(
     p.money = p.money.saturating_add(amount).clamp(0, MAX_ACCOUNT);
     let money = p.money;
     send_money(eng, slot, money, track_change);
+    crate::messages::broadcast_account(g, eng, slot, money);
     true
 }
 

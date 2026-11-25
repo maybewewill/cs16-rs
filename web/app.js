@@ -6,7 +6,7 @@ import {
   mountFromDropEvent,
   mountFromFileList
 } from './vfs_loader.js';
-import { WebGameTransport } from './transport.js';
+import { WebGameTransport, WebRtcGuestTransport, WebRtcHostHub } from './transport.js';
 import { WebInputController } from './input.js';
 import { WebAudioMixer } from './audio.js';
 
@@ -18,12 +18,15 @@ const botsInput = document.getElementById('bots-count');
 const wsUrlInput = document.getElementById('ws-url');
 const masterUrlInput = document.getElementById('master-url');
 const serverListSelect = document.getElementById('server-list');
+const p2pMaxPlayersSelect = document.getElementById('p2p-max-players');
 const panelEl = document.getElementById('control-panel');
 
 let cs16Web = null;
 let net = null;
+let p2pHost = null;
 let audio = null;
 let input = null;
+let pendingP2pInvite = null;
 
 function setStatus(text) {
   if (statusEl) statusEl.textContent = text;
@@ -33,26 +36,53 @@ function setAssetStatus(text) {
   if (assetStatusEl) assetStatusEl.textContent = text;
 }
 
-function parseInviteParams(search, pageProtocol) {
+function parseInviteParams(search, pageProtocol, pageOrigin = '') {
   const params = new URLSearchParams(search || '');
   const rawJoin = (params.get('join') || '').trim();
   const rawRoom = (params.get('room') || '').trim();
+  const rawP2p = (params.get('p2p') || '').trim();
+  const rawSignal = (params.get('signal') || '').trim();
   const room = /^[A-Za-z0-9_-]{1,32}$/.test(rawRoom) ? rawRoom : '';
+  const p2pRoom = /^[A-Za-z0-9_-]{1,32}$/.test(rawP2p) ? rawP2p : '';
+  const fallbackSignal = /^https?:\/\//i.test(pageOrigin) ? pageOrigin : '';
+  const signalOrigin = /^https?:\/\/[A-Za-z0-9._:-]+(\/[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]*)?$/i.test(rawSignal)
+    ? rawSignal.replace(/\/+$/, '')
+    : fallbackSignal;
   if (!rawJoin) {
-    return { wsUrl: '', joinLabel: '', room };
+    return { wsUrl: '', joinLabel: '', room, p2pRoom, signalOrigin };
   }
   const scheme = pageProtocol === 'https:' ? 'wss://' : 'ws://';
   if (/^wss?:\/\/[A-Za-z0-9._:-]+(\/[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]*)?$/.test(rawJoin)) {
-    return { wsUrl: rawJoin, joinLabel: rawJoin, room };
+    return { wsUrl: rawJoin, joinLabel: rawJoin, room, p2pRoom, signalOrigin };
   }
   if (/^[A-Za-z0-9._-]+(:\d{1,5})?$/.test(rawJoin)) {
     return {
       wsUrl: `${scheme}${rawJoin}/ws`,
       joinLabel: rawJoin,
-      room
+      room,
+      p2pRoom,
+      signalOrigin
     };
   }
-  return { wsUrl: '', joinLabel: '', room };
+  return { wsUrl: '', joinLabel: '', room, p2pRoom, signalOrigin };
+}
+
+function closeActiveTransports() {
+  net?.close();
+  net = null;
+  p2pHost?.close();
+  p2pHost = null;
+}
+
+function resolveSignalOrigin() {
+  if (window.location.protocol === 'http:' || window.location.protocol === 'https:') {
+    return window.location.origin;
+  }
+  const master = masterUrlInput?.value?.trim() || '';
+  if (/^https?:\/\//i.test(master)) {
+    return master.replace(/\/(servers|lobbies)\/?$/i, '').replace(/\/+$/, '');
+  }
+  return '';
 }
 
 async function connectToWsUrl(url) {
@@ -60,11 +90,28 @@ async function connectToWsUrl(url) {
   if (!trimmed) return;
   audio?.unlock();
   cs16Web?.unlockAudio?.();
-  net?.close();
+  closeActiveTransports();
   cs16Web?.connectRemote?.();
   net = new WebGameTransport(trimmed, {
     onPacket: (pkt) => cs16Web?.pushNetPacket?.(pkt),
     onStateChange: (st) => setStatus(`Net: ${st}`)
+  });
+  await net.connect();
+  panelEl?.classList.add('collapsed');
+  input?.lockPointer();
+}
+
+async function connectToP2pRoom(room, signalOrigin) {
+  if (!room || !signalOrigin) {
+    throw new Error('Missing P2P room or signaling URL');
+  }
+  audio?.unlock();
+  cs16Web?.unlockAudio?.();
+  closeActiveTransports();
+  cs16Web?.connectRemote?.();
+  net = new WebRtcGuestTransport(signalOrigin, room, {
+    onPacket: (pkt) => cs16Web?.pushNetPacket?.(pkt),
+    onStateChange: (st) => setStatus(`P2P (${room}): ${st}`)
   });
   await net.connect();
   panelEl?.classList.add('collapsed');
@@ -92,6 +139,13 @@ async function mountBatch(loaderPromise) {
   await cacheAssetsInDb(mounted);
   refreshMaps();
   setAssetStatus(`Mounted ${mounted.length} files (${cs16Web.listMaps?.().length || 0} maps)`);
+  if (pendingP2pInvite) {
+    const { p2pRoom, signalOrigin } = pendingP2pInvite;
+    pendingP2pInvite = null;
+    connectToP2pRoom(p2pRoom, signalOrigin).catch((err) => {
+      setStatus(`P2P invite failed: ${err.message}`);
+    });
+  }
 }
 
 function ensureSize() {
@@ -144,7 +198,11 @@ async function main() {
     }
   });
 
-  const invite = parseInviteParams(window.location.search, window.location.protocol);
+  const invite = parseInviteParams(
+    window.location.search,
+    window.location.protocol,
+    window.location.origin
+  );
   if (invite.wsUrl && wsUrlInput) {
     wsUrlInput.value = invite.wsUrl;
   }
@@ -158,7 +216,17 @@ async function main() {
     refreshMaps();
     setAssetStatus(`Restored ${cached} cached assets`);
   }
-  if (invite.wsUrl) {
+  if (invite.p2pRoom && invite.signalOrigin) {
+    if (cached > 0) {
+      setStatus(`Joining P2P room ${invite.p2pRoom}...`);
+      connectToP2pRoom(invite.p2pRoom, invite.signalOrigin).catch((err) => {
+        setStatus(`P2P invite failed: ${err.message}`);
+      });
+    } else {
+      pendingP2pInvite = { p2pRoom: invite.p2pRoom, signalOrigin: invite.signalOrigin };
+      setStatus(`P2P invite ready (${invite.p2pRoom}) — mount Half-Life folder to join`);
+    }
+  } else if (invite.wsUrl) {
     const roomNote = invite.room ? ` (room ${invite.room})` : '';
     if (cached > 0) {
       setStatus(`Joining ${invite.joinLabel}${roomNote}...`);
@@ -214,6 +282,7 @@ async function main() {
   document.getElementById('btn-start-local')?.addEventListener('click', () => {
     audio.unlock();
     cs16Web.unlockAudio?.();
+    closeActiveTransports();
     const map = mapSelect?.value || 'de_dust2';
     const bots = Math.max(0, Math.min(15, Number(botsInput?.value || 4)));
     cs16Web.startLocal?.(map, bots);
@@ -222,15 +291,73 @@ async function main() {
     setStatus(`Offline: ${map} (${bots} bots)`);
   });
 
+  document.getElementById('btn-host-p2p')?.addEventListener('click', async () => {
+    audio.unlock();
+    cs16Web.unlockAudio?.();
+    closeActiveTransports();
+    const map = mapSelect?.value || 'de_dust2';
+    const maxPlayers = Math.max(2, Math.min(16, Number(p2pMaxPlayersSelect?.value || 10)));
+    const bots = Math.max(0, Math.min(maxPlayers - 1, Number(botsInput?.value || 0)));
+    const signalOrigin = resolveSignalOrigin();
+    if (!signalOrigin) {
+      setStatus('P2P host needs HTTP(S) signaling origin (run cs-server --web-port)');
+      return;
+    }
+    const ok = cs16Web.startP2pHost?.(map, bots, maxPlayers);
+    if (!ok) {
+      setStatus('Mount Half-Life folder before hosting P2P room');
+      return;
+    }
+    const room = `p2p-${Math.random().toString(36).slice(2, 8)}`;
+    p2pHost = new WebRtcHostHub({
+      signalBaseUrl: signalOrigin,
+      room,
+      map,
+      maxPlayers,
+      onPacket: (peerId, pkt) => cs16Web?.pushP2pPacket?.(peerId, pkt),
+      onPeerOpen: (peerId) => setStatus(`P2P Room ${room}: peer #${peerId} joined`),
+      onPeerClose: (peerId) => setStatus(`P2P Room ${room}: peer #${peerId} left`),
+      onStateChange: (st) => setStatus(`P2P: ${st}`)
+    });
+    try {
+      await p2pHost.start();
+      const shareUrl = `${window.location.origin}${window.location.pathname}?p2p=${encodeURIComponent(room)}&signal=${encodeURIComponent(signalOrigin)}`;
+      if (wsUrlInput) wsUrlInput.value = shareUrl;
+      let copied = false;
+      try {
+        await navigator.clipboard?.writeText(shareUrl);
+        copied = true;
+      } catch {}
+      setStatus(
+        copied
+          ? `P2P Room ${room} live — share link copied!`
+          : `P2P Room ${room} live: ${shareUrl}`
+      );
+      panelEl?.classList.add('collapsed');
+      input.lockPointer();
+    } catch (err) {
+      closeActiveTransports();
+      cs16Web.disconnect?.();
+      setStatus(`P2P host failed: ${err.message}`);
+    }
+  });
+
   document.getElementById('btn-connect')?.addEventListener('click', async () => {
     const url = wsUrlInput?.value?.trim();
     if (!url) return;
+    if (/^https?:\/\/.*[?&]p2p=/i.test(url)) {
+      const parsed = new URL(url);
+      const inviteUrl = parseInviteParams(parsed.search, parsed.protocol, parsed.origin);
+      if (inviteUrl.p2pRoom && inviteUrl.signalOrigin) {
+        await connectToP2pRoom(inviteUrl.p2pRoom, inviteUrl.signalOrigin);
+        return;
+      }
+    }
     await connectToWsUrl(url);
   });
 
   document.getElementById('btn-disconnect')?.addEventListener('click', () => {
-    net?.close();
-    net = null;
+    closeActiveTransports();
     cs16Web.disconnect?.();
     panelEl?.classList.remove('collapsed');
     setStatus('Disconnected');
@@ -322,6 +449,14 @@ async function main() {
   function frame(nowMs) {
     input.pollGamepadAndTouch();
     cs16Web.stepAndRender?.(nowMs);
+    if (p2pHost) {
+      const p2pOut = cs16Web.drainP2pPackets?.();
+      if (Array.isArray(p2pOut)) {
+        for (const item of p2pOut) {
+          p2pHost.send(item.peerId, item.data);
+        }
+      }
+    }
     const outPackets = cs16Web.takeNetPackets?.();
     if (net && Array.isArray(outPackets)) {
       for (const pkt of outPackets) {

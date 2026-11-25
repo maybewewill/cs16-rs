@@ -168,6 +168,69 @@ pub fn install() {
         let _ = Reflect::set(&api, &JsValue::from_str("startLocal"), &closure.into_js_value());
     }
 
+    // startP2pHost(map, bots, maxPlayers) -> bool
+    {
+        let rt_c = Rc::clone(&rt);
+        let closure: Closure<dyn FnMut(String, u32, u8) -> bool> =
+            Closure::new(move |map: String, bots: u32, max_players: u8| {
+                match rt_c
+                    .borrow_mut()
+                    .state
+                    .start_p2p_host(&map, bots, max_players)
+                {
+                    Ok(()) => true,
+                    Err(err) => {
+                        web_sys::console::error_1(&JsValue::from_str(&format!(
+                            "startP2pHost failed: {err}"
+                        )));
+                        false
+                    }
+                }
+            });
+        let _ = Reflect::set(
+            &api,
+            &JsValue::from_str("startP2pHost"),
+            &closure.into_js_value(),
+        );
+    }
+
+    // pushP2pPacket(peerId, Uint8Array) -> bool
+    {
+        let rt_c = Rc::clone(&rt);
+        let closure: Closure<dyn FnMut(u32, Uint8Array) -> bool> =
+            Closure::new(move |peer_id: u32, bytes: Uint8Array| {
+                rt_c.borrow_mut()
+                    .state
+                    .push_p2p_packet(peer_id, bytes.to_vec())
+            });
+        let _ = Reflect::set(
+            &api,
+            &JsValue::from_str("pushP2pPacket"),
+            &closure.into_js_value(),
+        );
+    }
+
+    // drainP2pPackets() -> Array<{ peerId: number, data: Uint8Array }>
+    {
+        let rt_c = Rc::clone(&rt);
+        let closure: Closure<dyn FnMut() -> Array> = Closure::new(move || {
+            let pkts = rt_c.borrow_mut().state.drain_p2p_packets();
+            let arr = Array::new();
+            for (peer_id, bytes) in pkts {
+                let item = Object::new();
+                set_prop(&item, "peerId", JsValue::from_f64(f64::from(peer_id)));
+                set_prop(&item, "data", Uint8Array::from(bytes.as_slice()).into());
+                arr.push(&item);
+            }
+            arr
+        });
+        let _ = Reflect::set(
+            &api,
+            &JsValue::from_str("drainP2pPackets"),
+            &closure.into_js_value(),
+        );
+    }
+
     // connectRemote()
     {
         let rt_c = Rc::clone(&rt);
@@ -274,9 +337,25 @@ pub fn install() {
     {
         let rt_c = Rc::clone(&rt);
         let closure: Closure<dyn FnMut(u32, bool)> = Closure::new(move |button: u32, pressed: bool| {
-            rt_c.borrow_mut().state.input.on_mouse_button(button, pressed);
+            let mut g = rt_c.borrow_mut();
+            let state = &mut g.state;
+            state.input.on_mouse_button_bound(button, pressed, &mut state.cvars);
         });
         let _ = Reflect::set(&api, &JsValue::from_str("onMouseButton"), &closure.into_js_value());
+    }
+
+    // onMouseWheel(delta_y, delta_mode)
+    {
+        let rt_c = Rc::clone(&rt);
+        let closure: Closure<dyn FnMut(f64, u32)> =
+            Closure::new(move |delta_y: f64, delta_mode: u32| {
+                let mut g = rt_c.borrow_mut();
+                let state = &mut g.state;
+                state
+                    .input
+                    .on_mouse_wheel(delta_y as f32, delta_mode, &mut state.cvars);
+            });
+        let _ = Reflect::set(&api, &JsValue::from_str("onMouseWheel"), &closure.into_js_value());
     }
 
     // onGamepad(lx, ly, rx, ry, mask)

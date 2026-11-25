@@ -58,7 +58,14 @@ pub fn format_status_bar(
     loc: Option<&LocalizationTable>,
 ) -> Option<(u8, String)> {
     let (_, raw_fmt) = state.status_text.iter().next()?;
-    let trimmed = raw_fmt.trim();
+    let resolved_fmt = if raw_fmt.contains('#')
+        && let Some(l) = loc
+    {
+        l.resolve_inline(raw_fmt, None)
+    } else {
+        raw_fmt.clone()
+    };
+    let trimmed = resolved_fmt.trim();
     if trimmed.is_empty() {
         return None;
     }

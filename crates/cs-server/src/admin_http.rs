@@ -7,6 +7,9 @@
 //! - `GET  /api/stats` — match leaderboard & round history (token-protected)
 //! - `GET  /api/replays` — recorded HLDEMO v5 round index (token-protected)
 //! - `GET  /api/replays/<id>.dem` — download `.dem` bytes (token-protected)
+//! - `GET  /api/replays/<id>/timeline` — 10 Hz 2D round replay JSON (token-protected)
+//! - `GET  /api/map-overview/<map>` — overview spec / BSP wireframe bounds JSON (token-protected)
+//! - `GET  /api/map-overview/<map>.png` — overview BMP converted to RGBA PNG (token-protected)
 //! - `POST /api/rcon` — execute server console/RCON command (token-protected)
 //! - `GET  /api/invite` — generate `?join=<host:port>&room=<code>` lobby link (token-protected)
 //!
@@ -16,9 +19,10 @@
 use std::fmt::Write as _;
 use std::io::{self, Read, Write};
 
+use cs_master::lobbies::{LobbyError, LobbyRegistry};
 use cs_transport::ws_proto::{HttpRequest, MAX_HTTP_HEAD, parse_http_request};
 
-use crate::replays::{escape_json_str, valid_replay_id};
+use crate::replays::{escape_json_str, valid_map_overview_name, valid_replay_id};
 
 /// Maximum HTTP request body accepted by `/api/*` endpoints (8 KiB).
 pub const MAX_API_BODY_BYTES: usize = 8192;
@@ -102,6 +106,15 @@ pub trait AdminBackend {
     fn stats_json(&self) -> String;
     fn replays_index_json(&self) -> String;
     fn replay_dem(&self, id: &str) -> Option<Vec<u8>>;
+    fn replay_timeline_json(&self, _id: &str) -> Option<String> {
+        None
+    }
+    fn map_overview_json(&self, _map: &str) -> Option<String> {
+        None
+    }
+    fn map_overview_png(&self, _map: &str) -> Option<Vec<u8>> {
+        None
+    }
     fn execute_rcon(&mut self, command: &str) -> Result<String, String>;
     fn admin_html(&self) -> Option<&[u8]> {
         None
@@ -229,6 +242,8 @@ pub struct AdminHttpResponse {
     pub status_text: &'static str,
     pub content_type: &'static str,
     pub content_disposition: Option<String>,
+    pub cors_allow_origin: bool,
+    pub allow_header: Option<&'static str>,
     pub body: Vec<u8>,
 }
 
@@ -239,12 +254,40 @@ impl AdminHttpResponse {
             status_text,
             content_type: "application/json; charset=utf-8",
             content_disposition: None,
+            cors_allow_origin: false,
+            allow_header: None,
             body: body.into_bytes(),
+        }
+    }
+
+    pub fn cors_json(status_code: u16, status_text: &'static str, body: String) -> Self {
+        let mut resp = Self::json(status_code, status_text, body);
+        resp.cors_allow_origin = true;
+        resp
+    }
+
+    pub fn cors_no_content() -> Self {
+        Self {
+            status_code: 204,
+            status_text: "No Content",
+            content_type: "text/plain; charset=utf-8",
+            content_disposition: None,
+            cors_allow_origin: true,
+            allow_header: None,
+            body: Vec::new(),
         }
     }
 
     pub fn json_error(status_code: u16, status_text: &'static str, message: &str) -> Self {
         Self::json(
+            status_code,
+            status_text,
+            format!("{{\"error\":{}}}", escape_json_str(message)),
+        )
+    }
+
+    pub fn cors_json_error(status_code: u16, status_text: &'static str, message: &str) -> Self {
+        Self::cors_json(
             status_code,
             status_text,
             format!("{{\"error\":{}}}", escape_json_str(message)),
@@ -257,6 +300,8 @@ impl AdminHttpResponse {
             status_text: "OK",
             content_type: "text/html; charset=utf-8",
             content_disposition: None,
+            cors_allow_origin: false,
+            allow_header: None,
             body,
         }
     }
@@ -267,6 +312,20 @@ impl AdminHttpResponse {
             status_text: "OK",
             content_type: "application/octet-stream",
             content_disposition: Some(format!("attachment; filename=\"{filename}\"")),
+            cors_allow_origin: false,
+            allow_header: None,
+            body,
+        }
+    }
+
+    pub fn png(body: Vec<u8>) -> Self {
+        Self {
+            status_code: 200,
+            status_text: "OK",
+            content_type: "image/png",
+            content_disposition: None,
+            cors_allow_origin: false,
+            allow_header: None,
             body,
         }
     }
@@ -284,6 +343,16 @@ impl AdminHttpResponse {
             self.content_type,
             self.body.len(),
         );
+        if self.cors_allow_origin {
+            head.push_str(
+                "Access-Control-Allow-Origin: *\r\n\
+                 Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\n\
+                 Access-Control-Allow-Headers: Content-Type\r\n",
+            );
+        }
+        if let Some(allow) = self.allow_header {
+            let _ = write!(head, "Allow: {allow}\r\n");
+        }
         if let Some(disp) = &self.content_disposition {
             let _ = write!(head, "Content-Disposition: {disp}\r\n");
         }
@@ -293,6 +362,117 @@ impl AdminHttpResponse {
             writer.write_all(&self.body)?;
         }
         writer.flush()
+    }
+}
+
+/// Returns `true` if `path` belongs to the public WebRTC/lobby signaling API.
+pub fn is_lobby_path(path: &str) -> bool {
+    path == "/lobbies" || path.starts_with("/lobbies/")
+}
+
+/// Handles public CORS lobby signaling routes (`/lobbies`, `/lobbies/<room>`, `/lobbies/<room>/signal`)
+/// backed by `LobbyRegistry` when `--web-port` is enabled on `cs-server`.
+pub fn handle_lobby_request(
+    req: &AdminHttpRequest<'_>,
+    lobbies: &mut LobbyRegistry,
+    now_secs: f64,
+) -> AdminHttpResponse {
+    if req.method == "OPTIONS" {
+        return AdminHttpResponse::cors_no_content();
+    }
+    if req.body.len() > MAX_API_BODY_BYTES {
+        return AdminHttpResponse::cors_json_error(
+            413,
+            "Payload Too Large",
+            "request body too large",
+        );
+    }
+
+    if req.path == "/lobbies" {
+        return match req.method {
+            "GET" | "HEAD" => {
+                AdminHttpResponse::cors_json(200, "OK", lobbies.list_json(now_secs))
+            }
+            "POST" => match lobbies.upsert_from_json(req.body, now_secs) {
+                Ok(info) => AdminHttpResponse::cors_json(200, "OK", info.to_json()),
+                Err(err) => {
+                    AdminHttpResponse::cors_json_error(400, "Bad Request", &err.to_string())
+                }
+            },
+            _ => {
+                let mut resp = AdminHttpResponse::cors_json_error(
+                    405,
+                    "Method Not Allowed",
+                    "method not allowed",
+                );
+                resp.allow_header = Some("GET, POST, OPTIONS");
+                resp
+            }
+        };
+    }
+
+    let rest = req.path.strip_prefix("/lobbies/").unwrap_or("");
+    if let Some(room) = rest.strip_suffix("/signal") {
+        return match req.method {
+            "POST" => match lobbies.push_signal_from_json(room, req.body, now_secs) {
+                Ok(sig) => AdminHttpResponse::cors_json(200, "OK", sig.to_json()),
+                Err(LobbyError::NotFound) => {
+                    AdminHttpResponse::cors_json_error(404, "Not Found", "lobby room not found")
+                }
+                Err(err) => {
+                    AdminHttpResponse::cors_json_error(400, "Bad Request", &err.to_string())
+                }
+            },
+            "GET" | "HEAD" => {
+                let params = parse_query_params(req.query.unwrap_or(""));
+                let since_id = param_value(&params, "since")
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(0);
+                let target = param_value(&params, "to").filter(|v| !v.is_empty());
+                match lobbies.poll_signals(room, since_id, target, now_secs) {
+                    Ok(sigs) => AdminHttpResponse::cors_json(
+                        200,
+                        "OK",
+                        LobbyRegistry::signals_to_json(&sigs),
+                    ),
+                    Err(LobbyError::NotFound) => {
+                        AdminHttpResponse::cors_json_error(404, "Not Found", "lobby room not found")
+                    }
+                    Err(err) => {
+                        AdminHttpResponse::cors_json_error(400, "Bad Request", &err.to_string())
+                    }
+                }
+            }
+            _ => {
+                let mut resp = AdminHttpResponse::cors_json_error(
+                    405,
+                    "Method Not Allowed",
+                    "method not allowed",
+                );
+                resp.allow_header = Some("GET, POST, OPTIONS");
+                resp
+            }
+        };
+    }
+
+    match req.method {
+        "GET" | "HEAD" => match lobbies.get(rest, now_secs) {
+            Some(info) => AdminHttpResponse::cors_json(200, "OK", info.to_json()),
+            None => AdminHttpResponse::cors_json_error(404, "Not Found", "lobby room not found"),
+        },
+        "DELETE" => {
+            if lobbies.remove(rest) {
+                AdminHttpResponse::cors_json(200, "OK", "{\"deleted\":true}".to_string())
+            } else {
+                AdminHttpResponse::cors_json_error(404, "Not Found", "lobby room not found")
+            }
+        }
+        _ => {
+            let mut resp =
+                AdminHttpResponse::cors_json_error(405, "Method Not Allowed", "method not allowed");
+            resp.allow_header = Some("GET, DELETE, OPTIONS");
+            resp
+        }
     }
 }
 
@@ -356,8 +536,25 @@ impl AdminRouter {
                 let Some(rest) = path.strip_prefix("/api/replays/") else {
                     return AdminHttpResponse::json_error(404, "Not Found", "not found");
                 };
+                if let Some(id) = rest.strip_suffix("/timeline") {
+                    if !valid_replay_id(id) {
+                        return AdminHttpResponse::json_error(
+                            400,
+                            "Bad Request",
+                            "invalid replay id",
+                        );
+                    }
+                    return match backend.replay_timeline_json(id) {
+                        Some(json) => AdminHttpResponse::json(200, "OK", json),
+                        None => AdminHttpResponse::json_error(
+                            404,
+                            "Not Found",
+                            "replay timeline not found",
+                        ),
+                    };
+                }
                 let Some(id) = rest.strip_suffix(".dem") else {
-                    return AdminHttpResponse::json_error(404, "Not Found", "expected .dem suffix");
+                    return AdminHttpResponse::json_error(404, "Not Found", "expected .dem or /timeline");
                 };
                 if !valid_replay_id(id) {
                     return AdminHttpResponse::json_error(400, "Bad Request", "invalid replay id");
@@ -368,6 +565,39 @@ impl AdminRouter {
                         AdminHttpResponse::binary_download(&filename, bytes)
                     }
                     None => AdminHttpResponse::json_error(404, "Not Found", "replay not found"),
+                }
+            }
+            ("GET" | "HEAD", path) if path.starts_with("/api/map-overview/") => {
+                let Some(rest) = path.strip_prefix("/api/map-overview/") else {
+                    return AdminHttpResponse::json_error(404, "Not Found", "not found");
+                };
+                if let Some(map) = rest.strip_suffix(".png") {
+                    if !valid_map_overview_name(map) {
+                        return AdminHttpResponse::json_error(
+                            400,
+                            "Bad Request",
+                            "invalid map name",
+                        );
+                    }
+                    return match backend.map_overview_png(map) {
+                        Some(bytes) => AdminHttpResponse::png(bytes),
+                        None => AdminHttpResponse::json_error(
+                            404,
+                            "Not Found",
+                            "overview image not found",
+                        ),
+                    };
+                }
+                if !valid_map_overview_name(rest) {
+                    return AdminHttpResponse::json_error(400, "Bad Request", "invalid map name");
+                }
+                match backend.map_overview_json(rest) {
+                    Some(json) => AdminHttpResponse::json(200, "OK", json),
+                    None => AdminHttpResponse::json_error(
+                        404,
+                        "Not Found",
+                        "map overview not found",
+                    ),
                 }
             }
             ("POST", "/api/rcon") => handle_rcon_post(req.body, backend),
@@ -841,6 +1071,27 @@ mod tests {
             (id == "r0001-de_dust2").then(|| self.replay.clone())
         }
 
+        fn replay_timeline_json(&self, id: &str) -> Option<String> {
+            (id == "r0001-de_dust2")
+                .then(|| "{\"id\":\"r0001-de_dust2\",\"sample_rate_hz\":10,\"frames\":[]}".to_string())
+        }
+
+        fn map_overview_json(&self, map: &str) -> Option<String> {
+            match map {
+                "de_dust2" => Some(
+                    "{\"map\":\"de_dust2\",\"has_overview\":true,\"zoom\":1.5,\"origin\":[-223,1097,-192],\"rotated\":false,\"mins\":[-2432,-1280,-512],\"maxs\":[2048,3200,1024],\"image_url\":\"/api/map-overview/de_dust2.png\"}".to_string(),
+                ),
+                "fy_custom" => Some(
+                    "{\"map\":\"fy_custom\",\"has_overview\":false,\"zoom\":1.0,\"origin\":[0,0,0],\"rotated\":false,\"mins\":[-512,-512,-128],\"maxs\":[512,512,256],\"image_url\":null}".to_string(),
+                ),
+                _ => None,
+            }
+        }
+
+        fn map_overview_png(&self, map: &str) -> Option<Vec<u8>> {
+            (map == "de_dust2").then(|| b"\x89PNG\r\n\x1a\nfake-png".to_vec())
+        }
+
         fn execute_rcon(&mut self, command: &str) -> Result<String, String> {
             self.last_cmd = Some(command.to_string());
             Ok(format!("ran: {command}"))
@@ -985,13 +1236,76 @@ mod tests {
             &AdminHttpRequest {
                 path: "/api/invite",
                 query: Some("host=play.example.com&port=27016&room=dust-01"),
-                ..status_req
+                ..status_req.clone()
             },
             &mut backend,
         );
         assert_eq!(invite_resp.status_code, 200);
         let invite_body = String::from_utf8(invite_resp.body).unwrap();
         assert!(invite_body.contains("?join=play.example.com%3A27016&room=dust-01"));
+
+        // GET /api/replays/<id>/timeline returns 2D timeline JSON and blocks traversal.
+        let tl_resp = AdminRouter::handle(
+            &AdminHttpRequest {
+                path: "/api/replays/r0001-de_dust2/timeline",
+                ..status_req.clone()
+            },
+            &mut backend,
+        );
+        assert_eq!(tl_resp.status_code, 200);
+        assert!(String::from_utf8(tl_resp.body).unwrap().contains("\"sample_rate_hz\":10"));
+
+        let bad_tl = AdminRouter::handle(
+            &AdminHttpRequest {
+                path: "/api/replays/..%2Fbad/timeline",
+                ..status_req.clone()
+            },
+            &mut backend,
+        );
+        assert_eq!(bad_tl.status_code, 400);
+
+        // GET /api/map-overview/<map> and .png + missing-overview BSP bounds fallback.
+        let ov_resp = AdminRouter::handle(
+            &AdminHttpRequest {
+                path: "/api/map-overview/de_dust2",
+                ..status_req.clone()
+            },
+            &mut backend,
+        );
+        assert_eq!(ov_resp.status_code, 200);
+        assert!(String::from_utf8(ov_resp.body).unwrap().contains("\"/api/map-overview/de_dust2.png\""));
+
+        let png_resp = AdminRouter::handle(
+            &AdminHttpRequest {
+                path: "/api/map-overview/de_dust2.png",
+                ..status_req.clone()
+            },
+            &mut backend,
+        );
+        assert_eq!(png_resp.status_code, 200);
+        assert_eq!(png_resp.content_type, "image/png");
+        assert!(png_resp.body.starts_with(b"\x89PNG\r\n\x1a\n"));
+
+        let fb_resp = AdminRouter::handle(
+            &AdminHttpRequest {
+                path: "/api/map-overview/fy_custom",
+                ..status_req.clone()
+            },
+            &mut backend,
+        );
+        assert_eq!(fb_resp.status_code, 200);
+        let fb_body = String::from_utf8(fb_resp.body).unwrap();
+        assert!(fb_body.contains("\"has_overview\":false"));
+        assert!(fb_body.contains("\"mins\":[-512,-512,-128]"));
+
+        let bad_ov = AdminRouter::handle(
+            &AdminHttpRequest {
+                path: "/api/map-overview/..%2Fetc",
+                ..status_req
+            },
+            &mut backend,
+        );
+        assert_eq!(bad_ov.status_code, 400);
     }
 
     #[test]
@@ -1009,5 +1323,87 @@ mod tests {
             read_http_request_with_body(&mut cursor2, MAX_API_BODY_BYTES),
             Err(HttpReadError::PayloadTooLarge)
         ));
+    }
+
+    #[test]
+    fn lobby_signaling_routes_handle_cors_crud_and_signals() {
+        let mut lobbies = LobbyRegistry::default();
+        let opt_resp = handle_lobby_request(
+            &AdminHttpRequest {
+                method: "OPTIONS",
+                path: "/lobbies/p2p-alpha/signal",
+                query: None,
+                authorization: None,
+                x_admin_token: None,
+                host: None,
+                body: b"",
+            },
+            &mut lobbies,
+            10.0,
+        );
+        assert_eq!(opt_resp.status_code, 204);
+        assert!(opt_resp.cors_allow_origin);
+
+        let post_room = handle_lobby_request(
+            &AdminHttpRequest {
+                method: "POST",
+                path: "/lobbies",
+                query: None,
+                authorization: None,
+                x_admin_token: None,
+                host: None,
+                body: br#"{"room":"p2p-alpha","host":"browser-p2p","port":443,"map":"de_dust2","players":1,"max_players":10,"mode":"webrtc"}"#,
+            },
+            &mut lobbies,
+            10.0,
+        );
+        assert_eq!(post_room.status_code, 200);
+        assert!(String::from_utf8(post_room.body).unwrap().contains("\"mode\":\"webrtc\""));
+
+        let push_sig = handle_lobby_request(
+            &AdminHttpRequest {
+                method: "POST",
+                path: "/lobbies/p2p-alpha/signal",
+                query: None,
+                authorization: None,
+                x_admin_token: None,
+                host: None,
+                body: br#"{"from":"guest1","to":"host","kind":"join","payload":""}"#,
+            },
+            &mut lobbies,
+            11.0,
+        );
+        assert_eq!(push_sig.status_code, 200);
+
+        let poll_sig = handle_lobby_request(
+            &AdminHttpRequest {
+                method: "GET",
+                path: "/lobbies/p2p-alpha/signal",
+                query: Some("since=0&to=host"),
+                authorization: None,
+                x_admin_token: None,
+                host: None,
+                body: b"",
+            },
+            &mut lobbies,
+            11.5,
+        );
+        assert_eq!(poll_sig.status_code, 200);
+        assert!(String::from_utf8(poll_sig.body).unwrap().contains("\"kind\":\"join\""));
+
+        let del_room = handle_lobby_request(
+            &AdminHttpRequest {
+                method: "DELETE",
+                path: "/lobbies/p2p-alpha",
+                query: None,
+                authorization: None,
+                x_admin_token: None,
+                host: None,
+                body: b"",
+            },
+            &mut lobbies,
+            12.0,
+        );
+        assert_eq!(del_room.status_code, 200);
     }
 }

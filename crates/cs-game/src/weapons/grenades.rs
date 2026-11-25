@@ -285,6 +285,15 @@ fn throw_it(w: &mut WeaponCtx<'_, '_>) {
     let src = origin + view_ofs + forward * 16.0;
     let throw = forward * vel + velocity;
     let id = w.weapon.id;
+    if let Some(p) = w.g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+        p.last_grenade = Some(crate::player::LastGrenadeThrow {
+            weapon: id,
+            origin: src,
+            angles: ang_throw,
+            velocity: throw,
+            fuse: FUSE,
+        });
+    }
     crate::grenade::throw_grenade(w.g, w.eng, slot, id, src, throw, FUSE);
 }
 
@@ -315,7 +324,9 @@ fn weapon_idle(me: &mut dyn WeaponBehavior, w: &mut WeaponCtx<'_, '_>) {
         w.weapon.start_throw = 0.0;
         w.weapon.next_primary_attack = w.get_next_attack_delay(0.5);
         w.weapon.time_weapon_idle = 0.75;
-        w.add_ammo(ammo_type, -1);
+        if w.eng.cvar_f32("mp_infinite_grenades") == 0.0 {
+            w.add_ammo(ammo_type, -1);
+        }
         if w.ammo(ammo_type) <= 0 {
             // Just threw the last grenade: set the attack times in the future, and the idle
             // in the future so the whole throw animation can be seen; the idle retires the

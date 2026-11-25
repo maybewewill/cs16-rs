@@ -28,6 +28,10 @@ pub mod button {
 #[derive(Debug, Clone, Default)]
 pub struct Held<'a> {
     pub actions: Option<&'a HashSet<String>>,
+    /// Same-frame `+action` impulse latch (`kbutton_t` down-impulse bit): contributes its
+    /// `button::*` bit to the next `build_usercmd` even if `-action` already arrived in the
+    /// same frame (e.g. scroll-wheel `+jump` / `-jump`).
+    pub impulse_actions: Option<&'a HashSet<String>>,
     pub mouse1: bool,
     pub mouse2: bool,
 }
@@ -35,6 +39,153 @@ pub struct Held<'a> {
 impl Held<'_> {
     fn on(&self, name: &str) -> bool {
         self.actions.is_some_and(|a| a.contains(name))
+            || self.impulse_actions.is_some_and(|a| a.contains(name))
+    }
+}
+
+/// Windows `WHEEL_DELTA` equivalent in `MouseScrollDelta::PixelDelta` pixels per wheel notch.
+pub const WHEEL_PIXELS_PER_NOTCH: f32 = 120.0;
+
+/// Accumulates a wheel delta (`LineDelta` when `is_line_delta = true`, or `PixelDelta` at
+/// `120.0` px/notch when `false`) and returns the signed notch count
+/// (`> 0` = `"mwheelup"`, `< 0` = `"mwheeldown"`).
+pub fn accumulate_wheel_notches(accum: &mut f32, delta_y: f32, is_line_delta: bool) -> i32 {
+    if !delta_y.is_finite() || delta_y == 0.0 {
+        return 0;
+    }
+    let step = if is_line_delta {
+        1.0
+    } else {
+        WHEEL_PIXELS_PER_NOTCH
+    };
+    *accum += delta_y;
+    let mut notches = 0i32;
+    while *accum >= step {
+        *accum -= step;
+        notches += 1;
+    }
+    while *accum <= -step {
+        *accum += step;
+        notches -= 1;
+    }
+    notches
+}
+
+/// Quake/GoldSrc `kbutton_t` held + same-frame down-impulse state (`state & 1` and `state & 2`)
+/// and wheel accumulators (`IN_MWheelEvent` / `Key_Event` in Xash3D FWGS
+/// `engine/client/input/input.c` & `in_keys.c`, read 2026-11-25).
+#[derive(Debug, Clone, Default)]
+pub struct InputActionState {
+    pub active_actions: HashSet<String>,
+    pub impulse_actions: HashSet<String>,
+    pub wheel_line_accum: f32,
+    pub wheel_pixel_accum: f32,
+}
+
+impl InputActionState {
+    /// Records a `+action` press (setting both held and down-impulse) or `-action` release
+    /// (clearing held while leaving any same-frame down-impulse latched until consumed).
+    pub fn apply_action_input(&mut self, name: impl Into<String>, pressed: bool) {
+        let name = name.into();
+        if pressed {
+            self.impulse_actions.insert(name.clone());
+            self.active_actions.insert(name);
+        } else {
+            self.active_actions.remove(&name);
+        }
+    }
+
+    pub fn held(&self, capture: bool) -> Held<'_> {
+        Held {
+            actions: capture.then_some(&self.active_actions),
+            impulse_actions: capture.then_some(&self.impulse_actions),
+            mouse1: false,
+            mouse2: false,
+        }
+    }
+
+    pub fn consume_impulses(&mut self) {
+        self.impulse_actions.clear();
+    }
+
+    pub fn clear(&mut self) {
+        self.active_actions.clear();
+        self.impulse_actions.clear();
+        self.wheel_line_accum = 0.0;
+        self.wheel_pixel_accum = 0.0;
+    }
+
+    /// Applies keyboard turn/pitch binds (`+left`, `+right`, `+lookup`, `+lookdown`, and
+    /// `+klook` forward/back) using `cl_yawspeed`, `cl_pitchspeed`, and `cl_anglespeedkey`.
+    pub fn apply_keyboard_angles(
+        &self,
+        camera: &mut crate::camera::Camera,
+        p: &KeyboardLookParams,
+    ) {
+        if !p.dt.is_finite() || p.dt <= 0.0 {
+            return;
+        }
+        let speed_mul = if self.active_actions.contains("speed") {
+            finite_or_zero(p.anglespeedkey)
+        } else {
+            1.0
+        };
+        let yaw_dir = f32::from(self.active_actions.contains("left"))
+            - f32::from(self.active_actions.contains("right"));
+        if yaw_dir != 0.0 {
+            let yaw = if camera.yaw_deg.is_finite() { camera.yaw_deg } else { 0.0 };
+            camera.yaw_deg =
+                (yaw + yaw_dir * finite_or_zero(p.yawspeed) * speed_mul * p.dt).rem_euclid(360.0);
+        }
+        let mut pitch_dir = f32::from(self.active_actions.contains("lookdown"))
+            - f32::from(self.active_actions.contains("lookup"));
+        if self.active_actions.contains("klook") {
+            pitch_dir += f32::from(self.active_actions.contains("back"))
+                - f32::from(self.active_actions.contains("forward"));
+        }
+        if pitch_dir != 0.0 {
+            let max_up = if p.pitch_up.is_finite() { p.pitch_up.clamp(1.0, 89.9) } else { 89.0 };
+            let max_dn = if p.pitch_down.is_finite() { p.pitch_down.clamp(1.0, 89.9) } else { 89.0 };
+            let pitch = if camera.pitch_deg.is_finite() { camera.pitch_deg } else { 0.0 };
+            camera.pitch_deg =
+                (pitch + pitch_dir * finite_or_zero(p.pitchspeed) * speed_mul * p.dt)
+                    .clamp(-max_up, max_dn);
+        }
+    }
+
+    /// Accumulates a wheel delta (`LineDelta` when `is_line_delta`, else `PixelDelta` at
+    /// `120.0` px/notch) and returns the signed notch count (`> 0` up, `< 0` down).
+    pub fn accumulate_wheel(&mut self, delta_y: f32, is_line_delta: bool) -> i32 {
+        let accum = if is_line_delta {
+            &mut self.wheel_line_accum
+        } else {
+            &mut self.wheel_pixel_accum
+        };
+        accumulate_wheel_notches(accum, delta_y, is_line_delta)
+    }
+}
+
+/// Keyboard turn and look rates (`cl_yawspeed`, `cl_pitchspeed`, `cl_anglespeedkey`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KeyboardLookParams {
+    pub dt: f32,
+    pub yawspeed: f32,
+    pub pitchspeed: f32,
+    pub anglespeedkey: f32,
+    pub pitch_up: f32,
+    pub pitch_down: f32,
+}
+
+impl Default for KeyboardLookParams {
+    fn default() -> Self {
+        Self {
+            dt: 0.01,
+            yawspeed: 210.0,
+            pitchspeed: 225.0,
+            anglespeedkey: 0.67,
+            pitch_up: 89.0,
+            pitch_down: 89.0,
+        }
     }
 }
 
@@ -77,6 +228,7 @@ pub struct CmdParams {
 pub struct CmdClock {
     carry: f64,
     interp_amount: f32,
+    grid_accum_ms: f64,
 }
 
 impl CmdClock {
@@ -95,6 +247,30 @@ impl CmdClock {
             (total - ms).clamp(0.0, 1.0)
         };
         ms as u8
+    }
+
+    /// Returns the `usercmd.msec` ticks to emit for this frame:
+    /// - When `grid_enabled` is `false` (default `fps_max 100` / `fps_override 0`), preserves
+    ///   exact GoldSrc 1-command-per-frame behavior via [`CmdClock::msec`].
+    /// - When `grid_enabled` is `true` (`fps_override 1` running above `105 FPS` with
+    ///   `cl_cmd_100hz 1`), accumulates `dt` and emits ticks strictly on a `10 ms` (`100 Hz`)
+    ///   cadence so high-refresh rendering never produces `0 ms` command spam or micro-friction
+    ///   drift.
+    pub fn grid_ticks_100hz(&mut self, dt: f64, grid_enabled: bool) -> Vec<u8> {
+        if !grid_enabled {
+            self.grid_accum_ms = 0.0;
+            return vec![self.msec(dt)];
+        }
+        if !dt.is_finite() || dt <= 0.0 {
+            return Vec::new();
+        }
+        self.grid_accum_ms = (self.grid_accum_ms + dt * 1000.0).min(100.0);
+        let mut ticks = Vec::new();
+        while self.grid_accum_ms >= 10.0 && ticks.len() < 10 {
+            self.grid_accum_ms -= 10.0;
+            ticks.push(10);
+        }
+        ticks
     }
 
     /// `cmd->lerp_msec` of `CL_ComputeClientInterpolationAmount` (Xash3D FWGS
@@ -162,11 +338,16 @@ pub fn build_usercmd(
         finite_or_zero(view_angles.y),
         finite_or_zero(view_angles.z),
     );
+    let forward_move = if held.on("klook") {
+        0.0
+    } else {
+        (key("forward") * forward_speed - key("back") * back_speed) * walk
+    };
     GoldSrcUserCmd {
         lerp_msec: p.lerp_msec,
         msec: p.msec,
         viewangles: safe_angles,
-        forwardmove: (key("forward") * forward_speed - key("back") * back_speed) * walk,
+        forwardmove: forward_move,
         sidemove: (key("moveright") - key("moveleft")) * side_speed * walk,
         // +moveup / +movedown: swimming and ladders (jump and duck are buttons).
         upmove: (key("moveup") - key("movedown")) * up_speed,
@@ -240,6 +421,86 @@ pub fn weapon_for_slot<'a>(
     pick.map(|w| w.name.as_str())
 }
 
+/// Returns all owned weapons sorted in GoldSrc `WeaponInfo` bucket/position order
+/// `(slot, position, weapon_id)`.
+pub fn sorted_owned_weapons<'a>(
+    table: &'a BTreeMap<u8, WeaponInfo>,
+    owned: &HashSet<u8>,
+) -> Vec<&'a WeaponInfo> {
+    let mut list: Vec<&WeaponInfo> = table
+        .values()
+        .filter(|w| owned.contains(&w.weapon_id))
+        .collect();
+    list.sort_by_key(|w| (w.slot, w.position, w.weapon_id));
+    list
+}
+
+/// Selects the next (`forward = true`, `invnext`) or previous (`forward = false`, `invprev`)
+/// owned weapon relative to `current` in `(slot, position, weapon_id)` order, wrapping around.
+pub fn cycle_inventory_weapon<'a>(
+    table: &'a BTreeMap<u8, WeaponInfo>,
+    owned: &HashSet<u8>,
+    current: Option<u8>,
+    forward: bool,
+) -> Option<&'a WeaponInfo> {
+    let list = sorted_owned_weapons(table, owned);
+    if list.is_empty() {
+        return None;
+    }
+    let idx = current.and_then(|id| list.iter().position(|w| w.weapon_id == id));
+    let pick = match idx {
+        Some(i) => {
+            if forward {
+                (i + 1) % list.len()
+            } else {
+                (i + list.len() - 1) % list.len()
+            }
+        }
+        None => {
+            if forward {
+                0
+            } else {
+                list.len() - 1
+            }
+        }
+    };
+    Some(list[pick])
+}
+
+/// Advances `buckets` for `invnext` (`forward = true`) or `invprev` (`forward = false`)
+/// across owned weapons in `WeaponInfo` `(slot, position)` order, respecting `hud_fastswitch`.
+///
+/// With `fastswitch = true`, returns `Some(weapon_name)` immediately and closes the bucket
+/// selector. With `fastswitch = false`, opens/advances the bucket highlight to the target
+/// weapon's slot and returns `None` until `+attack` (`mouse1`) confirms it.
+pub fn step_inventory_cycle(
+    buckets: &mut crate::ui::hud_extras::WeaponBucketState,
+    hud: &cs_clientcore::hud::HudState,
+    owned: &HashSet<u8>,
+    forward: bool,
+    fastswitch: bool,
+) -> Option<String> {
+    let reference = if !fastswitch && buckets.active_slot.is_some() {
+        buckets
+            .highlighted_weapon_id
+            .or_else(|| hud.current_weapon.map(|c| c.weapon_id))
+    } else {
+        hud.current_weapon.map(|c| c.weapon_id)
+    };
+    let next_w = cycle_inventory_weapon(&hud.weapons, owned, reference, forward)?;
+    if fastswitch {
+        buckets.active_slot = None;
+        buckets.highlighted_weapon_id = Some(next_w.weapon_id);
+        buckets.timer_sec = 0.0;
+        Some(next_w.name.clone())
+    } else {
+        buckets.active_slot = Some(next_w.slot + 1);
+        buckets.highlighted_weapon_id = Some(next_w.weapon_id);
+        buckets.timer_sec = 2.5;
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,6 +541,7 @@ mod tests {
             actions: Some(&a),
             mouse1: true,
             mouse2: false,
+            ..Held::default()
         };
         let speeds = MoveSpeeds {
             forward: 250.0,
@@ -450,5 +712,212 @@ mod tests {
         assert_eq!(weapon_for_slot(&table, &owned, Some(26), 2), Some("weapon_usp"));
         assert_eq!(weapon_for_slot(&table, &owned, None, 3), Some("weapon_knife"));
         assert_eq!(weapon_for_slot(&table, &owned, None, 4), None);
+    }
+
+    #[test]
+    fn mwheelup_plus_jump_latches_frame_n_and_clears_frame_n_plus_1() {
+        let mut reg = cs_cvar::CVarRegistry::new_with_defaults();
+        reg.bind("mwheelup", "+jump");
+
+        let mut state = InputActionState::default();
+        let dispatch_notch = |reg: &mut cs_cvar::CVarRegistry, state: &mut InputActionState| {
+            for pressed in [true, false] {
+                for act in reg.handle_key_bind("mwheelup", pressed) {
+                    if let cs_cvar::EngineAction::ActionInput { name, pressed } = act {
+                        state.apply_action_input(name, pressed);
+                    }
+                }
+            }
+        };
+
+        // Single wheel-up notch within frame N (press + release before build_usercmd).
+        assert_eq!(state.accumulate_wheel(1.0, true), 1);
+        dispatch_notch(&mut reg, &mut state);
+        assert!(
+            !state.active_actions.contains("jump"),
+            "release already cleared held state"
+        );
+
+        let cmd_n = build_usercmd(&state.held(true), Vec3::ZERO, params(10), &MoveSpeeds::default());
+        state.consume_impulses();
+        assert_ne!(cmd_n.buttons & button::JUMP, 0, "frame N must emit JUMP");
+
+        // Frame N+1 with no wheel input must clear JUMP.
+        let cmd_n1 = build_usercmd(&state.held(true), Vec3::ZERO, params(10), &MoveSpeeds::default());
+        state.consume_impulses();
+        assert_eq!(cmd_n1.buttons & button::JUMP, 0, "frame N+1 must clear JUMP");
+
+        // Accumulated 120px PixelDelta produces a fresh JUMP edge on frame N+2 (1 -> 0 -> 1).
+        assert_eq!(state.accumulate_wheel(60.0, false), 0);
+        assert_eq!(state.accumulate_wheel(60.0, false), 1);
+        dispatch_notch(&mut reg, &mut state);
+        let cmd_n2 = build_usercmd(&state.held(true), Vec3::ZERO, params(10), &MoveSpeeds::default());
+        state.consume_impulses();
+        assert_ne!(cmd_n2.buttons & button::JUMP, 0, "frame N+2 must re-trigger JUMP");
+    }
+
+    #[test]
+    fn mouse4_bound_to_voicerecord_toggles_action() {
+        let mut reg = cs_cvar::CVarRegistry::new_with_defaults();
+        reg.bind("mouse4", "+voicerecord");
+        let mut state = InputActionState::default();
+
+        for act in reg.handle_key_bind("mouse4", true) {
+            if let cs_cvar::EngineAction::ActionInput { name, pressed } = act {
+                state.apply_action_input(name, pressed);
+            }
+        }
+        assert!(state.active_actions.contains("voicerecord"));
+
+        for act in reg.handle_key_bind("mouse4", false) {
+            if let cs_cvar::EngineAction::ActionInput { name, pressed } = act {
+                state.apply_action_input(name, pressed);
+            }
+        }
+        assert!(!state.active_actions.contains("voicerecord"));
+    }
+
+    #[test]
+    fn default_wheel_binds_and_invnext_invprev_cycle_respecting_fastswitch() {
+        let mut reg = cs_cvar::CVarRegistry::new_with_defaults();
+        assert_eq!(
+            reg.handle_key_bind("mwheelup", true),
+            vec![cs_cvar::EngineAction::InvPrev]
+        );
+        assert_eq!(
+            reg.handle_key_bind("mwheeldown", true),
+            vec![cs_cvar::EngineAction::InvNext]
+        );
+
+        let mut hud = cs_clientcore::hud::HudState::default();
+        hud.weapons.insert(28, info("weapon_ak47", 0, 1, 28));
+        hud.weapons.insert(16, info("weapon_usp", 1, 4, 16));
+        hud.weapons.insert(29, info("weapon_knife", 2, 1, 29));
+        hud.weapons.insert(4, info("weapon_hegrenade", 3, 1, 4));
+        hud.current_weapon = Some(cs_clientcore::hud::CurrentWeapon {
+            is_active: true,
+            weapon_id: 16,
+            clip: 12,
+        });
+        let owned: HashSet<u8> = [28, 16, 29, 4].into_iter().collect();
+
+        // hud_fastswitch 1: immediate weapon select across slots and wrap-around.
+        let mut buckets = crate::ui::hud_extras::WeaponBucketState::default();
+        assert_eq!(
+            step_inventory_cycle(&mut buckets, &hud, &owned, true, true).as_deref(),
+            Some("weapon_knife")
+        );
+        assert_eq!(buckets.active_slot, None);
+        assert_eq!(
+            step_inventory_cycle(&mut buckets, &hud, &owned, false, true).as_deref(),
+            Some("weapon_ak47")
+        );
+        hud.current_weapon = Some(cs_clientcore::hud::CurrentWeapon {
+            is_active: true,
+            weapon_id: 4,
+            clip: -1,
+        });
+        assert_eq!(
+            step_inventory_cycle(&mut buckets, &hud, &owned, true, true).as_deref(),
+            Some("weapon_ak47")
+        );
+
+        // hud_fastswitch 0: opens/steps bucket highlight without immediate switch until confirm.
+        hud.current_weapon = Some(cs_clientcore::hud::CurrentWeapon {
+            is_active: true,
+            weapon_id: 16,
+            clip: 12,
+        });
+        assert_eq!(step_inventory_cycle(&mut buckets, &hud, &owned, true, false), None);
+        assert_eq!(buckets.active_slot, Some(3));
+        assert_eq!(buckets.highlighted_weapon_id, Some(29));
+        assert_eq!(step_inventory_cycle(&mut buckets, &hud, &owned, true, false), None);
+        assert_eq!(buckets.active_slot, Some(4));
+        assert_eq!(buckets.highlighted_weapon_id, Some(4));
+        assert_eq!(
+            buckets.confirm_selection(&hud).as_deref(),
+            Some("weapon_hegrenade")
+        );
+        assert_eq!(buckets.active_slot, None);
+    }
+
+    #[test]
+    fn keyboard_turn_lookup_strafe_and_klook_angles() {
+        let mut cam = crate::camera::Camera {
+            yaw_deg: 90.0,
+            pitch_deg: 0.0,
+            ..Default::default()
+        };
+
+        let mut st = InputActionState::default();
+        st.apply_action_input("left", true);
+        let p = KeyboardLookParams {
+            dt: 0.5,
+            yawspeed: 210.0,
+            pitchspeed: 225.0,
+            anglespeedkey: 0.67,
+            pitch_up: 89.0,
+            pitch_down: 89.0,
+        };
+        st.apply_keyboard_angles(&mut cam, &p);
+        assert!((cam.yaw_deg - 195.0).abs() < 1e-4);
+
+        st.apply_action_input("speed", true);
+        st.apply_keyboard_angles(&mut cam, &p);
+        assert!((cam.yaw_deg - (195.0 + 210.0 * 0.67 * 0.5)).abs() < 1e-3);
+        st.apply_action_input("left", false);
+        st.apply_action_input("speed", false);
+
+        st.apply_action_input("lookup", true);
+        st.apply_keyboard_angles(&mut cam, &p);
+        assert!((cam.pitch_deg - (-112.5_f32).clamp(-89.0, 89.0)).abs() < 1e-4);
+        st.apply_action_input("lookup", false);
+
+        // +klook converts +forward/+back into pitch and zeros usercmd forwardmove.
+        cam.pitch_deg = 0.0;
+        st.apply_action_input("klook", true);
+        st.apply_action_input("forward", true);
+        st.apply_action_input("moveup", true);
+        st.apply_keyboard_angles(&mut cam, &p);
+        assert!(cam.pitch_deg < -80.0);
+        let cmd = build_usercmd(
+            &st.held(true),
+            Vec3::new(cam.pitch_deg, cam.yaw_deg, 0.0),
+            CmdParams::default(),
+            &MoveSpeeds::default(),
+        );
+        assert_eq!(cmd.forwardmove, 0.0);
+        assert_eq!(cmd.upmove, 320.0);
+    }
+
+    #[test]
+    fn cmd_clock_100hz_grid_emits_10ms_cadence_above_105fps() {
+        // Default 1-command-per-frame mode preserves GoldSrc msec behavior.
+        let mut off = CmdClock::default();
+        for _ in 0..10 {
+            assert_eq!(off.grid_ticks_100hz(1.0 / 240.0, false).len(), 1);
+        }
+
+        // High-Hz 100 Hz grid mode at 240 FPS emits clean 10 ms ticks (~100 cmds/sec), never 0 ms.
+        let mut clock_240 = CmdClock::default();
+        let mut ticks_240 = Vec::new();
+        for _ in 0..240 {
+            ticks_240.extend(clock_240.grid_ticks_100hz(1.0 / 240.0, true));
+        }
+        assert_eq!(ticks_240.len(), 100);
+        assert!(ticks_240.iter().all(|&ms| ms == 10));
+
+        // 144 FPS also emits ~100 clean 10 ms ticks per second with zero sub-10ms drift.
+        let mut clock_144 = CmdClock::default();
+        let mut ticks_144 = Vec::new();
+        for _ in 0..144 {
+            ticks_144.extend(clock_144.grid_ticks_100hz(1.0 / 144.0, true));
+        }
+        assert!(
+            (99..=100).contains(&ticks_144.len()),
+            "expected 99..=100 ticks at 144 Hz, got {}",
+            ticks_144.len()
+        );
+        assert!(ticks_144.iter().all(|&ms| ms == 10));
     }
 }

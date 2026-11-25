@@ -10,17 +10,24 @@ use cs_proto48::delta::{DeltaMarks, DeltaRecord, GoldSrcEntityState, GoldSrcWeap
 use cs_proto48::event::write_svc_event;
 use cs_proto48::messages::{
     EntityEncodeFn, WeaponDelta, WeaponRecords, entity_schema_name, weapon_records, wire_entity_type,
-    write_svc_addangle, write_svc_choke, write_svc_clientdata_with_weapons, write_svc_setangle, write_svc_packetentities_delta_encoded, write_svc_packetentities_full_encoded, write_svc_time,
+    write_svc_addangle, write_svc_choke, write_svc_clientdata_with_weapons, write_svc_pings,
+    write_svc_setangle, write_svc_packetentities_delta_encoded, write_svc_packetentities_full_encoded,
+    write_svc_time,
 };
 use cs_transport::{MAX_UDP_PACKET, PacketTransport};
 
 use crate::client::ClientState;
 use crate::edict::{EdictId, EntVars};
 use crate::game::{FullPackCtx, GameDll, entity_state_from_vars};
+use crate::lifecycle::PINGS_INTERVAL_SECS;
 use crate::world::LinkSnapshot;
 use crate::server::{Server, ServerConfig};
 use crate::unlag::userinfo_lw;
 use crate::world::consts::EF_NODRAW;
+
+/// `IN_SCORE` (`in_buttons.h` / ReHLDS `SV_ShouldUpdatePing`, `sv_main.cpp`, read 2026-11-25):
+/// client scoreboard button (`+showscores` / `TAB`).
+pub(crate) const IN_SCORE: u16 = 1 << 15;
 
 /// Updates remembered per client as delta bases.
 pub const UPDATE_BACKUP: usize = 64;
@@ -217,6 +224,58 @@ pub fn clamp_rate(rate: Option<&str>, cfg: &ServerConfig) -> u32 {
     rate.max(min).min(f64::from(cfg.max_rate).max(min)) as u32
 }
 
+/// Resolves live server rate and updaterate bounds from `cvars` (`sv_minupdaterate`,
+/// `sv_maxupdaterate`, `sv_minrate`, `sv_maxrate`, `sv_lan`, `sv_lan_rate`, per
+/// `swds.dll:FUN_102081e0` and ReHLDS `SV_CheckUpdateRate` / `SV_CheckRate` in `sv_main.cpp`,
+/// read 2026-11-25), falling back to `base_min_rate` / `base_max_rate` / `fallback` when unset
+/// or `0`.
+pub(crate) fn effective_rate_config(
+    cvars: &cs_cvar::CVarRegistry,
+    base_min_rate: u32,
+    base_max_rate: u32,
+    fallback: &ServerConfig,
+) -> ServerConfig {
+    let mut cfg = fallback.clone();
+    if let Some(c) = cvars.get("sv_minupdaterate") {
+        let v = c.as_f32();
+        if v.is_finite() {
+            cfg.min_update_rate = if v > 0.001 { (v as u32).max(1) } else { 1 };
+        }
+    }
+    if let Some(c) = cvars.get("sv_maxupdaterate") {
+        let v = c.as_f32();
+        if v.is_finite() {
+            let raw = if v > 0.001 { (v as u32).max(1) } else { 30 };
+            cfg.max_update_rate = raw.max(cfg.min_update_rate);
+        }
+    }
+    if let Some(c) = cvars.get("sv_minrate") {
+        let v = c.as_f32();
+        cfg.min_rate = if v.is_finite() && v > 0.0 {
+            (v as u32).max(1000)
+        } else {
+            base_min_rate
+        };
+    }
+    if let Some(c) = cvars.get("sv_maxrate") {
+        let v = c.as_f32();
+        cfg.max_rate = if v.is_finite() && v > 0.0 {
+            (v as u32).max(cfg.min_rate)
+        } else {
+            base_max_rate.max(cfg.min_rate)
+        };
+    }
+    if cvars.get_f32("sv_lan") > 0.0 {
+        let lan_rate = cvars.get_f32("sv_lan_rate");
+        if lan_rate.is_finite() && lan_rate > 0.0 {
+            let r = (lan_rate as u32).max(1000);
+            cfg.min_rate = r;
+            cfg.max_rate = r;
+        }
+    }
+    cfg
+}
+
 fn parse_number(value: Option<&str>) -> Option<f64> {
     value?.trim().parse::<f64>().ok().filter(|v| v.is_finite())
 }
@@ -237,6 +296,25 @@ pub(crate) fn advance_clear_time(clear_time: f64, now: f64, bytes: usize, rate: 
 }
 
 impl<G: GameDll> Server<G> {
+    /// Live rate/updaterate config resolved from `self.cvars`.
+    pub(crate) fn live_rate_config(&self) -> ServerConfig {
+        effective_rate_config(&self.cvars, self.base_min_rate, self.base_max_rate, &self.cfg)
+    }
+
+    /// Live update interval in seconds for `slot`, clamping `cl_updaterate` against live
+    /// `sv_minupdaterate` / `sv_maxupdaterate` from `self.cvars`.
+    pub(crate) fn client_update_interval(&self, slot: u8) -> f64 {
+        let cfg = self.live_rate_config();
+        update_interval(self.views[usize::from(slot)].userinfo.get("cl_updaterate"), &cfg)
+    }
+
+    /// Live rate cap in bytes/sec for `slot`, clamping `rate` against live `sv_minrate` /
+    /// `sv_maxrate` (or `sv_lan_rate` under `sv_lan`) from `self.cvars`.
+    pub(crate) fn client_rate(&self, slot: u8) -> u32 {
+        let cfg = self.live_rate_config();
+        clamp_rate(self.views[usize::from(slot)].userinfo.get("rate"), &cfg)
+    }
+
     /// Sends each connected client its datagram for this frame, if any. No datagram goes before
     /// the client's clear time, and every one moves it (see [`advance_clear_time`]). An
     /// `Active` client is sent only its due updates, which carry its pending reliable data; a
@@ -265,7 +343,7 @@ impl<G: GameDll> Server<G> {
                 self.choke_update(slot);
                 None
             };
-            let rate = clamp_rate(self.views[index].userinfo.get("rate"), &self.cfg);
+            let rate = self.client_rate(slot);
             let client = &mut self.clients[index];
             let (Some(packet), Some(addr)) = (packet, client.addr) else {
                 continue;
@@ -281,7 +359,7 @@ impl<G: GameDll> Server<G> {
     /// Skips the due update of `slot`: its due time advances as if it had been sent.
     fn choke_update(&mut self, slot: u8) {
         let index = usize::from(slot);
-        let interval = update_interval(self.views[index].userinfo.get("cl_updaterate"), &self.cfg);
+        let interval = self.client_update_interval(slot);
         let client = &mut self.clients[index];
         client.next_update_at = next_due(client.next_update_at, interval, self.real_time);
         client.choke_count = client.choke_count.saturating_add(1);
@@ -297,9 +375,10 @@ impl<G: GameDll> Server<G> {
 
     /// The due update of `slot`: `svc_time`, one `svc_choke` if any update was choked since the
     /// last one sent, the forced view, `svc_clientdata` and the entity block, delta-encoded against the frame the
-    /// client acknowledged when there is one, followed by the queued unreliable messages. The
-    /// entity block counts at most [`MAX_PACKET_ENTITIES`] entities. When the block does not
-    /// fit the datagram the whole unreliable part is dropped (nothing is stored as a delta
+    /// client acknowledged when there is one, `svc_event`, `svc_pings` (when `IN_SCORE` is held,
+    /// `SV_ShouldUpdatePing` throttled to `PINGS_INTERVAL_SECS`), followed by the queued unreliable
+    /// messages. The entity block counts at most [`MAX_PACKET_ENTITIES`] entities. When the block
+    /// does not fit the datagram the whole unreliable part is dropped (nothing is stored as a delta
     /// base, the client gets the reliable data alone), as HLDS does: a `SV_SendClientDatagram`
     /// (`rehlds/engine/sv_main.cpp`, read 2026-11-21) whose message overflowed is cleared
     /// (`WARNING: msg overflowed`) and its netchan sends the reliable data alone; and
@@ -309,7 +388,7 @@ impl<G: GameDll> Server<G> {
     /// `REHLDS_FIXES` rule). `None` when the game dropped the client meanwhile.
     fn build_update(&mut self, slot: u8) -> Option<Vec<u8>> {
         let index = usize::from(slot);
-        let interval = update_interval(self.views[index].userinfo.get("cl_updaterate"), &self.cfg);
+        let interval = self.client_update_interval(slot);
         let client = &mut self.clients[index];
         client.next_update_at = next_due(client.next_update_at, interval, self.real_time);
 
@@ -333,6 +412,26 @@ impl<G: GameDll> Server<G> {
         self.drain_outbox();
         if self.clients[index].state != ClientState::Active {
             return None;
+        }
+
+        // `SV_ShouldUpdatePing` + `SV_EmitPings_internal` (`rehlds/engine/sv_main.cpp:4805-4929,
+        // 4955, 5060`, read 2026-11-25): only emit `svc_pings` while `IN_SCORE` (`+showscores` /
+        // `TAB`) is held or for an HLTV proxy, throttled per slot to `PINGS_INTERVAL_SECS`.
+        let mut pings_block = MsgWriter::new();
+        let tab_held = (self.clients[index].last_cmd.buttons & IN_SCORE) != 0;
+        let is_proxy = self.views[index].userinfo.get("*hltv").is_some();
+        if (tab_held || is_proxy) && self.real_time >= self.next_pings_at[index] {
+            let pings: Vec<(u8, u16, u8)> = self
+                .clients
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.state == ClientState::Active)
+                .map(|(s, c)| (s as u8, c.pings.ping_ms(), 0))
+                .collect();
+            if !pings.is_empty() {
+                self.next_pings_at[index] = self.real_time + PINGS_INTERVAL_SECS;
+                write_svc_pings(&mut pings_block, &pings);
+            }
         }
 
         let max_clients = self.cfg.max_clients;
@@ -415,10 +514,12 @@ impl<G: GameDll> Server<G> {
         let budget = MAX_DATAGRAM.min(MAX_UDP_PACKET.saturating_sub(reliable_len));
         let mut payload = payload.into_bytes();
         let queued = std::mem::take(&mut client.unreliable);
-        let with_entities = payload.len() + block.len() + event_block.len() <= budget;
+        let with_entities =
+            payload.len() + block.len() + event_block.len() + pings_block.len() <= budget;
         if with_entities {
             payload.extend_from_slice(block.as_slice());
             payload.extend_from_slice(event_block.as_slice());
+            payload.extend_from_slice(pings_block.as_slice());
             if payload.len() + queued.len() <= budget {
                 payload.extend_from_slice(&queued);
             } else if !queued.is_empty() {

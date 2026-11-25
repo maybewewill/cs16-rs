@@ -179,10 +179,25 @@ pub fn add_multi_damage(
     mm.amount += damage;
 }
 
-/// `UTIL_ShouldShowBlood(BLOOD_COLOR_RED)`: the `violence_hblood` cvar. A server that has not
-/// registered it shows blood (assumption: the engine registers it with the default 1).
+/// `UTIL_ShouldShowBlood(BLOOD_COLOR_RED)`: `violence_hblood` (or `violence_ablood` for alien blood).
+fn show_blood_color(eng: &EngineApi<'_>, color: u8) -> bool {
+    let cvar = if color == BLOOD_COLOR_RED {
+        "violence_hblood"
+    } else {
+        "violence_ablood"
+    };
+    eng.cvar_str(cvar)
+        .is_none_or(|v| v.trim().parse::<f32>() != Ok(0.0))
+}
+
 fn show_blood(eng: &EngineApi<'_>) -> bool {
-    eng.cvar_str("violence_hblood")
+    show_blood_color(eng, BLOOD_COLOR_RED)
+}
+
+/// Whether human (`violence_hgibs`) or alien (`violence_agibs`) gibs are enabled.
+pub fn show_gibs(eng: &EngineApi<'_>, human: bool) -> bool {
+    let cvar = if human { "violence_hgibs" } else { "violence_agibs" };
+    eng.cvar_str(cvar)
         .is_none_or(|v| v.trim().parse::<f32>() != Ok(0.0))
 }
 
@@ -190,7 +205,7 @@ fn show_blood(eng: &EngineApi<'_>) -> bool {
 /// multiplied by two in multiplayer and capped at 255. The sprite indices are those of
 /// `sprites/bloodspray.spr` and `sprites/blood.spr` (0 when the game has not precached them).
 pub fn blood_drips(eng: &mut EngineApi<'_>, origin: Vec3, color: u8, amount: i32) {
-    if !show_blood(eng) || amount == 0 {
+    if !show_blood_color(eng, color) || amount == 0 {
         return;
     }
     let amount = (amount.wrapping_mul(2)).min(255);
@@ -514,6 +529,13 @@ pub fn fire_bullets3(
     let dir = bullet.dir + (x * bullet.spread) * v_right + (y * bullet.spread) * v_up;
     let mut end = src + dir * distance;
     let mut damage_modifier = 0.5_f32;
+    let show_impacts = if eng.cvar_f32("sv_cheats") != 0.0 {
+        eng.cvar_f32("sv_showimpacts") as i32
+    } else {
+        0
+    };
+    let shooter_slot = player_slot(g, eng, shooter).map(|s| s as u8);
+    let mut walls_penetrated: u32 = 0;
 
     while penetration != 0 {
         mm.clear();
@@ -542,8 +564,9 @@ pub fn fire_bullets3(
                 hit_shield(g, eng, hit, current_damage as f32, tr.trace.end_pos);
                 break;
             }
+            let hit_is_bsp = eng.ent(hit).is_some_and(|v| v.solid == SOLID_BSP);
             let distance_modifier;
-            if eng.ent(hit).is_none_or(|v| v.solid != SOLID_BSP) || penetration == 0 {
+            if !hit_is_bsp || penetration == 0 {
                 power = 42;
                 damage_modifier = 0.75;
                 distance_modifier = 0.75;
@@ -556,9 +579,27 @@ pub fn fire_bullets3(
             }
             decal_gunshot();
 
-            src = tr.trace.end_pos + dir * power as f32;
+            let entry_pos = tr.trace.end_pos;
+            src = entry_pos + dir * power as f32;
             distance = (distance - current_distance) * distance_modifier;
             end = src + dir * distance;
+
+            if matches!(show_impacts, 1 | 3) {
+                record_server_impact(
+                    g,
+                    eng,
+                    shooter,
+                    shooter_slot,
+                    weapon,
+                    tex,
+                    entry_pos,
+                    src,
+                    hit_is_bsp && penetration > 0,
+                    current_damage,
+                    damage_modifier,
+                    &mut walls_penetrated,
+                );
+            }
 
             trace_attack(
                 g,
@@ -578,6 +619,85 @@ pub fn fire_bullets3(
         apply_multi_damage(g, eng, &mm, Some(shooter), Some(attacker));
     }
     Vec3::new(x * bullet.spread, y * bullet.spread, 0.0)
+}
+
+fn weapon_short_name(w: WeaponId) -> &'static str {
+    crate::weapons::item_info(w)
+        .and_then(|i| i.name.strip_prefix("weapon_"))
+        .unwrap_or("bullet")
+}
+
+fn material_name(tex: u8) -> &'static str {
+    match tex {
+        CHAR_TEX_METAL => "metal",
+        CHAR_TEX_CONCRETE => "concrete",
+        CHAR_TEX_GRATE => "grate",
+        CHAR_TEX_VENT => "vent",
+        CHAR_TEX_TILE => "tile",
+        CHAR_TEX_COMPUTER => "computer",
+        CHAR_TEX_WOOD => "wood",
+        CHAR_TEX_FLESH => "flesh",
+        _ => "concrete",
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_server_impact(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    shooter: EdictId,
+    shooter_slot: Option<u8>,
+    weapon: Option<WeaponId>,
+    tex: u8,
+    entry_pos: Vec3,
+    exit_probe: Vec3,
+    penetrated_wall: bool,
+    dmg_before: i32,
+    damage_modifier: f32,
+    walls_penetrated: &mut u32,
+) {
+    let half = Vec3::splat(2.0);
+    let impact_box = tempent::box_fx(entry_pos - half, entry_pos + half, 40, [255, 40, 40]);
+    eng.send_temp_entity(MsgDest::Broadcast, &impact_box);
+
+    let mut exit_pos = None;
+    let mut wallbang_line = None;
+    if penetrated_wall {
+        let back_tr = eng.trace_line(exit_probe, entry_pos, MoveFilter::NoMonsters, Some(shooter));
+        if !back_tr.trace.start_solid && back_tr.trace.fraction < 1.0 {
+            let ex = back_tr.trace.end_pos;
+            let thickness = (ex - entry_pos).length();
+            if thickness > 0.1 {
+                *walls_penetrated += 1;
+                let wall_word = if *walls_penetrated == 1 { "wall" } else { "walls" };
+                let dmg_after = (dmg_before as f32 * damage_modifier) as i32;
+                let wname = weapon.map_or("bullet", weapon_short_name);
+                let mname = material_name(tex);
+                let line = format!(
+                    "[wallbang] {wname} penetrated {} {wall_word} ({thickness:.1}u {mname}): dmg {dmg_before} -> {dmg_after}",
+                    *walls_penetrated
+                );
+                let exit_box = tempent::box_fx(ex - half, ex + half, 40, [255, 220, 40]);
+                eng.send_temp_entity(MsgDest::Broadcast, &exit_box);
+                let span_line = tempent::line(entry_pos, ex, 40, [255, 165, 0]);
+                eng.send_temp_entity(MsgDest::Broadcast, &span_line);
+                if let Some(slot) = shooter_slot {
+                    eng.client_print(slot, &format!("{line}\n"));
+                }
+                exit_pos = Some(ex);
+                wallbang_line = Some(line);
+            }
+        }
+    }
+
+    if g.practice_impacts.len() >= 64 {
+        g.practice_impacts.pop_front();
+    }
+    g.practice_impacts.push_back(crate::PracticeImpact {
+        origin: entry_pos,
+        exit: exit_pos,
+        wallbang_line,
+    });
 }
 
 /// `CBaseEntity::FireBullets` (cbase.cpp, read 2026-11-22) as the shotguns call it

@@ -187,6 +187,8 @@ pub struct GoldSrcMixer {
     master_volume: f32,
     suit_volume: f32,
     occlusion_factor: f32,
+    lerping: bool,
+    hisound: bool,
     timescale: f32,
     rng_state: u64,
     next_age: u64,
@@ -212,12 +214,48 @@ impl GoldSrcMixer {
             listener: ListenerState::default(),
             master_volume: 0.8,
             suit_volume: 0.25,
-            occlusion_factor: 0.25,
+            occlusion_factor: 0.0,
+            lerping: true,
+            hisound: true,
             timescale: 1.0,
             rng_state: 0x9E37_79B9_7F4A_7C15,
             next_age: 1,
             fade_sample_acc: 0,
         }
+    }
+
+    pub fn occlusion_factor(&self) -> f32 {
+        self.occlusion_factor
+    }
+
+    pub fn set_resampling(&mut self, lerping: bool, hisound: bool) {
+        self.lerping = lerping;
+        self.hisound = hisound;
+    }
+
+    pub fn lerping(&self) -> bool {
+        self.lerping
+    }
+
+    pub fn hisound(&self) -> bool {
+        self.hisound
+    }
+
+    pub fn format_sound_list(&self) -> String {
+        let mut out = String::new();
+        let mut count = 0usize;
+        for ch in self.dynamic.iter().chain(self.static_ch.iter()) {
+            if !ch.active {
+                continue;
+            }
+            count += 1;
+            let kind = if ch.is_static { "static" } else { "dyn" };
+            out.push_str(&format!(
+                "  [{kind}] ent={} ch={} l={:.2} r={:.2} {}\n",
+                ch.entity, ch.channel, ch.left_gain, ch.right_gain, ch.sample_name
+            ));
+        }
+        format!("Active mixer channels: {count}\n{out}")
     }
 
     pub fn set_sentences(&mut self, table: SentenceTable) {
@@ -727,11 +765,13 @@ impl GoldSrcMixer {
             let mut sum_l = 0.0f32;
             let mut sum_r = 0.0f32;
 
+            let lerping = self.lerping;
+            let hisound = self.hisound;
             for ch in self.dynamic.iter_mut().chain(self.static_ch.iter_mut()) {
                 if !ch.active {
                     continue;
                 }
-                let (sl, sr) = sample_channel(ch, self.timescale);
+                let (sl, sr) = sample_channel(ch, self.timescale, lerping, hisound);
                 sum_l += sl * ch.left_gain;
                 sum_r += sr * ch.right_gain;
             }
@@ -777,7 +817,12 @@ fn soft_clip(x: f32) -> f32 {
     }
 }
 
-fn sample_channel(ch: &mut ChannelSlot, timescale: f32) -> (f32, f32) {
+/// Samples one output frame from `ch`.
+///
+/// Resampling honors `s_lerping` (`S_MixChannelToBuffer` / `S_MixAudio` in Xash3D FWGS
+/// `engine/client/sound/s_mix.c`, read 2026-11-25) and `hisound` (`11025 Hz` step quantization
+/// when `hisound 0`).
+fn sample_channel(ch: &mut ChannelSlot, timescale: f32, lerping: bool, hisound: bool) -> (f32, f32) {
     let Some(wav) = ch.wav.as_ref() else {
         advance_vox_or_stop(ch);
         return (0.0, 0.0);
@@ -796,7 +841,11 @@ fn sample_channel(ch: &mut ChannelSlot, timescale: f32) -> (f32, f32) {
         return (0.0, 0.0);
     }
 
-    let frac = (ch.phase - (i0 as f64)) as f32;
+    let frac = if lerping {
+        (ch.phase - (i0 as f64)) as f32
+    } else {
+        0.0
+    };
     let channels = usize::from(wav.channels.max(1));
     let loop_end = wav.loop_end.unwrap_or(nframes).min(nframes);
     let i1 = if i0 + 1 < nframes {
@@ -834,7 +883,12 @@ fn sample_channel(ch: &mut ChannelSlot, timescale: f32) -> (f32, f32) {
     let pitch_ratio = f64::from(ch.pitch.max(2)) / f64::from(PITCH_NORM);
     // Retail `hw.dll:FUN_10202bf0`: `(timescale + 1.0) * 0.5` pitch scaling + duplicate jitter.
     let timescale_pitch = (f64::from(timescale) + 1.0) * 0.5;
-    let step = (f64::from(wav.sample_rate) / f64::from(MIX_SAMPLE_RATE))
+    let effective_src_rate = if hisound {
+        f64::from(wav.sample_rate)
+    } else {
+        f64::from(wav.sample_rate.min(11025))
+    };
+    let step = (effective_src_rate / f64::from(MIX_SAMPLE_RATE))
         * pitch_ratio
         * timescale_pitch
         * ch.rate_jitter;

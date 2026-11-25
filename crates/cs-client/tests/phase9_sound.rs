@@ -667,6 +667,7 @@ fn voice_goldsrc_compat_steam_opus_miles_and_speex() {
     assert_eq!(back.len(), 512);
 
     let mut miles = VoiceManager::new();
+    miles.set_steam_compat(false);
     miles.handle_event(
         VoiceEvent::Init {
             codec: "voice_miles".to_string(),
@@ -700,4 +701,51 @@ fn voice_goldsrc_compat_steam_opus_miles_and_speex() {
     speex.handle_event(VoiceEvent::Data { player_slot: 4, data: framed2 }, 0.22);
     let speex_out = speex.drain_decoded(true);
     assert!(speex_out.iter().any(|(slot, rate, s)| *slot == 4 && *rate == 8_000 && s.len() == 160));
+}
+
+#[test]
+fn classic_audio_defaults_and_resampling_and_sound_list() {
+    let pcm = sine_i16(22_050, 440.0, 2_000, 0.7);
+    let wav = encode_test_wav_pcm16(22_050, 1, &pcm, None, None);
+
+    // Classic GoldSrc s_occfactor default 0.0 means occlusion factor starts at 0.0 (no attenuation).
+    let mut mixer = GoldSrcMixer::new();
+    mixer.set_volumes(1.0, 0.25);
+    mixer.set_room_off(true);
+    let listener = ListenerState {
+        origin: Vec3::ZERO,
+        right: Vec3::X,
+        local_entity: Some(1),
+        waterlevel: 0,
+    };
+    mixer.update_listener_and_entities(listener, &HashMap::new(), None);
+    mixer.insert_cached_wav("weapons/ak47-1.wav", &wav);
+
+    let start = SoundStart::by_name("weapons/ak47-1.wav", 1, 2, Vec3::new(60.0, 0.0, 0.0), 1.0, 0.0, 100);
+    mixer.start_sound(None, &start, true, None);
+
+    let list = mixer.format_sound_list();
+    assert!(list.contains("weapons/ak47-1.wav"), "{list}");
+
+    let mut out_occ0 = vec![0.0f32; 512 * 2];
+    mixer.mix_frames(&mut out_occ0);
+    assert!(rms(&out_occ0) > 0.1);
+
+    // Classic default occlusion_factor = 0.0 produces identical gain whether occluded=true or false.
+    let mut mixer2 = GoldSrcMixer::new();
+    mixer2.set_volumes(1.0, 0.25);
+    mixer2.set_room_off(true);
+    mixer2.update_listener_and_entities(listener, &HashMap::new(), None);
+    mixer2.insert_cached_wav("weapons/ak47-1.wav", &wav);
+    mixer2.start_sound(None, &start, false, None);
+    let mut out_unocc = vec![0.0f32; 512 * 2];
+    mixer2.mix_frames(&mut out_unocc);
+    assert!((rms(&out_occ0) - rms(&out_unocc)).abs() < 1e-4);
+
+    // Non-lerping & low-sound (11025 Hz cap) path still produces clean audible audio.
+    mixer.set_resampling(false, false);
+    mixer.start_sound(None, &start, false, None);
+    let mut out_low = vec![0.0f32; 512 * 2];
+    mixer.mix_frames(&mut out_low);
+    assert!(rms(&out_low) > 0.1);
 }

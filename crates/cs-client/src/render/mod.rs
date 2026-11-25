@@ -39,7 +39,7 @@ use crate::render::lighting::{GpuLightsUniform, TextureFilterMode, TextureUpload
 use crate::render::mdl_renderer::{MdlPassParams, MdlRenderer, StudioInstance};
 use crate::render::scene::{
     BrushDraw, DrawLists, FxFadeTracker, ModelKind, ModelRegistry, SceneFrame, StudioDraw,
-    build_draw_lists_tracked,
+    build_draw_lists_tracked, collect_opaque_brush_colliders,
 };
 use crate::render::skybox::SkyboxRenderer;
 use crate::render::sprite_renderer::{SpritePassParams, SpriteRenderer};
@@ -676,10 +676,11 @@ impl Renderer {
             let view_proj = proj * view_mat;
 
             self.decals.sync_gamma(gamma_cfg, tex_cfg);
+            let scene_entities = self.entity_scene.as_ref().map(|s| s.entities.as_slice());
             if let Some(vfs) = scene.vfs
                 && !scene.decals.is_empty()
             {
-                self.decals.spawn_decals(
+                self.decals.spawn_decals_with_scene(
                     &self.device,
                     &self.queue,
                     vfs,
@@ -687,9 +688,11 @@ impl Renderer {
                     scene.decals,
                     settings.r_decals,
                     custom_sprays,
+                    scene_entities,
+                    Some(&self.models),
                 );
             }
-            self.decals.prepare(
+            self.decals.prepare_with_scene(
                 &self.device,
                 &self.queue,
                 view_proj,
@@ -699,6 +702,8 @@ impl Renderer {
                 settings.brightness,
                 settings.software_mode,
                 settings.fog,
+                scene_entities,
+                Some(&self.models),
             );
 
             if let (Some(vfs), Some(vm)) = (scene.vfs, scene.viewmodel.as_ref()) {
@@ -732,6 +737,7 @@ impl Renderer {
                     blend: vm.blend,
                     flip_winding: vm.flip_winding,
                     attached_model: vm.attached_model,
+                    xray_color: None,
                 };
                 let vm_params = MdlPassParams {
                     view_proj: vm_vp,
@@ -805,6 +811,7 @@ impl Renderer {
                             .attached
                             .and_then(|h| self.models.get(h))
                             .map(|e| e.name.as_str()),
+                        xray_color: d.xray_color,
                     })
                 };
                 let studio: Vec<StudioInstance<'_>> =
@@ -835,6 +842,12 @@ impl Renderer {
                         &scene_params,
                     ));
                 }
+                self.mdl_scene.prepare_shadows(
+                    &self.device,
+                    &self.queue,
+                    &frame.shadows,
+                    &scene_params,
+                );
 
                 if !lists.sprites.is_empty() {
                     let paths: Vec<Option<&str>> = lists
@@ -850,6 +863,8 @@ impl Renderer {
                         software_mode: settings.software_mode,
                         fog: settings.fog,
                     };
+                    let brush_colliders =
+                        collect_opaque_brush_colliders(&frame.entities, &self.models);
                     prepared_sprites = Some(self.sprites.prepare(
                         &self.device,
                         &self.queue,
@@ -859,6 +874,7 @@ impl Renderer {
                         &frame.view,
                         &spr_params,
                         self.world_collision.as_ref(),
+                        &brush_colliders,
                     ));
                 }
             }
@@ -947,13 +963,15 @@ impl Renderer {
                     lights: scene.lights,
                 };
                 stats = self.bsp.draw(&self.queue, &mut pass, &bsp_params, &[]);
-                self.decals.draw(&mut pass);
+                self.decals.draw_world(&mut pass);
 
                 self.bsp.draw_entities(
                     &mut pass,
                     &prepared_solid_brushes,
                     settings.time_sec,
                 );
+                self.decals.draw_solid_entities(&mut pass);
+                self.mdl_scene.draw_shadows(&mut pass);
                 if let Some(ref studio) = prepared_scene_studio {
                     self.mdl_scene.draw_opaque(&mut pass, studio);
                 }
@@ -976,11 +994,15 @@ impl Renderer {
                     &prepared_trans_brushes,
                     settings.time_sec,
                 );
+                self.decals.draw_trans_entities(&mut pass);
                 if let Some(ref studio) = prepared_scene_studio {
                     self.mdl_scene.draw_translucent(&mut pass, studio);
                 }
                 if let Some(ref spr) = prepared_sprites {
                     self.sprites.draw(&mut pass, spr);
+                }
+                if let Some(ref studio) = prepared_scene_studio {
+                    self.mdl_scene.draw_xray(&mut pass, studio);
                 }
             }
         }

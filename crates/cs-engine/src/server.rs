@@ -134,8 +134,12 @@ pub struct Server<G: GameDll> {
     pub(crate) shutting_down: bool,
     /// Final datagrams for released clients, sent at the end of the frame.
     pub(crate) farewells: Vec<(PeerAddr, Vec<u8>)>,
-    /// Server time the next `svc_pings` is due.
-    pub(crate) next_pings_at: f64,
+    /// Server time from which each slot may next receive `svc_pings` when `IN_SCORE` is held
+    /// (`SV_ShouldUpdatePing` / `SV_GetNetInfo` in ReHLDS `sv_main.cpp`, read 2026-11-25).
+    pub(crate) next_pings_at: Vec<f64>,
+    /// Server time from which each slot's mid-game `userinfo` updates may next broadcast
+    /// (`client->sendinfo_time` in ReHLDS `sv_main.cpp`, read 2026-11-25).
+    pub(crate) next_sendinfo_at: Vec<f64>,
     /// The queued fake-client moves are being run (`Server::run_fake_moves`): a drain made while
     /// they run leaves the rest of the queue to that loop.
     pub(crate) in_fake_moves: bool,
@@ -152,6 +156,9 @@ pub struct Server<G: GameDll> {
     pub(crate) replay_capture: bool,
     pub(crate) replay_svc_packets: Vec<Vec<u8>>,
     pub(crate) next_replay_snapshot_at: f64,
+    pub(crate) localinfo: BTreeMap<String, String>,
+    pub(crate) available_maps: Vec<String>,
+    pub(crate) voice_bridge: Option<Box<dyn crate::voice_bridge::VoiceBridge>>,
 }
 
 /// Snapshot of a connected client or bot slot for server admin / status APIs.
@@ -285,7 +292,8 @@ impl<G: GameDll> Server<G> {
             net_stats: NetStats::default(),
             shutting_down: false,
             farewells: Vec::new(),
-            next_pings_at: 0.0,
+            next_pings_at: vec![0.0; slots],
+            next_sendinfo_at: vec![0.0; slots],
             in_fake_moves: false,
             file_provider: None,
             consistency_rules: BTreeMap::new(),
@@ -300,9 +308,27 @@ impl<G: GameDll> Server<G> {
             replay_capture: false,
             replay_svc_packets: Vec::new(),
             next_replay_snapshot_at: 0.0,
+            localinfo: BTreeMap::new(),
+            available_maps: Vec::new(),
+            voice_bridge: None,
         };
         server.activate_map();
         server
+    }
+
+    /// Installs a server-side voice transcode bridge (for `SteamOpusPlc <-> CSVO ADPCM`).
+    pub fn set_voice_bridge(&mut self, bridge: Box<dyn crate::voice_bridge::VoiceBridge>) {
+        self.voice_bridge = Some(bridge);
+    }
+
+    /// Removes any installed server-side voice transcode bridge.
+    pub fn clear_voice_bridge(&mut self) {
+        self.voice_bridge = None;
+    }
+
+    /// Sets the list of available map names returned by the `maps` console command.
+    pub fn set_available_maps(&mut self, maps: Vec<String>) {
+        self.available_maps = maps;
     }
 
     /// Sets the decal list `EngineApi::decal_index` answers from (`Decal_Init` in the original,
@@ -362,43 +388,12 @@ impl<G: GameDll> Server<G> {
     /// Syncs dynamic server rate & updaterate cvars (`sv_minupdaterate`, `sv_maxupdaterate`,
     /// `sv_minrate`, `sv_maxrate`, `sv_lan`, `sv_lan_rate`) per `swds.dll:FUN_102081e0`.
     fn sync_rate_cvars(&mut self) {
-        if let Some(c) = self.cvars.get("sv_minupdaterate") {
-            let v = c.as_f32();
-            if v.is_finite() {
-                self.cfg.min_update_rate = if v > 0.0 { v as u32 } else { 1 }.max(1);
-            }
-        }
-        if let Some(c) = self.cvars.get("sv_maxupdaterate") {
-            let v = c.as_f32();
-            if v.is_finite() {
-                let raw = if v > 0.0 { v as u32 } else { 30 };
-                self.cfg.max_update_rate = raw.max(self.cfg.min_update_rate);
-            }
-        }
-        if let Some(c) = self.cvars.get("sv_minrate") {
-            let v = c.as_f32();
-            self.cfg.min_rate = if v.is_finite() && v > 0.0 {
-                (v as u32).max(1000)
-            } else {
-                self.base_min_rate
-            };
-        }
-        if let Some(c) = self.cvars.get("sv_maxrate") {
-            let v = c.as_f32();
-            self.cfg.max_rate = if v.is_finite() && v > 0.0 {
-                (v as u32).max(self.cfg.min_rate)
-            } else {
-                self.base_max_rate.max(self.cfg.min_rate)
-            };
-        }
-        if self.cvars.get_f32("sv_lan") > 0.0 {
-            let lan_rate = self.cvars.get_f32("sv_lan_rate");
-            if lan_rate.is_finite() && lan_rate > 0.0 {
-                let r = (lan_rate as u32).max(1000);
-                self.cfg.min_rate = r;
-                self.cfg.max_rate = r;
-            }
-        }
+        self.cfg = crate::frame::effective_rate_config(
+            &self.cvars,
+            self.base_min_rate,
+            self.base_max_rate,
+            &self.cfg,
+        );
     }
 
     /// One server frame, in the order of HLDS `SV_Frame_Internal` (ReHLDS
@@ -444,7 +439,6 @@ impl<G: GameDll> Server<G> {
         }
         self.flush_reliable_datagram();
         self.drop_timed_out_clients();
-        self.queue_pings_if_due();
         self.broadcast_userinfo();
         self.send_client_frames(net);
         self.record_replay_snapshot_if_due();
@@ -996,6 +990,15 @@ impl<G: GameDll> Server<G> {
     /// past the `spawn` answer), and the buffer is emptied. The `REHLDS_FIXES` build also reaches
     /// a client that has been in the game before; not reproduced.
     pub(crate) fn flush_reliable_datagram(&mut self) {
+        if !self.outbox.replay_reliable.is_empty() {
+            let replay_bytes = std::mem::replace(&mut self.outbox.replay_reliable, MsgWriter::new());
+            if self.replay_capture && self.replay_svc_packets.len() < 1024 {
+                let mut pkt = MsgWriter::with_capacity(replay_bytes.len() + 8);
+                cs_proto48::messages::write_svc_time(&mut pkt, self.sv_time as f32);
+                pkt.write_bytes(replay_bytes.as_slice());
+                self.replay_svc_packets.push(pkt.into_bytes());
+            }
+        }
         if self.outbox.reliable_all.is_empty() {
             return;
         }
@@ -1225,8 +1228,11 @@ impl<G: GameDll> Server<G> {
     }
 
     /// Relays an active client's `clc_voicedata` frame into every unbanned recipient's unreliable
-    /// datagram buffer (`SV_ParseVoiceData`), respecting `sv_voiceenable` and per-client rate caps.
-    fn handle_voice_data(&mut self, sender_slot: u8, data: &[u8]) {
+    /// datagram buffer (`SV_ParseVoiceData`), respecting `sv_voiceenable`, `sv_voice_transcode`,
+    /// and per-client rate caps.
+    pub(crate) fn handle_voice_data(&mut self, sender_slot: u8, data: &[u8]) {
+        use crate::voice_bridge::{VoiceBridgeAction, VoiceSlotKind, sv_voice_transcode_enabled};
+
         let index = usize::from(sender_slot);
         if data.is_empty()
             || data.len() > 4096
@@ -1237,19 +1243,83 @@ impl<G: GameDll> Server<G> {
             return;
         }
         let sender_bit = 1u32.checked_shl(u32::from(sender_slot)).unwrap_or(0);
-        let mut msg = MsgWriter::with_capacity(data.len() + 4);
-        write_svc_voicedata(&mut msg, sender_slot, data);
-        let packet = msg.into_bytes();
-        for (rec_idx, client) in self.clients.iter_mut().enumerate() {
-            if rec_idx == index
-                || client.is_free()
-                || client.fake
-                || client.state != ClientState::Active
-                || (client.voice_ban_mask & sender_bit) != 0
-            {
+        let transcode_active =
+            sv_voice_transcode_enabled(&self.cvars) && self.voice_bridge.is_some();
+
+        if !transcode_active {
+            let mut msg = MsgWriter::with_capacity(data.len() + 4);
+            write_svc_voicedata(&mut msg, sender_slot, data);
+            let packet = msg.into_bytes();
+            for (rec_idx, client) in self.clients.iter_mut().enumerate() {
+                if rec_idx == index
+                    || client.is_free()
+                    || client.fake
+                    || client.state != ClientState::Active
+                    || (client.voice_ban_mask & sender_bit) != 0
+                {
+                    continue;
+                }
+                client.queue_unreliable(&packet);
+            }
+            return;
+        }
+
+        let sender_kind = VoiceSlotKind::from_peer_addr(self.clients[index].addr.as_ref());
+        let mut passthrough_pkt: Option<Vec<u8>> = None;
+        let mut native_cached: Option<Option<Vec<u8>>> = None;
+        let mut web_cached: Option<Option<Vec<u8>>> = None;
+
+        for rec_idx in 0..self.clients.len() {
+            if rec_idx == index {
                 continue;
             }
-            client.queue_unreliable(&packet);
+            let (eligible, target_kind) = {
+                let client = &self.clients[rec_idx];
+                let ok = !client.is_free()
+                    && !client.fake
+                    && client.state == ClientState::Active
+                    && (client.voice_ban_mask & sender_bit) == 0;
+                (ok, VoiceSlotKind::from_peer_addr(client.addr.as_ref()))
+            };
+            if !eligible {
+                continue;
+            }
+
+            let cache_slot = match target_kind {
+                VoiceSlotKind::NativeOrRetail => &mut native_cached,
+                VoiceSlotKind::WebBrowser => &mut web_cached,
+            };
+            if cache_slot.is_none() {
+                let action = self
+                    .voice_bridge
+                    .as_mut()
+                    .expect("voice_bridge checked Some")
+                    .bridge_packet(sender_slot, sender_kind, target_kind, data);
+                let built = match action {
+                    VoiceBridgeAction::Passthrough => {
+                        let pkt = passthrough_pkt.get_or_insert_with(|| {
+                            let mut msg = MsgWriter::with_capacity(data.len() + 4);
+                            write_svc_voicedata(&mut msg, sender_slot, data);
+                            msg.into_bytes()
+                        });
+                        Some(pkt.clone())
+                    }
+                    VoiceBridgeAction::Transcoded(bytes) => {
+                        if bytes.is_empty() || bytes.len() > 4096 {
+                            None
+                        } else {
+                            let mut msg = MsgWriter::with_capacity(bytes.len() + 4);
+                            write_svc_voicedata(&mut msg, sender_slot, &bytes);
+                            Some(msg.into_bytes())
+                        }
+                    }
+                    VoiceBridgeAction::Suppress => None,
+                };
+                *cache_slot = Some(built);
+            }
+            if let Some(pkt) = cache_slot.as_ref().and_then(|o| o.as_deref()) {
+                self.clients[rec_idx].queue_unreliable(pkt);
+            }
         }
     }
 
@@ -1293,6 +1363,25 @@ impl<G: GameDll> Server<G> {
                 if self.clients[usize::from(slot)].setinfos.try_take() {
                     self.client_setinfo(slot, &argv);
                 }
+            }
+            ("fullinfo", _) => {
+                if self.clients[usize::from(slot)].setinfos.try_take()
+                    && let Some(raw) = argv.get(1)
+                {
+                    let parsed = cs_proto48::info::InfoString::parse(raw);
+                    for (k, v) in parsed.iter() {
+                        self.client_setinfo(
+                            slot,
+                            &["setinfo".to_string(), k.to_string(), v.to_string()],
+                        );
+                    }
+                }
+            }
+            ("fullupdate", _) => {
+                let idx = usize::from(slot);
+                self.clients[idx].delta_seq = None;
+                self.clients[idx].frames = crate::frame::FrameRing::new();
+                self.with_game(|game, eng| game.client_command(eng, slot, &argv));
             }
             ("dlfile", _) => self.handle_dlfile(slot, &argv),
             ("disconnect" | "dropclient", _) => self.release_slot(slot, None),

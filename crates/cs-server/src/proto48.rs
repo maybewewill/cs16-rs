@@ -11,10 +11,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
-use cs_engine::{ConsoleOutcome, GameDll, GameStatEvent, Server, ServerConfig, ServerMap};
+use cs_engine::collision::Hull;
+use cs_engine::{
+    ConsoleOutcome, EdictId, GameDll, GameStatEvent, Server, ServerConfig, ServerMap,
+    WorldCollision,
+};
 use cs_game::CsGame;
 use cs_local::{load_server_map, new_server};
 use cs_platform::{Clock, NativeClock};
+use cs_proto48::messages::{SvcMessage, SvcParseContext, parse_svc_stream_partial};
+use cs_proto48::usermsg::CsUserMsg;
 use cs_relay::{RelayHandle, RelayPolicy, TargetAllowlist};
 use cs_sim::pmove::MoveParams;
 use cs_sim::walk_game::WalkGame;
@@ -28,12 +34,15 @@ use tracing::info;
 
 use crate::admin_http::{
     AdminBackend, AdminHttpRequest, AdminHttpResponse, AdminRouter, InviteConfig,
-    MAX_API_BODY_BYTES, PlayerSnapshot, ServerStatusSnapshot, read_http_body,
+    MAX_API_BODY_BYTES, PlayerSnapshot, ServerStatusSnapshot, handle_lobby_request, is_lobby_path,
+    read_http_body,
 };
+use cs_master::lobbies::LobbyRegistry;
 use crate::console_io;
 use crate::replays::{
-    DEFAULT_MAX_REPLAY_ROUNDS, MatchStatsTracker, RoundReplayStore, RoundWinner, TeamSide,
-    escape_json_str,
+    DEFAULT_MAX_REPLAY_ROUNDS, MapOverviewBundle, MatchStatsTracker, RoundReplayStore,
+    RoundWinner, TeamSide, TimelineBombState, TimelineGrenadeKind, TimelinePlayerSample,
+    escape_json_str, load_map_overview_from_vfs, valid_map_overview_name,
 };
 
 /// The port a Half-Life server listens on by default.
@@ -398,6 +407,61 @@ struct TrackedPlayerMeta {
     is_bot: bool,
 }
 
+fn weapon_id_from_p_model(path: &str) -> u8 {
+    let norm = path.replace('\\', "/").to_ascii_lowercase();
+    let file = norm.rsplit('/').next().unwrap_or(&norm);
+    match file {
+        "p_p228.mdl" => 1,
+        "p_scout.mdl" => 3,
+        "p_hegrenade.mdl" => 4,
+        "p_xm1014.mdl" => 5,
+        "p_c4.mdl" => 6,
+        "p_mac10.mdl" => 7,
+        "p_aug.mdl" => 8,
+        "p_smokegrenade.mdl" => 9,
+        "p_elite.mdl" => 10,
+        "p_fiveseven.mdl" => 11,
+        "p_ump45.mdl" => 12,
+        "p_sg550.mdl" => 13,
+        "p_galil.mdl" => 14,
+        "p_famas.mdl" => 15,
+        "p_usp.mdl" => 16,
+        "p_glock18.mdl" => 17,
+        "p_awp.mdl" => 18,
+        "p_mp5.mdl" => 19,
+        "p_m249.mdl" => 20,
+        "p_m3.mdl" => 21,
+        "p_m4a1.mdl" => 22,
+        "p_tmp.mdl" => 23,
+        "p_g3sg1.mdl" => 24,
+        "p_flashbang.mdl" => 25,
+        "p_deagle.mdl" => 26,
+        "p_sg552.mdl" => 27,
+        "p_ak47.mdl" => 28,
+        "p_knife.mdl" => 29,
+        "p_p90.mdl" => 30,
+        "p_shield.mdl" => 99,
+        _ => 0,
+    }
+}
+
+const fn is_firearm_weapon_id(id: u8) -> bool {
+    !matches!(id, 0 | 4 | 6 | 9 | 25 | 29 | 99)
+}
+
+fn grenade_kind_from_model(model: &str) -> Option<TimelineGrenadeKind> {
+    let lower = model.to_ascii_lowercase();
+    if lower.contains("hegrenade") {
+        Some(TimelineGrenadeKind::He)
+    } else if lower.contains("flashbang") {
+        Some(TimelineGrenadeKind::Flash)
+    } else if lower.contains("smokegrenade") {
+        Some(TimelineGrenadeKind::Smoke)
+    } else {
+        None
+    }
+}
+
 /// Live server-side replay store + match stats + player scoreboard cache for `AdminBackend`.
 struct Phase13Runtime {
     replays: RoundReplayStore,
@@ -410,6 +474,20 @@ struct Phase13Runtime {
     web_port: Option<u16>,
     available_maps: Vec<String>,
     admin_html: Option<Vec<u8>>,
+    vfs: Option<Vfs>,
+    world_collision: Option<Arc<WorldCollision>>,
+    current_map_name: String,
+    current_map_overview: Option<MapOverviewBundle>,
+    svc_ctx: SvcParseContext,
+    p_model_weapons: HashMap<u16, u8>,
+    active_grenades: HashMap<EdictId, (u32, TimelineGrenadeKind, [f32; 3], bool)>,
+    next_grenade_key: u32,
+    prev_animtime: [f32; 32],
+    last_shot_at: [f64; 32],
+    flashed_until: [f64; 32],
+    flashed_alpha: [u8; 32],
+    last_bomb_pos: [f32; 3],
+    lobbies: LobbyRegistry,
 }
 
 impl Phase13Runtime {
@@ -436,7 +514,72 @@ impl Phase13Runtime {
             web_port,
             available_maps,
             admin_html,
+            vfs: None,
+            world_collision: None,
+            current_map_name: map_name.to_string(),
+            current_map_overview: None,
+            svc_ctx: SvcParseContext::new(),
+            p_model_weapons: HashMap::new(),
+            active_grenades: HashMap::new(),
+            next_grenade_key: 1,
+            prev_animtime: [0.0; 32],
+            last_shot_at: [-10.0; 32],
+            flashed_until: [0.0; 32],
+            flashed_alpha: [0; 32],
+            last_bomb_pos: [0.0; 3],
+            lobbies: LobbyRegistry::default(),
         }
+    }
+
+    fn set_map_context(
+        &mut self,
+        vfs: Vfs,
+        collision: Option<Arc<WorldCollision>>,
+        map_name: &str,
+    ) {
+        self.vfs = Some(vfs);
+        self.refresh_map_overview(collision, map_name);
+    }
+
+    fn refresh_map_overview(&mut self, collision: Option<Arc<WorldCollision>>, map_name: &str) {
+        self.world_collision = collision;
+        self.current_map_name = map_name.to_string();
+        let fallback_bounds = self
+            .world_collision
+            .as_deref()
+            .and_then(|c| c.model_bounds(0))
+            .map(|(mn, mx)| ([mn.x, mn.y, mn.z], [mx.x, mx.y, mx.z]))
+            .or(Some(([-2048.0, -2048.0, -512.0], [2048.0, 2048.0, 512.0])));
+        self.current_map_overview = self.vfs.as_ref().and_then(|v| {
+            load_map_overview_from_vfs(v, map_name, fallback_bounds)
+        }).or_else(|| {
+            let (mins, maxs) = fallback_bounds?;
+            valid_map_overview_name(map_name).then(|| MapOverviewBundle {
+                map: map_name.strip_suffix(".bsp").unwrap_or(map_name).to_string(),
+                has_overview: false,
+                zoom: 1.0,
+                origin: [0.0; 3],
+                rotated: false,
+                mins,
+                maxs,
+                png_bytes: None,
+            })
+        });
+    }
+
+    fn resolve_map_overview(&self, map_name: &str) -> Option<MapOverviewBundle> {
+        let clean = map_name.strip_suffix(".bsp").unwrap_or(map_name);
+        if !valid_map_overview_name(clean) {
+            return None;
+        }
+        if clean.eq_ignore_ascii_case(&self.current_map_name)
+            && let Some(ref cached) = self.current_map_overview
+        {
+            return Some(cached.clone());
+        }
+        self.vfs
+            .as_ref()
+            .and_then(|v| load_map_overview_from_vfs(v, clean, None))
     }
 
     fn begin_round_recording<G: GameDll>(&mut self, server: &mut Server<G>, now: f64) {
@@ -447,7 +590,29 @@ impl Phase13Runtime {
         server.enable_replay_capture(true);
         self.replays
             .begin_round(server.map_name(), server.map_crc(), now);
+        self.svc_ctx = SvcParseContext::new();
+        self.p_model_weapons.clear();
+        self.active_grenades.clear();
+        self.prev_animtime = [0.0; 32];
+        self.last_shot_at = [-10.0; 32];
+        self.flashed_until = [0.0; 32];
+        self.flashed_alpha = [0; 32];
+        self.last_bomb_pos = [0.0; 3];
+
         let signon = server.encode_replay_signon();
+        let (msgs, _) = parse_svc_stream_partial(&signon, &mut self.svc_ctx);
+        for msg in msgs {
+            if let SvcMessage::ResourceList { resources, .. } = msg {
+                for r in resources {
+                    if r.res_type == 2 {
+                        let wid = weapon_id_from_p_model(&r.filename);
+                        if wid != 0 {
+                            self.p_model_weapons.insert(r.index, wid);
+                        }
+                    }
+                }
+            }
+        }
         self.replays.record_svc_packet(now, true, &signon);
         self.replays.mark_signon_complete(now);
     }
@@ -470,11 +635,190 @@ impl Phase13Runtime {
             let key = format!("slot:{}", info.slot);
             self.stats
                 .register_player(&key, &entry.name, entry.team, entry.is_bot);
+            let team_id = match entry.team {
+                TeamSide::Terrorist => 1,
+                TeamSide::CounterTerrorist => 2,
+                TeamSide::Spectator => 3,
+                TeamSide::Unassigned => 0,
+            };
+            self.replays
+                .set_timeline_player(info.slot + 1, &entry.name, team_id, entry.is_bot);
+        }
+    }
+
+    fn trace_shot_end(&self, from: [f32; 3], angles: glam::Vec3) -> [f32; 3] {
+        let pitch = angles.x.to_radians();
+        let yaw = angles.y.to_radians();
+        let dir = glam::Vec3::new(
+            yaw.cos() * pitch.cos(),
+            yaw.sin() * pitch.cos(),
+            -pitch.sin(),
+        );
+        let start = glam::Vec3::from_array(from);
+        let end = start + dir * 2048.0;
+        if let Some(ref coll) = self.world_collision {
+            let tr = coll.trace_world(start, end, Hull::Point);
+            [tr.end_pos.x, tr.end_pos.y, tr.end_pos.z]
+        } else {
+            [end.x, end.y, end.z]
+        }
+    }
+
+    fn apply_flash_detonation<G: GameDll>(&mut self, server: &Server<G>, pos: [f32; 3], now: f64) {
+        let max_clients = server.config().max_clients;
+        let flash_pos = glam::Vec3::from_array(pos);
+        for slot in 0..max_clients {
+            let Some((_, edict)) = server.edicts().by_index(u16::from(slot) + 1) else {
+                continue;
+            };
+            let v = &edict.vars;
+            if v.deadflag != 0 || v.health <= 0.0 {
+                continue;
+            }
+            let eye = v.origin + glam::Vec3::new(0.0, 0.0, 17.0);
+            let to_flash = flash_pos - eye;
+            let dist = to_flash.length();
+            if dist > 1500.0 {
+                continue;
+            }
+            if let Some(ref coll) = self.world_collision {
+                let tr = coll.trace_world(flash_pos, eye, Hull::Point);
+                if tr.fraction < 0.99 {
+                    continue;
+                }
+            }
+            let falloff: f32 = (1.0 - dist / 1500.0).clamp(0.15, 1.0);
+            let yaw = v.v_angle.y.to_radians();
+            let fwd = glam::Vec3::new(yaw.cos(), yaw.sin(), 0.0);
+            let dir_xy = to_flash.with_z(0.0).normalize_or_zero();
+            let facing: f32 = if fwd.dot(dir_xy) > 0.25 { 1.0 } else { 0.45 };
+            let alpha = (255.0_f32 * falloff * facing).round().clamp(30.0, 255.0) as u8;
+            let dur = 1.8 + 2.4 * f64::from(falloff * facing);
+            let idx = usize::from(slot);
+            if alpha >= self.flashed_alpha[idx] {
+                self.flashed_alpha[idx] = alpha;
+                self.flashed_until[idx] = now + dur;
+            }
         }
     }
 
     fn step_from_server<G: GameDll>(&mut self, server: &mut Server<G>, now: f64) {
+        self.lobbies.expire_stale(now);
         self.sync_players_from_server(server);
+        let max_clients = server.config().max_clients;
+        let mut deathmsgs_seen: Vec<(u8, u8)> = Vec::new();
+        let mut bomb_planted_seen = false;
+
+        if self.replays_enabled {
+            let pkts = server.take_replay_svc_packets();
+            for pkt in pkts {
+                self.replays.record_svc_packet(now, false, &pkt);
+                let (msgs, _) = parse_svc_stream_partial(&pkt, &mut self.svc_ctx);
+                for msg in msgs {
+                    match msg {
+                        SvcMessage::UserMsg { decoded, .. } => match decoded {
+                            CsUserMsg::TeamInfo {
+                                player_id,
+                                team_name,
+                            } if player_id > 0 => {
+                                let slot0 = player_id - 1;
+                                let team = match team_name.as_str() {
+                                    "CT" => TeamSide::CounterTerrorist,
+                                    "TERRORIST" => TeamSide::Terrorist,
+                                    "SPECTATOR" => TeamSide::Spectator,
+                                    _ => TeamSide::Unassigned,
+                                };
+                                if let Some(entry) = self.players.get_mut(&slot0) {
+                                    entry.team = team;
+                                    let tid = match team {
+                                        TeamSide::Terrorist => 1,
+                                        TeamSide::CounterTerrorist => 2,
+                                        TeamSide::Spectator => 3,
+                                        TeamSide::Unassigned => 0,
+                                    };
+                                    self.replays.set_timeline_player(
+                                        player_id,
+                                        &entry.name,
+                                        tid,
+                                        entry.is_bot,
+                                    );
+                                }
+                            }
+                            CsUserMsg::DeathMsg {
+                                killer_id,
+                                victim_id,
+                                headshot,
+                                weapon,
+                            } => {
+                                deathmsgs_seen.push((killer_id, victim_id));
+                                let killer = (killer_id > 0).then_some(killer_id);
+                                self.replays.record_timeline_kill(
+                                    now,
+                                    killer,
+                                    victim_id,
+                                    &weapon,
+                                    headshot,
+                                );
+                            }
+                            CsUserMsg::BombDrop { origin, planted } => {
+                                let pos = [origin.x, origin.y, origin.z];
+                                self.last_bomb_pos = pos;
+                                let state = if planted {
+                                    bomb_planted_seen = true;
+                                    TimelineBombState::Planted
+                                } else {
+                                    TimelineBombState::Dropped
+                                };
+                                self.replays.record_timeline_bomb(now, state, pos);
+                            }
+                            CsUserMsg::BombPickup => {
+                                self.replays.record_timeline_bomb(
+                                    now,
+                                    TimelineBombState::Pickup,
+                                    self.last_bomb_pos,
+                                );
+                            }
+                            _ => {}
+                        },
+                        SvcMessage::PacketEntities(pe) => {
+                            let player_schema = self.svc_ctx.deltas.get("entity_state_player_t");
+                            for (&ent_num, (_, rec)) in &pe.entities {
+                                if ent_num >= 1 && ent_num <= u16::from(max_clients) {
+                                    let effects = player_schema
+                                        .map_or(0, |s| rec.get_i32(s, "effects"));
+                                    if (effects & 2) != 0 {
+                                        let slot = (ent_num - 1) as usize;
+                                        if slot < 32
+                                            && now - self.last_shot_at[slot] >= 0.04
+                                            && let Some((_, edict)) =
+                                                server.edicts().by_index(ent_num)
+                                        {
+                                            let v = &edict.vars;
+                                            let wid = self
+                                                .p_model_weapons
+                                                .get(&v.weaponmodel)
+                                                .copied()
+                                                .unwrap_or(0);
+                                            let eye = [v.origin.x, v.origin.y, v.origin.z + 17.0];
+                                            let to = self.trace_shot_end(eye, v.v_angle);
+                                            self.last_shot_at[slot] = now;
+                                            self.replays.record_timeline_shot(
+                                                now,
+                                                ent_num as u8,
+                                                eye,
+                                                to,
+                                                wid,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
 
         for ev in server.take_stat_events() {
             match ev {
@@ -494,6 +838,15 @@ impl Phase13Runtime {
                     self.begin_round_recording(server, now);
                 }
                 GameStatEvent::RoundEnd { winner, reason } => {
+                    if self.replays_enabled
+                        && (reason.contains("Bombed") || reason.contains("Target_Bombed"))
+                    {
+                        self.replays.record_timeline_bomb(
+                            now,
+                            TimelineBombState::Exploded,
+                            self.last_bomb_pos,
+                        );
+                    }
                     let w = match winner {
                         1 => RoundWinner::Terrorist,
                         2 => RoundWinner::CounterTerrorist,
@@ -520,6 +873,33 @@ impl Phase13Runtime {
                     let att = attacker_slot.map(|s| format!("slot:{s}"));
                     let vic = format!("slot:{victim_slot}");
                     self.stats.record_damage(att.as_deref(), &vic, damage);
+                    if self.replays_enabled
+                        && let Some(a_slot) = attacker_slot
+                        && usize::from(a_slot) < 32
+                        && now - self.last_shot_at[usize::from(a_slot)] >= 0.04
+                        && let Some((_, att_ed)) = server.edicts().by_index(u16::from(a_slot) + 1)
+                        && let Some((_, vic_ed)) =
+                            server.edicts().by_index(u16::from(victim_slot) + 1)
+                    {
+                        let wid = self
+                            .p_model_weapons
+                            .get(&att_ed.vars.weaponmodel)
+                            .copied()
+                            .unwrap_or(0);
+                        let from = [
+                            att_ed.vars.origin.x,
+                            att_ed.vars.origin.y,
+                            att_ed.vars.origin.z + 17.0,
+                        ];
+                        let to = [
+                            vic_ed.vars.origin.x,
+                            vic_ed.vars.origin.y,
+                            vic_ed.vars.origin.z + 12.0,
+                        ];
+                        self.last_shot_at[usize::from(a_slot)] = now;
+                        self.replays
+                            .record_timeline_shot(now, a_slot + 1, from, to, wid);
+                    }
                 }
                 GameStatEvent::Kill {
                     killer_slot,
@@ -539,6 +919,19 @@ impl Phase13Runtime {
                             k.frags += 1;
                         }
                     }
+                    if self.replays_enabled {
+                        let k_id = killer_slot.map_or(0, |s| s + 1);
+                        let v_id = victim_slot + 1;
+                        if !deathmsgs_seen.contains(&(k_id, v_id)) {
+                            self.replays.record_timeline_kill(
+                                now,
+                                killer_slot.map(|s| s + 1),
+                                v_id,
+                                "weapon",
+                                headshot,
+                            );
+                        }
+                    }
                     let killer = killer_slot.map(|s| format!("slot:{s}"));
                     let victim = format!("slot:{victim_slot}");
                     self.stats.record_kill(
@@ -551,9 +944,30 @@ impl Phase13Runtime {
                 }
                 GameStatEvent::BombPlant { slot } => {
                     self.stats.record_bomb_plant(&format!("slot:{slot}"));
+                    if self.replays_enabled && !bomb_planted_seen {
+                        let pos = server
+                            .edicts()
+                            .by_index(u16::from(slot) + 1)
+                            .map_or(self.last_bomb_pos, |(_, e)| {
+                                [e.vars.origin.x, e.vars.origin.y, e.vars.origin.z]
+                            });
+                        self.last_bomb_pos = pos;
+                        self.replays
+                            .record_timeline_bomb(now, TimelineBombState::Planted, pos);
+                    }
                 }
                 GameStatEvent::BombDefuse { slot } => {
                     self.stats.record_bomb_defuse(&format!("slot:{slot}"));
+                    if self.replays_enabled {
+                        let pos = server
+                            .edicts()
+                            .by_index(u16::from(slot) + 1)
+                            .map_or(self.last_bomb_pos, |(_, e)| {
+                                [e.vars.origin.x, e.vars.origin.y, e.vars.origin.z]
+                            });
+                        self.replays
+                            .record_timeline_bomb(now, TimelineBombState::Defused, pos);
+                    }
                 }
                 GameStatEvent::HostageRescue { slot } => {
                     self.stats.record_hostage_rescue(&format!("slot:{slot}"));
@@ -561,10 +975,132 @@ impl Phase13Runtime {
             }
         }
 
-        if self.replays_enabled {
-            for pkt in server.take_replay_svc_packets() {
-                self.replays.record_svc_packet(now, false, &pkt);
+        if self.replays_enabled && self.replays.is_recording() {
+            // Track active grenades and planted C4 edicts.
+            let mut seen_grenades: Vec<EdictId> = Vec::new();
+            for (eid, edict) in server
+                .edicts()
+                .iter_live_from(usize::from(max_clients) + 1)
+            {
+                if edict.vars.classname != "grenade" {
+                    continue;
+                }
+                let pos = [
+                    edict.vars.origin.x,
+                    edict.vars.origin.y,
+                    edict.vars.origin.z,
+                ];
+                if edict.vars.model.to_ascii_lowercase().contains("w_c4") {
+                    self.last_bomb_pos = pos;
+                    continue;
+                }
+                let Some(kind) = grenade_kind_from_model(&edict.vars.model) else {
+                    continue;
+                };
+                seen_grenades.push(eid);
+                let nodraw = (edict.vars.effects & cs_engine::consts::EF_NODRAW) != 0;
+                if let Some((gid, _, last_pos, detonated)) = self.active_grenades.get_mut(&eid) {
+                    *last_pos = pos;
+                    self.replays.record_timeline_grenade_pos(now, *gid, kind, pos);
+                    if kind == TimelineGrenadeKind::Smoke && nodraw && !*detonated {
+                        *detonated = true;
+                        self.replays.detonate_timeline_grenade(now, *gid, Some(pos));
+                    }
+                } else {
+                    let gid = self.next_grenade_key;
+                    self.next_grenade_key = self.next_grenade_key.saturating_add(1);
+                    self.replays.record_timeline_grenade_pos(now, gid, kind, pos);
+                    self.active_grenades
+                        .insert(eid, (gid, kind, pos, false));
+                }
             }
+
+            let removed_grenades: Vec<EdictId> = self
+                .active_grenades
+                .keys()
+                .copied()
+                .filter(|eid| !seen_grenades.contains(eid))
+                .collect();
+            let mut flash_detonations: Vec<[f32; 3]> = Vec::new();
+            for eid in removed_grenades {
+                if let Some((gid, kind, last_pos, detonated)) = self.active_grenades.remove(&eid)
+                    && !detonated
+                {
+                    self.replays
+                        .detonate_timeline_grenade(now, gid, Some(last_pos));
+                    if kind == TimelineGrenadeKind::Flash {
+                        flash_detonations.push(last_pos);
+                    }
+                }
+            }
+            for fpos in flash_detonations {
+                self.apply_flash_detonation(server, fpos, now);
+            }
+
+            // Detect per-frame player firearm shots via animtime/button transition and sample at 10 Hz.
+            let mut samples = Vec::new();
+            for info in server.client_infos() {
+                let slot_idx = usize::from(info.slot);
+                let Some((_, edict)) = server.edicts().by_index(u16::from(info.slot) + 1) else {
+                    continue;
+                };
+                let v = &edict.vars;
+                let alive = v.deadflag == 0 && v.health > 0.0;
+                let weapon_id = self
+                    .p_model_weapons
+                    .get(&v.weaponmodel)
+                    .copied()
+                    .unwrap_or(0);
+                if alive
+                    && slot_idx < 32
+                    && is_firearm_weapon_id(weapon_id)
+                    && (v.button & 1 != 0 || v.oldbuttons & 1 != 0)
+                    && (v.animtime - self.prev_animtime[slot_idx]).abs() > 1e-4
+                    && now - self.last_shot_at[slot_idx] >= 0.04
+                {
+                    let eye = [v.origin.x, v.origin.y, v.origin.z + 17.0];
+                    let to = self.trace_shot_end(eye, v.v_angle);
+                    self.last_shot_at[slot_idx] = now;
+                    self.replays
+                        .record_timeline_shot(now, info.slot + 1, eye, to, weapon_id);
+                }
+                if slot_idx < 32 {
+                    self.prev_animtime[slot_idx] = v.animtime;
+                    if now >= self.flashed_until[slot_idx] {
+                        self.flashed_alpha[slot_idx] = 0;
+                    }
+                }
+                let team = self.players.get(&info.slot).map_or(0, |m| match m.team {
+                    TeamSide::Terrorist => 1,
+                    TeamSide::CounterTerrorist => 2,
+                    TeamSide::Spectator => 3,
+                    TeamSide::Unassigned => 0,
+                });
+                let has_c4 = v.body == 1 || weapon_id == 6;
+                let flashed_alpha = if slot_idx < 32 && alive {
+                    self.flashed_alpha[slot_idx]
+                } else {
+                    0
+                };
+                samples.push(TimelinePlayerSample {
+                    slot: info.slot + 1,
+                    team,
+                    alive,
+                    hp: if alive { v.health.round() as i32 } else { 0 },
+                    x: v.origin.x,
+                    y: v.origin.y,
+                    z: v.origin.z,
+                    yaw_deg: if v.v_angle != glam::Vec3::ZERO {
+                        v.v_angle.y
+                    } else {
+                        v.angles.y
+                    },
+                    active_weapon_id: weapon_id,
+                    has_c4,
+                    flashed_alpha,
+                });
+            }
+            self.replays.sample_timeline_if_due(now, &samples);
         }
     }
 
@@ -596,6 +1132,11 @@ impl Phase13Runtime {
 
 enum PendingHttpRequest {
     Admin {
+        head: HttpRequest,
+        body: Vec<u8>,
+        reply: Sender<AdminHttpResponse>,
+    },
+    Lobby {
         head: HttpRequest,
         body: Vec<u8>,
         reply: Sender<AdminHttpResponse>,
@@ -687,6 +1228,25 @@ impl<G: GameDll> AdminBackend for ServerAdminBridge<'_, G> {
         self.runtime.replays.get_demo(id).map(|b| b.to_vec())
     }
 
+    fn replay_timeline_json(&self, id: &str) -> Option<String> {
+        self.runtime
+            .replays
+            .get_timeline_json(id)
+            .map(ToString::to_string)
+    }
+
+    fn map_overview_json(&self, map: &str) -> Option<String> {
+        self.runtime
+            .resolve_map_overview(map)
+            .map(|b| b.to_json())
+    }
+
+    fn map_overview_png(&self, map: &str) -> Option<Vec<u8>> {
+        self.runtime
+            .resolve_map_overview(map)
+            .and_then(|b| b.png_bytes)
+    }
+
     fn execute_rcon(&mut self, command: &str) -> Result<String, String> {
         if self.runtime.replays_enabled {
             self.runtime.replays.record_console_command(self.now, command);
@@ -696,8 +1256,10 @@ impl<G: GameDll> AdminBackend for ServerAdminBridge<'_, G> {
             ConsoleOutcome::ChangeLevel(name) => {
                 match (self.load_map)(&name) {
                     Ok(map) => {
+                        let coll = map.collision_arc();
                         self.server.change_map(map);
                         self.runtime.stats.reset_match(&name);
+                        self.runtime.refresh_map_overview(coll, &name);
                         self.runtime.begin_round_recording(self.server, self.now);
                         Ok(format!("changing level to {name}\n"))
                     }
@@ -790,6 +1352,59 @@ fn make_http_hook(
                         "{\"error\":\"server timeout\"}",
                         false,
                     );
+                }
+            }
+            return true;
+        }
+
+        if is_lobby_path(&req.path) {
+            let body = match read_http_body(req, leftover, stream, MAX_API_BODY_BYTES) {
+                Ok(b) => b,
+                Err(crate::admin_http::HttpReadError::PayloadTooLarge) => {
+                    let _ = AdminHttpResponse::cors_json_error(
+                        413,
+                        "Payload Too Large",
+                        "request body too large",
+                    )
+                    .write_to(stream, false);
+                    return true;
+                }
+                Err(_) => {
+                    let _ = AdminHttpResponse::cors_json_error(
+                        400,
+                        "Bad Request",
+                        "invalid HTTP request",
+                    )
+                    .write_to(stream, false);
+                    return true;
+                }
+            };
+            let (reply_tx, reply_rx) = mpsc::channel();
+            let pending = PendingHttpRequest::Lobby {
+                head: req.clone(),
+                body,
+                reply: reply_tx,
+            };
+            if tx.send(pending).is_err() {
+                let _ = AdminHttpResponse::cors_json_error(
+                    503,
+                    "Service Unavailable",
+                    "server unavailable",
+                )
+                .write_to(stream, false);
+                return true;
+            }
+            match reply_rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(resp) => {
+                    let _ = resp.write_to(stream, req.method == "HEAD");
+                }
+                Err(_) => {
+                    let _ = AdminHttpResponse::cors_json_error(
+                        503,
+                        "Service Unavailable",
+                        "server timeout",
+                    )
+                    .write_to(stream, false);
                 }
             }
             return true;
@@ -899,6 +1514,11 @@ fn process_pending_http<G: GameDll>(
                 let resp = AdminRouter::handle(&view, &mut bridge);
                 let _ = reply.send(resp);
             }
+            PendingHttpRequest::Lobby { head, body, reply } => {
+                let view = AdminHttpRequest::from_http_request(&head, &body);
+                let resp = handle_lobby_request(&view, &mut runtime.lobbies, now);
+                let _ = reply.send(resp);
+            }
         }
     }
     quit_requested
@@ -961,12 +1581,14 @@ fn serve<G: GameDll>(
         ServerTransport::Udp(udp)
     };
 
+    let initial_collision = map.collision_arc();
     let cfg = ServerConfig {
         hostname: opts.hostname.clone(),
         max_clients: opts.max_players,
         ..ServerConfig::default()
     };
     let mut server = new_server(cfg, map, game, vfs);
+    server.set_voice_bridge(Box::new(crate::voice_bridge::ServerVoiceBridge::new()));
     if let Some(ticrate) = opts.sys_ticrate {
         server.set_cvar("sys_ticrate", &ticrate.to_string());
     }
@@ -1000,6 +1622,7 @@ fn serve<G: GameDll>(
         vfs.list_maps(),
         static_dir.as_deref(),
     );
+    runtime.set_map_context(vfs.clone(), initial_collision, &map_name);
     runtime.begin_round_recording(&mut server, start_now);
 
     let mut next_frame = start_now;
@@ -1028,9 +1651,16 @@ fn serve<G: GameDll>(
         // A change leaves the console lines to the next frame, as a console `changelevel` does.
         let changed = match server.take_pending_change_level() {
             Some(name) => {
-                change_level(&mut load_map, &mut server, &name);
-                runtime.stats.reset_match(&name);
-                runtime.begin_round_recording(&mut server, now);
+                if let Ok(next_map) = load_map(&name) {
+                    let next_coll = next_map.collision_arc();
+                    println!("changing level to {name}");
+                    server.change_map(next_map);
+                    runtime.stats.reset_match(&name);
+                    runtime.refresh_map_overview(next_coll, &name);
+                    runtime.begin_round_recording(&mut server, now);
+                } else {
+                    change_level(&mut load_map, &mut server, &name);
+                }
                 true
             }
             None => false,
@@ -1527,7 +2157,28 @@ mod tests {
             vec!["de_dust2".into(), "de_inferno".into()],
             None,
         );
+        runtime.set_map_context(
+            Vfs::from_memory([]),
+            None,
+            "de_dust2",
+        );
         runtime.begin_round_recording(&mut server, 0.0);
+        runtime.replays.sample_timeline_if_due(
+            0.1,
+            &[TimelinePlayerSample {
+                slot: 1,
+                team: 2,
+                alive: true,
+                hp: 100,
+                x: -223.0,
+                y: 1097.0,
+                z: -192.0,
+                yaw_deg: 90.0,
+                active_weapon_id: 22,
+                has_c4: false,
+                flashed_alpha: 0,
+            }],
+        );
         runtime.players.insert(
             0,
             TrackedPlayerMeta {
@@ -1652,6 +2303,61 @@ mod tests {
         let dem_bytes = &replay_raw[split + 4..];
         let parsed = cs_proto48::demo::parse_demo(dem_bytes).expect("valid downloaded .dem");
         assert_eq!(parsed.header.map_name, "de_dust2");
+
+        let timeline_ok = String::from_utf8(tcp_http_request(
+            http_addr,
+            &format!(
+                "GET /api/replays/{}/timeline HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer op-secret\r\n\r\n",
+                meta.id
+            ),
+        ))
+        .unwrap();
+        assert!(timeline_ok.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(timeline_ok.contains("\"sample_rate_hz\":10"));
+
+        let overview_ok = String::from_utf8(tcp_http_request(
+            http_addr,
+            "GET /api/map-overview/de_dust2 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer op-secret\r\n\r\n",
+        ))
+        .unwrap();
+        assert!(overview_ok.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(overview_ok.contains("\"map\":\"de_dust2\""));
+
+        // Public CORS WebRTC lobby signaling routes (/lobbies, /lobbies/<room>, /lobbies/<room>/signal).
+        let lobby_body = r#"{"room":"p2p-1","host":"browser-p2p","port":443,"map":"de_dust2","players":1,"max_players":10,"mode":"webrtc"}"#;
+        let lobby_req = format!(
+            "POST /lobbies HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            lobby_body.len(),
+            lobby_body
+        );
+        let lobby_resp = String::from_utf8(tcp_http_request(http_addr, &lobby_req)).unwrap();
+        assert!(lobby_resp.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(lobby_resp.contains("Access-Control-Allow-Origin: *\r\n"));
+        assert!(lobby_resp.contains("\"room\":\"p2p-1\""));
+
+        let sig_body = r#"{"from":"host","to":"guest1","kind":"offer","payload":"v=0"}"#;
+        let sig_req = format!(
+            "POST /lobbies/p2p-1/signal HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            sig_body.len(),
+            sig_body
+        );
+        let sig_resp = String::from_utf8(tcp_http_request(http_addr, &sig_req)).unwrap();
+        assert!(sig_resp.starts_with("HTTP/1.1 200 OK\r\n"));
+
+        let poll_resp = String::from_utf8(tcp_http_request(
+            http_addr,
+            "GET /lobbies/p2p-1/signal?since=0&to=guest1 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        ))
+        .unwrap();
+        assert!(poll_resp.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(poll_resp.contains("\"kind\":\"offer\""));
+
+        let del_resp = String::from_utf8(tcp_http_request(
+            http_addr,
+            "DELETE /lobbies/p2p-1 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        ))
+        .unwrap();
+        assert!(del_resp.starts_with("HTTP/1.1 200 OK\r\n"));
 
         running.store(false, Ordering::Relaxed);
         handle.join().unwrap();

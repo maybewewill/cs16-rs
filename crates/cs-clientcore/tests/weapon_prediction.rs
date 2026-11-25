@@ -451,3 +451,112 @@ fn shotgun_random_recoil_m3_cone_and_sniper_zoom_parity() {
     assert_eq!(awp.weapon.fov, 90.0);
     assert_eq!(awp.maxspeed, 150.0);
 }
+
+#[test]
+fn awp_knife_awp_quick_switch_resets_zoom_enforces_deploy_delay() {
+    let mut state = LocalState::default();
+    state.weapon.weapon_id = weapon_id::AWP;
+    state.weapon.fov = DEFAULT_FOV;
+    state.maxspeed = 210.0;
+    state.weapon.weapons.insert(
+        weapon_id::AWP as u8,
+        GoldSrcWeaponData {
+            m_i_id: weapon_id::AWP,
+            m_i_clip: 10,
+            ..Default::default()
+        },
+    );
+    state.weapon.weapons.insert(
+        weapon_id::KNIFE as u8,
+        GoldSrcWeaponData {
+            m_i_id: weapon_id::KNIFE,
+            m_i_clip: -1,
+            ..Default::default()
+        },
+    );
+    let mut extras = BTreeMap::new();
+
+    // 1. Zoom AWP to 40 deg and fire: `resume_zoom` is armed on AWP.
+    step(&mut state, &mut extras, IN_ATTACK2, 0, 1, 10, true, true);
+    assert_eq!(state.weapon.fov, 40.0);
+    let (ev, _) = step(&mut state, &mut extras, IN_ATTACK, 0, 2, 10, true, true);
+    assert_eq!(ev.len(), 1);
+    assert!(extras[&weapon_id::AWP].resume_zoom);
+
+    // 2. Quick-switch AWP -> Knife (`weaponselect = KNIFE`):
+    //    Cancels zoom FOV immediately, clears resume_zoom, sets knife deploy anim (3) and DefaultDeploy 0.75s.
+    let mut events = Vec::new();
+    let mut sounds = Vec::new();
+    let switch_knife = GoldSrcUserCmd {
+        msec: 10,
+        weaponselect: weapon_id::KNIFE as u8,
+        ..Default::default()
+    };
+    predict_weapon_step(
+        &mut state,
+        &mut extras,
+        &switch_knife,
+        0,
+        3,
+        true,
+        false,
+        true,
+        true,
+        &mut events,
+        &mut sounds,
+    );
+    assert_eq!(state.weapon.weapon_id, weapon_id::KNIFE);
+    assert_eq!(state.weapon.fov, DEFAULT_FOV);
+    assert_eq!(state.weapon.weaponanim, 3);
+    assert!((state.weapon.next_attack - 0.75).abs() < 1e-5);
+    assert!(!extras[&weapon_id::AWP].resume_zoom);
+    state.weapon.post_run_cmd(10);
+
+    // Attacking during the 0.75s deploy lock must NOT fire early.
+    for _ in 0..50 {
+        let (early_ev, _) = step(&mut state, &mut extras, IN_ATTACK, 0, 4, 10, true, true);
+        assert!(early_ev.is_empty(), "knife fired before 0.75s deploy elapsed");
+    }
+
+    // 3. Quick-switch Knife -> AWP (`weaponselect = AWP`):
+    //    Sets AWP deploy anim (5), enforces 1.45s deploy lock, keeps FOV = 90 (never resumes stale zoom!).
+    let switch_awp = GoldSrcUserCmd {
+        msec: 10,
+        weaponselect: weapon_id::AWP as u8,
+        ..Default::default()
+    };
+    predict_weapon_step(
+        &mut state,
+        &mut extras,
+        &switch_awp,
+        0,
+        5,
+        true,
+        false,
+        true,
+        true,
+        &mut events,
+        &mut sounds,
+    );
+    assert_eq!(state.weapon.weapon_id, weapon_id::AWP);
+    assert_eq!(state.weapon.fov, DEFAULT_FOV);
+    assert_eq!(state.weapon.weaponanim, 5);
+    assert!((state.weapon.next_attack - 1.45).abs() < 1e-5);
+    state.weapon.post_run_cmd(10);
+
+    // Hold IN_ATTACK for 1.40s: AWP must NOT fire before 1.45s deploy completes, and must NOT re-zoom.
+    for _ in 0..140 {
+        let (early_ev, _) = step(&mut state, &mut extras, IN_ATTACK, 0, 6, 10, true, true);
+        assert!(early_ev.is_empty(), "AWP fired before 1.45s deploy finished");
+        assert_eq!(state.weapon.fov, DEFAULT_FOV);
+    }
+    assert_eq!(state.weapon.weapons[&(weapon_id::AWP as u8)].m_i_clip, 9);
+
+    // After the remaining 50ms, AWP can finally fire.
+    for _ in 0..6 {
+        let _ = step(&mut state, &mut extras, 0, 0, 7, 10, true, true);
+    }
+    let (shot_ev, _) = step(&mut state, &mut extras, IN_ATTACK, 0, 8, 10, true, true);
+    assert_eq!(shot_ev.len(), 1);
+    assert_eq!(state.weapon.weapons[&(weapon_id::AWP as u8)].m_i_clip, 8);
+}

@@ -438,6 +438,10 @@ impl TitlesTable {
         self.entries
             .get(&name.trim().trim_start_matches('#').to_ascii_lowercase())
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &TitleEntry)> {
+        self.entries.iter()
+    }
 }
 
 /// Entry from `resource/GameMenu.res`.

@@ -225,6 +225,42 @@ pub fn data_dir(app_name: &str) -> Option<PathBuf> {
     data_dir_with(&PlatformEnv::from_host(), app_name)
 }
 
+/// Returns the canonical cache filename `<map>_<bsp_crc32>.nav` for an auto-generated `.nav`
+/// mesh, rejecting empty or traversal-unsafe map names.
+pub fn nav_cache_filename(map_name: &str, bsp_crc32: u32) -> Option<String> {
+    let clean_map = valid_app_name(map_name)?;
+    Some(format!("{clean_map}_{bsp_crc32:08x}.nav"))
+}
+
+/// Returns `<xdg_data_dir>/nav_cache` for `app_name` on the current host (`None` on wasm32).
+pub fn nav_cache_dir(app_name: &str) -> Option<PathBuf> {
+    nav_cache_dir_with(&PlatformEnv::from_host(), app_name)
+}
+
+/// Deterministic [`nav_cache_dir`] using an explicit [`PlatformEnv`].
+pub fn nav_cache_dir_with(env: &PlatformEnv, app_name: &str) -> Option<PathBuf> {
+    let base = data_dir_with(env, app_name)?;
+    Some(join_parts(env.effective_platform(), &base, &["nav_cache"]))
+}
+
+/// Returns `<xdg_data_dir>/nav_cache/<map>_<bsp_crc32>.nav` on the current host (`None` on
+/// wasm32 or invalid names).
+pub fn nav_cache_path(app_name: &str, map_name: &str, bsp_crc32: u32) -> Option<PathBuf> {
+    nav_cache_path_with(&PlatformEnv::from_host(), app_name, map_name, bsp_crc32)
+}
+
+/// Deterministic [`nav_cache_path`] using an explicit [`PlatformEnv`].
+pub fn nav_cache_path_with(
+    env: &PlatformEnv,
+    app_name: &str,
+    map_name: &str,
+    bsp_crc32: u32,
+) -> Option<PathBuf> {
+    let dir = nav_cache_dir_with(env, app_name)?;
+    let filename = nav_cache_filename(map_name, bsp_crc32)?;
+    Some(join_parts(env.effective_platform(), &dir, &[&filename]))
+}
+
 /// Resolves the user data directory for `app_name` using an explicit [`PlatformEnv`].
 pub fn data_dir_with(env: &PlatformEnv, app_name: &str) -> Option<PathBuf> {
     let app = valid_app_name(app_name)?;
@@ -523,7 +559,24 @@ mod tests {
         };
         assert_eq!(config_dir_with(&wasm, "cs16-rs"), None);
         assert_eq!(data_dir_with(&wasm, "cs16-rs"), None);
+        assert_eq!(nav_cache_path_with(&wasm, "cs16-rs", "fy_pool_day", 0x1234abcd), None);
         assert_eq!(config_dir_with(&linux_default, "../escape"), None);
+
+        assert_eq!(
+            nav_cache_filename("fy_pool_day", 0x0a1b2c3d).as_deref(),
+            Some("fy_pool_day_0a1b2c3d.nav")
+        );
+        assert_eq!(nav_cache_filename("../evil", 1), None);
+        assert_eq!(
+            nav_cache_path_with(&linux_xdg, "cs16-rs", "fy_pool_day", 0x0a1b2c3d),
+            Some(PathBuf::from("/mnt/data/cs16-rs/nav_cache/fy_pool_day_0a1b2c3d.nav"))
+        );
+        assert_eq!(
+            nav_cache_path_with(&windows, "cs16-rs", "awp_india", 0xdeadbeef),
+            Some(PathBuf::from(
+                r"C:\Users\Alice\AppData\Local\cs16-rs\nav_cache\awp_india_deadbeef.nav"
+            ))
+        );
     }
 
     #[test]

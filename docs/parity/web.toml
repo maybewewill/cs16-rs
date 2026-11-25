@@ -83,8 +83,8 @@ evidence = "web/manifest.webmanifest, web/sw.js, and cs-web LocalGame offline bo
 
 [[item]]
 id = "web_listen_server_webrtc_stretch"
-status = "missing"
-evidence = "Phase 4 (stretch): in-browser listen server via WebRTC DataChannels (cs-master /lobbies and /lobbies/<room>/signal signaling implemented and tested; in-browser WebRTC DataChannel transport not yet wired in cs-web)"
+status = "tested"
+evidence = "crates/cs-transport/src/channel.rs::multi_peer_channel_routes_web_peers_and_enforces_bounds; crates/cs-local/src/lib.rs::local_game_accepts_external_web_peer_alongside_loopback_host; crates/cs-web/src/state.rs::p2p_host_exchanges_signon_movement_and_shots_with_web_peer; crates/cs-server/src/admin_http.rs::lobby_signaling_routes_handle_cors_crud_and_signals; crates/cs-server/src/proto48.rs::admin_http_endpoints_replays_stats_rcon_and_servers_work_over_ws_transport; web/{transport.js,app.js,index.html} WebRtcHostHub/WebRtcGuestTransport over unreliable DataChannel"
 
 [[item]]
 id = "web_invite_links_and_master_lobbies"

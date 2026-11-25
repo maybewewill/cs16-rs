@@ -17,14 +17,24 @@ fn resolve_inline_with_titles(
     loc: Option<&LocalizationTable>,
     titles: Option<&TitlesTable>,
 ) -> String {
-    if let Some(l) = loc {
-        return l.resolve_inline(text, titles);
+    let mut cur = text.to_string();
+    for _ in 0..2 {
+        if !cur.contains('#') {
+            break;
+        }
+        let next = if let Some(l) = loc {
+            l.resolve_inline(&cur, titles)
+        } else if let Some(t) = titles {
+            LocalizationTable::default().resolve_inline(&cur, Some(t))
+        } else {
+            break;
+        };
+        if next == cur {
+            break;
+        }
+        cur = next;
     }
-    if let Some(t) = titles {
-        let dummy = LocalizationTable::default();
-        return dummy.resolve_inline(text, Some(t));
-    }
-    text.to_string()
+    cur
 }
 
 /// The lines of a menu text: `#Token` lines looked up, the colour escapes (`\w` white, `\y`
@@ -432,5 +442,10 @@ mod tests {
             "Select a team"
         );
         assert_eq!(styled[1].spans[0].1, "1. Terrorist Force");
+
+        let nested_titles = TitlesTable::parse("Game_Commencing\n{\n#Cstrike_TitlesTXT_Game_Commencing\n}\n");
+        loc.insert_text("\"Tokens\"\n{\n\"Cstrike_TitlesTXT_Game_Commencing\" \"Game Commencing!\"\n}");
+        let lines = menu_lines_with_titles("#Game_Commencing", Some(&loc), Some(&nested_titles));
+        assert_eq!(lines, ["Game Commencing!"]);
     }
 }

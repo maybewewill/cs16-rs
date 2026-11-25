@@ -27,7 +27,7 @@ use cs_assets::mdl::{RawBone, RawSequence, STUDIO_TRACE_HITBOX, StudioPoseData};
 use glam::Vec3;
 
 use crate::collision::BoxHull;
-use crate::edict::EntVars;
+use crate::edict::{EdictId, EntVars};
 use crate::game::EngineApi;
 use crate::world::consts::FL_CLIENT;
 
@@ -706,6 +706,64 @@ impl EngineApi<'_> {
     /// `LookupActivity`, `GetSequenceInfo`).
     pub fn studio_model(&self, index: u16) -> Option<Arc<StudioPoseData>> {
         self.precache.studio_model(index).cloned()
+    }
+
+    /// World-space oriented bounding boxes `(hitgroup, [8 corners])` for every hitbox of `id`'s
+    /// posed studio model (`sv_showhitboxes`). Returns `None` if `id` is invalid or has no posed
+    /// studio model with hitboxes.
+    pub fn studio_hitbox_boxes(&self, id: EdictId) -> Option<Vec<(i32, [Vec3; 8])>> {
+        let v = self.ent(id)?;
+        let model = self.precache.studio_model(v.modelindex)?;
+        if model.hitboxes.is_empty() {
+            return None;
+        }
+        let is_client = v.flags & FL_CLIENT != 0;
+        let skip_shield = v.gamestate == 1;
+        let (angles, controller, blending) = if is_client {
+            player_trace_pose(model, v)
+        } else {
+            (v.angles, v.controller, v.blending)
+        };
+        let angles2 = Vec3::new(-angles.x, angles.y, angles.z);
+        let bones = setup_bones(
+            model,
+            v.frame,
+            i32::from(v.sequence),
+            angles2,
+            v.origin,
+            controller,
+            blending,
+        )?;
+        let xform = |b: &Mat34, p: [f32; 3]| -> Vec3 {
+            Vec3::new(
+                b[0][0] * p[0] + b[0][1] * p[1] + b[0][2] * p[2] + b[0][3],
+                b[1][0] * p[0] + b[1][1] * p[1] + b[1][2] * p[2] + b[1][3],
+                b[2][0] * p[0] + b[2][1] * p[1] + b[2][2] * p[2] + b[2][3],
+            )
+        };
+        let mut out = Vec::with_capacity(model.hitboxes.len());
+        for (i, hb) in model.hitboxes.iter().enumerate() {
+            if skip_shield && i == SHIELD_HITBOX {
+                continue;
+            }
+            let Some(bone) = bones.get(hb.bone) else {
+                continue;
+            };
+            let lo = hb.bbmin;
+            let hi = hb.bbmax;
+            let corners = [
+                xform(bone, [lo[0], lo[1], lo[2]]),
+                xform(bone, [hi[0], lo[1], lo[2]]),
+                xform(bone, [hi[0], hi[1], lo[2]]),
+                xform(bone, [lo[0], hi[1], lo[2]]),
+                xform(bone, [lo[0], lo[1], hi[2]]),
+                xform(bone, [hi[0], lo[1], hi[2]]),
+                xform(bone, [hi[0], hi[1], hi[2]]),
+                xform(bone, [lo[0], hi[1], hi[2]]),
+            ];
+            out.push((hb.group, corners));
+        }
+        Some(out)
     }
 
     /// Bone setups the traces of this call made so far (cache misses). For tests that count

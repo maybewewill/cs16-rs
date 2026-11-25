@@ -120,6 +120,71 @@ pub trait ConfigStorage {
     fn remove(&mut self, key: &str) -> Result<(), String>;
 }
 
+/// Returns the [`ConfigStorage`] key for a cached `.nav` mesh (`nav_cache_<map>_<crc>.nav`).
+pub fn nav_cache_storage_key(map_name: &str, bsp_crc32: u32) -> Option<String> {
+    xdg::nav_cache_filename(map_name, bsp_crc32).map(|file| format!("nav_cache_{file}"))
+}
+
+/// Loads cached `.nav` bytes from a [`ConfigStorage`] backend (used on `wasm32` / tests).
+pub fn load_nav_cache_storage(
+    storage: &dyn ConfigStorage,
+    map_name: &str,
+    bsp_crc32: u32,
+) -> Option<Vec<u8>> {
+    let key = nav_cache_storage_key(map_name, bsp_crc32)?;
+    let hex = storage.load(&key)?;
+    decode_hex(hex.trim())
+}
+
+/// Saves `.nav` bytes into a [`ConfigStorage`] backend keyed by `(map_name, bsp_crc32)`.
+pub fn save_nav_cache_storage(
+    storage: &mut dyn ConfigStorage,
+    map_name: &str,
+    bsp_crc32: u32,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let key = nav_cache_storage_key(map_name, bsp_crc32)
+        .ok_or_else(|| format!("invalid nav_cache map name `{map_name}`"))?;
+    storage.save(&key, &encode_hex(bytes))
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[usize::from(b >> 4)] as char);
+        out.push(HEX[usize::from(b & 0x0f)] as char);
+    }
+    out
+}
+
+fn decode_hex(hex: &str) -> Option<Vec<u8>> {
+    if !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    let raw = hex.as_bytes();
+    let (pairs, remainder) = raw.as_chunks::<2>();
+    if !remainder.is_empty() {
+        return None;
+    }
+    for pair in pairs {
+        let hi = hex_nibble(pair[0])?;
+        let lo = hex_nibble(pair[1])?;
+        out.push((hi << 4) | lo);
+    }
+    Some(out)
+}
+
+const fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
 /// Validates a storage key so native file backends cannot escape their directory.
 fn valid_storage_key(key: &str) -> bool {
     !key.is_empty() && !key.contains(['/', '\\', '\0']) && !key.contains("..")
@@ -279,5 +344,18 @@ mod tests {
             assert!(fs_store.load("config.cfg").is_none());
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    #[test]
+    fn nav_cache_storage_roundtrip() {
+        let mut mem = MemoryStorage::default();
+        let payload = b"\xfe\xed\xfa\xce\x05\x00\x00\x00hello-nav";
+        save_nav_cache_storage(&mut mem, "fy_pool_day", 0x12ab_34cd, payload).unwrap();
+        assert_eq!(
+            load_nav_cache_storage(&mem, "fy_pool_day", 0x12ab_34cd).as_deref(),
+            Some(payload.as_slice())
+        );
+        assert!(load_nav_cache_storage(&mem, "fy_pool_day", 0x9999_9999).is_none());
+        assert!(save_nav_cache_storage(&mut mem, "../bad", 1, payload).is_err());
     }
 }

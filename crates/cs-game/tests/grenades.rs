@@ -1005,3 +1005,15 @@ fn a_grenade_keeps_the_team_of_the_thrower_for_friendly_fire() {
         });
     }
 }
+
+#[test]
+fn mp_infinite_grenades_keeps_grenade_after_throw() {
+    let mut b = arena(Vec3::new(5000.0, 0.0, 0.0));
+    let _ = b.server.console_command("mp_infinite_grenades 1");
+    b.run(|game, eng| {
+        arm(game, eng, WeaponId::HeGrenade, 1);
+        throw(game, eng, WeaponId::HeGrenade);
+        let ix = cs_game::weapons::ammo_index("HEGrenade") as usize;
+        assert_eq!(game.player_ammo(0, ix), Some(1));
+    });
+}

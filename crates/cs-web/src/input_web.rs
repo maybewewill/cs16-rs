@@ -4,7 +4,10 @@
 use std::collections::HashSet;
 
 use cs_client::camera::Camera;
-use cs_client::input::{CmdClock, CmdParams, Held, MoveSpeeds, build_usercmd};
+use cs_client::input::{
+    CmdClock, CmdParams, Held, MoveSpeeds, accumulate_wheel_notches, build_usercmd,
+};
+use cs_cvar::{CVarRegistry, EngineAction};
 use cs_proto48::delta::GoldSrcUserCmd;
 use glam::Vec3;
 
@@ -24,8 +27,14 @@ pub mod pad_bit {
 #[derive(Debug, Clone)]
 pub struct WebInputState {
     pub actions: HashSet<String>,
+    /// Same-frame `+action` impulse latch (`kbutton_t` down-impulse bit) so wheel-scroll
+    /// `+jump`/`-jump` or `+duck`/`-duck` within one frame sets the button bit on the next cmd.
+    pub impulse_actions: HashSet<String>,
     pub mouse1: bool,
     pub mouse2: bool,
+    pub pending_impulse: u8,
+    pub wheel_line_accum: f32,
+    pub wheel_pixel_accum: f32,
     pub gamepad_axes: [f32; 4],
     pub gamepad_mask: u32,
     pub touch_axes: [f32; 2],
@@ -44,8 +53,12 @@ impl WebInputState {
     pub fn new() -> Self {
         Self {
             actions: HashSet::new(),
+            impulse_actions: HashSet::new(),
             mouse1: false,
             mouse2: false,
+            pending_impulse: 0,
+            wheel_line_accum: 0.0,
+            wheel_pixel_accum: 0.0,
             gamepad_axes: [0.0; 4],
             gamepad_mask: 0,
             touch_axes: [0.0; 2],
@@ -72,6 +85,7 @@ impl WebInputState {
         };
         if let Some(action) = held_action {
             if pressed {
+                self.impulse_actions.insert(action.to_string());
                 self.actions.insert(action.to_string());
             } else {
                 self.actions.remove(action);
@@ -104,11 +118,97 @@ impl WebInputState {
         }
     }
 
+    /// Maps a DOM `MouseEvent.button` (`0`=Left, `1`=Middle, `2`=Right, `3`=Back, `4`=Forward)
+    /// to the GoldSrc bind key name (`mouse1..mouse5`).
+    pub fn mouse_button_to_goldsrc(button: u32) -> Option<&'static str> {
+        match button {
+            0 => Some("mouse1"),
+            1 => Some("mouse3"),
+            2 => Some("mouse2"),
+            3 => Some("mouse4"),
+            4 => Some("mouse5"),
+            _ => None,
+        }
+    }
+
     pub fn on_mouse_button(&mut self, button: u32, pressed: bool) {
         match button {
-            0 => self.mouse1 = pressed,
-            2 => self.mouse2 = pressed,
+            0 => {
+                if pressed {
+                    self.impulse_actions.insert("attack".to_string());
+                }
+                self.mouse1 = pressed;
+            }
+            2 => {
+                if pressed {
+                    self.impulse_actions.insert("attack2".to_string());
+                }
+                self.mouse2 = pressed;
+            }
             _ => {}
+        }
+    }
+
+    /// Routes DOM `MouseEvent.button` (`mouse1..mouse5`) through [`CVarRegistry`] key bindings.
+    pub fn on_mouse_button_bound(
+        &mut self,
+        button: u32,
+        pressed: bool,
+        cvars: &mut CVarRegistry,
+    ) {
+        if let Some(key_name) = Self::mouse_button_to_goldsrc(button) {
+            let actions = cvars.handle_key_bind(key_name, pressed);
+            self.apply_engine_actions(actions);
+        }
+    }
+
+    /// Routes DOM `WheelEvent` (`delta_y`, `delta_mode`: `0` = pixels at 120 px/notch, `1` = lines)
+    /// through `mwheelup`/`mwheeldown` bindings with GoldSrc press+release impulse semantics.
+    pub fn on_mouse_wheel(&mut self, delta_y: f32, delta_mode: u32, cvars: &mut CVarRegistry) {
+        // DOM WheelEvent deltaY < 0 means scrolling up (`mwheelup`), > 0 means scrolling down.
+        let up_delta = -delta_y;
+        let notches = match delta_mode {
+            1 => accumulate_wheel_notches(&mut self.wheel_line_accum, up_delta, true),
+            _ => accumulate_wheel_notches(&mut self.wheel_pixel_accum, up_delta, false),
+        };
+        let count = notches.unsigned_abs().min(16);
+        let key_name = if notches >= 0 { "mwheelup" } else { "mwheeldown" };
+        for _ in 0..count {
+            let press = cvars.handle_key_bind(key_name, true);
+            self.apply_engine_actions(press);
+            let release = cvars.handle_key_bind(key_name, false);
+            self.apply_engine_actions(release);
+        }
+    }
+
+    pub fn apply_engine_actions(&mut self, actions: Vec<EngineAction>) {
+        for action in actions {
+            match action {
+                EngineAction::ActionInput { name, pressed } => {
+                    if pressed {
+                        self.impulse_actions.insert(name.clone());
+                        self.actions.insert(name);
+                    } else {
+                        self.actions.remove(&name);
+                    }
+                }
+                EngineAction::InvNext => self.pending_commands.push("invnext".to_string()),
+                EngineAction::InvPrev => self.pending_commands.push("invprev".to_string()),
+                EngineAction::LastInv => self.pending_commands.push("lastinv".to_string()),
+                EngineAction::DropWeapon => self.pending_commands.push("drop".to_string()),
+                EngineAction::SelectSlot(s) => self.pending_commands.push(format!("slot{s}")),
+                EngineAction::Impulse(n) => self.pending_impulse = n,
+                EngineAction::OpenBuyMenu => self.pending_commands.push("buy".to_string()),
+                EngineAction::ChooseTeam => self.pending_commands.push("chooseteam".to_string()),
+                EngineAction::ToggleNightVision => {
+                    self.pending_commands.push("nightvision".to_string())
+                }
+                EngineAction::OpenRadio(g) => self.pending_commands.push(format!("radio{g}")),
+                EngineAction::Forward(tokens) if !tokens.is_empty() => {
+                    self.pending_commands.push(tokens.join(" "));
+                }
+                _ => {}
+            }
         }
     }
 
@@ -179,16 +279,18 @@ impl WebInputState {
 
         let held = Held {
             actions: Some(&combined_actions),
+            impulse_actions: Some(&self.impulse_actions),
             mouse1: self.mouse1 || (mask & pad_bit::FIRE != 0),
             mouse2: self.mouse2 || (mask & pad_bit::ALTFIRE != 0),
         };
         let params = CmdParams {
             msec: self.clock.msec(dt_secs),
             lerp_msec: self.clock.lerp_msec(interp, dt_f32),
-            impulse: 0,
+            impulse: std::mem::take(&mut self.pending_impulse),
         };
         let angles = Vec3::new(camera.pitch_deg, camera.yaw_deg, 0.0);
         let mut cmd = build_usercmd(&held, angles, params, speeds);
+        self.impulse_actions.clear();
 
         // Apply analog stick movement when digital keys did not already saturate an axis.
         let analog_side = (self.gamepad_axes[0] + self.touch_axes[0]).clamp(-1.0, 1.0);
@@ -262,5 +364,50 @@ mod tests {
         assert_eq!(cmd.sidemove, 300.0);
         assert_eq!(cmd.forwardmove, 200.0);
         assert_ne!(cmd.buttons & button::RELOAD, 0);
+    }
+
+    #[test]
+    fn wheel_bhop_impulse_latches_for_one_frame_and_defaults_cycle_inv() {
+        let mut cvars = CVarRegistry::new_with_defaults();
+        let mut input = WebInputState::new();
+        let mut cam = Camera::default();
+
+        // Default mwheelup -> invprev, mwheeldown -> invnext (DOM deltaY < 0 is wheel up).
+        input.on_mouse_wheel(-120.0, 0, &mut cvars);
+        input.on_mouse_wheel(120.0, 0, &mut cvars);
+        assert_eq!(input.pending_commands, vec!["invprev", "invnext"]);
+        input.pending_commands.clear();
+
+        // Bind mwheelup -> +jump and fire one wheel-up notch (line mode deltaY = -1.0).
+        cvars.bind("mwheelup", "+jump");
+        input.on_mouse_wheel(-1.0, 1, &mut cvars);
+        assert!(!input.actions.contains("jump"), "key-up already ran");
+
+        let frame_n = input.build_usercmd(&mut cam, 0.01, 0.1, &MoveSpeeds::default(), 180.0);
+        assert_ne!(frame_n.buttons & button::JUMP, 0, "frame N must latch JUMP");
+
+        let frame_n1 = input.build_usercmd(&mut cam, 0.01, 0.1, &MoveSpeeds::default(), 180.0);
+        assert_eq!(frame_n1.buttons & button::JUMP, 0, "frame N+1 must clear JUMP");
+
+        // Second notch produces distinct 1 -> 0 -> 1 edge.
+        input.on_mouse_wheel(-60.0, 0, &mut cvars);
+        let mid = input.build_usercmd(&mut cam, 0.01, 0.1, &MoveSpeeds::default(), 180.0);
+        assert_eq!(mid.buttons & button::JUMP, 0);
+        input.on_mouse_wheel(-60.0, 0, &mut cvars);
+        let frame_n2 = input.build_usercmd(&mut cam, 0.01, 0.1, &MoveSpeeds::default(), 180.0);
+        assert_ne!(frame_n2.buttons & button::JUMP, 0);
+    }
+
+    #[test]
+    fn mouse4_bound_to_voicerecord_toggles_active_action() {
+        let mut cvars = CVarRegistry::new_with_defaults();
+        cvars.bind("mouse4", "+voicerecord");
+        let mut input = WebInputState::new();
+
+        // DOM button 3 is Browser Back (mouse4).
+        input.on_mouse_button_bound(3, true, &mut cvars);
+        assert!(input.actions.contains("voicerecord"));
+        input.on_mouse_button_bound(3, false, &mut cvars);
+        assert!(!input.actions.contains("voicerecord"));
     }
 }

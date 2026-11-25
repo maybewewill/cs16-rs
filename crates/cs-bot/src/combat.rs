@@ -437,23 +437,39 @@ pub fn step_combat(state: &mut BotCombatState, input: &CombatInput<'_>) -> Comba
     // 9. Movement posture & strafe during combat.
     state.strafe_timer -= dt;
     if state.strafe_timer <= 0.0 {
-        state.strafe_timer = 0.35 + ((mix64(input.rng_seed) % 45) as f32) * 0.01;
-        state.strafe_dir = match mix64(input.rng_seed ^ 0x57AA) % 3 {
-            0 => -1.0,
-            1 => 1.0,
-            _ => 0.0,
-        };
+        if chosen_weapon == BotWeapon::Knife {
+            state.strafe_timer = 0.28 + ((mix64(input.rng_seed) % 21) as f32) * 0.01;
+            state.strafe_dir = if state.strafe_dir >= 0.0 { -1.0 } else { 1.0 };
+        } else {
+            state.strafe_timer = 0.35 + ((mix64(input.rng_seed) % 45) as f32) * 0.01;
+            state.strafe_dir = match mix64(input.rng_seed ^ 0x57AA) % 3 {
+                0 => -1.0,
+                1 => 1.0,
+                _ => 0.0,
+            };
+        }
     }
+
+    let knife_horiz_dist = if (target.pos.z - input.self_pos.z).abs() < 64.0 {
+        input.self_pos.truncate().distance(target.pos.truncate())
+    } else {
+        dist
+    };
 
     let is_rifle_or_sniper = matches!(
         chosen_weapon.category(),
         WeaponCategory::Rifle | WeaponCategory::Sniper | WeaponCategory::MachineGun
     );
-    if is_rifle_or_sniper && dist > 420.0 {
+    let stop_to_shoot_dist = if chosen_weapon.is_sniper() { 220.0 } else { 420.0 };
+    if is_rifle_or_sniper && dist > stop_to_shoot_dist {
         out.want_stop_to_shoot = true;
         out.want_crouch = input.profile.crouch || (input.profile.skill >= 0.55 && dist > 700.0);
     } else if chosen_weapon == BotWeapon::Knife {
-        out.strafe_bias = 0.0;
+        out.strafe_bias = if knife_horiz_dist > 56.0 {
+            state.strafe_dir * 0.55
+        } else {
+            state.strafe_dir * 0.30
+        };
     } else {
         out.strafe_bias = state.strafe_dir * 0.75;
     }
@@ -463,13 +479,17 @@ pub fn step_combat(state: &mut BotCombatState, input: &CombatInput<'_>) -> Comba
     let pitch_err = (state.pitch_deg - base_pitch).abs();
     let aim_tolerance = match chosen_weapon {
         w if w.is_sniper() => 3.5 + (1.0 - input.profile.skill) * 4.0,
-        BotWeapon::Knife => 28.0,
+        BotWeapon::Knife => 24.0,
         _ => 9.0 + (1.0 - input.profile.skill) * 8.0,
     };
 
     if chosen_weapon == BotWeapon::Knife {
-        if dist <= 82.0 && yaw_err < aim_tolerance {
-            out.primary_attack = true;
+        if yaw_err < aim_tolerance {
+            if knife_horiz_dist <= 48.0 && !input.inventory.has_shield {
+                out.secondary_attack = true;
+            } else if knife_horiz_dist <= 64.0 {
+                out.primary_attack = true;
+            }
         }
         return out;
     }
@@ -727,29 +747,35 @@ fn step_look_spring(
         )
     };
 
-    let yaw_err = angle_diff(state.yaw_deg, target_yaw);
-    let pitch_err = target_pitch - state.pitch_deg;
+    let sub_steps = ((dt / 0.02).ceil() as u32).clamp(1, 16);
+    let sub_dt = dt / (sub_steps as f32);
 
-    let yaw_accel = (yaw_err * stiffness - state.yaw_vel * damping).clamp(-max_accel, max_accel);
-    let pitch_accel =
-        (pitch_err * stiffness - state.pitch_vel * damping).clamp(-max_accel, max_accel);
+    for _ in 0..sub_steps {
+        let yaw_err = angle_diff(state.yaw_deg, target_yaw);
+        let pitch_err = target_pitch - state.pitch_deg;
 
-    state.yaw_vel += yaw_accel * dt;
-    state.pitch_vel += pitch_accel * dt;
+        let yaw_accel =
+            (yaw_err * stiffness - state.yaw_vel * damping).clamp(-max_accel, max_accel);
+        let pitch_accel =
+            (pitch_err * stiffness - state.pitch_vel * damping).clamp(-max_accel, max_accel);
 
-    // Prevent overshoot oscillation when nearly aligned.
-    if yaw_err.abs() < 0.25 && state.yaw_vel.abs() < 8.0 {
-        state.yaw_deg = target_yaw;
-        state.yaw_vel = 0.0;
-    } else {
-        state.yaw_deg = (state.yaw_deg + state.yaw_vel * dt).rem_euclid(360.0);
-    }
+        state.yaw_vel += yaw_accel * sub_dt;
+        state.pitch_vel += pitch_accel * sub_dt;
 
-    if pitch_err.abs() < 0.25 && state.pitch_vel.abs() < 8.0 {
-        state.pitch_deg = target_pitch;
-        state.pitch_vel = 0.0;
-    } else {
-        state.pitch_deg = (state.pitch_deg + state.pitch_vel * dt).clamp(-89.0, 89.0);
+        // Prevent overshoot oscillation when nearly aligned.
+        if yaw_err.abs() < 0.25 && state.yaw_vel.abs() < 8.0 {
+            state.yaw_deg = target_yaw;
+            state.yaw_vel = 0.0;
+        } else {
+            state.yaw_deg = (state.yaw_deg + state.yaw_vel * sub_dt).rem_euclid(360.0);
+        }
+
+        if pitch_err.abs() < 0.25 && state.pitch_vel.abs() < 8.0 {
+            state.pitch_deg = target_pitch;
+            state.pitch_vel = 0.0;
+        } else {
+            state.pitch_deg = (state.pitch_deg + state.pitch_vel * sub_dt).clamp(-89.0, 89.0);
+        }
     }
 }
 
@@ -1200,5 +1226,108 @@ mod tests {
             }
         }
         assert_eq!(thrown, Some(BotWeapon::HeGrenade));
+    }
+
+    #[test]
+    fn knife_combat_strafe_weaves_slashes_at_64u_and_stabs_at_48u() {
+        let prof = BotProfile::fallback("Ripper", BotDifficulty::Expert);
+        let mut restrictions = WeaponRestrictions::default();
+        restrictions.knives_only();
+        let inv = CombatInventory {
+            primary: None,
+            primary_clip: 0,
+            primary_reserve: 0,
+            secondary: None,
+            secondary_clip: 0,
+            secondary_reserve: 0,
+            active_weapon: Some(BotWeapon::Knife),
+            has_knife: true,
+            ..Default::default()
+        };
+
+        let mut st = BotCombatState::default();
+        let out_far = step_combat(
+            &mut st,
+            &CombatInput {
+                dt: 0.1,
+                self_pos: Vec3::ZERO,
+                self_eye: Vec3::new(0.0, 0.0, 64.0),
+                self_vel: Vec3::ZERO,
+                current_yaw_deg: 0.0,
+                current_pitch_deg: 0.0,
+                punch_angle_deg: Vec3::ZERO,
+                current_fov: 90,
+                on_ground: true,
+                is_crouching: false,
+                health: 35.0,
+                flash_alpha: 0.0,
+                inventory: inv,
+                visible_enemies: &[enemy(1, Vec3::new(140.0, 0.0, 0.0))],
+                grenade_request: None,
+                look_at_override: None,
+                profile: &prof,
+                difficulty: BotDifficulty::Expert,
+                restrictions: &restrictions,
+                rng_seed: 1,
+            },
+        );
+        assert!(out_far.strafe_bias.abs() > 0.25);
+        assert!(!out_far.primary_attack && !out_far.secondary_attack);
+
+        let out_slash = step_combat(
+            &mut st,
+            &CombatInput {
+                dt: 0.1,
+                self_pos: Vec3::ZERO,
+                self_eye: Vec3::new(0.0, 0.0, 64.0),
+                self_vel: Vec3::ZERO,
+                current_yaw_deg: 0.0,
+                current_pitch_deg: 0.0,
+                punch_angle_deg: Vec3::ZERO,
+                current_fov: 90,
+                on_ground: true,
+                is_crouching: false,
+                health: 35.0,
+                flash_alpha: 0.0,
+                inventory: inv,
+                visible_enemies: &[enemy(1, Vec3::new(58.0, 0.0, 0.0))],
+                grenade_request: None,
+                look_at_override: None,
+                profile: &prof,
+                difficulty: BotDifficulty::Expert,
+                restrictions: &restrictions,
+                rng_seed: 2,
+            },
+        );
+        assert!(out_slash.primary_attack, "expected slash at 58u");
+        assert!(!out_slash.secondary_attack);
+
+        let out_stab = step_combat(
+            &mut st,
+            &CombatInput {
+                dt: 0.1,
+                self_pos: Vec3::ZERO,
+                self_eye: Vec3::new(0.0, 0.0, 64.0),
+                self_vel: Vec3::ZERO,
+                current_yaw_deg: 0.0,
+                current_pitch_deg: 0.0,
+                punch_angle_deg: Vec3::ZERO,
+                current_fov: 90,
+                on_ground: true,
+                is_crouching: false,
+                health: 35.0,
+                flash_alpha: 0.0,
+                inventory: inv,
+                visible_enemies: &[enemy(1, Vec3::new(42.0, 0.0, 0.0))],
+                grenade_request: None,
+                look_at_override: None,
+                profile: &prof,
+                difficulty: BotDifficulty::Expert,
+                restrictions: &restrictions,
+                rng_seed: 3,
+            },
+        );
+        assert!(out_stab.secondary_attack, "expected stab at 42u");
+        assert!(!out_stab.primary_attack);
     }
 }

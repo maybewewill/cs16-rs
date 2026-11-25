@@ -864,3 +864,48 @@ fn a_corpse_hit_in_the_arm_flies_along_the_attackers_aim() {
     });
     assert_eq!(velocity.x, 1.0);
 }
+
+#[test]
+fn cheats_notarget_and_fly_and_mirrordamage_and_motd() {
+    let mut b = Bench::stub(stub_spawns());
+    b.enter_second_client();
+
+    // Without sv_cheats, notarget and fly are refused.
+    b.run(|game, eng| {
+        game.spawn_player(eng, 0, Team::Ct, 0);
+        game.spawn_player(eng, 1, Team::Ct, 1);
+        game.client_command(eng, 0, &["notarget".to_string()]);
+        game.client_command(eng, 0, &["fly".to_string()]);
+        let v = eng.ent(eng.client_edict(0)).unwrap();
+        assert_eq!(v.flags & cs_engine::consts::FL_NOTARGET, 0);
+        assert_eq!(v.movetype, MOVETYPE_WALK);
+    });
+
+    let _ = b.server.console_command("sv_cheats 1");
+    b.run(|game, eng| {
+        game.client_command(eng, 0, &["notarget".to_string()]);
+        game.client_command(eng, 0, &["fly".to_string()]);
+        let v = eng.ent(eng.client_edict(0)).unwrap();
+        assert_ne!(v.flags & cs_engine::consts::FL_NOTARGET, 0);
+        assert_eq!(v.movetype, cs_engine::consts::MOVETYPE_FLY);
+        game.client_command(eng, 0, &["fly".to_string()]);
+        assert_eq!(eng.ent(eng.client_edict(0)).unwrap().movetype, MOVETYPE_WALK);
+    });
+
+    // mp_mirrordamage reflects a fraction of teammate damage back to attacker under friendlyfire.
+    let _ = b.server.console_command("mp_friendlyfire 1");
+    let _ = b.server.console_command("mp_mirrordamage 0.5");
+    let hp_attacker = b.run(|game, eng| {
+        game.damage_player(eng, 1, Some(0), 20.0, dmg::BULLET);
+        game.state().players[0].as_ref().unwrap().health
+    });
+    assert!(hp_attacker < 100.0, "expected mirror damage, got {hp_attacker}");
+
+    // motd_write updates MOTD and motd prints it cleanly.
+    let _ = b.server.console_command("motd_write \"Welcome to cs16-rs\"");
+    let motd_out = b.server.console_command("motd");
+    assert!(
+        matches!(motd_out, cs_engine::ConsoleOutcome::Output(ref s) if s.contains("Welcome to cs16-rs")),
+        "{motd_out:?}"
+    );
+}

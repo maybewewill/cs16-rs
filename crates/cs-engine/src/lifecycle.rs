@@ -8,7 +8,7 @@
 
 use cs_proto48::bitbuf::MsgWriter;
 use cs_proto48::messages::{
-    write_svc_disconnect, write_svc_pings, write_svc_stufftext, write_svc_updateuserinfo,
+    write_svc_disconnect, write_svc_stufftext, write_svc_updateuserinfo,
 };
 use cs_transport::PacketTransport;
 
@@ -19,8 +19,11 @@ use crate::map::ServerMap;
 use crate::server::{SV_TIME_AT_MAP_START, Server, ServerConfig};
 use crate::world::WorldLinks;
 
-/// Seconds between the `svc_pings` messages sent to active clients.
+/// Seconds between the `svc_pings` messages sent to active clients while `IN_SCORE` is held.
 pub const PINGS_INTERVAL_SECS: f64 = 2.0;
+/// Minimum seconds between mid-game `svc_updateuserinfo` broadcasts for a slot
+/// (`client->sendinfo_time = realtime + 1.0`, ReHLDS `sv_main.cpp`, read 2026-11-25).
+pub const SENDINFO_INTERVAL_SECS: f64 = 1.0;
 /// Shortest time between two accepted name changes of one client.
 pub const NAME_CHANGE_MIN_INTERVAL_SECS: f64 = 1.0;
 /// `setinfo` commands a client may send per second, sustained. Every accepted one is
@@ -168,9 +171,15 @@ impl<G: GameDll> Server<G> {
         let mut reconnect = MsgWriter::new();
         write_svc_stufftext(&mut reconnect, "reconnect\n");
         let now = self.real_time;
-        for client in self.clients.iter_mut().filter(|c| !c.is_free()) {
+        for (i, client) in self.clients.iter_mut().filter(|c| !c.is_free()).enumerate() {
             client.restart_signon(now);
             client.chan.write_reliable(reconnect.as_slice());
+            if let Some(t) = self.next_pings_at.get_mut(i) {
+                *t = 0.0;
+            }
+            if let Some(t) = self.next_sendinfo_at.get_mut(i) {
+                *t = 0.0;
+            }
         }
     }
 
@@ -277,6 +286,12 @@ impl<G: GameDll> Server<G> {
             entry.0.clear();
             entry.1 = -100.0;
         }
+        if let Some(t) = self.next_pings_at.get_mut(index) {
+            *t = 0.0;
+        }
+        if let Some(t) = self.next_sendinfo_at.get_mut(index) {
+            *t = 0.0;
+        }
         // The userid stays for the removal broadcast.
         let userid = self.clients[index].userid;
         self.clients[index] = Client {
@@ -324,10 +339,7 @@ impl<G: GameDll> Server<G> {
     /// Records a datagram from `slot` that its netchan accepted, acknowledging `sequence_ack`.
     pub(crate) fn note_accepted(&mut self, slot: u8, sequence_ack: u32) {
         let now = self.real_time;
-        let interval = crate::frame::update_interval(
-            self.views[usize::from(slot)].userinfo.get("cl_updaterate"),
-            &self.cfg,
-        );
+        let interval = self.client_update_interval(slot);
         let samples = self.cvars.get_f32("sv_unlagsamples");
         let client = &mut self.clients[usize::from(slot)];
         client.last_heard = now;
@@ -351,6 +363,17 @@ impl<G: GameDll> Server<G> {
     /// `signon_timeout_secs` of connecting or of the last map change, and clients from which
     /// no datagram was accepted for `timeout_secs`.
     pub(crate) fn drop_timed_out_clients(&mut self) {
+        let timeout_secs = match self.cvars.get("sv_timeout") {
+            Some(c) if c.value != c.default_value => {
+                let v = f64::from(c.as_f32());
+                if v.is_finite() && v > 0.0 {
+                    v
+                } else {
+                    self.cfg.timeout_secs
+                }
+            }
+            _ => self.cfg.timeout_secs,
+        };
         for slot in 0..self.cfg.max_clients {
             let client = &self.clients[usize::from(slot)];
             // `SV_CheckTimeouts` skips `fakeclient` (`sv_main.cpp` 4041).
@@ -359,59 +382,38 @@ impl<G: GameDll> Server<G> {
             }
             let stalled = matches!(client.state, ClientState::Signon(_))
                 && self.real_time - client.signon_since > self.cfg.signon_timeout_secs;
-            let silent = self.real_time - client.last_heard > self.cfg.timeout_secs;
+            let silent = self.real_time - client.last_heard > timeout_secs;
             if stalled || silent {
                 self.free_slot(slot);
             }
         }
     }
 
-    /// Every [`PINGS_INTERVAL_SECS`], queues one `svc_pings` listing every `Active` client
-    /// (loss reported as 0) into each `Active` client's unreliable queue.
-    pub(crate) fn queue_pings_if_due(&mut self) {
-        if self.real_time < self.next_pings_at {
-            return;
-        }
-        self.next_pings_at = self.real_time + PINGS_INTERVAL_SECS;
-        let pings: Vec<(u8, u16, u8)> = self
-            .clients
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| c.state == ClientState::Active)
-            .map(|(slot, c)| (slot as u8, c.pings.ping_ms(), 0))
-            .collect();
-        if pings.is_empty() {
-            return;
-        }
-        let mut w = MsgWriter::new();
-        write_svc_pings(&mut w, &pings);
-        for client in self
-            .clients
-            .iter_mut()
-            .filter(|c| c.state == ClientState::Active && !c.fake)
-        {
-            if client.queue_unreliable(w.as_slice()) {
-                self.net_stats.unreliable_dropped += 1;
-            }
-        }
-    }
-
     /// Sends one `svc_updateuserinfo` per slot marked since the last call, however often it
     /// was marked, to every client in the game (`client->active`) through the reliable stream, as
-    /// `SV_UpdateToReliableMessages` copies `sv.reliable_datagram`. A free slot always
-    /// goes out with an empty userinfo.
+    /// `SV_UpdateToReliableMessages` copies `sv.reliable_datagram` (`rehlds/engine/sv_main.cpp`,
+    /// `SV_UpdateUserInfo` / `SV_UpdateToReliableMessages` / `SV_ExtractFromUserinfo` /
+    /// `SV_FullClientUpdate`, read 2026-11-25). A free slot always goes out immediately with an
+    /// empty userinfo; an `Active` slot applies its first update immediately (`next_sendinfo_at
+    /// = real_time + 1.0`) and coalesces mid-second changes until `real_time >=
+    /// next_sendinfo_at`.
     pub(crate) fn broadcast_userinfo(&mut self) {
         let mut w = MsgWriter::new();
         let now = self.real_time;
-        for (slot, view) in self.views.iter_mut().enumerate() {
-            if !std::mem::take(&mut view.userinfo_dirty) {
+        for slot in 0..self.views.len() {
+            if !self.views[slot].userinfo_dirty {
                 continue;
             }
             let client = &self.clients[slot];
+            let is_active = client.state == ClientState::Active;
+            if is_active && now < self.next_sendinfo_at[slot] {
+                continue;
+            }
+            self.views[slot].userinfo_dirty = false;
             let info = if client.is_free() {
                 String::new()
             } else {
-                crate::signon::public_userinfo(&view.userinfo)
+                crate::signon::public_userinfo(&self.views[slot].userinfo)
             };
             if !info.is_empty()
                 && let Some((prev, last_at)) = self.last_userinfo_hash.get_mut(slot)
@@ -421,6 +423,9 @@ impl<G: GameDll> Server<G> {
                 }
                 *prev = info.clone();
                 *last_at = now;
+            }
+            if is_active {
+                self.next_sendinfo_at[slot] = now + SENDINFO_INTERVAL_SECS;
             }
             write_svc_updateuserinfo(&mut w, slot as u8, client.userid, &info, &[0; 16]);
         }

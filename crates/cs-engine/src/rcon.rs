@@ -173,6 +173,12 @@ impl RconState {
         }
     }
 
+    pub fn reset(&mut self) {
+        self.failures.clear();
+        self.challenges.clear();
+        self.by_touch.clear();
+    }
+
     pub fn is_ip_banned(&mut self, addr: &PeerAddr, now: f64) -> bool {
         let Some(state) = self.failures.get_mut(addr) else {
             return false;

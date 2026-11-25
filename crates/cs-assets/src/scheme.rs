@@ -837,10 +837,11 @@ const ALL_LANG_PREFIXES: &[&str] = &[
 
 /// Valve VGUI2 `#Token` localization dictionary loaded from `resource/platform_*.txt`,
 /// `resource/valve_*.txt`, `resource/gameui_*.txt`, `servers/serverbrowser_*.txt`,
-/// and `resource/cstrike_*.txt` (supports UTF-16LE/BE BOM and UTF-8).
+/// `resource/cstrike_*.txt`, and `titles.txt` fallback (supports UTF-16LE/BE BOM and UTF-8).
 #[derive(Debug, Default, Clone)]
 pub struct LocalizationTable {
     tokens: HashMap<String, String>,
+    titles_tokens: HashMap<String, String>,
     language: String,
 }
 
@@ -852,6 +853,7 @@ impl LocalizationTable {
     pub fn load_language(vfs: &Vfs, lang: &str) -> Self {
         let mut table = Self {
             tokens: HashMap::new(),
+            titles_tokens: HashMap::new(),
             language: lang.trim().to_ascii_lowercase(),
         };
         let load_set = |tbl: &mut Self, l: &str| {
@@ -874,6 +876,12 @@ impl LocalizationTable {
         let clean_lang = table.language.clone();
         if !clean_lang.is_empty() && clean_lang != "english" {
             load_set(&mut table, &clean_lang);
+        }
+        // Populate lowest-priority fallback from `titles.txt` so HUD/ShowMenu tokens like
+        // `#Team_Select_Spect` resolve even when callers do not pass a separate `TitlesTable`.
+        let titles = crate::vgui_scripts::TitlesTable::load(vfs);
+        for (k, entry) in titles.iter() {
+            table.titles_tokens.insert(k.clone(), entry.text.clone());
         }
         table
     }
@@ -953,22 +961,37 @@ impl LocalizationTable {
         raw: &'a str,
         titles: Option<&'a crate::vgui_scripts::TitlesTable>,
     ) -> &'a str {
-        if let Some(key) = raw.strip_prefix('#') {
+        let mut cur = raw;
+        for _ in 0..2 {
+            let Some(key) = cur.strip_prefix('#') else {
+                break;
+            };
             let lower = key.to_ascii_lowercase();
-            if let Some(val) = self.tokens.get(&lower) {
-                return val.as_str();
+            let next = if let Some(val) = self.tokens.get(&lower) {
+                val.as_str()
+            } else {
+                let titles_key = format!("cstrike_titlestxt_{lower}");
+                if let Some(val) = self.tokens.get(&titles_key) {
+                    val.as_str()
+                } else if let Some(t) = titles
+                    && let Some(entry) = t.get(key)
+                {
+                    entry.text.as_str()
+                } else if let Some(val) = self.titles_tokens.get(&lower) {
+                    val.as_str()
+                } else {
+                    break;
+                }
+            };
+            if next == cur {
+                break;
             }
-            let titles_key = format!("cstrike_titlestxt_{lower}");
-            if let Some(val) = self.tokens.get(&titles_key) {
-                return val.as_str();
-            }
-            if let Some(t) = titles
-                && let Some(entry) = t.get(key)
-            {
-                return entry.text.as_str();
+            cur = next;
+            if !cur.starts_with('#') {
+                break;
             }
         }
-        raw
+        cur
     }
 
     /// Resolve `#Token` substrings anywhere inside a line (e.g. `\x01#Game_connected` or `1. #Cstrike_CT_Forces`),
@@ -978,40 +1001,51 @@ impl LocalizationTable {
         text: &str,
         titles: Option<&crate::vgui_scripts::TitlesTable>,
     ) -> String {
-        if !text.contains('#') {
-            return text.to_string();
-        }
-        let mut out = String::with_capacity(text.len());
-        let bytes = text.as_bytes();
-        let mut i = 0usize;
-        while i < text.len() {
-            if bytes[i] == b'#'
-                && let Some(ch_next) = text[i + 1..].chars().next()
-                && (ch_next.is_ascii_alphanumeric() || ch_next == '_')
-            {
-                let mut end = i + 1;
-                while end < text.len() {
-                    let b = bytes[end];
-                    if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' {
-                        end += 1;
-                    } else {
-                        break;
-                    }
-                }
-                let token = &text[i..end];
-                let resolved = self.resolve_with_titles(token, titles);
-                out.push_str(resolved);
-                i = end;
-                continue;
+        let mut current = text.to_string();
+        for _ in 0..2 {
+            if !current.contains('#') {
+                return current;
             }
-            if let Some(ch) = text[i..].chars().next() {
-                out.push(ch);
-                i += ch.len_utf8();
-            } else {
+            let mut out = String::with_capacity(current.len());
+            let bytes = current.as_bytes();
+            let mut i = 0usize;
+            let mut changed = false;
+            while i < current.len() {
+                if bytes[i] == b'#'
+                    && let Some(ch_next) = current[i + 1..].chars().next()
+                    && (ch_next.is_ascii_alphanumeric() || ch_next == '_')
+                {
+                    let mut end = i + 1;
+                    while end < current.len() {
+                        let b = bytes[end];
+                        if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' {
+                            end += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    let token = &current[i..end];
+                    let resolved = self.resolve_with_titles(token, titles);
+                    if resolved != token {
+                        changed = true;
+                    }
+                    out.push_str(resolved);
+                    i = end;
+                    continue;
+                }
+                if let Some(ch) = current[i..].chars().next() {
+                    out.push(ch);
+                    i += ch.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            current = out;
+            if !changed {
                 break;
             }
         }
-        out
+        current
     }
 
     pub fn len(&self) -> usize {
@@ -1315,6 +1349,33 @@ mod tests {
             loc.resolve_inline("\x01#Game_connected", Some(&titles)),
             "\x01%s connected"
         );
+
+        let nested = TitlesTable::parse(
+            "Game_Commencing\n{\n#Cstrike_TitlesTXT_Game_Commencing\n}\nCstrike_TitlesTXT_Game_Commencing\n{\nGame Commencing!\n}\n",
+        );
+        loc.insert_text("\"Tokens\"\n{\n\"Cstrike_TitlesTXT_Game_Commencing\" \"Round Starting!\"\n}");
+        assert_eq!(
+            loc.resolve_with_titles("#Game_Commencing", Some(&nested)),
+            "Round Starting!"
+        );
+
+        let Ok(vfs) = Vfs::discover(None, cs_vfs::VfsConfig::default()) else {
+            eprintln!("SKIPPED retail LocalizationTable titles.txt test: CS16_GAMEDIR not found");
+            return;
+        };
+        let retail_loc = LocalizationTable::load(&vfs);
+        for tok in [
+            "#Game_connected",
+            "#Game_join_ct",
+            "#Game_join_terrorist",
+            "#Team_Select_Spect",
+        ] {
+            let resolved = retail_loc.resolve(tok);
+            assert!(
+                !resolved.starts_with('#'),
+                "expected {tok} to resolve cleanly, got {resolved:?}"
+            );
+        }
     }
 
     #[test]

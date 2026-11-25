@@ -96,6 +96,9 @@ pub(crate) struct Outbox {
     /// server appends it to the reliable stream of every client in the game at the end of the
     /// frame (`SV_UpdateToReliableMessages`), after what the game sent to single clients.
     pub(crate) reliable_all: MsgWriter,
+    /// Server-side round `.dem` replay-only reliable messages (`HealthInfo`, `Account`, etc.)
+    /// captured for HLDEMO playback without leaking to live player connections.
+    pub(crate) replay_reliable: MsgWriter,
     /// Slots `EngineApi::create_fake_client` took since the server last looked: the game sees the
     /// slot taken at once (its `ClientView`), the server gives it its `Client` before the next
     /// call into the game and before it drains (`Server::adopt_fake_clients`).
@@ -137,6 +140,7 @@ impl Outbox {
             event_schema: None,
             discard_direct: None,
             reliable_all: MsgWriter::new(),
+            replay_reliable: MsgWriter::new(),
             fake_created: Vec::new(),
             fake_moves: Vec::new(),
             fake_moves_dropped: 0,
@@ -181,11 +185,19 @@ impl Outbox {
         }
     }
 
+    /// Appends `bytes` to [`replay_reliable`](Self::replay_reliable) under the same cap.
+    pub(crate) fn push_replay_reliable(&mut self, bytes: &[u8]) {
+        if self.replay_reliable.len() <= MAX_RELIABLE_BACKLOG {
+            self.replay_reliable.write_bytes(bytes);
+        }
+    }
+
     /// Forgets what belonged to the previous map: the init buffer and the light styles.
     pub(crate) fn reset_map_state(&mut self) {
         self.init.clear();
         self.init_open = false;
         self.reliable_all = MsgWriter::new();
+        self.replay_reliable = MsgWriter::new();
         self.light_styles = default_light_styles();
     }
 }

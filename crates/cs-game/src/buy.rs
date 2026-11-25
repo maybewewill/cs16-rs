@@ -532,8 +532,12 @@ pub(crate) fn can_player_buy(
     {
         return false;
     }
+    if g.rules.knife_round != crate::rules::KnifeRoundState::Inactive {
+        return false;
+    }
+    let buy_anywhere = eng.cvar_f32("mp_buy_anywhere") != 0.0 || eng.cvar_f32("mp_warmup_mode") != 0.0;
     // Is the player in a buy zone?
-    if p.signals.state() & SIGNAL_BUY == 0 {
+    if !buy_anywhere && p.signals.state() & SIGNAL_BUY == 0 {
         return false;
     }
     let mut buy_time = (eng.cvar_f32("mp_buytime") * 60.0) as i32;
@@ -541,7 +545,7 @@ pub(crate) fn can_player_buy(
         buy_time = MIN_BUY_TIME;
         eng.set_cvar("mp_buytime", &(MIN_BUY_TIME as f32 / 60.0).to_string());
     }
-    if eng.time() - g.rules.round_start_time() > f64::from(buy_time) {
+    if !buy_anywhere && eng.time() - g.rules.round_start_time() > f64::from(buy_time) {
         if display {
             client_print(
                 eng,
@@ -1397,11 +1401,15 @@ pub(crate) fn client_command(
     let Some(command) = argv.first().map(String::as_str) else {
         return;
     };
+    let buy_anywhere = eng.cvar_f32("mp_buy_anywhere") != 0.0 || eng.cvar_f32("mp_warmup_mode") != 0.0;
     let in_zone = g
         .players
         .get(usize::from(slot))
         .and_then(Option::as_ref)
-        .map(|p| p.signals.state() & SIGNAL_BUY != 0);
+        .map(|p| {
+            g.rules.knife_round == crate::rules::KnifeRoundState::Inactive
+                && ((p.signals.state() & SIGNAL_BUY != 0) || buy_anywhere)
+        });
     let Some(in_zone) = in_zone else {
         return;
     };
