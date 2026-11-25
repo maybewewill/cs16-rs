@@ -113,10 +113,10 @@ fn new_server_with<G: GameDll>(
 
 /// A server and one local client in one process, optionally accepting external P2P WebRTC peers.
 pub struct LocalGame {
-    server: Server<CsGame>,
+    server: Box<Server<CsGame>>,
     net: MultiTransport,
     p2p: MultiPeerHandle,
-    conn: Connection<LoopbackEndpoint>,
+    conn: Box<Connection<LoopbackEndpoint>>,
     vfs: Option<Vfs>,
     now: f64,
 }
@@ -148,7 +148,7 @@ impl LocalGame {
             max_clients: opts.max_clients,
             ..ServerConfig::default()
         };
-        let mut server = new_server_with(cfg, map, game, vfs.as_ref());
+        let mut server = Box::new(new_server_with(cfg, map, game, vfs.as_ref()));
         if let Some(vfs) = &vfs {
             server.set_available_maps(vfs.list_maps());
         }
@@ -166,7 +166,7 @@ impl LocalGame {
             76_561_197_960_265_728 + u64::from(endpoint.id()),
             &md5_hex(b"cs16-rs local game"),
         );
-        let mut conn = Connection::new(endpoint, PeerAddr::Loopback(0), cfg);
+        let mut conn = Box::new(Connection::new(endpoint, PeerAddr::Loopback(0), cfg));
         if opts.text_menus {
             conn.set_userinfo("_vgui_menus", "0");
         }
