@@ -32,12 +32,12 @@ evidence = "crates/cs-client/src/audio/mixer.rs (128 dynamic + 128 static channe
 [[item]]
 id = "sound_goldsrc_attenuation_and_stereo_panning"
 status = "tested"
-evidence = "crates/cs-client/src/audio/mixer.rs (ATTN_* 1000-unit linear attenuation and listener-right stereo panning); crates/cs-client/tests/phase9_sound.rs::goldsrc_distance_attenuation_and_stereo_pan"
+evidence = "crates/cs-client/src/audio/mixer.rs (ATTN_* 1000-unit linear attenuation, listener-right stereo panning, bbox center brush origin, duplicate rate jitter); crates/cs-client/tests/phase9_sound.rs::goldsrc_distance_attenuation_and_stereo_pan, goldsrc_spatialize_no_wall_occlusion_plus_timescale_and_duplicate_jitter"
 
 [[item]]
 id = "sound_pitch_shifting"
 status = "tested"
-evidence = "crates/cs-client/src/audio/mixer.rs (fractional playback phase resampling for pitch 50..=255 around PITCH_NORM=100); crates/cs-client/tests/phase9_sound.rs::goldsrc_fractional_pitch_shifting"
+evidence = "crates/cs-client/src/audio/mixer.rs (fractional playback phase resampling for pitch 50..=255 around PITCH_NORM=100, (timescale+1.0)*0.5 pitch scale); crates/cs-client/tests/phase9_sound.rs::goldsrc_fractional_pitch_shifting"
 
 [[item]]
 id = "sound_looped_wav_cue_points"
@@ -52,7 +52,7 @@ evidence = "crates/cs-client/src/audio/sentences.rs; crates/cs-client/src/audio/
 [[item]]
 id = "sound_roomtype_dsp_and_env_sound"
 status = "tested"
-evidence = "crates/cs-client/src/audio/dsp.rs (29-preset Schroeder/comb+allpass RoomDsp); crates/cs-game/tests/phase7_env_items.rs::env_sound_sends_svc_roomtype_and_ambient_generic_ramps; crates/cs-client/tests/phase9_sound.rs::roomtype_29_presets_modulate_wet_reverb"
+evidence = "crates/cs-client/src/audio/dsp.rs (exact retail 29x9 sx_presets table from hw.dll:0x1031c6c0..0x1031cad4); crates/cs-client/src/audio/dsp.rs::tests::all_29_presets_generate_tail_and_underwater_muffles_highs; crates/cs-game/tests/phase7_env_items.rs::env_sound_sends_svc_roomtype_and_ambient_generic_ramps; crates/cs-client/tests/phase9_sound.rs::roomtype_29_presets_modulate_wet_reverb"
 
 [[item]]
 id = "sound_ambient_generic_entities"
@@ -77,7 +77,7 @@ evidence = "crates/cs-client/src/audio/impacts.rs; crates/cs-client/src/view.rs;
 [[item]]
 id = "sound_occlusion_and_water_muffling"
 status = "tested"
-evidence = "crates/cs-client/src/audio/dsp.rs; crates/cs-client/src/audio/mixer.rs; crates/cs-client/tests/phase9_sound.rs::goldsrc_wall_occlusion_attenuates_sound, underwater_muffling_lowpass_filters_audio"
+evidence = "crates/cs-client/src/audio/dsp.rs; crates/cs-client/src/audio/mixer.rs (retail hw.dll:FUN_101fd050 applies no 48-unit wall occlusion multiplier); crates/cs-client/tests/phase9_sound.rs::goldsrc_spatialize_no_wall_occlusion_plus_timescale_and_duplicate_jitter, underwater_muffling_lowpass_filters_audio"
 
 [[item]]
 id = "sound_voice_opus_native"

@@ -19,7 +19,8 @@ evidence = "crates/cs-game/src/bots.rs::maintain_quota, crates/cs-game/tests/pha
 
 [[item]]
 id = "brightness"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-assets/src/gamma.rs::tests::retail_gamma_default_zero_fallback_and_brightness_clamps; crates/cs-client/src/render/gamma.rs::tests::gamma_texgamma_brightness_and_software_dither_work"
 
 [[item]]
 id = "cl_crosshair_color"
@@ -31,7 +32,8 @@ status = "implemented"
 
 [[item]]
 id = "cl_crosshair_translucent"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/src/ui/mod.rs::tests::nvg_crosshair_honors_cl_crosshair_translucent_and_alpha"
 
 [[item]]
 id = "cl_dynamiccrosshair"
@@ -56,11 +58,13 @@ status = "implemented"
 
 [[item]]
 id = "fps_max"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/src/app.rs::tests::mouse_accel_zoom_sens_and_multiplayer_fps_floor_match_build_10210"
 
 [[item]]
 id = "gamma"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-assets/src/gamma.rs::tests::retail_gamma_default_zero_fallback_and_brightness_clamps; crates/cs-client/src/ui/options.rs::tests::audio_volume_slider_allows_up_to_2_0_and_video_gamma_down_to_1_0"
 
 [[item]]
 id = "gl_texturemode"
@@ -201,8 +205,8 @@ status = "implemented"
 
 [[item]]
 id = "sv_accelerate"
-status = "implemented"
-evidence = "crates/cs-game/tests/movement_world.rs::movement_cvars_are_hard_locked; ACCEPTED DEVIATION: the registry default stays sv_accelerate 5 and sv_stopspeed 100 (vanilla game forces 5, 4 and 75 in RestartRound and once a second in Think, multiplay_gamerules.cpp 1697-1700 and 2567-2580, read 2026-11-22); the game forces the vanilla values, and changing the registry default would change the legacy client offline movement"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars (engine swds.dll:0x103133a4 default 10); crates/cs-game/tests/movement_world.rs::movement_cvars_are_hard_locked (game forces 5, 4, and 75 in RestartRound and Think)"
 
 [[item]]
 id = "sv_airaccelerate"
@@ -354,7 +358,7 @@ status = "implemented"
 [[item]]
 id = "volume"
 status = "tested"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/tests/phase9_sound.rs::wav_2d_playback_renders_pcm, wav_cue_and_smpl_loop_points_wrap"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/tests/phase9_sound.rs::wav_2d_playback_renders_pcm, wav_cue_and_smpl_loop_points_wrap; crates/cs-client/src/ui/options.rs::tests::audio_volume_slider_allows_up_to_2_0_and_video_gamma_down_to_1_0"
 
 [[item]]
 id = "mp_forcecamera"
@@ -1080,8 +1084,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cf
 
 [[item]]
 id = "cl_updaterate"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "crates/cs-clientcore/src/cvars.rs::tests::userinfo_cvars_are_the_probe_defaults; crates/cs-clientcore/src/interp.rs::tests::apply_cvars_quantizes_min_ms_resets_low_updaterate_and_caps_spectator"
 
 [[item]]
 id = "cl_upmax"
@@ -1245,8 +1249,8 @@ evidence = "dispatched in crates/cs-cvar/src/lib.rs (no dedicated test)"
 
 [[item]]
 id = "ex_interp"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "crates/cs-clientcore/src/cvars.rs::tests::userinfo_cvars_are_the_probe_defaults; crates/cs-clientcore/src/interp.rs::tests::apply_cvars_quantizes_min_ms_resets_low_updaterate_and_caps_spectator; crates/cs-client/src/input.rs::tests::the_interpolation_amount_drifts_to_ex_interp"
 
 [[item]]
 id = "exec"
@@ -1340,8 +1344,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.
 
 [[item]]
 id = "gl_lowlatency"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "crates/cs-client/src/ui/options.rs::tests::mouse_tab_low_latency_binds_to_gl_lowlatency_not_m_customaccel"
 
 [[item]]
 id = "gl_lowlatency_debugoutput"
@@ -1505,8 +1509,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cf
 
 [[item]]
 id = "hud_deathnotice_time"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/src/ui/hud.rs::tests::deathnotice_and_saytext_expire_and_respect_zero_cvar; crates/cs-client/src/app.rs::tests::hud_feeds_expire_respects_zero_deathnotice_and_saytext; crates/cs-client/tests/phase10_ui.rs::screen5_goldsrc_cvars_registered"
 
 [[item]]
 id = "hud_draw"
@@ -1725,23 +1729,23 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv
 
 [[item]]
 id = "m_customaccel"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/src/app.rs::tests::mouse_accel_zoom_sens_and_multiplayer_fps_floor_match_build_10210; crates/cs-client/tests/phase10_ui.rs::screen5_goldsrc_cvars_registered"
 
 [[item]]
 id = "m_customaccel_exponent"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/src/app.rs::tests::mouse_accel_zoom_sens_and_multiplayer_fps_floor_match_build_10210; crates/cs-client/tests/phase10_ui.rs::screen5_goldsrc_cvars_registered"
 
 [[item]]
 id = "m_customaccel_max"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/src/app.rs::tests::mouse_accel_zoom_sens_and_multiplayer_fps_floor_match_build_10210; crates/cs-client/tests/phase10_ui.rs::screen5_goldsrc_cvars_registered"
 
 [[item]]
 id = "m_customaccel_scale"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/src/app.rs::tests::mouse_accel_zoom_sens_and_multiplayer_fps_floor_match_build_10210; crates/cs-client/tests/phase10_ui.rs::screen5_goldsrc_cvars_registered"
 
 [[item]]
 id = "m_forward"
@@ -2685,8 +2689,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cf
 
 [[item]]
 id = "sv_contact"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/src/oob.rs::tests::connect_with_wrong_protocol_is_rejected"
 
 [[item]]
 id = "sv_downloadurl"
@@ -2720,13 +2724,13 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv
 
 [[item]]
 id = "sv_lan"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/src/server.rs::tests::sys_ticrate_gates_early_frames_and_rate_cvars_apply_dynamically"
 
 [[item]]
 id = "sv_lan_rate"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/src/server.rs::tests::sys_ticrate_gates_early_frames_and_rate_cvars_apply_dynamically"
 
 [[item]]
 id = "sv_log_onefile"
@@ -2755,23 +2759,23 @@ evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
 
 [[item]]
 id = "sv_maxrate"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/src/server.rs::tests::sys_ticrate_gates_early_frames_and_rate_cvars_apply_dynamically"
 
 [[item]]
 id = "sv_maxupdaterate"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/src/server.rs::tests::sys_ticrate_gates_early_frames_and_rate_cvars_apply_dynamically"
 
 [[item]]
 id = "sv_minrate"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/src/server.rs::tests::sys_ticrate_gates_early_frames_and_rate_cvars_apply_dynamically"
 
 [[item]]
 id = "sv_minupdaterate"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/src/server.rs::tests::sys_ticrate_gates_early_frames_and_rate_cvars_apply_dynamically"
 
 [[item]]
 id = "sv_newunit"
@@ -2800,22 +2804,22 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv
 
 [[item]]
 id = "sv_rcon_banpenalty"
-status = "implemented"
+status = "tested"
 evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/src/connect.rs (RconPolicy); crates/cs-engine/src/rcon.rs::tests::rcon_brute_force_triggers_ban_and_empty_password_rejects"
 
 [[item]]
 id = "sv_rcon_maxfailures"
-status = "implemented"
+status = "tested"
 evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/src/connect.rs (RconPolicy); crates/cs-engine/src/rcon.rs::tests::rcon_brute_force_triggers_ban_and_empty_password_rejects"
 
 [[item]]
 id = "sv_rcon_minfailures"
-status = "implemented"
+status = "tested"
 evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/src/connect.rs (RconPolicy); crates/cs-engine/src/rcon.rs::tests::rcon_brute_force_triggers_ban_and_empty_password_rejects"
 
 [[item]]
 id = "sv_rcon_minfailuretime"
-status = "implemented"
+status = "tested"
 evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/src/connect.rs (RconPolicy); crates/cs-engine/src/rcon.rs::tests::rcon_brute_force_triggers_ban_and_empty_password_rejects"
 
 [[item]]
@@ -3115,8 +3119,8 @@ evidence = "crates/cs-engine/src/console.rs (dispatched to BanList::write_ip_cfg
 
 [[item]]
 id = "zoom_sensitivity_ratio"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/src/app.rs::tests::mouse_accel_zoom_sens_and_multiplayer_fps_floor_match_build_10210; crates/cs-client/tests/phase10_ui.rs::screen5_goldsrc_cvars_registered"
 
 [[item]]
 id = "cl_upspeed"
@@ -3175,8 +3179,8 @@ evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/src/view_effects.rs
 
 [[item]]
 id = "s_occfactor"
-status = "tested"
-evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/src/audio/mixer.rs; crates/cs-client/tests/phase9_sound.rs::goldsrc_wall_occlusion_attenuates_sound"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars (registered for config compatibility; retail hw.dll:FUN_101fd050 does not apply 48-unit wall occlusion multiplier)"
 
 [[item]]
 id = "sv_voicecodec"
@@ -3322,3 +3326,23 @@ evidence = "crates/cs-hltv/src/proxy.rs::tests::password_and_capacity_limits_rej
 id = "tv_password"
 status = "tested"
 evidence = "crates/cs-hltv/src/proxy.rs::tests::password_and_capacity_limits_reject_unauthorized_spectators"
+
+[[item]]
+id = "max_queries_sec"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/src/oob.rs::tests::query_rate_limiter_enforces_per_ip_and_global_windows"
+
+[[item]]
+id = "max_queries_sec_global"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/src/oob.rs::tests::query_rate_limiter_enforces_per_ip_and_global_windows"
+
+[[item]]
+id = "max_queries_window"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/src/oob.rs::tests::query_rate_limiter_enforces_per_ip_and_global_windows"
+
+[[item]]
+id = "sys_ticrate"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/src/server.rs::tests::sys_ticrate_gates_early_frames_and_rate_cvars_apply_dynamically; crates/cs-server/src/proto48.rs::tests::parses_phase13_admin_replay_and_embed_flags"

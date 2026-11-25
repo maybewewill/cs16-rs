@@ -1,7 +1,7 @@
 [[item]]
 id = "a2s_queries"
 status = "tested"
-evidence = "crates/cs-engine/src/oob.rs::tests::a2s_without_challenge_gets_nine_byte_challenge, a2s_with_accepted_challenge_returns_server_info, server_to_client_packets_are_ignored (A2A_PING); crates/cs-engine/tests/lifecycle.rs::frame_after_shutdown_does_nothing (after Server::shutdown a frame reads no datagram, so a query is not answered; queries are answered through Server::frame before that, not asserted by a test of their own); challenge rule and reply contents unverified against the original server browser, see docs/parity/checklists/phase1-original-client.md table row 7"
+evidence = "crates/cs-engine/src/oob.rs::tests::a2s_without_challenge_gets_nine_byte_challenge, a2s_with_accepted_challenge_returns_server_info, server_to_client_packets_are_ignored, query_rate_limiter_enforces_per_ip_and_global_windows (A2A_PING & retail max_queries_* sliding window); crates/cs-engine/tests/lifecycle.rs::frame_after_shutdown_does_nothing (after Server::shutdown a frame reads no datagram, so a query is not answered; queries are answered through Server::frame before that, not asserted by a test of their own); challenge rule and reply contents unverified against the original server browser, see docs/parity/checklists/phase1-original-client.md table row 7"
 
 [[item]]
 id = "changelevel"
@@ -66,7 +66,7 @@ evidence = "crates/cs-engine/src/usercmd.rs::tests::budget_grants_only_accrued_t
 [[item]]
 id = "oob_rate_limit"
 status = "tested"
-evidence = "crates/cs-engine/src/oob.rs::tests::limiter_caps_burst, limiter_evicts_least_recently_touched_address, random_and_truncated_datagrams_never_panic_or_amplify; crates/cs-engine/tests/connectionless.rs::random_connectionless_datagrams_from_many_addresses, challenge_burst_from_one_address_is_limited (fails without the per-address limiter), challenges_from_many_addresses_share_a_global_budget (OOB_GLOBAL_REPLIES_PER_SEC); accepted deviation from the plan: a reply to a datagram without a valid challenge can be larger than the datagram (a 23-byte getchallenge gets up to 32 bytes); the rule is at most 64 bytes before a valid challenge, roughly twice the request; burst, refill rate and the global budget are working assumptions, unverified against a real server"
+evidence = "crates/cs-engine/src/oob.rs::tests::limiter_caps_burst, limiter_evicts_least_recently_touched_address, random_and_truncated_datagrams_never_panic_or_amplify, query_rate_limiter_enforces_per_ip_and_global_windows, connect_with_bad_or_missing_challenge_is_rejected, connect_with_wrong_protocol_is_rejected; crates/cs-engine/src/server.rs::tests::rejects_more_than_five_pending_connections_from_same_ip; crates/cs-engine/tests/connectionless.rs::random_connectionless_datagrams_from_many_addresses, challenge_burst_from_one_address_is_limited, challenges_from_many_addresses_share_a_global_budget; retail query limits (max_queries_sec=3.0, max_queries_sec_global=30, max_queries_window=60) and per-IP pending connection cap (5) match swds.dll:FUN_1020b250/FUN_10205640/FUN_10206040"
 
 [[item]]
 id = "pings"
@@ -273,7 +273,7 @@ evidence = "900+ delta updates of the original HLDS parsed with 0 errors and 20 
 [[item]]
 id = "clientcore_interpolation"
 status = "tested"
-evidence = "crates/cs-clientcore/tests/frames.rs::interpolates_between_two_frames, angles_are_interpolated_along_the_short_way, nointerp_snaps, a_teleport_snaps_and_ef_nointerp_resets_the_latched_state, local_player_is_not_interpolated; ran on the original HLDS stream without errors (Part A of docs/parity/checklists/phase3-clientcore.md), not compared with the original client's picture"
+evidence = "crates/cs-clientcore/src/interp.rs::tests::apply_cvars_quantizes_min_ms_resets_low_updaterate_and_caps_spectator; crates/cs-clientcore/tests/frames.rs::interpolates_between_two_frames, angles_are_interpolated_along_the_short_way, nointerp_snaps, a_teleport_snaps_and_ef_nointerp_resets_the_latched_state, local_player_is_not_interpolated; ran on the original HLDS stream without errors (Part A of docs/parity/checklists/phase3-clientcore.md), not compared with the original client's picture"
 
 [[item]]
 id = "clientcore_move_prediction"

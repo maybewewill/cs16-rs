@@ -63,7 +63,7 @@ evidence = "crates/cs-client/tests/phase8_render.rs::screenshot_gpu_offscreen_re
 [[item]]
 id = "render_basic_gamma_brightness_shader"
 status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::gamma_texgamma_brightness_overbright_curve; crates/cs-client/src/render/gamma.rs::tests::gamma_texgamma_brightness_and_software_dither_work"
+evidence = "crates/cs-client/tests/phase8_render.rs::gamma_texgamma_brightness_overbright_curve; crates/cs-client/src/render/gamma.rs::tests::gamma_texgamma_brightness_and_software_dither_work; crates/cs-assets/src/gamma.rs::tests::retail_gamma_default_zero_fallback_and_brightness_clamps"
 
 [[item]]
 id = "render_protocol48_entity_driven_pipeline"
@@ -188,7 +188,7 @@ evidence = "crates/cs-client/tests/phase8_render.rs::decals_wad_clipping_and_cus
 [[item]]
 id = "render_view_bob_roll_punch_and_lag"
 status = "tested"
-evidence = "crates/cs-client/tests/phase8_render.rs::view_bob_roll_punch_and_viewmodel_lag; crates/cs-client/src/view_effects.rs::tests::bob_and_roll_follow_goldsrc_bounds, viewmodel_lag_and_shake_behave_smoothly"
+evidence = "crates/cs-client/tests/phase8_render.rs::view_bob_roll_punch_and_viewmodel_lag; crates/cs-client/src/view_effects.rs::tests::bob_and_roll_follow_goldsrc_bounds, viewmodel_lag_and_shake_behave_smoothly, bob_state_freezes_airborne_and_allows_unclamped_bobup, view_idle_and_viewmodel_angles_match_goldsrc_cycles; crates/cs-client/src/view.rs::tests::build_parts_nudges_vieworg_by_one_32nd_and_freezes_airborne_bob; crates/cs-client/src/render/mdl_renderer.rs::tests::viewmodel_transform_with_angles_applies_roll_and_righthand_mirror"
 
 [[item]]
 id = "render_screen_fade_and_shake"
