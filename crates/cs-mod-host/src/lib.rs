@@ -9,6 +9,7 @@
 pub mod admins;
 pub mod amxx_import;
 pub mod client_host;
+pub mod crash_dump;
 pub mod hookchain;
 pub mod lang;
 pub mod menu;

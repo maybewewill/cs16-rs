@@ -13,6 +13,7 @@ const USAGE: &str = "usage: cargo xtask parity [--dir <path>] [--min <pct>]\n   
                      cargo xtask web-build [--out <dir>]\n       \
                      cargo xtask mod new <id> --lang rust|cpp|go|py [--dir <parent>] [--name <title>] [--side server|client|both]\n       \
                      cargo xtask mod build [dir] [--out <dir>]\n       \
+                     cargo xtask mod replay <dump.json> [--mod-path <override>] [--json]\n       \
                      cargo xtask mod-build [--out <dir>]\n       \
                      cargo xtask import-amxx <cstrike_or_amxmodx_dir> [--out-dir <dir>]";
 

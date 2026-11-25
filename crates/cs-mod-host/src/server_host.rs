@@ -36,6 +36,11 @@ use glam::Vec3;
 use tracing::warn;
 
 use crate::admins::{load_admins_from_dir, sync_player_admin};
+use crate::crash_dump::{
+    DEFAULT_RNG_SEED, FAULT_DUMP_SCHEMA_VERSION, FaultDumpStore, FaultSummary, InvocationTrigger,
+    ModFaultDump, PluginLanguage, catch_mod_call, current_timestamp_unix_ms, format_stack_trace,
+    infer_fuel_consumed, plugin_sha256_hex,
+};
 use crate::hookchain::HookTable;
 use crate::lang::{handle_lang_chat_command, load_lang_dir, sync_player_lang_from_userinfo};
 use crate::menu::send_rendered_menu;
@@ -69,6 +74,7 @@ struct ServerTimer {
 
 struct HostedMod {
     package: LoadedPackage,
+    binary_sha256: String,
     instance: Option<Arc<Mutex<Box<dyn ModInstance>>>>,
     status: ModStatus,
     storage_cache: BTreeMap<String, String>,
@@ -109,6 +115,7 @@ struct ServerModHostCore {
     py_watch: BTreeMap<String, (PathBuf, Option<std::time::SystemTime>, u64)>,
     #[cfg(not(target_arch = "wasm32"))]
     last_autoreload_poll_secs: Option<f64>,
+    faults: FaultDumpStore,
 }
 
 struct HostRpcDispatcher {
@@ -201,8 +208,27 @@ impl RpcDispatcher for HostRpcDispatcher {
             storage: &storage,
             fuel_budget,
         };
-        let Ok((rc, outcome)) = inst.call_rpc(entry.callback_id, &ctx) else {
-            return None;
+        let call_res = catch_mod_call(|| inst.call_rpc(entry.callback_id, &ctx));
+        drop(inst);
+        let (rc, outcome) = match call_res {
+            Ok(v) => v,
+            Err(err) => {
+                let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+                record_and_fault_mod_core(
+                    &mut core,
+                    &entry.owner_id,
+                    InvocationTrigger::Rpc {
+                        cb_id: entry.callback_id,
+                        fn_name: fn_name.to_string(),
+                    },
+                    &ev,
+                    &snap,
+                    &storage,
+                    fuel_budget,
+                    err.to_string(),
+                );
+                return None;
+            }
         };
         let ret = match outcome.rpc_return_str.clone() {
             Some(s) => RpcValue::Str(s),
@@ -308,9 +334,29 @@ impl AmxxExternalRpc for HostAmxxExternalRpc {
                 storage: &storage,
                 fuel_budget,
             };
-            if let Ok(outcome) = inst.call_event(sub.callback_id, &ctx) {
-                let mut se = self.side_effects.lock().unwrap_or_else(|e| e.into_inner());
-                se.push((sub.owner_id, outcome));
+            let res = catch_mod_call(|| inst.call_event(sub.callback_id, &ctx));
+            drop(inst);
+            match res {
+                Ok(outcome) => {
+                    let mut se = self.side_effects.lock().unwrap_or_else(|e| e.into_inner());
+                    se.push((sub.owner_id, outcome));
+                }
+                Err(err) => {
+                    let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+                    record_and_fault_mod_core(
+                        &mut core,
+                        &sub.owner_id,
+                        InvocationTrigger::RpcEvent {
+                            cb_id: sub.callback_id,
+                            event_name: event_name.to_string(),
+                        },
+                        &ev,
+                        &snap,
+                        &storage,
+                        fuel_budget,
+                        err.to_string(),
+                    );
+                }
             }
         }
     }
@@ -349,6 +395,8 @@ impl ServerModHost {
         storage: Box<dyn ConfigStorage + Send>,
         services: SharedPlatformServices,
     ) -> Self {
+        let mut faults = FaultDumpStore::new();
+        faults.load_from_storage(&*storage);
         let core = ServerModHostCore {
             runtime,
             python_runtime: None,
@@ -373,6 +421,7 @@ impl ServerModHost {
             py_watch: BTreeMap::new(),
             #[cfg(not(target_arch = "wasm32"))]
             last_autoreload_poll_secs: None,
+            faults,
         };
         Self {
             core: Arc::new(Mutex::new(core)),
@@ -399,6 +448,75 @@ impl ServerModHost {
     pub fn set_mods_dir(&mut self, dir: impl Into<PathBuf>) {
         let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
         core.mods_dir = Some(dir.into());
+    }
+
+    /// Configures the disk directory (e.g. `logs/mod_faults`) where bounded JSON black-box
+    /// crash dumps are written and ring-evicted (`<= 32` dumps).
+    pub fn set_fault_dump_dir(&mut self, dir: impl Into<PathBuf>) {
+        let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+        core.faults.set_disk_dir(Some(dir.into()));
+    }
+
+    /// Returns the configured disk directory for black-box crash dumps, if any.
+    pub fn fault_dump_dir(&self) -> Option<PathBuf> {
+        let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+        core.faults.disk_dir().map(Path::to_path_buf)
+    }
+
+    /// Hydrates retained crash dumps from a disk directory (e.g. `logs/mod_faults`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn load_fault_dumps_from_dir(&mut self, dir: &Path) -> Result<usize, String> {
+        let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+        core.faults.load_from_dir(dir)
+    }
+
+    /// Lists retained black-box fault dump summaries ordered newest-first (`<= 32` entries).
+    pub fn list_faults(&self) -> Vec<FaultSummary> {
+        let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+        core.faults.list_faults()
+    }
+
+    /// Serializes [`list_faults`](Self::list_faults) as JSON for `GET /api/mods/faults`.
+    pub fn list_faults_json(&self) -> String {
+        let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+        core.faults.list_faults_json()
+    }
+
+    /// Returns the exact bounded JSON payload for dump `id` (`<id>` or `<id>.json`).
+    pub fn get_fault_json(&self, id: &str) -> Option<String> {
+        let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+        core.faults.get_fault_json(id).map(str::to_string)
+    }
+
+    /// Returns a parsed clone of fault dump `id` (`<id>` or `<id>.json`).
+    pub fn get_fault(&self, id: &str) -> Option<ModFaultDump> {
+        let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+        core.faults.get_fault(id).cloned()
+    }
+
+    /// Returns the most recently captured [`ModFaultDump`], if any.
+    pub fn latest_fault(&self) -> Option<ModFaultDump> {
+        let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+        core.faults.latest().cloned()
+    }
+
+    /// Clears all retained fault dumps from memory, storage, and configured disk directory.
+    pub fn clear_faults(&mut self) {
+        let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+        let ServerModHostCore {
+            faults, storage, ..
+        } = &mut *core;
+        faults.clear(Some(&mut **storage));
+    }
+
+    /// Records an externally produced fault dump (e.g. from `.py` or `.amxx` runtimes) into the
+    /// unified bounded ring buffer and persistence backend.
+    pub fn record_external_fault(&mut self, dump: ModFaultDump) -> FaultSummary {
+        let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+        let ServerModHostCore {
+            faults, storage, ..
+        } = &mut *core;
+        faults.record(dump, Some(&mut **storage))
     }
 
     /// Loads `configs/lang/*.toml` + `data/lang/*.txt` and `configs/admins.toml` + `users.ini`
@@ -860,28 +978,32 @@ impl ServerModHost {
             (storage_cache, core.services.clone())
         };
 
+        let binary_sha256 = plugin_sha256_hex(pkg.server_wasm.as_deref());
         let mut init_outcome = ModCallOutcome::default();
 
         if let Some(ref mut inst) = instance {
             let snap = EngineSnapshot::default();
             let ev = ActiveEvent::default();
+            let fuel_budget = pkg.manifest.fuel_per_frame;
             let ctx = ModExecContext {
                 snapshot: &snap,
                 event: &ev,
                 storage: &storage_cache,
-                fuel_budget: pkg.manifest.fuel_per_frame,
+                fuel_budget,
             };
-            match inst.call_init(&ctx) {
+            match catch_mod_call(|| inst.call_init(&ctx)) {
                 Ok(out) => {
                     init_outcome = out;
                 }
                 Err(err) => {
                     let msg = err.to_string();
                     let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+                    let storage_snap = storage_cache.clone();
                     core.mods.insert(
                         id.clone(),
                         HostedMod {
                             package: pkg,
+                            binary_sha256,
                             instance: None,
                             status: ModStatus::Faulted(msg.clone()),
                             storage_cache,
@@ -889,7 +1011,17 @@ impl ServerModHost {
                             total_fuel_used: 0,
                         },
                     );
-                    core.load_order.push(id);
+                    core.load_order.push(id.clone());
+                    record_and_fault_mod_core(
+                        &mut core,
+                        &id,
+                        InvocationTrigger::Init,
+                        &ev,
+                        &snap,
+                        &storage_snap,
+                        fuel_budget,
+                        msg.clone(),
+                    );
                     return Err(msg);
                 }
             }
@@ -928,6 +1060,7 @@ impl ServerModHost {
             id.clone(),
             HostedMod {
                 package: pkg,
+                binary_sha256,
                 instance: instance.map(|i| Arc::new(Mutex::new(i))),
                 status: ModStatus::Active,
                 storage_cache,
@@ -1211,6 +1344,94 @@ fn fault_mod_core(core: &mut ServerModHostCore, mod_id: &str, reason: String) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn record_and_fault_mod_core(
+    core: &mut ServerModHostCore,
+    mod_id: &str,
+    trigger: InvocationTrigger,
+    event: &ActiveEvent,
+    snapshot: &EngineSnapshot,
+    storage_cache: &BTreeMap<String, String>,
+    fuel_budget: u64,
+    reason: String,
+) {
+    let timestamp_unix_ms = current_timestamp_unix_ms(snapshot.time_secs);
+    let (
+        version,
+        language,
+        source_path,
+        binary_sha256,
+        permissions_mask,
+        http_hosts,
+        max_memory_bytes,
+    ) = match core.mods.get(mod_id) {
+        Some(m) => (
+            m.package.manifest.version.clone(),
+            PluginLanguage::infer_from_entry(
+                m.package.manifest.entry_server.as_deref(),
+                m.package.server_wasm.is_some(),
+            ),
+            m.package
+                .source_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned()),
+            m.binary_sha256.clone(),
+            m.package.manifest.permissions.bits(),
+            m.package.manifest.http_hosts.clone(),
+            m.package.manifest.max_memory_bytes,
+        ),
+        None => (
+            String::new(),
+            PluginLanguage::Unknown,
+            None,
+            String::new(),
+            0,
+            Vec::new(),
+            cs_mod_api::DEFAULT_MEMORY_BYTES,
+        ),
+    };
+
+    let fuel_consumed = infer_fuel_consumed(&reason, fuel_budget);
+    let stack_trace = format_stack_trace(
+        mod_id,
+        language,
+        &trigger,
+        &reason,
+        fuel_consumed,
+        fuel_budget,
+    );
+    let dump_id = ModFaultDump::make_dump_id(timestamp_unix_ms, mod_id, &trigger);
+    let dump = ModFaultDump {
+        schema_version: FAULT_DUMP_SCHEMA_VERSION,
+        dump_id,
+        timestamp_unix_ms,
+        mod_id: mod_id.to_string(),
+        version,
+        language,
+        source_path,
+        binary_sha256,
+        permissions_mask,
+        http_hosts,
+        fuel_budget,
+        max_memory_bytes,
+        trigger,
+        event: event.clone(),
+        snapshot: snapshot.clone(),
+        storage_cache: storage_cache.clone(),
+        rng_seed: DEFAULT_RNG_SEED,
+        fuel_consumed_before_trap: fuel_consumed,
+        error: reason.clone(),
+        stack_trace,
+        truncated: false,
+    };
+
+    let ServerModHostCore {
+        faults, storage, ..
+    } = &mut *core;
+    let _ = faults.record(dump, Some(&mut **storage));
+    fault_mod_core(core, mod_id, reason);
+}
+
 fn flush_rpc_side_effects_core(
     core_arc: &Arc<Mutex<ServerModHostCore>>,
     mut game: Option<&mut GameState>,
@@ -1376,14 +1597,23 @@ fn dispatch_hook_core(
                 storage: &storage_cache,
                 fuel_budget,
             };
-            inst.call_hook(hook, phase, &ctx)
+            catch_mod_call(|| inst.call_hook(hook, phase, &ctx))
         };
 
         let outcome = match call_res {
             Ok(o) => o,
             Err(err) => {
                 let mut core = core_arc.lock().unwrap_or_else(|e| e.into_inner());
-                fault_mod_core(&mut core, &mod_id, err.to_string());
+                record_and_fault_mod_core(
+                    &mut core,
+                    &mod_id,
+                    InvocationTrigger::Hook { hook, phase },
+                    event,
+                    &snapshot,
+                    &storage_cache,
+                    fuel_budget,
+                    err.to_string(),
+                );
                 continue;
             }
         };
@@ -1488,13 +1718,22 @@ fn tick_timers_core(
                 storage: &storage_cache,
                 fuel_budget,
             };
-            inst.call_timer(cb_id, arg, &ctx)
+            catch_mod_call(|| inst.call_timer(cb_id, arg, &ctx))
         };
         let outcome = match res {
             Ok(o) => o,
             Err(err) => {
                 let mut core = core_arc.lock().unwrap_or_else(|e| e.into_inner());
-                fault_mod_core(&mut core, &mod_id, err.to_string());
+                record_and_fault_mod_core(
+                    &mut core,
+                    &mod_id,
+                    InvocationTrigger::Timer { cb_id, arg },
+                    &ev,
+                    &snapshot,
+                    &storage_cache,
+                    fuel_budget,
+                    err.to_string(),
+                );
                 continue;
             }
         };
@@ -1558,13 +1797,27 @@ fn poll_webhooks_core(
                 storage: &storage_cache,
                 fuel_budget,
             };
-            inst.call_webhook(result.callback_id, i32::from(result.status_code), &ctx)
+            catch_mod_call(|| {
+                inst.call_webhook(result.callback_id, i32::from(result.status_code), &ctx)
+            })
         };
         let outcome = match res {
             Ok(o) => o,
             Err(err) => {
                 let mut core = core_arc.lock().unwrap_or_else(|e| e.into_inner());
-                fault_mod_core(&mut core, &result.mod_id, err.to_string());
+                record_and_fault_mod_core(
+                    &mut core,
+                    &result.mod_id,
+                    InvocationTrigger::Webhook {
+                        cb_id: result.callback_id,
+                        status_code: i32::from(result.status_code),
+                    },
+                    &ev,
+                    &snapshot,
+                    &storage_cache,
+                    fuel_budget,
+                    err.to_string(),
+                );
                 continue;
             }
         };
@@ -1621,13 +1874,28 @@ fn dispatch_menu_callback_core(
             storage: &storage_cache,
             fuel_budget,
         };
-        inst.call_menu(cb_id, slot, menu_id, item_index, &ctx)
+        catch_mod_call(|| inst.call_menu(cb_id, slot, menu_id, item_index, &ctx))
     };
     let outcome = match res {
         Ok(o) => o,
         Err(err) => {
             let mut core = core_arc.lock().unwrap_or_else(|e| e.into_inner());
-            fault_mod_core(&mut core, owner_id, err.to_string());
+            record_and_fault_mod_core(
+                &mut core,
+                owner_id,
+                InvocationTrigger::MenuSelect {
+                    cb_id,
+                    slot,
+                    menu_id,
+                    item_index,
+                    info: info.to_string(),
+                },
+                &ev,
+                &snapshot,
+                &storage_cache,
+                fuel_budget,
+                err.to_string(),
+            );
             return;
         }
     };
@@ -1704,13 +1972,25 @@ fn dispatch_rpc_event_core(
                     storage: &storage_cache,
                     fuel_budget,
                 };
-                inst.call_event(sub.callback_id, &ctx)
+                catch_mod_call(|| inst.call_event(sub.callback_id, &ctx))
             };
             let outcome = match res {
                 Ok(o) => o,
                 Err(err) => {
                     let mut core = core_arc.lock().unwrap_or_else(|e| e.into_inner());
-                    fault_mod_core(&mut core, &sub.owner_id, err.to_string());
+                    record_and_fault_mod_core(
+                        &mut core,
+                        &sub.owner_id,
+                        InvocationTrigger::RpcEvent {
+                            cb_id: sub.callback_id,
+                            event_name: event_name.to_string(),
+                        },
+                        &ev,
+                        &snapshot,
+                        &storage_cache,
+                        fuel_budget,
+                        err.to_string(),
+                    );
                     continue;
                 }
             };

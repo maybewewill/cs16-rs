@@ -17,6 +17,7 @@ pub const DEFAULT_MOD_OUT: &str = "dist/mods";
 const MOD_USAGE: &str = "\
 usage: cargo xtask mod new <id> --lang rust|cpp|go|py [--dir <parent>] [--name <title>] [--side server|client|both]
        cargo xtask mod build [dir] [--out <dir>]
+       cargo xtask mod replay <dump.json> [--mod-path <override>] [--json]
        cargo xtask mod-build [--out <dir>]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +54,7 @@ pub fn run_mod_cli(mut args: impl Iterator<Item = String>) -> Result<ExitCode, S
     match args.next().as_deref() {
         Some("new") => run_mod_new(args),
         Some("build") => run_mod_build_args(args),
+        Some("replay") => run_mod_replay_args(args),
         Some(other) => Err(format!("unknown `mod` subcommand `{other}`\n{MOD_USAGE}")),
         None => Err(MOD_USAGE.to_string()),
     }
@@ -153,6 +155,120 @@ fn run_mod_build_args(mut args: impl Iterator<Item = String>) -> Result<ExitCode
         );
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn run_mod_replay_args(mut args: impl Iterator<Item = String>) -> Result<ExitCode, String> {
+    let mut dump_path: Option<PathBuf> = None;
+    let mut mod_override: Option<PathBuf> = None;
+    let mut json_out = false;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--mod-path" => {
+                mod_override = Some(PathBuf::from(
+                    args.next().ok_or("--mod-path needs a value")?,
+                ));
+            }
+            "--json" => json_out = true,
+            other if other.starts_with('-') => {
+                return Err(format!("unknown argument `{other}`\n{MOD_USAGE}"));
+            }
+            pos => {
+                if dump_path.is_some() {
+                    return Err(format!("unexpected positional argument `{pos}`\n{MOD_USAGE}"));
+                }
+                dump_path = Some(PathBuf::from(pos));
+            }
+        }
+    }
+
+    let dump_path = dump_path.ok_or_else(|| format!("mod replay requires <dump.json>\n{MOD_USAGE}"))?;
+    let report = replay_dump_file(&dump_path, mod_override.as_deref())?;
+    if json_out {
+        println!("{}", report.to_json());
+    } else {
+        print!("{report}");
+    }
+    if report.outcome.is_pass() {
+        Ok(ExitCode::SUCCESS)
+    } else {
+        Ok(ExitCode::FAILURE)
+    }
+}
+
+/// Replays a `ModFaultDump` JSON file deterministically across `.wasm`, `.csmod`, `.py`, and `.amxx`.
+pub fn replay_dump_file(
+    dump_path: &Path,
+    mod_override: Option<&Path>,
+) -> Result<cs_mod_host::crash_dump::ReplayReport, String> {
+    use cs_mod_host::crash_dump::{
+        InvocationTrigger, ModFaultDump, PluginLanguage, hydrate_services_from_snapshot,
+        replay_fault_dump_from_path, replay_fault_dump_with_instance,
+    };
+    use cs_mod_host::natives::ActiveEvent;
+    use cs_mod_host::runtime::{ModExecContext, ModInstance};
+
+    let raw = fs::read_to_string(dump_path).map_err(|e| io_err(dump_path, &e))?;
+    let dump = ModFaultDump::from_json(&raw)?;
+    let target_path: PathBuf = match mod_override {
+        Some(p) => p.to_path_buf(),
+        None => dump
+            .source_path
+            .as_ref()
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                format!(
+                    "dump `{}` has no recorded source_path; pass --mod-path <path>",
+                    dump.dump_id
+                )
+            })?,
+    };
+
+    let py_file = if target_path.is_file()
+        && target_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("py"))
+    {
+        Some(target_path.clone())
+    } else if target_path.is_dir() && target_path.join("main.py").is_file() {
+        Some(target_path.join("main.py"))
+    } else {
+        None
+    };
+
+    if py_file.is_some() || dump.language == PluginLanguage::Python {
+        let script_path = py_file.unwrap_or(target_path);
+        let source = fs::read_to_string(&script_path).map_err(|e| io_err(&script_path, &e))?;
+        let file_name = script_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("plugin.py");
+        let max_mem = dump.max_memory_bytes.max(65_536);
+        let mut inst = cs_mod_py::PyModInstance::from_source(
+            &dump.mod_id,
+            file_name,
+            &source,
+            dump.permissions(),
+            max_mem,
+        )
+        .map_err(|e| format!("failed to load Python plugin `{}`: {e}", script_path.display()))?;
+        let services = hydrate_services_from_snapshot(&dump.snapshot);
+        inst.configure_v2(services, dump.http_hosts.clone(), None);
+        if dump.trigger != InvocationTrigger::Init {
+            let init_ev = ActiveEvent::default();
+            let init_ctx = ModExecContext {
+                snapshot: &dump.snapshot,
+                event: &init_ev,
+                storage: &dump.storage_cache,
+                fuel_budget: dump.fuel_budget.max(500_000),
+            };
+            let _ = inst.call_init(&init_ctx);
+        }
+        return Ok(replay_fault_dump_with_instance(&dump, &mut inst));
+    }
+
+    replay_fault_dump_from_path(dump_path, mod_override)
 }
 
 /// Summary of one packaged `.csmod` or validated standalone script produced by [`build_mods_in`].
@@ -1182,6 +1298,97 @@ mod tests {
             assert!(item.output_path.is_file());
             assert!(item.byte_len > 0);
         }
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn replay_dump_file_reproduces_and_verifies_fix_for_python_plugin() {
+        use cs_mod_api::{HookId, HookPhase};
+        use cs_mod_host::crash_dump::{
+            DEFAULT_RNG_SEED, FAULT_DUMP_SCHEMA_VERSION, InvocationTrigger, ModFaultDump,
+            PluginLanguage,
+        };
+        use cs_mod_host::natives::{ActiveEvent, ClientSnap, EngineSnapshot};
+
+        let tmp = temp_test_dir("py_replay");
+        let buggy_py = tmp.join("buggy.py");
+        let fixed_py = tmp.join("fixed.py");
+        fs::write(
+            &buggy_py,
+            r#"from cs16 import mod, HookAction
+@mod.hook("player_take_damage", phase="pre")
+def on_dmg(ev):
+    ratio = ev.damage / 0
+    return HookAction.CONTINUE
+"#,
+        )
+        .unwrap();
+        fs::write(
+            &fixed_py,
+            r#"from cs16 import mod, HookAction
+@mod.hook("player_take_damage", phase="pre")
+def on_dmg(ev):
+    ev.damage = ev.damage * 0.5
+    return HookAction.OVERRIDE
+"#,
+        )
+        .unwrap();
+
+        let mut snap = EngineSnapshot {
+            time_secs: 42.0,
+            max_clients: 4,
+            map_name: "de_dust2".to_string(),
+            ..Default::default()
+        };
+        snap.clients.push(ClientSnap {
+            slot: 0,
+            active: true,
+            name: "Victim".to_string(),
+            alive: true,
+            health: 100.0,
+            ..Default::default()
+        });
+        let ev = ActiveEvent {
+            i32_args: [0, 1, 2, 28, 0, 0],
+            f32_args: [50.0, 0.0, 0.0, 0.0],
+            ..Default::default()
+        };
+        let dump = ModFaultDump {
+            schema_version: FAULT_DUMP_SCHEMA_VERSION,
+            dump_id: "test_py_div0".to_string(),
+            timestamp_unix_ms: 1_700_000_000_000,
+            mod_id: "buggy".to_string(),
+            version: "1.0.0".to_string(),
+            language: PluginLanguage::Python,
+            binary_sha256: "00".to_string(),
+            source_path: Some(buggy_py.to_string_lossy().into_owned()),
+            permissions_mask: cs_mod_py::default_python_permissions().bits(),
+            http_hosts: Vec::new(),
+            max_memory_bytes: 4 * 1024 * 1024,
+            fuel_budget: 500_000,
+            fuel_consumed_before_trap: 120,
+            rng_seed: DEFAULT_RNG_SEED,
+            trigger: InvocationTrigger::Hook {
+                hook: HookId::PlayerTakeDamage,
+                phase: HookPhase::Pre,
+            },
+            event: ev,
+            snapshot: snap,
+            storage_cache: BTreeMap::new(),
+            error: "ZeroDivisionError: division by zero".to_string(),
+            stack_trace: vec!["buggy.py:4".to_string()],
+            truncated: false,
+        };
+        let dump_path = tmp.join("dump.json");
+        fs::write(&dump_path, dump.to_bounded_json().1).unwrap();
+
+        let rep_buggy = replay_dump_file(&dump_path, None).unwrap();
+        assert!(rep_buggy.outcome.is_fault(), "expected fault on buggy.py: {rep_buggy}");
+
+        let rep_fixed = replay_dump_file(&dump_path, Some(&fixed_py)).unwrap();
+        assert!(rep_fixed.outcome.is_pass(), "expected pass on fixed.py: {rep_fixed}");
+        assert_eq!(rep_fixed.override_f32, Some(25.0));
+
         let _ = fs::remove_dir_all(&tmp);
     }
 }
