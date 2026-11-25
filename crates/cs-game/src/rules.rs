@@ -1127,6 +1127,7 @@ pub(crate) fn on_disconnect(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8
         }
     }
     crate::vip::on_disconnect(g, slot);
+    g.kz.reset_player(slot);
     teams::announce_departure(eng, slot);
     observer::on_target_left(g, eng, slot);
     check_win_conditions(g, eng);

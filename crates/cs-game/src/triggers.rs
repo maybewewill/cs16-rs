@@ -419,6 +419,7 @@ impl GameEntity for TriggerPush {
             return;
         };
         let push = dir * self.speed;
+        crate::kz::on_player_push(g, eng, other);
         if sf & SF_TRIGGER_PUSH_ONCE != 0 {
             if let Some(ov) = eng.ent_mut(other) {
                 ov.velocity += push;
@@ -475,10 +476,14 @@ impl GameEntity for TriggerTeleport {
         let Some((dest_origin, dest_angles)) = eng.ent(dest).map(|v| (v.origin, v.angles)) else {
             return;
         };
+        let keep_vel = eng.cvar_f32("sv_kz_keep_teleport_vel") != 0.0;
+        crate::kz::on_player_teleport(g, eng, other);
         eng.set_origin(other, dest_origin + Vec3::new(0.0, 0.0, 1.0));
         if let Some(ov) = eng.ent_mut(other) {
-            ov.velocity = Vec3::ZERO;
-            ov.basevelocity = Vec3::ZERO;
+            if !keep_vel {
+                ov.velocity = Vec3::ZERO;
+                ov.basevelocity = Vec3::ZERO;
+            }
             ov.angles = dest_angles;
             ov.v_angle = dest_angles;
             ov.fixangle = 1;

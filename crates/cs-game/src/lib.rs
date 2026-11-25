@@ -32,6 +32,7 @@ pub mod intro;
 pub mod inventory;
 pub mod io;
 pub mod items;
+pub mod kz;
 pub mod mapcycle;
 pub mod menus;
 mod messages;
@@ -150,6 +151,8 @@ pub struct GameState {
     pub round_damage: [[RoundDamageEntry; MAX_PLAYERS]; MAX_PLAYERS],
     /// Whether `sv_damage_print` already sent this round's summary to `slot` (e.g. on death).
     pub damage_printed: [bool; MAX_PLAYERS],
+    /// Built-in KZ checkpoints, map timer leaderboard, and server-side JumpStats.
+    pub kz: kz::KzState,
     /// Every call the dispatch delivered to a `test_dispatch` entity. For tests only (feature
     /// `test-hooks`).
     #[cfg(feature = "test-hooks")]
@@ -190,6 +193,7 @@ impl GameState {
             practice_impacts: std::collections::VecDeque::new(),
             round_damage: [[RoundDamageEntry::default(); MAX_PLAYERS]; MAX_PLAYERS],
             damage_printed: [false; MAX_PLAYERS],
+            kz: kz::KzState::default(),
             #[cfg(feature = "test-hooks")]
             dispatch_log: Vec::new(),
         }
@@ -223,6 +227,7 @@ impl GameState {
         self.practice_impacts.clear();
         self.round_damage = [[RoundDamageEntry::default(); MAX_PLAYERS]; MAX_PLAYERS];
         self.damage_printed = [false; MAX_PLAYERS];
+        self.kz.reset_map();
     }
 }
 

@@ -588,6 +588,13 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     reg.register("cl_mute_enemy_team", "0", arch, "Mute opposing team chat and voice (0 or 1)");
     reg.register("sv_damage_print", "0", srv, "Print round Damage Given/Taken summary to player console on death/round end (0 or 1)");
     reg.register("mp_knife_round", "0", srv, "Start a knife-only round with .stay/.switch before lo3 (0 or 1)");
+
+    // Task 10: Built-in KZ/bhop mode and Kreedz JumpStats (all disabled/"0" by default).
+    reg.register("sv_kz_mode", "0", srv, "Built-in KZ mode: checkpoints, func_button map timers, and non-lethal fall damage (0 or 1)");
+    reg.register("sv_kz_keep_teleport_vel", "0", srv, "Preserve player velocity across trigger_teleport in KZ/bhop mode (0 or 1)");
+    reg.register("sv_ljstats", "0", srv, "Enable server-side Kreedz JumpStats console reports (0 or 1)");
+    reg.register("cl_ljstats", "0", arch, "Enable client-side Kreedz JumpStats HUD and console reports (0 or 1)");
+    reg.register("cl_ljstats_min", "215", arch, "Minimum jump distance in units to report in JumpStats");
 }
 
 pub fn register_default_binds(reg: &mut CVarRegistry) {

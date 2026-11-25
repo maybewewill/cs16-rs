@@ -69,8 +69,8 @@ use cs_client::ui::vgui_assets::VguiAssetBank;
 use cs_client::ui::vgui_theme::{VguiPalette, apply_vgui2_theme};
 use cs_client::ui::{
     CrosshairInputs, CrosshairState, FrameTelemetry, KeyDisplayState, draw_crosshair_vgui,
-    draw_net_graph_with_telemetry, draw_r_speeds, draw_showkeys, draw_showpos, draw_showspeed,
-    draw_top_left_console_overlays, should_draw_dynamic_crosshair,
+    draw_ljstats, draw_net_graph_with_telemetry, draw_r_speeds, draw_showkeys, draw_showpos,
+    draw_showspeed, draw_top_left_console_overlays, should_draw_dynamic_crosshair,
 };
 use cs_client::view::{FrameView, ViewInputs, ViewStats};
 use cs_client::view_effects::{calc_view_idle, calc_viewmodel_angles};
@@ -224,6 +224,8 @@ pub struct Cs16App {
     last_log_seen: usize,
     strafe_sidemove: f32,
     voice_player_scales: [f32; 32],
+    lj_tracker: cs_pm::ljstats::JumpTracker,
+    last_ljstats: Option<(f64, cs_pm::ljstats::JumpStats)>,
 }
 
 struct PendingRcon {
@@ -372,6 +374,8 @@ impl Cs16App {
             last_log_seen,
             strafe_sidemove: 0.0,
             voice_player_scales: [1.0; 32],
+            lj_tracker: cs_pm::ljstats::JumpTracker::default(),
+            last_ljstats: None,
         }
     }
 
@@ -2674,6 +2678,57 @@ impl Cs16App {
                         || held.impulse_actions.is_some_and(|a| a.contains("duck")),
                 };
                 draw_showkeys(&rt.egui_ctx, &self.cvars, &keys_disp);
+                if self.cvars.get_bool("cl_ljstats") {
+                    if let Some(s) = self.session.local_lj_sample() {
+                        if s.teleported {
+                            self.lj_tracker.invalidate();
+                        } else {
+                            let min_cvar = self.cvars.get_f32("cl_ljstats_min");
+                            let min_distance = if min_cvar > 0.0 { min_cvar } else { 215.0 };
+                            let sidemove = match (keys_disp.left, keys_disp.right) {
+                                (true, false) => -400.0,
+                                (false, true) => 400.0,
+                                _ => 0.0,
+                            };
+                            let forwardmove = match (keys_disp.forward, keys_disp.back) {
+                                (true, false) => 400.0,
+                                (false, true) => -400.0,
+                                _ => 0.0,
+                            };
+                            if let Some(stats) =
+                                self.lj_tracker.observe(cs_pm::ljstats::JumpFrameInput {
+                                    dt,
+                                    origin: s.origin,
+                                    velocity: s.velocity,
+                                    on_ground: s.on_ground,
+                                    ducking: s.ducking,
+                                    waterlevel: s.waterlevel,
+                                    on_ladder: false,
+                                    noclip: false,
+                                    jump_pressed: keys_disp.jump,
+                                    sidemove,
+                                    forwardmove,
+                                    gravity: s.gravity,
+                                    airaccelerate: s.airaccelerate,
+                                    maxspeed: s.maxspeed,
+                                    is_highjump_edge: false,
+                                    min_distance,
+                                })
+                            {
+                                self.cvars.info(stats.format_summary());
+                                self.last_ljstats = Some((f64::from(time_sec), stats));
+                            }
+                        }
+                    }
+                    let active_stats = self
+                        .last_ljstats
+                        .as_ref()
+                        .filter(|(t, _)| f64::from(time_sec) - *t <= 5.0)
+                        .map(|(_, s)| s);
+                    draw_ljstats(&rt.egui_ctx, &self.cvars, active_stats);
+                } else {
+                    self.lj_tracker.invalidate();
+                }
             }
             if self
                 .session

@@ -396,8 +396,9 @@ pub(crate) fn run_pmove(
         return;
     };
     let mut pm = setup_pmove(eng, slot, v, cmd, old_angles, movevars, &physents);
+    let was_grounded = pm.onground != -1;
 
-    {
+    let is_highjump_edge = {
         let mut world = EnginePmWorld {
             eng: &mut *eng,
             physents: &physents,
@@ -405,11 +406,38 @@ pub(crate) fn run_pmove(
             rng: &mut g.rng,
         };
         pm_move(&mut pm, &mut g.pm_shared, &mut world, true);
-    }
+        let horiz = Vec3::new(pm.velocity.x, pm.velocity.y, 0.0);
+        if was_grounded && pm.onground == -1 && pm.velocity.z > 100.0 && horiz.length_squared() > 100.0 * 100.0 {
+            let dir = horiz.normalize();
+            let ahead = pm.origin + dir * 36.0;
+            let fwd = world.player_trace(
+                pm.origin,
+                ahead,
+                pm.usehull,
+                cs_sim::pm::consts::PM_NORMAL,
+                -1,
+            );
+            if fwd.fraction >= 0.99 {
+                let down = world.player_trace(
+                    ahead,
+                    ahead - Vec3::new(0.0, 0.0, 72.0),
+                    pm.usehull,
+                    cs_sim::pm::consts::PM_NORMAL,
+                    -1,
+                );
+                down.fraction >= 0.99
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    };
 
     if let Some(v) = eng.ent_mut(id) {
         finish_pmove(v, &pm, &physents);
     }
+    crate::kz::on_pmove_step(g, eng, slot, cmd, &pm, is_highjump_edge);
     // `SV_ProcessImpacts`: `touch = EDICT_NUM(physents[tr->ent].info)` for each touch.
     for tr in &pm.touchindex {
         if let Some(other) = physents.edict_of(tr.ent) {

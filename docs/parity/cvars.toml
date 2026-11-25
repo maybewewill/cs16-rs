@@ -3542,3 +3542,63 @@ evidence = "crates/cs-cvar/src/lib.rs; crates/cs-game/tests/phase14_task9.rs::lo
 id = "mp_knife_round"
 status = "tested"
 evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-game/tests/phase14_task9.rs::mp_knife_round_stay_and_switch_trigger_lo3"
+
+[[item]]
+id = "sv_kz_mode"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-game/tests/phase14_task10.rs::kz_checkpoints_and_map_timer_workflow"
+
+[[item]]
+id = "sv_kz_keep_teleport_vel"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-game/tests/phase14_task10.rs::kz_teleport_keeps_velocity_and_invalidates_jumpstats"
+
+[[item]]
+id = "sv_ljstats"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-game/tests/phase14_task10.rs::kz_ljstats_server_console_output_and_drop_rejection"
+
+[[item]]
+id = "cl_ljstats"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/tests/phase14_task10_client.rs::cl_ljstats_hud_renders_and_respects_min_threshold"
+
+[[item]]
+id = "cl_ljstats_min"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/tests/phase14_task10_client.rs::cl_ljstats_hud_renders_and_respects_min_threshold"
+
+[[item]]
+id = "cp"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs; crates/cs-game/tests/phase14_task10.rs::kz_checkpoints_and_map_timer_workflow"
+
+[[item]]
+id = "tp"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs; crates/cs-game/tests/phase14_task10.rs::kz_checkpoints_and_map_timer_workflow"
+
+[[item]]
+id = "gocheck"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs; crates/cs-game/tests/phase14_task10.rs::kz_checkpoints_and_map_timer_workflow"
+
+[[item]]
+id = "prevcp"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs; crates/cs-game/tests/phase14_task10.rs::kz_checkpoints_and_map_timer_workflow"
+
+[[item]]
+id = "stuck"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs; crates/cs-game/tests/phase14_task10.rs::kz_checkpoints_and_map_timer_workflow"
+
+[[item]]
+id = "start"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs; crates/cs-game/tests/phase14_task10.rs::kz_checkpoints_and_map_timer_workflow"
+
+[[item]]
+id = "reset"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs; crates/cs-game/tests/phase14_task10.rs::kz_checkpoints_and_map_timer_workflow"

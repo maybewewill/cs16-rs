@@ -358,6 +358,47 @@ pub fn draw_showkeys(ctx: &egui::Context, cvars: &CVarRegistry, keys: &KeyDispla
     );
 }
 
+/// Draw `cl_ljstats 1` latest completed Kreedz jump summary above the speed/keys HUD.
+pub fn draw_ljstats(
+    ctx: &egui::Context,
+    cvars: &CVarRegistry,
+    stats: Option<&cs_pm::ljstats::JumpStats>,
+) {
+    if cvars.get_f32("cl_ljstats") == 0.0 {
+        return;
+    }
+    let Some(stats) = stats else {
+        return;
+    };
+    let min_dist = cvars.get_f32("cl_ljstats_min");
+    let min_threshold = if min_dist > 0.0 { min_dist } else { 215.0 };
+    if stats.distance < min_threshold {
+        return;
+    }
+    let screen = ctx.content_rect();
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::unique("cs16_cl_ljstats"),
+    ));
+    let font = FontId::monospace(13.0);
+    let label = stats.format_summary();
+    let pos = Pos2::new(screen.center().x, screen.bottom() - 122.0);
+    painter.text(
+        pos + egui::vec2(1.0, 1.0),
+        egui::Align2::CENTER_BOTTOM,
+        &label,
+        font.clone(),
+        Color32::from_black_alpha(220),
+    );
+    painter.text(
+        pos,
+        egui::Align2::CENTER_BOTTOM,
+        &label,
+        font,
+        Color32::from_rgb(110, 235, 160),
+    );
+}
+
 /// Draw the classic 4-bar Counter-Strike 1.6 crosshair in the center of the screen.
 pub fn draw_crosshair(ctx: &egui::Context, cvars: &CVarRegistry, dynamic_extra_gap: f32) {
     let mut state = CrosshairState {

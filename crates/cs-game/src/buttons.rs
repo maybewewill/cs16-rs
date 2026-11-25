@@ -109,6 +109,7 @@ impl FuncButton {
         }
 
         use_targets(g, eng, id, activator, UseType::Toggle, 0.0);
+        crate::kz::on_func_button_press(g, eng, id, activator);
         if self.dont_move || self.pos1 == self.pos2 {
             self.state = ButtonState::Pressed;
             if !self.stay_pressed && !self.toggle && self.wait >= 0.0 {

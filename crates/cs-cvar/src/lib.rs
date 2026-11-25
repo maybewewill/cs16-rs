@@ -477,6 +477,13 @@ const KNOWN_COMMANDS: &[(&str, &str)] = &[
     ("cfg_diff", "Print only CVars whose value differs from the vanilla CS 1.6 default"),
     ("lo3", "Run competitive Live on Three (3-restart) scrim sequence"),
     ("mp_live_on_three", "Run competitive Live on Three (3-restart) scrim sequence"),
+    ("cp", "Save a KZ checkpoint on solid ground (requires sv_kz_mode 1)"),
+    ("tp", "Teleport to latest KZ checkpoint (requires sv_kz_mode 1)"),
+    ("gocheck", "Teleport to latest KZ checkpoint (requires sv_kz_mode 1)"),
+    ("prevcp", "Step back to previous KZ checkpoint (requires sv_kz_mode 1)"),
+    ("stuck", "Step back to previous KZ checkpoint (requires sv_kz_mode 1)"),
+    ("start", "Teleport to KZ run start and reset timer (requires sv_kz_mode 1)"),
+    ("reset", "Reset KZ timer and checkpoints (requires sv_kz_mode 1)"),
 ];
 
 /// Commands that never go to a server, even when the console does not know them: the rcon and
@@ -1239,14 +1246,26 @@ impl CVarRegistry {
             "force_centerview" | "centerview" => actions.push(EngineAction::ForceCenterView),
             "noclip" => actions.push(EngineAction::ToggleNoclip),
             "notarget" | "fly" | "rethrow" | "sv_rethrow_last_grenade" | "give_all"
-            | "ammo_full" | "autobuy" | "rebuy" | "setinfo" | "fullinfo" | "new" | "sendres"
+            | "ammo_full" | "cp" | "tp" | "gocheck" | "prevcp" | "stuck" | "start"
+            | "reset" | "autobuy" | "rebuy" | "setinfo" | "fullinfo" | "new" | "sendres"
             | "spawn" | "sendents" => {
                 if self.forward_unknown {
                     actions.push(EngineAction::Forward(tokens.to_vec()));
                 } else if matches!(
                     cmd.as_str(),
-                    "notarget" | "fly" | "rethrow" | "sv_rethrow_last_grenade" | "give_all"
+                    "notarget"
+                        | "fly"
+                        | "rethrow"
+                        | "sv_rethrow_last_grenade"
+                        | "give_all"
                         | "ammo_full"
+                        | "cp"
+                        | "tp"
+                        | "gocheck"
+                        | "prevcp"
+                        | "stuck"
+                        | "start"
+                        | "reset"
                 ) {
                     self.warn(format!("\"{cmd}\" requires an active game session"));
                 }

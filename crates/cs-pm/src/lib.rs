@@ -4,5 +4,6 @@
 //! sockets or files, depends only on `cs-assets` and `glam`, and builds for wasm.
 
 pub mod collision;
+pub mod ljstats;
 pub mod physent;
 pub mod pm;

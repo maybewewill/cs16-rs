@@ -1282,6 +1282,7 @@ pub(crate) fn spawn(
     if let Some(p) = g.players[index].as_mut() {
         p.num_spawns += 1;
     }
+    crate::kz::on_player_spawn(g, eng, slot);
     messages::set_scoreboard_attributes(g, eng, index);
     if let Some(p) = g.players[index].as_ref() {
         eng.send_usermsg(
@@ -2059,7 +2060,10 @@ fn post_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let (health, fall_velocity) = (p.health, p.fall_velocity);
     if flags & FL_ONGROUND != 0 && health > 0.0 && fall_velocity >= PLAYER_FALL_PUNCH_THRESHHOLD {
         if watertype != CONTENT_WATER && fall_velocity > MAX_PLAYER_SAFE_FALL_SPEED {
-            let damage = fall_damage(fall_velocity);
+            let mut damage = fall_damage(fall_velocity);
+            if eng.cvar_f32("sv_kz_mode") != 0.0 {
+                damage = damage.min((health - 1.0).max(0.0));
+            }
             if damage > health {
                 // Played on the item channel: the footstep landing uses the body channel.
                 eng.emit_sound(
@@ -3574,6 +3578,9 @@ pub(crate) fn client_command(
             return;
         }
         refill_player_ammo(g, eng, slot);
+        return;
+    }
+    if crate::kz::handle_command(g, eng, slot, command, false) {
         return;
     }
     // The game compares the rest exactly (`FStrEq`).
