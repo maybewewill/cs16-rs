@@ -200,6 +200,7 @@ impl LocalGame {
     ) -> Result<Self, String> {
         if opts.mods_dir.is_some() || opts.amxx_dir.is_some() || opts.plugins_toml.is_some() {
             let mut host = ServerModHost::new();
+            cs_mod_py::attach_python_runtime(&mut host);
             if let Some(ref v) = vfs {
                 let _ = host.load_configs_dir(v.root().join("cstrike"));
             }
@@ -216,6 +217,7 @@ impl LocalGame {
                 let pkgs = cs_mod_host::discover_packages(dir)
                     .map_err(|e| format!("failed to scan mods dir `{}`: {e}", dir.display()))?;
                 host.set_mods_dir(dir);
+                let mut loaded_ids = std::collections::BTreeSet::new();
                 for pkg in pkgs {
                     if let Some(ref mut v) = vfs
                         && !pkg.assets.is_empty()
@@ -232,6 +234,12 @@ impl LocalGame {
                     let id = pkg.manifest.id.clone();
                     host.load_package(pkg)
                         .map_err(|e| format!("failed to load mod `{id}`: {e}"))?;
+                    loaded_ids.insert(id);
+                }
+                for py_mod in cs_mod_py::discover_python_mods(dir)? {
+                    if !loaded_ids.contains(&py_mod.mod_id) {
+                        host.load_python_file(&py_mod.script_path)?;
+                    }
                 }
             }
             if let Some(ref dir) = opts.amxx_dir {

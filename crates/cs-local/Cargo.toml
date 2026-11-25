@@ -15,6 +15,7 @@ cs-cvar.workspace = true
 cs-engine.workspace = true
 cs-game.workspace = true
 cs-mod-host.workspace = true
+cs-mod-py.workspace = true
 cs-proto48.workspace = true
 cs-transport.workspace = true
 cs-vfs.workspace = true

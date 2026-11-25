@@ -1,0 +1,18 @@
+[package]
+name = "cs-mod-py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+cs-mod-api = { workspace = true, features = ["services"] }
+cs-mod-host = { workspace = true }
+cs-pm = { workspace = true }
+glam = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

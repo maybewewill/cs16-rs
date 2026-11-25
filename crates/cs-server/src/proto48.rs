@@ -273,6 +273,7 @@ fn build_unified_mod_host(
         return Ok(None);
     }
     let mut host = cs_mod_host::ServerModHost::new();
+    cs_mod_py::attach_python_runtime(&mut host);
     let _ = host.load_configs_dir(vfs.root().join("cstrike"));
     let _ = host.load_configs_dir(".");
 
@@ -295,6 +296,7 @@ fn build_unified_mod_host(
             .map_err(|e| format!("failed to scan mods dir `{}`: {e}", dir.display()))?;
         host.set_mods_dir(dir);
         let mut loaded = 0usize;
+        let mut loaded_ids = std::collections::BTreeSet::new();
         for pkg in packages {
             if !pkg.assets.is_empty() {
                 let entries: Vec<(String, Vec<u8>)> = pkg
@@ -309,7 +311,14 @@ fn build_unified_mod_host(
             let id = pkg.manifest.id.clone();
             host.load_package(pkg)
                 .map_err(|e| format!("failed to load mod `{id}`: {e}"))?;
+            loaded_ids.insert(id);
             loaded += 1;
+        }
+        for py_mod in cs_mod_py::discover_python_mods(dir)? {
+            if !loaded_ids.contains(&py_mod.mod_id) {
+                host.load_python_file(&py_mod.script_path)?;
+                loaded += 1;
+            }
         }
         info!(dir = %dir.display(), count = loaded, "loaded server mods");
     }

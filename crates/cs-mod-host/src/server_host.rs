@@ -43,7 +43,9 @@ use crate::natives::{
     ActiveEvent, ClientSnap, EngineOp, EngineSnapshot, EntitySnap, RpcDispatcher,
 };
 use crate::package::{LoadedPackage, PackageError, discover_packages};
-use crate::runtime::{ModCallOutcome, ModExecContext, ModInstance, ModRuntime, WasmiRuntime};
+use crate::runtime::{
+    ModCallOutcome, ModExecContext, ModInstance, ModRuntime, PythonModRuntime, WasmiRuntime,
+};
 use crate::webhook::WebhookClient;
 
 const MAX_HOOK_DEPTH: u8 = 4;
@@ -85,6 +87,7 @@ pub struct ModInfo {
 
 struct ServerModHostCore {
     runtime: Box<dyn ModRuntime>,
+    python_runtime: Option<Box<dyn PythonModRuntime>>,
     mods: BTreeMap<String, HostedMod>,
     load_order: Vec<String>,
     hooks: HookTable,
@@ -102,6 +105,10 @@ struct ServerModHostCore {
     wasi_logs: Vec<(String, String)>,
     hook_depth: Arc<AtomicU8>,
     amxx: Option<Arc<Mutex<AmxxRuntime>>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    py_watch: BTreeMap<String, (PathBuf, Option<std::time::SystemTime>, u64)>,
+    #[cfg(not(target_arch = "wasm32"))]
+    last_autoreload_poll_secs: Option<f64>,
 }
 
 struct HostRpcDispatcher {
@@ -134,7 +141,10 @@ impl RpcDispatcher for HostRpcDispatcher {
                 args,
             );
         }
-        if entry.runtime != PluginRuntimeKind::Wasm {
+        if !matches!(
+            entry.runtime,
+            PluginRuntimeKind::Wasm | PluginRuntimeKind::Python
+        ) {
             return None;
         }
         let (inst_arc, storage, fuel_budget) = {
@@ -265,7 +275,10 @@ impl AmxxExternalRpc for HostAmxxExternalRpc {
         }
         let snap = EngineSnapshot::default();
         for sub in subs {
-            if sub.runtime != PluginRuntimeKind::Wasm {
+            if !matches!(
+                sub.runtime,
+                PluginRuntimeKind::Wasm | PluginRuntimeKind::Python
+            ) {
                 continue;
             }
             let target = {
@@ -338,6 +351,7 @@ impl ServerModHost {
     ) -> Self {
         let core = ServerModHostCore {
             runtime,
+            python_runtime: None,
             mods: BTreeMap::new(),
             load_order: Vec::new(),
             hooks: HookTable::default(),
@@ -355,10 +369,26 @@ impl ServerModHost {
             wasi_logs: Vec::new(),
             hook_depth: Arc::new(AtomicU8::new(0)),
             amxx: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            py_watch: BTreeMap::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            last_autoreload_poll_secs: None,
         };
         Self {
             core: Arc::new(Mutex::new(core)),
         }
+    }
+
+    /// Registers a pure-Rust Python scripting runtime (`cs-mod-py`) so `.py` plugins can be
+    /// discovered, loaded, executed, and hot-reloaded seamlessly alongside `.wasm` and `.amxx`.
+    pub fn set_python_runtime(&mut self, runtime: Box<dyn PythonModRuntime>) {
+        let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+        core.python_runtime = Some(runtime);
+    }
+
+    pub fn has_python_runtime(&self) -> bool {
+        let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+        core.python_runtime.is_some()
     }
 
     pub fn services(&self) -> SharedPlatformServices {
@@ -528,6 +558,20 @@ impl ServerModHost {
 
         for entry_path in cfg.mod_entries {
             let p = resolve_rel(toml_dir, &entry_path);
+            if p.is_file()
+                && p.extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("py"))
+            {
+                self.load_python_file(&p)?;
+                wasm_count += 1;
+                continue;
+            }
+            if p.is_dir() && !p.join("mod.toml").is_file() && p.join("main.py").is_file() {
+                self.load_python_file(&p.join("main.py"))?;
+                wasm_count += 1;
+                continue;
+            }
             let pkg = if p.is_dir() {
                 crate::package::load_package_dir(&p).map_err(|e| e.to_string())?
             } else {
@@ -616,13 +660,15 @@ impl ServerModHost {
         std::mem::take(&mut core.wasi_logs)
     }
 
-    /// Discovers and loads all mods from `mods_dir` in dependency order.
+    /// Discovers and loads all mods from `mods_dir` in dependency order (both WASM packages and
+    /// standalone Python `*.py` / `<dir>/main.py` plugins when a Python runtime is attached).
     pub fn load_dir(&mut self, mods_dir: impl Into<PathBuf>) -> Result<usize, PackageError> {
         let dir = mods_dir.into();
-        {
+        let py_enabled = {
             let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
             core.mods_dir = Some(dir.clone());
-        }
+            core.python_runtime.is_some()
+        };
         let packages = discover_packages(&dir)?;
         let mut count = 0usize;
         for pkg in packages {
@@ -632,7 +678,106 @@ impl ServerModHost {
                 count += 1;
             }
         }
+        if py_enabled && dir.is_dir() {
+            let mut py_paths = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.is_file()
+                        && p.extension()
+                            .and_then(|e| e.to_str())
+                            .is_some_and(|e| e.eq_ignore_ascii_case("py"))
+                    {
+                        py_paths.push(p);
+                    } else if p.is_dir() && !p.join("mod.toml").is_file() && p.join("main.py").is_file()
+                    {
+                        py_paths.push(p.join("main.py"));
+                    }
+                }
+            }
+            py_paths.sort();
+            for py_path in py_paths {
+                match self.load_python_file(&py_path) {
+                    Ok(_) => count += 1,
+                    Err(err) => warn!(path = %py_path.display(), %err, "failed to load Python mod"),
+                }
+            }
+        }
         Ok(count)
+    }
+
+    /// Loads or hot-reloads a standalone Python 3 script directly from source text while
+    /// preserving any persisted `mod.storage`.
+    ///
+    /// Syntax and metadata are validated BEFORE replacing any previously running instance, so a
+    /// broken edit leaves the previous live plugin intact.
+    pub fn load_python_source(
+        &mut self,
+        mod_id_fallback: &str,
+        file_name: &str,
+        source: &str,
+        source_path: Option<PathBuf>,
+    ) -> Result<String, String> {
+        let manifest = {
+            let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+            let py_rt = core
+                .python_runtime
+                .as_ref()
+                .ok_or_else(|| "Python mod runtime is not enabled on ServerModHost".to_string())?;
+            py_rt.synthesize_manifest(mod_id_fallback, file_name, source)?
+        };
+        let id = manifest.id.clone();
+        let pkg = LoadedPackage {
+            manifest,
+            source_path,
+            server_wasm: Some(source.as_bytes().to_vec()),
+            client_wasm: None,
+            client_bundle: None,
+            assets: BTreeMap::new(),
+        };
+        self.load_package(pkg)?;
+        Ok(id)
+    }
+
+    /// Reads and loads (or hot-reloads) a `.py` script from disk, synthesizing its manifest from
+    /// `@mod.info(...)` (or using an adjacent `mod.toml` when loading `<dir>/main.py`).
+    pub fn load_python_file(&mut self, path: &Path) -> Result<String, String> {
+        let file_name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("plugin.py");
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("py_plugin");
+        let fallback_id = if stem.eq_ignore_ascii_case("main") {
+            path.parent()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .unwrap_or("py_plugin")
+        } else {
+            stem
+        };
+        let source = std::fs::read_to_string(path)
+            .map_err(|e| format!("failed to read Python mod `{}`: {e}", path.display()))?;
+        if stem.eq_ignore_ascii_case("main")
+            && let Some(parent) = path.parent()
+            && parent.join("mod.toml").is_file()
+        {
+            let pkg = crate::package::load_package_dir(parent).map_err(|e| e.to_string())?;
+            let id = pkg.manifest.id.clone();
+            // Validate syntax before replacing the running instance.
+            {
+                let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+                let py_rt = core.python_runtime.as_ref().ok_or_else(|| {
+                    "Python mod runtime is not enabled on ServerModHost".to_string()
+                })?;
+                let _ = py_rt.synthesize_manifest(&id, file_name, &source)?;
+            }
+            self.load_package(pkg)?;
+            return Ok(id);
+        }
+        self.load_python_source(fallback_id, file_name, &source, Some(path.to_path_buf()))
     }
 
     fn make_rpc_dispatcher(&self) -> Arc<dyn RpcDispatcher> {
@@ -650,25 +795,39 @@ impl ServerModHost {
     /// Loads or replaces a single mod package (`cs_mod_init` runs immediately).
     pub fn load_package(&mut self, pkg: LoadedPackage) -> Result<(), String> {
         let id = pkg.manifest.id.clone();
-        self.unload_mod(&id);
-
+        let is_py = is_python_manifest(&pkg.manifest);
         let rpc_dispatcher = self.make_rpc_dispatcher();
-        let (mut instance, storage_cache, services) = {
-            let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
-            for um in &pkg.manifest.custom_usermsgs {
-                core.custom_usermsgs.insert(um.clone());
-            }
-            let inst = match &pkg.server_wasm {
-                Some(wasm) => {
-                    let mut boxed = core
-                        .runtime
-                        .instantiate(
-                            &id,
-                            wasm,
-                            pkg.manifest.permissions,
-                            pkg.manifest.max_memory_bytes,
-                        )
-                        .map_err(|e| e.to_string())?;
+
+        // Compile/instantiate before tearing down any existing live instance so broken reloads
+        // cannot knock out an active plugin.
+        let mut instance = {
+            let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+            match &pkg.server_wasm {
+                Some(payload) => {
+                    let mut boxed = if is_py {
+                        let py_rt = core.python_runtime.as_ref().ok_or_else(|| {
+                            format!(
+                                "cannot load Python mod `{id}`: Python runtime is not enabled"
+                            )
+                        })?;
+                        py_rt
+                            .instantiate(
+                                &id,
+                                payload,
+                                pkg.manifest.permissions,
+                                pkg.manifest.max_memory_bytes,
+                            )
+                            .map_err(|e| e.to_string())?
+                    } else {
+                        core.runtime
+                            .instantiate(
+                                &id,
+                                payload,
+                                pkg.manifest.permissions,
+                                pkg.manifest.max_memory_bytes,
+                            )
+                            .map_err(|e| e.to_string())?
+                    };
                     boxed.configure_v2(
                         core.services.clone(),
                         pkg.manifest.http_hosts.clone(),
@@ -677,7 +836,16 @@ impl ServerModHost {
                     Some(boxed)
                 }
                 None => None,
-            };
+            }
+        };
+
+        self.unload_mod(&id);
+
+        let (storage_cache, services) = {
+            let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+            for um in &pkg.manifest.custom_usermsgs {
+                core.custom_usermsgs.insert(um.clone());
+            }
 
             let mut storage_cache = BTreeMap::new();
             let index_key = format!("mod:{id}:__keys");
@@ -689,13 +857,10 @@ impl ServerModHost {
                     }
                 }
             }
-            (inst, storage_cache, core.services.clone())
+            (storage_cache, core.services.clone())
         };
 
-        let mut hooks_registered = Vec::new();
-        let mut ops = Vec::new();
-        let mut wasi_logs = Vec::new();
-        let mut init_fuel = 0u64;
+        let mut init_outcome = ModCallOutcome::default();
 
         if let Some(ref mut inst) = instance {
             let snap = EngineSnapshot::default();
@@ -708,10 +873,7 @@ impl ServerModHost {
             };
             match inst.call_init(&ctx) {
                 Ok(out) => {
-                    hooks_registered = out.hooks_registered;
-                    ops = out.ops;
-                    wasi_logs = out.wasi_logs;
-                    init_fuel = out.fuel_used;
+                    init_outcome = out;
                 }
                 Err(err) => {
                     let msg = err.to_string();
@@ -734,23 +896,31 @@ impl ServerModHost {
         }
 
         let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
-        for h in hooks_registered {
+        for h in &init_outcome.hooks_registered {
             core.hooks.register(&id, h.hook, h.phase, h.priority);
         }
         let mut registered_commands = BTreeSet::new();
-        for op in ops {
+        for op in &init_outcome.ops {
             match op {
                 EngineOp::RegisterCommand { name } => {
-                    registered_commands.insert(name);
+                    registered_commands.insert(name.clone());
                 }
                 EngineOp::RegisterCustomWeapon(spec) => {
-                    core.pending_custom_weapons.push(spec);
+                    core.pending_custom_weapons.push(spec.clone());
                 }
                 _ => {}
             }
         }
-        for line in wasi_logs {
-            core.wasi_logs.push((id.clone(), line));
+        for line in &init_outcome.wasi_logs {
+            core.wasi_logs.push((id.clone(), line.clone()));
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if is_py
+            && let Some(py_path) = resolve_python_watch_path(&pkg)
+        {
+            let (mtime, len) = py_file_stamp(&py_path);
+            core.py_watch.insert(id.clone(), (py_path, mtime, len));
         }
 
         let _ = services;
@@ -762,10 +932,12 @@ impl ServerModHost {
                 status: ModStatus::Active,
                 storage_cache,
                 registered_commands,
-                total_fuel_used: init_fuel,
+                total_fuel_used: init_outcome.fuel_used,
             },
         );
-        core.load_order.push(id);
+        core.load_order.push(id.clone());
+        schedule_timers_core(&mut core, &id, 0.0, &init_outcome);
+        persist_storage_writes_core(&mut core, &id, &init_outcome.storage_writes);
         Ok(())
     }
 
@@ -774,6 +946,8 @@ impl ServerModHost {
         core.hooks.unregister_mod(mod_id);
         core.timers.retain(|t| t.mod_id != mod_id);
         core.load_order.retain(|id| id != mod_id);
+        #[cfg(not(target_arch = "wasm32"))]
+        core.py_watch.remove(mod_id);
         {
             let mut svc = core.services.lock();
             svc.menus.clear_owner(mod_id);
@@ -799,6 +973,18 @@ impl ServerModHost {
                 .ok_or_else(|| format!("unknown source path for mod `{mod_id}`"))?
         };
 
+        if src.is_file()
+            && src
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("py"))
+        {
+            return self.load_python_file(&src).map(|_| ());
+        }
+        if src.is_dir() && !src.join("mod.toml").is_file() && src.join("main.py").is_file() {
+            return self.load_python_file(&src.join("main.py")).map(|_| ());
+        }
+
         let pkg = if src.is_dir() {
             crate::package::load_package_dir(&src).map_err(|e| e.to_string())?
         } else {
@@ -806,6 +992,49 @@ impl ServerModHost {
             crate::package::load_package_csmod(&bytes, Some(src)).map_err(|e| e.to_string())?
         };
         self.load_package(pkg)
+    }
+
+    /// Polls watched `.py` plugin files for `mtime`/size changes (at most once per `1.0 s` unless
+    /// `force == true`) and hot-reloads any modified scripts while preserving `mod.storage`.
+    pub fn poll_autoreload(&mut self, now_secs: f64, force: bool) -> Vec<(String, Result<(), String>)> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (now_secs, force);
+            Vec::new()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let changed: Vec<(String, PathBuf)> = {
+                let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+                if core.py_watch.is_empty() {
+                    return Vec::new();
+                }
+                if !force
+                    && let Some(prev) = core.last_autoreload_poll_secs
+                    && now_secs >= prev
+                    && (now_secs - prev) < 1.0
+                {
+                    return Vec::new();
+                }
+                core.last_autoreload_poll_secs = Some(now_secs);
+                let mut dirty = Vec::new();
+                for (mod_id, (path, last_mtime, last_len)) in &mut core.py_watch {
+                    let (mtime, len) = py_file_stamp(path);
+                    if mtime != *last_mtime || len != *last_len {
+                        *last_mtime = mtime;
+                        *last_len = len;
+                        dirty.push((mod_id.clone(), path.clone()));
+                    }
+                }
+                dirty
+            };
+            let mut results = Vec::with_capacity(changed.len());
+            for (mod_id, path) in changed {
+                let res = self.load_python_file(&path).map(|_| ());
+                results.push((mod_id, res));
+            }
+            results
+        }
     }
 
     pub fn list_mods(&self) -> Vec<ModInfo> {
@@ -1444,7 +1673,10 @@ fn dispatch_rpc_event_core(
         };
 
         for sub in subs {
-            if sub.runtime != PluginRuntimeKind::Wasm {
+            if !matches!(
+                sub.runtime,
+                PluginRuntimeKind::Wasm | PluginRuntimeKind::Python
+            ) {
                 continue;
             }
             let target = {
@@ -3160,7 +3392,7 @@ impl<G: GameDll + 'static> GameDll for ModdedGame<G> {
                     );
                     if pre.action != HookAction::Supercede {
                         match owner_runtime {
-                            PluginRuntimeKind::Wasm => {
+                            PluginRuntimeKind::Wasm | PluginRuntimeKind::Python => {
                                 dispatch_menu_callback_core(
                                     &core_arc,
                                     self.cs_state_mut(),
@@ -3214,7 +3446,7 @@ impl<G: GameDll + 'static> GameDll for ModdedGame<G> {
                 } => {
                     let core_arc = self.host.core_arc();
                     match owner_runtime {
-                        PluginRuntimeKind::Wasm => {
+                        PluginRuntimeKind::Wasm | PluginRuntimeKind::Python => {
                             dispatch_menu_callback_core(
                                 &core_arc,
                                 self.cs_state_mut(),
@@ -3423,6 +3655,13 @@ impl<G: GameDll + 'static> GameDll for ModdedGame<G> {
             }
         }
         let core_arc = self.host.core_arc();
+        if eng.cvar_f32("sv_mod_autoreload") >= 1.0 {
+            for (mod_id, res) in self.host.poll_autoreload(eng.time(), false) {
+                if let Err(err) = res {
+                    warn!(%mod_id, %err, "auto-reload of Python mod failed; keeping previous instance");
+                }
+            }
+        }
         poll_webhooks_core(&core_arc, self.cs_state_mut(), eng);
         tick_timers_core(&core_arc, self.cs_state_mut(), eng);
         if let Some(unhandled) =
@@ -3927,7 +4166,7 @@ fn parse_plugins_toml(src: &str) -> PluginsTomlConfig {
                 "mods_dir" => cfg.mods_dir = Some(unquoted),
                 "amxx_dir" => cfg.amxx_dir = Some(unquoted),
                 "configs_dir" => cfg.configs_dir = Some(unquoted),
-                "mods" => {
+                "mods" | "python" => {
                     for item in parse_toml_string_array(val) {
                         cfg.mod_entries.push(item);
                     }
@@ -3943,6 +4182,43 @@ fn parse_plugins_toml(src: &str) -> PluginsTomlConfig {
     }
     flush(&mut cfg, &mut cur_path, &mut cur_enabled, &mut cur_kind);
     cfg
+}
+
+fn is_python_manifest(manifest: &cs_mod_api::ModManifest) -> bool {
+    manifest
+        .entry_server
+        .as_deref()
+        .is_some_and(|e| e.to_ascii_lowercase().ends_with(".py"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve_python_watch_path(pkg: &LoadedPackage) -> Option<PathBuf> {
+    let src = pkg.source_path.as_ref()?;
+    if src.is_file()
+        && src
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("py"))
+    {
+        return Some(src.clone());
+    }
+    if src.is_dir()
+        && let Some(ref entry) = pkg.manifest.entry_server
+    {
+        let cand = src.join(entry);
+        if cand.is_file() {
+            return Some(cand);
+        }
+    }
+    None
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn py_file_stamp(path: &Path) -> (Option<std::time::SystemTime>, u64) {
+    match std::fs::metadata(path) {
+        Ok(meta) => (meta.modified().ok(), meta.len()),
+        Err(_) => (None, 0),
+    }
 }
 
 fn parse_toml_string_array(val: &str) -> Vec<String> {

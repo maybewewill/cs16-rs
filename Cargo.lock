@@ -667,6 +667,7 @@ dependencies = [
  "cs-engine",
  "cs-game",
  "cs-mod-host",
+ "cs-mod-py",
  "cs-proto48",
  "cs-transport",
  "cs-vfs",
@@ -718,6 +719,19 @@ dependencies = [
 [[package]]
 name = "cs-mod-macros"
 version = "0.1.0"
+
+[[package]]
+name = "cs-mod-py"
+version = "0.1.0"
+dependencies = [
+ "cs-mod-api",
+ "cs-mod-host",
+ "cs-pm",
+ "glam",
+ "serde",
+ "thiserror 2.0.21",
+ "tracing",
+]
 
 [[package]]
 name = "cs-mod-sdk"
@@ -792,6 +806,7 @@ dependencies = [
  "cs-master",
  "cs-mod-api",
  "cs-mod-host",
+ "cs-mod-py",
  "cs-platform",
  "cs-proto48",
  "cs-relay",

@@ -328,6 +328,9 @@ fn read_or_compile_entry_map(
 }
 
 fn maybe_compile_wat(rel: &str, bytes: Vec<u8>) -> Result<Vec<u8>, PackageError> {
+    if rel.to_ascii_lowercase().ends_with(".py") {
+        return Ok(bytes);
+    }
     if rel.ends_with(".wat") || (!bytes.starts_with(b"\0asm") && bytes.trim_ascii_start().starts_with(b"(")) {
         let text = std::str::from_utf8(&bytes)
             .map_err(|e| PackageError::EntryCompile(rel.to_string(), e.to_string()))?;

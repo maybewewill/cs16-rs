@@ -155,7 +155,7 @@ pub trait ModInstance: Send {
     fn memory_bytes(&self) -> usize;
 }
 
-/// Pluggable execution runtime seam (`wasmi` interpreter in v1/v2, future JIT backend later).
+/// Pluggable execution runtime seam (`wasmi` interpreter in v1/v2, Python VM, future JIT later).
 pub trait ModRuntime: Send + Sync {
     fn name(&self) -> &'static str;
     fn instantiate(
@@ -165,6 +165,18 @@ pub trait ModRuntime: Send + Sync {
         permissions: Permissions,
         max_memory_bytes: usize,
     ) -> Result<Box<dyn ModInstance>, RuntimeError>;
+}
+
+/// Extension of [`ModRuntime`] implemented by pure-Rust Python runtimes (`cs-mod-py`) so
+/// [`ServerModHost`](crate::ServerModHost) can discover, validate, synthesize manifests for, and
+/// hot-reload `.py` plugins without introducing a crate cycle.
+pub trait PythonModRuntime: ModRuntime {
+    fn synthesize_manifest(
+        &self,
+        mod_id_fallback: &str,
+        file_name: &str,
+        source: &str,
+    ) -> Result<cs_mod_api::ModManifest, String>;
 }
 
 /// Deterministic `wasmi` interpreter runtime with per-call fuel accounting and memory caps.

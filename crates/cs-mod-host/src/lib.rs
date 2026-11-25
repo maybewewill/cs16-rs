@@ -28,7 +28,9 @@ pub use package::{
     LoadedPackage, PackageError, discover_packages, load_package_csmod, load_package_dir,
 };
 pub use rpc::RpcBus;
-pub use runtime::{ModCallOutcome, ModInstance, ModRuntime, RuntimeError, WasmiRuntime};
+pub use runtime::{
+    ModCallOutcome, ModInstance, ModRuntime, PythonModRuntime, RuntimeError, WasmiRuntime,
+};
 pub use server_host::{ModInfo, ModStatus, ModdedGame, ServerModHost};
 pub use storage::{LeaderboardEntry, LeaderboardStore, NVaultStore};
 pub use transfer::{ApprovalPolicy, ClientModTransfer, PendingModApproval, TransferError};
