@@ -8,9 +8,10 @@ use std::net::ToSocketAddrs;
 use std::sync::Arc;
 
 use cs_clientcore::{
-    ConnState, Connection, ConnectionConfig, ConsoleCommand, ResourceFiles, SoundCommand,
-    ViewAngleUpdate, VoiceEvent,
+    ConnState, Connection, ConnectionConfig, ConsoleCommand, DemoPlayer, ResourceFiles,
+    SoundCommand, ViewAngleUpdate, VoiceEvent,
 };
+use cs_clientcore::events::FiredEvent;
 use cs_clientcore::hud::HudState;
 use cs_local::{FRAME_SECS, LocalGame, LocalOptions};
 use cs_pm::collision::WorldCollision;
@@ -39,13 +40,17 @@ enum Kind {
         conn: Box<Connection<UdpTransport>>,
         now: f64,
     },
+    Demo {
+        player: Box<DemoPlayer>,
+        fired: Vec<FiredEvent>,
+    },
 }
 
 /// Runs `$body` with `$conn` bound to the session's connection, whichever transport it has.
 macro_rules! with_conn {
     ($self:expr, $conn:ident => $body:expr, else $none:expr) => {
         match &$self.kind {
-            Kind::None => $none,
+            Kind::None | Kind::Demo { .. } => $none,
             Kind::Local { game, .. } => {
                 let $conn = game.connection();
                 $body
@@ -61,7 +66,7 @@ macro_rules! with_conn {
 macro_rules! with_conn_mut {
     ($self:expr, $conn:ident => $body:expr, else $none:expr) => {
         match &mut $self.kind {
-            Kind::None => $none,
+            Kind::None | Kind::Demo { .. } => $none,
             Kind::Local { game, .. } => {
                 let $conn = game.connection_mut();
                 $body
@@ -177,12 +182,62 @@ impl Session {
         }, else ());
     }
 
+    /// Starts offline `.dem` playback from parsed `HLDEMO` Protocol 5 bytes.
+    pub fn start_demo(vfs: Option<&Vfs>, bytes: &[u8]) -> Result<Self, String> {
+        let player = DemoPlayer::from_bytes(bytes).map_err(|e| format!("bad demo: {e}"))?;
+        let mut s = Self::none();
+        s.vfs = vfs.cloned();
+        s.kind = Kind::Demo {
+            player: Box::new(player),
+            fired: Vec::new(),
+        };
+        Ok(s)
+    }
+
+    pub fn is_demo(&self) -> bool {
+        matches!(self.kind, Kind::Demo { .. })
+    }
+
+    pub fn demo_player(&self) -> Option<&DemoPlayer> {
+        match &self.kind {
+            Kind::Demo { player, .. } => Some(player),
+            _ => None,
+        }
+    }
+
+    pub fn demo_player_mut(&mut self) -> Option<&mut DemoPlayer> {
+        match &mut self.kind {
+            Kind::Demo { player, .. } => Some(player),
+            _ => None,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn is_recording(&self) -> bool {
+        with_conn!(self, c => c.is_recording(), else false)
+    }
+
+    pub fn start_recording(&mut self, game_dir: &str) {
+        with_conn_mut!(self, c => c.start_recording(game_dir), else ());
+    }
+
+    pub fn stop_recording(&mut self) -> Result<Option<Vec<u8>>, String> {
+        with_conn_mut!(
+            self,
+            c => c.stop_recording().map_err(|e| format!("demo encode error: {e}")),
+            else Ok(None)
+        )
+    }
+
     pub fn is_active(&self) -> bool {
         !matches!(self.kind, Kind::None)
     }
 
     pub fn state(&self) -> Option<ConnState> {
-        with_conn!(self, c => Some(c.state().clone()), else None)
+        match &self.kind {
+            Kind::Demo { .. } => Some(ConnState::InGame),
+            _ => with_conn!(self, c => Some(c.state().clone()), else None),
+        }
     }
 
     pub fn in_game(&self) -> bool {
@@ -195,6 +250,7 @@ impl Session {
             Kind::None => 0.0,
             Kind::Local { game, pending } => game.time() + pending,
             Kind::Remote { now, .. } => *now,
+            Kind::Demo { player, .. } => player.current_time(),
         }
     }
 
@@ -214,16 +270,32 @@ impl Session {
                 *now += dt;
                 conn.pump(*now);
             }
+            Kind::Demo { player, fired } => {
+                fired.extend(player.advance(dt));
+            }
         }
     }
 
     /// The map the server runs, once the resource list named it.
     pub fn server_map(&self) -> Option<String> {
-        with_conn!(self, c => c
-            .precache()
-            .world_model()
-            .map(|m| m.trim_start_matches("maps/").trim_end_matches(".bsp").to_string()),
-            else None)
+        match &self.kind {
+            Kind::Demo { player, .. } => {
+                let m = player
+                    .precache()
+                    .world_model()
+                    .unwrap_or_else(|| player.map_name());
+                (!m.is_empty()).then(|| {
+                    m.trim_start_matches("maps/")
+                        .trim_end_matches(".bsp")
+                        .to_string()
+                })
+            }
+            _ => with_conn!(self, c => c
+                .precache()
+                .world_model()
+                .map(|m| m.trim_start_matches("maps/").trim_end_matches(".bsp").to_string()),
+                else None),
+        }
     }
 
     pub fn loaded_map(&self) -> Option<&str> {
@@ -249,10 +321,15 @@ impl Session {
             .set_world_context(collision.clone(), self.vfs.clone());
         let vfs = self.vfs.clone();
         let names = self.view.names();
-        with_conn_mut!(self, c => {
-            c.set_world_collision(collision.clone());
-            c.set_fx_world(Box::new(MapFxWorld::new(collision, vfs, names)));
-        }, else ());
+        match &mut self.kind {
+            Kind::Demo { player, .. } => {
+                player.set_fx_world(Box::new(MapFxWorld::new(collision, vfs, names)));
+            }
+            _ => with_conn_mut!(self, c => {
+                c.set_world_collision(collision.clone());
+                c.set_fx_world(Box::new(MapFxWorld::new(collision, vfs, names)));
+            }, else ()),
+        }
     }
 
     pub fn send_stringcmd(&mut self, cmd: &str) {
@@ -290,14 +367,17 @@ impl Session {
         match &mut self.kind {
             Kind::Local { game, .. } => game.shutdown(),
             Kind::Remote { conn, .. } => conn.execute_local("disconnect"),
-            Kind::None => {}
+            Kind::None | Kind::Demo { .. } => {}
         }
         *self = Self::none();
     }
 
     /// The sound commands since the last call.
     pub fn take_sounds(&mut self) -> Vec<SoundCommand> {
-        with_conn_mut!(self, c => c.fx_mut().sounds.drain(), else Vec::new())
+        match &mut self.kind {
+            Kind::Demo { player, .. } => player.take_sounds(),
+            _ => with_conn_mut!(self, c => c.fx_mut().sounds.drain(), else Vec::new()),
+        }
     }
 
     /// Incoming `svc_voiceinit` and `svc_voicedata` events since the last call.
@@ -311,34 +391,58 @@ impl Session {
     }
 
     pub fn with_hud<R>(&self, f: impl FnOnce(&HudState) -> R) -> Option<R> {
-        with_conn!(self, c => Some(f(&c.fx().hud)), else None)
+        match &self.kind {
+            Kind::Demo { player, .. } => Some(f(player.hud())),
+            _ => with_conn!(self, c => Some(f(&c.fx().hud)), else None),
+        }
     }
 
     pub fn with_hud_mut<R>(&mut self, f: impl FnOnce(&mut HudState) -> R) -> Option<R> {
-        with_conn_mut!(self, c => Some(f(&mut c.fx_mut().hud)), else None)
+        match &mut self.kind {
+            Kind::Demo { player, .. } => Some(f(player.hud_mut())),
+            _ => with_conn_mut!(self, c => Some(f(&mut c.fx_mut().hud)), else None),
+        }
     }
 
     /// Player names by slot, from the userinfo strings.
     pub fn player_names(&self) -> BTreeMap<u8, String> {
-        with_conn!(self, c => c
-            .userinfos()
-            .iter()
+        let map = match &self.kind {
+            Kind::Demo { player, .. } => player.userinfos(),
+            _ => {
+                return with_conn!(self, c => c
+                    .userinfos()
+                    .iter()
+                    .filter_map(|(slot, raw)| {
+                        InfoString::parse(raw)
+                            .get("name")
+                            .map(|n| (*slot, n.to_string()))
+                    })
+                    .collect(),
+                    else BTreeMap::new());
+            }
+        };
+        map.iter()
             .filter_map(|(slot, raw)| {
                 InfoString::parse(raw)
                     .get("name")
                     .map(|n| (*slot, n.to_string()))
             })
-            .collect(),
-            else BTreeMap::new())
+            .collect()
     }
 
     pub fn local_slot(&self) -> Option<u8> {
-        with_conn!(self, c => c.player_slot(), else None)
+        match &self.kind {
+            Kind::Demo { player, .. } => player.server_info().map(|i| i.player_slot),
+            _ => with_conn!(self, c => c.player_slot(), else None),
+        }
     }
 
     /// The weapons the player carries, as `weapon_id` bits of the client data.
     pub fn owned_weapons(&self) -> u32 {
-        with_conn!(self, c => c.client_data().map_or(0, |d| d.weapons), else 0)
+        match &self.kind {
+            Kind::Demo { player, .. } => player.client_data().map_or(0, |d| d.weapons),
+            _ => with_conn!(self, c => c.client_data().map_or(0, |d| d.weapons), else 0),
+        }
     }
 
     /// The footsteps and other sounds the prediction made.
@@ -392,17 +496,34 @@ impl Session {
 
     /// Drains new console lines (`Con_Printf`) since the last call.
     pub fn take_console_lines(&mut self) -> Vec<String> {
-        with_conn_mut!(self, c => c.take_console_lines(), else Vec::new())
+        match &mut self.kind {
+            Kind::Demo { player, .. } => player.take_console_lines(),
+            _ => with_conn_mut!(self, c => c.take_console_lines(), else Vec::new()),
+        }
     }
 
     /// Drains server-forced view angle updates (`svc_setangle`, `svc_addangle`) since the last call.
     pub fn take_view_angle_updates(&mut self) -> Vec<ViewAngleUpdate> {
-        with_conn_mut!(self, c => c.take_view_angle_updates(), else Vec::new())
+        match &mut self.kind {
+            Kind::Demo { player, .. } => player
+                .take_view_angles()
+                .into_iter()
+                .map(ViewAngleUpdate::Set)
+                .collect(),
+            _ => with_conn_mut!(self, c => c.take_view_angle_updates(), else Vec::new()),
+        }
     }
 
     /// Drains raw custom `UserMsg` packets not handled by built-in GoldSrc HUD reducers.
     pub fn drain_unknown_usermsgs(&mut self) -> Vec<cs_clientcore::hud::UnknownUserMsg> {
-        with_conn_mut!(self, c => c.fx_mut().hud.unknown_messages.drain(..).collect(), else Vec::new())
+        match &mut self.kind {
+            Kind::Demo { player, .. } => player
+                .hud_mut()
+                .unknown_messages
+                .drain(..)
+                .collect(),
+            _ => with_conn_mut!(self, c => c.fx_mut().hud.unknown_messages.drain(..).collect(), else Vec::new()),
+        }
     }
 
     pub fn has_client_cvar(&self, name: &str) -> bool {
@@ -419,11 +540,19 @@ impl Session {
 
     #[cfg(test)]
     fn precache_model_names(&self) -> Vec<String> {
-        with_conn!(self, c => c.precache().models.values().map(|e| e.name.clone()).collect(), else Vec::new())
+        match &self.kind {
+            Kind::Demo { player, .. } => {
+                player.precache().models.values().map(|e| e.name.clone()).collect()
+            }
+            _ => with_conn!(self, c => c.precache().models.values().map(|e| e.name.clone()).collect(), else Vec::new()),
+        }
     }
 
     pub fn max_clients(&self) -> u8 {
-        with_conn!(self, c => c.server_info().map_or(0, |i| i.max_clients), else 0)
+        match &self.kind {
+            Kind::Demo { player, .. } => player.server_info().map_or(0, |i| i.max_clients),
+            _ => with_conn!(self, c => c.server_info().map_or(0, |i| i.max_clients), else 0),
+        }
     }
 
     /// Builds the frame: advances the client clock, runs the effects, interpolates. `None`
@@ -438,6 +567,10 @@ impl Session {
             Kind::None => None,
             Kind::Local { game, .. } => Some(view.build(game.connection_mut(), view_angles, inputs)),
             Kind::Remote { conn, .. } => Some(view.build(&mut **conn, view_angles, inputs)),
+            Kind::Demo { player, fired } => {
+                let events = std::mem::take(fired);
+                Some(view.build_demo(player, events, view_angles, inputs))
+            }
         }
     }
 }
@@ -548,5 +681,58 @@ mod tests {
         assert!(farthest > 100.0, "the camera did not follow the walking player: {farthest}");
         s.close();
         assert!(!s.is_active());
+    }
+
+    #[test]
+    fn loopback_demo_record_playback_seek_and_timedemo() {
+        let Ok(vfs) = Vfs::discover(None, cs_vfs::VfsConfig::default()) else {
+            return;
+        };
+        if !vfs.exists("maps/de_dust2.bsp") {
+            return;
+        }
+        let mut s = Session::start_local(&vfs, "de_dust2", &LocalOptions::default())
+            .expect("local de_dust2");
+        s.start_recording("cstrike");
+        assert!(s.is_recording());
+        let angles = Vec3::new(0.0, 45.0, 0.0);
+        for _ in 0..80 {
+            s.queue_cmd(build_usercmd(
+                &Default::default(),
+                angles,
+                Default::default(),
+                &MoveSpeeds::default(),
+            ));
+            s.advance(0.01);
+        }
+        assert!(s.in_game());
+        let bytes = s.stop_recording().expect("finish").expect("demo bytes");
+        assert!(!s.is_recording());
+        s.close();
+
+        let parsed = cs_proto48::demo::parse_demo(&bytes).expect("valid HLDEMO v5");
+        assert!(!parsed.directory.is_empty());
+
+        let mut demo = Session::start_demo(Some(&vfs), &bytes).expect("start demo");
+        assert!(demo.is_demo());
+        assert!(demo.in_game());
+        let demo_inputs = |now: f64| ViewInputs {
+            now,
+            frametime: 0.01,
+            right_hand: true,
+            draw_viewmodel: true,
+            default_fov: 90.0,
+            ..ViewInputs::default()
+        };
+        for _ in 0..10 {
+            demo.advance(0.05);
+            let _ = demo.build_view(angles, &demo_inputs(demo.now()));
+        }
+        let mid_t = demo.now();
+        demo.demo_player_mut().unwrap().seek(mid_t * 0.5);
+        assert!(demo.now() <= mid_t * 0.5 + 1e-4);
+        let report = demo.demo_player_mut().unwrap().run_timedemo_all(1.0 / 100.0);
+        assert!(report.frames > 0);
+        demo.close();
     }
 }

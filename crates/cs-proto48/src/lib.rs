@@ -7,6 +7,7 @@ pub mod compress;
 pub mod crypto;
 pub mod delta;
 pub mod delta_offsets;
+pub mod demo;
 pub mod event;
 pub mod handshake;
 pub mod info;

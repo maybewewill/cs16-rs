@@ -10,6 +10,7 @@
 pub mod commands;
 pub mod connection;
 pub mod cvars;
+pub mod demo;
 pub mod entities;
 pub mod frames;
 pub mod interp;
@@ -29,6 +30,7 @@ pub use connection::{
     ViewAngleUpdate,
 };
 pub use cvars::{ClientCvars, Cvar};
+pub use demo::{DemoPlayer, DemoPlaylist, DemoRecorder, TimeDemoReport};
 pub use entities::{ClientEntity, EntityStore, ModelKind};
 pub use frames::{ClientClock, ClientFrames, DeltaRefusal, Frame, FrameOutcome, FrameRing};
 pub use interp::{EmitInputs, EmitResult, EntityKind, InterpSettings, VisibleEntity};

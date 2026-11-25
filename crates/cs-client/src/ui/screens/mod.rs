@@ -10,8 +10,8 @@ pub mod spectator;
 pub use buy_team_class::{BuyClassTeamMenuUi, BuyMenuRenderCtx, VguiMenuKind};
 pub use command_menu::CommandMenuUi;
 pub use dialogs::{
-    DemoPlayerUi, DialogRenderCtx, DisconnectErrorDialog, LoadingDialogUi, PlayerListDialogUi,
-    ServerPasswordUi,
+    DemoPlayerUi, DemoTransportState, DemoUiAction, DialogRenderCtx, DisconnectErrorDialog,
+    LoadingDialogUi, PlayerListDialogUi, ServerPasswordUi,
 };
 pub use motd::{MotdRenderCtx, MotdVguiUi};
 pub use server_browser::{

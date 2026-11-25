@@ -38,11 +38,13 @@ use cs_transport::{PacketTransport, PeerAddr};
 
 use crate::commands::{CommandRegistry, ConsoleCommand, split_lines, tokenize};
 use crate::cvars::{CVAR_PRIVILEGED, CVAR_PROTECTED, CVAR_USERINFO, ClientCvars};
+use crate::demo::DemoRecorder;
 use crate::frames::{ClientFrames, FrameOutcome};
 use crate::events::{FiredEvent, FxEnv};
 use crate::hud::ClientEffects;
 use crate::precache::PrecacheTables;
 use crate::predict::{self, PredictInputs, Predictor};
+use cs_proto48::demo::{DemoMoveVars, DemoNetMsgInfo, DemoUserCmd};
 use crate::resources::{AllFilesPresent, ResourceFiles, ResourceManager, parse_file_stream};
 use crate::tempents::{FxWorld, NoWorld};
 
@@ -239,6 +241,7 @@ pub struct Connection<T: PacketTransport> {
     corrupt_moves: u32,
     /// Test hook: no `clc_move` in outgoing packets, not even the `msec` 0 placeholder.
     moves_suppressed: bool,
+    recorder: Option<DemoRecorder>,
 }
 
 impl<T: PacketTransport> Connection<T> {
@@ -299,6 +302,7 @@ impl<T: PacketTransport> Connection<T> {
             withheld_reliable_ack: None,
             corrupt_moves: 0,
             moves_suppressed: false,
+            recorder: None,
         };
         conn.userinfo = conn.base_userinfo();
         conn
@@ -969,6 +973,70 @@ impl<T: PacketTransport> Connection<T> {
         self.tap_error.as_ref()
     }
 
+    pub fn is_recording(&self) -> bool {
+        self.recorder.is_some()
+    }
+
+    /// Starts recording inbound `svc_*` frames to a Protocol 5 `.dem` (`HLDEMO`) buffer.
+    pub fn start_recording(&mut self, game_dir: &str) {
+        let (map_name, dir, map_crc) = match &self.server_info {
+            Some(info) => (info.map_path.as_str(), info.game_dir.as_str(), info.map_crc),
+            None => ("", game_dir, 0),
+        };
+        let mut rec = DemoRecorder::new(map_name, dir, map_crc, 48);
+        if self.state == ConnState::InGame {
+            rec.mark_signon_complete(0.0);
+        }
+        self.recorder = Some(rec);
+    }
+
+    /// Stops any active `.dem` recording and serializes it into valid `HLDEMO` v5 bytes.
+    pub fn stop_recording(&mut self) -> Result<Option<Vec<u8>>, cs_proto48::bitbuf::ProtoError> {
+        let Some(rec) = self.recorder.take() else {
+            return Ok(None);
+        };
+        rec.finish().map(Some)
+    }
+
+    fn build_demo_info(&self, now: f64) -> (DemoNetMsgInfo, [i32; 7]) {
+        let mut info = DemoNetMsgInfo::default();
+        info.timestamp = now as f32;
+        if let Some(cd) = &self.client_data {
+            info.ref_params.vieworg = cd.origin + cd.view_ofs;
+            info.ref_params.simorg = cd.origin;
+            info.ref_params.simvel = cd.velocity;
+            info.ref_params.viewheight = cd.view_ofs;
+            info.ref_params.punchangle = cd.punchangle;
+            info.ref_params.health = cd.health as i32;
+            info.ref_params.viewsize = cd.fov;
+            info.viewmodel = cd.viewmodel;
+        }
+        info.ref_params.viewangles = self.last_cmd.viewangles;
+        info.ref_params.time = self.ctx.server_time as f32;
+        info.cmd = DemoUserCmd::from(&self.last_cmd);
+        if let Some(mv) = &self.movevars {
+            info.movevars = DemoMoveVars::from(mv);
+        }
+        if let Some(si) = &self.server_info {
+            info.ref_params.maxclients = i32::from(si.max_clients);
+            info.ref_params.playernum = i32::from(si.player_slot);
+            info.ref_params.viewentity = i32::from(si.player_slot) + 1;
+        }
+        let seqs = match &self.chan {
+            Some(c) => [
+                c.incoming_sequence as i32,
+                c.incoming_acknowledged as i32,
+                c.incoming_reliable_acknowledged as i32,
+                c.incoming_reliable_sequence as i32,
+                c.outgoing_sequence as i32,
+                c.reliable_sequence as i32,
+                c.last_reliable_sequence as i32,
+            ],
+            None => [0; 7],
+        };
+        (info, seqs)
+    }
+
     fn record(&mut self, sent: bool, time: f64, data: &[u8]) {
         if let Some(tap) = self.tap.as_mut()
             && let Err(e) = tap.record(sent, time, data)
@@ -1054,8 +1122,18 @@ impl<T: PacketTransport> Connection<T> {
         // A stream that does not parse to its end still yields the messages before the bad
         // one; the rest of that stream is lost (no message boundary), the connection goes on.
         let mut failed = false;
+        let rec_snap = self.recorder.is_some().then(|| self.build_demo_info(now));
         let streams = std::iter::once(incoming.payload).chain(incoming.completed_normal_stream);
         for stream in streams {
+            if let (Some(rec), Some((info, seqs))) = (self.recorder.as_mut(), rec_snap.as_ref()) {
+                rec.record_svc_packet(
+                    now,
+                    self.state != ConnState::InGame,
+                    &stream,
+                    info.clone(),
+                    *seqs,
+                );
+            }
             let (messages, error) = parse_svc_stream_partial(&stream, &mut self.ctx);
             failed |= error.is_some();
             for message in messages {
@@ -1123,6 +1201,9 @@ impl<T: PacketTransport> Connection<T> {
             }
             SvcMessage::ServerInfo(info) => {
                 self.signon_progress = Some(now);
+                if let Some(rec) = self.recorder.as_mut() {
+                    rec.set_map_info(&info.map_path, &info.game_dir, info.map_crc);
+                }
                 self.server_info = Some(*info);
                 if signon {
                     self.send_stringcmd("sendres");
@@ -1387,6 +1468,9 @@ impl<T: PacketTransport> Connection<T> {
         self.last_entity_seq = Some(self.ctx.last_incoming_seq);
         if self.state == ConnState::Signon {
             self.state = ConnState::InGame;
+            if let Some(rec) = self.recorder.as_mut() {
+                rec.mark_signon_complete(now);
+            }
         }
     }
 

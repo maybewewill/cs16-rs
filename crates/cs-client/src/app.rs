@@ -52,9 +52,10 @@ use cs_client::ui::mod_hud::{draw_mod_approval_prompt, draw_mod_hud};
 use cs_client::ui::options::{OptionsRenderCtx, OptionsUi};
 use cs_client::ui::scoreboard::{ScoreRow, ScoreboardRenderCtx, show_scoreboard_vgui};
 use cs_client::ui::screens::{
-    BuyClassTeamMenuUi, BuyMenuRenderCtx, CommandMenuUi, DemoPlayerUi, DialogRenderCtx,
-    DisconnectErrorDialog, LoadingDialogUi, MotdRenderCtx, MotdVguiUi, PlayerListDialogUi,
-    ServerPasswordUi, SpectatorMode, SpectatorRenderCtx, SpectatorVguiUi, VguiMenuKind,
+    BuyClassTeamMenuUi, BuyMenuRenderCtx, CommandMenuUi, DemoPlayerUi, DemoUiAction,
+    DialogRenderCtx, DisconnectErrorDialog, LoadingDialogUi, MotdRenderCtx, MotdVguiUi,
+    PlayerListDialogUi, ServerPasswordUi, SpectatorMode, SpectatorRenderCtx, SpectatorVguiUi,
+    VguiMenuKind,
 };
 use cs_client::ui::server_menu::{
     draw_styled_text_menu_vgui, draw_text_menu_vgui, menu_key_enabled,
@@ -200,6 +201,7 @@ pub struct Cs16App {
     pending_screenshot: Option<PathBuf>,
     exit_after_screenshot: bool,
     config_path: PathBuf,
+    recording_demo: Option<String>,
 }
 
 impl Cs16App {
@@ -332,6 +334,7 @@ impl Cs16App {
             pending_screenshot: None,
             exit_after_screenshot,
             config_path,
+            recording_demo: None,
         }
     }
 
@@ -1047,16 +1050,165 @@ impl Cs16App {
                     EngineAction::SpecMenu(visible) => {
                         self.spectator_ui.menu_visible = visible != 0;
                     }
-                    EngineAction::RecordDemo(_)
-                    | EngineAction::StopDemo
-                    | EngineAction::PlayDemo(_)
-                    | EngineAction::TimeDemo(_)
-                    | EngineAction::RconCommand(_)
-                    | EngineAction::SetMaster(_) => {}
+                    EngineAction::RecordDemo(name) => {
+                        if name.trim().is_empty() {
+                            self.cvars.warn("usage: record <demoname>");
+                        } else if !self.session.is_active() || self.session.is_demo() {
+                            self.cvars.warn("must be connected to a server to record a demo");
+                        } else {
+                            let clean = name.trim().trim_end_matches(".dem").to_string();
+                            self.session.start_recording("cstrike");
+                            self.recording_demo = Some(clean.clone());
+                            self.cvars.info(format!("recording to {clean}.dem."));
+                        }
+                    }
+                    EngineAction::StopDemo => {
+                        if let Some(name) = self.recording_demo.take() {
+                            match self.session.stop_recording() {
+                                Ok(Some(bytes)) => {
+                                    let file_name = format!("{name}.dem");
+                                    let out_path = self
+                                        .config_path
+                                        .parent()
+                                        .filter(|p| !p.as_os_str().is_empty())
+                                        .unwrap_or_else(|| std::path::Path::new("."))
+                                        .join(&file_name);
+                                    match std::fs::write(&out_path, &bytes) {
+                                        Ok(()) => self.cvars.info(format!(
+                                            "Completed demo {file_name} ({} bytes)",
+                                            bytes.len()
+                                        )),
+                                        Err(e) => self.cvars.warn(format!(
+                                            "failed to write {}: {e}",
+                                            out_path.display()
+                                        )),
+                                    }
+                                }
+                                Ok(None) => self.cvars.info("Not recording a demo."),
+                                Err(e) => self.cvars.warn(format!("demo stop error: {e}")),
+                            }
+                        } else if self.session.is_demo() {
+                            self.session.close();
+                            self.demo_player_ui.state =
+                                cs_client::ui::screens::DemoTransportState::Stopped;
+                        } else {
+                            self.cvars.info("Not recording a demo.");
+                        }
+                    }
+                    EngineAction::PlayDemo(name) => {
+                        self.start_demo_file(&name, false);
+                    }
+                    EngineAction::TimeDemo(name) => {
+                        self.start_demo_file(&name, true);
+                    }
+                    EngineAction::RconCommand(_) | EngineAction::SetMaster(_) => {}
                 }
             }
         }
         false
+    }
+
+    fn start_demo_file(&mut self, raw_name: &str, timedemo: bool) {
+        let trimmed = raw_name.trim();
+        if trimmed.is_empty() {
+            self.cvars.warn("usage: playdemo <filename>");
+            return;
+        }
+        let fname = if trimmed.to_ascii_lowercase().ends_with(".dem") {
+            trimmed.to_string()
+        } else {
+            format!("{trimmed}.dem")
+        };
+        let bytes = std::fs::read(&fname).or_else(|_| {
+            self.vfs
+                .as_ref()
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no vfs"))
+                .and_then(|v| {
+                    v.read_bytes(&fname)
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e.to_string()))
+                })
+        });
+        match bytes {
+            Ok(data) => match Session::start_demo(self.vfs.as_ref(), &data) {
+                Ok(mut sess) => {
+                    if timedemo {
+                        if let Some(report) = sess.demo_player_mut().map(|p| p.run_timedemo_all(1.0 / 60.0)) {
+                            self.cvars.info(format!(
+                                "timedemo {}: {} frames, {:.3}s, {:.1} fps",
+                                fname, report.frames, report.elapsed_secs, report.avg_fps
+                            ));
+                        }
+                    } else if let Some(p) = sess.demo_player() {
+                        self.demo_player_ui.load_demo(&fname);
+                        self.demo_player_ui.duration_secs = p.total_duration();
+                        self.demo_player_ui.total_ticks =
+                            (p.total_duration() * 100.0).ceil().max(1.0) as u32;
+                    }
+                    self.session.close();
+                    self.session = sess;
+                    self.menu_ui.visible = false;
+                    self.sync_cursor_capture();
+                }
+                Err(e) => self.cvars.warn(format!("Failed to start demo {fname}: {e}")),
+            },
+            Err(e) => self.cvars.warn(format!("Couldn't open {fname}: {e}")),
+        }
+    }
+
+    fn apply_demo_ui_actions(&mut self, actions: Vec<DemoUiAction>) {
+        if let Some(player) = self.session.demo_player() {
+            self.demo_player_ui.current_secs = player.current_time();
+            self.demo_player_ui.duration_secs = player.total_duration();
+            self.demo_player_ui.tick = (player.current_time() * 100.0).round().max(0.0) as u32;
+        }
+        for act in actions {
+            match act {
+                DemoUiAction::Load(name) => self.start_demo_file(&name, false),
+                DemoUiAction::Stop => {
+                    if self.session.is_demo() {
+                        self.session.close();
+                    }
+                }
+                DemoUiAction::TogglePause => {
+                    if let Some(p) = self.session.demo_player_mut() {
+                        let next = !p.is_paused();
+                        p.set_paused(next);
+                    }
+                }
+                DemoUiAction::StepBack => {
+                    if let Some(p) = self.session.demo_player_mut() {
+                        let target = (p.current_time() - 0.5).max(0.0);
+                        p.seek(target);
+                    }
+                }
+                DemoUiAction::StepForward => {
+                    if let Some(p) = self.session.demo_player_mut() {
+                        let _ = p.step_frame();
+                    }
+                }
+                DemoUiAction::SetSpeed(spd) => {
+                    if let Some(p) = self.session.demo_player_mut() {
+                        p.set_speed(spd);
+                    }
+                }
+                DemoUiAction::Seek(secs) => {
+                    if let Some(p) = self.session.demo_player_mut() {
+                        p.seek(secs);
+                    }
+                }
+                DemoUiAction::JumpStart => {
+                    if let Some(p) = self.session.demo_player_mut() {
+                        p.seek(0.0);
+                    }
+                }
+                DemoUiAction::JumpEnd => {
+                    if let Some(p) = self.session.demo_player_mut() {
+                        let end = p.total_duration();
+                        p.seek(end);
+                    }
+                }
+            }
+        }
     }
 
     fn server_console(&mut self, line: &str) {
@@ -2013,8 +2165,7 @@ impl Cs16App {
             self.session.local_slot(),
             &dlg_ctx,
         );
-        self.demo_player_ui
-            .show(&rt.egui_ctx, &mut self.vgui_rt, &dlg_ctx);
+        let demo_actions = self.demo_player_ui.show(&rt.egui_ctx, &mut self.vgui_rt, &dlg_ctx);
         let pw_submit = self
             .password_ui
             .show(&rt.egui_ctx, &mut self.vgui_rt, &dlg_ctx);
@@ -2231,6 +2382,7 @@ impl Cs16App {
         }
 
         // 5. Post-frame actions.
+        self.apply_demo_ui_actions(demo_actions);
         for (mod_id, allow) in mod_decisions {
             if allow {
                 self.mod_transfer.approve(&mod_id);

@@ -928,7 +928,7 @@ impl HudState {
 }
 
 /// The state the effect modules build up from the svc stream.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ClientEffects {
     pub events: EventQueue,
     pub tempents: TempEnts,

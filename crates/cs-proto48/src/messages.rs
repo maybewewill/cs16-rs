@@ -659,7 +659,7 @@ impl SvcMessage {
 }
 
 /// Mutable parsing context maintained across packets of a GoldSrc 48 client session.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct SvcParseContext {
     pub deltas: DeltaRegistry,
     pub usermsgs: UserMsgRegistry,
