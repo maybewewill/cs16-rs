@@ -33,6 +33,44 @@ function setAssetStatus(text) {
   if (assetStatusEl) assetStatusEl.textContent = text;
 }
 
+function parseInviteParams(search, pageProtocol) {
+  const params = new URLSearchParams(search || '');
+  const rawJoin = (params.get('join') || '').trim();
+  const rawRoom = (params.get('room') || '').trim();
+  const room = /^[A-Za-z0-9_-]{1,32}$/.test(rawRoom) ? rawRoom : '';
+  if (!rawJoin) {
+    return { wsUrl: '', joinLabel: '', room };
+  }
+  const scheme = pageProtocol === 'https:' ? 'wss://' : 'ws://';
+  if (/^wss?:\/\/[A-Za-z0-9._:-]+(\/[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]*)?$/.test(rawJoin)) {
+    return { wsUrl: rawJoin, joinLabel: rawJoin, room };
+  }
+  if (/^[A-Za-z0-9._-]+(:\d{1,5})?$/.test(rawJoin)) {
+    return {
+      wsUrl: `${scheme}${rawJoin}/ws`,
+      joinLabel: rawJoin,
+      room
+    };
+  }
+  return { wsUrl: '', joinLabel: '', room };
+}
+
+async function connectToWsUrl(url) {
+  const trimmed = String(url || '').trim();
+  if (!trimmed) return;
+  audio?.unlock();
+  cs16Web?.unlockAudio?.();
+  net?.close();
+  cs16Web?.connectRemote?.();
+  net = new WebGameTransport(trimmed, {
+    onPacket: (pkt) => cs16Web?.pushNetPacket?.(pkt),
+    onStateChange: (st) => setStatus(`Net: ${st}`)
+  });
+  await net.connect();
+  panelEl?.classList.add('collapsed');
+  input?.lockPointer();
+}
+
 function refreshMaps() {
   if (!cs16Web || !mapSelect) return;
   const maps = cs16Web.listMaps?.() || [];
@@ -106,6 +144,11 @@ async function main() {
     }
   });
 
+  const invite = parseInviteParams(window.location.search, window.location.protocol);
+  if (invite.wsUrl && wsUrlInput) {
+    wsUrlInput.value = invite.wsUrl;
+  }
+
   const cached = await hydrateAssetsFromDb(
     (p, b) => cs16Web.mountFile?.(p, b),
     (n) => setAssetStatus(`Loading cached assets (${n})...`)
@@ -114,6 +157,17 @@ async function main() {
     cs16Web.finishMount?.();
     refreshMaps();
     setAssetStatus(`Restored ${cached} cached assets`);
+  }
+  if (invite.wsUrl) {
+    const roomNote = invite.room ? ` (room ${invite.room})` : '';
+    if (cached > 0) {
+      setStatus(`Joining ${invite.joinLabel}${roomNote}...`);
+      connectToWsUrl(invite.wsUrl).catch((err) => {
+        setStatus(`Invite connect failed: ${err.message}`);
+      });
+    } else {
+      setStatus(`Invite ready: ${invite.joinLabel}${roomNote} — mount Half-Life folder`);
+    }
   }
 
   document.getElementById('btn-pick-dir')?.addEventListener('click', () => {
@@ -169,19 +223,9 @@ async function main() {
   });
 
   document.getElementById('btn-connect')?.addEventListener('click', async () => {
-    audio.unlock();
-    cs16Web.unlockAudio?.();
     const url = wsUrlInput?.value?.trim();
     if (!url) return;
-    net?.close();
-    cs16Web.connectRemote?.();
-    net = new WebGameTransport(url, {
-      onPacket: (pkt) => cs16Web.pushNetPacket?.(pkt),
-      onStateChange: (st) => setStatus(`Net: ${st}`)
-    });
-    await net.connect();
-    panelEl?.classList.add('collapsed');
-    input.lockPointer();
+    await connectToWsUrl(url);
   });
 
   document.getElementById('btn-disconnect')?.addEventListener('click', () => {
@@ -200,25 +244,51 @@ async function main() {
       const resp = await fetch(endpoint);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const list = await resp.json();
+
+      let lobbies = [];
+      try {
+        const lobbiesUrl = endpoint.replace(/\/servers\/?$/, '/lobbies');
+        if (lobbiesUrl !== endpoint) {
+          const lresp = await fetch(lobbiesUrl);
+          if (lresp.ok) {
+            const parsedLobbies = await lresp.json();
+            if (Array.isArray(parsedLobbies)) lobbies = parsedLobbies;
+          }
+        }
+      } catch {
+        // Master server may not expose /lobbies (e.g., standalone cs-server /servers)
+      }
+
       serverListSelect.innerHTML = '';
-      if (!Array.isArray(list) || list.length === 0) {
+      const scheme = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+      const hasServers = Array.isArray(list) && list.length > 0;
+      if (!hasServers && lobbies.length === 0) {
         const opt = document.createElement('option');
         opt.value = '';
-        opt.textContent = '(no servers registered)';
+        opt.textContent = '(no servers or lobbies registered)';
         serverListSelect.appendChild(opt);
       } else {
-        for (const s of list) {
+        if (hasServers) {
+          for (const s of list) {
+            const opt = document.createElement('option');
+            const host = String(s.addr || '').split(':')[0] || '127.0.0.1';
+            const webPort = Number(s.web_port) || 27016;
+            opt.value = `${scheme}${host}:${webPort}/ws`;
+            opt.textContent = `${s.addr} — ${s.map || '?'} (${s.players ?? 0}/${s.max ?? 0})`;
+            serverListSelect.appendChild(opt);
+          }
+        }
+        for (const l of lobbies) {
           const opt = document.createElement('option');
-          const host = String(s.addr || '').split(':')[0] || '127.0.0.1';
-          opt.value = `ws://${host}:27016/ws`;
-          opt.textContent = `${s.addr} — ${s.map || '?'} (${s.players ?? 0}/${s.max ?? 0})`;
+          opt.value = `${scheme}${l.host}:${l.port}/ws`;
+          opt.textContent = `[Room ${l.room}] ${l.host}:${l.port} — ${l.map || '?'} (${l.players ?? 0}/${l.max_players ?? 16})`;
           serverListSelect.appendChild(opt);
         }
         if (wsUrlInput && serverListSelect.options[0]?.value) {
           wsUrlInput.value = serverListSelect.options[0].value;
         }
       }
-      setStatus(`Master: ${Array.isArray(list) ? list.length : 0} server(s)`);
+      setStatus(`Master: ${hasServers ? list.length : 0} server(s), ${lobbies.length} lobby(s)`);
     } catch (err) {
       setStatus(`Master error: ${err.message}`);
     }

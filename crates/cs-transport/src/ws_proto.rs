@@ -251,13 +251,15 @@ pub fn parse_http_request(buf: &[u8]) -> Result<Option<(HttpRequest, usize)>, Ws
     )))
 }
 
-/// Reads an HTTP/1.1 request head from `stream`, capping read length at [`MAX_HTTP_HEAD`].
-pub fn read_http_request(stream: &mut impl Read) -> Result<HttpRequest, WsProtoError> {
+/// Reads an HTTP/1.1 request head from `stream`, returning `(request, trailing_bytes_already_read)`.
+pub fn read_http_request_with_leftover(
+    stream: &mut impl Read,
+) -> Result<(HttpRequest, Vec<u8>), WsProtoError> {
     let mut buf = Vec::with_capacity(1024);
     let mut tmp = [0u8; 512];
     loop {
-        if let Some((req, _)) = parse_http_request(&buf)? {
-            return Ok(req);
+        if let Some((req, head_len)) = parse_http_request(&buf)? {
+            return Ok((req, buf[head_len..].to_vec()));
         }
         let n = stream.read(&mut tmp)?;
         if n == 0 {
@@ -269,6 +271,11 @@ pub fn read_http_request(stream: &mut impl Read) -> Result<HttpRequest, WsProtoE
         }
         buf.extend_from_slice(&tmp[..n]);
     }
+}
+
+/// Reads an HTTP/1.1 request head from `stream`, capping read length at [`MAX_HTTP_HEAD`].
+pub fn read_http_request(stream: &mut impl Read) -> Result<HttpRequest, WsProtoError> {
+    read_http_request_with_leftover(stream).map(|(req, _)| req)
 }
 
 /// Safely resolves a URL path against `root`, rejecting traversal, backslashes, NUL, and drive prefixes.

@@ -2324,8 +2324,18 @@ fn monster_take_damage(
         return false;
     }
     // Do the damage.
+    let attacker_slot = attacker
+        .and_then(|a| player_slot(g, eng, a))
+        .map(|s| s as u8);
     let Some(p) = g.players[index].as_mut() else { return false };
     p.health -= damage;
+    if damage > 0.0 {
+        eng.emit_stat_event(cs_engine::GameStatEvent::Damage {
+            attacker_slot,
+            victim_slot: slot,
+            damage: damage as u32,
+        });
+    }
     // `m_bitsDamageType |= bitsDamageType` is the first thing `CBaseMonster::TakeDamage` does.
     p.damage_bits |= bits;
     // What the `Damage` message reports (`CBaseMonster::TakeDamage`, ReGameDLL

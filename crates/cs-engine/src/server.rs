@@ -17,7 +17,10 @@ use cs_transport::{PacketTransport, PeerAddr};
 use crate::client::{Client, ClientState, MAX_REFUSED_STREAMS, SignonStage};
 use crate::edict::{DEFAULT_MAX_EDICTS, EdictPool};
 
-use crate::game::{ClientView, EngineApi, GameDll, Outbox, baseline_state_from_vars};
+use crate::game::{
+    ClientView, EngineApi, GameDll, GameStatEvent, Outbox, baseline_state_from_vars,
+    entity_state_from_vars,
+};
 use crate::map::ServerMap;
 use crate::oob::{ChallengeIssuer, OOB_GLOBAL_REPLIES_PER_SEC, OobLimiter};
 use crate::precache::PrecacheTables;
@@ -142,6 +145,21 @@ pub struct Server<G: GameDll> {
     pub(crate) paused: bool,
     pub(crate) last_userinfo_hash: Vec<(String, f64)>,
     pub(crate) masters: crate::master::MasterRegistration,
+    pub(crate) replay_capture: bool,
+    pub(crate) replay_svc_packets: Vec<Vec<u8>>,
+    pub(crate) next_replay_snapshot_at: f64,
+}
+
+/// Snapshot of a connected client or bot slot for server admin / status APIs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerClientInfo {
+    pub slot: u8,
+    pub userid: i32,
+    pub name: String,
+    pub ping_ms: u32,
+    pub active: bool,
+    pub addr: String,
+    pub is_bot: bool,
 }
 
 /// Monotonic counts of what the server refused, dropped or failed to send.
@@ -268,6 +286,9 @@ impl<G: GameDll> Server<G> {
             paused: false,
             last_userinfo_hash: vec![(String::new(), -100.0); slots],
             masters: crate::master::MasterRegistration::default(),
+            replay_capture: false,
+            replay_svc_packets: Vec::new(),
+            next_replay_snapshot_at: 0.0,
         };
         server.activate_map();
         server
@@ -367,6 +388,7 @@ impl<G: GameDll> Server<G> {
         self.queue_pings_if_due();
         self.broadcast_userinfo();
         self.send_client_frames(net);
+        self.record_replay_snapshot_if_due();
         self.cleanup_ents();
         self.send_farewells(net);
         self.logger.flush(net);
@@ -552,6 +574,154 @@ impl<G: GameDll> Server<G> {
 
     pub fn masters_mut(&mut self) -> &mut crate::master::MasterRegistration {
         &mut self.masters
+    }
+
+    pub fn rcon_password(&self) -> &str {
+        self.cvars.get_str("rcon_password")
+    }
+
+    pub fn map_name(&self) -> &str {
+        &self.map.name
+    }
+
+    pub fn map_crc(&self) -> u32 {
+        self.map.crc
+    }
+
+    pub fn cvar_str(&self, name: &str) -> &str {
+        self.cvars.get_str(name)
+    }
+
+    pub fn cvar_i32(&self, name: &str) -> i32 {
+        self.cvars.get_i32(name)
+    }
+
+    /// Returns snapshots of all currently connected clients and bots.
+    pub fn client_infos(&self) -> Vec<ServerClientInfo> {
+        let mut out = Vec::new();
+        for (index, client) in self.clients.iter().enumerate() {
+            if client.is_free() {
+                continue;
+            }
+            let name = self.views[index]
+                .userinfo
+                .get("name")
+                .unwrap_or("")
+                .to_string();
+            let addr = if client.fake {
+                "BOT".to_string()
+            } else {
+                client.addr.map_or_else(String::new, |a| a.to_string())
+            };
+            out.push(ServerClientInfo {
+                slot: index as u8,
+                userid: client.userid,
+                name,
+                ping_ms: if client.fake { 0 } else { u32::from(client.pings.ping_ms()) },
+                active: client.state == ClientState::Active,
+                addr,
+                is_bot: client.fake,
+            });
+        }
+        out
+    }
+
+    /// Enables or disables capturing broadcast `svc_*` streams and periodic entity snapshots for
+    /// server-side round `.dem` replay recording.
+    pub fn enable_replay_capture(&mut self, enabled: bool) {
+        self.replay_capture = enabled;
+        if !enabled {
+            self.replay_svc_packets.clear();
+        }
+    }
+
+    /// Drains queued match statistics / round lifecycle events emitted by the game.
+    pub fn take_stat_events(&mut self) -> Vec<GameStatEvent> {
+        std::mem::take(&mut self.outbox.stat_events)
+    }
+
+    /// Drains captured `svc_*` streams suitable for `RoundReplayStore::record_svc_packet`.
+    pub fn take_replay_svc_packets(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.replay_svc_packets)
+    }
+
+    /// Builds a valid HLDEMO signon `svc_*` packet stream for the current map and server state.
+    pub fn encode_replay_signon(&mut self) -> Vec<u8> {
+        let info = ServerInfoMsg {
+            protocol: 48,
+            spawn_count: self.spawn_count,
+            map_crc: self.map.crc,
+            client_dll_md5: [0; 16],
+            max_clients: self.cfg.max_clients,
+            player_slot: 0,
+            is_deathmatch: true,
+            game_dir: self.cfg.game_dir.clone(),
+            hostname: self.hostname(),
+            map_path: self.map.path.clone(),
+            map_cycle: String::new(),
+            vac_secure: false,
+        };
+        let userinfos = self.userinfo_entries(|_| true);
+        let movevars = move_vars(&self.cvars, &self.map.entities);
+        let mut w = MsgWriter::new();
+        write_new_stage(
+            &mut w,
+            &info,
+            self.cfg.build,
+            &self.deltas,
+            &movevars,
+            &self.usermsgs,
+            &userinfos,
+        );
+        w.write_bytes(&self.outbox.init);
+        write_spawn_baselines(
+            &mut w,
+            &self.deltas,
+            self.cfg.max_clients,
+            &self.baselines,
+            self.sv_time,
+            None,
+        );
+        write_spawn_stage(
+            &mut w,
+            glam::Vec3::ZERO,
+            self.sv_time,
+            &userinfos,
+            &self.outbox.light_styles,
+        );
+        let voice_codec = self.cvars.get_str("sv_voicecodec").to_string();
+        let voice_quality = self.cvars.get_i32("sv_voicequality").clamp(0, 5) as u8;
+        write_spawn_tail_with_voice(&mut w, &voice_codec, voice_quality);
+        w.into_bytes()
+    }
+
+    fn record_replay_snapshot_if_due(&mut self) {
+        if !self.replay_capture || self.real_time < self.next_replay_snapshot_at {
+            return;
+        }
+        self.next_replay_snapshot_at = self.real_time + 0.05;
+        let max_clients = self.cfg.max_clients;
+        let entities: Vec<GoldSrcEntityState> = self
+            .edicts
+            .iter_live()
+            .filter(|(id, edict)| id.index != 0 && edict.vars.modelindex != 0)
+            .take(crate::frame::MAX_PACKET_ENTITIES)
+            .map(|(id, edict)| entity_state_from_vars(id.index, &edict.vars, max_clients))
+            .collect();
+        let mut w = MsgWriter::new();
+        cs_proto48::messages::write_svc_time(&mut w, self.sv_time as f32);
+        cs_proto48::messages::write_svc_packetentities_full_encoded(
+            &mut w,
+            &self.deltas,
+            max_clients,
+            &self.baseline_records,
+            &entities,
+            self.sv_time,
+            None,
+        );
+        if self.replay_svc_packets.len() < 1024 {
+            self.replay_svc_packets.push(w.into_bytes());
+        }
     }
 
     /// Queries a client cvar via `svc_sendcvarvalue` (unnumbered).
@@ -771,6 +941,12 @@ impl<G: GameDll> Server<G> {
             return;
         }
         let bytes = std::mem::replace(&mut self.outbox.reliable_all, MsgWriter::new());
+        if self.replay_capture && self.replay_svc_packets.len() < 1024 {
+            let mut pkt = MsgWriter::with_capacity(bytes.len() + 8);
+            cs_proto48::messages::write_svc_time(&mut pkt, self.sv_time as f32);
+            pkt.write_bytes(bytes.as_slice());
+            self.replay_svc_packets.push(pkt.into_bytes());
+        }
         for client in &mut self.clients {
             // `SV_UpdateToReliableMessages` skips `fakeclient` (`sv_main.cpp` 5216-5229).
             if client.state.is_in_game() && !client.fake {

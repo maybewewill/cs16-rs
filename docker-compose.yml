@@ -1,0 +1,34 @@
+services:
+  cs-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cs16-rs/cs-server:latest
+    container_name: cs16-server
+    restart: unless-stopped
+    ports:
+      - "27015:27015/udp"
+      - "27016:27016/tcp"
+    volumes:
+      - "${CS16_GAMEDIR:-./gamedir}:/gamedir:ro"
+    environment:
+      RUST_LOG: "${RUST_LOG:-info}"
+      CS16_GAMEDIR: /gamedir
+    command:
+      - "--proto48"
+      - "--gamedir"
+      - "/gamedir"
+      - "--port"
+      - "27015"
+      - "--web-port"
+      - "27016"
+      - "--web-dir"
+      - "/app/web"
+      - "--map"
+      - "${CS16_MAP:-de_dust2}"
+      - "--maxplayers"
+      - "${CS16_MAXPLAYERS:-16}"
+      - "--hostname"
+      - "${CS16_HOSTNAME:-Counter-Strike 1.6 Rust}"
+    stdin_open: true
+    tty: true

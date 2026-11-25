@@ -7,6 +7,7 @@
 //! Protocol and registry modules are `wasm32-unknown-unknown` compatible; native socket
 //! I/O lives in [`server`] and [`client`].
 
+pub mod lobbies;
 pub mod protocol;
 pub mod registry;
 

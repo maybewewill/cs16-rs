@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Counter-Strike 1.6 — Web Admin Panel</title>
+  <style>
+    :root {
+      --bg: #1d211a;
+      --panel: #3e4637;
+      --panel-alt: #4c5844;
+      --inset: #2c3327;
+      --terminal: #121610;
+      --border: #889180;
+      --border-dark: #252b21;
+      --text: #ecefe9;
+      --muted: #b6bfb0;
+      --gold: #c4b550;
+      --ct: #84b4ff;
+      --t: #ff8e72;
+      --ok: #96d178;
+      --danger: #d96b5b;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: Tahoma, Verdana, sans-serif;
+      font-size: 12px;
+      line-height: 1.45;
+      padding: 12px;
+    }
+    header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      background: var(--panel-alt);
+      border: 1px solid var(--border);
+      padding: 8px 12px;
+      margin-bottom: 12px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .brand h1 {
+      font-size: 15px;
+      color: var(--gold);
+      letter-spacing: 0.4px;
+    }
+    .badge {
+      background: var(--inset);
+      border: 1px solid var(--border);
+      padding: 2px 7px;
+      color: var(--muted);
+    }
+    .badge.ok { color: var(--ok); border-color: var(--ok); }
+    .badge.err { color: var(--danger); border-color: var(--danger); }
+    a.nav-link {
+      color: var(--gold);
+      text-decoration: none;
+      border: 1px solid var(--border);
+      background: var(--inset);
+      padding: 4px 8px;
+    }
+    a.nav-link:hover { background: var(--panel); }
+
+    .auth-bar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      padding: 8px 12px;
+      margin-bottom: 12px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .card.wide { grid-column: 1 / -1; }
+    .card-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border-dark);
+      padding-bottom: 5px;
+      color: var(--gold);
+      font-weight: bold;
+      font-size: 13px;
+    }
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+    }
+    label { color: var(--muted); }
+    input, select, button {
+      background: var(--inset);
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 4px 8px;
+      font-family: inherit;
+      font-size: 12px;
+    }
+    input[type="text"], input[type="password"], select { min-width: 120px; }
+    .grow { flex: 1 1 160px; }
+    button {
+      background: var(--panel-alt);
+      cursor: pointer;
+    }
+    button:hover:not(:disabled) { background: #5a6a50; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.danger { background: #6b352d; border-color: #b46a5f; }
+    button.danger:hover:not(:disabled) { background: #824138; }
+    button.primary { border-color: var(--gold); color: var(--gold); }
+
+    .kv-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 6px;
+    }
+    .kv {
+      background: var(--inset);
+      border: 1px solid var(--border-dark);
+      padding: 6px 8px;
+    }
+    .kv .k { color: var(--muted); font-size: 11px; }
+    .kv .v { color: var(--text); font-weight: bold; font-size: 13px; margin-top: 2px; word-break: break-word; }
+    .score-ct { color: var(--ct); }
+    .score-t { color: var(--t); }
+
+    .table-wrap { overflow-x: auto; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--inset);
+      font-size: 12px;
+    }
+    th, td {
+      border: 1px solid var(--border-dark);
+      padding: 5px 7px;
+      text-align: left;
+      white-space: nowrap;
+    }
+    th {
+      background: var(--panel-alt);
+      color: var(--gold);
+      font-weight: bold;
+    }
+    tr:hover td { background: #343d2e; }
+    .empty-cell { color: var(--muted); text-align: center; padding: 10px; }
+
+    #rcon-output {
+      background: var(--terminal);
+      color: #b9e39e;
+      border: 1px solid var(--border-dark);
+      padding: 8px;
+      height: 190px;
+      overflow-y: auto;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 12px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .chip-row { display: flex; flex-wrap: wrap; gap: 5px; }
+    .chip { font-size: 11px; padding: 2px 6px; }
+    .hint { color: var(--muted); font-size: 11px; }
+    .mono { font-family: Consolas, "Courier New", monospace; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <h1>CS 1.6 RUST — SERVER ADMIN PANEL</h1>
+      <span id="auth-badge" class="badge">Locked</span>
+      <span id="refresh-badge" class="badge">Idle</span>
+    </div>
+    <div class="row">
+      <a class="nav-link" href="/">Open Web Client</a>
+    </div>
+  </header>
+
+  <section class="auth-bar">
+    <label for="token-input">Admin Token (<code>rcon_password</code>)</label>
+    <input id="token-input" type="password" class="grow" placeholder="Enter rcon_password..." autocomplete="current-password">
+    <label class="row">
+      <input id="remember-session" type="checkbox">
+      <span>Remember in tab</span>
+    </label>
+    <button id="btn-login" class="primary">Authenticate</button>
+    <button id="btn-logout">Logout</button>
+    <label for="refresh-select">Auto-Refresh</label>
+    <select id="refresh-select">
+      <option value="0">Off</option>
+      <option value="3000" selected>3s</option>
+      <option value="5000">5s</option>
+      <option value="10000">10s</option>
+    </select>
+    <button id="btn-refresh-now">Refresh Now</button>
+  </section>
+
+  <div class="grid">
+    <section class="card">
+      <div class="card-title">
+        <span>Server Status</span>
+        <span id="status-tick" class="hint">100 Hz</span>
+      </div>
+      <div class="kv-grid">
+        <div class="kv"><div class="k">Hostname</div><div id="st-hostname" class="v">-</div></div>
+        <div class="kv"><div class="k">Current Map</div><div id="st-map" class="v">-</div></div>
+        <div class="kv"><div class="k">Players (Bots)</div><div id="st-players" class="v">-</div></div>
+        <div class="kv"><div class="k">Round &amp; Score</div><div id="st-score" class="v">-</div></div>
+        <div class="kv"><div class="k">Ports (UDP / Web)</div><div id="st-ports" class="v">-</div></div>
+        <div class="kv"><div class="k">Uptime</div><div id="st-uptime" class="v">-</div></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-title">
+        <span>Map Switcher &amp; Bot Controls</span>
+      </div>
+      <div class="row">
+        <label for="map-select">Map</label>
+        <select id="map-select" class="grow">
+          <option value="de_dust2">de_dust2</option>
+          <option value="de_inferno">de_inferno</option>
+          <option value="de_nuke">de_nuke</option>
+          <option value="de_train">de_train</option>
+          <option value="cs_office">cs_office</option>
+          <option value="cs_italy">cs_italy</option>
+        </select>
+        <input id="map-custom" type="text" placeholder="or custom map...">
+        <button id="btn-changelevel" class="primary">Changelevel</button>
+      </div>
+      <div class="row">
+        <label for="bot-quota">Bot Quota</label>
+        <input id="bot-quota" type="number" min="0" max="32" value="0" style="width:68px">
+        <label for="bot-diff">Difficulty</label>
+        <select id="bot-diff">
+          <option value="0">0 - Easy</option>
+          <option value="1" selected>1 - Normal</option>
+          <option value="2">2 - Hard</option>
+          <option value="3">3 - Expert</option>
+        </select>
+        <button id="btn-apply-bots">Apply Bots</button>
+      </div>
+      <div class="row">
+        <button id="btn-add-t">Add T Bot</button>
+        <button id="btn-add-ct">Add CT Bot</button>
+        <button id="btn-kick-bots" class="danger">Kick All Bots</button>
+        <button id="btn-restart-round">sv_restart 1</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-title">
+        <span>One-Click Lobby Invite Builder</span>
+      </div>
+      <div class="row">
+        <label for="inv-host">Host</label>
+        <input id="inv-host" type="text" class="grow" placeholder="server hostname or IP">
+        <label for="inv-port">Web Port</label>
+        <input id="inv-port" type="number" min="1" max="65535" value="27016" style="width:82px">
+        <label for="inv-room">Room</label>
+        <input id="inv-room" type="text" value="alpha" style="width:92px">
+        <button id="btn-build-invite" class="primary">Generate</button>
+      </div>
+      <div class="row">
+        <input id="inv-url" type="text" class="grow mono" readonly placeholder="Click Generate for ?join=host:port&room=code">
+        <button id="btn-copy-invite">Copy Invite</button>
+      </div>
+      <div class="row">
+        <input id="inv-connect" type="text" class="grow mono" readonly placeholder="connect host:27015">
+        <button id="btn-copy-connect">Copy Console</button>
+      </div>
+      <div id="inv-feedback" class="hint">Generates shareable web join links and GoldSrc console commands.</div>
+    </section>
+  </div>
+
+  <section class="card wide" style="margin-bottom:12px;">
+    <div class="card-title">
+      <span>Live Players</span>
+      <span id="players-count" class="hint">0 connected</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Slot</th>
+            <th>UserID</th>
+            <th>Name</th>
+            <th>Team</th>
+            <th>Frags</th>
+            <th>Deaths</th>
+            <th>Ping</th>
+            <th>State</th>
+            <th>Address</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="players-body">
+          <tr><td colspan="10" class="empty-cell">Authenticate to load live players.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <div class="grid">
+    <section class="card">
+      <div class="card-title">
+        <span>Interactive RCON Terminal</span>
+        <button id="btn-rcon-clear" class="chip">Clear</button>
+      </div>
+      <div class="chip-row">
+        <button class="chip rcon-preset" data-cmd="status">status</button>
+        <button class="chip rcon-preset" data-cmd="users">users</button>
+        <button class="chip rcon-preset" data-cmd="listid">listid</button>
+        <button class="chip rcon-preset" data-cmd="listip">listip</button>
+        <button class="chip rcon-preset" data-cmd="mp_freezetime">mp_freezetime</button>
+        <button class="chip rcon-preset" data-cmd="sv_restart 1">sv_restart 1</button>
+      </div>
+      <pre id="rcon-output">Ready. Authenticate with rcon_password to run commands.</pre>
+      <form id="rcon-form" class="row">
+        <input id="rcon-input" type="text" class="grow mono" placeholder="Enter console / RCON command (Up/Down for history)...">
+        <button type="submit" class="primary">Run</button>
+      </form>
+    </section>
+
+    <section class="card">
+      <div class="card-title">
+        <span>Round .dem Replays (HLDEMO v5)</span>
+        <span id="replays-meta" class="hint">0 rounds</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Round</th>
+              <th>Map</th>
+              <th>Winner</th>
+              <th>Reason</th>
+              <th>Score</th>
+              <th>Duration</th>
+              <th>Size</th>
+              <th>Download</th>
+            </tr>
+          </thead>
+          <tbody id="replays-body">
+            <tr><td colspan="8" class="empty-cell">No recorded rounds yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <section class="card wide">
+    <div class="card-title">
+      <span>Match Stats Leaderboard</span>
+      <span id="stats-summary" class="hint">-</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Player</th>
+            <th>Team</th>
+            <th>K</th>
+            <th>D</th>
+            <th>K/D</th>
+            <th>HS%</th>
+            <th>A</th>
+            <th>Damage</th>
+            <th>ADR</th>
+            <th>Plants</th>
+            <th>Defuses</th>
+            <th>Rescues</th>
+            <th>MVPs</th>
+          </tr>
+        </thead>
+        <tbody id="stats-body">
+          <tr><td colspan="14" class="empty-cell">No match statistics yet.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <script type="module" src="./admin.js"></script>
+</body>
+</html>

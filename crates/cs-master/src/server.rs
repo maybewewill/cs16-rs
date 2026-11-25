@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use tracing::{debug, warn};
 
+use crate::lobbies::{LobbyError, LobbyRegistry};
 use crate::protocol::{
     MASTER_QUERY_OPCODE, MasterError, encode_query_reply, parse_query_request,
 };
@@ -17,6 +18,7 @@ use crate::registry::{
 const MAX_UDP_DATAGRAMS_PER_STEP: usize = 256;
 const MAX_HTTP_ACCEPTS_PER_STEP: usize = 64;
 const MAX_HTTP_REQUEST_BYTES: usize = 4096;
+const MAX_HTTP_BODY_BYTES: usize = 8192;
 const HTTP_STREAM_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// Configuration for [`MasterServer`].
@@ -50,6 +52,7 @@ pub struct MasterServer {
     http: Option<TcpListener>,
     http_addr: Option<SocketAddr>,
     registry: MasterRegistry,
+    lobbies: LobbyRegistry,
     max_per_page: usize,
 }
 
@@ -80,6 +83,7 @@ impl MasterServer {
                 config.max_entries,
                 config.max_challenges,
             ),
+            lobbies: LobbyRegistry::default(),
             max_per_page: config.max_per_page.max(1),
         })
     }
@@ -104,11 +108,22 @@ impl MasterServer {
         &mut self.registry
     }
 
+    /// Read-only view of the underlying [`LobbyRegistry`].
+    pub fn lobbies(&self) -> &LobbyRegistry {
+        &self.lobbies
+    }
+
+    /// Mutable access to the underlying [`LobbyRegistry`].
+    pub fn lobbies_mut(&mut self) -> &mut LobbyRegistry {
+        &mut self.lobbies
+    }
+
     /// Advance expiration and process pending UDP datagrams and HTTP connections without blocking.
     ///
     /// Returns the number of UDP packets and HTTP connections handled during this step.
     pub fn step(&mut self, now_secs: f64) -> Result<usize, MasterError> {
         self.registry.expire_stale(now_secs);
+        self.lobbies.expire_stale(now_secs);
 
         let mut handled = 0usize;
         handled += self.poll_udp(now_secs)?;
@@ -203,18 +218,15 @@ impl MasterServer {
         }
     }
 
-    fn poll_http(&self, now_secs: f64) -> Result<usize, MasterError> {
-        let Some(listener) = &self.http else {
+    fn poll_http(&mut self, now_secs: f64) -> Result<usize, MasterError> {
+        let Some(listener) = self.http.as_ref() else {
             return Ok(0);
         };
 
-        let mut count = 0usize;
+        let mut accepted = Vec::new();
         for _ in 0..MAX_HTTP_ACCEPTS_PER_STEP {
             match listener.accept() {
-                Ok((stream, _peer)) => {
-                    count += 1;
-                    self.handle_http_connection(stream, now_secs);
-                }
+                Ok((stream, _peer)) => accepted.push(stream),
                 Err(e) if e.kind() == ErrorKind::WouldBlock => break,
                 Err(e)
                     if matches!(
@@ -229,10 +241,14 @@ impl MasterServer {
                 Err(e) => return Err(MasterError::Io(e)),
             }
         }
+        let count = accepted.len();
+        for stream in accepted {
+            self.handle_http_connection(stream, now_secs);
+        }
         Ok(count)
     }
 
-    fn handle_http_connection(&self, mut stream: TcpStream, now_secs: f64) {
+    fn handle_http_connection(&mut self, mut stream: TcpStream, now_secs: f64) {
         let _ = stream.set_nonblocking(false);
         let _ = stream.set_read_timeout(Some(HTTP_STREAM_TIMEOUT));
         let _ = stream.set_write_timeout(Some(HTTP_STREAM_TIMEOUT));
@@ -263,18 +279,28 @@ impl MasterServer {
             }
         }
 
-        if total == MAX_HTTP_REQUEST_BYTES && header_end.is_none() {
-            write_http_response(
-                &mut stream,
-                "413 Payload Too Large",
-                "text/plain; charset=utf-8",
-                None,
-                "Request headers too large\n",
-            );
+        let Some(head_end) = header_end else {
+            if total == MAX_HTTP_REQUEST_BYTES {
+                write_http_response(
+                    &mut stream,
+                    "413 Payload Too Large",
+                    "text/plain; charset=utf-8",
+                    None,
+                    "Request headers too large\n",
+                );
+            } else {
+                write_http_response(
+                    &mut stream,
+                    "400 Bad Request",
+                    "text/plain; charset=utf-8",
+                    None,
+                    "Incomplete HTTP request\n",
+                );
+            }
             return;
-        }
+        };
 
-        let Ok(raw_req) = std::str::from_utf8(&buf[..total]) else {
+        let Ok(raw_req) = std::str::from_utf8(&buf[..head_end]) else {
             write_http_response(
                 &mut stream,
                 "400 Bad Request",
@@ -285,7 +311,8 @@ impl MasterServer {
             return;
         };
 
-        let Some(request_line) = raw_req.lines().next() else {
+        let mut lines = raw_req.lines();
+        let Some(request_line) = lines.next() else {
             write_http_response(
                 &mut stream,
                 "400 Bad Request",
@@ -321,7 +348,81 @@ impl MasterServer {
             return;
         }
 
-        let path = target.split('?').next().unwrap_or(target);
+        let mut content_len = 0usize;
+        for line in lines {
+            if let Some((k, v)) = line.split_once(':') {
+                if k.trim().eq_ignore_ascii_case("transfer-encoding") {
+                    write_http_response(
+                        &mut stream,
+                        "400 Bad Request",
+                        "text/plain; charset=utf-8",
+                        None,
+                        "Transfer-Encoding not supported\n",
+                    );
+                    return;
+                }
+                if k.trim().eq_ignore_ascii_case("content-length") {
+                    let Ok(parsed) = v.trim().parse::<usize>() else {
+                        write_http_response(
+                            &mut stream,
+                            "400 Bad Request",
+                            "text/plain; charset=utf-8",
+                            None,
+                            "Invalid Content-Length\n",
+                        );
+                        return;
+                    };
+                    if parsed > MAX_HTTP_BODY_BYTES {
+                        write_http_response(
+                            &mut stream,
+                            "413 Payload Too Large",
+                            "text/plain; charset=utf-8",
+                            None,
+                            "Request body too large\n",
+                        );
+                        return;
+                    }
+                    content_len = parsed;
+                }
+            }
+        }
+
+        let mut body = Vec::with_capacity(content_len);
+        let leftover = &buf[head_end..total];
+        if leftover.len() >= content_len {
+            body.extend_from_slice(&leftover[..content_len]);
+        } else {
+            body.extend_from_slice(leftover);
+            let remaining = content_len - body.len();
+            let mut tail = vec![0u8; remaining];
+            if stream.read_exact(&mut tail).is_err() {
+                write_http_response(
+                    &mut stream,
+                    "400 Bad Request",
+                    "text/plain; charset=utf-8",
+                    None,
+                    "Truncated request body\n",
+                );
+                return;
+            }
+            body.extend_from_slice(&tail);
+        }
+
+        if method == "OPTIONS" {
+            write_http_response(
+                &mut stream,
+                "204 No Content",
+                "text/plain; charset=utf-8",
+                Some("Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n"),
+                "",
+            );
+            return;
+        }
+
+        let (path, query) = match target.split_once('?') {
+            Some((p, q)) => (p, Some(q)),
+            None => (target, None),
+        };
         if path == "/servers" {
             if method == "GET" {
                 let json = self.registry.to_json(now_secs);
@@ -341,6 +442,8 @@ impl MasterServer {
                     "Method Not Allowed\n",
                 );
             }
+        } else if path == "/lobbies" || path.starts_with("/lobbies/") {
+            self.handle_lobby_http(&mut stream, method, path, query, &body, now_secs);
         } else {
             write_http_response(
                 &mut stream,
@@ -351,6 +454,183 @@ impl MasterServer {
             );
         }
     }
+
+    fn handle_lobby_http(
+        &mut self,
+        stream: &mut TcpStream,
+        method: &str,
+        path: &str,
+        query: Option<&str>,
+        body: &[u8],
+        now_secs: f64,
+    ) {
+        if path == "/lobbies" {
+            match method {
+                "GET" => {
+                    let json = self.lobbies.list_json(now_secs);
+                    write_http_response(
+                        stream,
+                        "200 OK",
+                        "application/json; charset=utf-8",
+                        None,
+                        &json,
+                    );
+                }
+                "POST" => match self.lobbies.upsert_from_json(body, now_secs) {
+                    Ok(info) => write_http_response(
+                        stream,
+                        "200 OK",
+                        "application/json; charset=utf-8",
+                        None,
+                        &info.to_json(),
+                    ),
+                    Err(err) => write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json; charset=utf-8",
+                        None,
+                        &format!("{{\"error\":\"{err}\"}}"),
+                    ),
+                },
+                _ => write_http_response(
+                    stream,
+                    "405 Method Not Allowed",
+                    "text/plain; charset=utf-8",
+                    Some("Allow: GET, POST\r\n"),
+                    "Method Not Allowed\n",
+                ),
+            }
+            return;
+        }
+
+        let rest = path.strip_prefix("/lobbies/").unwrap_or("");
+        if let Some(room) = rest.strip_suffix("/signal") {
+            match method {
+                "POST" => match self.lobbies.push_signal_from_json(room, body, now_secs) {
+                    Ok(sig) => write_http_response(
+                        stream,
+                        "200 OK",
+                        "application/json; charset=utf-8",
+                        None,
+                        &sig.to_json(),
+                    ),
+                    Err(LobbyError::NotFound) => write_http_response(
+                        stream,
+                        "404 Not Found",
+                        "application/json; charset=utf-8",
+                        None,
+                        "{\"error\":\"lobby room not found\"}",
+                    ),
+                    Err(err) => write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "application/json; charset=utf-8",
+                        None,
+                        &format!("{{\"error\":\"{err}\"}}"),
+                    ),
+                },
+                "GET" => {
+                    let (since_id, target) = parse_signal_query(query.unwrap_or(""));
+                    match self
+                        .lobbies
+                        .poll_signals(room, since_id, target.as_deref(), now_secs)
+                    {
+                        Ok(sigs) => write_http_response(
+                            stream,
+                            "200 OK",
+                            "application/json; charset=utf-8",
+                            None,
+                            &LobbyRegistry::signals_to_json(&sigs),
+                        ),
+                        Err(LobbyError::NotFound) => write_http_response(
+                            stream,
+                            "404 Not Found",
+                            "application/json; charset=utf-8",
+                            None,
+                            "{\"error\":\"lobby room not found\"}",
+                        ),
+                        Err(err) => write_http_response(
+                            stream,
+                            "400 Bad Request",
+                            "application/json; charset=utf-8",
+                            None,
+                            &format!("{{\"error\":\"{err}\"}}"),
+                        ),
+                    }
+                }
+                _ => write_http_response(
+                    stream,
+                    "405 Method Not Allowed",
+                    "text/plain; charset=utf-8",
+                    Some("Allow: GET, POST\r\n"),
+                    "Method Not Allowed\n",
+                ),
+            }
+            return;
+        }
+
+        match method {
+            "GET" => match self.lobbies.get(rest, now_secs) {
+                Some(info) => write_http_response(
+                    stream,
+                    "200 OK",
+                    "application/json; charset=utf-8",
+                    None,
+                    &info.to_json(),
+                ),
+                None => write_http_response(
+                    stream,
+                    "404 Not Found",
+                    "application/json; charset=utf-8",
+                    None,
+                    "{\"error\":\"lobby room not found\"}",
+                ),
+            },
+            "DELETE" => {
+                if self.lobbies.remove(rest) {
+                    write_http_response(
+                        stream,
+                        "200 OK",
+                        "application/json; charset=utf-8",
+                        None,
+                        "{\"deleted\":true}",
+                    );
+                } else {
+                    write_http_response(
+                        stream,
+                        "404 Not Found",
+                        "application/json; charset=utf-8",
+                        None,
+                        "{\"error\":\"lobby room not found\"}",
+                    );
+                }
+            }
+            _ => write_http_response(
+                stream,
+                "405 Method Not Allowed",
+                "text/plain; charset=utf-8",
+                Some("Allow: GET, DELETE\r\n"),
+                "Method Not Allowed\n",
+            ),
+        }
+    }
+}
+
+fn parse_signal_query(query: &str) -> (u64, Option<String>) {
+    let mut since = 0u64;
+    let mut target = None;
+    for pair in query.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            if k == "since"
+                && let Ok(parsed) = v.parse::<u64>()
+            {
+                since = parsed;
+            } else if k == "to" && !v.is_empty() {
+                target = Some(v.to_string());
+            }
+        }
+    }
+    (since, target)
 }
 
 fn find_http_header_end(buf: &[u8]) -> Option<usize> {
@@ -575,6 +855,45 @@ mod tests {
         let empty_http = http_get(http_addr, "GET /servers HTTP/1.1\r\nHost: localhost\r\n\r\n");
         let (_, empty_body) = empty_http.split_once("\r\n\r\n").unwrap();
         assert_eq!(empty_body, "[]");
+
+        // /lobbies registration, listing, signaling, and deletion.
+        let lobby_body = r#"{"room":"alpha","host":"127.0.0.1","port":27016,"map":"de_dust2","players":2,"max_players":16,"mode":"ws"}"#;
+        let create_lobby = http_get(
+            http_addr,
+            &format!(
+                "POST /lobbies HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+                lobby_body.len(),
+                lobby_body
+            ),
+        );
+        assert!(create_lobby.starts_with("HTTP/1.1 200 OK\r\n"), "{create_lobby}");
+        assert!(create_lobby.contains("?join=127.0.0.1:27016&room=alpha"));
+
+        let list_lobbies = http_get(http_addr, "GET /lobbies HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        assert!(list_lobbies.contains("\"room\":\"alpha\""));
+
+        let sig_body = r#"{"from":"host","to":"guest","kind":"offer","payload":"sdp-offer"}"#;
+        let push_sig = http_get(
+            http_addr,
+            &format!(
+                "POST /lobbies/alpha/signal HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+                sig_body.len(),
+                sig_body
+            ),
+        );
+        assert!(push_sig.starts_with("HTTP/1.1 200 OK\r\n"), "{push_sig}");
+
+        let poll_sig = http_get(
+            http_addr,
+            "GET /lobbies/alpha/signal?since=0&to=guest HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        assert!(poll_sig.contains("sdp-offer"));
+
+        let del_lobby = http_get(
+            http_addr,
+            "DELETE /lobbies/alpha HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        assert!(del_lobby.contains("\"deleted\":true"));
 
         stop.store(true, Ordering::Release);
         handle.join().unwrap();

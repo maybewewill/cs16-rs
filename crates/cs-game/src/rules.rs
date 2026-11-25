@@ -52,7 +52,7 @@
 //! rotation, and hostage `RePosition` follow vanilla ReGameDLL_CS (`multiplay_gamerules.cpp`).
 
 use cs_engine::consts::SOLID_NOT;
-use cs_engine::{EngineApi, MsgDest};
+use cs_engine::{EngineApi, GameStatEvent, MsgDest};
 use cs_proto48::messages::svc;
 use cs_proto48::usermsg::CsUserMsg;
 
@@ -687,6 +687,15 @@ fn win_round(
         terminate_round(g, eng, delay, status);
         update_team_scores(g, eng);
     }
+    let winner_code = match status {
+        WinStatus::Terrorists => 1,
+        WinStatus::Cts => 2,
+        WinStatus::None | WinStatus::Draw => 0,
+    };
+    eng.emit_stat_event(GameStatEvent::RoundEnd {
+        winner: winner_code,
+        reason: sentence.to_string(),
+    });
 }
 
 /// `Round_Cts`: the counter-terrorists win the round (and are paid for it when the next one
@@ -701,6 +710,10 @@ fn round_cts(g: &mut GameState, eng: &mut EngineApi<'_>, delay: f64) {
     }
     end_round_message(eng, "#CTs_Win");
     terminate_round(g, eng, delay, WinStatus::Cts);
+    eng.emit_stat_event(GameStatEvent::RoundEnd {
+        winner: 2,
+        reason: "#CTs_Win".to_string(),
+    });
 }
 
 /// `Round_Ts`: the terrorists win the round.
@@ -714,6 +727,10 @@ fn round_ts(g: &mut GameState, eng: &mut EngineApi<'_>, delay: f64) {
     }
     end_round_message(eng, "#Terrorists_Win");
     terminate_round(g, eng, delay, WinStatus::Terrorists);
+    eng.emit_stat_event(GameStatEvent::RoundEnd {
+        winner: 1,
+        reason: "#Terrorists_Win".to_string(),
+    });
 }
 
 /// `Round_Draw`: nobody wins the round.
@@ -722,6 +739,10 @@ fn round_draw(g: &mut GameState, eng: &mut EngineApi<'_>, delay: f64) {
     end_round_message(eng, "#Round_Draw");
     broadcast(eng, "rounddraw");
     terminate_round(g, eng, delay, WinStatus::Draw);
+    eng.emit_stat_event(GameStatEvent::RoundEnd {
+        winner: 0,
+        reason: "#Round_Draw".to_string(),
+    });
 }
 
 /// `NeededPlayersCheck(float)` (`ROUND_GAME_COMMENCE`): the first round starts as soon as both
@@ -734,6 +755,10 @@ fn game_commence(g: &mut GameState, eng: &mut EngineApi<'_>, delay: f64) {
     end_round_message(eng, "#Game_Commencing");
     terminate_round(g, eng, delay, WinStatus::Draw);
     g.rules.game_started = true;
+    eng.emit_stat_event(GameStatEvent::RoundEnd {
+        winner: 0,
+        reason: "#Game_Commencing".to_string(),
+    });
 }
 
 /// `NeededPlayersCheck()`: whether the game has to wait for players, or can start now. `true`
@@ -1603,6 +1628,10 @@ pub(crate) fn restart_round(g: &mut GameState, eng: &mut EngineApi<'_>) {
         g.num_terrorist_wins = 0;
         g.num_ct_wins = 0;
     }
+    let round_num = g.rules.total_rounds_played.max(0) as u32 + 1;
+    eng.emit_stat_event(GameStatEvent::RoundStart {
+        round_number: round_num,
+    });
 
     for slot in 0..g.players.len() {
         let Some(p) = g.players[slot].as_mut() else {

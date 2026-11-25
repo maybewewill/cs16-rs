@@ -5,8 +5,10 @@
 //! `cs-game`; add `--walk-game` for the older walking-only `WalkGame` of `cs-sim`. The
 //! `--proto48` flag of the earlier two-mode server is still accepted and does nothing.
 
+mod admin_http;
 mod console_io;
 mod proto48;
+mod replays;
 
 use tracing_subscriber::EnvFilter;
 

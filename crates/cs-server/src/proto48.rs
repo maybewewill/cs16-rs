@@ -2,14 +2,16 @@
 //! Counter-Strike 1.6 client and for `cs-client`. The game is `cs_game::CsGame`; `--walk-game` runs the
 //! older `cs_sim::walk_game::WalkGame` instead (players only walk: no weapons, rounds or HUD).
 
+use std::collections::HashMap;
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
-use cs_engine::{ConsoleOutcome, GameDll, Server, ServerConfig, ServerMap};
+use cs_engine::{ConsoleOutcome, GameDll, GameStatEvent, Server, ServerConfig, ServerMap};
 use cs_game::CsGame;
 use cs_local::{load_server_map, new_server};
 use cs_platform::{Clock, NativeClock};
@@ -17,13 +19,22 @@ use cs_relay::{RelayHandle, RelayPolicy, TargetAllowlist};
 use cs_sim::pmove::MoveParams;
 use cs_sim::walk_game::WalkGame;
 use cs_transport::{
-    MultiTransport, PacketTransport, PeerAddr, PeerKind, TransportError, UdpTransport,
+    HttpHook, MultiTransport, PacketTransport, PeerAddr, PeerKind, TransportError, UdpTransport,
     UpgradeHook, WsServerConfig, WsServerTransport,
 };
+use cs_transport::ws_proto::HttpRequest;
 use cs_vfs::{Vfs, VfsConfig};
 use tracing::info;
 
+use crate::admin_http::{
+    AdminBackend, AdminHttpRequest, AdminHttpResponse, AdminRouter, InviteConfig,
+    MAX_API_BODY_BYTES, PlayerSnapshot, ServerStatusSnapshot, read_http_body,
+};
 use crate::console_io;
+use crate::replays::{
+    DEFAULT_MAX_REPLAY_ROUNDS, MatchStatsTracker, RoundReplayStore, RoundWinner, TeamSide,
+    escape_json_str,
+};
 
 /// The port a Half-Life server listens on by default.
 const DEFAULT_PORT: u16 = 27015;
@@ -42,6 +53,9 @@ struct Options {
     walk_game: bool,
     web_port: Option<u16>,
     web_dir: Option<PathBuf>,
+    admin: bool,
+    replay_rounds: usize,
+    embed_web: bool,
     relay_allow: Vec<SocketAddr>,
     mods_dir: Option<PathBuf>,
     amxx_dir: Option<PathBuf>,
@@ -59,6 +73,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
         walk_game: false,
         web_port: None,
         web_dir: None,
+        admin: false,
+        replay_rounds: DEFAULT_MAX_REPLAY_ROUNDS,
+        embed_web: false,
         relay_allow: Vec::new(),
         mods_dir: None,
         amxx_dir: None,
@@ -70,6 +87,14 @@ fn parse(args: &[String]) -> Result<Options, String> {
         match arg.as_str() {
             "--proto48" => {}
             "--walk-game" => opts.walk_game = true,
+            "--admin" => opts.admin = true,
+            "--embed-web" => opts.embed_web = true,
+            "--replay-rounds" => {
+                let v = value()?;
+                opts.replay_rounds = v
+                    .parse()
+                    .map_err(|_| format!("{arg}: not a non-negative integer: {v}"))?;
+            }
             "--gamedir" | "-g" => opts.gamedir = Some(PathBuf::from(value()?)),
             "--map" | "-m" => opts.map = value()?.clone(),
             "--port" | "-p" => {
@@ -329,6 +354,541 @@ fn default_web_dir() -> Option<PathBuf> {
     plain.is_dir().then(|| plain.to_path_buf())
 }
 
+const EMBEDDED_INDEX_HTML: &[u8] = include_bytes!("../../../web/index.html");
+const EMBEDDED_APP_JS: &[u8] = include_bytes!("../../../web/app.js");
+const EMBEDDED_VFS_LOADER_JS: &[u8] = include_bytes!("../../../web/vfs_loader.js");
+const EMBEDDED_TRANSPORT_JS: &[u8] = include_bytes!("../../../web/transport.js");
+const EMBEDDED_INPUT_JS: &[u8] = include_bytes!("../../../web/input.js");
+const EMBEDDED_AUDIO_JS: &[u8] = include_bytes!("../../../web/audio.js");
+const EMBEDDED_SW_JS: &[u8] = include_bytes!("../../../web/sw.js");
+const EMBEDDED_MANIFEST: &[u8] = include_bytes!("../../../web/manifest.webmanifest");
+const EMBEDDED_ADMIN_HTML: &[u8] = include_bytes!("../../../web/admin.html");
+const EMBEDDED_ADMIN_JS: &[u8] = include_bytes!("../../../web/admin.js");
+
+fn embedded_web_asset(path: &str) -> Option<(&'static str, &'static [u8])> {
+    match path {
+        "/" | "/index.html" => Some(("text/html; charset=utf-8", EMBEDDED_INDEX_HTML)),
+        "/app.js" => Some(("text/javascript; charset=utf-8", EMBEDDED_APP_JS)),
+        "/vfs_loader.js" => Some(("text/javascript; charset=utf-8", EMBEDDED_VFS_LOADER_JS)),
+        "/transport.js" => Some(("text/javascript; charset=utf-8", EMBEDDED_TRANSPORT_JS)),
+        "/input.js" => Some(("text/javascript; charset=utf-8", EMBEDDED_INPUT_JS)),
+        "/audio.js" => Some(("text/javascript; charset=utf-8", EMBEDDED_AUDIO_JS)),
+        "/sw.js" => Some(("text/javascript; charset=utf-8", EMBEDDED_SW_JS)),
+        "/manifest.webmanifest" => Some(("application/manifest+json; charset=utf-8", EMBEDDED_MANIFEST)),
+        "/admin" | "/admin.html" => Some(("text/html; charset=utf-8", EMBEDDED_ADMIN_HTML)),
+        "/admin.js" => Some(("text/javascript; charset=utf-8", EMBEDDED_ADMIN_JS)),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TrackedPlayerMeta {
+    name: String,
+    team: TeamSide,
+    frags: i32,
+    deaths: i32,
+    is_bot: bool,
+}
+
+/// Live server-side replay store + match stats + player scoreboard cache for `AdminBackend`.
+struct Phase13Runtime {
+    replays: RoundReplayStore,
+    replays_enabled: bool,
+    stats: MatchStatsTracker,
+    players: HashMap<u8, TrackedPlayerMeta>,
+    started_at: f64,
+    round_started_at: f64,
+    game_port: u16,
+    web_port: Option<u16>,
+    available_maps: Vec<String>,
+    admin_html: Option<Vec<u8>>,
+}
+
+impl Phase13Runtime {
+    fn new(
+        map_name: &str,
+        replay_rounds: usize,
+        started_at: f64,
+        game_port: u16,
+        web_port: Option<u16>,
+        available_maps: Vec<String>,
+        static_dir: Option<&Path>,
+    ) -> Self {
+        let admin_html = static_dir
+            .and_then(|d| std::fs::read(d.join("admin.html")).ok())
+            .or_else(|| Some(EMBEDDED_ADMIN_HTML.to_vec()));
+        Self {
+            replays: RoundReplayStore::new(replay_rounds.max(1)),
+            replays_enabled: replay_rounds > 0,
+            stats: MatchStatsTracker::new(map_name),
+            players: HashMap::new(),
+            started_at,
+            round_started_at: started_at,
+            game_port,
+            web_port,
+            available_maps,
+            admin_html,
+        }
+    }
+
+    fn begin_round_recording<G: GameDll>(&mut self, server: &mut Server<G>, now: f64) {
+        self.round_started_at = now;
+        if !self.replays_enabled {
+            return;
+        }
+        server.enable_replay_capture(true);
+        self.replays
+            .begin_round(server.map_name(), server.map_crc(), now);
+        let signon = server.encode_replay_signon();
+        self.replays.record_svc_packet(now, true, &signon);
+        self.replays.mark_signon_complete(now);
+    }
+
+    fn sync_players_from_server<G: GameDll>(&mut self, server: &Server<G>) {
+        let infos = server.client_infos();
+        for info in &infos {
+            let entry = self
+                .players
+                .entry(info.slot)
+                .or_insert_with(|| TrackedPlayerMeta {
+                    name: info.name.clone(),
+                    team: TeamSide::Unassigned,
+                    frags: 0,
+                    deaths: 0,
+                    is_bot: info.is_bot,
+                });
+            entry.name = info.name.clone();
+            entry.is_bot = info.is_bot;
+            let key = format!("slot:{}", info.slot);
+            self.stats
+                .register_player(&key, &entry.name, entry.team, entry.is_bot);
+        }
+    }
+
+    fn step_from_server<G: GameDll>(&mut self, server: &mut Server<G>, now: f64) {
+        self.sync_players_from_server(server);
+
+        for ev in server.take_stat_events() {
+            match ev {
+                GameStatEvent::RoundStart { round_number } => {
+                    if self.replays_enabled && self.replays.is_recording() {
+                        let (ct, t) = self.stats.scores();
+                        let _ = self.replays.finish_round(
+                            RoundWinner::Draw,
+                            "Round Restarted",
+                            now,
+                            ct,
+                            t,
+                            None,
+                        );
+                    }
+                    self.stats.begin_round(round_number);
+                    self.begin_round_recording(server, now);
+                }
+                GameStatEvent::RoundEnd { winner, reason } => {
+                    let w = match winner {
+                        1 => RoundWinner::Terrorist,
+                        2 => RoundWinner::CounterTerrorist,
+                        _ => RoundWinner::Draw,
+                    };
+                    let duration = (now - self.round_started_at).max(0.0);
+                    let summary = self.stats.end_round(w, &reason, duration, None);
+                    if self.replays_enabled {
+                        let _ = self.replays.finish_round(
+                            w,
+                            &reason,
+                            now,
+                            summary.score_ct,
+                            summary.score_t,
+                            summary.mvp_name,
+                        );
+                    }
+                }
+                GameStatEvent::Damage {
+                    attacker_slot,
+                    victim_slot,
+                    damage,
+                } => {
+                    let att = attacker_slot.map(|s| format!("slot:{s}"));
+                    let vic = format!("slot:{victim_slot}");
+                    self.stats.record_damage(att.as_deref(), &vic, damage);
+                }
+                GameStatEvent::Kill {
+                    killer_slot,
+                    victim_slot,
+                    headshot,
+                    friendly_fire,
+                } => {
+                    if let Some(v) = self.players.get_mut(&victim_slot) {
+                        v.deaths += 1;
+                    }
+                    if let Some(ks) = killer_slot
+                        && let Some(k) = self.players.get_mut(&ks)
+                    {
+                        if ks == victim_slot || friendly_fire {
+                            k.frags -= 1;
+                        } else {
+                            k.frags += 1;
+                        }
+                    }
+                    let killer = killer_slot.map(|s| format!("slot:{s}"));
+                    let victim = format!("slot:{victim_slot}");
+                    self.stats.record_kill(
+                        killer.as_deref(),
+                        &victim,
+                        None,
+                        headshot,
+                        friendly_fire,
+                    );
+                }
+                GameStatEvent::BombPlant { slot } => {
+                    self.stats.record_bomb_plant(&format!("slot:{slot}"));
+                }
+                GameStatEvent::BombDefuse { slot } => {
+                    self.stats.record_bomb_defuse(&format!("slot:{slot}"));
+                }
+                GameStatEvent::HostageRescue { slot } => {
+                    self.stats.record_hostage_rescue(&format!("slot:{slot}"));
+                }
+            }
+        }
+
+        if self.replays_enabled {
+            for pkt in server.take_replay_svc_packets() {
+                self.replays.record_svc_packet(now, false, &pkt);
+            }
+        }
+    }
+
+    fn servers_list_json<G: GameDll>(&self, server: &Server<G>, host_header: Option<&str>) -> String {
+        let host = host_header
+            .and_then(|h| h.split(':').next())
+            .map(str::trim)
+            .filter(|h| !h.is_empty())
+            .unwrap_or("127.0.0.1");
+        let addr = format!("{host}:{}", self.game_port);
+        let infos = server.client_infos();
+        let players = infos.len();
+        let bots = infos.iter().filter(|c| c.is_bot).count();
+        let web_port_json = match self.web_port {
+            Some(p) => p.to_string(),
+            None => "null".to_string(),
+        };
+        format!(
+            "[{{\"addr\":{},\"hostname\":{},\"gamedir\":\"cstrike\",\"map\":{},\"players\":{},\"max\":{},\"bots\":{},\"web_port\":{web_port_json}}}]",
+            escape_json_str(&addr),
+            escape_json_str(&server.hostname()),
+            escape_json_str(server.map_name()),
+            players,
+            server.config().max_clients,
+            bots,
+        )
+    }
+}
+
+enum PendingHttpRequest {
+    Admin {
+        head: HttpRequest,
+        body: Vec<u8>,
+        reply: Sender<AdminHttpResponse>,
+    },
+    ServersJson {
+        host: Option<String>,
+        reply: Sender<String>,
+    },
+}
+
+struct ServerAdminBridge<'a, G: GameDll> {
+    server: &'a mut Server<G>,
+    runtime: &'a mut Phase13Runtime,
+    now: f64,
+    load_map: &'a mut dyn FnMut(&str) -> Result<ServerMap, String>,
+    quit_requested: &'a mut bool,
+}
+
+impl<G: GameDll> AdminBackend for ServerAdminBridge<'_, G> {
+    fn rcon_password(&self) -> &str {
+        self.server.rcon_password()
+    }
+
+    fn status(&self) -> ServerStatusSnapshot {
+        let infos = self.server.client_infos();
+        let bots = infos.iter().filter(|c| c.is_bot).count() as u8;
+        let (score_ct, score_t) = self.runtime.stats.scores();
+        ServerStatusSnapshot {
+            hostname: self.server.hostname(),
+            map: self.server.map_name().to_string(),
+            players: infos.len() as u8,
+            bots,
+            max_players: self.server.config().max_clients,
+            uptime_secs: (self.now - self.runtime.started_at).max(0.0),
+            tick_rate: 100,
+            round_number: self.runtime.stats.current_round(),
+            score_ct,
+            score_t,
+            game_port: self.runtime.game_port,
+            web_port: self.runtime.web_port,
+            bot_quota: self.server.cvar_i32("bot_quota").max(0) as u32,
+            bot_difficulty: self.server.cvar_i32("bot_difficulty").clamp(0, 3) as u8,
+            available_maps: self.runtime.available_maps.clone(),
+        }
+    }
+
+    fn players(&self) -> Vec<PlayerSnapshot> {
+        self.server
+            .client_infos()
+            .into_iter()
+            .map(|c| {
+                let meta = self.runtime.players.get(&c.slot);
+                PlayerSnapshot {
+                    slot: c.slot + 1,
+                    userid: c.userid,
+                    name: c.name,
+                    team: meta.map_or("UNASSIGNED", |m| m.team.as_str()).to_string(),
+                    frags: meta.map_or(0, |m| m.frags),
+                    deaths: meta.map_or(0, |m| m.deaths),
+                    ping_ms: c.ping_ms,
+                    state: if c.active {
+                        "active".to_string()
+                    } else {
+                        "connecting".to_string()
+                    },
+                    addr: c.addr,
+                    is_bot: c.is_bot,
+                }
+            })
+            .collect()
+    }
+
+    fn stats_json(&self) -> String {
+        self.runtime.stats.to_json()
+    }
+
+    fn replays_index_json(&self) -> String {
+        self.runtime.replays.to_json_index()
+    }
+
+    fn replay_dem(&self, id: &str) -> Option<Vec<u8>> {
+        self.runtime.replays.get_demo(id).map(|b| b.to_vec())
+    }
+
+    fn execute_rcon(&mut self, command: &str) -> Result<String, String> {
+        if self.runtime.replays_enabled {
+            self.runtime.replays.record_console_command(self.now, command);
+        }
+        match self.server.console_command(command) {
+            ConsoleOutcome::Output(text) => Ok(text),
+            ConsoleOutcome::ChangeLevel(name) => {
+                match (self.load_map)(&name) {
+                    Ok(map) => {
+                        self.server.change_map(map);
+                        self.runtime.stats.reset_match(&name);
+                        self.runtime.begin_round_recording(self.server, self.now);
+                        Ok(format!("changing level to {name}\n"))
+                    }
+                    Err(msg) => Err(msg),
+                }
+            }
+            ConsoleOutcome::Quit => {
+                *self.quit_requested = true;
+                Ok("Server shutting down\n".to_string())
+            }
+        }
+    }
+
+    fn admin_html(&self) -> Option<&[u8]> {
+        self.runtime.admin_html.as_deref()
+    }
+
+    fn invite_config(&self) -> InviteConfig {
+        InviteConfig {
+            default_host: "127.0.0.1".to_string(),
+            web_port: self.runtime.web_port.unwrap_or(27016),
+            game_port: self.runtime.game_port,
+            default_room: "alpha".to_string(),
+        }
+    }
+}
+
+fn write_cors_json_response(
+    stream: &mut dyn Write,
+    status_line: &str,
+    body: &str,
+    head_only: bool,
+) {
+    let head = format!(
+        "HTTP/1.1 {status_line}\r\n\
+         Content-Type: application/json; charset=utf-8\r\n\
+         Access-Control-Allow-Origin: *\r\n\
+         Content-Length: {}\r\n\
+         Cache-Control: no-store\r\n\
+         Connection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(head.as_bytes());
+    if !head_only && !body.is_empty() {
+        let _ = stream.write_all(body.as_bytes());
+    }
+    let _ = stream.flush();
+}
+
+fn make_http_hook(
+    tx: Sender<PendingHttpRequest>,
+    static_dir: Option<PathBuf>,
+    embed_web: bool,
+) -> HttpHook {
+    Arc::new(move |req: &HttpRequest, leftover: &[u8], stream, _peer_ip| {
+        if req.path == "/servers" {
+            if req.method != "GET" && req.method != "HEAD" {
+                write_cors_json_response(
+                    stream,
+                    "405 Method Not Allowed",
+                    "{\"error\":\"method not allowed\"}",
+                    false,
+                );
+                return true;
+            }
+            let (reply_tx, reply_rx) = mpsc::channel();
+            if tx
+                .send(PendingHttpRequest::ServersJson {
+                    host: req.header("host").map(str::to_string),
+                    reply: reply_tx,
+                })
+                .is_err()
+            {
+                write_cors_json_response(
+                    stream,
+                    "503 Service Unavailable",
+                    "{\"error\":\"server unavailable\"}",
+                    false,
+                );
+                return true;
+            }
+            match reply_rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(json) => {
+                    write_cors_json_response(stream, "200 OK", &json, req.method == "HEAD");
+                }
+                Err(_) => {
+                    write_cors_json_response(
+                        stream,
+                        "503 Service Unavailable",
+                        "{\"error\":\"server timeout\"}",
+                        false,
+                    );
+                }
+            }
+            return true;
+        }
+
+        if AdminRouter::handles_path(&req.path) {
+            let body = match read_http_body(req, leftover, stream, MAX_API_BODY_BYTES) {
+                Ok(b) => b,
+                Err(crate::admin_http::HttpReadError::PayloadTooLarge) => {
+                    let _ = AdminHttpResponse::json_error(
+                        413,
+                        "Payload Too Large",
+                        "request body too large",
+                    )
+                    .write_to(stream, false);
+                    return true;
+                }
+                Err(_) => {
+                    let _ =
+                        AdminHttpResponse::json_error(400, "Bad Request", "invalid HTTP request")
+                            .write_to(stream, false);
+                    return true;
+                }
+            };
+            let (reply_tx, reply_rx) = mpsc::channel();
+            let pending = PendingHttpRequest::Admin {
+                head: req.clone(),
+                body,
+                reply: reply_tx,
+            };
+            if tx.send(pending).is_err() {
+                let _ = AdminHttpResponse::json_error(
+                    503,
+                    "Service Unavailable",
+                    "server unavailable",
+                )
+                .write_to(stream, false);
+                return true;
+            }
+            match reply_rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(resp) => {
+                    let _ = resp.write_to(stream, req.method == "HEAD");
+                }
+                Err(_) => {
+                    let _ = AdminHttpResponse::json_error(
+                        503,
+                        "Service Unavailable",
+                        "server timeout",
+                    )
+                    .write_to(stream, false);
+                }
+            }
+            return true;
+        }
+
+        if (req.method == "GET" || req.method == "HEAD")
+            && let Some((mime, bytes)) = embedded_web_asset(&req.path)
+        {
+            let disk_exists = !embed_web
+                && static_dir
+                    .as_deref()
+                    .and_then(|root| cs_transport::ws_proto::resolve_static_path(root, &req.path))
+                    .is_some_and(|p| p.is_file());
+            if !disk_exists {
+                let _ = cs_transport::ws_native::send_http_response(
+                    stream,
+                    "200 OK",
+                    mime,
+                    bytes,
+                    req.method == "HEAD",
+                );
+                return true;
+            }
+        }
+
+        false
+    })
+}
+
+fn process_pending_http<G: GameDll>(
+    rx: &Receiver<PendingHttpRequest>,
+    server: &mut Server<G>,
+    runtime: &mut Phase13Runtime,
+    now: f64,
+    load_map: &mut dyn FnMut(&str) -> Result<ServerMap, String>,
+) -> bool {
+    let mut quit_requested = false;
+    while let Ok(req) = rx.try_recv() {
+        match req {
+            PendingHttpRequest::ServersJson { host, reply } => {
+                let json = runtime.servers_list_json(server, host.as_deref());
+                let _ = reply.send(json);
+            }
+            PendingHttpRequest::Admin {
+                head,
+                body,
+                reply,
+            } => {
+                let view = AdminHttpRequest::from_http_request(&head, &body);
+                let mut bridge = ServerAdminBridge {
+                    server,
+                    runtime,
+                    now,
+                    load_map,
+                    quit_requested: &mut quit_requested,
+                };
+                let resp = AdminRouter::handle(&view, &mut bridge);
+                let _ = reply.send(resp);
+            }
+        }
+    }
+    quit_requested
+}
+
 /// Binds the socket (and optional HTTP/WebSocket host) and runs `game` on `map`.
 fn serve<G: GameDll>(
     opts: &Options,
@@ -342,7 +902,10 @@ fn serve<G: GameDll>(
     let bind = format!("0.0.0.0:{}", opts.port);
     let udp = UdpTransport::bind(&bind).map_err(|e| format!("cannot bind UDP {bind}: {e}"))?;
     let udp_addr = udp.local_addr();
-    let mut net = if let Some(web_port) = opts.web_port {
+    let effective_web_port = opts.web_port.or(opts.admin.then_some(27016));
+    let static_dir = opts.web_dir.clone().or_else(default_web_dir);
+    let (http_tx, http_rx) = mpsc::channel::<PendingHttpRequest>();
+    let mut net = if let Some(web_port) = effective_web_port {
         let upgrade_hook: Option<UpgradeHook> = if !opts.relay_allow.is_empty() {
             let policy = RelayPolicy {
                 allowlist: TargetAllowlist::from_addrs(opts.relay_allow.iter().copied()),
@@ -355,20 +918,23 @@ fn serve<G: GameDll>(
         } else {
             None
         };
-        let static_dir = opts.web_dir.clone().or_else(default_web_dir);
+        let http_hook = make_http_hook(http_tx, static_dir.clone(), opts.embed_web);
         let ws_srv = WsServerTransport::bind(WsServerConfig {
             bind_addr: format!("0.0.0.0:{web_port}"),
             static_dir: static_dir.clone(),
             ws_path: "/ws".to_string(),
             max_clients: usize::from(opts.max_players) + 8,
             upgrade_hook,
+            http_hook: Some(http_hook),
         })
         .map_err(|e| format!("cannot bind WebSocket/HTTP on 0.0.0.0:{web_port}: {e}"))?;
         let ws_addr = ws_srv.local_addr();
         info!(
             http = %format!("http://127.0.0.1:{}", ws_addr.port()),
+            admin = %format!("http://127.0.0.1:{}/admin", ws_addr.port()),
             ws = %format!("ws://127.0.0.1:{}/ws", ws_addr.port()),
             static_dir = ?static_dir,
+            embed_web = opts.embed_web,
             relay_targets = opts.relay_allow.len(),
             "Web client hosting and WebSocket transport enabled"
         );
@@ -399,24 +965,46 @@ fn serve<G: GameDll>(
         maxplayers = server.config().max_clients,
         hostname = %server.config().hostname,
         game = game_name,
+        replay_rounds = opts.replay_rounds,
         "cs-server (Protocol 48) listening at 100 Hz (type quit or press Ctrl+C to stop)"
     );
 
     let commands = console_io::spawn_line_reader(std::io::BufReader::new(std::io::stdin()));
     let interrupted = console_io::interrupt_flag();
     let clock = NativeClock::new();
-    let mut next_frame = clock.now();
+    let start_now = clock.now();
+    let mut runtime = Phase13Runtime::new(
+        &map_name,
+        opts.replay_rounds,
+        start_now,
+        udp_addr.port(),
+        effective_web_port,
+        vfs.list_maps(),
+        static_dir.as_deref(),
+    );
+    runtime.begin_round_recording(&mut server, start_now);
+
+    let mut next_frame = start_now;
     let mut load_map = |name: &str| load_server_map(vfs, name);
     loop {
+        let now = clock.now();
         // Server time starts at 0 with the server, so `clock.now()` (seconds since the clock
         // was created, just before this loop) plus one frame makes the first `frametime` one
         // frame long instead of about 0, and later frames get their real elapsed time.
-        server.frame(&mut net, clock.now() + FRAME_SECS);
+        server.frame(&mut net, now + FRAME_SECS);
+        runtime.step_from_server(&mut server, now);
+        if process_pending_http(&http_rx, &mut server, &mut runtime, now, &mut load_map) {
+            info!("shutting down via admin RCON");
+            server.shutdown(&mut net, "Server shutting down");
+            return Ok(());
+        }
         // A map change the game asked for (`CHANGE_LEVEL`), done as the console's `changelevel`.
         // A change leaves the console lines to the next frame, as a console `changelevel` does.
         let changed = match server.take_pending_change_level() {
             Some(name) => {
                 change_level(&mut load_map, &mut server, &name);
+                runtime.stats.reset_match(&name);
+                runtime.begin_round_recording(&mut server, now);
                 true
             }
             None => false,
@@ -683,6 +1271,7 @@ mod tests {
             ws_path: "/ws".into(),
             max_clients: 8,
             upgrade_hook: None,
+            http_hook: None,
         })
         .unwrap();
         let ws_addr = ws_srv.local_addr();
@@ -817,5 +1406,215 @@ mod tests {
         }
         assert_eq!(conn.state(), &ConnState::InGame);
         assert!(saw_manifest, "mod-capable client should receive CsModManifest");
+    }
+
+    #[test]
+    fn parses_phase13_admin_replay_and_embed_flags() {
+        let o = parse(&args(&["--admin", "--replay-rounds", "12", "--embed-web"])).unwrap();
+        assert!(o.admin);
+        assert_eq!(o.replay_rounds, 12);
+        assert!(o.embed_web);
+
+        let zero = parse(&args(&["--replay-rounds", "0"])).unwrap();
+        assert_eq!(zero.replay_rounds, 0);
+
+        assert!(parse(&args(&["--replay-rounds", "abc"])).is_err());
+        assert!(parse(&args(&["--replay-rounds"])).is_err());
+    }
+
+    fn tcp_http_request(addr: SocketAddr, raw: &str) -> Vec<u8> {
+        use std::io::{ErrorKind, Read};
+        use std::net::TcpStream;
+
+        let mut s = TcpStream::connect(addr).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        s.write_all(raw.as_bytes()).unwrap();
+        s.flush().unwrap();
+        let mut out = Vec::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            match s.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(e)
+                    if !out.is_empty()
+                        && matches!(
+                            e.kind(),
+                            ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted
+                        ) =>
+                {
+                    break;
+                }
+                Err(e) => panic!("tcp_http_request read error: {e}"),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn admin_http_endpoints_replays_stats_rcon_and_servers_work_over_ws_transport() {
+        let (http_tx, http_rx) = mpsc::channel::<PendingHttpRequest>();
+        let http_hook = make_http_hook(http_tx, None, true);
+        let ws_srv = WsServerTransport::bind(WsServerConfig {
+            bind_addr: "127.0.0.1:0".into(),
+            static_dir: None,
+            ws_path: "/ws".into(),
+            max_clients: 8,
+            upgrade_hook: None,
+            http_hook: Some(http_hook),
+        })
+        .unwrap();
+        let http_addr = ws_srv.local_addr();
+
+        let mut server = Server::new(
+            ServerConfig {
+                hostname: "Phase13 Admin Test".into(),
+                max_clients: 8,
+                ..ServerConfig::default()
+            },
+            ServerMap::stub("de_dust2"),
+            WalkGame::new(MoveParams::default()),
+            DeltaRegistry::cs16_default(),
+            CVarRegistry::new_with_defaults(),
+        );
+        server.set_cvar("rcon_password", "op-secret");
+
+        let mut runtime = Phase13Runtime::new(
+            "de_dust2",
+            4,
+            0.0,
+            27015,
+            Some(http_addr.port()),
+            vec!["de_dust2".into(), "de_inferno".into()],
+            None,
+        );
+        runtime.begin_round_recording(&mut server, 0.0);
+        runtime.players.insert(
+            0,
+            TrackedPlayerMeta {
+                name: "Alice".into(),
+                team: TeamSide::CounterTerrorist,
+                frags: 2,
+                deaths: 1,
+                is_bot: false,
+            },
+        );
+        runtime
+            .stats
+            .register_player("slot:0", "Alice", TeamSide::CounterTerrorist, false);
+        runtime.stats.begin_round(1);
+        runtime.stats.record_damage(Some("slot:0"), "slot:1", 100);
+        runtime
+            .stats
+            .record_kill(Some("slot:0"), "slot:1", None, true, false);
+        let summary = runtime
+            .stats
+            .end_round(RoundWinner::CounterTerrorist, "#CTs_Win", 24.0, None);
+        let meta = runtime
+            .replays
+            .finish_round(
+                RoundWinner::CounterTerrorist,
+                "#CTs_Win",
+                24.0,
+                summary.score_ct,
+                summary.score_t,
+                summary.mvp_name.clone(),
+            )
+            .unwrap()
+            .expect("round 1 replay saved");
+        assert!(meta.byte_len > 544);
+
+        let running = Arc::new(AtomicBool::new(true));
+        let run_flag = Arc::clone(&running);
+        let mut net = ws_srv;
+        let handle = std::thread::spawn(move || {
+            let mut load = |name: &str| Ok(ServerMap::stub(name));
+            let mut t = 0.0;
+            while run_flag.load(Ordering::Relaxed) {
+                t += 0.01;
+                server.frame(&mut net, t);
+                runtime.step_from_server(&mut server, t);
+                if process_pending_http(&http_rx, &mut server, &mut runtime, t, &mut load) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        });
+
+        let admin_html = String::from_utf8(tcp_http_request(
+            http_addr,
+            "GET /admin HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        ))
+        .unwrap();
+        assert!(admin_html.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(admin_html.contains("Web Admin Panel"));
+
+        let admin_js = String::from_utf8(tcp_http_request(
+            http_addr,
+            "GET /admin.js HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        ))
+        .unwrap();
+        assert!(admin_js.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(admin_js.contains("cs16_admin_token"));
+
+        let servers_resp = String::from_utf8(tcp_http_request(
+            http_addr,
+            "GET /servers HTTP/1.1\r\nHost: play.example.com:27016\r\n\r\n",
+        ))
+        .unwrap();
+        assert!(servers_resp.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(servers_resp.contains("Access-Control-Allow-Origin: *\r\n"));
+        assert!(servers_resp.contains("\"map\":\"de_dust2\""));
+
+        let unauth = String::from_utf8(tcp_http_request(
+            http_addr,
+            "GET /api/status HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        ))
+        .unwrap();
+        assert!(unauth.starts_with("HTTP/1.1 401 Unauthorized\r\n"));
+
+        let status_ok = String::from_utf8(tcp_http_request(
+            http_addr,
+            "GET /api/status HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer op-secret\r\n\r\n",
+        ))
+        .unwrap();
+        assert!(status_ok.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(status_ok.contains("\"hostname\":\"Phase13 Admin Test\""));
+
+        let stats_ok = String::from_utf8(tcp_http_request(
+            http_addr,
+            "GET /api/stats HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer op-secret\r\n\r\n",
+        ))
+        .unwrap();
+        assert!(stats_ok.contains("\"name\":\"Alice\""));
+        assert!(stats_ok.contains("\"adr\":100.0"));
+
+        let rcon_body = r#"{"command":"status"}"#;
+        let rcon_req = format!(
+            "POST /api/rcon HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer op-secret\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            rcon_body.len(),
+            rcon_body
+        );
+        let rcon_resp = String::from_utf8(tcp_http_request(http_addr, &rcon_req)).unwrap();
+        assert!(rcon_resp.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(rcon_resp.contains("hostname: Phase13 Admin Test"));
+
+        let replay_raw = tcp_http_request(
+            http_addr,
+            &format!(
+                "GET /api/replays/{}.dem HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer op-secret\r\n\r\n",
+                meta.id
+            ),
+        );
+        let split = replay_raw
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .unwrap();
+        let dem_bytes = &replay_raw[split + 4..];
+        let parsed = cs_proto48::demo::parse_demo(dem_bytes).expect("valid downloaded .dem");
+        assert_eq!(parsed.header.map_name, "de_dust2");
+
+        running.store(false, Ordering::Relaxed);
+        handle.join().unwrap();
     }
 }

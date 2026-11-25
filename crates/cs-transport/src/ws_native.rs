@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use crate::ws_proto::{
     HttpRequest, WsFrame, WsOpcode, decode_frame, encode_frame, mime_type_for_path,
-    read_http_request, resolve_static_path, ws_accept_key,
+    read_http_request_with_leftover, resolve_static_path, ws_accept_key,
 };
 use crate::{MAX_UDP_PACKET, PacketTransport, PeerAddr, TransportError, check_len};
 
@@ -23,6 +23,11 @@ const WS_READ_TIMEOUT: Duration = Duration::from_millis(150);
 /// Optional upgrade handler invoked for non-default WebSocket paths (such as `/relay`).
 pub type UpgradeHook = Arc<dyn Fn(&HttpRequest, TcpStream, SocketAddr) + Send + Sync>;
 
+/// Optional HTTP/1.1 handler invoked for non-upgrade requests before static asset fallback.
+/// Returning `true` indicates the hook handled the request and wrote the response.
+pub type HttpHook =
+    Arc<dyn Fn(&HttpRequest, &[u8], &mut TcpStream, SocketAddr) -> bool + Send + Sync>;
+
 #[derive(Clone)]
 pub struct WsServerConfig {
     pub bind_addr: String,
@@ -30,6 +35,7 @@ pub struct WsServerConfig {
     pub ws_path: String,
     pub max_clients: usize,
     pub upgrade_hook: Option<UpgradeHook>,
+    pub http_hook: Option<HttpHook>,
 }
 
 impl Default for WsServerConfig {
@@ -40,6 +46,7 @@ impl Default for WsServerConfig {
             ws_path: "/ws".to_string(),
             max_clients: 64,
             upgrade_hook: None,
+            http_hook: None,
         }
     }
 }
@@ -201,7 +208,7 @@ fn handle_incoming_tcp(
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-    let Ok(req) = read_http_request(&mut stream) else {
+    let Ok((req, leftover)) = read_http_request_with_leftover(&mut stream) else {
         return;
     };
 
@@ -239,6 +246,12 @@ fn handle_incoming_tcp(
                 false,
             );
         }
+        return;
+    }
+
+    if let Some(hook) = &cfg.http_hook
+        && (hook)(&req, &leftover, &mut stream, peer_ip)
+    {
         return;
     }
 
@@ -640,6 +653,7 @@ mod tests {
             ws_path: "/ws".into(),
             max_clients: 8,
             upgrade_hook: None,
+            http_hook: None,
         })
         .unwrap();
         let addr = srv.local_addr();
@@ -694,6 +708,7 @@ mod tests {
             ws_path: "/ws".into(),
             max_clients: 4,
             upgrade_hook: None,
+            http_hook: None,
         })
         .unwrap();
         let addr = ws_srv.local_addr();

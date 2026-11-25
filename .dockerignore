@@ -1,0 +1,26 @@
+# Build artifacts & VCS
+target/
+.git/
+.gitignore
+.superpowers/
+
+# Local Half-Life / CS 1.6 assets (mounted read-only at runtime)
+Half-Life/
+cstrike/
+cstrike_hd/
+cstrike_downloads/
+valve/
+gamedir/
+*.bsp
+*.wad
+*.mdl
+*.spr
+*.wav
+*.mp3
+*.dem
+
+# Editor / OS clutter
+.DS_Store
+Thumbs.db
+*.log
+*.tmp

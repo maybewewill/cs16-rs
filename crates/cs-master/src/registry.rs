@@ -698,7 +698,7 @@ impl MasterRegistry {
     }
 }
 
-fn push_json_str(out: &mut String, s: &str) {
+pub(crate) fn push_json_str(out: &mut String, s: &str) {
     out.push('"');
     for ch in s.chars() {
         match ch {
