@@ -1427,35 +1427,156 @@ impl StudioPoseData {
     }
 }
 
-/// Union bounding box across all sequence descriptors (`mstudioseqdesc_t::bbmin`/`bbmax`),
-/// used for `svc_consistency` `ModelSameBounds` checks.
+fn eval_studio_anim_pos(data: &[u8], anim_off: usize, chan: usize, frame: usize) -> f32 {
+    let Ok(rel) = read_u16(data, anim_off + chan * 2) else {
+        return 0.0;
+    };
+    if rel == 0 {
+        return 0.0;
+    }
+    let mut p = anim_off + usize::from(rel);
+    let mut k = frame;
+    let mut steps = 0usize;
+    while steps < 4096 {
+        steps += 1;
+        let Some(&valid) = data.get(p) else {
+            return 0.0;
+        };
+        let Some(&total) = data.get(p + 1) else {
+            return 0.0;
+        };
+        let valid = usize::from(valid);
+        let total = usize::from(total);
+        if total == 0 {
+            return 0.0;
+        }
+        if k < total {
+            let idx = if k < valid { k } else { valid.saturating_sub(1) };
+            return read_i16(data, p + 2 + idx * 2).map(f32::from).unwrap_or(0.0);
+        }
+        k -= total;
+        p += (valid + 1) * 2;
+    }
+    0.0
+}
+
+fn bound_vertex(mins: &mut [f32; 3], maxs: &mut [f32; 3], count: &mut usize, v: [f32; 3]) -> Option<()> {
+    for &c in &v {
+        if !c.is_finite() {
+            return None;
+        }
+    }
+    if *count == 0 {
+        *mins = v;
+        *maxs = v;
+    } else {
+        for a in 0..3 {
+            mins[a] = mins[a].min(v[a]);
+            maxs[a] = maxs[a].max(v[a]);
+        }
+    }
+    *count += 1;
+    Some(())
+}
+
+/// Computes studio model bounds matching GoldSrc / Xash3D FWGS `Mod_GetStudioBounds` ->
+/// `Mod_StudioComputeBounds` (`engine/common/mod_studio.c`, read 2026-11-25): bounds all raw
+/// vertices across bodypart submodels plus sequence bone animation midpoints.
 pub fn studio_bounds(data: &[u8]) -> Option<([f32; 3], [f32; 3])> {
     if data.len() < 244 || &data[0..4] != MDL_MAGIC || read_i32(data, 4).ok()? != MDL_VERSION {
         return None;
     }
+    let num_bones = usize::try_from(read_i32(data, 140).ok()?).ok()?;
+    let bone_index = usize::try_from(read_i32(data, 144).ok()?).ok()?;
     let num_seq = usize::try_from(read_i32(data, 164).ok()?).ok()?;
     let seq_index = usize::try_from(read_i32(data, 168).ok()?).ok()?;
-    if num_seq == 0 {
-        return Some(([0.0; 3], [0.0; 3]));
-    }
-    let end = seq_index.checked_add(num_seq.checked_mul(176)?)?;
-    if end > data.len() {
+    let num_bodyparts = usize::try_from(read_i32(data, 204).ok()?).ok()?;
+    let bodypart_index = usize::try_from(read_i32(data, 208).ok()?).ok()?;
+
+    if bone_index.checked_add(num_bones.checked_mul(112)?)? > data.len() {
         return None;
     }
-    let mut mins = [f32::INFINITY; 3];
-    let mut maxs = [f32::NEG_INFINITY; 3];
-    for i in 0..num_seq {
-        let base = seq_index + i * 176;
-        for axis in 0..3 {
-            let lo = read_f32(data, base + 96 + axis * 4).ok()?;
-            let hi = read_f32(data, base + 108 + axis * 4).ok()?;
-            if !lo.is_finite() || !hi.is_finite() {
+    if seq_index.checked_add(num_seq.checked_mul(176)?)? > data.len() {
+        return None;
+    }
+    if bodypart_index.checked_add(num_bodyparts.checked_mul(76)?)? > data.len() {
+        return None;
+    }
+
+    let mut mins = [0.0f32; 3];
+    let mut maxs = [0.0f32; 3];
+    let mut vert_count = 0usize;
+
+    for i in 0..num_bodyparts {
+        let bp = bodypart_index + i * 76;
+        let num_models = usize::try_from(read_i32(data, bp + 64).ok()?).ok()?;
+        let model_index = usize::try_from(read_i32(data, bp + 72).ok()?).ok()?;
+        if model_index.checked_add(num_models.checked_mul(112)?)? > data.len() {
+            return None;
+        }
+        for j in 0..num_models {
+            let m = model_index + j * 112;
+            let num_verts = usize::try_from(read_i32(data, m + 80).ok()?).ok()?;
+            let vert_index = usize::try_from(read_i32(data, m + 88).ok()?).ok()?;
+            if vert_index.checked_add(num_verts.checked_mul(12)?)? > data.len() {
                 return None;
             }
-            mins[axis] = mins[axis].min(lo);
-            maxs[axis] = maxs[axis].max(hi);
+            for k in 0..num_verts {
+                let vo = vert_index + k * 12;
+                let v = [
+                    read_f32(data, vo).ok()?,
+                    read_f32(data, vo + 4).ok()?,
+                    read_f32(data, vo + 8).ok()?,
+                ];
+                bound_vertex(&mut mins, &mut maxs, &mut vert_count, v)?;
+            }
         }
     }
+
+    for i in 0..num_seq {
+        let s = seq_index + i * 176;
+        let seqgroup = read_i32(data, s + 64).ok()?;
+        if seqgroup != 0 {
+            continue;
+        }
+        let num_frames = usize::try_from(read_i32(data, s + 44).ok()?).ok()?.min(4096);
+        let anim_index = usize::try_from(read_i32(data, s + 60).ok()?).ok()?;
+        if anim_index.checked_add(12)? > data.len() {
+            continue;
+        }
+        let mut bone_mins = [0.0f32; 3];
+        let mut bone_maxs = [0.0f32; 3];
+        let mut bone_count = 0usize;
+        for j in 0..num_bones {
+            let bo = bone_index + j * 112;
+            let val = [
+                read_f32(data, bo + 64).ok()?,
+                read_f32(data, bo + 68).ok()?,
+                read_f32(data, bo + 72).ok()?,
+            ];
+            let scl = [
+                read_f32(data, bo + 88).ok()?,
+                read_f32(data, bo + 92).ok()?,
+                read_f32(data, bo + 96).ok()?,
+            ];
+            for k in 0..num_frames {
+                let mut pos = [0.0f32; 3];
+                for a in 0..3 {
+                    pos[a] = val[a] + eval_studio_anim_pos(data, anim_index, a, k) * scl[a];
+                }
+                bound_vertex(&mut bone_mins, &mut bone_maxs, &mut bone_count, pos)?;
+            }
+        }
+        if bone_count > 0 {
+            let pt = [
+                (bone_maxs[0] - bone_mins[0]) * 0.5,
+                (bone_maxs[1] - bone_mins[1]) * 0.5,
+                (bone_maxs[2] - bone_mins[2]) * 0.5,
+            ];
+            bound_vertex(&mut mins, &mut maxs, &mut vert_count, pt)?;
+        }
+    }
+
     Some((mins, maxs))
 }
 
@@ -1500,34 +1621,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn studio_bounds_computes_union_over_sequences_and_rejects_bad_data() {
+    fn studio_bounds_computes_mesh_vertex_bounds_and_rejects_bad_data() {
         assert!(studio_bounds(&[0u8; 64]).is_none());
 
-        let seq_base = 244usize;
-        let mut buf = vec![0u8; seq_base + 2 * 176];
+        let bp_off = 244usize;
+        let mod_off = bp_off + 76;
+        let vert_off = mod_off + 112;
+        let mut buf = vec![0u8; vert_off + 24];
         buf[0..4].copy_from_slice(MDL_MAGIC);
         buf[4..8].copy_from_slice(&MDL_VERSION.to_le_bytes());
-        buf[164..168].copy_from_slice(&2i32.to_le_bytes());
-        buf[168..172].copy_from_slice(&(seq_base as i32).to_le_bytes());
+        buf[204..208].copy_from_slice(&1i32.to_le_bytes());
+        buf[208..212].copy_from_slice(&(bp_off as i32).to_le_bytes());
+        buf[bp_off + 64..bp_off + 68].copy_from_slice(&1i32.to_le_bytes());
+        buf[bp_off + 72..bp_off + 76].copy_from_slice(&(mod_off as i32).to_le_bytes());
+        buf[mod_off + 80..mod_off + 84].copy_from_slice(&2i32.to_le_bytes());
+        buf[mod_off + 88..mod_off + 92].copy_from_slice(&(vert_off as i32).to_le_bytes());
 
-        let write_box = |dst: &mut [u8], seq: usize, mn: [f32; 3], mx: [f32; 3]| {
-            let b = seq_base + seq * 176;
-            for (i, v) in mn.iter().enumerate() {
-                dst[b + 96 + i * 4..b + 100 + i * 4].copy_from_slice(&v.to_le_bytes());
-            }
-            for (i, v) in mx.iter().enumerate() {
-                dst[b + 108 + i * 4..b + 112 + i * 4].copy_from_slice(&v.to_le_bytes());
+        let write_vec = |dst: &mut [u8], off: usize, v: [f32; 3]| {
+            for (i, f) in v.iter().enumerate() {
+                dst[off + i * 4..off + i * 4 + 4].copy_from_slice(&f.to_le_bytes());
             }
         };
-
-        write_box(&mut buf, 0, [-10.0, -5.0, 0.0], [10.0, 20.0, 36.0]);
-        write_box(&mut buf, 1, [-16.0, -2.0, -4.0], [8.0, 25.0, 12.0]);
+        write_vec(&mut buf, vert_off, [-10.0, -5.0, 0.0]);
+        write_vec(&mut buf, vert_off + 12, [8.0, 25.0, 12.0]);
         assert_eq!(
             studio_bounds(&buf),
-            Some(([-16.0, -5.0, -4.0], [10.0, 25.0, 36.0]))
+            Some(([-10.0, -5.0, 0.0], [8.0, 25.0, 12.0]))
         );
 
-        write_box(&mut buf, 1, [f32::NAN, 0.0, 0.0], [1.0, 1.0, 1.0]);
+        write_vec(&mut buf, vert_off + 12, [f32::NAN, 0.0, 0.0]);
         assert!(studio_bounds(&buf).is_none());
     }
 

@@ -9,10 +9,11 @@ use cs_proto48::crypto::com_munge2;
 use cs_proto48::delta::{DeltaRegistry, GoldSrcEntityState};
 use cs_proto48::messages::{
     MoveVarsMsg, ResourceEntry, ServerInfoMsg, write_svc_cdtrack, write_svc_deltadescriptions,
-    write_svc_lightstyle, write_svc_newmovevars, write_svc_print, write_svc_resourcelist,
-    write_svc_resourcerequest, write_svc_sendextrainfo, write_svc_serverinfo, write_svc_setangle,
-    write_svc_setview, write_svc_signonnum, write_svc_spawnbaseline_encoded, write_svc_time,
-    write_svc_updateuserinfo, write_svc_userregs, write_svc_voiceinit,
+    write_svc_lightstyle, write_svc_newmovevars, write_svc_print,
+    write_svc_resourcelist_with_consistency, write_svc_resourcerequest, write_svc_sendextrainfo,
+    write_svc_serverinfo, write_svc_setangle, write_svc_setview, write_svc_signonnum,
+    write_svc_spawnbaseline_encoded, write_svc_time, write_svc_updateuserinfo, write_svc_userregs,
+    write_svc_voiceinit,
 };
 use cs_proto48::usermsg::UserMsgRegistry;
 use glam::Vec3;
@@ -212,13 +213,24 @@ pub(crate) fn write_new_stage(
 }
 
 /// Answer to `sendres`: the resource request and the resource list.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn write_sendres_stage(
     w: &mut MsgWriter,
     spawn_count: u32,
     resources: &[ResourceEntry],
 ) {
+    write_sendres_stage_with_consistency(w, spawn_count, resources, &[]);
+}
+
+/// Answer to `sendres` with optional `mp_consistency` resource indices (`SV_SendConsistencyList`).
+pub(crate) fn write_sendres_stage_with_consistency(
+    w: &mut MsgWriter,
+    spawn_count: u32,
+    resources: &[ResourceEntry],
+    consistency_indices: &[u16],
+) {
     write_svc_resourcerequest(w, spawn_count as i32);
-    write_svc_resourcelist(w, resources);
+    write_svc_resourcelist_with_consistency(w, resources, consistency_indices);
 }
 
 /// First part of the answer to `spawn`, sent before the game puts the player in.

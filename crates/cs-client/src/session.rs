@@ -156,8 +156,14 @@ impl Session {
         let steam_id = 76_561_197_960_265_728 + u64::from(std::process::id());
         let cfg = ConnectionConfig::new(name, steam_id, &md5_hex(b"cs16-rs client"));
         let mut conn = Connection::new(transport, PeerAddr::Udp(peer), cfg);
+        conn.set_http_fetcher(Box::new(cs_client::http_dl::NativeHttpFetcher::new()));
         if let Some(v) = vfs {
             conn.set_files(Box::new(VfsResourceFiles(v.clone())));
+            if let Ok(wad) = v.read_bytes("tempdecal.wad")
+                && cs_assets::hpak::validate_spray_wad(&wad, 65536).is_ok()
+            {
+                let _ = conn.set_custom_spray(wad);
+            }
         }
         conn.set_userinfo("_vgui_menus", if vgui_menus { "1" } else { "0" });
         conn.set_userinfo(cs_mod_api::MOD_CAPABILITY_KEY, "1");
@@ -242,6 +248,10 @@ impl Session {
 
     pub fn in_game(&self) -> bool {
         self.state() == Some(ConnState::InGame)
+    }
+
+    pub fn download_progress(&self) -> Option<(usize, Option<String>)> {
+        with_conn!(self, c => Some(c.download_progress()), else None)
     }
 
     /// The session clock: what the connection is pumped with and the effects run on.

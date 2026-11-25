@@ -105,6 +105,11 @@ pub(crate) struct Client {
     /// has no address and no netchan peer: nothing is built or sent for it, it is never timed
     /// out and its reliable queue never fills. Its `state` is `Active` from creation.
     pub(crate) fake: bool,
+    /// Sorted 10-bit resource indices (`SV_SendConsistencyList`) awaiting `clc_fileconsistency`.
+    pub(crate) expected_consistency: Vec<u16>,
+    pub(crate) consistency_verified: bool,
+    /// Expected MD5 of a pending `!MD5<hex>` spray upload requested via `"upload\n"`.
+    pub(crate) expected_spray_md5: Option<[u8; 16]>,
 }
 
 impl Client {
@@ -138,6 +143,9 @@ impl Client {
             latency: 0.0,
             movevars: None,
             fake: false,
+            expected_consistency: Vec::new(),
+            consistency_verified: false,
+            expected_spray_md5: None,
         }
     }
 
@@ -194,6 +202,9 @@ impl Client {
         self.last_cmd = GoldSrcUserCmd::default();
         self.bad_moves = 0;
         self.choke_count = 0;
+        self.expected_consistency.clear();
+        self.consistency_verified = false;
+        self.expected_spray_md5 = None;
         self.reset_frames();
         self.chan.clear();
     }

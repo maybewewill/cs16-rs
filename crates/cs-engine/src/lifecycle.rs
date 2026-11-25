@@ -146,6 +146,7 @@ impl<G: GameDll> Server<G> {
             view.active = false;
         }
         self.spawn_count += 1;
+        self.resource_cache.clear();
         self.outbox.reset_map_state();
         self.edicts = self
             .edicts
@@ -258,6 +259,7 @@ impl<G: GameDll> Server<G> {
         }
         self.edicts.reset_client(slot);
         self.world.forget(u16::from(slot) + 1);
+        self.customizations.remove_slot(slot);
         // The userid stays for the removal broadcast.
         let userid = self.clients[index].userid;
         self.clients[index] = Client {

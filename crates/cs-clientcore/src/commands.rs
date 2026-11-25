@@ -86,6 +86,7 @@ impl CommandRegistry {
             "echo",
             "fullserverinfo",
             "cmd",
+            "upload",
         ] {
             r.register(name, CMD_STUFFTEXT_OK);
         }

@@ -1452,12 +1452,24 @@ impl Cs16App {
             } else if !matches!(state, ConnState::InGame) {
                 self.loading_ui.visible = true;
                 let (msg, prog) = match state {
-                    ConnState::AwaitChallenge => ("Establishing network connection to server...", 0.2),
-                    ConnState::AwaitConnection => ("Connecting to server...", 0.45),
-                    ConnState::Signon => ("Downloading resources and precaching...", 0.8),
-                    _ => ("Loading...", 0.1),
+                    ConnState::AwaitChallenge => (
+                        "Establishing network connection to server...".to_string(),
+                        0.2,
+                    ),
+                    ConnState::AwaitConnection => ("Connecting to server...".to_string(), 0.45),
+                    ConnState::Signon => {
+                        if let Some((pending, cur)) = self.session.download_progress()
+                            && pending > 0
+                        {
+                            let file = cur.unwrap_or_else(|| "resources".to_string());
+                            (format!("Downloading {file} ({pending} left)..."), 0.6)
+                        } else {
+                            ("Downloading resources and precaching...".to_string(), 0.8)
+                        }
+                    }
+                    _ => ("Loading...".to_string(), 0.1),
                 };
-                self.loading_ui.status_text = msg.to_string();
+                self.loading_ui.status_text = msg;
                 self.loading_ui.progress = prog;
             } else {
                 self.loading_ui.visible = false;

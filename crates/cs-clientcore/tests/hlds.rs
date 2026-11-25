@@ -379,3 +379,64 @@ fn headless_client_against_a_real_server() {
     assert!(observer.report.events > 0, "the observer saw the shots");
     assert!(report.checks.len() > 200, "the server acked the walk: {}", report.checks.len());
 }
+
+struct VfsFiles(Vfs);
+
+impl cs_clientcore::ResourceFiles for VfsFiles {
+    fn exists(&self, path: &str) -> bool {
+        self.0.exists(path)
+    }
+
+    fn md5(&self, path: &str) -> Option<[u8; 16]> {
+        self.0
+            .read_bytes(path)
+            .ok()
+            .map(|b| cs_proto48::crypto::md5_digest(&b))
+    }
+
+    fn studio_bounds(&self, path: &str) -> Option<([f32; 3], [f32; 3])> {
+        self.0
+            .read_bytes(path)
+            .ok()
+            .and_then(|b| cs_assets::mdl::studio_bounds(&b))
+    }
+}
+
+#[test]
+#[ignore]
+fn live_hlds_mp_consistency_1() {
+    let addr = std::env::var("CS16_HLDS_ADDR").unwrap_or_else(|_| "127.0.0.1:27099".to_string());
+    let map_name = std::env::var("CS16_HLDS_MAP").unwrap_or_else(|_| "de_dust2".to_string());
+    let vfs = Vfs::discover(None, VfsConfig::default()).expect("game files installed");
+    let bsp = BspMap::load(&vfs, &map_name).expect("load map");
+    let world = Arc::new(WorldCollision::from_bsp(&bsp));
+    let peer = addr
+        .to_socket_addrs()
+        .expect("address")
+        .find(std::net::SocketAddr::is_ipv4)
+        .expect("an IPv4 address");
+
+    let mut client = Player::new("consistency", peer, world, false);
+    client.conn.set_files(Box::new(VfsFiles(vfs)));
+    let started = Instant::now();
+    let mut next = started;
+    loop {
+        next += TICK;
+        std::thread::sleep(next.saturating_duration_since(Instant::now()));
+        let now = started.elapsed().as_secs_f64();
+        client.tick(now, false);
+        if matches!(client.conn.state(), ConnState::InGame)
+            || client.conn.state().is_terminal()
+            || now > 12.0
+        {
+            break;
+        }
+    }
+    let state = client.conn.state().clone();
+    client.conn.execute_local("disconnect");
+    assert_eq!(
+        state,
+        ConnState::InGame,
+        "client must pass live +mp_consistency 1 cleanly, state={state:?}"
+    );
+}

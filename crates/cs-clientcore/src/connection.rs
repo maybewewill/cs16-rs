@@ -16,11 +16,11 @@
 //!
 //! The core never reads a clock: the caller passes `now` to [`Connection::pump`].
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use cs_proto48::CONNECTIONLESS_HEADER;
 use cs_proto48::bitbuf::MsgWriter;
-use cs_proto48::crypto::com_munge2;
+use cs_proto48::crypto::{com_munge2, md5_digest, md5_digest_hex};
 use cs_proto48::delta::{GoldSrcClientData, GoldSrcEntityState, GoldSrcUserCmd, GoldSrcWeaponData};
 use cs_proto48::handshake::{
     OobPacket, default_cs16_protinfo, default_cs16_userinfo, encode_connect_48,
@@ -28,10 +28,10 @@ use cs_proto48::handshake::{
 };
 use cs_proto48::info::InfoString;
 use cs_proto48::messages::{
-    MoveVarsMsg, PacketEntitiesMsg, ServerInfoMsg, SvcMessage, SvcParseContext, WeaponRecords, clc,
-    clc_move_body_len, entity_schema_name, parse_svc_stream_partial, write_clc_cvarvalue2,
-    write_clc_delta, write_clc_fileconsistency, write_clc_move, write_clc_resourcelist,
-    write_clc_stringcmd, write_clc_voicedata,
+    MoveVarsMsg, PacketEntitiesMsg, ResourceEntry, ServerInfoMsg, SvcMessage, SvcParseContext,
+    WeaponRecords, clc, clc_move_body_len, entity_schema_name, parse_svc_stream_partial,
+    write_clc_cvarvalue2, write_clc_delta, write_clc_fileconsistency, write_clc_move,
+    write_clc_resourcelist, write_clc_stringcmd, write_clc_voicedata,
 };
 use cs_proto48::netchan::{FRAGMENT_C2S_SIZE, NetChan, SplitPacketAssembler};
 use cs_transport::{PacketTransport, PeerAddr};
@@ -45,7 +45,10 @@ use crate::hud::ClientEffects;
 use crate::precache::PrecacheTables;
 use crate::predict::{self, PredictInputs, Predictor};
 use cs_proto48::demo::{DemoMoveVars, DemoNetMsgInfo, DemoUserCmd};
-use crate::resources::{AllFilesPresent, ResourceFiles, ResourceManager, parse_file_stream};
+use crate::resources::{
+    AllFilesPresent, HttpFetcher, ResourceFiles, ResourceManager, parse_file_stream,
+    parse_md5_filename,
+};
 use crate::tempents::{FxWorld, NoWorld};
 
 /// Reliable bytes the connection lets pile up unacknowledged before it gives the server up:
@@ -242,6 +245,9 @@ pub struct Connection<T: PacketTransport> {
     /// Test hook: no `clc_move` in outgoing packets, not even the `msec` 0 placeholder.
     moves_suppressed: bool,
     recorder: Option<DemoRecorder>,
+    http_fetcher: Option<Box<dyn HttpFetcher>>,
+    custom_spray: Option<(Vec<u8>, [u8; 16])>,
+    requested_sprays: BTreeSet<[u8; 16]>,
 }
 
 impl<T: PacketTransport> Connection<T> {
@@ -303,6 +309,9 @@ impl<T: PacketTransport> Connection<T> {
             corrupt_moves: 0,
             moves_suppressed: false,
             recorder: None,
+            http_fetcher: None,
+            custom_spray: None,
+            requested_sprays: BTreeSet::new(),
         };
         conn.userinfo = conn.base_userinfo();
         conn
@@ -346,6 +355,7 @@ impl<T: PacketTransport> Connection<T> {
             self.frame_times.pop_front();
         }
         self.stats.frames_in_last_second = self.frame_times.len() as u32;
+        self.poll_http_downloads(now);
 
         match self.state {
             ConnState::AwaitChallenge | ConnState::AwaitConnection => {
@@ -672,6 +682,15 @@ impl<T: PacketTransport> Connection<T> {
                 _ => self.print("Usage: fullserverinfo <complete info string>"),
             },
             "setinfo" | "userinfo" => self.setinfo(&cmd),
+            "upload" => {
+                if self.cvars.float("cl_allowupload") > 0.0
+                    && let Some((bytes, md5)) = &self.custom_spray
+                    && let Some(chan) = self.chan.as_mut()
+                {
+                    let name = format!("!MD5{}", md5_digest_hex(md5));
+                    let _ = chan.create_file_fragments(&name, bytes, false);
+                }
+            }
             _ => {
                 if self.shell_commands.len() >= MAX_SHELL_COMMANDS {
                     self.disconnect_with("console command flood: the shell does not take them".to_string());
@@ -931,6 +950,29 @@ impl<T: PacketTransport> Connection<T> {
     /// downloads (default: every file exists).
     pub fn set_files(&mut self, files: Box<dyn ResourceFiles>) {
         self.files = files;
+    }
+
+    /// Installs an HTTP FastDL client used when `sv_downloadurl` provides HTTP locations.
+    pub fn set_http_fetcher(&mut self, fetcher: Box<dyn HttpFetcher>) {
+        self.http_fetcher = Some(fetcher);
+    }
+
+    /// Sets the client's `tempdecal.wad` payload for custom spray upload (`cl_allowupload`).
+    pub fn set_custom_spray(&mut self, wad_bytes: Vec<u8>) -> Result<(), String> {
+        if wad_bytes.len() < 12 || !wad_bytes.starts_with(b"WAD3") {
+            return Err("custom spray must be a valid WAD3 decal file".into());
+        }
+        if wad_bytes.len() > 65536 {
+            return Err("custom spray exceeds 65536 byte GoldSrc limit".into());
+        }
+        let md5 = md5_digest(&wad_bytes);
+        self.custom_spray = Some((wad_bytes, md5));
+        Ok(())
+    }
+
+    /// Returns `(pending_downloads, active_filename)` for `scr_downloading` overlays.
+    pub fn download_progress(&self) -> (usize, Option<String>) {
+        self.resources.download_summary()
     }
 
     /// Forgets the logged messages, so a test can tell what arrives from now on.
@@ -1209,11 +1251,24 @@ impl<T: PacketTransport> Connection<T> {
                     self.send_stringcmd("sendres");
                 }
             }
-            // `CL_ParseResourceRequest`: the client's own resources. It has no customization
-            // store yet, so the list is empty.
+            // `CL_ParseResourceRequest`: announce client custom decal spray if `cl_allowupload` is on.
             SvcMessage::ResourceRequest { .. } if signon => {
+                let mut entries = Vec::new();
+                if self.cvars.float("cl_allowupload") > 0.0
+                    && let Some((bytes, md5)) = &self.custom_spray
+                {
+                    entries.push(ResourceEntry {
+                        res_type: crate::resources::res_type::DECAL,
+                        filename: format!("!MD5{}", md5_digest_hex(md5)),
+                        index: 0,
+                        download_size: bytes.len() as u32,
+                        flags: 4,
+                        md5: Some(*md5),
+                        reserved: None,
+                    });
+                }
                 let mut w = MsgWriter::new();
-                write_clc_resourcelist(&mut w, &[]);
+                write_clc_resourcelist(&mut w, &entries);
                 self.queue_reliable(&w.into_bytes());
             }
             SvcMessage::ResourceList {
@@ -1226,6 +1281,15 @@ impl<T: PacketTransport> Connection<T> {
             SvcMessage::ResourceLocation(text) => {
                 if let Err(reason) = self.resources.add_download_locations(&text) {
                     self.disconnect_with(reason);
+                }
+            }
+            SvcMessage::FileTxferFailed(path) => {
+                if self.resources.file_failed(&path) {
+                    self.print(format!("Server failed to transfer {path}"));
+                    self.signon_progress = Some(now);
+                    if self.awaiting_resources && self.state == ConnState::Signon {
+                        self.request_missing();
+                    }
                 }
             }
             SvcMessage::SignonNum(n) => {
@@ -1288,6 +1352,18 @@ impl<T: PacketTransport> Connection<T> {
                     },
                 );
             }
+            SvcMessage::Customization(c)
+                if self.state == ConnState::InGame
+                    && self.cvars.float("cl_download_ingame") > 0.0
+                    && c.res_type == crate::resources::res_type::DECAL =>
+            {
+                if let Some(md5) = parse_md5_filename(&c.filename)
+                    && !self.fx.hud.custom_sprays.contains_key(&md5)
+                    && self.requested_sprays.insert(md5)
+                {
+                    self.send_stringcmd(&format!("dlfile {}", c.filename));
+                }
+            }
             SvcMessage::SendCvarValue(name) => {
                 let mut w = MsgWriter::new();
                 w.write_u8(clc::CVARVALUE);
@@ -1334,10 +1410,37 @@ impl<T: PacketTransport> Connection<T> {
         self.request_missing();
     }
 
+    fn poll_http_downloads(&mut self, now: f64) {
+        let Some(mut fetcher) = self.http_fetcher.take() else {
+            return;
+        };
+        let (downloaded, activity) = self.resources.poll_http(fetcher.as_mut(), self.files.as_mut());
+        let needs_fallback = self.resources.take_http_needs_fallback();
+        let has_pending = fetcher.has_pending();
+        self.http_fetcher = Some(fetcher);
+        for path in &downloaded {
+            self.print(format!("Downloaded {path} via HTTP"));
+        }
+        if activity || has_pending {
+            self.signon_progress = Some(now);
+        }
+        if (!downloaded.is_empty() || needs_fallback)
+            && self.awaiting_resources
+            && self.state == ConnState::Signon
+        {
+            self.request_missing();
+        }
+    }
+
     /// `CL_BatchResourceRequest`: ask for the files still missing; when none is, finish.
     fn request_missing(&mut self) {
         let allow = self.cvars.float("cl_allowdownload") > 0.0;
-        let outcome = self.resources.batch_request(allow);
+        let mut fetcher = self.http_fetcher.take();
+        let outcome = match fetcher.as_deref_mut() {
+            Some(f) => self.resources.batch_request_with_http(allow, true, Some(f)),
+            None => self.resources.batch_request_with_http(allow, true, None),
+        };
+        self.http_fetcher = fetcher;
         for line in outcome.skipped {
             self.print(line);
         }
@@ -1382,6 +1485,13 @@ impl<T: PacketTransport> Connection<T> {
             self.print("file fragment received with a bad header, name or size, ignoring");
             return;
         };
+        if let Some(md5) = parse_md5_filename(&file.name) {
+            self.signon_progress = Some(now);
+            if md5_digest(&file.data) == md5 {
+                self.fx.hud.custom_sprays.insert(md5, file.data);
+            }
+            return;
+        }
         if !self.resources.file_received(&file.name) {
             self.print(format!("unrequested file {} ignored", file.name));
             return;

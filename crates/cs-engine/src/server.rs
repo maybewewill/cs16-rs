@@ -25,7 +25,6 @@ use crate::world::WorldLinks;
 use crate::world::consts::{EF_MUZZLEFLASH, EF_NOINTERP, MOVETYPE_WALK, SOLID_SLIDEBOX};
 use crate::signon::{
     MAX_SIGNON_BUFFER, SPAWN_TAIL_MAX, UserInfoEntry, move_vars, public_userinfo, munged_map_crc, write_new_stage,
-    write_sendres_stage,
     write_spawn_baselines, write_spawn_stage, write_spawn_tail_with_voice,
 };
 use crate::usercmd::TokenBucket;
@@ -133,6 +132,10 @@ pub struct Server<G: GameDll> {
     /// The queued fake-client moves are being run (`Server::run_fake_moves`): a drain made while
     /// they run leaves the rest of the queue to that loop.
     pub(crate) in_fake_moves: bool,
+    pub(crate) file_provider: Option<Box<dyn crate::downloads::ServerFileProvider>>,
+    pub(crate) consistency_rules: BTreeMap<String, crate::downloads::ConsistencyRule>,
+    pub(crate) customizations: crate::downloads::CustomizationStore,
+    pub(crate) resource_cache: Vec<cs_proto48::messages::ResourceEntry>,
 }
 
 /// Monotonic counts of what the server refused, dropped or failed to send.
@@ -249,6 +252,10 @@ impl<G: GameDll> Server<G> {
             farewells: Vec::new(),
             next_pings_at: 0.0,
             in_fake_moves: false,
+            file_provider: None,
+            consistency_rules: BTreeMap::new(),
+            customizations: crate::downloads::CustomizationStore::default(),
+            resource_cache: Vec::new(),
         };
         server.activate_map();
         server
@@ -789,7 +796,7 @@ impl<G: GameDll> Server<G> {
         };
         // Losses are replayed once per packet, by its first `clc_move`.
         let mut dropped = incoming.dropped;
-        // A completed file stream (`completed_file_stream`) is discarded.
+        let completed_file_stream = incoming.completed_file_stream;
         let payloads = std::iter::once(incoming.payload).chain(incoming.completed_normal_stream);
         for payload in payloads {
             // The parser does not tell a bad `clc_move` checksum from other errors, so every
@@ -820,10 +827,21 @@ impl<G: GameDll> Server<G> {
                         self.handle_move(slot, &cmds, num_backup, lost, incoming.sequence);
                     }
                     ClcMessage::Delta(seq) => self.clients[index].delta_seq = Some(seq),
+                    ClcMessage::ResourceList(entries) => {
+                        self.handle_clc_resourcelist(slot, &entries);
+                    }
+                    ClcMessage::FileConsistency(bytes) => {
+                        self.handle_file_consistency(slot, &bytes);
+                    }
                     ClcMessage::VoiceData(data) => self.handle_voice_data(slot, &data),
                     _ => {}
                 }
             }
+        }
+        if let Some(stream) = completed_file_stream
+            && !self.clients[index].is_free()
+        {
+            self.handle_incoming_file_stream(slot, &stream);
         }
     }
 
@@ -900,6 +918,7 @@ impl<G: GameDll> Server<G> {
             }
             ("sendents", ClientState::Signon(SignonStage::AwaitSendEnts)) => {
                 self.clients[usize::from(slot)].state = ClientState::Active;
+                self.replay_customizations_to(slot);
             }
             _ if is_stage_cmd => return,
             ("setinfo", _) => {
@@ -907,6 +926,7 @@ impl<G: GameDll> Server<G> {
                     self.client_setinfo(slot, &argv);
                 }
             }
+            ("dlfile", _) => self.handle_dlfile(slot, &argv),
             ("disconnect" | "dropclient", _) => self.release_slot(slot, None),
             ("vban", _) => {
                 if let Some(mask_arg) = argv.get(1) {
@@ -990,13 +1010,7 @@ impl<G: GameDll> Server<G> {
     }
 
     fn stage_sendres(&mut self, slot: u8) {
-        // File transfer is not implemented: every resource is listed with size 0.
-        let resources = self.precache.resource_list(&|_| 0);
-        let mut w = MsgWriter::new();
-        write_sendres_stage(&mut w, self.spawn_count, &resources);
-        let client = &mut self.clients[usize::from(slot)];
-        client.chan.write_reliable(w.as_slice());
-        client.state = ClientState::Signon(SignonStage::AwaitSpawn);
+        self.on_stage_sendres(slot);
     }
 
     /// `spawn <spawn_count> <crc>`.
@@ -1009,6 +1023,9 @@ impl<G: GameDll> Server<G> {
             let client = &mut self.clients[index];
             client.chan.write_reliable(w.as_slice());
             client.state = ClientState::Signon(SignonStage::AwaitNew);
+            return;
+        }
+        if !self.stage_spawn_check_consistency(slot) {
             return;
         }
         let expected = munged_map_crc(self.map.crc, self.spawn_count);

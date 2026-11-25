@@ -6,6 +6,8 @@ pub mod client;
 pub use cs_pm::collision;
 mod connect;
 pub mod console;
+pub mod downloads;
+pub use downloads::{ConsistencyRule, CustomizationStore, ServerFileProvider};
 pub mod edict;
 pub mod events;
 pub mod frame;

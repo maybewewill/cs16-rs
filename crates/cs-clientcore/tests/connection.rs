@@ -522,13 +522,13 @@ fn answers_consistency_as_the_original() {
     let ClcMessage::FileConsistency(payload) = flat[consistency] else {
         unreachable!();
     };
-    // Munged with the spawn count; bits: 1, index (10), md5 prefix (32), 0.
+    // Munged with the spawn count; bits: 1, index (12), md5 prefix (32), 0 (`SV_ParseConsistencyResponse`).
     let mut payload = payload.clone();
     com_unmunge(&mut payload, SPAWN_COUNT as i32);
     let mut r = MsgReader::new(&payload);
     r.start_bit_reading();
     assert!(r.read_one_bit());
-    assert_eq!(r.read_bits(10), 1);
+    assert_eq!(r.read_bits(12), 1);
     assert_eq!(r.read_bits(32), "models/p_ak47.mdl".len() as u32);
     assert!(!r.read_one_bit());
 }

@@ -39,7 +39,9 @@ pub use predict::{
     LocalState, PlayerPose, PredictInputs, PredictSettings, PredictedSound, Prediction,
     PredictionCheck, Predictor, WeaponState, split_usercmd,
 };
-pub use resources::{AllFilesPresent, ResourceFiles, ResourceManager, res_type};
+pub use resources::{
+    AllFilesPresent, HttpFetchResult, HttpFetcher, ResourceFiles, ResourceManager, res_type,
+};
 pub use events::{EventFx, EventQueue, FiredEvent, FxEnv};
 pub use hud::{ClientEffects, HudState};
 pub use sound::{SoundCommand, SoundQueue, SoundStart, VoiceEvent, VoiceQueue};
