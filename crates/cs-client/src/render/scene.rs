@@ -18,8 +18,7 @@ use std::collections::HashMap;
 use cs_assets::spr::SpriteType;
 use glam::{Mat4, Vec3, Vec4};
 
-/// `EF_NODRAW` effect bit (assumption: value 128 taken from the GoldSrc `const.h` layout, which
-/// the protocol-48 reader in `cs-proto48` also uses for `effects`).
+/// `EF_NODRAW` effect bit (`ReHLDS rehlds/common/const.h:138`).
 pub const EF_NODRAW: u32 = 128;
 
 /// `kRenderFx*` values (`const.h` of the Xash3D FWGS common headers, lines 698-720, read

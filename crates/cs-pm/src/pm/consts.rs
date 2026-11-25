@@ -1,8 +1,7 @@
 //! Constants of `pm_shared` and the headers it includes (`pm_shared.h`, `pm_defs.h`, `const.h`,
-//! `in_buttons.h`, `pm_materials.h`). Values read 2026-11-22 from ReGameDLL_CS
-//! `regamedll/pm_shared/pm_shared.h`, `pm_defs.h`, `regamedll/dlls/const.h` (via the survey digest
-//! section 3). Constants the headers of the fetched copies did not contain are marked "(HL SDK)":
-//! they come from the standard Half-Life SDK and are an assumption until checked.
+//! `in_buttons.h`, `pm_materials.h`). Values read from ReGameDLL_CS `regamedll/pm_shared/pm_shared.h`,
+//! `pm_defs.h`, `regamedll/dlls/const.h`, and ReHLDS `rehlds/common/const.h` (via direct inspection
+//! of lines 42-74, 95-108, and 609-627).
 
 // pm_shared.h
 /// `PM_DEAD_VIEWHEIGHT`: view offset of a dead player.
@@ -104,7 +103,8 @@ pub const CONTENTS_WATER: i32 = -3;
 pub const CONTENTS_SLIME: i32 = -4;
 pub const CONTENTS_LAVA: i32 = -5;
 pub const CONTENTS_SKY: i32 = -6;
-/// (HL SDK) `CONTENTS_CURRENT_0` .. `CONTENTS_CURRENT_DOWN`, `CONTENTS_TRANSLUCENT`.
+/// `CONTENTS_CURRENT_0` .. `CONTENTS_CURRENT_DOWN`, `CONTENTS_TRANSLUCENT`
+/// (`ReHLDS rehlds/common/const.h:618-625`).
 pub const CONTENTS_CURRENT_0: i32 = -9;
 pub const CONTENTS_CURRENT_90: i32 = -10;
 pub const CONTENTS_CURRENT_180: i32 = -11;

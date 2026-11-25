@@ -34,7 +34,7 @@ status = "implemented"
 [[item]]
 id = "Train"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::movers_tracktrain_and_vehicle_move_and_send_train_hud"
+evidence = "crates/cs-game/tests/phase7_brushes_movers.rs::func_tracktrain_and_vehicle_controls_drive_and_send_train_hud"
 
 [[item]]
 id = "HudTextPro"
@@ -44,7 +44,7 @@ evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase10_hud_usermsgs_roundt
 [[item]]
 id = "HudText"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_visual_beam_shake_fade_explosion_render_message_and_spark_shower; crates/cs-proto48/src/usermsg.rs::tests::phase10_hud_usermsgs_roundtrip; crates/cs-clientcore/src/hud.rs::tests::phase10_hud_text_spec_and_damage_history_reduce"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_shake_fade_and_message; crates/cs-proto48/src/usermsg.rs::tests::phase10_hud_usermsgs_roundtrip; crates/cs-clientcore/src/hud.rs::tests::phase10_hud_text_spec_and_damage_history_reduce"
 
 [[item]]
 id = "SayText"
@@ -148,12 +148,12 @@ status = "implemented"
 [[item]]
 id = "ScreenShake"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_visual_beam_shake_fade_explosion_render_message_and_spark_shower"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_shake_fade_and_message"
 
 [[item]]
 id = "ScreenFade"
 status = "verified"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_visual_beam_shake_fade_explosion_render_message_and_spark_shower; VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; the message is in the join, jointeam and joinclass sequences, which match the original message by message apart from HealthInfo, Account and ReqState (values that depend on the clock or the random spawn point are not compared); docs/parity/checklists/phase2d-weapons.md V8)"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_shake_fade_and_message; VERIFIED 2026-11-22, method 2 (golden capture diff: cs-probe --diff of the original HLDS build 10210 against our server, a probe running jointeam 2 and joinclass 5; the message is in the join, jointeam and joinclass sequences, which match the original message by message apart from HealthInfo, Account and ReqState (values that depend on the clock or the random spawn point are not compared); docs/parity/checklists/phase2d-weapons.md V8)"
 
 [[item]]
 id = "AmmoX"
@@ -281,7 +281,7 @@ status = "missing"
 [[item]]
 id = "ReceiveW"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_fog_weather_lights_and_sound_entities; crates/cs-game/tests/phase7_stock_maps.rs::stock_map_spot_checks"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_fog_and_weather_entities; crates/cs-game/tests/phase7_stock_maps.rs::stock_map_spot_checks"
 
 [[item]]
 id = "ShadowIdx"
@@ -326,12 +326,12 @@ status = "missing"
 [[item]]
 id = "Brass"
 status = "tested"
-evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase8_usermsgs_roundtrip; crates/cs-clientcore/src/hud.rs::tests::phase8_hud_and_effect_messages_update_state; crates/cs-clientcore/src/tempents.rs::tests::all_59_temp_effects_handled_by_clientcore"
+evidence = "crates/cs-proto48/src/usermsg.rs::tests::phase8_usermsgs_roundtrip; crates/cs-clientcore/src/hud.rs::tests::phase8_hud_and_effect_messages_update_state; crates/cs-clientcore/src/tempents.rs::tests::te_gunshots_blood_tracers_and_brass_drive_tempents"
 
 [[item]]
 id = "Fog"
 status = "tested"
-evidence = "crates/cs-game/tests/phase7_env_items.rs::env_fog_weather_lights_and_sound_entities; crates/cs-proto48/src/usermsg.rs::tests::phase8_usermsgs_roundtrip; crates/cs-clientcore/src/hud.rs::tests::phase8_hud_and_effect_messages_update_state"
+evidence = "crates/cs-game/tests/phase7_env_items.rs::env_fog_and_weather_entities; crates/cs-proto48/src/usermsg.rs::tests::phase8_usermsgs_roundtrip; crates/cs-clientcore/src/hud.rs::tests::phase8_hud_and_effect_messages_update_state"
 
 [[item]]
 id = "ShowTimer"

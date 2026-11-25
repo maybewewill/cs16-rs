@@ -21,8 +21,7 @@ pub use udp::UdpTransport;
 #[cfg(not(target_arch = "wasm32"))]
 pub use ws_native::{UpgradeHook, WsClientTransport, WsServerConfig, WsServerTransport};
 
-/// Largest datagram a transport accepts for sending.
-/// Working assumption: the value from the reference `net.h`.
+/// Largest datagram a transport accepts for sending (`ReHLDS rehlds/engine/net.h:117`).
 pub const MAX_UDP_PACKET: usize = 4010;
 
 /// Address of a remote peer.

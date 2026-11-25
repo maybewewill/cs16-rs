@@ -2,7 +2,7 @@
 //! ported from ReGameDLL_CS (`effects.cpp`, `lights.cpp`, `sound.cpp`, `globals.cpp`).
 
 use cs_engine::consts::{
-    MOVETYPE_NONE, SOLID_BBOX, SOLID_NOT,
+    FL_CUSTOMENTITY, MOVETYPE_NONE, SOLID_BBOX, SOLID_NOT,
 };
 use cs_engine::{EdictId, EngineApi, MoveFilter, MsgDest};
 use cs_proto48::messages::{SND_FL_CHANGE_PITCH, SND_FL_CHANGE_VOL, SND_FL_STOP, svc};
@@ -502,12 +502,27 @@ impl GameEntity for BeamEntity {
         self.strike_time = key_str(keys, "StrikeTime").map(atof).unwrap_or(1.0).max(0.1);
         self.damage = key_str(keys, "damage").map(atof).unwrap_or(0.0);
 
+        let is_continuous =
+            self.life == 0.0 && !self.start_target.is_empty() && !self.end_target.is_empty();
+        if is_continuous {
+            // ReGameDLL_CS `CLightning::ServerSide()` + `BeamUpdateVars()` (`effects.cpp:816-821`):
+            // continuous point-to-point beams retain a model index and `FL_CUSTOMENTITY` so
+            // `SV_CreateBaseline` emits an `ENTITY_BEAM` (`type = 2`) baseline (e.g. `de_cbble`).
+            eng.set_model(id, &self.texture);
+        }
+
         let now = eng.time();
         let Some(v) = eng.ent_mut(id) else {
             return false;
         };
         v.solid = SOLID_NOT;
         v.movetype = MOVETYPE_NONE;
+        if is_continuous {
+            v.flags |= FL_CUSTOMENTITY;
+            v.scale = f32::from(self.width) * 0.1;
+            v.rendercolor = self.color;
+            v.renderamt = self.brightness;
+        }
         self.toggle = v.spawnflags & SF_BEAM_TOGGLE != 0;
         self.start_on = v.spawnflags & SF_BEAM_STARTON != 0 || v.targetname.is_empty();
         self.active = self.start_on;

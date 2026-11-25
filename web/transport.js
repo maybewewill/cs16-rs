@@ -1,3 +1,6 @@
+// Browser transport adapter: tries WebTransport over HTTPS only if a user supplies an
+// external HTTP/3 proxy, and otherwise connects directly to `cs-server`'s RFC 6455 WebSocket
+// endpoint (`cs-server` itself serves WebSocket only; see `docs/parity/web.toml`).
 export class WebGameTransport {
   constructor(url, { onPacket, onStateChange } = {}) {
     this.url = url;

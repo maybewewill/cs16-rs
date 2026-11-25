@@ -48,7 +48,35 @@ fn stereo_channel_rms(interleaved: &[f32], channel: usize) -> f32 {
 }
 
 #[test]
-fn wav_2d_3d_cue_and_smpl_looping() {
+fn wav_2d_playback_renders_pcm() {
+    let pcm = sine_i16(22_050, 440.0, 4_000, 0.7);
+    let wav = encode_test_wav_pcm16(22_050, 1, &pcm, None, None);
+
+    let mut mixer = GoldSrcMixer::new();
+    mixer.set_volumes(1.0, 0.25);
+    mixer.set_room_off(true);
+    mixer.insert_cached_wav("ui/menu_click.wav", &wav);
+
+    let start = SoundStart::by_name("ui/menu_click.wav", 1, 2, Vec3::ZERO, 1.0, 0.0, 100);
+    mixer.start_sound(None, &start, false, None);
+
+    let mut out = vec![0.0f32; (MIX_SAMPLE_RATE as usize / 20) * 2];
+    mixer.mix_frames(&mut out);
+    assert!(rms(&out) > 0.15, "2D WAV playback must render non-silent PCM");
+
+    if let Ok(vfs) = Vfs::discover(None, VfsConfig::default()) {
+        let candidate = ["sound/weapons/ak47-1.wav", "sound/items/smallmedkit1.wav"]
+            .into_iter()
+            .find_map(|p| vfs.read_bytes(p).ok().map(|b| (p, b)));
+        if let Some((path, bytes)) = candidate {
+            let dec = decode_wav(&bytes).unwrap_or_else(|e| panic!("decode {path}: {e}"));
+            assert!(dec.sample_rate >= 8000 && dec.frame_count() > 100);
+        }
+    }
+}
+
+#[test]
+fn wav_cue_and_smpl_loop_points_wrap() {
     let pcm = sine_i16(22_050, 440.0, 4_000, 0.7);
     let cue_wav = encode_test_wav_pcm16(22_050, 1, &pcm, Some(1_000), None);
     let smpl_wav = encode_test_wav_pcm16(22_050, 1, &pcm, None, Some((500, 1_500)));
@@ -76,17 +104,6 @@ fn wav_2d_3d_cue_and_smpl_looping() {
     assert!(rms(tail) > 0.15, "looped smpl WAV must keep playing seamlessly in tail");
     let (dyn_active, _) = mixer.active_channel_counts();
     assert_eq!(dyn_active, 1);
-
-    // Optional check against real retail Half-Life/cstrike WAV files if present.
-    if let Ok(vfs) = Vfs::discover(None, VfsConfig::default()) {
-        let candidate = ["sound/weapons/ak47-1.wav", "sound/items/smallmedkit1.wav"]
-            .into_iter()
-            .find_map(|p| vfs.read_bytes(p).ok().map(|b| (p, b)));
-        if let Some((path, bytes)) = candidate {
-            let dec = decode_wav(&bytes).unwrap_or_else(|e| panic!("decode {path}: {e}"));
-            assert!(dec.sample_rate >= 8000 && dec.frame_count() > 100);
-        }
-    }
 }
 
 #[test]
@@ -142,11 +159,10 @@ fn channels_priorities_alter_and_stopsound() {
 }
 
 #[test]
-fn goldsrc_attenuation_stereo_pan_pitch_and_occlusion() {
+fn goldsrc_distance_attenuation_and_stereo_pan() {
     let mut mixer = GoldSrcMixer::new();
     mixer.set_volumes(1.0, 0.25);
     mixer.set_room_off(true);
-    mixer.set_occlusion_factor(0.3);
     let tone = encode_test_wav_pcm16(22_050, 1, &sine_i16(22_050, 500.0, 22_050, 0.8), None, None);
     mixer.insert_cached_wav("player/step.wav", &tone);
 
@@ -177,7 +193,33 @@ fn goldsrc_attenuation_stereo_pan_pitch_and_occlusion() {
     assert!(stereo_channel_rms(&pan_buf, 1) > stereo_channel_rms(&pan_buf, 0) * 2.0);
     mixer.stop_all();
 
-    // 2. Occluded vs unoccluded attenuation at equal distance.
+    // 2. Closer source vs farther source under ATTN_NORM (0.8) attenuates monotonically.
+    let near_src = SoundStart::by_name("player/step.wav", 11, 2, Vec3::new(100.0, 0.0, 0.0), 1.0, 0.8, 100);
+    let far_src = SoundStart::by_name("player/step.wav", 12, 2, Vec3::new(600.0, 0.0, 0.0), 1.0, 0.8, 100);
+    mixer.start_sound(None, &near_src, false, None);
+    mixer.start_sound(None, &far_src, false, None);
+    let (near_l, _) = mixer.channel_gains(11, 2).expect("near active");
+    let (far_l, _) = mixer.channel_gains(12, 2).expect("far active");
+    assert!(near_l > far_l * 1.5, "near gain {near_l} should exceed far gain {far_l}");
+}
+
+#[test]
+fn goldsrc_wall_occlusion_attenuates_sound() {
+    let mut mixer = GoldSrcMixer::new();
+    mixer.set_volumes(1.0, 0.25);
+    mixer.set_room_off(true);
+    mixer.set_occlusion_factor(0.3);
+    let tone = encode_test_wav_pcm16(22_050, 1, &sine_i16(22_050, 500.0, 22_050, 0.8), None, None);
+    mixer.insert_cached_wav("player/step.wav", &tone);
+
+    let listener = ListenerState {
+        origin: Vec3::ZERO,
+        right: Vec3::Y,
+        local_entity: Some(1),
+        waterlevel: 0,
+    };
+    mixer.update_listener_and_entities(listener, &HashMap::new(), None);
+
     let occ_pos = Vec3::new(300.0, 0.0, 0.0);
     let clear = SoundStart::by_name("player/step.wav", 11, 1, occ_pos, 1.0, 0.8, 100);
     mixer.start_sound(None, &clear, false, Some(&|_| false));
@@ -187,11 +229,16 @@ fn goldsrc_attenuation_stereo_pan_pitch_and_occlusion() {
     mixer.start_sound(None, &blocked, false, Some(&|p| p.x > 250.0));
     let (b_l, _) = mixer.channel_gains(12, 1).unwrap();
     assert!(b_l < c_l * 0.75, "occluded gain {b_l} should be lower than clear {c_l}");
-    mixer.stop_all();
+}
 
-    // 3. Fractional pitch shifting (`pitch = 200` consumes audio at ~2x rate vs `pitch = 50`).
+#[test]
+fn goldsrc_fractional_pitch_shifting() {
+    let mut mixer = GoldSrcMixer::new();
+    mixer.set_volumes(1.0, 0.25);
+    mixer.set_room_off(true);
     let short = encode_test_wav_pcm16(22_050, 1, &sine_i16(22_050, 440.0, 2_205, 0.8), None, None);
     mixer.insert_cached_wav("misc/short.wav", &short);
+
     mixer.start_sound(
         None,
         &SoundStart::by_name("misc/short.wav", 20, 1, Vec3::ZERO, 1.0, 0.0, 200),
@@ -267,7 +314,7 @@ fn sentences_txt_and_vox_concatenation() {
 }
 
 #[test]
-fn roomtype_29_presets_env_sound_and_underwater_muffling() {
+fn roomtype_29_presets_modulate_wet_reverb() {
     assert_eq!(NUM_ROOM_TYPES, 29);
     assert_eq!(ROOM_PRESETS.len(), 29);
 
@@ -306,7 +353,14 @@ fn roomtype_29_presets_env_sound_and_underwater_muffling() {
     }
     assert!(off_tail < 1e-6, "room_off=1 must bypass reverb");
 
-    // Underwater lowpass filter passes 180 Hz cleanly while cutting 4500 Hz strongly.
+    // Mixer integration of SoundCommand::RoomType.
+    let mut mixer = GoldSrcMixer::new();
+    mixer.handle_sound_command(None, &SoundCommand::RoomType(18), None);
+    assert_eq!(mixer.room_type(), 18);
+}
+
+#[test]
+fn underwater_muffling_lowpass_filters_audio() {
     let mut uw_low = RoomDsp::new(MIX_SAMPLE_RATE);
     uw_low.set_underwater(true);
     let low_in: Vec<f32> = (0..4_000)
@@ -321,20 +375,14 @@ fn roomtype_29_presets_env_sound_and_underwater_muffling() {
         .collect();
     let high_out: Vec<f32> = high_in.iter().map(|&x| uw_high.process_frame(x, x).0).collect();
     assert!(rms(&low_out[500..]) > rms(&high_out[500..]) * 5.0);
-
-    // Mixer integration of SoundCommand::RoomType.
-    let mut mixer = GoldSrcMixer::new();
-    mixer.handle_sound_command(None, &SoundCommand::RoomType(18), None);
-    assert_eq!(mixer.room_type(), 18);
 }
 
 #[test]
-fn soundfade_cdtrack_mp3_commands_and_real_mp3_decode() {
-    // 1. svc_soundfade ramps gain down and back up smoothly.
+fn soundfade_attenuates_and_recovers_master_gain() {
     let mut mixer = GoldSrcMixer::new();
     mixer.set_volumes(1.0, 0.25);
     mixer.set_room_off(true);
-    let tone = encode_test_wav_pcm16(22_050, 1, &sine_i16(22_050, 300.0, 132_300, 0.8), None, None);
+    let tone = encode_test_wav_pcm16(22_050, 1, &sine_i16(22_050, 300.0, 176_400, 0.8), None, None);
     mixer.insert_cached_wav("ambience/drone.wav", &tone);
     mixer.start_sound(
         None,
@@ -360,7 +408,19 @@ fn soundfade_cdtrack_mp3_commands_and_real_mp3_decode() {
     mixer.mix_frames(&mut muted); // t=1.0..1.5s inside hold
     assert!(rms(&muted) < rms(&half_sec) * 0.1, "soundfade hold must attenuate output");
 
-    // 2. MusicController + console command parsing (`mp3`, `cd`, `svc_cdtrack`, `mp3fadetime`).
+    // Advance through remainder of hold (1.5..2.0s) and fade_in (2.0..3.0s) into full recovery (3.0..3.5s).
+    let mut fade_in = vec![0.0f32; (MIX_SAMPLE_RATE as usize * 3 / 2) * 2];
+    mixer.mix_frames(&mut fade_in);
+    let mut recovered = vec![0.0f32; (MIX_SAMPLE_RATE as usize / 2) * 2];
+    mixer.mix_frames(&mut recovered);
+    assert!(
+        rms(&recovered) > rms(&half_sec) * 0.8,
+        "soundfade must recover gain after hold + fade_in"
+    );
+}
+
+#[test]
+fn cdtrack_and_mp3_console_commands() {
     let mut cvars = CVarRegistry::new_with_defaults();
     let actions = cvars.execute_script("mp3 loop media/Half-Life03.mp3; cd play 5; stopsound");
     assert!(actions.iter().any(|a| matches!(a, EngineAction::Mp3Command(_))));
@@ -381,8 +441,10 @@ fn soundfade_cdtrack_mp3_commands_and_real_mp3_decode() {
     assert!(matches!(fade_cmds.as_slice(), [MusicCommand::SetVolume(v)] if *v < 0.5));
     let done_cmds = mc.step(0.6);
     assert!(matches!(done_cmds.as_slice(), [MusicCommand::Stop]));
+}
 
-    // 3. Real retail MP3 decoding via `rodio::Decoder` if CS16_GAMEDIR / Half-Life exists.
+#[test]
+fn real_mp3_menu_music_decode_if_installed() {
     if let Ok(vfs) = Vfs::discover(None, VfsConfig::default())
         && let Ok(mp3_bytes) = vfs.read_bytes("media/Half-Life01.mp3")
     {
@@ -393,6 +455,63 @@ fn soundfade_cdtrack_mp3_commands_and_real_mp3_decode() {
         let first_samples: Vec<f32> = dec.take(2048).collect();
         assert_eq!(first_samples.len(), 2048);
     }
+}
+
+#[test]
+fn gameplay_sound_events_radio_c4_footsteps_and_roomtype_drive_mixer() {
+    let script = r#"
+        MRAD_LOCKNLOAD radio/locknload(v100)
+        MRAD_TERWIN radio/terwin(v100)
+        MRAD_BOMBPL radio/bombpl(v100)
+        MRAD_BOMBDEF radio/bombdef(v100)
+        MRAD_RESCUED radio/rescued(v100)
+    "#;
+    let sentences = SentenceTable::parse(script);
+    let mut mixer = GoldSrcMixer::new();
+    mixer.set_volumes(1.0, 0.25);
+
+    let clip = encode_test_wav_pcm16(22_050, 1, &sine_i16(22_050, 440.0, 2_205, 0.6), None, None);
+    for path in [
+        "radio/locknload.wav",
+        "radio/terwin.wav",
+        "radio/bombpl.wav",
+        "radio/bombdef.wav",
+        "radio/rescued.wav",
+        "weapons/c4_plant.wav",
+        "weapons/c4_beep1.wav",
+        "weapons/c4_disarmed.wav",
+        "weapons/c4_explode1.wav",
+        "weapons/he_bounce-1.wav",
+        "hostage/hos1.wav",
+        "player/pl_step1.wav",
+    ] {
+        mixer.insert_cached_wav(path, &clip);
+    }
+
+    for token in ["%!MRAD_LOCKNLOAD", "%!MRAD_BOMBPL", "%!MRAD_BOMBDEF", "%!MRAD_RESCUED", "%!MRAD_TERWIN"] {
+        let words = sentences.resolve(token).unwrap_or_else(|| panic!("resolve {token}"));
+        let s = SoundStart::by_name(token, 0, 2, Vec3::ZERO, 1.0, 0.0, 100);
+        mixer.start_vox_words(None, &words, &s, false, None);
+    }
+
+    for (ent, path) in [
+        (30u16, "weapons/c4_plant.wav"),
+        (31, "weapons/c4_beep1.wav"),
+        (32, "weapons/c4_disarmed.wav"),
+        (33, "weapons/c4_explode1.wav"),
+        (34, "weapons/he_bounce-1.wav"),
+        (35, "hostage/hos1.wav"),
+        (36, "player/pl_step1.wav"),
+    ] {
+        let s = SoundStart::by_name(path, ent, 1, Vec3::new(32.0, 0.0, 0.0), 1.0, 0.8, 100);
+        mixer.start_sound(None, &s, false, None);
+    }
+    mixer.handle_sound_command(None, &SoundCommand::RoomType(12), None);
+    assert_eq!(mixer.room_type(), 12);
+
+    let mut out = vec![0.0f32; (MIX_SAMPLE_RATE as usize / 20) * 2];
+    mixer.mix_frames(&mut out);
+    assert!(rms(&out) > 0.05, "gameplay event sounds must render active mixer PCM");
 }
 
 #[test]

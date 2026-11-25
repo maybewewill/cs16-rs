@@ -2854,13 +2854,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn all_59_temp_effects_handled_by_clientcore() {
-        let precache = precache_with_models(&[1, 2, 3]);
-        let world = Floor { frames: 8 };
-        let mut ents = TempEnts::default();
-        let mut sounds = SoundQueue::default();
-        let mut rng = FxRandom::new(9);
+    fn sample_59_temp_effects() -> Vec<wire::TempEntity> {
         let p = Vec3::new(0.0, 0.0, 16.0);
         let q = Vec3::new(32.0, 16.0, 24.0);
         let beam = wire::BeamParams {
@@ -2874,7 +2868,7 @@ mod tests {
             brightness: 255,
             speed: 5,
         };
-        let samples = [
+        vec![
             wire::beam_points(p, q, &beam),
             wire::beam_ent_point(1, q, &beam),
             wire::gunshot(p),
@@ -2934,16 +2928,173 @@ mod tests {
             wire::multi_gunshot(p, Vec3::X, 0.1, 0.1, 3, 1),
             wire::user_tracer(p, Vec3::X * 100.0, 5, 4, 20),
             wire::kill_player_attachments(1),
-        ];
-        assert_eq!(samples.len(), 59);
-        for item in &samples {
+        ]
+    }
+
+    fn spawn_category(filter: fn(u8) -> bool) -> (TempEnts, Vec<RenderEffect>, usize) {
+        let precache = precache_with_models(&[1, 2, 3]);
+        let world = Floor { frames: 8 };
+        let mut ents = TempEnts::default();
+        let mut sounds = SoundQueue::default();
+        let mut rng = FxRandom::new(9);
+        let mut count = 0usize;
+        for item in &sample_59_temp_effects() {
+            if !filter(item.te_type) {
+                continue;
+            }
             let eff = item.decode().unwrap();
             assert!(!matches!(eff, TempEffect::Other { .. }));
             ents.spawn_effect(&eff, 1.0, &precache, &world, &mut rng, &mut sounds);
+            count += 1;
         }
-        assert!(!ents.take_effects().is_empty());
+        ents.update(clock(1.05), &world, &mut rng, &mut sounds);
+        let effects = ents.take_effects();
+        (ents, effects, count)
+    }
 
-        // Attachment + Brass usermsg + ParticleMsg
+    fn is_beam_or_line(id: u8) -> bool {
+        use wire::te;
+        matches!(
+            id,
+            te::BEAMPOINTS
+                | te::BEAMENTPOINT
+                | te::LIGHTNING
+                | te::BEAMENTS
+                | te::BEAMSPRITE
+                | te::BEAMTORUS
+                | te::BEAMDISK
+                | te::BEAMCYLINDER
+                | te::BEAMFOLLOW
+                | te::BEAMRING
+                | te::LINE
+                | te::BOX
+                | te::KILLBEAM
+                | te::SHOWLINE
+        )
+    }
+
+    fn is_explosion_or_light(id: u8) -> bool {
+        use wire::te;
+        matches!(
+            id,
+            te::EXPLOSION
+                | te::TAREXPLOSION
+                | te::SMOKE
+                | te::SPARKS
+                | te::LAVASPLASH
+                | te::TELEPORT
+                | te::EXPLOSION2
+                | te::IMPLOSION
+                | te::DLIGHT
+                | te::ELIGHT
+                | te::LARGEFUNNEL
+                | te::FIZZ
+                | te::EXPLODEMODEL
+                | te::FIREFIELD
+        )
+    }
+
+    fn is_gunshot_blood_or_tracer(id: u8) -> bool {
+        use wire::te;
+        matches!(
+            id,
+            te::GUNSHOT
+                | te::TRACER
+                | te::STREAK_SPLASH
+                | te::BLOODSTREAM
+                | te::BLOOD
+                | te::MODEL
+                | te::BREAKMODEL
+                | te::GUNSHOTDECAL
+                | te::ARMOR_RICOCHET
+                | te::BLOODSPRITE
+                | te::PROJECTILE
+                | te::SPRAY
+                | te::PARTICLEBURST
+                | te::MULTIGUNSHOT
+                | te::USERTRACER
+        )
+    }
+
+    fn is_decal_sprite_hud_or_attachment(id: u8) -> bool {
+        use wire::te;
+        matches!(
+            id,
+            te::BSPDECAL
+                | te::SPRITETRAIL
+                | te::SPRITE
+                | te::GLOWSPRITE
+                | te::TEXTMESSAGE
+                | te::DECAL
+                | te::SPRITE_SPRAY
+                | te::PLAYERDECAL
+                | te::BUBBLES
+                | te::BUBBLETRAIL
+                | te::WORLDDECAL
+                | te::WORLDDECALHIGH
+                | te::DECALHIGH
+                | te::PLAYERSPRITES
+                | te::PLAYERATTACHMENT
+                | te::KILLPLAYERATTACHMENTS
+        )
+    }
+
+    #[test]
+    fn te_beams_and_lines_produce_effects_and_kill_beam() {
+        let (_ents, effects, count) = spawn_category(is_beam_or_line);
+        assert_eq!(count, 14);
+        assert!(effects.iter().any(|e| matches!(e, RenderEffect::Beam { .. })));
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            RenderEffect::Beam {
+                effect: TempEffect::KillBeam { entity: 1 },
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn te_explosions_sparks_and_lights_produce_effects_and_dlights() {
+        let (_ents, effects, count) = spawn_category(is_explosion_or_light);
+        assert_eq!(count, 14);
+        assert!(effects.iter().any(|e| matches!(e, RenderEffect::Light(_))));
+        assert!(effects.iter().any(|e| matches!(e, RenderEffect::Particles(_))));
+    }
+
+    #[test]
+    fn te_gunshots_blood_tracers_and_brass_drive_tempents() {
+        let (mut ents, effects, count) = spawn_category(is_gunshot_blood_or_tracer);
+        assert_eq!(count, 15);
+        assert!(!effects.is_empty());
+        assert!(!ents.active().is_empty());
+
+        let precache = precache_with_models(&[1, 2, 3]);
+        let world = Floor { frames: 8 };
+        let mut sounds = SoundQueue::default();
+        let mut rng = FxRandom::new(9);
+        let p = Vec3::new(0.0, 0.0, 16.0);
+        let brass = wire::model(p, Vec3::Y * 40.0, 10, 1, 1, 10);
+        ents.spawn_brass_usermsg(&brass.payload, 2.0, &precache, &world, &mut rng);
+        ents.spawn_particle_msg(&cs_proto48::messages::ParticleMsg {
+            origin: p,
+            direction: [0, 0, 16],
+            count: 25,
+            color: 70,
+        });
+        ents.update(clock(2.1), &world, &mut rng, &mut sounds);
+        assert!(!ents.take_effects().is_empty());
+    }
+
+    #[test]
+    fn te_decals_sprites_hud_and_player_attachments_drive_tempents() {
+        let (mut ents, effects, count) = spawn_category(is_decal_sprite_hud_or_attachment);
+        assert_eq!(count, 16);
+        assert!(!effects.is_empty());
+
+        let precache = precache_with_models(&[1, 2, 3]);
+        let world = Floor { frames: 8 };
+        let mut sounds = SoundQueue::default();
+        let mut rng = FxRandom::new(9);
         ents.spawn_effect(
             &TempEffect::PlayerAttachment {
                 entity: 2,
@@ -2960,16 +3111,23 @@ mod tests {
         assert!(ents.active().iter().any(|t| t.client_entity == 2));
         ents.kill_player_attachments(2);
         assert!(!ents.active().iter().any(|t| t.client_entity == 2));
+    }
 
-        let brass = wire::model(p, Vec3::Y * 40.0, 10, 1, 1, 10);
-        ents.spawn_brass_usermsg(&brass.payload, 2.0, &precache, &world, &mut rng);
-        ents.spawn_particle_msg(&cs_proto48::messages::ParticleMsg {
-            origin: p,
-            direction: [0, 0, 16],
-            count: 25,
-            color: 70,
-        });
-        ents.update(clock(2.1), &world, &mut rng, &mut sounds);
-        assert!(!ents.take_effects().is_empty());
+    #[test]
+    fn temp_effects_cover_all_59_active_ids() {
+        let mut seen = std::collections::BTreeSet::new();
+        for f in [
+            is_beam_or_line as fn(u8) -> bool,
+            is_explosion_or_light,
+            is_gunshot_blood_or_tracer,
+            is_decal_sprite_hud_or_attachment,
+        ] {
+            for item in &sample_59_temp_effects() {
+                if f(item.te_type) {
+                    assert!(seen.insert(item.te_type), "duplicate TE {}", item.te_type);
+                }
+            }
+        }
+        assert_eq!(seen.len(), 59);
     }
 }

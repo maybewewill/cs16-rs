@@ -51,7 +51,7 @@ fn setup_bench(extra_entities: Vec<cs_assets::bsp::Entity>, slots: u8, clear_pro
 }
 
 #[test]
-fn env_fog_weather_lights_and_sound_entities() {
+fn env_fog_and_weather_entities() {
     let extra = vec![
         entity(&[
             ("classname", "env_fog"),
@@ -61,7 +61,50 @@ fn env_fog_weather_lights_and_sound_entities() {
         ]),
         entity(&[("classname", "env_rain")]),
         entity(&[("classname", "func_snow")]),
-        // Unnamed static light despawns cleanly; named switchable light toggles lightstyle.
+    ];
+
+    let mut b = setup_bench(extra, 1, false);
+
+    let mut fog_seen = false;
+    let mut weather_seen = None;
+    for msg in b.probe.messages() {
+        if let SvcMessage::UserMsg { decoded, .. } = msg {
+            match decoded {
+                CsUserMsg::Fog { color, .. } => {
+                    fog_seen = *color == [100, 120, 140];
+                }
+                CsUserMsg::ReceiveW(w) => {
+                    weather_seen = Some(*w);
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(fog_seen, "expected Fog usermsg with RGB 100 120 140");
+    assert_eq!(weather_seen, Some(1), "env_rain takes precedence as weather=1");
+
+    b.probe.clear_messages();
+    b.run(|game, eng| {
+        let p0 = eng.client_edict(0);
+        fire_targets(game.state_mut(), eng, "fog_ctrl", Some(p0), Some(p0), UseType::Off, 0.0);
+    });
+    b.step(4);
+
+    let got_fog_off = b.probe.messages().iter().any(|m| {
+        matches!(
+            m,
+            SvcMessage::UserMsg {
+                decoded: CsUserMsg::Fog { density, .. },
+                ..
+            } if *density == 0.0
+        )
+    });
+    assert!(got_fog_off, "env_fog Off should send 0 density Fog");
+}
+
+#[test]
+fn light_entities_unnamed_despawn_and_switchable_pattern() {
+    let extra = vec![
         entity(&[("classname", "light"), ("origin", "0 0 64")]),
         entity(&[
             ("classname", "light_spot"),
@@ -71,6 +114,32 @@ fn env_fog_weather_lights_and_sound_entities() {
             ("spawnflags", "1"), // START_OFF
         ]),
         entity(&[("classname", "light_environment")]),
+    ];
+
+    let mut b = setup_bench(extra, 1, true);
+    b.run(|game, eng| {
+        assert!(eng.find_by_classname(None, "light").is_none(), "unnamed light despawned");
+        assert!(eng.find_by_classname(None, "light_spot").is_some());
+        assert!(
+            eng.find_by_classname(None, "light_environment").is_none(),
+            "light_environment despawns like HLDS CEnvLight"
+        );
+        let p0 = eng.client_edict(0);
+        fire_targets(game.state_mut(), eng, "sw_light", Some(p0), Some(p0), UseType::On, 0.0);
+    });
+    b.step(4);
+
+    let got_lightstyle = b
+        .probe
+        .messages()
+        .iter()
+        .any(|m| matches!(m, SvcMessage::LightStyle { index: 32, pattern } if pattern == "mmmaaa"));
+    assert!(got_lightstyle, "light_spot should update svc_lightstyle");
+}
+
+#[test]
+fn sound_entities_ambient_speaker_and_soundent() {
+    let extra = vec![
         entity(&[
             ("classname", "ambient_generic"),
             ("targetname", "amb_loop"),
@@ -93,68 +162,21 @@ fn env_fog_weather_lights_and_sound_entities() {
         entity(&[("classname", "soundent")]),
     ];
 
-    let mut b = setup_bench(extra, 1, false);
-
-    // Unnamed static light was freed; Fog & ReceiveW were delivered at join.
-    let mut fog_seen = false;
-    let mut weather_seen = None;
-    for msg in b.probe.messages() {
-        if let SvcMessage::UserMsg { decoded, .. } = msg {
-            match decoded {
-                CsUserMsg::Fog { color, .. } => {
-                    fog_seen = *color == [100, 120, 140];
-                }
-                CsUserMsg::ReceiveW(w) => {
-                    weather_seen = Some(*w);
-                }
-                _ => {}
-            }
-        }
-    }
-    assert!(fog_seen, "expected Fog usermsg with RGB 100 120 140");
-    assert_eq!(weather_seen, Some(1), "env_rain takes precedence as weather=1");
-
-    b.probe.clear_messages();
+    let mut b = setup_bench(extra, 1, true);
     b.run(|game, eng| {
-        assert!(eng.find_by_classname(None, "light").is_none(), "unnamed light despawned");
-        assert!(eng.find_by_classname(None, "light_spot").is_some());
-        assert!(
-            eng.find_by_classname(None, "light_environment").is_none(),
-            "light_environment despawns like HLDS CEnvLight"
-        );
         assert!(eng.find_by_classname(None, "soundent").is_some());
-
         let p0 = eng.client_edict(0);
         eng.set_origin(p0, Vec3::ZERO);
-
-        fire_targets(game.state_mut(), eng, "sw_light", Some(p0), Some(p0), UseType::On, 0.0);
         fire_targets(game.state_mut(), eng, "amb_loop", Some(p0), Some(p0), UseType::On, 0.0);
         fire_targets(game.state_mut(), eng, "pa_sys", Some(p0), Some(p0), UseType::On, 0.0);
-        fire_targets(game.state_mut(), eng, "fog_ctrl", Some(p0), Some(p0), UseType::Off, 0.0);
     });
     b.step(35);
 
-    let got_lightstyle = b
-        .probe
-        .messages()
-        .iter()
-        .any(|m| matches!(m, SvcMessage::LightStyle { index: 32, pattern } if pattern == "mmmaaa"));
-    let got_fog_off = b.probe.messages().iter().any(|m| {
-        matches!(
-            m,
-            SvcMessage::UserMsg {
-                decoded: CsUserMsg::Fog { density, .. },
-                ..
-            } if *density == 0.0
-        )
-    });
     let got_ambient_or_pa = b
         .probe
         .messages()
         .iter()
         .any(|m| matches!(m, SvcMessage::Sound { .. }));
-    assert!(got_lightstyle, "light_spot should update svc_lightstyle");
-    assert!(got_fog_off, "env_fog Off should send 0 density Fog");
     assert!(got_ambient_or_pa, "ambient_generic/speaker should emit sound");
 
     let room = b.run(|_, eng| eng.cvar_f32("room_type"));
@@ -162,7 +184,7 @@ fn env_fog_weather_lights_and_sound_entities() {
 }
 
 #[test]
-fn env_visual_beam_shake_fade_explosion_render_message_and_spark_shower() {
+fn env_sprite_glow_bombglow_and_cyclers() {
     let extra = vec![
         entity(&[
             ("classname", "env_sprite"),
@@ -175,6 +197,23 @@ fn env_visual_beam_shake_fade_explosion_render_message_and_spark_shower() {
         entity(&[("classname", "cycler"), ("targetname", "cyc_m"), ("model", "models/player.mdl")]),
         entity(&[("classname", "cycler_sprite"), ("model", "sprites/smoke.spr")]),
         entity(&[("classname", "bodyque")]),
+    ];
+
+    let mut b = setup_bench(extra, 1, true);
+    b.run(|game, eng| {
+        for cls in ["env_sprite", "env_glow", "env_bombglow", "cycler", "cycler_sprite", "bodyque"] {
+            assert!(eng.find_by_classname(None, cls).is_some(), "missing {cls}");
+        }
+        let p0 = eng.client_edict(0);
+        fire_targets(game.state_mut(), eng, "spr", Some(p0), Some(p0), UseType::Toggle, 0.0);
+        fire_targets(game.state_mut(), eng, "cyc_m", Some(p0), Some(p0), UseType::Toggle, 0.0);
+    });
+    b.step(20);
+}
+
+#[test]
+fn env_beam_lightning_and_laser() {
+    let extra = vec![
         entity(&[("classname", "info_target"), ("targetname", "b_start"), ("origin", "0 0 0")]),
         entity(&[("classname", "info_target"), ("targetname", "b_end"), ("origin", "100 0 0")]),
         entity(&[
@@ -192,7 +231,36 @@ fn env_visual_beam_shake_fade_explosion_render_message_and_spark_shower() {
         ]),
         entity(&[("classname", "env_lightning"), ("targetname", "lt1")]),
         entity(&[("classname", "env_laser"), ("targetname", "lsr1")]),
-        entity(&[("classname", "env_spark"), ("targetname", "spk1")]),
+    ];
+
+    let mut b = setup_bench(extra, 1, true);
+    b.run(|game, eng| {
+        let beam_id = eng.find_by_classname(None, "env_beam").expect("env_beam spawned");
+        let bv = eng.ent(beam_id).unwrap();
+        assert_ne!(bv.modelindex, 0, "continuous env_beam must have modelindex for ENTITY_BEAM baseline");
+        assert_ne!(
+            bv.flags & cs_engine::consts::FL_CUSTOMENTITY,
+            0,
+            "continuous env_beam must set FL_CUSTOMENTITY"
+        );
+        let p0 = eng.client_edict(0);
+        for target in ["beam1", "beam2", "lt1", "lsr1"] {
+            fire_targets(game.state_mut(), eng, target, Some(p0), Some(p0), UseType::Toggle, 0.0);
+        }
+    });
+    b.step(20);
+
+    let saw_beam = b
+        .probe
+        .messages()
+        .iter()
+        .any(|m| matches!(m, SvcMessage::TempEntity { te_type, .. } if *te_type == te::BEAMPOINTS));
+    assert!(saw_beam, "beam/env_beam should emit TE_BEAMPOINTS");
+}
+
+#[test]
+fn env_shake_fade_and_message() {
+    let extra = vec![
         entity(&[
             ("classname", "env_shake"),
             ("targetname", "shk1"),
@@ -210,66 +278,28 @@ fn env_visual_beam_shake_fade_explosion_render_message_and_spark_shower() {
             ("renderamt", "200"),
         ]),
         entity(&[
-            ("classname", "env_explosion"),
-            ("targetname", "exp1"),
-            ("origin", "10 0 0"),
-            ("iMagnitude", "50"),
-        ]),
-        entity(&[
-            ("classname", "env_render"),
-            ("targetname", "ren1"),
-            ("target", "glow_tgt"),
-            ("rendermode", "5"),
-            ("renderamt", "128"),
-            ("rendercolor", "10 20 30"),
-        ]),
-        entity(&[
             ("classname", "env_message"),
             ("targetname", "msg1"),
             ("message", "#Hint_spot_clear"),
             ("spawnflags", "2"), // ALL
         ]),
-        entity(&[
-            ("classname", "env_shooter"),
-            ("targetname", "sht1"),
-            ("m_iGibs", "4"),
-        ]),
-        entity(&[("classname", "gibshooter"), ("targetname", "sht2")]),
-        entity(&[("classname", "env_debris"), ("targetname", "sht3")]),
-        entity(&[("classname", "env_blood"), ("targetname", "bld1")]),
-        entity(&[("classname", "env_bubbles"), ("targetname", "bub1")]),
-        entity(&[("classname", "env_funnel"), ("targetname", "fun1")]),
     ];
 
-    let mut b = setup_bench(extra, 1, false);
-
+    let mut b = setup_bench(extra, 1, true);
     b.run(|game, eng| {
         let p0 = eng.client_edict(0);
-        eng.set_origin(p0, Vec3::new(10.0, 0.0, 0.0));
-        for target in [
-            "spr", "cyc_m", "beam1", "beam2", "lt1", "lsr1", "spk1", "shk1", "fad1", "exp1",
-            "ren1", "msg1", "sht1", "sht2", "sht3", "bld1", "bub1", "fun1",
-        ] {
+        for target in ["shk1", "fad1", "msg1"] {
             fire_targets(game.state_mut(), eng, target, Some(p0), Some(p0), UseType::Toggle, 0.0);
         }
-        // Dedicated spark_shower test: spawn and let it emit TE_SPARKS and auto-remove.
-        create_spark_shower(game.state_mut(), eng, Vec3::new(20.0, 20.0, 20.0), Vec3::Z);
     });
-
-    b.step(100);
+    b.step(10);
 
     let mut saw_shake = false;
     let mut saw_fade = false;
     let mut saw_hudtext = false;
-    let mut saw_sparks = false;
-    let mut saw_explosion = false;
-    let mut saw_beam = false;
-    let mut saw_breakmodel = false;
-    let mut saw_blood = false;
-
     for m in b.probe.messages() {
-        match m {
-            SvcMessage::UserMsg { name, decoded, .. } => match name.as_str() {
+        if let SvcMessage::UserMsg { name, decoded, .. } = m {
+            match name.as_str() {
                 "ScreenShake" => saw_shake = true,
                 "ScreenFade" => saw_fade = true,
                 "HudText" => {
@@ -280,46 +310,109 @@ fn env_visual_beam_shake_fade_explosion_render_message_and_spark_shower() {
                     }
                 }
                 _ => {}
-            },
-            SvcMessage::TempEntity { te_type, .. } => match *te_type {
-                te::SPARKS => saw_sparks = true,
-                te::EXPLOSION => saw_explosion = true,
-                te::BEAMPOINTS => saw_beam = true,
-                te::BREAKMODEL => saw_breakmodel = true,
-                te::BLOODSPRITE | te::BLOODSTREAM => saw_blood = true,
-                _ => {}
-            },
-            _ => {}
+            }
         }
     }
-
     assert!(saw_shake, "env_shake should send ScreenShake");
     assert!(saw_fade, "env_fade should send ScreenFade");
     assert!(saw_hudtext, "env_message should send HudText");
+}
+
+#[test]
+fn env_explosion_and_spark_shower() {
+    let extra = vec![
+        entity(&[("classname", "env_spark"), ("targetname", "spk1")]),
+        entity(&[
+            ("classname", "env_explosion"),
+            ("targetname", "exp1"),
+            ("origin", "10 0 0"),
+            ("iMagnitude", "50"),
+        ]),
+    ];
+
+    let mut b = setup_bench(extra, 1, true);
+    b.run(|game, eng| {
+        let p0 = eng.client_edict(0);
+        eng.set_origin(p0, Vec3::new(10.0, 0.0, 0.0));
+        fire_targets(game.state_mut(), eng, "spk1", Some(p0), Some(p0), UseType::Toggle, 0.0);
+        fire_targets(game.state_mut(), eng, "exp1", Some(p0), Some(p0), UseType::Toggle, 0.0);
+        create_spark_shower(game.state_mut(), eng, Vec3::new(20.0, 20.0, 20.0), Vec3::Z);
+    });
+    b.step(100);
+
+    let mut saw_sparks = false;
+    let mut saw_explosion = false;
+    for m in b.probe.messages() {
+        if let SvcMessage::TempEntity { te_type, .. } = m {
+            match *te_type {
+                te::SPARKS => saw_sparks = true,
+                te::EXPLOSION => saw_explosion = true,
+                _ => {}
+            }
+        }
+    }
     assert!(saw_sparks, "env_spark/spark_shower should emit TE_SPARKS");
     assert!(saw_explosion, "env_explosion should emit TE_EXPLOSION");
-    assert!(saw_beam, "beam/env_beam should emit TE_BEAMPOINTS");
-    assert!(saw_breakmodel, "env_shooter/gibshooter/env_debris should emit TE_BREAKMODEL");
-    assert!(saw_blood, "env_blood should emit TE_BLOODSPRITE");
 
     b.run(|game, eng| {
-        let glow = eng.find_by_classname(None, "env_glow").unwrap();
-        let gv = eng.ent(glow).unwrap();
-        assert_eq!((gv.rendermode, gv.renderamt, gv.rendercolor), (5, 128, [10, 20, 30]));
         assert!(game.state().players[0].as_ref().unwrap().health < 100.0, "env_explosion dealt blast dmg");
         assert!(eng.find_by_classname(None, "spark_shower").is_none(), "spark_shower expired cleanly");
     });
 }
 
 #[test]
-fn ammo_boxes_world_items_and_player_equip() {
+fn env_render_shooter_blood_bubbles_and_funnel() {
     let extra = vec![
+        entity(&[("classname", "env_glow"), ("targetname", "glow_tgt")]),
         entity(&[
-            ("classname", "game_player_equip"),
-            ("targetname", "equip_awp"),
-            ("weapon_awp", "1"),
-            ("spawnflags", "1"), // USEONLY
+            ("classname", "env_render"),
+            ("targetname", "ren1"),
+            ("target", "glow_tgt"),
+            ("rendermode", "5"),
+            ("renderamt", "128"),
+            ("rendercolor", "10 20 30"),
         ]),
+        entity(&[("classname", "env_shooter"), ("targetname", "sht1"), ("m_iGibs", "4")]),
+        entity(&[("classname", "gibshooter"), ("targetname", "sht2")]),
+        entity(&[("classname", "env_debris"), ("targetname", "sht3")]),
+        entity(&[("classname", "env_blood"), ("targetname", "bld1")]),
+        entity(&[("classname", "env_bubbles"), ("targetname", "bub1")]),
+        entity(&[("classname", "env_funnel"), ("targetname", "fun1")]),
+    ];
+
+    let mut b = setup_bench(extra, 1, true);
+    b.run(|game, eng| {
+        let p0 = eng.client_edict(0);
+        for target in ["ren1", "sht1", "sht2", "sht3", "bld1", "bub1", "fun1"] {
+            fire_targets(game.state_mut(), eng, target, Some(p0), Some(p0), UseType::Toggle, 0.0);
+        }
+    });
+    b.step(20);
+
+    let mut saw_breakmodel = false;
+    let mut saw_blood = false;
+    for m in b.probe.messages() {
+        if let SvcMessage::TempEntity { te_type, .. } = m {
+            match *te_type {
+                te::BREAKMODEL => saw_breakmodel = true,
+                te::BLOODSPRITE | te::BLOODSTREAM => saw_blood = true,
+                _ => {}
+            }
+        }
+    }
+    assert!(saw_breakmodel, "env_shooter/gibshooter/env_debris should emit TE_BREAKMODEL");
+    assert!(saw_blood, "env_blood should emit TE_BLOODSPRITE");
+
+    b.run(|_, eng| {
+        let glow = eng.find_by_classname(None, "env_glow").unwrap();
+        let gv = eng.ent(glow).unwrap();
+        assert_eq!((gv.rendermode, gv.renderamt, gv.rendercolor), (5, 128, [10, 20, 30]));
+    });
+}
+
+#[test]
+fn ammo_boxes_grant_rounds_and_respawn_on_round_restart() {
+    let extra = vec![
         entity(&[("classname", "ammo_338magnum")]),
         entity(&[("classname", "ammo_357sig")]),
         entity(&[("classname", "ammo_45acp")]),
@@ -330,16 +423,11 @@ fn ammo_boxes_world_items_and_player_equip() {
         entity(&[("classname", "ammo_762nato")]),
         entity(&[("classname", "ammo_9mm")]),
         entity(&[("classname", "ammo_buckshot")]),
-        entity(&[("classname", "item_kevlar")]),
-        entity(&[("classname", "item_assaultsuit")]),
-        entity(&[("classname", "item_generic")]),
     ];
 
-    let mut b = setup_bench(extra, 1, false);
-
+    let mut b = setup_bench(extra, 1, true);
     b.run(|game, eng| {
         let p0 = eng.client_edict(0);
-        // Grant weapons for each ammo class or touch all 10 ammo_* entities directly.
         assert!(game.give_weapon(eng, 0, new_weapon(WeaponId::Ak47).unwrap(), 30, 0));
         assert!(game.give_weapon(eng, 0, new_weapon(WeaponId::Awp).unwrap(), 10, 0));
 
@@ -367,7 +455,37 @@ fn ammo_boxes_world_items_and_player_equip() {
             assert_ne!(eng.ent(box_id).unwrap().effects & EF_NODRAW, 0);
         }
 
-        // Armor items: kevlar then assaultsuit upgrade to VestHelm.
+        game.restart_round_now(eng);
+        assert_eq!(
+            eng.ent(eng.find_by_classname(None, "ammo_9mm").unwrap())
+                .unwrap()
+                .effects
+                & EF_NODRAW,
+            0
+        );
+    });
+    b.step(4);
+
+    let ammo_pickups = b
+        .probe
+        .messages()
+        .iter()
+        .filter(|m| matches!(m, SvcMessage::UserMsg { name, .. } if name == "AmmoPickup"))
+        .count();
+    assert!(ammo_pickups >= 10, "expected >= 10 AmmoPickup usermsgs, got {ammo_pickups}");
+}
+
+#[test]
+fn item_kevlar_assaultsuit_and_generic() {
+    let extra = vec![
+        entity(&[("classname", "item_kevlar")]),
+        entity(&[("classname", "item_assaultsuit")]),
+        entity(&[("classname", "item_generic")]),
+    ];
+
+    let mut b = setup_bench(extra, 1, true);
+    b.run(|game, eng| {
+        let p0 = eng.client_edict(0);
         let kevlar_id = eng.find_by_classname(None, "item_kevlar").unwrap();
         game.touch(eng, kevlar_id, p0);
         {
@@ -382,33 +500,32 @@ fn ammo_boxes_world_items_and_player_equip() {
             assert_eq!(p.armor, 100.0);
             assert_eq!(p.kevlar, ArmorType::VestHelm);
         }
-
         assert!(eng.find_by_classname(None, "item_generic").is_some());
 
-        // game_player_equip works on Use.
-        fire_targets(game.state_mut(), eng, "equip_awp", Some(p0), Some(p0), UseType::Toggle, 0.0);
-
-        // Round restart restores ammo & armor pickups.
         game.restart_round_now(eng);
         assert_eq!(eng.ent(kevlar_id).unwrap().effects & EF_NODRAW, 0);
-        assert_eq!(
-            eng.ent(eng.find_by_classname(None, "ammo_9mm").unwrap())
-                .unwrap()
-                .effects
-                & EF_NODRAW,
-            0
+    });
+}
+
+#[test]
+fn game_player_equip_gives_weapons_on_use() {
+    let extra = vec![entity(&[
+        ("classname", "game_player_equip"),
+        ("targetname", "equip_awp"),
+        ("weapon_awp", "1"),
+        ("spawnflags", "1"), // USEONLY
+    ])];
+
+    let mut b = setup_bench(extra, 1, true);
+    b.run(|game, eng| {
+        let p0 = eng.client_edict(0);
+        assert!(!game.carried_weapons(0).contains(&WeaponId::Awp));
+        fire_targets(game.state_mut(), eng, "equip_awp", Some(p0), Some(p0), UseType::Toggle, 0.0);
+        assert!(
+            game.carried_weapons(0).contains(&WeaponId::Awp),
+            "game_player_equip must grant weapon_awp on Use"
         );
     });
-
-    b.step(4);
-
-    let ammo_pickups = b
-        .probe
-        .messages()
-        .iter()
-        .filter(|m| matches!(m, SvcMessage::UserMsg { name, .. } if name == "AmmoPickup"))
-        .count();
-    assert!(ammo_pickups >= 10, "expected >= 10 AmmoPickup usermsgs, got {ammo_pickups}");
 }
 
 #[test]

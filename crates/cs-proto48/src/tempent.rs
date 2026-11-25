@@ -2282,10 +2282,12 @@ mod tests {
         ]
     }
 
-    #[test]
-    fn all_59_temp_entities_roundtrip_and_match_skip() {
+    fn assert_category_roundtrip(filter: fn(u8) -> bool) -> std::collections::BTreeSet<u8> {
         let mut seen = std::collections::BTreeSet::new();
         for (te, expected) in cases() {
+            if !filter(te.te_type) {
+                continue;
+            }
             seen.insert(te.te_type);
             let mut w = MsgWriter::new();
             write_svc_temp_entity(&mut w, te.te_type, &te.payload);
@@ -2299,7 +2301,134 @@ mod tests {
             assert_eq!(TempEffect::parse(*te_type, raw).unwrap(), expected);
             assert_eq!(msgs[1], SvcMessage::Choke);
         }
-        assert_eq!(seen.len(), 59, "expected all 59 active TE_* IDs, got {seen:?}");
+        seen
+    }
+
+    fn is_beam_or_line_te(id: u8) -> bool {
+        matches!(
+            id,
+            te::BEAMPOINTS
+                | te::BEAMENTPOINT
+                | te::LIGHTNING
+                | te::BEAMENTS
+                | te::BEAMSPRITE
+                | te::BEAMTORUS
+                | te::BEAMDISK
+                | te::BEAMCYLINDER
+                | te::BEAMFOLLOW
+                | te::BEAMRING
+                | te::LINE
+                | te::BOX
+                | te::KILLBEAM
+                | te::SHOWLINE
+        )
+    }
+
+    fn is_explosion_or_light_te(id: u8) -> bool {
+        matches!(
+            id,
+            te::EXPLOSION
+                | te::TAREXPLOSION
+                | te::SMOKE
+                | te::SPARKS
+                | te::LAVASPLASH
+                | te::TELEPORT
+                | te::EXPLOSION2
+                | te::IMPLOSION
+                | te::DLIGHT
+                | te::ELIGHT
+                | te::LARGEFUNNEL
+                | te::FIZZ
+                | te::EXPLODEMODEL
+                | te::FIREFIELD
+        )
+    }
+
+    fn is_gunshot_blood_or_tracer_te(id: u8) -> bool {
+        matches!(
+            id,
+            te::GUNSHOT
+                | te::TRACER
+                | te::STREAK_SPLASH
+                | te::BLOODSTREAM
+                | te::BLOOD
+                | te::MODEL
+                | te::BREAKMODEL
+                | te::GUNSHOTDECAL
+                | te::ARMOR_RICOCHET
+                | te::BLOODSPRITE
+                | te::PROJECTILE
+                | te::SPRAY
+                | te::PARTICLEBURST
+                | te::MULTIGUNSHOT
+                | te::USERTRACER
+        )
+    }
+
+    fn is_decal_sprite_hud_or_attachment_te(id: u8) -> bool {
+        matches!(
+            id,
+            te::BSPDECAL
+                | te::SPRITETRAIL
+                | te::SPRITE
+                | te::GLOWSPRITE
+                | te::TEXTMESSAGE
+                | te::DECAL
+                | te::SPRITE_SPRAY
+                | te::PLAYERDECAL
+                | te::BUBBLES
+                | te::BUBBLETRAIL
+                | te::WORLDDECAL
+                | te::WORLDDECALHIGH
+                | te::DECALHIGH
+                | te::PLAYERSPRITES
+                | te::PLAYERATTACHMENT
+                | te::KILLPLAYERATTACHMENTS
+        )
+    }
+
+    #[test]
+    fn te_beams_and_lines_roundtrip_and_match_skip() {
+        let seen = assert_category_roundtrip(is_beam_or_line_te);
+        assert_eq!(seen.len(), 14);
+    }
+
+    #[test]
+    fn te_explosions_sparks_and_lights_roundtrip_and_match_skip() {
+        let seen = assert_category_roundtrip(is_explosion_or_light_te);
+        assert_eq!(seen.len(), 14);
+    }
+
+    #[test]
+    fn te_gunshots_blood_and_tracers_roundtrip_and_match_skip() {
+        let seen = assert_category_roundtrip(is_gunshot_blood_or_tracer_te);
+        assert_eq!(seen.len(), 15);
+    }
+
+    #[test]
+    fn te_decals_sprites_hud_and_players_roundtrip_and_match_skip() {
+        let seen = assert_category_roundtrip(is_decal_sprite_hud_or_attachment_te);
+        assert_eq!(seen.len(), 16);
+    }
+
+    #[test]
+    fn temp_entities_cover_all_59_active_ids() {
+        let mut union = std::collections::BTreeSet::new();
+        for f in [
+            is_beam_or_line_te as fn(u8) -> bool,
+            is_explosion_or_light_te,
+            is_gunshot_blood_or_tracer_te,
+            is_decal_sprite_hud_or_attachment_te,
+        ] {
+            let cat: std::collections::BTreeSet<u8> = cases()
+                .into_iter()
+                .filter_map(|(te, _)| f(te.te_type).then_some(te.te_type))
+                .collect();
+            for id in cat {
+                assert!(union.insert(id), "duplicate category for TE {id}");
+            }
+        }
+        assert_eq!(union.len(), 59, "expected all 59 active TE_* IDs, got {union:?}");
     }
 
     #[test]

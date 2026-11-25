@@ -17,8 +17,9 @@ use crate::bullets::{self, MultiDamage};
 use crate::player::{DEAD_DEAD, DEAD_NO, player_slot};
 use crate::world::{BrushKind, FuncLadder, InfoPlayer, InfoTarget, StaticBrush, TriggerCamera, World};
 
-/// `USE_TYPE` (the Half-Life SDK's `cbase.h`; assumption: the header is not among the fetched
-/// sources): how an entity is used. `USE_OFF` is the default argument of `CBaseEntity::Use`.
+/// `USE_TYPE` (`FWGS/hlsdk-portable dlls/cbase.h:82-88`, read 2026-11-25): how an entity is
+/// used. `USE_OFF` (`0`) is the default argument of `CBaseEntity::Use`
+/// (`ReGameDLL_CS regamedll/dlls/cbase.h:113`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum UseType {
     #[default]

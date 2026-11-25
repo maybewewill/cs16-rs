@@ -113,7 +113,7 @@ evidence = "crates/cs-engine/src/signon.rs::tests::spawn_stage_messages_in_order
 [[item]]
 id = "svc_temp_entity"
 status = "tested"
-evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; crates/cs-proto48/src/tempent.rs::tests::all_59_temp_entities_roundtrip_and_match_skip (all 59 TE types decoded and round-tripped; see docs/parity/tempents.toml)"
+evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layout, temp_entities_reach_their_destinations; crates/cs-proto48/src/tempent.rs::tests::temp_entities_cover_all_59_active_ids (all 59 TE types decoded and round-tripped; see docs/parity/tempents.toml)"
 
 [[item]]
 id = "svc_setpause"

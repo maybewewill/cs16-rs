@@ -25,8 +25,7 @@ use crate::precache::PrecacheTables;
 
 /// `clgame.maxEntities` for GoldSrc: the entity number is 11 bits on the wire.
 pub const MAX_ENTITIES: u16 = 2048;
-/// `HISTORY_MAX` of `cl_entity.h`: the number of positions an entity remembers. Assumption:
-/// the header was not fetched; 64 is the Half-Life SDK value.
+/// `HISTORY_MAX` (`common/cl_entity.h:62`, Xash3D FWGS): the number of positions an entity remembers.
 pub const HISTORY_MAX: usize = 64;
 pub const HISTORY_MASK: u32 = HISTORY_MAX as u32 - 1;
 /// `GAME_FPS` (`common.h`): the update rate `CL_EntityTeleported` measures a jump against.
@@ -44,8 +43,8 @@ pub mod ef {
     pub const NODRAW: u32 = 128;
 }
 
-/// `MOVETYPE_*` (`const.h`; `MOVETYPE_COMPOUND` is Xash3D's addition). Assumption: the values
-/// are the Half-Life SDK's and Xash3D's; the headers were not fetched.
+/// `MOVETYPE_*` (`ReHLDS common/const.h:95-108`; `MOVETYPE_COMPOUND` in Xash3D FWGS
+/// `common/const.h:83`).
 pub mod movetype {
     pub const NONE: u8 = 0;
     pub const WALK: u8 = 3;
@@ -136,8 +135,7 @@ pub struct ClientEntity {
     pub latched: Latched,
     pub ph: [PositionHistory; HISTORY_MAX],
     pub current_position: u32,
-    /// `cl_entity_t::lastmove` (assumption: a float, as in the Xash3D header that was not
-    /// fetched).
+    /// `cl_entity_t::lastmove` (`common/cl_entity.h:86`, Xash3D FWGS).
     pub lastmove: f32,
     /// The position the entity is drawn at after interpolation.
     pub origin: Vec3,
