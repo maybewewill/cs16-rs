@@ -406,3 +406,15 @@ evidence = "crates/cs-platform/src/xdg.rs::tests::resolves_xdg_and_platform_conf
 id = "beyond_perf_bench_harness"
 status = "tested"
 evidence = "xtask/src/bench.rs::tests::parses_bench_flags_and_rejects_invalid, bench_smoke_measures_32_player_ticks_and_delta_packets"
+
+# Phase 15: Unified polyglot mod platform & Plugin Studio server operations
+
+[[item]]
+id = "beyond_polyglot_mod_host_and_import_amxx"
+status = "tested"
+evidence = "crates/cs-server/src/proto48.rs::tests::parses_import_amxx_flags, phase15_five_language_polyglot_resmon_and_studio_e2e; crates/cs-mod-host/tests/amxx_import.rs::realistic_legacy_amxx_fixture_migrates_and_boots_cleanly"
+
+[[item]]
+id = "beyond_resmon_and_web_plugin_studio"
+status = "tested"
+evidence = "crates/cs-server/src/admin_http.rs::tests::mod_studio_sandbox_blocks_traversal_and_symlinks_and_validates_python, routes_mods_resmon_toggle_faults_and_studio_source_endpoints; crates/cs-server/src/proto48.rs::tests::phase15_five_language_polyglot_resmon_and_studio_e2e"

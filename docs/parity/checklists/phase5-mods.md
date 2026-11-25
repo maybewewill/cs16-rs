@@ -10,8 +10,10 @@ Run sequentially on Windows / CI:
 4. `cargo check --target wasm32-unknown-unknown -p cs-relay --lib`
 5. `cargo check --target wasm32-unknown-unknown -p cs-client --lib`
 6. `cargo check --target wasm32-unknown-unknown -p cs-web`
-7. `cargo xtask mod-build` (packs the 6 reference mods into `dist/mods/*.csmod` with SHA-256 digests)
+7. `cargo xtask mod build` (packs all showcase polyglot mods in `mods/` into `dist/mods/*.csmod` with SHA-256 digests and verifies zero `.wat` files remain)
 8. `cargo xtask parity` (validates every `tested` citation in `docs/parity/mods.toml` and prints ledger totals)
+
+> **Phase 15 Update:** All raw `.wat` prototype mods from Phase 5 were replaced by the full localized polyglot AMXX+ suite (`mods/std/`, `mods/community/`, `mods/gamemodes/`) running across Rust, C++20, Go/WASI, Python 3, and AMXX. See [`phase15-mod-platform.md`](phase15-mod-platform.md) and [`docs/MODDING.md`](../../MODDING.md) for the complete Phase 15 verification checklist.
 
 ## Part B — Manual Multi-Client Checks (Original CS 1.6 + `cs-client` + `cs-web`)
 

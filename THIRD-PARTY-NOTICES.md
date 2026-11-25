@@ -290,3 +290,11 @@ Clean-room Rust hook-chain semantics (`HookChain` `Pre`/`Post` with `Continue`/`
 | File (ReAPI) | Where | What was taken (phase 15, read 2026-11-26) |
 |---|---|---|
 | `reapi_gamedll.inc`, `reapi_gamedll_const.inc` | `crates/cs-mod-api/src/abi.rs`, `crates/cs-game/src/{mod_hooks.rs,amxx_hooks.rs}`, `crates/cs-amxx/src/natives.rs` | Hook lifecycle names/phases (`PlayerSpawn`, `PlayerTakeDamage`, `PlayerKilled`, `PlayerPreThink`, `PlayerPostThink`, `PlayerJump`, `PlayersShouldCollide`, `CanBuyItem`, `CanHavePlayerItem`, `WeaponDeploy`, `WeaponPrimaryAttack`, `WeaponReload`, `FreezeTimeEnd`, `RoundStart`, `RoundEnd`, bomb & hostage events), `rg_give_item` (`GT_*`), `rg_remove_all_items`, `rg_set_user_armor`, `rg_add_account` (`AS_*`), `rg_round_respawn`, and `get_member`/`set_member` player/weapon member semantics. |
+
+## Clean-Room Phase 15 Platform Components (Zero Upstream Code Copied)
+
+The following Phase 15 components were implemented cleanly from scratch in this repository under GPL-3.0-or-later (`#![forbid(unsafe_code)]`) without copying upstream third-party source code:
+
+- **Minimal WASI Preview 1 Shims (`crates/cs-mod-host/src/runtime.rs`):** Implements only the public `wasi_snapshot_preview1` ABI function signatures and numeric errno codes (`ESUCCESS = 0`, `EBADF = 8`, `EINVAL = 28`, `ENOSYS = 52`) needed to run Go (`GOOS=wasip1 GOARCH=wasm`) and C++ WASM plugins (`fd_write`, `fd_close`, `fd_fdstat_get`, `fd_fdstat_set_flags`, `clock_time_get`, `random_get`, `environ_sizes_get`, `environ_get`, `args_sizes_get`, `args_get`, `proc_exit`, `sched_yield`).
+- **Pure-Rust Python 3 Scripting Runtime (`crates/cs-mod-py/` & `sdk/python/cs16.pyi`):** Clean-room lexer, parser, bytecode/AST evaluator, fuel meter, and `cs16` binding layer written entirely in safe Rust (no CPython or third-party interpreter code copied).
+- **Polyglot SDKs, Showcase Suite, AMXX Migrator, Black-Box Crash Replay & Plugin Studio (`crates/cs-mod-sdk/`, `crates/cs-mod-macros/`, `sdk/cpp/cs16_mod.hpp`, `sdk/go/cs16mod/`, `mods/`, `configs/`, `crates/cs-mod-host/src/{amxx_import.rs,crash_dump.rs}`, `crates/cs-server/src/admin_http.rs`, `web/admin.{html,js}`):** Original clean-room implementations referencing only the public AMX Mod X / ReAPI / GoldSrc behavioral specifications listed above.
