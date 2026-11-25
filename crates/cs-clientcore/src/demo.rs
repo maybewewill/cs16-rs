@@ -747,10 +747,8 @@ impl DemoPlayer {
                     self.pending_view_angles.push(ang);
                 }
             }
-            SvcMessage::Print(text) => {
-                if record_lines {
-                    self.push_console_line(text);
-                }
+            SvcMessage::Print(text) if record_lines => {
+                self.push_console_line(text);
             }
             _ => {}
         }
@@ -883,7 +881,7 @@ mod tests {
 
         player.advance(3.2);
         let t_mid = player.current_time();
-        assert!(t_mid >= 3.1 && t_mid <= 3.5);
+        assert!((3.1..=3.5).contains(&t_mid));
         assert!((player.view_angles().unwrap().y - 90.0).abs() < 0.01);
 
         // Seek backward to 1.2s -> must rewind viewangles back to ~30 deg (16-bit wire angle).

@@ -439,7 +439,7 @@ impl ResourceManager {
         &mut self,
         allow_download: bool,
         allow_dlfile_fallback: bool,
-        mut http: Option<&mut (dyn HttpFetcher + '_)>,
+        http: Option<&mut (dyn HttpFetcher + '_)>,
     ) -> BatchOutcome {
         if let Some(fatal) = self.fatal_failure.take() {
             return BatchOutcome {
@@ -448,7 +448,7 @@ impl ResourceManager {
                 ..BatchOutcome::default()
             };
         }
-        if let Some(fetcher) = http.as_deref_mut()
+        if let Some(fetcher) = http
             && allow_download
             && !self.download_locations.is_empty()
         {

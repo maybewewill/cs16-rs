@@ -116,7 +116,7 @@ pub struct HpakArchive {
 
 impl HpakArchive {
     pub fn parse(data: &[u8]) -> Result<Self, HpakError> {
-        if data.len() < HPAK_HEADER_BYTES || &data[0..4] != &HPAK_MAGIC {
+        if data.len() < HPAK_HEADER_BYTES || data[0..4] != HPAK_MAGIC {
             return Err(HpakError::InvalidHeader);
         }
         let version = i32::from_le_bytes(data[4..8].try_into().unwrap());

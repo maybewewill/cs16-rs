@@ -810,7 +810,7 @@ mod tests {
         enc.write_all(&raw32).unwrap();
         let comp32 = enc.finish().unwrap();
 
-        let header_size = 7 + 2 * 17;
+        let header_size: i32 = 7 + 2 * 17;
         let mut container = Vec::new();
         container.extend_from_slice(&MAGIC_HEADER2.to_le_bytes());
         container.extend_from_slice(&MAGIC_VERSION.to_le_bytes());
@@ -820,13 +820,13 @@ mod tests {
         container.extend_from_slice(&4i32.to_le_bytes());
         container.extend_from_slice(&4i32.to_le_bytes());
         container.extend_from_slice(&4i32.to_le_bytes());
-        container.extend_from_slice(&(header_size as i32).to_le_bytes());
+        container.extend_from_slice(&header_size.to_le_bytes());
         // Entry 1: 32-bit (`cellsize = 4`)
         container.push(4);
         container.extend_from_slice(&(comp32.len() as i32).to_le_bytes());
         container.extend_from_slice(&(raw32.len() as i32).to_le_bytes());
         container.extend_from_slice(&(raw32.len() as i32).to_le_bytes());
-        container.extend_from_slice(&((header_size + 4) as i32).to_le_bytes());
+        container.extend_from_slice(&(header_size + 4).to_le_bytes());
         container.extend_from_slice(&[0u8; 4]);
         container.extend_from_slice(&comp32);
 

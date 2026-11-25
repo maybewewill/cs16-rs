@@ -1045,8 +1045,10 @@ impl<T: PacketTransport> Connection<T> {
     }
 
     fn build_demo_info(&self, now: f64) -> (DemoNetMsgInfo, [i32; 7]) {
-        let mut info = DemoNetMsgInfo::default();
-        info.timestamp = now as f32;
+        let mut info = DemoNetMsgInfo {
+            timestamp: now as f32,
+            ..Default::default()
+        };
         if let Some(cd) = &self.client_data {
             info.ref_params.vieworg = cd.origin + cd.view_ofs;
             info.ref_params.simorg = cd.origin;

@@ -72,7 +72,7 @@ pub fn parse_rcon_datagram(raw: &[u8]) -> Option<RconDatagram> {
         || text
             .split_whitespace()
             .take(2)
-            .eq(["challenge", "rcon"].into_iter())
+            .eq(["challenge", "rcon"])
             && text.split_whitespace().count() == 2
     {
         return Some(RconDatagram::ChallengeRequest);
@@ -81,10 +81,8 @@ pub fn parse_rcon_datagram(raw: &[u8]) -> Option<RconDatagram> {
         .strip_prefix("rcon")
         .filter(|s| s.starts_with(char::is_whitespace))?
         .trim_start();
-    let (ch_str, rest) = match after_rcon.find(char::is_whitespace) {
-        Some(idx) => (&after_rcon[..idx], after_rcon[idx..].trim_start()),
-        None => return None,
-    };
+    let idx = after_rcon.find(char::is_whitespace)?;
+    let (ch_str, rest) = (&after_rcon[..idx], after_rcon[idx..].trim_start());
     let challenge = ch_str.parse::<u32>().ok()?;
     let (password, command) = if let Some(after_q) = rest.strip_prefix('"') {
         let close = after_q.find('"')?;

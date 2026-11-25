@@ -302,85 +302,85 @@ evidence = "crates/cs-clientcore/tests/loopback.rs::connects_to_our_server_over_
 
 [[item]]
 id = "demo_record"
-status = "missing"
-evidence = "Phase 11: recording GoldSrc .dem demo files compatible with original CS 1.6"
+status = "tested"
+evidence = "crates/cs-proto48/src/demo.rs::tests::wire_struct_sizes_match_goldsrc_c_layout, roundtrips_all_nine_frame_types_across_sections; crates/cs-clientcore/src/demo.rs::tests::recorder_and_player_support_playback_timedemo_and_rewind_seek; crates/cs-client/src/session.rs::tests::loopback_demo_record_playback_seek_and_timedemo; crates/cs-cvar/src/lib.rs::tests::phase11_cvar_flags_protection_and_actions (record/stop/stopdemo)"
 
 [[item]]
 id = "demo_playback"
-status = "missing"
-evidence = "Phase 11: playing back original and recorded .dem demo files"
+status = "tested"
+evidence = "crates/cs-proto48/src/demo.rs::tests::roundtrips_all_nine_frame_types_across_sections, rejects_corrupt_or_out_of_bounds_demos; crates/cs-clientcore/src/demo.rs::tests::recorder_and_player_support_playback_timedemo_and_rewind_seek; crates/cs-client/src/session.rs::tests::loopback_demo_record_playback_seek_and_timedemo"
 
 [[item]]
 id = "demo_timedemo_seek"
-status = "missing"
-evidence = "Phase 11: timedemo benchmark and demo scrubbing/rewind"
+status = "tested"
+evidence = "crates/cs-clientcore/src/demo.rs::tests::recorder_and_player_support_playback_timedemo_and_rewind_seek; crates/cs-client/src/session.rs::tests::loopback_demo_record_playback_seek_and_timedemo; crates/cs-cvar/src/lib.rs::tests::phase11_cvar_flags_protection_and_actions (timedemo)"
 
 [[item]]
 id = "resource_download_netchan"
-status = "missing"
-evidence = "Phase 11: downloading missing maps/models/sounds/sprites over netchan"
+status = "tested"
+evidence = "crates/cs-proto48/src/netchan.rs::tests::file_stream_fragments_deduplicate_and_report_progress; crates/cs-engine/src/downloads.rs::tests::safe_server_download_blocks_traversal_and_executables, server_dlfile_serves_safe_files_and_rejects_missing_or_unsafe; crates/cs-clientcore/src/resources.rs::tests::missing_files_are_requested_once_and_settle_when_they_arrive, file_stream_header_is_name_compressor_size, file_streams_with_bad_names_sizes_or_compressors_are_refused; crates/cs-clientcore/tests/connection.rs::missing_files_are_requested_then_the_client_spawns_when_they_arrive, a_custom_map_wad_is_downloaded_by_its_exact_name"
 
 [[item]]
 id = "resource_download_http"
-status = "missing"
-evidence = "Phase 11: fast HTTP resource download via sv_downloadurl"
+status = "tested"
+evidence = "crates/cs-clientcore/src/resources.rs::tests::download_locations_split_on_whitespace_and_are_capped, http_fastdl_tries_bz2_then_raw_then_falls_back_to_dlfile; crates/cs-client/src/http_dl.rs::tests::fastdl_fetches_raw_and_chunked_and_rejects_oversized_content_length"
 
 [[item]]
 id = "consistency_enforcement"
-status = "missing"
-evidence = "Phase 11: server/client file consistency checks (mp_consistency, clc_fileconsistency)"
+status = "verified"
+evidence = "crates/cs-engine/src/downloads.rs::tests::consistency_rule_accepts_exact_and_bounds_and_rejects_mismatch, server_mp_consistency_accepts_match_and_kicks_mismatch; crates/cs-clientcore/src/resources.rs::tests::consistency_answer_lists_each_item_and_keeps_the_md5_across_missing_files, a_models_check_type_comes_from_its_munged_reserved_bytes; crates/cs-clientcore/tests/connection.rs::answers_consistency_as_the_original; VERIFIED 2026-11-25 against retail hlds.exe build 10210 +mp_consistency 1 via crates/cs-clientcore/tests/hlds.rs::live_hlds_mp_consistency_1 (ok in 1.03s)"
 
 [[item]]
 id = "custom_sprays_customization"
-status = "missing"
-evidence = "Phase 11: custom spray upload and svc_customization broadcast"
+status = "tested"
+evidence = "crates/cs-assets/src/hpak.rs::tests::spray_wad_validation_accepts_valid_and_rejects_bad, hpak_roundtrips_and_rejects_corrupt_headers; crates/cs-engine/src/downloads.rs::tests::server_caches_uploaded_custom_spray_and_broadcasts_customization; crates/cs-proto48/src/messages.rs::tests::customization_roundtrip_with_and_without_md5"
 
 [[item]]
 id = "rcon_server"
-status = "missing"
-evidence = "Phase 11: server RCON authentication, rate limiting, and remote command execution"
+status = "verified"
+evidence = "crates/cs-engine/src/rcon.rs::tests::rcon_challenge_auth_and_chunking_work, rcon_brute_force_triggers_ban_and_empty_password_rejects; crates/cs-engine/tests/phase11_admin.rs::rcon_executes_commands_and_logs_and_masks_a2s_rules; crates/cs-proto48/src/handshake.rs::tests::rcon_and_a2a_print_packets_roundtrip; VERIFIED 2026-11-25 live UDP RCON against cs-server.exe (127.0.0.1:27162) and retail hlds.exe build 10210 (127.0.0.1:27161)"
 
 [[item]]
 id = "rcon_client"
-status = "missing"
-evidence = "Phase 11: client RCON command issuing"
+status = "verified"
+evidence = "crates/cs-clientcore/src/rcon.rs::tests::rcon_client_roundtrips_challenge_command_and_replies; crates/cs-clientcore/tests/loopback.rs::svc_sendcvarvalue2_and_rcon_client_roundtrip_over_loopback; VERIFIED 2026-11-25 live UDP RCON (challenge rcon -> rcon <ch> \"testrcon\" status) against retail hlds.exe build 10210 (127.0.0.1:27161) and cs-server.exe (127.0.0.1:27162)"
 
 [[item]]
 id = "bans_id_and_ip"
-status = "missing"
-evidence = "Phase 11: addip, banid, removeid, removeip, listid, listip, writeid, writeip"
+status = "tested"
+evidence = "crates/cs-engine/src/bans.rs::tests::ip_and_cidr_and_expiry_work, id_bans_and_cfg_format_roundtrip; crates/cs-engine/tests/phase11_admin.rs::password_and_ip_ban_reject_connecting_client"
 
 [[item]]
 id = "hl_standard_logs"
-status = "missing"
-evidence = "Phase 11: HLDS standard log format and logaddress UDP streaming"
+status = "tested"
+evidence = "crates/cs-engine/src/logging.rs::tests::formats_hl_standard_log_line_and_udp_packet, add_remove_and_flush_logaddress; crates/cs-engine/tests/phase11_admin.rs::rcon_executes_commands_and_logs_and_masks_a2s_rules"
 
 [[item]]
 id = "server_users_command"
-status = "missing"
-evidence = "Phase 11: server console users command and standard status columns"
+status = "tested"
+evidence = "crates/cs-engine/tests/phase11_admin.rs::pause_freezes_sv_time_and_status_full_users_work; crates/cs-clientcore/tests/loopback.rs::svc_sendcvarvalue2_and_rcon_client_roundtrip_over_loopback"
 
 [[item]]
 id = "cvar_protection_and_cheats"
-status = "missing"
-evidence = "Phase 11: cvar FCVAR_PROTECTED / FCVAR_SPONLY / sv_cheats enforcement and svc_sendcvarvalue checks"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs::tests::phase11_cvar_flags_protection_and_actions; crates/cs-engine/tests/phase11_admin.rs::rcon_executes_commands_and_logs_and_masks_a2s_rules; crates/cs-clientcore/tests/connection.rs::server_prints_and_cvar_queries_are_answered; crates/cs-clientcore/tests/loopback.rs::svc_sendcvarvalue2_and_rcon_client_roundtrip_over_loopback"
 
 [[item]]
 id = "client_slowhack_filter"
-status = "missing"
-evidence = "Phase 11: client protection filtering dangerous svc_stufftext / svc_director commands (cl_filterstuffcmd) and decompression size caps"
+status = "tested"
+evidence = "crates/cs-clientcore/src/commands.rs::tests::stufftext_filter_denies_restricted_prefixed_and_at_commands; crates/cs-clientcore/src/cvars.rs::tests::stufftext_filter_follows_cvar_should_set_cvar; crates/cs-clientcore/tests/connection.rs::stufftext_runs_allowed_commands_only, slowhack_defense_blocks_exec_director_and_restricted_cmds; crates/cs-proto48/src/netchan.rs::tests::exceeding_the_incoming_limit_empties_the_stream"
 
 [[item]]
 id = "master_server_client_and_reg"
-status = "missing"
-evidence = "Phase 11: cs-master server registration, heartbeats, and server browser querying"
+status = "tested"
+evidence = "crates/cs-master/src/protocol.rs::tests::query_request_roundtrip, query_reply_roundtrip_end_and_paginated, heartbeat_challenge_roundtrip, heartbeat_packets_parse_variants; crates/cs-master/src/registry.rs::tests::heartbeat_challenge_registration_and_shutdown, ttl_expiry_and_bounded_capacity, filters_and_nor_nand_work_correctly, query_pagination_uses_cursor_deterministically; crates/cs-master/src/server.rs::tests::end_to_end_heartbeat_paginated_query_http_shutdown_and_ttl; crates/cs-engine/src/master.rs::tests::master_registration_lifecycle_and_heartbeat_format; crates/cs-engine/tests/phase11_master.rs::setmaster_console_commands_manage_list, server_emits_master_heartbeat_challenge_update_and_shutdown"
 
 [[item]]
 id = "amxx_compat_vm"
-status = "missing"
-evidence = "Phase 11 (stretch): cs-amxx Pawn VM and AMX Mod X natives (cstrike, fun, engine, fakemeta, hamsandwich)"
+status = "tested"
+evidence = "crates/cs-amxx/src/amxxfile.rs::tests::parse_compressed_amxx_container_and_lookup_symbols, skips_64bit_entry_and_selects_32bit_section, compact_flag_expands_positive_and_negative_cells, rejects_invalid_magic_and_zlib_bomb_sizes; crates/cs-amxx/src/vm.rs::tests::arithmetic_and_floored_sdiv_and_float_opcodes, movs_fill_cmps_and_memory_bounds, switch_and_casetbl_dispatch, bounds_divide_by_zero_memory_access_and_fuel_exhaustion, packed_and_unpacked_strings_roundtrip, call_ret_lidx_idxaddr_and_lctrl; crates/cs-amxx/tests/amxx_tests.rs::lifecycle_forwards_cvars_and_server_cmd_draining, set_task_oneshot_repeat_and_remove_task, clcmd_interception_and_client_lifecycle_forwards, cstrike_fun_engine_fakemeta_and_player_query_natives, hamsandwich_spawn_supercede_takedamage_and_killed, string_float_and_event_message_natives; crates/cs-game/tests/amxx_hooks.rs::amxx_plugin_mutates_real_cs_game_player_via_hooks"
 
 [[item]]
 id = "hltv_proxy"
-status = "missing"
-evidence = "Phase 11 (stretch): cs-hltv spectator proxy with configurable delay"
+status = "tested"
+evidence = "crates/cs-hltv/src/delay.rs::tests::withholds_frames_until_delay_expires_and_releases_in_order, late_join_signon_replays_headers_and_time_aligned_userinfo, bounded_capacity_evicts_oldest_and_preserves_state, negative_or_nan_delay_clamps_to_zero; crates/cs-hltv/src/proxy.rs::tests::upstream_hltv_handshake_a2s_info_director_delay_and_demo_recording, password_and_capacity_limits_reject_unauthorized_spectators; crates/cs-hltv/src/main.rs::tests::parses_cli_flags_and_defaults, rejects_invalid_cli_flags"

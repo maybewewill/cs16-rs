@@ -322,6 +322,8 @@ impl AutoDirector {
     }
 }
 
+type DeltaFrameEntities = BTreeMap<u16, (u8, DeltaRecord)>;
+
 /// Connected downstream spectator or child HLTV proxy slot.
 #[derive(Debug)]
 pub struct SpectatorSlot {
@@ -336,7 +338,7 @@ pub struct SpectatorSlot {
     pub last_received: f64,
     chan: NetChan,
     delta_seq: Option<u8>,
-    sent_frames: BTreeMap<u8, (u32, BTreeMap<u16, (u8, DeltaRecord)>)>,
+    sent_frames: BTreeMap<u8, (u32, DeltaFrameEntities)>,
     pending_new: bool,
     next_retransmit_at: f64,
 }
@@ -372,7 +374,7 @@ impl SpectatorSlot {
     fn record_sent_entities(
         &mut self,
         seq: u32,
-        entities: BTreeMap<u16, (u8, DeltaRecord)>,
+        entities: DeltaFrameEntities,
     ) {
         let key = (seq & 0xFF) as u8;
         self.sent_frames.insert(key, (seq, entities));
@@ -390,7 +392,7 @@ impl SpectatorSlot {
         }
     }
 
-    fn delta_base(&self, current_seq: u32) -> Option<(u8, &BTreeMap<u16, (u8, DeltaRecord)>)> {
+    fn delta_base(&self, current_seq: u32) -> Option<(u8, &DeltaFrameEntities)> {
         let seq_byte = self.delta_seq?;
         let (full_seq, map) = self.sent_frames.get(&seq_byte)?;
         if *full_seq <= current_seq && current_seq - *full_seq < 63 {

@@ -1,10 +1,12 @@
 [[item]]
 id = "svc_bad"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::phase11_remaining_svc_clc_and_bad_opcodes (returns parse error on opcode 0)"
 
 [[item]]
 id = "svc_nop"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::phase11_remaining_svc_clc_and_bad_opcodes"
 
 [[item]]
 id = "svc_disconnect"
@@ -18,7 +20,8 @@ evidence = "crates/cs-engine/tests/events.rs::event_args_round_trip_on_the_wire,
 
 [[item]]
 id = "svc_version"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::phase11_remaining_svc_clc_and_bad_opcodes"
 
 [[item]]
 id = "svc_setview"
@@ -92,8 +95,8 @@ evidence = "crates/cs-proto48/src/messages.rs::tests::particle_roundtrip_and_uni
 
 [[item]]
 id = "svc_damage"
-status = "missing"
-evidence = "parse_svc_message only skips payload bytes and returns SvcMessage::Ignored; no typed decode or writer"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::damage_roundtrip"
 
 [[item]]
 id = "svc_spawnstatic"
@@ -117,7 +120,8 @@ evidence = "crates/cs-engine/tests/tempents.rs::te_builders_match_the_wire_layou
 
 [[item]]
 id = "svc_setpause"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::phase11_remaining_svc_clc_and_bad_opcodes; crates/cs-engine/tests/phase11_admin.rs::pause_freezes_sv_time_and_status_full_users_work"
 
 [[item]]
 id = "svc_signonnum"
@@ -126,17 +130,18 @@ evidence = "crates/cs-proto48/src/messages.rs::tests::full_signon_and_gameplay_s
 
 [[item]]
 id = "svc_centerprint"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::centerprint_and_temp_entity_roundtrip"
 
 [[item]]
 id = "svc_killedmonster"
-status = "missing"
-evidence = "parse_svc_message returns SvcMessage::Ignored; no typed decode or writer"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::phase11_remaining_svc_clc_and_bad_opcodes"
 
 [[item]]
 id = "svc_foundsecret"
-status = "missing"
-evidence = "parse_svc_message returns SvcMessage::Ignored; no typed decode or writer"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::phase11_remaining_svc_clc_and_bad_opcodes"
 
 [[item]]
 id = "svc_spawnstaticsound"
@@ -145,13 +150,13 @@ evidence = "crates/cs-proto48/src/messages.rs::tests::spawnstaticsound_roundtrip
 
 [[item]]
 id = "svc_intermission"
-status = "missing"
-evidence = "parse_svc_message returns SvcMessage::Ignored; no typed decode or writer"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::phase11_remaining_svc_clc_and_bad_opcodes"
 
 [[item]]
 id = "svc_finale"
-status = "missing"
-evidence = "parse_svc_message only skips payload bytes and returns SvcMessage::Ignored; no typed decode or writer"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::phase11_remaining_svc_clc_and_bad_opcodes"
 
 [[item]]
 id = "svc_cdtrack"
@@ -160,13 +165,13 @@ evidence = "crates/cs-engine/src/signon.rs::tests::new_stage_messages_in_order"
 
 [[item]]
 id = "svc_restore"
-status = "missing"
-evidence = "parse_svc_message only skips payload bytes and returns SvcMessage::Ignored; no typed decode or writer"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::phase11_remaining_svc_clc_and_bad_opcodes"
 
 [[item]]
 id = "svc_cutscene"
-status = "missing"
-evidence = "parse_svc_message only skips payload bytes and returns SvcMessage::Ignored; no typed decode or writer"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::phase11_remaining_svc_clc_and_bad_opcodes"
 
 [[item]]
 id = "svc_weaponanim"
@@ -185,7 +190,8 @@ evidence = "crates/cs-proto48/src/messages.rs::tests::voice_roomtype_stopsound_r
 
 [[item]]
 id = "svc_addangle"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-engine/tests/join_order.rs::a_turn_of_two_is_sent_as_addangle_and_zeroed"
 
 [[item]]
 id = "svc_newusermsg"
@@ -229,8 +235,8 @@ evidence = "crates/cs-proto48/src/messages.rs::tests::customization_roundtrip_wi
 
 [[item]]
 id = "svc_crosshairangle"
-status = "missing"
-evidence = "parse_svc_message only skips payload bytes and returns SvcMessage::Ignored; no typed decode or writer"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::crosshairangle_soundfade_timescale_roundtrip"
 
 [[item]]
 id = "svc_soundfade"
@@ -239,18 +245,18 @@ evidence = "crates/cs-proto48/src/messages.rs::tests::crosshairangle_soundfade_t
 
 [[item]]
 id = "svc_filetxferfailed"
-status = "missing"
-evidence = "parse_svc_message only skips payload bytes and returns SvcMessage::Ignored; no typed decode or writer"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::phase11_remaining_svc_clc_and_bad_opcodes; crates/cs-engine/src/downloads.rs::tests::server_dlfile_serves_safe_files_and_rejects_missing_or_unsafe; crates/cs-clientcore/src/resources.rs::tests::file_failed_settles_optional_and_marks_fatal_required"
 
 [[item]]
 id = "svc_hltv"
-status = "missing"
-evidence = "parse_svc_message only skips payload bytes and returns SvcMessage::Ignored; no typed decode or writer"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::phase11_remaining_svc_clc_and_bad_opcodes; crates/cs-hltv/src/delay.rs::tests::late_join_signon_replays_headers_and_time_aligned_userinfo"
 
 [[item]]
 id = "svc_director"
-status = "missing"
-evidence = "parse_svc_message only skips payload bytes and returns SvcMessage::Ignored; no typed decode or writer"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::phase11_remaining_svc_clc_and_bad_opcodes; crates/cs-hltv/src/proxy.rs::tests::upstream_hltv_handshake_a2s_info_director_delay_and_demo_recording"
 
 [[item]]
 id = "svc_voiceinit"
@@ -269,29 +275,33 @@ evidence = "crates/cs-engine/src/signon.rs::tests::new_stage_messages_in_order"
 
 [[item]]
 id = "svc_timescale"
-status = "missing"
-evidence = "parse_svc_message only skips payload bytes and returns SvcMessage::Ignored; no typed decode or writer"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::crosshairangle_soundfade_timescale_roundtrip"
 
 [[item]]
 id = "svc_resourcelocation"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::phase11_remaining_svc_clc_and_bad_opcodes; crates/cs-clientcore/src/resources.rs::tests::download_locations_split_on_whitespace_and_are_capped"
 
 [[item]]
 id = "svc_sendcvarvalue"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::phase11_remaining_svc_clc_and_bad_opcodes; crates/cs-clientcore/tests/connection.rs::server_prints_and_cvar_queries_are_answered"
 
 [[item]]
 id = "svc_sendcvarvalue2"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::phase11_remaining_svc_clc_and_bad_opcodes; crates/cs-clientcore/tests/loopback.rs::svc_sendcvarvalue2_and_rcon_client_roundtrip_over_loopback"
 
 [[item]]
 id = "svc_exec"
-status = "missing"
-evidence = "parse_svc_message only skips payload bytes and returns SvcMessage::Ignored; no typed decode or writer"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::phase11_remaining_svc_clc_and_bad_opcodes; crates/cs-clientcore/tests/connection.rs::slowhack_defense_blocks_exec_director_and_restricted_cmds"
 
 [[item]]
 id = "clc_bad"
-status = "missing"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::phase11_remaining_svc_clc_and_bad_opcodes (returns parse error on opcode 0)"
 
 [[item]]
 id = "clc_nop"
@@ -320,13 +330,13 @@ evidence = "crates/cs-proto48/src/messages.rs::tests::sound_pings_and_clc_resour
 
 [[item]]
 id = "clc_tmove"
-status = "missing"
-evidence = "parse_clc_message skips payload with no ClcMessage variant or writer"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::phase11_remaining_svc_clc_and_bad_opcodes"
 
 [[item]]
 id = "clc_fileconsistency"
-status = "tested"
-evidence = "crates/cs-proto48/src/messages.rs::tests::sound_pings_and_clc_resourcelist_roundtrip"
+status = "verified"
+evidence = "crates/cs-proto48/src/messages.rs::tests::sound_pings_and_clc_resourcelist_roundtrip; crates/cs-engine/src/downloads.rs::tests::server_mp_consistency_accepts_match_and_kicks_mismatch; crates/cs-clientcore/tests/connection.rs::answers_consistency_as_the_original; VERIFIED 2026-11-25 against retail hlds.exe build 10210 +mp_consistency 1 via crates/cs-clientcore/tests/hlds.rs::live_hlds_mp_consistency_1 (ok in 1.03s)"
 
 [[item]]
 id = "clc_voicedata"
@@ -335,13 +345,15 @@ evidence = "crates/cs-proto48/src/messages.rs::tests::voice_roomtype_stopsound_r
 
 [[item]]
 id = "clc_hltv"
-status = "missing"
-evidence = "parse_clc_message skips payload with no ClcMessage variant or writer"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::phase11_remaining_svc_clc_and_bad_opcodes; crates/cs-hltv/src/proxy.rs::tests::upstream_hltv_handshake_a2s_info_director_delay_and_demo_recording"
 
 [[item]]
 id = "clc_cvarvalue"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::phase11_remaining_svc_clc_and_bad_opcodes; crates/cs-clientcore/tests/connection.rs::server_prints_and_cvar_queries_are_answered"
 
 [[item]]
 id = "clc_cvarvalue2"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::phase11_remaining_svc_clc_and_bad_opcodes; crates/cs-clientcore/tests/loopback.rs::svc_sendcvarvalue2_and_rcon_client_roundtrip_over_loopback"

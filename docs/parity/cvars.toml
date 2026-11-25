@@ -215,7 +215,8 @@ evidence = "crates/cs-engine/tests/movevars.rs::move_vars_follow_every_cvar; the
 
 [[item]]
 id = "sv_cheats"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-cvar/src/lib.rs::tests::phase11_cvar_flags_protection_and_actions (FCVAR_CHEAT enforcement)"
 
 [[item]]
 id = "sv_friction"
@@ -603,8 +604,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/default.c
 
 [[item]]
 id = "addip"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (rh_sv_main.cpp))"
+status = "tested"
+evidence = "crates/cs-engine/src/bans.rs::tests::ip_and_cidr_and_expiry_work; crates/cs-engine/tests/phase11_admin.rs::password_and_ip_ban_reject_connecting_client"
 
 [[item]]
 id = "alias"
@@ -638,13 +639,13 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/gfx/she
 
 [[item]]
 id = "banid"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (rh_sv_main.cpp))"
+status = "tested"
+evidence = "crates/cs-engine/src/console.rs (dispatched to BanList::add_id); crates/cs-engine/src/bans.rs::tests::id_bans_and_cfg_format_roundtrip"
 
 [[item]]
 id = "bannedcfgfile"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
 
 [[item]]
 id = "bgmvolume"
@@ -858,13 +859,13 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cf
 
 [[item]]
 id = "cl_allowdownload"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-clientcore/src/cvars.rs; crates/cs-clientcore/tests/connection.rs::a_fatal_missing_file_with_downloads_off_ends_the_connection_with_its_name"
 
 [[item]]
 id = "cl_allowupload"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-clientcore/src/cvars.rs; crates/cs-clientcore/src/connection.rs"
 
 [[item]]
 id = "cl_autowepswitch"
@@ -918,8 +919,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.
 
 [[item]]
 id = "cl_download_ingame"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-clientcore/src/cvars.rs; crates/cs-clientcore/src/connection.rs"
 
 [[item]]
 id = "cl_envshot_size"
@@ -928,8 +929,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cf
 
 [[item]]
 id = "cl_filterstuffcmd"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-clientcore/src/cvars.rs::tests::stufftext_filter_follows_cvar_should_set_cvar; crates/cs-clientcore/src/commands.rs::tests::stufftext_filter_denies_restricted_prefixed_and_at_commands; crates/cs-clientcore/tests/connection.rs::stufftext_runs_allowed_commands_only, slowhack_defense_blocks_exec_director_and_restricted_cmds, server_prints_and_cvar_queries_are_answered"
 
 [[item]]
 id = "cl_fixtimerate"
@@ -968,13 +969,13 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cf
 
 [[item]]
 id = "cl_logocolor"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
 
 [[item]]
 id = "cl_logofile"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.cfg)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
 
 [[item]]
 id = "cl_lw"
@@ -1663,13 +1664,13 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cf
 
 [[item]]
 id = "listid"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (rh_sv_main.cpp))"
+status = "implemented"
+evidence = "crates/cs-engine/src/console.rs (dispatched to BanList::list_id)"
 
 [[item]]
 id = "listip"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (rh_sv_main.cpp))"
+status = "implemented"
+evidence = "crates/cs-engine/src/console.rs (dispatched to BanList::list_ip)"
 
 [[item]]
 id = "localinfo"
@@ -1678,28 +1679,28 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (rh_sv_
 
 [[item]]
 id = "log"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (rh_sv_main.cpp))"
+status = "tested"
+evidence = "crates/cs-engine/src/logging.rs::tests::formats_hl_standard_log_line_and_udp_packet; crates/cs-engine/tests/phase11_admin.rs::rcon_executes_commands_and_logs_and_masks_a2s_rules"
 
 [[item]]
 id = "logaddress"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (rh_sv_main.cpp))"
+status = "tested"
+evidence = "crates/cs-engine/src/console.rs (dispatched to ServerLogger); crates/cs-engine/src/logging.rs::tests::add_remove_and_flush_logaddress"
 
 [[item]]
 id = "logaddress_add"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (rh_sv_main.cpp))"
+status = "tested"
+evidence = "crates/cs-engine/src/console.rs (dispatched to ServerLogger::add_address); crates/cs-engine/src/logging.rs::tests::add_remove_and_flush_logaddress"
 
 [[item]]
 id = "logaddress_del"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (rh_sv_main.cpp))"
+status = "tested"
+evidence = "crates/cs-engine/src/console.rs (dispatched to ServerLogger::remove_address); crates/cs-engine/src/logging.rs::tests::add_remove_and_flush_logaddress"
 
 [[item]]
 id = "logsdir"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
 
 [[item]]
 id = "look_filter"
@@ -1853,8 +1854,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.
 
 [[item]]
 id = "mp_consistency"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_user.cpp)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/src/downloads.rs::tests::server_mp_consistency_accepts_match_and_kicks_mismatch; crates/cs-clientcore/tests/hlds.rs::live_hlds_mp_consistency_1"
 
 [[item]]
 id = "mp_decals"
@@ -1893,13 +1894,13 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.
 
 [[item]]
 id = "mp_logdetail"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
 
 [[item]]
 id = "mp_logmessages"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL game.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
 
 [[item]]
 id = "mp_mapvoteratio"
@@ -1983,13 +1984,13 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cf
 
 [[item]]
 id = "pausable"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/server.cfg)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/tests/phase11_admin.rs::pause_freezes_sv_time_and_status_full_users_work"
 
 [[item]]
 id = "pause"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "crates/cs-engine/tests/phase11_admin.rs::pause_freezes_sv_time_and_status_full_users_work"
 
 [[item]]
 id = "ping"
@@ -2088,8 +2089,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 cstrike/config.
 
 [[item]]
 id = "rcon_password"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/tests/phase11_admin.rs::rcon_executes_commands_and_logs_and_masks_a2s_rules; crates/cs-clientcore/tests/loopback.rs::svc_sendcvarvalue2_and_rcon_client_roundtrip_over_loopback"
 
 [[item]]
 id = "rebuy"
@@ -2108,13 +2109,13 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_c
 
 [[item]]
 id = "removeid"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (rh_sv_main.cpp))"
+status = "tested"
+evidence = "crates/cs-engine/src/console.rs (dispatched to BanList::remove_id); crates/cs-engine/src/bans.rs::tests::id_bans_and_cfg_format_roundtrip"
 
 [[item]]
 id = "removeip"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (rh_sv_main.cpp))"
+status = "tested"
+evidence = "crates/cs-engine/src/console.rs (dispatched to BanList::remove_ip); crates/cs-engine/src/bans.rs::tests::ip_and_cidr_and_expiry_work"
 
 [[item]]
 id = "resetrcon"
@@ -2198,8 +2199,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cf
 
 [[item]]
 id = "scr_downloading"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
 
 [[item]]
 id = "screenshot"
@@ -2233,13 +2234,13 @@ evidence = "crates/cs-game/tests/player.rs::a_userinfo_change_puts_the_team_mode
 
 [[item]]
 id = "setmaster"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "crates/cs-engine/tests/phase11_master.rs::setmaster_console_commands_manage_list, server_emits_master_heartbeat_challenge_update_and_shutdown; crates/cs-cvar/src/lib.rs::tests::phase11_cvar_flags_protection_and_actions"
 
 [[item]]
 id = "setpause"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "crates/cs-proto48/src/messages.rs::tests::phase11_remaining_svc_clc_and_bad_opcodes (svc_setpause wire codec)"
 
 [[item]]
 id = "showbriefing"
@@ -2603,8 +2604,8 @@ evidence = "crates/cs-engine/tests/console.rs::status_lists_connected_clients"
 
 [[item]]
 id = "stopdemo"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (host_cmd.cpp))"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs::tests::phase11_cvar_flags_protection_and_actions; crates/cs-clientcore/src/demo.rs::tests::recorder_and_player_support_playback_timedemo_and_rewind_seek"
 
 [[item]]
 id = "suitvolume"
@@ -2623,8 +2624,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv
 
 [[item]]
 id = "sv_allow_dlfile"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/src/downloads.rs"
 
 [[item]]
 id = "sv_allow_joystick"
@@ -2658,13 +2659,13 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cf
 
 [[item]]
 id = "sv_allowdownload"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/src/downloads.rs"
 
 [[item]]
 id = "sv_allowupload"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/src/downloads.rs"
 
 [[item]]
 id = "sv_alltalk"
@@ -2688,8 +2689,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv
 
 [[item]]
 id = "sv_downloadurl"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/src/downloads.rs"
 
 [[item]]
 id = "sv_enableoldqueries"
@@ -2703,8 +2704,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv
 
 [[item]]
 id = "sv_filterban"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
 
 [[item]]
 id = "sv_force_ent_intersection"
@@ -2728,28 +2729,28 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv
 
 [[item]]
 id = "sv_log_onefile"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
 
 [[item]]
 id = "sv_log_singleplayer"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
 
 [[item]]
 id = "sv_logbans"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
 
 [[item]]
 id = "sv_logrelay"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
 
 [[item]]
 id = "sv_logsecret"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
 
 [[item]]
 id = "sv_maxrate"
@@ -2783,8 +2784,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv
 
 [[item]]
 id = "sv_password"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/tests/phase11_admin.rs::rcon_executes_commands_and_logs_and_masks_a2s_rules, password_and_ip_ban_reject_connecting_client"
 
 [[item]]
 id = "sv_precache_meshes"
@@ -2798,23 +2799,23 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv
 
 [[item]]
 id = "sv_rcon_banpenalty"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/src/connect.rs (RconPolicy); crates/cs-engine/src/rcon.rs::tests::rcon_brute_force_triggers_ban_and_empty_password_rejects"
 
 [[item]]
 id = "sv_rcon_maxfailures"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/src/connect.rs (RconPolicy); crates/cs-engine/src/rcon.rs::tests::rcon_brute_force_triggers_ban_and_empty_password_rejects"
 
 [[item]]
 id = "sv_rcon_minfailures"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/src/connect.rs (RconPolicy); crates/cs-engine/src/rcon.rs::tests::rcon_brute_force_triggers_ban_and_empty_password_rejects"
 
 [[item]]
 id = "sv_rcon_minfailuretime"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-engine/src/connect.rs (RconPolicy); crates/cs-engine/src/rcon.rs::tests::rcon_brute_force_triggers_ban_and_empty_password_rejects"
 
 [[item]]
 id = "sv_reconnect_limit"
@@ -2823,13 +2824,13 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (CS 1.6 valve/config.cf
 
 [[item]]
 id = "sv_send_logos"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
 
 [[item]]
 id = "sv_send_resources"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
 
 [[item]]
 id = "sv_tags"
@@ -2843,8 +2844,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv
 
 [[item]]
 id = "sv_uploadmax"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL rh_sv_main.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
 
 [[item]]
 id = "sv_version"
@@ -2953,8 +2954,8 @@ evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (rh_sv_
 
 [[item]]
 id = "users"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (rh_sv_main.cpp))"
+status = "tested"
+evidence = "crates/cs-engine/tests/phase11_admin.rs::pause_freezes_sv_time_and_status_full_users_work; crates/cs-clientcore/tests/loopback.rs::svc_sendcvarvalue2_and_rcon_client_roundtrip_over_loopback"
 
 [[item]]
 id = "version"
@@ -3103,13 +3104,13 @@ evidence = "crates/cs-cvar/src/lib.rs::executes_cvars_binds_aliases_and_roundtri
 
 [[item]]
 id = "writeid"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (rh_sv_main.cpp))"
+status = "tested"
+evidence = "crates/cs-engine/src/console.rs (dispatched to BanList::write_id_cfg); crates/cs-engine/src/bans.rs::tests::id_bans_and_cfg_format_roundtrip"
 
 [[item]]
 id = "writeip"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS command (rh_sv_main.cpp))"
+status = "implemented"
+evidence = "crates/cs-engine/src/console.rs (dispatched to BanList::write_ip_cfg)"
 
 [[item]]
 id = "zoom_sensitivity_ratio"
@@ -3245,3 +3246,78 @@ evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/tests/phase10_ui.rs
 id = "sv_use_steam_networking"
 status = "tested"
 evidence = "crates/cs-cvar/src/defaults.rs; crates/cs-client/tests/phase10_ui.rs::screen5_goldsrc_cvars_registered"
+
+[[item]]
+id = "record"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs::tests::phase11_cvar_flags_protection_and_actions; crates/cs-clientcore/src/demo.rs::tests::recorder_and_player_support_playback_timedemo_and_rewind_seek; crates/cs-client/src/session.rs::tests::loopback_demo_record_playback_seek_and_timedemo"
+
+[[item]]
+id = "playdemo"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs; crates/cs-clientcore/src/demo.rs::tests::recorder_and_player_support_playback_timedemo_and_rewind_seek; crates/cs-client/src/session.rs::tests::loopback_demo_record_playback_seek_and_timedemo"
+
+[[item]]
+id = "timedemo"
+status = "tested"
+evidence = "crates/cs-cvar/src/lib.rs::tests::phase11_cvar_flags_protection_and_actions; crates/cs-clientcore/src/demo.rs::tests::recorder_and_player_support_playback_timedemo_and_rewind_seek; crates/cs-client/src/session.rs::tests::loopback_demo_record_playback_seek_and_timedemo"
+
+[[item]]
+id = "rcon"
+status = "tested"
+evidence = "crates/cs-client/src/app.rs; crates/cs-clientcore/src/rcon.rs::tests::rcon_client_roundtrips_challenge_command_and_replies; crates/cs-clientcore/tests/loopback.rs::svc_sendcvarvalue2_and_rcon_client_roundtrip_over_loopback"
+
+[[item]]
+id = "rcon_address"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/src/app.rs"
+
+[[item]]
+id = "rcon_port"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/src/app.rs"
+
+[[item]]
+id = "password"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars; crates/cs-client/src/app.rs"
+
+[[item]]
+id = "listipcfgfile"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
+
+[[item]]
+id = "mp_logecho"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
+
+[[item]]
+id = "mp_logfile"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
+
+[[item]]
+id = "master_server"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs::register_default_cvars"
+
+[[item]]
+id = "tv_delay"
+status = "tested"
+evidence = "crates/cs-hltv/src/proxy.rs::tests::upstream_hltv_handshake_a2s_info_director_delay_and_demo_recording; crates/cs-hltv/src/delay.rs::tests::withholds_frames_until_delay_expires_and_releases_in_order"
+
+[[item]]
+id = "tv_name"
+status = "implemented"
+evidence = "crates/cs-hltv/src/proxy.rs (registered in HltvProxy::new / set_cvar)"
+
+[[item]]
+id = "tv_maxclients"
+status = "tested"
+evidence = "crates/cs-hltv/src/proxy.rs::tests::password_and_capacity_limits_reject_unauthorized_spectators"
+
+[[item]]
+id = "tv_password"
+status = "tested"
+evidence = "crates/cs-hltv/src/proxy.rs::tests::password_and_capacity_limits_reject_unauthorized_spectators"

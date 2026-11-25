@@ -790,7 +790,7 @@ impl ViewBuilder {
             .map(|p| p.simvel)
             .or_else(|| cd.as_ref().map(|c| c.velocity))
             .unwrap_or(Vec3::ZERO);
-        let onground = prediction.map_or(true, |p| p.onground >= 0);
+        let onground = prediction.is_none_or(|p| p.onground >= 0);
         let watertype = prediction.map_or(0, |p| p.watertype);
         let waterlevel = prediction.map_or(0, |p| p.waterlevel.max(0) as u8);
 

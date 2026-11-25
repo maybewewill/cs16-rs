@@ -106,7 +106,7 @@ pub struct HeartbeatInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeartbeatPacket {
     ChallengeRequest,
-    Update(HeartbeatInfo),
+    Update(Box<HeartbeatInfo>),
     Shutdown,
 }
 
@@ -201,7 +201,7 @@ pub fn parse_query_reply(data: &[u8]) -> Result<(Vec<SocketAddrV4>, bool), Maste
         return Err(MasterError::InvalidHeader);
     }
     let payload = &data[MASTER_REPLY_HEADER.len()..];
-    if payload.len() % 6 != 0 {
+    if !payload.len().is_multiple_of(6) {
         return Err(MasterError::InvalidPacket(format!(
             "query reply payload length {} is not a multiple of 6",
             payload.len()
@@ -210,8 +210,8 @@ pub fn parse_query_reply(data: &[u8]) -> Result<(Vec<SocketAddrV4>, bool), Maste
 
     let mut addrs = Vec::with_capacity(payload.len() / 6);
     let mut has_more = true;
-    for chunk in payload.chunks_exact(6) {
-        if chunk == [0u8; 6] {
+    for chunk in payload.as_chunks::<6>().0 {
+        if *chunk == [0u8; 6] {
             has_more = false;
             break;
         }
@@ -374,7 +374,7 @@ pub fn parse_heartbeat_packet(data: &[u8]) -> Result<HeartbeatPacket, MasterErro
         b'0' => {
             let rest = &body[1..];
             let kv_raw = std::str::from_utf8(rest)?;
-            Ok(HeartbeatPacket::Update(parse_heartbeat_update(kv_raw)))
+            Ok(HeartbeatPacket::Update(Box::new(parse_heartbeat_update(kv_raw))))
         }
         op => Err(MasterError::InvalidOpcode(op)),
     }

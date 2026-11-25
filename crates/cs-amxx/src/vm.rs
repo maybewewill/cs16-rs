@@ -1360,7 +1360,7 @@ impl PawnVm {
                         return Err(AmxError::InvalidInstruction(tbl_op));
                     }
                     let count = self.fetch_code_i32(&mut tbl_cip)?;
-                    if count < 0 || count > 65_536 {
+                    if !(0..=65_536).contains(&count) {
                         return Err(AmxError::Format("invalid casetbl count".into()));
                     }
                     let mut chosen = self.fetch_code_i32(&mut tbl_cip)? as usize;
