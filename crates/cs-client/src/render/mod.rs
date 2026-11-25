@@ -39,7 +39,7 @@ use crate::render::lighting::{GpuLightsUniform, TextureFilterMode, TextureUpload
 use crate::render::mdl_renderer::{MdlPassParams, MdlRenderer, StudioInstance};
 use crate::render::scene::{
     BrushDraw, DrawLists, FxFadeTracker, ModelKind, ModelRegistry, SceneFrame, StudioDraw,
-    build_draw_lists_tracked,
+    build_draw_lists_tracked, collect_opaque_brush_colliders,
 };
 use crate::render::skybox::SkyboxRenderer;
 use crate::render::sprite_renderer::{SpritePassParams, SpriteRenderer};
@@ -850,6 +850,8 @@ impl Renderer {
                         software_mode: settings.software_mode,
                         fog: settings.fog,
                     };
+                    let brush_colliders =
+                        collect_opaque_brush_colliders(&frame.entities, &self.models);
                     prepared_sprites = Some(self.sprites.prepare(
                         &self.device,
                         &self.queue,
@@ -859,6 +861,7 @@ impl Renderer {
                         &frame.view,
                         &spr_params,
                         self.world_collision.as_ref(),
+                        &brush_colliders,
                     ));
                 }
             }

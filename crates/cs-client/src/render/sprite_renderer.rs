@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
 use cs_assets::spr::{GoldSrcSprite, SpriteType};
-use cs_pm::collision::{Hull, WorldCollision};
+use cs_pm::collision::WorldCollision;
 use cs_vfs::Vfs;
 use glam::Mat4;
 use tracing::warn;
@@ -16,7 +16,8 @@ use crate::render::lighting::{
     TextureFilterMode, create_sampler, upload_rgba_texture_mipmapped,
 };
 use crate::render::scene::{
-    EntRenderMode, SpriteDraw, ViewBasis, glow_blend, sprite_axes, sprite_quad,
+    BrushCollider, EntRenderMode, SpriteDraw, ViewBasis, glow_blend, sprite_axes, sprite_quad,
+    trace_glow_occlusion,
 };
 
 #[repr(C)]
@@ -443,6 +444,7 @@ impl SpriteRenderer {
         view: &ViewBasis,
         params: &SpritePassParams,
         collision: Option<&WorldCollision>,
+        brush_colliders: &[BrushCollider],
     ) -> PreparedSprites {
         let mut verts: Vec<SpriteVertex> = Vec::new();
         let mut prepared = Vec::new();
@@ -450,11 +452,9 @@ impl SpriteRenderer {
             let Some(path) = path else { continue };
             if d.mode == EntRenderMode::Glow
                 && let Some(world) = collision
+                && trace_glow_occlusion(world, brush_colliders, view.origin, d.origin)
             {
-                let tr = world.trace_world(view.origin, d.origin, Hull::Point);
-                if tr.start_solid || tr.fraction < 1.0 {
-                    continue;
-                }
+                continue;
             }
             let Some(key) = self.ensure_loaded(device, queue, vfs, path) else {
                 continue;

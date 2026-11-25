@@ -16,10 +16,14 @@
 use std::collections::HashMap;
 
 use cs_assets::spr::SpriteType;
+use cs_pm::collision::{Hull, WorldCollision};
 use glam::{Mat4, Vec3, Vec4};
 
 /// `EF_NODRAW` effect bit (`ReHLDS rehlds/common/const.h:138`).
 pub const EF_NODRAW: u32 = 128;
+
+/// `SOLID_BSP` solid type (`ReHLDS rehlds/common/const.h`): opaque brush submodel collider.
+pub const SOLID_BSP: i32 = 4;
 
 /// `kRenderFx*` values (`const.h` of the Xash3D FWGS common headers, lines 698-720, read
 /// 2026-11-23).
@@ -255,6 +259,8 @@ pub struct RenderEntity {
     pub renderfx: u8,
     /// `entity_state_t::scale`; 0 means 1.
     pub scale: f32,
+    /// `entity_state_t::solid` (e.g. `SOLID_BSP = 4` for solid brush entities).
+    pub solid: i32,
     /// A studio model merged onto this one's bones (`EF_BONEMERGE`: the weapon a player holds).
     pub attached: Option<ModelHandle>,
     pub controllers: [u8; 4],
@@ -286,6 +292,7 @@ impl RenderEntity {
             rendercolor: [0, 0, 0],
             renderfx: 0,
             scale: 0.0,
+            solid: 0,
             attached: None,
             controllers: [127, 127, 127, 127],
             mouth: 0,
@@ -467,10 +474,11 @@ pub fn fx_blend(e: &RenderEntity, time: f32, view: &ViewBasis) -> i32 {
 }
 
 /// Glow-sprite brightness and scale multiplier from the view distance: the distance part of
-/// `R_SpriteGlowBlend` (`ref/gl/gl_sprite.c`, read 2026-11-23).
+/// `R_SpriteGlowBlend` (`ref/gl/gl_sprite.c`, read 2026-11-25).
 ///
-/// The engine also traces from the eye and hides the glow when the origin is occluded; that part
-/// needs world traces and is not done here (assumption: glows show through walls for now).
+/// The eye-to-origin line-of-sight occlusion trace (`R_SpriteGlowBlend` against world BSP and
+/// opaque `SOLID_BSP` brush entities, ignoring hits within `8.0` units of `origin`) is
+/// implemented in [`trace_glow_occlusion`] and [`glow_blend_visible`].
 pub fn glow_blend(dist: f32, renderfx: u8) -> (f32, f32) {
     if renderfx == RENDERFX_NO_DISSIPATION {
         return (1.0, 1.0);
@@ -482,6 +490,87 @@ pub fn glow_blend(dist: f32, renderfx: u8) -> (f32, f32) {
         scale = scale.max(1.0);
     }
     (brightness, scale)
+}
+
+/// Opaque `SOLID_BSP` brush submodel entity used as an occluder for `R_SpriteGlowBlend`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BrushCollider {
+    pub submodel: u32,
+    pub origin: Vec3,
+    pub angles: Vec3,
+}
+
+/// Collect active opaque `SOLID_BSP` brush entities (`func_wall`, closed `func_door`,
+/// intact `func_breakable` with `kRenderNormal`) for glow occlusion traces.
+pub fn collect_opaque_brush_colliders(
+    entities: &[RenderEntity],
+    registry: &ModelRegistry,
+) -> Vec<BrushCollider> {
+    entities
+        .iter()
+        .filter(|e| {
+            (e.effects & EF_NODRAW) == 0
+                && e.solid == SOLID_BSP
+                && is_opaque_entity(e.rendermode, e.renderfx)
+        })
+        .filter_map(|e| {
+            let entry = registry.get(e.model)?;
+            match entry.kind {
+                ModelKind::Brush(submodel) => Some(BrushCollider {
+                    submodel,
+                    origin: e.origin,
+                    angles: e.angles,
+                }),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// Port of `R_SpriteGlowBlend` visibility trace (`ref/gl/gl_sprite.c:228-231`, read 2026-11-25):
+/// traces `Hull::Point` from `eye` to `origin` against world BSP (`model 0`) and opaque
+/// `SOLID_BSP` brush entities (`colliders`). Returns `true` when occluded, ignoring hits within
+/// `8.0` units of `origin` (`(1.0 - fraction) * dist <= 8.0`) so glows attached to surfaces do
+/// not self-occlude.
+pub fn trace_glow_occlusion(
+    world: &WorldCollision,
+    colliders: &[BrushCollider],
+    eye: Vec3,
+    origin: Vec3,
+) -> bool {
+    let world_tr = world.trace_world(eye, origin, Hull::Point);
+    if world_tr.all_solid || world_tr.start_solid {
+        return true;
+    }
+    let mut min_fraction = world_tr.fraction;
+    for c in colliders {
+        let mut start_l = eye - c.origin;
+        let mut end_l = origin - c.origin;
+        if c.angles != Vec3::ZERO {
+            let (forward, right, up) = angle_vectors(c.angles);
+            let to_local = |p: Vec3| Vec3::new(forward.dot(p), -right.dot(p), up.dot(p));
+            start_l = to_local(start_l);
+            end_l = to_local(end_l);
+        }
+        let tr = world.trace_model(c.submodel as usize, Vec3::ZERO, start_l, end_l, Hull::Point);
+        if tr.all_solid || tr.start_solid {
+            return true;
+        }
+        if tr.fraction < min_fraction {
+            min_fraction = tr.fraction;
+        }
+    }
+    let dist = (origin - eye).length();
+    (1.0 - min_fraction) * dist > 8.0
+}
+
+/// Full `R_SpriteGlowBlend` evaluation (`ref/gl/gl_sprite.c:220-242`, read 2026-11-25):
+/// returns `(0.0, 0.0)` when `occluded` is `true`, otherwise delegates to [`glow_blend`].
+pub fn glow_blend_visible(dist: f32, renderfx: u8, occluded: bool) -> (f32, f32) {
+    if occluded {
+        return (0.0, 0.0);
+    }
+    glow_blend(dist, renderfx)
 }
 
 /// World-space axes of a sprite quad.
@@ -1142,5 +1231,85 @@ mod tests {
         let l = build_draw_lists(&scene, &r);
         assert_eq!(l.trans_brush[0].submodel, 1, "far centre first");
         assert_eq!(l.trans_brush[0].distance_sq, 1_000_000.0);
+    }
+
+    #[test]
+    fn glow_occlusion_blocks_behind_world_and_solid_bsp_and_keeps_surface_epsilon() {
+        use cs_assets::bsp::{BspMap, BspModel, Leaf, LightmapAtlas, Node, Plane};
+        use cs_pm::collision::{CONTENTS_EMPTY, CONTENTS_SOLID};
+
+        // Model 0 (world): solid at x >= 100. Model 1 (*1): solid at x >= 0 (local).
+        let bsp = BspMap {
+            name: "glow_test".into(),
+            skyname: String::new(),
+            entities: Vec::new(),
+            spawns: Vec::new(),
+            hostage_spawns: Vec::new(),
+            brush_entities: Vec::new(),
+            planes: vec![
+                Plane { normal: Vec3::X, dist: 100.0, plane_type: 0 },
+                Plane { normal: Vec3::X, dist: 0.0, plane_type: 0 },
+            ],
+            vertices_raw: Vec::new(),
+            visibility: Vec::new(),
+            nodes: vec![
+                Node { plane: 0, children: [-1, -2], mins: [-512; 3], maxs: [512; 3], first_face: 0, num_faces: 0 },
+                Node { plane: 1, children: [-1, -2], mins: [-64; 3], maxs: [64; 3], first_face: 0, num_faces: 0 },
+            ],
+            texinfos: Vec::new(),
+            faces: Vec::new(),
+            lighting: Vec::new(),
+            clipnodes: Vec::new(),
+            leafs: vec![
+                Leaf { contents: CONTENTS_SOLID, vis_offset: -1, mins: [-512; 3], maxs: [512; 3], first_mark_surface: 0, num_mark_surfaces: 0, ambient_levels: [0; 4] },
+                Leaf { contents: CONTENTS_EMPTY, vis_offset: -1, mins: [-512; 3], maxs: [512; 3], first_mark_surface: 0, num_mark_surfaces: 0, ambient_levels: [0; 4] },
+            ],
+            mark_surfaces: Vec::new(),
+            edges: Vec::new(),
+            surf_edges: Vec::new(),
+            models: vec![
+                BspModel { mins: Vec3::splat(-512.0), maxs: Vec3::splat(512.0), origin: Vec3::ZERO, head_nodes: [0, -1, -1, -1], vis_leafs: 2, first_face: 0, num_faces: 0 },
+                BspModel { mins: Vec3::splat(-64.0), maxs: Vec3::splat(64.0), origin: Vec3::ZERO, head_nodes: [1, -1, -1, -1], vis_leafs: 2, first_face: 0, num_faces: 0 },
+            ],
+            textures: Vec::new(),
+            lightmap_atlas: LightmapAtlas { width: 0, height: 0, rgba: Vec::new(), packed_faces: 0 },
+            render_vertices: Vec::new(),
+            render_indices: Vec::new(),
+            batches: Vec::new(),
+        };
+        let world = WorldCollision::from_bsp(&bsp);
+        let eye = Vec3::ZERO;
+
+        // Unoccluded glow in open space (x = 50) renders with GLARE_FALLOFF brightness.
+        let unoccluded_pos = Vec3::new(50.0, 0.0, 0.0);
+        let occ_open = trace_glow_occlusion(&world, &[], eye, unoccluded_pos);
+        assert!(!occ_open);
+        let (bright_open, _) = glow_blend_visible((unoccluded_pos - eye).length(), 0, occ_open);
+        assert_eq!(bright_open, glow_blend(50.0, 0).0);
+
+        // Surface-attached glow 3 units inside world wall (x = 103) stays visible (<= 8u epsilon).
+        assert!(!trace_glow_occlusion(&world, &[], eye, Vec3::new(103.0, 0.0, 0.0)));
+
+        // Glow deep behind world BSP wall (x = 150) is occluded -> 0 alpha.
+        let occluded_pos = Vec3::new(150.0, 0.0, 0.0);
+        let occ_wall = trace_glow_occlusion(&world, &[], eye, occluded_pos);
+        assert!(occ_wall);
+        assert_eq!(glow_blend_visible((occluded_pos - eye).length(), 0, occ_wall), (0.0, 0.0));
+
+        // Opaque SOLID_BSP brush entity at x = 40 blocks glow at x = 80; glass (TransTexture) does not.
+        let reg = ModelRegistry::from_precache(&["", "maps/t.bsp", "*1"]);
+        let brush_h = reg.resolve(2).unwrap();
+        let mut wall_ent = RenderEntity::new(10, brush_h, Vec3::new(40.0, 0.0, 0.0));
+        wall_ent.solid = SOLID_BSP;
+        let mut glass_ent = wall_ent.clone();
+        glass_ent.rendermode = EntRenderMode::TransTexture;
+
+        let glass_colliders = collect_opaque_brush_colliders(&[glass_ent], &reg);
+        assert!(glass_colliders.is_empty());
+        assert!(!trace_glow_occlusion(&world, &glass_colliders, eye, Vec3::new(80.0, 0.0, 0.0)));
+
+        let wall_colliders = collect_opaque_brush_colliders(&[wall_ent], &reg);
+        assert_eq!(wall_colliders.len(), 1);
+        assert!(trace_glow_occlusion(&world, &wall_colliders, eye, Vec3::new(80.0, 0.0, 0.0)));
     }
 }

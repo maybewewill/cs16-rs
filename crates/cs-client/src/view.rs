@@ -42,7 +42,8 @@ use crate::render::lighting::{
 use crate::render::mdl_renderer::{STUDIO_LOOPING, studio_frame};
 use crate::render::particles::{BeamSystem, ParticleSystem};
 use crate::render::scene::{
-    EntRenderMode, ModelHandle, ModelRegistry, RenderEntity, SceneFrame, ViewBasis,
+    EF_NODRAW, EntRenderMode, ModelHandle, ModelRegistry, RenderEntity, SceneFrame, ViewBasis,
+    collect_opaque_brush_colliders, trace_glow_occlusion,
 };
 use crate::view_effects::{
     BobParams, BobState, StairSmoothState, ViewModelLagState, calc_roll, calc_screen_shake,
@@ -722,6 +723,7 @@ impl ViewBuilder {
                 scene.entities.push(r);
             }
         }
+        self.apply_glow_occlusion(&mut scene);
 
         // Effects that are not entries of the pool.
         let pos_lookup = |id: u16| entity_positions.get(&id).copied();
@@ -1061,6 +1063,7 @@ impl ViewBuilder {
         r.rendercolor = e.rendercolor;
         r.renderfx = e.renderfx;
         r.scale = s.scale;
+        r.solid = s.solid as i32;
         r.controllers = s.controller;
         r.blending = s.blending;
         r.scroll_speed = 0.0;
@@ -1120,6 +1123,26 @@ impl ViewBuilder {
         r.renderfx = t.render_fx;
         r.scale = t.scale;
         Some(r)
+    }
+
+    /// Suppress `EntRenderMode::Glow` entities and `TE_GLOWSPRITE` tempents occluded by world BSP
+    /// or opaque `SOLID_BSP` brush entities (`R_SpriteGlowBlend`, `ref/gl/gl_sprite.c:220-242`,
+    /// read 2026-11-25).
+    fn apply_glow_occlusion(&self, scene: &mut SceneFrame) {
+        let Some(world) = self.collision.as_deref() else {
+            return;
+        };
+        let colliders = collect_opaque_brush_colliders(&scene.entities, &self.models);
+        let eye = scene.view.origin;
+        for e in &mut scene.entities {
+            if e.rendermode == EntRenderMode::Glow
+                && (e.effects & EF_NODRAW) == 0
+                && trace_glow_occlusion(world, &colliders, eye, e.origin)
+            {
+                e.renderamt = 0;
+                e.effects |= EF_NODRAW;
+            }
+        }
     }
 
     /// A `ET_BEAM` entity: `origin` is where it starts and `angles` where it ends
@@ -1690,5 +1713,161 @@ mod tests {
             &inputs(0.4),
         );
         assert_eq!(v_air.bob, v_ground.bob);
+    }
+
+    #[test]
+    fn occluded_glow_entity_and_te_glowsprite_are_suppressed_while_unoccluded_remains() {
+        use cs_assets::bsp::{BspMap, BspModel, Leaf, LightmapAtlas, Node, Plane};
+        use cs_clientcore::PrecacheEntry;
+        use cs_clientcore::interp::{EmitResult, VisibleEntity};
+        use cs_clientcore::sound::SoundQueue;
+        use cs_clientcore::tempents::FxRandom;
+        use cs_pm::collision::{CONTENTS_EMPTY, CONTENTS_SOLID};
+        use cs_proto48::delta::GoldSrcEntityState;
+
+        let bsp = BspMap {
+            name: "glow_view".into(),
+            skyname: String::new(),
+            entities: Vec::new(),
+            spawns: Vec::new(),
+            hostage_spawns: Vec::new(),
+            brush_entities: Vec::new(),
+            planes: vec![
+                Plane { normal: Vec3::X, dist: 128.0, plane_type: 0 },
+                Plane { normal: Vec3::X, dist: 0.0, plane_type: 0 },
+            ],
+            vertices_raw: Vec::new(),
+            visibility: Vec::new(),
+            nodes: vec![
+                Node { plane: 0, children: [-1, -2], mins: [-512; 3], maxs: [512; 3], first_face: 0, num_faces: 0 },
+                Node { plane: 1, children: [-1, -2], mins: [-64; 3], maxs: [64; 3], first_face: 0, num_faces: 0 },
+            ],
+            texinfos: Vec::new(),
+            faces: Vec::new(),
+            lighting: Vec::new(),
+            clipnodes: Vec::new(),
+            leafs: vec![
+                Leaf { contents: CONTENTS_SOLID, vis_offset: -1, mins: [-512; 3], maxs: [512; 3], first_mark_surface: 0, num_mark_surfaces: 0, ambient_levels: [0; 4] },
+                Leaf { contents: CONTENTS_EMPTY, vis_offset: -1, mins: [-512; 3], maxs: [512; 3], first_mark_surface: 0, num_mark_surfaces: 0, ambient_levels: [0; 4] },
+            ],
+            mark_surfaces: Vec::new(),
+            edges: Vec::new(),
+            surf_edges: Vec::new(),
+            models: vec![
+                BspModel { mins: Vec3::splat(-512.0), maxs: Vec3::splat(512.0), origin: Vec3::ZERO, head_nodes: [0, -1, -1, -1], vis_leafs: 2, first_face: 0, num_faces: 0 },
+                BspModel { mins: Vec3::splat(-64.0), maxs: Vec3::splat(64.0), origin: Vec3::ZERO, head_nodes: [1, -1, -1, -1], vis_leafs: 2, first_face: 0, num_faces: 0 },
+            ],
+            textures: Vec::new(),
+            lightmap_atlas: LightmapAtlas { width: 0, height: 0, rgba: Vec::new(), packed_faces: 0 },
+            render_vertices: Vec::new(),
+            render_indices: Vec::new(),
+            batches: Vec::new(),
+        };
+
+        let mut builder = ViewBuilder::new();
+        let coll = Arc::new(WorldCollision::from_bsp(&bsp));
+        builder.set_world_context(Some(coll.clone()), None);
+        let mut precache = PrecacheTables::default();
+        for (idx, name) in [
+            (1u16, "maps/glow_view.bsp"),
+            (2, "*1"),
+            (3, "sprites/glow01.spr"),
+            (4, "sprites/ledglow.spr"),
+        ] {
+            precache.models.insert(
+                idx,
+                PrecacheEntry {
+                    name: name.to_string(),
+                    download_size: 0,
+                    flags: 0,
+                },
+            );
+        }
+        let fx_world = MapFxWorld::new(
+            Some(coll),
+            None,
+            Rc::new(RefCell::new(BTreeMap::new())),
+        );
+        let mut rng = FxRandom::new(1);
+        let mut sounds = SoundQueue::default();
+        let mut fx = ClientEffects::default();
+        // TE_GLOWSPRITE #1 unoccluded in open air (x=50), #2 occluded behind world wall (x=200),
+        // #3 occluded behind SOLID_BSP func_wall at y=60 (x=80 is in front of world wall x=128).
+        for pos in [
+            Vec3::new(50.0, 0.0, 0.0),
+            Vec3::new(200.0, 0.0, 0.0),
+            Vec3::new(80.0, 60.0, 0.0),
+        ] {
+            fx.tempents.spawn_effect(
+                &TempEffect::GlowSprite {
+                    position: pos,
+                    model: 4,
+                    life: 10,
+                    scale: 10,
+                    brightness: 255,
+                },
+                1.0,
+                &precache,
+                &fx_world,
+                &mut rng,
+                &mut sounds,
+            );
+        }
+
+        let make_vis = |number, model, modelindex, origin, rendermode, solid| VisibleEntity {
+            number,
+            kind: EntityKind::Normal,
+            model,
+            modelindex,
+            origin,
+            angles: Vec3::ZERO,
+            frame: 0.0,
+            sequence: 0,
+            rendermode,
+            renderamt: 255,
+            renderfx: 0,
+            rendercolor: [255, 255, 255],
+            local_player: false,
+            studio_lerp: false,
+            latched: Default::default(),
+            state: GoldSrcEntityState {
+                solid,
+                ..Default::default()
+            },
+        };
+        let emitted = EmitResult {
+            entities: vec![
+                // Opaque SOLID_BSP crate (*1) placed at (60, 60, 0) blocking (80, 60, 0) from (0, 0, 0).
+                make_vis(10, CoreModelKind::Brush, 2, Vec3::new(60.0, 60.0, 0.0), 0, 4),
+                // Unoccluded env_glow at (40, -40, 0).
+                make_vis(11, CoreModelKind::Sprite, 3, Vec3::new(40.0, -40.0, 0.0), 3, 0),
+                // Occluded env_glow behind world BSP at (180, -40, 0).
+                make_vis(12, CoreModelKind::Sprite, 3, Vec3::new(180.0, -40.0, 0.0), 3, 0),
+            ],
+            ..Default::default()
+        };
+
+        let (frame_view, _) = builder.build_parts(
+            &precache,
+            &mut fx,
+            &BTreeMap::new(),
+            None,
+            None,
+            None,
+            emitted,
+            Vec::new(),
+            Vec3::ZERO,
+            &inputs(1.05),
+        );
+        let draw_lists = crate::render::scene::build_draw_lists(&frame_view.scene, &builder.models);
+        assert_eq!(
+            draw_lists.sprites.len(),
+            2,
+            "expected only the unoccluded env_glow and unoccluded TE_GLOWSPRITE, got {:?}",
+            draw_lists.sprites.iter().map(|s| s.origin).collect::<Vec<_>>()
+        );
+        let origins: Vec<Vec3> = draw_lists.sprites.iter().map(|s| s.origin).collect();
+        assert!(origins.contains(&Vec3::new(40.0, -40.0, 0.0)));
+        assert!(origins.contains(&Vec3::new(50.0, 0.0, 0.0)));
     }
 }

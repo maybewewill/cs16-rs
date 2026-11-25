@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use cs_assets::scheme::{HudSpriteEntry, load_hud_txt, parse_hud_txt};
+use cs_assets::scheme::{HudSpriteEntry, load_hud_txt, load_tga_image, parse_hud_txt};
 use cs_assets::spr::{GoldSrcSprite, SpriteTexFormat};
 use cs_assets::vgui_font::SchemeFontSet;
 use cs_assets::vgui_res::TextAlignment;
@@ -248,6 +248,33 @@ pub struct HudSprites {
     pain_frames: Vec<(TextureHandle, [f32; 2])>,
     radar_tex: Option<TextureHandle>,
     radar_opaque_tex: Option<TextureHandle>,
+    /// Retail CS 1.6 `CHudSniperScope` quadrant corner arcs (`[nw, ne, sw, se]` from
+    /// `sprites/scope_arc{_nw,_ne,_sw,}.tga`).
+    scope_arcs: Option<[TextureHandle; 4]>,
+    /// Legacy/weapon-script `zoom` sprite (`sprites/sniper_scope.spr` / `sprites/ch_sniper.spr`),
+    /// loaded with GoldSrc `AlphaTest` palette-index 255 transparency.
+    sniper_scope_spr: Option<(TextureHandle, [f32; 2])>,
+}
+
+/// Load `sniper_scope.spr` / `ch_sniper.spr` from VFS (preferring `weapon_awp.txt` `zoom` entry
+/// when present) with GoldSrc `AlphaTest` palette index 255 transparency.
+pub fn load_sniper_scope_sprite(vfs: &Vfs) -> Option<GoldSrcSprite> {
+    if let Ok(text) = vfs.read_string_lossy("sprites/weapon_awp.txt") {
+        let mut entries: Vec<HudSpriteEntry> = parse_hud_txt(&text)
+            .into_iter()
+            .filter(|e| e.name == "zoom")
+            .collect();
+        entries.sort_by_key(|e| std::cmp::Reverse(e.resolution));
+        for e in entries {
+            let path = format!("sprites/{}.spr", e.sprite_name);
+            if let Ok(spr) = GoldSrcSprite::load(vfs, &path) {
+                return Some(spr);
+            }
+        }
+    }
+    GoldSrcSprite::load(vfs, "sprites/sniper_scope.spr")
+        .or_else(|_| GoldSrcSprite::load(vfs, "sprites/ch_sniper.spr"))
+        .ok()
 }
 
 const WEAPON_CARD_FILES: &[&str] = &[
@@ -435,6 +462,39 @@ impl HudSprites {
                 ))
             });
 
+        // Retail `CHudSniperScope` loads `scope_arc_nw`, `scope_arc_ne`, `scope_arc_sw`, `scope_arc`.
+        let load_arc = |name: &str, path: &str| -> Option<TextureHandle> {
+            let img = load_tga_image(vfs, path).ok()?;
+            let col = egui::ColorImage::from_rgba_unmultiplied(
+                [img.width as usize, img.height as usize],
+                &img.rgba,
+            );
+            Some(ctx.load_texture(name, col, egui::TextureOptions::LINEAR))
+        };
+        let scope_arcs = match (
+            load_arc("cs16_hud_scope_arc_nw", "sprites/scope_arc_nw.tga"),
+            load_arc("cs16_hud_scope_arc_ne", "sprites/scope_arc_ne.tga"),
+            load_arc("cs16_hud_scope_arc_sw", "sprites/scope_arc_sw.tga"),
+            load_arc("cs16_hud_scope_arc_se", "sprites/scope_arc.tga"),
+        ) {
+            (Some(nw), Some(ne), Some(sw), Some(se)) => Some([nw, ne, sw, se]),
+            _ => None,
+        };
+
+        let sniper_scope_spr = load_sniper_scope_sprite(vfs).and_then(|spr| {
+            let frame = spr.frames.first()?;
+            let img = egui::ColorImage::from_rgba_unmultiplied(
+                [frame.width as usize, frame.height as usize],
+                &frame.rgba,
+            );
+            let tex = ctx.load_texture(
+                "cs16_hud_sniper_scope_spr",
+                img,
+                egui::TextureOptions::NEAREST,
+            );
+            Some((tex, [frame.width as f32, frame.height as f32]))
+        });
+
         Self {
             sheets,
             entries,
@@ -443,6 +503,8 @@ impl HudSprites {
             pain_frames,
             radar_tex,
             radar_opaque_tex,
+            scope_arcs,
+            sniper_scope_spr,
         }
     }
 
@@ -452,6 +514,14 @@ impl HudSprites {
 
     pub fn has_radar_textures(&self) -> (bool, bool) {
         (self.radar_tex.is_some(), self.radar_opaque_tex.is_some())
+    }
+
+    pub fn has_scope_arcs(&self) -> bool {
+        self.scope_arcs.is_some()
+    }
+
+    pub fn has_sniper_scope_sprite(&self) -> bool {
+        self.sniper_scope_spr.is_some()
     }
 
     pub fn has_selected_weapon_card(&self, name: &str) -> bool {
@@ -1228,7 +1298,7 @@ fn draw_cs16_hud_impl(
         }
     }
     if hud.alive && hud.scoped {
-        draw_sniper_scope(&painter, screen);
+        draw_sniper_scope(&painter, screen, sprites);
     }
     if hud.alive
         && let Some([r, g, b, a]) = hud.underwater_tint
@@ -2149,7 +2219,12 @@ fn draw_cs16_hud_impl(
     }
 
     // 11. Centre text (`HUD_PRINTCENTER`, the centre print).
-    if let Some(text) = hud.center {
+    if let Some(raw_center) = hud.center {
+        let resolved_center = if raw_center.contains('#') {
+            crate::hudtext::format_message_with_titles(raw_center, &[], extras.loc, extras.titles)
+        } else {
+            raw_center.to_string()
+        };
         let (b_pos, center_col) = center_print_layout(screen);
         hud_paint_text(
             ctx,
@@ -2157,7 +2232,7 @@ fn draw_cs16_hud_impl(
             &mut font_ctx,
             egui::Align2::CENTER_CENTER,
             b_pos,
-            text,
+            &resolved_center,
             16.0 * scale,
             center_col,
         );
@@ -2216,7 +2291,19 @@ fn draw_cs16_hud_impl(
 
     // 12. Notifications under the radar, chat bottom-left above the health.
     let mut ny = 150.0 * scale;
-    for line in hud.notify {
+    for raw_line in hud.notify {
+        let line_owned;
+        let line = if raw_line.contains('#') {
+            line_owned = crate::hudtext::format_message_with_titles(
+                raw_line,
+                &[],
+                extras.loc,
+                extras.titles,
+            );
+            line_owned.as_str()
+        } else {
+            raw_line.as_str()
+        };
         hud_paint_text(
             ctx,
             &painter,
@@ -2292,8 +2379,13 @@ fn draw_cs16_hud_impl(
         let fade_out = (f64::from(msg.fadeout) / 256.0) as f32;
         let fx_time = (f64::from(msg.fxtime.unwrap_or(0)) / 256.0) as f32;
         let elapsed = (hud.now - msg.received_at).max(0.0) as f32;
+        let msg_text = if msg.text.contains('#') {
+            crate::hudtext::format_message_with_titles(&msg.text, &[], extras.loc, extras.titles)
+        } else {
+            msg.text.clone()
+        };
         let Some((shown_text, alpha_f, typing)) = evaluate_dhud_text_fx(
-            &msg.text,
+            &msg_text,
             msg.effect,
             fade_in,
             hold,
@@ -2725,38 +2817,95 @@ fn draw_radar_with_extras(
     }
 }
 
-fn draw_sniper_scope(painter: &egui::Painter, screen: Rect) {
+/// Retail CS 1.6 `CHudSniperScope::Draw`:
+/// centered 1:1 scope circle (`H x H`) from the 4 `scope_arc` quadrant corner textures,
+/// solid black side pillars outside the centered square, and full-screen 1 px black crosshairs
+/// with zero mil-dots and zero red center dot.
+fn draw_sniper_scope(painter: &egui::Painter, screen: Rect, sprites: Option<&HudSprites>) {
     let center = screen.center();
-    let radius = (screen.height() * 0.44).max(160.0);
+    let square_size = screen.height().min(screen.width()).max(1.0);
+    let half = square_size * 0.5;
+    let left = center.x - half;
+    let right = center.x + half;
+    let top = center.y - half;
+    let bottom = center.y + half;
     let black = Color32::BLACK;
 
-    // Solid black surround outside the circular scope ring
-    let top_h = (center.y - radius).max(0.0);
-    let side_w = (center.x - radius).max(0.0);
-    painter.rect_filled(Rect::from_min_max(screen.min, Pos2::new(screen.right(), screen.top() + top_h)), 0.0, black);
-    painter.rect_filled(Rect::from_min_max(Pos2::new(screen.left(), center.y + radius), screen.max), 0.0, black);
-    painter.rect_filled(Rect::from_min_max(screen.min, Pos2::new(screen.left() + side_w, screen.bottom())), 0.0, black);
-    painter.rect_filled(Rect::from_min_max(Pos2::new(center.x + radius, screen.top()), screen.max), 0.0, black);
-
-    // Mask corners of the bounding square with a thick black ring
-    let ring_thick = radius * 0.48;
-    painter.circle_stroke(center, radius + ring_thick * 0.5, Stroke::new(ring_thick, black));
-
-    // Iconic CS 1.6 thin black sniper crosshairs + mil-dots + red center dot
-    let hair = Stroke::new(1.2, black);
-    painter.line_segment([Pos2::new(center.x - radius, center.y), Pos2::new(center.x + radius, center.y)], hair);
-    painter.line_segment([Pos2::new(center.x, center.y - radius), Pos2::new(center.x, center.y + radius)], hair);
-
-    for step in 1..=3 {
-        let d = (step as f32) * (radius * 0.22);
-        let tick = 5.0;
-        painter.line_segment([Pos2::new(center.x + d, center.y - tick), Pos2::new(center.x + d, center.y + tick)], hair);
-        painter.line_segment([Pos2::new(center.x - d, center.y - tick), Pos2::new(center.x - d, center.y + tick)], hair);
-        painter.line_segment([Pos2::new(center.x - tick, center.y + d), Pos2::new(center.x + tick, center.y + d)], hair);
-        painter.line_segment([Pos2::new(center.x - tick, center.y - d), Pos2::new(center.x + tick, center.y - d)], hair);
+    // Solid black pillars outside the centered 1:1 scope square.
+    if left > screen.left() {
+        painter.rect_filled(
+            Rect::from_min_max(screen.min, Pos2::new(left, screen.bottom())),
+            0.0,
+            black,
+        );
+    }
+    if right < screen.right() {
+        painter.rect_filled(
+            Rect::from_min_max(Pos2::new(right, screen.top()), screen.max),
+            0.0,
+            black,
+        );
+    }
+    if top > screen.top() {
+        painter.rect_filled(
+            Rect::from_min_max(screen.min, Pos2::new(screen.right(), top)),
+            0.0,
+            black,
+        );
+    }
+    if bottom < screen.bottom() {
+        painter.rect_filled(
+            Rect::from_min_max(Pos2::new(screen.left(), bottom), screen.max),
+            0.0,
+            black,
+        );
     }
 
-    painter.circle_filled(center, 2.2, Color32::from_rgb(230, 30, 20));
+    if let Some([nw, ne, sw, se]) = sprites.and_then(|s| s.scope_arcs.as_ref()) {
+        let uv_full = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+        painter.image(
+            nw.id(),
+            Rect::from_min_max(Pos2::new(left, top), center),
+            uv_full,
+            Color32::WHITE,
+        );
+        painter.image(
+            ne.id(),
+            Rect::from_min_max(Pos2::new(center.x, top), Pos2::new(right, center.y)),
+            uv_full,
+            Color32::WHITE,
+        );
+        painter.image(
+            sw.id(),
+            Rect::from_min_max(Pos2::new(left, center.y), Pos2::new(center.x, bottom)),
+            uv_full,
+            Color32::WHITE,
+        );
+        painter.image(
+            se.id(),
+            Rect::from_min_max(center, Pos2::new(right, bottom)),
+            uv_full,
+            Color32::WHITE,
+        );
+    } else {
+        // Headless fallback when VFS scope textures are absent: clean black corner mask, no mil-dots.
+        let ring_thick = half * 0.48;
+        painter.circle_stroke(center, half + ring_thick * 0.5, Stroke::new(ring_thick, black));
+    }
+
+    // Full-screen 1 px black horizontal and vertical hairlines (zero mil-dots, zero red center dot).
+    let hx_y = center.y.floor();
+    let vx_x = center.x.floor();
+    painter.rect_filled(
+        Rect::from_min_max(Pos2::new(screen.left(), hx_y), Pos2::new(screen.right(), hx_y + 1.0)),
+        0.0,
+        black,
+    );
+    painter.rect_filled(
+        Rect::from_min_max(Pos2::new(vx_x, screen.top()), Pos2::new(vx_x + 1.0, screen.bottom())),
+        0.0,
+        black,
+    );
 }
 
 /// The colour of a `TeamInfo` team name.
@@ -3128,5 +3277,51 @@ mod tests {
 
         assert_eq!(radar_player_dot_style(true, 2), (4, [185, 20, 20, 235]));
         assert_eq!(radar_player_dot_style(false, 2), (2, [150, 75, 250, 235]));
+    }
+
+    #[test]
+    fn sniper_scope_loads_from_vfs_and_renders_clean_crosshair_without_mildots() {
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0));
+        let mut sprites: Option<HudSprites> = None;
+
+        if let Some(root) = std::env::var_os("CS16_GAMEDIR")
+            && let Ok(vfs) = cs_vfs::Vfs::discover(
+                Some(std::path::Path::new(&root)),
+                cs_vfs::VfsConfig::default(),
+            )
+        {
+            let spr = load_sniper_scope_sprite(&vfs).expect("sniper_scope.spr loads from VFS");
+            assert!(!spr.frames.is_empty());
+            assert_eq!(spr.tex_format, SpriteTexFormat::AlphaTest);
+            let loaded = HudSprites::load(&ctx, &vfs);
+            assert!(loaded.has_scope_arcs(), "scope_arc*.tga must load in HudSprites");
+            assert!(loaded.has_sniper_scope_sprite(), "sniper_scope.spr must load in HudSprites");
+            sprites = Some(loaded);
+        } else {
+            eprintln!("SKIPPED retail sniper_scope.spr VFS check: CS16_GAMEDIR not available");
+        }
+
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        ctx.begin_pass(input);
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Background,
+            egui::Id::unique("test_sniper_scope"),
+        ));
+        draw_sniper_scope(&painter, screen, sprites.as_ref());
+        let mut out = ctx.end_pass();
+        out.textures_delta.clear();
+        let shapes: Vec<_> = out.shapes.iter().map(|s| &s.shape).collect();
+        assert!(!shapes.is_empty());
+        // Zero red center dot and zero mil-dot ticks: every painted rect/circle/mesh uses pure black or white-tinted scope arc texture.
+        let red = Color32::from_rgb(230, 30, 20);
+        for sh in shapes {
+            if let egui::epaint::Shape::Circle(c) = sh {
+                assert_ne!(c.fill, red, "sniper scope must not draw an invented red center dot");
+            }
+        }
     }
 }

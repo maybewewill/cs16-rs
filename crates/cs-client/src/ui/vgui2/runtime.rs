@@ -595,7 +595,10 @@ impl VguiRuntime {
         };
         let mut out = Vec::new();
         let push_node = |c: &VguiControlSpec, rect: [f32; 4], out: &mut Vec<VguiLayoutNode>| {
-            let label = loc.map_or(c.label_text.as_str(), |l| l.resolve(&c.label_text)).to_string();
+            let label = match loc {
+                Some(l) if c.label_text.contains('#') => l.resolve_inline(&c.label_text, None),
+                _ => c.label_text.clone(),
+            };
             out.push(VguiLayoutNode {
                 field_name: c.field_name.clone(),
                 control_name: c.control_name.clone(),
@@ -625,7 +628,10 @@ impl VguiRuntime {
             ) {
                 for c in controls {
                     let rect = resolve_control_rect_mode(c, parent, mode, orig_parent);
-                    let label = loc.map_or(c.label_text.as_str(), |l| l.resolve(&c.label_text)).to_string();
+                    let label = match loc {
+                        Some(l) if c.label_text.contains('#') => l.resolve_inline(&c.label_text, None),
+                        _ => c.label_text.clone(),
+                    };
                     out.push(VguiLayoutNode {
                         field_name: c.field_name.clone(),
                         control_name: c.control_name.clone(),
@@ -841,13 +847,34 @@ impl VguiRuntime {
         painter.rect_filled(Rect::from_min_max(Pos2::new(r.left(), r.bottom() - 1.0), r.max), 0.0, border_col);
         painter.rect_filled(Rect::from_min_max(Pos2::new(r.right() - 1.0, r.top()), r.max), 0.0, border_col);
 
-        let text_rect = r.shrink2(Vec2::new(6.0, 0.0));
+        let text_rect = client_button_text_rect(r, align);
         let (clean_label, _) = crate::ui::vgui2::font_atlas::strip_vgui_hotkey(label);
+        let client_fonts = self.client_scheme.fonts.clone();
+        let measured_w = self
+            .font_atlas
+            .measure_text_with_scale(
+                ctx,
+                vfs,
+                &client_fonts,
+                "client",
+                font_name,
+                screen_h,
+                &clean_label,
+                1.0,
+            )
+            .x;
+        // Preserve 1.0 scale when the caption fits (all standard CS 1.6 English buy buttons),
+        // and shrink cleanly only when long translations or narrow viewports would clip.
+        let fit_scale = if measured_w > text_rect.width() && measured_w > 1.0 {
+            (text_rect.width() / measured_w).clamp(0.75, 1.0)
+        } else {
+            1.0
+        };
         self.font_atlas.paint_text_with_scale(
             painter,
             ctx,
             vfs,
-            &self.client_scheme.fonts,
+            &client_fonts,
             "client",
             font_name,
             screen_h,
@@ -856,7 +883,7 @@ impl VguiRuntime {
             fg,
             align,
             false,
-            1.0,
+            fit_scale,
         );
         resp
     }
@@ -1308,4 +1335,18 @@ pub fn default_sheet_state(tabs: &[&str]) -> VguiPropertySheetState {
 
 pub fn default_rich_text() -> VguiRichTextState {
     VguiRichTextState::default()
+}
+
+/// Compute padded text rect inside a `ClientScheme.res` button so `West`-aligned labels
+/// like `"6 PRIMARY AMMO"` and `"7 SECONDARY AMMO"` keep crisp left inset without right-side clipping.
+pub fn client_button_text_rect(rect: Rect, align: TextAlignment) -> Rect {
+    let (left_pad, right_pad) = match align {
+        TextAlignment::West | TextAlignment::NorthWest | TextAlignment::SouthWest => (4.0, 2.0),
+        TextAlignment::East | TextAlignment::NorthEast | TextAlignment::SouthEast => (2.0, 4.0),
+        TextAlignment::Center | TextAlignment::North | TextAlignment::South => (3.0, 3.0),
+    };
+    Rect::from_min_max(
+        Pos2::new((rect.left() + left_pad).min(rect.right()), rect.top()),
+        Pos2::new((rect.right() - right_pad).max(rect.left() + left_pad), rect.bottom()),
+    )
 }
