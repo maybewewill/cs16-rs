@@ -4,11 +4,16 @@
 //! Zero `unsafe` code; bounded ring-buffer memory budgets prevent unbounded growth across
 //! long-running dedicated server sessions.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt::Write as _;
 
+use cs_assets::scheme::load_overview_image_rgba;
+use cs_assets::vgui_scripts::OverviewSpec;
 use cs_clientcore::DemoRecorder;
 use cs_proto48::demo::{DEMO_MAGIC, DemoClientData, DemoNetMsgInfo};
+use cs_vfs::Vfs;
+use image::ImageEncoder;
+use image::codecs::png::PngEncoder;
 
 /// Default maximum number of completed round `.dem` files retained in memory.
 pub const DEFAULT_MAX_REPLAY_ROUNDS: usize = 32;
@@ -18,6 +23,18 @@ pub const MAX_SINGLE_REPLAY_BYTES: usize = 16 * 1024 * 1024;
 pub const DEFAULT_MAX_REPLAY_STORE_BYTES: usize = 128 * 1024 * 1024;
 /// Maximum number of round summaries retained in `MatchStatsTracker`.
 pub const MAX_ROUND_HISTORY: usize = 256;
+/// Sampling frequency for `Round2dTimeline` player state snapshots (10 Hz).
+pub const TIMELINE_SAMPLE_HZ: u32 = 10;
+/// Sampling interval in seconds corresponding to `TIMELINE_SAMPLE_HZ`.
+pub const TIMELINE_SAMPLE_INTERVAL_SECS: f64 = 0.1;
+/// Hard serialized JSON size cap per round 2D timeline (512 KiB).
+pub const MAX_TIMELINE_BYTES: usize = 512 * 1024;
+/// Maximum number of 10 Hz frames buffered during a single round before throttling (6 minutes).
+const MAX_TIMELINE_FRAMES_RAW: usize = 3600;
+/// Maximum discrete shot events buffered in a single round timeline.
+const MAX_TIMELINE_SHOTS_RAW: usize = 2048;
+/// Maximum grenade trajectories buffered in a single round timeline.
+const MAX_TIMELINE_GRENADES_RAW: usize = 256;
 
 const DEFAULT_GAME_DIR: &str = "cstrike";
 const PROTO48_NET_PROTOCOL: i32 = 48;
@@ -119,6 +136,782 @@ impl TeamSide {
     }
 }
 
+/// Validates a map name (`[A-Za-z0-9_-]`, 1..=64 bytes, no traversal) for overview routes.
+pub fn valid_map_overview_name(name: &str) -> bool {
+    let clean = name.strip_suffix(".bsp").unwrap_or(name);
+    !clean.is_empty()
+        && clean.len() <= 64
+        && clean
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+fn fmt_finite_f32(value: f32, decimals: usize) -> String {
+    let safe = if value.is_finite() { value } else { 0.0 };
+    format!("{safe:.decimals$}")
+}
+
+fn write_vec3_json(out: &mut String, v: [f32; 3], decimals: usize) {
+    out.push('[');
+    out.push_str(&fmt_finite_f32(v[0], decimals));
+    out.push(',');
+    out.push_str(&fmt_finite_f32(v[1], decimals));
+    out.push(',');
+    out.push_str(&fmt_finite_f32(v[2], decimals));
+    out.push(']');
+}
+
+/// Compact per-player state snapshot recorded at 10 Hz for HLTV-style 2D round replay.
+/// Serializes as `[slot, team, alive, hp, x, y, z, yaw_deg, active_weapon_id, has_c4, flashed_alpha]`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TimelinePlayerSample {
+    pub slot: u8,
+    pub team: u8,
+    pub alive: bool,
+    pub hp: i32,
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub yaw_deg: f32,
+    pub active_weapon_id: u8,
+    pub has_c4: bool,
+    pub flashed_alpha: u8,
+}
+
+impl TimelinePlayerSample {
+    fn write_compact_json(&self, out: &mut String) {
+        let alive_bit = u8::from(self.alive);
+        let c4_bit = u8::from(self.has_c4);
+        let hp = self.hp.clamp(0, 999);
+        let _ = write!(
+            out,
+            "[{},{},{},{},{},{},{},{},{},{},{}]",
+            self.slot,
+            self.team,
+            alive_bit,
+            hp,
+            fmt_finite_f32(self.x, 1),
+            fmt_finite_f32(self.y, 1),
+            fmt_finite_f32(self.z, 1),
+            fmt_finite_f32(self.yaw_deg, 1),
+            self.active_weapon_id,
+            c4_bit,
+            self.flashed_alpha,
+        );
+    }
+}
+
+/// Player roster entry included in [`Round2dTimeline`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimelinePlayerMeta {
+    pub slot: u8,
+    pub name: String,
+    pub team: u8,
+    pub is_bot: bool,
+}
+
+/// One 10 Hz tick of player snapshots in [`Round2dTimeline`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimelineTickFrame {
+    pub t: f64,
+    pub players: Vec<TimelinePlayerSample>,
+}
+
+/// Discrete shot tracer event for 2D replay visualization.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimelineShotEvent {
+    pub tick: u32,
+    pub slot: u8,
+    pub from: [f32; 3],
+    pub to: [f32; 3],
+    pub weapon: u8,
+}
+
+/// Grenade category for 2D replay rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineGrenadeKind {
+    He,
+    Flash,
+    Smoke,
+}
+
+impl TimelineGrenadeKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::He => "he",
+            Self::Flash => "flash",
+            Self::Smoke => "smoke",
+        }
+    }
+}
+
+/// Thrown grenade flight trajectory and detonation point.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimelineGrenadeEvent {
+    pub id: u32,
+    pub kind: TimelineGrenadeKind,
+    pub start_tick: u32,
+    pub trajectory: Vec<[f32; 3]>,
+    pub detonate_tick: Option<u32>,
+    pub detonate_pos: Option<[f32; 3]>,
+}
+
+/// C4 state transition in a round timeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineBombState {
+    Dropped,
+    Pickup,
+    Planted,
+    Defused,
+    Exploded,
+}
+
+impl TimelineBombState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Dropped => "dropped",
+            Self::Pickup => "pickup",
+            Self::Planted => "planted",
+            Self::Defused => "defused",
+            Self::Exploded => "exploded",
+        }
+    }
+}
+
+/// C4 state event in [`Round2dTimeline`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimelineBombEvent {
+    pub tick: u32,
+    pub state: TimelineBombState,
+    pub pos: [f32; 3],
+}
+
+/// Killfeed event in [`Round2dTimeline`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimelineKillEvent {
+    pub tick: u32,
+    pub killer: Option<u8>,
+    pub victim: u8,
+    pub weapon: String,
+    pub headshot: bool,
+}
+
+/// Complete 10 Hz 2D round replay timeline served by `GET /api/replays/<id>/timeline`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Round2dTimeline {
+    pub id: String,
+    pub round_number: u32,
+    pub map_name: String,
+    pub winner: RoundWinner,
+    pub reason: String,
+    pub duration_secs: f64,
+    pub sample_rate_hz: u32,
+    pub score_ct: u32,
+    pub score_t: u32,
+    pub players: Vec<TimelinePlayerMeta>,
+    pub frames: Vec<TimelineTickFrame>,
+    pub shots: Vec<TimelineShotEvent>,
+    pub grenades: Vec<TimelineGrenadeEvent>,
+    pub bombs: Vec<TimelineBombEvent>,
+    pub kills: Vec<TimelineKillEvent>,
+}
+
+impl Round2dTimeline {
+    /// Serializes the timeline into strict JSON, guaranteed not to exceed `max_bytes`
+    /// (default [`MAX_TIMELINE_BYTES`] = 512 KiB).
+    pub fn to_bounded_json(&self, max_bytes: usize) -> String {
+        let mut working = self.clone();
+        let mut json = working.encode_json_unbounded();
+        if json.len() <= max_bytes {
+            return json;
+        }
+
+        // First thin dense intermediate frames while keeping endpoints and key tick counts aligned
+        // only by dropping every other frame in a cloned copy? Instead of shifting indices,
+        // keep frame indices stable by clearing player payloads on thinned frames or truncating
+        // excess trailing shots/frames cleanly. Clearing oldest/alternating frames' snapshots
+        // preserves tick indices 1:1 with events, or truncating trailing frames when very long.
+        let mut stride = 2usize;
+        while json.len() > max_bytes && stride <= 16 {
+            let mut thinned = self.clone();
+            for (idx, frame) in thinned.frames.iter_mut().enumerate() {
+                if idx != 0
+                    && idx + 1 != self.frames.len()
+                    && idx % stride != 0
+                {
+                    frame.players.clear();
+                }
+            }
+            // Drop trailing empty-player ticks only if needed; better keep empty-player ticks or
+            // drop half of shots if still over budget.
+            if stride >= 4 && thinned.shots.len() > 256 {
+                let keep = thinned.shots.len() / 2;
+                thinned.shots.drain(..thinned.shots.len() - keep);
+            }
+            json = thinned.encode_json_unbounded();
+            working = thinned;
+            stride *= 2;
+        }
+
+        while json.len() > max_bytes && !working.shots.is_empty() {
+            let drop = (working.shots.len() / 2).max(1);
+            working.shots.drain(..drop);
+            json = working.encode_json_unbounded();
+        }
+        while json.len() > max_bytes && !working.grenades.is_empty() {
+            working.grenades.remove(0);
+            json = working.encode_json_unbounded();
+        }
+        while json.len() > max_bytes && working.frames.len() > 1 {
+            let new_len = (working.frames.len() / 2).max(1);
+            working.frames.truncate(new_len);
+            json = working.encode_json_unbounded();
+        }
+        json
+    }
+
+    fn encode_json_unbounded(&self) -> String {
+        let mut out = String::with_capacity(1024 + self.frames.len() * 192);
+        let _ = write!(
+            out,
+            "{{\"id\":{},\"round_number\":{},\"map\":{},\"winner\":{},\"reason\":{},\"duration_secs\":{},\"sample_rate_hz\":{},\"score_ct\":{},\"score_t\":{},\"players\":[",
+            escape_json_str(&self.id),
+            self.round_number,
+            escape_json_str(&self.map_name),
+            escape_json_str(self.winner.as_str()),
+            escape_json_str(&self.reason),
+            fmt_finite_f64(self.duration_secs, 2),
+            self.sample_rate_hz,
+            self.score_ct,
+            self.score_t,
+        );
+        for (idx, p) in self.players.iter().enumerate() {
+            if idx > 0 {
+                out.push(',');
+            }
+            let _ = write!(
+                out,
+                "{{\"slot\":{},\"name\":{},\"team\":{},\"is_bot\":{}}}",
+                p.slot,
+                escape_json_str(&p.name),
+                p.team,
+                p.is_bot,
+            );
+        }
+        out.push_str("],\"frames\":[");
+        for (idx, f) in self.frames.iter().enumerate() {
+            if idx > 0 {
+                out.push(',');
+            }
+            let _ = write!(out, "{{\"t\":{},\"p\":[", fmt_finite_f64(f.t, 2));
+            for (pidx, sample) in f.players.iter().enumerate() {
+                if pidx > 0 {
+                    out.push(',');
+                }
+                sample.write_compact_json(&mut out);
+            }
+            out.push_str("]}");
+        }
+        out.push_str("],\"shots\":[");
+        for (idx, s) in self.shots.iter().enumerate() {
+            if idx > 0 {
+                out.push(',');
+            }
+            let _ = write!(out, "{{\"tick\":{},\"slot\":{},\"from\":", s.tick, s.slot);
+            write_vec3_json(&mut out, s.from, 1);
+            out.push_str(",\"to\":");
+            write_vec3_json(&mut out, s.to, 1);
+            let _ = write!(out, ",\"weapon\":{}}}", s.weapon);
+        }
+        out.push_str("],\"grenades\":[");
+        for (idx, g) in self.grenades.iter().enumerate() {
+            if idx > 0 {
+                out.push(',');
+            }
+            let _ = write!(
+                out,
+                "{{\"id\":{},\"kind\":{},\"start_tick\":{},\"trajectory\":[",
+                g.id,
+                escape_json_str(g.kind.as_str()),
+                g.start_tick,
+            );
+            for (pidx, pt) in g.trajectory.iter().enumerate() {
+                if pidx > 0 {
+                    out.push(',');
+                }
+                write_vec3_json(&mut out, *pt, 1);
+            }
+            out.push_str("],\"detonate_tick\":");
+            match g.detonate_tick {
+                Some(dt) => {
+                    let _ = write!(out, "{dt}");
+                }
+                None => out.push_str("null"),
+            }
+            out.push_str(",\"detonate_pos\":");
+            match g.detonate_pos {
+                Some(pos) => write_vec3_json(&mut out, pos, 1),
+                None => out.push_str("null"),
+            }
+            out.push('}');
+        }
+        out.push_str("],\"bombs\":[");
+        for (idx, b) in self.bombs.iter().enumerate() {
+            if idx > 0 {
+                out.push(',');
+            }
+            let _ = write!(
+                out,
+                "{{\"tick\":{},\"state\":{},\"pos\":",
+                b.tick,
+                escape_json_str(b.state.as_str()),
+            );
+            write_vec3_json(&mut out, b.pos, 1);
+            out.push('}');
+        }
+        out.push_str("],\"kills\":[");
+        for (idx, k) in self.kills.iter().enumerate() {
+            if idx > 0 {
+                out.push(',');
+            }
+            let killer_json = match k.killer {
+                Some(id) => id.to_string(),
+                None => "null".to_string(),
+            };
+            let _ = write!(
+                out,
+                "{{\"tick\":{},\"killer\":{},\"victim\":{},\"weapon\":{},\"headshot\":{}}}",
+                k.tick,
+                killer_json,
+                k.victim,
+                escape_json_str(&k.weapon),
+                k.headshot,
+            );
+        }
+        out.push_str("]}");
+        out
+    }
+}
+
+/// Incremental 10 Hz timeline recorder paired with an active round recording.
+#[derive(Debug, Clone)]
+pub struct Round2dTimelineRecorder {
+    started_at_secs: f64,
+    last_sample_secs: Option<f64>,
+    next_grenade_id: u32,
+    grenade_index_by_key: HashMap<u32, usize>,
+    players: BTreeMap<u8, TimelinePlayerMeta>,
+    frames: Vec<TimelineTickFrame>,
+    shots: Vec<TimelineShotEvent>,
+    grenades: Vec<TimelineGrenadeEvent>,
+    bombs: Vec<TimelineBombEvent>,
+    kills: Vec<TimelineKillEvent>,
+}
+
+impl Round2dTimelineRecorder {
+    pub fn new(started_at_secs: f64) -> Self {
+        Self {
+            started_at_secs,
+            last_sample_secs: None,
+            next_grenade_id: 1,
+            grenade_index_by_key: HashMap::new(),
+            players: BTreeMap::new(),
+            frames: Vec::new(),
+            shots: Vec::new(),
+            grenades: Vec::new(),
+            bombs: Vec::new(),
+            kills: Vec::new(),
+        }
+    }
+
+    pub fn tick_for_time(&self, now_secs: f64) -> u32 {
+        let elapsed = (now_secs - self.started_at_secs).max(0.0);
+        let raw = (elapsed * f64::from(TIMELINE_SAMPLE_HZ)).round();
+        if raw.is_finite() && raw >= 0.0 {
+            (raw as u64).min(u64::from(u32::MAX)) as u32
+        } else {
+            0
+        }
+    }
+
+    pub fn set_player_info(&mut self, slot: u8, name: &str, team: u8, is_bot: bool) {
+        self.players.insert(
+            slot,
+            TimelinePlayerMeta {
+                slot,
+                name: name.to_string(),
+                team,
+                is_bot,
+            },
+        );
+    }
+
+    /// Samples a 10 Hz frame if `TIMELINE_SAMPLE_INTERVAL_SECS` has elapsed since the last sample.
+    pub fn sample_if_due(&mut self, now_secs: f64, players: &[TimelinePlayerSample]) -> bool {
+        if self.frames.len() >= MAX_TIMELINE_FRAMES_RAW {
+            return false;
+        }
+        if let Some(last) = self.last_sample_secs
+            && now_secs - last < TIMELINE_SAMPLE_INTERVAL_SECS - 1e-6
+        {
+            return false;
+        }
+        self.last_sample_secs = Some(now_secs);
+        let t = (now_secs - self.started_at_secs).max(0.0);
+        self.frames.push(TimelineTickFrame {
+            t,
+            players: players.to_vec(),
+        });
+        true
+    }
+
+    pub fn record_shot(
+        &mut self,
+        now_secs: f64,
+        slot: u8,
+        from: [f32; 3],
+        to: [f32; 3],
+        weapon: u8,
+    ) {
+        if self.shots.len() >= MAX_TIMELINE_SHOTS_RAW {
+            return;
+        }
+        self.shots.push(TimelineShotEvent {
+            tick: self.tick_for_time(now_secs),
+            slot,
+            from,
+            to,
+            weapon,
+        });
+    }
+
+    pub fn record_grenade_pos(
+        &mut self,
+        now_secs: f64,
+        entity_key: u32,
+        kind: TimelineGrenadeKind,
+        pos: [f32; 3],
+    ) {
+        let tick = self.tick_for_time(now_secs);
+        let idx = if let Some(&existing) = self.grenade_index_by_key.get(&entity_key) {
+            existing
+        } else {
+            if self.grenades.len() >= MAX_TIMELINE_GRENADES_RAW {
+                return;
+            }
+            let id = self.next_grenade_id;
+            self.next_grenade_id = self.next_grenade_id.saturating_add(1);
+            let idx = self.grenades.len();
+            self.grenades.push(TimelineGrenadeEvent {
+                id,
+                kind,
+                start_tick: tick,
+                trajectory: Vec::new(),
+                detonate_tick: None,
+                detonate_pos: None,
+            });
+            self.grenade_index_by_key.insert(entity_key, idx);
+            idx
+        };
+        if let Some(g) = self.grenades.get_mut(idx) {
+            let should_push = g.trajectory.last().is_none_or(|prev| {
+                let dx = prev[0] - pos[0];
+                let dy = prev[1] - pos[1];
+                let dz = prev[2] - pos[2];
+                dx * dx + dy * dy + dz * dz >= 4.0
+            });
+            if should_push && g.trajectory.len() < 128 {
+                g.trajectory.push(pos);
+            }
+        }
+    }
+
+    pub fn detonate_grenade(&mut self, now_secs: f64, entity_key: u32, pos: Option<[f32; 3]>) {
+        let tick = self.tick_for_time(now_secs);
+        if let Some(idx) = self.grenade_index_by_key.remove(&entity_key)
+            && let Some(g) = self.grenades.get_mut(idx)
+        {
+            g.detonate_tick = Some(tick);
+            g.detonate_pos = pos.or_else(|| g.trajectory.last().copied());
+        }
+    }
+
+    pub fn record_bomb(&mut self, now_secs: f64, state: TimelineBombState, pos: [f32; 3]) {
+        if self.bombs.len() >= 128 {
+            return;
+        }
+        self.bombs.push(TimelineBombEvent {
+            tick: self.tick_for_time(now_secs),
+            state,
+            pos,
+        });
+    }
+
+    pub fn record_kill(
+        &mut self,
+        now_secs: f64,
+        killer: Option<u8>,
+        victim: u8,
+        weapon: &str,
+        headshot: bool,
+    ) {
+        if self.kills.len() >= 256 {
+            return;
+        }
+        self.kills.push(TimelineKillEvent {
+            tick: self.tick_for_time(now_secs),
+            killer,
+            victim,
+            weapon: weapon.to_string(),
+            headshot,
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn finish(
+        self,
+        id: String,
+        round_number: u32,
+        map_name: String,
+        winner: RoundWinner,
+        reason: String,
+        now_secs: f64,
+        score_ct: u32,
+        score_t: u32,
+    ) -> (Round2dTimeline, String) {
+        let duration_secs = (now_secs - self.started_at_secs).max(0.0);
+        let timeline = Round2dTimeline {
+            id,
+            round_number,
+            map_name,
+            winner,
+            reason,
+            duration_secs,
+            sample_rate_hz: TIMELINE_SAMPLE_HZ,
+            score_ct,
+            score_t,
+            players: self.players.into_values().collect(),
+            frames: self.frames,
+            shots: self.shots,
+            grenades: self.grenades,
+            bombs: self.bombs,
+            kills: self.kills,
+        };
+        let bounded_json = timeline.to_bounded_json(MAX_TIMELINE_BYTES);
+        (timeline, bounded_json)
+    }
+}
+
+/// Overview metadata and optional PNG image bytes for `GET /api/map-overview/<map>{,.png}`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MapOverviewBundle {
+    pub map: String,
+    pub has_overview: bool,
+    pub zoom: f32,
+    pub origin: [f32; 3],
+    pub rotated: bool,
+    pub mins: [f32; 3],
+    pub maxs: [f32; 3],
+    pub png_bytes: Option<Vec<u8>>,
+}
+
+impl MapOverviewBundle {
+    pub fn to_json(&self) -> String {
+        let image_url = if self.has_overview {
+            escape_json_str(&format!("/api/map-overview/{}.png", self.map))
+        } else {
+            "null".to_string()
+        };
+        let mut out = String::with_capacity(256);
+        let _ = write!(
+            out,
+            "{{\"map\":{},\"has_overview\":{},\"zoom\":{},\"origin\":",
+            escape_json_str(&self.map),
+            self.has_overview,
+            fmt_finite_f32(self.zoom, 4),
+        );
+        write_vec3_json(&mut out, self.origin, 2);
+        let _ = write!(out, ",\"rotated\":{},\"mins\":", self.rotated);
+        write_vec3_json(&mut out, self.mins, 2);
+        out.push_str(",\"maxs\":");
+        write_vec3_json(&mut out, self.maxs, 2);
+        let _ = write!(out, ",\"image_url\":{image_url}}}");
+        out
+    }
+}
+
+/// Reads world model (`models[0]`) `mins`/`maxs` from GoldSrc BSP v30 `LUMP_MODELS` without
+/// decoding textures or lightmaps.
+pub fn read_bsp_world_bounds(bsp_bytes: &[u8]) -> Option<([f32; 3], [f32; 3])> {
+    const BSP_V30: i32 = 30;
+    const LUMP_MODELS: usize = 14;
+    if bsp_bytes.len() < 4 + 15 * 8 {
+        return None;
+    }
+    let version = i32::from_le_bytes(bsp_bytes[0..4].try_into().ok()?);
+    if version != BSP_V30 {
+        return None;
+    }
+    let lump_off = 4 + LUMP_MODELS * 8;
+    let off = i32::from_le_bytes(bsp_bytes[lump_off..lump_off + 4].try_into().ok()?);
+    let len = i32::from_le_bytes(bsp_bytes[lump_off + 4..lump_off + 8].try_into().ok()?);
+    if off < 0 || len < 24 {
+        return None;
+    }
+    let start = off as usize;
+    let end = start.checked_add(24)?;
+    let slice = bsp_bytes.get(start..end)?;
+    let f = |i: usize| -> Option<f32> {
+        let v = f32::from_le_bytes(slice[i..i + 4].try_into().ok()?);
+        v.is_finite().then_some(v)
+    };
+    let mins = [f(0)?, f(4)?, f(8)?];
+    let maxs = [f(12)?, f(16)?, f(20)?];
+    Some((mins, maxs))
+}
+
+/// Encodes an RGBA8 image buffer into PNG bytes.
+pub fn encode_rgba_to_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|px| px.checked_mul(4))
+        .ok_or_else(|| "overview image dimensions overflow".to_string())?;
+    if rgba.len() != expected {
+        return Err(format!(
+            "overview RGBA length {} != expected {}",
+            rgba.len(),
+            expected
+        ));
+    }
+    let mut out = Vec::new();
+    PngEncoder::new(&mut out)
+        .write_image(rgba, width, height, image::ExtendedColorType::Rgba8)
+        .map_err(|e| format!("failed to encode overview PNG: {e}"))?;
+    Ok(out)
+}
+
+/// Converts a GoldSrc `overviews/<map>.bmp` (or TGA/PNG) byte buffer to RGBA8 PNG with green
+/// `(0, 255, 0)` / palette index `255` (when green-keyed or explicitly transparent) chromakeying.
+pub fn convert_overview_bmp_to_png(vfs: &Vfs, image_path: &str) -> Result<Vec<u8>, String> {
+    let mut img = load_overview_image_rgba(vfs, image_path)
+        .map_err(|e| format!("failed to decode overview `{image_path}`: {e}"))?;
+    // Also honor explicit 8-bit uncompressed BMP palette index 255 if its palette color is
+    // pure GoldSrc chromakey green or magenta/cyan key, while never punching holes in maps
+    // whose index 255 holds wall/sky shades.
+    if image_path.to_ascii_lowercase().ends_with(".bmp")
+        && let Ok(raw) = vfs.read_bytes(image_path)
+    {
+        apply_bmp_index_255_chromakey(&raw, img.width, img.height, &mut img.rgba);
+    }
+    encode_rgba_to_png(img.width, img.height, &img.rgba)
+}
+
+fn apply_bmp_index_255_chromakey(raw: &[u8], width: u32, height: u32, rgba: &mut [u8]) {
+    if raw.len() < 54 + 256 * 4 || &raw[0..2] != b"BM" {
+        return;
+    }
+    let dib_size = u32::from_le_bytes([raw[14], raw[15], raw[16], raw[17]]) as usize;
+    let bpp = u16::from_le_bytes([raw[28], raw[29]]);
+    let compression = u32::from_le_bytes([raw[30], raw[31], raw[32], raw[33]]);
+    if bpp != 8 || compression != 0 || dib_size < 40 {
+        return;
+    }
+    let pal_off = 14 + dib_size;
+    let Some(p255) = raw.get(pal_off + 255 * 4..pal_off + 256 * 4) else {
+        return;
+    };
+    let (b, g, r) = (p255[0], p255[1], p255[2]);
+    let is_key_color = (r <= 12 && g >= 242 && b <= 12) || (r >= 245 && g <= 12 && b >= 245);
+    if !is_key_color {
+        return;
+    }
+    let pixel_offset = u32::from_le_bytes([raw[10], raw[11], raw[12], raw[13]]) as usize;
+    let raw_h = i32::from_le_bytes([raw[22], raw[23], raw[24], raw[25]]);
+    let top_down = raw_h < 0;
+    let w = width as usize;
+    let h = height as usize;
+    let row_stride = (w + 3) & !3;
+    for y in 0..h {
+        let src_row = if top_down { y } else { h - 1 - y };
+        let row_start = pixel_offset.saturating_add(src_row.saturating_mul(row_stride));
+        let Some(src) = raw.get(row_start..row_start + w) else {
+            break;
+        };
+        for (x, &idx) in src.iter().enumerate() {
+            if idx == 255 {
+                let dst = (y * w + x) * 4;
+                if let Some(px) = rgba.get_mut(dst..dst + 4) {
+                    px.copy_from_slice(&[0, 0, 0, 0]);
+                }
+            }
+        }
+    }
+}
+
+/// Loads overview spec, PNG bytes (if `overviews/<map>.txt` + image exist), and BSP world bounds
+/// for `map_name` from `vfs`.
+pub fn load_map_overview_from_vfs(
+    vfs: &Vfs,
+    map_name: &str,
+    fallback_bounds: Option<([f32; 3], [f32; 3])>,
+) -> Option<MapOverviewBundle> {
+    let clean = map_name.strip_suffix(".bsp").unwrap_or(map_name);
+    if !valid_map_overview_name(clean) {
+        return None;
+    }
+
+    let bsp_path = format!("maps/{clean}.bsp");
+    let bsp_bounds = vfs
+        .read_bytes(&bsp_path)
+        .ok()
+        .and_then(|bytes| read_bsp_world_bounds(&bytes));
+    let has_bsp = bsp_bounds.is_some() || vfs.exists(&bsp_path);
+    let (mins, maxs) = bsp_bounds
+        .or(fallback_bounds)
+        .unwrap_or(([-2048.0, -2048.0, -512.0], [2048.0, 2048.0, 512.0]));
+
+    if let Some(spec) = OverviewSpec::load(vfs, clean) {
+        let candidates = [
+            spec.image.as_str(),
+            &format!("overviews/{clean}.bmp"),
+            &format!("overviews/{clean}.tga"),
+            &format!("overviews/{clean}.png"),
+        ];
+        for cand in candidates {
+            if cand.is_empty() {
+                continue;
+            }
+            if let Ok(png) = convert_overview_bmp_to_png(vfs, cand) {
+                return Some(MapOverviewBundle {
+                    map: clean.to_string(),
+                    has_overview: true,
+                    zoom: spec.zoom,
+                    origin: spec.origin,
+                    rotated: spec.rotated,
+                    mins,
+                    maxs,
+                    png_bytes: Some(png),
+                });
+            }
+        }
+    }
+
+    if has_bsp || fallback_bounds.is_some() {
+        return Some(MapOverviewBundle {
+            map: clean.to_string(),
+            has_overview: false,
+            zoom: 1.0,
+            origin: [0.0; 3],
+            rotated: false,
+            mins,
+            maxs,
+            png_bytes: None,
+        });
+    }
+
+    None
+}
+
 /// Metadata describing one completed round `.dem` replay.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RoundReplayMeta {
@@ -141,6 +934,7 @@ pub struct RoundReplayMeta {
 struct StoredRoundReplay {
     meta: RoundReplayMeta,
     demo_bytes: Vec<u8>,
+    timeline_json: Option<String>,
 }
 
 struct ActiveRoundRecording {
@@ -150,6 +944,7 @@ struct ActiveRoundRecording {
     started_at_secs: f64,
     seq_counter: i32,
     recorder: DemoRecorder,
+    timeline: Round2dTimelineRecorder,
 }
 
 /// Bounded ring-buffer store of per-round GoldSrc HLDEMO v5 (`.dem`) recordings.
@@ -200,7 +995,97 @@ impl RoundReplayStore {
             started_at_secs: now_secs,
             seq_counter: 0,
             recorder,
+            timeline: Round2dTimelineRecorder::new(now_secs),
         });
+    }
+
+    /// Registers or updates player metadata on the active round's 2D timeline.
+    pub fn set_timeline_player(&mut self, slot: u8, name: &str, team: u8, is_bot: bool) {
+        if let Some(active) = &mut self.active {
+            active.timeline.set_player_info(slot, name, team, is_bot);
+        }
+    }
+
+    /// Samples a 10 Hz frame of player states into the active round's 2D timeline.
+    pub fn sample_timeline_if_due(
+        &mut self,
+        now_secs: f64,
+        players: &[TimelinePlayerSample],
+    ) -> bool {
+        if let Some(active) = &mut self.active {
+            active.timeline.sample_if_due(now_secs, players)
+        } else {
+            false
+        }
+    }
+
+    /// Records a shot tracer into the active round's 2D timeline.
+    pub fn record_timeline_shot(
+        &mut self,
+        now_secs: f64,
+        slot: u8,
+        from: [f32; 3],
+        to: [f32; 3],
+        weapon: u8,
+    ) {
+        if let Some(active) = &mut self.active {
+            active.timeline.record_shot(now_secs, slot, from, to, weapon);
+        }
+    }
+
+    /// Records an active grenade's position into the active round's 2D timeline.
+    pub fn record_timeline_grenade_pos(
+        &mut self,
+        now_secs: f64,
+        entity_key: u32,
+        kind: TimelineGrenadeKind,
+        pos: [f32; 3],
+    ) {
+        if let Some(active) = &mut self.active {
+            active
+                .timeline
+                .record_grenade_pos(now_secs, entity_key, kind, pos);
+        }
+    }
+
+    /// Marks an active grenade as detonated in the active round's 2D timeline.
+    pub fn detonate_timeline_grenade(
+        &mut self,
+        now_secs: f64,
+        entity_key: u32,
+        pos: Option<[f32; 3]>,
+    ) {
+        if let Some(active) = &mut self.active {
+            active.timeline.detonate_grenade(now_secs, entity_key, pos);
+        }
+    }
+
+    /// Records a C4 state transition in the active round's 2D timeline.
+    pub fn record_timeline_bomb(
+        &mut self,
+        now_secs: f64,
+        state: TimelineBombState,
+        pos: [f32; 3],
+    ) {
+        if let Some(active) = &mut self.active {
+            active.timeline.record_bomb(now_secs, state, pos);
+        }
+    }
+
+    /// Records a killfeed event in the active round's 2D timeline.
+    pub fn record_timeline_kill(
+        &mut self,
+        now_secs: f64,
+        killer: Option<u8>,
+        victim: u8,
+        weapon: &str,
+        headshot: bool,
+    ) {
+        if let Some(active) = &mut self.active {
+            active
+                .timeline
+                .record_kill(now_secs, killer, victim, weapon, headshot);
+        }
     }
 
     /// Marks signon complete on the active round recording.
@@ -265,6 +1150,16 @@ impl RoundReplayStore {
             sanitize_id_segment(&active.map_name)
         );
         let duration_secs = (now_secs - active.started_at_secs).max(0.0);
+        let (_timeline, timeline_json) = active.timeline.finish(
+            id.clone(),
+            active.round_number,
+            active.map_name.clone(),
+            winner,
+            reason.to_string(),
+            now_secs,
+            score_ct,
+            score_t,
+        );
         let meta = RoundReplayMeta {
             id,
             round_number: active.round_number,
@@ -280,15 +1175,25 @@ impl RoundReplayStore {
             score_t,
             mvp_player,
         };
-        self.push_finished_demo(meta.clone(), bytes)?;
+        self.push_finished_demo_with_timeline(meta.clone(), bytes, Some(timeline_json))?;
         Ok(Some(meta))
     }
 
     /// Inserts an already-encoded HLDEMO v5 `.dem` buffer, enforcing ID and size guards.
+    #[allow(dead_code)]
     pub fn push_finished_demo(
+        &mut self,
+        meta: RoundReplayMeta,
+        demo_bytes: Vec<u8>,
+    ) -> Result<(), String> {
+        self.push_finished_demo_with_timeline(meta, demo_bytes, None)
+    }
+
+    fn push_finished_demo_with_timeline(
         &mut self,
         mut meta: RoundReplayMeta,
         demo_bytes: Vec<u8>,
+        timeline_json: Option<String>,
     ) -> Result<(), String> {
         if !valid_replay_id(&meta.id) {
             return Err(format!("invalid replay id `{}`", meta.id));
@@ -321,7 +1226,11 @@ impl RoundReplayStore {
         }
 
         self.total_bytes = self.total_bytes.saturating_add(demo_bytes.len());
-        self.rounds.push_back(StoredRoundReplay { meta, demo_bytes });
+        self.rounds.push_back(StoredRoundReplay {
+            meta,
+            demo_bytes,
+            timeline_json,
+        });
         Ok(())
     }
 
@@ -340,6 +1249,17 @@ impl RoundReplayStore {
             .iter()
             .find(|r| r.meta.id == id)
             .map(|r| r.demo_bytes.as_slice())
+    }
+
+    /// Looks up bounded `Round2dTimeline` JSON by replay ID.
+    pub fn get_timeline_json(&self, id: &str) -> Option<&str> {
+        if !valid_replay_id(id) {
+            return None;
+        }
+        self.rounds
+            .iter()
+            .find(|r| r.meta.id == id)
+            .and_then(|r| r.timeline_json.as_deref())
     }
 
     /// Looks up replay metadata by ID.
@@ -394,13 +1314,19 @@ impl RoundReplayStore {
             }
             let m = &entry.meta;
             let download_url = format!("/api/replays/{}.dem", m.id);
+            let has_timeline = entry.timeline_json.is_some();
+            let timeline_url_json = if has_timeline {
+                escape_json_str(&format!("/api/replays/{}/timeline", m.id))
+            } else {
+                "null".to_string()
+            };
             let mvp_json = match m.mvp_player.as_deref() {
                 Some(mvp) => escape_json_str(mvp),
                 None => "null".to_string(),
             };
             let _ = write!(
                 out,
-                "{{\"id\":{},\"round_number\":{},\"map\":{},\"map_crc\":{},\"winner\":{},\"reason\":{},\"duration_secs\":{},\"frame_count\":{},\"byte_len\":{},\"recorded_at_secs\":{},\"score_ct\":{},\"score_t\":{},\"mvp_player\":{},\"download_url\":{}}}",
+                "{{\"id\":{},\"round_number\":{},\"map\":{},\"map_crc\":{},\"winner\":{},\"reason\":{},\"duration_secs\":{},\"frame_count\":{},\"byte_len\":{},\"recorded_at_secs\":{},\"score_ct\":{},\"score_t\":{},\"mvp_player\":{},\"download_url\":{},\"has_timeline\":{},\"timeline_url\":{}}}",
                 escape_json_str(&m.id),
                 m.round_number,
                 escape_json_str(&m.map_name),
@@ -415,6 +1341,8 @@ impl RoundReplayStore {
                 m.score_t,
                 mvp_json,
                 escape_json_str(&download_url),
+                has_timeline,
+                timeline_url_json,
             );
         }
         out.push_str("]}");
@@ -1019,5 +1947,199 @@ mod tests {
         assert!(json.contains("\"defuses\":1"));
         assert!(json.contains("\"assists\":1"));
         assert!(json.contains("\"rounds\":[{\"round_number\":1"));
+    }
+
+    fn build_8bit_overview_bmp_with_index_255_green() -> Vec<u8> {
+        let w = 2u32;
+        let h = 2u32;
+        let row_stride = 4usize; // 2 bytes padded to 4-byte boundary
+        let pixel_off = 54u32 + 256 * 4;
+        let file_size = pixel_off + (h * row_stride as u32);
+        let mut bmp = vec![0u8; file_size as usize];
+        bmp[0..2].copy_from_slice(b"BM");
+        bmp[2..6].copy_from_slice(&file_size.to_le_bytes());
+        bmp[10..14].copy_from_slice(&pixel_off.to_le_bytes());
+        bmp[14..18].copy_from_slice(&40u32.to_le_bytes());
+        bmp[18..22].copy_from_slice(&(w as i32).to_le_bytes());
+        bmp[22..26].copy_from_slice(&(h as i32).to_le_bytes());
+        bmp[26..28].copy_from_slice(&1u16.to_le_bytes());
+        bmp[28..30].copy_from_slice(&8u16.to_le_bytes());
+        // Palette entry 1 = bright red (BGR = 0, 0, 255).
+        bmp[54 + 4..54 + 8].copy_from_slice(&[0, 0, 255, 0]);
+        // Palette entry 255 = pure GoldSrc chromakey green (BGR = 0, 255, 0).
+        bmp[54 + 255 * 4..54 + 256 * 4].copy_from_slice(&[0, 255, 0, 0]);
+        // Bottom row (row 0): [255, 1], top row (row 1): [1, 255]
+        let po = pixel_off as usize;
+        bmp[po] = 255;
+        bmp[po + 1] = 1;
+        bmp[po + row_stride] = 1;
+        bmp[po + row_stride + 1] = 255;
+        bmp
+    }
+
+    fn build_minimal_bsp_v30_with_bounds(mins: [f32; 3], maxs: [f32; 3]) -> Vec<u8> {
+        let header_len = 4 + 15 * 8;
+        let mut bsp = vec![0u8; header_len + 64];
+        bsp[0..4].copy_from_slice(&30i32.to_le_bytes());
+        let lump14_hdr = 4 + 14 * 8;
+        bsp[lump14_hdr..lump14_hdr + 4].copy_from_slice(&(header_len as i32).to_le_bytes());
+        bsp[lump14_hdr + 4..lump14_hdr + 8].copy_from_slice(&64i32.to_le_bytes());
+        for (idx, v) in mins.iter().chain(maxs.iter()).enumerate() {
+            let off = header_len + idx * 4;
+            bsp[off..off + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        bsp
+    }
+
+    #[test]
+    fn round_2d_timeline_samples_at_10hz_and_caps_at_512_kib() {
+        let mut store = RoundReplayStore::new(4);
+        store.begin_round("de_dust2", 0x1122_3344, 100.0);
+        store.set_timeline_player(1, "Alice", 2, false);
+        store.set_timeline_player(2, "Bot_Bob", 1, true);
+
+        let sample_a = TimelinePlayerSample {
+            slot: 1,
+            team: 2,
+            alive: true,
+            hp: 100,
+            x: -223.0,
+            y: 1097.0,
+            z: -192.0,
+            yaw_deg: 90.0,
+            active_weapon_id: 22,
+            has_c4: false,
+            flashed_alpha: 0,
+        };
+        let sample_b = TimelinePlayerSample {
+            slot: 2,
+            team: 1,
+            alive: true,
+            hp: 85,
+            x: 120.5,
+            y: 640.0,
+            z: -120.0,
+            yaw_deg: -45.0,
+            active_weapon_id: 28,
+            has_c4: true,
+            flashed_alpha: 128,
+        };
+
+        // Feeding at 100 Hz (0.01s) must coalesce to 10 Hz (0.1s).
+        for step in 0..=25 {
+            let t = 100.0 + f64::from(step) * 0.01;
+            store.sample_timeline_if_due(t, &[sample_a, sample_b]);
+        }
+        store.record_timeline_shot(100.12, 1, [-223.0, 1097.0, -175.0], [120.5, 640.0, -105.0], 22);
+        store.record_timeline_grenade_pos(100.15, 77, TimelineGrenadeKind::Smoke, [-200.0, 1000.0, -170.0]);
+        store.record_timeline_grenade_pos(100.25, 77, TimelineGrenadeKind::Smoke, [0.0, 800.0, -180.0]);
+        store.detonate_timeline_grenade(100.25, 77, Some([0.0, 800.0, -180.0]));
+        store.record_timeline_bomb(100.20, TimelineBombState::Planted, [100.0, 650.0, -120.0]);
+        store.record_timeline_kill(100.22, Some(1), 2, "m4a1", true);
+
+        let meta = store
+            .finish_round(RoundWinner::CounterTerrorist, "Bomb Defused", 100.3, 1, 0, Some("Alice".into()))
+            .unwrap()
+            .unwrap();
+        let tl_json = store.get_timeline_json(&meta.id).expect("timeline JSON stored");
+        assert!(tl_json.len() <= MAX_TIMELINE_BYTES);
+        assert!(tl_json.contains("\"sample_rate_hz\":10"));
+        assert!(tl_json.contains("\"frames\":["));
+        // 0.00, 0.10, 0.20 => 3 sampled frames across 26 100 Hz steps.
+        assert_eq!(tl_json.matches("\"t\":").count(), 3);
+        assert!(tl_json.contains("\"kind\":\"smoke\""));
+        assert!(tl_json.contains("\"state\":\"planted\""));
+        assert!(tl_json.contains("\"headshot\":true"));
+        assert!(store.to_json_index().contains("\"has_timeline\":true"));
+
+        // Hard 512 KiB bound even with a huge synthetic 32-player 3-minute round.
+        let mut rec = Round2dTimelineRecorder::new(0.0);
+        let roster: Vec<TimelinePlayerSample> = (1..=32)
+            .map(|s| TimelinePlayerSample {
+                slot: s,
+                team: if s <= 16 { 2 } else { 1 },
+                alive: true,
+                hp: 100,
+                x: f32::from(s) * 123.4,
+                y: -f32::from(s) * 234.5,
+                z: -128.0,
+                yaw_deg: 179.5,
+                active_weapon_id: 28,
+                has_c4: s == 17,
+                flashed_alpha: 200,
+            })
+            .collect();
+        for tick in 0..1800 {
+            let t = f64::from(tick) * 0.1;
+            rec.sample_if_due(t, &roster);
+            rec.record_shot(t, 1, [10.0, 20.0, 30.0], [500.0, 600.0, 40.0], 28);
+        }
+        let (_tl, bounded) = rec.finish(
+            "r0099-de_dust2".into(),
+            99,
+            "de_dust2".into(),
+            RoundWinner::Terrorist,
+            "Target Bombed".into(),
+            180.0,
+            5,
+            6,
+        );
+        assert!(
+            bounded.len() <= MAX_TIMELINE_BYTES,
+            "bounded len {} exceeded 512 KiB ({MAX_TIMELINE_BYTES})",
+            bounded.len()
+        );
+        assert!(bounded.starts_with('{') && bounded.ends_with('}'));
+    }
+
+    #[test]
+    fn overview_bmp_png_conversion_chromakeys_index_255_and_falls_back_to_bsp_bounds() {
+        let bmp = build_8bit_overview_bmp_with_index_255_green();
+        let bsp = build_minimal_bsp_v30_with_bounds([-1500.0, -1200.0, -256.0], [1800.0, 2100.0, 512.0]);
+        let overview_txt = b"global { ZOOM 1.50 ORIGIN -223 1097 -192 ROTATED 0 }\nlayer { IMAGE \"overviews/de_test.bmp\" HEIGHT -192 }\n".to_vec();
+
+        let vfs = Vfs::from_memory([
+            ("overviews/de_test.txt".into(), overview_txt),
+            ("overviews/de_test.bmp".into(), bmp),
+            ("maps/de_test.bsp".into(), bsp.clone()),
+            ("maps/fy_wireframe.bsp".into(), bsp),
+        ]);
+
+        let bundle = load_map_overview_from_vfs(&vfs, "de_test", None).expect("de_test overview");
+        assert!(bundle.has_overview);
+        assert!((bundle.zoom - 1.50).abs() < 1e-4);
+        assert_eq!(bundle.origin, [-223.0, 1097.0, -192.0]);
+        assert!(!bundle.rotated);
+        assert_eq!(bundle.mins, [-1500.0, -1200.0, -256.0]);
+        assert_eq!(bundle.maxs, [1800.0, 2100.0, 512.0]);
+        let png = bundle.png_bytes.as_ref().expect("PNG bytes");
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+
+        let decoded = image::load_from_memory_with_format(png, image::ImageFormat::Png)
+            .expect("valid PNG")
+            .to_rgba8();
+        // Top-left (0,0) in image was top row col 0 = index 1 (red, opaque);
+        // top-right (1,0) was index 255 (green, transparent).
+        assert_eq!(decoded.get_pixel(0, 0).0, [255, 0, 0, 255]);
+        assert_eq!(decoded.get_pixel(1, 0).0[3], 0);
+        assert_eq!(decoded.get_pixel(0, 1).0[3], 0);
+        assert_eq!(decoded.get_pixel(1, 1).0, [255, 0, 0, 255]);
+
+        let ov_json = bundle.to_json();
+        assert!(ov_json.contains("\"has_overview\":true"));
+        assert!(ov_json.contains("\"image_url\":\"/api/map-overview/de_test.png\""));
+
+        // Map without overview BMP/TXT falls back to BSP world bounds for wireframe radar.
+        let fallback = load_map_overview_from_vfs(&vfs, "fy_wireframe", None).expect("wireframe fallback");
+        assert!(!fallback.has_overview);
+        assert!(fallback.png_bytes.is_none());
+        assert_eq!(fallback.mins, [-1500.0, -1200.0, -256.0]);
+        assert_eq!(fallback.maxs, [1800.0, 2100.0, 512.0]);
+        let fb_json = fallback.to_json();
+        assert!(fb_json.contains("\"has_overview\":false"));
+        assert!(fb_json.contains("\"image_url\":null"));
+
+        assert!(!valid_map_overview_name("../secret"));
+        assert!(valid_map_overview_name("fy_pool_day"));
     }
 }

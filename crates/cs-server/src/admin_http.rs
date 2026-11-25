@@ -7,6 +7,9 @@
 //! - `GET  /api/stats` — match leaderboard & round history (token-protected)
 //! - `GET  /api/replays` — recorded HLDEMO v5 round index (token-protected)
 //! - `GET  /api/replays/<id>.dem` — download `.dem` bytes (token-protected)
+//! - `GET  /api/replays/<id>/timeline` — 10 Hz 2D round replay JSON (token-protected)
+//! - `GET  /api/map-overview/<map>` — overview spec / BSP wireframe bounds JSON (token-protected)
+//! - `GET  /api/map-overview/<map>.png` — overview BMP converted to RGBA PNG (token-protected)
 //! - `POST /api/rcon` — execute server console/RCON command (token-protected)
 //! - `GET  /api/invite` — generate `?join=<host:port>&room=<code>` lobby link (token-protected)
 //!
@@ -18,7 +21,7 @@ use std::io::{self, Read, Write};
 
 use cs_transport::ws_proto::{HttpRequest, MAX_HTTP_HEAD, parse_http_request};
 
-use crate::replays::{escape_json_str, valid_replay_id};
+use crate::replays::{escape_json_str, valid_map_overview_name, valid_replay_id};
 
 /// Maximum HTTP request body accepted by `/api/*` endpoints (8 KiB).
 pub const MAX_API_BODY_BYTES: usize = 8192;
@@ -102,6 +105,15 @@ pub trait AdminBackend {
     fn stats_json(&self) -> String;
     fn replays_index_json(&self) -> String;
     fn replay_dem(&self, id: &str) -> Option<Vec<u8>>;
+    fn replay_timeline_json(&self, _id: &str) -> Option<String> {
+        None
+    }
+    fn map_overview_json(&self, _map: &str) -> Option<String> {
+        None
+    }
+    fn map_overview_png(&self, _map: &str) -> Option<Vec<u8>> {
+        None
+    }
     fn execute_rcon(&mut self, command: &str) -> Result<String, String>;
     fn admin_html(&self) -> Option<&[u8]> {
         None
@@ -271,6 +283,16 @@ impl AdminHttpResponse {
         }
     }
 
+    pub fn png(body: Vec<u8>) -> Self {
+        Self {
+            status_code: 200,
+            status_text: "OK",
+            content_type: "image/png",
+            content_disposition: None,
+            body,
+        }
+    }
+
     pub fn write_to(&self, writer: &mut impl Write, head_only: bool) -> io::Result<()> {
         let mut head = format!(
             "HTTP/1.1 {} {}\r\n\
@@ -356,8 +378,25 @@ impl AdminRouter {
                 let Some(rest) = path.strip_prefix("/api/replays/") else {
                     return AdminHttpResponse::json_error(404, "Not Found", "not found");
                 };
+                if let Some(id) = rest.strip_suffix("/timeline") {
+                    if !valid_replay_id(id) {
+                        return AdminHttpResponse::json_error(
+                            400,
+                            "Bad Request",
+                            "invalid replay id",
+                        );
+                    }
+                    return match backend.replay_timeline_json(id) {
+                        Some(json) => AdminHttpResponse::json(200, "OK", json),
+                        None => AdminHttpResponse::json_error(
+                            404,
+                            "Not Found",
+                            "replay timeline not found",
+                        ),
+                    };
+                }
                 let Some(id) = rest.strip_suffix(".dem") else {
-                    return AdminHttpResponse::json_error(404, "Not Found", "expected .dem suffix");
+                    return AdminHttpResponse::json_error(404, "Not Found", "expected .dem or /timeline");
                 };
                 if !valid_replay_id(id) {
                     return AdminHttpResponse::json_error(400, "Bad Request", "invalid replay id");
@@ -368,6 +407,39 @@ impl AdminRouter {
                         AdminHttpResponse::binary_download(&filename, bytes)
                     }
                     None => AdminHttpResponse::json_error(404, "Not Found", "replay not found"),
+                }
+            }
+            ("GET" | "HEAD", path) if path.starts_with("/api/map-overview/") => {
+                let Some(rest) = path.strip_prefix("/api/map-overview/") else {
+                    return AdminHttpResponse::json_error(404, "Not Found", "not found");
+                };
+                if let Some(map) = rest.strip_suffix(".png") {
+                    if !valid_map_overview_name(map) {
+                        return AdminHttpResponse::json_error(
+                            400,
+                            "Bad Request",
+                            "invalid map name",
+                        );
+                    }
+                    return match backend.map_overview_png(map) {
+                        Some(bytes) => AdminHttpResponse::png(bytes),
+                        None => AdminHttpResponse::json_error(
+                            404,
+                            "Not Found",
+                            "overview image not found",
+                        ),
+                    };
+                }
+                if !valid_map_overview_name(rest) {
+                    return AdminHttpResponse::json_error(400, "Bad Request", "invalid map name");
+                }
+                match backend.map_overview_json(rest) {
+                    Some(json) => AdminHttpResponse::json(200, "OK", json),
+                    None => AdminHttpResponse::json_error(
+                        404,
+                        "Not Found",
+                        "map overview not found",
+                    ),
                 }
             }
             ("POST", "/api/rcon") => handle_rcon_post(req.body, backend),
@@ -841,6 +913,27 @@ mod tests {
             (id == "r0001-de_dust2").then(|| self.replay.clone())
         }
 
+        fn replay_timeline_json(&self, id: &str) -> Option<String> {
+            (id == "r0001-de_dust2")
+                .then(|| "{\"id\":\"r0001-de_dust2\",\"sample_rate_hz\":10,\"frames\":[]}".to_string())
+        }
+
+        fn map_overview_json(&self, map: &str) -> Option<String> {
+            match map {
+                "de_dust2" => Some(
+                    "{\"map\":\"de_dust2\",\"has_overview\":true,\"zoom\":1.5,\"origin\":[-223,1097,-192],\"rotated\":false,\"mins\":[-2432,-1280,-512],\"maxs\":[2048,3200,1024],\"image_url\":\"/api/map-overview/de_dust2.png\"}".to_string(),
+                ),
+                "fy_custom" => Some(
+                    "{\"map\":\"fy_custom\",\"has_overview\":false,\"zoom\":1.0,\"origin\":[0,0,0],\"rotated\":false,\"mins\":[-512,-512,-128],\"maxs\":[512,512,256],\"image_url\":null}".to_string(),
+                ),
+                _ => None,
+            }
+        }
+
+        fn map_overview_png(&self, map: &str) -> Option<Vec<u8>> {
+            (map == "de_dust2").then(|| b"\x89PNG\r\n\x1a\nfake-png".to_vec())
+        }
+
         fn execute_rcon(&mut self, command: &str) -> Result<String, String> {
             self.last_cmd = Some(command.to_string());
             Ok(format!("ran: {command}"))
@@ -985,13 +1078,76 @@ mod tests {
             &AdminHttpRequest {
                 path: "/api/invite",
                 query: Some("host=play.example.com&port=27016&room=dust-01"),
-                ..status_req
+                ..status_req.clone()
             },
             &mut backend,
         );
         assert_eq!(invite_resp.status_code, 200);
         let invite_body = String::from_utf8(invite_resp.body).unwrap();
         assert!(invite_body.contains("?join=play.example.com%3A27016&room=dust-01"));
+
+        // GET /api/replays/<id>/timeline returns 2D timeline JSON and blocks traversal.
+        let tl_resp = AdminRouter::handle(
+            &AdminHttpRequest {
+                path: "/api/replays/r0001-de_dust2/timeline",
+                ..status_req.clone()
+            },
+            &mut backend,
+        );
+        assert_eq!(tl_resp.status_code, 200);
+        assert!(String::from_utf8(tl_resp.body).unwrap().contains("\"sample_rate_hz\":10"));
+
+        let bad_tl = AdminRouter::handle(
+            &AdminHttpRequest {
+                path: "/api/replays/..%2Fbad/timeline",
+                ..status_req.clone()
+            },
+            &mut backend,
+        );
+        assert_eq!(bad_tl.status_code, 400);
+
+        // GET /api/map-overview/<map> and .png + missing-overview BSP bounds fallback.
+        let ov_resp = AdminRouter::handle(
+            &AdminHttpRequest {
+                path: "/api/map-overview/de_dust2",
+                ..status_req.clone()
+            },
+            &mut backend,
+        );
+        assert_eq!(ov_resp.status_code, 200);
+        assert!(String::from_utf8(ov_resp.body).unwrap().contains("\"/api/map-overview/de_dust2.png\""));
+
+        let png_resp = AdminRouter::handle(
+            &AdminHttpRequest {
+                path: "/api/map-overview/de_dust2.png",
+                ..status_req.clone()
+            },
+            &mut backend,
+        );
+        assert_eq!(png_resp.status_code, 200);
+        assert_eq!(png_resp.content_type, "image/png");
+        assert!(png_resp.body.starts_with(b"\x89PNG\r\n\x1a\n"));
+
+        let fb_resp = AdminRouter::handle(
+            &AdminHttpRequest {
+                path: "/api/map-overview/fy_custom",
+                ..status_req.clone()
+            },
+            &mut backend,
+        );
+        assert_eq!(fb_resp.status_code, 200);
+        let fb_body = String::from_utf8(fb_resp.body).unwrap();
+        assert!(fb_body.contains("\"has_overview\":false"));
+        assert!(fb_body.contains("\"mins\":[-512,-512,-128]"));
+
+        let bad_ov = AdminRouter::handle(
+            &AdminHttpRequest {
+                path: "/api/map-overview/..%2Fetc",
+                ..status_req
+            },
+            &mut backend,
+        );
+        assert_eq!(bad_ov.status_code, 400);
     }
 
     #[test]

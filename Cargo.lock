@@ -778,6 +778,7 @@ name = "cs-server"
 version = "0.1.0"
 dependencies = [
  "cs-amxx",
+ "cs-assets",
  "cs-clientcore",
  "cs-cvar",
  "cs-engine",
@@ -792,6 +793,8 @@ dependencies = [
  "cs-transport",
  "cs-vfs",
  "ctrlc",
+ "glam",
+ "image",
  "tracing",
  "tracing-subscriber",
 ]

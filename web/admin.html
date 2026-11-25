@@ -182,6 +182,140 @@
     .chip { font-size: 11px; padding: 2px 6px; }
     .hint { color: var(--muted); font-size: 11px; }
     .mono { font-family: Consolas, "Courier New", monospace; }
+
+    /* HLTV-Style 2D Round Replay Modal */
+    .replay2d-modal {
+      position: fixed;
+      inset: 0;
+      z-index: 1000;
+      background: rgba(10, 12, 9, 0.86);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 14px;
+    }
+    .replay2d-modal.open { display: flex; }
+    .replay2d-shell {
+      width: min(1360px, 100%);
+      max-height: 96vh;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 10px 12px;
+      overflow: hidden;
+    }
+    .replay2d-header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      border-bottom: 1px solid var(--border-dark);
+      padding-bottom: 6px;
+    }
+    .replay2d-title { color: var(--gold); font-weight: bold; font-size: 14px; }
+    .replay2d-body {
+      display: grid;
+      grid-template-columns: 215px 1fr 215px;
+      gap: 8px;
+      min-height: 0;
+      flex: 1 1 auto;
+    }
+    @media (max-width: 980px) {
+      .replay2d-body { grid-template-columns: 1fr; overflow-y: auto; }
+    }
+    .replay2d-sidebar {
+      background: var(--inset);
+      border: 1px solid var(--border-dark);
+      padding: 6px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      overflow-y: auto;
+      max-height: 560px;
+    }
+    .replay2d-side-hdr {
+      font-weight: bold;
+      font-size: 12px;
+      border-bottom: 1px solid var(--border-dark);
+      padding-bottom: 3px;
+      margin-bottom: 2px;
+    }
+    .replay2d-side-hdr.ct { color: var(--ct); }
+    .replay2d-side-hdr.t { color: var(--t); }
+    .replay2d-prow {
+      background: #23291f;
+      border: 1px solid var(--border-dark);
+      padding: 4px 6px;
+      font-size: 11px;
+    }
+    .replay2d-prow.dead { opacity: 0.45; }
+    .replay2d-prow-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 4px;
+      font-weight: bold;
+    }
+    .replay2d-prow-sub {
+      display: flex;
+      justify-content: space-between;
+      gap: 4px;
+      color: var(--muted);
+      font-size: 10px;
+      margin-top: 2px;
+    }
+    .replay2d-hp-track {
+      height: 4px;
+      background: #141812;
+      margin-top: 3px;
+      overflow: hidden;
+    }
+    .replay2d-hp-fill { height: 100%; background: var(--ok); }
+    .replay2d-canvas-wrap {
+      position: relative;
+      background: #0d110c;
+      border: 1px solid var(--border-dark);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 320px;
+    }
+    #replay2d-canvas {
+      display: block;
+      width: 100%;
+      max-height: 560px;
+      aspect-ratio: 4 / 3;
+      object-fit: contain;
+    }
+    .replay2d-controls {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      border-top: 1px solid var(--border-dark);
+      padding-top: 6px;
+    }
+    .replay2d-ctrl-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .speed-btn.active {
+      border-color: var(--gold);
+      color: var(--gold);
+      background: var(--inset);
+    }
+    #replay2d-scrubber {
+      width: 100%;
+      height: 36px;
+      display: block;
+      background: var(--inset);
+      border: 1px solid var(--border-dark);
+      cursor: pointer;
+    }
   </style>
 </head>
 <body>
@@ -358,7 +492,7 @@
               <th>Score</th>
               <th>Duration</th>
               <th>Size</th>
-              <th>Download</th>
+              <th>Actions</th>
             </tr>
           </thead>
           <tbody id="replays-body">
@@ -400,6 +534,55 @@
       </table>
     </div>
   </section>
+
+  <div id="replay2d-modal" class="replay2d-modal" role="dialog" aria-modal="true" aria-labelledby="replay2d-title">
+    <div class="replay2d-shell">
+      <div class="replay2d-header">
+        <div>
+          <span id="replay2d-title" class="replay2d-title">2D Round Replay</span>
+          <span id="replay2d-status" class="badge" style="margin-left:8px;">Loading...</span>
+        </div>
+        <div class="row">
+          <span class="hint">Space: Play/Pause | Left/Right: -/+2s | Esc: Close</span>
+          <button id="replay2d-close" class="danger">Close</button>
+        </div>
+      </div>
+
+      <div class="replay2d-body">
+        <aside class="replay2d-sidebar">
+          <div class="replay2d-side-hdr ct">Counter-Terrorists</div>
+          <div id="replay2d-ct-list"></div>
+        </aside>
+
+        <div class="replay2d-canvas-wrap">
+          <canvas id="replay2d-canvas" width="960" height="720"></canvas>
+        </div>
+
+        <aside class="replay2d-sidebar">
+          <div class="replay2d-side-hdr t">Terrorists</div>
+          <div id="replay2d-t-list"></div>
+        </aside>
+      </div>
+
+      <div class="replay2d-controls">
+        <canvas id="replay2d-scrubber" width="960" height="36"></canvas>
+        <div class="replay2d-ctrl-row">
+          <div class="row">
+            <button id="replay2d-play" class="primary">Play</button>
+            <button id="replay2d-restart">Restart</button>
+            <span id="replay2d-time" class="mono">0:00.0 / 0:00.0</span>
+          </div>
+          <div class="row">
+            <span class="hint">Speed:</span>
+            <button class="chip speed-btn" data-speed="0.5">0.5x</button>
+            <button class="chip speed-btn active" data-speed="1">1x</button>
+            <button class="chip speed-btn" data-speed="2">2x</button>
+            <button class="chip speed-btn" data-speed="4">4x</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <script type="module" src="./admin.js"></script>
 </body>
