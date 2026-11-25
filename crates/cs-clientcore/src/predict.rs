@@ -32,8 +32,6 @@
 //! - Weapon prediction is bookkeeping (plan, Global Constraints): the clip, animation and
 //!   timers come from `weapon_data`/`clientdata`, time passes through the timers by each
 //!   command's `msec` ([`WeaponState::post_run_cmd`]); no `ItemPostFrame` runs on the client.
-//! - `PM_TraceTexture` answers nothing (the footstep material falls back to concrete): the
-//!   collision data has no texture names. Assumption: only the sound of a step differs.
 //! - `SV_Active()` of the original ("a local server does not smooth the correction") is
 //!   [`InterpSettings::remote_is_local`](crate::interp::InterpSettings).
 //! - `cl.intermission`, `cls.spectator` and the demo paths are not modelled: no intermission is
@@ -1553,9 +1551,13 @@ impl PmWorld for ClientPmWorld<'_> {
         }
     }
 
-    /// Nothing (module doc: the collision data has no texture names).
-    fn trace_texture(&mut self, _ground: i32, _start: Vec3, _end: Vec3) -> Option<String> {
-        None
+    /// `PM_CL_TraceTexture` (Xash3D FWGS `engine/client/cl_pmove.c`, read 2026-11-25): traces
+    /// the surface under `start..end` on physent `ground` (world or brush submodel).
+    fn trace_texture(&mut self, ground: i32, start: Vec3, end: Vec3) -> Option<String> {
+        if !in_world(start) || !in_world(end) {
+            return None;
+        }
+        physent::trace_texture(self.coll, self.physents.physents_slice(), ground, start, end)
     }
 
     fn play_sound(
@@ -1783,5 +1785,216 @@ mod tests {
 
         let to2 = pred.run_step(&ctx, &to1, &cmd, true, 2, &mut time, &mut lastground);
         assert!(to2.velocity.x < 120.0, "second step must not re-add basevelocity: {}", to2.velocity.x);
+    }
+
+    #[test]
+    fn client_pm_world_trace_texture_world_and_rotated_submodel() {
+        use cs_assets::bsp::{BspMap, BspModel, Face, Leaf, LightmapAtlas, Node, Plane, TexInfo};
+        use cs_assets::wad::DecodedTexture;
+
+        let bsp = BspMap {
+            name: "tex_unit".into(),
+            skyname: String::new(),
+            entities: Vec::new(),
+            spawns: Vec::new(),
+            hostage_spawns: Vec::new(),
+            brush_entities: Vec::new(),
+            planes: vec![
+                Plane {
+                    normal: Vec3::Z,
+                    dist: 0.0,
+                    plane_type: 2,
+                },
+                Plane {
+                    normal: Vec3::X,
+                    dist: 16.0,
+                    plane_type: 0,
+                },
+            ],
+            vertices_raw: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(64.0, 0.0, 0.0),
+                Vec3::new(64.0, 64.0, 0.0),
+                Vec3::new(0.0, 64.0, 0.0),
+                Vec3::new(16.0, -32.0, 0.0),
+                Vec3::new(16.0, 32.0, 0.0),
+                Vec3::new(16.0, 32.0, 64.0),
+                Vec3::new(16.0, -32.0, 64.0),
+            ],
+            visibility: Vec::new(),
+            nodes: vec![
+                Node {
+                    plane: 0,
+                    children: [-1, -1],
+                    mins: [0; 3],
+                    maxs: [0; 3],
+                    first_face: 0,
+                    num_faces: 1,
+                },
+                Node {
+                    plane: 1,
+                    children: [-1, -1],
+                    mins: [0; 3],
+                    maxs: [0; 3],
+                    first_face: 1,
+                    num_faces: 1,
+                },
+            ],
+            texinfos: vec![
+                TexInfo {
+                    s_vec: Vec3::X,
+                    s_shift: 0.0,
+                    t_vec: Vec3::Y,
+                    t_shift: 0.0,
+                    miptex: 0,
+                    flags: 0,
+                },
+                TexInfo {
+                    s_vec: Vec3::Y,
+                    s_shift: 0.0,
+                    t_vec: Vec3::Z,
+                    t_shift: 0.0,
+                    miptex: 1,
+                    flags: 0,
+                },
+            ],
+            faces: vec![
+                Face {
+                    plane: 0,
+                    plane_side: 0,
+                    first_edge: 0,
+                    num_edges: 4,
+                    texinfo: 0,
+                    styles: [0; 4],
+                    lightmap_offset: -1,
+                },
+                Face {
+                    plane: 1,
+                    plane_side: 0,
+                    first_edge: 4,
+                    num_edges: 4,
+                    texinfo: 1,
+                    styles: [0; 4],
+                    lightmap_offset: -1,
+                },
+            ],
+            lighting: Vec::new(),
+            clipnodes: Vec::new(),
+            leafs: vec![Leaf {
+                contents: CONTENTS_EMPTY,
+                vis_offset: -1,
+                mins: [0; 3],
+                maxs: [0; 3],
+                first_mark_surface: 0,
+                num_mark_surfaces: 0,
+                ambient_levels: [0; 4],
+            }],
+            mark_surfaces: Vec::new(),
+            edges: vec![
+                [0, 1],
+                [1, 2],
+                [2, 3],
+                [3, 0],
+                [4, 5],
+                [5, 6],
+                [6, 7],
+                [7, 4],
+            ],
+            surf_edges: vec![0, 1, 2, 3, 4, 5, 6, 7],
+            models: vec![
+                BspModel {
+                    mins: Vec3::splat(-64.0),
+                    maxs: Vec3::splat(64.0),
+                    origin: Vec3::ZERO,
+                    head_nodes: [0, -1, -1, -1],
+                    vis_leafs: 0,
+                    first_face: 0,
+                    num_faces: 1,
+                },
+                BspModel {
+                    mins: Vec3::new(-16.0, -32.0, 0.0),
+                    maxs: Vec3::new(16.0, 32.0, 64.0),
+                    origin: Vec3::ZERO,
+                    head_nodes: [1, -1, -1, -1],
+                    vis_leafs: 0,
+                    first_face: 1,
+                    num_faces: 1,
+                },
+            ],
+            textures: vec![
+                DecodedTexture {
+                    name: "{snow_01".to_string(),
+                    width: 16,
+                    height: 16,
+                    rgba: Vec::new(),
+                    alpha_test: false,
+                },
+                DecodedTexture {
+                    name: "duct_door".to_string(),
+                    width: 16,
+                    height: 16,
+                    rgba: Vec::new(),
+                    alpha_test: false,
+                },
+            ],
+            lightmap_atlas: LightmapAtlas {
+                width: 0,
+                height: 0,
+                rgba: Vec::new(),
+                packed_faces: 0,
+            },
+            render_vertices: Vec::new(),
+            render_indices: Vec::new(),
+            batches: Vec::new(),
+        };
+
+        let coll = WorldCollision::from_bsp(&bsp);
+        let mut physents = PmPhysEnts::default();
+        physents.push_physent(world_physent(Some(&coll)));
+        physents.push_physent(PhysEnt {
+            view: PhysEntView {
+                info: 10,
+                player: 0,
+                origin: Vec3::new(200.0, 0.0, 0.0),
+                angles: Vec3::new(0.0, 90.0, 0.0),
+                mins: Vec3::ZERO,
+                maxs: Vec3::ZERO,
+                solid: i32::from(SOLID_BSP),
+                skin: 0,
+                rendermode: 0,
+                movetype: 7,
+                is_brush_model: true,
+                model_mins: Vec3::ZERO,
+                model_maxs: Vec3::ZERO,
+            },
+            model: PhysModel::Brush(1),
+        });
+        let mut rng = 1u32;
+        let mut sounds = Vec::new();
+        let mut pm_world = ClientPmWorld {
+            coll: &coll,
+            physents: &physents,
+            rng: &mut rng,
+            now: 0.0,
+            runfuncs: true,
+            sounds: &mut sounds,
+        };
+
+        assert_eq!(
+            pm_world
+                .trace_texture(0, Vec3::new(16.0, 16.0, 10.0), Vec3::new(16.0, 16.0, -10.0))
+                .as_deref(),
+            Some("{snow_01")
+        );
+        assert_eq!(
+            pm_world
+                .trace_texture(1, Vec3::new(200.0, 32.0, 32.0), Vec3::new(200.0, 0.0, 32.0))
+                .as_deref(),
+            Some("duct_door")
+        );
+        assert_eq!(
+            pm_world.trace_texture(0, Vec3::new(200.0, 0.0, 10.0), Vec3::new(200.0, 0.0, -10.0)),
+            None
+        );
     }
 }

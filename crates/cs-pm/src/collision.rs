@@ -1,7 +1,7 @@
 //! BSP hull collision: traces of the four GoldSrc hulls (`hull 0/1/2/3`) through the
 //! world model and brush sub-models, and point contents. Pure geometry, no game data.
 
-use cs_assets::bsp::{BspMap, BspModel, ClipNode, Node, Plane};
+use cs_assets::bsp::{BspMap, BspModel, ClipNode, Face, Node, Plane, TexInfo};
 use glam::Vec3;
 
 pub const CONTENTS_EMPTY: i32 = -1;
@@ -23,6 +23,109 @@ pub fn in_world(v: Vec3) -> bool {
 
 /// Classic Quake / GoldSrc epsilon preventing surface sinking (`1 / 32`).
 pub const DIST_EPSILON: f32 = 0.03125;
+
+/// `TEX_SPECIAL` (`texinfo` flag bit 0: no lightmap, the surface is tiled or turbulent).
+const TEX_SPECIAL: i32 = 1;
+/// Deepest node chain `SurfaceAtPoint` follows. A real tree is far shallower; the cap keeps the
+/// recursion's stack use small for a hostile map (the `budget` bounds the work).
+const MAX_SURFACE_WALK_DEPTH: u32 = 256;
+
+/// A face's `texturemins` and `extents` (`msurface_t`), as `CalcSurfaceExtents` makes them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SurfaceExtents {
+    pub texturemins: [i32; 2],
+    pub extents: [i32; 2],
+}
+
+/// Compact face record for `SurfaceAtPoint` texture lookup.
+#[derive(Debug, Clone, Copy)]
+struct SurfaceFace {
+    texinfo: u16,
+    extents: Option<SurfaceExtents>,
+}
+
+/// Compact texinfo record for `SurfaceAtPoint` texture lookup.
+#[derive(Debug, Clone, Copy)]
+struct SurfaceTexInfo {
+    s_vec: Vec3,
+    s_shift: f32,
+    t_vec: Vec3,
+    t_shift: f32,
+    miptex: i32,
+}
+
+/// `CalcSurfaceExtents` and then the overrides of `Mod_LoadFaces` (`rehlds/engine/model.cpp`,
+/// read 2026-11-22): the texture-space box of the face, in whole 16-unit lumps. The dot
+/// products are taken in double and stored as `float`, as the source has it (the `FIXED: loss
+/// of floating point` there). `None` for a face whose edges or vertices are outside the map's
+/// arrays.
+///
+/// The overrides, in the source's order by the name of the face's texture: `sky*` keeps the
+/// computed box; `scroll*` (case-sensitive) takes the texture's width and height as `extents`
+/// (`texturemins` stay); `!*`, `laser*` and `water*` (the last two case-insensitive) take
+/// `texturemins` -8192 and `extents` 16384 on both axes, so every point of the plane is in the
+/// face; any other face whose texinfo has `TEX_SPECIAL` takes the texture's width and height.
+pub fn calc_surface_extents(bsp: &BspMap, face: &Face, tex: &TexInfo) -> Option<SurfaceExtents> {
+    let mut mins = [999_999.0f32; 2];
+    let mut maxs = [-99_999.0f32; 2];
+    let first = usize::try_from(face.first_edge).ok()?;
+    for i in 0..usize::from(face.num_edges) {
+        let e = *bsp.surf_edges.get(first.checked_add(i)?)?;
+        let vertex = if e >= 0 {
+            bsp.edges.get(e as usize)?[0]
+        } else {
+            bsp.edges.get(e.unsigned_abs() as usize)?[1]
+        };
+        let p = *bsp.vertices_raw.get(usize::from(vertex))?;
+        for (j, (vec, shift)) in [(tex.s_vec, tex.s_shift), (tex.t_vec, tex.t_shift)]
+            .into_iter()
+            .enumerate()
+        {
+            let val = (f64::from(p.x) * f64::from(vec.x)
+                + f64::from(p.y) * f64::from(vec.y)
+                + f64::from(p.z) * f64::from(vec.z)
+                + f64::from(shift)) as f32;
+            if val < mins[j] {
+                mins[j] = val;
+            }
+            if val > maxs[j] {
+                maxs[j] = val;
+            }
+        }
+    }
+    let mut out = SurfaceExtents {
+        texturemins: [0; 2],
+        extents: [0; 2],
+    };
+    for i in 0..2 {
+        let bmins = (mins[i] / 16.0).floor() as i32;
+        let bmaxs = (maxs[i] / 16.0).ceil() as i32;
+        out.texturemins[i] = bmins.wrapping_mul(16);
+        out.extents[i] = bmaxs.wrapping_sub(bmins).wrapping_mul(16);
+    }
+    let texture = usize::try_from(tex.miptex)
+        .ok()
+        .and_then(|m| bsp.textures.get(m));
+    if let Some(texture) = texture {
+        let name = texture.name.as_bytes();
+        let starts = |prefix: &[u8]| name.starts_with(prefix);
+        let starts_nocase = |prefix: &[u8]| {
+            name.len() >= prefix.len() && name[..prefix.len()].eq_ignore_ascii_case(prefix)
+        };
+        let size = [texture.width as i32, texture.height as i32];
+        if starts(b"sky") {
+            // Keeps the computed box.
+        } else if starts(b"scroll") {
+            out.extents = size;
+        } else if starts(b"!") || starts_nocase(b"laser") || starts_nocase(b"water") {
+            out.extents = [16384; 2];
+            out.texturemins = [-8192; 2];
+        } else if tex.flags & TEX_SPECIAL != 0 {
+            out.extents = size;
+        }
+    }
+    Some(out)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hull {
@@ -170,8 +273,8 @@ impl TraceResult {
     }
 }
 
-/// A map's collision geometry: planes, nodes, clipnodes, leaf contents and models
-/// (model 0 is the world, the rest are brush sub-models).
+/// A map's collision geometry: planes, nodes, clipnodes, leaf contents, models, and compact
+/// surface-texture tables (model 0 is the world, the rest are brush sub-models).
 #[derive(Debug, Clone)]
 pub struct WorldCollision {
     planes: Vec<Plane>,
@@ -179,6 +282,9 @@ pub struct WorldCollision {
     clipnodes: Vec<ClipNode>,
     leaf_contents: Vec<i32>,
     models: Vec<BspModel>,
+    faces: Vec<SurfaceFace>,
+    texinfos: Vec<SurfaceTexInfo>,
+    texture_names: Vec<String>,
 }
 
 /// A map without any model: the stand-in for geometry that does not need the map (box hulls).
@@ -188,6 +294,9 @@ pub static NO_COLLISION: WorldCollision = WorldCollision {
     clipnodes: Vec::new(),
     leaf_contents: Vec::new(),
     models: Vec::new(),
+    faces: Vec::new(),
+    texinfos: Vec::new(),
+    texture_names: Vec::new(),
 };
 
 // Checked in every build: the engine, and the map collision it holds, may run on its own thread.
@@ -198,6 +307,33 @@ const _: () = {
 
 impl WorldCollision {
     pub fn from_bsp(map: &BspMap) -> Self {
+        let faces = map
+            .faces
+            .iter()
+            .map(|face| {
+                let extents = map
+                    .texinfos
+                    .get(usize::from(face.texinfo))
+                    .and_then(|tex| calc_surface_extents(map, face, tex));
+                SurfaceFace {
+                    texinfo: face.texinfo,
+                    extents,
+                }
+            })
+            .collect();
+        let texinfos = map
+            .texinfos
+            .iter()
+            .map(|t| SurfaceTexInfo {
+                s_vec: t.s_vec,
+                s_shift: t.s_shift,
+                t_vec: t.t_vec,
+                t_shift: t.t_shift,
+                miptex: t.miptex,
+            })
+            .collect();
+        let texture_names = map.textures.iter().map(|t| t.name.clone()).collect();
+
         Self {
             planes: map.planes.clone(),
             nodes: map.nodes.clone(),
@@ -214,6 +350,9 @@ impl WorldCollision {
                     ..*m
                 })
                 .collect(),
+            faces,
+            texinfos,
+            texture_names,
         }
     }
 
@@ -272,6 +411,86 @@ impl WorldCollision {
     /// Out of range: `false`.
     pub fn point_in_model(&self, model: usize, origin: Vec3, p: Vec3) -> bool {
         self.model_point_contents(model, origin, p, Hull::Point) == CONTENTS_SOLID
+    }
+
+    /// `SurfaceAtPoint` (`rehlds/engine/pr_cmds.cpp`, read 2026-11-22 / 2026-11-25): walks
+    /// `models[model_index].head_nodes[0]` along the local-space line `start..end`, returning the
+    /// raw BSP miptex name (up to 16 chars, preserving `{`, `!`, `-0` prefixes) of the first face
+    /// whose texture-space box encloses the plane crossing point.
+    pub fn trace_texture(&self, model_index: usize, start: Vec3, end: Vec3) -> Option<&str> {
+        if !start.is_finite() || !end.is_finite() {
+            return None;
+        }
+        let root = self.models.get(model_index)?.head_nodes[0];
+        let mut budget = self.nodes.len();
+        let face_idx = self.surface_at_point(root, start, end, &mut budget, 0)?;
+        let face = self.faces.get(face_idx)?;
+        let tex = self.texinfos.get(usize::from(face.texinfo))?;
+        let name = self.texture_names.get(usize::try_from(tex.miptex).ok()?)?;
+        Some(name.as_str())
+    }
+
+    /// `SurfaceAtPoint` (`rehlds/engine/pr_cmds.cpp`, read 2026-11-22): walks the node tree from
+    /// `node` along the line `start`..`end`, nearest side first, and gives the first face whose
+    /// texture-space box holds the point where the line crosses the node's plane (the source's
+    /// order: the near child, then the node's own faces, then the far child). `None` in a leaf.
+    fn surface_at_point(
+        &self,
+        node: i32,
+        start: Vec3,
+        end: Vec3,
+        budget: &mut usize,
+        depth: u32,
+    ) -> Option<usize> {
+        if node < 0 || depth > MAX_SURFACE_WALK_DEPTH {
+            // `node->contents < 0`: a leaf.
+            return None;
+        }
+        *budget = budget.checked_sub(1)?;
+        let n = self.nodes.get(node as usize)?;
+        let plane = self.planes.get(n.plane as usize)?;
+        let front = start.dot(plane.normal) - plane.dist;
+        let back = end.dot(plane.normal) - plane.dist;
+        let s = usize::from(front < 0.0);
+        let t = usize::from(back < 0.0);
+        if t == s {
+            return self.surface_at_point(i32::from(n.children[s]), start, end, budget, depth + 1);
+        }
+        let frac = front / (front - back);
+        let mid = Vec3::new(
+            (end.x - start.x) * frac + start.x,
+            (end.y - start.y) * frac + start.y,
+            (end.z - start.z) * frac + start.z,
+        );
+        if let Some(face) =
+            self.surface_at_point(i32::from(n.children[s]), start, mid, budget, depth + 1)
+        {
+            return Some(face);
+        }
+        let first = usize::from(n.first_face);
+        for i in 0..usize::from(n.num_faces) {
+            let index = first + i;
+            let Some(face) = self.faces.get(index) else {
+                continue;
+            };
+            let Some(extents) = face.extents else {
+                continue;
+            };
+            let Some(tex) = self.texinfos.get(usize::from(face.texinfo)) else {
+                continue;
+            };
+            // `(int)` truncates toward zero.
+            let ds = (mid.dot(tex.s_vec) + tex.s_shift) as i32;
+            let dt = (mid.dot(tex.t_vec) + tex.t_shift) as i32;
+            if ds >= extents.texturemins[0]
+                && dt >= extents.texturemins[1]
+                && ds - extents.texturemins[0] <= extents.extents[0]
+                && dt - extents.texturemins[1] <= extents.extents[1]
+            {
+                return Some(index);
+            }
+        }
+        self.surface_at_point(i32::from(n.children[s ^ 1]), mid, end, budget, depth + 1)
     }
 
     fn trace_bsp_model(
@@ -593,6 +812,9 @@ mod tests {
                 first_face: 0,
                 num_faces: 0,
             }],
+            faces: Vec::new(),
+            texinfos: Vec::new(),
+            texture_names: Vec::new(),
         }
     }
 
@@ -755,6 +977,9 @@ mod tests {
                 first_face: 0,
                 num_faces: 0,
             }],
+            faces: Vec::new(),
+            texinfos: Vec::new(),
+            texture_names: Vec::new(),
         };
         assert_eq!(
             cyclic.geo_leaf_contents(
@@ -770,5 +995,17 @@ mod tests {
         let tr_st = cyclic.trace_world(Vec3::new(-10.0, 0.0, 0.0), Vec3::new(10.0, 0.0, 0.0), Hull::Standing);
         assert_eq!(tr_pt.fraction, 0.0);
         assert_eq!(tr_st.fraction, 0.0);
+        assert_eq!(
+            cyclic.trace_texture(0, Vec3::new(-10.0, 0.0, 0.0), Vec3::new(10.0, 0.0, 0.0)),
+            None
+        );
+    }
+
+    #[test]
+    fn no_collision_trace_texture_returns_none() {
+        assert_eq!(
+            NO_COLLISION.trace_texture(0, Vec3::ZERO, Vec3::new(0.0, 0.0, -64.0)),
+            None
+        );
     }
 }

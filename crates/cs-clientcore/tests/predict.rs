@@ -612,3 +612,550 @@ fn prediction_recovers_from_loss() {
     let predicted = l.conn.predictor().prediction().simorg;
     assert!((server - predicted).length() < TOLERANCE, "{server:?} vs {predicted:?}");
 }
+
+#[test]
+fn predicted_movement_emits_material_footsteps_and_handles_rotated_submodels() {
+    use cs_assets::bsp::{BspMap, BspModel, ClipNode, Face, Leaf, LightmapAtlas, Node, Plane, TexInfo};
+    use cs_assets::wad::DecodedTexture;
+    use cs_clientcore::{Frame, PlayerPose, PrecacheTables};
+    use cs_clientcore::frames::FrameEntity;
+    use cs_pm::collision::{CONTENTS_EMPTY, CONTENTS_SOLID, Hull, WorldCollision};
+    use cs_pm::pm::MoveVars;
+    use cs_proto48::delta::{GoldSrcClientData, GoldSrcEntityState};
+    use cs_proto48::messages::ResourceEntry;
+    use std::sync::Arc;
+
+    // Build a multi-zone BSP floor at z = 0:
+    //   x in [0, 200]:    "-0metal_zone" -> M -> player/pl_metal*.wav
+    //   x in [200, 400]:  "duct_zone"    -> V -> player/pl_duct*.wav
+    //   x in [400, 600]:  "snow_zone"    -> O -> player/pl_snow*.wav
+    //   x in [600, 800]:  "wood_zone"    -> W -> player/pl_step*.wav (wood maps to STEP_CONCRETE in pm_shared)
+    // Plus submodel *1 (a platform/door box [-64..64] x [-32..32] x [-16..0]) whose top face at z = 0
+    // is "grate_zone" -> G -> player/pl_grate*.wav, placed at origin (1000, 1000, 0) rotated 90 deg yaw.
+    let mut planes = Vec::new();
+    let mut nodes = Vec::new();
+    let mut clipnodes = Vec::new();
+    let mut vertices_raw = Vec::new();
+    let mut edges = Vec::new();
+    let mut surf_edges = Vec::new();
+    let mut faces = Vec::new();
+    let mut texinfos = Vec::new();
+    let mut textures = Vec::new();
+
+    let zone_specs = [
+        ("-0metal_zone", 0.0f32, 200.0f32),
+        ("duct_zone", 200.0f32, 400.0f32),
+        ("snow_zone", 400.0f32, 600.0f32),
+        ("wood_zone", 600.0f32, 800.0f32),
+    ];
+    for (i, (name, x0, x1)) in zone_specs.iter().enumerate() {
+        textures.push(DecodedTexture {
+            name: (*name).to_string(),
+            width: 16,
+            height: 16,
+            rgba: Vec::new(),
+            alpha_test: false,
+        });
+        texinfos.push(TexInfo {
+            s_vec: Vec3::X,
+            s_shift: 0.0,
+            t_vec: Vec3::Y,
+            t_shift: 0.0,
+            miptex: i as i32,
+            flags: 0,
+        });
+        let base_v = vertices_raw.len() as u16;
+        vertices_raw.push(Vec3::new(*x0, -128.0, 0.0));
+        vertices_raw.push(Vec3::new(*x1, -128.0, 0.0));
+        vertices_raw.push(Vec3::new(*x1, 128.0, 0.0));
+        vertices_raw.push(Vec3::new(*x0, 128.0, 0.0));
+        let base_e = edges.len() as i32;
+        edges.push([base_v, base_v + 1]);
+        edges.push([base_v + 1, base_v + 2]);
+        edges.push([base_v + 2, base_v + 3]);
+        edges.push([base_v + 3, base_v]);
+        surf_edges.extend_from_slice(&[base_e, base_e + 1, base_e + 2, base_e + 3]);
+        faces.push(Face {
+            plane: 0,
+            plane_side: 0,
+            first_edge: base_e,
+            num_edges: 4,
+            texinfo: i as u16,
+            styles: [0; 4],
+            lightmap_offset: -1,
+        });
+    }
+
+    // World point hull: node 0 is plane z = 0 carrying all 4 zone faces (each checked by its extents!).
+    planes.push(Plane {
+        normal: Vec3::Z,
+        dist: 0.0,
+        plane_type: 2,
+    });
+    nodes.push(Node {
+        plane: 0,
+        children: [-1, -2],
+        mins: [-4096; 3],
+        maxs: [4096; 3],
+        first_face: 0,
+        num_faces: 4,
+    });
+    // World standing hull: clipnode 0 is z = 36 (player standing half-height).
+    planes.push(Plane {
+        normal: Vec3::Z,
+        dist: Hull::Standing.half_extents().z,
+        plane_type: 2,
+    });
+    clipnodes.push(ClipNode {
+        plane: 1,
+        children: [CONTENTS_EMPTY as i16, CONTENTS_SOLID as i16],
+    });
+
+    // Submodel *1: local box [-64..64] x [-32..32] x [-16..0], top face at z = 0 textured "grate_zone".
+    textures.push(DecodedTexture {
+        name: "grate_zone".to_string(),
+        width: 16,
+        height: 16,
+        rgba: Vec::new(),
+        alpha_test: false,
+    });
+    texinfos.push(TexInfo {
+        s_vec: Vec3::X,
+        s_shift: 0.0,
+        t_vec: Vec3::Y,
+        t_shift: 0.0,
+        miptex: 4,
+        flags: 0,
+    });
+    let base_v = vertices_raw.len() as u16;
+    vertices_raw.push(Vec3::new(-64.0, -32.0, 0.0));
+    vertices_raw.push(Vec3::new(64.0, -32.0, 0.0));
+    vertices_raw.push(Vec3::new(64.0, 32.0, 0.0));
+    vertices_raw.push(Vec3::new(-64.0, 32.0, 0.0));
+    let base_e = edges.len() as i32;
+    edges.push([base_v, base_v + 1]);
+    edges.push([base_v + 1, base_v + 2]);
+    edges.push([base_v + 2, base_v + 3]);
+    edges.push([base_v + 3, base_v]);
+    surf_edges.extend_from_slice(&[base_e, base_e + 1, base_e + 2, base_e + 3]);
+    faces.push(Face {
+        plane: 0,
+        plane_side: 0,
+        first_edge: base_e,
+        num_edges: 4,
+        texinfo: 4,
+        styles: [0; 4],
+        lightmap_offset: -1,
+    });
+    nodes.push(Node {
+        plane: 0,
+        children: [-1, -2],
+        mins: [-64, -32, -16],
+        maxs: [64, 32, 0],
+        first_face: 4,
+        num_faces: 1,
+    });
+    // Submodel *1 standing hull: full grown box [-80..80] x [-48..48] x [-52..36].
+    let half = Hull::Standing.half_extents();
+    let sub_mins = Vec3::new(-64.0, -32.0, -16.0) - half;
+    let sub_maxs = Vec3::new(64.0, 32.0, 0.0) + half;
+    let box_planes = [
+        (0usize, sub_maxs.x),
+        (0usize, sub_mins.x),
+        (1usize, sub_maxs.y),
+        (1usize, sub_mins.y),
+        (2usize, sub_maxs.z),
+        (2usize, sub_mins.z),
+    ];
+    let first_sub_clip = clipnodes.len() as i32;
+    for (idx, &(axis, dist)) in box_planes.iter().enumerate() {
+        let mut normal = Vec3::ZERO;
+        normal[axis] = 1.0;
+        let plane_idx = planes.len() as i32;
+        planes.push(Plane {
+            normal,
+            dist,
+            plane_type: axis as i32,
+        });
+        let side = idx & 1;
+        let next = if idx < 5 {
+            first_sub_clip as i16 + idx as i16 + 1
+        } else {
+            CONTENTS_SOLID as i16
+        };
+        let mut children = [0i16; 2];
+        children[side] = CONTENTS_EMPTY as i16;
+        children[side ^ 1] = next;
+        clipnodes.push(ClipNode {
+            plane: plane_idx,
+            children,
+        });
+    }
+
+    let leaf = |contents: i32| Leaf {
+        contents,
+        vis_offset: -1,
+        mins: [0; 3],
+        maxs: [0; 3],
+        first_mark_surface: 0,
+        num_mark_surfaces: 0,
+        ambient_levels: [0; 4],
+    };
+    let bsp = BspMap {
+        name: "mat_zones".into(),
+        skyname: String::new(),
+        entities: Vec::new(),
+        spawns: Vec::new(),
+        hostage_spawns: Vec::new(),
+        brush_entities: Vec::new(),
+        planes,
+        vertices_raw,
+        visibility: Vec::new(),
+        nodes,
+        texinfos,
+        faces,
+        lighting: Vec::new(),
+        clipnodes,
+        leafs: vec![leaf(CONTENTS_EMPTY), leaf(CONTENTS_SOLID)],
+        mark_surfaces: Vec::new(),
+        edges,
+        surf_edges,
+        models: vec![
+            BspModel {
+                mins: Vec3::splat(-4096.0),
+                maxs: Vec3::splat(4096.0),
+                origin: Vec3::ZERO,
+                head_nodes: [0, 0, 0, 0],
+                vis_leafs: 1,
+                first_face: 0,
+                num_faces: 4,
+            },
+            BspModel {
+                mins: Vec3::new(-64.0, -32.0, -16.0),
+                maxs: Vec3::new(64.0, 32.0, 0.0),
+                origin: Vec3::ZERO,
+                head_nodes: [1, first_sub_clip, first_sub_clip, first_sub_clip],
+                vis_leafs: 1,
+                first_face: 4,
+                num_faces: 1,
+            },
+        ],
+        textures,
+        lightmap_atlas: LightmapAtlas {
+            width: 0,
+            height: 0,
+            rgba: Vec::new(),
+            packed_faces: 0,
+        },
+        render_vertices: Vec::new(),
+        render_indices: Vec::new(),
+        batches: Vec::new(),
+    };
+
+    let materials_txt = b"\
+M metal_zone
+V duct_zone
+N snow_zone
+W wood_zone
+G grate_zone
+";
+
+    let world = Arc::new(WorldCollision::from_bsp(&bsp));
+    let mut precache = PrecacheTables::default();
+    precache.add(&[ResourceEntry {
+        res_type: 2,
+        filename: "*1".to_string(),
+        index: 2,
+        download_size: 0,
+        flags: 0,
+        md5: None,
+        reserved: None,
+    }]);
+
+    let run_walk_at = |start_origin: Vec3, yaw: f32, submodel_origin: Option<Vec3>| -> Vec<String> {
+        let mut p = Predictor::new();
+        p.set_world(Some(Arc::clone(&world)));
+        p.set_materials(materials_txt);
+
+        let mut entities = vec![GoldSrcEntityState {
+            number: 1,
+            modelindex: 3,
+            movetype: 3,
+            solid: 3,
+            friction: 1.0,
+            gravity: 1.0,
+            mins: Vec3::new(-16.0, -16.0, -36.0),
+            maxs: Vec3::new(16.0, 16.0, 36.0),
+            ..GoldSrcEntityState::default()
+        }];
+        if let Some(org) = submodel_origin {
+            entities.push(GoldSrcEntityState {
+                number: 7,
+                modelindex: 2,
+                movetype: 7,
+                solid: 4,
+                origin: org,
+                angles: Vec3::new(0.0, 90.0, 0.0),
+                mins: Vec3::new(-64.0, -32.0, -16.0),
+                maxs: Vec3::new(64.0, 32.0, 0.0),
+                ..GoldSrcEntityState::default()
+            });
+        }
+        let frame = Frame {
+            sequence: 1,
+            valid: true,
+            time: 10.0,
+            received_time: 10.0,
+            entities: entities
+                .into_iter()
+                .map(|state| FrameEntity {
+                    state,
+                    is_new: false,
+                })
+                .collect(),
+            clientdata: Some(GoldSrcClientData {
+                origin: start_origin,
+                view_ofs: Vec3::new(0.0, 0.0, 17.0),
+                maxspeed: 250.0,
+                health: 100.0,
+                flags: 1 << 9,
+                ..GoldSrcClientData::default()
+            }),
+            weapon_data: Default::default(),
+        };
+        let mut all_sounds = Vec::new();
+        let poses: [PlayerPose; 0] = [];
+        let mv = MoveVars {
+            footsteps: true,
+            ..MoveVars::default()
+        };
+        for seq in 1..=45u32 {
+            let now = 10.0 + f64::from(seq) * 0.01;
+            p.set_now(now);
+            p.push_cmd(walk(10, IN_FORWARD, 250.0, 0.0, yaw));
+            p.packet_sent(seq, 1, None);
+            p.update(&PredictInputs {
+                now,
+                incoming_acknowledged: 0,
+                outgoing_sequence: seq + 1,
+                frame: Some(&frame),
+                playernum: 0,
+                max_clients: 4,
+                precache: &precache,
+                movevars: mv,
+                max_velocity: 2000.0,
+                poses: &poses,
+                entities: None,
+                remote_is_local: true,
+                intermission: false,
+            });
+            for s in p.take_sounds() {
+                all_sounds.push(s.sample);
+            }
+        }
+        all_sounds
+    };
+
+    // World zones: metal, duct, snow, wood.
+    let metal_sounds = run_walk_at(Vec3::new(32.0, 0.0, 36.03125), 0.0, None);
+    assert!(
+        !metal_sounds.is_empty() && metal_sounds.iter().all(|s| s.starts_with("player/pl_metal")),
+        "expected pl_metal*, got {metal_sounds:?}"
+    );
+    let duct_sounds = run_walk_at(Vec3::new(232.0, 0.0, 36.03125), 0.0, None);
+    assert!(
+        !duct_sounds.is_empty() && duct_sounds.iter().all(|s| s.starts_with("player/pl_duct")),
+        "expected pl_duct*, got {duct_sounds:?}"
+    );
+    let snow_sounds = run_walk_at(Vec3::new(432.0, 0.0, 36.03125), 0.0, None);
+    assert!(
+        !snow_sounds.is_empty() && snow_sounds.iter().all(|s| s.starts_with("player/pl_snow")),
+        "expected pl_snow*, got {snow_sounds:?}"
+    );
+    let wood_sounds = run_walk_at(Vec3::new(632.0, 0.0, 36.03125), 0.0, None);
+    assert!(
+        !wood_sounds.is_empty() && wood_sounds.iter().all(|s| s.starts_with("player/pl_step")),
+        "wood maps to STEP_CONCRETE (pl_step*) in GoldSrc pm_shared, got {wood_sounds:?}"
+    );
+
+    // Rotated submodel *1 at (1000, 1000, 100) with 90 deg yaw: long axis is along world Y.
+    // Walking along +Y (yaw 90) stays on top of the rotated platform and emits pl_grate*.
+    let grate_sounds = run_walk_at(
+        Vec3::new(1000.0, 960.0, 136.03125),
+        90.0,
+        Some(Vec3::new(1000.0, 1000.0, 100.0)),
+    );
+    assert!(
+        !grate_sounds.is_empty() && grate_sounds.iter().all(|s| s.starts_with("player/pl_grate")),
+        "expected pl_grate* on rotated brush submodel, got {grate_sounds:?}"
+    );
+}
+
+#[test]
+fn predicted_movement_on_stock_maps_emits_non_concrete_footsteps() {
+    use cs_assets::bsp::BspMap;
+    use cs_clientcore::frames::FrameEntity;
+    use cs_clientcore::{Frame, PlayerPose, PrecacheTables};
+    use cs_pm::collision::{CONTENTS_EMPTY, Hull, WorldCollision};
+    use cs_pm::pm::{MoveVars, TextureTable};
+    use cs_proto48::delta::{GoldSrcClientData, GoldSrcEntityState};
+    use cs_vfs::{Vfs, VfsConfig};
+    use std::sync::Arc;
+
+    let Ok(vfs) = Vfs::discover(None, VfsConfig::default()) else {
+        eprintln!("skipped: the installed game is not found (set CS16_GAMEDIR)");
+        return;
+    };
+    let materials_txt = vfs
+        .read_bytes("sound/materials.txt")
+        .expect("sound/materials.txt in retail VFS");
+    let tex_table = TextureTable::parse(&materials_txt);
+
+    let find_spot_and_walk = |map_name: &str, expected_type: u8, expected_prefix: &str| {
+        let bsp = BspMap::load(&vfs, map_name).expect("stock map parses");
+        let world = Arc::new(WorldCollision::from_bsp(&bsp));
+        let world_model = &bsp.models[0];
+        let first = world_model.first_face as usize;
+        let end = first + world_model.num_faces as usize;
+
+        let mut spot = None;
+        for face in &bsp.faces[first..end] {
+            let Some(plane) = bsp.planes.get(usize::from(face.plane)) else {
+                continue;
+            };
+            if plane.normal.z < 0.95 || face.num_edges < 3 {
+                continue;
+            }
+            let Some(ti) = bsp.texinfos.get(usize::from(face.texinfo)) else {
+                continue;
+            };
+            let Some(tex) = usize::try_from(ti.miptex).ok().and_then(|i| bsp.textures.get(i)) else {
+                continue;
+            };
+            let stripped = tex
+                .name
+                .trim_start_matches(['-', '+'])
+                .trim_start_matches(|c: char| c.is_ascii_digit())
+                .trim_start_matches(['{', '!', '~', ' ']);
+            if tex_table.find(stripped) != expected_type {
+                continue;
+            }
+            let mut sum = Vec3::ZERO;
+            let mut count = 0usize;
+            for i in 0..usize::from(face.num_edges) {
+                let se = bsp.surf_edges[face.first_edge as usize + i];
+                let v_idx = if se >= 0 {
+                    bsp.edges[se as usize][0]
+                } else {
+                    bsp.edges[se.unsigned_abs() as usize][1]
+                };
+                sum += bsp.vertices_raw[usize::from(v_idx)];
+                count += 1;
+            }
+            let center = sum / count as f32;
+            let tr = world.trace_world(
+                center + Vec3::Z * 48.0,
+                center - Vec3::Z * 16.0,
+                Hull::Standing,
+            );
+            if tr.start_solid || tr.all_solid || !tr.hit_solid || tr.plane_normal.z < 0.7 {
+                continue;
+            }
+            let stand_org = tr.end_pos;
+            if world.point_contents(stand_org, Hull::Standing) != CONTENTS_EMPTY {
+                continue;
+            }
+            if world
+                .trace_world(stand_org, stand_org + Vec3::X * 128.0, Hull::Standing)
+                .fraction
+                < 1.0
+            {
+                continue;
+            }
+            if world
+                .trace_texture(0, stand_org, stand_org - Vec3::Z * 64.0)
+                .is_some_and(|n| n == tex.name)
+            {
+                spot = Some((stand_org, tex.name.clone()));
+                break;
+            }
+        }
+
+        let (origin, tex_name) = spot.unwrap_or_else(|| {
+            panic!("expected a walkable face of type {} in {map_name}", char::from(expected_type))
+        });
+
+        let mut p = Predictor::new();
+        p.set_world(Some(world));
+        p.set_materials(&materials_txt);
+        let precache = PrecacheTables::default();
+        let frame = Frame {
+            sequence: 1,
+            valid: true,
+            time: 10.0,
+            received_time: 10.0,
+            entities: vec![FrameEntity {
+                state: GoldSrcEntityState {
+                    number: 1,
+                    modelindex: 3,
+                    movetype: 3,
+                    solid: 3,
+                    friction: 1.0,
+                    gravity: 1.0,
+                    mins: Vec3::new(-16.0, -16.0, -36.0),
+                    maxs: Vec3::new(16.0, 16.0, 36.0),
+                    ..GoldSrcEntityState::default()
+                },
+                is_new: false,
+            }],
+            clientdata: Some(GoldSrcClientData {
+                origin,
+                view_ofs: Vec3::new(0.0, 0.0, 17.0),
+                maxspeed: 250.0,
+                health: 100.0,
+                flags: 1 << 9,
+                ..GoldSrcClientData::default()
+            }),
+            weapon_data: Default::default(),
+        };
+        let mv = MoveVars {
+            footsteps: true,
+            ..MoveVars::default()
+        };
+        let poses: [PlayerPose; 0] = [];
+        let mut sounds = Vec::new();
+        for seq in 1..=60u32 {
+            let now = 10.0 + f64::from(seq) * 0.01;
+            p.set_now(now);
+            p.push_cmd(walk(10, IN_FORWARD, 250.0, 0.0, 0.0));
+            p.packet_sent(seq, 1, None);
+            p.update(&PredictInputs {
+                now,
+                incoming_acknowledged: 0,
+                outgoing_sequence: seq + 1,
+                frame: Some(&frame),
+                playernum: 0,
+                max_clients: 4,
+                precache: &precache,
+                movevars: mv,
+                max_velocity: 2000.0,
+                poses: &poses,
+                entities: None,
+                remote_is_local: true,
+                intermission: false,
+            });
+            for s in p.take_sounds() {
+                sounds.push(s.sample);
+            }
+        }
+        assert!(
+            sounds.iter().any(|s| s.starts_with(expected_prefix)),
+            "{map_name} face {tex_name}: expected {expected_prefix}*, got {sounds:?}"
+        );
+    };
+
+    find_spot_and_walk("de_survivor", b'N', "player/pl_snow");
+    find_spot_and_walk("de_nuke", b'M', "player/pl_metal");
+    find_spot_and_walk("de_nuke", b'V', "player/pl_duct");
+    find_spot_and_walk("as_oilrig", b'G', "player/pl_grate");
+}

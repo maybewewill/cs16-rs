@@ -724,6 +724,43 @@ pub fn trace_model(
     (tr.fraction, tr.plane_normal)
 }
 
+/// `PM_TraceTexture` (ReHLDS `rehlds/engine/pr_cmds.cpp` `TraceTexture` and Xash3D FWGS
+/// `engine/client/cl_pmove.c` `PM_CL_TraceTexture`, read 2026-11-25): returns the raw BSP
+/// texture name of the surface hit by `start..end` on physent `ground`.
+///
+/// For `ground == 0` (world), traces world model `0` directly. For a brush submodel
+/// (`PhysModel::Brush(model)`), transforms `start` and `end` into the entity's local frame by
+/// subtracting `pe.view.origin` and rotating by inverse `pe.view.angles` when non-zero.
+/// Returns `None` if `ground` is out of range, not a brush model, or coordinates are invalid.
+pub fn trace_texture(
+    world: &WorldCollision,
+    physents: &[PhysEnt],
+    ground: i32,
+    start: Vec3,
+    end: Vec3,
+) -> Option<String> {
+    if !start.is_finite() || !end.is_finite() {
+        return None;
+    }
+    let idx = usize::try_from(ground).ok()?;
+    let pe = physents.get(idx)?;
+    let PhysModel::Brush(model) = pe.model else {
+        return None;
+    };
+    if !pe.view.origin.is_finite() || !pe.view.angles.is_finite() {
+        return None;
+    }
+    let mut start_l = start - pe.view.origin;
+    let mut end_l = end - pe.view.origin;
+    if pe.view.angles != Vec3::ZERO {
+        let (forward, right, up) = angle_vectors(pe.view.angles);
+        let turn = |p: Vec3| Vec3::new(dot(forward, p), -dot(right, p), dot(up, p));
+        start_l = turn(start_l);
+        end_l = turn(end_l);
+    }
+    world.trace_texture(model, start_l, end_l).map(str::to_owned)
+}
+
 /// The world's entry of `physents` (`SV_AddLinksToPM`): the world model, `SOLID_BSP`,
 /// `MOVETYPE_NONE`, entity 0.
 pub fn world_physent(coll: Option<&WorldCollision>) -> PhysEnt {
@@ -779,4 +816,292 @@ fn sines(angles: Vec3) -> (f32, f32, f32, f32, f32, f32) {
     let (sp, cp) = sc(angles.x);
     let (sr, cr) = sc(angles.z);
     (sy, cy, sp, cp, sr, cr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cs_assets::bsp::{BspMap, BspModel, Face, Leaf, LightmapAtlas, Node, TexInfo};
+    use cs_assets::wad::DecodedTexture;
+
+    fn test_bsp_world_and_submodel() -> BspMap {
+        // Model 0 (world): plane z = 0, face [0..64, 0..64] textured "-0metal_floor".
+        // Model 1 (submodel): plane x = 16, face y in [-32..32], z in [0..64] textured "wall_duct".
+        BspMap {
+            name: "test".into(),
+            skyname: String::new(),
+            entities: Vec::new(),
+            spawns: Vec::new(),
+            hostage_spawns: Vec::new(),
+            brush_entities: Vec::new(),
+            planes: vec![
+                Plane {
+                    normal: Vec3::Z,
+                    dist: 0.0,
+                    plane_type: 2,
+                },
+                Plane {
+                    normal: Vec3::X,
+                    dist: 16.0,
+                    plane_type: 0,
+                },
+            ],
+            vertices_raw: vec![
+                // Face 0 (floor at z = 0)
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(64.0, 0.0, 0.0),
+                Vec3::new(64.0, 64.0, 0.0),
+                Vec3::new(0.0, 64.0, 0.0),
+                // Face 1 (wall at x = 16)
+                Vec3::new(16.0, -32.0, 0.0),
+                Vec3::new(16.0, 32.0, 0.0),
+                Vec3::new(16.0, 32.0, 64.0),
+                Vec3::new(16.0, -32.0, 64.0),
+            ],
+            visibility: Vec::new(),
+            nodes: vec![
+                Node {
+                    plane: 0,
+                    children: [-1, -1],
+                    mins: [0; 3],
+                    maxs: [0; 3],
+                    first_face: 0,
+                    num_faces: 1,
+                },
+                Node {
+                    plane: 1,
+                    children: [-1, -1],
+                    mins: [0; 3],
+                    maxs: [0; 3],
+                    first_face: 1,
+                    num_faces: 1,
+                },
+            ],
+            texinfos: vec![
+                TexInfo {
+                    s_vec: Vec3::X,
+                    s_shift: 0.0,
+                    t_vec: Vec3::Y,
+                    t_shift: 0.0,
+                    miptex: 0,
+                    flags: 0,
+                },
+                TexInfo {
+                    s_vec: Vec3::Y,
+                    s_shift: 0.0,
+                    t_vec: Vec3::Z,
+                    t_shift: 0.0,
+                    miptex: 1,
+                    flags: 0,
+                },
+            ],
+            faces: vec![
+                Face {
+                    plane: 0,
+                    plane_side: 0,
+                    first_edge: 0,
+                    num_edges: 4,
+                    texinfo: 0,
+                    styles: [0; 4],
+                    lightmap_offset: -1,
+                },
+                Face {
+                    plane: 1,
+                    plane_side: 0,
+                    first_edge: 4,
+                    num_edges: 4,
+                    texinfo: 1,
+                    styles: [0; 4],
+                    lightmap_offset: -1,
+                },
+            ],
+            lighting: Vec::new(),
+            clipnodes: Vec::new(),
+            leafs: vec![Leaf {
+                contents: CONTENTS_EMPTY,
+                vis_offset: -1,
+                mins: [0; 3],
+                maxs: [0; 3],
+                first_mark_surface: 0,
+                num_mark_surfaces: 0,
+                ambient_levels: [0; 4],
+            }],
+            mark_surfaces: Vec::new(),
+            edges: vec![
+                [0, 1],
+                [1, 2],
+                [2, 3],
+                [3, 0],
+                [4, 5],
+                [5, 6],
+                [6, 7],
+                [7, 4],
+            ],
+            surf_edges: vec![0, 1, 2, 3, 4, 5, 6, 7],
+            models: vec![
+                BspModel {
+                    mins: Vec3::splat(-64.0),
+                    maxs: Vec3::splat(64.0),
+                    origin: Vec3::ZERO,
+                    head_nodes: [0, -1, -1, -1],
+                    vis_leafs: 0,
+                    first_face: 0,
+                    num_faces: 1,
+                },
+                BspModel {
+                    mins: Vec3::new(-16.0, -32.0, 0.0),
+                    maxs: Vec3::new(16.0, 32.0, 64.0),
+                    origin: Vec3::ZERO,
+                    head_nodes: [1, -1, -1, -1],
+                    vis_leafs: 0,
+                    first_face: 1,
+                    num_faces: 1,
+                },
+            ],
+            textures: vec![
+                DecodedTexture {
+                    name: "-0metal_floor".to_string(),
+                    width: 16,
+                    height: 16,
+                    rgba: Vec::new(),
+                    alpha_test: false,
+                },
+                DecodedTexture {
+                    name: "wall_duct".to_string(),
+                    width: 16,
+                    height: 16,
+                    rgba: Vec::new(),
+                    alpha_test: false,
+                },
+            ],
+            lightmap_atlas: LightmapAtlas {
+                width: 0,
+                height: 0,
+                rgba: Vec::new(),
+                packed_faces: 0,
+            },
+            render_vertices: Vec::new(),
+            render_indices: Vec::new(),
+            batches: Vec::new(),
+        }
+    }
+
+    fn submodel_physent(origin: Vec3, angles: Vec3, model: PhysModel) -> PhysEnt {
+        PhysEnt {
+            view: PhysEntView {
+                info: 1,
+                player: 0,
+                origin,
+                angles,
+                mins: Vec3::ZERO,
+                maxs: Vec3::ZERO,
+                solid: SOLID_BSP,
+                skin: 0,
+                rendermode: 0,
+                movetype: 7,
+                is_brush_model: matches!(model, PhysModel::Brush(_)),
+                model_mins: Vec3::ZERO,
+                model_maxs: Vec3::ZERO,
+            },
+            model,
+        }
+    }
+
+    #[test]
+    fn trace_texture_handles_world_rotated_submodel_and_invalid_inputs() {
+        let world = WorldCollision::from_bsp(&test_bsp_world_and_submodel());
+        let ents = vec![
+            world_physent(Some(&world)),
+            submodel_physent(
+                Vec3::new(500.0, 0.0, 0.0),
+                Vec3::new(0.0, 90.0, 0.0),
+                PhysModel::Brush(1),
+            ),
+            submodel_physent(Vec3::ZERO, Vec3::ZERO, PhysModel::None),
+            submodel_physent(Vec3::ZERO, Vec3::ZERO, PhysModel::Other),
+        ];
+
+        // World hit preserves animation prefix `-0`.
+        assert_eq!(
+            trace_texture(
+                &world,
+                &ents,
+                0,
+                Vec3::new(32.0, 32.0, 10.0),
+                Vec3::new(32.0, 32.0, -10.0)
+            )
+            .as_deref(),
+            Some("-0metal_floor")
+        );
+        assert_eq!(
+            trace_texture(
+                &world,
+                &ents,
+                0,
+                Vec3::new(100.0, 32.0, 10.0),
+                Vec3::new(100.0, 32.0, -10.0)
+            ),
+            None
+        );
+
+        // Submodel at (500, 0, 0) rotated 90 deg yaw: local +x (16) is world (500, 16, z).
+        assert_eq!(
+            trace_texture(
+                &world,
+                &ents,
+                1,
+                Vec3::new(500.0, 32.0, 32.0),
+                Vec3::new(500.0, 0.0, 32.0)
+            )
+            .as_deref(),
+            Some("wall_duct")
+        );
+        // Unrotated world-X trace at origin misses the rotated face.
+        assert_eq!(
+            trace_texture(
+                &world,
+                &ents,
+                1,
+                Vec3::new(532.0, 0.0, 32.0),
+                Vec3::new(500.0, 0.0, 32.0)
+            ),
+            None
+        );
+
+        // Non-brush, out-of-range, and non-finite inputs return None.
+        assert_eq!(
+            trace_texture(
+                &world,
+                &ents,
+                2,
+                Vec3::new(32.0, 32.0, 10.0),
+                Vec3::new(32.0, 32.0, -10.0)
+            ),
+            None
+        );
+        assert_eq!(
+            trace_texture(
+                &world,
+                &ents,
+                3,
+                Vec3::new(32.0, 32.0, 10.0),
+                Vec3::new(32.0, 32.0, -10.0)
+            ),
+            None
+        );
+        assert_eq!(
+            trace_texture(
+                &world,
+                &ents,
+                -1,
+                Vec3::new(32.0, 32.0, 10.0),
+                Vec3::new(32.0, 32.0, -10.0)
+            ),
+            None
+        );
+        assert_eq!(
+            trace_texture(&world, &ents, 0, Vec3::NAN, Vec3::ZERO),
+            None
+        );
+    }
 }
