@@ -10,7 +10,8 @@ workspace = true
 
 [dependencies]
 cs-engine = { workspace = true }
-cs-mod-api = { workspace = true }
+cs-game = { workspace = true }
+cs-mod-api = { workspace = true, features = ["services"] }
 cs-platform = { workspace = true }
 cs-pm = { workspace = true }
 cs-proto48 = { workspace = true }
@@ -25,6 +26,5 @@ wat = "1"
 cs-assets = { workspace = true }
 cs-clientcore = { workspace = true }
 cs-cvar = { workspace = true }
-cs-game = { workspace = true }
 cs-sim = { workspace = true }
 cs-transport = { workspace = true }

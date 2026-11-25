@@ -39,7 +39,7 @@ pub const ITEM_FLAG_EXHAUST_SECONDARYAMMO: i32 = 1 << 6;
 
 /// `WeaponIdType` (`weapontype.h`). `Glock` (2) is unused by the game but has rows in the tables.
 #[repr(i32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum WeaponId {
     None = 0,
     P228 = 1,

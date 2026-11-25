@@ -552,6 +552,21 @@ impl Grenade {
         tr: &EntTrace,
         bits: u32,
     ) {
+        let mut exp_ctx = cs_mod_api::BombEventCtx {
+            slot: eng
+                .ent(id)
+                .and_then(|v| v.owner)
+                .and_then(|o| player_slot(g, eng, o))
+                .map(|s| s as u8),
+            origin: tr.trace.end_pos.to_array(),
+            has_kit: false,
+        };
+        if crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+            sink.on_bomb_exploded(g, eng, cs_mod_api::HookPhase::Pre, &mut exp_ctx)
+        }) == cs_mod_api::HookAction::Supercede
+        {
+            return;
+        }
         let Some(v) = eng.ent_mut(id) else {
             return;
         };
@@ -562,6 +577,9 @@ impl Grenade {
 
         self.just_blew = true;
         crate::rules::on_bomb_exploded(g, eng);
+        let _ = crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+            sink.on_bomb_exploded(g, eng, cs_mod_api::HookPhase::Post, &mut exp_ctx)
+        });
 
         // Pull out of the wall a bit.
         if let Some(v) = eng.ent_mut(id)
@@ -643,12 +661,25 @@ impl Grenade {
 
     /// `CGrenade::DefuseBombStart(CBasePlayer *pPlayer)` (`ggrenade.cpp` 1027-1083).
     fn defuse_bomb_start(&mut self, g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
-        crate::player::freeze_max_speed(eng, slot);
         let has_defuser = g
             .players
             .get(usize::from(slot))
             .and_then(Option::as_ref)
             .is_some_and(|p| p.has_defuser);
+        let player_edict = eng.client_edict(slot);
+        let origin = eng.ent(player_edict).map_or(Vec3::ZERO, |v| v.origin);
+        let mut def_ctx = cs_mod_api::BombEventCtx {
+            slot: Some(slot),
+            origin: origin.to_array(),
+            has_kit: has_defuser,
+        };
+        if crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+            sink.on_bomb_defusing(g, eng, cs_mod_api::HookPhase::Pre, &mut def_ctx)
+        }) == cs_mod_api::HookAction::Supercede
+        {
+            return;
+        }
+        crate::player::freeze_max_speed(eng, slot);
         let now = now_f32(eng);
         let (msg, secs) = if has_defuser {
             ("#Defusing_Bomb_With_Defuse_Kit", 5)
@@ -667,7 +698,6 @@ impl Grenade {
         self.next_defuse = now + NEXT_DEFUSE_TIME;
 
         // Vanilla (`!REGAMEDLL_FIXES`): emits on the defuser's edict rather than the bomb.
-        let player_edict = eng.client_edict(slot);
         eng.emit_sound(player_edict, CHAN_ITEM, "weapons/c4_disarm.wav", 1.0, ATTN_NORM, PITCH_NORM);
         if let Some(pos) = eng.ent(player_edict).map(|v| v.origin) {
             crate::bots::emit_sound_event(
@@ -679,6 +709,9 @@ impl Grenade {
                 eng.time(),
             );
         }
+        let _ = crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+            sink.on_bomb_defusing(g, eng, cs_mod_api::HookPhase::Post, &mut def_ctx)
+        });
     }
 
     /// `CGrenade::DefuseBombEnd(CBasePlayer *pPlayer, bool bDefused)` (`ggrenade.cpp` 1087-1217).
@@ -694,9 +727,25 @@ impl Grenade {
         if defused {
             let alive = eng.ent(player_edict).is_some_and(|v| v.deadflag == DEAD_NO);
             if alive {
+                let origin = eng.ent(id).map_or(Vec3::ZERO, |v| v.origin);
+                let has_kit = g
+                    .players
+                    .get(usize::from(slot))
+                    .and_then(Option::as_ref)
+                    .is_some_and(|p| p.has_defuser);
+                let mut defused_ctx = cs_mod_api::BombEventCtx {
+                    slot: Some(slot),
+                    origin: origin.to_array(),
+                    has_kit,
+                };
+                if crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+                    sink.on_bomb_defused(g, eng, cs_mod_api::HookPhase::Pre, &mut defused_ctx)
+                }) == cs_mod_api::HookAction::Supercede
+                {
+                    return;
+                }
                 crate::rules::broadcast(eng, "BOMBDEF");
 
-                let origin = eng.ent(id).map_or(Vec3::ZERO, |v| v.origin);
                 eng.emit_ambient_sound(
                     id,
                     origin,
@@ -734,6 +783,9 @@ impl Grenade {
 
                 crate::rules::on_bomb_defused(g, eng);
                 eng.emit_stat_event(cs_engine::GameStatEvent::BombDefuse { slot });
+                let _ = crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+                    sink.on_bomb_defused(g, eng, cs_mod_api::HookPhase::Post, &mut defused_ctx)
+                });
 
                 if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
                     p.frags += 3;
@@ -1271,6 +1323,17 @@ pub(crate) fn throw_grenade_with_angles(
     velocity: Vec3,
     time: f32,
 ) -> Option<EdictId> {
+    let mut throw_ctx = cs_mod_api::GrenadeThrowCtx {
+        slot,
+        weapon_id: id as i32 as u8,
+        ent_index: 0,
+    };
+    if crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+        sink.on_grenade_throw(g, eng, cs_mod_api::HookPhase::Pre, &mut throw_ctx)
+    }) == cs_mod_api::HookAction::Supercede
+    {
+        return None;
+    }
     let owner = eng.client_edict(slot);
     let spawned = match id {
         WeaponId::HeGrenade => {
@@ -1289,6 +1352,12 @@ pub(crate) fn throw_grenade_with_angles(
         && let Some(v) = eng.ent_mut(ent)
     {
         v.angles = ang;
+    }
+    if let Some(ent) = spawned {
+        throw_ctx.ent_index = ent.index;
+        let _ = crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+            sink.on_grenade_throw(g, eng, cs_mod_api::HookPhase::Post, &mut throw_ctx)
+        });
     }
     spawned
 }

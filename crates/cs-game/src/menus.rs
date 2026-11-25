@@ -181,6 +181,18 @@ pub(crate) fn print_console_all(eng: &mut EngineApi<'_>, text: &str) {
 /// closes a menu the player is not still choosing a team or appearance in.
 pub(crate) fn menuselect(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, argv: &[String]) {
     let choice = atoi(argv.get(1).map_or("", String::as_str));
+    let mut menu_ctx = cs_mod_api::MenuSelectCtx {
+        slot,
+        menu_id: 0,
+        item_index: choice.max(0) as usize,
+        info: String::new(),
+    };
+    if crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+        sink.on_menu_select(g, eng, cs_mod_api::HookPhase::Pre, &mut menu_ctx)
+    }) == cs_mod_api::HookAction::Supercede
+    {
+        return;
+    }
     let Some(p) = g
         .players
         .get_mut(usize::from(slot))

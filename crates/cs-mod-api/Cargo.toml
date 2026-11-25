@@ -8,6 +8,10 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+services = []
+
 [dependencies]
 crc32fast = { workspace = true }
 flate2 = { workspace = true }

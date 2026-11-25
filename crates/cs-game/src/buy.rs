@@ -830,10 +830,37 @@ pub(crate) fn buy_item(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, ite
         }
         _ => return,
     }
-    let Some((item, price)) = purchase else {
+    let Some((item, mut price)) = purchase else {
         not_enough_money(eng, slot);
         return;
     };
+    let item_code = match item_slot {
+        SLOT_ITEM_VEST => 101u8,
+        SLOT_ITEM_VESTHELM => 102u8,
+        SLOT_ITEM_FLASHGREN => WeaponId::Flashbang as i32 as u8,
+        SLOT_ITEM_HEGREN => WeaponId::HeGrenade as i32 as u8,
+        SLOT_ITEM_SMOKEGREN => WeaponId::SmokeGrenade as i32 as u8,
+        SLOT_ITEM_NVG => 106u8,
+        SLOT_ITEM_DEFUSEKIT => 107u8,
+        SLOT_ITEM_SHIELD => WeaponId::ShieldGun as i32 as u8,
+        _ => 0u8,
+    };
+    let mut buy_ctx = cs_mod_api::CanBuyItemCtx {
+        slot,
+        item_id: item_code,
+        price,
+    };
+    if crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+        sink.on_can_buy_item(g, eng, cs_mod_api::HookPhase::Pre, &mut buy_ctx)
+    }) == cs_mod_api::HookAction::Supercede
+    {
+        return;
+    }
+    price = buy_ctx.price.max(0);
+    if account < price {
+        not_enough_money(eng, slot);
+        return;
+    }
     match item {
         Purchase::Armor(armor) => give_armor_item(g, eng, slot, armor),
         Purchase::Weapon(class) => {
@@ -842,6 +869,9 @@ pub(crate) fn buy_item(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, ite
     }
     money::add_account(g, eng, slot, -price, true);
     snapshot_rebuy(g, slot);
+    let _ = crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+        sink.on_can_buy_item(g, eng, cs_mod_api::HookPhase::Post, &mut buy_ctx)
+    });
 }
 
 /// `CanBuyWeaponByMaptype` (`weapontype.cpp` 596-680): the weapons a team can buy, taking
@@ -936,8 +966,20 @@ pub(crate) fn buy_weapon_by_id(g: &mut GameState, eng: &mut EngineApi<'_>, slot:
     let Some(info) = weapon_info(id).filter(|i| !i.entity_name.is_empty()) else {
         return false;
     };
+    let mut buy_ctx = cs_mod_api::CanBuyItemCtx {
+        slot,
+        item_id: id as i32 as u8,
+        price: info.cost,
+    };
+    if crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+        sink.on_can_buy_item(g, eng, cs_mod_api::HookPhase::Pre, &mut buy_ctx)
+    }) == cs_mod_api::HookAction::Supercede
+    {
+        return false;
+    }
+    let cost = buy_ctx.price.max(0);
     let account = g.players.get(usize::from(slot)).and_then(Option::as_ref).map_or(0, |p| p.money);
-    if account < info.cost {
+    if account < cost {
         not_enough_money(eng, slot);
         return false;
     }
@@ -947,8 +989,11 @@ pub(crate) fn buy_weapon_by_id(g: &mut GameState, eng: &mut EngineApi<'_>, slot:
         inventory::drop_secondary(g, eng, slot);
     }
     inventory::give_named_item(g, eng, slot, info.entity_name);
-    money::add_account(g, eng, slot, -info.cost, true);
+    money::add_account(g, eng, slot, -cost, true);
     snapshot_rebuy(g, slot);
+    let _ = crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+        sink.on_can_buy_item(g, eng, cs_mod_api::HookPhase::Post, &mut buy_ctx)
+    });
     true
 }
 

@@ -78,6 +78,7 @@ pub(crate) struct EnginePmWorld<'a, 'e> {
     physents: &'a PmPhysEnts,
     player: EdictId,
     rng: &'a mut u32,
+    silent_footsteps: bool,
 }
 
 fn to_pm_trace(t: PmTraceResult) -> PmTrace {
@@ -167,6 +168,20 @@ impl PmWorld for EnginePmWorld<'_, '_> {
         flags: i32,
         pitch: i32,
     ) {
+        if self.silent_footsteps
+            && (sample.starts_with("player/pl_step")
+                || sample.starts_with("player/pl_dirt")
+                || sample.starts_with("player/pl_duct")
+                || sample.starts_with("player/pl_grate")
+                || sample.starts_with("player/pl_metal")
+                || sample.starts_with("player/pl_slosh")
+                || sample.starts_with("player/pl_snow")
+                || sample.starts_with("player/pl_tile")
+                || sample.starts_with("player/pl_wade")
+                || sample.starts_with("player/pl_ladder"))
+        {
+            return;
+        }
         self.eng.pm_play_sound(
             self.player,
             channel,
@@ -390,7 +405,36 @@ pub(crate) fn run_pmove(
     else {
         return;
     };
-    let physents = eng.pm_physents(id);
+    let mut physents = eng.pm_physents(id);
+    if g.hook_sink.is_some() {
+        let mut blocked_players = Vec::new();
+        for i in 0..physents.num_physents() as i32 {
+            if let Some(pe) = physents.physent(i)
+                && pe.player > 0
+            {
+                let other_slot = (pe.player - 1) as u8;
+                let mut ctx = cs_mod_api::PlayersShouldCollideCtx {
+                    slot_a: slot,
+                    slot_b: other_slot,
+                    should_collide: true,
+                };
+                let action = crate::mod_hooks::fire_hook(g, eng, |sink, g, eng| {
+                    sink.on_players_should_collide(g, eng, &mut ctx)
+                });
+                if !ctx.should_collide || action == cs_mod_api::HookAction::Supercede {
+                    blocked_players.push(pe.player);
+                }
+            }
+        }
+        if !blocked_players.is_empty() {
+            physents.retain_physents(|view, _| view.player == 0 || !blocked_players.contains(&view.player));
+        }
+    }
+    let silent_footsteps = g
+        .players
+        .get(usize::from(slot))
+        .and_then(Option::as_ref)
+        .is_some_and(|p| p.silent_footsteps);
     let movevars = movevars_from_msg(&eng.move_vars());
     let Some(v) = eng.ent(id) else {
         return;
@@ -404,6 +448,7 @@ pub(crate) fn run_pmove(
             physents: &physents,
             player: id,
             rng: &mut g.rng,
+            silent_footsteps,
         };
         pm_move(&mut pm, &mut g.pm_shared, &mut world, true);
         let horiz = Vec3::new(pm.velocity.x, pm.velocity.y, 0.0);
@@ -468,6 +513,7 @@ pub(crate) fn world_flags(eng: &mut EngineApi<'_>, slot: u8) -> Vec<(i32, bool, 
         physents: &physents,
         player: id,
         rng: &mut rng,
+        silent_footsteps: false,
     };
     (0..physents.num_physents() as i32)
         .filter_map(|i| {

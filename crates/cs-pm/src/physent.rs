@@ -171,6 +171,11 @@ impl PmPhysEnts {
         self.visents.push(pe);
     }
 
+    /// Retains only `physents` entries matching `pred` (used for ReAPI `PlayersShouldCollide` semiclip).
+    pub fn retain_physents(&mut self, pred: impl FnMut(&PhysEnt) -> bool) {
+        self.physents.retain(pred);
+    }
+
     /// The `physents` array.
     pub fn physents_slice(&self) -> &[PhysEnt] {
         &self.physents

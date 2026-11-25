@@ -10,6 +10,7 @@ cs-amxx.workspace = true
 cs-assets.workspace = true
 cs-bot.workspace = true
 cs-engine.workspace = true
+cs-mod-api.workspace = true
 cs-platform.workspace = true
 cs-proto48.workspace = true
 cs-sim.workspace = true
