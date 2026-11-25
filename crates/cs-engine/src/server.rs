@@ -134,8 +134,12 @@ pub struct Server<G: GameDll> {
     pub(crate) shutting_down: bool,
     /// Final datagrams for released clients, sent at the end of the frame.
     pub(crate) farewells: Vec<(PeerAddr, Vec<u8>)>,
-    /// Server time the next `svc_pings` is due.
-    pub(crate) next_pings_at: f64,
+    /// Server time from which each slot may next receive `svc_pings` when `IN_SCORE` is held
+    /// (`SV_ShouldUpdatePing` / `SV_GetNetInfo` in ReHLDS `sv_main.cpp`, read 2026-11-25).
+    pub(crate) next_pings_at: Vec<f64>,
+    /// Server time from which each slot's mid-game `userinfo` updates may next broadcast
+    /// (`client->sendinfo_time` in ReHLDS `sv_main.cpp`, read 2026-11-25).
+    pub(crate) next_sendinfo_at: Vec<f64>,
     /// The queued fake-client moves are being run (`Server::run_fake_moves`): a drain made while
     /// they run leaves the rest of the queue to that loop.
     pub(crate) in_fake_moves: bool,
@@ -287,7 +291,8 @@ impl<G: GameDll> Server<G> {
             net_stats: NetStats::default(),
             shutting_down: false,
             farewells: Vec::new(),
-            next_pings_at: 0.0,
+            next_pings_at: vec![0.0; slots],
+            next_sendinfo_at: vec![0.0; slots],
             in_fake_moves: false,
             file_provider: None,
             consistency_rules: BTreeMap::new(),
@@ -371,43 +376,12 @@ impl<G: GameDll> Server<G> {
     /// Syncs dynamic server rate & updaterate cvars (`sv_minupdaterate`, `sv_maxupdaterate`,
     /// `sv_minrate`, `sv_maxrate`, `sv_lan`, `sv_lan_rate`) per `swds.dll:FUN_102081e0`.
     fn sync_rate_cvars(&mut self) {
-        if let Some(c) = self.cvars.get("sv_minupdaterate") {
-            let v = c.as_f32();
-            if v.is_finite() {
-                self.cfg.min_update_rate = if v > 0.0 { v as u32 } else { 1 }.max(1);
-            }
-        }
-        if let Some(c) = self.cvars.get("sv_maxupdaterate") {
-            let v = c.as_f32();
-            if v.is_finite() {
-                let raw = if v > 0.0 { v as u32 } else { 30 };
-                self.cfg.max_update_rate = raw.max(self.cfg.min_update_rate);
-            }
-        }
-        if let Some(c) = self.cvars.get("sv_minrate") {
-            let v = c.as_f32();
-            self.cfg.min_rate = if v.is_finite() && v > 0.0 {
-                (v as u32).max(1000)
-            } else {
-                self.base_min_rate
-            };
-        }
-        if let Some(c) = self.cvars.get("sv_maxrate") {
-            let v = c.as_f32();
-            self.cfg.max_rate = if v.is_finite() && v > 0.0 {
-                (v as u32).max(self.cfg.min_rate)
-            } else {
-                self.base_max_rate.max(self.cfg.min_rate)
-            };
-        }
-        if self.cvars.get_f32("sv_lan") > 0.0 {
-            let lan_rate = self.cvars.get_f32("sv_lan_rate");
-            if lan_rate.is_finite() && lan_rate > 0.0 {
-                let r = (lan_rate as u32).max(1000);
-                self.cfg.min_rate = r;
-                self.cfg.max_rate = r;
-            }
-        }
+        self.cfg = crate::frame::effective_rate_config(
+            &self.cvars,
+            self.base_min_rate,
+            self.base_max_rate,
+            &self.cfg,
+        );
     }
 
     /// One server frame, in the order of HLDS `SV_Frame_Internal` (ReHLDS
@@ -453,7 +427,6 @@ impl<G: GameDll> Server<G> {
         }
         self.flush_reliable_datagram();
         self.drop_timed_out_clients();
-        self.queue_pings_if_due();
         self.broadcast_userinfo();
         self.send_client_frames(net);
         self.record_replay_snapshot_if_due();

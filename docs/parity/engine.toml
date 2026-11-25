@@ -71,7 +71,7 @@ evidence = "crates/cs-engine/src/oob.rs::tests::limiter_caps_burst, limiter_evic
 [[item]]
 id = "pings"
 status = "tested"
-evidence = "crates/cs-engine/src/lifecycle.rs::tests::ping_is_the_average_of_the_last_samples, ping_forgets_sequences_older_than_the_history; crates/cs-engine/tests/lifecycle.rs::pings_are_sent_every_two_seconds; crates/cs-proto48/src/messages.rs::tests::pings_are_clamped_to_their_bit_widths; ping calculation (average round trip of the last 16 acknowledged datagrams, loss 0) unverified against a real client"
+evidence = "crates/cs-engine/src/lifecycle.rs::tests::ping_is_the_average_of_the_last_samples, ping_forgets_sequences_older_than_the_history; crates/cs-engine/tests/lifecycle.rs::pings_only_sent_while_in_score_held_and_throttled; crates/cs-proto48/src/messages.rs::tests::pings_are_clamped_to_their_bit_widths; ping calculation (average round trip of the last 16 acknowledged datagrams, loss 0) and SV_ShouldUpdatePing (IN_SCORE gated, ReHLDS sv_main.cpp, read 2026-11-25) unverified against a real client"
 
 [[item]]
 id = "pvs_leaf_list"
@@ -210,13 +210,13 @@ evidence = "The resource list is identical to the original HLDS (build 10210, go
 
 [[item]]
 id = "msgdest_broadcast_datagram"
-status = "missing"
-evidence = "Known gap (documented deferral): MsgDest::Broadcast messages go out at the end of the frame after the single-client messages; ReHLDS puts them in sv.datagram (MSG_BROADCAST). Order differences against the original are possible"
+status = "tested"
+evidence = "crates/cs-engine/tests/messages.rs::msgdest_broadcast_preserves_emission_order_with_one_unreliable, each_destination_reaches_exactly_its_audience; MsgDest::Broadcast (ReHLDS sv_main.cpp SV_Multicast / sv.datagram, read 2026-11-25) appends directly into every active non-fake client's unreliable buffer at emission time, preserving chronological order relative to MsgDest::OneUnreliable"
 
 [[item]]
 id = "sendinfo_time_spacing"
-status = "missing"
-evidence = "Known gap: the 1 s spacing of the userinfo broadcast (sendinfo_time) of the original is not kept; the updates go out at once"
+status = "tested"
+evidence = "crates/cs-engine/tests/lifecycle.rs::sendinfo_time_spaces_userinfo_broadcasts_by_one_second, setinfo_flood_is_limited_and_coalesced; ReHLDS sv_main.cpp (SV_UpdateUserInfo, SV_UpdateToReliableMessages, SV_ExtractFromUserinfo, SV_FullClientUpdate, read 2026-11-25): next_sendinfo_at enforces 1.0 s cooldown between mid-game svc_updateuserinfo broadcasts while coalescing dirty userinfo changes"
 
 [[item]]
 id = "delta_encoder_callbacks"
@@ -230,8 +230,8 @@ evidence = "crates/cs-game/src/fullpack.rs (the AddToFullPack filters of ReGameD
 
 [[item]]
 id = "update_rate_frame_batching"
-status = "missing"
-evidence = "Known gap: our server sends about 60 updates a second (a datagram every 10 to 20 ms) where the original HLDS sends about 23.5 (41 to 45 ms); the frame batching of the original is not ported; svc_pings every 2 s where the original sends none (golden capture 2026-11-22)"
+status = "tested"
+evidence = "crates/cs-engine/tests/frames.rs::update_rate_follows_userinfo, no_update_is_sent_before_it_is_due, live_rate_and_updaterate_cvars_apply_immediately_in_frame; crates/cs-engine/src/server.rs::tests::sys_ticrate_gates_early_frames_and_rate_cvars_apply_dynamically; crates/cs-engine/tests/lifecycle.rs::pings_only_sent_while_in_score_held_and_throttled; ReHLDS sv_main.cpp (SV_CheckUpdateRate, SV_CheckRate, SV_ShouldUpdatePing, SV_EmitPings_internal, read 2026-11-25): frame.rs applies live sv_minrate/sv_maxrate/sv_minupdaterate/sv_maxupdaterate (default 30.0) and gates svc_pings on (last_cmd.buttons & IN_SCORE) != 0 throttled to 2.0 s"
 
 [[item]]
 id = "newer_build_messages"
@@ -282,8 +282,8 @@ evidence = "Prediction replayed against the original HLDS's clientdata: worst er
 
 [[item]]
 id = "clientcore_weapon_prediction"
-status = "missing"
-evidence = "Phase 3 kept only the bookkeeping from weapon_data and events (crates/cs-clientcore/src/predict.rs WeaponState: next attack, ammo, weapon id); the client does not run the weapon code (ItemPostFrame) or play the shot's events itself, so the shooter hears and sees its own shots only when the server's events arrive (the original server skips the host: A15 of docs/parity/checklists/phase3-clientcore.md). Phase 6"
+status = "tested"
+evidence = "crates/cs-clientcore/tests/weapon_prediction.rs::cl_lw_1_predicts_shot_recoil_clip_event_and_sound_before_server_reply, cl_lw_1_predicts_zoom_silencer_burst_reload_and_shield_toggle, client_prediction_matches_server_spread_and_recoil_with_same_seed, iuser3_bitmasks_and_freeze_time_quirk_match_client_dll, pistol_cycle_times_usp_silenced_glock_burst_and_elite_args, smg_and_rifle_silenced_m4a1_famas_burst_kick_scale_and_decay, shotgun_random_recoil_m3_cone_and_sniper_zoom_parity; ReGameDLL_CS / client.dll clean-room weapon prediction in crates/cs-clientcore/src/weapons_predict.rs"
 
 [[item]]
 id = "clientcore_usermsg_dispatch"

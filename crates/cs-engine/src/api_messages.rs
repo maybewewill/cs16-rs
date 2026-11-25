@@ -63,7 +63,9 @@ pub enum MsgDest {
     /// (`MSG_ALL`, `sv.reliable_datagram`): what the game sends to single clients in the same
     /// frame comes first.
     All,
-    /// The unreliable queue of every `Active` client.
+    /// The unreliable queue of every non-fake `Active` client. Appended directly at emission time
+    /// so chronological ordering relative to [`MsgDest::OneUnreliable`] is preserved (`sv.datagram`
+    /// delivery order).
     Broadcast,
     /// The unreliable queue of every `Active` client in the potentially visible set of the
     /// point, as `SV_Multicast` with `MSG_FL_PVS` (ReHLDS `sv_main.cpp`, read 2026-11-21): a
@@ -150,7 +152,7 @@ impl EngineApi<'_> {
             MsgDest::All => self.outbox.push_reliable_all(bytes),
             MsgDest::Broadcast => {
                 for (slot, view) in self.clients.iter().enumerate() {
-                    if view.state == ClientState::Active && Some(slot) != except {
+                    if view.state == ClientState::Active && !view.fake && Some(slot) != except {
                         self.outbox.push_unreliable(slot, bytes);
                     }
                 }

@@ -972,3 +972,31 @@ fn sends_within_one_call_stop_at_the_backlog_cap() {
     assert_eq!(h.server.client_state(1), ClientState::Free);
     assert_eq!(h.server.client_state(0), ClientState::Active);
 }
+
+#[test]
+fn msgdest_broadcast_preserves_emission_order_with_one_unreliable() {
+    let (mut h, mut a, mut b) = two_active(TestGame::default());
+    let bot_slot = Rc::new(Cell::new(None));
+    let bot_out = Rc::clone(&bot_slot);
+    h.server.game_mut().act(move |eng| {
+        bot_out.set(eng.create_fake_client("Bot"));
+    });
+    h.step(&mut [&mut a, &mut b], 2);
+    let bot = bot_slot.get().expect("fake client slot");
+
+    let a_before = prints(&a).len();
+    let b_before = prints(&b).len();
+    h.server.game_mut().act(move |eng| {
+        eng.send(MsgDest::OneUnreliable(0), &print_bytes("1-one"));
+        eng.send(MsgDest::Broadcast, &print_bytes("2-bcast"));
+        eng.send(MsgDest::OneUnreliable(0), &print_bytes("3-one"));
+        eng.send(MsgDest::Broadcast, &print_bytes("4-bcast"));
+    });
+    h.step(&mut [&mut a, &mut b], 30);
+
+    let a_got: Vec<String> = prints(&a).into_iter().skip(a_before).collect();
+    let b_got: Vec<String> = prints(&b).into_iter().skip(b_before).collect();
+    assert_eq!(a_got, vec!["1-one", "2-bcast", "3-one", "4-bcast"]);
+    assert_eq!(b_got, vec!["2-bcast", "4-bcast"]);
+    assert_eq!(h.server.client_reliable_backlog(bot), 0);
+}

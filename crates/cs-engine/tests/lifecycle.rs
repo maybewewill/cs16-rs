@@ -403,14 +403,83 @@ fn reliable_broadcast_reaches_everyone_past_new() {
 }
 
 #[test]
-fn pings_are_sent_every_two_seconds() {
+fn pings_only_sent_while_in_score_held_and_throttled() {
+    const IN_SCORE: u16 = 1 << 15;
     let mut h = Harness::new(4);
     let mut a = joined(&mut h, "A", &mut []);
+
+    // `SV_ShouldUpdatePing` (`rehlds/engine/sv_main.cpp`, read 2026-11-25): zero unsolicited
+    // `svc_pings` while `+showscores` (`IN_SCORE`) is not held.
     let before = opcodes(&a, svc::PINGS);
     h.step(&mut [&mut a], frames(5.0));
-    let pings = opcodes(&a, svc::PINGS) - before;
-    assert!((2..=3).contains(&pings), "{pings} svc_pings in 5 s");
+    assert_eq!(
+        opcodes(&a, svc::PINGS) - before,
+        0,
+        "must not emit svc_pings when IN_SCORE is not pressed"
+    );
+
+    // Holding `IN_SCORE` for 5 seconds emits `svc_pings` throttled to `PINGS_INTERVAL_SECS` (2.0 s).
+    let before_held = opcodes(&a, svc::PINGS);
+    for _ in 0..frames(5.0) {
+        a.queue_cmd(cs_proto48::delta::GoldSrcUserCmd {
+            msec: 10,
+            buttons: IN_SCORE,
+            ..Default::default()
+        });
+        h.step(&mut [&mut a], 1);
+    }
+    let pings = opcodes(&a, svc::PINGS) - before_held;
+    assert!((2..=3).contains(&pings), "{pings} svc_pings in 5 s while IN_SCORE held");
     assert_eq!(PINGS_INTERVAL_SECS, 2.0);
+
+    // Releasing `IN_SCORE` immediately stops `svc_pings` emission again.
+    a.queue_cmd(cs_proto48::delta::GoldSrcUserCmd {
+        msec: 10,
+        buttons: 0,
+        ..Default::default()
+    });
+    h.step(&mut [&mut a], 5);
+    let after_release = opcodes(&a, svc::PINGS);
+    h.step(&mut [&mut a], frames(5.0));
+    assert_eq!(
+        opcodes(&a, svc::PINGS) - after_release,
+        0,
+        "must stop emitting svc_pings after IN_SCORE is released"
+    );
+}
+
+#[test]
+fn sendinfo_time_spaces_userinfo_broadcasts_by_one_second() {
+    let mut h = Harness::new(4);
+    let mut a = joined(&mut h, "A", &mut []);
+    let mut b = joined(&mut h, "B", &mut [&mut a]);
+    h.step(&mut [&mut a, &mut b], 20);
+    let slot_a = slot_of(&a);
+    let updates_before = opcodes(&b, svc::UPDATEUSERINFO);
+
+    // First `setinfo` applies immediately and arms the 1.0 s `sendinfo_time` cooldown.
+    a.send_stringcmd("setinfo cl_updaterate 25");
+    h.step(&mut [&mut a, &mut b], 10);
+    assert_eq!(opcodes(&b, svc::UPDATEUSERINFO) - updates_before, 1);
+
+    // Mid-second `setinfo` updates within `< 1.0 s` coalesce without broadcasting yet.
+    a.send_stringcmd("setinfo model gign");
+    h.step(&mut [&mut a, &mut b], 30);
+    a.send_stringcmd("setinfo topcolor 77");
+    h.step(&mut [&mut a, &mut b], 30);
+    assert_eq!(
+        opcodes(&b, svc::UPDATEUSERINFO) - updates_before,
+        1,
+        "mid-second setinfo updates must wait for 1.0 s sendinfo_time"
+    );
+
+    // Once 1.0 s has elapsed from the first broadcast, all coalesced keys flush in one update.
+    h.step(&mut [&mut a, &mut b], 50);
+    assert_eq!(opcodes(&b, svc::UPDATEUSERINFO) - updates_before, 2);
+    let info = InfoString::parse(&b.userinfos()[&slot_a]);
+    assert_eq!(info.get("cl_updaterate"), Some("25"));
+    assert_eq!(info.get("model"), Some("gign"));
+    assert_eq!(info.get("topcolor"), Some("77"));
 }
 
 #[test]
