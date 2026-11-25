@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 cs-amxx.workspace = true
 cs-assets.workspace = true
+cs-bot.workspace = true
 cs-engine.workspace = true
 cs-proto48.workspace = true
 cs-sim.workspace = true

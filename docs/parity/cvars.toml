@@ -9,12 +9,13 @@ evidence = "crates/cs-game/tests/teams.rs::spectators, new_player_sees_the_team_
 
 [[item]]
 id = "bot_difficulty"
-status = "implemented"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs, crates/cs-bot/src/profile.rs::tests::parses_builtin_roster_for_all_difficulties"
 
 [[item]]
 id = "bot_quota"
-status = "implemented"
-evidence = "crates/cs-game/src/bots.rs (enable_cvar_bot_quota on cs-server --bots N; quota maintenance loop); crates/cs-local/src/lib.rs::tests::vanilla_round_time asserts vanilla default 0"
+status = "tested"
+evidence = "crates/cs-game/src/bots.rs::maintain_quota, crates/cs-game/tests/phase12_bots.rs::match_5v5_quota_10_multi_round_and_commands, crates/cs-local/src/lib.rs::tests::vanilla_round_time"
 
 [[item]]
 id = "brightness"
@@ -659,143 +660,143 @@ evidence = "crates/cs-cvar/src/lib.rs::executes_cvars_binds_aliases_and_roundtri
 
 [[item]]
 id = "bot_allow_grenades"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL bot_cs_bot_init.cpp)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs, crates/cs-bot/src/buy.rs::tests::respects_all_weapon_restriction_flags_and_presets, crates/cs-game/tests/phase12_bots.rs::weapon_restrictions_presets_and_buy"
 
 [[item]]
 id = "bot_allow_machine_guns"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL bot_cs_bot_init.cpp)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs, crates/cs-bot/src/buy.rs::tests::respects_all_weapon_restriction_flags_and_presets, crates/cs-game/tests/phase12_bots.rs::weapon_restrictions_presets_and_buy"
 
 [[item]]
 id = "bot_allow_pistols"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL bot_cs_bot_init.cpp)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs, crates/cs-bot/src/buy.rs::tests::respects_all_weapon_restriction_flags_and_presets, crates/cs-game/tests/phase12_bots.rs::weapon_restrictions_presets_and_buy"
 
 [[item]]
 id = "bot_allow_rifles"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL bot_cs_bot_init.cpp)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs, crates/cs-bot/src/buy.rs::tests::respects_all_weapon_restriction_flags_and_presets, crates/cs-game/tests/phase12_bots.rs::weapon_restrictions_presets_and_buy"
 
 [[item]]
 id = "bot_allow_rogues"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL bot_cs_bot_init.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-bot/src/tactics.rs (BotSettings::allow_rogues), crates/cs-game/src/bots.rs"
 
 [[item]]
 id = "bot_allow_shield"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL bot_cs_bot_init.cpp)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs, crates/cs-bot/src/buy.rs::tests::respects_all_weapon_restriction_flags_and_presets, crates/cs-game/tests/phase12_bots.rs::weapon_restrictions_presets_and_buy"
 
 [[item]]
 id = "bot_allow_shotguns"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL bot_cs_bot_init.cpp)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs, crates/cs-bot/src/buy.rs::tests::respects_all_weapon_restriction_flags_and_presets, crates/cs-game/tests/phase12_bots.rs::weapon_restrictions_presets_and_buy"
 
 [[item]]
 id = "bot_allow_snipers"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL bot_cs_bot_init.cpp)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs, crates/cs-bot/src/buy.rs::tests::respects_all_weapon_restriction_flags_and_presets, crates/cs-game/tests/phase12_bots.rs::weapon_restrictions_presets_and_buy"
 
 [[item]]
 id = "bot_allow_sub_machine_guns"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL bot_cs_bot_init.cpp)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs, crates/cs-bot/src/buy.rs::tests::respects_all_weapon_restriction_flags_and_presets, crates/cs-game/tests/phase12_bots.rs::weapon_restrictions_presets_and_buy"
 
 [[item]]
 id = "bot_auto_vacate"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL bot_cs_bot_init.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs::maintain_quota"
 
 [[item]]
 id = "bot_chatter"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL bot_cs_bot_init.cpp)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs, crates/cs-game/tests/phase12_bots.rs::radio_chatter_and_human_coordination"
 
 [[item]]
 id = "bot_debug"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL bot_cs_bot_init.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs"
 
 [[item]]
 id = "bot_defer_to_human"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL bot_cs_bot_init.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-bot/src/tactics.rs (BotSettings::defer_to_human), crates/cs-game/src/bots.rs"
 
 [[item]]
 id = "bot_enable"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL bot_cs_bot_init.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs"
 
 [[item]]
 id = "bot_join_after_player"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL bot_cs_bot_init.cpp)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs::maintain_quota, crates/cs-game/tests/phase12_bots.rs::{bot_join_after_player_waits_for_human, match_5v5_quota_10_multi_round_and_commands}"
 
 [[item]]
 id = "bot_join_team"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL bot_cs_bot_init.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-bot/src/tactics.rs (BotJoinTeam), crates/cs-game/src/bots.rs"
 
 [[item]]
 id = "bot_nav_edit"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL bot_cs_bot_init.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs"
 
 [[item]]
 id = "bot_nav_zdraw"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL bot_cs_bot_init.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs"
 
 [[item]]
 id = "bot_prefix"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL bot_cs_bot_init.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs"
 
 [[item]]
 id = "bot_profile_db"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL bot_cs_bot_init.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs (BotProfile.db VFS load and builtin fallback)"
 
 [[item]]
 id = "bot_quicksave"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL bot_cs_bot_init.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs"
 
 [[item]]
 id = "bot_quota_match"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL bot_cs_bot_init.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs::maintain_quota"
 
 [[item]]
 id = "bot_show_danger"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL bot_cs_bot_init.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs"
 
 [[item]]
 id = "bot_show_nav"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL bot_cs_bot_init.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs"
 
 [[item]]
 id = "bot_stop"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL bot_cs_bot_init.cpp)"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs, crates/cs-game/tests/phase12_bots.rs::{radio_chatter_and_human_coordination, match_5v5_quota_10_multi_round_and_commands}"
 
 [[item]]
 id = "bot_traceview"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL bot_cs_bot_init.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs"
 
 [[item]]
 id = "bot_walk"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL bot_cs_bot_init.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs"
 
 [[item]]
 id = "bot_zombie"
-status = "missing"
-evidence = "not implemented in cs-cvar/cs-engine/cs-game (ReHLDS/ReGameDLL bot_cs_bot_init.cpp)"
+status = "implemented"
+evidence = "crates/cs-cvar/src/defaults.rs, crates/cs-game/src/bots.rs"
 
 [[item]]
 id = "bottomcolor"

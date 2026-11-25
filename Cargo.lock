@@ -541,6 +541,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "cs-bot"
+version = "0.1.0"
+dependencies = [
+ "cs-assets",
+ "cs-pm",
+ "glam",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
 name = "cs-client"
 version = "0.1.0"
 dependencies = [
@@ -616,6 +627,7 @@ version = "0.1.0"
 dependencies = [
  "cs-amxx",
  "cs-assets",
+ "cs-bot",
  "cs-cvar",
  "cs-engine",
  "cs-game",

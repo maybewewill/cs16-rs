@@ -616,6 +616,16 @@ impl Grenade {
         // Vanilla (`!REGAMEDLL_FIXES`): emits on the defuser's edict rather than the bomb.
         let player_edict = eng.client_edict(slot);
         eng.emit_sound(player_edict, CHAN_ITEM, "weapons/c4_disarm.wav", 1.0, ATTN_NORM, PITCH_NORM);
+        if let Some(pos) = eng.ent(player_edict).map(|v| v.origin) {
+            crate::bots::emit_sound_event(
+                g,
+                Some(slot),
+                Some(Team::Ct),
+                pos,
+                cs_bot::tactics::SoundKind::BombDefusing,
+                eng.time(),
+            );
+        }
     }
 
     /// `CGrenade::DefuseBombEnd(CBasePlayer *pPlayer, bool bDefused)` (`ggrenade.cpp` 1087-1217).
@@ -753,6 +763,14 @@ impl Grenade {
             self.next_beep = now + 1.4;
             if let Some(sample) = self.beep_name {
                 eng.emit_sound(id, CHAN_VOICE, sample, 1.0, self.attenu, PITCH_NORM);
+                crate::bots::emit_sound_event(
+                    g,
+                    None,
+                    None,
+                    origin,
+                    cs_bot::tactics::SoundKind::BombBeep,
+                    eng.time(),
+                );
             }
         }
 
@@ -991,9 +1009,17 @@ impl Grenade {
     /// `CGrenade::BounceSound` (`ggrenade.cpp` 774): the HE grenade's (damage over 50) thud, or
     /// one of three hits for the others.
     fn bounce_sound(g: &mut GameState, eng: &mut EngineApi<'_>, id: EdictId) {
-        let Some(damage) = eng.ent(id).map(|v| v.dmg) else {
+        let Some((damage, origin)) = eng.ent(id).map(|v| (v.dmg, v.origin)) else {
             return;
         };
+        crate::bots::emit_sound_event(
+            g,
+            None,
+            None,
+            origin,
+            cs_bot::tactics::SoundKind::GrenadeBounce,
+            eng.time(),
+        );
         if damage > 50.0 {
             eng.emit_sound(id, CHAN_VOICE, "weapons/he_bounce-1.wav", 0.25, ATTN_NORM, PITCH_NORM);
             return;
@@ -1094,6 +1120,14 @@ impl GameEntity for Grenade {
 
     fn is_planted_live_c4(&self) -> bool {
         self.is_c4 && !self.just_blew
+    }
+
+    fn c4_blow_time(&self) -> Option<f32> {
+        (self.is_c4 && !self.just_blew).then_some(self.c4_blow)
+    }
+
+    fn smoke_cloud_center(&self) -> Option<Vec3> {
+        (self.detonated && self.smoke_detonate != Vec3::ZERO).then_some(self.smoke_detonate)
     }
 
     fn use_(

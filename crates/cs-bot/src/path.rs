@@ -456,7 +456,10 @@ pub fn find_path(
     }
 
     if closest_idx == start_idx && !reached_goal {
-        return Some(build_trivial_path(mesh, start_idx, start, goal, obstacles));
+        let end_pt = mesh.areas()[start_idx].closest_point(goal);
+        let mut p = build_trivial_path(mesh, start_idx, start, end_pt, obstacles);
+        p.reached_goal = false;
+        return Some(p);
     }
 
     // Reconstruct reversed area chain.

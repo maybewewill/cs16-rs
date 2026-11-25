@@ -111,6 +111,8 @@ pub struct GameState {
     pub(crate) next_hostage_number: u8,
     /// Server-side engine bots (`BotManager`).
     pub(crate) bots: bots::BotManager,
+    /// Optional VFS handle for loading map `.nav` meshes and `BotProfile.db`.
+    pub(crate) vfs: Option<cs_vfs::Vfs>,
     /// Named global states controlled by `env_global` (`0=Off, 1=On, 2=Dead`).
     pub(crate) global_states: std::collections::BTreeMap<String, i32>,
     /// Active map fog from `env_fog` (`(rgb, density)`).
@@ -154,6 +156,7 @@ impl GameState {
             hostage_nav: hostage_localnav::LocalNavManager::default(),
             next_hostage_number: 0,
             bots: bots::BotManager::default(),
+            vfs: None,
             global_states: std::collections::BTreeMap::new(),
             map_fog: None,
             weather: 0,
@@ -234,10 +237,32 @@ impl CsGame {
         self.state.bots.quota_enabled = true;
     }
 
-    /// Whether the bot navigation graph has been built: it is built on the first frame that has
-    /// a bot, so a server without bots never builds it.
+    /// Whether the bot navigation mesh has been built/loaded: it is built on the first frame
+    /// that has a bot, so a server without bots never builds it.
     pub fn bot_nav_built(&self) -> bool {
-        self.state.bots.nav.is_some()
+        self.state.bots.nav_mesh.is_some()
+    }
+
+    /// Returns the active ZBot navigation mesh, if loaded or generated.
+    pub fn bot_nav_mesh(&self) -> Option<&cs_bot::nav_mesh::NavMesh> {
+        self.state.bots.nav_mesh.as_ref()
+    }
+
+    /// Returns the active ZBot settings.
+    pub fn bot_settings(&self) -> &cs_bot::tactics::BotSettings {
+        &self.state.bots.settings
+    }
+
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn debug_bot_summary(&self, eng: &EngineApi<'_>) -> String {
+        bots::debug_summary(&self.state, eng)
+    }
+
+    /// Attaches a VFS handle and loads `BotProfile.db` (falling back to the built-in roster).
+    pub fn load_bot_assets(&mut self, vfs: &cs_vfs::Vfs) {
+        self.state.vfs = Some(vfs.clone());
+        self.state.bots.load_profile_db(vfs, "BotProfile.db");
     }
 
     /// Reads the message of the day, `motd.txt` of the game directories (`LOAD_FILE_FOR_ME` of
@@ -253,6 +278,7 @@ impl CsGame {
 
     /// Reads the message of the day from `motdfile` (defaulting to `motd.txt` when empty).
     pub fn load_motd_file(&mut self, vfs: &cs_vfs::Vfs, motdfile: &str) {
+        self.load_bot_assets(vfs);
         let path = if motdfile.trim().is_empty() {
             "motd.txt"
         } else {

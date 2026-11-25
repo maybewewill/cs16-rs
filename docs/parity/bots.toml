@@ -1,118 +1,119 @@
 # Bot AI, navigation mesh (.nav), and CZ/ZBot behavior parity (weight 4).
-# Phase 2E connected minimal NavGraph bots to cs-engine fake clients (crates/cs-game/src/bots.rs)
-# for basic combat and objective play (plant, defuse, hostage rescue); full ZBot / .nav parity is Phase 12.
+# Phase 2E connected minimal NavGraph bots to cs-engine fake clients; Phase 12 adds the
+# full GPL-3.0-or-later clean-room cs-bot crate (.nav load/gen/edit/save, A* pathing,
+# BotProfile.db, economy buying, combat/recoil/cover, radio/perception, and objective tactics).
 
 [[item]]
 id = "bot_legacy_sim_brain"
 status = "tested"
-evidence = "crates/cs-sim/src/bots.rs (directed NavGraph with ceiling-safe stair climb and think_bot_with AI used by MatchWorld and cs-game engine bots); tested in crates/cs-game/tests/bots.rs::bots_move_and_shoot_an_enemy, a_round_with_bots_ends and crates/cs-game/tests/full_round.rs::*"
+evidence = "crates/cs-sim/src/bots.rs (directed NavGraph with ceiling-safe stair climb and think_bot_with AI used by MatchWorld); tested in crates/cs-game/tests/bots.rs::bots_move_and_shoot_an_enemy, a_round_with_bots_ends and crates/cs-game/tests/full_round.rs::*"
 
 [[item]]
 id = "bot_engine_fake_client_bridge"
 status = "tested"
-evidence = "crates/cs-game/tests/bots.rs::bot_add_joins_a_team_and_spawns, bots_move_and_shoot_an_enemy, bots_buy_at_round_start, bot_kick_frees_the_slot, a_round_with_bots_ends (cs-game bot driver using EngineApi::create_fake_client and run_player_move, 30 Hz command/10 Hz think pacing); crates/cs-game/tests/bots.rs::a_map_without_bots_builds_no_nav, a_full_team_costs_no_fake_client (a server without bots pays nothing; AddBot settles the team before it creates the client). The IsBot branches of the rules (bots skip the MOTD and menus) are not separately tested"
+evidence = "crates/cs-game/src/bots.rs (`cs_bot` driver over EngineApi::create_fake_client and run_player_move); tested in crates/cs-game/tests/bots.rs::{bot_add_joins_a_team_and_spawns, bots_move_and_shoot_an_enemy, bots_buy_at_round_start, bot_kick_frees_the_slot, a_round_with_bots_ends, a_map_without_bots_builds_no_nav, a_full_team_costs_no_fake_client} and crates/cs-game/tests/phase12_bots.rs::*"
 
 [[item]]
 id = "bot_add_kick_commands"
 status = "tested"
-evidence = "crates/cs-game/tests/bots.rs::bot_add_joins_a_team_and_spawns, bot_kick_frees_the_slot, a_full_team_costs_no_fake_client (bot_add, bot_add_t, bot_add_ct, bot_kick); bot_quota_match and ZBot subcommands remain Phase 12"
+evidence = "crates/cs-game/src/bots.rs (`bot_add`, `bot_add_t`, `bot_add_ct`, `bot_kick`, `bot_kill`, `bot_about`, `bot_goto_mark`); tested in crates/cs-game/tests/bots.rs::{bot_add_joins_a_team_and_spawns, bot_kick_frees_the_slot, a_full_team_costs_no_fake_client} and crates/cs-game/tests/phase12_bots.rs::{match_5v5_quota_10_multi_round_and_commands, bot_profile_db_vfs_load_and_builtin_fallback}"
 
 [[item]]
 id = "bot_quota_maintenance"
-status = "implemented"
-evidence = "crates/cs-game/src/bots.rs::maintain_quota (every 0.5 s adds a bot below bot_quota, kicks one above it), wired in cs-server --bots (crates/cs-local/src/lib.rs::tests::vanilla_round_time only starts the server with it); no test drives maintain_quota itself"
+status = "tested"
+evidence = "crates/cs-game/src/bots.rs::maintain_quota (`bot_quota`, `bot_quota_match`, `bot_join_after_player`, `bot_auto_vacate`); tested in crates/cs-game/tests/phase12_bots.rs::{match_5v5_quota_10_multi_round_and_commands, bot_join_after_player_waits_for_human}"
 
 [[item]]
 id = "bot_navmesh_generation"
-status = "missing"
-evidence = "Phase 12: Condition Zero / CSBot automatic navigation mesh generation on BSP geometry"
+status = "tested"
+evidence = "crates/cs-bot/src/nav_gen.rs (`generate_nav_mesh` over BSP hull geometry, crouch/jump/ladder attributes, hiding spots, and fallback generation when VFS .nav is missing); tested in crates/cs-bot/src/nav_gen.rs::tests::{generates_merged_areas_places_and_crouch_duct, generates_and_links_ladder_between_floors} and crates/cs-game/tests/phase12_bots.rs::nav_vfs_load_generate_edit_and_save_roundtrip"
 
 [[item]]
 id = "bot_nav_file_read_write"
-status = "missing"
-evidence = "Phase 12: reading and writing Valve .nav binary navigation mesh files"
+status = "tested"
+evidence = "crates/cs-assets/src/nav.rs (`NavFile::parse` v1..=5 and `NavFile::encode` v5); tested in crates/cs-assets/src/nav.rs::tests::{parses_legacy_versions_1_through_4, roundtrip_v5_nav_file, z_interpolation_and_closest_point_match_quad, rejects_malformed_and_oversized_inputs} and crates/cs-game/tests/phase12_bots.rs::nav_vfs_load_generate_edit_and_save_roundtrip"
 
 [[item]]
 id = "bot_nav_place_names"
-status = "missing"
-evidence = "Phase 12: .nav place names for location-aware radio and bot chatter"
+status = "tested"
+evidence = "crates/cs-assets/src/nav.rs, crates/cs-bot/src/nav_mesh.rs (`place_by_id`, `place_id`, spatial lookups); tested in crates/cs-bot/src/nav_mesh.rs::tests::spatial_grid_and_place_lookup and crates/cs-game/tests/phase12_bots.rs::nav_vfs_load_generate_edit_and_save_roundtrip"
 
 [[item]]
 id = "bot_nav_edit_commands"
-status = "missing"
-evidence = "Phase 12: bot_nav_* mesh editing and visualization commands"
+status = "tested"
+evidence = "crates/cs-game/src/bots.rs::handle_nav_command (`bot_nav_mark`, `bot_nav_split`, `bot_nav_merge`, `bot_nav_delete`, `bot_nav_connect`, `bot_nav_disconnect`, `bot_nav_crouch`, `bot_nav_jump`, `bot_nav_precise`, `bot_nav_no_jump`, `bot_nav_avoid`, `bot_nav_place_set`, `bot_nav_check_consistency`, `bot_nav_analyze`, `bot_nav_generate`, `bot_nav_save`, `bot_nav_load`); tested in crates/cs-game/tests/phase12_bots.rs::nav_vfs_load_generate_edit_and_save_roundtrip"
 
 [[item]]
 id = "bot_profile_db_parser"
-status = "missing"
-evidence = "Phase 12: BotProfile.db parser for bot names, weapons, skin, voice pitch, and skill templates"
+status = "tested"
+evidence = "crates/cs-bot/src/profile.rs (`BotProfileDb::parse`, template inheritance, `BUILTIN_BOT_PROFILE_DB` fallback); tested in crates/cs-bot/src/profile.rs::tests::{parses_multi_level_template_inheritance_and_overrides, errors_on_unknown_and_cyclic_templates, select_profile_avoids_duplicate_names_when_available} and crates/cs-game/tests/phase12_bots.rs::bot_profile_db_vfs_load_and_builtin_fallback"
 
 [[item]]
 id = "bot_difficulty_profiles"
-status = "missing"
-evidence = "Phase 12: Easy/Normal/Hard/Expert reaction time, aggression, teamwork, and aim skill profiles"
+status = "tested"
+evidence = "crates/cs-bot/src/profile.rs (`BotDifficulty::Easy/Normal/Hard/Expert`, reaction time, aggression, teamwork, aim/skill profiles); tested in crates/cs-bot/src/profile.rs::tests::parses_builtin_roster_for_all_difficulties"
 
 [[item]]
 id = "bot_buy_economy_and_loadouts"
-status = "missing"
-evidence = "Phase 2E has fixed round-start alias buying (crates/cs-game/tests/bots.rs::bots_buy_at_round_start); Phase 12: economy-aware save/eco/force/full-buy decisions and weapon preferences"
+status = "tested"
+evidence = "crates/cs-bot/src/buy.rs (`decide_bot_buy` save/eco/force/full-buy, armor, defuser, utility, preference matching) and crates/cs-game/src/bots.rs; tested in crates/cs-bot/src/buy.rs::tests::{eco_and_save_thresholds_preserve_money, force_buy_buys_smg_or_budget_rifle_with_kevlar, full_buy_honors_weapon_preference_armor_defuser_and_utility, vip_and_as_map_restrictions_are_enforced}, crates/cs-game/tests/bots.rs::bots_buy_at_round_start, and crates/cs-game/tests/phase12_bots.rs::weapon_restrictions_presets_and_buy"
 
 [[item]]
 id = "bot_pathfinding_stairs_ladders_doors"
-status = "missing"
-evidence = "Phase 2E directed NavGraph adds ceiling-safe stair climb and doorway traces; Phase 12: A* pathfinding across nav areas, ladders, crouch passages, jumps, and func_door/func_breakable obstacles"
+status = "tested"
+evidence = "crates/cs-bot/src/path.rs (`find_path` weighted A*, danger/obstacle avoidance, ladder up/down actions, crouch/jump segments, string pulling); tested in crates/cs-bot/src/path.rs::tests::{astar_avoids_danger_and_obstacles_and_tags_metadata, astar_ladder_and_string_pull}"
 
 [[item]]
 id = "bot_combat_aim_burst_recoil"
-status = "missing"
-evidence = "Phase 2E has minimal LOS aim/fire in cs_sim::bots (crates/cs-game/tests/bots.rs::bots_move_and_shoot_an_enemy); Phase 12: weapon-aware engagement distance, burst control, sniper zoom, knife/grenade usage, and recoil compensation"
+status = "tested"
+evidence = "crates/cs-bot/src/combat.rs (weapon range selection, sniper scope, reaction delay gating, aim focus decay, recoil compensation, reload in cover, grenade throw pin/release) and crates/cs-game/src/bots.rs; tested in crates/cs-bot/src/combat.rs::tests::* and crates/cs-game/tests/bots.rs::bots_move_and_shoot_an_enemy"
 
 [[item]]
 id = "bot_cover_and_hiding_spots"
-status = "missing"
-evidence = "Phase 12: computing and using hiding spots, reload cover, and flash/retreat behavior"
+status = "tested"
+evidence = "crates/cs-bot/src/{nav_mesh.rs, combat.rs, tactics.rs} (hiding spot queries, reload cover, flashblind scatter); tested in crates/cs-bot/src/nav_mesh.rs::tests::hiding_sniper_and_ambush_queries, crates/cs-bot/src/combat.rs::tests::recoil_compensation_and_reload_in_cover_and_flash_scatter, and crates/cs-bot/src/tactics.rs::tests::cover_hide_ambush_and_radio_coordination"
 
 [[item]]
 id = "bot_ambush_and_camping"
-status = "missing"
-evidence = "Phase 12: sniper/defensive camping and ambush spots"
+status = "tested"
+evidence = "crates/cs-bot/src/{nav_mesh.rs, tactics.rs} (sniper/ambush/good-cover spot queries and Hide/Ambush states); tested in crates/cs-bot/src/nav_mesh.rs::tests::hiding_sniper_and_ambush_queries and crates/cs-bot/src/tactics.rs::tests::cover_hide_ambush_and_radio_coordination"
 
 [[item]]
 id = "bot_bomb_plant_and_guard"
 status = "tested"
-evidence = "PLANT ONLY: crates/cs-game/tests/full_round.rs::a_bot_plants_and_the_bomb_explodes_on_de_dust2 (Phase 2E NavGraph carrier pathing to func_bomb_target and arming C4). Guarding the site after the plant (ZBot post-plant behaviour) is not ported: Phase 12"
+evidence = "crates/cs-bot/src/tactics.rs and crates/cs-game/src/bots.rs; tested in crates/cs-bot/src/tactics.rs::tests::bomb_fetch_plant_guard_escape_and_ct_defuse, crates/cs-game/tests/full_round.rs::a_bot_plants_and_the_bomb_explodes_on_de_dust2, and crates/cs-game/tests/phase12_bots.rs::bomb_plant_guard_and_defuse_synthetic_arena"
 
 [[item]]
 id = "bot_bomb_search_and_defuse"
 status = "tested"
-evidence = "crates/cs-game/tests/full_round.rs::a_bot_defuses_a_planted_bomb (Phase 2E CT pathing to live planted C4, slow approach and +use defusal; full ZBot multi-site checking and cover remain Phase 12)"
+evidence = "crates/cs-bot/src/tactics.rs and crates/cs-game/src/bots.rs; tested in crates/cs-bot/src/tactics.rs::tests::bomb_fetch_plant_guard_escape_and_ct_defuse and crates/cs-game/tests/full_round.rs::a_bot_defuses_a_planted_bomb"
 
 [[item]]
 id = "bot_hostage_rescue_and_guard"
 status = "tested"
-evidence = "crates/cs-game/tests/full_round.rs::a_bot_rescues_a_hostage_on_cs_office (Phase 2E CT pathing to hostage, +use follow pulse and escort to rescue zone; full ZBot T hostage guarding remains Phase 12)"
+evidence = "crates/cs-bot/src/tactics.rs and crates/cs-game/src/bots.rs; tested in crates/cs-bot/src/tactics.rs::tests::hostage_guard_and_rescue_states and crates/cs-game/tests/full_round.rs::a_bot_rescues_a_hostage_on_cs_office"
 
 [[item]]
 id = "bot_vip_escort_and_assassination"
-status = "missing"
-evidence = "Phase 12: VIP escape pathing, CT escorting, and T assassination tactics on as_* maps"
+status = "tested"
+evidence = "crates/cs-bot/src/tactics.rs and crates/cs-game/src/bots.rs; tested in crates/cs-bot/src/tactics.rs::tests::vip_escort_and_assassination_states and crates/cs-game/tests/phase12_bots.rs::vip_escort_and_safety_zone_escape"
 
 [[item]]
 id = "bot_sound_and_vision_perception"
-status = "missing"
-evidence = "Phase 12: hearing footsteps/gunshots/reloads and line-of-sight/smoke/flashblind perception"
+status = "tested"
+evidence = "crates/cs-bot/src/tactics.rs (`SoundKind`, FOV/LOS, smoke occlusion, flashblindness) and crates/cs-game/src/{bots.rs, bullets.rs, grenade.rs, player.rs, weapons/core.rs}; tested in crates/cs-bot/src/tactics.rs::tests::perception_fov_smoke_flash_and_sound_events"
 
 [[item]]
 id = "bot_radio_and_chatter"
-status = "missing"
-evidence = "Phase 12: bot radio commands, voice chatter, and responding to human player radio calls"
+status = "tested"
+evidence = "crates/cs-bot/src/tactics.rs and crates/cs-game/src/{bots.rs, hud_misc.rs} (`bot_chatter`, `%!MRAD_*` SendAudio/TextMsg, place callouts); tested in crates/cs-bot/src/tactics.rs::tests::cover_hide_ambush_and_radio_coordination and crates/cs-game/tests/phase12_bots.rs::radio_chatter_and_human_coordination"
 
 [[item]]
 id = "bot_team_coordination"
-status = "missing"
-evidence = "Phase 12: coordinated pushes, site calls, and follow/hold commands"
+status = "tested"
+evidence = "crates/cs-bot/src/tactics.rs and crates/cs-game/src/bots.rs (followme/holdpos/report handling, coordinated site pushes); tested in crates/cs-bot/src/tactics.rs::tests::cover_hide_ambush_and_radio_coordination and crates/cs-game/tests/phase12_bots.rs::radio_chatter_and_human_coordination"
 
 [[item]]
 id = "bot_weapon_restriction_cvars"
-status = "missing"
-evidence = "Phase 12: bot_allow_pistols/shotguns/sub_machine_guns/rifles/snipers/machine_guns/grenades/shield/rogues"
+status = "tested"
+evidence = "crates/cs-cvar/src/defaults.rs (`bot_allow_*`), crates/cs-bot/src/buy.rs, and crates/cs-game/src/bots.rs (`bot_knives_only`, `bot_pistols_only`, `bot_snipers_only`, `bot_all_weapons`); tested in crates/cs-bot/src/buy.rs::tests::respects_all_weapon_restriction_flags_and_presets and crates/cs-game/tests/phase12_bots.rs::weapon_restrictions_presets_and_buy"

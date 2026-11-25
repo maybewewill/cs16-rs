@@ -427,9 +427,14 @@ fn find_node_at(
 }
 
 fn compute_node_attributes<W: NavWorld + ?Sized>(world: &W, feet: Vec3) -> Option<NavAttribute> {
-    // Must at least fit crouched hull at `feet + (0,0,18.5)`
-    let crouch_center = feet + Vec3::new(0.0, 0.0, 18.5);
-    if world.point_contents(crouch_center, Hull::Crouched) == CONTENTS_SOLID {
+    // Must fit crouched clearance above step height (using Point + vertical trace so ramps/stairs
+    // do not clip the bottom corners of Hull::Crouched into the slope).
+    let low = feet + Vec3::new(0.0, 0.0, STEP_HEIGHT + 0.5);
+    if world.point_contents(low, Hull::Point) == CONTENTS_SOLID {
+        return None;
+    }
+    let crouch_tr = world.trace_line(low, feet + Vec3::new(0.0, 0.0, HALF_HUMAN_HEIGHT));
+    if crouch_tr.start_solid || crouch_tr.fraction < 1.0 {
         return None;
     }
 
@@ -438,7 +443,7 @@ fn compute_node_attributes<W: NavWorld + ?Sized>(world: &W, feet: Vec3) -> Optio
     let mut crouch = false;
     for y in [-16.0f32, 0.0, 16.0] {
         for x in [-16.0f32, 0.0, 16.0] {
-            let floor = feet + Vec3::new(x, y, 5.0);
+            let floor = feet + Vec3::new(x, y, STEP_HEIGHT + 0.5);
             let ceiling = feet + Vec3::new(x, y, HUMAN_HEIGHT - eps);
             let tr = world.trace_line(floor, ceiling);
             if tr.fraction < 1.0 || tr.start_solid {
@@ -596,7 +601,9 @@ fn sample_walkable_nodes<W: NavWorld + ?Sized>(
                 continue;
             }
             nodes[curr_idx].to[dir.as_index()] = Some(next_idx);
-            if (from.z - to.z).abs() < 10.0 && nodes[next_idx].to[dir.opposite().as_index()].is_none()
+            // Any walkable slope up to ~45 deg over a 25u step (<= 26u dz) is traversable both ways.
+            if (from.z - to.z).abs() <= STEP_HEIGHT + 8.0
+                && nodes[next_idx].to[dir.opposite().as_index()].is_none()
             {
                 nodes[next_idx].to[dir.opposite().as_index()] = Some(curr_idx);
             }
@@ -836,7 +843,8 @@ fn connect_generated_areas<W: NavWorld + ?Sized>(
             }
             if let Some(adj) = nodes[n].to[NavDir::North.as_index()]
                 && let Some(adj_area) = nodes[adj].area_idx
-                && nodes[adj].to[NavDir::South.as_index()] == Some(n)
+                && (nodes[adj].to[NavDir::South.as_index()] == Some(n)
+                    || (nodes[adj].pos.z - nodes[n].pos.z).abs() <= JUMP_CROUCH_HEIGHT)
             {
                 push_unique(&mut north_links, adj_area);
             } else if let Some(down) =
@@ -856,7 +864,8 @@ fn connect_generated_areas<W: NavWorld + ?Sized>(
             }
             if let Some(adj) = nodes[n].to[NavDir::West.as_index()]
                 && let Some(adj_area) = nodes[adj].area_idx
-                && nodes[adj].to[NavDir::East.as_index()] == Some(n)
+                && (nodes[adj].to[NavDir::East.as_index()] == Some(n)
+                    || (nodes[adj].pos.z - nodes[n].pos.z).abs() <= JUMP_CROUCH_HEIGHT)
             {
                 push_unique(&mut west_links, adj_area);
             } else if let Some(down) =
@@ -878,7 +887,8 @@ fn connect_generated_areas<W: NavWorld + ?Sized>(
                 }
                 if let Some(adj) = nodes[n].to[NavDir::South.as_index()]
                     && let Some(adj_area) = nodes[adj].area_idx
-                    && nodes[adj].to[NavDir::North.as_index()] == Some(n)
+                    && (nodes[adj].to[NavDir::North.as_index()] == Some(n)
+                        || (nodes[adj].pos.z - nodes[n].pos.z).abs() <= JUMP_CROUCH_HEIGHT)
                 {
                     push_unique(&mut south_links, adj_area);
                 } else if let Some(down) =
@@ -901,7 +911,8 @@ fn connect_generated_areas<W: NavWorld + ?Sized>(
                 }
                 if let Some(adj) = nodes[n].to[NavDir::East.as_index()]
                     && let Some(adj_area) = nodes[adj].area_idx
-                    && nodes[adj].to[NavDir::West.as_index()] == Some(n)
+                    && (nodes[adj].to[NavDir::West.as_index()] == Some(n)
+                        || (nodes[adj].pos.z - nodes[n].pos.z).abs() <= JUMP_CROUCH_HEIGHT)
                 {
                     push_unique(&mut east_links, adj_area);
                 } else if let Some(down) =

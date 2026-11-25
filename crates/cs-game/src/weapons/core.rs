@@ -472,6 +472,18 @@ impl<'a, 'e> WeaponCtx<'a, 'e> {
         }
         self.player_mut().next_attack = delay;
         self.reload_sound();
+        let slot = self.slot;
+        let team = self.player().team;
+        let pos = self.eng.ent(self.edict()).map_or(Vec3::ZERO, |v| v.origin);
+        let now = self.eng.time();
+        crate::bots::emit_sound_event(
+            self.g,
+            Some(slot),
+            Some(team),
+            pos,
+            cs_bot::tactics::SoundKind::Reload,
+            now,
+        );
         self.send_weapon_anim(anim, self.use_decrement);
         self.weapon.in_reload = true;
         self.weapon.time_weapon_idle = delay + 0.5;

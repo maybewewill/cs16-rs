@@ -221,8 +221,38 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     reg.register("mp_fadetoblack", "0", srv, "Fade a dead player's screen to black (1 stays black)");
     // `game.cpp`: `{ "mp_playerid", "0", FCVAR_SERVER }`; 0 names everyone, 1 teammates only, 2 nobody.
     reg.register("mp_playerid", "0", srv, "Who the status bar names (0 all, 1 teammates, 2 nobody)");
-    reg.register("bot_quota", "9", srv_arch, "Target number of bots in local match (0..15)");
+
+    // Phase 12: Condition Zero / ZBot console variables
+    reg.register("bot_enable", "1", srv, "Enable ZBot AI (0 or 1)");
+    reg.register("bot_quota", "9", srv_arch, "Target number of bots in local match (0..31)");
+    reg.register("bot_quota_match", "0", srv, "Bots per human player ratio (0 = disabled)");
     reg.register("bot_difficulty", "1", srv_arch, "Bot skill level (0=Easy, 1=Normal, 2=Hard, 3=Expert)");
+    reg.register("bot_prefix", "", srv_arch, "Prefix added to bot names");
+    reg.register("bot_profile_db", "BotProfile.db", srv, "Filename for ZBot personality database");
+    reg.register("bot_join_after_player", "1", srv_arch, "Bots wait for a human player to join before entering (0 or 1)");
+    reg.register("bot_join_team", "any", srv_arch, "Team bots must join: any, T, or CT");
+    reg.register("bot_auto_vacate", "1", srv_arch, "Kick a bot when a human joins a full server (0 or 1)");
+    reg.register("bot_chatter", "normal", srv_arch, "Bot radio/voice chatter mode: off, radio, minimal, normal");
+    reg.register("bot_defer_to_human", "1", srv_arch, "Bots defer bomb/hostage objectives to human teammates (0 or 1)");
+    reg.register("bot_walk", "0", srv, "Force bots to walk silently (0 or 1)");
+    reg.register("bot_stop", "0", srv, "Freeze bot thinking and movement (0 or 1)");
+    reg.register("bot_zombie", "0", srv, "Put bots into idle zombie mode (0 or 1)");
+    reg.register("bot_debug", "0", srv, "Bot debug overlay verbosity (0..4)");
+    reg.register("bot_nav_edit", "0", srv, "Enable navigation mesh editing overlay (0 or 1)");
+    reg.register("bot_nav_zdraw", "4", srv, "Height offset for navmesh debug rendering");
+    reg.register("bot_quicksave", "0", srv, "Skip sniper/encounter analysis when generating navmesh (0 or 1)");
+    reg.register("bot_show_danger", "0", srv, "Show navmesh danger overlay (0 or 1)");
+    reg.register("bot_show_nav", "0", srv, "Show bot navigation paths (0 or 1)");
+    reg.register("bot_traceview", "0", srv, "Show bot vision/LOS debug traces (0..2)");
+    reg.register("bot_allow_pistols", "1", srv, "Allow bots to buy and use pistols (0 or 1)");
+    reg.register("bot_allow_shotguns", "1", srv, "Allow bots to buy and use shotguns (0 or 1)");
+    reg.register("bot_allow_sub_machine_guns", "1", srv, "Allow bots to buy and use SMGs (0 or 1)");
+    reg.register("bot_allow_rifles", "1", srv, "Allow bots to buy and use rifles (0 or 1)");
+    reg.register("bot_allow_snipers", "1", srv, "Allow bots to buy and use sniper rifles (0 or 1)");
+    reg.register("bot_allow_machine_guns", "1", srv, "Allow bots to buy and use machine guns (0 or 1)");
+    reg.register("bot_allow_grenades", "1", srv, "Allow bots to buy and use grenades (0 or 1)");
+    reg.register("bot_allow_shield", "1", srv, "Allow CT bots to buy and use the tactical shield (0 or 1)");
+    reg.register("bot_allow_rogues", "1", srv, "Allow low-teamwork bots to go rogue and ignore radio orders (0 or 1)");
 
     // Phase 11: RCON, passwords, bans, logs, downloads, consistency, slowhack filter, master
     let prot = CVarFlags::PROTECTED;

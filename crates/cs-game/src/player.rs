@@ -2814,6 +2814,7 @@ fn killed(
     if !killed_by_bomb {
         score::player_killed(g, eng, slot, attacker, inflictor, attacker_weapon);
     }
+    crate::bots::on_player_killed(g, eng, slot);
     // `NVGToggle 0` to the player and to the observers that watch it in first person.
     observer::killed_night_vision(g, eng, slot);
     // `SetAnimation(PLAYER_DIE)` (player.cpp:2360): the death sequence, and (vanilla) a first

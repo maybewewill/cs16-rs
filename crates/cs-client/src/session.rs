@@ -657,7 +657,8 @@ mod tests {
         let mut farthest = 0.0f32;
         let mut most_studio = 0;
         let mut had_viewmodel = false;
-        for frame in 0..3000 {
+        // 15 s covers freezetime and forward movement before enemy ZBots cross de_dust2 to kill the unarmed player.
+        for frame in 0..1500 {
             // Freeze time first so the bots and the round start; then walk.
             let held = Held {
                 actions: Some(&walk),
