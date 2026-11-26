@@ -156,6 +156,19 @@ fn non_empty_abs(platform: PlatformKind, path: Option<&PathBuf>) -> Option<&Path
             PlatformKind::Linux | PlatformKind::MacOs => {
                 p.is_absolute() || p.to_string_lossy().starts_with('/')
             }
+            PlatformKind::Windows => {
+                if p.is_absolute() {
+                    return true;
+                }
+                let s = p.to_string_lossy();
+                let b = s.as_bytes();
+                let drive_root = b.len() >= 3
+                    && b[0].is_ascii_alphabetic()
+                    && b[1] == b':'
+                    && matches!(b[2], b'\\' | b'/');
+                let unc_root = s.starts_with(r"\\");
+                drive_root || unc_root
+            }
             _ => p.is_absolute(),
         }
     })
@@ -551,6 +564,30 @@ mod tests {
         assert_eq!(
             data_dir_with(&windows, "cs16-rs"),
             Some(PathBuf::from(r"C:\Users\Alice\AppData\Local\cs16-rs"))
+        );
+
+        let windows_rel = PlatformEnv {
+            platform: Some(PlatformKind::Windows),
+            appdata: Some(PathBuf::from(r"relative\foo")),
+            local_appdata: Some(PathBuf::from("relative/bar")),
+            ..PlatformEnv::default()
+        };
+        assert_eq!(config_dir_with(&windows_rel, "cs16-rs"), None);
+        assert_eq!(data_dir_with(&windows_rel, "cs16-rs"), None);
+
+        let windows_unc = PlatformEnv {
+            platform: Some(PlatformKind::Windows),
+            appdata: Some(PathBuf::from(r"\\server\profiles\Alice\Roaming")),
+            local_appdata: Some(PathBuf::from("D:/Users/Alice/Local")),
+            ..PlatformEnv::default()
+        };
+        assert_eq!(
+            config_dir_with(&windows_unc, "cs16-rs"),
+            Some(PathBuf::from(r"\\server\profiles\Alice\Roaming\cs16-rs"))
+        );
+        assert_eq!(
+            data_dir_with(&windows_unc, "cs16-rs"),
+            Some(PathBuf::from(r"D:/Users/Alice/Local\cs16-rs"))
         );
 
         let wasm = PlatformEnv {

@@ -56,7 +56,7 @@ jobs:
         run: cargo clippy -p cs-game --all-targets --features test-hooks -- -D warnings
 
       - name: Test (workspace)
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast
 
       - name: wasm32 check (shared library crates)
         run: >-
