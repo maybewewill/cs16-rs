@@ -17,6 +17,7 @@ use egui::{
     epaint::text::{FontInsert, FontPriority, InsertFontFamily},
 };
 
+use crate::ui::vgui_theme::{VguiPalette, paint_vgui_bevel};
 use crate::ui::vgui2::controls::{
     VguiComboState, VguiControlState, VguiListPanelState, VguiPropertySheetState,
     VguiRichTextState, VguiSliderState, draw_vgui_check_button, draw_vgui_combo_box,
@@ -25,7 +26,6 @@ use crate::ui::vgui2::controls::{
 };
 use crate::ui::vgui2::font_atlas::{VguiFontAtlas, VguiTextDrawOpts};
 use crate::ui::vgui2::html::{paint_html_doc, parse_html_doc};
-use crate::ui::vgui_theme::{VguiPalette, paint_vgui_bevel};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VguiSchemeKind {
@@ -81,6 +81,7 @@ pub struct VguiLayoutNode {
     pub align: TextAlignment,
     pub default_button: bool,
     pub tab_position: i32,
+    pub cost: Option<u32>,
 }
 
 /// Install Valve's `resource/marlett.ttf` (if available in VFS) into `egui` as `"marlett"` font family.
@@ -147,9 +148,9 @@ pub fn resolve_vgui_text_color(spec: &VguiControlSpec, palette: VguiPalette) -> 
 }
 
 pub fn scheme_color_or(scheme: &VguiScheme, key: &str, fallback: Color32) -> Color32 {
-    scheme
-        .resolve_color(key)
-        .map_or(fallback, |[r, g, b, a]| Color32::from_rgba_unmultiplied(r, g, b, a))
+    scheme.resolve_color(key).map_or(fallback, |[r, g, b, a]| {
+        Color32::from_rgba_unmultiplied(r, g, b, a)
+    })
 }
 
 pub fn resolve_client_text_color(spec: &VguiControlSpec, scheme: &VguiScheme) -> Color32 {
@@ -158,20 +159,31 @@ pub fn resolve_client_text_color(spec: &VguiControlSpec, scheme: &VguiScheme) ->
     } else if spec.bright_text {
         scheme_color_or(scheme, "BrightControlText", Color32::from_rgb(255, 176, 0))
     } else if spec.dull_text {
-        scheme_color_or(scheme, "LabelDimText", Color32::from_rgba_unmultiplied(255, 176, 0, 164))
+        scheme_color_or(
+            scheme,
+            "LabelDimText",
+            Color32::from_rgba_unmultiplied(255, 176, 0, 164),
+        )
     } else {
         scheme_color_or(scheme, "ControlText", Color32::from_rgb(255, 176, 0))
     }
 }
 
 /// Paint a named `Borders` spec (`ButtonBorder`, `InsetBorder`, `RaisedBorder`, etc.) from `VguiScheme`.
-pub fn paint_vgui_border(painter: &egui::Painter, rect: Rect, border_name: &str, scheme: &VguiScheme) {
+pub fn paint_vgui_border(
+    painter: &egui::Painter,
+    rect: Rect,
+    border_name: &str,
+    scheme: &VguiScheme,
+) {
     let Some(spec) = scheme.resolve_border(border_name) else {
         return;
     };
     let r = rect.shrink2(Vec2::ZERO);
     for (idx, line) in spec.top.iter().enumerate() {
-        let Some([cr, cg, cb, ca]) = scheme.resolve_color(&line.color) else { continue };
+        let Some([cr, cg, cb, ca]) = scheme.resolve_color(&line.color) else {
+            continue;
+        };
         let col = Color32::from_rgba_unmultiplied(cr, cg, cb, ca);
         let y = r.top() + idx as f32;
         let x0 = r.left() + line.offset[0] as f32;
@@ -181,7 +193,9 @@ pub fn paint_vgui_border(painter: &egui::Painter, rect: Rect, border_name: &str,
         }
     }
     for (idx, line) in spec.bottom.iter().enumerate() {
-        let Some([cr, cg, cb, ca]) = scheme.resolve_color(&line.color) else { continue };
+        let Some([cr, cg, cb, ca]) = scheme.resolve_color(&line.color) else {
+            continue;
+        };
         let col = Color32::from_rgba_unmultiplied(cr, cg, cb, ca);
         let y = r.bottom() - idx as f32;
         let x0 = r.left() + line.offset[0] as f32;
@@ -191,7 +205,9 @@ pub fn paint_vgui_border(painter: &egui::Painter, rect: Rect, border_name: &str,
         }
     }
     for (idx, line) in spec.left.iter().enumerate() {
-        let Some([cr, cg, cb, ca]) = scheme.resolve_color(&line.color) else { continue };
+        let Some([cr, cg, cb, ca]) = scheme.resolve_color(&line.color) else {
+            continue;
+        };
         let col = Color32::from_rgba_unmultiplied(cr, cg, cb, ca);
         let x = r.left() + idx as f32;
         let y0 = r.top() + line.offset[0] as f32;
@@ -201,7 +217,9 @@ pub fn paint_vgui_border(painter: &egui::Painter, rect: Rect, border_name: &str,
         }
     }
     for (idx, line) in spec.right.iter().enumerate() {
-        let Some([cr, cg, cb, ca]) = scheme.resolve_color(&line.color) else { continue };
+        let Some([cr, cg, cb, ca]) = scheme.resolve_color(&line.color) else {
+            continue;
+        };
         let col = Color32::from_rgba_unmultiplied(cr, cg, cb, ca);
         let x = r.right() - idx as f32;
         let y0 = r.top() + line.offset[0] as f32;
@@ -413,7 +431,8 @@ impl VguiRuntime {
         field: &str,
         viewport: [f32; 4],
     ) -> Option<[f32; 4]> {
-        let nodes = self.compute_layout_mode(doc_path, viewport, VguiCoordMode::Proportional640, None);
+        let nodes =
+            self.compute_layout_mode(doc_path, viewport, VguiCoordMode::Proportional640, None);
         nodes
             .into_iter()
             .find(|n| n.field_name.eq_ignore_ascii_case(field))
@@ -550,7 +569,12 @@ impl VguiRuntime {
         }
     }
 
-    pub fn ensure_texture(&mut self, ctx: &egui::Context, vfs: Option<&Vfs>, rel_path: &str) -> Option<TextureHandle> {
+    pub fn ensure_texture(
+        &mut self,
+        ctx: &egui::Context,
+        vfs: Option<&Vfs>,
+        rel_path: &str,
+    ) -> Option<TextureHandle> {
         let norm = rel_path.replace('\\', "/");
         if norm.is_empty() {
             return None;
@@ -614,6 +638,7 @@ impl VguiRuntime {
                 align: c.text_alignment,
                 default_button: c.default_button,
                 tab_position: c.tab_position,
+                cost: c.cost,
             });
         };
         let walk_children = |children: &[VguiControlSpec],
@@ -631,7 +656,9 @@ impl VguiRuntime {
                 for c in controls {
                     let rect = resolve_control_rect_mode(c, parent, mode, orig_parent);
                     let label = match loc {
-                        Some(l) if c.label_text.contains('#') => l.resolve_inline(&c.label_text, None),
+                        Some(l) if c.label_text.contains('#') => {
+                            l.resolve_inline(&c.label_text, None)
+                        }
                         _ => c.label_text.clone(),
                     };
                     out.push(VguiLayoutNode {
@@ -647,8 +674,16 @@ impl VguiRuntime {
                         align: c.text_alignment,
                         default_button: c.default_button,
                         tab_position: c.tab_position,
+                        cost: c.cost,
                     });
-                    walk(&c.children, rect, mode, [c.wide.raw_or(orig_parent[0]), c.tall.raw_or(orig_parent[1])], loc, out);
+                    walk(
+                        &c.children,
+                        rect,
+                        mode,
+                        [c.wide.raw_or(orig_parent[0]), c.tall.raw_or(orig_parent[1])],
+                        loc,
+                        out,
+                    );
                 }
             }
             walk(children, parent, mode, orig_parent, loc, out);
@@ -666,7 +701,12 @@ impl VguiRuntime {
                 }
                 let rect = resolve_control_rect_mode(c, root_rect, mode, orig);
                 push_node(c, rect, &mut out);
-                walk_children(&c.children, rect, [c.wide.raw_or(orig[0]), c.tall.raw_or(orig[1])], &mut out);
+                walk_children(
+                    &c.children,
+                    rect,
+                    [c.wide.raw_or(orig[0]), c.tall.raw_or(orig[1])],
+                    &mut out,
+                );
             }
         } else {
             walk_children(&doc.controls, viewport, [640.0, 480.0], &mut out);
@@ -739,7 +779,10 @@ impl VguiRuntime {
             .round();
         let hairline_col = Color32::from_rgba_unmultiplied(210, 195, 185, 160);
         painter.rect_filled(
-            Rect::from_min_size(Pos2::new(panel_rect.left(), gap_y), Vec2::new(panel_rect.width(), 1.0)),
+            Rect::from_min_size(
+                Pos2::new(panel_rect.left(), gap_y),
+                Vec2::new(panel_rect.width(), 1.0),
+            ),
             0.0,
             hairline_col,
         );
@@ -747,7 +790,12 @@ impl VguiRuntime {
         let icon_rect = self
             .doc_control_rect("resource/UI/BackgroundPanel.res", "ExclamationPanel", vp)
             .map_or_else(
-                || Rect::from_min_size(Pos2::new(panel_rect.left() + 6.0 * s, panel_rect.top() + 6.0 * s), Vec2::splat(40.0 * s)),
+                || {
+                    Rect::from_min_size(
+                        Pos2::new(panel_rect.left() + 6.0 * s, panel_rect.top() + 6.0 * s),
+                        Vec2::splat(40.0 * s),
+                    )
+                },
                 |r| {
                     let sz = r[3].max(20.0);
                     Rect::from_min_size(Pos2::new(r[0], r[1]), Vec2::splat(sz))
@@ -780,7 +828,12 @@ impl VguiRuntime {
             let cap_rect = self
                 .doc_control_rect("resource/UI/BackgroundPanel.res", "CaptionLabel", vp)
                 .map_or_else(
-                    || Rect::from_min_size(Pos2::new(client_vp.left() + 70.0 * s, client_vp.top() + 22.0 * s), Vec2::new(450.0 * s, 48.0 * s)),
+                    || {
+                        Rect::from_min_size(
+                            Pos2::new(client_vp.left() + 70.0 * s, client_vp.top() + 22.0 * s),
+                            Vec2::new(450.0 * s, 48.0 * s),
+                        )
+                    },
                     |r| Rect::from_min_size(Pos2::new(r[0], r[1]), Vec2::new(r[2], r[3])),
                 );
             let screen_h = screen.height().round().max(480.0) as u32;
@@ -814,38 +867,109 @@ impl VguiRuntime {
         id_salt: &str,
         rect: Rect,
         label: &str,
+        default_button: bool,
+        enabled: bool,
+        selected: bool,
+        font_name: &str,
+        align: TextAlignment,
+        screen_h: u32,
+    ) -> egui::Response {
+        self.draw_client_button_styled(
+            ui,
+            ctx,
+            vfs,
+            id_salt,
+            rect,
+            label,
+            default_button,
+            enabled,
+            selected,
+            false,
+            font_name,
+            align,
+            screen_h,
+        )
+    }
+
+    /// Render a `ClientScheme.res` translucent dark & amber button, with optional red
+    /// unaffordable tint (`money < cost`) matching retail `CCSBuyMenu`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_client_button_styled(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        vfs: Option<&Vfs>,
+        id_salt: &str,
+        rect: Rect,
+        label: &str,
         _default_button: bool,
         enabled: bool,
-        _selected: bool,
+        selected: bool,
+        unaffordable: bool,
         font_name: &str,
         align: TextAlignment,
         screen_h: u32,
     ) -> egui::Response {
         let id = ui.make_persistent_id(id_salt);
-        let sense = if enabled { Sense::click() } else { Sense::hover() };
+        let interactive = enabled && !unaffordable;
+        let sense = if interactive {
+            Sense::click()
+        } else {
+            Sense::hover()
+        };
         let resp = ui.interact(rect, id, sense);
-        if enabled {
+        if interactive {
             self.track_interactive(id_salt, &resp);
         }
 
         let scheme = &self.client_scheme;
-        let bg = if !enabled {
-            scheme_color_or(scheme, "ButtonBG", Color32::from_rgba_unmultiplied(0, 0, 0, 64))
-        } else if resp.is_pointer_button_down_on() || resp.hovered() {
-            scheme_color_or(scheme, "SelectionBG", Color32::from_rgba_unmultiplied(255, 176, 0, 100))
+        let bg = if unaffordable {
+            if resp.hovered() {
+                Color32::from_rgba_unmultiplied(110, 18, 18, 128)
+            } else {
+                Color32::from_rgba_unmultiplied(64, 10, 10, 96)
+            }
+        } else if !enabled {
+            scheme_color_or(
+                scheme,
+                "ButtonBG",
+                Color32::from_rgba_unmultiplied(0, 0, 0, 64),
+            )
+        } else if resp.is_pointer_button_down_on() || resp.hovered() || selected {
+            scheme_color_or(
+                scheme,
+                "SelectionBG",
+                Color32::from_rgba_unmultiplied(255, 176, 0, 100),
+            )
         } else {
-            scheme_color_or(scheme, "ButtonBG", Color32::from_rgba_unmultiplied(0, 0, 0, 64))
+            scheme_color_or(
+                scheme,
+                "ButtonBG",
+                Color32::from_rgba_unmultiplied(0, 0, 0, 64),
+            )
         };
-        let border_col = if !enabled {
+        let border_col = if unaffordable {
+            Color32::from_rgba_unmultiplied(180, 42, 42, 150)
+        } else if !enabled {
             Color32::from_rgba_unmultiplied(80, 48, 0, 110)
-        } else if resp.hovered() {
-            scheme_color_or(scheme, "BorderBuyPreset", Color32::from_rgba_unmultiplied(255, 176, 0, 220))
+        } else if resp.hovered() || selected {
+            scheme_color_or(
+                scheme,
+                "BorderBuyPreset",
+                Color32::from_rgba_unmultiplied(255, 176, 0, 220),
+            )
         } else {
-            scheme_color_or(scheme, "BorderBright", Color32::from_rgba_unmultiplied(188, 112, 0, 128))
+            scheme_color_or(
+                scheme,
+                "BorderBright",
+                Color32::from_rgba_unmultiplied(188, 112, 0, 128),
+            )
         };
-        let fg = if !enabled {
+        let fg = if unaffordable {
+            Color32::from_rgb(205, 52, 52)
+        } else if !enabled {
             scheme_color_or(scheme, "DisabledText1", Color32::from_rgb(80, 48, 0))
-        } else if resp.hovered() {
+        } else if resp.hovered() || selected {
             scheme_color_or(scheme, "BrightControlText", Color32::from_rgb(255, 200, 40))
         } else {
             scheme_color_or(scheme, "ControlText", Color32::from_rgb(255, 176, 0))
@@ -857,10 +981,26 @@ impl VguiRuntime {
         );
         let painter = ui.painter();
         painter.rect_filled(r, 0.0, bg);
-        painter.rect_filled(Rect::from_min_max(r.min, Pos2::new(r.right(), r.top() + 1.0)), 0.0, border_col);
-        painter.rect_filled(Rect::from_min_max(r.min, Pos2::new(r.left() + 1.0, r.bottom())), 0.0, border_col);
-        painter.rect_filled(Rect::from_min_max(Pos2::new(r.left(), r.bottom() - 1.0), r.max), 0.0, border_col);
-        painter.rect_filled(Rect::from_min_max(Pos2::new(r.right() - 1.0, r.top()), r.max), 0.0, border_col);
+        painter.rect_filled(
+            Rect::from_min_max(r.min, Pos2::new(r.right(), r.top() + 1.0)),
+            0.0,
+            border_col,
+        );
+        painter.rect_filled(
+            Rect::from_min_max(r.min, Pos2::new(r.left() + 1.0, r.bottom())),
+            0.0,
+            border_col,
+        );
+        painter.rect_filled(
+            Rect::from_min_max(Pos2::new(r.left(), r.bottom() - 1.0), r.max),
+            0.0,
+            border_col,
+        );
+        painter.rect_filled(
+            Rect::from_min_max(Pos2::new(r.right() - 1.0, r.top()), r.max),
+            0.0,
+            border_col,
+        );
 
         let text_rect = client_button_text_rect(r, align);
         let (clean_label, _) = crate::ui::vgui2::font_atlas::strip_vgui_hotkey(label);
@@ -915,19 +1055,26 @@ impl VguiRuntime {
         let screen_h = ctx.content_rect().height().round().max(480.0) as u32;
         let tracker_fonts = self.tracker_scheme.fonts.clone();
         let (clean, _) = crate::ui::vgui2::font_atlas::strip_vgui_hotkey(cfg.label);
-        let text_w = self.font_atlas.measure_text(
-            &ctx,
-            vfs,
-            &tracker_fonts,
-            "tracker",
-            "Default",
-            screen_h,
-            &clean,
-        ).x;
+        let text_w = self
+            .font_atlas
+            .measure_text(
+                &ctx,
+                vfs,
+                &tracker_fonts,
+                "tracker",
+                "Default",
+                screen_h,
+                &clean,
+            )
+            .x;
         let desired = Vec2::new(cfg.min_size.x.max(text_w + 18.0), cfg.min_size.y.max(22.0));
         let (rect, resp) = ui.allocate_exact_size(
             desired,
-            if cfg.enabled { Sense::click() } else { Sense::hover() },
+            if cfg.enabled {
+                Sense::click()
+            } else {
+                Sense::hover()
+            },
         );
         if cfg.enabled {
             self.track_interactive(cfg.id, &resp);
@@ -993,15 +1140,18 @@ impl VguiRuntime {
         let ctx = ui.ctx().clone();
         let screen_h = ctx.content_rect().height().round().max(480.0) as u32;
         let tracker_fonts = self.tracker_scheme.fonts.clone();
-        let text_w = self.font_atlas.measure_text(
-            &ctx,
-            vfs,
-            &tracker_fonts,
-            "tracker",
-            "Default",
-            screen_h,
-            label,
-        ).x;
+        let text_w = self
+            .font_atlas
+            .measure_text(
+                &ctx,
+                vfs,
+                &tracker_fonts,
+                "tracker",
+                "Default",
+                screen_h,
+                label,
+            )
+            .x;
         let (rect, resp) =
             ui.allocate_exact_size(Vec2::new((text_w + 18.0).max(58.0), 22.0), Sense::click());
         self.track_interactive(id, &resp);
@@ -1014,13 +1164,33 @@ impl VguiRuntime {
         };
         let p = ui.painter();
         p.rect_filled(rect, CornerRadius::ZERO, fill);
-        let top_col = if selected { palette.border_bright } else { palette.border_dark };
-        let side_col = if selected { palette.border_dark } else { palette.border_bright };
-        p.line_segment([rect.left_top(), rect.right_top()], Stroke::new(1.0, top_col));
-        p.line_segment([rect.left_top(), rect.left_bottom()], Stroke::new(1.0, top_col));
-        p.line_segment([rect.right_top(), rect.right_bottom()], Stroke::new(1.0, side_col));
+        let top_col = if selected {
+            palette.border_bright
+        } else {
+            palette.border_dark
+        };
+        let side_col = if selected {
+            palette.border_dark
+        } else {
+            palette.border_bright
+        };
+        p.line_segment(
+            [rect.left_top(), rect.right_top()],
+            Stroke::new(1.0, top_col),
+        );
+        p.line_segment(
+            [rect.left_top(), rect.left_bottom()],
+            Stroke::new(1.0, top_col),
+        );
+        p.line_segment(
+            [rect.right_top(), rect.right_bottom()],
+            Stroke::new(1.0, side_col),
+        );
         if !selected {
-            p.line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, palette.border_bright));
+            p.line_segment(
+                [rect.left_bottom(), rect.right_bottom()],
+                Stroke::new(1.0, palette.border_bright),
+            );
         }
         let fg = if selected || resp.hovered() {
             palette.bright_control_text
@@ -1063,7 +1233,8 @@ impl VguiRuntime {
             origin_rect.width(),
             origin_rect.height(),
         ];
-        let nodes = self.compute_layout_mode(doc_path, viewport, VguiCoordMode::Proportional640, loc);
+        let nodes =
+            self.compute_layout_mode(doc_path, viewport, VguiCoordMode::Proportional640, loc);
         let key = doc_path.replace('\\', "/").to_ascii_lowercase();
         let specs = self.docs.get(&key).cloned();
         let screen_h = ui.ctx().content_rect().height().round().max(480.0) as u32;
@@ -1073,7 +1244,10 @@ impl VguiRuntime {
             if !n.visible {
                 continue;
             }
-            let rect = Rect::from_min_size(Pos2::new(n.rect[0], n.rect[1]), Vec2::new(n.rect[2], n.rect[3]));
+            let rect = Rect::from_min_size(
+                Pos2::new(n.rect[0], n.rect[1]),
+                Vec2::new(n.rect[2], n.rect[3]),
+            );
             let spec = specs.as_ref().and_then(|d| d.find(&n.field_name));
             match n.kind {
                 ControlKind::Panel => {
@@ -1086,8 +1260,13 @@ impl VguiRuntime {
                     ui.painter().rect_filled(rect, 0.0, palette.border_dark);
                 }
                 ControlKind::Label => {
-                    let fg = spec.map_or(palette.base_text, |s| resolve_vgui_text_color(s, palette));
-                    let font_name = if n.font.is_empty() { "Default" } else { n.font.as_str() };
+                    let fg =
+                        spec.map_or(palette.base_text, |s| resolve_vgui_text_color(s, palette));
+                    let font_name = if n.font.is_empty() {
+                        "Default"
+                    } else {
+                        n.font.as_str()
+                    };
                     self.font_atlas.paint_text(
                         ui.painter(),
                         &ctx,
@@ -1108,9 +1287,22 @@ impl VguiRuntime {
                 }
                 ControlKind::Button | ControlKind::MouseOverPanelButton => {
                     let def = n.default_button;
-                    let font_name = if n.font.is_empty() { "Default" } else { n.font.as_str() };
-                    let id = ui.make_persistent_id(("vgui_res_btn", &n.field_name, rect.left() as i32));
-                    let resp = ui.interact(rect, id, if n.enabled { Sense::click() } else { Sense::hover() });
+                    let font_name = if n.font.is_empty() {
+                        "Default"
+                    } else {
+                        n.font.as_str()
+                    };
+                    let id =
+                        ui.make_persistent_id(("vgui_res_btn", &n.field_name, rect.left() as i32));
+                    let resp = ui.interact(
+                        rect,
+                        id,
+                        if n.enabled {
+                            Sense::click()
+                        } else {
+                            Sense::hover()
+                        },
+                    );
                     if n.enabled {
                         self.track_interactive(&n.field_name, &resp);
                     }
@@ -1123,7 +1315,13 @@ impl VguiRuntime {
                     } else {
                         palette.control_bg
                     };
-                    draw_vgui_panel(ui.painter(), rect, bg, palette, resp.is_pointer_button_down_on());
+                    draw_vgui_panel(
+                        ui.painter(),
+                        rect,
+                        bg,
+                        palette,
+                        resp.is_pointer_button_down_on(),
+                    );
                     if def {
                         ui.painter().rect_stroke(
                             rect.shrink(1.0),
@@ -1132,7 +1330,11 @@ impl VguiRuntime {
                             StrokeKind::Inside,
                         );
                     }
-                    let fg = if n.enabled { palette.bright_control_text } else { palette.dim_text };
+                    let fg = if n.enabled {
+                        palette.bright_control_text
+                    } else {
+                        palette.dim_text
+                    };
                     self.font_atlas.paint_text(
                         ui.painter(),
                         &ctx,
@@ -1291,7 +1493,8 @@ impl VguiRuntime {
                     });
                     let tab_changed = sheet.active_tab != prev_tab;
                     let new_tab = sheet.active_tab;
-                    self.states.insert(key, VguiControlState::PropertySheet(sheet));
+                    self.states
+                        .insert(key, VguiControlState::PropertySheet(sheet));
                     if tab_changed {
                         self.ui_sounds.push(VguiUiSound::Click);
                         out.push(VguiEvent::TabChanged {
@@ -1362,6 +1565,9 @@ pub fn client_button_text_rect(rect: Rect, align: TextAlignment) -> Rect {
     };
     Rect::from_min_max(
         Pos2::new((rect.left() + left_pad).min(rect.right()), rect.top()),
-        Pos2::new((rect.right() - right_pad).max(rect.left() + left_pad), rect.bottom()),
+        Pos2::new(
+            (rect.right() - right_pad).max(rect.left() + left_pad),
+            rect.bottom(),
+        ),
     )
 }

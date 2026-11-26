@@ -133,7 +133,11 @@ impl InputActionState {
         let yaw_dir = f32::from(self.active_actions.contains("left"))
             - f32::from(self.active_actions.contains("right"));
         if yaw_dir != 0.0 {
-            let yaw = if camera.yaw_deg.is_finite() { camera.yaw_deg } else { 0.0 };
+            let yaw = if camera.yaw_deg.is_finite() {
+                camera.yaw_deg
+            } else {
+                0.0
+            };
             camera.yaw_deg =
                 (yaw + yaw_dir * finite_or_zero(p.yawspeed) * speed_mul * p.dt).rem_euclid(360.0);
         }
@@ -144,12 +148,24 @@ impl InputActionState {
                 - f32::from(self.active_actions.contains("forward"));
         }
         if pitch_dir != 0.0 {
-            let max_up = if p.pitch_up.is_finite() { p.pitch_up.clamp(1.0, 89.9) } else { 89.0 };
-            let max_dn = if p.pitch_down.is_finite() { p.pitch_down.clamp(1.0, 89.9) } else { 89.0 };
-            let pitch = if camera.pitch_deg.is_finite() { camera.pitch_deg } else { 0.0 };
-            camera.pitch_deg =
-                (pitch + pitch_dir * finite_or_zero(p.pitchspeed) * speed_mul * p.dt)
-                    .clamp(-max_up, max_dn);
+            let max_up = if p.pitch_up.is_finite() {
+                p.pitch_up.clamp(1.0, 89.9)
+            } else {
+                89.0
+            };
+            let max_dn = if p.pitch_down.is_finite() {
+                p.pitch_down.clamp(1.0, 89.9)
+            } else {
+                89.0
+            };
+            let pitch = if camera.pitch_deg.is_finite() {
+                camera.pitch_deg
+            } else {
+                0.0
+            };
+            camera.pitch_deg = (pitch
+                + pitch_dir * finite_or_zero(p.pitchspeed) * speed_mul * p.dt)
+                .clamp(-max_up, max_dn);
         }
     }
 
@@ -480,24 +496,53 @@ pub fn step_inventory_cycle(
     forward: bool,
     fastswitch: bool,
 ) -> Option<String> {
-    let reference = if !fastswitch && buckets.active_slot.is_some() {
+    let mode = if fastswitch { 2 } else { 0 };
+    step_inventory_cycle_mode(buckets, hud, owned, forward, mode).0
+}
+
+/// Advances `buckets` for `invnext` (`forward = true`) or `invprev` (`forward = false`)
+/// across owned weapons in `WeaponInfo` `(slot, position)` order, respecting `hud_fastswitch`:
+/// - `hud_fastswitch 0` or `1`: opens/advances the top weapon bucket selector (`gpActiveSel`)
+///   requiring `MOUSE1` confirm, returning `HudOn`/`MoveSelect` sound cue.
+/// - `hud_fastswitch >= 2`: equips immediately without opening the bucket bar (`Select` cue).
+pub fn step_inventory_cycle_mode(
+    buckets: &mut crate::ui::hud_extras::WeaponBucketState,
+    hud: &cs_clientcore::hud::HudState,
+    owned: &HashSet<u8>,
+    forward: bool,
+    fastswitch_mode: i32,
+) -> (
+    Option<String>,
+    Option<crate::ui::hud_extras::WeaponBucketSound>,
+) {
+    use crate::ui::hud_extras::WeaponBucketSound;
+    let immediate = fastswitch_mode >= 2;
+    let was_open = buckets.active_slot.is_some();
+    let reference = if !immediate && was_open {
         buckets
             .highlighted_weapon_id
             .or_else(|| hud.current_weapon.map(|c| c.weapon_id))
     } else {
         hud.current_weapon.map(|c| c.weapon_id)
     };
-    let next_w = cycle_inventory_weapon(&hud.weapons, owned, reference, forward)?;
-    if fastswitch {
+    let Some(next_w) = cycle_inventory_weapon(&hud.weapons, owned, reference, forward) else {
+        return (None, Some(WeaponBucketSound::DenySelect));
+    };
+    if immediate {
         buckets.active_slot = None;
         buckets.highlighted_weapon_id = Some(next_w.weapon_id);
         buckets.timer_sec = 0.0;
-        Some(next_w.name.clone())
+        (Some(next_w.name.clone()), Some(WeaponBucketSound::Select))
     } else {
         buckets.active_slot = Some(next_w.slot + 1);
         buckets.highlighted_weapon_id = Some(next_w.weapon_id);
         buckets.timer_sec = 2.5;
-        None
+        let snd = if was_open {
+            WeaponBucketSound::MoveSelect
+        } else {
+            WeaponBucketSound::HudOn
+        };
+        (None, Some(snd))
     }
 }
 
@@ -523,7 +568,12 @@ mod tests {
             actions: Some(&a),
             ..Held::default()
         };
-        let cmd = build_usercmd(&held, Vec3::new(10.0, 90.0, 0.0), params(10), &MoveSpeeds::default());
+        let cmd = build_usercmd(
+            &held,
+            Vec3::new(10.0, 90.0, 0.0),
+            params(10),
+            &MoveSpeeds::default(),
+        );
         assert_eq!(
             cmd.buttons,
             button::FORWARD | button::MOVELEFT | button::JUMP | button::ATTACK
@@ -583,7 +633,10 @@ mod tests {
             actions: Some(&b),
             ..Held::default()
         };
-        assert_eq!(build_usercmd(&both, Vec3::ZERO, params(10), &speeds).forwardmove, 100.0);
+        assert_eq!(
+            build_usercmd(&both, Vec3::ZERO, params(10), &speeds).forwardmove,
+            100.0
+        );
     }
 
     fn toks(items: &[&str]) -> Vec<String> {
@@ -612,8 +665,19 @@ mod tests {
             route_unknown(&toks(&["setinfo", "model", "gign"])),
             ConsoleRoute::Local("setinfo model gign".into())
         );
-        for name in ["rcon_password", "RCON", "password", "sv_password", "exec", "bind"] {
-            assert_eq!(route_unknown(&toks(&[name, "x"])), ConsoleRoute::Denied, "{name}");
+        for name in [
+            "rcon_password",
+            "RCON",
+            "password",
+            "sv_password",
+            "exec",
+            "bind",
+        ] {
+            assert_eq!(
+                route_unknown(&toks(&[name, "x"])),
+                ConsoleRoute::Denied,
+                "{name}"
+            );
         }
         assert_eq!(route_unknown(&[]), ConsoleRoute::Denied);
     }
@@ -709,8 +773,14 @@ mod tests {
             weapon_for_slot(&table, &owned, Some(16), 2),
             Some("weapon_glock18")
         );
-        assert_eq!(weapon_for_slot(&table, &owned, Some(26), 2), Some("weapon_usp"));
-        assert_eq!(weapon_for_slot(&table, &owned, None, 3), Some("weapon_knife"));
+        assert_eq!(
+            weapon_for_slot(&table, &owned, Some(26), 2),
+            Some("weapon_usp")
+        );
+        assert_eq!(
+            weapon_for_slot(&table, &owned, None, 3),
+            Some("weapon_knife")
+        );
         assert_eq!(weapon_for_slot(&table, &owned, None, 4), None);
     }
 
@@ -738,22 +808,45 @@ mod tests {
             "release already cleared held state"
         );
 
-        let cmd_n = build_usercmd(&state.held(true), Vec3::ZERO, params(10), &MoveSpeeds::default());
+        let cmd_n = build_usercmd(
+            &state.held(true),
+            Vec3::ZERO,
+            params(10),
+            &MoveSpeeds::default(),
+        );
         state.consume_impulses();
         assert_ne!(cmd_n.buttons & button::JUMP, 0, "frame N must emit JUMP");
 
         // Frame N+1 with no wheel input must clear JUMP.
-        let cmd_n1 = build_usercmd(&state.held(true), Vec3::ZERO, params(10), &MoveSpeeds::default());
+        let cmd_n1 = build_usercmd(
+            &state.held(true),
+            Vec3::ZERO,
+            params(10),
+            &MoveSpeeds::default(),
+        );
         state.consume_impulses();
-        assert_eq!(cmd_n1.buttons & button::JUMP, 0, "frame N+1 must clear JUMP");
+        assert_eq!(
+            cmd_n1.buttons & button::JUMP,
+            0,
+            "frame N+1 must clear JUMP"
+        );
 
         // Accumulated 120px PixelDelta produces a fresh JUMP edge on frame N+2 (1 -> 0 -> 1).
         assert_eq!(state.accumulate_wheel(60.0, false), 0);
         assert_eq!(state.accumulate_wheel(60.0, false), 1);
         dispatch_notch(&mut reg, &mut state);
-        let cmd_n2 = build_usercmd(&state.held(true), Vec3::ZERO, params(10), &MoveSpeeds::default());
+        let cmd_n2 = build_usercmd(
+            &state.held(true),
+            Vec3::ZERO,
+            params(10),
+            &MoveSpeeds::default(),
+        );
         state.consume_impulses();
-        assert_ne!(cmd_n2.buttons & button::JUMP, 0, "frame N+2 must re-trigger JUMP");
+        assert_ne!(
+            cmd_n2.buttons & button::JUMP,
+            0,
+            "frame N+2 must re-trigger JUMP"
+        );
     }
 
     #[test]
@@ -828,10 +921,16 @@ mod tests {
             weapon_id: 16,
             clip: 12,
         });
-        assert_eq!(step_inventory_cycle(&mut buckets, &hud, &owned, true, false), None);
+        assert_eq!(
+            step_inventory_cycle(&mut buckets, &hud, &owned, true, false),
+            None
+        );
         assert_eq!(buckets.active_slot, Some(3));
         assert_eq!(buckets.highlighted_weapon_id, Some(29));
-        assert_eq!(step_inventory_cycle(&mut buckets, &hud, &owned, true, false), None);
+        assert_eq!(
+            step_inventory_cycle(&mut buckets, &hud, &owned, true, false),
+            None
+        );
         assert_eq!(buckets.active_slot, Some(4));
         assert_eq!(buckets.highlighted_weapon_id, Some(4));
         assert_eq!(

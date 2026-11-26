@@ -22,13 +22,13 @@ use cs_vfs::{Vfs, VfsConfig};
 use glam::Vec3;
 use tracing::{error, info, warn};
 use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
+use winit::dpi::PhysicalSize;
 use winit::event::{
     DeviceEvent, DeviceId, ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent,
 };
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::{CursorGrabMode, Window, WindowId};
+use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
 use crate::audio::{AudioEngine, ListenerState};
 use crate::session::Session;
@@ -36,7 +36,7 @@ use cs_client::camera::Camera;
 use cs_client::hudtext::{format_message_with_titles, format_saytext_with_titles};
 use cs_client::input::{
     CmdClock, CmdParams, ConsoleRoute, InputActionState, KeyboardLookParams, MoveSpeeds,
-    build_usercmd, route_unknown, step_inventory_cycle,
+    build_usercmd, route_unknown, step_inventory_cycle_mode,
 };
 use cs_client::render::bsp_renderer::BspRenderStats;
 use cs_client::render::lighting::{GpuLightsUniform, TextureFilterMode};
@@ -49,10 +49,12 @@ use cs_client::ui::hud::{
     HudAnimState, HudChatEntry, HudExtrasContext, HudSprites, HudView, PickupHistoryEntry,
     PickupKind, compute_hud_visibility, draw_cs16_hud_with_runtime, draw_voice_speakers,
 };
-use cs_client::ui::hud_extras::{OverviewMapTex, WeaponBucketState, draw_overview_map};
+use cs_client::ui::hud_extras::{
+    OverviewMapTex, WeaponBucketSound, WeaponBucketState, draw_overview_map,
+};
 use cs_client::ui::main_menu::{MainMenuRenderCtx, MainMenuUi};
 use cs_client::ui::mod_hud::{draw_mod_approval_prompt, draw_mod_hud};
-use cs_client::ui::options::{OptionsRenderCtx, OptionsUi};
+use cs_client::ui::options::{OptionsRenderCtx, OptionsUi, VideoApplyRequest};
 use cs_client::ui::scoreboard::{ScoreRow, ScoreboardRenderCtx, show_scoreboard_vgui};
 use cs_client::ui::screens::{
     BuyClassTeamMenuUi, BuyMenuRenderCtx, CommandMenuUi, DemoPlayerUi, DemoUiAction,
@@ -68,7 +70,7 @@ use cs_client::ui::vgui_assets::VguiAssetBank;
 use cs_client::ui::vgui_theme::{VguiPalette, apply_vgui2_theme, paint_vgui_bevel};
 use cs_client::ui::vgui2::{VguiRuntime, install_scheme_fonts_into_egui};
 use cs_client::ui::{
-    CrosshairInputs, CrosshairState, FrameTelemetry, KeyDisplayState, draw_crosshair_vgui,
+    CrosshairInputs, CrosshairState, FrameTelemetry, KeyDisplayState, draw_crosshair_vgui_dt,
     draw_ljstats, draw_net_graph_with_telemetry, draw_r_speeds, draw_showkeys, draw_showpos,
     draw_showspeed, draw_top_left_console_overlays, should_draw_dynamic_crosshair,
 };
@@ -209,8 +211,7 @@ pub struct Cs16App {
     prev_mouse_delta: (f32, f32),
     pending_mouse_delta: (f64, f64),
     frame_view: FrameView,
-    weapon_switch_timer: f32,
-    last_weapon: Option<u8>,
+    active_backend_cvar: String,
     mod_transfer: ClientModTransfer,
     mod_host: ClientModHost,
 
@@ -394,6 +395,7 @@ impl Cs16App {
         let now = Instant::now();
         let last_log_seen = cvars.log_lines().len();
         let exit_after_screenshot = launch.auto_screenshot.is_some();
+        let active_backend_cvar = cvars.get_str("r_refdll").to_ascii_lowercase();
         Self {
             launch,
             vfs,
@@ -424,8 +426,7 @@ impl Cs16App {
             prev_mouse_delta: (0.0, 0.0),
             pending_mouse_delta: (0.0, 0.0),
             frame_view: FrameView::default(),
-            weapon_switch_timer: 0.0,
-            last_weapon: None,
+            active_backend_cvar,
             mod_transfer: ClientModTransfer::default(),
             mod_host: ClientModHost::new(),
             menu_ui,
@@ -730,8 +731,6 @@ impl Cs16App {
         self.session.set_map(&map.name, Some(collision));
         self.session.set_map_bsp(Some(Arc::new(map.clone())));
         self.feeds = HudFeeds::default();
-        self.last_weapon = None;
-        self.weapon_switch_timer = 0.0;
         self.audio.stop_all();
         self.audio_precache_warmed = false;
         if let Some(rt) = &mut self.runtime {
@@ -770,10 +769,17 @@ impl Cs16App {
             Ok(session) => {
                 self.session = session;
                 for name in [
+                    "bot_quota",
                     "bot_difficulty",
+                    "bot_join_team",
+                    "bot_chatter",
+                    "bot_join_after_player",
                     "mp_roundtime",
                     "mp_freezetime",
                     "mp_startmoney",
+                    "mp_buytime",
+                    "mp_timelimit",
+                    "mp_friendlyfire",
                     "sv_gravity",
                     "sv_airaccelerate",
                     "sv_cheats",
@@ -847,8 +853,6 @@ impl Cs16App {
     fn after_session_start(&mut self) {
         self.feeds = HudFeeds::default();
         self.view_stats = ViewStats::default();
-        self.last_weapon = None;
-        self.weapon_switch_timer = 0.0;
         self.weapon_buckets = WeaponBucketState::default();
         self.buy_team_class_ui.close();
         self.motd_ui.open = false;
@@ -961,8 +965,6 @@ impl Cs16App {
         self.pending_mouse_delta = (0.0, 0.0);
         self.pending_impulse = 0;
         self.cmd_clock = CmdClock::default();
-        self.last_weapon = None;
-        self.weapon_switch_timer = 0.0;
         self.weapon_buckets = WeaponBucketState::default();
         self.mod_transfer = ClientModTransfer::default();
         self.mod_host = ClientModHost::new();
@@ -1083,123 +1085,119 @@ impl Cs16App {
         let mute_enemy = self.cvars.get_bool("cl_mute_enemy_team");
         let local_slot1 = self.session.local_slot().map(|s| s + 1);
         let feeds = &mut self.feeds;
-        let weapon = self
-            .session
-            .with_hud_mut(|hud| {
-                let local_team = local_slot1
-                    .and_then(|s| hud.players.get(&s))
-                    .map(|p| p.team.as_str())
-                    .filter(|t| *t == "CT" || *t == "TERRORIST")
-                    .map(str::to_string);
-                for d in hud.deaths.drain(..) {
-                    feeds.deaths.push((d, now));
+        let _ = self.session.with_hud_mut(|hud| {
+            let local_team = local_slot1
+                .and_then(|s| hud.players.get(&s))
+                .map(|p| p.team.as_str())
+                .filter(|t| *t == "CT" || *t == "TERRORIST")
+                .map(str::to_string);
+            for d in hud.deaths.drain(..) {
+                feeds.deaths.push((d, now));
+            }
+            for line in hud.chat.drain(..) {
+                let team = hud.players.get(&line.sender).map(|p| p.team.clone());
+                if mute_enemy
+                    && let (Some(lt), Some(st)) = (&local_team, &team)
+                    && (st == "CT" || st == "TERRORIST")
+                    && st != lt
+                {
+                    continue;
                 }
-                for line in hud.chat.drain(..) {
-                    let team = hud.players.get(&line.sender).map(|p| p.team.clone());
-                    if mute_enemy
-                        && let (Some(lt), Some(st)) = (&local_team, &team)
-                        && (st == "CT" || st == "TERRORIST")
-                        && st != lt
-                    {
-                        continue;
+                let text = format_saytext_with_titles(&line.text, &line.params, loc, titles);
+                if !text.is_empty() {
+                    feeds.chat.push((HudChatEntry { text, team }, now));
+                }
+            }
+            for wid in hud.weapon_pickups.drain(..) {
+                let empty = matches!(hud.clips.get(&wid), Some(&0))
+                    && hud.weapons.get(&wid).is_some_and(|w| {
+                        w.ammo1_type != 255
+                            && hud.ammo.get(&w.ammo1_type).copied().unwrap_or(0) == 0
+                    });
+                feeds.pickups.push(PickupHistoryEntry {
+                    kind: PickupKind::Weapon {
+                        weapon_id: wid,
+                        empty,
+                    },
+                    end_time: now + 5.0,
+                });
+            }
+            for (ammo_id, amount) in hud.ammo_pickups.drain(..) {
+                feeds.pickups.push(PickupHistoryEntry {
+                    kind: PickupKind::Ammo { ammo_id, amount },
+                    end_time: now + 5.0,
+                });
+            }
+            for classname in hud.item_pickups.drain(..) {
+                feeds.pickups.push(PickupHistoryEntry {
+                    kind: PickupKind::Item { classname },
+                    end_time: now + 5.0,
+                });
+            }
+            if feeds.pickups.len() > 12 {
+                let excess = feeds.pickups.len() - 12;
+                feeds.pickups.drain(..excess);
+            }
+            let mut got_dest4 = false;
+            for line in hud.text.drain(..) {
+                let is_chat = line.dest == 3 || line.dest == 5;
+                let text = if is_chat {
+                    format_saytext_with_titles(&line.message, &line.params, loc, titles)
+                } else {
+                    format_message_with_titles(&line.message, &line.params, loc, titles)
+                };
+                if text.is_empty() {
+                    continue;
+                }
+                match line.dest {
+                    4 => {
+                        feeds.center = Some((text, now));
+                        got_dest4 = true;
                     }
-                    let text = format_saytext_with_titles(&line.text, &line.params, loc, titles);
-                    if !text.is_empty() {
+                    3 | 5 => {
+                        let team = line.params.first().and_then(|sender_name| {
+                            names
+                                .iter()
+                                .find(|(_, n)| *n == sender_name)
+                                .and_then(|(slot0, _)| slot0.checked_add(1))
+                                .and_then(|slot1| hud.players.get(&slot1))
+                                .map(|p| p.team.clone())
+                        });
                         feeds.chat.push((HudChatEntry { text, team }, now));
                     }
+                    1 => feeds.notify.push((text, now)),
+                    _ => {}
                 }
-                for wid in hud.weapon_pickups.drain(..) {
-                    let empty = matches!(hud.clips.get(&wid), Some(&0))
-                        && hud.weapons.get(&wid).is_some_and(|w| {
-                            w.ammo1_type != 255
-                                && hud.ammo.get(&w.ammo1_type).copied().unwrap_or(0) == 0
-                        });
-                    feeds.pickups.push(PickupHistoryEntry {
-                        kind: PickupKind::Weapon {
-                            weapon_id: wid,
-                            empty,
-                        },
-                        end_time: now + 5.0,
-                    });
-                }
-                for (ammo_id, amount) in hud.ammo_pickups.drain(..) {
-                    feeds.pickups.push(PickupHistoryEntry {
-                        kind: PickupKind::Ammo { ammo_id, amount },
-                        end_time: now + 5.0,
-                    });
-                }
-                for classname in hud.item_pickups.drain(..) {
-                    feeds.pickups.push(PickupHistoryEntry {
-                        kind: PickupKind::Item { classname },
-                        end_time: now + 5.0,
-                    });
-                }
-                if feeds.pickups.len() > 12 {
-                    let excess = feeds.pickups.len() - 12;
-                    feeds.pickups.drain(..excess);
-                }
-                let mut got_dest4 = false;
-                for line in hud.text.drain(..) {
-                    let is_chat = line.dest == 3 || line.dest == 5;
-                    let text = if is_chat {
-                        format_saytext_with_titles(&line.message, &line.params, loc, titles)
-                    } else {
-                        format_message_with_titles(&line.message, &line.params, loc, titles)
-                    };
-                    if text.is_empty() {
-                        continue;
-                    }
-                    match line.dest {
-                        4 => {
-                            feeds.center = Some((text, now));
-                            got_dest4 = true;
-                        }
-                        3 | 5 => {
-                            let team = line.params.first().and_then(|sender_name| {
-                                names
-                                    .iter()
-                                    .find(|(_, n)| *n == sender_name)
-                                    .and_then(|(slot0, _)| slot0.checked_add(1))
-                                    .and_then(|slot1| hud.players.get(&slot1))
-                                    .map(|p| p.team.clone())
-                            });
-                            feeds.chat.push((HudChatEntry { text, team }, now));
-                        }
-                        1 => feeds.notify.push((text, now)),
-                        _ => {}
-                    }
-                }
-                if let Some(text) = hud.center_print.take()
-                    && !got_dest4
-                {
-                    let text = format_message_with_titles(&text, &[], loc, titles);
-                    feeds.center = Some((text, now));
-                }
-                if hud
-                    .menu
-                    .as_ref()
-                    .is_some_and(|m| !m.multipart && (m.keys == 0 || m.text.is_empty()))
-                {
-                    hud.menu = None;
-                }
-                // A menu that came: remember when (once complete), so it expires by its display time.
-                match (&hud.menu, &feeds.menu_since) {
-                    (Some(m), _) if m.multipart => feeds.menu_since = None,
-                    (Some(m), Some((_, t))) if *t == m.text => {}
-                    (Some(m), _) => feeds.menu_since = Some((now, m.text.clone())),
-                    (None, _) => feeds.menu_since = None,
-                }
-                if let Some(m) = &hud.menu
-                    && !m.multipart
-                    && m.display_time > 0
-                    && let Some((since, _)) = &feeds.menu_since
-                    && now - since > f64::from(m.display_time)
-                {
-                    hud.menu = None;
-                }
-                hud.current_weapon.map(|w| w.weapon_id)
-            })
-            .flatten();
+            }
+            if let Some(text) = hud.center_print.take()
+                && !got_dest4
+            {
+                let text = format_message_with_titles(&text, &[], loc, titles);
+                feeds.center = Some((text, now));
+            }
+            if hud
+                .menu
+                .as_ref()
+                .is_some_and(|m| !m.multipart && (m.keys == 0 || m.text.is_empty()))
+            {
+                hud.menu = None;
+            }
+            // A menu that came: remember when (once complete), so it expires by its display time.
+            match (&hud.menu, &feeds.menu_since) {
+                (Some(m), _) if m.multipart => feeds.menu_since = None,
+                (Some(m), Some((_, t))) if *t == m.text => {}
+                (Some(m), _) => feeds.menu_since = Some((now, m.text.clone())),
+                (None, _) => feeds.menu_since = None,
+            }
+            if let Some(m) = &hud.menu
+                && !m.multipart
+                && m.display_time > 0
+                && let Some((since, _)) = &feeds.menu_since
+                && now - since > f64::from(m.display_time)
+            {
+                hud.menu = None;
+            }
+        });
         trim_feed(&mut self.feeds.deaths);
         trim_feed(&mut self.feeds.chat);
         trim_feed(&mut self.feeds.notify);
@@ -1208,12 +1206,6 @@ impl Cs16App {
         let center_life = f64::from(finite_or(self.cvars.get_f32("scr_centertime"), 2.0).max(0.5));
         self.feeds.expire(now, feed_life, chat_life, center_life);
 
-        if weapon != self.last_weapon {
-            if self.last_weapon.is_some() {
-                self.weapon_switch_timer = 1.8;
-            }
-            self.last_weapon = weapon;
-        }
         // The MOTD pops up once, when it is whole.
         if !self.feeds.motd_shown
             && self
@@ -1270,14 +1262,26 @@ impl Cs16App {
                         self.sync_cursor_capture();
                     }
                     EngineAction::ToggleMenu => {
+                        let has_text_menu = self
+                            .session
+                            .with_hud(|h| {
+                                h.menu.as_ref().is_some_and(|m| {
+                                    !m.multipart && m.keys != 0 && !m.text.is_empty()
+                                })
+                            })
+                            .unwrap_or(false);
                         if self.console_ui.open {
                             self.console_ui.open = false;
                         } else if self.motd_ui.open {
                             self.motd_ui.open = false;
                             self.feeds.motd_open = false;
-                        } else if self.buy_team_class_ui.active_res.is_some() {
+                        } else if self.buy_team_class_ui.is_open() {
                             self.buy_team_class_ui.close();
                             self.session.with_hud_mut(|h| h.vgui_menu = None);
+                        } else if has_text_menu {
+                            self.session.with_hud_mut(|h| h.menu = None);
+                        } else if self.weapon_buckets.active_slot.is_some() {
+                            self.weapon_buckets.close();
                         } else if self.command_menu_ui.open {
                             self.command_menu_ui.set_open(false);
                         } else if self.player_list_ui.open {
@@ -1291,7 +1295,7 @@ impl Cs16App {
                         } else if self.chat_ui.open {
                             self.chat_ui.open = false;
                         } else if self.options_ui.open {
-                            self.options_ui.open = false;
+                            self.options_ui.cancel_and_close(&mut self.cvars);
                         } else if self.menu_ui.new_game_open {
                             self.menu_ui.new_game_open = false;
                         } else if self.menu_ui.find_servers_open {
@@ -1878,6 +1882,9 @@ impl Cs16App {
 
     /// `slot1`..`slot10`: answers an open server text/VGUI menu first, then selects weapon buckets.
     fn select_slot(&mut self, slot: u8) {
+        if self.buy_team_class_ui.is_open() {
+            return;
+        }
         let digit = if slot == 10 { 0 } else { slot };
         let text_keys = self
             .session
@@ -1895,51 +1902,67 @@ impl Cs16App {
             self.session.with_hud_mut(|h| h.menu = None);
             return;
         }
-        let vgui_target = self
-            .session
-            .with_hud(|h| {
-                h.vgui_menu
-                    .as_ref()
-                    .filter(|v| !v.multipart && v.keys != 0 && menu_key_enabled(v.keys, digit))
-                    .map(|v| v.menu_id)
-            })
-            .flatten();
-        if let Some(menu_id) = vgui_target {
-            let cmd = vgui_menu_select_command(menu_id, slot);
-            self.session.send_stringcmd(&cmd);
-            self.session.with_hud_mut(|h| h.vgui_menu = None);
-            return;
+        // Never touch `h.vgui_menu` when `_vgui_menus 1` is active: the VGUI2 Buy/Team/Class
+        // screen owns digit hotkeys (`B-4-2`) exclusively. Only use the text fallback when
+        // `_vgui_menus 0`.
+        if !self.cvars.get_bool("_vgui_menus") {
+            let vgui_target = self
+                .session
+                .with_hud(|h| {
+                    h.vgui_menu
+                        .as_ref()
+                        .filter(|v| !v.multipart && v.keys != 0 && menu_key_enabled(v.keys, digit))
+                        .map(|v| v.menu_id)
+                })
+                .flatten();
+            if let Some(menu_id) = vgui_target {
+                let cmd = vgui_menu_select_command(menu_id, slot);
+                self.session.send_stringcmd(&cmd);
+                self.session.with_hud_mut(|h| h.vgui_menu = None);
+                return;
+            }
         }
         if slot == 10 {
             return;
         }
         let owned_bits = self.session.owned_weapons();
-        let fastswitch = self.cvars.get_bool("hud_fastswitch");
+        let fastswitch_mode = self.cvars.get_i32("hud_fastswitch");
         let buckets = &mut self.weapon_buckets;
-        let pick = self
+        let (pick, snd) = self
             .session
             .with_hud(|hud| {
                 let owned = Self::owned_weapon_ids(hud, owned_bits);
-                buckets.on_slot_press(hud, &owned, slot, fastswitch)
+                buckets.on_slot_press_mode(hud, &owned, slot, fastswitch_mode)
             })
-            .flatten();
+            .unwrap_or((None, None));
+        if let Some(sound) = snd {
+            self.audio
+                .play_ui_sound(self.vfs.as_ref(), sound.vfs_path());
+        }
         if let Some(name) = pick {
             self.session.send_stringcmd(&name);
         }
     }
 
-    /// `invnext` / `invprev`: cycles owned weapons across buckets/positions (`hud_fastswitch`).
+    /// `invnext` / `invprev`: cycles owned weapons across buckets/positions (`hud_fastswitch` 0/1/2).
     fn cycle_inventory(&mut self, forward: bool) {
+        if self.buy_team_class_ui.is_open() {
+            return;
+        }
         let owned_bits = self.session.owned_weapons();
-        let fastswitch = self.cvars.get_bool("hud_fastswitch");
+        let fastswitch_mode = self.cvars.get_i32("hud_fastswitch");
         let buckets = &mut self.weapon_buckets;
-        let pick = self
+        let (pick, snd) = self
             .session
             .with_hud(|hud| {
                 let owned = Self::owned_weapon_ids(hud, owned_bits);
-                step_inventory_cycle(buckets, hud, &owned, forward, fastswitch)
+                step_inventory_cycle_mode(buckets, hud, &owned, forward, fastswitch_mode)
             })
-            .flatten();
+            .unwrap_or((None, None));
+        if let Some(sound) = snd {
+            self.audio
+                .play_ui_sound(self.vfs.as_ref(), sound.vfs_path());
+        }
         if let Some(name) = pick {
             self.session.send_stringcmd(&name);
         }
@@ -2015,7 +2038,6 @@ impl Cs16App {
         if pressed
             && key_name == "mouse1"
             && self.weapon_buckets.active_slot.is_some()
-            && !self.cvars.get_bool("hud_fastswitch")
             && actions.iter().any(|a| {
                 matches!(
                     a,
@@ -2029,6 +2051,8 @@ impl Cs16App {
                 .with_hud(|h| buckets.confirm_selection(h))
                 .flatten()
             {
+                self.audio
+                    .play_ui_sound(self.vfs.as_ref(), WeaponBucketSound::Select.vfs_path());
                 self.session.send_stringcmd(&w_name);
                 let filtered: Vec<EngineAction> = actions
                     .into_iter()
@@ -2066,13 +2090,9 @@ impl Cs16App {
             return true;
         }
 
-        // Allow releasing TAB even while the scoreboard is visible
-        if code == KeyCode::Tab
-            && !self.console_ui.open
-            && !self.chat_ui.open
-            && !self.menu_ui.visible
-            && self.is_in_game()
-        {
+        // Allow releasing TAB even while the scoreboard is visible, but block TAB scoreboard
+        // while any modal menu (Console/Chat/MainMenu/Options/Buy/MOTD/Dialogs) is open.
+        if code == KeyCode::Tab && !self.any_modal_open() && self.is_in_game() {
             self.input_state.apply_action_input("showscores", pressed);
             return true;
         }
@@ -2081,7 +2101,10 @@ impl Cs16App {
             return false;
         }
 
-        // A menu of the server takes the digit keys its mask enables (once complete).
+        // Classic text `ShowMenu` (radio `Z`/`X`/`C`, `_vgui_menus 0` buy/team, AMXX/Python mods)
+        // takes the digit keys its mask enables without switching weapons.
+        // VGUI2 Buy/Team/Class (`_vgui_menus 1`) is NEVER intercepted here — `BuyClassTeamMenuUi`
+        // handles `1..9`, `0`, `A`, `R`, `Tab`, `Up`, `Down`, `Enter`, `Escape` exclusively.
         if pressed
             && !event.repeat
             && let Some(digit) = digit_of(code)
@@ -2103,21 +2126,25 @@ impl Cs16App {
                 self.session.with_hud_mut(|h| h.menu = None);
                 return true;
             }
-            let vgui_target = self
-                .session
-                .with_hud(|h| {
-                    h.vgui_menu
-                        .as_ref()
-                        .filter(|v| !v.multipart && v.keys != 0 && menu_key_enabled(v.keys, digit))
-                        .map(|v| v.menu_id)
-                })
-                .flatten();
-            if let Some(menu_id) = vgui_target {
-                let n = if digit == 0 { 10 } else { digit };
-                let cmd = vgui_menu_select_command(menu_id, n);
-                self.session.send_stringcmd(&cmd);
-                self.session.with_hud_mut(|h| h.vgui_menu = None);
-                return true;
+            if !self.cvars.get_bool("_vgui_menus") {
+                let vgui_target = self
+                    .session
+                    .with_hud(|h| {
+                        h.vgui_menu
+                            .as_ref()
+                            .filter(|v| {
+                                !v.multipart && v.keys != 0 && menu_key_enabled(v.keys, digit)
+                            })
+                            .map(|v| v.menu_id)
+                    })
+                    .flatten();
+                if let Some(menu_id) = vgui_target {
+                    let n = if digit == 0 { 10 } else { digit };
+                    let cmd = vgui_menu_select_command(menu_id, n);
+                    self.session.send_stringcmd(&cmd);
+                    self.session.with_hud_mut(|h| h.vgui_menu = None);
+                    return true;
+                }
             }
         }
 
@@ -2615,7 +2642,6 @@ impl Cs16App {
             self.session
                 .with_hud(|h| self.hud_anim.step_with_pose(dt, h, hud_now, eye, yaw_deg));
         }
-        self.weapon_switch_timer = (self.weapon_switch_timer - dt).max(0.0);
         self.weapon_buckets.step(dt);
 
         if has_view {
@@ -2742,7 +2768,7 @@ impl Cs16App {
                             .with_hud(|h| h.players.get(&(s + 1)).is_some_and(|p| p.team == "CT"))
                     })
                     .unwrap_or(false);
-                if kind == VguiMenuKind::Buy && self.buy_team_class_ui.active_res.is_none() {
+                if kind.is_buy() && !self.buy_team_class_ui.is_open() {
                     self.feeds.center = None;
                     self.feeds.notify.retain(|(s, _)| !s.contains("BUY key"));
                 }
@@ -2826,14 +2852,25 @@ impl Cs16App {
         let mut sent_chat: Option<(bool, String)> = None;
         let mut motd_close = false;
         let mut vgui_cmd_out: Option<String> = None;
+        let mut vgui_closed = false;
         let mut cmdmenu_exec: Option<String> = None;
         let mut cancel_loading = false;
 
         let Some(rt) = &mut self.runtime else {
             return false;
         };
+        rt.egui_ctx.set_zoom_factor(1.0);
         let raw_input = if let (Some(state), Some(win)) = (&mut rt.egui_state, &rt.window) {
-            state.take_egui_input(win)
+            let mut input = state.take_egui_input(win);
+            let phys = win.inner_size();
+            let event_scale = (win.scale_factor() as f32).max(1e-3);
+            normalize_raw_input_physical_pixels(
+                &mut input,
+                phys.width.max(1),
+                phys.height.max(1),
+                event_scale,
+            );
+            input
         } else {
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -2855,7 +2892,7 @@ impl Cs16App {
         };
         rt.egui_ctx.begin_pass(raw_input);
 
-        let (hud_health, hud_hidden, hud_timer_vis, hud_nvg) = self
+        let (hud_health, hud_hidden, hud_timer_vis, hud_nvg, hud_money) = self
             .session
             .with_hud(|h| {
                 (
@@ -2863,9 +2900,10 @@ impl Cs16App {
                     h.hidden,
                     h.timer_visible,
                     h.night_vision,
+                    h.money,
                 )
             })
-            .unwrap_or((0, 0, false, false));
+            .unwrap_or((0, 0, false, false, 0));
         let hud_vis = compute_hud_visibility(alive, hud_health, hud_hidden, hud_timer_vis);
         if has_view {
             let v = &self.frame_view;
@@ -2897,11 +2935,12 @@ impl Cs16App {
                     dynamic: self.cvars.get_bool("cl_dynamiccrosshair"),
                     hide_hud: hud_hidden,
                 };
-                draw_crosshair_vgui(
+                draw_crosshair_vgui_dt(
                     &rt.egui_ctx,
                     &self.cvars,
                     &mut self.crosshair_state,
                     &ch_inputs,
+                    dt,
                 );
             }
             let mut extras = HudExtrasContext {
@@ -2930,7 +2969,7 @@ impl Cs16App {
                     chat: &chat,
                     notify: &notify,
                     center: center.as_deref(),
-                    weapon_switch_timer: self.weapon_switch_timer,
+                    weapon_switch_timer: 0.0,
                     alive,
                     scoped,
                     eye: v.eye,
@@ -2997,6 +3036,9 @@ impl Cs16App {
                 || self.buy_team_class_ui.active_res.is_some()
                 || styled_menu_now.is_some()
                 || fallback_vgui_lines.is_some();
+            if observer_mode != 0 {
+                self.spectator_ui.mode = SpectatorMode::from_i32(observer_mode);
+            }
             let forced_spectator = self.launch.startup_ui.as_deref().is_some_and(|s| {
                 s.eq_ignore_ascii_case("spectator") || s.eq_ignore_ascii_case("spectator:menu")
             }) && self.startup_ui_applied;
@@ -3182,7 +3224,7 @@ impl Cs16App {
                     motd_close = true;
                 }
             }
-            if !self.motd_ui.open && !motd_close && self.buy_team_class_ui.active_res.is_some() {
+            if !self.motd_ui.open && !motd_close && self.buy_team_class_ui.is_open() {
                 let can_cancel = if let Some(ref vm) = active_vgui_menu {
                     (vm.keys & (1u16 << 9)) != 0
                 } else {
@@ -3207,10 +3249,15 @@ impl Cs16App {
                     is_ct: local_is_ct,
                     allowed_keys: active_vgui_menu.as_ref().map_or(0, |v| v.keys),
                     can_cancel,
+                    money: hud_money,
                 };
+                let was_open = self.buy_team_class_ui.is_open();
                 vgui_cmd_out =
                     self.buy_team_class_ui
                         .show(&rt.egui_ctx, &mut self.vgui_rt, &buy_ctx);
+                if was_open && !self.buy_team_class_ui.is_open() {
+                    vgui_closed = true;
+                }
             }
             cmdmenu_exec = self.command_menu_ui.show(
                 &rt.egui_ctx,
@@ -3253,6 +3300,8 @@ impl Cs16App {
         if menu_cmds.resume_game {
             should_resume = true;
         }
+        self.options_ui
+            .set_gpu_info(&rt.renderer.adapter_name, &rt.renderer.backend_name);
         self.options_ui.show(
             &rt.egui_ctx,
             &mut self.vgui_rt,
@@ -3500,8 +3549,19 @@ impl Cs16App {
                 + finite_or(v.shake_angles.y, 0.0)
                 + idle.yaw)
                 .rem_euclid(360.0);
+            let death_roll = if !alive
+                && observer_mode == 0
+                && local_has_team
+                && in_game
+                && finite_or(v.roll_deg, 0.0).abs() < 1.0
+            {
+                80.0
+            } else {
+                0.0
+            };
             render_cam.roll_deg = (punch_z
                 + finite_or(v.roll_deg, 0.0)
+                + death_roll
                 + finite_or(v.shake_angles.z, 0.0)
                 + idle.roll)
                 .clamp(-90.0, 90.0);
@@ -3761,6 +3821,8 @@ impl Cs16App {
         if let Some(cmd) = vgui_cmd_out {
             self.session.send_stringcmd(&cmd);
             self.session.with_hud_mut(|h| h.vgui_menu = None);
+        } else if vgui_closed {
+            self.session.with_hud_mut(|h| h.vgui_menu = None);
         }
         if let Some(cmd) = cmdmenu_exec {
             pending_actions.extend(self.cvars.execute_script(&cmd));
@@ -3795,6 +3857,9 @@ impl Cs16App {
                     i32::from(enabled)
                 ));
             }
+        }
+        if let Some(req) = self.options_ui.video_apply_requested.take() {
+            self.apply_video_request(req);
         }
         if self.options_ui.save_requested {
             self.options_ui.save_requested = false;
@@ -3834,6 +3899,93 @@ impl Cs16App {
         false
     }
 
+    fn apply_video_request(&mut self, req: VideoApplyRequest) {
+        let mut rebuild_backend = false;
+        let desired_backend = req.backend.trim().to_ascii_lowercase();
+        if desired_backend != self.active_backend_cvar {
+            rebuild_backend = true;
+        }
+        if let Some(rt) = &mut self.runtime
+            && let Some(win) = &rt.window
+        {
+            if req.fullscreen {
+                win.set_fullscreen(Some(Fullscreen::Borderless(None)));
+            } else {
+                win.set_fullscreen(None);
+                let _ = win.request_inner_size(PhysicalSize::new(req.width, req.height));
+            }
+            let sz = win.inner_size();
+            let rw = if req.fullscreen {
+                sz.width.max(1)
+            } else {
+                req.width.max(1)
+            };
+            let rh = if req.fullscreen {
+                sz.height.max(1)
+            } else {
+                req.height.max(1)
+            };
+            rt.renderer.resize(rw, rh);
+            rt.renderer.sync_swapchain_latency(
+                self.cvars.get_bool("gl_vsync"),
+                self.cvars.get_bool("gl_lowlatency"),
+            );
+        }
+        if rebuild_backend {
+            let win_opt = self.runtime.as_ref().and_then(|rt| rt.window.clone());
+            if let Some(win) = win_opt {
+                match create_window_renderer(Arc::clone(&win), &desired_backend) {
+                    Ok(mut new_renderer) => {
+                        new_renderer.sync_swapchain_latency(
+                            self.cvars.get_bool("gl_vsync"),
+                            self.cvars.get_bool("gl_lowlatency"),
+                        );
+                        let active_map = self.session.loaded_map().map(str::to_string);
+                        let (egui_ctx, bg_texture, brand_logo, hud_sprites, vgui_bank) =
+                            self.init_egui_context();
+                        let egui_state = egui_winit::State::new(
+                            egui_ctx.clone(),
+                            egui::ViewportId::ROOT,
+                            &win,
+                            Some(1.0),
+                            None,
+                            None,
+                        );
+                        let captured = self.runtime.as_ref().is_some_and(|r| r.cursor_captured);
+                        if let Some(ref map_name) = active_map
+                            && let Some(vfs) = &self.vfs
+                            && let Ok(bsp) = BspMap::load(vfs, map_name)
+                        {
+                            let sky = SkyboxTextures::load(vfs, &bsp.skyname);
+                            new_renderer.load_map(&bsp, &sky);
+                        }
+                        self.cvars.info(format!(
+                            "Switched GPU renderer backend to {} ({})",
+                            new_renderer.backend_name, new_renderer.adapter_name
+                        ));
+                        self.active_backend_cvar = desired_backend;
+                        self.runtime = Some(WindowRuntime {
+                            window: Some(win),
+                            renderer: new_renderer,
+                            egui_ctx,
+                            egui_state: Some(egui_state),
+                            bg_texture,
+                            brand_logo,
+                            hud_sprites,
+                            vgui_bank,
+                            cursor_captured: captured,
+                        });
+                    }
+                    Err(err) => {
+                        self.cvars.warn(format!(
+                            "GPU backend `{desired_backend}` unavailable ({err}); keeping current backend."
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     fn init_egui_context(
         &self,
     ) -> (
@@ -3844,6 +3996,9 @@ impl Cs16App {
         VguiAssetBank,
     ) {
         let egui_ctx = egui::Context::default();
+        egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        egui_ctx.set_zoom_factor(1.0);
+        egui_ctx.set_pixels_per_point(1.0);
         apply_vgui2_theme(&egui_ctx, self.palette);
         if let Some(vfs) = &self.vfs {
             install_scheme_fonts_into_egui(&egui_ctx, vfs, &self.vgui_rt.scheme_fonts);
@@ -3995,16 +4150,27 @@ impl ApplicationHandler for Cs16App {
 
         let mut attrs = Window::default_attributes()
             .with_title("Counter-Strike 1.6 (Rust)")
-            .with_inner_size(LogicalSize::new(
-                f64::from(self.launch.width),
-                f64::from(self.launch.height),
-            ));
+            .with_inner_size(PhysicalSize::new(self.launch.width, self.launch.height));
+        if self.cvars.get_bool("fullscreen") {
+            attrs = attrs.with_fullscreen(Some(Fullscreen::Borderless(None)));
+        }
         if let Some(icon) = load_window_icon() {
             attrs = attrs.with_window_icon(Some(icon));
         }
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
 
-        let mut renderer = Renderer::new(Arc::clone(&window));
+        let desired_backend = self.cvars.get_str("r_refdll").to_ascii_lowercase();
+        let mut renderer = match create_window_renderer(Arc::clone(&window), &desired_backend) {
+            Ok(r) => {
+                self.active_backend_cvar = desired_backend;
+                r
+            }
+            Err(err) => {
+                warn!(backend = %desired_backend, %err, "Requested GPU backend unavailable; falling back to default");
+                self.active_backend_cvar = "auto".to_string();
+                Renderer::new(Arc::clone(&window))
+            }
+        };
         renderer.sync_swapchain_latency(
             self.cvars.get_bool("gl_vsync"),
             self.cvars.get_bool("gl_lowlatency"),
@@ -4014,7 +4180,7 @@ impl ApplicationHandler for Cs16App {
             egui_ctx.clone(),
             egui::ViewportId::ROOT,
             &window,
-            Some(window.scale_factor() as f32),
+            Some(1.0),
             None,
             None,
         );
@@ -4177,32 +4343,154 @@ fn mouse_button_to_goldsrc(button: MouseButton) -> Option<&'static str> {
     }
 }
 
+/// Map `r_refdll` (`auto`, `vulkan`, `dx12`, `metal`, `gl`) to `wgpu::Backends` and construct a
+/// surface-backed [`Renderer`] without touching `render/mod.rs`.
+fn create_window_renderer(window: Arc<Window>, backend_cvar: &str) -> Result<Renderer, String> {
+    let backends = match backend_cvar.trim().to_ascii_lowercase().as_str() {
+        "vulkan" | "vk" => wgpu::Backends::VULKAN,
+        "dx12" | "d3d12" | "direct3d12" => wgpu::Backends::DX12,
+        "metal" => wgpu::Backends::METAL,
+        "gl" | "opengl" | "gles" => wgpu::Backends::GL,
+        _ => wgpu::Backends::PRIMARY | wgpu::Backends::GL,
+    };
+    let size = window.inner_size();
+    let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+    desc.backends = backends;
+    let instance = wgpu::Instance::new(desc);
+    let surface = instance
+        .create_surface(window)
+        .map_err(|e| format!("create wgpu surface: {e}"))?;
+    pollster::block_on(Renderer::new_from_surface(
+        &instance,
+        surface,
+        size.width.max(1),
+        size.height.max(1),
+    ))
+}
+
+/// Lock `egui::RawInput` to an exact `1.0` `pixels_per_point` physical pixel grid (`phys_w x phys_h`)
+/// regardless of Windows/macOS DPI scaling (`100%`, `125%`, `150%`, `200%`).
+///
+/// `egui_winit::State::on_window_event` divides `PhysicalPosition` cursor/touch/scroll deltas by
+/// `window.scale_factor()`; multiplying those events back by `event_scale` restores 1:1 physical
+/// coordinates so `ctx.content_rect()` at `1280x720` is always exactly `1280x720` and clicks hit
+/// exact pixel positions.
+fn normalize_raw_input_physical_pixels(
+    raw_input: &mut egui::RawInput,
+    phys_w: u32,
+    phys_h: u32,
+    event_scale: f32,
+) {
+    let scale = if event_scale.is_finite() && event_scale > 1e-3 {
+        event_scale
+    } else {
+        1.0
+    };
+    raw_input.screen_rect = Some(egui::Rect::from_min_size(
+        egui::Pos2::ZERO,
+        egui::vec2(phys_w.max(1) as f32, phys_h.max(1) as f32),
+    ));
+    let vp = raw_input
+        .viewports
+        .entry(egui::ViewportId::ROOT)
+        .or_default();
+    vp.native_pixels_per_point = Some(1.0);
+    if let Some(ref mut r) = vp.inner_rect {
+        *r = egui::Rect::from_min_max(
+            egui::Pos2::new(r.min.x * scale, r.min.y * scale),
+            egui::Pos2::new(r.max.x * scale, r.max.y * scale),
+        );
+    }
+    if let Some(ref mut r) = vp.outer_rect {
+        *r = egui::Rect::from_min_max(
+            egui::Pos2::new(r.min.x * scale, r.min.y * scale),
+            egui::Pos2::new(r.max.x * scale, r.max.y * scale),
+        );
+    }
+    if (scale - 1.0).abs() > 1e-4 {
+        for ev in &mut raw_input.events {
+            match ev {
+                egui::Event::PointerMoved(pos) => {
+                    pos.x *= scale;
+                    pos.y *= scale;
+                }
+                egui::Event::PointerButton { pos, .. } => {
+                    pos.x *= scale;
+                    pos.y *= scale;
+                }
+                egui::Event::Touch { pos, .. } => {
+                    pos.x *= scale;
+                    pos.y *= scale;
+                }
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta,
+                    ..
+                } => {
+                    delta.x *= scale;
+                    delta.y *= scale;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 fn physical_key_to_goldsrc(code: KeyCode) -> Option<&'static str> {
     Some(match code {
-        KeyCode::KeyW => "w",
         KeyCode::KeyA => "a",
-        KeyCode::KeyS => "s",
+        KeyCode::KeyB => "b",
+        KeyCode::KeyC => "c",
         KeyCode::KeyD => "d",
         KeyCode::KeyE => "e",
-        KeyCode::KeyR => "r",
+        KeyCode::KeyF => "f",
         KeyCode::KeyG => "g",
-        KeyCode::KeyB => "b",
-        KeyCode::KeyQ => "q",
+        KeyCode::KeyH => "h",
+        KeyCode::KeyI => "i",
+        KeyCode::KeyJ => "j",
+        KeyCode::KeyK => "k",
+        KeyCode::KeyL => "l",
         KeyCode::KeyM => "m",
-        KeyCode::KeyY => "y",
-        KeyCode::KeyU => "u",
         KeyCode::KeyN => "n",
-        KeyCode::KeyZ => "z",
-        KeyCode::KeyX => "x",
-        KeyCode::KeyC => "c",
+        KeyCode::KeyO => "o",
+        KeyCode::KeyP => "p",
+        KeyCode::KeyQ => "q",
+        KeyCode::KeyR => "r",
+        KeyCode::KeyS => "s",
         KeyCode::KeyT => "t",
+        KeyCode::KeyU => "u",
+        KeyCode::KeyV => "v",
+        KeyCode::KeyW => "w",
+        KeyCode::KeyX => "x",
+        KeyCode::KeyY => "y",
+        KeyCode::KeyZ => "z",
         KeyCode::Comma => ",",
         KeyCode::Period => ".",
+        KeyCode::Minus => "-",
+        KeyCode::Equal => "=",
+        KeyCode::BracketLeft => "[",
+        KeyCode::BracketRight => "]",
+        KeyCode::Semicolon => ";",
+        KeyCode::Quote => "'",
+        KeyCode::Slash => "/",
+        KeyCode::Backslash => "\\",
         KeyCode::Space => "space",
+        KeyCode::Enter | KeyCode::NumpadEnter => "enter",
+        KeyCode::Backspace => "backspace",
         KeyCode::ControlLeft | KeyCode::ControlRight => "ctrl",
         KeyCode::ShiftLeft | KeyCode::ShiftRight => "shift",
         KeyCode::AltLeft | KeyCode::AltRight => "alt",
         KeyCode::Tab => "tab",
+        KeyCode::ArrowUp => "uparrow",
+        KeyCode::ArrowDown => "downarrow",
+        KeyCode::ArrowLeft => "leftarrow",
+        KeyCode::ArrowRight => "rightarrow",
+        KeyCode::Insert => "ins",
+        KeyCode::Delete => "del",
+        KeyCode::Home => "home",
+        KeyCode::End => "end",
+        KeyCode::PageUp => "pgup",
+        KeyCode::PageDown => "pgdn",
         KeyCode::Digit0 => "0",
         KeyCode::Digit1 => "1",
         KeyCode::Digit2 => "2",
@@ -4213,7 +4501,18 @@ fn physical_key_to_goldsrc(code: KeyCode) -> Option<&'static str> {
         KeyCode::Digit7 => "7",
         KeyCode::Digit8 => "8",
         KeyCode::Digit9 => "9",
+        KeyCode::F1 => "f1",
+        KeyCode::F2 => "f2",
+        KeyCode::F3 => "f3",
+        KeyCode::F4 => "f4",
         KeyCode::F5 => "f5",
+        KeyCode::F6 => "f6",
+        KeyCode::F7 => "f7",
+        KeyCode::F8 => "f8",
+        KeyCode::F9 => "f9",
+        KeyCode::F10 => "f10",
+        KeyCode::F11 => "f11",
+        KeyCode::F12 => "f12",
         _ => return None,
     })
 }
@@ -4657,5 +4956,102 @@ mod tests {
             rgba.as_chunks::<4>().0.iter().any(|px| px[3] == 255),
             "window icon must contain opaque foreground pixels"
         );
+    }
+
+    #[test]
+    fn hidpi_physical_pixel_normalization_locks_1_to_1_across_all_scales() {
+        for scale in [1.0f32, 1.25, 1.5, 2.0] {
+            let mut raw = egui::RawInput::default();
+            // Simulate egui_winit dividing PhysicalPosition(640, 360) by OS scale_factor.
+            raw.events.push(egui::Event::PointerMoved(egui::Pos2::new(
+                640.0 / scale,
+                360.0 / scale,
+            )));
+            raw.events.push(egui::Event::PointerButton {
+                pos: egui::Pos2::new(300.0 / scale, 200.0 / scale),
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            });
+            normalize_raw_input_physical_pixels(&mut raw, 1280, 720, scale);
+            assert_eq!(
+                raw.screen_rect,
+                Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 720.0)
+                ))
+            );
+            assert_eq!(
+                raw.viewports[&egui::ViewportId::ROOT].native_pixels_per_point,
+                Some(1.0)
+            );
+            match raw.events[0] {
+                egui::Event::PointerMoved(p) => {
+                    assert!((p.x - 640.0).abs() < 1e-2 && (p.y - 360.0).abs() < 1e-2);
+                }
+                _ => panic!("expected PointerMoved"),
+            }
+            match raw.events[1] {
+                egui::Event::PointerButton { pos, .. } => {
+                    assert!((pos.x - 300.0).abs() < 1e-2 && (pos.y - 200.0).abs() < 1e-2);
+                }
+                _ => panic!("expected PointerButton"),
+            }
+        }
+    }
+
+    #[test]
+    fn crosshair_dt_decay_is_fps_independent_and_aug_keeps_crosshair_while_awp_scopes() {
+        let inputs = CrosshairInputs {
+            weapon_id: 28, // AK-47
+            on_ground: true,
+            dynamic: true,
+            shots_fired: 3,
+            ..CrosshairInputs::default()
+        };
+        let sim = |fps: usize| -> f32 {
+            let mut st = CrosshairState::default();
+            let dt = 1.0 / fps as f32;
+            // Fire pulse on first frame, then decay for 0.5s.
+            st.compute_geometry_dt(&inputs, "auto", 1280, dt);
+            for _ in 0..(fps / 2) {
+                st.compute_geometry_dt(&inputs, "auto", 1280, dt);
+            }
+            st.crosshair_dist
+        };
+        let d60 = sim(60);
+        let d100 = sim(100);
+        let d240 = sim(240);
+        assert!(
+            (d60 - d100).abs() < 0.05 && (d240 - d100).abs() < 0.05,
+            "dt decay must match across FPS: 60={d60}, 100={d100}, 240={d240}"
+        );
+
+        // AUG (8) and SG552 (27) zoomed to fov=55 keep normal crosshair & no black sniper scope;
+        // AWP (18), Scout (3), SG550 (13), G3SG1 (24) hide regular crosshair.
+        assert!(should_draw_dynamic_crosshair(55.0, 8));
+        assert!(should_draw_dynamic_crosshair(55.0, 27));
+        assert!(!should_draw_dynamic_crosshair(40.0, 18));
+        assert!(!should_draw_dynamic_crosshair(90.0, 18));
+        assert!(!should_draw_dynamic_crosshair(40.0, 3));
+    }
+
+    #[test]
+    fn vgui_buy_menu_blocks_select_slot_and_maps_all_goldsrc_keys() {
+        let mut app = Cs16App::new(LaunchConfig::default());
+        app.buy_team_class_ui.open_kind(VguiMenuKind::Buy, true);
+        assert!(app.buy_team_class_ui.is_open());
+        assert!(app.any_modal_open());
+        // Calling select_slot while VGUI Buy menu is open MUST NOT close or clobber it.
+        app.select_slot(4);
+        assert!(app.buy_team_class_ui.is_open());
+
+        assert_eq!(physical_key_to_goldsrc(KeyCode::KeyO), Some("o"));
+        assert_eq!(physical_key_to_goldsrc(KeyCode::KeyF), Some("f"));
+        assert_eq!(physical_key_to_goldsrc(KeyCode::KeyK), Some("k"));
+        assert_eq!(physical_key_to_goldsrc(KeyCode::KeyH), Some("h"));
+        assert_eq!(physical_key_to_goldsrc(KeyCode::F1), Some("f1"));
+        assert_eq!(physical_key_to_goldsrc(KeyCode::F2), Some("f2"));
+        assert_eq!(physical_key_to_goldsrc(KeyCode::ArrowUp), Some("uparrow"));
     }
 }

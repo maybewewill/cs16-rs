@@ -55,7 +55,14 @@ impl Camera {
     }
 
     /// Apply raw mouse delta using exact GoldSrc `sensitivity * m_yaw / m_pitch` degrees per count.
-    pub fn apply_mouse_delta(&mut self, dx: f32, dy: f32, sensitivity: f32, m_yaw: f32, m_pitch: f32) {
+    pub fn apply_mouse_delta(
+        &mut self,
+        dx: f32,
+        dy: f32,
+        sensitivity: f32,
+        m_yaw: f32,
+        m_pitch: f32,
+    ) {
         self.apply_mouse_delta_clamped(dx, dy, sensitivity, m_yaw, m_pitch, 89.0, 89.0);
     }
 
@@ -79,10 +86,26 @@ impl Camera {
         {
             return;
         }
-        let max_up = if pitch_up.is_finite() { pitch_up.clamp(1.0, 89.9) } else { 89.0 };
-        let max_dn = if pitch_down.is_finite() { pitch_down.clamp(1.0, 89.9) } else { 89.0 };
-        let yaw = if self.yaw_deg.is_finite() { self.yaw_deg } else { 0.0 };
-        let pitch = if self.pitch_deg.is_finite() { self.pitch_deg } else { 0.0 };
+        let max_up = if pitch_up.is_finite() {
+            pitch_up.clamp(1.0, 89.9)
+        } else {
+            89.0
+        };
+        let max_dn = if pitch_down.is_finite() {
+            pitch_down.clamp(1.0, 89.9)
+        } else {
+            89.0
+        };
+        let yaw = if self.yaw_deg.is_finite() {
+            self.yaw_deg
+        } else {
+            0.0
+        };
+        let pitch = if self.pitch_deg.is_finite() {
+            self.pitch_deg
+        } else {
+            0.0
+        };
         self.yaw_deg = (yaw - dx * sensitivity * m_yaw).rem_euclid(360.0);
         self.pitch_deg = (pitch + dy * sensitivity * m_pitch).clamp(-max_up, max_dn);
     }
@@ -113,6 +136,8 @@ impl Camera {
         let vfov = 2.0 * ((fov_clamped.to_radians() * 0.5).tan() * (3.0 / 4.0)).atan();
         let aspect = if aspect_mode.eq_ignore_ascii_case("4:3_stretch") {
             4.0 / 3.0
+        } else if aspect_mode.eq_ignore_ascii_case("16:10") {
+            16.0 / 10.0
         } else if viewport_w.is_finite() && viewport_h.is_finite() {
             (viewport_w.max(1.0) / viewport_h.max(1.0)).max(0.1)
         } else {
@@ -123,7 +148,13 @@ impl Camera {
 
     /// Compute wgpu-compatible right-handed perspective matrix (`z in [0, 1]`)
     /// using GoldSrc Hor+ FOV (horizontal `fov_deg` at 4:3 -> constant vertical FOV).
-    pub fn proj_matrix(&self, viewport_w: f32, viewport_h: f32, fov_deg: f32, aspect_mode: &str) -> Mat4 {
+    pub fn proj_matrix(
+        &self,
+        viewport_w: f32,
+        viewport_h: f32,
+        fov_deg: f32,
+        aspect_mode: &str,
+    ) -> Mat4 {
         self.proj_matrix_ex(viewport_w, viewport_h, fov_deg, aspect_mode, 4.0, 16384.0)
     }
 
@@ -135,11 +166,23 @@ impl Camera {
         viewmodel_fov: f32,
         aspect_mode: &str,
     ) -> Mat4 {
-        self.proj_matrix_ex(viewport_w, viewport_h, viewmodel_fov, aspect_mode, 1.0, 256.0)
+        self.proj_matrix_ex(
+            viewport_w,
+            viewport_h,
+            viewmodel_fov,
+            aspect_mode,
+            1.0,
+            256.0,
+        )
     }
 
     /// Projection matrix with `z_near = 1.0` for first-person weapon viewmodels.
-    pub fn viewmodel_proj_matrix(&self, viewport_w: f32, viewport_h: f32, aspect_mode: &str) -> Mat4 {
+    pub fn viewmodel_proj_matrix(
+        &self,
+        viewport_w: f32,
+        viewport_h: f32,
+        aspect_mode: &str,
+    ) -> Mat4 {
         self.viewmodel_proj_matrix_fov(viewport_w, viewport_h, 90.0, aspect_mode)
     }
 }

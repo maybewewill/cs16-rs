@@ -7,23 +7,32 @@ use std::sync::Arc;
 
 use cs_assets::bsp::BspMap;
 use cs_assets::demo_pack::{DEMO_MAP_NAME, build_instant_demo_pack};
+use cs_assets::scheme::LocalizationTable;
+use cs_assets::vgui_res::{ControlKind, VguiCoordMode};
 use cs_client::audio::mixer::{SND_FL_CHANGE_PITCH, SND_FL_CHANGE_VOL};
 use cs_client::audio::{
     MusicCommand, MusicController, SentenceTable, SoundFadeState, VoiceManager,
     normalize_sound_path, parse_wav_loop_points, reload_sound_path,
 };
 use cs_client::camera::Camera;
-use cs_client::input::{MoveSpeeds, cycle_inventory_weapon, weapon_for_slot};
+use cs_client::input::{MoveSpeeds, step_inventory_cycle_mode};
 use cs_client::render::scene::ModelRegistry;
 use cs_client::ui::hud::{
-    HudAnimState, HudExtrasContext, HudView, draw_cs16_hud_with_extras, draw_voice_speakers,
+    HudAnimState, HudExtrasContext, HudView, compute_hud_visibility, draw_cs16_hud_with_extras,
+    draw_voice_speakers,
 };
+use cs_client::ui::hud_extras::{WeaponBucketSound, WeaponBucketState};
 use cs_client::ui::mod_hud::draw_mod_hud;
 use cs_client::ui::scoreboard::{ScoreRow, show_scoreboard};
-use cs_client::ui::server_menu::{
-    draw_styled_text_menu, menu_key_enabled, menu_styled_lines,
+use cs_client::ui::screens::buy_team_class::{
+    BuyClassTeamMenuUi, BuyMenuRenderCtx, VguiMenuKind, find_button_by_hotkey,
 };
-use cs_client::ui::{FrameTelemetry, draw_crosshair, draw_net_graph, hud::HudSprites};
+use cs_client::ui::server_menu::{draw_styled_text_menu, menu_key_enabled, menu_styled_lines};
+use cs_client::ui::vgui2::VguiRuntime;
+use cs_client::ui::{
+    CrosshairInputs, CrosshairState, FrameTelemetry, draw_crosshair_vgui_dt, draw_net_graph,
+    hud::HudSprites, should_draw_dynamic_crosshair,
+};
 use cs_client::view::{FrameView, MapFxWorld, ViewBuilder, ViewInputs};
 use cs_clientcore::hud::HudState;
 use cs_clientcore::sound::{PITCH_NORM, SoundStart};
@@ -175,7 +184,15 @@ pub struct WebClientState {
     last_room_type: u16,
     last_underwater: bool,
     last_fade_gain: f32,
-    weapon_switch_timer: f32,
+    weapon_buckets: WeaponBucketState,
+    crosshair_state: CrosshairState,
+    crosshair_shots_fired: i32,
+    crosshair_last_weapon: u8,
+    crosshair_last_clip: i32,
+    last_dt: f32,
+    loc: Option<LocalizationTable>,
+    vgui_rt: VguiRuntime,
+    buy_team_class_ui: BuyClassTeamMenuUi,
     hud_anim: HudAnimState,
     time_sec: f32,
     pub mod_transfer: ClientModTransfer,
@@ -226,7 +243,15 @@ impl WebClientState {
             last_room_type: 0,
             last_underwater: false,
             last_fade_gain: 1.0,
-            weapon_switch_timer: 0.0,
+            weapon_buckets: WeaponBucketState::default(),
+            crosshair_state: CrosshairState::default(),
+            crosshair_shots_fired: 0,
+            crosshair_last_weapon: 0,
+            crosshair_last_clip: 0,
+            last_dt: 0.016,
+            loc: None,
+            vgui_rt: VguiRuntime::new(),
+            buy_team_class_ui: BuyClassTeamMenuUi::default(),
             hud_anim: HudAnimState::default(),
             time_sec: 0.0,
             mod_transfer: ClientModTransfer::default(),
@@ -295,6 +320,10 @@ impl WebClientState {
         if let Ok(text) = vfs.read_string_lossy("sound/sentences.txt") {
             self.sentences = SentenceTable::parse(&text);
         }
+        let lang = self.cvars.get_str("cl_language").to_string();
+        self.loc = Some(LocalizationTable::load_language(vfs, &lang));
+        self.vgui_rt.invalidate_cache();
+        self.vgui_rt.load_scheme_fonts(vfs);
     }
 
     pub fn list_maps(&self) -> Vec<String> {
@@ -319,12 +348,7 @@ impl WebClientState {
 
     /// Starts an in-browser listen server supporting the local host player plus external
     /// WebRTC DataChannel peers (`1..max_players`, clamped to `2..=16`).
-    pub fn start_p2p_host(
-        &mut self,
-        map: &str,
-        bots: u32,
-        max_players: u8,
-    ) -> Result<(), String> {
+    pub fn start_p2p_host(&mut self, map: &str, bots: u32, max_players: u8) -> Result<(), String> {
         self.start_local_mode(map, bots, max_players.clamp(2, 16), true)
     }
 
@@ -358,7 +382,7 @@ impl WebClientState {
             } else {
                 name
             },
-            text_menus: true,
+            text_menus: !self.cvars.get_bool("_vgui_menus"),
             ..LocalOptions::default()
         }
     }
@@ -425,7 +449,11 @@ impl WebClientState {
         if let Some(vfs) = &self.vfs {
             conn.set_files(Box::new(VfsResourceFiles(vfs.clone())));
         }
-        let vgui_flag = if self.cvars.get_bool("_vgui_menus") { "1" } else { "0" };
+        let vgui_flag = if self.cvars.get_bool("_vgui_menus") {
+            "1"
+        } else {
+            "0"
+        };
         conn.set_userinfo("_vgui_menus", vgui_flag);
         conn.set_userinfo(MOD_CAPABILITY_KEY, "1");
         let names = self.view.names();
@@ -460,6 +488,12 @@ impl WebClientState {
         self.mod_host = ClientModHost::new();
         self.last_mod_hud.clear();
         self.hud_anim = HudAnimState::default();
+        self.weapon_buckets = WeaponBucketState::default();
+        self.crosshair_state = CrosshairState::default();
+        self.crosshair_shots_fired = 0;
+        self.crosshair_last_weapon = 0;
+        self.crosshair_last_clip = 0;
+        self.buy_team_class_ui.close();
         self.queued_audio.push(WebAudioEvent::StopAll);
     }
 
@@ -532,7 +566,8 @@ impl WebClientState {
             self.collision = Some(coll.clone());
             self.view.set_map_bounds(Some(coll.as_ref()));
             self.view.set_map_bsp(Some(bsp_arc));
-            self.view.set_world_context(Some(coll.clone()), Some(vfs.clone()));
+            self.view
+                .set_world_context(Some(coll.clone()), Some(vfs.clone()));
             let materials_txt = vfs.read_bytes("sound/materials.txt").ok();
             let names = self.view.names();
             let vfs_c = vfs.clone();
@@ -613,7 +648,10 @@ impl WebClientState {
                     let next = match color_idx {
                         Some(i) => PRESETS[usize::from(i) % PRESETS.len()],
                         None => {
-                            let idx = PRESETS.iter().position(|p| *p == cur).map_or(0, |i| (i + 1) % PRESETS.len());
+                            let idx = PRESETS
+                                .iter()
+                                .position(|p| *p == cur)
+                                .map_or(0, |i| (i + 1) % PRESETS.len());
                             PRESETS[idx]
                         }
                     };
@@ -688,8 +726,9 @@ impl WebClientState {
     /// Advances the active session by `dt_secs`, runs usercmds, queues audio events, and emits `FrameView`.
     pub fn step(&mut self, dt_secs: f64) -> StepOutput {
         let dt = dt_secs.clamp(0.0, MAX_STEP);
+        self.last_dt = dt as f32;
         self.time_sec += dt as f32;
-        self.weapon_switch_timer = (self.weapon_switch_timer - dt as f32).max(0.0);
+        self.weapon_buckets.step(dt as f32);
 
         let interp = match &self.session {
             SessionMode::Idle => 0.1,
@@ -704,9 +743,27 @@ impl WebClientState {
             self.dispatch_command(&cmd);
         }
 
-        let cmd = self
-            .input
-            .build_usercmd(&mut self.camera, dt, interp, &MoveSpeeds::default(), 180.0);
+        // Confirm an open weapon bucket selection on `+attack` without firing a shot.
+        if self.weapon_buckets.active_slot.is_some() && self.input.actions.contains("attack") {
+            let confirmed = match &self.session {
+                SessionMode::Idle => None,
+                SessionMode::Local { game, .. } => self
+                    .weapon_buckets
+                    .confirm_selection(&game.connection().fx().hud),
+                SessionMode::Remote { conn, .. } => {
+                    self.weapon_buckets.confirm_selection(&conn.fx().hud)
+                }
+            };
+            if let Some(wname) = confirmed {
+                self.input.actions.remove("attack");
+                self.play_ui_sound(WeaponBucketSound::Select.vfs_path());
+                self.send_stringcmd(&wname);
+            }
+        }
+
+        let cmd =
+            self.input
+                .build_usercmd(&mut self.camera, dt, interp, &MoveSpeeds::default(), 180.0);
 
         match &mut self.session {
             SessionMode::Idle => {}
@@ -828,10 +885,12 @@ impl WebClientState {
         }
 
         for um in unknown_msgs {
-            if !self
-                .mod_transfer
-                .ingest_usermsg(&um.name, &um.payload, &mut self.mod_host, self.vfs.as_mut())
-            {
+            if !self.mod_transfer.ingest_usermsg(
+                &um.name,
+                &um.payload,
+                &mut self.mod_host,
+                self.vfs.as_mut(),
+            ) {
                 self.mod_host.on_usermsg(&um.name, &um.payload);
             }
         }
@@ -876,17 +935,29 @@ impl WebClientState {
         {
             self.camera.position = fv.eye;
         }
-        let anim_eye = built_view.as_ref().map_or(self.camera.position, |fv| fv.eye);
+        let anim_eye = built_view
+            .as_ref()
+            .map_or(self.camera.position, |fv| fv.eye);
         let anim_yaw = self.camera.yaw_deg;
         match &self.session {
             SessionMode::Idle => {}
             SessionMode::Local { game, .. } => {
-                self.hud_anim
-                    .step_with_pose(dt as f32, &game.connection().fx().hud, sess_now, anim_eye, anim_yaw);
+                self.hud_anim.step_with_pose(
+                    dt as f32,
+                    &game.connection().fx().hud,
+                    sess_now,
+                    anim_eye,
+                    anim_yaw,
+                );
             }
             SessionMode::Remote { conn, .. } => {
-                self.hud_anim
-                    .step_with_pose(dt as f32, &conn.fx().hud, sess_now, anim_eye, anim_yaw);
+                self.hud_anim.step_with_pose(
+                    dt as f32,
+                    &conn.fx().hud,
+                    sess_now,
+                    anim_eye,
+                    anim_yaw,
+                );
             }
         }
 
@@ -902,7 +973,10 @@ impl WebClientState {
             self.voice.handle_event(ev, sess_now);
         }
 
-        self.step_music_and_dsp(dt as f32, built_view.as_ref().is_some_and(|v| v.waterlevel >= 3));
+        self.step_music_and_dsp(
+            dt as f32,
+            built_view.as_ref().is_some_and(|v| v.waterlevel >= 3),
+        );
 
         for sc in drained_sounds {
             self.push_sound_event(sc, listener, right, local_entity);
@@ -981,6 +1055,8 @@ impl WebClientState {
             }
         }
 
+        self.sync_vgui_menu_state();
+
         StepOutput {
             view: built_view,
             new_registry,
@@ -988,65 +1064,197 @@ impl WebClientState {
         }
     }
 
+    fn play_ui_sound(&mut self, path: &str) {
+        let vol = self.master_volume();
+        self.push_2d_event(path.to_string(), vol, PITCH_NORM, 0, 0, 0.0);
+    }
+
+    fn local_is_ct(&self) -> bool {
+        let slot = match &self.session {
+            SessionMode::Idle => return true,
+            SessionMode::Local { game, .. } => game.connection().player_slot(),
+            SessionMode::Remote { conn, .. } => conn.player_slot(),
+        };
+        let Some(s) = slot else {
+            return true;
+        };
+        self.with_hud(|h| h.players.get(&(s + 1)).is_some_and(|p| p.team == "CT"))
+            .unwrap_or(true)
+    }
+
+    fn sync_vgui_menu_state(&mut self) {
+        let use_vgui = self.cvars.get_bool("_vgui_menus");
+        if !use_vgui {
+            self.buy_team_class_ui.close();
+            return;
+        }
+        let active = self
+            .with_hud(|h| {
+                h.vgui_menu
+                    .as_ref()
+                    .filter(|v| !v.multipart && v.keys != 0)
+                    .cloned()
+            })
+            .flatten();
+        if let Some(vm) = active
+            && let Some(kind) = VguiMenuKind::from_vgui_menu_id(vm.menu_id, &vm.name)
+        {
+            let is_ct = self.local_is_ct();
+            self.buy_team_class_ui.open_kind(kind, is_ct);
+        }
+    }
+
     fn dispatch_command(&mut self, cmd: &str) {
         if cmd == "invnext" || cmd == "invprev" {
+            if self.buy_team_class_ui.is_open() {
+                return;
+            }
             let forward = cmd == "invnext";
             let owned = owned_set(self.owned_weapons());
-            let picked = self
-                .with_hud(|hud| {
-                    cycle_inventory_weapon(
-                        &hud.weapons,
-                        &owned,
-                        hud.current_weapon.map(|c| c.weapon_id),
-                        forward,
-                    )
-                    .map(|w| w.name.clone())
-                })
-                .flatten();
+            let fastswitch_mode = self.cvars.get_i32("hud_fastswitch");
+            let (picked, snd) = match &self.session {
+                SessionMode::Idle => (None, None),
+                SessionMode::Local { game, .. } => step_inventory_cycle_mode(
+                    &mut self.weapon_buckets,
+                    &game.connection().fx().hud,
+                    &owned,
+                    forward,
+                    fastswitch_mode,
+                ),
+                SessionMode::Remote { conn, .. } => step_inventory_cycle_mode(
+                    &mut self.weapon_buckets,
+                    &conn.fx().hud,
+                    &owned,
+                    forward,
+                    fastswitch_mode,
+                ),
+            };
+            if let Some(sound) = snd {
+                self.play_ui_sound(sound.vfs_path());
+            }
             if let Some(wname) = picked {
                 self.send_stringcmd(&wname);
-                self.weapon_switch_timer = 0.6;
             }
             return;
         }
         if let Some(digit) = parse_slot_cmd(cmd) {
+            // 1. VGUI2 Buy/Team/Class menu (`_vgui_menus 1`) owns `1..9` & `0` exclusively.
+            if self.buy_team_class_ui.is_open() {
+                self.handle_vgui_menu_digit(digit);
+                return;
+            }
+            // 2. Classic text `ShowMenu` (`_vgui_menus 0`, radio `Z`/`X`/`C`, AMXX menus).
             let menu_open = self
-                .with_hud(|h| h.menu.as_ref().is_some_and(|m| m.keys != 0))
+                .with_hud(|h| {
+                    h.menu
+                        .as_ref()
+                        .is_some_and(|m| !m.multipart && m.keys != 0 && !m.text.is_empty())
+                })
                 .unwrap_or(false);
             if menu_open {
                 let valid = self
-                    .with_hud(|h| h.menu.as_ref().is_some_and(|m| menu_key_enabled(m.keys, digit)))
+                    .with_hud(|h| {
+                        h.menu
+                            .as_ref()
+                            .is_some_and(|m| menu_key_enabled(m.keys, digit))
+                    })
                     .unwrap_or(false);
                 if valid {
-                    self.send_stringcmd(&format!("menuselect {digit}"));
+                    let n = if digit == 0 { 10 } else { digit };
+                    self.send_stringcmd(&format!("menuselect {n}"));
                     self.clear_text_menu();
                     return;
                 }
             }
             if digit >= 1 {
-                let owned: HashSet<u8> = {
-                    let bits = self.owned_weapons();
-                    (0u8..32).filter(|id| bits & (1 << id) != 0).collect()
+                let owned = owned_set(self.owned_weapons());
+                let fastswitch_mode = self.cvars.get_i32("hud_fastswitch");
+                let (picked, snd) = match &self.session {
+                    SessionMode::Idle => (None, None),
+                    SessionMode::Local { game, .. } => self.weapon_buckets.on_slot_press_mode(
+                        &game.connection().fx().hud,
+                        &owned,
+                        digit,
+                        fastswitch_mode,
+                    ),
+                    SessionMode::Remote { conn, .. } => self.weapon_buckets.on_slot_press_mode(
+                        &conn.fx().hud,
+                        &owned,
+                        digit,
+                        fastswitch_mode,
+                    ),
                 };
-                let picked = self
-                    .with_hud(|hud| {
-                        weapon_for_slot(
-                            &hud.weapons,
-                            &owned,
-                            hud.current_weapon.map(|c| c.weapon_id),
-                            digit,
-                        )
-                        .map(str::to_string)
-                    })
-                    .flatten();
+                if let Some(sound) = snd {
+                    self.play_ui_sound(sound.vfs_path());
+                }
                 if let Some(wname) = picked {
                     self.send_stringcmd(&wname);
-                    self.weapon_switch_timer = 0.6;
                 }
             }
             return;
         }
         self.send_stringcmd(cmd);
+    }
+
+    fn handle_vgui_menu_digit(&mut self, digit: u8) {
+        let Some(res_path) = self.buy_team_class_ui.active_res.clone() else {
+            return;
+        };
+        if digit == 0 {
+            self.buy_team_class_ui.close();
+            self.clear_vgui_menu();
+            return;
+        }
+        if let Some(v) = &self.vfs {
+            self.vgui_rt.load_res(v, &res_path);
+        }
+        let nodes = self.vgui_rt.compute_layout_mode(
+            &res_path,
+            [0.0, 0.0, 640.0, 480.0],
+            VguiCoordMode::Proportional640,
+            self.loc.as_ref(),
+        );
+        let buttons: Vec<_> = nodes
+            .into_iter()
+            .filter(|n| {
+                n.visible
+                    && matches!(
+                        n.kind,
+                        ControlKind::Button | ControlKind::MouseOverPanelButton
+                    )
+            })
+            .collect();
+        let lower = res_path.to_ascii_lowercase();
+        let is_team = lower.contains("teammenu");
+        let is_buy_submenu =
+            !is_team && !lower.contains("classmenu") && !lower.contains("mainbuymenu");
+        let money = self.with_hud(|h| h.money).unwrap_or(0);
+        let ch = char::from(b'0' + digit);
+        if let Some(btn) = find_button_by_hotkey(&buttons, ch, is_team)
+            && btn.enabled
+            && !(is_buy_submenu && btn.cost.is_some_and(|c| money < c as i32))
+        {
+            let is_ct = self.local_is_ct();
+            if let Some(send) =
+                self.buy_team_class_ui
+                    .handle_command(&btn.command, is_ct, self.vfs.as_ref())
+            {
+                self.send_stringcmd(&send);
+                self.clear_vgui_menu();
+            } else if !self.buy_team_class_ui.is_open() {
+                self.clear_vgui_menu();
+            }
+        }
+    }
+
+    fn clear_vgui_menu(&mut self) {
+        match &mut self.session {
+            SessionMode::Idle => {}
+            SessionMode::Local { game, .. } => {
+                game.connection_mut().fx_mut().hud.vgui_menu = None;
+            }
+            SessionMode::Remote { conn, .. } => conn.fx_mut().hud.vgui_menu = None,
+        }
     }
 
     fn clear_text_menu(&mut self) {
@@ -1085,7 +1293,11 @@ impl WebClientState {
 
     fn cvar_f32_clamped(&self, name: &str, default: f32, lo: f32, hi: f32) -> f32 {
         let v = self.cvars.get_f32(name);
-        if v.is_finite() { v.clamp(lo, hi) } else { default }
+        if v.is_finite() {
+            v.clamp(lo, hi)
+        } else {
+            default
+        }
     }
 
     fn master_volume(&self) -> f32 {
@@ -1121,12 +1333,14 @@ impl WebClientState {
         let fade_gain = self.sound_fade.gain();
         if (fade_gain - self.last_fade_gain).abs() > 0.005 {
             self.last_fade_gain = fade_gain;
-            self.queued_audio.push(WebAudioEvent::SetFade { gain: fade_gain });
+            self.queued_audio
+                .push(WebAudioEvent::SetFade { gain: fade_gain });
         }
 
         if underwater != self.last_underwater {
             self.last_underwater = underwater;
-            self.queued_audio.push(WebAudioEvent::SetUnderwater(underwater));
+            self.queued_audio
+                .push(WebAudioEvent::SetUnderwater(underwater));
         }
 
         let room_off = self.cvars.get_bool("room_off");
@@ -1193,8 +1407,12 @@ impl WebClientState {
         let Some(coll) = &self.collision else {
             return false;
         };
-        coll.trace_world(Vec3::from_array(listener), Vec3::from_array(pos), Hull::Point)
-            .fraction
+        coll.trace_world(
+            Vec3::from_array(listener),
+            Vec3::from_array(pos),
+            Hull::Point,
+        )
+        .fraction
             < 0.99
     }
 
@@ -1288,7 +1506,8 @@ impl WebClientState {
                 fade_out,
                 fade_in,
             } => {
-                self.sound_fade.trigger(percent, hold_time, fade_out, fade_in);
+                self.sound_fade
+                    .trigger(percent, hold_time, fade_out, fade_in);
                 return;
             }
             _ => {}
@@ -1387,7 +1606,9 @@ impl WebClientState {
                 self.queued_audio
                     .push(WebAudioEvent::StopChannel { entity, channel });
             }
-            SoundCommand::Fade { .. } | SoundCommand::RoomType(_) | SoundCommand::CdTrack { .. } => {}
+            SoundCommand::Fade { .. }
+            | SoundCommand::RoomType(_)
+            | SoundCommand::CdTrack { .. } => {}
         }
     }
 
@@ -1403,9 +1624,9 @@ impl WebClientState {
         precache.sounds.get(&start.index).map(|e| e.name.clone())
     }
 
-    /// Renders HUD, crosshair, net_graph, server text menus, and scoreboard into `ctx`.
+    /// Renders HUD, crosshair, net_graph, VGUI2 Buy/Team/Class menus, server text menus, and scoreboard into `ctx`.
     pub fn draw_hud_ui(
-        &self,
+        &mut self,
         ctx: &egui::Context,
         hud_sprites: Option<&HudSprites>,
         client_palette: cs_client::ui::vgui_assets::ClientPalette,
@@ -1415,9 +1636,83 @@ impl WebClientState {
         let Some(fv) = view else {
             return;
         };
+        // Sniper scope overlay applies at <= 40 deg (AWP/Scout/auto-sniper), keeping AUG/SG552 (55 deg) unmasked.
         let scoped = fv.fov.is_finite() && fv.fov > 0.0 && fv.fov <= 40.0;
-        if fv.alive && !scoped {
-            draw_crosshair(ctx, &self.cvars, 0.0);
+        let (
+            hud_health,
+            hud_hidden,
+            hud_timer_vis,
+            hud_nvg,
+            hud_money,
+            wid,
+            clip,
+            active_vgui_keys,
+        ) = self
+            .with_hud(|h| {
+                (
+                    i32::from(h.health),
+                    h.hidden,
+                    h.timer_visible,
+                    h.night_vision,
+                    h.money,
+                    h.current_weapon.map_or(0, |w| w.weapon_id),
+                    h.current_weapon.map_or(-1, |w| i32::from(w.clip)),
+                    h.vgui_menu.as_ref().map_or(0, |v| v.keys),
+                )
+            })
+            .unwrap_or((100, 0, false, false, 0, 0, -1, 0));
+        let hud_vis = compute_hud_visibility(fv.alive, hud_health, hud_hidden, hud_timer_vis);
+        if hud_vis.crosshair && !scoped && should_draw_dynamic_crosshair(fv.fov, wid) {
+            if wid != self.crosshair_last_weapon {
+                self.crosshair_shots_fired = 0;
+                self.crosshair_last_weapon = wid;
+                self.crosshair_last_clip = clip;
+            } else if clip >= 0 {
+                if clip < self.crosshair_last_clip {
+                    self.crosshair_shots_fired += self.crosshair_last_clip - clip;
+                    if self.crosshair_shots_fired > 600 {
+                        self.crosshair_shots_fired = 1;
+                    }
+                }
+                self.crosshair_last_clip = clip;
+            }
+            let (on_ground, ducking, speed_2d, wflags) = match &self.session {
+                SessionMode::Idle => (true, false, 0.0, 0),
+                SessionMode::Local { game, .. } => {
+                    game.connection()
+                        .client_data()
+                        .map_or((true, false, 0.0, 0), |d| {
+                            let spd =
+                                (d.velocity.x * d.velocity.x + d.velocity.y * d.velocity.y).sqrt();
+                            ((d.flags & 512) != 0, (d.flags & 16384) != 0, spd, 0)
+                        })
+                }
+                SessionMode::Remote { conn, .. } => {
+                    conn.client_data().map_or((true, false, 0.0, 0), |d| {
+                        let spd =
+                            (d.velocity.x * d.velocity.x + d.velocity.y * d.velocity.y).sqrt();
+                        ((d.flags & 512) != 0, (d.flags & 16384) != 0, spd, 0)
+                    })
+                }
+            };
+            let ch_inputs = CrosshairInputs {
+                weapon_id: wid,
+                weapon_flags: wflags,
+                on_ground,
+                ducking,
+                speed_2d,
+                shots_fired: self.crosshair_shots_fired,
+                night_vision: hud_nvg,
+                dynamic: self.cvars.get_bool("cl_dynamiccrosshair"),
+                hide_hud: hud_hidden,
+            };
+            draw_crosshair_vgui_dt(
+                ctx,
+                &self.cvars,
+                &mut self.crosshair_state,
+                &ch_inputs,
+                self.last_dt,
+            );
         }
 
         let (names, owned, sess_now) = match &self.session {
@@ -1445,7 +1740,7 @@ impl WebClientState {
                 chat: &[],
                 notify: &[],
                 center: None,
-                weapon_switch_timer: self.weapon_switch_timer,
+                weapon_switch_timer: 0.0,
                 alive: fv.alive,
                 scoped,
                 eye: fv.eye,
@@ -1454,6 +1749,7 @@ impl WebClientState {
             };
             let mut extras = HudExtrasContext {
                 anim: Some(&self.hud_anim),
+                buckets: Some(&self.weapon_buckets),
                 ..Default::default()
             };
             extras.apply_cvars(&self.cvars);
@@ -1463,7 +1759,11 @@ impl WebClientState {
             draw_voice_speakers(ctx, &names, &speakers, local_talking);
             draw_mod_hud(ctx, &self.last_mod_hud);
 
-            if let Some(m) = h.menu.as_ref().filter(|m| !m.multipart && m.keys != 0 && !m.text.is_empty()) {
+            if let Some(m) = h
+                .menu
+                .as_ref()
+                .filter(|m| !m.multipart && m.keys != 0 && !m.text.is_empty())
+            {
                 let lines = menu_styled_lines(&m.text, None);
                 let scale = (ctx.content_rect().height() / 768.0).clamp(0.85, 1.45);
                 draw_styled_text_menu(ctx, &lines, scale);
@@ -1475,7 +1775,9 @@ impl WebClientState {
                     .iter()
                     .filter(|(slot, p)| {
                         !p.team.is_empty()
-                            || slot.checked_sub(1).is_some_and(|s0| names.contains_key(&s0))
+                            || slot
+                                .checked_sub(1)
+                                .is_some_and(|s0| names.contains_key(&s0))
                     })
                     .filter_map(|(slot, p)| {
                         let slot0 = slot.checked_sub(1)?;
@@ -1510,6 +1812,30 @@ impl WebClientState {
                 );
             }
         });
+
+        if self.buy_team_class_ui.is_open() {
+            let is_ct = self.local_is_ct();
+            let map_name = self.loaded_map.clone().unwrap_or_default();
+            let buy_ctx = BuyMenuRenderCtx {
+                vfs: self.vfs.as_ref(),
+                loc: self.loc.as_ref(),
+                map_name: &map_name,
+                is_ct,
+                allowed_keys: active_vgui_keys,
+                can_cancel: true,
+                money: hud_money,
+            };
+            let was_open = self.buy_team_class_ui.is_open();
+            let out_cmd = self
+                .buy_team_class_ui
+                .show(ctx, &mut self.vgui_rt, &buy_ctx);
+            if let Some(cmd) = out_cmd {
+                self.send_stringcmd(&cmd);
+                self.clear_vgui_menu();
+            } else if was_open && !self.buy_team_class_ui.is_open() {
+                self.clear_vgui_menu();
+            }
+        }
 
         draw_net_graph(
             ctx,
@@ -1579,7 +1905,10 @@ mod tests {
         st.mount_file("Half-Life/cstrike/maps/de_dust2.bsp", vec![30, 0, 0, 0]);
         st.finish_mount();
 
-        assert_eq!(st.read_file("config.cfg").as_deref(), Some(b"cstrike_line\n".as_slice()));
+        assert_eq!(
+            st.read_file("config.cfg").as_deref(),
+            Some(b"cstrike_line\n".as_slice())
+        );
         assert_eq!(st.list_maps(), vec!["de_dust2".to_string()]);
     }
 
@@ -1587,7 +1916,15 @@ mod tests {
     fn audio_events_gated_until_user_gesture() {
         let mut st = WebClientState::default();
         assert!(!st.is_audio_unlocked());
-        let start = cs_clientcore::SoundStart::by_name("weapons/ak47-1.wav", 1, 1, Vec3::ZERO, 1.0, 0.8, 100);
+        let start = cs_clientcore::SoundStart::by_name(
+            "weapons/ak47-1.wav",
+            1,
+            1,
+            Vec3::ZERO,
+            1.0,
+            0.8,
+            100,
+        );
         st.push_sound_event(
             SoundCommand::Start(start.clone()),
             [0.0; 3],
@@ -1620,7 +1957,10 @@ mod tests {
             Some((100, 2000)),
         );
         st.mount_file("Half-Life/valve/sound/ambience/hum.wav", looped_wav);
-        st.mount_file("Half-Life/valve/sound/vox/hello.wav", cs_client::audio::encode_test_wav_pcm16(22_050, 1, &[500i16; 4410], None, None));
+        st.mount_file(
+            "Half-Life/valve/sound/vox/hello.wav",
+            cs_client::audio::encode_test_wav_pcm16(22_050, 1, &[500i16; 4410], None, None),
+        );
         st.mount_file(
             "Half-Life/valve/sound/sentences.txt",
             b"TEST_VOX vox/hello\n".to_vec(),
@@ -1629,12 +1969,43 @@ mod tests {
         st.unlock_audio();
 
         // 1. Looped 3D sound + channel pitch/vol alter + room type + soundfade
-        let start = SoundStart::by_name("ambience/hum.wav", 5, 6, Vec3::new(100.0, 0.0, 0.0), 0.9, 0.8, 120);
-        st.push_sound_event(SoundCommand::Start(start), [0.0; 3], [0.0, 1.0, 0.0], Some(1));
-        let mut alter = SoundStart::by_name("ambience/hum.wav", 5, 6, Vec3::new(120.0, 0.0, 0.0), 0.4, 0.8, 90);
+        let start = SoundStart::by_name(
+            "ambience/hum.wav",
+            5,
+            6,
+            Vec3::new(100.0, 0.0, 0.0),
+            0.9,
+            0.8,
+            120,
+        );
+        st.push_sound_event(
+            SoundCommand::Start(start),
+            [0.0; 3],
+            [0.0, 1.0, 0.0],
+            Some(1),
+        );
+        let mut alter = SoundStart::by_name(
+            "ambience/hum.wav",
+            5,
+            6,
+            Vec3::new(120.0, 0.0, 0.0),
+            0.4,
+            0.8,
+            90,
+        );
         alter.flags = SND_FL_CHANGE_VOL;
-        st.push_sound_event(SoundCommand::Start(alter), [0.0; 3], [0.0, 1.0, 0.0], Some(1));
-        st.push_sound_event(SoundCommand::RoomType(14), [0.0; 3], [0.0, 1.0, 0.0], Some(1));
+        st.push_sound_event(
+            SoundCommand::Start(alter),
+            [0.0; 3],
+            [0.0, 1.0, 0.0],
+            Some(1),
+        );
+        st.push_sound_event(
+            SoundCommand::RoomType(14),
+            [0.0; 3],
+            [0.0, 1.0, 0.0],
+            Some(1),
+        );
         st.push_sound_event(
             SoundCommand::Fade {
                 percent: 80,
@@ -1662,11 +2033,26 @@ mod tests {
             WebAudioEvent::Play3d { path, pitch: 120, loop_start: Some(100), loop_end: Some(2000), .. }
                 if path == "sound/ambience/hum.wav"
         )));
-        assert!(evs.iter().any(|e| matches!(e, WebAudioEvent::UpdateChannel { entity: 5, channel: 6, .. })));
-        assert!(evs.iter().any(|e| matches!(e, WebAudioEvent::SetRoomType(14))));
-        assert!(evs.iter().any(|e| matches!(e, WebAudioEvent::SetFade { gain } if *gain < 0.99)));
+        assert!(evs.iter().any(|e| matches!(
+            e,
+            WebAudioEvent::UpdateChannel {
+                entity: 5,
+                channel: 6,
+                ..
+            }
+        )));
+        assert!(
+            evs.iter()
+                .any(|e| matches!(e, WebAudioEvent::SetRoomType(14)))
+        );
+        assert!(
+            evs.iter()
+                .any(|e| matches!(e, WebAudioEvent::SetFade { gain } if *gain < 0.99))
+        );
         assert!(evs.iter().any(|e| matches!(e, WebAudioEvent::PlayMusic { path, .. } if path == "media/Half-Life02.mp3")));
-        assert!(evs.iter().any(|e| matches!(e, WebAudioEvent::Play2d { path, .. } if path == "sound/vox/hello.wav")));
+        assert!(evs.iter().any(
+            |e| matches!(e, WebAudioEvent::Play2d { path, .. } if path == "sound/vox/hello.wav")
+        ));
         assert!(evs.iter().any(|e| matches!(e, WebAudioEvent::VoicePcm { speaker: 255, samples, .. } if !samples.is_empty())));
     }
 
@@ -1704,7 +2090,10 @@ mod tests {
                 break;
             }
         }
-        assert!(in_game, "web ChannelTransport client should reach ConnState::InGame");
+        assert!(
+            in_game,
+            "web ChannelTransport client should reach ConnState::InGame"
+        );
     }
 
     #[test]
@@ -1715,7 +2104,8 @@ mod tests {
         };
         let mut st = WebClientState::default();
         st.set_vfs(real_vfs);
-        st.start_local("de_dust2", 2).expect("start local game in cs-web");
+        st.start_local("de_dust2", 2)
+            .expect("start local game in cs-web");
         assert_eq!(st.conn_state(), Some(ConnState::InGame));
         let out = st.step(0.01);
         assert_eq!(out.map_sync, MapSyncAction::Load("de_dust2".to_string()));
@@ -1725,7 +2115,9 @@ mod tests {
     }
 
     fn p2p_test_floor_map() -> (ServerMap, Arc<BspMap>) {
-        use cs_assets::bsp::{BspMap, BspModel, ClipNode, Entity, Leaf, LightmapAtlas, Node, Plane};
+        use cs_assets::bsp::{
+            BspMap, BspModel, ClipNode, Entity, Leaf, LightmapAtlas, Node, Plane,
+        };
         use glam::Vec3;
 
         const CONTENTS_EMPTY: i32 = -1;
@@ -1741,16 +2133,44 @@ mod tests {
             ambient_levels: [0; 4],
         };
         let planes = vec![
-            Plane { normal: Vec3::Z, dist: 0.0, plane_type: 2 },
-            Plane { normal: Vec3::Z, dist: 36.0, plane_type: 2 },
-            Plane { normal: Vec3::Z, dist: 32.0, plane_type: 2 },
-            Plane { normal: Vec3::Z, dist: 18.0, plane_type: 2 },
+            Plane {
+                normal: Vec3::Z,
+                dist: 0.0,
+                plane_type: 2,
+            },
+            Plane {
+                normal: Vec3::Z,
+                dist: 36.0,
+                plane_type: 2,
+            },
+            Plane {
+                normal: Vec3::Z,
+                dist: 32.0,
+                plane_type: 2,
+            },
+            Plane {
+                normal: Vec3::Z,
+                dist: 18.0,
+                plane_type: 2,
+            },
         ];
         let clipnodes = vec![
-            ClipNode { plane: 1, children: [CONTENTS_EMPTY as i16, CONTENTS_SOLID as i16] },
-            ClipNode { plane: 2, children: [CONTENTS_EMPTY as i16, CONTENTS_SOLID as i16] },
-            ClipNode { plane: 3, children: [CONTENTS_EMPTY as i16, CONTENTS_SOLID as i16] },
-            ClipNode { plane: 3, children: [CONTENTS_EMPTY as i16, CONTENTS_SOLID as i16] },
+            ClipNode {
+                plane: 1,
+                children: [CONTENTS_EMPTY as i16, CONTENTS_SOLID as i16],
+            },
+            ClipNode {
+                plane: 2,
+                children: [CONTENTS_EMPTY as i16, CONTENTS_SOLID as i16],
+            },
+            ClipNode {
+                plane: 3,
+                children: [CONTENTS_EMPTY as i16, CONTENTS_SOLID as i16],
+            },
+            ClipNode {
+                plane: 3,
+                children: [CONTENTS_EMPTY as i16, CONTENTS_SOLID as i16],
+            },
         ];
         let nodes = vec![
             Node {
@@ -1824,7 +2244,8 @@ mod tests {
         });
         let mut raw = vec![0u8; 4 + 15 * 8];
         raw[..4].copy_from_slice(&30i32.to_le_bytes());
-        let map = ServerMap::from_bsp("de_p2p_test", &raw, Arc::clone(&bsp)).expect("valid test BSP");
+        let map =
+            ServerMap::from_bsp("de_p2p_test", &raw, Arc::clone(&bsp)).expect("valid test BSP");
         (map, bsp)
     }
 
@@ -1942,7 +2363,10 @@ mod tests {
         assert!(st.list_maps().contains(&"dm_rusthouse".to_string()));
 
         let out = st.step(0.01);
-        assert_eq!(out.map_sync, MapSyncAction::Load("dm_rusthouse".to_string()));
+        assert_eq!(
+            out.map_sync,
+            MapSyncAction::Load("dm_rusthouse".to_string())
+        );
         st.mark_map_loaded("dm_rusthouse");
         let mut saw_view = false;
         for _ in 0..100 {
@@ -1964,5 +2388,17 @@ mod tests {
             Some(steam_sentinel.as_slice())
         );
         assert!(st_steam.read_file("maps/dm_rusthouse.bsp").is_some());
+    }
+
+    #[test]
+    fn web_defaults_to_vgui_menus_and_no_fake_weapon_bar_on_spawn() {
+        let st = WebClientState::default();
+        assert!(st.cvars.get_bool("_vgui_menus"));
+        let opts = st.local_options(4, 16);
+        assert!(
+            !opts.text_menus,
+            "_vgui_menus 1 must request VGUI menus, not text_menus"
+        );
+        assert!(st.weapon_buckets.active_slot.is_none());
     }
 }

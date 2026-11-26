@@ -23,13 +23,13 @@ use cs_vfs::Vfs;
 use egui::{Color32, CornerRadius, Pos2, Rect, ScrollArea, Sense, Stroke, TextureHandle, Vec2};
 
 use crate::ui::parse_rgb;
+use crate::ui::vgui_theme::VguiPalette;
 use crate::ui::vgui2::{
     TrackerCtx, VguiRuntime, draw_tracker_button_rect, draw_tracker_check_button_rect,
     draw_tracker_close_button, draw_tracker_combo_box_rect, draw_tracker_list_panel_rect,
     draw_tracker_slider_rect, draw_tracker_text_entry_rect, paint_tracker_bevel_rect,
     paint_tracker_label_rect,
 };
-use crate::ui::vgui_theme::VguiPalette;
 
 /// Render context for [`OptionsUi`].
 pub struct OptionsRenderCtx<'a> {
@@ -53,15 +53,154 @@ const GAMMA_SLIDER_MIN: f32 = 1.0;
 const GAMMA_SLIDER_MAX: f32 = 3.0;
 const LOW_LATENCY_CVAR: &str = "gl_lowlatency";
 
-fn ensure_lowlatency_cvar(cvars: &mut CVarRegistry) {
-    if cvars.get(LOW_LATENCY_CVAR).is_none() {
-        cvars.register(
-            LOW_LATENCY_CVAR,
-            "1",
-            cs_cvar::CVarFlags::ARCHIVE,
-            "Lower input latency (0 or 1)",
-        );
+/// Video settings emitted on **Apply** / **OK** so the native window shell can resize, toggle
+/// borderless fullscreen, and recreate the `wgpu` surface/backend live.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoApplyRequest {
+    pub width: u32,
+    pub height: u32,
+    pub fullscreen: bool,
+    pub backend: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct OptionsSnapshot {
+    cvars: Vec<(String, String)>,
+    binds: Vec<(String, String)>,
+    hd_models: bool,
+}
+
+const VIDEO_BACKENDS: &[(&str, &str)] = &[
+    ("auto", "Auto / Best"),
+    ("vulkan", "Vulkan"),
+    ("dx12", "Direct3D 12"),
+    ("metal", "Metal"),
+    ("gl", "OpenGL"),
+];
+
+const TEXTURE_STYLES: &[(&str, &str, &str)] = &[
+    ("GL_LINEAR_MIPMAP_LINEAR", "0", "OpenGL 1.6 Trilinear"),
+    ("GL_LINEAR", "0", "OpenGL Bilinear"),
+    ("GL_NEAREST", "1", "Software Retro Nearest"),
+];
+
+const ASPECT_MODES: &[(&str, &str)] = &[
+    ("4:3_stretch", "Normal (4:3)"),
+    ("widescreen", "Widescreen (16:9)"),
+    ("16:10", "Widescreen (16:10)"),
+    ("4:3_bars", "Normal (4:3 Bars)"),
+];
+
+const MANAGED_OPTION_CVARS: &[&str] = &[
+    "name",
+    "cl_logofile",
+    "cl_logocolor",
+    "cl_crosshair_size",
+    "cl_crosshair_color",
+    "cl_crosshair_translucent",
+    "cl_dynamiccrosshair",
+    "cl_righthand",
+    "hud_fastswitch",
+    "hud_centerid",
+    "cl_radartype",
+    "volume",
+    "mp3volume",
+    "suitvolume",
+    "hisound",
+    "room_off",
+    "r_refdll",
+    "width",
+    "height",
+    "fullscreen",
+    "vid_aspect_mode",
+    "gl_texturemode",
+    "r_software_mode",
+    "gl_widescreen_yfov",
+    "gl_vsync",
+    "gl_lowlatency",
+    "gl_use_shaders",
+    "brightness",
+    "gamma",
+    "cl_hd_models",
+    "m_pitch",
+    "m_filter",
+    "sv_aim",
+    "m_rawinput",
+    "sensitivity",
+    "zoom_sensitivity_ratio",
+    "voice_enable",
+    "voice_modenable",
+    "voice_forcemicrecord",
+    "voice_avggain",
+    "voice_scale",
+    "voice_loopback",
+    "cl_allowdownload",
+    "violence_hblood",
+    "violence_ablood",
+    "violence_hgibs",
+    "violence_agibs",
+];
+
+fn ensure_cvar(cvars: &mut CVarRegistry, name: &str, default: &str, desc: &str) {
+    if cvars.get(name).is_none() {
+        cvars.register(name, default, cs_cvar::CVarFlags::ARCHIVE, desc);
     }
+}
+
+fn ensure_option_cvars(cvars: &mut CVarRegistry) {
+    ensure_cvar(cvars, LOW_LATENCY_CVAR, "1", "Lower input latency (0 or 1)");
+    ensure_cvar(
+        cvars,
+        "r_refdll",
+        "auto",
+        "Renderer GPU backend (auto/vulkan/dx12/metal/gl)",
+    );
+    ensure_cvar(cvars, "width", "1280", "Window physical width");
+    ensure_cvar(cvars, "height", "720", "Window physical height");
+    ensure_cvar(
+        cvars,
+        "fullscreen",
+        "0",
+        "Borderless fullscreen mode (0 or 1)",
+    );
+    ensure_cvar(
+        cvars,
+        "gl_widescreen_yfov",
+        "1",
+        "Widescreen Hor+ FOV scaling",
+    );
+    ensure_cvar(cvars, "gl_use_shaders", "1", "Enable GPU lighting shaders");
+    ensure_cvar(cvars, "hisound", "1", "High-quality audio mixing (0 or 1)");
+    ensure_cvar(cvars, "room_off", "0", "Disable GoldSrc room DSP reverb");
+    ensure_cvar(cvars, "sv_aim", "0", "Classic auto-aim assist");
+    ensure_cvar(
+        cvars,
+        "voice_forcemicrecord",
+        "1",
+        "Boost / force microphone capture",
+    );
+    ensure_cvar(
+        cvars,
+        "cl_logofile",
+        "lambda",
+        "Spraypaint decal image name",
+    );
+    ensure_cvar(
+        cvars,
+        "cl_logocolor",
+        "Orange",
+        "Spraypaint decal color preset",
+    );
+    ensure_cvar(
+        cvars,
+        "cl_allowdownload",
+        "1",
+        "Allow custom addon/server downloads",
+    );
+}
+
+fn ensure_lowlatency_cvar(cvars: &mut CVarRegistry) {
+    ensure_cvar(cvars, LOW_LATENCY_CVAR, "1", "Lower input latency (0 or 1)");
 }
 
 const SPRAY_COLOR_PRESETS: &[(&str, Color32)] = &[
@@ -82,15 +221,46 @@ const CROSSHAIR_COLOR_PRESETS: &[(&str, &str)] = &[
     ("Ltblue", "50 250 250"),
 ];
 
-const RESOLUTIONS: &[&str] = &[
-    "640 x 480",
-    "800 x 600",
-    "1024 x 768",
-    "1280 x 720",
-    "1280 x 800",
-    "1280 x 1024",
-    "1920 x 1080",
+const RESOLUTIONS: &[(u32, u32, &str)] = &[
+    (640, 480, "640 x 480"),
+    (800, 600, "800 x 600"),
+    (1024, 768, "1024 x 768"),
+    (1280, 720, "1280 x 720"),
+    (1280, 800, "1280 x 800"),
+    (1280, 1024, "1280 x 1024"),
+    (1600, 900, "1600 x 900"),
+    (1920, 1080, "1920 x 1080"),
+    (2560, 1440, "2560 x 1440"),
 ];
+
+fn backend_idx_from_cvar(raw: &str) -> usize {
+    let lower = raw.trim().to_ascii_lowercase();
+    VIDEO_BACKENDS
+        .iter()
+        .position(|(k, _)| *k == lower)
+        .unwrap_or(0)
+}
+
+fn texture_style_idx_from_cvars(cvars: &CVarRegistry) -> usize {
+    let mode = cvars.get_str("gl_texturemode").trim().to_ascii_uppercase();
+    if cvars.get_bool("r_software_mode")
+        || mode == "GL_NEAREST"
+        || mode == "GL_NEAREST_MIPMAP_NEAREST"
+    {
+        2
+    } else if mode == "GL_LINEAR" || mode == "GL_LINEAR_MIPMAP_NEAREST" {
+        1
+    } else {
+        0
+    }
+}
+
+fn parse_resolution_label(label: &str) -> Option<(u32, u32)> {
+    let mut parts = label.split('x');
+    let w = parts.next()?.trim().parse::<u32>().ok()?;
+    let h = parts.next()?.trim().parse::<u32>().ok()?;
+    (w >= 320 && h >= 240).then_some((w, h))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OptionsTab {
@@ -124,6 +294,7 @@ pub struct OptionsUi {
     pub open: bool,
     pub tab: OptionsTab,
     rebinding_cmd: Option<String>,
+    rebind_arm_frame: bool,
     pub advanced_open: bool,
     pub user_script: Option<SettingsScript>,
     pub kb_actions: Vec<KbActEntry>,
@@ -134,6 +305,9 @@ pub struct OptionsUi {
     pub content_locked: bool,
     pub save_requested: bool,
     pub hd_models_changed: bool,
+    pub video_apply_requested: Option<VideoApplyRequest>,
+    pub gpu_adapter: String,
+    pub gpu_backend: String,
     drag_offset: Vec2,
     adv_drag_offset: Vec2,
     content_dialog_open: bool,
@@ -141,16 +315,15 @@ pub struct OptionsUi {
     selected_bind_row: Option<usize>,
     sens_text_buf: String,
     sens_last_val: f32,
-    auto_aim: bool,
+    zoom_sens_buf: String,
+    zoom_sens_last_val: f32,
+    selected_res_w: u32,
+    selected_res_h: u32,
+    backend_idx: usize,
+    texture_style_idx: usize,
     windowed: bool,
-    widescreen_fov: bool,
-    vsync: bool,
-    use_shaders: bool,
-    renderer_idx: usize,
-    sound_quality_idx: usize,
-    mic_boost: bool,
-    addons_folder: bool,
-    video_inited: bool,
+    was_open: bool,
+    snapshot: Option<OptionsSnapshot>,
 }
 
 /// Parse Valve/CS 1.6 `gfx/shell/kb_act.lst` into section headers and bindable commands.
@@ -200,7 +373,11 @@ pub fn parse_kb_act_list(text: &str) -> Vec<KbActEntry> {
         }
         let is_header = cmd.eq_ignore_ascii_case("blank");
         out.push(KbActEntry {
-            command: if is_header { String::new() } else { cmd.to_string() },
+            command: if is_header {
+                String::new()
+            } else {
+                cmd.to_string()
+            },
             label: label.to_string(),
             is_header,
         });
@@ -265,6 +442,126 @@ impl OptionsUi {
         self.load_resources(vfs);
     }
 
+    pub fn set_gpu_info(&mut self, adapter: &str, backend: &str) {
+        if self.gpu_adapter != adapter {
+            self.gpu_adapter = adapter.to_string();
+        }
+        if self.gpu_backend != backend {
+            self.gpu_backend = backend.to_string();
+        }
+    }
+
+    fn capture_snapshot(&self, cvars: &CVarRegistry) -> OptionsSnapshot {
+        let mut names: Vec<&str> = MANAGED_OPTION_CVARS.to_vec();
+        if let Some(ref scr) = self.user_script {
+            for opt in &scr.options {
+                names.push(opt.cvar.as_str());
+            }
+        }
+        let mut saved = Vec::with_capacity(names.len());
+        for name in names {
+            if let Some(v) = cvars.get(name) {
+                saved.push((name.to_string(), v.value.clone()));
+            }
+        }
+        let binds = cvars
+            .binds()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        OptionsSnapshot {
+            cvars: saved,
+            binds,
+            hd_models: cvars.get_bool("cl_hd_models"),
+        }
+    }
+
+    fn sync_from_cvars(&mut self, cvars: &mut CVarRegistry, screen: Rect) {
+        ensure_option_cvars(cvars);
+        self.windowed = !cvars.get_bool("fullscreen");
+        self.backend_idx = backend_idx_from_cvar(cvars.get_str("r_refdll"));
+        self.texture_style_idx = texture_style_idx_from_cvars(cvars);
+        let cur_w = screen.width().round().max(640.0) as u32;
+        let cur_h = screen.height().round().max(480.0) as u32;
+        let cw = cvars.get_i32("width");
+        let ch = cvars.get_i32("height");
+        if cw >= 320 && ch >= 240 {
+            self.selected_res_w = cw as u32;
+            self.selected_res_h = ch as u32;
+        } else {
+            self.selected_res_w = cur_w;
+            self.selected_res_h = cur_h;
+        }
+        let logo_cvar = cvars.get_str("cl_logofile").trim().to_ascii_lowercase();
+        if !logo_cvar.is_empty()
+            && let Some(found) = self.spray_logos.iter().find(|l| {
+                let stem = l
+                    .strip_suffix(".bmp")
+                    .or_else(|| l.strip_suffix(".BMP"))
+                    .unwrap_or(l);
+                stem.eq_ignore_ascii_case(&logo_cvar) || l.eq_ignore_ascii_case(&logo_cvar)
+            })
+        {
+            self.selected_spray = found.clone();
+        }
+        let logo_col = cvars.get_str("cl_logocolor").trim();
+        if let Some(idx) = SPRAY_COLOR_PRESETS
+            .iter()
+            .position(|(n, _)| n.eq_ignore_ascii_case(logo_col))
+        {
+            self.spray_color_idx = idx;
+        }
+    }
+
+    /// Commit pending video/display selections into `cvars`, emit [`VideoApplyRequest`],
+    /// request `config.cfg` persistence, and refresh the Cancel rollback snapshot.
+    pub fn apply_changes(&mut self, cvars: &mut CVarRegistry) {
+        ensure_option_cvars(cvars);
+        let w = self.selected_res_w.max(640);
+        let h = self.selected_res_h.max(480);
+        let fullscreen = !self.windowed;
+        let backend = VIDEO_BACKENDS
+            .get(self.backend_idx)
+            .map_or("auto", |(k, _)| *k)
+            .to_string();
+        cvars.set("width", w.to_string());
+        cvars.set("height", h.to_string());
+        cvars.set("fullscreen", if fullscreen { "1" } else { "0" });
+        cvars.set("r_refdll", &backend);
+        self.video_apply_requested = Some(VideoApplyRequest {
+            width: w,
+            height: h,
+            fullscreen,
+            backend,
+        });
+        self.save_requested = true;
+        self.snapshot = Some(self.capture_snapshot(cvars));
+    }
+
+    /// Revert all un-applied Option CVars & keybinds back to the snapshot taken on dialog open
+    /// (or last Apply), then close the Options dialog cleanly.
+    pub fn cancel_and_close(&mut self, cvars: &mut CVarRegistry) {
+        if let Some(snap) = self.snapshot.take() {
+            let cur_hd = cvars.get_bool("cl_hd_models");
+            for (k, v) in snap.cvars {
+                cvars.set(&k, v);
+            }
+            if cur_hd != snap.hd_models {
+                self.hd_models_changed = true;
+            }
+            cvars.unbind_all();
+            for (k, cmd) in snap.binds {
+                cvars.bind(&k, &cmd);
+            }
+        }
+        self.open = false;
+        self.was_open = false;
+        self.advanced_open = false;
+        self.content_dialog_open = false;
+        self.rebinding_cmd = None;
+        self.rebind_arm_frame = false;
+    }
+
     pub fn show(
         &mut self,
         ctx: &egui::Context,
@@ -273,17 +570,16 @@ impl OptionsUi {
         o: &OptionsRenderCtx<'_>,
     ) {
         if !self.open {
+            self.was_open = false;
             self.rebinding_cmd = None;
+            self.rebind_arm_frame = false;
             return;
         }
-        if !self.video_inited {
-            self.video_inited = true;
-            self.windowed = true;
-            self.widescreen_fov = true;
-            self.vsync = true;
-            self.use_shaders = true;
-            self.auto_aim = true;
-            self.mic_boost = true;
+        let screen = ctx.content_rect();
+        if !self.was_open {
+            self.was_open = true;
+            self.sync_from_cvars(cvars, screen);
+            self.snapshot = Some(self.capture_snapshot(cvars));
         }
 
         if let Some(v) = o.vfs {
@@ -304,7 +600,6 @@ impl OptionsUi {
 
         self.handle_rebind_input(ctx, cvars);
 
-        let screen = ctx.content_rect();
         let s = (screen.height() / 720.0).max(1.0);
         let screen_h = screen.height().round().max(480.0) as u32;
         let tc = TrackerCtx {
@@ -322,12 +617,18 @@ impl OptionsUi {
         let max_x = (screen.right() - dlg_w).max(screen.left());
         let max_y = (screen.bottom() - dlg_h).max(screen.top());
         let dlg_min = Pos2::new(
-            (default_x + self.drag_offset.x).clamp(screen.left(), max_x).round(),
-            (default_y + self.drag_offset.y).clamp(screen.top(), max_y).round(),
+            (default_x + self.drag_offset.x)
+                .clamp(screen.left(), max_x)
+                .round(),
+            (default_y + self.drag_offset.y)
+                .clamp(screen.top(), max_y)
+                .round(),
         );
         let dlg_rect = Rect::from_min_size(dlg_min, Vec2::new(dlg_w, dlg_h));
 
-        let mut close_now = false;
+        let mut close_cancel = false;
+        let mut close_ok = false;
+        let mut do_apply = false;
         let title = loc_or(o.loc, "#GameUI_Options", "Options");
 
         egui::Area::new(egui::Id::unique("cs16_vgui_options"))
@@ -388,7 +689,7 @@ impl OptionsUi {
                     Vec2::splat((18.0 * s).round()),
                 );
                 if draw_tracker_close_button(ui, runtime, &tc, "opt_close", close_rect) {
-                    close_now = true;
+                    close_cancel = true;
                 }
 
                 // `PropertySheet`: `(5, 55, 512, 352) * s`
@@ -403,13 +704,22 @@ impl OptionsUi {
                 // Exact tab strip order measured on original CS 1.6:
                 // Multiplayer | Audio | Video | Aim | Keyboard | Voice | Content
                 let tab_specs = [
-                    (OptionsTab::Multiplayer, loc_or(o.loc, "#GameUI_Multiplayer", "Multiplayer")),
+                    (
+                        OptionsTab::Multiplayer,
+                        loc_or(o.loc, "#GameUI_Multiplayer", "Multiplayer"),
+                    ),
                     (OptionsTab::Audio, loc_or(o.loc, "#GameUI_Audio", "Audio")),
                     (OptionsTab::Video, loc_or(o.loc, "#GameUI_Video", "Video")),
                     (OptionsTab::Mouse, loc_or(o.loc, "#GameUI_Mouse", "Aim")),
-                    (OptionsTab::Keyboard, loc_or(o.loc, "#GameUI_Keyboard", "Keyboard")),
+                    (
+                        OptionsTab::Keyboard,
+                        loc_or(o.loc, "#GameUI_Keyboard", "Keyboard"),
+                    ),
                     (OptionsTab::Voice, loc_or(o.loc, "#GameUI_Voice", "Voice")),
-                    (OptionsTab::Lock, loc_or(o.loc, "#GameUI_Content", "Content")),
+                    (
+                        OptionsTab::Lock,
+                        loc_or(o.loc, "#GameUI_Content", "Content"),
+                    ),
                 ];
                 let mut tx = dlg_min.x + (5.0 * s).round();
                 let fonts = runtime.tracker_scheme.fonts.clone();
@@ -419,11 +729,18 @@ impl OptionsUi {
                 for (tab_val, label) in &tab_specs {
                     let tw = runtime
                         .font_atlas
-                        .measure_text_with_scale(ctx, o.vfs, &fonts, "tracker", "Default", screen_h, label, s)
+                        .measure_text_with_scale(
+                            ctx, o.vfs, &fonts, "tracker", "Default", screen_h, label, s,
+                        )
                         .x;
                     let tab_w = (tw + tab_pad_w).round().max(min_tab_w);
                     let active = self.tab == *tab_val;
-                    let top_y = dlg_min.y + if active { (29.0 * s).round() } else { (31.0 * s).round() };
+                    let top_y = dlg_min.y
+                        + if active {
+                            (29.0 * s).round()
+                        } else {
+                            (31.0 * s).round()
+                        };
                     let tab_rect = Rect::from_min_max(
                         Pos2::new(tx, top_y),
                         Pos2::new(tx + tab_w, sheet_rect.top()),
@@ -435,17 +752,26 @@ impl OptionsUi {
                     let tp = ui.painter();
                     tp.rect_filled(tab_rect, CornerRadius::ZERO, tc.palette.control_bg);
                     tp.rect_filled(
-                        Rect::from_min_max(tab_rect.min, Pos2::new(tab_rect.right(), tab_rect.top() + 1.0)),
+                        Rect::from_min_max(
+                            tab_rect.min,
+                            Pos2::new(tab_rect.right(), tab_rect.top() + 1.0),
+                        ),
                         0.0,
                         tc.palette.border_bright,
                     );
                     tp.rect_filled(
-                        Rect::from_min_max(tab_rect.min, Pos2::new(tab_rect.left() + 1.0, tab_rect.bottom())),
+                        Rect::from_min_max(
+                            tab_rect.min,
+                            Pos2::new(tab_rect.left() + 1.0, tab_rect.bottom()),
+                        ),
                         0.0,
                         tc.palette.border_bright,
                     );
                     tp.rect_filled(
-                        Rect::from_min_max(Pos2::new(tab_rect.right() - 1.0, tab_rect.top()), tab_rect.max),
+                        Rect::from_min_max(
+                            Pos2::new(tab_rect.right() - 1.0, tab_rect.top()),
+                            tab_rect.max,
+                        ),
                         0.0,
                         tc.palette.border_dark,
                     );
@@ -467,7 +793,10 @@ impl OptionsUi {
                     };
                     let inset_x = (8.0 * s).round();
                     let lbl_rect = Rect::from_min_max(
-                        Pos2::new(tab_rect.left() + inset_x, tab_rect.top() + (1.0 * s).round()),
+                        Pos2::new(
+                            tab_rect.left() + inset_x,
+                            tab_rect.top() + (1.0 * s).round(),
+                        ),
                         Pos2::new(tab_rect.right() - (2.0 * s).round(), tab_rect.bottom()),
                     );
                     paint_tracker_label_rect(
@@ -513,33 +842,63 @@ impl OptionsUi {
                 let cancel_rect = dlg_subrect(dlg_min, s, 357.0, 411.0, 72.0, 24.0);
                 let apply_rect = dlg_subrect(dlg_min, s, 437.0, 411.0, 72.0, 24.0);
                 if draw_tracker_button_rect(
-                    ui, runtime, &tc, "opt_ok", ok_rect, &ok_lbl, TextAlignment::West, false, true,
+                    ui,
+                    runtime,
+                    &tc,
+                    "opt_ok",
+                    ok_rect,
+                    &ok_lbl,
+                    TextAlignment::West,
+                    false,
+                    true,
                 )
                 .clicked()
                 {
-                    self.save_requested = true;
-                    close_now = true;
+                    close_ok = true;
                 }
                 if draw_tracker_button_rect(
-                    ui, runtime, &tc, "opt_cancel", cancel_rect, &cancel_lbl, TextAlignment::West, false, true,
+                    ui,
+                    runtime,
+                    &tc,
+                    "opt_cancel",
+                    cancel_rect,
+                    &cancel_lbl,
+                    TextAlignment::West,
+                    false,
+                    true,
                 )
                 .clicked()
                 {
-                    close_now = true;
+                    close_cancel = true;
                 }
                 if draw_tracker_button_rect(
-                    ui, runtime, &tc, "opt_apply", apply_rect, &apply_lbl, TextAlignment::West, false, true,
+                    ui,
+                    runtime,
+                    &tc,
+                    "opt_apply",
+                    apply_rect,
+                    &apply_lbl,
+                    TextAlignment::West,
+                    false,
+                    true,
                 )
                 .clicked()
                 {
-                    self.save_requested = true;
+                    do_apply = true;
                 }
             });
 
-        if close_now {
+        if close_ok {
+            self.apply_changes(cvars);
             self.open = false;
+            self.was_open = false;
             self.advanced_open = false;
             self.content_dialog_open = false;
+            self.snapshot = None;
+        } else if close_cancel {
+            self.cancel_and_close(cvars);
+        } else if do_apply {
+            self.apply_changes(cvars);
         }
 
         if self.advanced_open {
@@ -554,17 +913,47 @@ impl OptionsUi {
         let Some(target_cmd) = self.rebinding_cmd.clone() else {
             return;
         };
+        if self.rebind_arm_frame {
+            self.rebind_arm_frame = false;
+            return;
+        }
         let captured = ctx.input(|i| {
             for ev in &i.events {
-                if let egui::Event::Key {
-                    key, pressed: true, ..
-                } = ev
-                {
-                    if *key == egui::Key::Escape {
-                        return Some(None);
+                match ev {
+                    egui::Event::Key {
+                        key, pressed: true, ..
+                    } => {
+                        if *key == egui::Key::Escape {
+                            return Some(None);
+                        }
+                        return Some(Some(egui_key_to_goldsrc(*key)));
                     }
-                    return Some(Some(egui_key_to_goldsrc(*key)));
+                    egui::Event::PointerButton {
+                        button,
+                        pressed: true,
+                        ..
+                    } => {
+                        return Some(Some(egui_mouse_button_to_goldsrc(*button).to_string()));
+                    }
+                    egui::Event::MouseWheel { delta, .. } if delta.y.abs() > 0.0 => {
+                        let key = if delta.y > 0.0 {
+                            "mwheelup"
+                        } else {
+                            "mwheeldown"
+                        };
+                        return Some(Some(key.to_string()));
+                    }
+                    _ => {}
                 }
+            }
+            if i.modifiers.ctrl {
+                return Some(Some("ctrl".to_string()));
+            }
+            if i.modifiers.shift {
+                return Some(Some("shift".to_string()));
+            }
+            if i.modifiers.alt {
+                return Some(Some("alt".to_string()));
             }
             None
         });
@@ -636,14 +1025,19 @@ impl OptionsUi {
             &spray_lbl,
             "Default",
             align,
-            if dull { tc.palette.dim_text } else { tc.palette.base_text },
+            if dull {
+                tc.palette.dim_text
+            } else {
+                tc.palette.base_text
+            },
             wrap,
             true,
         );
 
         // `LogoImage` (`40, 120, 64, 64` + 1px `InsetBorder` outside/inside)
         let logo_rect = rect_or("LogoImage", 40.0, 120.0, 64.0, 64.0);
-        ui.painter().rect_filled(logo_rect, CornerRadius::ZERO, Color32::BLACK);
+        ui.painter()
+            .rect_filled(logo_rect, CornerRadius::ZERO, Color32::BLACK);
         let tint = SPRAY_COLOR_PRESETS
             .get(self.spray_color_idx)
             .map_or(Color32::WHITE, |(_, c)| *c);
@@ -666,7 +1060,12 @@ impl OptionsUi {
         } else {
             self.spray_logos
                 .iter()
-                .map(|s| s.strip_suffix(".bmp").or_else(|| s.strip_suffix(".BMP")).unwrap_or(s).to_string())
+                .map(|s| {
+                    s.strip_suffix(".bmp")
+                        .or_else(|| s.strip_suffix(".BMP"))
+                        .unwrap_or(s)
+                        .to_string()
+                })
                 .collect()
         };
         let mut spray_idx = self
@@ -686,6 +1085,11 @@ impl OptionsUi {
         ) && let Some(chosen) = self.spray_logos.get(spray_idx)
         {
             self.selected_spray = chosen.clone();
+            let stem = chosen
+                .strip_suffix(".bmp")
+                .or_else(|| chosen.strip_suffix(".BMP"))
+                .unwrap_or(chosen);
+            cvars.set("cl_logofile", stem);
         }
 
         // `SpraypaintColor`
@@ -693,7 +1097,7 @@ impl OptionsUi {
             .iter()
             .map(|(n, _)| (*n).to_string())
             .collect();
-        draw_tracker_combo_box_rect(
+        if draw_tracker_combo_box_rect(
             ui,
             rt,
             tc,
@@ -702,7 +1106,10 @@ impl OptionsUi {
             &color_items,
             &mut self.spray_color_idx,
             true,
-        );
+        ) && let Some((name, _)) = SPRAY_COLOR_PRESETS.get(self.spray_color_idx)
+        {
+            cvars.set("cl_logocolor", *name);
+        }
 
         // `Label3`: `#GameUI_SpraypaintServerNote` (`wrap 1`, `dulltext 1`)
         let (note_lbl, _, _, align) = label_or("Label3", "#GameUI_SpraypaintServerNote");
@@ -823,7 +1230,24 @@ impl OptionsUi {
             &tr_lbl,
             true,
         ) {
-            cvars.set("cl_crosshair_translucent", if translucent { "1" } else { "0" });
+            cvars.set(
+                "cl_crosshair_translucent",
+                if translucent { "1" } else { "0" },
+            );
+        }
+
+        let mut dyn_ch = cvars.get_bool("cl_dynamiccrosshair");
+        if draw_tracker_check_button_rect(
+            ui,
+            rt,
+            tc,
+            "opt_ch_dynamic",
+            dlg_subrect(origin, tc.scale, 281.0, 214.0, 181.0, 24.0),
+            &mut dyn_ch,
+            "Dynamic crosshair",
+            true,
+        ) {
+            cvars.set("cl_dynamiccrosshair", if dyn_ch { "1" } else { "0" });
         }
     }
 
@@ -857,7 +1281,9 @@ impl OptionsUi {
             wrap,
             true,
         );
-        let mut vol = cvars.get_f32("volume").clamp(VOLUME_SLIDER_MIN, VOLUME_SLIDER_MAX);
+        let mut vol = cvars
+            .get_f32("volume")
+            .clamp(VOLUME_SLIDER_MIN, VOLUME_SLIDER_MAX);
         if draw_tracker_slider_rect(
             ui,
             rt,
@@ -902,6 +1328,34 @@ impl OptionsUi {
             cvars.set("mp3volume", format!("{mp3:.2}"));
         }
 
+        paint_tracker_label_rect(
+            ui.painter(),
+            rt,
+            tc,
+            dlg_subrect(origin, tc.scale, 40.0, 138.0, 180.0, 22.0),
+            "HEV Suit / Radio volume",
+            "Default",
+            TextAlignment::West,
+            tc.palette.base_text,
+            false,
+            true,
+        );
+        let mut suit = cvars.get_f32("suitvolume").clamp(0.0, 1.0);
+        if draw_tracker_slider_rect(
+            ui,
+            rt,
+            tc,
+            "opt_audio_suit",
+            dlg_subrect(origin, tc.scale, 40.0, 160.0, 420.0, 34.0),
+            &mut suit,
+            0.0,
+            1.0,
+            "",
+            "",
+        ) {
+            cvars.set("suitvolume", format!("{suit:.2}"));
+        }
+
         let (sq_lbl, _, wrap, align) = label_or("Label1", "#GameUI_SoundQuality");
         paint_tracker_label_rect(
             ui.painter(),
@@ -919,16 +1373,33 @@ impl OptionsUi {
             loc_or(o.loc, "#GameUI_High", "High"),
             loc_or(o.loc, "#GameUI_Low", "Low"),
         ];
-        draw_tracker_combo_box_rect(
+        let mut sq_idx = if cvars.get_bool("hisound") { 0 } else { 1 };
+        if draw_tracker_combo_box_rect(
             ui,
             rt,
             tc,
             "opt_audio_quality",
             rect_or("Sound Quality", 40.0, 226.0, 180.0, 24.0),
             &sq_items,
-            &mut self.sound_quality_idx,
+            &mut sq_idx,
             true,
-        );
+        ) {
+            cvars.set("hisound", if sq_idx == 0 { "1" } else { "0" });
+        }
+
+        let mut room_off = cvars.get_bool("room_off");
+        if draw_tracker_check_button_rect(
+            ui,
+            rt,
+            tc,
+            "opt_audio_room_off",
+            dlg_subrect(origin, tc.scale, 240.0, 226.0, 220.0, 24.0),
+            &mut room_off,
+            "Disable room DSP / reverb",
+            true,
+        ) {
+            cvars.set("room_off", if room_off { "1" } else { "0" });
+        }
 
         let (miles_lbl, _, _, align) = label_or(
             "MilesAudioLabel",
@@ -958,19 +1429,18 @@ impl OptionsUi {
         origin: Pos2,
     ) {
         let doc = rt.doc("resource/OptionsSubVideo.res").cloned();
-        let rect_or = |field: &str, fx: f32, fy: f32, fw: f32, fh: f32| -> Rect {
-            res_rect(doc.as_ref(), origin, tc.scale, field, fx, fy, fw, fh)
-        };
         let label_or = |field: &str, fb: &str| -> (String, bool, bool, TextAlignment) {
             res_label(doc.as_ref(), o.loc, field, fb)
         };
+        let s = tc.scale;
 
+        // 1. Renderer Backend (`Auto / Best`, `Vulkan`, `Direct3D 12`, `Metal`, `OpenGL`) + live GPU info
         let (r_lbl, _, wrap, align) = label_or("Label2", "#GameUI_Renderer");
         paint_tracker_label_rect(
             ui.painter(),
             rt,
             tc,
-            rect_or("Label2", 40.0, 16.0, 80.0, 24.0),
+            dlg_subrect(origin, s, 28.0, 14.0, 108.0, 24.0),
             &r_lbl,
             "Default",
             align,
@@ -978,27 +1448,47 @@ impl OptionsUi {
             wrap,
             true,
         );
-        let renderers = vec![
-            loc_or(o.loc, "#GameUI_OpenGL", "OpenGL"),
-            loc_or(o.loc, "#GameUI_Software", "Software"),
-        ];
+        let backend_items: Vec<String> = VIDEO_BACKENDS
+            .iter()
+            .map(|(_, l)| (*l).to_string())
+            .collect();
         draw_tracker_combo_box_rect(
             ui,
             rt,
             tc,
-            "opt_vid_renderer",
-            rect_or("Renderer", 140.0, 16.0, 180.0, 24.0),
-            &renderers,
-            &mut self.renderer_idx,
+            "opt_vid_backend",
+            dlg_subrect(origin, s, 140.0, 14.0, 152.0, 24.0),
+            &backend_items,
+            &mut self.backend_idx,
             true,
         );
+        if !self.gpu_adapter.is_empty() {
+            let gpu_line = if self.gpu_backend.is_empty() {
+                self.gpu_adapter.clone()
+            } else {
+                format!("{} ({})", self.gpu_adapter, self.gpu_backend)
+            };
+            paint_tracker_label_rect(
+                ui.painter(),
+                rt,
+                tc,
+                dlg_subrect(origin, s, 298.0, 14.0, 206.0, 24.0),
+                &gpu_line,
+                "DefaultSmall",
+                TextAlignment::West,
+                tc.palette.dim_text,
+                false,
+                true,
+            );
+        }
 
+        // 2. Resolution (live physical pixels on Apply/OK)
         let (res_lbl, _, wrap, align) = label_or("Label1", "#GameUI_Resolution");
         paint_tracker_label_rect(
             ui.painter(),
             rt,
             tc,
-            rect_or("Label1", 40.0, 50.0, 80.0, 24.0),
+            dlg_subrect(origin, s, 28.0, 44.0, 108.0, 24.0),
             &res_lbl,
             "Default",
             align,
@@ -1006,33 +1496,38 @@ impl OptionsUi {
             wrap,
             true,
         );
-        let cur_sz = format!(
-            "{} x {}",
-            tc.ctx.content_rect().width().round() as u32,
-            tc.ctx.content_rect().height().round() as u32
-        );
-        let mut res_items: Vec<String> = RESOLUTIONS.iter().map(|s| (*s).to_string()).collect();
-        if !res_items.contains(&cur_sz) {
-            res_items.push(cur_sz.clone());
+        let mut res_items: Vec<String> = RESOLUTIONS
+            .iter()
+            .map(|(_, _, l)| (*l).to_string())
+            .collect();
+        let cur_sel = format!("{} x {}", self.selected_res_w, self.selected_res_h);
+        if !res_items.contains(&cur_sel) {
+            res_items.push(cur_sel.clone());
         }
-        let mut res_idx = res_items.iter().position(|r| r == &cur_sz).unwrap_or(4);
-        draw_tracker_combo_box_rect(
+        let mut res_idx = res_items.iter().position(|r| r == &cur_sel).unwrap_or(3);
+        if draw_tracker_combo_box_rect(
             ui,
             rt,
             tc,
             "opt_vid_res",
-            rect_or("Resolution", 140.0, 50.0, 180.0, 24.0),
+            dlg_subrect(origin, s, 140.0, 44.0, 152.0, 24.0),
             &res_items,
             &mut res_idx,
             true,
-        );
+        ) && let Some(chosen) = res_items.get(res_idx)
+            && let Some((w, h)) = parse_resolution_label(chosen)
+        {
+            self.selected_res_w = w;
+            self.selected_res_h = h;
+        }
 
+        // 3. Aspect Ratio (`Normal 4:3` / `Widescreen 16:9` / `16:10` / `4:3 Bars`)
         let (dm_lbl, _, wrap, align) = label_or("Label4", "#GameUI_DisplayMode");
         paint_tracker_label_rect(
             ui.painter(),
             rt,
             tc,
-            rect_or("Label4", 40.0, 84.0, 80.0, 24.0),
+            dlg_subrect(origin, s, 28.0, 74.0, 108.0, 24.0),
             &dm_lbl,
             "Default",
             align,
@@ -1040,95 +1535,153 @@ impl OptionsUi {
             wrap,
             true,
         );
-        let aspect_items = vec![
-            loc_or(o.loc, "#GameUI_AspectNormal", "Normal"),
-            loc_or(o.loc, "#GameUI_AspectWide", "Widescreen"),
-            "Normal (4:3 Bars)".to_string(),
-        ];
-        let aspect_vals = ["4:3_stretch", "widescreen", "4:3_bars"];
+        let aspect_items: Vec<String> =
+            ASPECT_MODES.iter().map(|(_, l)| (*l).to_string()).collect();
         let cur_aspect = cvars.get_str("vid_aspect_mode").to_string();
-        let mut aspect_idx = aspect_vals.iter().position(|&v| v == cur_aspect).unwrap_or(1);
+        let mut aspect_idx = ASPECT_MODES
+            .iter()
+            .position(|(v, _)| v.eq_ignore_ascii_case(&cur_aspect))
+            .unwrap_or(1);
         if draw_tracker_combo_box_rect(
             ui,
             rt,
             tc,
             "opt_vid_aspect",
-            rect_or("AspectRatio", 140.0, 84.0, 180.0, 24.0),
+            dlg_subrect(origin, s, 140.0, 74.0, 152.0, 24.0),
             &aspect_items,
             &mut aspect_idx,
             true,
         ) {
-            cvars.set("vid_aspect_mode", aspect_vals[aspect_idx]);
+            cvars.set("vid_aspect_mode", ASPECT_MODES[aspect_idx].0);
         }
 
+        // 4. Texture Filter Style (`OpenGL 1.6 Trilinear` / `OpenGL Bilinear` / `Software Retro Nearest`)
+        paint_tracker_label_rect(
+            ui.painter(),
+            rt,
+            tc,
+            dlg_subrect(origin, s, 28.0, 104.0, 108.0, 24.0),
+            "Texture Style",
+            "Default",
+            TextAlignment::West,
+            tc.palette.base_text,
+            false,
+            true,
+        );
+        let tex_items: Vec<String> = TEXTURE_STYLES
+            .iter()
+            .map(|(_, _, l)| (*l).to_string())
+            .collect();
+        self.texture_style_idx = texture_style_idx_from_cvars(cvars);
+        if draw_tracker_combo_box_rect(
+            ui,
+            rt,
+            tc,
+            "opt_vid_texstyle",
+            dlg_subrect(origin, s, 140.0, 104.0, 180.0, 24.0),
+            &tex_items,
+            &mut self.texture_style_idx,
+            true,
+        ) {
+            let (mode, sw, _) = TEXTURE_STYLES[self.texture_style_idx];
+            cvars.set("gl_texturemode", mode);
+            cvars.set("r_software_mode", sw);
+        }
+
+        // 5. Video checkboxes (2 crisp columns, every checkbox wired live to CVars)
         let (win_lbl, _, _, _) = label_or("Windowed", "#GameUI_Windowed");
         draw_tracker_check_button_rect(
             ui,
             rt,
             tc,
             "opt_vid_win",
-            rect_or("Windowed", 140.0, 116.0, 200.0, 24.0),
+            dlg_subrect(origin, s, 140.0, 134.0, 165.0, 22.0),
             &mut self.windowed,
             &win_lbl,
             true,
         );
+
         let (wfov_lbl, _, _, _) = label_or("WidescreenFOV", "#GameUI_WidescreenFOV");
-        draw_tracker_check_button_rect(
-            ui,
-            rt,
-            tc,
-            "opt_vid_wfov",
-            rect_or("WidescreenFOV", 140.0, 140.0, 280.0, 24.0),
-            &mut self.widescreen_fov,
-            &wfov_lbl,
-            true,
-        );
-        let (vs_lbl, _, _, _) = label_or("VSync", "#GameUI_VSync");
-        draw_tracker_check_button_rect(
-            ui,
-            rt,
-            tc,
-            "opt_vid_vsync",
-            rect_or("VSync", 140.0, 164.0, 280.0, 24.0),
-            &mut self.vsync,
-            &vs_lbl,
-            true,
-        );
-        let (tf_lbl, _, _, _) = label_or("TextureFiltering", "#GameUI_TextureFiltering");
-        let mut tex_filter = !cvars.get_str("gl_texturemode").eq_ignore_ascii_case("GL_NEAREST");
+        let mut wfov = cvars.get_bool("gl_widescreen_yfov");
         if draw_tracker_check_button_rect(
             ui,
             rt,
             tc,
-            "opt_vid_texfilter",
-            rect_or("TextureFiltering", 140.0, 188.0, 280.0, 24.0),
-            &mut tex_filter,
-            &tf_lbl,
+            "opt_vid_wfov",
+            dlg_subrect(origin, s, 140.0, 158.0, 165.0, 22.0),
+            &mut wfov,
+            &wfov_lbl,
             true,
         ) {
-            cvars.set(
-                "gl_texturemode",
-                if tex_filter { "GL_LINEAR_MIPMAP_LINEAR" } else { "GL_NEAREST" },
-            );
+            cvars.set("gl_widescreen_yfov", if wfov { "1" } else { "0" });
         }
+
+        let (vs_lbl, _, _, _) = label_or("VSync", "#GameUI_VSync");
+        let mut vsync = cvars.get_bool("gl_vsync");
+        if draw_tracker_check_button_rect(
+            ui,
+            rt,
+            tc,
+            "opt_vid_vsync",
+            dlg_subrect(origin, s, 140.0, 182.0, 165.0, 22.0),
+            &mut vsync,
+            &vs_lbl,
+            true,
+        ) {
+            cvars.set("gl_vsync", if vsync { "1" } else { "0" });
+        }
+
+        ensure_lowlatency_cvar(cvars);
+        let mut lowlat = cvars.get_bool(LOW_LATENCY_CVAR);
+        if draw_tracker_check_button_rect(
+            ui,
+            rt,
+            tc,
+            "opt_vid_lowlat",
+            dlg_subrect(origin, s, 312.0, 134.0, 185.0, 22.0),
+            &mut lowlat,
+            "Low video latency",
+            true,
+        ) {
+            cvars.set(LOW_LATENCY_CVAR, if lowlat { "1" } else { "0" });
+        }
+
         let (sh_lbl, _, _, _) = label_or("UseShaders", "#GameUI_UseShaders");
-        draw_tracker_check_button_rect(
+        let mut shaders = cvars.get_bool("gl_use_shaders");
+        if draw_tracker_check_button_rect(
             ui,
             rt,
             tc,
             "opt_vid_shaders",
-            rect_or("UseShaders", 140.0, 212.0, 280.0, 24.0),
-            &mut self.use_shaders,
+            dlg_subrect(origin, s, 312.0, 158.0, 185.0, 22.0),
+            &mut shaders,
             &sh_lbl,
             true,
-        );
+        ) {
+            cvars.set("gl_use_shaders", if shaders { "1" } else { "0" });
+        }
+
+        let mut hd_models = cvars.get_bool("cl_hd_models");
+        if draw_tracker_check_button_rect(
+            ui,
+            rt,
+            tc,
+            "opt_vid_hd_models",
+            dlg_subrect(origin, s, 312.0, 182.0, 185.0, 22.0),
+            &mut hd_models,
+            "Enable HD models",
+            true,
+        ) {
+            cvars.set("cl_hd_models", if hd_models { "1" } else { "0" });
+            self.hd_models_changed = true;
+        }
 
         let (br_lbl, _, wrap, align) = label_or("brightness label", "#GameUI_Brightness");
         paint_tracker_label_rect(
             ui.painter(),
             rt,
             tc,
-            rect_or("brightness label", 40.0, 242.0, 80.0, 24.0),
+            dlg_subrect(origin, s, 28.0, 218.0, 108.0, 24.0),
             &br_lbl,
             "Default",
             align,
@@ -1137,13 +1690,14 @@ impl OptionsUi {
             true,
         );
         let mut bright = cvars.get_f32("brightness").clamp(0.0, 2.0);
-        let (dark_s, light_s) = slider_edge_labels(doc.as_ref(), o.loc, "Brightness", "Dark", "Light");
+        let (dark_s, light_s) =
+            slider_edge_labels(doc.as_ref(), o.loc, "Brightness", "Dark", "Light");
         if draw_tracker_slider_rect(
             ui,
             rt,
             tc,
             "opt_vid_bright",
-            rect_or("Brightness", 140.0, 242.0, 300.0, 36.0),
+            dlg_subrect(origin, s, 140.0, 218.0, 300.0, 36.0),
             &mut bright,
             0.0,
             2.0,
@@ -1158,7 +1712,7 @@ impl OptionsUi {
             ui.painter(),
             rt,
             tc,
-            rect_or("Gamma label", 40.0, 283.0, 80.0, 24.0),
+            dlg_subrect(origin, s, 28.0, 260.0, 108.0, 24.0),
             &gm_lbl,
             "Default",
             align,
@@ -1166,14 +1720,16 @@ impl OptionsUi {
             wrap,
             true,
         );
-        let mut gamma = cvars.get_f32("gamma").clamp(GAMMA_SLIDER_MIN, GAMMA_SLIDER_MAX);
+        let mut gamma = cvars
+            .get_f32("gamma")
+            .clamp(GAMMA_SLIDER_MIN, GAMMA_SLIDER_MAX);
         let (low_s, high_s) = slider_edge_labels(doc.as_ref(), o.loc, "Gamma", "Low", "High");
         if draw_tracker_slider_rect(
             ui,
             rt,
             tc,
             "opt_vid_gamma",
-            rect_or("Gamma", 140.0, 283.0, 300.0, 36.0),
+            dlg_subrect(origin, s, 140.0, 260.0, 300.0, 36.0),
             &mut gamma,
             GAMMA_SLIDER_MIN,
             GAMMA_SLIDER_MAX,
@@ -1183,15 +1739,14 @@ impl OptionsUi {
             cvars.set("gamma", format!("{gamma:.2}"));
         }
 
-        let (note_lbl, _, _, align) = label_or("Label5", "#GameUI_VideoRestart");
         paint_tracker_label_rect(
             ui.painter(),
             rt,
             tc,
-            rect_or("Label5", 40.0, 315.0, 450.0, 48.0),
-            &note_lbl,
-            "Default",
-            align,
+            dlg_subrect(origin, s, 28.0, 304.0, 460.0, 40.0),
+            "Resolution, display mode, and GPU backend changes apply live on Apply / OK.",
+            "DefaultSmall",
+            TextAlignment::NorthWest,
             tc.palette.dim_text,
             true,
             true,
@@ -1273,16 +1828,19 @@ impl OptionsUi {
         );
 
         let (aa_lbl, _, _, _) = label_or("Auto-Aim", "#GameUI_AutoAim");
-        draw_tracker_check_button_rect(
+        let mut auto_aim = cvars.get_bool("sv_aim");
+        if draw_tracker_check_button_rect(
             ui,
             rt,
             tc,
             "opt_m_autoaim",
             rect_or("Auto-Aim", 30.0, 80.0, 160.0, 24.0),
-            &mut self.auto_aim,
+            &mut auto_aim,
             &aa_lbl,
             true,
-        );
+        ) {
+            cvars.set("sv_aim", if auto_aim { "1" } else { "0" });
+        }
         let (aa_desc, _, _, align) = label_or("AutoaimLabel", "#GameUI_AutoaimLabel");
         paint_tracker_label_rect(
             ui.painter(),
@@ -1405,6 +1963,56 @@ impl OptionsUi {
             cvars.set("sensitivity", format!("{clamped:.2}"));
             self.sens_last_val = clamped;
         }
+
+        paint_tracker_label_rect(
+            ui.painter(),
+            rt,
+            tc,
+            dlg_subrect(origin, tc.scale, 34.0, 266.0, 200.0, 22.0),
+            "Zoom sensitivity ratio",
+            "Default",
+            TextAlignment::West,
+            tc.palette.base_text,
+            false,
+            true,
+        );
+        let mut zsens = cvars.get_f32("zoom_sensitivity_ratio").clamp(0.20, 3.00);
+        if (zsens - self.zoom_sens_last_val).abs() > 1e-4 || self.zoom_sens_buf.is_empty() {
+            self.zoom_sens_last_val = zsens;
+            self.zoom_sens_buf = format!("{zsens:.2}");
+        }
+        if draw_tracker_slider_rect(
+            ui,
+            rt,
+            tc,
+            "opt_m_zsens",
+            dlg_subrect(origin, tc.scale, 34.0, 288.0, 272.0, 38.0),
+            &mut zsens,
+            0.20,
+            3.00,
+            "0.20",
+            "3.00",
+        ) {
+            cvars.set("zoom_sensitivity_ratio", format!("{zsens:.2}"));
+            self.zoom_sens_last_val = zsens;
+            self.zoom_sens_buf = format!("{zsens:.2}");
+        }
+        if draw_tracker_text_entry_rect(
+            ui,
+            rt,
+            tc,
+            "opt_m_zsens_val",
+            dlg_subrect(origin, tc.scale, 320.0, 288.0, 48.0, 24.0),
+            &mut self.zoom_sens_buf,
+            false,
+            true,
+            true,
+        ) && let Ok(v) = self.zoom_sens_buf.parse::<f32>()
+        {
+            let clamped = v.clamp(0.1, 5.0);
+            cvars.set("zoom_sensitivity_ratio", format!("{clamped:.2}"));
+            self.zoom_sens_last_val = clamped;
+        }
     }
 
     fn show_keyboard(
@@ -1476,6 +2084,7 @@ impl OptionsUi {
         ) && let Some(cmd) = row_cmds.get(dbl)
         {
             self.rebinding_cmd = Some(cmd.clone());
+            self.rebind_arm_frame = true;
         }
 
         let (def_lbl, _, _, def_align) = label_or("Defaults", "#GameUI_UseDefaults");
@@ -1514,6 +2123,7 @@ impl OptionsUi {
             && let Some(cmd) = row_cmds.get(idx)
         {
             self.rebinding_cmd = Some(cmd.clone());
+            self.rebind_arm_frame = true;
         }
 
         let (clr_lbl, _, _, clr_align) = label_or("ClearKeyButton", "#GameUI_ClearKey");
@@ -1572,16 +2182,19 @@ impl OptionsUi {
         }
 
         let (mb_lbl, _, _, _) = label_or("MicBoost", "#GameUI_BoostMicrophone");
-        draw_tracker_check_button_rect(
+        let mut mic_boost = cvars.get_bool("voice_forcemicrecord");
+        if draw_tracker_check_button_rect(
             ui,
             rt,
             tc,
             "opt_v_micboost",
             rect_or("MicBoost", 33.0, 66.0, 250.0, 28.0),
-            &mut self.mic_boost,
+            &mut mic_boost,
             &mb_lbl,
             true,
-        );
+        ) {
+            cvars.set("voice_forcemicrecord", if mic_boost { "1" } else { "0" });
+        }
 
         let (tx_lbl, _, wrap, align) = label_or("Microphonelabel", "#GameUI_VoiceTransmitVolume");
         paint_tracker_label_rect(
@@ -1727,16 +2340,19 @@ impl OptionsUi {
         }
 
         let (ad_lbl, _, _, _) = label_or("AddonsFolder", "#GameUI_AddonsFolder");
-        draw_tracker_check_button_rect(
+        let mut addons = cvars.get_bool("cl_allowdownload");
+        if draw_tracker_check_button_rect(
             ui,
             rt,
             tc,
             "opt_c_addons",
             rect_or("AddonsFolder", 40.0, 64.0, 280.0, 24.0),
-            &mut self.addons_folder,
+            &mut addons,
             &ad_lbl,
             true,
-        );
+        ) {
+            cvars.set("cl_allowdownload", if addons { "1" } else { "0" });
+        }
 
         let (cl_lbl, _, _, cl_align) = label_or("ContentLockButton", "#GameUI_ContentLock");
         if draw_tracker_button_rect(
@@ -1830,7 +2446,10 @@ impl OptionsUi {
                     p,
                     rt,
                     tc,
-                    Rect::from_min_size(dlg_min + Vec2::new(10.0 * s, 4.0 * s), Vec2::new(w - 40.0 * s, 22.0 * s)),
+                    Rect::from_min_size(
+                        dlg_min + Vec2::new(10.0 * s, 4.0 * s),
+                        Vec2::new(w - 40.0 * s, 22.0 * s),
+                    ),
                     &adv_title,
                     "DefaultBold",
                     TextAlignment::West,
@@ -1843,32 +2462,66 @@ impl OptionsUi {
                     close_adv = true;
                 }
 
-                let list_r = res_rect(doc.as_ref(), dlg_min, s, "PanelListPanel", 16.0, 56.0, 442.0, 274.0);
-                ui.painter().rect_filled(list_r, CornerRadius::ZERO, tc.palette.window_bg);
+                let list_r = res_rect(
+                    doc.as_ref(),
+                    dlg_min,
+                    s,
+                    "PanelListPanel",
+                    16.0,
+                    56.0,
+                    442.0,
+                    274.0,
+                );
+                ui.painter()
+                    .rect_filled(list_r, CornerRadius::ZERO, tc.palette.window_bg);
                 paint_tracker_bevel_rect(ui.painter(), list_r, false, tc.palette);
                 ui.scope_builder(egui::UiBuilder::new().max_rect(list_r.shrink(8.0)), |ui| {
-                    ScrollArea::vertical().id_salt("opt_adv_scr").show(ui, |ui| {
-                        if let Some(ref scr) = self.user_script {
-                            render_scr_options(ui, cvars, scr, o.loc);
-                        } else {
-                            cvar_checkbox(ui, cvars, "cl_righthand", "Right-handed weapon models");
-                            cvar_checkbox(ui, cvars, "hud_fastswitch", "Fast weapon switch");
-                            cvar_checkbox(ui, cvars, "hud_centerid", "Center player ID names");
-                            cvar_checkbox(ui, cvars, "cl_radartype", "Solid radar type");
-                        }
-                    });
+                    ScrollArea::vertical()
+                        .id_salt("opt_adv_scr")
+                        .show(ui, |ui| {
+                            if let Some(ref scr) = self.user_script {
+                                render_scr_options(ui, cvars, scr, o.loc);
+                            } else {
+                                cvar_checkbox(
+                                    ui,
+                                    cvars,
+                                    "cl_righthand",
+                                    "Right-handed weapon models",
+                                );
+                                cvar_checkbox(ui, cvars, "hud_fastswitch", "Fast weapon switch");
+                                cvar_checkbox(ui, cvars, "hud_centerid", "Center player ID names");
+                                cvar_checkbox(ui, cvars, "cl_radartype", "Solid radar type");
+                            }
+                        });
                 });
 
                 let ok_lbl = loc_or(o.loc, "#GameUI_OK", "OK");
                 let cancel_lbl = loc_or(o.loc, "#GameUI_Cancel", "Cancel");
                 let ok_r = res_rect(doc.as_ref(), dlg_min, s, "OK", 308.0, 338.0, 72.0, 24.0);
-                let cancel_r = res_rect(doc.as_ref(), dlg_min, s, "Cancel", 388.0, 338.0, 72.0, 24.0);
+                let cancel_r =
+                    res_rect(doc.as_ref(), dlg_min, s, "Cancel", 388.0, 338.0, 72.0, 24.0);
                 if draw_tracker_button_rect(
-                    ui, rt, tc, "opt_adv_ok", ok_r, &ok_lbl, TextAlignment::West, true, true,
+                    ui,
+                    rt,
+                    tc,
+                    "opt_adv_ok",
+                    ok_r,
+                    &ok_lbl,
+                    TextAlignment::West,
+                    true,
+                    true,
                 )
                 .clicked()
                     || draw_tracker_button_rect(
-                        ui, rt, tc, "opt_adv_cancel", cancel_r, &cancel_lbl, TextAlignment::West, false, true,
+                        ui,
+                        rt,
+                        tc,
+                        "opt_adv_cancel",
+                        cancel_r,
+                        &cancel_lbl,
+                        TextAlignment::West,
+                        false,
+                        true,
                     )
                     .clicked()
                 {
@@ -1914,7 +2567,10 @@ impl OptionsUi {
                     p,
                     rt,
                     tc,
-                    Rect::from_min_size(dlg_min + Vec2::new(10.0 * s, 4.0 * s), Vec2::new(w - 40.0 * s, 22.0 * s)),
+                    Rect::from_min_size(
+                        dlg_min + Vec2::new(10.0 * s, 4.0 * s),
+                        Vec2::new(w - 40.0 * s, 22.0 * s),
+                    ),
                     &title,
                     "DefaultBold",
                     TextAlignment::West,
@@ -1927,12 +2583,25 @@ impl OptionsUi {
                 } else {
                     "#GameUI_ContentStatusDisabled"
                 };
-                let status_txt = loc_or(o.loc, status_tok, "Enter a password to enable the content lock.");
+                let status_txt = loc_or(
+                    o.loc,
+                    status_tok,
+                    "Enter a password to enable the content lock.",
+                );
                 paint_tracker_label_rect(
                     ui.painter(),
                     rt,
                     tc,
-                    res_rect(doc.as_ref(), dlg_min, s, "ContentStatus", 30.0, 30.0, 280.0, 36.0),
+                    res_rect(
+                        doc.as_ref(),
+                        dlg_min,
+                        s,
+                        "ContentStatus",
+                        30.0,
+                        30.0,
+                        280.0,
+                        36.0,
+                    ),
                     &status_txt,
                     "Default",
                     TextAlignment::NorthWest,
@@ -1946,7 +2615,16 @@ impl OptionsUi {
                     ui.painter(),
                     rt,
                     tc,
-                    res_rect(doc.as_ref(), dlg_min, s, "PasswordPrompt", 32.0, 68.0, 280.0, 28.0),
+                    res_rect(
+                        doc.as_ref(),
+                        dlg_min,
+                        s,
+                        "PasswordPrompt",
+                        32.0,
+                        68.0,
+                        280.0,
+                        28.0,
+                    ),
                     &p1_lbl,
                     "Default",
                     TextAlignment::West,
@@ -1959,7 +2637,16 @@ impl OptionsUi {
                     rt,
                     tc,
                     "opt_cc_pw1",
-                    res_rect(doc.as_ref(), dlg_min, s, "Password", 32.0, 98.0, 166.0, 24.0),
+                    res_rect(
+                        doc.as_ref(),
+                        dlg_min,
+                        s,
+                        "Password",
+                        32.0,
+                        98.0,
+                        166.0,
+                        24.0,
+                    ),
                     &mut self.lock_password,
                     true,
                     false,
@@ -1970,7 +2657,16 @@ impl OptionsUi {
                     ui.painter(),
                     rt,
                     tc,
-                    res_rect(doc.as_ref(), dlg_min, s, "PasswordReentryPrompt", 32.0, 124.0, 280.0, 28.0),
+                    res_rect(
+                        doc.as_ref(),
+                        dlg_min,
+                        s,
+                        "PasswordReentryPrompt",
+                        32.0,
+                        124.0,
+                        280.0,
+                        28.0,
+                    ),
                     &p2_lbl,
                     "Default",
                     TextAlignment::West,
@@ -1983,7 +2679,16 @@ impl OptionsUi {
                     rt,
                     tc,
                     "opt_cc_pw2",
-                    res_rect(doc.as_ref(), dlg_min, s, "Password2", 32.0, 154.0, 166.0, 24.0),
+                    res_rect(
+                        doc.as_ref(),
+                        dlg_min,
+                        s,
+                        "Password2",
+                        32.0,
+                        154.0,
+                        166.0,
+                        24.0,
+                    ),
                     &mut self.content_pw2,
                     true,
                     false,
@@ -2046,7 +2751,10 @@ fn dlg_subrect(origin: Pos2, s: f32, x: f32, y: f32, w: f32, h: f32) -> Rect {
 
 fn doc_frame_size(doc: Option<&VguiResDocument>, fb_w: f32, fb_h: f32) -> (f32, f32) {
     if let Some(d) = doc
-        && let Some(root) = d.controls.iter().find(|c| matches!(c.kind, ControlKind::Frame))
+        && let Some(root) = d
+            .controls
+            .iter()
+            .find(|c| matches!(c.kind, ControlKind::Frame))
     {
         return (root.wide.raw_or(fb_w), root.tall.raw_or(fb_h));
     }
@@ -2068,8 +2776,16 @@ fn res_rect(
         (
             spec.xpos.resolve_pos(0.0, 512.0, 1.0),
             spec.ypos.resolve_pos(0.0, 352.0, 1.0),
-            if spec.wide_specified { spec.wide.resolve_size(0.0, 512.0, 1.0) } else { fw },
-            if spec.tall_specified { spec.tall.resolve_size(0.0, 352.0, 1.0) } else { fh },
+            if spec.wide_specified {
+                spec.wide.resolve_size(0.0, 512.0, 1.0)
+            } else {
+                fw
+            },
+            if spec.tall_specified {
+                spec.tall.resolve_size(0.0, 352.0, 1.0)
+            } else {
+                fh
+            },
         )
     } else {
         (fx, fy, fw, fh)
@@ -2084,7 +2800,11 @@ fn res_label(
     fallback_tok: &str,
 ) -> (String, bool, bool, TextAlignment) {
     if let Some(spec) = doc.and_then(|d| d.find(field)) {
-        let raw = if spec.label_text.is_empty() { fallback_tok } else { &spec.label_text };
+        let raw = if spec.label_text.is_empty() {
+            fallback_tok
+        } else {
+            &spec.label_text
+        };
         return (
             loc_or(loc, raw, raw),
             spec.dull_text,
@@ -2092,7 +2812,12 @@ fn res_label(
             spec.text_alignment,
         );
     }
-    (loc_or(loc, fallback_tok, fallback_tok), false, false, TextAlignment::West)
+    (
+        loc_or(loc, fallback_tok, fallback_tok),
+        false,
+        false,
+        TextAlignment::West,
+    )
 }
 
 fn slider_edge_labels(
@@ -2125,19 +2850,39 @@ fn paint_crosshair_preview(
     scale: f32,
 ) {
     let (cr, cg, cb) = parse_rgb(cvars.get_str("cl_crosshair_color"));
-    let ca = if cvars.get_bool("cl_crosshair_translucent") { 195 } else { 255 };
+    let ca = if cvars.get_bool("cl_crosshair_translucent") {
+        195
+    } else {
+        255
+    };
     let ch_col = Color32::from_rgba_unmultiplied(cr, cg, cb, ca);
-    let (len, gap) = match cvars.get_str("cl_crosshair_size").to_ascii_lowercase().as_str() {
+    let (len, gap) = match cvars
+        .get_str("cl_crosshair_size")
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "small" => (5.0 * scale, 3.0 * scale),
         "large" => (10.0 * scale, 5.0 * scale),
         _ => (7.5 * scale, 4.0 * scale),
     };
     let c = preview_rect.center();
     let st = Stroke::new((1.0 * scale).max(1.0), ch_col);
-    painter.line_segment([Pos2::new(c.x, c.y - gap - len), Pos2::new(c.x, c.y - gap)], st);
-    painter.line_segment([Pos2::new(c.x, c.y + gap), Pos2::new(c.x, c.y + gap + len)], st);
-    painter.line_segment([Pos2::new(c.x - gap - len, c.y), Pos2::new(c.x - gap, c.y)], st);
-    painter.line_segment([Pos2::new(c.x + gap, c.y), Pos2::new(c.x + gap + len, c.y)], st);
+    painter.line_segment(
+        [Pos2::new(c.x, c.y - gap - len), Pos2::new(c.x, c.y - gap)],
+        st,
+    );
+    painter.line_segment(
+        [Pos2::new(c.x, c.y + gap), Pos2::new(c.x, c.y + gap + len)],
+        st,
+    );
+    painter.line_segment(
+        [Pos2::new(c.x - gap - len, c.y), Pos2::new(c.x - gap, c.y)],
+        st,
+    );
+    painter.line_segment(
+        [Pos2::new(c.x + gap, c.y), Pos2::new(c.x + gap + len, c.y)],
+        st,
+    );
 }
 
 fn pretty_key_name(raw: &str) -> String {
@@ -2197,10 +2942,17 @@ pub fn render_scr_options(
             }
             ScrOptionKind::Number { min, max } => {
                 let mut val = cvars.get_f32(&opt.cvar);
-                let hi = if *max > *min { *max } else { (*min + 100.0).max(16000.0) };
+                let hi = if *max > *min {
+                    *max
+                } else {
+                    (*min + 100.0).max(16000.0)
+                };
                 ui.horizontal(|ui| {
                     ui.label(prompt);
-                    if ui.add(egui::DragValue::new(&mut val).range(*min..=hi)).changed() {
+                    if ui
+                        .add(egui::DragValue::new(&mut val).range(*min..=hi))
+                        .changed()
+                    {
                         cvars.set(&opt.cvar, format!("{val}"));
                     }
                 });
@@ -2237,6 +2989,16 @@ fn cvar_checkbox(ui: &mut egui::Ui, cvars: &mut CVarRegistry, name: &str, label:
     }
 }
 
+fn egui_mouse_button_to_goldsrc(button: egui::PointerButton) -> &'static str {
+    match button {
+        egui::PointerButton::Primary => "mouse1",
+        egui::PointerButton::Secondary => "mouse2",
+        egui::PointerButton::Middle => "mouse3",
+        egui::PointerButton::Extra1 => "mouse4",
+        egui::PointerButton::Extra2 => "mouse5",
+    }
+}
+
 fn egui_key_to_goldsrc(key: egui::Key) -> String {
     match key {
         egui::Key::Space => "space".into(),
@@ -2244,6 +3006,36 @@ fn egui_key_to_goldsrc(key: egui::Key) -> String {
         egui::Key::Enter => "enter".into(),
         egui::Key::Backspace => "backspace".into(),
         egui::Key::Backtick => "`".into(),
+        egui::Key::ArrowUp => "uparrow".into(),
+        egui::Key::ArrowDown => "downarrow".into(),
+        egui::Key::ArrowLeft => "leftarrow".into(),
+        egui::Key::ArrowRight => "rightarrow".into(),
+        egui::Key::Insert => "ins".into(),
+        egui::Key::Delete => "del".into(),
+        egui::Key::Home => "home".into(),
+        egui::Key::End => "end".into(),
+        egui::Key::PageUp => "pgup".into(),
+        egui::Key::PageDown => "pgdn".into(),
+        egui::Key::Comma => ",".into(),
+        egui::Key::Period => ".".into(),
+        egui::Key::Minus => "-".into(),
+        egui::Key::Equals => "=".into(),
+        egui::Key::OpenBracket => "[".into(),
+        egui::Key::CloseBracket => "]".into(),
+        egui::Key::Semicolon => ";".into(),
+        egui::Key::Quote => "'".into(),
+        egui::Key::Slash => "/".into(),
+        egui::Key::Backslash => "\\".into(),
+        egui::Key::Num0 => "0".into(),
+        egui::Key::Num1 => "1".into(),
+        egui::Key::Num2 => "2".into(),
+        egui::Key::Num3 => "3".into(),
+        egui::Key::Num4 => "4".into(),
+        egui::Key::Num5 => "5".into(),
+        egui::Key::Num6 => "6".into(),
+        egui::Key::Num7 => "7".into(),
+        egui::Key::Num8 => "8".into(),
+        egui::Key::Num9 => "9".into(),
         other => format!("{other:?}").to_ascii_lowercase(),
     }
 }
@@ -2328,5 +3120,124 @@ mod tests {
         assert!(cvars.set("gl_lowlatency", "0"));
         assert!(!cvars.get_bool("gl_lowlatency"));
         assert!(cvars.get_bool("m_customaccel"));
+    }
+
+    #[test]
+    fn options_cancel_reverts_cvars_and_binds_while_apply_emits_video_request() {
+        let mut opts = OptionsUi {
+            open: true,
+            ..Default::default()
+        };
+        let mut rt = VguiRuntime::new();
+        let mut cvars = CVarRegistry::new_with_defaults();
+        cvars.set("volume", "0.80");
+        cvars.set("sensitivity", "3.00");
+        cvars.unbind("k");
+        cvars.bind("v", "+voicerecord");
+
+        // Opening Options captures snapshot.
+        assert!(run_options_frame(&mut opts, &mut cvars, &mut rt) > 0);
+        cvars.set("volume", "0.20");
+        cvars.set("hisound", "0");
+        cvars.set("room_off", "1");
+        cvars.set("sv_aim", "1");
+        cvars.set("zoom_sensitivity_ratio", "0.85");
+        cvars.set("voice_forcemicrecord", "0");
+        cvars.set("cl_allowdownload", "0");
+        cvars.set("gl_texturemode", "GL_NEAREST");
+        cvars.set("r_software_mode", "1");
+        cvars.unbind("v");
+        cvars.bind("mouse4", "+voicerecord");
+
+        // Cancel reverts EVERY CVar & bind cleanly.
+        opts.cancel_and_close(&mut cvars);
+        assert!(!opts.open);
+        assert!((cvars.get_f32("volume") - 0.80).abs() < 1e-3);
+        assert!(cvars.get_bool("hisound"));
+        assert!(!cvars.get_bool("room_off"));
+        assert!(!cvars.get_bool("sv_aim"));
+        assert!(cvars.get_bool("cl_allowdownload"));
+        assert_eq!(cvars.bind_for_key("v"), Some("+voicerecord"));
+        assert_eq!(cvars.bind_for_key("mouse4"), None);
+
+        // Re-open, change Video resolution/fullscreen/backend, and Apply.
+        opts.open = true;
+        opts.tab = OptionsTab::Video;
+        opts.set_gpu_info("TestGPU", "Vulkan");
+        assert!(run_options_frame(&mut opts, &mut cvars, &mut rt) > 0);
+        opts.selected_res_w = 1920;
+        opts.selected_res_h = 1080;
+        opts.windowed = false;
+        opts.backend_idx = 1; // Vulkan
+        opts.apply_changes(&mut cvars);
+
+        assert!(opts.save_requested);
+        assert_eq!(
+            opts.video_apply_requested,
+            Some(VideoApplyRequest {
+                width: 1920,
+                height: 1080,
+                fullscreen: true,
+                backend: "vulkan".into(),
+            })
+        );
+        assert_eq!(cvars.get_i32("width"), 1920);
+        assert_eq!(cvars.get_i32("height"), 1080);
+        assert!(cvars.get_bool("fullscreen"));
+        assert_eq!(cvars.get_str("r_refdll"), "vulkan");
+    }
+
+    #[test]
+    fn keyboard_rebind_captures_mouse_buttons_and_wheel_after_arm_frame() {
+        let mut opts = OptionsUi {
+            open: true,
+            tab: OptionsTab::Keyboard,
+            rebinding_cmd: Some("+jump".into()),
+            rebind_arm_frame: true,
+            ..Default::default()
+        };
+        let mut cvars = CVarRegistry::new_with_defaults();
+        let ctx = egui::Context::default();
+
+        // Arm frame ignores the originating mouse1 click.
+        let mut raw_arm = egui::RawInput::default();
+        raw_arm.events.push(egui::Event::PointerButton {
+            pos: Pos2::ZERO,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let mut out = ctx.run_ui(raw_arm, |ui| opts.handle_rebind_input(ui.ctx(), &mut cvars));
+        out.textures_delta.clear();
+        assert_eq!(opts.rebinding_cmd.as_deref(), Some("+jump"));
+
+        // Next frame captures mouse wheel down -> `mwheeldown`.
+        let mut raw_wheel = egui::RawInput::default();
+        raw_wheel.events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: Vec2::new(0.0, -1.0),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let mut out = ctx.run_ui(raw_wheel, |ui| {
+            opts.handle_rebind_input(ui.ctx(), &mut cvars)
+        });
+        out.textures_delta.clear();
+        assert_eq!(opts.rebinding_cmd, None);
+        assert_eq!(cvars.key_for_command("+jump"), Some("mwheeldown"));
+
+        // Capture mouse side button `mouse4`.
+        opts.rebinding_cmd = Some("+voicerecord".into());
+        let mut raw_btn = egui::RawInput::default();
+        raw_btn.events.push(egui::Event::PointerButton {
+            pos: Pos2::ZERO,
+            button: egui::PointerButton::Extra1,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let mut out = ctx.run_ui(raw_btn, |ui| opts.handle_rebind_input(ui.ctx(), &mut cvars));
+        out.textures_delta.clear();
+        assert_eq!(cvars.key_for_command("+voicerecord"), Some("mouse4"));
     }
 }

@@ -10,12 +10,13 @@ use egui::{Color32, CornerRadius, Pos2, Rect, Sense, TextureHandle, Vec2};
 
 use crate::ui::options::render_scr_options;
 use crate::ui::screens::{ServerBrowserRenderCtx, ServerBrowserUi};
+use crate::ui::vgui_theme::VguiPalette;
 use crate::ui::vgui2::{
     TrackerCtx, VguiRuntime, VguiTextDrawOpts, draw_tracker_button_rect,
     draw_tracker_check_button_rect, draw_tracker_close_button, draw_tracker_combo_box_rect,
-    paint_tracker_bevel_rect, paint_tracker_label_rect,
+    draw_tracker_radio_button_rect, draw_tracker_text_entry_rect, paint_tracker_bevel_rect,
+    paint_tracker_label_rect,
 };
-use crate::ui::vgui_theme::VguiPalette;
 
 /// Render context for [`MainMenuUi`].
 pub struct MainMenuRenderCtx<'a> {
@@ -33,6 +34,40 @@ enum NewGameTab {
     #[default]
     Server,
     Game,
+    Bots,
+}
+
+const BOT_DIFFICULTIES: [(i32, &str); 4] = [(0, "Easy"), (1, "Normal"), (2, "Hard"), (3, "Expert")];
+
+const BOT_JOIN_TEAMS: [(&str, &str); 3] = [
+    ("any", "Any"),
+    ("ct", "Counter-Terrorists"),
+    ("t", "Terrorists"),
+];
+
+const BOT_CHATTER_MODES: [(&str, &str); 4] = [
+    ("normal", "Normal"),
+    ("minimal", "Minimal"),
+    ("radio", "Radio"),
+    ("off", "Off"),
+];
+
+/// Pick a real mounted classic `de_*` / `cs_*` map for `< Random Map >`, falling back to `de_dust2`.
+pub fn pick_random_classic_map(available_maps: &[String], seed: u64) -> String {
+    let classics: Vec<&String> = available_maps
+        .iter()
+        .filter(|m| {
+            let l = m.to_ascii_lowercase();
+            l.starts_with("de_") || l.starts_with("cs_")
+        })
+        .collect();
+    if !classics.is_empty() {
+        return classics[(seed as usize) % classics.len()].clone();
+    }
+    if !available_maps.is_empty() {
+        return available_maps[(seed as usize) % available_maps.len()].clone();
+    }
+    "de_dust2".to_string()
 }
 
 pub struct MainMenuUi {
@@ -44,6 +79,14 @@ pub struct MainMenuUi {
     new_game_drag_offset: Vec2,
     new_game_map_idx: usize,
     steam_networking: bool,
+    new_game_was_open: bool,
+    include_bots: bool,
+    bot_quota_buf: String,
+    bot_difficulty: i32,
+    bot_join_team_idx: usize,
+    bot_chatter_idx: usize,
+    bot_join_after_player: bool,
+    random_map_counter: u64,
     pub selected_map: String,
     pub game_menu: Vec<GameMenuEntry>,
     pub settings_script: Option<SettingsScript>,
@@ -66,6 +109,14 @@ impl Default for MainMenuUi {
             new_game_drag_offset: Vec2::ZERO,
             new_game_map_idx: 0,
             steam_networking: true,
+            new_game_was_open: false,
+            include_bots: true,
+            bot_quota_buf: "9".to_string(),
+            bot_difficulty: 1,
+            bot_join_team_idx: 0,
+            bot_chatter_idx: 0,
+            bot_join_after_player: true,
+            random_map_counter: 0,
             selected_map: "de_dust2".to_string(),
             game_menu: Vec::new(),
             settings_script: None,
@@ -169,7 +220,11 @@ impl MainMenuUi {
         // `MenuItemHeight` (48) * s, last baseline is 63 * s above bottom, logo 16 * s above
         // bottom, and `GameMenuInset` (115 * s) is scaled by 0.7 when `screen_w <= 1024`.
         let s_menu = (screen.height() / 720.0).max(1.0);
-        let base_x: f32 = if screen.width() > 1024.0 { 115.0 } else { (115.0f32 * 0.7).round() };
+        let base_x: f32 = if screen.width() > 1024.0 {
+            115.0
+        } else {
+            (115.0f32 * 0.7).round()
+        };
         let menu_x = screen.min.x + base_x * s_menu;
         let item_pitch = 48.0 * s_menu;
         let loc_ref = m.loc.or(self.loc.as_ref());
@@ -195,10 +250,7 @@ impl MainMenuUi {
         }
         if !in_game && let Some(logo) = &self.logo {
             let icon_sz = (28.0 * s_menu).round();
-            let min = Pos2::new(
-                menu_x - 5.0 * s_menu,
-                screen.max.y - (14.0 + 28.0) * s_menu,
-            );
+            let min = Pos2::new(menu_x - 5.0 * s_menu, screen.max.y - (14.0 + 28.0) * s_menu);
             let icon_rect = Rect::from_min_size(min, Vec2::splat(icon_sz));
             let uv_full = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
             let menu_gold = Color32::from_rgb(236, 227, 20);
@@ -215,10 +267,8 @@ impl MainMenuUi {
                 icon_rect.right() + (8.0 * s_menu).round(),
                 icon_rect.top() + (1.0 * s_menu).round(),
             );
-            let word_rect = Rect::from_min_size(
-                word_pos,
-                Vec2::new((220.0 * s_menu).round(), icon_sz),
-            );
+            let word_rect =
+                Rect::from_min_size(word_pos, Vec2::new((220.0 * s_menu).round(), icon_sz));
             let shadow_off = Vec2::splat(s_menu.round().max(1.0));
 
             egui::Area::new(egui::Id::unique("cs16_menu_logo"))
@@ -275,7 +325,8 @@ impl MainMenuUi {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 let mut armed = self.armed_item;
                 for (row, entry) in visible_entries.iter().enumerate() {
-                    let raw_label = loc_ref.map_or(entry.label.as_str(), |l| l.resolve(&entry.label));
+                    let raw_label =
+                        loc_ref.map_or(entry.label.as_str(), |l| l.resolve(&entry.label));
                     let label = raw_label.trim();
                     if label.is_empty() {
                         // A blank `GameMenu.res` entry is a spacer of one item height.
@@ -320,6 +371,30 @@ impl MainMenuUi {
 
         // 3. `New Game` Steam 2003 VGUI2 modal window (`CreateMultiplayerGameDialog`, `FUN_1001e9b0`)
         if self.new_game_open {
+            if !self.new_game_was_open {
+                self.new_game_was_open = true;
+                let quota = cvars.get_i32("bot_quota").clamp(0, 31);
+                self.include_bots = quota > 0;
+                self.bot_quota_buf = if quota > 0 {
+                    quota.to_string()
+                } else {
+                    "9".to_string()
+                };
+                self.bot_difficulty = cvars.get_i32("bot_difficulty").clamp(0, 3);
+                let cur_team = cvars.get_str("bot_join_team").to_ascii_lowercase();
+                self.bot_join_team_idx = BOT_JOIN_TEAMS
+                    .iter()
+                    .position(|(v, _)| *v == cur_team)
+                    .unwrap_or(0);
+                let cur_chatter = cvars.get_str("bot_chatter").to_ascii_lowercase();
+                self.bot_chatter_idx = BOT_CHATTER_MODES
+                    .iter()
+                    .position(|(v, _)| *v == cur_chatter)
+                    .unwrap_or(0);
+                self.bot_join_after_player = cvars
+                    .get("bot_join_after_player")
+                    .is_none_or(|v| v.as_bool());
+            }
             if let Some(v) = cvars.get("sv_use_steam_networking") {
                 self.steam_networking = v.as_bool();
             }
@@ -353,9 +428,11 @@ impl MainMenuUi {
             let title = loc_or(loc_ref, "#GameUI_CreateServer", "Create Server");
             let server_tab_lbl = loc_or(loc_ref, "#GameUI_Server", "Server");
             let game_tab_lbl = loc_or(loc_ref, "#GameUI_Game", "Game");
+            let bots_tab_lbl = loc_or(loc_ref, "#Cstrike_Bot_Options", "CPU Player Options");
             let start_lbl = loc_or(loc_ref, "#GameUI_Start", "Start");
             let cancel_lbl = loc_or(loc_ref, "#GameUI_Cancel", "Cancel");
 
+            let mut bot_cvars_dirty = false;
             egui::Area::new(egui::Id::unique("cs16_vgui_new_game"))
                 .order(egui::Order::Foreground)
                 .fixed_pos(dlg_rect.min)
@@ -426,6 +503,7 @@ impl MainMenuUi {
                     let tabs = [
                         (NewGameTab::Server, server_tab_lbl),
                         (NewGameTab::Game, game_tab_lbl),
+                        (NewGameTab::Bots, bots_tab_lbl),
                     ];
                     let mut tx = dlg_min.x + (5.0 * s).round();
                     let fonts = runtime.tracker_scheme.fonts.clone();
@@ -436,20 +514,17 @@ impl MainMenuUi {
                         let tw = runtime
                             .font_atlas
                             .measure_text_with_scale(
-                                ctx,
-                                m.vfs,
-                                &fonts,
-                                "tracker",
-                                "Default",
-                                screen_h,
-                                label,
-                                s,
+                                ctx, m.vfs, &fonts, "tracker", "Default", screen_h, label, s,
                             )
                             .x;
                         let tab_w = (tw + tab_pad_w).round().max(min_tab_w);
                         let active = self.new_game_tab == *tab_val;
-                        let top_y =
-                            dlg_min.y + if active { (29.0 * s).round() } else { (31.0 * s).round() };
+                        let top_y = dlg_min.y
+                            + if active {
+                                (29.0 * s).round()
+                            } else {
+                                (31.0 * s).round()
+                            };
                         let tab_rect = Rect::from_min_max(
                             Pos2::new(tx, top_y),
                             Pos2::new(tx + tab_w, sheet_rect.top()),
@@ -464,17 +539,26 @@ impl MainMenuUi {
                         let tp = ui.painter();
                         tp.rect_filled(tab_rect, CornerRadius::ZERO, tc.palette.control_bg);
                         tp.rect_filled(
-                            Rect::from_min_max(tab_rect.min, Pos2::new(tab_rect.right(), tab_rect.top() + 1.0)),
+                            Rect::from_min_max(
+                                tab_rect.min,
+                                Pos2::new(tab_rect.right(), tab_rect.top() + 1.0),
+                            ),
                             0.0,
                             tc.palette.border_bright,
                         );
                         tp.rect_filled(
-                            Rect::from_min_max(tab_rect.min, Pos2::new(tab_rect.left() + 1.0, tab_rect.bottom())),
+                            Rect::from_min_max(
+                                tab_rect.min,
+                                Pos2::new(tab_rect.left() + 1.0, tab_rect.bottom()),
+                            ),
                             0.0,
                             tc.palette.border_bright,
                         );
                         tp.rect_filled(
-                            Rect::from_min_max(Pos2::new(tab_rect.right() - 1.0, tab_rect.top()), tab_rect.max),
+                            Rect::from_min_max(
+                                Pos2::new(tab_rect.right() - 1.0, tab_rect.top()),
+                                tab_rect.max,
+                            ),
                             0.0,
                             tc.palette.border_dark,
                         );
@@ -495,7 +579,10 @@ impl MainMenuUi {
                         };
                         let inset_x = (8.0 * s).round();
                         let lbl_rect = Rect::from_min_max(
-                            Pos2::new(tab_rect.left() + inset_x, tab_rect.top() + (1.0 * s).round()),
+                            Pos2::new(
+                                tab_rect.left() + inset_x,
+                                tab_rect.top() + (1.0 * s).round(),
+                            ),
                             Pos2::new(tab_rect.right() - (2.0 * s).round(), tab_rect.bottom()),
                         );
                         paint_tracker_label_rect(
@@ -541,7 +628,11 @@ impl MainMenuUi {
                             );
 
                             let mut combo_items = Vec::with_capacity(available_maps.len() + 1);
-                            combo_items.push(loc_or(loc_ref, "#GameUI_RandomMap", "< Random Map >"));
+                            combo_items.push(loc_or(
+                                loc_ref,
+                                "#GameUI_RandomMap",
+                                "< Random Map >",
+                            ));
                             combo_items.extend(available_maps.iter().cloned());
                             if self.new_game_map_idx >= combo_items.len() {
                                 self.new_game_map_idx = 0;
@@ -561,7 +652,7 @@ impl MainMenuUi {
                                 self.selected_map = mp.clone();
                             }
 
-                            let div_r = page_sub(28.0, 70.0, 280.0, 2.0);
+                            let div_r = page_sub(28.0, 70.0, 380.0, 2.0);
                             ui.painter().rect_filled(
                                 Rect::from_min_size(div_r.min, Vec2::new(div_r.width(), 1.0)),
                                 0.0,
@@ -571,6 +662,106 @@ impl MainMenuUi {
                                 Rect::from_min_size(
                                     Pos2::new(div_r.left(), div_r.top() + 1.0),
                                     Vec2::new(div_r.width(), 1.0),
+                                ),
+                                0.0,
+                                tc.palette.border_bright,
+                            );
+
+                            let inc_lbl = loc_or(
+                                loc_ref,
+                                "#Cstrike_Include_CPU_Players",
+                                "Include CPU players (Bots) in this game",
+                            );
+                            if draw_tracker_check_button_rect(
+                                ui,
+                                runtime,
+                                &tc,
+                                "ng_srv_include_bots",
+                                page_sub(21.0, 84.0, 360.0, 24.0),
+                                &mut self.include_bots,
+                                &inc_lbl,
+                                true,
+                            ) {
+                                bot_cvars_dirty = true;
+                            }
+
+                            let qty_lbl =
+                                loc_or(loc_ref, "#Cstrike_Bot_Quota", "Number of CPU players");
+                            paint_tracker_label_rect(
+                                ui.painter(),
+                                runtime,
+                                &tc,
+                                page_sub(42.0, 114.0, 180.0, 24.0),
+                                &qty_lbl,
+                                "Default",
+                                TextAlignment::West,
+                                if self.include_bots {
+                                    tc.palette.base_text
+                                } else {
+                                    tc.palette.dim_text
+                                },
+                                false,
+                                true,
+                            );
+                            if draw_tracker_text_entry_rect(
+                                ui,
+                                runtime,
+                                &tc,
+                                "ng_srv_bot_quota",
+                                page_sub(228.0, 114.0, 56.0, 24.0),
+                                &mut self.bot_quota_buf,
+                                false,
+                                true,
+                                self.include_bots,
+                            ) {
+                                bot_cvars_dirty = true;
+                            }
+
+                            paint_tracker_label_rect(
+                                ui.painter(),
+                                runtime,
+                                &tc,
+                                page_sub(42.0, 146.0, 120.0, 24.0),
+                                "Difficulty",
+                                "Default",
+                                TextAlignment::West,
+                                if self.include_bots {
+                                    tc.palette.base_text
+                                } else {
+                                    tc.palette.dim_text
+                                },
+                                false,
+                                true,
+                            );
+                            let diff_items: Vec<String> = BOT_DIFFICULTIES
+                                .iter()
+                                .map(|(_, l)| (*l).to_string())
+                                .collect();
+                            let mut diff_idx = self.bot_difficulty.clamp(0, 3) as usize;
+                            if draw_tracker_combo_box_rect(
+                                ui,
+                                runtime,
+                                &tc,
+                                "ng_srv_bot_diff",
+                                page_sub(228.0, 146.0, 140.0, 24.0),
+                                &diff_items,
+                                &mut diff_idx,
+                                self.include_bots,
+                            ) {
+                                self.bot_difficulty = diff_idx as i32;
+                                bot_cvars_dirty = true;
+                            }
+
+                            let div2 = page_sub(28.0, 188.0, 380.0, 2.0);
+                            ui.painter().rect_filled(
+                                Rect::from_min_size(div2.min, Vec2::new(div2.width(), 1.0)),
+                                0.0,
+                                tc.palette.border_dark,
+                            );
+                            ui.painter().rect_filled(
+                                Rect::from_min_size(
+                                    Pos2::new(div2.left(), div2.top() + 1.0),
+                                    Vec2::new(div2.width(), 1.0),
                                 ),
                                 0.0,
                                 tc.palette.border_bright,
@@ -586,7 +777,7 @@ impl MainMenuUi {
                                 runtime,
                                 &tc,
                                 "ng_steam_net",
-                                page_sub(21.0, 83.0, 320.0, 24.0),
+                                page_sub(21.0, 202.0, 320.0, 24.0),
                                 &mut self.steam_networking,
                                 &net_lbl,
                                 true,
@@ -599,8 +790,11 @@ impl MainMenuUi {
                         }
                         NewGameTab::Game => {
                             let list_r = page_sub(10.0, 10.0, 418.0, 346.0);
-                            ui.painter()
-                                .rect_filled(list_r, CornerRadius::ZERO, tc.palette.window_bg);
+                            ui.painter().rect_filled(
+                                list_r,
+                                CornerRadius::ZERO,
+                                tc.palette.window_bg,
+                            );
                             paint_tracker_bevel_rect(ui.painter(), list_r, false, tc.palette);
                             let inner = list_r.shrink((6.0 * s).round());
                             ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
@@ -609,12 +803,219 @@ impl MainMenuUi {
                                     .show(ui, |ui| {
                                         if let Some(ref scr) = self.settings_script {
                                             render_scr_options(ui, cvars, scr, loc_ref);
+                                        } else {
+                                            cvar_edit_row(ui, cvars, "hostname", "Server Name:");
+                                            cvar_edit_row(
+                                                ui,
+                                                cvars,
+                                                "mp_startmoney",
+                                                "Starting Money ($):",
+                                            );
+                                            cvar_edit_row(
+                                                ui,
+                                                cvars,
+                                                "mp_freezetime",
+                                                "Freeze Time (sec):",
+                                            );
+                                            cvar_edit_row(
+                                                ui,
+                                                cvars,
+                                                "mp_roundtime",
+                                                "Time per Round (min):",
+                                            );
+                                            cvar_edit_row(
+                                                ui,
+                                                cvars,
+                                                "mp_buytime",
+                                                "Buy Time (min):",
+                                            );
+                                            cvar_edit_row(
+                                                ui,
+                                                cvars,
+                                                "mp_timelimit",
+                                                "Time Limit (min):",
+                                            );
+                                            cvar_edit_row(
+                                                ui,
+                                                cvars,
+                                                "mp_friendlyfire",
+                                                "Friendly Fire (0/1):",
+                                            );
                                         }
-                                        ui.separator();
-                                        cvar_edit_row(ui, cvars, "bot_quota", "Bots count (0..15):");
-                                        cvar_edit_row(ui, cvars, "bot_difficulty", "Bot difficulty (0-3):");
                                     });
                             });
+                        }
+                        NewGameTab::Bots => {
+                            let inc_lbl = loc_or(
+                                loc_ref,
+                                "#Cstrike_Include_CPU_Players",
+                                "Include CPU players (Bots) in this game",
+                            );
+                            if draw_tracker_check_button_rect(
+                                ui,
+                                runtime,
+                                &tc,
+                                "ng_bot_enable",
+                                page_sub(21.0, 18.0, 360.0, 24.0),
+                                &mut self.include_bots,
+                                &inc_lbl,
+                                true,
+                            ) {
+                                bot_cvars_dirty = true;
+                            }
+
+                            let enabled = self.include_bots;
+                            let txt_col = if enabled {
+                                tc.palette.base_text
+                            } else {
+                                tc.palette.dim_text
+                            };
+
+                            paint_tracker_label_rect(
+                                ui.painter(),
+                                runtime,
+                                &tc,
+                                page_sub(28.0, 50.0, 180.0, 24.0),
+                                "Number of CPU players",
+                                "Default",
+                                TextAlignment::West,
+                                txt_col,
+                                false,
+                                true,
+                            );
+                            if draw_tracker_text_entry_rect(
+                                ui,
+                                runtime,
+                                &tc,
+                                "ng_bot_quota",
+                                page_sub(220.0, 50.0, 64.0, 24.0),
+                                &mut self.bot_quota_buf,
+                                false,
+                                true,
+                                enabled,
+                            ) {
+                                bot_cvars_dirty = true;
+                            }
+
+                            paint_tracker_label_rect(
+                                ui.painter(),
+                                runtime,
+                                &tc,
+                                page_sub(28.0, 86.0, 160.0, 22.0),
+                                "Difficulty",
+                                "DefaultBold",
+                                TextAlignment::West,
+                                if enabled {
+                                    tc.palette.bright_control_text
+                                } else {
+                                    tc.palette.dim_text
+                                },
+                                false,
+                                true,
+                            );
+                            for (idx, &(val, lbl)) in BOT_DIFFICULTIES.iter().enumerate() {
+                                let col_x = if idx % 2 == 0 { 36.0 } else { 190.0 };
+                                let row_y = 110.0 + (idx / 2) as f32 * 24.0;
+                                if draw_tracker_radio_button_rect(
+                                    ui,
+                                    runtime,
+                                    &tc,
+                                    &format!("ng_bot_diff_{val}"),
+                                    page_sub(col_x, row_y, 140.0, 22.0),
+                                    self.bot_difficulty == val,
+                                    lbl,
+                                    enabled,
+                                ) {
+                                    self.bot_difficulty = val;
+                                    bot_cvars_dirty = true;
+                                }
+                            }
+
+                            let div_r = page_sub(28.0, 168.0, 380.0, 2.0);
+                            ui.painter().rect_filled(
+                                Rect::from_min_size(div_r.min, Vec2::new(div_r.width(), 1.0)),
+                                0.0,
+                                tc.palette.border_dark,
+                            );
+                            ui.painter().rect_filled(
+                                Rect::from_min_size(
+                                    Pos2::new(div_r.left(), div_r.top() + 1.0),
+                                    Vec2::new(div_r.width(), 1.0),
+                                ),
+                                0.0,
+                                tc.palette.border_bright,
+                            );
+
+                            paint_tracker_label_rect(
+                                ui.painter(),
+                                runtime,
+                                &tc,
+                                page_sub(28.0, 182.0, 170.0, 24.0),
+                                "Bot join team",
+                                "Default",
+                                TextAlignment::West,
+                                txt_col,
+                                false,
+                                true,
+                            );
+                            let team_items: Vec<String> = BOT_JOIN_TEAMS
+                                .iter()
+                                .map(|(_, l)| (*l).to_string())
+                                .collect();
+                            if draw_tracker_combo_box_rect(
+                                ui,
+                                runtime,
+                                &tc,
+                                "ng_bot_team",
+                                page_sub(220.0, 182.0, 176.0, 24.0),
+                                &team_items,
+                                &mut self.bot_join_team_idx,
+                                enabled,
+                            ) {
+                                bot_cvars_dirty = true;
+                            }
+
+                            paint_tracker_label_rect(
+                                ui.painter(),
+                                runtime,
+                                &tc,
+                                page_sub(28.0, 218.0, 170.0, 24.0),
+                                "Bot radio chatter",
+                                "Default",
+                                TextAlignment::West,
+                                txt_col,
+                                false,
+                                true,
+                            );
+                            let chatter_items: Vec<String> = BOT_CHATTER_MODES
+                                .iter()
+                                .map(|(_, l)| (*l).to_string())
+                                .collect();
+                            if draw_tracker_combo_box_rect(
+                                ui,
+                                runtime,
+                                &tc,
+                                "ng_bot_chatter",
+                                page_sub(220.0, 218.0, 176.0, 24.0),
+                                &chatter_items,
+                                &mut self.bot_chatter_idx,
+                                enabled,
+                            ) {
+                                bot_cvars_dirty = true;
+                            }
+
+                            if draw_tracker_check_button_rect(
+                                ui,
+                                runtime,
+                                &tc,
+                                "ng_bot_after_player",
+                                page_sub(21.0, 256.0, 340.0, 24.0),
+                                &mut self.bot_join_after_player,
+                                "Bots join after a player joins",
+                                enabled,
+                            ) {
+                                bot_cvars_dirty = true;
+                            }
                         }
                     }
 
@@ -640,13 +1041,12 @@ impl MainMenuUi {
                     )
                     .clicked()
                     {
+                        bot_cvars_dirty = true;
                         let chosen = if self.new_game_map_idx == 0 {
-                            available_maps
-                                .iter()
-                                .find(|mp| *mp == "de_dust2")
-                                .or_else(|| available_maps.first())
-                                .cloned()
-                                .unwrap_or_else(|| self.selected_map.clone())
+                            self.random_map_counter = self.random_map_counter.wrapping_add(1);
+                            let time_bits = ctx.input(|i| (i.time * 1000.0) as u64);
+                            let seed = time_bits.wrapping_add(self.random_map_counter);
+                            pick_random_classic_map(available_maps, seed)
                         } else {
                             available_maps
                                 .get(self.new_game_map_idx - 1)
@@ -673,9 +1073,15 @@ impl MainMenuUi {
                         close_now = true;
                     }
                 });
+            if bot_cvars_dirty {
+                self.sync_bot_cvars(cvars);
+            }
             if close_now {
                 self.new_game_open = false;
+                self.new_game_was_open = false;
             }
+        } else {
+            self.new_game_was_open = false;
         }
 
         // 4. `Find Servers` full 6-tab VGUI2 Server Browser window (`DialogServerBrowser.res`)
@@ -696,6 +1102,43 @@ impl MainMenuUi {
         }
 
         out
+    }
+
+    fn sync_bot_cvars(&self, cvars: &mut CVarRegistry) {
+        let quota = if self.include_bots {
+            self.bot_quota_buf
+                .trim()
+                .parse::<i32>()
+                .unwrap_or(9)
+                .clamp(1, 31)
+        } else {
+            0
+        };
+        set_or_register(cvars, "bot_quota", &quota.to_string());
+        set_or_register(
+            cvars,
+            "bot_difficulty",
+            &self.bot_difficulty.clamp(0, 3).to_string(),
+        );
+        let team = BOT_JOIN_TEAMS
+            .get(self.bot_join_team_idx)
+            .map_or("any", |(v, _)| *v);
+        set_or_register(cvars, "bot_join_team", team);
+        let chatter = BOT_CHATTER_MODES
+            .get(self.bot_chatter_idx)
+            .map_or("normal", |(v, _)| *v);
+        set_or_register(cvars, "bot_chatter", chatter);
+        set_or_register(
+            cvars,
+            "bot_join_after_player",
+            if self.bot_join_after_player { "1" } else { "0" },
+        );
+    }
+}
+
+fn set_or_register(cvars: &mut CVarRegistry, name: &str, value: &str) {
+    if !cvars.set(name, value) {
+        cvars.register(name, value, cs_cvar::CVarFlags::ARCHIVE, "");
     }
 }
 
@@ -730,7 +1173,10 @@ fn menu_item_vgui(
         }
     }
     let scheme_color = |runtime: &VguiRuntime, name: &str, fallback: [u8; 4]| {
-        let c = runtime.tracker_scheme.resolve_color(name).unwrap_or(fallback);
+        let c = runtime
+            .tracker_scheme
+            .resolve_color(name)
+            .unwrap_or(fallback);
         Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3])
     };
     let menu_color = scheme_color(runtime, "MenuColor", [238, 174, 0, 255]);
@@ -834,7 +1280,11 @@ fn fallback_game_menu() -> Vec<GameMenuEntry> {
         e("#GameUI_GameMenu_Disconnect", "Disconnect", true),
         e("#GameUI_GameMenu_PlayerList", "OpenPlayerListDialog", true),
         e("", "", true),
-        e("#GameUI_GameMenu_NewGame", "OpenCreateMultiplayerGameDialog", false),
+        e(
+            "#GameUI_GameMenu_NewGame",
+            "OpenCreateMultiplayerGameDialog",
+            false,
+        ),
         e("#GameUI_GameMenu_FindServers", "OpenServerBrowser", false),
         e("#GameUI_GameMenu_Options", "OpenOptionsDialog", false),
         e("#GameUI_GameMenu_Quit", "Quit", false),
@@ -859,4 +1309,49 @@ fn cvar_edit_row(ui: &mut egui::Ui, cvars: &mut CVarRegistry, key: &str, label: 
             cvars.set(key, val);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn random_map_picks_mounted_classic_maps_and_bots_tab_writes_cvars() {
+        let maps = vec![
+            "fy_pool_day".to_string(),
+            "de_inferno".to_string(),
+            "cs_office".to_string(),
+            "de_dust2".to_string(),
+            "aim_map".to_string(),
+        ];
+        let picked0 = pick_random_classic_map(&maps, 0);
+        let picked1 = pick_random_classic_map(&maps, 1);
+        let picked2 = pick_random_classic_map(&maps, 2);
+        assert_eq!(picked0, "de_inferno");
+        assert_eq!(picked1, "cs_office");
+        assert_eq!(picked2, "de_dust2");
+        assert_eq!(pick_random_classic_map(&[], 0), "de_dust2");
+
+        let mut cvars = CVarRegistry::new_with_defaults();
+        let mut ui = MainMenuUi {
+            include_bots: true,
+            bot_quota_buf: "11".into(),
+            bot_difficulty: 3,    // Expert
+            bot_join_team_idx: 1, // CT
+            bot_chatter_idx: 2,   // Radio
+            bot_join_after_player: false,
+            ..Default::default()
+        };
+        ui.sync_bot_cvars(&mut cvars);
+
+        assert_eq!(cvars.get_i32("bot_quota"), 11);
+        assert_eq!(cvars.get_i32("bot_difficulty"), 3);
+        assert_eq!(cvars.get_str("bot_join_team"), "ct");
+        assert_eq!(cvars.get_str("bot_chatter"), "radio");
+        assert!(!cvars.get_bool("bot_join_after_player"));
+
+        ui.include_bots = false;
+        ui.sync_bot_cvars(&mut cvars);
+        assert_eq!(cvars.get_i32("bot_quota"), 0);
+    }
 }

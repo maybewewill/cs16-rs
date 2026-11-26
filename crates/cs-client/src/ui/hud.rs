@@ -202,10 +202,12 @@ pub fn filter_active_death_notices<'a>(
         .iter()
         .enumerate()
         .rev()
-        .filter(|(idx, _)| match times.and_then(|ts| ts.get(*idx).copied()) {
-            Some(t) => now >= t && (now - t) <= limit,
-            None => true,
-        })
+        .filter(
+            |(idx, _)| match times.and_then(|ts| ts.get(*idx).copied()) {
+                Some(t) => now >= t && (now - t) <= limit,
+                None => true,
+            },
+        )
         .take(4)
         .map(|(_, entry)| entry)
         .collect();
@@ -229,10 +231,12 @@ pub fn filter_active_chat_entries<'a>(
         .iter()
         .enumerate()
         .rev()
-        .filter(|(idx, _)| match times.and_then(|ts| ts.get(*idx).copied()) {
-            Some(t) => now >= t && (now - t) <= limit,
-            None => true,
-        })
+        .filter(
+            |(idx, _)| match times.and_then(|ts| ts.get(*idx).copied()) {
+                Some(t) => now >= t && (now - t) <= limit,
+                None => true,
+            },
+        )
         .take(5)
         .map(|(_, entry)| entry)
         .collect();
@@ -362,9 +366,9 @@ impl HudSprites {
 
         let mut sheets = HashMap::new();
         for name in [
-            "640hud1", "640hud2", "640hud3", "640hud4", "640hud5", "640hud6", "640hud7",
-            "640hud8", "640hud9", "640hud10", "640hud11", "640hud12", "640hud13", "640hud14",
-            "640hud15", "640hud16", "640hud17", "640hud18", "320hud1", "320hud2",
+            "640hud1", "640hud2", "640hud3", "640hud4", "640hud5", "640hud6", "640hud7", "640hud8",
+            "640hud9", "640hud10", "640hud11", "640hud12", "640hud13", "640hud14", "640hud15",
+            "640hud16", "640hud17", "640hud18", "320hud1", "320hud2",
         ] {
             let path = format!("sprites/{name}.spr");
             if let Ok(spr) = GoldSrcSprite::load(vfs, &path)
@@ -439,11 +443,7 @@ impl HudSprites {
                     [frame.width as usize, frame.height as usize],
                     &rgba,
                 );
-                Some(ctx.load_texture(
-                    "cs16_hud_radar640",
-                    img,
-                    egui::TextureOptions::LINEAR,
-                ))
+                Some(ctx.load_texture("cs16_hud_radar640", img, egui::TextureOptions::LINEAR))
             });
 
         let radar_opaque_tex = GoldSrcSprite::load(vfs, "sprites/radaropaque640.spr")
@@ -729,19 +729,19 @@ impl HudSprites {
         tint: Color32,
     ) -> Option<Vec2> {
         let (sx, sy) = match weapon_id {
-            1 => (120.0, 72.0),                          // p228
-            3 | 24 | 28 => (72.0, 72.0),                 // scout / g3sg1 / ak47
-            4 => (72.0, 96.0),                           // hegrenade
-            5 | 21 | 29 => (0.0, 72.0),                  // xm1014 / m3 / knife
-            6 => (96.0, 96.0),                           // c4
-            7 | 12 | 16 => (96.0, 72.0),                 // mac10 / ump45 / usp
+            1 => (120.0, 72.0),                             // p228
+            3 | 24 | 28 => (72.0, 72.0),                    // scout / g3sg1 / ak47
+            4 => (72.0, 96.0),                              // hegrenade
+            5 | 21 | 29 => (0.0, 72.0),                     // xm1014 / m3 / knife
+            6 => (96.0, 96.0),                              // c4
+            7 | 12 | 16 => (96.0, 72.0),                    // mac10 / ump45 / usp
             8 | 13 | 14 | 15 | 20 | 22 | 27 => (0.0, 96.0), // aug / sg550 / galil / famas / m249 / m4a1 / sg552
-            9 => (144.0, 96.0),                          // smokegrenade
-            10 | 17 | 19 | 23 => (48.0, 72.0),           // elite / glock18 / mp5navy / tmp
-            11 | 30 => (120.0, 96.0),                    // fiveseven / p90
-            18 => (24.0, 96.0),                          // awp
-            25 => (48.0, 96.0),                          // flashbang
-            26 => (24.0, 72.0),                          // deagle
+            9 => (144.0, 96.0),                             // smokegrenade
+            10 | 17 | 19 | 23 => (48.0, 72.0),              // elite / glock18 / mp5navy / tmp
+            11 | 30 => (120.0, 96.0),                       // fiveseven / p90
+            18 => (24.0, 96.0),                             // awp
+            25 => (48.0, 96.0),                             // flashbang
+            26 => (24.0, 72.0),                             // deagle
             _ => return None,
         };
         let (tex, [tw, th]) = self.sheets.get("640hud7")?;
@@ -783,7 +783,8 @@ impl HudSprites {
         let digit_w = 20.0 * scale;
         for ch in s.chars() {
             let spr_name = format!("number_{ch}");
-            if let Some(sz) = self.draw_sprite(painter, &spr_name, Pos2::new(x, pos.y), scale, tint) {
+            if let Some(sz) = self.draw_sprite(painter, &spr_name, Pos2::new(x, pos.y), scale, tint)
+            {
                 x += sz.x + 1.0 * scale;
             } else {
                 painter.text(
@@ -812,7 +813,14 @@ impl HudSprites {
         min_digits: usize,
     ) -> f32 {
         let w = self.measure_number(value, scale, min_digits);
-        self.draw_number(painter, value, Pos2::new(right_x - w, y), scale, tint, min_digits);
+        self.draw_number(
+            painter,
+            value,
+            Pos2::new(right_x - w, y),
+            scale,
+            tint,
+            min_digits,
+        );
         w
     }
 }
@@ -852,7 +860,11 @@ pub fn screen_fade_alpha(fade: &ScreenFade, now: f64) -> f32 {
     let fade_out = fade.flags & 1 != 0;
     let stay = fade.flags & 4 != 0;
     let v = if fade_out {
-        let k = if dur > 0.0 { (t / dur).clamp(0.0, 1.0) } else { 1.0 };
+        let k = if dur > 0.0 {
+            (t / dur).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
         if stay || t < dur + hold { a * k } else { 0.0 }
     } else if t < hold {
         a
@@ -1047,8 +1059,9 @@ impl HudAnimState {
         }
         if hud.scenario.as_ref().is_some_and(|s| s.alpha > 0) {
             if self.scenario_alpha > 100 {
-                self.scenario_alpha =
-                    ((self.scenario_alpha as f32) * 0.9f32.powf((dt * 60.0).clamp(0.1, 4.0))) as i32;
+                self.scenario_alpha = ((self.scenario_alpha as f32)
+                    * 0.9f32.powf((dt * 60.0).clamp(0.1, 4.0)))
+                    as i32;
             }
             if self.scenario_flash_interval > 0.0 && now >= self.scenario_next_flash {
                 self.scenario_alpha = self.scenario_flash_alpha;
@@ -1286,7 +1299,11 @@ fn draw_cs16_hud_impl(
 
     // 1. Night vision overlay and the sniper scope mask.
     if hud.alive && state.night_vision {
-        painter.rect_filled(screen, 0.0, Color32::from_rgba_unmultiplied(20, 215, 45, 78));
+        painter.rect_filled(
+            screen,
+            0.0,
+            Color32::from_rgba_unmultiplied(20, 215, 45, 78),
+        );
         let mut sy = screen.top();
         let line_col = Color32::from_rgba_unmultiplied(0, 30, 0, 55);
         while sy < screen.bottom() {
@@ -1374,10 +1391,18 @@ fn draw_cs16_hud_impl(
                 let _ = sp.draw_pain_frame(&painter, i, pos, scale, col);
             } else {
                 let rect = match i {
-                    0 => Rect::from_center_size(Pos2::new(cx, cy - r), Vec2::new(span * 2.0, thick)),
-                    1 => Rect::from_center_size(Pos2::new(cx + r, cy), Vec2::new(thick, span * 2.0)),
-                    2 => Rect::from_center_size(Pos2::new(cx, cy + r), Vec2::new(span * 2.0, thick)),
-                    _ => Rect::from_center_size(Pos2::new(cx - r, cy), Vec2::new(thick, span * 2.0)),
+                    0 => {
+                        Rect::from_center_size(Pos2::new(cx, cy - r), Vec2::new(span * 2.0, thick))
+                    }
+                    1 => {
+                        Rect::from_center_size(Pos2::new(cx + r, cy), Vec2::new(thick, span * 2.0))
+                    }
+                    2 => {
+                        Rect::from_center_size(Pos2::new(cx, cy + r), Vec2::new(span * 2.0, thick))
+                    }
+                    _ => {
+                        Rect::from_center_size(Pos2::new(cx - r, cy), Vec2::new(thick, span * 2.0))
+                    }
                 };
                 painter.rect_filled(rect, 0.0, col);
             }
@@ -1414,10 +1439,25 @@ fn draw_cs16_hud_impl(
         let armor = i32::from(state.armor);
         if let Some(sp) = sprites {
             let cross_w = sp.sprite_size("cross", scale).map_or(24.0 * scale, |s| s.x);
-            let digit_w = sp.sprite_size("number_0", scale).map_or(20.0 * scale, |s| s.x);
+            let digit_w = sp
+                .sprite_size("number_0", scale)
+                .map_or(20.0 * scale, |s| s.x);
             let (cross_x, digits_x) = health_layout_x(cross_w, digit_w);
-            let _ = sp.draw_sprite(&painter, "cross", Pos2::new(screen.left() + cross_x, bottom_y), scale, hp_color);
-            sp.draw_number(&painter, health, Pos2::new(screen.left() + digits_x, bottom_y), scale, hp_color, 1);
+            let _ = sp.draw_sprite(
+                &painter,
+                "cross",
+                Pos2::new(screen.left() + cross_x, bottom_y),
+                scale,
+                hp_color,
+            );
+            sp.draw_number(
+                &painter,
+                health,
+                Pos2::new(screen.left() + digits_x, bottom_y),
+                scale,
+                hp_color,
+                1,
+            );
 
             let armor_x = (screen.width() / 5.0).floor();
             let (empty_spr, full_spr) = if state.armor_type == 1 {
@@ -1425,17 +1465,41 @@ fn draw_cs16_hud_impl(
             } else {
                 ("suit_empty", "suit_full")
             };
-            let suit_h = sp.sprite_size(empty_spr, scale).map_or(24.0 * scale, |s| s.y);
+            let suit_h = sp
+                .sprite_size(empty_spr, scale)
+                .map_or(24.0 * scale, |s| s.y);
             let y_pad = if screen.width() < 640.0 { 1.0 } else { 4.0 };
             let armor_num_y = bottom_y;
             let icon_y = bottom_y + y_pad - suit_h / 6.0;
-            let _ = sp.draw_sprite(&painter, empty_spr, Pos2::new(armor_x, icon_y), scale, armor_color);
+            let _ = sp.draw_sprite(
+                &painter,
+                empty_spr,
+                Pos2::new(armor_x, icon_y),
+                scale,
+                armor_color,
+            );
             let fill = (f32::from(state.armor) / 100.0).clamp(0.0, 1.0);
-            let _ = sp.draw_sprite_clipped_bottom(&painter, full_spr, Pos2::new(armor_x, icon_y), scale, armor_color, fill);
-            sp.draw_number_right(&painter, armor, armor_x + (24.0 + 60.0) * scale, armor_num_y, scale, armor_color, 1);
+            let _ = sp.draw_sprite_clipped_bottom(
+                &painter,
+                full_spr,
+                Pos2::new(armor_x, icon_y),
+                scale,
+                armor_color,
+                fill,
+            );
+            sp.draw_number_right(
+                &painter,
+                armor,
+                armor_x + (24.0 + 60.0) * scale,
+                armor_num_y,
+                scale,
+                armor_color,
+                1,
+            );
         } else {
             let (cross_x, _) = health_layout_x(24.0 * scale, 20.0 * scale);
-            let text_col = Color32::from_rgba_unmultiplied(hp_base.r(), hp_base.g(), hp_base.b(), hp_alpha);
+            let text_col =
+                Color32::from_rgba_unmultiplied(hp_base.r(), hp_base.g(), hp_base.b(), hp_alpha);
             painter.text(
                 Pos2::new(screen.left() + cross_x, bottom_y),
                 egui::Align2::LEFT_TOP,
@@ -1487,7 +1551,13 @@ fn draw_cs16_hud_impl(
                                 && let Some(sz) = sp.sprite_size(haz, scale)
                             {
                                 let y = icon_bot - sz.y;
-                                let _ = sp.draw_sprite(&painter, haz, Pos2::new(icon_x, y), scale, haz_col);
+                                let _ = sp.draw_sprite(
+                                    &painter,
+                                    haz,
+                                    Pos2::new(icon_x, y),
+                                    scale,
+                                    haz_col,
+                                );
                                 icon_bot = y - 5.0 * scale;
                             }
                         }
@@ -1536,14 +1606,23 @@ fn draw_cs16_hud_impl(
         };
         if let Some(sp) = sprites {
             let mut tx = center_x - 60.0 * scale;
-            let _ = sp.draw_sprite(&painter, "stopwatch", Pos2::new(tx, bottom_y), scale, timer_col);
+            let _ = sp.draw_sprite(
+                &painter,
+                "stopwatch",
+                Pos2::new(tx, bottom_y),
+                scale,
+                timer_col,
+            );
             tx += 28.0 * scale;
             tx += sp.draw_number(&painter, mins, Pos2::new(tx, bottom_y), scale, timer_col, 1);
             let dot_sz = (3.0 * scale).max(2.0);
             let colon_x = tx + 3.0 * scale;
             for dy in [7.0, 16.0] {
                 painter.rect_filled(
-                    Rect::from_min_size(Pos2::new(colon_x, bottom_y + dy * scale), Vec2::splat(dot_sz)),
+                    Rect::from_min_size(
+                        Pos2::new(colon_x, bottom_y + dy * scale),
+                        Vec2::splat(dot_sz),
+                    ),
                     0.0,
                     timer_col,
                 );
@@ -1626,8 +1705,22 @@ fn draw_cs16_hud_impl(
             let money_col = Color32::from_rgb_additive(main_col[0], main_col[1], main_col[2]);
             let dollar_x = right_margin - 20.0 * scale * 5.0 - 18.0 * scale;
             if let Some(sp) = sprites {
-                sp.draw_number_right(&painter, state.money, right_margin, money_y, scale, money_col, 1);
-                let _ = sp.draw_sprite(&painter, "dollar", Pos2::new(dollar_x, money_y), scale, money_col);
+                sp.draw_number_right(
+                    &painter,
+                    state.money,
+                    right_margin,
+                    money_y,
+                    scale,
+                    money_col,
+                    1,
+                );
+                let _ = sp.draw_sprite(
+                    &painter,
+                    "dollar",
+                    Pos2::new(dollar_x, money_y),
+                    scale,
+                    money_col,
+                );
             } else {
                 painter.text(
                     Pos2::new(right_margin, money_y),
@@ -1651,13 +1744,25 @@ fn draw_cs16_hud_impl(
                         d_col,
                         1,
                     );
-                    let sign_w = sp.sprite_size(sign_spr, scale).map_or(14.0 * scale, |s| s.x);
+                    let sign_w = sp
+                        .sprite_size(sign_spr, scale)
+                        .map_or(14.0 * scale, |s| s.x);
                     let sign_x = (right_margin - num_w - sign_w - 2.0 * scale).min(dollar_x);
-                    let _ = sp.draw_sprite(&painter, sign_spr, Pos2::new(sign_x, delta_y), scale, d_col);
+                    let _ = sp.draw_sprite(
+                        &painter,
+                        sign_spr,
+                        Pos2::new(sign_x, delta_y),
+                        scale,
+                        d_col,
+                    );
                 } else {
                     let da = ((anim.money_delta_fade / 2.5) * 255.0).clamp(0.0, 255.0) as u8;
                     let d_txt_col = Color32::from_rgba_unmultiplied(mr, mg, mb, da);
-                    let txt = if delta > 0 { format!("+${delta}") } else { format!("-${}", -delta) };
+                    let txt = if delta > 0 {
+                        format!("+${delta}")
+                    } else {
+                        format!("-${}", -delta)
+                    };
                     hud_paint_text(
                         ctx,
                         &painter,
@@ -1674,8 +1779,22 @@ fn draw_cs16_hud_impl(
             let money_col = hud_additive_color(HUD_AMBER, 100);
             let dollar_x = right_margin - 20.0 * scale * 5.0 - 18.0 * scale;
             if let Some(sp) = sprites {
-                sp.draw_number_right(&painter, state.money, right_margin, money_y, scale, money_col, 1);
-                let _ = sp.draw_sprite(&painter, "dollar", Pos2::new(dollar_x, money_y), scale, money_col);
+                sp.draw_number_right(
+                    &painter,
+                    state.money,
+                    right_margin,
+                    money_y,
+                    scale,
+                    money_col,
+                    1,
+                );
+                let _ = sp.draw_sprite(
+                    &painter,
+                    "dollar",
+                    Pos2::new(dollar_x, money_y),
+                    scale,
+                    money_col,
+                );
             } else {
                 painter.text(
                     Pos2::new(right_margin, money_y),
@@ -1701,24 +1820,61 @@ fn draw_cs16_hud_impl(
         let ammo_amber = hud_additive_color(HUD_AMBER, ammo_a);
         let icon_x = right_margin - 24.0 * scale;
         let has_icon = sprites
-            .and_then(|sp| sp.draw_ammo_icon(&painter, cur.weapon_id, Pos2::new(icon_x, bottom_y), scale, ammo_amber))
+            .and_then(|sp| {
+                sp.draw_ammo_icon(
+                    &painter,
+                    cur.weapon_id,
+                    Pos2::new(icon_x, bottom_y),
+                    scale,
+                    ammo_amber,
+                )
+            })
             .is_some();
-        let num_right = if has_icon { icon_x - 6.0 * scale } else { right_margin };
+        let num_right = if has_icon {
+            icon_x - 6.0 * scale
+        } else {
+            right_margin
+        };
         if cur.clip >= 0 {
             if let Some(sp) = sprites {
-                let res_w = sp.draw_number_right(&painter, i32::from(reserve), num_right, bottom_y, scale, ammo_amber, 1);
+                let res_w = sp.draw_number_right(
+                    &painter,
+                    i32::from(reserve),
+                    num_right,
+                    bottom_y,
+                    scale,
+                    ammo_amber,
+                    1,
+                );
                 let div_x = (num_right - res_w.max(44.0 * scale) - 10.0 * scale).round();
                 if sp
-                    .draw_sprite(&painter, "divider", Pos2::new(div_x, bottom_y - 6.0 * scale), scale, ammo_amber)
+                    .draw_sprite(
+                        &painter,
+                        "divider",
+                        Pos2::new(div_x, bottom_y - 6.0 * scale),
+                        scale,
+                        ammo_amber,
+                    )
                     .is_none()
                 {
                     painter.rect_filled(
-                        Rect::from_min_size(Pos2::new(div_x, bottom_y), Vec2::new((2.0 * scale).max(1.0), num_h)),
+                        Rect::from_min_size(
+                            Pos2::new(div_x, bottom_y),
+                            Vec2::new((2.0 * scale).max(1.0), num_h),
+                        ),
                         0.0,
                         ammo_amber,
                     );
                 }
-                sp.draw_number_right(&painter, i32::from(cur.clip), div_x - 8.0 * scale, bottom_y, scale, ammo_amber, 1);
+                sp.draw_number_right(
+                    &painter,
+                    i32::from(cur.clip),
+                    div_x - 8.0 * scale,
+                    bottom_y,
+                    scale,
+                    ammo_amber,
+                    1,
+                );
             } else {
                 painter.text(
                     Pos2::new(num_right, bottom_y),
@@ -1731,7 +1887,15 @@ fn draw_cs16_hud_impl(
         } else if reserve > 0
             && let Some(sp) = sprites
         {
-            sp.draw_number_right(&painter, i32::from(reserve), num_right, bottom_y, scale, ammo_amber, 1);
+            sp.draw_number_right(
+                &painter,
+                i32::from(reserve),
+                num_right,
+                bottom_y,
+                scale,
+                ammo_amber,
+                1,
+            );
         }
     }
 
@@ -1745,7 +1909,11 @@ fn draw_cs16_hud_impl(
             let y = pickup_history_slot_y(screen.bottom(), max_h, slot, scale);
             match &entry.kind {
                 PickupKind::Weapon { weapon_id, empty } => {
-                    let base_col = if *empty { Color32::from_rgb(255, 16, 16) } else { HUD_AMBER };
+                    let base_col = if *empty {
+                        Color32::from_rgb(255, 16, 16)
+                    } else {
+                        HUD_AMBER
+                    };
                     let tint = hud_additive_color(base_col, alpha);
                     let wname = state
                         .weapons
@@ -1767,7 +1935,12 @@ fn draw_cs16_hud_impl(
                             Pos2::new(screen.right() - 10.0 * scale, y),
                             short,
                             14.0 * scale,
-                            Color32::from_rgba_unmultiplied(base_col.r(), base_col.g(), base_col.b(), alpha),
+                            Color32::from_rgba_unmultiplied(
+                                base_col.r(),
+                                base_col.g(),
+                                base_col.b(),
+                                alpha,
+                            ),
                         );
                     }
                 }
@@ -1830,179 +2003,166 @@ fn draw_cs16_hud_impl(
     }
 
     // 8. Top-centre: weapon buckets & cards (`CHudAmmo::DrawWList`, `FUN_10044840` & `FUN_10043f50`).
-    let bucket_open = extras.buckets.is_some_and(|b| b.active_slot.is_some());
-    if (hud.weapon_switch_timer > 0.01 || bucket_open) && vis.weapon_buckets {
+    // Authentic CS 1.6 only renders `DrawWList` while `gpActiveSel` (`WeaponBucketState`) is open
+    // (`hud_fastswitch 0` on slot/wheel, `hud_fastswitch 1` on wheel or multi-item slot) — never
+    // on spawn, buy, weapon pickup, `lastinv`, or single-item fastswitch.
+    if let Some(b) = extras.buckets.filter(|b| b.active_slot.is_some())
+        && vis.weapon_buckets
+    {
         let start_x = screen.left() + if screen.width() >= 640.0 { 138.0 } else { 70.0 };
         let top_y = screen.top() + 10.0;
-        if bucket_open && !extras.hud_fastswitch {
-            let b = extras.buckets.expect("checked bucket_open");
-            let sel_slot = b.active_slot.unwrap_or(0);
-            let slot_has_ammo = |w: &cs_clientcore::hud::WeaponInfo| -> bool {
-                w.ammo1_max == 255
-                    || w.ammo1_type == 255
-                    || state.clips.get(&w.weapon_id).copied().unwrap_or(0) > 0
-                    || state.ammo.get(&w.ammo1_type).copied().unwrap_or(0) > 0
-                    || (w.flags & 1) != 0
+        let sel_slot = b.active_slot.unwrap_or(0);
+        let slot_has_ammo = |w: &cs_clientcore::hud::WeaponInfo| -> bool {
+            w.ammo1_max == 255
+                || w.ammo1_type == 255
+                || state.clips.get(&w.weapon_id).copied().unwrap_or(0) > 0
+                || state.ammo.get(&w.ammo1_type).copied().unwrap_or(0) > 0
+                || (w.flags & 1) != 0
+        };
+        let mut slot_x = start_x;
+        for slot in 1..=5u8 {
+            let mut slot_weapons: Vec<_> = state
+                .weapons
+                .values()
+                .filter(|w| w.slot + 1 == slot && hud.owned.contains(&w.weapon_id))
+                .collect();
+            slot_weapons.sort_by_key(|w| w.position);
+
+            let (bw, bh) = sprites
+                .and_then(|sp| sp.sprite_size(&format!("bucket{slot}"), scale))
+                .map_or((20.0 * scale, 20.0 * scale), |s| (s.x, s.y));
+            let card_w = slot_weapons
+                .first()
+                .and_then(|w| sprites.and_then(|sp| sp.weapon_card_size(&w.name, scale)))
+                .map_or(170.0 * scale, |s| s.x);
+            let col_w = if slot == sel_slot && !slot_weapons.is_empty() {
+                card_w
+            } else {
+                bw
             };
-            let mut slot_x = start_x;
-            for slot in 1..=5u8 {
-                let mut slot_weapons: Vec<_> = state
-                    .weapons
-                    .values()
-                    .filter(|w| w.slot + 1 == slot && hud.owned.contains(&w.weapon_id))
-                    .collect();
-                slot_weapons.sort_by_key(|w| w.position);
 
-                let (bw, bh) = sprites
-                    .and_then(|sp| sp.sprite_size(&format!("bucket{slot}"), scale))
-                    .map_or((20.0 * scale, 20.0 * scale), |s| (s.x, s.y));
-                let card_w = slot_weapons
-                    .first()
-                    .and_then(|w| sprites.and_then(|sp| sp.weapon_card_size(&w.name, scale)))
-                    .map_or(170.0 * scale, |s| s.x);
-                let col_w = if slot == sel_slot && !slot_weapons.is_empty() {
-                    card_w
-                } else {
-                    bw
-                };
+            if let Some(sp) = sprites {
+                let _ = sp.draw_sprite(
+                    &painter,
+                    &format!("bucket{slot}"),
+                    Pos2::new(slot_x, top_y),
+                    scale,
+                    hud_additive_color(HUD_AMBER, 255),
+                );
+            }
 
-                if let Some(sp) = sprites {
-                    let _ = sp.draw_sprite(
-                        &painter,
-                        &format!("bucket{slot}"),
-                        Pos2::new(slot_x, top_y),
-                        scale,
-                        hud_additive_color(HUD_AMBER, 255),
-                    );
-                }
-
-                let mut wy = top_y + bh + 5.0 * scale;
-                if slot == sel_slot && !slot_weapons.is_empty() {
-                    for w in &slot_weapons {
-                        let has_ammo = slot_has_ammo(w);
-                        let base_rgb = if has_ammo {
-                            HUD_AMBER
-                        } else {
-                            Color32::from_rgb(255, 16, 16)
-                        };
-                        let a = if has_ammo { 192 } else { 128 };
-                        let tint = hud_additive_color(base_rgb, a);
-                        let is_hi = b.highlighted_weapon_id == Some(w.weapon_id);
-                        let card_h = sprites
-                            .and_then(|sp| sp.weapon_card_size(&w.name, scale))
-                            .map_or(45.0 * scale, |s| s.y);
-                        if let Some(sp) = sprites {
-                            if is_hi {
-                                let _ = sp.draw_sprite(
+            let mut wy = top_y + bh + 5.0 * scale;
+            if slot == sel_slot && !slot_weapons.is_empty() {
+                for w in &slot_weapons {
+                    let has_ammo = slot_has_ammo(w);
+                    let base_rgb = if has_ammo {
+                        HUD_AMBER
+                    } else {
+                        Color32::from_rgb(255, 16, 16)
+                    };
+                    let a = if has_ammo { 192 } else { 128 };
+                    let tint = hud_additive_color(base_rgb, a);
+                    let is_hi = b.highlighted_weapon_id == Some(w.weapon_id);
+                    let card_h = sprites
+                        .and_then(|sp| sp.weapon_card_size(&w.name, scale))
+                        .map_or(45.0 * scale, |s| s.y);
+                    if let Some(sp) = sprites {
+                        if is_hi {
+                            let _ = sp.draw_sprite(
+                                &painter,
+                                "selection",
+                                Pos2::new(slot_x, wy),
+                                scale,
+                                hud_additive_color(HUD_AMBER, 255),
+                            );
+                            if sp
+                                .draw_weapon_card_selected(
                                     &painter,
-                                    "selection",
+                                    &w.name,
                                     Pos2::new(slot_x, wy),
                                     scale,
-                                    hud_additive_color(HUD_AMBER, 255),
+                                    tint,
+                                )
+                                .is_none()
+                            {
+                                let _ = sp.draw_weapon_card(
+                                    &painter,
+                                    &w.name,
+                                    Pos2::new(slot_x, wy),
+                                    scale,
+                                    tint,
                                 );
-                                if sp
-                                    .draw_weapon_card_selected(&painter, &w.name, Pos2::new(slot_x, wy), scale, tint)
-                                    .is_none()
-                                {
-                                    let _ = sp.draw_weapon_card(&painter, &w.name, Pos2::new(slot_x, wy), scale, tint);
-                                }
-                            } else {
-                                let _ = sp.draw_weapon_card(&painter, &w.name, Pos2::new(slot_x, wy), scale, tint);
                             }
                         } else {
-                            let box_r = Rect::from_min_size(Pos2::new(slot_x, wy), Vec2::new(col_w, 22.0 * scale));
-                            painter.rect_filled(box_r, 0.0, tint);
-                            let short = w.name.strip_prefix("weapon_").unwrap_or(&w.name);
-                            painter.text(
-                                box_r.center(),
-                                egui::Align2::CENTER_CENTER,
-                                short,
-                                FontId::proportional(11.5 * scale),
-                                if is_hi { Color32::WHITE } else { HUD_AMBER },
+                            let _ = sp.draw_weapon_card(
+                                &painter,
+                                &w.name,
+                                Pos2::new(slot_x, wy),
+                                scale,
+                                tint,
                             );
                         }
-                        if w.ammo1_max > 0 && w.ammo1_type != 255 {
-                            let res = state.ammo.get(&w.ammo1_type).copied().unwrap_or(0);
-                            if res > 0 {
-                                let bar_w = 20.0 * scale;
-                                let bar_h = 4.0 * scale;
-                                let bx = slot_x + bar_w * 0.5;
-                                let end_x = draw_ammo_bar(
+                    } else {
+                        let box_r = Rect::from_min_size(
+                            Pos2::new(slot_x, wy),
+                            Vec2::new(col_w, 22.0 * scale),
+                        );
+                        painter.rect_filled(box_r, 0.0, tint);
+                        let short = w.name.strip_prefix("weapon_").unwrap_or(&w.name);
+                        painter.text(
+                            box_r.center(),
+                            egui::Align2::CENTER_CENTER,
+                            short,
+                            FontId::proportional(11.5 * scale),
+                            if is_hi { Color32::WHITE } else { HUD_AMBER },
+                        );
+                    }
+                    if w.ammo1_max > 0 && w.ammo1_type != 255 {
+                        let res = state.ammo.get(&w.ammo1_type).copied().unwrap_or(0);
+                        if res > 0 {
+                            let bar_w = 20.0 * scale;
+                            let bar_h = 4.0 * scale;
+                            let bx = slot_x + bar_w * 0.5;
+                            let end_x = draw_ammo_bar(
+                                &painter,
+                                bx,
+                                wy + 3.0 * scale,
+                                bar_w,
+                                bar_h,
+                                f32::from(res) / f32::from(w.ammo1_max.max(1)),
+                            );
+                            if w.ammo2_max > 0 && w.ammo2_type != 255 {
+                                let res2 = state.ammo.get(&w.ammo2_type).copied().unwrap_or(0);
+                                draw_ammo_bar(
                                     &painter,
-                                    bx,
+                                    end_x + 5.0 * scale,
                                     wy + 3.0 * scale,
                                     bar_w,
                                     bar_h,
-                                    f32::from(res) / f32::from(w.ammo1_max.max(1)),
+                                    f32::from(res2) / f32::from(w.ammo2_max.max(1)),
                                 );
-                                if w.ammo2_max > 0 && w.ammo2_type != 255 {
-                                    let res2 = state.ammo.get(&w.ammo2_type).copied().unwrap_or(0);
-                                    draw_ammo_bar(
-                                        &painter,
-                                        end_x + 5.0 * scale,
-                                        wy + 3.0 * scale,
-                                        bar_w,
-                                        bar_h,
-                                        f32::from(res2) / f32::from(w.ammo2_max.max(1)),
-                                    );
-                                }
                             }
                         }
-                        wy += card_h + 5.0 * scale;
                     }
-                } else {
-                    for w in &slot_weapons {
-                        let has_ammo = slot_has_ammo(w);
-                        let col = if has_ammo {
-                            hud_additive_color(HUD_AMBER, 128)
-                        } else {
-                            hud_additive_color(Color32::from_rgb(255, 16, 16), 96)
-                        };
-                        painter.rect_filled(
-                            Rect::from_min_size(Pos2::new(slot_x, wy), Vec2::new(bw, bh)),
-                            0.0,
-                            col,
-                        );
-                        wy += bh + 5.0 * scale;
-                    }
+                    wy += card_h + 5.0 * scale;
                 }
-                slot_x += col_w + 5.0 * scale;
-            }
-        } else {
-            let alpha = ((hud.weapon_switch_timer / 0.4).min(1.0) * 235.0) as u8;
-            let active_slot = extras
-                .buckets
-                .and_then(|b| b.active_slot)
-                .or_else(|| {
-                    state
-                        .current_weapon
-                        .and_then(|c| state.weapons.get(&c.weapon_id))
-                        .map(|w| w.slot + 1)
-                })
-                .unwrap_or(0);
-            if let Some(sp) = sprites {
-                for slot in 1..=5u8 {
-                    let has_slot = state
-                        .weapons
-                        .values()
-                        .any(|w| w.slot + 1 == slot && hud.owned.contains(&w.weapon_id));
-                    let a = if slot == active_slot {
-                        alpha
-                    } else if has_slot {
-                        ((f32::from(alpha)) * 0.65) as u8
+            } else {
+                for w in &slot_weapons {
+                    let has_ammo = slot_has_ammo(w);
+                    let col = if has_ammo {
+                        hud_additive_color(HUD_AMBER, 128)
                     } else {
-                        ((f32::from(alpha)) * 0.30) as u8
+                        hud_additive_color(Color32::from_rgb(255, 16, 16), 96)
                     };
-                    let col = hud_additive_color(HUD_AMBER, a);
-                    let _ = sp.draw_sprite(
-                        &painter,
-                        &format!("bucket{slot}"),
-                        Pos2::new(start_x + f32::from(slot - 1) * 25.0 * scale, top_y),
-                        scale,
+                    painter.rect_filled(
+                        Rect::from_min_size(Pos2::new(slot_x, wy), Vec2::new(bw, bh)),
+                        0.0,
                         col,
                     );
+                    wy += bh + 5.0 * scale;
                 }
             }
+            slot_x += col_w + 5.0 * scale;
         }
     }
 
@@ -2022,7 +2182,9 @@ fn draw_cs16_hud_impl(
         if let Some(sp) = sprites
             && let Some(empty_sz) = sp.sprite_size("flash_empty", scale)
         {
-            let full_h = sp.sprite_size("flash_full", scale).map_or(empty_sz.y, |s| s.y);
+            let full_h = sp
+                .sprite_size("flash_full", scale)
+                .map_or(empty_sz.y, |s| s.y);
             let fy = screen.top() + (empty_sz.y - full_h * 0.0) * 0.5;
             let fx = screen.right() - empty_sz.x * 1.5;
             let _ = sp.draw_sprite(&painter, "flash_empty", Pos2::new(fx, fy), scale, flash_col);
@@ -2049,14 +2211,21 @@ fn draw_cs16_hud_impl(
             let bar_w = 34.0 * scale;
             let bar_h = 4.0 * scale;
             painter.rect_filled(
-                Rect::from_min_size(Pos2::new(fx, fy + 24.0 * scale), Vec2::new(bar_w * frac, bar_h)),
+                Rect::from_min_size(
+                    Pos2::new(fx, fy + 24.0 * scale),
+                    Vec2::new(bar_w * frac, bar_h),
+                ),
                 0.0,
                 flash_col,
             );
         }
     }
 
-    let mut kf_y = if show_flashlight { 48.0 * scale } else { 16.0 * scale };
+    let mut kf_y = if show_flashlight {
+        48.0 * scale
+    } else {
+        16.0 * scale
+    };
     let name_of = |slot: u8| -> String {
         if slot == 0 {
             return "world".to_string();
@@ -2113,13 +2282,20 @@ fn draw_cs16_hud_impl(
                 && let Some(hs_sz) = sp.sprite_size("d_headshot", scale)
             {
                 cursor_x -= hs_sz.x;
-                let _ = sp.draw_sprite(&painter, "d_headshot", Pos2::new(cursor_x, kf_y), scale, spr_tint);
+                let _ = sp.draw_sprite(
+                    &painter,
+                    "d_headshot",
+                    Pos2::new(cursor_x, kf_y),
+                    scale,
+                    spr_tint,
+                );
                 cursor_x -= 4.0 * scale;
             }
             let d_spr = killfeed_sprite_name(&entry.weapon);
             if let Some(w_sz) = sp.sprite_size(&d_spr, scale) {
                 cursor_x -= w_sz.x;
-                let _ = sp.draw_sprite(&painter, &d_spr, Pos2::new(cursor_x, kf_y), scale, spr_tint);
+                let _ =
+                    sp.draw_sprite(&painter, &d_spr, Pos2::new(cursor_x, kf_y), scale, spr_tint);
                 drew_icon = true;
             }
         }
@@ -2166,9 +2342,8 @@ fn draw_cs16_hud_impl(
         && bar.duration > 0
     {
         let elapsed = (hud.now - bar.started_at).max(0.0) as f32;
-        let progress = (f32::from(bar.start_percent) / 100.0
-            + elapsed / f32::from(bar.duration))
-        .clamp(0.0, 1.0);
+        let progress = (f32::from(bar.start_percent) / 100.0 + elapsed / f32::from(bar.duration))
+            .clamp(0.0, 1.0);
         if progress < 1.0 {
             let bar_w = 220.0 * scale;
             let bar_h = 10.0 * scale;
@@ -2179,10 +2354,35 @@ fn draw_cs16_hud_impl(
             let border_col = hud_additive_color(HUD_AMBER, 80);
             let fill_col = hud_additive_color(HUD_AMBER, 160);
             let t = 1.0 * scale;
-            painter.rect_filled(Rect::from_min_size(bar_rect.min, Vec2::new(t, bar_h)), 0.0, border_col);
-            painter.rect_filled(Rect::from_min_size(Pos2::new(bar_rect.right() - t, bar_rect.top()), Vec2::new(t, bar_h)), 0.0, border_col);
-            painter.rect_filled(Rect::from_min_size(Pos2::new(bar_rect.left() + t, bar_rect.top()), Vec2::new(bar_w - 2.0 * t, t)), 0.0, border_col);
-            painter.rect_filled(Rect::from_min_size(Pos2::new(bar_rect.left() + t, bar_rect.bottom() - t), Vec2::new(bar_w - 2.0 * t, t)), 0.0, border_col);
+            painter.rect_filled(
+                Rect::from_min_size(bar_rect.min, Vec2::new(t, bar_h)),
+                0.0,
+                border_col,
+            );
+            painter.rect_filled(
+                Rect::from_min_size(
+                    Pos2::new(bar_rect.right() - t, bar_rect.top()),
+                    Vec2::new(t, bar_h),
+                ),
+                0.0,
+                border_col,
+            );
+            painter.rect_filled(
+                Rect::from_min_size(
+                    Pos2::new(bar_rect.left() + t, bar_rect.top()),
+                    Vec2::new(bar_w - 2.0 * t, t),
+                ),
+                0.0,
+                border_col,
+            );
+            painter.rect_filled(
+                Rect::from_min_size(
+                    Pos2::new(bar_rect.left() + t, bar_rect.bottom() - t),
+                    Vec2::new(bar_w - 2.0 * t, t),
+                ),
+                0.0,
+                border_col,
+            );
             let inner_w = (bar_w - 4.0 * scale).max(1.0);
             let inner_h = (bar_h - 4.0 * scale).max(1.0);
             let fill_w = (inner_w * progress).min(inner_w);
@@ -2211,10 +2411,28 @@ fn draw_cs16_hud_impl(
         };
         if extras.hud_centerid {
             let pos = Pos2::new(center_x, screen.center().y + 34.0 * scale);
-            hud_paint_text(ctx, &painter, &mut font_ctx, egui::Align2::CENTER_TOP, pos, &line, 14.5 * scale, col);
+            hud_paint_text(
+                ctx,
+                &painter,
+                &mut font_ctx,
+                egui::Align2::CENTER_TOP,
+                pos,
+                &line,
+                14.5 * scale,
+                col,
+            );
         } else {
             let pos = Pos2::new(16.0 * scale, bottom_y - 34.0 * scale);
-            hud_paint_text(ctx, &painter, &mut font_ctx, egui::Align2::LEFT_BOTTOM, pos, &line, 14.5 * scale, col);
+            hud_paint_text(
+                ctx,
+                &painter,
+                &mut font_ctx,
+                egui::Align2::LEFT_BOTTOM,
+                pos,
+                &line,
+                14.5 * scale,
+                col,
+            );
         }
     }
 
@@ -2317,7 +2535,11 @@ fn draw_cs16_hud_impl(
         ny += 16.0 * scale;
     }
     if extras.hud_saytext_internal {
-        let normal_col = Color32::from_rgb(extras.con_color[0], extras.con_color[1], extras.con_color[2]);
+        let normal_col = Color32::from_rgb(
+            extras.con_color[0],
+            extras.con_color[1],
+            extras.con_color[2],
+        );
         let green_col = CHAT_GREEN_COLOR;
         let mut cy = if !hud.alive || extras.observer_mode != 0 {
             screen.bottom() - 60.0 * scale
@@ -2385,26 +2607,40 @@ fn draw_cs16_hud_impl(
             msg.text.clone()
         };
         let Some((shown_text, alpha_f, typing)) = evaluate_dhud_text_fx(
-            &msg_text,
-            msg.effect,
-            fade_in,
-            hold,
-            fade_out,
-            fx_time,
-            elapsed,
+            &msg_text, msg.effect, fade_in, hold, fade_out, fx_time, elapsed,
         ) else {
             continue;
         };
         if alpha_f <= 0.01 {
             continue;
         }
-        let nx = if msg.x < 0 { 0.5 } else { (f32::from(msg.x) / 8192.0).clamp(0.05, 0.95) };
-        let ny = if msg.y < 0 { 0.5 } else { (f32::from(msg.y) / 8192.0).clamp(0.05, 0.95) };
-        let pos = Pos2::new(screen.left() + screen.width() * nx, screen.top() + screen.height() * ny);
+        let nx = if msg.x < 0 {
+            0.5
+        } else {
+            (f32::from(msg.x) / 8192.0).clamp(0.05, 0.95)
+        };
+        let ny = if msg.y < 0 {
+            0.5
+        } else {
+            (f32::from(msg.y) / 8192.0).clamp(0.05, 0.95)
+        };
+        let pos = Pos2::new(
+            screen.left() + screen.width() * nx,
+            screen.top() + screen.height() * ny,
+        );
         let base_c = if typing { msg.color2 } else { msg.color1 };
         let a = (alpha_f.clamp(0.0, 1.0) * f32::from(base_c[3].max(180))) as u8;
         let col = Color32::from_rgba_unmultiplied(base_c[0], base_c[1], base_c[2], a);
-        hud_paint_text(ctx, &painter, &mut font_ctx, egui::Align2::CENTER_CENTER, pos, &shown_text, 16.0 * scale, col);
+        hud_paint_text(
+            ctx,
+            &painter,
+            &mut font_ctx,
+            egui::Align2::CENTER_CENTER,
+            pos,
+            &shown_text,
+            16.0 * scale,
+            col,
+        );
     }
 
     // Spectator bars are drawn exclusively by `SpectatorVguiUi` (`Spectator.res`).
@@ -2475,7 +2711,10 @@ fn parse_saytext_spans(
         }
     }
     if !buf.is_empty() {
-        spans.push(SayTextSpan { color: cur_col, text: buf });
+        spans.push(SayTextSpan {
+            color: cur_col,
+            text: buf,
+        });
     }
     spans
 }
@@ -2504,7 +2743,11 @@ fn hud_measure_text(
         }
     }
     painter
-        .layout_no_wrap(text.to_string(), FontId::proportional(fallback_size), Color32::WHITE)
+        .layout_no_wrap(
+            text.to_string(),
+            FontId::proportional(fallback_size),
+            Color32::WHITE,
+        )
         .size()
 }
 
@@ -2720,17 +2963,36 @@ fn draw_radar_with_extras(
                 Color32::from_rgb(200, 200, 200),
             );
         } else {
-            painter.circle_filled(center, radius, Color32::from_rgba_unmultiplied(12, 16, 12, 232));
+            painter.circle_filled(
+                center,
+                radius,
+                Color32::from_rgba_unmultiplied(12, 16, 12, 232),
+            );
             if let Some(ov) = extras.overview {
                 let uv = ov.spec.world_to_overview_uv([hud.eye.x, hud.eye.y]);
                 let span = 0.14f32;
                 let uv_rect = Rect::from_min_max(
-                    Pos2::new((uv[0] - span).clamp(0.0, 1.0 - span * 2.0), (uv[1] - span).clamp(0.0, 1.0 - span * 2.0)),
-                    Pos2::new((uv[0] + span).clamp(span * 2.0, 1.0), (uv[1] + span).clamp(span * 2.0, 1.0)),
+                    Pos2::new(
+                        (uv[0] - span).clamp(0.0, 1.0 - span * 2.0),
+                        (uv[1] - span).clamp(0.0, 1.0 - span * 2.0),
+                    ),
+                    Pos2::new(
+                        (uv[0] + span).clamp(span * 2.0, 1.0),
+                        (uv[1] + span).clamp(span * 2.0, 1.0),
+                    ),
                 );
-                painter.image(ov.texture.id(), rect, uv_rect, Color32::from_rgba_unmultiplied(190, 225, 190, 150));
+                painter.image(
+                    ov.texture.id(),
+                    rect,
+                    uv_rect,
+                    Color32::from_rgba_unmultiplied(190, 225, 190, 150),
+                );
             }
-            painter.circle_stroke(center, radius - 0.5, Stroke::new(1.5, Color32::from_rgb(200, 200, 200)));
+            painter.circle_stroke(
+                center,
+                radius - 0.5,
+                Stroke::new(1.5, Color32::from_rgb(200, 200, 200)),
+            );
         }
     } else if let Some(tex) = sprites.and_then(|s| s.radar_tex.as_ref()) {
         painter.image(
@@ -2740,12 +3002,26 @@ fn draw_radar_with_extras(
             Color32::from_rgb_additive(25, 75, 25),
         );
     } else {
-        painter.circle_filled(center, radius, Color32::from_rgba_unmultiplied(25, 75, 25, 155));
-        painter.circle_stroke(center, radius - 0.5, Stroke::new(1.2, Color32::from_rgba_unmultiplied(90, 215, 90, 195)));
+        painter.circle_filled(
+            center,
+            radius,
+            Color32::from_rgba_unmultiplied(25, 75, 25, 155),
+        );
+        painter.circle_stroke(
+            center,
+            radius - 0.5,
+            Stroke::new(1.2, Color32::from_rgba_unmultiplied(90, 215, 90, 195)),
+        );
         let cone_col = Color32::from_rgba_unmultiplied(165, 255, 165, 120);
         let diag = radius * 0.707;
-        painter.line_segment([center, Pos2::new(center.x - diag, center.y - diag)], Stroke::new(1.0, cone_col));
-        painter.line_segment([center, Pos2::new(center.x + diag, center.y - diag)], Stroke::new(1.0, cone_col));
+        painter.line_segment(
+            [center, Pos2::new(center.x - diag, center.y - diag)],
+            Stroke::new(1.0, cone_col),
+        );
+        painter.line_segment(
+            [center, Pos2::new(center.x + diag, center.y - diag)],
+            Stroke::new(1.0, cone_col),
+        );
     }
 
     let yaw = hud.yaw_deg.to_radians();
@@ -2812,7 +3088,18 @@ fn draw_radar_with_extras(
         let iv = if planted { 0.15 } else { 0.35 };
         if ((hud.time_sec / iv) as i32) % 2 == 0 {
             let flags = if planted { 9 } else { 1 };
-            draw_radar_dot(painter, ix, iy, pos.z - hud.eye.z, dot_sz, flags, 250, 0, 0, 245);
+            draw_radar_dot(
+                painter,
+                ix,
+                iy,
+                pos.z - hud.eye.z,
+                dot_sz,
+                flags,
+                250,
+                0,
+                0,
+                245,
+            );
         }
     }
 }
@@ -2887,22 +3174,40 @@ fn draw_sniper_scope(painter: &egui::Painter, screen: Rect, sprites: Option<&Hud
             uv_full,
             Color32::WHITE,
         );
+    } else if let Some((tex, _)) = sprites.and_then(|s| s.sniper_scope_spr.as_ref()) {
+        let uv_full = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+        painter.image(
+            tex.id(),
+            Rect::from_min_max(Pos2::new(left, top), Pos2::new(right, bottom)),
+            uv_full,
+            Color32::WHITE,
+        );
     } else {
         // Headless fallback when VFS scope textures are absent: clean black corner mask, no mil-dots.
         let ring_thick = half * 0.48;
-        painter.circle_stroke(center, half + ring_thick * 0.5, Stroke::new(ring_thick, black));
+        painter.circle_stroke(
+            center,
+            half + ring_thick * 0.5,
+            Stroke::new(ring_thick, black),
+        );
     }
 
     // Full-screen 1 px black horizontal and vertical hairlines (zero mil-dots, zero red center dot).
     let hx_y = center.y.floor();
     let vx_x = center.x.floor();
     painter.rect_filled(
-        Rect::from_min_max(Pos2::new(screen.left(), hx_y), Pos2::new(screen.right(), hx_y + 1.0)),
+        Rect::from_min_max(
+            Pos2::new(screen.left(), hx_y),
+            Pos2::new(screen.right(), hx_y + 1.0),
+        ),
         0.0,
         black,
     );
     painter.rect_filled(
-        Rect::from_min_max(Pos2::new(vx_x, screen.top()), Pos2::new(vx_x + 1.0, screen.bottom())),
+        Rect::from_min_max(
+            Pos2::new(vx_x, screen.top()),
+            Pos2::new(vx_x + 1.0, screen.bottom()),
+        ),
         0.0,
         black,
     );
@@ -2934,7 +3239,10 @@ pub fn draw_voice_speakers(
     ));
     let mut labels: Vec<(String, Color32)> = Vec::new();
     if local_talking {
-        labels.push(("[MIC] SPEAKING".to_string(), Color32::from_rgb(255, 180, 30)));
+        labels.push((
+            "[MIC] SPEAKING".to_string(),
+            Color32::from_rgb(255, 180, 30),
+        ));
     }
     for &slot in speakers {
         let label = names
@@ -2961,7 +3269,13 @@ pub fn draw_voice_speakers(
             egui::StrokeKind::Inside,
         );
         let pos = Pos2::new(rect.left() + 8.0, rect.center().y.floor());
-        painter.text(pos + Vec2::new(1.0, 1.0), egui::Align2::LEFT_CENTER, &text, font.clone(), shadow);
+        painter.text(
+            pos + Vec2::new(1.0, 1.0),
+            egui::Align2::LEFT_CENTER,
+            &text,
+            font.clone(),
+            shadow,
+        );
         painter.text(pos, egui::Align2::LEFT_CENTER, text, font.clone(), color);
         y -= 24.0;
     }
@@ -3084,10 +3398,16 @@ mod tests {
             CHAT_GREEN_COLOR,
         );
         assert_eq!(inline.len(), 4);
-        assert_eq!((inline[0].color, inline[0].text.as_str()), (normal, "(CT) "));
+        assert_eq!(
+            (inline[0].color, inline[0].text.as_str()),
+            (normal, "(CT) ")
+        );
         assert_eq!((inline[1].color, inline[1].text.as_str()), (ct, "Bob"));
         assert_eq!((inline[2].color, inline[2].text.as_str()), (normal, " :  "));
-        assert_eq!((inline[3].color, inline[3].text.as_str()), (CHAT_GREEN_COLOR, "greenstill_green"));
+        assert_eq!(
+            (inline[3].color, inline[3].text.as_str()),
+            (CHAT_GREEN_COLOR, "greenstill_green")
+        );
     }
 
     #[test]
@@ -3256,8 +3576,18 @@ mod tests {
     #[test]
     fn deathnotice_and_saytext_expire_and_respect_zero_cvar() {
         let feed = vec![
-            DeathNotice { killer: 1, victim: 2, headshot: false, weapon: "ak47".into() },
-            DeathNotice { killer: 2, victim: 3, headshot: true, weapon: "usp".into() },
+            DeathNotice {
+                killer: 1,
+                victim: 2,
+                headshot: false,
+                weapon: "ak47".into(),
+            },
+            DeathNotice {
+                killer: 2,
+                victim: 3,
+                headshot: true,
+                weapon: "usp".into(),
+            },
         ];
         let times = [1.0, 6.0];
         let active = filter_active_death_notices(&feed, Some(&times), 10.0, 6.0);
@@ -3266,8 +3596,14 @@ mod tests {
         assert!(filter_active_death_notices(&feed, Some(&times), 10.0, 0.0).is_empty());
 
         let chat = vec![
-            HudChatEntry { text: "old".into(), team: None },
-            HudChatEntry { text: "fresh".into(), team: None },
+            HudChatEntry {
+                text: "old".into(),
+                team: None,
+            },
+            HudChatEntry {
+                text: "fresh".into(),
+                team: None,
+            },
         ];
         let chat_times = [2.0, 7.0];
         let active_chat = filter_active_chat_entries(&chat, Some(&chat_times), 10.0, 5.0);
@@ -3303,8 +3639,14 @@ mod tests {
             assert!(!spr.frames.is_empty());
             assert_eq!(spr.tex_format, SpriteTexFormat::AlphaTest);
             let loaded = HudSprites::load(&ctx, &vfs);
-            assert!(loaded.has_scope_arcs(), "scope_arc*.tga must load in HudSprites");
-            assert!(loaded.has_sniper_scope_sprite(), "sniper_scope.spr must load in HudSprites");
+            assert!(
+                loaded.has_scope_arcs(),
+                "scope_arc*.tga must load in HudSprites"
+            );
+            assert!(
+                loaded.has_sniper_scope_sprite(),
+                "sniper_scope.spr must load in HudSprites"
+            );
             sprites = Some(loaded);
         } else {
             eprintln!("SKIPPED retail sniper_scope.spr VFS check: CS16_GAMEDIR not available");
@@ -3328,7 +3670,10 @@ mod tests {
         let red = Color32::from_rgb(230, 30, 20);
         for sh in shapes {
             if let egui::epaint::Shape::Circle(c) = sh {
-                assert_ne!(c.fill, red, "sniper scope must not draw an invented red center dot");
+                assert_ne!(
+                    c.fill, red,
+                    "sniper scope must not draw an invented red center dot"
+                );
             }
         }
     }

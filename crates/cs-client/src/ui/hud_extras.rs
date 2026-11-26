@@ -218,7 +218,27 @@ pub fn damage_hazard_icons(bits: u32) -> Vec<&'static str> {
     out
 }
 
-/// Weapon bucket selector state (`WeaponList` + `hud_fastswitch 0` two-step confirm).
+/// GoldSrc weapon selection bucket sound cues (`CHudAmmo` `wpn_*.wav`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeaponBucketSound {
+    HudOn,
+    MoveSelect,
+    Select,
+    DenySelect,
+}
+
+impl WeaponBucketSound {
+    pub fn vfs_path(self) -> &'static str {
+        match self {
+            Self::HudOn => "common/wpn_hudon.wav",
+            Self::MoveSelect => "common/wpn_moveselect.wav",
+            Self::Select => "common/wpn_select.wav",
+            Self::DenySelect => "common/wpn_denyselect.wav",
+        }
+    }
+}
+
+/// Weapon bucket selector state (`WeaponList` + `hud_fastswitch` 0/1/2 confirm).
 #[derive(Debug, Clone, Default)]
 pub struct WeaponBucketState {
     pub active_slot: Option<u8>,
@@ -234,6 +254,23 @@ impl WeaponBucketState {
         slot: u8,
         fastswitch: bool,
     ) -> Option<String> {
+        let mode = if fastswitch { 1 } else { 0 };
+        self.on_slot_press_mode(hud, owned, slot, mode).0
+    }
+
+    /// Authentic CS 1.6 `CHudAmmo::SlotInput`:
+    /// - `hud_fastswitch 0`: always opens/cycles the top bucket bar (`active_slot = Some(slot)`)
+    ///   and requires `MOUSE1` (`confirm_selection`) to equip.
+    /// - `hud_fastswitch 1`: equips immediately WITHOUT opening the top bar when the slot has 1
+    ///   weapon; opens/cycles the top bucket bar when the slot holds multiple weapons (e.g. grenades).
+    /// - `hud_fastswitch >= 2`: always equips immediately WITHOUT opening the top bar.
+    pub fn on_slot_press_mode(
+        &mut self,
+        hud: &HudState,
+        owned: &HashSet<u8>,
+        slot: u8,
+        fastswitch_mode: i32,
+    ) -> (Option<String>, Option<WeaponBucketSound>) {
         let mut slot_weapons: Vec<_> = hud
             .weapons
             .values()
@@ -241,9 +278,13 @@ impl WeaponBucketState {
             .collect();
         slot_weapons.sort_by_key(|w| w.position);
         if slot_weapons.is_empty() {
-            return None;
+            return (None, Some(WeaponBucketSound::DenySelect));
         }
-        let next_w = match self.highlighted_weapon_id.filter(|_| self.active_slot == Some(slot)) {
+        let was_open = self.active_slot.is_some();
+        let next_w = match self
+            .highlighted_weapon_id
+            .filter(|_| self.active_slot == Some(slot))
+        {
             Some(cur_id) => {
                 let pos = slot_weapons
                     .iter()
@@ -253,20 +294,35 @@ impl WeaponBucketState {
             }
             None => {
                 let cur_active = hud.current_weapon.map(|c| c.weapon_id);
-                if slot_weapons.len() > 1 && cur_active == Some(slot_weapons[0].weapon_id) {
-                    slot_weapons[1]
+                if let Some(cur_idx) =
+                    cur_active.and_then(|id| slot_weapons.iter().position(|w| w.weapon_id == id))
+                {
+                    if slot_weapons.len() > 1 {
+                        slot_weapons[(cur_idx + 1) % slot_weapons.len()]
+                    } else {
+                        slot_weapons[0]
+                    }
                 } else {
                     slot_weapons[0]
                 }
             }
         };
-        self.active_slot = Some(slot);
-        self.highlighted_weapon_id = Some(next_w.weapon_id);
-        self.timer_sec = 2.5;
-        if fastswitch {
-            Some(next_w.name.clone())
+        let immediate = fastswitch_mode >= 2 || (fastswitch_mode == 1 && slot_weapons.len() == 1);
+        if immediate {
+            self.active_slot = None;
+            self.highlighted_weapon_id = Some(next_w.weapon_id);
+            self.timer_sec = 0.0;
+            (Some(next_w.name.clone()), Some(WeaponBucketSound::Select))
         } else {
-            None
+            self.active_slot = Some(slot);
+            self.highlighted_weapon_id = Some(next_w.weapon_id);
+            self.timer_sec = 2.5;
+            let snd = if was_open {
+                WeaponBucketSound::MoveSelect
+            } else {
+                WeaponBucketSound::HudOn
+            };
+            (None, Some(snd))
         }
     }
 
@@ -275,6 +331,11 @@ impl WeaponBucketState {
         self.active_slot = None;
         self.timer_sec = 0.0;
         hud.weapons.get(&id).map(|w| w.name.clone())
+    }
+
+    pub fn close(&mut self) {
+        self.active_slot = None;
+        self.timer_sec = 0.0;
     }
 
     pub fn step(&mut self, dt: f32) {
@@ -369,9 +430,7 @@ pub fn draw_overview_map(
     for (&slot, &pos) in &hud.radar {
         let p = to_screen([pos.x, pos.y]);
         painter.circle_filled(p, 4.0, Color32::from_rgb(130, 220, 255));
-        if draw_names
-            && let Some(name) = names.get(&slot.saturating_sub(1))
-        {
+        if draw_names && let Some(name) = names.get(&slot.saturating_sub(1)) {
             painter.text(
                 p + Vec2::new(6.0, -4.0),
                 egui::Align2::LEFT_CENTER,
@@ -402,7 +461,10 @@ pub fn draw_overview_map(
     if draw_cones {
         let rad = local_yaw_deg.to_radians();
         let dir = Vec2::new(rad.cos(), -rad.sin()) * 26.0;
-        painter.line_segment([me, me + dir], Stroke::new(1.5, Color32::from_rgb(255, 220, 80)));
+        painter.line_segment(
+            [me, me + dir],
+            Stroke::new(1.5, Color32::from_rgb(255, 220, 80)),
+        );
     }
 }
 
@@ -418,4 +480,116 @@ pub fn format_hud_text_entry(
         .map(|e| e.text.as_str())
         .unwrap_or(raw);
     crate::hudtext::format_message_with_titles(base, args, loc, titles)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::input::step_inventory_cycle_mode;
+    use cs_clientcore::hud::{CurrentWeapon, WeaponInfo};
+
+    fn sample_hud() -> (HudState, HashSet<u8>) {
+        let mut hud = HudState::default();
+        hud.weapons.insert(
+            28,
+            WeaponInfo {
+                weapon_id: 28,
+                name: "weapon_ak47".into(),
+                slot: 0,
+                position: 1,
+                ammo1_type: 2,
+                ammo1_max: 90,
+                ammo2_type: 255,
+                ammo2_max: 255,
+                flags: 0,
+            },
+        );
+        hud.weapons.insert(
+            4,
+            WeaponInfo {
+                weapon_id: 4,
+                name: "weapon_hegrenade".into(),
+                slot: 3,
+                position: 1,
+                ammo1_type: 12,
+                ammo1_max: 1,
+                ammo2_type: 255,
+                ammo2_max: 255,
+                flags: 0,
+            },
+        );
+        hud.weapons.insert(
+            25,
+            WeaponInfo {
+                weapon_id: 25,
+                name: "weapon_flashbang".into(),
+                slot: 3,
+                position: 2,
+                ammo1_type: 11,
+                ammo1_max: 2,
+                ammo2_type: 255,
+                ammo2_max: 255,
+                flags: 0,
+            },
+        );
+        hud.current_weapon = Some(CurrentWeapon {
+            weapon_id: 28,
+            clip: 30,
+            is_active: true,
+        });
+        let owned = HashSet::from([28u8, 4, 25]);
+        (hud, owned)
+    }
+
+    #[test]
+    fn weapon_buckets_respect_hud_fastswitch_0_1_2_and_play_wpn_sounds() {
+        let (hud, owned) = sample_hud();
+        let mut b = WeaponBucketState::default();
+
+        // Empty slot 2 -> deny sound, bucket stays closed.
+        assert_eq!(
+            b.on_slot_press_mode(&hud, &owned, 2, 0),
+            (None, Some(WeaponBucketSound::DenySelect))
+        );
+        assert!(b.active_slot.is_none());
+
+        // hud_fastswitch 0: slot 1 opens bucket (HudOn) and waits for MOUSE1 confirm.
+        assert_eq!(
+            b.on_slot_press_mode(&hud, &owned, 1, 0),
+            (None, Some(WeaponBucketSound::HudOn))
+        );
+        assert_eq!(b.active_slot, Some(1));
+        assert_eq!(b.confirm_selection(&hud).as_deref(), Some("weapon_ak47"));
+        assert!(b.active_slot.is_none());
+
+        // hud_fastswitch 1: single-item slot 1 equips immediately WITHOUT opening bucket.
+        assert_eq!(
+            b.on_slot_press_mode(&hud, &owned, 1, 1),
+            (Some("weapon_ak47".into()), Some(WeaponBucketSound::Select))
+        );
+        assert!(b.active_slot.is_none());
+
+        // hud_fastswitch 1: multi-item slot 4 (HE + Flash) opens bucket and cycles with MoveSelect.
+        assert_eq!(
+            b.on_slot_press_mode(&hud, &owned, 4, 1),
+            (None, Some(WeaponBucketSound::HudOn))
+        );
+        assert_eq!(b.active_slot, Some(4));
+        assert_eq!(
+            b.on_slot_press_mode(&hud, &owned, 4, 1),
+            (None, Some(WeaponBucketSound::MoveSelect))
+        );
+
+        // hud_fastswitch 1: wheel (`invnext`) opens bucket; hud_fastswitch 2 equips immediately.
+        b.close();
+        assert_eq!(
+            step_inventory_cycle_mode(&mut b, &hud, &owned, true, 1),
+            (None, Some(WeaponBucketSound::HudOn))
+        );
+        assert!(b.active_slot.is_some());
+        let (pick2, snd2) = step_inventory_cycle_mode(&mut b, &hud, &owned, true, 2);
+        assert!(pick2.is_some());
+        assert_eq!(snd2, Some(WeaponBucketSound::Select));
+        assert!(b.active_slot.is_none());
+    }
 }

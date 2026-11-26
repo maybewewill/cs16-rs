@@ -93,24 +93,32 @@ impl CrosshairState {
         }
     }
 
-    /// Compute gap, bar length, and alpha matching `client.dll` `FUN_10043ff0`.
+    /// Compute gap, bar length, and alpha matching `client.dll` `FUN_10043ff0` at GoldSrc 100 Hz (`dt = 0.01`).
     pub fn compute_geometry(
         &mut self,
         inputs: &CrosshairInputs,
         size_cvar: &str,
         screen_w: i32,
     ) -> CrosshairGeometry {
+        self.compute_geometry_dt(inputs, size_cvar, screen_w, 0.01)
+    }
+
+    /// Compute gap, bar length, and alpha matching `client.dll` `FUN_10043ff0`, with frame-rate-
+    /// independent exponential recovery anchored to GoldSrc 100 Hz (`dt = 0.01`).
+    pub fn compute_geometry_dt(
+        &mut self,
+        inputs: &CrosshairInputs,
+        size_cvar: &str,
+        screen_w: i32,
+        dt: f32,
+    ) -> CrosshairGeometry {
         const ACC_CODE: [u8; 30] = [
-            0, 8, 8, 1, 1, 1, 2, 3,
-            8, 8, 0, 2, 1, 3, 4, 5,
-            6, 8, 2, 3, 1, 7, 2, 8,
-            1, 0, 3, 3, 1, 3,
+            0, 8, 8, 1, 1, 1, 2, 3, 8, 8, 0, 2, 1, 3, 4, 5, 6, 8, 2, 3, 1, 7, 2, 8, 1, 0, 3, 3, 1,
+            3,
         ];
         const SPD_CODE: [u8; 30] = [
-            0, 3, 3, 3, 3, 3, 3, 1,
-            3, 3, 0, 3, 3, 1, 1, 0,
-            0, 3, 3, 1, 3, 1, 3, 3,
-            3, 0, 1, 1, 3, 2,
+            0, 3, 3, 3, 3, 3, 3, 1, 3, 3, 0, 3, 3, 1, 1, 0, 0, 3, 3, 1, 3, 1, 3, 3, 3, 0, 1, 1, 3,
+            2,
         ];
         const SPD_THRESH: [i32; 4] = [0, 140, 170, 0];
 
@@ -156,8 +164,19 @@ impl CrosshairState {
             if inputs.shots_fired < self.last_shots_fired {
                 self.last_shots_fired = inputs.shots_fired;
             }
-            self.alpha = (self.alpha + 2).min(255);
-            self.crosshair_dist -= self.crosshair_dist * 0.013 + 0.1;
+            let safe_dt = if dt.is_finite() {
+                dt.clamp(0.0, 0.1)
+            } else {
+                0.01
+            };
+            let steps = safe_dt * 100.0;
+            if steps > 0.0 {
+                let alpha_step = (2.0 * steps).round().max(1.0) as i32;
+                self.alpha = (self.alpha + alpha_step).min(255);
+                // Exact continuous form of `d_{n+1} = 0.987 * d_n - 0.1` per 10ms tick.
+                let decay = 0.987_f32.powf(steps);
+                self.crosshair_dist = self.crosshair_dist * decay - 0.1 * ((1.0 - decay) / 0.013);
+            }
         }
 
         let base_dist = distance as f32;
@@ -227,13 +246,24 @@ pub fn draw_crosshair_vgui(
     state: &mut CrosshairState,
     inputs: &CrosshairInputs,
 ) {
+    draw_crosshair_vgui_dt(ctx, cvars, state, inputs, 0.01);
+}
+
+/// Frame-rate-independent variant of [`draw_crosshair_vgui`] accepting live frame `dt` seconds.
+pub fn draw_crosshair_vgui_dt(
+    ctx: &egui::Context,
+    cvars: &CVarRegistry,
+    state: &mut CrosshairState,
+    inputs: &CrosshairInputs,
+    dt: f32,
+) {
     if !cvars.get_bool("crosshair") {
         return;
     }
     let screen = ctx.content_rect();
     let sw = screen.width().round() as i32;
     let sh = screen.height().round() as i32;
-    let geom = state.compute_geometry(inputs, cvars.get_str("cl_crosshair_size"), sw);
+    let geom = state.compute_geometry_dt(inputs, cvars.get_str("cl_crosshair_size"), sw, dt);
     let color = crosshair_color(cvars, inputs.night_vision, geom.alpha);
     let dot = cvars.get_bool("cl_crosshair_dot");
     let outline = cvars.get_bool("cl_crosshair_outline");
@@ -265,7 +295,10 @@ pub fn draw_crosshair_vgui(
         ));
     }
     if dot {
-        rects.push(egui::Rect::from_min_size(Pos2::new(cx, cy), egui::vec2(1.0, 1.0)));
+        rects.push(egui::Rect::from_min_size(
+            Pos2::new(cx, cy),
+            egui::vec2(1.0, 1.0),
+        ));
     }
     if outline {
         for r in &rects {
@@ -339,7 +372,8 @@ pub fn draw_showkeys(ctx: &egui::Context, cvars: &CVarRegistry, keys: &KeyDispla
         ("DUCK", keys.duck, 42.0),
     ];
     let gap = 3.0;
-    let total_w: f32 = items.iter().map(|(_, _, w)| *w).sum::<f32>() + gap * (items.len() as f32 - 1.0);
+    let total_w: f32 =
+        items.iter().map(|(_, _, w)| *w).sum::<f32>() + gap * (items.len() as f32 - 1.0);
     let box_h = 18.0;
     let mut x = (screen.center().x - total_w * 0.5).floor();
     let top_y = (screen.bottom() - 102.0 - box_h).floor();
@@ -403,7 +437,8 @@ pub fn draw_ljstats(
     ));
     let font = FontId::monospace(12.5);
     let label = stats.format_summary();
-    let galley = painter.layout_no_wrap(label.clone(), font.clone(), Color32::from_rgb(255, 180, 30));
+    let galley =
+        painter.layout_no_wrap(label.clone(), font.clone(), Color32::from_rgb(255, 180, 30));
     let pad_x = 8.0;
     let pad_y = 3.0;
     let box_w = (galley.size().x + pad_x * 2.0).ceil();
@@ -478,7 +513,13 @@ pub fn draw_showpos(ctx: &egui::Context, cvars: &CVarRegistry, t: &FrameTelemetr
     let x = screen.right() - 12.0;
     for (idx, line) in lines.iter().enumerate() {
         let pos = Pos2::new(x, screen.top() + 8.0 + (idx as f32) * 15.0);
-        painter.text(pos + egui::vec2(1.0, 1.0), egui::Align2::RIGHT_TOP, line, font.clone(), shadow);
+        painter.text(
+            pos + egui::vec2(1.0, 1.0),
+            egui::Align2::RIGHT_TOP,
+            line,
+            font.clone(),
+            shadow,
+        );
         painter.text(pos, egui::Align2::RIGHT_TOP, line, font.clone(), white);
     }
 }
@@ -502,12 +543,23 @@ pub fn draw_r_speeds(ctx: &egui::Context, cvars: &CVarRegistry, t: &FrameTelemet
         t.map_name, t.draw_calls, t.triangles, t.frame_ms
     );
     let pos = Pos2::new(screen.right() - 12.0, screen.top() + 64.0);
-    painter.text(pos + egui::vec2(1.0, 1.0), egui::Align2::RIGHT_TOP, &line, font.clone(), shadow);
+    painter.text(
+        pos + egui::vec2(1.0, 1.0),
+        egui::Align2::RIGHT_TOP,
+        &line,
+        font.clone(),
+        shadow,
+    );
     painter.text(pos, egui::Align2::RIGHT_TOP, &line, font, white);
 }
 
 /// Draw classic CS 1.6 `net_graph 1/2/3` without live NetChan ring data.
-pub fn draw_net_graph(ctx: &egui::Context, cvars: &CVarRegistry, t: &FrameTelemetry<'_>, palette: VguiPalette) {
+pub fn draw_net_graph(
+    ctx: &egui::Context,
+    cvars: &CVarRegistry,
+    t: &FrameTelemetry<'_>,
+    palette: VguiPalette,
+) {
     draw_net_graph_with_telemetry(ctx, cvars, t, None, palette);
 }
 
@@ -557,7 +609,11 @@ pub fn draw_net_graph_with_telemetry(
     let line_h = 14.0;
     let text_top = screen.bottom() - 8.0 - 4.0 * line_h;
 
-    let fps_val = if t.fps.is_finite() { t.fps.max(0.0) } else { 0.0 };
+    let fps_val = if t.fps.is_finite() {
+        t.fps.max(0.0)
+    } else {
+        0.0
+    };
     let ping_ms = net.map_or(0.0, NetGraphTelemetry::ping_ms).max(0.0);
     let last_in = net.map_or(0, NetGraphTelemetry::last_in_bytes);
     let in_kbs = net.map_or(0.0, NetGraphTelemetry::in_kbs);
@@ -576,7 +632,13 @@ pub fn draw_net_graph_with_telemetry(
     ];
     for (idx, line) in rows.iter().enumerate() {
         let pos = Pos2::new(x, text_top + (idx as f32) * line_h);
-        painter.text(pos + egui::vec2(1.0, 1.0), egui::Align2::LEFT_TOP, line, font.clone(), shadow);
+        painter.text(
+            pos + egui::vec2(1.0, 1.0),
+            egui::Align2::LEFT_TOP,
+            line,
+            font.clone(),
+            shadow,
+        );
         painter.text(pos, egui::Align2::LEFT_TOP, line, font.clone(), text_color);
     }
 
@@ -650,7 +712,10 @@ pub fn draw_net_graph_with_telemetry(
                     Color32::from_rgba_unmultiplied(255, 0, 0, 200)
                 };
                 painter.rect_filled(
-                    egui::Rect::from_min_size(Pos2::new(col_x, graph_bottom - 3.0), egui::vec2(1.0, 2.0)),
+                    egui::Rect::from_min_size(
+                        Pos2::new(col_x, graph_bottom - 3.0),
+                        egui::vec2(1.0, 2.0),
+                    ),
                     0.0,
                     dot_col,
                 );
@@ -717,20 +782,29 @@ pub fn draw_net_graph_with_telemetry(
                     let top_y = ping_bottom - bar_h;
                     if is_ping && !solid {
                         painter.rect_filled(
-                            egui::Rect::from_min_size(Pos2::new(col_x, top_y), egui::vec2(1.0, 1.0)),
+                            egui::Rect::from_min_size(
+                                Pos2::new(col_x, top_y),
+                                egui::vec2(1.0, 1.0),
+                            ),
                             0.0,
                             col,
                         );
                     } else if is_ping {
                         painter.rect_filled(
-                            egui::Rect::from_min_size(Pos2::new(col_x, top_y), egui::vec2(1.0, bar_h)),
+                            egui::Rect::from_min_size(
+                                Pos2::new(col_x, top_y),
+                                egui::vec2(1.0, bar_h),
+                            ),
                             0.0,
                             col,
                         );
                     } else {
                         // Drop / invalid / skipped spike (`cl_netgraph.c:520-533`).
                         painter.rect_filled(
-                            egui::Rect::from_min_size(Pos2::new(col_x, top_y), egui::vec2(1.0, bar_h.min(2.0))),
+                            egui::Rect::from_min_size(
+                                Pos2::new(col_x, top_y),
+                                egui::vec2(1.0, bar_h.min(2.0)),
+                            ),
                             0.0,
                             col,
                         );
@@ -770,10 +844,17 @@ pub fn draw_net_graph_with_telemetry(
             if let Some(ng) = net {
                 let seq = latest_in.wrapping_sub(a as u32);
                 let sample = ng.incoming_sample(seq);
-                if sample.sequence == seq && sample.status == PacketSampleStatus::Valid && sample.bytes > 0 {
+                if sample.sequence == seq
+                    && sample.status == PacketSampleStatus::Valid
+                    && sample.bytes > 0
+                {
                     let seg_h = ((sample.bytes as f32) / net_scale).clamp(1.0, 48.0);
                     let top_y = (data_base_y - seg_h).max(1.0);
-                    let draw_h = if solid { (data_base_y - top_y).max(1.0) } else { 1.0 };
+                    let draw_h = if solid {
+                        (data_base_y - top_y).max(1.0)
+                    } else {
+                        1.0
+                    };
                     painter.rect_filled(
                         egui::Rect::from_min_size(Pos2::new(col_x, top_y), egui::vec2(1.0, draw_h)),
                         0.0,
@@ -817,10 +898,34 @@ pub fn draw_net_graph_with_telemetry(
     let cmd_label = format!("{cmdrate:.0}/s");
     let upd_pos = Pos2::new(rate_x, ping_bottom - (ping_height as f32));
     let cmd_pos = Pos2::new(rate_x, graph_bottom - (LERP_HEIGHT as f32));
-    painter.text(upd_pos + egui::vec2(1.0, 1.0), egui::Align2::LEFT_TOP, &upd_label, font.clone(), shadow);
-    painter.text(upd_pos, egui::Align2::LEFT_TOP, &upd_label, font.clone(), text_color);
-    painter.text(cmd_pos + egui::vec2(1.0, 1.0), egui::Align2::LEFT_TOP, &cmd_label, font.clone(), shadow);
-    painter.text(cmd_pos, egui::Align2::LEFT_TOP, &cmd_label, font, text_color);
+    painter.text(
+        upd_pos + egui::vec2(1.0, 1.0),
+        egui::Align2::LEFT_TOP,
+        &upd_label,
+        font.clone(),
+        shadow,
+    );
+    painter.text(
+        upd_pos,
+        egui::Align2::LEFT_TOP,
+        &upd_label,
+        font.clone(),
+        text_color,
+    );
+    painter.text(
+        cmd_pos + egui::vec2(1.0, 1.0),
+        egui::Align2::LEFT_TOP,
+        &cmd_label,
+        font.clone(),
+        shadow,
+    );
+    painter.text(
+        cmd_pos,
+        egui::Align2::LEFT_TOP,
+        &cmd_label,
+        font,
+        text_color,
+    );
 }
 
 /// Draw classic top-left `cl_showfps 1` framerate readout and `con_notifytime` recent lines.
@@ -846,7 +951,11 @@ pub fn draw_top_left_console_overlays(
     let font = FontId::monospace(13.0);
     let mut y = screen.top() + 8.0;
     if show_fps {
-        let fps_val = if fps.is_finite() { fps.round().max(0.0) } else { 0.0 };
+        let fps_val = if fps.is_finite() {
+            fps.round().max(0.0)
+        } else {
+            0.0
+        };
         let col = if fps_val >= 60.0 {
             Color32::from_rgb(80, 255, 80)
         } else if fps_val >= 30.0 {
@@ -856,7 +965,13 @@ pub fn draw_top_left_console_overlays(
         };
         let label = format!("{fps_val:.0} fps");
         let pos = Pos2::new(screen.left() + 8.0, y);
-        painter.text(pos + egui::vec2(1.0, 1.0), egui::Align2::LEFT_TOP, &label, font.clone(), Color32::BLACK);
+        painter.text(
+            pos + egui::vec2(1.0, 1.0),
+            egui::Align2::LEFT_TOP,
+            &label,
+            font.clone(),
+            Color32::BLACK,
+        );
         painter.text(pos, egui::Align2::LEFT_TOP, &label, font.clone(), col);
         y += 18.0;
     }
@@ -873,8 +988,20 @@ pub fn draw_top_left_console_overlays(
             .rev()
         {
             let pos = Pos2::new(screen.left() + 8.0, y);
-            painter.text(pos + egui::vec2(1.0, 1.0), egui::Align2::LEFT_TOP, line, font.clone(), Color32::BLACK);
-            painter.text(pos, egui::Align2::LEFT_TOP, line, font.clone(), Color32::from_rgb(255, 195, 65));
+            painter.text(
+                pos + egui::vec2(1.0, 1.0),
+                egui::Align2::LEFT_TOP,
+                line,
+                font.clone(),
+                Color32::BLACK,
+            );
+            painter.text(
+                pos,
+                egui::Align2::LEFT_TOP,
+                line,
+                font.clone(),
+                Color32::from_rgb(255, 195, 65),
+            );
             y += 15.0;
         }
     }
@@ -909,13 +1036,13 @@ mod tests {
 
     #[test]
     fn sniper_weapons_and_zoomed_fov_suppress_dynamic_crosshair() {
-        assert!(!should_draw_dynamic_crosshair(90.0, 3));  // Scout
+        assert!(!should_draw_dynamic_crosshair(90.0, 3)); // Scout
         assert!(!should_draw_dynamic_crosshair(90.0, 13)); // SG550
         assert!(!should_draw_dynamic_crosshair(90.0, 18)); // AWP
         assert!(!should_draw_dynamic_crosshair(90.0, 24)); // G3SG1
         assert!(!should_draw_dynamic_crosshair(54.0, 28)); // FOV <= 54
-        assert!(should_draw_dynamic_crosshair(55.0, 8));   // AUG zoomed (55 deg)
-        assert!(should_draw_dynamic_crosshair(90.0, 28));  // AK47 unzoomed
+        assert!(should_draw_dynamic_crosshair(55.0, 8)); // AUG zoomed (55 deg)
+        assert!(should_draw_dynamic_crosshair(90.0, 28)); // AK47 unzoomed
     }
 
     #[test]

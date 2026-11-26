@@ -74,30 +74,31 @@ pub fn install() {
     // init(canvas) -> Promise<void>
     {
         let rt_c = Rc::clone(&rt);
-        let closure: Closure<dyn FnMut(JsValue) -> JsValue> = Closure::new(move |canvas_val: JsValue| {
-            let rt_inner = Rc::clone(&rt_c);
-            let promise = future_to_promise(async move {
-                let canvas: HtmlCanvasElement = canvas_val
-                    .dyn_into()
-                    .map_err(|_| JsValue::from_str("expected HTMLCanvasElement"))?;
-                let width = canvas.width().max(1);
-                let height = canvas.height().max(1);
+        let closure: Closure<dyn FnMut(JsValue) -> JsValue> =
+            Closure::new(move |canvas_val: JsValue| {
+                let rt_inner = Rc::clone(&rt_c);
+                let promise = future_to_promise(async move {
+                    let canvas: HtmlCanvasElement = canvas_val
+                        .dyn_into()
+                        .map_err(|_| JsValue::from_str("expected HTMLCanvasElement"))?;
+                    let width = canvas.width().max(1);
+                    let height = canvas.height().max(1);
 
-                let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
-                desc.backends = wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL;
-                let instance = wgpu::Instance::new(desc);
-                let surface = instance
-                    .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
-                    .map_err(|e| JsValue::from_str(&format!("create_surface: {e}")))?;
+                    let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+                    desc.backends = wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL;
+                    let instance = wgpu::Instance::new(desc);
+                    let surface = instance
+                        .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
+                        .map_err(|e| JsValue::from_str(&format!("create_surface: {e}")))?;
 
-                let renderer = Renderer::new_from_surface(&instance, surface, width, height)
-                    .await
-                    .map_err(|e| JsValue::from_str(&e))?;
-                rt_inner.borrow_mut().renderer = Some(renderer);
-                Ok(JsValue::UNDEFINED)
+                    let renderer = Renderer::new_from_surface(&instance, surface, width, height)
+                        .await
+                        .map_err(|e| JsValue::from_str(&e))?;
+                    rt_inner.borrow_mut().renderer = Some(renderer);
+                    Ok(JsValue::UNDEFINED)
+                });
+                promise.into()
             });
-            promise.into()
-        });
         let _ = Reflect::set(&api, &JsValue::from_str("init"), &closure.into_js_value());
     }
 
@@ -111,7 +112,11 @@ pub fn install() {
                 None => "uninitialized".to_string(),
             }
         });
-        let _ = Reflect::set(&api, &JsValue::from_str("rendererInfo"), &closure.into_js_value());
+        let _ = Reflect::set(
+            &api,
+            &JsValue::from_str("rendererInfo"),
+            &closure.into_js_value(),
+        );
     }
 
     // mountFile(path, bytes)
@@ -121,7 +126,11 @@ pub fn install() {
             Closure::new(move |path: String, bytes: Uint8Array| {
                 rt_c.borrow_mut().state.mount_file(path, bytes.to_vec());
             });
-        let _ = Reflect::set(&api, &JsValue::from_str("mountFile"), &closure.into_js_value());
+        let _ = Reflect::set(
+            &api,
+            &JsValue::from_str("mountFile"),
+            &closure.into_js_value(),
+        );
     }
 
     // finishMount()
@@ -132,7 +141,11 @@ pub fn install() {
             g.state.finish_mount();
             refresh_ui_assets(&mut g);
         });
-        let _ = Reflect::set(&api, &JsValue::from_str("finishMount"), &closure.into_js_value());
+        let _ = Reflect::set(
+            &api,
+            &JsValue::from_str("finishMount"),
+            &closure.into_js_value(),
+        );
     }
 
     // mountInstantDemo() -> { files: number, bytes: number, map: string }
@@ -205,30 +218,46 @@ pub fn install() {
             }
             arr
         });
-        let _ = Reflect::set(&api, &JsValue::from_str("listMaps"), &closure.into_js_value());
+        let _ = Reflect::set(
+            &api,
+            &JsValue::from_str("listMaps"),
+            &closure.into_js_value(),
+        );
     }
 
     // readFile(path) -> Uint8Array | undefined
     {
         let rt_c = Rc::clone(&rt);
-        let closure: Closure<dyn FnMut(String) -> JsValue> = Closure::new(move |path: String| {
-            match rt_c.borrow().state.read_file(&path) {
-                Some(bytes) => Uint8Array::from(bytes.as_slice()).into(),
-                None => JsValue::UNDEFINED,
-            }
-        });
-        let _ = Reflect::set(&api, &JsValue::from_str("readFile"), &closure.into_js_value());
+        let closure: Closure<dyn FnMut(String) -> JsValue> =
+            Closure::new(
+                move |path: String| match rt_c.borrow().state.read_file(&path) {
+                    Some(bytes) => Uint8Array::from(bytes.as_slice()).into(),
+                    None => JsValue::UNDEFINED,
+                },
+            );
+        let _ = Reflect::set(
+            &api,
+            &JsValue::from_str("readFile"),
+            &closure.into_js_value(),
+        );
     }
 
     // startLocal(map, bots)
     {
         let rt_c = Rc::clone(&rt);
-        let closure: Closure<dyn FnMut(String, u32)> = Closure::new(move |map: String, bots: u32| {
-            if let Err(err) = rt_c.borrow_mut().state.start_local(&map, bots) {
-                web_sys::console::error_1(&JsValue::from_str(&format!("startLocal failed: {err}")));
-            }
-        });
-        let _ = Reflect::set(&api, &JsValue::from_str("startLocal"), &closure.into_js_value());
+        let closure: Closure<dyn FnMut(String, u32)> =
+            Closure::new(move |map: String, bots: u32| {
+                if let Err(err) = rt_c.borrow_mut().state.start_local(&map, bots) {
+                    web_sys::console::error_1(&JsValue::from_str(&format!(
+                        "startLocal failed: {err}"
+                    )));
+                }
+            });
+        let _ = Reflect::set(
+            &api,
+            &JsValue::from_str("startLocal"),
+            &closure.into_js_value(),
+        );
     }
 
     // startP2pHost(map, bots, maxPlayers) -> bool
@@ -300,7 +329,11 @@ pub fn install() {
         let closure: Closure<dyn FnMut()> = Closure::new(move || {
             let _ = rt_c.borrow_mut().state.connect_remote();
         });
-        let _ = Reflect::set(&api, &JsValue::from_str("connectRemote"), &closure.into_js_value());
+        let _ = Reflect::set(
+            &api,
+            &JsValue::from_str("connectRemote"),
+            &closure.into_js_value(),
+        );
     }
 
     // disconnect()
@@ -309,7 +342,11 @@ pub fn install() {
         let closure: Closure<dyn FnMut()> = Closure::new(move || {
             rt_c.borrow_mut().state.disconnect();
         });
-        let _ = Reflect::set(&api, &JsValue::from_str("disconnect"), &closure.into_js_value());
+        let _ = Reflect::set(
+            &api,
+            &JsValue::from_str("disconnect"),
+            &closure.into_js_value(),
+        );
     }
 
     // pushNetPacket(Uint8Array)
@@ -318,7 +355,11 @@ pub fn install() {
         let closure: Closure<dyn FnMut(Uint8Array)> = Closure::new(move |bytes: Uint8Array| {
             rt_c.borrow_mut().state.push_net_packet(bytes.to_vec());
         });
-        let _ = Reflect::set(&api, &JsValue::from_str("pushNetPacket"), &closure.into_js_value());
+        let _ = Reflect::set(
+            &api,
+            &JsValue::from_str("pushNetPacket"),
+            &closure.into_js_value(),
+        );
     }
 
     // takeNetPackets() -> Array<Uint8Array>
@@ -332,7 +373,11 @@ pub fn install() {
             }
             arr
         });
-        let _ = Reflect::set(&api, &JsValue::from_str("takeNetPackets"), &closure.into_js_value());
+        let _ = Reflect::set(
+            &api,
+            &JsValue::from_str("takeNetPackets"),
+            &closure.into_js_value(),
+        );
     }
 
     // takeAudioEvents() -> Array<Object>
@@ -346,7 +391,11 @@ pub fn install() {
             }
             arr
         });
-        let _ = Reflect::set(&api, &JsValue::from_str("takeAudioEvents"), &closure.into_js_value());
+        let _ = Reflect::set(
+            &api,
+            &JsValue::from_str("takeAudioEvents"),
+            &closure.into_js_value(),
+        );
     }
 
     // unlockAudio()
@@ -355,7 +404,11 @@ pub fn install() {
         let closure: Closure<dyn FnMut()> = Closure::new(move || {
             rt_c.borrow_mut().state.unlock_audio();
         });
-        let _ = Reflect::set(&api, &JsValue::from_str("unlockAudio"), &closure.into_js_value());
+        let _ = Reflect::set(
+            &api,
+            &JsValue::from_str("unlockAudio"),
+            &closure.into_js_value(),
+        );
     }
 
     // pushVoiceMicPcm(samples: Float32Array, sampleRate: number)
@@ -377,9 +430,10 @@ pub fn install() {
     // onKey(code, pressed)
     {
         let rt_c = Rc::clone(&rt);
-        let closure: Closure<dyn FnMut(String, bool)> = Closure::new(move |code: String, pressed: bool| {
-            rt_c.borrow_mut().state.input.on_key(&code, pressed);
-        });
+        let closure: Closure<dyn FnMut(String, bool)> =
+            Closure::new(move |code: String, pressed: bool| {
+                rt_c.borrow_mut().state.input.on_key(&code, pressed);
+            });
         let _ = Reflect::set(&api, &JsValue::from_str("onKey"), &closure.into_js_value());
     }
 
@@ -390,21 +444,34 @@ pub fn install() {
             let mut g = rt_c.borrow_mut();
             let sens = g.state.cvars.get_f32("sensitivity").clamp(0.1, 20.0);
             let mut cam = g.state.camera.clone();
-            g.state.input.on_mouse_move(&mut cam, dx as f32, dy as f32, sens);
+            g.state
+                .input
+                .on_mouse_move(&mut cam, dx as f32, dy as f32, sens);
             g.state.camera = cam;
         });
-        let _ = Reflect::set(&api, &JsValue::from_str("onMouseMove"), &closure.into_js_value());
+        let _ = Reflect::set(
+            &api,
+            &JsValue::from_str("onMouseMove"),
+            &closure.into_js_value(),
+        );
     }
 
     // onMouseButton(button, pressed)
     {
         let rt_c = Rc::clone(&rt);
-        let closure: Closure<dyn FnMut(u32, bool)> = Closure::new(move |button: u32, pressed: bool| {
-            let mut g = rt_c.borrow_mut();
-            let state = &mut g.state;
-            state.input.on_mouse_button_bound(button, pressed, &mut state.cvars);
-        });
-        let _ = Reflect::set(&api, &JsValue::from_str("onMouseButton"), &closure.into_js_value());
+        let closure: Closure<dyn FnMut(u32, bool)> =
+            Closure::new(move |button: u32, pressed: bool| {
+                let mut g = rt_c.borrow_mut();
+                let state = &mut g.state;
+                state
+                    .input
+                    .on_mouse_button_bound(button, pressed, &mut state.cvars);
+            });
+        let _ = Reflect::set(
+            &api,
+            &JsValue::from_str("onMouseButton"),
+            &closure.into_js_value(),
+        );
     }
 
     // onMouseWheel(delta_y, delta_mode)
@@ -418,7 +485,11 @@ pub fn install() {
                     .input
                     .on_mouse_wheel(delta_y as f32, delta_mode, &mut state.cvars);
             });
-        let _ = Reflect::set(&api, &JsValue::from_str("onMouseWheel"), &closure.into_js_value());
+        let _ = Reflect::set(
+            &api,
+            &JsValue::from_str("onMouseWheel"),
+            &closure.into_js_value(),
+        );
     }
 
     // onGamepad(lx, ly, rx, ry, mask)
@@ -431,7 +502,11 @@ pub fn install() {
                     .input
                     .on_gamepad(lx as f32, ly as f32, rx as f32, ry as f32, mask);
             });
-        let _ = Reflect::set(&api, &JsValue::from_str("onGamepad"), &closure.into_js_value());
+        let _ = Reflect::set(
+            &api,
+            &JsValue::from_str("onGamepad"),
+            &closure.into_js_value(),
+        );
     }
 
     // onTouch(lx, ly, dx, dy, mask)
@@ -443,17 +518,15 @@ pub fn install() {
                 let sens = g.state.cvars.get_f32("sensitivity").clamp(0.1, 20.0);
                 let mut cam = g.state.camera.clone();
                 g.state.input.on_touch(
-                    &mut cam,
-                    lx as f32,
-                    ly as f32,
-                    dx as f32,
-                    dy as f32,
-                    mask,
-                    sens,
+                    &mut cam, lx as f32, ly as f32, dx as f32, dy as f32, mask, sens,
                 );
                 g.state.camera = cam;
             });
-        let _ = Reflect::set(&api, &JsValue::from_str("onTouch"), &closure.into_js_value());
+        let _ = Reflect::set(
+            &api,
+            &JsValue::from_str("onTouch"),
+            &closure.into_js_value(),
+        );
     }
 
     // resize(w, h)
@@ -473,7 +546,11 @@ pub fn install() {
         let closure: Closure<dyn FnMut(String)> = Closure::new(move |line: String| {
             rt_c.borrow_mut().state.exec_console(&line);
         });
-        let _ = Reflect::set(&api, &JsValue::from_str("execConsole"), &closure.into_js_value());
+        let _ = Reflect::set(
+            &api,
+            &JsValue::from_str("execConsole"),
+            &closure.into_js_value(),
+        );
     }
 
     // stepAndRender(now_ms)
@@ -482,7 +559,11 @@ pub fn install() {
         let closure: Closure<dyn FnMut(f64)> = Closure::new(move |now_ms: f64| {
             step_and_render(&rt_c, now_ms);
         });
-        let _ = Reflect::set(&api, &JsValue::from_str("stepAndRender"), &closure.into_js_value());
+        let _ = Reflect::set(
+            &api,
+            &JsValue::from_str("stepAndRender"),
+            &closure.into_js_value(),
+        );
     }
 
     let _ = Reflect::set(&window, &JsValue::from_str("cs16Web"), &api);
@@ -534,22 +615,39 @@ fn step_and_render(rt_cell: &Rc<RefCell<WebRuntime>>, now_ms: f64) {
 
     let width = g.renderer.as_ref().map_or(1280, |r| r.config.width.max(1)) as f32;
     let height = g.renderer.as_ref().map_or(720, |r| r.config.height.max(1)) as f32;
-    let mut raw_input = egui::RawInput::default();
-    raw_input.screen_rect = Some(egui::Rect::from_min_size(
-        egui::Pos2::ZERO,
-        egui::Vec2::new(width, height),
-    ));
+    g.egui_ctx.set_zoom_factor(1.0);
+    let mut raw_input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::new(width, height),
+        )),
+        ..Default::default()
+    };
+    raw_input.viewports.insert(
+        egui::ViewportId::ROOT,
+        egui::ViewportInfo {
+            native_pixels_per_point: Some(1.0),
+            ..Default::default()
+        },
+    );
     g.egui_ctx.begin_pass(raw_input);
     let view_ref = out.view.as_ref();
-    let client_pal = g
-        .vgui_bank
-        .as_ref()
-        .map_or_else(
-            || cs_client::ui::vgui_assets::ClientPalette::from(cs_assets::scheme::ClientVguiColors::default()),
-            |b| b.client_palette,
-        );
-    g.state
-        .draw_hud_ui(&g.egui_ctx, g.hud_sprites.as_ref(), client_pal, g.vgui_palette, view_ref);
+    let client_pal = g.vgui_bank.as_ref().map_or_else(
+        || {
+            cs_client::ui::vgui_assets::ClientPalette::from(
+                cs_assets::scheme::ClientVguiColors::default(),
+            )
+        },
+        |b| b.client_palette,
+    );
+    let gi = &mut *g;
+    gi.state.draw_hud_ui(
+        &gi.egui_ctx,
+        gi.hud_sprites.as_ref(),
+        client_pal,
+        gi.vgui_palette,
+        view_ref,
+    );
     let full_output = g.egui_ctx.end_pass();
     let paint_jobs = g
         .egui_ctx
@@ -576,14 +674,15 @@ fn step_and_render(rt_cell: &Rc<RefCell<WebRuntime>>, now_ms: f64) {
         fov = (v.fov + v.underwater_fov_delta).clamp(10.0, 120.0);
         if let Some(vm) = v.viewmodel {
             let bob_off = Vec3::new(0.0, 0.0, v.bob * 0.4) + v.viewmodel_lag;
-            let xf = viewmodel_transform(
-                v.eye,
-                cam.yaw_deg,
-                cam.pitch_deg,
-                bob_off,
+            let xf = viewmodel_transform(v.eye, cam.yaw_deg, cam.pitch_deg, bob_off, vm.right_hand);
+            viewmodel_inst = Some((
+                vm.path,
+                xf,
+                vm.sequence,
+                vm.body,
+                vm.animtime,
                 vm.right_hand,
-            );
-            viewmodel_inst = Some((vm.path, xf, vm.sequence, vm.body, vm.animtime, vm.right_hand));
+            ));
         }
         beams = v.beams;
         points = v.points;
@@ -600,15 +699,14 @@ fn step_and_render(rt_cell: &Rc<RefCell<WebRuntime>>, now_ms: f64) {
     let texgamma = g.state.cvars.get_f32("texgamma").clamp(1.8, 3.0);
     let lightgamma = g.state.cvars.get_f32("lightgamma").clamp(1.8, 3.0);
     let brightness = g.state.cvars.get_f32("brightness").clamp(0.0, 3.0);
-    let debug_mode = if g.state.cvars.get_bool("r_lightmap")
-        || g.state.cvars.get_bool("r_lightmap_only")
-    {
-        1.0
-    } else if g.state.cvars.get_bool("r_fullbright") {
-        2.0
-    } else {
-        0.0
-    };
+    let debug_mode =
+        if g.state.cvars.get_bool("r_lightmap") || g.state.cvars.get_bool("r_lightmap_only") {
+            1.0
+        } else if g.state.cvars.get_bool("r_fullbright") {
+            2.0
+        } else {
+            0.0
+        };
     let time_sec = (sample_ms / 1000.0) as f32;
     let settings = RenderSettings {
         gamma,
@@ -625,7 +723,11 @@ fn step_and_render(rt_cell: &Rc<RefCell<WebRuntime>>, now_ms: f64) {
         aspect_mode: "widescreen",
         texture_mode: TextureFilterMode::parse(g.state.cvars.get_str("gl_texturemode")),
         anisotropy: g.state.cvars.get_i32("gl_ansio").clamp(1, 16) as u16,
-        msaa_samples: if g.state.cvars.get_i32("gl_msaa") >= 4 { 4 } else { 1 },
+        msaa_samples: if g.state.cvars.get_i32("gl_msaa") >= 4 {
+            4
+        } else {
+            1
+        },
         software_mode: g.state.cvars.get_bool("r_software_mode"),
         r_vis: g.state.cvars.get_bool("r_vis"),
         r_decals: g.state.cvars.get_i32("r_decals").max(0) as usize,
@@ -642,20 +744,22 @@ fn step_and_render(rt_cell: &Rc<RefCell<WebRuntime>>, now_ms: f64) {
         r.set_entity_scene(scene);
         let vm_ref = viewmodel_inst
             .as_ref()
-            .map(|(path, xf, seq, body, animtime, right_hand)| StudioInstance {
-                model_path: path.as_str(),
-                transform: *xf,
-                sequence: *seq,
-                frame: 0.0,
-                animtime: *animtime,
-                framerate: 1.0,
-                now: time_sec,
-                body: *body,
-                light_rgb: Vec3::splat(0.95),
-                flip_winding: *right_hand,
-                attached_model: None,
-                ..StudioInstance::default()
-            });
+            .map(
+                |(path, xf, seq, body, animtime, right_hand)| StudioInstance {
+                    model_path: path.as_str(),
+                    transform: *xf,
+                    sequence: *seq,
+                    frame: 0.0,
+                    animtime: *animtime,
+                    framerate: 1.0,
+                    now: time_sec,
+                    body: *body,
+                    light_rgb: Vec3::splat(0.95),
+                    flip_winding: *right_hand,
+                    attached_model: None,
+                    ..StudioInstance::default()
+                },
+            );
         let dynamic = SceneDynamicData {
             vfs: state.vfs.as_ref(),
             viewmodel: vm_ref,
@@ -729,7 +833,11 @@ fn audio_event_to_js(ev: WebAudioEvent) -> JsValue {
             set_prop(&obj, "path", JsValue::from_str(&path));
             set_prop(&obj, "volume", JsValue::from_f64(f64::from(volume)));
             set_prop(&obj, "pitch", JsValue::from_f64(f64::from(pitch)));
-            set_prop(&obj, "attenuation", JsValue::from_f64(f64::from(attenuation)));
+            set_prop(
+                &obj,
+                "attenuation",
+                JsValue::from_f64(f64::from(attenuation)),
+            );
             set_prop(&obj, "pos", vec3_arr(pos).into());
             set_prop(&obj, "listener", vec3_arr(listener).into());
             set_prop(&obj, "right", vec3_arr(right).into());
@@ -809,7 +917,11 @@ fn audio_event_to_js(ev: WebAudioEvent) -> JsValue {
         } => {
             set_prop(&obj, "kind", JsValue::from_str("voice_pcm"));
             set_prop(&obj, "speaker", JsValue::from_f64(f64::from(speaker)));
-            set_prop(&obj, "sample_rate", JsValue::from_f64(f64::from(sample_rate)));
+            set_prop(
+                &obj,
+                "sample_rate",
+                JsValue::from_f64(f64::from(sample_rate)),
+            );
             set_prop(&obj, "volume", JsValue::from_f64(f64::from(volume)));
             let f32arr = Float32Array::from(samples.as_slice());
             set_prop(&obj, "samples", f32arr.into());

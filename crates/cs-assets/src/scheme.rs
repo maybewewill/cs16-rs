@@ -303,7 +303,9 @@ impl SkyboxTextures {
             let img = vfs
                 .read_bytes(&path)
                 .ok()
-                .and_then(|bytes| image::load_from_memory_with_format(&bytes, ImageFormat::Tga).ok())
+                .and_then(|bytes| {
+                    image::load_from_memory_with_format(&bytes, ImageFormat::Tga).ok()
+                })
                 .map(|dyn_img| {
                     let rgba = dyn_img.to_rgba8();
                     RgbaImageData {
@@ -475,8 +477,7 @@ impl VguiScheme {
     }
 
     pub fn load_source_or_tracker(vfs: &Vfs) -> Self {
-        Self::load(vfs, "resource/SourceScheme.res")
-            .unwrap_or_else(|| Self::load_tracker(vfs))
+        Self::load(vfs, "resource/SourceScheme.res").unwrap_or_else(|| Self::load_tracker(vfs))
     }
 
     pub fn parse(text: &str) -> Self {
@@ -568,7 +569,12 @@ fn parse_rgba_str(raw: &str) -> Option<[u8; 4]> {
         .filter_map(|p| p.parse::<u8>().ok())
         .collect();
     if nums.len() >= 3 {
-        Some([nums[0], nums[1], nums[2], nums.get(3).copied().unwrap_or(255)])
+        Some([
+            nums[0],
+            nums[1],
+            nums[2],
+            nums.get(3).copied().unwrap_or(255),
+        ])
     } else {
         None
     }
@@ -698,7 +704,8 @@ fn parse_border_side(tokens: &[String], cursor: &mut usize) -> Vec<VguiBorderLin
                     match kl.as_str() {
                         "color" => color = v.clone(),
                         "offset" => {
-                            let mut nums = v.split_whitespace().filter_map(|p| p.parse::<i32>().ok());
+                            let mut nums =
+                                v.split_whitespace().filter_map(|p| p.parse::<i32>().ok());
                             offset[0] = nums.next().unwrap_or(0);
                             offset[1] = nums.next().unwrap_or(0);
                         }
@@ -1073,8 +1080,8 @@ pub struct ClassResLabel {
 #[derive(Debug, Clone, Default)]
 pub struct ClassResPanel {
     pub image_path: Option<String>,
-    pub image_box: [f32; 4],   // [x, y, w, h] of imageBG / imageBorder
-    pub image_rect: [f32; 4],  // [x, y, w, h] of classimage
+    pub image_box: [f32; 4],  // [x, y, w, h] of imageBG / imageBorder
+    pub image_rect: [f32; 4], // [x, y, w, h] of classimage
     pub labels: Vec<ClassResLabel>,
 }
 
@@ -1096,12 +1103,9 @@ impl ClassResPanel {
             labels: Vec::new(),
         };
 
-        let mut label_keys: Vec<String> = Vec::new();
+        let mut label_keys: Vec<(String, i32)> = Vec::new();
         for (block_name, props) in blocks {
-            let ctrl = props
-                .get("controlname")
-                .map(String::as_str)
-                .unwrap_or("");
+            let ctrl = props.get("controlname").map(String::as_str).unwrap_or("");
             let x = parse_f32_prop(&props, "xpos", 0.0);
             let y = parse_f32_prop(&props, "ypos", 0.0);
             let w = parse_f32_prop(&props, "wide", 150.0);
@@ -1142,13 +1146,18 @@ impl ClassResPanel {
                     bright,
                 };
                 // Valve EditablePanel::LoadControlSettings keys controls by `fieldName`, so a
-                // later entry sharing `fieldName` (e.g. `classes/urban.res` `className` + `infolabel`)
-                // overwrites the earlier entry.
-                let key = props
-                    .get("fieldname")
-                    .map(String::as_str)
-                    .unwrap_or(block_name.as_str())
-                    .to_ascii_lowercase();
+                // later entry sharing `fieldName` at the same column (e.g. `classes/urban.res`
+                // `className` + `infolabel` at `x=0`) overwrites the earlier entry, while paired
+                // label/value columns in equipment `.res` files (`classes/kevlar.res` `pricelabel`
+                // at `x=0` and `price` at `x=140`, both named `infolabel`) remain side by side.
+                let key = (
+                    props
+                        .get("fieldname")
+                        .map(String::as_str)
+                        .unwrap_or(block_name.as_str())
+                        .to_ascii_lowercase(),
+                    x.round() as i32,
+                );
                 if let Some(idx) = label_keys.iter().position(|k| k == &key) {
                     panel.labels[idx] = lbl;
                 } else {
@@ -1326,7 +1335,9 @@ mod tests {
             scheme.resolve_color("InGameDesktop/MenuColor"),
             Some([238, 174, 0, 255])
         );
-        let b = scheme.resolve_border("ButtonBorder").expect("ButtonBorder alias");
+        let b = scheme
+            .resolve_border("ButtonBorder")
+            .expect("ButtonBorder alias");
         assert_eq!(b.inset, [0, 0, 1, 1]);
         assert_eq!(b.left[0].color, "BorderBright");
         assert_eq!(b.left[0].offset, [0, 1]);
@@ -1335,7 +1346,9 @@ mod tests {
     #[test]
     fn resolves_tokens_via_cstrike_titlestxt_and_titles_table_inline() {
         let mut loc = LocalizationTable::default();
-        loc.insert_text("\"Tokens\"\n{\n\"Cstrike_TitlesTXT_CTs_Win\" \"Counter-Terrorists Win!\"\n}");
+        loc.insert_text(
+            "\"Tokens\"\n{\n\"Cstrike_TitlesTXT_CTs_Win\" \"Counter-Terrorists Win!\"\n}",
+        );
         let titles = TitlesTable::parse("Game_connected\n{\n%s connected\n}\n");
         assert_eq!(
             loc.resolve_with_titles("#CTs_Win", Some(&titles)),
@@ -1353,7 +1366,9 @@ mod tests {
         let nested = TitlesTable::parse(
             "Game_Commencing\n{\n#Cstrike_TitlesTXT_Game_Commencing\n}\nCstrike_TitlesTXT_Game_Commencing\n{\nGame Commencing!\n}\n",
         );
-        loc.insert_text("\"Tokens\"\n{\n\"Cstrike_TitlesTXT_Game_Commencing\" \"Round Starting!\"\n}");
+        loc.insert_text(
+            "\"Tokens\"\n{\n\"Cstrike_TitlesTXT_Game_Commencing\" \"Round Starting!\"\n}",
+        );
         assert_eq!(
             loc.resolve_with_titles("#Game_Commencing", Some(&nested)),
             "Round Starting!"
