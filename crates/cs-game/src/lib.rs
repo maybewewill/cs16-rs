@@ -430,7 +430,12 @@ impl CsGame {
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn set_last_hit_group(&mut self, slot: u8, group: i32) {
-        if let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+        if let Some(p) = self
+            .state
+            .players
+            .get_mut(usize::from(slot))
+            .and_then(Option::as_mut)
+        {
             p.last_hit_group = group;
         }
     }
@@ -448,7 +453,15 @@ impl CsGame {
         damage: f32,
         bits: u32,
     ) -> bool {
-        player::take_damage(&mut self.state, eng, slot, inflictor, attacker, damage, bits)
+        player::take_damage(
+            &mut self.state,
+            eng,
+            slot,
+            inflictor,
+            attacker,
+            damage,
+            bits,
+        )
     }
 
     /// Gives the player of `slot` night vision (`m_bHasNightVision`, which the buy menu sets).
@@ -456,7 +469,11 @@ impl CsGame {
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn grant_night_vision(&mut self, slot: u8) -> bool {
-        let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut)
+        let Some(p) = self
+            .state
+            .players
+            .get_mut(usize::from(slot))
+            .and_then(Option::as_mut)
         else {
             return false;
         };
@@ -469,7 +486,11 @@ impl CsGame {
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn set_velocity_modifier(&mut self, slot: u8, value: f32) -> bool {
-        let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut)
+        let Some(p) = self
+            .state
+            .players
+            .get_mut(usize::from(slot))
+            .and_then(Option::as_mut)
         else {
             return false;
         };
@@ -556,7 +577,12 @@ impl CsGame {
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn set_last_item(&mut self, slot: u8, id: Option<weapons::WeaponId>) {
-        if let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+        if let Some(p) = self
+            .state
+            .players
+            .get_mut(usize::from(slot))
+            .and_then(Option::as_mut)
+        {
             p.last_item = id;
         }
     }
@@ -577,7 +603,16 @@ impl CsGame {
         let v = eng.ent(ent)?;
         let (origin, angles) = (v.origin, v.angles);
         inventory::create_weapon_box(
-            &mut self.state, eng, Some(slot), id, model, origin, angles, Vec3::ZERO, life, false,
+            &mut self.state,
+            eng,
+            Some(slot),
+            id,
+            model,
+            origin,
+            angles,
+            Vec3::ZERO,
+            life,
+            false,
         )
     }
 
@@ -599,7 +634,13 @@ impl CsGame {
         slot: u8,
     ) -> Option<(f32, bool, Option<weapons::WeaponId>, u8, u8)> {
         let p = self.state.players.get(usize::from(slot))?.as_ref()?;
-        Some((p.next_attack, p.can_shoot, p.active_item, p.fov, p.client_fov))
+        Some((
+            p.next_attack,
+            p.can_shoot,
+            p.active_item,
+            p.fov,
+            p.client_fov,
+        ))
     }
 
     /// `CBasePlayer::SetAnimation(anim)` for the player of `slot`, with `m_LastHitGroup` set to
@@ -613,7 +654,12 @@ impl CsGame {
         anim: weapons::core::PlayerAnim,
         hit_group: i32,
     ) {
-        if let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+        if let Some(p) = self
+            .state
+            .players
+            .get_mut(usize::from(slot))
+            .and_then(Option::as_mut)
+        {
             p.last_hit_group = hit_group;
         }
         player_anim::set_animation(&mut self.state, eng, slot, anim);
@@ -633,7 +679,12 @@ impl CsGame {
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn set_anim_extension(&mut self, slot: u8, ext: &str) {
-        if let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+        if let Some(p) = self
+            .state
+            .players
+            .get_mut(usize::from(slot))
+            .and_then(Option::as_mut)
+        {
             p.anim_extension = ext.to_string();
         }
     }
@@ -643,7 +694,12 @@ impl CsGame {
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn set_next_attack(&mut self, slot: u8, value: f32) {
-        if let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+        if let Some(p) = self
+            .state
+            .players
+            .get_mut(usize::from(slot))
+            .and_then(Option::as_mut)
+        {
             p.next_attack = value;
         }
     }
@@ -653,7 +709,12 @@ impl CsGame {
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn set_fov(&mut self, slot: u8, fov: u8) {
-        if let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+        if let Some(p) = self
+            .state
+            .players
+            .get_mut(usize::from(slot))
+            .and_then(Option::as_mut)
+        {
             p.fov = fov;
         }
     }
@@ -662,7 +723,13 @@ impl CsGame {
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn player_ammo(&self, slot: u8, index: usize) -> Option<i32> {
-        self.state.players.get(usize::from(slot))?.as_ref()?.ammo.get(index).copied()
+        self.state
+            .players
+            .get(usize::from(slot))?
+            .as_ref()?
+            .ammo
+            .get(index)
+            .copied()
     }
 
     /// `m_rgAmmo[index] = value` of the player of `slot`. For tests only (cargo feature
@@ -686,7 +753,13 @@ impl CsGame {
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn tabulated_ammo(&self, slot: u8) -> Option<[i32; 10]> {
-        Some(self.state.players.get(usize::from(slot))?.as_ref()?.tabulated_ammo)
+        Some(
+            self.state
+                .players
+                .get(usize::from(slot))?
+                .as_ref()?
+                .tabulated_ammo,
+        )
     }
 
     /// Ends the freeze period now (`OnRoundFreezeEnd`). For tests only (cargo feature
@@ -709,7 +782,12 @@ impl CsGame {
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn set_resume_zoom(&mut self, slot: u8, last_zoom: i32) {
-        if let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+        if let Some(p) = self
+            .state
+            .players
+            .get_mut(usize::from(slot))
+            .and_then(Option::as_mut)
+        {
             p.resume_zoom = true;
             p.last_zoom = last_zoom;
         }
@@ -720,7 +798,12 @@ impl CsGame {
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn set_defusing(&mut self, slot: u8, defusing: bool) {
-        if let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+        if let Some(p) = self
+            .state
+            .players
+            .get_mut(usize::from(slot))
+            .and_then(Option::as_mut)
+        {
             p.is_defusing = defusing;
         }
     }
@@ -739,7 +822,12 @@ impl CsGame {
         if !already && !inventory::give_named_item(&mut self.state, eng, slot, "weapon_c4") {
             return false;
         }
-        if let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+        if let Some(p) = self
+            .state
+            .players
+            .get_mut(usize::from(slot))
+            .and_then(Option::as_mut)
+        {
             p.has_c4 = true;
             if let Ok(i) = usize::try_from(weapons::ammo_index("C4")) {
                 p.ammo[i] = 1;
@@ -764,7 +852,12 @@ impl CsGame {
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn test_set_defuser(&mut self, slot: u8, has: bool) {
-        if let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+        if let Some(p) = self
+            .state
+            .players
+            .get_mut(usize::from(slot))
+            .and_then(Option::as_mut)
+        {
             p.has_defuser = has;
         }
     }
@@ -774,7 +867,12 @@ impl CsGame {
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn test_set_not_killed(&mut self, slot: u8, not_killed: bool) {
-        if let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+        if let Some(p) = self
+            .state
+            .players
+            .get_mut(usize::from(slot))
+            .and_then(Option::as_mut)
+        {
             p.not_killed = not_killed;
         }
     }
@@ -824,14 +922,27 @@ impl CsGame {
     #[doc(hidden)]
     pub fn test_use_entity_by(&mut self, eng: &mut EngineApi<'_>, id: EdictId, activator: EdictId) {
         entity::with_entity(&mut self.state, eng, id, |entity, g, eng| {
-            entity.use_(g, eng, id, Some(activator), Some(activator), crate::entity::UseType::Toggle, 0.0);
+            entity.use_(
+                g,
+                eng,
+                id,
+                Some(activator),
+                Some(activator),
+                crate::entity::UseType::Toggle,
+                0.0,
+            );
         });
     }
 
     /// `GiveNamedItem` for `slot`. For tests only (cargo feature `test-hooks`).
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
-    pub fn test_give_named_item(&mut self, eng: &mut EngineApi<'_>, slot: u8, classname: &str) -> bool {
+    pub fn test_give_named_item(
+        &mut self,
+        eng: &mut EngineApi<'_>,
+        slot: u8,
+        classname: &str,
+    ) -> bool {
         inventory::give_named_item(&mut self.state, eng, slot, classname)
     }
 
@@ -841,7 +952,12 @@ impl CsGame {
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn place_player(&mut self, eng: &mut EngineApi<'_>, slot: u8, origin: Vec3) -> bool {
-        if self.state.players.get(usize::from(slot)).is_none_or(Option::is_none) {
+        if self
+            .state
+            .players
+            .get(usize::from(slot))
+            .is_none_or(Option::is_none)
+        {
             return false;
         }
         let id = eng.client_edict(slot);
@@ -852,6 +968,7 @@ impl CsGame {
             v.flags &= !(cs_engine::consts::FL_ONGROUND | cs_engine::consts::FL_BASEVELOCITY);
         }
         eng.set_origin(id, origin);
+        buy::sync_buy_signal_after_move(&mut self.state, eng, slot);
         true
     }
 
@@ -859,7 +976,11 @@ impl CsGame {
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn flash_battery(&self, slot: u8) -> Option<i32> {
-        self.state.players.get(usize::from(slot)).and_then(Option::as_ref).map(|p| p.flash_battery)
+        self.state
+            .players
+            .get(usize::from(slot))
+            .and_then(Option::as_ref)
+            .map(|p| p.flash_battery)
     }
 
     /// Sets `m_iFlashBattery` of the player of `slot`. For tests only (cargo feature
@@ -867,7 +988,12 @@ impl CsGame {
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn set_flash_battery(&mut self, slot: u8, battery: i32) {
-        if let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+        if let Some(p) = self
+            .state
+            .players
+            .get_mut(usize::from(slot))
+            .and_then(Option::as_mut)
+        {
             p.flash_battery = battery;
         }
     }
@@ -877,7 +1003,12 @@ impl CsGame {
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn set_display_history(&mut self, slot: u8, history: u32) {
-        if let Some(p) = self.state.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+        if let Some(p) = self
+            .state
+            .players
+            .get_mut(usize::from(slot))
+            .and_then(Option::as_mut)
+        {
             p.display_history = history;
         }
     }
@@ -887,7 +1018,11 @@ impl CsGame {
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn display_history(&self, slot: u8) -> Option<u32> {
-        self.state.players.get(usize::from(slot)).and_then(Option::as_ref).map(|p| p.display_history)
+        self.state
+            .players
+            .get(usize::from(slot))
+            .and_then(Option::as_ref)
+            .map(|p| p.display_history)
     }
 }
 

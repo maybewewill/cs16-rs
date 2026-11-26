@@ -64,13 +64,15 @@ use crate::GameState;
 use crate::chat::client_print;
 use crate::entity::GameEntity;
 use crate::hint;
+use crate::inventory::{self, PISTOL_SLOT, PRIMARY_WEAPON_SLOT};
 use crate::menus::{
     self, HUD_PRINTCENTER, MENU_KEY_0, MENU_KEY_1, MENU_KEY_2, MENU_KEY_3, MENU_KEY_4, MENU_KEY_5,
     MENU_KEY_6, MENU_KEY_7, MENU_KEY_8, Menu, VGUI_MENU_BUY_ITEM,
 };
-use crate::inventory::{self, PISTOL_SLOT, PRIMARY_WEAPON_SLOT};
 use crate::money;
-use crate::player::{ATTN_NORM, ArmorType, CHAN_ITEM, DEAD_NO, EF_NODRAW, PITCH_NORM, Team, player_slot};
+use crate::player::{
+    ATTN_NORM, ArmorType, CHAN_ITEM, DEAD_NO, EF_NODRAW, PITCH_NORM, Team, player_slot,
+};
 use crate::weapons::{
     AmmoType, FLASHBANG_PRICE, HEGRENADE_PRICE, SMOKEGRENADE_PRICE, WeaponId, ammo_info_by_name,
     is_primary_weapon, is_secondary_weapon, max_ammo_carry_for_weapon, weapon_info,
@@ -170,6 +172,17 @@ impl Signals {
     pub fn state(&self) -> u8 {
         self.state
     }
+
+    /// Immediately sets `flags` in the active state without touching pending touch signals.
+    pub fn set_state_bit(&mut self, flags: u8) {
+        self.state |= flags;
+    }
+
+    /// Clears `flags` from both pending signals and active state.
+    pub fn clear_bit(&mut self, flags: u8) {
+        self.signal &= !flags;
+        self.state &= !flags;
+    }
 }
 
 /// `func_buyzone` (`CBuyZone`): a trigger brush in which the players of its team (any team for
@@ -183,6 +196,10 @@ pub struct BuyZone {
 impl GameEntity for BuyZone {
     fn classname(&self) -> &'static str {
         "func_buyzone"
+    }
+
+    fn buy_zone_team(&self) -> Option<i32> {
+        Some(self.team)
     }
 
     /// `CBuyZone::Spawn`: `InitTrigger` (a non-solid trigger of the brush model, invisible unless
@@ -298,7 +315,15 @@ fn zone_icon_clear(g: &GameState, eng: &mut EngineApi<'_>, slot: u8, sprite: &st
 }
 
 /// `BuyZoneIcon_Clear`: the `buyzone` icon is hidden (see [`zone_icon_clear`]).
-pub(crate) fn buy_zone_icon_clear(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) {
+pub(crate) fn buy_zone_icon_clear(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
+    if let Some(p) = g
+        .players
+        .get_mut(usize::from(slot))
+        .and_then(Option::as_mut)
+    {
+        p.shown_zone_signals &= !SIGNAL_BUY;
+        p.signals.clear_bit(SIGNAL_BUY);
+    }
     zone_icon_clear(g, eng, slot, "buyzone");
 }
 
@@ -313,7 +338,11 @@ pub(crate) fn set_bomb_icon(g: &GameState, eng: &mut EngineApi<'_>, slot: u8, fl
         .is_some_and(|p| p.has_c4);
     let msg = if has_c4 {
         CsUserMsg::StatusIcon {
-            status: if flash { STATUSICON_FLASH } else { STATUSICON_SHOW },
+            status: if flash {
+                STATUSICON_FLASH
+            } else {
+                STATUSICON_SHOW
+            },
             sprite_name: "c4".to_string(),
             color: Some(ICON_GREEN),
         }
@@ -391,27 +420,15 @@ fn near_any(eng: &EngineApi<'_>, slot: u8, class: &str, within: impl Fn(f32) -> 
     near
 }
 
-/// `OLD_CheckBuyZone`: on a map with no `func_buyzone`, a player of a team that spawns is in a
-/// buy zone within 200 units of one of its team's spawn points (the origin of the point, whether
-/// or not the player is alive).
-fn old_check_buy_zone(g: &mut GameState, eng: &EngineApi<'_>, slot: u8) {
-    let class = match team_of(g, slot) {
-        Team::Terrorist => crate::world::T_SPAWN_CLASS,
-        Team::Ct => crate::world::CT_SPAWN_CLASS,
-        _ => return,
-    };
-    if near_any(eng, slot, class, |d| d < OLD_BUY_ZONE_RADIUS)
-        && let Some(p) = g.players[usize::from(slot)].as_mut()
-    {
-        p.signals.signal(SIGNAL_BUY);
-    }
-}
-
 /// `OLD_CheckBombTarget` (`player.cpp` 7132-7144, read 2026-11-23): a player within 256 units
 /// of an `info_bomb_target` is in a bomb site (any player, not only the carrier).
 fn old_check_bomb_target(g: &mut GameState, eng: &EngineApi<'_>, slot: u8) {
-    if near_any(eng, slot, "info_bomb_target", |d| d <= OLD_BOMB_TARGET_RADIUS)
-        && let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut)
+    if near_any(eng, slot, "info_bomb_target", |d| {
+        d <= OLD_BOMB_TARGET_RADIUS
+    }) && let Some(p) = g
+        .players
+        .get_mut(usize::from(slot))
+        .and_then(Option::as_mut)
     {
         p.signals.signal(SIGNAL_BOMB);
     }
@@ -420,10 +437,103 @@ fn old_check_bomb_target(g: &mut GameState, eng: &EngineApi<'_>, slot: u8) {
 /// `OLD_CheckRescueZone` (`player.cpp` 7147-7160, read 2026-11-23): a player within
 /// [`MAX_HOSTAGES_RESCUE_RADIUS`] of an `info_hostage_rescue` is in a rescue zone.
 fn old_check_rescue_zone(g: &mut GameState, eng: &EngineApi<'_>, slot: u8) {
-    if near_any(eng, slot, "info_hostage_rescue", |d| d <= MAX_HOSTAGES_RESCUE_RADIUS)
-        && let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut)
+    if near_any(eng, slot, "info_hostage_rescue", |d| {
+        d <= MAX_HOSTAGES_RESCUE_RADIUS
+    }) && let Some(p) = g
+        .players
+        .get_mut(usize::from(slot))
+        .and_then(Option::as_mut)
     {
         p.signals.signal(SIGNAL_RESCUE);
+    }
+}
+
+fn aabb_overlaps(a_min: Vec3, a_max: Vec3, b_min: Vec3, b_max: Vec3) -> bool {
+    a_min.x <= b_max.x
+        && a_max.x >= b_min.x
+        && a_min.y <= b_max.y
+        && a_max.y >= b_min.y
+        && a_min.z <= b_max.z
+        && a_max.z >= b_min.z
+}
+
+/// True when the living player in `slot` is geometrically inside a buy zone of their team
+/// (`func_buyzone` AABB overlap, or within [`OLD_BUY_ZONE_RADIUS`] of a team spawn on maps without
+/// `func_buyzone`). Used at spawn (tick 0) and during `mp_freezetime` so instant buy binds never
+/// fail while waiting for the first `HandleSignals` / trigger touch tick.
+pub(crate) fn is_in_buy_zone_now(g: &GameState, eng: &EngineApi<'_>, slot: u8) -> bool {
+    let Some(p) = g.players.get(usize::from(slot)).and_then(Option::as_ref) else {
+        return false;
+    };
+    let team_id = i32::from(p.team.id());
+    if team_id == 0 {
+        return false;
+    }
+    let id = eng.client_edict(slot);
+    let Some(pv) = eng.ent(id) else {
+        return false;
+    };
+    if pv.deadflag != DEAD_NO {
+        return false;
+    }
+    if !g.rules.map_has_buy_zone() {
+        let class = match p.team {
+            Team::Terrorist => crate::world::T_SPAWN_CLASS,
+            Team::Ct => crate::world::CT_SPAWN_CLASS,
+            _ => return false,
+        };
+        return near_any(eng, slot, class, |d| d < OLD_BUY_ZONE_RADIUS);
+    }
+    let mut cursor = None;
+    while let Some(zone_id) = eng.find_by_classname(cursor, "func_buyzone") {
+        cursor = Some(zone_id);
+        let Some(zone_team) = eng
+            .private::<Box<dyn GameEntity>>(zone_id)
+            .and_then(|e| e.buy_zone_team())
+        else {
+            continue;
+        };
+        if zone_team != 0 && zone_team != team_id {
+            continue;
+        }
+        if let Some(zv) = eng.ent(zone_id)
+            && aabb_overlaps(pv.absmin, pv.absmax, zv.absmin, zv.absmax)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Immediately populates `SIGNAL_BUY` in `p.signals.state()` on spawn (tick 0) when the player
+/// spawns inside a buy zone, leaving `shown_zone_signals` clear so `HandleSignals` emits the
+/// `buyzone` `StatusIcon` once on the first client data update.
+pub(crate) fn sync_buy_signal_on_spawn(g: &mut GameState, eng: &EngineApi<'_>, slot: u8) {
+    if is_in_buy_zone_now(g, eng, slot)
+        && let Some(p) = g
+            .players
+            .get_mut(usize::from(slot))
+            .and_then(Option::as_mut)
+    {
+        p.signals.set_state_bit(SIGNAL_BUY);
+    }
+}
+
+/// Synchronises `SIGNAL_BUY` in `p.signals` after a test teleport (`place_player`), preserving
+/// `shown_zone_signals` so `HandleSignals` sends the proper show/hide edge.
+#[cfg(feature = "test-hooks")]
+pub(crate) fn sync_buy_signal_after_move(g: &mut GameState, eng: &EngineApi<'_>, slot: u8) {
+    let in_buy = is_in_buy_zone_now(g, eng, slot);
+    if let Some(p) = g
+        .players
+        .get_mut(usize::from(slot))
+        .and_then(Option::as_mut)
+    {
+        if in_buy {
+            p.signals.set_state_bit(SIGNAL_BUY);
+        } else {
+            p.signals.clear_bit(SIGNAL_BUY);
+        }
     }
 }
 
@@ -434,11 +544,16 @@ fn old_check_rescue_zone(g: &mut GameState, eng: &EngineApi<'_>, slot: u8) {
 /// become the state and each change of a signal sets or clears its icon, in the order buy, bomb,
 /// rescue, escape, VIP safety.
 ///
-/// The state lags the touch by up to half a second in both directions (the zones touch every
-/// frame, this runs every half second): `CC4::PrimaryAttack` reads the state.
+/// For `SIGNAL_BUY`, we also test current buyzone geometry directly so a player who just spawned
+/// or is frozen during `mp_freezetime` always holds `SIGNAL_BUY` immediately from tick 0.
 fn handle_signals(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
-    if !g.rules.map_has_buy_zone() {
-        old_check_buy_zone(g, eng, slot);
+    if is_in_buy_zone_now(g, eng, slot)
+        && let Some(p) = g
+            .players
+            .get_mut(usize::from(slot))
+            .and_then(Option::as_mut)
+    {
+        p.signals.signal(SIGNAL_BUY);
     }
     if !g.rules.map_has_bomb_zone() {
         old_check_bomb_target(g, eng, slot);
@@ -454,7 +569,8 @@ fn handle_signals(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
         return;
     };
     let signal = p.signals.pending();
-    let changed = p.signals.state() ^ signal;
+    let changed = p.shown_zone_signals ^ signal;
+    p.shown_zone_signals = signal;
     p.signals.update();
     let on = |bit: u8| signal & bit != 0;
     if changed & SIGNAL_BUY != 0 {
@@ -535,9 +651,10 @@ pub(crate) fn can_player_buy(
     if g.rules.knife_round != crate::rules::KnifeRoundState::Inactive {
         return false;
     }
-    let buy_anywhere = eng.cvar_f32("mp_buy_anywhere") != 0.0 || eng.cvar_f32("mp_warmup_mode") != 0.0;
-    // Is the player in a buy zone?
-    if !buy_anywhere && p.signals.state() & SIGNAL_BUY == 0 {
+    let buy_anywhere =
+        eng.cvar_f32("mp_buy_anywhere") != 0.0 || eng.cvar_f32("mp_warmup_mode") != 0.0;
+    // Is the player in a buy zone? Check both cached signal state and live geometry (tick-0 safe).
+    if !buy_anywhere && p.signals.state() & SIGNAL_BUY == 0 && !is_in_buy_zone_now(g, eng, slot) {
         return false;
     }
     let mut buy_time = (eng.cvar_f32("mp_buytime") * 60.0) as i32;
@@ -754,15 +871,23 @@ pub(crate) fn buy_item(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, ite
             }
         }
         SLOT_ITEM_SHIELD => {
-            if !can_buy_weapon_by_maptype(team, WeaponId::ShieldGun, g.rules.map_has_vip_safety_zone()) {
+            if !can_buy_weapon_by_maptype(
+                team,
+                WeaponId::ShieldGun,
+                g.rules.map_has_vip_safety_zone(),
+            ) {
                 say(eng, slot, "#Cannot_Buy_This");
                 return;
             }
-            let (owns_shield, has_elite) = g.players[usize::from(slot)]
-                .as_ref()
-                .map_or((false, false), |p| {
-                    (p.owns_shield, inventory::has_player_item(p, WeaponId::Elite))
-                });
+            let (owns_shield, has_elite) =
+                g.players[usize::from(slot)]
+                    .as_ref()
+                    .map_or((false, false), |p| {
+                        (
+                            p.owns_shield,
+                            inventory::has_player_item(p, WeaponId::Elite),
+                        )
+                    });
             if owns_shield {
                 say(eng, slot, "#Already_Have_One");
                 return;
@@ -882,8 +1007,22 @@ fn can_buy_weapon_by_maptype(team: Team, id: WeaponId, assassination: bool) -> b
         return match team {
             Team::Ct => matches!(
                 id,
-                P228 | Xm1014 | Aug | FiveSeven | Ump45 | Sg550 | Famas | Usp | Glock18 | Mp5n
-                    | M249 | M3 | M4a1 | Tmp | Deagle | P90 | ShieldGun
+                P228 | Xm1014
+                    | Aug
+                    | FiveSeven
+                    | Ump45
+                    | Sg550
+                    | Famas
+                    | Usp
+                    | Glock18
+                    | Mp5n
+                    | M249
+                    | M3
+                    | M4a1
+                    | Tmp
+                    | Deagle
+                    | P90
+                    | ShieldGun
             ),
             Team::Terrorist => matches!(
                 id,
@@ -895,13 +1034,44 @@ fn can_buy_weapon_by_maptype(team: Team, id: WeaponId, assassination: bool) -> b
     match team {
         Team::Ct => matches!(
             id,
-            P228 | Scout | Xm1014 | Aug | FiveSeven | Ump45 | Sg550 | Famas | Usp | Glock18 | Awp
-                | Mp5n | M249 | M3 | M4a1 | Tmp | Deagle | P90 | ShieldGun
+            P228 | Scout
+                | Xm1014
+                | Aug
+                | FiveSeven
+                | Ump45
+                | Sg550
+                | Famas
+                | Usp
+                | Glock18
+                | Awp
+                | Mp5n
+                | M249
+                | M3
+                | M4a1
+                | Tmp
+                | Deagle
+                | P90
+                | ShieldGun
         ),
         Team::Terrorist => matches!(
             id,
-            P228 | Scout | Xm1014 | Mac10 | Elite | Ump45 | Galil | Usp | Glock18 | Awp | Mp5n
-                | M249 | M3 | G3sg1 | Deagle | Sg552 | Ak47 | P90
+            P228 | Scout
+                | Xm1014
+                | Mac10
+                | Elite
+                | Ump45
+                | Galil
+                | Usp
+                | Glock18
+                | Awp
+                | Mp5n
+                | M249
+                | M3
+                | G3sg1
+                | Deagle
+                | Sg552
+                | Ak47
+                | P90
         ),
         _ => false,
     }
@@ -925,7 +1095,11 @@ fn can_buy_this(g: &GameState, eng: &mut EngineApi<'_>, slot: u8, id: WeaponId) 
         say(eng, slot, "#Cannot_Buy_This");
         return false;
     }
-    let owns = |slot_index: usize| p.items[slot_index].first().is_some_and(|i| i.weapon.id == id);
+    let owns = |slot_index: usize| {
+        p.items[slot_index]
+            .first()
+            .is_some_and(|i| i.weapon.id == id)
+    };
     if owns(PRIMARY_WEAPON_SLOT) || owns(PISTOL_SLOT) {
         say(eng, slot, "#Cstrike_Already_Own_Weapon");
         return false;
@@ -940,7 +1114,12 @@ fn can_buy_this(g: &GameState, eng: &mut EngineApi<'_>, slot: u8, id: WeaponId) 
 /// `BuyWeaponByWeaponID` (`client.cpp` 1595, vanilla): the weapon `id` is bought when the player
 /// may buy at all, may have it and can pay; the weapon held in the slot is dropped first. True
 /// when it was bought.
-pub(crate) fn buy_weapon_by_id(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, id: WeaponId) -> bool {
+pub(crate) fn buy_weapon_by_id(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    slot: u8,
+    id: WeaponId,
+) -> bool {
     if !can_player_buy(g, eng, slot, true) {
         return false;
     }
@@ -978,7 +1157,11 @@ pub(crate) fn buy_weapon_by_id(g: &mut GameState, eng: &mut EngineApi<'_>, slot:
         return false;
     }
     let cost = buy_ctx.price.max(0);
-    let account = g.players.get(usize::from(slot)).and_then(Option::as_ref).map_or(0, |p| p.money);
+    let account = g
+        .players
+        .get(usize::from(slot))
+        .and_then(Option::as_ref)
+        .map_or(0, |p| p.money);
     if account < cost {
         not_enough_money(eng, slot);
         return false;
@@ -1000,18 +1183,40 @@ pub(crate) fn buy_weapon_by_id(g: &mut GameState, eng: &mut EngineApi<'_>, slot:
 /// Snapshots the player's currently carried loadout into `m_rebuyStruct` (`rebuy_record`) so
 /// future `rebuy` / `cl_rebuy` commands restore it.
 pub(crate) fn snapshot_rebuy(g: &mut GameState, slot: u8) {
-    let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) else {
+    let Some(p) = g
+        .players
+        .get_mut(usize::from(slot))
+        .and_then(Option::as_mut)
+    else {
         return;
     };
     p.rebuy_record = crate::player::RebuyRecord {
         primary: p.items[PRIMARY_WEAPON_SLOT].first().map(|i| i.weapon.id),
         secondary: p.items[PISTOL_SLOT].first().map(|i| i.weapon.id),
-        armor: if p.armor > 0.0 { p.kevlar } else { ArmorType::None },
+        armor: if p.armor > 0.0 {
+            p.kevlar
+        } else {
+            ArmorType::None
+        },
         defuser: p.has_defuser,
         nvg: p.has_night_vision,
-        he_grenade: p.ammo.get(AmmoType::HeGrenade as usize).copied().unwrap_or(0) > 0,
-        flashbangs: p.ammo.get(AmmoType::Flashbang as usize).copied().unwrap_or(0),
-        smoke_grenade: p.ammo.get(AmmoType::SmokeGrenade as usize).copied().unwrap_or(0) > 0,
+        he_grenade: p
+            .ammo
+            .get(AmmoType::HeGrenade as usize)
+            .copied()
+            .unwrap_or(0)
+            > 0,
+        flashbangs: p
+            .ammo
+            .get(AmmoType::Flashbang as usize)
+            .copied()
+            .unwrap_or(0),
+        smoke_grenade: p
+            .ammo
+            .get(AmmoType::SmokeGrenade as usize)
+            .copied()
+            .unwrap_or(0)
+            > 0,
         shield: p.owns_shield,
     };
 }
@@ -1020,7 +1225,13 @@ pub(crate) fn snapshot_rebuy(g: &mut GameState, slot: u8) {
 /// carries, when the player can buy, uses ammo, is not full and can pay; with `blink_money` a
 /// player that cannot pay is told. The clip is given as the ammo entity of the original gives
 /// it (`CBasePlayerAmmo::AddAmmo`).
-fn buy_gun_ammo(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, id: WeaponId, blink_money: bool) -> bool {
+fn buy_gun_ammo(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    slot: u8,
+    id: WeaponId,
+    blink_money: bool,
+) -> bool {
     if !can_player_buy(g, eng, slot, true) {
         return false;
     }
@@ -1048,7 +1259,15 @@ fn buy_gun_ammo(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, id: Weapon
         let Some(ammo) = ammo_info_by_name(info.ammo_name1) else {
             return false;
         };
-        if crate::weapons::core::give_ammo(g, eng, slot, ammo.buy_clip_size, Some(ammo.ammo_name2), -1) != -1 {
+        if crate::weapons::core::give_ammo(
+            g,
+            eng,
+            slot,
+            ammo.buy_clip_size,
+            Some(ammo.ammo_name2),
+            -1,
+        ) != -1
+        {
             item_sound(eng, slot, "items/9mmclip1.wav");
         }
         money::add_account(g, eng, slot, -info.clip_cost, true);
@@ -1064,7 +1283,13 @@ fn buy_gun_ammo(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, id: Weapon
 /// `BuyAmmo` (`client.cpp` 2380): one clip for each weapon in the inventory slot `n_slot` (1
 /// primary, 2 pistol), from the head of the list, while each purchase works. True when every
 /// weapon of the slot got its clip (so a slot with no weapon is false).
-fn buy_ammo(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, n_slot: usize, blink_money: bool) -> bool {
+fn buy_ammo(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    slot: u8,
+    n_slot: usize,
+    blink_money: bool,
+) -> bool {
     if !can_player_buy(g, eng, slot, true) {
         return false;
     }
@@ -1113,19 +1338,67 @@ fn menu_weapon(menu: Menu, team: Team, key: i32) -> Option<WeaponId> {
         (Menu::BuyPistol, 2) => Usp,
         (Menu::BuyPistol, 3) => P228,
         (Menu::BuyPistol, 4) => Deagle,
-        (Menu::BuyPistol, 5) => if ct { FiveSeven } else { Elite },
+        (Menu::BuyPistol, 5) => {
+            if ct {
+                FiveSeven
+            } else {
+                Elite
+            }
+        }
         (Menu::BuyShotgun, 1) => M3,
         (Menu::BuyShotgun, 2) => Xm1014,
-        (Menu::BuySubMachineGun, 1) => if ct { Tmp } else { Mac10 },
+        (Menu::BuySubMachineGun, 1) => {
+            if ct {
+                Tmp
+            } else {
+                Mac10
+            }
+        }
         (Menu::BuySubMachineGun, 2) => Mp5n,
         (Menu::BuySubMachineGun, 3) => Ump45,
         (Menu::BuySubMachineGun, 4) => P90,
-        (Menu::BuyRifle, 1) => if ct { Famas } else { Galil },
-        (Menu::BuyRifle, 2) => if ct { Scout } else { Ak47 },
-        (Menu::BuyRifle, 3) => if ct { M4a1 } else { Scout },
-        (Menu::BuyRifle, 4) => if ct { Aug } else { Sg552 },
-        (Menu::BuyRifle, 5) => if ct { Sg550 } else { Awp },
-        (Menu::BuyRifle, 6) => if ct { Awp } else { G3sg1 },
+        (Menu::BuyRifle, 1) => {
+            if ct {
+                Famas
+            } else {
+                Galil
+            }
+        }
+        (Menu::BuyRifle, 2) => {
+            if ct {
+                Scout
+            } else {
+                Ak47
+            }
+        }
+        (Menu::BuyRifle, 3) => {
+            if ct {
+                M4a1
+            } else {
+                Scout
+            }
+        }
+        (Menu::BuyRifle, 4) => {
+            if ct {
+                Aug
+            } else {
+                Sg552
+            }
+        }
+        (Menu::BuyRifle, 5) => {
+            if ct {
+                Sg550
+            } else {
+                Awp
+            }
+        }
+        (Menu::BuyRifle, 6) => {
+            if ct {
+                Awp
+            } else {
+                G3sg1
+            }
+        }
         (Menu::BuyMachineGun, 1) => M249,
         _ => return Option::None,
     })
@@ -1377,6 +1650,7 @@ const WEAPON_ALIASES: &[(&str, &str, char)] = &[
     ("228compact", "#P228", 'B'),
     ("deagle", "#DesertEagle", 'B'),
     ("nighthaw", "#DesertEagle", 'B'),
+    ("nighthawk", "#DesertEagle", 'B'),
     ("elites", "#Beretta96G", 'T'),
     ("fn57", "#FiveSeven", 'C'),
     ("fiveseven", "#FiveSeven", 'C'),
@@ -1402,10 +1676,11 @@ fn weapon_alias(name: &str) -> Option<&'static (&'static str, &'static str, char
         .find(|(alias, _, _)| alias.eq_ignore_ascii_case(name))
 }
 
-/// The commands of the other buy aliases, which `HandleBuyAliasCommands` takes exactly.
+/// The commands of the other buy aliases, which `HandleBuyAliasCommands` takes exactly (plus
+/// `"nvg"` emitted by Steam Build 10210 `resource/UI/BuyEquipment.res`).
 const EQUIPMENT_ALIASES: &[&str] = &[
-    "primammo", "secammo", "vest", "vesthelm", "flash", "hegren", "sgren", "nvgs", "defuser",
-    "shield",
+    "primammo", "secammo", "vest", "vesthelm", "flash", "hegren", "sgren", "nvgs", "nvg",
+    "defuser", "shield",
 ];
 
 /// Maximum number of tokens accepted by `cl_setautobuy` / `cl_setrebuy`.
@@ -1446,14 +1721,17 @@ pub(crate) fn client_command(
     let Some(command) = argv.first().map(String::as_str) else {
         return;
     };
-    let buy_anywhere = eng.cvar_f32("mp_buy_anywhere") != 0.0 || eng.cvar_f32("mp_warmup_mode") != 0.0;
+    let buy_anywhere =
+        eng.cvar_f32("mp_buy_anywhere") != 0.0 || eng.cvar_f32("mp_warmup_mode") != 0.0;
     let in_zone = g
         .players
         .get(usize::from(slot))
         .and_then(Option::as_ref)
         .map(|p| {
             g.rules.knife_round == crate::rules::KnifeRoundState::Inactive
-                && ((p.signals.state() & SIGNAL_BUY != 0) || buy_anywhere)
+                && ((p.signals.state() & SIGNAL_BUY != 0)
+                    || is_in_buy_zone_now(g, eng, slot)
+                    || buy_anywhere)
         });
     let Some(in_zone) = in_zone else {
         return;
@@ -1536,7 +1814,11 @@ fn parse_buy_script_tokens(args: &[String], g: &mut GameState, slot: u8, is_auto
             break;
         }
     }
-    if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+    if let Some(p) = g
+        .players
+        .get_mut(usize::from(slot))
+        .and_then(Option::as_mut)
+    {
         if is_autobuy {
             p.autobuy_list = tokens;
         } else {
@@ -1596,7 +1878,7 @@ fn handle_autobuy(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
             "flash" | "flashbang" => buy_item(g, eng, slot, SLOT_ITEM_FLASHGREN),
             "hegren" | "hegrenade" => buy_item(g, eng, slot, SLOT_ITEM_HEGREN),
             "sgren" | "smokegrenade" => buy_item(g, eng, slot, SLOT_ITEM_SMOKEGREN),
-            "nvgs" | "nightvision" => buy_item(g, eng, slot, SLOT_ITEM_NVG),
+            "nvgs" | "nvg" | "nightvision" => buy_item(g, eng, slot, SLOT_ITEM_NVG),
             "defuser" if team == Team::Ct => buy_item(g, eng, slot, SLOT_ITEM_DEFUSEKIT),
             "shield" if team == Team::Ct && !has_primary => {
                 buy_item(g, eng, slot, SLOT_ITEM_SHIELD);
@@ -1659,7 +1941,7 @@ fn handle_rebuy(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
                     buy_item(g, eng, slot, SLOT_ITEM_SMOKEGREN);
                 }
             }
-            "nightvision" | "nvgs" => {
+            "nightvision" | "nvgs" | "nvg" => {
                 if record.nvg {
                     buy_item(g, eng, slot, SLOT_ITEM_NVG);
                 }
@@ -1670,7 +1952,11 @@ fn handle_rebuy(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
             _ => {}
         }
     }
-    if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+    if let Some(p) = g
+        .players
+        .get_mut(usize::from(slot))
+        .and_then(Option::as_mut)
+    {
         p.rebuy_record = record;
     }
 }
@@ -1698,7 +1984,7 @@ fn alias_command(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, command: 
         "flash" => buy_item(g, eng, slot, SLOT_ITEM_FLASHGREN),
         "hegren" => buy_item(g, eng, slot, SLOT_ITEM_HEGREN),
         "sgren" => buy_item(g, eng, slot, SLOT_ITEM_SMOKEGREN),
-        "nvgs" => buy_item(g, eng, slot, SLOT_ITEM_NVG),
+        "nvgs" | "nvg" => buy_item(g, eng, slot, SLOT_ITEM_NVG),
         "defuser" => {
             if team == Team::Ct {
                 buy_item(g, eng, slot, SLOT_ITEM_DEFUSEKIT);
@@ -1755,6 +2041,8 @@ mod tests {
         assert_eq!(weapon_alias("m4a1").map(|a| a.2), Some('C'));
         assert_eq!(weapon_alias("ak47").map(|a| a.2), Some('T'));
         assert_eq!(weapon_alias("awp").map(|a| a.2), Some('B'));
-        assert_eq!(WEAPON_ALIASES.len(), 42);
+        assert_eq!(weapon_alias("nighthawk").map(|a| a.2), Some('B'));
+        assert!(is_buy_command("nvg"));
+        assert_eq!(WEAPON_ALIASES.len(), 43);
     }
 }

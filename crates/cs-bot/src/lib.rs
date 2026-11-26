@@ -3,6 +3,7 @@
 //! pathfinder (ported from ReGameDLL_CS `game_shared/bot/` and `bot/`, GPL-3.0-or-later).
 
 pub mod buy;
+pub mod chatter;
 pub mod combat;
 pub mod nav_gen;
 pub mod nav_mesh;

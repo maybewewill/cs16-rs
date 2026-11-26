@@ -12,10 +12,12 @@ use cs_engine::{EdictId, EngineApi, EntTrace};
 use glam::Vec3;
 
 use crate::GameState;
-use crate::buy::BuyZone;
 use crate::bullets::{self, MultiDamage};
+use crate::buy::BuyZone;
 use crate::player::{DEAD_DEAD, DEAD_NO, player_slot};
-use crate::world::{BrushKind, FuncLadder, InfoPlayer, InfoTarget, StaticBrush, TriggerCamera, World};
+use crate::world::{
+    BrushKind, FuncLadder, InfoPlayer, InfoTarget, StaticBrush, TriggerCamera, World,
+};
 
 /// `USE_TYPE` (`FWGS/hlsdk-portable dlls/cbase.h:82-88`, read 2026-11-25): how an entity is
 /// used. `USE_OFF` (`0`) is the default argument of `CBaseEntity::Use`
@@ -128,6 +130,11 @@ pub trait GameEntity: Send + 'static {
         FCAP_ACROSS_TRANSITION
     }
 
+    /// Team restriction of a `func_buyzone` (`0` any, `1` T, `2` CT); `None` for other classes.
+    fn buy_zone_team(&self) -> Option<i32> {
+        None
+    }
+
     /// `pev->takedamage != DAMAGE_NO`. The engine's entity variables have no `takedamage`, so
     /// the class says it: the default is `DAMAGE_NO`; an entity that can be shot says yes (and
     /// no again once its [`killed`](Self::killed) ran, the source's `pev->takedamage =
@@ -143,7 +150,8 @@ pub trait GameEntity: Send + 'static {
 
     /// `CBaseEntity::IsAlive`: `pev->deadflag == DEAD_NO && pev->health > 0`.
     fn is_alive(&self, eng: &EngineApi<'_>, id: EdictId) -> bool {
-        eng.ent(id).is_some_and(|v| v.deadflag == DEAD_NO && v.health > 0.0)
+        eng.ent(id)
+            .is_some_and(|v| v.deadflag == DEAD_NO && v.health > 0.0)
     }
 
     /// Whether this entity is a dropped C4 (`CWeaponBox::m_bIsBomb` or map `weapon_c4`).
@@ -213,7 +221,8 @@ pub trait GameEntity: Send + 'static {
 
     /// `CBaseEntity::BodyTarget(posSrc)`: `Center()`, `(pev->absmax + pev->absmin) * 0.5`.
     fn body_target(&self, eng: &EngineApi<'_>, id: EdictId, _src: Vec3) -> Vec3 {
-        eng.ent(id).map_or(Vec3::ZERO, |v| (v.absmax + v.absmin) * 0.5)
+        eng.ent(id)
+            .map_or(Vec3::ZERO, |v| (v.absmax + v.absmin) * 0.5)
     }
 
     /// `CBaseEntity::TraceAttack(pevAttacker, flDamage, vecDir, ptr, bitsDamageType)`
@@ -379,7 +388,8 @@ pub(crate) fn use_entity(
 /// drops `FCAP_ACROSS_TRANSITION`: 0), an edict with no game class has 0, a game entity says
 /// its own.
 pub(crate) fn object_caps_of(eng: &EngineApi<'_>, id: EdictId) -> i32 {
-    eng.private::<Box<dyn GameEntity>>(id).map_or(0, |e| e.object_caps())
+    eng.private::<Box<dyn GameEntity>>(id)
+        .map_or(0, |e| e.object_caps())
 }
 
 /// `pev->takedamage != DAMAGE_NO` of an entity that is not a player: what its class says. Like
@@ -388,7 +398,8 @@ pub(crate) fn object_caps_of(eng: &EngineApi<'_>, id: EdictId) -> i32 {
 /// entity that is out of its edict for its own call is a [`Vacant`] (no damage); that cannot be
 /// seen yet, as no class damages entities from within its own method.
 pub(crate) fn entity_takes_damage(eng: &EngineApi<'_>, id: EdictId) -> bool {
-    eng.private::<Box<dyn GameEntity>>(id).is_some_and(|e| e.takes_damage())
+    eng.private::<Box<dyn GameEntity>>(id)
+        .is_some_and(|e| e.takes_damage())
 }
 
 /// `BodyTarget(posSrc)` of whichever entity `id` is: a player's is its centre plus `view_ofs *
@@ -407,8 +418,13 @@ pub(crate) fn body_target_of(
         let (center, view_ofs) = ((v.absmax + v.absmin) * 0.5, v.view_ofs);
         return center + view_ofs * bullets::random_float(g, 0.5, 1.1);
     }
-    eng.private::<Box<dyn GameEntity>>(id)
-        .map_or_else(|| eng.ent(id).map_or(Vec3::ZERO, |v| (v.absmax + v.absmin) * 0.5), |e| e.body_target(eng, id, src))
+    eng.private::<Box<dyn GameEntity>>(id).map_or_else(
+        || {
+            eng.ent(id)
+                .map_or(Vec3::ZERO, |v| (v.absmax + v.absmin) * 0.5)
+        },
+        |e| e.body_target(eng, id, src),
+    )
 }
 
 /// `TakeDamage(pevInflictor, pevAttacker, flDamage, bitsDamageType)` of whichever entity `id`
@@ -484,7 +500,9 @@ pub fn create_entity(classname: &str) -> Option<Box<dyn GameEntity>> {
         "func_conveyor" => Box::new(crate::movers::FuncConveyor::default()),
         "path_corner" => Box::new(crate::movers::PathCorner::default()),
         "path_track" => Box::new(crate::movers::PathTrack::default()),
-        "func_illusionary" => Box::new(StaticBrush::new("func_illusionary", BrushKind::Illusionary)),
+        "func_illusionary" => {
+            Box::new(StaticBrush::new("func_illusionary", BrushKind::Illusionary))
+        }
         #[cfg(feature = "test-hooks")]
         "test_dispatch" => Box::new(DispatchProbe(ProbeMode::Plain)),
         #[cfg(feature = "test-hooks")]
@@ -627,9 +645,17 @@ pub(crate) fn with_entity(
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchEvent {
-    Think { id: EdictId },
-    Touch { id: EdictId, other: EdictId },
-    Blocked { id: EdictId, other: EdictId },
+    Think {
+        id: EdictId,
+    },
+    Touch {
+        id: EdictId,
+        other: EdictId,
+    },
+    Blocked {
+        id: EdictId,
+        other: EdictId,
+    },
     /// `Use` of a `test_target`; `value_bits` is the `f32` value's bits.
     Use {
         id: EdictId,
@@ -639,7 +665,9 @@ pub enum DispatchEvent {
         value_bits: u32,
     },
     /// `Killed` of a `test_target`.
-    Killed { id: EdictId },
+    Killed {
+        id: EdictId,
+    },
 }
 
 /// What a [`DispatchProbe`] does besides logging. For tests only (feature `test-hooks`).
@@ -857,7 +885,13 @@ mod tests {
             create_entity("monster_scientist").unwrap().classname(),
             "hostage_entity"
         );
-        for unknown in ["", "nonexistent_class", "FUNC_WALL", "func_buyzones", "worldspawn "] {
+        for unknown in [
+            "",
+            "nonexistent_class",
+            "FUNC_WALL",
+            "func_buyzones",
+            "worldspawn ",
+        ] {
             assert!(create_entity(unknown).is_none(), "{unknown:?}");
         }
     }

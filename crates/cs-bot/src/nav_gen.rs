@@ -246,7 +246,8 @@ pub fn generate_nav_mesh<W: NavWorld + ?Sized>(world: &W, config: &NavGenConfig)
     }
 
     // 2. Greedy rectangular area generation.
-    let mut areas = build_rectangular_areas(&mut nodes, config.max_merge_width, config.max_merge_height);
+    let mut areas =
+        build_rectangular_areas(&mut nodes, config.max_merge_width, config.max_merge_height);
 
     // 3. Connect adjacent areas (4 cardinal directions + jump-down links).
     connect_generated_areas(world, &nodes, &mut areas, step);
@@ -544,17 +545,28 @@ fn sample_walkable_nodes<W: NavWorld + ?Sized>(
             let to = Vec3::new(candidate_xy.x, candidate_xy.y, to_z);
 
             // Height delta bounds (cs_bot_learn.cpp:288)
-            if to.z - from.z > JUMP_CROUCH_HEIGHT + 0.1 || from.z - to.z > DEATH_DROP {
+            let delta_z = to.z - from.z;
+            if delta_z > JUMP_CROUCH_HEIGHT + 0.1 || -delta_z > DEATH_DROP {
                 continue;
             }
             if to_normal.z < MAX_UNIT_Z_SLOPE {
                 continue;
             }
 
-            // Clearance trace at crouch-waist height (step_up safe)
-            let lift = (to.z - from.z).max(0.0) + 18.5;
-            let from_probe = from + Vec3::new(0.0, 0.0, lift.min(36.0));
+            // Clearance trace at crouch-waist height above the higher endpoint (step_up & jump_up safe)
+            let lift = delta_z.max(0.0) + 18.5;
+            let from_probe = from + Vec3::new(0.0, 0.0, lift);
             let to_probe = to + Vec3::new(0.0, 0.0, 18.5);
+            if delta_z > 0.5 {
+                // Ensure vertical headroom above `from` when stepping or jumping onto a higher ledge.
+                let head_tr = world.trace_line(
+                    from + Vec3::new(0.0, 0.0, 18.5),
+                    from_probe + Vec3::new(0.0, 0.0, 17.5),
+                );
+                if head_tr.fraction < 1.0 || head_tr.start_solid {
+                    continue;
+                }
+            }
             let tr_line = world.trace_line(from_probe, to_probe);
             if (tr_line.fraction < 1.0 || tr_line.start_solid)
                 && !world.is_walkable_obstacle(from_probe, to_probe)
@@ -562,15 +574,38 @@ fn sample_walkable_nodes<W: NavWorld + ?Sized>(
                 continue;
             }
 
-            // Slope check along the step
+            // Intermediate terrain check along the step:
+            // - Always probe from above the higher endpoint so brush stairs/ledges do not start solid.
+            // - Allow vertical stair risers (`mid_normal.z < MAX_UNIT_Z_SLOPE`) and jump/drop ledges
+            //   as long as there is no barrier taller than `STEP_HEIGHT` or deep pit in between.
+            let is_jump_or_drop = delta_z.abs() > STEP_HEIGHT + 0.5;
+            let hi_z = from.z.max(to.z);
+            let lo_z = from.z.min(to.z);
             let mut slope_ok = true;
             for frac in [0.25f32, 0.5, 0.75] {
-                let mid = from.lerp(to, frac);
-                let Some((_, mid_normal)) = get_ground_height(world, mid) else {
+                let mid_xy = from.lerp(to, frac);
+                let probe_pos = Vec3::new(mid_xy.x, mid_xy.y, hi_z);
+                let Some((mid_z, mid_normal)) = get_ground_height(world, probe_pos) else {
                     slope_ok = false;
                     break;
                 };
-                if mid_normal.z < MAX_UNIT_Z_SLOPE {
+                if mid_z > hi_z + STEP_HEIGHT + 1.0 {
+                    slope_ok = false;
+                    break;
+                }
+                if !is_jump_or_drop {
+                    if mid_z < lo_z - STEP_HEIGHT - 2.0 {
+                        slope_ok = false;
+                        break;
+                    }
+                    // Reject steep non-stair barriers whose hit Z climbs above both endpoints,
+                    // while allowing brush stair risers whose Z stays between `lo_z` and `hi_z`.
+                    if mid_normal.z < MAX_UNIT_Z_SLOPE && (mid_z > hi_z + 2.0 || mid_z < lo_z - 2.0)
+                    {
+                        slope_ok = false;
+                        break;
+                    }
+                } else if mid_z < lo_z - DEATH_DROP {
                     slope_ok = false;
                     break;
                 }
@@ -582,7 +617,7 @@ fn sample_walkable_nodes<W: NavWorld + ?Sized>(
             let Some(mut attrs) = compute_node_attributes(world, to) else {
                 continue;
             };
-            if to.z - from.z > STEP_HEIGHT {
+            if delta_z > STEP_HEIGHT {
                 attrs.insert(NavAttribute::JUMP);
             }
 
@@ -601,10 +636,9 @@ fn sample_walkable_nodes<W: NavWorld + ?Sized>(
                 continue;
             }
             nodes[curr_idx].to[dir.as_index()] = Some(next_idx);
-            // Any walkable slope up to ~45 deg over a 25u step (<= 26u dz) is traversable both ways.
-            if (from.z - to.z).abs() <= STEP_HEIGHT + 8.0
-                && nodes[next_idx].to[dir.opposite().as_index()].is_none()
-            {
+            // Bidirectional link for walkable slopes/stairs and safe drop-downs back from a jump-up.
+            let can_return = (from.z - to.z <= STEP_HEIGHT + 8.0) && (to.z - from.z <= DEATH_DROP);
+            if can_return && nodes[next_idx].to[dir.opposite().as_index()].is_none() {
                 nodes[next_idx].to[dir.opposite().as_index()] = Some(curr_idx);
             }
         }
@@ -646,7 +680,9 @@ fn test_area(nodes: &[NavNode], nw_idx: usize, width: usize, height: usize) -> b
     for _y in 0..height {
         let mut horiz = vert;
         for _x in 0..width {
-            if nodes[horiz].attributes != attrs || nodes[horiz].covered || !is_closed_cell(nodes, horiz)
+            if nodes[horiz].attributes != attrs
+                || nodes[horiz].covered
+                || !is_closed_cell(nodes, horiz)
             {
                 return false;
             }
@@ -743,7 +779,8 @@ fn build_rectangular_areas(
             }
             if test_area(nodes, idx, try_w, try_h) {
                 let area_idx = areas.len();
-                if let Some((area, covered)) = build_area(nodes, idx, try_w, try_h, next_id, area_idx)
+                if let Some((area, covered)) =
+                    build_area(nodes, idx, try_w, try_h, next_id, area_idx)
                 {
                     next_id += 1;
                     areas.push(area);
@@ -801,7 +838,10 @@ fn find_jump_down_area<W: NavWorld + ?Sized>(
                 let top_b = Vec3::new(probe.x, probe.y, top_a.z);
                 let tr1 = world.trace_line(top_a, top_b);
                 let tr2 = world.trace_line(top_b, Vec3::new(probe.x, probe.y, target_z + 2.0));
-                if tr1.fraction >= 1.0 && !tr1.start_solid && tr2.fraction >= 1.0 && !tr2.start_solid
+                if tr1.fraction >= 1.0
+                    && !tr1.start_solid
+                    && tr2.fraction >= 1.0
+                    && !tr2.start_solid
                 {
                     return Some(target_idx);
                 }
@@ -1098,7 +1138,10 @@ fn split_area_x(areas: &mut Vec<GenArea>, idx: usize, step: f32) {
 
     for other in old_east {
         areas[other].connections[NavDir::West.as_index()].retain(|&c| c != idx);
-        push_unique(&mut areas[other].connections[NavDir::West.as_index()], new_idx);
+        push_unique(
+            &mut areas[other].connections[NavDir::West.as_index()],
+            new_idx,
+        );
     }
 
     // Keep overlapping north/south connections on both halves.
@@ -1161,7 +1204,10 @@ fn split_area_y(areas: &mut Vec<GenArea>, idx: usize, step: f32) {
 
     for other in old_south {
         areas[other].connections[NavDir::North.as_index()].retain(|&c| c != idx);
-        push_unique(&mut areas[other].connections[NavDir::North.as_index()], new_idx);
+        push_unique(
+            &mut areas[other].connections[NavDir::North.as_index()],
+            new_idx,
+        );
     }
 
     for dir in [NavDir::East, NavDir::West] {
@@ -1547,10 +1593,9 @@ fn compute_hiding_spots<W: NavWorld + ?Sized>(world: &W, file: &mut NavFile) {
                 continue;
             }
             let pos = file.areas[area_idx].corner(corner) + delta;
-            if spots
-                .iter()
-                .any(|s: &HidingSpot| s.pos.distance_squared(pos) < COLLISION_RANGE * COLLISION_RANGE)
-            {
+            if spots.iter().any(|s: &HidingSpot| {
+                s.pos.distance_squared(pos) < COLLISION_RANGE * COLLISION_RANGE
+            }) {
                 continue;
             }
             let flags = if is_hiding_spot_in_cover(world, pos) {
@@ -1668,7 +1713,8 @@ fn compute_spot_encounters<W: NavWorld + ?Sized>(world: &W, file: &mut NavFile) 
                             file.areas[area_idx].compute_portal(&file.areas[from_idx], from_dir);
                         let (mut p_to, _) =
                             file.areas[area_idx].compute_portal(&file.areas[to_idx], to_dir);
-                        p_from.z = file.areas[from_idx].z_at(p_from.x, p_from.y) + HALF_HUMAN_HEIGHT;
+                        p_from.z =
+                            file.areas[from_idx].z_at(p_from.x, p_from.y) + HALF_HUMAN_HEIGHT;
                         p_to.z = file.areas[to_idx].z_at(p_to.x, p_to.y) + HALF_HUMAN_HEIGHT;
 
                         let delta = p_to - p_from;
@@ -1739,7 +1785,11 @@ fn tag_places_from_hints<W: NavWorld + ?Sized>(world: &W, file: &mut NavFile) {
     let mut bomb_site_idx = 0usize;
     let bomb_names = ["BombsiteA", "BombsiteB", "BombsiteC"];
     let mut intern_place = |name: &str| -> u16 {
-        if let Some(pos) = file.places.iter().position(|p| p.eq_ignore_ascii_case(name)) {
+        if let Some(pos) = file
+            .places
+            .iter()
+            .position(|p| p.eq_ignore_ascii_case(name))
+        {
             (pos + 1) as u16
         } else {
             file.places.push(name.to_string());
@@ -1986,15 +2036,13 @@ mod tests {
         // Main room [0..300, 0..300], ceiling 128, plus a crouch tunnel [300..450, 100..200], ceiling 48
         let mut world = MockWorld::room_with_floor(Vec2::ZERO, Vec2::new(450.0, 300.0), 0.0, 128.0);
         // Add low ceiling over x in [300..450]
-        world.solids.push((
-            Vec3::new(300.0, 0.0, 48.0),
-            Vec3::new(450.0, 300.0, 128.0),
-        ));
+        world
+            .solids
+            .push((Vec3::new(300.0, 0.0, 48.0), Vec3::new(450.0, 300.0, 128.0)));
         // Add pillar in room corner to create hiding cover corners
-        world.solids.push((
-            Vec3::new(150.0, 0.0, 0.0),
-            Vec3::new(200.0, 100.0, 128.0),
-        ));
+        world
+            .solids
+            .push((Vec3::new(150.0, 0.0, 0.0), Vec3::new(200.0, 100.0, 128.0)));
 
         world.seeds = vec![Vec3::new(50.0, 50.0, 16.0)];
         world.zones = vec![
@@ -2017,7 +2065,9 @@ mod tests {
         let mesh = generate_nav_mesh(&world, &NavGenConfig::default());
         assert!(!mesh.areas().is_empty(), "expected generated areas");
         assert!(
-            mesh.areas().iter().any(|a| a.attributes.contains(NavAttribute::CROUCH)),
+            mesh.areas()
+                .iter()
+                .any(|a| a.attributes.contains(NavAttribute::CROUCH)),
             "expected crouch area under 48u ceiling"
         );
         assert_eq!(mesh.get_place(Vec3::new(50.0, 50.0, 0.0)), Some("CTSpawn"));
@@ -2040,10 +2090,9 @@ mod tests {
     fn generates_and_links_ladder_between_floors() {
         let mut world = MockWorld::room_with_floor(Vec2::ZERO, Vec2::new(300.0, 300.0), 0.0, 300.0);
         // Upper platform at z=160 for x in [150..300]
-        world.solids.push((
-            Vec3::new(150.0, 0.0, 144.0),
-            Vec3::new(300.0, 300.0, 160.0),
-        ));
+        world
+            .solids
+            .push((Vec3::new(150.0, 0.0, 144.0), Vec3::new(300.0, 300.0, 160.0)));
         world.seeds = vec![Vec3::new(50.0, 150.0, 16.0)];
         // Ladder along x=145..150 facing West (-X) climbing from z=0 to z=160
         world.ladders = vec![NavLadderHint {

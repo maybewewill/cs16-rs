@@ -7,7 +7,9 @@
 use glam::Vec3;
 
 use crate::buy::WeaponRestrictions;
-use crate::profile::{BotDifficulty, BotProfile, BotWeapon, LookSpringParams, WeaponCategory, mix64};
+use crate::profile::{
+    BotDifficulty, BotProfile, BotWeapon, LookSpringParams, WeaponCategory, mix64,
+};
 
 /// Enemy target visible to the combat controller.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -213,7 +215,8 @@ pub fn step_combat(state: &mut BotCombatState, input: &CombatInput<'_>) -> Comba
             state.blind_scatter_pitch = signed_unit(h2) * 22.0 * input.flash_alpha;
         }
         let target_yaw = (state.yaw_deg + state.blind_scatter_yaw * dt * 2.0).rem_euclid(360.0);
-        let target_pitch = (state.pitch_deg + state.blind_scatter_pitch * dt * 2.0).clamp(-45.0, 45.0);
+        let target_pitch =
+            (state.pitch_deg + state.blind_scatter_pitch * dt * 2.0).clamp(-45.0, 45.0);
         step_look_spring(
             state,
             target_yaw,
@@ -227,7 +230,10 @@ pub fn step_combat(state: &mut BotCombatState, input: &CombatInput<'_>) -> Comba
         out.pitch_deg = state.pitch_deg;
         if input.inventory.has_shield && !input.inventory.shield_drawn {
             out.secondary_attack = true;
-        } else if input.flash_alpha < 0.78 && !input.visible_enemies.is_empty() && has_active_clip(&input.inventory) {
+        } else if input.flash_alpha < 0.78
+            && !input.visible_enemies.is_empty()
+            && has_active_clip(&input.inventory)
+        {
             // Wild panic burst when partially flashed.
             out.primary_attack = (mix64(input.rng_seed) & 3) == 0;
         }
@@ -359,8 +365,13 @@ pub fn step_combat(state: &mut BotCombatState, input: &CombatInput<'_>) -> Comba
     if state.target_id != Some(target.id) {
         state.target_id = Some(target.id);
         state.reaction_elapsed = 0.0;
-        state.required_reaction =
-            compute_reaction_delay(input.profile, input.difficulty, state.yaw_deg, input.self_eye, target.eye);
+        state.required_reaction = compute_reaction_delay(
+            input.profile,
+            input.difficulty,
+            state.yaw_deg,
+            input.self_eye,
+            target.eye,
+        );
         state.aim_focus = input.profile.aim_focus_initial;
         state.aim_focus_timer = 0.0;
         state.shots_in_burst = 0;
@@ -370,7 +381,11 @@ pub fn step_combat(state: &mut BotCombatState, input: &CombatInput<'_>) -> Comba
         state.reaction_elapsed += dt;
         // Aim focus decays while steadily tracking; widens slightly if bot is moving fast.
         let move_penalty = (input.self_vel.truncate().length() / 250.0) * 1.5;
-        let decay = input.profile.aim_focus_decay.clamp(0.1, 0.99).powf(dt * 3.0);
+        let decay = input
+            .profile
+            .aim_focus_decay
+            .clamp(0.1, 0.99)
+            .powf(dt * 3.0);
         state.aim_focus = (state.aim_focus * decay + move_penalty * dt).clamp(0.15, 40.0);
         state.aim_focus_timer += dt;
         if state.aim_focus_timer >= input.profile.aim_focus_interval.max(0.05) {
@@ -460,7 +475,11 @@ pub fn step_combat(state: &mut BotCombatState, input: &CombatInput<'_>) -> Comba
         chosen_weapon.category(),
         WeaponCategory::Rifle | WeaponCategory::Sniper | WeaponCategory::MachineGun
     );
-    let stop_to_shoot_dist = if chosen_weapon.is_sniper() { 220.0 } else { 420.0 };
+    let stop_to_shoot_dist = if chosen_weapon.is_sniper() {
+        220.0
+    } else {
+        420.0
+    };
     if is_rifle_or_sniper && dist > stop_to_shoot_dist {
         out.want_stop_to_shoot = true;
         out.want_crouch = input.profile.crouch || (input.profile.skill >= 0.55 && dist > 700.0);
@@ -572,12 +591,12 @@ pub fn select_engagement_weapon(
         return BotWeapon::Knife;
     }
 
-    let primary_usable = inv.primary.filter(|&w| {
-        restrictions.allows_weapon(w) && inv.primary_clip > 0
-    });
-    let secondary_usable = inv.secondary.filter(|&w| {
-        restrictions.allows_weapon(w) && inv.secondary_clip > 0
-    });
+    let primary_usable = inv
+        .primary
+        .filter(|&w| restrictions.allows_weapon(w) && inv.primary_clip > 0);
+    let secondary_usable = inv
+        .secondary
+        .filter(|&w| restrictions.allows_weapon(w) && inv.secondary_clip > 0);
 
     if let Some(p) = primary_usable {
         // Shotgun at long range -> fall back to pistol if available.
@@ -602,10 +621,18 @@ pub fn select_engagement_weapon(
     }
 
     // Both primary and secondary clips are empty; pick weapon with reserve to reload, or knife.
-    if let Some(p) = inv.primary.filter(|&w| restrictions.allows_weapon(w) && inv.primary_reserve > 0) && dist > 180.0 {
+    if let Some(p) = inv
+        .primary
+        .filter(|&w| restrictions.allows_weapon(w) && inv.primary_reserve > 0)
+        && dist > 180.0
+    {
         return p;
     }
-    if let Some(s) = inv.secondary.filter(|&w| restrictions.allows_weapon(w) && inv.secondary_reserve > 0) && dist > 120.0 {
+    if let Some(s) = inv
+        .secondary
+        .filter(|&w| restrictions.allows_weapon(w) && inv.secondary_reserve > 0)
+        && dist > 120.0
+    {
         return s;
     }
     if inv.has_shield && restrictions.allow_shield {
@@ -718,7 +745,13 @@ fn step_burst_cadence(
     true
 }
 
-fn step_look_spring(
+/// Advances the critically damped 2nd-order angular look spring (`CCSBot::UpdateLookAngles`)
+/// smoothly toward `(target_yaw, target_pitch)` over `dt` seconds.
+///
+/// Stiffness scales with `difficulty`, while damping scales with `sqrt(diff_scale)` and is clamped
+/// to at least `0.95 * 2 * sqrt(stiffness)` so bots rotate smoothly without instant 180° snaps or
+/// robotic overshoot oscillation at any difficulty.
+pub fn step_look_spring(
     state: &mut BotCombatState,
     target_yaw: f32,
     target_pitch: f32,
@@ -727,25 +760,28 @@ fn step_look_spring(
     difficulty: BotDifficulty,
     spring: &LookSpringParams,
 ) {
+    let dt = dt.clamp(0.001, 0.25);
     let diff_scale = match difficulty {
         BotDifficulty::Easy => 0.65,
         BotDifficulty::Normal => 0.85,
         BotDifficulty::Hard => 1.05,
         BotDifficulty::Expert => 1.30,
     };
-    let (max_accel, stiffness, damping) = if attacking {
+    let (max_accel, stiffness, base_damping) = if attacking {
         (
             spring.max_accel_attacking * diff_scale,
             spring.stiffness_attacking * diff_scale,
-            spring.damping_attacking,
+            spring.damping_attacking * diff_scale.sqrt(),
         )
     } else {
         (
             spring.max_accel_normal * diff_scale,
             spring.stiffness_normal * diff_scale,
-            spring.damping_normal,
+            spring.damping_normal * diff_scale.sqrt(),
         )
     };
+    // Keep damping near or above critical (`2 * sqrt(k)`) so turns settle smoothly without ringing.
+    let damping = base_damping.max(2.0 * stiffness.sqrt() * 0.95);
 
     let sub_steps = ((dt / 0.02).ceil() as u32).clamp(1, 16);
     let sub_dt = dt / (sub_steps as f32);
@@ -784,19 +820,20 @@ fn select_best_target(
     enemies: &[CombatTarget],
     current_target: Option<u32>,
 ) -> Option<CombatTarget> {
-    enemies
-        .iter()
-        .copied()
-        .min_by(|a, b| {
-            let sa = target_priority_cost(self_eye, *a, current_target);
-            let sb = target_priority_cost(self_eye, *b, current_target);
-            sa.total_cmp(&sb)
-        })
+    enemies.iter().copied().min_by(|a, b| {
+        let sa = target_priority_cost(self_eye, *a, current_target);
+        let sb = target_priority_cost(self_eye, *b, current_target);
+        sa.total_cmp(&sb)
+    })
 }
 
 fn target_priority_cost(self_eye: Vec3, t: CombatTarget, current_target: Option<u32>) -> f32 {
     let dist = self_eye.distance(t.eye);
-    let sticky_bonus = if current_target == Some(t.id) { -180.0 } else { 0.0 };
+    let sticky_bonus = if current_target == Some(t.id) {
+        -180.0
+    } else {
+        0.0
+    };
     let threat_bonus = -t.threat_score * 120.0;
     dist + sticky_bonus + threat_bonus
 }
@@ -820,7 +857,11 @@ fn compute_reaction_delay(
     ((profile.reaction_time + profile.attack_delay) * diff_mult + surprise).clamp(0.04, 1.25)
 }
 
-fn compute_aim_point(target: CombatTarget, profile: &BotProfile, difficulty: BotDifficulty) -> Vec3 {
+fn compute_aim_point(
+    target: CombatTarget,
+    profile: &BotProfile,
+    difficulty: BotDifficulty,
+) -> Vec3 {
     // High-skill bots aim higher toward chest/head; lower-skill bots aim center-mass.
     let height_t = match difficulty {
         BotDifficulty::Expert => 0.88,
@@ -852,8 +893,10 @@ fn has_active_clip(inv: &CombatInventory) -> bool {
 
 fn needs_reload(inv: &CombatInventory) -> bool {
     let primary_empty = inv.primary.is_some() && inv.primary_clip == 0 && inv.primary_reserve > 0;
-    let secondary_empty =
-        inv.primary.is_none() && inv.secondary.is_some() && inv.secondary_clip == 0 && inv.secondary_reserve > 0;
+    let secondary_empty = inv.primary.is_none()
+        && inv.secondary.is_some()
+        && inv.secondary_clip == 0
+        && inv.secondary_reserve > 0;
     primary_empty || secondary_empty
 }
 
@@ -883,7 +926,8 @@ pub(crate) fn angles_to(from: Vec3, to: Vec3) -> (f32, f32) {
 }
 
 #[inline]
-pub(crate) fn angle_diff(from: f32, to: f32) -> f32 {
+/// Shortest signed angular difference `to - from` wrapped into `[-180, 180]`.
+pub fn angle_diff(from: f32, to: f32) -> f32 {
     let mut d = (to - from).rem_euclid(360.0);
     if d > 180.0 {
         d -= 360.0;
@@ -1010,8 +1054,14 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(select_engagement_weapon(&awp_inv, &restrictions, 1400.0), BotWeapon::Awp);
-        assert_eq!(select_engagement_weapon(&awp_inv, &restrictions, 100.0), BotWeapon::Deagle);
+        assert_eq!(
+            select_engagement_weapon(&awp_inv, &restrictions, 1400.0),
+            BotWeapon::Awp
+        );
+        assert_eq!(
+            select_engagement_weapon(&awp_inv, &restrictions, 100.0),
+            BotWeapon::Deagle
+        );
 
         let empty_all = CombatInventory {
             primary: Some(BotWeapon::Ak47),
@@ -1023,7 +1073,10 @@ mod tests {
             active_weapon: Some(BotWeapon::Ak47),
             ..Default::default()
         };
-        assert_eq!(select_engagement_weapon(&empty_all, &restrictions, 60.0), BotWeapon::Knife);
+        assert_eq!(
+            select_engagement_weapon(&empty_all, &restrictions, 60.0),
+            BotWeapon::Knife
+        );
 
         // Sniper triggers secondary_attack to zoom when enemy is far.
         let prof = BotProfile::fallback("Phoenix", BotDifficulty::Expert);
@@ -1104,7 +1157,11 @@ mod tests {
                 },
             );
         }
-        assert!(st.pitch_deg > 1.0, "expected downward pitch recoil compensation, got {}", st.pitch_deg);
+        assert!(
+            st.pitch_deg > 1.0,
+            "expected downward pitch recoil compensation, got {}",
+            st.pitch_deg
+        );
 
         // Empty primary clip triggers needs_reload_in_cover.
         let mut empty_inv = inv;

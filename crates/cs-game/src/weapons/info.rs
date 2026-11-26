@@ -366,19 +366,99 @@ static ITEM_INFO: [ItemInfo; 29] = [
     item!(Ak47, 0, 1, Some("762Nato"), 90, "weapon_ak47", 30, 0, 25),
     item!(Aug, 0, 14, Some("556Nato"), 90, "weapon_aug", 30, 0, 25),
     item!(Awp, 0, 2, Some("338Magnum"), 30, "weapon_awp", 10, 0, 30),
-    item!(C4, 4, 3, Some("C4"), MAX_AMMO_C4, "weapon_c4", WEAPON_NOCLIP, ITEM_FLAG_LIMITINWORLD | ITEM_FLAG_EXHAUSTIBLE, 3),
+    item!(
+        C4,
+        4,
+        3,
+        Some("C4"),
+        MAX_AMMO_C4,
+        "weapon_c4",
+        WEAPON_NOCLIP,
+        ITEM_FLAG_LIMITINWORLD | ITEM_FLAG_EXHAUSTIBLE,
+        3
+    ),
     item!(Deagle, 1, 1, Some("50AE"), 35, "weapon_deagle", 7, 0, 7),
     item!(Elite, 1, 5, Some("9mm"), 120, "weapon_elite", 30, 0, 5),
-    item!(Famas, 0, 18, Some("556Nato"), 90, "weapon_famas", 25, ITEM_FLAG_NOFIREUNDERWATER, 75),
-    item!(FiveSeven, 1, 6, Some("57mm"), 100, "weapon_fiveseven", 20, 0, 5),
-    item!(Flashbang, 3, 2, Some("Flashbang"), MAX_AMMO_FLASHBANG, "weapon_flashbang", WEAPON_NOCLIP, ITEM_FLAG_LIMITINWORLD | ITEM_FLAG_EXHAUSTIBLE, 1),
+    item!(
+        Famas,
+        0,
+        18,
+        Some("556Nato"),
+        90,
+        "weapon_famas",
+        25,
+        ITEM_FLAG_NOFIREUNDERWATER,
+        75
+    ),
+    item!(
+        FiveSeven,
+        1,
+        6,
+        Some("57mm"),
+        100,
+        "weapon_fiveseven",
+        20,
+        0,
+        5
+    ),
+    item!(
+        Flashbang,
+        3,
+        2,
+        Some("Flashbang"),
+        MAX_AMMO_FLASHBANG,
+        "weapon_flashbang",
+        WEAPON_NOCLIP,
+        ITEM_FLAG_LIMITINWORLD | ITEM_FLAG_EXHAUSTIBLE,
+        1
+    ),
     item!(G3sg1, 0, 3, Some("762Nato"), 90, "weapon_g3sg1", 20, 0, 20),
-    item!(Galil, 0, 17, Some("556Nato"), 90, "weapon_galil", 35, ITEM_FLAG_NOFIREUNDERWATER, 25),
+    item!(
+        Galil,
+        0,
+        17,
+        Some("556Nato"),
+        90,
+        "weapon_galil",
+        35,
+        ITEM_FLAG_NOFIREUNDERWATER,
+        25
+    ),
     item!(Glock18, 1, 2, Some("9mm"), 120, "weapon_glock18", 20, 0, 5),
-    item!(HeGrenade, 3, 1, Some("HEGrenade"), MAX_AMMO_HEGRENADE, "weapon_hegrenade", WEAPON_NOCLIP, ITEM_FLAG_LIMITINWORLD | ITEM_FLAG_EXHAUSTIBLE, 2),
+    item!(
+        HeGrenade,
+        3,
+        1,
+        Some("HEGrenade"),
+        MAX_AMMO_HEGRENADE,
+        "weapon_hegrenade",
+        WEAPON_NOCLIP,
+        ITEM_FLAG_LIMITINWORLD | ITEM_FLAG_EXHAUSTIBLE,
+        2
+    ),
     item!(Knife, 2, 1, None, -1, "weapon_knife", WEAPON_NOCLIP, 0, 0),
-    item!(M249, 0, 4, Some("556NatoBox"), 200, "weapon_m249", 100, 0, 25),
-    item!(M3, 0, 5, Some("buckshot"), 32, "weapon_m3", 8, ITEM_FLAG_NOFIREUNDERWATER, 20),
+    item!(
+        M249,
+        0,
+        4,
+        Some("556NatoBox"),
+        200,
+        "weapon_m249",
+        100,
+        0,
+        25
+    ),
+    item!(
+        M3,
+        0,
+        5,
+        Some("buckshot"),
+        32,
+        "weapon_m3",
+        8,
+        ITEM_FLAG_NOFIREUNDERWATER,
+        20
+    ),
     item!(M4a1, 0, 6, Some("556Nato"), 90, "weapon_m4a1", 30, 0, 25),
     item!(Mac10, 0, 13, Some("45acp"), 100, "weapon_mac10", 30, 0, 25),
     item!(Mp5n, 0, 7, Some("9mm"), 120, "weapon_mp5navy", 30, 0, 25),
@@ -387,12 +467,32 @@ static ITEM_INFO: [ItemInfo; 29] = [
     item!(Scout, 0, 9, Some("762Nato"), 90, "weapon_scout", 10, 0, 30),
     item!(Sg550, 0, 16, Some("556Nato"), 90, "weapon_sg550", 30, 0, 20),
     item!(Sg552, 0, 10, Some("556Nato"), 90, "weapon_sg552", 30, 0, 25),
-    item!(SmokeGrenade, 3, 3, Some("SmokeGrenade"), MAX_AMMO_SMOKEGRENADE, "weapon_smokegrenade", WEAPON_NOCLIP, ITEM_FLAG_LIMITINWORLD | ITEM_FLAG_EXHAUSTIBLE, 1),
+    item!(
+        SmokeGrenade,
+        3,
+        3,
+        Some("SmokeGrenade"),
+        MAX_AMMO_SMOKEGRENADE,
+        "weapon_smokegrenade",
+        WEAPON_NOCLIP,
+        ITEM_FLAG_LIMITINWORLD | ITEM_FLAG_EXHAUSTIBLE,
+        1
+    ),
     item!(Tmp, 0, 11, Some("9mm"), 120, "weapon_tmp", 30, 0, 25),
     // Quirk (vanilla): "45ACP" in capitals, unlike the "45acp" of the MAC-10.
     item!(Ump45, 0, 15, Some("45ACP"), 100, "weapon_ump45", 25, 0, 25),
     item!(Usp, 1, 4, Some("45ACP"), 100, "weapon_usp", 12, 0, 5),
-    item!(Xm1014, 0, 12, Some("buckshot"), 32, "weapon_xm1014", 7, ITEM_FLAG_NOFIREUNDERWATER, 20),
+    item!(
+        Xm1014,
+        0,
+        12,
+        Some("buckshot"),
+        32,
+        "weapon_xm1014",
+        7,
+        ITEM_FLAG_NOFIREUNDERWATER,
+        20
+    ),
 ];
 
 macro_rules! winfo {
@@ -415,55 +515,434 @@ macro_rules! winfo {
 /// `g_weaponInfo_default` (`weapontype.cpp`, read 2026-11-22), vanilla branch, without the
 /// all-zero terminator row. Quirk: the `WEAPON_GLOCK` row names `weapon_glock18`.
 static WEAPON_INFO: [WeaponInfo; 26] = [
-    winfo!(P228, 600, 50, 13, 13, 52, Sig357, "weapon_p228", "ammo_357sig", Some("357SIG")),
-    winfo!(Glock, 400, 20, 30, 20, 120, Mm9, "weapon_glock18", "ammo_9mm", Some("9mm")),
-    winfo!(Glock18, 400, 20, 30, 20, 120, Mm9, "weapon_glock18", "ammo_9mm", Some("9mm")),
-    winfo!(Scout, 2750, 80, 30, 10, 90, Nato762, "weapon_scout", "ammo_762nato", Some("762Nato")),
-    winfo!(Xm1014, 3000, 65, 8, 7, 32, Buckshot, "weapon_xm1014", "ammo_buckshot", Some("buckshot")),
-    winfo!(Mac10, 1400, 25, 12, 30, 100, Acp45, "weapon_mac10", "ammo_45acp", Some("45acp")),
-    winfo!(Aug, 3500, 60, 30, 30, 90, Nato556, "weapon_aug", "ammo_556nato", Some("556Nato")),
-    winfo!(Elite, 800, 20, 30, 30, 120, Mm9, "weapon_elite", "ammo_9mm", Some("9mm")),
-    winfo!(FiveSeven, 750, 50, 50, 20, 100, Mm57, "weapon_fiveseven", "ammo_57mm", Some("57mm")),
-    winfo!(Ump45, 1700, 25, 12, 25, 100, Acp45, "weapon_ump45", "ammo_45acp", Some("45acp")),
-    winfo!(Sg550, 4200, 60, 30, 30, 90, Nato556, "weapon_sg550", "ammo_556nato", Some("556Nato")),
-    winfo!(Galil, 2000, 60, 30, 35, 90, Nato556, "weapon_galil", "ammo_556nato", Some("556Nato")),
-    winfo!(Famas, 2250, 60, 30, 25, 90, Nato556, "weapon_famas", "ammo_556nato", Some("556Nato")),
-    winfo!(Usp, 500, 25, 12, 12, 100, Acp45, "weapon_usp", "ammo_45acp", Some("45acp")),
-    winfo!(Awp, 4750, 125, 10, 10, 30, Magnum338, "weapon_awp", "ammo_338magnum", Some("338Magnum")),
-    winfo!(Mp5n, 1500, 20, 30, 30, 120, Mm9, "weapon_mp5navy", "ammo_9mm", Some("9mm")),
-    winfo!(M249, 5750, 60, 30, 100, 200, NatoBox556, "weapon_m249", "ammo_556natobox", Some("556NatoBox")),
-    winfo!(M3, 1700, 65, 8, 8, 32, Buckshot, "weapon_m3", "ammo_buckshot", Some("buckshot")),
-    winfo!(M4a1, 3100, 60, 30, 30, 90, Nato556, "weapon_m4a1", "ammo_556nato", Some("556Nato")),
-    winfo!(Tmp, 1250, 20, 30, 30, 120, Mm9, "weapon_tmp", "ammo_9mm", Some("9mm")),
-    winfo!(G3sg1, 5000, 80, 30, 20, 90, Nato762, "weapon_g3sg1", "ammo_762nato", Some("762Nato")),
-    winfo!(Deagle, 650, 40, 7, 7, 35, Ae50, "weapon_deagle", "ammo_50ae", Some("50AE")),
-    winfo!(Sg552, 3500, 60, 30, 30, 90, Nato556, "weapon_sg552", "ammo_556nato", Some("556Nato")),
-    winfo!(Ak47, 2500, 80, 30, 30, 90, Nato762, "weapon_ak47", "ammo_762nato", Some("762Nato")),
-    winfo!(P90, 2350, 50, 50, 50, 100, Mm57, "weapon_p90", "ammo_57mm", Some("57mm")),
+    winfo!(
+        P228,
+        600,
+        50,
+        13,
+        13,
+        52,
+        Sig357,
+        "weapon_p228",
+        "ammo_357sig",
+        Some("357SIG")
+    ),
+    winfo!(
+        Glock,
+        400,
+        20,
+        30,
+        20,
+        120,
+        Mm9,
+        "weapon_glock18",
+        "ammo_9mm",
+        Some("9mm")
+    ),
+    winfo!(
+        Glock18,
+        400,
+        20,
+        30,
+        20,
+        120,
+        Mm9,
+        "weapon_glock18",
+        "ammo_9mm",
+        Some("9mm")
+    ),
+    winfo!(
+        Scout,
+        2750,
+        80,
+        30,
+        10,
+        90,
+        Nato762,
+        "weapon_scout",
+        "ammo_762nato",
+        Some("762Nato")
+    ),
+    winfo!(
+        Xm1014,
+        3000,
+        65,
+        8,
+        7,
+        32,
+        Buckshot,
+        "weapon_xm1014",
+        "ammo_buckshot",
+        Some("buckshot")
+    ),
+    winfo!(
+        Mac10,
+        1400,
+        25,
+        12,
+        30,
+        100,
+        Acp45,
+        "weapon_mac10",
+        "ammo_45acp",
+        Some("45acp")
+    ),
+    winfo!(
+        Aug,
+        3500,
+        60,
+        30,
+        30,
+        90,
+        Nato556,
+        "weapon_aug",
+        "ammo_556nato",
+        Some("556Nato")
+    ),
+    winfo!(
+        Elite,
+        800,
+        20,
+        30,
+        30,
+        120,
+        Mm9,
+        "weapon_elite",
+        "ammo_9mm",
+        Some("9mm")
+    ),
+    winfo!(
+        FiveSeven,
+        750,
+        50,
+        50,
+        20,
+        100,
+        Mm57,
+        "weapon_fiveseven",
+        "ammo_57mm",
+        Some("57mm")
+    ),
+    winfo!(
+        Ump45,
+        1700,
+        25,
+        12,
+        25,
+        100,
+        Acp45,
+        "weapon_ump45",
+        "ammo_45acp",
+        Some("45acp")
+    ),
+    winfo!(
+        Sg550,
+        4200,
+        60,
+        30,
+        30,
+        90,
+        Nato556,
+        "weapon_sg550",
+        "ammo_556nato",
+        Some("556Nato")
+    ),
+    winfo!(
+        Galil,
+        2000,
+        60,
+        30,
+        35,
+        90,
+        Nato556,
+        "weapon_galil",
+        "ammo_556nato",
+        Some("556Nato")
+    ),
+    winfo!(
+        Famas,
+        2250,
+        60,
+        30,
+        25,
+        90,
+        Nato556,
+        "weapon_famas",
+        "ammo_556nato",
+        Some("556Nato")
+    ),
+    winfo!(
+        Usp,
+        500,
+        25,
+        12,
+        12,
+        100,
+        Acp45,
+        "weapon_usp",
+        "ammo_45acp",
+        Some("45acp")
+    ),
+    winfo!(
+        Awp,
+        4750,
+        125,
+        10,
+        10,
+        30,
+        Magnum338,
+        "weapon_awp",
+        "ammo_338magnum",
+        Some("338Magnum")
+    ),
+    winfo!(
+        Mp5n,
+        1500,
+        20,
+        30,
+        30,
+        120,
+        Mm9,
+        "weapon_mp5navy",
+        "ammo_9mm",
+        Some("9mm")
+    ),
+    winfo!(
+        M249,
+        5750,
+        60,
+        30,
+        100,
+        200,
+        NatoBox556,
+        "weapon_m249",
+        "ammo_556natobox",
+        Some("556NatoBox")
+    ),
+    winfo!(
+        M3,
+        1700,
+        65,
+        8,
+        8,
+        32,
+        Buckshot,
+        "weapon_m3",
+        "ammo_buckshot",
+        Some("buckshot")
+    ),
+    winfo!(
+        M4a1,
+        3100,
+        60,
+        30,
+        30,
+        90,
+        Nato556,
+        "weapon_m4a1",
+        "ammo_556nato",
+        Some("556Nato")
+    ),
+    winfo!(
+        Tmp,
+        1250,
+        20,
+        30,
+        30,
+        120,
+        Mm9,
+        "weapon_tmp",
+        "ammo_9mm",
+        Some("9mm")
+    ),
+    winfo!(
+        G3sg1,
+        5000,
+        80,
+        30,
+        20,
+        90,
+        Nato762,
+        "weapon_g3sg1",
+        "ammo_762nato",
+        Some("762Nato")
+    ),
+    winfo!(
+        Deagle,
+        650,
+        40,
+        7,
+        7,
+        35,
+        Ae50,
+        "weapon_deagle",
+        "ammo_50ae",
+        Some("50AE")
+    ),
+    winfo!(
+        Sg552,
+        3500,
+        60,
+        30,
+        30,
+        90,
+        Nato556,
+        "weapon_sg552",
+        "ammo_556nato",
+        Some("556Nato")
+    ),
+    winfo!(
+        Ak47,
+        2500,
+        80,
+        30,
+        30,
+        90,
+        Nato762,
+        "weapon_ak47",
+        "ammo_762nato",
+        Some("762Nato")
+    ),
+    winfo!(
+        P90,
+        2350,
+        50,
+        50,
+        50,
+        100,
+        Mm57,
+        "weapon_p90",
+        "ammo_57mm",
+        Some("57mm")
+    ),
     winfo!(ShieldGun, 2200, 0, 0, 0, 0, None, "weapon_shield", "", None),
 ];
 
 /// `g_ammoInfo_default` (`weapontype.cpp`, read 2026-11-22).
 static AMMO_INFO: [AmmoInfo; 14] = [
-    AmmoInfo { ammo_type: AmmoType::Magnum338, clip_cost: 125, buy_clip_size: 10, max_rounds: 30, ammo_name1: Some("ammo_338magnum"), ammo_name2: "338Magnum" },
-    AmmoInfo { ammo_type: AmmoType::Nato762, clip_cost: 80, buy_clip_size: 30, max_rounds: 90, ammo_name1: Some("ammo_762nato"), ammo_name2: "762Nato" },
-    AmmoInfo { ammo_type: AmmoType::NatoBox556, clip_cost: 60, buy_clip_size: 30, max_rounds: 200, ammo_name1: Some("ammo_556natobox"), ammo_name2: "556NatoBox" },
-    AmmoInfo { ammo_type: AmmoType::Nato556, clip_cost: 60, buy_clip_size: 30, max_rounds: 90, ammo_name1: Some("ammo_556nato"), ammo_name2: "556Nato" },
-    AmmoInfo { ammo_type: AmmoType::Buckshot, clip_cost: 65, buy_clip_size: 8, max_rounds: 32, ammo_name1: Some("ammo_buckshot"), ammo_name2: "buckshot" },
-    AmmoInfo { ammo_type: AmmoType::Acp45, clip_cost: 25, buy_clip_size: 12, max_rounds: 100, ammo_name1: Some("ammo_45acp"), ammo_name2: "45acp" },
-    AmmoInfo { ammo_type: AmmoType::Mm57, clip_cost: 50, buy_clip_size: 50, max_rounds: 100, ammo_name1: Some("ammo_57mm"), ammo_name2: "57mm" },
-    AmmoInfo { ammo_type: AmmoType::Ae50, clip_cost: 40, buy_clip_size: 7, max_rounds: 35, ammo_name1: Some("ammo_50ae"), ammo_name2: "50AE" },
-    AmmoInfo { ammo_type: AmmoType::Sig357, clip_cost: 50, buy_clip_size: 13, max_rounds: 52, ammo_name1: Some("ammo_357sig"), ammo_name2: "357SIG" },
-    AmmoInfo { ammo_type: AmmoType::Mm9, clip_cost: 20, buy_clip_size: 30, max_rounds: 120, ammo_name1: Some("ammo_9mm"), ammo_name2: "9mm" },
-    AmmoInfo { ammo_type: AmmoType::Flashbang, clip_cost: FLASHBANG_PRICE, buy_clip_size: 1, max_rounds: MAX_AMMO_FLASHBANG, ammo_name1: None, ammo_name2: "Flashbang" },
-    AmmoInfo { ammo_type: AmmoType::HeGrenade, clip_cost: HEGRENADE_PRICE, buy_clip_size: 1, max_rounds: MAX_AMMO_HEGRENADE, ammo_name1: None, ammo_name2: "HEGrenade" },
-    AmmoInfo { ammo_type: AmmoType::SmokeGrenade, clip_cost: SMOKEGRENADE_PRICE, buy_clip_size: 1, max_rounds: MAX_AMMO_SMOKEGRENADE, ammo_name1: None, ammo_name2: "SmokeGrenade" },
-    AmmoInfo { ammo_type: AmmoType::C4, clip_cost: 0, buy_clip_size: 0, max_rounds: MAX_AMMO_C4, ammo_name1: None, ammo_name2: "C4" },
+    AmmoInfo {
+        ammo_type: AmmoType::Magnum338,
+        clip_cost: 125,
+        buy_clip_size: 10,
+        max_rounds: 30,
+        ammo_name1: Some("ammo_338magnum"),
+        ammo_name2: "338Magnum",
+    },
+    AmmoInfo {
+        ammo_type: AmmoType::Nato762,
+        clip_cost: 80,
+        buy_clip_size: 30,
+        max_rounds: 90,
+        ammo_name1: Some("ammo_762nato"),
+        ammo_name2: "762Nato",
+    },
+    AmmoInfo {
+        ammo_type: AmmoType::NatoBox556,
+        clip_cost: 60,
+        buy_clip_size: 30,
+        max_rounds: 200,
+        ammo_name1: Some("ammo_556natobox"),
+        ammo_name2: "556NatoBox",
+    },
+    AmmoInfo {
+        ammo_type: AmmoType::Nato556,
+        clip_cost: 60,
+        buy_clip_size: 30,
+        max_rounds: 90,
+        ammo_name1: Some("ammo_556nato"),
+        ammo_name2: "556Nato",
+    },
+    AmmoInfo {
+        ammo_type: AmmoType::Buckshot,
+        clip_cost: 65,
+        buy_clip_size: 8,
+        max_rounds: 32,
+        ammo_name1: Some("ammo_buckshot"),
+        ammo_name2: "buckshot",
+    },
+    AmmoInfo {
+        ammo_type: AmmoType::Acp45,
+        clip_cost: 25,
+        buy_clip_size: 12,
+        max_rounds: 100,
+        ammo_name1: Some("ammo_45acp"),
+        ammo_name2: "45acp",
+    },
+    AmmoInfo {
+        ammo_type: AmmoType::Mm57,
+        clip_cost: 50,
+        buy_clip_size: 50,
+        max_rounds: 100,
+        ammo_name1: Some("ammo_57mm"),
+        ammo_name2: "57mm",
+    },
+    AmmoInfo {
+        ammo_type: AmmoType::Ae50,
+        clip_cost: 40,
+        buy_clip_size: 7,
+        max_rounds: 35,
+        ammo_name1: Some("ammo_50ae"),
+        ammo_name2: "50AE",
+    },
+    AmmoInfo {
+        ammo_type: AmmoType::Sig357,
+        clip_cost: 50,
+        buy_clip_size: 13,
+        max_rounds: 52,
+        ammo_name1: Some("ammo_357sig"),
+        ammo_name2: "357SIG",
+    },
+    AmmoInfo {
+        ammo_type: AmmoType::Mm9,
+        clip_cost: 20,
+        buy_clip_size: 30,
+        max_rounds: 120,
+        ammo_name1: Some("ammo_9mm"),
+        ammo_name2: "9mm",
+    },
+    AmmoInfo {
+        ammo_type: AmmoType::Flashbang,
+        clip_cost: FLASHBANG_PRICE,
+        buy_clip_size: 1,
+        max_rounds: MAX_AMMO_FLASHBANG,
+        ammo_name1: None,
+        ammo_name2: "Flashbang",
+    },
+    AmmoInfo {
+        ammo_type: AmmoType::HeGrenade,
+        clip_cost: HEGRENADE_PRICE,
+        buy_clip_size: 1,
+        max_rounds: MAX_AMMO_HEGRENADE,
+        ammo_name1: None,
+        ammo_name2: "HEGrenade",
+    },
+    AmmoInfo {
+        ammo_type: AmmoType::SmokeGrenade,
+        clip_cost: SMOKEGRENADE_PRICE,
+        buy_clip_size: 1,
+        max_rounds: MAX_AMMO_SMOKEGRENADE,
+        ammo_name1: None,
+        ammo_name2: "SmokeGrenade",
+    },
+    AmmoInfo {
+        ammo_type: AmmoType::C4,
+        clip_cost: 0,
+        buy_clip_size: 0,
+        max_rounds: MAX_AMMO_C4,
+        ammo_name1: None,
+        ammo_name2: "C4",
+    },
 ];
 
 macro_rules! wstruct {
     ($id:ident, $price:expr, $side:expr, $class:expr, $ammo:expr) => {
-        WeaponStruct { id: WeaponId::$id, price: $price, side: $side, class: $class, ammo_price: $ammo }
+        WeaponStruct {
+            id: WeaponId::$id,
+            price: $price,
+            side: $side,
+            class: $class,
+            ammo_price: $ammo,
+        }
     };
 }
 
@@ -500,7 +979,11 @@ static WEAPON_STRUCT: [WeaponStruct; 25] = [
 
 macro_rules! slot {
     ($id:ident, $slot:ident, $name:expr) => {
-        WeaponSlotInfo { id: WeaponId::$id, slot: InventorySlot::$slot, weapon_name: $name }
+        WeaponSlotInfo {
+            id: WeaponId::$id,
+            slot: InventorySlot::$slot,
+            weapon_name: $name,
+        }
     };
 }
 
@@ -542,38 +1025,138 @@ static WEAPON_SLOT_INFO: [WeaponSlotInfo; 31] = [
 
 macro_rules! ab {
     ($class:expr, $cmd:expr, $cn:expr) => {
-        AutoBuyInfo { class: $class, command: $cmd, classname: $cn }
+        AutoBuyInfo {
+            class: $class,
+            command: $cmd,
+            classname: $cn,
+        }
     };
 }
 
 /// `g_autoBuyInfo` (`weapontype.cpp`, read 2026-11-22), without the `nullptr` terminator.
 static AUTO_BUY_INFO: [AutoBuyInfo; 34] = [
-    ab!(AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_RIFLE, "galil", "weapon_galil"),
-    ab!(AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_RIFLE, "ak47", "weapon_ak47"),
-    ab!(AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_SNIPERRIFLE, "scout", "weapon_scout"),
-    ab!(AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_RIFLE, "sg552", "weapon_sg552"),
-    ab!(AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_SNIPERRIFLE, "awp", "weapon_awp"),
-    ab!(AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_SNIPERRIFLE, "g3sg1", "weapon_g3sg1"),
-    ab!(AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_RIFLE, "famas", "weapon_famas"),
-    ab!(AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_RIFLE, "m4a1", "weapon_m4a1"),
-    ab!(AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_RIFLE, "aug", "weapon_aug"),
-    ab!(AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_SNIPERRIFLE, "sg550", "weapon_sg550"),
-    ab!(AUTOBUYCLASS_SECONDARY | AUTOBUYCLASS_PISTOL, "glock", "weapon_glock18"),
-    ab!(AUTOBUYCLASS_SECONDARY | AUTOBUYCLASS_PISTOL, "usp", "weapon_usp"),
-    ab!(AUTOBUYCLASS_SECONDARY | AUTOBUYCLASS_PISTOL, "p228", "weapon_p228"),
-    ab!(AUTOBUYCLASS_SECONDARY | AUTOBUYCLASS_PISTOL, "deagle", "weapon_deagle"),
-    ab!(AUTOBUYCLASS_SECONDARY | AUTOBUYCLASS_PISTOL, "elites", "weapon_elite"),
-    ab!(AUTOBUYCLASS_SECONDARY | AUTOBUYCLASS_PISTOL, "fn57", "weapon_fiveseven"),
-    ab!(AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_SHOTGUN, "m3", "weapon_m3"),
-    ab!(AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_SHOTGUN, "xm1014", "weapon_xm1014"),
-    ab!(AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_SMG, "mac10", "weapon_mac10"),
+    ab!(
+        AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_RIFLE,
+        "galil",
+        "weapon_galil"
+    ),
+    ab!(
+        AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_RIFLE,
+        "ak47",
+        "weapon_ak47"
+    ),
+    ab!(
+        AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_SNIPERRIFLE,
+        "scout",
+        "weapon_scout"
+    ),
+    ab!(
+        AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_RIFLE,
+        "sg552",
+        "weapon_sg552"
+    ),
+    ab!(
+        AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_SNIPERRIFLE,
+        "awp",
+        "weapon_awp"
+    ),
+    ab!(
+        AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_SNIPERRIFLE,
+        "g3sg1",
+        "weapon_g3sg1"
+    ),
+    ab!(
+        AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_RIFLE,
+        "famas",
+        "weapon_famas"
+    ),
+    ab!(
+        AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_RIFLE,
+        "m4a1",
+        "weapon_m4a1"
+    ),
+    ab!(
+        AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_RIFLE,
+        "aug",
+        "weapon_aug"
+    ),
+    ab!(
+        AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_SNIPERRIFLE,
+        "sg550",
+        "weapon_sg550"
+    ),
+    ab!(
+        AUTOBUYCLASS_SECONDARY | AUTOBUYCLASS_PISTOL,
+        "glock",
+        "weapon_glock18"
+    ),
+    ab!(
+        AUTOBUYCLASS_SECONDARY | AUTOBUYCLASS_PISTOL,
+        "usp",
+        "weapon_usp"
+    ),
+    ab!(
+        AUTOBUYCLASS_SECONDARY | AUTOBUYCLASS_PISTOL,
+        "p228",
+        "weapon_p228"
+    ),
+    ab!(
+        AUTOBUYCLASS_SECONDARY | AUTOBUYCLASS_PISTOL,
+        "deagle",
+        "weapon_deagle"
+    ),
+    ab!(
+        AUTOBUYCLASS_SECONDARY | AUTOBUYCLASS_PISTOL,
+        "elites",
+        "weapon_elite"
+    ),
+    ab!(
+        AUTOBUYCLASS_SECONDARY | AUTOBUYCLASS_PISTOL,
+        "fn57",
+        "weapon_fiveseven"
+    ),
+    ab!(
+        AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_SHOTGUN,
+        "m3",
+        "weapon_m3"
+    ),
+    ab!(
+        AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_SHOTGUN,
+        "xm1014",
+        "weapon_xm1014"
+    ),
+    ab!(
+        AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_SMG,
+        "mac10",
+        "weapon_mac10"
+    ),
     ab!(AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_SMG, "tmp", "weapon_tmp"),
-    ab!(AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_SMG, "mp5", "weapon_mp5navy"),
-    ab!(AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_SMG, "ump45", "weapon_ump45"),
+    ab!(
+        AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_SMG,
+        "mp5",
+        "weapon_mp5navy"
+    ),
+    ab!(
+        AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_SMG,
+        "ump45",
+        "weapon_ump45"
+    ),
     ab!(AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_SMG, "p90", "weapon_p90"),
-    ab!(AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_MACHINEGUN, "m249", "weapon_m249"),
-    ab!(AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_AMMO, "primammo", "primammo"),
-    ab!(AUTOBUYCLASS_SECONDARY | AUTOBUYCLASS_AMMO, "secammo", "secammo"),
+    ab!(
+        AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_MACHINEGUN,
+        "m249",
+        "weapon_m249"
+    ),
+    ab!(
+        AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_AMMO,
+        "primammo",
+        "primammo"
+    ),
+    ab!(
+        AUTOBUYCLASS_SECONDARY | AUTOBUYCLASS_AMMO,
+        "secammo",
+        "secammo"
+    ),
     ab!(AUTOBUYCLASS_ARMOR, "vest", "item_kevlar"),
     ab!(AUTOBUYCLASS_ARMOR, "vesthelm", "item_assaultsuit"),
     ab!(AUTOBUYCLASS_GRENADE, "flash", "weapon_flashbang"),
@@ -581,7 +1164,11 @@ static AUTO_BUY_INFO: [AutoBuyInfo; 34] = [
     ab!(AUTOBUYCLASS_GRENADE, "sgren", "weapon_smokegrenade"),
     ab!(AUTOBUYCLASS_NIGHTVISION, "nvgs", "nvgs"),
     ab!(AUTOBUYCLASS_DEFUSER, "defuser", "defuser"),
-    ab!(AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_SHIELD, "shield", "shield"),
+    ab!(
+        AUTOBUYCLASS_PRIMARY | AUTOBUYCLASS_SHIELD,
+        "shield",
+        "shield"
+    ),
 ];
 
 /// `g_weaponAliasInfo` (`weapontype.cpp`, read 2026-11-22), without the terminator. The first
@@ -627,9 +1214,10 @@ static WEAPON_ALIAS: [(&str, WeaponId); 38] = [
     ("mp5navy", WeaponId::Mp5n),
 ];
 
-/// `g_weaponBuyAliasInfo` (`weapontype.cpp`, read 2026-11-22): alias, weapon, the `failName`
-/// (the localised name shown when the player cannot buy it).
-static WEAPON_BUY_ALIAS: [(&str, WeaponId, &str); 42] = [
+/// `g_weaponBuyAliasInfo` (`weapontype.cpp`, read 2026-11-22) plus Build 10210 `autobuy.txt`
+/// full alias `nighthawk`: alias, weapon, the `failName` (the localised name shown when the player
+/// cannot buy it).
+static WEAPON_BUY_ALIAS: [(&str, WeaponId, &str); 43] = [
     ("galil", WeaponId::Galil, "#Galil"),
     ("defender", WeaponId::Galil, "#Galil"),
     ("ak47", WeaponId::Ak47, "#AK47"),
@@ -656,6 +1244,7 @@ static WEAPON_BUY_ALIAS: [(&str, WeaponId, &str); 42] = [
     ("228compact", WeaponId::P228, "#P228"),
     ("deagle", WeaponId::Deagle, "#DesertEagle"),
     ("nighthaw", WeaponId::Deagle, "#DesertEagle"),
+    ("nighthawk", WeaponId::Deagle, "#DesertEagle"),
     ("elites", WeaponId::Elite, "#Beretta96G"),
     ("fn57", WeaponId::FiveSeven, "#FiveSeven"),
     ("fiveseven", WeaponId::FiveSeven, "#FiveSeven"),
@@ -768,7 +1357,12 @@ static AMMO_REGISTRY: LazyLock<[Option<&'static str>; MAX_AMMO_SLOTS]> = LazyLoc
             if name.is_empty() {
                 continue;
             }
-            if reg.iter().skip(1).flatten().any(|n| n.eq_ignore_ascii_case(name)) {
+            if reg
+                .iter()
+                .skip(1)
+                .flatten()
+                .any(|n| n.eq_ignore_ascii_case(name))
+            {
                 continue;
             }
             giammo_index += 1;
@@ -796,7 +1390,9 @@ pub fn weapon_info(id: WeaponId) -> Option<&'static WeaponInfo> {
 /// `GetWeaponInfo(const char *weaponName)`: the first row whose entity name matches, without
 /// case. Quirk: `"weapon_glock18"` finds the `WEAPON_GLOCK` row (id 2), which comes first.
 pub fn weapon_info_by_name(name: &str) -> Option<&'static WeaponInfo> {
-    WEAPON_INFO.iter().find(|i| i.entity_name.eq_ignore_ascii_case(name))
+    WEAPON_INFO
+        .iter()
+        .find(|i| i.entity_name.eq_ignore_ascii_case(name))
 }
 
 /// Every row of `g_weaponInfo_default`.
@@ -816,7 +1412,9 @@ pub fn ammo_info(ammo: AmmoType) -> Option<&'static AmmoInfo> {
 
 /// `GetAmmoInfo(const char *ammoName)`: matches `ammoName1` (`"ammo_9mm"`) without case.
 pub fn ammo_info_by_name(name: &str) -> Option<&'static AmmoInfo> {
-    AMMO_INFO.iter().find(|a| a.ammo_name1.is_some_and(|n| n.eq_ignore_ascii_case(name)))
+    AMMO_INFO
+        .iter()
+        .find(|a| a.ammo_name1.is_some_and(|n| n.eq_ignore_ascii_case(name)))
 }
 
 /// `g_weaponStruct`: who can buy the weapon and its ammo price.
@@ -837,12 +1435,18 @@ pub fn auto_buy_info() -> &'static [AutoBuyInfo] {
 /// `AliasToWeaponID`: the first alias that matches without case. `None` where the C function
 /// returns `WEAPON_NONE` for "not found"; the alias `"none"` gives `Some(WeaponId::None)`.
 pub fn alias_to_weapon_id(alias: &str) -> Option<WeaponId> {
-    WEAPON_ALIAS.iter().find(|(a, _)| a.eq_ignore_ascii_case(alias)).map(|&(_, id)| id)
+    WEAPON_ALIAS
+        .iter()
+        .find(|(a, _)| a.eq_ignore_ascii_case(alias))
+        .map(|&(_, id)| id)
 }
 
 /// `WeaponIDToAlias`: the first alias of the weapon.
 pub fn weapon_id_to_alias(id: WeaponId) -> Option<&'static str> {
-    WEAPON_ALIAS.iter().find(|&&(_, i)| i == id).map(|&(a, _)| a)
+    WEAPON_ALIAS
+        .iter()
+        .find(|&&(_, i)| i == id)
+        .map(|&(a, _)| a)
 }
 
 /// `BuyAliasToWeaponID`: the weapon and the `failName` of the buy alias, without case.
@@ -877,8 +1481,25 @@ pub fn is_primary_weapon(id: WeaponId) -> bool {
     use WeaponId::*;
     matches!(
         id,
-        Scout | Xm1014 | Mac10 | Aug | Ump45 | Sg550 | Galil | Famas | Awp | Mp5n | M249 | M3 | M4a1 | Tmp
-            | G3sg1 | Sg552 | Ak47 | P90 | ShieldGun
+        Scout
+            | Xm1014
+            | Mac10
+            | Aug
+            | Ump45
+            | Sg550
+            | Galil
+            | Famas
+            | Awp
+            | Mp5n
+            | M249
+            | M3
+            | M4a1
+            | Tmp
+            | G3sg1
+            | Sg552
+            | Ak47
+            | P90
+            | ShieldGun
     )
 }
 

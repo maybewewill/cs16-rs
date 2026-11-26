@@ -8,21 +8,27 @@
 //! `--proto48` servers and `LocalGame` call [`crate::CsGame::enable_cvar_bot_quota`], and
 //! `bot_add*` / `bot_kick` / `bot_nav_*` console commands work everywhere.
 
+use std::collections::HashMap;
+
 use cs_assets::nav::{
-    HidingSpotFlags, NAV_VERSION, NavArea, NavAttribute, NavCorner, NavDir, NavFile, UNDEFINED_PLACE,
+    HidingSpotFlags, NAV_VERSION, NavArea, NavAttribute, NavCorner, NavDir, NavFile,
+    UNDEFINED_PLACE,
 };
 use cs_bot::buy::{BuyContext, BuyPlan, decide_bot_buy};
-use cs_bot::combat::CombatInventory;
-use cs_bot::nav_gen::{NavGenConfig, NavLadderHint, NavWorld, NavZoneHint, NavZoneKind, generate_nav_mesh};
+use cs_bot::chatter::{BotChatterDb, ChatterPriority};
+use cs_bot::combat::{CombatInventory, angle_diff, step_look_spring};
+use cs_bot::nav_gen::{
+    NavGenConfig, NavLadderHint, NavWorld, NavZoneHint, NavZoneKind, generate_nav_mesh,
+};
 use cs_bot::nav_mesh::NavMesh;
 use cs_bot::path::{
     NavPath, PathAction, PathCostParams, PathObstacles, PathScratch, find_path_with_scratch,
 };
 use cs_bot::profile::{BotDifficulty, BotProfile, BotProfileDb, BotTeam, BotWeapon};
 use cs_bot::tactics::{
-    BotJoinTeam, BotSettings, BotTacticalBrain, BotTacticalState, GroundPickup, GroundPickupKind,
-    IncomingRadio, PerceivedEnemyCandidate, RadioMessage, SmokeCloud, SoundEvent, SoundKind,
-    TacticalContext, TacticalDecision, TacticalHostage, TacticalSpot,
+    BotChatterEvent, BotJoinTeam, BotSettings, BotTacticalBrain, BotTacticalState, GroundPickup,
+    GroundPickupKind, IncomingRadio, PerceivedEnemyCandidate, RadioMessage, SmokeCloud, SoundEvent,
+    SoundKind, TacticalContext, TacticalDecision, TacticalHostage, TacticalSpot,
 };
 use cs_engine::collision::{Hull, TraceResult};
 use cs_engine::consts::{EF_NODRAW, FL_DUCKING, FL_FROZEN, FL_ONGROUND};
@@ -162,9 +168,12 @@ impl NavWorld for EngineNavWorld<'_, '_> {
 
     fn is_walkable_obstacle(&self, start: Vec3, end: Vec3) -> bool {
         let tr = self.0.trace_line(start, end, MoveFilter::NoMonsters, None);
-        tr.ent
-            .and_then(|id| self.0.ent(id))
-            .is_some_and(|v| matches!(v.classname.as_str(), "func_door" | "func_door_rotating" | "func_breakable"))
+        tr.ent.and_then(|id| self.0.ent(id)).is_some_and(|v| {
+            matches!(
+                v.classname.as_str(),
+                "func_door" | "func_door_rotating" | "func_breakable"
+            )
+        })
     }
 }
 
@@ -186,7 +195,7 @@ struct BotCmd {
     want_c4: bool,
 }
 
-/// Per-bot ZBot personality, tactical brain, path state, and buy tracking.
+/// Per-bot ZBot personality, tactical brain, path state, 30 Hz steering/look state, and buy tracking.
 #[derive(Debug, Clone)]
 struct BotSlot {
     profile: BotProfile,
@@ -195,6 +204,21 @@ struct BotSlot {
     path_wp_idx: usize,
     path_goal: Option<Vec3>,
     path_replan_time: f64,
+    move_goal: Option<Vec3>,
+    look_target_angles: Option<(f32, f32)>,
+    look_attacking: bool,
+    stop_to_shoot: bool,
+    strafe_bias: f32,
+    base_duck: bool,
+    base_use_key: bool,
+    base_walk: bool,
+    is_planting_c4: bool,
+    defuse_bomb_pos: Option<Vec3>,
+    is_ladder_up: bool,
+    spawn_yaw: Option<f32>,
+    crouch_jump_until: f64,
+    wiggle_until: f64,
+    wiggle_sign: f32,
     next_cmd_time: f64,
     next_full_think: f64,
     prev_cmd_time: f64,
@@ -218,6 +242,21 @@ impl BotSlot {
             path_wp_idx: 0,
             path_goal: None,
             path_replan_time: 0.0,
+            move_goal: None,
+            look_target_angles: None,
+            look_attacking: false,
+            stop_to_shoot: false,
+            strafe_bias: 0.0,
+            base_duck: false,
+            base_use_key: false,
+            base_walk: false,
+            is_planting_c4: false,
+            defuse_bomb_pos: None,
+            is_ladder_up: false,
+            spawn_yaw: None,
+            crouch_jump_until: 0.0,
+            wiggle_until: 0.0,
+            wiggle_sign: 1.0,
             next_cmd_time: now,
             next_full_think: now,
             prev_cmd_time: now,
@@ -237,6 +276,7 @@ pub(crate) struct BotManager {
     pub(crate) quota_enabled: bool,
     pub(crate) settings: BotSettings,
     pub(crate) profile_db: BotProfileDb,
+    pub(crate) chatter_db: BotChatterDb,
     loaded_profile_db_name: String,
     pub(crate) nav_mesh: Option<NavMesh>,
     nav_map_name: String,
@@ -252,6 +292,8 @@ pub(crate) struct BotManager {
     nav_place_mode: bool,
     nav_place_painting: bool,
     incoming_radios: Vec<IncomingRadio>,
+    last_team_radio_time: [f64; 2],
+    last_team_event_time: [HashMap<BotChatterEvent, f64>; 2],
     sound_events: Vec<SoundEvent>,
     next_quota_check: f64,
     slots: [Option<BotSlot>; MAX_PLAYERS],
@@ -264,6 +306,7 @@ impl Default for BotManager {
             quota_enabled: false,
             settings: BotSettings::default(),
             profile_db: BotProfileDb::builtin(),
+            chatter_db: BotChatterDb::builtin(),
             loaded_profile_db_name: String::from("BotProfile.db"),
             nav_mesh: None,
             nav_map_name: String::new(),
@@ -279,6 +322,8 @@ impl Default for BotManager {
             nav_place_mode: false,
             nav_place_painting: false,
             incoming_radios: Vec::new(),
+            last_team_radio_time: [-100.0; 2],
+            last_team_event_time: [HashMap::new(), HashMap::new()],
             sound_events: Vec::new(),
             next_quota_check: 0.0,
             slots: std::array::from_fn(|_| None),
@@ -292,6 +337,7 @@ impl BotManager {
         let quota_enabled = self.quota_enabled;
         let settings = self.settings.clone();
         let profile_db = self.profile_db.clone();
+        let chatter_db = self.chatter_db.clone();
         let loaded_profile_db_name = self.loaded_profile_db_name.clone();
         #[cfg(not(target_arch = "wasm32"))]
         let nav_cache_dir_override = self.nav_cache_dir_override.take();
@@ -300,6 +346,7 @@ impl BotManager {
         self.quota_enabled = quota_enabled;
         self.settings = settings;
         self.profile_db = profile_db;
+        self.chatter_db = chatter_db;
         self.loaded_profile_db_name = loaded_profile_db_name;
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -308,7 +355,20 @@ impl BotManager {
         self.nav_cache_storage = nav_cache_storage;
     }
 
+    pub(crate) fn load_chatter_db(&mut self, vfs: &cs_vfs::Vfs) {
+        for cand in ["BotChatter.db", "cstrike/BotChatter.db"] {
+            if let Ok(bytes) = vfs.read_bytes(cand)
+                && let Ok(text) = std::str::from_utf8(&bytes)
+            {
+                self.chatter_db = BotChatterDb::parse(text);
+                return;
+            }
+        }
+        self.chatter_db = BotChatterDb::builtin();
+    }
+
     pub(crate) fn load_profile_db(&mut self, vfs: &cs_vfs::Vfs, path: &str) {
+        self.load_chatter_db(vfs);
         let trimmed = path.trim();
         let candidates = [
             trimmed.to_string(),
@@ -382,12 +442,10 @@ fn sync_settings_from_cvars(g: &mut GameState, eng: &EngineApi<'_>) {
     if let Some(val) = eng.cvar_str("bot_allow_rogues") {
         g.bots.settings.apply_cvar("bot_allow_rogues", &val);
     }
-    g.bots.settings.bot_nav_autogen = eng
-        .cvar_str("bot_nav_autogen")
-        .is_none_or(|val| {
-            let s = val.trim();
-            matches!(s, "1" | "true" | "TRUE" | "yes" | "on") || s.eq_ignore_ascii_case("true")
-        });
+    g.bots.settings.bot_nav_autogen = eng.cvar_str("bot_nav_autogen").is_none_or(|val| {
+        let s = val.trim();
+        matches!(s, "1" | "true" | "TRUE" | "yes" | "on") || s.eq_ignore_ascii_case("true")
+    });
     if let Some(vfs) = g.vfs.clone()
         && g.bots.settings.bot_profile_db != g.bots.loaded_profile_db_name
     {
@@ -523,9 +581,11 @@ fn try_load_nav_from_cache(g: &GameState, map_name: &str, bsp_crc32: u32) -> Opt
         }
     }
     #[cfg(not(target_arch = "wasm32"))]
-    if let Some(path) =
-        resolve_native_nav_cache_path(g.bots.nav_cache_dir_override.as_deref(), map_name, bsp_crc32)
-        && let Ok(bytes) = std::fs::read(&path)
+    if let Some(path) = resolve_native_nav_cache_path(
+        g.bots.nav_cache_dir_override.as_deref(),
+        map_name,
+        bsp_crc32,
+    ) && let Ok(bytes) = std::fs::read(&path)
     {
         match NavFile::parse(&bytes) {
             Ok(file) => return Some(NavMesh::from_nav_file(file)),
@@ -553,9 +613,11 @@ fn save_nav_to_cache(g: &mut GameState, map_name: &str, bsp_crc32: u32, bytes: &
         return;
     }
     #[cfg(not(target_arch = "wasm32"))]
-    if let Some(path) =
-        resolve_native_nav_cache_path(g.bots.nav_cache_dir_override.as_deref(), map_name, bsp_crc32)
-    {
+    if let Some(path) = resolve_native_nav_cache_path(
+        g.bots.nav_cache_dir_override.as_deref(),
+        map_name,
+        bsp_crc32,
+    ) {
         if let Some(parent) = path.parent()
             && let Err(err) = std::fs::create_dir_all(parent)
         {
@@ -569,7 +631,8 @@ fn save_nav_to_cache(g: &mut GameState, map_name: &str, bsp_crc32: u32, bytes: &
     #[cfg(target_arch = "wasm32")]
     {
         let mut store = cs_platform::WebLocalStorage;
-        if let Err(err) = cs_platform::save_nav_cache_storage(&mut store, map_name, bsp_crc32, bytes)
+        if let Err(err) =
+            cs_platform::save_nav_cache_storage(&mut store, map_name, bsp_crc32, bytes)
         {
             tracing::warn!(%err, map_name, "failed to save .nav into WebLocalStorage nav_cache");
         }
@@ -719,9 +782,8 @@ fn build_inventory_snapshot(p: &player::Player) -> CombatInventory {
     let (primary, primary_clip, primary_reserve) = read_slot(PRIMARY_WEAPON_SLOT);
     let (secondary, secondary_clip, secondary_reserve) = read_slot(PISTOL_SLOT);
     let active_weapon = p.active_item.and_then(to_bot_weapon);
-    let ammo_of = |t: AmmoType| -> u8 {
-        p.ammo.get(t as usize).copied().unwrap_or(0).clamp(0, 255) as u8
-    };
+    let ammo_of =
+        |t: AmmoType| -> u8 { p.ammo.get(t as usize).copied().unwrap_or(0).clamp(0, 255) as u8 };
     CombatInventory {
         primary,
         primary_clip,
@@ -824,7 +886,11 @@ pub(crate) fn add_bot(
     let slot = eng.create_fake_client(&chosen_name)?;
     player::put_in_server(g, eng, slot);
 
-    if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+    if let Some(p) = g
+        .players
+        .get_mut(usize::from(slot))
+        .and_then(Option::as_mut)
+    {
         p.joining = JoinState::PickingTeam;
     }
 
@@ -853,11 +919,7 @@ pub(crate) fn add_bot(
 }
 
 /// Kicks matching bot(s): `"all"`/`None`, `"t"`, `"ct"`, or a bot's name.
-pub(crate) fn kick_bots(
-    g: &mut GameState,
-    eng: &mut EngineApi<'_>,
-    target: Option<&str>,
-) -> usize {
+pub(crate) fn kick_bots(g: &mut GameState, eng: &mut EngineApi<'_>, target: Option<&str>) -> usize {
     let filter = target.map(str::trim).filter(|s| !s.is_empty());
     let mut kicked = 0;
     let max_clients = usize::from(eng.max_clients());
@@ -884,11 +946,7 @@ pub(crate) fn kick_bots(
 }
 
 /// Slays matching living bot(s): `"all"`/`None`, `"t"`, `"ct"`, or a bot's name.
-pub(crate) fn kill_bots(
-    g: &mut GameState,
-    eng: &mut EngineApi<'_>,
-    target: Option<&str>,
-) -> usize {
+pub(crate) fn kill_bots(g: &mut GameState, eng: &mut EngineApi<'_>, target: Option<&str>) -> usize {
     let filter = target.map(str::trim).filter(|s| !s.is_empty());
     let mut killed = 0;
     let max_clients = usize::from(eng.max_clients());
@@ -943,7 +1001,9 @@ fn maintain_quota(g: &mut GameState, eng: &mut EngineApi<'_>) {
     }
 
     let raw_quota = if g.bots.settings.bot_quota_match > 0.0 {
-        ((humans as f32) * g.bots.settings.bot_quota_match).round().max(0.0) as usize
+        ((humans as f32) * g.bots.settings.bot_quota_match)
+            .round()
+            .max(0.0) as usize
     } else {
         eng.cvar_f32("bot_quota").max(0.0) as usize
     };
@@ -1060,7 +1120,11 @@ fn maybe_buy(g: &mut GameState, eng: &mut EngineApi<'_>, slot: usize, knife_only
     }
 }
 
-fn collect_entities_floor(eng: &EngineApi<'_>, brush_class: &str, point_class: Option<&str>) -> Vec<Vec3> {
+fn collect_entities_floor(
+    eng: &EngineApi<'_>,
+    brush_class: &str,
+    point_class: Option<&str>,
+) -> Vec<Vec3> {
     let mut out = Vec::new();
     let mut cursor = None;
     while let Some(id) = eng.find_by_classname(cursor, brush_class) {
@@ -1320,7 +1384,10 @@ fn collect_ground_pickups(eng: &EngineApi<'_>) -> Vec<GroundPickup> {
             && (v.effects & EF_NODRAW) == 0
             && let Some(kind) = pickup_kind_from_model(&v.model)
         {
-            out.push(GroundPickup { pos: v.origin, kind });
+            out.push(GroundPickup {
+                pos: v.origin,
+                kind,
+            });
         }
         cursor = Some(id);
     }
@@ -1332,7 +1399,10 @@ fn collect_ground_pickups(eng: &EngineApi<'_>) -> Vec<GroundPickup> {
             && (v.effects & EF_NODRAW) == 0
             && let Some(kind) = pickup_kind_from_model(&v.model)
         {
-            out.push(GroundPickup { pos: v.origin, kind });
+            out.push(GroundPickup {
+                pos: v.origin,
+                kind,
+            });
         }
         cursor = Some(id);
     }
@@ -1491,12 +1561,22 @@ fn string_pull_engine_path(mesh: &NavMesh, eng: &EngineApi<'_>, path: &mut NavPa
             let a = path.waypoints[anchor].pos;
             let b = target.pos;
             let clear_los = eng
-                .trace_line(a + Vec3::new(0.0, 0.0, 22.0), b + Vec3::new(0.0, 0.0, 22.0), MoveFilter::NoMonsters, None)
+                .trace_line(
+                    a + Vec3::new(0.0, 0.0, 22.0),
+                    b + Vec3::new(0.0, 0.0, 22.0),
+                    MoveFilter::NoMonsters,
+                    None,
+                )
                 .trace
                 .fraction
                 >= 1.0
                 && eng
-                    .trace_line(a + Vec3::new(0.0, 0.0, 54.0), b + Vec3::new(0.0, 0.0, 54.0), MoveFilter::NoMonsters, None)
+                    .trace_line(
+                        a + Vec3::new(0.0, 0.0, 54.0),
+                        b + Vec3::new(0.0, 0.0, 54.0),
+                        MoveFilter::NoMonsters,
+                        None,
+                    )
                     .trace
                     .fraction
                     >= 1.0;
@@ -1538,7 +1618,7 @@ fn string_pull_engine_path(mesh: &NavMesh, eng: &EngineApi<'_>, path: &mut NavPa
 }
 
 #[allow(clippy::too_many_arguments)]
-fn plan_and_steer_path(
+fn replan_path_if_needed(
     bot: &mut BotSlot,
     mesh: Option<&NavMesh>,
     eng: &EngineApi<'_>,
@@ -1547,16 +1627,19 @@ fn plan_and_steer_path(
     goal: Vec3,
     my_team: BotTeam,
     now: f64,
-    yaw_deg: f32,
     scratch: &mut PathScratch,
-) -> (f32, f32, bool, bool, bool, bool) {
+) {
     let Some(mesh) = mesh.filter(|m| !m.areas().is_empty()) else {
-        let (fwd, right) = world_dir_to_move((goal - origin).truncate(), yaw_deg);
-        return (fwd, right, false, false, false, false);
+        bot.path = None;
+        bot.path_wp_idx = 0;
+        bot.path_goal = Some(goal);
+        return;
     };
 
     let need_replan = bot.path.is_none()
-        || bot.path_goal.is_none_or(|g| g.distance_squared(goal) > 64.0 * 64.0)
+        || bot
+            .path_goal
+            .is_none_or(|g| g.distance_squared(goal) > 64.0 * 64.0)
         || now >= bot.path_replan_time;
 
     if need_replan {
@@ -1566,8 +1649,7 @@ fn plan_and_steer_path(
             danger_weight: 150.0 * (1.0 - bot.profile.aggression * 0.5),
             ..PathCostParams::default()
         };
-        if let Some(mut p) =
-            find_path_with_scratch(mesh, origin, goal, &params, obstacles, scratch)
+        if let Some(mut p) = find_path_with_scratch(mesh, origin, goal, &params, obstacles, scratch)
         {
             string_pull_engine_path(mesh, eng, &mut p);
             bot.path_wp_idx = usize::from(p.waypoints.len() > 1);
@@ -1579,50 +1661,260 @@ fn plan_and_steer_path(
         bot.path_goal = Some(goal);
         bot.path_replan_time = now + 1.0;
     }
+}
 
-    let Some(path) = bot.path.as_ref() else {
-        let (fwd, right) = world_dir_to_move((goal - origin).truncate(), yaw_deg);
-        return (fwd, right, false, false, false, false);
-    };
+/// Computes a smooth look-ahead target point ~160 units forward along the active nav path
+/// (`CCSBot::UpdateLookAround`) so navigating bots smoothly turn into corners instead of staring
+/// downward at the nearest floor node.
+fn path_look_ahead_point(path: Option<&NavPath>, wp_idx: usize, origin: Vec3) -> Option<Vec3> {
+    let path = path?;
+    if path.waypoints.is_empty() {
+        return None;
+    }
+    let start_idx = wp_idx.min(path.waypoints.len() - 1);
+    let mut prev = origin;
+    let mut remain = 160.0_f32;
+    for wp in &path.waypoints[start_idx..] {
+        let seg = wp.pos - prev;
+        let len = seg.length();
+        if len >= remain && len > 1e-3 {
+            let pt = prev + seg * (remain / len);
+            return Some(pt + Vec3::new(0.0, 0.0, 48.0));
+        }
+        remain -= len;
+        prev = wp.pos;
+    }
+    path.waypoints
+        .last()
+        .map(|w| w.pos + Vec3::new(0.0, 0.0, 48.0))
+}
 
-    while bot.path_wp_idx + 1 < path.waypoints.len() {
-        let wp = &path.waypoints[bot.path_wp_idx];
-        let tol = match wp.action {
-            PathAction::LadderTraverse { .. } => 24.0,
-            _ => 34.0,
-        };
-        if origin.truncate().distance(wp.pos.truncate()) <= tol
-            && (origin.z - wp.pos.z).abs() < 64.0
+/// Lateral whisker/feeler obstacle reflex (`CCSBot::FeelerReflexAdjustment`, `cs_bot_pathfind.cpp`).
+///
+/// Casts left/right forward feelers around the bot's hull (`±19u` lateral offset, `42u` forward)
+/// to steer smoothly around doorframes, crates, and corners without zig-zagging, and detects low
+/// climbable obstacles (`18..58u`) that require a jump / crouch-jump.
+fn feeler_reflex_adjustment(
+    eng: &EngineApi<'_>,
+    self_edict: cs_engine::EdictId,
+    origin: Vec3,
+    ducking: bool,
+    dir_xy: glam::Vec2,
+) -> (glam::Vec2, bool) {
+    let len = dir_xy.length();
+    if len < 1e-3 {
+        return (glam::Vec2::ZERO, false);
+    }
+    let fwd = dir_xy / len;
+    let right = glam::Vec2::new(fwd.y, -fwd.x);
+    let feeler_z = if ducking { 12.0 } else { 22.0 };
+    let lateral = 19.0_f32;
+    let reach = 42.0_f32;
+
+    let left_start = origin + Vec3::new(-right.x * lateral, -right.y * lateral, feeler_z);
+    let left_end = left_start + Vec3::new(fwd.x * reach, fwd.y * reach, 0.0);
+    let right_start = origin + Vec3::new(right.x * lateral, right.y * lateral, feeler_z);
+    let right_end = right_start + Vec3::new(fwd.x * reach, fwd.y * reach, 0.0);
+
+    let left_tr = eng
+        .trace_line(
+            left_start,
+            left_end,
+            MoveFilter::NoMonsters,
+            Some(self_edict),
+        )
+        .trace;
+    let right_tr = eng
+        .trace_line(
+            right_start,
+            right_end,
+            MoveFilter::NoMonsters,
+            Some(self_edict),
+        )
+        .trace;
+
+    let left_hit = left_tr.fraction < 1.0 || left_tr.start_solid;
+    let right_hit = right_tr.fraction < 1.0 || right_tr.start_solid;
+
+    let mut adjust = glam::Vec2::ZERO;
+    if left_hit && !right_hit {
+        let strength = (1.0 - left_tr.fraction).clamp(0.25, 1.0) * 0.90;
+        adjust = right * strength;
+    } else if right_hit && !left_hit {
+        let strength = (1.0 - right_tr.fraction).clamp(0.25, 1.0) * 0.90;
+        adjust = -right * strength;
+    }
+
+    // Detect low climbable crate/step between knee (`+18.5u`) and head (`+54u`) clearance.
+    let mut want_climb_jump = false;
+    if (left_hit || right_hit) && !ducking {
+        let low_start = origin + Vec3::new(0.0, 0.0, 18.5);
+        let low_end = low_start + Vec3::new(fwd.x * 36.0, fwd.y * 36.0, 0.0);
+        let high_start = origin + Vec3::new(0.0, 0.0, 54.0);
+        let high_end = high_start + Vec3::new(fwd.x * 36.0, fwd.y * 36.0, 0.0);
+        let low_tr = eng
+            .trace_line(low_start, low_end, MoveFilter::NoMonsters, Some(self_edict))
+            .trace;
+        let high_tr = eng
+            .trace_line(
+                high_start,
+                high_end,
+                MoveFilter::NoMonsters,
+                Some(self_edict),
+            )
+            .trace;
+        if (low_tr.fraction < 0.85 || low_tr.start_solid)
+            && high_tr.fraction >= 1.0
+            && !high_tr.start_solid
         {
-            bot.path_wp_idx += 1;
-        } else {
-            break;
+            want_climb_jump = true;
         }
     }
 
-    let Some(wp) = path.waypoints.get(bot.path_wp_idx) else {
-        let (fwd, right) = world_dir_to_move((goal - origin).truncate(), yaw_deg);
-        return (fwd, right, false, false, false, false);
+    (adjust, want_climb_jump)
+}
+
+/// Smooth repulsion vector away from nearby alive teammates so bots fan smoothly through
+/// spawn exits and doorways instead of clumping or locking shoulders.
+fn teammate_separation(
+    g: &GameState,
+    eng: &EngineApi<'_>,
+    self_slot: usize,
+    my_team: Team,
+    origin: Vec3,
+    max_clients: usize,
+) -> glam::Vec2 {
+    let mut push = glam::Vec2::ZERO;
+    for (other, slot_player) in g.players.iter().enumerate().take(max_clients) {
+        if other == self_slot {
+            continue;
+        }
+        let Some(op) = slot_player.as_ref() else {
+            continue;
+        };
+        if !op.alive || op.team != my_team {
+            continue;
+        }
+        let Some(ov) = eng.ent(eng.client_edict(other as u8)) else {
+            continue;
+        };
+        if (ov.origin.z - origin.z).abs() > 48.0 {
+            continue;
+        }
+        let delta = (origin - ov.origin).truncate();
+        let dist_sq = delta.length_squared();
+        if dist_sq > 1.0 && dist_sq < 46.0 * 46.0 {
+            let dist = dist_sq.sqrt();
+            let weight = ((46.0 - dist) / 46.0) * 0.70;
+            push += (delta / dist) * weight;
+        }
+    }
+    push
+}
+
+/// Continuous 30 Hz path steering (`CCSBot::MaintainPath`) projecting world steering + feeler
+/// reflex + teammate separation + wiggle onto `(forward, right)` relative to current `yaw_deg`.
+#[allow(clippy::too_many_arguments)]
+fn steer_path_30hz(
+    bot: &mut BotSlot,
+    eng: &EngineApi<'_>,
+    self_edict: cs_engine::EdictId,
+    origin: Vec3,
+    ducking: bool,
+    yaw_deg: f32,
+    now: f64,
+    teammate_push: glam::Vec2,
+) -> (f32, f32, bool, bool, bool, bool) {
+    let Some(goal) = bot.move_goal else {
+        return (0.0, 0.0, false, false, false, false);
     };
 
     if origin.truncate().distance(goal.truncate()) < 22.0 && (origin.z - goal.z).abs() < 48.0 {
         return (0.0, 0.0, false, false, false, false);
     }
 
-    let (fwd, right) = world_dir_to_move((wp.pos - origin).truncate(), yaw_deg);
-    let crouch = matches!(wp.action, PathAction::CrouchRequired);
-    let jump = matches!(wp.action, PathAction::JumpRequired)
-        && origin.truncate().distance(wp.pos.truncate()) < 72.0;
-    let ladder_up = matches!(
-        wp.action,
-        PathAction::LadderTraverse {
-            ascending: true,
-            ..
-        }
-    );
-    let door_use = wp.has_door && origin.distance(wp.pos) < 88.0;
+    let (target_pos, next_pos, path_crouch, path_jump, door_use, ladder_up) =
+        if let Some(path) = bot.path.as_ref() {
+            while bot.path_wp_idx + 1 < path.waypoints.len() {
+                let wp = &path.waypoints[bot.path_wp_idx];
+                let tol = match wp.action {
+                    PathAction::LadderTraverse { .. } => 24.0,
+                    _ => 34.0,
+                };
+                if origin.truncate().distance(wp.pos.truncate()) <= tol
+                    && (origin.z - wp.pos.z).abs() < 64.0
+                {
+                    bot.path_wp_idx += 1;
+                } else {
+                    break;
+                }
+            }
+            if let Some(wp) = path.waypoints.get(bot.path_wp_idx) {
+                let next_flat = path
+                    .waypoints
+                    .get(bot.path_wp_idx + 1)
+                    .filter(|n| {
+                        wp.action == PathAction::Walk
+                            && n.action == PathAction::Walk
+                            && !wp.has_door
+                            && !n.has_door
+                            && (n.pos.z - wp.pos.z).abs() <= 18.0
+                    })
+                    .map(|n| n.pos);
+                let crouch = matches!(wp.action, PathAction::CrouchRequired);
+                let dist_xy = origin.truncate().distance(wp.pos.truncate());
+                let jump = (matches!(wp.action, PathAction::JumpRequired)
+                    || (wp.pos.z - origin.z > 18.5 && wp.pos.z - origin.z <= 58.0))
+                    && dist_xy < 76.0;
+                let ladder_up = matches!(
+                    wp.action,
+                    PathAction::LadderTraverse {
+                        ascending: true,
+                        ..
+                    }
+                );
+                let door_use = wp.has_door && origin.distance(wp.pos) < 88.0;
+                (wp.pos, next_flat, crouch, jump, door_use, ladder_up)
+            } else {
+                (goal, None, false, false, false, false)
+            }
+        } else {
+            (goal, None, false, false, false, false)
+        };
 
-    (fwd, right, crouch, jump, door_use, ladder_up)
+    // Smooth corner anticipation: blend toward the next flat waypoint when approaching a corner.
+    let mut world_dir = (target_pos - origin).truncate().normalize_or_zero();
+    if let Some(next_pt) = next_pos {
+        let dist_to_corner = origin.truncate().distance(target_pos.truncate());
+        if dist_to_corner < 54.0 {
+            let next_dir = (next_pt - origin).truncate().normalize_or_zero();
+            let blend = ((54.0 - dist_to_corner) / 54.0).clamp(0.0, 0.55);
+            world_dir = (world_dir * (1.0 - blend) + next_dir * blend).normalize_or_zero();
+        }
+    }
+
+    // Whisker/feeler reflex around doorframes/crates + teammate separation.
+    let (feeler_adj, climb_jump) = if !ladder_up {
+        feeler_reflex_adjustment(eng, self_edict, origin, ducking || path_crouch, world_dir)
+    } else {
+        (glam::Vec2::ZERO, false)
+    };
+    let mut steer = world_dir + feeler_adj + teammate_push;
+
+    // Smooth diagonal wiggle during stuck recovery (continuous rotated angle, never binary ±1).
+    if now < bot.wiggle_until && world_dir.length_squared() > 1e-4 {
+        let angle = bot.wiggle_sign * 65.0_f32.to_radians();
+        let (s, c) = (angle.sin(), angle.cos());
+        let wiggled = glam::Vec2::new(
+            world_dir.x * c - world_dir.y * s,
+            world_dir.x * s + world_dir.y * c,
+        );
+        steer = (wiggled + feeler_adj * 0.5).normalize_or_zero();
+    }
+
+    let (fwd, right) = world_dir_to_move(steer, yaw_deg);
+    let jump = path_jump || climb_jump;
+    (fwd, right, path_crouch, jump, door_use, ladder_up)
 }
 
 /// Emits an acoustic event into the ZBot world perception buffer.
@@ -1650,8 +1942,14 @@ pub(crate) fn emit_sound_event(
     });
 }
 
-/// Propagates navmesh danger heat when a player is killed.
-pub(crate) fn on_player_killed(g: &mut GameState, eng: &EngineApi<'_>, victim_slot: u8) {
+/// Propagates navmesh danger heat when a player is killed and triggers `EnemyDown` chatter on
+/// the killer bot.
+pub(crate) fn on_player_killed(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    victim_slot: u8,
+    killer_slot: Option<u8>,
+) {
     let Some(victim_team) = g
         .players
         .get(usize::from(victim_slot))
@@ -1669,6 +1967,42 @@ pub(crate) fn on_player_killed(g: &mut GameState, eng: &EngineApi<'_>, victim_sl
     {
         let team_idx = usize::from(victim_team == BotTeam::CounterTerrorist);
         mesh.increase_danger_nearby(team_idx, 1.0, area_idx, pos, 600.0, now);
+    }
+
+    if let Some(k_slot) = killer_slot
+        && k_slot != victim_slot
+        && eng.is_fake_client(k_slot)
+    {
+        let k_idx = usize::from(k_slot);
+        let killer_info = g
+            .players
+            .get(k_idx)
+            .and_then(Option::as_ref)
+            .and_then(|kp| {
+                let kt = to_bot_team(kp.team)?;
+                (kp.alive && kt != victim_team).then_some(kt)
+            });
+        if let Some(killer_team) = killer_info
+            && let Some(k_pos) = eng.ent(eng.client_edict(k_slot)).map(|v| v.origin)
+        {
+            let place = g
+                .bots
+                .nav_mesh
+                .as_ref()
+                .and_then(|m| m.get_place(k_pos))
+                .map(ToString::to_string);
+            let mode = g.bots.settings.bot_chatter;
+            let pitch = g.bots.slots[k_idx]
+                .as_ref()
+                .map_or(PITCH_NORM as u16, |b| b.profile.voice_pitch);
+            let out_radio = g.bots.slots[k_idx].as_mut().and_then(|b| {
+                b.brain.on_enemy_killed(place.as_deref(), now as f32, mode);
+                b.brain.pending_radio_reply.take()
+            });
+            if let Some(out) = out_radio {
+                dispatch_bot_radio(g, eng, k_slot, killer_team, k_pos, pitch, &out);
+            }
+        }
     }
 }
 
@@ -1718,6 +2052,28 @@ fn dispatch_bot_radio(
     pitch: u16,
     out_radio: &cs_bot::tactics::OutgoingRadio,
 ) {
+    let now = eng.time();
+    let team_idx = usize::from(team == BotTeam::CounterTerrorist);
+    let priority = g.bots.chatter_db.priority(out_radio.chatter_event);
+    let min_team_gap = if priority >= ChatterPriority::Critical {
+        0.5
+    } else {
+        1.5
+    };
+    if now - g.bots.last_team_radio_time[team_idx] < min_team_gap {
+        return;
+    }
+    if let Some(ev) = out_radio.chatter_event {
+        let repeat = f64::from(g.bots.chatter_db.team_repeat_cooldown(Some(ev)));
+        if let Some(&prev) = g.bots.last_team_event_time[team_idx].get(&ev)
+            && now - prev < repeat
+        {
+            return;
+        }
+        g.bots.last_team_event_time[team_idx].insert(ev, now);
+    }
+    g.bots.last_team_radio_time[team_idx] = now;
+
     if let Some((sentence, text)) = crate::hud_misc::radio_payload(out_radio.message.alias()) {
         crate::hud_misc::radio_with_place(
             g,
@@ -1738,7 +2094,7 @@ fn dispatch_bot_radio(
         sender_pos: pos,
         sender_place: out_radio.place_name.clone(),
         message: out_radio.message,
-        time: eng.time() as f32,
+        time: now as f32,
         is_human: false,
     });
 }
@@ -1757,8 +2113,8 @@ pub(crate) fn start_frame(g: &mut GameState, eng: &mut EngineApi<'_>) {
     // scan of the objective entities.
     let max_clients = usize::from(eng.max_clients()).min(MAX_PLAYERS);
     let has_bots = (0..max_clients).any(|slot| eng.is_fake_client(slot as u8));
-    let has_humans = (0..max_clients)
-        .any(|slot| g.players[slot].is_some() && !eng.is_fake_client(slot as u8));
+    let has_humans =
+        (0..max_clients).any(|slot| g.players[slot].is_some() && !eng.is_fake_client(slot as u8));
     let quota_pending = g.bots.quota_enabled
         && g.bots.settings.bot_enable
         && g.bots.settings.bot_nav_autogen
@@ -1791,7 +2147,14 @@ pub(crate) fn start_frame(g: &mut GameState, eng: &mut EngineApi<'_>) {
             && v.velocity.truncate().length_squared() > 155.0 * 155.0
             && ((now * 100.0) as u64 + slot as u64).is_multiple_of(30)
         {
-            emit_sound_event(g, Some(slot as u8), Some(p.team), v.origin, SoundKind::Footstep, now);
+            emit_sound_event(
+                g,
+                Some(slot as u8),
+                Some(p.team),
+                v.origin,
+                SoundKind::Footstep,
+                now,
+            );
         }
     }
 
@@ -1806,7 +2169,8 @@ pub(crate) fn start_frame(g: &mut GameState, eng: &mut EngineApi<'_>) {
     let rescue_zones = if hostages.is_empty() {
         Vec::new()
     } else {
-        let mut zones = collect_entities_floor(eng, "func_hostage_rescue", Some("info_hostage_rescue"));
+        let mut zones =
+            collect_entities_floor(eng, "func_hostage_rescue", Some("info_hostage_rescue"));
         if zones.is_empty() {
             zones = collect_entities_floor(eng, "info_player_start", None);
         }
@@ -1885,6 +2249,41 @@ pub(crate) fn start_frame(g: &mut GameState, eng: &mut EngineApi<'_>) {
 
         maybe_buy(g, eng, slot, knife_only_arena);
 
+        // During `mp_freezetime`, bots finish buying and stand completely calm at their spawn
+        // orientation (zero twitching, spinning, firing, or radio spam) until FreezeTimeEnd.
+        if g.rules.is_freeze_period() {
+            let id = eng.client_edict(slot_u8);
+            let spawn_yaw = {
+                let ent_yaw = eng.ent(id).map_or(0.0, |v| v.angles.y);
+                let Some(b) = g.bots.slots[slot].as_mut() else {
+                    continue;
+                };
+                let yaw = *b.spawn_yaw.get_or_insert(ent_yaw);
+                b.brain.combat.yaw_deg = yaw;
+                b.brain.combat.pitch_deg = 0.0;
+                b.brain.combat.yaw_vel = 0.0;
+                b.brain.combat.pitch_vel = 0.0;
+                b.look_target_angles = Some((yaw, 0.0));
+                b.look_attacking = false;
+                b.move_goal = None;
+                b.cmd = BotCmd {
+                    yaw_deg: yaw,
+                    pitch_deg: 0.0,
+                    ..BotCmd::default()
+                };
+                b.prev_cmd_time = now;
+                b.next_full_think = now;
+                yaw
+            };
+            let viewangles = Vec3::new(0.0, spawn_yaw, 0.0);
+            if let Some(v) = eng.ent_mut(id) {
+                v.v_angle = viewangles;
+                v.angles = viewangles;
+            }
+            eng.run_player_move(slot_u8, viewangles, 0.0, 0.0, 0.0, 0, 0, 0);
+            continue;
+        }
+
         let full_due = g.bots.slots[slot]
             .as_ref()
             .is_some_and(|b| now >= b.next_full_think);
@@ -1918,7 +2317,9 @@ pub(crate) fn start_frame(g: &mut GameState, eng: &mut EngineApi<'_>) {
                 .filter_map(|s| g.players[s].as_ref().map(|hp| (s, hp)))
                 .filter(|(_, hp)| hp.alive && hp.team == my_team)
                 .fold((false, false), |(_, near), (s, _)| {
-                    let h_pos = eng.ent(eng.client_edict(s as u8)).map_or(Vec3::ZERO, |v| v.origin);
+                    let h_pos = eng
+                        .ent(eng.client_edict(s as u8))
+                        .map_or(Vec3::ZERO, |v| v.origin);
                     let close_to_obj = bomb_sites.iter().any(|b| b.distance(h_pos) < 350.0)
                         || dropped_bomb_pos.is_some_and(|d| d.distance(h_pos) < 350.0)
                         || hostages.iter().any(|h| h.pos.distance(h_pos) < 350.0);
@@ -1932,9 +2333,20 @@ pub(crate) fn start_frame(g: &mut GameState, eng: &mut EngineApi<'_>) {
                 0.0
             };
 
-            let (mut brain, profile, hostage_use_cooldown) = {
+            let (mut brain, profile, hostage_use_cooldown, prev_spring) = {
                 let b = g.bots.slots[slot].as_ref().unwrap();
-                (b.brain.clone(), b.profile.clone(), b.hostage_use_cooldown)
+                let sp = (
+                    b.brain.combat.yaw_deg,
+                    b.brain.combat.pitch_deg,
+                    b.brain.combat.yaw_vel,
+                    b.brain.combat.pitch_vel,
+                );
+                (
+                    b.brain.clone(),
+                    b.profile.clone(),
+                    b.hostage_use_cooldown,
+                    sp,
+                )
             };
 
             let bot_pickups = if p.has_primary || knife_only_arena {
@@ -2012,87 +2424,60 @@ pub(crate) fn start_frame(g: &mut GameState, eng: &mut EngineApi<'_>) {
                 brain.step(&ctx)
             };
 
-            let mut cmd = BotCmd {
-                yaw_deg: decision.combat.yaw_deg,
-                pitch_deg: decision.combat.pitch_deg,
-                forward: 0.0,
-                right: 0.0,
-                attack: decision.combat.primary_attack,
-                secondary_attack: decision.combat.secondary_attack,
-                jump: false,
-                duck: decision.duck,
-                use_key: decision.use_key,
-                reload: decision.combat.reload,
-                walk: decision.walk,
-                desired_weapon: decision.combat.desired_weapon,
-                want_c4: decision.want_c4,
+            let is_planting_c4 =
+                decision.want_c4 && p.has_c4 && (p.signals.state() & SIGNAL_BOMB) != 0;
+            let mut move_goal = if is_planting_c4 {
+                None
+            } else {
+                decision.move_goal
             };
 
-            // Plant C4 by holding +attack once inside bomb site.
-            if decision.want_c4 && p.has_c4 && (p.signals.state() & SIGNAL_BOMB) != 0 {
-                cmd.attack = true;
-                cmd.forward = 0.0;
-                cmd.right = 0.0;
-            } else if let Some(goal) = decision.move_goal {
+            // Replan navmesh A* path at 10 Hz when the goal changes or expires.
+            if let Some(goal) = move_goal {
                 let mut temp_bot = g.bots.slots[slot].take().unwrap();
-                let (mut fwd, mut right, path_crouch, path_jump, door_use, ladder_up) =
-                    plan_and_steer_path(
-                        &mut temp_bot,
-                        g.bots.nav_mesh.as_ref(),
-                        eng,
-                        &obstacles,
-                        hv.origin,
-                        goal,
-                        bot_team,
-                        now,
-                        cmd.yaw_deg,
-                        &mut g.bots.path_scratch,
-                    );
+                replan_path_if_needed(
+                    &mut temp_bot,
+                    g.bots.nav_mesh.as_ref(),
+                    eng,
+                    &obstacles,
+                    hv.origin,
+                    goal,
+                    bot_team,
+                    now,
+                    &mut g.bots.path_scratch,
+                );
                 g.bots.slots[slot] = Some(temp_bot);
-
-                if decision.combat.want_stop_to_shoot
-                    && decision.visible_enemy_count > 0
-                    && !matches!(
-                        decision.state,
-                        BotTacticalState::EscapeFromBomb | BotTacticalState::EscortVip
-                    )
-                {
-                    fwd = 0.0;
-                    right = 0.0;
-                } else if decision.visible_enemy_count > 0
-                    && decision.combat.strafe_bias.abs() > 0.01
-                {
-                    right = (right + decision.combat.strafe_bias).clamp(-1.0, 1.0);
-                }
-
-                cmd.forward = fwd;
-                cmd.right = right;
-                cmd.duck |= path_crouch;
-                cmd.jump |= path_jump;
-                cmd.use_key |= door_use;
-                if ladder_up && decision.visible_enemy_count == 0 {
-                    cmd.pitch_deg = -45.0;
-                }
             }
 
-            // Defuse C4: aim directly at the planted bomb so `+use` passes VIEW_FIELD_NARROW.
+            // Compute desired look target angles for the 30 Hz critically damped look spring
+            // (never snapping instantly even for C4 defuse or hostage interaction).
+            let mut look_attacking = decision.visible_enemy_count > 0;
+            let mut look_target_angles = (decision.combat.yaw_deg, decision.combat.pitch_deg);
+            let mut defuse_bomb_pos = None;
             if decision.state == BotTacticalState::DefuseBomb
                 && decision.visible_enemy_count == 0
                 && let Some(bpos) = planted_pos
-                && hv.origin.distance(bpos) < 96.0
+                && hv.origin.distance(bpos) < 110.0
             {
-                let (by, bp) = cs_bot::tactics::yaw_pitch_to(eye, bpos);
-                cmd.yaw_deg = by;
-                cmd.pitch_deg = bp;
-                if cmd.use_key {
-                    cmd.forward = 0.0;
-                    cmd.right = 0.0;
-                }
+                look_target_angles = cs_bot::tactics::yaw_pitch_to(eye, bpos);
+                look_attacking = true;
+                defuse_bomb_pos = Some(bpos);
+            } else if decision.visible_enemy_count == 0
+                && decision.heard_noise.is_none()
+                && decision.state != BotTacticalState::AmbushCamp
+                && let Some(look_pt) = g.bots.slots[slot]
+                    .as_ref()
+                    .and_then(|b| path_look_ahead_point(b.path.as_ref(), b.path_wp_idx, hv.origin))
+            {
+                look_target_angles = cs_bot::tactics::yaw_pitch_to(eye, look_pt);
             }
 
             // Hostage escort pacing & +use pulse cooldown.
             let mut pulse_hostage_use = false;
-            if decision.state == BotTacticalState::RescueHostage && decision.visible_enemy_count == 0 {
+            let mut base_use_key = decision.use_key;
+            if decision.state == BotTacticalState::RescueHostage
+                && decision.visible_enemy_count == 0
+            {
                 let following_me: Vec<&TacticalHostage> = hostages
                     .iter()
                     .filter(|h| h.follower_id == Some(slot as u32))
@@ -2105,59 +2490,83 @@ pub(crate) fn start_frame(g: &mut GameState, eng: &mut EngineApi<'_>) {
                     if max_dist > 220.0
                         || rescue_zones.iter().any(|rz| hv.origin.distance(*rz) < 64.0)
                     {
-                        cmd.forward = 0.0;
-                        cmd.right = 0.0;
+                        move_goal = None;
                     }
-                } else if cmd.use_key {
+                } else if base_use_key {
                     if now >= hostage_use_cooldown {
                         pulse_hostage_use = true;
-                        cmd.forward = 0.0;
-                        cmd.right = 0.0;
-                        if let Some(h) = hostages
-                            .iter()
-                            .min_by(|a, b| a.pos.distance_squared(hv.origin).total_cmp(&b.pos.distance_squared(hv.origin)))
-                        {
-                            let (hy, hp) = cs_bot::tactics::yaw_pitch_to(eye, h.pos + Vec3::new(0.0, 0.0, 31.0));
-                            cmd.yaw_deg = hy;
-                            cmd.pitch_deg = hp;
+                        move_goal = None;
+                        if let Some(h) = hostages.iter().min_by(|a, b| {
+                            a.pos
+                                .distance_squared(hv.origin)
+                                .total_cmp(&b.pos.distance_squared(hv.origin))
+                        }) {
+                            look_target_angles = cs_bot::tactics::yaw_pitch_to(
+                                eye,
+                                h.pos + Vec3::new(0.0, 0.0, 31.0),
+                            );
+                            look_attacking = true;
                         }
                     } else {
-                        cmd.use_key = false;
+                        base_use_key = false;
                     }
                 }
             }
 
-            // Stuck detection and detour recovery.
+            // Restore pre-step spring state so the 30 Hz loop advances the look spring smoothly
+            // every 33ms instead of double-stepping in 100ms chunks.
+            brain.combat.yaw_deg = prev_spring.0;
+            brain.combat.pitch_deg = prev_spring.1;
+            brain.combat.yaw_vel = prev_spring.2;
+            brain.combat.pitch_vel = prev_spring.3;
+
+            let stop_to_shoot = decision.combat.want_stop_to_shoot
+                && decision.visible_enemy_count > 0
+                && !matches!(
+                    decision.state,
+                    BotTacticalState::EscapeFromBomb | BotTacticalState::EscortVip
+                );
+            let strafe_bias = if decision.visible_enemy_count > 0 {
+                decision.combat.strafe_bias
+            } else {
+                0.0
+            };
+
+            // Stuck detection and smooth Wiggle + crouch-jump + A* repath recovery.
             let mut want_stuck_recenter = false;
             let mut stuck_tick_val = 0usize;
             if let Some(b) = g.bots.slots[slot].as_mut() {
                 let moving_unblocked = (hv.flags & FL_FROZEN) == 0
                     && hv.max_speed > 5.0
-                    && !cmd.use_key
-                    && !(cmd.want_c4 && cmd.attack)
-                    && (cmd.forward.abs() > 0.2 || cmd.right.abs() > 0.2);
+                    && !base_use_key
+                    && !is_planting_c4
+                    && !stop_to_shoot
+                    && move_goal.is_some();
 
                 if moving_unblocked {
                     let moved = hv.origin.truncate().distance(b.last_pos.truncate());
-                    if moved < 4.0 {
+                    if moved < 5.0 {
                         b.stuck_ticks = b.stuck_ticks.saturating_add(1);
                     } else {
                         b.stuck_ticks = 0;
                     }
-                    if b.stuck_ticks >= 4 {
-                        cmd.jump = b.stuck_ticks.is_multiple_of(4);
-                        cmd.right = if ((slot as u8) ^ (b.stuck_ticks / 6)) & 1 == 0 {
+                    if b.stuck_ticks >= 3 {
+                        b.wiggle_sign = if ((slot as u8) ^ (b.stuck_ticks / 4)) & 1 == 0 {
                             1.0
                         } else {
                             -1.0
                         };
+                        b.wiggle_until = now + 0.35;
+                        if b.stuck_ticks.is_multiple_of(3) {
+                            b.crouch_jump_until = now + 0.45;
+                        }
                     }
-                    if b.stuck_ticks >= 8 {
+                    if b.stuck_ticks >= 7 {
                         want_stuck_recenter = true;
                         stuck_tick_val = usize::from(b.stuck_ticks);
                         b.path_replan_time = 0.0;
                     }
-                    if b.stuck_ticks >= 16 {
+                    if b.stuck_ticks >= 14 {
                         b.path = None;
                         b.stuck_ticks = 0;
                     }
@@ -2166,12 +2575,31 @@ pub(crate) fn start_frame(g: &mut GameState, eng: &mut EngineApi<'_>) {
                 }
 
                 b.last_pos = hv.origin;
+                b.move_goal = move_goal;
+                b.look_target_angles = Some(look_target_angles);
+                b.look_attacking = look_attacking;
+                b.stop_to_shoot = stop_to_shoot;
+                b.strafe_bias = strafe_bias;
+                b.base_duck = decision.duck;
+                b.base_use_key = base_use_key;
+                b.base_walk = decision.walk;
+                b.is_planting_c4 = is_planting_c4;
+                b.defuse_bomb_pos = defuse_bomb_pos;
                 if pulse_hostage_use {
                     b.hostage_use_cooldown = now + 1.2;
                     b.hostage_use_pulse = true;
                 }
                 b.brain = brain;
-                b.cmd = cmd;
+                b.cmd.attack = if is_planting_c4 {
+                    true
+                } else {
+                    decision.combat.primary_attack
+                };
+                b.cmd.secondary_attack = decision.combat.secondary_attack;
+                b.cmd.reload = decision.combat.reload;
+                b.cmd.walk = decision.walk;
+                b.cmd.desired_weapon = decision.combat.desired_weapon;
+                b.cmd.want_c4 = decision.want_c4;
                 b.next_full_think = now + 0.1;
             }
 
@@ -2187,36 +2615,58 @@ pub(crate) fn start_frame(g: &mut GameState, eng: &mut EngineApi<'_>) {
                         }
                     }
                 }
-                if let Some(&target_pt) =
-                    (!candidates.is_empty()).then(|| &candidates[(slot + stuck_tick_val) % candidates.len()])
+                if let Some(&target_pt) = (!candidates.is_empty())
+                    .then(|| &candidates[(slot + stuck_tick_val) % candidates.len()])
+                    && let Some(b) = g.bots.slots[slot].as_mut()
                 {
-                    let (fwd, right) = world_dir_to_move((target_pt - hv.origin).truncate(), cmd.yaw_deg);
-                    if let Some(b) = g.bots.slots[slot].as_mut() {
-                        b.cmd.forward = fwd;
-                        b.cmd.right = right;
-                    }
+                    b.move_goal = Some(target_pt);
+                    b.path = None;
                 }
             }
 
             if let Some(out_radio) = decision.outgoing_radio.as_ref() {
-                dispatch_bot_radio(g, eng, slot_u8, bot_team, hv.origin, profile.voice_pitch, out_radio);
+                dispatch_bot_radio(
+                    g,
+                    eng,
+                    slot_u8,
+                    bot_team,
+                    hv.origin,
+                    profile.voice_pitch,
+                    out_radio,
+                );
             }
         }
 
-        let cmd_copy = g.bots.slots[slot].as_ref().map(|b| b.cmd).unwrap_or_default();
+        let cmd_copy = g.bots.slots[slot]
+            .as_ref()
+            .map(|b| b.cmd)
+            .unwrap_or_default();
         select_desired_weapon(g, eng, slot_u8, &cmd_copy);
 
         let id = eng.client_edict(slot_u8);
         let Some(hv) = eng.ent(id) else {
             continue;
         };
-        let frozen = hv.flags & FL_FROZEN != 0 || g.bots.settings.bot_stop || g.bots.settings.bot_zombie;
-        let max_speed = if hv.max_speed > 1.0 { hv.max_speed } else { 250.0 };
-        let speed_scale = if cmd_copy.walk { 0.5 } else { 1.0 };
+        let frozen =
+            hv.flags & FL_FROZEN != 0 || g.bots.settings.bot_stop || g.bots.settings.bot_zombie;
+        let on_ground = (hv.flags & FL_ONGROUND) != 0;
+        let ducking = (hv.flags & FL_DUCKING) != 0;
+        let max_speed = if hv.max_speed > 1.0 {
+            hv.max_speed
+        } else {
+            250.0
+        };
+        let teammate_push = if !frozen {
+            teammate_separation(g, eng, slot, my_team, hv.origin, max_clients)
+        } else {
+            glam::Vec2::ZERO
+        };
+        let difficulty = g.bots.settings.bot_difficulty;
+
         let Some(b) = g.bots.slots[slot].as_mut() else {
             continue;
         };
-        let cmd = b.cmd;
+        let cmd_dt = (now - b.prev_cmd_time).clamp(0.001, 0.1) as f32;
         let msec = if hv.flags & FL_FROZEN != 0 {
             0
         } else {
@@ -2224,20 +2674,139 @@ pub(crate) fn start_frame(g: &mut GameState, eng: &mut EngineApi<'_>) {
         };
         b.prev_cmd_time = now;
 
+        // 30 Hz critically damped angular look spring (`UpdateLookAngles`).
+        if !frozen && let Some((mut ty, mut tp)) = b.look_target_angles {
+            if b.is_ladder_up && !b.look_attacking {
+                tp = -45.0;
+            }
+            if let Some(bpos) = b.defuse_bomb_pos {
+                let eye = hv.origin + hv.view_ofs;
+                let (by, bp) = cs_bot::tactics::yaw_pitch_to(eye, bpos);
+                ty = by;
+                tp = bp;
+            }
+            let spring = b.profile.look_spring;
+            step_look_spring(
+                &mut b.brain.combat,
+                ty,
+                tp,
+                cmd_dt,
+                b.look_attacking,
+                difficulty,
+                &spring,
+            );
+            b.cmd.yaw_deg = b.brain.combat.yaw_deg;
+            b.cmd.pitch_deg = b.brain.combat.pitch_deg;
+        }
+
+        // 30 Hz continuous analog path steering + feeler reflex + teammate separation + crouch-jump.
+        if !frozen {
+            let mut fwd = 0.0_f32;
+            let mut right = 0.0_f32;
+            let mut duck = b.base_duck;
+            let mut jump = false;
+            let mut use_key = b.base_use_key;
+            let mut ladder_up = false;
+
+            if !b.is_planting_c4 && b.move_goal.is_some() {
+                let (pf, pr, p_crouch, p_jump, door_use, p_ladder) = steer_path_30hz(
+                    b,
+                    eng,
+                    id,
+                    hv.origin,
+                    ducking,
+                    b.cmd.yaw_deg,
+                    now,
+                    teammate_push,
+                );
+                fwd = pf;
+                right = pr;
+                duck |= p_crouch;
+                jump |= p_jump;
+                use_key |= door_use;
+                ladder_up = p_ladder;
+            }
+            b.is_ladder_up = ladder_up;
+
+            // Combat stop-to-shoot or smooth combat strafe (re-normalized onto continuous unit disk).
+            if b.stop_to_shoot {
+                fwd = 0.0;
+                right = 0.0;
+            } else if b.strafe_bias.abs() > 0.01 {
+                right += b.strafe_bias;
+                let mag = fwd.hypot(right);
+                if mag > 1.0 {
+                    fwd /= mag;
+                    right /= mag;
+                }
+            }
+
+            // Defuse C4: hold position once close and hold `+use` once aimed inside VIEW_FIELD_NARROW.
+            if let Some(bpos) = b.defuse_bomb_pos {
+                let dist = hv.origin.distance(bpos);
+                if dist < 58.0 {
+                    fwd = 0.0;
+                    right = 0.0;
+                    duck = true;
+                    let eye = hv.origin + hv.view_ofs;
+                    let (by, bp) = cs_bot::tactics::yaw_pitch_to(eye, bpos);
+                    let aligned = angle_diff(b.cmd.yaw_deg, by).abs() < 30.0
+                        && (b.cmd.pitch_deg - bp).abs() < 30.0;
+                    use_key = aligned;
+                }
+            }
+
+            // Reliable jump / crouch-jump over crates and ledges (`JUMP_HEIGHT`..`JUMP_CROUCH_HEIGHT`).
+            if jump && on_ground {
+                b.crouch_jump_until = b.crouch_jump_until.max(now + 0.45);
+            } else if now < b.crouch_jump_until && on_ground && b.stuck_ticks >= 3 {
+                jump = true;
+            }
+            if !on_ground && now < b.crouch_jump_until {
+                duck = true;
+            }
+
+            b.cmd.forward = fwd;
+            b.cmd.right = right;
+            b.cmd.duck = duck;
+            b.cmd.jump = jump;
+            b.cmd.use_key = use_key;
+        }
+
+        let cmd = b.cmd;
+        let speed_scale = if cmd.walk { 0.5 } else { 1.0 };
         let viewangles = Vec3::new(cmd.pitch_deg, cmd.yaw_deg, 0.0);
-        let forwardmove = if frozen { 0.0 } else { cmd.forward * max_speed * speed_scale };
-        let sidemove = if frozen { 0.0 } else { cmd.right * max_speed * speed_scale };
+        let forwardmove = if frozen {
+            0.0
+        } else {
+            cmd.forward * max_speed * speed_scale
+        };
+        let sidemove = if frozen {
+            0.0
+        } else {
+            cmd.right * max_speed * speed_scale
+        };
         let buttons = if frozen { 0 } else { encode_buttons(&cmd) };
 
         if let Some(v) = eng.ent_mut(id) {
             v.v_angle = viewangles;
             v.angles = Vec3::new(-viewangles.x / 3.0, viewangles.y, 0.0);
         }
-        eng.run_player_move(slot_u8, viewangles, forwardmove, sidemove, 0.0, buttons, 0, msec);
+        eng.run_player_move(
+            slot_u8,
+            viewangles,
+            forwardmove,
+            sidemove,
+            0.0,
+            buttons,
+            0,
+            msec,
+        );
         if let Some(b) = g.bots.slots[slot].as_mut()
             && b.hostage_use_pulse
         {
             b.cmd.use_key = false;
+            b.base_use_key = false;
             b.hostage_use_pulse = false;
         }
     }
@@ -2247,6 +2816,9 @@ pub(crate) fn start_frame(g: &mut GameState, eng: &mut EngineApi<'_>) {
 pub(crate) fn on_round_restart(g: &mut GameState) {
     let settings = g.bots.settings.clone();
     g.bots.incoming_radios.clear();
+    g.bots.last_team_radio_time = [-100.0; 2];
+    g.bots.last_team_event_time[0].clear();
+    g.bots.last_team_event_time[1].clear();
     g.bots.sound_events.clear();
     if let Some(mesh) = g.bots.nav_mesh.as_mut() {
         mesh.clear_blocked();
@@ -2259,6 +2831,21 @@ pub(crate) fn on_round_restart(g: &mut GameState) {
             b.path_wp_idx = 0;
             b.path_goal = None;
             b.path_replan_time = 0.0;
+            b.move_goal = None;
+            b.look_target_angles = None;
+            b.look_attacking = false;
+            b.stop_to_shoot = false;
+            b.strafe_bias = 0.0;
+            b.base_duck = false;
+            b.base_use_key = false;
+            b.base_walk = false;
+            b.is_planting_c4 = false;
+            b.defuse_bomb_pos = None;
+            b.is_ladder_up = false;
+            b.spawn_yaw = None;
+            b.crouch_jump_until = 0.0;
+            b.wiggle_until = 0.0;
+            b.wiggle_sign = 1.0;
             b.done_buying = false;
             b.buy_retries = 0;
             b.cmd = BotCmd::default();
@@ -2294,7 +2881,12 @@ fn active_editor_pos(g: &GameState, eng: &EngineApi<'_>) -> Vec3 {
     fallback.unwrap_or(Vec3::ZERO)
 }
 
-fn target_edit_area_idx(g: &BotManager, _eng: &EngineApi<'_>, arg: Option<&str>, fallback_pos: Vec3) -> Option<usize> {
+fn target_edit_area_idx(
+    g: &BotManager,
+    _eng: &EngineApi<'_>,
+    arg: Option<&str>,
+    fallback_pos: Vec3,
+) -> Option<usize> {
     let mesh = g.nav_mesh.as_ref()?;
     if let Some(id) = arg.and_then(|s| s.parse::<u32>().ok()) {
         return mesh.area_index_by_id(id);
@@ -2343,7 +2935,10 @@ fn handle_nav_command(
         "bot_nav_load" => {
             let map_name = eng.map_name().to_string();
             if let Some(path) = argv.get(1) {
-                match std::fs::read(path).ok().and_then(|b| NavFile::parse(&b).ok()) {
+                match std::fs::read(path)
+                    .ok()
+                    .and_then(|b| NavFile::parse(&b).ok())
+                {
                     Some(file) => {
                         let n = file.areas.len();
                         g.bots.nav_mesh = Some(NavMesh::from_nav_file(file));
@@ -2413,9 +3008,15 @@ fn handle_nav_command(
         "bot_nav_mark" => {
             ensure_nav(g, eng);
             let idx = if let Some(id) = argv.get(1).and_then(|s| s.parse::<u32>().ok()) {
-                g.bots.nav_mesh.as_ref().and_then(|m| m.area_index_by_id(id))
+                g.bots
+                    .nav_mesh
+                    .as_ref()
+                    .and_then(|m| m.area_index_by_id(id))
             } else {
-                g.bots.nav_mesh.as_ref().and_then(|m| m.get_nearest_nav_area(pos, true))
+                g.bots
+                    .nav_mesh
+                    .as_ref()
+                    .and_then(|m| m.get_nearest_nav_area(pos, true))
             };
             g.bots.nav_edit_marked_area = idx;
             match idx.and_then(|i| g.bots.nav_mesh.as_ref()?.area(i)) {
@@ -2424,7 +3025,9 @@ fn handle_nav_command(
             }
         }
         "bot_nav_delete" => {
-            let Some(idx) = target_edit_area_idx(&g.bots, eng, argv.get(1).map(String::as_str), pos) else {
+            let Some(idx) =
+                target_edit_area_idx(&g.bots, eng, argv.get(1).map(String::as_str), pos)
+            else {
                 return Some("No nav area selected\n".to_string());
             };
             let mut file = g.bots.nav_mesh.as_ref()?.to_nav_file();
@@ -2439,7 +3042,9 @@ fn handle_nav_command(
             Some(format!("Deleted nav area #{removed_id}\n"))
         }
         "bot_nav_split" => {
-            let Some(idx) = target_edit_area_idx(&g.bots, eng, argv.get(1).map(String::as_str), pos) else {
+            let Some(idx) =
+                target_edit_area_idx(&g.bots, eng, argv.get(1).map(String::as_str), pos)
+            else {
                 return Some("No nav area selected\n".to_string());
             };
             let mut file = g.bots.nav_mesh.as_ref()?.to_nav_file();
@@ -2539,7 +3144,11 @@ fn handle_nav_command(
             let id_b = file.areas[idx_b].id;
             let delta = file.areas[idx_b].center() - file.areas[idx_a].center();
             let dir = if delta.x.abs() >= delta.y.abs() {
-                if delta.x >= 0.0 { NavDir::East } else { NavDir::West }
+                if delta.x >= 0.0 {
+                    NavDir::East
+                } else {
+                    NavDir::West
+                }
             } else if delta.y >= 0.0 {
                 NavDir::South
             } else {
@@ -2570,7 +3179,10 @@ fn handle_nav_command(
         "bot_nav_begin_area" => {
             let p = parse_vec3_args(argv.get(1..)).unwrap_or(pos);
             g.bots.nav_edit_begin_pos = Some(p);
-            Some(format!("Nav area start corner set to ({:.1}, {:.1}, {:.1})\n", p.x, p.y, p.z))
+            Some(format!(
+                "Nav area start corner set to ({:.1}, {:.1}, {:.1})\n",
+                p.x, p.y, p.z
+            ))
         }
         "bot_nav_end_area" => {
             ensure_nav(g, eng);
@@ -2623,9 +3235,12 @@ fn handle_nav_command(
             rebuild_nav_mesh(&mut g.bots.nav_mesh, file);
             Some(format!("Spliced new nav area #{next_id}\n"))
         }
-        "bot_nav_crouch" | "bot_nav_jump" | "bot_nav_precise" | "bot_nav_no_jump" | "bot_nav_avoid" => {
+        "bot_nav_crouch" | "bot_nav_jump" | "bot_nav_precise" | "bot_nav_no_jump"
+        | "bot_nav_avoid" => {
             ensure_nav(g, eng);
-            let Some(idx) = target_edit_area_idx(&g.bots, eng, argv.get(1).map(String::as_str), pos) else {
+            let Some(idx) =
+                target_edit_area_idx(&g.bots, eng, argv.get(1).map(String::as_str), pos)
+            else {
                 return Some("No nav area selected\n".to_string());
             };
             let attr = match cmd {
@@ -2647,20 +3262,31 @@ fn handle_nav_command(
             Some(format!("Area #{id} {cmd}: {active}\n"))
         }
         "bot_nav_corner_select" => {
-            g.bots.nav_edit_selected_corner = match argv.get(1).map(|s| s.to_ascii_lowercase()).as_deref() {
-                Some("ne") => NavCorner::NorthEast,
-                Some("se") => NavCorner::SouthEast,
-                Some("sw") => NavCorner::SouthWest,
-                _ => NavCorner::NorthWest,
-            };
-            Some(format!("Selected corner {:?}\n", g.bots.nav_edit_selected_corner))
+            g.bots.nav_edit_selected_corner =
+                match argv.get(1).map(|s| s.to_ascii_lowercase()).as_deref() {
+                    Some("ne") => NavCorner::NorthEast,
+                    Some("se") => NavCorner::SouthEast,
+                    Some("sw") => NavCorner::SouthWest,
+                    _ => NavCorner::NorthWest,
+                };
+            Some(format!(
+                "Selected corner {:?}\n",
+                g.bots.nav_edit_selected_corner
+            ))
         }
         "bot_nav_corner_raise" | "bot_nav_corner_lower" => {
             let Some(idx) = target_edit_area_idx(&g.bots, eng, None, pos) else {
                 return Some("No nav area selected\n".to_string());
             };
-            let step = argv.get(1).and_then(|s| s.parse::<f32>().ok()).unwrap_or(5.0);
-            let delta = if cmd == "bot_nav_corner_raise" { step } else { -step };
+            let step = argv
+                .get(1)
+                .and_then(|s| s.parse::<f32>().ok())
+                .unwrap_or(5.0);
+            let delta = if cmd == "bot_nav_corner_raise" {
+                step
+            } else {
+                -step
+            };
             let mut file = g.bots.nav_mesh.as_ref()?.to_nav_file();
             let area = &mut file.areas[idx];
             match g.bots.nav_edit_selected_corner {
@@ -2671,7 +3297,10 @@ fn handle_nav_command(
             }
             let id = area.id;
             rebuild_nav_mesh(&mut g.bots.nav_mesh, file);
-            Some(format!("Adjusted corner {:?} of area #{id} by {delta}\n", g.bots.nav_edit_selected_corner))
+            Some(format!(
+                "Adjusted corner {:?} of area #{id} by {delta}\n",
+                g.bots.nav_edit_selected_corner
+            ))
         }
         "bot_nav_place_pick" => {
             ensure_nav(g, eng);
@@ -2682,19 +3311,30 @@ fn handle_nav_command(
                 .and_then(|m| m.get_place(pos))
                 .map(ToString::to_string);
             g.bots.nav_paint_place = picked.clone();
-            Some(format!("Picked place: {}\n", picked.as_deref().unwrap_or("<none>")))
+            Some(format!(
+                "Picked place: {}\n",
+                picked.as_deref().unwrap_or("<none>")
+            ))
         }
         "bot_nav_place_set" => {
             ensure_nav(g, eng);
-            let Some(place) = argv.get(1).cloned().or_else(|| g.bots.nav_paint_place.clone()) else {
+            let Some(place) = argv
+                .get(1)
+                .cloned()
+                .or_else(|| g.bots.nav_paint_place.clone())
+            else {
                 return Some("Usage: bot_nav_place_set <name>\n".to_string());
             };
-            let Some(idx) = target_edit_area_idx(&g.bots, eng, argv.get(2).map(String::as_str), pos) else {
+            let Some(idx) =
+                target_edit_area_idx(&g.bots, eng, argv.get(2).map(String::as_str), pos)
+            else {
                 return Some("No nav area selected\n".to_string());
             };
             let mesh = g.bots.nav_mesh.as_mut()?;
             let pid = mesh.set_area_place(idx, &place);
-            Some(format!("Assigned place '{place}' (id {pid}) to area index {idx}\n"))
+            Some(format!(
+                "Assigned place '{place}' (id {pid}) to area index {idx}\n"
+            ))
         }
         "bot_nav_place_floodfill" => {
             ensure_nav(g, eng);
@@ -2724,12 +3364,18 @@ fn handle_nav_command(
                     }
                 }
             }
-            Some(format!("Flood-filled place '{place}' across {count} areas\n"))
+            Some(format!(
+                "Flood-filled place '{place}' across {count} areas\n"
+            ))
         }
         "bot_nav_place_list" => {
             ensure_nav(g, eng);
             let places = g.bots.nav_mesh.as_ref().map_or(&[][..], NavMesh::places);
-            Some(format!("Places ({}): {}\n", places.len(), places.join(", ")))
+            Some(format!(
+                "Places ({}): {}\n",
+                places.len(),
+                places.join(", ")
+            ))
         }
         "bot_nav_toggle_place_mode" => {
             g.bots.nav_place_mode = !g.bots.nav_place_mode;

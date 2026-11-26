@@ -563,6 +563,7 @@ pub struct BotTacticalBrain {
     pub patrol_index: usize,
     pub pending_radio_reply: Option<OutgoingRadio>,
     pub state_timer: f32,
+    pub bomb_planted_acked: bool,
 }
 
 impl Default for BotTacticalBrain {
@@ -585,6 +586,7 @@ impl Default for BotTacticalBrain {
             patrol_index: 0,
             pending_radio_reply: None,
             state_timer: 0.0,
+            bomb_planted_acked: false,
         }
     }
 }
@@ -596,6 +598,17 @@ impl BotTacticalBrain {
         self.is_rogue = settings.weapon_restrictions.allow_rogues
             && profile.teamwork < 0.45
             && mix64(seed ^ 0x5061).is_multiple_of(4);
+    }
+
+    /// Queues an `EnemyDown` chatter/radio call when this bot eliminates an enemy.
+    pub fn on_enemy_killed(&mut self, place_name: Option<&str>, now: f32, mode: BotChatterMode) {
+        self.queue_radio(
+            RadioMessage::EnemyDown,
+            place_name,
+            Some(BotChatterEvent::KilledEnemy),
+            now,
+            mode,
+        );
     }
 
     /// Processes a human or teammate radio call immediately (`CCSBot::OnRadioMessage`).
@@ -702,9 +715,7 @@ impl BotTacticalBrain {
                 }
             }
             RadioMessage::EnemySpotted => {
-                if self.last_enemy_pos.is_none()
-                    || radio.time - self.last_enemy_time > 2.5
-                {
+                if self.last_enemy_pos.is_none() || radio.time - self.last_enemy_time > 2.5 {
                     self.last_enemy_pos = Some(radio.sender_pos);
                     self.last_enemy_time = radio.time;
                     if matches!(self.state, BotTacticalState::Idle | BotTacticalState::Hunt) {
@@ -713,23 +724,33 @@ impl BotTacticalBrain {
                 }
             }
             RadioMessage::ReportIn => {
-                let (msg, chatter) = if self.last_enemy_pos.is_some()
-                    && radio.time - self.last_enemy_time < 3.0
-                {
-                    (RadioMessage::EnemySpotted, BotChatterEvent::SpotEnemy)
-                } else if matches!(self.state, BotTacticalState::Idle | BotTacticalState::AmbushCamp) {
-                    (RadioMessage::SectorClear, BotChatterEvent::Clear)
-                } else {
-                    (RadioMessage::ReportingIn, BotChatterEvent::ReportingIn)
-                };
-                self.queue_radio(msg, self_place, Some(chatter), radio.time, settings.bot_chatter);
+                let (msg, chatter) =
+                    if self.last_enemy_pos.is_some() && radio.time - self.last_enemy_time < 3.0 {
+                        (RadioMessage::EnemySpotted, BotChatterEvent::SpotEnemy)
+                    } else if matches!(
+                        self.state,
+                        BotTacticalState::Idle | BotTacticalState::AmbushCamp
+                    ) {
+                        (RadioMessage::SectorClear, BotChatterEvent::Clear)
+                    } else {
+                        (RadioMessage::ReportingIn, BotChatterEvent::ReportingIn)
+                    };
+                self.queue_radio(
+                    msg,
+                    self_place,
+                    Some(chatter),
+                    radio.time,
+                    settings.bot_chatter,
+                );
             }
             RadioMessage::GetOutOfThere => {
                 self.state = BotTacticalState::EscapeFromBomb;
             }
             RadioMessage::GoGoGo | RadioMessage::StormTheFront => {
                 self.hold_spot = None;
-                if self.state == BotTacticalState::AmbushCamp || self.state == BotTacticalState::Hide {
+                if self.state == BotTacticalState::AmbushCamp
+                    || self.state == BotTacticalState::Hide
+                {
                     self.state = BotTacticalState::Hunt;
                 }
                 self.queue_radio(
@@ -824,11 +845,12 @@ impl BotTacticalBrain {
         }
 
         // 3. Grenade request when enemy last seen behind corner or clustered.
-        let grenade_req = pick_tactical_grenade(ctx, &visible, self.last_enemy_pos, self.last_enemy_time);
+        let grenade_req =
+            pick_tactical_grenade(ctx, &visible, self.last_enemy_pos, self.last_enemy_time);
 
         // 4. Step combat controller first so `needs_reload_in_cover` informs tactical hiding.
         let look_override = self.compute_look_override(ctx, heard.map(|h| h.0));
-        let combat_out = step_combat(
+        let mut combat_out = step_combat(
             &mut self.combat,
             &CombatInput {
                 dt: ctx.dt,
@@ -859,7 +881,15 @@ impl BotTacticalBrain {
         let mut use_key = false;
         let mut want_c4 = false;
 
-        self.update_tactical_state(ctx, &visible, heard, &combat_out, &mut duck, &mut use_key, &mut want_c4);
+        self.update_tactical_state(
+            ctx,
+            &visible,
+            heard,
+            &combat_out,
+            &mut duck,
+            &mut use_key,
+            &mut want_c4,
+        );
 
         let walk = !ctx.knife_only_arena
             && (ctx.settings.bot_walk
@@ -871,6 +901,25 @@ impl BotTacticalBrain {
                     )
                 || (self.state == BotTacticalState::InvestigateNoise && ctx.profile.skill >= 0.5))
             || ctx.settings.bot_walk;
+
+        // 6. Authentic CS 1.6 knife-out spawn rollout (`250 u/s`): equip knife while traversing
+        // long safe distances far from enemies, and switch back to primary rifle well before
+        // entering enemy LoS or contact zones (`~1150u` pre-contact margin).
+        if should_use_knife_rollout(
+            ctx,
+            self.state,
+            self.move_goal,
+            &visible,
+            heard,
+            walk,
+            want_c4,
+            use_key,
+            &combat_out,
+            self.last_enemy_time,
+            self.noise_time,
+        ) {
+            combat_out.desired_weapon = Some(BotWeapon::Knife);
+        }
 
         let outgoing_radio = self.pending_radio_reply.take();
 
@@ -969,9 +1018,19 @@ impl BotTacticalBrain {
         if let Some(bomb_pos) = ctx.planted_bomb_pos {
             match ctx.team {
                 BotTeam::CounterTerrorist => {
+                    if !self.bomb_planted_acked {
+                        self.bomb_planted_acked = true;
+                        self.queue_radio(
+                            RadioMessage::GoGoGo,
+                            ctx.place_name,
+                            Some(BotChatterEvent::BombPlanted),
+                            ctx.now,
+                            ctx.settings.bot_chatter,
+                        );
+                    }
                     self.state = BotTacticalState::DefuseBomb;
                     self.move_goal = Some(bomb_pos);
-                    if ctx.pos.distance(bomb_pos) < 62.0 {
+                    if ctx.pos.distance(bomb_pos) < 58.0 {
                         *use_key = true;
                         *duck = true;
                         self.queue_radio(
@@ -985,9 +1044,17 @@ impl BotTacticalBrain {
                     return;
                 }
                 BotTeam::Terrorist => {
+                    if self.state != BotTacticalState::GuardBomb {
+                        self.queue_radio(
+                            RadioMessage::InPosition,
+                            ctx.place_name,
+                            Some(BotChatterEvent::GuardingBomb),
+                            ctx.now,
+                            ctx.settings.bot_chatter,
+                        );
+                    }
                     self.state = BotTacticalState::GuardBomb;
-                    let guard_pt = best_guard_spot(bomb_pos, ctx.cover_spots)
-                        .unwrap_or(bomb_pos);
+                    let guard_pt = best_guard_spot(bomb_pos, ctx.cover_spots).unwrap_or(bomb_pos);
                     self.move_goal = Some(guard_pt);
                     return;
                 }
@@ -1047,8 +1114,12 @@ impl BotTacticalBrain {
 
         // Priority 7: Hostage mode (cs_* maps).
         if !ctx.hostages.is_empty() {
-            let unrescued: Vec<TacticalHostage> =
-                ctx.hostages.iter().copied().filter(|h| !h.rescued).collect();
+            let unrescued: Vec<TacticalHostage> = ctx
+                .hostages
+                .iter()
+                .copied()
+                .filter(|h| !h.rescued)
+                .collect();
             if !unrescued.is_empty() {
                 match ctx.team {
                     BotTeam::CounterTerrorist => {
@@ -1157,7 +1228,10 @@ impl BotTacticalBrain {
                     && ctx.inventory.primary.is_some_and(|w| w.is_sniper())
                     && ctx.profile.aggression < 0.4));
         if prefers_camp
-            && let Some(spot) = ctx.cover_spots.iter().find(|s| s.is_sniper_spot || s.is_cover)
+            && let Some(spot) = ctx
+                .cover_spots
+                .iter()
+                .find(|s| s.is_sniper_spot || s.is_cover)
         {
             self.state = BotTacticalState::AmbushCamp;
             self.hold_spot = Some(*spot);
@@ -1181,7 +1255,8 @@ impl BotTacticalBrain {
             if ctx.pos.distance(current) < 96.0 {
                 self.patrol_index = (self.patrol_index + 1) % ctx.patrol_waypoints.len();
             }
-            self.move_goal = Some(ctx.patrol_waypoints[self.patrol_index % ctx.patrol_waypoints.len()]);
+            self.move_goal =
+                Some(ctx.patrol_waypoints[self.patrol_index % ctx.patrol_waypoints.len()]);
             return;
         }
 
@@ -1252,6 +1327,98 @@ impl BotTacticalBrain {
             formatted_callout,
         });
     }
+}
+
+/// True when it is safe and beneficial to run with the Knife (`250 u/s`) during spawn rollout or
+/// long rotations, switching back to the primary rifle well before entering enemy LoS or contact.
+#[allow(clippy::too_many_arguments)]
+fn should_use_knife_rollout(
+    ctx: &TacticalContext<'_>,
+    state: BotTacticalState,
+    move_goal: Option<Vec3>,
+    visible: &[CombatTarget],
+    heard: Option<(Vec3, SoundKind)>,
+    walk: bool,
+    want_c4: bool,
+    use_key: bool,
+    combat_out: &CombatOutput,
+    last_enemy_time: f32,
+    noise_time: f32,
+) -> bool {
+    if !ctx.inventory.has_knife
+        || ctx.knife_only_arena
+        || !visible.is_empty()
+        || heard.is_some()
+        || walk
+        || want_c4
+        || use_key
+        || combat_out.reload
+        || combat_out.primary_attack
+        || combat_out.secondary_attack
+        || ctx.now - last_enemy_time <= 3.5
+        || ctx.now - noise_time <= 2.5
+    {
+        return false;
+    }
+
+    let rolling_state = matches!(
+        state,
+        BotTacticalState::MoveTo
+            | BotTacticalState::Hunt
+            | BotTacticalState::FetchBomb
+            | BotTacticalState::DefuseBomb
+            | BotTacticalState::EscapeFromBomb
+            | BotTacticalState::RescueHostage
+            | BotTacticalState::EscortVip
+    );
+    if !rolling_state {
+        return false;
+    }
+
+    let Some(goal) = move_goal else {
+        return false;
+    };
+    let dist_to_goal = ctx.pos.distance(goal);
+    if dist_to_goal <= 220.0 {
+        return false;
+    }
+
+    // Never run with knife if any nearby enemy already has line of sight (<1900u) or is within
+    // pre-contact range (<1150u, even behind walls).
+    if ctx
+        .enemy_candidates
+        .iter()
+        .any(|e| e.has_los && ctx.pos.distance(e.pos) < 1900.0)
+    {
+        return false;
+    }
+    let nearest_enemy_dist = ctx
+        .enemy_candidates
+        .iter()
+        .map(|e| ctx.pos.distance(e.pos))
+        .fold(f32::INFINITY, f32::min);
+    if ctx.enemy_candidates.is_empty() {
+        if dist_to_goal <= 450.0 {
+            return false;
+        }
+    } else if nearest_enemy_dist <= 1150.0 {
+        return false;
+    }
+
+    // Switch back to rifle before stepping into an active bombsite (unless fleeing C4 blast).
+    if state != BotTacticalState::EscapeFromBomb {
+        if ctx.bomb_sites.iter().any(|s| ctx.pos.distance(*s) <= 320.0) {
+            return false;
+        }
+        if ctx
+            .planted_bomb_pos
+            .is_some_and(|b| ctx.pos.distance(b) <= 550.0)
+        {
+            return false;
+        }
+    }
+
+    true
 }
 
 /// Filters enemy candidates through flashblindness, FOV cone, LOS, and smoke occlusion.
@@ -1328,7 +1495,12 @@ pub fn perceive_most_relevant_sound(ctx: &TacticalContext<'_>) -> Option<(Vec3, 
         }
         // Ignore friendly footsteps/reloads unless it's a bomb beep/defuse/plant or gunfire.
         let is_friendly = s.team == Some(ctx.team);
-        if is_friendly && matches!(s.kind, SoundKind::Footstep | SoundKind::Reload | SoundKind::DoorOpen) {
+        if is_friendly
+            && matches!(
+                s.kind,
+                SoundKind::Footstep | SoundKind::Reload | SoundKind::DoorOpen
+            )
+        {
             continue;
         }
         let radius = if s.radius > 0.0 {
@@ -1451,8 +1623,10 @@ pub fn select_best_ground_pickup(ctx: &TacticalContext<'_>) -> Option<GroundPick
         .copied()
         .filter(|p| is_pickup_eligible(ctx, p.kind))
         .max_by(|a, b| {
-            let score_a = f32::from(a.kind.base_priority(ctx.profile)) * 20.0 - ctx.pos.distance(a.pos);
-            let score_b = f32::from(b.kind.base_priority(ctx.profile)) * 20.0 - ctx.pos.distance(b.pos);
+            let score_a =
+                f32::from(a.kind.base_priority(ctx.profile)) * 20.0 - ctx.pos.distance(a.pos);
+            let score_b =
+                f32::from(b.kind.base_priority(ctx.profile)) * 20.0 - ctx.pos.distance(b.pos);
             score_a.total_cmp(&score_b)
         })
 }
@@ -1475,11 +1649,11 @@ fn nearest_point(pos: Vec3, pts: &[Vec3]) -> Option<Vec3> {
 }
 
 fn nearest_cover_spot(pos: Vec3, spots: &[TacticalSpot]) -> Option<TacticalSpot> {
-    spots
-        .iter()
-        .copied()
-        .filter(|s| s.is_cover)
-        .min_by(|a, b| a.pos.distance_squared(pos).total_cmp(&b.pos.distance_squared(pos)))
+    spots.iter().copied().filter(|s| s.is_cover).min_by(|a, b| {
+        a.pos
+            .distance_squared(pos)
+            .total_cmp(&b.pos.distance_squared(pos))
+    })
 }
 
 fn best_guard_spot(objective: Vec3, spots: &[TacticalSpot]) -> Option<Vec3> {
@@ -1501,7 +1675,11 @@ fn escape_point_away_from(pos: Vec3, bomb_pos: Vec3, spots: &[TacticalSpot]) -> 
     if let Some(far_spot) = spots
         .iter()
         .filter(|s| s.pos.distance(bomb_pos) > 1200.0)
-        .min_by(|a, b| a.pos.distance_squared(pos).total_cmp(&b.pos.distance_squared(pos)))
+        .min_by(|a, b| {
+            a.pos
+                .distance_squared(pos)
+                .total_cmp(&b.pos.distance_squared(pos))
+        })
     {
         return far_spot.pos;
     }

@@ -61,10 +61,8 @@ use glam::Vec3;
 use crate::GameState;
 use crate::bullets;
 use crate::entity::{FCAP_CONTINUOUS_USE, FCAP_IMPULSE_USE, FCAP_ONOFF_USE, UseType};
-use crate::menus::{self, Menu};
 use crate::intro;
-use crate::weapons::core::{self as weapon_core, PlayerAnim};
-use crate::weapons::{MAX_AMMO_SLOTS, MAX_ITEM_TYPES, WEAPON_SUIT, WeaponId, WeaponSlotItem};
+use crate::menus::{self, Menu};
 use crate::messages;
 use crate::money;
 use crate::observer::{self, ObserverState};
@@ -73,6 +71,8 @@ use crate::pmove;
 use crate::rules;
 use crate::score;
 use crate::teams::{self, JoinState};
+use crate::weapons::core::{self as weapon_core, PlayerAnim};
+use crate::weapons::{MAX_AMMO_SLOTS, MAX_ITEM_TYPES, WEAPON_SUIT, WeaponId, WeaponSlotItem};
 use crate::world::{select_join_spawn_point, select_spawn_point};
 
 /// Most players a server holds (the slots of [`GameState::players`]).
@@ -103,9 +103,16 @@ pub mod dmg {
     /// freeze, drown, burn, slow burn, nerve gas, radiation, shock). Verified in
     /// `FWGS/hlsdk-portable dlls/cbase.h:629` and `ReGameDLL_CS regamedll/dlls/player.cpp:7808`
     /// (read 2026-11-25).
-    pub const SHOWNHUD: u32 =
-        (1 << 17) | (1 << 20) | (1 << 4) | (1 << 22) | (1 << 14) | (1 << 3) | (1 << 21) | (1 << 16)
-            | (1 << 18) | (1 << 8);
+    pub const SHOWNHUD: u32 = (1 << 17)
+        | (1 << 20)
+        | (1 << 4)
+        | (1 << 22)
+        | (1 << 14)
+        | (1 << 3)
+        | (1 << 21)
+        | (1 << 16)
+        | (1 << 18)
+        | (1 << 8);
     /// `DMG_TIMEBASED`: the kinds that last (`FWGS/hlsdk-portable dlls/cbase.h:613` and
     /// `ReGameDLL_CS regamedll/dlls/player.cpp:5045,7824`, read 2026-11-25).
     pub const TIMEBASED: u32 = !0x3fff & 0x7fff_ffff;
@@ -455,6 +462,10 @@ pub struct Player {
     pub hud: crate::hud_misc::HudState,
     /// `m_signals`: the zones the player stands in ([`crate::buy`]).
     pub(crate) signals: crate::buy::Signals,
+    /// Zone icon bits last sent to the client via `StatusIcon` (`SIGNAL_*`), kept separate from
+    /// `signals.state()` so tick-0 spawn `SIGNAL_BUY` enables instant buying without duplicating
+    /// or dropping the HUD icon.
+    pub(crate) shown_zone_signals: u8,
     /// `m_tmHandleSignals`: server time `HandleSignals` runs next.
     pub(crate) next_handle_signals: f64,
     /// `m_bHasC4`: the player carries the bomb.
@@ -630,6 +641,7 @@ impl Player {
             night_vision_on: false,
             hud: Default::default(),
             signals: Default::default(),
+            shown_zone_signals: 0,
             next_handle_signals: 0.0,
             has_c4: false,
             has_defuser: false,
@@ -691,7 +703,14 @@ impl Player {
     /// `CBasePlayer::Blind(duration, holdTime, fadeTime, alpha)` (`player.cpp` 8257, read
     /// 2026-11-22): remembers the flash that hit the player, `now` being `gpGlobals->time`. (The
     /// `m_RadiusFlash` hook chain of `REGAMEDLL_API` has no default but this.)
-    pub(crate) fn blind(&mut self, now: f32, duration: f32, hold_time: f32, fade_time: f32, alpha: i32) {
+    pub(crate) fn blind(
+        &mut self,
+        now: f32,
+        duration: f32,
+        hold_time: f32,
+        fade_time: f32,
+        alpha: i32,
+    ) {
         self.blind_until_time = now + duration;
         self.blind_start_time = now;
         self.blind_hold_time = hold_time;
@@ -991,11 +1010,12 @@ pub(crate) fn put_in_server(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8
     eng.set_model(id, "models/player.mdl");
     // The end of `ClientPutInServer` (client.cpp:735-749, read 2026-11-22): everyone is told the
     // player connected, `%` of the name made a space (the text is a format string).
-    let name = eng
-        .client_key(slot, "name")
-        .unwrap_or("")
-        .replace('%', " ");
-    let name = if name.is_empty() { "<unconnected>" } else { name.as_str() };
+    let name = eng.client_key(slot, "name").unwrap_or("").replace('%', " ");
+    let name = if name.is_empty() {
+        "<unconnected>"
+    } else {
+        name.as_str()
+    };
     menus::print_all_notify(eng, "#Game_connected", name);
 }
 
@@ -1195,6 +1215,8 @@ pub(crate) fn spawn(
     p.on_spawn_hud_extras(time as f32);
     observer::on_spawn(p);
     // `m_tmHandleSignals = 0`: the zones are looked at again with the first client data update.
+    p.signals = Default::default();
+    p.shown_zone_signals = 0;
     p.next_handle_signals = 0.0;
     // `Spawn` (player.cpp 5838, 5863, 5870, read 2026-11-23): no bomb, no bomb site, not escaped.
     p.cur_bomb_target = None;
@@ -1219,7 +1241,11 @@ pub(crate) fn spawn(
     p.next_attack = 0.0;
     // `Spawn` (player.cpp 5841-5843): a player without a shield has `HITGROUP_SHIELD_DISABLED`
     // (1) in `gamestate`, so the engine's studio traces skip the shield's hit box.
-    let shield_state = if p.owns_shield { HITGROUP_SHIELD_ENABLED } else { HITGROUP_SHIELD_DISABLED };
+    let shield_state = if p.owns_shield {
+        HITGROUP_SHIELD_ENABLED
+    } else {
+        HITGROUP_SHIELD_DISABLED
+    };
     let body = if is_vip { 0 } else { u8::from(p.has_defuser) };
 
     if eng.ent(id).is_some_and(|v| v.modelindex == 0) {
@@ -1277,6 +1303,9 @@ pub(crate) fn spawn(
     }
     eng.set_size(id, HULL_MIN, HULL_MAX);
     eng.set_origin(id, origin);
+    // Populate `SIGNAL_BUY` immediately at tick 0 so instant buy binds (`B-4-2`, `F1`/`autobuy`)
+    // never fail with "not in a buy zone" on the first frame or during `mp_freezetime`.
+    crate::buy::sync_buy_signal_on_spawn(g, eng, slot);
     // `Spawn`: the gait starts over and the sequence is an idle one.
     player_anim::on_spawn(g, eng, slot);
     reset_max_speed(g, eng, slot);
@@ -1354,7 +1383,11 @@ pub(crate) fn spawn(
 pub(crate) fn apply_knife_round_loadout(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     crate::inventory::remove_all_items(g, eng, slot, false);
     let _ = crate::inventory::give_named_item(g, eng, slot, "weapon_knife");
-    if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+    if let Some(p) = g
+        .players
+        .get_mut(usize::from(slot))
+        .and_then(Option::as_mut)
+    {
         p.money = 0;
     }
     messages::money(eng, slot, 0);
@@ -1433,7 +1466,11 @@ pub(crate) fn freeze_max_speed(eng: &mut EngineApi<'_>, slot: u8) {
 /// the player model's backpack bodygroup (`pev->body = 1`), shows the green `defuser` HUD icon,
 /// and sends `ItemStatus`. (Vanilla does not call `SetScoreboardAttributes` here.)
 pub(crate) fn give_defuser(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
-    let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) else {
+    let Some(p) = g
+        .players
+        .get_mut(usize::from(slot))
+        .and_then(Option::as_mut)
+    else {
         return;
     };
     p.has_defuser = true;
@@ -1457,7 +1494,11 @@ pub(crate) fn give_defuser(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8)
 /// resets `pev->body`, hides the `defuser` icon, updates `ItemStatus`, and unconditionally clears
 /// the progress bar (`SetProgressBarTime(0)`).
 pub(crate) fn remove_defuser(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
-    let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) else {
+    let Some(p) = g
+        .players
+        .get_mut(usize::from(slot))
+        .and_then(Option::as_mut)
+    else {
         return;
     };
     p.has_defuser = false;
@@ -1486,7 +1527,11 @@ pub(crate) fn make_bomber(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) 
     if !crate::inventory::give_named_item(g, eng, slot, "weapon_c4") {
         return false;
     }
-    if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+    if let Some(p) = g
+        .players
+        .get_mut(usize::from(slot))
+        .and_then(Option::as_mut)
+    {
         p.has_c4 = true;
         p.display_history |= crate::hint::dhf::BOMB_RETRIEVED;
     }
@@ -1509,7 +1554,11 @@ pub(crate) fn set_progress_bar_time(
     time: i32,
 ) {
     let now = eng.time() as f32;
-    if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+    if let Some(p) = g
+        .players
+        .get_mut(usize::from(slot))
+        .and_then(Option::as_mut)
+    {
         if time != 0 {
             p.progress_start = now;
             p.progress_end = time as f32 + now;
@@ -1542,7 +1591,11 @@ pub(crate) fn set_progress_bar_time2(
         time_elapsed = 0.0;
         (0.0, 0.0)
     };
-    if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+    if let Some(p) = g
+        .players
+        .get_mut(usize::from(slot))
+        .and_then(Option::as_mut)
+    {
         p.progress_start = start;
         p.progress_end = end;
     }
@@ -1583,7 +1636,11 @@ pub fn fall_damage(fall_velocity: f32) -> f32 {
 fn finite_cmd(cmd: &GoldSrcUserCmd) -> GoldSrcUserCmd {
     let f = |x: f32| if x.is_finite() { x } else { 0.0 };
     GoldSrcUserCmd {
-        viewangles: Vec3::new(f(cmd.viewangles.x), f(cmd.viewangles.y), f(cmd.viewangles.z)),
+        viewangles: Vec3::new(
+            f(cmd.viewangles.x),
+            f(cmd.viewangles.y),
+            f(cmd.viewangles.z),
+        ),
         forwardmove: f(cmd.forwardmove),
         sidemove: f(cmd.sidemove),
         upmove: f(cmd.upmove),
@@ -1830,14 +1887,31 @@ fn water_move(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     if waterlevel != 3 {
         // Not underwater: play 'up for air' sound.
         if air_finished < time {
-            eng.emit_sound(id, CHAN_VOICE, "player/pl_wade1.wav", 1.0, ATTN_NORM, PITCH_NORM);
+            eng.emit_sound(
+                id,
+                CHAN_VOICE,
+                "player/pl_wade1.wav",
+                1.0,
+                ATTN_NORM,
+                PITCH_NORM,
+            );
         } else if air_finished < time + 9.0 {
-            eng.emit_sound(id, CHAN_VOICE, "player/pl_wade2.wav", 1.0, ATTN_NORM, PITCH_NORM);
+            eng.emit_sound(
+                id,
+                CHAN_VOICE,
+                "player/pl_wade2.wav",
+                1.0,
+                ATTN_NORM,
+                PITCH_NORM,
+            );
         }
         air_finished = time + AIRTIME as f32;
         pev_dmg = 2.0;
         // If we took drowning damage, give it back slowly.
-        if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut)
+        if let Some(p) = g
+            .players
+            .get_mut(usize::from(slot))
+            .and_then(Option::as_mut)
             && p.drown_dmg > p.drown_restored
         {
             p.time_based_damage[ITBD_DROWN_RECOVER] = 0;
@@ -1846,7 +1920,11 @@ fn water_move(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
         }
     } else {
         // Fully under water: stop restoring damage while underwater.
-        if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+        if let Some(p) = g
+            .players
+            .get_mut(usize::from(slot))
+            .and_then(Option::as_mut)
+        {
             p.time_based_damage[ITBD_DROWN_RECOVER] = 0;
             p.damage_bits &= !dmg::DROWNRECOVER;
         }
@@ -1861,11 +1939,19 @@ fn water_move(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
                 take_damage(g, eng, slot, None, None, pev_dmg, dmg::DROWN);
                 pain_finished = time + 1.0;
                 // Track drowning damage, give it back when the player finally takes a breath.
-                if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+                if let Some(p) = g
+                    .players
+                    .get_mut(usize::from(slot))
+                    .and_then(Option::as_mut)
+                {
                     p.drown_dmg += pev_dmg as i32;
                 }
             }
-        } else if let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) {
+        } else if let Some(p) = g
+            .players
+            .get_mut(usize::from(slot))
+            .and_then(Option::as_mut)
+        {
             p.damage_bits &= !(dmg::DROWNRECOVER | dmg::DROWN);
         }
     }
@@ -1897,13 +1983,29 @@ fn water_move(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     if watertype == CONTENT_LAVA {
         // Do damage.
         if dmgtime < time {
-            take_damage(g, eng, slot, None, None, f32::from(waterlevel as u8) * 10.0, dmg::BURN);
+            take_damage(
+                g,
+                eng,
+                slot,
+                None,
+                None,
+                f32::from(waterlevel as u8) * 10.0,
+                dmg::BURN,
+            );
         }
     } else if watertype == CONTENT_SLIME {
         if let Some(v) = eng.ent_mut(id) {
             v.dmgtime = time + 1.0;
         }
-        take_damage(g, eng, slot, None, None, f32::from(waterlevel as u8) * 4.0, dmg::ACID);
+        take_damage(
+            g,
+            eng,
+            slot,
+            None,
+            None,
+            f32::from(waterlevel as u8) * 4.0,
+            dmg::ACID,
+        );
     }
     if flags & FL_INWATER == 0
         && let Some(v) = eng.ent_mut(id)
@@ -1916,8 +2018,18 @@ fn water_move(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
 /// `CBasePlayer::TakeHealth` (`CBaseMonster::TakeHealth` and `CBaseEntity::TakeHealth`,
 /// basemonster.cpp and cbase.cpp, read 2026-11-22) up to `max_health`, which is 100 for a player
 /// (assumption: the edict keeps none). Returns whether anything was given.
-fn take_health(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, health: f32, bits: u32) -> bool {
-    let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) else {
+fn take_health(
+    g: &mut GameState,
+    eng: &mut EngineApi<'_>,
+    slot: u8,
+    health: f32,
+    bits: u32,
+) -> bool {
+    let Some(p) = g
+        .players
+        .get_mut(usize::from(slot))
+        .and_then(Option::as_mut)
+    else {
         return false;
     };
     if !p.takes_damage {
@@ -1945,7 +2057,11 @@ fn take_health(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8, health: f32
 /// difference to whole seconds first.
 fn check_time_based_damage(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let time = eng.time() as f32;
-    let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) else {
+    let Some(p) = g
+        .players
+        .get_mut(usize::from(slot))
+        .and_then(Option::as_mut)
+    else {
         return;
     };
     if p.damage_bits & dmg::TIMEBASED == 0 {
@@ -1956,7 +2072,11 @@ fn check_time_based_damage(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8)
     }
     p.tbd_prev = time;
     for i in 0..ITBD_END {
-        let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) else {
+        let Some(p) = g
+            .players
+            .get_mut(usize::from(slot))
+            .and_then(Option::as_mut)
+        else {
             return;
         };
         if p.damage_bits & (dmg::PARALYZE << i) == 0 {
@@ -1999,7 +2119,11 @@ fn weapon_player_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let game_over = g.rules.game_over();
     let freeze = g.rules.is_freeze_period();
     let id = eng.client_edict(slot);
-    let Some(p) = g.players.get_mut(usize::from(slot)).and_then(Option::as_mut) else {
+    let Some(p) = g
+        .players
+        .get_mut(usize::from(slot))
+        .and_then(Option::as_mut)
+    else {
         return;
     };
     if game_over {
@@ -2013,9 +2137,12 @@ fn weapon_player_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     if !p.can_shoot && !freeze {
         p.can_shoot = true;
     }
-    let shield_drawn = p.active_item.and_then(|a| p.find_item(a)).is_some_and(|(s, i)| {
-        p.items[s][i].weapon.weapon_state & crate::weapons::WPNSTATE_SHIELD_DRAWN != 0
-    });
+    let shield_drawn = p
+        .active_item
+        .and_then(|a| p.find_item(a))
+        .is_some_and(|(s, i)| {
+            p.items[s][i].weapon.weapon_state & crate::weapons::WPNSTATE_SHIELD_DRAWN != 0
+        });
     if shield_drawn {
         p.can_shoot = false;
     }
@@ -2082,13 +2209,27 @@ pub(crate) fn player_use(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let Some(object) = closest else {
         if pressed & IN_USE != 0 {
             // `UseEmpty`.
-            eng.emit_sound(id, CHAN_ITEM, "common/wpn_denyselect.wav", 0.4, ATTN_NORM, PITCH_NORM);
+            eng.emit_sound(
+                id,
+                CHAN_ITEM,
+                "common/wpn_denyselect.wav",
+                0.4,
+                ATTN_NORM,
+                PITCH_NORM,
+            );
         }
         return;
     };
     let caps = crate::entity::object_caps_of(eng, object);
     if pressed & IN_USE != 0 {
-        eng.emit_sound(id, CHAN_ITEM, "common/wpn_select.wav", 0.4, ATTN_NORM, PITCH_NORM);
+        eng.emit_sound(
+            id,
+            CHAN_ITEM,
+            "common/wpn_select.wav",
+            0.4,
+            ATTN_NORM,
+            PITCH_NORM,
+        );
     }
     if (button & IN_USE != 0 && caps & FCAP_CONTINUOUS_USE != 0)
         || (pressed & IN_USE != 0 && caps & (FCAP_IMPULSE_USE | FCAP_ONOFF_USE) != 0)
@@ -2181,7 +2322,10 @@ fn post_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
                 }
             }
         }
-        if g.players[usize::from(slot)].as_ref().is_some_and(|p| p.alive) {
+        if g.players[usize::from(slot)]
+            .as_ref()
+            .is_some_and(|p| p.alive)
+        {
             player_anim::set_animation(g, eng, slot, PlayerAnim::Walk);
         }
     }
@@ -2191,7 +2335,9 @@ fn post_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
         p.fall_velocity = 0.0;
     }
     // "Select the proper animation for the player character."
-    if g.players[usize::from(slot)].as_ref().is_some_and(|p| p.alive)
+    if g.players[usize::from(slot)]
+        .as_ref()
+        .is_some_and(|p| p.alive)
         && let Some(v) = eng.ent(id)
     {
         let (moving, on_ground, waterlevel, gait) = (
@@ -2365,9 +2511,13 @@ pub(crate) fn trace_attack(
     let hit_group = tr.trace.hitgroup;
     let attacker_slot = attacker.and_then(|a| player_slot(g, eng, a));
     let friendly_fire = eng.cvar_f32("mp_friendlyfire") != 0.0;
-    let attacker_team = attacker_slot.and_then(|a| g.players[a].as_ref()).map(|p| p.team);
+    let attacker_team = attacker_slot
+        .and_then(|a| g.players[a].as_ref())
+        .map(|p| p.team);
     let hit_shield = is_hitting_shield(g, eng, slot, dir, tr);
-    let Some(p) = g.players[slot].as_mut() else { return };
+    let Some(p) = g.players[slot].as_mut() else {
+        return;
+    };
     let mut should_bleed = true;
     let mut should_spark = false;
     if attacker_team == Some(p.team) && !friendly_fire {
@@ -2478,7 +2628,9 @@ fn monster_take_damage(
 ) -> bool {
     let index = usize::from(slot);
     let id = eng.client_edict(slot);
-    let Some(p) = g.players[index].as_ref() else { return false };
+    let Some(p) = g.players[index].as_ref() else {
+        return false;
+    };
     if !p.takes_damage {
         return false;
     }
@@ -2486,7 +2638,9 @@ fn monster_take_damage(
     let attacker_slot = attacker
         .and_then(|a| player_slot(g, eng, a))
         .map(|s| s as u8);
-    let Some(p) = g.players[index].as_mut() else { return false };
+    let Some(p) = g.players[index].as_mut() else {
+        return false;
+    };
     let before_hp = p.health.max(0.0);
     p.health -= damage;
     let _ = before_hp;
@@ -2551,7 +2705,9 @@ pub(crate) fn take_damage(
     let weapon = attacker
         .and_then(|a| player_slot(g, eng, a))
         .and_then(|a| active_weapon_id(g, a));
-    take_damage_with(g, eng, slot, inflictor, None, attacker, weapon, damage, bits)
+    take_damage_with(
+        g, eng, slot, inflictor, None, attacker, weapon, damage, bits,
+    )
 }
 
 /// `TakeDamage` for the damage of a grenade of team `inflictor_team` (`m_iTeam`), whose attacker
@@ -2570,7 +2726,17 @@ pub(crate) fn take_damage_from_grenade(
     let weapon = attacker
         .and_then(|a| player_slot(g, eng, a))
         .and_then(|a| active_weapon_id(g, a));
-    take_damage_with(g, eng, slot, inflictor, inflictor_team, attacker, weapon, damage, bits)
+    take_damage_with(
+        g,
+        eng,
+        slot,
+        inflictor,
+        inflictor_team,
+        attacker,
+        weapon,
+        damage,
+        bits,
+    )
 }
 
 /// `CBasePlayer::TakeDamage` (ReGameDLL `player.cpp:909-1380`, read 2026-11-22) then
@@ -2715,7 +2881,9 @@ pub(crate) fn take_damage_with(
         if let Some(i) = inflictor {
             let origin = eng.ent(id).map(|v| v.origin);
             let inflictor_origin = eng.ent(i).map(|v| v.origin);
-            if let (Some(o), Some(io), Some(p)) = (origin, inflictor_origin, g.players[index].as_mut()) {
+            if let (Some(o), Some(io), Some(p)) =
+                (origin, inflictor_origin, g.players[index].as_mut())
+            {
                 p.blast_vector = o - io;
             }
         }
@@ -2773,7 +2941,10 @@ pub(crate) fn take_damage_with(
     }
 
     // `FPlayerCanTakeDamage`; a grenade's damage is never refused here.
-    if attacker_slot.is_some() && teammate && attacker_slot != Some(index) && !friendly_fire
+    if attacker_slot.is_some()
+        && teammate
+        && attacker_slot != Some(index)
+        && !friendly_fire
         && !inflictor_is_grenade
     {
         return false;
@@ -2800,7 +2971,9 @@ pub(crate) fn take_damage_with(
             // `flRatio += flShieldRatio` (0 without a shield), then the weapon's multiplier.
             ratio = weapon_armor_ratio(w, ratio);
         }
-        let hit_group = g.players[index].as_ref().map_or(HITGROUP_GENERIC, |p| p.last_hit_group);
+        let hit_group = g.players[index]
+            .as_ref()
+            .map_or(HITGROUP_GENERIC, |p| p.last_hit_group);
         let ducking = eng.ent(id).is_some_and(|v| v.flags & FL_DUCKING != 0);
         let attacker_origin = eng.ent(eng.client_edict(a as u8)).map(|v| v.origin);
         let victim_vars = eng.ent(id).map(|v| (v.origin, v.velocity));
@@ -2810,7 +2983,11 @@ pub(crate) fn take_damage_with(
         let flinch = if !should_do_large_flinch(ducking, hit_group, attacker_weapon) {
             // `TakeDamageImpulse(pAttack, 0.0f, 0.5f)`.
             p.velocity_modifier = 0.5;
-            p.high_damage = if hit_group == HITGROUP_HEAD { damage > 60.0 } else { damage > 20.0 };
+            p.high_damage = if hit_group == HITGROUP_HEAD {
+                damage > 60.0
+            } else {
+                damage > 20.0
+            };
             PlayerAnim::Flinch
         } else {
             if let (Some((origin, velocity)), Some(ao)) = (victim_vars, attacker_origin)
@@ -3024,10 +3201,12 @@ pub(crate) fn disappear(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     messages::set_fov(eng, slot, 0);
     rules::check_win_conditions(g, eng);
     let (has_c4, has_defuser, owns_shield) =
-        g.players[index].as_mut().map_or((false, false, false), |p| {
-            p.not_killed = false;
-            (p.has_c4, p.has_defuser, p.owns_shield)
-        });
+        g.players[index]
+            .as_mut()
+            .map_or((false, false, false), |p| {
+                p.not_killed = false;
+                (p.has_c4, p.has_defuser, p.owns_shield)
+            });
     if owns_shield {
         crate::inventory::drop_shield(g, eng, slot, false);
     }
@@ -3080,10 +3259,11 @@ fn killed(
     let weapon_name = score::killer_weapon_name(eng, inflictor, attacker, attacker_weapon);
     let (hitgroup, victim_team) = g.players[index]
         .as_ref()
-        .map_or((HITGROUP_GENERIC, Team::Unassigned), |p| (p.last_hit_group, p.team));
-    let team_kill = killer_slot.is_some_and(|k| {
-        k != index && g.players[k].as_ref().map(|p| p.team) == Some(victim_team)
-    });
+        .map_or((HITGROUP_GENERIC, Team::Unassigned), |p| {
+            (p.last_hit_group, p.team)
+        });
+    let team_kill = killer_slot
+        .is_some_and(|k| k != index && g.players[k].as_ref().map(|p| p.team) == Some(victim_team));
     let mut kill_ctx = cs_mod_api::PlayerKilledCtx {
         victim: slot,
         killer: killer_slot.map(|k| k as u8),
@@ -3111,7 +3291,7 @@ fn killed(
     if !killed_by_bomb {
         score::player_killed(g, eng, slot, attacker, inflictor, attacker_weapon);
     }
-    crate::bots::on_player_killed(g, eng, slot);
+    crate::bots::on_player_killed(g, eng, slot, killer_slot.map(|k| k as u8));
     // `NVGToggle 0` to the player and to the observers that watch it in first person.
     observer::killed_night_vision(g, eng, slot);
     // `SetAnimation(PLAYER_DIE)` (player.cpp:2360): the death sequence, and (vanilla) a first
@@ -3163,10 +3343,12 @@ fn killed(
     // A team may be out of players now (`CheckWinConditions` of `Killed`).
     rules::check_win_conditions(g, eng);
     let (has_c4, has_defuser, owns_shield) =
-        g.players[index].as_mut().map_or((false, false, false), |p| {
-            p.not_killed = false;
-            (p.has_c4, p.has_defuser, p.owns_shield)
-        });
+        g.players[index]
+            .as_mut()
+            .map_or((false, false, false), |p| {
+                p.not_killed = false;
+                (p.has_c4, p.has_defuser, p.owns_shield)
+            });
     if owns_shield {
         crate::inventory::drop_shield(g, eng, slot, false);
     }
@@ -3234,7 +3416,11 @@ pub(crate) fn print_round_damage_summary(g: &mut GameState, eng: &mut EngineApi<
             .unwrap_or("Player");
         let g_word = if given.hits == 1 { "hit" } else { "hits" };
         let t_word = if taken.hits == 1 { "hit" } else { "hits" };
-        let hs = if taken.headshots > 0 { " (headshot)" } else { "" };
+        let hs = if taken.headshots > 0 {
+            " (headshot)"
+        } else {
+            ""
+        };
         let line = format!(
             "* [cs16-rs] Damage Given to \"{name}\" - {} in {} {g_word} | Damage Taken - {} in {} {t_word}{hs}\n",
             given.damage, given.hits, taken.damage, taken.hits
@@ -3352,7 +3538,10 @@ fn throw_grenade_on_death(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) 
         return;
     };
     let Some(weapon) = p.active_item.filter(|w| {
-        matches!(w, WeaponId::HeGrenade | WeaponId::Flashbang | WeaponId::SmokeGrenade)
+        matches!(
+            w,
+            WeaponId::HeGrenade | WeaponId::Flashbang | WeaponId::SmokeGrenade
+        )
     }) else {
         return;
     };
@@ -3360,7 +3549,10 @@ fn throw_grenade_on_death(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) 
         .active_item
         .and_then(|w| p.find_item(w))
         .map_or(-1, |(s, i)| p.items[s][i].weapon.primary_ammo_type);
-    let has_ammo = usize::try_from(ammo_type).ok().and_then(|i| p.ammo.get(i)).is_some_and(|&a| a != 0);
+    let has_ammo = usize::try_from(ammo_type)
+        .ok()
+        .and_then(|i| p.ammo.get(i))
+        .is_some_and(|&a| a != 0);
     let Some(v) = eng.ent(id) else {
         return;
     };
@@ -3392,7 +3584,10 @@ fn throw_grenade_on_death(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) 
 /// branch, so the think ends when the body is animating, or a button is held, or the player has
 /// no team; a live player (respawned meanwhile) is left alone.
 pub(crate) fn death_think_entity(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
-    if eng.ent(eng.client_edict(slot)).is_some_and(|v| v.deadflag != DEAD_NO) {
+    if eng
+        .ent(eng.client_edict(slot))
+        .is_some_and(|v| v.deadflag != DEAD_NO)
+    {
         death_think(g, eng, slot);
     }
 }
@@ -3429,7 +3624,9 @@ fn death_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     let animating = modelindex != 0
         && dying
         && eng.studio_model(modelindex).is_some()
-        && g.players[usize::from(slot)].as_ref().is_some_and(|p| !p.anim.sequence_finished);
+        && g.players[usize::from(slot)]
+            .as_ref()
+            .is_some_and(|p| !p.anim.sequence_finished);
     if animating {
         player_anim::studio_frame_advance(g, eng, slot);
         return;
@@ -3452,7 +3649,10 @@ fn death_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     v.framerate = 0.0;
     v.effects |= EF_NOINTERP;
     // A player dead for `DEATH_ANIMATION_TIME` leaves a corpse and goes to the death camera.
-    if v.deadflag != DEAD_RESPAWNABLE && !p.pflag_observer && now > p.dead_time + DEATH_ANIMATION_TIME {
+    if v.deadflag != DEAD_RESPAWNABLE
+        && !p.pflag_observer
+        && now > p.dead_time + DEATH_ANIMATION_TIME
+    {
         let origin = [
             (v.origin.x * 128.0) as i32,
             (v.origin.y * 128.0) as i32,
@@ -3482,7 +3682,9 @@ fn death_think(g: &mut GameState, eng: &mut EngineApi<'_>, slot: u8) {
     // in a tenth of a second (`pev->nextthink = gpGlobals->time + 0.1f`).
     let warmup = eng.cvar_f32("mp_warmup_mode") != 0.0;
     let team = g.players[usize::from(slot)].as_ref().map(|p| p.team);
-    let dead_time = g.players[usize::from(slot)].as_ref().map_or(0.0, |p| p.dead_time);
+    let dead_time = g.players[usize::from(slot)]
+        .as_ref()
+        .map_or(0.0, |p| p.dead_time);
     if warmup
         && team.is_some_and(|t| !matches!(t, Team::Unassigned | Team::Spectator))
         && now >= dead_time + 0.5
@@ -3683,10 +3885,7 @@ pub(crate) fn client_command(
     let Some(command) = argv.first() else {
         return;
     };
-    if g.players
-        .get(usize::from(slot))
-        .is_none_or(Option::is_none)
-    {
+    if g.players.get(usize::from(slot)).is_none_or(Option::is_none) {
         return;
     }
     // `kill` is the engine's command, which the engine matches without regard to case.
@@ -3753,7 +3952,10 @@ pub(crate) fn client_command(
             eng.client_print(slot, "Can't use give_all unless sv_cheats is 1\n");
             return;
         }
-        if eng.ent(eng.client_edict(slot)).is_none_or(|v| v.deadflag != DEAD_NO) {
+        if eng
+            .ent(eng.client_edict(slot))
+            .is_none_or(|v| v.deadflag != DEAD_NO)
+        {
             return;
         }
         crate::buy::give_armor_item(g, eng, slot, crate::buy::ArmorItem::AssaultSuit);
@@ -3775,7 +3977,10 @@ pub(crate) fn client_command(
             eng.client_print(slot, "Can't use ammo_full unless sv_cheats is 1\n");
             return;
         }
-        if eng.ent(eng.client_edict(slot)).is_none_or(|v| v.deadflag != DEAD_NO) {
+        if eng
+            .ent(eng.client_edict(slot))
+            .is_none_or(|v| v.deadflag != DEAD_NO)
+        {
             return;
         }
         refill_player_ammo(g, eng, slot);

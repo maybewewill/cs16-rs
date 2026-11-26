@@ -71,7 +71,14 @@ impl WeaponBehavior for C4 {
         self.started_arming = false;
         self.armed_time = 0.0;
         w.weapon.max_speed = C4_MAX_SPEED;
-        w.default_deploy(self, "models/v_c4.mdl", "models/p_c4.mdl", C4_DRAW, "c4", true)
+        w.default_deploy(
+            self,
+            "models/v_c4.mdl",
+            "models/p_c4.mdl",
+            C4_DRAW,
+            "c4",
+            true,
+        )
     }
 
     fn holster(&mut self, w: &mut WeaponCtx<'_, '_>) {
@@ -96,12 +103,24 @@ impl WeaponBehavior for C4 {
 
         if !self.started_arming {
             if !in_bomb_zone {
-                client_print(w.eng, w.slot, HUD_PRINTCENTER, "#C4_Plant_At_Bomb_Spot", &[]);
+                client_print(
+                    w.eng,
+                    w.slot,
+                    HUD_PRINTCENTER,
+                    "#C4_Plant_At_Bomb_Spot",
+                    &[],
+                );
                 w.weapon.next_primary_attack = w.get_next_attack_delay(1.0);
                 return;
             }
             if !on_ground {
-                client_print(w.eng, w.slot, HUD_PRINTCENTER, "#C4_Plant_Must_Be_On_Ground", &[]);
+                client_print(
+                    w.eng,
+                    w.slot,
+                    HUD_PRINTCENTER,
+                    "#C4_Plant_Must_Be_On_Ground",
+                    &[],
+                );
                 w.weapon.next_primary_attack = w.get_next_attack_delay(1.0);
                 return;
             }
@@ -125,6 +144,14 @@ impl WeaponBehavior for C4 {
             crate::player::freeze_max_speed(w.eng, w.slot);
             w.set_animation(PlayerAnim::Attack1);
             crate::player::set_progress_bar_time(w.g, w.eng, w.slot, C4_ARMING_ON_TIME as i32);
+            crate::bots::emit_sound_event(
+                w.g,
+                Some(w.slot),
+                Some(crate::player::Team::Terrorist),
+                origin,
+                cs_bot::tactics::SoundKind::BombPlanting,
+                w.eng.time(),
+            );
             let _ = crate::mod_hooks::fire_hook(w.g, w.eng, |sink, g, eng| {
                 sink.on_bomb_planting(g, eng, cs_mod_api::HookPhase::Post, &mut plant_ctx)
             });
@@ -155,8 +182,9 @@ impl WeaponBehavior for C4 {
                 // Vanilla (`!REGAMEDLL_FIXES`): planted bomb angles are zero.
                 let bomb_id =
                     crate::grenade::shoot_satchel_charge(w.g, w.eng, id, origin, Vec3::ZERO);
-                let bomb_origin =
-                    bomb_id.and_then(|b| w.eng.ent(b)).map_or(origin, |v| v.origin);
+                let bomb_origin = bomb_id
+                    .and_then(|b| w.eng.ent(b))
+                    .map_or(origin, |v| v.origin);
                 planted_ctx.origin = bomb_origin.to_array();
 
                 w.eng.send_usermsg(
@@ -168,7 +196,8 @@ impl WeaponBehavior for C4 {
                 );
                 crate::menus::print_center_all(w.eng, "#Bomb_Planted");
                 crate::rules::on_bomb_planted(w.g, w.eng);
-                w.eng.emit_stat_event(cs_engine::GameStatEvent::BombPlant { slot: w.slot });
+                w.eng
+                    .emit_stat_event(cs_engine::GameStatEvent::BombPlant { slot: w.slot });
                 let _ = crate::mod_hooks::fire_hook(w.g, w.eng, |sink, g, eng| {
                     sink.on_bomb_planted(g, eng, cs_mod_api::HookPhase::Post, &mut planted_ctx)
                 });
@@ -209,7 +238,11 @@ impl WeaponBehavior for C4 {
             w.reset_max_speed(self);
             crate::player::set_progress_bar_time(w.g, w.eng, w.slot, 0);
             w.set_animation(PlayerAnim::HoldBomb);
-            let anim = if self.bomb_placed_animation { C4_DRAW } else { C4_IDLE1 };
+            let anim = if self.bomb_placed_animation {
+                C4_DRAW
+            } else {
+                C4_IDLE1
+            };
             w.send_weapon_anim(anim, true);
             return;
         }
@@ -224,7 +257,11 @@ impl WeaponBehavior for C4 {
             w.reset_max_speed(self);
             w.weapon.next_primary_attack = w.get_next_attack_delay(1.0);
             crate::player::set_progress_bar_time(w.g, w.eng, w.slot, 0);
-            let anim = if self.bomb_placed_animation { C4_DRAW } else { C4_IDLE1 };
+            let anim = if self.bomb_placed_animation {
+                C4_DRAW
+            } else {
+                C4_IDLE1
+            };
             w.send_weapon_anim(anim, true);
         }
 

@@ -140,12 +140,7 @@ pub(crate) fn link_user_messages() -> UserMsgRegistry {
 /// Sends the message `name` of [`USER_MESSAGES`] with `payload` as its bytes. `false`, nothing
 /// sent, for a name that is not registered, a payload of the wrong size for a fixed-size
 /// message, or one over 255 bytes for a variable one.
-pub(crate) fn send_raw(
-    eng: &mut EngineApi<'_>,
-    dest: MsgDest,
-    name: &str,
-    payload: &[u8],
-) -> bool {
+pub(crate) fn send_raw(eng: &mut EngineApi<'_>, dest: MsgDest, name: &str, payload: &[u8]) -> bool {
     let Some(i) = USER_MESSAGES.iter().position(|&(n, _)| n == name) else {
         return false;
     };
@@ -312,9 +307,8 @@ pub(crate) fn screen_shake(
     duration: f32,
     frequency: f32,
 ) {
-    let fixed = |v: f32| -> [u8; 2] {
-        ((v * 4096.0).round().clamp(0.0, 65535.0) as u16).to_le_bytes()
-    };
+    let fixed =
+        |v: f32| -> [u8; 2] { ((v * 4096.0).round().clamp(0.0, 65535.0) as u16).to_le_bytes() };
     let mut payload = [0u8; 6];
     payload[0..2].copy_from_slice(&fixed(amplitude));
     payload[2..4].copy_from_slice(&fixed(duration));
@@ -331,9 +325,8 @@ pub(crate) fn screen_fade(
     flags: u16,
     color: [u8; 4],
 ) {
-    let fixed = |v: f32| -> [u8; 2] {
-        ((v * 4096.0).round().clamp(0.0, 65535.0) as u16).to_le_bytes()
-    };
+    let fixed =
+        |v: f32| -> [u8; 2] { ((v * 4096.0).round().clamp(0.0, 65535.0) as u16).to_le_bytes() };
     let mut payload = [0u8; 10];
     payload[0..2].copy_from_slice(&fixed(duration));
     payload[2..4].copy_from_slice(&fixed(hold_time));
@@ -443,13 +436,21 @@ pub(crate) fn observer_eligible_for(
     obs_slot: u8,
     subject_slot: u8,
 ) -> bool {
-    let Some(subject) = g.players.get(usize::from(subject_slot)).and_then(Option::as_ref) else {
+    let Some(subject) = g
+        .players
+        .get(usize::from(subject_slot))
+        .and_then(Option::as_ref)
+    else {
         return false;
     };
     if !matches!(subject.team, Team::Ct | Team::Terrorist) {
         return false;
     }
-    let Some(obs) = g.players.get(usize::from(obs_slot)).and_then(Option::as_ref) else {
+    let Some(obs) = g
+        .players
+        .get(usize::from(obs_slot))
+        .and_then(Option::as_ref)
+    else {
         return false;
     };
     let Some(obs_ent) = eng.ent(eng.client_edict(obs_slot)) else {
@@ -483,7 +484,11 @@ fn broadcast_observer_usermsg(
     subject_slot: u8,
     msg: &CsUserMsg,
 ) {
-    let Some(subject) = g.players.get(usize::from(subject_slot)).and_then(Option::as_ref) else {
+    let Some(subject) = g
+        .players
+        .get(usize::from(subject_slot))
+        .and_then(Option::as_ref)
+    else {
         return;
     };
     if !matches!(subject.team, Team::Ct | Team::Terrorist) {
@@ -707,7 +712,10 @@ fn init_hud(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) {
     send_raw(eng, MsgDest::One(slot), "ForceCam", &force_cam);
     // A player that enters while the scoreboard is up sees it too.
     if g.rules.game_over() {
-        eng.send(MsgDest::One(slot), &[cs_proto48::messages::svc::INTERMISSION]);
+        eng.send(
+            MsgDest::One(slot),
+            &[cs_proto48::messages::svc::INTERMISSION],
+        );
     }
 
     for (i, other) in g.players.iter().enumerate() {
@@ -718,7 +726,9 @@ fn init_hud(g: &GameState, eng: &mut EngineApi<'_>, slot: u8) {
         if i != usize::from(slot) && other.alive {
             // Vanilla sends every living player's position, teammate or not
             // (`BUILD_LATEST_FIXES` limits it to the team).
-            let origin = eng.ent(eng.client_edict(i as u8)).map_or(Vec3::ZERO, |v| v.origin);
+            let origin = eng
+                .ent(eng.client_edict(i as u8))
+                .map_or(Vec3::ZERO, |v| v.origin);
             radar(eng, slot, index, origin);
         }
     }
@@ -790,8 +800,16 @@ pub(crate) fn update_client_data(g: &mut GameState, eng: &mut EngineApi<'_>, slo
         // `m_fInitHUD = FALSE; gInitHUD = FALSE;`
         g.init_hud_global = false;
         // Vanilla (`m_signals.Update()`): the zones the player touched count as the ones it
-        // stands in, with no icon message for the change.
-        p.signals.update();
+        // stands in, with no icon message for the change. Preserve `SIGNAL_BUY` geometrically so
+        // tick-0 buying stays armed until `handle_signals_when_due` emits the `buyzone` icon.
+        let in_buy_now = crate::buy::is_in_buy_zone_now(g, eng, slot);
+        if let Some(p) = g.players.get_mut(index).and_then(Option::as_mut) {
+            if in_buy_now {
+                p.signals.signal(crate::buy::SIGNAL_BUY);
+            }
+            p.signals.update();
+            p.shown_zone_signals = p.signals.state() & !crate::buy::SIGNAL_BUY;
+        }
         eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::ResetHud);
         if first_entry {
             eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::InitHud);
@@ -866,7 +884,10 @@ pub(crate) fn update_client_data(g: &mut GameState, eng: &mut EngineApi<'_>, slo
     };
     if p.armor as i32 != p.client_battery {
         p.client_battery = p.armor as i32;
-        eng.send_usermsg(MsgDest::One(slot), &CsUserMsg::Battery(clamp_i16(p.client_battery)));
+        eng.send_usermsg(
+            MsgDest::One(slot),
+            &CsUserMsg::Battery(clamp_i16(p.client_battery)),
+        );
     }
     if p.dmg_take != 0.0 || p.hud_damage != p.damage_bits as i32 {
         // Damage comes from inside the player if nothing is known to have caused it; a fall
