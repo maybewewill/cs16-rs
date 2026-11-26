@@ -966,29 +966,54 @@ fn build_rust_wasm(dir: &Path, out_wasm: &Path, repo_root: &Path) -> Result<Vec<
 }
 
 fn build_go_wasm(dir: &Path, out_wasm: &Path) -> Result<Vec<u8>, String> {
+    let tmp_name = ".cs16_go_tmp.wasm";
+    let tmp_path = dir.join(tmp_name);
+    let _ = fs::remove_file(&tmp_path);
+
     let go_res = Command::new("go")
         .current_dir(dir)
         .env("GOOS", "wasip1")
         .env("GOARCH", "wasm")
-        .args(["build", "-buildmode=c-shared", "-o"])
-        .arg(out_wasm.file_name().unwrap_or_else(|| "server.wasm".as_ref()))
-        .arg(".")
+        .args(["build", "-buildmode=c-shared", "-o", tmp_name, "."])
         .status();
 
     match go_res {
         Ok(st) if st.success() => {
-            let bytes = fs::read(out_wasm).map_err(|e| io_err(out_wasm, &e))?;
-            verify_wasm_bytes(out_wasm, &bytes)?;
+            let bytes = fs::read(&tmp_path).map_err(|e| io_err(&tmp_path, &e));
+            let _ = fs::remove_file(&tmp_path);
+            let bytes = bytes?;
+            verify_wasm_bytes(&tmp_path, &bytes)?;
+            if fs::read(out_wasm).ok().as_deref() != Some(bytes.as_slice()) {
+                let _ = fs::write(out_wasm, &bytes);
+            }
             return Ok(bytes);
         }
         Ok(st) => {
+            let _ = fs::remove_file(&tmp_path);
+            if out_wasm.is_file()
+                && let Ok(bytes) = fs::read(out_wasm)
+                && verify_wasm_bytes(out_wasm, &bytes).is_ok()
+            {
+                eprintln!(
+                    "warning: go build (GOOS=wasip1 GOARCH=wasm) exited with {st} in `{}`; using verified prebuilt `{}`",
+                    dir.display(),
+                    out_wasm.display()
+                );
+                return Ok(bytes);
+            }
             return Err(format!(
-                "go build (GOOS=wasip1 GOARCH=wasm) failed in `{}` with {st}",
-                dir.display()
+                "go build (GOOS=wasip1 GOARCH=wasm) failed in `{}` with {st} and no valid prebuilt `{}` present",
+                dir.display(),
+                out_wasm.display()
             ));
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(format!("failed to execute `go`: {e}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let _ = fs::remove_file(&tmp_path);
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(format!("failed to execute `go`: {e}"));
+        }
     }
 
     // Fallback: verified prebuilt `.wasm` when Go toolchain is not installed.
@@ -1017,7 +1042,19 @@ fn build_cpp_wasm(
         .is_some_and(|e| e.eq_ignore_ascii_case("c"));
     let compiler = if is_c { "clang" } else { "clang++" };
     let std_flag = if is_c { "-std=c99" } else { "-std=c++20" };
-    let include_dir = repo_root.join("sdk").join("cpp");
+
+    let raw_include_dir = repo_root.join("sdk").join("cpp");
+    let include_dir = if raw_include_dir.is_relative() {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&raw_include_dir))
+            .unwrap_or(raw_include_dir)
+    } else {
+        raw_include_dir
+    };
+    let src_rel = src_path.strip_prefix(dir).unwrap_or(src_path);
+    let tmp_name = ".cs16_cpp_tmp.wasm";
+    let tmp_path = dir.join(tmp_name);
+    let _ = fs::remove_file(&tmp_path);
 
     let mut cmd = Command::new(compiler);
     cmd.current_dir(dir)
@@ -1035,23 +1072,46 @@ fn build_cpp_wasm(
     cmd.arg("-I")
         .arg(&include_dir)
         .arg("-o")
-        .arg(out_wasm)
-        .arg(src_path);
+        .arg(tmp_name)
+        .arg(src_rel);
 
     match cmd.status() {
         Ok(st) if st.success() => {
-            let bytes = fs::read(out_wasm).map_err(|e| io_err(out_wasm, &e))?;
-            verify_wasm_bytes(out_wasm, &bytes)?;
+            let bytes = fs::read(&tmp_path).map_err(|e| io_err(&tmp_path, &e));
+            let _ = fs::remove_file(&tmp_path);
+            let bytes = bytes?;
+            verify_wasm_bytes(&tmp_path, &bytes)?;
+            if fs::read(out_wasm).ok().as_deref() != Some(bytes.as_slice()) {
+                let _ = fs::write(out_wasm, &bytes);
+            }
             return Ok(bytes);
         }
         Ok(st) => {
+            let _ = fs::remove_file(&tmp_path);
+            if out_wasm.is_file()
+                && let Ok(bytes) = fs::read(out_wasm)
+                && verify_wasm_bytes(out_wasm, &bytes).is_ok()
+            {
+                eprintln!(
+                    "warning: {compiler} exited with {st} building `{}`; using verified prebuilt `{}`",
+                    src_path.display(),
+                    out_wasm.display()
+                );
+                return Ok(bytes);
+            }
             return Err(format!(
-                "{compiler} failed building `{}` with {st}",
-                src_path.display()
+                "{compiler} failed building `{}` with {st} and no valid prebuilt `{}` present",
+                src_path.display(),
+                out_wasm.display()
             ));
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(format!("failed to invoke `{compiler}`: {e}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let _ = fs::remove_file(&tmp_path);
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(format!("failed to invoke `{compiler}`: {e}"));
+        }
     }
 
     // Fallback: verified prebuilt `.wasm` when Clang is not installed.
@@ -1281,9 +1341,32 @@ mod tests {
         assert_eq!(cpp_built.len(), 1);
         assert!(out.join("cpp_demo.csmod").is_file());
 
-        // Corrupt non-WASM binary is rejected
+        // Corrupt non-WASM binary is rejected deterministically (remove main.cpp so hosts
+        // with a working clang++ --target=wasm32 don't overwrite the corrupt prebuilt file).
+        let _ = fs::remove_file(cpp_dir.join("main.cpp"));
         fs::write(cpp_dir.join("server.wasm"), b"not wasm").unwrap();
         assert!(build_mods_in(&cpp_dir, &out, &root).is_err());
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn build_cpp_mod_from_relative_path_does_not_double_paths() {
+        let tmp = temp_test_dir("cpp_rel");
+        let root = workspace_root();
+        let rel_semiclip = if Path::new("mods/gamemodes/semiclip").is_dir() {
+            Path::new("mods/gamemodes/semiclip")
+        } else {
+            Path::new("../mods/gamemodes/semiclip")
+        };
+        assert!(rel_semiclip.is_relative());
+        assert!(rel_semiclip.is_dir());
+
+        let built = build_mods_in(rel_semiclip, &tmp, &root).unwrap();
+        assert_eq!(built.len(), 1);
+        assert_eq!(built[0].mod_id, "semiclip");
+        assert!(tmp.join("semiclip.csmod").is_file());
+        assert!(!rel_semiclip.join(".cs16_cpp_tmp.wasm").exists());
 
         let _ = fs::remove_dir_all(&tmp);
     }
