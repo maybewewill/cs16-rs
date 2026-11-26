@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -12,9 +14,17 @@ env:
 
 jobs:
   ci:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libasound2-dev libudev-dev cmake libopus-dev
 
       # Same toolchain as rust-toolchain.toml and the declared rust-version.
       - uses: dtolnay/rust-toolchain@master
@@ -34,23 +44,40 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Clippy
+      - name: Clippy (workspace)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Test
+      - name: Clippy (cs-game test-hooks)
+        run: cargo clippy -p cs-game --all-targets --features test-hooks -- -D warnings
+
+      - name: Test (workspace)
         run: cargo test --workspace
 
-      - name: wasm32 check (library crates)
-        run: cargo check --target wasm32-unknown-unknown -p cs-proto48 -p cs-cvar -p cs-assets -p cs-vfs -p cs-pm -p cs-sim -p cs-platform -p cs-transport -p cs-engine -p cs-probe -p cs-clientcore -p cs-game -p cs-local -p cs-mod-api -p cs-mod-host -p cs-mod-sdk
+      - name: wasm32 check (shared library crates)
+        run: >-
+          cargo check --target wasm32-unknown-unknown
+          -p cs-proto48 -p cs-cvar -p cs-assets -p cs-vfs -p cs-pm -p cs-sim
+          -p cs-platform -p cs-transport -p cs-engine -p cs-bot -p cs-probe
+          -p cs-clientcore -p cs-game -p cs-local
+          -p cs-mod-api -p cs-mod-host -p cs-mod-py -p cs-mod-sdk -p cs-amxx
 
-      - name: wasm32 check (cs-relay, cs-client, cs-web)
+      - name: wasm32 check (cs-master, cs-relay, cs-client, cs-web)
+        shell: bash
         run: |
+          cargo check --target wasm32-unknown-unknown -p cs-master --lib
           cargo check --target wasm32-unknown-unknown -p cs-relay --lib
           cargo check --target wasm32-unknown-unknown -p cs-client --lib
           cargo check --target wasm32-unknown-unknown -p cs-web
 
-      - name: Build reference mods
-        run: cargo xtask mod-build
+      - name: Build polyglot reference mods
+        run: cargo xtask mod build
 
-      - name: Parity report
+      - name: Parity ledger report
         run: cargo xtask parity
+
+      - name: Verify web JS syntax
+        shell: bash
+        run: |
+          for f in web/*.js; do
+            node --check "$f"
+          done
