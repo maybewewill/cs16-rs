@@ -1,4 +1,7 @@
 //! GoldSrc StudioModel v10 (`.mdl`) renderer:
+//! - GPU skeletal bone skinning (`<= 128` 3x4 affine bone matrices per posed instance, `6,144 B`
+//!   uniform buffer strictly within WebGL2's `16,384 B` limit) over static rest-pose per-submodel
+//!   vertex buffers, with cached `GammaTables` and GPU `lightgammatable` LUT shading
 //! - Bone controllers, 1D/9-way/2D multi-blending, `"Bip01 Spine"` lower/upper gait split,
 //!   sequence crossfade interpolation, external `*01.mdl` sequence groups, and attachments
 //! - All 6 `EntRenderMode`s, `RenderFx` (`GlowShell`, `Explode`, `LightMultiplier`),
@@ -12,8 +15,9 @@ use std::collections::HashMap;
 use bytemuck::{Pod, Zeroable};
 use cs_assets::gamma::{GammaTables, GoldSrcGammaConfig};
 use cs_assets::mdl::{
-    BoneEvalParams, MdlSeqEvent, STUDIO_NF_ADDITIVE, STUDIO_NF_CHROME, STUDIO_NF_FLATSHADE,
-    STUDIO_NF_MASKED, StudioModel,
+    BoneEvalParams, MAXSTUDIOBONES, MdlBone, MdlBoneAnim, MdlSeqEvent, STUDIO_NF_ADDITIVE,
+    STUDIO_NF_CHROME, STUDIO_NF_FLATSHADE, STUDIO_NF_MASKED, STUDIO_RLOOP, StudioModel,
+    goldsrc_angle_quat,
 };
 use cs_vfs::Vfs;
 use glam::{Mat4, Quat, Vec3};
@@ -28,6 +32,10 @@ use crate::render::scene::{
     EntRenderMode, RENDERFX_EXPLODE, RENDERFX_GLOW_SHELL, RENDERFX_LIGHT_MULTIPLIER,
     StudioShadow,
 };
+
+/// Maximum posed bones uploaded to the GPU vertex shader per studio instance (`MAXSTUDIOBONES`).
+/// `128 * 3 * 16 = 6,144` bytes — strictly inside WebGL2's `16,384`-byte uniform buffer cap.
+pub const MAX_GPU_BONES: usize = MAXSTUDIOBONES;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -89,14 +97,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// Build a feathered octagonal translucent disc (`8` triangles = `24` vertices) on the floor
-/// plane orthogonal to `shadow.normal`, centered at `shadow.origin` (`alpha = shadow.alpha` at
-/// center fading to `0.0` at `shadow.radius`).
-pub fn build_shadow_disc_vertices(shadow: &StudioShadow) -> Vec<MdlShadowVertex> {
+/// Append a feathered octagonal translucent disc (`8` triangles = `24` vertices) on the floor plane
+/// orthogonal to `shadow.normal`, centered at `shadow.origin` (`alpha = shadow.alpha` at center
+/// fading to `0.0` at `shadow.radius`).
+fn push_shadow_disc_vertices(shadow: &StudioShadow, verts: &mut Vec<MdlShadowVertex>) {
     const SIDES: usize = 8;
     let normal = shadow.normal.normalize_or_zero();
     if normal.length_squared() < 1e-4 || shadow.alpha <= 0.0 || shadow.radius <= 0.0 {
-        return Vec::new();
+        return;
     }
     let ref_up = if normal.z.abs() < 0.99 { Vec3::Z } else { Vec3::Y };
     let u = normal.cross(ref_up).normalize_or_zero();
@@ -112,7 +120,6 @@ pub fn build_shadow_disc_vertices(shadow: &StudioShadow) -> Vec<MdlShadowVertex>
         *slot = center + (u * c + v * s) * shadow.radius;
     }
 
-    let mut verts = Vec::with_capacity(SIDES * 3);
     for i in 0..SIDES {
         let next = (i + 1) % SIDES;
         verts.push(MdlShadowVertex {
@@ -128,18 +135,29 @@ pub fn build_shadow_disc_vertices(shadow: &StudioShadow) -> Vec<MdlShadowVertex>
             color: rim_col,
         });
     }
+}
+
+/// Build a feathered octagonal translucent disc (`8` triangles = `24` vertices) on the floor
+/// plane orthogonal to `shadow.normal`, centered at `shadow.origin` (`alpha = shadow.alpha` at
+/// center fading to `0.0` at `shadow.radius`).
+pub fn build_shadow_disc_vertices(shadow: &StudioShadow) -> Vec<MdlShadowVertex> {
+    let mut verts = Vec::with_capacity(24);
+    push_shadow_disc_vertices(shadow, &mut verts);
     verts
 }
 
+/// Static rest-pose GPU vertex uploaded once per `(bodypart, submodel)` at model load time.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct MdlGpuVertex {
+struct MdlStaticVertex {
     position: [f32; 3],
     normal: [f32; 3],
     uv: [f32; 2],
-    color: [f32; 3],
+    pos_bone: u32,
+    norm_bone: u32,
 }
 
+/// Per-draw studio uniforms (224 bytes — fits inside one 256-byte uniform alignment slot).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct MdlUniforms {
@@ -152,6 +170,48 @@ struct MdlUniforms {
     light_color: [f32; 4],
     render_color: [f32; 4],
     flags_params: [f32; 4],
+    studio_light_vec: [f32; 4],
+    studio_light_params: [f32; 4],
+}
+
+/// Packed 1024-entry `GammaTables::lightgammatable` (`2 x u16` per `u32`, `2,048` bytes).
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct LightGammaUniform {
+    entries: [[u32; 4]; 128],
+}
+
+fn pack_light_gamma_uniform(tables: &GammaTables) -> LightGammaUniform {
+    let mut entries = [[0u32; 4]; 128];
+    for (i, vec) in entries.iter_mut().enumerate() {
+        for (c, slot) in vec.iter_mut().enumerate() {
+            let base = i * 8 + c * 2;
+            let lo = u32::from(tables.lightgammatable[base]);
+            let hi = u32::from(tables.lightgammatable[base + 1]);
+            *slot = lo | (hi << 16);
+        }
+    }
+    LightGammaUniform { entries }
+}
+
+/// Posed bone palette (`<= 128` 3x4 row-major affine matrices = `384 vec4<f32>` = `6,144` bytes).
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct MdlBonesUniform {
+    rows: [[f32; 4]; MAX_GPU_BONES * 3],
+}
+
+const BONE_MATRIX_BYTES: usize = 48; // 3 * vec4<f32>
+const BONE_UNIFORM_BINDING_SIZE: u64 = std::mem::size_of::<MdlBonesUniform>() as u64;
+
+#[inline]
+fn write_bone_3x4(dst: &mut [u8], m: Mat4) {
+    let rows: [[f32; 4]; 3] = [
+        [m.x_axis.x, m.y_axis.x, m.z_axis.x, m.w_axis.x],
+        [m.x_axis.y, m.y_axis.y, m.z_axis.y, m.w_axis.y],
+        [m.x_axis.z, m.y_axis.z, m.z_axis.z, m.w_axis.z],
+    ];
+    dst[..BONE_MATRIX_BYTES].copy_from_slice(bytemuck::bytes_of(&rows));
 }
 
 /// Shared camera, lighting, fog, and gamma parameters for a [`MdlRenderer::prepare_studio`] pass.
@@ -305,12 +365,12 @@ pub fn studio_frame(
     f as f32
 }
 
-/// Submodel of body part `index` selected by the entity's `body` value.
-pub fn bodypart_submodel(
+/// Submodel index within body part `index` selected by the entity's `body` value.
+fn bodypart_submodel_index(
     parts: &[cs_assets::mdl::MdlBodyPart],
     index: usize,
     body: i32,
-) -> Option<&cs_assets::mdl::MdlSubModel> {
+) -> Option<usize> {
     let part = parts.get(index)?;
     let count = part.submodels.len() as i64;
     if count == 0 {
@@ -320,7 +380,18 @@ pub fn bodypart_submodel(
         .iter()
         .try_fold(1i64, |acc, p| acc.checked_mul((p.submodels.len() as i64).max(1)))?;
     let pick = (i64::from(body.max(0)) / base) % count;
-    part.submodels.get(pick as usize)
+    let idx = pick as usize;
+    (idx < part.submodels.len()).then_some(idx)
+}
+
+/// Submodel of body part `index` selected by the entity's `body` value.
+pub fn bodypart_submodel(
+    parts: &[cs_assets::mdl::MdlBodyPart],
+    index: usize,
+    body: i32,
+) -> Option<&cs_assets::mdl::MdlSubModel> {
+    let idx = bodypart_submodel_index(parts, index, body)?;
+    parts.get(index)?.submodels.get(idx)
 }
 
 struct CachedGpuTexture {
@@ -329,9 +400,178 @@ struct CachedGpuTexture {
     flags: i32,
 }
 
+struct CachedSubModelMesh {
+    skinref: usize,
+    first_vertex: u32,
+    vertex_count: u32,
+}
+
+struct CachedSubModelGpu {
+    vertex_buf: Option<wgpu::Buffer>,
+    meshes: Vec<CachedSubModelMesh>,
+}
+
+struct CachedBodyPartGpu {
+    submodels: Vec<CachedSubModelGpu>,
+}
+
 struct CachedGpuModel {
     mdl: StudioModel,
     textures: Vec<CachedGpuTexture>,
+    bodyparts: Vec<CachedBodyPartGpu>,
+    model_bone_count: usize,
+    gpu_bone_slots: usize,
+    fallback_bone_slot: Option<u32>,
+    upper_body_mask: [bool; MAX_GPU_BONES],
+}
+
+fn compute_upper_body_mask(mdl: &StudioModel) -> [bool; MAX_GPU_BONES] {
+    let n = mdl.bones.len().min(MAX_GPU_BONES);
+    let mut mask = [false; MAX_GPU_BONES];
+    let Some(spine_idx) = mdl.bones[..n]
+        .iter()
+        .position(|b| b.name.eq_ignore_ascii_case("Bip01 Spine"))
+    else {
+        mask[..n].fill(true);
+        return mask;
+    };
+    mask[spine_idx] = true;
+    for i in (spine_idx + 1)..n {
+        let p = mdl.bones[i].parent;
+        if p >= 0 && (p as usize) < i && mask[p as usize] {
+            mask[i] = true;
+        }
+    }
+    mask
+}
+
+fn build_cached_gpu_model(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    mdl: StudioModel,
+    tables: &GammaTables,
+    tex_cfg: TextureUploadConfig,
+    tex_bgl: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+) -> CachedGpuModel {
+    let mut textures = Vec::with_capacity(mdl.textures.len());
+    for tex in &mdl.textures {
+        let cfg = TextureUploadConfig {
+            apply_texgamma: (tex.flags & STUDIO_NF_MASKED) == 0,
+            ..tex_cfg
+        };
+        let view = upload_rgba_texture_mipmapped_with_config(
+            device,
+            queue,
+            &tex.name,
+            tex.width.max(1),
+            tex.height.max(1),
+            &tex.rgba,
+            Some(tables),
+            cfg,
+        );
+        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(&tex.name),
+            layout: tex_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+        });
+        textures.push(CachedGpuTexture {
+            view,
+            bg,
+            flags: tex.flags,
+        });
+    }
+
+    let model_bone_count = mdl.bones.len().min(MAX_GPU_BONES);
+    let mut has_oob_bone = false;
+    'scan: for bp in &mdl.bodyparts {
+        for sub in &bp.submodels {
+            for mesh in &sub.meshes {
+                for v in &mesh.vertices {
+                    if usize::from(v.bone) >= model_bone_count {
+                        has_oob_bone = true;
+                        break 'scan;
+                    }
+                }
+            }
+        }
+    }
+    let fallback_bone_slot = if model_bone_count == 0 {
+        Some(0u32)
+    } else if has_oob_bone {
+        Some(model_bone_count.min(MAX_GPU_BONES - 1) as u32)
+    } else {
+        None
+    };
+    let gpu_bone_slots = match fallback_bone_slot {
+        Some(fb) => (fb as usize + 1).max(model_bone_count).min(MAX_GPU_BONES),
+        None => model_bone_count.max(1),
+    };
+
+    let mut bodyparts = Vec::with_capacity(mdl.bodyparts.len());
+    let mut sub_verts: Vec<MdlStaticVertex> = Vec::new();
+    for bp in &mdl.bodyparts {
+        let mut submodels = Vec::with_capacity(bp.submodels.len());
+        for sub in &bp.submodels {
+            sub_verts.clear();
+            let mut meshes = Vec::with_capacity(sub.meshes.len());
+            for mesh in &sub.meshes {
+                if mesh.vertices.is_empty() {
+                    continue;
+                }
+                let first_vertex = sub_verts.len() as u32;
+                sub_verts.reserve(mesh.vertices.len());
+                for v in &mesh.vertices {
+                    let bone_idx = if usize::from(v.bone) < model_bone_count {
+                        u32::from(v.bone)
+                    } else {
+                        fallback_bone_slot.unwrap_or(0)
+                    };
+                    sub_verts.push(MdlStaticVertex {
+                        position: v.pos.to_array(),
+                        normal: v.normal.to_array(),
+                        uv: v.uv,
+                        pos_bone: bone_idx,
+                        norm_bone: bone_idx,
+                    });
+                }
+                meshes.push(CachedSubModelMesh {
+                    skinref: mesh.skinref,
+                    first_vertex,
+                    vertex_count: (sub_verts.len() as u32) - first_vertex,
+                });
+            }
+            let vertex_buf = (!sub_verts.is_empty()).then(|| {
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("mdl_static_submodel_vbuf"),
+                    contents: bytemuck::cast_slice(&sub_verts),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+            });
+            submodels.push(CachedSubModelGpu { vertex_buf, meshes });
+        }
+        bodyparts.push(CachedBodyPartGpu { submodels });
+    }
+
+    let upper_body_mask = compute_upper_body_mask(&mdl);
+    CachedGpuModel {
+        mdl,
+        textures,
+        bodyparts,
+        model_bone_count,
+        gpu_bone_slots,
+        fallback_bone_slot,
+        upper_body_mask,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -340,6 +580,290 @@ enum MdlPipelineKind {
     Alpha,
     Additive,
     XRay,
+}
+
+#[derive(Clone, Copy)]
+struct PreparedDraw {
+    model_id: u32,
+    bodypart_idx: u16,
+    submodel_idx: u16,
+    tex_idx: u16,
+    first_vertex: u32,
+    vertex_count: u32,
+    uniform_slot: u32,
+    bone_byte_offset: u32,
+    pipe_kind: MdlPipelineKind,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PreparedMdlPass {
+    total_draws: usize,
+    xray_draws: usize,
+}
+
+impl PreparedMdlPass {
+    /// Total prepared draw calls across all studio pipelines.
+    pub fn total_draws(&self) -> usize {
+        self.total_draws
+    }
+
+    /// Number of wall-occluded X-Ray silhouette draw calls (`MdlPipelineKind::XRay`).
+    pub fn xray_draw_count(&self) -> usize {
+        self.xray_draws
+    }
+}
+
+struct BoneEvalScratch {
+    bones: Box<[Mat4; MAX_GPU_BONES]>,
+    merged_bones: Box<[Mat4; MAX_GPU_BONES]>,
+    pose_upper: Box<[(Vec3, Quat); MAX_GPU_BONES]>,
+    pose_prev: Box<[(Vec3, Quat); MAX_GPU_BONES]>,
+    pose_gait: Box<[(Vec3, Quat); MAX_GPU_BONES]>,
+}
+
+impl BoneEvalScratch {
+    fn new() -> Self {
+        Self {
+            bones: Box::new([Mat4::IDENTITY; MAX_GPU_BONES]),
+            merged_bones: Box::new([Mat4::IDENTITY; MAX_GPU_BONES]),
+            pose_upper: Box::new([(Vec3::ZERO, Quat::IDENTITY); MAX_GPU_BONES]),
+            pose_prev: Box::new([(Vec3::ZERO, Quat::IDENTITY); MAX_GPU_BONES]),
+            pose_gait: Box::new([(Vec3::ZERO, Quat::IDENTITY); MAX_GPU_BONES]),
+        }
+    }
+}
+
+fn compute_controller_adj(mdl: &StudioModel, controller: &[u8; 4], mouth: u8) -> [f32; 8] {
+    let mut adj = [0.0f32; 8];
+    for ctrl in &mdl.controllers {
+        let idx = ctrl.index;
+        if !(0..8).contains(&idx) {
+            continue;
+        }
+        let raw = if idx == 4 {
+            f32::from(mouth) / 64.0
+        } else if let Some(&v) = controller.get(idx as usize) {
+            f32::from(v) / 255.0
+        } else {
+            continue;
+        };
+        let span = ctrl.end - ctrl.start;
+        let value = if ctrl.kind & STUDIO_RLOOP != 0 {
+            ctrl.start + raw * span
+        } else {
+            ctrl.start + raw.clamp(0.0, 1.0) * span
+        };
+        adj[idx as usize] = value;
+    }
+    adj
+}
+
+fn eval_sequence_pose_into(
+    mdl: &StudioModel,
+    seq_idx: usize,
+    frame_time: f32,
+    loop_anim: bool,
+    blending: [u8; 2],
+    adj: &[f32; 8],
+    out: &mut [(Vec3, Quat); MAX_GPU_BONES],
+) {
+    let n = mdl.bones.len().min(MAX_GPU_BONES);
+    let seq = mdl.sequences.get(seq_idx);
+    let (f0, f1, frac) = if let Some(s) = seq {
+        let nf = s.num_frames.max(1);
+        if nf <= 1 {
+            (0, 0, 0.0)
+        } else if loop_anim {
+            let period = (nf - 1) as f32;
+            let f_wrapped = frame_time.rem_euclid(period);
+            let i0 = (f_wrapped.floor() as usize).min(nf - 2);
+            (i0, i0 + 1, f_wrapped - f_wrapped.floor())
+        } else {
+            let f_clamped = frame_time.clamp(0.0, (nf - 1) as f32);
+            let i0 = (f_clamped.floor() as usize).min(nf - 1);
+            let i1 = (i0 + 1).min(nf - 1);
+            (i0, i1, f_clamped - f_clamped.floor())
+        }
+    } else {
+        (0, 0, 0.0)
+    };
+
+    let sample_blend = |blend: &[MdlBoneAnim], i: usize, bone: &MdlBone| -> (Vec3, Quat) {
+        if let Some(anim) = blend.get(i)
+            && !anim.frames.is_empty()
+        {
+            let mut ch0 = anim.frames[f0.min(anim.frames.len() - 1)];
+            let mut ch1 = anim.frames[f1.min(anim.frames.len() - 1)];
+            for c in 0..6 {
+                let ci = bone.bonecontroller[c];
+                if (0..8).contains(&ci) {
+                    ch0[c] += adj[ci as usize];
+                    ch1[c] += adj[ci as usize];
+                }
+            }
+            let p0 = bone.default_pos + Vec3::new(ch0[0], ch0[1], ch0[2]) * bone.pos_scale;
+            let p1 = bone.default_pos + Vec3::new(ch1[0], ch1[1], ch1[2]) * bone.pos_scale;
+            let r0 = bone.default_rot + Vec3::new(ch0[3], ch0[4], ch0[5]) * bone.rot_scale;
+            let r1 = bone.default_rot + Vec3::new(ch1[3], ch1[4], ch1[5]) * bone.rot_scale;
+            (
+                p0.lerp(p1, frac),
+                goldsrc_angle_quat(r0).slerp(goldsrc_angle_quat(r1), frac),
+            )
+        } else {
+            (bone.default_pos, goldsrc_angle_quat(bone.default_rot))
+        }
+    };
+
+    let blends = seq.map(|s| s.blends.as_slice()).unwrap_or(&[]);
+    let nb = blends.len();
+    if nb <= 1 {
+        let b0 = blends.first().map(Vec::as_slice).unwrap_or(&[]);
+        for (i, bone) in mdl.bones.iter().take(n).enumerate() {
+            out[i] = sample_blend(b0, i, bone);
+        }
+        return;
+    }
+    let blend_type1 = seq.map_or(0, |s| s.blend_type[1]);
+    if blend_type1 == 0 || nb < 4 {
+        let x = (f32::from(blending[0]) / 255.0) * ((nb - 1) as f32);
+        let i0 = (x.floor() as usize).min(nb - 1);
+        let i1 = (i0 + 1).min(nb - 1);
+        let t = (x - i0 as f32).clamp(0.0, 1.0);
+        for (i, bone) in mdl.bones.iter().take(n).enumerate() {
+            let (p0, q0) = sample_blend(&blends[i0], i, bone);
+            let (p1, q1) = sample_blend(&blends[i1], i, bone);
+            out[i] = (p0.lerp(p1, t), q0.slerp(q1, t));
+        }
+    } else {
+        let cols = (nb as f32).sqrt().round().max(1.0) as usize;
+        let rows = nb / cols;
+        let fx = (f32::from(blending[0]) / 255.0) * (cols.saturating_sub(1) as f32);
+        let fy = (f32::from(blending[1]) / 255.0) * (rows.saturating_sub(1) as f32);
+        let x0 = (fx.floor() as usize).min(cols - 1);
+        let x1 = (x0 + 1).min(cols - 1);
+        let y0 = (fy.floor() as usize).min(rows.saturating_sub(1));
+        let y1 = (y0 + 1).min(rows.saturating_sub(1));
+        let tx = (fx - x0 as f32).clamp(0.0, 1.0);
+        let ty = (fy - y0 as f32).clamp(0.0, 1.0);
+        for (i, bone) in mdl.bones.iter().take(n).enumerate() {
+            let (p00, q00) = sample_blend(&blends[(y0 * cols + x0).min(nb - 1)], i, bone);
+            let (p10, q10) = sample_blend(&blends[(y0 * cols + x1).min(nb - 1)], i, bone);
+            let (p01, q01) = sample_blend(&blends[(y1 * cols + x0).min(nb - 1)], i, bone);
+            let (p11, q11) = sample_blend(&blends[(y1 * cols + x1).min(nb - 1)], i, bone);
+            let pa = p00.lerp(p10, tx);
+            let pb = p01.lerp(p11, tx);
+            let qa = q00.slerp(q10, tx);
+            let qb = q01.slerp(q11, tx);
+            out[i] = (pa.lerp(pb, ty), qa.slerp(qb, ty));
+        }
+    }
+}
+
+/// Zero-allocation hierarchical bone evaluation matching [`StudioModel::evaluate_bones_full`].
+fn eval_bones_into(
+    mdl: &StudioModel,
+    upper_body_mask: &[bool; MAX_GPU_BONES],
+    params: &BoneEvalParams,
+    scratch: &mut BoneEvalScratch,
+) -> usize {
+    let n = mdl.bones.len().min(MAX_GPU_BONES);
+    if n == 0 {
+        return 0;
+    }
+    let adj = compute_controller_adj(mdl, &params.controller, params.mouth);
+    eval_sequence_pose_into(
+        mdl,
+        params.sequence,
+        params.frame,
+        params.loop_anim,
+        params.blending,
+        &adj,
+        &mut scratch.pose_upper,
+    );
+    let prev_weight = params.prev_sequence.map(|(p_seq, p_frame, p_loop, weight)| {
+        eval_sequence_pose_into(
+            mdl,
+            p_seq,
+            p_frame,
+            p_loop,
+            params.blending,
+            &adj,
+            &mut scratch.pose_prev,
+        );
+        weight.clamp(0.0, 1.0)
+    });
+    let has_gait = if let Some((g_seq, g_frame)) = params.gait {
+        eval_sequence_pose_into(
+            mdl,
+            g_seq,
+            g_frame,
+            true,
+            [0, 0],
+            &adj,
+            &mut scratch.pose_gait,
+        );
+        true
+    } else {
+        false
+    };
+
+    for (i, bone) in mdl.bones.iter().take(n).enumerate() {
+        let (mut pos, mut quat) = if has_gait {
+            if upper_body_mask[i] {
+                scratch.pose_upper[i]
+            } else {
+                scratch.pose_gait[i]
+            }
+        } else {
+            scratch.pose_upper[i]
+        };
+        if let Some(weight) = prev_weight
+            && weight > 0.0
+        {
+            let (p_pos, p_quat) = scratch.pose_prev[i];
+            let t = 1.0 - weight;
+            pos = p_pos.lerp(pos, t);
+            quat = p_quat.slerp(quat, t);
+        }
+        let local = Mat4::from_rotation_translation(quat, pos);
+        scratch.bones[i] = if bone.parent >= 0 && (bone.parent as usize) < i {
+            scratch.bones[bone.parent as usize] * local
+        } else {
+            local
+        };
+    }
+    n
+}
+
+/// Zero-allocation `EF_BONEMERGE` evaluation matching [`StudioModel::evaluate_bones_merged`].
+fn eval_bones_merged_into(
+    child: &StudioModel,
+    parent: &StudioModel,
+    parent_bones: &[Mat4],
+    out: &mut [Mat4; MAX_GPU_BONES],
+) -> usize {
+    let n = child.bones.len().min(MAX_GPU_BONES);
+    for (i, bone) in child.bones.iter().take(n).enumerate() {
+        if let Some(p_idx) = parent
+            .bones
+            .iter()
+            .position(|pb| pb.name.eq_ignore_ascii_case(&bone.name))
+            && let Some(&p_mat) = parent_bones.get(p_idx)
+        {
+            out[i] = p_mat;
+            continue;
+        }
+        let local = Mat4::from_rotation_translation(
+            goldsrc_angle_quat(bone.default_rot),
+            bone.default_pos,
+        );
+        out[i] = if bone.parent >= 0 && (bone.parent as usize) < i {
+            out[bone.parent as usize] * local
+        } else {
+            local
+        };
+    }
+    n
 }
 
 pub struct MdlRenderer {
@@ -353,17 +877,22 @@ pub struct MdlRenderer {
     xray_pipeline: wgpu::RenderPipeline,
     uniform_bgl: wgpu::BindGroupLayout,
     tex_bgl: wgpu::BindGroupLayout,
+    bone_bgl: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     filter_mode: TextureFilterMode,
     anisotropy: u16,
-    cache: HashMap<String, Option<CachedGpuModel>>,
-    vertex_buf: wgpu::Buffer,
-    vertex_cap: usize,
+    models: Vec<Option<CachedGpuModel>>,
+    exact_path_to_id: HashMap<String, u32>,
+    lower_path_to_id: HashMap<String, u32>,
     uniform_buf: wgpu::Buffer,
     uniform_cap: usize,
     uniform_stride: u64,
-    lights_buf: wgpu::Buffer,
+    light_gamma_buf: wgpu::Buffer,
     uniform_bg: wgpu::BindGroup,
+    bone_buf: wgpu::Buffer,
+    bone_buf_cap: usize,
+    bone_align: usize,
+    bone_bg: wgpu::BindGroup,
     shadow_shader: wgpu::ShaderModule,
     shadow_pipeline_layout: wgpu::PipelineLayout,
     shadow_pipeline: wgpu::RenderPipeline,
@@ -373,7 +902,13 @@ pub struct MdlRenderer {
     shadow_vbuf_cap: usize,
     shadow_vertex_count: u32,
     cached_gamma: GoldSrcGammaConfig,
+    cached_gamma_tables: GammaTables,
     cached_tex_cfg: TextureUploadConfig,
+    prepared_draws: Vec<PreparedDraw>,
+    scratch_uniform_bytes: Vec<u8>,
+    scratch_bone_bytes: Vec<u8>,
+    scratch_shadow_verts: Vec<MdlShadowVertex>,
+    bone_scratch: BoneEvalScratch,
     frame_upload_bytes: u64,
 }
 
@@ -429,34 +964,6 @@ fn create_shadow_pipeline(
     })
 }
 
-struct PreparedDraw {
-    model_key: String,
-    tex_idx: usize,
-    first_vertex: u32,
-    vertex_count: u32,
-    uniform_slot: u32,
-    pipe_kind: MdlPipelineKind,
-}
-
-pub struct PreparedMdlPass {
-    draws: Vec<PreparedDraw>,
-}
-
-impl PreparedMdlPass {
-    /// Total prepared draw calls across all studio pipelines.
-    pub fn total_draws(&self) -> usize {
-        self.draws.len()
-    }
-
-    /// Number of wall-occluded X-Ray silhouette draw calls (`MdlPipelineKind::XRay`).
-    pub fn xray_draw_count(&self) -> usize {
-        self.draws
-            .iter()
-            .filter(|d| d.pipe_kind == MdlPipelineKind::XRay)
-            .count()
-    }
-}
-
 fn create_mdl_pipelines(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
@@ -489,13 +996,14 @@ fn create_mdl_pipelines(
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
                 buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<MdlGpuVertex>() as wgpu::BufferAddress,
+                    array_stride: std::mem::size_of::<MdlStaticVertex>() as wgpu::BufferAddress,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &wgpu::vertex_attr_array![
                         0 => Float32x3,
                         1 => Float32x3,
                         2 => Float32x2,
-                        3 => Float32x3,
+                        3 => Uint32,
+                        4 => Uint32,
                     ],
                 })],
             },
@@ -554,7 +1062,7 @@ fn create_mdl_uniform_bg(
     layout: &wgpu::BindGroupLayout,
     uniform_buf: &wgpu::Buffer,
     raw_size: u64,
-    lights_buf: &wgpu::Buffer,
+    light_gamma_buf: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("mdl_uniform_bg"),
@@ -570,9 +1078,28 @@ fn create_mdl_uniform_bg(
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: lights_buf.as_entire_binding(),
+                resource: light_gamma_buf.as_entire_binding(),
             },
         ],
+    })
+}
+
+fn create_mdl_bone_bg(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    bone_buf: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("mdl_bone_bg"),
+        layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                buffer: bone_buf,
+                offset: 0,
+                size: wgpu::BufferSize::new(BONE_UNIFORM_BINDING_SIZE),
+            }),
+        }],
     })
 }
 
@@ -583,7 +1110,7 @@ impl MdlRenderer {
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/mdl.wgsl").into()),
         });
 
-        let align = device.limits().min_uniform_buffer_offset_alignment as u64;
+        let align = device.limits().min_uniform_buffer_offset_alignment.max(1) as u64;
         let raw_size = std::mem::size_of::<MdlUniforms>() as u64;
         let uniform_stride = raw_size.div_ceil(align) * align;
 
@@ -602,12 +1129,12 @@ impl MdlRenderer {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::VERTEX,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
                         min_binding_size: wgpu::BufferSize::new(
-                            std::mem::size_of::<GpuLightsUniform>() as u64,
+                            std::mem::size_of::<LightGammaUniform>() as u64,
                         ),
                     },
                     count: None,
@@ -637,9 +1164,23 @@ impl MdlRenderer {
             ],
         });
 
+        let bone_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("mdl_bone_bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: true,
+                    min_binding_size: wgpu::BufferSize::new(BONE_UNIFORM_BINDING_SIZE),
+                },
+                count: None,
+            }],
+        });
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("mdl_pipeline_layout"),
-            bind_group_layouts: &[Some(&uniform_bgl), Some(&tex_bgl)],
+            bind_group_layouts: &[Some(&uniform_bgl), Some(&tex_bgl), Some(&bone_bgl)],
             immediate_size: 0,
         });
 
@@ -651,14 +1192,6 @@ impl MdlRenderer {
         let anisotropy = 1;
         let sampler = create_sampler(device, "mdl_sampler", filter_mode, anisotropy, false);
 
-        let vertex_cap = 16384;
-        let vertex_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("mdl_dynamic_vbuf"),
-            size: (vertex_cap * std::mem::size_of::<MdlGpuVertex>()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
         let uniform_cap = 256;
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("mdl_dynamic_ubuf"),
@@ -667,9 +1200,12 @@ impl MdlRenderer {
             mapped_at_creation: false,
         });
 
-        let lights_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("mdl_lights_buf"),
-            contents: bytemuck::bytes_of(&GpuLightsUniform::default()),
+        let cached_gamma = GoldSrcGammaConfig::default().validated();
+        let cached_gamma_tables = GammaTables::build(cached_gamma);
+        let light_gamma_init = pack_light_gamma_uniform(&cached_gamma_tables);
+        let light_gamma_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mdl_light_gamma_lut"),
+            contents: bytemuck::bytes_of(&light_gamma_init),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -678,8 +1214,17 @@ impl MdlRenderer {
             &uniform_bgl,
             &uniform_buf,
             raw_size,
-            &lights_buf,
+            &light_gamma_buf,
         );
+
+        let bone_buf_cap = 64 * 1024;
+        let bone_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mdl_bone_palette_ubuf"),
+            size: bone_buf_cap as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bone_bg = create_mdl_bone_bg(device, &bone_bgl, &bone_buf);
 
         let shadow_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mdl_shadow.wgsl"),
@@ -748,17 +1293,22 @@ impl MdlRenderer {
             xray_pipeline,
             uniform_bgl,
             tex_bgl,
+            bone_bgl,
             sampler,
             filter_mode,
             anisotropy,
-            cache: HashMap::new(),
-            vertex_buf,
-            vertex_cap,
+            models: Vec::new(),
+            exact_path_to_id: HashMap::new(),
+            lower_path_to_id: HashMap::new(),
             uniform_buf,
             uniform_cap,
             uniform_stride,
-            lights_buf,
+            light_gamma_buf,
             uniform_bg,
+            bone_buf,
+            bone_buf_cap,
+            bone_align: align as usize,
+            bone_bg,
             shadow_shader,
             shadow_pipeline_layout,
             shadow_pipeline,
@@ -767,8 +1317,14 @@ impl MdlRenderer {
             shadow_vbuf,
             shadow_vbuf_cap,
             shadow_vertex_count: 0,
-            cached_gamma: GoldSrcGammaConfig::default(),
+            cached_gamma,
+            cached_gamma_tables,
             cached_tex_cfg: TextureUploadConfig::default(),
+            prepared_draws: Vec::new(),
+            scratch_uniform_bytes: Vec::new(),
+            scratch_bone_bytes: Vec::new(),
+            scratch_shadow_verts: Vec::new(),
+            bone_scratch: BoneEvalScratch::new(),
             frame_upload_bytes: 0,
         }
     }
@@ -816,7 +1372,7 @@ impl MdlRenderer {
         self.filter_mode = mode;
         self.anisotropy = clamped_aniso;
         self.sampler = create_sampler(device, "mdl_sampler", mode, clamped_aniso, false);
-        for cached in self.cache.values_mut().flatten() {
+        for cached in self.models.iter_mut().flatten() {
             for (idx, tex) in cached.textures.iter_mut().enumerate() {
                 tex.bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some(&format!("mdl_tex_bg_{idx}")),
@@ -837,7 +1393,18 @@ impl MdlRenderer {
     }
 
     pub fn clear_cache(&mut self) {
-        self.cache.clear();
+        self.models.clear();
+        self.exact_path_to_id.clear();
+        self.lower_path_to_id.clear();
+        self.prepared_draws.clear();
+    }
+
+    fn lookup_model_id(&self, model_path: &str) -> Option<u32> {
+        if let Some(&id) = self.exact_path_to_id.get(model_path) {
+            return Some(id);
+        }
+        let lower = model_path.to_ascii_lowercase();
+        self.lower_path_to_id.get(&lower).copied()
     }
 
     fn ensure_loaded(
@@ -846,64 +1413,47 @@ impl MdlRenderer {
         queue: &wgpu::Queue,
         vfs: &Vfs,
         rel_path: &str,
-        tables: &GammaTables,
         tex_cfg: TextureUploadConfig,
-    ) -> Option<String> {
-        let key = rel_path.to_ascii_lowercase();
-        if !self.cache.contains_key(&key) {
-            let loaded = match StudioModel::load(vfs, &key) {
-                Ok(mdl) => {
-                    let mut textures = Vec::with_capacity(mdl.textures.len());
-                    for tex in &mdl.textures {
-                        let cfg = TextureUploadConfig {
-                            apply_texgamma: (tex.flags & STUDIO_NF_MASKED) == 0,
-                            ..tex_cfg
-                        };
-                        let view = upload_rgba_texture_mipmapped_with_config(
-                            device,
-                            queue,
-                            &tex.name,
-                            tex.width.max(1),
-                            tex.height.max(1),
-                            &tex.rgba,
-                            Some(tables),
-                            cfg,
-                        );
-                        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                            label: Some(&tex.name),
-                            layout: &self.tex_bgl,
-                            entries: &[
-                                wgpu::BindGroupEntry {
-                                    binding: 0,
-                                    resource: wgpu::BindingResource::TextureView(&view),
-                                },
-                                wgpu::BindGroupEntry {
-                                    binding: 1,
-                                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                                },
-                            ],
-                        });
-                        textures.push(CachedGpuTexture {
-                            view,
-                            bg,
-                            flags: tex.flags,
-                        });
-                    }
-                    Some(CachedGpuModel { mdl, textures })
-                }
-                Err(err) => {
-                    warn!(model = %key, %err, "Could not load StudioModel");
-                    None
-                }
-            };
-            self.cache.insert(key.clone(), loaded);
+    ) -> Option<u32> {
+        if let Some(&id) = self.exact_path_to_id.get(rel_path) {
+            return self
+                .models
+                .get(id as usize)
+                .and_then(|o| o.as_ref())
+                .map(|_| id);
         }
 
-        if self.cache.get(&key).and_then(|o| o.as_ref()).is_some() {
-            Some(key)
-        } else {
-            None
+        let lower = rel_path.to_ascii_lowercase();
+        if let Some(&id) = self.lower_path_to_id.get(&lower) {
+            self.exact_path_to_id.insert(rel_path.to_string(), id);
+            return self
+                .models
+                .get(id as usize)
+                .and_then(|o| o.as_ref())
+                .map(|_| id);
         }
+
+        let loaded = match StudioModel::load(vfs, &lower) {
+            Ok(mdl) => Some(build_cached_gpu_model(
+                device,
+                queue,
+                mdl,
+                &self.cached_gamma_tables,
+                tex_cfg,
+                &self.tex_bgl,
+                &self.sampler,
+            )),
+            Err(err) => {
+                warn!(model = %lower, %err, "Could not load StudioModel");
+                None
+            }
+        };
+        let is_some = loaded.is_some();
+        let id = self.models.len() as u32;
+        self.models.push(loaded);
+        self.lower_path_to_id.insert(lower, id);
+        self.exact_path_to_id.insert(rel_path.to_string(), id);
+        is_some.then_some(id)
     }
 
     /// Evaluate the 4 world-space attachment points of a studio model from cached GPU data.
@@ -913,25 +1463,24 @@ impl MdlRenderer {
         params: &BoneEvalParams,
         entity_transform: Mat4,
     ) -> Option<[Vec3; 4]> {
-        let key = model_path.to_ascii_lowercase();
-        let cached = self.cache.get(&key)?.as_ref()?;
+        let id = self.lookup_model_id(model_path)?;
+        let cached = self.models.get(id as usize)?.as_ref()?;
         let bones = cached.mdl.evaluate_bones_full(params);
         Some(cached.mdl.evaluate_attachments(entity_transform, &bones))
     }
 
     /// Inspect sequence animation events for a cached studio model.
     pub fn sequence_events(&self, model_path: &str, sequence: usize) -> &[MdlSeqEvent] {
-        let key = model_path.to_ascii_lowercase();
-        self.cache
-            .get(&key)
+        self.lookup_model_id(model_path)
+            .and_then(|id| self.models.get(id as usize))
             .and_then(|o| o.as_ref())
             .and_then(|c| c.mdl.sequences.get(sequence))
             .map(|s| s.events.as_slice())
             .unwrap_or(&[])
     }
 
-    /// Skin and upload studio model entities with full GoldSrc animation, blending, render modes,
-    /// lighting, fog, and gamma.
+    /// Pose studio model bone hierarchies on CPU and stage GPU skinning palettes & draw uniforms
+    /// with full GoldSrc animation, blending, render modes, lighting, fog, and gamma.
     pub fn prepare_studio(
         &mut self,
         device: &wgpu::Device,
@@ -940,13 +1489,11 @@ impl MdlRenderer {
         instances: &[StudioInstance<'_>],
         params: &MdlPassParams,
     ) -> PreparedMdlPass {
-        queue.write_buffer(&self.lights_buf, 0, bytemuck::bytes_of(&params.lights));
-        self.frame_upload_bytes += std::mem::size_of::<GpuLightsUniform>() as u64;
-
-        let mut all_verts: Vec<MdlGpuVertex> = Vec::new();
-        let mut draws: Vec<PreparedDraw> = Vec::new();
-        let mut uniform_bytes: Vec<u8> = Vec::new();
+        self.prepared_draws.clear();
+        self.scratch_uniform_bytes.clear();
+        self.scratch_bone_bytes.clear();
         let mut uniform_slot: u32 = 0;
+        let mut xray_draws: usize = 0;
 
         let (fog_rgb, fog_density) = params.fog.unwrap_or(([0.0, 0.0, 0.0], 0.0));
         let gamma_vec = [
@@ -969,23 +1516,32 @@ impl MdlRenderer {
             gl_max_size: params.gl_max_size,
             apply_texgamma: true,
         };
-        if self.cached_gamma != gamma_cfg || self.cached_tex_cfg != tex_cfg {
-            self.cache.clear();
+        let gamma_changed = self.cached_gamma != gamma_cfg;
+        if gamma_changed {
             self.cached_gamma = gamma_cfg;
+            self.cached_gamma_tables = GammaTables::build(gamma_cfg);
+            let packed = pack_light_gamma_uniform(&self.cached_gamma_tables);
+            queue.write_buffer(&self.light_gamma_buf, 0, bytemuck::bytes_of(&packed));
+            self.frame_upload_bytes += std::mem::size_of::<LightGammaUniform>() as u64;
+        }
+        if gamma_changed || self.cached_tex_cfg != tex_cfg {
+            self.clear_cache();
             self.cached_tex_cfg = tex_cfg;
         }
-        let tables = GammaTables::build(gamma_cfg);
+
+        let uniform_stride = self.uniform_stride as usize;
+        let bone_align = self.bone_align;
 
         for inst in instances {
-            let Some(key) =
-                self.ensure_loaded(device, queue, vfs, inst.model_path, &tables, tex_cfg)
+            let Some(model_id) = self.ensure_loaded(device, queue, vfs, inst.model_path, tex_cfg)
             else {
                 continue;
             };
-            let attached_key = inst
+            let attached_id = inst
                 .attached_model
-                .and_then(|p| self.ensure_loaded(device, queue, vfs, p, &tables, tex_cfg));
-            let Some(Some(cached)) = self.cache.get(&key) else {
+                .and_then(|p| self.ensure_loaded(device, queue, vfs, p, tex_cfg));
+
+            let Some(Some(cached)) = self.models.get(model_id as usize) else {
                 continue;
             };
 
@@ -1032,13 +1588,19 @@ impl MdlRenderer {
                 prev_sequence,
                 gait,
             };
-            let bones = cached.mdl.evaluate_bones_full(&eval_params);
+            let bone_count = eval_bones_into(
+                &cached.mdl,
+                &cached.upper_body_mask,
+                &eval_params,
+                &mut self.bone_scratch,
+            );
 
             let explode_scale = if inst.renderfx == RENDERFX_EXPLODE {
                 Vec3::splat(1.12)
             } else {
                 Vec3::ONE
             };
+            let base_xf = inst.transform * Mat4::from_scale(explode_scale);
             let light_mul = if inst.renderfx == RENDERFX_LIGHT_MULTIPLIER {
                 1.5
             } else {
@@ -1051,191 +1613,195 @@ impl MdlRenderer {
                 params.direct,
             );
 
-            let mut push_model =
-                |m_key: &str, cached_m: &CachedGpuModel, m_bones: &[Mat4], shell_only: bool| {
-                    for bi in 0..cached_m.mdl.bodyparts.len() {
-                        let Some(sub) = bodypart_submodel(&cached_m.mdl.bodyparts, bi, inst.body)
-                        else {
-                            continue;
-                        };
-                        for mesh in &sub.meshes {
-                            if mesh.vertices.is_empty() {
-                                continue;
-                            }
-                            let tex_idx = cached_m
-                                .mdl
-                                .resolve_skin_texture(inst.skin, mesh.skinref)
-                                .min(cached_m.textures.len().saturating_sub(1));
-                            let tex_flags = cached_m
-                                .textures
-                                .get(tex_idx)
-                                .map(|t| t.flags)
-                                .unwrap_or(0);
-                            let alpha_test = (tex_flags & STUDIO_NF_MASKED) != 0;
+            let mut push_posed_model = |m_id: u32,
+                                        cached_m: &CachedGpuModel,
+                                        bone_byte_offset: u32,
+                                        shell_only: bool| {
+                for bi in 0..cached_m.mdl.bodyparts.len() {
+                    let Some(sub_idx) = bodypart_submodel_index(&cached_m.mdl.bodyparts, bi, inst.body)
+                    else {
+                        continue;
+                    };
+                    let Some(sub_gpu) = cached_m
+                        .bodyparts
+                        .get(bi)
+                        .and_then(|bp| bp.submodels.get(sub_idx))
+                    else {
+                        continue;
+                    };
+                    if sub_gpu.vertex_buf.is_none() || sub_gpu.meshes.is_empty() {
+                        continue;
+                    }
+                    for mesh in &sub_gpu.meshes {
+                        let tex_idx = cached_m
+                            .mdl
+                            .resolve_skin_texture(inst.skin, mesh.skinref)
+                            .min(cached_m.textures.len().saturating_sub(1));
+                        let tex_flags = cached_m
+                            .textures
+                            .get(tex_idx)
+                            .map(|t| t.flags)
+                            .unwrap_or(0);
+                        let alpha_test = (tex_flags & STUDIO_NF_MASKED) != 0;
 
-                            let first_vertex = all_verts.len() as u32;
-                            for v in &mesh.vertices {
-                                let bm = m_bones
-                                    .get(v.bone as usize)
-                                    .copied()
-                                    .unwrap_or(Mat4::IDENTITY);
-                                let m = inst.transform * Mat4::from_scale(explode_scale) * bm;
-                                let pos = m.transform_point3(v.pos);
-                                let norm = m.transform_vector3(v.normal).normalize_or_zero();
-                                let lv = r_studio_lighting(
-                                    &tables,
-                                    tex_flags,
-                                    norm,
-                                    ambient_light,
-                                    shade_light,
-                                    plight_vec,
-                                );
-                                let vcol = light_color * lv;
-                                all_verts.push(MdlGpuVertex {
-                                    position: pos.to_array(),
-                                    normal: norm.to_array(),
-                                    uv: v.uv,
-                                    color: vcol.to_array(),
-                                });
-                            }
-                            let vertex_count = (all_verts.len() as u32) - first_vertex;
-
-                            let (shader_mode, shell_offset, pipe_kind, alpha_val) = if shell_only {
-                                let thickness = (inst.renderamt * 255.0 * 0.05).clamp(0.4, 3.0);
-                                (5.0, thickness, MdlPipelineKind::Additive, 0.75)
-                            } else {
-                                let is_add_tex = (tex_flags & STUDIO_NF_ADDITIVE) != 0;
-                                match inst.rendermode {
-                                    EntRenderMode::Normal => {
-                                        if is_add_tex {
-                                            (2.0, 0.0, MdlPipelineKind::Additive, 1.0)
-                                        } else {
-                                            (0.0, 0.0, MdlPipelineKind::Opaque, 1.0)
-                                        }
-                                    }
-                                    EntRenderMode::TransColor => {
-                                        (1.0, 0.0, MdlPipelineKind::Alpha, inst.renderamt)
-                                    }
-                                    EntRenderMode::TransTexture | EntRenderMode::Glow => {
-                                        (4.0, 0.0, MdlPipelineKind::Alpha, inst.blend)
-                                    }
-                                    EntRenderMode::TransAlpha => {
-                                        (3.0, 0.0, MdlPipelineKind::Alpha, inst.blend)
-                                    }
-                                    EntRenderMode::TransAdd => {
-                                        (2.0, 0.0, MdlPipelineKind::Additive, inst.blend)
+                        let (shader_mode, shell_offset, pipe_kind, alpha_val) = if shell_only {
+                            let thickness = (inst.renderamt * 255.0 * 0.05).clamp(0.4, 3.0);
+                            (5.0, thickness, MdlPipelineKind::Additive, 0.75)
+                        } else {
+                            let is_add_tex = (tex_flags & STUDIO_NF_ADDITIVE) != 0;
+                            match inst.rendermode {
+                                EntRenderMode::Normal => {
+                                    if is_add_tex {
+                                        (2.0, 0.0, MdlPipelineKind::Additive, 1.0)
+                                    } else {
+                                        (0.0, 0.0, MdlPipelineKind::Opaque, 1.0)
                                     }
                                 }
-                            };
+                                EntRenderMode::TransColor => {
+                                    (1.0, 0.0, MdlPipelineKind::Alpha, inst.renderamt)
+                                }
+                                EntRenderMode::TransTexture | EntRenderMode::Glow => {
+                                    (4.0, 0.0, MdlPipelineKind::Alpha, inst.blend)
+                                }
+                                EntRenderMode::TransAlpha => {
+                                    (3.0, 0.0, MdlPipelineKind::Alpha, inst.blend)
+                                }
+                                EntRenderMode::TransAdd => {
+                                    (2.0, 0.0, MdlPipelineKind::Additive, inst.blend)
+                                }
+                            }
+                        };
 
-                            let u = MdlUniforms {
-                                view_proj: params.view_proj.to_cols_array_2d(),
-                                camera_pos: [
-                                    params.camera_pos.x,
-                                    params.camera_pos.y,
-                                    params.camera_pos.z,
-                                    1.0,
-                                ],
-                                cam_right: [
-                                    params.cam_right.x,
-                                    params.cam_right.y,
-                                    params.cam_right.z,
-                                    0.0,
-                                ],
-                                cam_up: [params.cam_up.x, params.cam_up.y, params.cam_up.z, 0.0],
-                                fog_color_density: [fog_rgb[0], fog_rgb[1], fog_rgb[2], fog_density],
-                                gamma_params: gamma_vec,
-                                light_color: [
-                                    inst.light_rgb.x,
-                                    inst.light_rgb.y,
-                                    inst.light_rgb.z,
-                                    if alpha_test { 1.0 } else { 0.0 },
-                                ],
-                                render_color: [
-                                    inst.rendercolor[0],
-                                    inst.rendercolor[1],
-                                    inst.rendercolor[2],
-                                    alpha_val,
-                                ],
-                                flags_params: [
-                                    shader_mode,
-                                    (tex_flags & (STUDIO_NF_FLATSHADE | STUDIO_NF_CHROME | STUDIO_NF_ADDITIVE)) as f32,
-                                    shell_offset,
-                                    light_mul,
-                                ],
-                            };
-                            let start = uniform_bytes.len();
-                            uniform_bytes.resize(start + self.uniform_stride as usize, 0);
-                            let raw = bytemuck::bytes_of(&u);
-                            uniform_bytes[start..start + raw.len()].copy_from_slice(raw);
+                        let u = MdlUniforms {
+                            view_proj: params.view_proj.to_cols_array_2d(),
+                            camera_pos: [
+                                params.camera_pos.x,
+                                params.camera_pos.y,
+                                params.camera_pos.z,
+                                1.0,
+                            ],
+                            cam_right: [
+                                params.cam_right.x,
+                                params.cam_right.y,
+                                params.cam_right.z,
+                                0.0,
+                            ],
+                            cam_up: [params.cam_up.x, params.cam_up.y, params.cam_up.z, 0.0],
+                            fog_color_density: [fog_rgb[0], fog_rgb[1], fog_rgb[2], fog_density],
+                            gamma_params: gamma_vec,
+                            light_color: [
+                                light_color.x,
+                                light_color.y,
+                                light_color.z,
+                                if alpha_test { 1.0 } else { 0.0 },
+                            ],
+                            render_color: [
+                                inst.rendercolor[0],
+                                inst.rendercolor[1],
+                                inst.rendercolor[2],
+                                alpha_val,
+                            ],
+                            flags_params: [
+                                shader_mode,
+                                (tex_flags
+                                    & (STUDIO_NF_FLATSHADE
+                                        | STUDIO_NF_CHROME
+                                        | STUDIO_NF_ADDITIVE
+                                        | STUDIO_NF_MASKED)) as f32,
+                                shell_offset,
+                                light_mul,
+                            ],
+                            studio_light_vec: [
+                                plight_vec.x,
+                                plight_vec.y,
+                                plight_vec.z,
+                                ambient_light,
+                            ],
+                            studio_light_params: [shade_light, 0.0, 0.0, 0.0],
+                        };
+                        let start = self.scratch_uniform_bytes.len();
+                        self.scratch_uniform_bytes.resize(start + uniform_stride, 0);
+                        let raw = bytemuck::bytes_of(&u);
+                        self.scratch_uniform_bytes[start..start + raw.len()].copy_from_slice(raw);
 
-                            draws.push(PreparedDraw {
-                                model_key: m_key.to_string(),
-                                tex_idx,
-                                first_vertex,
-                                vertex_count,
+                        self.prepared_draws.push(PreparedDraw {
+                            model_id: m_id,
+                            bodypart_idx: bi as u16,
+                            submodel_idx: sub_idx as u16,
+                            tex_idx: tex_idx as u16,
+                            first_vertex: mesh.first_vertex,
+                            vertex_count: mesh.vertex_count,
+                            uniform_slot,
+                            bone_byte_offset,
+                            pipe_kind,
+                        });
+                        uniform_slot += 1;
+
+                        if !shell_only
+                            && let Some(xray_rgb) = inst.xray_color
+                        {
+                            let xray_u = MdlUniforms {
+                                render_color: [xray_rgb[0], xray_rgb[1], xray_rgb[2], 0.65],
+                                flags_params: [6.0, 0.0, 0.0, 1.0],
+                                ..u
+                            };
+                            let x_start = self.scratch_uniform_bytes.len();
+                            self.scratch_uniform_bytes.resize(x_start + uniform_stride, 0);
+                            let x_raw = bytemuck::bytes_of(&xray_u);
+                            self.scratch_uniform_bytes[x_start..x_start + x_raw.len()]
+                                .copy_from_slice(x_raw);
+
+                            self.prepared_draws.push(PreparedDraw {
+                                model_id: m_id,
+                                bodypart_idx: bi as u16,
+                                submodel_idx: sub_idx as u16,
+                                tex_idx: tex_idx as u16,
+                                first_vertex: mesh.first_vertex,
+                                vertex_count: mesh.vertex_count,
                                 uniform_slot,
-                                pipe_kind,
+                                bone_byte_offset,
+                                pipe_kind: MdlPipelineKind::XRay,
                             });
                             uniform_slot += 1;
-
-                            if !shell_only
-                                && let Some(xray_rgb) = inst.xray_color
-                            {
-                                let xray_u = MdlUniforms {
-                                    render_color: [xray_rgb[0], xray_rgb[1], xray_rgb[2], 0.65],
-                                    flags_params: [6.0, 0.0, 0.0, 1.0],
-                                    ..u
-                                };
-                                let x_start = uniform_bytes.len();
-                                uniform_bytes.resize(x_start + self.uniform_stride as usize, 0);
-                                let x_raw = bytemuck::bytes_of(&xray_u);
-                                uniform_bytes[x_start..x_start + x_raw.len()]
-                                    .copy_from_slice(x_raw);
-
-                                draws.push(PreparedDraw {
-                                    model_key: m_key.to_string(),
-                                    tex_idx,
-                                    first_vertex,
-                                    vertex_count,
-                                    uniform_slot,
-                                    pipe_kind: MdlPipelineKind::XRay,
-                                });
-                                uniform_slot += 1;
-                            }
+                            xray_draws += 1;
                         }
                     }
-                };
+                }
+            };
 
-            push_model(&key, cached, &bones, false);
+            let main_bone_offset = stage_bone_palette(
+                &mut self.scratch_bone_bytes,
+                bone_align,
+                cached,
+                base_xf,
+                &self.bone_scratch.bones[..bone_count],
+            );
+            push_posed_model(model_id, cached, main_bone_offset, false);
             if inst.renderfx == RENDERFX_GLOW_SHELL {
-                push_model(&key, cached, &bones, true);
+                push_posed_model(model_id, cached, main_bone_offset, true);
             }
 
-            if let Some(ref att_key) = attached_key
-                && let Some(Some(att_cached)) = self.cache.get(att_key)
+            if let Some(att_id) = attached_id
+                && let Some(Some(att_cached)) = self.models.get(att_id as usize)
             {
-                let merged_bones = att_cached.mdl.evaluate_bones_merged(&cached.mdl, &bones);
-                push_model(att_key, att_cached, &merged_bones, false);
+                let merged_count = eval_bones_merged_into(
+                    &att_cached.mdl,
+                    &cached.mdl,
+                    &self.bone_scratch.bones[..bone_count],
+                    &mut self.bone_scratch.merged_bones,
+                );
+                let att_bone_offset = stage_bone_palette(
+                    &mut self.scratch_bone_bytes,
+                    bone_align,
+                    att_cached,
+                    base_xf,
+                    &self.bone_scratch.merged_bones[..merged_count],
+                );
+                push_posed_model(att_id, att_cached, att_bone_offset, false);
                 if inst.renderfx == RENDERFX_GLOW_SHELL {
-                    push_model(att_key, att_cached, &merged_bones, true);
+                    push_posed_model(att_id, att_cached, att_bone_offset, true);
                 }
             }
-        }
-
-        if all_verts.len() > self.vertex_cap {
-            self.vertex_cap = all_verts.len().next_power_of_two();
-            self.vertex_buf = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("mdl_dynamic_vbuf"),
-                size: (self.vertex_cap * std::mem::size_of::<MdlGpuVertex>()) as u64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-        }
-        if !all_verts.is_empty() {
-            queue.write_buffer(&self.vertex_buf, 0, bytemuck::cast_slice(&all_verts));
-            self.frame_upload_bytes +=
-                (all_verts.len() * std::mem::size_of::<MdlGpuVertex>()) as u64;
         }
 
         if (uniform_slot as usize) > self.uniform_cap {
@@ -1252,15 +1818,39 @@ impl MdlRenderer {
                 &self.uniform_bgl,
                 &self.uniform_buf,
                 raw_size,
-                &self.lights_buf,
+                &self.light_gamma_buf,
             );
         }
-        if !uniform_bytes.is_empty() {
-            queue.write_buffer(&self.uniform_buf, 0, &uniform_bytes);
-            self.frame_upload_bytes += uniform_bytes.len() as u64;
+        if !self.scratch_uniform_bytes.is_empty() {
+            queue.write_buffer(&self.uniform_buf, 0, &self.scratch_uniform_bytes);
+            self.frame_upload_bytes += self.scratch_uniform_bytes.len() as u64;
         }
 
-        PreparedMdlPass { draws }
+        // Ensure every dynamic offset + BONE_UNIFORM_BINDING_SIZE (6,144 B) stays strictly in-bounds
+        // of `bone_buf` for both WebGPU and WebGL2 validation.
+        let required_bone_cap = self
+            .scratch_bone_bytes
+            .len()
+            .saturating_add(BONE_UNIFORM_BINDING_SIZE as usize);
+        if required_bone_cap > self.bone_buf_cap {
+            self.bone_buf_cap = required_bone_cap.next_power_of_two();
+            self.bone_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("mdl_bone_palette_ubuf"),
+                size: self.bone_buf_cap as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.bone_bg = create_mdl_bone_bg(device, &self.bone_bgl, &self.bone_buf);
+        }
+        if !self.scratch_bone_bytes.is_empty() {
+            queue.write_buffer(&self.bone_buf, 0, &self.scratch_bone_bytes);
+            self.frame_upload_bytes += self.scratch_bone_bytes.len() as u64;
+        }
+
+        PreparedMdlPass {
+            total_draws: self.prepared_draws.len(),
+            xray_draws,
+        }
     }
 
     pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, prepared: &PreparedMdlPass) {
@@ -1304,13 +1894,13 @@ impl MdlRenderer {
             self.shadow_vertex_count = 0;
             return;
         }
-        let mut verts = Vec::with_capacity(shadows.len() * 24);
+        self.scratch_shadow_verts.clear();
         for s in shadows {
-            verts.extend(build_shadow_disc_vertices(s));
+            push_shadow_disc_vertices(s, &mut self.scratch_shadow_verts);
         }
-        self.shadow_vertex_count = verts.len() as u32;
-        if verts.len() > self.shadow_vbuf_cap {
-            self.shadow_vbuf_cap = verts.len().next_power_of_two();
+        self.shadow_vertex_count = self.scratch_shadow_verts.len() as u32;
+        if self.scratch_shadow_verts.len() > self.shadow_vbuf_cap {
+            self.shadow_vbuf_cap = self.scratch_shadow_verts.len().next_power_of_two();
             self.shadow_vbuf = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("mdl_shadow_vbuf"),
                 size: (self.shadow_vbuf_cap * std::mem::size_of::<MdlShadowVertex>()) as u64,
@@ -1318,10 +1908,14 @@ impl MdlRenderer {
                 mapped_at_creation: false,
             });
         }
-        if !verts.is_empty() {
-            queue.write_buffer(&self.shadow_vbuf, 0, bytemuck::cast_slice(&verts));
+        if !self.scratch_shadow_verts.is_empty() {
+            queue.write_buffer(
+                &self.shadow_vbuf,
+                0,
+                bytemuck::cast_slice(&self.scratch_shadow_verts),
+            );
             self.frame_upload_bytes +=
-                (verts.len() * std::mem::size_of::<MdlShadowVertex>()) as u64;
+                (self.scratch_shadow_verts.len() * std::mem::size_of::<MdlShadowVertex>()) as u64;
         }
     }
 
@@ -1383,6 +1977,9 @@ impl MdlRenderer {
         pass: &mut wgpu::RenderPass<'a>,
         prepared: &PreparedMdlPass,
     ) -> usize {
+        if prepared.xray_draws == 0 {
+            return 0;
+        }
         self.draw_filtered(pass, prepared, |k| k == MdlPipelineKind::XRay)
     }
 
@@ -1392,36 +1989,91 @@ impl MdlRenderer {
         prepared: &PreparedMdlPass,
         pred: fn(MdlPipelineKind) -> bool,
     ) -> usize {
-        if prepared.draws.is_empty() {
+        if prepared.total_draws == 0 || self.prepared_draws.is_empty() {
             return 0;
         }
         let mut draw_calls = 0usize;
-        pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
-        for d in &prepared.draws {
+        let mut last_pipe: Option<MdlPipelineKind> = None;
+        let mut last_vbuf: Option<(u32, u16, u16)> = None;
+        let mut last_bone_offset: Option<u32> = None;
+        let mut last_tex: Option<(u32, u16)> = None;
+
+        for d in &self.prepared_draws {
             if !pred(d.pipe_kind) {
                 continue;
             }
-            let Some(Some(cached)) = self.cache.get(&d.model_key) else {
+            let Some(Some(cached)) = self.models.get(d.model_id as usize) else {
                 continue;
             };
-            let Some(tex) = cached.textures.get(d.tex_idx) else {
+            let Some(tex) = cached.textures.get(d.tex_idx as usize) else {
                 continue;
             };
-            let pipe = match d.pipe_kind {
-                MdlPipelineKind::Opaque => &self.opaque_pipeline,
-                MdlPipelineKind::Alpha => &self.alpha_pipeline,
-                MdlPipelineKind::Additive => &self.additive_pipeline,
-                MdlPipelineKind::XRay => &self.xray_pipeline,
+            let Some(sub_gpu) = cached
+                .bodyparts
+                .get(d.bodypart_idx as usize)
+                .and_then(|bp| bp.submodels.get(d.submodel_idx as usize))
+            else {
+                continue;
             };
-            pass.set_pipeline(pipe);
-            let offset = d.uniform_slot * (self.uniform_stride as u32);
-            pass.set_bind_group(0, &self.uniform_bg, &[offset]);
-            pass.set_bind_group(1, &tex.bg, &[]);
+            let Some(ref vbuf) = sub_gpu.vertex_buf else {
+                continue;
+            };
+
+            if last_pipe != Some(d.pipe_kind) {
+                let pipe = match d.pipe_kind {
+                    MdlPipelineKind::Opaque => &self.opaque_pipeline,
+                    MdlPipelineKind::Alpha => &self.alpha_pipeline,
+                    MdlPipelineKind::Additive => &self.additive_pipeline,
+                    MdlPipelineKind::XRay => &self.xray_pipeline,
+                };
+                pass.set_pipeline(pipe);
+                last_pipe = Some(d.pipe_kind);
+            }
+            let vbuf_key = (d.model_id, d.bodypart_idx, d.submodel_idx);
+            if last_vbuf != Some(vbuf_key) {
+                pass.set_vertex_buffer(0, vbuf.slice(..));
+                last_vbuf = Some(vbuf_key);
+            }
+            let u_offset = d.uniform_slot * (self.uniform_stride as u32);
+            pass.set_bind_group(0, &self.uniform_bg, &[u_offset]);
+            let tex_key = (d.model_id, d.tex_idx);
+            if last_tex != Some(tex_key) {
+                pass.set_bind_group(1, &tex.bg, &[]);
+                last_tex = Some(tex_key);
+            }
+            if last_bone_offset != Some(d.bone_byte_offset) {
+                pass.set_bind_group(2, &self.bone_bg, &[d.bone_byte_offset]);
+                last_bone_offset = Some(d.bone_byte_offset);
+            }
             pass.draw(d.first_vertex..d.first_vertex + d.vertex_count, 0..1);
             draw_calls += 1;
         }
         draw_calls
     }
+}
+
+fn stage_bone_palette(
+    dst: &mut Vec<u8>,
+    bone_align: usize,
+    cached_m: &CachedGpuModel,
+    base_xf: Mat4,
+    bones: &[Mat4],
+) -> u32 {
+    let raw_bytes = cached_m.gpu_bone_slots * BONE_MATRIX_BYTES;
+    let aligned_bytes = raw_bytes.div_ceil(bone_align) * bone_align;
+    let offset = dst.len();
+    dst.resize(offset + aligned_bytes, 0);
+    for b in 0..cached_m.model_bone_count {
+        let bm = bones.get(b).copied().unwrap_or(Mat4::IDENTITY);
+        write_bone_3x4(&mut dst[offset + b * BONE_MATRIX_BYTES..], base_xf * bm);
+    }
+    if let Some(fb) = cached_m.fallback_bone_slot {
+        write_bone_3x4(
+            &mut dst[offset + (fb as usize) * BONE_MATRIX_BYTES..],
+            base_xf,
+        );
+    }
+    offset as u32
 }
 
 /// Port of `R_EntityDynamicLight` (`ref/common/ref_light.c:520-685`, read 2026-11-24).
@@ -1475,9 +2127,10 @@ fn compute_entity_lighting(
     (ambientlight, shadelight, lightcolor, plightvec)
 }
 
-/// Port of `R_StudioLighting` (`ref/gl/gl_studio.c:1324-1370`, `SHADE_LAMBERT = 1.4953241`,
-/// read 2026-11-24).
-fn r_studio_lighting(
+/// CPU reference port of `R_StudioLighting` (`ref/gl/gl_studio.c:1324-1370`,
+/// `SHADE_LAMBERT = 1.4953241`, read 2026-11-24). Kept for GPU vertex-shader parity verification.
+#[cfg(test)]
+fn r_studio_lighting_cpu_ref(
     tables: &GammaTables,
     tex_flags: i32,
     normal: Vec3,
@@ -1501,7 +2154,7 @@ fn r_studio_lighting(
         }
         lum.max(0.0)
     };
-    let clamped = illum.min(255.0);
+    let clamped = illum.clamp(0.0, 255.0);
     tables.light_to_tex_gamma_unit((clamped * 4.0) as u32)
 }
 
@@ -1541,7 +2194,7 @@ pub fn viewmodel_transform(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cs_assets::mdl::{MdlBodyPart, MdlSubModel};
+    use cs_assets::mdl::{MdlBodyPart, MdlMesh, MdlSubModel, MdlTexture, MdlVertexRef};
 
     fn part(n: usize) -> MdlBodyPart {
         MdlBodyPart {
@@ -1553,6 +2206,81 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    fn wgsl_lookup_light_gamma(lut: &LightGammaUniform, b_10bit: u32) -> f32 {
+        let idx = b_10bit.min(1023);
+        let v = lut.entries[(idx >> 3) as usize];
+        let packed = v[((idx >> 1) & 3) as usize];
+        let val = if (idx & 1) != 0 {
+            packed >> 16
+        } else {
+            packed & 0xFFFF
+        };
+        (val as f32) / 1023.0
+    }
+
+    fn wgsl_skin_and_shade(
+        bones_buf: &[u8],
+        lut: &LightGammaUniform,
+        pos: Vec3,
+        normal: Vec3,
+        uv: [f32; 2],
+        bone_idx: u32,
+        tex_flags: u32,
+        ambientlight: f32,
+        shadelight: f32,
+        plightvec: Vec3,
+        light_color: Vec3,
+        cam_right: Vec3,
+        cam_up: Vec3,
+    ) -> (Vec3, Vec3, [f32; 2], Vec3) {
+        let base = (bone_idx.min(127) as usize) * BONE_MATRIX_BYTES;
+        let rows: [[f32; 4]; 3] = *bytemuck::from_bytes(&bones_buf[base..base + BONE_MATRIX_BYTES]);
+        let r0 = glam::Vec4::from_array(rows[0]);
+        let r1 = glam::Vec4::from_array(rows[1]);
+        let r2 = glam::Vec4::from_array(rows[2]);
+        let p4 = pos.extend(1.0);
+        let wp = Vec3::new(r0.dot(p4), r1.dot(p4), r2.dot(p4));
+        let n_raw = Vec3::new(
+            r0.truncate().dot(normal),
+            r1.truncate().dot(normal),
+            r2.truncate().dot(normal),
+        );
+        let n = if n_raw.length_squared() > 1e-12 {
+            n_raw / n_raw.length()
+        } else {
+            Vec3::ZERO
+        };
+
+        const TEX_FLAG_FLATSHADE: u32 = 1;
+        const TEX_FLAG_CHROME: u32 = 2;
+        const TEX_FLAG_FULLBRIGHT: u32 = 64;
+        const SHADE_LAMBERT: f32 = 1.4953241;
+
+        let lv = if (tex_flags & TEX_FLAG_FULLBRIGHT) != 0 {
+            1.0
+        } else {
+            let illum = if (tex_flags & TEX_FLAG_FLATSHADE) != 0 {
+                ambientlight + shadelight * 0.8
+            } else {
+                let mut lum = ambientlight + shadelight;
+                let lightcos = n.dot(plightvec).min(1.0);
+                let adj = (lightcos + (SHADE_LAMBERT - 1.0)) / SHADE_LAMBERT;
+                if adj > 0.0 {
+                    lum -= shadelight * adj;
+                }
+                lum.max(0.0)
+            };
+            let clamped = illum.clamp(0.0, 255.0);
+            wgsl_lookup_light_gamma(lut, (clamped * 4.0) as u32)
+        };
+        let out_uv = if (tex_flags & TEX_FLAG_CHROME) != 0 {
+            [n.dot(cam_right) * 0.5 + 0.5, -n.dot(cam_up) * 0.5 + 0.5]
+        } else {
+            uv
+        };
+        (wp, n, out_uv, light_color * lv)
     }
 
     #[test]
@@ -1617,5 +2345,576 @@ mod tests {
             let d1 = (Vec3::from_array(tri[1].position) - shadow.origin).length();
             assert!((d1 - 18.0).abs() < 1e-4);
         }
+    }
+
+    #[test]
+    fn uniform_buffers_fit_webgl2_limit_and_light_gamma_lut_is_bit_exact() {
+        let webgl2_limit = wgpu::Limits::downlevel_webgl2_defaults().max_uniform_buffer_binding_size as usize;
+        assert_eq!(std::mem::size_of::<MdlBonesUniform>(), 6144);
+        assert_eq!(std::mem::size_of::<LightGammaUniform>(), 2048);
+        assert!(std::mem::size_of::<MdlUniforms>() <= webgl2_limit);
+        assert!(std::mem::size_of::<MdlBonesUniform>() <= webgl2_limit);
+        assert!(std::mem::size_of::<LightGammaUniform>() <= webgl2_limit);
+
+        for cfg in [
+            GoldSrcGammaConfig::default(),
+            GoldSrcGammaConfig {
+                gamma: 2.5,
+                brightness: 1.5,
+                texgamma: 2.0,
+                lightgamma: 2.2,
+            },
+            GoldSrcGammaConfig {
+                gamma: 1.8,
+                brightness: 0.0,
+                texgamma: 2.8,
+                lightgamma: 3.0,
+            },
+        ] {
+            let tables = GammaTables::build(cfg);
+            let lut = pack_light_gamma_uniform(&tables);
+            for i in 0..1024u32 {
+                assert_eq!(
+                    wgsl_lookup_light_gamma(&lut, i),
+                    tables.light_to_tex_gamma_unit(i),
+                    "mismatch at entry {i} for {cfg:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_skinning_matches_cpu_reference_on_synthetic_chrome_and_righthand() {
+        let mdl = StudioModel {
+            name: "synth.mdl".into(),
+            bones: vec![
+                MdlBone {
+                    name: "root".into(),
+                    parent: -1,
+                    bonecontroller: [-1; 6],
+                    default_pos: Vec3::new(1.0, -2.0, 3.0),
+                    default_rot: Vec3::new(0.2, -0.3, 0.5),
+                    pos_scale: Vec3::ONE,
+                    rot_scale: Vec3::ONE,
+                },
+                MdlBone {
+                    name: "Bip01 Spine".into(),
+                    parent: 0,
+                    bonecontroller: [-1; 6],
+                    default_pos: Vec3::new(0.0, 4.0, 8.0),
+                    default_rot: Vec3::new(-0.15, 0.45, -0.25),
+                    pos_scale: Vec3::ONE,
+                    rot_scale: Vec3::ONE,
+                },
+            ],
+            controllers: Vec::new(),
+            attachments: Vec::new(),
+            hitboxes: Vec::new(),
+            sequences: Vec::new(),
+            seq_groups: Vec::new(),
+            textures: vec![
+                MdlTexture {
+                    name: "chrome".into(),
+                    width: 4,
+                    height: 4,
+                    flags: STUDIO_NF_CHROME,
+                    rgba: vec![200; 64],
+                },
+                MdlTexture {
+                    name: "flat".into(),
+                    width: 4,
+                    height: 4,
+                    flags: STUDIO_NF_FLATSHADE,
+                    rgba: vec![180; 64],
+                },
+                MdlTexture {
+                    name: "masked".into(),
+                    width: 4,
+                    height: 4,
+                    flags: STUDIO_NF_MASKED,
+                    rgba: vec![255; 64],
+                },
+            ],
+            skin_families: vec![vec![0, 1, 2]],
+            bodyparts: vec![MdlBodyPart {
+                name: "body".into(),
+                submodels: vec![MdlSubModel {
+                    name: "s0".into(),
+                    meshes: vec![
+                        MdlMesh {
+                            texture_index: 0,
+                            skinref: 0,
+                            vertices: vec![MdlVertexRef {
+                                pos: Vec3::new(3.5, -1.25, 7.0),
+                                normal: Vec3::new(0.4, -0.5, 0.7681146).normalize(),
+                                bone: 1,
+                                uv: [0.25, 0.75],
+                            }],
+                        },
+                        MdlMesh {
+                            texture_index: 1,
+                            skinref: 1,
+                            vertices: vec![MdlVertexRef {
+                                pos: Vec3::new(-2.0, 5.0, 1.0),
+                                normal: Vec3::new(-0.6, 0.2, 0.7745967).normalize(),
+                                bone: 0,
+                                uv: [0.5, 0.5],
+                            }],
+                        },
+                        MdlMesh {
+                            texture_index: 2,
+                            skinref: 2,
+                            vertices: vec![MdlVertexRef {
+                                pos: Vec3::new(0.5, 0.5, -2.0),
+                                normal: Vec3::Y,
+                                bone: 1,
+                                uv: [0.1, 0.9],
+                            }],
+                        },
+                    ],
+                }],
+            }],
+        };
+
+        let tables = GammaTables::build(GoldSrcGammaConfig {
+            gamma: 2.5,
+            brightness: 0.75,
+            texgamma: 2.0,
+            lightgamma: 2.5,
+        });
+        let lut = pack_light_gamma_uniform(&tables);
+        let mut lights = GpuLightsUniform::default();
+        lights.counts[0] = 1;
+        lights.dlight_pos_rad[0] = [40.0, -15.0, 25.0, 200.0];
+        lights.dlight_col[0] = [1.0, 0.7, 0.3, 1.0];
+
+        let cam_right = Vec3::new(0.0, -1.0, 0.0);
+        let cam_up = Vec3::Z;
+        let eval_params = BoneEvalParams::default();
+        let ref_bones = mdl.evaluate_bones_full(&eval_params);
+        let mask = compute_upper_body_mask(&mdl);
+        let mut scratch = BoneEvalScratch::new();
+        let n = eval_bones_into(&mdl, &mask, &eval_params, &mut scratch);
+        assert_eq!(n, ref_bones.len());
+        for i in 0..n {
+            assert!((scratch.bones[i] - ref_bones[i]).abs_diff_eq(Mat4::ZERO, 1e-6));
+        }
+
+        for right_handed in [false, true] {
+            let xf = viewmodel_transform_with_angles(
+                Vec3::new(10.0, 20.0, 30.0),
+                35.0,
+                -12.0,
+                4.0,
+                Vec3::new(1.0, 0.0, -0.5),
+                right_handed,
+            );
+            let (amb, shade, lcol, pvec) =
+                compute_entity_lighting(xf.w_axis.truncate(), Vec3::new(0.6, 0.7, 0.8), &lights, 0.9);
+            let mut bone_bytes = vec![0u8; mdl.bones.len() * BONE_MATRIX_BYTES];
+            for (b, &bm) in ref_bones.iter().enumerate() {
+                write_bone_3x4(&mut bone_bytes[b * BONE_MATRIX_BYTES..], xf * bm);
+            }
+            for mesh in &mdl.bodyparts[0].submodels[0].meshes {
+                let flags = mdl.textures[mesh.skinref].flags;
+                for v in &mesh.vertices {
+                    let m = xf * ref_bones[usize::from(v.bone)];
+                    let cpu_pos = m.transform_point3(v.pos);
+                    let cpu_norm = m.transform_vector3(v.normal).normalize_or_zero();
+                    let cpu_lv = r_studio_lighting_cpu_ref(&tables, flags, cpu_norm, amb, shade, pvec);
+                    let cpu_col = lcol * cpu_lv;
+                    let cpu_uv = if (flags & STUDIO_NF_CHROME) != 0 {
+                        [
+                            cpu_norm.dot(cam_right) * 0.5 + 0.5,
+                            -cpu_norm.dot(cam_up) * 0.5 + 0.5,
+                        ]
+                    } else {
+                        v.uv
+                    };
+                    let masked_flags = (flags
+                        & (STUDIO_NF_FLATSHADE | STUDIO_NF_CHROME | STUDIO_NF_ADDITIVE | STUDIO_NF_MASKED))
+                        as u32;
+                    let (gpu_pos, gpu_norm, gpu_uv, gpu_col) = wgsl_skin_and_shade(
+                        &bone_bytes,
+                        &lut,
+                        v.pos,
+                        v.normal,
+                        v.uv,
+                        u32::from(v.bone),
+                        masked_flags,
+                        amb,
+                        shade,
+                        pvec,
+                        lcol,
+                        cam_right,
+                        cam_up,
+                    );
+                    assert!((gpu_pos - cpu_pos).length() < 1e-4, "pos mismatch");
+                    assert!((gpu_norm - cpu_norm).length() < 1e-4, "norm mismatch");
+                    assert!((gpu_uv[0] - cpu_uv[0]).abs() < 1e-5 && (gpu_uv[1] - cpu_uv[1]).abs() < 1e-5);
+                    assert!(
+                        (gpu_col - cpu_col).abs().max_element() < (1.0 / 255.0),
+                        "color diff {:?} vs {:?}",
+                        gpu_col,
+                        cpu_col
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn gpu_skinning_parity_urban_and_v_ak47_with_chrome_and_righthand_if_installed() {
+        let Ok(gamedir) = std::env::var("CS16_GAMEDIR") else {
+            return;
+        };
+        let Ok(vfs) = Vfs::open(std::path::Path::new(&gamedir), cs_vfs::VfsConfig::default()) else {
+            return;
+        };
+        let Ok(urban) = StudioModel::load(&vfs, "models/player/urban/urban.mdl") else {
+            return;
+        };
+        let Ok(ak47) = StudioModel::load(&vfs, "models/v_ak47.mdl") else {
+            return;
+        };
+
+        let tables = GammaTables::build(GoldSrcGammaConfig {
+            gamma: 2.5,
+            brightness: 0.0,
+            texgamma: 2.0,
+            lightgamma: 2.5,
+        });
+        let lut = pack_light_gamma_uniform(&tables);
+        let mut lights = GpuLightsUniform::default();
+        lights.counts[0] = 1;
+        lights.dlight_pos_rad[0] = [64.0, 32.0, 48.0, 220.0];
+        lights.dlight_col[0] = [1.0, 0.85, 0.6, 1.0];
+        let cam_right = Vec3::new(0.0, -1.0, 0.0);
+        let cam_up = Vec3::Z;
+
+        // 1. Verify every vertex of urban.mdl (with gait + blending) and v_ak47.mdl (cl_righthand 0 & 1 + chrome!).
+        let urban_params = BoneEvalParams {
+            sequence: 4.min(urban.sequences.len().saturating_sub(1)),
+            frame: 5.5,
+            loop_anim: false,
+            blending: [160, 0],
+            controller: [127, 127, 127, 127],
+            mouth: 0,
+            prev_sequence: Some((0, 1.0, true, 0.35)),
+            gait: Some((1.min(urban.sequences.len().saturating_sub(1)), 3.25)),
+        };
+        let ak_params = BoneEvalParams {
+            sequence: 0,
+            frame: 2.5,
+            loop_anim: false,
+            ..BoneEvalParams::default()
+        };
+
+        let verify_model = |label: &str,
+                            mdl: &StudioModel,
+                            eval_params: &BoneEvalParams,
+                            xf: Mat4| -> (usize, usize) {
+            let ref_bones = mdl.evaluate_bones_full(eval_params);
+            let mask = compute_upper_body_mask(mdl);
+            let mut scratch = BoneEvalScratch::new();
+            let n = eval_bones_into(mdl, &mask, eval_params, &mut scratch);
+            assert_eq!(n, ref_bones.len(), "{label}: bone count");
+            for i in 0..n {
+                assert!(
+                    (scratch.bones[i] - ref_bones[i]).abs_diff_eq(Mat4::ZERO, 1e-5),
+                    "{label}: zero-alloc bone {i} drifted"
+                );
+            }
+
+            let mut bone_bytes = vec![0u8; ref_bones.len().max(1) * BONE_MATRIX_BYTES];
+            for (b, &bm) in ref_bones.iter().enumerate() {
+                write_bone_3x4(&mut bone_bytes[b * BONE_MATRIX_BYTES..], xf * bm);
+            }
+            let (amb, shade, lcol, pvec) =
+                compute_entity_lighting(xf.w_axis.truncate(), Vec3::splat(0.75), &lights, 0.9);
+
+            let mut verts_checked = 0usize;
+            let mut chrome_verts = 0usize;
+            for bp in &mdl.bodyparts {
+                let Some(sub) = bp.submodels.first() else {
+                    continue;
+                };
+                for mesh in &sub.meshes {
+                    let tex_idx = mdl
+                        .resolve_skin_texture(0, mesh.skinref)
+                        .min(mdl.textures.len().saturating_sub(1));
+                    let flags = mdl.textures.get(tex_idx).map(|t| t.flags).unwrap_or(0);
+                    let masked_flags = (flags
+                        & (STUDIO_NF_FLATSHADE | STUDIO_NF_CHROME | STUDIO_NF_ADDITIVE | STUDIO_NF_MASKED))
+                        as u32;
+                    for v in &mesh.vertices {
+                        let bm = ref_bones.get(usize::from(v.bone)).copied().unwrap_or(Mat4::IDENTITY);
+                        let m = xf * bm;
+                        let cpu_pos = m.transform_point3(v.pos);
+                        let cpu_norm = m.transform_vector3(v.normal).normalize_or_zero();
+                        let cpu_lv = r_studio_lighting_cpu_ref(&tables, flags, cpu_norm, amb, shade, pvec);
+                        let cpu_col = lcol * cpu_lv;
+                        let cpu_uv = if (flags & STUDIO_NF_CHROME) != 0 {
+                            chrome_verts += 1;
+                            [
+                                cpu_norm.dot(cam_right) * 0.5 + 0.5,
+                                -cpu_norm.dot(cam_up) * 0.5 + 0.5,
+                            ]
+                        } else {
+                            v.uv
+                        };
+                        let (gpu_pos, gpu_norm, gpu_uv, gpu_col) = wgsl_skin_and_shade(
+                            &bone_bytes,
+                            &lut,
+                            v.pos,
+                            v.normal,
+                            v.uv,
+                            u32::from(v.bone),
+                            masked_flags,
+                            amb,
+                            shade,
+                            pvec,
+                            lcol,
+                            cam_right,
+                            cam_up,
+                        );
+                        assert!(
+                            (gpu_pos - cpu_pos).length() < 1e-3,
+                            "{label}: pos diff {:?}",
+                            (gpu_pos - cpu_pos).length()
+                        );
+                        assert!(
+                            (gpu_norm - cpu_norm).length() < 1e-4,
+                            "{label}: norm diff {:?}",
+                            (gpu_norm - cpu_norm).length()
+                        );
+                        assert!(
+                            (gpu_uv[0] - cpu_uv[0]).abs() < 1e-4
+                                && (gpu_uv[1] - cpu_uv[1]).abs() < 1e-4,
+                            "{label}: uv diff {:?} vs {:?}",
+                            gpu_uv,
+                            cpu_uv
+                        );
+                        assert!(
+                            (gpu_col - cpu_col).abs().max_element() < (1.0 / 255.0),
+                            "{label}: color diff {:?} vs {:?}",
+                            gpu_col,
+                            cpu_col
+                        );
+                        verts_checked += 1;
+                    }
+                }
+            }
+            (verts_checked, chrome_verts)
+        };
+
+        let (urban_verts, _) = verify_model(
+            "urban.mdl",
+            &urban,
+            &urban_params,
+            Mat4::from_rotation_translation(Quat::from_rotation_z(0.6), Vec3::new(90.0, 0.0, -32.0)),
+        );
+        assert!(urban_verts > 500, "urban.mdl should have >500 verts, got {urban_verts}");
+
+        for right_handed in [false, true] {
+            let vm_xf = viewmodel_transform_with_angles(
+                Vec3::ZERO,
+                0.0,
+                0.0,
+                0.0,
+                Vec3::ZERO,
+                right_handed,
+            );
+            let (ak_verts, ak_chrome) = verify_model(
+                if right_handed { "v_ak47.mdl (righthand 1)" } else { "v_ak47.mdl (righthand 0)" },
+                &ak47,
+                &ak_params,
+                vm_xf,
+            );
+            assert!(ak_verts > 500, "v_ak47.mdl should have >500 verts, got {ak_verts}");
+            // v_ak47.mdl has chrome metallic parts if textures carry STUDIO_NF_CHROME; check non-negative.
+            let has_chrome_tex = ak47.textures.iter().any(|t| (t.flags & STUDIO_NF_CHROME) != 0);
+            if has_chrome_tex {
+                assert!(ak_chrome > 0, "v_ak47.mdl chrome vertices must be exercised");
+            }
+        }
+
+        // Also check bonemerge parity if p_ak47.mdl is present.
+        if let Ok(p_ak) = StudioModel::load(&vfs, "models/p_ak47.mdl") {
+            let ref_parent = urban.evaluate_bones_full(&urban_params);
+            let ref_merged = p_ak.evaluate_bones_merged(&urban, &ref_parent);
+            let mut merged_out = [Mat4::IDENTITY; MAX_GPU_BONES];
+            let mn = eval_bones_merged_into(&p_ak, &urban, &ref_parent, &mut merged_out);
+            assert_eq!(mn, ref_merged.len());
+            for i in 0..mn {
+                assert!((merged_out[i] - ref_merged[i]).abs_diff_eq(Mat4::ZERO, 1e-6));
+            }
+        }
+
+        // 2. End-to-end headless GPU render check for urban.mdl (normal + X-Ray) and v_ak47.mdl (righthand 1)
+        // under WebGL2 downlevel uniform limits!
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Some(adapter) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        }))
+        .ok() else {
+            return;
+        };
+        let limits = wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits());
+        let Ok((device, queue)) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("mdl-parity-webgl2-device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: limits,
+            ..Default::default()
+        })) else {
+            return;
+        };
+
+        let w = 128u32;
+        let h = 128u32;
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let color_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("mdl_parity_color"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let depth_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("mdl_parity_depth"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let color_view = color_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth_view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut mdl_r = MdlRenderer::new(&device, format);
+        let cam = crate::camera::Camera {
+            position: Vec3::ZERO,
+            yaw_deg: 0.0,
+            pitch_deg: 0.0,
+            roll_deg: 0.0,
+        };
+        let vp = cam.proj_matrix(w as f32, h as f32, 90.0, "widescreen") * cam.view_matrix();
+        let pass_params = MdlPassParams {
+            view_proj: vp,
+            camera_pos: cam.position,
+            cam_right: cam.right(),
+            cam_up: Vec3::Z,
+            lights,
+            ..MdlPassParams::default()
+        };
+        let urban_inst = StudioInstance {
+            model_path: "models/player/urban/urban.mdl",
+            transform: Mat4::from_rotation_translation(
+                Quat::from_rotation_z(std::f32::consts::PI),
+                Vec3::new(96.0, 0.0, -32.0),
+            ),
+            sequence: 4,
+            gait: Some((1, 2.0)),
+            attached_model: vfs.exists("models/p_ak47.mdl").then_some("models/p_ak47.mdl"),
+            xray_color: Some([0.25, 0.55, 1.0]),
+            ..StudioInstance::default()
+        };
+        let ak_inst = StudioInstance {
+            model_path: "models/v_ak47.mdl",
+            transform: viewmodel_transform_with_angles(Vec3::ZERO, 0.0, 0.0, 0.0, Vec3::ZERO, true),
+            sequence: 0,
+            flip_winding: false,
+            ..StudioInstance::default()
+        };
+        let prep = mdl_r.prepare_studio(&device, &queue, &vfs, &[urban_inst, ak_inst], &pass_params);
+        assert!(prep.total_draws() >= 2, "expected studio draws, got {}", prep.total_draws());
+        assert!(prep.xray_draw_count() > 0, "expected spec_xray draws for urban.mdl");
+
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mdl_parity_enc"),
+        });
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("mdl_parity_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            let opaque_calls = mdl_r.draw_opaque_counted(&mut pass, &prep);
+            let xray_calls = mdl_r.draw_xray_counted(&mut pass, &prep);
+            assert!(opaque_calls >= 2);
+            assert_eq!(xray_calls, prep.xray_draw_count());
+        }
+
+        let bpr = (w * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mdl_parity_readback"),
+            size: u64::from(bpr) * u64::from(h),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &color_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bpr),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        queue.submit(Some(enc.finish()));
+
+        let slice = staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        rx.recv().unwrap().unwrap();
+        let mapped = slice.get_mapped_range().unwrap();
+        let mut lit_pixels = 0usize;
+        for y in 0..h {
+            let row = &mapped[(y * bpr) as usize..(y * bpr + w * 4) as usize];
+            for px in row.as_chunks::<4>().0 {
+                if px[0] > 5 || px[1] > 5 || px[2] > 5 {
+                    lit_pixels += 1;
+                }
+            }
+        }
+        drop(mapped);
+        staging.unmap();
+        assert!(lit_pixels > 200, "GPU-skinned urban.mdl + v_ak47.mdl rendered too few pixels: {lit_pixels}");
     }
 }

@@ -350,6 +350,7 @@ struct UploadedMap {
     lighting: Vec<u8>,
     last_style_values: [f32; 64],
     cached_gamma: GoldSrcGammaConfig,
+    cached_gamma_tables: GammaTables,
     cached_tex_cfg: TextureUploadConfig,
     cached_overbright: bool,
     textures_raw: Vec<DecodedTexture>,
@@ -695,7 +696,7 @@ impl BspRenderer {
             ],
         });
 
-        let default_gamma = GoldSrcGammaConfig::default();
+        let default_gamma = GoldSrcGammaConfig::default().validated();
         let default_tables = GammaTables::build(default_gamma);
         let default_tex_cfg = TextureUploadConfig::default();
 
@@ -773,6 +774,7 @@ impl BspRenderer {
             lighting: map.lighting.clone(),
             last_style_values: [1.0; 64],
             cached_gamma: default_gamma,
+            cached_gamma_tables: default_tables,
             cached_tex_cfg: default_tex_cfg,
             cached_overbright: false,
             textures_raw: map.textures.clone(),
@@ -797,7 +799,6 @@ impl BspRenderer {
         let Some(map) = &mut self.uploaded else {
             return;
         };
-        let tables = GammaTables::build(map.cached_gamma);
         let dirty = map.lightmap_atlas.rebuild_with_dlights(
             &map.lighting,
             &map.dlight_infos,
@@ -805,7 +806,7 @@ impl BspRenderer {
             &map.last_style_values,
             &[],
             &mut map.prev_dlight_faces,
-            &tables,
+            &map.cached_gamma_tables,
             map.cached_overbright,
             false,
         );
@@ -834,9 +835,12 @@ impl BspRenderer {
         };
         let gamma_cfg = gamma_cfg.validated();
         let gamma_changed = map.cached_gamma != gamma_cfg;
+        if gamma_changed {
+            map.cached_gamma_tables = GammaTables::build(gamma_cfg);
+            map.cached_gamma = gamma_cfg;
+        }
         let tex_changed = gamma_changed || map.cached_tex_cfg != tex_cfg;
         let overbright_changed = map.cached_overbright != gl_overbright;
-        let tables = GammaTables::build(gamma_cfg);
 
         if tex_changed {
             map.tex_views.clear();
@@ -849,7 +853,7 @@ impl BspRenderer {
                     tex.width.max(1),
                     tex.height.max(1),
                     &tex.rgba,
-                    Some(&tables),
+                    Some(&map.cached_gamma_tables),
                     tex_cfg,
                 );
                 let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -880,12 +884,11 @@ impl BspRenderer {
             &map.last_style_values,
             dlights,
             &mut map.prev_dlight_faces,
-            &tables,
+            &map.cached_gamma_tables,
             gl_overbright,
             force_all,
         );
         map.last_style_values = *style_values;
-        map.cached_gamma = gamma_cfg;
         map.cached_overbright = gl_overbright;
         if !dirty.is_empty() {
             upload_dirty_lightmap_rects(queue, &map.lightmap_tex, &map.lightmap_atlas, &dirty);
