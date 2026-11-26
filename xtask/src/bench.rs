@@ -6,7 +6,7 @@
 //! - `delta`: Encode + decode `100,000` Protocol 48 deltas across `entity_state_player_t`,
 //!   `entity_state_t`, `clientdata_t`, and `usercmd_t` -> `ns/op` and `entities/sec`.
 //! - `client`: `1,000` client frames of `Connection` + `Predictor` (`CL_PredictMovement` with
-//!   5 unacked cmds) + `ViewBuilder::build` (32 studio players + 64 tempents + 24 decals) ->
+//!   5 unacked cmds) + `ViewBuilder::build_into` (32 studio players + 64 tempents + 24 decals) ->
 //!   `avg / p99` CPU `us/frame`.
 //! - `gpu` (`--suite gpu` or `--gpu`): Headless `1280x800` `de_dust2` `200` frames with `16`
 //!   studio models and `3` active smoke grenade clouds (`45` `gas_puff_01.spr` sprites) ->
@@ -28,7 +28,7 @@ use cs_assets::scheme::SkyboxTextures;
 use cs_client::camera::Camera;
 use cs_client::render::scene::{EntRenderMode, ModelRegistry, RenderEntity, SceneFrame, ViewBasis};
 use cs_client::render::{RenderSettings, Renderer, SceneDynamicData};
-use cs_client::view::{MapFxWorld, ViewBuilder, ViewInputs};
+use cs_client::view::{FrameView, MapFxWorld, ViewBuilder, ViewInputs};
 use cs_clientcore::tempents::{FxRandom, ModelRef, NoWorld, SmokeCloudConfig, ftent};
 use cs_clientcore::{ConnState, Connection, ConnectionConfig, SoundQueue};
 use cs_cvar::CVarRegistry;
@@ -39,7 +39,8 @@ use cs_pm::collision::{NO_COLLISION, WorldCollision};
 use cs_proto48::bitbuf::{MsgReader, MsgWriter};
 use cs_proto48::crypto::md5_hex;
 use cs_proto48::delta::{
-    DeltaRegistry, GoldSrcClientData, GoldSrcEntityState, GoldSrcUserCmd, read_delta, write_delta,
+    DeltaRegistry, GoldSrcClientData, GoldSrcEntityState, GoldSrcUserCmd, read_struct_delta,
+    write_struct_delta,
 };
 use cs_proto48::messages::{PacketEntitiesMsg, SvcMessage, SvcParseContext};
 use cs_proto48::tempent::TempEffect;
@@ -789,11 +790,6 @@ fn run_delta_bench(cfg: &BenchConfig) -> Result<DeltaBenchReport, String> {
         to_cmds,
     } = build_delta_fixtures();
 
-    let from_player_rec = base_player.to_delta(player_schema);
-    let from_ent_rec = base_ent.to_delta(ent_schema);
-    let from_cd_rec = base_cd.to_delta(cd_schema);
-    let from_cmd_rec = base_cmd.to_delta(cmd_schema);
-
     let total_ops = cfg.delta_ops;
     let time_base = 12.50f64;
     let batch_size = 200usize;
@@ -813,20 +809,44 @@ fn run_delta_bench(cfg: &BenchConfig) -> Result<DeltaBenchReport, String> {
             let variant = (op >> 2) & 15;
             match op & 3 {
                 0 => {
-                    let rec = to_players[variant].to_delta(player_schema);
-                    write_delta(&mut w, player_schema, &from_player_rec, &rec, true, time_base);
+                    write_struct_delta(
+                        &mut w,
+                        player_schema,
+                        &base_player,
+                        &to_players[variant],
+                        true,
+                        time_base,
+                    );
                 }
                 1 => {
-                    let rec = to_ents[variant].to_delta(ent_schema);
-                    write_delta(&mut w, ent_schema, &from_ent_rec, &rec, true, time_base);
+                    write_struct_delta(
+                        &mut w,
+                        ent_schema,
+                        &base_ent,
+                        &to_ents[variant],
+                        true,
+                        time_base,
+                    );
                 }
                 2 => {
-                    let rec = to_cds[variant].to_delta(cd_schema);
-                    write_delta(&mut w, cd_schema, &from_cd_rec, &rec, true, time_base);
+                    write_struct_delta(
+                        &mut w,
+                        cd_schema,
+                        &base_cd,
+                        &to_cds[variant],
+                        true,
+                        time_base,
+                    );
                 }
                 _ => {
-                    let rec = to_cmds[variant].to_delta(cmd_schema);
-                    write_delta(&mut w, cmd_schema, &from_cmd_rec, &rec, true, time_base);
+                    write_struct_delta(
+                        &mut w,
+                        cmd_schema,
+                        &base_cmd,
+                        &to_cmds[variant],
+                        true,
+                        time_base,
+                    );
                 }
             }
         }
@@ -842,27 +862,23 @@ fn run_delta_bench(cfg: &BenchConfig) -> Result<DeltaBenchReport, String> {
             let op = done + offset;
             match op & 3 {
                 0 => {
-                    let rec = read_delta(&mut r, player_schema, &from_player_rec, time_base)
+                    let st = read_struct_delta(&mut r, player_schema, &base_player, time_base)
                         .map_err(|e| format!("player delta decode failed: {e}"))?;
-                    let st = GoldSrcEntityState::from_delta(2, 1, &rec, player_schema);
                     black_box(st);
                 }
                 1 => {
-                    let rec = read_delta(&mut r, ent_schema, &from_ent_rec, time_base)
+                    let st = read_struct_delta(&mut r, ent_schema, &base_ent, time_base)
                         .map_err(|e| format!("entity delta decode failed: {e}"))?;
-                    let st = GoldSrcEntityState::from_delta(48, 1, &rec, ent_schema);
                     black_box(st);
                 }
                 2 => {
-                    let rec = read_delta(&mut r, cd_schema, &from_cd_rec, time_base)
+                    let cd = read_struct_delta(&mut r, cd_schema, &base_cd, time_base)
                         .map_err(|e| format!("clientdata delta decode failed: {e}"))?;
-                    let cd = GoldSrcClientData::from_delta(&rec, cd_schema);
                     black_box(cd);
                 }
                 _ => {
-                    let rec = read_delta(&mut r, cmd_schema, &from_cmd_rec, time_base)
+                    let cmd = read_struct_delta(&mut r, cmd_schema, &base_cmd, time_base)
                         .map_err(|e| format!("usercmd delta decode failed: {e}"))?;
-                    let cmd = GoldSrcUserCmd::from_delta(&rec, cmd_schema);
                     black_box(cmd);
                 }
             }
@@ -896,7 +912,7 @@ fn run_delta_bench(cfg: &BenchConfig) -> Result<DeltaBenchReport, String> {
 }
 
 // -----------------------------------------------------------------------------
-// Suite 3: Client Connection + Predictor (5 unacked) + ViewBuilder::build
+// Suite 3: Client Connection + Predictor (5 unacked) + ViewBuilder::build_into
 // -----------------------------------------------------------------------------
 
 fn run_client_bench(cfg: &BenchConfig) -> Result<ClientBenchReport, String> {
@@ -1170,6 +1186,7 @@ fn run_client_bench(cfg: &BenchConfig) -> Result<ClientBenchReport, String> {
     let mut decal_rng = FxRandom::new(0xDEC4_0024);
     let mut view_angles = Vec3::new(0.0, 15.0, 0.0);
 
+    let mut frame_view = FrameView::default();
     for step in 0..warmup_frames {
         now += conn_dt;
         view_angles.y = (15.0 + (step as f32) * 0.25) % 360.0;
@@ -1179,8 +1196,8 @@ fn run_client_bench(cfg: &BenchConfig) -> Result<ClientBenchReport, String> {
             frametime: 0.01,
             ..ViewInputs::default()
         };
-        let (fv, _) = view.build(&mut conn, view_angles, &inputs);
-        black_box(fv);
+        let _ = view.build_into(&mut frame_view, &mut conn, view_angles, &inputs);
+        black_box(&frame_view);
     }
 
     let mut samples_us = Vec::with_capacity(cfg.client_frames);
@@ -1193,7 +1210,7 @@ fn run_client_bench(cfg: &BenchConfig) -> Result<ClientBenchReport, String> {
         now += conn_dt;
         view_angles.y = (17.0 + (frame_idx as f32) * 0.25) % 360.0;
 
-        // Enqueue 24 decals for `ViewBuilder::build` to process on this frame.
+        // Enqueue 24 decals for `ViewBuilder::build_into` to process on this frame.
         tmp_sounds.clear();
         for d in 0..TARGET_DECALS {
             let ang = ((frame_idx + d) as f32) * (std::f32::consts::TAU / TARGET_DECALS as f32);
@@ -1219,13 +1236,13 @@ fn run_client_bench(cfg: &BenchConfig) -> Result<ClientBenchReport, String> {
 
         let t0 = Instant::now();
         conn.pump(now);
-        let (fv, _) = view.build(&mut conn, view_angles, &inputs);
+        let _ = view.build_into(&mut frame_view, &mut conn, view_angles, &inputs);
         let elapsed_us = t0.elapsed().as_secs_f64() * 1_000_000.0;
 
-        last_studio = fv.stats.studio;
-        last_tempents = fv.stats.tempents;
-        last_decals = fv.decals.len();
-        black_box(fv);
+        last_studio = frame_view.stats.studio;
+        last_tempents = frame_view.stats.tempents;
+        last_decals = frame_view.decals.len();
+        black_box(&frame_view);
         samples_us.push(elapsed_us);
     }
 
