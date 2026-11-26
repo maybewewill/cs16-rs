@@ -1,0 +1,10 @@
+[mod]
+id = "retakes"
+name = "Competitive Retakes (3T vs 4CT)"
+version = "1.0.0"
+api_version = 2
+side = "server"
+entry_server = "server.wasm"
+permissions = ["entities", "messages", "cvars", "commands", "menus", "timers", "storage", "weapons", "admins", "vfx", "sound"]
+fuel_per_frame = 2000000
+max_memory_bytes = 4194304

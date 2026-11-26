@@ -73,6 +73,20 @@ path = "../mods/gamemodes/zombie_plague"
 enabled = false
 runtime = "wasm"
 
+# Competitive Retakes (Rust -> WASM): 3T vs 4CT Bombsite A/B scenarios, /guns allocator, AWP lottery & streak scramble.
+# Set `enabled = true` (and disable conflicting gamemodes above) to run a Retakes server!
+[[plugins]]
+path = "../mods/gamemodes/retakes"
+enabled = false
+runtime = "wasm"
+
+# Competitive Multi-1v1 Arena Ladder (Zero-Compile Python 3): Arena 1..N winner-up/loser-down, /guns & /top1v1 Elo.
+# Set `enabled = true` (and disable conflicting gamemodes above) to run a Multi-1v1 Arena server!
+[[plugins]]
+path = "../mods/gamemodes/multi_1v1.py"
+enabled = false
+runtime = "python"
+
 # --- Legacy AMX Mod X (.amxx) Plugins ---
 # Drop compiled third-party .amxx plugins into `plugins/` or migrate with:
 #   cs-server --import-amxx <path/to/cstrike>
