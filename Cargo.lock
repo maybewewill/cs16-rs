@@ -665,6 +665,8 @@ dependencies = [
  "cs-assets",
  "cs-clientcore",
  "cs-cvar",
+ "cs-engine",
+ "cs-game",
  "cs-local",
  "cs-master",
  "cs-mod-api",

@@ -48,6 +48,9 @@ pub struct LocalOptions {
     pub amxx_dir: Option<PathBuf>,
     /// Optional `configs/plugins.toml` manifest for the unified mod + AMXX host.
     pub plugins_toml: Option<PathBuf>,
+    /// Server CVars applied onto [`vanilla_cvars`] BEFORE `server_activate` and host sign-on
+    /// (e.g. `mp_startmoney`, `mp_freezetime`, `mp_roundtime`, `mp_buytime`, `bot_difficulty`).
+    pub initial_cvars: Vec<(String, String)>,
 }
 
 impl Default for LocalOptions {
@@ -61,6 +64,7 @@ impl Default for LocalOptions {
             mods_dir: None,
             amxx_dir: None,
             plugins_toml: None,
+            initial_cvars: Vec::new(),
         }
     }
 }
@@ -78,7 +82,8 @@ pub fn vanilla_cvars() -> CVarRegistry {
 
 /// Loads `maps/<name>.bsp` through `vfs` as a server map.
 pub fn load_server_map(vfs: &Vfs, name: &str) -> Result<ServerMap, String> {
-    let bsp = Arc::new(BspMap::load(vfs, name).map_err(|e| format!("cannot load map {name}: {e}"))?);
+    let bsp =
+        Arc::new(BspMap::load(vfs, name).map_err(|e| format!("cannot load map {name}: {e}"))?);
     let path = format!("maps/{name}.bsp");
     let raw = vfs
         .read_bytes(&path)
@@ -110,7 +115,7 @@ pub fn load_decal_names(vfs: &Vfs) -> Vec<String> {
 /// on `map` with `game`, the Protocol 48 deltas, the vanilla cvars, the decal list of the game
 /// directory and the game files as the studio model loader (the players' hitboxes).
 pub fn new_server<G: GameDll>(cfg: ServerConfig, map: ServerMap, game: G, vfs: &Vfs) -> Server<G> {
-    new_server_with(cfg, map, game, Some(vfs))
+    new_server_with(cfg, map, game, Some(vfs), &[])
 }
 
 fn new_server_with<G: GameDll>(
@@ -118,8 +123,15 @@ fn new_server_with<G: GameDll>(
     map: ServerMap,
     game: G,
     vfs: Option<&Vfs>,
+    initial_cvars: &[(String, String)],
 ) -> Server<G> {
-    let mut server = Server::new(cfg, map, game, DeltaRegistry::cs16_default(), vanilla_cvars());
+    let mut cvars = vanilla_cvars();
+    for (k, v) in initial_cvars {
+        if !v.is_empty() {
+            cvars.set(k, v);
+        }
+    }
+    let mut server = Server::new(cfg, map, game, DeltaRegistry::cs16_default(), cvars);
     if let Some(vfs) = vfs {
         server.set_decals(load_decal_names(vfs));
         let model_vfs = vfs.clone();
@@ -214,8 +226,9 @@ impl LocalGame {
                 let _ = host.load_plugins_toml(toml_path)?;
                 if let Some(ref mut v) = vfs {
                     for (mod_id, entries) in host.loaded_mod_assets() {
-                        v.mount_mod_assets(&mod_id, entries)
-                            .map_err(|e| format!("failed to mount assets for mod `{mod_id}`: {e}"))?;
+                        v.mount_mod_assets(&mod_id, entries).map_err(|e| {
+                            format!("failed to mount assets for mod `{mod_id}`: {e}")
+                        })?;
                     }
                 }
             }
@@ -265,7 +278,13 @@ impl LocalGame {
             max_clients: opts.max_clients,
             ..ServerConfig::default()
         };
-        let server = LocalServer::Vanilla(Box::new(new_server_with(cfg, map, game, vfs.as_ref())));
+        let server = LocalServer::Vanilla(Box::new(new_server_with(
+            cfg,
+            map,
+            game,
+            vfs.as_ref(),
+            &opts.initial_cvars,
+        )));
         Self::finish_start(server, vfs, opts)
     }
 
@@ -289,7 +308,13 @@ impl LocalGame {
             ..ServerConfig::default()
         };
         let modded = ModdedGame::new(game, host);
-        let server = LocalServer::Modded(Box::new(new_server_with(cfg, map, modded, vfs.as_ref())));
+        let server = LocalServer::Modded(Box::new(new_server_with(
+            cfg,
+            map,
+            modded,
+            vfs.as_ref(),
+            &opts.initial_cvars,
+        )));
         Self::finish_start(server, vfs, opts)
     }
 
@@ -430,7 +455,9 @@ impl LocalGame {
         match &mut self.server {
             LocalServer::Vanilla(s) => s,
             LocalServer::Modded(_) => {
-                panic!("LocalGame is running a modded server; use modded_server_mut() or cs_game_mut()")
+                panic!(
+                    "LocalGame is running a modded server; use modded_server_mut() or cs_game_mut()"
+                )
             }
         }
     }
@@ -491,7 +518,10 @@ mod tests {
         // A Protocol 48 server starts at the vanilla 5 minutes; the shared registry keeps 1.75.
         assert_eq!(vanilla_cvars().get_f32("mp_roundtime"), 5.0);
         assert_eq!(vanilla_cvars().get_f32("bot_quota"), 0.0);
-        assert_eq!(CVarRegistry::new_with_defaults().get_f32("mp_roundtime"), 1.75);
+        assert_eq!(
+            CVarRegistry::new_with_defaults().get_f32("mp_roundtime"),
+            1.75
+        );
     }
 
     #[test]
@@ -530,7 +560,10 @@ mod tests {
                 break;
             }
         }
-        assert!(guest_in_game, "external PeerAddr::Web(1) should complete signon");
+        assert!(
+            guest_in_game,
+            "external PeerAddr::Web(1) should complete signon"
+        );
         assert_eq!(local.server().client_infos().len(), 2);
         assert!(!local.is_modded());
     }
@@ -576,11 +609,8 @@ mod tests {
                     "spawn #{idx} {:?} embedded in solid for hull {hull:?} (contents={contents})",
                     sp.position
                 );
-                let tr_down = coll.trace_world(
-                    sp.position,
-                    sp.position - Vec3::new(0.0, 0.0, 64.0),
-                    hull,
-                );
+                let tr_down =
+                    coll.trace_world(sp.position, sp.position - Vec3::new(0.0, 0.0, 64.0), hull);
                 assert!(
                     !tr_down.start_solid && !tr_down.all_solid && tr_down.fraction < 1.0,
                     "spawn #{idx} hull {hull:?} floor trace failed: {tr_down:?}"
@@ -625,7 +655,8 @@ mod tests {
             !crate_ray.start_solid && crate_ray.fraction < 1.0 && crate_ray.hit_solid,
             "Hull 0 bullet ray should hit NW crate: {crate_ray:?}"
         );
-        let floor_tex = coll.trace_texture(0, Vec3::new(0.0, 200.0, 64.0), Vec3::new(0.0, 200.0, -16.0));
+        let floor_tex =
+            coll.trace_texture(0, Vec3::new(0.0, 200.0, 64.0), Vec3::new(0.0, 200.0, -16.0));
         assert_eq!(floor_tex, Some("RH_FLOOR"));
 
         // 3. Boot a 5v5 ZBot match (9 bots + local player) on `dm_rusthouse` and run 600+ ticks.
@@ -656,7 +687,10 @@ mod tests {
         let _ = local.console("sv_restart 1");
         local.run_frames(130); // complete 1s restart + spawn all 10 players
 
-        assert!(local.cs_game().bot_nav_built(), "dm_rusthouse.nav should be loaded");
+        assert!(
+            local.cs_game().bot_nav_built(),
+            "dm_rusthouse.nav should be loaded"
+        );
 
         let snapshot_bot_positions = |g: &LocalGame| -> Vec<(u8, Vec3)> {
             let sv = g.server();
@@ -732,7 +766,10 @@ mod tests {
             max_moved_bots >= 6,
             "expected >= 6 ZBots actively navigating dm_rusthouse (>64u moved), got {max_moved_bots}"
         );
-        assert!(any_bot_fired, "expected ZBots to fire weapons on dm_rusthouse");
+        assert!(
+            any_bot_fired,
+            "expected ZBots to fire weapons on dm_rusthouse"
+        );
         assert!(
             any_damage_or_kill,
             "expected ZBots to engage in combat (damage/frags) on dm_rusthouse"

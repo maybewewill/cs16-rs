@@ -629,11 +629,12 @@ impl BuyClassTeamMenuUi {
                             );
                             self.map_scroll_y = scroll_out.inner.state.clamped_offset().y;
                         }
-                    } else if let Some(hover) = self
-                        .hovered_class
-                        .clone()
-                        .or_else(|| buttons.first().map(|btn| btn.field_name.clone()))
-                        && let Some(panel) = self.preview_panel(b.vfs, b.loc, &hover)
+                    } else if let Some(hover) = self.hovered_class.clone().or_else(|| {
+                        buttons
+                            .get(self.focus_index)
+                            .or_else(|| buttons.first())
+                            .map(|btn| btn.field_name.clone())
+                    }) && let Some(panel) = self.preview_panel(b.vfs, b.loc, &hover)
                     {
                         let origin = clamped_box.min;
 

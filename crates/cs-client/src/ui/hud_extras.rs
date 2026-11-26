@@ -76,6 +76,11 @@ pub fn format_status_bar(
         }
     };
     let team_id = state.status_values.get(&1).copied().unwrap_or(0);
+    // GoldSrc `CHudStatusBar::ParseStatusString` clears the target ID bar when
+    // `StatusValue(1, 0)` (no player under crosshair) or `%pN` resolves to slot 0.
+    if (trimmed.contains("%c") || trimmed.contains("%p")) && team_id <= 0 {
+        return None;
+    }
     let mut lines_out = Vec::new();
     for raw_line in trimmed.split(['\n', '\r']) {
         let mut line = raw_line.trim_start();
@@ -92,6 +97,7 @@ pub fn format_status_bar(
         let mut out = String::new();
         let chars: Vec<char> = line.chars().collect();
         let mut i = 0usize;
+        let mut missing_target = false;
         while i < chars.len() {
             if chars[i] == '%' && i + 1 < chars.len() {
                 let kind = chars[i + 1];
@@ -114,6 +120,8 @@ pub fn format_status_bar(
                                 .cloned()
                                 .unwrap_or_else(|| format!("Player #{slot1}"));
                             out.push_str(&name);
+                        } else {
+                            missing_target = true;
                         }
                         i += if idx.is_some() { 3 } else { 2 };
                         continue;
@@ -144,6 +152,9 @@ pub fn format_status_bar(
             }
             out.push(chars[i]);
             i += 1;
+        }
+        if missing_target {
+            return None;
         }
         let clean = out.trim();
         if !clean.is_empty() {

@@ -138,16 +138,20 @@ impl SchemeFontSet {
                                                 v.yres_max = nums.next();
                                             }
                                             "range" => {
-                                                let mut nums = val
-                                                    .split_whitespace()
-                                                    .filter_map(|n| {
-                                                        if let Some(hex) = n.strip_prefix("0x").or_else(|| n.strip_prefix("0X")) {
+                                                let mut nums =
+                                                    val.split_whitespace().filter_map(|n| {
+                                                        if let Some(hex) = n
+                                                            .strip_prefix("0x")
+                                                            .or_else(|| n.strip_prefix("0X"))
+                                                        {
                                                             u32::from_str_radix(hex, 16).ok()
                                                         } else {
                                                             n.parse::<u32>().ok()
                                                         }
                                                     });
-                                                if let (Some(a), Some(b)) = (nums.next(), nums.next()) {
+                                                if let (Some(a), Some(b)) =
+                                                    (nums.next(), nums.next())
+                                                {
                                                     v.range = Some((a, b));
                                                 }
                                             }
@@ -322,7 +326,8 @@ pub struct VguiTrueTypeFont {
 
 impl VguiTrueTypeFont {
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, String> {
-        let font = FontArc::try_from_vec(bytes.clone()).map_err(|e| format!("invalid font: {e}"))?;
+        let font =
+            FontArc::try_from_vec(bytes.clone()).map_err(|e| format!("invalid font: {e}"))?;
         Ok(Self { font, raw: bytes })
     }
 
@@ -365,7 +370,10 @@ impl VguiTrueTypeFont {
             width += scaled.h_advance(gid).round() as i32;
             prev = Some(gid);
         }
-        (width as f32, (scaled.ascent() - scaled.descent()).round().max(px_height))
+        (
+            width as f32,
+            (scaled.ascent() - scaled.descent()).round().max(px_height),
+        )
     }
 
     pub fn kern_i32(&self, prev: char, curr: char, px_height: f32) -> i32 {
@@ -420,7 +428,11 @@ impl VguiTrueTypeFont {
     /// - `underline` & `strikeout` horizontal strokes (`vgui2.dll:FUN_1000daf0`)
     /// - Gaussian `blur` pass when `opts.blur > 1` (`vgui2.dll:FUN_1001a9b0`, `sigma = blur * 0.683`)
     /// - `scanlines` darkening when `opts.scanlines > 1` (`vgui2.dll:FUN_1001aea0`)
-    pub fn rasterize_glyph_rgba(&self, ch: char, opts: &RasterizeOptions) -> Option<RasterizedGlyphRgba> {
+    pub fn rasterize_glyph_rgba(
+        &self,
+        ch: char,
+        opts: &RasterizeOptions,
+    ) -> Option<RasterizedGlyphRgba> {
         let px = self.gdi_px_scale(opts.tall);
         let scaled = self.font.as_scaled(PxScale::from(px));
         let gid = self.font.glyph_id(ch);
@@ -438,7 +450,12 @@ impl VguiTrueTypeFont {
                 let bounds = o.px_bounds();
                 let w = bounds.width().ceil().max(0.0) as i32 + embolden;
                 let h = bounds.height().ceil().max(0.0) as i32;
-                (bounds.min.x.round() as i32, bounds.min.y.round() as i32, w, h)
+                (
+                    bounds.min.x.round() as i32,
+                    bounds.min.y.round() as i32,
+                    w,
+                    h,
+                )
             }
             None => (0, baseline_i, 0, 0),
         };
@@ -461,9 +478,21 @@ impl VguiTrueTypeFont {
         let stroke_x1 = advance_x.max(bx0 + orig_gw);
 
         let mut gx0 = if orig_gw > 0 && orig_gh > 0 { bx0 } else { 0 };
-        let mut gy0 = if orig_gw > 0 && orig_gh > 0 { by0 } else { ul_y.min(so_y) };
-        let mut gx1 = if orig_gw > 0 && orig_gh > 0 { bx0 + orig_gw } else { stroke_x1 };
-        let mut gy1 = if orig_gw > 0 && orig_gh > 0 { by0 + orig_gh } else { gy0 };
+        let mut gy0 = if orig_gw > 0 && orig_gh > 0 {
+            by0
+        } else {
+            ul_y.min(so_y)
+        };
+        let mut gx1 = if orig_gw > 0 && orig_gh > 0 {
+            bx0 + orig_gw
+        } else {
+            stroke_x1
+        };
+        let mut gy1 = if orig_gw > 0 && orig_gh > 0 {
+            by0 + orig_gh
+        } else {
+            gy0
+        };
 
         if opts.underline && stroke_x1 > 0 {
             gx0 = gx0.min(0);
@@ -487,20 +516,99 @@ impl VguiTrueTypeFont {
         {
             let ox_off = (bx0 - gx0) as usize;
             let oy_off = (by0 - gy0) as usize;
-            o.draw(|x, y, cov| {
-                let dx = ox_off + x as usize;
-                let dy = oy_off + y as usize;
-                let idx = dy * (gw as usize) + dx;
-                if let Some(dst) = raw_alpha.get_mut(idx) {
-                    *dst = if opts.antialias {
-                        (cov.clamp(0.0, 1.0) * 255.0).round() as u8
-                    } else if cov >= 0.48 {
-                        255
-                    } else {
-                        0
-                    };
+            if opts.antialias {
+                o.draw(|x, y, cov| {
+                    let dx = ox_off + x as usize;
+                    let dy = oy_off + y as usize;
+                    let idx = dy * (gw as usize) + dx;
+                    if let Some(dst) = raw_alpha.get_mut(idx) {
+                        *dst = (cov.clamp(0.0, 1.0) * 255.0).round() as u8;
+                    }
+                });
+            } else {
+                // Collect raw sub-pixel coverage so unhinted 1px stems split across two pixel
+                // columns/rows (e.g. 'i', 'l', '1' at 10-12px Tahoma where both columns have
+                // cov ~0.40) never drop below the 0.48 binary cutoff (matching GDI grid-fitting).
+                let gwu = gw as usize;
+                let ghu = gh as usize;
+                let mut cov_grid = vec![0.0f32; gwu * ghu];
+                o.draw(|x, y, cov| {
+                    let dx = ox_off + x as usize;
+                    let dy = oy_off + y as usize;
+                    let idx = dy * gwu + dx;
+                    if let Some(dst) = cov_grid.get_mut(idx) {
+                        *dst = cov.clamp(0.0, 1.0);
+                    }
+                });
+                for (i, &c) in cov_grid.iter().enumerate() {
+                    if c >= 0.48 {
+                        raw_alpha[i] = 255;
+                    }
                 }
-            });
+                // Horizontal pass: recover thin vertical stems split across <=2 adjacent columns.
+                for y in 0..ghu {
+                    let row = y * gwu;
+                    let mut x = 0usize;
+                    while x < gwu {
+                        if cov_grid[row + x] <= 0.08 {
+                            x += 1;
+                            continue;
+                        }
+                        let start = x;
+                        let mut any_solid = false;
+                        let mut best_x = x;
+                        let mut best_cov = 0.0f32;
+                        let mut sum_cov = 0.0f32;
+                        while x < gwu && cov_grid[row + x] > 0.08 {
+                            let c = cov_grid[row + x];
+                            if raw_alpha[row + x] > 0 {
+                                any_solid = true;
+                            }
+                            if c > best_cov {
+                                best_cov = c;
+                                best_x = x;
+                            }
+                            sum_cov += c;
+                            x += 1;
+                        }
+                        let run_len = x - start;
+                        if !any_solid && run_len <= 3 && (best_cov >= 0.22 || sum_cov >= 0.35) {
+                            raw_alpha[row + best_x] = 255;
+                        }
+                    }
+                }
+                // Vertical pass: recover thin horizontal bars split across <=2 adjacent rows.
+                for x in 0..gwu {
+                    let mut y = 0usize;
+                    while y < ghu {
+                        if cov_grid[y * gwu + x] <= 0.08 {
+                            y += 1;
+                            continue;
+                        }
+                        let start = y;
+                        let mut any_solid = false;
+                        let mut best_y = y;
+                        let mut best_cov = 0.0f32;
+                        let mut sum_cov = 0.0f32;
+                        while y < ghu && cov_grid[y * gwu + x] > 0.08 {
+                            let c = cov_grid[y * gwu + x];
+                            if raw_alpha[y * gwu + x] > 0 {
+                                any_solid = true;
+                            }
+                            if c > best_cov {
+                                best_cov = c;
+                                best_y = y;
+                            }
+                            sum_cov += c;
+                            y += 1;
+                        }
+                        let run_len = y - start;
+                        if !any_solid && run_len <= 2 && (best_cov >= 0.25 || sum_cov >= 0.38) {
+                            raw_alpha[best_y * gwu + x] = 255;
+                        }
+                    }
+                }
+            }
             if embolden > 0 {
                 // Smear one pixel to the right, right to left so the source is the unsmeared row.
                 for y in 0..gh as usize {
@@ -513,10 +621,30 @@ impl VguiTrueTypeFont {
         }
 
         if opts.underline {
-            paint_horizontal_stroke(&mut raw_alpha, gw, gh, gx0, gy0, 0, stroke_x1, ul_y, stroke_h);
+            paint_horizontal_stroke(
+                &mut raw_alpha,
+                gw,
+                gh,
+                gx0,
+                gy0,
+                0,
+                stroke_x1,
+                ul_y,
+                stroke_h,
+            );
         }
         if opts.strikeout {
-            paint_horizontal_stroke(&mut raw_alpha, gw, gh, gx0, gy0, 0, stroke_x1, so_y, stroke_h);
+            paint_horizontal_stroke(
+                &mut raw_alpha,
+                gw,
+                gh,
+                gx0,
+                gy0,
+                0,
+                stroke_x1,
+                so_y,
+                stroke_h,
+            );
         }
 
         let pad_l = i32::from(opts.outline);
@@ -765,8 +893,15 @@ pub fn resolve_font_bytes(
     if let Some(v) = vfs {
         for raw in custom_font_files {
             let norm = raw.replace('\\', "/");
-            if let Ok(bytes) = v.read_bytes(&norm).or_else(|_| v.read_bytes(&format!("resource/{norm}"))) {
-                let stem = norm.rsplit('/').next().unwrap_or(&norm).to_ascii_lowercase();
+            if let Ok(bytes) = v
+                .read_bytes(&norm)
+                .or_else(|_| v.read_bytes(&format!("resource/{norm}")))
+            {
+                let stem = norm
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&norm)
+                    .to_ascii_lowercase();
                 if stem.contains(&lower.replace(' ', "")) {
                     return Ok((bytes, format!("vfs:{norm}")));
                 }
@@ -1040,14 +1175,20 @@ mod tests {
         assert!(eff.underline);
         assert!(eff.strikeout);
         let eff_opts = RasterizeOptions::from(eff);
-        assert!(eff_opts.synthetic_bold, "weight >= 700 must set synthetic_bold");
+        assert!(
+            eff_opts.synthetic_bold,
+            "weight >= 700 must set synthetic_bold"
+        );
         assert_eq!(eff_opts.blur, 4);
         assert_eq!(eff_opts.scanlines, 2);
         assert!(eff_opts.underline);
         assert!(eff_opts.strikeout);
 
         let med = parsed.resolve("MediumFont", 720).unwrap();
-        assert!(!RasterizeOptions::from(med).synthetic_bold, "weight < 700 must not embolden");
+        assert!(
+            !RasterizeOptions::from(med).synthetic_bold,
+            "weight < 700 must not embolden"
+        );
     }
 
     #[test]
@@ -1063,7 +1204,10 @@ mod tests {
         let edge = ((3 * bw + 1) * 4) as usize;
         assert!(blurred[center + 3] > blurred[edge + 3]);
         assert!(blurred[edge + 3] > 0 && blurred[edge + 3] < 255);
-        assert_eq!(blurred[edge], 255, "white ink RGB must remain white after blur");
+        assert_eq!(
+            blurred[edge], 255,
+            "white ink RGB must remain white after blur"
+        );
     }
 
     #[test]
@@ -1071,7 +1215,10 @@ mod tests {
         let mut rgba = vec![255u8; 2 * 4 * 4];
         apply_scanlines(&mut rgba, 2, 4, 0, 2);
         assert_eq!(&rgba[0..4], &[255, 255, 255, 255]);
-        assert!(rgba[8] < 200 && rgba[11] == 255, "odd row RGB darkened, alpha preserved");
+        assert!(
+            rgba[8] < 200 && rgba[11] == 255,
+            "odd row RGB darkened, alpha preserved"
+        );
         assert_eq!(&rgba[16..20], &[255, 255, 255, 255]);
         assert!(rgba[24] < 200);
     }
@@ -1098,10 +1245,14 @@ mod tests {
         assert!(space_ul.width > 0 && space_ul.height > 1);
         let non_empty_rows = (0..space_ul.height)
             .filter(|&y| {
-                (0..space_ul.width).any(|x| space_ul.rgba[((y * space_ul.width + x) * 4 + 3) as usize] == 255)
+                (0..space_ul.width)
+                    .any(|x| space_ul.rgba[((y * space_ul.width + x) * 4 + 3) as usize] == 255)
             })
             .count();
-        assert!(non_empty_rows >= 2, "expected both underline and strikeout rows");
+        assert!(
+            non_empty_rows >= 2,
+            "expected both underline and strikeout rows"
+        );
 
         let plain = font
             .rasterize_glyph_rgba(
@@ -1124,5 +1275,37 @@ mod tests {
             .expect("blurred glyph");
         assert_eq!(blurred.width, plain.width + 6);
         assert_eq!(blurred.height, plain.height + 6);
+    }
+
+    #[test]
+    fn small_non_aa_thin_stems_never_drop_out() {
+        let variant = SchemeFontVariant {
+            name: "Tahoma".to_string(),
+            tall: 11.0,
+            ..Default::default()
+        };
+        let Ok((bytes, _)) = resolve_font_bytes(None, &variant, &[]) else {
+            return;
+        };
+        let font = VguiTrueTypeFont::from_bytes(bytes).expect("parse Tahoma");
+        for tall in [10.0f32, 11.0, 12.0, 13.0] {
+            for ch in ['i', 'l', 'I', '1'] {
+                let g = font
+                    .rasterize_glyph_rgba(
+                        ch,
+                        &RasterizeOptions {
+                            tall,
+                            antialias: false,
+                            ..Default::default()
+                        },
+                    )
+                    .expect("thin stem glyph");
+                let lit_pixels = g.rgba.as_chunks::<4>().0.iter().filter(|px| px[3] > 0).count();
+                assert!(
+                    lit_pixels >= 4,
+                    "glyph '{ch}' at {tall}px non-AA dropped out ({lit_pixels} lit pixels)"
+                );
+            }
+        }
     }
 }

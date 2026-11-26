@@ -24,13 +24,13 @@ use crate::game::{
 use crate::map::ServerMap;
 use crate::oob::{ChallengeIssuer, OOB_GLOBAL_REPLIES_PER_SEC, OobLimiter, QueryRateLimiter};
 use crate::precache::PrecacheTables;
-use crate::world::WorldLinks;
-use crate::world::consts::{EF_MUZZLEFLASH, EF_NOINTERP, MOVETYPE_WALK, SOLID_SLIDEBOX};
 use crate::signon::{
-    MAX_SIGNON_BUFFER, SPAWN_TAIL_MAX, UserInfoEntry, move_vars, public_userinfo, munged_map_crc, write_new_stage,
-    write_spawn_baselines, write_spawn_stage, write_spawn_tail_with_voice,
+    MAX_SIGNON_BUFFER, SPAWN_TAIL_MAX, UserInfoEntry, move_vars, munged_map_crc, public_userinfo,
+    write_new_stage, write_spawn_baselines, write_spawn_stage, write_spawn_tail_with_voice,
 };
 use crate::usercmd::TokenBucket;
+use crate::world::WorldLinks;
+use crate::world::consts::{EF_MUZZLEFLASH, EF_NOINTERP, MOVETYPE_WALK, SOLID_SLIDEBOX};
 
 /// Unacknowledged reliable bytes a client may have queued; past this it is dropped.
 pub const MAX_RELIABLE_BACKLOG: usize = 256 * 1024;
@@ -368,8 +368,10 @@ impl<G: GameDll> Server<G> {
     /// Spawns the map's entities, lets the game activate the current map, then locks the
     /// precache tables and computes the spawn baselines.
     pub(crate) fn activate_map(&mut self) {
-        self.logger
-            .log(self.real_time, &format!("Loading map \"{}\"", self.map.name));
+        self.logger.log(
+            self.real_time,
+            &format!("Loading map \"{}\"", self.map.name),
+        );
         // ReHLDS builds the PAS at SV_SpawnServer, before the map entities exist.
         self.map.calc_pas(self.cfg.max_clients);
         // While the game spawns entities and activates the map, messages sent to
@@ -500,7 +502,10 @@ impl<G: GameDll> Server<G> {
     /// `SV_GetFakeClientCount` (ReHLDS `sv_main.cpp` 2770-2782, read 2026-11-23): the clients
     /// made with `EngineApi::create_fake_client`; the `bots` of the server info.
     pub fn fake_client_count(&self) -> usize {
-        self.clients.iter().filter(|c| !c.is_free() && c.fake).count()
+        self.clients
+            .iter()
+            .filter(|c| !c.is_free() && c.fake)
+            .count()
     }
 
     /// Whether the client in `slot` is a fake client (a bot); false for a free slot.
@@ -531,7 +536,10 @@ impl<G: GameDll> Server<G> {
     /// allocations (records of unchanged entities are shared). Test aid.
     #[doc(hidden)]
     pub fn client_frame_records(&self, slot: u8) -> Option<(usize, usize)> {
-        let client = self.clients.get(usize::from(slot)).filter(|c| !c.is_free())?;
+        let client = self
+            .clients
+            .get(usize::from(slot))
+            .filter(|c| !c.is_free())?;
         Some(client.frames.record_counts())
     }
 
@@ -595,6 +603,20 @@ impl<G: GameDll> Server<G> {
 
     pub fn edicts(&self) -> &EdictPool {
         &self.edicts
+    }
+
+    /// Moves connected client/bot `slot` to `origin` with zero velocity and re-links its edict.
+    pub fn set_client_origin(&mut self, slot: u8, origin: glam::Vec3) -> bool {
+        self.with_engine(|eng| {
+            let id = eng.client_edict(slot);
+            if let Some(v) = eng.ent_mut(id) {
+                v.velocity = glam::Vec3::ZERO;
+                eng.set_origin(id, origin);
+                true
+            } else {
+                false
+            }
+        })
     }
 
     pub fn set_cvar(&mut self, name: &str, value: &str) {
@@ -670,7 +692,11 @@ impl<G: GameDll> Server<G> {
                 slot: index as u8,
                 userid: client.userid,
                 name,
-                ping_ms: if client.fake { 0 } else { u32::from(client.pings.ping_ms()) },
+                ping_ms: if client.fake {
+                    0
+                } else {
+                    u32::from(client.pings.ping_ms())
+                },
                 active: client.state == ClientState::Active,
                 addr,
                 is_bot: client.fake,
@@ -953,7 +979,8 @@ impl<G: GameDll> Server<G> {
         self.adopt_fake_clients();
         loop {
             self.net_stats.outbox_dropped += std::mem::take(&mut self.outbox.dropped);
-            self.net_stats.fake_moves_dropped += std::mem::take(&mut self.outbox.fake_moves_dropped);
+            self.net_stats.fake_moves_dropped +=
+                std::mem::take(&mut self.outbox.fake_moves_dropped);
             for (slot, client) in self.clients.iter_mut().enumerate() {
                 let reliable = std::mem::take(&mut self.outbox.reliable[slot]);
                 let unreliable = std::mem::take(&mut self.outbox.unreliable[slot]);
@@ -991,7 +1018,8 @@ impl<G: GameDll> Server<G> {
     /// a client that has been in the game before; not reproduced.
     pub(crate) fn flush_reliable_datagram(&mut self) {
         if !self.outbox.replay_reliable.is_empty() {
-            let replay_bytes = std::mem::replace(&mut self.outbox.replay_reliable, MsgWriter::new());
+            let replay_bytes =
+                std::mem::replace(&mut self.outbox.replay_reliable, MsgWriter::new());
             if self.replay_capture && self.replay_svc_packets.len() < 1024 {
                 let mut pkt = MsgWriter::with_capacity(replay_bytes.len() + 8);
                 cs_proto48::messages::write_svc_time(&mut pkt, self.sv_time as f32);
@@ -1024,7 +1052,8 @@ impl<G: GameDll> Server<G> {
     /// `EF_MUZZLEFLASH`) are cleared on every entity from 1 up, whether or not any client was
     /// sent an update this frame.
     fn cleanup_ents(&mut self) {
-        self.edicts.clear_effects_from(1, EF_NOINTERP | EF_MUZZLEFLASH);
+        self.edicts
+            .clear_effects_from(1, EF_NOINTERP | EF_MUZZLEFLASH);
     }
 
     /// Connected clients whose unacknowledged reliable data exceeds [`MAX_RELIABLE_BACKLOG`].
@@ -1583,9 +1612,8 @@ mod tests {
     use crate::edict::EdictId;
     use crate::oob::MAX_INFO_STRING;
     use crate::signon::{
-        SPAWN_CLIENTDATA_MAX,
-        INIT_BUFFER_BUDGET, MAX_LIGHTSTYLES, write_spawn_baselines, write_spawn_stage,
-        write_spawn_tail,
+        INIT_BUFFER_BUDGET, MAX_LIGHTSTYLES, SPAWN_CLIENTDATA_MAX, write_spawn_baselines,
+        write_spawn_stage, write_spawn_tail,
     };
 
     /// `NET_MAX_PAYLOAD` of ReHLDS (`rehlds/engine/net.h`, read 2026-11-21), also the size of
@@ -1720,7 +1748,14 @@ mod tests {
             })
             .collect();
         let mut baselines = MsgWriter::new();
-        write_spawn_baselines(&mut baselines, &server.deltas, 32, &server.baselines, 100.0, None);
+        write_spawn_baselines(
+            &mut baselines,
+            &server.deltas,
+            32,
+            &server.baselines,
+            100.0,
+            None,
+        );
         let mut rest = MsgWriter::new();
         rest.write_bytes(&server.outbox.init);
         write_spawn_stage(
@@ -1775,7 +1810,10 @@ mod tests {
         // data and no choke or forced view.
         let tail = rest - INIT_BUFFER_BUDGET + 1 + 7 + SPAWN_CLIENTDATA_MAX;
         assert!(tail <= SPAWN_TAIL_MAX, "{tail} bytes of {SPAWN_TAIL_MAX}");
-        assert!(SPAWN_TAIL_MAX - tail <= 64, "{tail} bytes of {SPAWN_TAIL_MAX}");
+        assert!(
+            SPAWN_TAIL_MAX - tail <= 64,
+            "{tail} bytes of {SPAWN_TAIL_MAX}"
+        );
     }
 
     /// `SPAWN_CLIENTDATA_MAX` holds the client data with every field at its widest and 64
@@ -1862,22 +1900,34 @@ mod tests {
         server.set_cvar("sv_minrate", "5000");
         server.set_cvar("sv_maxrate", "25000");
         server.frame(&mut hub, 0.03);
-        assert_eq!((server.config().min_update_rate, server.config().max_update_rate), (20, 66));
-        assert_eq!((server.config().min_rate, server.config().max_rate), (5000, 25000));
+        assert_eq!(
+            (
+                server.config().min_update_rate,
+                server.config().max_update_rate
+            ),
+            (20, 66)
+        );
+        assert_eq!(
+            (server.config().min_rate, server.config().max_rate),
+            (5000, 25000)
+        );
 
         server.set_cvar("sv_lan", "1");
         server.frame(&mut hub, 0.04);
-        assert_eq!((server.config().min_rate, server.config().max_rate), (20000, 20000));
+        assert_eq!(
+            (server.config().min_rate, server.config().max_rate),
+            (20000, 20000)
+        );
     }
 
     #[test]
     fn rejects_more_than_five_pending_connections_from_same_ip() {
-        use std::net::SocketAddr;
         use cs_proto48::crypto::md5_hex;
         use cs_proto48::handshake::{
             OobPacket, default_cs16_protinfo, default_cs16_userinfo, encode_connect_48,
             encode_getchallenge, lan_steam_auth_ticket, parse_oob_packet,
         };
+        use std::net::SocketAddr;
 
         let mut server = Server::new(
             ServerConfig::default(),
@@ -1906,7 +1956,10 @@ mod tests {
             let out = server.handle_oob_connect_for_test(from, &req);
             if port < 27015 {
                 assert!(
-                    matches!(parse_oob_packet(&out).unwrap(), OobPacket::S2cConnection { .. }),
+                    matches!(
+                        parse_oob_packet(&out).unwrap(),
+                        OobPacket::S2cConnection { .. }
+                    ),
                     "port {port} should be accepted: {out:?}"
                 );
             } else {

@@ -39,18 +39,18 @@ use cs_transport::{PacketTransport, PeerAddr};
 use crate::commands::{CommandRegistry, ConsoleCommand, split_lines, tokenize};
 use crate::cvars::{CVAR_PRIVILEGED, CVAR_PROTECTED, CVAR_USERINFO, ClientCvars};
 use crate::demo::DemoRecorder;
-use crate::frames::{ClientFrames, FrameOutcome};
 use crate::events::{FiredEvent, FxEnv};
+use crate::frames::{ClientFrames, FrameOutcome};
 use crate::hud::ClientEffects;
 use crate::net_graph::NetGraphTelemetry;
 use crate::precache::PrecacheTables;
 use crate::predict::{self, PredictInputs, Predictor};
-use cs_proto48::demo::{DemoMoveVars, DemoNetMsgInfo, DemoUserCmd};
 use crate::resources::{
     AllFilesPresent, HttpFetcher, ResourceFiles, ResourceManager, parse_file_stream,
     parse_md5_filename,
 };
 use crate::tempents::{FxWorld, NoWorld};
+use cs_proto48::demo::{DemoMoveVars, DemoNetMsgInfo, DemoUserCmd};
 
 /// Reliable bytes the connection lets pile up unacknowledged before it gives the server up:
 /// stuffed commands forwarded to a server that does not answer, mostly.
@@ -672,10 +672,7 @@ impl<T: PacketTransport> Connection<T> {
             if privileged || self.commands.stufftext_may_run(&cmd.name, filter) {
                 self.run_command(cmd);
             } else {
-                self.print(format!(
-                    "Could not execute privileged command {}",
-                    cmd.name
-                ));
+                self.print(format!("Could not execute privileged command {}", cmd.name));
             }
             return;
         }
@@ -736,7 +733,9 @@ impl<T: PacketTransport> Connection<T> {
             }
             _ => {
                 if self.shell_commands.len() >= MAX_SHELL_COMMANDS {
-                    self.disconnect_with("console command flood: the shell does not take them".to_string());
+                    self.disconnect_with(
+                        "console command flood: the shell does not take them".to_string(),
+                    );
                 } else {
                     self.shell_commands.push_back(cmd);
                 }
@@ -902,7 +901,10 @@ impl<T: PacketTransport> Connection<T> {
             .iter()
             .filter_map(|(&number, (ent_type, rec))| {
                 let schema = deltas.get(entity_schema_name(number, *ent_type, max_clients))?;
-                Some((number, GoldSrcEntityState::from_delta(number, *ent_type, rec, schema)))
+                Some((
+                    number,
+                    GoldSrcEntityState::from_delta(number, *ent_type, rec, schema),
+                ))
             })
             .collect()
     }
@@ -968,6 +970,7 @@ impl<T: PacketTransport> Connection<T> {
     /// The gravity is the server's (`movevars.gravity`), 800 before the movevars arrive.
     pub fn update_effects(&mut self, now: f64) -> Vec<FiredEvent> {
         let gravity = self.movevars.as_ref().map_or(800.0, |v| v.gravity);
+        let prediction_active = self.cvars.float("cl_nopred") == 0.0;
         let env = fx_env(
             now,
             &self.precache,
@@ -977,6 +980,7 @@ impl<T: PacketTransport> Connection<T> {
             self.client_data.as_ref(),
             self.fx_world.as_ref(),
             self.fx_local,
+            prediction_active,
         );
         self.fx.update(&env, gravity)
     }
@@ -1220,7 +1224,10 @@ impl<T: PacketTransport> Connection<T> {
 
         // While a download is pending, progress is fragment bytes arriving (or a finished
         // file), not just any datagram: a server that sends nothing useful times out.
-        let buffered = self.chan.as_ref().map_or(0, |c| c.incoming_buffered_bytes());
+        let buffered = self
+            .chan
+            .as_ref()
+            .map_or(0, |c| c.incoming_buffered_bytes());
         if self.resources.pending_downloads() > 0 && buffered > self.buffered_fragments {
             self.signon_progress = Some(now);
         }
@@ -1280,6 +1287,7 @@ impl<T: PacketTransport> Connection<T> {
         // Task 6 hook: every parsed message also goes to the effect modules (events, temp
         // entities, sound, HUD). They run before the match below, so an event sees the entity
         // update of the message before it, which `apply_entities` stored.
+        let prediction_active = self.cvars.float("cl_nopred") == 0.0;
         let env = fx_env(
             now,
             &self.precache,
@@ -1289,6 +1297,7 @@ impl<T: PacketTransport> Connection<T> {
             self.client_data.as_ref(),
             self.fx_world.as_ref(),
             self.fx_local,
+            prediction_active,
         );
         self.fx.handle(&message, &env);
 
@@ -1298,9 +1307,9 @@ impl<T: PacketTransport> Connection<T> {
             self.frames.apply_cvars(&self.cvars);
         }
         let sequence = self.chan.as_ref().map_or(0, |c| c.incoming_sequence);
-        let frame_outcome =
-            self.frames
-                .handle(&message, &self.ctx, &self.precache, sequence, now);
+        let frame_outcome = self
+            .frames
+            .handle(&message, &self.ctx, &self.precache, sequence, now);
         match message {
             SvcMessage::Disconnect(reason) if !self.state.is_terminal() => {
                 self.state = ConnState::Disconnected(reason.trim_end_matches('\n').to_string());
@@ -1458,7 +1467,12 @@ impl<T: PacketTransport> Connection<T> {
                 cvar_name,
             } => {
                 let mut w = MsgWriter::new();
-                write_clc_cvarvalue2(&mut w, request_id, &cvar_name, &self.cvar_report(&cvar_name));
+                write_clc_cvarvalue2(
+                    &mut w,
+                    request_id,
+                    &cvar_name,
+                    &self.cvar_report(&cvar_name),
+                );
                 self.queue_reliable(&w.into_bytes());
             }
             _ => {}
@@ -1484,7 +1498,10 @@ impl<T: PacketTransport> Connection<T> {
         }
         self.precache.add(resources);
         let spawn_count = self.server_info.as_ref().map_or(0, |i| i.spawn_count);
-        if let Err(reason) = self.resources.begin(resources, consistency_indices, spawn_count) {
+        if let Err(reason) = self
+            .resources
+            .begin(resources, consistency_indices, spawn_count)
+        {
             self.state = ConnState::Disconnected(reason);
             return;
         }
@@ -1497,7 +1514,9 @@ impl<T: PacketTransport> Connection<T> {
         let Some(mut fetcher) = self.http_fetcher.take() else {
             return;
         };
-        let (downloaded, activity) = self.resources.poll_http(fetcher.as_mut(), self.files.as_mut());
+        let (downloaded, activity) = self
+            .resources
+            .poll_http(fetcher.as_mut(), self.files.as_mut());
         let needs_fallback = self.resources.take_http_needs_fallback();
         let has_pending = fetcher.has_pending();
         self.http_fetcher = Some(fetcher);
@@ -1771,7 +1790,8 @@ impl<T: PacketTransport> Connection<T> {
         let lerp_msec = self.last_cmd.lerp_msec;
         let interp = self.frames.settings.interp;
         let cmd_lerp = if interp > 0.001 && self.frames.clock.time > 0.0 {
-            ((self.frames.clock.time - self.frames.clock.mtime[0]) / f64::from(interp)).clamp(0.0, 3.0) as f32
+            ((self.frames.clock.time - self.frames.clock.mtime[0]) / f64::from(interp))
+                .clamp(0.0, 3.0) as f32
         } else {
             (f32::from(lerp_msec) / 100.0).clamp(0.0, 3.0)
         };
@@ -1809,11 +1829,13 @@ fn fx_env<'a>(
     client_data: Option<&GoldSrcClientData>,
     world: &'a dyn FxWorld,
     local: FxLocal,
+    prediction_active: bool,
 ) -> FxEnv<'a> {
     let mut env = FxEnv::new(now, precache, entities, world);
     env.weapon_state = local.weapon_state;
     env.holding_shield = local.holding_shield;
     env.right_hand = local.right_hand;
+    env.prediction_active = prediction_active;
     env.max_clients = u16::from(max_clients);
     env.local_player = player_slot.map_or(0, |slot| u16::from(slot) + 1);
     if let Some(cd) = client_data {
@@ -1935,9 +1957,15 @@ mod fx_tests {
             None,
             conn.fx_world.as_ref(),
             conn.fx_local,
+            true,
         );
         assert_eq!(
-            (env.weapon_state, env.holding_shield, env.right_hand, env.local_player),
+            (
+                env.weapon_state,
+                env.holding_shield,
+                env.right_hand,
+                env.local_player
+            ),
             (2, true, true, 1)
         );
     }
@@ -2001,7 +2029,10 @@ mod fx_tests {
             });
         }
         conn.send_netchan_packet(1.0);
-        assert!(!conn.cmd_queue.is_empty(), "overflow cmds kept for next packet");
+        assert!(
+            !conn.cmd_queue.is_empty(),
+            "overflow cmds kept for next packet"
+        );
         assert!(conn.cmd_queue.len() < 16, "at least some cmds were sent");
     }
 
@@ -2071,7 +2102,16 @@ mod fx_tests {
         let empty_base: BTreeMap<u16, (u8, cs_proto48::delta::DeltaRecord)> = BTreeMap::new();
         let mut payload3 = MsgWriter::new();
         write_svc_choke(&mut payload3);
-        write_svc_packetentities_delta(&mut payload3, &reg, 32, 99, &empty_base, &empty_base, &[], 1.06);
+        write_svc_packetentities_delta(
+            &mut payload3,
+            &reg,
+            32,
+            99,
+            &empty_base,
+            &empty_base,
+            &[],
+            1.06,
+        );
         let pkt3 = srv.build_packet(&payload3.into_bytes());
         conn.handle_datagram(&pkt3, 1.060);
 

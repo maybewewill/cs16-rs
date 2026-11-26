@@ -21,7 +21,7 @@ use cs_proto48::messages::{CustomizationMsg, SpawnStaticMsg, SvcMessage};
 use cs_proto48::usermsg::CsUserMsg;
 use glam::Vec3;
 
-use crate::events::{EventFx, FiredEvent, FxEnv, EventQueue, ViewAnim};
+use crate::events::{EventFx, EventQueue, FiredEvent, FxEnv, ViewAnim};
 use crate::sound::{SoundCommand, SoundQueue, VoiceEvent, VoiceQueue};
 use crate::tempents::{
     FxRandom, ModelRef, RenderEffect, SmokeCloudConfig, TeTextMessage, TempEntClock, TempEnts,
@@ -1059,7 +1059,12 @@ impl ClientEffects {
             | SvcMessage::StopSound(_)
             | SvcMessage::SoundFade(_)
             | SvcMessage::RoomType(_)
-            | SvcMessage::CdTrack { .. } => self.sounds.handle(msg, env.precache),
+            | SvcMessage::CdTrack { .. } => self.sounds.handle_with_local(
+                msg,
+                env.precache,
+                (env.local_player > 0).then_some(env.local_player),
+                env.prediction_active,
+            ),
             SvcMessage::VoiceInit { codec, quality } => {
                 self.voice.push(VoiceEvent::Init {
                     codec: codec.clone(),
@@ -1742,6 +1747,50 @@ mod tests {
             &env,
         );
         assert_eq!(fx.tempents.active().len(), 1);
+    }
+
+    #[test]
+    fn local_predicted_footsteps_suppressed_end_to_end_in_client_effects() {
+        let mut precache = crate::precache::PrecacheTables::default();
+        precache.sounds.insert(
+            1,
+            crate::precache::PrecacheEntry {
+                name: "player/pl_step1.wav".into(),
+                download_size: 0,
+                flags: 0,
+            },
+        );
+        let entities = BTreeMap::new();
+        let step = |entity: u16| {
+            SvcMessage::Sound(cs_proto48::messages::SoundMsg {
+                flags: 0,
+                volume: 128,
+                attenuation: 0.8,
+                channel: 4,
+                entity,
+                sound_index: 1,
+                origin: Vec3::ZERO,
+                pitch: 100,
+            })
+        };
+
+        let mut env = FxEnv::new(1.0, &precache, &entities, &NoWorld);
+        env.local_player = 2;
+        env.prediction_active = true;
+        let mut fx = ClientEffects::with_seed(3);
+        fx.handle(&step(2), &env);
+        assert!(fx.sounds.pending().is_empty());
+        assert_eq!(fx.sounds.suppressed_local_steps, 1);
+
+        // Remote player's footstep still passes through.
+        fx.handle(&step(3), &env);
+        assert_eq!(fx.sounds.pending().len(), 1);
+        fx.sounds.clear();
+
+        // With prediction disabled (`cl_nopred 1` or demo playback), local footsteps play.
+        env.prediction_active = false;
+        fx.handle(&step(2), &env);
+        assert_eq!(fx.sounds.pending().len(), 1);
     }
 
     #[test]

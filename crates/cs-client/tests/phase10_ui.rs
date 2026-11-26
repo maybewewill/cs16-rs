@@ -39,6 +39,8 @@ use cs_client::ui::screens::{
 use cs_client::ui::server_menu::{
     MenuSpanColor, draw_styled_text_menu, menu_key_enabled, menu_styled_lines,
 };
+use cs_client::ui::vgui_assets::ClientPalette;
+use cs_client::ui::vgui_theme::VguiPalette;
 use cs_client::ui::vgui2::controls::{
     ListSortDir, VguiControlState, VguiSliderState, align_to_egui,
 };
@@ -46,8 +48,6 @@ use cs_client::ui::vgui2::{
     HtmlBlock, VguiEvent, VguiRuntime, client_ui_viewport, install_marlett_into_egui,
     install_scheme_fonts_into_egui, paint_html_doc, parse_html_doc,
 };
-use cs_client::ui::vgui_assets::ClientPalette;
-use cs_client::ui::vgui_theme::VguiPalette;
 use cs_client::ui::{
     CrosshairInputs, CrosshairState, FrameTelemetry, draw_crosshair, draw_crosshair_vgui,
     draw_net_graph,
@@ -164,7 +164,10 @@ fn ui_screen_main_menu_and_new_game_parses_gamemenu_and_settings_scr() {
         real_menu.load_resources(&vfs, "english");
         assert!(!real_menu.game_menu.is_empty());
         assert!(real_menu.settings_script.is_some());
-        assert!(rt.load_res(&vfs, "resource/CreateMultiplayerGameServerPage.res").is_some());
+        assert!(
+            rt.load_res(&vfs, "resource/CreateMultiplayerGameServerPage.res")
+                .is_some()
+        );
     } else {
         eprintln!("SKIPPED retail GameMenu.res check: CS16_GAMEDIR not set");
     }
@@ -174,7 +177,10 @@ fn ui_screen_main_menu_and_new_game_parses_gamemenu_and_settings_scr() {
 fn ui_screen_buy_menu_vgui_navigates_ct_and_t_submenus() {
     let mut buy = BuyClassTeamMenuUi::default();
     buy.open_kind(VguiMenuKind::Buy, true);
-    assert_eq!(buy.active_res.as_deref(), Some("resource/UI/MainBuyMenu.res"));
+    assert_eq!(
+        buy.active_res.as_deref(),
+        Some("resource/UI/MainBuyMenu.res")
+    );
 
     let nav = buy.handle_command("Resource/UI/BuyRifles.res", true, None);
     assert_eq!(nav, None);
@@ -194,12 +200,27 @@ fn ui_screen_buy_menu_vgui_navigates_ct_and_t_submenus() {
 
 #[test]
 fn ui_screen_team_and_class_menu_resolves_team_and_class_res() {
-    assert_eq!(VguiMenuKind::from_vgui_menu_id(2, ""), Some(VguiMenuKind::Team));
+    assert_eq!(
+        VguiMenuKind::from_vgui_menu_id(2, ""),
+        Some(VguiMenuKind::Team)
+    );
     // ReGameDLL_CS cdll_dll.h: VGUI_Menu_Class_T = 26, VGUI_Menu_Class_CT = 27, Buy = 28..=34
-    assert_eq!(VguiMenuKind::from_vgui_menu_id(26, ""), Some(VguiMenuKind::ClassT));
-    assert_eq!(VguiMenuKind::from_vgui_menu_id(27, ""), Some(VguiMenuKind::ClassCt));
-    assert_eq!(VguiMenuKind::from_vgui_menu_id(28, ""), Some(VguiMenuKind::Buy));
-    assert_eq!(VguiMenuKind::from_vgui_menu_id(3, ""), Some(VguiMenuKind::ClassT));
+    assert_eq!(
+        VguiMenuKind::from_vgui_menu_id(26, ""),
+        Some(VguiMenuKind::ClassT)
+    );
+    assert_eq!(
+        VguiMenuKind::from_vgui_menu_id(27, ""),
+        Some(VguiMenuKind::ClassCt)
+    );
+    assert_eq!(
+        VguiMenuKind::from_vgui_menu_id(28, ""),
+        Some(VguiMenuKind::Buy)
+    );
+    assert_eq!(
+        VguiMenuKind::from_vgui_menu_id(3, ""),
+        Some(VguiMenuKind::ClassT)
+    );
 
     let mut ui = BuyClassTeamMenuUi::default();
     ui.open_kind(VguiMenuKind::Team, true);
@@ -210,7 +231,10 @@ fn ui_screen_team_and_class_menu_resolves_team_and_class_res() {
     );
 
     ui.open_kind(VguiMenuKind::ClassCt, true);
-    assert_eq!(ui.active_res.as_deref(), Some("resource/UI/ClassMenu_CT.res"));
+    assert_eq!(
+        ui.active_res.as_deref(),
+        Some("resource/UI/ClassMenu_CT.res")
+    );
     assert_eq!(
         ui.handle_command("joinclass 1", true, None).as_deref(),
         Some("joinclass 1")
@@ -583,7 +607,10 @@ fn ui_vgui2_control_panel_paints_panel_control() {
 
 #[test]
 fn ui_vgui2_control_label_resolves_alignment_and_text() {
-    assert_eq!(align_to_egui(TextAlignment::Center), egui::Align2::CENTER_CENTER);
+    assert_eq!(
+        align_to_egui(TextAlignment::Center),
+        egui::Align2::CENTER_CENTER
+    );
     let mut rt = VguiRuntime::new();
     rt.insert_res(
         "lbl.res",
@@ -633,13 +660,17 @@ fn ui_vgui2_control_frame_infers_window_size_and_paints() {
         "frm.res",
         r#""Frm.res" { "MainFrame" { "ControlName" "Frame" "fieldName" "MainFrame" "xpos" "40" "ypos" "40" "wide" "520" "tall" "380" "visible" "1" } }"#,
     );
-    assert_eq!(rt.doc_window_size("frm.res", [400.0, 300.0]), [520.0, 380.0]);
+    assert_eq!(
+        rt.doc_window_size("frm.res", [400.0, 300.0]),
+        [520.0, 380.0]
+    );
 }
 
 #[test]
 fn ui_vgui2_control_list_panel_sorts_columns_and_rows() {
     let mut rt = VguiRuntime::new();
-    let mut list = cs_client::ui::vgui2::runtime::default_list_state(&[("Name", 120), ("Ping", 60)]);
+    let mut list =
+        cs_client::ui::vgui2::runtime::default_list_state(&[("Name", 120), ("Ping", 60)]);
     list.rows = vec![
         vec!["Server B".into(), "45".into()],
         vec!["Server A".into(), "12".into()],
@@ -778,7 +809,8 @@ fn ui_truetype_font_rasterizer_loads_marlett_and_scheme_tiers() {
     assert_eq!(MarlettGlyph::CHECK, 'a');
 
     if let Some(vfs) = discover_retail_vfs() {
-        let marlett = load_marlett_font(&vfs).expect("resource/marlett.ttf present in Valve install");
+        let marlett =
+            load_marlett_font(&vfs).expect("resource/marlett.ttf present in Valve install");
         assert!(marlett.metrics(14.0).line_height > 0.0);
         let glyph = marlett
             .rasterize_glyph(MarlettGlyph::CHECK, 14.0)
@@ -1250,7 +1282,10 @@ fn ui_hud_player_id_status_bar_formats_friend_enemy_hostage_hp() {
         &mut hud,
         93,
         "StatusValue",
-        CsUserMsg::StatusValue { index: 3, value: 100 },
+        CsUserMsg::StatusValue {
+            index: 3,
+            value: 100,
+        },
         1.0,
     );
     let mut names = BTreeMap::new();
@@ -1264,7 +1299,10 @@ fn ui_hud_player_id_status_bar_formats_friend_enemy_hostage_hp() {
 #[test]
 fn ui_hud_text_menus_showmenu_parses_amx_colors_and_right_align() {
     let lines = menu_styled_lines("\\yAMX Mod\\n\n\\w1. \\rAK-47\\R$2500", None);
-    assert_eq!(lines[0].spans[0], (MenuSpanColor::Yellow, "AMX Mod\\n".into()));
+    assert_eq!(
+        lines[0].spans[0],
+        (MenuSpanColor::Yellow, "AMX Mod\\n".into())
+    );
     assert!(lines[1].spans.iter().any(|(c, _)| *c == MenuSpanColor::Red));
     assert_eq!(lines[1].right.as_deref(), Some("$2500"));
     assert!(menu_key_enabled(0b11, 1));
@@ -1468,9 +1506,7 @@ fn ui_options_advanced_localizes_user_scr_tokens() {
         }"##,
     );
     let mut loc = LocalizationTable::default();
-    loc.insert_text(
-        "\"Tokens\"\n{\n\"Cstrike_Center_ID_Names\" \"Center player ID names\"\n}",
-    );
+    loc.insert_text("\"Tokens\"\n{\n\"Cstrike_Center_ID_Names\" \"Center player ID names\"\n}");
     let mut cvars = CVarRegistry::new_with_defaults();
     let out = run_egui_frame(|ctx| {
         egui::Area::new(egui::Id::unique("test_adv_loc_scr")).show(ctx, |ui| {
@@ -1529,12 +1565,18 @@ fn ui_hud_with_runtime_renders_engine_font_lines() {
 
 #[test]
 fn ui_screen_options_loads_all_7_res_pages_and_parses_tab_names() {
-    assert_eq!(OptionsTab::from_name("multiplayer"), Some(OptionsTab::Multiplayer));
+    assert_eq!(
+        OptionsTab::from_name("multiplayer"),
+        Some(OptionsTab::Multiplayer)
+    );
     assert_eq!(OptionsTab::from_name("audio"), Some(OptionsTab::Audio));
     assert_eq!(OptionsTab::from_name("video"), Some(OptionsTab::Video));
     assert_eq!(OptionsTab::from_name("aim"), Some(OptionsTab::Mouse));
     assert_eq!(OptionsTab::from_name("mouse"), Some(OptionsTab::Mouse));
-    assert_eq!(OptionsTab::from_name("keyboard"), Some(OptionsTab::Keyboard));
+    assert_eq!(
+        OptionsTab::from_name("keyboard"),
+        Some(OptionsTab::Keyboard)
+    );
     assert_eq!(OptionsTab::from_name("voice"), Some(OptionsTab::Voice));
     assert_eq!(OptionsTab::from_name("content"), Some(OptionsTab::Lock));
     assert_eq!(OptionsTab::from_name("lock"), Some(OptionsTab::Lock));
@@ -1586,27 +1628,45 @@ fn ui_screen_options_loads_all_7_res_pages_and_parses_tab_names() {
         "resource/MultiplayerAdvancedDialog.res",
         "resource/ContentControlDialog.res",
     ] {
-        assert!(rt.doc(path).is_some(), "missing loaded .res document {path}");
+        assert!(
+            rt.doc(path).is_some(),
+            "missing loaded .res document {path}"
+        );
     }
 }
 
 #[test]
 fn ui_client_viewport_centers_4_3_across_aspect_ratios() {
     let rect_for = |w: f32, h: f32| {
-        client_ui_viewport(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h)))
+        client_ui_viewport(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(w, h),
+        ))
     };
 
     let r800 = rect_for(800.0, 600.0);
-    assert_eq!((r800.left(), r800.top(), r800.width(), r800.height()), (0.0, 0.0, 800.0, 600.0));
+    assert_eq!(
+        (r800.left(), r800.top(), r800.width(), r800.height()),
+        (0.0, 0.0, 800.0, 600.0)
+    );
 
     let r720 = rect_for(1280.0, 720.0);
-    assert_eq!((r720.left(), r720.top(), r720.width(), r720.height()), (160.0, 0.0, 960.0, 720.0));
+    assert_eq!(
+        (r720.left(), r720.top(), r720.width(), r720.height()),
+        (160.0, 0.0, 960.0, 720.0)
+    );
 
     let r800w = rect_for(1280.0, 800.0);
-    assert_eq!((r800w.left(), r800w.top(), r800w.width(), r800w.height()), (106.0, 0.0, 1067.0, 800.0));
+    assert_eq!(
+        (r800w.left(), r800w.top(), r800w.width(), r800w.height()),
+        (106.0, 0.0, 1067.0, 800.0)
+    );
 
     let r1024 = rect_for(1280.0, 1024.0);
-    assert_eq!((r1024.left(), r1024.top(), r1024.width(), r1024.height()), (0.0, 32.0, 1280.0, 960.0));
+    assert_eq!(
+        (r1024.left(), r1024.top(), r1024.width(), r1024.height()),
+        (0.0, 32.0, 1280.0, 960.0)
+    );
 }
 
 #[test]
@@ -1624,27 +1684,48 @@ fn ui_html_parses_css_font_line_height_and_blank_br() {
 
 #[test]
 fn ui_scoreboard_and_console_rects_scale_across_resolutions() {
-    let rect_for = |w: f32, h: f32| {
-        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h))
-    };
+    let rect_for = |w: f32, h: f32| egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h));
 
     let sb720 = scoreboard_rect(rect_for(1280.0, 720.0));
-    assert_eq!((sb720.left(), sb720.top(), sb720.width(), sb720.height()), (250.0, 105.0, 780.0, 510.0));
+    assert_eq!(
+        (sb720.left(), sb720.top(), sb720.width(), sb720.height()),
+        (250.0, 105.0, 780.0, 510.0)
+    );
 
     let sb800 = scoreboard_rect(rect_for(1280.0, 800.0));
-    assert_eq!((sb800.left(), sb800.top(), sb800.width(), sb800.height()), (206.0, 116.0, 867.0, 567.0));
+    assert_eq!(
+        (sb800.left(), sb800.top(), sb800.width(), sb800.height()),
+        (206.0, 116.0, 867.0, 567.0)
+    );
 
     let sb1024 = scoreboard_rect(rect_for(1280.0, 1024.0));
-    assert_eq!((sb1024.left(), sb1024.top(), sb1024.width(), sb1024.height()), (85.0, 149.0, 1109.0, 725.0));
+    assert_eq!(
+        (sb1024.left(), sb1024.top(), sb1024.width(), sb1024.height()),
+        (85.0, 149.0, 1109.0, 725.0)
+    );
 
     let con720 = console_default_rect(rect_for(1280.0, 720.0));
-    assert_eq!((con720.left(), con720.top(), con720.width(), con720.height()), (40.0, 40.0, 560.0, 400.0));
+    assert_eq!(
+        (con720.left(), con720.top(), con720.width(), con720.height()),
+        (40.0, 40.0, 560.0, 400.0)
+    );
 
     let con800 = console_default_rect(rect_for(1280.0, 800.0));
-    assert_eq!((con800.left(), con800.top(), con800.width(), con800.height()), (44.0, 44.0, 622.0, 444.0));
+    assert_eq!(
+        (con800.left(), con800.top(), con800.width(), con800.height()),
+        (44.0, 44.0, 622.0, 444.0)
+    );
 
     let con1024 = console_default_rect(rect_for(1280.0, 1024.0));
-    assert_eq!((con1024.left(), con1024.top(), con1024.width(), con1024.height()), (57.0, 57.0, 796.0, 569.0));
+    assert_eq!(
+        (
+            con1024.left(),
+            con1024.top(),
+            con1024.width(),
+            con1024.height()
+        ),
+        (57.0, 57.0, 796.0, 569.0)
+    );
 }
 
 #[test]
@@ -1709,7 +1790,8 @@ fn screen5_crosshair_30_weapon_table_and_1280x800_usp_parity() {
 #[test]
 fn screen5_status_bar_strips_prefix_unescapes_percent_and_falls_back() {
     let mut hud = HudState::default();
-    hud.status_text.insert(0, "1 %c1: %p2\n2  %h: %i3%%".to_string());
+    hud.status_text
+        .insert(0, "1 %c1: %p2\n2  %h: %i3%%".to_string());
     hud.status_values.insert(1, 2); // Enemy
     hud.status_values.insert(2, 1); // player slot 1 -> index 0
     hud.status_values.insert(3, 100);
@@ -1721,6 +1803,12 @@ fn screen5_status_bar_strips_prefix_unescapes_percent_and_falls_back() {
     let (team, line) = format_status_bar(&hud, &names, Some(&empty_loc)).expect("formatted");
     assert_eq!(team, 2);
     assert_eq!(line, "Enemy: Minh2  HP: 100%");
+
+    // When target clears (`StatusValue(1, 0)` / `StatusValue(2, 0)`), status bar hides cleanly.
+    hud.status_values.insert(1, 0);
+    hud.status_values.insert(2, 0);
+    hud.status_values.insert(3, 0);
+    assert_eq!(format_status_bar(&hud, &names, Some(&empty_loc)), None);
     let _ = draw_crosshair_vgui;
 }
 
@@ -1849,15 +1937,23 @@ fn screen5_hud_saytext_and_pickup_history_with_retail_weapon_cards() {
     ];
     let pickups = vec![
         PickupHistoryEntry {
-            kind: PickupKind::Weapon { weapon_id: 16, empty: false },
+            kind: PickupKind::Weapon {
+                weapon_id: 16,
+                empty: false,
+            },
             end_time: 14.0,
         },
         PickupHistoryEntry {
-            kind: PickupKind::Weapon { weapon_id: 28, empty: true },
+            kind: PickupKind::Weapon {
+                weapon_id: 28,
+                empty: true,
+            },
             end_time: 13.5,
         },
         PickupHistoryEntry {
-            kind: PickupKind::Item { classname: "item_kevlar".into() },
+            kind: PickupKind::Item {
+                classname: "item_kevlar".into(),
+            },
             end_time: 13.0,
         },
     ];
@@ -1868,9 +1964,18 @@ fn screen5_hud_saytext_and_pickup_history_with_retail_weapon_cards() {
             && let Some(ref v) = vfs
         {
             let sp = HudSprites::load(ctx, v);
-            assert_eq!(sp.weapon_card_size("weapon_usp", 1.0), Some(egui::Vec2::new(170.0, 45.0)));
-            assert_eq!(sp.weapon_card_size("weapon_ak47", 1.0), Some(egui::Vec2::new(170.0, 45.0)));
-            assert_eq!(sp.weapon_card_size("weapon_knife", 1.0), Some(egui::Vec2::new(170.0, 45.0)));
+            assert_eq!(
+                sp.weapon_card_size("weapon_usp", 1.0),
+                Some(egui::Vec2::new(170.0, 45.0))
+            );
+            assert_eq!(
+                sp.weapon_card_size("weapon_ak47", 1.0),
+                Some(egui::Vec2::new(170.0, 45.0))
+            );
+            assert_eq!(
+                sp.weapon_card_size("weapon_knife", 1.0),
+                Some(egui::Vec2::new(170.0, 45.0))
+            );
             assert!(sp.has_pain_sprites());
             assert_eq!(sp.has_radar_textures(), (true, true));
             assert!(sp.has_selected_weapon_card("weapon_usp"));
@@ -1914,7 +2019,10 @@ fn cl_showfps_and_con_notifytime_overlay_and_crosshair_toggle() {
     let prims = run_egui_frame(|ctx| {
         cs_client::ui::draw_top_left_console_overlays(ctx, &cvars, 99.7, &notify, 2.0, false);
     });
-    assert!(prims > 0, "cl_showfps 1 + notify lines should draw primitives");
+    assert!(
+        prims > 0,
+        "cl_showfps 1 + notify lines should draw primitives"
+    );
 
     let mut ch = CrosshairState::default();
     let ch_inputs = CrosshairInputs::default();
@@ -1937,10 +2045,8 @@ fn ui_main_buy_menu_ammo_captions_fit_single_line_without_clipping() {
     let ctx = egui::Context::default();
 
     for (w, h) in [(640u32, 480u32), (800, 600), (1280, 800), (1280, 1024)] {
-        let screen = egui::Rect::from_min_size(
-            egui::Pos2::ZERO,
-            egui::Vec2::new(w as f32, h as f32),
-        );
+        let screen =
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(w as f32, h as f32));
         let vp = cs_client::ui::vgui2::client_ui_viewport(screen);
         let nodes = rt.compute_layout_mode(
             "resource/UI/MainBuyMenu.res",

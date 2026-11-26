@@ -524,7 +524,7 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     reg.register("r_detailtextures", "0", arch, "Enable detail textures on BSP surfaces");
     reg.register("r_lighting_modulate", "0.6", CVarFlags::NONE, "Studio lighting modulation scale");
     reg.register("r_prefertexturefiltering", "1", arch, "Prefer linear texture filtering");
-    reg.register("r_refdll", "gl", arch, "[compat] Renderer backend DLL selector");
+    reg.register("r_refdll", "auto", arch, "Renderer GPU backend selector (auto/vulkan/dx12/metal/gl)");
     reg.register("r_showtree", "0", CVarFlags::NONE, "Debug show BSP tree traversal");
     reg.register("r_sprite_lerping", "1", arch, "Interpolate sprite animation frames");
     reg.register("r_sprite_lighting", "1", arch, "Apply world lighting to sprites");

@@ -652,6 +652,7 @@ struct ClientDataSnapshot {
     weaponanim: i32,
     viewmodel: i32,
     alive: bool,
+    dead: bool,
     observer_mode: i32,
     observed_target: u8,
 }
@@ -667,6 +668,7 @@ impl ClientDataSnapshot {
             weaponanim: cd.weaponanim,
             viewmodel: cd.viewmodel,
             alive: is_client_alive(cd),
+            dead: cd.deadflag != 0 || cd.health <= 0.0,
             observer_mode: cd.iuser1,
             observed_target: u8::try_from(cd.iuser2.max(0)).unwrap_or(0),
         }
@@ -1902,12 +1904,26 @@ impl ViewBuilder {
                 cl_bobup: inputs.cl_bobup,
             },
         );
-        let roll_deg = calc_roll(
-            view_angles.y,
-            simvel,
-            inputs.cl_rollangle,
-            inputs.cl_rollspeed,
-        );
+        // Classic GoldSrc DeathCam tilt (`viewangles[ROLL] = 80`): while dying (`health <= 0`
+        // before `StartObserver` resets `health = 1` & `view_ofs = 0`), `observer::killed` sets
+        // `iuser1 = OBS_CHASE_FREE` and `iuser2 = local_entity` with `view_ofs.z = -8`.
+        let in_death_cam = !alive
+            && cd.is_some_and(|d| {
+                d.dead
+                    && (d.observer_mode == 0
+                        || d.view_ofs.z < 0.0
+                        || local_number.is_some_and(|me| u16::from(d.observed_target) == me))
+            });
+        let roll_deg = if in_death_cam {
+            80.0
+        } else {
+            calc_roll(
+                view_angles.y,
+                simvel,
+                inputs.cl_rollangle,
+                inputs.cl_rollspeed,
+            )
+        };
         let (shake_angles, shake_z) = calc_screen_shake(fx.hud.screen_shake.as_ref(), now);
         let viewmodel_lag =
             self.lag_state

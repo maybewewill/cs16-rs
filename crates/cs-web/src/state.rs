@@ -374,6 +374,25 @@ impl WebClientState {
 
     fn local_options(&self, bots: u32, max_clients: u8) -> LocalOptions {
         let name = self.cvars.get_str("name").to_string();
+        let initial_cvars: Vec<(String, String)> = [
+            "bot_difficulty",
+            "bot_join_team",
+            "bot_chatter",
+            "bot_join_after_player",
+            "mp_startmoney",
+            "mp_freezetime",
+            "mp_roundtime",
+            "mp_buytime",
+            "mp_c4timer",
+            "violence_hblood",
+            "violence_ablood",
+        ]
+        .iter()
+        .filter_map(|&k| {
+            let v = self.cvars.get_str(k);
+            (!v.is_empty()).then(|| (k.to_string(), v.to_string()))
+        })
+        .collect();
         LocalOptions {
             max_clients,
             bots,
@@ -383,6 +402,7 @@ impl WebClientState {
                 name
             },
             text_menus: !self.cvars.get_bool("_vgui_menus"),
+            initial_cvars,
             ..LocalOptions::default()
         }
     }
@@ -768,8 +788,15 @@ impl WebClientState {
         match &mut self.session {
             SessionMode::Idle => {}
             SessionMode::Local { game, pending } => {
-                if game.connection().state() == &ConnState::InGame {
-                    game.connection_mut().queue_cmd(cmd);
+                let conn = game.connection_mut();
+                for name in ["cl_nopred", "cl_lw"] {
+                    let desired = self.cvars.get_str(name);
+                    if conn.cvars().find(name).map(|v| v.value.as_str()) != Some(desired) {
+                        conn.set_cvar(name, desired);
+                    }
+                }
+                if conn.state() == &ConnState::InGame {
+                    conn.queue_cmd(cmd);
                 }
                 *pending += dt;
                 while *pending >= FRAME_SECS {
@@ -778,6 +805,12 @@ impl WebClientState {
                 }
             }
             SessionMode::Remote { conn, now, .. } => {
+                for name in ["cl_nopred", "cl_lw"] {
+                    let desired = self.cvars.get_str(name);
+                    if conn.cvars().find(name).map(|v| v.value.as_str()) != Some(desired) {
+                        conn.set_cvar(name, desired);
+                    }
+                }
                 if conn.state() == &ConnState::InGame {
                     conn.queue_cmd(cmd);
                 }
@@ -1404,6 +1437,11 @@ impl WebClientState {
     }
 
     fn is_occluded(&self, listener: [f32; 3], pos: [f32; 3]) -> bool {
+        if !self.cvars.get_bool("snd_occlusion")
+            || self.cvar_f32_clamped("s_occfactor", 0.0, 0.0, 0.9) <= 0.0
+        {
+            return false;
+        }
         let Some(coll) = &self.collision else {
             return false;
         };

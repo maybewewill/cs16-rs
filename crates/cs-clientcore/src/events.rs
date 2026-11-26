@@ -74,6 +74,8 @@ pub struct FxEnv<'a> {
     pub holding_shield: bool,
     /// The `cl_righthand` cvar.
     pub right_hand: bool,
+    /// Whether client-side movement prediction (`!cl_nopred`) is active for local footsteps.
+    pub prediction_active: bool,
     pub world: &'a dyn FxWorld,
 }
 
@@ -97,6 +99,7 @@ impl<'a> FxEnv<'a> {
             weapon_state: 0,
             holding_shield: false,
             right_hand: false,
+            prediction_active: true,
             world,
         }
     }

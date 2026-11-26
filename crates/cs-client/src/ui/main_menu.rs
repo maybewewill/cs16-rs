@@ -137,6 +137,11 @@ pub struct MenuCommands {
 }
 
 impl MainMenuUi {
+    pub fn open_new_game_bots_tab(&mut self) {
+        self.new_game_open = true;
+        self.new_game_tab = NewGameTab::Bots;
+    }
+
     pub fn load_resources(&mut self, vfs: &Vfs, lang: &str) {
         self.game_menu = GameMenuEntry::load(vfs);
         self.settings_script = SettingsScript::load(vfs, "settings.scr");

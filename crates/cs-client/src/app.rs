@@ -152,6 +152,7 @@ struct HudFeeds {
     chat: Vec<(HudChatEntry, f64)>,
     notify: Vec<(String, f64)>,
     pickups: Vec<PickupHistoryEntry>,
+    last_hud_resets: u32,
     center: Option<(String, f64)>,
     menu_since: Option<(f64, String)>,
     motd_shown: bool,
@@ -757,48 +758,61 @@ impl Cs16App {
                 .error("Half-Life / CS 1.6 directory not mounted.");
             return;
         };
+        const LOCAL_SERVER_CVARS: &[&str] = &[
+            "bot_quota",
+            "bot_difficulty",
+            "bot_join_team",
+            "bot_chatter",
+            "bot_join_after_player",
+            "bot_stop",
+            "mp_roundtime",
+            "mp_freezetime",
+            "mp_startmoney",
+            "mp_buytime",
+            "mp_timelimit",
+            "mp_friendlyfire",
+            "mp_c4timer",
+            "mp_forcecamera",
+            "mp_forcechasecam",
+            "sv_gravity",
+            "sv_airaccelerate",
+            "sv_cheats",
+            "mp_infinite_ammo",
+            "mp_infinite_grenades",
+            "mp_mirrordamage",
+            "violence_hblood",
+            "violence_ablood",
+            "violence_hgibs",
+            "violence_agibs",
+            "sv_showimpacts",
+            "sv_grenade_trajectory",
+            "sv_grenade_trajectory_time",
+            "sv_showhitboxes",
+            "mp_buy_anywhere",
+            "mp_warmup_mode",
+            "sv_damage_print",
+            "mp_knife_round",
+        ];
+        let initial_cvars: Vec<(String, String)> = LOCAL_SERVER_CVARS
+            .iter()
+            .filter_map(|&name| {
+                let val = self.cvars.get_str(name);
+                (!val.is_empty()).then(|| (name.to_string(), val.to_string()))
+            })
+            .collect();
         let opts = LocalOptions {
             bots: self.cvars.get_i32("bot_quota").clamp(0, 31) as u32,
             player_name: self.cvars.get_str("name").to_string(),
             hostname: self.cvars.get_str("hostname").to_string(),
             // `_vgui_menus 1` asks server for VGUIMenu dialogs; `_vgui_menus 0` uses ShowMenu.
             text_menus: !self.cvars.get_bool("_vgui_menus"),
+            initial_cvars,
             ..LocalOptions::default()
         };
         match Session::start_local(&vfs, map_name, &opts) {
             Ok(session) => {
                 self.session = session;
-                for name in [
-                    "bot_quota",
-                    "bot_difficulty",
-                    "bot_join_team",
-                    "bot_chatter",
-                    "bot_join_after_player",
-                    "mp_roundtime",
-                    "mp_freezetime",
-                    "mp_startmoney",
-                    "mp_buytime",
-                    "mp_timelimit",
-                    "mp_friendlyfire",
-                    "sv_gravity",
-                    "sv_airaccelerate",
-                    "sv_cheats",
-                    "mp_infinite_ammo",
-                    "mp_infinite_grenades",
-                    "mp_mirrordamage",
-                    "violence_hblood",
-                    "violence_ablood",
-                    "violence_hgibs",
-                    "violence_agibs",
-                    "sv_showimpacts",
-                    "sv_grenade_trajectory",
-                    "sv_grenade_trajectory_time",
-                    "sv_showhitboxes",
-                    "mp_buy_anywhere",
-                    "mp_warmup_mode",
-                    "sv_damage_print",
-                    "mp_knife_round",
-                ] {
+                for &name in LOCAL_SERVER_CVARS {
                     let val = self.cvars.get_str(name);
                     if !val.is_empty() {
                         let _ = self.session.server_console(&format!("{name} {val}"));
@@ -1108,31 +1122,58 @@ impl Cs16App {
                     feeds.chat.push((HudChatEntry { text, team }, now));
                 }
             }
+            if hud.hud_resets != feeds.last_hud_resets {
+                feeds.last_hud_resets = hud.hud_resets;
+                feeds.pickups.clear();
+            }
             for wid in hud.weapon_pickups.drain(..) {
                 let empty = matches!(hud.clips.get(&wid), Some(&0))
                     && hud.weapons.get(&wid).is_some_and(|w| {
                         w.ammo1_type != 255
                             && hud.ammo.get(&w.ammo1_type).copied().unwrap_or(0) == 0
                     });
-                feeds.pickups.push(PickupHistoryEntry {
-                    kind: PickupKind::Weapon {
+                if let Some(existing) = feeds.pickups.iter_mut().find(
+                    |e| matches!(e.kind, PickupKind::Weapon { weapon_id, .. } if weapon_id == wid),
+                ) {
+                    existing.kind = PickupKind::Weapon {
                         weapon_id: wid,
                         empty,
-                    },
-                    end_time: now + 5.0,
-                });
+                    };
+                    existing.end_time = now + 5.0;
+                } else {
+                    feeds.pickups.push(PickupHistoryEntry {
+                        kind: PickupKind::Weapon {
+                            weapon_id: wid,
+                            empty,
+                        },
+                        end_time: now + 5.0,
+                    });
+                }
             }
             for (ammo_id, amount) in hud.ammo_pickups.drain(..) {
-                feeds.pickups.push(PickupHistoryEntry {
-                    kind: PickupKind::Ammo { ammo_id, amount },
-                    end_time: now + 5.0,
-                });
+                if let Some(existing) = feeds.pickups.iter_mut().find(
+                    |e| matches!(e.kind, PickupKind::Ammo { ammo_id: id, .. } if id == ammo_id),
+                ) {
+                    existing.kind = PickupKind::Ammo { ammo_id, amount };
+                    existing.end_time = now + 5.0;
+                } else {
+                    feeds.pickups.push(PickupHistoryEntry {
+                        kind: PickupKind::Ammo { ammo_id, amount },
+                        end_time: now + 5.0,
+                    });
+                }
             }
             for classname in hud.item_pickups.drain(..) {
-                feeds.pickups.push(PickupHistoryEntry {
-                    kind: PickupKind::Item { classname },
-                    end_time: now + 5.0,
-                });
+                if let Some(existing) = feeds.pickups.iter_mut().find(
+                    |e| matches!(&e.kind, PickupKind::Item { classname: c } if c == &classname),
+                ) {
+                    existing.end_time = now + 5.0;
+                } else {
+                    feeds.pickups.push(PickupHistoryEntry {
+                        kind: PickupKind::Item { classname },
+                        end_time: now + 5.0,
+                    });
+                }
             }
             if feeds.pickups.len() > 12 {
                 let excess = feeds.pickups.len() - 12;
@@ -2433,7 +2474,13 @@ impl Cs16App {
                 .map(|l| l.text.clone())
                 .collect();
             for line in new_lines {
-                self.console_notify_lines.push((line, f64::from(time_sec)));
+                for part in line.split(['\n', '\r']) {
+                    let clean = part.trim();
+                    if !clean.is_empty() {
+                        self.console_notify_lines
+                            .push((clean.to_string(), f64::from(time_sec)));
+                    }
+                }
             }
             if self.console_notify_lines.len() > 16 {
                 let excess = self.console_notify_lines.len() - 16;
@@ -2468,6 +2515,8 @@ impl Cs16App {
             bgm_enabled,
             mp3_fade,
         );
+        self.audio
+            .set_snd_occlusion(self.cvars.get_bool("snd_occlusion"));
         let want_menu_music = !self.session.is_active()
             && self.launch.auto_screenshot.is_none()
             && self.launch.record_dir.is_none();
@@ -2503,9 +2552,11 @@ impl Cs16App {
                 let m = ui_mode.to_ascii_lowercase();
                 if matches!(
                     m.as_str(),
-                    "hud" | "buy" | "scoreboard" | "commandmenu" | "chat"
+                    "hud" | "buy" | "buy:rifles" | "scoreboard" | "commandmenu" | "chat"
                 ) {
-                    if self.in_game_frames == 2 {
+                    if self.in_game_frames == 1 && m == "buy:rifles" {
+                        let _ = self.session.server_console("mp_startmoney 16000");
+                    } else if self.in_game_frames == 2 {
                         self.session.send_stringcmd("jointeam 2");
                     } else if self.in_game_frames == 6 {
                         self.session.send_stringcmd("joinclass 1");
@@ -2524,13 +2575,161 @@ impl Cs16App {
                                 self.feeds.notify.clear();
                                 self.buy_team_class_ui.open_kind(VguiMenuKind::Buy, true);
                             }
+                            "buy:rifles" => {
+                                self.cvars.set("_vgui_menus", "1");
+                                self.feeds.center = None;
+                                self.feeds.notify.clear();
+                                self.buy_team_class_ui
+                                    .open_kind_fresh(VguiMenuKind::BuyRifles, true);
+                                self.buy_team_class_ui.focus_index = 2;
+                                self.buy_team_class_ui.hovered_class = Some("m4a1".to_string());
+                            }
                             "scoreboard" => self.scoreboard_toggled = true,
                             "commandmenu" => self.command_menu_ui.set_open(true),
                             "chat" => self.chat_ui.open_chat(false),
                             _ => {}
                         }
-                        self.startup_ui_applied = true;
+                        if m != "hud" {
+                            self.startup_ui_applied = true;
+                        }
                         self.sync_cursor_capture();
+                    } else if m == "hud" && self.in_game_frames == 90 {
+                        self.startup_ui_applied = true;
+                    }
+                } else if matches!(
+                    m.as_str(),
+                    "ak47" | "m4a1:silenced" | "awp:scope" | "aug:zoom" | "blood:bot"
+                ) {
+                    let is_t = m == "ak47";
+                    if self.in_game_frames == 1 {
+                        let _ = self.session.server_console("mp_startmoney 16000");
+                        let _ = self.session.server_console("mp_freezetime 0");
+                        if m == "blood:bot" {
+                            let _ = self.session.server_console("bot_stop 1");
+                            let _ = self.session.server_console("bot_add_t");
+                        }
+                    } else if self.in_game_frames == 2 {
+                        self.session
+                            .send_stringcmd(if is_t { "jointeam 1" } else { "jointeam 2" });
+                    } else if self.in_game_frames == 6 {
+                        self.session.send_stringcmd("joinclass 1");
+                    } else if self.in_game_frames == 12 {
+                        self.motd_ui.open = false;
+                        self.feeds.motd_open = false;
+                        self.buy_team_class_ui.close();
+                        self.session.with_hud_mut(|h| {
+                            h.vgui_menu = None;
+                            h.menu = None;
+                        });
+                        match m.as_str() {
+                            "ak47" => self.session.send_stringcmd("ak47"),
+                            "m4a1:silenced" | "blood:bot" => self.session.send_stringcmd("m4a1"),
+                            "awp:scope" => self.session.send_stringcmd("awp"),
+                            "aug:zoom" => self.session.send_stringcmd("aug"),
+                            _ => {}
+                        }
+                        self.sync_cursor_capture();
+                    } else if m == "ak47" && self.in_game_frames == 65 {
+                        self.startup_ui_applied = true;
+                    } else if m == "m4a1:silenced" {
+                        if self.in_game_frames == 75 {
+                            self.input_state.apply_action_input("attack2", true);
+                        } else if self.in_game_frames == 80 {
+                            self.input_state.apply_action_input("attack2", false);
+                        } else if self.in_game_frames == 250 {
+                            self.startup_ui_applied = true;
+                        }
+                    } else if m == "awp:scope" {
+                        if self.in_game_frames == 125 {
+                            self.input_state.apply_action_input("attack2", true);
+                        } else if self.in_game_frames == 130 {
+                            self.input_state.apply_action_input("attack2", false);
+                        } else if self.in_game_frames == 145 {
+                            self.startup_ui_applied = true;
+                        }
+                    } else if m == "aug:zoom" {
+                        if self.in_game_frames == 75 {
+                            self.input_state.apply_action_input("attack2", true);
+                        } else if self.in_game_frames == 80 {
+                            self.input_state.apply_action_input("attack2", false);
+                        } else if self.in_game_frames == 96 {
+                            self.startup_ui_applied = true;
+                        }
+                    } else if m == "blood:bot" {
+                        if self.in_game_frames == 68 {
+                            let mut chosen_yaw = self.camera.yaw_deg;
+                            let mut dir = {
+                                let fwd = self.camera.forward();
+                                let flat = Vec3::new(fwd.x, fwd.y, 0.0).normalize_or_zero();
+                                if flat.length_squared() > 0.01 {
+                                    flat
+                                } else {
+                                    Vec3::X
+                                }
+                            };
+                            let coll_opt = self.session.collision().cloned();
+                            let _ = self.session.with_local_game_mut(|local| {
+                                let local_pos = {
+                                    let srv = local.server();
+                                    let local_id = srv.edicts().client(0);
+                                    srv.edicts()
+                                        .get(local_id)
+                                        .map(|e| e.vars.origin)
+                                        .unwrap_or(Vec3::ZERO)
+                                };
+                                if let Some(coll) = coll_opt.as_deref() {
+                                    for deg in (0..360).step_by(15) {
+                                        let r = (deg as f32).to_radians();
+                                        let d = Vec3::new(r.cos(), r.sin(), 0.0);
+                                        let tr = coll.trace_world(
+                                            local_pos + Vec3::new(0.0, 0.0, 18.0),
+                                            local_pos + d * 140.0 + Vec3::new(0.0, 0.0, 18.0),
+                                            cs_pm::collision::Hull::Standing,
+                                        );
+                                        if tr.fraction >= 0.99 {
+                                            dir = d;
+                                            chosen_yaw = deg as f32;
+                                            break;
+                                        }
+                                    }
+                                }
+                                let target_pos = local_pos + dir * 92.0;
+                                let max_c = local.server().config().max_clients;
+                                let mut bot_slot = None;
+                                for slot in 1..max_c {
+                                    let id = local.server().edicts().client(slot);
+                                    if local
+                                        .server()
+                                        .edicts()
+                                        .get(id)
+                                        .is_some_and(|e| e.vars.health > 0.0)
+                                    {
+                                        bot_slot = Some(slot);
+                                        break;
+                                    }
+                                }
+                                if let Some(slot) = bot_slot {
+                                    if let Some(p) = local
+                                        .cs_game_mut()
+                                        .state_mut()
+                                        .players
+                                        .get_mut(usize::from(slot))
+                                        .and_then(|o| o.as_mut())
+                                    {
+                                        p.kevlar = Default::default();
+                                        p.armor = 0.0;
+                                    }
+                                    local.server_mut().set_client_origin(slot, target_pos);
+                                }
+                            });
+                            self.camera.yaw_deg = chosen_yaw;
+                            self.camera.pitch_deg = 6.0;
+                        } else if self.in_game_frames == 76 {
+                            self.input_state.apply_action_input("attack", true);
+                        } else if self.in_game_frames == 81 {
+                            self.input_state.apply_action_input("attack", false);
+                            self.startup_ui_applied = true;
+                        }
                     }
                 } else if m == "class" {
                     if self.in_game_frames == 2 {
@@ -4027,8 +4226,25 @@ impl Cs16App {
     }
 
     fn apply_startup_commands(&mut self, event_loop: Option<&ActiveEventLoop>) -> bool {
-        if let Some(map) = self.launch.startup_map.clone() {
-            self.start_local_map(&map);
+        if let Some(ui_mode) = self.launch.startup_ui.as_deref() {
+            match ui_mode.to_ascii_lowercase().as_str() {
+                "buy:rifles" => {
+                    self.cvars.set("bot_quota", "0");
+                    self.cvars.set("mp_startmoney", "16000");
+                }
+                "ak47" | "m4a1:silenced" | "awp:scope" | "aug:zoom" => {
+                    self.cvars.set("bot_quota", "0");
+                    self.cvars.set("mp_startmoney", "16000");
+                    self.cvars.set("mp_freezetime", "0");
+                }
+                "blood:bot" => {
+                    self.cvars.set("bot_quota", "0");
+                    self.cvars.set("mp_startmoney", "16000");
+                    self.cvars.set("mp_freezetime", "0");
+                    self.cvars.set("bot_stop", "1");
+                }
+                _ => {}
+            }
         }
         let startup_cmds = std::mem::take(&mut self.launch.startup_exec);
         for cmd in startup_cmds {
@@ -4036,6 +4252,9 @@ impl Cs16App {
             if self.process_actions(actions, event_loop) {
                 return true;
             }
+        }
+        if let Some(map) = self.launch.startup_map.clone() {
+            self.start_local_map(&map);
         }
         if let Some(ui_mode) = self.launch.startup_ui.take() {
             let lower = ui_mode.to_ascii_lowercase();
@@ -4049,6 +4268,7 @@ impl Cs16App {
             } else {
                 match lower.as_str() {
                     "newgame" => self.menu_ui.new_game_open = true,
+                    "newgame:bots" => self.menu_ui.open_new_game_bots_tab(),
                     "servers" => {
                         self.menu_ui.find_servers_open = true;
                         self.menu_ui.server_browser.open = true;
@@ -4076,6 +4296,14 @@ impl Cs16App {
             self.headless_fixed_dt = Some(1.0 / fps);
         }
         let renderer = Renderer::new_headless(self.launch.width, self.launch.height)?;
+        if !self
+            .cvars
+            .get_str("r_refdll")
+            .eq_ignore_ascii_case(&renderer.backend_name)
+        {
+            self.cvars.set("r_refdll", "auto");
+        }
+        self.active_backend_cvar = self.cvars.get_str("r_refdll").to_ascii_lowercase();
         let (egui_ctx, bg_texture, brand_logo, hud_sprites, vgui_bank) = self.init_egui_context();
         info!(gpu = %renderer.adapter_name, "Counter-Strike 1.6 (Rust) headless runtime ready");
         self.runtime = Some(WindowRuntime {
@@ -4167,6 +4395,7 @@ impl ApplicationHandler for Cs16App {
             }
             Err(err) => {
                 warn!(backend = %desired_backend, %err, "Requested GPU backend unavailable; falling back to default");
+                self.cvars.set("r_refdll", "auto");
                 self.active_backend_cvar = "auto".to_string();
                 Renderer::new(Arc::clone(&window))
             }

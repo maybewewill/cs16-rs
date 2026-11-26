@@ -1436,6 +1436,7 @@ impl OptionsUi {
 
         // 1. Renderer Backend (`Auto / Best`, `Vulkan`, `Direct3D 12`, `Metal`, `OpenGL`) + live GPU info
         let (r_lbl, _, wrap, align) = label_or("Label2", "#GameUI_Renderer");
+        let label_align = align;
         paint_tracker_label_rect(
             ui.painter(),
             rt,
@@ -1443,21 +1444,27 @@ impl OptionsUi {
             dlg_subrect(origin, s, 28.0, 14.0, 108.0, 24.0),
             &r_lbl,
             "Default",
-            align,
+            label_align,
             tc.palette.bright_control_text,
             wrap,
             true,
         );
         let backend_items: Vec<String> = VIDEO_BACKENDS
             .iter()
-            .map(|(_, l)| (*l).to_string())
+            .map(|(k, l)| {
+                if *k == "auto" && !self.gpu_backend.is_empty() {
+                    format!("Auto ({})", self.gpu_backend)
+                } else {
+                    (*l).to_string()
+                }
+            })
             .collect();
         draw_tracker_combo_box_rect(
             ui,
             rt,
             tc,
             "opt_vid_backend",
-            dlg_subrect(origin, s, 140.0, 14.0, 152.0, 24.0),
+            dlg_subrect(origin, s, 140.0, 14.0, 168.0, 24.0),
             &backend_items,
             &mut self.backend_idx,
             true,
@@ -1472,12 +1479,12 @@ impl OptionsUi {
                 ui.painter(),
                 rt,
                 tc,
-                dlg_subrect(origin, s, 298.0, 14.0, 206.0, 24.0),
+                dlg_subrect(origin, s, 314.0, 12.0, 190.0, 30.0),
                 &gpu_line,
                 "DefaultSmall",
-                TextAlignment::West,
+                TextAlignment::NorthWest,
                 tc.palette.dim_text,
-                false,
+                true,
                 true,
             );
         }
@@ -1510,7 +1517,7 @@ impl OptionsUi {
             rt,
             tc,
             "opt_vid_res",
-            dlg_subrect(origin, s, 140.0, 44.0, 152.0, 24.0),
+            dlg_subrect(origin, s, 140.0, 44.0, 168.0, 24.0),
             &res_items,
             &mut res_idx,
             true,
@@ -1547,7 +1554,7 @@ impl OptionsUi {
             rt,
             tc,
             "opt_vid_aspect",
-            dlg_subrect(origin, s, 140.0, 74.0, 152.0, 24.0),
+            dlg_subrect(origin, s, 140.0, 74.0, 168.0, 24.0),
             &aspect_items,
             &mut aspect_idx,
             true,
@@ -1563,7 +1570,7 @@ impl OptionsUi {
             dlg_subrect(origin, s, 28.0, 104.0, 108.0, 24.0),
             "Texture Style",
             "Default",
-            TextAlignment::West,
+            label_align,
             tc.palette.base_text,
             false,
             true,
@@ -1578,7 +1585,7 @@ impl OptionsUi {
             rt,
             tc,
             "opt_vid_texstyle",
-            dlg_subrect(origin, s, 140.0, 104.0, 180.0, 24.0),
+            dlg_subrect(origin, s, 140.0, 104.0, 168.0, 24.0),
             &tex_items,
             &mut self.texture_style_idx,
             true,
@@ -1588,14 +1595,14 @@ impl OptionsUi {
             cvars.set("r_software_mode", sw);
         }
 
-        // 5. Video checkboxes (2 crisp columns, every checkbox wired live to CVars)
+        // 5. Video checkboxes (2 crisp well-spaced columns, every checkbox wired live to CVars)
         let (win_lbl, _, _, _) = label_or("Windowed", "#GameUI_Windowed");
         draw_tracker_check_button_rect(
             ui,
             rt,
             tc,
             "opt_vid_win",
-            dlg_subrect(origin, s, 140.0, 134.0, 165.0, 22.0),
+            dlg_subrect(origin, s, 28.0, 134.0, 236.0, 22.0),
             &mut self.windowed,
             &win_lbl,
             true,
@@ -1608,7 +1615,7 @@ impl OptionsUi {
             rt,
             tc,
             "opt_vid_wfov",
-            dlg_subrect(origin, s, 140.0, 158.0, 165.0, 22.0),
+            dlg_subrect(origin, s, 28.0, 158.0, 236.0, 22.0),
             &mut wfov,
             &wfov_lbl,
             true,
@@ -1623,7 +1630,7 @@ impl OptionsUi {
             rt,
             tc,
             "opt_vid_vsync",
-            dlg_subrect(origin, s, 140.0, 182.0, 165.0, 22.0),
+            dlg_subrect(origin, s, 28.0, 182.0, 236.0, 22.0),
             &mut vsync,
             &vs_lbl,
             true,
@@ -1638,7 +1645,7 @@ impl OptionsUi {
             rt,
             tc,
             "opt_vid_lowlat",
-            dlg_subrect(origin, s, 312.0, 134.0, 185.0, 22.0),
+            dlg_subrect(origin, s, 278.0, 134.0, 218.0, 22.0),
             &mut lowlat,
             "Low video latency",
             true,
@@ -1653,7 +1660,7 @@ impl OptionsUi {
             rt,
             tc,
             "opt_vid_shaders",
-            dlg_subrect(origin, s, 312.0, 158.0, 185.0, 22.0),
+            dlg_subrect(origin, s, 278.0, 158.0, 218.0, 22.0),
             &mut shaders,
             &sh_lbl,
             true,
@@ -1667,7 +1674,7 @@ impl OptionsUi {
             rt,
             tc,
             "opt_vid_hd_models",
-            dlg_subrect(origin, s, 312.0, 182.0, 185.0, 22.0),
+            dlg_subrect(origin, s, 278.0, 182.0, 218.0, 22.0),
             &mut hd_models,
             "Enable HD models",
             true,

@@ -3496,25 +3496,29 @@ pub(crate) fn server_command(
     let arg1 = argv.get(1).map(String::as_str);
     let arg2 = argv.get(2).map(String::as_str);
     match cmd.as_str() {
-        "bot_add" => {
-            if add_bot(g, eng, None, arg1, arg2).is_some() {
+        "bot_add" | "bot_add_t" | "bot_add_ct" => {
+            let team = match cmd.as_str() {
+                "bot_add_t" => Some(Team::Terrorist),
+                "bot_add_ct" => Some(Team::Ct),
+                _ => None,
+            };
+            if add_bot(g, eng, team, arg1, arg2).is_some() {
+                if g.bots.quota_enabled {
+                    let count = (0..eng.max_clients())
+                        .filter(|&s| eng.is_fake_client(s))
+                        .count() as i32;
+                    if (eng.cvar_f32("bot_quota") as i32) < count {
+                        eng.set_cvar("bot_quota", &count.to_string());
+                        g.bots.settings.bot_quota = count as u32;
+                    }
+                }
                 Some(String::new())
             } else {
-                Some("Failed to add bot\n".to_string())
-            }
-        }
-        "bot_add_t" => {
-            if add_bot(g, eng, Some(Team::Terrorist), arg1, arg2).is_some() {
-                Some(String::new())
-            } else {
-                Some("Failed to add terrorist bot\n".to_string())
-            }
-        }
-        "bot_add_ct" => {
-            if add_bot(g, eng, Some(Team::Ct), arg1, arg2).is_some() {
-                Some(String::new())
-            } else {
-                Some("Failed to add CT bot\n".to_string())
+                Some(match team {
+                    Some(Team::Terrorist) => "Failed to add terrorist bot\n".to_string(),
+                    Some(Team::Ct) => "Failed to add CT bot\n".to_string(),
+                    _ => "Failed to add bot\n".to_string(),
+                })
             }
         }
         "bot_kick" => {

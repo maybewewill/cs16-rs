@@ -106,7 +106,11 @@ impl DemoRecorder {
         let time = self.rel_time(now);
         let frame_num = self.frame_counter;
         self.frame_counter = self.frame_counter.saturating_add(1);
-        let frame_type_raw = if is_signon && !self.signon_complete { 0 } else { 1 };
+        let frame_type_raw = if is_signon && !self.signon_complete {
+            0
+        } else {
+            1
+        };
         let frame = DemoFrame {
             frame_type_raw,
             time,
@@ -361,7 +365,11 @@ fn make_fx_env<'a>(
 ) -> FxEnv<'a> {
     let mut env = FxEnv::new(time, precache, latest_entities, world);
     env.max_clients = server_info.map(|i| u16::from(i.max_clients)).unwrap_or(32);
-    env.local_player = server_info.map(|i| u16::from(i.player_slot) + 1).unwrap_or(0);
+    env.local_player = server_info
+        .map(|i| u16::from(i.player_slot) + 1)
+        .unwrap_or(0);
+    // Demo playback replays server sound packets directly without local movement prediction.
+    env.prediction_active = false;
     if let Some(cd) = client_data {
         env.local_origin = cd.origin;
         env.local_view_ofs = cd.view_ofs;
@@ -600,7 +608,11 @@ impl DemoPlayer {
     }
 
     fn maybe_store_keyframe(&mut self) {
-        let last_t = self.keyframes.last().map(|k| k.playback_time).unwrap_or(-10.0);
+        let last_t = self
+            .keyframes
+            .last()
+            .map(|k| k.playback_time)
+            .unwrap_or(-10.0);
         if self.state.playback_time - last_t >= KEYFRAME_INTERVAL_SECS {
             self.keyframes.push(self.state.clone());
         }
@@ -661,18 +673,19 @@ impl DemoPlayer {
                 ..
             } => {
                 if record_lines {
-                    let name = String::from_utf8_lossy(
-                        sample.split(|&b| b == 0).next().unwrap_or(sample),
-                    )
-                    .into_owned();
+                    let name =
+                        String::from_utf8_lossy(sample.split(|&b| b == 0).next().unwrap_or(sample))
+                            .into_owned();
                     let origin = self
                         .state
                         .client_data
                         .as_ref()
                         .map(|c| c.origin)
                         .unwrap_or(Vec3::ZERO);
-                    self.state.fx.sounds.push(SoundCommand::Start(
-                        SoundStart::by_name(
+                    self.state
+                        .fx
+                        .sounds
+                        .push(SoundCommand::Start(SoundStart::by_name(
                             &name,
                             0,
                             (*channel).clamp(0, 255) as u8,
@@ -680,8 +693,7 @@ impl DemoPlayer {
                             volume.clamp(0.0, 1.0),
                             *attenuation,
                             (*pitch).clamp(2, 255) as u8,
-                        ),
-                    ));
+                        )));
                 }
             }
             DemoFrameData::Event(_) | DemoFrameData::DemoStart | DemoFrameData::DemoBuffer(_) => {}
@@ -691,7 +703,13 @@ impl DemoPlayer {
         }
     }
 
-    fn handle_svc(&mut self, msg: SvcMessage, incoming_sequence: u32, now: f64, record_lines: bool) {
+    fn handle_svc(
+        &mut self,
+        msg: SvcMessage,
+        incoming_sequence: u32,
+        now: f64,
+        record_lines: bool,
+    ) {
         let _ = self.state.frames.handle(
             &msg,
             &self.state.ctx,
@@ -704,7 +722,9 @@ impl DemoPlayer {
         {
             self.state.latest_entities.clear();
             for fe in &frame.entities {
-                self.state.latest_entities.insert(fe.state.number, fe.state.clone());
+                self.state
+                    .latest_entities
+                    .insert(fe.state.number, fe.state.clone());
             }
         }
 

@@ -43,4 +43,6 @@ wgpu = { workspace = true, features = ["webgl"] }
 workspace = true
 
 [dev-dependencies]
+cs-engine.workspace = true
+cs-game.workspace = true
 cs-probe.workspace = true

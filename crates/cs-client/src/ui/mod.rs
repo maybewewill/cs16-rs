@@ -987,18 +987,27 @@ pub fn draw_top_left_console_overlays(
             .into_iter()
             .rev()
         {
+            let clean: String = line
+                .chars()
+                .map(|c| if c == '\t' { ' ' } else { c })
+                .filter(|c| !c.is_control())
+                .collect();
+            let clean = clean.trim();
+            if clean.is_empty() {
+                continue;
+            }
             let pos = Pos2::new(screen.left() + 8.0, y);
             painter.text(
                 pos + egui::vec2(1.0, 1.0),
                 egui::Align2::LEFT_TOP,
-                line,
+                clean,
                 font.clone(),
                 Color32::BLACK,
             );
             painter.text(
                 pos,
                 egui::Align2::LEFT_TOP,
-                line,
+                clean,
                 font.clone(),
                 Color32::from_rgb(255, 195, 65),
             );

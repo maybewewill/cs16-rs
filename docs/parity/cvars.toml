@@ -2584,6 +2584,11 @@ status = "tested"
 evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
+id = "snd_occlusion"
+status = "tested"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-client/src/audio/mixer.rs; crates/cs-client/tests/phase18_stage1_walkthrough.rs"
+
+[[item]]
 id = "soundfade"
 status = "tested"
 evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"

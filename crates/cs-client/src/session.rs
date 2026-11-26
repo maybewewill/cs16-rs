@@ -7,12 +7,12 @@ use std::collections::BTreeMap;
 use std::net::ToSocketAddrs;
 use std::sync::Arc;
 
+use cs_clientcore::events::FiredEvent;
+use cs_clientcore::hud::HudState;
 use cs_clientcore::{
     ConnState, Connection, ConnectionConfig, ConsoleCommand, DemoPlayer, ResourceFiles,
     SoundCommand, ViewAngleUpdate, VoiceEvent,
 };
-use cs_clientcore::events::FiredEvent;
-use cs_clientcore::hud::HudState;
 use cs_local::{FRAME_SECS, LocalGame, LocalOptions};
 use cs_pm::collision::WorldCollision;
 use cs_proto48::crypto::md5_hex;
@@ -257,6 +257,13 @@ impl Session {
         matches!(self.kind, Kind::Local { .. })
     }
 
+    pub fn with_local_game_mut<R>(&mut self, f: impl FnOnce(&mut LocalGame) -> R) -> Option<R> {
+        match &mut self.kind {
+            Kind::Local { game, .. } => Some(f(game)),
+            _ => None,
+        }
+    }
+
     pub fn state(&self) -> Option<ConnState> {
         match &self.kind {
             Kind::Demo { .. } => Some(ConnState::InGame),
@@ -353,8 +360,7 @@ impl Session {
         self.map_name = Some(name.to_string());
         self.collision = collision.clone();
         self.view.reset_map();
-        self.view
-            .set_map_bounds(collision.as_deref());
+        self.view.set_map_bounds(collision.as_deref());
         self.view
             .set_world_context(collision.clone(), self.vfs.clone());
         let vfs = self.vfs.clone();
@@ -583,12 +589,10 @@ impl Session {
     /// Drains raw custom `UserMsg` packets not handled by built-in GoldSrc HUD reducers.
     pub fn drain_unknown_usermsgs(&mut self) -> Vec<cs_clientcore::hud::UnknownUserMsg> {
         match &mut self.kind {
-            Kind::Demo { player, .. } => player
-                .hud_mut()
-                .unknown_messages
-                .drain(..)
-                .collect(),
-            _ => with_conn_mut!(self, c => c.fx_mut().hud.unknown_messages.drain(..).collect(), else Vec::new()),
+            Kind::Demo { player, .. } => player.hud_mut().unknown_messages.drain(..).collect(),
+            _ => {
+                with_conn_mut!(self, c => c.fx_mut().hud.unknown_messages.drain(..).collect(), else Vec::new())
+            }
         }
     }
 
@@ -616,11 +620,17 @@ impl Session {
         with_conn!(self, c => c.delta_stats_summary(), else "No active session.".to_string())
     }
 
-    pub fn with_net_graph<R>(&self, f: impl FnOnce(&cs_clientcore::NetGraphTelemetry) -> R) -> Option<R> {
+    pub fn with_net_graph<R>(
+        &self,
+        f: impl FnOnce(&cs_clientcore::NetGraphTelemetry) -> R,
+    ) -> Option<R> {
         with_conn!(self, c => Some(f(c.net_graph())), else None)
     }
 
-    pub fn with_precache<R>(&self, f: impl FnOnce(&cs_clientcore::PrecacheTables) -> R) -> Option<R> {
+    pub fn with_precache<R>(
+        &self,
+        f: impl FnOnce(&cs_clientcore::PrecacheTables) -> R,
+    ) -> Option<R> {
         match &self.kind {
             Kind::Demo { player, .. } => Some(f(player.precache())),
             _ => with_conn!(self, c => Some(f(c.precache())), else None),
@@ -649,10 +659,15 @@ impl Session {
     #[cfg(test)]
     fn precache_model_names(&self) -> Vec<String> {
         match &self.kind {
-            Kind::Demo { player, .. } => {
-                player.precache().models.values().map(|e| e.name.clone()).collect()
+            Kind::Demo { player, .. } => player
+                .precache()
+                .models
+                .values()
+                .map(|e| e.name.clone())
+                .collect(),
+            _ => {
+                with_conn!(self, c => c.precache().models.values().map(|e| e.name.clone()).collect(), else Vec::new())
             }
-            _ => with_conn!(self, c => c.precache().models.values().map(|e| e.name.clone()).collect(), else Vec::new()),
         }
     }
 
@@ -705,9 +720,9 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cs_assets::bsp::BspMap;
     use cs_client::input::{CmdParams, Held, MoveSpeeds, build_usercmd};
     use cs_client::view::ViewInputs;
-    use cs_assets::bsp::BspMap;
     use cs_vfs::VfsConfig;
     use std::collections::HashSet;
 
@@ -747,7 +762,9 @@ mod tests {
             let mut text = None;
             for _ in 0..600 {
                 s.advance(0.01);
-                text = s.with_hud(|h| h.menu.as_ref().map(|m| m.text.clone())).flatten();
+                text = s
+                    .with_hud(|h| h.menu.as_ref().map(|m| m.text.clone()))
+                    .flatten();
                 if text.is_some() {
                     break;
                 }
@@ -779,9 +796,7 @@ mod tests {
             };
             s.queue_cmd(build_usercmd(&held, angles, p, &MoveSpeeds::default()));
             s.advance(0.01);
-            let (view, _) = s
-                .build_view(angles, &inputs(s.now()))
-                .expect("a view");
+            let (view, _) = s.build_view(angles, &inputs(s.now())).expect("a view");
             if frame == 100 {
                 first_eye = Some(view.eye);
             }
@@ -795,18 +810,31 @@ mod tests {
         }
         let hp = s.with_hud(|h| h.health).expect("hud");
         assert!(hp > 0, "the player is alive");
-        assert!(most_studio > 0, "the bots are in the scene as studio models");
+        assert!(
+            most_studio > 0,
+            "the bots are in the scene as studio models"
+        );
         // `viewmodel` of the client data names the weapon in hand. The game sets it from the
         // precache table; the shell shows it when it is there (see the report: the game
         // precaches no `v_*.mdl`, so the local server sends 0 until it does).
-        let v_models = s.precache_model_names().iter().filter(|n| n.contains("/v_")).count();
+        let v_models = s
+            .precache_model_names()
+            .iter()
+            .filter(|n| n.contains("/v_"))
+            .count();
         eprintln!("view models precached by the server: {v_models}, shown: {had_viewmodel}");
-        assert!(had_viewmodel || v_models == 0, "a precached view model was not shown");
+        assert!(
+            had_viewmodel || v_models == 0,
+            "a precached view model was not shown"
+        );
         assert!(s.local_slot().is_some());
         // The camera follows the predicted player: walking forward moved it away
         // from where it stood at frame 100 (the freeze time ends before the walk is over).
         let _ = last_eye;
-        assert!(farthest > 100.0, "the camera did not follow the walking player: {farthest}");
+        assert!(
+            farthest > 100.0,
+            "the camera did not follow the walking player: {farthest}"
+        );
         s.close();
         assert!(!s.is_active());
     }
@@ -859,7 +887,10 @@ mod tests {
         let mid_t = demo.now();
         demo.demo_player_mut().unwrap().seek(mid_t * 0.5);
         assert!(demo.now() <= mid_t * 0.5 + 1e-4);
-        let report = demo.demo_player_mut().unwrap().run_timedemo_all(1.0 / 100.0);
+        let report = demo
+            .demo_player_mut()
+            .unwrap()
+            .run_timedemo_all(1.0 / 100.0);
         assert!(report.frames > 0);
         demo.close();
     }
