@@ -83,6 +83,6 @@ jobs:
       - name: Verify web JS syntax
         shell: bash
         run: |
-          for f in web/*.js; do
+          for f in web/*.js web/playground/*.js; do
             node --check "$f"
           done

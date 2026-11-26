@@ -242,4 +242,49 @@ fn playground_four_starter_templates_hot_reload_under_5ms_and_run_in_instant_dem
     for (id, _, _) in &extracted {
         assert!(st.unload_python_plugin(id), "failed to unload `{id}`");
     }
+
+    // 7. Verify both `player.hud(...)` (TE_TEXTMESSAGE) and `player.dhud(...)` (SVC_DIRECTOR
+    //    DRC_CMD_MESSAGE) propagate through ViewBuilder into `fx.hud.te_text_messages` for
+    //    Native + Browser HUD rendering.
+    let hud_probe_py = r#"from cs16 import mod, HookAction
+
+@mod.info(id="hud_probe", version="1.0.0", permissions=["messages", "commands"])
+def _meta():
+    pass
+
+@mod.chat_command("/hudprobe")
+def cmd_probe(player, args):
+    player.hud("HUD_LINE_OK", x=-1.0, y=0.35, channel=2, rgba=(255, 200, 50, 255), hold=3.0)
+    player.dhud("DHUD_BANNER_OK", x=-1.0, y=0.22, rgb=(255, 80, 40), hold=3.0)
+    return HookAction.SUPERCEDE
+"#;
+    st.reload_python_plugin("hud_probe.py", hud_probe_py)
+        .expect("load hud_probe");
+    for _ in 0..75 {
+        let _ = st.step(0.01);
+    }
+    st.exec_command("say /hudprobe");
+    for _ in 0..10 {
+        let _ = st.step(0.01);
+    }
+    let te_texts: Vec<String> = match &st.session {
+        SessionMode::Local { game, .. } => game
+            .connection()
+            .fx()
+            .hud
+            .te_text_messages
+            .iter()
+            .map(|m| m.text.clone())
+            .collect(),
+        _ => panic!("expected Local session"),
+    };
+    assert!(
+        te_texts.iter().any(|t| t == "HUD_LINE_OK"),
+        "expected TE_TEXTMESSAGE HUD_LINE_OK in hud.te_text_messages, got: {te_texts:?}"
+    );
+    assert!(
+        te_texts.iter().any(|t| t == "DHUD_BANNER_OK"),
+        "expected DRC_CMD_MESSAGE DHUD_BANNER_OK in hud.te_text_messages, got: {te_texts:?}"
+    );
+    assert!(st.unload_python_plugin("hud_probe"));
 }

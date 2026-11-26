@@ -6,6 +6,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ---
 
+## [0.4.0] - 2026-11-26
+
+Major release delivering the **1-to-1 Steam Build 10210 Visual, Audio, UI & Bot Fidelity Overhaul** alongside the **Interactive Developer Portal (`/docs/`)**, **15-Plugin Hub (`/mods/`)**, **Live Browser Python Mod Playground (`/playground/`)**, and two new competitive gamemodes (**Retakes** in Rust WASM and **Multi-1v1 Arena Ladder** in Python 3).
+
+### Added
+
+- **1-to-1 Steam Build 10210 UI, HUD, Menus & Options Overhaul (Stage 1):**
+  - **HiDPI Physical-Pixel Grid & Input Routing:** Locked VGUI2 and HUD rendering to exact 1:1 physical pixels (`pixels_per_point = 1.0`), authentic `CCSBuyMenu` (`BuyRifles_CT.res` `B-4-2` hotkey navigation with matching `.tga` weapon previews and `ItemInfo` prices/caliber/RPM stats), authentic `DrawWList` weapon-bucket switcher (removing the non-vanilla `[1..5]` bottom bar), dynamic CS 1.6 crosshair scaling, `sniper_scope.spr` scopes, `BarTime` defuse/plant bars, 80° GoldSrc DeathCam roll tilt, `New Game` Bots tab, and all 7 live Options tabs with zero dead controls.
+  - **StudioModel Viewmodels, 3rd-Person Animation & Crimson Blood:** Exact GoldSrc backface culling, right-hand viewmodel mirror normal preservation, depth-range isolation, live BSP world lighting on first-person `v_*.mdl` hands/weapons, silencer visual persistence across reloads/holsters, 3rd-person player/bot gait & pitch/yaw aim blending, and vivid crimson blood sprites & wall decals.
+  - **Authentic GoldSrc Audio & Footsteps:** Crisp dry `SND_Spatialize` default (removing fake occlusion muffling and pitch jitter), firing all `.mdl` `5004` weapon animation keyframe events, echo-free 300 ms predicted material footsteps, and exact `HUD_PRINTRADIO` wire formatting (`Player @ Location (RADIO): Message`).
+  - **1-to-1 `CCSBot` AI & Server Gameplay Parity:** Continuous ZBot movement steering, freeze-time economy buying, knife rollout on round start, tick-0 buyzone `SIGNAL_BUY` & complete classic weapon aliases (`ak47`, `m4a1`, `awp`, `vesthelm`, etc.), weapon special states, C4/observer parity, and server-side footstep PAS filtering.
+  - **Native + Browser HUD `TE_TEXTMESSAGE` & `DRC_CMD_MESSAGE` Glue:** Wired `RenderEffect::TextMessage` (`player.hud(...)`) through `ViewBuilder` and `SvcMessage::Director` `DRC_CMD_MESSAGE` (`player.dhud(...)`) through `HudState::handle` with channel replacement, 8-banner DHUD stacking, multi-line layout, and automatic expiration on both Native (`cs-client`) and Browser (`cs-web`) HUDs.
+- **Competitive Gamemodes (15 Built-In Plugins Total):**
+  - **`mods/gamemodes/retakes/` (Rust -> WASM, `#![forbid(unsafe_code)]`):** 3T vs 4CT Bombsite A/B retake scenarios with tuned spawn/site presets for `de_dust2`, `de_inferno`, `de_nuke`, `de_mirage`, `de_train` + custom map fallback, Pistol/Force-Buy/Full-Buy round cycle, CT defuser allocation, GoldSrc `/guns` preference menu + max-1-per-team AWP lottery, win-streak team rotation/scramble (`retakes_scramble_streak`), admin overrides, and bilingual EN/RU DHUD+HUD banners.
+  - **`mods/gamemodes/multi_1v1.py` (Zero-Compile Python 3):** Competitive Arena `1..N` ladder (`Arena 1 [Server Champion]` .. `Arena N`) with winner-up/loser-down promotion, odd-player wait queue, spatial arena isolation + cross-arena damage guard, `/guns` Rifle/Pistol/AWP preference resolution, persistent Elo ratings + Arena-1 crown defenses, and bilingual EN/RU `/top1v1` & `!rank` commands.
+- **Static Developer Portal (`/docs/`) & Plugin Hub (`/mods/`):**
+  - Added `xtask/src/docs_gen.rs` and `xtask/src/mods_hub_gen.rs` (`cargo xtask docs-build` and integrated into `cargo xtask web-build --release` + GitHub Pages deployment).
+  - `/docs/` generates 6 interactive Steam-2003 VGUI2 pages indexing all `52` `HookId` variants (with 5-language code tabs), `92` SDK API methods, `736` CVars & console commands, `138` AMXX natives + `25` stock plugin upgrades + live `.sma` converter, interactive GoldSrc Menu/HUD/VFX studio, and `Ctrl+K` instant search.
+  - `/mods/` dynamically discovers all 15 built-in plugins across `mods/{std,community,gamemodes}` with searchable cards, source browser, 1-click `.py`/`.csmod` downloads, `plugins.json` contract, and *"Open in Playground"* handoff.
+- **Live Browser Python Mod Playground (`/playground/`):**
+  - Wired `ServerModHost` + pure-Rust `cs-mod-py` (`#![forbid(unsafe_code)]`, `wasm32`-clean) into `cs-local` and `cs-web` with JS-callable `reloadPythonPlugin` (`< 5 ms` hot-reload latency), `unloadPythonPlugin`, `modResmonJson`, `drainModLogsJson`, `execCommand`, and pre-session plugin queueing.
+  - Shipped `web/playground/` split-pane VGUI2 code editor with synchronized line gutter & Python syntax highlight overlay, 4 starter templates (`vampire_shockwave.py`, `golden_ak_damager.py`, `moon_gravity_parachute.py`, `vip_menu.py`), live `< 5 ms` reload latency badge, ResMon fuel/calls panel, 1-click test actions, `?mod=<id>` import from `/mods/`, shared 5-link portal navbar across `/`, `/admin`, `/docs/`, `/playground/`, `/mods/`, and updated `web/sw.js` (`cs16-rs-shell-v5`).
+- **Refreshed 1-to-1 Release Showcase Media:**
+  - Re-captured all 8 `1280x720` screenshots (`.github/assets/shot-*.jpg`) and dual-format `800x450` animated `de_dust2` gameplay preview (`.github/assets/gameplay-preview.webp` + `.github/assets/gameplay-preview.gif` fallback) on the perfected 1-to-1 `--release` build.
+
+---
+
 ## [0.3.0] - 2026-11-26
 
 Milestone release reaching **`100.0%` Parity Ledger completion** (`1,783 / 1,783` tracked items across all 15 categories), introducing a **1-Click Clean-Room Instant Demo (`dm_rusthouse`)** playable in the browser or natively with zero external Valve files, zero-`unsafe` Rust guest mod export macros, animated gameplay showcase footage, and verified production **`--release` LTO** benchmarks head-to-head against retail Steam `hlds.exe` (Build 10210).

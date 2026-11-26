@@ -1,8 +1,37 @@
 # cs16-rs Polyglot Modding Guide (ABI v2)
 
-`cs16-rs` ships a sandboxed, zero-`unsafe` modding platform where **Python 3**, **Rust**, **C/C++20**, **Go**, and legacy **AMX Mod X (`.amxx`)** plugins run side-by-side on the same 100 Hz Protocol 48 server, sharing paginated `ShowMenu`, per-player `i18n`, RBAC admins, `nvault` + $O(\log N)$ leaderboards, and synchronous cross-language RPC.
+> **Interactive Online Resources:**
+> - **[Docs & API Portal (`/docs/`)](https://maybewewill.github.io/cs16-rs/docs/)** — Complete 52-hook reference (5-language tabs), 92 SDK API methods, 736 CVars & commands, 138 AMXX natives + live `.sma` converter, and interactive Menu/HUD/VFX studio.
+> - **[Live Browser Python Playground (`/playground/`)](https://maybewewill.github.io/cs16-rs/playground/)** — Write & hot-reload Python 3 plugins in `< 5 ms` directly inside a playable WebGPU/WebGL2 match with live ResMon fuel/calls telemetry.
+> - **[Plugin Hub (`/mods/` — 15 Built-In Mods)](https://maybewewill.github.io/cs16-rs/mods/)** — Searchable catalog with source viewer, `.py`/`.csmod` downloads, and 1-click *"Open in Playground"*.
+
+`cs16-rs` ships a sandboxed, zero-`unsafe` modding platform where **Python 3**, **Rust**, **C/C++20**, **Go**, and legacy **AMX Mod X (`.amxx`)** plugins run side-by-side on the same 100 Hz Protocol 48 server (and inside the browser WebGPU/WebGL2 `cs-web` client!), sharing paginated `ShowMenu`, `TE_TEXTMESSAGE` / `DRC_CMD_MESSAGE` HUD & DHUD banners, per-player `i18n`, RBAC admins, `nvault` + $O(\log N)$ leaderboards, and synchronous cross-language RPC.
 
 Every plugin runs inside strict fuel & memory caps: an infinite loop or runtime error faults only that plugin, keeps the server ticking at 100 Hz, and captures a deterministic black-box crash dump in `logs/mod_faults/` for offline `< 10 ms` replay.
+
+---
+
+## Built-In 15-Plugin Showcase Catalog (`configs/plugins.toml`)
+
+All 15 built-in plugins compile/validate cleanly via `cargo xtask mod build` and are indexed in the online **[Plugin Hub (`/mods/`)](https://maybewewill.github.io/cs16-rs/mods/)**:
+
+| Category | Plugin | Language | Highlights |
+|---|---|---|---|
+| **Standard** *(enabled)* | `mods/std/admin` | Rust WASM | RBAC admin commands (`amx_kick`, `amx_ban`, `amx_slay`, `amx_slap`, `amx_map`, `amx_csay`) |
+| **Standard** *(enabled)* | `mods/std/mapmanager` | Go / WASI | `rtv`, `nominate`, `timeleft`, `nextmap`, paginated end-of-map vote |
+| **Standard** *(enabled)* | `mods/std/statsx` | Rust WASM | Persistent K/D/HS `/rank`, `/top15`, `/me`, `/hp` with $O(\log N)$ leaderboard |
+| **Standard** *(enabled)* | `mods/std/restmenu` | C++20 WASM | Weapon restriction menu (`CanBuyItem` hook) |
+| **Community** *(enabled)* | `mods/community/resetscore.py` | Python 3 | `/rs` / `/resetscore` with VFX aura & EN/RU localization |
+| **Community** *(enabled)* | `mods/community/vip_system.py` | Python 3 | VIP flags, bonus armor/money, round menus, golden weapons |
+| **Community** *(enabled)* | `mods/community/afk_control.py` | Python 3 | Idle detection, bomb transfer & spectator/kick management |
+| **Community** *(enabled)* | `mods/community/damager_and_parachute.py` | Python 3 | Live HUD hit-damage indicator + `+use` parachute glide |
+| **Community** *(enabled)* | `mods/community/antiflood_admanager.py` | Python 3 | Chat flood protection & scheduled server announcements |
+| **Gamemodes** *(opt-in)* | `mods/gamemodes/semiclip` | Rust WASM | Teammate collision pass-through + translucent fade |
+| **Gamemodes** *(opt-in)* | `mods/gamemodes/csdm` | Rust WASM | Counter-Strike Deathmatch instant respawn, weapon menu & spawn protection |
+| **Gamemodes** *(opt-in)* | `mods/gamemodes/gungame` | Rust WASM | 24-level weapon progression, knife steal & turbo mode |
+| **Gamemodes** *(opt-in)* | `mods/gamemodes/zombie_plague` | Rust WASM | Infection rounds, Nemesis/Survivor bosses, laser mines & extra items |
+| **Gamemodes** *(opt-in)* | `mods/gamemodes/retakes` | Rust WASM | **Competitive Retakes:** 3T vs 4CT Bombsite A/B scenarios (`de_dust2`/`de_inferno`/`de_nuke`/`de_mirage`/`de_train` + fallback), Pistol/Force-Buy/Full-Buy rounds, `/guns` allocator, max-1 AWP lottery, win-streak team scramble & EN/RU DHUD banners |
+| **Gamemodes** *(opt-in)* | `mods/gamemodes/multi_1v1.py` | Python 3 | **Competitive Multi-1v1 Arena Ladder:** Arena `1..N` winner-up / loser-down promotion, Server Champion crown, spatial arena isolation + cross-arena damage guard, `/guns` Rifle/Pistol/AWP preferences, persistent Elo & EN/RU `/top1v1` / `!rank` |
 
 ---
 

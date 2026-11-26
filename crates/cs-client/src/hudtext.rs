@@ -183,6 +183,17 @@ fn format_with_titles_inner(
     titles: Option<&TitlesTable>,
     keep_color_codes: bool,
 ) -> String {
+    // GoldSrc `HUD_PRINTRADIO` sends `message = "<sender_entindex>"` with
+    // `params = ["#Game_radio" | "#Game_radio_location", sender_name, ...]`.
+    let clean_head = text.trim();
+    if !clean_head.is_empty()
+        && clean_head.bytes().all(|b| b.is_ascii_digit())
+        && let Some(first) = params.first()
+        && (first.eq_ignore_ascii_case("#Game_radio")
+            || first.eq_ignore_ascii_case("#Game_radio_location"))
+    {
+        return format_with_titles_inner(first, &params[1..], loc, titles, keep_color_codes);
+    }
     let stripped = text.trim_start_matches(['\u{1}', '\u{2}', '\u{3}', '\u{4}']);
     let prefix_len = text.len() - stripped.len();
     let trimmed = stripped.trim_end_matches(['\r', '\n', ' ', '\t']);
@@ -435,6 +446,15 @@ mod tests {
             None,
         );
         assert_eq!(radio, "BotBravo (RADIO): Fire in the hole!");
+
+        // GoldSrc `HUD_PRINTRADIO` wire format: message = sender entindex, params[0] = #Game_radio_location.
+        let wire_radio = format_saytext_with_titles(
+            "6",
+            &p(&["#Game_radio_location", "Toby", "CTSpawn", "#Enemy_spotted"]),
+            None,
+            None,
+        );
+        assert_eq!(wire_radio, "\x02Toby @ CTSpawn (RADIO): Enemy spotted.");
 
         for tok in [
             "#Cstrike_TitlesTXT_Bomb_Planted",

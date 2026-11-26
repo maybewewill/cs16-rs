@@ -2631,16 +2631,41 @@ fn draw_cs16_hud_impl(
         let base_c = if typing { msg.color2 } else { msg.color1 };
         let a = (alpha_f.clamp(0.0, 1.0) * f32::from(base_c[3].max(180))) as u8;
         let col = Color32::from_rgba_unmultiplied(base_c[0], base_c[1], base_c[2], a);
-        hud_paint_text(
-            ctx,
-            &painter,
-            &mut font_ctx,
-            egui::Align2::CENTER_CENTER,
-            pos,
-            &shown_text,
-            16.0 * scale,
-            col,
-        );
+        let font_px = if msg.channel == 0 {
+            20.0 * scale
+        } else {
+            16.0 * scale
+        };
+        let lines: Vec<&str> = shown_text.lines().collect();
+        if lines.len() <= 1 {
+            hud_paint_text(
+                ctx,
+                &painter,
+                &mut font_ctx,
+                egui::Align2::CENTER_CENTER,
+                pos,
+                &shown_text,
+                font_px,
+                col,
+            );
+        } else {
+            let line_h = font_px * 1.25;
+            let start_y = pos.y - ((lines.len() - 1) as f32 * 0.5) * line_h;
+            for (idx, line) in lines.iter().enumerate() {
+                if !line.is_empty() {
+                    hud_paint_text(
+                        ctx,
+                        &painter,
+                        &mut font_ctx,
+                        egui::Align2::CENTER_CENTER,
+                        Pos2::new(pos.x, start_y + idx as f32 * line_h),
+                        line,
+                        font_px,
+                        col,
+                    );
+                }
+            }
+        }
     }
 
     // Spectator bars are drawn exclusively by `SpectatorVguiUi` (`Spectator.res`).

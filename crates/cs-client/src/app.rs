@@ -2598,22 +2598,24 @@ impl Cs16App {
                     }
                 } else if matches!(
                     m.as_str(),
-                    "ak47" | "m4a1:silenced" | "awp:scope" | "aug:zoom" | "blood:bot"
+                    "ak47" | "m4a1:silenced" | "awp:scope" | "aug:zoom" | "blood:bot" | "preview"
                 ) {
-                    let is_t = m == "ak47";
+                    let is_t = matches!(m.as_str(), "ak47" | "preview");
                     if self.in_game_frames == 1 {
                         let _ = self.session.server_console("mp_startmoney 16000");
                         let _ = self.session.server_console("mp_freezetime 0");
                         if m == "blood:bot" {
                             let _ = self.session.server_console("bot_stop 1");
                             let _ = self.session.server_console("bot_add_t");
+                        } else if m == "preview" {
+                            let _ = self.session.server_console("bot_quota 9");
                         }
                     } else if self.in_game_frames == 2 {
                         self.session
                             .send_stringcmd(if is_t { "jointeam 1" } else { "jointeam 2" });
                     } else if self.in_game_frames == 6 {
                         self.session.send_stringcmd("joinclass 1");
-                    } else if self.in_game_frames == 12 {
+                    } else if self.in_game_frames == 12 && m != "preview" {
                         self.motd_ui.open = false;
                         self.feeds.motd_open = false;
                         self.buy_team_class_ui.close();
@@ -2629,6 +2631,170 @@ impl Cs16App {
                             _ => {}
                         }
                         self.sync_cursor_capture();
+                    } else if m == "preview" {
+                        if self.in_game_frames == 96 {
+                            self.motd_ui.open = false;
+                            self.feeds.motd_open = false;
+                            self.buy_team_class_ui.close();
+                            self.session.with_hud_mut(|h| {
+                                h.vgui_menu = None;
+                                h.menu = None;
+                            });
+                            self.feeds.center = None;
+                            self.session.with_hud_mut(|h| h.hud_texts.clear());
+                            self.session.send_stringcmd("ak47");
+                            self.session.send_stringcmd("primammo");
+                            self.session.send_stringcmd("vesthelm");
+                            self.sync_cursor_capture();
+                        } else if self.in_game_frames == 124 {
+                            let mut chosen_yaw = self.camera.yaw_deg;
+                            let mut best_dist = 0.0f32;
+                            let mut dir = Vec3::X;
+                            let coll_opt = self.session.collision().cloned();
+                            let _ = self.session.with_local_game_mut(|local| {
+                                let local_pos = {
+                                    let srv = local.server();
+                                    let local_id = srv.edicts().client(0);
+                                    srv.edicts()
+                                        .get(local_id)
+                                        .map(|e| e.vars.origin)
+                                        .unwrap_or(Vec3::ZERO)
+                                };
+                                if let Some(coll) = coll_opt.as_deref() {
+                                    for deg in (0..360).step_by(10) {
+                                        let r = (deg as f32).to_radians();
+                                        let d = Vec3::new(r.cos(), r.sin(), 0.0);
+                                        let tr = coll.trace_world(
+                                            local_pos + Vec3::new(0.0, 0.0, 22.0),
+                                            local_pos + d * 420.0 + Vec3::new(0.0, 0.0, 22.0),
+                                            cs_pm::collision::Hull::Standing,
+                                        );
+                                        let dist = tr.fraction * 420.0;
+                                        if dist > best_dist {
+                                            best_dist = dist;
+                                            dir = d;
+                                            chosen_yaw = deg as f32;
+                                        }
+                                    }
+                                }
+                                let target_pos = local_pos + dir * 130.0;
+                                let local_team = local
+                                    .cs_game()
+                                    .state()
+                                    .players
+                                    .first()
+                                    .and_then(|o| o.as_ref())
+                                    .map(|p| p.team);
+                                let max_c = local.server().config().max_clients;
+                                let mut enemy_slot = None;
+                                for slot in 1..max_c {
+                                    let is_enemy = local
+                                        .cs_game()
+                                        .state()
+                                        .players
+                                        .get(usize::from(slot))
+                                        .and_then(|o| o.as_ref())
+                                        .is_some_and(|p| Some(p.team) != local_team);
+                                    let id = local.server().edicts().client(slot);
+                                    if is_enemy
+                                        && local
+                                            .server()
+                                            .edicts()
+                                            .get(id)
+                                            .is_some_and(|e| e.vars.health > 0.0)
+                                    {
+                                        enemy_slot = Some(slot);
+                                        break;
+                                    }
+                                }
+                                if let Some(slot) = enemy_slot {
+                                    if let Some(p) = local
+                                        .cs_game_mut()
+                                        .state_mut()
+                                        .players
+                                        .get_mut(usize::from(slot))
+                                        .and_then(|o| o.as_mut())
+                                    {
+                                        p.kevlar = Default::default();
+                                        p.armor = 0.0;
+                                    }
+                                    local.server_mut().set_client_origin(slot, target_pos);
+                                }
+                            });
+                            self.camera.yaw_deg = chosen_yaw;
+                            self.camera.pitch_deg = 1.5;
+                        } else if self.in_game_frames == 126 {
+                            self.feeds.center = None;
+                            self.session.with_hud_mut(|h| h.hud_texts.clear());
+                            self.startup_ui_applied = true;
+                        } else if (127..=164).contains(&self.in_game_frames) {
+                            self.session.with_hud_mut(|h| h.hud_texts.clear());
+                            // Track the nearest alive enemy bot within sightline so bursts land cleanly.
+                            let mut aim: Option<(f32, f32)> = None;
+                            let _ = self.session.with_local_game_mut(|local| {
+                                let local_id = local.server().edicts().client(0);
+                                let local_eye = local
+                                    .server()
+                                    .edicts()
+                                    .get(local_id)
+                                    .map(|e| e.vars.origin + Vec3::new(0.0, 0.0, 17.0))
+                                    .unwrap_or(Vec3::ZERO);
+                                let local_team = local
+                                    .cs_game()
+                                    .state()
+                                    .players
+                                    .first()
+                                    .and_then(|o| o.as_ref())
+                                    .map(|p| p.team);
+                                let max_c = local.server().config().max_clients;
+                                let mut best_d2 = 380.0f32 * 380.0;
+                                for slot in 1..max_c {
+                                    let is_enemy = local
+                                        .cs_game()
+                                        .state()
+                                        .players
+                                        .get(usize::from(slot))
+                                        .and_then(|o| o.as_ref())
+                                        .is_some_and(|p| Some(p.team) != local_team);
+                                    if !is_enemy {
+                                        continue;
+                                    }
+                                    let id = local.server().edicts().client(slot);
+                                    if let Some(ent) = local.server().edicts().get(id)
+                                        && ent.vars.health > 0.0
+                                    {
+                                        let target = ent.vars.origin + Vec3::new(0.0, 0.0, 12.0);
+                                        let delta = target - local_eye;
+                                        let d2 = delta.length_squared();
+                                        if d2 > 16.0 && d2 < best_d2 {
+                                            best_d2 = d2;
+                                            let horiz = (delta.x * delta.x + delta.y * delta.y)
+                                                .sqrt()
+                                                .max(1.0);
+                                            let yaw = delta.y.atan2(delta.x).to_degrees();
+                                            let pitch = (-delta.z).atan2(horiz).to_degrees();
+                                            aim = Some((yaw, pitch.clamp(-25.0, 25.0)));
+                                        }
+                                    }
+                                }
+                            });
+                            if let Some((yaw, pitch)) = aim {
+                                self.camera.yaw_deg = yaw;
+                                self.camera.pitch_deg = pitch;
+                            }
+                            if self.in_game_frames == 134 || self.in_game_frames == 149 {
+                                self.input_state.apply_action_input("attack", aim.is_some());
+                            } else if self.in_game_frames == 140
+                                || self.in_game_frames == 156
+                                || aim.is_none()
+                            {
+                                self.input_state.apply_action_input("attack", false);
+                            }
+                        } else if (165..198).contains(&self.in_game_frames) {
+                            self.session.with_hud_mut(|h| h.hud_texts.clear());
+                            self.input_state.apply_action_input("attack", false);
+                            self.camera.yaw_deg += 0.35;
+                        }
                     } else if m == "ak47" && self.in_game_frames == 65 {
                         self.startup_ui_applied = true;
                     } else if m == "m4a1:silenced" {
@@ -4242,6 +4408,13 @@ impl Cs16App {
                     self.cvars.set("mp_startmoney", "16000");
                     self.cvars.set("mp_freezetime", "0");
                     self.cvars.set("bot_stop", "1");
+                }
+                "preview" => {
+                    self.cvars.set("bot_quota", "9");
+                    self.cvars.set("mp_startmoney", "16000");
+                    self.cvars.set("mp_freezetime", "0");
+                    self.cvars.set("net_graph", "1");
+                    self.cvars.set("net_graphpos", "2");
                 }
                 _ => {}
             }

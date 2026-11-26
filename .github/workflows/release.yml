@@ -101,7 +101,7 @@ jobs:
           set -euo pipefail
           NAME="cs16-rs-${TAG}-${PLATFORM}"
           STAGE="release-stage/${NAME}"
-          mkdir -p "${STAGE}/mods/community" "${STAGE}/docs" "${STAGE}/configs" "${STAGE}/sdk"
+          mkdir -p "${STAGE}/mods/community" "${STAGE}/mods/gamemodes" "${STAGE}/docs" "${STAGE}/configs" "${STAGE}/sdk"
 
           for bin in cs-client cs-server cs-hltv cs-master cs-probe; do
             cp "target/${TARGET}/release/${bin}${EXT}" "${STAGE}/"
@@ -112,6 +112,9 @@ jobs:
           fi
           if ls mods/community/*.py >/dev/null 2>&1; then
             cp mods/community/*.py "${STAGE}/mods/community/"
+          fi
+          if ls mods/gamemodes/*.py >/dev/null 2>&1; then
+            cp mods/gamemodes/*.py "${STAGE}/mods/gamemodes/"
           fi
           cp -R configs/. "${STAGE}/configs/"
           cp -R sdk/. "${STAGE}/sdk/"

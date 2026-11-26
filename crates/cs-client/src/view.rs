@@ -1828,8 +1828,12 @@ impl ViewBuilder {
         let positions = &out.entity_positions;
         let pos_lookup = |id: u16| positions.get(usize::from(id)).copied().flatten();
         for effect in fx.tempents.take_effects() {
-            self.take_effect(effect, now, &pos_lookup);
+            match effect {
+                RenderEffect::TextMessage(msg) => fx.hud.push_te_text_message(msg, now),
+                other => self.take_effect(other, now, &pos_lookup),
+            }
         }
+        fx.hud.prune_te_text_messages(now);
         let weather = if inputs.cl_weather { fx.hud.weather } else { 0 };
         self.particles.step_weather(now, dt, weather, eye);
         self.beam_sys.step(now, &pos_lookup);

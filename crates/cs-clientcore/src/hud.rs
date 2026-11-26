@@ -481,10 +481,116 @@ fn push_bounded<T>(log: &mut VecDeque<T>, entry: T) {
     log.push_back(entry);
 }
 
+const MAX_DHUD_MESSAGES: usize = 8;
+
+fn decode_director_text_message(bytes: &[u8], now: f64) -> Option<TeTextMessage> {
+    // Wire layout (`DRC_CMD_MESSAGE` = 6):
+    // u8 cmd | u8 effect | u32/rgba color | 6 * f32 (x, y, fadein, fadeout, hold, fxtime) | cstr text.
+    if bytes.len() < 31 || bytes[0] != cs_proto48::messages::drc::CMD_MESSAGE {
+        return None;
+    }
+    let effect = bytes[1];
+    // AMXX `dhudmessage.inc` / `send_dhud_message` packs `0x00RRGGBB` as LE u32 (`[b, g, r, 0]`);
+    // HLTV `encode_director_message` writes raw `[r, g, b, a]` bytes (`bytes[5] != 0`).
+    let color1 = if bytes[5] == 0 {
+        [bytes[4], bytes[3], bytes[2], 255]
+    } else {
+        [bytes[2], bytes[3], bytes[4], bytes[5]]
+    };
+    let read_f32 = |off: usize| -> f32 {
+        f32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]])
+    };
+    let x_f = read_f32(6);
+    let y_f = read_f32(10);
+    let fadein_f = read_f32(14);
+    let fadeout_f = read_f32(18);
+    let hold_f = read_f32(22);
+    let fxtime_f = read_f32(26);
+    let text_bytes = &bytes[30..];
+    let end = text_bytes
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(text_bytes.len());
+    let text = String::from_utf8_lossy(&text_bytes[..end]).into_owned();
+    if text.is_empty() {
+        return None;
+    }
+    let to_coord = |v: f32| -> i16 {
+        if !v.is_finite() || v < 0.0 {
+            -1
+        } else {
+            (v * 8192.0).round().clamp(0.0, f32::from(i16::MAX)) as i16
+        }
+    };
+    let to_u16_time = |v: f32| -> u16 {
+        if !v.is_finite() || v <= 0.0 {
+            0
+        } else {
+            (v * 256.0).round().clamp(0.0, f32::from(u16::MAX)) as u16
+        }
+    };
+    Some(TeTextMessage {
+        channel: 0,
+        x: to_coord(x_f),
+        y: to_coord(y_f),
+        effect,
+        color1,
+        color2: [255, 255, 255, 255],
+        fadein: to_u16_time(fadein_f),
+        fadeout: to_u16_time(fadeout_f),
+        holdtime: to_u16_time(hold_f),
+        fxtime: (effect == 2).then(|| to_u16_time(fxtime_f)),
+        text,
+        received_at: now,
+    })
+}
+
 impl HudState {
     /// Seconds the round has left now (`RoundTime` counts down on the client).
     pub fn round_seconds_left(&self, now: f64) -> f64 {
         (f64::from(self.round_time) - (now - self.round_time_at)).max(0.0)
+    }
+
+    /// Stores a `TE_TEXTMESSAGE` or `SVC_DIRECTOR` `DRC_CMD_MESSAGE` banner for HUD rendering.
+    /// Non-zero channels (`1..=4`) replace any existing message on that channel; channel `0`
+    /// (DHUD / auto-channel) keeps up to 8 concurrent banners.
+    pub fn push_te_text_message(&mut self, mut msg: TeTextMessage, now: f64) {
+        if !msg.received_at.is_finite() || msg.received_at < 0.0 {
+            msg.received_at = now;
+        }
+        self.prune_te_text_messages(now);
+        if msg.channel != 0 {
+            self.te_text_messages.retain(|m| m.channel != msg.channel);
+        } else {
+            let dhud_count = self
+                .te_text_messages
+                .iter()
+                .filter(|m| m.channel == 0)
+                .count();
+            if dhud_count >= MAX_DHUD_MESSAGES
+                && let Some(pos) = self.te_text_messages.iter().position(|m| m.channel == 0)
+            {
+                self.te_text_messages.remove(pos);
+            }
+        }
+        self.te_text_messages.push(msg);
+    }
+
+    /// Removes expired `TE_TEXTMESSAGE` / DHUD messages whose fade+hold window has elapsed.
+    pub fn prune_te_text_messages(&mut self, now: f64) {
+        self.te_text_messages.retain(|msg| {
+            let fade_in = f64::from(msg.fadein) / 256.0;
+            let hold = f64::from(msg.holdtime) / 256.0;
+            let fade_out = f64::from(msg.fadeout) / 256.0;
+            let total = if msg.effect == 2 {
+                let char_rate = (f64::from(msg.fxtime.unwrap_or(0)) / 256.0).max(0.01);
+                char_rate * (msg.text.chars().count().max(1) as f64) + hold + fade_out
+            } else {
+                fade_in + hold + fade_out
+            };
+            let elapsed = now - msg.received_at;
+            elapsed < total.max(0.05) + 0.1
+        });
     }
 
     /// Reacts to one parsed svc message at client time `now`; messages that are not about the
@@ -506,6 +612,11 @@ impl HudState {
                     sequence: i32::from(*anim),
                     body: i32::from(*body),
                 });
+            }
+            SvcMessage::Director(bytes) => {
+                if let Some(te) = decode_director_text_message(bytes, now) {
+                    self.push_te_text_message(te, now);
+                }
             }
             SvcMessage::UserMsg { id, decoded, .. } => self.user_message(*id, decoded, now),
             _ => {}
@@ -1079,7 +1190,8 @@ impl ClientEffects {
             }
             SvcMessage::NewUserMsg(_)
             | SvcMessage::CenterPrint(_)
-            | SvcMessage::WeaponAnim { .. } => self.hud.handle(msg, env.time),
+            | SvcMessage::WeaponAnim { .. }
+            | SvcMessage::Director(_) => self.hud.handle(msg, env.time),
             SvcMessage::LightStyle { index, pattern } => {
                 if let Some(slot) = self.hud.lightstyles.get_mut(usize::from(*index)) {
                     *slot = pattern.clone();
@@ -2090,5 +2202,56 @@ mod tests {
         assert_eq!(h.player_money.get(&2).copied(), Some(4250));
         assert_eq!(h.req_state_count, 1);
         assert_eq!(h.force_cam, Some((1, 0, 0)));
+    }
+
+    #[test]
+    fn te_text_message_channels_and_director_dhud_decode_and_expire() {
+        let mut h = HudState::default();
+        // Channel 1 replaces channel 1 without clobbering channel 2.
+        let mk_te = |channel: u8, text: &str, hold_sec: u16, received_at: f64| TeTextMessage {
+            channel,
+            x: -1,
+            y: 2048,
+            effect: 0,
+            color1: [255, 176, 0, 255],
+            color2: [255, 255, 255, 255],
+            fadein: 26,
+            fadeout: 51,
+            holdtime: hold_sec * 256,
+            fxtime: None,
+            text: text.to_string(),
+            received_at,
+        };
+        h.push_te_text_message(mk_te(1, "FIRST", 2, 1.0), 1.0);
+        h.push_te_text_message(mk_te(2, "SECOND", 2, 1.0), 1.0);
+        h.push_te_text_message(mk_te(1, "REPLACED", 2, 1.2), 1.2);
+        assert_eq!(h.te_text_messages.len(), 2);
+        assert!(h.te_text_messages.iter().any(|m| m.text == "REPLACED"));
+        assert!(h.te_text_messages.iter().any(|m| m.text == "SECOND"));
+
+        // AMXX / mod `SVC_DIRECTOR` `DRC_CMD_MESSAGE` (LE 0x00RRGGBB color).
+        let mut drc = Vec::new();
+        drc.push(cs_proto48::messages::drc::CMD_MESSAGE);
+        drc.push(0); // fade effect
+        let packed: u32 = (255 << 16) | (120 << 8) | 40;
+        drc.extend_from_slice(&packed.to_le_bytes());
+        for f in [-1.0f32, 0.25, 0.1, 0.2, 2.0, 0.0] {
+            drc.extend_from_slice(&f.to_le_bytes());
+        }
+        drc.extend_from_slice(b"RETAKES BOMBSITE A\0");
+        h.handle(&SvcMessage::Director(drc), 1.5);
+        let dhud = h
+            .te_text_messages
+            .iter()
+            .find(|m| m.text == "RETAKES BOMBSITE A")
+            .expect("decoded DRC_CMD_MESSAGE");
+        assert_eq!(dhud.channel, 0);
+        assert_eq!(dhud.color1, [255, 120, 40, 255]);
+        assert_eq!(dhud.x, -1);
+        assert_eq!(dhud.y, 2048);
+
+        // Expiry cleans up after fadein + hold + fadeout.
+        h.prune_te_text_messages(6.0);
+        assert!(h.te_text_messages.is_empty());
     }
 }
