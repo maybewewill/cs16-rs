@@ -82,7 +82,6 @@ function applyDualModeDefaults(invite) {
       hostingModeBadgeEl.textContent = hostingMode.isHttps ? 'GitHub Pages / HTTPS' : 'Static Launcher';
     }
     if (onboardingCardEl) onboardingCardEl.classList.remove('hidden');
-    if (adminLinkEl) adminLinkEl.style.display = 'none';
     if (wsUrlInput && !invite.wsUrl) {
       wsUrlInput.value = '';
       wsUrlInput.placeholder = 'wss://your-server.example/ws or P2P invite link';

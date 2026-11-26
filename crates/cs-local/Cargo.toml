@@ -19,6 +19,4 @@ cs-mod-py.workspace = true
 cs-proto48.workspace = true
 cs-transport.workspace = true
 cs-vfs.workspace = true
-
-[dev-dependencies]
 glam.workspace = true

@@ -493,6 +493,8 @@ const EMBEDDED_SW_JS: &[u8] = include_bytes!("../../../web/sw.js");
 const EMBEDDED_MANIFEST: &[u8] = include_bytes!("../../../web/manifest.webmanifest");
 const EMBEDDED_ADMIN_HTML: &[u8] = include_bytes!("../../../web/admin.html");
 const EMBEDDED_ADMIN_JS: &[u8] = include_bytes!("../../../web/admin.js");
+const EMBEDDED_PLAYGROUND_HTML: &[u8] = include_bytes!("../../../web/playground/index.html");
+const EMBEDDED_PLAYGROUND_JS: &[u8] = include_bytes!("../../../web/playground/playground.js");
 const EMBEDDED_FAVICON_ICO: &[u8] = include_bytes!("../../../web/favicon.ico");
 const EMBEDDED_ICON_512: &[u8] = include_bytes!("../../../web/icons/icon-512.png");
 const EMBEDDED_ICON_192: &[u8] = include_bytes!("../../../web/icons/icon-192.png");
@@ -511,6 +513,12 @@ fn embedded_web_asset(path: &str) -> Option<(&'static str, &'static [u8])> {
         "/manifest.webmanifest" => Some(("application/manifest+json; charset=utf-8", EMBEDDED_MANIFEST)),
         "/admin" | "/admin.html" => Some(("text/html; charset=utf-8", EMBEDDED_ADMIN_HTML)),
         "/admin.js" => Some(("text/javascript; charset=utf-8", EMBEDDED_ADMIN_JS)),
+        "/playground" | "/playground/" | "/playground/index.html" => {
+            Some(("text/html; charset=utf-8", EMBEDDED_PLAYGROUND_HTML))
+        }
+        "/playground/playground.js" => {
+            Some(("text/javascript; charset=utf-8", EMBEDDED_PLAYGROUND_JS))
+        }
         "/favicon.ico" => Some(("image/x-icon", EMBEDDED_FAVICON_ICO)),
         "/icons/icon-512.png" => Some(("image/png", EMBEDDED_ICON_512)),
         "/icons/icon-192.png" => Some(("image/png", EMBEDDED_ICON_192)),
@@ -2523,6 +2531,22 @@ mod tests {
             assert_eq!(mime, "image/png", "{path}");
             assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"), "{path} must be valid PNG");
         }
+
+        let (pg_html_mime, pg_html) = embedded_web_asset("/playground/").expect("/playground/");
+        assert_eq!(pg_html_mime, "text/html; charset=utf-8");
+        assert!(
+            pg_html
+                .windows(b"playground-canvas".len())
+                .any(|w| w == b"playground-canvas")
+        );
+        let (pg_js_mime, pg_js) =
+            embedded_web_asset("/playground/playground.js").expect("/playground/playground.js");
+        assert_eq!(pg_js_mime, "text/javascript; charset=utf-8");
+        assert!(
+            pg_js
+                .windows(b"STARTER_TEMPLATES".len())
+                .any(|w| w == b"STARTER_TEMPLATES")
+        );
     }
 
     fn tcp_http_request(addr: SocketAddr, raw: &str) -> Vec<u8> {

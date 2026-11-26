@@ -257,9 +257,8 @@ fn web_stage1_walkthrough_dust2_and_inferno() {
 
     if let SessionMode::Local { game, .. } = &mut st.session {
         let local_pos = {
-            let srv = game.server();
-            let local_id = srv.edicts().client(0);
-            srv.edicts()
+            let local_id = game.edicts().client(0);
+            game.edicts()
                 .get(local_id)
                 .map(|e| e.vars.origin)
                 .unwrap_or(Vec3::ZERO)
@@ -283,16 +282,11 @@ fn web_stage1_walkthrough_dust2_and_inferno() {
             }
         }
         let target_pos = local_pos + dir * 100.0;
-        let max_c = game.server().config().max_clients;
+        let max_c = game.max_clients();
         let mut bot_slot = None;
         for slot in 1..max_c {
-            let id = game.server().edicts().client(slot);
-            if game
-                .server()
-                .edicts()
-                .get(id)
-                .is_some_and(|e| e.vars.health > 0.0)
-            {
+            let id = game.edicts().client(slot);
+            if game.edicts().get(id).is_some_and(|e| e.vars.health > 0.0) {
                 bot_slot = Some(slot);
                 break;
             }
@@ -308,7 +302,7 @@ fn web_stage1_walkthrough_dust2_and_inferno() {
                 p.kevlar = Default::default();
                 p.armor = 0.0;
             }
-            game.server_mut().set_client_origin(slot, target_pos);
+            game.set_client_origin(slot, target_pos);
             st.camera.yaw_deg = yaw_deg;
             st.camera.pitch_deg = 6.0;
         }

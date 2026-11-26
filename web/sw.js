@@ -1,4 +1,4 @@
-const CACHE_NAME = 'cs16-rs-shell-v4';
+const CACHE_NAME = 'cs16-rs-shell-v5';
 const SHELL_ASSETS = [
   './',
   './index.html',
@@ -14,7 +14,10 @@ const SHELL_ASSETS = [
   './icons/icon-192.png',
   './icons/icon-512.png',
   './pkg/cs_web.js',
-  './pkg/cs_web_bg.wasm'
+  './pkg/cs_web_bg.wasm',
+  './playground/',
+  './playground/index.html',
+  './playground/playground.js'
 ];
 
 self.addEventListener('install', (event) => {
@@ -39,10 +42,46 @@ self.addEventListener('activate', (event) => {
   self.clients.claim();
 });
 
+function isPortalSubpath(pathname) {
+  return (
+    pathname.includes('/playground/') ||
+    pathname.endsWith('/playground') ||
+    pathname.includes('/docs/') ||
+    pathname.endsWith('/docs') ||
+    pathname.includes('/mods/') ||
+    pathname.endsWith('/mods')
+  );
+}
+
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) return;
+
+  // Never intercept API calls or return stale root fallbacks for /playground/, /docs/, /mods/.
+  if (url.pathname.includes('/api/')) return;
+
+  const networkFirst =
+    event.request.mode === 'navigate' ||
+    isPortalSubpath(url.pathname) ||
+    url.pathname.endsWith('.html') ||
+    url.pathname.endsWith('.json');
+
+  if (networkFirst) {
+    event.respondWith(
+      fetch(event.request)
+        .then((response) => {
+          if (response && response.status === 200) {
+            const copy = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+          }
+          return response;
+        })
+        .catch(() => caches.match(event.request))
+    );
+    return;
+  }
+
   event.respondWith(
     caches.match(event.request).then((cached) => {
       const fetched = fetch(event.request)

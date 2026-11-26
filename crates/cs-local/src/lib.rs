@@ -6,6 +6,8 @@
 //! Time is the caller's: [`LocalGame::step`] runs one 10 ms frame, so a test (or a window's
 //! loop) decides how many frames pass and nothing reads a clock.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -51,6 +53,13 @@ pub struct LocalOptions {
     /// Server CVars applied onto [`vanilla_cvars`] BEFORE `server_activate` and host sign-on
     /// (e.g. `mp_startmoney`, `mp_freezetime`, `mp_roundtime`, `mp_buytime`, `bot_difficulty`).
     pub initial_cvars: Vec<(String, String)>,
+    /// Start the listen server with a unified [`ServerModHost`] + pure-Rust Python 3 runtime
+    /// attached even when no disk directories are configured (enables live `< 5 ms` hot-reload
+    /// in offline sessions and the browser `/playground/`).
+    pub enable_mods: bool,
+    /// In-memory Python 3 plugins `(name, source)` loaded before `server_activate` so
+    /// `ServerActivate` / `RoundStart` / `PlayerSpawn` hooks run from frame 0.
+    pub initial_python_plugins: Vec<(String, String)>,
 }
 
 impl Default for LocalOptions {
@@ -65,8 +74,255 @@ impl Default for LocalOptions {
             amxx_dir: None,
             plugins_toml: None,
             initial_cvars: Vec::new(),
+            enable_mods: false,
+            initial_python_plugins: Vec::new(),
         }
     }
+}
+
+/// Structured report returned after validating or hot-reloading a Python 3 plugin.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PythonReloadReport {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub load_ms: f64,
+    pub hook_count: usize,
+    pub chat_command_count: usize,
+    pub console_command_count: usize,
+    pub timer_count: usize,
+    pub hooks: Vec<String>,
+    pub chat_commands: Vec<String>,
+    pub console_commands: Vec<String>,
+}
+
+impl PythonReloadReport {
+    /// Serializes this report to compact JSON for JS/browser consumption.
+    pub fn to_json(&self, queued: bool) -> String {
+        let mut out = String::with_capacity(256);
+        let _ = write!(
+            out,
+            "{{\"ok\":true,\"id\":\"{}\",\"name\":\"{}\",\"version\":\"{}\",\"load_ms\":{:.3},\"queued\":{},\"hook_count\":{},\"chat_command_count\":{},\"console_command_count\":{},\"timer_count\":{},\"hooks\":",
+            json_escape(&self.id),
+            json_escape(&self.name),
+            json_escape(&self.version),
+            self.load_ms,
+            queued,
+            self.hook_count,
+            self.chat_command_count,
+            self.console_command_count,
+            self.timer_count,
+        );
+        write_json_str_array(&mut out, &self.hooks);
+        out.push_str(",\"chat_commands\":");
+        write_json_str_array(&mut out, &self.chat_commands);
+        out.push_str(",\"console_commands\":");
+        write_json_str_array(&mut out, &self.console_commands);
+        out.push('}');
+        out
+    }
+}
+
+/// One log, reload notification, or hook fault entry emitted by the mod host.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModLogEntry {
+    pub level: String,
+    pub mod_id: String,
+    pub time_secs: f64,
+    pub message: String,
+}
+
+/// Escapes a string for JSON embedding.
+pub fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn write_json_str_array(out: &mut String, items: &[String]) {
+    out.push('[');
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push('"');
+        out.push_str(&json_escape(item));
+        out.push('"');
+    }
+    out.push(']');
+}
+
+/// Serializes a slice of [`ModLogEntry`] items into a JSON array.
+pub fn mod_logs_to_json(entries: &[ModLogEntry]) -> String {
+    let mut out = String::with_capacity(entries.len() * 96 + 2);
+    out.push('[');
+    for (i, e) in entries.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            "{{\"level\":\"{}\",\"mod_id\":\"{}\",\"time\":{:.2},\"message\":\"{}\"}}",
+            json_escape(&e.level),
+            json_escape(&e.mod_id),
+            e.time_secs,
+            json_escape(&e.message),
+        );
+    }
+    out.push(']');
+    out
+}
+
+/// Derives `(fallback_id, file_name)` from a user-supplied plugin name (`"vip_menu.py"` or `"vip_menu"`).
+pub fn normalize_python_plugin_name(name: &str) -> (String, String) {
+    let trimmed = name.trim();
+    let stem = trimmed
+        .strip_suffix(".py")
+        .or_else(|| trimmed.strip_suffix(".PY"))
+        .unwrap_or(trimmed);
+    let sanitized: String = stem
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(48)
+        .collect();
+    let fallback_id = if sanitized.is_empty() {
+        "playground_mod".to_string()
+    } else {
+        sanitized
+    };
+    let file_name = format!("{fallback_id}.py");
+    (fallback_id, file_name)
+}
+
+/// Validates Python plugin source in a bounded dry-run VM and extracts metadata, decorator names,
+/// and hook/command/timer counts without touching any live server.
+pub fn inspect_python_plugin(name: &str, code: &str) -> Result<PythonReloadReport, String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    let started = std::time::Instant::now();
+
+    let (fallback_id, file_name) = normalize_python_plugin_name(name);
+    let check =
+        cs_mod_py::PySourceSyntaxCheck::check(&file_name, code).map_err(|err| err.to_string())?;
+    let id = check
+        .meta
+        .id
+        .as_deref()
+        .map(|raw| normalize_python_plugin_name(raw).0)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(fallback_id);
+    let display_name = check.meta.name.unwrap_or_else(|| id.clone());
+    let version = check.meta.version.unwrap_or_else(|| "1.0.0".to_string());
+    let (hooks, chat_commands, console_commands) = extract_python_decorators(code);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    let load_ms = started.elapsed().as_secs_f64() * 1000.0;
+    #[cfg(target_arch = "wasm32")]
+    let load_ms = 0.0;
+
+    Ok(PythonReloadReport {
+        id,
+        name: display_name,
+        version,
+        load_ms,
+        hook_count: check.hook_count,
+        chat_command_count: check.chat_command_count,
+        console_command_count: check.console_command_count,
+        timer_count: check.timer_count,
+        hooks,
+        chat_commands,
+        console_commands,
+    })
+}
+
+fn extract_python_decorators(code: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut hooks = Vec::new();
+    let mut chat_cmds = Vec::new();
+    let mut console_cmds = Vec::new();
+    for raw_line in code.lines() {
+        let line = raw_line.trim();
+        if let Some(rest) = line.strip_prefix("@mod.hook(") {
+            if let Some(label) = extract_first_quoted(rest)
+                && !hooks.contains(&label)
+            {
+                hooks.push(label);
+            }
+        } else if let Some(rest) = line.strip_prefix("@mod.chat_command(") {
+            for label in extract_all_quoted(rest) {
+                if !chat_cmds.contains(&label) {
+                    chat_cmds.push(label);
+                }
+            }
+        } else if let Some(rest) = line.strip_prefix("@mod.console_command(") {
+            for label in extract_all_quoted(rest) {
+                if !console_cmds.contains(&label) {
+                    console_cmds.push(label);
+                }
+            }
+        }
+    }
+    (hooks, chat_cmds, console_cmds)
+}
+
+fn extract_first_quoted(s: &str) -> Option<String> {
+    extract_all_quoted(s).into_iter().next()
+}
+
+fn extract_all_quoted(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b')' {
+            break;
+        }
+        if b == b'"' || b == b'\'' {
+            let quote = b;
+            i += 1;
+            let start = i;
+            while i < bytes.len() && bytes[i] != quote {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            if i <= bytes.len()
+                && i > start
+                && let Ok(text) = std::str::from_utf8(&bytes[start..i])
+            {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    out.push(trimmed.to_string());
+                }
+            }
+            if i < bytes.len() {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    out
 }
 
 /// The cvars a Protocol 48 server starts with: the shared defaults with the vanilla
@@ -190,7 +446,7 @@ impl LocalServer {
 }
 
 /// A server and one local client in one process, optionally accepting external P2P WebRTC peers
-/// and optionally hosting unified WASM + AMXX mods via [`ServerModHost`].
+/// and optionally hosting unified WASM + Python 3 + AMXX mods via [`ServerModHost`].
 pub struct LocalGame {
     server: LocalServer,
     net: MultiTransport,
@@ -198,6 +454,9 @@ pub struct LocalGame {
     conn: Box<Connection<LoopbackEndpoint>>,
     vfs: Option<Vfs>,
     now: f64,
+    python_meta: BTreeMap<String, PythonReloadReport>,
+    pending_mod_logs: Vec<ModLogEntry>,
+    seen_fault_ids: BTreeSet<String>,
 }
 
 impl LocalGame {
@@ -216,7 +475,12 @@ impl LocalGame {
         mut vfs: Option<Vfs>,
         opts: &LocalOptions,
     ) -> Result<Self, String> {
-        if opts.mods_dir.is_some() || opts.amxx_dir.is_some() || opts.plugins_toml.is_some() {
+        if opts.enable_mods
+            || !opts.initial_python_plugins.is_empty()
+            || opts.mods_dir.is_some()
+            || opts.amxx_dir.is_some()
+            || opts.plugins_toml.is_some()
+        {
             let mut host = ServerModHost::new();
             cs_mod_py::attach_python_runtime(&mut host);
             if let Some(ref v) = vfs {
@@ -264,7 +528,53 @@ impl LocalGame {
             if let Some(ref dir) = opts.amxx_dir {
                 let _ = host.load_amxx_dir(dir)?;
             }
-            return Self::start_with_host(map, vfs, opts, host);
+            let mut initial_meta = BTreeMap::new();
+            let mut initial_logs = Vec::new();
+            for (name, code) in &opts.initial_python_plugins {
+                let (fallback_id, file_name) = normalize_python_plugin_name(name);
+                match inspect_python_plugin(name, code) {
+                    Ok(mut report) => {
+                        match host.load_python_source(&fallback_id, &file_name, code, None) {
+                            Ok(loaded_id) => {
+                                report.id = loaded_id.clone();
+                                initial_logs.push(ModLogEntry {
+                                    level: "info".to_string(),
+                                    mod_id: loaded_id.clone(),
+                                    time_secs: 0.0,
+                                    message: format!(
+                                        "Loaded `{}` v{} ({} hooks, {} chat cmds)",
+                                        report.name,
+                                        report.version,
+                                        report.hook_count,
+                                        report.chat_command_count
+                                    ),
+                                });
+                                initial_meta.insert(loaded_id, report);
+                            }
+                            Err(err) => {
+                                initial_logs.push(ModLogEntry {
+                                    level: "error".to_string(),
+                                    mod_id: fallback_id,
+                                    time_secs: 0.0,
+                                    message: err,
+                                });
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        initial_logs.push(ModLogEntry {
+                            level: "error".to_string(),
+                            mod_id: fallback_id,
+                            time_secs: 0.0,
+                            message: err,
+                        });
+                    }
+                }
+            }
+            let mut local = Self::start_with_host(map, vfs, opts, host)?;
+            local.python_meta = initial_meta;
+            local.pending_mod_logs = initial_logs;
+            return Ok(local);
         }
 
         let mut game = CsGame::new();
@@ -352,6 +662,9 @@ impl LocalGame {
             conn,
             vfs,
             now: 0.0,
+            python_meta: BTreeMap::new(),
+            pending_mod_logs: Vec::new(),
+            seen_fault_ids: BTreeSet::new(),
         };
         for _ in 0..SIGNON_FRAMES {
             local.step();
@@ -482,6 +795,219 @@ impl LocalGame {
         }
     }
 
+    /// Returns the unified [`ServerModHost`] when this local session runs in modded mode.
+    pub fn mod_host(&self) -> Option<&ServerModHost> {
+        self.modded_server().map(|s| &s.game().host)
+    }
+
+    /// Mutable access to the unified [`ServerModHost`] when this local session runs in modded mode.
+    pub fn mod_host_mut(&mut self) -> Option<&mut ServerModHost> {
+        self.modded_server_mut().map(|s| &mut s.game_mut().host)
+    }
+
+    /// Compiles, validates, and hot-swaps a Python 3 plugin directly on the active listen server
+    /// while preserving `mod.storage`. Syntax or load errors leave any previously running plugin
+    /// and the active match untouched.
+    pub fn reload_python_plugin(
+        &mut self,
+        name: &str,
+        code: &str,
+    ) -> Result<PythonReloadReport, String> {
+        let now = self.now;
+        let (fallback_id, file_name) = normalize_python_plugin_name(name);
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let started = std::time::Instant::now();
+
+        let mut report = match inspect_python_plugin(name, code) {
+            Ok(r) => r,
+            Err(err) => {
+                self.pending_mod_logs.push(ModLogEntry {
+                    level: "error".to_string(),
+                    mod_id: fallback_id,
+                    time_secs: now,
+                    message: err.clone(),
+                });
+                return Err(err);
+            }
+        };
+
+        let host = self
+            .mod_host_mut()
+            .ok_or_else(|| "local session is running without mod host enabled".to_string())?;
+        if !host.has_python_runtime() {
+            cs_mod_py::attach_python_runtime(host);
+        }
+
+        let loaded_id = match host.load_python_source(&fallback_id, &file_name, code, None) {
+            Ok(id) => id,
+            Err(err) => {
+                self.pending_mod_logs.push(ModLogEntry {
+                    level: "error".to_string(),
+                    mod_id: report.id,
+                    time_secs: now,
+                    message: err.clone(),
+                });
+                return Err(err);
+            }
+        };
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            report.load_ms = started.elapsed().as_secs_f64() * 1000.0;
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            report.load_ms = 0.0;
+        }
+
+        report.id = loaded_id.clone();
+        self.pending_mod_logs.push(ModLogEntry {
+            level: "info".to_string(),
+            mod_id: loaded_id.clone(),
+            time_secs: now,
+            message: format!(
+                "Hot-reloaded `{}` v{} in {:.2} ms ({} hooks, {} chat cmds)",
+                report.name,
+                report.version,
+                report.load_ms,
+                report.hook_count,
+                report.chat_command_count
+            ),
+        });
+        self.python_meta.insert(loaded_id, report.clone());
+        Ok(report)
+    }
+
+    /// Unloads a loaded Python plugin by its manifest id or script name (`"vip_menu.py"`).
+    pub fn unload_python_plugin(&mut self, name: &str) -> bool {
+        let now = self.now;
+        let (norm_id, _) = normalize_python_plugin_name(name);
+        let Some(host) = self.mod_host_mut() else {
+            return false;
+        };
+        let target = if host.unload_mod(name) {
+            Some(name.to_string())
+        } else if norm_id != name && host.unload_mod(&norm_id) {
+            Some(norm_id)
+        } else {
+            None
+        };
+        if let Some(id) = target {
+            self.python_meta.remove(&id);
+            self.pending_mod_logs.push(ModLogEntry {
+                level: "info".to_string(),
+                mod_id: id.clone(),
+                time_secs: now,
+                message: format!("Unloaded plugin `{id}`"),
+            });
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Snapshot of live per-plugin ResMon metrics across all loaded mods.
+    pub fn mod_resmon_snapshot(&self) -> Vec<cs_mod_host::PluginResmon> {
+        self.mod_host()
+            .map(ServerModHost::resmon_snapshot)
+            .unwrap_or_default()
+    }
+
+    /// Live per-plugin ResMon metrics serialized as JSON (`active`, `count`, `plugins`).
+    pub fn mod_resmon_json(&self) -> String {
+        let rows = self.mod_resmon_snapshot();
+        let mut out = String::with_capacity(rows.len() * 220 + 48);
+        let _ = write!(
+            out,
+            "{{\"active\":{},\"count\":{},\"plugins\":[",
+            self.is_modded(),
+            rows.len()
+        );
+        for (idx, row) in rows.iter().enumerate() {
+            if idx > 0 {
+                out.push(',');
+            }
+            let meta = self.python_meta.get(&row.id);
+            let display_name = meta.map_or(row.id.as_str(), |m| m.name.as_str());
+            let _ = write!(
+                out,
+                "{{\"id\":\"{}\",\"name\":\"{}\",\"version\":\"{}\",\"language\":\"{}\",\"status\":\"{}\",\"enabled\":{},\"hook_calls\":{},\"avg_us\":{:.2},\"p99_us\":{},\"max_us\":{},\"fuel_used\":{},\"memory_bytes\":{},\"fault_count\":{},\"hooks\":",
+                json_escape(&row.id),
+                json_escape(display_name),
+                json_escape(&row.version),
+                json_escape(&row.language),
+                json_escape(&row.status),
+                row.enabled,
+                row.hook_calls,
+                row.avg_us_per_tick,
+                row.p99_us_per_tick,
+                row.max_us,
+                row.fuel_used,
+                row.memory_bytes,
+                row.fault_count,
+            );
+            if let Some(m) = meta {
+                write_json_str_array(&mut out, &m.hooks);
+                out.push_str(",\"chat_commands\":");
+                write_json_str_array(&mut out, &m.chat_commands);
+                out.push_str(",\"console_commands\":");
+                write_json_str_array(&mut out, &m.console_commands);
+            } else {
+                out.push_str("[],\"chat_commands\":[],\"console_commands\":[]");
+            }
+            out.push('}');
+        }
+        out.push_str("]}");
+        out
+    }
+
+    /// Drains plugin `print`/`mod.log` lines, newly recorded hook faults, and reload notifications.
+    pub fn drain_mod_logs(&mut self) -> Vec<ModLogEntry> {
+        let mut out = std::mem::take(&mut self.pending_mod_logs);
+        let now = self.now;
+        let (wasi_logs, faults) = match self.mod_host_mut() {
+            Some(host) => (host.take_wasi_logs(), host.list_faults()),
+            None => return out,
+        };
+        for (mod_id, line) in wasi_logs {
+            out.push(ModLogEntry {
+                level: "log".to_string(),
+                mod_id,
+                time_secs: now,
+                message: line,
+            });
+        }
+        for summary in faults {
+            if self.seen_fault_ids.insert(summary.id.clone()) {
+                let detail = self
+                    .mod_host()
+                    .and_then(|h| h.get_fault(&summary.id))
+                    .map(|d| {
+                        if d.stack_trace.is_empty() {
+                            d.error.clone()
+                        } else {
+                            format!("{}\n{}", d.error, d.stack_trace.join("\n"))
+                        }
+                    })
+                    .unwrap_or_else(|| summary.error.clone());
+                out.push(ModLogEntry {
+                    level: "error".to_string(),
+                    mod_id: summary.mod_id,
+                    time_secs: now,
+                    message: detail,
+                });
+            }
+        }
+        out
+    }
+
+    /// Drains mod logs and returns them encoded as a JSON array.
+    pub fn drain_mod_logs_json(&mut self) -> String {
+        let logs = self.drain_mod_logs();
+        mod_logs_to_json(&logs)
+    }
+
     /// Direct reference to the underlying [`CsGame`] regardless of whether mods are active.
     pub fn cs_game(&self) -> &CsGame {
         match &self.server {
@@ -494,6 +1020,30 @@ impl LocalGame {
         match &mut self.server {
             LocalServer::Vanilla(s) => s.game_mut(),
             LocalServer::Modded(s) => &mut s.game_mut().inner,
+        }
+    }
+
+    /// Server edict pool regardless of whether mods are active.
+    pub fn edicts(&self) -> &cs_engine::EdictPool {
+        match &self.server {
+            LocalServer::Vanilla(s) => s.edicts(),
+            LocalServer::Modded(s) => s.edicts(),
+        }
+    }
+
+    /// Configured maximum client slots regardless of whether mods are active.
+    pub fn max_clients(&self) -> u8 {
+        match &self.server {
+            LocalServer::Vanilla(s) => s.config().max_clients,
+            LocalServer::Modded(s) => s.config().max_clients,
+        }
+    }
+
+    /// Teleports a connected client/bot slot to `origin` regardless of whether mods are active.
+    pub fn set_client_origin(&mut self, slot: u8, origin: glam::Vec3) -> bool {
+        match &mut self.server {
+            LocalServer::Vanilla(s) => s.set_client_origin(slot, origin),
+            LocalServer::Modded(s) => s.set_client_origin(slot, origin),
         }
     }
 

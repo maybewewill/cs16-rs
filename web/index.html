@@ -19,7 +19,8 @@
     }
     #cs16-canvas { width: 100%; height: 100%; display: block; touch-action: none; }
     #topbar {
-      position: fixed; top: 8px; left: 8px; z-index: 20; display: flex; gap: 6px; align-items: center;
+      position: fixed; top: 8px; left: 8px; z-index: 20; display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+      max-width: calc(100vw - 16px);
       background: rgba(76, 88, 68, 0.96);
       border-top: 1px solid #889180; border-left: 1px solid #889180;
       border-right: 1px solid #282e22; border-bottom: 1px solid #282e22;
@@ -110,7 +111,11 @@
     <img class="brand-logo" src="./icons/icon-192.png" alt="cs16-rs" width="24" height="24">
     <button id="btn-toggle-panel">Menu</button>
     <button id="btn-fullscreen">Fullscreen</button>
-    <a id="link-admin" class="vgui-link" href="./admin.html" style="display:none">Admin</a>
+    <a class="vgui-link" href="./" style="color:#c4b550;font-weight:bold;">Play</a>
+    <a class="vgui-link" href="./docs/">Docs &amp; API</a>
+    <a class="vgui-link" href="./playground/">Live Playground</a>
+    <a class="vgui-link" href="./mods/">Plugin Hub</a>
+    <a id="link-admin" class="vgui-link" href="./admin.html">Server Admin</a>
     <span id="status-pill">Initializing...</span>
   </div>
 

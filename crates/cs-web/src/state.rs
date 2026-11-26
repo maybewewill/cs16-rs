@@ -3,6 +3,7 @@
 //! gesture-gated audio event queueing, and headless `FrameView` generation.
 
 use std::collections::{BTreeMap, HashSet};
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use cs_assets::bsp::BspMap;
@@ -15,11 +16,12 @@ use cs_client::audio::{
     normalize_sound_path, parse_wav_loop_points, reload_sound_path,
 };
 use cs_client::camera::Camera;
+use cs_client::hudtext::{format_message_with_titles, format_saytext_with_titles};
 use cs_client::input::{MoveSpeeds, step_inventory_cycle_mode};
 use cs_client::render::scene::ModelRegistry;
 use cs_client::ui::hud::{
-    HudAnimState, HudExtrasContext, HudView, compute_hud_visibility, draw_cs16_hud_with_extras,
-    draw_voice_speakers,
+    HudAnimState, HudChatEntry, HudExtrasContext, HudView, compute_hud_visibility,
+    draw_cs16_hud_with_extras, draw_voice_speakers,
 };
 use cs_client::ui::hud_extras::{WeaponBucketSound, WeaponBucketState};
 use cs_client::ui::mod_hud::draw_mod_hud;
@@ -34,14 +36,17 @@ use cs_client::ui::{
     hud::HudSprites, should_draw_dynamic_crosshair,
 };
 use cs_client::view::{FrameView, MapFxWorld, ViewBuilder, ViewInputs};
-use cs_clientcore::hud::HudState;
+use cs_clientcore::hud::{DeathNotice, HudState};
 use cs_clientcore::sound::{PITCH_NORM, SoundStart};
 use cs_clientcore::{
     ConnState, Connection, ConnectionConfig, ResourceFiles, SoundCommand, ViewAngleUpdate,
     VoiceEvent,
 };
 use cs_cvar::{CVarRegistry, EngineAction};
-use cs_local::{FRAME_SECS, LocalGame, LocalOptions};
+use cs_local::{
+    FRAME_SECS, LocalGame, LocalOptions, ModLogEntry, PythonReloadReport, inspect_python_plugin,
+    json_escape, mod_logs_to_json, normalize_python_plugin_name,
+};
 use cs_mod_api::{HudDrawCmd, MOD_CAPABILITY_KEY};
 use cs_mod_host::{ClientModHost, ClientModTransfer};
 use cs_platform::{ConfigStorage, MemoryStorage};
@@ -199,6 +204,12 @@ pub struct WebClientState {
     pub mod_host: ClientModHost,
     last_mod_hud: Vec<HudDrawCmd>,
     p2p_host: bool,
+    pending_python_plugins: BTreeMap<String, (String, PythonReloadReport)>,
+    mod_log_queue: Vec<ModLogEntry>,
+    hud_deaths: Vec<(DeathNotice, f64)>,
+    hud_chat: Vec<(HudChatEntry, f64)>,
+    hud_notify: Vec<(String, f64)>,
+    hud_center: Option<(String, f64)>,
 }
 
 #[derive(Clone, Copy)]
@@ -258,6 +269,12 @@ impl WebClientState {
             mod_host: ClientModHost::new(),
             last_mod_hud: Vec::new(),
             p2p_host: false,
+            pending_python_plugins: BTreeMap::new(),
+            mod_log_queue: Vec::new(),
+            hud_deaths: Vec::new(),
+            hud_chat: Vec::new(),
+            hud_notify: Vec::new(),
+            hud_center: None,
         }
     }
 
@@ -305,12 +322,15 @@ impl WebClientState {
         let summary = self.mount_instant_demo();
         self.start_local(DEMO_MAP_NAME, bots)?;
         if let SessionMode::Local { game, .. } = &mut self.session {
+            let preserve_mod_menu = !self.pending_python_plugins.is_empty();
             game.connection_mut().execute_local("jointeam 2");
             game.run_frames(4);
             game.connection_mut().execute_local("joinclass 1");
             game.run_frames(8);
             let hud = &mut game.connection_mut().fx_mut().hud;
-            hud.menu = None;
+            if !preserve_mod_menu {
+                hud.menu = None;
+            }
             hud.vgui_menu = None;
         }
         Ok(summary)
@@ -393,6 +413,11 @@ impl WebClientState {
             (!v.is_empty()).then(|| (k.to_string(), v.to_string()))
         })
         .collect();
+        let initial_python_plugins: Vec<(String, String)> = self
+            .pending_python_plugins
+            .iter()
+            .map(|(id, (code, _))| (id.clone(), code.clone()))
+            .collect();
         LocalOptions {
             max_clients,
             bots,
@@ -403,6 +428,8 @@ impl WebClientState {
             },
             text_menus: !self.cvars.get_bool("_vgui_menus"),
             initial_cvars,
+            enable_mods: true,
+            initial_python_plugins,
             ..LocalOptions::default()
         }
     }
@@ -507,6 +534,10 @@ impl WebClientState {
         self.mod_transfer = ClientModTransfer::default();
         self.mod_host = ClientModHost::new();
         self.last_mod_hud.clear();
+        self.hud_deaths.clear();
+        self.hud_chat.clear();
+        self.hud_notify.clear();
+        self.hud_center = None;
         self.hud_anim = HudAnimState::default();
         self.weapon_buckets = WeaponBucketState::default();
         self.crosshair_state = CrosshairState::default();
@@ -558,6 +589,204 @@ impl WebClientState {
 
     pub fn is_p2p_host(&self) -> bool {
         self.p2p_host && matches!(self.session, SessionMode::Local { .. })
+    }
+
+    /// Returns `true` when either a local listen server or remote server session is active.
+    pub fn is_session_active(&self) -> bool {
+        !matches!(self.session, SessionMode::Idle)
+    }
+
+    /// Compiles and hot-reloads a Python 3 plugin on the active local listen server, or validates
+    /// and queues it so starting Instant Demo / Offline immediately runs it on tick 0.
+    ///
+    /// Returns `(PythonReloadReport, queued)` on success, or a syntax/runtime traceback string on
+    /// failure without affecting any active plugin or running match.
+    pub fn reload_python_plugin_report(
+        &mut self,
+        name: &str,
+        code: &str,
+    ) -> Result<(PythonReloadReport, bool), String> {
+        if let SessionMode::Local { game, .. } = &mut self.session {
+            let report = game.reload_python_plugin(name, code)?;
+            self.pending_python_plugins
+                .insert(report.id.clone(), (code.to_string(), report.clone()));
+            Ok((report, false))
+        } else {
+            let (fallback_id, _) = normalize_python_plugin_name(name);
+            let report = match inspect_python_plugin(name, code) {
+                Ok(r) => r,
+                Err(err) => {
+                    self.mod_log_queue.push(ModLogEntry {
+                        level: "error".to_string(),
+                        mod_id: fallback_id,
+                        time_secs: f64::from(self.time_sec),
+                        message: err.clone(),
+                    });
+                    return Err(err);
+                }
+            };
+            self.mod_log_queue.push(ModLogEntry {
+                level: "info".to_string(),
+                mod_id: report.id.clone(),
+                time_secs: f64::from(self.time_sec),
+                message: format!(
+                    "Queued `{}` v{} ({} hooks, {} chat cmds) — will run immediately on game start",
+                    report.name, report.version, report.hook_count, report.chat_command_count
+                ),
+            });
+            self.pending_python_plugins
+                .insert(report.id.clone(), (code.to_string(), report.clone()));
+            Ok((report, true))
+        }
+    }
+
+    /// Compiles and hot-reloads (or queues) a Python 3 plugin and returns its JSON report.
+    pub fn reload_python_plugin(&mut self, name: &str, code: &str) -> Result<String, String> {
+        let (report, queued) = self.reload_python_plugin_report(name, code)?;
+        Ok(report.to_json(queued))
+    }
+
+    /// Unloads a Python 3 plugin from both the active local session and queued startup list.
+    pub fn unload_python_plugin(&mut self, name: &str) -> bool {
+        let (norm_id, _) = normalize_python_plugin_name(name);
+        let removed_pending = self.pending_python_plugins.remove(name).is_some()
+            || (norm_id != name && self.pending_python_plugins.remove(&norm_id).is_some());
+        let unloaded_live = if let SessionMode::Local { game, .. } = &mut self.session {
+            game.unload_python_plugin(name)
+        } else {
+            false
+        };
+        if removed_pending && !unloaded_live {
+            self.mod_log_queue.push(ModLogEntry {
+                level: "info".to_string(),
+                mod_id: norm_id.clone(),
+                time_secs: f64::from(self.time_sec),
+                message: format!("Unloaded queued plugin `{norm_id}`"),
+            });
+        }
+        removed_pending || unloaded_live
+    }
+
+    /// Live per-plugin ResMon metrics serialized as JSON (`active`, `count`, `plugins`).
+    pub fn mod_resmon_json(&self) -> String {
+        if let SessionMode::Local { game, .. } = &self.session {
+            return game.mod_resmon_json();
+        }
+        let mut out = String::with_capacity(self.pending_python_plugins.len() * 192 + 48);
+        let _ = write!(
+            out,
+            "{{\"active\":false,\"count\":{},\"plugins\":[",
+            self.pending_python_plugins.len()
+        );
+        for (idx, (id, (_, rep))) in self.pending_python_plugins.iter().enumerate() {
+            if idx > 0 {
+                out.push(',');
+            }
+            let _ = write!(
+                out,
+                "{{\"id\":\"{}\",\"name\":\"{}\",\"version\":\"{}\",\"language\":\"Python\",\"status\":\"Queued\",\"enabled\":true,\"hook_calls\":0,\"avg_us\":0.00,\"p99_us\":0,\"max_us\":0,\"fuel_used\":0,\"memory_bytes\":0,\"fault_count\":0,\"hooks\":",
+                json_escape(id),
+                json_escape(&rep.name),
+                json_escape(&rep.version),
+            );
+            write_json_str_array(&mut out, &rep.hooks);
+            out.push_str(",\"chat_commands\":");
+            write_json_str_array(&mut out, &rep.chat_commands);
+            out.push_str(",\"console_commands\":");
+            write_json_str_array(&mut out, &rep.console_commands);
+            out.push('}');
+        }
+        out.push_str("]}");
+        out
+    }
+
+    /// Drains queued and live mod logs (`print`, `mod.log`, reload notices, and hook fault traces)
+    /// encoded as a JSON array.
+    pub fn drain_mod_logs_json(&mut self) -> String {
+        let mut entries = std::mem::take(&mut self.mod_log_queue);
+        if let SessionMode::Local { game, .. } = &mut self.session {
+            entries.extend(game.drain_mod_logs());
+        }
+        mod_logs_to_json(&entries)
+    }
+
+    /// Executes a console or chat/gameplay command (used by Playground quick-action triggers such
+    /// as `say /vip`, `give_money 16000`, `respawn`, `bot_add`, `sv_restart 1`).
+    pub fn exec_command(&mut self, cmd: &str) {
+        let trimmed = cmd.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        // Do not split chat lines on `;` so chat payloads stay intact.
+        if lower.starts_with("say ") || lower.starts_with("say_team ") {
+            self.exec_single_command(trimmed);
+            return;
+        }
+        for part in trimmed.split(';') {
+            let piece = part.trim();
+            if !piece.is_empty() {
+                self.exec_single_command(piece);
+            }
+        }
+    }
+
+    fn exec_single_command(&mut self, trimmed: &str) {
+        let lower = trimmed.to_ascii_lowercase();
+        let is_client_only = lower.starts_with("say ")
+            || lower.starts_with("say_team ")
+            || lower.starts_with("menuselect ")
+            || lower.starts_with("jointeam ")
+            || lower.starts_with("joinclass ")
+            || lower.starts_with("slot")
+            || lower.starts_with("weapon_")
+            || matches!(
+                lower.as_str(),
+                "buy" | "drop" | "kill" | "nightvision" | "radio1" | "radio2" | "radio3"
+            );
+        if is_client_only {
+            match &mut self.session {
+                SessionMode::Local { game, .. } => {
+                    game.connection_mut().execute_local(trimmed);
+                }
+                SessionMode::Remote { conn, .. } => {
+                    conn.execute_local(trimmed);
+                }
+                SessionMode::Idle => {}
+            }
+            return;
+        }
+        if lower == "respawn" {
+            if let SessionMode::Local { game, .. } = &mut self.session {
+                let _ = game.console("sv_restart 1");
+            }
+            return;
+        }
+        if lower == "give_money" || lower.starts_with("give_money ") {
+            let amount = trimmed
+                .split_whitespace()
+                .nth(1)
+                .and_then(|v| v.parse::<i32>().ok())
+                .unwrap_or(16000)
+                .clamp(0, 16000);
+            if let SessionMode::Local { game, .. } = &mut self.session {
+                let _ = game.console(&format!("mp_startmoney {amount}"));
+                let local_slot = game.connection().player_slot().unwrap_or(0);
+                if let Some(p) = game
+                    .cs_game_mut()
+                    .state_mut()
+                    .players
+                    .get_mut(usize::from(local_slot))
+                    .and_then(Option::as_mut)
+                {
+                    p.money = amount;
+                }
+                game.connection_mut().fx_mut().hud.money = amount;
+                game.connection_mut().fx_mut().hud.money_flash = true;
+            }
+            return;
+        }
+        self.exec_console(trimmed);
     }
 
     pub fn take_audio_events(&mut self) -> Vec<WebAudioEvent> {
@@ -1088,12 +1317,109 @@ impl WebClientState {
             }
         }
 
+        self.collect_hud_feeds(sess_now);
         self.sync_vgui_menu_state();
 
         StepOutput {
             view: built_view,
             new_registry,
             map_sync,
+        }
+    }
+
+    fn collect_hud_feeds(&mut self, now: f64) {
+        let loc = self.loc.as_ref();
+        let names = match &self.session {
+            SessionMode::Idle => return,
+            SessionMode::Local { game, .. } => extract_names(game.connection().userinfos()),
+            SessionMode::Remote { conn, .. } => extract_names(conn.userinfos()),
+        };
+        let hud = match &mut self.session {
+            SessionMode::Idle => return,
+            SessionMode::Local { game, .. } => &mut game.connection_mut().fx_mut().hud,
+            SessionMode::Remote { conn, .. } => &mut conn.fx_mut().hud,
+        };
+        for d in hud.deaths.drain(..) {
+            self.hud_deaths.push((d, now));
+        }
+        for line in hud.chat.drain(..) {
+            let team = hud.players.get(&line.sender).map(|p| p.team.clone());
+            let text = format_saytext_with_titles(&line.text, &line.params, loc, None);
+            if !text.is_empty() {
+                self.hud_chat.push((HudChatEntry { text, team }, now));
+            }
+        }
+        let mut got_dest4 = false;
+        for line in hud.text.drain(..) {
+            let is_chat = line.dest == 3 || line.dest == 5;
+            let text = if is_chat {
+                format_saytext_with_titles(&line.message, &line.params, loc, None)
+            } else {
+                format_message_with_titles(&line.message, &line.params, loc, None)
+            };
+            if text.is_empty() {
+                continue;
+            }
+            match line.dest {
+                4 => {
+                    self.hud_center = Some((text, now));
+                    got_dest4 = true;
+                }
+                3 | 5 => {
+                    let team = line.params.first().and_then(|sender_name| {
+                        names
+                            .iter()
+                            .find(|(_, n)| *n == sender_name)
+                            .and_then(|(slot0, _)| slot0.checked_add(1))
+                            .and_then(|slot1| hud.players.get(&slot1))
+                            .map(|p| p.team.clone())
+                    });
+                    self.hud_chat.push((HudChatEntry { text, team }, now));
+                }
+                1 => self.hud_notify.push((text, now)),
+                _ => {}
+            }
+        }
+        if let Some(text) = hud.center_print.take()
+            && !got_dest4
+        {
+            let text = format_message_with_titles(&text, &[], loc, None);
+            if !text.is_empty() {
+                self.hud_center = Some((text, now));
+            }
+        }
+        if hud
+            .menu
+            .as_ref()
+            .is_some_and(|m| !m.multipart && (m.keys == 0 || m.text.is_empty()))
+        {
+            hud.menu = None;
+        }
+
+        if self.hud_deaths.len() > 8 {
+            let excess = self.hud_deaths.len() - 8;
+            self.hud_deaths.drain(..excess);
+        }
+        if self.hud_chat.len() > 10 {
+            let excess = self.hud_chat.len() - 10;
+            self.hud_chat.drain(..excess);
+        }
+        if self.hud_notify.len() > 8 {
+            let excess = self.hud_notify.len() - 8;
+            self.hud_notify.drain(..excess);
+        }
+        let feed_life = f64::from(self.cvar_f32_clamped("hud_deathnotice_time", 6.0, 0.5, 30.0));
+        let chat_life = f64::from(self.cvar_f32_clamped("hud_saytext_time", 5.0, 0.5, 30.0));
+        let center_life = f64::from(self.cvar_f32_clamped("scr_centertime", 2.0, 0.5, 15.0));
+        self.hud_deaths.retain(|(_, t)| now - *t <= feed_life);
+        self.hud_chat.retain(|(_, t)| now - *t <= chat_life);
+        self.hud_notify.retain(|(_, t)| now - *t <= chat_life);
+        if self
+            .hud_center
+            .as_ref()
+            .is_some_and(|(_, t)| now - *t > center_life)
+        {
+            self.hud_center = None;
         }
     }
 
@@ -1767,6 +2093,15 @@ impl WebClientState {
             }
         };
 
+        let deaths: Vec<DeathNotice> = self.hud_deaths.iter().map(|(d, _)| d.clone()).collect();
+        let death_times: Vec<f64> = self.hud_deaths.iter().map(|(_, t)| *t).collect();
+        let chat_entries: Vec<HudChatEntry> =
+            self.hud_chat.iter().map(|(c, _)| c.clone()).collect();
+        let chat_times: Vec<f64> = self.hud_chat.iter().map(|(_, t)| *t).collect();
+        let chat: Vec<String> = chat_entries.iter().map(|c| c.text.clone()).collect();
+        let notify: Vec<String> = self.hud_notify.iter().map(|(n, _)| n.clone()).collect();
+        let center = self.hud_center.as_ref().map(|(c, _)| c.clone());
+
         self.with_hud(|h| {
             let hv = HudView {
                 hud: h,
@@ -1774,10 +2109,10 @@ impl WebClientState {
                 time_sec: self.time_sec,
                 names: &names,
                 owned: &owned,
-                feed: &[],
-                chat: &[],
-                notify: &[],
-                center: None,
+                feed: &deaths,
+                chat: &chat,
+                notify: &notify,
+                center: center.as_deref(),
                 weapon_switch_timer: 0.0,
                 alive: fv.alive,
                 scoped,
@@ -1786,8 +2121,12 @@ impl WebClientState {
                 underwater_tint: fv.underwater_tint,
             };
             let mut extras = HudExtrasContext {
+                loc: self.loc.as_ref(),
                 anim: Some(&self.hud_anim),
                 buckets: Some(&self.weapon_buckets),
+                chat_entries: Some(&chat_entries),
+                death_times: Some(&death_times),
+                chat_times: Some(&chat_times),
                 ..Default::default()
             };
             extras.apply_cvars(&self.cvars);
@@ -1924,6 +2263,19 @@ fn extract_names(userinfos: &BTreeMap<u8, String>) -> BTreeMap<u8, String> {
 
 fn owned_set(bits: u32) -> HashSet<u8> {
     (0u8..32).filter(|id| bits & (1 << id) != 0).collect()
+}
+
+fn write_json_str_array(out: &mut String, items: &[String]) {
+    out.push('[');
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push('"');
+        out.push_str(&json_escape(item));
+        out.push('"');
+    }
+    out.push(']');
 }
 
 #[cfg(test)]

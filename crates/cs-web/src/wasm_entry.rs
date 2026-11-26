@@ -553,6 +553,81 @@ pub fn install() {
         );
     }
 
+    // execCommand(cmd) & exec_command(cmd)
+    {
+        let rt_c = Rc::clone(&rt);
+        let closure: Closure<dyn FnMut(String)> = Closure::new(move |cmd: String| {
+            rt_c.borrow_mut().state.exec_command(&cmd);
+        });
+        let js_fn = closure.into_js_value();
+        let _ = Reflect::set(&api, &JsValue::from_str("execCommand"), &js_fn);
+        let _ = Reflect::set(&api, &JsValue::from_str("exec_command"), &js_fn);
+    }
+
+    // reloadPythonPlugin(name, code) & reload_python_plugin(name, code) -> Result<String, JsValue>
+    {
+        let rt_c = Rc::clone(&rt);
+        let closure: Closure<dyn FnMut(String, String) -> Result<String, JsValue>> =
+            Closure::new(move |name: String, code: String| {
+                let mut g = rt_c.borrow_mut();
+                let t0 = g.clock.now();
+                let res = g.state.reload_python_plugin_report(&name, &code);
+                let elapsed_ms = ((g.clock.now() - t0) * 1000.0).max(0.0);
+                match res {
+                    Ok((mut report, queued)) => {
+                        report.load_ms = elapsed_ms;
+                        Ok(report.to_json(queued))
+                    }
+                    Err(err) => Err(JsValue::from_str(&err)),
+                }
+            });
+        let js_fn = closure.into_js_value();
+        let _ = Reflect::set(&api, &JsValue::from_str("reloadPythonPlugin"), &js_fn);
+        let _ = Reflect::set(&api, &JsValue::from_str("reload_python_plugin"), &js_fn);
+    }
+
+    // unloadPythonPlugin(name) & unload_python_plugin(name) -> bool
+    {
+        let rt_c = Rc::clone(&rt);
+        let closure: Closure<dyn FnMut(String) -> bool> =
+            Closure::new(move |name: String| rt_c.borrow_mut().state.unload_python_plugin(&name));
+        let js_fn = closure.into_js_value();
+        let _ = Reflect::set(&api, &JsValue::from_str("unloadPythonPlugin"), &js_fn);
+        let _ = Reflect::set(&api, &JsValue::from_str("unload_python_plugin"), &js_fn);
+    }
+
+    // modResmonJson() & mod_resmon_json() -> String
+    {
+        let rt_c = Rc::clone(&rt);
+        let closure: Closure<dyn FnMut() -> String> =
+            Closure::new(move || rt_c.borrow().state.mod_resmon_json());
+        let js_fn = closure.into_js_value();
+        let _ = Reflect::set(&api, &JsValue::from_str("modResmonJson"), &js_fn);
+        let _ = Reflect::set(&api, &JsValue::from_str("mod_resmon_json"), &js_fn);
+    }
+
+    // drainModLogsJson() & drain_mod_logs_json() -> String
+    {
+        let rt_c = Rc::clone(&rt);
+        let closure: Closure<dyn FnMut() -> String> =
+            Closure::new(move || rt_c.borrow_mut().state.drain_mod_logs_json());
+        let js_fn = closure.into_js_value();
+        let _ = Reflect::set(&api, &JsValue::from_str("drainModLogsJson"), &js_fn);
+        let _ = Reflect::set(&api, &JsValue::from_str("drain_mod_logs_json"), &js_fn);
+    }
+
+    // isSessionActive() -> bool
+    {
+        let rt_c = Rc::clone(&rt);
+        let closure: Closure<dyn FnMut() -> bool> =
+            Closure::new(move || rt_c.borrow().state.is_session_active());
+        let _ = Reflect::set(
+            &api,
+            &JsValue::from_str("isSessionActive"),
+            &closure.into_js_value(),
+        );
+    }
+
     // stepAndRender(now_ms)
     {
         let rt_c = Rc::clone(&rt);
